@@ -61,10 +61,52 @@ type ResolveResult struct {
 }
 
 // ResolveError represents a single skill that failed resolution.
+// RetryAfter is a delay in whole seconds, as text, when one is known: for
+// SkillErrCodeRateLimited, the time left on the credential's cooldown; for
+// other causes, the upstream Retry-After header, if any. ProvisionAgent
+// copies it to SkillResolutionError.RetryAfter.
 type ResolveError struct {
-	URI     string
-	Code    string
-	Message string
+	URI        string
+	Code       string
+	Message    string
+	RetryAfter string
+}
+
+// Stable cause codes for ResolveError.Code and SkillResolutionError.Code.
+// Resolvers that can distinguish these failure modes (currently
+// GitHubSkillResolver) should set them so the create path can map a failure
+// to the right HTTP status without string-matching Message. An empty or
+// unrecognized code — including the Hub's own per-URI codes (storage_error,
+// internal_error, federation_error) for PreResolvedSkills — is treated as an
+// uncategorized resolution failure and kept on the existing 5xx path rather
+// than guessed at (#2546 R3).
+const (
+	SkillErrCodeNotFound            = "not_found"
+	SkillErrCodeRateLimited         = "rate_limited"
+	SkillErrCodeTimeout             = "timeout"
+	SkillErrCodeUpstreamUnavailable = "upstream_unavailable"
+	SkillErrCodeUnreachable         = "unreachable"
+)
+
+// SkillResolutionError is returned by ProvisionAgent when a required skill
+// reference could not be resolved. It carries the ref URI and a stable Code
+// (see the SkillErrCode* constants) alongside the human-readable Message, so
+// the HTTP boundary (runtimebroker) can map it to the right status — naming
+// the ref and the cause — instead of folding it into a generic 500/502.
+// RetryAfter is a delay in whole seconds, as text, when one is known: for
+// SkillErrCodeRateLimited, the time left on the credential's cooldown (see
+// GitHubCooldown); for other causes, the upstream Retry-After header, if
+// any. It is empty otherwise. The broker sends it as a Retry-After header
+// only for SkillErrCodeRateLimited.
+type SkillResolutionError struct {
+	URI        string
+	Code       string
+	Message    string
+	RetryAfter string
+}
+
+func (e *SkillResolutionError) Error() string {
+	return fmt.Sprintf("required skill %q could not be resolved: %s", e.URI, e.Message)
 }
 
 // ResolvedSkill is a skill that was successfully resolved to downloadable files.

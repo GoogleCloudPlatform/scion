@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // AgentCursor is the decoded form of a v2 sorted-mode agent list cursor
@@ -59,11 +61,11 @@ func EncodeAgentCursor(sort, dir string, k, created time.Time, id, binding strin
 }
 
 // DecodeAgentCursor decodes and validates a v2 sorted-mode cursor against the
-// request's sort, dir and binding, before any store call is made (design
-// lists-graph.md 4.4). Every failure — malformed input, a legacy cursor,
-// a mismatched sort, dir or binding, or an unparseable timestamp or id — is
-// reported by wrapping ErrInvalidInput, so callers can map it to a uniform
-// 400 the same way they already do for store.ErrInvalidInput.
+// request's sort, dir and binding, before any store call is made. Every
+// failure — malformed input, a legacy cursor, a mismatched sort, dir or
+// binding, or an unparseable timestamp or id — is reported by wrapping
+// ErrInvalidInput, so callers can map it to a uniform 400 the same way they
+// already do for store.ErrInvalidInput.
 func DecodeAgentCursor(cursor, sort, dir, binding string) (AgentCursor, error) {
 	raw, err := base64.URLEncoding.DecodeString(cursor)
 	if err != nil {
@@ -94,8 +96,12 @@ func DecodeAgentCursor(cursor, sort, dir, binding string) (AgentCursor, error) {
 	if err != nil {
 		return AgentCursor{}, fmt.Errorf("invalid cursor: parse created: %w", ErrInvalidInput)
 	}
-	if parts[5] == "" {
-		return AgentCursor{}, fmt.Errorf("invalid cursor: missing id: %w", ErrInvalidInput)
+	// uuid.Parse also accepts urn:uuid:, braced, undashed and uppercase
+	// forms. Agent ids are always stored in the canonical lowercase dashed
+	// form, so anything else is rejected rather than bound into SQL.
+	parsed, err := uuid.Parse(parts[5])
+	if err != nil || parsed.String() != parts[5] {
+		return AgentCursor{}, fmt.Errorf("invalid cursor: parse id: %w", ErrInvalidInput)
 	}
 	return AgentCursor{K: k, Created: created, ID: parts[5]}, nil
 }

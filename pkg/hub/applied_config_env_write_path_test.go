@@ -42,9 +42,17 @@ func TestShouldPersistResolvedEnvKey(t *testing.T) {
 	}{
 		{
 			name:            "plain key is persisted",
+			key:             "MY_PLAIN_VAR",
+			classifications: map[string]api.EnvKind{"MY_PLAIN_VAR": api.EnvKindPlain},
+			want:            true,
+		},
+		{
+			// TZ is resolved on every dispatch from the agent TZ chain;
+			// persisting it would turn it into a legacy pin.
+			name:            "TZ is rejected even when classified plain",
 			key:             "TZ",
 			classifications: map[string]api.EnvKind{"TZ": api.EnvKindPlain},
-			want:            true,
+			want:            false,
 		},
 		{
 			name:            "secret-fetchable key is rejected",
@@ -107,9 +115,10 @@ func TestShouldPersistResolvedEnvKey(t *testing.T) {
 }
 
 // TestProvisionMergeBackSkipsNonPlainEnv exercises DispatchAgentProvision
-// end-to-end: a plain, non-SCION_ key resolved through hub defaults (TZ) must
-// land in AppliedConfig.Env, and so must a plain (Secret==false) key resolved
-// from project-scoped storage -- storage-sourced keys are classified per the
+// end-to-end: a TZ resolved through the hub default is dispatched but must
+// not land in AppliedConfig.Env (it is resolved again on every dispatch),
+// while a plain (Secret==false) key resolved from project-scoped storage
+// must land there -- storage-sourced keys are classified per the
 // backing EnvVar's own Secret flag, not blanket-classified as fetchable
 // secrets (see resolveEnvFromStorage's plain-key return value). A
 // Secret==true storage key must not land there, and GITHUB_TOKEN must never
@@ -179,8 +188,11 @@ func TestProvisionMergeBackSkipsNonPlainEnv(t *testing.T) {
 		t.Fatalf("DispatchAgentProvision failed: %v", err)
 	}
 
-	if got := agent.AppliedConfig.Env["TZ"]; got != "America/New_York" {
-		t.Errorf("expected plain TZ to be persisted, got %q", got)
+	if got := mockClient.lastCreateReq.ResolvedEnv["TZ"]; got != "America/New_York" {
+		t.Errorf("expected the hub default TZ to be dispatched, got %q", got)
+	}
+	if got, ok := agent.AppliedConfig.Env["TZ"]; ok {
+		t.Errorf("expected TZ to never be persisted, got %q", got)
 	}
 	if got := agent.AppliedConfig.Env["STORAGE_PLAIN_VAR"]; got != "storage-plain-value" {
 		t.Errorf("expected plain STORAGE_PLAIN_VAR to be persisted, got %q", got)

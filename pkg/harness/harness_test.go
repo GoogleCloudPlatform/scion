@@ -16,13 +16,16 @@ package harness
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNew_EmbedFSHarnesses(t *testing.T) {
@@ -57,7 +60,30 @@ func TestDefaultModelAliases_KnownHarnessReturnsBuiltInTable(t *testing.T) {
 	for alias, model := range aliases {
 		assert.NotEmpty(t, model, "alias %q", alias)
 		assert.NotEqual(t, alias, model, "alias %q resolves to itself", alias)
+		// A model that is itself an alias key would make resolution
+		// transitive or circular; aliases must map to concrete models.
+		assert.NotContains(t, aliases, model,
+			"alias %q resolves to another alias %q", alias, model)
 	}
+}
+
+// TestGeminiCLIDefaultModel_ResolvesThroughAliases guards ptone/scion#2674:
+// the embedded gemini-cli config.yaml must declare the "medium" default tier,
+// and that tier must resolve through its own model_aliases to a concrete
+// model. ProvisionAgent (pkg/agent/provision.go) layers this model under the
+// template config and resolves it with config.ResolveModelAlias before
+// RunAgent injects it as SCION_MODEL, so an agent started with no model gets
+// the concrete medium model rather than an image-pinned one.
+func TestGeminiCLIDefaultModel_ResolvesThroughAliases(t *testing.T) {
+	data, err := fs.ReadFile(HarnessesFS(), "gemini-cli/config.yaml")
+	require.NoError(t, err)
+	entry, err := config.ParseHarnessConfigYAML(data)
+	require.NoError(t, err)
+	assert.Equal(t, "medium", entry.Model)
+	resolved := config.ResolveModelAlias(entry.Model, entry.ModelAliases)
+	assert.Equal(t, entry.ModelAliases["medium"], resolved)
+	assert.NotEmpty(t, resolved)
+	assert.NotEqual(t, "medium", resolved)
 }
 
 // TestDefaultModelAliases_UnknownOrEmptyHarnessReturnsNil is the "nil/empty

@@ -37,7 +37,19 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../../client/api.js';
 import { showConfirm } from '../confirm-dialog.js';
 import { showToast } from '../../../utils/toast.js';
+import { formatInstantWithZone } from '../../../utils/time.js';
 import { touchMenuItemStyles } from '../touch-styles.js';
+import { TouchPrimaryController } from '../../../utils/input-modality.js';
+import { LongPressController, type LongPressPoint } from './long-press.js';
+import {
+  placeMenuInViewport,
+  renderMenuRows,
+  runMenuAction,
+  shouldUseMenuSheet,
+  type MenuAction,
+} from './context-menu.js';
+import type { ActionSheetSelectDetail } from './chat-action-sheet.js';
+import './chat-action-sheet.js';
 import './chat-avatar.js';
 
 /** A space (project) in the rail. */
@@ -322,6 +334,11 @@ export class ScionChatSpaceRail extends LitElement {
     projectId: string;
   } | null = null;
   @state() private contextMenuPos = { x: 0, y: 0 };
+  /** The open thread or group menu is the mobile bottom sheet, not the popup. */
+  @state() private menuAsSheet = false;
+  private readonly longPress = new LongPressController(this);
+  /** Rows are draggable only for a mouse or trackpad: on touch, a long-press opens the menu. */
+  private readonly touchPrimary = new TouchPrimaryController(this);
   @state() private renamingThread: string | null = null;
   @state() private renameValue = '';
   /** Space filter: 'all' shows everything, 'unread' shows only spaces with unread. */
@@ -709,8 +726,9 @@ export class ScionChatSpaceRail extends LitElement {
       border-color: var(--scion-border, #e2e8f0);
     }
 
-    /* Context menu */
+    /* Context menu. It renders hidden and is shown once placed in the viewport. */
     .context-menu {
+      visibility: hidden;
       position: fixed;
       z-index: 1000;
       background: var(--scion-surface, #ffffff);
@@ -867,6 +885,17 @@ export class ScionChatSpaceRail extends LitElement {
       }
     }
 
+    /* Long-press opens the row menu on touch: keep iOS's callout and text
+       selection from taking the press first. */
+    @media (hover: none) {
+      .thread-item,
+      .thread-group-header {
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+    }
+
     @media (max-width: 768px) {
       /* Beyond comfy: real-device feedback asked for rail text bigger than
          the comfy token set gives, not just comfy-forced-on-mobile. */
@@ -956,6 +985,12 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   override updated(changedProperties: Map<string, unknown>): void {
+    if ((this.contextMenuTarget || this.groupContextMenuTarget) && !this.menuAsSheet) {
+      placeMenuInViewport(
+        this.renderRoot.querySelector<HTMLElement>('.context-menu'),
+        this.contextMenuPos
+      );
+    }
     if (changedProperties.has('selectedKey')) {
       if (this.selectedKey) {
         // Auto-expand the space and group containing the selected thread
@@ -2070,10 +2105,24 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   private handleContextMenu(e: MouseEvent, thread: ChatSpaceThread, projectId: string): void {
+    if (this.longPress.contextMenu(e)) return;
     e.preventDefault();
     e.stopPropagation();
+    this.openThreadMenu(thread, projectId, { x: e.clientX, y: e.clientY });
+  }
+
+  /** Open a thread row's menu: the popup at `at`, or the sheet on mobile. */
+  private openThreadMenu(thread: ChatSpaceThread, projectId: string, at: LongPressPoint): void {
+    this.groupContextMenuTarget = null;
     this.contextMenuTarget = { type: 'thread', thread, projectId };
-    this.contextMenuPos = { x: e.clientX, y: e.clientY };
+    this.contextMenuPos = at;
+    this.menuAsSheet = shouldUseMenuSheet();
+  }
+
+  /** Close whichever row menu is open, popup or sheet. */
+  private closeRowMenus(): void {
+    this.contextMenuTarget = null;
+    this.groupContextMenuTarget = null;
   }
 
   // _projectId is kept for the call site's symmetry with the other context-menu
@@ -2318,7 +2367,7 @@ export class ScionChatSpaceRail extends LitElement {
   ): string {
     const lines: string[] = [];
     lines.push(`# Thread: ${thread.name}`);
-    lines.push(`Exported: ${new Date().toLocaleString()}`);
+    lines.push(`Exported: ${formatInstantWithZone(new Date().toISOString())}`);
     lines.push('');
     lines.push('---');
 
@@ -2327,7 +2376,7 @@ export class ScionChatSpaceRail extends LitElement {
       const sender = rawSender.replace(/^(user|agent):/, '');
       const ts = msg.createdAt ?? '';
       const content = msg.msg ?? '';
-      const formattedTs = ts ? new Date(ts).toLocaleString() : '';
+      const formattedTs = ts ? formatInstantWithZone(ts) || ts : '';
 
       lines.push('');
       lines.push(`**${sender}** (${formattedTs}):`);
@@ -2649,9 +2698,9 @@ export class ScionChatSpaceRail extends LitElement {
               <div class="rail-body" @click=${this.handleRailBodyClick}>${this.renderSpaces()}</div>
             `
       }
-      ${this.contextMenuTarget ? this.renderContextMenu() : nothing}
-      ${this.groupContextMenuTarget ? this.renderGroupContextMenu() : nothing}
-      ${this.emojiPickerSpaceId ? this.renderEmojiPicker() : nothing}
+      ${this.contextMenuTarget && !this.menuAsSheet ? this.renderContextMenu() : nothing}
+      ${this.groupContextMenuTarget && !this.menuAsSheet ? this.renderGroupContextMenu() : nothing}
+      ${this.renderMenuSheet()} ${this.emojiPickerSpaceId ? this.renderEmojiPicker() : nothing}
     `;
   }
 
@@ -2822,7 +2871,7 @@ export class ScionChatSpaceRail extends LitElement {
               ? 'drag-over'
               : ''
           }"
-          draggable="true"
+          draggable=${this.touchPrimary.isTouch ? nothing : 'true'}
           @dragstart=${(e: DragEvent): void => this.handleSpaceDragStart(e, space.projectId)}
           @dragover=${(e: DragEvent): void => this.handleSpaceDragOver(e, space.projectId)}
           @drop=${(e: DragEvent): void => void this.handleSpaceDrop(e, space.projectId)}
@@ -2972,11 +3021,13 @@ export class ScionChatSpaceRail extends LitElement {
             @click=${() => this.toggleGroupCollapse(group.id)}
             @dragover=${(e: DragEvent) => this.handleGroupDragOver(e, group.id)}
             @drop=${(e: DragEvent) => void this.handleGroupDrop(e, group.id, projectId)}
-            @contextmenu=${(e: MouseEvent) => {
+            @pointerdown=${(e: PointerEvent): void =>
+              this.longPress.pointerDown(e, (at) => this.openGroupMenu(group, projectId, at))}
+            @contextmenu=${(e: MouseEvent): void => {
+              if (this.longPress.contextMenu(e)) return;
               e.preventDefault();
               e.stopPropagation();
-              this.contextMenuTarget = null;
-              this.showGroupContextMenu(e, group, projectId);
+              this.openGroupMenu(group, projectId, { x: e.clientX, y: e.clientY });
             }}
           >
             <sl-icon name="chevron-down" class="chevron ${collapsed ? 'collapsed' : ''}"></sl-icon>
@@ -3034,9 +3085,11 @@ export class ScionChatSpaceRail extends LitElement {
     projectId: string;
   } | null = null;
 
-  private showGroupContextMenu(e: MouseEvent, group: ThreadGroup, projectId: string): void {
+  private openGroupMenu(group: ThreadGroup, projectId: string, at: LongPressPoint): void {
+    this.contextMenuTarget = null;
     this.groupContextMenuTarget = { group, projectId };
-    this.contextMenuPos = { x: e.clientX, y: e.clientY };
+    this.contextMenuPos = at;
+    this.menuAsSheet = shouldUseMenuSheet();
   }
 
   /**
@@ -3074,8 +3127,9 @@ export class ScionChatSpaceRail extends LitElement {
     }
 
     // Every thread is draggable except #general; dragging gives its space an
-    // explicit order regardless of the active sort mode.
-    const isDraggable = !thread.isGeneral;
+    // explicit order regardless of the active sort mode. Not on a touch
+    // device, where a press-and-hold opens the thread's menu instead.
+    const isDraggable = !thread.isGeneral && !this.touchPrimary.isTouch;
     const isDragging = this.draggingThreadId === thread.id;
     const isDragOver = this.dragOverThreadId === thread.id && this.draggingThreadId !== thread.id;
 
@@ -3098,6 +3152,8 @@ export class ScionChatSpaceRail extends LitElement {
         }
         @dragend=${isDraggable ? () => this.handleThreadDragEnd() : nothing}
         @click=${() => this.handleThreadClick(thread, projectId)}
+        @pointerdown=${(e: PointerEvent): void =>
+          this.longPress.pointerDown(e, (at) => this.openThreadMenu(thread, projectId, at))}
         @contextmenu=${(e: MouseEvent) => this.handleContextMenu(e, thread, projectId)}
       >
         <span class="hash">#</span>
@@ -3226,142 +3282,177 @@ export class ScionChatSpaceRail extends LitElement {
     `;
   }
 
+  /** The actions of a thread row's menu, shared by the popup and the sheet. */
+  private threadMenuActions(thread: ChatSpaceThread, projectId: string): MenuAction[] {
+    const actions: MenuAction[] = [
+      {
+        id: 'mark-read',
+        label: 'Mark as read',
+        icon: 'check-circle',
+        run: () => void this.handleMarkRead(thread, projectId),
+      },
+    ];
+    if (!thread.hasUnread && thread.lastMessageId) {
+      actions.push({
+        id: 'mark-unread',
+        label: 'Mark unread',
+        icon: 'envelope',
+        run: () => void this.handleMarkUnread(thread, projectId),
+      });
+    }
+    actions.push(
+      {
+        id: 'mark-space-read',
+        label: 'Mark space read',
+        icon: 'check-lg',
+        run: () => void this.handleMarkSpaceRead(projectId),
+      },
+      {
+        id: 'pin',
+        // The glyph reports the current state, the label offers the action —
+        // the filled star means pinned everywhere else in this rail, and a
+        // menu that used it for "will be pinned" would make the row indicator
+        // ambiguous.
+        label: thread.pinned ? 'Unpin' : 'Pin to top',
+        icon: thread.pinned ? 'star-fill' : 'star',
+        className: 'pin-toggle',
+        run: () => void this.handleTogglePin(thread, projectId),
+      },
+      {
+        id: 'mute',
+        label: thread.muted ? 'Unmute' : 'Mute',
+        icon: thread.muted ? 'bell-slash' : 'bell',
+        className: 'mute-toggle',
+        run: () => void this.handleToggleMute(thread, projectId),
+      }
+    );
+    if (!thread.isGeneral) {
+      actions.push(
+        {
+          id: 'move-up',
+          label: 'Move up',
+          icon: 'arrow-up',
+          disabled: this.isThreadAtEdge(thread.id, projectId, 'first'),
+          run: () => void this.moveThread(thread.id, projectId, -1),
+        },
+        {
+          id: 'move-down',
+          label: 'Move down',
+          icon: 'arrow-down',
+          disabled: this.isThreadAtEdge(thread.id, projectId, 'last'),
+          run: () => void this.moveThread(thread.id, projectId, 1),
+        }
+      );
+      const groups = this.getGroups(projectId);
+      for (const group of groups.filter((g) => !g.threadIds.includes(thread.id))) {
+        actions.push({
+          id: `move-to-group:${group.id}`,
+          label: `Move to ${group.name}`,
+          icon: 'folder',
+          run: () => {
+            this.contextMenuTarget = null;
+            void this.moveThreadToGroup(thread.id, group.id, projectId);
+          },
+        });
+      }
+      if (groups.some((g) => g.threadIds.includes(thread.id))) {
+        actions.push({
+          id: 'remove-from-group',
+          label: 'Remove from group',
+          icon: 'folder-minus',
+          run: () => {
+            this.contextMenuTarget = null;
+            void this.removeThreadFromGroup(thread.id, projectId);
+          },
+        });
+      }
+    }
+    actions.push(
+      {
+        id: 'copy-markdown',
+        label: 'Copy as Markdown',
+        icon: 'file-earmark-text',
+        run: () => void this.handleExportThread(thread),
+      },
+      {
+        id: 'download-markdown',
+        label: 'Download as Markdown',
+        icon: 'download',
+        run: () => void this.handleDownloadThread(thread),
+      },
+      {
+        id: 'rename',
+        label: 'Rename',
+        icon: 'pencil',
+        run: () => this.startRename(thread),
+      },
+      {
+        id: 'delete',
+        label: 'Delete',
+        icon: 'trash',
+        destructive: true,
+        run: () => void this.handleDeleteThread(thread, projectId),
+      }
+    );
+    return actions;
+  }
+
+  /** The actions of a group header's menu, shared by the popup and the sheet. */
+  private groupMenuActions(group: ThreadGroup, projectId: string): MenuAction[] {
+    return [
+      {
+        id: 'new-thread',
+        label: 'New thread',
+        icon: 'plus-lg',
+        run: () => {
+          this.groupContextMenuTarget = null;
+          this.startCreateThread(projectId, group.id);
+        },
+      },
+      {
+        id: 'rename-group',
+        label: 'Rename group',
+        icon: 'pencil',
+        run: () => {
+          this.groupContextMenuTarget = null;
+          this.startGroupNameInput(projectId, {
+            renamingGroupId: group.id,
+            initialValue: group.name,
+          });
+        },
+      },
+      {
+        id: 'delete-group',
+        label: 'Delete group',
+        icon: 'trash',
+        destructive: true,
+        run: () => {
+          this.groupContextMenuTarget = null;
+          void this.deleteGroup(group.id, projectId);
+        },
+      },
+    ];
+  }
+
+  /** The open row menu's heading and actions, or null when none is open. */
+  private openMenu(): { heading: string; actions: MenuAction[] } | null {
+    if (this.contextMenuTarget) {
+      const { thread, projectId } = this.contextMenuTarget;
+      return { heading: `#${thread.name}`, actions: this.threadMenuActions(thread, projectId) };
+    }
+    if (this.groupContextMenuTarget) {
+      const { group, projectId } = this.groupContextMenuTarget;
+      return { heading: group.name, actions: this.groupMenuActions(group, projectId) };
+    }
+    return null;
+  }
+
   private renderContextMenu() {
     if (!this.contextMenuTarget) return nothing;
     const { thread, projectId } = this.contextMenuTarget;
-
     return html`
-      <div
-        class="context-menu"
-        style="left: ${this.contextMenuPos.x}px; top: ${this.contextMenuPos.y}px"
-        @click=${(e: Event) => e.stopPropagation()}
-      >
-        <div class="context-menu-item" @click=${() => this.handleMarkRead(thread, projectId)}>
-          <sl-icon name="check-circle"></sl-icon>
-          Mark as read
-        </div>
-        ${
-          !thread.hasUnread && thread.lastMessageId
-            ? html`
-                <div
-                  class="context-menu-item"
-                  @click=${() => void this.handleMarkUnread(thread, projectId)}
-                >
-                  <sl-icon name="envelope"></sl-icon>
-                  Mark unread
-                </div>
-              `
-            : nothing
-        }
-        <div class="context-menu-item" @click=${() => this.handleMarkSpaceRead(projectId)}>
-          <sl-icon name="check-lg"></sl-icon>
-          Mark space read
-        </div>
-        <div
-          class="context-menu-item pin-toggle"
-          @click=${(): void => void this.handleTogglePin(thread, projectId)}
-        >
-          <!-- The glyph reports the current state, the label offers the
-               action — the filled star means pinned everywhere else in this
-               rail, and a menu that used it for "will be pinned" would make
-               the row indicator ambiguous. -->
-          <sl-icon name=${thread.pinned ? 'star-fill' : 'star'}></sl-icon>
-          ${thread.pinned ? 'Unpin' : 'Pin to top'}
-        </div>
-        <div
-          class="context-menu-item mute-toggle"
-          @click=${(): void => void this.handleToggleMute(thread, projectId)}
-        >
-          <sl-icon name=${thread.muted ? 'bell-slash' : 'bell'}></sl-icon>
-          ${thread.muted ? 'Unmute' : 'Mute'}
-        </div>
-        ${
-          !thread.isGeneral
-            ? html`
-                <div
-                  class="context-menu-item"
-                  @click=${() => void this.moveThread(thread.id, projectId, -1)}
-                  style="${
-                    this.isThreadAtEdge(thread.id, projectId, 'first')
-                      ? 'opacity: 0.4; pointer-events: none;'
-                      : ''
-                  }"
-                >
-                  <sl-icon name="arrow-up"></sl-icon>
-                  Move up
-                </div>
-                <div
-                  class="context-menu-item"
-                  @click=${() => void this.moveThread(thread.id, projectId, 1)}
-                  style="${
-                    this.isThreadAtEdge(thread.id, projectId, 'last')
-                      ? 'opacity: 0.4; pointer-events: none;'
-                      : ''
-                  }"
-                >
-                  <sl-icon name="arrow-down"></sl-icon>
-                  Move down
-                </div>
-              `
-            : nothing
-        }
-        ${
-          !thread.isGeneral
-            ? html`
-                ${this.getGroups(projectId)
-                  .filter((g) => !g.threadIds.includes(thread.id))
-                  .map(
-                    (group) => html`
-                      <div
-                        class="context-menu-item"
-                        @click=${() => {
-                          this.contextMenuTarget = null;
-                          void this.moveThreadToGroup(thread.id, group.id, projectId);
-                        }}
-                      >
-                        <sl-icon name="folder"></sl-icon>
-                        Move to ${group.name}
-                      </div>
-                    `
-                  )}
-                ${
-                  this.getGroups(projectId).some((g) => g.threadIds.includes(thread.id))
-                    ? html`
-                        <div
-                          class="context-menu-item"
-                          @click=${() => {
-                            this.contextMenuTarget = null;
-                            void this.removeThreadFromGroup(thread.id, projectId);
-                          }}
-                        >
-                          <sl-icon name="folder-minus"></sl-icon>
-                          Remove from group
-                        </div>
-                      `
-                    : nothing
-                }
-              `
-            : nothing
-        }
-        <div class="context-menu-item" @click=${() => this.handleExportThread(thread)}>
-          <sl-icon name="file-earmark-text"></sl-icon>
-          Copy as Markdown
-        </div>
-        <div class="context-menu-item" @click=${() => this.handleDownloadThread(thread)}>
-          <sl-icon name="download"></sl-icon>
-          Download as Markdown
-        </div>
-        <div class="context-menu-item" @click=${() => this.startRename(thread)}>
-          <sl-icon name="pencil"></sl-icon>
-          Rename
-        </div>
-        <div
-          class="context-menu-item danger"
-          @click=${() => this.handleDeleteThread(thread, projectId)}
-        >
-          <sl-icon name="trash"></sl-icon>
-          Delete
-        </div>
+      <div class="context-menu" @click=${(e: Event) => e.stopPropagation()}>
+        ${renderMenuRows(this.threadMenuActions(thread, projectId))}
       </div>
     `;
   }
@@ -3370,47 +3461,27 @@ export class ScionChatSpaceRail extends LitElement {
   private renderGroupContextMenu() {
     if (!this.groupContextMenuTarget) return nothing;
     const { group, projectId } = this.groupContextMenuTarget;
-
     return html`
-      <div
-        class="context-menu"
-        style="left: ${this.contextMenuPos.x}px; top: ${this.contextMenuPos.y}px"
-        @click=${(e: Event) => e.stopPropagation()}
-      >
-        <div
-          class="context-menu-item"
-          @click=${() => {
-            this.groupContextMenuTarget = null;
-            this.startCreateThread(projectId, group.id);
-          }}
-        >
-          <sl-icon name="plus-lg"></sl-icon>
-          New thread
-        </div>
-        <div
-          class="context-menu-item"
-          @click=${() => {
-            this.groupContextMenuTarget = null;
-            this.startGroupNameInput(projectId, {
-              renamingGroupId: group.id,
-              initialValue: group.name,
-            });
-          }}
-        >
-          <sl-icon name="pencil"></sl-icon>
-          Rename group
-        </div>
-        <div
-          class="context-menu-item danger"
-          @click=${() => {
-            this.groupContextMenuTarget = null;
-            void this.deleteGroup(group.id, projectId);
-          }}
-        >
-          <sl-icon name="trash"></sl-icon>
-          Delete group
-        </div>
+      <div class="context-menu" @click=${(e: Event) => e.stopPropagation()}>
+        ${renderMenuRows(this.groupMenuActions(group, projectId))}
       </div>
+    `;
+  }
+
+  /** The mobile presentation of the thread and group menus. */
+  private renderMenuSheet() {
+    const menu = this.menuAsSheet ? this.openMenu() : null;
+    return html`
+      <scion-action-sheet
+        .items=${menu?.actions ?? []}
+        heading=${menu?.heading ?? ''}
+        .open=${menu !== null}
+        @action-sheet-select=${(e: CustomEvent<ActionSheetSelectDetail>): void => {
+          const current = this.openMenu();
+          if (current) runMenuAction(current.actions, e.detail.id);
+        }}
+        @action-sheet-close=${(): void => this.closeRowMenus()}
+      ></scion-action-sheet>
     `;
   }
 }

@@ -37,7 +37,9 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
 - **GitHub References**: `owner/repo#N` references in a message automatically link to the corresponding GitHub issue or pull request.
 - **Clickable File Paths**: File paths starting with `/workspace/...` or `/scion-volumes/...` render as interactive links. Clicking them immediately opens an on-demand file viewer dialog, fetching the current file content directly from the existing workspace and shared-directory APIs without leaving the chat context.
 - **Clickable `gs://` Links**: A `gs://bucket/object` reference posted by an agent likewise opens the same on-demand viewer, fetching the object through the sending agent's own assigned GCP identity. See [gs:// links in chat](/scion/hosted/single-node/hub-server/#gs-links-in-chat) for what links, which identity is used, size limits, and error behavior.
-- **iOS & Platform Tailoring**: The layout incorporates specific styling adjustments for iOS devices, delivering polished rendering and input behavior under Safari and other mobile browsers.
+- **iOS & Platform Tailoring**: The layout incorporates specific styling adjustments for iOS devices, delivering polished rendering and input behavior under Safari and other mobile browsers. Inputs use a 16px font so iOS does not zoom in on focus, and buttons and rail entries have 44px touch targets.
+- **Touch Menus & Bottom Action Sheets**: On touch screens, a long-press (about half a second) on a message, thread, space or member opens the same menu that right-click opens on desktop; iOS never sends a right-click for a long-press. At 768px wide or narrower, every chat menu opens as a bottom action sheet instead of a popup.
+- **Install as an App**: The web UI ships an app logo, PWA icons and a web app manifest, so it can be added to a phone's home screen with its own icon.
 - **Config Toggle**: Top-level native chat can be turned on or off globally by administrators using a single configuration key (`web.native_chat` feature flag) or via the Admin interface.
 
 ---
@@ -75,7 +77,7 @@ Right-clicking a message (on desktop) or tapping it (on touch devices without ho
   - **Print / Save as PDF** for offline review.
   - **Copy to Clipboard** (HTML + plain text) for quick pasting into other tools.
   All exported content is HTML-escaped for safe rendering.
-- **Send-to-Agent Context & Slash Commands**: Fast-track your workflow with slash commands (e.g. `/start`, `/help`) and easily forward snippets or whole discussions directly to your agents as contextual guidance.
+- **Send-to-Agent Context & Slash Commands**: Fast-track your workflow with slash commands and easily forward snippets or whole discussions directly to your agents as contextual guidance. The built-in commands are `/status` (list the project's agents and their state), `/spawn <template> [name]` (create an agent), `/stop <agent>` (stop a running agent; it is not deleted), `/default <agent|clear>`, `/clear` and `/help`. In a DM with an agent, `/status`, `/spawn` and `/stop` act on that agent's project.
 
 ---
 

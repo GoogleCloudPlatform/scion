@@ -21,8 +21,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
@@ -433,8 +433,8 @@ func runSecretGet(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Ref:     %s\n", secret.SecretRef)
 	}
 	fmt.Printf("  Version: %d\n", secret.Version)
-	fmt.Printf("  Created: %s\n", secret.Created.Format(time.RFC3339))
-	fmt.Printf("  Updated: %s\n", secret.Updated.Format(time.RFC3339))
+	fmt.Printf("  Created: %s\n", clitime.Format(secret.Created, clitime.Full))
+	fmt.Printf("  Updated: %s\n", clitime.Format(secret.Updated, clitime.Full))
 	if secret.Description != "" {
 		fmt.Printf("  Description: %s\n", secret.Description)
 	}
@@ -471,7 +471,7 @@ func runSecretList(cmd *cobra.Command, _ []string) error {
 
 	fmt.Printf("Secrets (scope: %s):\n", scope)
 	fmt.Printf("%-30s  %-12s  %-8s  %-8s  %s\n", "KEY", "TYPE", "PROGENY", "VERSION", "UPDATED")
-	fmt.Printf("%-30s  %-12s  %-8s  %-8s  %s\n", "------------------------------", "------------", "--------", "--------", "-------------------")
+	fmt.Printf("%-30s  %-12s  %-8s  %-8s  %s\n", "------------------------------", "------------", "--------", "--------", "-----------------------")
 	for _, s := range resp.Secrets {
 		typeLabel := s.SecretType
 		if typeLabel == "" {
@@ -481,7 +481,7 @@ func runSecretList(cmd *cobra.Command, _ []string) error {
 		if s.AllowProgeny {
 			progenyLabel = "\u2713"
 		}
-		fmt.Printf("%-30s  %-12s  %-8s  v%-7d  %s\n", truncate(s.Key, 30), typeLabel, progenyLabel, s.Version, s.Updated.Format("2006-01-02 15:04:05"))
+		fmt.Printf("%-30s  %-12s  %-8s  v%-7d  %s\n", truncate(s.Key, 30), typeLabel, progenyLabel, s.Version, clitime.Format(s.Updated, clitime.Full))
 	}
 
 	return nil

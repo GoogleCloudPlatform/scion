@@ -1584,3 +1584,52 @@ func TestCheckGitVersion_Gate(t *testing.T) {
 		}
 	})
 }
+
+func TestStripGitURLCredentials(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{"https token", "https://x-access-token:ghp_SECRET@github.com/org/repo.git", "https://github.com/org/repo.git"},
+		{"https user only", "https://org@dev.azure.com/org/proj/_git/repo", "https://dev.azure.com/org/proj/_git/repo"},
+		{"https password containing @", "https://u:p@ss@github.com/org/repo", "https://github.com/org/repo"},
+		{"http token", "http://u:t@gitlab.example.com/g/r.git", "http://gitlab.example.com/g/r.git"},
+		{"git scheme", "git://u:t@host.example/r.git", "git://host.example/r.git"},
+		{"uppercase scheme", "HTTPS://u:t@github.com/org/repo", "HTTPS://github.com/org/repo"},
+		{"ssh keeps login drops password", "ssh://git:pw@github.com/org/repo.git", "ssh://git@github.com/org/repo.git"},
+		{"ssh login only unchanged", "ssh://git@github.com/org/repo.git", "ssh://git@github.com/org/repo.git"},
+		{"ssh empty login", "ssh://:pw@github.com/org/repo.git", "ssh://github.com/org/repo.git"},
+		{"no credentials", "https://github.com/org/repo.git", "https://github.com/org/repo.git"},
+		{"@ in path is not userinfo", "https://github.com/org/repo@v1", "https://github.com/org/repo@v1"},
+		{"scp shorthand unchanged", "git@github.com:org/repo.git", "git@github.com:org/repo.git"},
+		{"password containing /", "https://u:p/w@github.com/org/repo", "https://github.com/org/repo"},
+		{"password containing / and @", "https://u:p/w@x@github.com/org/repo.git", "https://github.com/org/repo.git"},
+		{"ssh password containing /", "ssh://git:p/w@github.com/org/repo.git", "ssh://git@github.com/org/repo.git"},
+		{"credentials and @ in path", "https://tok@github.com/org/repo@v1", "https://github.com/org/repo@v1"},
+		{"no path", "https://u:t@github.com", "https://github.com"},
+		{"query preserved", "https://u:t@github.com/org/repo?x=1", "https://github.com/org/repo?x=1"},
+		{"@ only in query", "https://github.com/org/repo?u=a@b", "https://github.com/org/repo?u=a@b"},
+		{"@ host in path is not userinfo", "https://github.com/org/repo@github.com/x", "https://github.com/org/repo@github.com/x"},
+		{"credentials then @ host in path", "https://u:p@github.com/org/x@github.com/repo", "https://github.com/org/x@github.com/repo"},
+		{"login containing / is path", "https://a/b@github.com/x", "https://a/b@github.com/x"},
+		// A port then '@' in the path is not userinfo (#2368 review).
+		{"port then @ in path", "https://host:8443/org/repo@v1", "https://host:8443/org/repo@v1"},
+		{"default port then @ in path", "https://github.com:443/org/repo@v1", "https://github.com:443/org/repo@v1"},
+		{"ipv6 port then @ in path", "https://[::1]:8443/org/repo@v1", "https://[::1]:8443/org/repo@v1"},
+		{"credentials, port, @ in path", "https://u:t@host:8443/org/repo@v1", "https://host:8443/org/repo@v1"},
+		// A password with '/' that cannot be a port is still stripped.
+		{"password starting with / stripped", "https://u:/pw@github.com/org/repo", "https://github.com/org/repo"},
+		{"password with leading-zero digits and / stripped", "https://u:0123/w@github.com/org/repo", "https://github.com/org/repo"},
+		{"password with out-of-range digits and / stripped", "https://u:65536/w@github.com/org/repo", "https://github.com/org/repo"},
+		{"password with digits+letters and / stripped", "https://u:12ab/w@github.com/org/repo", "https://github.com/org/repo"},
+		// Port-like password: RFC 3986 reads a port; the hub rejects the '@' path.
+		{"port-like password read as port", "https://u:8443/w@github.com/org/repo", "https://u:8443/w@github.com/org/repo"},
+		{"empty", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := StripGitURLCredentials(tt.in); got != tt.want {
+				t.Errorf("StripGitURLCredentials(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}

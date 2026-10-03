@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // mockRuntimeBrokerService implements hubclient.RuntimeBrokerService for testing.
@@ -328,6 +329,55 @@ func TestHeartbeatService_ReportsReprovisionCapability(t *testing.T) {
 	}
 	if !hb.Capabilities.Sync || !hb.Capabilities.Attach {
 		t.Error("expected Sync and Attach capabilities to still be reported")
+	}
+}
+
+// TestHeartbeatService_ReportsEmptyPerAgentWorkspaceCapability pins that
+// every heartbeat advertises empty-per-agent support (design #2703 P2), so
+// the hub's dispatch gate admits this broker for such projects and an
+// upgraded, already-joined broker self-heals its stored capabilities.
+func TestHeartbeatService_ReportsEmptyPerAgentWorkspaceCapability(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+	svc := NewHeartbeatService(client, "test-host", time.Hour, nil, nil, slog.Default())
+	if err := svc.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat failed: %v", err)
+	}
+	calls := client.getHeartbeatCalls()
+	if len(calls) != 1 || calls[0].Heartbeat.Capabilities == nil {
+		t.Fatalf("expected 1 heartbeat with capabilities, got %d calls", len(calls))
+	}
+	if !calls[0].Heartbeat.Capabilities.EmptyPerAgentWorkspace {
+		t.Error("expected Capabilities.EmptyPerAgentWorkspace to be true on every heartbeat")
+	}
+}
+
+// noEmptyPerAgentTestRuntime is a MockRuntime that opts out of the optional
+// runtime.EmptyPerAgentCapableRuntime capability, as Cloud Run does.
+type noEmptyPerAgentTestRuntime struct {
+	*runtime.MockRuntime
+}
+
+func (r *noEmptyPerAgentTestRuntime) SupportsEmptyPerAgentWorkspace() bool { return false }
+
+var _ runtime.EmptyPerAgentCapableRuntime = (*noEmptyPerAgentTestRuntime)(nil)
+
+// TestHeartbeatService_EmptyPerAgentFollowsDefaultRuntime pins that the
+// heartbeat's EmptyPerAgentWorkspace reflects the default runtime, like
+// Attach: false when it opts out (Cloud Run), so the hub never routes an
+// empty-per-agent project to a broker that would reject it at Run.
+func TestHeartbeatService_EmptyPerAgentFollowsDefaultRuntime(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+	svc := NewHeartbeatService(client, "test-host", time.Hour, nil, nil, slog.Default())
+	svc.SetDefaultRuntime(&noEmptyPerAgentTestRuntime{MockRuntime: &runtime.MockRuntime{}})
+	if err := svc.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat failed: %v", err)
+	}
+	calls := client.getHeartbeatCalls()
+	if len(calls) != 1 || calls[0].Heartbeat.Capabilities == nil {
+		t.Fatalf("expected 1 heartbeat with capabilities, got %d calls", len(calls))
+	}
+	if calls[0].Heartbeat.Capabilities.EmptyPerAgentWorkspace {
+		t.Error("Capabilities.EmptyPerAgentWorkspace = true, want false for a default runtime that opts out")
 	}
 }
 

@@ -96,16 +96,21 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		checks["runtime"] = "unavailable"
 	}
 
-	// NFS mount health
-	if s.nfsMountReconciler != nil {
-		checks["nfs_mounts"] = s.nfsMountReconciler.HealthCheckString()
-	}
-
 	status := "healthy"
 	for _, v := range checks {
 		if v != "available" && v != "healthy" {
 			status = "degraded"
 			break
+		}
+	}
+
+	// NFS mount health is always reported per share. It degrades the
+	// overall status only when the broker owns the mounts and a dispatch
+	// would be refused: see nfsHealthDegradesStatus.
+	if s.nfsMountReconciler != nil {
+		checks["nfs_mounts"] = s.nfsMountReconciler.HealthCheckString()
+		if s.nfsHealthDegradesStatus() {
+			status = degradeHealthStatus(status)
 		}
 	}
 
@@ -115,6 +120,57 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		Uptime:  time.Since(s.startTime).Round(time.Second).String(),
 		Checks:  checks,
 	}
+}
+
+// degradeHealthStatus lowers a healthy status to degraded. Any other
+// status (already degraded, or worse) is returned unchanged, so a
+// degrading check never raises a worse status back to degraded.
+func degradeHealthStatus(status string) string {
+	if status == "healthy" {
+		return "degraded"
+	}
+	return status
+}
+
+// nfsHealthDegradesStatus reports whether an unhealthy NFS share should
+// mark the broker degraded. It does only when the broker mounts the shares
+// itself (auto_mount on, and the default runtime is not Kubernetes or Cloud
+// Run, where the platform mounts the export and dispatch is not gated), the
+// first reconcile pass has finished (a pending check is not a failure), and
+// a share is unhealthy. Otherwise the broker only verifies mounts it does
+// not manage, so a missing mount is reported in nfs_mounts without changing
+// the overall status.
+func (s *Server) nfsHealthDegradesStatus() bool {
+	r := s.nfsMountReconciler
+	if r == nil || !r.MountsShares() || r.IsHealthy() {
+		return false
+	}
+	if s.nfsStartupReconcileDone != nil {
+		select {
+		case <-s.nfsStartupReconcileDone:
+		default:
+			return false // first pass still pending
+		}
+	}
+	return true
+}
+
+// NFSWarnOnlyRuntime reports whether name is a runtime type on which the
+// platform, not the broker, mounts the NFS export into the agent: the
+// Kubernetes family (the kubelet mounts the volume) and the Cloud Run
+// family. For these the broker never mounts a share and never refuses a
+// dispatch over NFS state; it logs a warning instead. When it is the
+// broker's default runtime the broker only verifies its shares, and
+// scion doctor reports an unmounted share as a warning.
+func NFSWarnOnlyRuntime(name string) bool {
+	if isKubernetesRuntimeName(name) {
+		return true
+	}
+	switch name {
+	case "cloudrun", "cloudrun-instances", "cloudrun-sandbox":
+		return true
+	}
+	return false
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -173,6 +229,9 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			Exec:        true,
 			Reprovision: true,
 			AsyncLaunch: true,
+			// EmptyPerAgentWorkspace, like Attach, reflects the default
+			// runtime (false for Cloud Run, which rejects the mode).
+			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(s.runtime),
 		},
 		Profiles: s.buildInfoProfiles(runtimeType),
 	}
@@ -250,9 +309,8 @@ func (s *Server) buildInfoProfiles(defaultRuntimeType string) []BrokerProfile {
 // makes). ok is false when no live instance exists yet for rtType — most
 // commonly an auxiliary runtime type no request has resolved yet — and
 // callers must leave the capability unknown in that case rather than guess
-// from the type string alone (a named profile on a broker with a different
-// default type is not "probably fine" just because it's not the default
-// type).
+// from the type string alone (a substrate profile on a docker-default
+// broker is not "probably fine" just because it's not the default type).
 func (s *Server) resolveLiveRuntimeInstance(rtType, defaultRuntimeType string) (rt scionrt.Runtime, ok bool) {
 	if rtType == defaultRuntimeType {
 		if s.runtime == nil {
@@ -372,7 +430,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 
 	agents, err := s.manager.List(ctx, filter)
 	if err != nil {
-		RuntimeError(w, "Failed to list agents: "+err.Error())
+		s.writeRuntimeOpError(w, ctx, "list agents", err)
 		return
 	}
 
@@ -753,8 +811,8 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 						OriginalErr: err,
 					}
 					markAttemptFailed(http.StatusInternalServerError, sce.Message)
-					span.SetStatus(codes.Error, sce.Message)
-					writeStartContextError(w, sce)
+					span.SetStatus(codes.Error, startContextSpanText(sce))
+					s.writeStartContextError(w, sce, "create agent")
 					return
 				}
 				hydratedTemplatePath = tplPath
@@ -929,8 +987,14 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// N1-7: Ensure NFS shares are mounted before dispatch (no-op when backend=local).
-	if err := s.ensureNFSMountsReady(); err != nil {
+	// N1-7: with nfs.auto_mount, ensure NFS shares are mounted before an
+	// NFS-backed dispatch. No-op without NFS config, with auto_mount off, or
+	// for a project that does not use the nfs workspace backend.
+	nfsProfile := ""
+	if req.Config != nil {
+		nfsProfile = req.Config.Profile
+	}
+	if err := s.checkNFSForDispatch(r.Context(), req.Name, req.ProjectPath, req.ProjectSlug, nfsProfile); err != nil {
 		markAttemptFailed(http.StatusServiceUnavailable, "NFS mount check failed: "+err.Error())
 		span.SetStatus(codes.Error, "NFS workspace storage is not available: "+err.Error())
 		writeError(w, http.StatusServiceUnavailable, "nfs_unavailable",
@@ -985,10 +1049,13 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		WorkspaceMode:      req.WorkspaceMode,
 		HTTPRequest:        r,
 		Operation:          opCreate,
+		// Threaded only for the workspace-source checks; the download
+		// itself runs after buildStartContext (below, or in runLaunch).
+		WorkspaceStoragePath: req.WorkspaceStoragePath,
 	})
 	if err != nil {
-		span.SetStatus(codes.Error, err.Error())
-		status := writeStartContextError(w, err)
+		span.SetStatus(codes.Error, startContextSpanText(err))
+		status := s.writeStartContextError(w, err, "create agent")
 		markAttemptFailed(status, err.Error())
 		return
 	}
@@ -1033,9 +1100,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// With AsyncLaunch absent, no LaunchID to track the launch by, or a
 	// LaunchTimeoutSeconds too small to leave any budget after the broker's
 	// 20s abort margin (ctx' would already be expired when the 201 is sent),
-	// fall back to the synchronous path rather than accept a launch that
-	// cannot possibly succeed. Behavior is unchanged from here down for all
-	// of these non-conforming cases.
+	// or a resolved runtime that does not call the async launch hooks
+	// (scionrt.HasAsyncLaunchSupport, asked of this request's runtime, not
+	// the broker default), fall back to the synchronous path rather than
+	// accept a launch that cannot possibly succeed or be cancelled. Behavior
+	// is unchanged from here down for all of these non-conforming cases.
 	if req.AsyncLaunch && !req.ProvisionOnly && !req.Reprovision {
 		switch {
 		case req.LaunchID == "":
@@ -1044,6 +1113,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		case req.LaunchTimeoutSeconds <= minAsyncLaunchTimeoutSeconds:
 			s.agentLifecycleLog.Warn("async launch requested with too small a launchTimeoutSeconds; falling back to synchronous create",
 				"agent_id", req.ID, "name", req.Name, "launch_timeout_seconds", req.LaunchTimeoutSeconds)
+		case !managerSupportsAsyncLaunch(sc.Manager):
+			s.agentLifecycleLog.Warn("async launch requested for a runtime that does not support async launch; falling back to synchronous create",
+				"agent_id", req.ID, "name", req.Name, "runtime", sc.RuntimeType)
 		default:
 			s.beginAsyncLaunch(w, r, ctx, req, opts, sc.Manager, attempt, markAttemptFailed, span, createStart)
 			return
@@ -1138,8 +1210,18 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to provision agent: "+err.Error(), nil)
 				return
 			}
+			// A required skill reference that could not be resolved is mapped
+			// to the status matching its cause (404 not found, 429 rate
+			// limited, 504 timeout, 502 upstream/unreachable) rather than a
+			// blanket 500/502, so the caller gets an actionable response (#2546).
+			var skillErr *agent.SkillResolutionError
+			if errors.As(err, &skillErr) {
+				markAttemptFailed(skillResolutionHTTPStatus(skillErr.Code), "failed to provision agent")
+				SkillResolutionFailed(w, skillErr)
+				return
+			}
 			markAttemptFailed(http.StatusInternalServerError, "failed to provision agent")
-			RuntimeError(w, "Failed to provision agent: "+err.Error())
+			s.writeRuntimeOpError(w, ctx, "provision agent", err, "agent_id", req.ID)
 			return
 		}
 
@@ -1161,7 +1243,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			agentResp.HarnessConfig = cfg.HarnessConfig
 			agentResp.Image = cfg.Image
 		}
-		if s.runtime != nil {
+		// Report the runtime this dispatch resolved to (its profile), not
+		// the broker's default runtime: the hub records this value as the
+		// agent's runtime.
+		agentResp.RuntimeType = sc.RuntimeType
+		if agentResp.RuntimeType == "" && s.runtime != nil {
 			agentResp.RuntimeType = s.runtime.Name()
 		}
 
@@ -1193,9 +1279,18 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// the generic 502 the hub maps RuntimeError to (ptone/scion#1316
 		// fault 3).
 		notFoundErr := errors.Is(err, config.ErrHarnessConfigNotFound) || errors.Is(err, config.ErrTemplateNotFound)
-		if notFoundErr {
+		// A required skill reference that could not be resolved is mapped to
+		// the status matching its cause (404 not found, 429 rate limited,
+		// 504 timeout, 502 upstream/unreachable) rather than a blanket
+		// 500/502, so the caller gets an actionable response (#2546).
+		var skillErr *agent.SkillResolutionError
+		isSkillErr := errors.As(err, &skillErr)
+		switch {
+		case notFoundErr:
 			markAttemptFailed(http.StatusNotFound, "failed to create agent")
-		} else {
+		case isSkillErr:
+			markAttemptFailed(skillResolutionHTTPStatus(skillErr.Code), "failed to create agent")
+		default:
 			markAttemptFailed(http.StatusInternalServerError, "failed to create agent")
 		}
 
@@ -1210,7 +1305,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// have started since (for example, this agent was deleted while
 		// its start was blocked and the name was reused); its files must
 		// survive this start's failure. ownsName is a fresh read of the
-		// name's marker, taken right before the removal.
+		// name's marker, taken right before the removal. Subject to that
+		// guard, this covers every Start failure, including a skill
+		// resolution failure above (#2546). It covers broker files only,
+		// not the hub's agent record.
 		if opts.ProjectPath != "" && !ss.ownsName() {
 			s.agentLifecycleLog.Info("Skipped agent file cleanup after start failure: the agent name is now owned by a newer start",
 				"agent_id", req.ID, "project_id", req.ProjectID, "agent", opts.Name)
@@ -1229,8 +1327,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			Conflict(w, err.Error())
 		case notFoundErr:
 			writeError(w, http.StatusNotFound, ErrCodeNotFound, "Failed to create agent: "+err.Error(), nil)
+		case isSkillErr:
+			SkillResolutionFailed(w, skillErr)
 		default:
-			RuntimeError(w, "Failed to create agent: "+err.Error())
+			RuntimeError(w, runtimeOpError("create agent", err).Error())
 		}
 		return
 	}
@@ -1664,7 +1764,7 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id, projectID 
 
 	agents, err := mgr.List(ctx, map[string]string{"scion.agent": "true"})
 	if err != nil {
-		RuntimeError(w, "Failed to list agents: "+err.Error())
+		s.writeRuntimeOpError(w, ctx, "list agents", err, "agent_id", id)
 		return
 	}
 
@@ -1717,15 +1817,30 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		if errors.Is(err, errDeleteTargetNotFound) {
-			// No side effects: the hub's broker clients treat a 404 on
-			// delete as an idempotent success.
+			// No container and no files, but per-agent runtime objects
+			// may remain when the container was removed outside scion.
+			// Beyond that, no side effects: the hub's broker clients
+			// treat a 404 on delete as an idempotent success.
+			s.cleanupLeftoverAgentResources(ctx, id, projectID)
 			s.agentLifecycleLog.Info("Agent delete: no matching agent in project",
 				"agent_id", id, "project_id", projectID)
 			NotFound(w, "Agent")
 			return
 		}
 		if errors.Is(err, errDeleteTargetUnknown) {
-			RuntimeError(w, "Failed to delete agent: "+err.Error())
+			s.writeRuntimeOpError(w, ctx, "delete agent", err, "agent_id", id, "project_id", projectID)
+			return
+		}
+		if errors.Is(err, errAgentIdentityUnknown) {
+			logArgs := []any{"agent_id", id, "project_id", projectID, "error", err}
+			var idErr *agentIdentityUnknownError
+			if errors.As(err, &idErr) {
+				// The prober-supplied, runtime-specific scope is logged
+				// here only; AgentIdentityUnknown's HTTP body never names it.
+				logArgs = append(logArgs, logKeyRuntimeScope, idErr.Scope, "recordless_actors", idErr.Names)
+			}
+			s.agentLifecycleLog.Warn("Agent delete: agent identity unknown after a runtime process restart", logArgs...)
+			AgentIdentityUnknown(w, err.Error())
 			return
 		}
 		Conflict(w, "Failed to delete agent: "+err.Error())
@@ -1795,21 +1910,27 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 
 	_, err = target.mgr.DeleteTarget(ctx, target.name, target.containerID, filesToDelete, projectPath, removeBranch)
 	if err != nil {
-		span.SetStatus(codes.Error, err.Error())
-		RuntimeError(w, "Failed to delete agent: "+err.Error())
+		s.writeRuntimeOpError(w, ctx, "delete agent", err, "agent_id", id, "project_id", projectID)
 		return
 	}
+	if target.containerID == "" {
+		// The container was already gone, so DeleteTarget made no runtime
+		// call and the runtime never removed the objects it created with
+		// the container.
+		s.cleanupLeftoverAgentResources(ctx, target.name, projectID)
+	}
 
-	// Worktree-per-agent on the NFS workspace: the agent's worktree lives on
-	// the export rather than in the agent's files, so remove it here too.
-	// A failure does not fail the delete; the worktree is then left in
-	// place, and an agent created again with the same name reuses it. The
-	// agent's branch is always kept, whatever removeBranch says.
+	// On the NFS workspace, the agent's worktree (worktree-per-agent) or
+	// its own workspace (clone-per-agent) lives on the export rather than
+	// in the agent's files, so remove it here too. A failure does not fail
+	// the delete; what failed is then left in place, and an agent created
+	// again with the same name reuses it. The agent's branch is always
+	// kept, whatever removeBranch says.
 	if filesToDelete && agentProjectID != "" {
-		if remover, ok := target.mgr.(nfsWorktreeRemover); ok {
-			if wtPath, rmErr := remover.RemoveNFSWorktree(ctx, projectPath, agentProjectID, target.name); rmErr != nil {
-				s.agentLifecycleLog.Warn("Agent delete: could not remove the agent's worktree on the NFS workspace; left in place",
-					"agent_id", id, "project_id", agentProjectID, "path", wtPath, "error", rmErr)
+		if remover, ok := target.mgr.(nfsAgentFilesRemover); ok {
+			if paths, rmErr := remover.RemoveNFSAgentFiles(ctx, projectPath, agentProjectID, target.name); rmErr != nil {
+				s.agentLifecycleLog.Warn("Agent delete: could not remove the agent's files on the NFS workspace; left in place",
+					"agent_id", id, "project_id", agentProjectID, "paths", paths, "error", rmErr)
 			}
 		}
 	}
@@ -1992,48 +2113,66 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	// agent's worktree lives under.
 	startAgentID := startReq.ResolvedEnv["SCION_AGENT_ID"]
 
+	// If the request names no project, recover the project path from the
+	// agent's existing container, found by the same project-scoped search
+	// across every runtime this broker has that stop and restart use. This
+	// runs before buildStartContext so its runtime resolution reads the
+	// agent's project settings and saved profile. A recovered path is the
+	// project's .scion directory as the container recorded it, not a
+	// project root, so buildStartContext is told where it came from.
+	startProjectPath := startReq.ProjectPath
+	var startProjectPathFromContainer bool
+	if startReq.ProjectPath == "" && startReq.ProjectSlug == "" {
+		m, err := s.lookupAgentMatch(ctx, id, projectID)
+		switch {
+		case m.matched:
+			startProjectPath = m.entry.ProjectPath
+			startProjectPathFromContainer = startProjectPath != ""
+		case errors.Is(err, ErrAgentNotFound):
+			// No container to recover from; resolve as a request that names
+			// no project.
+		case errors.Is(err, errAuxiliaryRuntimeList):
+			// The default runtime listed no match and an auxiliary runtime
+			// could not list; resolve as a request that names no project
+			// rather than failing a start that may not involve that runtime.
+			s.agentLifecycleLog.Warn("Start agent: auxiliary runtime list failed while recovering the project path",
+				"agent_id", id, "error", err)
+		case errors.Is(err, ErrAgentListUnavailable):
+			span.SetStatus(codes.Error, err.Error())
+			AgentLookupUnavailable(w, err, id, "start", "")
+			return
+		default:
+			// More than one container matches: none of them is taken as the
+			// agent's project; resolve as a request that names no project.
+			s.agentLifecycleLog.Warn("Start agent: project path not recovered", "agent_id", id, "error", err)
+		}
+	}
+
 	sc, err := s.buildStartContext(ctx, startContextInputs{
-		Name:               id,
-		AgentID:            startAgentID,
-		ProjectID:          projectID,
-		ProjectPath:        startReq.ProjectPath,
-		ProjectSlug:        startReq.ProjectSlug,
-		Config:             cfg,
-		InlineConfig:       startReq.InlineConfig,
-		HubEndpoint:        startReq.HubEndpoint,
-		ResolvedEnv:        startReq.ResolvedEnv,
-		EnvClassifications: startReq.EnvClassifications,
-		ResolvedSecrets:    startReq.ResolvedSecrets,
-		SharedDirs:         startReq.SharedDirs,
-		AgentToken:         startContextAgentToken,
-		WorkspaceMode:      startReq.WorkspaceMode,
-		HTTPRequest:        r,
-		Operation:          opHTTPStart,
+		Name:                     id,
+		AgentID:                  startAgentID,
+		ProjectID:                projectID,
+		ProjectPath:              startProjectPath,
+		ProjectPathFromContainer: startProjectPathFromContainer,
+		ProjectSlug:              startReq.ProjectSlug,
+		Config:                   cfg,
+		InlineConfig:             startReq.InlineConfig,
+		HubEndpoint:              startReq.HubEndpoint,
+		ResolvedEnv:              startReq.ResolvedEnv,
+		EnvClassifications:       startReq.EnvClassifications,
+		ResolvedSecrets:          startReq.ResolvedSecrets,
+		SharedDirs:               startReq.SharedDirs,
+		AgentToken:               startContextAgentToken,
+		WorkspaceMode:            startReq.WorkspaceMode,
+		HTTPRequest:              r,
+		Operation:                opHTTPStart,
 	})
 	if err != nil {
-		span.SetStatus(codes.Error, err.Error())
-		writeStartContextError(w, err)
+		span.SetStatus(codes.Error, startContextSpanText(err))
+		s.writeStartContextError(w, err, "start agent")
 		return
 	}
 	opts := sc.Opts
-
-	// If project path wasn't in the request, fall back to looking up from an existing container
-	if startReq.ProjectPath == "" && startReq.ProjectSlug == "" && opts.ProjectPath == "" {
-		agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true"})
-		if err != nil {
-			span.SetStatus(codes.Error, err.Error())
-			RuntimeError(w, "Failed to list agents: "+err.Error())
-			return
-		}
-		for i := range agents {
-			if matchesAgent(agents[i], id, projectID) {
-				if agents[i].ProjectPath != "" {
-					opts.ProjectPath = agents[i].ProjectPath
-				}
-				break
-			}
-		}
-	}
 
 	// Once ProjectPath is resolved, confirm id's agent directory actually
 	// resolves under this project's agents root before applyInlineConfigUpdate,
@@ -2065,7 +2204,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	mgr, resolvedRuntimeType := s.resolveManagerForOpts(opts)
 	recheckHubDefaultPassthrough(opts.Env, sc.EnvClassifications, resolvedRuntimeType)
 	if sce := rejectKubernetesBlock(resolvedRuntimeType, opts.Env["SCION_METADATA_MODE"]); sce != nil {
-		writeStartContextError(w, sce)
+		s.writeStartContextError(w, sce, "start agent")
 		return
 	}
 
@@ -2095,7 +2234,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		if errors.Is(err, agent.ErrContainerNameInUse) {
 			Conflict(w, err.Error())
 		} else {
-			RuntimeError(w, "Failed to start agent: "+err.Error())
+			RuntimeError(w, runtimeOpError("start agent", err).Error())
 		}
 		return
 	}
@@ -2223,9 +2362,16 @@ func agentsWithoutProjectLabel(agents []api.AgentInfo) []api.AgentInfo {
 // container id — nothing addressable to stop): that case is folded into
 // the same "not found" outcome as a genuine no-match.
 func (s *Server) projectScopedTarget(ctx context.Context, id, projectID string) (string, agent.Manager, error) {
-	containerID, mgr, _, err := s.lookupAgentTarget(ctx, id, projectID)
-	if err == nil && containerID != "" {
-		return containerID, mgr, nil
+	m, err := s.lookupAgentMatch(ctx, id, projectID)
+	return s.projectScopedTargetFrom(ctx, id, projectID, m, err)
+}
+
+// projectScopedTargetFrom applies projectScopedTarget's rules to a
+// lookupAgentMatch result the caller already has, so restart can read the
+// agent's project path from the same entry it stops.
+func (s *Server) projectScopedTargetFrom(ctx context.Context, id, projectID string, m agentMatch, err error) (string, agent.Manager, error) {
+	if err == nil && m.containerID != "" {
+		return m.containerID, m.manager, nil
 	}
 	if err != nil && !errors.Is(err, ErrAgentNotFound) {
 		return "", nil, err
@@ -2234,6 +2380,65 @@ func (s *Server) projectScopedTarget(ctx context.Context, id, projectID string) 
 		return "", nil, nil
 	}
 	return id, s.resolveManagerForAgent(ctx, id, projectID), nil
+}
+
+// managerSupportsAsyncLaunch reports whether the runtime behind mgr can
+// serve an async launch (scionrt.HasAsyncLaunchSupport). A manager whose
+// runtime cannot be identified is treated as supporting it, the same
+// default the capability itself uses, so only a runtime that opts out
+// changes the create path.
+func managerSupportsAsyncLaunch(mgr agent.Manager) bool {
+	var rt scionrt.Runtime
+	switch m := mgr.(type) {
+	case *agent.AgentManager:
+		rt = m.Runtime
+	case managerRuntimeProvider:
+		rt = m.managerRuntime()
+	}
+	if rt == nil {
+		return true
+	}
+	return scionrt.HasAsyncLaunchSupport(rt)
+}
+
+// managerRuntimeProvider lets a manager other than agent.AgentManager
+// (tests) supply the runtime it runs agents on directly.
+//
+// test seam: it exists so test managers (fakes that are not an
+// agent.AgentManager) can supply a runtime; no production manager
+// implements it.
+type managerRuntimeProvider interface {
+	managerRuntime() scionrt.Runtime
+}
+
+// hasRecordlessProber reports whether the default runtime or any currently
+// registered auxiliary runtime implements the optional RecordlessActorProber
+// capability. stopAgent uses this to decide whether an unresolved target is
+// worth probing for record-less actors at all — unlike allManagers() (built,
+// sorted, and used only once the probe actually runs), this doesn't build or
+// sort the full manager list, so a broker with no prober never pays for
+// either on an unresolved stop.
+func (s *Server) hasRecordlessProber() bool {
+	if am, ok := s.manager.(*agent.AgentManager); ok && am.Runtime != nil {
+		if _, ok := am.Runtime.(scionrt.RecordlessActorProber); ok {
+			return true
+		}
+	}
+	s.auxiliaryRuntimesMu.RLock()
+	defer s.auxiliaryRuntimesMu.RUnlock()
+	for _, aux := range s.auxiliaryRuntimes {
+		if aux.Manager == nil {
+			continue
+		}
+		am, ok := aux.Manager.(*agent.AgentManager)
+		if !ok || am.Runtime == nil {
+			continue
+		}
+		if _, ok := am.Runtime.(scionrt.RecordlessActorProber); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID string) {
@@ -2270,11 +2475,54 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 			AgentLookupUnavailable(w, err, id, "stop", "")
 			return
 		}
-		s.agentLifecycleLog.Warn("Stop agent: lookup failed", "agent_id", id, "error", err)
-		RuntimeError(w, "Failed to stop agent")
+		s.writeRuntimeOpError(w, ctx, "stop agent", err, "agent_id", id)
 		return
 	}
 	if target == "" {
+		// Before treating an unresolved target as an idempotent no-op (the
+		// generic behaviour every runtime relies on), check whether a
+		// runtime process restart left at least one record-less actor in
+		// the runtime's own scope for this project (the optional
+		// RecordlessActorProber capability). Only runtimes that implement
+		// that capability take part, so every other runtime's Stop
+		// behaviour here is unchanged. Scoped to projectID != "" for the
+		// same reason as resolveDeleteTarget's equivalent check: a
+		// project-blind stop (solo/CLI) is unaffected, and a
+		// genuinely-absent slug in a project with no record-less actors
+		// still falls through to the idempotent 202 below.
+		//
+		// projectID != "" is, today, always true by the time control
+		// reaches here: projectScopedTarget only returns "" for a non-empty
+		// projectID (an empty projectID falls back to returning id itself,
+		// per its own doc comment). Kept anyway as defence-in-depth against
+		// a future change to projectScopedTarget's contract.
+		//
+		// hasRecordlessProber() gates the probe so a broker with no
+		// registered prober doesn't pay for allManagers() (lock + sort) and
+		// recordlessActorProbe's manager loop on every unresolved stop, for
+		// a type assertion that can never succeed.
+		if projectID != "" && s.hasRecordlessProber() {
+			managers := s.allManagers()
+			scope, recordless, perr := recordlessActorProbe(ctx, managers, projectID)
+			if perr != nil {
+				span.SetStatus(codes.Error, perr.Error())
+				// Same rule as the projectScopedTarget error above: perr may
+				// carry a raw runtime error; log it, keep the body fixed.
+				s.agentLifecycleLog.Warn("Agent stop: record-less actor probe failed", "agent_id", id, "project_id", projectID, "error", perr)
+				RuntimeError(w, "Failed to stop agent")
+				return
+			}
+			if len(recordless) > 0 {
+				// bodyMsg is generic and carries no runtime-specific scope;
+				// the prober-supplied scope is logged below only, never in
+				// the HTTP body.
+				bodyMsg := fmt.Sprintf("%d actor(s) with no runtime-process record after a runtime restart; agent identity unknown; operator cleanup required", len(recordless))
+				s.agentLifecycleLog.Warn("Agent stop: agent identity unknown after a runtime process restart",
+					"agent_id", id, "project_id", projectID, logKeyRuntimeScope, scope, "recordless_actors", recordless, "error", bodyMsg)
+				AgentIdentityUnknown(w, bodyMsg)
+				return
+			}
+		}
 		s.agentLifecycleLog.Info("Agent stopped (not found in project)",
 			"agent_id", id,
 			"phase", string(state.PhaseStopped))
@@ -2293,8 +2541,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 				"agent_id", id,
 				"phase", string(state.PhaseStopped))
 		} else {
-			span.SetStatus(codes.Error, err.Error())
-			RuntimeError(w, "Failed to stop agent: "+err.Error())
+			s.writeRuntimeOpError(w, ctx, "stop agent", err, "agent_id", id)
 			return
 		}
 	} else {
@@ -2344,31 +2591,35 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		UserID:               restartReq.UserID,
 	})
 
-	// Look up agent to get its name and project path
+	// Look up the agent with the same project-scoped search across every
+	// runtime this broker has that the stop below uses, and read its name
+	// and project path from the matched entry; the project path is what
+	// lets the runtime resolution below read the agent's project settings
+	// and saved profile. A lookup error leaves the agent unresolved here and
+	// is reported where the stop target is resolved, after the
+	// runtime checks.
 	agentName := id
 	var projectPath string
-	agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true"})
-	if err == nil {
-		for i := range agents {
-			if matchesAgent(agents[i], id, projectID) {
-				agentName = agents[i].Name
-				projectPath = agents[i].ProjectPath
-				break
-			}
+	match, matchErr := s.lookupAgentMatch(ctx, id, projectID)
+	if match.matched {
+		if match.entry.Name != "" {
+			agentName = match.entry.Name
 		}
+		projectPath = match.entry.ProjectPath
 	}
 
 	sc, err := s.buildStartContext(ctx, startContextInputs{
-		Name:               agentName,
-		ProjectPath:        projectPath,
-		HubEndpoint:        restartReq.HubEndpoint,
-		ResolvedEnv:        restartReq.ResolvedEnv,
-		EnvClassifications: restartReq.EnvClassifications,
-		HTTPRequest:        r,
-		Operation:          opHTTPRestart,
+		Name:                     agentName,
+		ProjectPath:              projectPath,
+		ProjectPathFromContainer: projectPath != "",
+		HubEndpoint:              restartReq.HubEndpoint,
+		ResolvedEnv:              restartReq.ResolvedEnv,
+		EnvClassifications:       restartReq.EnvClassifications,
+		HTTPRequest:              r,
+		Operation:                opHTTPRestart,
 	})
 	if err != nil {
-		writeStartContextError(w, err)
+		s.writeStartContextError(w, err, "restart agent")
 		return
 	}
 	opts := sc.Opts
@@ -2386,7 +2637,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	mgr, resolvedRuntimeType := s.resolveManagerForOpts(opts)
 	recheckHubDefaultPassthrough(opts.Env, sc.EnvClassifications, resolvedRuntimeType)
 	if sce := rejectKubernetesBlock(resolvedRuntimeType, opts.Env["SCION_METADATA_MODE"]); sce != nil {
-		writeStartContextError(w, sce)
+		s.writeStartContextError(w, sce, "restart agent")
 		return
 	}
 
@@ -2394,7 +2645,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// be exited and the subsequent start will handle cleanup.
 	// The lookup also returns the manager whose runtime reported the
 	// target, so the stop goes to that same runtime (default or auxiliary).
-	stopTarget, stopMgr, err := s.projectScopedTarget(ctx, id, projectID)
+	stopTarget, stopMgr, err := s.projectScopedTargetFrom(ctx, id, projectID, match, matchErr)
 	if err != nil {
 		// A lookup error other than "not found" must abort the restart
 		// without starting a second container — otherwise a runtime hiccup
@@ -2404,8 +2655,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			AgentLookupUnavailable(w, err, id, "restart", "")
 			return
 		}
-		s.agentLifecycleLog.Warn("Restart agent: lookup failed", "agent_id", id, "error", err)
-		RuntimeError(w, "Failed to restart agent")
+		s.writeRuntimeOpError(w, ctx, "restart agent", err, "agent_id", id, "project_id", projectID)
 		return
 	}
 	// An empty target means the agent isn't present in this project — skip the
@@ -2429,7 +2679,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			NotFound(w, "Agent")
 			return
 		}
-		RuntimeError(w, "Failed to restart agent: "+err.Error())
+		RuntimeError(w, runtimeOpError("restart agent", err).Error())
 		return
 	}
 
@@ -2491,12 +2741,12 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 	isRaw := req.StructuredMessage != nil && req.StructuredMessage.Raw
 	if isRaw {
 		if err := mgr.MessageRaw(ctx, id, projectID, deliveryText); err != nil {
-			span.SetStatus(codes.Error, err.Error())
 			if strings.Contains(err.Error(), "not found") {
+				span.SetStatus(codes.Error, err.Error())
 				NotFound(w, "Agent")
 				return
 			}
-			RuntimeError(w, "Failed to send raw message: "+err.Error())
+			s.writeRuntimeOpError(w, ctx, "send message to agent", err, "agent_id", id, "project_id", projectID)
 			return
 		}
 	} else {
@@ -2522,12 +2772,12 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request, id, project
 			})
 		}
 		if err := mgr.Message(msgCtx, id, projectID, deliveryText, req.Interrupt); err != nil {
-			span.SetStatus(codes.Error, err.Error())
 			if strings.Contains(err.Error(), "not found") {
+				span.SetStatus(codes.Error, err.Error())
 				NotFound(w, "Agent")
 				return
 			}
-			RuntimeError(w, "Failed to send message: "+err.Error())
+			s.writeRuntimeOpError(w, ctx, "send message to agent", err, "agent_id", id, "project_id", projectID)
 			return
 		}
 	}
@@ -2920,7 +3170,7 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, project
 			})
 			return
 		}
-		RuntimeError(w, "Failed to execute command: "+err.Error())
+		s.writeRuntimeOpError(w, ctx, "execute command on agent", err, "agent_id", id, "project_id", projectID)
 		return
 	}
 
@@ -2928,6 +3178,39 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, project
 		Output:   output,
 		ExitCode: 0,
 	})
+}
+
+// scionTokenDirScript sets TOKEN_DIR to the scion user's ~/.scion inside
+// the agent container, falling back to /home/scion when getent is missing
+// or has no entry. (A `getent … | cut … || echo …` pipeline never takes the
+// fallback: its status is cut's, which succeeds on empty input.) It is a
+// brace group, so callers can chain it with && like a single command.
+const scionTokenDirScript = `{ d="$(getent passwd scion 2>/dev/null | cut -d: -f6)"; ` +
+	`[ -n "$d" ] || d=/home/scion; ` +
+	`TOKEN_DIR="$d/.scion"; }`
+
+// scionTokenWriteCmd returns the in-container command that writes the agent
+// token (read from stdin) to the scion user's token file via temp+rename.
+func scionTokenWriteCmd() []string {
+	return []string{"sh", "-c",
+		scionTokenDirScript + " && " +
+			"mkdir -p \"$TOKEN_DIR\" && " +
+			"cat > \"$TOKEN_DIR/scion-token.tmp\" && " +
+			"mv \"$TOKEN_DIR/scion-token.tmp\" \"$TOKEN_DIR/scion-token\"",
+	}
+}
+
+// transportTokenWriteCmd returns the in-container command that writes the
+// transport token (read from stdin) to the scion user's transport token
+// file via temp+rename, created mode 0600.
+func transportTokenWriteCmd() []string {
+	return []string{"sh", "-c",
+		"umask 077 && " +
+			scionTokenDirScript + " && " +
+			"mkdir -p \"$TOKEN_DIR\" && " +
+			"cat > \"$TOKEN_DIR/transport-token.tmp\" && " +
+			"mv \"$TOKEN_DIR/transport-token.tmp\" \"$TOKEN_DIR/transport-token\"",
+	}
 }
 
 // resetAuth writes a fresh token into a running agent's container and signals
@@ -2986,17 +3269,27 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 	// becomes part of the outer host process's command line and is readable
 	// via /proc/<pid>/cmdline for the lifetime of the exec, while stdin is
 	// not. See #1355.
-	writeCmd := []string{"sh", "-c",
-		"TOKEN_DIR=\"$(getent passwd scion 2>/dev/null | cut -d: -f6 || echo /home/scion)/.scion\" && " +
-			"mkdir -p \"$TOKEN_DIR\" && " +
-			"cat > \"$TOKEN_DIR/scion-token.tmp\" && " +
-			"mv \"$TOKEN_DIR/scion-token.tmp\" \"$TOKEN_DIR/scion-token\"",
-	}
+	writeCmd := scionTokenWriteCmd()
 
 	if _, err := rt.ExecWithStdin(ctx, target, writeCmd, strings.NewReader(req.Token)); err != nil {
-		s.agentLifecycleLog.Error("reset-auth: failed to write token file", "agent_id", id, "error", err)
-		RuntimeError(w, "Failed to write token file: "+err.Error())
+		s.writeRuntimeOpError(w, ctx, "write token file on agent", err, "agent_id", id)
 		return
+	}
+
+	// Write the transport token, when the hub sent one, the same way
+	// (stdin, temp+rename), with a umask so the file is created 0600.
+	// sciontool init re-reads it on the signal below and normalises its
+	// ownership. A failure here does not fail the reset: the agent token is
+	// already in place.
+	transportWritten := false
+	transportFailed := false
+	if req.TransportToken != "" {
+		if _, err := rt.ExecWithStdin(ctx, target, transportTokenWriteCmd(), strings.NewReader(req.TransportToken)); err != nil {
+			transportFailed = true
+			s.agentLifecycleLog.Warn("reset-auth: failed to write transport token file", "agent_id", id, "error", err)
+		} else {
+			transportWritten = true
+		}
 	}
 
 	// Signal sciontool init (PID 1) to re-read the token and restart its refresh
@@ -3012,13 +3305,19 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 		s.agentLifecycleLog.Warn("reset-auth: failed to signal PID 1 (token still written, poller will reload)", "agent_id", id, "error", err)
 	}
 
-	s.agentLifecycleLog.Info("Auth reset completed", "agent_id", id, "signaled", signaled)
+	s.agentLifecycleLog.Info("Auth reset completed", "agent_id", id, "signaled", signaled,
+		"transport_token_written", transportWritten)
 
 	s.forceHeartbeatAll("reset-auth", id)
 
 	msg := "Auth reset: token written and init signaled"
 	if !signaled {
 		msg = "Auth reset: token written; signal failed (poller will reload)"
+	}
+	if transportWritten {
+		msg += "; transport token written"
+	} else if transportFailed {
+		msg += "; transport token write failed"
 	}
 	writeJSON(w, http.StatusOK, ResetAuthResponse{
 		Message: msg,
@@ -3034,7 +3333,7 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request, id, projectID s
 	// Try to read agent.log from the filesystem first (preferred source).
 	agents, err := mgr.List(ctx, map[string]string{"scion.agent": "true"})
 	if err != nil {
-		RuntimeError(w, "Failed to list agents: "+err.Error())
+		s.writeRuntimeOpError(w, ctx, "list agents", err, "agent_id", id)
 		return
 	}
 
@@ -3084,7 +3383,7 @@ func (s *Server) getLogs(w http.ResponseWriter, r *http.Request, id, projectID s
 			RuntimeLogsUnsupported(w, scionrt.ErrLogsNotSupported.Error())
 			return
 		}
-		RuntimeError(w, "Failed to get logs: "+err.Error())
+		s.writeRuntimeOpError(w, ctx, "get logs for agent", err, "agent_id", id)
 		return
 	}
 
@@ -3113,7 +3412,7 @@ func (s *Server) checkAgentPrompt(w http.ResponseWriter, r *http.Request, id, pr
 	// Find the agent to get its project path
 	agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true"})
 	if err != nil {
-		RuntimeError(w, "Failed to list agents: "+err.Error())
+		s.writeRuntimeOpError(w, ctx, "list agents", err, "agent_id", id)
 		return
 	}
 
@@ -4064,9 +4363,12 @@ func (s *Server) resolveManagerForAgent(ctx context.Context, id, projectID strin
 }
 
 // allManagers returns the default manager plus every distinct auxiliary
-// runtime's manager, in deterministic (sorted-by-identity) order. Used by
-// resolveDeleteTarget to search every registered runtime rather than only
-// the one a slug-based lookup happens to resolve to first.
+// runtime's manager, in deterministic (sorted-by-name) order. Used by
+// resolveDeleteTarget and the stop path's record-less-actor probe
+// (recordlessActorProbe) to search every registered runtime rather than
+// only the one a slug-based lookup happens to resolve to first — a
+// record-less actor (see RecordlessActorProber) never matches a slug-based
+// lookup at all, so that lookup must not be relied on here.
 func (s *Server) allManagers() []agent.Manager {
 	managers := []agent.Manager{s.manager}
 	s.auxiliaryRuntimesMu.RLock()
@@ -4474,13 +4776,113 @@ var errDeleteTargetNotFound = errors.New("agent not found in project")
 // runtime listing failed.
 var errDeleteTargetUnknown = errors.New("could not list agents to resolve delete target")
 
-// nfsWorktreeRemover is implemented by agent managers that can remove an
-// agent's worktree from the NFS workspace export on delete.
-type nfsWorktreeRemover interface {
-	RemoveNFSWorktree(ctx context.Context, projectPath, projectID, agentName string) (path string, err error)
+// nfsAgentFilesRemover is implemented by agent managers that can remove an
+// agent's worktree or own workspace from the NFS workspace export on
+// delete.
+type nfsAgentFilesRemover interface {
+	RemoveNFSAgentFiles(ctx context.Context, projectPath, projectID, agentName string) (paths []string, err error)
 }
 
-var _ nfsWorktreeRemover = (*agent.AgentManager)(nil)
+var _ nfsAgentFilesRemover = (*agent.AgentManager)(nil)
+
+// errAgentIdentityUnknown means a runtime process restart dropped the
+// in-memory record a runtime needs to tell "not found" apart from "exists,
+// but this process can no longer identify which project it belongs to," for
+// at least one actor in the runtime's own scope for a project (see
+// RecordlessActorProber). Reporting not-found here would let the hub treat
+// an unresolved delete/stop as an idempotent success and orphan the actor.
+var errAgentIdentityUnknown = errors.New("agent identity unknown after a runtime process restart")
+
+// logKeyRuntimeScope is the structured-log key under which the broker
+// records the runtime-specific scope a RecordlessActorProber reports (for
+// example, a namespace) when a delete/stop fails with
+// errAgentIdentityUnknown. The broker only carries this generic key; the
+// value is whatever the prober supplies, and it goes to the broker log
+// only, never into an HTTP response body.
+const logKeyRuntimeScope = "runtime_scope"
+
+// agentIdentityUnknownError carries the record-less actor names and the
+// runtime's own scope for them (as reported by the prober) alongside
+// errAgentIdentityUnknown, so resolveDeleteTarget's caller (deleteAgent) can
+// log both at WARN in the broker log, without ever putting them in the HTTP
+// response body: Error() deliberately reports only the count, exactly what
+// AgentIdentityUnknown's body already carries, so nothing about this type
+// changes what a caller sees from err.Error() or errors.Is(err,
+// errAgentIdentityUnknown).
+type agentIdentityUnknownError struct {
+	Scope string
+	Names []string
+}
+
+func (e *agentIdentityUnknownError) Error() string {
+	return fmt.Sprintf("%d actor(s) with no runtime-process record after a runtime restart; agent identity unknown; operator cleanup required", len(e.Names))
+}
+
+func (e *agentIdentityUnknownError) Unwrap() error {
+	return errAgentIdentityUnknown
+}
+
+// recordlessActorProbe checks every manager in managers whose runtime
+// implements the optional RecordlessActorProber capability for record-less
+// actors belonging to projectID, and returns the prober-reported scope with
+// the actor names. A probe error is returned immediately as an explicit
+// failure — never treated as "no record-less actors" — matching how a
+// runtime listing failure elsewhere on this path is never treated as
+// not-found either.
+//
+// Results are deduped by actor UID across every manager the probe checks,
+// not by "scope/name", because two managers can both report an actor with
+// the same scope and name for two different reasons that need different
+// treatment —
+//   - the SAME actor, reached twice (e.g. resolveManagerForOpts caching a
+//     second manager for a profile whose runtime points at the same backend
+//     as the default) — this must be deduped, or the 409 message
+//     double-counts it;
+//   - two DIFFERENT actors that merely collide on scope+name, because a
+//     runtime may derive its scope from projectID alone regardless of which
+//     backend a profile points at — this must NOT be deduped, or the
+//     operator is told about only one of two actors that both need
+//     cleaning up.
+//
+// The UID (see RecordlessActor) tells these apart where scope+name cannot:
+// a real duplicate report of the same actor carries the same UID both
+// times, while two distinct actors do not. Only currently registered
+// managers are probed: a restarted broker does not probe a non-default
+// profile's backend until that profile is used again and re-registers its
+// runtime as an auxiliary runtime.
+func recordlessActorProbe(ctx context.Context, managers []agent.Manager, projectID string) (scope string, actorNames []string, err error) {
+	seen := make(map[string]bool)
+	for _, mgr := range managers {
+		am, ok := mgr.(*agent.AgentManager)
+		if !ok || am.Runtime == nil {
+			continue
+		}
+		prober, ok := am.Runtime.(scionrt.RecordlessActorProber)
+		if !ok {
+			continue
+		}
+		probeScope, found, perr := prober.RecordlessActors(ctx, projectID)
+		if perr != nil {
+			return "", nil, perr
+		}
+		for _, a := range found {
+			key := a.UID
+			if key == "" {
+				// Defensive only: a UID is expected on every entry, so this
+				// falls back to the collision-prone scope/name key rather
+				// than dropping the entry.
+				key = probeScope + "/" + a.Name
+			}
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			scope = probeScope
+			actorNames = append(actorNames, a.Name)
+		}
+	}
+	return scope, actorNames, nil
+}
 
 // deleteTarget is the single, project-matched agent a delete acts on.
 type deleteTarget struct {
@@ -4634,9 +5036,40 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, project
 	// No runtime entry was found. If a runtime could not be listed, that is
 	// not known to be true: its container may still be running. Fail rather
 	// than delete only the files (orphaning the container) or report a 404
-	// (which the hub treats as a completed delete).
+	// (which the hub treats as a completed delete). listErr itself is
+	// already logged where it was captured, above (a raw runtime List
+	// error may carry an actor/runtime-scope name); errDeleteTargetUnknown's
+	// own fixed message is what reaches the caller and, from there, the
+	// HTTP body.
 	if listErr != nil {
-		return nil, fmt.Errorf("%w: %v", errDeleteTargetUnknown, listErr)
+		return nil, errDeleteTargetUnknown
+	}
+
+	// Before accepting a file-only target below (which reports success —
+	// files deleted, HTTP 204 — while never touching the runtime), check
+	// whether a runtime process restart left at least one record-less actor
+	// in the runtime's own scope for this project (the optional
+	// RecordlessActorProber capability). This runs on every "no runtime
+	// entry matched" outcome, not only when the file scan also finds
+	// nothing: a persisted project directory (a workstation or a
+	// PVC-backed $HOME) can resolve a file-only target even for an agent
+	// whose actor is still running, record-less, on its backend — reporting
+	// that as success would delete only the files and orphan the actor and
+	// whatever the runtime provisioned for it. Scoped to projectID != "" so
+	// a project-blind delete (solo/CLI) is unaffected; a runtime with no
+	// RecordlessActorProber, or a project whose scope holds no record-less
+	// actor, falls through unchanged.
+	if projectID != "" {
+		scope, recordless, perr := recordlessActorProbe(ctx, managers, projectID)
+		if perr != nil {
+			// Same rule as the listErr case above: log the raw error, return
+			// errDeleteTargetUnknown's fixed, scope-free message.
+			s.agentLifecycleLog.Warn("Agent delete: record-less actor probe failed", "agent_id", id, "project_id", projectID, "error", perr)
+			return nil, errDeleteTargetUnknown
+		}
+		if len(recordless) > 0 {
+			return nil, &agentIdentityUnknownError{Scope: scope, Names: recordless}
+		}
 	}
 
 	// The agent may exist only as files (never started, or its container is
@@ -4656,6 +5089,36 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, project
 		projectPath: resolved,
 		projectID:   projectID,
 	}, nil
+}
+
+// agentResourceCleaner is implemented by managers whose runtime can remove
+// per-agent objects left behind after the agent's container is gone (see
+// runtime.AgentResourceCleaner and agent.AgentManager.CleanupAgentResources).
+type agentResourceCleaner interface {
+	CleanupAgentResources(ctx context.Context, agentName, projectID string) error
+}
+
+// cleanupLeftoverAgentResources removes the per-agent runtime objects of an
+// agent whose container no longer exists, across the default and every
+// auxiliary runtime, since the container may have run on any of them. It is
+// scoped to projectID and does nothing without one. It is best effort: a
+// failure is logged and does not fail the delete, matching the cleanup that
+// runtime Delete does when the container still exists.
+func (s *Server) cleanupLeftoverAgentResources(ctx context.Context, agentName, projectID string) {
+	if projectID == "" {
+		return
+	}
+	slug := api.Slugify(agentName)
+	for _, mgr := range s.allManagers() {
+		c, ok := mgr.(agentResourceCleaner)
+		if !ok {
+			continue
+		}
+		if err := c.CleanupAgentResources(ctx, slug, projectID); err != nil {
+			s.agentLifecycleLog.Warn("Agent delete: failed to remove leftover runtime objects",
+				"agent_id", agentName, "project_id", projectID, "error", err)
+		}
+	}
 }
 
 // findAgentProjectDir returns the .scion dir of the project that owns the
@@ -4900,28 +5363,85 @@ func isLocalhostEndpoint(endpoint string) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
-// ensureNFSMountsReady verifies that all configured NFS shares are mounted
-// before dispatching an agent. This is a pre-flight check (N1-7):
-// the reconciler may have mounted them at startup, but a transient
-// unmount (network blip, manual intervention) should block dispatches.
-// Returns an error if any configured share cannot be mounted — the caller
-// should reject the dispatch to avoid silent fallback to a broken mount.
-func (s *Server) ensureNFSMountsReady() error {
-	if s.nfsMountReconciler == nil {
-		return nil // NFS not configured — local backend, nothing to check.
+// checkNFSForDispatch is the NFS pre-flight for an agent create. It
+// applies only when NFS is configured with nfs.auto_mount on (otherwise
+// mounts are managed externally and the broker never gates on them) and the
+// project's effective settings select the nfs workspace backend (projects
+// on any other backend are never affected by NFS state).
+//
+// It is decided by the dispatch's resolved runtime, which is checked before
+// anything is mounted:
+//   - Kubernetes or Cloud Run (NFSWarnOnlyRuntime): the platform
+//     mounts the export into the agent. The broker reads the share's last
+//     recorded status, logs a warning if it is unhealthy, and continues; it
+//     never mounts and never refuses the dispatch.
+//   - Any other (local-container) runtime: the share is checked and, when
+//     the broker mounts shares, mounted. If it is not mounted the dispatch
+//     is refused, since the workspace would otherwise silently land on
+//     local disk under the mount point.
+func (s *Server) checkNFSForDispatch(ctx context.Context, name, projectPath, projectSlug, profile string) error {
+	r := s.nfsMountReconciler
+	if r == nil || !r.AutoMount() {
+		return nil
 	}
-
 	nfsCfg := s.config.NFSConfig
 	if nfsCfg == nil || len(nfsCfg.Shares) == 0 {
 		return nil
 	}
+	projectDir := resolveDispatchProjectDir(projectPath, projectSlug)
+	if !dispatchUsesNFSWorkspace(projectDir) {
+		return nil
+	}
+	// The nfs workspace backend places workspaces on the first share only
+	// (runtime.NFSWorkspaceBackend), so that is the share a dispatch needs.
+	shareID := nfsCfg.Shares[0].ID
 
-	for _, share := range nfsCfg.Shares {
-		if err := s.nfsMountReconciler.EnsureShareMounted(share.ID); err != nil {
-			return err
+	_, runtimeType := s.resolveManagerForOpts(api.StartOptions{
+		Name:        name,
+		ProjectPath: projectDir,
+		Profile:     profile,
+	})
+	if NFSWarnOnlyRuntime(runtimeType) {
+		if st, ok := r.ShareStatus(shareID); !ok || !st.Healthy {
+			detail := "not checked yet"
+			if ok {
+				detail = st.Message
+			}
+			s.agentLifecycleLog.Warn("NFS share not mounted on the broker; continuing dispatch, the runtime mounts the export into the agent",
+				"agent", name, "runtime", runtimeType, "share", shareID, "detail", detail)
+		}
+		return nil
+	}
+	// ctx (the request context) bounds the wait and any mount command.
+	return r.EnsureShareMounted(ctx, shareID)
+}
+
+// resolveDispatchProjectDir mirrors buildStartContext's hub-managed project
+// path resolution (a slug with no path resolves under the global projects
+// directory) followed by config.GetResolvedProjectDir, the directory the
+// agent manager loads effective settings from.
+func resolveDispatchProjectDir(projectPath, projectSlug string) string {
+	if projectPath == "" && projectSlug != "" {
+		if globalDir, err := config.GetGlobalDir(); err == nil {
+			projectPath = filepath.Join(globalDir, "projects", projectSlug)
 		}
 	}
-	return nil
+	projectDir, _ := config.GetResolvedProjectDir(projectPath)
+	return projectDir
+}
+
+// dispatchUsesNFSWorkspace reports whether the effective settings for
+// projectDir select the nfs workspace backend, the same condition the agent
+// manager uses (pkg/agent run.go). If the settings cannot be loaded it
+// returns true: the caller only asks when the broker itself is configured
+// for NFS, so that is the likely backend.
+func dispatchUsesNFSWorkspace(projectDir string) bool {
+	vs, _, err := config.LoadEffectiveSettings(projectDir)
+	if err != nil || vs == nil {
+		return true
+	}
+	return vs.Server != nil && vs.Server.WorkspaceStorage != nil &&
+		vs.Server.WorkspaceStorage.Backend == "nfs"
 }
 
 // preResolvedHubEndpoint picks the Hub base URL used to absolutize the

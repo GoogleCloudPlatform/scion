@@ -97,6 +97,10 @@ func TestUnreachableNC_SuspendedDefault(t *testing.T) {
 	if m == nil || m.DispatchState != store.MessageDispatchFailed {
 		t.Fatalf("expected row failed, got %+v", m)
 	}
+	// The row is born failed, so its reason must survive CreateMessage.
+	if m.DispatchFailureReason == nil || *m.DispatchFailureReason != "Agent unreachable (suspended)" {
+		t.Fatalf("expected row reason %q, got %v", "Agent unreachable (suspended)", m.DispatchFailureReason)
+	}
 	if resp["dispatchState"] != "failed" {
 		t.Fatalf("expected response dispatchState=failed, got %v", resp["dispatchState"])
 	}
@@ -119,6 +123,10 @@ func TestUnreachableNC_StoppedDefault(t *testing.T) {
 	}
 	if m == nil || m.DispatchState != store.MessageDispatchFailed {
 		t.Fatalf("expected row failed, got %+v", m)
+	}
+	// The row is born failed, so its reason must survive CreateMessage.
+	if m.DispatchFailureReason == nil || *m.DispatchFailureReason != "Agent unreachable (stopped)" {
+		t.Fatalf("expected row reason %q, got %v", "Agent unreachable (stopped)", m.DispatchFailureReason)
 	}
 	if resp["dispatchState"] != "failed" {
 		t.Fatalf("expected response dispatchState=failed, got %v", resp["dispatchState"])
@@ -422,6 +430,29 @@ func TestUnreachableNC_DispatchErrorBranch_ResponseMatchesRow(t *testing.T) {
 	}
 	if resp["dispatchFailureReason"] != wantReason {
 		t.Fatalf("expected response reason %q matching the persisted row, got %v", wantReason, resp["dispatchFailureReason"])
+	}
+}
+
+// ptone/scion#1841: markFailed persists the sanitized reason, so the
+// response mirror must carry the same sanitized text, not the raw error.
+func TestUnreachableNC_DispatchErrorBranch_ResponseReasonSanitizedLikeRow(t *testing.T) {
+	raw := "broker \x1b[31mcrashed\r\nFAKE: ok"
+	d := &errorDispatcher{err: errors.New(raw)}
+	srv, s, topic, _ := unreachableTestSetup(t, "running", false, d)
+
+	_, resp, m := unreachableSend(t, srv, s, topic, "hello")
+	if m == nil || m.DispatchFailureReason == nil {
+		t.Fatalf("expected a persisted failure reason, got %+v", m)
+	}
+	want := sanitizeFailureReason(raw)
+	if want == raw {
+		t.Fatal("test input must contain characters the sanitizer changes")
+	}
+	if *m.DispatchFailureReason != want {
+		t.Fatalf("persisted reason = %q, want %q", *m.DispatchFailureReason, want)
+	}
+	if resp["dispatchFailureReason"] != want {
+		t.Fatalf("response reason = %q, want the persisted %q", resp["dispatchFailureReason"], want)
 	}
 }
 

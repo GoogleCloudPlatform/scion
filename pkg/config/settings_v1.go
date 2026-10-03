@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +35,7 @@ import (
 	"github.com/knadh/koanf/providers/rawbytes"
 	"github.com/knadh/koanf/v2"
 	yamlv3 "gopkg.in/yaml.v3"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // ResolveHarnessConfig looks up a named harness config and merges profile-level overrides.
@@ -145,6 +147,216 @@ func (vs *VersionedSettings) ResolveRuntime(profileName string) (V1RuntimeConfig
 	}
 
 	return rtConfig, runtimeType, nil
+}
+
+// missingSchemaVersionWarning is emitted when a settings file is loaded as v1
+// only because its runtime entries use v1-only keys (v1RuntimeIndicatorKeys).
+var missingSchemaVersionWarning = `settings.yaml contains v1 runtime fields (` + strings.Join(v1RuntimeIndicatorKeys, ", ") + `) but is missing 'schema_version: "1"'; add it as the first line to silence this warning`
+
+// ResolveSharedDirDefaults returns the settings-level Kubernetes shared-dir
+// PVC defaults (storage class and size) for a profile. Each field is
+// resolved independently: the profile's value wins, otherwise the value on
+// the profile's runtime entry is used. Empty means "not set in settings".
+// If profileName is empty, ActiveProfile is used. An unknown profile
+// yields empty values; a profile naming a missing runtime entry yields the
+// profile's own values only.
+//
+// These are defaults only. A template's or agent's kubernetes block
+// (api.KubernetesConfig.SharedDirStorageClass / SharedDirSize) wins over
+// both; see ApplySharedDirDefaults.
+func (vs *VersionedSettings) ResolveSharedDirDefaults(profileName string) (storageClass, size string) {
+	storageClass, size, _ = vs.ResolveSharedDirDefaultsWithSource(profileName)
+	return storageClass, size
+}
+
+// ResolveSharedDirDefaultsWithSource is ResolveSharedDirDefaults that also
+// returns the settings key the size came from
+// ("profiles.NAME.shared_dir_size" or "runtimes.NAME.shared_dir_size"), so
+// an error about the value can name where it is set. sizeKey is empty when
+// size is empty.
+func (vs *VersionedSettings) ResolveSharedDirDefaultsWithSource(profileName string) (storageClass, size, sizeKey string) {
+	if vs == nil {
+		return "", "", ""
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	profile, ok := vs.Profiles[profileName]
+	if !ok {
+		return "", "", ""
+	}
+	storageClass, size = profile.SharedDirStorageClass, profile.SharedDirSize
+	if size != "" {
+		sizeKey = "profiles." + profileName + ".shared_dir_size"
+	}
+	if rt, ok := vs.Runtimes[profile.Runtime]; ok {
+		if storageClass == "" {
+			storageClass = rt.SharedDirStorageClass
+		}
+		if size == "" && rt.SharedDirSize != "" {
+			size = rt.SharedDirSize
+			sizeKey = "runtimes." + profile.Runtime + ".shared_dir_size"
+		}
+	}
+	return storageClass, size, sizeKey
+}
+
+// ValidateSharedDirSize checks that a shared_dir_size value parses as a
+// positive Kubernetes resource quantity (for example 10Gi or 1Ti). Empty is
+// valid and means "not set".
+func ValidateSharedDirSize(size string) error {
+	if size == "" {
+		return nil
+	}
+	q, err := resource.ParseQuantity(size)
+	if err != nil {
+		return fmt.Errorf("invalid shared_dir_size %q: must be a Kubernetes quantity such as 10Gi or 1Ti", size)
+	}
+	if q.Sign() <= 0 {
+		return fmt.Errorf("invalid shared_dir_size %q: must be a positive Kubernetes quantity such as 10Gi or 1Ti", size)
+	}
+	return nil
+}
+
+// ValidateSharedDirSizes checks shared_dir_size on every runtime and
+// profile entry. Each error's Path names the settings key
+// ("runtimes.NAME.shared_dir_size" / "profiles.NAME.shared_dir_size").
+// Results are sorted by path.
+func ValidateSharedDirSizes(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig) []ValidationError {
+	var errs []ValidationError
+	for name, rt := range runtimes {
+		if err := ValidateSharedDirSize(rt.SharedDirSize); err != nil {
+			errs = append(errs, ValidationError{Path: "runtimes." + name + ".shared_dir_size", Message: err.Error()})
+		}
+	}
+	for name, p := range profiles {
+		if err := ValidateSharedDirSize(p.SharedDirSize); err != nil {
+			errs = append(errs, ValidationError{Path: "profiles." + name + ".shared_dir_size", Message: err.Error()})
+		}
+	}
+	sort.Slice(errs, func(i, j int) bool { return errs[i].Path < errs[j].Path })
+	return errs
+}
+
+// ApplySharedDirDefaults returns base with SharedDirStorageClass and
+// SharedDirSize filled from the given settings defaults where base leaves
+// them empty, so a template's or agent's explicit value always wins. base
+// is never modified; a copy is returned. When both defaults are empty,
+// base is returned unchanged (including nil).
+func ApplySharedDirDefaults(base *api.KubernetesConfig, storageClass, size string) *api.KubernetesConfig {
+	if storageClass == "" && size == "" {
+		return base
+	}
+	out := &api.KubernetesConfig{}
+	if base != nil {
+		cpy := *base
+		out = &cpy
+	}
+	if out.SharedDirStorageClass == "" {
+		out.SharedDirStorageClass = storageClass
+	}
+	if out.SharedDirSize == "" {
+		out.SharedDirSize = size
+	}
+	return out
+}
+
+// ResolveSafeToEvict returns the settings-level safe_to_evict default for a
+// profile: the profile's value if set, otherwise the value on the profile's
+// runtime entry. Nil means "not set in settings". If profileName is empty,
+// ActiveProfile is used; an unknown profile yields nil.
+//
+// This is a default only. A template's or agent's kubernetes.safeToEvict
+// wins over it; see ApplySafeToEvictDefault.
+//
+// This follows the ResolveSharedDirDefaults pattern; it can move onto a
+// generic per-profile resolver once one exists.
+func (vs *VersionedSettings) ResolveSafeToEvict(profileName string) *bool {
+	v, _ := vs.ResolveSafeToEvictWithSource(profileName)
+	return v
+}
+
+// ResolveSafeToEvictWithSource is ResolveSafeToEvict that also returns the
+// settings key the value came from ("profiles.NAME.safe_to_evict" or
+// "runtimes.NAME.safe_to_evict"). source is empty when the value is nil.
+// The returned pointer is a fresh copy, never one held by vs.
+func (vs *VersionedSettings) ResolveSafeToEvictWithSource(profileName string) (value *bool, source string) {
+	if vs == nil {
+		return nil, ""
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	profile, ok := vs.Profiles[profileName]
+	if !ok {
+		return nil, ""
+	}
+	if profile.SafeToEvict != nil {
+		v := *profile.SafeToEvict
+		return &v, "profiles." + profileName + ".safe_to_evict"
+	}
+	if rt, ok := vs.Runtimes[profile.Runtime]; ok && rt.SafeToEvict != nil {
+		v := *rt.SafeToEvict
+		return &v, "runtimes." + profile.Runtime + ".safe_to_evict"
+	}
+	return nil, ""
+}
+
+// ApplySafeToEvictDefault returns base with SafeToEvict filled from the
+// settings default when base leaves it unset, so a template's or agent's
+// explicit value (true or false) always wins. base is never modified; a
+// copy is returned. When def is nil, base is returned unchanged (including
+// nil).
+func ApplySafeToEvictDefault(base *api.KubernetesConfig, def *bool) *api.KubernetesConfig {
+	if def == nil {
+		return base
+	}
+	out := &api.KubernetesConfig{}
+	if base != nil {
+		cpy := *base
+		out = &cpy
+	}
+	if out.SafeToEvict == nil {
+		v := *def
+		out.SafeToEvict = &v
+	}
+	return out
+}
+
+// SafeToEvictIgnoredWarnings returns a warning for every runtime entry that
+// sets safe_to_evict but is not a Kubernetes runtime, and for every profile
+// that sets it while pointing at such an entry. The setting is accepted and
+// ignored there. Results are sorted.
+func SafeToEvictIgnoredWarnings(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig) []string {
+	var warnings []string
+	for name, rt := range runtimes {
+		if rt.SafeToEvict != nil && !isKubernetesRuntimeEntry(name, rt) {
+			warnings = append(warnings, fmt.Sprintf("runtimes.%s.safe_to_evict is set but runtime %q is not a Kubernetes runtime; it is ignored", name, name))
+		}
+	}
+	for name, p := range profiles {
+		if p.SafeToEvict == nil {
+			continue
+		}
+		rt, ok := runtimes[p.Runtime]
+		if ok && !isKubernetesRuntimeEntry(p.Runtime, rt) {
+			warnings = append(warnings, fmt.Sprintf("profiles.%s.safe_to_evict is set but its runtime %q is not a Kubernetes runtime; it is ignored", name, p.Runtime))
+		}
+	}
+	sort.Strings(warnings)
+	return warnings
+}
+
+// isKubernetesRuntimeEntry reports whether a runtime entry targets
+// Kubernetes: an explicit type of "kubernetes" (or "k8s"), or no type and
+// the entry name itself is one of those.
+func isKubernetesRuntimeEntry(name string, rt V1RuntimeConfig) bool {
+	t := rt.Type
+	if t == "" {
+		t = name
+	}
+	// "remote" is normalised to the Kubernetes runtime by the runtime factory.
+	return t == "kubernetes" || t == "k8s" || t == "remote"
 }
 
 // GetHubEndpoint returns the Hub endpoint from settings, or empty string if not configured.
@@ -787,6 +999,18 @@ type V1NFSConfig struct {
 	MountOptions string       `json:"mount_options,omitempty" yaml:"mount_options,omitempty" koanf:"mount_options"`
 	Shares       []V1NFSShare `json:"shares,omitempty" yaml:"shares,omitempty" koanf:"shares"`
 
+	// AutoMount lets a Runtime Broker mount each share itself, at
+	// <MountRoot>/<share.ID>, in the background at startup and again before
+	// each NFS-backed dispatch to a local-container runtime (dispatches to
+	// Kubernetes or Cloud Run never mount). A broker whose default runtime
+	// is Kubernetes or Cloud Run never mounts, even with AutoMount on; it
+	// only verifies. Default false: the operator (or the kubelet, on
+	// Kubernetes) provides the mounts, and the broker only checks them
+	// read-only for /healthz and scion doctor. Mounting requires the broker
+	// to run as root (mount.nfs checks uid 0). Only server.workspace_storage
+	// reads this field; shared_dir_storage ignores it.
+	AutoMount bool `json:"auto_mount,omitempty" yaml:"auto_mount,omitempty" koanf:"auto_mount"`
+
 	// Stable, node-independent ownership for NFS-backed trees.
 	// Default 1000:1000 to converge with the K8s pod UID/GID.
 	UID int `json:"uid,omitempty" yaml:"uid,omitempty" koanf:"uid"` // default 1000
@@ -977,10 +1201,11 @@ var sharedDirStorageIgnoredNFSFields = []struct {
 	{"gid", func(nfs *V1NFSConfig) bool { return nfs.GID != 0 }},
 	{"mount_options", func(nfs *V1NFSConfig) bool { return nfs.MountOptions != "" }},
 	{"storage_class", func(nfs *V1NFSConfig) bool { return nfs.StorageClass != "" }},
+	{"auto_mount", func(nfs *V1NFSConfig) bool { return nfs.AutoMount }},
 }
 
 // IgnoredNFSFields returns the names of the workspace-storage-only NFS
-// fields (uid, gid, mount_options, storage_class) that are set on s but
+// fields (uid, gid, mount_options, storage_class, auto_mount) that are set on s but
 // never used by shared_dir_storage, for a one-time startup warning (Phase 2
 // item 5, design §7 Phase 2: "startup validation warns about ignored
 // fields"). Returns nil if s is nil, s.NFS is nil, or backend isn't "nfs" —
@@ -1161,6 +1386,108 @@ type V1CloudRunSandboxConfig struct {
 	SandboxBin string `json:"sandbox_bin,omitempty" yaml:"sandbox_bin,omitempty" koanf:"sandbox_bin"`
 }
 
+// V1SubstrateConfig holds Substrate runtime settings (substrate-runtime.md
+// §2). Substrate is a Kubernetes-hosted actor
+// runtime; scion agents run as Substrate "actors". Selection is explicit
+// only — there is no auto-detect branch in factory.go.
+type V1SubstrateConfig struct {
+	// APIEndpoint is the ateapi Control gRPC endpoint, e.g.
+	// "api.ate-system.svc:443".
+	APIEndpoint string `json:"api_endpoint,omitempty" yaml:"api_endpoint,omitempty" koanf:"api_endpoint"`
+	// RouterEndpoint is the atenet-router inbound endpoint the broker uses
+	// to reach an actor's control server, e.g.
+	// "http://atenet-router.ate-system.svc:80". Used as a base URL (scheme
+	// required), not a bare host:port. This hop is plain HTTP: CAFile and
+	// ClusterTrustBundle below apply only to the ateapi Control gRPC dial
+	// (APIEndpoint), not to this one, and there is no separate TLS setting
+	// for it (see substrate-runtime.md §10).
+	RouterEndpoint string `json:"router_endpoint,omitempty" yaml:"router_endpoint,omitempty" koanf:"router_endpoint"`
+	// TokenAudience is the audience requested for the in-cluster
+	// ServiceAccount TokenRequest used to authenticate to the ateapi
+	// Control API. Defaults to "api.ate-system.svc" when empty.
+	TokenAudience string `json:"token_audience,omitempty" yaml:"token_audience,omitempty" koanf:"token_audience"`
+	// CAFile is a path to a PEM CA bundle used to verify the ateapi Control
+	// gRPC server certificate.
+	CAFile string `json:"ca_file,omitempty" yaml:"ca_file,omitempty" koanf:"ca_file"`
+	// ClusterTrustBundle names a Kubernetes ClusterTrustBundle object
+	// holding the CA used to verify the ateapi Control gRPC server
+	// certificate. When both this and CAFile are set, the dialer prefers
+	// ClusterTrustBundle.
+	ClusterTrustBundle string `json:"cluster_trust_bundle,omitempty" yaml:"cluster_trust_bundle,omitempty" koanf:"cluster_trust_bundle"`
+	// SandboxClass selects the actor sandbox isolation technology
+	// ("gvisor" or "microvm"). Defaults to "gvisor" when empty.
+	SandboxClass string `json:"sandbox_class,omitempty" yaml:"sandbox_class,omitempty" koanf:"sandbox_class"`
+	// SandboxConfigName names the Substrate SandboxConfig CRD instance used
+	// by actor templates.
+	SandboxConfigName string `json:"sandbox_config_name,omitempty" yaml:"sandbox_config_name,omitempty" koanf:"sandbox_config_name"`
+	// WorkerSelector is copied into the ActorTemplate's workerSelector, to
+	// pin actors to a labeled WorkerPool.
+	WorkerSelector map[string]string `json:"worker_selector,omitempty" yaml:"worker_selector,omitempty" koanf:"worker_selector"`
+	// SnapshotStorage is the configured bucket/prefix used for the
+	// ActorTemplate's snapshotsConfig storage, e.g. "gs://bucket/prefix/".
+	SnapshotStorage string `json:"snapshot_storage,omitempty" yaml:"snapshot_storage,omitempty" koanf:"snapshot_storage"`
+	// EgressAllow lists additional hostnames allowed through the per-actor
+	// EgressPolicy, beyond the hub/git/model/telemetry hosts the runtime
+	// always adds. Despite the field's own shape (a bare string list), no
+	// IP addresses or CIDRs are accepted here — see below.
+	//
+	// Only public FQDNs are accepted here — no IP addresses or CIDRs at
+	// all (Substrate's own HostnameRule, which is where every entry ends
+	// up, rejects IP addresses outright), and only a hostname whose
+	// top-level domain is a real, ICANN-delegated one, with at least one
+	// label beneath its actual matched suffix (which may be a private
+	// multi-tenant-platform suffix like "googleapis.com"/"github.io", not
+	// only an ICANN one). See pkg/runtime/substrate.ValidateEgressAllow's
+	// doc comment for the exact rule set, which changes more often than
+	// this comment would otherwise be kept in sync with.
+	//
+	// Residual risk this does not close: a validly-public hostname can
+	// still be made to resolve to a private or in-cluster address (DNS
+	// rebinding, or services like nip.io/sslip.io that do this by design).
+	// Only a check by the egress proxy itself, after DNS resolution,
+	// against the address actually connected to, can close that gap.
+	//
+	// Validated by pkg/runtime/substrate.Validate, which NewSubstrateRuntime
+	// calls when the runtime is constructed, and Run calls again once at
+	// its start — not at settings-load time or by `scion config validate`
+	// (there is no generic settings-validation hook for this yet), and not
+	// a second time inside Run's egress-policy step (r.cfg is immutable for
+	// a single Run call, so one check per call is enough). Substrate's
+	// egress default-deny plus the actor's EgressPolicy is what keeps an
+	// actor off the atenet-router and other in-cluster services
+	// (substrate-runtime.md §5.2); an entry that reaches either of those
+	// would defeat it.
+	EgressAllow []string `json:"egress_allow,omitempty" yaml:"egress_allow,omitempty" koanf:"egress_allow"`
+	// EgressTrustBundle names a Substrate trust bundle to project into every
+	// actor as a system-info volume, so the actor can validate the egress
+	// gateway's own TLS certificate (docs/egress-trust-bundle.md, vendored
+	// Substrate d277088b).
+	//
+	// Required iff the cluster runs the sdsmint egress gateway
+	// (`hack/install-ate.sh --deploy-atenet --experimental-use-sdsmint`) and
+	// the actor makes any HTTPS/TLS request: under sdsmint, the gateway
+	// terminates every TLS connection and re-originates it with a per-SNI
+	// leaf certificate chained to its own CA, which the actor otherwise has
+	// no way to validate. Setting this on a plain (non-sdsmint) install
+	// breaks every actor instead: nothing backs the named
+	// ClusterTrustBundle, so the actor fails to start (see
+	// pkg/runtime/substrate.Validate and buildActorTemplate's doc comment).
+	//
+	// Empty (the default) is off, and off is byte-identical to today: no
+	// system-info volume, no mount, no env. Validated by
+	// pkg/runtime/substrate.Validate: when non-empty it must be exactly
+	// "egress-mitm.ate.dev", the only trust bundle name Substrate d277088b
+	// supports. Kept as a string validated against a one-name allowlist,
+	// not a bool, deliberately: it mirrors Substrate's own
+	// trustBundle.name, and a future additional name needs only an
+	// allowlist entry here, not a schema change.
+	EgressTrustBundle string `json:"egress_trust_bundle,omitempty" yaml:"egress_trust_bundle,omitempty" koanf:"egress_trust_bundle"`
+	// TemplateReadyTimeout bounds how long Run waits for a newly created
+	// ActorTemplate to become ready (a Go duration string, e.g. "10m").
+	// Defaults to 10 minutes when empty.
+	TemplateReadyTimeout string `json:"template_ready_timeout,omitempty" yaml:"template_ready_timeout,omitempty" koanf:"template_ready_timeout"`
+}
+
 // V1RuntimeConfig extends RuntimeConfig with a Type field.
 //
 // Env is parsed and round-tripped but not applied to agent containers; no
@@ -1180,12 +1507,28 @@ type V1RuntimeConfig struct {
 	// not create one. Validated as a DNS-1123 subdomain. An explicit
 	// template/agent-config kubernetes.priorityClassName outranks this.
 	PriorityClassName string `json:"priority_class_name,omitempty" yaml:"priority_class_name,omitempty" koanf:"priority_class_name"`
+	// SharedDirStorageClass and SharedDirSize are Kubernetes-only defaults
+	// for the ReadWriteMany PVCs backing project shared dirs. They are the
+	// lowest settings tier: a profile's values win over them, and a
+	// template's or agent's kubernetes block wins over both. See
+	// ResolveSharedDirDefaults.
+	SharedDirStorageClass string `json:"shared_dir_storage_class,omitempty" yaml:"shared_dir_storage_class,omitempty" koanf:"shared_dir_storage_class"`
+	SharedDirSize         string `json:"shared_dir_size,omitempty" yaml:"shared_dir_size,omitempty" koanf:"shared_dir_size"`
+	// SafeToEvict is the Kubernetes-only default for the
+	// cluster-autoscaler.kubernetes.io/safe-to-evict pod annotation. Only an
+	// explicit false has an effect (the pod is annotated "false"); true is
+	// accepted and adds nothing. It is the lowest tier: a profile's
+	// safe_to_evict wins over it, and a template's or agent's
+	// kubernetes.safeToEvict wins over both. See ResolveSafeToEvict.
+	SafeToEvict *bool `json:"safe_to_evict,omitempty" yaml:"safe_to_evict,omitempty" koanf:"safe_to_evict"`
 	// CloudRun holds Cloud Run-specific settings when Type is "cloudrun".
 	CloudRun *CloudRunConfig `json:"cloudrun,omitempty" yaml:"cloudrun,omitempty" koanf:"cloudrun"`
 	// CloudRunInstances holds Cloud Run Instances-specific settings when Type is "cloudrun-instances".
 	CloudRunInstances *V1CloudRunInstancesConfig `json:"cloudrun_instances,omitempty" yaml:"cloudrun_instances,omitempty" koanf:"cloudrun_instances"`
 	// CloudRunSandbox holds Cloud Run Sandbox-specific settings when Type is "cloudrun-sandbox".
 	CloudRunSandbox *V1CloudRunSandboxConfig `json:"cloudrun_sandbox,omitempty" yaml:"cloudrun_sandbox,omitempty" koanf:"cloudrun_sandbox"`
+	// Substrate holds Substrate-specific settings when Type is "substrate".
+	Substrate *V1SubstrateConfig `json:"substrate,omitempty" yaml:"substrate,omitempty" koanf:"substrate"`
 }
 
 // V1RuntimeDefaultsConfig holds runtime-wide behaviour that is not specific to
@@ -1229,6 +1572,10 @@ type HarnessConfigEntry struct {
 	// model field; the alias is resolved to the concrete name at provision time.
 	ModelAliases map[string]string `json:"model_aliases,omitempty" yaml:"model_aliases,omitempty" koanf:"model_aliases"`
 
+	// Thinking maps the canonical 0-100 thinking level to harness-native values.
+	// Applied in-container by scion_harness.resolve_thinking.
+	Thinking *HarnessThinkingConfig `json:"thinking,omitempty" yaml:"thinking,omitempty" koanf:"thinking"`
+
 	Provisioner       *HarnessProvisionerConfig        `json:"provisioner,omitempty" yaml:"provisioner,omitempty" koanf:"provisioner"`
 	ConfigDir         string                           `json:"config_dir,omitempty" yaml:"config_dir,omitempty" koanf:"config_dir"`
 	SkillsDir         string                           `json:"skills_dir,omitempty" yaml:"skills_dir,omitempty" koanf:"skills_dir"`
@@ -1245,6 +1592,51 @@ type HarnessConfigEntry struct {
 	NoAuthConfig      *HarnessNoAuthConfig             `json:"no_auth,omitempty" yaml:"no_auth,omitempty" koanf:"no_auth"`
 	MCP               *HarnessMCPConfig                `json:"mcp,omitempty" yaml:"mcp,omitempty" koanf:"mcp"`
 	Dialect           map[string]interface{}           `json:"dialect,omitempty" yaml:"dialect,omitempty" koanf:"dialect"`
+}
+
+// HarnessThinkingConfig maps the canonical 0-100 thinking level
+// (SCION_THINKING_LEVEL) to harness-native values. A level L maps to the Value
+// of the first entry in Levels whose Max >= L. Default is emitted when the
+// level is unset or invalid; when empty, nothing is emitted and the harness
+// CLI's own default applies. The mapping is resolved in-container by
+// scion_harness.resolve_thinking; Go only carries and validates it.
+type HarnessThinkingConfig struct {
+	Levels  []HarnessThinkingLevel `json:"levels" yaml:"levels" koanf:"levels"`
+	Default string                 `json:"default,omitempty" yaml:"default,omitempty" koanf:"default"`
+}
+
+// HarnessThinkingLevel is one entry of a HarnessThinkingConfig: Max is the
+// inclusive upper bound (0-100) of the level range that maps to Value.
+type HarnessThinkingLevel struct {
+	Max   int    `json:"max" yaml:"max" koanf:"max"` // no omitempty: 0 is meaningful
+	Value string `json:"value" yaml:"value" koanf:"value"`
+}
+
+// Validate checks the ordering rules the JSON schema cannot express: Levels
+// must be non-empty, each Max must be strictly greater than the previous one,
+// and the last Max must be 100 so every clamped level maps to a value.
+func (t *HarnessThinkingConfig) Validate() error {
+	if t == nil {
+		return nil
+	}
+	if len(t.Levels) == 0 {
+		return fmt.Errorf("thinking.levels must not be empty")
+	}
+	for i, lvl := range t.Levels {
+		if lvl.Max < 0 || lvl.Max > 100 {
+			return fmt.Errorf("thinking.levels[%d].max must be between 0 and 100, got %d", i, lvl.Max)
+		}
+		if lvl.Value == "" {
+			return fmt.Errorf("thinking.levels[%d].value must not be empty", i)
+		}
+		if i > 0 && lvl.Max <= t.Levels[i-1].Max {
+			return fmt.Errorf("thinking.levels[%d].max (%d) must be greater than thinking.levels[%d].max (%d)", i, lvl.Max, i-1, t.Levels[i-1].Max)
+		}
+	}
+	if last := t.Levels[len(t.Levels)-1].Max; last != 100 {
+		return fmt.Errorf("thinking.levels last max must be 100, got %d", last)
+	}
+	return nil
 }
 
 // HarnessProvisionerConfig declares how a harness-config is provisioned.
@@ -1340,6 +1732,17 @@ type V1ProfileConfig struct {
 	// Validated with time.LoadLocation on write. Takes precedence over a raw
 	// TZ entry in the profile's env map and the hub-level default_timezone.
 	Timezone string `json:"timezone,omitempty" yaml:"timezone,omitempty" koanf:"timezone"`
+	// SharedDirStorageClass and SharedDirSize are Kubernetes-only defaults
+	// for shared-dir PVCs created by agents using this profile. They win
+	// over the same keys on the profile's runtime entry and lose to a
+	// template's or agent's kubernetes block. See ResolveSharedDirDefaults.
+	SharedDirStorageClass string `json:"shared_dir_storage_class,omitempty" yaml:"shared_dir_storage_class,omitempty" koanf:"shared_dir_storage_class"`
+	SharedDirSize         string `json:"shared_dir_size,omitempty" yaml:"shared_dir_size,omitempty" koanf:"shared_dir_size"`
+	// SafeToEvict is the Kubernetes-only safe-to-evict default for agents
+	// using this profile. It wins over the profile's runtime entry and
+	// loses to a template's or agent's kubernetes.safeToEvict. Only false
+	// has an effect. See ResolveSafeToEvict.
+	SafeToEvict *bool `json:"safe_to_evict,omitempty" yaml:"safe_to_evict,omitempty" koanf:"safe_to_evict"`
 }
 
 // resolveEffectiveProjectPath resolves the effective project path for settings loading.
@@ -2720,7 +3123,7 @@ func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, er
 		}
 		var warnings []string
 		if missingSchemaVersion {
-			warnings = append(warnings, `settings.yaml contains v1 runtime fields (type, cloudrun, gke, list_all_namespaces) but is missing 'schema_version: "1"'; add it as the first line to silence this warning`)
+			warnings = append(warnings, missingSchemaVersionWarning)
 		}
 		// Apply DB-backed settings overlay (co-located hub+broker mode).
 		// DB values win over file values for runtimes, profiles, harness_configs.
@@ -2942,7 +3345,7 @@ func loadGlobalSettingsOnly(globalDir string) (*VersionedSettings, []string, err
 		}
 		var warnings []string
 		if missingSchemaVersion {
-			warnings = append(warnings, `settings.yaml contains v1 runtime fields (type, cloudrun, gke, list_all_namespaces) but is missing 'schema_version: "1"'; add it as the first line to silence this warning`)
+			warnings = append(warnings, missingSchemaVersionWarning)
 		}
 		return vs, warnings, nil
 	}

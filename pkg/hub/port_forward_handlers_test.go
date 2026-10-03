@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"log/slog"
 	"net"
@@ -120,10 +121,9 @@ func TestAuthorizePortRegistrationRejectsFederatedAdmin(t *testing.T) {
 		ProjectID: project.ID, OwnerID: caller.ID(), Phase: string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
-	// The caller owns the agent, so it passes authorizePortAccess via the
-	// resource-owner relationship grant (project-owner no longer carries
-	// agent.port_access, miller79/scion#88) but still lacks the hub-level
-	// permission checked by authorizePortRegistration.
+	// The caller owns the agent, so it passes authorizePortAccess (via the
+	// resource-owner grant and project-owner's agent.port_access) but still
+	// lacks the hub-level permission checked by authorizePortRegistration.
 	createTestUserWithProjectRole(t, s, caller.ID(), caller.Email(), project.ID, store.ProjectRoleOwner)
 
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", nil)
@@ -337,6 +337,160 @@ func TestAgentPortProxyThroughTunnel(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "ok", rec.Header().Get("X-App"))
 	assert.Equal(t, "hello from app", rec.Body.String())
+}
+
+// TestAgentPortProxyResponseIsSandboxed verifies the defensive invariant that
+// content proxied from an agent's exposed port cannot set cookies on the hub
+// origin and is always served under the hub's sandbox CSP, regardless of what
+// the agent's own response headers say.
+func TestAgentPortProxyResponseIsSandboxed(t *testing.T) {
+	srv, s := testServer(t)
+	hubHTTP := httptest.NewServer(srv.Handler())
+	t.Cleanup(hubHTTP.Close)
+
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Set-Cookie", "session=agent-set; Path=/")
+		w.Header().Set("Content-Security-Policy", "default-src *")
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("<html>agent content</html>"))
+	}))
+	t.Cleanup(app.Close)
+
+	appURL, err := url.Parse(app.URL)
+	require.NoError(t, err)
+	host, portText, err := net.SplitHostPort(appURL.Host)
+	require.NoError(t, err)
+	port, err := net.LookupPort("tcp", portText)
+	require.NoError(t, err)
+	if strings.TrimSpace(host) == "" {
+		host = "127.0.0.1"
+	}
+
+	agent, token := createPortForwardAgent(t, srv, s)
+	rec := doAgentTokenRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", map[string]any{
+		"port": port,
+		"host": host,
+	}, token)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	manager := scionportforward.NewManager(scionhub.NewClientWithConfig(hubHTTP.URL, token, agent.ID))
+	go manager.Run(ctx)
+	require.Eventually(t, func() bool {
+		srv.portTunnels.mu.RLock()
+		defer srv.portTunnels.mu.RUnlock()
+		return srv.portTunnels.sessions[agent.ID] != nil
+	}, 5*time.Second, 50*time.Millisecond)
+
+	rec = doAgentTokenRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agent.ID+"/ports/"+portText+"/proxy/", nil, token)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "<html>agent content</html>", rec.Body.String())
+	assert.Equal(t, untrustedContentSandboxCSP, rec.Header().Get("Content-Security-Policy"),
+		"the hub's sandbox CSP must be authoritative; the agent's own CSP must not pass through")
+	assert.Equal(t, "nosniff", rec.Header().Get("X-Content-Type-Options"))
+	assert.Empty(t, rec.Header().Values("Set-Cookie"), "the agent must not be able to set cookies on the hub origin")
+}
+
+// TestAgentPortProxyResponseDoesNotRelayHubOriginStateHeaders verifies the
+// defensive invariant that proxied responses must not set or clear hub-origin
+// state, and that CORS response headers on the hub origin come only from the
+// hub's own CORS middleware (never duplicated by the agent's copies).
+func TestAgentPortProxyResponseDoesNotRelayHubOriginStateHeaders(t *testing.T) {
+	srv, s := testServer(t)
+	hubHTTP := httptest.NewServer(srv.Handler())
+	t.Cleanup(hubHTTP.Close)
+
+	agentHeaders := map[string]string{
+		"Set-Cookie":                           "session=agent-set; Path=/",
+		"Set-Cookie2":                          "legacy=agent-set; Version=1",
+		"Clear-Site-Data":                      `"cookies", "storage", "cache"`,
+		"Access-Control-Allow-Origin":          "https://agent.example",
+		"Access-Control-Allow-Credentials":     "true",
+		"Access-Control-Allow-Methods":         "GET, PUT",
+		"Access-Control-Allow-Headers":         "X-Agent",
+		"Access-Control-Allow-Private-Network": "true",
+		"Access-Control-Expose-Headers":        "X-Agent",
+		"Access-Control-Max-Age":               "1",
+	}
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for k, v := range agentHeaders {
+			w.Header().Set(k, v)
+		}
+		w.Header().Set("X-Agent-Passthrough", "kept")
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	t.Cleanup(app.Close)
+
+	appURL, err := url.Parse(app.URL)
+	require.NoError(t, err)
+	host, portText, err := net.SplitHostPort(appURL.Host)
+	require.NoError(t, err)
+	port, err := net.LookupPort("tcp", portText)
+	require.NoError(t, err)
+	if strings.TrimSpace(host) == "" {
+		host = "127.0.0.1"
+	}
+
+	agent, token := createPortForwardAgent(t, srv, s)
+	rec := doAgentTokenRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", map[string]any{
+		"port": port,
+		"host": host,
+	}, token)
+	require.Equal(t, http.StatusCreated, rec.Code)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	manager := scionportforward.NewManager(scionhub.NewClientWithConfig(hubHTTP.URL, token, agent.ID))
+	go manager.Run(ctx)
+	require.Eventually(t, func() bool {
+		srv.portTunnels.mu.RLock()
+		defer srv.portTunnels.mu.RUnlock()
+		return srv.portTunnels.sessions[agent.ID] != nil
+	}, 5*time.Second, 50*time.Millisecond)
+
+	const hubOrigin = "https://hub.example"
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents/"+agent.ID+"/ports/"+portText+"/proxy/", nil)
+	req.Header.Set("X-Scion-Agent-Token", token)
+	req.Header.Set("Origin", hubOrigin)
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "ok", rec.Body.String())
+	assert.Equal(t, "kept", rec.Header().Get("X-Agent-Passthrough"), "ordinary agent headers must still be relayed")
+
+	// Headers the hub never sets on proxied responses: must be absent.
+	for _, h := range []string{
+		"Set-Cookie",
+		"Set-Cookie2",
+		"Clear-Site-Data",
+		"Access-Control-Allow-Credentials",
+		"Access-Control-Allow-Private-Network",
+		"Access-Control-Expose-Headers",
+	} {
+		t.Run("absent/"+h, func(t *testing.T) {
+			assert.Empty(t, rec.Header().Values(h), "proxied responses must not relay %s onto the hub origin", h)
+		})
+	}
+
+	// Headers owned by the hub's CORS middleware: exactly the hub's single value.
+	for _, tc := range []struct {
+		header string
+		want   string
+	}{
+		{"Access-Control-Allow-Origin", hubOrigin},
+		{"Access-Control-Allow-Methods", strings.Join(srv.config.CORSAllowedMethods, ", ")},
+		{"Access-Control-Allow-Headers", strings.Join(srv.config.CORSAllowedHeaders, ", ")},
+		{"Access-Control-Max-Age", fmt.Sprintf("%d", srv.config.CORSMaxAge)},
+	} {
+		t.Run("hub-owned/"+tc.header, func(t *testing.T) {
+			assert.Equal(t, []string{tc.want}, rec.Header().Values(tc.header),
+				"%s must carry only the hub's value, not a duplicate from the proxied response", tc.header)
+		})
+	}
 }
 
 func TestAgentPortClearedOnTunnelDisconnect(t *testing.T) {

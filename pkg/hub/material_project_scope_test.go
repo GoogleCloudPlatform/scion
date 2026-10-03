@@ -200,7 +200,7 @@ func TestAgentSecretRead_ProjectScopeRequiresDelegatorProjectSecretRead(t *testi
 		Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{plainDelegator},
 		Created: time.Now(), Updated: time.Now(),
 	}))
-	createDCEdge(t, f.Store, store.DelegationPrincipalUser, plainDelegator, store.DelegationPrincipalAgent, plainAgentID,
+	seedRecordedDelegationEdge(t, f.Store, store.DelegationPrincipalUser, plainDelegator, store.DelegationPrincipalAgent, plainAgentID,
 		store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
 	plainToken, err := f.Server.agentTokenService.GenerateAgentToken(plainAgentID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{plainDelegator})
 	require.NoError(t, err)
@@ -215,7 +215,7 @@ func TestAgentSecretRead_ProjectScopeRequiresDelegatorProjectSecretRead(t *testi
 		Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{ownerDelegator},
 		Created: time.Now(), Updated: time.Now(),
 	}))
-	createDCEdge(t, f.Store, store.DelegationPrincipalUser, ownerDelegator, store.DelegationPrincipalAgent, ownerAgentID,
+	seedRecordedDelegationEdge(t, f.Store, store.DelegationPrincipalUser, ownerDelegator, store.DelegationPrincipalAgent, ownerAgentID,
 		store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
 	ownerToken, err := f.Server.agentTokenService.GenerateAgentToken(ownerAgentID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{ownerDelegator})
 	require.NoError(t, err)
@@ -264,7 +264,7 @@ func TestAgentSecretRead_ProjectScopeAgentDelegatorWithSecretReadAllowed(t *test
 
 	parentID := tid("parent-full")
 	createDCAgent(t, f.Store, parentID, f.ProjectID, f.UserID, AgentRoleFull)
-	createDCEdge(t, f.Store, store.DelegationPrincipalUser, f.UserID, store.DelegationPrincipalAgent, parentID,
+	seedRecordedDelegationEdge(t, f.Store, store.DelegationPrincipalUser, f.UserID, store.DelegationPrincipalAgent, parentID,
 		store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
 
 	childID := tid("child-of-full-parent")
@@ -273,7 +273,7 @@ func TestAgentSecretRead_ProjectScopeAgentDelegatorWithSecretReadAllowed(t *test
 		Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{f.UserID, parentID},
 		Created: time.Now(), Updated: time.Now(),
 	}))
-	createDCEdge(t, f.Store, store.DelegationPrincipalAgent, parentID, store.DelegationPrincipalAgent, childID,
+	seedRecordedDelegationEdge(t, f.Store, store.DelegationPrincipalAgent, parentID, store.DelegationPrincipalAgent, childID,
 		store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
 	childToken, err := f.Server.agentTokenService.GenerateAgentToken(childID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID, parentID})
 	require.NoError(t, err)
@@ -378,7 +378,7 @@ func TestAgentSecretRead_ProjectScopeStoppedParentRetainsAuthority(t *testing.T)
 
 	parentID := tid("stopped-parent-agent")
 	createDCAgent(t, f.Store, parentID, f.ProjectID, f.UserID, AgentRoleFull)
-	createDCEdge(t, f.Store, store.DelegationPrincipalUser, f.UserID, store.DelegationPrincipalAgent, parentID,
+	seedRecordedDelegationEdge(t, f.Store, store.DelegationPrincipalUser, f.UserID, store.DelegationPrincipalAgent, parentID,
 		store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
 
 	childID := tid("child-of-stopped-parent")
@@ -387,7 +387,7 @@ func TestAgentSecretRead_ProjectScopeStoppedParentRetainsAuthority(t *testing.T)
 		Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{f.UserID, parentID},
 		Created: time.Now(), Updated: time.Now(),
 	}))
-	createDCEdge(t, f.Store, store.DelegationPrincipalAgent, parentID, store.DelegationPrincipalAgent, childID,
+	seedRecordedDelegationEdge(t, f.Store, store.DelegationPrincipalAgent, parentID, store.DelegationPrincipalAgent, childID,
 		store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
 	childToken, err := f.Server.agentTokenService.GenerateAgentToken(childID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{f.UserID, parentID})
 	require.NoError(t, err)

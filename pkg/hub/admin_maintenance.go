@@ -265,6 +265,8 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 			Store:         s.store,
 			SecretBackend: s.GetSecretBackend(),
 		}, nil
+	case "applied-config-tz-cleanup":
+		return &AppliedConfigTZCleanupExecutor{Store: s.store}, nil
 	case "pull-images":
 		log.Debug("Resolved pull-images executor",
 			"runtime_bin", mc.RuntimeBin, "registry", mc.ImageRegistry,

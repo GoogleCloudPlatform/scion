@@ -43,6 +43,12 @@ file (.scion-provisioned) is placed inside the workspace directory itself
 because the init container's PVC subPath mount only exposes the workspace
 dir, not its parent.
 
+In clone-per-agent mode (SCION_WORKSPACE_MODE=clone-per-agent, with
+SCION_AGENT_SLUG and SCION_AGENT_BRANCH), the mounted directory is the
+agent's own directory: it prepares the empty workspace directory inside it
+for the agent container's clone, records the branch, and writes the
+sentinel next to the workspace. It does not clone.
+
 In --wait-for-sentinel mode, polls for the sentinel file written by the
 winning node's init container and exits 0 when found or non-zero on timeout.
 
@@ -78,7 +84,7 @@ func init() {
 	provisionCmd.Flags().StringVar(&provisionWorkspace, "workspace", "/workspace",
 		"Path to the workspace directory")
 	provisionCmd.Flags().StringVar(&provisionMode, "mode", "shared-plain",
-		"Workspace sharing mode (shared-plain, worktree-per-agent)")
+		"Workspace sharing mode (shared-plain, worktree-per-agent, clone-per-agent)")
 	provisionCmd.Flags().IntVar(&provisionDepth, "depth", 1,
 		"Git clone depth (0=full clone, >0=that depth; default 1=shallow)")
 	provisionCmd.Flags().IntVar(&provisionUID, "uid", 1000,
@@ -123,12 +129,16 @@ func runProvision(ctx context.Context) error {
 	// The agent's worktree directory is named after the agent's slug.
 	agentSlug := os.Getenv("SCION_AGENT_SLUG")
 	worktree := mode == store.SharingModeWorktreePerAgent
-	if worktree {
+	// Clone-per-agent: the workspace path is the agent's directory
+	// (<project>/agents/<agent name>); this step prepares its workspace
+	// directory and the agent container clones into it.
+	agentDir := mode == store.SharingModeClonePerAgent
+	if worktree || agentDir {
 		if slug, err := api.ValidateAgentName(agentSlug); err != nil || slug != agentSlug {
-			return fmt.Errorf("provision: worktree-per-agent mode needs SCION_AGENT_SLUG set to the agent's slug (got %q)", agentSlug)
+			return fmt.Errorf("provision: %s mode needs SCION_AGENT_SLUG set to the agent's slug (got %q)", mode, agentSlug)
 		}
 	}
-	if worktree {
+	if worktree || agentDir {
 		// Files the worktree step creates as root keep group write, like
 		// the directories the broker prepares.
 		defer setProvisionUmask()()
@@ -198,6 +208,9 @@ func runProvision(ctx context.Context) error {
 			}
 		}
 	}
+	if agentDir {
+		setAgentDirInput(&in, agentSlug, os.Getenv("SCION_AGENT_BRANCH"), provisionTimeout)
+	}
 	if !in.RequireChownSuccess {
 		log.Info("Best-effort chown requested (workspace directory prepared by the broker); a failed chown is logged and provisioning continues")
 	}
@@ -207,11 +220,29 @@ func runProvision(ctx context.Context) error {
 	if worktree {
 		log.Info("Adding the worktree for agent %s at %s", agentSlug, provision.WorktreePath(provisionWorkspace, agentSlug))
 	}
+	if agentDir {
+		log.Info("Preparing the workspace of agent %s at %s", agentSlug, filepath.Join(provisionWorkspace, provision.AgentWorkspaceDir))
+		if err := provision.ProvisionAgentDir(in); err != nil {
+			return fmt.Errorf("provision failed: %w", err)
+		}
+		log.Info("Agent workspace prepared")
+		return nil
+	}
 	if err := provision.ProvisionShared(in); err != nil {
 		return fmt.Errorf("provision failed: %w", err)
 	}
 	log.Info("Workspace provisioned successfully")
 	return nil
+}
+
+// setAgentDirInput fills in the clone-per-agent part of in: the agent's
+// slug and branch, and a lock wait of at least the --timeout value. The
+// clone itself is left to the agent container: ProvisionAgentDir does not
+// use clone settings.
+func setAgentDirInput(in *provision.ProvisionInput, agentSlug, branch string, timeoutSeconds int) {
+	in.AgentID = agentSlug
+	in.AgentName = branch
+	in.LockWait = time.Duration(timeoutSeconds) * time.Second
 }
 
 // setWorktreeInput fills in the worktree-per-agent part of in. The branch

@@ -749,6 +749,112 @@ func IsGitURL(s string) bool {
 	return false
 }
 
+// StripGitURLCredentials removes credentials from a git remote URL so it can
+// be stored or displayed safely (for example in a readable project label).
+//
+//   - http(s):// and git:// URLs lose their userinfo entirely, e.g.
+//     https://user:TOKEN@github.com/org/repo.git -> https://github.com/org/repo.git
+//   - ssh:// URLs keep the login name (it selects the SSH account and is not
+//     a secret) but lose any password: ssh://git:pw@host/x -> ssh://git@host/x
+//   - SCP-style shorthand (git@host:org/repo) carries no password and is
+//     returned unchanged, as is anything without a "scheme://" prefix.
+//
+// The userinfo ends at the first '@' that is preceded by a valid login (no
+// '/' before the first ':') and followed by a host (no '@' or '/') — the RFC
+// 3986 authority with a lenient password. So a password containing an
+// unencoded '/' or '@' (https://u:p/w@host/org/repo) is still removed rather
+// than left in place, and a '@' after the start of the path (.../repo@v1,
+// .../repo@github.com/x) is never treated as userinfo.
+//
+// The URL is edited textually rather than round-tripped through net/url so
+// that the rest of it is preserved byte-for-byte.
+func StripGitURLCredentials(remote string) string {
+	schemeEnd := strings.Index(remote, "://")
+	if schemeEnd < 0 {
+		return remote
+	}
+	scheme := strings.ToLower(remote[:schemeEnd])
+	authorityStart := schemeEnd + len("://")
+	rest := remote[authorityStart:]
+	limit := strings.IndexAny(rest, "?#")
+	if limit < 0 {
+		limit = len(rest)
+	}
+	at := userinfoEnd(rest[:limit])
+	if at < 0 {
+		return remote
+	}
+	userinfo, hostAndPath := rest[:at], rest[at+1:]
+	if scheme == "ssh" {
+		if colon := strings.Index(userinfo, ":"); colon >= 0 {
+			userinfo = userinfo[:colon]
+		}
+		if userinfo != "" && !strings.ContainsAny(userinfo, "/@") {
+			return remote[:authorityStart] + userinfo + "@" + hostAndPath
+		}
+	}
+	return remote[:authorityStart] + hostAndPath
+}
+
+// userinfoEnd returns the index of the '@' ending the userinfo of s (a URL
+// with its "scheme://" prefix, query and fragment removed), or -1 if s has no
+// userinfo. It picks the first '@' such that the login before it (up to the
+// first ':') contains no '/', and the host after it (up to the next '/') is
+// non-empty and contains no '@'. Once a '/' appears in the login position the
+// path has started, so no later '@' can end the userinfo.
+//
+// A '/' after the first ':' is ambiguous: "host:8443/org/repo@v1" is a port
+// followed by a path with '@', while "user:pa/ss@host/repo" is a password
+// with an unencoded '/'. When the text before that '/' is a valid host:port
+// (a 1-65535 port without leading zeros), s is read as RFC 3986 does, with no
+// userinfo. Otherwise it cannot be a valid authority, so the '@' is taken to
+// end a password and the credential is stripped (fail closed). Callers that
+// persist the result must still reject '@' in the path, since a password
+// that looks like a port ("user:8443/x@host/repo") is left in place.
+func userinfoEnd(s string) int {
+	for from := 0; ; {
+		i := strings.Index(s[from:], "@")
+		if i < 0 {
+			return -1
+		}
+		at := from + i
+		userinfo := s[:at]
+		login, _, _ := strings.Cut(userinfo, ":")
+		if strings.Contains(login, "/") {
+			return -1
+		}
+		if authority, _, ok := strings.Cut(userinfo, "/"); ok && isHostAndPort(authority) {
+			return -1
+		}
+		host, _, _ := strings.Cut(s[at+1:], "/")
+		if host != "" && !strings.Contains(host, "@") {
+			return at
+		}
+		from = at + 1
+	}
+}
+
+// isHostAndPort reports whether s is a non-empty host followed by ':' and a
+// port of 1-65535 without leading zeros (e.g. "host:8443", "[::1]:8443").
+func isHostAndPort(s string) bool {
+	colon := strings.LastIndex(s, ":")
+	if colon <= 0 {
+		return false
+	}
+	port := s[colon+1:]
+	if port == "" || len(port) > 5 || port[0] == '0' {
+		return false
+	}
+	n := 0
+	for _, c := range port {
+		if c < '0' || c > '9' {
+			return false
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n <= 65535
+}
+
 // ToHTTPSCloneURL converts any git URL to HTTPS clone form with a .git suffix.
 // SSH shorthand and ssh:// URLs are converted; HTTPS URLs are passed through
 // (with .git appended if missing). Azure DevOps URLs (dev.azure.com,

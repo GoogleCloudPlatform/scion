@@ -382,6 +382,14 @@ func ProvisionShared(in ProvisionInput) error {
 		return fmt.Errorf("ProvisionShared: ClonePerAgent mode must not use NFS backend " +
 			"(should be routed to localBackend by SelectWorkspaceBackend)")
 	}
+	// Guard: EmptyPerAgent has no shared project workspace to provision. Its
+	// private per-agent directory is local-only until NFS per-agent support
+	// lands (design #2703 P3); runtime.CheckWorkspaceBackendMode fails closed
+	// for it on NFS, so reaching here is a routing bug.
+	if in.Mode == store.SharingModeEmptyPerAgent {
+		return fmt.Errorf("ProvisionShared: EmptyPerAgent mode has no shared workspace to provision " +
+			"(should be routed to localBackend by SelectWorkspaceBackend)")
+	}
 
 	if in.Resolved.HostPath == "" {
 		return fmt.Errorf("ProvisionShared: Resolved.HostPath is required")
@@ -738,43 +746,7 @@ const removalPruneTimeout = 2 * time.Minute
 // must be a plain directory; the deletes run inside that directory as
 // opened, so they stay there even if the path is replaced meanwhile.
 func PurgeRemovedWorktrees(base string) error {
-	worktreesDir := filepath.Join(base, "worktrees")
-	root, err := os.OpenRoot(worktreesDir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	defer func() { _ = root.Close() }()
-	opened, err := root.Stat(".")
-	if err != nil {
-		return err
-	}
-	// Lstat does not follow symlinks, so this holds only when worktrees/
-	// is the plain directory that was opened.
-	if fi, err := os.Lstat(worktreesDir); err != nil || !os.SameFile(fi, opened) {
-		return nil
-	}
-	dir, err := root.Open(".")
-	if err != nil {
-		return err
-	}
-	entries, err := dir.ReadDir(-1)
-	_ = dir.Close()
-	if err != nil {
-		return err
-	}
-	var errs []error
-	for _, e := range entries {
-		if !strings.HasPrefix(e.Name(), removedWorktreePrefix) {
-			continue
-		}
-		if err := root.RemoveAll(e.Name()); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", filepath.Join(worktreesDir, e.Name()), err))
-		}
-	}
-	return errors.Join(errs...)
+	return purgePrefixedEntries(filepath.Join(base, "worktrees"), removedWorktreePrefix)
 }
 
 // moveWorktreeAside renames base/worktrees/<name> to a unique
@@ -879,6 +851,24 @@ func acquireProvisionLock(ctx context.Context, in ProvisionInput, sentinelDir st
 // different (older evicted, or newer) generation" — the identity check that
 // makes every rename-based claim below safe to act on.
 const provisionLockOwnerFile = "owner"
+
+// provisionLockFileMode is the mode of the files inside a lock directory
+// (owner, heartbeat, evicted-at). Together with shareLockDirWithGroup it
+// lets another user in the directory's group, such as the broker and the
+// provisioning init container on an NFS export, read the owner id and the
+// heartbeat, so either one can reclaim a lock the other left behind.
+const provisionLockFileMode = 0o660
+
+// shareLockDirWithGroup gives a new lock directory group read, write and
+// search, keeping the setgid bit it inherited from a setgid parent, so new
+// files in it keep the parent's group. os.MkdirTemp creates it 0700.
+func shareLockDirWithGroup(dir string) error {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return err
+	}
+	return os.Chmod(dir, info.Mode()&os.ModeSetgid|0o770)
+}
 
 // provisionLockHeartbeatFile is written inside the lock directory on every
 // heartbeat beat (see startLockHeartbeat), carrying the holder's owner id.
@@ -1417,7 +1407,11 @@ func tryCreateFileLock(lockPath string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("create staging dir: %w", err)
 	}
-	if err := writeLockFile(filepath.Join(tmpDir, provisionLockOwnerFile), []byte(token), 0600); err != nil {
+	if err := shareLockDirWithGroup(tmpDir); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return "", fmt.Errorf("set staging dir mode: %w", err)
+	}
+	if err := writeLockFile(filepath.Join(tmpDir, provisionLockOwnerFile), []byte(token), provisionLockFileMode); err != nil {
 		_ = os.RemoveAll(tmpDir)
 		return "", fmt.Errorf("write owner marker: %w", err)
 	}
@@ -1790,7 +1784,7 @@ func beatOnce(lockPath, token string) beatResult {
 		return beatTransientMiss // I/O error reading it -- tolerate briefly
 	}
 
-	if err := writeLockFile(filepath.Join(lockPath, provisionLockHeartbeatFile), []byte(token), 0600); err != nil {
+	if err := writeLockFile(filepath.Join(lockPath, provisionLockHeartbeatFile), []byte(token), provisionLockFileMode); err != nil {
 		return beatTransientMiss
 	}
 
@@ -1877,7 +1871,7 @@ func releaseFileLock(lockPath, token string) func() error {
 		// evictPath's own mtime. Best-effort: if this write fails,
 		// garbageCollectLockLitter simply leaves this entry alone rather
 		// than guessing at its age.
-		_ = writeLockFile(filepath.Join(evictPath, provisionLockEvictedAtFile), []byte{}, 0600)
+		_ = writeLockFile(filepath.Join(evictPath, provisionLockEvictedAtFile), []byte{}, provisionLockFileMode)
 		return nil
 	}
 }
@@ -2017,7 +2011,7 @@ func tryReclaimIfAbandoned(dir, lockPath string) bool {
 	// this rather than evictPath's own mtime. Best-effort: if this write
 	// fails, garbageCollectLockLitter simply leaves this entry alone rather
 	// than guessing at its age.
-	_ = writeLockFile(filepath.Join(evictPath, provisionLockEvictedAtFile), []byte{}, 0600)
+	_ = writeLockFile(filepath.Join(evictPath, provisionLockEvictedAtFile), []byte{}, provisionLockFileMode)
 
 	slog.Warn("acquireFileLock: reclaimed apparently-abandoned lock", "path", lockPath, "owner", matchToken)
 	// Leave evictPath for garbageCollectLockLitter rather than deleting it

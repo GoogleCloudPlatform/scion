@@ -39,6 +39,7 @@ import type {
 import { canMessageAgent } from '../shared/types.js';
 import { activityMsFromTimestamp } from '../utils/chat-palette-match.js';
 import { formatFileSize } from '../utils/chat-file-links.js';
+import { formatInstant } from '../utils/time.js';
 import type { PaletteCandidate, PaletteThreadTarget } from './chat-palette-types.js';
 import { dmCandidateId, documentCandidateId, threadCandidateId } from './chat-palette-types.js';
 import type { RecentFile } from './chat-recent-files.js';
@@ -603,9 +604,7 @@ function documentSecondaryLabel(file: RecentFile): string {
   const activityMs = activityMsFromTimestamp(file.source.sentAt);
   const metadata = [
     formatFileSize(file.target.size),
-    activityMs > 0
-      ? new Date(activityMs).toLocaleDateString('en', { month: 'short', day: 'numeric' })
-      : '',
+    activityMs > 0 ? formatInstant(new Date(activityMs).toISOString(), 'date') : '',
   ]
     .filter(Boolean)
     .join(' · ');

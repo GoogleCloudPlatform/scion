@@ -25,6 +25,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -364,8 +365,8 @@ func runTemplateShow(cmd *cobra.Command, args []string) error {
 			"harness":  t.Harness,
 			"scope":    t.Scope,
 			"status":   t.Status,
-			"created":  t.Created.Format(time.RFC3339),
-			"updated":  t.Updated.Format(time.RFC3339),
+			"created":  t.Created,
+			"updated":  t.Updated,
 		}
 		if t.ContentHash != "" {
 			output["contentHash"] = t.ContentHash
@@ -388,8 +389,8 @@ func runTemplateShow(cmd *cobra.Command, args []string) error {
 	if t.Description != "" {
 		fmt.Printf("Description: %s\n", t.Description)
 	}
-	fmt.Printf("Created:  %s\n", t.Created.Format(time.RFC3339))
-	fmt.Printf("Updated:  %s\n", t.Updated.Format(time.RFC3339))
+	fmt.Printf("Created:  %s\n", clitime.Format(t.Created, clitime.Full))
+	fmt.Printf("Updated:  %s\n", clitime.Format(t.Updated, clitime.Full))
 
 	return nil
 }

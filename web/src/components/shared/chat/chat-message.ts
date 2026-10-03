@@ -32,6 +32,8 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../../client/api.js';
 import { getMarkdownRenderer } from '../../../utils/markdown.js';
+import { formatInstant, formatInstantWithZone } from '../../../utils/time.js';
+import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
 import { getLanguageFromPath } from '../code-editor.js';
 import { hashColor, getInitials } from './chat-avatar.js';
 import {
@@ -61,12 +63,6 @@ export interface AttachmentRefInfo {
 
 /** Image MIME types rendered inline. */
 const IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
-
-const MESSAGE_TIME_FORMAT = new Intl.DateTimeFormat('en', {
-  hour12: false,
-  hour: '2-digit',
-  minute: '2-digit',
-});
 
 /** Non-`text/*` MIME types whose bytes are still text. */
 const TEXT_MIMES = new Set([
@@ -523,6 +519,13 @@ function styleMentions(htmlStr: string): string {
 
 @customElement('scion-chat-message')
 export class ScionChatMessage extends LitElement {
+  /**
+   * Re-renders this message when the effective display zone changes
+   * (review R2-1), so a thread already on screen when the preference
+   * loads or changes doesn't stay stuck in the browser zone.
+   */
+  readonly _zone = new DisplayZoneController(this);
+
   /** The message body text. */
   @property()
   body = '';
@@ -1352,58 +1355,6 @@ export class ScionChatMessage extends LitElement {
       color: var(--scion-warning-600, #d97706);
     }
 
-    /* ---- Phase-3: Message action bar ---- */
-    .message-actions {
-      position: absolute;
-      top: -12px;
-      right: 8px;
-      display: flex;
-      gap: 0.0625rem;
-      padding: 0.125rem;
-      border-radius: 0.375rem;
-      background: var(--scion-surface-100, #f1f5f9);
-      border: 1px solid var(--scion-neutral-200, #e2e8f0);
-      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-      opacity: 0;
-      visibility: hidden;
-      pointer-events: none;
-      transition:
-        opacity 0.15s ease,
-        visibility 0.15s ease;
-      z-index: 10;
-    }
-
-    .message-wrapper:hover .message-actions,
-    .message-wrapper:focus-within .message-actions,
-    .message-actions.pinned {
-      opacity: 1;
-      visibility: visible;
-      pointer-events: auto;
-    }
-
-    @media (hover: none) {
-      .message-actions {
-        opacity: 0;
-        visibility: hidden;
-        pointer-events: none;
-      }
-      .message-actions.pinned {
-        opacity: 1;
-        visibility: visible;
-        pointer-events: auto;
-      }
-    }
-
-    .message-actions sl-icon-button::part(base) {
-      padding: 0.25rem;
-      font-size: var(--chat-fs-lg);
-      color: var(--scion-neutral-600, #475569);
-    }
-
-    .message-actions sl-icon-button::part(base):hover {
-      color: var(--scion-primary-600, #2563eb);
-    }
-
     /* ---- Phase-3: Reply preview quote block ---- */
     .reply-preview {
       display: flex;
@@ -2060,7 +2011,7 @@ export class ScionChatMessage extends LitElement {
                   ${this.routedTo
                     ? html`<span class="routed-to"> &rarr; ${this.routedTo}</span>`
                     : nothing}
-                  <span class="msg-time">${this.formatTime()}</span>
+                  <span class="msg-time" title=${this.formatTimeTitle()}>${this.formatTime()}</span>
                   ${this.editedAt ? html`<span class="edited-label">(edited)</span>` : nothing}
                 </div>
               `
@@ -2073,7 +2024,7 @@ export class ScionChatMessage extends LitElement {
                     ? html`<span class="cross-project-label">${this.senderProjectSlug}</span>`
                     : nothing}
                   <span class="routed-to"> &rarr; ${this.routedTo}</span>
-                  <span class="msg-time">${this.formatTime()}</span>
+                  <span class="msg-time" title=${this.formatTimeTitle()}>${this.formatTime()}</span>
                   ${this.editedAt ? html`<span class="edited-label">(edited)</span>` : nothing}
                 </div>
               `
@@ -2460,12 +2411,19 @@ export class ScionChatMessage extends LitElement {
 
   private formatTime(): string {
     if (!this.timestamp) return '';
-    try {
-      const d = new Date(this.timestamp);
-      return Number.isNaN(d.getTime()) ? 'Invalid Date' : MESSAGE_TIME_FORMAT.format(d);
-    } catch {
-      return '';
-    }
+    const formatted = formatInstant(this.timestamp, 'time');
+    return formatted || 'Invalid Date';
+  }
+
+  /**
+   * Full instant plus zone label for the `.msg-time` tooltip (review R1-3,
+   * AC4: "sees native chat timestamps in Tokyo time, with a zone label").
+   * Low-noise: surfaced as a `title`, not inline text, since every message
+   * in a thread shares the same effective zone.
+   */
+  private formatTimeTitle(): string {
+    if (!this.timestamp) return '';
+    return formatInstantWithZone(this.timestamp);
   }
 
   /** Deterministic colour from the sender ID (preferred) or slug/name fallback. */

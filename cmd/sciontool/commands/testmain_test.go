@@ -16,6 +16,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/substrate"
 )
 
 // errScionUserLookupDisabledInTests is what scionUserLookup/lookupUserByID
@@ -27,6 +28,18 @@ var errScionUserLookupDisabledInTests = errors.New("scionUserLookup/lookupUserBy
 // need to check what did or didn't get written under it (see
 // TestGoCachesEscapeSandboxHOME) read this instead of recomputing it.
 var sandboxHomeDir string
+
+// realHomeDir is this test binary's own real, original $HOME, captured
+// before TestMain redirects HOME to sandboxHomeDir below. A fixture that
+// must pass a real root-owned-or-self-owned chain check (e.g.
+// dirfd.VerifyRootOwnedExecutable, which trustedTestRoot in
+// substrate_rootfs_test.go anchors under this) cannot use t.TempDir() or
+// sandboxHomeDir: both resolve under the real, world-writable "/tmp", which
+// fails that check on mode alone before the fixture's own content is ever
+// reached. The real $HOME (e.g. "/home/scion") is trusted for the same
+// reason production's real "/home/scion" is: owned by the user actually
+// running this process, not group- or world-writable.
+var realHomeDir string
 
 // resolveRealGoCaches finds this machine's real GOCACHE, GOMODCACHE and
 // GOPATH before TestMain redirects HOME and XDG_CACHE_HOME to a throwaway
@@ -112,9 +125,26 @@ func disableGoTelemetry(configHome string) error {
 	return os.WriteFile(filepath.Join(dir, "mode"), []byte("off"), 0o644)
 }
 
+// selfCheckHelperEnv, when set to any non-empty value, makes this test
+// binary behave as a lightweight standalone helper process instead of
+// running the test suite: it calls verifySelfBinaryRootOwned() directly
+// against its own running location and exits, printing "PASS" or "FAIL: "
+// plus the error. This lets a test copy the compiled test binary itself to
+// a controlled location (a real self-owned trusted chain, or a real
+// world-writable one) and run it as a real subprocess, so
+// verifySelfBinaryRootOwned's accept path can be exercised for real without
+// needing actual root — unlike a fake "root-owned" fixture, whose ownership
+// can't be constructed without CAP_CHOWN, this controls the one thing an
+// unprivileged test process CAN control for itself: which directory chain
+// its own binary sits under.
+const selfCheckHelperEnv = "SUBSTRATE_SELFCHECK_HELPER_TEST"
+
 // TestMain makes this package's tests hermetic against the *real* machine
 // they happen to run on, for the whole test binary — not just the tests
-// that remember to sandbox themselves.
+// that remember to sandbox themselves. See
+// .design/project-log/2026-09-25-substrate-phase1-substrate-serve.md
+// ("Privilege drop" and "Test hermeticity") for what motivated each layer
+// below.
 //
 // Layers, all required:
 //
@@ -143,6 +173,15 @@ func disableGoTelemetry(configHome string) error {
 //     same per-binary temp directory, before any log call in this binary
 //     can lazily Init() itself against the real path.
 func TestMain(m *testing.M) {
+	if os.Getenv(selfCheckHelperEnv) != "" {
+		if err := verifySelfBinaryRootOwned(); err != nil {
+			fmt.Printf("FAIL: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("PASS")
+		os.Exit(0)
+	}
+
 	envVarsToClear := append(append([]string{}, hubEnvVars...),
 		"SCION_HOST_UID", "SCION_HOST_GID", "SCION_KEEPID_UID")
 	for _, v := range envVarsToClear {
@@ -156,6 +195,12 @@ func TestMain(m *testing.M) {
 		return nil, errScionUserLookupDisabledInTests
 	}
 	startReaper = func() {}
+
+	// Captured before HOME is redirected below — see realHomeDir's own doc
+	// comment for why some fixtures need the real one instead.
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		realHomeDir = home
+	}
 
 	resolveRealGoCaches()
 
@@ -185,8 +230,24 @@ func TestMain(m *testing.M) {
 	// directly.
 	restoreTokenHome := hub.SetTokenHome(tmpHome)
 
+	privateTmpBase, err := os.MkdirTemp("", "sciontool-test-private-tmp-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "TestMain: failed to create private-tmp-dir sandbox: %v\n", err)
+		os.Exit(1)
+	}
+	// A test that spins up a real substrate.Server (e.g. via
+	// newSubstrateServeServer) exercises pkg/sciontool/substrate's own
+	// ensurePrivateTmpDir, which reads that package's unexported
+	// privateRootTmpDir var. Point it at this throwaway directory via the
+	// exported test seam instead of the real, root-owned "/run/scion/tmp".
+	restorePrivateRootTmpDir := substrate.SetPrivateRootTmpDirForTest(filepath.Join(privateTmpBase, "run", "scion", "tmp"))
+
 	code := m.Run()
 	restoreTokenHome()
+	restorePrivateRootTmpDir()
+	if err := removeSandboxHome(privateTmpBase); err != nil {
+		fmt.Fprintf(os.Stderr, "TestMain: failed to remove private-tmp-dir sandbox %s: %v\n", privateTmpBase, err)
+	}
 	if err := removeSandboxHome(tmpHome); err != nil {
 		fmt.Fprintf(os.Stderr, "TestMain: failed to remove sandbox home %s: %v\n", tmpHome, err)
 	}

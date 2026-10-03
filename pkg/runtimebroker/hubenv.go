@@ -97,11 +97,19 @@ type hubEndpointInputs struct {
 // resolveEffectiveHubEndpoint resolves the hub endpoint to stamp into a
 // dispatched agent for the given operation, then applies the cloudrun-family
 // runtime overrides that follow endpoint resolution on every operation.
-func resolveEffectiveHubEndpoint(ctx context.Context, in hubEndpointInputs) (string, error) {
-	var hubEndpoint string
+//
+// The second return value, trusted, reports whether that endpoint is
+// operator-derived — see resolveHubEndpointForCreate's own doc comment for
+// exactly which tiers count. buildStartContext uses it to decide
+// api.StartOptions.TrustedHubEndpoint, the one value Substrate's egress
+// allowlist may trust (pkg/agent/run.go, pkg/runtime/substrate_egress.go).
+// This return value changes nothing about the endpoint itself: the value
+// this function returns and delivers into the agent's own SCION_HUB_ENDPOINT
+// env is identical whether or not it is trusted.
+func resolveEffectiveHubEndpoint(ctx context.Context, in hubEndpointInputs) (endpoint string, trusted bool, err error) {
 	switch in.Op {
 	case opCreate, opHTTPStart, opHTTPRestart:
-		hubEndpoint = resolveHubEndpointForCreate(
+		endpoint, trusted = resolveHubEndpointForCreate(
 			in.ReqHubEndpoint,
 			in.ConnectionHubEndpoint,
 			in.BrokerHubEndpoint,
@@ -111,7 +119,7 @@ func resolveEffectiveHubEndpoint(ctx context.Context, in hubEndpointInputs) (str
 			in.RuntimeName,
 		)
 	default:
-		return "", fmt.Errorf("resolveEffectiveHubEndpoint: unknown start operation %q", in.Op)
+		return "", false, fmt.Errorf("resolveEffectiveHubEndpoint: unknown start operation %q", in.Op)
 	}
 
 	// On the cloudrun-sandbox runtime, sandboxes cannot reach the hub's
@@ -120,51 +128,90 @@ func resolveEffectiveHubEndpoint(ctx context.Context, in hubEndpointInputs) (str
 	// link-local address. Override the endpoint so the sandbox's sciontool
 	// init (and the metadata emulator's FetchGCPToken) can reach the hub.
 	// This overrides whatever the resolution above produced, on every
-	// operation.
+	// operation. The override itself is infra-derived (GCE metadata / the
+	// broker's own listen port), so it is always trusted.
 	if in.RuntimeName == "cloudrun-sandbox" {
-		sandboxEndpoint, err := cloudrunSandboxHubEndpoint(in.HubListenPort)
-		if err != nil {
-			return "", fmt.Errorf("cannot resolve hub endpoint for sandbox: %w", err)
+		sandboxEndpoint, serr := cloudrunSandboxHubEndpoint(in.HubListenPort)
+		if serr != nil {
+			return "", false, fmt.Errorf("cannot resolve hub endpoint for sandbox: %w", serr)
 		}
-		return sandboxEndpoint, nil
+		return sandboxEndpoint, true, nil
 	}
 	// On the cloudrun (CRI) runtime, standalone instances run on separate VMs
 	// (potentially in different regions) and cannot reach the broker's
 	// localhost endpoint. Unlike cloudrun-sandbox (co-located with the hub,
 	// reachable via link-local), CRI instances need the hub's public Cloud
-	// Run service URL. Resolve it from the K_SERVICE env var and GCE metadata.
-	if in.RuntimeName == "cloudrun" && isLocalhostEndpoint(hubEndpoint) {
-		criEndpoint, err := cloudrunInstancesHubEndpoint(ctx)
-		if err != nil {
-			return "", fmt.Errorf("cannot resolve hub endpoint for Cloud Run instance: %w", err)
+	// Run service URL. Resolve it from the K_SERVICE env var and GCE
+	// metadata — also infra-derived, so also always trusted.
+	if in.RuntimeName == "cloudrun" && isLocalhostEndpoint(endpoint) {
+		criEndpoint, cerr := cloudrunInstancesHubEndpoint(ctx)
+		if cerr != nil {
+			return "", false, fmt.Errorf("cannot resolve hub endpoint for Cloud Run instance: %w", cerr)
 		}
-		return criEndpoint, nil
+		return criEndpoint, true, nil
 	}
-	return hubEndpoint, nil
+	return endpoint, trusted, nil
 }
 
-func resolveHubEndpointForCreate(reqHubEndpoint, connectionHubEndpoint, brokerHubEndpoint string, resolvedEnv map[string]string, projectPath, containerHubEndpoint, runtimeName string) string {
+// resolveHubEndpointForCreate resolves the hub endpoint through five tiers,
+// in priority order: the request-level HubEndpoint, the hub connection
+// endpoint, this broker's own configured HubEndpoint, the resolved env
+// (ResolvedEnv, i.e. hub-side AppliedConfig.Env — creator-controlled), and
+// finally project settings. All five tiers feed the returned endpoint,
+// which is what SCION_HUB_ENDPOINT delivers to the agent.
+//
+// trusted reports whether that endpoint came from an OPERATOR-DERIVED tier:
+// only the first three (the request HubEndpoint, the connection endpoint,
+// or this broker's own configured HubEndpoint) — never the resolved-env
+// tier, which a project or template creator controls, and never project
+// settings either, since for a hub-managed project that file's own content
+// is itself hub-resolved, the same tenant-reachable path the resolved-env
+// tier already excludes. Once either of those last two tiers supplies the
+// endpoint, trusted stays false for exactly that result, even though the
+// endpoint itself is no longer empty and is still delivered to the agent.
+// The final localhost/connection-endpoint substitution and the
+// container-bridge override below only ever replace the endpoint with
+// another operator-derived value (the connection endpoint or a rewrite of
+// the broker's own bridge address), so neither one can turn a trusted
+// result into an untrusted one or vice versa.
+func resolveHubEndpointForCreate(reqHubEndpoint, connectionHubEndpoint, brokerHubEndpoint string, resolvedEnv map[string]string, projectPath, containerHubEndpoint, runtimeName string) (endpoint string, trusted bool) {
 	hubEndpoint := reqHubEndpoint
+	trusted = hubEndpoint != ""
 	if hubEndpoint == "" {
 		hubEndpoint = connectionHubEndpoint
+		trusted = hubEndpoint != ""
 	}
 	if hubEndpoint == "" {
 		hubEndpoint = brokerHubEndpoint
+		trusted = hubEndpoint != ""
 	}
 	if hubEndpoint == "" {
+		// hubEndpointFromResolvedEnv is the one tier that is NOT
+		// operator-derived: it reads ResolvedEnv, the hub-resolved
+		// AppliedConfig.Env a project or template creator controls. A
+		// value from here must never be trusted for egress, so trusted
+		// stays false even though hubEndpoint itself is no longer empty.
 		hubEndpoint = hubEndpointFromResolvedEnv(resolvedEnv)
 	}
 	if hubEndpoint == "" {
+		// hubEndpointFromProjectSettings is also excluded from trust: for a
+		// hub-managed project this file's content is itself hub-resolved,
+		// the same degenerate precondition (every earlier tier empty) that
+		// makes the resolved-env tier untrustworthy above. trusted stays
+		// false even though hubEndpoint itself is no longer empty; only the
+		// delivered (non-egress) SCION_HUB_ENDPOINT value uses this tier.
 		hubEndpoint = hubEndpointFromProjectSettings(projectPath)
 	}
 	// A localhost endpoint from a remote hub dispatch refers to the hub
 	// machine's loopback, not this broker's. When we have a non-localhost
 	// connection endpoint (the URL this broker used to reach the hub),
-	// prefer it since it is known to be reachable from this broker.
+	// prefer it since it is known to be reachable from this broker. This
+	// substitutes an operator-derived value, so it always sets trusted.
 	if isLocalhostEndpoint(hubEndpoint) && connectionHubEndpoint != "" && !isLocalhostEndpoint(connectionHubEndpoint) {
 		hubEndpoint = connectionHubEndpoint
+		trusted = true
 	}
-	return applyContainerBridgeOverride(hubEndpoint, containerHubEndpoint, runtimeName)
+	return applyContainerBridgeOverride(hubEndpoint, containerHubEndpoint, runtimeName), trusted
 }
 
 func hubEndpointFromResolvedEnv(resolvedEnv map[string]string) string {

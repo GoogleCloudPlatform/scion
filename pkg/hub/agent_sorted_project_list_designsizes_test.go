@@ -129,7 +129,7 @@ func TestListProjectAgentsSorted_DecisionCounts_PartialRead_Paged(t *testing.T) 
 	grantProjectListOnly(t, f.store, caller.ID, f.project.ID, "sl-list-only-1200")
 
 	const n, r = 1200, 400
-	f.createAgentsBulk(t, n, "pr1200", string(state.PhaseStopped), func(i int) string {
+	agents := f.createAgentsBulk(t, n, "pr1200", string(state.PhaseStopped), func(i int) string {
 		if i < r {
 			return caller.ID // first r agents are owned by caller -> readable via the owner grant
 		}
@@ -140,12 +140,13 @@ func TestListProjectAgentsSorted_DecisionCounts_PartialRead_Paged(t *testing.T) 
 	f.srv.authzService.SetDecisionAuditEmitter(emitter)
 
 	const limit = 25
-	rec := doRequestAsUser(t, f.srv, caller, http.MethodGet, f.listPath(fmt.Sprintf("sort=updated&fit=500&limit=%d", limit)), nil)
+	rec := doRequestAsUser(t, f.srv, caller, http.MethodGet, f.listPath(fmt.Sprintf("sort=updated&fit=500&limit=%d&stats=1", limit)), nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
 	require.NotNil(t, resp.Complete)
 	assert.False(t, *resp.Complete, "n=1200 > fit's 500 max, so this can only ever be paged")
 	assert.Equal(t, r, resp.TotalCount, "totalCount is the readable (phase-filtered) count, independent of page size")
+	assertStatsWithinReadable(t, resp, agents[:r])
 
 	// 5 (gate+scope caps) + n (step-3 read pass over every candidate) +
 	// 7*limit (remaining-action pass for the page only) = 5 + 1200 + 175 = 1380.
@@ -167,7 +168,7 @@ func TestListProjectAgentsSorted_DecisionCounts_PartialRead_Complete(t *testing.
 	grantProjectListOnly(t, f.store, caller.ID, f.project.ID, "sl-list-only-500")
 
 	const n, r = 500, 200
-	f.createAgentsBulk(t, n, "pr500", string(state.PhaseStopped), func(i int) string {
+	agents := f.createAgentsBulk(t, n, "pr500", string(state.PhaseStopped), func(i int) string {
 		if i < r {
 			return caller.ID
 		}
@@ -177,13 +178,14 @@ func TestListProjectAgentsSorted_DecisionCounts_PartialRead_Complete(t *testing.
 	emitter := &recordingDecisionAuditEmitter{}
 	f.srv.authzService.SetDecisionAuditEmitter(emitter)
 
-	rec := doRequestAsUser(t, f.srv, caller, http.MethodGet, f.listPath(fmt.Sprintf("sort=updated&fit=%d", n)), nil)
+	rec := doRequestAsUser(t, f.srv, caller, http.MethodGet, f.listPath(fmt.Sprintf("sort=updated&fit=%d&stats=1", n)), nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
 	require.NotNil(t, resp.Complete)
 	assert.True(t, *resp.Complete, "completeness is decided on the candidate count n, not R (design 5.3 step 2)")
 	assert.Len(t, resp.Agents, r, "a complete response's page is the whole readable set")
 	assert.Equal(t, r, resp.TotalCount)
+	assertStatsWithinReadable(t, resp, agents[:r])
 
 	// 5 (gate+scope caps) + n (step-3 read pass over every candidate) +
 	// 7*r (remaining-action pass over every readable item) = 5 + 500 + 1400 = 1905.
@@ -280,4 +282,23 @@ func TestListProjectAgentsSorted_LegacyUnaffectedAbove2001(t *testing.T) {
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
 	assert.Len(t, resp.Agents, 500)
 	assert.NotEmpty(t, resp.NextCursor)
+}
+
+// assertStatsWithinReadable checks that a project user response's stats
+// block counts and lists exactly the caller-readable agents: stats.total is
+// len(readable) and every stats.agents id is one of them. stats=1 adds no
+// decisions, so the exact decision counts in the callers still hold.
+func assertStatsWithinReadable(t *testing.T, resp ListAgentsResponse, readable []*store.Agent) {
+	t.Helper()
+	ids := make(map[string]bool, len(readable))
+	for _, a := range readable {
+		ids[a.ID] = true
+	}
+	require.NotNil(t, resp.Stats)
+	require.NotNil(t, resp.Stats.Agents)
+	assert.Equal(t, len(readable), resp.Stats.Total, "stats.total must be the readable count")
+	assert.Len(t, *resp.Stats.Agents, len(readable))
+	for _, ip := range *resp.Stats.Agents {
+		assert.True(t, ids[ip[0]], "stats.agents lists %s, which the caller cannot read", ip[0])
+	}
 }

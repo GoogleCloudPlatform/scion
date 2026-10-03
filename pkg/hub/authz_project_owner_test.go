@@ -712,8 +712,7 @@ func TestCapabilities_GCPServiceAccount_HubScoped_NoProjectOwnerBypass(t *testin
 // not carry; they come only from the owner or ancestor relationship to the
 // agent.
 var relationshipOnlyAgentActions = map[Action]bool{
-	ActionAttach:     true,
-	ActionPortAccess: true,
+	ActionAttach: true,
 }
 
 // TestCapabilities_GCPServiceAccount_ProjectOwnerAdmin_AssignAgreesWithKernel

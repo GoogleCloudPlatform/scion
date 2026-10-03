@@ -110,6 +110,76 @@ func buildNoAuthCmdLine(noAuthMsg, noAuthCmd string) string {
 	return "exec bash"
 }
 
+// harnessCmdLine builds the shell command line that runs the harness (or
+// the no-auth shell), from the fields shared by every runtime's entrypoint
+// builder: NoAuth/NoAuthMessage/NoAuthCommand, or Harness.GetCommand with
+// Task/Resume/CommandArgs. It returns ok=false when neither is configured;
+// callers decide how to handle that case, since it differs by runtime
+// (error out, or fall back to a placeholder command).
+func harnessCmdLine(cfg RunConfig) (cmdLine string, ok bool) {
+	if cfg.NoAuth {
+		return buildNoAuthCmdLine(cfg.NoAuthMessage, cfg.NoAuthCommand), true
+	}
+	if cfg.Harness != nil {
+		harnessArgs := cfg.Harness.GetCommand(cfg.Task, cfg.Resume, cfg.CommandArgs)
+		quotedArgs := make([]string, 0, len(harnessArgs))
+		for _, a := range harnessArgs {
+			quotedArgs = append(quotedArgs, shellQuote(a))
+		}
+		return strings.Join(quotedArgs, " "), true
+	}
+	return "", false
+}
+
+// tmuxAgentWindowCmd wraps cmdLine so the harness's real exit code is
+// recorded to state.HarnessExitCodeFile once it exits. The harness runs as
+// a tmux grandchild, so its exit code is otherwise invisible to the
+// `sciontool init` supervisor (which only sees the sh/container exit
+// code); reading the file lets init report crashes correctly. The whole
+// wrapper is single-quoted again so tmux's command parser treats it as one
+// word. shellPath is the shell binary to invoke ("sh" or "/bin/sh",
+// depending on what the runtime guarantees is resolvable for argv[0]).
+func tmuxAgentWindowCmd(shellPath, cmdLine string) string {
+	return shellPath + " -c " + shellQuote(cmdLine+"; echo $? > "+state.HarnessExitCodeFile)
+}
+
+// tmuxSessionEnd selects how buildTmuxStartCmd keeps the tmux session's
+// lifetime visible to the container/pod's PID 1 once the session is
+// created.
+type tmuxSessionEnd int
+
+const (
+	// tmuxAttachSession runs `attach-session -t scion`, a foreground
+	// attach bound to a TTY. Valid only where the runtime provides a TTY
+	// for PID 1 (Docker, Podman, Kubernetes).
+	tmuxAttachSession tmuxSessionEnd = iota
+	// tmuxPollSession polls tmux for the session's liveness in a shell
+	// loop instead of attaching. Required where PID 1 has no TTY (Cloud
+	// Run, Cloud Run sandbox): `attach-session` fails immediately with
+	// "open terminal failed: not a terminal" there.
+	tmuxPollSession
+)
+
+// buildTmuxStartCmd builds the tmux invocation shared by every runtime: it
+// creates the "scion" session with an "agent" window running
+// agentWindowCmd, adds a "shell" window, selects back to "agent", and then
+// keeps PID 1 alive per end. end is an explicit parameter rather than
+// something this function infers, because the TTY-vs-no-TTY difference
+// between runtimes is a genuine behavioural difference, not one to
+// normalise away.
+func buildTmuxStartCmd(agentWindowCmd string, end tmuxSessionEnd) string {
+	cmd := fmt.Sprintf(
+		"tmux new-session -d -s scion -n agent %s \\; set-option -g window-size latest \\; new-window -t scion -n shell \\; select-window -t scion:agent",
+		agentWindowCmd,
+	)
+	switch end {
+	case tmuxPollSession:
+		return cmd + "; while tmux has-session -t scion 2>/dev/null; do sleep 2; done"
+	default:
+		return cmd + " \\; attach-session -t scion"
+	}
+}
+
 // buildCommonRunArgs constructs the common arguments for 'run' command across different runtimes.
 func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	args := []string{"run", "-d", "-i"}
@@ -433,11 +503,24 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		}
 	}
 
-	// Inject environment-type resolved secrets
+	// Inject environment-type resolved secrets. config.Env, emitted above,
+	// always wins: skip any secret whose target collides with a key already
+	// present there, so a secret can never re-decide a value the caller (the
+	// broker or hub that built config.Env) already set for that name. This is
+	// explicit and symmetric with the k8s runtime's equivalent check.
+	envKeys := make(map[string]struct{}, len(config.Env))
+	for _, e := range config.Env {
+		key, _, _ := strings.Cut(e, "=")
+		envKeys[key] = struct{}{}
+	}
 	for _, s := range config.ResolvedSecrets {
-		if s.Type == "environment" || s.Type == "" {
-			addArg("-e", fmt.Sprintf("%s=%s", s.Target, s.Value))
+		if s.Type != "environment" && s.Type != "" {
+			continue
 		}
+		if _, collides := envKeys[s.Target]; collides {
+			continue
+		}
+		addArg("-e", fmt.Sprintf("%s=%s", s.Target, s.Value))
 	}
 
 	// Dev-mode binary override: if SCION_DEV_BINARIES points to a local
@@ -523,34 +606,18 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	// directly into the sh -c used by the tmux agent window. This avoids
 	// the double-sh-c wrapping that previously caused the no-auth command
 	// to be injected as terminal input instead of running standalone.
-	var cmdLine string
-	if config.NoAuth {
-		cmdLine = buildNoAuthCmdLine(config.NoAuthMessage, config.NoAuthCommand)
-	} else if config.Harness != nil {
-		harnessArgs := config.Harness.GetCommand(config.Task, config.Resume, config.CommandArgs)
-		var quotedArgs []string
-		for _, a := range harnessArgs {
-			quotedArgs = append(quotedArgs, shellQuote(a))
-		}
-		cmdLine = strings.Join(quotedArgs, " ")
-	} else {
+	cmdLine, ok := harnessCmdLine(config)
+	if !ok {
 		return nil, fmt.Errorf("no harness provided")
 	}
 
 	// Wrap the harness in a shell that records its real exit code to a fixed
-	// file. The harness runs as a tmux grandchild, so its exit code is
-	// otherwise invisible to the `sciontool init` supervisor (which only sees
-	// the sh/container exit code). Writing $? lets init read the authoritative
-	// harness exit code and report crashes correctly. The whole wrapper is
-	// single-quoted again so tmux's command parser treats it as one word.
-	agentWindowCmd := "sh -c " + shellQuote(cmdLine+"; echo $? > "+state.HarnessExitCodeFile)
-
-	// Build tmux command: create session with "agent" window running the harness,
-	// then add a "shell" window and switch back to the agent window.
-	tmuxCmd := fmt.Sprintf(
-		"tmux new-session -d -s scion -n agent %s \\; set-option -g window-size latest \\; new-window -t scion -n shell \\; select-window -t scion:agent \\; attach-session -t scion",
-		agentWindowCmd,
-	)
+	// file, then build the tmux command: create session with "agent" window
+	// running the harness, add a "shell" window, and attach (Docker/Podman
+	// provide PID 1 a TTY). See tmuxAgentWindowCmd/buildTmuxStartCmd for the
+	// shared definition across runtimes.
+	agentWindowCmd := tmuxAgentWindowCmd("sh", cmdLine)
+	tmuxCmd := buildTmuxStartCmd(agentWindowCmd, tmuxAttachSession)
 
 	if len(fuseMounts) > 0 {
 		// Pass tmuxCmd via env var to avoid double-shell quoting issues.

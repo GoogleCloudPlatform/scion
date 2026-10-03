@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 )
 
 // nfsWorktreeConfig is nfsBaseConfig for a worktree-per-agent agent.
@@ -187,7 +188,10 @@ func TestRun_NFSWorktreeLockLost_CreatesProvisioningPod(t *testing.T) {
 	r := newNFSTestK8sRuntime()
 	cfg := nfsWorktreeConfig("scion-wt-lock-lost")
 	cfg.Locker = &alwaysLoseLocker{}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	// Run creates the pod, then fails readiness at its first poll (see
+	// failPodReadiness), which keeps the pod for inspection.
+	failPodReadiness(r.Client.Clientset.(*k8sfake.Clientset))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	r.Run(ctx, cfg) //nolint:errcheck
 

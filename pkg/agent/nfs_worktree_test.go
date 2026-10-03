@@ -143,11 +143,12 @@ func TestStartNFSWorktree_LaterStartCreatesWorktreeDir(t *testing.T) {
 	assert.Empty(t, entries)
 }
 
-// clone-per-agent and shared-plain on NFS are unchanged: every agent
-// mounts projects/<project ID>/workspace at /workspace, and no worktree
-// directory is created.
+// shared-plain on NFS is unchanged: every agent mounts
+// projects/<project ID>/workspace at /workspace, and no worktree directory
+// is created. clone-per-agent creates no worktree directory either (see
+// TestStartNFSAgentDir_OtherModesUnchanged for its own layout).
 func TestStartNFSWorktree_OtherModesUnchanged(t *testing.T) {
-	for _, mode := range []string{"clone-per-agent", "shared-plain", ""} {
+	for _, mode := range []string{"shared-plain", ""} {
 		t.Run("mode="+mode, func(t *testing.T) {
 			mountRoot := filepath.Join(t.TempDir(), "nfs")
 			ws := nfsTestWorkspaceDir(mountRoot)

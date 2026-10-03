@@ -80,6 +80,7 @@ type ChatAgentMember = import('./chat-members.js').ChatAgentMember;
 
 import { chatRecentFiles } from '../../../client/chat-recent-files.js';
 import { agentGraphHref, terminalHref } from '../../../client/open-terminal.js';
+import { setPreferredTimeZone } from '../../../utils/time.js';
 
 const CONVERSATION_KEY = 'topic-1';
 
@@ -376,6 +377,62 @@ describe('scion-chat-thread reply send payload (nc-reply-recipient)', () => {
     const body = JSON.parse(String((sendCall![1] as RequestInit).body));
     expect(body.reply_to_id).toBe('orig-msg-1');
     expect(body).not.toHaveProperty('reply_to_agent');
+  });
+});
+
+// "Send with interruption": the composer's interrupt flag must reach the v2
+// send body, and only when requested.
+describe('scion-chat-thread interrupt send payload', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  async function sendAndGetBody(interrupt: boolean): Promise<Record<string, unknown>> {
+    const el = await mount();
+    const internals = el as unknown as {
+      handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void>;
+    };
+
+    apiFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 201,
+      json: () => Promise.resolve({ id: 'sent-1' }),
+    } as unknown as Response);
+
+    await internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'stop and look at this',
+          plain: false,
+          interrupt,
+          onSuccess: vi.fn(),
+          mentions: [],
+          attachmentIds: [],
+        },
+      })
+    );
+
+    const sendCall = apiFetch.mock.calls.find(
+      (c) =>
+        String(c[0]).endsWith('/messages') && (c[1] as RequestInit | undefined)?.method === 'POST'
+    );
+    expect(sendCall).toBeDefined();
+    return JSON.parse(String((sendCall![1] as RequestInit).body)) as Record<string, unknown>;
+  }
+
+  it('sends interrupt: true when the composer requests interruption', async () => {
+    const body = await sendAndGetBody(true);
+    expect(body.interrupt).toBe(true);
+  });
+
+  it('omits interrupt on an ordinary send', async () => {
+    const body = await sendAndGetBody(false);
+    expect(body).not.toHaveProperty('interrupt');
   });
 });
 
@@ -3875,6 +3932,29 @@ describe('scion-chat-thread inter-agent day-split markers', () => {
       expect((marker as unknown as { messageCount: number }).messageCount).toBe(1);
     }
   });
+
+  // Review round 3, R3-3: the thread's DisplayZoneController re-renders the
+  // date divider when the preference changes after mount — pin it, since
+  // deleting the controller left every other test in this suite green.
+  it('re-renders the date divider zone label after a mounted thread outlives a preference change', async () => {
+    try {
+      const el = await mountAgentDM({
+        interagent: [makeIaMessage({ id: 'ia-1', createdAt: '2026-09-23T15:00:00Z' })],
+      });
+
+      const dividerBefore = el.shadowRoot!.querySelector('.date-divider');
+      expect(dividerBefore?.textContent).toContain('UTC'); // Auto, pinned ambient zone
+
+      setPreferredTimeZone('Asia/Tokyo');
+      await el.updateComplete;
+
+      const dividerAfter = el.shadowRoot!.querySelector('.date-divider');
+      expect(dividerAfter?.textContent).toContain('Asia/Tokyo');
+      expect(dividerAfter?.textContent).not.toContain('UTC');
+    } finally {
+      setPreferredTimeZone('');
+    }
+  });
 });
 
 describe('scion-chat-thread path-link project context fallback', () => {
@@ -5828,6 +5908,232 @@ describe('scion-chat-thread /stop slash command', () => {
   });
 });
 
+describe('scion-chat-thread /status slash command', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    fakeStateManager.clearAgents();
+  });
+
+  type StatusInternals = { handleSlashStatus(): Promise<void> };
+
+  function agentsPage(agents: Array<{ slug: string; phase: string }>, nextCursor?: string) {
+    return {
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve(nextCursor ? { agents, nextCursor } : { agents }),
+    };
+  }
+
+  function systemMessages(el: ScionChatThread): Array<string | null> {
+    return Array.from(el.shadowRoot?.querySelectorAll('scion-chat-system-line') ?? []).map((l) =>
+      l.getAttribute('message')
+    );
+  }
+
+  function agentListCalls(): string[] {
+    return apiFetch.mock.calls
+      .map((c) => String(c[0]))
+      .filter((u) => u.startsWith('/api/v1/agents?'));
+  }
+
+  /**
+   * The GET /api/v1/agents list handler filters on `projectId` and returns
+   * `{ agents, nextCursor }`. A `project=` param is ignored, and a client
+   * reading `items` never sees any agents.
+   */
+  it('queries by projectId and renders the agents from the response', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    apiFetch.mockResolvedValueOnce(
+      agentsPage([
+        { slug: 'coder', phase: 'running' },
+        { slug: 'reviewer', phase: 'stopped' },
+      ])
+    );
+
+    await (el as unknown as StatusInternals).handleSlashStatus();
+
+    expect(agentListCalls()).toEqual(['/api/v1/agents?projectId=proj-1']);
+    await vi.waitFor(() => {
+      expect(systemMessages(el)).toContain(
+        'Project agents:\n  coder: running\n  reviewer: stopped'
+      );
+    });
+  });
+
+  /**
+   * The server caps each page (500 at the store) and returns `nextCursor`
+   * when more remain. The cursor is bound to the request filter, so each
+   * follow-up page must repeat the same `projectId`.
+   */
+  it('follows nextCursor across pages, repeating the projectId filter', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    apiFetch
+      .mockResolvedValueOnce(agentsPage([{ slug: 'a1', phase: 'running' }], 'c1'))
+      .mockResolvedValueOnce(agentsPage([], 'c2'))
+      .mockResolvedValueOnce(agentsPage([{ slug: 'a2', phase: 'stopped' }]));
+
+    await (el as unknown as StatusInternals).handleSlashStatus();
+
+    expect(agentListCalls()).toEqual([
+      '/api/v1/agents?projectId=proj-1',
+      '/api/v1/agents?projectId=proj-1&cursor=c1',
+      '/api/v1/agents?projectId=proj-1&cursor=c2',
+    ]);
+    await vi.waitFor(() => {
+      expect(systemMessages(el)).toContain('Project agents:\n  a1: running\n  a2: stopped');
+    });
+  });
+
+  it('stops with a failure message when the server repeats a cursor', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    apiFetch
+      .mockResolvedValueOnce(agentsPage([{ slug: 'a1', phase: 'running' }], 'c1'))
+      .mockResolvedValueOnce(agentsPage([{ slug: 'a2', phase: 'running' }], 'c1'));
+
+    await (el as unknown as StatusInternals).handleSlashStatus();
+
+    expect(agentListCalls()).toHaveLength(2);
+    await vi.waitFor(() => {
+      expect(systemMessages(el)).toContain('Failed to fetch project status.');
+    });
+  });
+
+  /**
+   * Mirrors the component's MAX_STATUS_AGENT_PAGES bound in chat-thread.ts
+   * (the server has no page limit). A server that keeps minting new cursors
+   * must not be followed forever: the walk stops at the bound and the
+   * listing ends with a truncation note.
+   */
+  const MAX_STATUS_AGENT_PAGES = 20;
+
+  it('stops at the page bound and notes truncation when cursors never end', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    let page = 0;
+    apiFetch.mockImplementation((url: string) => {
+      if (!String(url).startsWith('/api/v1/agents?')) return Promise.resolve(emptyHistory());
+      page++;
+      // Stop minting cursors well past the bound so an unbounded walk
+      // fails the call-count assertion instead of hanging the test.
+      const next = page < MAX_STATUS_AGENT_PAGES + 5 ? `c${page}` : undefined;
+      return Promise.resolve(agentsPage([{ slug: `a${page}`, phase: 'running' }], next));
+    });
+
+    await (el as unknown as StatusInternals).handleSlashStatus();
+
+    expect(agentListCalls()).toHaveLength(MAX_STATUS_AGENT_PAGES);
+    const expected = Array.from(
+      { length: MAX_STATUS_AGENT_PAGES },
+      (_, i) => `  a${i + 1}: running`
+    );
+    expected.push('  … (list truncated)');
+    await vi.waitFor(() => {
+      expect(systemMessages(el)).toContain(`Project agents:\n${expected.join('\n')}`);
+    });
+  });
+
+  it('does not note truncation when the last page has no nextCursor', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    apiFetch
+      .mockResolvedValueOnce(agentsPage([{ slug: 'a1', phase: 'running' }], 'c1'))
+      .mockResolvedValueOnce(agentsPage([{ slug: 'a2', phase: 'running' }]));
+
+    await (el as unknown as StatusInternals).handleSlashStatus();
+
+    await vi.waitFor(() => {
+      expect(systemMessages(el)).toContain('Project agents:\n  a1: running\n  a2: running');
+    });
+    expect(systemMessages(el).some((m) => m?.includes('list truncated'))).toBe(false);
+  });
+
+  it('fails without showing earlier pages when a follow-up page errors', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    apiFetch
+      .mockResolvedValueOnce(agentsPage([{ slug: 'a1', phase: 'running' }], 'c1'))
+      .mockResolvedValueOnce({ ok: false, status: 500, json: () => Promise.resolve({}) })
+      .mockResolvedValueOnce(agentsPage([{ slug: 'a2', phase: 'running' }]));
+
+    await (el as unknown as StatusInternals).handleSlashStatus();
+
+    expect(agentListCalls()).toEqual([
+      '/api/v1/agents?projectId=proj-1',
+      '/api/v1/agents?projectId=proj-1&cursor=c1',
+    ]);
+    await vi.waitFor(() => {
+      expect(systemMessages(el)).toContain('Failed to fetch project status.');
+    });
+    expect(systemMessages(el).some((m) => m?.startsWith('Project agents:'))).toBe(false);
+  });
+
+  /**
+   * In a chat-page DM, `projectId` is only the inherited project (whatever
+   * the user viewed before opening the DM). Like /stop, /status must list
+   * the DM peer agent's own project instead.
+   */
+  it('in a DM, lists the peer agent project, not the inherited projectId', async () => {
+    fakeStateManager.setAgent('coder', 'proj-peer');
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = 'dm:agent:coder:user:u1';
+    el.isDM = true;
+    // The previously viewed project; a DM's /status must never use it.
+    el.projectId = 'proj-inherited';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValueOnce(agentsPage([{ slug: 'coder', phase: 'running' }]));
+
+    await (el as unknown as StatusInternals).handleSlashStatus();
+
+    expect(agentListCalls()).toEqual(['/api/v1/agents?projectId=proj-peer']);
+    await vi.waitFor(() => {
+      expect(systemMessages(el)).toContain('Project agents:\n  coder: running');
+    });
+  });
+
+  it('in a DM with no peer project, sends no list request', async () => {
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = 'dm:agent:unknown-agent:user:u1';
+    el.isDM = true;
+    // Non-empty, to prove it is never used as a fallback in a DM.
+    el.projectId = 'proj-inherited';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+
+    await (el as unknown as StatusInternals).handleSlashStatus();
+
+    expect(agentListCalls()).toEqual([]);
+    await vi.waitFor(() => {
+      expect(systemMessages(el)).toContain('No project context available.');
+    });
+  });
+
+  it('shows the empty-project message when the response has no agents', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    apiFetch.mockResolvedValueOnce(agentsPage([]));
+
+    await (el as unknown as StatusInternals).handleSlashStatus();
+
+    await vi.waitFor(() => {
+      expect(systemMessages(el)).toContain('No agents found in this project.');
+    });
+  });
+});
+
 describe('scion-chat-thread gcs-link-click', () => {
   type GcsInternals = {
     filePreview: {
@@ -5864,5 +6170,257 @@ describe('scion-chat-thread gcs-link-click', () => {
       object: 'workspace-volumes/dev-brief.md',
       name: 'dev-brief.md',
     });
+  });
+});
+
+describe('scion-chat-thread /spawn slash command', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    fakeStateManager.clearAgents();
+  });
+
+  type SpawnInternals = { handleSlashSpawn(args: string): Promise<void> };
+
+  function systemMessages(el: ScionChatThread): Array<string | null> {
+    return Array.from(el.shadowRoot?.querySelectorAll('scion-chat-system-line') ?? []).map((l) =>
+      l.getAttribute('message')
+    );
+  }
+
+  function createCalls(): Array<Record<string, unknown>> {
+    return apiFetch.mock.calls
+      .filter((c) => c[0] === '/api/v1/agents' && c[1]?.method === 'POST')
+      .map((c) => JSON.parse(String(c[1].body)) as Record<string, unknown>);
+  }
+
+  function created(agent: { slug: string; name: string }) {
+    return { ok: true, status: 201, json: () => Promise.resolve({ agent }) };
+  }
+
+  /**
+   * The hub's CreateAgentRequest (pkg/hub/handlers_agents_core.go) decodes
+   * `projectId` and `name`, and rejects the request when either is empty.
+   * A `project_id` key is silently ignored by the decoder.
+   */
+  it('posts name, projectId and template in the shape the hub decodes', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    apiFetch.mockResolvedValueOnce(created({ slug: 'my-coder', name: 'my-coder' }));
+
+    await (el as unknown as SpawnInternals).handleSlashSpawn('coder my-coder');
+
+    expect(createCalls()).toEqual([{ name: 'my-coder', projectId: 'proj-1', template: 'coder' }]);
+    await vi.waitFor(() => {
+      expect(systemMessages(el)).toContain('Agent "my-coder" spawned successfully.');
+    });
+  });
+
+  it('defaults the name to the template plus a short random suffix', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    apiFetch.mockResolvedValueOnce(created({ slug: 'coder-ab12', name: 'coder-ab12' }));
+
+    await (el as unknown as SpawnInternals).handleSlashSpawn('coder');
+
+    const calls = createCalls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.projectId).toBe('proj-1');
+    expect(calls[0]?.template).toBe('coder');
+    expect(String(calls[0]?.name)).toMatch(/^coder-[a-z0-9]{4}$/);
+  });
+
+  /**
+   * The hub rejects names over 63 runes. A long template is truncated so
+   * the default name fits, without leaving a hyphen before the suffix. A
+   * short base36 float still yields a 4-character suffix.
+   */
+  it('truncates a long template so the default name fits 63 runes', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    apiFetch.mockResolvedValueOnce(created({ slug: 'x', name: 'x' }));
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const template = `${'a'.repeat(57)}-${'b'.repeat(12)}`;
+
+    try {
+      await (el as unknown as SpawnInternals).handleSlashSpawn(template);
+    } finally {
+      random.mockRestore();
+    }
+
+    const calls = createCalls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.template).toBe(template);
+    expect(calls[0]?.name).toBe(`${'a'.repeat(57)}-i000`);
+  });
+
+  /**
+   * The suffix is exactly four base36 characters at the extremes of
+   * Math.random: a tiny value pads with leading zeros, a value just
+   * below 1 maps to the largest suffix.
+   */
+  it.each([
+    [1e-10, '0000'],
+    [0, '0000'],
+    [1 - Number.EPSILON, 'zzzz'],
+  ])('keeps a 4-char base36 suffix when Math.random is %s', async (value, suffix) => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    apiFetch.mockResolvedValueOnce(created({ slug: 'x', name: 'x' }));
+    const random = vi.spyOn(Math, 'random').mockReturnValue(value);
+
+    try {
+      await (el as unknown as SpawnInternals).handleSlashSpawn('coder');
+    } finally {
+      random.mockRestore();
+    }
+
+    const name = String(createCalls()[0]?.name);
+    expect(name).toMatch(/^coder-[0-9a-z]{4}$/);
+    expect(name).toBe(`coder-${suffix}`);
+  });
+
+  /** The hub returns `{ agent }`; the reported name is the agent's slug. */
+  it('reports the slug from the wrapped agent in the response', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    apiFetch.mockResolvedValueOnce(created({ slug: 'hub-slug', name: 'Hub Slug' }));
+
+    await (el as unknown as SpawnInternals).handleSlashSpawn('coder Hub-Slug');
+
+    await vi.waitFor(() => {
+      expect(systemMessages(el)).toContain('Agent "hub-slug" spawned successfully.');
+    });
+  });
+
+  it('shows usage and sends nothing for missing or extra arguments', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+
+    await (el as unknown as SpawnInternals).handleSlashSpawn('  ');
+    await (el as unknown as SpawnInternals).handleSlashSpawn('coder a b');
+
+    expect(createCalls()).toEqual([]);
+    await vi.waitFor(() => {
+      expect(
+        systemMessages(el).filter((m) => m === 'Usage: /spawn <template> [name]')
+      ).toHaveLength(2);
+    });
+  });
+
+  it('shows a failure message and no success on a non-2xx response', async () => {
+    const el = await mount();
+    el.projectId = 'proj-1';
+    apiFetch.mockResolvedValueOnce({ ok: false, status: 409, json: () => Promise.resolve({}) });
+
+    await (el as unknown as SpawnInternals).handleSlashSpawn('coder x');
+
+    await vi.waitFor(() => {
+      expect(systemMessages(el).some((m) => m?.startsWith('Failed to spawn agent'))).toBe(true);
+    });
+    expect(systemMessages(el).some((m) => m?.includes('spawned successfully'))).toBe(false);
+  });
+
+  /**
+   * In a chat-page DM, `projectId` is only the inherited project (whatever
+   * the user viewed before opening the DM). Like /stop, /spawn must create
+   * the agent in the DM peer agent's own project instead.
+   */
+  it('in a DM, spawns into the peer agent project, not the inherited projectId', async () => {
+    fakeStateManager.setAgent('coder', 'proj-peer');
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = 'dm:agent:coder:user:u1';
+    el.isDM = true;
+    el.projectId = 'proj-inherited';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValueOnce(created({ slug: 'helper', name: 'helper' }));
+
+    await (el as unknown as SpawnInternals).handleSlashSpawn('coder helper');
+
+    expect(createCalls()).toEqual([{ name: 'helper', projectId: 'proj-peer', template: 'coder' }]);
+  });
+
+  it('in a DM with no peer project, sends nothing and shows the local message', async () => {
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = 'dm:agent:unknown-agent:user:u1';
+    el.isDM = true;
+    el.projectId = 'proj-inherited';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await vi.waitFor(() => expect(apiFetch).toHaveBeenCalled());
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+
+    await (el as unknown as SpawnInternals).handleSlashSpawn('coder helper');
+
+    expect(createCalls()).toEqual([]);
+    await vi.waitFor(() => {
+      expect(systemMessages(el)).toContain('No project context available.');
+    });
+  });
+});
+
+describe('scion-chat-thread inter-agent markers', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('fetches inter-agent exchanges without raising the access-denied toast', async () => {
+    // Members lack agent.attach on agents they did not create, so this
+    // optional fetch 403s for them; it must fail quietly.
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.isDM = true;
+    el.conversationKey = 'dm:agent:agent-1:user:user-1';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    await vi.waitFor(() =>
+      expect(apiFetch.mock.calls.some((c) => String(c[0]).includes('/interagent?'))).toBe(true)
+    );
+    const call = apiFetch.mock.calls.find((c) => String(c[0]).includes('/interagent?'))!;
+    expect((call[1] as { suppressAccessDeniedToast?: boolean })?.suppressAccessDeniedToast).toBe(
+      true
+    );
+  });
+});
+
+describe('export timestamps in the display zone (tz-refactor task 21)', () => {
+  afterEach(() => {
+    setPreferredTimeZone('');
+    vi.useRealTimers();
+  });
+
+  it('formats each exported message time 24-hour in the display zone, naming the zone', () => {
+    // vitest pins the browser zone to UTC; 15:00Z is midnight in Tokyo.
+    setPreferredTimeZone('Asia/Tokyo');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const el = document.createElement('scion-chat-thread') as any;
+    expect(el.formatExportTimestamp('2026-09-23T15:00:00Z')).toBe(
+      'Sep 24, 2026, 00:00 (Asia/Tokyo)'
+    );
+    expect(el.formatExportTimestamp('not-a-date')).toBe('not-a-date');
+  });
+
+  it('stamps the export filename with the display-zone date', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-23T15:30:00Z'));
+    setPreferredTimeZone('Asia/Tokyo');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const el = document.createElement('scion-chat-thread') as any;
+    expect(el.filenameDateStamp()).toBe('2026-09-24');
+    setPreferredTimeZone('America/New_York');
+    expect(el.filenameDateStamp()).toBe('2026-09-23');
   });
 });

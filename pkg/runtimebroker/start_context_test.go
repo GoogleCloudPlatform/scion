@@ -439,6 +439,42 @@ func TestBuildStartContext_ResolvedSecrets(t *testing.T) {
 	}
 }
 
+// TestBuildStartContext_DropsReservedTargetResolvedSecret verifies that an
+// environment-type resolved secret whose target is reserved for scion's own
+// control-plane env vars is dropped before it reaches opts.ResolvedSecrets,
+// as defense in depth for a row that reached this call without going through
+// the hub's create/patch check or dispatch-time drop. A non-reserved secret
+// in the same request must still pass through.
+func TestBuildStartContext_DropsReservedTargetResolvedSecret(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	secrets := []api.ResolvedSecret{
+		{Name: "RESERVED_NAME_SECRET", Type: "environment", Target: "SCION_METADATA_MODE", Value: "passthrough"},
+		{Name: "API_KEY", Type: "environment", Target: "API_KEY", Value: "secret-value"},
+	}
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:            "agent-1",
+		ResolvedSecrets: secrets,
+		HTTPRequest:     r,
+		Operation:       opCreate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, rs := range sc.Opts.ResolvedSecrets {
+		if rs.Target == "SCION_METADATA_MODE" {
+			t.Errorf("expected reserved-target secret to be dropped, found it in opts.ResolvedSecrets: %+v", rs)
+		}
+	}
+	if len(sc.Opts.ResolvedSecrets) != 1 || sc.Opts.ResolvedSecrets[0].Name != "API_KEY" {
+		t.Errorf("expected only the non-reserved secret to pass through, got %v", sc.Opts.ResolvedSecrets)
+	}
+}
+
 func TestBuildStartContext_ConfigFields(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
@@ -1793,13 +1829,18 @@ func TestBuildStartContext_HubManagedProjectSlugResolution(t *testing.T) {
 
 	// Simulate: ProjectSlug set, ProjectPath empty (buildStartContext resolves it),
 	// ProjectID from hub. This is the path when the handler doesn't pre-resolve.
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
 		Name:        "agent-1",
 		ProjectSlug: "my-project",
 		ProjectID:   "aabbccdd-1234-5678-9012-abcdef123456",
 		Operation:   opCreate,
+		// A current hub sends the hub-managed project path as the
+		// workspace for a shared non-git project (see
+		// ambiguousNonGitWorkspace).
+		Config: &CreateAgentConfig{Workspace: filepath.Join(home, ".scion", "projects", "my-project")},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1848,12 +1889,86 @@ func TestBuildStartContext_NeverFallsBackToLegacyGrovesDir(t *testing.T) {
 		ProjectSlug: slug,
 		ProjectID:   "aabbccdd-1234-5678-9012-abcdef123456",
 		Operation:   opCreate,
+		Config:      &CreateAgentConfig{Workspace: projectsDir},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if sc.Opts.ProjectPath != projectsDir {
 		t.Errorf("ProjectPath = %q, want %q (must never fall back to the legacy groves dir)", sc.Opts.ProjectPath, projectsDir)
+	}
+}
+
+// TestBuildStartContext_GlobalDirFailureMessageOmitsRawError proves that a
+// config.GetGlobalDir failure (ProjectSlug set, HOME unresolvable) returns a
+// startContextError whose Message is a fixed string, not "...: " + the raw
+// os.UserHomeDir error text — a 4xx Status writes Message verbatim to the
+// HTTP response body (writeStartContextError), so it must never be built by
+// string-concatenating a wrapped error even when this particular failure
+// isn't itself a 4xx.
+func TestBuildStartContext_GlobalDirFailureMessageOmitsRawError(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+
+	_, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "agent-1",
+		ProjectSlug: "my-project",
+		Operation:   opCreate,
+	})
+	if err == nil {
+		t.Fatal("buildStartContext() with unresolvable HOME: expected an error, got nil")
+	}
+	sce, ok := err.(*startContextError)
+	if !ok {
+		t.Fatalf("err = %T, want *startContextError", err)
+	}
+	if strings.Contains(sce.Message, "$HOME") || strings.Contains(sce.Message, "defined") {
+		t.Errorf("Message = %q, embeds the raw os.UserHomeDir error text", sce.Message)
+	}
+	if sce.Message != "Failed to resolve the global config directory" {
+		t.Errorf("Message = %q, want the fixed string", sce.Message)
+	}
+	if sce.OriginalErr == nil {
+		t.Error("OriginalErr = nil, want the underlying error preserved for logging/span")
+	}
+}
+
+// TestBuildStartContext_HubEndpointResolutionFailureMessageOmitsRawError
+// proves the same for resolveEffectiveHubEndpoint's failure path (triggered
+// here via cloudrun-sandbox with no configured hub listen port): Message
+// must be a fixed string, not the wrapped error's own text.
+func TestBuildStartContext_HubEndpointResolutionFailureMessageOmitsRawError(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	cfg.HubListenPort = 0
+	srv := newTestServerForStartContextRuntime(t, cfg, "cloudrun-sandbox")
+
+	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+
+	_, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "agent-sandbox-no-port",
+		HTTPRequest: r,
+		Operation:   opCreate,
+	})
+	if err == nil {
+		t.Fatal("buildStartContext() with HubListenPort=0 on cloudrun-sandbox: expected an error, got nil")
+	}
+	sce, ok := err.(*startContextError)
+	if !ok {
+		t.Fatalf("err = %T, want *startContextError", err)
+	}
+	if strings.Contains(sce.Message, "listen port") {
+		t.Errorf("Message = %q, embeds the raw hub-endpoint-resolution error text", sce.Message)
+	}
+	if sce.Message != "Failed to resolve the hub endpoint" {
+		t.Errorf("Message = %q, want the fixed string", sce.Message)
+	}
+	if sce.OriginalErr == nil {
+		t.Error("OriginalErr = nil, want the underlying error preserved for logging/span")
 	}
 }
 
@@ -2105,6 +2220,92 @@ func TestBuildStartContext_HubEndpoint(t *testing.T) {
 	if sc.Opts.Env["SCION_HUB_URL"] != "https://hub.example.com" {
 		t.Errorf("expected SCION_HUB_URL='https://hub.example.com', got %q", sc.Opts.Env["SCION_HUB_URL"])
 	}
+}
+
+// TestBuildStartContext_TrustedHubEndpointOperatorTiersOnly proves
+// StartOptions.TrustedHubEndpoint is populated only from an
+// operator-derived tier (the broker's own configured HubEndpoint here; the
+// request HubEndpoint and the hub connection endpoint rank above it but are
+// exercised at the hubenv_test.go unit level), while the DELIVERED
+// SCION_HUB_ENDPOINT env value still follows the full resolution chain
+// regardless of which tier supplied it. A tenant-controllable resolved-env
+// value and a project-settings-only value both reach the agent's own env,
+// but neither ever reaches TrustedHubEndpoint.
+func TestBuildStartContext_TrustedHubEndpointOperatorTiersOnly(t *testing.T) {
+	const tenantEndpoint = "http://169.254.169.254"
+
+	t.Run("resolved-env-only value is delivered but not trusted", func(t *testing.T) {
+		cfg := DefaultServerConfig()
+		cfg.StateDir = t.TempDir()
+		srv := newTestServerForStartContext(t, cfg)
+
+		sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name:        "agent-1",
+			Operation:   opCreate,
+			ResolvedEnv: map[string]string{"SCION_HUB_ENDPOINT": tenantEndpoint},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Existence control: the value really does reach the agent's own
+		// env, so the TrustedHubEndpoint assertion below is not vacuously
+		// passing because nothing was resolved at all.
+		if sc.Opts.Env["SCION_HUB_ENDPOINT"] != tenantEndpoint {
+			t.Fatalf("existence control failed: SCION_HUB_ENDPOINT = %q, want %q", sc.Opts.Env["SCION_HUB_ENDPOINT"], tenantEndpoint)
+		}
+		if sc.Opts.TrustedHubEndpoint != "" {
+			t.Errorf("TrustedHubEndpoint = %q, want \"\" (a resolved-env-only value must never be trusted for egress)", sc.Opts.TrustedHubEndpoint)
+		}
+	})
+
+	t.Run("broker config endpoint is trusted even with a resolved-env value present", func(t *testing.T) {
+		const operatorEndpoint = "https://hub.operator.example"
+		cfg := DefaultServerConfig()
+		cfg.StateDir = t.TempDir()
+		cfg.HubEndpoint = operatorEndpoint
+		srv := newTestServerForStartContext(t, cfg)
+
+		sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name:        "agent-2",
+			Operation:   opCreate,
+			ResolvedEnv: map[string]string{"SCION_HUB_ENDPOINT": tenantEndpoint},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sc.Opts.TrustedHubEndpoint != operatorEndpoint {
+			t.Errorf("TrustedHubEndpoint = %q, want %q (the operator-configured broker endpoint)", sc.Opts.TrustedHubEndpoint, operatorEndpoint)
+		}
+	})
+
+	// Project settings is itself a hub-resolved file for a hub-managed
+	// project — the same tenant-reachable precondition the resolved-env
+	// tier is excluded for.
+	t.Run("project-settings-only value is delivered but not trusted", func(t *testing.T) {
+		const settingsEndpoint = "https://settings.example.com"
+		projectDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(projectDir, "settings.yaml"), []byte("hub:\n  endpoint: "+settingsEndpoint+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfg := DefaultServerConfig()
+		cfg.StateDir = t.TempDir()
+		srv := newTestServerForStartContext(t, cfg)
+
+		sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+			Name:        "agent-3",
+			Operation:   opCreate,
+			ProjectPath: projectDir,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sc.Opts.Env["SCION_HUB_ENDPOINT"] != settingsEndpoint {
+			t.Fatalf("existence control failed: SCION_HUB_ENDPOINT = %q, want %q", sc.Opts.Env["SCION_HUB_ENDPOINT"], settingsEndpoint)
+		}
+		if sc.Opts.TrustedHubEndpoint != "" {
+			t.Errorf("TrustedHubEndpoint = %q, want \"\" (a project-settings-only value must never be trusted for egress)", sc.Opts.TrustedHubEndpoint)
+		}
+	})
 }
 
 func TestBuildStartContext_GCPMetadataDefaultBlock(t *testing.T) {
@@ -2556,7 +2757,10 @@ func TestBuildStartContext_GCPMetadataUnknownModeFromResolvedEnv(t *testing.T) {
 
 // TestBuildStartContext_GCPMetadataModeFromResolvedEnvStillAccepted guards the
 // inversion against over-reach: the start path must keep working for the modes
-// the hub legitimately injects.
+// the hub legitimately injects. SCION_METADATA_MODE_SOURCE=hub is included
+// because "assign" is an elevated mode: without the marker the broker treats
+// it as untrusted and downgrades it (see
+// TestBuildStartContext_GCPMetadataElevatedModeWithoutSourceMarkerDowngraded).
 func TestBuildStartContext_GCPMetadataModeFromResolvedEnvStillAccepted(t *testing.T) {
 	for _, mode := range []string{"assign", "block"} {
 		t.Run(mode, func(t *testing.T) {
@@ -2567,8 +2771,11 @@ func TestBuildStartContext_GCPMetadataModeFromResolvedEnvStillAccepted(t *testin
 			r := httptest.NewRequest("POST", "/api/v1/agents", nil)
 
 			sc, err := srv.buildStartContext(context.Background(), startContextInputs{
-				Name:        "agent-env-mode",
-				ResolvedEnv: map[string]string{"SCION_METADATA_MODE": mode},
+				Name: "agent-env-mode",
+				ResolvedEnv: map[string]string{
+					"SCION_METADATA_MODE":        mode,
+					"SCION_METADATA_MODE_SOURCE": "hub",
+				},
 				HTTPRequest: r,
 				Operation:   opCreate,
 			})
@@ -2596,13 +2803,16 @@ func TestBuildStartContext_GCPMetadataFromResolvedEnv(t *testing.T) {
 
 	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
 
-	// Simulate hub injecting GCP identity via resolvedEnv (start path)
+	// Simulate hub injecting GCP identity via resolvedEnv (start path).
+	// SCION_METADATA_MODE_SOURCE marks "assign" as the hub's own
+	// authoritative write; without it the broker would downgrade it.
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
 		Name: "agent-resolved-assign",
 		ResolvedEnv: map[string]string{
-			"SCION_METADATA_MODE":       "assign",
-			"SCION_METADATA_SA_EMAIL":   "sa@proj.iam.gserviceaccount.com",
-			"SCION_METADATA_PROJECT_ID": "my-project",
+			"SCION_METADATA_MODE":        "assign",
+			"SCION_METADATA_MODE_SOURCE": "hub",
+			"SCION_METADATA_SA_EMAIL":    "sa@proj.iam.gserviceaccount.com",
+			"SCION_METADATA_PROJECT_ID":  "my-project",
 		},
 		HTTPRequest: r,
 		Operation:   opCreate,
@@ -2632,11 +2842,13 @@ func TestBuildStartContext_GCPMetadataPassthroughFromResolvedEnv(t *testing.T) {
 
 	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
 
-	// Simulate hub injecting passthrough mode via resolvedEnv
+	// Simulate hub injecting passthrough mode via resolvedEnv. The source
+	// marker is required here too: passthrough is an elevated mode.
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
 		Name: "agent-resolved-passthrough",
 		ResolvedEnv: map[string]string{
-			"SCION_METADATA_MODE": "passthrough",
+			"SCION_METADATA_MODE":        "passthrough",
+			"SCION_METADATA_MODE_SOURCE": "hub",
 		},
 		HTTPRequest: r,
 		Operation:   opCreate,
@@ -2651,6 +2863,41 @@ func TestBuildStartContext_GCPMetadataPassthroughFromResolvedEnv(t *testing.T) {
 	}
 	if sc.Opts.Env["GCE_METADATA_HOST"] != "" {
 		t.Errorf("expected no GCE_METADATA_HOST for passthrough, got %q", sc.Opts.Env["GCE_METADATA_HOST"])
+	}
+}
+
+// TestBuildStartContext_GCPMetadataElevatedModeWithoutSourceMarkerDowngraded
+// is the version-skew case SCION_METADATA_MODE_SOURCE exists to close: a hub
+// old enough to predate the marker sends SCION_METADATA_MODE without it, on
+// the same fallback path a stored env var or secret can also reach (see the
+// reserved-target checks elsewhere in this change). Absent the marker, an
+// elevated mode must be downgraded to the secure default rather than
+// trusted.
+func TestBuildStartContext_GCPMetadataElevatedModeWithoutSourceMarkerDowngraded(t *testing.T) {
+	for _, mode := range []string{"assign", "passthrough"} {
+		t.Run(mode, func(t *testing.T) {
+			cfg := DefaultServerConfig()
+			cfg.StateDir = t.TempDir()
+			srv := newTestServerForStartContext(t, cfg)
+
+			r := httptest.NewRequest("POST", "/api/v1/agents", nil)
+
+			sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+				Name:        "agent-unmarked-env-mode",
+				ResolvedEnv: map[string]string{"SCION_METADATA_MODE": mode},
+				HTTPRequest: r,
+				Operation:   opCreate,
+			})
+			if err != nil {
+				t.Fatalf("expected downgrade, not rejection, for mode %q, got error: %v", mode, err)
+			}
+			if sc.Opts.Env["SCION_METADATA_MODE"] != "block" {
+				t.Errorf("expected unmarked mode %q to be downgraded to block, got %q", mode, sc.Opts.Env["SCION_METADATA_MODE"])
+			}
+			if sc.Opts.Env["GCE_METADATA_HOST"] != "localhost:18380" {
+				t.Errorf("expected the metadata redirect to be set after downgrade, got %q", sc.Opts.Env["GCE_METADATA_HOST"])
+			}
+		})
 	}
 }
 

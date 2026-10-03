@@ -64,6 +64,8 @@ type mockManager struct {
 	provisionErr          error
 	stopErr               error
 	listErr               error
+	deleteTargetErr       error
+	messageErr            error
 	lastStartOpts         api.StartOptions
 	lastDeleteProjectPath string
 	lastDeleteAgentID     string
@@ -164,6 +166,9 @@ func (m *mockManager) DeleteTarget(ctx context.Context, agentName, containerID s
 	m.lastDeleteContainerID = containerID
 	m.lastDeleteFiles = deleteFiles
 	m.deleteCalls++
+	if m.deleteTargetErr != nil {
+		return false, m.deleteTargetErr
+	}
 	return true, nil
 }
 
@@ -278,11 +283,11 @@ func (m *mockManager) LastListFilter() map[string]string {
 }
 
 func (m *mockManager) Message(ctx context.Context, agentID, projectID string, message string, interrupt bool) error {
-	return nil
+	return m.messageErr
 }
 
 func (m *mockManager) MessageRaw(ctx context.Context, agentID, projectID string, keys string) error {
-	return nil
+	return m.messageErr
 }
 
 func (m *mockManager) SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
@@ -470,7 +475,35 @@ func TestHostInfo(t *testing.T) {
 	}
 
 	if resp.Capabilities == nil {
-		t.Error("expected capabilities to be present")
+		t.Fatal("expected capabilities to be present")
+	}
+	if !resp.Capabilities.EmptyPerAgentWorkspace {
+		t.Error("expected capabilities.emptyPerAgentWorkspace to be true (design #2703 P2)")
+	}
+}
+
+// TestHostInfo_EmptyPerAgentFollowsDefaultRuntime pins that /api/v1/info
+// advertises EmptyPerAgentWorkspace per default runtime (false for one that
+// opts out, as Cloud Run does), matching the heartbeat.
+func TestHostInfo_EmptyPerAgentFollowsDefaultRuntime(t *testing.T) {
+	srv := newTestServer(t)
+	srv.runtime = &noEmptyPerAgentTestRuntime{MockRuntime: &runtime.MockRuntime{NameFunc: func() string { return "cloudrun" }}}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/info", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+	var resp BrokerInfoResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.Capabilities == nil {
+		t.Fatal("expected capabilities to be present")
+	}
+	if resp.Capabilities.EmptyPerAgentWorkspace {
+		t.Error("capabilities.emptyPerAgentWorkspace = true, want false for a default runtime that opts out")
 	}
 }
 
@@ -902,6 +935,127 @@ func TestCreateAgentProvisionOnly_TemplateNotFound(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "missing-template") {
 		t.Errorf("expected response to name the unresolved resource, got: %s", w.Body.String())
+	}
+}
+
+// TestCreateAgentFullStart_SkillResolutionRateLimited proves that a required
+// skill reference failing to resolve because of GitHub rate limiting
+// surfaces as a 429, naming the ref and the cause, instead of the generic
+// 500 the "other error" branch maps to (#2546).
+func TestCreateAgentFullStart_SkillResolutionRateLimited(t *testing.T) {
+	srv := newTestServer(t)
+	mgr := srv.manager.(*mockManager)
+	mgr.startErr = &agent.SkillResolutionError{
+		URI:     "gh://example-org/example-skills/my-skill@main",
+		Code:    agent.SkillErrCodeRateLimited,
+		Message: "GitHub API request to /repos/example-org/example-skills/commits/main rate limited",
+	}
+
+	body := `{"name": "new-agent", "config": {"template": "claude"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusTooManyRequests, w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "gh://example-org/example-skills/my-skill@main") {
+		t.Errorf("expected response to name the unresolved skill ref, got: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "rate_limited") {
+		t.Errorf("expected response to name the cause, got: %s", w.Body.String())
+	}
+}
+
+// TestCreateAgentProvisionOnly_SkillResolutionNotFound is the ProvisionOnly
+// counterpart, covering the not-found cause mapped to 404.
+func TestCreateAgentProvisionOnly_SkillResolutionNotFound(t *testing.T) {
+	srv := newTestServer(t)
+	mgr := srv.manager.(*mockManager)
+	mgr.provisionErr = &agent.SkillResolutionError{
+		URI:     "gh://example-org/example-skills/missing-skill@main",
+		Code:    agent.SkillErrCodeNotFound,
+		Message: `skill "missing-skill" not found in repo example-org/example-skills at ref main`,
+	}
+
+	body := `{"name": "new-agent", "provisionOnly": true, "config": {"template": "claude"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusNotFound, w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "gh://example-org/example-skills/missing-skill@main") {
+		t.Errorf("expected response to name the unresolved skill ref, got: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "not_found") {
+		t.Errorf("expected response to name the cause, got: %s", w.Body.String())
+	}
+}
+
+// TestCreateAgentFullStart_SkillResolutionUpstreamUnavailableBecomes502
+// proves that GitHub itself failing (5xx after retries exhausted) surfaces as
+// 502, the one 5xx code in the mapping that still names the ref and the
+// cause, instead of either the pre-fix 500 or the briefly-considered 400
+// default (#2546 R3, O1).
+func TestCreateAgentFullStart_SkillResolutionUpstreamUnavailableBecomes502(t *testing.T) {
+	srv := newTestServer(t)
+	mgr := srv.manager.(*mockManager)
+	mgr.startErr = &agent.SkillResolutionError{
+		URI:     "gh://example-org/example-skills/my-skill@main",
+		Code:    agent.SkillErrCodeUpstreamUnavailable,
+		Message: "GitHub API error (503) while resolving commit, retries exhausted",
+	}
+
+	body := `{"name": "new-agent", "config": {"template": "claude"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadGateway, w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "gh://example-org/example-skills/my-skill@main") {
+		t.Errorf("expected response to name the unresolved skill ref, got: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "upstream_unavailable") {
+		t.Errorf("expected response to name the cause, got: %s", w.Body.String())
+	}
+}
+
+// TestCreateAgentFullStart_SkillResolutionDefaultCodeStaysInternalError
+// proves that an uncategorized SkillResolutionError.Code (e.g. a Hub-side
+// PreResolvedSkills code this broker version does not recognize) stays on
+// the existing 500 path, matching the "any other error" branch, rather than
+// being guessed at as a 4xx (#2546 R3).
+func TestCreateAgentFullStart_SkillResolutionDefaultCodeStaysInternalError(t *testing.T) {
+	srv := newTestServer(t)
+	mgr := srv.manager.(*mockManager)
+	mgr.startErr = &agent.SkillResolutionError{
+		URI:     "gh://example-org/example-skills/my-skill@main",
+		Code:    "storage_error",
+		Message: "skill my-skill version abc123 has storage files missing",
+	}
+
+	body := `{"name": "new-agent", "config": {"template": "claude"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusInternalServerError, w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "gh://example-org/example-skills/my-skill@main") {
+		t.Errorf("expected response to name the unresolved skill ref, got: %s", w.Body.String())
 	}
 }
 
@@ -1812,9 +1966,10 @@ func TestCreateAgentProvisionOnly_PlainProvision_DoesNotEchoReprovisioned(t *tes
 // plain (unwrapped, not agent.ErrReprovisionRefused) Reprovision failure: the
 // handler must return the generic 500 — not the 409 the sentinel-wrapped
 // path gets — and must not echo reprovisioned:true for a request that never
-// actually succeeded. A neutral error message (no "reprovision refused"
-// substring) keeps this test from being satisfied by accident if the 409
-// path's body text ever changed to also contain "error".
+// actually succeeded. The body must carry the fixed, identity-free
+// "Failed to provision agent" message, never Reprovision's own raw error
+// text, which could carry a runtime-specific detail this response must not
+// disclose.
 func TestCreateAgentProvisionOnly_ReprovisionError_ReturnsErrorNoEcho(t *testing.T) {
 	srv, mgr := newTestServerWithProvisionCapture()
 	mgr.reprovisionErr = errors.New("boom: transient broker failure")
@@ -1839,8 +1994,11 @@ func TestCreateAgentProvisionOnly_ReprovisionError_ReturnsErrorNoEcho(t *testing
 	if !mgr.reprovisionCalled {
 		t.Error("expected Reprovision to have been attempted")
 	}
-	if !strings.Contains(w.Body.String(), "boom: transient broker failure") {
-		t.Errorf("expected the error body to surface the Reprovision error, got: %s", w.Body.String())
+	if strings.Contains(w.Body.String(), "boom: transient broker failure") {
+		t.Errorf("the error body must never surface Reprovision's own raw error text, got: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Failed to provision agent") {
+		t.Errorf("expected the fixed, identity-free provision-failure message, got: %s", w.Body.String())
 	}
 	if strings.Contains(w.Body.String(), `"reprovisioned":true`) {
 		t.Errorf("a failed Reprovision must never echo reprovisioned:true, got: %s", w.Body.String())
@@ -2546,7 +2704,7 @@ func TestCreateAgentHubManagedProjectSettingsEndpoint(t *testing.T) {
 		"name": "hub-managed-agent",
 		"projectSlug": "settings-test-project",
 		"hubEndpoint": "http://localhost:9810",
-		"config": {"template": "claude"}
+		"config": {"template": "claude", "workspace": "` + projectPath + `"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -3784,7 +3942,7 @@ func TestCreateAgentProjectSlugResolvesProjectPath(t *testing.T) {
 		"projectId": "project-abc",
 		"projectSlug": "my-hub-project",
 		"provisionOnly": true,
-		"config": {"template": "claude"}
+		"config": {"template": "claude", "workspace": "/hub/projects/my-hub-project"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

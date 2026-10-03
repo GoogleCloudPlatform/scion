@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -33,8 +34,9 @@ type mockControlChannelTunnel struct {
 	connected   bool
 	lastBroker  string
 	lastRequest *wsprotocol.RequestEnvelope
-	status      int    // response status; 0 means 200
-	body        []byte // response body; nil means no body
+	status      int               // response status; 0 means 200
+	body        []byte            // response body; nil means no body
+	headers     map[string]string // response headers; nil means none
 	// err, when non-nil, makes TunnelRequest fail instead of returning a
 	// response — used by keys fault-injection tests (e.g. a broker
 	// reconnect or response-loss mid-flight, after the pre-send connection
@@ -60,7 +62,7 @@ func (m *mockControlChannelTunnel) TunnelRequest(_ context.Context, brokerID str
 	if status == 0 {
 		status = http.StatusOK
 	}
-	return wsprotocol.NewResponseEnvelope(req.RequestID, status, nil, m.body), nil
+	return wsprotocol.NewResponseEnvelope(req.RequestID, status, m.headers, m.body), nil
 }
 
 type mockBrokerSigner struct {
@@ -326,5 +328,45 @@ func TestControlChannelBrokerClient_DeleteAgentForwardsProjectPath(t *testing.T)
 	}
 	if q, _ := url.ParseQuery(tunnel.lastRequest.Query); q.Has("projectPath") {
 		t.Errorf("projectPath sent without a hint: %q", tunnel.lastRequest.Query)
+	}
+}
+
+// TestControlChannelBrokerClient_CreateAgentWithGather_ErrorCarriesStatus
+// proves the control-channel counterpart of brokerHTTPTransport's
+// CreateAgentWithGather: a broker error status must survive as a
+// *brokerStatusError, including its Retry-After header, so
+// dispatchCreateErrorResponse can relay a skill-resolution 429/404/504/502
+// instead of every control-channel create failure losing its status to a
+// bare fmt.Errorf (#2546 R2).
+func TestControlChannelBrokerClient_CreateAgentWithGather_ErrorCarriesStatus(t *testing.T) {
+	body := []byte(`{"error":{"code":"skill_resolution_failed","message":"required skill \"gh://owner/repo/my-skill@main\" could not be resolved: rate limited","details":{"skill":"gh://owner/repo/my-skill@main","cause":"rate_limited"}}}`)
+	tunnel := &mockControlChannelTunnel{
+		connected: true,
+		status:    http.StatusTooManyRequests,
+		body:      body,
+		headers:   map[string]string{"Retry-After": "120"},
+	}
+	client := &ControlChannelBrokerClient{manager: tunnel}
+
+	_, _, err := client.CreateAgentWithGather(context.Background(), "broker-1", "unused", &RemoteCreateAgentRequest{Name: "new-agent"})
+	if err == nil {
+		t.Fatal("expected an error for the broker's 429 response")
+	}
+
+	var se *brokerStatusError
+	if !errors.As(err, &se) {
+		t.Fatalf("expected a *brokerStatusError, got %T: %v", err, err)
+	}
+	if se.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("expected status %d, got %d", http.StatusTooManyRequests, se.StatusCode)
+	}
+	if se.RetryAfter != "120" {
+		t.Errorf("expected RetryAfter %q, got %q", "120", se.RetryAfter)
+	}
+	if se.brokerErrorCode() != skillResolutionErrorCode {
+		t.Errorf("expected broker error code %q, got %q", skillResolutionErrorCode, se.brokerErrorCode())
+	}
+	if !strings.Contains(se.brokerErrorMessage(), "gh://owner/repo/my-skill@main") {
+		t.Errorf("expected broker error message to name the ref, got: %s", se.brokerErrorMessage())
 	}
 }
