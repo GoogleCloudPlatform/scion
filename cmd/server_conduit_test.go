@@ -350,6 +350,53 @@ func TestStartConduit(t *testing.T) {
 	})
 }
 
+// TestStartConduitRelay_AdvertiseHostCheckOnlyInHA: the public-host rule
+// applies only in hosted HA. A single-node hub on http://localhost may
+// advertise localhost on its internal port; in hosted HA the same setting
+// is refused.
+func TestStartConduitRelay_AdvertiseHostCheckOnlyInHA(t *testing.T) {
+	t.Cleanup(resetServerFlags)
+	const hubEndpoint = "http://localhost:9810"
+	tests := []struct {
+		name      string
+		requireHA bool
+		advertise string
+		wantErr   string // "" = the advertise check passes
+	}{
+		{name: "single node, localhost", advertise: "http://localhost:9811"},
+		{name: "single node, cloud run host", advertise: "https://x.a.run.app"},
+		{name: "hosted HA, public hub host", requireHA: true, advertise: "http://localhost:9811", wantErr: "public hub host"},
+		{name: "hosted HA, cloud run host", requireHA: true, advertise: "https://x.a.run.app", wantErr: "Cloud Run host"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetServerFlags()
+			enableHub = true
+			t.Setenv("K_SERVICE", "")
+			t.Setenv("SCION_SERVER_SESSION_SECRET", "conduit-test-signing-secret-0123456789")
+			srv := conduitHubServerWith(t, true, hub.ServerConfig{SharedSigningSecret: "conduit-test-signing-secret-0123456789"})
+			require.True(t, srv.ConduitGrantRingShared())
+			cfg := &config.GlobalConfig{}
+			cfg.Hub.Conduit.PeerAuth = config.ConduitPeerAuthHMAC
+			cfg.Hub.Conduit.InternalAdvertise = tt.advertise
+			// A listen address that cannot open: past the advertise check,
+			// startup stops at the listener.
+			cfg.Hub.Conduit.InternalListen = "256.0.0.1:1"
+			ctx, cancel := context.WithCancel(context.Background())
+			var wg sync.WaitGroup
+			t.Cleanup(func() { cancel(); wg.Wait() })
+			err := startConduitRelay(ctx, cfg, srv, hubEndpoint, &wg, make(chan error, 1), tt.requireHA)
+			require.Error(t, err)
+			if tt.wantErr != "" {
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			assert.NotContains(t, err.Error(), "internal_advertise")
+			assert.Contains(t, err.Error(), "256.0.0.1:1", "startup reached the listener")
+		})
+	}
+}
+
 func TestCheckConduitAdvertiseHost(t *testing.T) {
 	tests := []struct {
 		name, advertise, hub string

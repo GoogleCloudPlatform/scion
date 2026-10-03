@@ -191,8 +191,13 @@ func startConduitRelay(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hu
 	if requireHA && os.Getenv("K_SERVICE") != "" {
 		return errConduitRelayOnCloudRun
 	}
-	if err := checkConduitAdvertiseHost(cfg.Hub.Conduit.InternalAdvertise, hubEndpoint); err != nil {
-		return err
+	// Hosted HA only: a single-node hub may advertise the same host as its
+	// public endpoint (e.g. localhost on another port), and its self-check
+	// still guards addressability.
+	if requireHA {
+		if err := checkConduitAdvertiseHost(cfg.Hub.Conduit.InternalAdvertise, hubEndpoint); err != nil {
+			return err
+		}
 	}
 	id := hub.ConduitInstanceID(cfg.Hub.Conduit.InstanceID)
 	auth, mode, err := hub.NewConduitPeerAuth(conduitPeerAuthOptions(ctx, cfg, id, metadata.OnGCE()))
@@ -271,8 +276,9 @@ var errConduitRelayOnCloudRun = errors.New("the in-process conduit relay is not 
 	"its own internal address, or turn hub.conduit off (a separate relay role will support this deployment later)")
 
 // checkConduitAdvertiseHost refuses an internal_advertise whose host is the
-// public hub endpoint's host or a Cloud Run (*.run.app) host: those names
-// reach an arbitrary instance behind a load balancer, not this node.
+// public hub endpoint's host or a Cloud Run (*.run.app) host: in hosted HA
+// those names reach an arbitrary instance behind a load balancer, not this
+// node. It runs only in hosted HA.
 func checkConduitAdvertiseHost(advertise, hubEndpoint string) error {
 	if advertise == "" {
 		return nil
