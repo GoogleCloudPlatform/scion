@@ -464,6 +464,8 @@ func TestRestoreConflictingEdgeRollsBack409(t *testing.T) {
 
 	rec := restoreForTest(t, srv, agent.ID)
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "active delegation that conflicts",
+		"the conflict names the delegation, not a generic duplicate")
 
 	got := mustGetAgent(t, s, agent.ID)
 	assert.False(t, got.DeletedAt.IsZero(), "the row stays soft-deleted")
