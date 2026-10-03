@@ -405,3 +405,81 @@ func TestCountUnbackfilledMessages_InvalidProjectIDReturnsError(t *testing.T) {
 	assert.Error(t, err)
 	assert.Equal(t, 0, count)
 }
+
+// TestMessageProjectProvenanceRoundTrip pins ptone/scion#2282: the
+// server-derived SenderProjectID / RecipientProjectID stamps must survive a
+// CreateMessage -> read round-trip on every read path, and an absent stamp
+// (human sender, legacy row) must read back as nil.
+func TestMessageProjectProvenanceRoundTrip(t *testing.T) {
+	s := newTestMessageStore(t)
+	ctx := context.Background()
+	projectID := uuid.NewString()
+	senderProj := uuid.NewString()
+	recipientProj := projectID
+
+	stamped := newTestMessage(projectID, "agent-1")
+	stamped.Sender = "agent:peer"
+	stamped.SenderProjectID = &senderProj
+	stamped.RecipientProjectID = &recipientProj
+	require.NoError(t, s.CreateMessage(ctx, stamped))
+
+	unstamped := newTestMessage(projectID, "agent-1")
+	require.NoError(t, s.CreateMessage(ctx, unstamped))
+
+	emptyStr := ""
+	emptyStamp := newTestMessage(projectID, "agent-1")
+	emptyStamp.SenderProjectID = &emptyStr
+	require.NoError(t, s.CreateMessage(ctx, emptyStamp))
+
+	assertStamped := func(t *testing.T, got *store.Message) {
+		t.Helper()
+		require.NotNil(t, got.SenderProjectID, "SenderProjectID must be persisted")
+		require.NotNil(t, got.RecipientProjectID, "RecipientProjectID must be persisted")
+		assert.Equal(t, senderProj, *got.SenderProjectID)
+		assert.Equal(t, recipientProj, *got.RecipientProjectID)
+	}
+
+	t.Run("GetMessage", func(t *testing.T) {
+		got, err := s.GetMessage(ctx, stamped.ID)
+		require.NoError(t, err)
+		assertStamped(t, got)
+
+		got, err = s.GetMessage(ctx, unstamped.ID)
+		require.NoError(t, err)
+		assert.Nil(t, got.SenderProjectID)
+		assert.Nil(t, got.RecipientProjectID)
+
+		got, err = s.GetMessage(ctx, emptyStamp.ID)
+		require.NoError(t, err)
+		assert.Nil(t, got.SenderProjectID, "an empty stamp persists as NULL")
+	})
+
+	t.Run("GetMessagesByIDs", func(t *testing.T) {
+		got, err := s.GetMessagesByIDs(ctx, []string{stamped.ID, unstamped.ID})
+		require.NoError(t, err)
+		require.Contains(t, got, stamped.ID)
+		assertStamped(t, got[stamped.ID])
+		assert.Nil(t, got[unstamped.ID].SenderProjectID)
+	})
+
+	t.Run("ListMessages", func(t *testing.T) {
+		res, err := s.ListMessages(ctx, store.MessageFilter{ProjectID: projectID}, store.ListOptions{Limit: 10})
+		require.NoError(t, err)
+		var found bool
+		for i := range res.Items {
+			if res.Items[i].ID == stamped.ID {
+				found = true
+				assertStamped(t, &res.Items[i])
+			}
+		}
+		assert.True(t, found)
+	})
+}
+
+func TestMessageProjectProvenanceRejectsMalformedID(t *testing.T) {
+	s := newTestMessageStore(t)
+	bad := "not-a-uuid"
+	msg := newTestMessage(uuid.NewString(), "agent-1")
+	msg.RecipientProjectID = &bad
+	assert.ErrorIs(t, s.CreateMessage(context.Background(), msg), store.ErrInvalidInput)
+}

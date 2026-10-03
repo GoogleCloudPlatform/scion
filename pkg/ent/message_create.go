@@ -244,6 +244,34 @@ func (_c *MessageCreate) SetNillableConversationID(v *uuid.UUID) *MessageCreate 
 	return _c
 }
 
+// SetSenderProjectID sets the "sender_project_id" field.
+func (_c *MessageCreate) SetSenderProjectID(v uuid.UUID) *MessageCreate {
+	_c.mutation.SetSenderProjectID(v)
+	return _c
+}
+
+// SetNillableSenderProjectID sets the "sender_project_id" field if the given value is not nil.
+func (_c *MessageCreate) SetNillableSenderProjectID(v *uuid.UUID) *MessageCreate {
+	if v != nil {
+		_c.SetSenderProjectID(*v)
+	}
+	return _c
+}
+
+// SetRecipientProjectID sets the "recipient_project_id" field.
+func (_c *MessageCreate) SetRecipientProjectID(v uuid.UUID) *MessageCreate {
+	_c.mutation.SetRecipientProjectID(v)
+	return _c
+}
+
+// SetNillableRecipientProjectID sets the "recipient_project_id" field if the given value is not nil.
+func (_c *MessageCreate) SetNillableRecipientProjectID(v *uuid.UUID) *MessageCreate {
+	if v != nil {
+		_c.SetRecipientProjectID(*v)
+	}
+	return _c
+}
+
 // SetCreated sets the "created" field.
 func (_c *MessageCreate) SetCreated(v time.Time) *MessageCreate {
 	_c.mutation.SetCreated(v)
@@ -501,6 +529,14 @@ func (_c *MessageCreate) createSpec() (*Message, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.ConversationID(); ok {
 		_spec.SetField(message.FieldConversationID, field.TypeUUID, value)
 		_node.ConversationID = &value
+	}
+	if value, ok := _c.mutation.SenderProjectID(); ok {
+		_spec.SetField(message.FieldSenderProjectID, field.TypeUUID, value)
+		_node.SenderProjectID = &value
+	}
+	if value, ok := _c.mutation.RecipientProjectID(); ok {
+		_spec.SetField(message.FieldRecipientProjectID, field.TypeUUID, value)
+		_node.RecipientProjectID = &value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(message.FieldCreated, field.TypeTime, value)
@@ -844,6 +880,12 @@ func (u *MessageUpsertOne) UpdateNewValues() *MessageUpsertOne {
 	u.create.conflict = append(u.create.conflict, sql.ResolveWith(func(s *sql.UpdateSet) {
 		if _, exists := u.create.mutation.ID(); exists {
 			s.SetIgnore(message.FieldID)
+		}
+		if _, exists := u.create.mutation.SenderProjectID(); exists {
+			s.SetIgnore(message.FieldSenderProjectID)
+		}
+		if _, exists := u.create.mutation.RecipientProjectID(); exists {
+			s.SetIgnore(message.FieldRecipientProjectID)
 		}
 		if _, exists := u.create.mutation.Created(); exists {
 			s.SetIgnore(message.FieldCreated)
@@ -1376,6 +1418,12 @@ func (u *MessageUpsertBulk) UpdateNewValues() *MessageUpsertBulk {
 		for _, b := range u.create.builders {
 			if _, exists := b.mutation.ID(); exists {
 				s.SetIgnore(message.FieldID)
+			}
+			if _, exists := b.mutation.SenderProjectID(); exists {
+				s.SetIgnore(message.FieldSenderProjectID)
+			}
+			if _, exists := b.mutation.RecipientProjectID(); exists {
+				s.SetIgnore(message.FieldRecipientProjectID)
 			}
 			if _, exists := b.mutation.Created(); exists {
 				s.SetIgnore(message.FieldCreated)

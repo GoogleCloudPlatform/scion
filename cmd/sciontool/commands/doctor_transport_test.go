@@ -58,7 +58,7 @@ func TestCheckTransportAuth_Injected(t *testing.T) {
 	t.Setenv("SCION_TRANSPORT_TOKEN_FILE", "")
 	t.Setenv("SCION_TRANSPORT_TOKEN", token)
 
-	src := checkTransportAuth()
+	src := checkTransportAuth(&doctorDiag{})
 	if src == nil {
 		t.Fatal("expected non-nil transport source")
 	}
@@ -82,7 +82,7 @@ func TestCheckTransportAuth_None(t *testing.T) {
 	transportauth.IsOnGCEFunc = func() bool { return false }
 	defer func() { transportauth.IsOnGCEFunc = orig }()
 
-	src := checkTransportAuth()
+	src := checkTransportAuth(&doctorDiag{})
 	if src != nil {
 		t.Errorf("expected nil transport source, got %T", src)
 	}
@@ -171,7 +171,7 @@ func TestCheckAuthentication_WithTransportAuth(t *testing.T) {
 	_ = os.WriteFile(scionDir+"/scion-token", []byte("test-scion-token"), 0600)
 
 	failures := 0
-	result := checkAuthentication(server.URL, &failures, src)
+	result := checkAuthentication(server.URL, &failures, src, &doctorDiag{})
 	if !result {
 		t.Error("expected authentication check to pass with transport auth")
 	}
@@ -242,7 +242,7 @@ func TestCheckAuthentication_DoesNotRevokeOriginalToken(t *testing.T) {
 	_ = os.WriteFile(scionDir+"/scion-token", []byte(originalToken), 0600)
 
 	failures := 0
-	result := checkAuthentication(server.URL, &failures, nil)
+	result := checkAuthentication(server.URL, &failures, nil, &doctorDiag{})
 	if !result {
 		t.Errorf("expected authentication check to pass, got failures=%d", failures)
 	}

@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 )
 
 // brokerCallbackTimeout bounds how long a broker subscription callback may
@@ -74,9 +75,17 @@ type MessageBrokerProxy struct {
 	pluginSubscriptions map[string]eventbus.Subscription   // pattern -> plugin-initiated subscription
 	subscribedTopics    map[string]bool                    // dedup guard for project-level subscriptions
 	runningSeen         map[string]bool                    // agent IDs whose running status already ensured subscriptions
-	stopCh              chan struct{}
-	stopOnce            sync.Once
-	wg                  sync.WaitGroup
+	stopped             bool                               // set by Stop; no subscription is registered afterwards
+	// userSubLocks holds one mutex per user-message topic (guarded by mu;
+	// entries are never removed, so the map is bounded by project count).
+	// A topic's mutex is held across its first Subscribe, so a caller that
+	// is told "subscribed" knows Subscribe has returned, while first
+	// subscriptions for other projects proceed independently
+	// (ptone/scion#1906).
+	userSubLocks map[string]*sync.Mutex
+	stopCh       chan struct{}
+	stopOnce     sync.Once
+	wg           sync.WaitGroup
 }
 
 // NewMessageBrokerProxy creates a new MessageBrokerProxy.
@@ -97,6 +106,7 @@ func NewMessageBrokerProxy(
 		pluginSubscriptions: make(map[string]eventbus.Subscription),
 		subscribedTopics:    make(map[string]bool),
 		runningSeen:         make(map[string]bool),
+		userSubLocks:        make(map[string]*sync.Mutex),
 		stopCh:              make(chan struct{}),
 	}
 }
@@ -170,6 +180,9 @@ func (p *MessageBrokerProxy) bootstrapExistingProjects() {
 // Stop signals the proxy to shut down and waits for goroutines to finish.
 func (p *MessageBrokerProxy) Stop() {
 	p.stopOnce.Do(func() {
+		p.mu.Lock()
+		p.stopped = true
+		p.mu.Unlock()
 		close(p.stopCh)
 		p.wg.Wait()
 
@@ -398,7 +411,7 @@ func (p *MessageBrokerProxy) subscribeAgent(projectID, agentSlug string) {
 	topic := eventbus.TopicAgentMessages(projectID, agentSlug)
 
 	p.mu.Lock()
-	if p.subscribedTopics[topic] {
+	if p.stopped || p.subscribedTopics[topic] {
 		p.mu.Unlock()
 		return
 	}
@@ -417,6 +430,11 @@ func (p *MessageBrokerProxy) subscribeAgent(projectID, agentSlug string) {
 	}
 
 	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		_ = sub.Unsubscribe()
+		return
+	}
 	p.subscriptions[projectID] = append(p.subscriptions[projectID], sub)
 	p.mu.Unlock()
 
@@ -429,7 +447,7 @@ func (p *MessageBrokerProxy) subscribeProjectBroadcast(projectID string) {
 	topic := eventbus.TopicProjectBroadcast(projectID)
 
 	p.mu.Lock()
-	if p.subscribedTopics[topic] {
+	if p.stopped || p.subscribedTopics[topic] {
 		p.mu.Unlock()
 		return
 	}
@@ -448,6 +466,11 @@ func (p *MessageBrokerProxy) subscribeProjectBroadcast(projectID string) {
 	}
 
 	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		_ = sub.Unsubscribe()
+		return
+	}
 	p.subscriptions[projectID] = append(p.subscriptions[projectID], sub)
 	p.mu.Unlock()
 
@@ -458,33 +481,121 @@ func (p *MessageBrokerProxy) subscribeProjectBroadcast(projectID string) {
 // messages in a project. When a message arrives, it is persisted to the message
 // store and published as a user.message SSE event for connected browser clients.
 // The subscription uses a wildcard to cover all users in the project.
-func (p *MessageBrokerProxy) subscribeProjectUserMessages(projectID string) {
+//
+// It reports whether the persisting subscription is in place when it
+// returns (ptone/scion#1906): true only once Subscribe has returned
+// successfully, so a caller that publishes next is guaranteed a subscriber.
+// It returns false after Stop, when Subscribe fails (the topic is left
+// unmarked so a later call retries), or when the bus has no inprocess spoke
+// (handlers would never run). Callers that need the message persisted fall
+// back to writing it themselves on false.
+func (p *MessageBrokerProxy) subscribeProjectUserMessages(projectID string) bool {
 	topic := eventbus.TopicAllUserMessages(projectID)
 
+	if hs, ok := p.bus.(interface{ HasSpoke(string) bool }); ok && !hs.HasSpoke(eventbus.InProcessBusName) {
+		return false
+	}
+
+	// Fast path, without the topic lock: the flag is only set after
+	// Subscribe has returned, so an already-subscribed topic never waits
+	// behind another caller's (possibly slow, plugin-backed) Subscribe.
 	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		return false
+	}
 	if p.subscribedTopics[topic] {
 		p.mu.Unlock()
-		return
+		return true
 	}
-	p.subscribedTopics[topic] = true
+	topicMu := p.userSubLocks[topic]
+	if topicMu == nil {
+		topicMu = &sync.Mutex{}
+		p.userSubLocks[topic] = topicMu
+	}
 	p.mu.Unlock()
 
-	sub, err := p.bus.Subscribe(topic, func(_ context.Context, t string, msg *messages.StructuredMessage) {
+	// Serialize callers for this topic across Subscribe: a concurrent
+	// caller (e.g. the lifecycle goroutine and the notifier reacting to
+	// the same status event) must not see the topic as subscribed before
+	// it is. Re-check under the lock: another caller may have finished.
+	topicMu.Lock()
+	defer topicMu.Unlock()
+
+	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		return false
+	}
+	if p.subscribedTopics[topic] {
+		p.mu.Unlock()
+		return true
+	}
+	p.mu.Unlock()
+
+	sub, err := p.bus.Subscribe(topic, func(hctx context.Context, t string, msg *messages.StructuredMessage) {
 		ctx, cancel := context.WithTimeout(context.Background(), brokerCallbackTimeout)
 		defer cancel()
+		// Carry only the notification ID (log correlation) from the
+		// publisher's ctx; delivery keeps its own lifetime.
+		ctx = withNotificationID(ctx, notificationIDFromContext(hctx))
 		p.deliverToUser(ctx, projectID, t, msg)
 	})
 	if err != nil {
 		p.log.Error("Failed to subscribe for project user messages",
 			"projectID", projectID, "error", err)
-		return
+		return false
 	}
 
 	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		_ = sub.Unsubscribe()
+		return false
+	}
+	p.subscribedTopics[topic] = true
 	p.subscriptions[projectID] = append(p.subscriptions[projectID], sub)
 	p.mu.Unlock()
 
 	p.log.Debug("Subscribed to project user messages", "topic", topic)
+	return true
+}
+
+// notificationIDKey carries a notification ID from the notifier's publish
+// into deliverToUser, in process only, so a lost inbox row can be logged
+// against the notification it came from.
+type notificationIDKey struct{}
+
+func withNotificationID(ctx context.Context, id string) context.Context {
+	if id == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, notificationIDKey{}, id)
+}
+
+func notificationIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	id, _ := ctx.Value(notificationIDKey{}).(string)
+	return id
+}
+
+// canPersistUserDM reports whether deliverToUser can persist a DM addressed
+// to recipientID. Under G2 write-deny a DM row needs a resolved conversation,
+// and DM conversation keys only accept canonical UUIDs
+// (messages.DMConversationKey), so a federated or otherwise non-canonical
+// principal cannot be persisted there. deliverToUser applies it only when
+// both principal kinds are determined (it persists undetermined-kind DMs
+// without a conversation); notifications always have determined kinds
+// (agent:<slug> to user:<id>). Shared with the notifier's persistsViaInbox
+// so the two cannot drift.
+func canPersistUserDM(recipientID string, writeDeny bool) bool {
+	if !writeDeny {
+		return true
+	}
+	u, err := uuid.Parse(recipientID)
+	return err == nil && u.String() == recipientID
 }
 
 // deliverToUser handles a broker message addressed to a human user by persisting
@@ -566,6 +677,15 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 			senderKind, sOK := messages.PrincipalKindFromAddress(msg.Sender)
 			recipientKind, rOK := messages.PrincipalKindFromAddress(msg.Recipient)
 			if sOK && rOK {
+				// Only here, where DM key derivation would fail anyway: the
+				// undetermined-kind branch below persists without a
+				// conversation, as before.
+				if !canPersistUserDM(msg.RecipientID, p.writeDenyEnabled != nil && p.writeDenyEnabled()) {
+					messaging.WriteDenialMetrics.Inc("mb.user.dm")
+					p.log.Error("DM recipient is not a canonical UUID under write-deny, message not persisted",
+						"notification_id", notificationIDFromContext(ctx))
+					return
+				}
 				var convErr error
 				convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, recipientKind, msg.RecipientID)
 				if convErr != nil {
@@ -628,6 +748,12 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 	}
 	if err := p.store.CreateMessage(ctx, storeMsg); err != nil {
 		p.log.Error("Failed to persist user message from broker", "topic", topic, "error", err)
+		if notifID := notificationIDFromContext(ctx); notifID != "" {
+			// ptone/scion#1906: this subscriber is the notification's only
+			// persister, so the inbox row is lost; nothing retries.
+			p.log.Warn("User notification inbox row lost: broker persist failed",
+				"notification_id", notifID, "topic", topic, "error", err)
+		}
 		return
 	}
 
@@ -993,7 +1119,7 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 	if err := dispatchWithBrokerRetry(withDispatchMessageID(ctx, storeMsg.ID), dispatcher, agent, msg.Msg, msg.Urgent, msg); err != nil {
 		p.log.Error("Failed to dispatch broker message to agent",
 			"agentSlug", agentSlug, "error", err)
-		if markErr := p.store.MarkMessageFailed(ctx, storeMsg.ID, err.Error()); markErr != nil {
+		if markErr := markMessageFailed(ctx, p.store, storeMsg.ID, err.Error()); markErr != nil {
 			p.log.Error("Failed to mark broker message as failed", "id", storeMsg.ID, "error", markErr)
 		}
 		p.publishDeliveryFailed(ctx, projectID, agentSlug, msg, err)
@@ -1116,6 +1242,14 @@ func (p *MessageBrokerProxy) publishDeliveryFailed(ctx context.Context, projectI
 	if !strings.HasPrefix(msg.Sender, "agent:") || msg.SenderID == "" {
 		return
 	}
+	// ptone/scion#1838: this notice is a post-dispatch finalization. Callers
+	// often hold a dispatch ctx that has already expired (broker timeout) or
+	// been cancelled, so detach from it with a bounded timeout rather than
+	// silently dropping the sender's DELIVERY_FAILED. The notice dispatches
+	// through the runtime broker, so it gets deliveryNoticeTimeout rather
+	// than the 5s row-CAS budget.
+	ctx, cancel := detachedContext(ctx, deliveryNoticeTimeout)
+	defer cancel()
 	senderAgent, err := p.store.GetAgent(ctx, msg.SenderID)
 	if err != nil {
 		p.log.Warn("Could not resolve sender agent for DELIVERY_FAILED notification",
@@ -1125,19 +1259,14 @@ func (p *MessageBrokerProxy) publishDeliveryFailed(ctx context.Context, projectI
 
 	var failMsg string
 	if deliveryErr != nil && !errors.Is(deliveryErr, store.ErrNotFound) {
-		failMsg = fmt.Sprintf("Message delivery failed to agent %q: %v", agentSlug, deliveryErr)
+		// ptone/scion#1841: deliveryErr can carry a raw broker response
+		// body; sanitize here so every DELIVERY_FAILED notice is covered
+		// whichever path produced it.
+		failMsg = fmt.Sprintf("Message delivery failed to agent %q: %s", agentSlug, sanitizeFailureReason(deliveryErr.Error()))
 	} else {
 		failMsg = fmt.Sprintf("Message delivery failed: agent %q not found in project", agentSlug)
 	}
-	structuredMsg := &messages.StructuredMessage{
-		Sender:    "system",
-		Recipient: msg.Sender,
-		Msg:       failMsg,
-		Type:      messages.TypeSystem,
-		Status:    "DELIVERY_FAILED",
-		Metadata:  map[string]string{"system_category": messages.SystemCategoryDeliveryFailed},
-	}
-	structuredMsg.RecipientID = senderAgent.ID
+	structuredMsg := newDeliveryNotice(msg.Sender, senderAgent.ID, failMsg, "DELIVERY_FAILED", messages.SystemCategoryDeliveryFailed)
 
 	dispatcher := p.getDispatcher()
 	if dispatcher == nil {
@@ -1147,6 +1276,18 @@ func (p *MessageBrokerProxy) publishDeliveryFailed(ctx context.Context, projectI
 		p.log.Warn("Failed to dispatch DELIVERY_FAILED notification",
 			"senderID", msg.SenderID, "error", err)
 	}
+}
+
+// newDeliveryNotice builds the system notice sent to an agent sender about the
+// fate of its message (DELIVERY_FAILED, DELIVERY_DEFERRED). It goes through
+// messages.NewSystemMessage so every notice carries Version and an RFC3339 UTC
+// Timestamp (ptone/scion#2100); new notice sites should use it rather than a
+// StructuredMessage literal so they cannot drift.
+func newDeliveryNotice(recipient, recipientID, text, status, category string) *messages.StructuredMessage {
+	notice := messages.NewSystemMessage("system", recipient, text, category)
+	notice.RecipientID = recipientID
+	notice.Status = status
+	return notice
 }
 
 // publishDeliveryDeferred tells an agent sender that their message to
@@ -1170,15 +1311,7 @@ func (p *MessageBrokerProxy) publishDeliveryDeferred(ctx context.Context, agentS
 	}
 
 	deferredMsg := fmt.Sprintf("agent %q is reincarnating; message saved to history and will be seen on catch-up", agentSlug)
-	structuredMsg := &messages.StructuredMessage{
-		Sender:    "system",
-		Recipient: msg.Sender,
-		Msg:       deferredMsg,
-		Type:      messages.TypeSystem,
-		Status:    "DELIVERY_DEFERRED",
-		Metadata:  map[string]string{"system_category": messages.SystemCategoryDeliveryDeferred},
-	}
-	structuredMsg.RecipientID = senderAgent.ID
+	structuredMsg := newDeliveryNotice(msg.Sender, senderAgent.ID, deferredMsg, "DELIVERY_DEFERRED", messages.SystemCategoryDeliveryDeferred)
 
 	dispatcher := p.getDispatcher()
 	if dispatcher == nil {

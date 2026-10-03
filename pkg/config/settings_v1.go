@@ -1288,6 +1288,108 @@ type V1CloudRunSandboxConfig struct {
 	SandboxBin string `json:"sandbox_bin,omitempty" yaml:"sandbox_bin,omitempty" koanf:"sandbox_bin"`
 }
 
+// V1SubstrateConfig holds Substrate runtime settings (substrate-runtime.md
+// §2). Substrate is a Kubernetes-hosted actor
+// runtime; scion agents run as Substrate "actors". Selection is explicit
+// only — there is no auto-detect branch in factory.go.
+type V1SubstrateConfig struct {
+	// APIEndpoint is the ateapi Control gRPC endpoint, e.g.
+	// "api.ate-system.svc:443".
+	APIEndpoint string `json:"api_endpoint,omitempty" yaml:"api_endpoint,omitempty" koanf:"api_endpoint"`
+	// RouterEndpoint is the atenet-router inbound endpoint the broker uses
+	// to reach an actor's control server, e.g.
+	// "http://atenet-router.ate-system.svc:80". Used as a base URL (scheme
+	// required), not a bare host:port. This hop is plain HTTP: CAFile and
+	// ClusterTrustBundle below apply only to the ateapi Control gRPC dial
+	// (APIEndpoint), not to this one, and there is no separate TLS setting
+	// for it (see substrate-runtime.md §10).
+	RouterEndpoint string `json:"router_endpoint,omitempty" yaml:"router_endpoint,omitempty" koanf:"router_endpoint"`
+	// TokenAudience is the audience requested for the in-cluster
+	// ServiceAccount TokenRequest used to authenticate to the ateapi
+	// Control API. Defaults to "api.ate-system.svc" when empty.
+	TokenAudience string `json:"token_audience,omitempty" yaml:"token_audience,omitempty" koanf:"token_audience"`
+	// CAFile is a path to a PEM CA bundle used to verify the ateapi Control
+	// gRPC server certificate.
+	CAFile string `json:"ca_file,omitempty" yaml:"ca_file,omitempty" koanf:"ca_file"`
+	// ClusterTrustBundle names a Kubernetes ClusterTrustBundle object
+	// holding the CA used to verify the ateapi Control gRPC server
+	// certificate. When both this and CAFile are set, the dialer prefers
+	// ClusterTrustBundle.
+	ClusterTrustBundle string `json:"cluster_trust_bundle,omitempty" yaml:"cluster_trust_bundle,omitempty" koanf:"cluster_trust_bundle"`
+	// SandboxClass selects the actor sandbox isolation technology
+	// ("gvisor" or "microvm"). Defaults to "gvisor" when empty.
+	SandboxClass string `json:"sandbox_class,omitempty" yaml:"sandbox_class,omitempty" koanf:"sandbox_class"`
+	// SandboxConfigName names the Substrate SandboxConfig CRD instance used
+	// by actor templates.
+	SandboxConfigName string `json:"sandbox_config_name,omitempty" yaml:"sandbox_config_name,omitempty" koanf:"sandbox_config_name"`
+	// WorkerSelector is copied into the ActorTemplate's workerSelector, to
+	// pin actors to a labeled WorkerPool.
+	WorkerSelector map[string]string `json:"worker_selector,omitempty" yaml:"worker_selector,omitempty" koanf:"worker_selector"`
+	// SnapshotStorage is the configured bucket/prefix used for the
+	// ActorTemplate's snapshotsConfig storage, e.g. "gs://bucket/prefix/".
+	SnapshotStorage string `json:"snapshot_storage,omitempty" yaml:"snapshot_storage,omitempty" koanf:"snapshot_storage"`
+	// EgressAllow lists additional hostnames allowed through the per-actor
+	// EgressPolicy, beyond the hub/git/model/telemetry hosts the runtime
+	// always adds. Despite the field's own shape (a bare string list), no
+	// IP addresses or CIDRs are accepted here — see below.
+	//
+	// Only public FQDNs are accepted here — no IP addresses or CIDRs at
+	// all (Substrate's own HostnameRule, which is where every entry ends
+	// up, rejects IP addresses outright), and only a hostname whose
+	// top-level domain is a real, ICANN-delegated one, with at least one
+	// label beneath its actual matched suffix (which may be a private
+	// multi-tenant-platform suffix like "googleapis.com"/"github.io", not
+	// only an ICANN one). See pkg/runtime/substrate.ValidateEgressAllow's
+	// doc comment for the exact rule set, which changes more often than
+	// this comment would otherwise be kept in sync with.
+	//
+	// Residual risk this does not close: a validly-public hostname can
+	// still be made to resolve to a private or in-cluster address (DNS
+	// rebinding, or services like nip.io/sslip.io that do this by design).
+	// Only a check by the egress proxy itself, after DNS resolution,
+	// against the address actually connected to, can close that gap.
+	//
+	// Validated by pkg/runtime/substrate.Validate, which NewSubstrateRuntime
+	// calls when the runtime is constructed, and Run calls again once at
+	// its start — not at settings-load time or by `scion config validate`
+	// (there is no generic settings-validation hook for this yet), and not
+	// a second time inside Run's egress-policy step (r.cfg is immutable for
+	// a single Run call, so one check per call is enough). Substrate's
+	// egress default-deny plus the actor's EgressPolicy is what keeps an
+	// actor off the atenet-router and other in-cluster services
+	// (substrate-runtime.md §5.2); an entry that reaches either of those
+	// would defeat it.
+	EgressAllow []string `json:"egress_allow,omitempty" yaml:"egress_allow,omitempty" koanf:"egress_allow"`
+	// EgressTrustBundle names a Substrate trust bundle to project into every
+	// actor as a system-info volume, so the actor can validate the egress
+	// gateway's own TLS certificate (docs/egress-trust-bundle.md, vendored
+	// Substrate d277088b).
+	//
+	// Required iff the cluster runs the sdsmint egress gateway
+	// (`hack/install-ate.sh --deploy-atenet --experimental-use-sdsmint`) and
+	// the actor makes any HTTPS/TLS request: under sdsmint, the gateway
+	// terminates every TLS connection and re-originates it with a per-SNI
+	// leaf certificate chained to its own CA, which the actor otherwise has
+	// no way to validate. Setting this on a plain (non-sdsmint) install
+	// breaks every actor instead: nothing backs the named
+	// ClusterTrustBundle, so the actor fails to start (see
+	// pkg/runtime/substrate.Validate and buildActorTemplate's doc comment).
+	//
+	// Empty (the default) is off, and off is byte-identical to today: no
+	// system-info volume, no mount, no env. Validated by
+	// pkg/runtime/substrate.Validate: when non-empty it must be exactly
+	// "egress-mitm.ate.dev", the only trust bundle name Substrate d277088b
+	// supports. Kept as a string validated against a one-name allowlist,
+	// not a bool, deliberately: it mirrors Substrate's own
+	// trustBundle.name, and a future additional name needs only an
+	// allowlist entry here, not a schema change.
+	EgressTrustBundle string `json:"egress_trust_bundle,omitempty" yaml:"egress_trust_bundle,omitempty" koanf:"egress_trust_bundle"`
+	// TemplateReadyTimeout bounds how long Run waits for a newly created
+	// ActorTemplate to become ready (a Go duration string, e.g. "10m").
+	// Defaults to 10 minutes when empty.
+	TemplateReadyTimeout string `json:"template_ready_timeout,omitempty" yaml:"template_ready_timeout,omitempty" koanf:"template_ready_timeout"`
+}
+
 // V1RuntimeConfig extends RuntimeConfig with a Type field.
 //
 // Env is parsed and round-tripped but not applied to agent containers; no
@@ -1320,6 +1422,8 @@ type V1RuntimeConfig struct {
 	CloudRunInstances *V1CloudRunInstancesConfig `json:"cloudrun_instances,omitempty" yaml:"cloudrun_instances,omitempty" koanf:"cloudrun_instances"`
 	// CloudRunSandbox holds Cloud Run Sandbox-specific settings when Type is "cloudrun-sandbox".
 	CloudRunSandbox *V1CloudRunSandboxConfig `json:"cloudrun_sandbox,omitempty" yaml:"cloudrun_sandbox,omitempty" koanf:"cloudrun_sandbox"`
+	// Substrate holds Substrate-specific settings when Type is "substrate".
+	Substrate *V1SubstrateConfig `json:"substrate,omitempty" yaml:"substrate,omitempty" koanf:"substrate"`
 }
 
 // V1RuntimeDefaultsConfig holds runtime-wide behaviour that is not specific to

@@ -1681,28 +1681,16 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	// the double-sh-c wrapping that previously caused the no-auth command
 	// to be injected as terminal input instead of running standalone.
 	var cmd []string
-	var cmdLine string
-	if config.NoAuth {
-		cmdLine = buildNoAuthCmdLine(config.NoAuthMessage, config.NoAuthCommand)
-	} else if config.Harness != nil {
-		harnessArgs := config.Harness.GetCommand(config.Task, config.Resume, config.CommandArgs)
-		var quotedArgs []string
-		for _, a := range harnessArgs {
-			quotedArgs = append(quotedArgs, shellQuote(a))
-		}
-		cmdLine = strings.Join(quotedArgs, " ")
-	} else {
+	cmdLine, ok := harnessCmdLine(config)
+	if !ok {
 		cmdLine = "sleep infinity"
 	}
 	// Wrap the harness so it records its real exit code to a fixed file (see
-	// state.HarnessExitCodeFile / buildCommonRunArgs for rationale). `sciontool init`
-	// reads this to report crashes accurately.
-	agentWindowCmd := "sh -c " + shellQuote(cmdLine+"; echo $? > "+state.HarnessExitCodeFile)
-	// Create session with "agent" window running the harness, plus a "shell" window.
-	tmuxCmd := fmt.Sprintf(
-		"tmux new-session -d -s scion -n agent %s \\; set-option -g window-size latest \\; new-window -t scion -n shell \\; select-window -t scion:agent \\; attach-session -t scion",
-		agentWindowCmd,
-	)
+	// tmuxAgentWindowCmd for rationale). `sciontool init` reads this to
+	// report crashes accurately. K8s provides PID 1 a TTY, so attach like
+	// Docker/Podman (see buildCommonRunArgs).
+	agentWindowCmd := tmuxAgentWindowCmd("sh", cmdLine)
+	tmuxCmd := buildTmuxStartCmd(agentWindowCmd, tmuxAttachSession)
 	// --- K8s Startup Gate ---
 	//
 	// Unlike Docker/Podman where volumes are bind-mounted before the container
@@ -1757,6 +1745,15 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		if len(parts) == 2 {
 			envVars = append(envVars, corev1.EnvVar{Name: parts[0], Value: parts[1]})
 		}
+	}
+
+	// System env set above always wins: track the names already present so
+	// the secret-injection loops below can skip any secret whose target
+	// collides with one. Symmetric with the docker/podman/apple_container
+	// runtime's equivalent check in buildCommonRunArgs.
+	envVarNames := make(map[string]struct{}, len(envVars))
+	for _, ev := range envVars {
+		envVarNames[ev.Name] = struct{}{}
 	}
 
 	// Secret and auth-file mounting. Every file these volumes deliver comes
@@ -1829,6 +1826,9 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 
 			for _, s := range config.ResolvedSecrets {
 				if s.Type == "environment" {
+					if _, collides := envVarNames[s.Target]; collides {
+						continue
+					}
 					envVars = append(envVars, corev1.EnvVar{
 						Name: s.Target,
 						ValueFrom: &corev1.EnvVarSource{
@@ -1838,6 +1838,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 							},
 						},
 					})
+					envVarNames[s.Target] = struct{}{}
 				}
 			}
 		} else {
@@ -1846,6 +1847,9 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			// volume projects only the file keys, not the env values.
 			for _, s := range config.ResolvedSecrets {
 				if s.Type == "environment" {
+					if _, collides := envVarNames[s.Target]; collides {
+						continue
+					}
 					envVars = append(envVars, corev1.EnvVar{
 						Name: s.Target,
 						ValueFrom: &corev1.EnvVarSource{
@@ -1855,6 +1859,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 							},
 						},
 					})
+					envVarNames[s.Target] = struct{}{}
 				}
 			}
 

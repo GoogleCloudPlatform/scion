@@ -331,6 +331,13 @@ func (s *Server) setEnvVar(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 
+	// A plain env var's key is itself the container-env name it is projected
+	// under (same as an environment-type secret's target), whether or not
+	// req.Secret promotes it to the secret backend below.
+	if !validateEnvSecretTarget(w, store.SecretTypeEnvironment, key) {
+		return
+	}
+
 	scope := req.Scope
 	if scope == "" {
 		scope = store.ScopeUser
@@ -697,6 +704,27 @@ func (s *Server) getSecret(w http.ResponseWriter, r *http.Request, key string) {
 	writeJSON(w, http.StatusOK, metaToStoreSecret(*meta))
 }
 
+// validateEnvSecretTarget rejects an environment-type secret whose target
+// falls under a reserved control-plane prefix (secret.IsReservedEnvTarget).
+// It is a no-op for every other secret type, since only environment-type
+// secrets are projected into the container environment by name. On success
+// it returns true; on rejection it writes a validation error response
+// (matching the shape used for the file-target checks below) and returns
+// false, so callers can simply `if !validateEnvSecretTarget(...) { return }`.
+func validateEnvSecretTarget(w http.ResponseWriter, secretType, target string) bool {
+	if secretType != store.SecretTypeEnvironment && secretType != "" {
+		return true
+	}
+	if !secret.IsReservedEnvTarget(target) {
+		return true
+	}
+	ValidationError(w, "target is reserved for scion's own control-plane environment variables", map[string]interface{}{
+		"field": "target",
+		"value": target,
+	})
+	return false
+}
+
 func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 	ctx := r.Context()
 
@@ -756,6 +784,10 @@ func (s *Server) setSecret(w http.ResponseWriter, r *http.Request, key string) {
 	target := req.Target
 	if target == "" {
 		target = key
+	}
+
+	if !validateEnvSecretTarget(w, secretType, target) {
+		return
 	}
 
 	// Validate file-specific constraints
@@ -888,9 +920,11 @@ func (s *Server) patchSecretValidateAndUpdate(w http.ResponseWriter, r *http.Req
 		effectiveType = existing.SecretType
 	}
 
-	// Validate file-specific target constraints (including stored target when type changes to file)
+	// Resolve the effective target (including the stored target when only
+	// the type is changing) so the file- and environment-specific checks
+	// below see the target the update will actually store.
 	effectiveTarget := req.Target
-	if effectiveType == store.SecretTypeFile && effectiveTarget == "" {
+	if (effectiveType == store.SecretTypeFile || effectiveType == store.SecretTypeEnvironment) && effectiveTarget == "" {
 		existing, err := s.secretBackend.GetMeta(ctx, key, scope, scopeID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
@@ -910,6 +944,9 @@ func (s *Server) patchSecretValidateAndUpdate(w http.ResponseWriter, r *http.Req
 			})
 			return
 		}
+	}
+	if !validateEnvSecretTarget(w, effectiveType, effectiveTarget) {
+		return
 	}
 
 	// allowProgeny is only valid on user-scoped secrets.
@@ -1203,6 +1240,10 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 	target := req.Target
 	if target == "" {
 		target = key
+	}
+
+	if !validateEnvSecretTarget(w, secretType, target) {
+		return
 	}
 
 	// Validate file-specific constraints.
@@ -1688,6 +1729,11 @@ func (s *Server) handleScopedEnvVarByKey(w http.ResponseWriter, r *http.Request,
 			return
 		}
 
+		// See setEnvVar: the key is itself the container-env name.
+		if !validateEnvSecretTarget(w, store.SecretTypeEnvironment, key) {
+			return
+		}
+
 		var createdBy string
 		if userIdent := GetUserIdentityFromContext(ctx); userIdent != nil {
 			createdBy = userIdent.ID()
@@ -1959,6 +2005,9 @@ func (s *Server) handleScopedSecretByKey(w http.ResponseWriter, r *http.Request,
 		target := req.Target
 		if target == "" {
 			target = key
+		}
+		if !validateEnvSecretTarget(w, secretType, target) {
+			return
 		}
 		if secretType == store.SecretTypeFile {
 			if strings.Contains(target, "..") {

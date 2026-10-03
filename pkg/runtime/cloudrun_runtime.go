@@ -27,6 +27,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -38,7 +39,6 @@ import (
 
 	"cloud.google.com/go/compute/metadata"
 	"cloud.google.com/go/run/apiv2/runpb"
-	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun"
@@ -186,6 +186,11 @@ func (r *CloudRunRuntime) resolveConfig(ctx context.Context) error {
 
 func (r *CloudRunRuntime) Name() string { return "cloudrun" }
 
+// SupportsEmptyPerAgentWorkspace reports false: Run rejects empty-per-agent
+// workspaces (rejectEmptyPerAgentOnCloudRun), so a broker whose default
+// runtime is Cloud Run must not advertise the capability.
+func (r *CloudRunRuntime) SupportsEmptyPerAgentWorkspace() bool { return false }
+
 func (r *CloudRunRuntime) ExecUser() string {
 	return "scion"
 }
@@ -199,6 +204,12 @@ func (r *CloudRunRuntime) client(ctx context.Context) (cloudrun.InstancesAPI, er
 }
 
 func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
+	// Checked before anything is resolved or provisioned: this runtime
+	// always mounts the project's shared NFS workspace (see
+	// provisionCloudRunNFS), which would break empty-per-agent isolation.
+	if err := rejectEmptyPerAgentOnCloudRun(cfg); err != nil {
+		return "", err
+	}
 	if err := r.resolveConfig(ctx); err != nil {
 		return "", fmt.Errorf("failed to resolve Cloud Run config: %w", err)
 	}
@@ -374,30 +385,16 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 		VolumeMounts: volumeMounts,
 	}
 
-	if cfg.NoAuth {
-		cmdLine := buildNoAuthCmdLine(cfg.NoAuthMessage, cfg.NoAuthCommand)
-		agentWindowCmd := "/bin/sh -c " + shellQuote(cmdLine+"; echo $? > "+state.HarnessExitCodeFile)
-		tmuxCmd := fmt.Sprintf(
-			"tmux new-session -d -s scion -n agent %s \\; set-option -g window-size latest \\; new-window -t scion -n shell \\; select-window -t scion:agent; while tmux has-session -t scion 2>/dev/null; do sleep 2; done",
-			agentWindowCmd,
-		)
-		container.Args = []string{"/bin/sh", "-c", tmuxCmd}
-	} else if cfg.Harness != nil {
-		harnessArgs := cfg.Harness.GetCommand(cfg.Task, cfg.Resume, cfg.CommandArgs)
-		var quotedArgs []string
-		for _, a := range harnessArgs {
-			quotedArgs = append(quotedArgs, shellQuote(a))
-		}
-		cmdLine := strings.Join(quotedArgs, " ")
-		agentWindowCmd := "/bin/sh -c " + shellQuote(cmdLine+"; echo $? > "+state.HarnessExitCodeFile)
+	if cfg.NoAuth || cfg.Harness != nil {
+		// harnessCmdLine covers both branches (NoAuth checked first,
+		// matching the priority order above); ok is always true here.
+		cmdLine, _ := harnessCmdLine(cfg)
+		agentWindowCmd := tmuxAgentWindowCmd("/bin/sh", cmdLine)
 		// Use poll loop instead of attach-session: CRI has no TTY for PID 1,
 		// so tmux attach-session would fail with "not a terminal". The poll
 		// loop tracks the tmux session's lifetime without needing a terminal,
 		// matching the cloudrun-sandbox pattern.
-		tmuxCmd := fmt.Sprintf(
-			"tmux new-session -d -s scion -n agent %s \\; set-option -g window-size latest \\; new-window -t scion -n shell \\; select-window -t scion:agent; while tmux has-session -t scion 2>/dev/null; do sleep 2; done",
-			agentWindowCmd,
-		)
+		tmuxCmd := buildTmuxStartCmd(agentWindowCmd, tmuxPollSession)
 		container.Args = []string{"/bin/sh", "-c", tmuxCmd}
 	} else if len(cfg.CommandArgs) > 0 {
 		// Fallback: no harness, pass raw command args as CMD override.
@@ -942,4 +939,34 @@ func sanitizeGCPLabelValue(value string) string {
 		value = value[:63]
 	}
 	return value
+}
+
+// errEmptyPerAgentCloudRun is returned by CloudRunRuntime.Run for an
+// empty-per-agent agent (design #2703).
+var errEmptyPerAgentCloudRun = errors.New("cloudrun: empty-per-agent workspaces are not supported on the Cloud Run runtime, " +
+	"which always mounts the project's shared workspace; use a Docker, Podman, Apple or Kubernetes broker for this project")
+
+// isEmptyPerAgentRun reports whether cfg starts an empty-per-agent agent,
+// identified by SCION_WORKSPACE_MODE in its env. Runtimes that cannot
+// provide the private workspace use it to refuse the mode at Run, which
+// backs up their SupportsEmptyPerAgentWorkspace=false opt-out for requests
+// that reach the broker before its first heartbeat corrects the static
+// registration capabilities.
+func isEmptyPerAgentRun(cfg RunConfig) bool {
+	for _, kv := range cfg.Env {
+		k, v, ok := strings.Cut(kv, "=")
+		if ok && k == "SCION_WORKSPACE_MODE" && store.ResolveWorkspaceSharingMode(v) == store.SharingModeEmptyPerAgent {
+			return true
+		}
+	}
+	return false
+}
+
+// rejectEmptyPerAgentOnCloudRun fails when cfg starts an empty-per-agent
+// agent.
+func rejectEmptyPerAgentOnCloudRun(cfg RunConfig) error {
+	if isEmptyPerAgentRun(cfg) {
+		return errEmptyPerAgentCloudRun
+	}
+	return nil
 }
