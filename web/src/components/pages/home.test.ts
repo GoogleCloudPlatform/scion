@@ -256,6 +256,8 @@ describe('dashboard Create Project card (hub project.create)', () => {
     vi.stubGlobal('fetch', fetchMock);
     stateManager.setScope({ type: 'dashboard' });
     stateManager.seedAgents([{ id: 'a1', name: 'A1' } as Agent]);
+    // Hydrated from the agents page's complete load.
+    stateManager.markAgentSetComplete('full');
 
     element = await mountHome();
 
