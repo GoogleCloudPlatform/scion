@@ -27,6 +27,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
@@ -296,5 +297,111 @@ func TestStartAgent_ResolvableSavedProfileUsesItsRuntime(t *testing.T) {
 	}
 	if f.defaultMgr.StartCalls() != 0 {
 		t.Errorf("default runtime Start calls = %d, want 0", f.defaultMgr.StartCalls())
+	}
+}
+
+// writeSavedAgentInfo writes agent-info.json with a saved profile and the
+// runtime the agent is recorded as last running on.
+func writeSavedAgentInfo(t *testing.T, dotScionDir, agentName, profile, recordedRuntime string) {
+	t.Helper()
+	agentHome := config.GetAgentHomePath(dotScionDir, agentName)
+	if err := os.MkdirAll(agentHome, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(api.AgentInfo{Name: agentName, Profile: profile, Runtime: recordedRuntime})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestStartAgent_UnresolvableSavedProfileRecordedRuntime: when the saved
+// profile cannot be resolved, an agent whose agent-info.json records the
+// broker's default runtime ("docker" in the fixture) starts on the default
+// runtime; a recorded non-default runtime or no recorded runtime still
+// gets the 503.
+func TestStartAgent_UnresolvableSavedProfileRecordedRuntime(t *testing.T) {
+	for _, recorded := range []string{"docker", "kubernetes", ""} {
+		for _, tc := range unresolvedCases() {
+			t.Run("recorded="+recorded+"/"+tc.name, func(t *testing.T) {
+				f := newLifecycleFixture(t)
+				logs := captureLifecycleLog(f.srv)
+				const name = "recorded-runtime-agent"
+				writeSavedAgentInfo(t, f.projectPath, name, "vanished", recorded)
+				tc.apply(t, f)
+
+				w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/start", map[string]any{
+					"projectPath": f.projectPath,
+				})
+				if runs, _ := f.k8sRun(); runs != 0 {
+					t.Errorf("kubernetes runtime runs = %d, want 0", runs)
+				}
+				if recorded != "docker" {
+					assertSavedProfileUnresolved(t, tc, w, logs, f.projectPath)
+					if f.defaultMgr.StartCalls() != 0 {
+						t.Errorf("default runtime Start calls = %d, want 0", f.defaultMgr.StartCalls())
+					}
+					return
+				}
+				if w.Code != http.StatusAccepted {
+					t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusAccepted, w.Body.String())
+				}
+				if f.defaultMgr.StartCalls() != 1 {
+					t.Errorf("default runtime Start calls = %d, want 1", f.defaultMgr.StartCalls())
+				}
+				out := logs.String()
+				if !strings.Contains(out, "agent last ran on the broker default runtime") ||
+					!strings.Contains(out, "runtime=docker") || !strings.Contains(out, "profile=vanished") {
+					t.Errorf("default-runtime fallback not logged:\n%s", out)
+				}
+				if strings.Contains(out, "refusing to use the broker default runtime") {
+					t.Errorf("fallback logged as a refusal:\n%s", out)
+				}
+			})
+		}
+	}
+}
+
+// TestRestartAgent_UnresolvableSavedProfileRecordedDefaultRuntime: restart
+// uses the same resolution, so a recorded default runtime restarts there.
+func TestRestartAgent_UnresolvableSavedProfileRecordedDefaultRuntime(t *testing.T) {
+	f := newLifecycleFixture(t)
+	const name = "restart-recorded-default"
+	writeSavedAgentInfo(t, f.projectPath, name, "vanished", "docker")
+	f.defaultMgr.agents = append(f.defaultMgr.agents, lifecycleAgent(name, f.projectPath, ""))
+
+	w := lifecyclePost(t, f.srv, "/api/v1/agents/"+name+"/restart", map[string]any{})
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	if f.defaultMgr.StartCalls() != 1 {
+		t.Errorf("default runtime Start calls = %d, want 1", f.defaultMgr.StartCalls())
+	}
+	if runs, _ := f.k8sRun(); runs != 0 {
+		t.Errorf("kubernetes runtime runs = %d, want 0", runs)
+	}
+}
+
+// TestRestartAgent_HandlerStrictCheckWhenContainerNameDiffers: the matched
+// container's Name differs from the restart id, and only id has the saved
+// profile. buildStartContext reads the profile by Name, finds none and
+// stays non-strict, so only restartAgent's own strict resolution (which
+// reads the profile by id) can return the 503.
+func TestRestartAgent_HandlerStrictCheckWhenContainerNameDiffers(t *testing.T) {
+	f := newLifecycleFixture(t)
+	logs := captureLifecycleLog(f.srv)
+	const id = "restart-by-id"
+	writeSavedAgentProfile(t, f.projectPath, id, "vanished")
+	entry := lifecycleAgent(id, f.projectPath, "")
+	entry.Name = "container-name"
+	f.defaultMgr.agents = append(f.defaultMgr.agents, entry)
+
+	w := lifecyclePost(t, f.srv, "/api/v1/agents/"+id+"/restart", map[string]any{})
+	tc := unresolvedCase{wantMsg: `profile \"vanished\" not found`, wantLog: "not found"}
+	assertSavedProfileUnresolved(t, tc, w, logs, f.projectPath)
+	if f.defaultMgr.stopCalls != 0 || f.defaultMgr.StartCalls() != 0 {
+		t.Errorf("default runtime used: stop=%d start=%d", f.defaultMgr.stopCalls, f.defaultMgr.StartCalls())
 	}
 }

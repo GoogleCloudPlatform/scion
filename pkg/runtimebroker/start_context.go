@@ -348,6 +348,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		Profile:     gcpIdentityProfile,
 	}, savedProfile)
 	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 	isKubernetes := isKubernetesRuntimeName(dispatchRuntimeType)
