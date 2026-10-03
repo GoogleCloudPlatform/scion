@@ -15,7 +15,7 @@
  */
 
 /**
- * Agent list pager (design §6.1, §6.2).
+ * Agent list pager.
  *
  * "a-b of N", Prev/Next, a page size of 25/50/100 (default 25, persisted),
  * loading and error states, the paged-state "may have changed - Refresh"
@@ -41,9 +41,8 @@ export class ScionAgentPager extends LitElement {
   pageIndex = 0;
 
   /**
-   * Rows before this page, i.e. `a - 1` in "a-b of N" (design §6.1). Not
-   * assumed to be `pageIndex * pageSize` — a page can be short (design §5.3
-   * step 5a), so the host tracks the real running offset.
+   * Rows before this page, i.e. `a - 1` in "a-b of N". Not
+   * assumed to be `pageIndex * pageSize` — a page can be short, so the host tracks the real running offset.
    */
   @property({ type: Number })
   rangeStart = 0;
@@ -52,7 +51,7 @@ export class ScionAgentPager extends LitElement {
   @property({ type: Number })
   rowsOnPage = 0;
 
-  /** Exact total, or `{loaded, capped: true}` for a capped drain (design §4.6). */
+  /** Exact total, or `{loaded, capped: true}` for a capped drain. */
   @property({ attribute: false })
   total: AgentPagerTotal = 0;
 
@@ -71,7 +70,7 @@ export class ScionAgentPager extends LitElement {
   @property({ type: String })
   error: string | null = null;
 
-  /** The zero-cost "may have changed - Refresh" chip (design §6.2). */
+  /** The zero-cost "may have changed - Refresh" chip. */
   @property({ type: Boolean })
   showChip = false;
 

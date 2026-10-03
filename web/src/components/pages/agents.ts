@@ -670,7 +670,7 @@ export class ScionPageAgents extends LitElement {
   }
 
   /**
-   * Live updates (design §7, §11): one `agents-changed` flush merged
+   * Live updates: one `agents-changed` flush merged
    * through `mergeChanged`, replacing the old `onAgentsUpdated` per-event
    * full rebuild over `stateManager.getAgents()`.
    */
@@ -683,7 +683,7 @@ export class ScionPageAgents extends LitElement {
     if (this.agentWindow.state === 'paged') return;
     const merged = mergeChanged(this.agents, detail, {
       getAgent: (id) => stateManager.getAgent(id),
-      // Today's add rule (design §6.2): global page, scope `all` only — a
+      // Today's add rule: global page, scope `all` only — a
       // scope filter's server-side response is the source of truth for
       // membership, so a brand-new SSE agent is not added under a filter.
       // An ID already held keeps getting its updates regardless.

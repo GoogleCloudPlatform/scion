@@ -15,7 +15,7 @@
  */
 
 /**
- * `Map<id, phase>` member index (design §6.2).
+ * `Map<id, phase>` member index.
  *
  * Seeded from a sorted response's `stats.agents`, and kept live from
  * `agents-changed` under the page's add rule. The paged window and home

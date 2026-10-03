@@ -15,11 +15,11 @@
  */
 
 /**
- * Shared agent sort comparator (design doc §4.2, §6.1).
+ * Shared agent sort comparator.
  *
  * Moves project-detail.ts's `displayAgents` sort block into one shared,
  * unchanged function. `agents.ts` keeps its own inline copy until it is
- * migrated later (design §11); the two blocks are identical in every
+ * migrated later; the two blocks are identical in every
  * practical case today, since `createdAt`/`updatedAt` are legacy fallback
  * fields that current API responses never populate (see the comment on
  * `Agent` in `./types.ts`).
@@ -46,7 +46,7 @@ function createdKey(a: Agent): string {
   return a.created || a.createdAt || '';
 }
 
-/** Today's two-agent comparator, moved unchanged (design §4.2, §6.1). */
+/** Today's two-agent comparator, moved unchanged. */
 export function agentCompare(a: Agent, b: Agent, field: AgentSortField, dir: SortDir): number {
   let cmp = 0;
   switch (field) {
@@ -69,7 +69,7 @@ export function agentCompare(a: Agent, b: Agent, field: AgentSortField, dir: Sor
 /**
  * Today's `displayAgents` sort: a stable sort by `agentCompare`. Stable over
  * the REST order (`created DESC, id DESC`), so ties show in created-desc
- * order in both directions, exactly as today (design §4.2).
+ * order in both directions, exactly as today.
  */
 export function sortAgents(agents: readonly Agent[], field: AgentSortField, dir: SortDir): Agent[] {
   const sorted = [...agents];
@@ -90,15 +90,13 @@ export function serverSortKey(a: Agent, sort: 'updated' | 'created'): string {
  * `serverSortKey(a, sort)` (`updated` by default). For `created`, K is the
  * created time, so this is `(created dir, id DESC)`. Used to reinsert an
  * updated row at the correct
- * position within an already server-sorted page (design §6.1, §6.2),
+ * position within an already server-sorted page,
  * where `agentCompare`'s stability over the REST order cannot be relied on
  * because the page did not arrive in that order.
  *
  * This is a string comparison of the same ISO timestamps the server keys
- * on, not the server's true-time comparison (design §4.2's documented bug
- * fix) — a local re-sort can drift from the server's order by the
- * same sub-second edge case today's client-side order already has (design
- * §14). The view is corrected on the next fetch.
+ * on, not the server's true-time comparison — a local re-sort can drift from the server's order by the
+ * same sub-second edge case today's client-side order already has. The view is corrected on the next fetch.
  */
 export function serverOrderCompare(
   a: Agent,

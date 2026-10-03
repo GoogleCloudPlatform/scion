@@ -96,7 +96,7 @@ import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 /** A request/refresh trigger; every one funnels into `loadAgentsForView`, which asks the window's planner for the one request it needs. */
 type AgentsViewTrigger = AgentListTrigger;
 
-/** The project endpoint's sorted-mode response shape (design §4.6). */
+/** The project endpoint's sorted-mode response shape. */
 interface SortedAgentsResponse {
   agents: Agent[];
   nextCursor?: string;
@@ -347,9 +347,9 @@ export class ScionPageProjectDetail extends LitElement {
   private boundOnAgentsChanged = (e: Event) => {
     // `notifyWithData` wraps the payload as `{state, data}` (state.ts); the
     // `AgentsChangedDetail` itself is `detail.data`. The paged state merges
-    // through the window (design §6.2); the small/held state merges
-    // through `mergeChanged` instead of a per-event full rebuild (design
-    // §7, §11 — this replaces the old `onAgentsUpdated`).
+    // through the window; the small/held state merges
+    // through `mergeChanged` instead of a per-event full rebuild (this
+    // replaces the old `onAgentsUpdated`).
     const detail = (e as CustomEvent<{ data: AgentsChangedDetail }>).detail.data;
     this.agentWindow.applyChanges(detail);
     if (this.agentWindow.state !== 'paged') {
@@ -1165,7 +1165,7 @@ export class ScionPageProjectDetail extends LitElement {
     }
 
     // Sync the window's view state with the persisted values read above,
-    // before the initial load (design §6.3).
+    // before the initial load.
     this.agentWindow.setViewState({
       phaseFilter: this.phaseFilter,
       label: this.labelFilter,
@@ -1363,13 +1363,13 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   /**
-   * Live updates for the small/held state (design §7, §11): one
+   * Live updates for the small/held state: one
    * `agents-changed` flush merged through `mergeChanged`, replacing the old
    * `onAgentsUpdated` per-event full rebuild over `stateManager.getAgents()`.
    * Never called while the window is paged — `boundOnAgentsChanged` gates
    * the call to this method on `agentWindow.state !== 'paged'`, since
    * `this.agents` is intentionally empty then and the list view's live
-   * updates go through `agentWindow.applyChanges` instead (design §6.2),
+   * updates go through `agentWindow.applyChanges` instead,
    * called unconditionally before that gate.
    */
   private mergeAgentsChanged(detail: AgentsChangedDetail): void {
@@ -1385,7 +1385,7 @@ export class ScionPageProjectDetail extends LitElement {
     }
     const merged = mergeChanged(this.agents, detail, {
       getAgent: (id) => stateManager.getAgent(id),
-      // Today's add rule (design §6.2): any agent in this project, or an ID
+      // Today's add rule: any agent in this project, or an ID
       // already held (e.g. one whose projectId changed underneath it keeps
       // getting its updates until an explicit `deleted` removes it).
       shouldAdd: (agent) => agent.projectId === this.projectId,
@@ -1415,8 +1415,7 @@ export class ScionPageProjectDetail extends LitElement {
 
     try {
       // Load the project and the agents window's one first request in
-      // parallel (design §11: `loadData` and `fetchAndMergeAgents` both
-      // funnel into `loadAgentsForView`).
+      // parallel.
       const [projectResponse] = await Promise.all([
         apiFetch(`/api/v1/projects/${this.projectId}`),
         this.loadAgentsForView('page-load'),
@@ -2140,8 +2139,7 @@ export class ScionPageProjectDetail extends LitElement {
           .value=${this.labelFilter}
           @sl-input=${(e: Event) => {
             this.labelFilter = (e.target as HTMLElement & { value: string }).value;
-            // Live preview only — no request per keystroke (design §4.3, §6.4
-            // row 8). `setViewState` never fetches, so
+            // Live preview only — no request per keystroke. `setViewState` never fetches, so
             // this is always free regardless of window state.
             this.agentWindow.setViewState({ label: this.labelFilter });
           }}
@@ -3121,8 +3119,8 @@ export class ScionPageProjectDetail extends LitElement {
    * covers a real click; this one covers an event dispatched directly on
    * the host). This never bumps `agentsLoadGen` — it simply refuses to
    * navigate while either the window's own fetch or, while paged, a
-   * page-level load is in flight, so the mismatched-cursor race (design
-   * §4.4) can never start in the first place. A page-level load alone
+   * page-level load is in flight, so the mismatched-cursor race
+   * can never start in the first place. A page-level load alone
    * never gates small-state navigation: small-state Prev/Next is a purely
    * local slice of `display` and sends no request, so a held refresh or
    * lifecycle load has nothing to race.

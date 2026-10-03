@@ -110,7 +110,7 @@ describe('dashboard invite-stats 403 suppression (#1733)', () => {
 });
 
 /* ========================================================================== */
-/* Create Project quick action gated on hub-scope project.create (§5.F)       */
+/* Create Project quick action gated on hub-scope project.create       */
 /* ========================================================================== */
 
 /** happy-dom has no EventSource; setScope opens one. */

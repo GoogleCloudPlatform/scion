@@ -15,7 +15,7 @@
  */
 
 /**
- * Covers the small and paged window states (design §9, §11).
+ * Covers the small and paged window states.
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -80,7 +80,7 @@ function createWindow(
 }
 
 describe('AgentListWindow — small state', () => {
-  it('display/items match agent-sort over the held set for every filter (A5 parity surface)', () => {
+  it('display/items match agent-sort over the held set for every filter', () => {
     const agents = [
       agent('a', { name: 'Charlie', phase: 'running', updated: '2026-01-03T00:00:00Z' }),
       agent('b', { name: 'Alpha', phase: 'stopped', updated: '2026-01-02T00:00:00Z' }),
@@ -278,8 +278,7 @@ describe('AgentListWindow — paged state', () => {
     expect(win.updatesAvailable).toBe(false);
 
     // Off-page member 'c' changes phase. Its (default, tied) key is >= the
-    // page's first key, so on page 0 it counts as "entering range" (design
-    // §6.2) and the chip shows regardless of the phase change itself.
+    // page's first key, so on page 0 it counts as "entering range" and the chip shows regardless of the phase change itself.
     known.set('c', agent('c', { phase: 'stopped' }));
     win.applyChanges({ upserted: ['c'], deleted: [], unknown: new Map(), generation: 1 });
 
@@ -287,7 +286,7 @@ describe('AgentListWindow — paged state', () => {
     expect(win.items.map((a) => a.id)).toEqual(['a', 'b']); // on-page rows unchanged
     expect(win.memberIndex.getPhase('c')).toBe('stopped');
     expect(win.stats).toEqual({ total: 3, running: 2, incomplete: false });
-    expect(fetchPage).not.toHaveBeenCalled(); // no request (design §6.2)
+    expect(fetchPage).not.toHaveBeenCalled(); // no request
   });
 
   it('an off-page member change affecting counts only (no filter, key stays outside the page range) raises no chip', () => {
@@ -326,7 +325,7 @@ describe('AgentListWindow — paged state', () => {
 
     expect(win.memberIndex.getPhase('c')).toBe('stopped');
     expect(win.stats).toEqual({ total: 2, running: 1, incomplete: false });
-    expect(win.updatesAvailable).toBe(false); // counts-only: no chip (design §6.2)
+    expect(win.updatesAvailable).toBe(false); // counts-only: no chip
   });
 
   it('an off-page member that newly passes the active phase filter raises the chip', () => {
@@ -358,7 +357,7 @@ describe('AgentListWindow — paged state', () => {
     known.set('c', agent('c', { phase: 'running', updated: '2026-01-01T00:00:00Z' }));
     win.applyChanges({ upserted: ['c'], deleted: [], unknown: new Map(), generation: 1 });
 
-    expect(win.updatesAvailable).toBe(true); // newly passes the filter (design §6.2)
+    expect(win.updatesAvailable).toBe(true); // newly passes the filter
   });
 
   it('an off-page upsert for a non-member is added only if it passes the project + committed-label add rule', () => {
@@ -470,7 +469,7 @@ describe('AgentListWindow — paged state', () => {
       ''
     );
 
-    // No active phase filter: a phase-only change is counts-only (design §6.2).
+    // No active phase filter: a phase-only change is counts-only.
     win.applyChanges({
       upserted: [],
       deleted: [],
@@ -516,7 +515,7 @@ describe('AgentListWindow — paged state', () => {
     expect(freshWin.updatesAvailable).toBe(false); // neither on-page nor a member: ignored
   });
 
-  it('markResync raises the chip and issues no request (reconnect, design §6.2/§7)', () => {
+  it('markResync raises the chip and issues no request (reconnect)', () => {
     const fetchPage = vi.fn();
     const { win } = createWindow({ viewState: makeViewState(), fetchPage });
     win.setPaged(pagedResult([agent('a')], { totalCount: 1 }), '');
@@ -547,7 +546,7 @@ describe('AgentListWindow — paged state', () => {
     expect(fetchPage).not.toHaveBeenCalled();
   });
 
-  it('applyChanges is a no-op in the small state (design §11: small uses onAgentsUpdated instead)', () => {
+  it('applyChanges is a no-op in the small state', () => {
     const { win, setHeld } = createWindow({
       viewState: makeViewState(),
       getAgent: () => agent('a', { phase: 'stopped' }),
@@ -593,7 +592,7 @@ describe('AgentListWindow — page-0 K-range chip predicate and off-page add-rul
     expect(win.pageIndex).toBe(1); // unchanged — no re-adoption, no reset
     expect(win.hasPrev).toBe(true); // unchanged
     // The live preview filter IS applied to the
-    // loaded page's rows, same as the small state (design §6.3) — only 'c'
+    // loaded page's rows, same as the small state — only 'c'
     // (which carries the `env` label) remains.
     expect(win.items.map((a) => a.id)).toEqual(['c']);
     expect(fetchPage.mock.calls.length).toBe(callsBefore); // no request
