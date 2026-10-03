@@ -193,15 +193,16 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	var moveTarget *store.RuntimeBroker
 	targetBrokerID := ""
 	if req.TargetBroker != "" {
-		dst, found, err := s.resolveMoveTargetBroker(ctx, req.TargetBroker)
+		dst, ambiguous, err := s.resolveMoveTargetBroker(ctx, req.TargetBroker, agent.RuntimeBrokerID, project.ID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		// The agent's current broker is already visible to the caller
-		// through the agent record; any other target must pass the
-		// visibility gate before anything about it is revealed.
-		if !found || (dst.ID != agent.RuntimeBrokerID && !s.moveTargetVisible(ctx, dst)) {
+		if len(ambiguous) > 0 {
+			writeMoveTargetAmbiguous(w, req.TargetBroker, ambiguous)
+			return
+		}
+		if dst == nil {
 			s.writeMoveTargetNotFound(ctx, w, req.TargetBroker, project)
 			return
 		}

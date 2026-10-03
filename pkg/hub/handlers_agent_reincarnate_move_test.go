@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -416,6 +417,26 @@ func TestReincarnateMove_TargetNotVisibleToAgent_Returns404LikeUnknown(t *testin
 // the eligibility checks.
 func TestReincarnateMove_TargetNotReadableByUser_Returns404LikeUnknown(t *testing.T) {
 	f := setupMoveFixture(t, false, nil)
+	user, do := f.unprivilegedUser(t)
+	count := f.agentCount(t)
+
+	// The user may reincarnate the agent in place.
+	rec := do(ReincarnateAgentRequest{DryRun: true})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	assertSameAsUnknownTarget(t, do, f.dst.ID)
+	f.assertNoMoveSideEffects(t, count)
+
+	// Hub members can read brokers, so the target resolves.
+	ensureHubMembership(context.Background(), f.s, user.ID)
+	rec = do(ReincarnateAgentRequest{DryRun: true, TargetBroker: f.dst.ID})
+	assert.NotEqual(t, http.StatusNotFound, rec.Code, rec.Body.String())
+}
+
+// unprivilegedUser makes the agent's owner a user with no broker or
+// project rights, and returns a request func acting as that user.
+func (f *moveFixture) unprivilegedUser(t *testing.T) (*store.User, func(ReincarnateAgentRequest) *httptest.ResponseRecorder) {
+	t.Helper()
 	ctx := context.Background()
 	user := &store.User{
 		ID: tid("move-user-" + t.Name()), Email: "move-user@example.com", DisplayName: "Move User",
@@ -425,26 +446,187 @@ func TestReincarnateMove_TargetNotReadableByUser_Returns404LikeUnknown(t *testin
 	f.agent.OwnerID = user.ID
 	f.agent.CreatedBy = user.ID
 	require.NoError(t, f.s.UpdateAgent(ctx, f.agent))
-	f.agent, _ = f.s.GetAgent(ctx, f.agent.ID)
-	count := f.agentCount(t)
+	agent, err := f.s.GetAgent(ctx, f.agent.ID)
+	require.NoError(t, err)
+	f.agent = agent
 
 	caller := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, string(ClientTypeWeb))
-	do := func(body ReincarnateAgentRequest) *httptest.ResponseRecorder {
+	return user, func(body ReincarnateAgentRequest) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
 		f.srv.handleReincarnateAgent(rec, reincarnateRequest(t, f.agent.ID, caller, body), f.agent.ID)
 		return rec
 	}
-	// The user may reincarnate the agent in place.
-	rec := do(ReincarnateAgentRequest{DryRun: true})
+}
+
+// A user who cannot read the agent's current broker may still name it: that
+// is a plain reincarnate, and the broker is already in the agent record.
+func TestReincarnateMove_CurrentBrokerVisibleToUserWithoutRead(t *testing.T) {
+	f := setupMoveFixture(t, false, nil)
+	// Unlink the source so only the current-broker exemption makes it
+	// visible (a project provider is visible on its own).
+	require.NoError(t, f.s.RemoveProjectProvider(context.Background(), f.project.ID, f.src.ID))
+	_, do := f.unprivilegedUser(t)
+	rec := do(ReincarnateAgentRequest{DryRun: true, TargetBroker: f.src.ID})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp ReincarnateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Nil(t, resp.MoveVerdict, "same broker is not a move")
+	assert.Equal(t, f.src.ID, resp.TargetBrokerID)
+}
 
-	assertSameAsUnknownTarget(t, do, f.dst.ID)
+// An auto-providing broker is visible to a caller with no other rights:
+// the request reaches the checks (and stops at access, since the user may
+// not link brokers to the project).
+func TestReincarnateMove_AutoProvideTargetVisibleWithoutRights(t *testing.T) {
+	f := setupMoveFixture(t, false, func(dst *store.RuntimeBroker) { dst.AutoProvide = true })
+	_, do := f.unprivilegedUser(t)
+	rec := do(ReincarnateAgentRequest{DryRun: true, TargetBroker: f.dst.ID})
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	_, _, v := decodeMoveRefusal(t, rec)
+	assertVerdictFailedAt(t, v, moveCheckAccess)
+}
+
+// A broker that serves the agent's project (and so is listed in the
+// not-found response) is visible to a user without broker read.
+func TestReincarnateMove_ProjectProviderVisibleToUserWithoutRead(t *testing.T) {
+	f := setupMoveFixture(t, true, nil)
+	_, do := f.unprivilegedUser(t)
+	rec := do(ReincarnateAgentRequest{DryRun: true, TargetBroker: f.dst.ID})
+	require.NotEqual(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	_, _, v := decodeMoveRefusal(t, rec)
+	assert.Equal(t, f.dst.ID, v.TargetBroker.ID)
+}
+
+// An agent without agent-create scope still sees a broker that serves its
+// project; it is refused at the access check, not hidden.
+func TestReincarnateMove_AgentServesProjectWithoutScope(t *testing.T) {
+	f := setupMoveFixture(t, true, nil)
+	req := reincarnateRequest(t, f.agent.ID, agentIdentityFor(f.agent.ID, f.project.ID), ReincarnateAgentRequest{DryRun: true, TargetBroker: f.dst.ID})
+	rec := httptest.NewRecorder()
+	f.srv.handleReincarnateAgent(rec, req, f.agent.ID)
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	_, _, v := decodeMoveRefusal(t, rec)
+	assertVerdictFailedAt(t, v, moveCheckAccess)
+}
+
+// Plugin records are not runtime brokers: a user who can read every broker
+// gets the unknown-broker 404 for one, by ID or name.
+func TestReincarnateMove_PluginTargetIs404ForUser(t *testing.T) {
+	f := setupMoveFixture(t, false, func(dst *store.RuntimeBroker) {
+		dst.Labels = map[string]string{"scion.io/plugin": "discord"}
+	})
+	do := func(body ReincarnateAgentRequest) *httptest.ResponseRecorder {
+		return doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/reincarnate", body)
+	}
+	for _, target := range []string{f.dst.ID, f.dst.Name} {
+		assertSameAsUnknownTarget(t, do, target)
+	}
+}
+
+// addMoveBroker stores another move-eligible broker, linked to the project
+// (and so visible to the agent caller) when provider is true.
+func (f *moveFixture) addMoveBroker(t *testing.T, id, name, slug string, provider bool) *store.RuntimeBroker {
+	t.Helper()
+	ctx := context.Background()
+	b := &store.RuntimeBroker{
+		ID: tid(id + t.Name()), Name: name, Slug: slug,
+		Status: store.BrokerStatusOnline, WorkspaceStorage: moveFixtureStorage(),
+		Capabilities: &store.BrokerCapabilities{Reprovision: true, AgentMove: true},
+		Profiles:     moveFixtureProfiles(), DefaultProfile: "k8s",
+	}
+	require.NoError(t, f.s.CreateRuntimeBroker(ctx, b))
+	if provider {
+		require.NoError(t, f.s.AddProjectProvider(ctx, &store.ProjectProvider{
+			ProjectID: f.project.ID, BrokerID: b.ID, BrokerName: b.Name, Status: store.BrokerStatusOnline,
+		}))
+	}
+	return b
+}
+
+func (f *moveFixture) assertTargetResolvesTo(t *testing.T, target string, want *store.RuntimeBroker) {
+	t.Helper()
+	rec := f.reincarnate(t, ReincarnateAgentRequest{DryRun: true, TargetBroker: target})
+	require.Equal(t, http.StatusOK, rec.Code, "target %q: %s", target, rec.Body.String())
+	var resp ReincarnateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, want.ID, resp.TargetBrokerID, "target %q", target)
+}
+
+// A hidden broker never shadows a visible one: hidden brokers are filtered
+// out before the name or slug is matched. Each case runs with the hidden
+// broker created both before and after the visible one, so it is listed
+// first in one of the two runs.
+func TestReincarnateMove_HiddenBrokerDoesNotShadowVisible(t *testing.T) {
+	type spec struct{ id, name, slug string }
+	cases := []struct {
+		name            string
+		hidden, visible spec
+		target          string
+	}{
+		{"same name, different case", spec{"hidden-", "shadow-name", "hidden-slug-x"}, spec{"visible-", "SHADOW-NAME", "visible-slug-x"}, "shadow-name"},
+		{"hidden name equals visible slug", spec{"hidden2-", "visible2-slug", "hidden2-slug"}, spec{"visible2-", "Visible Two", "visible2-slug"}, "visible2-slug"},
+	}
+	for _, tc := range cases {
+		for _, hiddenFirst := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/hiddenFirst=%v", tc.name, hiddenFirst), func(t *testing.T) {
+				f := setupMoveFixture(t, true, nil)
+				var vis *store.RuntimeBroker
+				if hiddenFirst {
+					f.addMoveBroker(t, tc.hidden.id, tc.hidden.name, tc.hidden.slug, false)
+					vis = f.addMoveBroker(t, tc.visible.id, tc.visible.name, tc.visible.slug, true)
+				} else {
+					vis = f.addMoveBroker(t, tc.visible.id, tc.visible.name, tc.visible.slug, true)
+					f.addMoveBroker(t, tc.hidden.id, tc.hidden.name, tc.hidden.slug, false)
+				}
+				f.assertTargetResolvesTo(t, tc.target, vis)
+			})
+		}
+	}
+}
+
+// An exact ID match wins over a broker whose name is that ID.
+func TestReincarnateMove_ExactIDWinsOverName(t *testing.T) {
+	f := setupMoveFixture(t, true, nil)
+	f.addMoveBroker(t, "named-like-id-", f.dst.ID, "named-like-id", true)
+	f.assertTargetResolvesTo(t, f.dst.ID, f.dst)
+}
+
+// A name or slug matching more than one visible broker is refused with a
+// 409 listing only the visible candidates; the caller must use the ID.
+func TestReincarnateMove_AmbiguousTarget_Returns409(t *testing.T) {
+	f := setupMoveFixture(t, true, nil)
+	count := f.agentCount(t)
+	a := f.addMoveBroker(t, "twin-a-", "Twin", "twin-a", true)
+	b := f.addMoveBroker(t, "twin-b-", "twin", "twin-b", true)
+	f.addMoveBroker(t, "twin-hidden-", "TWIN", "twin-hidden", false)
+
+	for _, dryRun := range []bool{true, false} {
+		rec := f.reincarnate(t, ReincarnateAgentRequest{DryRun: dryRun, TargetBroker: "twin"})
+		require.Equal(t, http.StatusConflict, rec.Code, "dryRun=%v: %s", dryRun, rec.Body.String())
+		var body struct {
+			Error struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+				Details struct {
+					RequestedBroker string                 `json:"requestedBroker"`
+					Candidates      []RuntimeBrokerSummary `json:"candidates"`
+				} `json:"details"`
+			} `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+		assert.Equal(t, ErrCodeRuntimeBrokerAmbiguous, body.Error.Code)
+		assert.Contains(t, body.Error.Message, "use the broker ID")
+		assert.Equal(t, "twin", body.Error.Details.RequestedBroker)
+		ids := []string{}
+		for _, c := range body.Error.Details.Candidates {
+			ids = append(ids, c.ID)
+		}
+		want := []string{a.ID, b.ID}
+		sort.Strings(want)
+		assert.Equal(t, want, ids, "only visible candidates, sorted by ID")
+	}
+	f.assertTargetResolvesTo(t, a.ID, a)
 	f.assertNoMoveSideEffects(t, count)
-
-	// Hub members can read brokers, so the target resolves.
-	ensureHubMembership(ctx, f.s, user.ID)
-	rec = do(ReincarnateAgentRequest{DryRun: true, TargetBroker: f.dst.ID})
-	assert.NotEqual(t, http.StatusNotFound, rec.Code, rec.Body.String())
 }
 
 // A target that is not reachable fails the target health check.

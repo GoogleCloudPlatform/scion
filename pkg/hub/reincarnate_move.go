@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -307,42 +308,69 @@ func sameExportMessage(src, dst *store.RuntimeBroker) string {
 		where, brokerDisplayName(src), brokerDisplayName(dst), mounts)
 }
 
-// resolveMoveTargetBroker resolves a --broker value (ID, name or slug) to a
-// runtime broker record. It writes nothing and links nothing. found is false
-// when no runtime broker matches; message-broker plugin records (label
-// scion.io/plugin) are not runtime brokers and never match.
-func (s *Server) resolveMoveTargetBroker(ctx context.Context, target string) (broker *store.RuntimeBroker, found bool, err error) {
+// resolveMoveTargetBroker resolves a --broker value to a runtime broker
+// among the brokers the caller may see (moveTargetVisible; the agent's
+// current broker, currentBrokerID, is always visible). Message-broker plugin
+// records (label scion.io/plugin) are not runtime brokers and never match.
+// It writes nothing and links nothing.
+//
+// A visible broker whose ID equals target wins. Otherwise target is matched
+// against visible brokers' names (case-insensitive) and slugs (exact):
+// exactly one match is the target; none returns a nil broker; more than one
+// returns the candidates, sorted by ID. Brokers the caller cannot see are
+// filtered out before matching, so they neither shadow a visible broker nor
+// make a request ambiguous.
+func (s *Server) resolveMoveTargetBroker(ctx context.Context, target, currentBrokerID, projectID string) (broker *store.RuntimeBroker, ambiguous []store.RuntimeBroker, err error) {
+	candidate := func(b *store.RuntimeBroker) bool {
+		return !isPluginBroker(b) && (b.ID == currentBrokerID || s.moveTargetVisible(ctx, b, projectID))
+	}
 	b, err := s.store.GetRuntimeBroker(ctx, target)
-	if err == nil && !isPluginBroker(b) {
-		return b, true, nil
-	}
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return nil, false, err
+		return nil, nil, err
 	}
-	b, err = s.store.GetRuntimeBrokerByName(ctx, target)
-	if err == nil && !isPluginBroker(b) {
-		return b, true, nil
+	if err == nil && candidate(b) {
+		return b, nil, nil
 	}
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return nil, false, err
-	}
+	var matches []store.RuntimeBroker
 	cursor := ""
 	for {
 		page, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{},
 			store.ListOptions{Limit: 200, Cursor: cursor, SkipTotalCount: true})
 		if err != nil {
-			return nil, false, err
+			return nil, nil, err
 		}
 		for i := range page.Items {
-			if page.Items[i].Slug == target && !isPluginBroker(&page.Items[i]) {
-				return &page.Items[i], true, nil
+			b := &page.Items[i]
+			if (strings.EqualFold(b.Name, target) || b.Slug == target) && candidate(b) {
+				matches = append(matches, *b)
 			}
 		}
 		if page.NextCursor == "" {
-			return nil, false, nil
+			break
 		}
 		cursor = page.NextCursor
 	}
+	switch len(matches) {
+	case 0:
+		return nil, nil, nil
+	case 1:
+		return &matches[0], nil, nil
+	default:
+		sort.Slice(matches, func(i, j int) bool { return matches[i].ID < matches[j].ID })
+		return nil, matches, nil
+	}
+}
+
+// writeMoveTargetAmbiguous writes the 409 for a --broker name or slug that
+// matches more than one visible broker, listing those brokers' IDs.
+func writeMoveTargetAmbiguous(w http.ResponseWriter, target string, candidates []store.RuntimeBroker) {
+	summaries := make([]RuntimeBrokerSummary, 0, len(candidates))
+	for _, b := range candidates {
+		summaries = append(summaries, RuntimeBrokerSummary{ID: b.ID, Name: b.Name, Status: b.Status})
+	}
+	writeError(w, http.StatusConflict, ErrCodeRuntimeBrokerAmbiguous,
+		fmt.Sprintf("%q matches %d runtime brokers; use the broker ID", target, len(candidates)),
+		map[string]interface{}{"requestedBroker": target, "candidates": summaries})
 }
 
 // isPluginBroker reports whether a broker record is a message-broker plugin
@@ -356,11 +384,12 @@ func isPluginBroker(b *store.RuntimeBroker) bool {
 // see its configuration in a move verdict. A broker the caller cannot see
 // is answered exactly like an unknown one, so --broker is not an existence
 // oracle and the verdict does not leak another broker's export, profiles or
-// health. Visible means: dst auto-provides; or the caller is a user who may
-// read dst; or the caller is an agent that may dispatch to dst or whose
-// project dst already serves. Dispatch and provider-link rights are still
-// decided separately by the access check.
-func (s *Server) moveTargetVisible(ctx context.Context, dst *store.RuntimeBroker) bool {
+// health. Visible means: dst auto-provides; or dst already serves the
+// agent's project (projectID), as listed in the not-found response; or the
+// caller is a user who may read dst; or the caller is an agent that may
+// dispatch to dst. Dispatch and provider-link rights are still decided
+// separately by the access check.
+func (s *Server) moveTargetVisible(ctx context.Context, dst *store.RuntimeBroker, projectID string) bool {
 	if dst.AutoProvide {
 		return true
 	}
@@ -371,10 +400,10 @@ func (s *Server) moveTargetVisible(ctx context.Context, dst *store.RuntimeBroker
 	switch identity.Type() {
 	case "user", "dev":
 		user, ok := identity.(UserIdentity)
-		return ok && s.authzService.CheckAccess(ctx, user, brokerResource(dst), ActionRead).Allowed
+		return ok && (s.brokerServesProject(ctx, dst.ID, projectID) ||
+			s.authzService.CheckAccess(ctx, user, brokerResource(dst), ActionRead).Allowed)
 	case "agent":
-		agent, ok := identity.(AgentIdentity)
-		return ok && (s.canDispatchToBroker(ctx, dst) || s.brokerServesProject(ctx, dst.ID, agent.ProjectID()))
+		return s.brokerServesProject(ctx, dst.ID, projectID) || s.canDispatchToBroker(ctx, dst)
 	default:
 		return false
 	}
