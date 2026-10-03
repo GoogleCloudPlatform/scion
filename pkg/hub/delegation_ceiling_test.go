@@ -120,6 +120,32 @@ func createDCEdge(t *testing.T, s store.Store, delegatorType, delegatorID, deleg
 	}))
 }
 
+// seedRecordedDelegationEdge records an active edge carrying recorded
+// authority: a principal effect ceiling with session provenance, version 1.
+// This is the edge an interactive session create writes. createDCEdge, by
+// contrast, writes an edge without provenance (it reads as unrecorded, the
+// state of edges that predate provenance recording).
+func seedRecordedDelegationEdge(t *testing.T, s store.Store, delegatorType, delegatorID, delegateType, delegateID, scopeType, scopeID, role string) {
+	t.Helper()
+	require.NoError(t, s.CreateDelegationEdge(context.Background(), &store.DelegationEdge{
+		DelegatorType: delegatorType,
+		DelegatorID:   delegatorID,
+		DelegateType:  delegateType,
+		DelegateID:    delegateID,
+		ScopeType:     scopeType,
+		ScopeID:       scopeID,
+		Role:          role,
+		Active:        true,
+		AuthorityProvenance: store.AuthorityProvenance{
+			ProvenanceVersion:    1,
+			SourcePrincipalKind:  delegatorType,
+			SourcePrincipalID:    delegatorID,
+			SourceCredentialKind: store.SourceCredentialSession,
+		},
+		EffectCeiling: store.EffectCeiling{Kind: store.EffectCeilingPrincipal},
+	}))
+}
+
 func dcAgentIdentity(agentID, projectID string, role AgentRole) AgentIdentity {
 	return &agentIdentityWrapper{&AgentTokenClaims{
 		Claims:    jwt.Claims{Subject: agentID},

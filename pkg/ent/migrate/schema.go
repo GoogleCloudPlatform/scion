@@ -732,6 +732,27 @@ var (
 	// DelegationEdgesColumns holds the columns for the "delegation_edges" table.
 	DelegationEdgesColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
+		{Name: "provenance_version", Type: field.TypeInt, Default: 0},
+		{Name: "source_principal_kind", Type: field.TypeString, Default: ""},
+		{Name: "source_principal_id", Type: field.TypeString, Default: ""},
+		{Name: "source_credential_kind", Type: field.TypeString, Default: ""},
+		{Name: "source_credential_id", Type: field.TypeString, Default: ""},
+		{Name: "source_event_id", Type: field.TypeString, Default: ""},
+		{Name: "source_schedule_id", Type: field.TypeString, Nullable: true},
+		{Name: "source_authorization_revision", Type: field.TypeInt, Default: 0},
+		{Name: "initiator_principal_kind", Type: field.TypeString, Default: ""},
+		{Name: "initiator_principal_id", Type: field.TypeString, Default: ""},
+		{Name: "initiator_credential_kind", Type: field.TypeString, Default: ""},
+		{Name: "initiator_credential_id", Type: field.TypeString, Default: ""},
+		{Name: "ceiling_kind", Type: field.TypeString, Default: ""},
+		{Name: "ceiling_version", Type: field.TypeInt32, Default: 0},
+		{Name: "ceiling_permission_ids", Type: field.TypeString, Nullable: true},
+		{Name: "ceiling_boundary_kind", Type: field.TypeString, Default: ""},
+		{Name: "ceiling_boundary_project_id", Type: field.TypeString, Default: ""},
+		{Name: "ceiling_source_expires_at", Type: field.TypeTime, Nullable: true},
+		{Name: "deactivation_cause", Type: field.TypeString, Default: ""},
+		{Name: "deactivated_at", Type: field.TypeTime, Nullable: true},
+		{Name: "deactivation_op_id", Type: field.TypeString, Default: ""},
 		{Name: "delegator_type", Type: field.TypeEnum, Enums: []string{"user", "agent"}},
 		{Name: "delegator_id", Type: field.TypeString},
 		{Name: "delegate_type", Type: field.TypeEnum, Enums: []string{"user", "agent"}},
@@ -753,17 +774,17 @@ var (
 			{
 				Name:    "delegationedge_delegate_type_delegate_id",
 				Unique:  false,
-				Columns: []*schema.Column{DelegationEdgesColumns[3], DelegationEdgesColumns[4]},
+				Columns: []*schema.Column{DelegationEdgesColumns[24], DelegationEdgesColumns[25]},
 			},
 			{
 				Name:    "delegationedge_delegator_type_delegator_id",
 				Unique:  false,
-				Columns: []*schema.Column{DelegationEdgesColumns[1], DelegationEdgesColumns[2]},
+				Columns: []*schema.Column{DelegationEdgesColumns[22], DelegationEdgesColumns[23]},
 			},
 			{
 				Name:    "delegationedge_delegate_type_delegate_id_scope_type_scope_id",
 				Unique:  true,
-				Columns: []*schema.Column{DelegationEdgesColumns[3], DelegationEdgesColumns[4], DelegationEdgesColumns[5], DelegationEdgesColumns[6]},
+				Columns: []*schema.Column{DelegationEdgesColumns[24], DelegationEdgesColumns[25], DelegationEdgesColumns[26], DelegationEdgesColumns[27]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "active = true",
 				},
@@ -771,7 +792,7 @@ var (
 			{
 				Name:    "delegationedge_delegator_type_delegator_id_active",
 				Unique:  false,
-				Columns: []*schema.Column{DelegationEdgesColumns[1], DelegationEdgesColumns[2], DelegationEdgesColumns[8]},
+				Columns: []*schema.Column{DelegationEdgesColumns[22], DelegationEdgesColumns[23], DelegationEdgesColumns[29]},
 			},
 		},
 	}
