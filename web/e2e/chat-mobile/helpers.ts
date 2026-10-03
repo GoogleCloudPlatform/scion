@@ -184,6 +184,56 @@ export async function touchSwipe(
   }
 }
 
+/**
+ * A two-finger horizontal pinch through CDP, both fingers at height `y`.
+ * Finger 0 starts at `x0` and finger 1 at `x1`; over `steps` moves they
+ * travel `dx0` and `dx1` (fingers moving apart zoom in). With `solo`,
+ * finger 0 first travels `solo.dx` alone over `solo.steps` moves before
+ * finger 1 lands, a pinch whose fingers land a moment apart. Solo travel
+ * within the browser's touch slop (about 15px in Chromium) never reaches
+ * the page as touchmoves, so make it larger when those moves matter.
+ */
+export async function touchPinch(
+  page: Page,
+  opts: {
+    y: number;
+    x0: number;
+    dx0: number;
+    x1: number;
+    dx1: number;
+    steps?: number;
+    solo?: { steps: number; dx: number };
+  }
+): Promise<void> {
+  const steps = opts.steps ?? 8;
+  const solo = opts.solo ?? { steps: 0, dx: 0 };
+  const cdp = await page.context().newCDPSession(page);
+  const soloAt = (i: number) => ({ id: 0, x: opts.x0 + (solo.dx * i) / solo.steps, y: opts.y });
+  const x0 = opts.x0 + solo.dx;
+  const f0 = (i: number) => ({ id: 0, x: x0 + (opts.dx0 * i) / steps, y: opts.y });
+  const f1 = (i: number) => ({ id: 1, x: opts.x1 + (opts.dx1 * i) / steps, y: opts.y });
+  try {
+    if (solo.steps > 0) {
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [soloAt(0)] });
+      for (let i = 1; i <= solo.steps; i++) {
+        await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [soloAt(i)] });
+        await page.waitForTimeout(15);
+      }
+    }
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [f0(0), f1(0)] });
+    for (let i = 1; i <= steps; i++) {
+      await cdp.send('Input.dispatchTouchEvent', {
+        type: 'touchMove',
+        touchPoints: [f0(i), f1(i)],
+      });
+      await page.waitForTimeout(15);
+    }
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  } finally {
+    await cdp.detach();
+  }
+}
+
 /** Press and hold at one point — the gesture a long-press controller listens to. */
 export async function touchHold(page: Page, x: number, y: number, holdMs = 600): Promise<void> {
   const cdp = await page.context().newCDPSession(page);
@@ -195,6 +245,9 @@ export async function touchHold(page: Page, x: number, y: number, holdMs = 600):
     await cdp.detach();
   }
 }
+
+/** Sideways scrollers that message content brings with it: a wide table's wrapper. */
+const CONTENT_SIDE_SCROLLERS = ['.md-table-scroll'];
 
 /** CSS class of the panel that is on screen for a given `data-panel` value. */
 const ACTIVE_PANEL_SELECTOR: Record<string, string> = {
@@ -217,7 +270,8 @@ const ACTIVE_PANEL_SELECTOR: Record<string, string> = {
  * `sideScrollers` names elements that are meant to scroll sideways (a
  * toolbar row that scrolls when its buttons do not fit). Each must itself
  * fit and must actually be a sideways scroller; what it clips is reachable
- * by scrolling it, so its descendants are not scanned.
+ * by scrolling it, so its descendants are not scanned. The scroller a
+ * message wraps around a wide table is always one of them.
  */
 export async function assertNoHorizontalOverflow(
   page: Page,
@@ -287,7 +341,7 @@ export async function assertNoHorizontalOverflow(
         notScrollers,
       };
     },
-    [ACTIVE_PANEL_SELECTOR, sideScrollers] as const
+    [ACTIVE_PANEL_SELECTOR, [...CONTENT_SIDE_SCROLLERS, ...sideScrollers]] as const
   );
 
   expect(result.notScrollers, 'declared sideways scrollers scroll sideways').toEqual([]);
