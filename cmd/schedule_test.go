@@ -16,55 +16,9 @@ package cmd
 
 import (
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 )
-
-func TestFormatScheduleDuration(t *testing.T) {
-	tests := []struct {
-		name     string
-		duration time.Duration
-		expected string
-	}{
-		{"1 second", time.Second, "1 second"},
-		{"30 seconds", 30 * time.Second, "30 seconds"},
-		{"1 minute", time.Minute, "1 minute"},
-		{"5 minutes", 5 * time.Minute, "5 minutes"},
-		{"1 hour", time.Hour, "1 hour"},
-		{"3 hours", 3 * time.Hour, "3 hours"},
-		{"1 day", 24 * time.Hour, "1 day"},
-		{"7 days", 7 * 24 * time.Hour, "7 days"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := formatScheduleDuration(tt.duration)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
-func TestFormatScheduleTime(t *testing.T) {
-	t.Run("pending event in future shows relative time", func(t *testing.T) {
-		future := time.Now().Add(30 * time.Minute)
-		result := formatScheduleTime(future, "pending")
-		assert.Contains(t, result, "in ")
-		assert.Contains(t, result, "minute")
-	})
-
-	t.Run("pending event in past shows now", func(t *testing.T) {
-		past := time.Now().Add(-1 * time.Minute)
-		result := formatScheduleTime(past, "pending")
-		assert.Equal(t, "now", result)
-	})
-
-	t.Run("fired event shows relative past time", func(t *testing.T) {
-		past := time.Now().Add(-5 * time.Minute)
-		result := formatScheduleTime(past, "fired")
-		assert.Contains(t, result, "ago")
-	})
-}
 
 func TestScheduleCreateValidation(t *testing.T) {
 	// Save and restore flags

@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agentcache"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
@@ -979,48 +980,12 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 	return nil
 }
 
-// formatLastSeen formats a timestamp as a human-readable relative time.
-func formatLastSeen(t time.Time) string {
-	if t.IsZero() {
-		return "-"
-	}
-
-	d := time.Since(t)
-	if d < 0 {
-		return "just now"
-	}
-
-	switch {
-	case d < time.Minute:
-		secs := int(d.Seconds())
-		if secs <= 1 {
-			return "just now"
-		}
-		return fmt.Sprintf("%d seconds ago", secs)
-	case d < time.Hour:
-		mins := int(d.Minutes())
-		if mins == 1 {
-			return "1 minute ago"
-		}
-		return fmt.Sprintf("%d minutes ago", mins)
-	case d < 24*time.Hour:
-		hours := int(d.Hours())
-		if hours == 1 {
-			return "1 hour ago"
-		}
-		return fmt.Sprintf("%d hours ago", hours)
-	default:
-		days := int(d.Hours() / 24)
-		if days == 1 {
-			return "1 day ago"
-		}
-		return fmt.Sprintf("%d days ago", days)
-	}
-}
-
 // formatLastActivity formats a status and timestamp as a combined "activity, time ago" string.
 func formatLastActivity(status string, t time.Time) string {
-	timePart := formatLastSeen(t)
+	timePart := "-"
+	if !t.IsZero() {
+		timePart = clitime.Relative(t)
+	}
 	if status == "" || status == "WORKING" || status == "working" {
 		return timePart
 	}

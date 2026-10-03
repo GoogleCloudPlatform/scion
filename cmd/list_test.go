@@ -53,52 +53,6 @@ func captureListStdout(fn func()) {
 	_ = r.Close()
 }
 
-func TestFormatLastSeen(t *testing.T) {
-	tests := []struct {
-		name     string
-		offset   time.Duration
-		expected string
-	}{
-		{"zero time", 0, "-"},
-		{"just now", 0 * time.Second, "just now"},
-		{"1 second ago", 1 * time.Second, "just now"},
-		{"30 seconds ago", 30 * time.Second, "30 seconds ago"},
-		{"59 seconds ago", 59 * time.Second, "59 seconds ago"},
-		{"1 minute ago", 1 * time.Minute, "1 minute ago"},
-		{"5 minutes ago", 5 * time.Minute, "5 minutes ago"},
-		{"59 minutes ago", 59 * time.Minute, "59 minutes ago"},
-		{"1 hour ago", 1 * time.Hour, "1 hour ago"},
-		{"3 hours ago", 3 * time.Hour, "3 hours ago"},
-		{"23 hours ago", 23 * time.Hour, "23 hours ago"},
-		{"1 day ago", 24 * time.Hour, "1 day ago"},
-		{"7 days ago", 7 * 24 * time.Hour, "7 days ago"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var input time.Time
-			if tt.name == "zero time" {
-				input = time.Time{}
-			} else {
-				input = time.Now().Add(-tt.offset)
-			}
-
-			result := formatLastSeen(input)
-			if result != tt.expected {
-				t.Errorf("formatLastSeen() = %q, want %q", result, tt.expected)
-			}
-		})
-	}
-}
-
-func TestFormatLastSeenFutureTime(t *testing.T) {
-	future := time.Now().Add(10 * time.Second)
-	result := formatLastSeen(future)
-	if result != "just now" {
-		t.Errorf("formatLastSeen(future) = %q, want %q", result, "just now")
-	}
-}
-
 func TestFormatLastActivity(t *testing.T) {
 	now := time.Now()
 	tests := []struct {
@@ -107,11 +61,11 @@ func TestFormatLastActivity(t *testing.T) {
 		t        time.Time
 		expected string
 	}{
-		{"activity with time", "thinking", now.Add(-30 * time.Second), "thinking, 30 seconds ago"},
-		{"phase with time", "stopped", now.Add(-2 * time.Hour), "stopped, 2 hours ago"},
-		{"empty status with time", "", now.Add(-5 * time.Minute), "5 minutes ago"},
-		{"WORKING status with time", "WORKING", now.Add(-5 * time.Minute), "5 minutes ago"},
-		{"working status with time", "working", now.Add(-5 * time.Minute), "5 minutes ago"},
+		{"activity with time", "thinking", now.Add(-30 * time.Second), "thinking, just now"},
+		{"phase with time", "stopped", now.Add(-2 * time.Hour), "stopped, 2h ago"},
+		{"empty status with time", "", now.Add(-5 * time.Minute), "5m ago"},
+		{"WORKING status with time", "WORKING", now.Add(-5 * time.Minute), "5m ago"},
+		{"working status with time", "working", now.Add(-5 * time.Minute), "5m ago"},
 		{"activity with zero time", "running", time.Time{}, "running"},
 		{"empty status with zero time", "", time.Time{}, "-"},
 	}
@@ -187,8 +141,8 @@ func TestDisplayAgentsLocalMode(t *testing.T) {
 	if !strings.Contains(lines[1], "running") {
 		t.Errorf("agent-1 row should contain phase 'running': %s", lines[1])
 	}
-	if !strings.Contains(lines[1], "thinking, 30 seconds ago") {
-		t.Errorf("agent-1 row should contain 'thinking, 30 seconds ago': %s", lines[1])
+	if !strings.Contains(lines[1], "thinking, just now") {
+		t.Errorf("agent-1 row should contain 'thinking, just now': %s", lines[1])
 	}
 
 	// Verify second agent row shows "-" for missing harness config
@@ -252,8 +206,8 @@ func TestDisplayAgentsHubMode(t *testing.T) {
 		t.Errorf("hub agent row should contain phase 'running': %s", lines[1])
 	}
 	// No activity set, so last activity should show just the timestamp
-	if !strings.Contains(lines[1], "2 minutes ago") {
-		t.Errorf("hub agent row should contain '2 minutes ago': %s", lines[1])
+	if !strings.Contains(lines[1], "2m ago") {
+		t.Errorf("hub agent row should contain '2m ago': %s", lines[1])
 	}
 }
 
