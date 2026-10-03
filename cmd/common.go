@@ -523,6 +523,10 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		return fmt.Errorf("--enable-telemetry and --disable-telemetry are mutually exclusive")
 	}
 
+	if err := validateLaunchWaitFlags(); err != nil {
+		return err
+	}
+
 	// Validate --harness-auth value
 	if harnessAuthFlag != "" {
 		switch harnessAuthFlag {
@@ -1206,6 +1210,13 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		workspaceFinalized = true
 	}
 
+	return finishHubStart(hubCtx, projectID, agentName, resume, resp, workspaceFinalized)
+}
+
+// finishHubStart completes a Hub start after the create (and any workspace
+// finalize): it waits for the launch when needed, reports the result, and
+// attaches with --attach.
+func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume bool, resp *hubclient.CreateAgentResponse, workspaceFinalized bool) error {
 	// Decide whether to wait for the agent to reach running:
 	//   - after a workspace finalize, which dispatches the start;
 	//   - when the Hub accepted the create for an asynchronous launch;
@@ -1230,8 +1241,9 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		if workspaceFinalized {
 			budgetFrom = nil
 		}
-		// Ctrl-C stops waiting only; the launch continues on the Hub.
-		waitCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		// Ctrl-C (or SIGTERM) stops waiting only; the launch continues on
+		// the Hub.
+		waitCtx, stopSignals := signalWaitContext()
 		waited, err := waitForAgentLaunch(waitCtx, launchWaitOptions{
 			AgentName:  agentName,
 			BudgetFrom: budgetFrom,
@@ -1251,11 +1263,28 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		finalAgent = waited
 	}
 
+	// After a finalize without waiting, the create answer predates the
+	// dispatched start; report the agent's current state instead.
+	phaseKnown := true
+	if workspaceFinalized && !needWait {
+		getCtx, getCancel := context.WithTimeout(context.Background(), launchFetchTimeout)
+		current, getErr := hubCtx.Client.ProjectAgents(projectID).Get(getCtx, agentName)
+		getCancel()
+		if getErr == nil && current != nil {
+			finalAgent = current
+		} else {
+			phaseKnown = false
+		}
+	}
+
 	displayStatus := "started"
 	if resume {
 		displayStatus = "resumed"
 	}
 	launching := !needWait && launchActive(finalAgent)
+	if workspaceFinalized && !needWait && !agentIsRunning(finalAgent, phaseKnown) {
+		launching = true
+	}
 	message := fmt.Sprintf("Agent '%s' %s via Hub.", agentName, displayStatus)
 	if launching {
 		message = fmt.Sprintf("Agent '%s' accepted by Hub and launching.", agentName)
@@ -1273,14 +1302,16 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		if finalAgent != nil {
 			result.Details["slug"] = finalAgent.Slug
 			phase, activity := hubAgentPhaseActivity(finalAgent.Phase, finalAgent.Activity, finalAgent.Status)
-			result.Details["phase"] = phase
-			if activity != "" {
-				result.Details["activity"] = activity
+			if phaseKnown {
+				result.Details["phase"] = phase
+				if activity != "" {
+					result.Details["activity"] = activity
+				}
 			}
 			if finalAgent.RuntimeBrokerID != "" {
 				result.Details["runtimeBrokerId"] = finalAgent.RuntimeBrokerID
 			}
-			if launching {
+			if launching && finalAgent.Launch != nil {
 				result.Details["launchId"] = finalAgent.Launch.ID
 				if finalAgent.Launch.Deadline != nil {
 					result.Details["launchDeadline"] = finalAgent.Launch.Deadline.UTC().Format(time.RFC3339)
@@ -1293,8 +1324,10 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 	statusf("%s\n", message)
 	if finalAgent != nil {
 		statusf("Agent Slug: %s\n", finalAgent.Slug)
-		phase, _ := hubAgentPhaseActivity(finalAgent.Phase, finalAgent.Activity, finalAgent.Status)
-		statusf("Phase: %s\n", phase)
+		if phaseKnown {
+			phase, _ := hubAgentPhaseActivity(finalAgent.Phase, finalAgent.Activity, finalAgent.Status)
+			statusf("Phase: %s\n", phase)
+		}
 	}
 	if launching {
 		statusf("Follow the launch with: scion start %s (waits until it is running)\n", agentName)
@@ -1702,4 +1735,13 @@ func splitCommaList(values []string) []string {
 		}
 	}
 	return out
+}
+
+// agentIsRunning reports whether a is known to be in the running phase.
+func agentIsRunning(a *hubclient.Agent, phaseKnown bool) bool {
+	if a == nil || !phaseKnown {
+		return false
+	}
+	phase, _ := hubAgentPhaseActivity(a.Phase, a.Activity, a.Status)
+	return phase == string(state.PhaseRunning)
 }

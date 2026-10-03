@@ -95,8 +95,12 @@ people, say so.
 ### Waiting for the agent to start
 
 In Hub mode `scion start` waits until the agent is running (or its launch
-fails) before returning. The default wait is the Hub's remaining launch budget
-plus 30 seconds, or 5 minutes when the Hub does not report one.
+fails) only when the Hub launches the agent asynchronously, after a workspace
+upload, or with `--attach`. Otherwise it returns as soon as the Hub answers, and
+the agent may still be provisioning — check with `scion look <name>` or
+`scion list` before relying on it. When it waits, the default wait is the
+Hub's remaining launch budget plus 30 seconds, or 5 minutes when the Hub does
+not report one.
 
 - Pass `--wait-timeout <duration>` (for example `--wait-timeout 15m`) to wait
   longer — needed if the Hub's launch timeout has been raised.
