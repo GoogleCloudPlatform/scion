@@ -159,7 +159,7 @@ func TestBuildAgentEnv(t *testing.T) {
 		"EMPTY_EXTRA_KEY": "", // Should be omitted
 	}
 
-	env, warnings, missingKeys := buildAgentEnv(scionCfg, extraEnv)
+	env, warnings, missingKeys, _ := buildAgentEnv(scionCfg, extraEnv, false)
 
 	expected := map[string]string{
 		"NORMAL_KEY":    "normal-value",
@@ -213,7 +213,7 @@ func TestBuildAgentEnv_MissingKeysReturned(t *testing.T) {
 		},
 	}
 
-	env, _, missingKeys := buildAgentEnv(scionCfg, nil)
+	env, _, missingKeys, _ := buildAgentEnv(scionCfg, nil, false)
 
 	if len(env) != 1 {
 		t.Errorf("expected 1 env var, got %d: %v", len(env), env)
@@ -2566,7 +2566,7 @@ func TestBuildAgentEnv_EmptyValuePassthrough(t *testing.T) {
 		},
 	}
 
-	env, warnings, missingKeys := buildAgentEnv(scionCfg, nil)
+	env, warnings, missingKeys, _ := buildAgentEnv(scionCfg, nil, false)
 
 	envMap := make(map[string]string)
 	for _, e := range env {
@@ -2605,7 +2605,7 @@ func TestBuildAgentEnv_ScionExtraPath(t *testing.T) {
 		},
 	}
 
-	env, warnings, _ := buildAgentEnv(scionCfg, nil)
+	env, warnings, _, _ := buildAgentEnv(scionCfg, nil, false)
 
 	envMap := make(map[string]string)
 	for _, e := range env {
@@ -2650,7 +2650,7 @@ func TestBuildAgentEnv_HubEndpointOverride(t *testing.T) {
 			extraEnv["SCION_HUB_URL"] = scionCfg.Hub.Endpoint
 		}
 
-		env, _, _ := buildAgentEnv(scionCfg, extraEnv)
+		env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, false)
 
 		envMap := make(map[string]string)
 		for _, e := range env {
@@ -2675,7 +2675,7 @@ func TestBuildAgentEnv_HubEndpointOverride(t *testing.T) {
 			"SCION_HUB_URL":      "https://hub.example.com",
 		}
 
-		env, _, _ := buildAgentEnv(scionCfg, extraEnv)
+		env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, false)
 
 		envMap := make(map[string]string)
 		for _, e := range env {
@@ -2775,6 +2775,125 @@ func TestStartResumeNonExistentAgent(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "does not exist") {
 		t.Errorf("expected error message to contain 'does not exist', got: %v", err)
+	}
+}
+
+// newResumePhaseTestFixture seeds a minimal on-disk Scion installation plus
+// an already-provisioned "resume-test" agent (scion-agent.json present, and
+// agent-info.json recording phase "suspended", the state a resume starts
+// from), wired to a mock runtime via the given ListFunc. It returns the
+// Manager and the project .scion dir, ready for a Start() call with
+// Resume: true.
+func newResumePhaseTestFixture(t *testing.T, listFunc func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error)) (Manager, string) {
+	t.Helper()
+
+	tmpDir := t.TempDir()
+
+	t.Chdir(tmpDir)
+	t.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	agentDir := filepath.Join(projectScionDir, "agents", "resume-test")
+	agentHome := filepath.Join(agentDir, "home")
+	_ = os.MkdirAll(agentHome, 0755)
+	_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(`{"harness": "generic"}`), 0644)
+	_ = os.WriteFile(filepath.Join(agentHome, "agent-info.json"),
+		[]byte(`{"id":"resume-test","name":"resume-test","phase":"suspended"}`), 0644)
+
+	mockRT := &runtime.MockRuntime{
+		ListFunc: listFunc,
+		RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {
+			return "mock-id", nil
+		},
+	}
+
+	return NewManager(mockRT), projectScionDir
+}
+
+// TestStartResumeSetsRunningPhase is the regression guard for ptone/scion#1956:
+// a resumed agent's Phase must be the canonical state.PhaseRunning,
+// not the non-standard "resumed" string run.go used to write. The hub's
+// waitForAgentReady only understood starting/running, so "resumed" made a
+// healthy resume look like a failure. This exercises the normal return path,
+// where the started container is found again in the runtime's listing
+// (run.go's "Fetch fresh info" branch).
+func TestStartResumeSetsRunningPhase(t *testing.T) {
+	mgr, projectScionDir := newResumePhaseTestFixture(t, func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+		return []api.AgentInfo{
+			{
+				ContainerID:     "mock-id",
+				Name:            "resume-test",
+				ContainerStatus: "Up 2 seconds",
+				Phase:           string(state.PhaseStarting),
+			},
+		}, nil
+	})
+
+	result, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "resume-test",
+		ProjectPath: projectScionDir,
+		BrokerMode:  true,
+		NoAuth:      true,
+		Resume:      true,
+	})
+	if err != nil {
+		t.Fatalf("Start with Resume should succeed, got: %v", err)
+	}
+
+	if result.Phase != string(state.PhaseRunning) {
+		t.Errorf("returned AgentInfo.Phase = %q, want %q", result.Phase, state.PhaseRunning)
+	}
+	if saved := GetSavedPhase("resume-test", projectScionDir); saved != string(state.PhaseRunning) {
+		t.Errorf("persisted agent-info.json phase = %q, want %q", saved, state.PhaseRunning)
+	}
+}
+
+// TestStartResumeSetsRunningPhase_FallbackPath covers the other return path
+// in run.go: when the started container cannot be found again in the
+// runtime's listing (e.g. a transient listing delay), Start falls back to
+// constructing an AgentInfo directly from "status" without consulting the
+// listing. That branch must also carry state.PhaseRunning, not "resumed".
+func TestStartResumeSetsRunningPhase_FallbackPath(t *testing.T) {
+	mgr, projectScionDir := newResumePhaseTestFixture(t, func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+		return []api.AgentInfo{}, nil
+	})
+
+	result, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "resume-test",
+		ProjectPath: projectScionDir,
+		BrokerMode:  true,
+		NoAuth:      true,
+		Resume:      true,
+	})
+	if err != nil {
+		t.Fatalf("Start with Resume should succeed, got: %v", err)
+	}
+
+	if result.Phase != string(state.PhaseRunning) {
+		t.Errorf("returned AgentInfo.Phase = %q, want %q", result.Phase, state.PhaseRunning)
+	}
+	if saved := GetSavedPhase("resume-test", projectScionDir); saved != string(state.PhaseRunning) {
+		t.Errorf("persisted agent-info.json phase = %q, want %q", saved, state.PhaseRunning)
 	}
 }
 
@@ -3400,7 +3519,7 @@ func TestBuildAgentEnv_TelemetryInjection(t *testing.T) {
 		}
 	}
 
-	env, _, _ := buildAgentEnv(scionCfg, opts)
+	env, _, _, _ := buildAgentEnv(scionCfg, opts, false)
 
 	envMap := make(map[string]string)
 	for _, e := range env {
@@ -4136,7 +4255,7 @@ func TestBuildAgentEnv_TelemetryNoOverrideExplicit(t *testing.T) {
 		}
 	}
 
-	env, _, _ := buildAgentEnv(scionCfg, opts)
+	env, _, _, _ := buildAgentEnv(scionCfg, opts, false)
 
 	envMap := make(map[string]string)
 	for _, e := range env {
@@ -4169,7 +4288,7 @@ func TestBuildAgentEnv_HubEnvVarsSurviveMerge(t *testing.T) {
 		"SCION_AGENT_NAME":   "test-agent",
 	}
 
-	env, _, _ := buildAgentEnv(scionCfg, extraEnv)
+	env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, false)
 
 	envMap := make(map[string]string)
 	for _, e := range env {
@@ -4633,7 +4752,7 @@ func TestBuildAgentEnv_EnvKeyScionHubEndpointOverride(t *testing.T) {
 			}
 		}
 
-		env, _, _ := buildAgentEnv(scionCfg, extraEnv)
+		env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, false)
 
 		envMap := make(map[string]string)
 		for _, e := range env {
@@ -4681,7 +4800,7 @@ func TestBuildAgentEnv_EnvKeyScionHubEndpointOverride(t *testing.T) {
 			}
 		}
 
-		env, _, _ := buildAgentEnv(scionCfg, extraEnv)
+		env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, false)
 
 		envMap := make(map[string]string)
 		for _, e := range env {
@@ -6839,7 +6958,7 @@ func TestStart_BrokerMode_HarnessConfigEnv_VisibleToAuthOverlay(t *testing.T) {
 		Env:        map[string]string{"EXISTING": "val"},
 	}
 
-	overlay := resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
+	overlay, _ := resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
 
 	if got := overlay["GOOGLE_CLOUD_PROJECT"]; got != "hc-project" {
 		t.Errorf("auth overlay GOOGLE_CLOUD_PROJECT = %q, want %q "+
@@ -6870,7 +6989,7 @@ func TestStart_BrokerMode_HubEnvNotClobberedByHarnessConfigEnv(t *testing.T) {
 		Env: map[string]string{"GOOGLE_CLOUD_PROJECT": "hub-project"},
 	}
 
-	overlay := resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
+	overlay, _ := resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
 
 	if got := overlay["GOOGLE_CLOUD_PROJECT"]; got != "hub-project" {
 		t.Errorf("auth overlay GOOGLE_CLOUD_PROJECT = %q, want %q (hub value must win)",
@@ -6898,7 +7017,7 @@ func TestResolveAuthEnvOverlay_NoHarnessConfigMeansNoInjection(t *testing.T) {
 
 	opts := api.StartOptions{Name: "test-agent", BrokerMode: true}
 
-	overlay := resolveAuthEnvOverlay(&opts, settings, "vertex", "" /* no harness config */)
+	overlay, _ := resolveAuthEnvOverlay(&opts, settings, "vertex", "" /* no harness config */)
 
 	if len(overlay) != 0 {
 		t.Errorf("auth overlay = %v, want empty (with no harness config named, nothing should be injected)", overlay)
@@ -6913,7 +7032,7 @@ func TestResolveAuthEnvOverlay_OnlyHarnessConfigEnvArrives(t *testing.T) {
 
 	opts := api.StartOptions{Name: "test-agent", BrokerMode: true}
 
-	overlay := resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
+	overlay, _ := resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
 
 	if got := overlay["HC_ONLY"]; got != "hc-value" {
 		t.Fatalf("existence control failed: auth overlay HC_ONLY = %q, want %q — "+
@@ -6926,7 +7045,7 @@ func TestResolveAuthEnvOverlay_OnlyHarnessConfigEnvArrives(t *testing.T) {
 func TestResolveAuthEnvOverlay_NilSettings(t *testing.T) {
 	opts := api.StartOptions{Name: "test-agent", BrokerMode: true, Env: map[string]string{"A": "1"}}
 
-	overlay := resolveAuthEnvOverlay(&opts, nil, "vertex", "claude-cfg")
+	overlay, _ := resolveAuthEnvOverlay(&opts, nil, "vertex", "claude-cfg")
 
 	if got := overlay["A"]; got != "1" {
 		t.Errorf("auth overlay A = %q, want %q", got, "1")
@@ -7596,7 +7715,7 @@ func TestResolveAuthEnvOverlay_MutatesCallerOptsEnv(t *testing.T) {
 			Env:        map[string]string{"EXISTING": "val"},
 		}
 
-		_ = resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
+		_, _ = resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
 
 		if got := opts.Env["GOOGLE_CLOUD_PROJECT"]; got != "hc-project" {
 			t.Errorf("CALLER's opts.Env[GOOGLE_CLOUD_PROJECT] = %q, want %q — the pointer "+
@@ -7615,7 +7734,7 @@ func TestResolveAuthEnvOverlay_MutatesCallerOptsEnv(t *testing.T) {
 		// arrives with opts.Env == nil.
 		opts := api.StartOptions{Name: "test-agent", BrokerMode: true, Env: nil}
 
-		_ = resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
+		_, _ = resolveAuthEnvOverlay(&opts, settings, "vertex", "claude-cfg")
 
 		if opts.Env == nil {
 			t.Fatal("CALLER's opts.Env is still nil — the allocation inside " +
@@ -7794,5 +7913,157 @@ func TestSortedEnvVarKeysOmitsValues(t *testing.T) {
 func TestSortedEnvVarKeysEmpty(t *testing.T) {
 	if got := sortedEnvVarKeys(nil); len(got) != 0 {
 		t.Errorf("sortedEnvVarKeys(nil) = %v, want empty", got)
+	}
+}
+
+// TestStartNoneAuthTypeTreatedAsNoAuth covers agents created in no-auth
+// mode (ptone/scion#2561). Create persists auth_selectedType "none" to
+// scion-agent.json; a later start, restart, resume or wake reaches Start
+// without NoAuth set. "none" must select the no-auth path rather than be
+// forwarded to the container-side provisioner as an auth type.
+func TestStartNoneAuthTypeTreatedAsNoAuth(t *testing.T) {
+	cases := []struct {
+		name          string
+		persistedAuth string
+		harnessAuth   string
+		env           map[string]string
+		wantNoAuth    bool
+		wantSelected  string
+	}{
+		{
+			name:          "PersistedNone",
+			persistedAuth: "none",
+			wantNoAuth:    true,
+		},
+		{
+			name:        "ExplicitNone",
+			harnessAuth: "none",
+			wantNoAuth:  true,
+		},
+		{
+			name:          "ExplicitTypeOverridesPersistedNone",
+			persistedAuth: "none",
+			harnessAuth:   "api-key",
+			env:           map[string]string{"GEMINI_API_KEY": "test-key"},
+			wantSelected:  "api-key",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			t.Chdir(tmpDir)
+			t.Setenv("HOME", tmpDir)
+
+			globalScionDir := filepath.Join(tmpDir, ".scion")
+			hcDir := filepath.Join(globalScionDir, "harness-configs", "noauth-test")
+			if err := os.MkdirAll(hcDir, 0755); err != nil {
+				t.Fatalf("mkdir harness-config dir: %v", err)
+			}
+			hcYAML := "harness: noauth-test\nuser: scion\nimage: test-image:latest\n" +
+				"provisioner:\n  type: container-script\n  command: [\"python3\", \"provision.py\"]\n" +
+				"no_auth:\n  behavior: drop-to-shell\n" +
+				antigravityLikeAuthMetaYAML
+			if err := os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte(hcYAML), 0644); err != nil {
+				t.Fatalf("write harness-config config.yaml: %v", err)
+			}
+
+			tplDir := filepath.Join(globalScionDir, "templates", "default")
+			if err := os.MkdirAll(tplDir, 0755); err != nil {
+				t.Fatalf("mkdir template dir: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "noauth-test"}`), 0644); err != nil {
+				t.Fatalf("write template scion-agent.json: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: local
+profiles:
+  local:
+    runtime: docker
+`), 0644); err != nil {
+				t.Fatalf("write global settings.yaml: %v", err)
+			}
+
+			projectScionDir := filepath.Join(tmpDir, "project", ".scion")
+			agentName := "noauth-agent"
+			agentDir := filepath.Join(projectScionDir, "agents", agentName)
+			agentHome := filepath.Join(agentDir, "home")
+			if err := os.MkdirAll(agentHome, 0755); err != nil {
+				t.Fatalf("mkdir agent home: %v", err)
+			}
+			agentCfg := `{"harness_config": "noauth-test"`
+			if tc.persistedAuth != "" {
+				agentCfg += `, "auth_selectedType": "` + tc.persistedAuth + `"`
+			}
+			agentCfg += `}`
+			if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(agentCfg), 0644); err != nil {
+				t.Fatalf("write agent scion-agent.json: %v", err)
+			}
+
+			candidatesPath := filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json")
+			if tc.wantNoAuth {
+				// Seed a stale auth-candidates.json, as create leaves
+				// behind, so the test proves Start removes it on the
+				// no-auth path.
+				if err := os.MkdirAll(filepath.Dir(candidatesPath), 0755); err != nil {
+					t.Fatalf("mkdir harness inputs dir: %v", err)
+				}
+				if err := os.WriteFile(candidatesPath, []byte(`{"explicit_type":"none"}`), 0644); err != nil {
+					t.Fatalf("write stale auth-candidates.json: %v", err)
+				}
+			}
+
+			var capturedConfig runtime.RunConfig
+			mockRT := &runtime.MockRuntime{
+				ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+					return []api.AgentInfo{}, nil
+				},
+				RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+					capturedConfig = cfg
+					return "mock-id", nil
+				},
+			}
+
+			mgr := NewManager(mockRT)
+			_, err := mgr.Start(context.Background(), api.StartOptions{
+				Name:        agentName,
+				ProjectPath: projectScionDir,
+				BrokerMode:  true,
+				HarnessAuth: tc.harnessAuth,
+				Env:         tc.env,
+			})
+			if err != nil {
+				t.Fatalf("Start failed: %v", err)
+			}
+
+			if capturedConfig.NoAuth != tc.wantNoAuth {
+				t.Errorf("RunConfig.NoAuth = %t, want %t", capturedConfig.NoAuth, tc.wantNoAuth)
+			}
+			var selected string
+			if capturedConfig.ResolvedAuth != nil {
+				selected = capturedConfig.ResolvedAuth.EnvVars["SCION_HARNESS_SELECTED_AUTH"]
+			}
+			if selected != tc.wantSelected {
+				t.Errorf("SCION_HARNESS_SELECTED_AUTH = %q, want %q", selected, tc.wantSelected)
+			}
+
+			data, err := os.ReadFile(candidatesPath)
+			if tc.wantNoAuth {
+				if !os.IsNotExist(err) {
+					t.Errorf("auth-candidates.json present after no-auth Start (err=%v): %s", err, data)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("read auth-candidates.json: %v", err)
+			}
+			var payload map[string]interface{}
+			if err := json.Unmarshal(data, &payload); err != nil {
+				t.Fatalf("parse auth-candidates.json: %v", err)
+			}
+			if got := payload["explicit_type"]; got != tc.wantSelected {
+				t.Errorf("explicit_type = %v, want %q", got, tc.wantSelected)
+			}
+		})
 	}
 }

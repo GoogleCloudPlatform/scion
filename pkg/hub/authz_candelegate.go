@@ -82,6 +82,14 @@ func (a *AuthzService) CanDelegate(ctx context.Context, actor Identity, grant Gr
 		return Decision{Allowed: false, Reason: "missing actor"}
 	}
 
+	// A delivery credential cannot delegate any permission. The check keys
+	// on the concrete type and comes before every allow path below,
+	// including the AgentRoleNone allow for an agent delegation with no
+	// scopes.
+	if _, ok := actor.(*hubDeliveryIdentity); ok {
+		return Decision{Allowed: false, Reason: "delivery credential cannot delegate"}
+	}
+
 	// Scoped credentials (UAT) can only delegate within their credential scope.
 	if scoped, ok := actor.(*ScopedUserIdentity); ok {
 		if denied := a.enforceUATDelegation(scoped, grant); denied != nil {

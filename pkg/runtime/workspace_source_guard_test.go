@@ -158,10 +158,10 @@ func TestValidateWorkspaceSource_RootlessAcceptsScionProjectsSubtree(t *testing.
 // covers the sensitive shapes a single hub-managed project's own directory
 // can otherwise contain: an agent's home (credential-bearing, never a
 // legitimate workspace source) and another, unrelated file. Both share a
-// project directory with the three allowed shapes
+// project directory with the allowed shapes
 // (TestValidateWorkspaceSource_RootlessAcceptsScionProjectsSubtree), so
 // admitting the whole projects/<slug> subtree by name alone -- rather than
-// the three specific shapes isAllowedProjectSubtree names -- would accept
+// the specific shapes isAllowedProjectSubtree names -- would accept
 // them at any rootless call site.
 func TestValidateWorkspaceSource_RootlessScionProjectsSubtreeRefusesNonWorkspacePaths(t *testing.T) {
 	tmpHome := t.TempDir()
@@ -185,6 +185,196 @@ func TestValidateWorkspaceSource_RootlessScionProjectsSubtreeRefusesNonWorkspace
 				t.Errorf("expected %q to be refused at a rootless call site, got nil", source)
 			}
 		})
+	}
+}
+
+// TestValidateWorkspaceSource_RootlessAcceptsScionProjectsWorktreesSubtree
+// covers the hub-native worktree-per-agent shared-base layout: the
+// project's own ~/.scion/projects/<slug> directory is the shared git
+// checkout, and each agent's worktree is a direct child of its "worktrees"
+// subdirectory (isAllowedProjectSubtree's worktrees/<name> rule).
+func TestValidateWorkspaceSource_RootlessAcceptsScionProjectsWorktreesSubtree(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	tests := []string{
+		filepath.Join(tmpHome, ".scion", "projects", "my-project", "worktrees", "agent-1"),
+		filepath.Join(tmpHome, ".scion", "projects", "my-project", "worktrees", "agent-1", "sub"),
+	}
+
+	for _, source := range tests {
+		t.Run(source, func(t *testing.T) {
+			if err := os.MkdirAll(source, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ValidateWorkspaceSource(source, ""); err != nil {
+				t.Errorf("expected %q to be accepted at a rootless call site, got error: %v", source, err)
+			}
+		})
+	}
+}
+
+// TestValidateWorkspaceSource_RootlessScionProjectsWorktreesSubtreeRejectsBareWorktreesDir
+// proves the worktrees/<name> rule requires a non-empty name segment: the
+// "worktrees" directory itself (no name following it) must never be
+// admitted as a workspace source, the same way the agents/<id>/workspace
+// rule it is modeled on never admits "agents" alone.
+func TestValidateWorkspaceSource_RootlessScionProjectsWorktreesSubtreeRejectsBareWorktreesDir(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	worktreesDir := filepath.Join(tmpHome, ".scion", "projects", "my-project", "worktrees")
+	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ValidateWorkspaceSource(worktreesDir, ""); err == nil {
+		t.Errorf("expected the bare worktrees directory %q to be refused, got nil", worktreesDir)
+	}
+}
+
+// TestIsAllowedProjectSubtree_WorktreesRuleRejectsEmptyName is a direct unit
+// test on isAllowedProjectSubtree itself (unexported, same package): proves
+// the empty-name case is rejected at the classification function directly,
+// not only indirectly through ValidateWorkspaceSource's other floors (which
+// Clean away a trailing or doubled separator before this function ever sees
+// the path, making that collapsed form otherwise unreachable through the
+// public API).
+func TestIsAllowedProjectSubtree_WorktreesRuleRejectsEmptyName(t *testing.T) {
+	tests := []string{
+		filepath.Join("p", "worktrees") + string(filepath.Separator),
+		filepath.Join("p", "worktrees") + string(filepath.Separator) + string(filepath.Separator) + "x",
+	}
+	for _, rel := range tests {
+		t.Run(rel, func(t *testing.T) {
+			if isAllowedProjectSubtree(rel) {
+				t.Errorf("isAllowedProjectSubtree(%q) = true, want false (empty worktrees name)", rel)
+			}
+		})
+	}
+}
+
+// TestValidateWorkspaceSource_RootlessScionProjectsWorktreesSubtreeRejectsLookalikes
+// is a table test covering paths shaped closely enough to worktrees/<name>
+// to be worth pinning explicitly. Only the first two rows (worktreesX,
+// worktrees-old) are refusals the worktrees/<name> rule itself must produce,
+// by not matching a prefix or suffix of the "worktrees" literal; the
+// remaining rows are refused by other rules (the .git/ and .scion/ nested
+// cases) or only after filepath.Clean collapses the embedded ".." segments
+// to a path that still doesn't match any allowed shape (the two traversal
+// cases, built by string concatenation here, not filepath.Join, so the
+// ".." segments reach the guard uncleaned, the way a caller-controlled
+// string would). root is "" throughout, so none of these rejections are
+// merely root containment catching what the allow-list would otherwise
+// admit.
+func TestValidateWorkspaceSource_RootlessScionProjectsWorktreesSubtreeRejectsLookalikes(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	sep := string(filepath.Separator)
+	projectDir := filepath.Join(tmpHome, ".scion", "projects", "my-project")
+
+	tests := []struct {
+		name   string
+		source string
+	}{
+		{
+			name:   "worktreesX lookalike (suffix, not a separator)",
+			source: filepath.Join(projectDir, "worktreesX", "a"),
+		},
+		{
+			name:   "worktrees-old lookalike",
+			source: filepath.Join(projectDir, "worktrees-old", "a"),
+		},
+		{
+			name:   "worktrees nested under .git",
+			source: filepath.Join(projectDir, ".git", "worktrees", "a"),
+		},
+		{
+			name:   "worktrees nested under .scion",
+			source: filepath.Join(projectDir, ".scion", "worktrees", "a"),
+		},
+		{
+			name:   "dot-dot reaching outside worktrees/<name>, built uncleaned",
+			source: projectDir + sep + "worktrees" + sep + "a" + sep + ".." + sep + ".." + sep + ".scion" + sep + "agents" + sep + "x" + sep + "home",
+		},
+		{
+			name:   "dot-dot collapsing worktrees itself, built uncleaned",
+			source: projectDir + sep + "worktrees" + sep + ".." + sep + "..",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := os.MkdirAll(filepath.Dir(tt.source), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ValidateWorkspaceSource(tt.source, ""); err == nil {
+				t.Errorf("expected %q to be refused at a rootless call site, got nil", tt.source)
+			}
+		})
+	}
+}
+
+// TestValidateWorkspaceSource_RejectsSymlinkedWorktreesResolvingOutsideProjectRoot
+// proves a worktrees/<name> entry that is lexically in the right place but
+// resolves (via a symlink) outside the project's own root is still refused:
+// the worktrees/<name> rule is purely lexical classification, not proof of
+// physical location, so the existing root-containment and symlink
+// resolution machinery (resolveForValidation) must still catch this.
+func TestValidateWorkspaceSource_RejectsSymlinkedWorktreesResolvingOutsideProjectRoot(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	outside := filepath.Join(tmpHome, "outside-project")
+	if err := os.MkdirAll(outside, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	projectDir := filepath.Join(tmpHome, ".scion", "projects", "my-project")
+	worktreesDir := filepath.Join(projectDir, "worktrees")
+	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(worktreesDir, "agent-1")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ValidateWorkspaceSource(link, projectDir); err == nil {
+		t.Errorf("expected a worktrees/<name> entry resolving outside the project root to be refused, got nil")
+	}
+}
+
+// TestValidateWorkspaceSource_RootlessSymlinkedWorktreesResolvingToDisallowedScionHomePath
+// is the rootless counterpart to
+// TestValidateWorkspaceSource_RejectsSymlinkedWorktreesResolvingOutsideProjectRoot:
+// with no root supplied, a symlinked worktrees/<name> entry cannot be caught
+// by root containment at all (there is no root to contain it against), so
+// this exercises the ~/.scion floor as the sole remaining guard. The link
+// target is itself inside ~/.scion (a different project's agent home, never
+// a legitimate workspace source), not just any outside-the-tree path, so
+// this specifically proves the worktrees/<name> rule's lexical match does
+// not shortcut the floor that governs everything under ~/.scion.
+func TestValidateWorkspaceSource_RootlessSymlinkedWorktreesResolvingToDisallowedScionHomePath(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	disallowed := filepath.Join(tmpHome, ".scion", "projects", "other", ".scion", "agents", "a", "home")
+	if err := os.MkdirAll(disallowed, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	worktreesDir := filepath.Join(tmpHome, ".scion", "projects", "my-project", "worktrees")
+	if err := os.MkdirAll(worktreesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(worktreesDir, "agent-1")
+	if err := os.Symlink(disallowed, link); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ValidateWorkspaceSource(link, ""); err == nil {
+		t.Errorf("expected a rootless worktrees/<name> entry resolving to a disallowed ~/.scion path to be refused, got nil")
 	}
 }
 
@@ -515,7 +705,7 @@ func TestValidateWorkspaceSource_ScionHomeFloorAppliesWithRootsSupplied(t *testi
 	// no further subpath). Plain containment against that root would accept
 	// this source; the ~/.scion floor, which runs before containment, must
 	// still refuse it since an agent's home is not one of
-	// isAllowedProjectSubtree's three named shapes.
+	// isAllowedProjectSubtree's named shapes.
 	projectSlugDir := filepath.Join(scionDir, "projects", "hub-project")
 	agentHome := filepath.Join(projectSlugDir, ".scion", "agents", "agent-1", "home")
 	if err := os.MkdirAll(agentHome, 0755); err != nil {

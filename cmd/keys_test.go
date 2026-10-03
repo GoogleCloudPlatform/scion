@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -371,8 +372,8 @@ func TestResolveLocalKeysTarget_SelectsOtherProjectWhenSwitched(t *testing.T) {
 	assert.Equal(t, "agent-b", target.Labels["agent_id"])
 }
 
-// TestResolveLocalKeysTarget_NoHubProjectID_UsesPathScope proves the r1
-// review finding #3 correction: a project with NO Hub-linked project ID
+// TestResolveLocalKeysTarget_NoHubProjectID_UsesPathScope proves that a
+// project with NO Hub-linked project ID
 // must still resolve successfully, scoped by its resolved project-config
 // directory path (agent.Manager.SendKeysLocal's scope) rather than being
 // refused outright.
@@ -874,6 +875,19 @@ func TestSendKeysViaHub_JSONMode_FailureEmitsOneResultWithUnknownOutcome(t *test
 	var extra json.RawMessage
 	decErr := dec.Decode(&extra)
 	assert.ErrorIs(t, decErr, io.EOF, "stdout must contain nothing after the single JSON result")
+
+	// #2184 Verification: "outcome_unknown does not say delivered or
+	// suggest blind retry" -- checked against both the JSON message and the
+	// returned error text, since either could regress independently. "retry"
+	// is allowed only inside the two fixed, non-inviting phrases this
+	// package uses ("do not retry [automatically]", "before resending");
+	// any other occurrence would read as an invitation.
+	combined := strings.ToLower(result.Message + " " + cmdErr.Error())
+	assert.NotContains(t, combined, "delivered")
+	sanitized := strings.ReplaceAll(combined, "do not retry", "")
+	sanitized = strings.ReplaceAll(sanitized, "before resending", "")
+	assert.NotContains(t, sanitized, "retry",
+		"unexpected bare 'retry' outside the allowed fixed phrases: %q", combined)
 }
 
 // ---------------------------------------------------------------------------
@@ -920,4 +934,240 @@ func TestSendKeysLocalWithManager_Ambiguous_NoExec(t *testing.T) {
 	// would still pass even if this CLI-level branch were removed.
 	assert.Contains(t, err.Error(), "containers match in project")
 	assert.Empty(t, captured, "an ambiguous local target must never be delivered to")
+}
+
+// TestSendKeysViaHub_RateLimited_SurfacesRetryAfter_NoRetry proves the
+// CLI must surface a 429 keys_rate_limited response's Retry-After header
+// (parsed by apiclient.ParseErrorResponse into APIError.RetryAfterSeconds),
+// in both JSON and human-readable form, and must never auto-retry the
+// request regardless.
+func TestSendKeysViaHub_RateLimited_SurfacesRetryAfter_NoRetry(t *testing.T) {
+	var requestCount int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			return
+		}
+		atomic.AddInt32(&requestCount, 1)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "7")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]interface{}{
+				"code":    "keys_rate_limited",
+				"message": "rate limit exceeded",
+				"details": map[string]interface{}{"operation_id": "op-429"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: "project-429"}
+
+	err = sendKeysViaHub(hubCtx, "target-agent", "Escape")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "keys_rate_limited")
+	// assert.Contains(err.Error(), "7") would match
+	// almost anything containing a 7. Assert the actual suffix format
+	// instead.
+	assert.Contains(t, err.Error(), "Retry-After: 7s", "the Retry-After value must be surfaced in the human-readable error")
+	assert.Contains(t, strings.ToLower(err.Error()), "do not retry",
+		"must not read as an invitation to auto-retry")
+
+	if got := atomic.LoadInt32(&requestCount); got != 1 {
+		t.Fatalf("expected exactly 1 request to the keys endpoint (no automatic retry), got %d", got)
+	}
+
+	// JSON mode: the same value must be machine-readable.
+	origFormat := outputFormat
+	defer func() { outputFormat = origFormat }()
+	outputFormat = "json"
+
+	var cmdErr error
+	stdout := captureStdout(t, func() {
+		cmdErr = sendKeysViaHub(hubCtx, "target-agent", "Escape")
+	})
+	require.Error(t, cmdErr)
+
+	var result ActionResult
+	require.NoError(t, json.NewDecoder(strings.NewReader(stdout)).Decode(&result))
+	require.NotNil(t, result.Details)
+	retryAfter, ok := result.Details["retry_after_seconds"]
+	require.True(t, ok, "expected retry_after_seconds in JSON details, got: %v", result.Details)
+	// JSON numbers decode as float64 via map[string]interface{}.
+	assert.Equal(t, float64(7), retryAfter)
+
+	if got := atomic.LoadInt32(&requestCount); got != 2 {
+		t.Fatalf("expected exactly 2 total requests across both calls (no automatic retry), got %d", got)
+	}
+}
+
+// setupGitRepoWithRemote creates a temp git repo with the given origin
+// remote URL and chdirs into it for the duration of the test (restoring the
+// original working directory on cleanup) -- GetProjectID/getProjectIDForKeys
+// resolve the git remote via util.GetGitRemote(), which shells out to `git
+// remote get-url origin` in the current directory, with no injectable seam.
+func setupGitRepoWithRemote(t *testing.T, remoteURL string) {
+	t.Helper()
+	dir := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = dir
+		out, err := c.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v failed: %v: %s", args, err, out)
+		}
+	}
+	runGit("init", "-q")
+	runGit("remote", "add", "origin", remoteURL)
+
+	origWd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(dir))
+	t.Cleanup(func() { _ = os.Chdir(origWd) })
+}
+
+// TestGetProjectID_AmbiguousGitRemote_FailsForKeys covers
+// ptone/scion#2200: the keys CLI path must fail with a message naming
+// --project when several projects share the queried git remote, instead of
+// GetProjectID's existing (and, for every other command, unchanged)
+// behavior of silently picking resp.Projects[0]. Asserts both halves: the
+// keys-scoped resolver fails, and the shared GetProjectID used by every
+// other command is untouched.
+func TestGetProjectID_AmbiguousGitRemote_FailsForKeys(t *testing.T) {
+	const remoteURL = "https://github.com/example/ambiguous-repo.git"
+	setupGitRepoWithRemote(t, remoteURL)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			return
+		}
+		if r.URL.Path == "/api/v1/projects" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"projects": []map[string]interface{}{
+					{"id": "project-first", "name": "first", "slug": "first"},
+					{"id": "project-second", "name": "second", "slug": "second"},
+				},
+			})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
+
+	_, err = getProjectIDForKeys(hubCtx)
+	require.Error(t, err, "expected the keys path to fail on an ambiguous git remote")
+	assert.Contains(t, err.Error(), "--project")
+
+	// Negative control: GetProjectID (used by every other command) is
+	// unchanged -- it still silently resolves to the first match.
+	id, err := GetProjectID(hubCtx)
+	require.NoError(t, err, "GetProjectID must remain unaffected by the keys-scoped fix")
+	assert.Equal(t, "project-first", id)
+}
+
+// TestSendKeysViaHub_AmbiguousGitRemote_FailsClosed_NoDispatch covers a gap:
+// TestGetProjectID_AmbiguousGitRemote_FailsForKeys only
+// proved getProjectIDForKeys itself fails closed, never that the keys CLI
+// path (sendKeysViaHub, what `scion keys` actually calls) is wired to it
+// instead of GetProjectID. Mutating cmd/keys.go back to call GetProjectID
+// made that test suite keep passing, because nothing drove sendKeysViaHub
+// with an empty hubCtx.ProjectID and an ambiguous git remote. This test
+// does: it asserts the returned error names --project, and -- the
+// decisive check a unit test on the resolver alone cannot make -- that the
+// fake Hub's /keys endpoint never received a single POST.
+func TestSendKeysViaHub_AmbiguousGitRemote_FailsClosed_NoDispatch(t *testing.T) {
+	const remoteURL = "https://github.com/example/ambiguous-repo-e2e.git"
+	setupGitRepoWithRemote(t, remoteURL)
+
+	var keysPOSTs int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			return
+		}
+		if r.URL.Path == "/api/v1/projects" {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"projects": []map[string]interface{}{
+					{"id": "project-e2e-first", "name": "first", "slug": "first"},
+					{"id": "project-e2e-second", "name": "second", "slug": "second"},
+				},
+			})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/keys") {
+			atomic.AddInt32(&keysPOSTs, 1)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "dispatched", "operation_id": "op-should-not-happen"})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	// hubCtx.ProjectID deliberately empty: this is the exact shape
+	// sendKeysViaHub receives from CheckHubAvailabilityForAgent when no
+	// --project flag was given and settings carry no project_id, forcing
+	// the git-remote resolution path that fails closed on ambiguity.
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL}
+
+	err = sendKeysViaHub(hubCtx, "target-agent", "C-c")
+	require.Error(t, err, "expected the keys CLI path to fail on an ambiguous git remote")
+	assert.Contains(t, err.Error(), "--project")
+
+	if got := atomic.LoadInt32(&keysPOSTs); got != 0 {
+		t.Fatalf("expected zero POSTs to the keys endpoint, got %d -- sendKeysViaHub must fail before ever resolving to a project to dispatch against", got)
+	}
+}
+
+// TestKeysCmd_HelpTextNoSequenceClaim covers the A.6 gap: pins that
+// keysCmd's help text explicitly disclaims sequence/macro support (each
+// invocation delivers exactly one key) and that every Examples line passes
+// exactly one key argument -- never a space-separated run like "Up Up
+// Enter" that would read as a supported multi-key sequence (contract §2.3
+// deviation).
+func TestKeysCmd_HelpTextNoSequenceClaim(t *testing.T) {
+	long := keysCmd.Long
+	require.Contains(t, long, "not a sequence",
+		"help text must explicitly disclaim sequence/macro support")
+
+	lines := strings.Split(long, "\n")
+	var exampleLines []string
+	inExamples := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "Examples:" {
+			inExamples = true
+			continue
+		}
+		if inExamples && trimmed != "" {
+			exampleLines = append(exampleLines, trimmed)
+		}
+	}
+	require.NotEmpty(t, exampleLines, "expected at least one Examples line")
+
+	for _, line := range exampleLines {
+		require.True(t, strings.HasPrefix(line, "scion keys "), "unexpected example line shape: %q", line)
+		rest := strings.TrimPrefix(line, "scion keys ")
+		fields := strings.Fields(rest)
+		require.Len(t, fields, 2, "example %q must be exactly <agent> <one-key-argument>, never a multi-key sequence", line)
+		keyArg := strings.Trim(fields[1], `"`)
+		assert.NotContains(t, keyArg, " ", "example %q must pass exactly one key, not a space-separated sequence", line)
+	}
 }

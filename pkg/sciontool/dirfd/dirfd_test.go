@@ -7,6 +7,7 @@ package dirfd
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -246,4 +247,263 @@ func TestFdsAreCloseOnExec(t *testing.T) {
 			t.Error("EnsureDirNoFollow's fd is not close-on-exec")
 		}
 	})
+}
+
+// TestEnsureDirNoFollowUnderRoot_CreatesNestedChain proves the normal path
+// keeps working: a multi-component chain that does not exist yet is created
+// entirely, and the function reports it as under root.
+func TestEnsureDirNoFollowUnderRoot_CreatesNestedChain(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "a", "b", "c")
+
+	dirFd, underRoot, err := EnsureDirNoFollowUnderRoot(root, target, 0o755, 0, 0)
+	if err != nil {
+		t.Fatalf("EnsureDirNoFollowUnderRoot: %v", err)
+	}
+	defer func() { _ = syscall.Close(dirFd) }()
+	if !underRoot {
+		t.Fatal("underRoot = false, want true")
+	}
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("stat %s: %v", target, err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("%s is not a directory", target)
+	}
+}
+
+// TestEnsureDirNoFollowUnderRoot_PreExistingChainUntouched proves a fully
+// pre-existing chain is accepted without needing to create anything, and
+// without needing any chown at all (uid=1/gid=1 here would fail for an
+// unprivileged test process if the function ever tried to chown an
+// already-existing component).
+func TestEnsureDirNoFollowUnderRoot_PreExistingChainUntouched(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "a", "b")
+	if err := os.MkdirAll(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	dirFd, underRoot, err := EnsureDirNoFollowUnderRoot(root, target, 0o755, 1, 1)
+	if err != nil {
+		t.Fatalf("EnsureDirNoFollowUnderRoot on a fully pre-existing chain must not try to chown it: %v", err)
+	}
+	defer func() { _ = syscall.Close(dirFd) }()
+	if !underRoot {
+		t.Fatal("underRoot = false, want true")
+	}
+}
+
+// TestEnsureDirNoFollowUnderRoot_ChownsOnlyTheComponentItCreates proves that
+// when part of the chain already exists and part must be created, only the
+// newly created component is ever a chown target: passing an unprivileged
+// uid/gid that will fail chown, the resulting error names the created
+// component ("new"), not the pre-existing one ("existing").
+func TestEnsureDirNoFollowUnderRoot_ChownsOnlyTheComponentItCreates(t *testing.T) {
+	root := t.TempDir()
+	existing := filepath.Join(root, "existing")
+	if err := os.Mkdir(existing, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(existing, "new")
+
+	// uid 1 is never the current test uid; an unprivileged process cannot
+	// chown to it, so this only succeeds if "existing" (pre-existing) is
+	// never a chown target at all.
+	_, _, err := EnsureDirNoFollowUnderRoot(root, target, 0o755, 1, 1)
+	if err == nil {
+		t.Fatal("expected a chown failure for the newly created component")
+	}
+	if !strings.Contains(err.Error(), "new") {
+		t.Errorf("error = %v, want it to name the newly created component (\"new\")", err)
+	}
+	if strings.Contains(err.Error(), "chown existing") {
+		t.Errorf("error = %v, must not attempt to chown the pre-existing component", err)
+	}
+	// The directory was still created even though its chown failed.
+	if info, statErr := os.Stat(target); statErr != nil || !info.IsDir() {
+		t.Errorf("expected %s to have been created despite the chown failure", target)
+	}
+}
+
+// TestEnsureDirNoFollowUnderRoot_RefusesSymlinkAtLeaf proves a symlink
+// planted at the leaf component is refused before any chown, and the
+// symlink's target is left untouched.
+func TestEnsureDirNoFollowUnderRoot_RefusesSymlinkAtLeaf(t *testing.T) {
+	root := t.TempDir()
+	victim := t.TempDir()
+	if err := os.Chmod(victim, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	leaf := filepath.Join(root, "leaf")
+	if err := os.Symlink(victim, leaf); err != nil {
+		t.Fatal(err)
+	}
+	wantInfo, err := os.Lstat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := EnsureDirNoFollowUnderRoot(root, leaf, 0o755, os.Getuid(), os.Getgid()); err == nil {
+		t.Fatal("expected a refusal for a symlinked leaf")
+	}
+	gotInfo, err := os.Lstat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotInfo.Mode() != wantInfo.Mode() {
+		t.Errorf("victim mode changed: got %v, want %v", gotInfo.Mode(), wantInfo.Mode())
+	}
+}
+
+// TestEnsureDirNoFollowUnderRoot_RefusesSymlinkAtIntermediateComponent
+// proves the same for a symlink at an intermediate component, one level
+// above the leaf being ensured.
+func TestEnsureDirNoFollowUnderRoot_RefusesSymlinkAtIntermediateComponent(t *testing.T) {
+	root := t.TempDir()
+	victim := t.TempDir()
+	if err := os.Chmod(victim, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	intermediate := filepath.Join(root, "mid")
+	if err := os.Symlink(victim, intermediate); err != nil {
+		t.Fatal(err)
+	}
+	wantInfo, err := os.Lstat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	target := filepath.Join(intermediate, "leaf")
+	if _, _, err := EnsureDirNoFollowUnderRoot(root, target, 0o755, os.Getuid(), os.Getgid()); err == nil {
+		t.Fatal("expected a refusal for a symlinked intermediate component")
+	}
+	gotInfo, err := os.Lstat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotInfo.Mode() != wantInfo.Mode() {
+		t.Errorf("victim mode changed: got %v, want %v", gotInfo.Mode(), wantInfo.Mode())
+	}
+	if _, err := os.Stat(filepath.Join(victim, "leaf")); !os.IsNotExist(err) {
+		t.Error("a new component was created through the symlinked intermediate directory")
+	}
+}
+
+// TestEnsureDirNoFollowUnderRoot_RefusesNonDirectoryComponent proves a
+// regular file sitting where a directory component is expected is refused,
+// not silently treated as absent or descended into.
+func TestEnsureDirNoFollowUnderRoot_RefusesNonDirectoryComponent(t *testing.T) {
+	root := t.TempDir()
+	blocker := filepath.Join(root, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	target := filepath.Join(blocker, "leaf")
+	if _, _, err := EnsureDirNoFollowUnderRoot(root, target, 0o755, 0, 0); err == nil {
+		t.Fatal("expected a refusal when a path component is a regular file")
+	}
+}
+
+// TestEnsureDirNoFollowUnderRoot_OutsideRootReportsFalseUntouched proves a
+// path that does not resolve under root at all is reported as such, with a
+// nil error and without creating anything, so a caller can fall back to its
+// own handling for a legitimate outside-root target.
+func TestEnsureDirNoFollowUnderRoot_OutsideRootReportsFalseUntouched(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	target := filepath.Join(outside, "a", "b")
+
+	dirFd, underRoot, err := EnsureDirNoFollowUnderRoot(root, target, 0o755, 0, 0)
+	if err != nil {
+		t.Fatalf("EnsureDirNoFollowUnderRoot: %v", err)
+	}
+	if dirFd != -1 {
+		_ = syscall.Close(dirFd)
+	}
+	if underRoot {
+		t.Fatal("underRoot = true, want false for a target outside root")
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Error("EnsureDirNoFollowUnderRoot must not create anything for an outside-root target")
+	}
+}
+
+// TestEnsureDirNoFollowUnderRoot_PathEqualsRootIsUnderRoot proves that
+// path == root itself is reported as underRoot=true, not an escape: this is
+// the shape a file secret directly inside the agent home takes (its parent
+// dir IS the home directory). Root already exists, so nothing is created,
+// but the call still opens root no-follow to confirm it resolves to a real
+// directory.
+func TestEnsureDirNoFollowUnderRoot_PathEqualsRootIsUnderRoot(t *testing.T) {
+	root := t.TempDir()
+
+	dirFd, underRoot, err := EnsureDirNoFollowUnderRoot(root, root, 0o755, 1, 1)
+	if err != nil {
+		t.Fatalf("EnsureDirNoFollowUnderRoot(root, root): %v (must not try to chown pre-existing root)", err)
+	}
+	defer func() { _ = syscall.Close(dirFd) }()
+	if !underRoot {
+		t.Fatal("underRoot = false, want true for path == root")
+	}
+}
+
+// TestEnsureDirNoFollowUnderRoot_PathEqualsRootButSymlinkRefused proves the
+// path==root case still refuses a symlinked root rather than silently
+// reporting it usable.
+func TestEnsureDirNoFollowUnderRoot_PathEqualsRootButSymlinkRefused(t *testing.T) {
+	parent := t.TempDir()
+	victim := t.TempDir()
+	root := filepath.Join(parent, "home")
+	if err := os.Symlink(victim, root); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := EnsureDirNoFollowUnderRoot(root, root, 0o755, 0, 0); err == nil {
+		t.Fatal("expected a refusal for a symlinked root even when path == root")
+	}
+}
+
+// TestEnsureDirNoFollowUnderRoot_RootVsSiblingContainment is the
+// containment table: path == root counts as under-root, but a sibling
+// path that merely shares root's own string prefix (not a real descendant)
+// must NOT — treating root itself as under-root must not loosen
+// containment for anything that isn't genuinely root or beneath it.
+func TestEnsureDirNoFollowUnderRoot_RootVsSiblingContainment(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "home")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// "home-other" shares the string prefix "home" with root but is a
+	// sibling, not a descendant.
+	sibling := filepath.Join(parent, "home-other")
+	if err := os.Mkdir(sibling, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{"root itself is under root", root, true},
+		{"sibling sharing a string prefix is not under root", sibling, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dirFd, underRoot, err := EnsureDirNoFollowUnderRoot(root, tt.path, 0o755, 0, 0)
+			if err != nil {
+				t.Fatalf("EnsureDirNoFollowUnderRoot: %v", err)
+			}
+			if dirFd != -1 {
+				defer func() { _ = syscall.Close(dirFd) }()
+			}
+			if underRoot != tt.want {
+				t.Errorf("underRoot = %v, want %v", underRoot, tt.want)
+			}
+		})
+	}
 }

@@ -95,7 +95,7 @@ func writeRemapSettings(t *testing.T, runtimeType string) string {
 // the create path: a passthrough grant flagged as RequireLocalRuntime, where
 // this dispatch's project-effective settings resolve the profile to a
 // runtime that is neither a local-container runtime nor Kubernetes, must
-// downgrade to block. srv.runtimeResolver is overridden (the same pattern
+// downgrade to block. srv.resolveAuxiliaryRuntime is overridden (the same pattern
 // newTestServerForSavedProfileRemap uses) to a fictitious runtime name
 // ("other") rather than "kubernetes": block is not offered on Kubernetes
 // (ptone/scion#2328), so Kubernetes is excluded from this downgrade (see
@@ -105,7 +105,7 @@ func writeRemapSettings(t *testing.T, runtimeType string) string {
 func TestBuildStartContext_HubDefaultPassthroughDowngradedOnRuntimeRemap(t *testing.T) {
 	srv, _ := newTestServerForRuntimeRemap(t)
 	projectPath := writeRemapSettings(t, "other")
-	srv.runtimeResolver = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
 		return &runtime.MockRuntime{NameFunc: func() string { return "other" }}
 	}
 
@@ -146,14 +146,14 @@ func TestBuildStartContext_HubDefaultPassthroughDowngradedOnRuntimeRemap(t *test
 // anyway, so keeping the grant's passthrough unchanged produces the
 // identical outcome a downgrade-to-unset would. This is reconciled with
 // upstream's RequireLocalRuntime downgrade mechanism (main #2186).
-// srv.runtimeResolver is overridden so settings resolving to "kubernetes"
+// srv.resolveAuxiliaryRuntime is overridden so settings resolving to "kubernetes"
 // returns a mock runtime rather than attempting a real cluster client (see
 // TestExtractRequiredEnvKeys_KubernetesImplicitPassthroughSkipsADC for the
 // same need in a different test file).
 func TestBuildStartContext_HubDefaultPassthroughKeptOnKubernetesRemap(t *testing.T) {
 	srv, _ := newTestServerForRuntimeRemap(t)
 	projectPath := writeRemapSettings(t, "kubernetes")
-	srv.runtimeResolver = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
 		return &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }}
 	}
 
@@ -297,7 +297,7 @@ func TestBuildStartContext_HubDefaultPassthroughDowngradedFromEnvFlag(t *testing
 // second (after it, in the handler itself) sees the agent's saved profile
 // and does not. Production always constructs a fresh agent.Manager around a
 // freshly resolved runtime for that second resolution; this fixture
-// overrides srv.runtimeResolver so that resolution returns this test's own
+// overrides srv.resolveAuxiliaryRuntime so that resolution returns this test's own
 // mock runtime (remapRuntime, returned to the caller) instead of attempting
 // a real cluster client, without changing what resolveManagerForOpts does
 // for any real dispatch or how its result is wired up afterward. The
@@ -388,7 +388,7 @@ func newTestServerForSavedProfileRemap(t *testing.T, agentName, remapRuntimeName
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(cfg, mgr, rt)
 	remapRuntime := &runtime.MockRuntime{NameFunc: func() string { return remapRuntimeName }}
-	srv.runtimeResolver = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
 		return remapRuntime
 	}
 	return srv, mgr, remapRuntime
@@ -570,32 +570,27 @@ func TestRestartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKuberne
 //
 //   - The project's active profile ("other") resolves to docker; "local"
 //     resolves to remapRuntimeName (Kubernetes).
-//   - The mock agent record's Name is agentName, but its ContainerID is
-//     urlID — a different string. The HTTP request addresses the agent by
-//     urlID.
+//   - The mock agent record's Name is agentName, but its ContainerID and
+//     scion.name label are urlID — a different string. The HTTP request
+//     addresses the agent by urlID.
 //   - A saved profile of "local" (Kubernetes) exists only under urlID, not
 //     under agentName.
 //
-// On restart, the handler's own pre-buildStartContext lookup resolves the
-// URL id to the agent's Name (agentName) via matchesAgent, and
-// buildStartContext's own early resolution reads the saved profile under
+// On restart, the handler's own pre-buildStartContext lookup finds the
+// record by its scion.name label and passes its Name (agentName) to
+// buildStartContext, whose early resolution reads the saved profile under
 // that Name — finding nothing, so it falls back to the active profile
 // (docker) and does not reject. The handler's later, authoritative
 // resolution reads the saved profile under the URL id itself
 // (agent.GetSavedProfile(id, ...), handlers.go) — urlID — and finds
 // Kubernetes.
 //
-// On start, there is no such Name/id translation (buildStartContext's Name
-// input is the URL id directly on both the early and late reads), so the
-// divergence instead comes from the project path: this fixture does not
-// chdir into the project directory, so buildStartContext's own early
-// resolution — reached with no projectPath in the request, before
-// startAgent's own project-path fallback lookup runs — resolves a saved
-// profile against an empty/unrelated path and finds nothing (docker, no
-// reject). startAgent's own fallback lookup (over the mock manager's agent
-// list, keyed on ContainerID here) then populates opts.ProjectPath for real,
-// and the later resolution finds the Kubernetes profile saved under urlID at
-// that real path.
+// On start, buildStartContext's Name input is the URL id on both reads, and
+// startAgent recovers the project path from the record before
+// buildStartContext runs, so the early resolution already finds the
+// Kubernetes profile saved under urlID and rejects there. The start test
+// therefore pins that the rejection comes before Start and before the
+// inline config is written, whichever resolution raises it.
 func newTestServerForLateCheckOrdering(t *testing.T, agentName, urlID, remapRuntimeName string) (*Server, *mockManager, *runtime.MockRuntime) {
 	t.Helper()
 	// Isolate HOME and every ambient SCION_* variable, as
@@ -652,15 +647,19 @@ func newTestServerForLateCheckOrdering(t *testing.T, agentName, urlID, remapRunt
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 
+	// The scion.name label carries urlID, as a runtime labels a container
+	// with the slug the hub addresses it by; the broker's agent lookup
+	// filters on that label.
 	mgr := &mockManager{
 		agents: []api.AgentInfo{
-			{ID: agentName, Name: agentName, ContainerID: urlID, ProjectPath: dotScion, Phase: "running"},
+			{ID: agentName, Name: agentName, ContainerID: urlID, ProjectPath: dotScion, Phase: "running",
+				Labels: map[string]string{"scion.name": urlID}},
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
 	srv := New(cfg, mgr, rt)
 	remapRuntime := &runtime.MockRuntime{NameFunc: func() string { return remapRuntimeName }}
-	srv.runtimeResolver = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
 		return remapRuntime
 	}
 	return srv, mgr, remapRuntime

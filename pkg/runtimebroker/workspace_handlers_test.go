@@ -40,6 +40,14 @@ func (m *mockAgentManager) Provision(ctx context.Context, opts api.StartOptions)
 	return nil, nil
 }
 
+func (m *mockAgentManager) Preflight(ctx context.Context, opts api.StartOptions) error {
+	return nil
+}
+
+func (m *mockAgentManager) CleanupLaunch(ctx context.Context, handles []agent.ResourceHandle) error {
+	return nil
+}
+
 func (m *mockAgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
 	return nil, nil
 }

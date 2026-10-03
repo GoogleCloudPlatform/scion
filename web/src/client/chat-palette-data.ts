@@ -30,8 +30,10 @@
 import { apiFetch } from './api.js';
 import type { ApiFetchOptions } from './api.js';
 import type {
+  AgentActivity,
   AgentMessageability,
   AgentMessageabilityDetail,
+  AgentPhase,
   Capabilities,
 } from '../shared/types.js';
 import { canMessageAgent } from '../shared/types.js';
@@ -80,17 +82,29 @@ export const AGENTS_IDLE_TIMEOUT_MS = 90 * 1000;
 /**
  * Distinguishes an idle-timeout-triggered abort of the Agents group's
  * controller from an explicit cancel/supersede, so
- * {@link ChatPaletteDataController.loadAgentsGroup} can surface the former
+ * {@link loadPaletteAgentsBounded} can surface the former
  * as a load error rather than swallowing it the way an ordinary
  * superseded/cancelled load is swallowed.
  */
 const AGENTS_IDLE_TIMEOUT_REASON = Symbol('agents-group-idle-timeout');
 
-/** The subset of the agent-list response shape this module reads. */
+/**
+ * The subset of the agent-list response shape this module reads. Widened
+ * with `phase`/`activity`/`project` (all optional, all already
+ * present on every real `/api/v1/agents` row) so {@link fetchAllPaletteAgents}
+ * is reusable as-is by a non-chat caller that needs those fields too (the
+ * terminal view's own agents-only candidate source) without a parallel
+ * paginated fetch — this module's own candidate building
+ * ({@link buildAgentCandidates}, {@link isPaletteAgentViable}) reads none of
+ * the three.
+ */
 export interface RawPaletteAgent {
   id: string;
   name?: string;
   slug?: string;
+  project?: string;
+  phase?: AgentPhase;
+  activity?: AgentActivity;
   _capabilities?: Capabilities;
   _messageability?: AgentMessageability | AgentMessageabilityDetail;
 }
@@ -295,8 +309,8 @@ export function isPaletteAgentViable(agent: RawPaletteAgent): boolean {
  * API call needed (see `openDM` in chat.ts).
  */
 export function buildAgentCandidates(
-  agents: RawPaletteAgent[],
-  dms: RawPaletteDm[]
+  agents: readonly RawPaletteAgent[],
+  dms: readonly RawPaletteDm[]
 ): PaletteCandidate[] {
   const dmByAgentId = new Map<string, RawPaletteDm>();
   for (const dm of dms) {
@@ -688,6 +702,100 @@ function reclassifyIfStale(err: unknown, aborted: boolean, stale: boolean): neve
   throw err;
 }
 
+/** Options for {@link loadPaletteAgentsBounded}. */
+export interface BoundedAgentsLoadOptions<T> {
+  /** The load's own controller: the caller aborts it to cancel or supersede the load. */
+  controller: AbortController;
+  /** Whether this load is still the caller's current one. */
+  isCurrent: () => boolean;
+  /**
+   * Called with every agent seen so far after each page of a still-current
+   * load arrives, so the caller can publish partial results before the
+   * walk finishes.
+   */
+  onProgress?: (agentsSoFar: readonly RawPaletteAgent[]) => void;
+  /**
+   * Turns the full agent list into the load's result. Runs straight after
+   * the last page, still under the same idle bound, so any follow-up fetch
+   * it makes with `signal` is covered too.
+   */
+  finish: (agents: RawPaletteAgent[], signal: AbortSignal) => T | Promise<T>;
+}
+
+/**
+ * The palette Agents walk, bounded and progressive: fetches every page via
+ * {@link fetchAllPaletteAgents}, reports progress per page through
+ * `onProgress`, and aborts after {@link AGENTS_IDLE_TIMEOUT_MS} with no
+ * forward progress. The idle timer resets on every page and keeps running
+ * through `finish`.
+ *
+ * Rejects with {@link PaletteLoadError} when a still-current load fails or
+ * goes idle for too long, and with an AbortError-like error when the load
+ * was cancelled or superseded (`controller` aborted, or `isCurrent()`
+ * false), which the caller should treat as "no update".
+ */
+export async function loadPaletteAgentsBounded<T>({
+  controller,
+  isCurrent,
+  onProgress,
+  finish,
+}: BoundedAgentsLoadOptions<T>): Promise<T> {
+  let idleTimeoutId: ReturnType<typeof setTimeout> | null = null;
+  const resetIdleTimeout = (): void => {
+    if (idleTimeoutId) clearTimeout(idleTimeoutId);
+    idleTimeoutId = setTimeout(
+      () => controller.abort(AGENTS_IDLE_TIMEOUT_REASON),
+      AGENTS_IDLE_TIMEOUT_MS
+    );
+  };
+  const stopIdleTimeout = (): void => {
+    if (idleTimeoutId) clearTimeout(idleTimeoutId);
+    idleTimeoutId = null;
+  };
+
+  resetIdleTimeout();
+  try {
+    const seen: RawPaletteAgent[] = [];
+    const agents = await fetchAllPaletteAgents(controller.signal, (pageAgents) => {
+      // Each page is forward progress, whether or not this load is still
+      // current — resetting here is harmless even for a stale load: either
+      // a newer load's own abort() already fired (a no-op on an
+      // already-aborted controller), or this one is still current and the
+      // reset is exactly the point.
+      resetIdleTimeout();
+      // A superseded/cancelled load's own trailing pages must not publish
+      // through a newer load's (or no load's) onProgress.
+      if (!isCurrent()) return;
+      seen.push(...pageAgents);
+      onProgress?.(seen);
+    });
+
+    if (!isCurrent()) {
+      throw new DOMException('superseded by a later load', 'AbortError');
+    }
+
+    // No separate reset before `finish`: it starts immediately after the
+    // last page's own reset above, with no gap in between, so that reset
+    // already covers it.
+    return await finish(agents, controller.signal);
+  } catch (err) {
+    // Only classify as a timeout for a load that is still current: a timer
+    // firing for an already-superseded load must still be reclassified as
+    // an AbortError below, not surfaced as a PaletteLoadError that could
+    // publish over a newer load's own state.
+    if (
+      controller.signal.aborted &&
+      controller.signal.reason === AGENTS_IDLE_TIMEOUT_REASON &&
+      isCurrent()
+    ) {
+      throw new PaletteLoadError('agents list took too long to load');
+    }
+    return reclassifyIfStale(err, controller.signal.aborted, !isCurrent());
+  } finally {
+    stopIdleTimeout();
+  }
+}
+
 /**
  * Per-open controller for the palette's Agents, People and Threads groups:
  * fetches each group's real list(s), builds candidates, and guards against a
@@ -744,9 +852,9 @@ export class ChatPaletteDataController {
    * substitute for it.
    *
    * Bounded by {@link AGENTS_IDLE_TIMEOUT_MS} as an *idle* timeout: reset on
-   * every page (see the `resetIdleTimeout()` calls below and that constant's
-   * own doc comment for why the reset also covers the DM fetch), not a cap
-   * on the load's total duration. A load that goes that
+   * every page (see {@link loadPaletteAgentsBounded} and that constant's own
+   * doc comment for why the reset also covers the DM fetch), not a cap on
+   * the load's total duration. A load that goes that
    * long with no forward progress at all is aborted and rejects with
    * {@link PaletteLoadError}, not the silent AbortError-like rejection a
    * supersede/cancel produces — a genuinely stalled request must surface as
@@ -762,88 +870,44 @@ export class ChatPaletteDataController {
     const controller = new AbortController();
     this.agentsAbort = controller;
     const myGeneration = ++this.agentsGeneration;
+    const isCurrent = (): boolean => myGeneration === this.agentsGeneration;
 
-    let idleTimeoutId: ReturnType<typeof setTimeout> | null = null;
-    const resetIdleTimeout = (): void => {
-      if (idleTimeoutId) clearTimeout(idleTimeoutId);
-      idleTimeoutId = setTimeout(
-        () => controller.abort(AGENTS_IDLE_TIMEOUT_REASON),
-        AGENTS_IDLE_TIMEOUT_MS
-      );
-    };
-    const stopIdleTimeout = (): void => {
-      if (idleTimeoutId) clearTimeout(idleTimeoutId);
-      idleTimeoutId = null;
-    };
+    // Agents are fetched before DMs. Each page is published through
+    // `onProgress` (with `activityMs=0`, i.e. unknown recency — no DMs are
+    // known yet at this point) as it arrives, so a caller can show real
+    // rows long before a hub with a long agent list finishes paginating;
+    // the final return value below re-joins every agent against the real
+    // DM list once both fetches are done, which is what actually gets
+    // published as `ready` (see `ChatPaletteDataController`'s only caller,
+    // `_loadPaletteAgents` in chat.ts) and what every progress callback's
+    // recency is superseded by.
+    return loadPaletteAgentsBounded({
+      controller,
+      isCurrent,
+      ...(onProgress
+        ? {
+            onProgress: (seen: readonly RawPaletteAgent[]) =>
+              onProgress(buildAgentCandidates(seen, [])),
+          }
+        : {}),
+      finish: async (agents, signal) => {
+        // The DM join only supplies recency, not agent membership, but a
+        // failure here must still be visible rather than silently degrading
+        // every agent to activityMs=0 (which reads as "no agent has a DM yet"
+        // rather than "recency is unknown right now") — so it fails the whole
+        // group. The dialog's existing retry control reloads both fetches
+        // together. A softer "ready, but recency unavailable" state that keeps
+        // the agent list interactive while flagging the join failure would be a
+        // reasonable enhancement; deferred rather than added speculatively here.
+        const dms = await fetchPaletteDms(signal);
 
-    resetIdleTimeout();
-    try {
-      // Agents are fetched before DMs. Each page is published through
-      // `onProgress` (with `activityMs=0`, i.e. unknown recency — no DMs are
-      // known yet at this point) as it arrives, so a caller can show real
-      // rows long before a hub with a long agent list finishes paginating;
-      // the final return value below re-joins every agent against the real
-      // DM list once both fetches are done, which is what actually gets
-      // published as `ready` (see `ChatPaletteDataController`'s only caller,
-      // `_loadPaletteAgents` in chat.ts) and what every progress callback's
-      // recency is superseded by.
-      const seen: RawPaletteAgent[] = [];
-      const agents = await fetchAllPaletteAgents(controller.signal, (pageAgents) => {
-        // Each page is forward progress, whether or not this generation is
-        // still current — resetting here is harmless even for a stale load:
-        // either a newer load's own abort() already fired (a no-op on an
-        // already-aborted controller), or this one is still current and the
-        // reset is exactly the point.
-        resetIdleTimeout();
-        // A superseded/cancelled load's own trailing pages must not publish
-        // through a newer load's (or no load's) onProgress.
-        if (myGeneration !== this.agentsGeneration) return;
-        seen.push(...pageAgents);
-        onProgress?.(buildAgentCandidates(seen, []));
-      });
+        if (!isCurrent()) {
+          throw new DOMException('superseded by a later load', 'AbortError');
+        }
 
-      if (myGeneration !== this.agentsGeneration) {
-        throw new DOMException('superseded by a later load', 'AbortError');
-      }
-
-      // The DM join only supplies recency, not agent membership, but a
-      // failure here must still be visible rather than silently degrading
-      // every agent to activityMs=0 (which reads as "no agent has a DM yet"
-      // rather than "recency is unknown right now") — so it fails the whole
-      // group. The dialog's existing retry control reloads both fetches
-      // together. A softer "ready, but recency unavailable" state that keeps
-      // the agent list interactive while flagging the join failure would be a
-      // reasonable enhancement; deferred rather than added speculatively here.
-      // No separate reset here before the DM fetch: it starts immediately
-      // after the last agents page's own reset above, with no gap in
-      // between, so that reset already covers it.
-      const dms = await fetchPaletteDms(controller.signal);
-
-      if (myGeneration !== this.agentsGeneration) {
-        throw new DOMException('superseded by a later load', 'AbortError');
-      }
-
-      return buildAgentCandidates(agents, dms);
-    } catch (err) {
-      // Only classify as a timeout for a load that is still current: a timer
-      // firing for an already-superseded load must still be reclassified as
-      // an AbortError below, not surfaced as a PaletteLoadError that could
-      // publish over a newer load's own state.
-      if (
-        controller.signal.aborted &&
-        controller.signal.reason === AGENTS_IDLE_TIMEOUT_REASON &&
-        myGeneration === this.agentsGeneration
-      ) {
-        throw new PaletteLoadError('agents list took too long to load');
-      }
-      return reclassifyIfStale(
-        err,
-        controller.signal.aborted,
-        myGeneration !== this.agentsGeneration
-      );
-    } finally {
-      stopIdleTimeout();
-    }
+        return buildAgentCandidates(agents, dms);
+      },
+    });
   }
 
   /**

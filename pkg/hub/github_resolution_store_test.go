@@ -16,15 +16,19 @@ package hub
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubresolutioncache"
 )
 
 // TestGitHubResolutionStore_GetPut tests basic cache operations.
@@ -67,6 +71,115 @@ func TestGitHubResolutionStore_GetPut(t *testing.T) {
 	_, hit, err = store.Get(ctx, "nonexistent")
 	require.NoError(t, err)
 	require.False(t, hit)
+}
+
+// TestGitHubResolutionStore_Put_UpsertUpdatesExistingRow is the repro for the
+// unqualified-upsert defect: Put must update the existing row for a
+// cache_key it has already written, not fail or silently insert a duplicate.
+// This exercises the actual upsert path end to end (SQLite accepts the
+// unqualified "ON CONFLICT DO UPDATE" the code used to emit, by inferring the
+// lone eligible unique index, which is why this symptom never reproduced
+// against SQLite — see TestGitHubResolutionStore_Put_ConflictTargetInSQL for
+// the generated-SQL assertion that would catch it on a dialect that doesn't).
+func TestGitHubResolutionStore_Put_UpsertUpdatesExistingRow(t *testing.T) {
+	client, err := ent.Open("sqlite3", "file:ent?mode=memory&cache=shared&_fk=1")
+	require.NoError(t, err)
+	defer client.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	err = client.Schema.Create(ctx)
+	require.NoError(t, err)
+
+	store := NewGitHubResolutionStore(client)
+	cacheKey := "upsert-key"
+
+	first := GitHubCacheEntry{
+		CommitSHA:   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com/a", Hash: "sha256:a", Size: 1}},
+		BundleHash:  "sha256:first",
+		TokenScope:  "public",
+		ExpiresAt:   time.Now().Add(30 * time.Minute),
+		OriginalURI: "gh://test/repo/skill",
+	}
+	require.NoError(t, store.Put(ctx, cacheKey, first))
+
+	second := first
+	second.CommitSHA = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	second.BundleHash = "sha256:second"
+	require.NoError(t, store.Put(ctx, cacheKey, second))
+
+	retrieved, hit, err := store.Get(ctx, cacheKey)
+	require.NoError(t, err)
+	require.True(t, hit)
+	require.Equal(t, second.CommitSHA, retrieved.CommitSHA, "upsert must update the existing row, not leave the first value in place")
+	require.Equal(t, second.BundleHash, retrieved.BundleHash)
+
+	// Exactly one row for this cache_key: a conflict-target-less upsert that
+	// instead fell back to always inserting (the failure mode this guards
+	// against) would leave two. Filtered by cache_key, not a bare Count(),
+	// since this DSN (file:ent?mode=memory&cache=shared) is shared across the
+	// package's tests and could otherwise pick up rows left by another test.
+	count, err := client.GitHubResolutionCache.Query().
+		Where(githubresolutioncache.CacheKeyEQ(cacheKey)).
+		Count(ctx)
+	require.NoError(t, err)
+	require.Equal(t, 1, count)
+}
+
+// TestGitHubResolutionStore_Put_ConflictTargetInSQL asserts on the SQL Put
+// generates, rather than against a live Postgres instance: the repo's T1 CI
+// job (pkg/store/integrationtest and pkg/store/entadapter only, see
+// .github/workflows/ci.yml) does not cover pkg/hub, so there is no Postgres
+// harness here to run an integration test against. ent's debug driver lets
+// the test capture the exact statement without a real Postgres connection.
+//
+// The defect: Put used OnConflict().UpdateNewValues(), which omits a conflict
+// target. Postgres rejects "INSERT ... ON CONFLICT DO UPDATE" outright
+// without one ("ON CONFLICT DO UPDATE requires inference specification or
+// constraint name") — every write failed there, silently, because the error
+// was only logged as a WARN by the caller. The fix adds
+// OnConflictColumns(cache_key), which must appear in the generated statement
+// on every dialect, SQLite included.
+func TestGitHubResolutionStore_Put_ConflictTargetInSQL(t *testing.T) {
+	var captured []string
+	client, err := ent.Open("sqlite3", "file:ent?mode=memory&cache=shared&_fk=1",
+		ent.Log(func(args ...any) { captured = append(captured, fmt.Sprint(args...)) }),
+		ent.Debug())
+	require.NoError(t, err)
+	defer client.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	require.NoError(t, client.Schema.Create(ctx))
+
+	store := NewGitHubResolutionStore(client)
+	entry := GitHubCacheEntry{
+		CommitSHA:   "abcdef1234567890abcdef1234567890abcdef12",
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:abc", Size: 100}},
+		BundleHash:  "sha256:bundlehash",
+		TokenScope:  "public",
+		ExpiresAt:   time.Now().Add(30 * time.Minute),
+		OriginalURI: "gh://test/repo/skill",
+	}
+	require.NoError(t, store.Put(ctx, "conflict-target-key", entry))
+
+	var insertStmt string
+	for _, line := range captured {
+		if strings.Contains(line, "INSERT INTO") && strings.Contains(line, "github_resolution_cache") {
+			insertStmt = line
+			break
+		}
+	}
+	require.NotEmpty(t, insertStmt, "expected an INSERT statement against github_resolution_cache to be logged")
+	require.Contains(t, insertStmt, "ON CONFLICT", "upsert must use ON CONFLICT")
+	require.Contains(t, insertStmt, "cache_key", "the conflict target must name cache_key explicitly — a bare \"ON CONFLICT DO UPDATE\" is rejected by Postgres")
+	// The conflict target must appear between ON CONFLICT and DO UPDATE, not
+	// merely somewhere later in the SET clause (every column is in the SET
+	// clause via UpdateNewValues, including cache_key itself).
+	conflictIdx := strings.Index(insertStmt, "ON CONFLICT")
+	doUpdateIdx := strings.Index(insertStmt, "DO UPDATE")
+	require.True(t, conflictIdx >= 0 && doUpdateIdx > conflictIdx, "expected ON CONFLICT ... DO UPDATE in %q", insertStmt)
+	target := insertStmt[conflictIdx:doUpdateIdx]
+	require.Contains(t, target, "cache_key", "conflict target (between ON CONFLICT and DO UPDATE) must name cache_key: got %q", target)
 }
 
 // TestGitHubResolutionStore_Expiration tests TTL expiration.
@@ -113,14 +226,15 @@ func TestGitHubResolutionStore_PurgeExpired(t *testing.T) {
 
 	store := NewGitHubResolutionStore(client)
 
-	// Add expired entry
+	// Add an entry past staleCutoff for a branch ref — GetStale could never
+	// serve this one stale again, under any ref type, so it is safe to purge.
 	expiredKey := "expired-key"
 	expiredEntry := GitHubCacheEntry{
 		CommitSHA:   "abcdef1234567890abcdef1234567890abcdef12",
 		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:abc", Size: 100}},
 		BundleHash:  "sha256:bundlehash",
 		TokenScope:  "public",
-		ExpiresAt:   time.Now().Add(-1 * time.Hour),
+		ExpiresAt:   time.Now().Add(-(agent.MaxResolutionStaleAge + time.Hour)),
 		OriginalURI: "gh://expired/repo/skill",
 	}
 	err = store.Put(ctx, expiredKey, expiredEntry)
@@ -152,6 +266,122 @@ func TestGitHubResolutionStore_PurgeExpired(t *testing.T) {
 	_, hit, err = store.Get(ctx, validKey)
 	require.NoError(t, err)
 	require.True(t, hit)
+}
+
+// TestGitHubResolutionStore_PurgeExpired_KeepsStaleServableBranchRow is the
+// acceptance test for the purge horizon: a branch-ref row past its TTL but
+// still within MaxResolutionStaleAge of its last resolution must survive
+// PurgeExpired —
+// otherwise the hub's 10-minute eviction tick would delete it long before
+// GetStale's 24h stale-serve window actually ends, leaving GetStale with
+// nothing to serve during exactly the outage it exists to absorb. A second
+// row past MaxResolutionStaleAge confirms PurgeExpired still deletes rows
+// that are genuinely beyond anyone's stale horizon.
+func TestGitHubResolutionStore_PurgeExpired_KeepsStaleServableBranchRow(t *testing.T) {
+	client, err := ent.Open("sqlite3", "file:ent?mode=memory&cache=shared&_fk=1")
+	require.NoError(t, err)
+	defer client.Close() //nolint:errcheck
+
+	ctx := context.Background()
+	require.NoError(t, client.Schema.Create(ctx))
+
+	store := NewGitHubResolutionStore(client)
+
+	// A branch row whose TTL expired an hour ago: well past ExpiresAt, but
+	// its last resolution (ExpiresAt - DefaultResolutionCacheTTL) is nowhere
+	// near MaxResolutionStaleAge (24h) ago. GetStale must still be able to
+	// serve this one.
+	staleServableKey := "stale-servable-key"
+	require.NoError(t, store.Put(ctx, staleServableKey, GitHubCacheEntry{
+		CommitSHA:   "1111111111111111111111111111111111111111",
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:a", Size: 1}},
+		BundleHash:  "sha256:stale-servable",
+		TokenScope:  "public",
+		ExpiresAt:   time.Now().Add(-time.Hour),
+		OriginalURI: "gh://acme/repo/skill@main",
+	}))
+
+	// A branch row whose last resolution is well past MaxResolutionStaleAge:
+	// GetStale could never serve this one again, so purging it is correct.
+	tooOldKey := "too-old-key"
+	require.NoError(t, store.Put(ctx, tooOldKey, GitHubCacheEntry{
+		CommitSHA:   "2222222222222222222222222222222222222222",
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:b", Size: 1}},
+		BundleHash:  "sha256:too-old",
+		TokenScope:  "public",
+		ExpiresAt:   time.Now().Add(-(agent.MaxResolutionStaleAge + time.Hour)),
+		OriginalURI: "gh://acme/repo/skill@main",
+	}))
+
+	require.NoError(t, store.PurgeExpired(ctx))
+
+	_, hit, err := store.Get(ctx, staleServableKey)
+	require.NoError(t, err)
+	require.False(t, hit, "the row is past its TTL, so a fresh Get must miss")
+	stale, ok, err := store.GetStale(ctx, staleServableKey, agent.DefaultResolutionCacheTTL, agent.MaxResolutionStaleAge)
+	require.NoError(t, err)
+	require.True(t, ok, "a branch row within MaxResolutionStaleAge must survive PurgeExpired and remain stale-servable")
+	require.Equal(t, "1111111111111111111111111111111111111111", stale.CommitSHA)
+
+	_, ok, err = store.GetStale(ctx, tooOldKey, agent.DefaultResolutionCacheTTL, agent.MaxResolutionStaleAge)
+	require.NoError(t, err)
+	require.False(t, ok, "a row past MaxResolutionStaleAge must not survive PurgeExpired")
+}
+
+// TestGitHubResolutionStore_StaleCutoff_AccountsForTTLJitter confirms
+// GetStale and PurgeExpired still agree on one horizon (see staleCutoff) now
+// that ExpiresAt is written with a jittered TTL (agent.JitteredTTL, applied
+// in fetchAndCacheGitHubSkill): a row placed just inside the jitter-aware
+// cutoff survives PurgeExpired and remains stale-servable, and a row just
+// outside it does not.
+//
+// wantCutoff is computed independently of staleCutoff itself — directly from
+// agent.MaxJitteredTTL and agent.MaxResolutionStaleAge, the same inputs
+// staleCutoff is supposed to combine — rather than by calling staleCutoff and
+// asserting around whatever it happens to return: that would make this test
+// pass unconditionally, since entries placed relative to staleCutoff's own
+// (possibly wrong) output always look internally consistent with it. The ~3
+// minute gap between MaxJitteredTTL(30m) and the unjittered 30m is what the
+// one-minute margins below are sized to land on either side of.
+func TestGitHubResolutionStore_StaleCutoff_AccountsForTTLJitter(t *testing.T) {
+	client, err := ent.Open("sqlite3", "file:ent?mode=memory&cache=shared&_fk=1")
+	require.NoError(t, err)
+	defer client.Close() //nolint:errcheck
+	ctx := context.Background()
+	require.NoError(t, client.Schema.Create(ctx))
+
+	store := NewGitHubResolutionStore(client)
+	cutoff := time.Now().Add(agent.MaxJitteredTTL(agent.DefaultResolutionCacheTTL) - agent.MaxResolutionStaleAge)
+
+	justInsideKey := "just-inside"
+	require.NoError(t, store.Put(ctx, justInsideKey, GitHubCacheEntry{
+		CommitSHA:   "3333333333333333333333333333333333333333",
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:c", Size: 1}},
+		BundleHash:  "sha256:just-inside",
+		TokenScope:  "public",
+		ExpiresAt:   cutoff.Add(time.Minute),
+		OriginalURI: "gh://acme/repo/skill@main",
+	}))
+
+	justOutsideKey := "just-outside"
+	require.NoError(t, store.Put(ctx, justOutsideKey, GitHubCacheEntry{
+		CommitSHA:   "4444444444444444444444444444444444444444",
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.com", Hash: "sha256:d", Size: 1}},
+		BundleHash:  "sha256:just-outside",
+		TokenScope:  "public",
+		ExpiresAt:   cutoff.Add(-time.Minute),
+		OriginalURI: "gh://acme/repo/skill@main",
+	}))
+
+	require.NoError(t, store.PurgeExpired(ctx))
+
+	_, ok, err := store.GetStale(ctx, justInsideKey, agent.DefaultResolutionCacheTTL, agent.MaxResolutionStaleAge)
+	require.NoError(t, err)
+	require.True(t, ok, "a row just inside the jitter-aware cutoff must survive PurgeExpired and remain stale-servable")
+
+	_, ok, err = store.GetStale(ctx, justOutsideKey, agent.DefaultResolutionCacheTTL, agent.MaxResolutionStaleAge)
+	require.NoError(t, err)
+	require.False(t, ok, "a row just outside the jitter-aware cutoff must not be stale-servable, and PurgeExpired must have removed it")
 }
 
 // TestComputeCacheKey tests cache key computation.
@@ -247,7 +477,7 @@ func TestGHListContents_PermanentURLs(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	entries, err := ghListContents(context.Background(), srv.URL, "https://raw.githubusercontent.com",
+	entries, err := ghListContents(context.Background(), agent.NewGitHubCooldown(nil), "anon", srv.URL, "https://raw.githubusercontent.com",
 		"acme", "skills", "skills/deploy", commitSHA, "")
 	require.NoError(t, err)
 
@@ -281,7 +511,7 @@ func TestGHListContents_RawBaseOverride(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	entries, err := ghListContents(context.Background(), srv.URL, "https://raw.ghe.example.com",
+	entries, err := ghListContents(context.Background(), agent.NewGitHubCooldown(nil), "anon", srv.URL, "https://raw.ghe.example.com",
 		"acme", "skills", "s", commitSHA, "")
 	require.NoError(t, err)
 	require.Len(t, entries, 1)

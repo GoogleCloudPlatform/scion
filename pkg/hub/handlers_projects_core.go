@@ -705,10 +705,9 @@ func isSystemProjectAgentsGroup(group *store.Group, projectID string) bool {
 }
 
 // createProjectMembersGroup creates the project's collaboration
-// members group and ensures project membership via RoleBindings. The group
-// exists for collaboration (chat, agent co-ownership) but carries NO
-// authorization meaning — all authorization flows through project-scoped
-// RoleBindings.
+// members group. The group exists for collaboration (chat, agent
+// co-ownership) but carries NO authorization meaning — all authorization
+// flows through project-scoped RoleBindings. It never creates role bindings.
 //
 // PM1 contract: project membership IS the set of project-scoped role bindings.
 // The special project:<slug>:members group no longer has authorization meaning.
@@ -790,17 +789,16 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 			s.projectsLogger().Warn("failed to add creator to project members group",
 				"project_id", project.ID, "user", project.CreatedBy, "error", err.Error())
 		}
-
-		// Ensure a project-owner role binding exists for the creator. In
-		// production, the createProject handler creates this via
-		// createProjectOwnerRoleBinding BEFORE calling us. But this function
-		// is also called from backfill and sync paths where the role binding
-		// may not exist. Best-effort; errors logged.
-		if rbErr := s.createProjectOwnerRoleBinding(ctx, project.ID, project.CreatedBy); rbErr != nil {
-			s.projectsLogger().Debug("project owner role binding already exists or failed",
-				"project_id", project.ID, "user", project.CreatedBy, "error", rbErr.Error())
-		}
 	}
+
+	// This function deliberately does NOT create a project-owner role binding
+	// for project.CreatedBy (ptone/scion#2554). It runs on GET, register,
+	// the idempotent re-create of an existing project and clone, so granting
+	// here would re-make a removed or demoted creator an owner on the next
+	// read. The creator-owner binding is created only on genuine first
+	// creation, by createProjectOwnerRoleBinding in the create, register and
+	// clone handlers; legacy projects with no owner binding at all are
+	// backfilled at startup by backfillProjectOwnerRoleBindings.
 
 	// ── Legacy policy bridge (pre-CO1) ──────────────────────────────────
 	// CO1 cutover: legacy project policies are no longer needed.
@@ -1765,6 +1763,34 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		memberPath := strings.TrimPrefix(subPath, "members")
 		memberPath = strings.TrimPrefix(memberPath, "/")
 		memberPath = strings.TrimSuffix(memberPath, "/")
+		// ptone/scion#2529 P1: …/members/principals/{principalType}/{principalId}
+		// sits above handleProjectMemberByID's binding-ID dispatch — binding
+		// IDs are UUIDs, so there is no collision with the literal
+		// "principals" segment.
+		if strings.HasPrefix(memberPath, "principals/") {
+			principalPath := strings.TrimPrefix(memberPath, "principals/")
+			parts := strings.SplitN(principalPath, "/", 2)
+			// L6 (review r1): principalPath comes from r.URL.Path, which
+			// net/http has already percent-decoded once — a further
+			// url.PathUnescape here double-decoded it (e.g. a principal ID
+			// that is literally "a%40b" was silently corrupted to "a@b").
+			// Reject an ID containing "/" rather than accepting it as part
+			// of a two-segment ID: SplitN(…, 2) otherwise lets
+			// "principals/user/a/b" through as principalID "a/b".
+			if len(parts) == 2 && parts[0] != "" && parts[1] != "" && !strings.Contains(parts[1], "/") {
+				s.handleProjectMemberPrincipal(w, r, projectID, parts[0], parts[1])
+			} else {
+				NotFound(w, "Member principal")
+			}
+			return
+		}
+		// ptone/scion#2529 P2: read-only assignable-roles view. A literal
+		// segment, so like "principals" it cannot collide with a UUID
+		// binding ID.
+		if memberPath == "assignable-roles" {
+			s.handleProjectAssignableRoles(w, r, projectID)
+			return
+		}
 		if memberPath == "" {
 			s.handleProjectMembers(w, r, projectID)
 		} else {
@@ -2136,14 +2162,6 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 			NotFound(w, "Project")
 			return
 		}
-		// P1b (ptone/scion#2383, design lists-graph.md 5.3 "P1b build"): the
-		// agent-JWT sorted path ships in P2. Reject before any SQL, so a
-		// sorted request from an agent token can never fall into the user
-		// path's read pass below.
-		if sorted {
-			rejectAgentJWTSortedMode(w)
-			return
-		}
 	} else {
 		// A user identity (or no identity) reached no gate at all here before
 		// this fix: any authenticated hub user, project member or not, got
@@ -2183,11 +2201,17 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	}
 
 	if sorted {
-		params, ok := parseSortedProjectListParams(w, query, limit)
+		params, ok := parseAgentListParams(w, query, limit)
 		if !ok {
 			return
 		}
-		s.listProjectAgentsSorted(w, r, projectID, query, filter, params)
+		if agentIdent != nil {
+			// Agent-JWT sorted path: no per-item read filter, unlike the
+			// user path.
+			s.listProjectAgentsSortedAgentJWT(w, r, projectID, filter, params)
+		} else {
+			s.listProjectAgentsSorted(w, r, projectID, filter, params)
+		}
 		return
 	}
 

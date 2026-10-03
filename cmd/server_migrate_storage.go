@@ -63,6 +63,8 @@ func init() {
 }
 
 func runMigrateStorage(cmd *cobra.Command, _ []string) error {
+	pinProcessUTC()
+
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 

@@ -15,6 +15,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
@@ -225,9 +227,43 @@ func TestGitCloneWorkspace_NoCloneURL(t *testing.T) {
 
 	tmpWorkspace := t.TempDir()
 	t.Setenv("SCION_WORKSPACE_PATH", tmpWorkspace)
-	err := gitCloneWorkspace(0, 0, "/tmp")
+	err := gitCloneWorkspace(0, 0, "/tmp", false)
 	if err != nil {
 		t.Errorf("expected nil error when SCION_GIT_CLONE_URL is not set, got: %v", err)
+	}
+}
+
+// TestGitCloneWorkspace_EnforcedRefusesUndroppableCredentials proves
+// gitCloneWorkspace refuses outright — before running any git command —
+// when requirePrivilegeDrop is set but uid/gid do not both pass
+// configureGitCommand's own Credential predicate, instead of silently
+// running every git command as this process's own (root, in production)
+// identity. SCION_GIT_CLONE_URL is set so the function does not return
+// early via the "no clone URL configured" path above.
+func TestGitCloneWorkspace_EnforcedRefusesUndroppableCredentials(t *testing.T) {
+	t.Setenv("SCION_GIT_CLONE_URL", "https://example.invalid/repo.git")
+
+	cases := []struct {
+		name     string
+		uid, gid int
+	}{
+		{name: "uid0", uid: 0, gid: 1000},
+		{name: "gid0", uid: 1000, gid: 0},
+		{name: "both0", uid: 0, gid: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			workspacePath := t.TempDir()
+			t.Setenv("SCION_WORKSPACE_PATH", workspacePath)
+
+			err := gitCloneWorkspace(tc.uid, tc.gid, "/tmp", true)
+			if !errors.Is(err, errGitCloneWorkspacePrivilegeDropRequired) {
+				t.Fatalf("gitCloneWorkspace(uid=%d, gid=%d, requirePrivilegeDrop=true) = %v, want errGitCloneWorkspacePrivilegeDropRequired", tc.uid, tc.gid, err)
+			}
+			if _, err := os.Stat(filepath.Join(workspacePath, ".git")); err == nil {
+				t.Error("expected no .git to be created when the refusal fires before any git command runs")
+			}
+		})
 	}
 }
 
@@ -923,7 +959,8 @@ func TestWriteEnvFile_DirChownSurvivesSwapAfterWrite(t *testing.T) {
 		}
 		movedStBefore = movedInfoBefore.Sys().(*syscall.Stat_t)
 		// A brief settle so the chown call below is guaranteed to bump
-		// ctime by a measurable amount.
+		// ctime by a measurable amount — see dirfd's ctimeSettle for why
+		// this matters on this test suite's filesystem/clock source.
 		time.Sleep(15 * time.Millisecond)
 
 		if err := os.Symlink(victimDir, dir); err != nil {
@@ -998,7 +1035,7 @@ func TestGitCloneWorkspace_DefaultEnvValues(t *testing.T) {
 
 	tmpWorkspace := t.TempDir()
 	t.Setenv("SCION_WORKSPACE_PATH", tmpWorkspace)
-	err := gitCloneWorkspace(0, 0, "/tmp")
+	err := gitCloneWorkspace(0, 0, "/tmp", false)
 	if err == nil {
 		t.Fatal("expected error from git clone to nonexistent host")
 	}
@@ -1040,7 +1077,7 @@ func TestGitCloneWorkspace_NonZeroUIDChownsWorkspace(t *testing.T) {
 
 	tmpWorkspace := t.TempDir()
 	t.Setenv("SCION_WORKSPACE_PATH", tmpWorkspace)
-	err := gitCloneWorkspace(uid, gid, "/tmp")
+	err := gitCloneWorkspace(uid, gid, "/tmp", false)
 	if err == nil {
 		t.Fatal("expected error from git clone to nonexistent host")
 	}
@@ -1084,14 +1121,13 @@ func TestConfigureGitCommand_SkipsCredentialOverrideForNonRootDifferentTarget(t 
 	}
 }
 
-// TestConfigureGitCommand_PropagatesTrustBundleEnv proves the git-clone leg
-// of the trust-bundle env-propagation path: init's git clone needs
-// GIT_SSL_CAINFO to reach the `git` subprocess. configureGitCommand builds
-// cmd.Env as append(os.Environ(), "GIT_TERMINAL_PROMPT=0") — a full copy of
-// the process environment, not an allowlisted subset — so GIT_SSL_CAINFO
-// (and every other CA-bundle var the container sets) reaches the actual
-// `git` subprocess whenever it is present in the parent's env, with no code
-// change needed here to carry it through.
+// TestConfigureGitCommand_PropagatesTrustBundleEnv proves configureGitCommand
+// passes GIT_SSL_CAINFO through to the `git` subprocess it configures:
+// configureGitCommand (init.go) builds cmd.Env as
+// append(os.Environ(), "GIT_TERMINAL_PROMPT=0") — a full copy of the process
+// environment, not an allowlisted subset — so any CA-bundle var already set
+// in this process's own environment reaches the `git` subprocess unchanged,
+// with no code change needed here to carry it through.
 func TestConfigureGitCommand_PropagatesTrustBundleEnv(t *testing.T) {
 	t.Setenv("GIT_SSL_CAINFO", "/run/ate/trust-bundle.pem")
 
@@ -1718,7 +1754,7 @@ func TestGitCloneWorkspace_LateFailureCleansUpWholeWorkspace_RetrySucceeds(t *te
 	// fail to create <agentHome>/.gitconfig.
 	badAgentHome := filepath.Join(t.TempDir(), "does-not-exist", "nested")
 
-	err := gitCloneWorkspace(0, 0, badAgentHome)
+	err := gitCloneWorkspace(0, 0, badAgentHome, false)
 	if err == nil {
 		t.Fatal("expected gitCloneWorkspace to fail at the credential-helper config step")
 	}
@@ -1741,7 +1777,7 @@ func TestGitCloneWorkspace_LateFailureCleansUpWholeWorkspace_RetrySucceeds(t *te
 
 	// Retry with a valid agentHome: must succeed and populate the workspace.
 	goodAgentHome := t.TempDir()
-	if err := gitCloneWorkspace(0, 0, goodAgentHome); err != nil {
+	if err := gitCloneWorkspace(0, 0, goodAgentHome, false); err != nil {
 		t.Fatalf("retry after cleanup failed: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(workspacePath, "README.md")); err != nil {
@@ -1749,11 +1785,153 @@ func TestGitCloneWorkspace_LateFailureCleansUpWholeWorkspace_RetrySucceeds(t *te
 	}
 }
 
+// TestRequirePrivilegeDropOrFail_EnforcedFailsClosed is the fail-closed
+// case: an enforcing caller sets RequirePrivilegeDrop, and setupHostUser did
+// not actually drop privileges (targetUID stayed 0). RunInit
+// must refuse to start the harness rather than run it as root.
+func TestRequirePrivilegeDropOrFail_EnforcedFailsClosed(t *testing.T) {
+	err := requirePrivilegeDropOrFail(0, 0, true)
+	if err == nil {
+		t.Fatal("requirePrivilegeDropOrFail(0, 0, true) = nil, want an error — an enforcing caller must never start the harness as root")
+	}
+	if !errors.Is(err, errPrivilegeDropRequired) {
+		t.Errorf("requirePrivilegeDropOrFail(0, 0, true) = %v, want errPrivilegeDropRequired", err)
+	}
+}
+
+// TestRequirePrivilegeDropOrFail_EnforcedSucceedsWhenDropped confirms the
+// gate does not fire when the drop actually happened (targetUID != 0) —
+// the ordinary, successful case once the actor's capability set and
+// SCION_HOST_UID/GID are both in place.
+func TestRequirePrivilegeDropOrFail_EnforcedSucceedsWhenDropped(t *testing.T) {
+	if err := requirePrivilegeDropOrFail(1000, 1000, true); err != nil {
+		t.Errorf("requirePrivilegeDropOrFail(1000, 1000, true) = %v, want nil", err)
+	}
+}
+
+// TestRequirePrivilegeDropOrFail_UnenforcedRootlessUnchanged is the
+// unenforced control: RequirePrivilegeDrop is false (the plain `sciontool
+// init` CLI entrypoint never sets it), so the generic rootless fallback
+// (e.g. rootless Podman, targetUID legitimately staying 0) is not subject
+// to this gate.
+func TestRequirePrivilegeDropOrFail_UnenforcedRootlessUnchanged(t *testing.T) {
+	if err := requirePrivilegeDropOrFail(0, 0, false); err != nil {
+		t.Errorf("requirePrivilegeDropOrFail(0, 0, false) = %v, want nil (unenforced rootless fallback must be unaffected)", err)
+	}
+}
+
+// TestRequirePrivilegeDropOrFail_EnforcedRefusesRootGID proves the gid
+// clamp: in enforced mode a non-root UID paired with a root (0) GID must be
+// refused, because the supervisor's and manager's credential drop both use
+// UID>0 && GID>0 and would otherwise skip the drop entirely (full root). A
+// uid-only predicate would let exactly this pair through.
+func TestRequirePrivilegeDropOrFail_EnforcedRefusesRootGID(t *testing.T) {
+	err := requirePrivilegeDropOrFail(1000, 0, true)
+	if !errors.Is(err, errPrivilegeDropRequired) {
+		t.Fatalf("requirePrivilegeDropOrFail(1000, 0, true) = %v, want errPrivilegeDropRequired", err)
+	}
+	if err := requirePrivilegeDropOrFail(1000, 0, false); err != nil {
+		t.Errorf("requirePrivilegeDropOrFail(1000, 0, false) = %v, want nil (non-enforced mode is unaffected)", err)
+	}
+}
+
+// TestRequirePrivilegeDropOrFail_EnforcedRefusesRootUIDWithNonRootGID is
+// the other half of the gid-clamp predicate: UID 0 paired with a non-root GID must
+// still be refused in enforced mode (the gid clamp must not replace the
+// original uid check).
+func TestRequirePrivilegeDropOrFail_EnforcedRefusesRootUIDWithNonRootGID(t *testing.T) {
+	if err := requirePrivilegeDropOrFail(0, 1000, true); !errors.Is(err, errPrivilegeDropRequired) {
+		t.Fatalf("requirePrivilegeDropOrFail(0, 1000, true) = %v, want errPrivilegeDropRequired", err)
+	}
+}
+
+// TestGitCloneWorkspace_FailedCloneKeepsWorkspaceDir covers a workspace
+// that is the root of a mount, as on Kubernetes where /workspace is a
+// volume mount: the directory itself cannot be removed or replaced. A
+// failed clone must clean up only the directory's contents, leaving the
+// same directory (same inode) and anything that was already in it, so a
+// retry clones into it again.
+func TestGitCloneWorkspace_FailedCloneKeepsWorkspaceDir(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	originDir := t.TempDir()
+	runGitForTest(t, originDir, "init", "-b", "main")
+	runGitForTest(t, originDir, "config", "user.email", "test@example.com")
+	runGitForTest(t, originDir, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(originDir, "README.md"), []byte("hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	runGitForTest(t, originDir, "add", "README.md")
+	runGitForTest(t, originDir, "commit", "-m", "init")
+
+	// The workspace directory exists before the clone, with a marker
+	// directory in it, as the mount and the runtime leave it.
+	workspacePath := filepath.Join(t.TempDir(), "workspace")
+	if err := os.MkdirAll(filepath.Join(workspacePath, ".scion-volumes"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Keep the directory open, so a removed directory's inode stays in use
+	// and cannot be handed to a new directory at the same path.
+	handle, err := os.Open(workspacePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = handle.Close() })
+	before, err := handle.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("SCION_GIT_CLONE_URL", "file://"+originDir)
+	t.Setenv("SCION_GIT_BRANCH", "main")
+	t.Setenv("SCION_GIT_DEPTH", "")
+	t.Setenv("SCION_AGENT_NAME", "test-agent")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("SCION_WORKSPACE_PATH", workspacePath)
+	t.Setenv("SCION_AGENT_BRANCH", "")
+
+	badAgentHome := filepath.Join(t.TempDir(), "does-not-exist", "nested")
+	if err := gitCloneWorkspace(0, 0, badAgentHome, false); err == nil {
+		t.Fatal("expected gitCloneWorkspace to fail")
+	}
+
+	after, err := os.Stat(workspacePath)
+	if err != nil {
+		t.Fatalf("workspace directory removed by the cleanup: %v", err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("workspace directory was replaced by the cleanup, want the same directory")
+	}
+	entries, err := os.ReadDir(workspacePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != ".scion-volumes" {
+		names := make([]string, len(entries))
+		for i, e := range entries {
+			names[i] = e.Name()
+		}
+		t.Fatalf("want only the pre-existing .scion-volumes after cleanup, found: %v", names)
+	}
+
+	if err := gitCloneWorkspace(0, 0, t.TempDir(), false); err != nil {
+		t.Fatalf("retry after cleanup failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(workspacePath, "README.md")); err != nil {
+		t.Fatalf("expected README.md after the retry: %v", err)
+	}
+	retried, err := os.Stat(workspacePath)
+	if err != nil || !os.SameFile(before, retried) {
+		t.Fatalf("retry replaced the workspace directory (err %v)", err)
+	}
+}
+
 // TestPostPreStartOwnershipFixup_ForwardsRequirePrivilegeDrop proves that,
-// with euid stubbed to 0, the body of postPreStartOwnershipFixup forwards
-// its own requirePrivilegeDrop, unchanged, to chownTreeRootOwned for every
-// directory it fixes up. Hardcoding false there would silently fall back to
-// the path-based walk with no hard-link guard in enforced mode.
+// with euid stubbed to 0, the body of postPreStartOwnershipFixup forwards its own
+// requirePrivilegeDrop, unchanged, to chownTreeRootOwned for every directory
+// it fixes up. Hardcoding false there would silently fall back to the
+// path-based walk with no hard-link guard in enforced mode.
 func TestPostPreStartOwnershipFixup_ForwardsRequirePrivilegeDrop(t *testing.T) {
 	for _, want := range []bool{true, false} {
 		t.Run(map[bool]string{true: "enforced", false: "non-enforced"}[want], func(t *testing.T) {
@@ -1786,10 +1964,162 @@ func TestPostPreStartOwnershipFixup_ForwardsRequirePrivilegeDrop(t *testing.T) {
 	}
 }
 
+// TestSetupHostUser_ForwardsRequirePrivilegeDrop proves that, with getuid,
+// CAP_SETUID and the UID-map check stubbed to "root, capable, mapped",
+// setupHostUser reaches
+// adjustScionUser and forward its own requirePrivilegeDrop to it unchanged,
+// along with the parsed SCION_HOST_UID/GID.
+func TestSetupHostUser_ForwardsRequirePrivilegeDrop(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		t.Run(map[bool]string{true: "enforced", false: "non-enforced"}[want], func(t *testing.T) {
+			origGetuid, origCap, origMapped, origAdjust := setupHostUserGetuid, setupHostUserHasCapSetUID, setupHostUserIsUIDMapped, runAdjustScionUser
+			t.Cleanup(func() {
+				setupHostUserGetuid, setupHostUserHasCapSetUID, setupHostUserIsUIDMapped, runAdjustScionUser = origGetuid, origCap, origMapped, origAdjust
+			})
+			t.Setenv("SCION_HOST_UID", "1234")
+			t.Setenv("SCION_HOST_GID", "5678")
+			t.Setenv("SCION_KEEPID_UID", "")
+
+			setupHostUserGetuid = func() int { return 0 }
+			setupHostUserHasCapSetUID = func() bool { return true }
+			setupHostUserIsUIDMapped = func(int) bool { return true }
+			called := 0
+			var gotUID, gotGID int
+			var gotHostUID, gotHostGID string
+			var gotRPD bool
+			runAdjustScionUser = func(uid, gid int, hostUID, hostGID string, requirePrivilegeDrop bool) (int, int, bool) {
+				called++
+				gotUID, gotGID, gotHostUID, gotHostGID, gotRPD = uid, gid, hostUID, hostGID, requirePrivilegeDrop
+				return uid, gid, false
+			}
+
+			uid, gid, rootless := setupHostUser(want)
+
+			if called != 1 {
+				t.Fatalf("adjustScionUser called %d times, want 1", called)
+			}
+			if gotRPD != want {
+				t.Errorf("adjustScionUser got requirePrivilegeDrop=%v, want %v", gotRPD, want)
+			}
+			if gotUID != 1234 || gotGID != 5678 || gotHostUID != "1234" || gotHostGID != "5678" {
+				t.Errorf("adjustScionUser got (%d, %d, %q, %q), want (1234, 5678, \"1234\", \"5678\")", gotUID, gotGID, gotHostUID, gotHostGID)
+			}
+			if uid != 1234 || gid != 5678 || rootless {
+				t.Errorf("setupHostUser = (%d, %d, %v), want adjustScionUser's (1234, 5678, false)", uid, gid, rootless)
+			}
+		})
+	}
+}
+
+// TestSetupHostUser_RefusesUint32OverflowAndSentinelIDs proves setupHostUser
+// closes the numeric fail-open where SCION_HOST_UID/GID values at or past
+// 2^32 (or the 2^32-1 sentinel) pass every "uid > 0" (Go int) guard
+// downstream and only fail once cast to uint32 for syscall.Credential,
+// where they silently wrap around to 0 (root). setupHostUser routes both
+// through rootexec.ValidWorkloadID at the parse site, so they are refused
+// here instead of ever reaching adjustScionUser at all — the same "skip
+// user setup, continue as root-eligible for DecideExecAsRoot to gate"
+// outcome an unparseable value produces.
+func TestSetupHostUser_RefusesUint32OverflowAndSentinelIDs(t *testing.T) {
+	tests := []struct {
+		name           string
+		hostUID        string
+		hostGID        string
+		wantAdjustCall bool
+	}{
+		{"2^32 uid overflows uint32", "4294967296", "1000", false},
+		{"2^32 gid overflows uint32", "1000", "4294967296", false},
+		{"2^32-1 uid sentinel refused", "4294967295", "1000", false},
+		{"2^32-1 gid sentinel refused", "1000", "4294967295", false},
+		{"ordinary uid/gid pass", "1000", "1000", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			origGetuid, origCap, origMapped, origAdjust := setupHostUserGetuid, setupHostUserHasCapSetUID, setupHostUserIsUIDMapped, runAdjustScionUser
+			t.Cleanup(func() {
+				setupHostUserGetuid, setupHostUserHasCapSetUID, setupHostUserIsUIDMapped, runAdjustScionUser = origGetuid, origCap, origMapped, origAdjust
+			})
+			t.Setenv("SCION_HOST_UID", tt.hostUID)
+			t.Setenv("SCION_HOST_GID", tt.hostGID)
+			t.Setenv("SCION_KEEPID_UID", "")
+
+			setupHostUserGetuid = func() int { return 0 }
+			setupHostUserHasCapSetUID = func() bool { return true }
+			setupHostUserIsUIDMapped = func(int) bool { return true }
+			called := false
+			runAdjustScionUser = func(uid, gid int, hostUID, hostGID string, requirePrivilegeDrop bool) (int, int, bool) {
+				called = true
+				return uid, gid, false
+			}
+
+			uid, gid, _ := setupHostUser(false)
+
+			if called != tt.wantAdjustCall {
+				t.Errorf("adjustScionUser called = %v, want %v", called, tt.wantAdjustCall)
+			}
+			if !tt.wantAdjustCall {
+				if uid != 0 || gid != 0 {
+					t.Errorf("setupHostUser = (%d, %d), want (0, 0): refused input must never reach a Credential as a wrapped uid/gid", uid, gid)
+				}
+			}
+		})
+	}
+}
+
+// TestSetupHostUser_ZeroUIDGIDModeGated proves SCION_HOST_UID/GID=0 is
+// refused under RequirePrivilegeDrop (the whole point of the mode is to
+// never regain root) and accepted outside it, proceeding as root when
+// privilege drop is optional. The uid-only and gid-only enforced cases pin
+// that either field being 0 trips the refusal on its own — not just the
+// case where both happen to be 0 together, which a buggy comparison
+// (e.g. uid == gid instead of uid == 0) could still pass via the
+// "0 == 0" zero value.
+func TestSetupHostUser_ZeroUIDGIDModeGated(t *testing.T) {
+	tests := []struct {
+		name                 string
+		hostUID              string
+		hostGID              string
+		requirePrivilegeDrop bool
+		wantAdjustCall       bool
+	}{
+		{"enforced: zero uid and gid refused", "0", "0", true, false},
+		{"enforced: zero uid only refused", "0", "1000", true, false},
+		{"enforced: zero gid only refused", "1000", "0", true, false},
+		{"non-enforced: zero keeps base behavior", "0", "0", false, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			origGetuid, origCap, origMapped, origAdjust := setupHostUserGetuid, setupHostUserHasCapSetUID, setupHostUserIsUIDMapped, runAdjustScionUser
+			t.Cleanup(func() {
+				setupHostUserGetuid, setupHostUserHasCapSetUID, setupHostUserIsUIDMapped, runAdjustScionUser = origGetuid, origCap, origMapped, origAdjust
+			})
+			t.Setenv("SCION_HOST_UID", tt.hostUID)
+			t.Setenv("SCION_HOST_GID", tt.hostGID)
+			t.Setenv("SCION_KEEPID_UID", "")
+
+			setupHostUserGetuid = func() int { return 0 }
+			setupHostUserHasCapSetUID = func() bool { return true }
+			setupHostUserIsUIDMapped = func(int) bool { return true }
+			called := false
+			runAdjustScionUser = func(uid, gid int, hostUID, hostGID string, requirePrivilegeDrop bool) (int, int, bool) {
+				called = true
+				return uid, gid, false
+			}
+
+			setupHostUser(tt.requirePrivilegeDrop)
+
+			if called != tt.wantAdjustCall {
+				t.Errorf("adjustScionUser called = %v, want %v", called, tt.wantAdjustCall)
+			}
+		})
+	}
+}
+
 // TestRunServicesStart_DefaultForwardsRequirePrivilegeDrop exercises the
-// DEFAULT runServicesStart body: with requirePrivilegeDrop true and
-// <name>.stdout.log pre-planted as a hard link to a victim file, the
-// service must be refused (so the default body forwarded the flag to
+// DEFAULT runServicesStart body, which the RunInit threading test replaces
+// with a stub: with requirePrivilegeDrop
+// true and <name>.stdout.log pre-planted as a hard link to a victim file,
+// the service must be refused (so the default body forwarded the flag to
 // Manager.Start), and the victim's content must be unchanged.
 func TestRunServicesStart_DefaultForwardsRequirePrivilegeDrop(t *testing.T) {
 	home := t.TempDir()
@@ -1867,7 +2197,8 @@ func TestHarnessSupervisorConfig(t *testing.T) {
 // an enforced RequirePrivilegeDrop threads through to supervisor.Config
 // unconditionally — a rootless setup-host-user result must not silently
 // clear it. Rootless and RequirePrivilegeDrop are independent signals to
-// the supervisor.
+// the supervisor: the former describes the host UID-mapping state, the
+// latter is the fail-closed enforcement flag from InitRunOptions.
 func TestHarnessSupervisorConfig_RequirePrivilegeDropIgnoresRootless(t *testing.T) {
 	got := harnessSupervisorConfig(InitRunOptions{RequirePrivilegeDrop: true}, 0, 0, 0, true, nil, "", nil)
 	if !got.RequirePrivilegeDrop || !got.Rootless {
@@ -1875,14 +2206,42 @@ func TestHarnessSupervisorConfig_RequirePrivilegeDropIgnoresRootless(t *testing.
 	}
 }
 
+func TestResolveProjectHookPath(t *testing.T) {
+	tests := []struct {
+		name                 string
+		agentHome            string
+		requirePrivilegeDrop bool
+		want                 string
+	}{
+		{
+			name:                 "non-enforced mode stays under agentHome",
+			agentHome:            "/home/scion",
+			requirePrivilegeDrop: false,
+			want:                 "/home/scion/.scion/hooks/pre-start.d/30-project-custom",
+		},
+		{
+			name:                 "enforced mode redirects to hooks.EnforcedHooksDir, independent of agentHome",
+			agentHome:            "/home/scion",
+			requirePrivilegeDrop: true,
+			want:                 hooks.EnforcedHooksDir + "/pre-start.d/30-project-custom",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveProjectHookPath(tt.agentHome, tt.requirePrivilegeDrop); got != tt.want {
+				t.Errorf("resolveProjectHookPath(%q, %v) = %q, want %q", tt.agentHome, tt.requirePrivilegeDrop, got, tt.want)
+			}
+		})
+	}
+}
+
 // TestBlockClaudeDebugSymlink_NonEnforced_KeepsHistoricalPathBasedBehaviour
-// proves the non-enforced path is byte-identical to the pre-hardening code:
-// a pre-existing symlink at debugDir is followed (os.MkdirAll
-// short-circuits, os.Chmod chmods the target) exactly like the original
-// inline os.MkdirAll+os.Chmod did. This is deliberate — see
-// blockClaudeDebugSymlink's doc comment for why a legitimate unenforced
-// setup may symlink .claude itself (e.g. to a mounted volume), and refusing
-// that would break it.
+// proves unenforced runtimes keep the historical, path-based behavior: a
+// pre-existing symlink at debugDir is followed (os.MkdirAll short-circuits,
+// os.Chmod chmods the target) exactly like the original inline
+// os.MkdirAll+os.Chmod did. This is deliberate — see blockClaudeDebugSymlink's
+// doc comment for why a legitimate unenforced setup may symlink .claude
+// itself (e.g. to a mounted volume), and refusing that would break it.
 func TestBlockClaudeDebugSymlink_NonEnforced_KeepsHistoricalPathBasedBehaviour(t *testing.T) {
 	tmpHome := t.TempDir()
 	victim := t.TempDir()
@@ -1910,7 +2269,10 @@ func TestBlockClaudeDebugSymlink_NonEnforced_KeepsHistoricalPathBasedBehaviour(t
 
 // TestBlockClaudeDebugSymlink_Enforced_RefusesSymlinkAndLeavesVictimUnchanged
 // is the core regression test: a symlink planted at ~/.claude/debug before
-// this runs, pointing at a victim directory, must never be chmod'd through.
+// this runs, pointing at a victim directory, must never be chmod'd through —
+// deterministic, no race required, since the symlink already exists when
+// this function runs (matching the realistic case: a pre-start hook or
+// sidecar plants it before line 836 in RunInit is reached).
 func TestBlockClaudeDebugSymlink_Enforced_RefusesSymlinkAndLeavesVictimUnchanged(t *testing.T) {
 	tmpHome := t.TempDir()
 	victim := t.TempDir()
@@ -1945,7 +2307,9 @@ func TestBlockClaudeDebugSymlink_Enforced_RefusesSymlinkAndLeavesVictimUnchanged
 
 // TestBlockClaudeDebugSymlink_Enforced_CreatesAndChmodsRealDir proves the
 // legitimate case still works under enforced mode: when debugDir doesn't
-// exist yet, it gets created and chmod'd 0555 exactly as intended.
+// exist yet (the common case, and $HOME/.claude may not exist yet either,
+// since this runs before the harness itself starts), it gets created and
+// chmod'd 0555 exactly as intended.
 func TestBlockClaudeDebugSymlink_Enforced_CreatesAndChmodsRealDir(t *testing.T) {
 	tmpHome := t.TempDir()
 	debugDir := filepath.Join(tmpHome, ".claude", "debug")
@@ -1962,10 +2326,12 @@ func TestBlockClaudeDebugSymlink_Enforced_CreatesAndChmodsRealDir(t *testing.T) 
 }
 
 // TestBlockClaudeDebugSymlink_Enforced_ChmodSurvivesSwapAfterEnsure is the
-// core regression test for the swap-after-resolve race: a workload process
-// that renames debugDir away and plants a symlink to a victim directory in
-// its place, in the exact window between EnsureDirNoFollow returning its fd
-// and the chmod that follows, must not have the chmod land on the victim.
+// core regression test for the swap-after-resolve race: a workload process that renames debugDir away and
+// plants a symlink to a victim directory in its place, in the exact window
+// between EnsureDirNoFollow returning its fd and the chmod that follows,
+// must not have the chmod land on the victim. The chmod is fd-based
+// (d.Chmod, not os.Chmod(debugDir)), so it stays bound to the original
+// directory no matter what its entry in the parent becomes afterward.
 func TestBlockClaudeDebugSymlink_Enforced_ChmodSurvivesSwapAfterEnsure(t *testing.T) {
 	tmpHome := t.TempDir()
 	victim := t.TempDir()
@@ -2014,7 +2380,7 @@ func TestBlockClaudeDebugSymlink_Enforced_ChmodSurvivesSwapAfterEnsure(t *testin
 }
 
 // TestCleanGcloudConfigForMetadata_NonEnforced_KeepsHistoricalBehaviour
-// proves the non-enforced path is byte-identical: entries under gcloudDir
+// proves unenforced runtimes are byte-identical: entries under gcloudDir
 // (except the preserved ADC file) are removed via the historical
 // os.ReadDir+os.RemoveAll path, including through a symlinked gcloudDir
 // itself — a legitimate unenforced setup may bind-mount or symlink
@@ -2046,8 +2412,9 @@ func TestCleanGcloudConfigForMetadata_NonEnforced_KeepsHistoricalBehaviour(t *te
 
 // TestCleanGcloudConfigForMetadata_Enforced_RefusesSymlinkAndLeavesVictimUnchanged
 // is the core deterministic regression test: gcloudDir itself is a symlink
-// to a victim directory, and enforced mode must refuse it outright rather
-// than enumerating/deleting through it.
+// to a victim directory (planted before this runs, so no race is required
+// to demonstrate the class), and enforced mode must refuse it outright
+// rather than enumerating/deleting through it.
 func TestCleanGcloudConfigForMetadata_Enforced_RefusesSymlinkAndLeavesVictimUnchanged(t *testing.T) {
 	victim := t.TempDir()
 	sentinel := filepath.Join(victim, "sentinel")
@@ -2115,7 +2482,10 @@ func TestCleanGcloudConfigForMetadata_Enforced_CleansRealDir(t *testing.T) {
 // "nothing to clean" case is unaffected by the enforced-mode rewrite, and
 // specifically that it is NOT misreported as a refused symlink: a missing
 // directory must never produce an Error log line, only a genuinely refused
-// symlink should.
+// symlink should. errors.Is(err, os.ErrNotExist) is what tells the two
+// apart — os.IsNotExist would not (see readServicesYAML/OpenDirNoFollow's
+// own doc comments for the same distinction), so this pins the log-level
+// behaviour a regression back to os.IsNotExist would silently break.
 func TestCleanGcloudConfigForMetadata_Enforced_MissingDirIsNoop(t *testing.T) {
 	tmpHome := t.TempDir()
 	logPath := filepath.Join(tmpHome, "capture.log")
@@ -2170,7 +2540,9 @@ func TestCleanGcloudConfigForMetadata_Enforced_SymlinkLogsErrorLine(t *testing.T
 
 // TestChownTreeRootOwned_DirectCall is a thin call-site test proving
 // chownTreeRootOwned, in enforced mode, delegates to the shared
-// dirfd.ChownTreeNoFollow walk with the root-owned-only filter.
+// dirfd.ChownTreeNoFollow walk with the root-owned-only filter — the deeper
+// symlink-swap race itself is covered once, thoroughly, at the dirfd level
+// (TestChownTreeNoFollow_SurvivesIntermediateDirSwapMidWalk).
 func TestChownTreeRootOwned_DirectCall(t *testing.T) {
 	origFilter := chownTreeRootOwnedFilter
 	t.Cleanup(func() { chownTreeRootOwnedFilter = origFilter })
@@ -2223,7 +2595,9 @@ func TestChownTreeRootOwned_NonEnforced_UsesPathBasedWalk(t *testing.T) {
 
 // TestChownTreeRootOwned_MissingRootIsSilentNoop proves that a missing
 // root is a silent no-op (nil, 0, 0) on both branches, restoring the
-// historical filepath.WalkDir contract rather than surfacing as an error.
+// historical filepath.WalkDir contract (WalkDir passes the root's own lstat
+// error to the callback, which returns nil) rather than surfacing as an
+// error.
 func TestChownTreeRootOwned_MissingRootIsSilentNoop(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
 
@@ -2239,10 +2613,10 @@ func TestChownTreeRootOwned_MissingRootIsSilentNoop(t *testing.T) {
 }
 
 // TestChownTreeRootOwned_NonEnforced_FollowsAncestorSymlink proves the
-// runtime gating: when not enforced, an ancestor-path symlink is followed
+// runtime gating: on non-enforced runtimes, an ancestor-path symlink is followed
 // (the historical filepath.WalkDir behaviour), not refused — a legitimate
-// unenforced setup may symlink an ancestor of the walked root (e.g. from a
-// bind-mounted host path), and refusing that would break it.
+// unenforced setup may symlink an ancestor of the walked root (e.g. from
+// a bind-mounted host path), and refusing that would break it.
 func TestChownTreeRootOwned_NonEnforced_FollowsAncestorSymlink(t *testing.T) {
 	origFilter := chownTreeRootOwnedFilter
 	t.Cleanup(func() { chownTreeRootOwnedFilter = origFilter })
@@ -2276,10 +2650,10 @@ func TestChownTreeRootOwned_NonEnforced_FollowsAncestorSymlink(t *testing.T) {
 }
 
 // TestChownTreeRootOwned_Enforced_RefusesAncestorSymlink proves the other
-// half of the same runtime gating: enforced mode refuses the same
-// ancestor-path symlink rather than following it, so the whole fixup for
-// that root is skipped (nothing chowned) instead of silently descending
-// through workload-controlled redirection.
+// half of the same gating: when enforced, the same ancestor-path symlink is
+// refused rather than followed, so the whole fixup for that root is skipped
+// (nothing chowned) instead of silently descending through workload-
+// controlled redirection.
 func TestChownTreeRootOwned_Enforced_RefusesAncestorSymlink(t *testing.T) {
 	origFilter := chownTreeRootOwnedFilter
 	t.Cleanup(func() { chownTreeRootOwnedFilter = origFilter })
@@ -2314,7 +2688,8 @@ func TestChownTreeRootOwned_Enforced_RefusesAncestorSymlink(t *testing.T) {
 // regression test: the enforced branch chowns specifically root-owned
 // entries, so a pre-planted hard link to a root-owned file is exactly what
 // it would hand over if the hard-link guard were ever disabled for this
-// call site.
+// call site. Forces the root-owned filter, creates a hard-linked pair, and
+// asserts the target is left untouched.
 func TestChownTreeRootOwned_Enforced_SkipsHardlinkedFile(t *testing.T) {
 	origFilter := chownTreeRootOwnedFilter
 	t.Cleanup(func() { chownTreeRootOwnedFilter = origFilter })
@@ -2371,14 +2746,18 @@ func scionEnvFileCtime(t *testing.T, tmpHome string) syscall.Timespec {
 
 // TestWriteEnvFile_ChownGating covers all three owner states writeEnvFile's
 // fstat-based owner gate distinguishes: root-owned (uid 0) triggers the
-// chown; anything else — the target uid itself (the normal steady-state
-// case, once a previous run's chown already landed) or any other
-// unexpected uid — is left alone. Each case drives scionDirOwnerUID
-// directly rather than needing a real differently-owned directory.
+// chown; anything else — the
+// target uid itself (the normal steady-state case, once a previous run's
+// chown already landed) or any other unexpected uid — is left alone. Each
+// case drives scionDirOwnerUID directly rather than needing a real
+// differently-owned directory (this test process cannot create one without
+// real root).
 //
 // The "before" ctime is captured via writeEnvFileAfterWriteForTest, firing
 // right after the env-file write/rename (which itself bumps .scion's own
-// ctime) and right before the chown gate runs.
+// ctime, since that changes the directory's entries) and right before the
+// chown gate runs — not before the whole call — so the content-write's own
+// ctime bump doesn't get misread as evidence the chown ran.
 func TestWriteEnvFile_ChownGating(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -2417,8 +2796,8 @@ func TestWriteEnvFile_ChownGating(t *testing.T) {
 	}
 }
 
-// TestReadServicesYAML_NonEnforced_FollowsSymlink proves the non-enforced
-// path is byte-identical to the historical os.ReadFile: a symlinked
+// TestReadServicesYAML_NonEnforced_FollowsSymlink proves unenforced
+// runtimes are byte-identical to the historical os.ReadFile: a symlinked
 // services config is followed and its content returned.
 func TestReadServicesYAML_NonEnforced_FollowsSymlink(t *testing.T) {
 	tmpHome := t.TempDir()
@@ -2445,7 +2824,8 @@ func TestReadServicesYAML_NonEnforced_FollowsSymlink(t *testing.T) {
 }
 
 // TestReadServicesYAML_Enforced_RefusesSymlink is the core regression test:
-// a symlink planted at scion-services.yaml must never be read through in
+// a symlink planted at scion-services.yaml (deterministic — the workload
+// can plant it any time before this is read) must never be read through in
 // enforced mode.
 func TestReadServicesYAML_Enforced_RefusesSymlink(t *testing.T) {
 	tmpHome := t.TempDir()
@@ -2501,8 +2881,12 @@ func TestReadServicesYAML_Enforced_ReadsRealFile(t *testing.T) {
 }
 
 // TestReadServicesYAML_Enforced_MissingFileIsQuietError proves a missing
-// file is reported as an ordinary error WITHOUT being logged as a refused
-// symlink.
+// file is reported as an ordinary error (matching os.ReadFile's contract,
+// which the caller already treats as "no services to start") WITHOUT being
+// logged as a refused symlink — captures real log output and asserts no
+// ERROR line, not just err!=nil (a bare err!=nil check can't distinguish
+// "quiet ENOENT" from "logged refusal", so it doesn't discriminate the
+// errors.Is-vs-os.IsNotExist gate this function relies on).
 func TestReadServicesYAML_Enforced_MissingFileIsQuietError(t *testing.T) {
 	tmpHome := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0o755); err != nil {
@@ -2528,9 +2912,12 @@ func TestReadServicesYAML_Enforced_MissingFileIsQuietError(t *testing.T) {
 	}
 }
 
-// TestReadServicesYAML_Enforced_RefusesHardlink proves the Nlink check is
-// the only defence against a pre-planted hard link to a root-only file on
-// the same filesystem.
+// TestReadServicesYAML_Enforced_RefusesHardlink proves the Nlink check
+// is the only defence against a pre-planted hard link to a root-only file
+// on the same filesystem — a workload process can hard-link to a file it
+// does not own (hard-linking only needs write access to the directory the
+// link is created in). Without it, root would read and parse that file's
+// content as if it were the services config.
 func TestReadServicesYAML_Enforced_RefusesHardlink(t *testing.T) {
 	tmpHome := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0o755); err != nil {
@@ -2551,7 +2938,9 @@ func TestReadServicesYAML_Enforced_RefusesHardlink(t *testing.T) {
 }
 
 // TestReadServicesYAML_Enforced_RefusesAncestorSymlink proves the no-follow
-// resolution applies to every component of the path, not just the leaf.
+// resolution applies to every component of the path, not just the leaf: a
+// symlinked $HOME/.scion (an ancestor of the services file, not the file
+// itself) must be refused, not followed.
 func TestReadServicesYAML_Enforced_RefusesAncestorSymlink(t *testing.T) {
 	tmpHome, real := t.TempDir(), t.TempDir()
 	if err := os.WriteFile(filepath.Join(real, "scion-services.yaml"), []byte("- name: x\n  command: [\"true\"]\n"), 0o600); err != nil {
@@ -2568,10 +2957,14 @@ func TestReadServicesYAML_Enforced_RefusesAncestorSymlink(t *testing.T) {
 	}
 }
 
-// TestReadServicesYAML_Enforced_RefusesFifoWithoutHang proves both the
-// S_IFREG check (a FIFO must be refused, not read as if it were a regular
-// file) and O_NONBLOCK (the refusal must not require a writer to ever show
-// up).
+// TestReadServicesYAML_Enforced_RefusesFifoWithoutHang proves BOTH the S_IFREG check (a FIFO must be refused, not read as if it were a
+// regular file) and O_NONBLOCK (the refusal must not require a writer to
+// ever show up — a backgrounded pre-start-hook child could hold a FIFO
+// open at this exact path and never write to it, which would otherwise
+// hang root's init before the harness ever starts). A reader is held open
+// (as openLogNoFollow's own FIFO test does) so the O_NONBLOCK open itself
+// succeeds instead of failing ENXIO — the point is that the SUBSEQUENT
+// fstat/S_IFREG check refuses it, and that neither step ever blocks.
 func TestReadServicesYAML_Enforced_RefusesFifoWithoutHang(t *testing.T) {
 	tmpHome := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0o755); err != nil {
@@ -2603,10 +2996,10 @@ func TestReadServicesYAML_Enforced_RefusesFifoWithoutHang(t *testing.T) {
 	}
 }
 
-// TestReadServicesYAML_Enforced_RefusesOverCapFile bounds the enforced-mode
-// read so a workload-planted multi-GB regular file cannot make root's own
-// init process read the whole thing into memory before the harness ever
-// starts.
+// TestReadServicesYAML_Enforced_RefusesOverCapFile bounds the
+// enforced-mode read so a workload-planted multi-GB regular file cannot
+// make root's own init process read the whole thing into memory before the
+// harness ever starts.
 func TestReadServicesYAML_Enforced_RefusesOverCapFile(t *testing.T) {
 	tmpHome := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0o755); err != nil {
@@ -2647,8 +3040,10 @@ func TestReadServicesYAML_Enforced_ReadsAtCapFile(t *testing.T) {
 
 // TestReadServicesYAML_Enforced_ReadsReadOnlyFile pins that the enforced
 // leaf open is read-only: a 0444 scion-services.yaml must still be read.
-// This discriminates only as non-root (root bypasses the permission
-// check), so it skips as root.
+// An O_RDWR open (which would also sidestep the FIFO-blocking O_NONBLOCK
+// guard, since a read-write FIFO open never blocks) needs write permission
+// and fails here. This discriminates only as non-root
+// (root bypasses the permission check), so it skips as root.
 func TestReadServicesYAML_Enforced_ReadsReadOnlyFile(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root bypasses file permission checks; this property is only observable as non-root")
@@ -2673,7 +3068,8 @@ func TestReadServicesYAML_Enforced_ReadsReadOnlyFile(t *testing.T) {
 
 // TestReadServicesYAML_NonEnforced_ReadsOverCapFile pins the claim that the
 // 1 MiB cap is enforced-mode only: the non-enforced branch is an unbounded
-// os.ReadFile, byte-identical to its previous behaviour.
+// os.ReadFile, byte-identical to its previous behaviour, so a file over the
+// cap is returned whole.
 func TestReadServicesYAML_NonEnforced_ReadsOverCapFile(t *testing.T) {
 	tmpHome := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0o755); err != nil {
@@ -2695,9 +3091,9 @@ func TestReadServicesYAML_NonEnforced_ReadsOverCapFile(t *testing.T) {
 }
 
 // TestValidateServiceSpecs_DropsInvalidNamesKeepsValidOnes proves the
-// authoritative parse-time gate: an invalid Name is dropped from the list,
-// while every valid entry — regardless of position — passes through
-// unchanged.
+// authoritative parse-time gate: an invalid Name is dropped from the list
+// (logged, never a raw workload-chosen string), while every valid entry —
+// regardless of position — passes through unchanged.
 func TestValidateServiceSpecs_DropsInvalidNamesKeepsValidOnes(t *testing.T) {
 	specs := []api.ServiceSpec{
 		{Name: "chrome", Command: []string{"true"}},
@@ -2800,8 +3196,6 @@ func TestConfigureSharedWorkspaceGit_NeverConsultsPATHForGit(t *testing.T) {
 	}
 }
 
-var startProcreapReaperOnce sync.Once
-
 // TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD is the
 // regression test for the property that configureSharedWorkspaceGit's
 // internal runGitConfig closure must invoke git through procreap's managed
@@ -2825,8 +3219,17 @@ var startProcreapReaperOnce sync.Once
 // TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD
 // ./cmd/sciontool/commands/`; with procreap.CombinedOutputManaged in place
 // it passes reliably.
+//
+// The reaper runs until its process exits and reaps every child that is not
+// started through procreap, so this test runs in a child copy of the test
+// binary (see runInReaperChild). Started in this process, it would keep
+// reaping the git children of the tests that run after it.
 func TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD(t *testing.T) {
-	startProcreapReaperOnce.Do(procreap.StartReaper)
+	if os.Getenv(reaperChildEnv) != "1" {
+		runInReaperChild(t)
+		return
+	}
+	procreap.StartReaper()
 
 	// log.Init() runs first because the logger's lazy initialization is not concurrency-safe.
 	log.Init()
@@ -3154,5 +3557,87 @@ func TestInitRunOptions_ZeroValueForwardsTermSignal(t *testing.T) {
 	}
 	if (InitRunOptions{DisableTermSignalForwarding: true}).forwardsTermSignal() {
 		t.Error("DisableTermSignalForwarding: true must turn off forwarding")
+	}
+}
+
+// TestNewLifecycleManager_WiresEnforcedModeConsistently is the wiring test
+// for the switch that turns on every generic enforced-privilege-drop
+// behaviour at once: EnforcePrivilegeDrop, WorkloadUID/WorkloadGID, and the
+// hub token-file owner-check flag newLifecycleManager reports back for
+// RunInit to pass to hub.EnforceTokenFileOwnerChecks all derive from the
+// identical requirePrivilegeDrop input. A change that stops threading any
+// one of them through independently must fail here, not survive to be
+// caught only by a much larger, harder-to-diagnose end-to-end test.
+func TestNewLifecycleManager_WiresEnforcedModeConsistently(t *testing.T) {
+	tests := []struct {
+		name                 string
+		requirePrivilegeDrop bool
+		targetUID, targetGID int
+	}{
+		{"enforced with a real workload identity", true, 1000, 1000},
+		{"unenforced (docker/base parity)", false, 0, 0},
+		{"unenforced with a resolved identity anyway", false, 1000, 1000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agentHome := "/home/scion"
+			lm, enforceTokenOwnerChecks := newLifecycleManager(agentHome, tt.targetUID, tt.targetGID, tt.requirePrivilegeDrop)
+
+			if lm.EnforcePrivilegeDrop != tt.requirePrivilegeDrop {
+				t.Errorf("EnforcePrivilegeDrop = %v, want %v", lm.EnforcePrivilegeDrop, tt.requirePrivilegeDrop)
+			}
+			if lm.WorkloadUID != tt.targetUID {
+				t.Errorf("WorkloadUID = %d, want %d", lm.WorkloadUID, tt.targetUID)
+			}
+			if lm.WorkloadGID != tt.targetGID {
+				t.Errorf("WorkloadGID = %d, want %d", lm.WorkloadGID, tt.targetGID)
+			}
+			if enforceTokenOwnerChecks != tt.requirePrivilegeDrop {
+				t.Errorf("enforceTokenOwnerChecks = %v, want %v (must track requirePrivilegeDrop exactly)", enforceTokenOwnerChecks, tt.requirePrivilegeDrop)
+			}
+
+			// HooksDirs ordering: the per-agent hooks directory must always
+			// be last (system-then-per-agent, per AddHooksDir's own doc
+			// comment), and EnforcedHooksDir must appear, before it, only
+			// when enforced.
+			wantDirs := defaultHooksDirsForTest()
+			if tt.requirePrivilegeDrop {
+				wantDirs = append(wantDirs, hooks.EnforcedHooksDir)
+			}
+			wantDirs = append(wantDirs, filepath.Join(agentHome, ".scion", "hooks"))
+			if !reflect.DeepEqual(lm.HooksDirs, wantDirs) {
+				t.Errorf("HooksDirs = %v, want %v", lm.HooksDirs, wantDirs)
+			}
+		})
+	}
+}
+
+// defaultHooksDirsForTest returns the default discovery list a fresh
+// hooks.NewLifecycleManager starts with, so
+// TestNewLifecycleManager_WiresEnforcedModeConsistently's expected HooksDirs
+// stays correct regardless of $SCION_HOOKS_DIR in the test environment,
+// without duplicating NewLifecycleManager's own resolution logic here.
+func defaultHooksDirsForTest() []string {
+	return hooks.NewLifecycleManager().HooksDirs
+}
+
+// reaperChildEnv is set in the child test process that runInReaperChild
+// starts.
+const reaperChildEnv = "SCION_TEST_REAPER_CHILD"
+
+// runInReaperChild runs the calling test alone in a child copy of the test
+// binary, with reaperChildEnv set, and fails the test if it fails there. A
+// test that starts the procreap reaper uses it so the reaper ends with the
+// child process.
+func runInReaperChild(t *testing.T) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run", "^"+regexp.QuoteMeta(t.Name())+"$", "-test.count=1", "-test.v")
+	cmd.Env = append(os.Environ(), reaperChildEnv+"=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s in a child test process: %v\n%s", t.Name(), err, out)
+	}
+	if !strings.Contains(string(out), "--- PASS: "+t.Name()) {
+		t.Fatalf("%s did not run in the child test process:\n%s", t.Name(), out)
 	}
 }

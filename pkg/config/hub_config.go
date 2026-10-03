@@ -120,6 +120,12 @@ type HubServerConfig struct {
 	// before being marked as stalled. Default: 5 minutes.
 	StalledThreshold time.Duration `json:"stalledThreshold" yaml:"stalledThreshold" koanf:"stalledThreshold"`
 
+	// MissingAgentGrace is how long a running agent must be continuously
+	// absent from its runtime broker's complete heartbeat inventory before
+	// the Hub marks it phase=error with exit reason container_missing.
+	// Default: 3 minutes (minimum 1 minute).
+	MissingAgentGrace time.Duration `json:"missingAgentGrace" yaml:"missingAgentGrace" koanf:"missingAgentGrace"`
+
 	// DisableLegacyStorageFallback disables the legacy un-namespaced storage
 	// path fallback introduced during GCS namespace migration. When true,
 	// only hub-scoped paths are checked; legacy paths are never consulted.
@@ -789,6 +795,13 @@ type GlobalConfig struct {
 	// in file/SQLite mode.
 	DefaultHarnessConfig string `json:"-" yaml:"-" koanf:"-"`
 
+	// DefaultTimezone is the hub-level IANA timezone fallback for agent
+	// containers with no pinned timezone and no TZ environment variable.
+	// Populated from the top-level default_timezone key in settings.yaml in
+	// file/SQLite mode, so a file-mode admin save reaches
+	// hubAgentDefaults() (and therefore agent create) without a restart.
+	DefaultTimezone string `json:"-" yaml:"-" koanf:"-"`
+
 	// DefaultGCPIdentityMode and DefaultGCPIdentityServiceAccountID are the
 	// hub-level default GCP identity for new agents. Populated from the
 	// top-level keys of the same name in settings.yaml in file/SQLite mode,
@@ -1331,6 +1344,7 @@ var snakeCaseFields = map[string]string{
 	"insecureskipverify":    "insecure_skip_verify",
 	"installationurl":       "installation_url",
 	"maxsize":               "max_size",
+	"missingagentgrace":     "missing_agent_grace",
 	"notificationchannels":  "notification_channels",
 	"privatekeypath":        "private_key_path",
 	"publicurl":             "public_url",
@@ -1408,6 +1422,7 @@ var camelCaseFields = map[string]string{
 	"logformat":                     "logFormat",
 	"loglevel":                      "logLevel",
 	"maintenancemessage":            "maintenanceMessage",
+	"missingagentgrace":             "missingAgentGrace",
 	"oidcaudience":                  "oidcAudience",
 	"platformauthsa":                "platformAuthSA",
 	"privatekey":                    "privateKey",
@@ -1923,6 +1938,13 @@ func loadServerFromSettingsFile(dir string) (*GlobalConfig, bool) {
 	if dhc, ok := raw["default_harness_config"]; ok && dhc != nil {
 		if s, ok := dhc.(string); ok {
 			gc.DefaultHarnessConfig = s
+		}
+	}
+
+	// Top-level default_timezone — read from raw YAML.
+	if dtz, ok := raw["default_timezone"]; ok && dtz != nil {
+		if s, ok := dtz.(string); ok {
+			gc.DefaultTimezone = s
 		}
 	}
 

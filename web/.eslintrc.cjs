@@ -47,6 +47,40 @@ module.exports = {
             files: ['src/client/terminal-*.test.ts'],
             parserOptions: { project: './src/client/tsconfig.terminal-tests.json' },
         },
+        // Explicit lists, not globs: only these files are lint-clean against
+        // their project. Other files in the same directories are not.
+        {
+            files: [
+                'src/components/shared/palette/quick-palette.test.ts',
+                'src/components/shared/palette/quick-palette-groups.test.ts',
+                'src/components/shared/palette/quick-palette-ranking-memo.test.ts',
+                'src/components/shared/open-modal.test.ts',
+                'src/components/terminal/terminal-pane.test.ts',
+                'src/components/shared/header.test.ts',
+            ],
+            parserOptions: { project: './src/components/tsconfig.component-tests.json' },
+        },
+        {
+            files: [
+                'e2e/chat-palette/accessibility.pw.ts',
+                'e2e/chat-palette/agent-selection.pw.ts',
+                'e2e/chat-palette/agents-livelock.pw.ts',
+                'e2e/chat-palette/agents-progressive.pw.ts',
+                'e2e/chat-palette/document-preview.pw.ts',
+                'e2e/chat-palette/fixture.ts',
+                'e2e/chat-palette/focus-and-guards.pw.ts',
+                'e2e/chat-palette/group-navigation.pw.ts',
+                'e2e/chat-palette/palette-button.pw.ts',
+                'e2e/chat-palette/playwright.config.ts',
+                'e2e/chat-palette/reopen-race.pw.ts',
+                'e2e/chat-palette/terminal-and-modal.pw.ts',
+                'e2e/chat-palette/terminal-guard-under-shell.pw.ts',
+                'e2e/chat-palette/thread-navigation.pw.ts',
+                'e2e/chat-palette/typography.pw.ts',
+                'e2e/palette-typography.ts',
+            ],
+            parserOptions: { project: './e2e/chat-palette/tsconfig.json' },
+        },
         // e2e-perf/*.mjs (the large-project performance harness's browser
         // benchmark) isn't part of the tsconfig.json TS program the root
         // parserOptions.project requires, so it needs the plain ESLint

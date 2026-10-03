@@ -17,7 +17,9 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -829,6 +831,302 @@ func TestProjectSettings_DefaultGCPIdentity_ClearingAlwaysAllowed(t *testing.T) 
 	var got hubclient.ProjectSettings
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
 	assert.Empty(t, got.DefaultGCPIdentityServiceAccountID)
+}
+
+// The tests below cover Phase 2 of ptone/scion#2328: block is no longer
+// offered as a new default for a project whose runtime is reliably known to
+// be Kubernetes. "Reliably known" means every broker linked to the project
+// registers only kubernetes profiles — a project with no linked broker, or
+// with a mix of runtime types across its linked brokers, is left alone: the
+// write is permitted and the broker rejects the value at dispatch instead
+// (Phase 1).
+
+func TestProjectSettings_DefaultGCPIdentity_RejectsBlockForKubernetesBoundProject(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+
+	createTestBroker(t, s, "gcp-identity-k8s-broker-"+t.Name(), "k8s-broker", "",
+		[]store.BrokerProfile{{Name: "default", Type: "kubernetes", Available: true}}, nil)
+	brokerID := tid("gcp-identity-k8s-broker-" + t.Name())
+	require.NoError(t, s.AddProjectProvider(t.Context(), &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   brokerID,
+		BrokerName: "k8s-broker",
+		Status:     store.BrokerStatusOnline,
+	}))
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{DefaultGCPIdentityMode: "block"})
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"a new block default must be refused for a project bound to a Kubernetes-only broker; got: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "Kubernetes")
+
+	// The rejected value must not have been persisted.
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/settings", nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got hubclient.ProjectSettings
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
+	assert.Empty(t, got.DefaultGCPIdentityMode)
+}
+
+func TestProjectSettings_DefaultGCPIdentity_AcceptsBlockForDockerBoundProject(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+
+	createTestBroker(t, s, "gcp-identity-docker-broker-"+t.Name(), "docker-broker", "",
+		[]store.BrokerProfile{{Name: "default", Type: "docker", Available: true}}, nil)
+	brokerID := tid("gcp-identity-docker-broker-" + t.Name())
+	require.NoError(t, s.AddProjectProvider(t.Context(), &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   brokerID,
+		BrokerName: "docker-broker",
+		Status:     store.BrokerStatusOnline,
+	}))
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{DefaultGCPIdentityMode: "block"})
+	require.Equal(t, http.StatusOK, rec.Code,
+		"block must remain available for a docker-bound project; got: %s", rec.Body.String())
+
+	var got hubclient.ProjectSettings
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
+	assert.Equal(t, "block", got.DefaultGCPIdentityMode)
+}
+
+// A project whose linked brokers mix runtime types is not "reliably known" to
+// be Kubernetes-bound. The write is allowed here; the broker that ends up
+// serving a given dispatch rejects block itself if it turns out to be
+// Kubernetes (Phase 1).
+func TestProjectSettings_DefaultGCPIdentity_AcceptsBlockForMixedRuntimeProject(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+
+	createTestBroker(t, s, "gcp-identity-mixed-k8s-"+t.Name(), "mixed-k8s-broker", "",
+		[]store.BrokerProfile{{Name: "default", Type: "kubernetes", Available: true}}, nil)
+	createTestBroker(t, s, "gcp-identity-mixed-docker-"+t.Name(), "mixed-docker-broker", "",
+		[]store.BrokerProfile{{Name: "default", Type: "docker", Available: true}}, nil)
+	require.NoError(t, s.AddProjectProvider(t.Context(), &store.ProjectProvider{
+		ProjectID: project.ID, BrokerID: tid("gcp-identity-mixed-k8s-" + t.Name()), BrokerName: "mixed-k8s-broker",
+		Status: store.BrokerStatusOnline,
+	}))
+	require.NoError(t, s.AddProjectProvider(t.Context(), &store.ProjectProvider{
+		ProjectID: project.ID, BrokerID: tid("gcp-identity-mixed-docker-" + t.Name()), BrokerName: "mixed-docker-broker",
+		Status: store.BrokerStatusOnline,
+	}))
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{DefaultGCPIdentityMode: "block"})
+	require.Equal(t, http.StatusOK, rec.Code,
+		"a project with mixed-runtime providers must not be guessed at; got: %s", rec.Body.String())
+}
+
+func TestProjectSettings_DefaultGCPIdentity_AcceptsBlockWithNoProviders(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{DefaultGCPIdentityMode: "block"})
+	require.Equal(t, http.StatusOK, rec.Code,
+		"a project with no linked broker has no known runtime to reject against; got: %s", rec.Body.String())
+}
+
+// Stored block defaults are not migrated or rewritten: reading an existing
+// "block" value must keep working even after the project becomes
+// Kubernetes-bound. Only a NEW write of "block" is refused.
+func TestProjectSettings_DefaultGCPIdentity_ExistingBlockValueReadableAfterProjectBecomesKubernetesBound(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{DefaultGCPIdentityMode: "block"})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	// The project only becomes Kubernetes-bound afterward.
+	createTestBroker(t, s, "gcp-identity-later-k8s-"+t.Name(), "later-k8s-broker", "",
+		[]store.BrokerProfile{{Name: "default", Type: "kubernetes", Available: true}}, nil)
+	require.NoError(t, s.AddProjectProvider(t.Context(), &store.ProjectProvider{
+		ProjectID: project.ID, BrokerID: tid("gcp-identity-later-k8s-" + t.Name()), BrokerName: "later-k8s-broker",
+		Status: store.BrokerStatusOnline,
+	}))
+
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/projects/"+project.ID+"/settings", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "reading a pre-existing stored value must not error; body: %s", rec.Body.String())
+	var got hubclient.ProjectSettings
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
+	assert.Equal(t, "block", got.DefaultGCPIdentityMode,
+		"stored block defaults are not migrated or rewritten by this change")
+}
+
+// Re-saving an unrelated setting must not fail merely because the project
+// already stores "block" and has since become Kubernetes-bound. PUT is a full
+// replace and the settings page resends the current value on every save
+// (project-settings.ts), so treating every "block" in the body as new would
+// force a migration of stored values, which stored block defaults must not
+// undergo. This is the natural companion to
+// TestProjectSettings_DefaultGCPIdentity_ExistingBlockValueReadableAfterProjectBecomesKubernetesBound
+// above, covering the write path instead of the read path.
+func TestProjectSettings_DefaultGCPIdentity_ResavingStoredBlockSucceedsOnKubernetesBoundProject(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{DefaultGCPIdentityMode: "block"})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+	// The project only becomes Kubernetes-bound afterward.
+	createTestBroker(t, s, "gcp-identity-resave-k8s-"+t.Name(), "resave-k8s-broker", "",
+		[]store.BrokerProfile{{Name: "default", Type: "kubernetes", Available: true}}, nil)
+	require.NoError(t, s.AddProjectProvider(t.Context(), &store.ProjectProvider{
+		ProjectID: project.ID, BrokerID: tid("gcp-identity-resave-k8s-" + t.Name()), BrokerName: "resave-k8s-broker",
+		Status: store.BrokerStatusOnline,
+	}))
+
+	// A PUT that resends the same stored "block" alongside an unrelated
+	// change must succeed: it is not a NEW selection of block.
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{DefaultGCPIdentityMode: "block", DefaultTemplate: "some-template"})
+	require.Equal(t, http.StatusOK, rec.Code,
+		"re-saving an already-stored block value must not be blocked by a rule aimed at NEW selections; body: %s", rec.Body.String())
+
+	var got hubclient.ProjectSettings
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&got))
+	assert.Equal(t, "block", got.DefaultGCPIdentityMode)
+	assert.Equal(t, "some-template", got.DefaultTemplate)
+
+	// A genuinely NEW write of block is still refused once the project is
+	// Kubernetes-bound: clear it first, then try to set it again.
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{})
+	require.Equal(t, http.StatusOK, rec.Code, "clearing must always succeed; body: %s", rec.Body.String())
+
+	rec = doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{DefaultGCPIdentityMode: "block"})
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"a NEW block selection must still be refused for a Kubernetes-bound project; body: %s", rec.Body.String())
+}
+
+// A broker linked to the project but reporting no profiles at all has nothing
+// to confirm its runtime type from — brokerIsKubernetesOnly must not treat
+// that as Kubernetes-only.
+func TestProjectSettings_DefaultGCPIdentity_AcceptsBlockForProviderWithNoProfiles(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+
+	createTestBroker(t, s, "gcp-identity-no-profiles-"+t.Name(), "no-profiles-broker", "", nil, nil)
+	require.NoError(t, s.AddProjectProvider(t.Context(), &store.ProjectProvider{
+		ProjectID: project.ID, BrokerID: tid("gcp-identity-no-profiles-" + t.Name()), BrokerName: "no-profiles-broker",
+		Status: store.BrokerStatusOnline,
+	}))
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{DefaultGCPIdentityMode: "block"})
+	require.Equal(t, http.StatusOK, rec.Code,
+		"a broker with no profiles must not be guessed at as Kubernetes-only; body: %s", rec.Body.String())
+}
+
+// Distinct from mixed PROVIDERS (TestProjectSettings_DefaultGCPIdentity_AcceptsBlockForMixedRuntimeProject,
+// which uses two single-profile brokers): here ONE broker's own profile list
+// mixes kubernetes and docker. The per-profile check must be "every", not
+// "any".
+func TestProjectSettings_DefaultGCPIdentity_AcceptsBlockForBrokerWithMixedProfiles(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+
+	createTestBroker(t, s, "gcp-identity-mixed-profiles-"+t.Name(), "mixed-profiles-broker", "",
+		[]store.BrokerProfile{
+			{Name: "k8s-profile", Type: "kubernetes", Available: true},
+			{Name: "docker-profile", Type: "docker", Available: true},
+		}, nil)
+	require.NoError(t, s.AddProjectProvider(t.Context(), &store.ProjectProvider{
+		ProjectID: project.ID, BrokerID: tid("gcp-identity-mixed-profiles-" + t.Name()), BrokerName: "mixed-profiles-broker",
+		Status: store.BrokerStatusOnline,
+	}))
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{DefaultGCPIdentityMode: "block"})
+	require.Equal(t, http.StatusOK, rec.Code,
+		"a broker whose own profiles mix runtime types must not be treated as Kubernetes-only; body: %s", rec.Body.String())
+}
+
+// Every spelling the runtime factory accepts for the Kubernetes runtime
+// ("kubernetes", "k8s", "remote") must be recognized — a broker profile's
+// Type is the runtime config's map key name, and the factory accepts all
+// three as referring to the same runtime.
+func TestProjectSettings_DefaultGCPIdentity_RejectsBlockForKubernetesAliasSpellings(t *testing.T) {
+	for _, alias := range []string{"kubernetes", "k8s", "remote"} {
+		t.Run(alias, func(t *testing.T) {
+			srv, s := testServer(t)
+			project := createTestProjectForSettings(t, s)
+
+			createTestBroker(t, s, "gcp-identity-alias-"+alias+"-"+t.Name(), "alias-broker-"+alias, "",
+				[]store.BrokerProfile{{Name: "default", Type: alias, Available: true}}, nil)
+			require.NoError(t, s.AddProjectProvider(t.Context(), &store.ProjectProvider{
+				ProjectID: project.ID, BrokerID: tid("gcp-identity-alias-" + alias + "-" + t.Name()), BrokerName: "alias-broker-" + alias,
+				Status: store.BrokerStatusOnline,
+			}))
+
+			rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+				hubclient.ProjectSettings{DefaultGCPIdentityMode: "block"})
+			require.Equal(t, http.StatusBadRequest, rec.Code,
+				"profile type %q must be recognized as the Kubernetes runtime; body: %s", alias, rec.Body.String())
+		})
+	}
+}
+
+// gcpIdentityFailingBrokerStore wraps a real store.Store and fails every
+// GetRuntimeBroker call with a generic (non-ErrNotFound) error, to pin that
+// projectIsKubernetesBound propagates a real store error instead of silently
+// treating it as "allow".
+type gcpIdentityFailingBrokerStore struct {
+	store.Store
+}
+
+func (f *gcpIdentityFailingBrokerStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
+	return nil, fmt.Errorf("simulated: runtime broker lookup failure")
+}
+
+func TestProjectSettings_DefaultGCPIdentity_PropagatesRealBrokerLookupError(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+
+	createTestBroker(t, s, "gcp-identity-broker-error-"+t.Name(), "broker-error", "",
+		[]store.BrokerProfile{{Name: "default", Type: "kubernetes", Available: true}}, nil)
+	require.NoError(t, s.AddProjectProvider(t.Context(), &store.ProjectProvider{
+		ProjectID: project.ID, BrokerID: tid("gcp-identity-broker-error-" + t.Name()), BrokerName: "broker-error",
+		Status: store.BrokerStatusOnline,
+	}))
+
+	srv.store = &gcpIdentityFailingBrokerStore{Store: s}
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{DefaultGCPIdentityMode: "block"})
+	require.Equal(t, http.StatusInternalServerError, rec.Code,
+		"a real store error resolving the broker must propagate as a 500, not be silently treated as allow; body: %s", rec.Body.String())
+}
+
+// A project_providers row whose BrokerID no longer resolves to a runtime
+// broker (the broker was deleted, or this caller cannot read it) must NOT be
+// treated as a real error: GetRuntimeBroker returns store.ErrNotFound in that
+// case specifically, and projectIsKubernetesBound's "do not guess" rule
+// applies — the write is allowed, same as any other unconfirmable broker.
+// This is the ErrNotFound branch that TestProjectSettings_..._PropagatesRealBrokerLookupError
+// does not exercise (that test returns a generic error, not ErrNotFound).
+func TestProjectSettings_DefaultGCPIdentity_AllowsBlockForDanglingProviderLink(t *testing.T) {
+	srv, s := testServer(t)
+	project := createTestProjectForSettings(t, s)
+
+	// A provider link with no corresponding runtime_broker row: never created
+	// via createTestBroker, so GetRuntimeBroker(ctx, this ID) returns
+	// store.ErrNotFound.
+	require.NoError(t, s.AddProjectProvider(t.Context(), &store.ProjectProvider{
+		ProjectID: project.ID, BrokerID: tid("gcp-identity-dangling-" + t.Name()), BrokerName: "dangling-broker",
+		Status: store.BrokerStatusOnline,
+	}))
+
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
+		hubclient.ProjectSettings{DefaultGCPIdentityMode: "block"})
+	require.Equal(t, http.StatusOK, rec.Code,
+		"a dangling project_providers link (ErrNotFound) must not confirm Kubernetes-bound; body: %s", rec.Body.String())
 }
 
 // TestProjectSettings_HubScopedDefaultIsAcceptedAndConsumed pins that the write

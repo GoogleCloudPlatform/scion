@@ -474,17 +474,37 @@ func gcsSniffLooksLikeText(sniffedPrefix []byte, truncated bool) bool {
 	return false
 }
 
+// gcsSniffedImageType returns one of the four supported raster image
+// Content-Types if http.DetectContentType recognizes sniffedPrefix as such,
+// or "" otherwise. http.DetectContentType never reports image/svg+xml (SVG
+// is plain-text XML, not a sniffed binary signature) and its text/html
+// result is not read here at all, so an object whose bytes are HTML -
+// regardless of its stored metadata or file extension - never takes this
+// branch; it falls through to the caller's own text/octet-stream decision.
+func gcsSniffedImageType(sniffedPrefix []byte) string {
+	switch ct := http.DetectContentType(sniffedPrefix); ct {
+	case "image/png", "image/jpeg", "image/gif", "image/webp":
+		return ct
+	default:
+		return ""
+	}
+}
+
 // gcsContentType decides the response Content-Type from the object's own
-// bytes, never from its stored metadata: a sniffed prefix that is valid
-// UTF-8, on an object with no Content-Encoding, gets text/plain; everything
-// else — including any object with a Content-Encoding, so a compressed
-// object is never transcoded and then mislabeled — gets
-// application/octet-stream. No image/* type is emitted: the client does
-// not classify a gcs target as an image, so an image sniff here would have
-// no visible effect.
+// bytes, never from its stored metadata. An object with a Content-Encoding
+// is always application/octet-stream - a compressed object is never
+// transcoded and then mislabeled, and the stored bytes are compressed data
+// that would not sniff as a meaningful image or text type anyway. Otherwise,
+// one of the four supported raster image types is used if
+// http.DetectContentType recognizes the sniffed prefix as one of them;
+// otherwise a sniffed prefix that is valid UTF-8 gets text/plain; everything
+// else gets application/octet-stream.
 func gcsContentType(contentEncoding string, sniffedPrefix []byte, truncated bool) string {
 	if contentEncoding != "" {
 		return "application/octet-stream"
+	}
+	if ct := gcsSniffedImageType(sniffedPrefix); ct != "" {
+		return ct
 	}
 	if gcsSniffLooksLikeText(sniffedPrefix, truncated) {
 		return "text/plain; charset=utf-8"

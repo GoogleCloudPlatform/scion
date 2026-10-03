@@ -14,7 +14,11 @@
 
 package main
 
-import "github.com/GoogleCloudPlatform/scion/cmd"
+import (
+	_ "time/tzdata" // embed the IANA tzdata database so time.LoadLocation works without /usr/share/zoneinfo
+
+	"github.com/GoogleCloudPlatform/scion/cmd"
+)
 
 func main() {
 	cmd.Execute()

@@ -58,11 +58,11 @@ function paletteTooltip(page: Page) {
 }
 
 function paletteDialog(page: Page) {
-  return page.locator('scion-chat-switcher sl-dialog[label="Quick switcher"]');
+  return page.locator('scion-quick-palette sl-dialog[label="Quick switcher"]');
 }
 
 function paletteInput(page: Page) {
-  return page.locator('scion-chat-switcher #palette-query-input');
+  return page.locator('scion-quick-palette #palette-query-input');
 }
 
 /** Deep-query into the real composer's native textarea, through both shadow roots. */
@@ -110,7 +110,7 @@ async function assertAxeClean(page: Page): Promise<void> {
   const results = await new AxeBuilder({ page })
     .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
     .include(['scion-chat-shell', 'scion-header'])
-    .include(['scion-page-chat', 'scion-chat-switcher'])
+    .include(['scion-page-chat', 'scion-quick-palette'])
     .analyze();
 
   const serious = results.violations.filter(
@@ -181,6 +181,34 @@ test('clicking the button opens the palette with the query input focused', async
   await paletteButton(page).click();
   await expect(paletteDialog(page)).toBeVisible();
   await expect(paletteInput(page)).toBeFocused();
+  await expect(paletteInput(page)).toHaveAttribute(
+    'placeholder',
+    'Search agents, threads, people, documents…'
+  );
+});
+
+test('at desktop width, the multi-group palette lays its groups out in two columns', async ({
+  page,
+}) => {
+  await gotoShell(page);
+  await paletteButton(page).click();
+  await expect(paletteDialog(page)).toBeVisible();
+
+  // Read in one frame, so the dialog's open animation scales every box alike.
+  const layout = await page.locator('scion-quick-palette').evaluate((host) => {
+    const root = host.shadowRoot!;
+    const results = root.querySelector('.palette-results')!;
+    const box = (group: string): DOMRect =>
+      root.querySelector(`[data-palette-group="${group}"]`)!.getBoundingClientRect();
+    const agents = box('agents');
+    const threads = box('threads');
+    return {
+      columns: getComputedStyle(results).gridTemplateColumns.split(' ').length,
+      sameRow: Math.abs(threads.top - agents.top) < 1,
+      threadsRightOfAgents: threads.left >= agents.right - 1,
+    };
+  });
+  expect(layout).toEqual({ columns: 2, sameRow: true, threadsRightOfAgents: true });
 });
 
 test('Escape after a button-driven open returns focus to the button', async ({ page }) => {
@@ -199,7 +227,7 @@ test('a backdrop click after a button-driven open returns focus to the button', 
   await paletteButton(page).click();
   await expect(paletteDialog(page)).toBeVisible();
   await page
-    .locator('scion-chat-switcher sl-dialog')
+    .locator('scion-quick-palette sl-dialog')
     .locator('[part~="overlay"]')
     .click({ position: { x: 5, y: 5 }, force: true });
   await expect(paletteDialog(page)).toBeHidden();
@@ -212,7 +240,7 @@ test("the dialog's own X (close button) after a button-driven open returns focus
   await gotoShell(page);
   await paletteButton(page).click();
   await expect(paletteDialog(page)).toBeVisible();
-  await page.locator('scion-chat-switcher sl-dialog').locator('[part~="close-button"]').click();
+  await page.locator('scion-quick-palette sl-dialog').locator('[part~="close-button"]').click();
   await expect(paletteDialog(page)).toBeHidden();
   await expect(paletteButton(page)).toBeFocused();
 });
@@ -229,7 +257,7 @@ test('a double-click before the first-open lazy import settles leaves the palett
   // click events on the button synchronously, in the same task, reliably
   // reproduces the race togglePalette's 'open' mode guards against: both
   // land while `_palettePendingOpen` is still true from the first call's
-  // synchronous portion, before either's `await loadChatSwitcher()` (or the
+  // synchronous portion, before either's `await loadQuickPalette()` (or the
   // subsequent render) has had a chance to resolve.
   await gotoShell(page);
   await page.evaluate(() => {
@@ -370,7 +398,7 @@ test('a button press during a closing document preview reopens the palette once 
 
   await paletteButton(page).click();
   await paletteInput(page).fill('notes.txt');
-  await expect(page.locator('scion-chat-switcher .palette-option')).toHaveCount(1);
+  await expect(page.locator('scion-quick-palette .palette-option')).toHaveCount(1);
   await page.keyboard.press('Enter');
   await expect(page.locator('scion-chat-file-preview sl-dialog')).toBeVisible();
 
@@ -514,7 +542,7 @@ test.describe('touch', () => {
     await paletteButton(page).tap();
     await expect(paletteDialog(page)).toBeVisible();
 
-    await expect(page.locator('scion-chat-switcher #palette-keyboard-help')).toHaveCount(0);
+    await expect(page.locator('scion-quick-palette #palette-keyboard-help')).toHaveCount(0);
     await expect(paletteInput(page)).not.toHaveAttribute('aria-describedby', /.+/);
     // Tooltip stays disabled (never shows) even once the button has been
     // focused/tapped.
@@ -547,7 +575,7 @@ test.describe('touch', () => {
 
     await paletteButton(page).tap();
     await paletteInput(page).fill('No Email Person');
-    const option = page.locator('scion-chat-switcher .palette-option').first();
+    const option = page.locator('scion-quick-palette .palette-option').first();
     await expect(option).toBeVisible();
     // `toBeVisible()` only requires a non-empty box — Shoelace's dialog show
     // animation (a scale transition) can still be mid-flight at that
@@ -568,7 +596,7 @@ test.describe('touch', () => {
     // distinguishes "44px minimum" from "44px plus padding" without being
     // sensitive to exactly which pixel the natural height lands on.
     await paletteInput(page).fill('General');
-    const twoLineOption = page.locator('scion-chat-switcher .palette-option').first();
+    const twoLineOption = page.locator('scion-quick-palette .palette-option').first();
     await expect(twoLineOption).toBeVisible();
     await page.waitForTimeout(300);
     const twoLineBox = await twoLineOption.boundingBox();
@@ -593,7 +621,7 @@ test.describe('touch', () => {
     await page.waitForFunction(() => !!document.querySelector('scion-page-chat'));
 
     await paletteButton(page).tap();
-    const retryButton = page.locator('scion-chat-switcher .palette-group-error sl-button');
+    const retryButton = page.locator('scion-quick-palette .palette-group-error sl-button');
     await expect(retryButton).toBeVisible();
     // `toBeVisible()` only requires a non-empty box — Shoelace's dialog show
     // animation (a scale transition) can still be mid-flight at that
@@ -627,13 +655,13 @@ test.describe('touch', () => {
 
     // Stand in for the iOS on-screen keyboard shrinking the real
     // visualViewport, which this headless run never actually triggers.
-    // scion-chat-switcher lives inside scion-page-chat's shadow root, so
+    // scion-quick-palette lives inside scion-page-chat's shadow root, so
     // document.querySelector alone (no shadow piercing) would silently find
     // nothing here — deep-query through the host explicitly instead.
     const resultsBottom = await page.evaluate(() => {
       const switcher = document
         .querySelector('scion-page-chat')
-        ?.shadowRoot?.querySelector('scion-chat-switcher') as HTMLElement | undefined;
+        ?.shadowRoot?.querySelector('scion-quick-palette') as HTMLElement | undefined;
       switcher?.style.setProperty('--palette-vvh', '400px');
       const results = switcher?.shadowRoot?.querySelector('.palette-results');
       return results ? results.getBoundingClientRect().bottom : null;
@@ -656,7 +684,7 @@ test.describe('touch', () => {
     const lastOptionBottom = await page.evaluate(() => {
       const switcher = document
         .querySelector('scion-page-chat')
-        ?.shadowRoot?.querySelector('scion-chat-switcher');
+        ?.shadowRoot?.querySelector('scion-quick-palette');
       const results = switcher?.shadowRoot?.querySelector('.palette-results');
       if (!(results instanceof HTMLElement)) return null;
       results.scrollTop = results.scrollHeight;
@@ -682,7 +710,7 @@ test.describe('touch', () => {
     const geometry = await page.evaluate(() => {
       const switcher = document
         .querySelector('scion-page-chat')
-        ?.shadowRoot?.querySelector('scion-chat-switcher');
+        ?.shadowRoot?.querySelector('scion-quick-palette');
       const dialog = switcher?.shadowRoot?.querySelector('sl-dialog.palette-dialog');
       const panel = dialog?.shadowRoot?.querySelector('[part~="panel"]');
       const rect = panel?.getBoundingClientRect();
@@ -778,9 +806,9 @@ test.describe('touch', () => {
     await gotoShell(page);
     await paletteButton(page).tap();
     await paletteInput(page).fill(AGENT_WITH_DM.name);
-    await expect(page.locator('scion-chat-switcher .palette-option')).toHaveCount(1);
+    await expect(page.locator('scion-quick-palette .palette-option')).toHaveCount(1);
 
-    await page.locator('scion-chat-switcher .palette-option').first().tap();
+    await page.locator('scion-quick-palette .palette-option').first().tap();
     await expect(paletteDialog(page)).toBeHidden();
 
     // The composer for the newly-opened DM must actually exist before "not

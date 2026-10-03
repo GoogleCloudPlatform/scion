@@ -63,8 +63,15 @@ var readClassActions = map[string]bool{"read": true, "list": true, "verify": tru
 // registered permission on one of these resource types fails
 // TestRelationshipPolicy_DriftRequiresDecision until it is placed in one list.
 var relationshipOwnerExcluded = map[relationshipAllowKey][]string{
-	{"owner", "user", "agent"}:          {},
-	{"owner", "user", "project"}:        {},
+	{"owner", "user", "agent"}: {},
+	// Project.OwnerID grants nothing (ptone/scion#2586): project authority
+	// comes only from project-scoped role bindings, so every project
+	// permission is excluded from the owner relationship.
+	{"owner", "user", "project"}: {
+		"project.create", "project.read", "project.update", "project.delete",
+		"project.manage", "project.register", "project.set_messaging_policy",
+		"project.clone", "project.list", "project.secret_read",
+	},
 	{"owner", "user", "template"}:       {},
 	{"owner", "user", "harness_config"}: {},
 	{"owner", "user", "group"}:          {},

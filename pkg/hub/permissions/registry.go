@@ -20,6 +20,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/credentialmeta"
 )
 
 const (
@@ -443,15 +445,14 @@ func uatScopesForResource(resource string) []string {
 // BoundaryKind identifies the credential-side boundary a UAT is issued
 // under: confined to one project, or spanning the hub (including
 // cross-project use, subject to the holder's live authority on each
-// resolved target — see pkg/hub/authz_boundary.go). Canonical here so that
-// permissions data (SelectorMapping, PermissionAllowedBoundaries in
-// project_applicability.go) can reference it without pkg/hub/permissions
-// depending on pkg/hub. pkg/hub aliases this type rather than redeclaring it.
-type BoundaryKind string
+// resolved target — see pkg/hub/authz_boundary.go). The dependency-neutral
+// credentialmeta package owns the canonical enum so permissions and audit
+// metadata cannot drift. pkg/hub aliases this type through permissions.
+type BoundaryKind = credentialmeta.BoundaryKind
 
 const (
-	BoundaryKindProject BoundaryKind = "project"
-	BoundaryKindHub     BoundaryKind = "hub"
+	BoundaryKindProject = credentialmeta.BoundaryProject
+	BoundaryKindHub     = credentialmeta.BoundaryHub
 )
 
 // ValidBoundary is defined in project_applicability.go (shared with

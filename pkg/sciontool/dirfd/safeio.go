@@ -191,6 +191,32 @@ const (
 	// there means tampering worth refusing loudly, not a stale leaf to
 	// overwrite quietly.
 	RefuseSymlink
+
+	// TruncateInPlaceOrCreate refuses an existing symlink or any other
+	// non-regular leaf exactly like RefuseSymlink does, but when the leaf
+	// already exists AS a regular file, WriteFileNoFollow rewrites that
+	// file IN PLACE: it reopens the leaf O_WRONLY|O_NOFOLLOW|O_NONBLOCK|
+	// O_CLOEXEC through the same already-open parent dirFd — deliberately
+	// without O_TRUNC — fstats that SAME fd, refuses a non-regular or
+	// hardlinked (Nlink != 1) leaf, and only then Ftruncates and rewrites
+	// it; there is no create-in-tmp-then-rename. A missing leaf is still
+	// created via the ordinary create-then-rename path below, since there
+	// is nothing yet to write in place.
+	//
+	// Trade-off (present tense): writing in place gives up
+	// WriteFileNoFollow's usual crash-atomicity for an existing regular
+	// leaf. This policy exists because the leaf may be bind-mounted:
+	// replacing a bind-mounted regular file's directory entry via
+	// rename(2) fails EBUSY, so create+rename is not an option there, and
+	// truncating the existing inode in place is the only way to update
+	// its content without unmounting it.
+	//
+	// This is deliberately its own opt-in policy value, not a change to
+	// ReplaceLeaf's or RefuseSymlink's own behavior: every other
+	// WriteFileNoFollow/WriteFileNoFollowWithChown caller keeps the
+	// existing create+rename atomicity guarantee. Use this only for a leaf
+	// that is known to sometimes be a bind-mount target.
+	TruncateInPlaceOrCreate
 )
 
 // WriteFileNoFollow atomically replaces path's content the way
@@ -222,20 +248,46 @@ func WriteFileNoFollow(path string, data []byte, mode os.FileMode, uid, gid int,
 // its existing tests can intercept the fchown call without actually needing
 // CAP_CHOWN — calls this directly with its own chown function instead.
 func WriteFileNoFollowWithChown(path string, data []byte, mode os.FileMode, uid, gid int, policy LeafPolicy, chown func(fd, uid, gid int) error) (err error) {
-	if policy != ReplaceLeaf && policy != RefuseSymlink {
-		return fmt.Errorf("dirfd: WriteFileNoFollow %s: invalid LeafPolicy %d (every caller must choose ReplaceLeaf or RefuseSymlink)", path, policy)
-	}
-
 	dirFd, leaf, err := OpenParentNoFollow(path)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = syscall.Close(dirFd) }()
 
+	return WriteAtNoFollowWithChown(dirFd, leaf, path, data, mode, uid, gid, policy, chown)
+}
+
+// WriteAtNoFollowWithChown is WriteFileNoFollowWithChown's core, taking an
+// already-open, already-verified parent directory fd and the leaf name
+// directly instead of resolving them itself via OpenParentNoFollow. A
+// caller that has already walked to its own parent directory by some other
+// no-follow-safe means (e.g. EnsureDirTrustedAncestorFollow) calls this
+// directly, so the leaf write is anchored at the SAME fd that walk
+// produced — never re-resolving dirFd's path as a string, which could let
+// something swapped in between the walk and the write redirect the
+// destination again. pathForErrors is used only in error messages, never to
+// resolve anything.
+func WriteAtNoFollowWithChown(dirFd int, leaf, pathForErrors string, data []byte, mode os.FileMode, uid, gid int, policy LeafPolicy, chown func(fd, uid, gid int) error) error {
+	if policy != ReplaceLeaf && policy != RefuseSymlink && policy != TruncateInPlaceOrCreate {
+		return fmt.Errorf("dirfd: WriteFileNoFollow %s: invalid LeafPolicy %d (every caller must choose ReplaceLeaf, RefuseSymlink, or TruncateInPlaceOrCreate)", pathForErrors, policy)
+	}
+
 	if policy == RefuseSymlink {
 		if rerr := RefuseSymlinkOrNonRegularAt(dirFd, leaf); rerr != nil {
-			return fmt.Errorf("dirfd: refusing to write %s: %w", path, rerr)
+			return fmt.Errorf("dirfd: refusing to write %s: %w", pathForErrors, rerr)
 		}
+	}
+
+	if policy == TruncateInPlaceOrCreate {
+		isRegular, cerr := existingLeafIsRegularAt(dirFd, leaf)
+		if cerr != nil {
+			return fmt.Errorf("dirfd: refusing to write %s: %w", pathForErrors, cerr)
+		}
+		if isRegular {
+			return writeInPlaceAt(dirFd, leaf, pathForErrors, data, mode, uid, gid, chown)
+		}
+		// Leaf is absent: fall through to the create-then-rename path
+		// below, exactly like every other policy takes for a missing leaf.
 	}
 
 	// PID + nanosecond timestamp is unique enough that CreateExclAt's
@@ -244,9 +296,105 @@ func WriteFileNoFollowWithChown(path string, data []byte, mode os.FileMode, uid,
 	tmpName := fmt.Sprintf(".%s.tmp-%d-%d", leaf, os.Getpid(), time.Now().UnixNano())
 	tmpFile, err := CreateExclAt(dirFd, tmpName, 0o600)
 	if err != nil {
-		return fmt.Errorf("dirfd: create temp for %s: %w", path, err)
+		return fmt.Errorf("dirfd: create temp for %s: %w", pathForErrors, err)
 	}
-	return writeTempAndRename(dirFd, tmpFile, tmpName, leaf, path, data, mode, uid, gid, chown)
+	return writeTempAndRename(dirFd, tmpFile, tmpName, leaf, pathForErrors, data, mode, uid, gid, chown)
+}
+
+// existingLeafIsRegularAt reports whether leaf, relative to dirFd, already
+// exists as a plain regular file: (false, nil) when nothing exists there yet
+// (matching os.IsNotExist semantics — a caller that treats "absent" as "go
+// create it" keeps that behaviour), (true, nil) when it exists and is a
+// regular file, or (false, non-nil) when it exists as something else (a
+// symlink or any other non-regular entry) that must be refused rather than
+// written through or replaced in place.
+//
+// This opens the entry read-only, non-blocking (so a planted FIFO can't hang
+// the check — same reasoning as RefuseSymlinkOrNonRegularAt), purely to fstat
+// it, then closes it immediately; it never touches the leaf's content. A
+// symlink swapped in between this check and writeInPlaceAt's own open is
+// still safe — that open also carries O_NOFOLLOW, so it can only ever
+// resolve to a real regular file or fail, never follow the swap — this
+// function only decides which of the two paths (in place vs. create+rename)
+// to take, not the safety of either.
+func existingLeafIsRegularAt(dirFd int, leaf string) (isRegular bool, err error) {
+	fd, operr := unix.Openat(dirFd, leaf, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if operr != nil {
+		if os.IsNotExist(operr) {
+			return false, nil
+		}
+		if operr == syscall.ELOOP {
+			return false, fmt.Errorf("existing entry is a symlink")
+		}
+		return false, operr
+	}
+	defer func() { _ = syscall.Close(fd) }()
+
+	var st syscall.Stat_t
+	if serr := syscall.Fstat(fd, &st); serr != nil {
+		return false, serr
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFREG {
+		return false, fmt.Errorf("existing entry is not a regular file")
+	}
+	return true, nil
+}
+
+// writeInPlaceAt implements TruncateInPlaceOrCreate's own path: leaf is
+// reopened O_WRONLY|O_NOFOLLOW|O_NONBLOCK relative to dirFd — deliberately
+// WITHOUT O_TRUNC, so nothing is touched before this function has verified
+// the fd it just opened — then fstat'd on that SAME fd, never a second
+// open, so there is no window between checking and truncating for a
+// symlink-or-hardlink swap to land in the way existingLeafIsRegularAt's own
+// separate, earlier check could not by itself prevent. A non-regular entry,
+// or a regular file with more than one hard link — a workload can always
+// pre-plant a hard link to an unrelated (possibly root-owned) file it does
+// not itself own, the same threat ReadAtNoFollow's own Nlink check and
+// hub.ChownTokenFile guard against — is refused, naming the link count,
+// before anything is truncated. Only then is the file truncated
+// (Ftruncate), rewritten, chmod'd/chown'd via the same fd, and fsync'd.
+// O_NONBLOCK also means a FIFO swapped in at the leaf can never hang this
+// open waiting for a reader/writer to connect, the same reasoning
+// RefuseSymlinkOrNonRegularAt and ReadAtNoFollow already use (O_NONBLOCK is
+// a no-op for an ordinary regular file, so it changes nothing for the
+// common case). There is no rename: the leaf's directory entry, and the
+// inode it names, are exactly what they were before this call, just as
+// required for a bind-mounted target where a rename over the entry would
+// fail EBUSY.
+func writeInPlaceAt(dirFd int, leaf, path string, data []byte, mode os.FileMode, uid, gid int, chown func(fd, uid, gid int) error) (err error) {
+	fd, operr := unix.Openat(dirFd, leaf, syscall.O_WRONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if operr != nil {
+		return fmt.Errorf("dirfd: open %s for in-place write: %w", path, operr)
+	}
+	f := os.NewFile(uintptr(fd), leaf)
+	defer func() { _ = f.Close() }()
+
+	var st syscall.Stat_t
+	if serr := syscall.Fstat(int(f.Fd()), &st); serr != nil {
+		return fmt.Errorf("dirfd: stat %s for in-place write: %w", path, serr)
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFREG || st.Nlink != 1 {
+		return fmt.Errorf("dirfd: refusing in-place write to %s: not a single-link regular file (mode=%#o, link count=%d)", path, st.Mode&syscall.S_IFMT, st.Nlink)
+	}
+
+	if terr := unix.Ftruncate(int(f.Fd()), 0); terr != nil {
+		return fmt.Errorf("dirfd: truncate %s for in-place write: %w", path, terr)
+	}
+	if _, werr := f.Write(data); werr != nil {
+		return fmt.Errorf("dirfd: write %s: %w", path, werr)
+	}
+	if cerr := f.Chmod(mode); cerr != nil {
+		return fmt.Errorf("dirfd: chmod %s: %w", path, cerr)
+	}
+	if uid > 0 {
+		if cerr := chown(int(f.Fd()), uid, gid); cerr != nil {
+			return fmt.Errorf("dirfd: chown %s: %w", path, cerr)
+		}
+	}
+	if serr := f.Sync(); serr != nil {
+		return fmt.Errorf("dirfd: fsync %s: %w", path, serr)
+	}
+	return nil
 }
 
 func writeTempAndRename(dirFd int, tmpFile *os.File, tmpName, leaf, path string, data []byte, mode os.FileMode, uid, gid int, chown func(fd, uid, gid int) error) (err error) {

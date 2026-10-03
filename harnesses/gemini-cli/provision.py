@@ -179,17 +179,41 @@ def _apply_native_system_prompt(ctx: scion_harness.ProvisionContext) -> bool:
     return _is_meaningful_system_prompt(system_prompt)
 
 
-def _apply_model(ctx: scion_harness.ProvisionContext) -> None:
-    """Apply resolved model from SCION_MODEL to ~/.gemini/settings.json.
+def _resolve_model(ctx: scion_harness.ProvisionContext) -> str:
+    """Resolve the effective Gemini model name.
 
-    SCION_MODEL arrives already resolved by the Go side (pkg/agent/provision.go
-    and pkg/hub/handlers_agent_create_helpers.go resolve size aliases before the
-    container starts). This function writes the concrete model into
-    ~/.gemini/settings.json so the Gemini CLI uses it.
+    Precedence:
+      1. SCION_MODEL (the hub/broker-resolved value), via
+         scion_harness.resolve_model(ctx). An explicit model always wins. A
+         bare size alias that leaked through unresolved (resume/restart paths
+         with no alias table on the Go side) is mapped through this harness's
+         config.yaml model_aliases here.
+      2. harness_config.model (config.yaml's default tier, e.g. "medium"),
+         normalized through the same alias table via
+         scion_harness.normalize_model_alias(), so a tier never reaches
+         settings.json unresolved.
+      3. "" -- no model; the caller clears any stale model.name so the Gemini
+         CLI falls back to its own built-in default rather than a value left
+         over from an image pin or a previous provision.
     """
-    model = os.environ.get("SCION_MODEL", "").strip()
-    if not model:
-        return
+    resolved = scion_harness.resolve_model(ctx)
+    if resolved:
+        return resolved
+    return scion_harness.normalize_model_alias(
+        str(ctx.harness_config.get("model") or ""), ctx.harness_config
+    )
+
+
+def _apply_model(ctx: scion_harness.ProvisionContext) -> None:
+    """Write the resolved model into ~/.gemini/settings.json model.name.
+
+    The image's settings.json deliberately carries no model.name (it used to
+    pin one outside the alias table; ptone/scion#2674). The model is owned
+    here: see _resolve_model() for precedence. When nothing resolves, any
+    existing model.name is removed so a refreshed settings.json never keeps
+    a stale model.
+    """
+    model = _resolve_model(ctx)
 
     settings_path = scion_harness.expand_path(GEMINI_SETTINGS_FILE)
     settings: dict[str, Any] = {}
@@ -203,12 +227,23 @@ def _apply_model(ctx: scion_harness.ProvisionContext) -> None:
 
     model_section = settings.get("model")
     if not isinstance(model_section, dict):
+        if not model:
+            return
         model_section = {}
         settings["model"] = model_section
 
-    model_section["name"] = model
+    if model:
+        if model_section.get("name") == model:
+            ctx.info(f"model={model}")
+            return
+        model_section["name"] = model
+        ctx.info(f"model={model}")
+    else:
+        if "name" not in model_section:
+            return
+        stale = model_section.pop("name")
+        ctx.info(f"model unset; removed stale settings.json model.name={stale!r}")
     scion_harness.atomic_write_json(settings_path, settings)
-    ctx.info(f"model={model}")
 
 
 def provision(ctx: scion_harness.ProvisionContext) -> None:
@@ -264,8 +299,8 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     ctx.write_outputs(resolved, env=env, extra=extra)
     ctx.info(f"method={resolved.method}")
 
-    # Apply the resolved model to ~/.gemini/settings.json. SCION_MODEL
-    # arrives already resolved by the Go side.
+    # Apply the resolved model to ~/.gemini/settings.json: SCION_MODEL,
+    # else the harness-config default tier (see _resolve_model).
     _apply_model(ctx)
 
     harness_cfg = ctx.harness_config

@@ -37,6 +37,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../../client/api.js';
 import { showConfirm } from '../confirm-dialog.js';
 import { showToast } from '../../../utils/toast.js';
+import { touchMenuItemStyles } from '../touch-styles.js';
 import './chat-avatar.js';
 
 /** A space (project) in the rail. */
@@ -395,6 +396,8 @@ export class ScionChatSpaceRail extends LitElement {
   private _createThreadGroupId: string | null = null;
 
   static override styles = css`
+    ${touchMenuItemStyles}
+
     :host {
       display: flex;
       flex-direction: column;
@@ -849,6 +852,74 @@ export class ScionChatSpaceRail extends LitElement {
     .emoji-grid button:hover {
       background: var(--scion-bg-subtle, #f1f5f9);
       border-color: var(--scion-border, #e2e8f0);
+    }
+
+    /* Stop iOS/Android focus-zoom on the rail's Shoelace inputs, whose
+       local ::part(base) font-size overrides bypass the app-wide
+       --sl-input-font-size-* variable, independent of layout density (an
+       iPad is coarse-pointer but wider than the mobile breakpoint, so it
+       still needs this). */
+    @media (pointer: coarse) {
+      .group-name-input sl-input::part(base),
+      .create-thread sl-input::part(base),
+      .rename-input::part(base) {
+        font-size: max(16px, var(--chat-fs-md));
+      }
+    }
+
+    @media (max-width: 768px) {
+      /* Beyond comfy: real-device feedback asked for rail text bigger than
+         the comfy token set gives, not just comfy-forced-on-mobile. */
+      .rail-header {
+        font-size: 18px;
+      }
+
+      .thread-item {
+        font-size: 17px;
+        min-height: 48px;
+      }
+
+      .thread-item .unread-dot,
+      .thread-item .mention-dot {
+        width: 8px;
+        height: 8px;
+      }
+
+      .space-header {
+        font-size: 14px;
+        min-height: 44px;
+      }
+
+      .space-header .unread-badge,
+      .space-header .mention-badge {
+        font-size: 12px;
+        min-width: 1.25rem;
+        padding: 0.125rem 0.375rem;
+      }
+
+      /* A real 44px-tall button, not a ::before-expanded hit area: the
+         rounded segmented border on .filter-toggle needs overflow: hidden,
+         which clips any pseudo-element that tries to extend past the
+         container's own edge — an invisible hit area here would never
+         actually be reachable. */
+      .filter-toggle button {
+        font-size: 15px;
+        min-height: 44px;
+      }
+
+      .sort-btn::part(base) {
+        width: 44px;
+        height: 44px;
+      }
+
+      .space-actions sl-icon-button::part(base) {
+        width: 44px;
+        height: 44px;
+      }
+
+      .space-actions sl-menu-item::part(base) {
+        font-size: 16px;
+      }
     }
   `;
 
@@ -2375,9 +2446,44 @@ export class ScionChatSpaceRail extends LitElement {
     }
   }
 
-  private startCreateThread(projectId: string): void {
-    this.creatingThread = projectId;
-    this.newThreadName = '';
+  /**
+   * Open the new-thread name entry for a space. `groupId` is the group the
+   * thread is filed into once created; every request sets it, so a target
+   * left by an earlier group-menu request cannot carry over.
+   */
+  private startCreateThread(projectId: string, groupId: string | null = null): void {
+    this._createThreadGroupId = groupId;
+    // The name-entry row renders inside the space's thread list, so a
+    // collapsed space must open for the row to be visible.
+    this.expandSpace(projectId);
+    // Asking again for the space whose row is already open keeps the typed
+    // name; only a fresh entry starts empty.
+    if (this.creatingThread !== projectId) {
+      this.creatingThread = projectId;
+      this.newThreadName = '';
+    }
+    // Focus on every request, not only when the row first opens, so a repeat
+    // New thread brings focus back from the menu that issued it.
+    void this.updateComplete.then(() => this.focusCreateThreadInput());
+  }
+
+  /**
+   * Focus the new-thread name input. Native focus also scrolls the input
+   * into view, so no separate scroll is needed.
+   */
+  private async focusCreateThreadInput(): Promise<void> {
+    const input = this.shadowRoot?.querySelector<
+      HTMLElement & { updateComplete?: Promise<unknown> }
+    >('.create-thread sl-input');
+    if (!input) return;
+    await input.updateComplete;
+    input.focus();
+  }
+
+  /** Close the new-thread name entry without creating a thread. */
+  private cancelCreateThread(): void {
+    this.creatingThread = '';
+    this._createThreadGroupId = null;
   }
 
   /** IDs of topics created by this client — suppresses SSE-triggered reloads. */
@@ -2796,12 +2902,12 @@ export class ScionChatSpaceRail extends LitElement {
           !isCollapsed
             ? html`
                 <div class="thread-list">
-                  ${this.renderThreadList(threads, space.projectId)}
                   ${
                     this.creatingThread === space.projectId
                       ? this.renderCreateThread(space.projectId)
                       : nothing
                   }
+                  ${this.renderThreadList(threads, space.projectId)}
                 </div>
               `
             : nothing
@@ -3029,11 +3135,11 @@ export class ScionChatSpaceRail extends LitElement {
               void this.submitCreateThread(projectId);
             }
             if (e.key === 'Escape') {
-              this.creatingThread = '';
+              this.cancelCreateThread();
             }
           }}
           @sl-blur=${() => {
-            if (!this.newThreadName.trim()) this.creatingThread = '';
+            if (!this.newThreadName.trim()) this.cancelCreateThread();
           }}
           style="flex: 1"
         ></sl-input>
@@ -3275,8 +3381,7 @@ export class ScionChatSpaceRail extends LitElement {
           class="context-menu-item"
           @click=${() => {
             this.groupContextMenuTarget = null;
-            this._createThreadGroupId = group.id;
-            this.startCreateThread(projectId);
+            this.startCreateThread(projectId, group.id);
           }}
         >
           <sl-icon name="plus-lg"></sl-icon>

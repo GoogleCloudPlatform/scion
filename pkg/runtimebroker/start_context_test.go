@@ -176,7 +176,7 @@ runtimes:
 	// non-default profile (otherProfile -> otherRuntimeName), so the
 	// resolver can report otherRuntimeName unconditionally rather than
 	// inspecting profileFlag.
-	srv.runtimeResolver = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
 		return &runtime.MockRuntime{NameFunc: func() string { return otherRuntimeName }}
 	}
 	return srv, dotScion
@@ -780,7 +780,7 @@ func TestTryProvisionWorktree_FallbackFailureLogNeverContainsCredentials(t *test
 		ProjectPath:   projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 		Config:        &CreateAgentConfig{GitClone: &api.GitCloneConfig{URL: credentialedURL}},
-	}, opts, map[string]string{})
+	}, opts, map[string]string{}, srv.runtime.Name())
 
 	logged := buf.String()
 	if strings.Contains(logged, secretToken) {
@@ -972,7 +972,7 @@ func TestTryProvisionWorktree_InvalidAgentIDLeavesSharedBaseIntact(t *testing.T)
 				ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 				WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 				Config:        &CreateAgentConfig{GitClone: invalidGitClone},
-			}, opts, map[string]string{})
+			}, opts, map[string]string{}, srv.runtime.Name())
 
 			if ok {
 				t.Error("expected ok=false for an invalid AgentID")
@@ -1004,7 +1004,7 @@ func setUpAgent1SharedBase(t *testing.T, srv *Server, projectPath, bare string) 
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 		Config:        &CreateAgentConfig{GitClone: &api.GitCloneConfig{URL: bare, Branch: "main"}},
-	}, opts, map[string]string{})
+	}, opts, map[string]string{}, srv.runtime.Name())
 	if err != nil || !ok {
 		t.Fatalf("setup: tryProvisionWorktree for agent-1: ok=%v err=%v", ok, err)
 	}
@@ -1046,7 +1046,7 @@ func TestTryProvisionWorktree_SymlinkedOwnWorktreeRejected(t *testing.T) {
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 		Config:        &CreateAgentConfig{GitClone: &api.GitCloneConfig{URL: bare, Branch: "main"}},
-	}, opts, map[string]string{})
+	}, opts, map[string]string{}, srv.runtime.Name())
 
 	if ok {
 		t.Error("expected ok=false for a symlinked worktree target")
@@ -1099,7 +1099,7 @@ func TestTryProvisionWorktree_SymlinkedWorktreesDirRejected(t *testing.T) {
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 		Config:        &CreateAgentConfig{GitClone: &api.GitCloneConfig{URL: bare, Branch: "main"}},
-	}, opts, map[string]string{})
+	}, opts, map[string]string{}, srv.runtime.Name())
 
 	if ok {
 		t.Error("expected ok=false when the worktrees directory is a symlink")
@@ -1147,7 +1147,7 @@ func TestTryProvisionWorktree_SharerRegistryOutsidePathRejected(t *testing.T) {
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 		Config:        &CreateAgentConfig{GitClone: &api.GitCloneConfig{URL: bare, Branch: "main"}},
-	}, opts, map[string]string{})
+	}, opts, map[string]string{}, srv.runtime.Name())
 
 	if ok {
 		t.Error("expected ok=false when the sharer registry names a path outside the base")
@@ -1204,7 +1204,7 @@ func TestTryProvisionWorktree_SharerRegistryFakeGitfileStillRejected(t *testing.
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 		Config:        &CreateAgentConfig{GitClone: &api.GitCloneConfig{URL: bare, Branch: "main"}},
-	}, opts, map[string]string{})
+	}, opts, map[string]string{}, srv.runtime.Name())
 
 	if ok {
 		t.Error("expected ok=false when the sharer registry names a path outside the base, even with a matching gitfile")
@@ -1359,7 +1359,7 @@ func TestTryProvisionWorktree_SharerRegistryNestedMarkerRejected(t *testing.T) {
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 		Config:        &CreateAgentConfig{GitClone: &api.GitCloneConfig{URL: bare, Branch: "main"}},
-	}, opts, map[string]string{})
+	}, opts, map[string]string{}, srv.runtime.Name())
 
 	if ok {
 		t.Error("expected ok=false when the sharer registry names a nested subdirectory of another worktree")
@@ -1422,7 +1422,7 @@ func TestTryProvisionWorktree_SharerRegistryIntermediateSymlinkRejected(t *testi
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 		Config:        &CreateAgentConfig{GitClone: &api.GitCloneConfig{URL: bare, Branch: "main"}},
-	}, opts, map[string]string{})
+	}, opts, map[string]string{}, srv.runtime.Name())
 
 	if ok {
 		t.Error("expected ok=false when the sharer registry names a path reached through an intermediate symlink")
@@ -1500,7 +1500,7 @@ func TestTryProvisionWorktree_SharerRegistryNonCanonicalPathRejected(t *testing.
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 		Config:        &CreateAgentConfig{GitClone: &api.GitCloneConfig{URL: bare, Branch: "main"}},
-	}, opts, map[string]string{})
+	}, opts, map[string]string{}, srv.runtime.Name())
 
 	if ok {
 		t.Error("expected ok=false for a marker that is not already in canonical direct-child form")
@@ -1541,7 +1541,7 @@ func TestTryProvisionWorktree_SymlinkedProjectParentAccepted(t *testing.T) {
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 		Config:        &CreateAgentConfig{GitClone: &api.GitCloneConfig{URL: bare, Branch: "main"}},
-	}, opts, map[string]string{})
+	}, opts, map[string]string{}, srv.runtime.Name())
 
 	if err != nil {
 		t.Fatalf("expected provisioning through a symlinked project parent to succeed, got err=%v", err)
@@ -2719,7 +2719,7 @@ func TestBuildStartContext_CloudrunSandboxHubEndpoint(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	cfg.HubListenPort = 8080
-	srv := newTestServerWithRuntime(t, cfg, "cloudrun-sandbox")
+	srv := newTestServerForStartContextRuntime(t, cfg, "cloudrun-sandbox")
 
 	t.Setenv("SCION_METADATA_BIND_ADDRESS", "203.0.113.5")
 
@@ -2758,7 +2758,7 @@ func TestBuildStartContext_CloudrunSandboxHubNeverRunApp(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
 	cfg.HubListenPort = 8080
-	srv := newTestServerWithRuntime(t, cfg, "cloudrun-sandbox")
+	srv := newTestServerForStartContextRuntime(t, cfg, "cloudrun-sandbox")
 
 	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
 
@@ -3309,7 +3309,7 @@ func TestTryProvisionWorktree_MissingIdentityOnStart_FailsClosed(t *testing.T) {
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 		Config:        &CreateAgentConfig{GitClone: gc},
 		Operation:     opHTTPStart,
-	}, opts, map[string]string{})
+	}, opts, map[string]string{}, srv.runtime.Name())
 
 	if err == nil {
 		t.Fatal("expected tryProvisionWorktree to fail closed when AgentID is missing on a start dispatch")
@@ -3331,7 +3331,7 @@ func TestTryProvisionWorktree_MissingIdentityOnStart_FailsClosed(t *testing.T) {
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 		Config:        &CreateAgentConfig{GitClone: gc},
 		Operation:     opCreate,
-	}, opts2, map[string]string{})
+	}, opts2, map[string]string{}, srv.runtime.Name())
 	if err2 != nil {
 		t.Fatalf("expected create to fall back cleanly, got error: %v", err2)
 	}
@@ -3402,6 +3402,33 @@ func TestResolveWorktreeProvision_KubernetesNodeLocal_Rejected(t *testing.T) {
 	}
 	if result.ProvisionInput.ProjectID != "" {
 		t.Error("expected empty ProvisionInput when rejected")
+	}
+}
+
+// TestResolveWorktreeProvision_KubernetesAliases_Rejected: every recognized
+// spelling of the Kubernetes runtime skips host-side provisioning.
+func TestResolveWorktreeProvision_KubernetesAliases_Rejected(t *testing.T) {
+	for _, name := range []string{"k8s", "remote"} {
+		t.Run(name, func(t *testing.T) {
+			result := resolveWorktreeProvision(worktreeProvisionInput{
+				WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+				GitClone:      &api.GitCloneConfig{URL: "https://github.com/org/repo.git", Branch: "main"},
+				ProjectPath:   t.TempDir(),
+				ProjectID:     "proj-1",
+				AgentID:       "agent-1",
+				AgentName:     "test-agent",
+				RuntimeName:   name,
+				eligibilityOverride: func() (bool, string) {
+					return true, ""
+				},
+			})
+			if result.ShouldProvision {
+				t.Fatalf("expected ShouldProvision=false for runtime %q", name)
+			}
+			if !strings.Contains(result.Reason, "Kubernetes") {
+				t.Errorf("expected reason to mention Kubernetes, got %q", result.Reason)
+			}
+		})
 	}
 }
 
@@ -3576,7 +3603,7 @@ func TestTryProvisionWorktree_JoinResolvesSharedPath(t *testing.T) {
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 		Config:        &CreateAgentConfig{GitClone: gc, Branch: "agent-a"},
-	}, opts, map[string]string{})
+	}, opts, map[string]string{}, srv.runtime.Name())
 	if err != nil {
 		t.Fatalf("tryProvisionWorktree returned an error: %v", err)
 	}
@@ -3690,7 +3717,7 @@ func TestTryProvisionWorktree_JoinTargetPreExisting_FailsInsteadOfFallback(t *te
 		ProjectID: "p1", ProjectSlug: "proj", ProjectPath: projectPath,
 		WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
 		Config:        &CreateAgentConfig{GitClone: gc, Branch: "agent-a"},
-	}, opts, map[string]string{})
+	}, opts, map[string]string{}, srv.runtime.Name())
 
 	if err == nil {
 		t.Fatalf("expected tryProvisionWorktree to fail when the JOIN target's registration write fails, got ok=%v", ok)

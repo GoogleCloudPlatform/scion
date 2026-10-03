@@ -26,6 +26,19 @@ import (
 // ErrNoCommand is returned when no command is specified for the supervisor to run.
 var ErrNoCommand = errors.New("no command specified")
 
+// ErrPrivilegeDropRequired is returned by Run when Config.RequirePrivilegeDrop
+// is set but Config.UID/GID do not both pass the same UID>0 && GID>0
+// predicate the credential drop itself uses (see Run's Credential-setting
+// block): a "no drop" decision reaching this point in enforced mode must be
+// a hard, fail-closed error rather than a silent run-as-root — the same
+// fail-closed principle commands.requirePrivilegeDropOrFail already applies
+// one layer up, at RunInit's own call site. In practice, the equivalent
+// clamp on requirePrivilegeDropOrFail already makes this unreachable in
+// enforced mode (it refuses to reach Supervisor.Run at all unless UID>0 &&
+// GID>0), so this is belt-and-suspenders against a future caller that
+// constructs a Config directly, bypassing RunInit's own check.
+var ErrPrivilegeDropRequired = errors.New("privilege drop required but UID/GID were not both set; refusing to run the child as root")
+
 // Config holds configuration for the Supervisor.
 type Config struct {
 	// GracePeriod is the time to wait after SIGTERM before sending SIGKILL.
@@ -139,6 +152,8 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 			Gid: uint32(s.config.GID),
 		}
 		log.Debug("Child will run as UID=%d, GID=%d", s.config.UID, s.config.GID)
+	} else if s.config.RequirePrivilegeDrop {
+		return 1, ErrPrivilegeDropRequired
 	}
 
 	// Set the child's user environment when dropping privileges OR in

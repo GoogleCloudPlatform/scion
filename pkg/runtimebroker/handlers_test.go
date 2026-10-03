@@ -81,6 +81,18 @@ type mockManager struct {
 	// control its return value (including the three agentkeys sentinels)
 	// and capture its arguments, without needing a real AgentManager/tmux.
 	sendKeysFunc func(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error
+
+	// preflightErr, when set, is returned by Preflight (e.g.
+	// config.ErrTemplateNotFound, for the async-create admission 404 case).
+	preflightErr      error
+	preflightCalls    int
+	lastPreflightOpts api.StartOptions
+
+	// cleanupLaunchCalls/lastCleanupLaunchHandles record CleanupLaunch
+	// invocations so tests can assert on report-first failure cleanup.
+	cleanupLaunchCalls       int
+	lastCleanupLaunchHandles []agent.ResourceHandle
+	cleanupLaunchErr         error
 }
 
 func (m *mockManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
@@ -88,6 +100,18 @@ func (m *mockManager) Provision(ctx context.Context, opts api.StartOptions) (*ap
 		return nil, m.provisionErr
 	}
 	return &api.ScionConfig{}, nil
+}
+
+func (m *mockManager) Preflight(ctx context.Context, opts api.StartOptions) error {
+	m.preflightCalls++
+	m.lastPreflightOpts = opts
+	return m.preflightErr
+}
+
+func (m *mockManager) CleanupLaunch(ctx context.Context, handles []agent.ResourceHandle) error {
+	m.cleanupLaunchCalls++
+	m.lastCleanupLaunchHandles = handles
+	return m.cleanupLaunchErr
 }
 
 func (m *mockManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
@@ -149,6 +173,21 @@ func (m *mockManager) List(ctx context.Context, filter map[string]string) ([]api
 	m.lastListFilter = filter
 	if m.listErr != nil {
 		return nil, m.listErr
+	}
+	// Honor a scion.name filter so a slug lookup against a multi-agent
+	// fixture resolves to the one matching agent instead of an ambiguous
+	// match. Real docker and k8s runtimes filter on the scion.name label
+	// only; the Name match here stands in for that label on unlabelled
+	// fixtures (such as newTestServer's), where real runtimes would have
+	// filled Name from the label.
+	if name, ok := filter["scion.name"]; ok {
+		var out []api.AgentInfo
+		for _, a := range m.agents {
+			if a.Name == name || a.Labels["scion.name"] == name {
+				out = append(out, a)
+			}
+		}
+		return out, nil
 	}
 	return m.agents, nil
 }
@@ -1532,6 +1571,14 @@ func (m *provisionCapturingManager) Provision(ctx context.Context, opts api.Star
 	m.lastOpts = opts
 	m.lastProvisionCtx = ctx
 	return &api.ScionConfig{Harness: "claude", HarnessConfig: "claude"}, nil
+}
+
+func (m *provisionCapturingManager) Preflight(ctx context.Context, opts api.StartOptions) error {
+	return nil
+}
+
+func (m *provisionCapturingManager) CleanupLaunch(ctx context.Context, handles []agent.ResourceHandle) error {
+	return nil
 }
 
 func (m *provisionCapturingManager) Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
@@ -3400,12 +3447,13 @@ runtimes:
 }
 
 // TestResolveManagerForOpts_NilRuntimeResolverFallsBack proves that a nil
-// srv.runtimeResolver does not panic when settings resolve to a runtime
-// other than the broker's default. New() always sets runtimeResolver to
-// agent.ResolveRuntime, so this only matters for a Server built without
-// New() (e.g. a test literal, or some future construction path) — but
-// resolveManagerForOpts falls back to that exact same function rather than
-// a stand-in, so the fallback resolves identically to production.
+// srv.resolveAuxiliaryRuntime does not panic when settings resolve to a
+// runtime other than the broker's default. New() always sets
+// resolveAuxiliaryRuntime to agent.ResolveRuntime, so this only matters for
+// a Server built without New() (e.g. a test literal, or some future
+// construction path) — but resolveManagerForOpts falls back to that exact
+// same function rather than a stand-in, so the fallback resolves
+// identically to production.
 //
 // Isolated from ambient SCION_* env and HOME: without that isolation, an
 // ambient SCION_AUTO_EXPOSE_PORTS collides with the struct-typed
@@ -3436,7 +3484,7 @@ runtimes:
 
 	srv, _ := newTestServerWithProvisionCapture()
 	srv.config.ForceRuntime = ""
-	srv.runtimeResolver = nil
+	srv.resolveAuxiliaryRuntime = nil
 
 	opts := api.StartOptions{
 		Name:        "test-agent",
