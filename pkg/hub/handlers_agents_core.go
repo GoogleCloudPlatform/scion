@@ -325,6 +325,9 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	if !checkAgentReadScope(w, r) {
 		return
 	}
+	// The listing performs no authorization-state writes, so one input memo
+	// serves every authorization decision this request makes.
+	r = r.WithContext(withAuthzInputMemo(r.Context()))
 
 	ctx := r.Context()
 	query := r.URL.Query()
@@ -1305,6 +1308,11 @@ func (s *Server) createAgentInProject(
 		return
 	}
 
+	// Collect warnings the dispatcher raises (hub-side TZ drops and the
+	// broker's hub-only env warnings) so they reach this response, including
+	// when an existing agent is started, resumed or recovered below.
+	ctx, dispatchWarns := withDispatchWarnings(ctx)
+
 	switch s.handleExistingAgent(ctx, w, existingAgent, project, runtimeBrokerID, req, notifySubscriberType, notifySubscriberID, createdBy) {
 	case existingAgentStarted, existingAgentErrored:
 		return // Response already written.
@@ -2003,7 +2011,7 @@ func (s *Server) createAgentInProject(
 
 					writeJSON(w, http.StatusAccepted, CreateAgentResponse{
 						Agent:     redactedAgentCopy(ctx, s, agent),
-						Warnings:  warnings,
+						Warnings:  append(warnings, dispatchWarns.Warnings()...),
 						EnvGather: hubEnvGather,
 					})
 					return
@@ -2089,7 +2097,7 @@ func (s *Server) createAgentInProject(
 
 	writeJSON(w, http.StatusCreated, CreateAgentResponse{
 		Agent:    redactedAgentCopy(ctx, s, agent),
-		Warnings: warnings,
+		Warnings: append(warnings, dispatchWarns.Warnings()...),
 	})
 }
 
@@ -2198,6 +2206,9 @@ func isTerminalAgentPhase(phase string) bool {
 // buildEnvGatherResponse converts a broker's env requirements into the Hub-level
 // response format, enriching it with scope information from the dispatcher.
 func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent, brokerReqs *RemoteEnvRequirementsResponse) *EnvGatherResponse {
+	// TZ is never gathered: never forward it to the CLI as a need, even if
+	// an older broker reported one the dispatcher did not already remove.
+	takeTZGatherNeed(brokerReqs)
 	resp := &EnvGatherResponse{
 		AgentID:   agent.ID,
 		Required:  brokerReqs.Required,
@@ -2208,6 +2219,11 @@ func (s *Server) buildEnvGatherResponse(ctx context.Context, agent *store.Agent,
 	// Build hubHas with scope info
 	// Try to determine the scope for each key the Hub provided
 	for _, key := range brokerReqs.HubHas {
+		if key == agentTZEnvKey {
+			// TZ is labelled with the rung of the agent TZ chain.
+			resp.HubHas = append(resp.HubHas, EnvSource{Key: key, Scope: s.agentTZ(ctx, agent).Source})
+			continue
+		}
 		source := EnvSource{Key: key, Scope: "hub"}
 
 		// Check if we can determine a more specific scope
@@ -2378,6 +2394,7 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		return
 	}
 
+	ctx, dispatchWarns := withDispatchWarnings(ctx)
 	if err := dispatcher.DispatchFinalizeEnv(ctx, agent, req.Env); err != nil {
 		var stillMissing *ErrEnvStillMissing
 		if errors.As(err, &stillMissing) {
@@ -2402,7 +2419,8 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 	s.enrichAgent(ctx, agent, project, nil)
 
 	writeJSON(w, http.StatusOK, CreateAgentResponse{
-		Agent: redactedAgentCopy(ctx, s, agent),
+		Agent:    redactedAgentCopy(ctx, s, agent),
+		Warnings: dispatchWarns.Warnings(),
 	})
 }
 
@@ -2503,6 +2521,8 @@ func (s *Server) enrichAgents(ctx context.Context, agents []store.Agent) {
 	for i := range agents {
 		// The client-facing `launch` view (design §3.2), computed fresh per response.
 		agents[i].Launch = store.ComputeAgentLaunch(&agents[i], now)
+		// The client-facing `deletion` view (design ptone/scion#2483 §2.2).
+		agents[i].Deletion = store.ComputeAgentDeletion(&agents[i], now)
 		// Populate harness config from applied config
 		if agents[i].HarnessConfig == "" && agents[i].AppliedConfig != nil && agents[i].AppliedConfig.HarnessConfig != "" {
 			agents[i].HarnessConfig = agents[i].AppliedConfig.HarnessConfig
@@ -2539,7 +2559,10 @@ func (s *Server) enrichAgent(ctx context.Context, agent *store.Agent, project *s
 	// The client-facing `launch` view (design §3.2), computed fresh at
 	// response time so remainingSeconds reflects "now", not whenever the row
 	// was last written.
-	agent.Launch = store.ComputeAgentLaunch(agent, time.Now())
+	now := time.Now()
+	agent.Launch = store.ComputeAgentLaunch(agent, now)
+	// The client-facing `deletion` view (design ptone/scion#2483 §2.2).
+	agent.Deletion = store.ComputeAgentDeletion(agent, now)
 
 	// Populate harness config and auth from applied config
 	if agent.AppliedConfig != nil {
@@ -2777,6 +2800,11 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id string) {
 func (s *Server) writeAgentGetResponse(w http.ResponseWriter, r *http.Request, agent *store.Agent) {
 	ctx := r.Context()
 
+	// Show a TZ that an older hub persisted in the env records as the legacy
+	// pin it becomes, so the configure page never round-trips it as an env
+	// entry. In memory only: the next write persists the adoption.
+	adoptLegacyTZ(agent.AppliedConfig)
+
 	// Enrich agent with project and broker names
 	s.enrichAgent(ctx, agent, nil, nil)
 	resolvedHarness, harnessCaps := s.resolveAgentHarnessCapabilities(ctx, agent)
@@ -2841,6 +2869,10 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		Config       *api.ScionConfig       `json:"config,omitempty"`
 		GCPIdentity  *GCPIdentityAssignment `json:"gcp_identity,omitempty"`
 		StateVersion int64                  `json:"stateVersion"`
+		// ExplicitTimezone pins (an IANA zone name) or unpins ("") the
+		// agent's container timezone. Absent leaves the pin unchanged. It
+		// is accepted in any phase and applies at the next start.
+		ExplicitTimezone *string `json:"explicitTimezone,omitempty"`
 	}
 
 	// The body is read into a buffer, rather than decoded straight off
@@ -2897,6 +2929,26 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		Conflict(w, "Version conflict - resource was modified")
 		return
 	}
+
+	if updates.ExplicitTimezone != nil {
+		if !agent.DeletedAt.IsZero() {
+			Conflict(w, "explicitTimezone cannot be updated for deleted agents")
+			return
+		}
+		// Validate before any write so a bad zone changes nothing.
+		if _, err := applyExplicitTimezoneEdit(&store.AgentAppliedConfig{}, *updates.ExplicitTimezone); err != nil {
+			ValidationError(w, err.Error(), map[string]interface{}{"field": "explicitTimezone"})
+			return
+		}
+	}
+
+	// warnings are returned with the updated agent.
+	var warnings []string
+
+	// Adopt a TZ that an older hub persisted in the env records into
+	// ExplicitTimezone before anything below reads or writes the agent's
+	// TZ, and in particular before config.env's TZ is stripped.
+	adoptLegacyTZ(agent.AppliedConfig)
 
 	// Apply updates
 	if updates.Name != "" {
@@ -2965,10 +3017,18 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		// first assignment into agent.AppliedConfig itself.
 		old := *agent.AppliedConfig
 
-		// SEAM for ptone/scion#2457 task #16 (I2): once that task lands, its
-		// PATCH config.env["TZ"] strip belongs HERE, between the `old`
-		// snapshot above and the recordExplicitEdits call below -- never
-		// after it. See recordExplicitEdits' doc comment for why.
+		// config.env never sets the agent timezone; explicitTimezone does.
+		// The strip runs here, between the `old` snapshot above and the
+		// recordExplicitEdits call below -- never after it. See
+		// recordExplicitEdits' doc comment for why. An empty value is a
+		// marker the configure page may round-trip, so it is dropped
+		// silently.
+		if v, ok := cfg.Env[agentTZEnvKey]; ok {
+			delete(cfg.Env, agentTZEnvKey)
+			if v != "" {
+				warnings = append(warnings, configEnvTZIgnoredWarning)
+			}
+		}
 		if agent.AppliedConfig.CreateInputs != nil {
 			// canViewAgentEnv is the same attach-equivalent-access gate the
 			// GET response's Env redaction uses (ResponseView). A caller who
@@ -3122,6 +3182,32 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		}
 	}
 
+	// Writer (b) of ExplicitTimezone. Unlike config edits it is accepted in
+	// any phase; a running container keeps its TZ until the next start.
+	if updates.ExplicitTimezone != nil {
+		if agent.AppliedConfig == nil {
+			agent.AppliedConfig = &store.AgentAppliedConfig{}
+		}
+		// Warn only when the edit changes the zone the agent resolves to
+		// while a container is live; any other phase picks the zone up at
+		// its next start anyway. A same-zone re-pin that only clears the
+		// legacy label, or an unpin that falls back to the same zone, leaves
+		// the container as it is.
+		live := phaseHasLiveContainer(agent.Phase)
+		var zoneBefore string
+		if live {
+			zoneBefore = s.agentTZ(ctx, agent).TZ
+		}
+		changed, err := applyExplicitTimezoneEdit(agent.AppliedConfig, *updates.ExplicitTimezone)
+		if err != nil {
+			ValidationError(w, err.Error(), map[string]interface{}{"field": "explicitTimezone"})
+			return
+		}
+		if live && changed && s.agentTZ(ctx, agent).TZ != zoneBefore {
+			warnings = append(warnings, explicitTimezoneNextStartWarning)
+		}
+	}
+
 	if updates.Name != "" {
 		// Name and its identity key are written in the same transaction:
 		// the key row is what makes the key's per-project uniqueness a
@@ -3148,7 +3234,24 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		return
 	}
 
-	writeJSON(w, http.StatusOK, redactedAgentCopy(ctx, s, agent))
+	tz := s.agentTZ(ctx, agent)
+	writeJSON(w, http.StatusOK, agentUpdateResponse{
+		Agent:            redactedAgentCopy(ctx, s, agent),
+		ResolvedTimezone: tz.TZ,
+		TimezoneSource:   tz.Source,
+		Warnings:         warnings,
+	})
+}
+
+// agentUpdateResponse is the agent PATCH response: the updated agent plus
+// the container timezone it will get at its next start, the rung of the
+// agent TZ chain that supplies it, and any warnings about the request.
+// resolvedTimezone is "" (source "none") when no TZ will be sent.
+type agentUpdateResponse struct {
+	*store.Agent
+	ResolvedTimezone string   `json:"resolvedTimezone"`
+	TimezoneSource   string   `json:"timezoneSource"`
+	Warnings         []string `json:"warnings,omitempty"`
 }
 
 // checkBrokerAvailability verifies the agent's runtime broker is reachable.

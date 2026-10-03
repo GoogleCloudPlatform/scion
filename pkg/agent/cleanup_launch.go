@@ -19,27 +19,23 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // ResourceHandle identifies one runtime resource created during a launch
 // (design t1-async-create-v11.md §3.8.4), reported by the runtime via
-// opts.OnResourceCreated (wired in P1b-2) after each true create. Namespace
-// and UID are empty for runtimes that have neither concept (e.g. a Docker
-// container has an ID but no namespace).
-type ResourceHandle struct {
-	Kind      string // e.g. "secret", "secretproviderclass", "pod", "container"
-	Namespace string
-	Name      string
-	UID       string
-}
+// StartOptions.OnResourceCreated after each true create. It is defined in
+// pkg/api so pkg/runtime can produce it without importing pkg/agent.
+type ResourceHandle = api.ResourceHandle
 
 // UIDPreconditionDeleter is an optional capability a runtime.Runtime may
 // implement: delete one named resource only if its current UID still
 // matches the UID recorded when it was created (design §3.8.4), so a delete
 // that overlaps a newer launch's recreate of the same name can never remove
-// the newer launch's resource. P1b-2 adds this to the Kubernetes runtime
-// (for secrets, SecretProviderClasses and pods) and the Docker-family
-// runtimes (by container ID). CleanupLaunch skips (and reports an error for)
+// the newer launch's resource. The Kubernetes runtime implements it for
+// secrets, SecretProviderClasses and pods, and the Docker-family runtimes
+// by container ID. CleanupLaunch skips (and reports an error for)
 // any handle whose runtime does not implement this, rather than deleting it
 // unconditionally by name.
 type UIDPreconditionDeleter interface {

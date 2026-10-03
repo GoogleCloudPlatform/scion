@@ -88,6 +88,11 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 		templateEnv = resolvedTemplate.Config.Env
 	}
 
+	// Adopt a legacy env TZ into ExplicitTimezone before anything reads
+	// old's env: legacyCreateInputsFromAppliedConfig below would otherwise
+	// replay it as a create-time env value instead of a carried-forward pin.
+	adoptLegacyTZ(old)
+
 	createInputs := old.CreateInputs
 	var warnings []string
 	if createInputs == nil {
@@ -112,6 +117,15 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 		WorkspaceStoragePath:   old.WorkspaceStoragePath,
 		Branch:                 old.Branch,
 		GCPIdentity:            old.GCPIdentity,
+
+		// Writer (d) of ExplicitTimezone: the pin, its legacy label and the
+		// unpin record are carried forward. deriveAgentConfig's create-time
+		// capture never overwrites a non-empty pin and moves nothing when
+		// the agent was unpinned, so only an agent with neither re-derives
+		// its timezone from CreateInputs and the current template.
+		ExplicitTimezone:         old.ExplicitTimezone,
+		ExplicitTimezoneLegacy:   old.ExplicitTimezoneLegacy,
+		ExplicitTimezoneUnpinned: old.ExplicitTimezoneUnpinned,
 
 		// Explicit-only: empty here (rather than copied from `old`) is what
 		// lets deriveAgentConfig's pipeline fill these fresh from the CURRENT
@@ -249,6 +263,9 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 	// and for an already-qualified name.
 	fresh.Image = config.RewriteImageRegistry(fresh.Image, imageRegistry)
 
+	// deriveAgentConfig's timezone capture already stripped TZ from the
+	// fresh env copies; strip again so no step after it can leave one.
+	stripAgentEnvTZ(fresh)
 	return fresh, warnings, nil
 }
 

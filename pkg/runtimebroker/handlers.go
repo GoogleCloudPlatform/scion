@@ -96,16 +96,21 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		checks["runtime"] = "unavailable"
 	}
 
-	// NFS mount health
-	if s.nfsMountReconciler != nil {
-		checks["nfs_mounts"] = s.nfsMountReconciler.HealthCheckString()
-	}
-
 	status := "healthy"
 	for _, v := range checks {
 		if v != "available" && v != "healthy" {
 			status = "degraded"
 			break
+		}
+	}
+
+	// NFS mount health is always reported per share. It degrades the
+	// overall status only when the broker owns the mounts and a dispatch
+	// would be refused: see nfsHealthDegradesStatus.
+	if s.nfsMountReconciler != nil {
+		checks["nfs_mounts"] = s.nfsMountReconciler.HealthCheckString()
+		if s.nfsHealthDegradesStatus() {
+			status = degradeHealthStatus(status)
 		}
 	}
 
@@ -115,6 +120,57 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		Uptime:  time.Since(s.startTime).Round(time.Second).String(),
 		Checks:  checks,
 	}
+}
+
+// degradeHealthStatus lowers a healthy status to degraded. Any other
+// status (already degraded, or worse) is returned unchanged, so a
+// degrading check never raises a worse status back to degraded.
+func degradeHealthStatus(status string) string {
+	if status == "healthy" {
+		return "degraded"
+	}
+	return status
+}
+
+// nfsHealthDegradesStatus reports whether an unhealthy NFS share should
+// mark the broker degraded. It does only when the broker mounts the shares
+// itself (auto_mount on, and the default runtime is not Kubernetes or Cloud
+// Run, where the platform mounts the export and dispatch is not gated), the
+// first reconcile pass has finished (a pending check is not a failure), and
+// a share is unhealthy. Otherwise the broker only verifies mounts it does
+// not manage, so a missing mount is reported in nfs_mounts without changing
+// the overall status.
+func (s *Server) nfsHealthDegradesStatus() bool {
+	r := s.nfsMountReconciler
+	if r == nil || !r.MountsShares() || r.IsHealthy() {
+		return false
+	}
+	if s.nfsStartupReconcileDone != nil {
+		select {
+		case <-s.nfsStartupReconcileDone:
+		default:
+			return false // first pass still pending
+		}
+	}
+	return true
+}
+
+// NFSWarnOnlyRuntime reports whether name is a runtime type on which the
+// platform, not the broker, mounts the NFS export into the agent: the
+// Kubernetes family (the kubelet mounts the volume) and the Cloud Run
+// family. For these the broker never mounts a share and never refuses a
+// dispatch over NFS state; it logs a warning instead. When it is the
+// broker's default runtime the broker only verifies its shares, and
+// scion doctor reports an unmounted share as a warning.
+func NFSWarnOnlyRuntime(name string) bool {
+	if isKubernetesRuntimeName(name) {
+		return true
+	}
+	switch name {
+	case "cloudrun", "cloudrun-instances", "cloudrun-sandbox":
+		return true
+	}
+	return false
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -929,8 +985,14 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// N1-7: Ensure NFS shares are mounted before dispatch (no-op when backend=local).
-	if err := s.ensureNFSMountsReady(); err != nil {
+	// N1-7: with nfs.auto_mount, ensure NFS shares are mounted before an
+	// NFS-backed dispatch. No-op without NFS config, with auto_mount off, or
+	// for a project that does not use the nfs workspace backend.
+	nfsProfile := ""
+	if req.Config != nil {
+		nfsProfile = req.Config.Profile
+	}
+	if err := s.checkNFSForDispatch(r.Context(), req.Name, req.ProjectPath, req.ProjectSlug, nfsProfile); err != nil {
 		markAttemptFailed(http.StatusServiceUnavailable, "NFS mount check failed: "+err.Error())
 		span.SetStatus(codes.Error, "NFS workspace storage is not available: "+err.Error())
 		writeError(w, http.StatusServiceUnavailable, "nfs_unavailable",
@@ -1734,8 +1796,11 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		if errors.Is(err, errDeleteTargetNotFound) {
-			// No side effects: the hub's broker clients treat a 404 on
-			// delete as an idempotent success.
+			// No container and no files, but per-agent runtime objects
+			// may remain when the container was removed outside scion.
+			// Beyond that, no side effects: the hub's broker clients
+			// treat a 404 on delete as an idempotent success.
+			s.cleanupLeftoverAgentResources(ctx, id, projectID)
 			s.agentLifecycleLog.Info("Agent delete: no matching agent in project",
 				"agent_id", id, "project_id", projectID)
 			NotFound(w, "Agent")
@@ -1815,6 +1880,12 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 		span.SetStatus(codes.Error, err.Error())
 		RuntimeError(w, "Failed to delete agent: "+err.Error())
 		return
+	}
+	if target.containerID == "" {
+		// The container was already gone, so DeleteTarget made no runtime
+		// call and the runtime never removed the objects it created with
+		// the container.
+		s.cleanupLeftoverAgentResources(ctx, target.name, projectID)
 	}
 
 	// On the NFS workspace, the agent's worktree (worktree-per-agent) or
@@ -4706,6 +4777,36 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, project
 	}, nil
 }
 
+// agentResourceCleaner is implemented by managers whose runtime can remove
+// per-agent objects left behind after the agent's container is gone (see
+// runtime.AgentResourceCleaner and agent.AgentManager.CleanupAgentResources).
+type agentResourceCleaner interface {
+	CleanupAgentResources(ctx context.Context, agentName, projectID string) error
+}
+
+// cleanupLeftoverAgentResources removes the per-agent runtime objects of an
+// agent whose container no longer exists, across the default and every
+// auxiliary runtime, since the container may have run on any of them. It is
+// scoped to projectID and does nothing without one. It is best effort: a
+// failure is logged and does not fail the delete, matching the cleanup that
+// runtime Delete does when the container still exists.
+func (s *Server) cleanupLeftoverAgentResources(ctx context.Context, agentName, projectID string) {
+	if projectID == "" {
+		return
+	}
+	slug := api.Slugify(agentName)
+	for _, mgr := range s.allManagers() {
+		c, ok := mgr.(agentResourceCleaner)
+		if !ok {
+			continue
+		}
+		if err := c.CleanupAgentResources(ctx, slug, projectID); err != nil {
+			s.agentLifecycleLog.Warn("Agent delete: failed to remove leftover runtime objects",
+				"agent_id", agentName, "project_id", projectID, "error", err)
+		}
+	}
+}
+
 // findAgentProjectDir returns the .scion dir of the project that owns the
 // agent's files, or "" if none. It checks the hub-managed project directories
 // first. When projectID is set it then checks linked (non hub-managed)
@@ -4948,28 +5049,85 @@ func isLocalhostEndpoint(endpoint string) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
-// ensureNFSMountsReady verifies that all configured NFS shares are mounted
-// before dispatching an agent. This is a pre-flight check (N1-7):
-// the reconciler may have mounted them at startup, but a transient
-// unmount (network blip, manual intervention) should block dispatches.
-// Returns an error if any configured share cannot be mounted — the caller
-// should reject the dispatch to avoid silent fallback to a broken mount.
-func (s *Server) ensureNFSMountsReady() error {
-	if s.nfsMountReconciler == nil {
-		return nil // NFS not configured — local backend, nothing to check.
+// checkNFSForDispatch is the NFS pre-flight for an agent create. It
+// applies only when NFS is configured with nfs.auto_mount on (otherwise
+// mounts are managed externally and the broker never gates on them) and the
+// project's effective settings select the nfs workspace backend (projects
+// on any other backend are never affected by NFS state).
+//
+// It is decided by the dispatch's resolved runtime, which is checked before
+// anything is mounted:
+//   - Kubernetes or Cloud Run (NFSWarnOnlyRuntime): the platform
+//     mounts the export into the agent. The broker reads the share's last
+//     recorded status, logs a warning if it is unhealthy, and continues; it
+//     never mounts and never refuses the dispatch.
+//   - Any other (local-container) runtime: the share is checked and, when
+//     the broker mounts shares, mounted. If it is not mounted the dispatch
+//     is refused, since the workspace would otherwise silently land on
+//     local disk under the mount point.
+func (s *Server) checkNFSForDispatch(ctx context.Context, name, projectPath, projectSlug, profile string) error {
+	r := s.nfsMountReconciler
+	if r == nil || !r.AutoMount() {
+		return nil
 	}
-
 	nfsCfg := s.config.NFSConfig
 	if nfsCfg == nil || len(nfsCfg.Shares) == 0 {
 		return nil
 	}
+	projectDir := resolveDispatchProjectDir(projectPath, projectSlug)
+	if !dispatchUsesNFSWorkspace(projectDir) {
+		return nil
+	}
+	// The nfs workspace backend places workspaces on the first share only
+	// (runtime.NFSWorkspaceBackend), so that is the share a dispatch needs.
+	shareID := nfsCfg.Shares[0].ID
 
-	for _, share := range nfsCfg.Shares {
-		if err := s.nfsMountReconciler.EnsureShareMounted(share.ID); err != nil {
-			return err
+	_, runtimeType := s.resolveManagerForOpts(api.StartOptions{
+		Name:        name,
+		ProjectPath: projectDir,
+		Profile:     profile,
+	})
+	if NFSWarnOnlyRuntime(runtimeType) {
+		if st, ok := r.ShareStatus(shareID); !ok || !st.Healthy {
+			detail := "not checked yet"
+			if ok {
+				detail = st.Message
+			}
+			s.agentLifecycleLog.Warn("NFS share not mounted on the broker; continuing dispatch, the runtime mounts the export into the agent",
+				"agent", name, "runtime", runtimeType, "share", shareID, "detail", detail)
+		}
+		return nil
+	}
+	// ctx (the request context) bounds the wait and any mount command.
+	return r.EnsureShareMounted(ctx, shareID)
+}
+
+// resolveDispatchProjectDir mirrors buildStartContext's hub-managed project
+// path resolution (a slug with no path resolves under the global projects
+// directory) followed by config.GetResolvedProjectDir, the directory the
+// agent manager loads effective settings from.
+func resolveDispatchProjectDir(projectPath, projectSlug string) string {
+	if projectPath == "" && projectSlug != "" {
+		if globalDir, err := config.GetGlobalDir(); err == nil {
+			projectPath = filepath.Join(globalDir, "projects", projectSlug)
 		}
 	}
-	return nil
+	projectDir, _ := config.GetResolvedProjectDir(projectPath)
+	return projectDir
+}
+
+// dispatchUsesNFSWorkspace reports whether the effective settings for
+// projectDir select the nfs workspace backend, the same condition the agent
+// manager uses (pkg/agent run.go). If the settings cannot be loaded it
+// returns true: the caller only asks when the broker itself is configured
+// for NFS, so that is the likely backend.
+func dispatchUsesNFSWorkspace(projectDir string) bool {
+	vs, _, err := config.LoadEffectiveSettings(projectDir)
+	if err != nil || vs == nil {
+		return true
+	}
+	return vs.Server != nil && vs.Server.WorkspaceStorage != nil &&
+		vs.Server.WorkspaceStorage.Backend == "nfs"
 }
 
 // preResolvedHubEndpoint picks the Hub base URL used to absolutize the

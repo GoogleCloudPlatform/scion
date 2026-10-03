@@ -140,7 +140,15 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 					return &a, nil
 				}
 			}
-			// If it exists but not running (or we have a new task), we delete it so we can recreate it
+			// If it exists but not running (or we have a new task), we delete it so we can recreate it.
+			// The delete is by name/ID found by name, so an async launch
+			// checkpoints first: a launch the hub has already ended must
+			// not remove a newer launch's agent.
+			if opts.Checkpoint != nil {
+				if err := opts.Checkpoint(ctx, runtime.CheckpointStepPreClean); err != nil {
+					return nil, err
+				}
+			}
 			if err := m.Runtime.Delete(ctx, a.ContainerID); err != nil {
 				return nil, fmt.Errorf("failed to cleanup existing container: %w", err)
 			}
@@ -1056,7 +1064,8 @@ authDone:
 
 	agentEnv, envWarnings, missingEnvKeys, droppedConfigEnv := buildAgentEnv(finalScionCfg, opts.Env, opts.BrokerMode)
 	droppedBrokerEnvVars = append(droppedBrokerEnvVars, droppedConfigEnv...)
-	warnings = append(warnings, warnDroppedBrokerEnv(agentID, opts.Env, droppedBrokerEnvVars)...)
+	hubOnlyEnvWarnings := warnDroppedBrokerEnv(agentID, opts.Env, droppedBrokerEnvVars)
+	warnings = append(warnings, hubOnlyEnvWarnings...)
 	if len(missingEnvKeys) > 0 {
 		sort.Strings(missingEnvKeys)
 		if opts.BrokerMode {
@@ -1371,6 +1380,31 @@ authDone:
 		}
 	}
 
+	// Kubernetes shared-dir PVC defaults from settings: the profile's value,
+	// else its runtime entry's (applied below under the template/agent
+	// kubernetes block). The profile is the one named for this start, else
+	// the one the agent was created with. When shared-dir PVCs will be
+	// needed, check the effective size here so a bad value fails with the
+	// place it is set rather than a bare parse error from the runtime.
+	var sdClass, sdSize string
+	if settings != nil && m.Runtime.Name() == "kubernetes" {
+		sdProfile := opts.Profile
+		if sdProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
+			sdProfile = finalScionCfg.Info.Profile
+		}
+		var sdSizeKey string
+		sdClass, sdSize, sdSizeKey = settings.ResolveSharedDirDefaultsWithSource(sdProfile)
+		if len(effectiveSharedDirs) > 0 {
+			size, source := sdSize, "settings "+sdSizeKey
+			if finalScionCfg != nil && finalScionCfg.Kubernetes != nil && finalScionCfg.Kubernetes.SharedDirSize != "" {
+				size, source = finalScionCfg.Kubernetes.SharedDirSize, "kubernetes.shared_dir_size in the agent or template config"
+			}
+			if err := config.ValidateSharedDirSize(size); err != nil {
+				return nil, fmt.Errorf("%s: %w", source, err)
+			}
+		}
+	}
+
 	runCfg := runtime.RunConfig{
 		Name:                 containerName(projectName, opts.Name),
 		Template:             template,
@@ -1486,15 +1520,28 @@ authDone:
 			// to empty — e.g. after an operator removes a settings or
 			// template pull-policy pin — exactly the staleness this
 			// package's Image handling was written to avoid.
-			if finalScionCfg == nil || finalScionCfg.Kubernetes == nil {
-				if resolvedPullPolicy == "" {
-					return nil
-				}
-				return &api.KubernetesConfig{ImagePullPolicy: resolvedPullPolicy}
+			//
+			// Shared-dir PVC defaults from settings (profile, then the
+			// profile's runtime entry) are filled in only where the
+			// template/agent kubernetes block leaves them empty, and only
+			// on the Kubernetes runtime. They are resolved here at start
+			// time rather than persisted by ProvisionAgent, so a settings
+			// change applies on the next start, matching ImagePullPolicy.
+			var k8sCfg *api.KubernetesConfig
+			if finalScionCfg != nil && finalScionCfg.Kubernetes != nil {
+				cpy := *finalScionCfg.Kubernetes
+				k8sCfg = &cpy
 			}
-			k8sCfg := *finalScionCfg.Kubernetes
-			k8sCfg.ImagePullPolicy = resolvedPullPolicy
-			return &k8sCfg
+			if resolvedPullPolicy != "" || k8sCfg != nil {
+				if k8sCfg == nil {
+					k8sCfg = &api.KubernetesConfig{}
+				}
+				k8sCfg.ImagePullPolicy = resolvedPullPolicy
+			}
+			if sdClass != "" || sdSize != "" {
+				k8sCfg = config.ApplySharedDirDefaults(k8sCfg, sdClass, sdSize)
+			}
+			return k8sCfg
 		}(),
 		GitClone:         opts.GitClone,
 		SharedDirs:       effectiveSharedDirs,
@@ -1540,6 +1587,10 @@ authDone:
 			return l
 		}(),
 		Annotations: projectkeys.ProjectPathLabels(projectDir),
+		// Async-launch hooks (design t1-async-create-v11.md §3.8.3,
+		// §3.8.4); nil on the synchronous path.
+		Checkpoint:        opts.Checkpoint,
+		OnResourceCreated: opts.OnResourceCreated,
 	}
 	slog.Info("agent start: pre-runtime provisioning complete", "agent", opts.Name,
 		"elapsed_ms", time.Since(startEntry).Milliseconds())
@@ -1582,6 +1633,7 @@ authDone:
 				}
 				a.Detached = detached
 				a.Warnings = warnings
+				a.HubOnlyEnvWarnings = hubOnlyEnvWarnings
 				a.Phase = status
 				a.HarnessConfig = harnessConfigName
 				a.HarnessConfigRevision = harnessConfigRevision
@@ -1600,6 +1652,7 @@ authDone:
 		Phase:                 status,
 		Detached:              detached,
 		Warnings:              warnings,
+		HubOnlyEnvWarnings:    hubOnlyEnvWarnings,
 		HarnessConfig:         harnessConfigName,
 		HarnessConfigRevision: harnessConfigRevision,
 		HarnessAuth:           opts.HarnessAuth,

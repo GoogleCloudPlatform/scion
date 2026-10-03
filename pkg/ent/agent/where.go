@@ -296,6 +296,51 @@ func LaunchError(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldLaunchError, v))
 }
 
+// DeletionState applies equality check predicate on the "deletion_state" field. It's identical to DeletionStateEQ.
+func DeletionState(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldDeletionState, v))
+}
+
+// DeletionClaim applies equality check predicate on the "deletion_claim" field. It's identical to DeletionClaimEQ.
+func DeletionClaim(v int64) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldDeletionClaim, v))
+}
+
+// DeletionLeaseAt applies equality check predicate on the "deletion_lease_at" field. It's identical to DeletionLeaseAtEQ.
+func DeletionLeaseAt(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldDeletionLeaseAt, v))
+}
+
+// DeletionStartedAt applies equality check predicate on the "deletion_started_at" field. It's identical to DeletionStartedAtEQ.
+func DeletionStartedAt(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldDeletionStartedAt, v))
+}
+
+// DeletionFailedAt applies equality check predicate on the "deletion_failed_at" field. It's identical to DeletionFailedAtEQ.
+func DeletionFailedAt(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldDeletionFailedAt, v))
+}
+
+// DeletionCode applies equality check predicate on the "deletion_code" field. It's identical to DeletionCodeEQ.
+func DeletionCode(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldDeletionCode, v))
+}
+
+// DeletionError applies equality check predicate on the "deletion_error" field. It's identical to DeletionErrorEQ.
+func DeletionError(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldDeletionError, v))
+}
+
+// DeletionPrior applies equality check predicate on the "deletion_prior" field. It's identical to DeletionPriorEQ.
+func DeletionPrior(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldDeletionPrior, v))
+}
+
+// DeletionRequest applies equality check predicate on the "deletion_request" field. It's identical to DeletionRequestEQ.
+func DeletionRequest(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldDeletionRequest, v))
+}
+
 // SlugEQ applies the EQ predicate on the "slug" field.
 func SlugEQ(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldSlug, v))
@@ -3144,6 +3189,571 @@ func LaunchErrorEqualFold(v string) predicate.Agent {
 // LaunchErrorContainsFold applies the ContainsFold predicate on the "launch_error" field.
 func LaunchErrorContainsFold(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldContainsFold(FieldLaunchError, v))
+}
+
+// DeletionStateEQ applies the EQ predicate on the "deletion_state" field.
+func DeletionStateEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldDeletionState, v))
+}
+
+// DeletionStateNEQ applies the NEQ predicate on the "deletion_state" field.
+func DeletionStateNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldDeletionState, v))
+}
+
+// DeletionStateIn applies the In predicate on the "deletion_state" field.
+func DeletionStateIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldDeletionState, vs...))
+}
+
+// DeletionStateNotIn applies the NotIn predicate on the "deletion_state" field.
+func DeletionStateNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldDeletionState, vs...))
+}
+
+// DeletionStateGT applies the GT predicate on the "deletion_state" field.
+func DeletionStateGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldDeletionState, v))
+}
+
+// DeletionStateGTE applies the GTE predicate on the "deletion_state" field.
+func DeletionStateGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldDeletionState, v))
+}
+
+// DeletionStateLT applies the LT predicate on the "deletion_state" field.
+func DeletionStateLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldDeletionState, v))
+}
+
+// DeletionStateLTE applies the LTE predicate on the "deletion_state" field.
+func DeletionStateLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldDeletionState, v))
+}
+
+// DeletionStateContains applies the Contains predicate on the "deletion_state" field.
+func DeletionStateContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldDeletionState, v))
+}
+
+// DeletionStateHasPrefix applies the HasPrefix predicate on the "deletion_state" field.
+func DeletionStateHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldDeletionState, v))
+}
+
+// DeletionStateHasSuffix applies the HasSuffix predicate on the "deletion_state" field.
+func DeletionStateHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldDeletionState, v))
+}
+
+// DeletionStateIsNil applies the IsNil predicate on the "deletion_state" field.
+func DeletionStateIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldDeletionState))
+}
+
+// DeletionStateNotNil applies the NotNil predicate on the "deletion_state" field.
+func DeletionStateNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldDeletionState))
+}
+
+// DeletionStateEqualFold applies the EqualFold predicate on the "deletion_state" field.
+func DeletionStateEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldDeletionState, v))
+}
+
+// DeletionStateContainsFold applies the ContainsFold predicate on the "deletion_state" field.
+func DeletionStateContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldDeletionState, v))
+}
+
+// DeletionClaimEQ applies the EQ predicate on the "deletion_claim" field.
+func DeletionClaimEQ(v int64) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldDeletionClaim, v))
+}
+
+// DeletionClaimNEQ applies the NEQ predicate on the "deletion_claim" field.
+func DeletionClaimNEQ(v int64) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldDeletionClaim, v))
+}
+
+// DeletionClaimIn applies the In predicate on the "deletion_claim" field.
+func DeletionClaimIn(vs ...int64) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldDeletionClaim, vs...))
+}
+
+// DeletionClaimNotIn applies the NotIn predicate on the "deletion_claim" field.
+func DeletionClaimNotIn(vs ...int64) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldDeletionClaim, vs...))
+}
+
+// DeletionClaimGT applies the GT predicate on the "deletion_claim" field.
+func DeletionClaimGT(v int64) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldDeletionClaim, v))
+}
+
+// DeletionClaimGTE applies the GTE predicate on the "deletion_claim" field.
+func DeletionClaimGTE(v int64) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldDeletionClaim, v))
+}
+
+// DeletionClaimLT applies the LT predicate on the "deletion_claim" field.
+func DeletionClaimLT(v int64) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldDeletionClaim, v))
+}
+
+// DeletionClaimLTE applies the LTE predicate on the "deletion_claim" field.
+func DeletionClaimLTE(v int64) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldDeletionClaim, v))
+}
+
+// DeletionLeaseAtEQ applies the EQ predicate on the "deletion_lease_at" field.
+func DeletionLeaseAtEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldDeletionLeaseAt, v))
+}
+
+// DeletionLeaseAtNEQ applies the NEQ predicate on the "deletion_lease_at" field.
+func DeletionLeaseAtNEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldDeletionLeaseAt, v))
+}
+
+// DeletionLeaseAtIn applies the In predicate on the "deletion_lease_at" field.
+func DeletionLeaseAtIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldDeletionLeaseAt, vs...))
+}
+
+// DeletionLeaseAtNotIn applies the NotIn predicate on the "deletion_lease_at" field.
+func DeletionLeaseAtNotIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldDeletionLeaseAt, vs...))
+}
+
+// DeletionLeaseAtGT applies the GT predicate on the "deletion_lease_at" field.
+func DeletionLeaseAtGT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldDeletionLeaseAt, v))
+}
+
+// DeletionLeaseAtGTE applies the GTE predicate on the "deletion_lease_at" field.
+func DeletionLeaseAtGTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldDeletionLeaseAt, v))
+}
+
+// DeletionLeaseAtLT applies the LT predicate on the "deletion_lease_at" field.
+func DeletionLeaseAtLT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldDeletionLeaseAt, v))
+}
+
+// DeletionLeaseAtLTE applies the LTE predicate on the "deletion_lease_at" field.
+func DeletionLeaseAtLTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldDeletionLeaseAt, v))
+}
+
+// DeletionLeaseAtIsNil applies the IsNil predicate on the "deletion_lease_at" field.
+func DeletionLeaseAtIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldDeletionLeaseAt))
+}
+
+// DeletionLeaseAtNotNil applies the NotNil predicate on the "deletion_lease_at" field.
+func DeletionLeaseAtNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldDeletionLeaseAt))
+}
+
+// DeletionStartedAtEQ applies the EQ predicate on the "deletion_started_at" field.
+func DeletionStartedAtEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldDeletionStartedAt, v))
+}
+
+// DeletionStartedAtNEQ applies the NEQ predicate on the "deletion_started_at" field.
+func DeletionStartedAtNEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldDeletionStartedAt, v))
+}
+
+// DeletionStartedAtIn applies the In predicate on the "deletion_started_at" field.
+func DeletionStartedAtIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldDeletionStartedAt, vs...))
+}
+
+// DeletionStartedAtNotIn applies the NotIn predicate on the "deletion_started_at" field.
+func DeletionStartedAtNotIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldDeletionStartedAt, vs...))
+}
+
+// DeletionStartedAtGT applies the GT predicate on the "deletion_started_at" field.
+func DeletionStartedAtGT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldDeletionStartedAt, v))
+}
+
+// DeletionStartedAtGTE applies the GTE predicate on the "deletion_started_at" field.
+func DeletionStartedAtGTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldDeletionStartedAt, v))
+}
+
+// DeletionStartedAtLT applies the LT predicate on the "deletion_started_at" field.
+func DeletionStartedAtLT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldDeletionStartedAt, v))
+}
+
+// DeletionStartedAtLTE applies the LTE predicate on the "deletion_started_at" field.
+func DeletionStartedAtLTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldDeletionStartedAt, v))
+}
+
+// DeletionStartedAtIsNil applies the IsNil predicate on the "deletion_started_at" field.
+func DeletionStartedAtIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldDeletionStartedAt))
+}
+
+// DeletionStartedAtNotNil applies the NotNil predicate on the "deletion_started_at" field.
+func DeletionStartedAtNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldDeletionStartedAt))
+}
+
+// DeletionFailedAtEQ applies the EQ predicate on the "deletion_failed_at" field.
+func DeletionFailedAtEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldDeletionFailedAt, v))
+}
+
+// DeletionFailedAtNEQ applies the NEQ predicate on the "deletion_failed_at" field.
+func DeletionFailedAtNEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldDeletionFailedAt, v))
+}
+
+// DeletionFailedAtIn applies the In predicate on the "deletion_failed_at" field.
+func DeletionFailedAtIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldDeletionFailedAt, vs...))
+}
+
+// DeletionFailedAtNotIn applies the NotIn predicate on the "deletion_failed_at" field.
+func DeletionFailedAtNotIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldDeletionFailedAt, vs...))
+}
+
+// DeletionFailedAtGT applies the GT predicate on the "deletion_failed_at" field.
+func DeletionFailedAtGT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldDeletionFailedAt, v))
+}
+
+// DeletionFailedAtGTE applies the GTE predicate on the "deletion_failed_at" field.
+func DeletionFailedAtGTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldDeletionFailedAt, v))
+}
+
+// DeletionFailedAtLT applies the LT predicate on the "deletion_failed_at" field.
+func DeletionFailedAtLT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldDeletionFailedAt, v))
+}
+
+// DeletionFailedAtLTE applies the LTE predicate on the "deletion_failed_at" field.
+func DeletionFailedAtLTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldDeletionFailedAt, v))
+}
+
+// DeletionFailedAtIsNil applies the IsNil predicate on the "deletion_failed_at" field.
+func DeletionFailedAtIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldDeletionFailedAt))
+}
+
+// DeletionFailedAtNotNil applies the NotNil predicate on the "deletion_failed_at" field.
+func DeletionFailedAtNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldDeletionFailedAt))
+}
+
+// DeletionCodeEQ applies the EQ predicate on the "deletion_code" field.
+func DeletionCodeEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldDeletionCode, v))
+}
+
+// DeletionCodeNEQ applies the NEQ predicate on the "deletion_code" field.
+func DeletionCodeNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldDeletionCode, v))
+}
+
+// DeletionCodeIn applies the In predicate on the "deletion_code" field.
+func DeletionCodeIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldDeletionCode, vs...))
+}
+
+// DeletionCodeNotIn applies the NotIn predicate on the "deletion_code" field.
+func DeletionCodeNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldDeletionCode, vs...))
+}
+
+// DeletionCodeGT applies the GT predicate on the "deletion_code" field.
+func DeletionCodeGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldDeletionCode, v))
+}
+
+// DeletionCodeGTE applies the GTE predicate on the "deletion_code" field.
+func DeletionCodeGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldDeletionCode, v))
+}
+
+// DeletionCodeLT applies the LT predicate on the "deletion_code" field.
+func DeletionCodeLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldDeletionCode, v))
+}
+
+// DeletionCodeLTE applies the LTE predicate on the "deletion_code" field.
+func DeletionCodeLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldDeletionCode, v))
+}
+
+// DeletionCodeContains applies the Contains predicate on the "deletion_code" field.
+func DeletionCodeContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldDeletionCode, v))
+}
+
+// DeletionCodeHasPrefix applies the HasPrefix predicate on the "deletion_code" field.
+func DeletionCodeHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldDeletionCode, v))
+}
+
+// DeletionCodeHasSuffix applies the HasSuffix predicate on the "deletion_code" field.
+func DeletionCodeHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldDeletionCode, v))
+}
+
+// DeletionCodeIsNil applies the IsNil predicate on the "deletion_code" field.
+func DeletionCodeIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldDeletionCode))
+}
+
+// DeletionCodeNotNil applies the NotNil predicate on the "deletion_code" field.
+func DeletionCodeNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldDeletionCode))
+}
+
+// DeletionCodeEqualFold applies the EqualFold predicate on the "deletion_code" field.
+func DeletionCodeEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldDeletionCode, v))
+}
+
+// DeletionCodeContainsFold applies the ContainsFold predicate on the "deletion_code" field.
+func DeletionCodeContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldDeletionCode, v))
+}
+
+// DeletionErrorEQ applies the EQ predicate on the "deletion_error" field.
+func DeletionErrorEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldDeletionError, v))
+}
+
+// DeletionErrorNEQ applies the NEQ predicate on the "deletion_error" field.
+func DeletionErrorNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldDeletionError, v))
+}
+
+// DeletionErrorIn applies the In predicate on the "deletion_error" field.
+func DeletionErrorIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldDeletionError, vs...))
+}
+
+// DeletionErrorNotIn applies the NotIn predicate on the "deletion_error" field.
+func DeletionErrorNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldDeletionError, vs...))
+}
+
+// DeletionErrorGT applies the GT predicate on the "deletion_error" field.
+func DeletionErrorGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldDeletionError, v))
+}
+
+// DeletionErrorGTE applies the GTE predicate on the "deletion_error" field.
+func DeletionErrorGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldDeletionError, v))
+}
+
+// DeletionErrorLT applies the LT predicate on the "deletion_error" field.
+func DeletionErrorLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldDeletionError, v))
+}
+
+// DeletionErrorLTE applies the LTE predicate on the "deletion_error" field.
+func DeletionErrorLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldDeletionError, v))
+}
+
+// DeletionErrorContains applies the Contains predicate on the "deletion_error" field.
+func DeletionErrorContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldDeletionError, v))
+}
+
+// DeletionErrorHasPrefix applies the HasPrefix predicate on the "deletion_error" field.
+func DeletionErrorHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldDeletionError, v))
+}
+
+// DeletionErrorHasSuffix applies the HasSuffix predicate on the "deletion_error" field.
+func DeletionErrorHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldDeletionError, v))
+}
+
+// DeletionErrorIsNil applies the IsNil predicate on the "deletion_error" field.
+func DeletionErrorIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldDeletionError))
+}
+
+// DeletionErrorNotNil applies the NotNil predicate on the "deletion_error" field.
+func DeletionErrorNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldDeletionError))
+}
+
+// DeletionErrorEqualFold applies the EqualFold predicate on the "deletion_error" field.
+func DeletionErrorEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldDeletionError, v))
+}
+
+// DeletionErrorContainsFold applies the ContainsFold predicate on the "deletion_error" field.
+func DeletionErrorContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldDeletionError, v))
+}
+
+// DeletionPriorEQ applies the EQ predicate on the "deletion_prior" field.
+func DeletionPriorEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldDeletionPrior, v))
+}
+
+// DeletionPriorNEQ applies the NEQ predicate on the "deletion_prior" field.
+func DeletionPriorNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldDeletionPrior, v))
+}
+
+// DeletionPriorIn applies the In predicate on the "deletion_prior" field.
+func DeletionPriorIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldDeletionPrior, vs...))
+}
+
+// DeletionPriorNotIn applies the NotIn predicate on the "deletion_prior" field.
+func DeletionPriorNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldDeletionPrior, vs...))
+}
+
+// DeletionPriorGT applies the GT predicate on the "deletion_prior" field.
+func DeletionPriorGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldDeletionPrior, v))
+}
+
+// DeletionPriorGTE applies the GTE predicate on the "deletion_prior" field.
+func DeletionPriorGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldDeletionPrior, v))
+}
+
+// DeletionPriorLT applies the LT predicate on the "deletion_prior" field.
+func DeletionPriorLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldDeletionPrior, v))
+}
+
+// DeletionPriorLTE applies the LTE predicate on the "deletion_prior" field.
+func DeletionPriorLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldDeletionPrior, v))
+}
+
+// DeletionPriorContains applies the Contains predicate on the "deletion_prior" field.
+func DeletionPriorContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldDeletionPrior, v))
+}
+
+// DeletionPriorHasPrefix applies the HasPrefix predicate on the "deletion_prior" field.
+func DeletionPriorHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldDeletionPrior, v))
+}
+
+// DeletionPriorHasSuffix applies the HasSuffix predicate on the "deletion_prior" field.
+func DeletionPriorHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldDeletionPrior, v))
+}
+
+// DeletionPriorIsNil applies the IsNil predicate on the "deletion_prior" field.
+func DeletionPriorIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldDeletionPrior))
+}
+
+// DeletionPriorNotNil applies the NotNil predicate on the "deletion_prior" field.
+func DeletionPriorNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldDeletionPrior))
+}
+
+// DeletionPriorEqualFold applies the EqualFold predicate on the "deletion_prior" field.
+func DeletionPriorEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldDeletionPrior, v))
+}
+
+// DeletionPriorContainsFold applies the ContainsFold predicate on the "deletion_prior" field.
+func DeletionPriorContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldDeletionPrior, v))
+}
+
+// DeletionRequestEQ applies the EQ predicate on the "deletion_request" field.
+func DeletionRequestEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldDeletionRequest, v))
+}
+
+// DeletionRequestNEQ applies the NEQ predicate on the "deletion_request" field.
+func DeletionRequestNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldDeletionRequest, v))
+}
+
+// DeletionRequestIn applies the In predicate on the "deletion_request" field.
+func DeletionRequestIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldDeletionRequest, vs...))
+}
+
+// DeletionRequestNotIn applies the NotIn predicate on the "deletion_request" field.
+func DeletionRequestNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldDeletionRequest, vs...))
+}
+
+// DeletionRequestGT applies the GT predicate on the "deletion_request" field.
+func DeletionRequestGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldDeletionRequest, v))
+}
+
+// DeletionRequestGTE applies the GTE predicate on the "deletion_request" field.
+func DeletionRequestGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldDeletionRequest, v))
+}
+
+// DeletionRequestLT applies the LT predicate on the "deletion_request" field.
+func DeletionRequestLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldDeletionRequest, v))
+}
+
+// DeletionRequestLTE applies the LTE predicate on the "deletion_request" field.
+func DeletionRequestLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldDeletionRequest, v))
+}
+
+// DeletionRequestContains applies the Contains predicate on the "deletion_request" field.
+func DeletionRequestContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldDeletionRequest, v))
+}
+
+// DeletionRequestHasPrefix applies the HasPrefix predicate on the "deletion_request" field.
+func DeletionRequestHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldDeletionRequest, v))
+}
+
+// DeletionRequestHasSuffix applies the HasSuffix predicate on the "deletion_request" field.
+func DeletionRequestHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldDeletionRequest, v))
+}
+
+// DeletionRequestIsNil applies the IsNil predicate on the "deletion_request" field.
+func DeletionRequestIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldDeletionRequest))
+}
+
+// DeletionRequestNotNil applies the NotNil predicate on the "deletion_request" field.
+func DeletionRequestNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldDeletionRequest))
+}
+
+// DeletionRequestEqualFold applies the EqualFold predicate on the "deletion_request" field.
+func DeletionRequestEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldDeletionRequest, v))
+}
+
+// DeletionRequestContainsFold applies the ContainsFold predicate on the "deletion_request" field.
+func DeletionRequestContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldDeletionRequest, v))
 }
 
 // HasProject applies the HasEdge predicate on the "project" edge.

@@ -174,6 +174,10 @@ func gcpServiceAccountResource(sa *store.GCPServiceAccount) Resource {
 
 // ComputeCapabilities evaluates which actions the identity can perform on a single resource.
 func (a *AuthzService) ComputeCapabilities(ctx context.Context, identity Identity, resource Resource) *Capabilities {
+	// Reuse the caller's principals, access constraints and delegation edges
+	// across every decision below (no-op if a memo or mask is already set).
+	// Nothing below writes authorization state, so the memo stays valid.
+	ctx = withAuthzInputMemo(ctx)
 	actions, ok := ResourceActions[resource.Type]
 	if !ok {
 		return &Capabilities{Actions: []string{}}
@@ -206,6 +210,10 @@ func (a *AuthzService) ComputeCapabilities(ctx context.Context, identity Identit
 // permission is reported as not allowed. Every "hub" scope action is such a
 // pair; hub-level checks pass an explicit Permission to Decide instead.
 func (a *AuthzService) ComputeScopeCapabilities(ctx context.Context, identity Identity, scopeType, scopeID, resourceType string) *Capabilities {
+	// Reuse the caller's principals, access constraints and delegation edges
+	// across every decision below (no-op if a memo or mask is already set).
+	// Nothing below writes authorization state, so the memo stays valid.
+	ctx = withAuthzInputMemo(ctx)
 	actions, ok := ScopeActions[resourceType]
 	if !ok {
 		return &Capabilities{Actions: []string{}}
@@ -236,20 +244,27 @@ func (a *AuthzService) ComputeScopeCapabilities(ctx context.Context, identity Id
 	return &Capabilities{Actions: allowed}
 }
 
-// ComputeCapabilitiesBatch evaluates capabilities for a list of resources, optimized
-// for batch operation by expanding groups and fetching policies once.
+// ComputeCapabilitiesBatch evaluates capabilities for a list of resources.
+// It installs the request-local authorization input memo, so the caller's
+// principals, access constraints and delegation edges are loaded once for
+// the whole batch rather than once per decision; every decision still runs
+// the full evaluation path.
 //
 // PINNED to ComputeCapabilitiesForActions below: the two evaluation loops
 // (the IsScopedUserIdentity branch and the CheckAccess branch) must stay in
 // lockstep, field for field, with ComputeCapabilitiesForActions's loops over
 // an explicit action list. They are intentionally a duplicated body rather
-// than one delegating to the other: this function's body is deliberately
-// left unchanged here so the shared `withAuthzInputMemo` install site in
-// this file is unaffected.
+// than one delegating to the other. Both install the request-local input
+// memo at entry, so either can be called directly or nested inside an outer
+// install site with the same result.
 // TestListProjectAgentsSorted_CapsDeepEqualLegacy asserts the two stay
 // byte-identical on real requests; if you change one loop, change the other
 // and re-run that test.
 func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Identity, resources []Resource, resourceType string) []*Capabilities {
+	// Reuse the caller's principals, access constraints and delegation edges
+	// across every decision below (no-op if a memo or mask is already set).
+	// Nothing below writes authorization state, so the memo stays valid.
+	ctx = withAuthzInputMemo(ctx)
 	actions, ok := ResourceActions[resourceType]
 	if !ok {
 		caps := make([]*Capabilities, len(resources))
@@ -304,6 +319,10 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 // result). Each (resource, action) pair costs exactly one decision and one
 // audit record, same as today.
 func (a *AuthzService) ComputeCapabilitiesForActions(ctx context.Context, identity Identity, resources []Resource, actions []Action) []*Capabilities {
+	// Reuse the caller's principals, access constraints and delegation edges
+	// across every decision below (no-op if a memo or mask is already set).
+	// Nothing below writes authorization state, so the memo stays valid.
+	ctx = withAuthzInputMemo(ctx)
 	if IsScopedUserIdentity(identity) {
 		caps := make([]*Capabilities, len(resources))
 		for i, resource := range resources {

@@ -429,6 +429,18 @@ func (m *AgentManager) deleteResolved(ctx context.Context, agentName, targetID s
 	return false, nil
 }
 
+// CleanupAgentResources removes runtime objects that an agent's start
+// created beside its container (for example Kubernetes Secrets) when the
+// container itself is already gone, so deleteResolved never reaches
+// Runtime.Delete. It is a no-op for a runtime that does not implement
+// runtime.AgentResourceCleaner. See that interface for the scoping rules.
+func (m *AgentManager) CleanupAgentResources(ctx context.Context, agentName, projectID string) error {
+	if c, ok := m.Runtime.(runtime.AgentResourceCleaner); ok {
+		return c.CleanupAgentResources(ctx, agentName, projectID)
+	}
+	return nil
+}
+
 func (m *AgentManager) Watch(ctx context.Context, agentID string) (<-chan api.StatusEvent, error) {
 	return nil, fmt.Errorf("Watch not implemented")
 }
