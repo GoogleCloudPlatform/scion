@@ -237,6 +237,25 @@ func (s *AgentStore) BeginLaunch(ctx context.Context, agentID, kind string, time
 	return newID, nil
 }
 
+// SetAgentRunID implements store.AgentStore.SetAgentRunID.
+func (s *AgentStore) SetAgentRunID(ctx context.Context, agentID, runID string) error {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return err
+	}
+	n, err := s.client.Agent.Update().
+		Where(agent.IDEQ(uid)).
+		SetRunID(runID).
+		Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
 // MarkLaunchAccepted implements store.AgentStore.MarkLaunchAccepted.
 func (s *AgentStore) MarkLaunchAccepted(ctx context.Context, agentID, launchID, owner string) (store.Agent, error) {
 	uid, err := parseUUID(agentID)

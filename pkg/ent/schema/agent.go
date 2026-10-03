@@ -236,6 +236,15 @@ func (Agent) Fields() []ent.Field {
 		field.String("launch_id").
 			Optional().
 			Default(""),
+		// run_id is the identity of the agent's current or most recent run
+		// (ptone/scion#2550): minted by the Hub for every create, start and
+		// restart dispatch, persisted before the broker call, and carried
+		// on the runtime entry as the scion.run_id label. A delete sends it
+		// so the broker never removes a different run of the same name. ""
+		// for rows that have not been dispatched since run IDs existed.
+		field.String("run_id").
+			Optional().
+			Default(""),
 		// launch_state is "active" while a launch is in flight, "ended" once
 		// it has reached a terminal outcome, or "" for an agent that has
 		// never had a launch (pre-T1 rows, or rows created before P1b-3 turns

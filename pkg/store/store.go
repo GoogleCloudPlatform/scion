@@ -439,6 +439,13 @@ type AgentStore interface {
 	// transaction inside the ambient one WithTx provides, and returns an
 	// error (or, for RunLaunchReaperTick, ReaperTickUnavailable) instead.
 
+	// SetAgentRunID records runID as the agent's current run identity
+	// (ptone/scion#2550). It is a narrow single-column write: it does not
+	// check or bump state_version, so it neither conflicts with nor
+	// invalidates a concurrent UpdateAgent, and UpdateAgent never writes
+	// run_id back. Returns ErrNotFound if the agent doesn't exist.
+	SetAgentRunID(ctx context.Context, agentID, runID string) error
+
 	// BeginLaunch starts a new launch for agentID. The caller must start its
 	// monotonic remaining-budget timer BEFORE calling this (§3.4). Any
 	// previous active launch on the row becomes implicitly superseded (its ID
