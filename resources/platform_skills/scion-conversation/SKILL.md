@@ -98,8 +98,8 @@ The commands are complementary:
 | Inspect or administer a conversation | `scion conversation get`, `participants`, `join`, or `leave` |
 
 Use the `scion-messaging` skill for writing and reply routing, including the
-required structured-markdown message format. Use this skill for reading and
-conversation administration.
+structured-markdown format required for multi-sentence messages. Use this
+skill for reading and conversation administration.
 
 ## Anti-Patterns
 

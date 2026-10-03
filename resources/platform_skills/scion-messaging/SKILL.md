@@ -60,7 +60,7 @@ The `scion message` CLI delivers the body argument **verbatim** — it performs 
 Any message longer than a sentence or two **must** use structured markdown. Dense single paragraphs are hard to scan and act on in a chat surface.
 
 - **Headline first**: start with a short **bold** one-line summary of the message.
-- **Bullets for facts**: put status, findings and blockers in bullets, each starting with a bold label (`**Status:**`, `**Blocker:**`, `**Found:**`).
+- **Bullets for facts**: put status, findings and blockers in bullets, each starting with a short bold label (e.g. `**Status:**`, `**Blocker:**`, `**Found:**`, `**Cause:**`).
 - **Choices are always a list**: one option per bulleted or numbered item, each with its trade-off. Mark the recommended option, or add a separate `**Recommendation:**` line. Never write options inline in a paragraph ("A) ... B) ... C) ...").
 - **Ask on its own line**: end with the explicit question or decision needed, set apart from the rest (e.g. `**Ask:** ...`).
 - **Code formatting**: use `code` for identifiers, commands, branch names and paths. Put a command the reader should run in its own fenced block.
