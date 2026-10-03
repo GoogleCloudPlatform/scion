@@ -403,3 +403,32 @@ func TestStartAgentViaHub_WorkspaceFilesWarningWiring(t *testing.T) {
 		})
 	}
 }
+
+func TestSyncToResultLines(t *testing.T) {
+	ignored := api.WarningEmptyPerAgentWorkspaceFilesIgnored
+	tz := "TZ in config.env is ignored"
+	resp := func(applied bool, n int, w ...string) *hubclient.SyncToFinalizeResponse {
+		return &hubclient.SyncToFinalizeResponse{Applied: applied, FilesApplied: n, Warnings: w}
+	}
+	for _, tc := range []struct {
+		name            string
+		uploaded        int
+		skipped         int
+		nothingToUpload bool
+		resp            *hubclient.SyncToFinalizeResponse
+		want            []string
+	}{
+		{name: "nothing to upload", nothingToUpload: true, resp: resp(true, 2),
+			want: []string{"Workspace sync applied to agent."}},
+		{name: "nothing to upload, files ignored", nothingToUpload: true, resp: resp(true, 0, tz, ignored),
+			want: []string{"Warning: " + ignored, "Warning: " + tz}},
+		{name: "uploaded", uploaded: 1, skipped: 1, resp: resp(true, 2, tz),
+			want: []string{"Warning: " + tz, "Sync complete: 1 files uploaded, 10 B transferred", "Skipped 1 unchanged files", "Applied 2 files to agent workspace"}},
+		{name: "uploaded, files ignored", uploaded: 1, skipped: 1, resp: resp(true, 0, ignored),
+			want: []string{"Warning: " + ignored}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, syncToResultLines(tc.uploaded, 10, tc.skipped, tc.nothingToUpload, tc.resp))
+		})
+	}
+}

@@ -473,8 +473,9 @@ func syncToViaHub(hubCtx *HubContext, agentID, agentName, localPath string) erro
 		if err != nil {
 			return wrapHubError(fmt.Errorf("failed to finalize sync: %w", err))
 		}
-		statusln("Workspace sync applied to agent.")
-		printHubWarnings(finalizeResp.Warnings)
+		for _, line := range syncToResultLines(0, 0, 0, true, finalizeResp) {
+			statusln(line)
+		}
 		return nil
 	}
 
@@ -521,14 +522,8 @@ func syncToViaHub(hubCtx *HubContext, agentID, agentName, localPath string) erro
 		}
 		return outputJSON(result)
 	}
-	printHubWarnings(finalizeResp.Warnings)
-
-	statusf("Sync complete: %d files uploaded, %s transferred\n", uploadedCount, humanize.Bytes(uint64(uploadedBytes)))
-	if len(resp.ExistingFiles) > 0 {
-		statusf("Skipped %d unchanged files\n", len(resp.ExistingFiles))
-	}
-	if finalizeResp.Applied {
-		statusf("Applied %d files to agent workspace\n", finalizeResp.FilesApplied)
+	for _, line := range syncToResultLines(uploadedCount, uploadedBytes, len(resp.ExistingFiles), false, finalizeResp) {
+		statusln(line)
 	}
 
 	return nil
@@ -588,11 +583,31 @@ func resolveLocalWorkspacePath(agentName string) (string, error) {
 	return ".", nil
 }
 
-// printHubWarnings prints non-fatal Hub warnings (e.g. from sync-to
-// finalize) to stderr as "Warning: ..." lines. Nothing is printed for JSON
-// output, which carries them in its result instead.
-func printHubWarnings(warnings []string) {
-	for _, w := range warnings {
-		statusln("Warning: " + w)
+// syncToResultLines returns the status lines to show after a sync-to
+// finalize. When the hub reports that it ignored the workspace files
+// (empty-per-agent), its warning replaces the "applied" / "Sync complete"
+// lines, which would be misleading. Other hub warnings are always shown.
+func syncToResultLines(uploadedCount int, uploadedBytes int64, skipped int, nothingToUpload bool, resp *hubclient.SyncToFinalizeResponse) []string {
+	ignored, rest := splitFilesIgnoredWarning(resp.Warnings)
+	var lines []string
+	if ignored {
+		lines = append(lines, "Warning: "+api.WarningEmptyPerAgentWorkspaceFilesIgnored)
 	}
+	for _, w := range rest {
+		lines = append(lines, "Warning: "+w)
+	}
+	if ignored {
+		return lines
+	}
+	if nothingToUpload {
+		return append(lines, "Workspace sync applied to agent.")
+	}
+	lines = append(lines, fmt.Sprintf("Sync complete: %d files uploaded, %s transferred", uploadedCount, humanize.Bytes(uint64(uploadedBytes))))
+	if skipped > 0 {
+		lines = append(lines, fmt.Sprintf("Skipped %d unchanged files", skipped))
+	}
+	if resp.Applied {
+		lines = append(lines, fmt.Sprintf("Applied %d files to agent workspace", resp.FilesApplied))
+	}
+	return lines
 }
