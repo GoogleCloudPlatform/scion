@@ -22,6 +22,7 @@ import (
 	"net/http"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"go.opentelemetry.io/otel/codes"
@@ -114,6 +115,17 @@ func writeError(w http.ResponseWriter, statusCode int, code, message string, det
 	}
 
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// startAttemptedDetails returns the error details for a failure inside
+// Manager.Start, so the hub knows the broker acted on the request (see
+// api.BrokerErrorDetailStartAttempted).
+func startAttemptedDetails(runID string) map[string]interface{} {
+	d := map[string]interface{}{api.BrokerErrorDetailStartAttempted: true}
+	if runID != "" {
+		d[api.BrokerErrorDetailRunID] = runID
+	}
+	return d
 }
 
 // NotFound writes a 404 Not Found response.

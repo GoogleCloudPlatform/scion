@@ -1784,14 +1784,6 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	removeBranch := query.Get("removeBranch") == "true"
 	softDelete := query.Get("softDelete") == "true"
 
-	// Cancel any in-flight start of this agent on this broker first, before
-	// resolving the delete target: a start still blocked in provisioning
-	// (for example, skill resolution) may have no container or listable
-	// entry yet, so resolution can 404 before reaching the CancelLocal
-	// below, leaving the start to run on and fail long after the agent is
-	// gone. A key that matches no in-flight start is a harmless no-op.
-	s.cancelLocalLaunch(launchKey{ProjectID: projectID, Slug: id})
-
 	// Resolve the exact entry to delete, scoped to the requested project,
 	// across the default and every auxiliary runtime (ptone/scion#1819).
 	// Everything below acts on this entry only: the runtime operation uses
@@ -1809,6 +1801,17 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	// agent recreated under the same name.
 	runID := query.Get("runId")
 	span.SetAttributes(attribute.String("scion.agent.run_id", runID))
+
+	// Cancel any in-flight start of this agent on this broker first, before
+	// resolving the delete target: a start still blocked in provisioning
+	// (for example, skill resolution) may have no container or listable
+	// entry yet, so resolution can 404 before reaching the CancelLocal
+	// below, leaving the start to run on and fail long after the agent is
+	// gone. A key that matches no in-flight start is a harmless no-op. A
+	// delete naming a run leaves a start of a different run alone
+	// (ptone/scion#2550).
+	s.cancelLocalLaunchForRun(launchKey{ProjectID: projectID, Slug: id}, runID)
+
 	s.agentLifecycleLog.Debug("Agent delete: resolving target",
 		"agent_id", id, "project_id", projectID, "run_id", runID)
 	target, err := s.resolveDeleteTarget(ctx, id, projectID, runID, query.Get("projectPath"), deleteFiles || softDelete)
@@ -1861,7 +1864,7 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	// local optimisation (the Hub's answer to the launch's next report is
 	// what actually ends it), so a key that doesn't match an in-flight
 	// launch is a harmless no-op.
-	s.cancelLocalLaunch(launchKey{ProjectID: agentProjectID, Slug: target.name})
+	s.cancelLocalLaunchForRun(launchKey{ProjectID: agentProjectID, Slug: target.name}, runID)
 
 	filesToDelete := deleteFiles
 	if deleteFiles && projectPath == "" && projectID != "" {
@@ -2247,10 +2250,13 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		span.SetStatus(codes.Error, err.Error())
 		s.agentLifecycleLog.Error("Agent start failed",
 			"agent_id", id, "error", err)
+		// Manager.Start has acted (it may have removed the previous entry
+		// or created a new one), so mark the failure for the hub.
+		details := startAttemptedDetails(opts.RunID)
 		if errors.Is(err, agent.ErrContainerNameInUse) {
-			Conflict(w, err.Error())
+			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), details)
 		} else {
-			RuntimeError(w, runtimeOpError("start agent", err).Error())
+			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, runtimeOpError("start agent", err).Error(), details)
 		}
 		return
 	}
@@ -2695,11 +2701,14 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	if err != nil {
 		s.agentLifecycleLog.Error("Agent restart failed",
 			"agent_id", id, "error", err)
+		// The stop above and Manager.Start have acted, so mark the
+		// failure for the hub.
+		details := startAttemptedDetails(opts.RunID)
 		if strings.Contains(err.Error(), "not found") {
-			NotFound(w, "Agent")
+			writeError(w, http.StatusNotFound, ErrCodeAgentNotFound, "Agent not found", details)
 			return
 		}
-		RuntimeError(w, runtimeOpError("restart agent", err).Error())
+		writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, runtimeOpError("restart agent", err).Error(), details)
 		return
 	}
 
@@ -5142,28 +5151,38 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, runID, 
 
 // filterDeleteCandidatesByRun keeps the delete candidates that may belong to
 // run runID (see resolveDeleteTarget) and reports whether any candidate was
-// dropped because it is labelled with a different run.
+// dropped because it is labelled with a different run. It is a separate
+// step over the candidate list, so it composes with however the candidates
+// were looked up.
 //
-// A legacy container with no run ID label is kept so that deleting an agent
-// started before run IDs existed works as before; it cannot be told apart
-// from the requested run, and an agent started since then always carries a
-// label. A file-only entry (no container) carries no label either, but when
-// another run's entry holds the name those files are that run's, so it is
-// dropped then.
+// Candidates labelled with exactly runID win: when there are any, only
+// they are kept, so the run ID also resolves a name shared with a legacy
+// or file-only entry instead of reporting it ambiguous.
+//
+// Without an exact match, a legacy container with no run ID label is kept
+// so that deleting an agent started before run IDs existed works as
+// before; it cannot be told apart from the requested run, and an agent
+// started since then always carries a label. A file-only entry (no
+// container) carries no label either, but when another run's entry holds
+// the name those files are that run's, so it is dropped then.
 func filterDeleteCandidatesByRun[T any](cands []T, runID string, entry func(T) api.AgentInfo) ([]T, bool) {
 	var otherRun bool
+	var exact []T
 	for _, c := range cands {
-		if r := entry(c).RunID; r != "" && r != runID {
+		switch r := entry(c).RunID; {
+		case r == runID:
+			exact = append(exact, c)
+		case r != "":
 			otherRun = true
-			break
 		}
+	}
+	if len(exact) > 0 {
+		return exact, otherRun
 	}
 	var out []T
 	for _, c := range cands {
 		e := entry(c)
 		switch {
-		case e.RunID == runID:
-			out = append(out, c)
 		case e.RunID != "":
 			// Another run's entry: never a target.
 		case e.ContainerID != "":

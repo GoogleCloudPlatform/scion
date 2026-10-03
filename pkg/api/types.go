@@ -1111,6 +1111,22 @@ type ResourceHandle struct {
 // targets the entry with that label (ptone/scion#2550).
 const LabelRunID = "scion.run_id"
 
+// Error-detail keys a runtime broker sets on a start or restart failure
+// that happened inside Manager.Start (ptone/scion#2550). By then the broker
+// has acted: Start may already have removed the previous same-name entry
+// (and restart has stopped it) and may have created a new entry labelled
+// with the requested run. The hub must therefore not revert its run ID to
+// the previous one. An error without DetailStartAttempted is a rejection
+// from before Manager.Start, or from a broker that predates the marker.
+const (
+	// BrokerErrorDetailStartAttempted is true when the failure came from
+	// Manager.Start.
+	BrokerErrorDetailStartAttempted = "startAttempted"
+	// BrokerErrorDetailRunID carries the run ID the failed start used,
+	// when it had one.
+	BrokerErrorDetailRunID = "runId"
+)
+
 // ResourceHandle.Kind values.
 const (
 	ResourceKindSecret              = "secret"
