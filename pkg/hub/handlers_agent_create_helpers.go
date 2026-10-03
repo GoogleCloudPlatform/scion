@@ -1061,10 +1061,9 @@ func (s *Server) handleExistingAgent(
 		cleanupMode = "strict"
 	}
 
-	// Start guard entry checks, before
-	// Phase 1 and Phase 2: an incomplete create is refused, and an agent
-	// whose create is in flight is returned as it is, without applying the
-	// request.
+	// Start guard entry checks, before Phase 1 and Phase 2: an incomplete
+	// create is refused, and an agent whose create is in flight is returned
+	// as it is, without applying the request.
 	if refusal := launchStartRefusal(existingAgent, time.Now()); refusal != nil {
 		if !refusal.InFlight {
 			refusal.write(w)

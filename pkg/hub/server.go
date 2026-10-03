@@ -733,9 +733,9 @@ type RemoteCreateAgentRequest struct {
 	// runtimebroker.CreateAgentRequest.Reprovision, the wire twin this maps to.
 	Reprovision bool `json:"reprovision,omitempty"`
 	// AsyncLaunch, LaunchID, LaunchTimeoutSeconds and LaunchKeepaliveSeconds
-	// mirror runtimebroker.CreateAgentRequest's async launch fields. They are set only by
-	// dispatchLaunching.
-	// LaunchTimeoutSeconds is the remaining launch budget at send time.
+	// mirror runtimebroker.CreateAgentRequest's async launch fields. They are
+	// set only by dispatchLaunching. LaunchTimeoutSeconds is the remaining
+	// launch budget at send time.
 	AsyncLaunch            bool   `json:"asyncLaunch,omitempty"`
 	LaunchID               string `json:"launchId,omitempty"`
 	LaunchTimeoutSeconds   int    `json:"launchTimeoutSeconds,omitempty"`
@@ -917,9 +917,10 @@ type RemoteAgentResponse struct {
 	Reprovisioned bool `json:"reprovisioned,omitempty"`
 
 	// LaunchPending, LaunchID and LaunchInstanceID mirror
-	// runtimebroker.CreateAgentResponse's async launch echo. LaunchPending with a LaunchID equal to
-	// the request's means the broker accepted the create for asynchronous
-	// launch; LaunchInstanceID is the broker process that owns it.
+	// runtimebroker.CreateAgentResponse's async launch echo. LaunchPending
+	// with a LaunchID equal to the request's means the broker accepted the
+	// create for asynchronous launch; LaunchInstanceID is the broker process
+	// that owns it.
 	LaunchPending    bool   `json:"launchPending,omitempty"`
 	LaunchID         string `json:"launchId,omitempty"`
 	LaunchInstanceID string `json:"launchInstanceId,omitempty"`
@@ -3497,8 +3498,8 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// is then omitted and broker behaviour is unchanged.
 	dispatcher.SetHubAgentDefaultsProvider(s.hubAgentDefaults)
 
-	// Wire the async agent launch settings. They are static after startup; the accessor reads them under
-	// s.mu.
+	// Wire the async agent launch settings. They are static after startup;
+	// the accessor reads them under s.mu.
 	dispatcher.SetAsyncLaunchSettingsProvider(s.asyncLaunchSettings)
 
 	// Wire profile timezone provider so dispatch can inject TZ from the
@@ -4415,7 +4416,8 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		s.deriveAgentConfig(ctx, agent, project, tmpl)
 
 		// Scheduled creates have no waiting client, so they opt in to
-		// asynchronous launch server-side. It only takes effect when hub.asyncAgentLaunch is on.
+		// asynchronous launch server-side. It only takes effect when
+		// hub.asyncAgentLaunch is on.
 		agent.LaunchAsyncOptIn = true
 
 		if err := s.createAgentWithIdentityKey(ctx, agent, slug); err != nil {

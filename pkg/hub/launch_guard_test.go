@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -234,6 +235,21 @@ func TestAgentLifecycle_LaunchGuard(t *testing.T) {
 			assert.Empty(t, resp.Warnings)
 		})
 	}
+
+	// A body that does not decode is treated as carrying inputs.
+	t.Run("start with a malformed body while launching warns", func(t *testing.T) {
+		srv, client, agent := setup(t, "lg-start-malformed", seedInFlight)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", strings.NewReader("{"))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+testDevToken)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.False(t, client.startCalled)
+		var resp AgentWithWarnings
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, []string{launchInFlightInputsWarning}, resp.Warnings)
+	})
 
 	t.Run("start with inputs while launching warns", func(t *testing.T) {
 		srv, _, agent := setup(t, "lg-start-inputs", seedInFlight)

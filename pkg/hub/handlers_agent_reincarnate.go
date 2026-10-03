@@ -291,10 +291,9 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Start guard entry check, before
-	// the reincarnation is claimed: the worker stops and reprovisions the
-	// agent, so an agent whose create is in flight or did not complete is
-	// refused here.
+	// Start guard entry check, before the reincarnation is claimed: the
+	// worker stops and reprovisions the agent, so an agent whose create is
+	// in flight or did not complete is refused here.
 	if refusal := launchStartRefusal(agent, time.Now()); refusal != nil {
 		refusal.write(w)
 		return

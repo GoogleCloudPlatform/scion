@@ -374,9 +374,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	// Start guard entry checks. Restart
-	// is checked here, before its stop leg, so a launching agent is not
-	// stopped; the dispatcher guard is the backstop for the start leg.
+	// Start guard entry checks. Restart is checked here, before its stop
+	// leg, so a launching agent is not stopped; the dispatcher guard is the
+	// backstop for the start leg.
 	if action == api.AgentActionStart || action == api.AgentActionRestart {
 		if refusal := launchStartRefusal(agent, time.Now()); refusal != nil {
 			if !refusal.InFlight {

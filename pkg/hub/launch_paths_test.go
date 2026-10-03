@@ -388,13 +388,22 @@ func TestCrossNodeCreate_AsyncLaunchRoundTrip(t *testing.T) {
 // TestDispatchFinalizeEnv_ResendUsesFreshRequestID covers the inner
 // as_needed resend: it always carries a new RequestID (with the flag off as
 // well), so the broker's attempt cache cannot replay the first answer; with
-// the flag on it also carries a new launch ID.
+// the flag on it also carries a new launch ID. The resend happens for an
+// as_needed key and for a TZ-only need, which the hub answers itself.
 func TestDispatchFinalizeEnv_ResendUsesFreshRequestID(t *testing.T) {
-	for _, flag := range []bool{false, true} {
-		t.Run(fmt.Sprintf("flag=%v", flag), func(t *testing.T) {
+	for _, tc := range []struct {
+		need string
+		flag bool
+	}{{"SECRET_A", false}, {"SECRET_A", true}, {"TZ", false}, {"TZ", true}} {
+		flag := tc.flag
+		t.Run(fmt.Sprintf("need=%s/flag=%v", tc.need, flag), func(t *testing.T) {
 			ctx := context.Background()
 			s := createTestStore(t)
-			agent := setupFinalizeEnvTest(t, ctx, s, []store.EnvVar{{Key: "SECRET_A", Value: "val-a"}})
+			var asNeeded []store.EnvVar
+			if tc.need == "SECRET_A" {
+				asNeeded = []store.EnvVar{{Key: "SECRET_A", Value: "val-a"}}
+			}
+			agent := setupFinalizeEnvTest(t, ctx, s, asNeeded)
 			agent.Phase = string(state.PhaseProvisioning)
 			agent.LaunchAsyncOptIn = true
 			agent.OwnerID = "" // the fixture's owner is not a stored user
@@ -406,7 +415,7 @@ func TestDispatchFinalizeEnv_ResendUsesFreshRequestID(t *testing.T) {
 				createWithGatherFunc: func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
 					sends = append(sends, *req)
 					if len(sends) == 1 {
-						return nil, &RemoteEnvRequirementsResponse{AgentID: req.ID, Needs: []string{"SECRET_A"}}, nil
+						return nil, &RemoteEnvRequirementsResponse{AgentID: req.ID, Needs: []string{tc.need}}, nil
 					}
 					if req.AsyncLaunch {
 						return acceptedAnswer(req, req.LaunchID), nil, nil
@@ -425,7 +434,11 @@ func TestDispatchFinalizeEnv_ResendUsesFreshRequestID(t *testing.T) {
 			require.NotEmpty(t, sends[0].RequestID)
 			require.NotEmpty(t, sends[1].RequestID)
 			assert.NotEqual(t, sends[0].RequestID, sends[1].RequestID, "the resend must not reuse the first RequestID")
-			assert.Equal(t, "val-a", sends[1].ResolvedEnv["SECRET_A"])
+			if tc.need == "SECRET_A" {
+				assert.Equal(t, "val-a", sends[1].ResolvedEnv["SECRET_A"])
+			} else {
+				assert.NotEmpty(t, sends[1].ResolvedEnv["TZ"], "the hub answers the TZ need")
+			}
 
 			if !flag {
 				assert.Nil(t, res.AcceptedLaunch())

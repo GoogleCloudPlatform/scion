@@ -373,3 +373,24 @@ func TestPersistAcceptedLaunch_KeepsLaunchAndPhase(t *testing.T) {
 	assert.Equal(t, launchID, persisted.LaunchID)
 	assert.True(t, persisted.IsInFlight())
 }
+
+func TestDispatchLaunching_AcceptedMarkSurvivesCanceledRequest(t *testing.T) {
+	f := newAsyncLaunchFixture(t, nil)
+	agent := f.agent(t, "mark-canceled", string(state.PhaseCreated), true)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := &RemoteCreateAgentRequest{ID: agent.ID}
+
+	// The caller's request ends while the broker answers.
+	_, _, launch, err := f.dispatcher.dispatchLaunching(ctx, agent, f.broker.Endpoint, req, false,
+		func(_ context.Context, r *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			cancel()
+			return acceptedAnswer(r, r.LaunchID), nil, nil
+		})
+	require.NoError(t, err)
+	require.NotNil(t, launch)
+	row := f.row(t, agent.ID)
+	assert.Equal(t, launch.ID, row.LaunchID)
+	assert.Equal(t, "broker-instance-1", row.LaunchOwner, "the accepted mark is written")
+	assert.Equal(t, string(state.PhaseProvisioning), row.Phase)
+}
