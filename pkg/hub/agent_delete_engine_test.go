@@ -517,7 +517,6 @@ func TestAgentDeleteEngine_SecondDeleteJoins(t *testing.T) {
 func TestAgentDeleteEngine_JoinerAnswers202AtDeadline(t *testing.T) {
 	srv, s, _, disp := engineTestServer(t)
 	entered, release := make(chan struct{}), make(chan struct{})
-	defer close(release)
 	disp.setFn(blockingDelete(entered, release, nil))
 	agent := setupBrokerAgentInPhase(t, s, "join202", state.PhaseRunning)
 
@@ -525,7 +524,10 @@ func TestAgentDeleteEngine_JoinerAnswers202AtDeadline(t *testing.T) {
 	waitClosed(t, entered, 5*time.Second, "owner dispatch")
 	j := waitDelete(t, deleteAsync(t, srv, "/api/v1/agents/"+agent.ID, map[string]string{"Prefer": "wait=1"}), 5*time.Second)
 	assert.Equal(t, http.StatusAccepted, j.rec.Code, j.rec.Body.String())
-	_ = owner
+	// Let the owner finish before the test (and its DB) ends, so no engine
+	// outlives the test.
+	close(release)
+	assert.Equal(t, http.StatusNoContent, waitDelete(t, owner, 5*time.Second).rec.Code)
 }
 
 // Acceptance (q): a joiner on a publisher that drops every event (noop:
