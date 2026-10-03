@@ -30,6 +30,9 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { showConfirm } from './confirm-dialog.js';
+import { formatNumber } from '../../utils/format-number.js';
+import { formatInstant, zoneLabel } from '../../utils/time.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 // ────────────────────────────────────────────────────────────
 // Types
@@ -529,31 +532,6 @@ function isDotFile(path: string): boolean {
   return path.split('/').some((segment) => segment.startsWith('.'));
 }
 
-/**
- * Shared formatter for the file table's "Modified" column. Constructing an
- * Intl.DateTimeFormat is comparatively expensive (locale data lookup), and
- * the locale/options here never change, so build it once at module scope
- * rather than once per row on every render — CPU samples attributed
- * roughly 160-174ms to per-row formatter construction on a 1000-row listing.
- *
- * Trade-off: this formatter resolves the environment's default IANA time
- * zone once, at module load, instead of on every prior per-row
- * construction. If the OS time zone changes while a tab stays open, the
- * displayed times keep using the zone captured at load until the page is
- * reloaded. This column has no visible zone/offset indicator either way, so
- * the displayed text differs only in which zone's wall-clock time it
- * reflects. Not fixed (e.g. by re-resolving `resolvedOptions().timeZone`
- * once per render and rebuilding on change) — that adds a construction back
- * on every render for a live mid-session OS time-zone change, which is rare.
- */
-const FILE_DATE_FORMATTER = new Intl.DateTimeFormat('en', {
-  month: 'short',
-  day: 'numeric',
-  year: 'numeric',
-  hour: '2-digit',
-  minute: '2-digit',
-});
-
 function formatFileSize(bytes: number): string {
   if (bytes === 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];
@@ -564,6 +542,9 @@ function formatFileSize(bytes: number): string {
 
 @customElement('scion-file-browser')
 export class ScionFileBrowser extends LitElement {
+  /** Re-renders the "Modified" column when the display zone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   /** Data source adapter — must be set by the parent. */
   @property({ attribute: false })
   dataSource: FileBrowserDataSource | null = null;
@@ -775,6 +756,11 @@ export class ScionFileBrowser extends LitElement {
     .file-name sl-icon {
       color: var(--scion-text-muted, #64748b);
       flex-shrink: 0;
+    }
+
+    .zone-label {
+      font-weight: normal;
+      color: var(--scion-text-muted, #64748b);
     }
 
     .file-size,
@@ -1210,25 +1196,14 @@ export class ScionFileBrowser extends LitElement {
     this.dispatchEvent(new CustomEvent('file-create-requested', { bubbles: true, composed: true }));
   }
 
+  /**
+   * Formats the "Modified" column in the effective display zone, 24-hour
+   * (`time.ts`). `formatInstant` reuses one formatter per style and zone, so
+   * no formatter is built per row (ptone/scion#2382), and it returns `''`
+   * for an invalid date without throwing; the raw string is shown then.
+   */
   private formatDate(dateString: string): string {
-    // new Date() never throws, but Intl.DateTimeFormat#format() throws a
-    // RangeError for an invalid date (e.g. an unparseable dateString).
-    // Checking getTime() up front avoids that throw/catch entirely — cheap
-    // per row, and exceptions are comparatively expensive to raise
-    // (GoogleCloudPlatform/scion#2176 review) — while still falling back to
-    // the raw string for an invalid date, same as before.
-    const date = new Date(dateString);
-    if (isNaN(date.getTime())) {
-      return dateString;
-    }
-    // Purely defensive: per ECMA-402, format() only throws RangeError for a
-    // non-finite time value, which the isNaN check above already excludes —
-    // this catch is unreachable, kept in case that invariant ever changes.
-    try {
-      return FILE_DATE_FORMATTER.format(date);
-    } catch {
-      return dateString;
-    }
+    return formatInstant(dateString, 'datetime-full') || dateString;
   }
 
   // ── Render ──
@@ -1261,7 +1236,7 @@ export class ScionFileBrowser extends LitElement {
       }
     } else if (this.initialHasMore && this.totalCount > this.files.length) {
       const sizeStr = this.totalSize > 0 ? ` (${formatFileSize(this.totalSize)})` : '';
-      countLabel = `${this.files.length.toLocaleString()} of ${this.totalCount.toLocaleString()} files${sizeStr} · most recent`;
+      countLabel = `${formatNumber(this.files.length)} of ${formatNumber(this.totalCount)} files${sizeStr} · most recent`;
     } else {
       const n = base.length;
       const visibleSize = base.reduce((sum, f) => sum + (f.size ?? 0), 0);
@@ -1430,7 +1405,7 @@ export class ScionFileBrowser extends LitElement {
                       @click=${() => this.toggleSort('modified')}
                     >
                       <span class="sort-indicator">${this.sortIndicator('modified')}</span>
-                      Modified
+                      Modified <span class="zone-label">(${zoneLabel()})</span>
                     </th>
                     <th></th>
                   </tr>
@@ -1497,7 +1472,7 @@ export class ScionFileBrowser extends LitElement {
               </table>
               ${displayFiles.length > 1000
                 ? html`<div class="file-list-truncated">
-                    File list truncated — showing 1,000 of ${displayFiles.length.toLocaleString()}
+                    File list truncated — showing 1,000 of ${formatNumber(displayFiles.length)}
                     files
                   </div>`
                 : nothing}
