@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
@@ -260,3 +261,52 @@ func TestStartConduit(t *testing.T) {
 		assert.Nil(t, srv.ConduitRelayFatal(), "no relay is running")
 	})
 }
+
+// TestNewCommandBus_ConduitHA (C8): a Postgres command bus that cannot
+// start is a startup error in hosted HA with hub.conduit on; otherwise the
+// hub falls back to the no-op bus.
+func TestNewCommandBus_ConduitHA(t *testing.T) {
+	t.Cleanup(resetServerFlags)
+	orig := startPostgresCommandBus
+	t.Cleanup(func() { startPostgresCommandBus = orig })
+
+	tests := []struct {
+		name    string
+		hosted  bool
+		conduit bool
+		busErr  error
+		wantErr bool
+		wantBus hub.CommandBus
+	}{
+		{name: "hosted HA, conduit on, bus fails", hosted: true, conduit: true, busErr: errors.New("listen refused"), wantErr: true},
+		{name: "hosted HA, conduit off, bus fails", hosted: true, busErr: errors.New("listen refused"), wantBus: hub.NoopCommandBus{}},
+		{name: "not hosted, conduit on, bus fails", conduit: true, busErr: errors.New("listen refused"), wantBus: hub.NoopCommandBus{}},
+		{name: "hosted HA, conduit on, bus starts", hosted: true, conduit: true, wantBus: fakeCommandBus{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetServerFlags()
+			hostedMode, enableHub = tt.hosted, true
+			startPostgresCommandBus = func(context.Context, string, func(string) bool, func(context.Context, string), *slog.Logger) (hub.CommandBus, error) {
+				if tt.busErr != nil {
+					return nil, tt.busErr
+				}
+				return fakeCommandBus{}, nil
+			}
+			cfg := &config.GlobalConfig{}
+			cfg.Database.Driver = "postgres"
+			bus, err := newCommandBus(context.Background(), cfg, conduitHubServer(t, tt.conduit))
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.ErrorIs(t, err, tt.busErr)
+				assert.Contains(t, err.Error(), "hosted HA")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantBus, bus)
+		})
+	}
+}
+
+// fakeCommandBus stands in for a started Postgres bus.
+type fakeCommandBus struct{ hub.NoopCommandBus }
