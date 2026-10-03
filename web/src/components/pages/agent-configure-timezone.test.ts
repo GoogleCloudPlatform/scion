@@ -35,6 +35,8 @@ interface PatchCall {
 interface PatchReply {
   status?: number;
   body: Record<string, unknown>;
+  /** When set, the PATCH stays in flight until this resolves. */
+  gate?: Promise<void>;
 }
 
 interface ConfigureEl extends HTMLElement {
@@ -68,12 +70,15 @@ function stubFetch(agent: Record<string, unknown>): void {
         patchCalls.push({ body: JSON.parse(String(init.body)) as Record<string, unknown> });
         const reply = patchReplies.shift() ?? { body: {} };
         const status = reply.status ?? 200;
-        return Promise.resolve({
-          ok: status < 400,
-          status,
-          json: async () => reply.body,
-          text: async () => JSON.stringify(reply.body),
-        } as Response);
+        return (reply.gate ?? Promise.resolve()).then(
+          () =>
+            ({
+              ok: status < 400,
+              status,
+              json: async () => reply.body,
+              text: async () => JSON.stringify(reply.body),
+            }) as Response
+        );
       }
       if (url.includes('/agents/')) {
         return Promise.resolve({
@@ -445,6 +450,113 @@ describe('agent-configure Timezone row on a non-created agent', () => {
     await pin(el, 'Europe/Paris');
     expect(q(el, 'timezone-next-start')).not.toBeNull();
   });
+});
+
+type BusyEl = ConfigureEl & {
+  saving: boolean;
+  starting: boolean;
+  tzDraft: string;
+  handleSave(): Promise<void>;
+  handleStart(): Promise<void>;
+  handleTimezonePin(): Promise<void>;
+  handleTimezoneUnpin(): Promise<void>;
+};
+
+function isDisabled(el: Element | null): boolean {
+  expect(el).not.toBeNull();
+  return (el as HTMLElement & { disabled: boolean }).disabled;
+}
+
+/** The main form's footer button with the given label. */
+function formAction(el: ConfigureEl, label: string): Element {
+  const button = Array.from(el.shadowRoot!.querySelectorAll('.form-actions sl-button')).find(
+    (b) => b.textContent?.trim() === label
+  );
+  expect(button, `${label} is rendered`).toBeDefined();
+  return button!;
+}
+
+describe('agent-configure Timezone row and the main form never overlap', () => {
+  it.each(['saving', 'starting'] as const)(
+    'disables Pin…, Unpin, the picker and its actions while the form is %s',
+    async (flag) => {
+      const el = (await mount(
+        makeAgent('created', { explicitTimezone: 'Europe/Paris' })
+      )) as BusyEl;
+      expect(isDisabled(q(el, 'timezone-pin-open'))).toBe(false);
+      expect(isDisabled(q(el, 'timezone-unpin'))).toBe(false);
+
+      el[flag] = true;
+      await settle(el);
+      expect(isDisabled(q(el, 'timezone-pin-open'))).toBe(true);
+      expect(isDisabled(q(el, 'timezone-unpin'))).toBe(true);
+      await el.handleTimezoneUnpin();
+      expect(patchCalls).toEqual([]);
+
+      el[flag] = false;
+      await settle(el);
+      await click(el, 'timezone-pin-open');
+      el[flag] = true;
+      await settle(el);
+      expect(isDisabled(el.shadowRoot!.querySelector('scion-timezone-picker'))).toBe(true);
+      expect(isDisabled(q(el, 'timezone-pin-confirm'))).toBe(true);
+      expect(isDisabled(q(el, 'timezone-pin-cancel'))).toBe(true);
+      el.tzDraft = 'Asia/Tokyo';
+      await el.handleTimezonePin();
+      expect(patchCalls).toEqual([]);
+
+      el[flag] = false;
+      await settle(el);
+      expect(isDisabled(q(el, 'timezone-pin-confirm'))).toBe(false);
+    }
+  );
+
+  it.each(['pin', 'unpin'] as const)(
+    'disables Save and Start while a timezone %s is in flight',
+    async (action) => {
+      const el = (await mount(
+        makeAgent('created', { explicitTimezone: 'Europe/Paris' })
+      )) as BusyEl;
+      expect(isDisabled(formAction(el, 'Save'))).toBe(false);
+      expect(isDisabled(formAction(el, 'Start'))).toBe(false);
+
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      patchReplies.push({
+        gate,
+        body:
+          action === 'pin'
+            ? {
+                appliedConfig: { explicitTimezone: 'Asia/Tokyo' },
+                resolvedTimezone: 'Asia/Tokyo',
+                timezoneSource: 'explicit',
+              }
+            : { appliedConfig: {}, resolvedTimezone: 'UTC', timezoneSource: 'hub-default' },
+      });
+      if (action === 'pin') {
+        await click(el, 'timezone-pin-open');
+        el.tzDraft = 'Asia/Tokyo';
+        await click(el, 'timezone-pin-confirm');
+      } else {
+        await click(el, 'timezone-unpin');
+      }
+      expect(patchCalls).toHaveLength(1);
+
+      expect(isDisabled(formAction(el, 'Save'))).toBe(true);
+      expect(isDisabled(formAction(el, 'Start'))).toBe(true);
+      await el.handleSave();
+      await el.handleStart();
+      expect(patchCalls).toHaveLength(1);
+
+      release();
+      await settle(el);
+      expect(isDisabled(formAction(el, 'Save'))).toBe(false);
+      expect(isDisabled(formAction(el, 'Start'))).toBe(false);
+      expect(text(el, 'timezone-value')).toBe(action === 'pin' ? 'Asia/Tokyo' : 'UTC');
+    }
+  );
 });
 
 describe('agent-configure env table never owns TZ', () => {

@@ -935,6 +935,9 @@ export class ScionPageAgentConfigure extends LitElement {
    * the rest of the form.
    */
   private async patchExplicitTimezone(value: string): Promise<void> {
+    // Never overlap the main form's Save/Start PATCH (the controls are
+    // disabled too; this guards programmatic calls).
+    if (this.tzSaving || this.saving || this.starting) return;
     this.tzSaving = true;
     this.tzError = null;
     try {
@@ -1160,6 +1163,8 @@ export class ScionPageAgentConfigure extends LitElement {
   }
 
   private async handleSave(): Promise<void> {
+    // Never overlap an in-flight timezone pin/unpin PATCH.
+    if (this.tzSaving || this.saving || this.starting) return;
     this.saving = true;
     this.error = null;
     this.successMessage = null;
@@ -1220,6 +1225,8 @@ export class ScionPageAgentConfigure extends LitElement {
   }
 
   private async handleStart(): Promise<void> {
+    // Never overlap an in-flight timezone pin/unpin PATCH.
+    if (this.tzSaving || this.saving || this.starting) return;
     // Validate required env vars
     const missingKeys = this.validateRequiredEnv();
     if (missingKeys.length > 0) {
@@ -1376,7 +1383,8 @@ export class ScionPageAgentConfigure extends LitElement {
       `;
     }
 
-    const isBusy = this.saving || this.starting;
+    // A timezone pin/unpin is its own PATCH; Save/Start wait for it.
+    const isBusy = this.saving || this.starting || this.tzSaving;
 
     return html`
       <a href="/agents" class="back-link">
@@ -2117,6 +2125,8 @@ export class ScionPageAgentConfigure extends LitElement {
     // change reaches its container only at the next start (the hub also
     // warns when the container is live).
     const showNextStart = this.agent?.phase !== 'created' || this.tzNextStartWarned;
+    // Pin/unpin is a separate PATCH from Save/Start; never let the two overlap.
+    const busy = this.tzSaving || this.saving || this.starting;
 
     return html`
       <div class="form-field timezone-row" data-testid="timezone-row">
@@ -2133,7 +2143,7 @@ export class ScionPageAgentConfigure extends LitElement {
                   size="small"
                   variant="default"
                   data-testid="timezone-pin-open"
-                  ?disabled=${this.tzSaving}
+                  ?disabled=${busy}
                   @click=${() => {
                     this.tzDraft = this.tzPinned;
                     this.tzError = null;
@@ -2149,7 +2159,7 @@ export class ScionPageAgentConfigure extends LitElement {
                         variant="default"
                         data-testid="timezone-unpin"
                         ?loading=${this.tzSaving}
-                        ?disabled=${this.tzSaving}
+                        ?disabled=${busy}
                         @click=${() => this.handleTimezoneUnpin()}
                         >Unpin</sl-button
                       >
@@ -2166,7 +2176,7 @@ export class ScionPageAgentConfigure extends LitElement {
                     <scion-timezone-picker
                       label="Pin timezone"
                       .value=${this.tzDraft}
-                      ?disabled=${this.tzSaving}
+                      ?disabled=${busy}
                       @timezone-change=${(e: CustomEvent<TimezoneChangeDetail>) => {
                         this.tzDraft = e.detail.timezone;
                         this.tzError = null;
@@ -2180,7 +2190,7 @@ export class ScionPageAgentConfigure extends LitElement {
                     variant="primary"
                     data-testid="timezone-pin-confirm"
                     ?loading=${this.tzSaving}
-                    ?disabled=${this.tzSaving}
+                    ?disabled=${busy}
                     @click=${() => this.handleTimezonePin()}
                     >Pin</sl-button
                   >
@@ -2188,7 +2198,7 @@ export class ScionPageAgentConfigure extends LitElement {
                     size="small"
                     variant="default"
                     data-testid="timezone-pin-cancel"
-                    ?disabled=${this.tzSaving}
+                    ?disabled=${busy}
                     @click=${() => {
                       this.tzPicking = false;
                       this.tzError = null;

@@ -25,6 +25,11 @@
 - **Entry point.** `agent-detail.ts` now shows the Configure button in every phase when the caller
   has the agent `update` capability, and still in `created` as before. This makes the row reachable
   for existing (often legacy-pinned) agents, which the task 16 release note relies on.
+- **No overlapping PATCHes.** Pin…, Unpin, the picker and its Pin/Cancel actions are disabled while
+  the main form is saving or starting. Save, Start, Back and Delete are disabled while a pin or unpin
+  is in flight. `handleSave`, `handleStart` and the pin/unpin PATCH also return early if another
+  PATCH is in flight, so the timezone PATCH and the config PATCH never race. Tests cover both
+  directions; dropping either half, or the handler guards, fails 2 to 4 cases.
 - **Env table.** `TZ` is filtered out on load, so an empty gathered `TZ` is never a "required" row.
   In `buildConfig` it is skipped on both the current and the loaded side, so a typed `TZ` row is
   never sent and a loaded `TZ` never counts as an env edit. The Environment tab says where `TZ` is managed.
