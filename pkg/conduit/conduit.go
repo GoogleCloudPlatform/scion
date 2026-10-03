@@ -234,11 +234,27 @@ type GoAwayOptions struct {
 // Welcome. Returning an error rejects the session: the code of a
 // *CloseError (see Reject) is sent to the dialer, any other error is sent
 // as 4403.
+//
+// A Welcome can be discarded after Admit returns it: when Admit outlives
+// the handshake timeout (the dialer gets 4504) or ties with it, when
+// Accept's ctx ends, or when writing the Welcome fails. The session then
+// never starts. Admitters with side effects (an epoch bump, a registry
+// row) should also implement AdmitAbandoner to undo them.
 type Admitter interface {
 	Admit(ctx context.Context, hello *conduitv1.Hello) (*conduitv1.Welcome, error)
 	// Refresh re-validates an in-band credential. An error closes the
 	// session with 4401 (or the *CloseError code).
 	Refresh(ctx context.Context, ar *conduitv1.AuthRefresh) error
+}
+
+// AdmitAbandoner is an optional extension of Admitter. Accept calls
+// AbandonAdmission exactly once for every successful Admit result it
+// discards (see Admitter), with the hello and the Welcome Admit returned.
+// It is never called for an Admit error or for a session that started.
+// The call runs in its own goroutine, after Accept may have returned,
+// under a fresh context bounded by the handshake timeout.
+type AdmitAbandoner interface {
+	AbandonAdmission(ctx context.Context, hello *conduitv1.Hello, welcome *conduitv1.Welcome)
 }
 
 // PendingStream is an inbound stream in the opening state.

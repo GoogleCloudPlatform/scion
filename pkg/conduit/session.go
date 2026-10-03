@@ -202,6 +202,7 @@ func Accept(ctx context.Context, conn transport.Conn, cfg Config, adm Admitter) 
 		s.rejectHandshake(code, rejectReason(err))
 		return nil, err
 	}
+	admitted := w
 	w = proto.Clone(w).(*conduitv1.Welcome)
 	if w.PingIntervalMs == 0 {
 		w.PingIntervalMs = uint32(cfg.PingInterval / time.Millisecond)
@@ -211,6 +212,7 @@ func Accept(ctx context.Context, conn transport.Conn, cfg Config, adm Admitter) 
 	}
 	if err := s.writeDirect(&conduitv1.Frame{Body: &conduitv1.Frame_Welcome{Welcome: w}}); err != nil {
 		_ = conn.Close()
+		s.abandonAdmission(ctx, hello, admitted)
 		return nil, err
 	}
 	s.setInfo(hello, w)
@@ -224,7 +226,11 @@ var errAdmitCancelled = errors.New("conduit: accept cancelled during admission")
 // admit runs adm.Admit bounded by the remaining handshake time d, on the
 // session clock. At the deadline it returns a CloseRelayTimeout error even
 // if Admit ignores its context; a result Admit returns later is dropped.
-// The deadline wins a tie with a result that arrives as it fires.
+// The deadline wins a tie with a result that arrives as it fires. If ctx
+// ends first, or has ended by the time a result arrives, it returns
+// errAdmitCancelled so that Accept closes quietly instead of sending the
+// admitter's error (likely caused by the cancellation) as a rejection.
+// Every successful result it drops is handed to abandonAdmission.
 func (s *session) admit(ctx context.Context, hello *conduitv1.Hello, d time.Duration) (*conduitv1.Welcome, error) {
 	timeoutErr := &CloseError{Code: CloseRelayTimeout, Reason: "admission timed out"}
 	if d <= 0 {
@@ -242,19 +248,50 @@ func (s *session) admit(ctx context.Context, hello *conduitv1.Hello, d time.Dura
 		ch <- result{w, err}
 	}()
 	timeout, stop := clock.After(s.clk, d)
+	drop := func(r result) {
+		if r.err == nil && r.w != nil {
+			s.abandonAdmission(ctx, hello, r.w)
+		}
+	}
+	dropLate := func() { go func() { drop(<-ch) }() }
 	select {
 	case r := <-ch:
 		if !stop() {
+			drop(r)
 			return nil, timeoutErr
+		}
+		if ctx.Err() != nil {
+			drop(r)
+			return nil, errAdmitCancelled
 		}
 		return r.w, r.err
 	case <-timeout:
 		cancel(timeoutErr)
+		dropLate()
 		return nil, timeoutErr
 	case <-ctx.Done():
 		stop()
+		dropLate()
 		return nil, errAdmitCancelled
 	}
+}
+
+// abandonAdmission tells an AdmitAbandoner that the successful admission
+// of hello with w was discarded. It runs in its own goroutine under a
+// fresh context bounded by HandshakeTimeout on the session clock, keeping
+// ctx's values but not its cancellation, so Accept does not wait for it.
+func (s *session) abandonAdmission(ctx context.Context, hello *conduitv1.Hello, w *conduitv1.Welcome) {
+	ab, ok := s.adm.(AdmitAbandoner)
+	if !ok {
+		return
+	}
+	go func() {
+		actx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+		defer cancel()
+		t := s.clk.AfterFunc(s.cfg.HandshakeTimeout, cancel)
+		defer t.Stop()
+		ab.AbandonAdmission(actx, hello, w)
+	}()
 }
 
 func rejectReason(err error) string {
