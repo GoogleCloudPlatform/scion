@@ -1291,7 +1291,7 @@ export class ScionTokenList extends LitElement {
         <td>
           <span class="meta-text">
             ${token.expiresAt
-              ? formatInstantWithZone(token.expiresAt, 'date') || token.expiresAt
+              ? formatInstantWithZone(token.expiresAt) || token.expiresAt
               : '\u2014'}
           </span>
         </td>

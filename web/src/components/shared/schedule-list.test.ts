@@ -200,6 +200,29 @@ describe('scion-schedule-list next-run in the display zone', () => {
     expect(headers).toContain('Cron (UTC)');
   });
 
+  it('shows a next run days away in days, not hours, beside the labelled absolute', async () => {
+    useFakeNow();
+    setPreferredTimeZone('Asia/Tokyo');
+    // Three days after NEXT_RUN: still midnight in Tokyo.
+    const el = await mount([schedule({ name: 'weekly', nextRunAt: '2026-10-04T15:00:00Z' })]);
+    const row = rowFor(el, 'weekly');
+    expect(row.textContent).toContain('in 3 days');
+    expect(row.querySelector('.next-run-absolute')?.textContent?.trim()).toBe(
+      'Oct 5, 2026, 00:00 (Asia/Tokyo)'
+    );
+  });
+
+  it('shows "now" for an overdue next run', async () => {
+    useFakeNow();
+    setPreferredTimeZone('Asia/Tokyo');
+    const el = await mount([schedule({ name: 'late', nextRunAt: '2026-10-01T11:00:00Z' })]);
+    const row = rowFor(el, 'late');
+    const cells = Array.from(row.querySelectorAll('td')).map((td) => td.textContent ?? '');
+    const nextRunCell = cells.find((c) => c.includes('(Asia/Tokyo)')) ?? '';
+    expect(nextRunCell).toMatch(/^\s*now\b/);
+    expect(nextRunCell).not.toContain('ago');
+  });
+
   it('re-renders the next run when the display zone changes', async () => {
     useFakeNow();
     const el = await mount([schedule({ name: 'nightly', nextRunAt: NEXT_RUN })]);

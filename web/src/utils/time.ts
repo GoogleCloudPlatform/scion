@@ -370,8 +370,16 @@ export function formatRelativeTime(dateString: string): string {
  * ("3 hours ago") and future ("in 3 hours") instants. Zone-independent
  * (a duration, not a wall-clock time), so it uses only `FORMAT_LOCALE`.
  * Returns the original string on parse failure.
+ *
+ * `options.style` selects the `Intl.RelativeTimeFormat` style: `'long'`
+ * (default, "5 minutes ago"), `'short'` ("5 min. ago") or `'narrow'`
+ * ("5m ago"), for compact cells such as trays and dense tables.
  */
-export function formatRelative(iso: string): string {
+export interface FormatRelativeOptions {
+  style?: Intl.RelativeTimeFormatStyle;
+}
+
+export function formatRelative(iso: string, options: FormatRelativeOptions = {}): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;
 
@@ -381,7 +389,10 @@ export function formatRelative(iso: string): string {
   const diffHours = Math.round(diffMs / (1000 * 60 * 60));
   const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
 
-  const rtf = new Intl.RelativeTimeFormat(FORMAT_LOCALE, { numeric: 'auto' });
+  const rtf = new Intl.RelativeTimeFormat(FORMAT_LOCALE, {
+    numeric: 'auto',
+    style: options.style ?? 'long',
+  });
 
   if (Math.abs(diffSeconds) < 60) return rtf.format(diffSeconds, 'second');
   if (Math.abs(diffMinutes) < 60) return rtf.format(diffMinutes, 'minute');

@@ -32,7 +32,7 @@ import {
   fetchHubProjectCapabilities,
   seedHubProjectCapabilities,
 } from '../../client/hub-capabilities.js';
-import { formatInstantWithZone } from '../../utils/time.js';
+import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 interface InviteStats {
@@ -503,18 +503,13 @@ export class ScionPageHome extends LitElement {
 
   private formatRelativeTime(dateStr: string): string {
     if (!dateStr) return '';
-    const date = new Date(dateStr);
-    const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
-    const diffSecs = Math.floor(diffMs / 1000);
-    if (diffSecs < 60) return 'just now';
-    const diffMins = Math.floor(diffSecs / 60);
-    if (diffMins < 60) return `${diffMins}m ago`;
-    const diffHours = Math.floor(diffMins / 60);
-    if (diffHours < 24) return `${diffHours}h ago`;
-    const diffDays = Math.floor(diffHours / 24);
-    if (diffDays < 30) return `${diffDays}d ago`;
-    return formatInstantWithZone(dateStr, 'date') || dateStr;
+    const ms = new Date(dateStr).getTime();
+    if (Number.isNaN(ms)) return dateStr;
+    const diffMs = Date.now() - ms;
+    // A future instant is clock skew between hub and browser.
+    if (diffMs < 0) return 'just now';
+    if (diffMs < 30 * 24 * 60 * 60 * 1000) return formatRelative(dateStr, { style: 'narrow' });
+    return formatInstantWithZone(dateStr, 'date');
   }
 }
 

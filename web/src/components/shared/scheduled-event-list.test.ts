@@ -102,4 +102,28 @@ describe('scion-scheduled-event-list fire time in the display zone', () => {
     expect(cell?.textContent?.trim()).toBe('in 3 hours');
     expect(cell?.getAttribute('title')).toBe('Oct 2, 2026, 00:00 (Asia/Tokyo)');
   });
+
+  it('shows days for a far fire time and "now" for an overdue one', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-01T12:00:00Z'));
+    const event = (id: string, fireAt: string) => ({
+      id,
+      projectId: 'p1',
+      eventType: 'message',
+      fireAt,
+      payload: '{"agentName":"worker"}',
+      status: 'pending',
+      createdAt: '2026-10-01T11:00:00Z',
+      createdBy: 'u1',
+    });
+    const el = await mountWith([
+      event('far', '2026-10-04T12:00:00Z'),
+      event('late', '2026-10-01T11:00:00Z'),
+    ]);
+
+    const cells = Array.from(
+      el.shadowRoot!.querySelectorAll('tbody tr td:nth-child(3) span') as NodeListOf<Element>
+    ).map((c) => c.textContent?.trim());
+    expect(cells).toEqual(['in 3 days', 'now']);
+  });
 });

@@ -64,10 +64,10 @@ const BANNED_PATTERN =
  * them to `time.ts`: the four native-chat formatters (`chat-message.ts`,
  * `chat-date-divider.ts`, `chat-interagent-marker.ts`,
  * `chat-system-line.ts`) and `access-boundary-schedule-editor.ts` (its
- * `viewerTimeZone` getter). `admin-role-bindings.ts` and
- * `scheduled-event-list.ts` stay listed: this issue fixed only their
- * `datetime-local` parsing (now `parseWallClock`), not their own private
- * relative-time formatters, which a later P3 issue migrates.
+ * `viewerTimeZone` getter). `admin-role-bindings.ts` stays listed: that
+ * issue fixed only its `datetime-local` parsing (now `parseWallClock`), not
+ * its own private relative-time formatter, which tz-refactor task 20
+ * migrates.
  * `profile-settings.ts` stays listed for the "Agent timezone" section's
  * zone check, which tz-refactor task 13 removes along with the section.
  *

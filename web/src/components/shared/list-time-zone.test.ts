@@ -35,6 +35,8 @@ await import('./project-template-list.js');
 await import('./pre-start-hook-list.js');
 await import('../pages/broker-detail.js');
 await import('../pages/project-detail.js');
+await import('../pages/project-settings.js');
+await import('../pages/home.js');
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyEl = any;
@@ -79,7 +81,7 @@ describe('list and detail times in the display zone (tz-refactor task 19)', () =
     );
   });
 
-  it('token list shows the expiry date in the preferred zone, labelled', () => {
+  it('token list shows the expiry instant in the preferred zone, labelled', () => {
     setPreferredTimeZone('Asia/Tokyo');
     const text = renderText(
       element('scion-token-list').renderRow({
@@ -94,7 +96,7 @@ describe('list and detail times in the display zone (tz-refactor task 19)', () =
         created: '2026-09-01T00:00:00Z',
       })
     );
-    expect(text).toContain('Oct 2, 2026 (Asia/Tokyo)');
+    expect(text).toContain('Oct 2, 2026, 00:00 (Asia/Tokyo)');
   });
 
   it('project template list shows the created date in the preferred zone, labelled', () => {
@@ -108,6 +110,39 @@ describe('list and detail times in the display zone (tz-refactor task 19)', () =
       })
     );
     expect(text).toContain('Oct 2, 2026 (Asia/Tokyo)');
+  });
+
+  it('project settings shows the last token mint in the preferred zone, labelled', () => {
+    setPreferredTimeZone('Asia/Tokyo');
+    const el = element('scion-page-project-settings');
+    el.project = { id: 'p1', name: 'p', gitRemote: 'https://github.com/acme/repo' };
+    el.githubAppConfigured = true;
+    el.githubAppInstallationId = 42;
+    el.githubAppStatus = {
+      state: 'ok',
+      last_token_mint: MIDNIGHT_TOKYO,
+      last_checked: MIDNIGHT_TOKYO,
+    };
+    expect(renderText(el.renderGitHubAppSection())).toContain(
+      'Last Token Mint Oct 2, 2026, 00:00 (Asia/Tokyo)'
+    );
+  });
+
+  it('home shows items older than 30 days as a labelled date in the preferred zone', () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-11-15T00:00:00Z'));
+      setPreferredTimeZone('Asia/Tokyo');
+      const el = element('scion-page-home');
+      expect(el.formatRelativeTime(MIDNIGHT_TOKYO)).toBe('Oct 2, 2026 (Asia/Tokyo)');
+      // Within 30 days: compact relative time; future (clock skew): "just now".
+      expect(el.formatRelativeTime('2026-11-14T21:00:00Z')).toBe('3h ago');
+      expect(el.formatRelativeTime('2026-11-12T00:00:00Z')).toBe('3d ago');
+      expect(el.formatRelativeTime('2026-11-15T00:05:00Z')).toBe('just now');
+      expect(el.formatRelativeTime('')).toBe('');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('pre-start hook list shows the created date in the preferred zone, labelled', () => {
