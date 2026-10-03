@@ -336,7 +336,7 @@ func TestAggregateBufferBudgetEnforced(t *testing.T) {
 	}()
 	eventually(t, "writers finish", func() bool { return written.Load() == 2<<20 })
 	eventually(t, "rpc written", func() bool { return s.Stats().ControlFramesSent >= 3 }) // 2 opens + rpc
-	cancelCall() // the raw peer never answers
+	cancelCall()                                                                          // the raw peer never answers
 	<-callDone
 	if peak := s.Stats().PeakQueuedBytes; peak > budget {
 		t.Fatalf("peak queued %d exceeds budget %d", peak, budget)
