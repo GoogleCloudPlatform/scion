@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -96,11 +97,208 @@ func TestHubUAT_SuperAdminDeletesAgentInAnyProjectWhileAuthorityHolds(t *testing
 
 	deleteSystemBindings(t, s, adminID)
 
-	second := uatpAgent(t, s, projectQ, ownerQ, "slice-second", ownerQ)
+	// The second agent is owned by the admin, so the owner relationship
+	// grant alone would admit the delete. The project access stage of the
+	// bearer gate must deny it: a former super-admin with no membership in Q
+	// has no current access to Q.
+	emitter := &capturingAuditEmitter{}
+	srv.authzService.SetDecisionAuditEmitter(emitter)
+	second := uatpAgent(t, s, projectQ, adminID, "slice-second", adminID)
 	rec = doRequestWithUAT(t, srv, raw.Token, http.MethodDelete, "/api/v1/agents/"+second.ID, nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code, "after demotion the same hub token must be denied; got: %s", rec.Body.String())
+	assert.Contains(t, deniedAuditReasons(emitter, second.ID), bearerReasonProjectAccessDenied,
+		"the deny must come from the project access stage of the bearer gate")
 	_, err = s.GetAgent(ctx, second.ID)
 	assert.NoError(t, err, "a denied delete must leave the agent in place")
+}
+
+// deniedAuditReasons returns the reasons of every captured deny decision
+// whose resource ID is resourceID.
+func deniedAuditReasons(e *capturingAuditEmitter, resourceID string) []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var reasons []string
+	for _, r := range e.records {
+		if r.ResourceID == resourceID && r.Result == "deny" {
+			reasons = append(reasons, r.Reason)
+		}
+	}
+	return reasons
+}
+
+// hubUATFixture is a super-admin holding a hub token carrying agent:delete,
+// and an agent in a project the super-admin is not a member of.
+type hubUATFixture struct {
+	srv     *Server
+	store   store.Store
+	adminID string
+	tokenID string
+	key     string
+	agent   *store.Agent
+}
+
+func newHubUATFixture(t *testing.T, name string) hubUATFixture {
+	t.Helper()
+	srv, s := testServer(t)
+	projectQ := tid("hubuat-" + name + "-project-q")
+	ownerQ := tid("hubuat-" + name + "-owner-q")
+	adminID := tid("hubuat-" + name + "-admin")
+	createRS1Project(t, s, projectQ, ownerQ)
+	createTestUserWithRole(t, s, adminID, adminID+"@test.com", "admin", store.SystemRoleSuperAdmin)
+
+	key, token, err := srv.uatService.CreateTokenWithParams(rs4MintContext(adminID), CreateTokenParams{
+		UserID: adminID, Name: "hubuat-" + name, Boundary: TokenBoundary{Kind: BoundaryKindHub}, Scopes: []string{"agent:delete"},
+	})
+	require.NoError(t, err)
+	return hubUATFixture{
+		srv: srv, store: s, adminID: adminID, tokenID: token.ID, key: key,
+		agent: uatpAgent(t, s, projectQ, ownerQ, name, ownerQ),
+	}
+}
+
+// requireAgentKept asserts that the fixture agent still exists.
+func (f hubUATFixture) requireAgentKept(t *testing.T) {
+	t.Helper()
+	_, err := f.store.GetAgent(context.Background(), f.agent.ID)
+	assert.NoError(t, err, "a rejected request must leave the agent in place")
+}
+
+// TestHubUAT_RevokedTokenRejected pins that a revoked hub token is
+// rejected with 401 before authorization.
+func TestHubUAT_RevokedTokenRejected(t *testing.T) {
+	f := newHubUATFixture(t, "revoked")
+	require.NoError(t, f.srv.uatService.RevokeToken(rs4MintContext(f.adminID), f.adminID, f.tokenID))
+
+	rec := doRequestWithUAT(t, f.srv, f.key, http.MethodDelete, "/api/v1/agents/"+f.agent.ID, nil)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	f.requireAgentKept(t)
+}
+
+// TestHubUAT_ExpiredTokenRejected pins that a hub token past its expiry is
+// rejected with 401 before authorization.
+func TestHubUAT_ExpiredTokenRejected(t *testing.T) {
+	// Mint against a service clock set in 2020 with an expiry one day
+	// later, so the stored token is expired when it is validated.
+	mintClock := time.Date(2020, time.January, 1, 0, 0, 0, 0, time.UTC)
+	expiresAt := mintClock.Add(24 * time.Hour)
+
+	srv, s := testServer(t)
+	projectQ := tid("hubuat-expired-project-q")
+	ownerQ := tid("hubuat-expired-owner-q")
+	adminID := tid("hubuat-expired-admin")
+	createRS1Project(t, s, projectQ, ownerQ)
+	createTestUserWithRole(t, s, adminID, adminID+"@test.com", "admin", store.SystemRoleSuperAdmin)
+
+	serviceClock := srv.uatService.nowFunc
+	srv.uatService.nowFunc = func() time.Time { return mintClock }
+	key, _, err := srv.uatService.CreateTokenWithParams(rs4MintContext(adminID), CreateTokenParams{
+		UserID: adminID, Name: "hubuat-expired", Boundary: TokenBoundary{Kind: BoundaryKindHub}, Scopes: []string{"agent:delete"}, ExpiresAt: &expiresAt,
+	})
+	srv.uatService.nowFunc = serviceClock
+	require.NoError(t, err)
+
+	agent := uatpAgent(t, s, projectQ, ownerQ, "expired", ownerQ)
+	rec := doRequestWithUAT(t, srv, key, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	_, err = s.GetAgent(context.Background(), agent.ID)
+	assert.NoError(t, err, "a rejected request must leave the agent in place")
+}
+
+// TestHubUAT_SuspendedUserRejected pins that a hub token whose user is
+// suspended is rejected with 403 user_suspended before authorization.
+func TestHubUAT_SuspendedUserRejected(t *testing.T) {
+	f := newHubUATFixture(t, "suspended")
+	ctx := context.Background()
+	admin := mustGetUser(t, f.store, f.adminID)
+	admin.Status = store.UserStatusSuspended
+	require.NoError(t, f.store.UpdateUser(ctx, admin))
+
+	rec := doRequestWithUAT(t, f.srv, f.key, http.MethodDelete, "/api/v1/agents/"+f.agent.ID, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	assert.Equal(t, "user_suspended", errResp.Error.Code)
+	f.requireAgentKept(t)
+}
+
+// TestHubUAT_FormerMemberRetainedAncestryDenied pins that a hub token
+// reaches a project target only with current project access: a former
+// member of Q who still owns, and is in the ancestry of, an agent in Q is
+// denied read and attach at the project access stage, before relationship
+// grants are considered.
+func TestHubUAT_FormerMemberRetainedAncestryDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	projectQ := tid("hubuat-former-project-q")
+	ownerQ := tid("hubuat-former-owner-q")
+	memberID := tid("hubuat-former-member")
+	createRS1Project(t, s, projectQ, ownerQ)
+	uatpMember(t, s, projectQ, memberID)
+	agent := uatpAgent(t, s, projectQ, memberID, "former", memberID)
+
+	selectors := []string{"agent:read", "agent:attach"}
+	key, _, err := srv.uatService.CreateTokenWithParams(rs4MintContext(memberID), CreateTokenParams{
+		UserID: memberID, Name: "hubuat-former", Boundary: TokenBoundary{Kind: BoundaryKindHub}, Scopes: selectors,
+	})
+	require.NoError(t, err, "a member of Q may mint a hub token for its own agent")
+
+	// While a member, the token reaches the agent.
+	rec := doRequestWithUAT(t, srv, key, http.MethodGet, "/api/v1/agents/"+agent.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	uatpDeleteProjectBinding(t, s, memberID, projectQ)
+
+	emitter := &capturingAuditEmitter{}
+	srv.authzService.SetDecisionAuditEmitter(emitter)
+	rec = doRequestWithUAT(t, srv, key, http.MethodGet, "/api/v1/agents/"+agent.ID, nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "read: %s", rec.Body.String())
+	rec = doRequestWithUAT(t, srv, key, http.MethodGet, "/api/v1/agents/"+agent.ID+"/pty", nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "attach: %s", rec.Body.String())
+	reasons := deniedAuditReasons(emitter, agent.ID)
+	assert.NotEmpty(t, reasons)
+	for _, reason := range reasons {
+		assert.Equal(t, bearerReasonProjectAccessDenied, reason)
+	}
+
+	ceiling := bearerCeiling(t, selectors...)
+	for _, permID := range []string{"agent.read", "agent.attach"} {
+		eval := srv.authzService.EvaluateBearerCeiling(ctx, PrincipalContext{Identity: bearerUser(memberID)}, hubBoundary(), ceiling, permID, agentResource(agent), BearerOptions{})
+		assert.False(t, eval.Decision.Allowed, "%s: %s", permID, eval.Decision.Reason)
+		assert.Equal(t, BearerStageProjectAccess, eval.Stage, permID)
+	}
+}
+
+// TestProjectRegisterEmbeddedBroker_HubUATDenied pins that a hub token
+// carrying broker:create cannot register a project with an embedded
+// broker: the request is denied with 403 and creates neither a broker nor
+// a project.
+func TestProjectRegisterEmbeddedBroker_HubUATDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	projectID := tid("embedded-hubuat-project")
+	ownerID := tid("embedded-hubuat-owner")
+	createRS1Project(t, s, projectID, ownerID)
+	grantPermissionViaRoleBinding(t, s, ownerID, "broker.create", store.RoleScopeSystem, "")
+	grantPermissionViaRoleBinding(t, s, ownerID, "project.create", store.RoleScopeSystem, "")
+
+	key, _, err := srv.uatService.CreateTokenWithParams(rs4MintContext(ownerID), CreateTokenParams{
+		UserID: ownerID, Name: "embedded-hubuat", Boundary: TokenBoundary{Kind: BoundaryKindHub}, Scopes: []string{"broker:create"},
+	})
+	require.NoError(t, err)
+
+	const brokerName = "embedded-hubuat-broker"
+	const projectName = "embedded-hubuat-new-project"
+	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
+		Name:   projectName,
+		Broker: &RegisterProjectBrokerInfo{Name: brokerName, Version: "1.0.0"},
+	})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "secretKey", "a denied response carries no secret")
+
+	_, err = s.GetRuntimeBrokerByName(ctx, brokerName)
+	assert.ErrorIs(t, err, store.ErrNotFound, "a denied registration creates no broker")
+	_, err = s.GetProjectBySlugCaseInsensitive(ctx, api.Slugify(projectName))
+	assert.ErrorIs(t, err, store.ErrNotFound, "a denied registration creates no project")
 }
 
 // TestHubUAT_CeilingWithoutPermissionDenies pins that a hub token can do
@@ -146,8 +344,12 @@ func TestHubUAT_MemberReachesOnlyProjectsWithAccess(t *testing.T) {
 
 	rec := doRequestWithUAT(t, srv, key, http.MethodGet, "/api/v1/agents/"+own.ID, nil)
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	emitter := &capturingAuditEmitter{}
+	srv.authzService.SetDecisionAuditEmitter(emitter)
 	rec = doRequestWithUAT(t, srv, key, http.MethodGet, "/api/v1/agents/"+other.ID, nil)
 	assert.Contains(t, []int{http.StatusForbidden, http.StatusNotFound}, rec.Code, rec.Body.String())
+	assert.Contains(t, deniedAuditReasons(emitter, other.ID), bearerReasonProjectAccessDenied,
+		"the deny must come from the project access stage of the bearer gate")
 }
 
 // TestCreateToken_HubBoundaryRequiresLiveAuthority pins that a hub
