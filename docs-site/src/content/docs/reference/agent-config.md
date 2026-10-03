@@ -153,9 +153,12 @@ kubernetes:
   serviceAccountName: "workload-identity-sa"
   runtimeClassName: "gvisor"
   priorityClassName: "scion-agent-priority"
+  safeToEvict: false
 ```
 
 `priorityClassName` must name a `PriorityClass` that already exists on the cluster — Scion does not create one — and overrides any `runtimes.<name>.priority_class_name` default set in `settings.yaml`. See [Running Scion on Kubernetes](/scion/hosted/ha/kubernetes/#pod-priority-and-preemption) for why to set it.
+
+`safeToEvict: false` adds the `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` annotation to the pod. It overrides `safe_to_evict` on the profile and the runtime entry, and an explicit `true` turns the annotation off. See [Safe-to-Evict](/scion/hosted/ha/kubernetes/#safe-to-evict).
 
 ## Resolution Logic
 

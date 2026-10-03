@@ -126,6 +126,10 @@ func (g staticTokenGenerator) GenerateAgentToken(string, string, []string, Agent
 	return g.token, nil
 }
 
+func (g staticTokenGenerator) GenerateAgentTokenForAgent(context.Context, *store.Agent) (string, error) {
+	return g.token, nil
+}
+
 func newResetAuthDispatcher(t *testing.T) (*HTTPAgentDispatcher, *mockRuntimeBrokerClient, *store.Agent) {
 	t.Helper()
 	ctx := context.Background()

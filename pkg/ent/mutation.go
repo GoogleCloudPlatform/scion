@@ -22574,24 +22574,48 @@ func (m *DecisionAuditMutation) ResetEdge(name string) error {
 // DelegationEdgeMutation represents an operation that mutates the DelegationEdge nodes in the graph.
 type DelegationEdgeMutation struct {
 	config
-	op             Op
-	typ            string
-	id             *uuid.UUID
-	delegator_type *delegationedge.DelegatorType
-	delegator_id   *string
-	delegate_type  *delegationedge.DelegateType
-	delegate_id    *string
-	scope_type     *delegationedge.ScopeType
-	scope_id       *string
-	role           *string
-	active         *bool
-	grandfathered  *bool
-	created        *time.Time
-	updated        *time.Time
-	clearedFields  map[string]struct{}
-	done           bool
-	oldValue       func(context.Context) (*DelegationEdge, error)
-	predicates     []predicate.DelegationEdge
+	op                               Op
+	typ                              string
+	id                               *uuid.UUID
+	provenance_version               *int
+	addprovenance_version            *int
+	source_principal_kind            *string
+	source_principal_id              *string
+	source_credential_kind           *string
+	source_credential_id             *string
+	source_event_id                  *string
+	source_schedule_id               *string
+	source_authorization_revision    *int
+	addsource_authorization_revision *int
+	initiator_principal_kind         *string
+	initiator_principal_id           *string
+	initiator_credential_kind        *string
+	initiator_credential_id          *string
+	ceiling_kind                     *string
+	ceiling_version                  *int32
+	addceiling_version               *int32
+	ceiling_permission_ids           *string
+	ceiling_boundary_kind            *string
+	ceiling_boundary_project_id      *string
+	ceiling_source_expires_at        *time.Time
+	deactivation_cause               *string
+	deactivated_at                   *time.Time
+	deactivation_op_id               *string
+	delegator_type                   *delegationedge.DelegatorType
+	delegator_id                     *string
+	delegate_type                    *delegationedge.DelegateType
+	delegate_id                      *string
+	scope_type                       *delegationedge.ScopeType
+	scope_id                         *string
+	role                             *string
+	active                           *bool
+	grandfathered                    *bool
+	created                          *time.Time
+	updated                          *time.Time
+	clearedFields                    map[string]struct{}
+	done                             bool
+	oldValue                         func(context.Context) (*DelegationEdge, error)
+	predicates                       []predicate.DelegationEdge
 }
 
 var _ ent.Mutation = (*DelegationEdgeMutation)(nil)
@@ -22696,6 +22720,874 @@ func (m *DelegationEdgeMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
 	default:
 		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
 	}
+}
+
+// SetProvenanceVersion sets the "provenance_version" field.
+func (m *DelegationEdgeMutation) SetProvenanceVersion(i int) {
+	m.provenance_version = &i
+	m.addprovenance_version = nil
+}
+
+// ProvenanceVersion returns the value of the "provenance_version" field in the mutation.
+func (m *DelegationEdgeMutation) ProvenanceVersion() (r int, exists bool) {
+	v := m.provenance_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldProvenanceVersion returns the old "provenance_version" field's value of the DelegationEdge entity.
+// If the DelegationEdge object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationEdgeMutation) OldProvenanceVersion(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldProvenanceVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldProvenanceVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldProvenanceVersion: %w", err)
+	}
+	return oldValue.ProvenanceVersion, nil
+}
+
+// AddProvenanceVersion adds i to the "provenance_version" field.
+func (m *DelegationEdgeMutation) AddProvenanceVersion(i int) {
+	if m.addprovenance_version != nil {
+		*m.addprovenance_version += i
+	} else {
+		m.addprovenance_version = &i
+	}
+}
+
+// AddedProvenanceVersion returns the value that was added to the "provenance_version" field in this mutation.
+func (m *DelegationEdgeMutation) AddedProvenanceVersion() (r int, exists bool) {
+	v := m.addprovenance_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetProvenanceVersion resets all changes to the "provenance_version" field.
+func (m *DelegationEdgeMutation) ResetProvenanceVersion() {
+	m.provenance_version = nil
+	m.addprovenance_version = nil
+}
+
+// SetSourcePrincipalKind sets the "source_principal_kind" field.
+func (m *DelegationEdgeMutation) SetSourcePrincipalKind(s string) {
+	m.source_principal_kind = &s
+}
+
+// SourcePrincipalKind returns the value of the "source_principal_kind" field in the mutation.
+func (m *DelegationEdgeMutation) SourcePrincipalKind() (r string, exists bool) {
+	v := m.source_principal_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourcePrincipalKind returns the old "source_principal_kind" field's value of the DelegationEdge entity.
+// If the DelegationEdge object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationEdgeMutation) OldSourcePrincipalKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourcePrincipalKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourcePrincipalKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourcePrincipalKind: %w", err)
+	}
+	return oldValue.SourcePrincipalKind, nil
+}
+
+// ResetSourcePrincipalKind resets all changes to the "source_principal_kind" field.
+func (m *DelegationEdgeMutation) ResetSourcePrincipalKind() {
+	m.source_principal_kind = nil
+}
+
+// SetSourcePrincipalID sets the "source_principal_id" field.
+func (m *DelegationEdgeMutation) SetSourcePrincipalID(s string) {
+	m.source_principal_id = &s
+}
+
+// SourcePrincipalID returns the value of the "source_principal_id" field in the mutation.
+func (m *DelegationEdgeMutation) SourcePrincipalID() (r string, exists bool) {
+	v := m.source_principal_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourcePrincipalID returns the old "source_principal_id" field's value of the DelegationEdge entity.
+// If the DelegationEdge object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationEdgeMutation) OldSourcePrincipalID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourcePrincipalID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourcePrincipalID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourcePrincipalID: %w", err)
+	}
+	return oldValue.SourcePrincipalID, nil
+}
+
+// ResetSourcePrincipalID resets all changes to the "source_principal_id" field.
+func (m *DelegationEdgeMutation) ResetSourcePrincipalID() {
+	m.source_principal_id = nil
+}
+
+// SetSourceCredentialKind sets the "source_credential_kind" field.
+func (m *DelegationEdgeMutation) SetSourceCredentialKind(s string) {
+	m.source_credential_kind = &s
+}
+
+// SourceCredentialKind returns the value of the "source_credential_kind" field in the mutation.
+func (m *DelegationEdgeMutation) SourceCredentialKind() (r string, exists bool) {
+	v := m.source_credential_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourceCredentialKind returns the old "source_credential_kind" field's value of the DelegationEdge entity.
+// If the DelegationEdge object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationEdgeMutation) OldSourceCredentialKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourceCredentialKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourceCredentialKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourceCredentialKind: %w", err)
+	}
+	return oldValue.SourceCredentialKind, nil
+}
+
+// ResetSourceCredentialKind resets all changes to the "source_credential_kind" field.
+func (m *DelegationEdgeMutation) ResetSourceCredentialKind() {
+	m.source_credential_kind = nil
+}
+
+// SetSourceCredentialID sets the "source_credential_id" field.
+func (m *DelegationEdgeMutation) SetSourceCredentialID(s string) {
+	m.source_credential_id = &s
+}
+
+// SourceCredentialID returns the value of the "source_credential_id" field in the mutation.
+func (m *DelegationEdgeMutation) SourceCredentialID() (r string, exists bool) {
+	v := m.source_credential_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourceCredentialID returns the old "source_credential_id" field's value of the DelegationEdge entity.
+// If the DelegationEdge object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationEdgeMutation) OldSourceCredentialID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourceCredentialID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourceCredentialID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourceCredentialID: %w", err)
+	}
+	return oldValue.SourceCredentialID, nil
+}
+
+// ResetSourceCredentialID resets all changes to the "source_credential_id" field.
+func (m *DelegationEdgeMutation) ResetSourceCredentialID() {
+	m.source_credential_id = nil
+}
+
+// SetSourceEventID sets the "source_event_id" field.
+func (m *DelegationEdgeMutation) SetSourceEventID(s string) {
+	m.source_event_id = &s
+}
+
+// SourceEventID returns the value of the "source_event_id" field in the mutation.
+func (m *DelegationEdgeMutation) SourceEventID() (r string, exists bool) {
+	v := m.source_event_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourceEventID returns the old "source_event_id" field's value of the DelegationEdge entity.
+// If the DelegationEdge object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationEdgeMutation) OldSourceEventID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourceEventID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourceEventID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourceEventID: %w", err)
+	}
+	return oldValue.SourceEventID, nil
+}
+
+// ResetSourceEventID resets all changes to the "source_event_id" field.
+func (m *DelegationEdgeMutation) ResetSourceEventID() {
+	m.source_event_id = nil
+}
+
+// SetSourceScheduleID sets the "source_schedule_id" field.
+func (m *DelegationEdgeMutation) SetSourceScheduleID(s string) {
+	m.source_schedule_id = &s
+}
+
+// SourceScheduleID returns the value of the "source_schedule_id" field in the mutation.
+func (m *DelegationEdgeMutation) SourceScheduleID() (r string, exists bool) {
+	v := m.source_schedule_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourceScheduleID returns the old "source_schedule_id" field's value of the DelegationEdge entity.
+// If the DelegationEdge object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationEdgeMutation) OldSourceScheduleID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourceScheduleID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourceScheduleID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourceScheduleID: %w", err)
+	}
+	return oldValue.SourceScheduleID, nil
+}
+
+// ClearSourceScheduleID clears the value of the "source_schedule_id" field.
+func (m *DelegationEdgeMutation) ClearSourceScheduleID() {
+	m.source_schedule_id = nil
+	m.clearedFields[delegationedge.FieldSourceScheduleID] = struct{}{}
+}
+
+// SourceScheduleIDCleared returns if the "source_schedule_id" field was cleared in this mutation.
+func (m *DelegationEdgeMutation) SourceScheduleIDCleared() bool {
+	_, ok := m.clearedFields[delegationedge.FieldSourceScheduleID]
+	return ok
+}
+
+// ResetSourceScheduleID resets all changes to the "source_schedule_id" field.
+func (m *DelegationEdgeMutation) ResetSourceScheduleID() {
+	m.source_schedule_id = nil
+	delete(m.clearedFields, delegationedge.FieldSourceScheduleID)
+}
+
+// SetSourceAuthorizationRevision sets the "source_authorization_revision" field.
+func (m *DelegationEdgeMutation) SetSourceAuthorizationRevision(i int) {
+	m.source_authorization_revision = &i
+	m.addsource_authorization_revision = nil
+}
+
+// SourceAuthorizationRevision returns the value of the "source_authorization_revision" field in the mutation.
+func (m *DelegationEdgeMutation) SourceAuthorizationRevision() (r int, exists bool) {
+	v := m.source_authorization_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourceAuthorizationRevision returns the old "source_authorization_revision" field's value of the DelegationEdge entity.
+// If the DelegationEdge object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationEdgeMutation) OldSourceAuthorizationRevision(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourceAuthorizationRevision is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourceAuthorizationRevision requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourceAuthorizationRevision: %w", err)
+	}
+	return oldValue.SourceAuthorizationRevision, nil
+}
+
+// AddSourceAuthorizationRevision adds i to the "source_authorization_revision" field.
+func (m *DelegationEdgeMutation) AddSourceAuthorizationRevision(i int) {
+	if m.addsource_authorization_revision != nil {
+		*m.addsource_authorization_revision += i
+	} else {
+		m.addsource_authorization_revision = &i
+	}
+}
+
+// AddedSourceAuthorizationRevision returns the value that was added to the "source_authorization_revision" field in this mutation.
+func (m *DelegationEdgeMutation) AddedSourceAuthorizationRevision() (r int, exists bool) {
+	v := m.addsource_authorization_revision
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetSourceAuthorizationRevision resets all changes to the "source_authorization_revision" field.
+func (m *DelegationEdgeMutation) ResetSourceAuthorizationRevision() {
+	m.source_authorization_revision = nil
+	m.addsource_authorization_revision = nil
+}
+
+// SetInitiatorPrincipalKind sets the "initiator_principal_kind" field.
+func (m *DelegationEdgeMutation) SetInitiatorPrincipalKind(s string) {
+	m.initiator_principal_kind = &s
+}
+
+// InitiatorPrincipalKind returns the value of the "initiator_principal_kind" field in the mutation.
+func (m *DelegationEdgeMutation) InitiatorPrincipalKind() (r string, exists bool) {
+	v := m.initiator_principal_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorPrincipalKind returns the old "initiator_principal_kind" field's value of the DelegationEdge entity.
+// If the DelegationEdge object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationEdgeMutation) OldInitiatorPrincipalKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorPrincipalKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorPrincipalKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorPrincipalKind: %w", err)
+	}
+	return oldValue.InitiatorPrincipalKind, nil
+}
+
+// ResetInitiatorPrincipalKind resets all changes to the "initiator_principal_kind" field.
+func (m *DelegationEdgeMutation) ResetInitiatorPrincipalKind() {
+	m.initiator_principal_kind = nil
+}
+
+// SetInitiatorPrincipalID sets the "initiator_principal_id" field.
+func (m *DelegationEdgeMutation) SetInitiatorPrincipalID(s string) {
+	m.initiator_principal_id = &s
+}
+
+// InitiatorPrincipalID returns the value of the "initiator_principal_id" field in the mutation.
+func (m *DelegationEdgeMutation) InitiatorPrincipalID() (r string, exists bool) {
+	v := m.initiator_principal_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorPrincipalID returns the old "initiator_principal_id" field's value of the DelegationEdge entity.
+// If the DelegationEdge object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationEdgeMutation) OldInitiatorPrincipalID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorPrincipalID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorPrincipalID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorPrincipalID: %w", err)
+	}
+	return oldValue.InitiatorPrincipalID, nil
+}
+
+// ResetInitiatorPrincipalID resets all changes to the "initiator_principal_id" field.
+func (m *DelegationEdgeMutation) ResetInitiatorPrincipalID() {
+	m.initiator_principal_id = nil
+}
+
+// SetInitiatorCredentialKind sets the "initiator_credential_kind" field.
+func (m *DelegationEdgeMutation) SetInitiatorCredentialKind(s string) {
+	m.initiator_credential_kind = &s
+}
+
+// InitiatorCredentialKind returns the value of the "initiator_credential_kind" field in the mutation.
+func (m *DelegationEdgeMutation) InitiatorCredentialKind() (r string, exists bool) {
+	v := m.initiator_credential_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorCredentialKind returns the old "initiator_credential_kind" field's value of the DelegationEdge entity.
+// If the DelegationEdge object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationEdgeMutation) OldInitiatorCredentialKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorCredentialKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorCredentialKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorCredentialKind: %w", err)
+	}
+	return oldValue.InitiatorCredentialKind, nil
+}
+
+// ResetInitiatorCredentialKind resets all changes to the "initiator_credential_kind" field.
+func (m *DelegationEdgeMutation) ResetInitiatorCredentialKind() {
+	m.initiator_credential_kind = nil
+}
+
+// SetInitiatorCredentialID sets the "initiator_credential_id" field.
+func (m *DelegationEdgeMutation) SetInitiatorCredentialID(s string) {
+	m.initiator_credential_id = &s
+}
+
+// InitiatorCredentialID returns the value of the "initiator_credential_id" field in the mutation.
+func (m *DelegationEdgeMutation) InitiatorCredentialID() (r string, exists bool) {
+	v := m.initiator_credential_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInitiatorCredentialID returns the old "initiator_credential_id" field's value of the DelegationEdge entity.
+// If the DelegationEdge object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationEdgeMutation) OldInitiatorCredentialID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInitiatorCredentialID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInitiatorCredentialID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInitiatorCredentialID: %w", err)
+	}
+	return oldValue.InitiatorCredentialID, nil
+}
+
+// ResetInitiatorCredentialID resets all changes to the "initiator_credential_id" field.
+func (m *DelegationEdgeMutation) ResetInitiatorCredentialID() {
+	m.initiator_credential_id = nil
+}
+
+// SetCeilingKind sets the "ceiling_kind" field.
+func (m *DelegationEdgeMutation) SetCeilingKind(s string) {
+	m.ceiling_kind = &s
+}
+
+// CeilingKind returns the value of the "ceiling_kind" field in the mutation.
+func (m *DelegationEdgeMutation) CeilingKind() (r string, exists bool) {
+	v := m.ceiling_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCeilingKind returns the old "ceiling_kind" field's value of the DelegationEdge entity.
+// If the DelegationEdge object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationEdgeMutation) OldCeilingKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCeilingKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCeilingKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCeilingKind: %w", err)
+	}
+	return oldValue.CeilingKind, nil
+}
+
+// ResetCeilingKind resets all changes to the "ceiling_kind" field.
+func (m *DelegationEdgeMutation) ResetCeilingKind() {
+	m.ceiling_kind = nil
+}
+
+// SetCeilingVersion sets the "ceiling_version" field.
+func (m *DelegationEdgeMutation) SetCeilingVersion(i int32) {
+	m.ceiling_version = &i
+	m.addceiling_version = nil
+}
+
+// CeilingVersion returns the value of the "ceiling_version" field in the mutation.
+func (m *DelegationEdgeMutation) CeilingVersion() (r int32, exists bool) {
+	v := m.ceiling_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCeilingVersion returns the old "ceiling_version" field's value of the DelegationEdge entity.
+// If the DelegationEdge object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationEdgeMutation) OldCeilingVersion(ctx context.Context) (v int32, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCeilingVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCeilingVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCeilingVersion: %w", err)
+	}
+	return oldValue.CeilingVersion, nil
+}
+
+// AddCeilingVersion adds i to the "ceiling_version" field.
+func (m *DelegationEdgeMutation) AddCeilingVersion(i int32) {
+	if m.addceiling_version != nil {
+		*m.addceiling_version += i
+	} else {
+		m.addceiling_version = &i
+	}
+}
+
+// AddedCeilingVersion returns the value that was added to the "ceiling_version" field in this mutation.
+func (m *DelegationEdgeMutation) AddedCeilingVersion() (r int32, exists bool) {
+	v := m.addceiling_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetCeilingVersion resets all changes to the "ceiling_version" field.
+func (m *DelegationEdgeMutation) ResetCeilingVersion() {
+	m.ceiling_version = nil
+	m.addceiling_version = nil
+}
+
+// SetCeilingPermissionIds sets the "ceiling_permission_ids" field.
+func (m *DelegationEdgeMutation) SetCeilingPermissionIds(s string) {
+	m.ceiling_permission_ids = &s
+}
+
+// CeilingPermissionIds returns the value of the "ceiling_permission_ids" field in the mutation.
+func (m *DelegationEdgeMutation) CeilingPermissionIds() (r string, exists bool) {
+	v := m.ceiling_permission_ids
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCeilingPermissionIds returns the old "ceiling_permission_ids" field's value of the DelegationEdge entity.
+// If the DelegationEdge object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationEdgeMutation) OldCeilingPermissionIds(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCeilingPermissionIds is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCeilingPermissionIds requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCeilingPermissionIds: %w", err)
+	}
+	return oldValue.CeilingPermissionIds, nil
+}
+
+// ClearCeilingPermissionIds clears the value of the "ceiling_permission_ids" field.
+func (m *DelegationEdgeMutation) ClearCeilingPermissionIds() {
+	m.ceiling_permission_ids = nil
+	m.clearedFields[delegationedge.FieldCeilingPermissionIds] = struct{}{}
+}
+
+// CeilingPermissionIdsCleared returns if the "ceiling_permission_ids" field was cleared in this mutation.
+func (m *DelegationEdgeMutation) CeilingPermissionIdsCleared() bool {
+	_, ok := m.clearedFields[delegationedge.FieldCeilingPermissionIds]
+	return ok
+}
+
+// ResetCeilingPermissionIds resets all changes to the "ceiling_permission_ids" field.
+func (m *DelegationEdgeMutation) ResetCeilingPermissionIds() {
+	m.ceiling_permission_ids = nil
+	delete(m.clearedFields, delegationedge.FieldCeilingPermissionIds)
+}
+
+// SetCeilingBoundaryKind sets the "ceiling_boundary_kind" field.
+func (m *DelegationEdgeMutation) SetCeilingBoundaryKind(s string) {
+	m.ceiling_boundary_kind = &s
+}
+
+// CeilingBoundaryKind returns the value of the "ceiling_boundary_kind" field in the mutation.
+func (m *DelegationEdgeMutation) CeilingBoundaryKind() (r string, exists bool) {
+	v := m.ceiling_boundary_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCeilingBoundaryKind returns the old "ceiling_boundary_kind" field's value of the DelegationEdge entity.
+// If the DelegationEdge object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationEdgeMutation) OldCeilingBoundaryKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCeilingBoundaryKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCeilingBoundaryKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCeilingBoundaryKind: %w", err)
+	}
+	return oldValue.CeilingBoundaryKind, nil
+}
+
+// ResetCeilingBoundaryKind resets all changes to the "ceiling_boundary_kind" field.
+func (m *DelegationEdgeMutation) ResetCeilingBoundaryKind() {
+	m.ceiling_boundary_kind = nil
+}
+
+// SetCeilingBoundaryProjectID sets the "ceiling_boundary_project_id" field.
+func (m *DelegationEdgeMutation) SetCeilingBoundaryProjectID(s string) {
+	m.ceiling_boundary_project_id = &s
+}
+
+// CeilingBoundaryProjectID returns the value of the "ceiling_boundary_project_id" field in the mutation.
+func (m *DelegationEdgeMutation) CeilingBoundaryProjectID() (r string, exists bool) {
+	v := m.ceiling_boundary_project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCeilingBoundaryProjectID returns the old "ceiling_boundary_project_id" field's value of the DelegationEdge entity.
+// If the DelegationEdge object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationEdgeMutation) OldCeilingBoundaryProjectID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCeilingBoundaryProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCeilingBoundaryProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCeilingBoundaryProjectID: %w", err)
+	}
+	return oldValue.CeilingBoundaryProjectID, nil
+}
+
+// ResetCeilingBoundaryProjectID resets all changes to the "ceiling_boundary_project_id" field.
+func (m *DelegationEdgeMutation) ResetCeilingBoundaryProjectID() {
+	m.ceiling_boundary_project_id = nil
+}
+
+// SetCeilingSourceExpiresAt sets the "ceiling_source_expires_at" field.
+func (m *DelegationEdgeMutation) SetCeilingSourceExpiresAt(t time.Time) {
+	m.ceiling_source_expires_at = &t
+}
+
+// CeilingSourceExpiresAt returns the value of the "ceiling_source_expires_at" field in the mutation.
+func (m *DelegationEdgeMutation) CeilingSourceExpiresAt() (r time.Time, exists bool) {
+	v := m.ceiling_source_expires_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCeilingSourceExpiresAt returns the old "ceiling_source_expires_at" field's value of the DelegationEdge entity.
+// If the DelegationEdge object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationEdgeMutation) OldCeilingSourceExpiresAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCeilingSourceExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCeilingSourceExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCeilingSourceExpiresAt: %w", err)
+	}
+	return oldValue.CeilingSourceExpiresAt, nil
+}
+
+// ClearCeilingSourceExpiresAt clears the value of the "ceiling_source_expires_at" field.
+func (m *DelegationEdgeMutation) ClearCeilingSourceExpiresAt() {
+	m.ceiling_source_expires_at = nil
+	m.clearedFields[delegationedge.FieldCeilingSourceExpiresAt] = struct{}{}
+}
+
+// CeilingSourceExpiresAtCleared returns if the "ceiling_source_expires_at" field was cleared in this mutation.
+func (m *DelegationEdgeMutation) CeilingSourceExpiresAtCleared() bool {
+	_, ok := m.clearedFields[delegationedge.FieldCeilingSourceExpiresAt]
+	return ok
+}
+
+// ResetCeilingSourceExpiresAt resets all changes to the "ceiling_source_expires_at" field.
+func (m *DelegationEdgeMutation) ResetCeilingSourceExpiresAt() {
+	m.ceiling_source_expires_at = nil
+	delete(m.clearedFields, delegationedge.FieldCeilingSourceExpiresAt)
+}
+
+// SetDeactivationCause sets the "deactivation_cause" field.
+func (m *DelegationEdgeMutation) SetDeactivationCause(s string) {
+	m.deactivation_cause = &s
+}
+
+// DeactivationCause returns the value of the "deactivation_cause" field in the mutation.
+func (m *DelegationEdgeMutation) DeactivationCause() (r string, exists bool) {
+	v := m.deactivation_cause
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeactivationCause returns the old "deactivation_cause" field's value of the DelegationEdge entity.
+// If the DelegationEdge object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationEdgeMutation) OldDeactivationCause(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeactivationCause is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeactivationCause requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeactivationCause: %w", err)
+	}
+	return oldValue.DeactivationCause, nil
+}
+
+// ResetDeactivationCause resets all changes to the "deactivation_cause" field.
+func (m *DelegationEdgeMutation) ResetDeactivationCause() {
+	m.deactivation_cause = nil
+}
+
+// SetDeactivatedAt sets the "deactivated_at" field.
+func (m *DelegationEdgeMutation) SetDeactivatedAt(t time.Time) {
+	m.deactivated_at = &t
+}
+
+// DeactivatedAt returns the value of the "deactivated_at" field in the mutation.
+func (m *DelegationEdgeMutation) DeactivatedAt() (r time.Time, exists bool) {
+	v := m.deactivated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeactivatedAt returns the old "deactivated_at" field's value of the DelegationEdge entity.
+// If the DelegationEdge object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationEdgeMutation) OldDeactivatedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeactivatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeactivatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeactivatedAt: %w", err)
+	}
+	return oldValue.DeactivatedAt, nil
+}
+
+// ClearDeactivatedAt clears the value of the "deactivated_at" field.
+func (m *DelegationEdgeMutation) ClearDeactivatedAt() {
+	m.deactivated_at = nil
+	m.clearedFields[delegationedge.FieldDeactivatedAt] = struct{}{}
+}
+
+// DeactivatedAtCleared returns if the "deactivated_at" field was cleared in this mutation.
+func (m *DelegationEdgeMutation) DeactivatedAtCleared() bool {
+	_, ok := m.clearedFields[delegationedge.FieldDeactivatedAt]
+	return ok
+}
+
+// ResetDeactivatedAt resets all changes to the "deactivated_at" field.
+func (m *DelegationEdgeMutation) ResetDeactivatedAt() {
+	m.deactivated_at = nil
+	delete(m.clearedFields, delegationedge.FieldDeactivatedAt)
+}
+
+// SetDeactivationOpID sets the "deactivation_op_id" field.
+func (m *DelegationEdgeMutation) SetDeactivationOpID(s string) {
+	m.deactivation_op_id = &s
+}
+
+// DeactivationOpID returns the value of the "deactivation_op_id" field in the mutation.
+func (m *DelegationEdgeMutation) DeactivationOpID() (r string, exists bool) {
+	v := m.deactivation_op_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeactivationOpID returns the old "deactivation_op_id" field's value of the DelegationEdge entity.
+// If the DelegationEdge object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationEdgeMutation) OldDeactivationOpID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeactivationOpID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeactivationOpID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeactivationOpID: %w", err)
+	}
+	return oldValue.DeactivationOpID, nil
+}
+
+// ResetDeactivationOpID resets all changes to the "deactivation_op_id" field.
+func (m *DelegationEdgeMutation) ResetDeactivationOpID() {
+	m.deactivation_op_id = nil
 }
 
 // SetDelegatorType sets the "delegator_type" field.
@@ -23128,7 +24020,70 @@ func (m *DelegationEdgeMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *DelegationEdgeMutation) Fields() []string {
-	fields := make([]string, 0, 11)
+	fields := make([]string, 0, 32)
+	if m.provenance_version != nil {
+		fields = append(fields, delegationedge.FieldProvenanceVersion)
+	}
+	if m.source_principal_kind != nil {
+		fields = append(fields, delegationedge.FieldSourcePrincipalKind)
+	}
+	if m.source_principal_id != nil {
+		fields = append(fields, delegationedge.FieldSourcePrincipalID)
+	}
+	if m.source_credential_kind != nil {
+		fields = append(fields, delegationedge.FieldSourceCredentialKind)
+	}
+	if m.source_credential_id != nil {
+		fields = append(fields, delegationedge.FieldSourceCredentialID)
+	}
+	if m.source_event_id != nil {
+		fields = append(fields, delegationedge.FieldSourceEventID)
+	}
+	if m.source_schedule_id != nil {
+		fields = append(fields, delegationedge.FieldSourceScheduleID)
+	}
+	if m.source_authorization_revision != nil {
+		fields = append(fields, delegationedge.FieldSourceAuthorizationRevision)
+	}
+	if m.initiator_principal_kind != nil {
+		fields = append(fields, delegationedge.FieldInitiatorPrincipalKind)
+	}
+	if m.initiator_principal_id != nil {
+		fields = append(fields, delegationedge.FieldInitiatorPrincipalID)
+	}
+	if m.initiator_credential_kind != nil {
+		fields = append(fields, delegationedge.FieldInitiatorCredentialKind)
+	}
+	if m.initiator_credential_id != nil {
+		fields = append(fields, delegationedge.FieldInitiatorCredentialID)
+	}
+	if m.ceiling_kind != nil {
+		fields = append(fields, delegationedge.FieldCeilingKind)
+	}
+	if m.ceiling_version != nil {
+		fields = append(fields, delegationedge.FieldCeilingVersion)
+	}
+	if m.ceiling_permission_ids != nil {
+		fields = append(fields, delegationedge.FieldCeilingPermissionIds)
+	}
+	if m.ceiling_boundary_kind != nil {
+		fields = append(fields, delegationedge.FieldCeilingBoundaryKind)
+	}
+	if m.ceiling_boundary_project_id != nil {
+		fields = append(fields, delegationedge.FieldCeilingBoundaryProjectID)
+	}
+	if m.ceiling_source_expires_at != nil {
+		fields = append(fields, delegationedge.FieldCeilingSourceExpiresAt)
+	}
+	if m.deactivation_cause != nil {
+		fields = append(fields, delegationedge.FieldDeactivationCause)
+	}
+	if m.deactivated_at != nil {
+		fields = append(fields, delegationedge.FieldDeactivatedAt)
+	}
+	if m.deactivation_op_id != nil {
+		fields = append(fields, delegationedge.FieldDeactivationOpID)
+	}
 	if m.delegator_type != nil {
 		fields = append(fields, delegationedge.FieldDelegatorType)
 	}
@@ -23170,6 +24125,48 @@ func (m *DelegationEdgeMutation) Fields() []string {
 // schema.
 func (m *DelegationEdgeMutation) Field(name string) (ent.Value, bool) {
 	switch name {
+	case delegationedge.FieldProvenanceVersion:
+		return m.ProvenanceVersion()
+	case delegationedge.FieldSourcePrincipalKind:
+		return m.SourcePrincipalKind()
+	case delegationedge.FieldSourcePrincipalID:
+		return m.SourcePrincipalID()
+	case delegationedge.FieldSourceCredentialKind:
+		return m.SourceCredentialKind()
+	case delegationedge.FieldSourceCredentialID:
+		return m.SourceCredentialID()
+	case delegationedge.FieldSourceEventID:
+		return m.SourceEventID()
+	case delegationedge.FieldSourceScheduleID:
+		return m.SourceScheduleID()
+	case delegationedge.FieldSourceAuthorizationRevision:
+		return m.SourceAuthorizationRevision()
+	case delegationedge.FieldInitiatorPrincipalKind:
+		return m.InitiatorPrincipalKind()
+	case delegationedge.FieldInitiatorPrincipalID:
+		return m.InitiatorPrincipalID()
+	case delegationedge.FieldInitiatorCredentialKind:
+		return m.InitiatorCredentialKind()
+	case delegationedge.FieldInitiatorCredentialID:
+		return m.InitiatorCredentialID()
+	case delegationedge.FieldCeilingKind:
+		return m.CeilingKind()
+	case delegationedge.FieldCeilingVersion:
+		return m.CeilingVersion()
+	case delegationedge.FieldCeilingPermissionIds:
+		return m.CeilingPermissionIds()
+	case delegationedge.FieldCeilingBoundaryKind:
+		return m.CeilingBoundaryKind()
+	case delegationedge.FieldCeilingBoundaryProjectID:
+		return m.CeilingBoundaryProjectID()
+	case delegationedge.FieldCeilingSourceExpiresAt:
+		return m.CeilingSourceExpiresAt()
+	case delegationedge.FieldDeactivationCause:
+		return m.DeactivationCause()
+	case delegationedge.FieldDeactivatedAt:
+		return m.DeactivatedAt()
+	case delegationedge.FieldDeactivationOpID:
+		return m.DeactivationOpID()
 	case delegationedge.FieldDelegatorType:
 		return m.DelegatorType()
 	case delegationedge.FieldDelegatorID:
@@ -23201,6 +24198,48 @@ func (m *DelegationEdgeMutation) Field(name string) (ent.Value, bool) {
 // database failed.
 func (m *DelegationEdgeMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
 	switch name {
+	case delegationedge.FieldProvenanceVersion:
+		return m.OldProvenanceVersion(ctx)
+	case delegationedge.FieldSourcePrincipalKind:
+		return m.OldSourcePrincipalKind(ctx)
+	case delegationedge.FieldSourcePrincipalID:
+		return m.OldSourcePrincipalID(ctx)
+	case delegationedge.FieldSourceCredentialKind:
+		return m.OldSourceCredentialKind(ctx)
+	case delegationedge.FieldSourceCredentialID:
+		return m.OldSourceCredentialID(ctx)
+	case delegationedge.FieldSourceEventID:
+		return m.OldSourceEventID(ctx)
+	case delegationedge.FieldSourceScheduleID:
+		return m.OldSourceScheduleID(ctx)
+	case delegationedge.FieldSourceAuthorizationRevision:
+		return m.OldSourceAuthorizationRevision(ctx)
+	case delegationedge.FieldInitiatorPrincipalKind:
+		return m.OldInitiatorPrincipalKind(ctx)
+	case delegationedge.FieldInitiatorPrincipalID:
+		return m.OldInitiatorPrincipalID(ctx)
+	case delegationedge.FieldInitiatorCredentialKind:
+		return m.OldInitiatorCredentialKind(ctx)
+	case delegationedge.FieldInitiatorCredentialID:
+		return m.OldInitiatorCredentialID(ctx)
+	case delegationedge.FieldCeilingKind:
+		return m.OldCeilingKind(ctx)
+	case delegationedge.FieldCeilingVersion:
+		return m.OldCeilingVersion(ctx)
+	case delegationedge.FieldCeilingPermissionIds:
+		return m.OldCeilingPermissionIds(ctx)
+	case delegationedge.FieldCeilingBoundaryKind:
+		return m.OldCeilingBoundaryKind(ctx)
+	case delegationedge.FieldCeilingBoundaryProjectID:
+		return m.OldCeilingBoundaryProjectID(ctx)
+	case delegationedge.FieldCeilingSourceExpiresAt:
+		return m.OldCeilingSourceExpiresAt(ctx)
+	case delegationedge.FieldDeactivationCause:
+		return m.OldDeactivationCause(ctx)
+	case delegationedge.FieldDeactivatedAt:
+		return m.OldDeactivatedAt(ctx)
+	case delegationedge.FieldDeactivationOpID:
+		return m.OldDeactivationOpID(ctx)
 	case delegationedge.FieldDelegatorType:
 		return m.OldDelegatorType(ctx)
 	case delegationedge.FieldDelegatorID:
@@ -23232,6 +24271,153 @@ func (m *DelegationEdgeMutation) OldField(ctx context.Context, name string) (ent
 // type.
 func (m *DelegationEdgeMutation) SetField(name string, value ent.Value) error {
 	switch name {
+	case delegationedge.FieldProvenanceVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetProvenanceVersion(v)
+		return nil
+	case delegationedge.FieldSourcePrincipalKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourcePrincipalKind(v)
+		return nil
+	case delegationedge.FieldSourcePrincipalID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourcePrincipalID(v)
+		return nil
+	case delegationedge.FieldSourceCredentialKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourceCredentialKind(v)
+		return nil
+	case delegationedge.FieldSourceCredentialID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourceCredentialID(v)
+		return nil
+	case delegationedge.FieldSourceEventID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourceEventID(v)
+		return nil
+	case delegationedge.FieldSourceScheduleID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourceScheduleID(v)
+		return nil
+	case delegationedge.FieldSourceAuthorizationRevision:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourceAuthorizationRevision(v)
+		return nil
+	case delegationedge.FieldInitiatorPrincipalKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorPrincipalKind(v)
+		return nil
+	case delegationedge.FieldInitiatorPrincipalID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorPrincipalID(v)
+		return nil
+	case delegationedge.FieldInitiatorCredentialKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorCredentialKind(v)
+		return nil
+	case delegationedge.FieldInitiatorCredentialID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInitiatorCredentialID(v)
+		return nil
+	case delegationedge.FieldCeilingKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCeilingKind(v)
+		return nil
+	case delegationedge.FieldCeilingVersion:
+		v, ok := value.(int32)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCeilingVersion(v)
+		return nil
+	case delegationedge.FieldCeilingPermissionIds:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCeilingPermissionIds(v)
+		return nil
+	case delegationedge.FieldCeilingBoundaryKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCeilingBoundaryKind(v)
+		return nil
+	case delegationedge.FieldCeilingBoundaryProjectID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCeilingBoundaryProjectID(v)
+		return nil
+	case delegationedge.FieldCeilingSourceExpiresAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCeilingSourceExpiresAt(v)
+		return nil
+	case delegationedge.FieldDeactivationCause:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeactivationCause(v)
+		return nil
+	case delegationedge.FieldDeactivatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeactivatedAt(v)
+		return nil
+	case delegationedge.FieldDeactivationOpID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeactivationOpID(v)
+		return nil
 	case delegationedge.FieldDelegatorType:
 		v, ok := value.(delegationedge.DelegatorType)
 		if !ok {
@@ -23316,13 +24502,31 @@ func (m *DelegationEdgeMutation) SetField(name string, value ent.Value) error {
 // AddedFields returns all numeric fields that were incremented/decremented during
 // this mutation.
 func (m *DelegationEdgeMutation) AddedFields() []string {
-	return nil
+	var fields []string
+	if m.addprovenance_version != nil {
+		fields = append(fields, delegationedge.FieldProvenanceVersion)
+	}
+	if m.addsource_authorization_revision != nil {
+		fields = append(fields, delegationedge.FieldSourceAuthorizationRevision)
+	}
+	if m.addceiling_version != nil {
+		fields = append(fields, delegationedge.FieldCeilingVersion)
+	}
+	return fields
 }
 
 // AddedField returns the numeric value that was incremented/decremented on a field
 // with the given name. The second boolean return value indicates that this field
 // was not set, or was not defined in the schema.
 func (m *DelegationEdgeMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case delegationedge.FieldProvenanceVersion:
+		return m.AddedProvenanceVersion()
+	case delegationedge.FieldSourceAuthorizationRevision:
+		return m.AddedSourceAuthorizationRevision()
+	case delegationedge.FieldCeilingVersion:
+		return m.AddedCeilingVersion()
+	}
 	return nil, false
 }
 
@@ -23331,6 +24535,27 @@ func (m *DelegationEdgeMutation) AddedField(name string) (ent.Value, bool) {
 // type.
 func (m *DelegationEdgeMutation) AddField(name string, value ent.Value) error {
 	switch name {
+	case delegationedge.FieldProvenanceVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddProvenanceVersion(v)
+		return nil
+	case delegationedge.FieldSourceAuthorizationRevision:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddSourceAuthorizationRevision(v)
+		return nil
+	case delegationedge.FieldCeilingVersion:
+		v, ok := value.(int32)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddCeilingVersion(v)
+		return nil
 	}
 	return fmt.Errorf("unknown DelegationEdge numeric field %s", name)
 }
@@ -23338,7 +24563,20 @@ func (m *DelegationEdgeMutation) AddField(name string, value ent.Value) error {
 // ClearedFields returns all nullable fields that were cleared during this
 // mutation.
 func (m *DelegationEdgeMutation) ClearedFields() []string {
-	return nil
+	var fields []string
+	if m.FieldCleared(delegationedge.FieldSourceScheduleID) {
+		fields = append(fields, delegationedge.FieldSourceScheduleID)
+	}
+	if m.FieldCleared(delegationedge.FieldCeilingPermissionIds) {
+		fields = append(fields, delegationedge.FieldCeilingPermissionIds)
+	}
+	if m.FieldCleared(delegationedge.FieldCeilingSourceExpiresAt) {
+		fields = append(fields, delegationedge.FieldCeilingSourceExpiresAt)
+	}
+	if m.FieldCleared(delegationedge.FieldDeactivatedAt) {
+		fields = append(fields, delegationedge.FieldDeactivatedAt)
+	}
+	return fields
 }
 
 // FieldCleared returns a boolean indicating if a field with the given name was
@@ -23351,6 +24589,20 @@ func (m *DelegationEdgeMutation) FieldCleared(name string) bool {
 // ClearField clears the value of the field with the given name. It returns an
 // error if the field is not defined in the schema.
 func (m *DelegationEdgeMutation) ClearField(name string) error {
+	switch name {
+	case delegationedge.FieldSourceScheduleID:
+		m.ClearSourceScheduleID()
+		return nil
+	case delegationedge.FieldCeilingPermissionIds:
+		m.ClearCeilingPermissionIds()
+		return nil
+	case delegationedge.FieldCeilingSourceExpiresAt:
+		m.ClearCeilingSourceExpiresAt()
+		return nil
+	case delegationedge.FieldDeactivatedAt:
+		m.ClearDeactivatedAt()
+		return nil
+	}
 	return fmt.Errorf("unknown DelegationEdge nullable field %s", name)
 }
 
@@ -23358,6 +24610,69 @@ func (m *DelegationEdgeMutation) ClearField(name string) error {
 // It returns an error if the field is not defined in the schema.
 func (m *DelegationEdgeMutation) ResetField(name string) error {
 	switch name {
+	case delegationedge.FieldProvenanceVersion:
+		m.ResetProvenanceVersion()
+		return nil
+	case delegationedge.FieldSourcePrincipalKind:
+		m.ResetSourcePrincipalKind()
+		return nil
+	case delegationedge.FieldSourcePrincipalID:
+		m.ResetSourcePrincipalID()
+		return nil
+	case delegationedge.FieldSourceCredentialKind:
+		m.ResetSourceCredentialKind()
+		return nil
+	case delegationedge.FieldSourceCredentialID:
+		m.ResetSourceCredentialID()
+		return nil
+	case delegationedge.FieldSourceEventID:
+		m.ResetSourceEventID()
+		return nil
+	case delegationedge.FieldSourceScheduleID:
+		m.ResetSourceScheduleID()
+		return nil
+	case delegationedge.FieldSourceAuthorizationRevision:
+		m.ResetSourceAuthorizationRevision()
+		return nil
+	case delegationedge.FieldInitiatorPrincipalKind:
+		m.ResetInitiatorPrincipalKind()
+		return nil
+	case delegationedge.FieldInitiatorPrincipalID:
+		m.ResetInitiatorPrincipalID()
+		return nil
+	case delegationedge.FieldInitiatorCredentialKind:
+		m.ResetInitiatorCredentialKind()
+		return nil
+	case delegationedge.FieldInitiatorCredentialID:
+		m.ResetInitiatorCredentialID()
+		return nil
+	case delegationedge.FieldCeilingKind:
+		m.ResetCeilingKind()
+		return nil
+	case delegationedge.FieldCeilingVersion:
+		m.ResetCeilingVersion()
+		return nil
+	case delegationedge.FieldCeilingPermissionIds:
+		m.ResetCeilingPermissionIds()
+		return nil
+	case delegationedge.FieldCeilingBoundaryKind:
+		m.ResetCeilingBoundaryKind()
+		return nil
+	case delegationedge.FieldCeilingBoundaryProjectID:
+		m.ResetCeilingBoundaryProjectID()
+		return nil
+	case delegationedge.FieldCeilingSourceExpiresAt:
+		m.ResetCeilingSourceExpiresAt()
+		return nil
+	case delegationedge.FieldDeactivationCause:
+		m.ResetDeactivationCause()
+		return nil
+	case delegationedge.FieldDeactivatedAt:
+		m.ResetDeactivatedAt()
+		return nil
+	case delegationedge.FieldDeactivationOpID:
+		m.ResetDeactivationOpID()
+		return nil
 	case delegationedge.FieldDelegatorType:
 		m.ResetDelegatorType()
 		return nil

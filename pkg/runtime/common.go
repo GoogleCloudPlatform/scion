@@ -481,11 +481,24 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		}
 	}
 
-	// Inject environment-type resolved secrets
+	// Inject environment-type resolved secrets. config.Env, emitted above,
+	// always wins: skip any secret whose target collides with a key already
+	// present there, so a secret can never re-decide a value the caller (the
+	// broker or hub that built config.Env) already set for that name. This is
+	// explicit and symmetric with the k8s runtime's equivalent check.
+	envKeys := make(map[string]struct{}, len(config.Env))
+	for _, e := range config.Env {
+		key, _, _ := strings.Cut(e, "=")
+		envKeys[key] = struct{}{}
+	}
 	for _, s := range config.ResolvedSecrets {
-		if s.Type == "environment" || s.Type == "" {
-			addArg("-e", fmt.Sprintf("%s=%s", s.Target, s.Value))
+		if s.Type != "environment" && s.Type != "" {
+			continue
 		}
+		if _, collides := envKeys[s.Target]; collides {
+			continue
+		}
+		addArg("-e", fmt.Sprintf("%s=%s", s.Target, s.Value))
 	}
 
 	// Dev-mode binary override: if SCION_DEV_BINARIES points to a local

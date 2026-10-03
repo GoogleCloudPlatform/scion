@@ -508,6 +508,20 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// safe_to_evict on a non-Kubernetes runtime is saved and ignored, with
+	// the same warning as config validate. Checked on the merged file so a
+	// profile is matched against a runtime saved earlier.
+	var saveWarnings []string
+	if req.Runtimes != nil || req.Profiles != nil {
+		var merged struct {
+			Runtimes map[string]config.V1RuntimeConfig `yaml:"runtimes"`
+			Profiles map[string]config.V1ProfileConfig `yaml:"profiles"`
+		}
+		if yamlv3.Unmarshal(newData, &merged) == nil {
+			saveWarnings = safeToEvictSaveWarnings(merged.Runtimes, merged.Profiles)
+		}
+	}
+
 	if err := os.WriteFile(settingsPath, newData, 0644); err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
 		return
@@ -520,10 +534,26 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// Attempt to reload applicable runtime settings
 	reloadResults := s.reloadSettings()
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"status": "saved",
 		"reload": reloadResults,
-	})
+	}
+	if len(saveWarnings) > 0 {
+		resp["warnings"] = saveWarnings
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// safeToEvictSaveWarnings returns, and logs, a warning for each runtime or
+// profile that sets safe_to_evict on a non-Kubernetes runtime. The value is
+// saved and ignored at agent start; this is the same rule as config
+// validate. Used by both the file-mode and DB-mode PUT handlers.
+func safeToEvictSaveWarnings(runtimes map[string]config.V1RuntimeConfig, profiles map[string]config.V1ProfileConfig) []string {
+	warnings := config.SafeToEvictIgnoredWarnings(runtimes, profiles)
+	for _, msg := range warnings {
+		slog.Warn("Server config saved with an ignored setting", "warning", msg)
+	}
+	return warnings
 }
 
 // reloadSettings re-reads the settings file and applies runtime-changeable values.

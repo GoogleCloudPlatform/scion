@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -1213,7 +1214,7 @@ func scheduleMessageViaHub(hubCtx *HubContext, agentName string, message string,
 	}
 
 	if !isJSONOutput() {
-		fmt.Printf("Message to agent '%s' scheduled for %s\n", agentName, evt.FireAt.Format(time.RFC3339))
+		fmt.Printf("Message to agent '%s' scheduled for %s\n", agentName, clitime.Format(evt.FireAt, clitime.Full))
 	}
 
 	return nil

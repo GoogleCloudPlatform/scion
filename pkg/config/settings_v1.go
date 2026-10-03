@@ -261,6 +261,104 @@ func ApplySharedDirDefaults(base *api.KubernetesConfig, storageClass, size strin
 	return out
 }
 
+// ResolveSafeToEvict returns the settings-level safe_to_evict default for a
+// profile: the profile's value if set, otherwise the value on the profile's
+// runtime entry. Nil means "not set in settings". If profileName is empty,
+// ActiveProfile is used; an unknown profile yields nil.
+//
+// This is a default only. A template's or agent's kubernetes.safeToEvict
+// wins over it; see ApplySafeToEvictDefault.
+//
+// This follows the ResolveSharedDirDefaults pattern; it can move onto a
+// generic per-profile resolver once one exists.
+func (vs *VersionedSettings) ResolveSafeToEvict(profileName string) *bool {
+	v, _ := vs.ResolveSafeToEvictWithSource(profileName)
+	return v
+}
+
+// ResolveSafeToEvictWithSource is ResolveSafeToEvict that also returns the
+// settings key the value came from ("profiles.NAME.safe_to_evict" or
+// "runtimes.NAME.safe_to_evict"). source is empty when the value is nil.
+// The returned pointer is a fresh copy, never one held by vs.
+func (vs *VersionedSettings) ResolveSafeToEvictWithSource(profileName string) (value *bool, source string) {
+	if vs == nil {
+		return nil, ""
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	profile, ok := vs.Profiles[profileName]
+	if !ok {
+		return nil, ""
+	}
+	if profile.SafeToEvict != nil {
+		v := *profile.SafeToEvict
+		return &v, "profiles." + profileName + ".safe_to_evict"
+	}
+	if rt, ok := vs.Runtimes[profile.Runtime]; ok && rt.SafeToEvict != nil {
+		v := *rt.SafeToEvict
+		return &v, "runtimes." + profile.Runtime + ".safe_to_evict"
+	}
+	return nil, ""
+}
+
+// ApplySafeToEvictDefault returns base with SafeToEvict filled from the
+// settings default when base leaves it unset, so a template's or agent's
+// explicit value (true or false) always wins. base is never modified; a
+// copy is returned. When def is nil, base is returned unchanged (including
+// nil).
+func ApplySafeToEvictDefault(base *api.KubernetesConfig, def *bool) *api.KubernetesConfig {
+	if def == nil {
+		return base
+	}
+	out := &api.KubernetesConfig{}
+	if base != nil {
+		cpy := *base
+		out = &cpy
+	}
+	if out.SafeToEvict == nil {
+		v := *def
+		out.SafeToEvict = &v
+	}
+	return out
+}
+
+// SafeToEvictIgnoredWarnings returns a warning for every runtime entry that
+// sets safe_to_evict but is not a Kubernetes runtime, and for every profile
+// that sets it while pointing at such an entry. The setting is accepted and
+// ignored there. Results are sorted.
+func SafeToEvictIgnoredWarnings(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig) []string {
+	var warnings []string
+	for name, rt := range runtimes {
+		if rt.SafeToEvict != nil && !isKubernetesRuntimeEntry(name, rt) {
+			warnings = append(warnings, fmt.Sprintf("runtimes.%s.safe_to_evict is set but runtime %q is not a Kubernetes runtime; it is ignored", name, name))
+		}
+	}
+	for name, p := range profiles {
+		if p.SafeToEvict == nil {
+			continue
+		}
+		rt, ok := runtimes[p.Runtime]
+		if ok && !isKubernetesRuntimeEntry(p.Runtime, rt) {
+			warnings = append(warnings, fmt.Sprintf("profiles.%s.safe_to_evict is set but its runtime %q is not a Kubernetes runtime; it is ignored", name, p.Runtime))
+		}
+	}
+	sort.Strings(warnings)
+	return warnings
+}
+
+// isKubernetesRuntimeEntry reports whether a runtime entry targets
+// Kubernetes: an explicit type of "kubernetes" (or "k8s"), or no type and
+// the entry name itself is one of those.
+func isKubernetesRuntimeEntry(name string, rt V1RuntimeConfig) bool {
+	t := rt.Type
+	if t == "" {
+		t = name
+	}
+	// "remote" is normalised to the Kubernetes runtime by the runtime factory.
+	return t == "kubernetes" || t == "k8s" || t == "remote"
+}
+
 // GetHubEndpoint returns the Hub endpoint from settings, or empty string if not configured.
 func (vs *VersionedSettings) GetHubEndpoint() string {
 	if vs.Hub != nil {
@@ -1416,6 +1514,13 @@ type V1RuntimeConfig struct {
 	// ResolveSharedDirDefaults.
 	SharedDirStorageClass string `json:"shared_dir_storage_class,omitempty" yaml:"shared_dir_storage_class,omitempty" koanf:"shared_dir_storage_class"`
 	SharedDirSize         string `json:"shared_dir_size,omitempty" yaml:"shared_dir_size,omitempty" koanf:"shared_dir_size"`
+	// SafeToEvict is the Kubernetes-only default for the
+	// cluster-autoscaler.kubernetes.io/safe-to-evict pod annotation. Only an
+	// explicit false has an effect (the pod is annotated "false"); true is
+	// accepted and adds nothing. It is the lowest tier: a profile's
+	// safe_to_evict wins over it, and a template's or agent's
+	// kubernetes.safeToEvict wins over both. See ResolveSafeToEvict.
+	SafeToEvict *bool `json:"safe_to_evict,omitempty" yaml:"safe_to_evict,omitempty" koanf:"safe_to_evict"`
 	// CloudRun holds Cloud Run-specific settings when Type is "cloudrun".
 	CloudRun *CloudRunConfig `json:"cloudrun,omitempty" yaml:"cloudrun,omitempty" koanf:"cloudrun"`
 	// CloudRunInstances holds Cloud Run Instances-specific settings when Type is "cloudrun-instances".
@@ -1633,6 +1738,11 @@ type V1ProfileConfig struct {
 	// template's or agent's kubernetes block. See ResolveSharedDirDefaults.
 	SharedDirStorageClass string `json:"shared_dir_storage_class,omitempty" yaml:"shared_dir_storage_class,omitempty" koanf:"shared_dir_storage_class"`
 	SharedDirSize         string `json:"shared_dir_size,omitempty" yaml:"shared_dir_size,omitempty" koanf:"shared_dir_size"`
+	// SafeToEvict is the Kubernetes-only safe-to-evict default for agents
+	// using this profile. It wins over the profile's runtime entry and
+	// loses to a template's or agent's kubernetes.safeToEvict. Only false
+	// has an effect. See ResolveSafeToEvict.
+	SafeToEvict *bool `json:"safe_to_evict,omitempty" yaml:"safe_to_evict,omitempty" koanf:"safe_to_evict"`
 }
 
 // resolveEffectiveProjectPath resolves the effective project path for settings loading.

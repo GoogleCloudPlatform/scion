@@ -1484,4 +1484,82 @@ describe('scion-page-admin-server-config', () => {
       expect(experimentsEl.active).toBe(false);
     });
   });
+
+  describe('safe_to_evict on runtimes and profiles', () => {
+    function steConfig() {
+      return makeBaseConfig({
+        runtimes: { k8s: { type: 'kubernetes', safe_to_evict: false } },
+        profiles: {
+          gke: { runtime: 'k8s' },
+          evictable: { runtime: 'k8s', safe_to_evict: true },
+        },
+      });
+    }
+
+    async function saveAndCapture(el: HTMLElement): Promise<void> {
+      await (el as any).updateComplete;
+      const buttons = queryAll(el, 'sl-button[variant="primary"]');
+      const saveBtn = buttons.find((b) => b.textContent?.trim() === 'Save & Reload');
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    it('shows false, true and unset distinctly', async () => {
+      element = await createComponent(createFetchHandler(steConfig()));
+      const values = queryAll(element, 'sl-select.safe-to-evict').map((s) =>
+        s.getAttribute('value')
+      );
+      // runtime k8s, then profiles gke and evictable
+      expect(values).toEqual(['false', '', 'true']);
+    });
+
+    it('labels the select as ignored on non-Kubernetes runtimes', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            runtimes: {
+              k8s: { type: 'kubernetes' },
+              docker: { type: 'docker', safe_to_evict: false },
+              remote: {},
+            },
+            profiles: {
+              gke: { runtime: 'k8s' },
+              local: { runtime: 'docker' },
+              far: { runtime: 'remote' },
+            },
+          })
+        )
+      );
+      await (element as any).updateComplete;
+      // the docker runtime card and the profile that uses it
+      expect(queryAll(element, '.safe-to-evict-ignored').length).toBe(2);
+    });
+
+    it('sends booleans, and clearing removes the key', async () => {
+      let capturedPayload: Record<string, any> | null = null;
+      element = await createComponent(
+        createFetchHandler(steConfig(), {
+          putHandler: (body) => {
+            if ('profiles' in body) capturedPayload = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+      const [runtimeSel, gkeSel, evictableSel] = queryAll(
+        element,
+        'sl-select.safe-to-evict'
+      ) as (HTMLElement & { value: string })[];
+      gkeSel.value = 'false';
+      gkeSel.dispatchEvent(new Event('sl-change'));
+      evictableSel.value = '';
+      evictableSel.dispatchEvent(new Event('sl-change'));
+      expect(runtimeSel).toBeDefined();
+      await saveAndCapture(element);
+
+      expect(capturedPayload).not.toBeNull();
+      expect(capturedPayload!.runtimes.k8s.safe_to_evict).toBe(false);
+      expect(capturedPayload!.profiles.gke.safe_to_evict).toBe(false);
+      expect('safe_to_evict' in capturedPayload!.profiles.evictable).toBe(false);
+    });
+  });
 });

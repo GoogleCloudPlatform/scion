@@ -221,7 +221,7 @@ func TestSecretUse_ProjectSecretRequiresProjectSecretRead(t *testing.T) {
 		Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{ownerDelegator},
 		Created: time.Now(), Updated: time.Now(),
 	}))
-	createDCEdge(t, f.Store, store.DelegationPrincipalUser, ownerDelegator, store.DelegationPrincipalAgent, ownerAgentID,
+	seedRecordedDelegationEdge(t, f.Store, store.DelegationPrincipalUser, ownerDelegator, store.DelegationPrincipalAgent, ownerAgentID,
 		store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
 
 	ident := newFullAgentIdentity(ownerAgentID, f.ProjectID, []string{ownerDelegator}, []AgentTokenScope{ScopeProjectSecretRead})
@@ -334,7 +334,7 @@ func TestMaterialUse_CeilingStoreErrorDenies(t *testing.T) {
 		Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{superAdminDelegator},
 		Created: time.Now(), Updated: time.Now(),
 	}))
-	createDCEdge(t, f.Store, store.DelegationPrincipalUser, superAdminDelegator, store.DelegationPrincipalAgent, delegateAgentID,
+	seedRecordedDelegationEdge(t, f.Store, store.DelegationPrincipalUser, superAdminDelegator, store.DelegationPrincipalAgent, delegateAgentID,
 		store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
 
 	ident := newFullAgentIdentity(delegateAgentID, f.ProjectID, []string{superAdminDelegator}, []AgentTokenScope{ScopeProjectSecretRead})

@@ -14,7 +14,10 @@
 
 package store
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // DeletionPredicate is the condition UpdateAgentDeletion evaluates against
 // the current row inside its transaction (design ptone/scion#2483 §2.1).
@@ -104,7 +107,33 @@ type DeletionFields struct {
 	Phase    *string
 	Activity *string
 
+	// DeletedAt soft-deletes the row (the engine's soft finish). There is no
+	// clear: restore goes through UpdateAgent.
+	DeletedAt *time.Time
+
+	// KeepUpdated leaves the row's updated timestamp alone. The engine's
+	// lease renewal sets it: a renewal is bookkeeping, not a change to the
+	// agent, so it must not make the row look recently modified (list
+	// ordering, notification staleness checks). state_version is still
+	// bumped, so stale whole-row writers still conflict.
+	KeepUpdated bool
+
 	// Derive, when set, is called with the current row (as read inside the
 	// transaction) after the predicate matched, before the write.
 	Derive func(current *Agent, f *DeletionFields)
 }
+
+// DeletionFinalizeMode selects FinalizeAgentDeletion's terminal write.
+type DeletionFinalizeMode string
+
+const (
+	// DeletionFinalizeSoft keeps the row, marked deleted (deleted_at set).
+	DeletionFinalizeSoft DeletionFinalizeMode = "soft"
+	// DeletionFinalizeHard removes the row and its dependent records.
+	DeletionFinalizeHard DeletionFinalizeMode = "hard"
+)
+
+// DeletionFinalizeHook runs inside FinalizeAgentDeletion's transaction just
+// before commit. tx is a transaction-scoped Store: writes through it commit
+// or roll back with the finalize. A non-nil error rolls the finalize back.
+type DeletionFinalizeHook func(ctx context.Context, tx Store, a *Agent, mode DeletionFinalizeMode) error
