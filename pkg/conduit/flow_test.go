@@ -151,7 +151,9 @@ func TestFlowControlViolationIsRefused(t *testing.T) {
 	})
 	t.Run("session credit", func(t *testing.T) {
 		in := make(chan Stream, 64)
-		s, raw := acceptAgainstRaw(t, Config{StreamWindow: MaxWindow / 2, StreamHandler: acceptAll(in)}, transport.MemoryOptions{Buffer: 1024})
+		// A tiny RecvBufferLimit: session credit returns only on read,
+		// and nothing is read.
+		s, raw := acceptAgainstRaw(t, Config{StreamWindow: MaxWindow / 2, RecvBufferLimit: 1, StreamHandler: acceptAll(in)}, transport.MemoryOptions{Buffer: 1024})
 		raw.send(&conduitv1.Frame{Body: &conduitv1.Frame_StreamOpen{StreamOpen: &conduitv1.StreamOpen{StreamId: 1, Kind: conduitv1.StreamKind_STREAM_KIND_TCP, InitialWindow: 1024}}})
 		raw.recvType("stream_accept")
 		// 4 MiB + one frame without any session window update.
@@ -309,14 +311,24 @@ func TestAggregateBufferBudgetEnforced(t *testing.T) {
 			written.Add(int64(n))
 		}()
 	}
-	// Caller-originated control frames also wait for budget.
+	// Data fills the budget up to the control share; with the session
+	// credit (4 MiB) far above the budget, data alone would fill it all.
+	dataLimit := int64(budget) - controlShareOf(budget)
+	eventually(t, "budget filled with data", func() bool {
+		return s.Stats().QueuedDataBytes >= dataLimit-MaxDataFrame-dataFrameOverhead
+	})
+	// A caller-originated control frame is still queued at once: it
+	// does not wait for the data backlog to drain (1a-r1-F3).
 	callCtx, cancelCall := context.WithCancel(context.Background())
 	callDone := make(chan struct{})
 	go func() {
 		defer close(callDone)
-		_, _ = s.Call(callCtx, &conduitv1.RpcRequest{Body: make([]byte, 100*1024)})
+		_, _ = s.Call(callCtx, &conduitv1.RpcRequest{Body: make([]byte, 64*1024)})
 	}()
-	eventually(t, "budget filled", func() bool { return s.Stats().QueuedBytes >= budget-MaxDataFrame-dataFrameOverhead })
+	eventually(t, "call queued behind no data", func() bool { return s.Stats().QueuedControlBytes >= 64*1024 })
+	if q := s.Stats().QueuedDataBytes; q > dataLimit {
+		t.Fatalf("data queued %d beyond the data share %d", q, dataLimit)
+	}
 
 	st := s.Stats()
 	if st.PeakQueuedBytes > budget {
@@ -394,4 +406,88 @@ func TestPurgeRestoresSessionCredit(t *testing.T) {
 		// consumed; at most a couple of frames were in flight.
 		return s.sendSession >= SessionWindow-3*MaxDataFrame
 	})
+}
+
+// TestManyStalledReadersDoNotStallSession: more stalled streams than the
+// session window can cover (20 × 256 KiB > 4 MiB) do not stall the other
+// streams: within RecvBufferLimit session credit returns on receipt, and
+// each stalled stream holds only its own window (1a-r1-F4).
+func TestManyStalledReadersDoNotStallSession(t *testing.T) {
+	accepted := make(chan Stream, 64)
+	p := newPair(t, Config{}, Config{StreamHandler: acceptAll(accepted)})
+	const stalled = SessionWindow/DefaultStreamWindow + 4
+	for i := 0; i < stalled; i++ {
+		st, err := p.dialer.OpenStream(context.Background(), tcpOpen())
+		if err != nil {
+			t.Fatal(err)
+		}
+		recvStream(t, accepted) // never read
+		if _, err := st.Write(make([]byte, DefaultStreamWindow)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eventually(t, "stalled windows delivered", func() bool {
+		return p.relay.Stats().RecvBufferedBytes == stalled*DefaultStreamWindow
+	})
+
+	st, err := p.dialer.OpenStream(context.Background(), tcpOpen())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := recvStream(t, accepted)
+	const n = 2 << 20
+	go func() {
+		if _, err := st.Write(bytes.Repeat([]byte{'x'}, n)); err != nil {
+			t.Error(err)
+		}
+	}()
+	got, err := io.ReadFull(target, make([]byte, n))
+	if err != nil || got != n {
+		t.Fatalf("live stream read %d, %v", got, err)
+	}
+	if peak := p.relay.Stats().PeakRecvBufferedBytes; peak > (stalled+1)*DefaultStreamWindow {
+		t.Fatalf("receive buffering %d beyond the per-stream windows", peak)
+	}
+}
+
+// TestRecvBufferLimitBoundsSessionMemory: beyond RecvBufferLimit session
+// credit returns only as the application reads, so a session's unread
+// data stays within RecvBufferLimit + SessionWindow.
+func TestRecvBufferLimitBoundsSessionMemory(t *testing.T) {
+	accepted := make(chan Stream, 64)
+	const limit = 1 << 20
+	p := newPair(t, Config{}, Config{StreamHandler: acceptAll(accepted), RecvBufferLimit: limit})
+	const streams = (limit+SessionWindow)/DefaultStreamWindow + 4
+	var targets []Stream
+	for i := 0; i < streams; i++ {
+		st, err := p.dialer.OpenStream(context.Background(), tcpOpen())
+		if err != nil {
+			t.Fatal(err)
+		}
+		targets = append(targets, recvStream(t, accepted))
+		go func() { _, _ = st.Write(make([]byte, DefaultStreamWindow)) }()
+	}
+	bound := int64(limit + SessionWindow)
+	eventually(t, "session window exhausted", func() bool {
+		return p.relay.Stats().RecvBufferedBytes >= bound-int64(SessionWindow)/4
+	})
+	if peak := p.relay.Stats().PeakRecvBufferedBytes; peak > bound {
+		t.Fatalf("buffered %d beyond RecvBufferLimit+SessionWindow %d", peak, bound)
+	}
+	// Reading releases credit and the stalled writers complete (read
+	// concurrently: some streams have nothing delivered yet).
+	var wg sync.WaitGroup
+	for _, tg := range targets {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := io.ReadFull(tg, make([]byte, DefaultStreamWindow)); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	if peak := p.relay.Stats().PeakRecvBufferedBytes; peak > bound {
+		t.Fatalf("buffered %d beyond RecvBufferLimit+SessionWindow %d", peak, bound)
+	}
 }

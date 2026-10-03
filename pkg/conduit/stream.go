@@ -65,7 +65,14 @@ type stream struct {
 	localClosed   bool  // Close/CloseWithCode called: reads stop
 	closeSent     bool  // a StreamClose for this id was sent or queued
 	failErr       error // session failure
+
+	// Resize delivery: resizes holds at most the latest size and is
+	// closed (resizesClosed) when the stream becomes dead.
+	resizes       chan WindowSize
+	resizesClosed bool
 }
+
+var _ Resizable = (*stream)(nil)
 
 func newStream(s *session, id uint32, opener bool, recvWindow uint32) *stream {
 	st := &stream{
@@ -75,6 +82,7 @@ func newStream(s *session, id uint32, opener bool, recvWindow uint32) *stream {
 		state:         StateOpening,
 		opened:        make(chan struct{}),
 		dead:          make(chan struct{}),
+		resizes:       make(chan WindowSize, 1),
 		recvWindow:    int64(recvWindow),
 		recvRemaining: int64(recvWindow),
 	}
@@ -98,6 +106,8 @@ func (st *stream) markDeadLocked() {
 	st.deadOnce.Do(func() {
 		st.writeDead.Store(true)
 		close(st.dead)
+		st.resizesClosed = true
+		close(st.resizes)
 	})
 	st.cond.Broadcast()
 	st.s.wakeCreditWaiters()
@@ -224,20 +234,20 @@ func (st *stream) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-// deliver appends inbound data (reader goroutine). It returns false if the
-// peer exceeded the stream credit.
-func (st *stream) deliver(d *conduitv1.StreamData) (ok bool) {
+// deliver appends inbound data (reader goroutine). ok is false if the
+// peer exceeded the stream credit; buffered reports whether the bytes
+// were buffered (and accounted with adjustBuffered) rather than dropped.
+func (st *stream) deliver(d *conduitv1.StreamData) (ok, buffered bool) {
 	n := int64(len(d.GetData()))
 	st.mu.Lock()
 	if n > st.recvRemaining {
 		st.mu.Unlock()
-		return false
+		return false, false
 	}
 	st.recvRemaining -= n
 	if st.localClosed || st.remoteFin || st.remoteErr != nil || st.failErr != nil {
 		st.mu.Unlock()
-		st.s.returnSessionCredit(n) // discarded: return the session credit
-		return true
+		return true, false
 	}
 	if n > 0 {
 		st.buf.Write(d.GetData())
@@ -248,7 +258,12 @@ func (st *stream) deliver(d *conduitv1.StreamData) (ok bool) {
 	}
 	st.cond.Broadcast()
 	st.mu.Unlock()
-	return true
+	// Outside st.mu (sendInternal may fail the session). A Read of these
+	// bytes may be accounted first; the counters net out.
+	if n > 0 {
+		st.s.adjustBuffered(n)
+	}
+	return true, n > 0
 }
 
 // grant adds peer-granted send credit. It returns false on overflow.
@@ -344,6 +359,27 @@ func (st *stream) CloseWrite() error {
 	})
 }
 
+// Resizes implements Resizable.
+func (st *stream) Resizes() <-chan WindowSize { return st.resizes }
+
+// deliverResize records an inbound StreamResize (reader goroutine). It
+// never blocks: an undelivered older size is replaced.
+func (st *stream) deliverResize(cols, rows uint32) {
+	ws := WindowSize{Cols: uint16(min(cols, 0xFFFF)), Rows: uint16(min(rows, 0xFFFF))}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.resizesClosed {
+		return
+	}
+	// Only this goroutine sends, under st.mu, so after draining the
+	// buffered slot the send cannot block.
+	select {
+	case <-st.resizes:
+	default:
+	}
+	st.resizes <- ws
+}
+
 // Resize implements Stream.
 func (st *stream) Resize(cols, rows uint16) error {
 	st.mu.Lock()
@@ -400,8 +436,11 @@ func (st *stream) abort(code uint32, reason string, send bool) {
 	st.mu.Unlock()
 
 	st.s.consumed(discarded)
-	st.s.restoreSessionCredit(st.s.sched.purge(st.id))
-	if send {
+	payload, closeDropped := st.s.sched.purge(st.id)
+	st.s.restoreSessionCredit(payload)
+	// A graceful StreamClose still queued (closeSent was set for it) was
+	// just dropped: the peer must still learn that the stream ended.
+	if send || closeDropped {
 		st.s.sendClose(st.id, code, reason)
 	}
 	st.cancel()
@@ -441,7 +480,10 @@ func (st *stream) remoteClose(code uint32, reason string) {
 	st.mu.Unlock()
 
 	st.s.consumed(discarded)
-	st.s.restoreSessionCredit(st.s.sched.purge(st.id))
+	// The peer closed the stream, so a dropped graceful close of ours
+	// needs no replacement.
+	payload, _ := st.s.sched.purge(st.id)
+	st.s.restoreSessionCredit(payload)
 	st.cancel()
 	st.s.removeStream(st)
 }

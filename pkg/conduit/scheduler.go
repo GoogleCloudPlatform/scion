@@ -80,12 +80,17 @@ type outFrame struct {
 // scheduler orders outbound frames: control first, then data round-robin
 // across streams, under an aggregate byte budget.
 type scheduler struct {
-	mu      sync.Mutex
-	budget  int64
-	control []*outFrame
-	data    map[uint32][]*outFrame
-	rr      []uint32 // streams with queued data, in service order
-	closed  bool
+	mu     sync.Mutex
+	budget int64
+	// controlShare is the part of budget that data frames may not use,
+	// so caller-originated control frames (Call, OpenStream, RPC
+	// responses, RefreshAuth) never wait behind bulk data (§3.5
+	// isolation).
+	controlShare int64
+	control      []*outFrame
+	data         map[uint32][]*outFrame
+	rr           []uint32 // streams with queued data, in service order
+	closed       bool
 	// wake is closed (and replaced) whenever state changes, to wake
 	// blocked enqueuers and the writer.
 	wake chan struct{}
@@ -99,7 +104,13 @@ type scheduler struct {
 }
 
 func newScheduler(budget int64) *scheduler {
-	return &scheduler{budget: budget, data: map[uint32][]*outFrame{}, wake: make(chan struct{})}
+	return &scheduler{budget: budget, controlShare: controlShareOf(budget), data: map[uint32][]*outFrame{}, wake: make(chan struct{})}
+}
+
+// controlShareOf reserves an eighth of the budget for control frames, and
+// at least one maximal RPC frame where the budget allows (at most half).
+func controlShareOf(budget int64) int64 {
+	return max(budget/8, min(int64(DefaultMaxRPCFrame), budget/2))
 }
 
 func (s *scheduler) signalLocked() {
@@ -128,6 +139,8 @@ func (s *scheduler) pushLocked(of *outFrame) {
 }
 
 // enqueue blocks until the frame fits within the budget, then queues it.
+// Data frames fit only within budget-controlShare, which keeps
+// controlShare free for control frames whatever the data backlog.
 // It fails with ErrSessionClosed after close, or with the error returned
 // by abort when abort's channel fires (stream closed, ctx cancelled).
 // A frame larger than the whole budget is admitted once the queue is
@@ -149,7 +162,11 @@ func (s *scheduler) enqueue(of *outFrame, abort <-chan struct{}, abortErr func()
 		default:
 		}
 		q := s.queuedLocked()
-		if q+of.size <= s.budget || q == 0 {
+		limit := s.budget
+		if of.class == classData {
+			limit -= s.controlShare
+		}
+		if q+of.size <= limit || q == 0 {
 			s.pushLocked(of)
 			s.mu.Unlock()
 			return nil
@@ -221,20 +238,24 @@ func (s *scheduler) next() (*outFrame, bool) {
 	}
 }
 
-// purge drops a stream's queued data frames (abortive close) and returns
+// purge drops a stream's queued data frames (abortive close). It returns
 // the number of payload bytes dropped, so their send credit can be
-// restored: the peer never saw them.
-func (s *scheduler) purge(streamID uint32) (payload int64) {
+// restored (the peer never saw them), and whether a queued graceful
+// StreamClose was dropped, so the caller can still tell the peer.
+func (s *scheduler) purge(streamID uint32) (payload int64, closeDropped bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	q, ok := s.data[streamID]
 	if !ok {
-		return 0
+		return 0, false
 	}
 	for _, of := range q {
 		s.queuedData -= of.size
 		if d := of.f.GetStreamData(); d != nil {
 			payload += int64(len(d.GetData()))
+		}
+		if of.f.GetStreamClose() != nil {
+			closeDropped = true
 		}
 	}
 	delete(s.data, streamID)
@@ -245,7 +266,7 @@ func (s *scheduler) purge(streamID uint32) (payload int64) {
 		}
 	}
 	s.signalLocked()
-	return payload
+	return payload, closeDropped
 }
 
 func (s *scheduler) close() {

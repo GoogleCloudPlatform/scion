@@ -160,6 +160,18 @@ type Stream interface {
 	ID() uint32
 }
 
+// WindowSize is a terminal size carried by StreamResize.
+type WindowSize struct{ Cols, Rows uint16 }
+
+// Resizable is implemented by every Stream of this package. Resizes
+// delivers the peer's StreamResize frames (values above 65535 are
+// clamped). Delivery never blocks the session: if the consumer falls
+// behind, only the latest size is kept. The channel is closed when the
+// stream ends or is closed locally, so it can be ranged over.
+type Resizable interface {
+	Resizes() <-chan WindowSize
+}
+
 // SessionInfo describes a session. Field values use the canonical strings
 // of contracts §2.
 type SessionInfo struct {
@@ -188,7 +200,16 @@ type LocalSession interface {
 	// GoAwayReceived is closed when the peer sent GoAway; the dialer
 	// should open a replacement session at once.
 	GoAwayReceived() <-chan struct{}
+	// CloseWithCode ends the session at once, without a drain: the peer
+	// receives GoAway{code, reason} (no drain deadline), then the
+	// transport is closed. Every stream and pending call fails with the
+	// code (e.g. 4401 authz expired, 4403 forbidden). It returns
+	// ErrSessionClosed if the session already ended; Done reports when
+	// the close completed.
+	CloseWithCode(code uint32, reason string) error
 	// RefreshAuth sends AuthRefresh{credential, stream_id} (dialer side).
+	// The receiving side validates refreshes one at a time; if several
+	// arrive while one is being validated, only the latest is kept.
 	RefreshAuth(credential []byte, streamID uint32) error
 	// Stats returns scheduler and buffer counters.
 	Stats() Stats
