@@ -18,7 +18,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -124,18 +124,22 @@ func selectorCallNames(fd *ast.FuncDecl) map[string]int {
 func parseHubFuncs(t *testing.T) map[string]map[string]int {
 	t.Helper()
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, parser.SkipObjectResolution)
+	files, err := filepath.Glob("*.go")
 	if err != nil {
-		t.Fatalf("parse package: %v", err)
-	}
-	pkg, ok := pkgs["hub"]
-	if !ok {
-		t.Fatalf("package hub not found")
+		t.Fatalf("list package files: %v", err)
 	}
 	funcs := map[string]map[string]int{}
-	for _, f := range pkg.Files {
+	for _, name := range files {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		if f.Name.Name != "hub" {
+			continue
+		}
 		for _, decl := range f.Decls {
 			fd, ok := decl.(*ast.FuncDecl)
 			if !ok {
@@ -143,6 +147,9 @@ func parseHubFuncs(t *testing.T) map[string]map[string]int {
 			}
 			funcs[funcDeclKey(fd)] = selectorCallNames(fd)
 		}
+	}
+	if len(funcs) == 0 {
+		t.Fatalf("no functions found in package hub")
 	}
 	return funcs
 }
