@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -275,12 +276,12 @@ func TestGoAwayCarriesReconnectWindow(t *testing.T) {
 func TestTestHelpersWaitForRegistration(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		call func(t *testing.T, r *relay.Relay, id string) bool
+		call func(t testing.TB, r *relay.Relay, id string) bool
 	}{
-		{name: "touch interceptor", call: func(t *testing.T, r *relay.Relay, id string) bool {
+		{name: "touch interceptor", call: func(t testing.TB, r *relay.Relay, id string) bool {
 			return r.TouchInterceptorForTest(t, id, nil) != nil
 		}},
-		{name: "source", call: func(t *testing.T, r *relay.Relay, id string) bool {
+		{name: "source", call: func(t testing.TB, r *relay.Relay, id string) bool {
 			return r.SourceForTest(t, id) == relay.IncarnationSourceLaunchID
 		}},
 	} {
@@ -301,20 +302,58 @@ func TestTestHelpersWaitForRegistration(t *testing.T) {
 				}
 			})
 			_, wel := n.MustDial("a", relaytest.AgentHello(agentID, "L1", "", "pty"), conduit.Config{})
-			result := make(chan bool, 1)
-			go func() { result <- tc.call(t, n.Relay, wel.GetSessionId()) }()
-			relaytest.Wait(t, waiting, "the helper to wait for the pending session")
+			// The helper runs off the test goroutine: its fatal path is
+			// recorded and reported here, not called on t.
+			result := make(chan helperOutcome, 1)
+			go func() {
+				rec := &fatalRecorder{TB: t}
+				var out helperOutcome
+				defer func() { out.fatal = rec.msg; result <- out }()
+				out.ok = tc.call(rec, n.Relay, wel.GetSessionId())
+			}()
 			select {
-			case <-result:
-				t.Fatal("helper returned while the session was still pending")
+			case <-waiting:
+			case out := <-result:
+				t.Fatalf("helper returned while the session was still pending (ok %v, fatal %q)", out.ok, out.fatal)
+			case <-time.After(10 * time.Second): // safety net, not synchronisation
+				t.Fatal("timed out waiting for the helper to wait for the pending session")
+			}
+			select {
+			case out := <-result:
+				t.Fatalf("helper returned while the session was still pending (ok %v, fatal %q)", out.ok, out.fatal)
 			default:
 			}
 			unblock()
-			if !relaytest.Wait(t, result, "helper") {
+			out := relaytest.Wait(t, result, "helper")
+			if out.fatal != "" {
+				t.Fatalf("helper failed: %s", out.fatal)
+			}
+			if !out.ok {
 				t.Fatal("helper did not see the registered session")
 			}
 		})
 	}
+}
+
+// helperOutcome is the result of a test helper run off the test goroutine.
+type helperOutcome struct {
+	ok    bool
+	fatal string
+}
+
+// fatalRecorder lets a helper that fails with t.Fatal run off the test
+// goroutine: the failure is recorded and the goroutine exits, and the test
+// goroutine reports it.
+type fatalRecorder struct {
+	testing.TB
+	msg string
+}
+
+func (f *fatalRecorder) Fatal(args ...any) { f.msg = fmt.Sprint(args...); runtime.Goexit() }
+
+func (f *fatalRecorder) Fatalf(format string, args ...any) {
+	f.msg = fmt.Sprintf(format, args...)
+	runtime.Goexit()
 }
 
 // TestShutdownBoundsDrainWriteConcurrency (r3-F2): Shutdown never has more
