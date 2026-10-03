@@ -22,7 +22,10 @@
     It writes `agent_defaults` first (copy case only), then strips
     `profiles`, through `OperationalSettings.Update` with each row's revision
     and `updatedBy = system:profile-timezone-retire`. It retries on a revision
-    conflict and logs one warning per value.
+    conflict and logs one warning per value. In the copy case the
+    `agent_defaults` row becomes admin-managed (origin `managed`): later
+    `settings.yaml` changes to agent defaults no longer apply on that hub
+    until an admin resets the section, which returns it to file seeding.
   - File tier: `settings.yaml` is never rewritten. A raw map walk
     (`config.ScanSettingsFileProfileTimezones`, same parser as the loader, so
     dotted profile names work) finds the keys, and the hub logs one warning
@@ -46,6 +49,14 @@ literal `agent_defaults.default_timezone: <zone>` line. `settings.yaml` stores
 the hub default as the top-level `default_timezone` key, and nothing reads a
 nested `agent_defaults:` block from the file, so the literal line would have
 no effect. The warning names both forms.
+
+On a DB-tier hub whose `profiles` row is still `seeded`, the strip is written
+by the every-boot seed sync (`updatedBy = seed`), because the legacy keys are
+removed from the seed material first. The retire step then only decides the
+copy and logs. Only `agent_defaults` in the copy case, and a `managed`
+`profiles` row, carry `updatedBy = system:profile-timezone-retire`.
+`TestInitOperationalSettings_ProfileTimezoneRetire_TwoBoots` pins the seeded
+case.
 
 ## Tests
 
