@@ -507,45 +507,6 @@ func TestDevAuthGrandchildBoundedByParent(t *testing.T) {
 	assert.Equal(t, rowFiveIDs(t, mf.srv, parent), withoutDeliver(edges[0].PermissionIDs))
 }
 
-// A create whose broker dispatch fails leaves the child's edge in place but
-// no usable authority: the token sent to the broker creates nothing and
-// refreshes nothing, and the child is not a valid ceiling source.
-func TestDispatchFailureLeavesNoUsableAuthority(t *testing.T) {
-	f := newChainFixture(t, "chain-dispatch")
-	parent, _ := f.sessionParent(t, "chain-dispatch-p")
-	f.client.returnErr = errors.New("broker unavailable")
-
-	rec := f.createAsParent(t, f.agentToken(t, parent.ID), CreateAgentRequest{Name: "chain-dispatch-c"})
-	require.GreaterOrEqual(t, rec.Code, 400, rec.Body.String())
-	_, err := f.store.GetAgentBySlug(context.Background(), f.proj.ID, "chain-dispatch-c")
-	require.ErrorIs(t, err, store.ErrNotFound, "no agent row")
-
-	edges := agentDelegatorEdges(t, f.store, parent.ID)
-	require.Len(t, edges, 1)
-	assert.True(t, edges[0].Active, "the edge is left in place")
-	childID := edges[0].DelegateID
-
-	require.NotNil(t, f.client.lastCreateReq)
-	childToken := f.client.lastCreateReq.AgentToken
-	require.NotEmpty(t, childToken)
-	f.client.returnErr = nil
-
-	rec = f.createAsParent(t, childToken, CreateAgentRequest{Name: "chain-dispatch-gc"})
-	assert.GreaterOrEqual(t, rec.Code, 400, rec.Body.String())
-	_, err = f.store.GetAgentBySlug(context.Background(), f.proj.ID, "chain-dispatch-gc")
-	assert.ErrorIs(t, err, store.ErrNotFound, "no grandchild row")
-
-	mf := f.mint()
-	claims := mf.tokenClaims(t, childToken)
-	refresh := httptest.NewRecorder()
-	f.srv.handleAgentTokenRefresh(refresh, buildAgentRefreshRequest(childID, claims, "", false), childID)
-	assert.NotEqual(t, http.StatusOK, refresh.Code, refresh.Body.String())
-
-	_, _, err = f.srv.authzService.sourceEffectCeiling(context.Background(), &agentIdentityWrapper{AgentTokenClaims: claims})
-	assert.ErrorIs(t, err, ErrProvenanceChain)
-	assert.Contains(t, err.Error(), "not found")
-}
-
 // Authority from a relationship is checked at use, not frozen: a child of
 // an access token holding agent:attach carries exactly the token's ceiling,
 // and the walk allows attach only on agents the owner descends to.

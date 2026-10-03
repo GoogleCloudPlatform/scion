@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -340,7 +341,7 @@ func TestCleanupFailedCreate_CanceledCtx_EveryStepRunsDetached(t *testing.T) {
 	cancel()
 
 	var runtimeDelete ctxObservation
-	srv.cleanupFailedCreate(canceled, agent, agent.RuntimeBrokerID, cleanupSkipRevoke, func(cctx context.Context) error {
+	srv.cleanupFailedCreate(canceled, agent, agent.RuntimeBrokerID, "", errors.New("dispatch failed"), cleanupSkipRevoke, func(cctx context.Context) error {
 		runtimeDelete = observeCtx(cctx)
 		return nil
 	})
