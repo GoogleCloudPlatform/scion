@@ -1214,14 +1214,13 @@ func (s *Server) handleExistingAgent(
 		// ptone/scion#1963 delete-path audit: this hard-deletes a
 		// provisioning-phase agent, which counts against
 		// max_agents_per_broker (isBrokerQuotaCountedPhase). Release both
-		// limits explicitly, matching the main delete handler
-		// (handlers_agents_core.go) — the stale-reservation reconcile would
-		// eventually catch a missed release once the agent record is gone,
-		// but there is no reason to wait for that here.
-		if s.quotaService != nil {
-			s.releaseBrokerQuota(ctx, existingAgent)
-			s.quotaService.Release(ctx, "max_agents_per_project", existingAgent.ID)
-		}
+		// limits via releaseAgentQuotas, matching the main delete handler
+		// (handlers_agents_core.go). releaseAgentQuotas detaches from ctx
+		// (ptone/scion#2087): the row is already gone, so a release that
+		// failed on a canceled request would strand the per-project
+		// reservation for good — the stale-reservation reconcile only
+		// reclaims max_agents_per_broker.
+		s.releaseAgentQuotas(ctx, existingAgent.ID, existingAgent.RuntimeBrokerID)
 		return existingAgentDeleted
 	}
 
