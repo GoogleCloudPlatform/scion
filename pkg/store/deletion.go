@@ -81,7 +81,11 @@ func (p DeletionPredicate) Matches(a *Agent) bool {
 type DeletionFields struct {
 	State *string
 	// Claim sets deletion_claim; BumpClaim increments it (claim+1) and wins
-	// over Claim when both are set.
+	// over Claim when both are set. Any write that takes a new claim must
+	// bump the claim epoch (use BumpClaim), never reuse or lower it: the
+	// reincarnate worker pins its failed-marker clear to the claim admitted
+	// at request time and relies on a marker at that claim never appearing
+	// later.
 	Claim     *int64
 	BumpClaim bool
 

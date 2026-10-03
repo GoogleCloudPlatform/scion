@@ -819,6 +819,9 @@ func TestDeleteGate_ReincarnateCompletionClearsFailedMarker(t *testing.T) {
 		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	}
 
+	// This subtest alone cannot catch a regression that moves the clear
+	// back after the completion write (that only races); "completion write
+	// fails" below pins the ordering, so do not delete that one.
 	t.Run("completion clears", func(t *testing.T) {
 		srv, s, project, broker := setupReincarnateTestServer(t, newReincarnateTestDispatcher())
 		agent := newReincarnateTestAgent(t, s, project, broker, nil)
