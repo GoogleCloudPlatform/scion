@@ -654,3 +654,40 @@ func TestKnownRuntimeNamesMatchRuntimeNames(t *testing.T) {
 		t.Errorf("runtime names %v, knownRuntimeNames %v", names, knownRuntimeNames)
 	}
 }
+
+// TestRecordedRuntime_StartIsNotGated pins that start, which may create the
+// agent, is not subject to the recorded-runtime check: an unregistered
+// recorded type for an agent no runtime lists does not produce the
+// runtime-unavailable 503.
+func TestRecordedRuntime_StartIsNotGated(t *testing.T) {
+	srv, defaultMgr, _ := newRecordedRuntimeServer(t, false)
+	defaultMgr.agents = nil
+
+	w := serveRR(srv, http.MethodPost, "/api/v1/agents/"+rrAgent+"/start"+rrQuery("cloudrun"), "")
+
+	if w.Code == http.StatusServiceUnavailable && strings.Contains(w.Body.String(), "is not available on this broker") {
+		t.Fatalf("start answered the recorded-runtime 503: %s", w.Body.String())
+	}
+}
+
+// TestRecordedRuntime_AliasNamedRuntimeMatches pins that a runtime is matched
+// by the canonical form of its Name(), so a runtime reporting an alias such as
+// "k8s" serves an agent recorded as "kubernetes".
+func TestRecordedRuntime_AliasNamedRuntimeMatches(t *testing.T) {
+	srv, defaultMgr, _ := newRecordedRuntimeServer(t, false)
+	defaultMgr.agents = nil
+	auxMgr := &rrManager{}
+	auxMgr.agents = []api.AgentInfo{rrAgentInfo("k8s-pod")}
+	srv.auxiliaryRuntimesMu.Lock()
+	srv.auxiliaryRuntimes["kubernetes"] = auxiliaryRuntime{Runtime: newRRRuntime("k8s", auxMgr), Manager: auxMgr}
+	srv.auxiliaryRuntimesMu.Unlock()
+
+	w := serveRR(srv, http.MethodPost, "/api/v1/agents/"+rrAgent+"/stop"+rrQuery("kubernetes"), "")
+
+	if w.Code >= 300 {
+		t.Fatalf("status = %d; body = %s", w.Code, w.Body.String())
+	}
+	if auxMgr.acted() == 0 {
+		t.Error("the k8s-named runtime holding the agent did not act")
+	}
+}
