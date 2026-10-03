@@ -158,6 +158,34 @@ describe('scion-unified-log-viewer timestamps', () => {
     expect(ts.getAttribute('title')).toBe('Sep 24, 2026, 00:00 (Asia/Tokyo)');
   });
 
+  it('detail panel shows the display-zone instant, then the raw value labelled UTC', async () => {
+    setPreferredTimeZone('Asia/Tokyo');
+    const el = await mount();
+    (el.shadowRoot.querySelector('.log-row') as HTMLElement).click();
+    await el.updateComplete;
+    expect(text(el, '.detail-meta-item')[0].replace(/\s+/g, ' ')).toBe(
+      'Timestamp: Sep 24, 2026, 00:00:00.000 (Asia/Tokyo) · 2026-09-23T15:00:00.000Z UTC'
+    );
+  });
+
+  it('detail panel shows an unparsable timestamp as given, without throwing', async () => {
+    const el: AnyEl = document.createElement('scion-unified-log-viewer');
+    document.body.appendChild(el);
+    el.entries = [
+      {
+        timestamp: 'not-a-date',
+        severity: 'ERROR',
+        message: 'boom',
+        insertId: 'u2',
+        source: 'hub',
+      },
+    ];
+    await el.updateComplete;
+    (el.shadowRoot.querySelector('.log-row') as HTMLElement).click();
+    await el.updateComplete;
+    expect(text(el, '.detail-meta-item')[0].replace(/\s+/g, ' ')).toBe('Timestamp: not-a-date');
+  });
+
   it('re-renders on a display zone change', async () => {
     setPreferredTimeZone('Asia/Tokyo');
     const el = await mount();

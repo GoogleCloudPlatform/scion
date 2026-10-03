@@ -21,11 +21,16 @@
   `chat/chat-thread.ts`.
   - Log viewers: row times in the display zone, 24-hour (milliseconds kept where they were
     shown). Date dividers name the zone; the unified viewer's time tooltip carries the full
-    date and zone.
+    date and zone. Its expanded detail panel shows the display-zone instant with milliseconds
+    and the zone, then the raw ISO value labelled UTC (for Cloud Logging correlation); an
+    unparsable timestamp is shown as given instead of throwing.
   - Chat exports (markdown, print, copy, and the rail's thread export) use
     `formatInstantWithZone`. The export filename date is in the display zone.
-  - Chat members/search: ages under a week keep their compact text; older dates use
-    `formatInstantWithZone(iso, 'date')`.
+  - Chat members: ages under a week keep their compact text; older dates use
+    `formatInstantWithZone(iso, 'date')` (shown in a tooltip).
+  - Chat search: same ladder, but older dates show the compact `formatInstant(iso, 'date')`
+    because the time slot does not shrink; every result time carries the full
+    `formatInstantWithZone(iso, 'datetime-full')` as its title.
   - Palette attachment date: `formatInstant(..., 'date')`, so it now includes the year.
     `PaletteCandidate` has no title field, so no tooltip was added.
   - File browser: the "Modified" column uses `formatInstant(..., 'datetime-full')`, and the header

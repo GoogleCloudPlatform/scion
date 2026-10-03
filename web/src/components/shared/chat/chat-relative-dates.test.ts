@@ -27,6 +27,7 @@ vi.mock('../../../client/api.js', () => ({
   extractApiError: vi.fn(() => 'error'),
 }));
 
+import { render } from 'lit';
 import { setPreferredTimeZone } from '../../../utils/time.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -74,10 +75,25 @@ describe('scion-chat-search result time', () => {
     expect(fmt('2026-09-23T09:00:00Z')).toBe('3h ago');
   });
 
-  it('shows an older date in the display zone, with the zone named', () => {
+  it('shows an older date compactly in the display zone, with the zone in the title', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(NOW));
+    // vitest pins the browser zone to UTC; 15:00Z is the next day in Tokyo.
     setPreferredTimeZone('Asia/Tokyo');
-    expect(fmt('2026-09-01T15:00:00Z')).toBe('Sep 2, 2026 (Asia/Tokyo)');
+    const el = document.createElement('scion-chat-search') as any;
+    const container = document.createElement('div');
+    render(
+      el.renderResult({
+        threadName: 'general',
+        conversationKey: 'c1',
+        senderName: 'alice',
+        snippet: 'hi',
+        timestamp: '2026-09-01T15:00:00Z',
+      }),
+      container
+    );
+    const time = container.querySelector('.result-time') as HTMLElement;
+    expect(time.textContent?.trim()).toBe('Sep 2, 2026');
+    expect(time.getAttribute('title')).toBe('Sep 2, 2026, 00:00 (Asia/Tokyo)');
   });
 });

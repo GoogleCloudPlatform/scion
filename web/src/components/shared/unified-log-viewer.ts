@@ -28,7 +28,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../client/api.js';
 import './json-browser.js';
-import { formatInstant, formatInstantWithZone } from '../../utils/time.js';
+import { formatInstant, formatInstantWithZone, zoneLabel } from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 interface DiagnosticLogEntry {
@@ -846,8 +846,13 @@ export class ScionUnifiedLogViewer extends LitElement {
   }
 
   private renderDetailPanel(entry: DiagnosticLogEntry) {
-    const d = new Date(entry.timestamp);
-    const fullTimestamp = d.toISOString();
+    // The instant in the display zone (with milliseconds and the zone named),
+    // then the raw UTC ISO value for correlating with Cloud Logging. An
+    // unparsable timestamp is shown as given.
+    const date = formatInstant(entry.timestamp, 'date');
+    const fullTimestamp = date
+      ? `${date}, ${formatInstant(entry.timestamp, 'time-millis')} (${zoneLabel()}) · ${new Date(entry.timestamp).toISOString()} UTC`
+      : entry.timestamp;
 
     return html`
       <div class="detail-row">
