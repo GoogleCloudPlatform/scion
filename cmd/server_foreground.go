@@ -2663,7 +2663,7 @@ var logSharedDirStorageStartupGuard sync.Once
 // impure half, factored out so a test can call it directly -- as many times
 // as it likes, with a captured logf -- without the once-per-process guard
 // making every call after the first a no-op. It loads global settings the
-// same env-free, global-only way the Start path does (config.LoadGlobalSettings,
+// same env-free, global-only way the Start path does (config.LoadGlobalSettingsWithOverlay,
 // never LoadEffectiveSettings, so this can never be influenced by a
 // project's own settings.yaml) and forwards to logSharedDirStorageStartup.
 //
@@ -2674,7 +2674,7 @@ var logSharedDirStorageStartupGuard sync.Once
 // request/agent-start actually needs it, so this is the heads-up an
 // operator sees before that happens.
 func loadAndLogSharedDirStorageStartup(logf func(format string, args ...interface{})) {
-	globalSettings, _, gErr := config.LoadGlobalSettings()
+	globalSettings, _, gErr := config.LoadGlobalSettingsWithOverlay()
 	if gErr != nil {
 		if config.GlobalSettingsMentions("shared_dir_storage") {
 			logf("Warning: server.shared_dir_storage: global settings failed to load (%v); "+
@@ -2682,10 +2682,60 @@ func loadAndLogSharedDirStorageStartup(logf func(format string, args ...interfac
 		}
 		return
 	}
-	if globalSettings == nil || globalSettings.Server == nil {
+	if globalSettings == nil {
 		return
 	}
-	logSharedDirStorageStartup(globalSettings.Server.SharedDirStorage, logf)
+	if globalSettings.Server != nil {
+		logSharedDirStorageStartup(globalSettings.Server.SharedDirStorage, logf)
+	}
+	logSharedDirStorageOverridesStartup(globalSettings, logf)
+}
+
+// logSharedDirStorageOverridesStartup logs one line per profile whose
+// shared-dir storage backend comes from a profile or runtime entry
+// shared_dir_storage_backend override, and a warning per invalid override.
+// It checks configuration only and never touches the filesystem: an nfs
+// override whose export is not mounted on this host is reported when an
+// agent using it starts, not here, so a missing mount never affects startup
+// or agents that use the local backend. Overrides set through the hub's
+// settings API after startup are not in this summary; they apply to the
+// next agent start.
+func logSharedDirStorageOverridesStartup(gs *config.VersionedSettings, logf func(format string, args ...interface{})) {
+	if gs == nil {
+		return
+	}
+	var global *config.V1SharedDirStorageConfig
+	if gs.Server != nil {
+		global = gs.Server.SharedDirStorage
+	}
+	for _, e := range config.ValidateSharedDirStorageBackends(gs.Runtimes, gs.Profiles, global) {
+		logf("Warning: %s", e.Error())
+	}
+	names := make([]string, 0, len(gs.Profiles))
+	for name := range gs.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		cfg, source := gs.ResolveSharedDirStorage(name)
+		if cfg == nil || source == config.SharedDirStorageGlobalSource {
+			continue
+		}
+		line := fmt.Sprintf("shared_dir_storage for profile %s: backend=%s (from %s)", name, sharedDirBackendLabel(cfg), source)
+		if summary := cfg.ResolvedLayoutSummary(); summary != "" {
+			line = fmt.Sprintf("shared_dir_storage for profile %s: %s (from %s)", name, summary, source)
+		}
+		logf("%s", line)
+	}
+}
+
+// sharedDirBackendLabel is the backend a resolved config selects, with
+// nil and "" shown as local.
+func sharedDirBackendLabel(cfg *config.V1SharedDirStorageConfig) string {
+	if cfg != nil && cfg.Backend == "nfs" {
+		return "nfs"
+	}
+	return "local"
 }
 
 // logSharedDirStorageStartupOnce calls loadAndLogSharedDirStorageStartup
