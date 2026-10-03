@@ -117,7 +117,7 @@ func runMemGuard(done <-chan struct{}, w io.Writer, interval time.Duration, limi
 		}
 		used, source, ok := sample()
 		if !ok {
-			fmt.Fprintln(w, "memory guard: no memory signal available; guard disabled")
+			_, _ = fmt.Fprintln(w, "memory guard: no memory signal available; guard disabled")
 			return
 		}
 		if used > limit {
@@ -139,10 +139,16 @@ func memGuardUsage() (uint64, string, bool) {
 	sample := []metrics.Sample{{Name: memGuardMetricTotal}, {Name: memGuardMetricReleased}}
 	metrics.Read(sample)
 	if sample[0].Value.Kind() == metrics.KindUint64 && sample[1].Value.Kind() == metrics.KindUint64 {
-		if goMem := sample[0].Value.Uint64() - sample[1].Value.Uint64(); goMem > used {
-			used, source = goMem, "Go runtime memory"
+		// The two metrics are read together, but guard against released
+		// exceeding total so a skewed sample cannot wrap to a huge value
+		// and abort a healthy run.
+		total, released := sample[0].Value.Uint64(), sample[1].Value.Uint64()
+		if total >= released {
+			if goMem := total - released; goMem > used {
+				used, source = goMem, "Go runtime memory"
+			}
+			ok = true
 		}
-		ok = true
 	}
 	return used, source, ok
 }

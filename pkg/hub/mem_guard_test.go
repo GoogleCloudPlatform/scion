@@ -33,6 +33,11 @@ func TestMemGuard_TripsOnlyAboveLimit(t *testing.T) {
 	samples := []uint64{10, 100, 50, 101, 500}
 	i := 0
 	sample := func() (uint64, string, bool) {
+		// Past the end, report no signal: the guard logs and stops, and the
+		// empty-log assertion below fails instead of the test panicking.
+		if i >= len(samples) {
+			return 0, "fake", false
+		}
 		v := samples[i]
 		i++
 		return v, "fake", true
