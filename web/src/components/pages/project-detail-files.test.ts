@@ -919,6 +919,19 @@ describe('scion-page-project-detail — empty directory per agent (#2703)', () =
     expect(listingCalls[SHARED_DIR_A]).toBe(1);
   });
 
+  it('still shows the workspace tab for a linked project', async () => {
+    vi.stubGlobal('IntersectionObserver', undefined);
+
+    const { el, listingCalls } = await createComponent('member', {
+      projectType: 'linked',
+      sharedDirs: [],
+    });
+    element = el;
+
+    expect(fileBrowserFor(el, 'workspace')).not.toBeNull();
+    expect(listingCalls.workspace).toBe(1);
+  });
+
   it('still shows the workspace tab for a shared workspace directory project', async () => {
     vi.stubGlobal('IntersectionObserver', undefined);
 

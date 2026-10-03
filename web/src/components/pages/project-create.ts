@@ -1485,9 +1485,10 @@ export class ScionPageProjectCreate extends LitElement {
         <div class="hint">${selectedType?.hint ?? ''}</div>
         ${this.mode === 'empty-per-agent'
           ? html`<div class="workspace-mode-note empty-per-agent-note">
-              The directory is created on the broker when the agent starts. It survives
-              suspend/resume and is <strong>deleted when the agent is deleted</strong>. Use shared
-              dirs or a git remote for anything you need to keep.
+              The directory is created on the broker when the agent starts. It is kept across
+              suspend/resume where the broker's storage allows, and is
+              <strong>deleted when the agent is deleted</strong>. Use shared dirs or a git remote
+              for anything you need to keep.
             </div>`
           : nothing}
       </div>
