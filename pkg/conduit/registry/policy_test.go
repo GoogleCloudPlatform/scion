@@ -94,6 +94,15 @@ func TestNew_Defaults(t *testing.T) {
 	r := New(nil, Config{})
 	assert.Equal(t, DefaultRelayStaleAfter, r.cfg.RelayStaleAfter)
 	assert.Equal(t, DefaultSessionReapAfter, r.cfg.SessionReapAfter)
+
+	// 1b-r2-F1: a reap horizon at or below the staleness threshold is
+	// normalised so ReapStaleSessions(ctx, 0, now) never errors.
+	r = New(nil, Config{SessionStaleAfter: 15 * time.Minute})
+	assert.Equal(t, 30*time.Minute, r.cfg.SessionReapAfter)
+	r = New(nil, Config{SessionReapAfter: 60 * time.Second})
+	assert.Equal(t, DefaultSessionReapAfter, r.cfg.SessionReapAfter)
+	r = New(nil, Config{SessionReapAfter: 20 * time.Minute})
+	assert.Equal(t, 20*time.Minute, r.cfg.SessionReapAfter, "a valid explicit horizon is kept")
 	assert.Equal(t, DefaultSessionStaleAfter, r.cfg.SessionStaleAfter)
 	assert.WithinDuration(t, time.Now(), r.now(), time.Minute)
 }

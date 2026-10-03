@@ -129,13 +129,14 @@ func nullIfEmpty(v string) any {
 }
 
 // RegisterRelay implements registry.Store. The generation is assigned by a
-// single atomic upsert (1 on insert, stored+1 on conflict), so it is
-// derived from the database and strictly increasing per instance_id
-// regardless of wall-clock behaviour.
+// single atomic upsert (the registry's seed r.Generation on insert,
+// stored+1 on conflict), so re-registration is derived from the database
+// and strictly increasing per instance_id regardless of wall-clock
+// behaviour.
 func (s *ConduitRegistryStore) RegisterRelay(ctx context.Context, r registry.RelayInstance) (int64, error) {
 	q := fmt.Sprintf(`INSERT INTO relay_instances
   (instance_id, generation, internal_endpoint, public_endpoint, started_at, last_seen, draining)
-VALUES (%s, 1, %s, %s, %s, %s, %s)
+VALUES (%s, %s, %s, %s, %s, %s, %s)
 ON CONFLICT (instance_id) DO UPDATE SET
   generation = relay_instances.generation + 1,
   internal_endpoint = excluded.internal_endpoint,
@@ -143,7 +144,11 @@ ON CONFLICT (instance_id) DO UPDATE SET
   started_at = excluded.started_at,
   last_seen = excluded.last_seen,
   draining = excluded.draining
-RETURNING generation`, s.ph(1), s.ph(2), s.ph(3), s.ph(4), s.ph(5), s.ph(6))
+RETURNING generation`, s.ph(1), s.ph(2), s.ph(3), s.ph(4), s.ph(5), s.ph(6), s.ph(7))
+	seed := r.Generation
+	if seed <= 0 {
+		seed = 1
+	}
 	t, err := s.begin(ctx, false)
 	if err != nil {
 		return 0, err
@@ -151,7 +156,7 @@ RETURNING generation`, s.ph(1), s.ph(2), s.ph(3), s.ph(4), s.ph(5), s.ph(6))
 	defer t.rollback()
 	var gen int64
 	if err := t.tx.QueryRowContext(ctx, q,
-		r.InstanceID, r.InternalEndpoint, nullIfEmpty(r.PublicEndpoint),
+		r.InstanceID, seed, r.InternalEndpoint, nullIfEmpty(r.PublicEndpoint),
 		r.StartedAt.UTC(), r.LastSeen.UTC(), false,
 	).Scan(&gen); err != nil {
 		return 0, fmt.Errorf("conduit registry store: register relay %q: %w", r.InstanceID, err)

@@ -42,7 +42,10 @@ type Config struct {
 	SessionStaleAfter time.Duration
 	// SessionReapAfter is how old a session's last_seen must be before
 	// ReapStaleSessions deletes the row regardless of its relay's state.
-	// It must exceed SessionStaleAfter by a wide margin. Default 10m.
+	// It must exceed SessionStaleAfter by a wide margin. Default 10m. New
+	// normalises a value <= SessionStaleAfter (after defaults are applied)
+	// to max(DefaultSessionReapAfter, 2*SessionStaleAfter), so the
+	// default-horizon ReapStaleSessions call never errors.
 	SessionReapAfter time.Duration
 	// Clock supplies timestamps for writes and admission checks. Default:
 	// the wall clock.
@@ -66,6 +69,9 @@ func New(store Store, cfg Config) *Registry {
 	if cfg.SessionReapAfter <= 0 {
 		cfg.SessionReapAfter = DefaultSessionReapAfter
 	}
+	if cfg.SessionReapAfter <= cfg.SessionStaleAfter {
+		cfg.SessionReapAfter = max(DefaultSessionReapAfter, 2*cfg.SessionStaleAfter)
+	}
 	if cfg.Clock == nil {
 		cfg.Clock = ClockFunc(time.Now)
 	}
@@ -79,6 +85,16 @@ func (r *Registry) now() time.Time { return r.cfg.Clock.Now().UTC() }
 // returned for the same instance_id. In hosted-HA mode the caller must run
 // SelfCheck first and refuse to start if it fails (design §3.4, §3.9).
 // Zero StartedAt/LastSeen are filled from the clock.
+//
+// Generation assignment: re-registering an existing row yields stored+1
+// (database-derived, immune to the clock). A NEW row (first registration,
+// or one previously removed by PruneRelayInstances) is seeded with the
+// clock's Unix milliseconds rather than 1, so generations stay monotonic
+// across a prune even for stable instance ids: a pruned id has been idle
+// for at least the prune horizon (default 7 days), so a fresh millisecond
+// seed exceeds any generation it held before. Residual assumption: node
+// clocks are roughly correct (not wrong by days), the same NTP assumption
+// as the liveness checks. ri.Generation on input is ignored.
 func (r *Registry) RegisterRelay(ctx context.Context, ri RelayInstance) (int64, error) {
 	if ri.InstanceID == "" {
 		return 0, fmt.Errorf("%w: empty instance_id", ErrInvalidInput)
@@ -89,6 +105,10 @@ func (r *Registry) RegisterRelay(ctx context.Context, ri RelayInstance) (int64, 
 	}
 	if ri.LastSeen.IsZero() {
 		ri.LastSeen = now
+	}
+	ri.Generation = now.UnixMilli()
+	if ri.Generation <= 0 {
+		ri.Generation = 1
 	}
 	return r.store.RegisterRelay(ctx, ri)
 }
@@ -248,7 +268,10 @@ func (r *Registry) ReapStaleSessions(ctx context.Context, olderThan time.Duratio
 // HeartbeatRelay/SetRelayDraining/InsertSessionWithNextEpoch fenced with
 // ErrRelaySuperseded and must re-register; the horizon is far beyond the
 // reaper's, so any session such a relay could still insert would be reaped
-// anyway. Run it from the same singleton as ReapStaleRelays.
+// anyway. A pruned id that later re-registers is seeded with a clock-based
+// generation (see RegisterRelay), so it never reuses a generation an old
+// process might still hold, provided clocks are not wrong by more than
+// the prune horizon. Run it from the same singleton as ReapStaleRelays.
 func (r *Registry) PruneRelayInstances(ctx context.Context, olderThan time.Duration, now time.Time) (int, error) {
 	if olderThan <= 0 {
 		olderThan = DefaultRelayPruneAfter

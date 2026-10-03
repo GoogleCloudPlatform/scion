@@ -43,7 +43,8 @@ type PrincipalSessions struct {
 // by the Registry (from its Clock) so tests can control them.
 type Store interface {
 	// RegisterRelay upserts the relay row and atomically assigns the next
-	// generation (1 for a new instance_id, stored+1 otherwise), resetting
+	// generation (r.Generation, the caller's seed, for a new row; stored+1
+	// otherwise), resetting
 	// endpoints, started_at, last_seen and draining=false. It returns the
 	// new generation.
 	RegisterRelay(ctx context.Context, r RelayInstance) (int64, error)
