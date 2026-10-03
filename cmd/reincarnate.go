@@ -305,16 +305,16 @@ func printMoveVerdict(w io.Writer, v *hubclient.MoveVerdict) {
 		}
 		return b.ID
 	}
-	fmt.Fprintf(w, "Move eligibility: %s -> %s\n", ref(v.SourceBroker), ref(v.TargetBroker))
+	_, _ = fmt.Fprintf(w, "Move eligibility: %s -> %s\n", ref(v.SourceBroker), ref(v.TargetBroker))
 	if v.Profile != "" {
-		fmt.Fprintf(w, "  %-28s %s (%s)\n", "Target profile:", v.Profile, valueOrNone(v.RuntimeType))
+		_, _ = fmt.Fprintf(w, "  %-28s %s (%s)\n", "Target profile:", v.Profile, valueOrNone(v.RuntimeType))
 	}
 	for _, c := range v.Checks {
 		line := fmt.Sprintf("  %-28s %s", c.Name+":", c.Result)
 		if c.Message != "" {
 			line += " - " + c.Message
 		}
-		fmt.Fprintln(w, line)
+		_, _ = fmt.Fprintln(w, line)
 	}
 }
 
