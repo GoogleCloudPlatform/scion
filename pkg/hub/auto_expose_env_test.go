@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -276,34 +277,52 @@ func autoExposeDispatchFixture(t *testing.T) (*HTTPAgentDispatcher, *mockRuntime
 
 // TestDispatch_AutoExposeDefault_OnCreateStartAndRestart pins the hub default's
 // transport: it rides HubAgentDefaults on create, start and restart, so a
-// change to it reaches an agent at its next start (AC5).
+// change to it reaches an agent at its next start (AC5). Start and restart
+// carry the auto-expose default only: the hub limit/resource defaults stay
+// create/provision-only, so start behaviour for limits is unchanged.
 func TestDispatch_AutoExposeDefault_OnCreateStartAndRestart(t *testing.T) {
 	ctx := context.Background()
 	d, client, ag := autoExposeDispatchFixture(t)
 	hubDefault := ptrBool(true)
 	d.SetAutoExposePortsDefaultProvider(func() *bool { return hubDefault })
+	d.SetHubAgentDefaultsProvider(func() opsettings.AgentDefaultsSettings {
+		var s opsettings.AgentDefaultsSettings
+		s.DefaultMaxTurns = 7
+		s.DefaultMaxModelCalls = 70
+		s.DefaultMaxDuration = "1h"
+		s.DefaultResources = &api.ResourceSpec{Limits: api.ResourceList{CPU: "2"}}
+		return s
+	})
 
 	req, err := d.buildCreateRequest(ctx, hubDefaultsDispatchAgent(), "test")
 	require.NoError(t, err)
 	require.NotNil(t, req.Config)
-	require.NotNil(t, req.Config.HubAgentDefaults, "create must carry the hub auto-expose default")
-	require.NotNil(t, req.Config.HubAgentDefaults.AutoExposePorts)
-	assert.True(t, *req.Config.HubAgentDefaults.AutoExposePorts)
-
-	require.NoError(t, d.DispatchAgentStart(ctx, ag, "", false))
-	hd := client.lastStartExtras.HubAgentDefaults
-	require.NotNil(t, hd, "start must carry the hub auto-expose default")
+	hd := req.Config.HubAgentDefaults
+	require.NotNil(t, hd, "create must carry the hub defaults")
 	require.NotNil(t, hd.AutoExposePorts)
 	assert.True(t, *hd.AutoExposePorts)
-	assert.Zero(t, hd.MaxTurns, "start carries the auto-expose default only")
+	assert.Equal(t, 7, hd.MaxTurns, "create carries the hub limits")
+	assert.Equal(t, "1h", hd.MaxDuration)
+	assert.NotNil(t, hd.Resources)
+
+	assertAutoExposeOnly := func(label string, hd *RemoteHubAgentDefaults, want bool) {
+		t.Helper()
+		require.NotNil(t, hd, "%s must carry the hub auto-expose default", label)
+		require.NotNil(t, hd.AutoExposePorts, label)
+		assert.Equal(t, want, *hd.AutoExposePorts, label)
+		assert.Zero(t, hd.MaxTurns, "%s must not carry hub limits", label)
+		assert.Zero(t, hd.MaxModelCalls, "%s must not carry hub limits", label)
+		assert.Empty(t, hd.MaxDuration, "%s must not carry hub limits", label)
+		assert.Nil(t, hd.Resources, "%s must not carry hub resources", label)
+	}
+
+	require.NoError(t, d.DispatchAgentStart(ctx, ag, "", false))
+	assertAutoExposeOnly("start", client.lastStartExtras.HubAgentDefaults, true)
 
 	// A changed hub default reaches the next restart.
 	hubDefault = ptrBool(false)
 	require.NoError(t, d.DispatchAgentRestart(ctx, ag))
-	hd = client.lastRestartExtras.HubAgentDefaults
-	require.NotNil(t, hd, "restart must carry the hub auto-expose default")
-	require.NotNil(t, hd.AutoExposePorts)
-	assert.False(t, *hd.AutoExposePorts)
+	assertAutoExposeOnly("restart", client.lastRestartExtras.HubAgentDefaults, false)
 }
 
 func TestDispatch_AutoExposeDefault_UnsetSendsNothingOnStart(t *testing.T) {

@@ -18,7 +18,7 @@ import "github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 
 // remoteHubAgentDefaults converts the hub's operational agent_defaults section
 // into the wire form sent to a runtime broker, or nil when the hub has no
-// limit/resource defaults to send.
+// limit/resource or auto-expose defaults to send.
 //
 // Only the four limit/resource fields cross here. default_template and
 // default_harness_config are resolved hub-side (they need ID/hash stamping) and
@@ -31,9 +31,10 @@ import "github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 // Sending them from the hub as well would promote them from that bottom tier to
 // the hub tier and silently outrank broker profile resources and template
 // limits in deployments that have always behaved the other way. Because the
-// snapshot is empty in file mode, this returns nil there, the wire field is
-// omitted, and the broker-side rung never fires — no file-mode branch needed
-// anywhere. That is rejected alternative A7.
+// snapshot is empty in file mode, the four limit/resource fields are zero
+// there, so the broker-side limit rung never fires — no file-mode branch
+// needed anywhere. That is rejected alternative A7. With no auto-expose
+// default either, this returns nil and the wire field is omitted.
 //
 // autoExposePorts is the hub's auto-expose-ports default. Unlike the four
 // limit/resource fields it is sent in file mode too: no broker reads it from

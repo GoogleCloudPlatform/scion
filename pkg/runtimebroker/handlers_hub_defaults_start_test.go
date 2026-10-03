@@ -109,3 +109,29 @@ func TestCreateAgent_WiresHubAutoExposeDefaultOntoProvisionContext(t *testing.T)
 		t.Fatalf("provision context hub defaults = %+v, want autoExposePorts=false", hd)
 	}
 }
+
+// TestCreateAgent_FullStartSeesHubAutoExposeDefault pins the synchronous
+// create path: without provisionOnly, createAgent calls Manager.Start directly,
+// and the hub defaults must be on that context, where buildAgentEnv reads the
+// auto-expose default.
+func TestCreateAgent_FullStartSeesHubAutoExposeDefault(t *testing.T) {
+	srv, mgr := newHubDefaultsWiringServer()
+
+	postCreateAgent(t, srv, `{
+		"name": "hubdefaults-ae-start",
+		"id": "agent-uuid-hd-ae-start",
+		"slug": "hubdefaults-ae-start",
+		"config": {
+			"template": "claude",
+			"hubAgentDefaults": {"autoExposePorts": true}
+		}
+	}`)
+
+	if mgr.startCalls != 1 {
+		t.Fatalf("expected Start to be called once on the synchronous create path, got %d", mgr.startCalls)
+	}
+	hd := api.HubAgentDefaultsFromContext(mgr.lastStartCtx)
+	if hd == nil || hd.AutoExposePorts == nil || !*hd.AutoExposePorts {
+		t.Fatalf("Start context hub defaults = %+v, want autoExposePorts=true", hd)
+	}
+}
