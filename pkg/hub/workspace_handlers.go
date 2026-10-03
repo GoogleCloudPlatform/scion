@@ -486,6 +486,10 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			return
 		}
 		if err := dispatcher.DispatchAgentCreate(ctx, agent); err != nil {
+			if ref := deleteClaimedDuringDispatch(err, agent.ID); ref != nil {
+				ref.write(w)
+				return
+			}
 			if writeAgentTokenIssueError(w, err) {
 				return
 			}

@@ -60,7 +60,9 @@ func (s *Server) deleteBlocksStart(ctx context.Context, a *store.Agent) (bool, e
 	if a == nil {
 		return false, nil
 	}
-	if deletionActive(a) || a.DeletionState == store.DeletionStateFinalizing {
+	// store.DeletionHoldsRow is deletionActive(a) || finalizing (even
+	// expired); SetAgentRunID refuses under the same predicate.
+	if a.DeletionHoldsRow(time.Now()) {
 		return true, nil
 	}
 	return s.store.HasOutstandingBrokerDispatch(ctx, a.ID, brokerDispatchOpDelete)
@@ -123,6 +125,8 @@ func (r *startRefusal) dmError() *AgentDMError {
 // match wins:
 //
 //  1. deleteBlocksStart → 409 delete_in_progress (this design);
+//     1b. soft-deleted, on start, restart and wake → 409 "agent is
+//     deleted; restore it first";
 //  2. IsIncompleteCreate → 409 agent_create_incomplete (T1 P1b-3);
 //  3. IsInFlight → the per-entry T1 answer (200 + Warnings, or 409
 //     agent_launching) (T1 P1b-3).
@@ -147,8 +151,30 @@ func (s *Server) startGate(ctx context.Context, a *store.Agent, entry startEntry
 		return deleteInProgressRefusal(a.ID)
 	}
 
+	// Step 1b: a soft-deleted row is not started or woken in place; only
+	// restore brings it back (ptone/scion#2550 P1). Without this the start
+	// would pass the gate and fail later at beginRun, whose run-ID write
+	// refuses a soft-deleted row, after quota was reserved. It comes after
+	// step 1 because a restore is refused while a delete holds the row.
+	if !a.DeletedAt.IsZero() && (entry == startEntryStart || entry == startEntryRestart || entry == startEntryWake) {
+		return agentDeletedRefusal(a.ID)
+	}
+
 	// Steps 2-3 (T1 P1b-3) slot in here.
 	return nil
+}
+
+// agentDeletedRefusal is the 409 answer to starting or waking a
+// soft-deleted agent.
+func agentDeletedRefusal(agentID string) *startRefusal {
+	return &startRefusal{
+		HTTPStatus: http.StatusConflict,
+		Code:       ErrCodeConflict,
+		Message:    "agent is deleted; restore it first",
+		Details: map[string]interface{}{
+			"agentId": agentID,
+		},
+	}
 }
 
 // deleteInProgressRefusal is the 409 delete_in_progress answer.

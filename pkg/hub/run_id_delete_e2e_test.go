@@ -348,3 +348,153 @@ func TestRunID_DeleteClaimBeforeBeginRunFailsStartClosed(t *testing.T) {
 		})
 	}
 }
+
+// finalize-env mints a run (beginRun); a delete that holds the row refuses
+// the write, and the handler answers 409 delete_in_progress with no broker
+// call (ptone/scion#2550 P1 round 4, N-1).
+func TestRunID_FinalizeEnvUnderDeleteIs409(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	client := &mockRuntimeBrokerClient{}
+	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
+	agent := setupBrokerAgentInPhase(t, s, "runid-finalize-del", state.PhaseProvisioning)
+	if _, err := s.SetAgentRunID(ctx, agent.ID, "run-0"); err != nil {
+		t.Fatal(err)
+	}
+	seedAgentDeletion(t, s, agent.ID, seedLiveDeleting)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/env",
+		map[string]interface{}{"env": map[string]string{"FOO": "bar"}})
+	requireDeleteInProgress(t, rec)
+	if client.createCalled {
+		t.Error("finalize-env reached the broker")
+	}
+	got, err := s.GetAgent(ctx, agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RunID != "run-0" {
+		t.Errorf("row run = %q, want run-0", got.RunID)
+	}
+}
+
+// POST /agents on an existing stopped agent: a delete claim landing between
+// the start gate and beginRun fails the start closed with 409
+// delete_in_progress and no broker call (round 4, N-2).
+func TestRunID_DeleteClaimBeforeBeginRun_CreateExisting(t *testing.T) {
+	ctx := context.Background()
+	f := handleExistingAgentAuthzSetup(t)
+	client := &mockRuntimeBrokerClient{}
+	agent := f.agent(t, "runid-claim-create", string(state.PhaseStopped))
+	var plan *agentDeletionPlan
+	cs := &claimFirstStore{Store: f.store, claim: func() {
+		var err error
+		if plan, err = f.srv.claimAgentDeletion(ctx, agent.ID, agentDeleteParams{}); err != nil || plan == nil {
+			t.Errorf("claim: plan %v, err %v", plan, err)
+		}
+	}}
+	f.srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(cs, client, false, slog.Default()))
+
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPost, "/api/v1/agents", map[string]interface{}{
+		"name": agent.Slug, "projectId": f.project.ID, "resume": true,
+	})
+	requireDeleteInProgress(t, rec)
+	if plan == nil {
+		t.Fatal("the delete claim did not run")
+	}
+	if client.startCalled || client.createCalled || client.deleteCalled {
+		t.Error("the create-existing start reached the broker")
+	}
+}
+
+// wakeAgentForDM on a suspended agent: the same claim race answers
+// AgentDMError delete_in_progress with no broker call and no quota held
+// (round 4, N-2).
+func TestRunID_DeleteClaimBeforeBeginRun_DMWake(t *testing.T) {
+	ctx := context.Background()
+	u := newWakeQuotaFixture(t, "runid-claim-wake", 1)
+	client := &mockRuntimeBrokerClient{}
+	var plan *agentDeletionPlan
+	cs := &claimFirstStore{Store: u.s, claim: func() {
+		var err error
+		if plan, err = u.srv.claimAgentDeletion(ctx, u.target.ID, agentDeleteParams{}); err != nil || plan == nil {
+			t.Errorf("claim: plan %v, err %v", plan, err)
+		}
+	}}
+	u.srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(cs, client, false, slog.Default()))
+	target, err := u.s.GetAgent(ctx, u.target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, dmErr := u.srv.wakeAgentForDM(ctx, target)
+	if res != nil || dmErr == nil {
+		t.Fatalf("wake: res %+v, dmErr %+v; want a delete_in_progress error", res, dmErr)
+	}
+	if dmErr.HTTPStatus != http.StatusConflict || dmErr.Code != ErrCodeDeleteInProgress {
+		t.Errorf("dmErr = %d %s, want 409 %s", dmErr.HTTPStatus, dmErr.Code, ErrCodeDeleteInProgress)
+	}
+	if plan == nil {
+		t.Fatal("the delete claim did not run")
+	}
+	if client.startCalled {
+		t.Error("the wake reached the broker")
+	}
+	if n := u.count(t); n != 0 {
+		t.Errorf("broker quota held = %d, want 0", n)
+	}
+}
+
+// Start, restart and DM wake of a soft-deleted agent answer 409 "agent is
+// deleted; restore it first" from the start gate, before quota or beginRun
+// (ptone/scion#2550 P1 round 4, n-b).
+func TestStartGate_SoftDeletedAgentRefused(t *testing.T) {
+	softDelete := func(t *testing.T, s store.Store, id string) {
+		t.Helper()
+		now := time.Now()
+		n, err := s.UpdateAgentDeletion(context.Background(), id, store.DeletionPredicate{}, store.DeletionFields{DeletedAt: &now})
+		if err != nil || n != 1 {
+			t.Fatalf("soft delete: n %d, err %v", n, err)
+		}
+	}
+	for _, op := range []string{"start", "restart"} {
+		t.Run(op, func(t *testing.T) {
+			srv, s := testServer(t)
+			client := &mockRuntimeBrokerClient{}
+			srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
+			agent := setupBrokerAgentInPhase(t, s, "softdel-"+op, state.PhaseStopped)
+			softDelete(t, s, agent.ID)
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+op, nil)
+			if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "agent is deleted; restore it first") {
+				t.Fatalf("status %d, want 409 restore-first: %s", rec.Code, rec.Body.String())
+			}
+			if client.startCalled || client.restartCalled {
+				t.Error("the start reached the broker")
+			}
+			if n := brokerReservationCount(t, s, agent.RuntimeBrokerID); n != 0 {
+				t.Errorf("broker quota held = %d, want 0", n)
+			}
+		})
+	}
+	t.Run("wake", func(t *testing.T) {
+		u := newWakeQuotaFixture(t, "softdel-wake", 1)
+		client := &mockRuntimeBrokerClient{}
+		u.srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(u.s, client, false, slog.Default()))
+		softDelete(t, u.s, u.target.ID)
+		target, err := u.s.GetAgent(context.Background(), u.target.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, dmErr := u.srv.wakeAgentForDM(context.Background(), target)
+		if res != nil || dmErr == nil || dmErr.HTTPStatus != http.StatusConflict || dmErr.Message != "agent is deleted; restore it first" {
+			t.Fatalf("wake: res %+v, dmErr %+v; want 409 restore-first", res, dmErr)
+		}
+		if client.startCalled {
+			t.Error("the wake reached the broker")
+		}
+		if n := u.count(t); n != 0 {
+			t.Errorf("broker quota held = %d, want 0", n)
+		}
+	})
+}

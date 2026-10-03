@@ -2124,7 +2124,7 @@ func (s *Server) createAgentInProject(
 					// DispatchAgentCreateWithGather already revoked any credential
 					// it minted on this error return.
 					s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, dispatchDeleteFailedCreate(dispatcher, agent))
-					dispatchCreateErrorResponse(w, err)
+					dispatchCreateErrorResponse(w, err, agent.ID)
 					return
 				} else if envReqs != nil {
 					// Broker returned 202: needs env gather
@@ -2162,7 +2162,7 @@ func (s *Server) createAgentInProject(
 					// DispatchAgentCreateWithGather already revoked any credential
 					// it minted on this error return.
 					s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, dispatchDeleteFailedCreate(dispatcher, agent))
-					dispatchCreateErrorResponse(w, err)
+					dispatchCreateErrorResponse(w, err, agent.ID)
 					return
 				} else if envReqs != nil && len(envReqs.Needs) > 0 {
 					// Broker reported missing required env vars — fail the dispatch.
@@ -2539,6 +2539,10 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		if errors.As(err, &stillMissing) {
 			MissingEnvVars(w, stillMissing.Requirements.Needs,
 				s.buildEnvGatherResponse(ctx, agent, stillMissing.Requirements))
+			return
+		}
+		if ref := deleteClaimedDuringDispatch(err, agent.ID); ref != nil {
+			ref.write(w)
 			return
 		}
 		RuntimeError(w, "Failed to finalize env on runtime broker: "+err.Error())
@@ -4135,7 +4139,15 @@ const skillResolutionErrorCode = "skill_resolution_failed"
 //
 // A required-skill resolution failure is relayed verbatim: the broker's
 // status, message, details and Retry-After, with no hub prefix (#2546 R2).
-func dispatchCreateErrorResponse(w http.ResponseWriter, err error) {
+//
+// A delete that claimed agentID while the create was in flight refuses the
+// dispatch's run-ID write (store.ErrDeleteInProgress); that answers 409
+// delete_in_progress, as start does (ptone/scion#2550).
+func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID string) {
+	if ref := deleteClaimedDuringDispatch(err, agentID); ref != nil {
+		ref.write(w)
+		return
+	}
 	if writeAgentTokenIssueError(w, err) {
 		return
 	}
