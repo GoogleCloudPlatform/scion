@@ -621,6 +621,38 @@ func TestClassifyLegacyViewQuery_NilMessage_Legacy(t *testing.T) {
 		"nil message must use legacy view mode")
 }
 
+// TestClassifyLegacyViewQuery_PersistedStamp pins ptone/scion#2282: the
+// cross-project branch classifies rows read back from the store, not only
+// in-memory rows, because the provenance stamps are now persisted.
+func TestClassifyLegacyViewQuery_PersistedStamp(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+
+	projA, projB := tid("classify-proj-a"), tid("classify-proj-b")
+	newRow := func(id, senderProj, recipientProj string) *store.Message {
+		return &store.Message{
+			ID: tid(id), ProjectID: recipientProj,
+			Sender: "agent:a", SenderID: tid("classify-agent-a"), SenderProjectID: &senderProj,
+			Recipient: "agent:b", RecipientID: tid("classify-agent-b"), RecipientProjectID: &recipientProj,
+			Msg: "hello", Type: messages.TypeInstruction,
+		}
+	}
+	cross := newRow("classify-cross", projA, projB)
+	same := newRow("classify-same", projB, projB)
+	require.NoError(t, s.CreateMessage(ctx, cross))
+	require.NoError(t, s.CreateMessage(ctx, same))
+
+	gotCross, err := s.GetMessage(ctx, cross.ID)
+	require.NoError(t, err)
+	assert.Equal(t, LegacyViewCanonical, ClassifyLegacyViewQuery(gotCross),
+		"a persisted cross-project row (no conversation ID) must classify canonical from its stamps")
+
+	gotSame, err := s.GetMessage(ctx, same.ID)
+	require.NoError(t, err)
+	assert.Equal(t, LegacyViewLegacy, ClassifyLegacyViewQuery(gotSame),
+		"a persisted same-project row with no conversation ID stays legacy")
+}
+
 // ---------------------------------------------------------------------------
 // AC-4 (integration): Interagent view wires ClassifyLegacyViewQuery
 // ---------------------------------------------------------------------------

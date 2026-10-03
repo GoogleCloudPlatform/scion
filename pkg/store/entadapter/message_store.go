@@ -70,6 +70,8 @@ func entMessageToStore(e *ent.Message) *store.Message {
 	if e.ConversationID != nil {
 		conversationID = e.ConversationID.String()
 	}
+	senderProjectID := uuidPtrToStringPtr(e.SenderProjectID)
+	recipientProjectID := uuidPtrToStringPtr(e.RecipientProjectID)
 
 	return &store.Message{
 		ID:                    e.ID.String(),
@@ -89,10 +91,22 @@ func entMessageToStore(e *ent.Message) *store.Message {
 		ThreadID:              e.ThreadID,
 		ConversationID:        conversationID,
 		CreatedAt:             e.Created,
+		SenderProjectID:       senderProjectID,
+		RecipientProjectID:    recipientProjectID,
 		DispatchState:         e.DispatchState,
 		DispatchedAt:          e.DispatchedAt,
 		DispatchFailureReason: e.DispatchFailureReason,
 	}
+}
+
+// uuidPtrToStringPtr converts a nullable UUID column to the nullable string
+// form used by store models.
+func uuidPtrToStringPtr(u *uuid.UUID) *string {
+	if u == nil {
+		return nil
+	}
+	v := u.String()
+	return &v
 }
 
 // CreateMessage persists a new message and announces it via the publisher.
@@ -136,6 +150,22 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 			return err
 		}
 		create.SetConversationID(cid)
+	}
+	// Cross-project provenance (ptone/scion#2282). An absent or empty stamp
+	// persists as NULL; a malformed one is rejected like any other bad ID.
+	if msg.SenderProjectID != nil && *msg.SenderProjectID != "" {
+		spid, err := parseUUID(*msg.SenderProjectID)
+		if err != nil {
+			return err
+		}
+		create.SetSenderProjectID(spid)
+	}
+	if msg.RecipientProjectID != nil && *msg.RecipientProjectID != "" {
+		rpid, err := parseUUID(*msg.RecipientProjectID)
+		if err != nil {
+			return err
+		}
+		create.SetRecipientProjectID(rpid)
 	}
 	if msg.Type == "" {
 		create.SetType("instruction")

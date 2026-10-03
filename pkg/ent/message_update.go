@@ -490,6 +490,12 @@ func (_u *MessageUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if _u.mutation.ConversationIDCleared() {
 		_spec.ClearField(message.FieldConversationID, field.TypeUUID)
 	}
+	if _u.mutation.SenderProjectIDCleared() {
+		_spec.ClearField(message.FieldSenderProjectID, field.TypeUUID)
+	}
+	if _u.mutation.RecipientProjectIDCleared() {
+		_spec.ClearField(message.FieldRecipientProjectID, field.TypeUUID)
+	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
 			err = &NotFoundError{message.Label}
@@ -1000,6 +1006,12 @@ func (_u *MessageUpdateOne) sqlSave(ctx context.Context) (_node *Message, err er
 	}
 	if _u.mutation.ConversationIDCleared() {
 		_spec.ClearField(message.FieldConversationID, field.TypeUUID)
+	}
+	if _u.mutation.SenderProjectIDCleared() {
+		_spec.ClearField(message.FieldSenderProjectID, field.TypeUUID)
+	}
+	if _u.mutation.RecipientProjectIDCleared() {
+		_spec.ClearField(message.FieldRecipientProjectID, field.TypeUUID)
 	}
 	_node = &Message{config: _u.config}
 	_spec.Assign = _node.assignValues

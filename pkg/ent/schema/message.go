@@ -90,6 +90,19 @@ func (Message) Fields() []ent.Field {
 		field.UUID("conversation_id", uuid.UUID{}).
 			Optional().
 			Nillable(),
+		// sender_project_id / recipient_project_id carry server-derived
+		// cross-project provenance (store.Message.SenderProjectID /
+		// RecipientProjectID). Nullable: human senders and legacy rows have
+		// no project-level provenance. Stamped at admission and never
+		// updated afterwards.
+		field.UUID("sender_project_id", uuid.UUID{}).
+			Optional().
+			Nillable().
+			Immutable(),
+		field.UUID("recipient_project_id", uuid.UUID{}).
+			Optional().
+			Nillable().
+			Immutable(),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),

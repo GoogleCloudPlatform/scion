@@ -1351,6 +1351,8 @@ var (
 		{Name: "channel", Type: field.TypeString, Nullable: true, Size: 64},
 		{Name: "thread_id", Type: field.TypeString, Nullable: true, Size: 256},
 		{Name: "conversation_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "sender_project_id", Type: field.TypeUUID, Nullable: true},
+		{Name: "recipient_project_id", Type: field.TypeUUID, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 	}
 	// MessagesTable holds the schema information for the "messages" table.
@@ -1372,7 +1374,7 @@ var (
 			{
 				Name:    "message_created",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[19]},
+				Columns: []*schema.Column{MessagesColumns[21]},
 			},
 			{
 				Name:    "message_conversation_id",
@@ -1382,12 +1384,12 @@ var (
 			{
 				Name:    "message_conversation_id_channel_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[18], MessagesColumns[16], MessagesColumns[19], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[18], MessagesColumns[16], MessagesColumns[21], MessagesColumns[0]},
 			},
 			{
 				Name:    "message_thread_id_channel_created_id",
 				Unique:  false,
-				Columns: []*schema.Column{MessagesColumns[17], MessagesColumns[16], MessagesColumns[19], MessagesColumns[0]},
+				Columns: []*schema.Column{MessagesColumns[17], MessagesColumns[16], MessagesColumns[21], MessagesColumns[0]},
 			},
 		},
 	}

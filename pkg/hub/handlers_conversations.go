@@ -1283,18 +1283,17 @@ func (s *Server) crossProjectPeerAllowed(ctx context.Context, callerProjectID, p
 		peerAgent, err := s.store.GetAgent(ctx, peerID)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
-				// Refinement (msg-attach-arch, 2026-09-30, in response to
-				// ptone/scion#2282 — SenderProjectID/RecipientProjectID are
-				// never persisted, so stampedPeerProject is always nil in
-				// practice today): with no stamp we cannot tell same-project
-				// from cross-project for a deleted peer. But when the flag is
-				// ON, every possible peer project would be allowed anyway, so
-				// the missing project doesn't matter — allow. When the flag
-				// is OFF, assuming same-project would be a flag-off bypass
-				// for a genuinely cross-project deleted sender, so deny.
-				// This is exact under the current policy in both cases, and
-				// needs no change once the stamp is actually persisted
-				// (peerProjectFromRow will simply stop returning nil).
+				// Refinement (msg-attach-arch, 2026-09-30): with no stamp
+				// (a row written before ptone/scion#2282 persisted
+				// SenderProjectID/RecipientProjectID, a human-sent row, or a
+				// conversation-level check with no row) we cannot tell
+				// same-project from cross-project for a deleted peer. But
+				// when the flag is ON, every possible peer project would be
+				// allowed anyway, so the missing project doesn't matter —
+				// allow. When the flag is OFF, assuming same-project would be
+				// a flag-off bypass for a genuinely cross-project deleted
+				// sender, so deny. This is exact under the current policy in
+				// both cases.
 				if s.crossProjectMessagingEnabled() {
 					return peerAllowed, ""
 				}

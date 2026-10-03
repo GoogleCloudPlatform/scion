@@ -39871,6 +39871,8 @@ type MessageMutation struct {
 	channel                 *string
 	thread_id               *string
 	conversation_id         *uuid.UUID
+	sender_project_id       *uuid.UUID
+	recipient_project_id    *uuid.UUID
 	created                 *time.Time
 	clearedFields           map[string]struct{}
 	done                    bool
@@ -40747,6 +40749,104 @@ func (m *MessageMutation) ResetConversationID() {
 	delete(m.clearedFields, message.FieldConversationID)
 }
 
+// SetSenderProjectID sets the "sender_project_id" field.
+func (m *MessageMutation) SetSenderProjectID(u uuid.UUID) {
+	m.sender_project_id = &u
+}
+
+// SenderProjectID returns the value of the "sender_project_id" field in the mutation.
+func (m *MessageMutation) SenderProjectID() (r uuid.UUID, exists bool) {
+	v := m.sender_project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSenderProjectID returns the old "sender_project_id" field's value of the Message entity.
+// If the Message object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessageMutation) OldSenderProjectID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSenderProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSenderProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSenderProjectID: %w", err)
+	}
+	return oldValue.SenderProjectID, nil
+}
+
+// ClearSenderProjectID clears the value of the "sender_project_id" field.
+func (m *MessageMutation) ClearSenderProjectID() {
+	m.sender_project_id = nil
+	m.clearedFields[message.FieldSenderProjectID] = struct{}{}
+}
+
+// SenderProjectIDCleared returns if the "sender_project_id" field was cleared in this mutation.
+func (m *MessageMutation) SenderProjectIDCleared() bool {
+	_, ok := m.clearedFields[message.FieldSenderProjectID]
+	return ok
+}
+
+// ResetSenderProjectID resets all changes to the "sender_project_id" field.
+func (m *MessageMutation) ResetSenderProjectID() {
+	m.sender_project_id = nil
+	delete(m.clearedFields, message.FieldSenderProjectID)
+}
+
+// SetRecipientProjectID sets the "recipient_project_id" field.
+func (m *MessageMutation) SetRecipientProjectID(u uuid.UUID) {
+	m.recipient_project_id = &u
+}
+
+// RecipientProjectID returns the value of the "recipient_project_id" field in the mutation.
+func (m *MessageMutation) RecipientProjectID() (r uuid.UUID, exists bool) {
+	v := m.recipient_project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRecipientProjectID returns the old "recipient_project_id" field's value of the Message entity.
+// If the Message object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *MessageMutation) OldRecipientProjectID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRecipientProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRecipientProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRecipientProjectID: %w", err)
+	}
+	return oldValue.RecipientProjectID, nil
+}
+
+// ClearRecipientProjectID clears the value of the "recipient_project_id" field.
+func (m *MessageMutation) ClearRecipientProjectID() {
+	m.recipient_project_id = nil
+	m.clearedFields[message.FieldRecipientProjectID] = struct{}{}
+}
+
+// RecipientProjectIDCleared returns if the "recipient_project_id" field was cleared in this mutation.
+func (m *MessageMutation) RecipientProjectIDCleared() bool {
+	_, ok := m.clearedFields[message.FieldRecipientProjectID]
+	return ok
+}
+
+// ResetRecipientProjectID resets all changes to the "recipient_project_id" field.
+func (m *MessageMutation) ResetRecipientProjectID() {
+	m.recipient_project_id = nil
+	delete(m.clearedFields, message.FieldRecipientProjectID)
+}
+
 // SetCreated sets the "created" field.
 func (m *MessageMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -40817,7 +40917,7 @@ func (m *MessageMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *MessageMutation) Fields() []string {
-	fields := make([]string, 0, 19)
+	fields := make([]string, 0, 21)
 	if m.project_id != nil {
 		fields = append(fields, message.FieldProjectID)
 	}
@@ -40872,6 +40972,12 @@ func (m *MessageMutation) Fields() []string {
 	if m.conversation_id != nil {
 		fields = append(fields, message.FieldConversationID)
 	}
+	if m.sender_project_id != nil {
+		fields = append(fields, message.FieldSenderProjectID)
+	}
+	if m.recipient_project_id != nil {
+		fields = append(fields, message.FieldRecipientProjectID)
+	}
 	if m.created != nil {
 		fields = append(fields, message.FieldCreated)
 	}
@@ -40919,6 +41025,10 @@ func (m *MessageMutation) Field(name string) (ent.Value, bool) {
 		return m.ThreadID()
 	case message.FieldConversationID:
 		return m.ConversationID()
+	case message.FieldSenderProjectID:
+		return m.SenderProjectID()
+	case message.FieldRecipientProjectID:
+		return m.RecipientProjectID()
 	case message.FieldCreated:
 		return m.Created()
 	}
@@ -40966,6 +41076,10 @@ func (m *MessageMutation) OldField(ctx context.Context, name string) (ent.Value,
 		return m.OldThreadID(ctx)
 	case message.FieldConversationID:
 		return m.OldConversationID(ctx)
+	case message.FieldSenderProjectID:
+		return m.OldSenderProjectID(ctx)
+	case message.FieldRecipientProjectID:
+		return m.OldRecipientProjectID(ctx)
 	case message.FieldCreated:
 		return m.OldCreated(ctx)
 	}
@@ -41103,6 +41217,20 @@ func (m *MessageMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetConversationID(v)
 		return nil
+	case message.FieldSenderProjectID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSenderProjectID(v)
+		return nil
+	case message.FieldRecipientProjectID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRecipientProjectID(v)
+		return nil
 	case message.FieldCreated:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -41167,6 +41295,12 @@ func (m *MessageMutation) ClearedFields() []string {
 	if m.FieldCleared(message.FieldConversationID) {
 		fields = append(fields, message.FieldConversationID)
 	}
+	if m.FieldCleared(message.FieldSenderProjectID) {
+		fields = append(fields, message.FieldSenderProjectID)
+	}
+	if m.FieldCleared(message.FieldRecipientProjectID) {
+		fields = append(fields, message.FieldRecipientProjectID)
+	}
 	return fields
 }
 
@@ -41207,6 +41341,12 @@ func (m *MessageMutation) ClearField(name string) error {
 		return nil
 	case message.FieldConversationID:
 		m.ClearConversationID()
+		return nil
+	case message.FieldSenderProjectID:
+		m.ClearSenderProjectID()
+		return nil
+	case message.FieldRecipientProjectID:
+		m.ClearRecipientProjectID()
 		return nil
 	}
 	return fmt.Errorf("unknown Message nullable field %s", name)
@@ -41269,6 +41409,12 @@ func (m *MessageMutation) ResetField(name string) error {
 		return nil
 	case message.FieldConversationID:
 		m.ResetConversationID()
+		return nil
+	case message.FieldSenderProjectID:
+		m.ResetSenderProjectID()
+		return nil
+	case message.FieldRecipientProjectID:
+		m.ResetRecipientProjectID()
 		return nil
 	case message.FieldCreated:
 		m.ResetCreated()

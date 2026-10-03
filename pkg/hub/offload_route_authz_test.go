@@ -124,22 +124,14 @@ func TestRouteAuthz_U7_NonPartyKeyPeer_ZToBRow_FlagOff403ThroughLiveLookupOfA(t 
 }
 
 // U7 route level, r4 #1: an A -> Z row inside K(A<->B): the sender (A) IS
-// the key peer, so peerProjectFromRow's sender branch is the one designed to
-// fire here, using A's own SenderProjectID stamp directly with no live
-// lookup needed.
+// the key peer, so peerProjectFromRow's sender branch fires here, using A's
+// own SenderProjectID stamp directly with no live lookup needed.
 //
-// r2 finding 3: in this test, that design intent is not what actually runs.
-// The ent-backed test store never persists SenderProjectID/RecipientProjectID
-// (ptone/scion#2282), so s.CreateMessage followed by the handler's
-// s.store.GetMessage round-trip silently drops the stamp set above — the
-// message peerProjectFromRow sees has a nil SenderProjectID, so
-// enforceCrossProjectReadGate actually falls through to the live lookup of
-// A's current project, not the stamp branch. The assertion (403, flag off)
-// still holds either way, so this test remains valid coverage of the
-// outcome, but its name and comment must not claim the stamp path was
-// exercised. See TestOffload_I10_StampSurvivesDeletion_WhenStorePersistsIt
-// for the in-memory-store variant that does exercise the stamp branch.
-func TestRouteAuthz_U7_NonPartyKeyPeer_AToZRow_FlagOff403ThroughLiveLookup(t *testing.T) {
+// The stamp round-trips through s.CreateMessage and the handler's
+// s.store.GetMessage (ptone/scion#2282). To prove the stamp branch — not the
+// live lookup — decided, GetAgent(A) is made to fail: a live lookup would
+// turn that into a 500, so a 403 can only come from the persisted stamp.
+func TestRouteAuthz_U7_NonPartyKeyPeer_AToZRow_FlagOff403ViaPersistedStamp(t *testing.T) {
 	srv, s, conv, agentA, agentB, agentZ := routeAuthzSetup(t)
 	ctx := context.Background()
 
@@ -152,8 +144,17 @@ func TestRouteAuthz_U7_NonPartyKeyPeer_AToZRow_FlagOff403ThroughLiveLookup(t *te
 	}
 	require.NoError(t, s.CreateMessage(ctx, msg))
 
+	stored, err := s.GetMessage(ctx, msg.ID)
+	require.NoError(t, err)
+	require.NotNil(t, stored.SenderProjectID, "SenderProjectID must be persisted (ptone/scion#2282)")
+	require.Equal(t, agentA.ProjectID, *stored.SenderProjectID)
+
+	srv.store = &getAgentErrorStore{Store: s, failID: agentA.ID, err: errors.New("live lookup must not run")}
+
 	rr := getConvMessage(srv, agentB.ID, agentB.ProjectID, conv.ID, msg.ID)
 	assert.Equal(t, http.StatusForbidden, rr.Code, "body: %s", rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "cross-project messaging is disabled",
+		"the denial must come from the stamped (cross-project) peer project")
 }
 
 // U7 route level: a message that exists but is not in the requested
