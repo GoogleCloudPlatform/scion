@@ -249,3 +249,37 @@ func (r *KeyRing) Prune(now time.Time) {
 	}
 	r.Keys = kept
 }
+
+// WireKey is the JSON form of a PublicKey, matching the contract's GrantKey
+// {kid, public_key, not_after_unix}. public_key is the raw 32-byte Ed25519
+// key (standard base64 in JSON); not_after_unix 0 means no scheduled
+// retirement.
+type WireKey struct {
+	KeyID        string `json:"kid"`
+	PublicKey    []byte `json:"public_key"`
+	NotAfterUnix int64  `json:"not_after_unix"`
+}
+
+// ToWire converts keys to their wire form.
+func ToWire(keys []PublicKey) []WireKey {
+	out := make([]WireKey, len(keys))
+	for i, k := range keys {
+		out[i] = WireKey{KeyID: k.KeyID, PublicKey: append([]byte(nil), k.Key...)}
+		if !k.NotAfter.IsZero() {
+			out[i].NotAfterUnix = k.NotAfter.Unix()
+		}
+	}
+	return out
+}
+
+// FromWire converts wire keys back, for a target building its KeySet.
+func FromWire(keys []WireKey) []PublicKey {
+	out := make([]PublicKey, len(keys))
+	for i, k := range keys {
+		out[i] = PublicKey{KeyID: k.KeyID, Key: append(ed25519.PublicKey(nil), k.PublicKey...)}
+		if k.NotAfterUnix != 0 {
+			out[i].NotAfter = time.Unix(k.NotAfterUnix, 0)
+		}
+	}
+	return out
+}
