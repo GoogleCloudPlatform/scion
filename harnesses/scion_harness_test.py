@@ -489,6 +489,47 @@ class TestHarnessDirEnv(unittest.TestCase):
                                 sh.harness_dir_override(sh.HARNESS_OUTPUTS_DIR_ENV)
                             self.assertIn("symbolic link", str(cm.exception))
 
+    def test_root_reached_through_symlink_rejected(self):
+        tmp = tempfile.mkdtemp()
+        root = os.path.join(tmp, "mem")
+        os.makedirs(os.path.join(root, "real"))
+        linked_root = os.path.join(tmp, "linked-mem")
+        os.symlink(root, linked_root)
+        value = os.path.join(linked_root, "real")
+        with mock.patch.object(sh, "HARNESS_DIRS_ROOT", linked_root):
+            with mock.patch.dict(os.environ, {**self._UNSET, sh.HARNESS_OUTPUTS_DIR_ENV: value}):
+                with self.assertRaises(sh.ProvisionError) as cm:
+                    sh.harness_dir_override(sh.HARNESS_OUTPUTS_DIR_ENV)
+                self.assertIn(linked_root + " is a symbolic link", str(cm.exception))
+
+    def test_component_check_error_rejected(self):
+        tmp = tempfile.mkdtemp()
+        root = os.path.join(tmp, "mem")
+        os.makedirs(root)
+        with open(os.path.join(root, "file"), "w") as f:
+            f.write("x")
+        cases = [os.path.join(root, "file", "outputs")]
+        if os.geteuid() != 0:
+            locked = os.path.join(root, "locked")
+            os.makedirs(locked)
+            os.chmod(locked, 0)
+            self.addCleanup(os.chmod, locked, 0o700)
+            cases.append(os.path.join(locked, "outputs"))
+        with mock.patch.object(sh, "HARNESS_DIRS_ROOT", root):
+            for value in cases:
+                with self.subTest(value=value):
+                    with mock.patch.dict(os.environ, {**self._UNSET, sh.HARNESS_OUTPUTS_DIR_ENV: value}):
+                        with self.assertRaises(sh.ProvisionError) as cm:
+                            sh.harness_dir_override(sh.HARNESS_OUTPUTS_DIR_ENV)
+                        self.assertIn(sh.HARNESS_OUTPUTS_DIR_ENV, str(cm.exception))
+
+    def test_leading_double_slash_folded(self):
+        with mock.patch.dict(os.environ, {**self._UNSET, sh.HARNESS_OUTPUTS_DIR_ENV: "//run/scion/mem/outputs"}):
+            self.assertEqual(sh.harness_dir_override(sh.HARNESS_OUTPUTS_DIR_ENV), "/run/scion/mem/outputs")
+        with mock.patch.dict(os.environ, {**self._UNSET, sh.HARNESS_OUTPUTS_DIR_ENV: "//run/scion/memx"}):
+            with self.assertRaises(sh.ProvisionError):
+                sh.harness_dir_override(sh.HARNESS_OUTPUTS_DIR_ENV)
+
     def test_remap_under(self):
         self.assertEqual(sh.remap_under("/b/secrets/K", "/b/secrets", "/m"), "/m/K")
         self.assertEqual(sh.remap_under("/b/secrets", "/b/secrets", "/m"), "/m")

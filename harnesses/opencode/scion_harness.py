@@ -29,6 +29,7 @@ import itertools
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -80,17 +81,28 @@ HARNESS_SECRETS_DIR_ENV = "SCION_HARNESS_SECRETS_DIR"
 HARNESS_DIRS_ROOT = "/run/scion/mem"
 
 
-def _symlink_component(path: str) -> str | None:
-    """Return the first existing component of absolute path that is a
-    symbolic link, or None. Components that do not exist end the walk."""
+def _check_dir_components(name: str, path: str) -> None:
+    """Raise ProvisionError if any existing component of absolute path is a
+    symbolic link, or cannot be checked. A missing component ends the walk."""
     cur = os.sep
     for part in path.strip(os.sep).split(os.sep):
         cur = os.path.join(cur, part)
-        if os.path.islink(cur):
-            return cur
-        if not os.path.lexists(cur):
-            return None
-    return None
+        try:
+            st = os.lstat(cur)
+        except FileNotFoundError:
+            return
+        except OSError as e:
+            raise ProvisionError(f"{name}: {cur}: {e.strerror or e}") from e
+        if stat.S_ISLNK(st.st_mode):
+            raise ProvisionError(f"{name}: {cur} is a symbolic link")
+
+
+def _clean_abs(value: str) -> str:
+    """normpath, also folding the leading // that POSIX normpath keeps."""
+    clean = os.path.normpath(value)
+    if clean.startswith("//"):
+        clean = os.sep + clean.lstrip(os.sep)
+    return clean
 
 
 def harness_dir_override(name: str) -> str | None:
@@ -105,13 +117,11 @@ def harness_dir_override(name: str) -> str | None:
         return None
     if not os.path.isabs(value):
         raise ProvisionError(f"{name} must be an absolute path, got {value!r}")
-    clean = os.path.normpath(value)
-    root = os.path.normpath(HARNESS_DIRS_ROOT)
+    clean = _clean_abs(value)
+    root = _clean_abs(HARNESS_DIRS_ROOT)
     if not clean.startswith(root + os.sep):
         raise ProvisionError(f"{name} must be a directory below {root}, got {value!r}")
-    link = _symlink_component(clean)
-    if link is not None:
-        raise ProvisionError(f"{name}: {link} is a symbolic link")
+    _check_dir_components(name, clean)
     return clean
 
 

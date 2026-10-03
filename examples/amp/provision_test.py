@@ -94,5 +94,46 @@ class HarnessDirEnvTest(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(tmp, "other", "outputs")))
 
 
+    def _override(self, root: str, value: str) -> str | None:
+        with unittest.mock.patch.dict(os.environ, {"SCION_HARNESS_OUTPUTS_DIR": value}), \
+                unittest.mock.patch.object(provision, "HARNESS_DIRS_ROOT", root):
+            return provision._dir_override("SCION_HARNESS_OUTPUTS_DIR")
+
+    def test_component_check_error_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mem = os.path.join(tmp, "mem")
+            os.makedirs(mem)
+            with open(os.path.join(mem, "file"), "w", encoding="utf-8") as f:
+                f.write("x")
+            cases = [os.path.join(mem, "file", "outputs")]
+            if os.geteuid() != 0:
+                locked = os.path.join(mem, "locked")
+                os.makedirs(locked)
+                os.chmod(locked, 0)
+                cases.append(os.path.join(locked, "outputs"))
+            try:
+                for value in cases:
+                    with self.subTest(value=value):
+                        with self.assertRaises(ValueError):
+                            self._override(mem, value)
+            finally:
+                if os.geteuid() != 0:
+                    os.chmod(os.path.join(mem, "locked"), 0o700)
+
+    def test_leading_double_slash_folded(self) -> None:
+        self.assertEqual(self._override("/run/scion/mem", "//run/scion/mem/outputs"), "/run/scion/mem/outputs")
+        with self.assertRaises(ValueError):
+            self._override("/run/scion/mem", "//run/scion/memx")
+
+    def test_root_reached_through_symlink_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mem = os.path.join(tmp, "mem")
+            os.makedirs(os.path.join(mem, "real"))
+            linked = os.path.join(tmp, "linked-mem")
+            os.symlink(mem, linked)
+            with self.assertRaises(ValueError) as cm:
+                self._override(linked, os.path.join(linked, "real"))
+            self.assertIn("symbolic link", str(cm.exception))
+
 if __name__ == "__main__":
     unittest.main()

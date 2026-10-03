@@ -48,6 +48,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import sys
 from typing import Any
 
@@ -104,6 +105,14 @@ HARNESS_SECRETS_DIR_ENV = "SCION_HARNESS_SECRETS_DIR"
 HARNESS_DIRS_ROOT = "/run/scion/mem"
 
 
+def _clean_abs(value: str) -> str:
+    """normpath, also folding the leading // that POSIX normpath keeps."""
+    clean = os.path.normpath(value)
+    if clean.startswith("//"):
+        clean = os.sep + clean.lstrip(os.sep)
+    return clean
+
+
 def _dir_override(name: str) -> str | None:
     """Directory set by env var name; None when unset.
 
@@ -115,17 +124,21 @@ def _dir_override(name: str) -> str | None:
         return None
     if not os.path.isabs(value):
         raise ValueError(f"amp provision: {name} must be an absolute path, got {value!r}")
-    clean = os.path.normpath(value)
-    root = os.path.normpath(HARNESS_DIRS_ROOT)
+    clean = _clean_abs(value)
+    root = _clean_abs(HARNESS_DIRS_ROOT)
     if not clean.startswith(root + os.sep):
         raise ValueError(f"amp provision: {name} must be a directory below {root}, got {value!r}")
     cur = os.sep
     for part in clean.strip(os.sep).split(os.sep):
         cur = os.path.join(cur, part)
-        if os.path.islink(cur):
-            raise ValueError(f"amp provision: {name}: {cur} is a symbolic link")
-        if not os.path.lexists(cur):
+        try:
+            st = os.lstat(cur)
+        except FileNotFoundError:
             break
+        except OSError as e:
+            raise ValueError(f"amp provision: {name}: {cur}: {e.strerror or e}") from e
+        if stat.S_ISLNK(st.st_mode):
+            raise ValueError(f"amp provision: {name}: {cur} is a symbolic link")
     return clean
 
 
