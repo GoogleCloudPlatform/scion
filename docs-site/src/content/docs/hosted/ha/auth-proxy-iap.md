@@ -218,7 +218,13 @@ When transport auth is configured, the Hub injects these environment variables i
 |----------|-------------|
 | `SCION_TRANSPORT_TOKEN` | Initial Google OIDC ID token for the transport layer. |
 | `SCION_TRANSPORT_AUDIENCE` | Audience the transport token was minted for (IAP client ID or hub URL). |
-| `SCION_TRANSPORT_TOKEN_EXPIRY` | Token expiry in RFC 3339 format. |
+| `SCION_TRANSPORT_TOKEN_EXPIRY` | Expiry of the initial token, in RFC 3339 format. Bootstrap only: `sciontool init` removes it together with `SCION_TRANSPORT_TOKEN`, because it goes stale after the first refresh. |
+
+`SCION_TRANSPORT_TOKEN` only bootstraps the agent. At startup, `sciontool init` writes it to `~/.scion/transport-token` (mode `0600`, owned by the agent user) and removes it from the environment that the harness and its child processes inherit. Children get `SCION_TRANSPORT_TOKEN_FILE`, which points at that file. Each token refresh rewrites the file, and every in-agent hub client (hooks, `sciontool` subcommands, the in-agent `scion` CLI) re-reads it when it changes. So these clients keep working after the initial token expires, which takes about an hour.
+
+If `sciontool init` cannot write the file, it logs an error and leaves `SCION_TRANSPORT_TOKEN` in the environment. In-agent clients then use that value until it expires, and hub calls from child processes fail after about an hour. A file is used only when the agent was given a transport token (`SCION_TRANSPORT_TOKEN` or `SCION_TRANSPORT_TOKEN_FILE` is set); a stale file left in a persisted home is removed at startup when neither is set.
+
+A root shell opened with `docker exec` or `kubectl exec` does not inherit `SCION_TRANSPORT_TOKEN_FILE`. Run `. ~/.scion/scion-env` (as the agent user, or with the agent's home path) to get the same hub environment as the harness. That file exports `SCION_TRANSPORT_TOKEN_FILE`.
 
 On the Kubernetes runtime, `SCION_TRANSPORT_TOKEN` comes from the agent's per-agent Secret through `secretKeyRef`, not from a plain value in the Pod spec. See [Hub Transport Credential](/scion/hosted/ha/kubernetes/#hub-transport-credential). Other runtimes set it as a regular environment variable.
 
@@ -254,9 +260,11 @@ The `transport` entry is only present when `auth.transport` is configured on the
 
 The agent (`pkg/sciontool/hub`) selects an OIDC token source automatically:
 
-1. **`SCION_TRANSPORT_TOKEN` env var set** → **Injected mode**: uses the hub-provided token from dispatch, refreshed via `tokens[]` on subsequent refresh calls.
+1. **`SCION_TRANSPORT_TOKEN_FILE` or `SCION_TRANSPORT_TOKEN` set** → **Injected mode**: reads the refreshed file, with the env value as bootstrap fallback. The hub-provided token from dispatch is refreshed via `tokens[]` on subsequent refresh calls and shared with other processes through the file. Whichever of the file and the env value expires later is used. The file alone does not select this mode.
 2. **Running on GCP (metadata server available)** → **Metadata mode**: fetches OIDC from the GCE metadata server using the ambient SA identity (the PR #307 pattern). Audience is set via `SCION_HUB_OIDC_AUDIENCE` or defaults to the hub URL.
 3. **Neither** → No OIDC transport (agent uses plain HTTP).
+
+The header follows `SCION_TRANSPORT_MODE` in every in-agent client: `iap` sends `Proxy-Authorization`, `cloudrun_invoker` sends `X-Serverless-Authorization`, and anything else sends `Authorization`.
 
 Injected mode (option 1) is the recommended path for IAP deployments — it decouples agent transport auth from the agent's own GCP identity.
 

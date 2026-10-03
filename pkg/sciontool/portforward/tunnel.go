@@ -81,6 +81,11 @@ func (m *Manager) runOnce(ctx context.Context) error {
 	}
 	header := http.Header{}
 	header.Set("X-Scion-Agent-Token", m.client.AuthToken())
+	// Behind an identity-aware proxy the upgrade request needs the same
+	// transport credential as every other hub request.
+	if err := m.client.ApplyTransportHeaders(header); err != nil {
+		log.Debug("Port-forward tunnel: no transport credential available: %v", err)
+	}
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, endpoint, header)
 	if err != nil {
 		return err

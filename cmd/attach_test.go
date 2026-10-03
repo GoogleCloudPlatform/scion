@@ -654,6 +654,7 @@ func TestFindRuntimeBrokerByIDViaList_FreshCursorEveryPage_StopsAtPageCap(t *tes
 func TestResolveAttachTransport_PlainMode(t *testing.T) {
 	// Ensure all transport auth env vars are unset.
 	t.Setenv("SCION_TRANSPORT_TOKEN", "")
+	t.Setenv("SCION_TRANSPORT_TOKEN_FILE", "")
 	t.Setenv("SCION_TRANSPORT_AUDIENCE", "")
 	t.Setenv("SCION_HUB_OIDC_AUDIENCE", "")
 	t.Setenv("SCION_METADATA_MODE", "")
@@ -683,6 +684,8 @@ func TestResolveAttachTransport_PlainMode(t *testing.T) {
 func TestResolveAttachTransport_IAPMode(t *testing.T) {
 	// A minimal three-part JWT-shaped value; ParseTokenExpiry falls back to
 	// DefaultTTL on any parse error, so we don't need a valid signature.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SCION_TRANSPORT_TOKEN_FILE", "")
 	t.Setenv("SCION_TRANSPORT_TOKEN", "header.payload.sig")
 	t.Setenv("SCION_TRANSPORT_MODE", "iap")
 

@@ -54,14 +54,16 @@ func doctorIAPMiddleware(expectedToken string, next http.Handler) http.Handler {
 // SCION_TRANSPORT_TOKEN is set.
 func TestCheckTransportAuth_Injected(t *testing.T) {
 	token := makeDoctorTestJWT(time.Now().Add(1 * time.Hour))
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SCION_TRANSPORT_TOKEN_FILE", "")
 	t.Setenv("SCION_TRANSPORT_TOKEN", token)
 
 	src := checkTransportAuth()
 	if src == nil {
 		t.Fatal("expected non-nil transport source")
 	}
-	if _, ok := src.(*transportauth.InjectedSource); !ok {
-		t.Errorf("expected InjectedSource, got %T", src)
+	if _, ok := src.(*transportauth.FileSource); !ok {
+		t.Errorf("expected FileSource, got %T", src)
 	}
 }
 
@@ -70,6 +72,7 @@ func TestCheckTransportAuth_Injected(t *testing.T) {
 func TestCheckTransportAuth_None(t *testing.T) {
 	for _, key := range []string{
 		"SCION_TRANSPORT_TOKEN",
+		"SCION_TRANSPORT_TOKEN_FILE",
 		"SCION_TRANSPORT_AUDIENCE",
 		"SCION_HUB_OIDC_AUDIENCE",
 	} {
