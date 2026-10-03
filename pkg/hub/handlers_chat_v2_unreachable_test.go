@@ -97,6 +97,10 @@ func TestUnreachableNC_SuspendedDefault(t *testing.T) {
 	if m == nil || m.DispatchState != store.MessageDispatchFailed {
 		t.Fatalf("expected row failed, got %+v", m)
 	}
+	// The row is born failed, so its reason must survive CreateMessage.
+	if m.DispatchFailureReason == nil || *m.DispatchFailureReason != "Agent unreachable (suspended)" {
+		t.Fatalf("expected row reason %q, got %v", "Agent unreachable (suspended)", m.DispatchFailureReason)
+	}
 	if resp["dispatchState"] != "failed" {
 		t.Fatalf("expected response dispatchState=failed, got %v", resp["dispatchState"])
 	}
@@ -119,6 +123,10 @@ func TestUnreachableNC_StoppedDefault(t *testing.T) {
 	}
 	if m == nil || m.DispatchState != store.MessageDispatchFailed {
 		t.Fatalf("expected row failed, got %+v", m)
+	}
+	// The row is born failed, so its reason must survive CreateMessage.
+	if m.DispatchFailureReason == nil || *m.DispatchFailureReason != "Agent unreachable (stopped)" {
+		t.Fatalf("expected row reason %q, got %v", "Agent unreachable (stopped)", m.DispatchFailureReason)
 	}
 	if resp["dispatchState"] != "failed" {
 		t.Fatalf("expected response dispatchState=failed, got %v", resp["dispatchState"])
