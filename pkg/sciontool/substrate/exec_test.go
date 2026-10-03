@@ -16,11 +16,13 @@ package substrate
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -235,50 +237,139 @@ func TestRunExec_SetsHomeUserPathShellForScion(t *testing.T) {
 	}
 }
 
+// TestRunExec_TimeoutKillsProcess pins the timeout path end to end: the
+// command forks a grandchild (a background sleep that also holds the
+// output pipes open), and when the timeout fires runExec must kill the
+// whole process group, so that grandchild is dead too, and return promptly
+// rather than waiting out execWaitDelay for the grandchild to release the
+// pipes. The grandchild records its own PID so the test can check it
+// directly instead of inferring its death from timing alone.
 func TestRunExec_TimeoutKillsProcess(t *testing.T) {
 	if testing.Short() {
 		t.Skip("waits on a real subprocess timeout")
 	}
 	withExecUserAsCurrent(t)
+	pidFile := filepath.Join(t.TempDir(), "grandchild.pid")
+	script := "sleep 30 & echo $! > " + pidFile + "; echo started; wait"
+
+	const timeout = 500 * time.Millisecond
 	start := time.Now()
-	resp := runExec(context.Background(), "scion", []string{"sh", "-c", "echo started; sleep 30"}, nil, 300*time.Millisecond)
+	resp := runExec(context.Background(), "scion", []string{"sh", "-c", script}, nil, timeout)
 	elapsed := time.Since(start)
 
 	// The marker confirms the command actually ran before the timeout
-	// killed it ("started" must reach stdout), distinguishing a real
-	// timeout kill from the command never having run at all — the same
-	// elapsed time and exit code would otherwise make the two
-	// indistinguishable.
+	// killed it, distinguishing a real timeout kill from the command never
+	// having run at all.
 	if !strings.Contains(resp.Stdout, "started") {
-		t.Errorf("subprocess never ran (stdout=%q stderr=%q) — timeout killed something other than the command", resp.Stdout, resp.Stderr)
-	}
-	if elapsed > 5*time.Second {
-		t.Fatalf("runExec took %v, want it to be killed near the 300ms timeout", elapsed)
+		t.Fatalf("subprocess never ran (stdout=%q stderr=%q) — timeout killed something other than the command", resp.Stdout, resp.Stderr)
 	}
 	if resp.ExitCode == 0 {
 		t.Errorf("exit_code = 0, want non-zero for a timed-out command")
 	}
+
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read grandchild pid file: %v", err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+	if err != nil || pid <= 0 {
+		t.Fatalf("grandchild pid file = %q, want a positive pid", raw)
+	}
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+
+	if !waitProcessGone(pid, 2*time.Second) {
+		t.Errorf("grandchild pid %d is still running after the timeout; the process-group kill did not reach it", pid)
+	}
+	if limit := timeout + execWaitDelay; elapsed >= limit {
+		t.Errorf("runExec took %v, want under timeout+execWaitDelay (%v): it waited for a grandchild to release the output pipes instead of killing it", elapsed, limit)
+	}
 }
+
+// waitProcessGone polls until pid no longer names a live process — either
+// it is gone entirely (kill(pid, 0) reports ESRCH) or only its zombie entry
+// remains, waiting for whichever ancestor it was reparented to to reap it —
+// or until timeout. It reports whether the process was seen gone.
+func waitProcessGone(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+			return true
+		}
+		if stat, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat"); err == nil && procStatIsZombie(string(stat)) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// procStatIsZombie reports whether a /proc/<pid>/stat line shows state Z.
+// The state is the first field after the parenthesised command name, which
+// may itself contain spaces or parentheses, so it is located from the last
+// ')'.
+func procStatIsZombie(stat string) bool {
+	i := strings.LastIndexByte(stat, ')')
+	if i < 0 || i+2 >= len(stat) {
+		return false
+	}
+	return stat[i+2] == 'Z'
+}
+
+// reaperChildEnv marks the re-executed test binary that
+// TestRunExec_SucceedsUnderActiveReaper runs its body in.
+const reaperChildEnv = "SUBSTRATE_EXEC_REAPER_CHILD"
 
 // TestRunExec_SucceedsUnderActiveReaper is the regression test for running
 // the exec child through procreap.RunManaged rather than a bare cmd.Run():
-// with the PID 1 SIGCHLD reaper goroutine actually running (StartReaper),
-// an unrelated reap pass racing this call's own cmd.Wait must never steal
-// its exit status out from under it (see procreap's package doc for the
-// "waitid: no child processes" failure this registration prevents). A
-// command that runs to completion must still report exit code 0 while that
-// reaper is live.
+// with the SIGCHLD reaper goroutine actually running (StartReaper), an
+// unrelated reap pass racing a call's own cmd.Wait must never steal its
+// exit status out from under it (see procreap's package doc for the
+// "waitid: no child processes" failure this registration prevents). The
+// race is timing-dependent, so the body repeats the exec many times to give
+// it a real chance to show up; every run must still report exit code 0.
+//
+// procreap.StartReaper installs a process-wide SIGCHLD handler and a
+// goroutine that cannot be stopped, and it reaps any unregistered child of
+// the process. Started in this test binary, it would stay live for every
+// later test and could reap a child some other test is waiting on outside
+// procreap. The body therefore runs in a re-executed copy of this test
+// binary, and the reaper dies with that process.
 func TestRunExec_SucceedsUnderActiveReaper(t *testing.T) {
 	if testing.Short() {
-		t.Skip("spawns a real subprocess and a real signal-handling goroutine")
+		t.Skip("spawns real subprocesses and a real signal-handling goroutine")
 	}
+	if os.Getenv(reaperChildEnv) == "1" {
+		runExecUnderActiveReaper(t)
+		return
+	}
+
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locate test binary: %v", err)
+	}
+	cmd := exec.Command(self, "-test.run=^TestRunExec_SucceedsUnderActiveReaper$", "-test.count=1", "-test.v")
+	cmd.Env = append(os.Environ(), reaperChildEnv+"=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("reaper subprocess failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "--- PASS: TestRunExec_SucceedsUnderActiveReaper") {
+		t.Fatalf("reaper subprocess did not run the test body:\n%s", out)
+	}
+}
+
+func runExecUnderActiveReaper(t *testing.T) {
 	withExecUserAsCurrent(t)
 	procreap.StartReaper()
 
-	resp := runExec(context.Background(), "scion", []string{"true"}, nil, 5*time.Second)
-
-	if resp.ExitCode != 0 {
-		t.Errorf("exit_code = %d, want 0 (stderr=%q)", resp.ExitCode, resp.Stderr)
+	const runs = 100
+	for i := 0; i < runs; i++ {
+		resp := runExec(context.Background(), "scion", []string{"true"}, nil, 5*time.Second)
+		if resp.ExitCode != 0 {
+			t.Fatalf("run %d/%d: exit_code = %d, want 0 (stderr=%q)", i+1, runs, resp.ExitCode, resp.Stderr)
+		}
 	}
 }
 
