@@ -59,7 +59,6 @@ type ResourceRecord struct {
 	Files         []store.TemplateFile
 	Status        string
 	SourceURL     string
-	Visibility    string
 }
 
 // Resource lifecycle states. Templates and harness-configs use identical string
@@ -77,8 +76,6 @@ const (
 type resourcePersistence interface {
 	// Kind identifies the resource kind (drives storage paths).
 	Kind() storage.ResourceKind
-	// DefaultVisibility is the visibility stamped on a newly-created record.
-	DefaultVisibility() string
 	// Label prefixes log messages (e.g. "template bootstrap").
 	Label() string
 
@@ -162,7 +159,6 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 			StorageBucket: stor.Bucket(),
 			StorageURI:    storage.ResourceStorageURI(rs.hubID, stor.Bucket(), kind, scope, scopeID, slug),
 			SourceURL:     sourceURL,
-			Visibility:    p.DefaultVisibility(),
 		}
 		if err := p.Create(ctx, rec, dir); err != nil {
 			return false, err
@@ -239,7 +235,6 @@ type templatePersistence struct {
 }
 
 func (p *templatePersistence) Kind() storage.ResourceKind { return storage.ResourceKindTemplate }
-func (p *templatePersistence) DefaultVisibility() string  { return store.VisibilityPrivate }
 func (p *templatePersistence) Label() string              { return "template bootstrap" }
 
 func (p *templatePersistence) GetBySlug(ctx context.Context, slug, scope, scopeID string) (*ResourceRecord, error) {
@@ -267,7 +262,13 @@ func (p *templatePersistence) Create(ctx context.Context, rec *ResourceRecord, d
 		StorageBucket: rec.StorageBucket,
 		StorageURI:    rec.StorageURI,
 		SourceURL:     rec.SourceURL,
-		Visibility:    rec.Visibility,
+	}
+	// For user-scoped templates imported via the resource pipeline, set
+	// OwnerID and CreatedBy from the scope ID (which IS the user ID for
+	// user scope). This mirrors handleCreateTemplate's behavior.
+	if rec.Scope == store.TemplateScopeUser && rec.ScopeID != "" {
+		t.OwnerID = rec.ScopeID
+		t.CreatedBy = rec.ScopeID
 	}
 	p.applyDirMeta(t, dir, rec)
 	p.model = t
@@ -340,7 +341,6 @@ func templateToRecord(t *store.Template) *ResourceRecord {
 		Files:         t.Files,
 		Status:        t.Status,
 		SourceURL:     t.SourceURL,
-		Visibility:    t.Visibility,
 	}
 }
 
@@ -355,8 +355,7 @@ type harnessConfigPersistence struct {
 func (p *harnessConfigPersistence) Kind() storage.ResourceKind {
 	return storage.ResourceKindHarnessConfig
 }
-func (p *harnessConfigPersistence) DefaultVisibility() string { return store.VisibilityPublic }
-func (p *harnessConfigPersistence) Label() string             { return "harness config bootstrap" }
+func (p *harnessConfigPersistence) Label() string { return "harness config bootstrap" }
 
 func (p *harnessConfigPersistence) GetBySlug(ctx context.Context, slug, scope, scopeID string) (*ResourceRecord, error) {
 	hc, err := p.s.store.GetHarnessConfigBySlug(ctx, slug, scope, scopeID)
@@ -383,10 +382,10 @@ func (p *harnessConfigPersistence) Create(ctx context.Context, rec *ResourceReco
 		StorageBucket: rec.StorageBucket,
 		StorageURI:    rec.StorageURI,
 		SourceURL:     rec.SourceURL,
-		Visibility:    rec.Visibility,
 	}
 	extractNoAuthBehavior(hc, dir)
 	extractAuthMeta(hc, dir)
+	extractModelConfig(hc, dir)
 	rec.Harness = p.harness
 	p.model = hc
 	return p.s.store.CreateHarnessConfig(ctx, hc)
@@ -404,6 +403,7 @@ func (p *harnessConfigPersistence) Update(ctx context.Context, rec *ResourceReco
 	}
 	extractNoAuthBehavior(hc, dir)
 	extractAuthMeta(hc, dir)
+	extractModelConfig(hc, dir)
 	return p.s.store.UpdateHarnessConfig(ctx, hc)
 }
 
@@ -488,6 +488,61 @@ func extractAuthMeta(hc *store.HarnessConfig, dir string) {
 	}
 }
 
+// extractModelConfig loads config.yaml from dir and stamps its default
+// model and model_aliases onto the HarnessConfig's Config data, so the hub's
+// stored record reflects config.yaml as the source of truth for the
+// harness's default model and size-alias table. resolveModelAliasForAgent
+// (harness_capabilities.go) reads these instead of falling back to the
+// alias table baked into the hub binary at build time
+// (harness.DefaultModelAliases), which otherwise goes stale the moment
+// config.yaml's aliases are updated without a hub rebuild/redeploy.
+//
+// Like extractImage, a field is only overwritten when config.yaml declares
+// it (non-empty/non-nil) — an absent field preserves whatever value is
+// already stored, so a hub-side manual edit to Config.Model or
+// Config.ModelAliases (e.g. via the harness-config API) survives a re-sync
+// of a config.yaml that doesn't mention that field. This mirrors the
+// contract already exercised by TestSyncHarnessConfig_PreservesTypedConfig.
+//
+// One consequence: deleting model_aliases (or model) from config.yaml does
+// NOT clear the stored value — the record keeps resolving with the last
+// aliases it saw. If stale-alias drift shows up again, check whether
+// config.yaml actually still declares model_aliases before assuming this
+// stamping is broken; an intentional removal needs an explicit clear (e.g.
+// a hub-side PATCH), not just deleting the key from config.yaml.
+func extractModelConfig(hc *store.HarnessConfig, dir string) {
+	if dir == "" {
+		return
+	}
+	hcDir, err := config.LoadHarnessConfigDir(dir)
+	if err != nil {
+		return
+	}
+	applyModelConfigFromEntry(hc, hcDir.Config)
+}
+
+// applyModelConfigFromEntry stamps the Model and ModelAliases fields from a
+// parsed config.yaml entry onto hc.Config, initializing it if necessary.
+// Fields config.yaml doesn't declare are left untouched (see
+// extractModelConfig for why). Shared by the directory-based sync path
+// (extractModelConfig above) and the storage/content-based harness-config
+// file write, upload, and finalize handlers, so every path that can update a
+// harness config's config.yaml keeps Model/ModelAliases in sync.
+func applyModelConfigFromEntry(hc *store.HarnessConfig, entry config.HarnessConfigEntry) {
+	if entry.Model == "" && len(entry.ModelAliases) == 0 {
+		return
+	}
+	if hc.Config == nil {
+		hc.Config = &store.HarnessConfigData{}
+	}
+	if entry.Model != "" {
+		hc.Config.Model = entry.Model
+	}
+	if len(entry.ModelAliases) > 0 {
+		hc.Config.ModelAliases = entry.ModelAliases
+	}
+}
+
 func harnessConfigToRecord(hc *store.HarnessConfig) *ResourceRecord {
 	if hc == nil {
 		return nil
@@ -507,6 +562,5 @@ func harnessConfigToRecord(hc *store.HarnessConfig) *ResourceRecord {
 		Files:         hc.Files,
 		Status:        hc.Status,
 		SourceURL:     hc.SourceURL,
-		Visibility:    hc.Visibility,
 	}
 }

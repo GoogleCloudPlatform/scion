@@ -19,6 +19,8 @@
 package opsettings
 
 import (
+	"encoding/json"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
@@ -27,6 +29,7 @@ import (
 type AccessSettings struct {
 	AdminEmails       []string `json:"admin_emails,omitempty"`
 	UserAccessMode    string   `json:"user_access_mode,omitempty"`
+	DefaultUserRole   string   `json:"default_user_role,omitempty"`
 	AuthorizedDomains []string `json:"authorized_domains,omitempty"`
 }
 
@@ -69,6 +72,17 @@ type AgentDefaultsSettings struct {
 	DefaultMaxAgentRole  string            `json:"default_max_agent_role,omitempty"`
 	DefaultAgentRole     string            `json:"default_agent_role,omitempty"`
 	DefaultRuntimeBroker string            `json:"default_runtime_broker,omitempty"`
+	// DefaultTimezone is the hub-level IANA timezone fallback (e.g.
+	// "America/Los_Angeles"). Applied as TZ when neither the profile's
+	// first-class timezone field nor a raw TZ in the profile env is set.
+	DefaultTimezone string `json:"default_timezone,omitempty"`
+	// DefaultGCPIdentityMode is the hub-wide fallback GCP metadata mode
+	// ("block", "passthrough", or "assign") applied when neither the agent
+	// create request nor the project's default GCP identity setting names one.
+	DefaultGCPIdentityMode string `json:"default_gcp_identity_mode,omitempty"`
+	// DefaultGCPIdentityServiceAccountID is the service account used when
+	// DefaultGCPIdentityMode is "assign". Ignored otherwise.
+	DefaultGCPIdentityServiceAccountID string `json:"default_gcp_identity_service_account_id,omitempty"`
 }
 
 // EndpointsSettings holds Layer-1 endpoint configuration.
@@ -122,6 +136,26 @@ type ProfilesSettings = map[string]config.V1ProfileConfig
 // The entire map is stored as a single JSONB document in hub_settings.
 type HarnessConfigsSettings = map[string]config.HarnessConfigEntry
 
+// QuotaSettings holds Layer-1 quota enforcement settings.
+type QuotaSettings struct {
+	// EnforceBrokerQuotas controls whether max_agents_per_broker is enforced
+	// on create. Default true (fail-safe) when absent. When false, usage is
+	// still counted (reservations, release, reconcile, backfill all run) —
+	// only the reject is skipped (design P1-D5).
+	EnforceBrokerQuotas *bool `json:"enforce_broker_quotas,omitempty" koanf:"enforce_broker_quotas"`
+}
+
+// AgentSecretsSettings holds Layer-1 hub policy for secrets written by
+// agents. UserScopeOnly is nil when unset, meaning agents may write project
+// scope as they do today (default false/permissive).
+type AgentSecretsSettings struct {
+	// UserScopeOnly, when true, restricts agents to writing user (profile)
+	// scope secrets only. The hub rejects agent writes at project scope,
+	// including harness auth capture. User-originated writes are unaffected
+	// (design ptone/scion#2291 §5).
+	UserScopeOnly *bool `json:"user_scope_only,omitempty" koanf:"user_scope_only"`
+}
+
 // MessagingSettings holds Layer-1 messaging configuration.
 // DB-only (runtime state), no settings.yaml representation.
 //
@@ -137,8 +171,51 @@ type HarnessConfigsSettings = map[string]config.HarnessConfigEntry
 type MessagingSettings struct {
 	ConversationEnvelopeSwitch *bool `json:"conversation_envelope_switch,omitempty"`
 
+	// CrossProjectMessagingEnabled controls whether agents may communicate
+	// across project boundaries on this Hub. Default false (off).
+	// This is a security-critical flag requiring revision/ETag concurrency.
+	CrossProjectMessagingEnabled *bool `json:"cross_project_messaging_enabled,omitempty"`
+
+	// OffloadThresholdRunes is the rune-count threshold above which an
+	// agent-recipient DM body is replaced by a fetch stub at dispatch
+	// (ptone/scion#2257, design auto-offload-large-dm §5, §8.1). Compiled
+	// default 0 (disabled); negative values are treated as 0. Nothing in
+	// Phase 1/2 wires `offload_fetch_by_id` — that setting is added in
+	// Phase 3.
+	OffloadThresholdRunes *int `json:"offload_threshold_runes,omitempty"`
+
 	// Stale fields — kept for backward-compatible deserialization only.
 	// New code must not read or write these.
 	ConversationReadSwitch      *bool `json:"conversation_read_switch,omitempty"`
 	ConversationWriteDenySwitch *bool `json:"conversation_write_deny_switch,omitempty"`
+}
+
+// ExperimentsSettings stores only explicit admin overrides for the
+// pkg/experiments registry. An absent key means "use the registry default".
+// Absent row = no overrides.
+//
+// DB-only (runtime state), no settings.yaml representation: experiment names
+// contain dots, and koanf uses "." as its key delimiter, so a koanf-backed
+// map keyed by experiment name would split "web.terminal_workspace" into
+// nested keys (ptone/scion#2217).
+type ExperimentsSettings struct {
+	Overrides map[string]bool `json:"overrides,omitempty"`
+}
+
+// ParseExperimentsDoc applies exactly the Refresh/Update malformed predicate
+// (operational_settings.go): malformed = the raw bytes are not valid JSON, or
+// they do not unmarshal into ExperimentsSettings. Schema validity is
+// deliberately NOT part of this predicate — a parseable but schema-invalid
+// document (e.g. an extra top-level key) is not "malformed" in this sense,
+// even though Validate rejects it on write. Refresh and Update keep their
+// generic check through sec.New(), which is the same predicate for this
+// struct; ReadAuthoritativeExperiments calls this function directly.
+func ParseExperimentsDoc(raw json.RawMessage) (doc ExperimentsSettings, malformed bool) {
+	if !json.Valid(raw) {
+		return ExperimentsSettings{}, true
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return ExperimentsSettings{}, true
+	}
+	return doc, false
 }

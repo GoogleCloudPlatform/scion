@@ -21,21 +21,20 @@
  * Uses Shoelace components for UI and integrates with shared Scion components.
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 // Import shared components
 import './shared/nav.js';
 import './shared/header.js';
 import './shared/breadcrumb.js';
-import './shared/debug-panel.js';
-
 import type { User } from '../shared/types.js';
 import type { AccessDeniedDetail } from '../client/api.js';
 import { showAccessDeniedToast } from '../utils/access-denied.js';
 import { performLogout } from '../utils/auth.js';
 import { setDocumentTitle, PAGE_TITLE_EVENT } from '../client/page-title.js';
 import type { PageTitleDetail } from '../client/page-title.js';
+import { enterAppFrame, exitAppFrame } from './shared/app-frame.js';
 
 /**
  * Page title configuration
@@ -44,6 +43,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/': 'Dashboard',
   '/projects': 'Projects',
   '/agents': 'Agents',
+  '/terminals': 'Terminals',
   '/brokers': 'Brokers',
   '/settings': 'Settings',
   '/admin/scheduler': 'Scheduler',
@@ -92,9 +92,9 @@ export class ScionApp extends LitElement {
   static override styles = css`
     :host {
       display: flex;
-      height: 100vh;
-      height: 100dvh;
+      height: var(--scion-app-height, 100dvh);
       background: var(--scion-bg, #f8fafc);
+      touch-action: manipulation;
     }
 
     /* Desktop sidebar */
@@ -103,7 +103,7 @@ export class ScionApp extends LitElement {
       flex-shrink: 0;
       position: sticky;
       top: 0;
-      height: 100vh;
+      height: var(--scion-app-height, 100dvh);
     }
 
     @media (max-width: 768px) {
@@ -148,6 +148,7 @@ export class ScionApp extends LitElement {
       flex: 1;
       padding: 1.5rem;
       overflow: auto;
+      overscroll-behavior: contain;
       display: flex;
       flex-direction: column;
     }
@@ -198,6 +199,7 @@ export class ScionApp extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    enterAppFrame();
     window.addEventListener('scion:access-denied', this._accessDeniedHandler as EventListener);
     this.addEventListener(PAGE_TITLE_EVENT, this._pageTitleHandler as EventListener);
     this.updateDocumentTitle();
@@ -210,6 +212,7 @@ export class ScionApp extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
+    exitAppFrame();
     window.removeEventListener('scion:access-denied', this._accessDeniedHandler as EventListener);
     this.removeEventListener(PAGE_TITLE_EVENT, this._pageTitleHandler as EventListener);
   }
@@ -247,7 +250,7 @@ export class ScionApp extends LitElement {
     showAccessDeniedToast(detail);
   }
 
-  override render() {
+  override render(): TemplateResult {
     const pageTitle = this.getPageTitle();
 
     return html`
@@ -293,9 +296,6 @@ export class ScionApp extends LitElement {
           </div>
         </div>
       </main>
-
-      <!-- Debug Panel (only shows in debug mode) -->
-      <scion-debug-panel></scion-debug-panel>
     `;
   }
 
@@ -332,6 +332,9 @@ export class ScionApp extends LitElement {
     }
     if (this.currentPath.match(/^\/agents\/[^/]+\/terminal$/)) {
       return 'Terminal';
+    }
+    if (this.currentPath === '/terminals' || this.currentPath.match(/^\/terminals\/[^/]+$/)) {
+      return 'Terminals';
     }
     if (this.currentPath.match(/^\/agents\/[^/]+\/configure$/)) {
       return 'Configure Agent';

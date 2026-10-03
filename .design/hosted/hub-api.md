@@ -91,7 +91,9 @@ Represents a running or stopped agent instance.
   "ownerId": "string",         // Current owner user ID
   "visibility": "private",     // Access level: private, team, public
 
-  "stateVersion": 1            // Optimistic locking version
+  "stateVersion": 1,           // Optimistic locking version
+
+  "launch": Launch             // Optional, see §5.9; absent if never async-launched
 }
 ```
 
@@ -382,7 +384,8 @@ POST /api/v1/agents
     "model": "string"
   },
 
-  "resume": false              // Resume from existing agent state
+  "resume": false,             // Resume from existing agent state
+  "acceptAsyncLaunch": false   // Opt in to a non-blocking launch; see §5.10
 }
 ```
 
@@ -856,6 +859,154 @@ Internal endpoint for runtime brokers to report health.
 - `X-Scion-Timestamp`: Request timestamp (RFC 3339)
 - `X-Scion-Nonce`: Random nonce for replay prevention
 - `X-Scion-Signature`: HMAC-SHA256 signature
+
+### 5.7 Runtime Broker Message Delivery Failures
+
+```
+POST /api/v1/runtime-brokers/{brokerId}/message-failures
+```
+
+Internal endpoint for a runtime broker to report messages it accepted into its
+debounce buffer (answering 200, so the hub marked them `dispatched`) but then
+failed to deliver to the agent. The hub moves each reported message from
+`pending`/`dispatched` to `failed` and sends a `DELIVERY_FAILED` notice to an
+agent sender. See ptone/scion#1820.
+
+The hub passes its message ID to the broker as `message_id` on the agent
+message request, for agent-to-agent DMs and broker/pub-sub deliveries. Only
+those messages can be reported.
+
+Only the broker itself may call this endpoint (HMAC broker identity must match
+`{brokerId}`). Reports are ignored for unknown message IDs, for messages whose
+recipient agent is not assigned to the reporting broker, and for rows already
+in a terminal state. At most 50 failures may be sent per request.
+
+**Request Body:**
+```json
+{
+  "failures": [
+    {
+      "messageId": "string",   // hub message ID (required)
+      "agentId": "string",     // broker-side agent identifier (informational)
+      "projectId": "string",   // informational
+      "reason": "string"       // stored as the dispatch failure reason; control characters are
+                               // stripped and it is truncated to 512 bytes
+    }
+  ]
+}
+```
+
+**Response:** `200 OK` with `{"marked": 1, "ignored": 0}`.
+
+### 5.8 Runtime Broker Launch Report
+
+```
+POST /api/v1/runtime-brokers/{brokerId}/agents/{agentId}/launch
+```
+
+Internal endpoint for a runtime broker to report progress and the terminal
+outcome of a non-blocking ("async") agent launch (design §3.2, §3.7). Only
+meaningful for an agent whose create request opted in via
+`acceptAsyncLaunch` while `hub.asyncAgentLaunch` is enabled; with the feature
+off (no agent has a launch), every authorized, well-formed call ends in a
+404 or 409 below.
+
+Only the broker itself may call this endpoint (HMAC broker identity must
+match `{brokerId}`); a non-broker caller, or a broker identity that does not
+match, gets `403 Forbidden` with the standard error body
+(`{"error": {"code": "forbidden", ...}}`), not the `{code, reason}` shape
+below. The endpoint is intentionally not gated by `hub.asyncAgentLaunch`, so
+an in-flight launch can still report and drain if the flag is turned off
+mid-launch.
+
+**Request Body:**
+```json
+{
+  "launchId": "string",       // required, must match the agent's current launch
+  "instanceId": "string",     // broker-side identifier for this launch attempt; matched exactly
+                               // against the stored owner, not free text — rejected with 400 if
+                               // over 256 bytes or containing a control character
+  "seq": 1,                   // monotonic sequence number for ordering
+  "state": "progress",        // claim | checkpoint | progress | succeeded | failed
+  "phase": "string",          // optional, a pre-running phase to move to; matched exactly against
+                               // a fixed set, not free text — rejected with 400 if over 64 bytes
+                               // or containing a control character
+  "step": "string",           // optional, free-text progress label; truncated to 512 bytes
+  "message": "string",        // optional, stored and republished; truncated to 512 bytes
+  "errorCode": "string",      // optional, set on a "failed" report; truncated to 512 bytes
+  "agent": RemoteAgentInfo,   // present only on "succeeded"
+  "at": "2026-01-01T00:00:00Z" // optional, broker-side timestamp
+}
+```
+
+The request body is bounded to 64 KiB.
+
+**Response:**
+- `200 OK` with `{"result": "applied"}` (or `"duplicate"` for a stale `seq`,
+  or `"completed"` for a report on an agent already past `running`). `applied`
+  also covers a late `failed` report that refines a launch that already ended
+  `timed_out` or `lost` (the agent is already in `error`); `completed` also
+  covers any report on a launch that already ended `succeeded` or
+  `running_observed`.
+- `403 Forbidden` with the standard error body (`{"error": {"code": "forbidden", ...}}`),
+  not the `{code, reason}` shape below: not the owning broker.
+- `405 Method Not Allowed`: any method other than `POST`.
+- `400 Bad Request`: malformed body, unknown `state`, empty `launchId`, a
+  non-UUID `agentId`, or an `instanceId` over 256 bytes or a `phase` over 64
+  bytes, or either containing a control character.
+- `404 Not Found` with `{"code": "agent_launch_unknown"}`: no such agent. A
+  malformed agent path segment (empty, or containing an extra `/`) is
+  rejected at routing time with the standard 404 error body instead.
+- `409 Conflict` with `{"code": "stale_launch", "reason": "..."}`: the
+  `launchId` does not match the agent's current launch (including an agent
+  that has never had one), or the launch already ended with a reason that
+  does not accept this report. `reason` is one of `superseded`, `deleted`,
+  `other_owner`, `stopped`, or the agent's current launch end reason
+  (`timed_out`, `lost`, `failed`, or `not_launched`) when the agent's launch
+  already ended with one of those reasons — `succeeded` and
+  `running_observed` never appear here, since either one always answers
+  `200` instead (see above). This set is open — treat any unrecognized
+  `reason` as terminal.
+
+### 5.9 The `launch` Object
+
+Agent resources (GET/List responses) and the `agent.status`/`agent.created`
+events carry an optional `launch` object whenever the agent has ever had an
+async launch (`launch,omitempty`); it is absent entirely for an agent that
+has never launched asynchronously.
+
+```json
+{
+  "id": "string",              // the launch ID
+  "state": "active",           // "active" | "ended"
+  "active": true,               // launch in flight: state == "active", phase is one of the
+                                 // in-flight phases, and the agent is not deleted. A launch
+                                 // that is "active" but winding down (e.g. the agent was
+                                 // stopped or deleted mid-launch) has active == false.
+  "kind": "create",             // create | start | restart
+  "step": "string",             // omitted if empty
+  "error": "string",             // omitted if empty
+  "endReason": "string",         // omitted if empty
+  "deadline": "2026-01-01T00:05:00Z",  // present only while state == "active"
+  "remainingSeconds": 250               // present only while state == "active"; max(0, ceil(deadline - now))
+}
+```
+
+Events carry a snapshot of `launch` taken at publish time, not a live
+reference: a later mutation to the agent does not retroactively change an
+already-delivered event.
+
+### 5.10 Create Request: `acceptAsyncLaunch`
+
+```
+POST /api/v1/agents
+```
+
+The create request body accepts an optional `acceptAsyncLaunch: boolean`
+field (default `false`). It is the client's opt-in to a non-blocking launch
+and is persisted as-is regardless of whether `hub.asyncAgentLaunch` is
+enabled; the flag and the opt-in must both be true for a launch to actually
+be non-blocking.
 
 ---
 
@@ -1334,6 +1485,7 @@ All error responses follow a consistent format:
 |-------------|------|-------------|
 | 400 | `invalid_request` | Malformed request body |
 | 400 | `validation_error` | Request validation failed |
+| 400 | `invalid_cursor` | Pagination cursor is not valid for this request (tampered, sealed under a different or rotated key, legacy format, or issued for a different query or caller); restart from the first page |
 | 401 | `unauthorized` | Missing or invalid authentication |
 | 403 | `forbidden` | Insufficient permissions |
 | 404 | `not_found` | Resource not found |

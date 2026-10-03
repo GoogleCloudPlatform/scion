@@ -37,39 +37,32 @@ type HarnessConfigFileUploadResponse = TemplateFileUploadResponse
 type HarnessConfigFileWriteRequest = TemplateFileWriteRequest
 type HarnessConfigFileWriteResponse = TemplateFileWriteResponse
 
-func (s *Server) handleHarnessConfigFiles(w http.ResponseWriter, r *http.Request, id, filePath string) {
+func (s *Server) handleHarnessConfigFiles(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig, filePath string) {
 	if filePath == "" {
 		switch r.Method {
 		case http.MethodGet:
-			s.handleHarnessConfigFileList(w, r, id)
+			s.handleHarnessConfigFileList(w, r, hc)
 		case http.MethodPost:
-			s.handleHarnessConfigFileUpload(w, r, id)
+			s.handleHarnessConfigFileUpload(w, r, hc)
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 		}
 		return
 	}
 
 	switch r.Method {
 	case http.MethodGet:
-		s.handleHarnessConfigFileRead(w, r, id, filePath)
+		s.handleHarnessConfigFileRead(w, r, hc, filePath)
 	case http.MethodPut:
-		s.handleHarnessConfigFileWrite(w, r, id, filePath)
+		s.handleHarnessConfigFileWrite(w, r, hc, filePath)
 	case http.MethodDelete:
-		s.handleHarnessConfigFileDelete(w, r, id, filePath)
+		s.handleHarnessConfigFileDelete(w, r, hc, filePath)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
-func (s *Server) handleHarnessConfigFileList(w http.ResponseWriter, r *http.Request, id string) {
-	ctx := r.Context()
-
-	hc, err := s.store.GetHarnessConfig(ctx, id)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
+func (s *Server) handleHarnessConfigFileList(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 
 	var totalSize int64
 	entries := make([]HarnessConfigFileEntry, len(hc.Files))
@@ -90,19 +83,13 @@ func (s *Server) handleHarnessConfigFileList(w http.ResponseWriter, r *http.Requ
 	})
 }
 
-func (s *Server) handleHarnessConfigFileRead(w http.ResponseWriter, r *http.Request, id, filePath string) {
+func (s *Server) handleHarnessConfigFileRead(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig, filePath string) {
 	if err := validateWorkspaceFilePath(filePath); err != nil {
 		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", filePath, err.Error()))
 		return
 	}
 
 	ctx := r.Context()
-
-	hc, err := s.store.GetHarnessConfig(ctx, id)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 
 	var found *store.TemplateFile
 	for i := range hc.Files {
@@ -162,7 +149,7 @@ func (s *Server) handleHarnessConfigFileRead(w http.ResponseWriter, r *http.Requ
 	})
 }
 
-func (s *Server) handleHarnessConfigFileWrite(w http.ResponseWriter, r *http.Request, id, filePath string) {
+func (s *Server) handleHarnessConfigFileWrite(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig, filePath string) {
 	if err := validateWorkspaceFilePath(filePath); err != nil {
 		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", filePath, err.Error()))
 		return
@@ -170,11 +157,6 @@ func (s *Server) handleHarnessConfigFileWrite(w http.ResponseWriter, r *http.Req
 
 	ctx := r.Context()
 
-	hc, err := s.store.GetHarnessConfig(ctx, id)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 	// Limit request body size for both JSON and raw content paths.
 	r.Body = http.MaxBytesReader(w, r.Body, maxHarnessConfigFileSize+4096)
 
@@ -216,7 +198,7 @@ func (s *Server) handleHarnessConfigFileWrite(w http.ResponseWriter, r *http.Req
 
 	content := []byte(req.Content)
 	objectPath := hc.StoragePath + "/" + filePath
-	_, err = stor.Upload(ctx, objectPath, strings.NewReader(req.Content), storage.UploadOptions{
+	_, err := stor.Upload(ctx, objectPath, strings.NewReader(req.Content), storage.UploadOptions{
 		ContentType: "text/plain; charset=utf-8",
 	})
 	if err != nil {
@@ -255,6 +237,7 @@ func (s *Server) handleHarnessConfigFileWrite(w http.ResponseWriter, r *http.Req
 				hc.Config = &store.HarnessConfigData{}
 			}
 			hc.Config.Image = entry.Image
+			applyModelConfigFromEntry(hc, entry)
 		}
 	}
 
@@ -271,14 +254,9 @@ func (s *Server) handleHarnessConfigFileWrite(w http.ResponseWriter, r *http.Req
 	})
 }
 
-func (s *Server) handleHarnessConfigFileUpload(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) handleHarnessConfigFileUpload(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	ctx := r.Context()
 
-	hc, err := s.store.GetHarnessConfig(ctx, id)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 	// Apply total request body size limit
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadTotalSize)
 
@@ -369,11 +347,14 @@ func (s *Server) handleHarnessConfigFileUpload(w http.ResponseWriter, r *http.Re
 	hc.Files = files
 	hc.ContentHash = computeContentHash(hc.Files)
 
-	if image := extractImageFromStorage(ctx, stor, hc.StoragePath); image != "" {
-		if hc.Config == nil {
-			hc.Config = &store.HarnessConfigData{}
+	if entry, ok := extractHarnessConfigEntryFromStorage(ctx, stor, hc.StoragePath); ok {
+		if entry.Image != "" {
+			if hc.Config == nil {
+				hc.Config = &store.HarnessConfigData{}
+			}
+			hc.Config.Image = entry.Image
 		}
-		hc.Config.Image = image
+		applyModelConfigFromEntry(hc, entry)
 	}
 
 	if err := s.store.UpdateHarnessConfig(ctx, hc); err != nil {
@@ -387,7 +368,7 @@ func (s *Server) handleHarnessConfigFileUpload(w http.ResponseWriter, r *http.Re
 	})
 }
 
-func (s *Server) handleHarnessConfigFileDelete(w http.ResponseWriter, r *http.Request, id, filePath string) {
+func (s *Server) handleHarnessConfigFileDelete(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig, filePath string) {
 	if err := validateWorkspaceFilePath(filePath); err != nil {
 		BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", filePath, err.Error()))
 		return
@@ -395,11 +376,6 @@ func (s *Server) handleHarnessConfigFileDelete(w http.ResponseWriter, r *http.Re
 
 	ctx := r.Context()
 
-	hc, err := s.store.GetHarnessConfig(ctx, id)
-	if err != nil {
-		writeErrorFromErr(w, err, "")
-		return
-	}
 	stor := s.GetStorage()
 	if stor == nil {
 		RuntimeError(w, "Storage not configured")

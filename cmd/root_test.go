@@ -22,7 +22,166 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+// TestShouldShowUsageOnError covers the decision Execute makes about printing
+// a command's usage block after a failed invocation. Regression test for
+// ptone/scion#2089: Execute used to call cmd.Usage() unconditionally whenever
+// autoHelp was enabled, ignoring cmd.SilenceUsage entirely — so a command
+// opting into SilenceUsage (e.g. attach, once argument parsing has already
+// succeeded) had no way to suppress usage on a runtime error.
+//
+// A parentless command with SilenceUsage set is also covered here (standing
+// in for rootCmd, which sets SilenceUsage on itself only to stop cobra's own
+// internal auto-print — not as an opt-out signal for this helper): it must
+// still show usage, or root-level usage errors like an unknown command or an
+// unknown global flag would silently lose their usage block. See
+// TestExecuteUsageOnError_EndToEnd for the same case driven through the real
+// rootCmd.ExecuteC() dispatch.
+func TestShouldShowUsageOnError(t *testing.T) {
+	tests := []struct {
+		name         string
+		cmd          *cobra.Command
+		hasParent    bool
+		autoHelp     bool
+		silenceUsage bool
+		want         bool
+	}{
+		{
+			name:     "nil command never shows usage",
+			cmd:      nil,
+			autoHelp: true,
+			want:     false,
+		},
+		{
+			name:     "autoHelp disabled never shows usage",
+			cmd:      &cobra.Command{Use: "other"},
+			autoHelp: false,
+			want:     false,
+		},
+		{
+			name:     "a command that never opts in shows usage as before (no-op default)",
+			cmd:      &cobra.Command{Use: "other"},
+			autoHelp: true,
+			want:     true,
+		},
+		{
+			name:         "a subcommand that sets SilenceUsage suppresses usage",
+			cmd:          &cobra.Command{Use: "attach"},
+			hasParent:    true,
+			autoHelp:     true,
+			silenceUsage: true,
+			want:         false,
+		},
+		{
+			name:         "a parentless (root-like) command with SilenceUsage still shows usage",
+			cmd:          &cobra.Command{Use: "scion"},
+			hasParent:    false,
+			autoHelp:     true,
+			silenceUsage: true,
+			want:         true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.cmd != nil {
+				tt.cmd.SilenceUsage = tt.silenceUsage
+				if tt.hasParent {
+					parent := &cobra.Command{Use: "parent"}
+					parent.AddCommand(tt.cmd)
+				}
+			}
+			got := shouldShowUsageOnError(tt.cmd, tt.autoHelp)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestExecuteUsageOnError_EndToEnd drives the real cobra dispatch via
+// rootCmd.ExecuteC() and feeds the result into shouldShowUsageOnError,
+// exercising exactly the code path Execute() uses. This is the regression
+// test for the root-command finding raised in review: the helper originally
+// read cmd.SilenceUsage without checking whether cmd was the root command
+// itself, so rootCmd's own SilenceUsage (set only to silence cobra's
+// internal auto-print, see the doc comment on shouldShowUsageOnError) leaked
+// into the decision and hid usage for genuine root-level usage errors — an
+// unknown command or an unknown global flag.
+func TestExecuteUsageOnError_EndToEnd(t *testing.T) {
+	// attach's PersistentPreRunE requires project/registry context unless
+	// Hub context is detected. Configure that once for the attach-scoped
+	// subtests below so they reach cobra's flag/Args validation or RunE
+	// instead of failing earlier on an unrelated "no project" or "no
+	// image_registry" error.
+	origNoHub := noHub
+	origProjectPath := projectPath
+	origSilenceUsage := attachCmd.SilenceUsage
+	origNonInteractive := nonInteractive
+	origAutoConfirm := autoConfirm
+	origAutoHelp := autoHelp
+	t.Cleanup(func() {
+		noHub = origNoHub
+		projectPath = origProjectPath
+		attachCmd.SilenceUsage = origSilenceUsage
+		// PersistentPreRunE mutates these (agent mode / cli.* settings) in
+		// the agent-mode / interactive_disabled block; restore them so this
+		// test doesn't leak state into whichever test runs next.
+		nonInteractive = origNonInteractive
+		autoConfirm = origAutoConfirm
+		autoHelp = origAutoHelp
+		rootCmd.SetArgs(nil)
+		rootCmd.SetOut(nil)
+		rootCmd.SetErr(nil)
+	})
+
+	t.Setenv("SCION_HOST_UID", "")
+	// A non-empty Hub endpoint makes config.IsHubContext() true, which is
+	// what PersistentPreRunE uses to skip the image_registry requirement.
+	// This doesn't affect the attach code path itself, which is gated
+	// separately by the package-level noHub flag set below.
+	t.Setenv("SCION_HUB_ENDPOINT", "https://hub.invalid.example")
+	noHub = true
+	projectPath = t.TempDir()
+
+	run := func(t *testing.T, args []string) (*cobra.Command, error) {
+		t.Helper()
+		attachCmd.SilenceUsage = false
+		var buf bytes.Buffer
+		rootCmd.SetOut(&buf)
+		rootCmd.SetErr(&buf)
+		rootCmd.SetArgs(args)
+		return rootCmd.ExecuteC()
+	}
+
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"unknown root command still shows usage", []string{"totally-bogus-command-zzz"}, true},
+		{"unknown root flag still shows usage", []string{"--totally-bogus-flag-zzz"}, true},
+		{"attach with no args still shows usage", []string{"attach"}, true},
+		{"attach with too many args still shows usage", []string{"attach", "a", "b"}, true},
+		{"attach with an unknown flag still shows usage", []string{"attach", "--totally-bogus-flag-zzz", "x"}, true},
+		{"attach runtime error hides usage", []string{"attach", "does-not-exist-xyz"}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd, err := run(t, tt.args)
+			require.Error(t, err)
+			assert.Equal(t, tt.want, shouldShowUsageOnError(cmd, true))
+			if tt.name == "attach runtime error hides usage" {
+				// Make the intent explicit: this row's outcome depends on
+				// cobra actually dispatching into attachCmd (and RunE running
+				// far enough to hit the "not found" error), not on
+				// PersistentPreRunE failing first for an unrelated reason.
+				assert.Equal(t, attachCmd, cmd)
+			}
+		})
+	}
+}
 
 func TestFormatFlagCheck(t *testing.T) {
 	// Backup original values
@@ -210,6 +369,138 @@ func TestServerStartDoesNotRequireImageRegistry(t *testing.T) {
 	// check because it's in the server subtree.
 	err := rootCmd.PersistentPreRunE(serverStartCmd, []string{})
 	assert.NoError(t, err, "server start should not require image_registry")
+}
+
+// setupNoProjectPreRun prepares package-level command state for tests that
+// exercise rootCmd.PersistentPreRunE outside any scion project. It saves and
+// restores globalMode, projectPath, noHub, nonInteractive, autoConfirm,
+// outputFormat, profile and autoHelp (mirroring the fields
+// TestServerStartDoesNotRequireImageRegistry resets, so a stale value from
+// another test — outputFormat in particular, which PersistentPreRunE
+// rejects outright unless it's ""/json/plain — can't make these tests fail
+// spuriously); clears SCION_HOST_UID and the leaked
+// SCION_HUB_ENDPOINT/SCION_HUB_URL/SCION_PROJECT_ID env vars that would
+// otherwise let config.IsHubContext() or FindProjectRoot() mask the "not in
+// a scion project" failure these tests guard against, plus SCION_PROJECT
+// and SCION_CREATOR, cleared defensively (see below); points HOME at a
+// fresh temp dir; and changes into a temp dir with no .scion project
+// anywhere above it (t.Chdir restores the working directory itself).
+func setupNoProjectPreRun(t *testing.T) {
+	t.Helper()
+
+	origGlobalMode := globalMode
+	origProjectPath := projectPath
+	origNoHub := noHub
+	origNonInteractive := nonInteractive
+	origAutoConfirm := autoConfirm
+	origOutputFormat := outputFormat
+	origProfile := profile
+	origAutoHelp := autoHelp
+	t.Cleanup(func() {
+		globalMode = origGlobalMode
+		projectPath = origProjectPath
+		noHub = origNoHub
+		nonInteractive = origNonInteractive
+		autoConfirm = origAutoConfirm
+		outputFormat = origOutputFormat
+		profile = origProfile
+		autoHelp = origAutoHelp
+	})
+
+	t.Setenv("SCION_HOST_UID", "")
+	// Clear leaked SCION_* env vars that make config.IsHubContext() true and
+	// would otherwise let FindProjectRoot() synthesize a project path,
+	// masking the "not in a scion project" failure these tests guard against.
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+	t.Setenv("SCION_HUB_URL", "")
+	t.Setenv("SCION_PROJECT_ID", "")
+	// SCION_PROJECT and SCION_CREATOR aren't read by name on this code
+	// path (the settings loaders bulk-load SCION_* vars but ignore these
+	// two), but the sandbox container can still leak them (see
+	// AGENTS.md, "Sandbox gotchas"), so clear them
+	// defensively alongside the vars above to keep these tests isolated
+	// against future readers.
+	t.Setenv("SCION_PROJECT", "")
+	t.Setenv("SCION_CREATOR", "")
+	t.Setenv("HOME", t.TempDir())
+
+	// A directory with no .scion project anywhere above it.
+	t.Chdir(t.TempDir())
+
+	globalMode = false
+	projectPath = ""
+	noHub = true
+	nonInteractive = true
+	autoConfirm = true
+	outputFormat = ""
+	profile = ""
+	autoHelp = false
+}
+
+// TestHubSecretMigrateNamesAndMigrateDoNotRequireProject is a regression test
+// for ptone/scion#2396: `scion hub secret migrate-names` (and its sibling
+// `scion hub secret migrate`) operate directly against the Hub DB and GCP
+// Secret Manager, never reading or resolving the current directory's scion
+// project, so they must not fail with "not in a scion project" when run
+// outside one — without requiring the --global workaround.
+func TestHubSecretMigrateNamesAndMigrateDoNotRequireProject(t *testing.T) {
+	setupNoProjectPreRun(t)
+
+	for _, cmd := range []*cobra.Command{hubSecretMigrateNamesCmd, hubSecretMigrateCmd} {
+		t.Run(cmd.CommandPath(), func(t *testing.T) {
+			err := rootCmd.PersistentPreRunE(cmd, []string{})
+			assert.NoError(t, err)
+		})
+	}
+}
+
+// TestOrdinaryCommandStillRequiresProject guards against the migrate-names
+// exemption (ptone/scion#2396) becoming too broad: a command that isn't in
+// any exemption list or subtree must still fail with "not in a scion
+// project" when run outside one and without --global. It also checks three
+// commands chosen to share something with the new exemption case's guard
+// (`parentName == "secret" && commandInSubtree(cmd, "hub")`) without
+// satisfying all of it, so that dropping either half of the guard would
+// make this test fail:
+//   - configMigrateCmd ("scion config migrate") shares the "migrate" name
+//     but its parent is "config", not "secret", and it has no "hub"
+//     ancestor.
+//   - a synthetic "secret -> migrate-names" tree shares both the
+//     "migrate-names" name and a "secret" parent, but (like the real
+//     top-level "scion secret" command) has no "hub" ancestor. Dropping the
+//     "commandInSubtree(cmd, "hub")" half of the guard would wrongly exempt
+//     this tree.
+//   - a synthetic "hub -> other -> migrate" tree has a "hub" ancestor, like
+//     the real exemption target, but its parent is "other", not "secret".
+//     Dropping the "parentName == "secret"" half of the guard would wrongly
+//     exempt this tree.
+func TestOrdinaryCommandStillRequiresProject(t *testing.T) {
+	setupNoProjectPreRun(t)
+
+	ordinaryCmd := &cobra.Command{Use: "other"}
+	err := rootCmd.PersistentPreRunE(ordinaryCmd, []string{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not in a scion project")
+
+	err = rootCmd.PersistentPreRunE(configMigrateCmd, []string{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not in a scion project")
+
+	secretParent := &cobra.Command{Use: "secret"}
+	migrateNamesChild := &cobra.Command{Use: "migrate-names"}
+	secretParent.AddCommand(migrateNamesChild)
+	err = rootCmd.PersistentPreRunE(migrateNamesChild, []string{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not in a scion project")
+
+	hubParent := &cobra.Command{Use: "hub"}
+	otherParent := &cobra.Command{Use: "other"}
+	migrateChild := &cobra.Command{Use: "migrate"}
+	hubParent.AddCommand(otherParent)
+	otherParent.AddCommand(migrateChild)
+	err = rootCmd.PersistentPreRunE(migrateChild, []string{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not in a scion project")
 }
 
 func TestDevAuthWarning(t *testing.T) {

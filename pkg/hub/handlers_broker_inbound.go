@@ -27,7 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -54,12 +54,11 @@ type inboundMessageRequest struct {
 // Authentication: Requires broker HMAC authentication (X-Scion-Broker-ID header
 // validated by BrokerAuthMiddleware).
 //
-// The topic string is parsed to extract the project ID and agent slug. Canonical
-// broker topics use scion.project; legacy scion.grove topics are accepted here
-// as an external compatibility adapter.
+// The topic string is parsed to extract the project ID and agent slug. Broker
+// topics use scion.project.
 func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -97,6 +96,23 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+
+	// Phase 0.2 (ptone/scion#2192): broker/plugin ingress cannot use a raw
+	// message to obtain terminal authority through a claimed sender. Reject
+	// before sender identity synthesis, conversation resolution, mention
+	// work or dispatch — this integration may still send ordinary messages,
+	// just never raw ones. Trusted Hub-to-runtime-broker /keys dispatch is a
+	// distinct, separately authorized operation and is not affected.
+	if req.Message.Raw {
+		writeRawGuardViolation(w, unsupportedRaw(MessageDenialRawBrokerIngressUnsupported,
+			"raw message delivery is not supported on broker inbound ingress"))
+		return
+	}
+
+	// #2257 P2 (design auto-offload-large-dm §4.2 item 1): strip hub-reserved
+	// offload metadata keys from plugin-supplied messages before any further
+	// processing, render, or dispatch.
+	req.Message.Metadata = messaging.StripReservedMetadata(req.Message.Metadata)
 
 	// Parse topic to extract project ID and agent slug
 	projectID, agentSlug, err := parseAgentMessageTopic(req.Topic)
@@ -177,7 +193,7 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		// so authorizeAgentMessage denies it.
 		senderIdentity = broker
 	}
-	allowed, reason := s.authorizeAgentMessage(r.Context(), senderIdentity, agent, false)
+	allowed, reason, _ := s.authorizeAgentMessage(r.Context(), senderIdentity, agent, false)
 	if !allowed {
 		log.Warn("broker inbound message authorization denied",
 			"sender", req.Message.Sender, "agent_slug", agentSlug, "reason", reason)
@@ -421,18 +437,26 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		req.Message.DeliveryText = messaging.RenderDeliveryText(renderInput)
 	}
 
-	retryCtx, retryCancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer retryCancel()
+	// Migration gate (design agent-reincarnate §3.7, R3 p2a-r1 review): skip
+	// dispatch while the recipient is mid-`scion reincarnate`. This legacy
+	// endpoint dispatches before persisting (unlike every other path in this
+	// package), so the gate here only skips the dispatch call; the
+	// persisted row below is stamped "deferred" via agentReincarnating.
+	agentReincarnating := reincarnationInFlight(agent)
+	if !agentReincarnating {
+		retryCtx, retryCancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer retryCancel()
 
-	if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, req.Message.Msg, req.Message.Urgent, req.Message); errors.Is(err, ErrBrokerTimeout) {
-		GatewayTimeout(w, "Broker unreachable after 30s deadline")
-		return
-	} else if err != nil {
-		log.Error("Failed to dispatch inbound message",
-			"agent_id", agent.ID, "agent_slug", agentSlug, "error", err)
-		writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
-			"failed to deliver message to agent: "+err.Error(), nil)
-		return
+		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, req.Message.Msg, req.Message.Urgent, req.Message); errors.Is(err, ErrBrokerTimeout) {
+			GatewayTimeout(w, "Broker unreachable after 30s deadline")
+			return
+		} else if err != nil {
+			log.Error("Failed to dispatch inbound message",
+				"agent_id", agent.ID, "agent_slug", agentSlug, "error", err)
+			writeError(w, http.StatusBadGateway, ErrCodeRuntimeError,
+				"failed to deliver message to agent: "+err.Error(), nil)
+			return
+		}
 	}
 
 	log.Info("Inbound message delivered",
@@ -463,6 +487,9 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 		Broadcasted:   req.Message.Broadcasted,
 		DispatchState: store.MessageDispatchDispatched,
 		CreatedAt:     now,
+	}
+	if agentReincarnating {
+		storeMsg.DispatchState = store.MessageDispatchDeferred
 	}
 	if req.Message.Metadata != nil {
 		if gid, ok := req.Message.Metadata["group_id"]; ok {
@@ -503,12 +530,36 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			"conversation_id", storeMsg.ConversationID,
 			"agent_id", agent.ID,
 		)
+		// F1 (p2a-r2 review): while the recipient is mid-`scion
+		// reincarnate`, dispatch was skipped above (agentReincarnating), so
+		// a persist failure here means the message is neither saved nor
+		// dispatched — the "deferred ⇒ persisted" promise the gate makes
+		// would be a lie. Fail loudly instead. This is safe to retry (no
+		// dispatch happened, so a retry cannot double-deliver), unlike the
+		// non-fatal case below where the dispatch already succeeded.
+		if agentReincarnating {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"failed to persist message; agent is reincarnating, retry", nil)
+			return
+		}
 		// Non-fatal: the dispatch already succeeded, so the agent got the
 		// message. The agent now holds identifiers (message_id,
 		// conversation_id) that reference an unpersisted row. Failing the
 		// HTTP response here would mislead the caller into retrying —
 		// which would double-deliver.
 	} else {
+		// Validated dm: key: advance the sender's v2 watermarks before
+		// publish; their web client refetches unread state on this event.
+		if strings.HasPrefix(storeMsg.ThreadID, "dm:") && senderUserID != "" {
+			s.mu.RLock()
+			dmWcs := s.webChatStore
+			s.mu.RUnlock()
+			if dmWcs != nil {
+				registerDMParticipants(r.Context(), dmWcs, storeMsg.ThreadID)
+				s.touchConversationActivity(r.Context(), storeMsg.ThreadID, storeMsg.ID)
+				s.autoAdvanceSenderReadState(r.Context(), senderUserID, storeMsg.ThreadID, storeMsg.ID)
+			}
+		}
 		s.events.PublishUserMessage(r.Context(), storeMsg, nil)
 	}
 
@@ -543,25 +594,31 @@ func (s *Server) handleBrokerInbound(w http.ResponseWriter, r *http.Request) {
 			"broker_id", broker.ID(),
 			"plugin_name", pluginName,
 		}
+		if storeMsg.ConversationID != "" {
+			req.Message.ConversationID = storeMsg.ConversationID
+		}
 		logAttrs = append(logAttrs, req.Message.LogAttrs()...)
 		s.dedicatedMessageLog.Info("inbound broker message delivered", logAttrs...)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"delivered": true,
+	resp := map[string]interface{}{
+		"delivered": !agentReincarnating,
 		"agentId":   agent.ID,
-	})
+	}
+	if agentReincarnating {
+		resp["deferred"] = "agent is reincarnating"
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // parseAgentMessageTopic extracts the project ID and agent slug from a topic string.
-// Expected canonical format: scion.project.<projectID>.agent.<agentSlug>.messages.
-// Legacy scion.grove topics are accepted at this adapter boundary.
+// Expected format: scion.project.<projectID>.agent.<agentSlug>.messages.
 func parseAgentMessageTopic(topic string) (projectID, agentSlug string, err error) {
-	parsed, err := projectcompat.ParseTopic(topic)
+	parsed, err := projectkeys.ParseTopic(topic)
 	if err != nil {
 		return "", "", err
 	}
-	if parsed.Kind != projectcompat.TopicKindAgent {
+	if parsed.Kind != projectkeys.TopicKindAgent {
 		return "", "", fmt.Errorf("expected format scion.project.<projectId>.agent.<agentSlug>.messages")
 	}
 	return parsed.ProjectID, parsed.Actor, nil
@@ -609,6 +666,10 @@ func (s *Server) resolvePhase5Conversation(
 		if surface := messaging.ChannelToSurface(channel, s.messageLog); surface != "native" {
 			threadOpts = append(threadOpts, messaging.WithThreadSurface(surface))
 		}
+		// A25.6 F1/F3: threadID may carry a dm: prefix, in which case this
+		// resolves as kind=="direct"; register both principals so the
+		// conversation is discoverable via `conversation list`.
+		threadOpts = append(threadOpts, messaging.WithThreadParticipants(s.store))
 		return messaging.ResolveOrCreateThreadConversation(ctx, s.store, s.messageLog, threadID, projectID, threadOpts...)
 	}
 	if senderUserID != "" && agentID != "" {

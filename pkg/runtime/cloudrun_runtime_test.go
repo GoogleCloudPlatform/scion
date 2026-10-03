@@ -108,6 +108,87 @@ func TestCloudRunRuntime_NewFromInstancesMissingRegion(t *testing.T) {
 	}
 }
 
+func TestCloudRunRuntime_NewFromInstancesInitializesExec(t *testing.T) {
+	// Regression test: NewCloudRunRuntimeFromInstances used to leave exec
+	// nil, so Exec/ExecWithStdin/Attach would panic with a nil pointer
+	// dereference the first time they were called on an instances-based
+	// runtime. See ptone/scion#1355 follow-up review.
+	rt, err := NewCloudRunRuntimeFromInstances(&config.V1CloudRunInstancesConfig{
+		ProjectID: "instances-project",
+		Region:    "us-west1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rt.exec == nil {
+		t.Error("NewCloudRunRuntimeFromInstances() left exec nil; want an initialized exec connector")
+	}
+}
+
+func TestCloudRunRuntime_ExecNilExecConnector(t *testing.T) {
+	// Guards against a nil pointer dereference if a CloudRunRuntime is ever
+	// constructed (e.g. directly, or by a future constructor) without an
+	// exec connector. Exec/ExecWithStdin/Attach must return a clean error
+	// instead of panicking.
+	rt := &CloudRunRuntime{
+		config: &config.CloudRunConfig{ProjectID: "p", Location: "us-central1"},
+	}
+
+	if _, err := rt.Exec(context.Background(), "instance-1", []string{"true"}); err == nil {
+		t.Error("Exec() with nil exec connector: expected error, got nil")
+	}
+
+	if _, err := rt.ExecWithStdin(context.Background(), "instance-1", []string{"true"}, strings.NewReader("")); err == nil {
+		t.Error("ExecWithStdin() with nil exec connector: expected error, got nil")
+	}
+
+	if err := rt.Attach(context.Background(), "instance-1"); err == nil {
+		t.Error("Attach() with nil exec connector: expected error, got nil")
+	}
+}
+
+func TestCloudRunRuntime_ResolveConfig_SkipsWhenConfigured(t *testing.T) {
+	// When ProjectID and Location are already set, resolveConfig should be a no-op.
+	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{
+		ProjectID: "my-project",
+		Location:  "us-central1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// resolveConfig should succeed without touching the metadata server.
+	if err := rt.resolveConfig(context.Background()); err != nil {
+		t.Fatalf("resolveConfig() returned error for already-configured runtime: %v", err)
+	}
+	if rt.config.ProjectID != "my-project" {
+		t.Errorf("ProjectID changed after resolveConfig: got %q, want %q", rt.config.ProjectID, "my-project")
+	}
+	if rt.config.Location != "us-central1" {
+		t.Errorf("Location changed after resolveConfig: got %q, want %q", rt.config.Location, "us-central1")
+	}
+}
+
+func TestCloudRunRuntime_ResolveConfig_FailsWithoutMetadata(t *testing.T) {
+	// When ProjectID and Location are empty and no metadata server is available,
+	// resolveConfig should return an error (not produce an empty parent string).
+	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// In a test environment without a GCE metadata server, this should fail
+	// with a clear error rather than silently producing "projects//locations/".
+	err = rt.resolveConfig(context.Background())
+	if err == nil {
+		// If we're somehow running on GCE/Cloud Run, the metadata server
+		// will respond and this is fine — but in a standard test env, it should fail.
+		t.Log("resolveConfig() succeeded — likely running on GCE/Cloud Run")
+	} else {
+		if !strings.Contains(err.Error(), "auto-detecting") {
+			t.Errorf("resolveConfig() error = %q, want it to mention 'auto-detecting'", err)
+		}
+	}
+}
+
 func TestCloudRunRuntime_LifecycleMethods(t *testing.T) {
 	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{
 		ProjectID: "test-project", Location: "us-central1",
@@ -274,7 +355,6 @@ func TestGetRuntime_CloudRun_DirectProfileName(t *testing.T) {
 
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
-	t.Setenv("SCION_GROVE", "")
 
 	globalDir := filepath.Join(tmpHome, ".scion")
 	if err := os.MkdirAll(globalDir, 0755); err != nil {
@@ -472,6 +552,98 @@ func TestCloudRunProvisionNFSFailsWhenHubLacksNFSMount(t *testing.T) {
 	if !strings.Contains(err.Error(), "Hub cannot access NFS export") {
 		t.Fatalf("error = %q", err)
 	}
+}
+
+func TestBuildCloudRunInstance_HarnessCommand(t *testing.T) {
+	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{
+		ProjectID: "test-project", Location: "us-central1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("harness command is wrapped in tmux", func(t *testing.T) {
+		cfg := RunConfig{
+			Image: "test-image:latest",
+			Labels: map[string]string{
+				"agent_id": "agent-1",
+			},
+			Harness: &mockHarness{
+				command: []string{"claude", "--no-chrome", "--dangerously-skip-permissions"},
+			},
+			Task: "do something",
+		}
+		inst := rt.buildCloudRunInstance(cfg, 1000, 1000, nil)
+
+		if len(inst.Containers) != 1 {
+			t.Fatalf("expected 1 container, got %d", len(inst.Containers))
+		}
+		c := inst.Containers[0]
+
+		// Command (ENTRYPOINT override) must be nil — we rely on the image's
+		// ENTRYPOINT ("sciontool init --") from scion-base.
+		if len(c.Command) != 0 {
+			t.Errorf("Container.Command should be nil/empty (use image ENTRYPOINT), got %v", c.Command)
+		}
+
+		// Args (CMD override) must contain the tmux-wrapped harness command.
+		if len(c.Args) != 3 {
+			t.Fatalf("Container.Args length = %d, want 3 [/bin/sh -c <tmux_cmd>]", len(c.Args))
+		}
+		if c.Args[0] != "/bin/sh" || c.Args[1] != "-c" {
+			t.Errorf("Container.Args[0:2] = %v, want [/bin/sh -c]", c.Args[:2])
+		}
+		tmuxCmd := c.Args[2]
+		if !strings.Contains(tmuxCmd, "tmux new-session") {
+			t.Errorf("tmux wrapper missing from Args: %s", tmuxCmd)
+		}
+		if !strings.Contains(tmuxCmd, "claude") {
+			t.Errorf("harness command 'claude' missing from Args: %s", tmuxCmd)
+		}
+		if !strings.Contains(tmuxCmd, "--no-chrome") {
+			t.Errorf("harness flag '--no-chrome' missing from Args: %s", tmuxCmd)
+		}
+		// Must use poll loop (while tmux has-session), NOT attach-session.
+		if strings.Contains(tmuxCmd, "attach-session") {
+			t.Errorf("must use poll loop instead of attach-session (no TTY in CRI): %s", tmuxCmd)
+		}
+		if !strings.Contains(tmuxCmd, "while tmux has-session") {
+			t.Errorf("poll loop missing from tmux command: %s", tmuxCmd)
+		}
+	})
+
+	t.Run("no harness falls back to CommandArgs as Args", func(t *testing.T) {
+		cfg := RunConfig{
+			Image:       "test-image:latest",
+			Labels:      map[string]string{"agent_id": "agent-2"},
+			CommandArgs: []string{"custom-binary", "--flag"},
+		}
+		inst := rt.buildCloudRunInstance(cfg, 1000, 1000, nil)
+
+		c := inst.Containers[0]
+		if len(c.Command) != 0 {
+			t.Errorf("Container.Command should be nil/empty, got %v", c.Command)
+		}
+		if len(c.Args) != 2 || c.Args[0] != "custom-binary" || c.Args[1] != "--flag" {
+			t.Errorf("Container.Args = %v, want [custom-binary --flag]", c.Args)
+		}
+	})
+
+	t.Run("no harness and no args uses image defaults", func(t *testing.T) {
+		cfg := RunConfig{
+			Image:  "test-image:latest",
+			Labels: map[string]string{"agent_id": "agent-3"},
+		}
+		inst := rt.buildCloudRunInstance(cfg, 1000, 1000, nil)
+
+		c := inst.Containers[0]
+		if len(c.Command) != 0 {
+			t.Errorf("Container.Command should be nil/empty, got %v", c.Command)
+		}
+		if len(c.Args) != 0 {
+			t.Errorf("Container.Args should be nil/empty, got %v", c.Args)
+		}
+	})
 }
 
 func TestCloudRunShortInstanceID(t *testing.T) {

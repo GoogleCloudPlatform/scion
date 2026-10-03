@@ -32,7 +32,7 @@
 # Commands:
 #   health        Run health endpoint checks (sections 3, 7)
 #   session       Obtain and print a dev session cookie
-#   subscribe     Open an SSE connection to a grove (section 4, 5)
+#   subscribe     Open an SSE connection to a project (section 4, 5)
 #   errors        Test SSE error cases (section 4.4)
 #   publish       Publish test events via NATS (section 5)
 #   lifecycle     Run connection lifecycle tests (section 6)
@@ -46,8 +46,8 @@ set -euo pipefail
 
 WEB_PORT="${PORT:-8080}"
 BASE_URL="http://localhost:${WEB_PORT}"
-# Test grove/agent IDs used throughout
-TEST_GROVE="test-grove"
+# Test project/agent IDs used throughout
+TEST_PROJECT="test-project"
 TEST_AGENT="agent-001"
 
 # ---------------------------------------------------------------------------
@@ -151,30 +151,30 @@ cmd_health() {
 #
 # Subscription Scope Verification Matrix:
 #
-#   Page Route            Expected SSE URL                             Scope
-#   /groves               /events?sub=grove.*.summary                  dashboard
-#   /groves/:groveId      /events?sub=grove.{groveId}.>               grove
-#   /agents/:agentId      /events?sub=grove.{groveId}.>&sub=agent.{agentId}.>  agent-detail
+#   Page Route            Expected SSE URL                                     Scope
+#   /projects             /events?sub=project.*.summary                        dashboard
+#   /projects/:projectId  /events?sub=project.{projectId}.>                    project
+#   /agents/:agentId      /events?sub=project.{projectId}.>&sub=agent.{agentId}.>  agent-detail
 #
-# The agent-detail scope includes both grove-level and agent-level
-# subscriptions. The grove-level subscription keeps sidebar/breadcrumb state
+# The agent-detail scope includes both project-level and agent-level
+# subscriptions. The project-level subscription keeps sidebar/breadcrumb state
 # fresh; the agent subscription adds heavy events (harness output) for the
 # detail view.
 #
 # Allowed Subject Prefixes:
 #
-#   grove.    Grove-scoped events (agent status, broker health)
+#   project.  Project-scoped events (agent status, broker health)
 #   agent.    Agent-scoped heavy events (harness output)
 #   broker.   Broker-scoped events
 #
 # Subjects outside these prefixes are rejected with 400. Bare wildcards
 # (">", "*") are rejected. All subjects must have at least two tokens
-# (e.g., "grove.mygrove" minimum).
+# (e.g., "project.myproject" minimum).
 #
 
 cmd_subscribe() {
     ensure_session
-    local subject="${1:-grove.${TEST_GROVE}.>}"
+    local subject="${1:-project.${TEST_PROJECT}.>}"
 
     section "4/5. SSE Subscription"
     info "Subscribing to: ${subject}"
@@ -184,7 +184,7 @@ cmd_subscribe() {
     # The connection stays open and emits:
     #   id: 1
     #   event: connected
-    #   data: {"connectionId":"sse-1","subjects":["grove.test-grove.>"]}
+    #   data: {"connectionId":"sse-1","subjects":["project.test-project.>"]}
     #
     # Then :heartbeat <timestamp> comments every 30 seconds to keep alive.
     info "Expected: initial 'connected' event, then heartbeats every 30s"
@@ -202,7 +202,7 @@ cmd_subscribe_multi() {
 
     # Both formats are supported — multiple sub params or comma-separated.
     info "Opening SSE connection with two subjects:"
-    info "  grove.${TEST_GROVE}.>"
+    info "  project.${TEST_PROJECT}.>"
     info "  agent.${TEST_AGENT}.>"
     info "Press Ctrl+C to close the connection"
     echo ""
@@ -210,7 +210,7 @@ cmd_subscribe_multi() {
     echo ""
 
     curl -N -H "Cookie: ${SESSION_COOKIE}" \
-        "${BASE_URL}/events?sub=grove.${TEST_GROVE}.>&sub=agent.${TEST_AGENT}.>"
+        "${BASE_URL}/events?sub=project.${TEST_PROJECT}.>&sub=agent.${TEST_AGENT}.>"
 }
 
 # ---------------------------------------------------------------------------
@@ -242,7 +242,7 @@ cmd_errors() {
 
     # Invalid prefix → 400
     step "Invalid prefix 'system.internal.>' (expect 400)"
-    info "Expected: 400 — Subject must start with one of: grove., agent., broker."
+    info "Expected: 400 — Subject must start with one of: project., agent., broker."
     echo ""
     curl -s -w '\nHTTP Status: %{http_code}\n' \
         -H "Cookie: ${SESSION_COOKIE}" \
@@ -250,12 +250,12 @@ cmd_errors() {
     echo ""
 
     # Single-token subject → 400
-    step "Single-token subject 'grove.' (expect 400)"
+    step "Single-token subject 'project.' (expect 400)"
     info "Expected: 400 — Subject must have at least two tokens"
     echo ""
     curl -s -w '\nHTTP Status: %{http_code}\n' \
         -H "Cookie: ${SESSION_COOKIE}" \
-        "${BASE_URL}/events?sub=grove." | jq . 2>/dev/null || true
+        "${BASE_URL}/events?sub=project." | jq . 2>/dev/null || true
     echo ""
 
     # NATS unavailable → 503
@@ -269,7 +269,7 @@ cmd_errors() {
     echo ""
     curl -s -w '\nHTTP Status: %{http_code}\n' \
         -H "Cookie: ${SESSION_COOKIE}" \
-        "${BASE_URL}/events?sub=grove.test.>" | jq . 2>/dev/null || true
+        "${BASE_URL}/events?sub=project.test.>" | jq . 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -288,7 +288,7 @@ cmd_errors() {
 
 cmd_publish() {
     section "5. End-to-End NATS -> SSE Message Flow"
-    info "Publishing test events to grove.${TEST_GROVE}.*"
+    info "Publishing test events to project.${TEST_PROJECT}.*"
     info "Make sure an SSE listener is open in another terminal:"
     info "  ./web-nats-client.sh subscribe"
     echo ""
@@ -300,48 +300,48 @@ cmd_publish() {
 
     # 5.2 Agent status update
     step "5.2 Agent Status Update"
-    info "Publishing: grove.${TEST_GROVE}.agent.status"
+    info "Publishing: project.${TEST_PROJECT}.agent.status"
     # Expected in SSE stream:
     #   id: 2
     #   event: update
-    #   data: {"subject":"grove.test-grove.agent.status","data":{"agentId":"agent-001","status":"running","sessionStatus":"idle"}}
-    nats pub "grove.${TEST_GROVE}.agent.status" \
+    #   data: {"subject":"project.test-project.agent.status","data":{"agentId":"agent-001","status":"running","sessionStatus":"idle"}}
+    nats pub "project.${TEST_PROJECT}.agent.status" \
         '{"agentId":"agent-001","status":"running","sessionStatus":"idle"}'
     ok "Published agent status"
     echo ""
 
     # 5.3 Agent created event
     step "5.3 Agent Created Event"
-    info "Publishing: grove.${TEST_GROVE}.agent.created"
+    info "Publishing: project.${TEST_PROJECT}.agent.created"
     # Expected in SSE stream:
     #   id: 3
     #   event: update
-    #   data: {"subject":"grove.test-grove.agent.created","data":{"agentId":"agent-002","name":"test-agent","template":"claude","status":"provisioning"}}
-    nats pub "grove.${TEST_GROVE}.agent.created" \
+    #   data: {"subject":"project.test-project.agent.created","data":{"agentId":"agent-002","name":"test-agent","template":"claude","status":"provisioning"}}
+    nats pub "project.${TEST_PROJECT}.agent.created" \
         '{"agentId":"agent-002","name":"test-agent","template":"claude","status":"provisioning"}'
     ok "Published agent created"
     echo ""
 
     # 5.4 Agent deleted event
     step "5.4 Agent Deleted Event"
-    info "Publishing: grove.${TEST_GROVE}.agent.deleted"
-    nats pub "grove.${TEST_GROVE}.agent.deleted" \
+    info "Publishing: project.${TEST_PROJECT}.agent.deleted"
+    nats pub "project.${TEST_PROJECT}.agent.deleted" \
         '{"agentId":"agent-001"}'
     ok "Published agent deleted"
     echo ""
 
-    # 5.5 Grove summary
-    step "5.5 Grove Summary"
-    info "Publishing: grove.${TEST_GROVE}.summary"
-    nats pub "grove.${TEST_GROVE}.summary" \
-        "{\"groveId\":\"${TEST_GROVE}\",\"name\":\"Test Grove\",\"agentCount\":5,\"runningCount\":3}"
-    ok "Published grove summary"
+    # 5.5 Project summary
+    step "5.5 Project Summary"
+    info "Publishing: project.${TEST_PROJECT}.summary"
+    nats pub "project.${TEST_PROJECT}.summary" \
+        "{\"projectId\":\"${TEST_PROJECT}\",\"name\":\"Test Project\",\"agentCount\":5,\"runningCount\":3}"
+    ok "Published project summary"
     echo ""
 
     # 5.6 Agent-scoped heavy event
     step "5.6 Agent-Scoped Heavy Event"
     info "Publishing: agent.${TEST_AGENT}.event"
-    info "NOTE: This should NOT appear on a grove-only subscription."
+    info "NOTE: This should NOT appear on a project-only subscription."
     info "      It only appears on an agent-scoped subscription:"
     info "        ./web-nats-client.sh subscribe-multi"
     nats pub "agent.${TEST_AGENT}.event" \
@@ -353,12 +353,12 @@ cmd_publish() {
     # The SSE manager handles non-JSON payloads gracefully, wrapping them
     # as a string in the data field.
     step "5.7 Non-JSON Payload"
-    info "Publishing: grove.${TEST_GROVE}.agent.log (plain text)"
+    info "Publishing: project.${TEST_PROJECT}.agent.log (plain text)"
     # Expected in SSE stream:
     #   id: N
     #   event: update
-    #   data: {"subject":"grove.test-grove.agent.log","data":"plain text message"}
-    nats pub "grove.${TEST_GROVE}.agent.log" "plain text message"
+    #   data: {"subject":"project.test-project.agent.log","data":"plain text message"}
+    nats pub "project.${TEST_PROJECT}.agent.log" "plain text message"
     ok "Published non-JSON payload"
     echo ""
 
@@ -381,7 +381,7 @@ cmd_lifecycle() {
     info "They are ignored by EventSource but keep TCP connections alive through proxies."
     echo ""
     timeout 35 curl -N -H "Cookie: ${SESSION_COOKIE}" \
-        "${BASE_URL}/events?sub=grove.${TEST_GROVE}.>" 2>/dev/null || true
+        "${BASE_URL}/events?sub=project.${TEST_PROJECT}.>" 2>/dev/null || true
     echo ""
     ok "Heartbeat test complete"
     echo ""
@@ -392,7 +392,7 @@ cmd_lifecycle() {
     info "Check web server logs for cleanup messages (subscription removal)."
     echo ""
     timeout 3 curl -N -H "Cookie: ${SESSION_COOKIE}" \
-        "${BASE_URL}/events?sub=grove.${TEST_GROVE}.>" 2>/dev/null || true
+        "${BASE_URL}/events?sub=project.${TEST_PROJECT}.>" 2>/dev/null || true
     echo ""
     ok "Client disconnect test complete — check server logs for cleanup"
     echo ""
@@ -430,7 +430,7 @@ cmd_lifecycle() {
     echo ""
     timeout 5 curl -N -H "Cookie: ${SESSION_COOKIE}" \
         -H "Last-Event-ID: 5" \
-        "${BASE_URL}/events?sub=grove.${TEST_GROVE}.>" 2>/dev/null || true
+        "${BASE_URL}/events?sub=project.${TEST_PROJECT}.>" 2>/dev/null || true
     echo ""
     ok "Last-Event-ID resume test complete"
 }
@@ -448,10 +448,10 @@ cmd_lifecycle() {
 #
 # Expected behavior:
 #
-#   /healthz              200, no "nats" field
-#   /readyz               200, no "nats" field
-#   /events?sub=grove.>   503 Service Unavailable
-#   Page loads (/groves)  Pages render normally, SSE silently not connected
+#   /healthz                200, no "nats" field
+#   /readyz                 200, no "nats" field
+#   /events?sub=project.>   503 Service Unavailable
+#   Page loads (/projects)  Pages render normally, SSE silently not connected
 #
 
 cmd_degraded() {
@@ -474,10 +474,10 @@ cmd_degraded() {
     step "SSE endpoint (expect 503 Service Unavailable)"
     curl -s -w '\nHTTP Status: %{http_code}\n' \
         -H "Cookie: ${SESSION_COOKIE}" \
-        "${BASE_URL}/events?sub=grove.test.>" | jq . 2>/dev/null || true
+        "${BASE_URL}/events?sub=project.test.>" | jq . 2>/dev/null || true
     echo ""
 
-    info "Verify page loads (/groves) render normally with SSE silently not connected."
+    info "Verify page loads (/projects) render normally with SSE silently not connected."
 }
 
 # ---------------------------------------------------------------------------
@@ -488,32 +488,32 @@ cmd_degraded() {
 # They are documented here for reference.
 #
 # 8.1 SSE Connection in DevTools
-#   1. Navigate to http://localhost:8080/groves
+#   1. Navigate to http://localhost:8080/projects
 #   2. Open DevTools -> Network -> filter by "EventSource" or "events"
-#   3. Verify an EventSource connection is opened to /events?sub=grove.*.summary
+#   3. Verify an EventSource connection is opened to /events?sub=project.*.summary
 #   4. The connection should show a "connected" event in the EventStream tab
 #
 # 8.2 Scope-Based Subscription Changes
-#   1. Navigate to /groves       -> SSE URL: /events?sub=grove.*.summary
-#   2. Click into a grove (abc)  -> Old SSE closes, new opens: /events?sub=grove.abc.>
-#   3. Click into agent (xyz)    -> SSE reconnects: /events?sub=grove.abc.>&sub=agent.xyz.>
-#   4. Navigate back to /groves  -> SSE reconnects: /events?sub=grove.*.summary
+#   1. Navigate to /projects       -> SSE URL: /events?sub=project.*.summary
+#   2. Click into a project (abc)  -> Old SSE closes, new opens: /events?sub=project.abc.>
+#   3. Click into agent (xyz)      -> SSE reconnects: /events?sub=project.abc.>&sub=agent.xyz.>
+#   4. Navigate back to /projects  -> SSE reconnects: /events?sub=project.*.summary
 #
 # 8.3 Real-Time UI Updates
-#   1. Navigate to a grove detail page (e.g., /groves/test-grove)
-#   2. Publish: nats pub grove.test-grove.agent.status '{"agentId":"<id>","status":"stopped"}'
+#   1. Navigate to a project detail page (e.g., /projects/test-project)
+#   2. Publish: nats pub project.test-project.agent.status '{"agentId":"<id>","status":"stopped"}'
 #   3. Verify the agent's status badge updates without a page refresh
 #
 # 8.4 Agent Created / Deleted
-#   1. On a grove detail page, publish a "created" event:
-#      nats pub grove.test-grove.agent.created '{"agentId":"new-123","name":"New","status":"provisioning"}'
+#   1. On a project detail page, publish a "created" event:
+#      nats pub project.test-project.agent.created '{"agentId":"new-123","name":"New","status":"provisioning"}'
 #   2. Verify the new agent appears in the agent list
 #   3. Publish a "deleted" event:
-#      nats pub grove.test-grove.agent.deleted '{"agentId":"new-123"}'
+#      nats pub project.test-project.agent.deleted '{"agentId":"new-123"}'
 #   4. Verify the agent is removed from the list
 #
 # 8.5 Reconnection Behavior
-#   1. Open a grove page in the browser
+#   1. Open a project page in the browser
 #   2. Stop your NATS server
 #   3. Console shows: [SSE] Reconnecting in Xms (attempt N)
 #   4. Verify exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s (capped)
@@ -522,7 +522,7 @@ cmd_degraded() {
 #
 # 8.6 Page Unload Cleanup
 #   1. Open DevTools Network tab
-#   2. Navigate to a grove page (SSE connection opens)
+#   2. Navigate to a project page (SSE connection opens)
 #   3. Close the tab or navigate away
 #   4. Verify the SSE connection is closed (check server logs)
 #
@@ -548,7 +548,7 @@ cmd_quick() {
     # Open SSE listener in background
     step "Opening SSE listener in background"
     curl -N -H "Cookie: ${SESSION_COOKIE}" \
-        "${BASE_URL}/events?sub=grove.test.>" &
+        "${BASE_URL}/events?sub=project.test.>" &
     local sse_pid=$!
     sleep 2
     echo ""
@@ -557,10 +557,10 @@ cmd_quick() {
     if command -v nats &>/dev/null; then
         step "Publishing test events"
 
-        nats pub grove.test.agent.status '{"agentId":"a1","status":"running"}'
-        nats pub grove.test.agent.created '{"agentId":"a2","name":"new","status":"starting"}'
-        nats pub grove.test.agent.deleted '{"agentId":"a2"}'
-        nats pub grove.test.summary '{"groveId":"test","agentCount":1}'
+        nats pub project.test.agent.status '{"agentId":"a1","status":"running"}'
+        nats pub project.test.agent.created '{"agentId":"a2","name":"new","status":"starting"}'
+        nats pub project.test.agent.deleted '{"agentId":"a2"}'
+        nats pub project.test.summary '{"projectId":"test","agentCount":1}'
         ok "Test events published"
         echo ""
     else
@@ -620,8 +620,8 @@ usage() {
     echo "Commands:"
     echo "  health          Run health endpoint checks"
     echo "  session         Obtain and print a dev session cookie"
-    echo "  subscribe [sub] Open SSE connection (default: grove.${TEST_GROVE}.>)"
-    echo "  subscribe-multi Open SSE with grove + agent subscriptions"
+    echo "  subscribe [sub] Open SSE connection (default: project.${TEST_PROJECT}.>)"
+    echo "  subscribe-multi Open SSE with project + agent subscriptions"
     echo "  errors          Test SSE error cases"
     echo "  publish         Publish test events via NATS"
     echo "  lifecycle       Run connection lifecycle tests"

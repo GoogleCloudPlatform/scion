@@ -22,8 +22,10 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -219,4 +221,199 @@ func TestGCPSA_TopLevel_MethodNotAllowed(t *testing.T) {
 
 	rec := doRequestAsUser(t, srv, owner, http.MethodDelete, "/api/v1/gcp-service-accounts?scope=hub", nil)
 	require.Equal(t, http.StatusMethodNotAllowed, rec.Code, rec.Body.String())
+}
+
+// ============================================================================
+// Hub-scope mint tests
+// ============================================================================
+
+// setupHubMintTest creates a test server with minting configured, an admin user
+// (super-admin role binding, so gcp_service_account.create is granted), and a
+// regular hub member who should be denied.
+func setupHubMintTest(t *testing.T) (*Server, store.Store, *mockGCPServiceAccountAdmin, *store.User, *store.User) {
+	t.Helper()
+
+	srv, s := testServer(t)
+	mock := &mockGCPServiceAccountAdmin{}
+	srv.SetGCPServiceAccountAdmin(mock)
+	srv.SetGCPProjectID("test-hub-project")
+	srv.SetGCPTokenGenerator(&mockGCPTokenGenerator{email: "hub-sa@test-hub-project.iam.gserviceaccount.com"})
+
+	ctx := context.Background()
+
+	admin := &store.User{
+		ID:          tid("user-hub-admin"),
+		Email:       "hub-admin@test.com",
+		DisplayName: "Hub Admin",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	member := &store.User{
+		ID:          tid("user-hub-member"),
+		Email:       "hub-member@test.com",
+		DisplayName: "Hub Member",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	for _, u := range []*store.User{admin, member} {
+		require.NoError(t, s.CreateUser(ctx, u))
+		ensureHubMembership(ctx, s, u.ID)
+	}
+
+	// Grant super-admin to the admin user so gcp_service_account.create is available.
+	grantSuperAdminRole(t, s, admin.ID)
+
+	return srv, s, mock, admin, member
+}
+
+func TestGCPSA_HubMint_Success(t *testing.T) {
+	srv, _, mock, admin, _ := setupHubMintTest(t)
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost,
+		"/api/v1/gcp-service-accounts/mint?scope=hub", map[string]string{})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	var sa store.GCPServiceAccount
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&sa))
+	assert.True(t, sa.Managed, "minted SA must be managed")
+	assert.True(t, sa.Verified, "minted SA must be verified")
+	assert.Equal(t, store.ScopeHub, sa.Scope, "minted SA scope must be hub")
+	assert.Contains(t, sa.Email, "@test-hub-project.iam.gserviceaccount.com")
+	assert.Contains(t, sa.Email, "scion-")
+	assert.Equal(t, "test-hub-project", sa.ProjectID)
+	assert.Equal(t, "Scion hub agent", sa.DisplayName)
+	assert.Len(t, mock.createdSAs, 1)
+}
+
+func TestGCPSA_HubMint_AuthorizationDenied(t *testing.T) {
+	srv, _, _, _, member := setupHubMintTest(t)
+
+	rec := doRequestAsUser(t, srv, member, http.MethodPost,
+		"/api/v1/gcp-service-accounts/mint?scope=hub", map[string]string{})
+	require.Equal(t, http.StatusForbidden, rec.Code,
+		"non-admin hub member must be denied; got: %s", rec.Body.String())
+}
+
+func TestGCPSA_HubMint_PerHubQuota(t *testing.T) {
+	srv, _, _, admin, _ := setupHubMintTest(t)
+	srv.config.GCPMintCapPerHub = 2
+
+	// Mint first two — should succeed
+	for i := 0; i < 2; i++ {
+		rec := doRequestAsUser(t, srv, admin, http.MethodPost,
+			"/api/v1/gcp-service-accounts/mint?scope=hub", map[string]string{})
+		require.Equal(t, http.StatusCreated, rec.Code, "mint %d: %s", i+1, rec.Body.String())
+	}
+
+	// Third mint should be rejected
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost,
+		"/api/v1/gcp-service-accounts/mint?scope=hub", map[string]string{})
+	require.Equal(t, http.StatusConflict, rec.Code, "expected per-hub cap enforcement: %s", rec.Body.String())
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Contains(t, errResp.Error.Message, "per-hub mint limit")
+}
+
+func TestGCPSA_HubMint_GlobalQuota(t *testing.T) {
+	srv, _, _, admin, _ := setupHubMintTest(t)
+	srv.config.GCPMintCapGlobal = 2
+
+	// Mint two at hub scope — should succeed
+	for i := 0; i < 2; i++ {
+		rec := doRequestAsUser(t, srv, admin, http.MethodPost,
+			"/api/v1/gcp-service-accounts/mint?scope=hub", map[string]string{})
+		require.Equal(t, http.StatusCreated, rec.Code, "mint %d: %s", i+1, rec.Body.String())
+	}
+
+	// Third mint should hit global cap
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost,
+		"/api/v1/gcp-service-accounts/mint?scope=hub", map[string]string{})
+	require.Equal(t, http.StatusConflict, rec.Code, "expected global cap enforcement: %s", rec.Body.String())
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Contains(t, errResp.Error.Message, "global mint limit")
+}
+
+func TestGCPSA_HubMint_NotConfigured(t *testing.T) {
+	srv, s, _, _, _ := setupHubMintTest(t)
+	// Remove the IAM admin to simulate minting not configured
+	srv.SetGCPServiceAccountAdmin(nil)
+
+	ctx := context.Background()
+	admin := &store.User{
+		ID:          tid("user-hub-admin-noconfig"),
+		Email:       "admin-noconfig@test.com",
+		DisplayName: "Admin NoConfig",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, s.CreateUser(ctx, admin))
+	ensureHubMembership(ctx, s, admin.ID)
+	grantSuperAdminRole(t, s, admin.ID)
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost,
+		"/api/v1/gcp-service-accounts/mint?scope=hub", map[string]string{})
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code,
+		"minting not configured should return 503: %s", rec.Body.String())
+}
+
+func TestGCPSA_HubMint_ProjectScopeViaFlatRoute(t *testing.T) {
+	srv, _, _, admin, _ := setupHubMintTest(t)
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost,
+		"/api/v1/gcp-service-accounts/mint?scope=project&scopeId=some-project", map[string]string{})
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"project-scope via flat mint route should be refused: %s", rec.Body.String())
+
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Contains(t, errResp.Error.Message, "use /api/v1/projects/{id}/gcp-service-accounts/mint")
+}
+
+func TestGCPSA_HubMint_MethodNotAllowed(t *testing.T) {
+	srv, _, _, admin, _ := setupHubMintTest(t)
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodGet,
+		"/api/v1/gcp-service-accounts/mint?scope=hub", nil)
+	require.Equal(t, http.StatusMethodNotAllowed, rec.Code, rec.Body.String())
+}
+
+func TestGCPSA_HubScopeList_IncludesMintQuota(t *testing.T) {
+	srv, s, _, admin, _ := setupHubMintTest(t)
+	ctx := context.Background()
+
+	// Seed a managed hub-scoped SA to see non-zero quota
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, &store.GCPServiceAccount{
+		ID:        tid("sa-hub-managed"),
+		Scope:     store.ScopeHub,
+		ScopeID:   "test-hub-id",
+		Email:     "managed@test-hub-project.iam.gserviceaccount.com",
+		ProjectID: "test-hub-project",
+		CreatedBy: admin.ID,
+		CreatedAt: time.Now(),
+		Managed:   true,
+	}))
+
+	srv.config.GCPMintCapPerHub = 5
+	srv.config.GCPMintCapGlobal = 10
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodGet,
+		"/api/v1/gcp-service-accounts?scope=hub", nil)
+	require.Equal(t, http.StatusOK, rec.Code, "list failed: %s", rec.Body.String())
+
+	var resp ListGCPServiceAccountsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotNil(t, resp.MintQuota, "hub-scope list should include mint_quota when minting is configured")
+	assert.Equal(t, 1, resp.MintQuota.HubMinted, "hub_minted should count managed hub-scoped SAs")
+	assert.Equal(t, 5, resp.MintQuota.HubCap, "hub_cap should reflect GCPMintCapPerHub")
+	assert.Equal(t, 1, resp.MintQuota.GlobalMinted, "global_minted should count all managed SAs")
+	assert.Equal(t, 10, resp.MintQuota.GlobalCap, "global_cap should reflect GCPMintCapGlobal")
+	// Project fields should be zero-omitted
+	assert.Equal(t, 0, resp.MintQuota.ProjectMinted, "project_minted should be zero at hub scope")
+	assert.Equal(t, 0, resp.MintQuota.ProjectCap, "project_cap should be zero at hub scope")
 }

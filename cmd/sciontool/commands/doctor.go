@@ -22,6 +22,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
@@ -35,8 +36,7 @@ Checks performed:
   - Environment variables (SCION_HUB_ENDPOINT, SCION_AGENT_ID, etc.)
   - Token file presence, format, and expiry
   - Hub reachability (unauthenticated health check)
-  - Token validity (authenticated status update)
-  - Token refresh capability
+  - Token validity (authenticated status update and a read-only agent lookup)
   - GCP metadata server (if configured)
   - GitHub App token (if configured)
 
@@ -326,32 +326,46 @@ func checkAuthentication(hubURL string, failures *int, transportSrc transportaut
 		fmt.Printf("[WARN] Hub returned %d: %s\n", resp.StatusCode, doctorTruncate(string(respBody), 120))
 	}
 
-	// Test token refresh
-	refreshURL := fmt.Sprintf("%s/api/v1/agents/%s/token/refresh",
+	// Confirm the token a second way using a read-only lookup, deliberately
+	// *not* the token-refresh endpoint: POST .../token/refresh mints a
+	// replacement credential and revokes the one just presented (hub side:
+	// pkg/hub/handlers_agents_core.go). Doctor has no way to hand a rotated
+	// token back to the running agent process, so calling refresh here
+	// discarded the replacement and left the agent holding a now-revoked
+	// token — every subsequent heartbeat/status call 401'd until restart
+	// (ptone/scion#1939). GET /api/v1/agents/{id} exercises the same
+	// authenticated path (it's what `Client.GetSelf` / `scion whoami --full`
+	// use) without mutating any credential state.
+	selfURL := fmt.Sprintf("%s/api/v1/agents/%s",
 		strings.TrimSuffix(hubURL, "/"), agentID)
 
-	req, _ = http.NewRequest("POST", refreshURL, nil)
+	req, err = http.NewRequest("GET", selfURL, nil)
+	if err != nil {
+		fmt.Printf("[FAIL] Failed to create request: %v\n", err)
+		*failures++
+		return false
+	}
 	req.Header.Set("X-Scion-Agent-Token", token)
 
 	resp, err = client.Do(req)
 	if err != nil {
-		fmt.Printf("[FAIL] Token refresh check failed: %v\n", err)
+		fmt.Printf("[FAIL] Agent lookup check failed: %v\n", err)
 		*failures++
 		return false
 	}
 	respBody, _ = io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 
-	switch resp.StatusCode {
-	case 200:
-		fmt.Println("[ OK ] Token refresh works")
+	switch {
+	case resp.StatusCode < 400:
+		fmt.Println("[ OK ] Agent record accessible (read-only check; credentials untouched)")
 		return true
-	case 401, 403:
-		fmt.Printf("[FAIL] Token refresh rejected (%d): %s\n", resp.StatusCode, doctorTruncate(string(respBody), 120))
+	case resp.StatusCode == 401 || resp.StatusCode == 403:
+		fmt.Printf("[FAIL] Agent lookup rejected (%d): %s\n", resp.StatusCode, doctorTruncate(string(respBody), 120))
 		*failures++
 		return false
 	default:
-		fmt.Printf("[WARN] Token refresh returned %d: %s\n", resp.StatusCode, doctorTruncate(string(respBody), 120))
+		fmt.Printf("[WARN] Agent lookup returned %d: %s\n", resp.StatusCode, doctorTruncate(string(respBody), 120))
 		return false
 	}
 }
@@ -529,9 +543,30 @@ func checkWorkspaceGit(failures *int) {
 
 	fmt.Println("\n--- Workspace/Git State ---")
 
+	if os.Geteuid() == 0 {
+		// This check passes HOME through so `git status` picks up the
+		// invoking user's own gitconfig (needed for a normal, non-root
+		// doctor run against a shared workspace with a different owning
+		// uid — see safe.directory below). Doing that as root would let a
+		// workload-writable ~/.gitconfig ("safe.directory=*") or
+		// /workspace/.git/config ("core.fsmonitor=<cmd>") run arbitrary
+		// code as root; no shipped path runs doctor as root, so this is a
+		// belt-and-suspenders refusal for a human invoking it that way
+		// directly, not a case this binary needs to actually support.
+		fmt.Println("[INFO] Running as root — skipping git workspace check (would trust a workload-controlled gitconfig)")
+		return
+	}
+
 	gitCtx, gitCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer gitCancel()
-	cmd := exec.CommandContext(gitCtx, "git", "-C", "/workspace", "status", "--porcelain")
+	gitPath, err := rootexec.Resolve("git")
+	if err != nil {
+		fmt.Printf("[FAIL] could not resolve a trusted git binary: %v\n", err)
+		*failures++
+		return
+	}
+	cmd := exec.CommandContext(gitCtx, gitPath, "-C", "/workspace", "status", "--porcelain")
+	cmd.Env = rootexec.Env("HOME=" + os.Getenv("HOME"))
 	if err := cmd.Run(); err != nil {
 		fmt.Printf("[FAIL] Git workspace corrupted: %v\n", err)
 		*failures++
@@ -567,7 +602,13 @@ func checkHarnessProcess(failures *int) {
 	}
 
 	// Fallback: search for known harness process names.
-	cmd := exec.Command("pgrep", "-f", "claude|gemini|codex")
+	pgrepPath, err := rootexec.Resolve("pgrep")
+	if err != nil {
+		fmt.Println("[INFO] Cannot determine harness process status")
+		return
+	}
+	cmd := exec.Command(pgrepPath, "-f", "claude|gemini|codex")
+	cmd.Env = rootexec.Env()
 	output, err := cmd.Output()
 	if err != nil {
 		fmt.Println("[INFO] Cannot determine harness process status")

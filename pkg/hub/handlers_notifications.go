@@ -16,7 +16,6 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -234,7 +233,7 @@ func checkAgentNotifyScope(w http.ResponseWriter, r *http.Request) bool {
 //     the combined shape has nothing to carry.
 func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -381,7 +380,7 @@ func (s *Server) handleNotificationRoutes(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	MethodNotAllowed(w)
+	MethodNotAllowed(w, http.MethodPost)
 }
 
 // createSubscriptionRequest is the request body for POST /api/v1/notifications/subscriptions.
@@ -496,9 +495,6 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 
 		// Apply optional filters
 		projectID := r.URL.Query().Get("projectId")
-		if projectID == "" {
-			projectID = r.URL.Query().Get("groveId")
-		}
 		agentID := r.URL.Query().Get("agentId")
 		scope := r.URL.Query().Get("scope")
 
@@ -710,7 +706,14 @@ func (s *Server) handleSubscriptionRoutes(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusOK, map[string]int{"deleted": deleted})
 
 	default:
-		MethodNotAllowed(w)
+		switch subID {
+		case "":
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
+		case "bulk", "bulk-delete":
+			MethodNotAllowed(w, http.MethodPost, http.MethodPatch, http.MethodDelete)
+		default:
+			MethodNotAllowed(w, http.MethodPatch, http.MethodDelete)
+		}
 	}
 }
 
@@ -720,22 +723,6 @@ type createTemplateRequest struct {
 	Scope             string   `json:"scope"`
 	TriggerActivities []string `json:"triggerActivities"`
 	ProjectID         string   `json:"projectId"`
-}
-
-// UnmarshalJSON implements backward compatibility for the grove-to-project rename.
-func (r *createTemplateRequest) UnmarshalJSON(data []byte) error {
-	type Alias createTemplateRequest
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{Alias: (*Alias)(r)}
-	if err := json.Unmarshal(data, aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // handleSubscriptionTemplateRoutes handles CRUD for subscription templates.
@@ -771,6 +758,11 @@ func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http
 		if req.Scope == "" {
 			req.Scope = store.SubscriptionScopeProject
 		}
+		if req.Scope != store.SubscriptionScopeProject && req.Scope != store.SubscriptionScopeAgent {
+			writeError(w, http.StatusBadRequest, "bad_request",
+				fmt.Sprintf("invalid scope %q: must be \"project\" or \"agent\"", req.Scope), nil)
+			return
+		}
 
 		tmpl := &store.SubscriptionTemplate{
 			ID:                api.NewUUID(),
@@ -797,9 +789,6 @@ func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http
 	// GET /api/v1/notifications/templates — List
 	case templateID == "" && r.Method == http.MethodGet:
 		projectID := r.URL.Query().Get("projectId")
-		if projectID == "" {
-			projectID = r.URL.Query().Get("groveId")
-		}
 		templates, err := s.store.ListSubscriptionTemplates(ctx, projectID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
@@ -827,6 +816,10 @@ func (s *Server) handleSubscriptionTemplateRoutes(w http.ResponseWriter, r *http
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
-		MethodNotAllowed(w)
+		if templateID == "" {
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
+		} else {
+			MethodNotAllowed(w, http.MethodDelete)
+		}
 	}
 }

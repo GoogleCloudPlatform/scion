@@ -42,7 +42,7 @@ func (s *Server) handleProjectInjectedSkills(w http.ResponseWriter, r *http.Requ
 	case http.MethodPut:
 		s.setProjectInjectedSkills(w, r, projectID)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost, http.MethodPut)
 	}
 }
 
@@ -53,7 +53,7 @@ func (s *Server) handleProjectInjectedSkillByID(w http.ResponseWriter, r *http.R
 	case http.MethodDelete:
 		s.removeProjectInjectedSkill(w, r, projectID, entryID)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodDelete)
 	}
 }
 
@@ -408,7 +408,7 @@ func (s *Server) handleUserMeInjectedSkills(w http.ResponseWriter, r *http.Reque
 	case http.MethodPut:
 		s.setUserInjectedSkills(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost, http.MethodPut)
 	}
 }
 
@@ -419,7 +419,7 @@ func (s *Server) handleUserMeInjectedSkillByID(w http.ResponseWriter, r *http.Re
 	case http.MethodDelete:
 		s.removeUserInjectedSkill(w, r, entryID)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodDelete)
 	}
 }
 
@@ -655,7 +655,7 @@ func (s *Server) handleHubInjectedSkills(w http.ResponseWriter, r *http.Request)
 	case http.MethodPut:
 		s.setHubInjectedSkills(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut)
 	}
 }
 

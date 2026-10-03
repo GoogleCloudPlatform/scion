@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -71,7 +72,19 @@ type AgentService interface {
 	// SendStructuredMessage sends a structured message to an agent.
 	// If notify is true, the sender subscribes to status notifications for the target agent.
 	// If wake is true, a suspended agent will be resumed before delivering the message.
+	//
+	// It delegates to SendStructuredMessageWithOptions with no explicit
+	// mentions; callers that need to pass mentions should call that method
+	// directly.
 	SendStructuredMessage(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt bool, notify bool, wake bool) (*MessageResponse, error)
+
+	// SendStructuredMessageWithOptions sends a structured message to an
+	// agent, same as SendStructuredMessage, plus an explicit list of agent
+	// slugs to mention: the server unions Mentions with body-extracted
+	// @mentions, deduplicates, excludes the sender and the primary
+	// recipient, and fans out a TypeMention to each. Callers on these send
+	// paths do not fan mentions out client-side; the server does it.
+	SendStructuredMessageWithOptions(ctx context.Context, agentID string, msg *messages.StructuredMessage, opts SendMessageOptions) (*MessageResponse, error)
 
 	// BroadcastMessage broadcasts a structured message to all running agents in the project.
 	// Uses the Hub's broadcast endpoint which routes through the message broker (if available)
@@ -90,9 +103,11 @@ type AgentService interface {
 	// GetLogs retrieves agent logs.
 	GetLogs(ctx context.Context, agentID string, opts *GetLogsOptions) (string, error)
 
-	// SendOutboundMessage sends a message from an agent to a human inbox.
-	// Used when agents need to communicate with users (e.g., asking questions).
-	SendOutboundMessage(ctx context.Context, agentID string, msg *OutboundMessageRequest) error
+	// SendOutboundMessage sends a message from an agent via the outbound
+	// endpoint and returns the server-assigned message identity and delivery
+	// status. The SDK adds no retry or fallback routing; send budget, policy,
+	// and capabilities are server-enforced.
+	SendOutboundMessage(ctx context.Context, agentID string, msg *OutboundMessageRequest) (*OutboundMessageResult, error)
 
 	// GetCloudLogs retrieves structured log entries from Cloud Logging.
 	GetCloudLogs(ctx context.Context, agentID string, opts *GetCloudLogsOptions) (*CloudLogsResponse, error)
@@ -101,6 +116,33 @@ type AgentService interface {
 	// The handler is called for each log entry received. Blocks until the
 	// context is cancelled or the server closes the connection.
 	StreamCloudLogs(ctx context.Context, agentID string, opts *GetCloudLogsOptions, handler func(CloudLogEntry)) error
+
+	// SetMessageMode changes the messaging mode for an agent.
+	SetMessageMode(ctx context.Context, agentID string, req *SetMessageModeRequest, opts *SetMessageModeOptions) (*SetMessageModeResponse, error)
+
+	// Reincarnate requests a `scion reincarnate` migration for an agent:
+	// re-resolve its configuration against the current template/harness-config
+	// catalog and start a new generation with the given handoff as its first
+	// task. With req.DryRun, returns the resolved plan and changes nothing.
+	Reincarnate(ctx context.Context, agentID string, req *ReincarnateAgentRequest) (*ReincarnateAgentResponse, error)
+
+	// SendKeys delivers literal terminal input to an agent's tmux session via
+	// the dedicated agent-keys operation (.design/agent-keys-contract.md),
+	// POSTing to {id}/keys — never to /message, and never as a Raw
+	// StructuredMessage. It never creates a conversation message, never uses
+	// message-mode authorization, and is never retried: the request is sent
+	// exactly once regardless of how the client was constructed (including
+	// WithRetry), and an HTTP redirect is never followed and re-sent. A
+	// network-level failure (no response received at all) is returned
+	// unchanged — the caller cannot know whether the broker executed the
+	// keys, and must not infer success or failure from this call having
+	// failed to connect. A response the Hub did send is decoded and
+	// returned as *apiclient.APIError on any non-2xx status, preserving the
+	// outcome code (Code) and, where the contract says one exists for that
+	// outcome, the operation ID (Details["operation_id"]) — see contract
+	// §2.4a/§2.5. SendKeys performs no client-side retry, fallback, or
+	// downgrade to messaging of any kind.
+	SendKeys(ctx context.Context, agentID string, keys string) (*agentkeys.Response, error)
 }
 
 // agentService is the implementation of AgentService.
@@ -130,7 +172,31 @@ type ListAgentsOptions struct {
 	RuntimeBrokerID string            // Filter by runtime broker
 	Labels          map[string]string // Label selector
 	IncludeDeleted  bool              // Include soft-deleted agents
-	Page            apiclient.PageOptions
+
+	// OwnerID, when set, restricts results to agents owned by this principal
+	// ID. Always combined with every other option using AND (ptone/scion#2146).
+	OwnerID string
+
+	// AncestorID, when set, restricts results to agents whose Ancestry chain
+	// contains this principal ID (transitive descendants of AncestorID).
+	AncestorID string
+
+	// HarnessConfig, when set, restricts results to agents whose resolved
+	// harness-config name equals this value.
+	HarnessConfig string
+
+	// IDs, when non-empty, restricts results to agents whose ID is in this
+	// set. Used for relationship queries (e.g. CLI --ancestors) that resolve
+	// a specific set of candidate IDs client-side and ask the Hub to narrow
+	// them to the caller's authorized, currently-existing agents.
+	IDs []string
+
+	// LineageRootID, when set, restricts results to the agent whose ID
+	// equals this value OR whose Ancestry contains it — the root agent plus
+	// all its descendants. Used by CLI --lineage.
+	LineageRootID string
+
+	Page apiclient.PageOptions
 }
 
 // ListAgentsResponse is the response from listing agents.
@@ -190,6 +256,11 @@ type CreateAgentRequest struct {
 	// AgentRole specifies the requested authorization role.
 	AgentRole string `json:"agentRole,omitempty"`
 
+	// MessageMode specifies the initial message mode for the agent.
+	// Valid values: "none", "lineage", "branch", "project", "hub".
+	// When omitted, resolved from template, parent inheritance, or "project" default.
+	MessageMode string `json:"messageMode,omitempty"`
+
 	// GCPIdentity specifies the GCP identity assignment for the agent.
 	// Controls metadata server behavior and optional service account binding.
 	// When nil, the project default (if any) is applied by the Hub.
@@ -208,36 +279,6 @@ type GCPIdentityConfig struct {
 	// ServiceAccountID is the Scion resource ID of the service account to assign.
 	// Required when MetadataMode is "assign", must be empty otherwise.
 	ServiceAccountID string `json:"service_account_id,omitempty"`
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (r CreateAgentRequest) MarshalJSON() ([]byte, error) {
-	type Alias CreateAgentRequest
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(r),
-		GroveID: r.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (r *CreateAgentRequest) UnmarshalJSON(data []byte) error {
-	type Alias CreateAgentRequest
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // CreateAgentResponse is the response from creating an agent.
@@ -319,7 +360,6 @@ func (s *agentService) List(ctx context.Context, opts *ListAgentsOptions) (*List
 	if opts != nil {
 		if opts.ProjectID != "" {
 			query.Set("projectId", opts.ProjectID)
-			query.Set("groveId", opts.ProjectID)
 		}
 		if opts.Phase != "" {
 			query.Set("phase", opts.Phase)
@@ -332,6 +372,21 @@ func (s *agentService) List(ctx context.Context, opts *ListAgentsOptions) (*List
 		}
 		for k, v := range opts.Labels {
 			query.Add("label", fmt.Sprintf("%s=%s", k, v))
+		}
+		if opts.OwnerID != "" {
+			query.Set("ownerId", opts.OwnerID)
+		}
+		if opts.AncestorID != "" {
+			query.Set("ancestorId", opts.AncestorID)
+		}
+		if opts.HarnessConfig != "" {
+			query.Set("harnessConfig", opts.HarnessConfig)
+		}
+		for _, id := range opts.IDs {
+			query.Add("id", id)
+		}
+		if opts.LineageRootID != "" {
+			query.Set("lineageRootId", opts.LineageRootID)
 		}
 		opts.Page.ToQuery(query)
 	}
@@ -512,22 +567,57 @@ type MessageResponse struct {
 	Status     string `json:"status"`
 	Agent      string `json:"agent"`
 	AgentPhase string `json:"agent_phase"`
+	// Deferred is set when Status is "deferred": the recipient is
+	// mid-`scion reincarnate` (design agent-reincarnate §3.7). The message
+	// was saved to conversation history but not dispatched.
+	Deferred string `json:"deferred,omitempty"`
+	// MentionResults reports the outcome of server-side @mention fan-out,
+	// one entry per resolved mention name. Empty when the message had no
+	// mentions, or on hubs that predate this field.
+	MentionResults []messages.MentionResult `json:"mention_results,omitempty"`
+}
+
+// SendMessageOptions holds the optional parameters for
+// SendStructuredMessageWithOptions.
+type SendMessageOptions struct {
+	// Interrupt the harness before sending.
+	Interrupt bool
+	// Notify subscribes the sender to status notifications for the target agent.
+	Notify bool
+	// Wake resumes a suspended target agent before delivering the message.
+	Wake bool
+	// Mentions lists agent slugs to receive mention notifications, in
+	// addition to any @mentions the server extracts from the body. The
+	// primary recipient and the sender are excluded automatically.
+	Mentions []string
 }
 
 // SendStructuredMessage sends a structured message to an agent.
 // If notify is true, the sender subscribes to status notifications for the target agent.
 // If wake is true, a suspended agent will be resumed before delivering the message.
 func (s *agentService) SendStructuredMessage(ctx context.Context, agentID string, msg *messages.StructuredMessage, interrupt bool, notify bool, wake bool) (*MessageResponse, error) {
+	return s.SendStructuredMessageWithOptions(ctx, agentID, msg, SendMessageOptions{
+		Interrupt: interrupt,
+		Notify:    notify,
+		Wake:      wake,
+	})
+}
+
+// SendStructuredMessageWithOptions sends a structured message to an agent
+// with an explicit mentions list. See AgentService.SendStructuredMessageWithOptions.
+func (s *agentService) SendStructuredMessageWithOptions(ctx context.Context, agentID string, msg *messages.StructuredMessage, opts SendMessageOptions) (*MessageResponse, error) {
 	body := struct {
 		StructuredMessage *messages.StructuredMessage `json:"structured_message"`
 		Interrupt         bool                        `json:"interrupt,omitempty"`
 		Notify            bool                        `json:"notify,omitempty"`
 		Wake              bool                        `json:"wake,omitempty"`
+		Mentions          []string                    `json:"mentions,omitempty"`
 	}{
 		StructuredMessage: msg,
-		Interrupt:         interrupt,
-		Notify:            notify,
-		Wake:              wake,
+		Interrupt:         opts.Interrupt,
+		Notify:            opts.Notify,
+		Wake:              opts.Wake,
+		Mentions:          opts.Mentions,
 	}
 	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/message", body, nil)
 	if err != nil {
@@ -536,7 +626,63 @@ func (s *agentService) SendStructuredMessage(ctx context.Context, agentID string
 	return apiclient.DecodeResponse[MessageResponse](resp)
 }
 
-// OutboundMessageRequest is the request body for sending an agent-to-human outbound message.
+// SendKeys implements AgentService.SendKeys. See that method's doc comment
+// for the no-replay and error-fidelity guarantees; agentPath already honors
+// project scoping, so the same call reaches either public route shape
+// (.design/agent-keys-contract.md §2.1) depending on whether this service was
+// obtained from Client.Agents() or Client.ProjectAgents(projectID).
+func (s *agentService) SendKeys(ctx context.Context, agentID string, keys string) (*agentkeys.Response, error) {
+	resp, err := s.c.postNoRetry(ctx, s.agentPath(agentID)+"/keys", agentkeys.Request{Keys: keys}, nil)
+	if err != nil {
+		// No response was received at all (connection refused/reset, DNS
+		// failure, context deadline, ...): honest uncertainty, not a 503/502
+		// to reclassify. The caller must not infer either outcome from this.
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode >= 400 {
+		return nil, apiclient.ParseErrorResponse(resp)
+	}
+
+	// Contract §2.4: the ONLY success shape is HTTP 200 with
+	// Response.Status == agentkeys.StatusDispatched. Nothing else — a 204,
+	// a 2xx the server never defines, or a 3xx apiclient.DecodeResponse's
+	// own <400 check would otherwise treat as decodable — may be reported
+	// as success: each is either a response this contract never promises
+	// (so treating it as success would be a guess, not a decision) or a
+	// response DoNoRetry's "do not follow the redirect" contract leaves
+	// unresolved. Either way the caller must receive "unknown", never
+	// "dispatched" and never a nil *Response with a nil error.
+	if resp.StatusCode != http.StatusOK {
+		return nil, &apiclient.APIError{
+			StatusCode: resp.StatusCode,
+			Code:       string(agentkeys.OutcomeKeysOutcomeUnknown),
+			Message:    fmt.Sprintf("unexpected keys response status %d (only 200 means dispatched)", resp.StatusCode),
+		}
+	}
+
+	var result agentkeys.Response
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, &apiclient.APIError{
+			StatusCode: resp.StatusCode,
+			Code:       string(agentkeys.OutcomeKeysOutcomeUnknown),
+			Message:    "could not decode keys response body",
+		}
+	}
+	if result.Status != agentkeys.StatusDispatched {
+		return nil, &apiclient.APIError{
+			StatusCode: resp.StatusCode,
+			Code:       string(agentkeys.OutcomeKeysOutcomeUnknown),
+			Message:    fmt.Sprintf("unexpected keys response status %q (not %q)", result.Status, agentkeys.StatusDispatched),
+		}
+	}
+	return &result, nil
+}
+
+// OutboundMessageRequest is the request body for sending an outbound message
+// from an agent. The recipient may be a human user or another agent; the hub
+// determines the delivery path from the addressing fields.
 type OutboundMessageRequest struct {
 	Recipient       string            `json:"recipient,omitempty"`
 	RecipientID     string            `json:"recipient_id,omitempty"`
@@ -549,15 +695,45 @@ type OutboundMessageRequest struct {
 	Metadata        map[string]string `json:"metadata,omitempty"`
 	ConversationID  string            `json:"conversation_id,omitempty"`
 	ConversationRef string            `json:"conversation_ref,omitempty"`
+	// Wake requests that a suspended target agent be resumed before
+	// delivering the message. Ignored for non-agent recipients.
+	Wake bool `json:"wake,omitempty"`
 }
 
-// SendOutboundMessage sends a message from an agent to a human inbox.
-func (s *agentService) SendOutboundMessage(ctx context.Context, agentID string, msg *OutboundMessageRequest) error {
+// OutboundMessageResult is the parsed response from a successful outbound
+// message send. It carries the server-assigned message identity and delivery
+// status so callers can correlate the message or detect ambiguous delivery.
+//
+// All fields are populated by the server on every 2xx response; omitempty is
+// intentionally absent because the contract guarantees non-empty values on
+// success. A nil result (with a non-nil error) indicates a non-2xx response.
+type OutboundMessageResult struct {
+	// MessageID is the server-assigned UUID for the persisted message.
+	MessageID string `json:"message_id"`
+	// Status is the delivery status reported by the hub (e.g. "sent").
+	Status string `json:"status"`
+	// Recipient is the wire-format recipient (e.g. "user:alice" or "agent:builder").
+	Recipient string `json:"recipient"`
+	// RecipientID is the recipient's UUID.
+	RecipientID string `json:"recipient_id"`
+	// Deferred is set only when Status == "deferred".
+	Deferred string `json:"deferred,omitempty"`
+	// MentionResults reports the outcome of server-side @mention fan-out,
+	// one entry per resolved mention name. Empty when the message had no
+	// mentions, or on hubs that predate this field.
+	MentionResults []messages.MentionResult `json:"mention_results,omitempty"`
+}
+
+// SendOutboundMessage sends a message from an agent via the outbound endpoint.
+// Returns the server-assigned message identity and delivery status, or a
+// structured error on failure. The SDK adds no retry or fallback routing;
+// send budget, policy, and capabilities are server-enforced.
+func (s *agentService) SendOutboundMessage(ctx context.Context, agentID string, msg *OutboundMessageRequest) (*OutboundMessageResult, error) {
 	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/outbound-message", msg, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return apiclient.CheckResponse(resp)
+	return apiclient.DecodeResponse[OutboundMessageResult](resp)
 }
 
 // BroadcastResponse is the parsed response from a broadcast message delivery.
@@ -742,4 +918,101 @@ func (s *agentService) StreamCloudLogs(ctx context.Context, agentID string, opts
 	}
 
 	return scanner.Err()
+}
+
+// SetMessageModeRequest is the request body for changing an agent's message mode.
+type SetMessageModeRequest struct {
+	Mode    string `json:"mode"`
+	Cascade bool   `json:"cascade,omitempty"`
+}
+
+// SetMessageModeResponse is the response from changing an agent's message mode.
+type SetMessageModeResponse struct {
+	AgentID  string          `json:"agent_id"`
+	Mode     string          `json:"mode"`
+	Previous string          `json:"previous_mode"`
+	Cascade  json.RawMessage `json:"cascade,omitempty"`
+}
+
+// SetMessageModeOptions configures the set-message-mode call.
+type SetMessageModeOptions struct {
+	DryRun bool
+}
+
+// SetMessageMode changes the messaging mode for an agent.
+func (s *agentService) SetMessageMode(ctx context.Context, agentID string, req *SetMessageModeRequest, opts *SetMessageModeOptions) (*SetMessageModeResponse, error) {
+	path := s.agentPath(agentID) + "/set_message_mode"
+	if opts != nil && opts.DryRun {
+		path += "?dryRun=true"
+	}
+	resp, err := s.c.post(ctx, path, req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeResponse[SetMessageModeResponse](resp)
+}
+
+// Reincarnate requests a `scion reincarnate` migration for an agent (design
+// /scion-volumes/scratchpad/projects/agent-migrate/design.md §3.2).
+func (s *agentService) Reincarnate(ctx context.Context, agentID string, req *ReincarnateAgentRequest) (*ReincarnateAgentResponse, error) {
+	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/reincarnate", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeResponse[ReincarnateAgentResponse](resp)
+}
+
+// ReincarnateAgentRequest is the request body for Reincarnate. Phase 1
+// supports only Handoff and DryRun; every override field is accepted on the
+// wire (so a hub that has adopted overrides can still parse an old client's
+// request), but a Phase-1 hub rejects any of them with a 400.
+type ReincarnateAgentRequest struct {
+	Handoff string `json:"handoff,omitempty"`
+	DryRun  bool   `json:"dryRun,omitempty"`
+
+	// Phase 3 overrides — not yet supported by a Phase 1 hub.
+	Image          string            `json:"image,omitempty"`
+	HarnessConfig  string            `json:"harnessConfig,omitempty"`
+	HarnessAuth    string            `json:"harnessAuth,omitempty"`
+	Model          string            `json:"model,omitempty"`
+	Env            map[string]string `json:"env,omitempty"`
+	TemplateHash   string            `json:"templateHash,omitempty"`
+	ResetOverrides bool              `json:"resetOverrides,omitempty"`
+	Rollback       bool              `json:"rollback,omitempty"`
+}
+
+// ReincarnateAgentResponse is the response body for Reincarnate: 202 for a
+// persisted (pending) reincarnation, or 200 for a dry run.
+type ReincarnateAgentResponse struct {
+	AgentID    string            `json:"agentId"`
+	Generation int               `json:"generation"`
+	State      string            `json:"state"`
+	Plan       ReincarnationPlan `json:"plan"`
+}
+
+// FieldChange describes an old→new change to a single scalar field on the
+// reincarnation plan.
+type FieldChange struct {
+	Old string `json:"old,omitempty"`
+	New string `json:"new,omitempty"`
+}
+
+// KeyDiff describes an old→new change to a set of map keys (e.g. env var
+// names), by name only — never by value.
+type KeyDiff struct {
+	Added   []string `json:"added,omitempty"`
+	Removed []string `json:"removed,omitempty"`
+	Changed []string `json:"changed,omitempty"`
+}
+
+// ReincarnationPlan is the old→new diff returned by both a dry run and a real
+// reincarnate request.
+type ReincarnationPlan struct {
+	Template   FieldChange `json:"template"`
+	Image      FieldChange `json:"image"`
+	HarnessCfg FieldChange `json:"harnessConfig"`
+	Model      FieldChange `json:"model"`
+	EnvKeys    KeyDiff     `json:"envKeys"`
+	Branch     string      `json:"branch"`
+	Warnings   []string    `json:"warnings,omitempty"`
 }

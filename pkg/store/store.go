@@ -51,6 +51,21 @@ var (
 	// the existing membership binding before assigning a different built-in
 	// membership role (change-role = delete + create).
 	ErrBuiltInMembershipConflict = errors.New("principal already has a built-in membership role in this project")
+
+	// ErrIdentityKeyConflict is returned when writing an agent's identity
+	// keys (its slug and/or slugify(displayName)) would collide with a key
+	// already reserved by a different agent in the same project, including a
+	// soft-deleted one. Kept distinct from ErrAlreadyExists so callers can
+	// map it to a specific message instead of a generic conflict.
+	ErrIdentityKeyConflict = errors.New("identity key already reserved by another agent in this project")
+
+	// ErrInvalidPhase is returned by BeginLaunch when the agent's current
+	// phase is not eligible for the requested launch kind (design
+	// t1-async-create-v11.md §3.3): in P1a, a create launch requires phase
+	// in {created, provisioning}. Callers must never fall back to a
+	// synchronous send on this error (design §3.4, NB-1); it means a
+	// concurrent write (e.g. a stop) landed first.
+	ErrInvalidPhase = errors.New("agent phase is not eligible for this launch")
 )
 
 // SystemReconcileCreatedBy is the CreatedBy sentinel that identifies the
@@ -124,6 +139,9 @@ type Store interface {
 	// User operations
 	UserStore
 
+	// UserTerminalWorkspace operations
+	UserTerminalWorkspaceStore
+
 	// ProjectProvider operations
 	ProjectProviderStore
 
@@ -184,6 +202,9 @@ type Store interface {
 	// HubSetting operations (Two-Tier Settings Architecture)
 	HubSettingStore
 
+	// BrokerSetting operations (ptone/scion#2061 P2, ptone/scion#2177)
+	BrokerSettingStore
+
 	// SkillInjection operations (Injected-Skills List)
 	SkillInjectionStore
 
@@ -205,6 +226,9 @@ type Store interface {
 	// Agent Credential operations (Permissions Foundation Phase 1H)
 	AgentCredentialStore
 
+	// Agent Identity Key operations (per-project display-name / slug uniqueness)
+	AgentIdentityKeyStore
+
 	// Decision Audit operations (Authorization Decision Audit Phase 1I)
 	DecisionAuditStore
 
@@ -216,6 +240,12 @@ type Store interface {
 
 	// Access Constraint operations (AC1 — Operator Access Constraint Backend)
 	AccessConstraintStore
+
+	// External Identity operations (GE Google Credential Exchange)
+	ExternalIdentityStore
+
+	// Agent Reincarnation operations (agent-reincarnate, ptone/scion#1821)
+	AgentReincarnationStore
 }
 
 // AgentStore defines agent-related persistence operations.
@@ -247,8 +277,56 @@ type AgentStore interface {
 	// Returns ErrNotFound if the agent doesn't exist.
 	DeleteAgent(ctx context.Context, id string) error
 
-	// ListAgents returns agents matching the filter criteria.
+	// ListAgents returns agents matching the filter criteria. With
+	// opts.SortBy empty this is the legacy path (ORDER BY created DESC, id
+	// DESC, opts.Cursor/CursorBinding decoded via the legacy cursor codec).
+	// With opts.SortBy set to "created" or "updated", this is the real-SQL
+	// sorted-mode total order: a keyset WHERE predicate bound to
+	// opts.SortCursor (page 0 when nil), a limit+1 probe for NextCursor
+	// exactly like the legacy path, and NextCursor minted as a v2 cursor via
+	// EncodeAgentCursor using opts.CursorBinding. An unrecognized
+	// opts.SortBy or opts.SortDir, or a non-empty legacy opts.Cursor, fails
+	// closed with ErrInvalidInput. Used directly by the global endpoint's
+	// sorted mode, which has no per-row read filter and so needs no narrow
+	// AgentMember projection — unlike the project endpoint's
+	// candidate-bounded ListAgentMembers above.
 	ListAgents(ctx context.Context, filter AgentFilter, opts ListOptions) (*ListResult[Agent], error)
+
+	// CountAgents returns the number of agents matching filter, applying the
+	// exact predicate ListAgents does for its total count, but without
+	// loading any rows. Used by the project sorted-mode candidate ceiling
+	// as a cheap pre-check before any member row is read.
+	CountAgents(ctx context.Context, filter AgentFilter) (int, error)
+
+	// ListAgentMembers returns up to max agents matching filter, in the
+	// sorted-mode total order for (sort, dir): sort="updated" orders by
+	// COALESCE(last_activity_event, updated) dir, then created DESC, id
+	// DESC; sort="created" orders by created dir, then id DESC. Each row
+	// carries exactly the fields agentResource (pkg/hub/capabilities.go)
+	// reads, plus Phase/Created/Updated/LastActivityEvent for positioning
+	// and stats — see AgentMember.
+	//
+	// max bounds the read so a candidate pool that grew past the caller's
+	// ceiling check is still detected by the member read: when the true
+	// candidate count exceeds max, exactly max rows are returned (the exact
+	// order among untaken rows is unspecified in that case, since the
+	// caller's only use of an over-max result is to refuse the request).
+	ListAgentMembers(ctx context.Context, filter AgentFilter, sort, dir string, max int) ([]AgentMember, error)
+
+	// CountAgentsByPhaseIDs returns the id and phase of every agent matching
+	// filter, with no per-row authorization decision: it backs the global
+	// endpoint's sorted-mode "stats" population. Callers pass filter with
+	// Phase cleared, matching CountAgents/ListAgentMembers' "stats"
+	// convention.
+	CountAgentsByPhaseIDs(ctx context.Context, filter AgentFilter) ([]IDPhase, error)
+
+	// ListAgentsWithStaleNonTerminalReincarnationState returns every agent
+	// whose reincarnation_state is non-terminal and whose row has not been
+	// updated since before olderThan. Backstop for the replica-safe
+	// reincarnation sweep (design §3.7): catches an agent left claimed with
+	// no matching non-terminal AgentReincarnation record for the main sweep
+	// to find (e.g. the record was deleted).
+	ListAgentsWithStaleNonTerminalReincarnationState(ctx context.Context, olderThan time.Time) ([]*Agent, error)
 
 	// UpdateAgentStatus updates only status-related fields.
 	// This is a partial update that doesn't require version checking.
@@ -274,6 +352,47 @@ type AgentStore interface {
 	// Returns the updated agent records for event publishing.
 	MarkStalledAgents(ctx context.Context, activityThreshold, heartbeatRecency time.Time) ([]Agent, error)
 
+	// MarkAgentContainerMissing moves a running agent whose container its
+	// runtime broker no longer reports to phase=error with exit reason
+	// container_missing. An exit reason that is more specific about why the
+	// container went away (preempted, evicted) is kept, with its message and
+	// exit code. The write is conditional (every check is in the
+	// UPDATE's WHERE clause): the agent must still exist and not be
+	// soft-deleted, still be assigned to brokerID, still be in phase running,
+	// have no reincarnation in flight, and not have been seen (last_seen) at
+	// or after cutoff. When any check fails it changes nothing and returns
+	// (nil, nil), so a concurrent start,
+	// restart, stop or heartbeat always wins. On success it returns the
+	// updated record for event publishing.
+	MarkAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, message string) (*Agent, error)
+
+	// ClearAgentRuntimeTarget removes the runtime target and any runtime
+	// target candidate recorded in an agent's applied config
+	// (AgentAppliedConfig.RuntimeTarget, RuntimeTargetCandidate) and changes
+	// no other applied-config key. When it removes something it bumps
+	// state_version by exactly one, so a writer holding a read from before
+	// the clear gets ErrVersionConflict from UpdateAgent instead of writing
+	// the old target back; it returns cleared=true and the new state_version.
+	// The write is conditional on the stored applied config and state_version
+	// being unchanged since they were read (and the row is locked for the
+	// read where supported); when a concurrent write wins, the row is re-read
+	// and the clear retried a bounded number of times, after which an error
+	// is returned. It is a no-op (cleared=false) when neither key is recorded
+	// or the agent does not exist.
+	ClearAgentRuntimeTarget(ctx context.Context, id string) (cleared bool, newVersion int64, err error)
+
+	// SetAgentRuntimeTarget sets the runtime target and runtime target
+	// candidate in an agent's applied config (AgentAppliedConfig.RuntimeTarget,
+	// RuntimeTargetCandidate; an empty value removes the key) and changes
+	// nothing else: no other applied-config key, no other column, and not
+	// state_version. The write is conditional on state_version still being
+	// expectedVersion (the version the caller read), so a report based on a
+	// read from before ClearAgentRuntimeTarget, which bumps state_version,
+	// is rejected. It returns written=false, with no error, when the version
+	// no longer matches, the applied config changed concurrently, or the
+	// agent does not exist.
+	SetAgentRuntimeTarget(ctx context.Context, id string, expectedVersion int64, target, candidate string) (written bool, err error)
+
 	// FindOrphanedAgents returns agents whose RuntimeBrokerID references a broker
 	// that is offline or does not exist, and who are not in terminal states
 	// (stopped, error). Agents assigned to the given currentBrokerID are excluded.
@@ -296,6 +415,57 @@ type AgentStore interface {
 	// for the health-summary endpoint without fetching full agent records.
 	// This avoids the O(N) deserialization cost of ListAgents on large installations.
 	AggregateAgentHealth(ctx context.Context) (*AgentHealthAggregate, error)
+
+	// --- T1 async agent create (design t1-async-create-v11.md §3.3) ---
+	// These are the only writers of the launch_* columns. Each runs as a
+	// single row-locked transaction. See launch.go for the supporting types.
+	//
+	// Each of these methods opens its own transaction and must not be called
+	// from inside WithTx: the entadapter implementation cannot nest a second
+	// transaction inside the ambient one WithTx provides, and returns an
+	// error (or, for RunLaunchReaperTick, ReaperTickUnavailable) instead.
+
+	// BeginLaunch starts a new launch for agentID. The caller must start its
+	// monotonic remaining-budget timer BEFORE calling this (§3.4). Any
+	// previous active launch on the row becomes implicitly superseded (its ID
+	// no longer matches launch_id). kind must be LaunchKindCreate in P1a;
+	// any other value returns an error wrapping ErrInvalidInput (start and
+	// restart are P6, design §3.13). Returns ErrInvalidPhase when the
+	// agent's current phase is not eligible for kind (P1a: phase must be
+	// created or provisioning). Returns ErrNotFound if the agent doesn't
+	// exist.
+	BeginLaunch(ctx context.Context, agentID, kind string, timeout time.Duration) (launchID string, err error)
+
+	// MarkLaunchAccepted records that a broker (owner) has claimed launchID:
+	// if owner is currently empty on the row, sets it, and if phase is
+	// "created", moves it to "provisioning". Returns ErrNotFound if the
+	// agent doesn't exist. Otherwise never returns an error for a stale
+	// caller: if the row's launch_id no longer matches launchID (superseded)
+	// or the launch has already ended, this is a no-op that returns the
+	// current row unchanged, with a nil error — callers detect that case by
+	// comparing the returned Agent's LaunchID/LaunchState against the
+	// launchID they hold. Does not bump state_version.
+	MarkLaunchAccepted(ctx context.Context, agentID, launchID, owner string) (Agent, error)
+
+	// EndLaunch ends launchID with the given reason if it is still the
+	// agent's current, active launch. No-op if launch_id no longer matches or
+	// the launch has already ended. Does not bump state_version. Used by the
+	// dispatcher's not_launched cases (design §3.4).
+	EndLaunch(ctx context.Context, agentID, launchID, reason string) error
+
+	// ApplyLaunchReport evaluates a broker's launch report against the
+	// current row and applies the resulting state transition, per the
+	// ordered rule list in design §3.7. Bumps state_version only on a
+	// terminal apply (succeeded/failed) or a reaper-refining apply.
+	ApplyLaunchReport(ctx context.Context, agentID, brokerID string, r LaunchReport) (LaunchReportAnswer, Agent, error)
+
+	// RunLaunchReaperTick runs one tick of the launch deadline/staleness
+	// reaper (design §3.7): a single hand-built transaction holding the
+	// transaction-scoped advisory lock store.LockAgentLaunchDeadline, which
+	// arms/disarms cluster-wide staleness detection and reaps overdue
+	// launches. Synchronous, bounded by a 10s internal timeout; safe to call
+	// from a 15s ticker on every replica.
+	RunLaunchReaperTick(ctx context.Context, p ReaperParams) (ReaperTickResult, error)
 }
 
 // AgentFilter defines criteria for filtering agents.
@@ -341,6 +511,132 @@ type AgentFilter struct {
 	// scoped constraints that block the list permission for specific projects.
 	// An empty or nil slice means no exclusions.
 	ExcludedProjectIDs []string
+
+	// RequestedOwnerID, when non-empty, restricts results to agents whose
+	// owner_id matches this value. Unlike OwnerID (which participates in the
+	// OR-based Mine/Shared classification via MemberOrOwnerProjectIDs), this
+	// field is always combined with every other filter using AND. It exists
+	// so an explicit caller-supplied owner filter (e.g. CLI `--owner`, hub
+	// query param `ownerId`) can never be folded into the classification OR
+	// clause and widen results beyond "agents owned by exactly this
+	// principal" (ptone/scion#2146).
+	RequestedOwnerID string
+
+	// HarnessConfig, when non-empty, restricts results to agents whose
+	// resolved AppliedConfig.HarnessConfig equals this value. The Ent
+	// adapter backs this with a dedicated, plain-equality column
+	// (harness_config, pkg/ent/schema/agent.go) kept in sync with
+	// AppliedConfig.HarnessConfig on every write, rather than parsing or
+	// pattern-matching AppliedConfig's JSON at query time (ptone/scion#2146).
+	HarnessConfig string
+
+	// IDs, when non-nil, restricts results to agents whose ID is in this set.
+	// Always combined with every other filter (including AuthorizedProjectIDs)
+	// using AND — it narrows, it never substitutes for authorization. A nil
+	// value means no restriction. An empty non-nil slice means no agents
+	// match (fail closed, mirroring AuthorizedProjectIDs).
+	//
+	// This backs relationship queries such as CLI `--ancestors`, where the
+	// caller supplies a set of IDs found in another agent's Ancestry chain.
+	// Some of those IDs may name users rather than agents (Ancestry mixes
+	// both); those simply match no row here, which is how "skip entries that
+	// are users" falls out without extra bookkeeping. It is deliberately NOT
+	// implemented by fetching each ID individually — doing so would bypass
+	// whatever authorization predicate (AuthorizedProjectIDs, etc.) the
+	// caller composed this filter with, and future relationship-based
+	// visibility (ptone/scion#2128) needs a single choke point to widen.
+	IDs []string
+
+	// LineageRootID, when non-empty, restricts results to the agent whose ID
+	// equals this value OR whose Ancestry chain contains it — i.e. the root
+	// principal plus every agent descended from it, at any depth. It is an
+	// internal OR of two sub-conditions, but that OR is itself ANDed with
+	// every other filter (including AuthorizedProjectIDs), the same
+	// composition pattern already used for MemberOrOwnerProjectIDs above:
+	// the OR only decides which rows count as "in the root's lineage", it
+	// never widens past the authorization predicate. A root the caller is
+	// not authorized to see simply yields no matches, not an error or a
+	// disclosure.
+	//
+	// Backs CLI `--lineage`, which is a CREATION-TREE query, not a
+	// messaging-permission query — it says nothing about who the reference
+	// agent may message under any message mode (scion set-message-mode),
+	// which can be a different, smaller set. The root ID this field is set
+	// to is computed client-side (see resolveLineageRootID in cmd/list.go):
+	// the reference's direct parent, or the reference itself when it has no
+	// parent at all (an empty Ancestry), when its parent is a user rather
+	// than an agent, or when its only recorded parent is an agent the
+	// caller cannot list. The latter two both root at self because the
+	// caller cannot tell them apart; a length-1 parent the caller *can* list
+	// roots at that parent.
+	//
+	// "Parent is a user" cannot be decided from len(Ancestry) alone: a
+	// child can inherit a length-1, agent-only Ancestry from a creator
+	// whose own Ancestry was itself empty (see resolveLineageRootID's doc
+	// for exactly when this happens). Determining "is the parent a user"
+	// therefore requires resolving a length-1 Ancestry entry through the
+	// caller's authorized list (never a bare per-ID fetch) rather than a
+	// purely local length check; an Ancestry of two or more entries never
+	// needs this, since its last entry is always an agent ID by
+	// construction. The root ID handed to this field may therefore be a
+	// USER principal ID, not only an agent ID — the OR predicate treats
+	// either the same way, since IDEQ simply never matches a user ID and
+	// ancestryContains still finds that user's descendants.
+	LineageRootID string
+}
+
+// AgentMember is the narrow projection ListAgentMembers reads for
+// sorted-mode candidate evaluation. It carries exactly the fields pkg/hub's
+// agentResource(*Agent) reads — ID, OwnerID, ProjectID, Labels, Ancestry —
+// plus Phase, Created, Updated and LastActivityEvent for positioning
+// (pkg/store/agentsort) and stats.
+//
+// The projection is defined as "exactly the fields agentResource reads", not
+// as an independently maintained field list: ToAgent is the single
+// construction path a caller must use to build a Resource from a member, so
+// that a future agentResource input agentResource gains but AgentMember
+// lacks is caught by the equality gate described on ToAgent, rather than
+// silently widening what the hub's race re-check can miss (the hub-side
+// non-waivable member/full equality test is the gate that exercises this).
+type AgentMember struct {
+	ID        string
+	OwnerID   string
+	ProjectID string
+	Labels    map[string]string
+	Ancestry  []string
+
+	Phase             string
+	Created           time.Time
+	Updated           time.Time
+	LastActivityEvent time.Time
+}
+
+// ToAgent copies m's fields into a new Agent, leaving every other field
+// zero. It is the one construction path for building an authorization
+// Resource from a member row: callers must derive it as
+// agentResource(m.ToAgent()), never by hand-listing AgentMember's fields, so
+// that comparing that Resource against agentResource(fullRow) in the hub's
+// race re-check actually proves the two rows agree on every input the kernel
+// reads, not just the ones some earlier author remembered to copy here.
+func (m AgentMember) ToAgent() *Agent {
+	return &Agent{
+		ID:                m.ID,
+		OwnerID:           m.OwnerID,
+		ProjectID:         m.ProjectID,
+		Labels:            m.Labels,
+		Ancestry:          m.Ancestry,
+		Phase:             m.Phase,
+		Created:           m.Created,
+		Updated:           m.Updated,
+		LastActivityEvent: m.LastActivityEvent,
+	}
+}
+
+// IDPhase is one row of CountAgentsByPhaseIDs' narrow projection: an agent id
+// and its phase, with no other column read.
+type IDPhase struct {
+	ID    string
+	Phase string
 }
 
 // AgentHealthAggregate holds pre-computed counts and short lists used by the
@@ -385,6 +681,17 @@ type AgentStatusUpdate struct {
 	// Exit tracking
 	ExitCode   *int   `json:"exitCode,omitempty"`
 	ExitReason string `json:"exitReason,omitempty"`
+	// ClearExit, when true, clears ExitCode and ExitReason on this update —
+	// independent of any phase-transition-gated clear, since a lifecycle
+	// start/restart dispatch is a fresh generation of the agent regardless
+	// of its current phase: an exit reason recorded against the agent's
+	// prior generation (for example state.ExitReasonPreempted/ExitReasonEvicted,
+	// which can be set on a still-running agent ahead of its pod actually
+	// stopping) describes the old pod, not the one the start/restart is
+	// bringing up. Internal to the lifecycle dispatch path — json:"-" so a
+	// status report from an external caller (an agent, or a user with
+	// update access) cannot set it through the wire API.
+	ClearExit bool `json:"-"`
 }
 
 // ProjectStore defines project-related persistence operations.
@@ -419,6 +726,12 @@ type ProjectStore interface {
 	// Returns ErrNotFound if the project doesn't exist.
 	UpdateProject(ctx context.Context, project *Project) error
 
+	// SetProjectOwnerID updates only the project's OwnerID column, leaving
+	// every other field untouched. Used by ownership transfer so it cannot
+	// clobber fields written by a concurrent full-row UpdateProject.
+	// Returns ErrNotFound if the project doesn't exist.
+	SetProjectOwnerID(ctx context.Context, projectID, ownerID string) error
+
 	// DeleteProject removes a project by ID.
 	// Returns ErrNotFound if the project doesn't exist.
 	DeleteProject(ctx context.Context, id string) error
@@ -435,6 +748,13 @@ type ProjectStore interface {
 	// Must be called inside a transaction (WithTx) before any membership
 	// reads or writes. Returns ErrNotFound if the project does not exist.
 	LockProjectForMembership(ctx context.Context, projectID string) error
+
+	// UpdateProjectMessagingPolicy updates only the cross-project inbound
+	// policy and its revision using optimistic concurrency. The
+	// expectedRevision must match the current revision; returns
+	// ErrRevisionConflict on mismatch. This is the only path that may change
+	// the policy; generic UpdateProject must NOT update these fields.
+	UpdateProjectMessagingPolicy(ctx context.Context, projectID string, inbound string, expectedRevision int64) (*Project, error)
 }
 
 // ProjectFilter defines criteria for filtering projects.
@@ -500,6 +820,18 @@ type RuntimeBrokerStore interface {
 	// UpdateRuntimeBroker updates an existing runtime broker.
 	// Returns ErrNotFound if the broker doesn't exist.
 	UpdateRuntimeBroker(ctx context.Context, broker *RuntimeBroker) error
+
+	// SetRuntimeBrokerCreatedByIfEmpty atomically sets created_by on a runtime
+	// broker, but only if the row's created_by is currently empty. Returns
+	// applied=false (not an error) when the row already has a non-empty
+	// created_by, or when the row does not exist — both are safe no-ops for
+	// an idempotent, never-overwrite backfill of legacy ownerless records.
+	//
+	// This is intentionally separate from UpdateRuntimeBroker, which never
+	// touches created_by at all: ownership must not become settable through
+	// the same path a broker uses to update its own heartbeat, status, or
+	// capabilities.
+	SetRuntimeBrokerCreatedByIfEmpty(ctx context.Context, id, createdBy string) (applied bool, err error)
 
 	// DeleteRuntimeBroker removes a runtime broker by ID.
 	// Returns ErrNotFound if the broker doesn't exist.
@@ -616,6 +948,20 @@ type BrokerDispatchStore interface {
 	// past the given cutoff to failed, recording the reason. Returns the
 	// number of messages expired.
 	ExpireStuckPendingMessages(ctx context.Context, before time.Time, reason string) (int, error)
+
+	// FailPendingMessagesWithMissingRecipient transitions pending messages to
+	// failed early, without waiting for ExpireStuckPendingMessages' TTL, when
+	// their recipient agent has been deleted (soft- or hard-deleted) and can
+	// therefore never accept delivery. Returns the number of messages failed.
+	FailPendingMessagesWithMissingRecipient(ctx context.Context, reason string) (int, error)
+
+	// BackfillNonAgentDispatchState repairs non-agent-recipient rows left
+	// "pending", or "failed" with reason == expiredReason, by the pre-fix
+	// nc-promote-busy bug (a storeMsg persisted without stamping
+	// DispatchState). The exact complement of ExpireStuckPendingMessages'
+	// and PurgeFailedMessages' agent-only scoping: only an agent recipient
+	// is ever legitimately in either state. Returns the number repaired.
+	BackfillNonAgentDispatchState(ctx context.Context, expiredReason string) (int, error)
 }
 
 // TemplateStore defines template persistence operations.
@@ -858,6 +1204,22 @@ type SecretStore interface {
 	// Returns ErrNotFound if the secret doesn't exist.
 	UpdateSecret(ctx context.Context, secret *Secret) error
 
+	// UpdateSecretRefIfMatches conditionally updates only the SecretRef column,
+	// applying the change and incrementing Version only if the row's current
+	// SecretRef equals expectedRef AND its current Version equals
+	// expectedVersion. Returns applied=false (no error) if the row doesn't
+	// exist or either check fails — e.g. a concurrent Set() raced ahead and
+	// updated the value and the ref, or an old binary rewrote the value
+	// through a ref string that happens to read back unchanged (Version
+	// still increments on every write, so the version check catches that
+	// same-ref case the ref check alone would miss — ptone/scion#2152
+	// round-4 review finding 1). Every other column is left untouched, so
+	// callers that only need to repoint the ref (such as GCP SM
+	// name-migration tooling) never clobber a concurrent metadata edit the
+	// way a GetSecret-then-UpdateSecret read-modify-write would
+	// (ptone/scion#2152 round-2 review finding 11).
+	UpdateSecretRefIfMatches(ctx context.Context, key, scope, scopeID, expectedRef string, expectedVersion int, newRef string) (applied bool, err error)
+
 	// UpsertSecret creates or updates a secret.
 	// Uses key+scope+scopeId as the unique identifier.
 	UpsertSecret(ctx context.Context, secret *Secret) (created bool, err error)
@@ -1035,7 +1397,10 @@ type UserAccessTokenStore interface {
 	// CountUserAccessTokens returns the number of active (non-revoked) tokens for a user.
 	CountUserAccessTokens(ctx context.Context, userID string) (int, error)
 
-	// DeleteUserAccessTokensByProject permanently removes all tokens scoped to a project.
+	// DeleteUserAccessTokensByProject permanently removes all "project"-boundary
+	// tokens scoped to projectID. A hub-boundary token belonging to one of the
+	// project's members is never removed by this call, even if that member
+	// loses access to the project as a result of its deletion.
 	// Returns the number of tokens deleted.
 	DeleteUserAccessTokensByProject(ctx context.Context, projectID string) (int, error)
 
@@ -1263,9 +1628,35 @@ type ScheduleStore interface {
 	// ListSchedules returns schedules matching the filter criteria.
 	ListSchedules(ctx context.Context, filter ScheduleFilter, opts ListOptions) (*ListResult[Schedule], error)
 
-	// UpdateSchedule updates an existing schedule (name, cron_expr, payload, status).
-	// Returns ErrNotFound if the schedule doesn't exist.
-	UpdateSchedule(ctx context.Context, schedule *Schedule) error
+	// ListActiveZonePrefixedSchedules returns up to limit active schedules,
+	// across all projects, whose cron expression starts with a zone prefix
+	// (CRON_TZ= or TZ=), ordered by ID and skipping the IDs in excludeIDs.
+	// It does not page on created, so it is unaffected by how timestamps are
+	// stored. The prefix match may be case-insensitive on some backends;
+	// callers must re-check the prefix exactly.
+	ListActiveZonePrefixedSchedules(ctx context.Context, limit int, excludeIDs []string) ([]Schedule, error)
+
+	// UpdateSchedule writes the schedule's mutable fields named by `fields`
+	// (name, cron_expr, event_type, payload, status, next_run_at) from
+	// `schedule`; a field not named in `fields` is left completely untouched
+	// in the row, so a struct built from a stale read can never revert a
+	// column this call didn't intend to change.
+	//
+	// The write is ALWAYS conditioned on the schedule's current
+	// authorization_revision matching prevRevision (or being NULL, when
+	// prevRevisionKnown is false) — the revision the caller read just before
+	// building this write — regardless of whether attribution is also being
+	// replaced. This closes the same race for every field: a write built
+	// from a stale read can never land once a newer, revision-bumping write
+	// has landed first.
+	//
+	// When attribution is non-nil, the same conditional write also replaces
+	// schedule.InitiatorAttribution.
+	//
+	// Returns ErrRevisionConflict when the schedule exists but its revision
+	// no longer matches, and ErrNotFound if the schedule itself does not
+	// exist.
+	UpdateSchedule(ctx context.Context, schedule *Schedule, fields ScheduleFieldMask, prevRevision int, prevRevisionKnown bool, attribution *InitiatorAttribution) error
 
 	// UpdateScheduleStatus updates only the status of a schedule.
 	// Returns ErrNotFound if the schedule doesn't exist.
@@ -1416,6 +1807,13 @@ type MessageStore interface {
 	// PurgeOldMessages removes read messages older than readCutoff and
 	// unread messages older than unreadCutoff. Returns count removed.
 	PurgeOldMessages(ctx context.Context, readCutoff time.Time, unreadCutoff time.Time) (int, error)
+
+	// PurgeFailedMessages removes messages with dispatch_state="failed" whose
+	// created timestamp is before cutoff. Returns the number of messages
+	// removed. Unlike PurgeOldMessages (read/unread semantics, which would
+	// also delete successfully delivered history), this filters strictly on
+	// dispatch_state so delivered messages are never touched.
+	PurgeFailedMessages(ctx context.Context, cutoff time.Time) (int, error)
 
 	// SetMessageConversationID updates the conversation_id on an existing
 	// message. Used by the Phase 4 backfill to link legacy messages to
@@ -1597,6 +1995,30 @@ type SkillFilter struct {
 	Status  string
 	Search  string
 	Tags    []string
+
+	// AccessScope, when non-nil, restricts results to the read boundary
+	// established by ptone/scion#1901. It is applied in the store query
+	// before LIMIT/cursor pagination (and before TotalCount) so that
+	// out-of-scope rows can never crowd a caller's own rows out of a page,
+	// and so TotalCount reflects only rows the caller may actually see. A
+	// nil AccessScope applies no restriction — used for the hub-admin/
+	// super-admin bypass, which sees every skill unfiltered.
+	AccessScope *SkillAccessScope
+}
+
+// SkillAccessScope narrows a skill query to the rows a specific caller may
+// read, mirroring the ptone/scion#1901 and ptone/scion#1903 rulings —
+// creation scope is the only read boundary; visibility does not widen it:
+//   - IncludeHubScope: hub-scoped (global/core) skills are visible to any
+//     authenticated caller.
+//   - CallerID: a user-scoped skill is visible only when its ScopeID equals
+//     CallerID (the owning user; for an agent caller, its creator).
+//   - ProjectIDs: a project-scoped skill is visible only when its ScopeID is
+//     one of these (the caller's project memberships).
+type SkillAccessScope struct {
+	IncludeHubScope bool
+	CallerID        string
+	ProjectIDs      []string
 }
 
 // =============================================================================
@@ -1691,6 +2113,28 @@ type HubSettingStore interface {
 	// the origin field. Rows with updated_by="seed" get origin="seeded";
 	// all other non-_meta rows get origin="managed". Idempotent.
 	BackfillOrigin(ctx context.Context) error
+}
+
+// BrokerSettingStore defines persistence operations for general per-broker
+// settings (ptone/scion#2061 P2, ptone/scion#2177). One row per broker holds
+// a BrokerSettings document; see pkg/hub/brokersettings for the key
+// registry that validates and authorizes writes to individual keys.
+type BrokerSettingStore interface {
+	// GetBrokerSettings retrieves brokerID's settings document.
+	// Returns ErrNotFound if the broker has no settings row.
+	GetBrokerSettings(ctx context.Context, brokerID string) (*BrokerSettingsRecord, error)
+
+	// PutBrokerSettings replaces brokerID's settings document with CAS
+	// semantics.
+	//   expectedRevision == 0: create-only; returns ErrRevisionConflict if a row already exists.
+	//   expectedRevision > 0:  CAS update; returns ErrRevisionConflict if the current revision differs.
+	PutBrokerSettings(ctx context.Context, brokerID string, settings BrokerSettings,
+		expectedRevision int64, updatedBy string) (*BrokerSettingsRecord, error)
+
+	// DeleteBrokerSettings removes brokerID's settings row, if any. It is a
+	// no-op (not an error) when no row exists, so it is safe to call
+	// unconditionally from DeleteRuntimeBroker.
+	DeleteBrokerSettings(ctx context.Context, brokerID string) error
 }
 
 // =============================================================================
@@ -1969,6 +2413,31 @@ type AgentCredentialStore interface {
 }
 
 // =============================================================================
+// Agent Identity Key Store (per-project display-name / slug uniqueness)
+// =============================================================================
+
+// AgentIdentityKeyStore defines agent identity-key persistence operations.
+// An agent's identity keys are the distinct set {slug, slugify(displayName)};
+// the store enforces uniqueness of each key within a project as a database
+// invariant (UNIQUE(project_id, key)), including against soft-deleted agents.
+type AgentIdentityKeyStore interface {
+	// ReplaceAgentIdentityKeys atomically replaces agentID's identity-key
+	// rows in projectID with keys: rows for keys no longer present are
+	// deleted, rows for new keys are inserted, and rows for keys already
+	// present are left alone. Returns ErrIdentityKeyConflict if any key in
+	// keys is already reserved by a different agent in the project.
+	ReplaceAgentIdentityKeys(ctx context.Context, agentID, projectID string, keys []string) error
+
+	// DeleteAgentIdentityKeys removes all of agentID's identity-key rows,
+	// freeing its keys for reuse. Used on hard delete/purge.
+	DeleteAgentIdentityKeys(ctx context.Context, agentID string) error
+
+	// ListAgentIdentityKeys returns every identity-key row in projectID,
+	// across all agents.
+	ListAgentIdentityKeys(ctx context.Context, projectID string) ([]*AgentIdentityKey, error)
+}
+
+// =============================================================================
 // Decision Audit Store (Authorization Decision Audit Phase 1I)
 // =============================================================================
 
@@ -2074,6 +2543,13 @@ type QuotaStore interface {
 
 	// ListActiveReservations returns active (non-released) reservations for a limit and scope.
 	ListActiveReservations(ctx context.Context, limitDefinitionID, scopeType, scopeID string) ([]*UsageReservation, error)
+
+	// HasActiveReservation reports whether resourceID already holds a
+	// non-released reservation for the given limit, regardless of scope.
+	// Used to make re-reservation idempotent (ptone/scion#1963): a caller
+	// re-reserving on agent start/resume must not create a second active
+	// reservation for an agent that already holds one.
+	HasActiveReservation(ctx context.Context, limitDefinitionID, resourceID string) (bool, error)
 }
 
 // =============================================================================
@@ -2133,4 +2609,76 @@ type AccessConstraintStore interface {
 	// DisableAccessConstraint disables a constraint (for offline recovery).
 	// Returns ErrNotFound if the constraint doesn't exist.
 	DisableAccessConstraint(ctx context.Context, id string) error
+
+	// AppendConstraintHistoryTx appends one purpose-specific live-boundary
+	// history row and atomically enforces the newest-1,000-row retention cap.
+	// Callers must use the Store passed by WithTx so the row, retention, and
+	// boundary mutation share a transaction.
+	AppendConstraintHistoryTx(ctx context.Context, entry *AccessConstraintHistory) error
+
+	// ListConstraintHistory returns retained rows newest-first. The milestone-1
+	// writer tests use this method; API pagination is owned by #2405.
+	ListConstraintHistory(ctx context.Context, constraintID string) ([]*AccessConstraintHistory, error)
+}
+
+// ExternalIdentityBinding represents a persistent mapping from an external
+// identity provider's (provider, issuer, subject) triple to a local Hub user.
+// Used by the GE Google credential exchange to persist stable cross-login
+// identity linkage.
+type ExternalIdentityBinding struct {
+	ID        string    `json:"id"`
+	Provider  string    `json:"provider"` // e.g. "google"
+	Issuer    string    `json:"issuer"`   // canonical issuer URL
+	Subject   string    `json:"subject"`  // stable provider subject
+	UserID    string    `json:"userId"`   // FK to User.ID
+	Email     string    `json:"email"`    // email at binding time (informational)
+	CreatedAt time.Time `json:"createdAt"`
+	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// ExternalIdentityStore provides durable persistence for external identity
+// bindings with transactional uniqueness on (provider, issuer, subject).
+type ExternalIdentityStore interface {
+	// GetExternalIdentity looks up a binding by (provider, issuer, subject).
+	// Returns ErrNotFound if no binding exists.
+	GetExternalIdentity(ctx context.Context, provider, issuer, subject string) (*ExternalIdentityBinding, error)
+
+	// CreateExternalIdentity atomically creates a new binding.
+	// Returns an error if a binding for this (provider, issuer, subject)
+	// already exists (unique constraint violation).
+	CreateExternalIdentity(ctx context.Context, binding *ExternalIdentityBinding) error
+
+	// UpdateExternalIdentityEmail updates the email field of an existing binding.
+	UpdateExternalIdentityEmail(ctx context.Context, id, email string) error
+
+	// GetExternalIdentitiesByUserID returns all bindings for a given user.
+	GetExternalIdentitiesByUserID(ctx context.Context, userID string) ([]*ExternalIdentityBinding, error)
+}
+
+// UserTerminalWorkspace is the persisted, per-user state of the terminal
+// viewer's (/terminals) open-terminal rail: the ordered list of open agent
+// IDs, plus which one was frontmost when it was last saved.
+type UserTerminalWorkspace struct {
+	UserID           string    `json:"userId"`
+	AgentIDs         []string  `json:"agentIds"`         // ordered, lowercase canonical UUIDs
+	FrontmostAgentID string    `json:"frontmostAgentId"` // "" when none
+	Revision         int64     `json:"revision"`
+	Updated          time.Time `json:"updatedAt"`
+}
+
+// UserTerminalWorkspaceStore provides durable, per-user persistence for the
+// terminal viewer's open-terminal list. There is exactly one row per user.
+// The store trusts its caller to have already validated agentIDs and
+// frontmostAgentID (size bounds, UUID format, membership); see
+// pkg/hub/handlers_user_terminal_workspace.go.
+type UserTerminalWorkspaceStore interface {
+	// GetUserTerminalWorkspace returns the saved workspace for userID.
+	// Returns ErrNotFound when the user has never saved one.
+	GetUserTerminalWorkspace(ctx context.Context, userID string) (*UserTerminalWorkspace, error)
+
+	// PutUserTerminalWorkspace unconditionally upserts the workspace for
+	// userID, keyed on user_id, incrementing revision atomically
+	// (last-writer-wins: there is no expected-revision / compare-and-swap
+	// parameter). Returns the stored row.
+	PutUserTerminalWorkspace(ctx context.Context, userID string, agentIDs []string, frontmostAgentID string) (*UserTerminalWorkspace, error)
 }

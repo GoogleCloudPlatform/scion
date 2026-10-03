@@ -90,6 +90,7 @@ type ScopeType string
 const (
 	ScopeTypeSystem  ScopeType = "system"
 	ScopeTypeProject ScopeType = "project"
+	ScopeTypeBroker  ScopeType = "broker"
 )
 
 func (st ScopeType) String() string {
@@ -99,7 +100,7 @@ func (st ScopeType) String() string {
 // ScopeTypeValidator is a validator for the "scope_type" field enum values. It is called by the builders before save.
 func ScopeTypeValidator(st ScopeType) error {
 	switch st {
-	case ScopeTypeSystem, ScopeTypeProject:
+	case ScopeTypeSystem, ScopeTypeProject, ScopeTypeBroker:
 		return nil
 	default:
 		return fmt.Errorf("usagereservation: invalid enum value for scope_type field: %q", st)

@@ -17,6 +17,9 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"reflect"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -196,6 +199,98 @@ func TestChannelEventPublisher_PublishAgentCreated(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("timeout waiting for project agent created event")
+	}
+}
+
+// TestChannelEventPublisher_LaunchSnapshotAtPublishTime covers design §6
+// H-4: "the event snapshot carries the values at publish time" --
+// PublishAgentStatus and PublishAgentCreated compute Launch from the
+// *store.Agent passed to them, not from some later read, so a caller that
+// mutates its copy afterward cannot retroactively change what subscribers
+// already received. Proven below by mutating agent.LaunchStep after both
+// publish calls and asserting the already-received events still show the
+// pre-mutation value.
+func TestChannelEventPublisher_LaunchSnapshotAtPublishTime(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+
+	statusCh, unsub1 := pub.Subscribe("agent.a1.status")
+	defer unsub1()
+	createdCh, unsub2 := pub.Subscribe("agent.a1.created")
+	defer unsub2()
+
+	deadline := time.Now().Add(90 * time.Second)
+	agent := &store.Agent{
+		ID: "a1", ProjectID: "g1", Phase: "provisioning",
+		LaunchID: "L1", LaunchState: store.LaunchStateActive, LaunchKind: store.LaunchKindCreate,
+		LaunchStep: "cloning", LaunchDeadline: deadline,
+	}
+
+	pub.PublishAgentStatus(context.Background(), agent)
+	pub.PublishAgentCreated(context.Background(), agent)
+
+	// Mutate the caller's copy after both publish calls. Since publish
+	// marshals synchronously before returning (ChannelEventPublisher.publish),
+	// this must have no effect on what was already sent to subscribers.
+	agent.LaunchStep = "mutated-after-publish"
+
+	select {
+	case evt := <-statusCh:
+		var data AgentStatusEvent
+		if err := json.Unmarshal(evt.Data, &data); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if data.Launch == nil {
+			t.Fatal("expected a launch snapshot on the status event")
+		}
+		if data.Launch.ID != "L1" || !data.Launch.Active || data.Launch.Step != "cloning" {
+			t.Errorf("unexpected launch snapshot: %+v", data.Launch)
+		}
+		if data.Launch.Step == "mutated-after-publish" {
+			t.Error("status event reflects a mutation made after PublishAgentStatus returned; snapshot isolation is broken")
+		}
+		if data.Launch.RemainingSeconds == nil || *data.Launch.RemainingSeconds <= 0 {
+			t.Errorf("expected a positive remainingSeconds snapshot, got %v", data.Launch.RemainingSeconds)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for agent status event")
+	}
+
+	select {
+	case evt := <-createdCh:
+		var data AgentCreatedEvent
+		if err := json.Unmarshal(evt.Data, &data); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		if data.Launch == nil || data.Launch.ID != "L1" {
+			t.Errorf("expected a launch snapshot on the created event, got %+v", data.Launch)
+		}
+		if data.Launch != nil && data.Launch.Step == "mutated-after-publish" {
+			t.Error("created event reflects a mutation made after PublishAgentCreated returned; snapshot isolation is broken")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for agent created event")
+	}
+}
+
+// TestChannelEventPublisher_NoLaunchOmitsLaunchField covers the "absent when
+// there is no launch" half of H-4.
+func TestChannelEventPublisher_NoLaunchOmitsLaunchField(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+
+	statusCh, unsub := pub.Subscribe("agent.a1.status")
+	defer unsub()
+
+	pub.PublishAgentStatus(context.Background(), &store.Agent{ID: "a1", Phase: "running"})
+
+	select {
+	case evt := <-statusCh:
+		if strings.Contains(string(evt.Data), `"launch"`) {
+			t.Errorf("expected no launch field in the wire payload, got %s", evt.Data)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timeout waiting for agent status event")
 	}
 }
 
@@ -617,6 +712,139 @@ func TestChannelEventPublisher_PublishNotification(t *testing.T) {
 	}
 }
 
+// TestChannelEventPublisher_NoLegacyGroveSubjects guards a cross-project SSE
+// invariant: grove.<projectId>.* must never be published. That subject would
+// duplicate the authorized project.<projectId>.* subjects without SSE
+// subject authorization covering the "grove" namespace, so anything sent
+// there is readable by any authenticated session regardless of project
+// membership (default-deny authorization for unrecognized namespaces is
+// covered separately in pkg/hub/sse_default_deny_test.go). This test
+// subscribes to the wildcard grove.> pattern and asserts nothing is ever
+// delivered there, across every event type a project can publish.
+func TestChannelEventPublisher_NoLegacyGroveSubjects(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+
+	groveCh, unsub := pub.Subscribe("grove.>")
+	defer unsub()
+
+	ctx := context.Background()
+	pub.PublishAgentStatus(ctx, &store.Agent{ID: "a1", ProjectID: "g1", Phase: "running"})
+	pub.PublishAgentCreated(ctx, &store.Agent{ID: "a1", ProjectID: "g1"})
+	pub.PublishAgentDeleted(ctx, "a1", "g1")
+	pub.PublishAgentPorts(ctx, &store.Agent{ID: "a1", ProjectID: "g1"})
+	pub.PublishProjectCreated(ctx, &store.Project{ID: "g1", Name: "Project"})
+	pub.PublishProjectUpdated(ctx, &store.Project{ID: "g1", Name: "Project"})
+	pub.PublishProjectDeleted(ctx, "g1")
+	pub.PublishBrokerConnected(ctx, "b1", "broker-one", []string{"g1"})
+	pub.PublishBrokerDisconnected(ctx, "b1", []string{"g1"})
+	pub.PublishNotification(ctx, &store.Notification{ID: "n1", ProjectID: "g1", Status: "COMPLETED"})
+	pub.PublishUserMessage(ctx, &store.Message{
+		ID: "m1", ProjectID: "g1", Sender: "agent:a1", SenderID: "a1",
+		Recipient: "user:alice", RecipientID: "u1", Msg: "secret", Type: "assistant-reply",
+		CreatedAt: time.Now().UTC(),
+	}, nil)
+
+	select {
+	case evt := <-groveCh:
+		t.Fatalf("legacy grove.* subject must not be published, got %q", evt.Subject)
+	default:
+		// Expected: nothing was published on grove.>.
+	}
+}
+
+// TestChannelEventPublisher_PayloadsCarryProjectIDNotGroveID verifies every
+// event payload struct that identifies a project marshals it as "projectId"
+// and never emits a "groveId" key.
+func TestChannelEventPublisher_PayloadsCarryProjectIDNotGroveID(t *testing.T) {
+	pub := NewChannelEventPublisher()
+	defer pub.Close()
+
+	ch, unsub := pub.Subscribe(">")
+	defer unsub()
+
+	ctx := context.Background()
+	pub.PublishAgentStatus(ctx, &store.Agent{ID: "a1", ProjectID: "p1", Phase: "running"})
+	pub.PublishAgentCreated(ctx, &store.Agent{ID: "a1", ProjectID: "p1"})
+	pub.PublishAgentDeleted(ctx, "a1", "p1")
+	pub.PublishAgentPorts(ctx, &store.Agent{ID: "a1", ProjectID: "p1"})
+	pub.PublishProjectCreated(ctx, &store.Project{ID: "p1", Name: "Project"})
+	pub.PublishProjectUpdated(ctx, &store.Project{ID: "p1", Name: "Project"})
+	pub.PublishProjectDeleted(ctx, "p1")
+	pub.PublishBrokerConnected(ctx, "b1", "broker-one", []string{"p1"})
+	pub.PublishBrokerDisconnected(ctx, "b1", []string{"p1"})
+	pub.PublishNotification(ctx, &store.Notification{ID: "n1", ProjectID: "p1", Status: "COMPLETED"})
+	pub.PublishUserMessage(ctx, &store.Message{
+		ID: "m1", ProjectID: "p1", Sender: "agent:a1", SenderID: "a1",
+		Recipient: "user:alice", RecipientID: "u1", Msg: "hi", Type: "assistant-reply",
+		CreatedAt: time.Now().UTC(),
+	}, nil)
+	pub.PublishChatNotification(ctx,
+		&store.Notification{ID: "n2", ProjectID: "p1", Status: "COMPLETED", SubscriberID: "u2"},
+		ChatMessageContext{})
+
+	drain := func() []Event {
+		var got []Event
+		for {
+			select {
+			case evt := <-ch:
+				got = append(got, evt)
+			case <-time.After(100 * time.Millisecond):
+				return got
+			}
+		}
+	}
+
+	// Every one of the calls above carries a project identity, so every
+	// resulting event must carry "projectId" — there is no payload above
+	// that legitimately omits it. Asserting the exact subject multiset
+	// means a dropped publish can't hide behind another one that still
+	// lands.
+	wantSubjects := []string{
+		"agent.a1.status", "project.p1.agent.status",
+		"agent.a1.created", "project.p1.agent.created",
+		"agent.a1.deleted", "project.p1.agent.deleted",
+		"agent.a1.ports", "project.p1.agent.ports",
+		"project.p1.created",
+		"project.p1.updated",
+		"project.p1.deleted",
+		"project.p1.broker.status", "project.p1.broker.status",
+		"notification.created", "project.p1.notification",
+		"user.u1.message", "project.p1.user.message",
+		"user.u2.notification",
+	}
+
+	events := drain()
+	gotSubjects := make([]string, len(events))
+	for i, evt := range events {
+		gotSubjects[i] = evt.Subject
+	}
+	sort.Strings(gotSubjects)
+	wantSorted := append([]string(nil), wantSubjects...)
+	sort.Strings(wantSorted)
+	if !reflect.DeepEqual(gotSubjects, wantSorted) {
+		t.Fatalf("published subjects = %v, want %v", gotSubjects, wantSorted)
+	}
+
+	for _, evt := range events {
+		var m map[string]interface{}
+		if err := json.Unmarshal(evt.Data, &m); err != nil {
+			t.Fatalf("%s: unmarshal: %v", evt.Subject, err)
+		}
+		if _, ok := m["groveId"]; ok {
+			t.Errorf("%s: payload must not contain groveId, got %s", evt.Subject, evt.Data)
+		}
+		got, ok := m["projectId"]
+		if !ok {
+			t.Errorf("%s: payload must contain projectId, got %s", evt.Subject, evt.Data)
+			continue
+		}
+		if got != "p1" {
+			t.Errorf("%s: projectId = %v, want %q", evt.Subject, got, "p1")
+		}
+	}
+}
+
 func TestNoopEventPublisher(t *testing.T) {
 	var pub noopEventPublisher
 	ctx := context.Background()
@@ -773,6 +1001,92 @@ func TestPublishUserMessage_NoChatMessageForNonWebChannel(t *testing.T) {
 		t.Fatalf("non-web channel should not produce chat.message event, got: %s", evt.Subject)
 	case <-time.After(100 * time.Millisecond):
 		// Expected: no event.
+	}
+}
+
+// TestPublishUserMessage_DispatchFailureFields covers nc-delivery-unreachable
+// review R2 Consider 1: PublishUserMessage must populate
+// DispatchFailureReason/DispatchFailureCode on the event for a failed row
+// with the agent_unreachable reason prefix, and must omit both for a
+// dispatched row. Without this, dropping the four lines in
+// PublishUserMessage or renaming the "Agent unreachable" prefix would leave
+// every other test green.
+func TestPublishUserMessage_DispatchFailureFields(t *testing.T) {
+	unreachableReason := "Agent unreachable (deleted)"
+	// Round 4, item 5: a stale reason left over from a prior failed attempt
+	// (e.g. a retried row that later dispatched). If PublishUserMessage
+	// dropped its `DispatchState == failed` gate and instead populated the
+	// event fields whenever DispatchFailureReason is non-nil, this case would
+	// still pass with a nil reason. A stale non-nil reason on a dispatched
+	// row proves the state check — not just a nil check — gates the fields.
+	staleReason := "Agent unreachable (suspended)"
+
+	tests := []struct {
+		name          string
+		dispatchState string
+		failureReason *string
+		wantReason    string
+		wantCode      string
+	}{
+		{
+			name:          "failed row with agent_unreachable reason",
+			dispatchState: store.MessageDispatchFailed,
+			failureReason: &unreachableReason,
+			wantReason:    unreachableReason,
+			wantCode:      dispatchFailureCodeAgentUnreachable,
+		},
+		{
+			name:          "dispatched row omits both fields despite a stale failure reason",
+			dispatchState: store.MessageDispatchDispatched,
+			failureReason: &staleReason,
+			wantReason:    "",
+			wantCode:      "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pub := NewChannelEventPublisher()
+			defer pub.Close()
+
+			ch, unsub := pub.Subscribe("agent.agent-uuid-1.message")
+			defer unsub()
+
+			msg := &store.Message{
+				ID:                    "msg-dispatch-fields",
+				ProjectID:             "proj1",
+				Sender:                "user:alice",
+				SenderID:              "user-uuid-1",
+				Recipient:             "agent:coder",
+				RecipientID:           "agent-uuid-1",
+				AgentID:               "agent-uuid-1",
+				Msg:                   "hello",
+				Type:                  "chat",
+				Channel:               "web",
+				ThreadID:              "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+				CreatedAt:             time.Now(),
+				DispatchState:         tt.dispatchState,
+				DispatchFailureReason: tt.failureReason,
+			}
+
+			pub.PublishUserMessage(context.Background(), msg, nil)
+
+			select {
+			case evt := <-ch:
+				var payload UserMessageEvent
+				if err := json.Unmarshal(evt.Data, &payload); err != nil {
+					t.Fatalf("failed to unmarshal event: %v", err)
+				}
+				if payload.DispatchFailureReason != tt.wantReason {
+					t.Errorf("DispatchFailureReason = %q, want %q", payload.DispatchFailureReason, tt.wantReason)
+				}
+				if payload.DispatchFailureCode != tt.wantCode {
+					t.Errorf("DispatchFailureCode = %q, want %q", payload.DispatchFailureCode, tt.wantCode)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("timed out waiting for agent.message event")
+			}
+		})
 	}
 }
 

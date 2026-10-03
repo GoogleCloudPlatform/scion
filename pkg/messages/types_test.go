@@ -31,6 +31,8 @@ func TestValidateType(t *testing.T) {
 		{TypeGroupSet, false},
 		{TypeMention, false},
 		{TypeSystem, false},
+		{TypeChat, false},
+		{TypeReply, false},
 		{"unknown", true},
 		{"", true},
 	}
@@ -373,6 +375,68 @@ func TestLogAttrs(t *testing.T) {
 	}
 }
 
+// TestLogAttrs_RedactsRawMessageContent is a regression guard for
+// ptone/scion#2192: raw keystroke payloads are literal terminal input and
+// must never appear in Hub/broker message logs (normal or debug) while
+// legacy raw delivery remains reachable. LogAttrs is the single choke point
+// both handlers_broker_inbound.go's dedicated audit log and
+// runtimebroker/handlers.go's sendMessage log use, so redacting here covers
+// both call sites.
+func TestLogAttrs_RedactsRawMessageContent(t *testing.T) {
+	const secret = "TOP-SECRET-KEYSTROKE-PAYLOAD-4F9C2A"
+	m := &StructuredMessage{
+		Version:   Version,
+		Sender:    "user:alice",
+		Recipient: "agent:dev",
+		Msg:       secret,
+		Type:      TypeInstruction,
+		Raw:       true,
+	}
+
+	attrs := m.LogAttrs()
+
+	found := false
+	for i := 0; i < len(attrs); i += 2 {
+		key, ok := attrs[i].(string)
+		if !ok {
+			continue
+		}
+		if key != "message_content" {
+			continue
+		}
+		found = true
+		content, _ := attrs[i+1].(string)
+		if content == secret {
+			t.Fatalf("LogAttrs() exposed raw message content: %q", content)
+		}
+		if content != redactedRawContent {
+			t.Errorf("LogAttrs()[\"message_content\"] = %q, want redaction placeholder %q", content, redactedRawContent)
+		}
+	}
+	if !found {
+		t.Fatal("LogAttrs() did not include a message_content key")
+	}
+
+	// raw:false must be unaffected — this is Plain/normal-message regression
+	// coverage living in TestLogAttrs above; assert it here too so the two
+	// invariants (redact raw, preserve non-raw) are pinned side by side.
+	nonRaw := &StructuredMessage{
+		Version:   Version,
+		Sender:    "user:alice",
+		Recipient: "agent:dev",
+		Msg:       secret,
+		Type:      TypeInstruction,
+	}
+	nonRawAttrs := nonRaw.LogAttrs()
+	for i := 0; i < len(nonRawAttrs); i += 2 {
+		if key, ok := nonRawAttrs[i].(string); ok && key == "message_content" {
+			if nonRawAttrs[i+1] != secret {
+				t.Errorf("non-raw LogAttrs() must not redact message_content, got %v", nonRawAttrs[i+1])
+			}
+		}
+	}
+}
+
 func TestLogAttrsWithoutIDs(t *testing.T) {
 	m := &StructuredMessage{
 		Version:   Version,
@@ -421,6 +485,56 @@ func TestLogAttrsWithRecipients(t *testing.T) {
 	}
 	if !found {
 		t.Error("LogAttrs() should include recipients when set")
+	}
+}
+
+// TestLogAttrsWithConversationID is a regression test for ptone/scion#1635:
+// the dedicated message audit log omitted conversation_id even though the
+// field is resolved and stamped onto the message before dispatch.
+func TestLogAttrsWithConversationID(t *testing.T) {
+	m := &StructuredMessage{
+		Version:        Version,
+		Sender:         "user:alice",
+		Recipient:      "agent:dev",
+		Msg:            "hello",
+		Type:           TypeInstruction,
+		ConversationID: "conv-uuid-789",
+	}
+
+	attrs := m.LogAttrs()
+
+	found := false
+	for i := 0; i < len(attrs)-1; i += 2 {
+		if attrs[i] == "conversation_id" {
+			found = true
+			if attrs[i+1] != "conv-uuid-789" {
+				t.Errorf("conversation_id = %v, want %q", attrs[i+1], "conv-uuid-789")
+			}
+		}
+	}
+	if !found {
+		t.Error("LogAttrs() should include conversation_id when set")
+	}
+}
+
+// TestLogAttrsWithoutConversationID ensures the field stays absent (rather
+// than emitted empty) when no conversation has been resolved, matching the
+// omitempty convention used by the other optional attrs.
+func TestLogAttrsWithoutConversationID(t *testing.T) {
+	m := &StructuredMessage{
+		Version:   Version,
+		Sender:    "user:alice",
+		Recipient: "agent:dev",
+		Msg:       "hello",
+		Type:      TypeInstruction,
+	}
+
+	attrs := m.LogAttrs()
+
+	for i := 0; i < len(attrs); i += 2 {
+		if attrs[i] == "conversation_id" {
+			t.Error("LogAttrs() should not include conversation_id when empty")
+		}
 	}
 }
 
@@ -534,6 +648,62 @@ func TestStructuredMessage_ValidateSystem(t *testing.T) {
 	}
 	if err := m.Validate(); err != nil {
 		t.Errorf("unexpected error for valid system message: %v", err)
+	}
+}
+
+func TestLogAttrs_SkipsAttachmentsMetadata(t *testing.T) {
+	m := &StructuredMessage{
+		Version:   Version,
+		Timestamp: "2026-09-19T00:00:00Z",
+		Sender:    "agent:dev",
+		Recipient: "user:alice",
+		Msg:       "here is a file",
+		Type:      TypeAssistantReply,
+		Metadata: map[string]string{
+			"attachments":     `[{"id":"a1","name":"shot.png"}]`,
+			"channel":         "web",
+			"system_category": "test",
+		},
+	}
+
+	attrs := m.LogAttrs()
+
+	// Collect all keys from the attrs slice (key-value pairs).
+	keys := map[string]bool{}
+	for i := 0; i < len(attrs)-1; i += 2 {
+		if k, ok := attrs[i].(string); ok {
+			keys[k] = true
+		}
+	}
+
+	// The "attachments" internal transport key must NOT appear in log output.
+	if keys["meta_attachments"] {
+		t.Error("LogAttrs should skip the internal attachments metadata key")
+	}
+
+	// Other metadata keys should be present.
+	if !keys["meta_channel"] {
+		t.Error("LogAttrs should include non-internal metadata keys like channel")
+	}
+	if !keys["meta_system_category"] {
+		t.Error("LogAttrs should include non-internal metadata keys like system_category")
+	}
+}
+
+func TestLogAttrs_NilMetadata(t *testing.T) {
+	m := &StructuredMessage{
+		Version:   Version,
+		Timestamp: "2026-09-19T00:00:00Z",
+		Sender:    "agent:dev",
+		Recipient: "user:alice",
+		Msg:       "no metadata",
+		Type:      TypeInstruction,
+	}
+
+	// Should not panic with nil Metadata.
+	attrs := m.LogAttrs()
+	if len(attrs) == 0 {
+		t.Error("expected non-empty LogAttrs")
 	}
 }
 

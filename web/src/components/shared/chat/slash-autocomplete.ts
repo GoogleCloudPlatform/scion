@@ -52,7 +52,7 @@ const BUILT_IN_COMMANDS: SlashCommand[] = [
   { name: 'status', description: 'Show project status', usage: '/status' },
   { name: 'clear', description: 'Clear the conversation', usage: '/clear' },
   { name: 'help', description: 'Show available commands', usage: '/help' },
-  { name: 'spawn', description: 'Spawn a new agent', usage: '/spawn <template>' },
+  { name: 'spawn', description: 'Spawn a new agent', usage: '/spawn <template> [name]' },
   { name: 'stop', description: 'Stop a running agent', usage: '/stop <agent>' },
   { name: 'default', description: 'Set or clear default agent', usage: '/default <agent|clear>' },
 ];
@@ -68,6 +68,17 @@ export class ScionSlashAutocomplete extends LitElement {
 
   /** Index of the highlighted command. */
   @state() private selectedIndex = 0;
+
+  /**
+   * The command prefix at the time the user explicitly dismissed the dropdown.
+   * Null when there is no active dismissal. The dismissal holds as long as the
+   * current prefix is a continuation of the dismissed one; backspacing past it
+   * or typing a different command clears it.
+   */
+  private dismissedPrefix: string | null = null;
+
+  /** The command prefix from the most recent handleInput call (for dismiss). */
+  private currentPrefix = '';
 
   static override styles = css`
     :host {
@@ -94,7 +105,7 @@ export class ScionSlashAutocomplete extends LitElement {
       flex-direction: column;
       padding: 0.375rem 0.75rem;
       cursor: pointer;
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
       transition: background 0.1s;
     }
 
@@ -109,7 +120,7 @@ export class ScionSlashAutocomplete extends LitElement {
     }
 
     .dropdown-item .command-desc {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       color: var(--scion-text-muted, #64748b);
       overflow: hidden;
       text-overflow: ellipsis;
@@ -128,7 +139,9 @@ export class ScionSlashAutocomplete extends LitElement {
               class="dropdown-item ${i === this.selectedIndex ? 'highlighted' : ''}"
               data-index=${i}
               @click=${() => this.acceptCommand(i)}
-              @mouseenter=${() => { this.selectedIndex = i; }}
+              @mouseenter=${() => {
+                this.selectedIndex = i;
+              }}
             >
               <span class="command-name">/${cmd.name}</span>
               <span class="command-desc">${cmd.description}</span>
@@ -149,6 +162,8 @@ export class ScionSlashAutocomplete extends LitElement {
   handleInput(text: string, _cursorPos: number): void {
     // Only trigger if the text starts with `/`
     if (!text.startsWith('/')) {
+      // The trigger is gone, so a previous dismissal no longer applies.
+      this.dismissedPrefix = null;
       this.dismiss();
       return;
     }
@@ -157,6 +172,14 @@ export class ScionSlashAutocomplete extends LitElement {
     const afterSlash = text.slice(1);
     const spaceIdx = afterSlash.indexOf(' ');
     const prefix = spaceIdx >= 0 ? afterSlash.slice(0, spaceIdx) : afterSlash;
+    this.currentPrefix = prefix;
+
+    // A dismissal holds while the current prefix is a continuation of the
+    // dismissed one. Backspacing past or typing a different command clears it.
+    if (this.dismissedPrefix !== null && prefix.startsWith(this.dismissedPrefix)) {
+      return;
+    }
+    this.dismissedPrefix = null;
 
     // If the user has already typed a full command + space, don't show autocomplete
     if (spaceIdx >= 0) {
@@ -200,8 +223,7 @@ export class ScionSlashAutocomplete extends LitElement {
 
       case 'ArrowUp':
         e.preventDefault();
-        this.selectedIndex =
-          (this.selectedIndex - 1 + this.commands.length) % this.commands.length;
+        this.selectedIndex = (this.selectedIndex - 1 + this.commands.length) % this.commands.length;
         return true;
 
       case 'Enter':
@@ -212,7 +234,7 @@ export class ScionSlashAutocomplete extends LitElement {
 
       case 'Escape':
         e.preventDefault();
-        this.dismiss();
+        this.dismiss(true);
         return true;
 
       default:
@@ -221,9 +243,12 @@ export class ScionSlashAutocomplete extends LitElement {
   }
 
   /** Dismiss the dropdown. */
-  dismiss(): void {
+  dismiss(userInitiated = false): void {
+    if (userInitiated) {
+      this.dismissedPrefix = this.currentPrefix;
+    }
     this.active = false;
-    this.commands = [];
+    if (this.commands.length > 0) this.commands = [];
     this.selectedIndex = 0;
   }
 
@@ -233,6 +258,8 @@ export class ScionSlashAutocomplete extends LitElement {
 
   /** Dispatch the slash-command event and close the dropdown. */
   private acceptCommand(index: number): void {
+    // An accepted command ends this trigger.
+    this.dismissedPrefix = null;
     const cmd = this.commands[index];
     if (!cmd) return;
 

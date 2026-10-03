@@ -59,7 +59,7 @@ func setupAgentRoleTest(t *testing.T) (*Server, store.Store, *store.User, *store
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	return srv, s, user, project
 }
@@ -513,7 +513,7 @@ func TestCreateAgent_ProjectMaxCapsRole(t *testing.T) {
 		Updated: time.Now(),
 	}
 	require.NoError(t, st.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	admin := &store.User{
 		ID:          tid("user-admin-cap"),
@@ -583,7 +583,7 @@ func setupFullMaxProject(t *testing.T) (*Server, store.Store, *store.Project) {
 		Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	return srv, s, project
 }
@@ -864,7 +864,7 @@ func TestCreateAgent_ProjectMaxBaseline_CapsFullToBaseline(t *testing.T) {
 		Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	admin := &store.User{
 		ID:          tid("user-admin-base-cap"),
@@ -904,7 +904,7 @@ func TestCreateAgent_ProjectMaxReadonly_MemberGetsReadonly(t *testing.T) {
 		Updated: time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Member user requesting no specific role — should default to project max (readonly)
 	_ = doAgentRoleRequest(t, srv, user, CreateAgentRequest{
@@ -967,7 +967,7 @@ func setupReadScopeTest(t *testing.T) (*Server, store.Store, *store.Agent, *stor
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	agent := &store.Agent{
 		ID:        tid("agent-read-scope"),
@@ -990,8 +990,8 @@ func TestReadEndpoint_BaselineAgent_Allowed(t *testing.T) {
 	scopes := ScopesForRole(AgentRoleBaseline)
 
 	// CO1: agent.read has no AgentScopes mapping in the permissions registry,
-	// so the agent JWT scope restriction blocks GET /api/v1/agents/{id}.
-	// Only list and project-level read endpoints pass through.
+	// so the agent JWT scope restriction blocks GET /api/v1/agents/{id} for
+	// any agent other than the caller. List and project-level reads pass.
 	endpoints := []string{
 		"/api/v1/agents?projectId=" + project.ID,
 		"/api/v1/templates",
@@ -1010,11 +1010,13 @@ func TestReadEndpoint_BaselineAgent_Allowed(t *testing.T) {
 		})
 	}
 
-	// CO1: agent.read is blocked by agent scope restriction (no AgentScopes mapping).
+	// Self-read: the token's agent reads its own record, which is allowed
+	// (as on the project-scoped route). CO1 still denies reading other agents
+	// by ID; see TestGetAgent_SelfRead.
 	t.Run("/api/v1/agents/"+agent.ID, func(t *testing.T) {
 		rec := doAgentReadRequest(t, srv, agent.ID, project.ID, "/api/v1/agents/"+agent.ID, scopes)
-		assert.Equal(t, http.StatusForbidden, rec.Code,
-			"CO1: agent.read has no AgentScopes mapping; agent must be denied on GET /api/v1/agents/{id}; got %d: %s",
+		assert.Equal(t, http.StatusOK, rec.Code,
+			"a baseline agent must be able to read its own record; got %d: %s",
 			rec.Code, rec.Body.String())
 	})
 }
@@ -1026,7 +1028,8 @@ func TestReadEndpoint_ReadonlyAgent_Allowed(t *testing.T) {
 	scopes := ScopesForRole(AgentRoleReadOnly)
 
 	// CO1: agent.read has no AgentScopes mapping in the permissions registry,
-	// so the agent JWT scope restriction blocks GET /api/v1/agents/{id}.
+	// so the agent JWT scope restriction blocks GET /api/v1/agents/{id} for
+	// any agent other than the caller.
 	endpoints := []string{
 		"/api/v1/agents?projectId=" + project.ID,
 		"/api/v1/templates",
@@ -1045,11 +1048,12 @@ func TestReadEndpoint_ReadonlyAgent_Allowed(t *testing.T) {
 		})
 	}
 
-	// CO1: agent.read is blocked by agent scope restriction (no AgentScopes mapping).
+	// Self-read is allowed for readonly too (it carries project:read); CO1
+	// still denies reading other agents by ID.
 	t.Run("/api/v1/agents/"+agent.ID, func(t *testing.T) {
 		rec := doAgentReadRequest(t, srv, agent.ID, project.ID, "/api/v1/agents/"+agent.ID, scopes)
-		assert.Equal(t, http.StatusForbidden, rec.Code,
-			"CO1: agent.read has no AgentScopes mapping; agent must be denied on GET /api/v1/agents/{id}; got %d: %s",
+		assert.Equal(t, http.StatusOK, rec.Code,
+			"a readonly agent must be able to read its own record; got %d: %s",
 			rec.Code, rec.Body.String())
 	})
 }
@@ -1182,7 +1186,7 @@ func TestCreateAgent_ProjectDefaultFull_NotOverriddenByHubBaseline(t *testing.T)
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Set the hub-level default to baseline — this should NOT override the
 	// project-level explicit "full".

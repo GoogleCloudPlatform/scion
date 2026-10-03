@@ -125,6 +125,31 @@ func DeadlineAt(v time.Time) predicate.BrokerDispatch {
 	return predicate.BrokerDispatch(sql.FieldEQ(FieldDeadlineAt, v))
 }
 
+// InitiatorPrincipalKind applies equality check predicate on the "initiator_principal_kind" field. It's identical to InitiatorPrincipalKindEQ.
+func InitiatorPrincipalKind(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldEQ(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalID applies equality check predicate on the "initiator_principal_id" field. It's identical to InitiatorPrincipalIDEQ.
+func InitiatorPrincipalID(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldEQ(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorCredentialKind applies equality check predicate on the "initiator_credential_kind" field. It's identical to InitiatorCredentialKindEQ.
+func InitiatorCredentialKind(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldEQ(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialID applies equality check predicate on the "initiator_credential_id" field. It's identical to InitiatorCredentialIDEQ.
+func InitiatorCredentialID(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldEQ(FieldInitiatorCredentialID, v))
+}
+
+// CorrelationID applies equality check predicate on the "correlation_id" field. It's identical to CorrelationIDEQ.
+func CorrelationID(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldEQ(FieldCorrelationID, v))
+}
+
 // BrokerIDEQ applies the EQ predicate on the "broker_id" field.
 func BrokerIDEQ(v uuid.UUID) predicate.BrokerDispatch {
 	return predicate.BrokerDispatch(sql.FieldEQ(FieldBrokerID, v))
@@ -938,6 +963,381 @@ func DeadlineAtIsNil() predicate.BrokerDispatch {
 // DeadlineAtNotNil applies the NotNil predicate on the "deadline_at" field.
 func DeadlineAtNotNil() predicate.BrokerDispatch {
 	return predicate.BrokerDispatch(sql.FieldNotNull(FieldDeadlineAt))
+}
+
+// InitiatorPrincipalKindEQ applies the EQ predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindEQ(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldEQ(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindNEQ applies the NEQ predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindNEQ(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldNEQ(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindIn applies the In predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindIn(vs ...string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldIn(FieldInitiatorPrincipalKind, vs...))
+}
+
+// InitiatorPrincipalKindNotIn applies the NotIn predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindNotIn(vs ...string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldNotIn(FieldInitiatorPrincipalKind, vs...))
+}
+
+// InitiatorPrincipalKindGT applies the GT predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindGT(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldGT(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindGTE applies the GTE predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindGTE(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldGTE(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindLT applies the LT predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindLT(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldLT(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindLTE applies the LTE predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindLTE(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldLTE(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindContains applies the Contains predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindContains(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldContains(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindHasPrefix applies the HasPrefix predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindHasPrefix(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldHasPrefix(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindHasSuffix applies the HasSuffix predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindHasSuffix(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldHasSuffix(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindIsNil applies the IsNil predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindIsNil() predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldIsNull(FieldInitiatorPrincipalKind))
+}
+
+// InitiatorPrincipalKindNotNil applies the NotNil predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindNotNil() predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldNotNull(FieldInitiatorPrincipalKind))
+}
+
+// InitiatorPrincipalKindEqualFold applies the EqualFold predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindEqualFold(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldEqualFold(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalKindContainsFold applies the ContainsFold predicate on the "initiator_principal_kind" field.
+func InitiatorPrincipalKindContainsFold(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldContainsFold(FieldInitiatorPrincipalKind, v))
+}
+
+// InitiatorPrincipalIDEQ applies the EQ predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDEQ(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldEQ(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDNEQ applies the NEQ predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDNEQ(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldNEQ(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDIn applies the In predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDIn(vs ...string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldIn(FieldInitiatorPrincipalID, vs...))
+}
+
+// InitiatorPrincipalIDNotIn applies the NotIn predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDNotIn(vs ...string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldNotIn(FieldInitiatorPrincipalID, vs...))
+}
+
+// InitiatorPrincipalIDGT applies the GT predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDGT(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldGT(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDGTE applies the GTE predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDGTE(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldGTE(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDLT applies the LT predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDLT(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldLT(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDLTE applies the LTE predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDLTE(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldLTE(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDContains applies the Contains predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDContains(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldContains(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDHasPrefix applies the HasPrefix predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDHasPrefix(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldHasPrefix(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDHasSuffix applies the HasSuffix predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDHasSuffix(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldHasSuffix(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDIsNil applies the IsNil predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDIsNil() predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldIsNull(FieldInitiatorPrincipalID))
+}
+
+// InitiatorPrincipalIDNotNil applies the NotNil predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDNotNil() predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldNotNull(FieldInitiatorPrincipalID))
+}
+
+// InitiatorPrincipalIDEqualFold applies the EqualFold predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDEqualFold(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldEqualFold(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorPrincipalIDContainsFold applies the ContainsFold predicate on the "initiator_principal_id" field.
+func InitiatorPrincipalIDContainsFold(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldContainsFold(FieldInitiatorPrincipalID, v))
+}
+
+// InitiatorCredentialKindEQ applies the EQ predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindEQ(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldEQ(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindNEQ applies the NEQ predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindNEQ(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldNEQ(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindIn applies the In predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindIn(vs ...string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldIn(FieldInitiatorCredentialKind, vs...))
+}
+
+// InitiatorCredentialKindNotIn applies the NotIn predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindNotIn(vs ...string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldNotIn(FieldInitiatorCredentialKind, vs...))
+}
+
+// InitiatorCredentialKindGT applies the GT predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindGT(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldGT(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindGTE applies the GTE predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindGTE(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldGTE(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindLT applies the LT predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindLT(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldLT(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindLTE applies the LTE predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindLTE(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldLTE(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindContains applies the Contains predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindContains(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldContains(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindHasPrefix applies the HasPrefix predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindHasPrefix(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldHasPrefix(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindHasSuffix applies the HasSuffix predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindHasSuffix(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldHasSuffix(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindIsNil applies the IsNil predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindIsNil() predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldIsNull(FieldInitiatorCredentialKind))
+}
+
+// InitiatorCredentialKindNotNil applies the NotNil predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindNotNil() predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldNotNull(FieldInitiatorCredentialKind))
+}
+
+// InitiatorCredentialKindEqualFold applies the EqualFold predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindEqualFold(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldEqualFold(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialKindContainsFold applies the ContainsFold predicate on the "initiator_credential_kind" field.
+func InitiatorCredentialKindContainsFold(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldContainsFold(FieldInitiatorCredentialKind, v))
+}
+
+// InitiatorCredentialIDEQ applies the EQ predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDEQ(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldEQ(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDNEQ applies the NEQ predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDNEQ(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldNEQ(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDIn applies the In predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDIn(vs ...string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldIn(FieldInitiatorCredentialID, vs...))
+}
+
+// InitiatorCredentialIDNotIn applies the NotIn predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDNotIn(vs ...string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldNotIn(FieldInitiatorCredentialID, vs...))
+}
+
+// InitiatorCredentialIDGT applies the GT predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDGT(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldGT(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDGTE applies the GTE predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDGTE(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldGTE(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDLT applies the LT predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDLT(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldLT(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDLTE applies the LTE predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDLTE(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldLTE(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDContains applies the Contains predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDContains(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldContains(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDHasPrefix applies the HasPrefix predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDHasPrefix(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldHasPrefix(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDHasSuffix applies the HasSuffix predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDHasSuffix(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldHasSuffix(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDIsNil applies the IsNil predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDIsNil() predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldIsNull(FieldInitiatorCredentialID))
+}
+
+// InitiatorCredentialIDNotNil applies the NotNil predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDNotNil() predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldNotNull(FieldInitiatorCredentialID))
+}
+
+// InitiatorCredentialIDEqualFold applies the EqualFold predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDEqualFold(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldEqualFold(FieldInitiatorCredentialID, v))
+}
+
+// InitiatorCredentialIDContainsFold applies the ContainsFold predicate on the "initiator_credential_id" field.
+func InitiatorCredentialIDContainsFold(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldContainsFold(FieldInitiatorCredentialID, v))
+}
+
+// CorrelationIDEQ applies the EQ predicate on the "correlation_id" field.
+func CorrelationIDEQ(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldEQ(FieldCorrelationID, v))
+}
+
+// CorrelationIDNEQ applies the NEQ predicate on the "correlation_id" field.
+func CorrelationIDNEQ(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldNEQ(FieldCorrelationID, v))
+}
+
+// CorrelationIDIn applies the In predicate on the "correlation_id" field.
+func CorrelationIDIn(vs ...string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldIn(FieldCorrelationID, vs...))
+}
+
+// CorrelationIDNotIn applies the NotIn predicate on the "correlation_id" field.
+func CorrelationIDNotIn(vs ...string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldNotIn(FieldCorrelationID, vs...))
+}
+
+// CorrelationIDGT applies the GT predicate on the "correlation_id" field.
+func CorrelationIDGT(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldGT(FieldCorrelationID, v))
+}
+
+// CorrelationIDGTE applies the GTE predicate on the "correlation_id" field.
+func CorrelationIDGTE(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldGTE(FieldCorrelationID, v))
+}
+
+// CorrelationIDLT applies the LT predicate on the "correlation_id" field.
+func CorrelationIDLT(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldLT(FieldCorrelationID, v))
+}
+
+// CorrelationIDLTE applies the LTE predicate on the "correlation_id" field.
+func CorrelationIDLTE(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldLTE(FieldCorrelationID, v))
+}
+
+// CorrelationIDContains applies the Contains predicate on the "correlation_id" field.
+func CorrelationIDContains(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldContains(FieldCorrelationID, v))
+}
+
+// CorrelationIDHasPrefix applies the HasPrefix predicate on the "correlation_id" field.
+func CorrelationIDHasPrefix(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldHasPrefix(FieldCorrelationID, v))
+}
+
+// CorrelationIDHasSuffix applies the HasSuffix predicate on the "correlation_id" field.
+func CorrelationIDHasSuffix(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldHasSuffix(FieldCorrelationID, v))
+}
+
+// CorrelationIDIsNil applies the IsNil predicate on the "correlation_id" field.
+func CorrelationIDIsNil() predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldIsNull(FieldCorrelationID))
+}
+
+// CorrelationIDNotNil applies the NotNil predicate on the "correlation_id" field.
+func CorrelationIDNotNil() predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldNotNull(FieldCorrelationID))
+}
+
+// CorrelationIDEqualFold applies the EqualFold predicate on the "correlation_id" field.
+func CorrelationIDEqualFold(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldEqualFold(FieldCorrelationID, v))
+}
+
+// CorrelationIDContainsFold applies the ContainsFold predicate on the "correlation_id" field.
+func CorrelationIDContainsFold(v string) predicate.BrokerDispatch {
+	return predicate.BrokerDispatch(sql.FieldContainsFold(FieldCorrelationID, v))
 }
 
 // And groups predicates with the AND operator between them.

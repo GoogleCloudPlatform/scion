@@ -313,9 +313,18 @@ func (s *ConversationStore) ListConversations(ctx context.Context, filter store.
 		query.Where(conversation.DriftStateEQ(conversation.DriftState(filter.DriftState)))
 	}
 
-	totalCount, err := query.Clone().Count(ctx)
-	if err != nil {
-		return nil, err
+	// Review round 2 finding #5: honor SkipTotalCount like the other
+	// stores (agent_store.go, group_store.go, ...) — a caller paging
+	// through every row (e.g. the conversation listing union) was already
+	// passing this flag, but it was silently ignored, so every page still
+	// ran a full COUNT.
+	totalCount := 0
+	if !opts.SkipTotalCount {
+		var err error
+		totalCount, err = query.Clone().Count(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Cursor-based keyset pagination using the same encoding as message_store.

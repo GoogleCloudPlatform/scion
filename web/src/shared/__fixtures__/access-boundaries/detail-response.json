@@ -123,6 +123,14 @@
   "updatedAt": "2026-08-28T11:03:47Z",
   "lastAuditEventId": "aev-91c4",
   "_capabilities": {
-    "actions": ["read", "readAudit", "previewCreate", "previewTighten", "previewRelax", "commit", "delete"]
+    "actions": [
+      "read",
+      "readAudit",
+      "previewCreate",
+      "previewTighten",
+      "previewRelax",
+      "commit",
+      "delete"
+    ]
   }
 }

@@ -45,12 +45,14 @@ type dispatchCall struct {
 	Message           string
 	Interrupt         bool
 	StructuredMessage *messages.StructuredMessage
+	// MessageID is the hub message ID carried on the dispatch context (#1820).
+	MessageID string
 }
 
-func (d *recordingDispatcher) DispatchAgentMessage(_ context.Context, agent *store.Agent, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
+func (d *recordingDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.calls = append(d.calls, dispatchCall{Agent: agent, Message: message, Interrupt: interrupt, StructuredMessage: structuredMsg})
+	d.calls = append(d.calls, dispatchCall{Agent: agent, Message: message, Interrupt: interrupt, StructuredMessage: structuredMsg, MessageID: dispatchMessageIDFromContext(ctx)})
 	return d.returnErr
 }
 
@@ -67,6 +69,10 @@ func (d *recordingDispatcher) DispatchAgentCreate(_ context.Context, _ *store.Ag
 	return nil
 }
 func (d *recordingDispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error {
+	return nil
+}
+
+func (d *recordingDispatcher) DispatchAgentReprovision(_ context.Context, _ *store.Agent) error {
 	return nil
 }
 func (d *recordingDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ string, _ bool) error {
@@ -188,7 +194,6 @@ func setupNotificationTest(t *testing.T) *notificationTestEnv {
 		ProjectID:       project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: tid("broker-1"),
-		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, watched))
 
@@ -200,7 +205,6 @@ func setupNotificationTest(t *testing.T) *notificationTestEnv {
 		ProjectID:       project.ID,
 		Phase:           string(state.PhaseRunning),
 		RuntimeBrokerID: tid("broker-1"),
-		Visibility:      store.VisibilityPrivate,
 	}
 	require.NoError(t, s.CreateAgent(ctx, subscriber))
 

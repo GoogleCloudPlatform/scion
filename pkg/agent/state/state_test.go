@@ -565,3 +565,29 @@ func TestActivitiesEnumeration(t *testing.T) {
 		t.Error("Activities() did not return a defensive copy; mutation leaked")
 	}
 }
+
+func TestExitReasonIsValid(t *testing.T) {
+	tests := []struct {
+		reason ExitReason
+		want   bool
+	}{
+		// Empty is valid: no reason given.
+		{"", true},
+		{ExitReasonCrashed, true},
+		{ExitReasonLimitsExceeded, true},
+		{ExitReasonPreempted, true},
+		{ExitReasonEvicted, true},
+		// Unrecognised values.
+		{"bogus", false},
+		{"Preempted", false},
+		{"EVICTED", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.reason), func(t *testing.T) {
+			if got := tt.reason.IsValid(); got != tt.want {
+				t.Errorf("ExitReason(%q).IsValid() = %v, want %v", tt.reason, got, tt.want)
+			}
+		})
+	}
+}

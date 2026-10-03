@@ -64,9 +64,7 @@ describe('markdown renderer: raw HTML escaping', () => {
   });
 
   it('keeps <template> in fenced code blocks escaped (already handled by marked)', () => {
-    const result = renderer.render(
-      '```\nUse -t <template> here\n```'
-    );
+    const result = renderer.render('```\nUse -t <template> here\n```');
     expect(result).toContain('&lt;template&gt;');
   });
 });

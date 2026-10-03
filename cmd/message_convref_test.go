@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -37,6 +38,8 @@ type outboundMessage struct {
 	Type            string
 	Urgent          bool
 	ConversationRef string
+	Wake            bool
+	Attachments     []string
 }
 
 // convRefMockServer provides a test server for conversation-ref CLI tests.
@@ -60,6 +63,30 @@ func newConvRefMockHubServer(t *testing.T, projectID string) (*httptest.Server, 
 		case path == "/healthz" && r.Method == http.MethodGet:
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
 
+		case r.Method == http.MethodPost && strings.HasPrefix(path, "/api/v1/conversations/") && strings.HasSuffix(path, "/messages"):
+			// Conversation send endpoint: POST /api/v1/conversations/{id}/messages
+			// Used by Messaging().SendMessage() for conv:<uuid> replies.
+			convID := strings.TrimPrefix(path, "/api/v1/conversations/")
+			convID = strings.TrimSuffix(convID, "/messages")
+			var body struct {
+				Msg  string `json:"msg"`
+				Type string `json:"type"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
+			outbound = append(outbound, outboundMessage{
+				AgentName:       "conv:" + convID,
+				Message:         body.Msg,
+				Type:            body.Type,
+				ConversationRef: "conv:" + convID,
+			})
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"messageId": "msg-test-conv",
+				"status":    "delivered",
+			})
+
 		case r.Method == http.MethodPost && strings.HasPrefix(path, projectPrefix) && strings.HasSuffix(path, "/outbound-message"):
 			// Outbound message endpoint: /api/v1/projects/<pid>/agents/<agent>/outbound-message
 			rest := path[len(projectPrefix):]
@@ -74,10 +101,17 @@ func newConvRefMockHubServer(t *testing.T, projectID string) (*httptest.Server, 
 				Type:            body.Type,
 				Urgent:          body.Urgent,
 				ConversationRef: body.ConversationRef,
+				Wake:            body.Wake,
+				Attachments:     body.Attachments,
 			})
 			mu.Unlock()
 			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":   "msg-test-outbound",
+				"status":       "sent",
+				"recipient":    body.Recipient,
+				"recipient_id": "uid-test",
+			})
 
 		case r.Method == http.MethodPost && strings.HasPrefix(path, projectPrefix):
 			// Agent message endpoint (human-to-agent via StructuredMessage)
@@ -91,6 +125,7 @@ func newConvRefMockHubServer(t *testing.T, projectID string) (*httptest.Server, 
 				Message           string                      `json:"message"`
 				StructuredMessage *messages.StructuredMessage `json:"structured_message"`
 				Interrupt         bool                        `json:"interrupt"`
+				Mentions          []string                    `json:"mentions"`
 			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 
@@ -98,6 +133,7 @@ func newConvRefMockHubServer(t *testing.T, projectID string) (*httptest.Server, 
 				AgentName:     agentName,
 				Interrupt:     body.Interrupt,
 				StructuredMsg: body.StructuredMessage,
+				Mentions:      body.Mentions,
 			}
 			if body.StructuredMessage != nil {
 				sm.Message = body.StructuredMessage.Msg
@@ -108,8 +144,17 @@ func newConvRefMockHubServer(t *testing.T, projectID string) (*httptest.Server, 
 			mu.Lock()
 			sent = append(sent, sm)
 			mu.Unlock()
+
+			// Echo mention_results for the requested mentions, matching
+			// newMessageMockHubServer's pattern — good enough to exercise
+			// the CLI's own response handling without real hub resolution.
+			var mentionResults []messages.MentionResult
+			for _, m := range body.Mentions {
+				mentionResults = append(mentionResults, messages.MentionResult{Slug: m, Status: "not_found", Error: "no matching agent in this project"})
+			}
+
 			w.WriteHeader(http.StatusOK)
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok", "mention_results": mentionResults})
 
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -257,6 +302,81 @@ func TestSendMessageViaConversation_AgentRef_AgentContext(t *testing.T) {
 	assert.Equal(t, "agent:test-sender-agent", (*sent)[0].StructuredMsg.Sender)
 	assert.Equal(t, "agent:builder", (*sent)[0].StructuredMsg.Recipient)
 	assert.Equal(t, "please review", (*sent)[0].StructuredMsg.Msg)
+}
+
+// TestSendMessageViaConversation_AgentRef_MentionFanOut: @agent from an
+// agent context sends the body's @mention through the explicit mentions
+// field, filtered of the sender and the primary, and makes no extra
+// TypeMention POST.
+func TestSendMessageViaConversation_AgentRef_MentionFanOut(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	projectID := "proj-convref-agent-mention"
+	server, sent, outbound := newConvRefMockHubServer(t, projectID)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	ref := &messaging.Reference{
+		Kind:  messaging.RefAgent,
+		Value: "builder",
+		Raw:   "@builder",
+	}
+
+	err = sendMessageViaConversation(hubCtx, ref, "please review, cc @bystander and @test-sender-agent and @builder", false, false, nil)
+	require.NoError(t, err)
+
+	assert.Len(t, *outbound, 0, "no extra TypeMention POST for path B")
+	require.Len(t, *sent, 1, "exactly one request for the primary send")
+	assert.Equal(t, "builder", (*sent)[0].AgentName)
+	// The sender (test-sender-agent) and the primary (builder) are filtered
+	// out client-side; only the third-party bystander mention survives.
+	assert.Equal(t, []string{"bystander"}, (*sent)[0].Mentions)
+}
+
+// TestSendMessageViaConversation_AgentRef_JSONOutputIncludesMentionResults
+// is path B's --json coverage: the mention_results the mock echoes back must
+// actually reach stdout as part of the decoded response, not be silently
+// dropped the way it was before printing was wired up.
+func TestSendMessageViaConversation_AgentRef_JSONOutputIncludesMentionResults(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	origFormat := outputFormat
+	outputFormat = "json"
+	defer func() { outputFormat = origFormat }()
+
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	projectID := "proj-convref-agent-json"
+	server, _, _ := newConvRefMockHubServer(t, projectID)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
+	ref := &messaging.Reference{Kind: messaging.RefAgent, Value: "builder", Raw: "@builder"}
+
+	out := captureStdout(t, func() {
+		err = sendMessageViaConversation(hubCtx, ref, "please review @unknown-name", false, false, nil)
+	})
+	require.NoError(t, err)
+
+	var resp hubclient.MessageResponse
+	require.NoError(t, json.Unmarshal([]byte(out), &resp), "stdout: %s", out)
+	require.Len(t, resp.MentionResults, 1, "--json output must include mention_results")
+	require.Equal(t, "unknown-name", resp.MentionResults[0].Slug)
 }
 
 // TestConvRef_ThreadRefAccepted verifies that #<thread> references are
@@ -643,4 +763,603 @@ func TestSendMessageViaConversation_EmailEmptyMsgBeforeSend(t *testing.T) {
 	// DEF-51: no additional messages should be sent when validation fails.
 	assert.Len(t, *sent, 0, "no agent messages should be sent")
 	assert.Len(t, *outbound, 1, "outbound count should not increase after validation failure")
+}
+
+// --- CPM cutover (#1693) tests: conv: routes through outbound ---
+
+// TestSendMessageViaConversation_ConvRef_OutboundRoute verifies that conv:<uuid>
+// from an agent context routes through the outbound endpoint (not the
+// conversation send API). This is the core CPM cutover change (#1693).
+func TestSendMessageViaConversation_ConvRef_OutboundRoute(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	projectID := "proj-convref-outbound-route"
+	server, sent, outbound := newConvRefMockHubServer(t, projectID)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	convID := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	ref := &messaging.Reference{
+		Kind:  messaging.RefConversation,
+		Value: convID,
+		Raw:   "conv:" + convID,
+	}
+
+	err = sendMessageViaConversation(hubCtx, ref, "outbound route test", false, false, nil)
+	require.NoError(t, err)
+
+	// Must go through outbound, not the agent message path
+	assert.Len(t, *sent, 0, "conv: should not use agent message path")
+	require.Len(t, *outbound, 1, "conv: should use outbound path")
+	assert.Equal(t, "conv:"+convID, (*outbound)[0].ConversationRef)
+	assert.Equal(t, "outbound route test", (*outbound)[0].Message)
+	assert.Equal(t, "instruction", (*outbound)[0].Type)
+	assert.Equal(t, "test-sender-agent", (*outbound)[0].AgentName)
+}
+
+// TestSendMessageViaConversation_ConvRef_WakeSerialized verifies that
+// --wake is serialized in the outbound request for conv: references.
+// CPM cutover (#1693): wake was previously rejected for conv:.
+func TestSendMessageViaConversation_ConvRef_WakeSerialized(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	projectID := "proj-convref-wake"
+	server, _, outbound := newConvRefMockHubServer(t, projectID)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	convID := "aaaaaaaa-bbbb-cccc-dddd-111111111111"
+	ref := &messaging.Reference{
+		Kind:  messaging.RefConversation,
+		Value: convID,
+		Raw:   "conv:" + convID,
+	}
+
+	// Wake=true should be serialized
+	err = sendMessageViaConversation(hubCtx, ref, "wake me up", false, true, nil)
+	require.NoError(t, err, "conv: with --wake should succeed via outbound")
+
+	require.Len(t, *outbound, 1)
+	assert.True(t, (*outbound)[0].Wake, "wake flag should be serialized in outbound request")
+
+	// Wake=false should also work (baseline)
+	err = sendMessageViaConversation(hubCtx, ref, "no wake", false, false, nil)
+	require.NoError(t, err)
+
+	require.Len(t, *outbound, 2)
+	assert.False(t, (*outbound)[1].Wake, "wake=false should be serialized correctly")
+}
+
+// TestSendMessageViaConversation_ConvRef_AttachmentsSerialized verifies that
+// --attach is serialized in the outbound request for conv: references.
+// CPM cutover (#1693): attachments were previously rejected for conv:.
+func TestSendMessageViaConversation_ConvRef_AttachmentsSerialized(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	projectID := "proj-convref-attach"
+	server, _, outbound := newConvRefMockHubServer(t, projectID)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	convID := "aaaaaaaa-bbbb-cccc-dddd-222222222222"
+	ref := &messaging.Reference{
+		Kind:  messaging.RefConversation,
+		Value: convID,
+		Raw:   "conv:" + convID,
+	}
+
+	attachments := []string{"/workspace/notes.md", "/scion-volumes/data.json"}
+	err = sendMessageViaConversation(hubCtx, ref, "msg with attachments", false, false, attachments)
+	require.NoError(t, err, "conv: with --attach should succeed via outbound")
+
+	require.Len(t, *outbound, 1)
+	assert.Equal(t, attachments, (*outbound)[0].Attachments, "attachments should be serialized")
+}
+
+// TestSendMessageViaConversation_ConvRef_UrgentSerialized verifies that
+// --interrupt (urgent) is serialized for conv: references via outbound.
+func TestSendMessageViaConversation_ConvRef_UrgentSerialized(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	projectID := "proj-convref-urgent"
+	server, _, outbound := newConvRefMockHubServer(t, projectID)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	convID := "aaaaaaaa-bbbb-cccc-dddd-333333333333"
+	ref := &messaging.Reference{
+		Kind:  messaging.RefConversation,
+		Value: convID,
+		Raw:   "conv:" + convID,
+	}
+
+	// Urgent=true
+	err = sendMessageViaConversation(hubCtx, ref, "urgent msg", true, false, nil)
+	require.NoError(t, err)
+
+	require.Len(t, *outbound, 1)
+	assert.True(t, (*outbound)[0].Urgent, "urgent flag should be serialized")
+}
+
+// TestSendMessageViaConversation_ConvRef_GroupViaOutbound verifies that
+// same-project group conversations via conv: work through the outbound
+// endpoint. This addresses the original 501 regression from PR #1679.
+func TestSendMessageViaConversation_ConvRef_GroupViaOutbound(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	projectID := "proj-convref-group"
+	server, sent, outbound := newConvRefMockHubServer(t, projectID)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	// Use a conv: ref that represents a group conversation
+	groupConvID := "gggggggg-rrrr-oooo-uuuu-pppppppppppp"
+	ref := &messaging.Reference{
+		Kind:  messaging.RefConversation,
+		Value: groupConvID,
+		Raw:   "conv:" + groupConvID,
+	}
+
+	err = sendMessageViaConversation(hubCtx, ref, "group message", false, false, nil)
+	require.NoError(t, err, "group conversation via conv: should work through outbound")
+
+	assert.Len(t, *sent, 0, "conv: should not use agent message path")
+	require.Len(t, *outbound, 1, "conv: should use outbound path")
+	assert.Equal(t, "conv:"+groupConvID, (*outbound)[0].ConversationRef)
+}
+
+// TestSendMessageViaConversation_ConvRef_OutputFormat verifies that text
+// and JSON output modes produce correct output for conv: sends via outbound.
+// CPM cutover (#1693): the outbound result carries message_id and status.
+func TestSendMessageViaConversation_ConvRef_OutputFormat(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	projectID := "proj-convref-output"
+	server, _, _ := newConvRefMockHubServer(t, projectID)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	convID := "aaaaaaaa-bbbb-cccc-dddd-444444444444"
+	ref := &messaging.Reference{
+		Kind:  messaging.RefConversation,
+		Value: convID,
+		Raw:   "conv:" + convID,
+	}
+
+	// Text mode (default) — should succeed without error
+	err = sendMessageViaConversation(hubCtx, ref, "text output test", false, false, nil)
+	require.NoError(t, err)
+}
+
+// TestSendMessageViaConversation_ConvRef_DispatchError verifies that when the
+// outbound endpoint returns an error for conv: sends, the error propagates
+// without trying another endpoint. CPM cutover (#1693) acceptance criteria:
+// policy denials and dispatch failures return non-success.
+func TestSendMessageViaConversation_ConvRef_DispatchError(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	projectID := "proj-convref-error"
+	// Use a server that returns 403 for outbound messages
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case strings.HasSuffix(r.URL.Path, "/outbound-message"):
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]interface{}{
+					"code":    "forbidden",
+					"message": "policy denied: cross-project attachment not allowed",
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	convID := "aaaaaaaa-bbbb-cccc-dddd-555555555555"
+	ref := &messaging.Reference{
+		Kind:  messaging.RefConversation,
+		Value: convID,
+		Raw:   "conv:" + convID,
+	}
+
+	err = sendMessageViaConversation(hubCtx, ref, "should fail", false, false, nil)
+	require.Error(t, err, "policy denial should propagate as error")
+	assert.Contains(t, err.Error(), "failed to send message to conv:")
+}
+
+// TestSendMessageViaConversation_ConvRef_JSONOutputContent verifies that
+// JSON output mode emits the full OutboundMessageResult with message_id,
+// status, recipient, and recipient_id fields. CPM cutover (#1693) AC-4.
+func TestSendMessageViaConversation_ConvRef_JSONOutputContent(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	// Enable JSON output mode
+	oldFormat := outputFormat
+	outputFormat = "json"
+	defer func() { outputFormat = oldFormat }()
+
+	projectID := "proj-convref-json-output"
+	server, _, _ := newConvRefMockHubServer(t, projectID)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	convID := "aaaaaaaa-bbbb-cccc-dddd-666666666666"
+	ref := &messaging.Reference{
+		Kind:  messaging.RefConversation,
+		Value: convID,
+		Raw:   "conv:" + convID,
+	}
+
+	// Capture stdout to verify JSON content
+	oldStdout := os.Stdout
+	r, w, pipeErr := os.Pipe()
+	require.NoError(t, pipeErr)
+	os.Stdout = w
+
+	err = sendMessageViaConversation(hubCtx, ref, "json output test", false, false, nil)
+
+	// Restore stdout and read captured output
+	_ = w.Close()
+	os.Stdout = oldStdout
+
+	require.NoError(t, err)
+
+	var buf [4096]byte
+	n, _ := r.Read(buf[:])
+	_ = r.Close()
+	output := string(buf[:n])
+
+	// Parse the JSON output and verify structure
+	var result hubclient.OutboundMessageResult
+	jsonErr := json.Unmarshal([]byte(output), &result)
+	require.NoError(t, jsonErr, "output must be valid JSON; got: %s", output)
+
+	// Verify fields from the mock server response
+	assert.Equal(t, "msg-test-outbound", result.MessageID, "message_id should match mock response")
+	assert.Equal(t, "sent", result.Status, "status should match mock response")
+	assert.Equal(t, "uid-test", result.RecipientID, "recipient_id should match mock response")
+}
+
+// new204OutboundMockServer answers /healthz normally and returns 204 No
+// Content (no body) for the outbound-message endpoint, exercising
+// apiclient.DecodeResponse's "204 -> (nil, nil)" branch.
+func new204OutboundMockServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/outbound-message"):
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+// TestSendMessageViaConversation_ConvRef_204NoContent_PlainOutput pins the
+// nil-result guard: apiclient.DecodeResponse returns (nil, nil) on a 204 No
+// Content response, so SendOutboundMessage's result can be nil even though
+// err is nil. The CLI must not panic dereferencing result.Status in
+// plain-output mode; it must print the minimal confirmation instead.
+func TestSendMessageViaConversation_ConvRef_204NoContent_PlainOutput(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	server := new204OutboundMockServer(t)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: "proj-convref-204-plain",
+	}
+
+	convID := "aaaaaaaa-bbbb-cccc-dddd-777777777777"
+	ref := &messaging.Reference{
+		Kind:  messaging.RefConversation,
+		Value: convID,
+		Raw:   "conv:" + convID,
+	}
+
+	oldStdout := os.Stdout
+	r, w, pipeErr := os.Pipe()
+	require.NoError(t, pipeErr)
+	os.Stdout = w
+
+	var sendErr error
+	func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				os.Stdout = oldStdout
+				t.Fatalf("must not panic on a nil (204) SendOutboundMessage result, got: %v", rec)
+			}
+		}()
+		sendErr = sendMessageViaConversation(hubCtx, ref, "204 test", false, false, nil)
+	}()
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+	require.NoError(t, sendErr)
+
+	var buf [4096]byte
+	n, _ := r.Read(buf[:])
+	_ = r.Close()
+	output := string(buf[:n])
+
+	assert.Equal(t, "Message dispatched to conv:"+convID+".\n", output)
+}
+
+// TestSendMessageViaConversation_ConvRef_204NoContent_JSONOutput is the
+// --json counterpart: outputJSON(nil) must encode valid JSON null rather
+// than panic on a nil *OutboundMessageResult.
+func TestSendMessageViaConversation_ConvRef_204NoContent_JSONOutput(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	oldFormat := outputFormat
+	outputFormat = "json"
+	defer func() { outputFormat = oldFormat }()
+
+	server := new204OutboundMockServer(t)
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: "proj-convref-204-json",
+	}
+
+	convID := "aaaaaaaa-bbbb-cccc-dddd-888888888888"
+	ref := &messaging.Reference{
+		Kind:  messaging.RefConversation,
+		Value: convID,
+		Raw:   "conv:" + convID,
+	}
+
+	oldStdout := os.Stdout
+	r, w, pipeErr := os.Pipe()
+	require.NoError(t, pipeErr)
+	os.Stdout = w
+
+	var sendErr error
+	func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				os.Stdout = oldStdout
+				t.Fatalf("must not panic encoding a nil (204) SendOutboundMessage result as JSON, got: %v", rec)
+			}
+		}()
+		sendErr = sendMessageViaConversation(hubCtx, ref, "204 json test", false, false, nil)
+	}()
+
+	_ = w.Close()
+	os.Stdout = oldStdout
+	require.NoError(t, sendErr)
+
+	var buf [4096]byte
+	n, _ := r.Read(buf[:])
+	_ = r.Close()
+	output := strings.TrimSpace(string(buf[:n]))
+
+	assert.Equal(t, "null", output, "outputJSON(nil) must encode JSON null")
+}
+
+// TestSendMessageViaConversation_AgentRef_AgentContext_Deferred is the
+// agent-sender half of the migration gate CLI test (design agent-reincarnate
+// §3.7, Amendment A25 2a.2): @agent from an agent context routes through
+// SendStructuredMessage (DEF-164); when the hub reports status "deferred"
+// (the target is mid-`scion reincarnate`), the CLI must print the deferred
+// notice instead of the generic "delivered" message.
+func TestSendMessageViaConversation_AgentRef_AgentContext_Deferred(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	projectID := "proj-convref-agent-deferred"
+	projectPrefix := "/api/v1/projects/" + projectID + "/agents/"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, projectPrefix) && strings.HasSuffix(r.URL.Path, "/message"):
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id": "msg-deferred-agent-ctx",
+				"status":     "deferred",
+				"deferred":   "agent is reincarnating",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	ref := &messaging.Reference{
+		Kind:  messaging.RefAgent,
+		Value: "builder",
+		Raw:   "@builder",
+	}
+
+	var sendErr error
+	output := captureStdout(t, func() {
+		sendErr = sendMessageViaConversation(hubCtx, ref, "please review", false, false, nil)
+	})
+	require.NoError(t, sendErr, "a deferred delivery must not be reported as a send error")
+	assert.Contains(t, output, "agent builder is reincarnating; message saved to history and will be seen on catch-up")
+	assert.Contains(t, output, "msg-deferred-agent-ctx")
+	assert.NotContains(t, output, "Message delivered to agent")
+}
+
+// TestSendMessageViaConversation_OutboundPath_Deferred covers the
+// conv:/@email/#thread outbound path (agent context) reporting a deferred
+// migration-gate outcome.
+func TestSendMessageViaConversation_OutboundPath_Deferred(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+
+	t.Setenv("SCION_AGENT_NAME", "test-sender-agent")
+
+	projectID := "proj-convref-outbound-deferred"
+	projectPrefix := "/api/v1/projects/" + projectID + "/agents/"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, projectPrefix) && strings.HasSuffix(r.URL.Path, "/outbound-message"):
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message_id":   "msg-deferred-outbound",
+				"status":       "deferred",
+				"deferred":     "agent is reincarnating",
+				"recipient":    "agent:peer",
+				"recipient_id": "uid-peer",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+
+	hubCtx := &HubContext{
+		Client:    client,
+		Endpoint:  server.URL,
+		ProjectID: projectID,
+	}
+
+	convID := "conv-uuid-deferred"
+	ref := &messaging.Reference{
+		Kind:  messaging.RefConversation,
+		Value: convID,
+		Raw:   "conv:" + convID,
+	}
+
+	var sendErr error
+	output := captureStdout(t, func() {
+		sendErr = sendMessageViaConversation(hubCtx, ref, "hello during migration", false, false, nil)
+	})
+	require.NoError(t, sendErr, "a deferred delivery must not be reported as a send error")
+	assert.Contains(t, output, "agent conv:"+convID+" is reincarnating; message saved to history and will be seen on catch-up")
+	assert.Contains(t, output, "msg-deferred-outbound")
 }

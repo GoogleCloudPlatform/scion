@@ -104,14 +104,14 @@ func TestProjectAndAgentEdge(t *testing.T) {
 	client := newTestClient(t)
 	ctx := context.Background()
 
-	// Create a grove
+	// Create a project
 	g, err := client.Project.Create().
-		SetName("test-grove").
-		SetSlug("test-grove").
+		SetName("test-project").
+		SetSlug("test-project").
 		Save(ctx)
 	require.NoError(t, err)
 
-	// Create an agent linked to the grove
+	// Create an agent linked to the project
 	a, err := client.Agent.Create().
 		SetSlug("agent-1").
 		SetName("Agent One").
@@ -120,7 +120,7 @@ func TestProjectAndAgentEdge(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, g.ID, a.ProjectID)
 
-	// Query agents through grove edge
+	// Query agents through project edge
 	agents, err := client.Project.QueryAgents(g).All(ctx)
 	require.NoError(t, err)
 	require.Len(t, agents, 1)
@@ -132,8 +132,8 @@ func TestAgentSlugProjectUnique(t *testing.T) {
 	ctx := context.Background()
 
 	g, err := client.Project.Create().
-		SetName("grove").
-		SetSlug("grove").
+		SetName("project").
+		SetSlug("project").
 		Save(ctx)
 	require.NoError(t, err)
 
@@ -149,7 +149,7 @@ func TestAgentSlugProjectUnique(t *testing.T) {
 		SetName("Agent B").
 		SetProject(g).
 		Save(ctx)
-	assert.Error(t, err, "duplicate slug+grove_id should fail")
+	assert.Error(t, err, "duplicate slug+project_id should fail")
 }
 
 func TestGroupMembership(t *testing.T) {
@@ -289,17 +289,17 @@ func TestGroupProjectEdge(t *testing.T) {
 	client := newTestClient(t)
 	ctx := context.Background()
 
-	// Create a grove
+	// Create a project
 	gv, err := client.Project.Create().
-		SetName("my-grove").
-		SetSlug("my-grove").
+		SetName("my-project").
+		SetSlug("my-project").
 		Save(ctx)
 	require.NoError(t, err)
 
-	// Create a grove_agents group linked to the grove via grove_id field
+	// Create a project_agents group linked to the project via project_id field
 	grp, err := client.Group.Create().
-		SetName("my-grove-agents").
-		SetSlug("my-grove-agents").
+		SetName("my-project-agents").
+		SetSlug("my-project-agents").
 		SetGroupType("project_agents").
 		SetProjectID(gv.ID).
 		Save(ctx)
@@ -307,10 +307,10 @@ func TestGroupProjectEdge(t *testing.T) {
 	assert.NotNil(t, grp.ProjectID)
 	assert.Equal(t, gv.ID, *grp.ProjectID)
 
-	// Create a second group for the same grove (members group)
+	// Create a second group for the same project (members group)
 	grp2, err := client.Group.Create().
-		SetName("my-grove-members").
-		SetSlug("my-grove-members").
+		SetName("my-project-members").
+		SetSlug("my-project-members").
 		SetGroupType("explicit").
 		SetProjectID(gv.ID).
 		Save(ctx)
@@ -318,7 +318,7 @@ func TestGroupProjectEdge(t *testing.T) {
 	assert.NotNil(t, grp2.ProjectID)
 	assert.Equal(t, gv.ID, *grp2.ProjectID)
 
-	// Query groups by grove_id field
+	// Query groups by project_id field
 	groups, err := client.Group.Query().
 		Where(group.ProjectIDEQ(gv.ID)).
 		All(ctx)

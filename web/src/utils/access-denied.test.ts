@@ -133,9 +133,7 @@ describe('formatAccessDenied', () => {
     const result = formatAccessDenied(detail);
     expect(result.secondary).toContain('<script>');
     // The string itself is literal text, not stripped or interpreted.
-    expect(result.secondary).toBe(
-      'Permission needed: <script>alert("xss")</script> on agent'
-    );
+    expect(result.secondary).toBe('Permission needed: <script>alert("xss")</script> on agent');
   });
 
   it('treats <img onerror> payload in resource as literal text', () => {
@@ -144,9 +142,7 @@ describe('formatAccessDenied', () => {
       resource: '<img src=x onerror=alert(1)>',
     };
     const result = formatAccessDenied(detail);
-    expect(result.secondary).toBe(
-      'Permission needed: delete on <img src=x onerror=alert(1)>'
-    );
+    expect(result.secondary).toBe('Permission needed: delete on <img src=x onerror=alert(1)>');
   });
 
   it('treats hostile strings in reason as literal text', () => {
@@ -189,12 +185,10 @@ describe('formatAccessDenied', () => {
     const detail: AccessDeniedDetail = {
       action: 'update',
       resource: 'user',
-      reason: 'requires user.update permission to modify another user\'s profile',
+      reason: "requires user.update permission to modify another user's profile",
     };
     const result = formatAccessDenied(detail);
-    expect(result.primary).toBe(
-      'requires user.update permission to modify another user\'s profile'
-    );
+    expect(result.primary).toBe("requires user.update permission to modify another user's profile");
     expect(result.secondary).toBe('Permission needed: update on user');
   });
 
@@ -216,9 +210,7 @@ describe('formatAccessDenied', () => {
       reason: 'Insufficient permissions',
     };
     const result = formatAccessDenied(detail);
-    expect(result.primary).toBe(
-      "You don't have permission to perform this action."
-    );
+    expect(result.primary).toBe("You don't have permission to perform this action.");
     expect(result.secondary).toBe('Permission needed: create on role_binding');
   });
 
@@ -229,9 +221,7 @@ describe('formatAccessDenied', () => {
       reason: 'Insufficient permissions',
     };
     const result = formatAccessDenied(detail);
-    expect(result.primary).toBe(
-      "You don't have permission to perform this action."
-    );
+    expect(result.primary).toBe("You don't have permission to perform this action.");
     expect(result.secondary).toBe('Permission needed: delete on role_binding');
   });
 
@@ -243,8 +233,7 @@ describe('formatAccessDenied', () => {
     };
     const result = formatAccessDenied(detail);
     // The formatted output should not contain any UUID-shaped strings.
-    const uuidPattern =
-      /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+    const uuidPattern = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
     expect(result.primary).not.toMatch(uuidPattern);
     expect(result.secondary).not.toMatch(uuidPattern);
   });
@@ -327,6 +316,106 @@ describe('showAccessDeniedToast', () => {
 });
 
 // ---------------------------------------------------------------------------
+// showAccessDeniedToast — no competing sl-after-hide listener (#1733)
+// ---------------------------------------------------------------------------
+
+describe('showAccessDeniedToast cleanup (#1733)', () => {
+  beforeEach(() => {
+    _resetDedupState();
+  });
+
+  afterEach(() => {
+    document.querySelectorAll('sl-alert').forEach((el) => el.remove());
+    vi.restoreAllMocks();
+    _resetDedupState();
+  });
+
+  it('does NOT register an app-owned sl-after-hide listener on the two-line toast', () => {
+    // Track sl-after-hide listeners registered on sl-alert elements
+    const afterHideListeners: Array<() => void> = [];
+    const origCreate = document.createElement.bind(document);
+    vi.spyOn(document, 'createElement').mockImplementation(
+      (tag: string, options?: ElementCreationOptions) => {
+        const el = origCreate(tag, options);
+        if (tag === 'sl-alert') {
+          const origAdd = el.addEventListener.bind(el);
+          vi.spyOn(el, 'addEventListener').mockImplementation(
+            (type: string, listener: EventListenerOrEventListenerObject, opts?: unknown) => {
+              if (type === 'sl-after-hide' && typeof listener === 'function') {
+                afterHideListeners.push(listener as () => void);
+              }
+              origAdd(type, listener, opts as AddEventListenerOptions);
+            }
+          );
+          (el as unknown as Record<string, unknown>).toast = vi.fn();
+        }
+        return el;
+      }
+    );
+
+    showAccessDeniedToast({
+      action: 'delete',
+      resource: 'agent',
+      reason: 'Insufficient permissions',
+    });
+
+    // The two-line path in showAccessDeniedToast must NOT register
+    // any sl-after-hide listener — Shoelace's toast() handles cleanup.
+    expect(afterHideListeners.length).toBe(0);
+  });
+
+  it('does NOT register an app-owned sl-after-hide listener on the single-line toast', () => {
+    const afterHideListeners: Array<() => void> = [];
+    const origCreate = document.createElement.bind(document);
+    vi.spyOn(document, 'createElement').mockImplementation(
+      (tag: string, options?: ElementCreationOptions) => {
+        const el = origCreate(tag, options);
+        if (tag === 'sl-alert') {
+          const origAdd = el.addEventListener.bind(el);
+          vi.spyOn(el, 'addEventListener').mockImplementation(
+            (type: string, listener: EventListenerOrEventListenerObject, opts?: unknown) => {
+              if (type === 'sl-after-hide' && typeof listener === 'function') {
+                afterHideListeners.push(listener as () => void);
+              }
+              origAdd(type, listener, opts as AddEventListenerOptions);
+            }
+          );
+          (el as unknown as Record<string, unknown>).toast = vi.fn();
+        }
+        return el;
+      }
+    );
+
+    // Legacy 403 with no detail → goes through showToast() single-line path
+    showAccessDeniedToast({});
+
+    // Neither path should register sl-after-hide listeners
+    expect(afterHideListeners.length).toBe(0);
+  });
+
+  it('element is not removed from DOM by app code on sl-after-hide', () => {
+    stubAlertToast();
+
+    showAccessDeniedToast({
+      action: 'delete',
+      resource: 'agent',
+      reason: 'Insufficient permissions',
+    });
+
+    const alert = document.querySelector('sl-alert');
+    expect(alert).not.toBeNull();
+    expect(document.body.contains(alert)).toBe(true);
+
+    // Simulate Shoelace firing sl-after-hide
+    alert!.dispatchEvent(new Event('sl-after-hide'));
+
+    // Element should still be in DOM — only Shoelace's toast() cleanup
+    // (which is stubbed in tests) should remove it.
+    expect(document.body.contains(alert)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // showAccessDeniedToast — dedup coalescing with mocked Date.now
 // ---------------------------------------------------------------------------
 
@@ -375,11 +464,11 @@ describe('showAccessDeniedToast dedup', () => {
   });
 
   it('suppresses A→B→A interleaved within window', () => {
-    showAccessDeniedToast({ action: 'read', resource: 'hub' });   // A fires
+    showAccessDeniedToast({ action: 'read', resource: 'hub' }); // A fires
     nowMs += 100;
     showAccessDeniedToast({ action: 'update', resource: 'hub' }); // B fires (distinct)
     nowMs += 100;
-    showAccessDeniedToast({ action: 'read', resource: 'hub' });   // A again at +200ms — suppressed
+    showAccessDeniedToast({ action: 'read', resource: 'hub' }); // A again at +200ms — suppressed
 
     expect(document.querySelectorAll('sl-alert').length).toBe(2);
   });

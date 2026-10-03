@@ -134,7 +134,10 @@ func TelemetryConfigToEnv(cfg *api.TelemetryConfig) map[string]string {
 			}
 		}
 		if cfg.Cloud.TLS != nil && cfg.Cloud.TLS.InsecureSkipVerify != nil {
-			env["SCION_OTEL_INSECURE"] = strconv.FormatBool(*cfg.Cloud.TLS.InsecureSkipVerify)
+			env["SCION_OTEL_SKIP_TLS_VERIFY"] = strconv.FormatBool(*cfg.Cloud.TLS.InsecureSkipVerify)
+		}
+		if cfg.Cloud.TLS != nil && cfg.Cloud.TLS.Enabled != nil {
+			env["SCION_OTEL_INSECURE"] = strconv.FormatBool(!*cfg.Cloud.TLS.Enabled)
 		}
 		if cfg.Cloud.TLS != nil && cfg.Cloud.TLS.CAFile != "" {
 			env["SCION_OTEL_CA_FILE"] = cfg.Cloud.TLS.CAFile

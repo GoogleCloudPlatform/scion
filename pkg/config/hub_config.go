@@ -19,8 +19,12 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +48,20 @@ type HubServerConfig struct {
 	// This is passed to agents so they know where to report status updates.
 	// If empty, agents won't be able to call back to the Hub.
 	Endpoint string `json:"endpoint" yaml:"endpoint" koanf:"endpoint"`
+
+	// AgentEndpoint optionally overrides Endpoint for the sole purpose of the
+	// SCION_HUB_ENDPOINT value injected into dispatched agents. Use this when
+	// agents must reach the Hub on a different address than users (e.g. an
+	// internal VPC URL), while invite links, chat-bridge links, the OIDC
+	// issuer default, and the cloudrun_invoker audience default continue to
+	// use Endpoint. It is injected into agents on every runtime broker
+	// attached to this Hub, including remote brokers — see the settings
+	// reference before setting it. When unset, agents receive the Hub's
+	// regular endpoint (Endpoint, or the endpoint the Hub resolves when
+	// Endpoint is unset). When set, it must be scheme://host[:port] only —
+	// see ValidateAgentEndpoint, which also returns the normalized form that
+	// should be stored back into this field.
+	AgentEndpoint string `json:"agentEndpoint,omitempty" yaml:"agentEndpoint,omitempty" koanf:"agentEndpoint"`
 
 	// CORS settings
 	CORSEnabled        bool     `json:"corsEnabled" yaml:"corsEnabled" koanf:"corsEnabled"`
@@ -102,11 +120,40 @@ type HubServerConfig struct {
 	// before being marked as stalled. Default: 5 minutes.
 	StalledThreshold time.Duration `json:"stalledThreshold" yaml:"stalledThreshold" koanf:"stalledThreshold"`
 
+	// MissingAgentGrace is how long a running agent must be continuously
+	// absent from its runtime broker's complete heartbeat inventory before
+	// the Hub marks it phase=error with exit reason container_missing.
+	// Default: 3 minutes (minimum 1 minute).
+	MissingAgentGrace time.Duration `json:"missingAgentGrace" yaml:"missingAgentGrace" koanf:"missingAgentGrace"`
+
 	// DisableLegacyStorageFallback disables the legacy un-namespaced storage
 	// path fallback introduced during GCS namespace migration. When true,
 	// only hub-scoped paths are checked; legacy paths are never consulted.
 	// Enable this after all resources have been migrated to namespaced paths.
 	DisableLegacyStorageFallback bool `json:"disableLegacyStorageFallback" yaml:"disableLegacyStorageFallback" koanf:"disableLegacyStorageFallback"`
+
+	// --- Async agent create (design §3.7) ---
+
+	// AsyncAgentLaunch is the kill switch for non-blocking agent create. Off
+	// by default; even when on, a launch is only non-blocking for a request
+	// that also opts in (AcceptAsyncLaunch). Old clients that never opt in
+	// stay synchronous permanently, regardless of this flag.
+	AsyncAgentLaunch bool `json:"asyncAgentLaunch" yaml:"asyncAgentLaunch" koanf:"asyncAgentLaunch"`
+
+	// LaunchTimeout is the whole-launch budget from BeginLaunch (design
+	// §3.10). Default 5 minutes. The Hub reaper ends every in-flight launch
+	// between this deadline and +15s; the broker aborts 20s before it. The
+	// API already advertises the remaining budget (`launch.remainingSeconds`,
+	// design §3.2) so a client can size its own wait around it, but no
+	// client does that yet (planned CLI behavior, design §3.11).
+	LaunchTimeout time.Duration `json:"launchTimeout" yaml:"launchTimeout" koanf:"launchTimeout"`
+
+	// LaunchKeepaliveSeconds is the broker keepalive interval, in seconds
+	// (design §3.7). Today it only sets the reaper's staleness window (8x
+	// this value); it will also be sent to the broker as
+	// launchKeepaliveSeconds in the create request once the async dispatch
+	// path lands. Default 15.
+	LaunchKeepaliveSeconds int `json:"launchKeepaliveSeconds" yaml:"launchKeepaliveSeconds" koanf:"launchKeepaliveSeconds"`
 }
 
 // DefaultHubID generates a deterministic hub instance ID from the machine hostname.
@@ -239,6 +286,42 @@ func (c *HubServerConfig) ResolveHubID() string {
 	return ResolveHubIDFromEnv()
 }
 
+// ResolveHubIDFromEnvReadOnly mirrors ResolveHubIDFromEnv's environment
+// fallback precedence (SCION_SERVER_HUB_HUBID, then K_SERVICE, then the
+// persisted workstation ID) but never derives-and-persists a fresh ID to
+// disk (ptone/scion#2152 round-3 review finding 1). It reports ok=false when
+// the only way to resolve an ID would be to create ~/.scion/hub-id for the
+// first time via PersistentHubID — a write a read-only caller (e.g.
+// `hub secret migrate-names --dry-run`) must not perform, since a value
+// derived-but-not-persisted here could disagree with whatever a later real
+// run ends up persisting.
+//
+// This does not use or populate ResolveHubIDFromEnv's process-lifetime
+// cache: the two are expected to disagree on the first-boot, no-file-yet
+// case, for exactly the reason above.
+func ResolveHubIDFromEnvReadOnly() (id string, ok bool) {
+	if v := os.Getenv("SCION_SERVER_HUB_HUBID"); v != "" {
+		return v, true
+	}
+	if kService := os.Getenv("K_SERVICE"); kService != "" {
+		h := sha256.Sum256([]byte(kService))
+		return hex.EncodeToString(h[:6]), true
+	}
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return "", false
+	}
+	data, err := os.ReadFile(filepath.Join(globalDir, hubIDFileName))
+	if err != nil {
+		return "", false
+	}
+	stored := strings.TrimSpace(string(data))
+	if stored == "" {
+		return "", false
+	}
+	return stored, true
+}
+
 // IsHubIDUnconfigured returns true when hub_id was not explicitly set in
 // config. On Cloud Run, ResolveHubID() will still produce a stable ID via
 // K_SERVICE, but this method checks whether the operator explicitly pinned
@@ -257,6 +340,113 @@ func (c *HubServerConfig) ResolveHubName() string {
 		return "unknown"
 	}
 	return hostname
+}
+
+// validAgentEndpointLabelRE matches one DNS label made only of letters,
+// digits, '_', and '-', each dot-separated label matched individually so that
+// a leading or trailing '-' is rejected per label rather than only at the
+// ends of the whole host. Underscore is accepted because Docker's embedded
+// DNS and Compose-style service names commonly use it (e.g. "scion_hub").
+// IP literals are checked separately with net.ParseIP and never reach this
+// pattern.
+var validAgentEndpointLabelRE = regexp.MustCompile(`^[A-Za-z0-9_]([A-Za-z0-9_-]*[A-Za-z0-9_])?$`)
+
+// isValidAgentEndpointHostname reports whether host is a syntactically valid
+// hostname for server.hub.agent_endpoint: one or more non-empty
+// dot-separated labels, each matching validAgentEndpointLabelRE, with at
+// most one trailing dot for a fully-qualified name.
+func isValidAgentEndpointHostname(host string) bool {
+	h := strings.TrimSuffix(host, ".")
+	if h == "" {
+		return false
+	}
+	for _, label := range strings.Split(h, ".") {
+		if !validAgentEndpointLabelRE.MatchString(label) {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidateAgentEndpoint checks server.hub.agent_endpoint and returns its
+// normalized form. An empty string is valid (the override is optional and
+// unused) and returns "". A non-empty value must be an absolute http(s) URL
+// naming only a host and, optionally, a port: no userinfo, query, fragment,
+// out-of-range port, or path other than "" or "/". The host must be an IP
+// literal or a hostname of letters, digits, '_', '-', and '.'; an IPv6 zone
+// (e.g. "%eth0") is rejected because it cannot be stamped into a URL that
+// agents can re-parse. Rejecting all of this at startup means the Hub fails
+// fast with a clear error instead of silently injecting a broken or
+// credential-carrying endpoint into every dispatched agent.
+//
+// On success, the returned string is the normalized form — lowercase scheme,
+// "scheme://host[:port]" rebuilt from the parsed host and port (so an empty
+// port is dropped and an IPv6 host is bracketed), no path — that callers
+// should store in place of raw and use everywhere the value is read. The
+// normalized form always re-parses to the same scheme and host.
+//
+// No error message from ValidateAgentEndpoint ever echoes any part of the
+// configured value — not raw, not u.Redacted(), not any individual component
+// such as the scheme, host, path, or query: every rejected value is, by
+// definition, a value this function has not finished validating, so no
+// substring of it can be assumed safe to print. The scheme itself could be a
+// leaked secret or username (e.g. "secret://h" or "u:/secret@h"), so even
+// the scheme-mismatch message is a fixed string, and the host could be a
+// leaked secret too (e.g. "http://admin:123456" with an out-of-range port),
+// so the port-range message does not name the host either. This holds even
+// for a hierarchical URL with no "//" authority — e.g. "http:/admin:secret@h"
+// parses with an empty host and a Path of "/admin:secret@h", and
+// "http://h?token=secret" carries the secret in RawQuery — so every message
+// states the rule without echoing anything.
+func ValidateAgentEndpoint(raw string) (string, error) {
+	if raw == "" {
+		return "", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("server.hub.agent_endpoint: invalid URL")
+	}
+	if u.Opaque != "" {
+		return "", fmt.Errorf("server.hub.agent_endpoint: must be an absolute http(s) URL of the form scheme://host[:port]")
+	}
+	if u.User != nil {
+		return "", fmt.Errorf("server.hub.agent_endpoint: must not contain user credentials")
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return "", fmt.Errorf("server.hub.agent_endpoint: must be an absolute http(s) URL")
+	}
+	if u.RawQuery != "" {
+		return "", fmt.Errorf("server.hub.agent_endpoint: must not contain a query string")
+	}
+	if u.Fragment != "" {
+		return "", fmt.Errorf("server.hub.agent_endpoint: must not contain a fragment")
+	}
+	if u.Path != "" && u.Path != "/" {
+		return "", fmt.Errorf("server.hub.agent_endpoint: must not contain a path")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return "", fmt.Errorf("server.hub.agent_endpoint: must include a host")
+	}
+	if strings.Contains(host, "%") {
+		return "", fmt.Errorf("server.hub.agent_endpoint: host must not contain an IPv6 zone")
+	}
+	if net.ParseIP(host) == nil && !isValidAgentEndpointHostname(host) {
+		return "", fmt.Errorf("server.hub.agent_endpoint: host must be an IP address or a hostname of letters, digits, '_', '-', and '.'")
+	}
+	authority := host
+	if portStr := u.Port(); portStr != "" {
+		port, err := strconv.Atoi(portStr)
+		if err != nil || port < 1 || port > 65535 {
+			return "", fmt.Errorf("server.hub.agent_endpoint: port must be between 1 and 65535")
+		}
+		authority = net.JoinHostPort(host, strconv.Itoa(port))
+	} else if strings.Contains(host, ":") {
+		// A bare IPv6 literal still needs brackets even without a port.
+		authority = "[" + host + "]"
+	}
+	return scheme + "://" + authority, nil
 }
 
 // RuntimeBrokerConfig holds configuration for the Runtime Broker API server.
@@ -367,6 +557,10 @@ type DevAuthConfig struct {
 	// UserAccessMode controls how user access is evaluated at login time.
 	// Values: "open" (default), "domain_restricted", "invite_only".
 	UserAccessMode string `json:"userAccessMode" yaml:"userAccessMode" koanf:"userAccessMode"`
+	// DefaultUserRole is the role assigned to new users who are not in the
+	// admin_emails list. Values: "member" (default), "viewer". "admin" is
+	// blocked — admin promotion is handled exclusively by admin_emails.
+	DefaultUserRole string `json:"defaultUserRole" yaml:"defaultUserRole" koanf:"defaultUserRole"`
 	// Proxy holds proxy authentication settings (consulted when Mode == "proxy").
 	Proxy *ProxyAuthConfig `json:"proxy,omitempty" yaml:"proxy,omitempty" koanf:"proxy"`
 	// Transport holds transport-layer auth settings for agent outbound requests.
@@ -398,10 +592,12 @@ type TransportAuthConfig struct {
 
 // ProxyAuthConfig holds proxy authentication settings.
 type ProxyAuthConfig struct {
-	// Provider selects the proxy auth provider: "iap" or "header".
+	// Provider selects the proxy auth provider: "iap", "jwt", or "header".
 	Provider string `json:"provider" yaml:"provider" koanf:"provider"`
 	// IAP holds Google IAP-specific settings.
 	IAP *IAPAuthConfig `json:"iap,omitempty" yaml:"iap,omitempty" koanf:"iap"`
+	// JWT holds settings for the generic JWT proxy auth provider.
+	JWT *JWTAuthConfig `json:"jwt,omitempty" yaml:"jwt,omitempty" koanf:"jwt"`
 	// RequireTrustedProxyIP enables defense-in-depth IP allowlisting.
 	RequireTrustedProxyIP bool `json:"requireTrustedProxyIP,omitempty" yaml:"requireTrustedProxyIP,omitempty" koanf:"requireTrustedProxyIP"`
 }
@@ -414,6 +610,63 @@ type IAPAuthConfig struct {
 	Issuer string `json:"issuer,omitempty" yaml:"issuer,omitempty" koanf:"issuer"`
 	// JWKSURL overrides the default IAP JWKS URL (for testing).
 	JWKSURL string `json:"jwksURL,omitempty" yaml:"jwksURL,omitempty" koanf:"jwksURL"`
+}
+
+// JWTAuthConfig holds settings for the generic JWT proxy auth provider.
+// Unlike IAPAuthConfig (which is hardcoded to Google's conventions), this
+// provider is fully configurable so operators running bespoke auth proxies
+// can plug in their own JWT contract.
+type JWTAuthConfig struct {
+	// Header is the HTTP header containing the JWT assertion.
+	// Default: "X-Auth-Proxy-JWT"
+	Header string `json:"header,omitempty" yaml:"header,omitempty" koanf:"header"`
+
+	// Algorithm is the expected JWT signing algorithm (MANDATORY).
+	// Must be an asymmetric algorithm: RS256, RS384, RS512, ES256, ES384, ES512,
+	// PS256, PS384, PS512.
+	Algorithm string `json:"algorithm" yaml:"algorithm" koanf:"algorithm"`
+
+	// Issuer, if set, is validated against the JWT "iss" claim. Optional.
+	Issuer string `json:"issuer,omitempty" yaml:"issuer,omitempty" koanf:"issuer"`
+
+	// Audience, if set, is validated against the JWT "aud" claim. Optional.
+	Audience string `json:"audience,omitempty" yaml:"audience,omitempty" koanf:"audience"`
+
+	// Key source — exactly one of the following three must be set.
+	// Phase 1 supports only PublicKeyFile; JWKSURL and JWKSFile are reserved
+	// for Phase 2.
+
+	// JWKSURL is a remote JWKS endpoint URL. Not yet supported (Phase 2).
+	JWKSURL string `json:"jwksURL,omitempty" yaml:"jwksURL,omitempty" koanf:"jwksURL"`
+
+	// JWKSFile is a local filesystem path to a JWKS JSON file. Not yet
+	// supported (Phase 2).
+	JWKSFile string `json:"jwksFile,omitempty" yaml:"jwksFile,omitempty" koanf:"jwksFile"`
+
+	// PublicKeyFile is a local filesystem path to a PEM-encoded public key.
+	// This is the only key source implemented in Phase 1.
+	PublicKeyFile string `json:"publicKeyFile,omitempty" yaml:"publicKeyFile,omitempty" koanf:"publicKeyFile"`
+
+	// Claims configures which JWT claims map to user identity fields.
+	Claims *JWTClaimsConfig `json:"claims,omitempty" yaml:"claims,omitempty" koanf:"claims"`
+}
+
+// JWTClaimsConfig maps JWT claim names to identity fields.
+// All fields have sensible defaults matching standard OIDC claim names.
+type JWTClaimsConfig struct {
+	// Email is the claim containing the user's email. Default: "email".
+	Email string `json:"email,omitempty" yaml:"email,omitempty" koanf:"email"`
+
+	// Subject is the claim containing the stable user identifier. Default: "sub".
+	Subject string `json:"subject,omitempty" yaml:"subject,omitempty" koanf:"subject"`
+
+	// DisplayName is the claim containing the user's display name. Default: "name".
+	// Optional — if the claim is absent in the JWT, DisplayName is left empty.
+	DisplayName string `json:"displayName,omitempty" yaml:"displayName,omitempty" koanf:"displayName"`
+
+	// Domain is the claim containing the user's domain (hosted domain). Default: "hd".
+	// Optional — if the claim is absent in the JWT, Domain is left empty.
+	Domain string `json:"domain,omitempty" yaml:"domain,omitempty" koanf:"domain"`
 }
 
 // OAuthProviderConfig holds OAuth credentials for a single provider.
@@ -521,6 +774,40 @@ type GlobalConfig struct {
 	// "scratchpad" shared directory. Populated from settings.yaml
 	// project_defaults.default_scratchpad in file/SQLite mode.
 	DefaultScratchpad *bool `json:"-" yaml:"-" koanf:"-"`
+
+	// EnforceBrokerQuotas controls whether the per-broker agent quota cap
+	// (max_agents_per_broker) is enforced on create. Populated from
+	// settings.yaml quotas.enforce_broker_quotas in file/SQLite mode, so a
+	// file-mode admin save takes effect without a restart. nil means
+	// unset — the fail-safe default (enforced) applies.
+	EnforceBrokerQuotas *bool `json:"-" yaml:"-" koanf:"-"`
+
+	// AgentSecretsUserScopeOnly controls whether agents are restricted to
+	// writing user (profile) scope secrets only. Populated from
+	// settings.yaml agent_secrets.user_scope_only in file/SQLite mode, so a
+	// file-mode admin save takes effect without a restart. nil means
+	// unset — the permissive default (agents may write project scope)
+	// applies.
+	AgentSecretsUserScopeOnly *bool `json:"-" yaml:"-" koanf:"-"`
+
+	// DefaultHarnessConfig is the hub-level default harness config name.
+	// Populated from the top-level default_harness_config key in settings.yaml
+	// in file/SQLite mode.
+	DefaultHarnessConfig string `json:"-" yaml:"-" koanf:"-"`
+
+	// DefaultTimezone is the hub-level IANA timezone fallback for agent
+	// containers with no pinned timezone and no TZ environment variable.
+	// Populated from the top-level default_timezone key in settings.yaml in
+	// file/SQLite mode, so a file-mode admin save reaches
+	// hubAgentDefaults() (and therefore agent create) without a restart.
+	DefaultTimezone string `json:"-" yaml:"-" koanf:"-"`
+
+	// DefaultGCPIdentityMode and DefaultGCPIdentityServiceAccountID are the
+	// hub-level default GCP identity for new agents. Populated from the
+	// top-level keys of the same name in settings.yaml in file/SQLite mode,
+	// so a file-mode admin save reaches hubAgentDefaults() without a restart.
+	DefaultGCPIdentityMode             string `json:"-" yaml:"-" koanf:"-"`
+	DefaultGCPIdentityServiceAccountID string `json:"-" yaml:"-" koanf:"-"`
 
 	// Telemetry default — when set, the Hub exposes this as the default telemetry opt-in
 	// state for new agents via GET /api/v1/settings/public.
@@ -785,6 +1072,57 @@ func loadGlobalConfigFromSettings(configPath string) (*GlobalConfig, bool) {
 	return gc, true
 }
 
+// serverConfigSources resolves the actual server.yaml/server.yml file path(s)
+// loadGlobalConfigLegacy reads (global dir plus the effective local config
+// location) for the unused-keys warning's dedup key and log message. This
+// mirrors what that function actually loads (step 2 and step 3 below,
+// including loadServerConfigFile's own yaml/yml lookup), not just the
+// directories it looks in: a directory with no server config file is
+// omitted, matching settingsHierarchySources, and a relative configPath (or
+// the default ".") is resolved to an absolute path so it isn't ambiguous in
+// a hub or broker log where the process's cwd isn't obvious. Like
+// settingsHierarchySources, a resolved path already seen (e.g. configPath, or
+// the cwd it defaults to, is the global dir itself) is not listed twice.
+func serverConfigSources(configPath string) []string {
+	seen := make(map[string]struct{}, 2)
+	add := func(out []string, path string) []string {
+		clean := filepath.Clean(path)
+		if _, ok := seen[clean]; ok {
+			return out
+		}
+		seen[clean] = struct{}{}
+		return append(out, path)
+	}
+
+	var out []string
+	if globalDir, err := GetGlobalDir(); err == nil && globalDir != "" {
+		if path := GetServerConfigPath(globalDir); path != "" {
+			out = add(out, path)
+		}
+	}
+
+	dir := configPath
+	if dir == "" {
+		dir = "."
+	}
+	if info, err := os.Stat(dir); err == nil && !info.IsDir() {
+		// configPath names a file directly; loadGlobalConfigLegacy loads it
+		// as-is in that case (see step 3 below).
+		path := dir
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
+		}
+		out = add(out, path)
+	} else if path := GetServerConfigPath(dir); path != "" {
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
+		}
+		out = add(out, path)
+	}
+
+	return out
+}
+
 // loadGlobalConfigLegacy loads global configuration from server.yaml files using the legacy path.
 func loadGlobalConfigLegacy(configPath string) (*GlobalConfig, error) {
 	k := koanf.New(".")
@@ -885,7 +1223,7 @@ func loadGlobalConfigLegacy(configPath string) (*GlobalConfig, error) {
 	// produce false-positive warnings if the check ran after merging env vars.
 	{
 		var probe GlobalConfig
-		_ = unmarshalWithUnusedKeyCheck(k, &probe, "server config")
+		_ = unmarshalWithUnusedKeyCheck(k, &probe, "server config", serverConfigSources(configPath))
 	}
 
 	// 4. Load environment variables (SCION_SERVER_ prefix)
@@ -987,6 +1325,7 @@ func parseCommaSeparatedList(s string) []string {
 var snakeCaseFields = map[string]string{
 	// Layer-1 compound segments (from opsettings registry)
 	"adminemails":           "admin_emails",
+	"agentendpoint":         "agent_endpoint",
 	"apibaseurl":            "api_base_url",
 	"appid":                 "app_id",
 	"authorizeddomains":     "authorized_domains",
@@ -994,6 +1333,7 @@ var snakeCaseFields = map[string]string{
 	"cafile":                "ca_file",
 	"defaultharnessconfig":  "default_harness_config",
 	"defaultmaxduration":    "default_max_duration",
+	"defaultuserrole":       "default_user_role",
 	"defaultmaxmodelcalls":  "default_max_model_calls",
 	"defaultmaxturns":       "default_max_turns",
 	"defaultresources":      "default_resources",
@@ -1004,6 +1344,7 @@ var snakeCaseFields = map[string]string{
 	"insecureskipverify":    "insecure_skip_verify",
 	"installationurl":       "installation_url",
 	"maxsize":               "max_size",
+	"missingagentgrace":     "missing_agent_grace",
 	"notificationchannels":  "notification_channels",
 	"privatekeypath":        "private_key_path",
 	"publicurl":             "public_url",
@@ -1041,9 +1382,11 @@ var snakeCaseFields = map[string]string{
 var camelCaseFields = map[string]string{
 	"adminemails":                   "adminEmails",
 	"adminmode":                     "adminMode",
+	"agentendpoint":                 "agentEndpoint",
 	"allowcontainerscriptharnesses": "allowContainerScriptHarnesses",
 	"apibaseurl":                    "apiBaseUrl",
 	"appid":                         "appId",
+	"asyncagentlaunch":              "asyncAgentLaunch",
 	"authorizeddomains":             "authorizedDomains",
 	"autosuspendstalled":            "autoSuspendStalled",
 	"brokerid":                      "brokerId",
@@ -1056,6 +1399,7 @@ var camelCaseFields = map[string]string{
 	"corsallowedorigins":            "corsAllowedOrigins",
 	"corsenabled":                   "corsEnabled",
 	"corsmaxage":                    "corsMaxAge",
+	"defaultuserrole":               "defaultUserRole",
 	"devmode":                       "devMode",
 	"devtoken":                      "devToken",
 	"devtokenfile":                  "devTokenFile",
@@ -1072,10 +1416,13 @@ var camelCaseFields = map[string]string{
 	"hubname":                       "hubName",
 	"installationurl":               "installationUrl",
 	"jwksurl":                       "jwksURL",
+	"launchkeepaliveseconds":        "launchKeepaliveSeconds",
+	"launchtimeout":                 "launchTimeout",
 	"localpath":                     "localPath",
 	"logformat":                     "logFormat",
 	"loglevel":                      "logLevel",
 	"maintenancemessage":            "maintenanceMessage",
+	"missingagentgrace":             "missingAgentGrace",
 	"oidcaudience":                  "oidcAudience",
 	"platformauthsa":                "platformAuthSA",
 	"privatekey":                    "privateKey",
@@ -1166,7 +1513,7 @@ func LoadFileOnlyKoanf() *koanf.Koanf {
 		slog.Warn("LoadFileOnlyKoanf: failed to resolve global settings directory", "error", err)
 	}
 	if globalDir != "" {
-		if err := loadSettingsFile(k, globalDir); err != nil {
+		if _, err := loadSettingsFile(k, globalDir); err != nil {
 			slog.Warn("LoadFileOnlyKoanf: failed to load settings file", "dir", globalDir, "error", err)
 		}
 	}
@@ -1242,6 +1589,18 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 		"server.log_format":       defaults.LogFormat,
 	}, "."), nil)
 
+	// 1b. Embedded agent-defaults (embeds/default_settings.yaml, or the
+	// tier-specific variant — see GetDefaultSettingsDataYAML). This is the
+	// "coded defaults" layer for default_template/default_harness_config:
+	// without it, an un-seeded instance (no settings.yaml on disk, no
+	// SCION_SEED_* / SCION_SERVER_* env vars) has these keys entirely absent
+	// from bootstrap material, so agent-create requests that omit
+	// harnessConfig resolve to an empty name instead of the product default
+	// (ptone/scion#1306).
+	if agentDefaults := embeddedAgentDefaultsKoanfMap(); len(agentDefaults) > 0 {
+		_ = k.Load(confmap.Provider(agentDefaults, "."), nil)
+	}
+
 	// 2. SCION_SEED_* environment variables (snake_case via envKeyToOpsettingsKey).
 	seedK := LoadSeedEnvKoanf()
 	_ = k.Merge(seedK)
@@ -1252,7 +1611,7 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 		slog.Warn("LoadBootstrapKoanf: failed to resolve global settings directory", "error", err)
 	}
 	if globalDir != "" {
-		if err := loadSettingsFile(k, globalDir); err != nil {
+		if _, err := loadSettingsFile(k, globalDir); err != nil {
 			slog.Warn("LoadBootstrapKoanf: failed to load settings file", "dir", globalDir, "error", err)
 		}
 		loadServerConfigFile(k, globalDir)
@@ -1272,6 +1631,44 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 	splitCommaSeparatedKoanfKeys(k)
 
 	return k
+}
+
+// embeddedAgentDefaultsKoanfMap extracts default_template and
+// default_harness_config from the embedded default settings YAML
+// (GetDefaultSettingsDataYAML — tier-aware: the Cloud Run sandbox tier gets
+// its own embedded file) for use as the lowest-precedence "coded defaults"
+// layer in LoadBootstrapKoanf.
+//
+// This deliberately reads only those two scalar keys: the embedded file also
+// carries runtime/profile sections that are meaningful for the CLI's local
+// settings.yaml materialization (config/init.go) but have no equivalent in
+// the opsettings agent_defaults section, and pulling them in here would just
+// be dead weight in the bootstrap koanf.
+//
+// Failure to read or parse the embedded file is logged and treated as "no
+// embedded agent defaults" rather than a fatal error — bootstrap material
+// must still be produced even if this best-effort layer comes up empty.
+func embeddedAgentDefaultsKoanfMap() map[string]interface{} {
+	data, err := GetDefaultSettingsDataYAML()
+	if err != nil {
+		slog.Warn("LoadBootstrapKoanf: failed to read embedded default settings", "error", err)
+		return nil
+	}
+
+	var raw map[string]interface{}
+	if err := yamlv3.Unmarshal(data, &raw); err != nil {
+		slog.Warn("LoadBootstrapKoanf: failed to parse embedded default settings", "error", err)
+		return nil
+	}
+
+	out := make(map[string]interface{}, 2)
+	if v, ok := raw["default_template"].(string); ok && v != "" {
+		out["default_template"] = v
+	}
+	if v, ok := raw["default_harness_config"].(string); ok && v != "" {
+		out["default_harness_config"] = v
+	}
+	return out
 }
 
 // commaSplitKoanfKeys lists koanf paths that represent list values and may
@@ -1510,6 +1907,53 @@ func loadServerFromSettingsFile(dir string) (*GlobalConfig, bool) {
 				}
 			}
 		}
+	}
+
+	// Check for top-level "quotas" section — it lives outside "server" in
+	// settings.yaml and controls hub-level quota enforcement toggles.
+	if qRaw, ok := raw["quotas"]; ok && qRaw != nil {
+		if qMap, ok := qRaw.(map[string]interface{}); ok {
+			if eb, ok := qMap["enforce_broker_quotas"]; ok {
+				if b, ok := eb.(bool); ok {
+					gc.EnforceBrokerQuotas = &b
+				}
+			}
+		}
+	}
+
+	// Check for top-level "agent_secrets" section — it lives outside
+	// "server" in settings.yaml and controls hub-level policy for secrets
+	// written by agents.
+	if asRaw, ok := raw["agent_secrets"]; ok && asRaw != nil {
+		if asMap, ok := asRaw.(map[string]interface{}); ok {
+			if uso, ok := asMap["user_scope_only"]; ok {
+				if b, ok := uso.(bool); ok {
+					gc.AgentSecretsUserScopeOnly = &b
+				}
+			}
+		}
+	}
+
+	// Top-level default_harness_config — read from raw YAML.
+	if dhc, ok := raw["default_harness_config"]; ok && dhc != nil {
+		if s, ok := dhc.(string); ok {
+			gc.DefaultHarnessConfig = s
+		}
+	}
+
+	// Top-level default_timezone — read from raw YAML.
+	if dtz, ok := raw["default_timezone"]; ok && dtz != nil {
+		if s, ok := dtz.(string); ok {
+			gc.DefaultTimezone = s
+		}
+	}
+
+	// Top-level hub default GCP identity — read from raw YAML.
+	if v, ok := raw["default_gcp_identity_mode"].(string); ok {
+		gc.DefaultGCPIdentityMode = v
+	}
+	if v, ok := raw["default_gcp_identity_service_account_id"].(string); ok {
+		gc.DefaultGCPIdentityServiceAccountID = v
 	}
 
 	return gc, true

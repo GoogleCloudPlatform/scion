@@ -18,7 +18,7 @@ import (
 	"github.com/slack-go/slack/socketmode"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 var botMentionRe = regexp.MustCompile(`<@[A-Z0-9]+>\s*`)
@@ -492,7 +492,7 @@ func (s *eventServer) deliverUserMessage(channelID, threadID, userID, text strin
 		return
 	}
 
-	topic := projectcompat.AgentTopic(link.ProjectID, agentSlug)
+	topic := projectkeys.AgentTopic(link.ProjectID, agentSlug)
 	recipient := "agent:" + agentSlug
 
 	msg := &messages.StructuredMessage{

@@ -102,7 +102,7 @@
     },
     "hub": {
       "type": "object",
-      "description": "Hub connection settings override for this agent/template. Takes highest priority over grove and server settings.",
+      "description": "Hub connection settings override for this agent/template. Takes highest priority over project and server settings.",
       "properties": {
         "endpoint": {
           "type": "string",
@@ -140,6 +140,17 @@
         "namespace": { "type": "string" },
         "runtimeClassName": { "type": "string" },
         "serviceAccountName": { "type": "string" },
+        "priorityClassName": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+          "description": "PriorityClass name (DNS-1123 subdomain) applied to the agent pod's spec.priorityClassName, or the empty string for unset. The PriorityClass must already exist on the cluster; Scion does not create one. Overrides any runtimes.<name>.priority_class_name default."
+        },
+        "imagePullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"],
+          "description": "Kubernetes image pull policy. Overrides any Hub settings harness_configs.<name>.image_pull_policy default."
+        },
         "resources": {
           "type": "object",
           "properties": {

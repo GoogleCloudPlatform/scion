@@ -63,6 +63,17 @@ type EventPublisher interface {
 	// participants of a DM on user.<peerID>.chat.read-state so the sender can
 	// render "seen" without polling.
 	PublishChatReadStateEvent(ctx context.Context, conversationKey, userID, messageID string)
+	// PublishChatOwnReadStateEvent publishes a watermark change to the
+	// caller's OWN other sessions on user.<userID>.chat.read-state — the same
+	// event and subject convention as PublishChatReadStateEvent, just
+	// addressed to the reader instead of a DM peer. Used ONLY by "mark
+	// unread" so a user's other open tabs learn their own conversation went
+	// unread; it always sets the event's Unread field, which the client uses
+	// as the sole discriminator for "this is a mark-unread notification",
+	// distinct from a userId match alone. Unlike PublishChatReadStateEvent it fires for
+	// topic keys too: a self-notification has no "no peer, so no audience"
+	// case to exclude.
+	PublishChatOwnReadStateEvent(ctx context.Context, conversationKey, userID, messageID string)
 	// PublishChatMessageEdited publishes a message-edited event so SSE
 	// subscribers can update the message content in real time.
 	PublishChatMessageEdited(ctx context.Context, projectID, conversationKey string, evt ChatMessageEditedEvent)
@@ -107,7 +118,8 @@ func (noopEventPublisher) PublishInviteChanged(_ context.Context, _, _, _ string
 func (noopEventPublisher) PublishDispatchDone(_ context.Context, _ string)        {}
 func (noopEventPublisher) PublishChatTopicEvent(_ context.Context, _ string, _ string, _ WebChatTopic) {
 }
-func (noopEventPublisher) PublishChatReadStateEvent(_ context.Context, _, _, _ string) {}
+func (noopEventPublisher) PublishChatReadStateEvent(_ context.Context, _, _, _ string)    {}
+func (noopEventPublisher) PublishChatOwnReadStateEvent(_ context.Context, _, _, _ string) {}
 func (noopEventPublisher) PublishChatMessageEdited(_ context.Context, _ string, _ string, _ ChatMessageEditedEvent) {
 }
 func (noopEventPublisher) PublishChatMessageDeleted(_ context.Context, _ string, _ string, _ ChatMessageDeletedEvent) {
@@ -143,14 +155,14 @@ type AgentDetail struct {
 
 // AgentStatusEvent is published when an agent's status changes.
 type AgentStatusEvent struct {
-	AgentID           string       `json:"agentId"`
-	ProjectID         string       `json:"projectId"`
-	GroveID           string       `json:"groveId"`
-	Phase             string       `json:"phase,omitempty"`
-	Activity          string       `json:"activity,omitempty"`
-	Detail            *AgentDetail `json:"detail,omitempty"`
-	ContainerStatus   string       `json:"containerStatus,omitempty"`
-	LastActivityEvent string       `json:"lastActivityEvent,omitempty"`
+	AgentID           string             `json:"agentId"`
+	ProjectID         string             `json:"projectId"`
+	Phase             string             `json:"phase,omitempty"`
+	Activity          string             `json:"activity,omitempty"`
+	Detail            *AgentDetail       `json:"detail,omitempty"`
+	ContainerStatus   string             `json:"containerStatus,omitempty"`
+	LastActivityEvent string             `json:"lastActivityEvent,omitempty"`
+	Launch            *store.AgentLaunch `json:"launch,omitempty"` // design §3.2; a snapshot taken at publish time
 }
 
 // AgentCreatedEvent is published when an agent is created.
@@ -159,7 +171,6 @@ type AgentStatusEvent struct {
 type AgentCreatedEvent struct {
 	AgentID         string   `json:"agentId"`
 	ProjectID       string   `json:"projectId"`
-	GroveID         string   `json:"groveId"`
 	Name            string   `json:"name"`
 	Slug            string   `json:"slug"`
 	Template        string   `json:"template,omitempty"`
@@ -170,31 +181,31 @@ type AgentCreatedEvent struct {
 	Runtime         string   `json:"runtime,omitempty"`
 	RuntimeBrokerID string   `json:"runtimeBrokerId,omitempty"`
 	CreatedBy       string   `json:"createdBy,omitempty"`
-	Visibility      string   `json:"visibility,omitempty"`
 	TaskSummary     string   `json:"taskSummary,omitempty"`
 	Created         string   `json:"created,omitempty"`
 	Ancestry        []string `json:"ancestry,omitempty"`
+	// Launch is the async-launch view (design §3.2), nil when the agent has
+	// no launch (e.g. a synchronous create, or before any dispatch path
+	// starts one).
+	Launch *store.AgentLaunch `json:"launch,omitempty"`
 }
 
 // AgentDeletedEvent is published when an agent is deleted.
 type AgentDeletedEvent struct {
 	AgentID   string `json:"agentId"`
 	ProjectID string `json:"projectId"`
-	GroveID   string `json:"groveId"`
 }
 
 // AgentPortsEvent is published when an agent's exposed ports change.
 type AgentPortsEvent struct {
 	AgentID   string              `json:"agentId"`
 	ProjectID string              `json:"projectId"`
-	GroveID   string              `json:"groveId"`
 	Ports     []store.ExposedPort `json:"ports"`
 }
 
 // ProjectCreatedEvent is published when a project is created.
 type ProjectCreatedEvent struct {
 	ProjectID string `json:"projectId"`
-	GroveID   string `json:"groveId"`
 	Name      string `json:"name"`
 	Slug      string `json:"slug"`
 }
@@ -202,14 +213,12 @@ type ProjectCreatedEvent struct {
 // ProjectUpdatedEvent is published when a project is updated.
 type ProjectUpdatedEvent struct {
 	ProjectID string `json:"projectId"`
-	GroveID   string `json:"groveId"`
 	Name      string `json:"name"`
 }
 
 // ProjectDeletedEvent is published when a project is deleted.
 type ProjectDeletedEvent struct {
 	ProjectID string `json:"projectId"`
-	GroveID   string `json:"groveId"`
 }
 
 // BrokerProjectEvent is published when a broker connects or disconnects,
@@ -218,7 +227,6 @@ type BrokerProjectEvent struct {
 	BrokerID   string `json:"brokerId"`
 	BrokerName string `json:"brokerName,omitempty"`
 	ProjectID  string `json:"projectId"`
-	GroveID    string `json:"groveId"`
 	Status     string `json:"status"` // "online" or "offline"
 }
 
@@ -233,7 +241,6 @@ type BrokerStatusEvent struct {
 type UserMessageEvent struct {
 	ID            string          `json:"id"`
 	ProjectID     string          `json:"projectId"`
-	GroveID       string          `json:"groveId"`
 	Sender        string          `json:"sender"`
 	SenderID      string          `json:"senderId"`
 	Recipient     string          `json:"recipient"`
@@ -250,6 +257,17 @@ type UserMessageEvent struct {
 	Read          bool            `json:"read"`
 	DispatchState string          `json:"dispatchState,omitempty"`
 	Attachments   []AttachmentRef `json:"attachments,omitempty"`
+
+	// DispatchFailureReason and DispatchFailureCode carry the same failure
+	// detail as chatMessageResponse (nc-delivery-unreachable review R2), so
+	// live SSE viewers — including the sending tab, when the SSE echo
+	// resolves before the HTTP response — see "Agent unreachable" instead of
+	// a bare "Failed". Populated only for a failed row whose reason was
+	// already known at publish time (see PublishUserMessage); the
+	// synchronous dispatch_error branch publishes before that reason is set,
+	// which is pre-existing ordering, unchanged here.
+	DispatchFailureReason string `json:"dispatchFailureReason,omitempty"`
+	DispatchFailureCode   string `json:"dispatchFailureCode,omitempty"`
 }
 
 // NotificationCreatedEvent is published when a user notification is created.
@@ -257,7 +275,6 @@ type NotificationCreatedEvent struct {
 	ID        string `json:"id"`
 	AgentID   string `json:"agentId"`
 	ProjectID string `json:"projectId"`
-	GroveID   string `json:"groveId"`
 	Status    string `json:"status"`
 	Message   string `json:"message"`
 	CreatedAt string `json:"createdAt"`
@@ -465,13 +482,13 @@ func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent)
 	evt := AgentStatusEvent{
 		AgentID:         agent.ID,
 		ProjectID:       agent.ProjectID,
-		GroveID:         agent.ProjectID,
 		Phase:           agent.Phase,
 		Activity:        agent.Activity,
 		ContainerStatus: agent.ContainerStatus,
+		Launch:          store.ComputeAgentLaunch(agent, time.Now()),
 	}
 	if !agent.LastActivityEvent.IsZero() {
-		evt.LastActivityEvent = agent.LastActivityEvent.Format("2006-01-02T15:04:05Z07:00")
+		evt.LastActivityEvent = agent.LastActivityEvent.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
 
 	detail := AgentDetail{
@@ -482,7 +499,7 @@ func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent)
 		CurrentModelCalls: agent.CurrentModelCalls,
 	}
 	if !agent.StartedAt.IsZero() {
-		detail.StartedAt = agent.StartedAt.Format("2006-01-02T15:04:05Z07:00")
+		detail.StartedAt = agent.StartedAt.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
 	if detail != (AgentDetail{}) {
 		evt.Detail = &detail
@@ -490,7 +507,6 @@ func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent)
 	p.sink("agent."+agent.ID+".status", evt)
 	if agent.ProjectID != "" {
 		p.sink("project."+agent.ProjectID+".agent.status", evt)
-		p.sink("grove."+agent.ProjectID+".agent.status", evt)
 	}
 }
 
@@ -500,7 +516,6 @@ func (p *eventBuilder) PublishAgentCreated(_ context.Context, agent *store.Agent
 	evt := AgentCreatedEvent{
 		AgentID:         agent.ID,
 		ProjectID:       agent.ProjectID,
-		GroveID:         agent.ProjectID,
 		Name:            agent.Name,
 		Slug:            agent.Slug,
 		Template:        agent.Template,
@@ -511,17 +526,16 @@ func (p *eventBuilder) PublishAgentCreated(_ context.Context, agent *store.Agent
 		Runtime:         agent.Runtime,
 		RuntimeBrokerID: agent.RuntimeBrokerID,
 		CreatedBy:       agent.CreatedBy,
-		Visibility:      agent.Visibility,
 		TaskSummary:     agent.TaskSummary,
 		Ancestry:        agent.Ancestry,
+		Launch:          store.ComputeAgentLaunch(agent, time.Now()),
 	}
 	if !agent.Created.IsZero() {
-		evt.Created = agent.Created.Format("2006-01-02T15:04:05Z07:00")
+		evt.Created = agent.Created.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
 	p.sink("agent."+agent.ID+".created", evt)
 	if agent.ProjectID != "" {
 		p.sink("project."+agent.ProjectID+".agent.created", evt)
-		p.sink("grove."+agent.ProjectID+".agent.created", evt)
 	}
 }
 
@@ -531,12 +545,10 @@ func (p *eventBuilder) PublishAgentDeleted(_ context.Context, agentID, projectID
 	evt := AgentDeletedEvent{
 		AgentID:   agentID,
 		ProjectID: projectID,
-		GroveID:   projectID,
 	}
 	p.sink("agent."+agentID+".deleted", evt)
 	if projectID != "" {
 		p.sink("project."+projectID+".agent.deleted", evt)
-		p.sink("grove."+projectID+".agent.deleted", evt)
 	}
 }
 
@@ -545,13 +557,11 @@ func (p *eventBuilder) PublishAgentPorts(_ context.Context, agent *store.Agent) 
 	evt := AgentPortsEvent{
 		AgentID:   agent.ID,
 		ProjectID: agent.ProjectID,
-		GroveID:   agent.ProjectID,
 		Ports:     agent.ExposedPorts,
 	}
 	p.sink("agent."+agent.ID+".ports", evt)
 	if agent.ProjectID != "" {
 		p.sink("project."+agent.ProjectID+".agent.ports", evt)
-		p.sink("grove."+agent.ProjectID+".agent.ports", evt)
 	}
 }
 
@@ -559,33 +569,27 @@ func (p *eventBuilder) PublishAgentPorts(_ context.Context, agent *store.Agent) 
 func (p *eventBuilder) PublishProjectCreated(_ context.Context, project *store.Project) {
 	evt := ProjectCreatedEvent{
 		ProjectID: project.ID,
-		GroveID:   project.ID,
 		Name:      project.Name,
 		Slug:      project.Slug,
 	}
 	p.sink("project."+project.ID+".created", evt)
-	p.sink("grove."+project.ID+".created", evt)
 }
 
 // PublishProjectUpdated publishes a project updated event.
 func (p *eventBuilder) PublishProjectUpdated(_ context.Context, project *store.Project) {
 	evt := ProjectUpdatedEvent{
 		ProjectID: project.ID,
-		GroveID:   project.ID,
 		Name:      project.Name,
 	}
 	p.sink("project."+project.ID+".updated", evt)
-	p.sink("grove."+project.ID+".updated", evt)
 }
 
 // PublishProjectDeleted publishes a project deleted event.
 func (p *eventBuilder) PublishProjectDeleted(_ context.Context, projectID string) {
 	evt := ProjectDeletedEvent{
 		ProjectID: projectID,
-		GroveID:   projectID,
 	}
 	p.sink("project."+projectID+".deleted", evt)
-	p.sink("grove."+projectID+".deleted", evt)
 }
 
 // PublishBrokerConnected publishes broker connection events, one per project the broker serves.
@@ -595,11 +599,9 @@ func (p *eventBuilder) PublishBrokerConnected(_ context.Context, brokerID, broke
 			BrokerID:   brokerID,
 			BrokerName: brokerName,
 			ProjectID:  pid,
-			GroveID:    pid,
 			Status:     "online",
 		}
 		p.sink("project."+pid+".broker.status", evt)
-		p.sink("grove."+pid+".broker.status", evt)
 	}
 }
 
@@ -609,11 +611,9 @@ func (p *eventBuilder) PublishBrokerDisconnected(_ context.Context, brokerID str
 		evt := BrokerProjectEvent{
 			BrokerID:  brokerID,
 			ProjectID: pid,
-			GroveID:   pid,
 			Status:    "offline",
 		}
 		p.sink("project."+pid+".broker.status", evt)
-		p.sink("grove."+pid+".broker.status", evt)
 	}
 }
 
@@ -632,7 +632,6 @@ func (p *eventBuilder) PublishNotification(_ context.Context, notif *store.Notif
 		ID:        notif.ID,
 		AgentID:   notif.AgentID,
 		ProjectID: notif.ProjectID,
-		GroveID:   notif.ProjectID,
 		Status:    notif.Status,
 		Message:   notif.Message,
 		CreatedAt: notif.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
@@ -640,7 +639,6 @@ func (p *eventBuilder) PublishNotification(_ context.Context, notif *store.Notif
 	p.sink("notification.created", evt)
 	if notif.ProjectID != "" {
 		p.sink("project."+notif.ProjectID+".notification", evt)
-		p.sink("grove."+notif.ProjectID+".notification", evt)
 	}
 }
 
@@ -648,12 +646,11 @@ func (p *eventBuilder) PublishNotification(_ context.Context, notif *store.Notif
 // on user.<subscriberID>.notification and on no other subject.
 //
 // Chat notification messages contain the sender's display name and a preview of
-// the message body. authorizeSSESubjects (web.go) only constrains subjects whose
-// first token is "project" or "user": a subscription to "notification.>" is
-// granted to every logged-in session, so publishing chat payloads there hands
-// every browser on the deployment a copy. project.<id>.notification is narrower
-// but still wrong — project membership is not conversation membership, and a DM
-// has no project at all.
+// the message body. notification.* is an explicit pass-through in
+// authorizeSSESubjects (web.go), granted to every logged-in session, so
+// publishing chat payloads there hands every browser on the deployment a
+// copy. project.<id>.notification is narrower but still wrong — project
+// membership is not conversation membership, and a DM has no project at all.
 //
 // A notification with no SubscriberID has no subject that can be scoped to it,
 // so it is dropped rather than broadcast. Agent-status notifications keep using
@@ -667,7 +664,6 @@ func (p *eventBuilder) PublishChatNotification(_ context.Context, notif *store.N
 			ID:        notif.ID,
 			AgentID:   notif.AgentID,
 			ProjectID: notif.ProjectID,
-			GroveID:   notif.ProjectID,
 			Status:    notif.Status,
 			Message:   notif.Message,
 			CreatedAt: notif.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
@@ -717,7 +713,6 @@ func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message,
 	evt := UserMessageEvent{
 		ID:            msg.ID,
 		ProjectID:     msg.ProjectID,
-		GroveID:       msg.ProjectID,
 		Sender:        msg.Sender,
 		SenderID:      msg.SenderID,
 		Recipient:     msg.Recipient,
@@ -727,13 +722,23 @@ func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message,
 		Urgent:        msg.Urgent,
 		Broadcasted:   msg.Broadcasted,
 		AgentID:       msg.AgentID,
-		CreatedAt:     msg.CreatedAt.Format("2006-01-02T15:04:05.000Z"),
+		CreatedAt:     msg.CreatedAt.UTC().Format(time.RFC3339Nano),
 		Channel:       msg.Channel,
 		ThreadID:      msg.ThreadID,
 		GroupID:       msg.GroupID,
 		Read:          msg.Read,
 		DispatchState: msg.DispatchState,
 		Attachments:   attachments,
+	}
+	// nc-delivery-unreachable review R2: carry the failure reason/code onto
+	// the event for a row that is already known to be failed at publish
+	// time (the phase gate and the unreachable-default override both set
+	// DispatchFailureReason before calling PublishUserMessage). The code is
+	// derived from the reason the same way the frontend's history-row
+	// fallback does, because store.Message has no dedicated code column.
+	if msg.DispatchState == store.MessageDispatchFailed && msg.DispatchFailureReason != nil {
+		evt.DispatchFailureReason = *msg.DispatchFailureReason
+		evt.DispatchFailureCode = dispatchFailureCodeFromReason(*msg.DispatchFailureReason)
 	}
 	// Only fan out to user-inbox and project-level subjects when the
 	// recipient is actually a human user. For user→agent messages the
@@ -746,7 +751,6 @@ func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message,
 	}
 	if recipientIsUser && msg.ProjectID != "" {
 		p.sink("project."+msg.ProjectID+".user.message", evt)
-		p.sink("grove."+msg.ProjectID+".user.message", evt)
 	}
 	if msg.AgentID != "" {
 		p.sink("agent."+msg.AgentID+".message", evt)
@@ -812,6 +816,28 @@ func (p *eventBuilder) PublishChatReadStateEvent(_ context.Context, conversation
 		}
 		p.sink("user."+participantID+".chat.read-state", evt)
 	}
+}
+
+// PublishChatOwnReadStateEvent fans a watermark change out to the CALLER's
+// own other sessions on user.<userID>.chat.read-state. Used by "mark
+// unread": the caller's other open tabs need to learn their own watermark
+// moved, the same way a DM peer learns theirs did above — just addressed to
+// the reader instead. It fires for both DM and topic keys; a topic watermark
+// is per-user state with no peer to notify, but the reader's own other tabs
+// are still an audience.
+func (p *eventBuilder) PublishChatOwnReadStateEvent(_ context.Context, conversationKey, userID, messageID string) {
+	evt := ChatReadStateEvent{
+		ConversationKey: conversationKey,
+		UserID:          userID,
+		MessageID:       messageID,
+		ReadAt:          time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		// Always true: this publisher exists only for mark-unread. If it is
+		// ever reused for a different self-notification, that caller must
+		// add its own way to say "not unread" rather than let this default
+		// silently become ambiguous again.
+		Unread: true,
+	}
+	p.sink("user."+userID+".chat.read-state", evt)
 }
 
 // PublishChatMessageEdited publishes a message-edited event on the project and

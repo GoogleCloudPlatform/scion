@@ -10,7 +10,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 // OpenAskUserModal responds to a component interaction by presenting a modal
@@ -116,7 +116,7 @@ func HandleModalSubmit(
 			sender = "user:" + mapping.ScionEmail
 		}
 
-		topic := projectcompat.AgentTopic(pending.ProjectID, pending.AgentSlug)
+		topic := projectkeys.AgentTopic(pending.ProjectID, pending.AgentSlug)
 		recipient := "agent:" + pending.AgentSlug
 
 		msg := &messages.StructuredMessage{

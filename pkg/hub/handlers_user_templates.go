@@ -42,7 +42,7 @@ func (s *Server) handleUserMeTemplates(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.createUserTemplate(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -81,7 +81,7 @@ func (s *Server) handleUserTemplateCRUD(w http.ResponseWriter, r *http.Request, 
 	case http.MethodDelete:
 		s.deleteUserTemplate(w, r, id)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -178,12 +178,7 @@ func (s *Server) createUserTemplate(w http.ResponseWriter, r *http.Request) {
 		OwnerID:      userIdent.ID(),
 		CreatedBy:    userIdent.ID(),
 		BaseTemplate: req.BaseTemplate,
-		Visibility:   req.Visibility,
 		Status:       store.TemplateStatusPending,
-	}
-
-	if template.Visibility == "" {
-		template.Visibility = store.VisibilityPrivate
 	}
 
 	// Generate storage path and URI
@@ -349,7 +344,7 @@ func (s *Server) deleteUserTemplate(w http.ResponseWriter, r *http.Request, id s
 // handleUserTemplateUpload handles POST /api/v1/users/me/templates/{id}/upload.
 func (s *Server) handleUserTemplateUpload(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -380,7 +375,7 @@ func (s *Server) handleUserTemplateUpload(w http.ResponseWriter, r *http.Request
 // handleUserTemplateFinalize handles POST /api/v1/users/me/templates/{id}/finalize.
 func (s *Server) handleUserTemplateFinalize(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -411,7 +406,7 @@ func (s *Server) handleUserTemplateFinalize(w http.ResponseWriter, r *http.Reque
 // handleUserTemplateDownload handles GET /api/v1/users/me/templates/{id}/download.
 func (s *Server) handleUserTemplateDownload(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 

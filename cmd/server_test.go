@@ -18,11 +18,15 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
@@ -41,7 +45,7 @@ func newTestStore(t *testing.T) store.Store {
 	return s
 }
 
-func TestRegisterGlobalGroveAndBroker_DedupByName(t *testing.T) {
+func TestRegisterGlobalProjectAndBroker_DedupByName(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	settings := &config.Settings{}
@@ -76,7 +80,7 @@ func TestRegisterGlobalGroveAndBroker_DedupByName(t *testing.T) {
 	assert.Equal(t, store.BrokerStatusOnline, broker.Status)
 }
 
-func TestRegisterGlobalGroveAndBroker_SameIDNoDedup(t *testing.T) {
+func TestRegisterGlobalProjectAndBroker_SameIDNoDedup(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	settings := &config.Settings{}
@@ -98,7 +102,7 @@ func TestRegisterGlobalGroveAndBroker_SameIDNoDedup(t *testing.T) {
 	assert.Equal(t, false, broker.AutoProvide, "auto-provide should be updated to false")
 }
 
-func TestRegisterGlobalGroveAndBroker_NewBrokerNewName(t *testing.T) {
+func TestRegisterGlobalProjectAndBroker_NewBrokerNewName(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	settings := &config.Settings{}
@@ -120,7 +124,7 @@ func TestRegisterGlobalGroveAndBroker_NewBrokerNewName(t *testing.T) {
 	assert.NoError(t, err)
 }
 
-func TestRegisterGlobalGroveAndBroker_DedupCaseInsensitive(t *testing.T) {
+func TestRegisterGlobalProjectAndBroker_DedupCaseInsensitive(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	settings := &config.Settings{}
@@ -198,6 +202,64 @@ func TestRegisterGlobalProjectAndBroker_LabelsOnDedupByName(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "embedded", broker.Labels["scion.io/broker-role"])
 }
+
+// TestRegisterGlobalProjectAndBroker_RecordsDefaultProfile covers the hub's
+// side of resolving an agent dispatch with no explicit profile: the broker
+// record must carry the same active profile the broker itself would use
+// locally, so it survives create, re-registration (when settings change),
+// and the stock two-profile default settings shape.
+func TestRegisterGlobalProjectAndBroker_RecordsDefaultProfile(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	settings := &config.Settings{
+		ActiveProfile: "local",
+		Profiles: map[string]config.ProfileConfig{
+			"local":  {Runtime: "docker"},
+			"remote": {Runtime: "kubernetes"},
+		},
+	}
+
+	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings)
+	require.NoError(t, err)
+
+	broker, err := s.GetRuntimeBroker(ctx, tid("broker-1"))
+	require.NoError(t, err)
+	assert.Equal(t, "local", broker.DefaultProfile,
+		"the broker record must carry the same active profile the broker resolves an empty profile to locally")
+
+	// Re-registration with a different active profile (e.g. settings.yaml
+	// edited and the broker restarted) must update the stored value, not
+	// leave the stale one in place.
+	settings.ActiveProfile = "remote"
+	_, err = registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings)
+	require.NoError(t, err)
+
+	broker, err = s.GetRuntimeBroker(ctx, tid("broker-1"))
+	require.NoError(t, err)
+	assert.Equal(t, "remote", broker.DefaultProfile)
+}
+
+// TestRegisterGlobalProjectAndBroker_NoActiveProfileLeavesDefaultProfileEmpty
+// covers the case buildStoreBrokerProfiles itself falls back on: settings
+// with no profiles defined at all produce a single implicit "default"
+// profile, and there is no active-profile setting to record. An empty
+// DefaultProfile is correct here — the hub resolves this broker's single
+// profile without needing it (resolveAgentRuntimeProfileType,
+// pkg/hub/default_gcp_identity.go).
+func TestRegisterGlobalProjectAndBroker_NoActiveProfileLeavesDefaultProfileEmpty(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	settings := &config.Settings{}
+
+	_, err := registerGlobalProjectAndBroker(ctx, s, tid("broker-1"), "test-broker", "http://localhost:9800", nil, true, settings)
+	require.NoError(t, err)
+
+	broker, err := s.GetRuntimeBroker(ctx, tid("broker-1"))
+	require.NoError(t, err)
+	assert.Empty(t, broker.DefaultProfile)
+	require.Len(t, broker.Profiles, 1, "settings with no profiles defined fall back to a single implicit profile")
+}
+
 func TestBuildStoreBrokerProfiles_CloudRunFiltersLocalRuntimes(t *testing.T) {
 	settings := &config.Settings{
 		Profiles: map[string]config.ProfileConfig{
@@ -206,7 +268,7 @@ func TestBuildStoreBrokerProfiles_CloudRunFiltersLocalRuntimes(t *testing.T) {
 		},
 	}
 
-	profiles := buildStoreBrokerProfiles(settings, "cloudrun")
+	profiles := buildStoreBrokerProfiles(settings, "cloudrun", nil)
 
 	assert.Len(t, profiles, 1, "Cloud Run should filter out docker profile")
 	assert.Equal(t, "kubernetes", profiles[0].Type)
@@ -221,7 +283,7 @@ func TestBuildStoreBrokerProfiles_DockerDefaultKeepsAllProfiles(t *testing.T) {
 		},
 	}
 
-	profiles := buildStoreBrokerProfiles(settings, "docker")
+	profiles := buildStoreBrokerProfiles(settings, "docker", nil)
 
 	assert.Len(t, profiles, 2, "docker default should keep all profiles")
 	types := map[string]bool{}
@@ -239,7 +301,7 @@ func TestBuildStoreBrokerProfiles_EmptyAfterFilterFallsBackToDefault(t *testing.
 		},
 	}
 
-	profiles := buildStoreBrokerProfiles(settings, "cloudrun")
+	profiles := buildStoreBrokerProfiles(settings, "cloudrun", nil)
 
 	assert.Len(t, profiles, 1, "should fall back to default profile when all are filtered")
 	assert.Equal(t, "default", profiles[0].Name)
@@ -255,7 +317,7 @@ func TestBuildStoreBrokerProfiles_StarterHubKeepsDockerProfiles(t *testing.T) {
 		},
 	}
 
-	profiles := buildStoreBrokerProfiles(settings, "docker")
+	profiles := buildStoreBrokerProfiles(settings, "docker", nil)
 
 	assert.Len(t, profiles, 2, "starter hub (docker default) should keep docker profiles")
 	types := map[string]bool{}
@@ -266,7 +328,7 @@ func TestBuildStoreBrokerProfiles_StarterHubKeepsDockerProfiles(t *testing.T) {
 	assert.True(t, types["kubernetes"], "kubernetes profile should be present")
 }
 
-func TestRegisterGlobalGroveAndBroker_CloudRunSuppressesDockerProfile(t *testing.T) {
+func TestRegisterGlobalProjectAndBroker_CloudRunSuppressesDockerProfile(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	settings := &config.Settings{
@@ -290,7 +352,7 @@ func TestRegisterGlobalGroveAndBroker_CloudRunSuppressesDockerProfile(t *testing
 	assert.Equal(t, "kubernetes", broker.Profiles[0].Type)
 }
 
-func TestRegisterGlobalGroveAndBroker_StarterHubKeepsDockerProfile(t *testing.T) {
+func TestRegisterGlobalProjectAndBroker_StarterHubKeepsDockerProfile(t *testing.T) {
 	ctx := context.Background()
 	s := newTestStore(t)
 	settings := &config.Settings{
@@ -314,4 +376,108 @@ func TestRegisterGlobalGroveAndBroker_StarterHubKeepsDockerProfile(t *testing.T)
 	}
 	assert.True(t, types["docker"], "docker profile should be present on starter hub")
 	assert.True(t, types["kubernetes"], "kubernetes profile should be present")
+}
+
+// optOutRuntime is a MockRuntime that also implements the optional
+// runtime.AttachCapableRuntime capability, always reporting false.
+type optOutRuntime struct {
+	*runtime.MockRuntime
+}
+
+func (r *optOutRuntime) SupportsAttach() bool { return false }
+
+// TestRegisterGlobalProjectAndBroker_AttachOptOut_PersistsFalseAndCLIRefuses
+// is the producer-path integration test: a broker whose default runtime
+// opts out of attach registers through the real production path
+// (registerGlobalProjectAndBroker -> buildStoreBrokerProfiles), the stored
+// record ends up with Attach=false on both the default profile and the
+// broker-wide capability, and a CLI attach attempt against an agent on that
+// broker refuses before any WebSocket dial. The persisted store.RuntimeBroker
+// is round-tripped through JSON into the wire shape a real Hub GET
+// /runtime-brokers/{id} response carries (hubclient.RuntimeBroker) rather
+// than hand-built as a mock literal, so this proves the producer, the
+// *bool encode/decode, and the CLI's read all agree — not just the CLI's
+// read of a value nothing upstream actually produces.
+func TestRegisterGlobalProjectAndBroker_AttachOptOut_PersistsFalseAndCLIRefuses(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	settings := &config.Settings{}
+	rt := &optOutRuntime{MockRuntime: &runtime.MockRuntime{NameFunc: func() string { return "optout" }}}
+	brokerID := tid("broker-optout")
+
+	_, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "optout-broker", "http://localhost:9800", rt, true, settings)
+	require.NoError(t, err)
+
+	broker, err := s.GetRuntimeBroker(ctx, brokerID)
+	require.NoError(t, err)
+	require.NotNil(t, broker.Capabilities)
+	assert.False(t, broker.Capabilities.Attach, "broker-wide Capabilities.Attach must be false for an opted-out default runtime")
+	require.Len(t, broker.Profiles, 1)
+	require.NotNil(t, broker.Profiles[0].Attach, "the default profile's Attach must be explicitly set, not left unknown")
+	assert.False(t, *broker.Profiles[0].Attach)
+
+	raw, err := json.Marshal(broker)
+	require.NoError(t, err)
+	agentPath := "/api/v1/projects/proj-optout/agents/optout-agent"
+	brokerPath := "/api/v1/runtime-brokers/" + brokerID
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case brokerPath:
+			_, _ = w.Write(raw)
+		case agentPath:
+			_ = json.NewEncoder(w).Encode(hubclient.Agent{
+				ID: "a1", Name: "optout-agent", Phase: "running", Runtime: "optout",
+				RuntimeBrokerID: brokerID,
+				AppliedConfig:   &hubclient.AgentConfig{Profile: broker.Profiles[0].Name},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	err = attachViaHub(&HubContext{Client: client, Endpoint: srv.URL, ProjectID: "proj-optout"}, "optout-agent")
+	require.Error(t, err)
+	assert.Equal(t, "attach is not supported for agents on the optout runtime", err.Error())
+}
+
+// TestRegisterGlobalProjectAndBroker_UpdateSetsReprovisionCapability is the
+// design §3.4 Amendment A2.2(b) regression test: the update
+// branch (an existing broker record, re-registering) must refresh
+// Capabilities to include Reprovision:true, not just the create branch. A
+// broker registered before the reincarnate feature existed would otherwise
+// keep Capabilities.Reprovision unset forever, since CompleteBrokerJoin (the
+// remote-broker capability path) never runs for the embedded broker.
+func TestRegisterGlobalProjectAndBroker_UpdateSetsReprovisionCapability(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	settings := &config.Settings{}
+	brokerID := tid("broker-preexisting")
+
+	// Simulate a broker record from before the Reprovision capability
+	// existed: created directly, with the old capability set.
+	pre := &store.RuntimeBroker{
+		ID:           brokerID,
+		Name:         "pre-existing-broker",
+		Slug:         "pre-existing-broker",
+		Status:       store.BrokerStatusOnline,
+		Capabilities: &store.BrokerCapabilities{Sync: true, Attach: true},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, pre))
+
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "pre-existing-broker", "http://localhost:9800", nil, true, settings)
+	require.NoError(t, err)
+	assert.Equal(t, brokerID, effectiveID)
+
+	updated, err := s.GetRuntimeBroker(ctx, brokerID)
+	require.NoError(t, err)
+	require.NotNil(t, updated.Capabilities)
+	assert.True(t, updated.Capabilities.Reprovision,
+		"re-registering an existing broker must refresh Capabilities.Reprovision to true")
+	assert.True(t, updated.Capabilities.Sync)
+	assert.True(t, updated.Capabilities.Attach)
 }

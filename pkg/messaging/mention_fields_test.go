@@ -311,7 +311,7 @@ func TestDEF169_Event_Unchanged(t *testing.T) {
 	conv := &ConversationInfo{ID: "conv-ev", Kind: "direct", Surface: "native"}
 
 	// Even with isMention=true, event should still render as "event".
-	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, true)
+	result := FormatNewDelivery(msg, nil, conv, DeliveryOptions{}, true, false)
 
 	env := extractEnvelope(t, result)
 	if env.Type != "event" {
@@ -421,7 +421,7 @@ func TestFormatNewDelivery_Mention_TypeAndTo(t *testing.T) {
 	}
 	conv := &ConversationInfo{ID: "conv-fmt-mention", Kind: "group", Surface: "native"}
 
-	result := FormatNewDelivery(msg, addrs, conv, DeliveryOptions{}, true)
+	result := FormatNewDelivery(msg, addrs, conv, DeliveryOptions{}, true, false)
 
 	env := extractEnvelope(t, result)
 	if env.Type != "mention" {
@@ -453,7 +453,7 @@ func TestFormatNewDelivery_SingleMention_IncludesTo(t *testing.T) {
 	}
 	conv := &ConversationInfo{ID: "conv-fmt-single", Kind: "direct", Surface: "native"}
 
-	result := FormatNewDelivery(msg, addrs, conv, DeliveryOptions{}, true)
+	result := FormatNewDelivery(msg, addrs, conv, DeliveryOptions{}, true, false)
 
 	env := extractEnvelope(t, result)
 	if env.Type != "mention" {
@@ -495,7 +495,7 @@ func TestFormatNewDelivery_NotMention_SingleAddressee_OmitsTo(t *testing.T) {
 	}
 	conv := &ConversationInfo{ID: "conv-fmt-nomention", Kind: "direct", Surface: "native"}
 
-	result := FormatNewDelivery(msg, addrs, conv, DeliveryOptions{}, false)
+	result := FormatNewDelivery(msg, addrs, conv, DeliveryOptions{}, false, false)
 
 	env := extractEnvelope(t, result)
 	if env.Type != "message" {

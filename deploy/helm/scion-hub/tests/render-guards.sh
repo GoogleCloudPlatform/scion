@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=77   # 63 + 14 from the oauth credential section (Phase 3).
+EXPECTED_TOTAL=130   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -161,10 +161,100 @@ reject "--private-key"            "names credential material" --set hub.args[0]=
 reject "--upstream-password"      "names credential material" --set hub.args[0]=--upstream-password=abc
 reject "--x-credential"           "names credential material" --set hub.args[0]=--x-credential=abc
 
+echo "== NAME axis: the separator must not decide whether the guard runs =="
+# F2. Every one of these was ACCEPTED, and the word list already contained the
+# word that should have caught each. The match was anchored to the hyphen alone,
+# so a dotted or camelCase convention walked straight through - and dotted flag
+# names are exactly where "password" turns up in the wild. The fix normalises the
+# separator; the list is still nine words long. Lengthening it would have been
+# the same defect with more entries.
+reject "--admin.token"            "names credential material" --set hub.args[0]=--admin.token=hunter2
+reject "--admin:token"            "names credential material" --set hub.args[0]=--admin:token=hunter2
+reject "--adminToken (camelCase)" "names credential material" --set hub.args[0]=--adminToken=hunter2
+reject "--adminAPIKey (acronym)"  "names credential material" --set hub.args[0]=--adminAPIKey=hunter2
+reject "--spring.datasource.password" "names credential material" --set hub.args[0]=--spring.datasource.password=hunter2
+reject "--auth/token"             "names credential material" --set hub.args[0]=--auth/token=hunter2
+reject "--db.credential"          "names credential material" --set hub.args[0]=--db.credential=x
+# The camelCase split happens before lowering, so it is destroyed by any caller
+# that pre-lowers. It WAS: the flag path passed an already-lowered name while the
+# positional path passed a raw one, so --adminToken was rejected as a positional
+# and accepted as a flag. Both paths are pinned here; a fix to one is not a fix.
+reject "adminToken as a positional" "names credential material" --set hub.args[0]=adminToken=hunter2
+# POSITIVE TWINS FOR THE NEW SEPARATORS. The trailing-segment anchor is what makes
+# the list usable at all: a flag NAMED for a credential carries one, a flag named
+# ABOUT one does not. Matching every segment instead of the last would reject all
+# of these, and they are the reason the fix is a better tokeniser and not a
+# broader match.
+accept "--tokenTtl"               --set hub.args[0]=--tokenTtl=5m
+accept "--maxTokens"              --set hub.args[0]=--maxTokens=10
+accept "--secret.manager.project" --set hub.args[0]=--secret.manager.project=p
+accept "--passwordMinLength"      --set hub.args[0]=--passwordMinLength=8
+
 echo "== credential guard, VALUE axis =="
 reject "DSN with userinfo"  "embeds credentials in a URL" --set 'hub.args[0]=--upstream=postgres://scion:hunter2@10.0.0.1/scion'
+
+echo "== F3: a / in the password must not silence the URL guard =="
+# EVERY ONE OF THESE RENDERED CLEAN before F3, with the password on argv. The old
+# password class was [^/@[:space:]]+, so a slash left the regex no path to the
+# terminating @ and the guard went quiet. The control below - the same password
+# with the slash removed - was refused, which is what made this anti-correlated
+# with the mistake: the operator who percent-encodes correctly was protected and
+# the one carrying a raw slash was not.
+#
+# THESE ROWS ARE THE COST OF ANY FUTURE NARROWING OF THAT PATTERN. The disclosed
+# residual below is a standing temptation to tighten it; if you do, run these
+# first and count how many go quiet.
+reject "pw with a slash"        "embeds credentials in a URL" --set 'hub.args[0]=--upstream=postgres://u:a/b@10.0.0.1/scion'
+reject "pw slash, empty user"   "embeds credentials in a URL" --set 'hub.args[0]=--upstream=redis://:S3cr3t/Xy@10.0.0.1:6379'
+reject "pw with two slashes"    "embeds credentials in a URL" --set 'hub.args[0]=--upstream=mysql://u:p/w/d@host:3306/db'
+# THE COMMA IS ESCAPED BECAUSE --set SPLITS ON IT, and the first version of this
+# row proved the point the hard way: helm never planted the value at all, failing
+# with `key "h2:27017/db" has no value`. That is a REJECTION, so an exit-code-only
+# assertion would have gone green on an arm that never reached the chart.
+#
+# So this row asserts the REDACTED DSN rather than the message wording. It is the
+# stronger claim: it can only appear if the comma survived --set, if the URL guard
+# was the guard that fired, and if the redactor rewrote the userinfo. If a future
+# helm changes its escaping, this goes red instead of quietly degrading into a
+# single-host arm that still passes.
+reject "mongodb replica set"    'mongodb://REDACTED@h1:27017,h2:27017/db' --set 'hub.args[0]=--upstream=mongodb://u:p/w@h1:27017\,h2:27017/db'
+reject "amqp vhost"             "embeds credentials in a URL" --set 'hub.args[0]=--upstream=amqp://u:a/b@rabbit:5672/vhost'
+reject "pw ends in a slash"     "embeds credentials in a URL" --set 'hub.args[0]=--upstream=postgres://u:abc/@10.0.0.1/scion'
+reject "pw is a single slash"   "embeds credentials in a URL" --set 'hub.args[0]=--upstream=postgres://u:/@10.0.0.1/scion'
+
+# THE OTHER DIRECTION, WHICH IS THE HALF THAT KEEPS GETTING SKIPPED. Widening the
+# password class to admit "/" is only safe if the authority-terminator tail holds
+# these three quiet. Without that tail, "user:pass@" matched anywhere inside a
+# query string and each of these was refused.
+accept "DSN with no userinfo"     --set 'hub.args[0]=--upstream=postgres://10.0.0.1:5432/scion'
+accept "email in a query string"  --set 'hub.args[0]=--upstream=https://api.example.com/v1/users?filter=a:b@c.com'
+accept "explicit port, @ in query" --set 'hub.args[0]=--upstream=https://example.com:8080/path?e=a@b'
+
+# 🔴 KNOWN FALSE POSITIVE, PINNED DELIBERATELY. THIS ROW ASSERTS A DEFECT.
+# A URL with an explicit port AND an @ in its path is refused: the port reads as
+# the password and the path segment as the host, and no URI grammar distinguishes
+# them from userinfo. The pre-F3 pattern accepted this, so it is a real regression
+# on this one shape, taken knowingly - 7 silent credential leaks traded for 1 loud
+# refusal of an unusual URL.
+#
+# DO NOT DELETE THIS ROW TO MAKE A FIX GO GREEN. If you narrow the pattern and
+# reclaim this arm, this row goes red - that is the row WORKING. Flip it to
+# accept() and delete this comment, having first re-run the seven fire rows above.
+reject "KNOWN FP: port + @ in path" "embeds credentials in a URL" --set 'hub.args[0]=--upstream=https://example.com:8080/a@b/c'
 reject "ghp_ prefix"        "shape of a credential"       --set 'hub.args[0]=--x=ghp_AAAAAAAAAAAAAAAAAAAA'
-reject "sk- prefix"         "shape of a credential"       --set 'hub.args[0]=--x=sk-AAAAAAAAAAAA'
+reject "sk- prefix"         "shape of a credential"       --set 'hub.args[0]=--x=sk-proj-A1b2C3d4E5f6G7h8I9j0'
+# 🔴 THE ROW BELOW WAS AN accept FOR MOST OF TODAY AND THAT WAS MY DEFECT, NOT A
+# TRADE. In 215a6f85 I added length floors to the credential alternation, which
+# made "sk-9A" render clean, and I INVERTED THIS ROW -- a production reject row
+# inherited from main, where its witness read "sk-AAAAAAAAAAAA" -- so that my own
+# suite would go green on the change. It did. That is precisely the problem: the
+# suite could no longer show me the casualty, because I had deleted the row that
+# WAS the casualty. Restored to reject by me, gd-p0-dev, 2026-08-17.
+#
+# RATIFIED BY gd-em AND gke-deploy-lead AFTER I DISCLOSED IT: NOTHING IN THIS
+# BRANCH MAY WEAKEN A PRODUCTION reject ROW, and any diff flipping an
+# accept/reject verb must list the row in the PR description with a reason.
+reject "short sk- string"   "shape of a credential"       --set 'hub.args[0]=--x=sk-9A'
 reject "AKIA prefix"        "shape of a credential"       --set 'hub.args[0]=--x=AKIAABCDEFGH1234'
 # ORDERING PIN. Both messages are rejections, and asserting WHICH one fires is
 # what keeps a guard from taking credit for a catch it did not make. This row
@@ -189,6 +279,189 @@ reject "PEM header (value axis wins)"       "shape of a credential" --set 'hub.a
 # it on environment values where a multi-line PEM is legal and this is the catch.
 reject "PEM in a positional"                "shape of a credential" --set 'hub.args[0]=x=-----BEGIN RSA PRIVATE KEY-----'
 
+echo "== VALUE axis: ONE SCALAR LEAF CAN BE MULTI-LINE =="
+# Every other row on this axis plants a BARE scalar, which sits at the start of
+# the string and so satisfies "^" for free. That made the whole axis look anchored
+# when it was not: a YAML block scalar - which is what annotations carrying an
+# embedded config blob look like - hid any prefixed token behind a leading line.
+# Worst on "-----BEGIN ", since PEM is multi-line BY DEFINITION.
+#
+# These use a values FILE, not --set: --set cannot express a newline in a scalar,
+# and a fixture that silently plants one line is a row that measures nothing.
+MLTMP="$(mktemp -d)"; trap 'rm -rf "$MLTMP"' EXIT
+ml() { # ml <file> <block scalar body>
+  { printf 'hub:\n  hubId: fixed-id\n  podAnnotations:\n    example.com/blob: |\n'
+    printf '%b\n' "$2"; } > "$MLTMP/$1.yaml"
+  # PERTURBATION ASSERT: prove the leaf really is multi-line before reading a result.
+  local n; n=$(awk '/^      /{c++} END{print c+0}' "$MLTMP/$1.yaml")
+  [ "$n" -ge 2 ] || { echo "FAIL  fixture $1 is not multi-line (${n} line(s)) - row measures nothing"; failed=$((failed + 1)); return 1; }
+}
+ml pem   "      owner: platform-eng\n      -----BEGIN RSA PRIVATE KEY-----\n      MIIEowIBAAKCAQEA\n      -----END RSA PRIVATE KEY-----" \
+  && reject "PEM block on a non-first line"  "shape of a credential" -f "$MLTMP/pem.yaml"
+ml tokln "      owner: platform-eng\n      ghp_A1b2C3d4E5f6G7h8\n      tier: gold" \
+  && reject "R3: credential alone on LINE 2 of a scalar" "shape of a credential" -f "$MLTMP/tokln.yaml"
+# These two are why (?m) alone was not enough: the credential is MID-line, after
+# "token: ", so a line-start anchor never reaches it. They need the widened class.
+ml tokkv "      owner: platform-eng\n      token: ghp_A1b2C3d4E5f6G7h8\n      tier: gold" \
+  && reject "token after 'token: ' in a leaf" "shape of a credential" -f "$MLTMP/tokkv.yaml"
+ml pemkv "      owner: platform-eng\n      key: -----BEGIN RSA PRIVATE KEY-----" \
+  && reject "PEM after 'key: ' in a leaf"     "shape of a credential" -f "$MLTMP/pemkv.yaml"
+# R-b: PEM INDENTED, which is how a PEM actually appears when someone pastes one
+# under a key in a block scalar. The extra two spaces survive the block's own
+# indent stripping, so the header is preceded by whitespace rather than sitting
+# at column 0 - a configuration no other row here plants.
+ml pemind "      cert:\n        -----BEGIN RSA PRIVATE KEY-----\n        MIIEowIBAAKCAQEA" \
+  && reject "PEM indented under a key"        "shape of a credential" -f "$MLTMP/pemind.yaml"
+
+echo "== ANCHOR CLASS: the credential is not at offset 0, and the leaf is ONE LINE =="
+# THE DEFECT WAS NEVER MULTI-LINE. "(^|=)" required the credential at offset 0 or
+# immediately after "="; ANY other preceding byte silenced the check. Every row
+# above plants a bare scalar or a "--flag=" form, so the whole axis sat on the one
+# side of the defect where the anchor happens to hold, and reported green.
+#
+# These rows are SINGLE-LINE on purpose. A multi-line witness makes this look like
+# a narrower bug than it is and invites a line-start fix, which closes one of the
+# seven known arms and leaves the likeliest one - a plain "token: <secret>" pair -
+# still silent.
+sl() { # sl <file> <single-line leaf value>, planted as a QUOTED scalar
+  { printf 'hub:\n  hubId: fixed-id\n  podAnnotations:\n'
+    printf "    example.com/blob: %s\n" "$2"; } > "$MLTMP/$1.yaml"
+  # PERTURBATION ASSERT: one line, and the value really reached the file.
+  local n; n=$(awk '/example.com\/blob:/{c++} END{print c+0}' "$MLTMP/$1.yaml")
+  [ "$n" -eq 1 ] || { echo "FAIL  fixture $1 did not plant a single leaf (${n})"; failed=$((failed + 1)); return 1; }
+}
+sl a3   "'token: ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8'" \
+  && reject "single-line 'token: <tok>'"      "shape of a credential" -f "$MLTMP/a3.yaml"
+sl a4   "'Authorization: Bearer ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8'" \
+  && reject "single-line 'Bearer <tok>'"      "shape of a credential" -f "$MLTMP/a4.yaml"
+sl a5   "' ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8'" \
+  && reject "ONE leading space before a token" "shape of a credential" -f "$MLTMP/a5.yaml"
+# A quoted credential inside a JSON blob. The preceding byte is a double quote,
+# which is neither "=" nor whitespace nor a colon - the configuration that a
+# hand-listed set of separators misses and a negated token class catches.
+sl aq   "'{\"tok\":\"ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8\"}'" \
+  && reject "token after a double quote"      "shape of a credential" -f "$MLTMP/aq.yaml"
+
+echo "== the walk checks BOTH SIDES of the colon =="
+# A credential written as an annotation KEY rendered clean: the walk recursed on
+# values and never inspected names. A key reaches exactly the same readers as a
+# value.
+{ printf 'hub:\n  hubId: fixed-id\n  podAnnotations:\n'
+  printf '    ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8: mine\n'; } > "$MLTMP/k1.yaml"
+reject "credential as an annotation KEY" "shape of a credential" -f "$MLTMP/k1.yaml"
+# AND THE MESSAGE MUST NOT PRINT THE KEY IT CAUGHT. Everywhere else the source
+# path interpolates the key so the operator can find the leaf; here the key IS
+# the secret, so the path stops at the parent. Asserted, not assumed.
+executed=$((executed + 1))
+_kout="$(render -f "$MLTMP/k1.yaml")"
+case "$_kout" in
+  *ghp_A1b2C3d4E5f6G7h8*) echo "FAIL  the key-check message printed the credential it caught"
+                          failed=$((failed + 1)) ;;
+  *"a map key"*)          echo "ok    key-check message locates the leaf without printing it" ;;
+  *) echo "FAIL  key-check message did not name the surface"; failed=$((failed + 1)) ;;
+esac
+# R2 PAIRING (gd-p3-rev, ratified by gd-em 14:20Z at CRITICAL). The key-position
+# reject above only means something beside a VALUE-position row planted in THE
+# SAME MAP. Without it, "the key axis fires" and "this fixture shape fires for
+# some other reason" are the same observation. Same annotation map, same
+# credential, other side of the colon.
+{ printf 'hub:\n  hubId: fixed-id\n  podAnnotations:\n'
+  printf '    example.com/tok: ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8\n'; } > "$MLTMP/k2.yaml"
+reject "same credential in VALUE position" "shape of a credential" -f "$MLTMP/k2.yaml"
+# ⚠ THE PATH IN THESE MESSAGES DOES NOT ROUND-TRIP, and that is known and not
+# fixed here (gd-em 14:27Z §5). "values.hub.nodeSelector.cloud.google.com/pool"
+# is ambiguous between a dotted KEY and four nested maps, and dotted keys are
+# ordinary in this chart -- "cloud.google.com/gke-spot" is in its own values.
+# Still far better than no path. Not a defect this commit undertakes to repair.
+# KEYS GET THE VALUE AXIS, NOT THE NAME AXIS, AND THIS IS THE ROW THAT PINS IT.
+# The name axis hard-fails on an underscore because pflag rejects one in a flag
+# name. Annotation keys are not flags, and underscores are legal in them, so
+# routing keys through the name axis would reject an ordinary label.
+accept "ordinary key with an underscore" \
+  --set 'hub.podAnnotations.app_version=1.2'
+
+echo "== THE READINESS PATH IS /readyz, AND NOTHING ELSE =="
+# R6 (gd-p3-rev's sweep, made gd-em's own at 14:20Z). "/readyz" appeared ZERO
+# times across all six committed test scripts while two probes in deployment.yaml
+# depend on it. It is a hard constraint on this project -- the path is /readyz,
+# NOT /api/v1/readyz and NOT /healthz -- and until these two rows it was protected
+# by nothing at all. A constraint that lives only in a brief is not a constraint.
+#
+# TWO ASSERTIONS, POSITIVE AND EXHAUSTIVE, BECAUSE EITHER ALONE IS WEAK. The
+# count row alone passes if a second probe is added pointing somewhere wrong and
+# a correct one is deleted. The no-other-path row alone passes VACUOUSLY if the
+# probes stop rendering altogether -- zero paths is zero wrong paths. Together
+# they pin "exactly two, and both of them /readyz".
+executed=$((executed + 1))
+_probeout="$("$HELM" template t "$CHART" "${BASE[@]}" -s templates/deployment.yaml 2>&1)"
+_nready=$(printf '%s\n' "$_probeout" | grep -c 'path: /readyz')
+if [ "$_nready" -eq 2 ]; then
+  echo "ok    both probes point at /readyz (exactly 2)"
+else
+  echo "FAIL  expected exactly 2 'path: /readyz' in the Deployment, got ${_nready}"
+  failed=$((failed + 1))
+fi
+# Whole chart, not just the Deployment: an httpGet path introduced in any other
+# template is in scope for this constraint too.
+executed=$((executed + 1))
+_nother=$(render | grep 'path:' | grep -cv 'path: /readyz')
+if [ "$_nother" -eq 0 ]; then
+  echo "ok    no probe path other than /readyz renders anywhere in the chart"
+else
+  echo "FAIL  ${_nother} probe path(s) other than /readyz render:"
+  render | grep 'path:' | grep -v 'path: /readyz' | sed 's/^/        /'
+  failed=$((failed + 1))
+fi
+
+echo "== THE FALSE-POSITIVE SET: prose this pattern REFUSES, pinned as its cost =="
+# 🔴 REWRITTEN BY ME, gd-p0-dev, 2026-08-17, REPLACING A COMMENT I ALSO WROTE
+# EARLIER TODAY (215a6f85) THAT SAID THE OPPOSITE. The old block introduced these
+# as negative controls proving that length floors kept ordinary English
+# renderable. The floors are gone -- no floor can separate a 40-character real
+# key from a 40-character legitimate string, which is a closed-form result and
+# not a tuning failure -- so these values are REFUSED now, and the rows say so.
+#
+# FLIP, DO NOT DELETE. Every reject row below is a KNOWN FALSE POSITIVE. If you
+# narrow the pattern and reclaim one, its row goes red: THAT IS THE ROW WORKING,
+# and the repair is to flip it back to accept() with a note, NEVER to delete it.
+# A deleted FP row is a cost that has stopped being counted.
+#
+# FRAME, BECAUSE SIX IS NOT A COVERAGE FIGURE: these are 6 rows from a corpus I
+# built by hand. The production aperture is 32 distinct legitimate values over 19
+# rendered surfaces (gd-p3-rev, 14:08Z, measured with real helm). THIS IS A
+# SAMPLE AND MUST NOT BE READ AS THE FALSE-POSITIVE SET. It exists so the cost is
+# visible in the suite at all, not so that it is quantified here.
+#
+# AND THE COST DID NOT RISE. Against the pattern shipping in main the FP count is
+# IDENTICAL -- 608/1368, 32 distinct, before and after -- because dropping "(?i)"
+# removes two while the anchor fix adds two. Membership changes; size does not.
+# The two rows immediately below are the OUT side of that swap, and they are what
+# make it a swap rather than an assertion.
+sl h1 "'SK-Hynix-pool'"   && accept "SK-Hynix-pool (an FP under (?i), reclaimed)"  -f "$MLTMP/h1.yaml"
+sl h2 "'akia12345678'"    && accept "akia12345678 (an FP under (?i), reclaimed)"   -f "$MLTMP/h2.yaml"
+# The IN side. Both are the ANCHOR's price, NOT the prefix list's -- the prefixes
+# below are byte-identical to main's. Anyone reaching for the alternation to
+# reclaim these is editing the wrong half of the expression.
+sl p1 "'sk-learn pipeline'"       && reject "KNOWN FP, FLIP DONT DELETE: prose 'sk-learn pipeline'" "shape of a credential" -f "$MLTMP/p1.yaml"
+sl p2 "'xoxb-team'"               && reject "KNOWN FP, FLIP DONT DELETE: prose 'xoxb-team'"         "shape of a credential" -f "$MLTMP/p2.yaml"
+sl p3 "'my sk-8 skateboard deck'" && reject "KNOWN FP, FLIP DONT DELETE: prose 'sk-8 skateboard'"   "shape of a credential" -f "$MLTMP/p3.yaml"
+sl p4 "'avoid xoxb-style naming'" && reject "KNOWN FP, FLIP DONT DELETE: prose 'xoxb-style naming'" "shape of a credential" -f "$MLTMP/p4.yaml"
+sl p5 "'/opt/sk-tools/bin'"       && reject "KNOWN FP, FLIP DONT DELETE: path '/opt/sk-tools/bin'"  "shape of a credential" -f "$MLTMP/p5.yaml"
+ml prose "      note: the sk-8 connector is documented\n      tier: gold" \
+  && reject "KNOWN FP, FLIP DONT DELETE: prose 'sk-8' in a leaf" "shape of a credential" -f "$MLTMP/prose.yaml"
+# 🛑 THIS ONE DID NOT FLIP, AND IT IS THE ONLY ROW IN THE BLOCK THAT
+# DISCRIMINATES. "task-force" contains "sk-f", but the byte in front of it is
+# "a", which IS in the token class, so the anchor never engages. Measured, not
+# reasoned: of the seven prose rows this block used to carry, six refuse and this
+# one still renders.
+# IF THIS ROW EVER GOES RED, THE ANCHOR CLASS HAS BEEN WIDENED INTO A PLAIN
+# SUBSTRING SEARCH and every English word containing a prefix becomes a refusal.
+# The six rows above cannot detect that -- they are red either way.
+ml task  "      note: owned by a task-force team\n      tier: gold" \
+  && accept "mid-word sk- in 'task-force' is NOT matched" -f "$MLTMP/task.yaml"
+ml clean "      owner: platform-eng\n      tier: gold" \
+  && accept "credential-free multi-line leaf"   -f "$MLTMP/clean.yaml"
+
 echo "== the failure message must not print what it caught =="
 # TWO CONDITIONS, AND THE FIRST ONE IS THE POINT. This was a bare negative -
 # "the output does not contain hunter2" - which an EMPTY output satisfies
@@ -210,6 +483,36 @@ case "$_out" in
      failed=$((failed + 1)) ;;
 esac
 
+# THE SAME ASSERTION WITH A SLASH IN THE PASSWORD, AND IT IS NOT A DUPLICATE.
+# Detection and redaction are TWO DIFFERENT REGEXES in _helpers.tpl. The detector
+# carries an authority-terminator tail; the redactor deliberately does not, which
+# makes the redactor a strict SUPERSET of the detector. That relationship is the
+# only thing guaranteeing every caught string is redactable.
+#
+# If someone edits one pattern and not the other - the obvious maintenance
+# mistake, since they sit on adjacent lines and look interchangeable -
+# regexReplaceAll matches nothing, returns the value UNCHANGED, and %q prints the
+# whole DSN INCLUDING THE PASSWORD into the CI log. The failure is invisible from
+# the exit code: the guard still refuses, still exits 1, still prints a
+# correct-sounding message. Only the password's presence in it gives it away.
+#
+# The slash matters: it is the character the detector was widened for, so this is
+# the arm that goes red first if the two patterns drift apart.
+executed=$((executed + 1))
+_out="$(render --set 'hub.args[0]=--upstream=postgres://scion:S3cr3t/Xy@10.0.0.1/scion')"
+case "$_out" in
+  *"embeds credentials in a URL"*)
+    case "$_out" in
+      *"S3cr3t/Xy"*) echo "FAIL  slash-bearing password LEAKED into the guard's own error message"
+                     echo "        the detector and the redactor have drifted apart in _helpers.tpl"
+                     failed=$((failed + 1)) ;;
+      *) echo "ok    slash-bearing credential redacted in the failure message" ;;
+    esac ;;
+  *) echo "FAIL  slash redaction: the guard did not fire, so redaction was never tested"
+     echo "        got: $(printf '%s' "$_out" | tr '\n' ' ' | cut -c1-160)"
+     failed=$((failed + 1)) ;;
+esac
+
 echo "== underscore reachability =="
 # Not input validation. The name pattern needs a hyphen or start-of-string
 # before "secret", so SESSION_SECRET passed through unchanged matches NOTHING -
@@ -222,6 +525,30 @@ reject "--pod_namespace"  "contains an underscore" --set hub.args[0]=--pod_names
 echo "== whitespace on argv =="
 reject "leading space"  "leading or trailing whitespace" --set 'hub.args[0]= --verbose'
 reject "embedded space" "contains whitespace"            --set 'hub.args[0]=--log-level debug'
+# THE EMBEDDED-WHITESPACE GUARD IS GATED ON hasPrefix "-" (_helpers.tpl, the
+# "contains whitespace" refusal). A POSITIONAL carrying whitespace is not covered
+# by it at all. This row pins that boundary so nobody reads the row above as
+# "argv rejects whitespace" - it rejects whitespace in FLAGS.
+accept "positional with spaces (whitespace guard is flag-only)" \
+  --set 'hub.args[0]=plain positional with spaces'
+
+echo "== argv, ANCHOR CLASS, attributed BY MESSAGE TEXT =="
+# WHY ATTRIBUTION AND NOT PASS/FAIL. Several prefixed argv forms are refused today
+# by the WHITESPACE guard rather than the credential guard - a different guard,
+# with a different purpose, that the operator satisfies by not typing a space. A
+# harness recording only "did it fail" books those as credential coverage and
+# concludes argv is guarded. These rows name the message, so the whitespace axis
+# cannot take credit for a catch the value axis did not make.
+#
+# THE CLEANEST DISCRIMINATOR IS A POSITIONAL, AND THE REASON IS NOT WHAT IT LOOKS
+# LIKE. "cert:-----BEGIN RSA PRIVATE KEY-----" was reported as escaping because it
+# contains no whitespace. It contains four spaces. It escapes because it does not
+# begin with "-", so the whitespace guard above never examines it, which leaves
+# the value axis as the only thing standing between a PEM and the manifest.
+reject "positional 'cert:<PEM>' (value axis, not whitespace)" \
+  "shape of a credential" --set 'hub.args[0]=cert:-----BEGIN RSA PRIVATE KEY-----'
+reject "positional 'Authorization: Bearer <tok>'" \
+  "shape of a credential" --set 'hub.args[0]=Authorization: Bearer ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8'
 
 echo "== POSITIVE TWINS: the false-positive baseline =="
 # Without these the suite passes by refusing everything. Each is a near-miss

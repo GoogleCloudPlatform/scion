@@ -79,6 +79,17 @@ func (m *migrationSecretBackend) Resolve(context.Context, string, string, string
 
 func (m *migrationSecretBackend) HubID() string { return "test-hub" }
 
+// FetchValues is not exercised by the activation tests in this file; this
+// stub only satisfies secret.SecretBackend and reports every item not found,
+// the same as the other minimal fakes in this codebase.
+func (m *migrationSecretBackend) FetchValues(_ context.Context, metas []secret.SecretMeta) (map[string]secret.FetchResult, error) {
+	results := make(map[string]secret.FetchResult, len(metas))
+	for _, meta := range metas {
+		results[meta.ID] = secret.FetchResult{Err: store.ErrNotFound}
+	}
+	return results, nil
+}
+
 // newActivationServer returns a Server wired with a mock plugin manager and
 // the given secret backend, plus a temporary HOME so plugin dir resolution
 // stays inside the test sandbox.
@@ -294,5 +305,54 @@ func TestLoadTeamsConfig_DoesNotMigrateSecrets(t *testing.T) {
 	}
 	if len(sb.sets) != 0 {
 		t.Errorf("manifest generation must not write to the secret backend, got %+v", sb.sets)
+	}
+}
+
+// TestActivateInstalledIntegration_AuthFieldsPropagatedToLoadOne is a
+// regression test verifying that activateInstalledIntegration propagates
+// AuthType and AuthAudience from the settings entry through to the
+// PluginEntry received by IntegrationManager.LoadOne. Without this,
+// dynamically activated plugins lose their authentication settings and
+// the Hub-to-Bridge gRPC transport falls back to unauthenticated.
+func TestActivateInstalledIntegration_AuthFieldsPropagatedToLoadOne(t *testing.T) {
+	srv, mgr := newActivationServer(t, nil)
+
+	entry := &config.V1PluginEntry{
+		Path:         "./a2a-bridge",
+		SelfManaged:  true,
+		Mode:         "grpc",
+		Address:      "bridge.example.com:443",
+		AuthType:     "google_id_token",
+		AuthAudience: "https://bridge.example.com",
+	}
+
+	err := srv.activateInstalledIntegration(context.Background(), mgr, "a2a-bridge", entry)
+	if err != nil {
+		t.Fatalf("activateInstalledIntegration: %v", err)
+	}
+
+	if len(mgr.loadOneCalls) != 1 {
+		t.Fatalf("expected 1 LoadOne call, got %d", len(mgr.loadOneCalls))
+	}
+	if mgr.loadOneCalls[0] != "a2a-bridge" {
+		t.Errorf("LoadOne name = %q, want %q", mgr.loadOneCalls[0], "a2a-bridge")
+	}
+	if len(mgr.loadOneEntries) != 1 {
+		t.Fatalf("expected 1 LoadOne entry, got %d", len(mgr.loadOneEntries))
+	}
+
+	got := mgr.loadOneEntries[0]
+	if got.AuthType != "google_id_token" {
+		t.Errorf("PluginEntry.AuthType = %q, want %q", got.AuthType, "google_id_token")
+	}
+	if got.AuthAudience != "https://bridge.example.com" {
+		t.Errorf("PluginEntry.AuthAudience = %q, want %q", got.AuthAudience, "https://bridge.example.com")
+	}
+	// Also verify other fields propagated correctly.
+	if got.Mode != "grpc" {
+		t.Errorf("PluginEntry.Mode = %q, want %q", got.Mode, "grpc")
+	}
+	if got.Address != "bridge.example.com:443" {
+		t.Errorf("PluginEntry.Address = %q, want %q", got.Address, "bridge.example.com:443")
 	}
 }

@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Matches the real app's index.html: without this, Chromium's mobile
+         emulation (isMobile: true) ignores Playwright's requested viewport
+         size and falls back to a ~980px desktop-site layout viewport, which
+         silently breaks any narrow-width assertion made under touch
+         emulation. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chat quick command palette fixture</title>
+    <style>
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        display: flex;
+        flex-direction: column;
+      }
+      #chat-outlet,
+      #terminal-outlet {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+      }
+      /*
+       * `display: flex` above otherwise wins over the UA default
+       * `[hidden] { display: none }` rule (an inline style always outranks
+       * a plain element-selector rule of equal specificity that comes
+       * earlier in the cascade) — without this, hideChatShowTerminal()'s
+       * `chatOutlet.hidden = true` would leave chat fully laid out and
+       * visible, and a test relying on chat being genuinely hidden while
+       * the terminal is shown would never actually exercise that.
+       */
+      #chat-outlet[hidden],
+      #terminal-outlet[hidden] {
+        display: none;
+      }
+      scion-page-chat {
+        width: 100%;
+      }
+      scion-chat-shell {
+        width: 100%;
+        min-height: 0;
+      }
+      scion-terminal-pane {
+        width: 100%;
+        height: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- A real focusable element outside <scion-page-chat> entirely — distinct
+         from both a real composer and the page's own #palette-focus-fallback
+         — so a test can tell "the invoker was actually restored" apart from
+         "focus fell back to the page's own default" when this is the
+         invoker. -->
+    <button id="outside-invoker" type="button">Outside invoker</button>
+    <!-- Mirrors main.ts: the route outlet is hidden (not the page itself)
+         while the terminal workspace is shown, and the chat page stays
+         mounted underneath. -->
+    <div id="chat-outlet"></div>
+    <div id="terminal-outlet" hidden></div>
+    <script type="module" src="./fixture.ts"></script>
+  </body>
+</html>

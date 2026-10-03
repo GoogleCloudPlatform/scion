@@ -162,17 +162,11 @@ func init() {
 	// Subscribe flags
 	notificationsSubscribeCmd.Flags().StringVar(&subscribeAgent, "agent", "", "Agent name or ID to subscribe to")
 	notificationsSubscribeCmd.Flags().StringVar(&subscribeProject, "project", "", "Project to subscribe in (inferred from context if omitted)")
-	notificationsSubscribeCmd.Flags().StringVar(&subscribeProject, "grove", "", "Deprecated alias for --project")
-	_ = notificationsSubscribeCmd.Flags().MarkDeprecated("grove", "use --project instead")
-	_ = notificationsSubscribeCmd.Flags().MarkHidden("grove")
 	notificationsSubscribeCmd.Flags().StringArrayVar(&subscribeTriggers, "triggers", nil, "Trigger activity (repeatable; also accepts a comma-separated list) (default: COMPLETED,WAITING_FOR_INPUT,LIMITS_EXCEEDED)")
 
 	// Unsubscribe flags
 	notificationsUnsubscribeCmd.Flags().BoolVar(&unsubscribeAll, "all", false, "Remove all subscriptions in the project")
 	notificationsUnsubscribeCmd.Flags().StringVar(&unsubscribeProject, "project", "", "Project to unsubscribe from (used with --all)")
-	notificationsUnsubscribeCmd.Flags().StringVar(&unsubscribeProject, "grove", "", "Deprecated alias for --project")
-	_ = notificationsUnsubscribeCmd.Flags().MarkDeprecated("grove", "use --project instead")
-	_ = notificationsUnsubscribeCmd.Flags().MarkHidden("grove")
 
 	// Update flags
 	notificationsUpdateCmd.Flags().StringArrayVar(&updateTriggers, "triggers", nil, "Trigger activity (required, repeatable; also accepts a comma-separated list)")
@@ -180,13 +174,21 @@ func init() {
 
 	// Subscriptions list flags
 	notificationsSubscriptionsCmd.Flags().StringVar(&subscriptionsProject, "project", "", "Filter by project")
-	notificationsSubscriptionsCmd.Flags().StringVar(&subscriptionsProject, "grove", "", "Deprecated alias for --project")
-	_ = notificationsSubscriptionsCmd.Flags().MarkDeprecated("grove", "use --project instead")
-	_ = notificationsSubscriptionsCmd.Flags().MarkHidden("grove")
 	notificationsSubscriptionsCmd.Flags().BoolVar(&subscriptionsJSON, "json", false, "Output in JSON format")
 }
 
 // requireHubClient resolves settings and returns a hub client, or errors if hub is not enabled.
+//
+// In addition to settings.IsHubEnabled(), this also accepts the in-container
+// fallback that hubsync.EnsureHubReady uses: when running inside a hub-connected
+// agent container, hub.enabled is never written to settings, but the hub context
+// env vars (SCION_HUB_ENDPOINT/SCION_HUB_URL/SCION_PROJECT_ID) are
+// always set. Without this fallback, every conversation and notifications
+// subcommand fails with "requires Hub mode" inside an agent, even though the
+// hub handlers already accept agent-scoped auth (SCION_AUTH_TOKEN) and the
+// endpoint can be resolved from the same env vars via GetHubEndpoint. This does
+// not widen access: callers still need valid agent-scoped credentials for
+// getHubClient to authenticate.
 func requireHubClient() (*config.Settings, hubclient.Client, error) {
 	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
@@ -198,7 +200,7 @@ func requireHubClient() (*config.Settings, hubclient.Client, error) {
 		return nil, nil, fmt.Errorf("failed to load settings: %w", err)
 	}
 
-	if !settings.IsHubEnabled() {
+	if !settings.IsHubEnabled() && !config.IsHubContext() {
 		return nil, nil, fmt.Errorf("notifications require Hub mode. Enable with 'scion hub enable <endpoint>'")
 	}
 

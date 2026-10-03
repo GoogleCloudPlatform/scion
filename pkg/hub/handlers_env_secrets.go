@@ -213,7 +213,7 @@ func (s *Server) handleEnvVars(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.listEnvVars(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 
@@ -276,7 +276,7 @@ func (s *Server) handleEnvVarByKey(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.deleteEnvVar(w, r, key)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -613,7 +613,7 @@ func (s *Server) handleSecrets(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		s.listSecrets(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 
@@ -671,7 +671,7 @@ func (s *Server) handleSecretByKey(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.deleteSecret(w, r, key)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodDelete)
 	}
 }
 
@@ -1059,7 +1059,7 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 		}
 		// Fall through to existing PUT logic below.
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut)
 		return
 	}
 
@@ -1128,6 +1128,30 @@ func (s *Server) handleAgentSecrets(w http.ResponseWriter, r *http.Request, agen
 			"value":   scope,
 			"allowed": []string{"project", "user"},
 		})
+		return
+	}
+
+	// Hub admin policy: when agent_secrets.user_scope_only is on, agents may
+	// not write project-scope secrets at all. This is a blanket rule on
+	// every agent-originated project-scope write (design ptone/scion#2291
+	// §6) — it covers harness auth capture and ad-hoc `sciontool secret set`
+	// alike. It is checked before allowProgeny/base64-decode/type/conflict/
+	// GetMeta, so it cannot be bypassed by `force` and the request never
+	// reaches the backend. (Value/Encoding validation above still runs
+	// first and fails closed on its own terms — an empty value or an
+	// unrecognized encoding gets its own 400/422 either way.)
+	if scope == store.ScopeProject && s.agentSecretsUserScopeOnly() {
+		slog.Info("agent project-scope secret write rejected by policy",
+			"agent_id", agentID, "project_id", projectID, "key", key)
+		writeError(w, http.StatusForbidden, ErrCodeSecretScopeRestricted,
+			"The hub administrator has restricted agent-written secrets to user (profile) scope; "+
+				"project-scope writes are not allowed. Retry with scope \"user\" (sciontool: --scope user).",
+			map[string]interface{}{
+				"field":         "scope",
+				"value":         "project",
+				"allowedScopes": []string{"user"},
+				"setting":       "agent_secrets.user_scope_only",
+			})
 		return
 	}
 
@@ -1301,36 +1325,48 @@ func (s *Server) validateAgentSecretAccess(w http.ResponseWriter, r *http.Reques
 // agentGetSecret handles GET /api/v1/agents/{agentID}/secrets/{key}.
 // Returns the secret value (base64-encoded) along with type and target metadata.
 // Supports both project-scoped and user-scoped secrets via the ?scope= query parameter.
+//
+// The runtime material check sequence (material_runtime.go) runs after
+// validateAgentSecretAccess (not modified here): the whole-request precheck
+// (checks 1-6), then the per-item check for the requested scope (check 7
+// project, check 8 user) and the record-race rule (check 9).
 func (s *Server) agentGetSecret(w http.ResponseWriter, r *http.Request, agentID, key string) {
 	ctx := r.Context()
 
-	projectID, ok := s.validateAgentSecretAccess(w, r, agentID)
+	_, ok := s.validateAgentSecretAccess(w, r, agentID)
 	if !ok {
-		LogAgentSecretRead(ctx, s.auditLogger, agentID, "", key, false, "auth failed")
+		// This path runs before the precheck, so no TargetFacts exist and no
+		// MaterialSelectionEvent is emitted: there is no partner event for
+		// the compat record to be derived from.
+		s.logAgentSecretReadCompat(ctx, agentID, "", "", "", key, false, "auth failed", false, "")
 		return
 	}
 
-	// Determine scope and scopeID.
+	ident := GetAgentIdentityFromContext(ctx)
+	correlationID := newMaterialCorrelationID()
+
+	facts, reason, status := s.materialRuntimePrecheck(ctx, ident)
+	if status != 0 {
+		s.logMaterialSelection(ctx, s.buildMaterialSelectionEvent(ctx, "get", correlationID, nil, reason, nil))
+		if status == http.StatusInternalServerError {
+			writeError(w, status, ErrCodeRuntimeError, agentSecretAccessErrorMessage, nil)
+			return
+		}
+		writeError(w, status, ErrCodeForbidden, agentSecretAccessDeniedMessage, nil)
+		return
+	}
+
+	// Determine scope (check 6: unchanged).
 	scope := r.URL.Query().Get("scope")
 	if scope == "" {
 		scope = store.ScopeProject
 	}
-	var scopeID string
 	switch scope {
-	case store.ScopeProject:
-		scopeID = projectID
-	case store.ScopeUser:
-		agentIdent := GetAgentIdentityFromContext(ctx)
-		if agentIdent == nil {
-			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "This endpoint requires agent authentication", nil)
-			return
-		}
-		scopeID = agentIdent.OriginUserID()
-		if scopeID == "" {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "agent token lacks user context required for user-scoped secrets", nil)
-			return
-		}
+	case store.ScopeProject, store.ScopeUser:
 	default:
+		// An invalid scope parameter still emits the request's
+		// MaterialSelectionEvent rather than exiting silently.
+		s.logMaterialSelection(ctx, s.buildMaterialSelectionEvent(ctx, "get", correlationID, facts, ReasonInvalidScope, nil))
 		ValidationError(w, "scope must be \"project\" or \"user\"", map[string]interface{}{
 			"field":   "scope",
 			"value":   scope,
@@ -1339,103 +1375,89 @@ func (s *Server) agentGetSecret(w http.ResponseWriter, r *http.Request, agentID,
 		return
 	}
 
-	// Retrieve the secret including its value.
-	secretVal, err := s.secretBackend.Get(ctx, key, scope, scopeID)
-	if err != nil {
-		LogAgentSecretRead(ctx, s.auditLogger, agentID, scopeID, key, false, err.Error())
-		writeErrorFromErr(w, err, "")
-		return
+	var decisionCache projectDecisionCache
+	item, sv, permission, detail := s.selectRuntimeMaterial(ctx, ident, facts, scope, key, &decisionCache)
+
+	emit := func() {
+		items := []MaterialSelectionEventItem{materialSelectionItem(item, permission, detail)}
+		s.logMaterialSelection(ctx, s.buildMaterialSelectionEvent(ctx, "get", correlationID, facts, "", items))
 	}
 
-	// Audit log the successful read.
-	LogAgentSecretRead(ctx, s.auditLogger, agentID, scopeID, key, true, "")
-
-	writeJSON(w, http.StatusOK, AgentGetSecretResponse{
-		Key:    secretVal.Name,
-		Value:  base64.StdEncoding.EncodeToString([]byte(secretVal.Value)),
-		Type:   secretVal.SecretType,
-		Target: secretVal.Target,
-	})
+	switch {
+	case item.Selected:
+		s.logAgentSecretReadCompat(ctx, agentID, facts.ProjectID, item.Scope, item.ScopeID, key, true, "", true, correlationID)
+		emit()
+		writeJSON(w, http.StatusOK, AgentGetSecretResponse{
+			Key:    sv.Name,
+			Value:  base64.StdEncoding.EncodeToString([]byte(sv.Value)),
+			Type:   sv.SecretType,
+			Target: sv.Target,
+		})
+	case !item.Allowed && item.Reason != ReasonBackendError:
+		// Check 7 or 8 denied the item for a reason other than an
+		// infrastructure fault: not_found, never a value.
+		s.logAgentSecretReadCompat(ctx, agentID, facts.ProjectID, item.Scope, item.ScopeID, key, false, item.Reason, true, correlationID)
+		emit()
+		writeError(w, http.StatusNotFound, ErrCodeNotFound, "secret not found", nil)
+	default:
+		// Either checks 7/8 failed with a backend error, or they allowed the
+		// item but check 9 (the record-race rule) did not: both report
+		// unavailable, never a value.
+		s.logAgentSecretReadCompat(ctx, agentID, facts.ProjectID, item.Scope, item.ScopeID, key, false, item.Reason, true, correlationID)
+		emit()
+		writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "secret unavailable", nil)
+	}
 }
 
 // agentListSecrets handles GET /api/v1/agents/{agentID}/secrets (no key).
 // Returns metadata for secrets accessible to the agent.
 // Supports both project-scoped and user-scoped secrets via the ?scope= query parameter.
 // When no scope is specified, secrets from both project and user scopes are returned.
+//
+// Applies the whole-request checks 1-6 precheck, then filters metadata: it
+// reads no value and has no check-9 step. It lists only keys the agent could
+// read.
 func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentID string) {
 	ctx := r.Context()
 
-	projectID, ok := s.validateAgentSecretAccess(w, r, agentID)
+	_, ok := s.validateAgentSecretAccess(w, r, agentID)
 	if !ok {
 		return
 	}
 
+	ident := GetAgentIdentityFromContext(ctx)
+	correlationID := newMaterialCorrelationID()
+
+	facts, reason, status := s.materialRuntimePrecheck(ctx, ident)
+	if status != 0 {
+		s.logMaterialSelection(ctx, s.buildMaterialSelectionEvent(ctx, "list", correlationID, nil, reason, nil))
+		if status == http.StatusInternalServerError {
+			writeError(w, status, ErrCodeRuntimeError, agentSecretAccessErrorMessage, nil)
+			return
+		}
+		writeError(w, status, ErrCodeForbidden, agentSecretAccessDeniedMessage, nil)
+		return
+	}
+
+	// emitListExitItem records the request's MaterialSelectionEvent with a
+	// single request-level item before a whole-request exit, so a backend
+	// fault is never a silent exit: every exit from this handler leaves a
+	// trace, the same way the decision-error branch already did.
+	emitListExitItem := func(scope, scopeID string, grant GrantKind, permission string) {
+		item := materialSelectionItem(ItemResult{
+			Candidate: Candidate{Kind: MaterialKindSecret, Scope: scope, ScopeID: scopeID, Grant: grant},
+			Reason:    ReasonBackendError,
+		}, permission, "")
+		s.logMaterialSelection(ctx, s.buildMaterialSelectionEvent(ctx, "list", correlationID, facts, "", []MaterialSelectionEventItem{item}))
+	}
+
 	scope := r.URL.Query().Get("scope")
-
-	// Collect secrets based on requested scope.
-	var allMetas []secret.SecretMeta
-
 	switch scope {
-	case "": // No scope filter: include both project and user secrets.
-		projectMetas, err := s.secretBackend.List(ctx, secret.Filter{
-			Scope:   store.ScopeProject,
-			ScopeID: projectID,
-		})
-		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		allMetas = append(allMetas, projectMetas...)
-
-		// Include user-scoped secrets if agent has user context.
-		agentIdent := GetAgentIdentityFromContext(ctx)
-		if agentIdent != nil {
-			if userID := agentIdent.OriginUserID(); userID != "" {
-				userMetas, err := s.secretBackend.List(ctx, secret.Filter{
-					Scope:   store.ScopeUser,
-					ScopeID: userID,
-				})
-				if err != nil {
-					writeErrorFromErr(w, err, "")
-					return
-				}
-				allMetas = append(allMetas, userMetas...)
-			}
-		}
-
-	case store.ScopeProject:
-		metas, err := s.secretBackend.List(ctx, secret.Filter{
-			Scope:   store.ScopeProject,
-			ScopeID: projectID,
-		})
-		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		allMetas = metas
-
-	case store.ScopeUser:
-		agentIdent := GetAgentIdentityFromContext(ctx)
-		if agentIdent == nil {
-			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "This endpoint requires agent authentication", nil)
-			return
-		}
-		userID := agentIdent.OriginUserID()
-		if userID == "" {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden, "agent token lacks user context required for user-scoped secrets", nil)
-			return
-		}
-		metas, err := s.secretBackend.List(ctx, secret.Filter{
-			Scope:   store.ScopeUser,
-			ScopeID: userID,
-		})
-		if err != nil {
-			writeErrorFromErr(w, err, "")
-			return
-		}
-		allMetas = metas
-
+	case "", store.ScopeProject, store.ScopeUser:
 	default:
+		// An invalid scope parameter still emits the request's
+		// MaterialSelectionEvent rather than exiting silently.
+		s.logMaterialSelection(ctx, s.buildMaterialSelectionEvent(ctx, "list", correlationID, facts, ReasonInvalidScope, nil))
 		ValidationError(w, "scope must be \"project\" or \"user\"", map[string]interface{}{
 			"field":   "scope",
 			"value":   scope,
@@ -1444,14 +1466,112 @@ func (s *Server) agentListSecrets(w http.ResponseWriter, r *http.Request, agentI
 		return
 	}
 
-	secrets := make([]AgentSecretMeta, len(allMetas))
-	for i, m := range allMetas {
-		secrets[i] = AgentSecretMeta{
-			Key:    m.Name,
-			Type:   m.SecretType,
-			Target: m.Target,
+	includeProject := scope == "" || scope == store.ScopeProject
+	includeUser := scope == "" || scope == store.ScopeUser
+
+	secrets := make([]AgentSecretMeta, 0)
+	items := make([]MaterialSelectionEventItem, 0)
+
+	if includeProject {
+		var cache projectDecisionCache
+		decision, decErr := s.projectReadDecision(ctx, ident, facts, &cache)
+		if decErr != nil {
+			// A decision error still emits the request's
+			// MaterialSelectionEvent, with a request-level item recording
+			// the failure, rather than exiting silently.
+			emitListExitItem(store.ScopeProject, facts.ProjectID, GrantProjectSecretRead, "project.secret_read")
+			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "failed to list secrets", nil)
+			return
+		}
+		// Decision first, then metadata: a denial leaves the project part
+		// of the list empty and makes no GetMeta/List call.
+		if decision.Allowed {
+			metas, err := s.secretBackend.List(ctx, secret.Filter{
+				Scope:   store.ScopeProject,
+				ScopeID: facts.ProjectID,
+			})
+			if err != nil {
+				emitListExitItem(store.ScopeProject, facts.ProjectID, GrantProjectSecretRead, "project.secret_read")
+				writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "failed to list secrets", nil)
+				return
+			}
+			for _, m := range metas {
+				if m.SecretType == store.SecretTypeInternal {
+					continue
+				}
+				secrets = append(secrets, AgentSecretMeta{Key: m.Name, Type: m.SecretType, Target: m.Target})
+				items = append(items, materialSelectionItem(ItemResult{
+					Candidate: Candidate{Kind: MaterialKindSecret, Key: m.Name, Scope: store.ScopeProject, ScopeID: facts.ProjectID, Grant: GrantProjectSecretRead, Meta: m},
+					Allowed:   true,
+					Reason:    ReasonAllowed,
+				}, "project.secret_read", ""))
+			}
+		} else {
+			// The project part of the list is empty, but the denial and its
+			// Detail are still recorded as a request-level item, rather than
+			// leaving no trace of the project scope having been evaluated.
+			items = append(items, materialSelectionItem(ItemResult{
+				Candidate: Candidate{Kind: MaterialKindSecret, Scope: store.ScopeProject, ScopeID: facts.ProjectID, Grant: GrantProjectSecretRead},
+				Reason:    ReasonDeniedByPolicy,
+			}, "project.secret_read", decision.Reason))
 		}
 	}
+
+	if includeUser {
+		eligible, err := s.progenyEligibleSecretIDs(ctx, facts.Agent)
+		if err != nil {
+			emitListExitItem(store.ScopeUser, facts.Root.ID, GrantProgeny, "")
+			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "failed to list secrets", nil)
+			return
+		}
+		metas, err := s.secretBackend.List(ctx, secret.Filter{
+			Scope:   store.ScopeUser,
+			ScopeID: facts.Root.ID,
+		})
+		if err != nil {
+			emitListExitItem(store.ScopeUser, facts.Root.ID, GrantProgeny, "")
+			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "failed to list secrets", nil)
+			return
+		}
+		for _, m := range metas {
+			if m.SecretType == store.SecretTypeInternal {
+				continue
+			}
+			if !m.AllowProgeny || !eligible[m.ID] {
+				continue
+			}
+			live, kind, _, lerr := s.progenySourceLive(ctx, m)
+			if lerr != nil {
+				// A liveness-check error is not the same as "not shared":
+				// logged distinctly so an operator is not left to guess
+				// which one occurred, and recorded as a per-row item so the
+				// audit event shows the row was skipped rather than simply
+				// absent.
+				slog.Error("agent list secrets: progeny source liveness check failed",
+					"agent_id", agentID, "key", m.Name, "err", lerr)
+				items = append(items, materialSelectionItem(ItemResult{
+					Candidate: Candidate{Kind: MaterialKindSecret, Key: m.Name, Scope: store.ScopeUser, ScopeID: facts.Root.ID, Grant: GrantProgeny, Meta: m},
+					Reason:    ReasonBackendError,
+				}, "", ""))
+				continue
+			}
+			if !live {
+				continue
+			}
+			var src *SourceRef
+			if kind != "" {
+				src = &SourceRef{Kind: kind, ID: m.CreatedBy}
+			}
+			secrets = append(secrets, AgentSecretMeta{Key: m.Name, Type: m.SecretType, Target: m.Target})
+			items = append(items, materialSelectionItem(ItemResult{
+				Candidate: Candidate{Kind: MaterialKindSecret, Key: m.Name, Scope: store.ScopeUser, ScopeID: facts.Root.ID, Grant: GrantProgeny, SharingSource: src, Meta: m},
+				Allowed:   true,
+				Reason:    ReasonAllowed,
+			}, "", ""))
+		}
+	}
+
+	s.logMaterialSelection(ctx, s.buildMaterialSelectionEvent(ctx, "list", correlationID, facts, "", items))
 
 	writeJSON(w, http.StatusOK, AgentListSecretsResponse{
 		Secrets: secrets,
@@ -1528,7 +1648,7 @@ func (s *Server) handleProjectEnvVars(w http.ResponseWriter, r *http.Request, pr
 			ScopeID: projectID,
 		})
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 
@@ -1655,7 +1775,7 @@ func (s *Server) handleScopedEnvVarByKey(w http.ResponseWriter, r *http.Request,
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodDelete)
 	}
 }
 
@@ -1776,7 +1896,7 @@ func (s *Server) handleProjectSecrets(w http.ResponseWriter, r *http.Request, pr
 			ScopeID: projectID,
 		})
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 
@@ -1887,7 +2007,7 @@ func (s *Server) handleScopedSecretByKey(w http.ResponseWriter, r *http.Request,
 		w.WriteHeader(http.StatusNoContent)
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodDelete)
 	}
 }
 
@@ -1985,14 +2105,42 @@ func (s *Server) autoLinkProviders(ctx context.Context, project *store.Project) 
 func (s *Server) handleProjectProviders(w http.ResponseWriter, r *http.Request, projectID, subPath string) {
 	ctx := r.Context()
 
-	// Verify project exists
-	_, err := s.store.GetProject(ctx, projectID)
+	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
 		if err == store.ErrNotFound {
 			NotFound(w, "Project")
 			return
 		}
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		Unauthorized(w)
+		return
+	}
+
+	// Project isolation runs before the authorization check so a cross-project
+	// agent caller keeps its 404 and is not told the project exists.
+	if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
+		if project.ID != agentIdent.ProjectID() {
+			NotFound(w, "Project")
+			return
+		}
+	}
+
+	// Listing providers is a read of the project; linking or unlinking a
+	// provider changes where the project's agents may run, so it is an update.
+	action := ActionRead
+	switch r.Method {
+	case http.MethodPost, http.MethodDelete:
+		action = ActionUpdate
+	}
+
+	// SECURITY-GATE: CheckAccess — one check here gates the whole providers
+	// subtree (list, link, unlink) before dispatching to the handlers below.
+	if !s.authorize(w, r, projectResource(project), action) {
 		return
 	}
 
@@ -2004,7 +2152,7 @@ func (s *Server) handleProjectProviders(w http.ResponseWriter, r *http.Request, 
 		case http.MethodPost:
 			s.addProjectProvider(w, r, projectID)
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 		}
 		return
 	}
@@ -2015,8 +2163,52 @@ func (s *Server) handleProjectProviders(w http.ResponseWriter, r *http.Request, 
 	case http.MethodDelete:
 		s.removeProjectProvider(w, r, projectID, brokerID)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodDelete)
 	}
+}
+
+// projectProviderView decorates a project's provider record with read-only
+// broker capacity fields for the providers list response (ptone/scion#2161).
+// AgentLimit and AgentCount are computed at request time from the same
+// quota primitives checkAndReserveBrokerQuota uses to admit or reject agent
+// starts (pkg/hub/broker_quota.go) — they report that decision's inputs,
+// they do not make one: nothing here creates, modifies, or releases a
+// reservation. Unexported: only pkg/hub constructs this view; clients see
+// the wire shape through hubclient.ProjectProvider.
+type projectProviderView struct {
+	store.ProjectProvider
+	// AgentLimit is the effective max_agents_per_broker ceiling for this
+	// broker. Unset (nil) when the hub has no quota enforcement configured,
+	// no max_agents_per_broker definition exists, resolution failed for
+	// this provider, or the broker is unlimited. The field is never 0: a
+	// non-positive effective limit means unlimited and is omitted. Older
+	// clients that don't know this field are unaffected.
+	AgentLimit *int64 `json:"agentLimit,omitempty"`
+	// AgentCount is the number of active max_agents_per_broker reservations
+	// held by agents in a counted phase (see isBrokerQuotaCountedPhase),
+	// from any project on this broker. It is exact when the broker has a
+	// limit, since every admission and release goes through
+	// QuotaService.Reserve/Release synchronously. When the broker is
+	// unlimited, Reserve returns before creating a reservation (quota.go),
+	// so newly started agents are only reflected here once the periodic
+	// broker-quota-reconcile job backfills them; the value may lag by up to
+	// that reconcile interval. This is broker-wide and distinct from the
+	// project-level agentCount reported elsewhere (e.g. Project.AgentCount).
+	// Unset (nil) when the hub has no quota enforcement configured, no
+	// max_agents_per_broker definition exists, or resolution failed for
+	// this provider — a zero count is reported as 0, not omitted.
+	AgentCount *int64 `json:"agentCount,omitempty"`
+	// AgentLimitSource reports which precedence step produced AgentLimit
+	// (ptone/scion#2061 P2, design.md §5.9): "broker" (a per-broker setting,
+	// pkg/hub/brokersettings), "entitlement" (an entitlement binding),
+	// "hub_default" (the limit definition's default value), "unlimited"
+	// (resolved with no cap), or "not_enforced" (Amendment A1: the P1b
+	// enforcement switch, GoogleCloudPlatform/scion#2115, is off — AgentLimit
+	// is then informational only: it is still the resolved cap from whichever
+	// step would otherwise apply, but Reserve does not reject agent creates
+	// against it). Omitted whenever resolution didn't run or failed — the
+	// same conditions that leave AgentLimit and AgentCount unset.
+	AgentLimitSource string `json:"agentLimitSource,omitempty"`
 }
 
 // listProjectProviders returns all providers for a project.
@@ -2029,9 +2221,73 @@ func (s *Server) listProjectProviders(w http.ResponseWriter, r *http.Request, pr
 		return
 	}
 
+	// Looked up once and reused for every provider: the limit definition
+	// row is the same for all of them, so this turns what would otherwise
+	// be one lookup (and, on failure, one warning) per provider into one
+	// for the whole listing.
+	limitDef := s.lookupAgentLimitDefinition(ctx)
+
+	views := make([]projectProviderView, len(providers))
+	for i, p := range providers {
+		views[i] = projectProviderView{ProjectProvider: p}
+		views[i].AgentLimit, views[i].AgentCount, views[i].AgentLimitSource = s.resolveBrokerCapacity(ctx, p.BrokerID, limitDef)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"providers": providers,
+		"providers": views,
 	})
+}
+
+// lookupAgentLimitDefinition fetches the max_agents_per_broker limit
+// definition once for reuse across all providers in a single listing
+// request. Returns nil when no quota service is configured or when no such
+// limit definition exists (store.ErrNotFound), matching how
+// QuotaService.Reserve treats a missing definition as "no limit — no
+// enforcement" (quota.go). Other lookup errors are logged.
+func (s *Server) lookupAgentLimitDefinition(ctx context.Context) *store.LimitDefinition {
+	if s.quotaService == nil {
+		return nil
+	}
+
+	limitDef, err := s.store.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			slog.WarnContext(ctx, "providers: failed to look up max_agents_per_broker limit definition", "error", err)
+		}
+		return nil
+	}
+	return limitDef
+}
+
+// resolveBrokerCapacity is a thin wrapper over brokerCapacity
+// (broker_capacity.go) — the one read model shared by enforcement and every
+// read path (ptone/scion#2061 P2, design.md §5.9, AC-P2-10) — that adapts it
+// to the providers listing's pre-existing (agentLimit, agentCount, source)
+// field shape (ptone/scion#2161). It mirrors exactly the primitives
+// checkAndReserveBrokerQuota uses to admit or reject an agent start
+// (pkg/hub/broker_quota.go): the same limit name, subject, and scope
+// (store.QuotaScopeBroker, scoped to the broker itself). This is a read: it
+// never creates, updates, or releases a reservation.
+//
+// limitDef is looked up once by the caller (lookupAgentLimitDefinition) and
+// shared across every provider in a listing.
+//
+// The listing's pre-existing contract is all-or-nothing per provider: if
+// either half of BrokerCapacity couldn't be resolved, both agentLimit and
+// agentCount come back nil (never "an agentLimit with no matching count to
+// compare it against") — so that a failure for one provider never fails the
+// whole providers listing (per ptone/scion#2161), while also never reporting
+// half a picture for that provider. Count is nil exactly when either the
+// limit or the count resolution failed, or nothing is configured at all
+// (brokerCapacity skips counting when there's no limitDef/quotaService) —
+// all three collapse to the listing's existing "leave both unset" case here.
+// Failures are logged inside brokerCapacity, not duplicated here.
+func (s *Server) resolveBrokerCapacity(ctx context.Context, brokerID string, limitDef *store.LimitDefinition) (agentLimit, agentCount *int64, source string) {
+	bc := s.brokerCapacity(ctx, brokerID, limitDef)
+	if bc.Count == nil {
+		return nil, nil, ""
+	}
+	return bc.Limit, bc.Count, bc.Source
 }
 
 // addProjectProvider adds a broker as a provider to a project.
@@ -2213,7 +2469,7 @@ func (s *Server) handleBrokerEnvVars(w http.ResponseWriter, r *http.Request, bro
 			ScopeID: brokerID,
 		})
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 
@@ -2321,7 +2577,7 @@ func (s *Server) handleBrokerSecrets(w http.ResponseWriter, r *http.Request, bro
 			ScopeID: brokerID,
 		})
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 	}
 }
 

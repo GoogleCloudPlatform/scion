@@ -308,9 +308,7 @@ describe('Error surfacing: every error kind → expected inline copy', () => {
       message,
       httpStatus
     );
-    (
-      el as unknown as { surfaceAddError(err: GroupsApiError): void }
-    ).surfaceAddError(apiErr);
+    (el as unknown as { surfaceAddError(err: GroupsApiError): void }).surfaceAddError(apiErr);
 
     return {
       error: (el as unknown as { addMemberError: string | null }).addMemberError,
@@ -330,11 +328,7 @@ describe('Error surfacing: every error kind → expected inline copy', () => {
   });
 
   it('quota → member limit copy', async () => {
-    const result = await getSurfacedError(
-      'quota',
-      'quota exceeded: max_members_per_group',
-      429
-    );
+    const result = await getSurfacedError('quota', 'quota exceeded: max_members_per_group', 429);
     expect(result.error).toContain('member limit');
     expect(result.error).toContain('max_members_per_group');
     expect(result.error).toContain('Remove a member');
@@ -515,7 +509,9 @@ describe('Dialog behavior and accessibility', () => {
   it('dialog close is prevented while loading (sl-request-close suppressed)', () => {
     // The sl-request-close handler should check addMemberLoading
     // and call preventDefault when true
-    expect(SOURCE).toMatch(/sl-request-close[\s\S]{0,200}addMemberLoading[\s\S]{0,100}preventDefault/);
+    expect(SOURCE).toMatch(
+      /sl-request-close[\s\S]{0,200}addMemberLoading[\s\S]{0,100}preventDefault/
+    );
   });
 
   it('aria-live="polite" on member count for screen reader announcements', () => {
@@ -537,9 +533,7 @@ describe('Dialog behavior and accessibility', () => {
     // The member row renders role as a badge, not a select
     expect(SOURCE).toMatch(/role-badge \$\{member\.role\}/);
     // No sl-select for role in the member row
-    const memberRowMethod = SOURCE.match(
-      /renderMemberRow[\s\S]*?(?=\n\s+private\s|$)/
-    )?.[0];
+    const memberRowMethod = SOURCE.match(/renderMemberRow[\s\S]*?(?=\n\s+private\s|$)/)?.[0];
     expect(memberRowMethod).toBeDefined();
     expect(memberRowMethod).not.toContain('sl-select');
   });
@@ -551,7 +545,9 @@ describe('Dialog behavior and accessibility', () => {
 
 describe('API adapter migration', () => {
   it('loadMembers uses listMembers from groups-api.ts', () => {
-    expect(SOURCE).toContain("import { listMembers, addMember, removeMember, GroupsApiError } from '../../client/groups-api.js'");
+    expect(SOURCE).toContain(
+      "import { listMembers, addMember, removeMember, GroupsApiError } from '../../client/groups-api.js'"
+    );
     expect(SOURCE).toMatch(/await listMembers\(this\.groupId\)/);
   });
 

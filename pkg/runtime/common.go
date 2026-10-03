@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
 	"os"
@@ -33,7 +34,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	stagedsecrets "github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
@@ -201,9 +202,59 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		addArg("--network", config.NetworkMode)
 	}
 
+	// Reject a home directory that is not an allowed agent-home path before
+	// it becomes a bind mount, the same way config.Workspace is checked just
+	// below: this is the Docker/Podman/Apple-container counterpart to the
+	// Kubernetes runtime's Run(), which already validates HomeDir this way.
+	// No root is passed: unlike config.Workspace, a home directory has no
+	// per-project root to check it against at this call site at all, so the
+	// fixed deny-set and the named ~/.scion allow list are the only checks,
+	// the same as every other rootless caller of ValidateAgentHomeSource.
 	if config.HomeDir != "" {
+		resolvedHomeDir, err := ValidateAgentHomeSource(config.HomeDir, "")
+		if err != nil {
+			return nil, err
+		}
+		config.HomeDir = resolvedHomeDir
 		registerMount(config.HomeDir, util.GetHomeDir(config.UnixUsername), false, true)
 	}
+	// Reject a workspace source that is not an allowed workspace path before
+	// any of the branches below turn it into a bind mount, and act on the
+	// resolved, symlink-free path it returns rather than the original value.
+	// This mirrors the same check at the pkg/agent Start() call site, as a
+	// second gate at the actual point config.Workspace becomes a mount —
+	// covering any caller that builds a RunConfig without going through
+	// Start().
+	//
+	// No root is passed here, even though config.RepoRoot is often set: a
+	// workspace outside the repo root is an intentional, supported shape at
+	// this layer (see the "Fallback if workspace is outside repo root"
+	// branch below, and an explicit --workspace generally), and RunConfig
+	// carries no flag this function could use to tell that apart from a bad
+	// value. Only the fixed deny-set ('/', $HOME, ~/.scion, and its named
+	// ~/.scion allow list) applies here; per-project root containment is
+	// enforced upstream, at the pkg/agent Start() call site, which does have
+	// that context.
+	resolvedWorkspace, err := ValidateWorkspaceSource(config.Workspace, "")
+	if err != nil {
+		return nil, err
+	}
+	config.Workspace = resolvedWorkspace
+
+	// Resolve RepoRoot through any symlinks too, the same way Workspace just
+	// was: the branches below compare the two with filepath.Rel to decide
+	// the mount layout, and a symlinked repo path that only one of the two
+	// still carries silently changes which branch fires (in-repo worktree
+	// vs. shared-workspace vs. the outside-repo-root fallback) depending on
+	// which side of the comparison the symlink survives on.
+	if config.RepoRoot != "" {
+		resolvedRepoRoot, err := filepath.EvalSymlinks(config.RepoRoot)
+		if err != nil {
+			return nil, fmt.Errorf("resolve repo root %s: %w", config.RepoRoot, err)
+		}
+		config.RepoRoot = resolvedRepoRoot
+	}
+
 	fullRepoRootMounted := false
 	if config.GitClone != nil {
 		// Git clone mode: mount the host-side workspace directory so the
@@ -331,9 +382,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 
 	// Phase 3 & 5: Project identity injection
 	addEnv("SCION_PROJECT", config.Project)
-	addEnv("SCION_GROVE", config.Project)
 	addEnv("SCION_PROJECT_ID", config.ProjectID)
-	addEnv("SCION_GROVE_ID", config.ProjectID)
 
 	// Mount gcloud config if it exists on the host (local mode only).
 	// In broker mode, credentials are projected via ResolvedSecrets;
@@ -437,12 +486,10 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 
 	// Phase 5: Standard project labels
 	if config.Project != "" {
-		addArg("--label", fmt.Sprintf("%s=%s", projectcompat.LabelProject, config.Project))
-		addArg("--label", fmt.Sprintf("%s=%s", projectcompat.LabelGrove, config.Project))
+		addArg("--label", fmt.Sprintf("%s=%s", projectkeys.LabelProject, config.Project))
 	}
 	if config.ProjectID != "" {
-		addArg("--label", fmt.Sprintf("%s=%s", projectcompat.LabelProjectID, config.ProjectID))
-		addArg("--label", fmt.Sprintf("%s=%s", projectcompat.LabelGroveID, config.ProjectID))
+		addArg("--label", fmt.Sprintf("%s=%s", projectkeys.LabelProjectID, config.ProjectID))
 	}
 
 	if config.Template != "" {
@@ -544,6 +591,18 @@ func syncGCSVolumes(ctx context.Context, encoded string, direction SyncDirection
 		if volume.Source == "" {
 			continue
 		}
+		// volume.Source is read back from a persisted label on every sync,
+		// not just checked once when the agent started: validate it the
+		// same way every other workspace source is, since nothing upstream
+		// of this decode re-derives or re-checks it. No per-project root is
+		// available at this call site, so only the universal floors apply
+		// (refusing '/', $HOME, ~/.scion outside its own allow list, and
+		// the other critical-system-path and ancestor refusals).
+		resolvedSource, err := ValidateWorkspaceSource(volume.Source, "")
+		if err != nil {
+			return fmt.Errorf("invalid GCS volume source: %w", err)
+		}
+		volume.Source = resolvedSource
 		switch direction {
 		case SyncTo:
 			if err := gcp.SyncToGCS(ctx, volume.Source, volume.Bucket, volume.Prefix); err != nil {
@@ -630,11 +689,99 @@ func runSimpleCommand(ctx context.Context, command string, args ...string) (stri
 	out, err := cmd.CombinedOutput()
 	elapsed := time.Since(start)
 	if err != nil {
-		runtimeLog.Debug("Command failed", "cmd", command, "argc", len(args), "duration", elapsed, "output", strings.TrimSpace(string(out)))
+		logCommandFailure(ctx, command, len(args), elapsed, out)
 		return string(out), fmt.Errorf("%s failed: %w", command, err)
 	}
 	runtimeLog.Debug("Command completed", "cmd", command, "argc", len(args), "duration", elapsed)
 	return strings.TrimSpace(string(out)), nil
+}
+
+// logCommandFailure logs a failed command's combined stdout/stderr, unless
+// ctx is marked via WithSensitiveExec — in which case the output is omitted
+// (never even truncated or hashed) because it may carry caller-supplied
+// content that must not reach logs at all. The command name, argument count
+// and duration are always logged regardless: only the output value itself is
+// sensitive. See WithSensitiveExec's doc comment for why this suppression
+// must live here rather than only at the broker layer.
+func logCommandFailure(ctx context.Context, command string, argc int, elapsed time.Duration, out []byte) {
+	if IsSensitiveExec(ctx) {
+		// No "output" key at all — matches this function's doc comment
+		// ("omitted"), not a placeholder value that would still need its own
+		// audit for leaking anything.
+		runtimeLog.Debug("Command failed", "cmd", command, "argc", argc, "duration", elapsed)
+		return
+	}
+	runtimeLog.Debug("Command failed", "cmd", command, "argc", argc, "duration", elapsed, "output", strings.TrimSpace(string(out)))
+}
+
+// runSimpleCommandWithStdin is runSimpleCommand's counterpart for callers
+// that need to deliver data to the child process over stdin rather than
+// argv (see #1355 — secrets embedded in argv leak via /proc/<pid>/cmdline
+// for the lifetime of the exec). It never logs the piped content.
+func runSimpleCommandWithStdin(ctx context.Context, stdin io.Reader, command string, args ...string) (string, error) {
+	// Log the command name and argument count only — see runSimpleCommand
+	// comment above. The stdin payload is never logged.
+	runtimeLog.Debug("Executing command with stdin", "cmd", command, "argc", len(args))
+	start := time.Now()
+	cmd := exec.CommandContext(ctx, command, args...)
+	cmd.Stdin = stdin
+	out, err := cmd.CombinedOutput()
+	elapsed := time.Since(start)
+	if err != nil {
+		logCommandFailure(ctx, command, len(args), elapsed, out)
+		return string(out), fmt.Errorf("%s failed: %w", command, err)
+	}
+	runtimeLog.Debug("Command completed", "cmd", command, "argc", len(args), "duration", elapsed)
+	return strings.TrimSpace(string(out)), nil
+}
+
+// rollbackCancelledCreate best-effort removes a container that the daemon
+// may have already created/started before the CLI process (e.g. a detached
+// "run -d") was killed by context cancellation. exec.CommandContext only
+// kills the local CLI subprocess — it does not tell the daemon to undo work
+// it already began server-side. Without this, a create whose context is
+// cancelled because the caller gave up (e.g. the Hub's dispatch timeout
+// elapsed, or the original request was itself cancelled) can leak a running
+// container that nothing else knows to reap. See ptone/scion#1886.
+//
+// It intentionally uses a fresh, short-lived context rather than the
+// (already cancelled) caller context, since the caller has already given up
+// and this cleanup must still be allowed to run.
+//
+// The Apple "container" CLI's "rm" does not support "-f" and fails if the
+// container is still running (see AppleContainerRuntime.Delete), so for that
+// runtime we kill first, then retry a plain "rm" a few times — kill is
+// asynchronous and the container may not be immediately ready for removal.
+// Docker/Podman support "rm -f" directly.
+func rollbackCancelledCreate(command, containerName string) {
+	if containerName == "" {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if filepath.Base(command) == "container" {
+		_, _ = runSimpleCommand(cleanupCtx, command, "kill", containerName)
+
+		var out string
+		var err error
+		for attempt := 0; attempt < 5; attempt++ {
+			out, err = runSimpleCommand(cleanupCtx, command, "rm", containerName)
+			if err == nil {
+				return
+			}
+			select {
+			case <-cleanupCtx.Done():
+				runtimeLog.Warn("Failed to roll back cancelled create", "cmd", command, "container", containerName, "error", cleanupCtx.Err(), "output", strings.TrimSpace(out))
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+		runtimeLog.Warn("Failed to roll back cancelled create", "cmd", command, "container", containerName, "error", err, "output", strings.TrimSpace(out))
+		return
+	}
+	if out, err := runSimpleCommand(cleanupCtx, command, "rm", "-f", containerName); err != nil {
+		runtimeLog.Warn("Failed to roll back cancelled create", "cmd", command, "container", containerName, "error", err, "output", strings.TrimSpace(out))
+	}
 }
 
 func runInteractiveCommand(command string, args ...string) error {
@@ -852,6 +999,12 @@ func applyResolvedAuth(config RunConfig, addEnv func(string, string), addVolume 
 	// Inject files
 	containerHome := util.GetHomeDir(config.UnixUsername)
 	for _, f := range ra.Files {
+		if f.SourcePath == "" {
+			// In broker mode, file content is projected from staged secrets
+			// (SCION_STAGED_SECRETS), not copied from host paths. SourcePath is
+			// intentionally cleared by run.go. Skip the copy/mount.
+			continue
+		}
 		containerPath := expandTildeTarget(f.ContainerPath, containerHome)
 
 		if config.HomeDir != "" {

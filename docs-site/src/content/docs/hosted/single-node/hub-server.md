@@ -21,9 +21,14 @@ The Hub is part of the main `scion` binary. You can start it using the `server s
 ```bash
 # Start the Hub, Web Dashboard, and a local Runtime Broker
 
-scion --global server start --foreground --production --debug --enable-hub --enable-runtime-broker --enable-web --runtime-broker-port 9800 --web-port 8080 --storage-bucket \${SCION_HUB_STORAGE_BUCKET} --session-secret \${SESSION_SECRET} --auto-provide
+SESSION_SECRET=\${SESSION_SECRET} scion --global server start --foreground --production --debug --enable-hub --enable-runtime-broker --enable-web --runtime-broker-port 9800 --web-port 8080 --storage-bucket \${SCION_HUB_STORAGE_BUCKET} --auto-provide
 
 ```
+
+:::caution[Session Secret Security]
+Pass the session secret via the `SESSION_SECRET` environment variable (e.g., through a systemd `EnvironmentFile`), **not** via the `--session-secret` CLI flag. CLI arguments are visible to any local user via `ps(1)` and `/proc/pid/cmdline`.
+:::
+
 This is often best managed through something like systemd
 
 ### Hub vs. Broker Processes
@@ -124,6 +129,37 @@ Administrative actions for GCP Service Account management require `project-owner
 
 For more details on how agents assume these identities via metadata server emulation, see the [Authentication Guide](/scion/hosted/single-node/auth/#gcp-identity--metadata-emulation).
 
+### gs:// links in chat
+
+An agent's assigned GCP Identity has a second use beyond Vertex AI: when the
+`web.gcs_links` experiment is enabled on the Hub, a `gs://bucket/object`
+reference that an **agent** posts in Native Web Chat becomes a clickable
+link. Clicking it fetches the object through the Hub using the sending
+agent's *current* assigned Service Account, through a token minted on
+demand with only the read-only `devstorage.read_only` scope — never the
+broader scope the agent itself uses for Vertex AI or other Google Cloud
+calls, and never a token the browser can see or reuse directly.
+
+- **What links, and when**: only a `gs://` reference inside a message an
+  agent sent. The same text in a message you send does not link — the
+  Hub only ever reads an object on an agent's behalf, never a human's.
+- **Which identity is used**: the sending agent's *current* assigned Service
+  Account at the moment you click, resolved fresh from the message each
+  time — not a snapshot from when the message was originally posted. If the
+  agent's identity was later reassigned or removed, the fetch uses the new
+  identity (or fails, if none is assigned).
+- **Size limits and previews**: objects up to 10 MiB can be opened. PNG,
+  JPEG, GIF and WebP objects preview as images; other text — including SVG,
+  which is always shown as source rather than rendered — previews inline up
+  to 512 KB (larger text offers Download only); binary objects show "This
+  file can't be previewed." with Download.
+- **Errors and the Cloud Console fallback**: an object that can't be opened
+  (not found, access denied, or no Service Account currently assigned) shows
+  a single generic message rather than revealing which case applied; an
+  object over 10 MiB shows a size-limit message instead. Every such case also
+  offers an **Open in Cloud Console** link, so you can still inspect the
+  object with your own Google identity and permissions.
+
 ## Project Settings & Agent Limits
 
 The Hub provides a comprehensive UI for configuring project-level settings, ensuring administrators have control over resource allocation and project configurations. Access these settings via the Web Dashboard for any project you manage.
@@ -214,7 +250,7 @@ The Hub stores agent templates and other artifacts.
 
 ### GCE VM
 
-The most direct path to getting a deployed demonstration hub, is to use the GCE setup scripts in `/scripts/starter-hub`
+The most direct path to getting a deployed demonstration hub is to use the GCE setup scripts in `/scripts/starter-hub` (the Developer Hub tier)
 
 ### Cloud Run, GKE (GCP) *Future*
 The Hub is designed to be stateless and is highly compatible with Google Cloud Run. 
@@ -244,8 +280,8 @@ To enable log forwarding, set `SCION_OTEL_LOG_ENABLED=true` and `SCION_OTEL_ENDP
 ## Monitoring
 
 The Hub exposes health check endpoints:
-- `/healthz`: Basic liveness check.
-- `/readyz`: Readiness check (verifies database connectivity).
+- `/healthz`: Basic liveness check. Always `200`; the body's `status` is `healthy` or `degraded`, with `checks` naming any failing subsystem. On a single-node setup (Hub + co-located runtime broker), the co-located broker check reports `healthy`, `unhealthy: registration failed`, or `unhealthy: registration pending` — a failed registration is not retried, so `status` stays `degraded` until the broker configuration is fixed and the server is restarted. The single-node workstation setup runs combined (web server + Hub on one port), so the web server answers `/healthz` and nests the Hub's own health under `hub` — the check is at `hub.checks.colocated_broker`, not top-level `checks.colocated_broker` (that path is only for a standalone Hub with no web server). `scion server status` names this check (in either shape) instead of just reporting the Hub as not detected. `scion server start` names it too, but only when it waits to open a browser (an interactive, non-headless terminal with web enabled, and `SCION_NO_BROWSER` unset) — other `start` invocations print nothing about it.
+- `/readyz`: Readiness check (verifies database connectivity). Unaffected by the co-located broker check above — use `/readyz`, not `/healthz`, for Kubernetes/Cloud Run readiness probes.
 - `/health`: Legacy/alternative liveness check endpoint.
 
 ### Reverse Proxy / GFE Interception Handling

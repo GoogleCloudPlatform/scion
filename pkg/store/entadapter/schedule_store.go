@@ -16,6 +16,7 @@ package entadapter
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"entgo.io/ent/dialect"
@@ -79,7 +80,59 @@ func entScheduleToStore(e *ent.Schedule) *store.Schedule {
 		CreatedBy:     e.CreatedBy,
 		UpdatedAt:     e.Updated,
 	}
+	sc.InitiatorAttribution = initiatorAttributionFromColumns(
+		e.InitiatorPrincipalKind, e.InitiatorPrincipalID,
+		e.InitiatorCredentialKind, e.InitiatorCredentialID, e.InitiatorCredentialSnapshot,
+		e.AttributionVersion, e.AuthorizationRevision,
+	)
 	return sc
+}
+
+// initiatorAttributionFromColumns collapses E.2b's nullable attribution
+// columns (identical on Schedule and ScheduledEvent, via one ent mixin) into
+// a store.InitiatorAttribution.
+//
+// A NULL/zero attribution_version means the row predates E.2b (or was
+// written by a caller that never set attribution). Such a row must read
+// InitiatorCredentialKind as the explicit
+// store.InitiatorCredentialKindLegacyUnknown, never "" — every other
+// identity field is cleared too, so a legacy row never surfaces
+// partial/stale column data (design check (c); the same rule
+// pkg/hub's scheduledInitiator applies on top of this). AuthorizationRevision
+// is preserved regardless: the conditional write in UpdateSchedule needs the
+// real counter value (including 0/absent) even for a legacy row being
+// re-attributed for the first time.
+func initiatorAttributionFromColumns(
+	principalKind, principalID, credentialKind, credentialID, credentialSnapshot *string,
+	attributionVersion, authorizationRevision *int,
+) store.InitiatorAttribution {
+	var attr store.InitiatorAttribution
+	if authorizationRevision != nil {
+		attr.AuthorizationRevision = *authorizationRevision
+	}
+
+	if attributionVersion == nil || *attributionVersion == 0 {
+		attr.InitiatorCredentialKind = store.InitiatorCredentialKindLegacyUnknown
+		return attr
+	}
+
+	attr.AttributionVersion = *attributionVersion
+	if principalKind != nil {
+		attr.InitiatorPrincipalKind = *principalKind
+	}
+	if principalID != nil {
+		attr.InitiatorPrincipalID = *principalID
+	}
+	if credentialKind != nil {
+		attr.InitiatorCredentialKind = *credentialKind
+	}
+	if credentialID != nil {
+		attr.InitiatorCredentialID = *credentialID
+	}
+	if credentialSnapshot != nil {
+		attr.InitiatorCredentialSnapshot = *credentialSnapshot
+	}
+	return attr
 }
 
 // ============================================================================
@@ -137,6 +190,7 @@ func (s *ScheduleStore) CreateSchedule(ctx context.Context, sc *store.Schedule) 
 	if !sc.UpdatedAt.IsZero() {
 		create.SetUpdated(sc.UpdatedAt)
 	}
+	setScheduleInitiatorAttribution(create, sc.InitiatorAttribution)
 
 	created, err := create.Save(ctx)
 	if err != nil {
@@ -146,6 +200,33 @@ func (s *ScheduleStore) CreateSchedule(ctx context.Context, sc *store.Schedule) 
 	sc.UpdatedAt = created.Updated
 	sc.Status = created.Status
 	return nil
+}
+
+// setScheduleInitiatorAttribution applies a store.InitiatorAttribution's
+// non-empty fields to a ScheduleCreate builder. Empty fields are left unset
+// (NULL), which is what marks a row legacy_unknown.
+func setScheduleInitiatorAttribution(create *ent.ScheduleCreate, attr store.InitiatorAttribution) {
+	if attr.InitiatorPrincipalKind != "" {
+		create.SetInitiatorPrincipalKind(attr.InitiatorPrincipalKind)
+	}
+	if attr.InitiatorPrincipalID != "" {
+		create.SetInitiatorPrincipalID(attr.InitiatorPrincipalID)
+	}
+	if attr.InitiatorCredentialKind != "" {
+		create.SetInitiatorCredentialKind(attr.InitiatorCredentialKind)
+	}
+	if attr.InitiatorCredentialID != "" {
+		create.SetInitiatorCredentialID(attr.InitiatorCredentialID)
+	}
+	if attr.InitiatorCredentialSnapshot != "" {
+		create.SetInitiatorCredentialSnapshot(attr.InitiatorCredentialSnapshot)
+	}
+	if attr.AttributionVersion != 0 {
+		create.SetAttributionVersion(attr.AttributionVersion)
+	}
+	if attr.AuthorizationRevision != 0 {
+		create.SetAuthorizationRevision(attr.AuthorizationRevision)
+	}
 }
 
 // GetSchedule retrieves a schedule by ID.
@@ -182,14 +263,42 @@ func (s *ScheduleStore) ListSchedules(ctx context.Context, filter store.Schedule
 		query.Where(schedule.NameEQ(filter.Name))
 	}
 
+	// TotalCount covers the whole filtered set, not the rows after the
+	// cursor, so it is taken before the keyset predicate is added.
 	totalCount, err := query.Clone().Count(ctx)
 	if err != nil {
 		return nil, err
 	}
 
+	// Keyset pagination on (created DESC, id DESC). The cursor is the opaque
+	// token produced by encodeCursor from the previous page's last row, so
+	// no lookup of that row is needed: paging is unaffected if the row was
+	// deleted or no longer matches the filter (for example it was paused
+	// while listing active schedules).
+	var (
+		cursorCreated time.Time
+		cursorID      uuid.UUID
+	)
+	if opts.Cursor != "" {
+		var err error
+		cursorCreated, cursorID, err = decodeCursor(opts.Cursor)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cursor: %w", store.ErrInvalidInput)
+		}
+		cursorCreated = cursorCreated.UTC()
+		query.Where(schedule.Or(
+			schedule.CreatedLT(cursorCreated),
+			schedule.And(
+				schedule.CreatedEQ(cursorCreated),
+				schedule.IDLT(cursorID),
+			),
+		))
+	}
+
 	limit := clampLimit(opts.Limit)
 	entities, err := query.
 		Order(schedule.ByCreated(entsql.OrderDesc())).
+		Order(schedule.ByID(entsql.OrderDesc())).
 		Limit(limit + 1).
 		All(ctx)
 	if err != nil {
@@ -204,39 +313,202 @@ func (s *ScheduleStore) ListSchedules(ctx context.Context, filter store.Schedule
 	result := &store.ListResult[store.Schedule]{TotalCount: totalCount}
 	if len(schedules) > limit {
 		result.Items = schedules[:limit]
-		result.NextCursor = schedules[limit-1].ID
+		last := schedules[limit-1]
+		// No-progress guard: a next cursor is returned only if it is
+		// strictly after the input cursor in (created DESC, id DESC)
+		// order. That always holds for canonical timestamps. On SQLite,
+		// created is compared as stored text, so rows written in a
+		// non-UTC zone before timestamps were normalized can break the
+		// keyset until the utc-timestamp-normalize maintenance operation
+		// has run. Ending the listing here means no client can page
+		// forever.
+		if opts.Cursor == "" || cursorAdvances(last, cursorCreated, cursorID) {
+			result.NextCursor = encodeCursor(last.CreatedAt.UTC(), last.ID)
+		}
 	} else {
 		result.Items = schedules
 	}
 	return result, nil
 }
 
-// UpdateSchedule updates an existing schedule.
-func (s *ScheduleStore) UpdateSchedule(ctx context.Context, sc *store.Schedule) error {
+// cursorAdvances reports whether row sorts strictly after the cursor position
+// (created, id) in the (created DESC, id DESC) listing order.
+func cursorAdvances(row store.Schedule, created time.Time, id uuid.UUID) bool {
+	rc := row.CreatedAt.UTC()
+	if !rc.Equal(created) {
+		return rc.Before(created)
+	}
+	return row.ID < id.String()
+}
+
+// ListActiveZonePrefixedSchedules returns up to limit active schedules whose
+// cron expression starts with CRON_TZ= or TZ=, ordered by ID, skipping
+// excludeIDs. ent's HasPrefix compiles to LIKE, which SQLite matches
+// case-insensitively for ASCII, so callers re-check the prefix exactly.
+func (s *ScheduleStore) ListActiveZonePrefixedSchedules(ctx context.Context, limit int, excludeIDs []string) ([]store.Schedule, error) {
+	query := s.client.Schedule.Query().Where(
+		schedule.StatusEQ(store.ScheduleStatusActive),
+		schedule.Or(
+			schedule.CronExprHasPrefix("CRON_TZ="),
+			schedule.CronExprHasPrefix("TZ="),
+		),
+	)
+	if len(excludeIDs) > 0 {
+		ids := make([]uuid.UUID, 0, len(excludeIDs))
+		for _, raw := range excludeIDs {
+			id, err := parseUUID(raw)
+			if err != nil {
+				return nil, err
+			}
+			ids = append(ids, id)
+		}
+		query.Where(schedule.IDNotIn(ids...))
+	}
+	entities, err := query.
+		Order(schedule.ByID()).
+		Limit(clampLimit(limit)).
+		All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]store.Schedule, 0, len(entities))
+	for _, e := range entities {
+		out = append(out, *entScheduleToStore(e))
+	}
+	return out, nil
+}
+
+// UpdateSchedule writes the schedule's mutable fields named by `fields` from
+// `sc`; a field not named in `fields` is not referenced at all — no Set, no
+// Clear — so a struct built from a possibly-stale read can never revert a
+// column this call did not intend to touch, whether or not that column
+// happens to differ from what's currently stored.
+//
+// The write is ALWAYS conditioned on the schedule's current
+// authorization_revision matching prevRevision (or being NULL, when
+// prevRevisionKnown is false) — this is the revision the caller read just
+// before building this write, regardless of whether attribution is also
+// being replaced. A write built from a stale read can therefore never land
+// once a newer, revision-bumping write has landed first, for any field.
+//
+// When attribution is non-nil, the same conditional write also replaces the
+// row's InitiatorAttribution (old and new authority are never unioned; a
+// re-attribution is atomic with the revision bump).
+//
+// Returns store.ErrRevisionConflict when the schedule exists but its
+// revision no longer matches, and store.ErrNotFound if the schedule itself
+// does not exist — both produce zero affected rows, so a follow-up read
+// distinguishes them.
+func (s *ScheduleStore) UpdateSchedule(
+	ctx context.Context, sc *store.Schedule, fields store.ScheduleFieldMask,
+	prevRevision int, prevRevisionKnown bool, attribution *store.InitiatorAttribution,
+) error {
 	uid, err := parseUUID(sc.ID)
 	if err != nil {
 		return err
 	}
 
-	update := s.client.Schedule.UpdateOneID(uid).
-		SetName(sc.Name).
-		SetCronExpr(sc.CronExpr).
-		SetEventType(sc.EventType).
-		SetPayload(sc.Payload).
-		SetStatus(sc.Status)
-
-	if sc.NextRunAt != nil {
-		update.SetNextRunAt(*sc.NextRunAt)
+	update := s.client.Schedule.Update().Where(schedule.IDEQ(uid))
+	if prevRevisionKnown {
+		update = update.Where(schedule.AuthorizationRevisionEQ(prevRevision))
 	} else {
-		update.ClearNextRunAt()
+		update = update.Where(schedule.AuthorizationRevisionIsNil())
 	}
 
-	updated, err := update.Save(ctx)
+	if fields.Name {
+		update = update.SetName(sc.Name)
+	}
+	if fields.CronExpr {
+		update = update.SetCronExpr(sc.CronExpr)
+	}
+	if fields.EventType {
+		update = update.SetEventType(sc.EventType)
+	}
+	if fields.Payload {
+		update = update.SetPayload(sc.Payload)
+	}
+	if fields.Status {
+		update = update.SetStatus(sc.Status)
+	}
+	if fields.NextRunAt {
+		if sc.NextRunAt != nil {
+			update = update.SetNextRunAt(*sc.NextRunAt)
+		} else {
+			update = update.ClearNextRunAt()
+		}
+	}
+	if attribution != nil {
+		update = setScheduleAttributionUpdate(update, *attribution)
+	}
+
+	affected, err := update.Save(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if affected == 0 {
+		if _, getErr := s.client.Schedule.Get(ctx, uid); ent.IsNotFound(getErr) {
+			return store.ErrNotFound
+		}
+		return store.ErrRevisionConflict
+	}
+
+	if attribution != nil {
+		sc.InitiatorAttribution = *attribution
+	}
+	// The bulk Update() form above returns only an affected-row count, not
+	// the updated entity, so re-fetch the row to report an accurate
+	// UpdatedAt/Status back to the caller.
+	updated, err := s.client.Schedule.Get(ctx, uid)
 	if err != nil {
 		return mapError(err)
 	}
 	sc.UpdatedAt = updated.Updated
+	sc.Status = updated.Status
 	return nil
+}
+
+// setScheduleAttributionUpdate applies a store.InitiatorAttribution's fields
+// to a bulk ScheduleUpdate builder (used by UpdateSchedule's conditional
+// re-attribution write). Unlike the create-side setter, this always sets or
+// explicitly clears every field, since it replaces a prior attribution
+// rather than filling in blanks on a brand-new row.
+func setScheduleAttributionUpdate(u *ent.ScheduleUpdate, attr store.InitiatorAttribution) *ent.ScheduleUpdate {
+	if attr.InitiatorPrincipalKind != "" {
+		u = u.SetInitiatorPrincipalKind(attr.InitiatorPrincipalKind)
+	} else {
+		u = u.ClearInitiatorPrincipalKind()
+	}
+	if attr.InitiatorPrincipalID != "" {
+		u = u.SetInitiatorPrincipalID(attr.InitiatorPrincipalID)
+	} else {
+		u = u.ClearInitiatorPrincipalID()
+	}
+	if attr.InitiatorCredentialKind != "" {
+		u = u.SetInitiatorCredentialKind(attr.InitiatorCredentialKind)
+	} else {
+		u = u.ClearInitiatorCredentialKind()
+	}
+	if attr.InitiatorCredentialID != "" {
+		u = u.SetInitiatorCredentialID(attr.InitiatorCredentialID)
+	} else {
+		u = u.ClearInitiatorCredentialID()
+	}
+	if attr.InitiatorCredentialSnapshot != "" {
+		u = u.SetInitiatorCredentialSnapshot(attr.InitiatorCredentialSnapshot)
+	} else {
+		u = u.ClearInitiatorCredentialSnapshot()
+	}
+	if attr.AttributionVersion != 0 {
+		u = u.SetAttributionVersion(attr.AttributionVersion)
+	} else {
+		u = u.ClearAttributionVersion()
+	}
+	if attr.AuthorizationRevision != 0 {
+		u = u.SetAuthorizationRevision(attr.AuthorizationRevision)
+	} else {
+		u = u.ClearAuthorizationRevision()
+	}
+	return u
 }
 
 // UpdateScheduleStatus updates only the status of a schedule.
@@ -356,7 +628,7 @@ func (s *ScheduleStore) ListDueSchedules(ctx context.Context, now time.Time) ([]
 // ============================================================================
 
 func entScheduledEventToStore(e *ent.ScheduledEvent) *store.ScheduledEvent {
-	return &store.ScheduledEvent{
+	evt := &store.ScheduledEvent{
 		ID:         e.ID.String(),
 		ProjectID:  e.ProjectID.String(),
 		EventType:  e.EventType,
@@ -369,6 +641,12 @@ func entScheduledEventToStore(e *ent.ScheduledEvent) *store.ScheduledEvent {
 		Error:      e.Error,
 		ScheduleID: e.ScheduleID,
 	}
+	evt.InitiatorAttribution = initiatorAttributionFromColumns(
+		e.InitiatorPrincipalKind, e.InitiatorPrincipalID,
+		e.InitiatorCredentialKind, e.InitiatorCredentialID, e.InitiatorCredentialSnapshot,
+		e.AttributionVersion, e.AuthorizationRevision,
+	)
+	return evt
 }
 
 // ============================================================================
@@ -415,6 +693,7 @@ func (s *ScheduleStore) CreateScheduledEvent(ctx context.Context, event *store.S
 	if !event.CreatedAt.IsZero() {
 		create.SetCreated(event.CreatedAt)
 	}
+	setScheduledEventInitiatorAttribution(create, event.InitiatorAttribution)
 
 	created, err := create.Save(ctx)
 	if err != nil {
@@ -423,6 +702,33 @@ func (s *ScheduleStore) CreateScheduledEvent(ctx context.Context, event *store.S
 	event.CreatedAt = created.Created
 	event.Status = created.Status
 	return nil
+}
+
+// setScheduledEventInitiatorAttribution applies a store.InitiatorAttribution's
+// non-empty fields to a ScheduledEventCreate builder. Empty fields are left
+// unset (NULL), which is what marks a row legacy_unknown.
+func setScheduledEventInitiatorAttribution(create *ent.ScheduledEventCreate, attr store.InitiatorAttribution) {
+	if attr.InitiatorPrincipalKind != "" {
+		create.SetInitiatorPrincipalKind(attr.InitiatorPrincipalKind)
+	}
+	if attr.InitiatorPrincipalID != "" {
+		create.SetInitiatorPrincipalID(attr.InitiatorPrincipalID)
+	}
+	if attr.InitiatorCredentialKind != "" {
+		create.SetInitiatorCredentialKind(attr.InitiatorCredentialKind)
+	}
+	if attr.InitiatorCredentialID != "" {
+		create.SetInitiatorCredentialID(attr.InitiatorCredentialID)
+	}
+	if attr.InitiatorCredentialSnapshot != "" {
+		create.SetInitiatorCredentialSnapshot(attr.InitiatorCredentialSnapshot)
+	}
+	if attr.AttributionVersion != 0 {
+		create.SetAttributionVersion(attr.AttributionVersion)
+	}
+	if attr.AuthorizationRevision != 0 {
+		create.SetAuthorizationRevision(attr.AuthorizationRevision)
+	}
 }
 
 // GetScheduledEvent retrieves a scheduled event by ID.

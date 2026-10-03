@@ -123,8 +123,11 @@ func (s *Server) resolveAgentHarnessCapabilities(ctx context.Context, agent *sto
 
 // resolveModelAliasForAgent resolves a model size alias (e.g. "extra-large")
 // to a concrete model name (e.g. "fable") using the agent's harness config's
-// model_aliases map. Returns the input unchanged if no alias mapping exists
-// or any lookup fails.
+// model_aliases map. When the stored harness config has no model_aliases (or
+// can't be found at all — e.g. it was deleted, or the agent only has an
+// inline/harness-name reference), this falls back to the harness's built-in
+// alias table (harnesses/<name>/config.yaml) so aliases still resolve rather
+// than passing through unchanged to a resumed agent.
 func (s *Server) resolveModelAliasForAgent(ctx context.Context, agent *store.Agent, model string) string {
 	if agent == nil || agent.AppliedConfig == nil || model == "" {
 		return model
@@ -133,27 +136,63 @@ func (s *Server) resolveModelAliasForAgent(ctx context.Context, agent *store.Age
 	// Try by ID first (fast path — stamped during create)
 	if hcID := agent.AppliedConfig.HarnessConfigID; hcID != "" {
 		hc, err := s.store.GetHarnessConfig(ctx, hcID)
-		if err == nil && hc != nil && hc.Config != nil && len(hc.Config.ModelAliases) > 0 {
-			return config.ResolveModelAlias(model, hc.Config.ModelAliases)
+		if err == nil && hc != nil {
+			if aliases := s.modelAliasesForHarnessConfig(ctx, hc); len(aliases) > 0 {
+				return config.ResolveModelAlias(model, aliases)
+			}
 		}
 	}
 
 	// Fallback: by slug (project scope, then global)
 	hcSlug := agent.AppliedConfig.HarnessConfig
-	if hcSlug == "" {
-		return model
+	if hcSlug != "" {
+		var hc *store.HarnessConfig
+		if agent.ProjectID != "" {
+			hc, _ = s.store.GetHarnessConfigBySlug(ctx, hcSlug, store.HarnessConfigScopeProject, agent.ProjectID)
+		}
+		if hc == nil {
+			hc, _ = s.store.GetHarnessConfigBySlug(ctx, hcSlug, store.HarnessConfigScopeGlobal, "")
+		}
+		if hc != nil {
+			if aliases := s.modelAliasesForHarnessConfig(ctx, hc); len(aliases) > 0 {
+				return config.ResolveModelAlias(model, aliases)
+			}
+		}
 	}
-	var hc *store.HarnessConfig
-	if agent.ProjectID != "" {
-		hc, _ = s.store.GetHarnessConfigBySlug(ctx, hcSlug, store.HarnessConfigScopeProject, agent.ProjectID)
-	}
-	if hc == nil {
-		hc, _ = s.store.GetHarnessConfigBySlug(ctx, hcSlug, store.HarnessConfigScopeGlobal, "")
-	}
-	if hc != nil && hc.Config != nil && len(hc.Config.ModelAliases) > 0 {
-		return config.ResolveModelAlias(model, hc.Config.ModelAliases)
+
+	// Built-in fallback: no stored harness config carries a model_aliases
+	// map for this agent. Resolve against the harness's own bundled
+	// defaults instead of passing the alias through unresolved.
+	if harnessType := s.resolveAgentHarnessType(ctx, agent); harnessType != "" {
+		if aliases := harness.DefaultModelAliases(harnessType); len(aliases) > 0 {
+			return config.ResolveModelAlias(model, aliases)
+		}
 	}
 	return model
+}
+
+// modelAliasesForHarnessConfig returns hc's model_aliases map, backfilling
+// it from the record's own stored config.yaml when the DB record predates
+// resource_store.go stamping ModelAliases onto HarnessConfigData (or was
+// otherwise never synced since). This is a read-time-only backfill — it does
+// not persist the result — so a record missing aliases self-heals on every
+// resolution rather than only on its next sync/create/update/finalize.
+func (s *Server) modelAliasesForHarnessConfig(ctx context.Context, hc *store.HarnessConfig) map[string]string {
+	if hc == nil {
+		return nil
+	}
+	if hc.Config != nil && len(hc.Config.ModelAliases) > 0 {
+		return hc.Config.ModelAliases
+	}
+	stor := s.GetStorage()
+	if stor == nil || hc.StoragePath == "" {
+		return nil
+	}
+	entry, ok := extractHarnessConfigEntryFromStorage(ctx, stor, hc.StoragePath)
+	if !ok {
+		return nil
+	}
+	return entry.ModelAliases
 }
 
 func supportReason(field api.CapabilityField) string {

@@ -115,14 +115,9 @@ func Runtimes(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldEQ(FieldRuntimes, v))
 }
 
-// Labels applies equality check predicate on the "labels" field. It's identical to LabelsEQ.
-func Labels(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldEQ(FieldLabels, v))
-}
-
-// Annotations applies equality check predicate on the "annotations" field. It's identical to AnnotationsEQ.
-func Annotations(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldEQ(FieldAnnotations, v))
+// DefaultProfile applies equality check predicate on the "default_profile" field. It's identical to DefaultProfileEQ.
+func DefaultProfile(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldDefaultProfile, v))
 }
 
 // Endpoint applies equality check predicate on the "endpoint" field. It's identical to EndpointEQ.
@@ -965,59 +960,79 @@ func RuntimesContainsFold(v string) predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldRuntimes, v))
 }
 
-// LabelsEQ applies the EQ predicate on the "labels" field.
-func LabelsEQ(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldEQ(FieldLabels, v))
+// DefaultProfileEQ applies the EQ predicate on the "default_profile" field.
+func DefaultProfileEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEQ(FieldDefaultProfile, v))
 }
 
-// LabelsNEQ applies the NEQ predicate on the "labels" field.
-func LabelsNEQ(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldNEQ(FieldLabels, v))
+// DefaultProfileNEQ applies the NEQ predicate on the "default_profile" field.
+func DefaultProfileNEQ(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNEQ(FieldDefaultProfile, v))
 }
 
-// LabelsIn applies the In predicate on the "labels" field.
-func LabelsIn(vs ...string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldIn(FieldLabels, vs...))
+// DefaultProfileIn applies the In predicate on the "default_profile" field.
+func DefaultProfileIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIn(FieldDefaultProfile, vs...))
 }
 
-// LabelsNotIn applies the NotIn predicate on the "labels" field.
-func LabelsNotIn(vs ...string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldNotIn(FieldLabels, vs...))
+// DefaultProfileNotIn applies the NotIn predicate on the "default_profile" field.
+func DefaultProfileNotIn(vs ...string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotIn(FieldDefaultProfile, vs...))
 }
 
-// LabelsGT applies the GT predicate on the "labels" field.
-func LabelsGT(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldGT(FieldLabels, v))
+// DefaultProfileGT applies the GT predicate on the "default_profile" field.
+func DefaultProfileGT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGT(FieldDefaultProfile, v))
 }
 
-// LabelsGTE applies the GTE predicate on the "labels" field.
-func LabelsGTE(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldGTE(FieldLabels, v))
+// DefaultProfileGTE applies the GTE predicate on the "default_profile" field.
+func DefaultProfileGTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldGTE(FieldDefaultProfile, v))
 }
 
-// LabelsLT applies the LT predicate on the "labels" field.
-func LabelsLT(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldLT(FieldLabels, v))
+// DefaultProfileLT applies the LT predicate on the "default_profile" field.
+func DefaultProfileLT(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLT(FieldDefaultProfile, v))
 }
 
-// LabelsLTE applies the LTE predicate on the "labels" field.
-func LabelsLTE(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldLTE(FieldLabels, v))
+// DefaultProfileLTE applies the LTE predicate on the "default_profile" field.
+func DefaultProfileLTE(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldLTE(FieldDefaultProfile, v))
 }
 
-// LabelsContains applies the Contains predicate on the "labels" field.
-func LabelsContains(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldContains(FieldLabels, v))
+// DefaultProfileContains applies the Contains predicate on the "default_profile" field.
+func DefaultProfileContains(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContains(FieldDefaultProfile, v))
 }
 
-// LabelsHasPrefix applies the HasPrefix predicate on the "labels" field.
-func LabelsHasPrefix(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldLabels, v))
+// DefaultProfileHasPrefix applies the HasPrefix predicate on the "default_profile" field.
+func DefaultProfileHasPrefix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldDefaultProfile, v))
 }
 
-// LabelsHasSuffix applies the HasSuffix predicate on the "labels" field.
-func LabelsHasSuffix(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldLabels, v))
+// DefaultProfileHasSuffix applies the HasSuffix predicate on the "default_profile" field.
+func DefaultProfileHasSuffix(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldDefaultProfile, v))
+}
+
+// DefaultProfileIsNil applies the IsNil predicate on the "default_profile" field.
+func DefaultProfileIsNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldIsNull(FieldDefaultProfile))
+}
+
+// DefaultProfileNotNil applies the NotNil predicate on the "default_profile" field.
+func DefaultProfileNotNil() predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldNotNull(FieldDefaultProfile))
+}
+
+// DefaultProfileEqualFold applies the EqualFold predicate on the "default_profile" field.
+func DefaultProfileEqualFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldDefaultProfile, v))
+}
+
+// DefaultProfileContainsFold applies the ContainsFold predicate on the "default_profile" field.
+func DefaultProfileContainsFold(v string) predicate.RuntimeBroker {
+	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldDefaultProfile, v))
 }
 
 // LabelsIsNil applies the IsNil predicate on the "labels" field.
@@ -1030,71 +1045,6 @@ func LabelsNotNil() predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldNotNull(FieldLabels))
 }
 
-// LabelsEqualFold applies the EqualFold predicate on the "labels" field.
-func LabelsEqualFold(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldLabels, v))
-}
-
-// LabelsContainsFold applies the ContainsFold predicate on the "labels" field.
-func LabelsContainsFold(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldLabels, v))
-}
-
-// AnnotationsEQ applies the EQ predicate on the "annotations" field.
-func AnnotationsEQ(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldEQ(FieldAnnotations, v))
-}
-
-// AnnotationsNEQ applies the NEQ predicate on the "annotations" field.
-func AnnotationsNEQ(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldNEQ(FieldAnnotations, v))
-}
-
-// AnnotationsIn applies the In predicate on the "annotations" field.
-func AnnotationsIn(vs ...string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldIn(FieldAnnotations, vs...))
-}
-
-// AnnotationsNotIn applies the NotIn predicate on the "annotations" field.
-func AnnotationsNotIn(vs ...string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldNotIn(FieldAnnotations, vs...))
-}
-
-// AnnotationsGT applies the GT predicate on the "annotations" field.
-func AnnotationsGT(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldGT(FieldAnnotations, v))
-}
-
-// AnnotationsGTE applies the GTE predicate on the "annotations" field.
-func AnnotationsGTE(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldGTE(FieldAnnotations, v))
-}
-
-// AnnotationsLT applies the LT predicate on the "annotations" field.
-func AnnotationsLT(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldLT(FieldAnnotations, v))
-}
-
-// AnnotationsLTE applies the LTE predicate on the "annotations" field.
-func AnnotationsLTE(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldLTE(FieldAnnotations, v))
-}
-
-// AnnotationsContains applies the Contains predicate on the "annotations" field.
-func AnnotationsContains(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldContains(FieldAnnotations, v))
-}
-
-// AnnotationsHasPrefix applies the HasPrefix predicate on the "annotations" field.
-func AnnotationsHasPrefix(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldHasPrefix(FieldAnnotations, v))
-}
-
-// AnnotationsHasSuffix applies the HasSuffix predicate on the "annotations" field.
-func AnnotationsHasSuffix(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldHasSuffix(FieldAnnotations, v))
-}
-
 // AnnotationsIsNil applies the IsNil predicate on the "annotations" field.
 func AnnotationsIsNil() predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldIsNull(FieldAnnotations))
@@ -1103,16 +1053,6 @@ func AnnotationsIsNil() predicate.RuntimeBroker {
 // AnnotationsNotNil applies the NotNil predicate on the "annotations" field.
 func AnnotationsNotNil() predicate.RuntimeBroker {
 	return predicate.RuntimeBroker(sql.FieldNotNull(FieldAnnotations))
-}
-
-// AnnotationsEqualFold applies the EqualFold predicate on the "annotations" field.
-func AnnotationsEqualFold(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldEqualFold(FieldAnnotations, v))
-}
-
-// AnnotationsContainsFold applies the ContainsFold predicate on the "annotations" field.
-func AnnotationsContainsFold(v string) predicate.RuntimeBroker {
-	return predicate.RuntimeBroker(sql.FieldContainsFold(FieldAnnotations, v))
 }
 
 // EndpointEQ applies the EQ predicate on the "endpoint" field.

@@ -226,9 +226,110 @@ type BrokerJoinResponse struct {
 // JoinTokenPrefix is the prefix for join tokens.
 const JoinTokenPrefix = "scion_join_"
 
+// capabilitiesFromStrings converts the broker-reported capability name list
+// (CreateBrokerRegistrationRequest.Capabilities / BrokerJoinRequest.Capabilities,
+// e.g. []string{"sync", "attach", "reprovision"}) into the structured
+// store.BrokerCapabilities the hub gates dispatch decisions on. Unrecognized
+// names are ignored rather than rejected, so an older hub talking to a newer
+// broker (or vice versa) never fails registration over an unknown capability
+// string.
+func capabilitiesFromStrings(names []string) *store.BrokerCapabilities {
+	caps := &store.BrokerCapabilities{}
+	for _, name := range names {
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "webpty", "web_pty":
+			caps.WebPTY = true
+		case "sync":
+			caps.Sync = true
+		case "attach":
+			caps.Attach = true
+		case "reprovision":
+			caps.Reprovision = true
+		case "asynclaunch", "async_launch":
+			caps.AsyncLaunch = true
+		}
+	}
+	return caps
+}
+
+// FindExistingBroker looks up the broker record, if any, that a registration
+// request for the given name and (optional) caller-supplied ID would match:
+// first by name, then by ID when no name match is found. It returns (nil,
+// nil) when no existing broker matches, which means the request describes a
+// brand-new registration. Callers that need to authorize a match before it
+// is acted upon (e.g. the HTTP handler's ownership gate) should use this
+// method rather than re-deriving the matching rule.
+func (s *BrokerAuthService) FindExistingBroker(ctx context.Context, name, brokerID string) (*store.RuntimeBroker, error) {
+	existingBroker, err := s.store.GetRuntimeBrokerByName(ctx, name)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, fmt.Errorf("failed to check existing broker: %w", err)
+	}
+
+	if existingBroker == nil && brokerID != "" {
+		existingByID, err := s.store.GetRuntimeBroker(ctx, brokerID)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return nil, fmt.Errorf("failed to check existing broker by ID: %w", err)
+		}
+		existingBroker = existingByID
+	}
+
+	return existingBroker, nil
+}
+
+// ErrBrokerRegistrationAuthorizationStale is returned by
+// CreateBrokerRegistrationForAuthorizedMatch and
+// CreateBrokerRegistrationForAuthorizedNew when the existing-broker lookup
+// performed during the mutation no longer matches what the caller was
+// authorized against: the authorization decision and this call must agree
+// on whether an existing broker is being reused, and on which one.
+var ErrBrokerRegistrationAuthorizationStale = errors.New("broker registration authorization is stale; retry")
+
 // CreateBrokerRegistration creates a new broker with a join token.
 // Requires admin authentication.
 func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string) (*CreateBrokerRegistrationResponse, error) {
+	return s.createBrokerRegistration(ctx, req, createdBy, "", false)
+}
+
+// CreateBrokerRegistrationForAuthorizedMatch is CreateBrokerRegistration for
+// a caller that has already been authorized against a specific existing
+// broker returned by FindExistingBroker. expectedExistingBrokerID must equal
+// that broker's ID; if the lookup performed here resolves to a different
+// broker, or no longer finds a match at all, the registration is refused
+// (ErrBrokerRegistrationAuthorizationStale) rather than mutating a record
+// the caller was not authorized against.
+func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedMatch(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy, expectedExistingBrokerID string) (*CreateBrokerRegistrationResponse, error) {
+	if expectedExistingBrokerID == "" {
+		return nil, errors.New("expectedExistingBrokerID is required")
+	}
+	return s.createBrokerRegistration(ctx, req, createdBy, expectedExistingBrokerID, false)
+}
+
+// CreateBrokerRegistrationForAuthorizedNew is CreateBrokerRegistration for a
+// caller that has already been authorized for a first-time registration,
+// specifically because FindExistingBroker found no match at authorization
+// time. If the lookup performed here now finds an existing broker — a
+// registration for the same name or ID landed in the window between
+// authorization and this call — the request is refused
+// (ErrBrokerRegistrationAuthorizationStale) rather than treated as an
+// implicit re-registration of a broker the caller was never authorized
+// against.
+func (s *BrokerAuthService) CreateBrokerRegistrationForAuthorizedNew(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy string) (*CreateBrokerRegistrationResponse, error) {
+	return s.createBrokerRegistration(ctx, req, createdBy, "", true)
+}
+
+// createBrokerRegistration implements CreateBrokerRegistration,
+// CreateBrokerRegistrationForAuthorizedMatch, and
+// CreateBrokerRegistrationForAuthorizedNew.
+//
+// expectedExistingBrokerID and expectNoExistingMatch express what the
+// caller was authorized for, if anything:
+//   - both unset (empty / false): no pin, used by the plain entry point
+//     that performs no HTTP-level authorization decision of its own.
+//   - expectedExistingBrokerID set: the lookup below must resolve to that
+//     exact broker.
+//   - expectNoExistingMatch true: the lookup below must resolve to no
+//     broker at all.
+func (s *BrokerAuthService) createBrokerRegistration(ctx context.Context, req CreateBrokerRegistrationRequest, createdBy, expectedExistingBrokerID string, expectNoExistingMatch bool) (*CreateBrokerRegistrationResponse, error) {
 	if req.Name == "" {
 		return nil, errors.New("name is required")
 	}
@@ -249,20 +350,16 @@ func (s *BrokerAuthService) CreateBrokerRegistration(ctx context.Context, req Cr
 	var brokerID string
 	var reregistered bool
 
-	existingBroker, err := s.store.GetRuntimeBrokerByName(ctx, req.Name)
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return nil, fmt.Errorf("failed to check existing broker: %w", err)
+	existingBroker, err := s.FindExistingBroker(ctx, req.Name, req.BrokerID)
+	if err != nil {
+		return nil, err
 	}
 
-	// Also check for re-registration by client-supplied BrokerID
-	if existingBroker == nil && req.BrokerID != "" {
-		existingByID, err := s.store.GetRuntimeBroker(ctx, req.BrokerID)
-		if err != nil && !errors.Is(err, store.ErrNotFound) {
-			return nil, fmt.Errorf("failed to check existing broker by ID: %w", err)
-		}
-		if existingByID != nil {
-			existingBroker = existingByID
-		}
+	if expectedExistingBrokerID != "" && (existingBroker == nil || existingBroker.ID != expectedExistingBrokerID) {
+		return nil, ErrBrokerRegistrationAuthorizationStale
+	}
+	if expectNoExistingMatch && existingBroker != nil {
+		return nil, ErrBrokerRegistrationAuthorizationStale
 	}
 
 	if existingBroker != nil {
@@ -422,6 +519,16 @@ func (s *BrokerAuthService) CompleteBrokerJoin(ctx context.Context, req BrokerJo
 	// Update profiles if provided in the join request
 	if len(req.Profiles) > 0 {
 		broker.Profiles = req.Profiles
+	}
+
+	// Update capabilities if provided in the join request. This was
+	// previously accepted but silently discarded (the join handshake is the
+	// only point at which a broker reports what it supports — there is no
+	// separate heartbeat-time capability refresh). `scion reincarnate`'s
+	// broker-capability gate (design §5) needs Reprovision here to
+	// distinguish an upgraded broker from an old one.
+	if len(req.Capabilities) > 0 {
+		broker.Capabilities = capabilitiesFromStrings(req.Capabilities)
 	}
 
 	if err := s.store.UpdateRuntimeBroker(ctx, broker); err != nil {
@@ -915,13 +1022,32 @@ func (svc *BrokerAuthService) resolveOnBehalfOf(ctx context.Context, r *http.Req
 	return authenticatedUser, 0, nil
 }
 
-// applyOnBehalfOf resolves the delegated requestor identity and returns the
-// updated context plus the resolved UserIdentity (nil when the header is
-// absent). If the X-Scion-On-Behalf-Of header is present and valid, both
-// broker and user identities are set in the context. If absent, the broker
-// is set as the sole identity. On error it writes the HTTP error response
-// and returns (nil, nil, false).
+// applyOnBehalfOf is the single shared helper that installs the authenticated
+// broker/on-behalf-of context for an HMAC-verified request (ptone/scion#2123).
+// Both BrokerAuthMiddleware and AuditableBrokerAuthMiddleware call it instead
+// of each wiring their own copy, so the two configurations always agree on
+// the request's ctx credential.
+//
+// Callers must pass brokerIdent only after ValidateBrokerSignature succeeds:
+// this function does not itself verify the HMAC. On success ctx carries:
+//   - the broker identity (contextWithBrokerIdentity), unconditionally;
+//   - when the X-Scion-On-Behalf-Of header resolves to an active local user,
+//     that user as the request identity, the BrokerOnBehalfOf marker
+//     (contextWithBrokerOnBehalfOf) binding Credential.ID to this broker, and
+//     a broker CredentialContext;
+//   - otherwise, the broker itself as the request identity and a broker
+//     CredentialContext, with no marker set — so a broker acting for itself,
+//     with no on-behalf-of header, is never mistaken for an authorized
+//     narrowing of a local user (it stays broker/broker and is denied by
+//     Decide's unsupported-principal switch).
+//
+// A missing header resolves userIdent == nil, which takes the broker-only
+// branch below and never calls contextWithBrokerOnBehalfOf. An invalid or
+// unresolvable header returns ok=false before either branch runs: neither
+// path installs the marker in that case, and the caller must not proceed.
 func (svc *BrokerAuthService) applyOnBehalfOf(ctx context.Context, w http.ResponseWriter, r *http.Request, brokerIdent BrokerIdentity) (context.Context, UserIdentity, bool) {
+	ctx = contextWithBrokerIdentity(ctx, brokerIdent)
+
 	userIdent, statusCode, oboErr := svc.resolveOnBehalfOf(ctx, r)
 	if oboErr != nil {
 		errCode := ErrCodeForbidden
@@ -935,9 +1061,11 @@ func (svc *BrokerAuthService) applyOnBehalfOf(ctx context.Context, w http.Respon
 	if userIdent != nil {
 		ctx = context.WithValue(ctx, userContextKey{}, userIdent)
 		ctx = contextWithIdentity(ctx, userIdent)
+		ctx = contextWithBrokerOnBehalfOf(ctx, BrokerOnBehalfOf{Broker: brokerIdent, BrokerID: brokerIdent.ID()})
 	} else {
 		ctx = contextWithIdentity(ctx, brokerIdent)
 	}
+	ctx = contextWithCredentialContext(ctx, CredentialContext{Kind: CredentialKindBroker, ID: brokerIdent.ID(), Type: brokerIdent.Type()})
 	return ctx, userIdent, true
 }
 
@@ -968,15 +1096,15 @@ func BrokerAuthMiddleware(svc *BrokerAuthService) func(http.Handler) http.Handle
 				return
 			}
 
-			// Set broker-specific identity context and resolve on-behalf-of
-			ctx := contextWithBrokerIdentity(r.Context(), identity)
-			ctx, _, ok := svc.applyOnBehalfOf(ctx, w, r, identity)
+			// Install the authenticated broker/on-behalf-of context: broker
+			// identity, effective user (when OBO resolves), the OBO marker,
+			// and the broker credential — all from the one shared helper.
+			ctx, _, ok := svc.applyOnBehalfOf(r.Context(), w, r, identity)
 			if !ok {
 				return
 			}
-			ctx = contextWithCredentialContext(ctx, CredentialContext{Kind: CredentialKindBroker, ID: identity.ID(), Type: identity.Type()})
 
-			next.ServeHTTP(w, r.WithContext(ctx))
+			serveAfterAuth(w, next, r.WithContext(ctx))
 		})
 	}
 }

@@ -1,0 +1,1379 @@
+#!/usr/bin/env bash
+# scripts/single-node-vm/tests/lib/gcloud — a fake `gcloud` for the
+# deploy.sh test harness, put first on PATH by tests/run.sh. Never
+# contacts GCP.
+#
+# Every invocation is appended to $GCLOUD_STUB_LOG, one call per line
+# (space-joined argv), so tests can assert on exactly what deploy.sh
+# asked gcloud to do. Responses are served from plain files under
+# $GCLOUD_STUB_STATE_DIR, which each test populates as its fixture and
+# can inspect afterwards to see what would have been created or
+# deleted.
+#
+# Covers the base deploy.sh resources needed to run deploy.sh itself end
+# to end against this stub (service account, router, NAT, the base VM,
+# firewall rule, Cloud Run deploy/describe/delete, IAP, auth/project
+# plumbing). Firewall rules are stored as JSON, mirroring the real
+# --format=json shape a caller would parse.
+#
+# This is the harness core shared across scripts/single-node-vm/tests
+# stub-case PRs: keep additions here generic to deploy.sh's own gcloud
+# usage (compute/iam/services/run). Feature-specific stub cases (GKE,
+# NAT reuse fixtures, IAP firewall scoping, etc.) belong in the PR that
+# adds the behavior they cover, layered on top of this file.
+#
+# The hybrid tier's cases are layered on top: clusters, subnets, internal
+# addresses, the GKE-managed firewall rules node-tag discovery reads, the
+# IAP OAuth client, the transport service account's keys, and the
+# hybrid-tier firewall rules. Firewall rules and clusters are stored as
+# JSON, mirroring the real --format=json shape hybrid-tier.sh parses.
+#
+# --project and --zone are required on every call that takes them in the
+# real gcloud CLI; this stub asserts they're present (and non-empty)
+# everywhere deploy.sh is expected to pass them -- --project on every
+# create/list/delete/describe, --zone on every per-instance call, plus
+# --region/--router on regional router/NAT/Cloud Run calls -- and fails
+# loudly (not just "not found") if one is missing, rather than silently
+# falling back to an ambient default the way real gcloud would.
+
+set -euo pipefail
+
+: "${GCLOUD_STUB_LOG:?GCLOUD_STUB_LOG must be set}"
+: "${GCLOUD_STUB_STATE_DIR:?GCLOUD_STUB_STATE_DIR must be set}"
+
+LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Deliberately its own variable, not "${PYTHON:-python3}": a test that
+# sets PYTHON for deploy.sh's own process (to simulate a missing
+# interpreter) exports it to every child process deploy.sh execs,
+# including this stub -- which needs a real interpreter for its own JSON
+# handling regardless of what deploy.sh is being tested against.
+PYTHON="${GCLOUD_STUB_PYTHON:-python3}"
+
+mkdir -p "${GCLOUD_STUB_STATE_DIR}/firewall-rules" "${GCLOUD_STUB_STATE_DIR}/clusters" \
+  "${GCLOUD_STUB_STATE_DIR}/gke-node-firewall-rules" \
+  "${GCLOUD_STUB_STATE_DIR}/instances" "${GCLOUD_STUB_STATE_DIR}/subnets" "${GCLOUD_STUB_STATE_DIR}/run-services" \
+  "${GCLOUD_STUB_STATE_DIR}/addresses" "${GCLOUD_STUB_STATE_DIR}/nats" \
+  "${GCLOUD_STUB_STATE_DIR}/networks" "${GCLOUD_STUB_STATE_DIR}/service-accounts"
+
+printf '%s\n' "$*" >> "$GCLOUD_STUB_LOG"
+
+# Every `... list` call prints a gcloud-style WARNING line on stderr,
+# success or failure, empty result or not, the way real gcloud can print
+# notices on stderr next to a list's --format=json stdout. A caller that
+# merges stderr into the output it parses then fails in every test.
+for list_word in "${1:-}" "${2:-}" "${3:-}" "${4:-}"; do
+  if [[ "$list_word" == "list" ]]; then
+    echo "WARNING: gcloud-stub: simulated notice on stderr for: $*" >&2
+    break
+  fi
+done
+
+# get_flag KEY "$@" — echoes the value of --KEY=VALUE among the remaining
+# args, or fails (no output) if absent. Matches only the --KEY=VALUE
+# form; a caller using the space-separated --KEY VALUE form real gcloud
+# also accepts would be reported as a missing flag, not read.
+get_flag() {
+  local key="$1"
+  shift
+  local a
+  for a in "$@"; do
+    case "$a" in
+      "--${key}="*) printf '%s' "${a#--"${key}"=}"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# require_flag KEY "$@" — fails loudly if --KEY=... is missing or empty.
+require_flag() {
+  local key="$1"
+  shift
+  local v
+  v="$(get_flag "$key" "$@")" || {
+    echo "gcloud-stub: missing --${key} on: $*" >&2
+    exit 1
+  }
+  if [[ -z "$v" ]]; then
+    echo "gcloud-stub: empty --${key} on: $*" >&2
+    exit 1
+  fi
+}
+
+# require_project "$@" — fails loudly if --project=... is missing or empty.
+require_project() {
+  require_flag project "$@"
+}
+
+# last_segment URL_OR_NAME — the basename, used as the fixture lookup key
+# for subnets regardless of whether hybrid-tier.sh passed a bare name or
+# a full self-link URL.
+last_segment() {
+  printf '%s' "${1##*/}"
+}
+
+# "routers nats <verb>" is a four-word subcommand (unlike every other
+# case below, which is three words plus a resource name at $4, or two
+# words plus a name/project at $3), so it needs its own match on
+# $1..$4 before the general dispatch. Because the subcommand itself is
+# four words, the NAT's own name -- unlike every describe/create/delete
+# case below, where the resource name is $4 -- is one word later, at $5.
+case "${1:-} ${2:-} ${3:-} ${4:-}" in
+  "compute networks subnets describe")
+    require_project "$@"
+    require_flag region "$@"
+    key="$(last_segment "${5:-}")"
+    f="${GCLOUD_STUB_STATE_DIR}/subnets/${key}.json"
+    if [[ -f "${f}.describe-fail" ]]; then
+      echo "gcloud-stub: simulated describe failure for subnet ${key}" >&2
+      exit 1
+    fi
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/subnets/${key}.missing" ]]; then
+      echo "gcloud-stub: ERROR: (gcloud.compute.networks.subnets.describe) Could not fetch resource: subnetwork '${key}' not found" >&2
+      exit 1
+    fi
+    format="$(get_flag format "$@")" || format=""
+    # Callers are told apart by --format.
+    if [[ "$format" == "json" ]]; then
+      if [[ -f "$f" ]]; then
+        cat "$f"
+        exit 0
+      fi
+      # No explicit fixture: every cluster fixture (seed_cluster) implicitly
+      # names its subnet "default-subnet", so tests that don't care about
+      # the actual CIDR value don't need to seed one explicitly.
+      echo '{"ipCidrRange": "10.128.0.0/20"}'
+      exit 0
+    fi
+    # Default to a realistic auto-mode "default" subnet CIDR (matching
+    # real GCP's us-central1 default subnet) when a test hasn't overridden
+    # it with set_subnet_cidr -- most tests don't care about the exact
+    # value, only that a real one comes back.
+    cidr="$(cat "${GCLOUD_STUB_STATE_DIR}/subnets/${key}.cidr" 2>/dev/null || echo "10.128.0.0/20")"
+    if [[ "$format" == "value(ipCidrRange)" || -z "$format" ]]; then
+      echo "$cidr"
+    fi
+    exit 0
+    ;;
+  "compute routers nats describe")
+    require_project "$@"
+    require_flag region "$@"
+    require_flag router "$@"
+    name="${5:-}"
+    if [[ -n "$name" && -f "${GCLOUD_STUB_STATE_DIR}/nats/${name}.exists" ]]; then
+      exit 0
+    fi
+    exit 1
+    ;;
+  "compute routers nats create")
+    require_project "$@"
+    require_flag region "$@"
+    require_flag router "$@"
+    name="${5:-}"
+    if [[ -n "$name" ]]; then
+      mkdir -p "${GCLOUD_STUB_STATE_DIR}/nats"
+      touch "${GCLOUD_STUB_STATE_DIR}/nats/${name}.exists"
+    fi
+    exit 0
+    ;;
+  "compute routers nats delete")
+    require_project "$@"
+    require_flag region "$@"
+    require_flag router "$@"
+    name="${5:-}"
+    # A name-scoped delete-error fixture fails the delete; its content,
+    # if any, is the stderr text (so a test can supply a positive
+    # not-found or any other error), else a generic failure.
+    if [[ -n "$name" && -f "${GCLOUD_STUB_STATE_DIR}/nats/${name}.delete-error" ]]; then
+      err_msg="$(cat "${GCLOUD_STUB_STATE_DIR}/nats/${name}.delete-error")"
+      echo "${err_msg:-gcloud-stub: simulated delete failure for NAT ${name}}" >&2
+      exit 1
+    fi
+    [[ -n "$name" ]] && rm -f "${GCLOUD_STUB_STATE_DIR}/nats/${name}.exists"
+    exit 0
+    ;;
+  "beta run services update")
+    require_project "$@"
+    require_flag region "$@"
+    exit 0
+    ;;
+  "beta services identity create")
+    require_project "$@"
+    exit 0
+    ;;
+  "iam service-accounts keys list")
+    require_project "$@"
+    require_flag iam-account "$@"
+    if [[ "$(get_flag managed-by "$@" || true)" != "user" ]]; then
+      echo "gcloud-stub: keys list is expected to pass --managed-by=user on: $*" >&2
+      exit 1
+    fi
+    sa_email="$(get_flag iam-account "$@")"
+    f="${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json"
+    if [[ -f "${f}.keys-list-error" ]]; then
+      echo "gcloud-stub: ERROR: (gcloud.iam.service-accounts.keys.list) PERMISSION_DENIED: Permission iam.serviceAccountKeys.list denied on resource" >&2
+      exit 1
+    fi
+    if [[ -f "${f}.user-keys" ]]; then
+      cat "${f}.user-keys"
+    fi
+    exit 0
+    ;;
+esac
+
+case "${1:-} ${2:-}" in
+  "projects add-iam-policy-binding")
+    # Answers as for a project whose IAM policy already contains
+    # conditional bindings: gcloud refuses, in non-interactive mode, a
+    # binding that does not pass --condition, so every call here must
+    # carry --condition=None.
+    if [[ "$(get_flag condition "$@" || true)" != "None" ]]; then
+      echo "ERROR: (gcloud.projects.add-iam-policy-binding) Adding a binding without specifying a condition to a policy containing conditions is prohibited in non-interactive mode. Run the command again with \`--condition=None\`" >&2
+      exit 1
+    fi
+    role="$(get_flag role "$@" || true)"
+    fail_file="${GCLOUD_STUB_STATE_DIR}/project-binding-fail/${role//\//_}"
+    if [[ -f "$fail_file" ]]; then
+      err_msg="$(cat "$fail_file")"
+      echo "${err_msg:-ERROR: (gcloud.projects.add-iam-policy-binding) PERMISSION_DENIED: simulated binding failure for role [${role}]}" >&2
+      exit 1
+    fi
+    # On success real gcloud prints the updated policy on stdout and a
+    # status line on stderr.
+    echo "Updated IAM policy for project [${3:-}]." >&2
+    echo "bindings: []"
+    exit 0
+    ;;
+  "projects get-ancestors")
+    # Empty output = "could not read ancestry" in deploy.sh, which just
+    # skips the cross-org IAP check. Not the scenario under test here.
+    exit 0
+    ;;
+  "services enable")
+    require_project "$@"
+    exit 0
+    ;;
+  "services list")
+    require_project "$@"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/services-list-should-fail" ]]; then
+      echo "gcloud-stub: simulated services list failure" >&2
+      exit 1
+    fi
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/enabled-apis.txt" ]]; then
+      cat "${GCLOUD_STUB_STATE_DIR}/enabled-apis.txt"
+    else
+      # Default: every required API except aiplatform.googleapis.com and
+      # iam.googleapis.com is already enabled, so a default run makes one
+      # `services enable` call, for exactly those two. The omissions are
+      # deliberate: tests that check the enable call rely on iam being
+      # missing here.
+      cat <<'APIS'
+compute.googleapis.com
+run.googleapis.com
+iap.googleapis.com
+cloudbuild.googleapis.com
+artifactregistry.googleapis.com
+container.googleapis.com
+APIS
+    fi
+    exit 0
+    ;;
+  "auth list")
+    echo "stub-deployer@example.com"
+    exit 0
+    ;;
+  "projects describe")
+    echo "123456789012"
+    exit 0
+    ;;
+  "run deploy")
+    require_project "$@"
+    require_flag region "$@"
+    name="${3:-}"
+    mkdir -p "${GCLOUD_STUB_STATE_DIR}/run-services"
+    touch "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.exists"
+    exit 0
+    ;;
+esac
+
+case "${1:-} ${2:-} ${3:-}" in
+  "container clusters get-credentials")
+    require_project "$@"
+    get_flag location "$@" >/dev/null || {
+      echo "gcloud-stub: missing --location on: $*" >&2
+      exit 1
+    }
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/get-credentials-should-fail" ]]; then
+      echo "gcloud-stub: simulated get-credentials failure" >&2
+      exit 1
+    fi
+    : "${KUBECONFIG:?KUBECONFIG must be set when calling get-credentials}"
+    echo "fake-kubeconfig-for-${4:-}" > "$KUBECONFIG"
+    exit 0
+    ;;
+  "config get-value account")
+    echo "stub-deployer@example.com"
+    exit 0
+    ;;
+  "config get-value project")
+    # Deliberately a different, project-ID-shaped value from "account"
+    # above: deploy.sh reads this as a literal PROJECT_ID fallback when
+    # project_id is missing from its config, so returning the deployer's
+    # email here (as a single two-word "config get-value" case matching
+    # regardless of the property name once did) would silently feed an
+    # email address into every --project= flag on that path.
+    echo "demo-project"
+    exit 0
+    ;;
+  "compute firewall-rules describe")
+    require_project "$@"
+    name="${4:-}"
+    f="${GCLOUD_STUB_STATE_DIR}/firewall-rules/${name}.json"
+    if [[ -f "$f" ]]; then
+      format="$(get_flag format "$@")" || format=""
+      if [[ "$format" == "value(targetTags)" ]]; then
+        # A name-scoped fixture flag: the rule itself exists (the
+        # unformatted describe above still succeeds), but this specific
+        # --format=value(targetTags) read fails, e.g. a transient error
+        # between two back-to-back describe calls. On failure, write only
+        # to stderr and leave stdout empty, as real gcloud does; the
+        # caller decides whether to discard stderr.
+        if [[ -f "${f}.describe-target-tags-fail" ]]; then
+          echo "gcloud-stub: simulated failure reading target tags for ${name}" >&2
+          exit 1
+        fi
+        # Real gcloud's value() transform joins a repeated field with ";".
+        # Prints nothing (not "[]" or similar) when the list is empty, same
+        # as a real unscoped rule.
+        "$PYTHON" -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(';'.join(d.get('targetTags') or []))
+" "$f"
+      elif [[ "$format" == "value(sourceRanges,allowed[].map().firewall_rule().list(),targetTags)" ]]; then
+        # The proxy-to-VM rule's own drift check reads all three fields in
+        # one combined value() call instead of three separate ones. Real
+        # gcloud's value() printer joins multiple requested fields with a
+        # single tab, and joins each repeated field's own values
+        # (sourceRanges, targetTags) with ";" -- verified by rendering
+        # synthetic firewall-rule resources through the installed Cloud
+        # SDK's own csv_printer.ValuePrinter, including the empty-field
+        # case (renders as nothing between its two tabs, field position
+        # preserved). The allowed-ports sub-expression mirrors
+        # compute/transforms.py's TransformFirewallRule: each entry becomes
+        # "PROTO:PORT" (or just "PROTO" with no ports), joined with ","
+        # by list() -- see googlecloudsdk/command_lib/compute/
+        # firewall_rules/flags.py, which is where deploy.sh's own
+        # --format string comes from.
+        "$PYTHON" -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+source = ';'.join(d.get('sourceRanges') or [])
+parts = []
+for rule in d.get('allowed') or []:
+    proto = rule.get('IPProtocol')
+    ports = rule.get('ports')
+    if ports:
+        for p in ports:
+            parts.append(f'{proto}:{p}')
+    else:
+        parts.append(proto)
+allowed = ','.join(parts)
+tags = ';'.join(d.get('targetTags') or [])
+print('\t'.join([source, allowed, tags]))
+" "$f"
+      else
+        cat "$f"
+      fi
+      exit 0
+    fi
+    exit 1
+    ;;
+  "compute firewall-rules update")
+    require_project "$@"
+    name="${4:-}"
+    f="${GCLOUD_STUB_STATE_DIR}/firewall-rules/${name}.json"
+    if [[ ! -f "$f" ]]; then
+      echo "gcloud-stub: firewall rule ${name} not found" >&2
+      exit 1
+    fi
+    # Real gcloud only touches the fields a flag was actually given for;
+    # an update call with no --target-tags leaves the rule's existing
+    # target tags alone, not clears them. Only write targetTags when
+    # get_flag actually found the flag (its own exit status, not whether
+    # the value came back empty -- "--target-tags=" is a valid, distinct
+    # "clear the list" request from "the flag wasn't passed at all").
+    if target_tags="$(get_flag target-tags "$@")"; then
+      "$PYTHON" -c "
+import json, sys
+path, tags = sys.argv[1], sys.argv[2]
+d = json.load(open(path))
+d['targetTags'] = [t for t in tags.split(',') if t]
+json.dump(d, open(path, 'w'))
+" "$f" "$target_tags"
+    fi
+    exit 0
+    ;;
+  "compute firewall-rules create")
+    require_project "$@"
+    name="${4:-}"
+    desc="$(get_flag description "$@")" || desc=""
+    network="$(get_flag network "$@")" || network=""
+    direction="$(get_flag direction "$@")" || direction=""
+    action="$(get_flag action "$@")" || action=""
+    rules="$(get_flag rules "$@")" || rules=""
+    source_tags="$(get_flag source-tags "$@")" || source_tags=""
+    source_ranges="$(get_flag source-ranges "$@")" || source_ranges=""
+    target_tags="$(get_flag target-tags "$@")" || target_tags=""
+    priority="$(get_flag priority "$@")" || priority=""
+
+    proto="${rules%%:*}"
+    if [[ "$proto" == "$rules" ]]; then
+      ports=""
+    else
+      ports="${rules#*:}"
+    fi
+
+    "$PYTHON" "${LIB_DIR}/firewall-rule-json.py" \
+      "$desc" "$network" "$direction" "$action" "$proto" "$ports" \
+      "$source_tags" "$source_ranges" "$target_tags" "$priority" \
+      > "${GCLOUD_STUB_STATE_DIR}/firewall-rules/${name}.json"
+    exit 0
+    ;;
+  "compute firewall-rules delete")
+    require_project "$@"
+    name="${4:-}"
+    f="${GCLOUD_STUB_STATE_DIR}/firewall-rules/${name}.json"
+    if [[ -f "${f}.delete-fail" ]]; then
+      if [[ -f "${f}.delete-fail-text" ]]; then
+        cat "${f}.delete-fail-text" >&2
+      else
+        echo "gcloud-stub: simulated delete failure for ${name}" >&2
+      fi
+      exit 1
+    fi
+    if [[ -f "$f" ]]; then
+      rm -f "$f"
+      exit 0
+    fi
+    echo "gcloud-stub: firewall rule ${name} not found" >&2
+    exit 1
+    ;;
+  "compute firewall-rules list")
+    require_project "$@"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/firewall-rules-list-should-fail" ]]; then
+      echo "gcloud-stub: simulated list failure (permission denied)" >&2
+      exit 1
+    fi
+    # --filter is applied the way real gcloud applies it, never ignored:
+    # a form this stub does not implement fails loudly rather than
+    # returning rules the real command would not.
+    if filter="$(get_flag filter "$@")"; then
+      filter_given=true
+    else
+      filter_given=false
+      filter=""
+    fi
+    if [[ "$filter_given" == false || "$filter" == network[:~]* ]]; then
+      if [[ -f "${GCLOUD_STUB_STATE_DIR}/firewall-rules-list-empty-stdout" ]]; then
+        # A successful call that prints nothing at all -- distinct from a
+        # genuinely empty JSON array ("[]") -- pins the caller's own
+        # handling of zero-byte stdout, not just an empty list value.
+        exit 0
+      fi
+      # Every rule in the project: the GKE-managed rules node-tag
+      # discovery reads (gke-node-firewall-rules/, one JSON file per
+      # rule, each carrying its own 'network' self-link URL, on whatever
+      # network the fixture put it) and the hybrid tier's own rules
+      # (firewall-rules/). Unfiltered, that is everything, on every
+      # network, which is what the real unfiltered list returns.
+      #
+      # A network filter is emulated with documented gcloud semantics,
+      # as the Compute API receives it:
+      #   network:PATTERN  word match: PATTERN must match whole words of
+      #                    the value; only a trailing * is a wildcard
+      #                    (word-prefix match), so a leading * matches
+      #                    nothing.
+      #   network~REGEX    unanchored regular-expression search.
+      "$PYTHON" -c "
+import glob, json, os, re, sys
+state_dir, given, flt = sys.argv[1], sys.argv[2] == 'true', sys.argv[3]
+out = []
+for p in sorted(glob.glob(os.path.join(state_dir, 'gke-node-firewall-rules', '*.json'))):
+    with open(p) as f:
+        out.append(json.load(f))
+for p in sorted(glob.glob(os.path.join(state_dir, 'firewall-rules', '*.json'))):
+    with open(p) as f:
+        d = json.load(f)
+    d['name'] = os.path.basename(p)[:-len('.json')]
+    out.append(d)
+if given:
+    key, op, pat = flt[:len('network')], flt[len('network')], flt[len('network') + 1:]
+    if op == ':':
+        if pat.endswith('*'):
+            rx = re.compile(r'\\b' + re.escape(pat[:-1]), re.I)
+        else:
+            rx = re.compile(r'\\b' + re.escape(pat) + r'\\b', re.I)
+    else:
+        rx = re.compile(pat)
+    out = [r for r in out if rx.search(r.get(key) or '')]
+print(json.dumps(out))
+" "${GCLOUD_STUB_STATE_DIR}" "$filter_given" "$filter"
+      exit 0
+    fi
+    # The teardown ownership check and the absence check list the tier's
+    # own rules by exact name: name=(NAME ...), with = an equality match
+    # against any listed name.
+    name_list_re='^name=\(([a-z0-9-]+)( [a-z0-9-]+)*\)$'
+    if [[ ! "$filter" =~ $name_list_re ]]; then
+      echo "gcloud-stub: unsupported firewall-rules list --filter form: ${filter}" >&2
+      exit 1
+    fi
+    inner="${filter#name=(}"
+    inner="${inner%)}"
+    "$PYTHON" -c "
+import json, os, sys
+names = sys.argv[1].split()
+state_dir = sys.argv[2]
+out = []
+for n in names:
+    p = os.path.join(state_dir, 'firewall-rules', n + '.json')
+    if os.path.isfile(p):
+        with open(p, encoding='utf-8') as f:
+            d = json.load(f)
+        d['name'] = n
+        out.append(d)
+print(json.dumps(out))
+" "$inner" "${GCLOUD_STUB_STATE_DIR}"
+    exit 0
+    ;;
+  "compute instances add-tags")
+    require_project "$@"
+    require_flag zone "$@"
+    name="${4:-}"
+    if [[ -n "$name" && -f "${GCLOUD_STUB_STATE_DIR}/instances/${name}.add-tags-fail" ]]; then
+      echo "gcloud-stub: simulated add-tags failure for ${name}" >&2
+      exit 1
+    fi
+    # Re-touches the same sentinel as "instances create" below: on the
+    # existing-VM branch, this (and the hybrid-tier internal-IP calls
+    # that follow it) is real work a create-mode wiring test needs to
+    # have actually happened before it stops deploy.sh, not just the
+    # earlier "does the VM exist" describe call that the sentinel alone
+    # would fire on.
+    touch "${GCLOUD_STUB_STATE_DIR}/vm-create-happened"
+    exit 0
+    ;;
+  "compute instances list")
+    require_project "$@"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/instances-list-should-fail" ]]; then
+      echo "gcloud-stub: simulated transient instances list failure" >&2
+      exit 1
+    fi
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/instances-list-zone-unreachable" ]]; then
+      # Emulates a real AggregatedList (no --zones) hitting an UNREACHABLE
+      # zone: with the SDK's default compute/allow_partial_error=true,
+      # that's downgraded to a stderr warning and exit 0 with the
+      # unreachable zone's instances (including this one) missing from
+      # stdout. Only CLOUDSDK_COMPUTE_ALLOW_PARTIAL_ERROR=false makes it a
+      # hard error, matching real gcloud.
+      echo "gcloud-stub: (simulated) Some requests did not succeed: - Failed to fetch some zones: ('Unreachable')" >&2
+      if [[ "${CLOUDSDK_COMPUTE_ALLOW_PARTIAL_ERROR:-}" == "false" ]]; then
+        exit 1
+      fi
+      exit 0
+    fi
+    filter="$(get_flag filter "$@")" || filter=""
+    format="$(get_flag format "$@")" || format=""
+    # Both callers look the VM up by exact name: name=NAME, with = an
+    # equality match. Any other form fails loudly rather than being
+    # answered as if it were that one.
+    instance_name_re='^name=[a-z0-9-]+$'
+    if [[ ! "$filter" =~ $instance_name_re ]]; then
+      echo "gcloud-stub: unsupported instances list --filter form: ${filter}" >&2
+      exit 1
+    fi
+    name="${filter#name=}"
+    f="${GCLOUD_STUB_STATE_DIR}/instances/${name}"
+    if [[ -f "$f" ]]; then
+      if [[ "$format" == "value(name)" ]]; then
+        echo "$name"
+      else
+        cat "$f"
+      fi
+    fi
+    exit 0
+    ;;
+  "compute instances describe")
+    require_project "$@"
+    require_flag zone "$@"
+    name="${4:-}"
+    format="$(get_flag format "$@")" || format=""
+    if [[ "$format" == "get(networkInterfaces[0].networkIP)" ]]; then
+      if [[ -f "${GCLOUD_STUB_STATE_DIR}/instances/${name}" ]]; then
+        if [[ -n "${GCLOUD_STUB_VM_IP:-}" ]]; then
+          echo "${GCLOUD_STUB_VM_IP}"
+        elif [[ -f "${GCLOUD_STUB_STATE_DIR}/instances/${name}.ip" ]]; then
+          cat "${GCLOUD_STUB_STATE_DIR}/instances/${name}.ip"
+        else
+          echo "10.128.0.5"
+        fi
+        exit 0
+      fi
+      exit 1
+    fi
+    # Same sentinel purpose as the "instances create" case below: this is
+    # always the call deploy.sh makes right before branching into either
+    # "create a new VM" or "tag the existing one", so it marks the point
+    # a create-mode wiring test has seen everything interesting on either
+    # branch, whether or not a new VM actually gets created.
+    touch "${GCLOUD_STUB_STATE_DIR}/vm-create-happened"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/instances/${name}" ]]; then
+      format="$(get_flag format "$@")" || format=""
+      if [[ "$format" == "get(networkInterfaces[0].networkIP)" ]]; then
+        # Phase 4's VM-internal-IP lookup. A sidecar file, not the
+        # instances/${name} fixture itself -- that file's content is the
+        # zone string, read verbatim by "compute instances list"'s
+        # --format=value(zone) case below. Defaults to a realistic
+        # RFC1918 internal IP so a test that doesn't care about the exact
+        # value still gets a real one back, matching this stub's usual
+        # "default to the realistic response" convention.
+        cat "${GCLOUD_STUB_STATE_DIR}/instances/${name}.internal-ip" 2>/dev/null || echo "10.128.0.5"
+      fi
+      exit 0
+    fi
+    exit 1
+    ;;
+  "compute instances delete")
+    require_project "$@"
+    require_flag zone "$@"
+    name="${4:-}"
+    f="${GCLOUD_STUB_STATE_DIR}/instances/${name}"
+    if [[ -f "${f}.delete-fail" ]]; then
+      if [[ -f "${f}.delete-fail-text" ]]; then
+        cat "${f}.delete-fail-text" >&2
+      else
+        echo "gcloud-stub: simulated delete failure for ${name}" >&2
+      fi
+      exit 1
+    fi
+    if [[ -f "$f" ]]; then
+      rm -f "$f"
+      exit 0
+    fi
+    echo "gcloud-stub: instance ${name} not found" >&2
+    exit 1
+    ;;
+  "compute instances create")
+    require_project "$@"
+    require_flag zone "$@"
+    # Deliberately stricter than real gcloud: the real API only requires
+    # --subnet for a custom-mode network (auto-mode tolerates its
+    # absence). Required here unconditionally, as a regression guard,
+    # because deploy.sh always passes it now regardless of network mode
+    # -- no test should be able to create a VM without it. Same for
+    # --network: deploy.sh always pairs it with --subnet=default so the
+    # create fails clearly instead of silently landing in another VPC's
+    # "default" subnet (real gcloud would tolerate --subnet alone here
+    # too), so this stub requires both consistently.
+    require_flag subnet "$@"
+    require_flag network "$@"
+    name="${4:-}"
+    echo "us-central1-b" > "${GCLOUD_STUB_STATE_DIR}/instances/${name}"
+    # Record the actually-requested private IP, if any, so a later
+    # `describe --format=get(networkInterfaces[0].networkIP)` reflects
+    # what this VM was really created with -- otherwise
+    # hybrid_internal_ip_guard_verify's real-VM-describe check would
+    # always see the generic default IP instead of the reserved one on
+    # the new-VM path.
+    priv_ip="$(get_flag private-network-ip "$@")" || priv_ip=""
+    if [[ -n "$priv_ip" ]]; then
+      printf '%s' "$priv_ip" > "${GCLOUD_STUB_STATE_DIR}/instances/${name}.ip"
+    fi
+    # A sentinel the create-mode wiring tests poll for, so they can stop
+    # deploy.sh right after VM creation instead of waiting out its SSH
+    # retry loop (which this stub's unhandled `compute ssh` case makes
+    # fail immediately, but deploy.sh still sleeps between attempts).
+    touch "${GCLOUD_STUB_STATE_DIR}/vm-create-happened"
+    # A second, dedicated sentinel touched only here (not at any of the
+    # other, earlier points the generic one above also fires at), for a
+    # test that specifically needs to know this exact call has already
+    # completed -- not just that deploy.sh has reached the general
+    # create-or-tag branch point.
+    touch "${GCLOUD_STUB_STATE_DIR}/instances-create-completed"
+    exit 0
+    ;;
+  "compute zones list")
+    require_project "$@"
+    echo "us-central1-b"
+    exit 0
+    ;;
+  "compute routers describe")
+    require_project "$@"
+    require_flag region "$@"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/router-exists" ]]; then
+      exit 0
+    fi
+    exit 1
+    ;;
+  "compute routers list")
+    # Returns a JSON list from a fixture (routers-list.json), defaulting
+    # to an empty list -- not empty stdout, not exit 1 -- so a caller
+    # doing "no routers yet" discovery gets a real (empty) JSON array to
+    # parse rather than a parse error or a false "list failed". Feature
+    # PRs building on this (e.g. NAT reuse) seed routers-list.json with
+    # their own router/NAT fixtures via seed_routers_list below.
+    require_project "$@"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/routers-list-should-fail" ]]; then
+      echo "gcloud-stub: simulated routers list failure" >&2
+      exit 1
+    fi
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/routers-list-should-return-empty" ]]; then
+      # Exit 0, no stdout -- distinct from the exit-1 case above.
+      exit 0
+    fi
+    f="${GCLOUD_STUB_STATE_DIR}/routers-list.json"
+    if [[ -f "$f" ]]; then
+      cat "$f"
+    else
+      echo "[]"
+    fi
+    exit 0
+    ;;
+  "compute addresses list")
+    require_project "$@"
+    filter="$(get_flag filter "$@")" || filter=""
+    # Filter is "name=(NAME) region:REGION" -- pull NAME out of the
+    # name=(...) clause and REGION out of the region: clause. Any other
+    # form fails loudly rather than being answered as if it were this one.
+    address_filter_re='^name=\([a-z0-9-]+\) region:[a-z0-9-]+$'
+    if [[ ! "$filter" =~ $address_filter_re ]]; then
+      echo "gcloud-stub: unsupported addresses list --filter form: ${filter}" >&2
+      exit 1
+    fi
+    name="${filter#*name=(}"
+    name="${name%%)*}"
+    list_region="${filter#*region:}"
+    f="${GCLOUD_STUB_STATE_DIR}/addresses/${name}.json"
+    if [[ -f "${f}.list-error" ]]; then
+      err_msg="$(cat "${f}.list-error")"
+      echo "${err_msg:-gcloud-stub: PERMISSION_DENIED: simulated PERMISSION_DENIED listing addresses}" >&2
+      exit 1
+    fi
+    # A successful call whose stdout is not JSON.
+    if [[ -f "${f}.list-invalid-json" ]]; then
+      echo "gcloud-stub: this is not JSON"
+      exit 0
+    fi
+    # Simulates list eventual-consistency: absent (empty list) reads
+    # succeed normally, but once the address actually exists (i.e. a
+    # `create` has run for it), list starts failing -- for exercising the
+    # get-immediately-after-create step's own error handling.
+    if [[ -f "${f}.list-error-after-create" && -f "$f" ]]; then
+      echo "gcloud-stub: simulated list failure right after create for address ${name}" >&2
+      exit 1
+    fi
+    # region:REGION is applied the way gcloud applies ':': a word match,
+    # case-insensitive, anywhere in the entry's region URL. An entry with
+    # no region (a global address) never matches. So a same-named entry
+    # in another region is left out unless its URL contains REGION as a
+    # word (e.g. in the project ID), in which case it is returned too,
+    # as the real list would. Entries from seed_address_extra come first.
+    "$PYTHON" -c "
+import glob, json, os, re, sys
+path, region = sys.argv[1], sys.argv[2]
+word = re.compile(r'\\b' + re.escape(region) + r'\\b', re.IGNORECASE)
+out = []
+for p in sorted(glob.glob(glob.escape(path) + '.extra-*')) + ([path] if os.path.isfile(path) else []):
+    d = json.load(open(p))
+    if word.search(d.get('region') or ''):
+        out.append(d)
+print(json.dumps(out))
+" "$f" "$list_region"
+    # Re-touches the same VM-creation sentinel: this list call is always
+    # the first (and sometimes only, on a reuse) step of the hybrid-tier
+    # internal-IP ensure functions, which run either just before
+    # "instances create" or just after "instances add-tags" -- both
+    # already-touched points -- so a create-mode wiring test waiting on
+    # that sentinel needs this call's own completion covered too, not
+    # just whichever of those two happens to run first.
+    touch "${GCLOUD_STUB_STATE_DIR}/vm-create-happened"
+    exit 0
+    ;;
+  "compute addresses describe")
+    require_project "$@"
+    require_flag region "$@"
+    name="${4:-}"
+    f="${GCLOUD_STUB_STATE_DIR}/addresses/${name}.json"
+    if [[ -f "${f}.describe-error" ]]; then
+      err_msg="$(cat "${f}.describe-error")"
+      echo "${err_msg:-gcloud-stub: PERMISSION_DENIED: simulated PERMISSION_DENIED describe error for address ${name}}" >&2
+      exit 1
+    fi
+    if [[ -f "$f" ]]; then
+      cat "$f"
+      exit 0
+    fi
+    echo "gcloud-stub: ERROR: (gcloud.compute.addresses.describe) Could not fetch resource: - The resource 'projects/${GCLOUD_STUB_PROJECT:-demo-project}/regions/x/addresses/${name}' was not found" >&2
+    exit 1
+    ;;
+  "compute addresses create")
+    require_project "$@"
+    require_flag region "$@"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/addresses/${4:-}.json.create-fail" ]]; then
+      echo "gcloud-stub: simulated create failure for address ${4:-}" >&2
+      exit 1
+    fi
+    # Real gcloud creates an EXTERNAL address when --subnet is omitted,
+    # not one on any particular internal subnet -- silently defaulting
+    # it here would hide a caller that dropped the flag by accident.
+    require_flag subnet "$@"
+    region="$(get_flag region "$@")" || region="us-central1"
+    name="${4:-}"
+    addr="$(get_flag addresses "$@")" || addr="10.128.0.9"
+    desc="$(get_flag description "$@")" || desc=""
+    subnet="$(get_flag subnet "$@")"
+    project="$(get_flag project "$@")" || project="demo-project"
+    "$PYTHON" -c "
+import json, sys
+addr, desc, project, region, subnet = sys.argv[1:6]
+print(json.dumps({
+    'address': addr,
+    'description': desc,
+    'addressType': 'INTERNAL',
+    'subnetwork': 'https://www.googleapis.com/compute/v1/projects/' + project + '/regions/' + region + '/subnetworks/' + subnet,
+    'region': 'https://www.googleapis.com/compute/v1/projects/' + project + '/regions/' + region,
+}))
+" "$addr" "$desc" "$project" "$region" "$subnet" > "${GCLOUD_STUB_STATE_DIR}/addresses/${name}.json"
+    touch "${GCLOUD_STUB_STATE_DIR}/vm-create-happened"
+    touch "${GCLOUD_STUB_STATE_DIR}/addresses-create-completed"
+    exit 0
+    ;;
+  "compute addresses delete")
+    require_project "$@"
+    require_flag region "$@"
+    name="${4:-}"
+    f="${GCLOUD_STUB_STATE_DIR}/addresses/${name}.json"
+    if [[ -f "${f}.delete-fail" ]]; then
+      echo "gcloud-stub: simulated delete failure for address ${name}" >&2
+      exit 1
+    fi
+    if [[ -f "$f" ]]; then
+      rm -f "$f"
+      exit 0
+    fi
+    echo "gcloud-stub: address ${name} not found" >&2
+    exit 1
+    ;;
+  "compute routers create")
+    require_project "$@"
+    require_flag region "$@"
+    # Persists the same flag "compute routers describe" (above) and
+    # set_router_exists (harness.sh) both use, so a re-run against the
+    # state a create actually left behind sees the router as already
+    # existing, not just a test that hand-seeds it upfront.
+    touch "${GCLOUD_STUB_STATE_DIR}/router-exists"
+    exit 0
+    ;;
+  "compute routers delete")
+    require_project "$@"
+    require_flag region "$@"
+    # Same content-carrying delete-error fixture as the NAT delete above.
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/router-delete-error" ]]; then
+      err_msg="$(cat "${GCLOUD_STUB_STATE_DIR}/router-delete-error")"
+      echo "${err_msg:-gcloud-stub: simulated delete failure for router ${4:-}}" >&2
+      exit 1
+    fi
+    rm -f "${GCLOUD_STUB_STATE_DIR}/router-exists"
+    exit 0
+    ;;
+  "iam service-accounts describe")
+    require_project "$@"
+    # $4 is a full email for this call (unlike create's bare account id
+    # below). A name-scoped describe-error fixture is checked first (an
+    # error unrelated to existence, e.g. PERMISSION_DENIED), then a
+    # name-scoped JSON fixture keyed by that email; the non-name-scoped
+    # service-account-exists flag serves callers (the hub's own base SA)
+    # that only ever check existence, never a description. Anything else
+    # is a realistic NOT_FOUND.
+    sa_email="${4:-}"
+    f="${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json"
+    if [[ -f "${f}.describe-error" ]]; then
+      err_msg="$(cat "${f}.describe-error")"
+      echo "${err_msg:-gcloud-stub: ERROR: (gcloud.iam.service-accounts.describe) PERMISSION_DENIED: Permission iam.serviceAccounts.get denied on resource}" >&2
+      exit 1
+    fi
+    if [[ -f "$f" ]]; then
+      cat "$f"
+      exit 0
+    fi
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/service-account-exists" ]]; then
+      echo '{}'
+      exit 0
+    fi
+    echo "gcloud-stub: ERROR: (gcloud.iam.service-accounts.describe) NOT_FOUND: Unknown service account" >&2
+    exit 1
+    ;;
+  "iam service-accounts create")
+    require_project "$@"
+    # $4 here is the bare account id, not the email describe/delete use --
+    # reconstruct the email the same way deploy.sh/hybrid-tier.sh do, so a
+    # later describe/delete of the same account finds this fixture.
+    sa_id="${4:-}"
+    create_project="$(get_flag project "$@")" || create_project=""
+    create_desc="$(get_flag description "$@")" || create_desc=""
+    if [[ -n "$sa_id" && -n "$create_project" ]]; then
+      mkdir -p "${GCLOUD_STUB_STATE_DIR}/service-accounts"
+      "$PYTHON" -c "
+import json, sys
+email, desc, path = sys.argv[1:4]
+json.dump({'email': email, 'description': desc}, open(path, 'w', encoding='utf-8'))
+" "${sa_id}@${create_project}.iam.gserviceaccount.com" "$create_desc" \
+        "${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_id}@${create_project}.iam.gserviceaccount.com.json"
+    fi
+    exit 0
+    ;;
+  "iam service-accounts delete")
+    require_project "$@"
+    sa_email="${4:-}"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json.delete-fail" ]]; then
+      if [[ -f "${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json.delete-fail-text" ]]; then
+        cat "${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json.delete-fail-text" >&2
+      else
+        echo "gcloud-stub: simulated delete failure for service account ${sa_email}" >&2
+      fi
+      exit 1
+    fi
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json.delete-not-found" ]]; then
+      # Found by describe, gone by the time of the delete.
+      rm -f "${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json"
+      echo "gcloud-stub: ERROR: (gcloud.iam.service-accounts.delete) NOT_FOUND: Unknown service account" >&2
+      exit 1
+    fi
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json" ]]; then
+      rm -f "${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json"
+      exit 0
+    fi
+    # Not otherwise seeded: a realistic "not found" error shape for a
+    # name-scoped fixture that was never created.
+    echo "gcloud-stub: ERROR: (gcloud.iam.service-accounts.delete) NOT_FOUND: Unknown service account" >&2
+    exit 1
+    ;;
+  "iam service-accounts add-iam-policy-binding")
+    require_project "$@"
+    # Answers as for a service account whose IAM policy already contains
+    # conditional bindings: every call here must carry --condition=None.
+    if [[ "$(get_flag condition "$@" || true)" != "None" ]]; then
+      echo "ERROR: (gcloud.iam.service-accounts.add-iam-policy-binding) Adding a binding without specifying a condition to a policy containing conditions is prohibited in non-interactive mode. Run the command again with \`--condition=None\`" >&2
+      exit 1
+    fi
+    sa_email="${4:-}"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json.grant-fail" ]]; then
+      err_msg="$(cat "${GCLOUD_STUB_STATE_DIR}/service-accounts/${sa_email}.json.grant-fail")"
+      echo "${err_msg:-ERROR: (gcloud.iam.service-accounts.add-iam-policy-binding) PERMISSION_DENIED: simulated grant failure on service account [${sa_email}]}" >&2
+      exit 1
+    fi
+    echo "Updated IAM policy for serviceAccount [${sa_email}]." >&2
+    echo "bindings: []"
+    exit 0
+    ;;
+  "iap settings get")
+    require_project "$@"
+    # The real CLI needs a resource type to know which settings to read;
+    # the project-wide OAuth client lives on iap_web.
+    if [[ "$(get_flag resource-type "$@" || true)" != "iap_web" ]]; then
+      echo "gcloud-stub: ERROR: iap settings get requires --resource-type=iap_web for project-level settings" >&2
+      exit 1
+    fi
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/iap-settings-get-should-fail" ]]; then
+      echo "gcloud-stub: simulated IAP settings read failure" >&2
+      exit 1
+    fi
+    client_id="$(cat "${GCLOUD_STUB_STATE_DIR}/iap-client-id.txt" 2>/dev/null || true)"
+    if [[ -z "$client_id" && ! -f "${GCLOUD_STUB_STATE_DIR}/iap-client-id.txt" ]]; then
+      # No fixture at all: a realistic default, so a test that doesn't
+      # care about the actual client ID doesn't need to seed one.
+      client_id="123456789-abcdefghijklmnop.apps.googleusercontent.com"
+    fi
+    if [[ -z "$client_id" ]]; then
+      # An explicitly empty fixture: IAP configured, but with no OAuth
+      # client id set -- the "must fail closed" case.
+      echo '{"accessSettings": {"oauthSettings": {}}}'
+    else
+      "$PYTHON" -c "import json,sys; print(json.dumps({'accessSettings': {'oauthSettings': {'clientId': sys.argv[1]}}}))" "$client_id"
+    fi
+    exit 0
+    ;;
+  "iap web add-iam-policy-binding")
+    require_project "$@"
+    require_flag region "$@"
+    # The deployer-facing IAP binding: the first gcloud call *after* the
+    # entire allUsers-verification block (get-iam-policy, and the
+    # conditional remove-iam-policy-binding). A create-mode wiring test
+    # that needs to run deploy.sh past Phase 4's IAP hardening
+    # (GCLOUD_STUB_SSH_SUCCEEDS=true) polls for this sentinel to stop
+    # deploy.sh here, well before the (real, 60s) IAP-enforcement sleep
+    # later in Phase 4 -- and, just as importantly, *after* the allUsers
+    # block has had a chance to run to completion, so a test asserting on
+    # what that block did (or didn't do) isn't racing the harness's own
+    # kill. On the allUsers-hard-fail path, deploy.sh exits before ever
+    # reaching this call, so the sentinel is never touched there --
+    # that's the point: a test on that path sees the process end on its
+    # own instead.
+    touch "${GCLOUD_STUB_STATE_DIR}/phase4-iap-hardening-done"
+    # Answers as for a resource whose IAM policy already contains
+    # conditional bindings: every call here must carry --condition=None.
+    if [[ "$(get_flag condition "$@" || true)" != "None" ]]; then
+      echo "ERROR: (gcloud.iap.web.add-iam-policy-binding) Adding a binding without specifying a condition to a policy containing conditions is prohibited in non-interactive mode. Run the command again with \`--condition=None\`" >&2
+      exit 1
+    fi
+    member="$(get_flag member "$@" || true)"
+    fail_file="${GCLOUD_STUB_STATE_DIR}/iap-web-binding-fail/${member//[:\/@]/_}"
+    if [[ ! -f "$fail_file" ]]; then
+      fail_file="${GCLOUD_STUB_STATE_DIR}/iap-web-add-binding-should-fail"
+    fi
+    if [[ -f "$fail_file" ]]; then
+      err_msg="$(cat "$fail_file")"
+      echo "${err_msg:-ERROR: (gcloud.iap.web.add-iam-policy-binding) PERMISSION_DENIED: simulated IAP web binding failure for member [${member}]}" >&2
+      exit 1
+    fi
+    echo "Updated IAM policy for Cloud Run service." >&2
+    echo "bindings: []"
+    exit 0
+    ;;
+  "iap web remove-iam-policy-binding")
+    # Answers as for a resource whose IAM policy already contains
+    # conditional bindings: every call here must carry --condition=None.
+    if [[ "$(get_flag condition "$@" || true)" != "None" ]]; then
+      echo "ERROR: (gcloud.iap.web.remove-iam-policy-binding) Removing a binding without specifying a condition from a policy containing conditions is prohibited in non-interactive mode. Run the command again with \`--condition=None\` to remove a binding without condition or run command with \`--all\` to remove all bindings of the specified principal and role." >&2
+      exit 1
+    fi
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/iap-web-remove-binding-error" ]]; then
+      err_msg="$(cat "${GCLOUD_STUB_STATE_DIR}/iap-web-remove-binding-error")"
+      echo "${err_msg:-gcloud-stub: ERROR: (gcloud.iap.web.remove-iam-policy-binding) PERMISSION_DENIED: simulated binding removal failure}" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  "run services delete")
+    require_project "$@"
+    require_flag region "$@"
+    name="${4:-}"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.delete-error" ]]; then
+      err_msg="$(cat "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.delete-error")"
+      echo "${err_msg:-gcloud-stub: ERROR: (gcloud.run.services.delete) PERMISSION_DENIED: simulated delete failure for service [${name}]}" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  "run services describe")
+    require_project "$@"
+    require_flag region "$@"
+    name="${4:-}"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.describe-error" ]]; then
+      err_msg="$(cat "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.describe-error")"
+      echo "${err_msg:-gcloud-stub: PERMISSION_DENIED: simulated PERMISSION_DENIED describe error unrelated to existence}" >&2
+      exit 1
+    fi
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.exists" ]]; then
+      format="$(get_flag format "$@")" || format=""
+      if [[ "$format" == "value(status.url)" ]]; then
+        echo "https://${name}-abc123-uc.a.run.app"
+      fi
+      exit 0
+    fi
+    # Real gcloud's own Cloud Run 404 text -- "Cannot find service [X]" --
+    # carries none of the NOT_FOUND/404 tokens gcloud's other APIs use, so
+    # this deliberately does NOT look like the other services' not-found
+    # fixtures below: hybrid_cloud_run_label_args must never rely on
+    # text-matching this, only on the positive-absence `list` call.
+    echo "gcloud-stub: ERROR: (gcloud.run.services.describe) Cannot find service [${name}]" >&2
+    exit 1
+    ;;
+  "beta run deploy")
+    # The one-step IAP deploy (--no-allow-unauthenticated --iap). Same
+    # sentinel/state as the plain "run deploy" case above (this stub does
+    # not model any behavioral difference between the two beyond what a
+    # wiring test asserts directly off the logged invocation's flags).
+    require_project "$@"
+    require_flag region "$@"
+    name="${4:-}"
+    mkdir -p "${GCLOUD_STUB_STATE_DIR}/run-services"
+    touch "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.exists"
+    exit 0
+    ;;
+  "run services add-iam-policy-binding")
+    require_project "$@"
+    require_flag region "$@"
+    # Answers as for a service whose IAM policy already contains
+    # conditional bindings: every call here must carry --condition=None.
+    if [[ "$(get_flag condition "$@" || true)" != "None" ]]; then
+      echo "ERROR: (gcloud.run.services.add-iam-policy-binding) Adding a binding without specifying a condition to a policy containing conditions is prohibited in non-interactive mode. Run the command again with \`--condition=None\`" >&2
+      exit 1
+    fi
+    name="${4:-}"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.add-binding-fail" ]]; then
+      echo "gcloud-stub: simulated failure adding an IAM binding to service [${name}]" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  "run services get-iam-policy")
+    require_project "$@"
+    require_flag region "$@"
+    name="${4:-}"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.get-policy-fail" ]]; then
+      echo "gcloud-stub: simulated failure reading IAM policy for service [${name}]" >&2
+      exit 1
+    fi
+    # Holds the call open so a test can interrupt deploy.sh while this
+    # read is in flight (its stderr temp file exists at that point). The
+    # started sentinel tells the test the call has begun.
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.get-policy-blocks" ]]; then
+      touch "${GCLOUD_STUB_STATE_DIR}/run-services-get-policy-started"
+      sleep 30
+    fi
+    # Simplified relative to real gcloud's --flatten/--filter machinery:
+    # this stub only ever needs to answer the one shape deploy.sh asks
+    # for (is allUsers bound to roles/run.invoker), modeled as a
+    # name-scoped marker file rather than a real IAM policy document.
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.allusers-invoker" ]]; then
+      echo "allUsers"
+    fi
+    exit 0
+    ;;
+  "run services remove-iam-policy-binding")
+    require_project "$@"
+    require_flag region "$@"
+    # Answers as for a service whose IAM policy already contains
+    # conditional bindings: every call here must carry --condition=None.
+    if [[ "$(get_flag condition "$@" || true)" != "None" ]]; then
+      echo "ERROR: (gcloud.run.services.remove-iam-policy-binding) Removing a binding without specifying a condition from a policy containing conditions is prohibited in non-interactive mode. Run the command again with \`--condition=None\` to remove a binding without condition or run command with \`--all\` to remove all bindings of the specified principal and role." >&2
+      exit 1
+    fi
+    name="${4:-}"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.remove-binding-fail" ]]; then
+      echo "gcloud-stub: simulated failure removing an IAM binding from service [${name}]" >&2
+      exit 1
+    fi
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.allusers-invoker" ]]; then
+      rm -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.allusers-invoker"
+      exit 0
+    fi
+    # Real gcloud's remove-iam-policy-binding raises IamPolicyBindingNotFound
+    # (exit 1) when the given member+role isn't present in the policy --
+    # it is NOT a no-op success (iam_util.RemoveBindingFromIamPolicy in
+    # the Cloud SDK). deploy.sh only calls this after confirming presence
+    # via `run services get-iam-policy` above, so this path is a realistic
+    # "gone by the time we tried to remove it" race, not the common case.
+    echo "ERROR: (gcloud.run.services.remove-iam-policy-binding) Policy binding with the specified principal and role not found!" >&2
+    exit 1
+    ;;
+  "compute networks describe")
+    require_project "$@"
+    name="${4:-}"
+    # A name-scoped, non-"not found" error (permission denied, a
+    # transient API error, ...) -- checked first, distinct from ".missing"
+    # below, since deploy.sh must treat the two very differently (R1:
+    # retry/report "missing" only for a genuine not-found; surface
+    # anything else immediately with the real error text).
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/networks/${name}.describe-error" ]]; then
+      cat "${GCLOUD_STUB_STATE_DIR}/networks/${name}.describe-error" >&2
+      exit 1
+    fi
+    # Models the network's real asynchronous appearance after
+    # services-enable: the first N calls report "not found", then it
+    # exists from call N+1 onward. Checked before the permanently-missing
+    # fixture below, so a test can exercise the poll loop's
+    # retry-then-succeed path (N < NETWORK_CHECK_MAX_ATTEMPTS) and its
+    # give-up-after-budget path (N >= it) without needing two different
+    # fixtures.
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/networks/${name}.appears-after" ]]; then
+      appears_after="$(cat "${GCLOUD_STUB_STATE_DIR}/networks/${name}.appears-after")"
+      count_file="${GCLOUD_STUB_STATE_DIR}/networks/${name}.describe-count"
+      count="$(cat "$count_file" 2>/dev/null || echo 0)"
+      count=$((count + 1))
+      echo "$count" > "$count_file"
+      if [[ "$count" -le "$appears_after" ]]; then
+        # Retryable shapes, selected by an optional companion fixture
+        # (not-found is the default): a genuine not-found (the network
+        # itself is still propagating), or one of three SERVICE_DISABLED
+        # shapes real gcloud can produce right after
+        # compute.googleapis.com is enabled on a brand-new project (see
+        # deploy.sh's own comment on the retry condition for which gcloud
+        # code paths produce which shape).
+        error_shape="$(cat "${GCLOUD_STUB_STATE_DIR}/networks/${name}.appears-after-error-shape" 2>/dev/null || echo "")"
+        case "$error_shape" in
+          service-disabled)
+            # The realistic shape when gcloud's API-enablement prompt is
+            # declined (or auto-declined by --quiet): the rendered
+            # HttpException's message, followed by a details block whose
+            # reason is SERVICE_DISABLED. Contains both match substrings.
+            cat >&2 <<STUBERR
+gcloud-stub: ERROR: (gcloud.compute.networks.describe) PERMISSION_DENIED: Compute Engine API has not been used in project 123456789012 before or it is disabled.  Enable it by visiting https://console.developers.google.com/apis/api/compute.googleapis.com/overview?project=123456789012 then retry.  If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry.
+- '@type': type.googleapis.com/google.rpc.ErrorInfo
+  domain: googleapis.com
+  metadata:
+    consumer: projects/123456789012
+    service: compute.googleapis.com
+  reason: SERVICE_DISABLED
+STUBERR
+            ;;
+          service-disabled-bare-message)
+            # The realistic shape when the API-enablement prompt is
+            # disabled entirely (should_prompt_to_enable_api=false): the
+            # batch-request error path (compute/utils.RaiseToolException)
+            # renders a plain "Could not fetch resource:" header line
+            # followed by the message, no PERMISSION_DENIED prefix and no
+            # details block -- so only the message fragment is present,
+            # not the literal "SERVICE_DISABLED". Proves the fragment
+            # match matters on its own.
+            cat >&2 <<STUBERR
+gcloud-stub: ERROR: (gcloud.compute.networks.describe) Could not fetch resource:
+ - Compute Engine API has not been used in project 123456789012 before or it is disabled.  Enable it by visiting https://console.developers.google.com/apis/api/compute.googleapis.com/overview?project=123456789012 then retry.  If you enabled this API recently, wait a few minutes for the action to propagate to our systems and retry.
+STUBERR
+            ;;
+          service-disabled-reason-only)
+            # Synthetic, not a shape real gcloud is known to produce for
+            # this exact call: a details block carrying reason:
+            # SERVICE_DISABLED with none of the "has not been used in
+            # project" message text. Exists only so the SERVICE_DISABLED
+            # match condition is independently exercised too, in case a
+            # future gcloud version (or a related API) reports the same
+            # machine-readable reason under different message wording.
+            cat >&2 <<STUBERR
+gcloud-stub: ERROR: (gcloud.compute.networks.describe) PERMISSION_DENIED: request rejected.
+- '@type': type.googleapis.com/google.rpc.ErrorInfo
+  domain: googleapis.com
+  reason: SERVICE_DISABLED
+STUBERR
+            ;;
+          *)
+            echo "gcloud-stub: ERROR: (gcloud.compute.networks.describe) Could not fetch resource: - The resource 'projects/$(get_flag project "$@")/global/networks/${name}' was not found" >&2
+            ;;
+        esac
+        exit 1
+      fi
+      exit 0
+    fi
+    # Realistic projects have a "default" network unless the operator's
+    # org enforces compute.skipDefaultNetworkCreation -- the opposite
+    # default from most other resources in this stub (which don't exist
+    # until deploy.sh itself creates them), so "exists" is the default
+    # response here, and a hardened-org test opts into "missing" via
+    # set_network_missing.
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/networks/${name}.missing" ]]; then
+      echo "gcloud-stub: ERROR: (gcloud.compute.networks.describe) Could not fetch resource: - The resource 'projects/$(get_flag project "$@")/global/networks/${name}' was not found" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  "run services list")
+    require_project "$@"
+    require_flag region "$@"
+    if [[ -f "${GCLOUD_STUB_STATE_DIR}/run-services/list-error" ]]; then
+      echo "gcloud-stub: simulated error listing run services" >&2
+      exit 1
+    fi
+    filter="$(get_flag filter "$@")" || filter=""
+    # metadata.name=NAME, with = an equality match. Any other form fails
+    # loudly rather than being answered as if it were this one.
+    run_service_filter_re='^metadata\.name=[a-z0-9-]+$'
+    if [[ ! "$filter" =~ $run_service_filter_re ]]; then
+      echo "gcloud-stub: unsupported run services list --filter form: ${filter}" >&2
+      exit 1
+    fi
+    name="${filter#metadata.name=}"
+    if [[ -n "$name" && -f "${GCLOUD_STUB_STATE_DIR}/run-services/${name}.exists" ]]; then
+      echo "$name"
+    fi
+    exit 0
+    ;;
+  "container clusters describe")
+    require_project "$@"
+    get_flag location "$@" >/dev/null || {
+      echo "gcloud-stub: missing --location on: $*" >&2
+      exit 1
+    }
+    name="${4:-}"
+    f="${GCLOUD_STUB_STATE_DIR}/clusters/${name}.json"
+    if [[ -f "${f}.describe-error" ]]; then
+      err_msg="$(cat "${f}.describe-error")"
+      echo "${err_msg:-gcloud-stub: PERMISSION_DENIED: simulated PERMISSION_DENIED cluster describe error unrelated to existence}" >&2
+      exit 1
+    fi
+    if [[ -f "$f" ]]; then
+      cat "$f"
+      exit 0
+    fi
+    echo "gcloud-stub: ERROR: (gcloud.container.clusters.describe) ResponseError: code=404, message=Not found: projects/${GCLOUD_STUB_PROJECT:-demo-project}/locations/x/clusters/${name}." >&2
+    exit 1
+    ;;
+  "compute ssh "*)
+    # The first `compute ssh` call of deploy.sh's own SSH-readiness retry
+    # loop always happens here, on its first attempt, before that loop's
+    # own backoff sleep -- deploy.sh's entire Phase 2 (VM create/tag and
+    # the hybrid-tier internal-IP calls and their guard) has run to
+    # completion by the time this is reached, in every tier/VM-state
+    # combination, since deploy.sh is a single sequential script. This is
+    # the sentinel run_deploy_create's default (see test_deploy_wiring.sh)
+    # waits on to know Phase 2 is genuinely done, not just that VM
+    # creation/tagging itself was reached.
+    touch "${GCLOUD_STUB_STATE_DIR}/phase2-complete"
+    # Only opts into actually succeeding when a test explicitly asks for
+    # it (GCLOUD_STUB_SSH_SUCCEEDS=true): every pre-existing create-mode
+    # wiring test relies on `compute ssh` failing immediately so it can
+    # stop deploy.sh shortly after Phase 2 without waiting out the real
+    # SSH-readiness retry loop. Canned answers only cover the handful of
+    # commands whose stdout deploy.sh's own local variables actually
+    # depend on; everything else (binary/plugin install, hub.env write,
+    # etc.) just succeeds silently, since the stub never really executes
+    # any of it remotely.
+    if [[ "${GCLOUD_STUB_SSH_SUCCEEDS:-false}" != "true" ]]; then
+      echo "gcloud-stub: compute ssh not simulated (set GCLOUD_STUB_SSH_SUCCEEDS=true to enable)" >&2
+      exit 1
+    fi
+    require_project "$@"
+    require_flag zone "$@"
+    cmd="$(get_flag command "$@")" || cmd=""
+    case "$cmd" in
+      "echo ssh-ok")
+        echo ssh-ok
+        ;;
+      "uname -m")
+        echo "${GCLOUD_STUB_SSH_ARCH:-x86_64}"
+        ;;
+      *"useradd -r -M -N -g scion"*)
+        # The rendered NFS squash-identity script: its own docstring says
+        # it prints exactly "SQUASH_UID:SCION_GID" on success.
+        echo "${GCLOUD_STUB_SSH_SQUASH_IDS:-997:1001}"
+        ;;
+      *"test -f /home/scion/.scion/hub.env"*)
+        echo "no"
+        ;;
+      *"schema_version"*"mode: proxy"*)
+        # The settings.yaml Phase-5 proxy-mode (re)write: a later, distinct
+        # sentinel from the dev-mode one below, for a test that needs to
+        # reach past Cloud Run deploy/IAP enablement instead of stopping
+        # at the earlier dev-mode write.
+        touch "${GCLOUD_STUB_STATE_DIR}/settings-yaml-proxy-mode-written"
+        ;;
+      *"schema_version"*)
+        # The settings.yaml dev-mode write: this is the point create-mode
+        # wiring tests that opt into GCLOUD_STUB_SSH_SUCCEEDS stop at.
+        touch "${GCLOUD_STUB_STATE_DIR}/settings-yaml-dev-mode-written"
+        ;;
+    esac
+    exit 0
+    ;;
+  "compute scp "*)
+    if [[ "${GCLOUD_STUB_SSH_SUCCEEDS:-false}" != "true" ]]; then
+      echo "gcloud-stub: compute scp not simulated (set GCLOUD_STUB_SSH_SUCCEEDS=true to enable)" >&2
+      exit 1
+    fi
+    exit 0
+    ;;
+  *)
+    echo "gcloud-stub: unhandled invocation: $*" >&2
+    exit 1
+    ;;
+esac

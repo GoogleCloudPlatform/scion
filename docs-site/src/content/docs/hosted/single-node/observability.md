@@ -75,7 +75,7 @@ As an alternative to the OTel pipeline, the Hub and Broker can send logs directl
 export SCION_CLOUD_LOGGING=true
 export SCION_GCP_PROJECT_ID="your-project-id"
 
-# Optional: customize the log name (default: "scion")
+# Optional: customize the log name (default: "scion-server")
 export SCION_CLOUD_LOGGING_LOG_ID="scion-hub"
 
 scion server start --enable-hub
@@ -107,6 +107,9 @@ telemetry:
   enabled: true
   cloud:
     enabled: true
+    # Required when exporting to Google Cloud — without it the metrics
+    # dashboard has no project to query and stays empty.
+    gcp_project_id: "my-gcp-project"
     endpoint: "monitoring.googleapis.com:443"
     protocol: grpc
   filter:
@@ -129,16 +132,29 @@ SCION_TELEMETRY_ENABLED="true"
 
 #### Harness-Specific Configuration
 
-If you are using agents that natively support OpenTelemetry (like `opencode`), you may need to explicitly tell the agent where to find the `sciontool` forwarder (which is `localhost` from the agent's perspective):
+Each harness integrates with `sciontool`'s telemetry pipeline differently depending on its native telemetry support:
 
-- **gRPC (Default)**: `OTEL_EXPORTER_OTLP_ENDPOINT="localhost:4317"`
-- **HTTP**: `OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"`
+- **OpenTelemetry-native harnesses** (e.g. `opencode`): These harnesses emit OTLP data directly. Point them at the `sciontool` forwarder on localhost:
+  - **gRPC (Default)**: `OTEL_EXPORTER_OTLP_ENDPOINT="localhost:4317"`
+  - **HTTP**: `OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"`
 
-These harness-specific env vars are injected at agent start time via the harness config's `env` map and are separate from the Scion telemetry settings.
+- **Claude Code (logs-first route)**: Claude Code emits structured OTLP log records (scope `com.anthropic.claude_code.events`) rather than spans or metrics. The `sciontool` receiver normalizes Claude's event names to the canonical `agent.*` namespace (e.g. `user_prompt` → `agent.user.prompt`) and **unconditionally redacts** all Claude log bodies to protect prompt privacy, regardless of the configured filter policy. When Claude is the active harness and telemetry is enabled, the broker propagates the telemetry backend configuration (`gcp` or `otlp`) via the `SCION_TELEMETRY_CLOUD_PROVIDER` environment variable to `sciontool` to prevent accidental metrics export before credentials are available.
+
+- **Gemini CLI**: Telemetry comes primarily from harness hook events and session-file parsing — see [Session Metrics (Gemini)](/scion/hosted/single-node/metrics/#session-metrics-gemini).
+
+- **Copilot and Grok Build**: The harness provisioner always points the native OTel exporter at the local `sciontool` receiver (Copilot over HTTP on `4318`, Grok Build over gRPC on `4317`), never directly at `SCION_OTEL_ENDPOINT`, so their telemetry passes through redaction and identity stamping. `SCION_COPILOT_OTEL_ENDPOINT` and `SCION_GROK_BUILD_OTEL_ENDPOINT` override the endpoint for local debugging only; they bypass redaction entirely. See [Supported Harnesses](/scion/supported-harnesses/).
+
+:::caution[Reserved telemetry variables]
+When a harness provisioner configures native telemetry, the variables that control it are reserved: `CLAUDE_CODE_ENABLE_TELEMETRY`, `GEMINI_TELEMETRY_*`, `COPILOT_OTEL_*`, `GROK_TELEMETRY_*`, `GROK_EXTERNAL_OTEL`, and `OTEL_*`. If the runtime environment (for example, Project or Broker env on the Hub) sets any of them to a value other than the one the provisioner generated, the agent fails to start with a `native telemetry policy conflict` error naming the key.
+:::
+
+These harness-specific env vars are injected at agent start time via the harness config's `env` map and are separate from the Scion telemetry settings. Scion automatically injects `SCION_HARNESS` and `SCION_MODEL` into all agent containers to enable harness-aware telemetry attribution.
 
 ## Agent Logs
 
 Agent logs are written to `/home/scion/agent.log` inside the container. The sciontool logging system writes to both stderr and this file.
+
+Each `agent.log` line starts with a UTC RFC 3339 timestamp, followed by `[sciontool] [LEVEL]`, an optional `[TAG]`, and the message, for example `2026-10-02T00:30:15.123456789Z [sciontool] [INFO] [LIMITS_EXCEEDED] Agent stopped: ...`. Per-service `<name>.lifecycle.log` lines use the same timestamp in brackets: `[2026-10-02T00:30:15.123456789Z] message`. Timestamps are always UTC, whatever `TZ` the agent runs with; the agent process itself keeps its own `TZ`.
 
 ### Cloud Log Viewer & Hub API
 
@@ -160,7 +176,15 @@ The telemetry pipeline in sciontool collects and forwards OpenTelemetry (OTLP) d
 
 ### Telemetry Export Resilience
 
-To safeguard against transient network issues or temporary destination outages, `sciontool`'s telemetry pipeline includes automated **retry with exponential backoff** for all cloud OTLP exports. When an export attempt fails (e.g. due to rate limits or transient 5xx errors from the cloud backend), the pipeline retries with a progressively increasing delay, ensuring high telemetry delivery reliability and preventing data loss.
+Trace and log batches make at most four pipeline export attempts, including the first, with exponential backoff while the caller deadline permits. Metrics make one pipeline export call per eligible flush. Calls for the same metric series are spaced at least 15 seconds after the preceding call completes. An unresolved metric snapshot stops after 20 pipeline calls or five minutes from its oldest admission, whichever comes first. An underlying SDK may make additional network calls within one pipeline call; the caller context bounds cooperative work.
+
+An OTLP intake success means the agent's local collector accepted the records. It does not confirm remote delivery. The collector retains at most 16 MiB of encoded payload, 4096 records or metric points, and 512 nonempty request entries across all signals, including pending, in-flight, and retry work. On capacity exhaustion it rejects the new request with HTTP 429 or gRPC `ResourceExhausted` and retry advice; it does not evict healthy admitted work. A permanent oversize request receives HTTP 413 or gRPC `ResourceExhausted` without retry advice. The collector has no disk-backed queue, so a process crash can lose admitted data.
+
+Local delivery diagnostics use span, log-record, or admitted metric-point units. `Delivered` means a whole exporter batch returned success. `Unconfirmed` means admitted data reached a terminal permanent, partial, attempt-limit, age-limit, or shutdown outcome without full delivery confirmation; it is not proof that the backend lost those records. `Dropped` covers proven local discard. `BackendRejected` records the known rejected subset in an OTLP partial-success response. At a quiet point, `Accepted = Delivered + Dropped + Unconfirmed + retained`. `Attempts` counts exporter calls, and `Failed` counts failed batch outcomes. `SDKErrors` separately counts asynchronous Cloud Logging callbacks; one failed batch can produce both a `Failed` outcome and an `SDKErrors` callback without representing two failed batches. A later cumulative metric value may include an earlier unconfirmed baseline, but it cannot retroactively confirm that earlier admission.
+
+The collector writes bounded delivery snapshots to local stderr and `agent.log` at startup, on the first export failure, at most once per minute during continued operation, and on shutdown. These remain visible while the telemetry destination is unavailable and are not sent through that destination. A final `degraded` snapshot with `Unconfirmed` records signals uncertain delivery after a failed drain.
+
+The server admits at most 16 active HTTP and gRPC processing requests together. A gRPC client can queue a 17th call locally on the same connection before the server receives it; use a caller deadline to bound that wait. The server's 15-second intake deadline starts only after it receives a stream. These are local collector limits, not end-to-end delivery or process-memory guarantees.
 
 ### What's Collected
 
@@ -169,6 +193,7 @@ To safeguard against transient network issues or temporary destination outages, 
 | Traces | Agent OTLP | Span data for tool calls, API requests |
 | Metrics | sciontool | Counters and histograms for tokens, tools, and latency |
 | Correlated Logs | sciontool | Log records linked to traces for every hook event |
+| Native Logs | Claude Code OTLP | Structured log records (bodies redacted); event names normalized to `agent.*` namespace |
 | Hook Events | Harness hooks | Tool calls, prompts, model invocations converted to spans |
 | Session Metrics | Gemini session files | Token counts, turn counts, tool statistics |
 
@@ -178,6 +203,7 @@ By default, user prompts (`agent.user.prompt`) are excluded from telemetry to pr
 
 - **Redacted**: `prompt`, `user.email`, `tool_output`, `tool_input`
 - **Hashed**: `session_id`
+- **Claude log bodies**: Unconditionally redacted (`[REDACTED]`) regardless of filter configuration. Claude Code emits free-form text in its OTLP log bodies; the receiver enforces redaction even if a custom policy omits `log.body` from its redaction list.
 
 ## HTTP Request Logs
 
@@ -213,7 +239,7 @@ httpRequest.status >= 400
 labels.project_id = "my-project"
 
 -- Correlate a request with its application logs
-logName="projects/YOUR_PROJECT/logs/scion" OR logName="projects/YOUR_PROJECT/logs/scion_request_log"
+logName="projects/YOUR_PROJECT/logs/scion-server" OR logName="projects/YOUR_PROJECT/logs/scion_request_log"
 jsonPayload.request_id = "YOUR_REQUEST_ID"
 ```
 
@@ -249,17 +275,17 @@ In combo server mode (`scion-server`), both `hub.*` and `broker.*` subsystem log
 
 ### Cloud Logging Query Examples
 
-All examples assume your logs are in the `scion` log name. Adjust the `logName` filter to match your configuration.
+All examples assume your logs are in the `scion-server` log name. Adjust the `logName` filter to match your configuration.
 
 #### Filter by Server Component
 
 ```
 -- All hub logs (hub-only or combo mode)
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 labels.component="scion-hub"
 
 -- All logs from combo server mode
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 labels.component="scion-server"
 ```
 
@@ -267,15 +293,15 @@ labels.component="scion-server"
 
 ```
 -- All hub subsystem logs
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "^hub\."
 
 -- All broker subsystem logs
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "^broker\."
 
 -- A specific subsystem
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem = "hub.notifications"
 ```
 
@@ -283,16 +309,16 @@ jsonPayload.subsystem = "hub.notifications"
 
 ```
 -- All agent lifecycle events across hub and broker
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "\.agent-lifecycle$"
 
 -- Agent lifecycle for a specific agent
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "\.agent-lifecycle$"
 jsonPayload.agent_id = "my-agent-id"
 
 -- Only errors in agent lifecycle
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "\.agent-lifecycle$"
 severity >= ERROR
 ```
@@ -301,30 +327,54 @@ severity >= ERROR
 
 ```
 -- All message-related logs (hub routing + broker injection)
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "\.messages$"
 
 -- Messages from a specific sender
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "\.messages$"
 jsonPayload.sender = "agent-slug"
 
 -- Messages to a specific recipient in a project
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "\.messages$"
 jsonPayload.recipient = "target-agent"
 jsonPayload.project_id = "my-project-id"
+```
+
+#### Agent Telemetry Logs
+
+Logs that agents export through the `sciontool` telemetry pipeline go to the `scion-agents` log name, not `scion-server`. The exporter turns each OpenTelemetry resource attribute into a log label with the same key. Agent identity is carried only in these resource-attribute labels: there are no top-level `agent_id` or `project_id` labels on agent telemetry log entries. The only extra label is `hub`, which is set from `SCION_HUB_NAME` when present.
+
+The identity labels are stamped by the `sciontool` receiver from the agent's authoritative identity (see [Identity Enforcement](/scion/hosted/single-node/metrics/#identity-enforcement)), so filter on these:
+
+- `labels."scion.project.id"` for the agent's project.
+- `labels."scion.agent.id"` for the agent ID.
+- `labels."scion.agent.slug"` for the agent slug.
+
+```
+-- Agent telemetry logs for a project
+logName="projects/YOUR_PROJECT/logs/scion-agents"
+labels."scion.project.id" = "my-project-id"
+
+-- Agent telemetry logs for one agent, by slug
+logName="projects/YOUR_PROJECT/logs/scion-agents"
+labels."scion.agent.slug" = "my-agent-slug"
+
+-- Agent telemetry logs for one agent, by ID
+logName="projects/YOUR_PROJECT/logs/scion-agents"
+labels."scion.agent.id" = "my-agent-id"
 ```
 
 #### Auth and Security Auditing
 
 ```
 -- All authentication and authorization events
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem = "hub.auth"
 
 -- Auth failures only
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem = "hub.auth"
 severity >= WARNING
 ```
@@ -333,11 +383,11 @@ severity >= WARNING
 
 ```
 -- All control channel activity (hub + broker sides)
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "\.control-channel$"
 
 -- Control channel errors (connectivity issues)
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "\.control-channel$"
 severity >= ERROR
 ```
@@ -346,12 +396,12 @@ severity >= ERROR
 
 ```
 -- All hub logs EXCEPT heartbeat noise
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "^hub\."
 jsonPayload.subsystem != "broker.heartbeat"
 
 -- Only high-priority subsystems (notifications, auth, agent lifecycle)
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem = "hub.notifications" OR
 jsonPayload.subsystem = "hub.auth" OR
 jsonPayload.subsystem =~ "\.agent-lifecycle$"
@@ -361,13 +411,13 @@ jsonPayload.subsystem =~ "\.agent-lifecycle$"
 
 ```
 -- Errors across all subsystems in the last hour
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem != ""
 severity >= ERROR
 timestamp >= "2026-03-03T00:00:00Z"
 
 -- Debug-level broker logs for troubleshooting
-logName="projects/YOUR_PROJECT/logs/scion"
+logName="projects/YOUR_PROJECT/logs/scion-server"
 jsonPayload.subsystem =~ "^broker\."
 severity = DEBUG
 ```

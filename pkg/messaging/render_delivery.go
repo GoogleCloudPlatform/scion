@@ -57,6 +57,11 @@ type RenderDeliveryInput struct {
 	// envelope is being rendered for). Used for both mention and
 	// group-primary envelopes when multiple agents are engaged.
 	CoAddressees []Addressee
+
+	// ReplyToID is the message ID of the parent message being replied to.
+	// When non-empty, the envelope's "type" is "reply" and "reply_to"
+	// carries this value.
+	ReplyToID string
 }
 
 // RenderDeliveryText is the single shared rendering entry point for all hub
@@ -88,8 +93,7 @@ func RenderDeliveryText(in RenderDeliveryInput) string {
 	// the fabricated ID while the message carried the real one).
 	msg, addrs, err := MapLegacyEnvelope(in.Msg, PersistedIdentity{
 		MessageID: in.MessageID,
-		// ReplyToID intentionally empty: no genuine reply target exists
-		// yet. Empty means omit, which is correct per the design rule.
+		ReplyToID: in.ReplyToID,
 	})
 	if err != nil {
 		// MapLegacyEnvelope only fails on nil input, which we checked.
@@ -124,7 +128,7 @@ func RenderDeliveryText(in RenderDeliveryInput) string {
 		Plain: in.Msg.Plain,
 		Raw:   in.Msg.Raw,
 	}
-	return FormatNewDelivery(msg, addrs, convInfo, opts, in.IsMention)
+	return FormatNewDelivery(msg, addrs, convInfo, opts, in.IsMention, in.ReplyToID != "")
 }
 
 // ConversationGetter is the minimal interface for looking up a conversation

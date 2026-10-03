@@ -49,9 +49,9 @@ import (
 // ---------------------------------------------------------------------------
 
 // def162Setup creates a server, project, agent, and human user wired for
-// mention notification tests. The human is added to the project members group
-// with an unambiguous display name ("UniqueHuman162") that resolves to exactly
-// one member (AC-3).
+// mention notification tests. The human is added as a project member via a
+// role binding (PM1) with an unambiguous display name ("UniqueHuman162") that
+// resolves to exactly one member (AC-3).
 func def162Setup(t *testing.T) (srv *Server, s store.Store, project *store.Project, agent *store.Agent, human *store.User, topicID string) {
 	t.Helper()
 	srv, s = testServer(t)
@@ -75,32 +75,45 @@ func def162Setup(t *testing.T) (srv *Server, s store.Store, project *store.Proje
 	require.NoError(t, s.CreateUser(ctx, human))
 
 	agent = &store.Agent{
-		ID:         api.NewUUID(),
-		Name:       "NotifyBot",
-		Slug:       "notifybot",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        api.NewUUID(),
+		Name:      "NotifyBot",
+		Slug:      "notifybot",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
-	// Add human to project members group so resolveProjectHumanMembers finds them.
-	groupID := api.NewUUID()
-	require.NoError(t, s.CreateGroup(ctx, &store.Group{
-		ID:   groupID,
-		Name: "def162-project members",
-		Slug: "project:def162-project:members",
-	}))
-	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
-		GroupID:    groupID,
-		MemberType: store.GroupMemberTypeUser,
-		MemberID:   human.ID,
-		Role:       "member",
-	}))
+	// Add human as a project member via role binding (PM1).
+	// resolveProjectHumanMembers now queries ListProjectMembers (role bindings).
+	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err, "project-member role definition must exist")
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      human.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          project.ID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
 
 	// Set up WebChatStore + ChatNotifier.
+	//
+	// A bare ":memory:" DSN gives every new *sql.DB connection its own
+	// private, empty database -- sqlite3's in-memory mode is per-connection,
+	// not shared, unless cache=shared is used. database/sql's pool opens a
+	// second connection whenever one is already checked out, which happens
+	// on the broker path here: the eventbus delivery goroutine and the
+	// mention-notification goroutine can both reach into wcs concurrently.
+	// When that races, the second connection lands on a fresh DB with no
+	// tables ("no such table: webchat_read_state"), NotifyMention aborts
+	// silently on that error, and the test then spins out its full deadline
+	// waiting for a notification that was never going to arrive. Pinning the
+	// pool to one connection forces all access through the single connection
+	// Init() populated, removing that race deterministically.
 	db, err := sql.Open("sqlite3", ":memory:")
 	require.NoError(t, err)
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = db.Close() })
 	wcs := NewWebChatStore(db, "sqlite3")
 	require.NoError(t, wcs.Init())
@@ -152,18 +165,59 @@ func postOutboundConvRef(t *testing.T, srv *Server, projectID, agentID, msg, con
 	return rr
 }
 
+// def162MentionWaitTimeout is the deadline used by waitForMentionNotification
+// callers that expect a notification to eventually appear (a positive wait).
+// The mention notification is fired from a background goroutine
+// (handlers_agent_messaging.go, handlers_chat_v2.go), so this must give that
+// goroutine enough wall-clock time to be scheduled and complete its DB writes
+// even on a heavily loaded CI runner. 30s is generous headroom over the local
+// ~0.2s completion time; a passing run still returns as soon as the
+// notification appears, since waitForMentionNotification polls and returns
+// early. Callers that assert *absence* of a notification (AC-2, AC-4, AC-5,
+// AC-7, AC-9) intentionally keep a short deadline -- lengthening those would
+// only slow down passing runs without reducing flake risk, since they are not
+// waiting on this goroutine to complete before asserting.
+const def162MentionWaitTimeout = 30 * time.Second
+
 // waitForMentionNotification polls the store for a mention notification for the
 // given user, up to the timeout. Returns the notification if found.
 func waitForMentionNotification(t *testing.T, s store.Store, userID string, timeout time.Duration) *store.Notification {
 	t.Helper()
+	ctx := t.Context()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		notifs, err := s.GetNotifications(context.Background(), store.SubscriberTypeUser, userID, false)
+		notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, userID, false)
 		require.NoError(t, err)
 		for i := range notifs {
 			if notifs[i].Status == ChatNotificationMention {
 				return &notifs[i]
 			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return nil
+}
+
+// waitForBrokerMessage polls the store for at least one persisted message in
+// the given conversation, up to the timeout. Returns the messages found (nil
+// if none appeared within the deadline).
+//
+// On the broker path, persistence happens in the eventbus subscriber callback
+// (proxy.deliverToUser), which runs asynchronously relative to the publish
+// call in the handler -- the same class of goroutine-scheduling exposure as
+// waitForMentionNotification, so it uses the same def162MentionWaitTimeout
+// headroom. Asserting on s.ListMessages immediately after the mention
+// notification appears wrongly assumes the two independent async paths
+// (notification fire vs. broker persistence) complete in a fixed order.
+func waitForBrokerMessage(t *testing.T, s store.Store, conversationID string, timeout time.Duration) []store.Message {
+	t.Helper()
+	ctx := t.Context()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		msgs, err := s.ListMessages(ctx, store.MessageFilter{ConversationID: conversationID}, store.ListOptions{})
+		require.NoError(t, err)
+		if len(msgs.Items) > 0 {
+			return msgs.Items
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -212,7 +266,7 @@ func TestDEF162_AC1_AgentMention_CreatesNotification(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code, "send must succeed: %s", rr.Body.String())
 
 	// The mention fires in a goroutine -- poll for the notification.
-	notif := waitForMentionNotification(t, s, human.ID, 5*time.Second)
+	notif := waitForMentionNotification(t, s, human.ID, def162MentionWaitTimeout)
 	require.NotNil(t, notif, "AC-1: mention notification must exist for the mentioned user")
 	assert.Equal(t, ChatNotificationMention, notif.Status)
 	assert.Contains(t, notif.Message, "@NotifyBot mentioned you",
@@ -295,7 +349,7 @@ func TestDEF162_AC6_SenderLabel_IsAgentName_NotUUID(t *testing.T) {
 		"Hey @UniqueHuman162 label check", "conv:"+convID)
 	require.Equal(t, http.StatusOK, rr.Code)
 
-	notif := waitForMentionNotification(t, s, human.ID, 5*time.Second)
+	notif := waitForMentionNotification(t, s, human.ID, def162MentionWaitTimeout)
 	require.NotNil(t, notif, "notification must exist for label check")
 
 	// Positive assertion: the notification uses agent.Name ("NotifyBot").
@@ -411,7 +465,7 @@ func TestDEF162_AC8_NonBroker_MentionFires(t *testing.T) {
 		"Hey @UniqueHuman162 non-broker path", "conv:"+convID)
 	require.Equal(t, http.StatusOK, rr.Code)
 
-	notif := waitForMentionNotification(t, s, human.ID, 5*time.Second)
+	notif := waitForMentionNotification(t, s, human.ID, def162MentionWaitTimeout)
 	require.NotNil(t, notif, "AC-8: mention must fire on non-broker path")
 	assert.Contains(t, notif.Message, "@NotifyBot mentioned you")
 }
@@ -419,7 +473,6 @@ func TestDEF162_AC8_NonBroker_MentionFires(t *testing.T) {
 func TestDEF162_AC8_Broker_MentionFires(t *testing.T) {
 	// Broker topology: MessageBrokerProxy configured and wired.
 	srv, s, project, agent, human, topicID := def162Setup(t)
-	ctx := context.Background()
 
 	// Wire up a broker proxy (pattern from def141BrokerSetup and
 	// handlers_agent_messaging_test.go:446-450).
@@ -459,14 +512,16 @@ func TestDEF162_AC8_Broker_MentionFires(t *testing.T) {
 		"Hey @UniqueHuman162 broker path", "conv:"+convID)
 	require.Equal(t, http.StatusOK, rr.Code)
 
-	notif := waitForMentionNotification(t, s, human.ID, 5*time.Second)
+	notif := waitForMentionNotification(t, s, human.ID, def162MentionWaitTimeout)
 	require.NotNil(t, notif, "AC-8: mention must fire on broker path")
 	assert.Contains(t, notif.Message, "@NotifyBot mentioned you")
 
 	// Also verify the message was persisted through the broker (not directly).
-	msgs, err := s.ListMessages(ctx, store.MessageFilter{ConversationID: convID}, store.ListOptions{})
-	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(msgs.Items), 1, "broker must persist the message")
+	// Persistence happens in the eventbus subscriber callback, asynchronously
+	// relative to the mention notification above, so poll rather than assume
+	// it has already landed by the time the notification appears.
+	msgs := waitForBrokerMessage(t, s, convID, def162MentionWaitTimeout)
+	require.GreaterOrEqual(t, len(msgs), 1, "broker must persist the message")
 }
 
 // ---------------------------------------------------------------------------

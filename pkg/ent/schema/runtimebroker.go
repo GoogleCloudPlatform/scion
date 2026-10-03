@@ -28,9 +28,10 @@ import (
 // RuntimeBroker holds the schema definition for the RuntimeBroker entity,
 // mapping the legacy SQLite `runtime_brokers` table.
 //
-// JSON-bearing columns (capabilities, supported_harnesses, resources, runtimes,
-// labels, annotations) are kept as raw strings to stay dialect-neutral and match
-// the existing store's raw-marshaling behavior during the dual-write phase.
+// JSON-bearing columns (capabilities, supported_harnesses, resources, runtimes)
+// are kept as raw strings to stay dialect-neutral and match the existing store's
+// raw-marshaling behavior. Labels and annotations use native JSON (jsonb on
+// Postgres) to support the @> containment operator in broker-label queries.
 type RuntimeBroker struct {
 	ent.Schema
 }
@@ -72,9 +73,19 @@ func (RuntimeBroker) Fields() []ent.Field {
 			Optional(),
 		field.String("runtimes").
 			Optional(),
-		field.String("labels").
+		// default_profile records the broker's own active/default profile
+		// name at registration time (config.Settings.ActiveProfile on the
+		// broker side — see registerGlobalProjectAndBroker), so the hub can
+		// resolve an agent dispatch with no explicit profile against this
+		// registration data instead of guessing. See
+		// store.RuntimeBroker.DefaultProfile's doc comment: this is
+		// registration-time data, and can differ from what the broker
+		// itself resolves at dispatch time.
+		field.String("default_profile").
 			Optional(),
-		field.String("annotations").
+		field.JSON("labels", map[string]string{}).
+			Optional(),
+		field.JSON("annotations", map[string]string{}).
 			Optional(),
 		field.String("endpoint").
 			Optional(),

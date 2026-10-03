@@ -96,9 +96,7 @@ describe('apiFetch — 403 access-denied event', () => {
     expect(captured).toHaveLength(1);
     expect(captured[0].action).toBe('create');
     expect(captured[0].resource).toBe('agent');
-    expect(captured[0].reason).toBe(
-      'Agents can only create sub-agents within their own project'
-    );
+    expect(captured[0].reason).toBe('Agents can only create sub-agents within their own project');
   });
 
   it('parses structured 403 with partial details (only resource_type)', async () => {
@@ -159,9 +157,7 @@ describe('apiFetch — 403 access-denied event', () => {
   });
 
   it('degrades gracefully for flat {message} body', async () => {
-    fetchMock.mockResolvedValue(
-      fakeResponse(403, { message: 'Go away' })
-    );
+    fetchMock.mockResolvedValue(fakeResponse(403, { message: 'Go away' }));
 
     await apiFetch('/api/v1/old');
     expect(captured).toHaveLength(1);
@@ -171,9 +167,7 @@ describe('apiFetch — 403 access-denied event', () => {
   });
 
   it('degrades gracefully for flat {error: "string"} body', async () => {
-    fetchMock.mockResolvedValue(
-      fakeResponse(403, { error: 'Nope' })
-    );
+    fetchMock.mockResolvedValue(fakeResponse(403, { error: 'Nope' }));
 
     await apiFetch('/api/v1/legacy');
     expect(captured).toHaveLength(1);

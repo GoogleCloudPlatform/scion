@@ -33,21 +33,21 @@ steps:
 
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-core-base'
-    dir: 'image-build/core-base'
-    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--cache-to', 'type=local,dest=/workspace/buildx-cache-core,mode=max', '-t', '$_REGISTRY/core-base:$_SHORT_SHA', '-t', '$_REGISTRY/core-base:$_TAG', '-f', 'Dockerfile', '.']
+    dir: 'image-build'
+    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--cache-to', 'type=local,dest=/workspace/buildx-cache-core,mode=max', '-t', '$_REGISTRY/core-base:$_SHORT_SHA', '-t', '$_REGISTRY/core-base:$_TAG', '-f', 'core-base/Dockerfile', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 
   - name: 'gcr.io/cloud-builders/docker'
     id: 'push-core-base'
-    dir: 'image-build/core-base'
-    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--cache-from', 'type=local,src=/workspace/buildx-cache-core', '-t', '$_REGISTRY/core-base:$_SHORT_SHA', '-t', '$_REGISTRY/core-base:$_TAG', '-f', 'Dockerfile', '--push', '.']
+    dir: 'image-build'
+    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--cache-from', 'type=local,src=/workspace/buildx-cache-core', '-t', '$_REGISTRY/core-base:$_SHORT_SHA', '-t', '$_REGISTRY/core-base:$_TAG', '-f', 'core-base/Dockerfile', '--push', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 
   - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-base'
-    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/core-base:$_SHORT_SHA', '--build-arg', 'GIT_COMMIT=$_COMMIT_SHA', '-t', '$_REGISTRY/scion-base:$_SHORT_SHA', '-t', '$_REGISTRY/scion-base:$_TAG', '-f', 'image-build/scion-base/Dockerfile', '--pull', '--push', '.']
+    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/core-base:$_SHORT_SHA', '--build-arg', 'GIT_COMMIT=$_COMMIT_SHA', '--build-arg', 'VERSION=$_VERSION', '-t', '$_REGISTRY/scion-base:$_SHORT_SHA', '-t', '$_REGISTRY/scion-base:$_TAG', '-f', 'image-build/scion-base/Dockerfile', '--pull', '--push', '.']
     env:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 
@@ -101,6 +101,13 @@ steps:
       - 'DOCKER_CLI_EXPERIMENTAL=enabled'
 
   - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-scion-muse-code'
+    dir: 'harnesses/muse-code'
+    args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_SHORT_SHA', '-t', '$_REGISTRY/scion-muse-code:$_SHORT_SHA', '-t', '$_REGISTRY/scion-muse-code:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
+    env:
+      - 'DOCKER_CLI_EXPERIMENTAL=enabled'
+
+  - name: 'gcr.io/cloud-builders/docker'
     id: 'build-scion-opencode'
     dir: 'harnesses/opencode'
     args: ['buildx', 'build', '--platform', 'linux/amd64,linux/arm64', '--build-arg', 'BASE_IMAGE=$_REGISTRY/scion-base:$_SHORT_SHA', '-t', '$_REGISTRY/scion-opencode:$_SHORT_SHA', '-t', '$_REGISTRY/scion-opencode:$_TAG', '-f', 'Dockerfile', '--pull', '--push', '.']
@@ -117,6 +124,7 @@ steps:
 substitutions:
   _REGISTRY: 'us-central1-docker.pkg.dev/${PROJECT_ID}/public-docker'
   _TAG: 'latest'
+  _VERSION: ''
 options:
   dynamicSubstitutions: true
   machineType: 'E2_HIGHCPU_8'

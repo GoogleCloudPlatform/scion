@@ -103,9 +103,14 @@ func TestAgentTokenScopesMapToRegistry(t *testing.T) {
 	want := map[AgentTokenScope][]string{
 		ScopeAgentStatusUpdate: {"agent.status_update"},
 		ScopeAgentLogAppend:    {"agent.log_append"},
-		ScopeProjectSecretRead: {"project.secret_read"},
-		ScopeAgentCreate:       {"agent.create", "gcp_service_account.assign"},
-		ScopeAgentLifecycle:    {"agent.attach", "agent.delete"},
+		// ptone/scion#2129 gives secret.use the same explicit AgentScopes
+		// mapping as project.secret_read, so a runtime read and a project
+		// secret-read decision share one token capability. No other
+		// permission gains this mapping (TestMaterialPermissions_AgentScopeMappingExplicit).
+		ScopeProjectSecretRead: {"project.secret_read", "secret.use"},
+		ScopeAgentCreate:       {"agent.create"},
+		ScopeAgentSAAssign:     {"gcp_service_account.assign"},
+		ScopeAgentLifecycle:    {"agent.attach", "agent.delete", "agent.lifecycle"},
 		ScopeAgentNotify:       {"agent.notify"},
 		ScopeAgentTokenRefresh: {"agent.token_refresh"},
 		ScopeAgentPortForward:  {"agent.port_forward"},
@@ -115,10 +120,13 @@ func TestAgentTokenScopesMapToRegistry(t *testing.T) {
 		// been failing on main since. The scope constant documents itself as
 		// covering "agents, templates, skills, harness configs, projects", so the
 		// widening is intended - it just was not recorded here.
+		// ptone/scion#1968 adds skill.read/list (agents read skills).
 		ScopeProjectRead: {
 			"harness_config.list",
 			"harness_config.read",
 			"project.read",
+			"skill.list",
+			"skill.read",
 			"template.list",
 			"template.read",
 		},

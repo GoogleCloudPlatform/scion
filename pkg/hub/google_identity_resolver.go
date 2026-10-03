@@ -1,0 +1,517 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package hub
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
+)
+
+// ---------------------------------------------------------------------------
+// GoogleIdentityResolver — resolves a validated Google identity to a local Hub
+// user via the external identity binding system.
+//
+// Extracted from ge_exchange.go so the GE credential-exchange
+// endpoint and the external-bearer authentication path (auth_external_bearer.go)
+// share exactly one resolution/provisioning/suspension code path. Both must
+// reach identical decisions for the same Google identity during the soak
+// between the two mechanisms.
+// ---------------------------------------------------------------------------
+
+var (
+	errBindingConflict       = errors.New("external identity binding conflicts with existing user")
+	errAmbiguousLinkage      = errors.New("ambiguous email-to-user linkage")
+	errNonAuthoritativeEmail = errors.New("email domain not authoritative for automatic linkage")
+)
+
+// ResolvePolicy carries per-request policy decisions that Resolve needs but
+// cannot infer from the validated identity alone.
+type ResolvePolicy struct {
+	// PreAuthorized skips the Hub sign-in policy (the injected authorize func)
+	// for first-time provisioning. Set ONLY for service accounts admitted by
+	// allowed_gcp_projects: the project allowlist IS the authorization decision.
+	// It never bypasses the suspension check on an already-bound user — that
+	// check runs unconditionally in Resolve/resolveAfterConflict.
+	PreAuthorized bool
+}
+
+// GoogleIdentityResolver resolves a validated Google identity (see
+// google_credential_validator.go) to a local Hub user, applying:
+//   - Sub-bound identity: (provider=google, issuer, sub) -> user, so an email
+//     change or a recycled email does not move the account.
+//   - Authoritative-domain bootstrap: a first-time link by email happens only
+//     for Gmail, matching Workspace hd, or a Google service-account email
+//     (Google controls gserviceaccount.com).
+//   - The Hub sign-in policy (authorize) and role assignment (roleFor) for
+//     newly provisioned users, matching interactive OAuth.
+//   - The same live sign-in policy and account-state handling (suspension,
+//     authorization unless PreAuthorized, invited activation, role/grant
+//     sync) for every existing record too, on every call — no cache, so a
+//     suspension or policy change takes effect on the very next request.
+type GoogleIdentityResolver struct {
+	users     store.UserStore
+	extIDs    store.ExternalIdentityStore
+	authorize func(ctx context.Context, email string) bool
+	roleFor   func(ctx context.Context, email string) string
+	log       *slog.Logger
+
+	// platformAuthSA is the configured platform/transport auth service
+	// account email, if any. Set via SetPlatformAuthSA after construction
+	// (server.go wires it from the same Server field used by
+	// provisionUser). Empty by default, which leaves the check in Resolve
+	// inert — safe for the many existing callers that construct a resolver
+	// directly without setting it.
+	platformAuthSA string
+
+	// policyDeps carries the additional server-config-derived callbacks
+	// (role assignment, super-admin binding, grant sync, audit) that
+	// applyLiveSignInPolicy uses to give an existing record found by email
+	// the same account-state handling as interactive login. Set via
+	// SetSignInPolicyDeps (server.go wires it from the same Server methods
+	// provisionUser uses). Zero value is safe: every field except authorize
+	// degrades to a no-op, and authorize/suspension are always enforced
+	// directly from r.authorize regardless of whether this is set — see
+	// Resolve's email-match branch.
+	policyDeps signInPolicyDeps
+}
+
+// SetSignInPolicyDeps wires every existing-record branch of Resolve (bound
+// identity, email match, and the unique-email collision handback) to the
+// same live sign-in policy and account-state handling that interactive
+// login uses (see applyLiveSignInPolicy), so a pre-existing record picked up
+// by this resolver cannot drift from login's behavior. Optional: the
+// sign-in policy check (authorize) and suspension enforcement apply
+// unconditionally either way (see liveSignInPolicyDeps); this only fills in
+// role assignment, super-admin binding, grant sync, and audit — the many
+// callers that construct a resolver without server-config wiring keep
+// working with those left as no-ops.
+func (r *GoogleIdentityResolver) SetSignInPolicyDeps(deps signInPolicyDeps) {
+	r.policyDeps = deps
+}
+
+// liveSignInPolicyDeps returns r.policyDeps with the fields that must never
+// silently depend on SetSignInPolicyDeps having been called: authorize
+// (always r.authorize, the resolver's own configured authorize check) and
+// UpdateUser (defaults to r.users.UpdateUser, since persisting a state
+// transition like invited -> active must not depend on optional wiring).
+// Used by every existing-record branch of Resolve.
+func (r *GoogleIdentityResolver) liveSignInPolicyDeps() signInPolicyDeps {
+	deps := r.policyDeps
+	deps.authorize = r.authorize
+	if deps.UpdateUser == nil {
+		deps.UpdateUser = r.users.UpdateUser
+	}
+	return deps
+}
+
+// SetPlatformAuthSA records the hub's configured platform/transport auth
+// service account so Resolve can refuse to resolve or provision a user for
+// that identity. Resolve is the single resolution entry point shared by two
+// callers with different service-account handling: the GE exchange endpoint
+// rejects every service-account credential itself before Resolve is reached
+// (ge_exchange.go's Step 1.5), so here this check duplicates that existing
+// rejection; the external-bearer path admits a service-account identity
+// whose GCP project is on its allowed_gcp_projects list, so on that path
+// this check is the one that applies. It is narrow — a backstop for the one
+// configured identity, not a general service-account gate.
+func (r *GoogleIdentityResolver) SetPlatformAuthSA(email string) {
+	r.platformAuthSA = email
+}
+
+// NewGoogleIdentityResolver creates a GoogleIdentityResolver.
+//
+// authorize implements the Hub sign-in policy (domain restriction, invite-only,
+// admin bypass) — typically (*Server).isUserAuthorized. roleFor assigns the
+// role for newly-provisioned users (honouring admin_emails) — typically
+// func(ctx, email) string { return srv.getUserRole(ctx, email, "", "") }.
+// Both default to safe fail-closed/fail-plain behavior when nil, so tests that
+// don't exercise those paths can omit them.
+func NewGoogleIdentityResolver(
+	users store.UserStore,
+	extIDs store.ExternalIdentityStore,
+	authorize func(ctx context.Context, email string) bool,
+	roleFor func(ctx context.Context, email string) string,
+	log *slog.Logger,
+) *GoogleIdentityResolver {
+	if authorize == nil {
+		// Fail closed: no policy means no provisioning.
+		authorize = func(ctx context.Context, email string) bool { return false }
+	}
+	if roleFor == nil {
+		roleFor = func(ctx context.Context, email string) string { return "member" }
+	}
+	if log == nil {
+		log = slog.Default()
+	}
+	return &GoogleIdentityResolver{
+		users:     users,
+		extIDs:    extIDs,
+		authorize: authorize,
+		roleFor:   roleFor,
+		log:       log,
+	}
+}
+
+// Resolve resolves a validated Google identity to a local Hub user. The flow
+// is:
+//
+//  1. Look up existing binding by (provider, canonical issuer, sub).
+//  2. If found: verify the bound user exists, apply the live sign-in policy
+//     and account-state handling (suspension, authorization unless
+//     PreAuthorized, invited activation, role/grant sync), update email if
+//     changed. Return the user.
+//  3. If not found: attempt first-time bootstrap via email, guarded by the
+//     authoritative email domain requirement, and apply the same policy and
+//     account-state handling to the matched record.
+//  4. Create atomic binding and return user.
+func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *ValidatedGoogleIdentity, policy ResolvePolicy) (*store.User, error) {
+	if identity == nil {
+		// A GoogleCredentialValidator that returns (nil, nil) is a contract
+		// violation, not a verification failure — return a generic error
+		// rather than reaching the nil pointer dereference on identity.Issuer
+		// below. Both callers (ge_exchange.go and auth_external_bearer.go)
+		// already map an unrecognized Resolve error to a 5xx, not the 4xx
+		// arms reserved for the named sentinels below.
+		return nil, fmt.Errorf("google identity resolver: no identity to resolve")
+	}
+
+	// See isReservedPlatformIdentity: every path that provisions a user or
+	// mints/re-mints a hub token checks this. See SetPlatformAuthSA for how
+	// the two callers of Resolve differ in whether this duplicates an
+	// existing rejection or is the applicable check.
+	if isReservedPlatformIdentity(identity.Email, r.platformAuthSA) {
+		return nil, ErrAccessDenied
+	}
+
+	canonicalIssuer := canonicalizeGoogleIssuer(identity.Issuer)
+
+	// Step 1: Look up existing binding.
+	binding, err := r.extIDs.GetExternalIdentity(ctx, "google", canonicalIssuer, identity.Subject)
+	if err == nil {
+		// Binding exists — verify the bound user. Suspension is always
+		// enforced here, regardless of policy.PreAuthorized.
+		user, err := r.users.GetUser(ctx, binding.UserID)
+		if err != nil {
+			r.log.Error("google identity resolver: bound user not found",
+				"binding_id", binding.ID,
+				"user_id", binding.UserID,
+				"sub", identity.Subject)
+			return nil, fmt.Errorf("bound user not found: %w", err)
+		}
+		if user == nil {
+			return nil, fmt.Errorf("google identity resolver: bound user record is nil")
+		}
+
+		if user.Status == store.UserStatusSuspended {
+			return nil, ErrUserSuspended
+		}
+
+		// Email drift: the presented email no longer matches the binding's
+		// recorded email (informational, never relinks the subject-bound
+		// identity). Reassign user.Email here, before the policy call, only
+		// when the profile email still matched the old binding email — so
+		// authorize evaluates the presented email and the helper's UpdateUser
+		// persists it in the same write. The binding's own record of the
+		// email is updated further down, only after the policy call
+		// succeeds: on denial neither the binding nor the profile email may
+		// change (see the return below).
+		normalizedEmail := strings.ToLower(identity.Email)
+		bindingEmailStale := strings.ToLower(binding.Email) != normalizedEmail
+		callerChangedEmail := false
+		if bindingEmailStale && strings.EqualFold(user.Email, binding.Email) {
+			user.Email = normalizedEmail
+			callerChangedEmail = true
+		}
+
+		// Apply the same live sign-in policy and account-state handling
+		// every sign-in path shares (see applyLiveSignInPolicy): the live
+		// access policy (unless PreAuthorized), invited-record activation,
+		// and role/grant sync — identical to the email-match branch above,
+		// so an already-bound identity is re-checked on every issuance, not
+		// just at first link. Suspension was already checked above; the
+		// helper re-checks it too, matching every other caller.
+		//
+		// This branch runs on every issuance (e.g. every external-bearer
+		// request for an already-linked identity), unlike the one-time
+		// linking paths above, so it does NOT always-persist: persistence
+		// and grant sync only happen when something actually changed
+		// (activation, a role change, a profile backfill, or the presented-
+		// email update above) — an unconditional per-request full-row write
+		// would risk overwriting a concurrent admin suspension or role
+		// change with the stale value this request read.
+		user, err = applyLiveSignInPolicy(ctx, r.liveSignInPolicyDeps(), user, identity.DisplayName, identity.AvatarURL, policy.PreAuthorized, signInPolicyPersistOpts{CallerChanged: callerChangedEmail})
+		if err != nil {
+			return nil, err
+		}
+
+		if bindingEmailStale {
+			r.log.Info("google identity resolver: updating binding email",
+				"old", binding.Email, "new", normalizedEmail,
+				"sub", identity.Subject, "user_id", user.ID)
+			_ = r.extIDs.UpdateExternalIdentityEmail(ctx, binding.ID, normalizedEmail)
+		}
+
+		return user, nil
+	}
+
+	// A binding-lookup fault that is not "no such binding" must not be
+	// silently treated as "no binding": that would let a transient store
+	// error either provision a duplicate user or (for a non-authoritative
+	// email) surface as 403 instead of the store fault it actually is. Only
+	// store.ErrNotFound means "no binding exists yet".
+	if !errors.Is(err, store.ErrNotFound) {
+		r.log.Error("google identity resolver: external identity lookup failed",
+			"sub", identity.Subject, "error", err)
+		return nil, fmt.Errorf("check external identity binding: %w", err)
+	}
+
+	// Step 2: No existing binding — attempt first-time bootstrap.
+	// Automatic bootstrap only for authoritative email domains: Gmail,
+	// verified Workspace hd, or a Google service-account email (Google
+	// controls gserviceaccount.com, so SA emails are authoritative too).
+	authoritative := isAuthoritativeEmailDomain(identity.Email, identity.HostedDomain) ||
+		isGoogleServiceAccount(identity.Email)
+	if !authoritative {
+		r.log.Warn("google identity resolver: non-authoritative email, cannot auto-link",
+			"email", identity.Email,
+			"hd", identity.HostedDomain,
+			"sub", identity.Subject)
+		return nil, errNonAuthoritativeEmail
+	}
+
+	// Look up existing user by email.
+	normalizedEmail := strings.ToLower(identity.Email)
+	existingUser, err := r.users.GetUserByEmail(ctx, normalizedEmail)
+	if err == nil {
+		if existingUser == nil {
+			return nil, fmt.Errorf("google identity resolver: existing user record is nil")
+		}
+		// Found a user by email. Verify no conflicting binding exists.
+		existingBindings, _ := r.extIDs.GetExternalIdentitiesByUserID(ctx, existingUser.ID)
+		for _, eb := range existingBindings {
+			if eb.Provider == "google" && eb.Issuer == canonicalIssuer && eb.Subject != identity.Subject {
+				// Another Google subject is already bound to this user.
+				r.log.Error("google identity resolver: conflicting Google binding",
+					"existing_sub", eb.Subject,
+					"new_sub", identity.Subject,
+					"user_id", existingUser.ID)
+				return nil, errBindingConflict
+			}
+		}
+
+		// Apply the same live sign-in policy and account-state handling
+		// every sign-in path shares (see applyLiveSignInPolicy): suspension,
+		// the live access policy (unless PreAuthorized), invited-record
+		// activation, and role/grant sync. On denial, no identity link is
+		// created for this sign-in.
+		existingUser, err = applyLiveSignInPolicy(ctx, r.liveSignInPolicyDeps(), existingUser, identity.DisplayName, identity.AvatarURL, policy.PreAuthorized, signInPolicyPersistOpts{AlwaysPersist: true})
+		if err != nil {
+			return nil, err
+		}
+
+		// Create the binding atomically. If a concurrent resolution already
+		// created it (unique constraint violation), fall back to the winner's
+		// binding — this is the conflict-safe race-resolution path.
+		now := time.Now()
+		if err := r.extIDs.CreateExternalIdentity(ctx, &ExternalIdentityBinding{
+			ID:        uuid.New().String(),
+			Provider:  "google",
+			Issuer:    canonicalIssuer,
+			Subject:   identity.Subject,
+			UserID:    existingUser.ID,
+			Email:     normalizedEmail,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}); err != nil {
+			return r.resolveAfterConflict(ctx, canonicalIssuer, identity, existingUser.ID, err)
+		}
+
+		r.log.Info("google identity resolver: created new binding for existing user",
+			"sub", identity.Subject,
+			"email", normalizedEmail,
+			"user_id", existingUser.ID)
+		return existingUser, nil
+	}
+
+	// No existing user by email — provision a new user through the normal path.
+	// This requires the same authorization checks as regular login, unless
+	// policy.PreAuthorized (service accounts admitted by allowed_gcp_projects).
+	//
+	// provisionNewUser may return an existing user instead of a newly created
+	// one when a concurrent resolution wins the unique-email race. The
+	// provisioned flag distinguishes the two cases for orphan cleanup below.
+	user, provisioned, err := r.provisionNewUser(ctx, identity, policy)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create the binding. If a concurrent resolution already created it
+	// (unique constraint violation), resolve via the winning binding and
+	// clean up the orphaned user only if we actually provisioned a NEW user
+	// that differs from the winner's user.
+	now := time.Now()
+	if err := r.extIDs.CreateExternalIdentity(ctx, &ExternalIdentityBinding{
+		ID:        uuid.New().String(),
+		Provider:  "google",
+		Issuer:    canonicalIssuer,
+		Subject:   identity.Subject,
+		UserID:    user.ID,
+		Email:     normalizedEmail,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}); err != nil {
+		winner, resolveErr := r.resolveAfterConflict(ctx, canonicalIssuer, identity, "", err)
+		// Orphan cleanup: only delete if we provisioned a new user AND the
+		// winner resolved to a different user. When all concurrent resolutions
+		// converge on the same user (via email-collision resolution), the
+		// user is NOT an orphan even if we lose the binding race.
+		if provisioned && resolveErr == nil && winner != nil && winner.ID != user.ID {
+			if delErr := r.users.DeleteUser(ctx, user.ID); delErr != nil {
+				r.log.Warn("google identity resolver: failed to clean up orphaned user after conflict",
+					"user_id", user.ID, "error", delErr)
+			}
+		}
+		return winner, resolveErr
+	}
+
+	return user, nil
+}
+
+// resolveAfterConflict handles the case where CreateExternalIdentity failed
+// due to a unique constraint violation (race between concurrent resolutions).
+// It looks up the winning binding and resolves to the winner's user.
+//
+// If expectedUserID is non-empty (linking to an existing user), the winner's
+// binding must point to the same user — otherwise it fails closed with
+// errBindingConflict to prevent silently adopting a mismatched user.
+func (r *GoogleIdentityResolver) resolveAfterConflict(ctx context.Context, canonicalIssuer string, identity *ValidatedGoogleIdentity, expectedUserID string, createErr error) (*store.User, error) {
+	// Retry by looking up the binding the winner created.
+	winner, err := r.extIDs.GetExternalIdentity(ctx, "google", canonicalIssuer, identity.Subject)
+	if err != nil {
+		// Binding still not found: this was a genuine error, not a race.
+		r.log.Error("google identity resolver: binding creation failed and no winning binding found",
+			"create_error", createErr, "lookup_error", err, "sub", identity.Subject)
+		return nil, fmt.Errorf("failed to create identity binding: %w", createErr)
+	}
+
+	// If we expected a specific user (existing-user linkage path), validate
+	// the winner bound to the same user. Fail closed otherwise.
+	if expectedUserID != "" && winner.UserID != expectedUserID {
+		r.log.Error("google identity resolver: conflict resolution mismatch — winner bound to different user",
+			"expected_user_id", expectedUserID, "winner_user_id", winner.UserID,
+			"sub", identity.Subject)
+		return nil, errBindingConflict
+	}
+
+	// Found the winner's binding — resolve to the winner's user.
+	user, err := r.users.GetUser(ctx, winner.UserID)
+	if err != nil {
+		return nil, fmt.Errorf("bound user not found after conflict resolution: %w", err)
+	}
+	if user == nil {
+		return nil, fmt.Errorf("google identity resolver: resolved user record is nil")
+	}
+	if user.Status == "suspended" {
+		return nil, ErrUserSuspended
+	}
+
+	r.log.Info("google identity resolver: resolved to existing binding after race",
+		"sub", identity.Subject, "user_id", user.ID)
+	return user, nil
+}
+
+// provisionNewUser creates a new user via the normal Hub provisioning path.
+// Enforces the same domain/invite/allow-registration policy as the normal
+// Hub login flow via the injected authorize func, UNLESS policy.PreAuthorized
+// is set (service accounts admitted by allowed_gcp_projects: the project
+// allowlist is itself the authorization decision). PreAuthorized never
+// bypasses suspension checks — those happen in Resolve/resolveAfterConflict on
+// every call, not just at provisioning time.
+//
+// Returns (user, true, nil) when a new user was created, or
+// (winner, false, nil) when CreateUser lost a unique-email race and the
+// winning user was found. The caller uses the provisioned flag to decide
+// whether orphan cleanup is appropriate.
+//
+// When CreateUser fails with a unique-email constraint violation (concurrent
+// resolution race), re-queries by normalized email. If the winning user is
+// found and passes suspension checks, returns the winner with
+// provisioned=false; otherwise returns the original create error to fail
+// closed.
+func (r *GoogleIdentityResolver) provisionNewUser(ctx context.Context, identity *ValidatedGoogleIdentity, policy ResolvePolicy) (user *store.User, provisioned bool, err error) {
+	normalizedEmail := strings.ToLower(identity.Email)
+
+	if policy.PreAuthorized {
+		r.log.Info("google identity resolver: bypassing sign-in policy for pre-authorized principal",
+			"email", normalizedEmail, "sub", identity.Subject, "reason", "allowed_gcp_projects")
+	} else if !r.authorize(ctx, normalizedEmail) {
+		r.log.Warn("google identity resolver: user not authorized for auto-provisioning",
+			"email", normalizedEmail, "sub", identity.Subject)
+		return nil, false, fmt.Errorf("%w: user not authorized for auto-provisioning", ErrAccessDenied)
+	}
+
+	newUser := &store.User{
+		ID:          uuid.New().String(),
+		Email:       normalizedEmail,
+		DisplayName: identity.DisplayName,
+		AvatarURL:   identity.AvatarURL,
+		Role:        r.roleFor(ctx, normalizedEmail),
+		Status:      store.UserStatusActive,
+		Created:     time.Now(),
+		LastLogin:   time.Now(),
+	}
+
+	if createErr := r.users.CreateUser(ctx, newUser); createErr != nil {
+		// Unique-email collision: another concurrent resolution won the race
+		// and created the user first. Re-query by email to find the winner.
+		if errors.Is(createErr, store.ErrAlreadyExists) {
+			winner, lookupErr := r.users.GetUserByEmail(ctx, normalizedEmail)
+			if lookupErr != nil {
+				// No winner found — return the original create error (fail closed).
+				r.log.Error("google identity resolver: user creation conflict but no winner found",
+					"email", normalizedEmail, "create_error", createErr, "lookup_error", lookupErr)
+				return nil, false, fmt.Errorf("create user: %w", createErr)
+			}
+			// The winner handback is policy-checked too, exactly like every
+			// other existing-record path (see applyLiveSignInPolicy): the
+			// winner is itself an existing record now, not a fresh
+			// provision, even though this call started out provisioning one.
+			winner, policyErr := applyLiveSignInPolicy(ctx, r.liveSignInPolicyDeps(), winner, identity.DisplayName, identity.AvatarURL, policy.PreAuthorized, signInPolicyPersistOpts{AlwaysPersist: true})
+			if policyErr != nil {
+				return nil, false, policyErr
+			}
+			r.log.Info("google identity resolver: resolved to existing user after email collision",
+				"email", normalizedEmail, "winner_user_id", winner.ID,
+				"sub", identity.Subject)
+			return winner, false, nil
+		}
+		return nil, false, fmt.Errorf("create user: %w", createErr)
+	}
+
+	r.log.Info("google identity resolver: provisioned new user",
+		"email", normalizedEmail,
+		"user_id", newUser.ID,
+		"role", newUser.Role,
+		"sub", identity.Subject)
+
+	return newUser, true, nil
+}

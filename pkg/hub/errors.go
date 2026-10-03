@@ -93,6 +93,11 @@ const (
 	// filter. Status 409 — see G3 brief §3.
 	ErrCodeConversationNotResolved = "conversation_not_resolved"
 
+	// ErrCodeUnsupportedCapability is returned when a request exercises a
+	// capability that the server does not yet support (e.g. cross-project
+	// attachment transfer). Status 422.
+	ErrCodeUnsupportedCapability = "unsupported_capability"
+
 	// ErrCodeInvalidDMKey is returned when a DM key does not have exactly 5
 	// colon-separated parts. Distinguishable from ErrCodeConversationNotResolved
 	// because this is a parse failure, not a lookup miss.
@@ -194,15 +199,71 @@ const (
 	// remove the last direct-user project-owner binding.
 	// D7: normalized from SCREAMING_SNAKE to lower_snake_case (approved breaking change).
 	ErrCodeLastOwner = "last_owner"
+
+	// ErrCodeInvalidCursor is returned for every authorizedList pagination
+	// cursor failure: malformed input, truncation, a tampered byte, a
+	// legacy (pre-opaque-cursor) plaintext cursor, a cursor sealed under a
+	// key the Hub does not currently hold (for example after key
+	// rotation), or one bound to a different endpoint, filter or caller
+	// than it was issued for. All of these are indistinguishable to the
+	// client on purpose (ptone/scion#2124, ptone/scion#2151) and get the
+	// same response: discard the cursor and restart pagination from the
+	// first page (an empty cursor).
+	ErrCodeInvalidCursor = "invalid_cursor"
+
+	// ErrCodeSecretScopeRestricted is returned when an agent's secret write
+	// resolves to project scope while the hub admin setting
+	// agent_secrets.user_scope_only is on. Distinct from ErrCodeForbidden
+	// so clients (the web terminal pane) can recognise the rejection
+	// reliably and show a specific message (design ptone/scion#2291 §6).
+	ErrCodeSecretScopeRestricted = "secret_scope_restricted"
+
+	// ErrCodeInvalidRoleSet is returned by PUT …/members/principals/{type}/{id}
+	// when the desired role set contains an unknown role definition ID, a
+	// non-project-scoped role, or more than one built-in membership role
+	// (ptone/scion#2529 P1).
+	ErrCodeInvalidRoleSet = "invalid_role_set"
+
+	// ErrCodeEmptyRoleSet is returned by PUT …/members/principals/{type}/{id}
+	// when the desired role set is empty; the client must use DELETE instead
+	// (ptone/scion#2529 P1).
+	ErrCodeEmptyRoleSet = "empty_role_set"
+
+	// ErrCodeMembershipChanged is returned when a precondition
+	// (expectedRoleDefinitionIds) or the re-read under lock finds the
+	// principal's project roles no longer match what the caller observed
+	// (ptone/scion#2529 P1).
+	ErrCodeMembershipChanged = "membership_changed"
 )
+
+// elevatedClientErrorStatus reports whether a 4xx status code should be
+// logged at INFO instead of DEBUG. Two motivating cases (ptone/scion#2352)
+// were invisible at DEBUG in production: a 422 when no runtime broker is
+// available for agent create, and a 400 on outbound agent messages surfaced
+// during HA deployment validation. Both land in this set. 401/403/404/429
+// stay at DEBUG on purpose — they fire routinely (stale credentials,
+// polling for a not-yet-created resource, rate limiting) and promoting them
+// would flood operator logs without adding diagnostic signal.
+func elevatedClientErrorStatus(statusCode int) bool {
+	switch statusCode {
+	case http.StatusBadRequest, http.StatusConflict, http.StatusUnprocessableEntity:
+		return true
+	default:
+		return false
+	}
+}
 
 // writeError writes a JSON error response.
 // For 5xx errors, it logs the error details for debugging.
 func writeError(w http.ResponseWriter, statusCode int, code, message string, details map[string]interface{}) {
-	// Log 5xx errors at ERROR level, 4xx at DEBUG level for diagnostics
-	if statusCode >= 500 {
+	// Log 5xx errors at ERROR level. Most 4xx stay at DEBUG; a narrow set
+	// (see elevatedClientErrorStatus) is promoted to INFO.
+	switch {
+	case statusCode >= 500:
 		slog.Error("API Error", "status", statusCode, "code", code, "message", message)
-	} else if statusCode >= 400 {
+	case elevatedClientErrorStatus(statusCode):
+		slog.Info("API client error", "status", statusCode, "code", code, "message", message)
+	case statusCode >= 400:
 		slog.Debug("API client error", "status", statusCode, "code", code, "message", message)
 	}
 
@@ -261,25 +322,52 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		statusCode = http.StatusConflict
 		code = ErrCodeConflict
 		message = "Principal already has a built-in membership role in this project"
+	case errors.Is(err, store.ErrIdentityKeyConflict):
+		statusCode = http.StatusConflict
+		code = ErrCodeConflict
+		message = "display name collides with another agent in this project"
 	case errors.Is(err, secret.ErrNoSecretBackend):
 		statusCode = http.StatusNotImplemented
 		code = ErrCodeUnavailable
 		message = err.Error()
+	case errors.Is(err, errInvalidCursor):
+		statusCode = http.StatusBadRequest
+		code = ErrCodeInvalidCursor
+		message = "invalid cursor: restart pagination from the first page"
 	default:
 		statusCode = http.StatusInternalServerError
 		code = ErrCodeInternalError
 		message = "Internal server error"
 	}
 
-	// Log 5xx errors with the underlying error for debugging, 4xx at DEBUG
-	if statusCode >= 500 {
+	// Log 5xx errors with the underlying error for debugging. Most 4xx stay
+	// at DEBUG with the underlying error attached; a narrow set (see
+	// elevatedClientErrorStatus) is promoted to INFO, logging only the
+	// public message there so the elevated log line never carries more
+	// detail than the response already returned. The raw error remains
+	// available at DEBUG for that same narrow set.
+	switch {
+	case statusCode >= 500:
 		slog.Error("API Error from Go error",
 			"status", statusCode,
 			"code", code,
 			"requestID", requestID,
 			"error", err,
 		)
-	} else if statusCode >= 400 {
+	case elevatedClientErrorStatus(statusCode):
+		slog.Info("API client error from Go error",
+			"status", statusCode,
+			"code", code,
+			"message", message,
+			"requestID", requestID,
+		)
+		slog.Debug("API client error from Go error (underlying)",
+			"status", statusCode,
+			"code", code,
+			"requestID", requestID,
+			"error", err,
+		)
+	case statusCode >= 400:
 		slog.Debug("API client error from Go error",
 			"status", statusCode,
 			"code", code,
@@ -300,6 +388,20 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 	}
 
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// writeStoreErr maps a store lookup error to an HTTP response: a
+// store.ErrNotFound gets the resource-specific "<resource> not found" body
+// via NotFound, and anything else falls through to writeErrorFromErr's
+// generic mapping. This is the common shape of the not-found check that
+// precedes authorization in the get/upload/finalize/download/validate/clone
+// handlers, so callers don't each repeat the branch.
+func writeStoreErr(w http.ResponseWriter, err error, resource string) {
+	if errors.Is(err, store.ErrNotFound) {
+		NotFound(w, resource)
+		return
+	}
+	writeErrorFromErr(w, err, "")
 }
 
 // NotFound writes a 404 Not Found response.

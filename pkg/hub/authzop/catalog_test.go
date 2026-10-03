@@ -271,9 +271,15 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"hub.audit.read": "Super-admin audit explain, NonRouteUse only",
 
 		// User/project permissions — NonRouteUse only
-		"user.list":     "NonRouteUse only, no route declaration",
-		"project.clone": "NonRouteUse only, no route declaration",
-		"project.list":  "NonRouteUse only, no route declaration",
+		"user.list":                    "NonRouteUse only, no route declaration",
+		"project.clone":                "NonRouteUse only, no route declaration",
+		"project.list":                 "NonRouteUse only, no route declaration",
+		"project.set_messaging_policy": "Inline admin/owner check in project_messaging_policy.go, not route-enforced",
+		"agent.grant_hub_mode":         "Inline authorization in authorize_message_mode_grant.go, not route-enforced",
+		"agent.lifecycle":              "Inline authorization in authorizeAgentLifecycle/handleAgentAction (start, stop, suspend, restart, restore) and authorizeAgentReincarnate (reincarnate), not route-enforced",
+
+		// Global catalog permissions — handler-enforced, not a standalone route.
+		"skill.create_global": "Handler-enforced via globalWriteAction in skill_handlers.go; catalog operation deferred to Phase 2 (ptone/scion#1713)",
 
 		// Agent token scopes — not route-enforced
 		"agent.status_update":  "Agent token scope, not route-enforced",
@@ -283,6 +289,14 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"agent.token_refresh":  "Agent token scope, not route-enforced",
 		"agent.port_forward":   "Agent token scope, not route-enforced",
 		"agent.identity_token": "Agent token scope, not route-enforced",
+
+		// Material delivery and runtime-use permissions — NonRouteUse only
+		// (ptone/scion#2129)
+		"secret.deliver":          "Material delivery grant evaluation, NonRouteUse only (ptone/scion#2129)",
+		"env_var.deliver":         "Material delivery grant evaluation, NonRouteUse only (ptone/scion#2129)",
+		"skill_injection.deliver": "Material delivery grant evaluation, NonRouteUse only (ptone/scion#2129)",
+		"secret.use":              "Agent runtime secret retrieval, enforced in material_runtime.go, not route-enforced",
+		"gcp_service_account.use": "Agent GCP token-mint request, NonRouteUse only (ptone/scion#2129)",
 	}
 
 	var unconsumed []string

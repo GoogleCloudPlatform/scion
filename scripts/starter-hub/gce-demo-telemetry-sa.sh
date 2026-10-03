@@ -124,7 +124,8 @@ for role in "${ROLES[@]}"; do
     echo "  -> ${role}"
     gcloud projects add-iam-policy-binding "${PROJECT_ID}" \
         --member "serviceAccount:${SA_EMAIL}" \
-        --role "${role}" > /dev/null
+        --role "${role}" \
+        --condition=None > /dev/null
 done
 
 # Create and download key
@@ -156,6 +157,6 @@ echo "       --scope hub \\"
 echo "       --type file \\"
 echo "       --target '~/.scion/telemetry-gcp-credentials.json'"
 echo ""
-echo "  2. Ensure grove settings include 'provider: gcp' under telemetry.cloud"
+echo "  2. Ensure project settings include 'provider: gcp' under telemetry.cloud"
 echo ""
 echo "  To delete this SA, run: $0 delete"

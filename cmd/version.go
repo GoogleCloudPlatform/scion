@@ -16,11 +16,15 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
+	"github.com/GoogleCloudPlatform/scion/pkg/version/update"
 	"github.com/spf13/cobra"
 )
+
+var checkUpdate bool
 
 // versionCmd represents the version command
 var versionCmd = &cobra.Command{
@@ -28,22 +32,60 @@ var versionCmd = &cobra.Command{
 	Short: "Print the version number of scion",
 	Long:  `All software has versions. This is scion's`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		var (
+			info      *update.UpdateInfo
+			updateErr error
+		)
+		if checkUpdate {
+			info, updateErr = update.CheckForUpdate(cmd.Context(), version.Version)
+		}
+
 		if isJSONOutput() {
-			return outputJSON(map[string]string{
+			result := map[string]interface{}{
 				"version":   version.Version,
 				"commit":    version.Commit,
 				"buildTime": version.BuildTime,
 				"short":     version.Short(),
-			})
+			}
+
+			if checkUpdate {
+				if updateErr != nil {
+					result["updateError"] = updateErr.Error()
+				} else {
+					result["channel"] = info.Channel
+					result["updateAvailable"] = info.UpdateAvailable
+					result["latestVersion"] = info.LatestVersion
+					result["releaseUrl"] = info.ReleaseURL
+				}
+			}
+
+			return outputJSON(result)
 		}
 		if resolveMode() != ModeAgent {
 			fmt.Println(util.GetBanner())
 		}
 		fmt.Println(version.Get())
+
+		if checkUpdate {
+			if updateErr != nil {
+				fmt.Fprintf(os.Stderr, "\nCould not check for updates: %v\n", updateErr)
+			} else if info.UpdateAvailable {
+				fmt.Printf("\nUpdate available: %s\n", info.LatestVersion)
+				if info.ReleaseURL != "" {
+					fmt.Printf("  %s\n", info.ReleaseURL)
+				}
+			} else if info.Channel != "" {
+				fmt.Printf("\nYou are running the latest %s version.\n", info.Channel)
+			} else {
+				fmt.Println("\nUpdate checking is not supported for development or unknown builds.")
+			}
+		}
+
 		return nil
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(versionCmd)
+	versionCmd.Flags().BoolVar(&checkUpdate, "check", false, "Check for available updates")
 }

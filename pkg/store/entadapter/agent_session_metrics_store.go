@@ -44,7 +44,7 @@ func entAgentSessionMetricsToStore(e *ent.AgentSessionMetrics) *store.AgentSessi
 	return &store.AgentSessionMetrics{
 		ID:              e.ID.String(),
 		AgentID:         e.AgentID,
-		ProjectID:       e.GroveID,
+		ProjectID:       e.ProjectID,
 		SessionID:       e.SessionID,
 		StartedAt:       e.StartedAt,
 		EndedAt:         e.EndedAt,
@@ -73,7 +73,7 @@ func (s *AgentSessionMetricsStore) CreateAgentSessionMetrics(ctx context.Context
 
 	builder := s.client.AgentSessionMetrics.Create().
 		SetAgentID(m.AgentID).
-		SetGroveID(m.ProjectID).
+		SetProjectID(m.ProjectID).
 		SetSessionID(m.SessionID).
 		SetStartedAt(m.StartedAt).
 		SetNillableEndedAt(m.EndedAt).
@@ -142,7 +142,7 @@ func (s *AgentSessionMetricsStore) ListAgentSessionMetricsByAgent(ctx context.Co
 // ListAgentSessionMetricsByProject returns session metrics for all agents
 // in a project, ordered by started_at descending, capped at defaultMetricsListLimit.
 func (s *AgentSessionMetricsStore) ListAgentSessionMetricsByProject(ctx context.Context, projectID string) ([]*store.AgentSessionMetrics, error) {
-	return s.listAgentSessionMetrics(ctx, entasm.GroveIDEQ(projectID))
+	return s.listAgentSessionMetrics(ctx, entasm.ProjectIDEQ(projectID))
 }
 
 func (s *AgentSessionMetricsStore) listAgentSessionMetrics(ctx context.Context, filter predicate.AgentSessionMetrics) ([]*store.AgentSessionMetrics, error) {
@@ -183,7 +183,7 @@ func (s *AgentSessionMetricsStore) AggregateByAgent(ctx context.Context, agentID
 
 // AggregateByProject returns SQL-level aggregate totals for a project's sessions.
 func (s *AgentSessionMetricsStore) AggregateByProject(ctx context.Context, projectID string) (*store.AgentSessionMetricsAggregates, error) {
-	return s.aggregateAgentSessionMetrics(ctx, entasm.GroveIDEQ(projectID))
+	return s.aggregateAgentSessionMetrics(ctx, entasm.ProjectIDEQ(projectID))
 }
 
 func (s *AgentSessionMetricsStore) aggregateAgentSessionMetrics(ctx context.Context, filter predicate.AgentSessionMetrics) (*store.AgentSessionMetricsAggregates, error) {
@@ -233,7 +233,7 @@ func (s *AgentSessionMetricsStore) CountDistinctAgentsByProject(ctx context.Cont
 
 	err := s.client.AgentSessionMetrics.
 		Query().
-		Where(entasm.GroveIDEQ(projectID)).
+		Where(entasm.ProjectIDEQ(projectID)).
 		GroupBy(entasm.FieldAgentID).
 		Scan(ctx, &groups)
 	if err != nil {

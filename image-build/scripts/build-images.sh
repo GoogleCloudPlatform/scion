@@ -61,7 +61,9 @@ Options:
   --builder <name>      Build backend (default: local-docker)
                           local-docker  - docker buildx, local
                           local-podman  - podman build, local (single-arch by default)
-                          cloud-build   - Google Cloud Build (submits a static cloudbuild-*.yaml)
+                          cloud-build   - Google Cloud Build (group targets submit a
+                                          static cloudbuild-*.yaml; an individual harness
+                                          step ID submits a config generated on the fly)
   --target <target>     Build target (default: common)
                         Group targets:
                           core-base   - just the core-base layer
@@ -78,9 +80,17 @@ Options:
                           thick       - full thick rebuild: thick-prep + scion-base +
                                         harnesses + hub (amd64 only, uses Cloud
                                         Workstations base instead of core-base)
-                        Individual image step IDs are also accepted (e.g.
-                        scion-claude, scion-hub, scion-codex). Use the group
-                        target "all" with --dry-run to list all valid step IDs.
+                        Individual step IDs (e.g. scion-claude, scion-hub,
+                        scion-omni) are also accepted by local-docker and
+                        local-podman. Under cloud-build, only individual
+                        harness step IDs (e.g. scion-claude, scion-codex)
+                        work this way, submitting a generated single-step
+                        config instead of the group's static
+                        cloudbuild-*.yaml; scion-hub, scion-omni, and other
+                        non-harness step IDs are not mapped there, so use
+                        their group target (hub, omni) with cloud-build
+                        instead. Use the group target "all" with --dry-run
+                        to list all valid step IDs.
   --tag <tag>           Mutable image tag (default: latest). The :<short-sha> tag
                         is always added when run inside a git repo.
   --platform <plat>     Target platform(s) (default: builder's native arch)
@@ -221,11 +231,19 @@ fi
 # and to build the :<short-sha> tag.
 SHORT_SHA=""
 COMMIT_SHA=""
+VERSION=""
 if git -C "${REPO_ROOT}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   SHORT_SHA="$(git -C "${REPO_ROOT}" rev-parse --short HEAD 2>/dev/null || true)"
   COMMIT_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD 2>/dev/null || true)"
+  # Same convention as hack/version.sh: VERSION is only set when HEAD is
+  # exactly on a tag, so the embedded sciontool/scion Version falls back to
+  # "dev" the same way a local `make build` off-tag does. The .git directory
+  # is not in the docker build context (VCS stamping is disabled there), so
+  # this has to be resolved on the host and threaded through as a build-arg,
+  # the same way GIT_COMMIT already is.
+  VERSION="$(git -C "${REPO_ROOT}" describe --tags --exact-match 2>/dev/null || true)"
 fi
-export SHORT_SHA COMMIT_SHA
+export SHORT_SHA COMMIT_SHA VERSION
 
 # Source the selected builder. The allow-list above guarantees the file
 # name is one of a fixed set.
@@ -257,6 +275,86 @@ if [[ "${DRY_RUN}" == "true" ]]; then
   echo "(dry-run: no commands will be executed)"
 fi
 echo ""
+
+# warn_if_scion_base_not_in_run
+#
+# usage-telemetry (#2053, D5): sciontool fixes only reach agents when
+# scion-base is rebuilt, and a harness-only build (e.g. --target harnesses)
+# silently inherits whatever scion-base already exists — stale sciontool and
+# all. Warn, don't fail: this is a build-time provenance nudge, not a version
+# check (the design's non-goal is runtime version checks, not this).
+warn_if_scion_base_not_in_run() {
+  local built_scion_base="false"
+  local needs_scion_base="false"
+
+  # In target mode (cloud-build), STEPS is resolve_targets()'s per-image view
+  # and is only used above for the banner/dry-run listing -- it is not what
+  # actually runs. The orchestrator hands the *whole target* off to a static
+  # cloudbuild-*.yaml, and that yaml can build scion-base itself even when
+  # STEPS (computed the same way regardless of builder) doesn't include it.
+  # cloudbuild-omni.yaml is exactly this case: it rebuilds the full chain
+  # from thick-prep, unlike the per-image "omni" target, which chains from
+  # whatever scion-base image already exists. Ask the yaml, not STEPS, in
+  # that mode. Guarded by `declare -F` so this stays a no-op if a future
+  # target-mode builder doesn't define the helper.
+  if [[ "${BUILDER_MODE}" == "target" ]] && declare -F cloud_build_config_for_target >/dev/null; then
+    local target_config
+    if target_config="$(cloud_build_config_for_target "${TARGET}" 2>/dev/null)" \
+      && [[ -f "${target_config}" ]] \
+      && grep -q "id: 'build-scion-base'" "${target_config}"; then
+      built_scion_base="true"
+    fi
+  fi
+
+  local s
+  for s in "${STEPS[@]}"; do
+    if [[ "${s}" == "scion-base" ]]; then
+      built_scion_base="true"
+    elif [[ "$(step_parent "${s}")" == "scion-base" ]]; then
+      needs_scion_base="true"
+    fi
+  done
+  if [[ "${needs_scion_base}" != "true" || "${built_scion_base}" == "true" ]]; then
+    return 0
+  fi
+
+  local prefix=""
+  [[ -n "${REGISTRY}" ]] && prefix="${REGISTRY}/"
+  local inherited="${prefix}scion-base:${TAG}"
+
+  echo "Warning: this build does not (re)build scion-base." >&2
+  echo "  These images will inherit whatever sciontool is already baked into" >&2
+  echo "  ${inherited}." >&2
+  echo "  If that scion-base predates a sciontool fix you need (e.g. usage" >&2
+  echo "  telemetry), rebuild it first: --target scion-base, then re-run" >&2
+  echo "  this build." >&2
+
+  # Best-effort only: skip when there's no local store to trust -- cloud-build
+  # and any push/multi-arch local-docker build (buildx docker-container
+  # driver) both resolve BASE_IMAGE from the registry, not a local store.
+  # Otherwise inspect the store the selected builder actually uses. A hit is
+  # a local copy that can still be stale; any miss is silently swallowed.
+  if [[ "${BUILDER_MODE}" != "target" && "${PUSH}" != "true" ]]; then
+    local inspect_tool=""
+    case "${BUILDER}" in
+      # if-guarded, not "cmd && x": a failing && list that ends up as the
+      # function's return status would trip set -e.
+      local-podman) if command -v podman >/dev/null 2>&1; then inspect_tool="podman"; fi ;;
+      *)            if command -v docker >/dev/null 2>&1; then inspect_tool="docker"; fi ;;
+    esac
+    if [[ -n "${inspect_tool}" ]]; then
+      local revision
+      revision="$("${inspect_tool}" image inspect "${inherited}" \
+        --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+        2>/dev/null || true)"
+      if [[ -n "${revision}" && "${revision}" != "<no value>" ]]; then
+        echo "  local copy of ${inherited}: revision ${revision}" >&2
+      fi
+    fi
+  fi
+  echo "" >&2
+}
+warn_if_scion_base_not_in_run
 
 builder_prepare
 
@@ -321,7 +419,7 @@ else
     tags="$(compute_tags "${image_name}")"
 
     BASE_TAG="$(resolve_base_tag "${step}")"
-    export BASE_TAG REGISTRY TAG SHORT_SHA COMMIT_SHA
+    export BASE_TAG REGISTRY TAG SHORT_SHA COMMIT_SHA VERSION
 
     # Collect build-args for this step.
     build_arg_flags=()

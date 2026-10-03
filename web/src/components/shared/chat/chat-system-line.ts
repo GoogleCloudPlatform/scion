@@ -23,9 +23,17 @@
 
 import { LitElement, html, css } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
+import { formatInstant, formatInstantWithZone } from '../../../utils/time.js';
+import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
 
 @customElement('scion-chat-system-line')
 export class ScionChatSystemLine extends LitElement {
+  /**
+   * Re-renders this line when the effective display zone changes (review
+   * R2-1).
+   */
+  readonly _zone = new DisplayZoneController(this);
+
   /** The system message text. */
   @property()
   message = '';
@@ -50,13 +58,13 @@ export class ScionChatSystemLine extends LitElement {
       justify-content: center;
       gap: 0.5rem;
       padding: 0.375rem 0.75rem;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #64748b);
       text-align: center;
     }
 
     .system-line sl-icon {
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       flex-shrink: 0;
     }
 
@@ -65,7 +73,7 @@ export class ScionChatSystemLine extends LitElement {
     }
 
     .system-time {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       opacity: 0.7;
       white-space: nowrap;
     }
@@ -79,7 +87,9 @@ export class ScionChatSystemLine extends LitElement {
       <div class="system-line">
         ${iconName ? html`<sl-icon name=${iconName}></sl-icon>` : null}
         <span class="system-text">${this.message}</span>
-        ${timeStr ? html`<span class="system-time">${timeStr}</span>` : null}
+        ${timeStr
+          ? html`<span class="system-time" title=${this.formatTimeTitle()}>${timeStr}</span>`
+          : null}
       </div>
     `;
   }
@@ -99,16 +109,13 @@ export class ScionChatSystemLine extends LitElement {
 
   private formatTime(): string {
     if (!this.timestamp) return '';
-    try {
-      const d = new Date(this.timestamp);
-      return d.toLocaleTimeString('en', {
-        hour12: false,
-        hour: '2-digit',
-        minute: '2-digit',
-      });
-    } catch {
-      return '';
-    }
+    return formatInstant(this.timestamp, 'time');
+  }
+
+  /** Full instant plus zone label for the `.system-time` tooltip (review R1-3, AC4). */
+  private formatTimeTitle(): string {
+    if (!this.timestamp) return '';
+    return formatInstantWithZone(this.timestamp);
   }
 }
 

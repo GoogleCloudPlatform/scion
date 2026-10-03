@@ -26,6 +26,32 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// loadUserPreferences reads a user's preferences live from the store (no
+// caching), for /auth/me on both the web server and the Hub API: a PATCH
+// from another tab, device or client is visible on the very next load. A nil
+// store or a store.ErrNotFound degrades to nil preferences rather than
+// failing the request (the caller's response then falls back to the session
+// or token fields alone, and the UI treats the display timezone as Auto).
+// Any other store error also degrades, but is logged, so a broken store does
+// not silently masquerade as "no preferences set".
+func loadUserPreferences(ctx context.Context, st store.Store, uid string) *store.UserPreferences {
+	if st == nil || uid == "" {
+		return nil
+	}
+	dbUser, err := st.GetUser(ctx, uid)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			slog.WarnContext(ctx, "loadUserPreferences: store error reading user; degrading to no preferences",
+				"user_id", uid, "error", err)
+		}
+		return nil
+	}
+	if dbUser == nil {
+		return nil
+	}
+	return dbUser.Preferences
+}
+
 type ListUsersResponse struct {
 	Users        []UserWithCapabilities `json:"users"`
 	NextCursor   string                 `json:"nextCursor,omitempty"`
@@ -40,7 +66,7 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.createUser(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -89,6 +115,10 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 		totalCount = len(users)
 	}
 
+	for i := range users {
+		stripPreferencesForViewer(ctx, &users[i].User, users[i].Cap)
+	}
+
 	writeJSON(w, http.StatusOK, ListUsersResponse{
 		Users:      users,
 		NextCursor: result.NextCursor,
@@ -114,7 +144,7 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 	// Sub-resource actions
 	if action == "revoke-sessions" {
 		if r.Method != http.MethodPost {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
 		s.revokeUserSessions(w, r, id)
@@ -129,7 +159,7 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.deleteUser(w, r, id)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPatch, http.MethodDelete)
 	}
 }
 
@@ -165,8 +195,33 @@ func (s *Server) getUser(w http.ResponseWriter, r *http.Request, id string) {
 	if identity := GetIdentityFromContext(ctx); identity != nil {
 		resp.Cap = s.authzService.ComputeCapabilities(ctx, identity, userResource(user))
 	}
+	stripPreferencesForViewer(ctx, &resp.User, resp.Cap)
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// stripPreferencesForViewer clears u.Preferences in place unless the caller
+// in ctx is that same user, or cap (the capability set already computed by
+// the caller for this same resource — listUsers and getUser each compute it
+// once per user) includes ActionUpdate. That is the same permission
+// (user.update) that gates a cross-user PATCH, so read and write visibility
+// of preferences agree, and this does not issue a second Decide call or
+// duplicate its deny-audit record. Preferences (including the
+// display-timezone field) are personal: a member listing or viewing another
+// user must not see them (AC6).
+func stripPreferencesForViewer(ctx context.Context, u *store.User, cap *Capabilities) {
+	if u.Preferences == nil {
+		return
+	}
+	if userIdentity, ok := GetIdentityFromContext(ctx).(UserIdentity); ok && userIdentity.ID() == u.ID {
+		return
+	}
+	// capabilityAllows already treats a nil cap as "no actions allowed", so
+	// this is a redundant, zero-risk guard, not a behavior change.
+	if cap != nil && capabilityAllows(cap, ActionUpdate) {
+		return
+	}
+	u.Preferences = nil
 }
 
 // ---------------------------------------------------------------------------
@@ -234,10 +289,55 @@ func (s *Server) requireSessionCredential(w http.ResponseWriter, ctx context.Con
 
 // userPatchPayload is the strict set of allowed fields for PATCH /api/v1/users/{id}.
 type userPatchPayload struct {
-	DisplayName *string                `json:"displayName,omitempty"`
-	Role        *string                `json:"role,omitempty"`
-	Status      *string                `json:"status,omitempty"`
-	Preferences *store.UserPreferences `json:"preferences,omitempty"`
+	DisplayName *string `json:"displayName,omitempty"`
+	Role        *string `json:"role,omitempty"`
+	Status      *string `json:"status,omitempty"`
+}
+
+// userPreferencesPatch is a per-key partial update to store.UserPreferences.
+// A nil field means "leave unchanged"; a non-nil field (including a pointer
+// to "") is applied verbatim, so an explicit "" clears that preference.
+type userPreferencesPatch struct {
+	DefaultTemplate *string
+	DefaultProfile  *string
+	Theme           *string
+	Timezone        *string
+}
+
+// decodeStringPref unmarshals one preferences sub-field's raw JSON value
+// into a string, for the per-key preferences PATCH merge. A JSON null is a
+// no-op onto the freshly zero-valued result, so it decodes to "" — the same
+// as an explicit "" (both clear the preference). A non-string JSON value
+// (e.g. a number or object) is a decode error, which the caller reports as a
+// 400.
+func decodeStringPref(key string, rv json.RawMessage) (string, error) {
+	var v string
+	if err := json.Unmarshal(rv, &v); err != nil {
+		return "", fmt.Errorf("invalid preferences.%s: %w", key, err)
+	}
+	return v, nil
+}
+
+// validateUserTimezone validates a user display-timezone preference value.
+// "" means Auto (the browser-detected zone) and is always valid.
+//
+// Delegates the actual check to validateIANATimezone (timezone_validate.go),
+// shared with the hub-wide agent_defaults.default_timezone validator
+// (admin_settings.go's validateDefaultTimezone), so the two can't drift.
+// Each validator keeps its own wrapping here, because the right message
+// differs: this one points users at "" for Auto, which means nothing for
+// the hub-wide default.
+func validateUserTimezone(tz string) error {
+	if tz == "" {
+		return nil
+	}
+	if err := validateIANATimezone(tz); err != nil {
+		if errors.Is(err, errNonPortableTimezone) {
+			return fmt.Errorf("timezone %q is not allowed; use an IANA zone name, or \"\" for Auto", tz)
+		}
+		return fmt.Errorf("invalid timezone %q: %v", tz, err)
+	}
+	return nil
 }
 
 func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
@@ -275,6 +375,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 
 	// Re-parse into typed struct.
 	var updates userPatchPayload
+	var prefsPatch *userPreferencesPatch
 	for field, raw := range rawFields {
 		switch field {
 		case "displayName":
@@ -299,12 +400,72 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 			}
 			updates.Status = &v
 		case "preferences":
-			var v store.UserPreferences
-			if err := json.Unmarshal(raw, &v); err != nil {
+			// Decode as a raw map, not the typed struct, so that an absent
+			// key (leave unchanged) can be told apart from an explicit ""
+			// (clear). The PATCH merges per-key onto the stored preferences
+			// rather than replacing the whole struct.
+			var rawPrefs map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &rawPrefs); err != nil {
 				BadRequest(w, "invalid preferences: "+err.Error())
 				return
 			}
-			updates.Preferences = &v
+			// hasFields tracks whether rawPrefs contained at least one
+			// recognized key. An empty object, a top-level null (which
+			// decodes to a nil rawPrefs and an empty loop below) and a body
+			// containing only unknown keys must all be true no-ops: they
+			// must not set prefsPatch, so they neither force a DB write nor
+			// initialize an empty store.UserPreferences record for a user
+			// that had none.
+			patch := &userPreferencesPatch{}
+			var hasFields bool
+			for key, rv := range rawPrefs {
+				switch key {
+				case "defaultTemplate":
+					v, err := decodeStringPref(key, rv)
+					if err != nil {
+						BadRequest(w, err.Error())
+						return
+					}
+					patch.DefaultTemplate = &v
+					hasFields = true
+				case "defaultProfile":
+					v, err := decodeStringPref(key, rv)
+					if err != nil {
+						BadRequest(w, err.Error())
+						return
+					}
+					patch.DefaultProfile = &v
+					hasFields = true
+				case "theme":
+					v, err := decodeStringPref(key, rv)
+					if err != nil {
+						BadRequest(w, err.Error())
+						return
+					}
+					patch.Theme = &v
+					hasFields = true
+				case "timezone":
+					v, err := decodeStringPref(key, rv)
+					if err != nil {
+						BadRequest(w, err.Error())
+						return
+					}
+					if err := validateUserTimezone(v); err != nil {
+						BadRequest(w, err.Error())
+						return
+					}
+					patch.Timezone = &v
+					hasFields = true
+				default:
+					// Unknown preferences keys are silently ignored (200, no
+					// change). This keeps older hubs and newer clients
+					// compatible, unlike the top-level field switch above,
+					// which rejects unknown fields outright.
+				}
+			}
+			if hasFields {
+				prefsPatch = patch
+			}
 		}
 	}
 
@@ -312,10 +473,10 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	// role matches the current value.
 	if updates.Role != nil {
 		switch *updates.Role {
-		case "admin", "member":
+		case store.UserRoleAdmin, store.UserRoleMember, store.UserRoleViewer:
 			// valid canonical roles
 		default:
-			BadRequest(w, fmt.Sprintf("unsupported role %q; valid values are \"admin\" and \"member\"", *updates.Role))
+			BadRequest(w, fmt.Sprintf("unsupported role %q; valid values are \"admin\", \"member\" and \"viewer\"", *updates.Role))
 			return
 		}
 	}
@@ -335,7 +496,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 
 	needsPromote := updates.Role != nil
 	needsSuspend := updates.Status != nil
-	needsUpdate := updates.DisplayName != nil || updates.Preferences != nil
+	needsUpdate := updates.DisplayName != nil || prefsPatch != nil
 
 	isSelf := actor.ID() == user.ID
 	needsCrossUserUpdate := needsUpdate && !isSelf
@@ -415,6 +576,22 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
+	// Invited users have no real role yet: the stored role is a placeholder and
+	// the role is assigned at first sign-in (see determineUserRole). Reject role
+	// changes so an admin cannot set a role that activation would silently
+	// overwrite. Suspending an invited user remains allowed; activation is rejected below.
+	if needsPromote && user.Status == store.UserStatusInvited {
+		writeError(w, http.StatusConflict, ErrCodeConflict, errRoleOnInvitedUser.Error(), nil)
+		return
+	}
+	// Likewise, activating an invited user directly would leave the placeholder
+	// role in place and skip the invited->active branch at first sign-in, so
+	// the hub default would never be applied. Suspending remains allowed.
+	if activatesInvitedUser(updates.Status, user.Status) {
+		writeError(w, http.StatusConflict, ErrCodeConflict, errActivateInvitedUser.Error(), nil)
+		return
+	}
+
 	// ── Execute ALL mutations in a single atomic transaction (R4-C1) ──
 
 	// Build actor audit metadata outside the transaction.
@@ -431,6 +608,14 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		// truthful audit records and change detection (R4-fix: not stale pre-tx).
 		beforeRole := txUser.Role
 		beforeStatus := txUser.Status
+
+		// Re-check the invited guard against the transactional read.
+		if needsPromote && beforeStatus == store.UserStatusInvited {
+			return errRoleOnInvitedUser
+		}
+		if activatesInvitedUser(updates.Status, beforeStatus) {
+			return errActivateInvitedUser
+		}
 
 		// Role transition: derives classification from canonical binding state
 		// inside the transaction, not from User.Role (R4-fix).
@@ -452,8 +637,22 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		if updates.DisplayName != nil {
 			txUser.DisplayName = *updates.DisplayName
 		}
-		if updates.Preferences != nil {
-			txUser.Preferences = updates.Preferences
+		if prefsPatch != nil {
+			if txUser.Preferences == nil {
+				txUser.Preferences = &store.UserPreferences{}
+			}
+			if prefsPatch.DefaultTemplate != nil {
+				txUser.Preferences.DefaultTemplate = *prefsPatch.DefaultTemplate
+			}
+			if prefsPatch.DefaultProfile != nil {
+				txUser.Preferences.DefaultProfile = *prefsPatch.DefaultProfile
+			}
+			if prefsPatch.Theme != nil {
+				txUser.Preferences.Theme = *prefsPatch.Theme
+			}
+			if prefsPatch.Timezone != nil {
+				txUser.Preferences.Timezone = *prefsPatch.Timezone
+			}
 		}
 
 		// Persist all User record changes in the same transaction.
@@ -476,18 +675,16 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 				// Same-role but binding changed — use a repair-specific type.
 				mutationType = "user_role_binding_" + string(bindingMutation)
 			}
-			if err := tx.CreateMutationAudit(ctx, &store.MutationAuditRecord{
-				MutationType:        mutationType,
-				ActorPrincipalKind:  auditActor.kind,
-				ActorPrincipalID:    auditActor.id,
-				ActorCredentialID:   auditActor.credID,
-				ActorCredentialType: auditActor.credType,
-				TargetType:          "user",
-				TargetID:            txUser.ID,
-				BeforeSummary:       fmt.Sprintf(`{"role":%q,"binding":%q}`, beforeRole, bindingMutation),
-				AfterSummary:        fmt.Sprintf(`{"role":%q}`, txUser.Role),
-				Timestamp:           time.Now(),
-			}); err != nil {
+			record := &store.MutationAuditRecord{
+				MutationType:  mutationType,
+				TargetType:    "user",
+				TargetID:      txUser.ID,
+				BeforeSummary: fmt.Sprintf(`{"role":%q,"binding":%q}`, beforeRole, bindingMutation),
+				AfterSummary:  fmt.Sprintf(`{"role":%q}`, txUser.Role),
+				Timestamp:     time.Now(),
+			}
+			auditActor.ApplyActor(record)
+			if err := tx.CreateMutationAudit(ctx, record); err != nil {
 				return fmt.Errorf("audit role change: %w", err)
 			}
 		}
@@ -497,18 +694,16 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 			if txUser.Status == "active" {
 				mutationType = "user_reactivate"
 			}
-			if err := tx.CreateMutationAudit(ctx, &store.MutationAuditRecord{
-				MutationType:        mutationType,
-				ActorPrincipalKind:  auditActor.kind,
-				ActorPrincipalID:    auditActor.id,
-				ActorCredentialID:   auditActor.credID,
-				ActorCredentialType: auditActor.credType,
-				TargetType:          "user",
-				TargetID:            txUser.ID,
-				BeforeSummary:       fmt.Sprintf(`{"status":%q}`, beforeStatus),
-				AfterSummary:        fmt.Sprintf(`{"status":%q}`, txUser.Status),
-				Timestamp:           time.Now(),
-			}); err != nil {
+			record := &store.MutationAuditRecord{
+				MutationType:  mutationType,
+				TargetType:    "user",
+				TargetID:      txUser.ID,
+				BeforeSummary: fmt.Sprintf(`{"status":%q}`, beforeStatus),
+				AfterSummary:  fmt.Sprintf(`{"status":%q}`, txUser.Status),
+				Timestamp:     time.Now(),
+			}
+			auditActor.ApplyActor(record)
+			if err := tx.CreateMutationAudit(ctx, record); err != nil {
 				return fmt.Errorf("audit status change: %w", err)
 			}
 		}
@@ -519,7 +714,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 	})
 
 	if err != nil {
-		if errors.Is(err, errLastSuperAdmin) || errors.Is(err, errSelfDemotion) {
+		if errors.Is(err, errLastSuperAdmin) || errors.Is(err, errSelfDemotion) || errors.Is(err, errRoleOnInvitedUser) || errors.Is(err, errActivateInvitedUser) {
 			writeError(w, http.StatusConflict, ErrCodeConflict, err.Error(), nil)
 		} else if errors.Is(err, errBindingStateDrift) {
 			writeError(w, http.StatusConflict, "binding_state_drift", err.Error(), nil)
@@ -530,31 +725,21 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
+	// This response applies the same per-viewer preferences visibility rule
+	// as GET (stripPreferencesForViewer; used by getUser and listUsers).
+	cap := s.authzService.ComputeCapabilities(ctx, actor, userResource(user))
+	stripPreferencesForViewer(ctx, user, cap)
+
 	writeJSON(w, http.StatusOK, user)
 }
 
-// auditActorInfo holds pre-resolved actor metadata for audit records.
-type auditActorInfo struct {
-	kind     string
-	id       string
-	credID   string
-	credType string
-}
-
 // buildAuditActorFromContext extracts actor identity and credential metadata
-// from the request context for use in transactional audit records.
-func (s *Server) buildAuditActorFromContext(ctx context.Context) auditActorInfo {
-	var info auditActorInfo
-	if identity := GetIdentityFromContext(ctx); identity != nil {
-		info.kind = identity.Type()
-		info.id = identity.ID()
-	}
-	cred := GetCredentialContextFromContext(ctx)
-	if cred.Kind != "" {
-		info.credID = cred.ID
-		info.credType = string(cred.Kind)
-	}
-	return info
+// from the request context for use in transactional audit records. E.2a: thin
+// wrapper over the shared auditActorFromContext helper (plan §3.3), which
+// also carries the credential snapshot, correlation ID, and executor fields
+// this file's call sites apply via AuditActor.ApplyActor.
+func (s *Server) buildAuditActorFromContext(ctx context.Context) AuditActor {
+	return auditActorFromContext(ctx)
 }
 
 // superAdminBindingState describes the lifecycle state of a user's super-admin
@@ -664,6 +849,19 @@ var errLastSuperAdmin = errors.New("cannot remove the last super-admin; promote 
 // binding mutation.
 var errSelfDemotion = errors.New("cannot demote yourself; ask another admin to change your role")
 
+// errRoleOnInvitedUser is returned when PATCH sets a role on an invited user.
+var errRoleOnInvitedUser = errors.New("role is assigned when the user first signs in")
+
+// errActivateInvitedUser is returned when PATCH sets status=active on an
+// invited user.
+var errActivateInvitedUser = errors.New("invited users are activated at first sign-in")
+
+// activatesInvitedUser reports whether a PATCH status would move an invited
+// user straight to active, bypassing first sign-in.
+func activatesInvitedUser(newStatus *string, currentStatus string) bool {
+	return newStatus != nil && *newStatus == store.UserStatusActive && currentStatus == store.UserStatusInvited
+}
+
 // bindingMutationKind describes what happened to super-admin bindings during
 // a role transition. Used for truthful audit records even when User.Role
 // doesn't change (R4-fix audit).
@@ -688,7 +886,7 @@ var errBindingStateDrift = errors.New("binding state changed since authorization
 // NOT from User.Role which may be stale.
 //
 // Lifecycle handling (R4-fix lifecycle):
-//   - member: removes ALL matching bindings (active, scheduled, expired)
+//   - member/viewer: removes ALL matching bindings (active, scheduled, expired)
 //   - admin: ensures exactly one active binding exists; stale rows are
 //     deleted then a fresh active binding is created
 //
@@ -697,6 +895,10 @@ var errBindingStateDrift = errors.New("binding state changed since authorization
 // weren't present at preauth (txState.HasAny && !preAuthState.HasAny), the
 // operation is rejected to prevent concurrent promotion from creating a
 // binding that is then silently removed without CanDelegate verification.
+//
+// After the super-admin bookkeeping, syncHubRoleGrants makes the hub-members
+// group membership and hub-viewer binding match newRole in the same
+// transaction (fail closed).
 //
 // Returns what binding mutation occurred for truthful audit (R4-fix audit).
 func (s *Server) executeRoleTransition(
@@ -770,17 +972,11 @@ func (s *Server) executeRoleTransition(
 		// !wantsBinding && !txState.HasAny: nothing to do.
 	}
 
-	// Manage hub-members group membership based on the target role.
-	// Members get added; viewers (and other non-admin, non-member roles) get removed.
-	switch newRole {
-	case "member":
-		if err := s.ensureHubMembershipTx(ctx, tx, user.ID); err != nil {
-			return bindingMutationNone, fmt.Errorf("ensure hub-member group membership: %w", err)
-		}
-	case "viewer":
-		if err := s.removeHubMembershipTx(ctx, tx, user.ID); err != nil {
-			return bindingMutationNone, fmt.Errorf("remove hub-member group membership: %w", err)
-		}
+	// Make hub-level grants (hub-members group, hub-viewer binding) match
+	// the target role inside the same transaction. Fails closed: any error
+	// rolls back the role change.
+	if err := syncHubRoleGrants(ctx, tx, user.ID, newRole, store.AdminAPICreatedBy); err != nil {
+		return bindingMutationNone, fmt.Errorf("sync hub role grants: %w", err)
 	}
 
 	user.Role = newRole
@@ -910,50 +1106,6 @@ func (s *Server) checkLastSuperAdminTx(
 	return nil
 }
 
-// ensureHubMembershipTx idempotently adds the given user to the canonical
-// Hub Members group within the provided transaction. This is the canonical
-// path for granting hub-member permissions on demotion from admin to member.
-// Returns an error if the group cannot be found (fail-closed).
-func (s *Server) ensureHubMembershipTx(ctx context.Context, tx store.Store, userID string) error {
-	group, err := tx.GetGroupBySlug(ctx, "hub-members")
-	if err != nil {
-		return fmt.Errorf("hub-members group lookup: %w", err)
-	}
-
-	err = tx.AddGroupMember(ctx, &store.GroupMember{
-		GroupID:    group.ID,
-		MemberType: store.GroupMemberTypeUser,
-		MemberID:   userID,
-		Role:       store.GroupMemberRoleMember,
-	})
-	if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-		return fmt.Errorf("add user to hub-members group: %w", err)
-	}
-	return nil
-}
-
-// removeHubMembershipTx removes the given user from the canonical Hub Members
-// group within the provided transaction. This is the counterpart to
-// ensureHubMembershipTx — used when a user's role changes to viewer so they
-// no longer carry hub-member permissions.
-// A missing group or membership is not an error (idempotent).
-func (s *Server) removeHubMembershipTx(ctx context.Context, tx store.Store, userID string) error {
-	group, err := tx.GetGroupBySlug(ctx, "hub-members")
-	if err != nil {
-		// Group doesn't exist yet — nothing to remove.
-		if errors.Is(err, store.ErrNotFound) {
-			return nil
-		}
-		return fmt.Errorf("hub-members group lookup: %w", err)
-	}
-
-	err = tx.RemoveGroupMember(ctx, group.ID, store.GroupMemberTypeUser, userID)
-	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		return fmt.Errorf("remove user from hub-members group: %w", err)
-	}
-	return nil
-}
-
 // ---------------------------------------------------------------------------
 // DELETE /api/v1/users/{id} — user deletion (R3/R4)
 //
@@ -1032,17 +1184,15 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 		}
 
 		// Synchronous audit record (R4-C3).
-		if err := tx.CreateMutationAudit(ctx, &store.MutationAuditRecord{
-			MutationType:        "user_delete",
-			ActorPrincipalKind:  auditActor.kind,
-			ActorPrincipalID:    auditActor.id,
-			ActorCredentialID:   auditActor.credID,
-			ActorCredentialType: auditActor.credType,
-			TargetType:          "user",
-			TargetID:            id,
-			BeforeSummary:       fmt.Sprintf(`{"email":%q,"role":%q,"status":%q}`, user.Email, user.Role, user.Status),
-			Timestamp:           time.Now(),
-		}); err != nil {
+		record := &store.MutationAuditRecord{
+			MutationType:  "user_delete",
+			TargetType:    "user",
+			TargetID:      id,
+			BeforeSummary: fmt.Sprintf(`{"email":%q,"role":%q,"status":%q}`, user.Email, user.Role, user.Status),
+			Timestamp:     time.Now(),
+		}
+		auditActor.ApplyActor(record)
+		if err := tx.CreateMutationAudit(ctx, record); err != nil {
 			return fmt.Errorf("audit delete: %w", err)
 		}
 

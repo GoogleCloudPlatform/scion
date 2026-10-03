@@ -17,15 +17,19 @@ import (
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstraint"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstrainthistory"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accesspolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentcredential"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentsessionmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/allowlistentry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/apikey"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerdispatch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
@@ -33,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entitlementbinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/externalidentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubresolutioncache"
@@ -43,6 +48,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationconfig"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationupdate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/invitecode"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/launchreaperstate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/lifecyclehook"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/lifecyclehookagentphase"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/limitdefinition"
@@ -74,6 +80,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 )
 
 // Client is the client that holds all ent builders.
@@ -83,12 +90,18 @@ type Client struct {
 	Schema *migrate.Schema
 	// AccessConstraint is the client for interacting with the AccessConstraint builders.
 	AccessConstraint *AccessConstraintClient
+	// AccessConstraintHistory is the client for interacting with the AccessConstraintHistory builders.
+	AccessConstraintHistory *AccessConstraintHistoryClient
 	// AccessPolicy is the client for interacting with the AccessPolicy builders.
 	AccessPolicy *AccessPolicyClient
 	// Agent is the client for interacting with the Agent builders.
 	Agent *AgentClient
 	// AgentCredential is the client for interacting with the AgentCredential builders.
 	AgentCredential *AgentCredentialClient
+	// AgentIdentityKey is the client for interacting with the AgentIdentityKey builders.
+	AgentIdentityKey *AgentIdentityKeyClient
+	// AgentReincarnation is the client for interacting with the AgentReincarnation builders.
+	AgentReincarnation *AgentReincarnationClient
 	// AgentSessionMetrics is the client for interacting with the AgentSessionMetrics builders.
 	AgentSessionMetrics *AgentSessionMetricsClient
 	// AllowListEntry is the client for interacting with the AllowListEntry builders.
@@ -101,6 +114,8 @@ type Client struct {
 	BrokerJoinToken *BrokerJoinTokenClient
 	// BrokerSecret is the client for interacting with the BrokerSecret builders.
 	BrokerSecret *BrokerSecretClient
+	// BrokerSetting is the client for interacting with the BrokerSetting builders.
+	BrokerSetting *BrokerSettingClient
 	// ChatLinkCode is the client for interacting with the ChatLinkCode builders.
 	ChatLinkCode *ChatLinkCodeClient
 	// Conversation is the client for interacting with the Conversation builders.
@@ -115,6 +130,8 @@ type Client struct {
 	EntitlementBinding *EntitlementBindingClient
 	// EnvVar is the client for interacting with the EnvVar builders.
 	EnvVar *EnvVarClient
+	// ExternalIdentity is the client for interacting with the ExternalIdentity builders.
+	ExternalIdentity *ExternalIdentityClient
 	// GCPServiceAccount is the client for interacting with the GCPServiceAccount builders.
 	GCPServiceAccount *GCPServiceAccountClient
 	// GitHubResolutionCache is the client for interacting with the GitHubResolutionCache builders.
@@ -135,6 +152,8 @@ type Client struct {
 	IntegrationUpdate *IntegrationUpdateClient
 	// InviteCode is the client for interacting with the InviteCode builders.
 	InviteCode *InviteCodeClient
+	// LaunchReaperState is the client for interacting with the LaunchReaperState builders.
+	LaunchReaperState *LaunchReaperStateClient
 	// LifecycleHook is the client for interacting with the LifecycleHook builders.
 	LifecycleHook *LifecycleHookClient
 	// LifecycleHookAgentPhase is the client for interacting with the LifecycleHookAgentPhase builders.
@@ -197,6 +216,8 @@ type Client struct {
 	User *UserClient
 	// UserAccessToken is the client for interacting with the UserAccessToken builders.
 	UserAccessToken *UserAccessTokenClient
+	// UserTerminalWorkspace is the client for interacting with the UserTerminalWorkspace builders.
+	UserTerminalWorkspace *UserTerminalWorkspaceClient
 }
 
 // NewClient creates a new client configured with the given options.
@@ -209,15 +230,19 @@ func NewClient(opts ...Option) *Client {
 func (c *Client) init() {
 	c.Schema = migrate.NewSchema(c.driver)
 	c.AccessConstraint = NewAccessConstraintClient(c.config)
+	c.AccessConstraintHistory = NewAccessConstraintHistoryClient(c.config)
 	c.AccessPolicy = NewAccessPolicyClient(c.config)
 	c.Agent = NewAgentClient(c.config)
 	c.AgentCredential = NewAgentCredentialClient(c.config)
+	c.AgentIdentityKey = NewAgentIdentityKeyClient(c.config)
+	c.AgentReincarnation = NewAgentReincarnationClient(c.config)
 	c.AgentSessionMetrics = NewAgentSessionMetricsClient(c.config)
 	c.AllowListEntry = NewAllowListEntryClient(c.config)
 	c.ApiKey = NewApiKeyClient(c.config)
 	c.BrokerDispatch = NewBrokerDispatchClient(c.config)
 	c.BrokerJoinToken = NewBrokerJoinTokenClient(c.config)
 	c.BrokerSecret = NewBrokerSecretClient(c.config)
+	c.BrokerSetting = NewBrokerSettingClient(c.config)
 	c.ChatLinkCode = NewChatLinkCodeClient(c.config)
 	c.Conversation = NewConversationClient(c.config)
 	c.ConversationParticipant = NewConversationParticipantClient(c.config)
@@ -225,6 +250,7 @@ func (c *Client) init() {
 	c.DelegationEdge = NewDelegationEdgeClient(c.config)
 	c.EntitlementBinding = NewEntitlementBindingClient(c.config)
 	c.EnvVar = NewEnvVarClient(c.config)
+	c.ExternalIdentity = NewExternalIdentityClient(c.config)
 	c.GCPServiceAccount = NewGCPServiceAccountClient(c.config)
 	c.GitHubResolutionCache = NewGitHubResolutionCacheClient(c.config)
 	c.GithubInstallation = NewGithubInstallationClient(c.config)
@@ -235,6 +261,7 @@ func (c *Client) init() {
 	c.IntegrationConfig = NewIntegrationConfigClient(c.config)
 	c.IntegrationUpdate = NewIntegrationUpdateClient(c.config)
 	c.InviteCode = NewInviteCodeClient(c.config)
+	c.LaunchReaperState = NewLaunchReaperStateClient(c.config)
 	c.LifecycleHook = NewLifecycleHookClient(c.config)
 	c.LifecycleHookAgentPhase = NewLifecycleHookAgentPhaseClient(c.config)
 	c.LimitDefinition = NewLimitDefinitionClient(c.config)
@@ -266,6 +293,7 @@ func (c *Client) init() {
 	c.UsageReservation = NewUsageReservationClient(c.config)
 	c.User = NewUserClient(c.config)
 	c.UserAccessToken = NewUserAccessTokenClient(c.config)
+	c.UserTerminalWorkspace = NewUserTerminalWorkspaceClient(c.config)
 }
 
 type (
@@ -359,15 +387,19 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		ctx:                      ctx,
 		config:                   cfg,
 		AccessConstraint:         NewAccessConstraintClient(cfg),
+		AccessConstraintHistory:  NewAccessConstraintHistoryClient(cfg),
 		AccessPolicy:             NewAccessPolicyClient(cfg),
 		Agent:                    NewAgentClient(cfg),
 		AgentCredential:          NewAgentCredentialClient(cfg),
+		AgentIdentityKey:         NewAgentIdentityKeyClient(cfg),
+		AgentReincarnation:       NewAgentReincarnationClient(cfg),
 		AgentSessionMetrics:      NewAgentSessionMetricsClient(cfg),
 		AllowListEntry:           NewAllowListEntryClient(cfg),
 		ApiKey:                   NewApiKeyClient(cfg),
 		BrokerDispatch:           NewBrokerDispatchClient(cfg),
 		BrokerJoinToken:          NewBrokerJoinTokenClient(cfg),
 		BrokerSecret:             NewBrokerSecretClient(cfg),
+		BrokerSetting:            NewBrokerSettingClient(cfg),
 		ChatLinkCode:             NewChatLinkCodeClient(cfg),
 		Conversation:             NewConversationClient(cfg),
 		ConversationParticipant:  NewConversationParticipantClient(cfg),
@@ -375,6 +407,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		DelegationEdge:           NewDelegationEdgeClient(cfg),
 		EntitlementBinding:       NewEntitlementBindingClient(cfg),
 		EnvVar:                   NewEnvVarClient(cfg),
+		ExternalIdentity:         NewExternalIdentityClient(cfg),
 		GCPServiceAccount:        NewGCPServiceAccountClient(cfg),
 		GitHubResolutionCache:    NewGitHubResolutionCacheClient(cfg),
 		GithubInstallation:       NewGithubInstallationClient(cfg),
@@ -385,6 +418,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		IntegrationConfig:        NewIntegrationConfigClient(cfg),
 		IntegrationUpdate:        NewIntegrationUpdateClient(cfg),
 		InviteCode:               NewInviteCodeClient(cfg),
+		LaunchReaperState:        NewLaunchReaperStateClient(cfg),
 		LifecycleHook:            NewLifecycleHookClient(cfg),
 		LifecycleHookAgentPhase:  NewLifecycleHookAgentPhaseClient(cfg),
 		LimitDefinition:          NewLimitDefinitionClient(cfg),
@@ -416,6 +450,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		UsageReservation:         NewUsageReservationClient(cfg),
 		User:                     NewUserClient(cfg),
 		UserAccessToken:          NewUserAccessTokenClient(cfg),
+		UserTerminalWorkspace:    NewUserTerminalWorkspaceClient(cfg),
 	}, nil
 }
 
@@ -436,15 +471,19 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		ctx:                      ctx,
 		config:                   cfg,
 		AccessConstraint:         NewAccessConstraintClient(cfg),
+		AccessConstraintHistory:  NewAccessConstraintHistoryClient(cfg),
 		AccessPolicy:             NewAccessPolicyClient(cfg),
 		Agent:                    NewAgentClient(cfg),
 		AgentCredential:          NewAgentCredentialClient(cfg),
+		AgentIdentityKey:         NewAgentIdentityKeyClient(cfg),
+		AgentReincarnation:       NewAgentReincarnationClient(cfg),
 		AgentSessionMetrics:      NewAgentSessionMetricsClient(cfg),
 		AllowListEntry:           NewAllowListEntryClient(cfg),
 		ApiKey:                   NewApiKeyClient(cfg),
 		BrokerDispatch:           NewBrokerDispatchClient(cfg),
 		BrokerJoinToken:          NewBrokerJoinTokenClient(cfg),
 		BrokerSecret:             NewBrokerSecretClient(cfg),
+		BrokerSetting:            NewBrokerSettingClient(cfg),
 		ChatLinkCode:             NewChatLinkCodeClient(cfg),
 		Conversation:             NewConversationClient(cfg),
 		ConversationParticipant:  NewConversationParticipantClient(cfg),
@@ -452,6 +491,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		DelegationEdge:           NewDelegationEdgeClient(cfg),
 		EntitlementBinding:       NewEntitlementBindingClient(cfg),
 		EnvVar:                   NewEnvVarClient(cfg),
+		ExternalIdentity:         NewExternalIdentityClient(cfg),
 		GCPServiceAccount:        NewGCPServiceAccountClient(cfg),
 		GitHubResolutionCache:    NewGitHubResolutionCacheClient(cfg),
 		GithubInstallation:       NewGithubInstallationClient(cfg),
@@ -462,6 +502,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		IntegrationConfig:        NewIntegrationConfigClient(cfg),
 		IntegrationUpdate:        NewIntegrationUpdateClient(cfg),
 		InviteCode:               NewInviteCodeClient(cfg),
+		LaunchReaperState:        NewLaunchReaperStateClient(cfg),
 		LifecycleHook:            NewLifecycleHookClient(cfg),
 		LifecycleHookAgentPhase:  NewLifecycleHookAgentPhaseClient(cfg),
 		LimitDefinition:          NewLimitDefinitionClient(cfg),
@@ -493,6 +534,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		UsageReservation:         NewUsageReservationClient(cfg),
 		User:                     NewUserClient(cfg),
 		UserAccessToken:          NewUserAccessTokenClient(cfg),
+		UserTerminalWorkspace:    NewUserTerminalWorkspaceClient(cfg),
 	}, nil
 }
 
@@ -522,21 +564,23 @@ func (c *Client) Close() error {
 // In order to add hooks to a specific client, call: `client.Node.Use(...)`.
 func (c *Client) Use(hooks ...Hook) {
 	for _, n := range []interface{ Use(...Hook) }{
-		c.AccessConstraint, c.AccessPolicy, c.Agent, c.AgentCredential,
+		c.AccessConstraint, c.AccessConstraintHistory, c.AccessPolicy, c.Agent,
+		c.AgentCredential, c.AgentIdentityKey, c.AgentReincarnation,
 		c.AgentSessionMetrics, c.AllowListEntry, c.ApiKey, c.BrokerDispatch,
-		c.BrokerJoinToken, c.BrokerSecret, c.ChatLinkCode, c.Conversation,
-		c.ConversationParticipant, c.DecisionAudit, c.DelegationEdge,
-		c.EntitlementBinding, c.EnvVar, c.GCPServiceAccount, c.GitHubResolutionCache,
-		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
-		c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate, c.InviteCode,
-		c.LifecycleHook, c.LifecycleHookAgentPhase, c.LimitDefinition,
-		c.MaintenanceOperation, c.MaintenanceOperationRun, c.Message,
-		c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
+		c.BrokerJoinToken, c.BrokerSecret, c.BrokerSetting, c.ChatLinkCode,
+		c.Conversation, c.ConversationParticipant, c.DecisionAudit, c.DelegationEdge,
+		c.EntitlementBinding, c.EnvVar, c.ExternalIdentity, c.GCPServiceAccount,
+		c.GitHubResolutionCache, c.GithubInstallation, c.Group, c.GroupMembership,
+		c.HarnessConfig, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
+		c.InviteCode, c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
+		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
+		c.Message, c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
 		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
 		c.ProjectPreStartHook, c.ProjectSyncState, c.RoleBinding, c.RoleDefinition,
 		c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret, c.Skill,
 		c.SkillInjection, c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate,
 		c.Template, c.UsageReservation, c.User, c.UserAccessToken,
+		c.UserTerminalWorkspace,
 	} {
 		n.Use(hooks...)
 	}
@@ -546,21 +590,23 @@ func (c *Client) Use(hooks ...Hook) {
 // In order to add interceptors to a specific client, call: `client.Node.Intercept(...)`.
 func (c *Client) Intercept(interceptors ...Interceptor) {
 	for _, n := range []interface{ Intercept(...Interceptor) }{
-		c.AccessConstraint, c.AccessPolicy, c.Agent, c.AgentCredential,
+		c.AccessConstraint, c.AccessConstraintHistory, c.AccessPolicy, c.Agent,
+		c.AgentCredential, c.AgentIdentityKey, c.AgentReincarnation,
 		c.AgentSessionMetrics, c.AllowListEntry, c.ApiKey, c.BrokerDispatch,
-		c.BrokerJoinToken, c.BrokerSecret, c.ChatLinkCode, c.Conversation,
-		c.ConversationParticipant, c.DecisionAudit, c.DelegationEdge,
-		c.EntitlementBinding, c.EnvVar, c.GCPServiceAccount, c.GitHubResolutionCache,
-		c.GithubInstallation, c.Group, c.GroupMembership, c.HarnessConfig,
-		c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate, c.InviteCode,
-		c.LifecycleHook, c.LifecycleHookAgentPhase, c.LimitDefinition,
-		c.MaintenanceOperation, c.MaintenanceOperationRun, c.Message,
-		c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
+		c.BrokerJoinToken, c.BrokerSecret, c.BrokerSetting, c.ChatLinkCode,
+		c.Conversation, c.ConversationParticipant, c.DecisionAudit, c.DelegationEdge,
+		c.EntitlementBinding, c.EnvVar, c.ExternalIdentity, c.GCPServiceAccount,
+		c.GitHubResolutionCache, c.GithubInstallation, c.Group, c.GroupMembership,
+		c.HarnessConfig, c.HubSetting, c.IntegrationConfig, c.IntegrationUpdate,
+		c.InviteCode, c.LaunchReaperState, c.LifecycleHook, c.LifecycleHookAgentPhase,
+		c.LimitDefinition, c.MaintenanceOperation, c.MaintenanceOperationRun,
+		c.Message, c.MessageAddressee, c.MutationAudit, c.NonceCache, c.Notification,
 		c.NotificationSubscription, c.PolicyBinding, c.Project, c.ProjectContributor,
 		c.ProjectPreStartHook, c.ProjectSyncState, c.RoleBinding, c.RoleDefinition,
 		c.RuntimeBroker, c.Schedule, c.ScheduledEvent, c.Secret, c.Skill,
 		c.SkillInjection, c.SkillRegistry, c.SkillVersion, c.SubscriptionTemplate,
 		c.Template, c.UsageReservation, c.User, c.UserAccessToken,
+		c.UserTerminalWorkspace,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -571,12 +617,18 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 	switch m := m.(type) {
 	case *AccessConstraintMutation:
 		return c.AccessConstraint.mutate(ctx, m)
+	case *AccessConstraintHistoryMutation:
+		return c.AccessConstraintHistory.mutate(ctx, m)
 	case *AccessPolicyMutation:
 		return c.AccessPolicy.mutate(ctx, m)
 	case *AgentMutation:
 		return c.Agent.mutate(ctx, m)
 	case *AgentCredentialMutation:
 		return c.AgentCredential.mutate(ctx, m)
+	case *AgentIdentityKeyMutation:
+		return c.AgentIdentityKey.mutate(ctx, m)
+	case *AgentReincarnationMutation:
+		return c.AgentReincarnation.mutate(ctx, m)
 	case *AgentSessionMetricsMutation:
 		return c.AgentSessionMetrics.mutate(ctx, m)
 	case *AllowListEntryMutation:
@@ -589,6 +641,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.BrokerJoinToken.mutate(ctx, m)
 	case *BrokerSecretMutation:
 		return c.BrokerSecret.mutate(ctx, m)
+	case *BrokerSettingMutation:
+		return c.BrokerSetting.mutate(ctx, m)
 	case *ChatLinkCodeMutation:
 		return c.ChatLinkCode.mutate(ctx, m)
 	case *ConversationMutation:
@@ -603,6 +657,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.EntitlementBinding.mutate(ctx, m)
 	case *EnvVarMutation:
 		return c.EnvVar.mutate(ctx, m)
+	case *ExternalIdentityMutation:
+		return c.ExternalIdentity.mutate(ctx, m)
 	case *GCPServiceAccountMutation:
 		return c.GCPServiceAccount.mutate(ctx, m)
 	case *GitHubResolutionCacheMutation:
@@ -623,6 +679,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.IntegrationUpdate.mutate(ctx, m)
 	case *InviteCodeMutation:
 		return c.InviteCode.mutate(ctx, m)
+	case *LaunchReaperStateMutation:
+		return c.LaunchReaperState.mutate(ctx, m)
 	case *LifecycleHookMutation:
 		return c.LifecycleHook.mutate(ctx, m)
 	case *LifecycleHookAgentPhaseMutation:
@@ -685,6 +743,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.User.mutate(ctx, m)
 	case *UserAccessTokenMutation:
 		return c.UserAccessToken.mutate(ctx, m)
+	case *UserTerminalWorkspaceMutation:
+		return c.UserTerminalWorkspace.mutate(ctx, m)
 	default:
 		return nil, fmt.Errorf("ent: unknown mutation type %T", m)
 	}
@@ -798,6 +858,22 @@ func (c *AccessConstraintClient) GetX(ctx context.Context, id uuid.UUID) *Access
 	return obj
 }
 
+// QueryHistory queries the history edge of a AccessConstraint.
+func (c *AccessConstraintClient) QueryHistory(_m *AccessConstraint) *AccessConstraintHistoryQuery {
+	query := (&AccessConstraintHistoryClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(accessconstraint.Table, accessconstraint.FieldID, id),
+			sqlgraph.To(accessconstrainthistory.Table, accessconstrainthistory.FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, accessconstraint.HistoryTable, accessconstraint.HistoryColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
 // Hooks returns the client hooks.
 func (c *AccessConstraintClient) Hooks() []Hook {
 	return c.hooks.AccessConstraint
@@ -820,6 +896,155 @@ func (c *AccessConstraintClient) mutate(ctx context.Context, m *AccessConstraint
 		return (&AccessConstraintDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown AccessConstraint mutation op: %q", m.Op())
+	}
+}
+
+// AccessConstraintHistoryClient is a client for the AccessConstraintHistory schema.
+type AccessConstraintHistoryClient struct {
+	config
+}
+
+// NewAccessConstraintHistoryClient returns a client for the AccessConstraintHistory from the given config.
+func NewAccessConstraintHistoryClient(c config) *AccessConstraintHistoryClient {
+	return &AccessConstraintHistoryClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `accessconstrainthistory.Hooks(f(g(h())))`.
+func (c *AccessConstraintHistoryClient) Use(hooks ...Hook) {
+	c.hooks.AccessConstraintHistory = append(c.hooks.AccessConstraintHistory, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `accessconstrainthistory.Intercept(f(g(h())))`.
+func (c *AccessConstraintHistoryClient) Intercept(interceptors ...Interceptor) {
+	c.inters.AccessConstraintHistory = append(c.inters.AccessConstraintHistory, interceptors...)
+}
+
+// Create returns a builder for creating a AccessConstraintHistory entity.
+func (c *AccessConstraintHistoryClient) Create() *AccessConstraintHistoryCreate {
+	mutation := newAccessConstraintHistoryMutation(c.config, OpCreate)
+	return &AccessConstraintHistoryCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of AccessConstraintHistory entities.
+func (c *AccessConstraintHistoryClient) CreateBulk(builders ...*AccessConstraintHistoryCreate) *AccessConstraintHistoryCreateBulk {
+	return &AccessConstraintHistoryCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *AccessConstraintHistoryClient) MapCreateBulk(slice any, setFunc func(*AccessConstraintHistoryCreate, int)) *AccessConstraintHistoryCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &AccessConstraintHistoryCreateBulk{err: fmt.Errorf("calling to AccessConstraintHistoryClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*AccessConstraintHistoryCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &AccessConstraintHistoryCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for AccessConstraintHistory.
+func (c *AccessConstraintHistoryClient) Update() *AccessConstraintHistoryUpdate {
+	mutation := newAccessConstraintHistoryMutation(c.config, OpUpdate)
+	return &AccessConstraintHistoryUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *AccessConstraintHistoryClient) UpdateOne(_m *AccessConstraintHistory) *AccessConstraintHistoryUpdateOne {
+	mutation := newAccessConstraintHistoryMutation(c.config, OpUpdateOne, withAccessConstraintHistory(_m))
+	return &AccessConstraintHistoryUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *AccessConstraintHistoryClient) UpdateOneID(id string) *AccessConstraintHistoryUpdateOne {
+	mutation := newAccessConstraintHistoryMutation(c.config, OpUpdateOne, withAccessConstraintHistoryID(id))
+	return &AccessConstraintHistoryUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for AccessConstraintHistory.
+func (c *AccessConstraintHistoryClient) Delete() *AccessConstraintHistoryDelete {
+	mutation := newAccessConstraintHistoryMutation(c.config, OpDelete)
+	return &AccessConstraintHistoryDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *AccessConstraintHistoryClient) DeleteOne(_m *AccessConstraintHistory) *AccessConstraintHistoryDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *AccessConstraintHistoryClient) DeleteOneID(id string) *AccessConstraintHistoryDeleteOne {
+	builder := c.Delete().Where(accessconstrainthistory.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &AccessConstraintHistoryDeleteOne{builder}
+}
+
+// Query returns a query builder for AccessConstraintHistory.
+func (c *AccessConstraintHistoryClient) Query() *AccessConstraintHistoryQuery {
+	return &AccessConstraintHistoryQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeAccessConstraintHistory},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a AccessConstraintHistory entity by its id.
+func (c *AccessConstraintHistoryClient) Get(ctx context.Context, id string) (*AccessConstraintHistory, error) {
+	return c.Query().Where(accessconstrainthistory.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *AccessConstraintHistoryClient) GetX(ctx context.Context, id string) *AccessConstraintHistory {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// QueryConstraint queries the constraint edge of a AccessConstraintHistory.
+func (c *AccessConstraintHistoryClient) QueryConstraint(_m *AccessConstraintHistory) *AccessConstraintQuery {
+	query := (&AccessConstraintClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(accessconstrainthistory.Table, accessconstrainthistory.FieldID, id),
+			sqlgraph.To(accessconstraint.Table, accessconstraint.FieldID),
+			sqlgraph.Edge(sqlgraph.M2O, true, accessconstrainthistory.ConstraintTable, accessconstrainthistory.ConstraintColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// Hooks returns the client hooks.
+func (c *AccessConstraintHistoryClient) Hooks() []Hook {
+	return c.hooks.AccessConstraintHistory
+}
+
+// Interceptors returns the client interceptors.
+func (c *AccessConstraintHistoryClient) Interceptors() []Interceptor {
+	return c.inters.AccessConstraintHistory
+}
+
+func (c *AccessConstraintHistoryClient) mutate(ctx context.Context, m *AccessConstraintHistoryMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&AccessConstraintHistoryCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&AccessConstraintHistoryUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&AccessConstraintHistoryUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&AccessConstraintHistoryDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown AccessConstraintHistory mutation op: %q", m.Op())
 	}
 }
 
@@ -1283,6 +1508,272 @@ func (c *AgentCredentialClient) mutate(ctx context.Context, m *AgentCredentialMu
 		return (&AgentCredentialDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown AgentCredential mutation op: %q", m.Op())
+	}
+}
+
+// AgentIdentityKeyClient is a client for the AgentIdentityKey schema.
+type AgentIdentityKeyClient struct {
+	config
+}
+
+// NewAgentIdentityKeyClient returns a client for the AgentIdentityKey from the given config.
+func NewAgentIdentityKeyClient(c config) *AgentIdentityKeyClient {
+	return &AgentIdentityKeyClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `agentidentitykey.Hooks(f(g(h())))`.
+func (c *AgentIdentityKeyClient) Use(hooks ...Hook) {
+	c.hooks.AgentIdentityKey = append(c.hooks.AgentIdentityKey, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `agentidentitykey.Intercept(f(g(h())))`.
+func (c *AgentIdentityKeyClient) Intercept(interceptors ...Interceptor) {
+	c.inters.AgentIdentityKey = append(c.inters.AgentIdentityKey, interceptors...)
+}
+
+// Create returns a builder for creating a AgentIdentityKey entity.
+func (c *AgentIdentityKeyClient) Create() *AgentIdentityKeyCreate {
+	mutation := newAgentIdentityKeyMutation(c.config, OpCreate)
+	return &AgentIdentityKeyCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of AgentIdentityKey entities.
+func (c *AgentIdentityKeyClient) CreateBulk(builders ...*AgentIdentityKeyCreate) *AgentIdentityKeyCreateBulk {
+	return &AgentIdentityKeyCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *AgentIdentityKeyClient) MapCreateBulk(slice any, setFunc func(*AgentIdentityKeyCreate, int)) *AgentIdentityKeyCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &AgentIdentityKeyCreateBulk{err: fmt.Errorf("calling to AgentIdentityKeyClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*AgentIdentityKeyCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &AgentIdentityKeyCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for AgentIdentityKey.
+func (c *AgentIdentityKeyClient) Update() *AgentIdentityKeyUpdate {
+	mutation := newAgentIdentityKeyMutation(c.config, OpUpdate)
+	return &AgentIdentityKeyUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *AgentIdentityKeyClient) UpdateOne(_m *AgentIdentityKey) *AgentIdentityKeyUpdateOne {
+	mutation := newAgentIdentityKeyMutation(c.config, OpUpdateOne, withAgentIdentityKey(_m))
+	return &AgentIdentityKeyUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *AgentIdentityKeyClient) UpdateOneID(id uuid.UUID) *AgentIdentityKeyUpdateOne {
+	mutation := newAgentIdentityKeyMutation(c.config, OpUpdateOne, withAgentIdentityKeyID(id))
+	return &AgentIdentityKeyUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for AgentIdentityKey.
+func (c *AgentIdentityKeyClient) Delete() *AgentIdentityKeyDelete {
+	mutation := newAgentIdentityKeyMutation(c.config, OpDelete)
+	return &AgentIdentityKeyDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *AgentIdentityKeyClient) DeleteOne(_m *AgentIdentityKey) *AgentIdentityKeyDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *AgentIdentityKeyClient) DeleteOneID(id uuid.UUID) *AgentIdentityKeyDeleteOne {
+	builder := c.Delete().Where(agentidentitykey.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &AgentIdentityKeyDeleteOne{builder}
+}
+
+// Query returns a query builder for AgentIdentityKey.
+func (c *AgentIdentityKeyClient) Query() *AgentIdentityKeyQuery {
+	return &AgentIdentityKeyQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeAgentIdentityKey},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a AgentIdentityKey entity by its id.
+func (c *AgentIdentityKeyClient) Get(ctx context.Context, id uuid.UUID) (*AgentIdentityKey, error) {
+	return c.Query().Where(agentidentitykey.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *AgentIdentityKeyClient) GetX(ctx context.Context, id uuid.UUID) *AgentIdentityKey {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *AgentIdentityKeyClient) Hooks() []Hook {
+	return c.hooks.AgentIdentityKey
+}
+
+// Interceptors returns the client interceptors.
+func (c *AgentIdentityKeyClient) Interceptors() []Interceptor {
+	return c.inters.AgentIdentityKey
+}
+
+func (c *AgentIdentityKeyClient) mutate(ctx context.Context, m *AgentIdentityKeyMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&AgentIdentityKeyCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&AgentIdentityKeyUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&AgentIdentityKeyUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&AgentIdentityKeyDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown AgentIdentityKey mutation op: %q", m.Op())
+	}
+}
+
+// AgentReincarnationClient is a client for the AgentReincarnation schema.
+type AgentReincarnationClient struct {
+	config
+}
+
+// NewAgentReincarnationClient returns a client for the AgentReincarnation from the given config.
+func NewAgentReincarnationClient(c config) *AgentReincarnationClient {
+	return &AgentReincarnationClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `agentreincarnation.Hooks(f(g(h())))`.
+func (c *AgentReincarnationClient) Use(hooks ...Hook) {
+	c.hooks.AgentReincarnation = append(c.hooks.AgentReincarnation, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `agentreincarnation.Intercept(f(g(h())))`.
+func (c *AgentReincarnationClient) Intercept(interceptors ...Interceptor) {
+	c.inters.AgentReincarnation = append(c.inters.AgentReincarnation, interceptors...)
+}
+
+// Create returns a builder for creating a AgentReincarnation entity.
+func (c *AgentReincarnationClient) Create() *AgentReincarnationCreate {
+	mutation := newAgentReincarnationMutation(c.config, OpCreate)
+	return &AgentReincarnationCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of AgentReincarnation entities.
+func (c *AgentReincarnationClient) CreateBulk(builders ...*AgentReincarnationCreate) *AgentReincarnationCreateBulk {
+	return &AgentReincarnationCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *AgentReincarnationClient) MapCreateBulk(slice any, setFunc func(*AgentReincarnationCreate, int)) *AgentReincarnationCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &AgentReincarnationCreateBulk{err: fmt.Errorf("calling to AgentReincarnationClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*AgentReincarnationCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &AgentReincarnationCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for AgentReincarnation.
+func (c *AgentReincarnationClient) Update() *AgentReincarnationUpdate {
+	mutation := newAgentReincarnationMutation(c.config, OpUpdate)
+	return &AgentReincarnationUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *AgentReincarnationClient) UpdateOne(_m *AgentReincarnation) *AgentReincarnationUpdateOne {
+	mutation := newAgentReincarnationMutation(c.config, OpUpdateOne, withAgentReincarnation(_m))
+	return &AgentReincarnationUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *AgentReincarnationClient) UpdateOneID(id uuid.UUID) *AgentReincarnationUpdateOne {
+	mutation := newAgentReincarnationMutation(c.config, OpUpdateOne, withAgentReincarnationID(id))
+	return &AgentReincarnationUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for AgentReincarnation.
+func (c *AgentReincarnationClient) Delete() *AgentReincarnationDelete {
+	mutation := newAgentReincarnationMutation(c.config, OpDelete)
+	return &AgentReincarnationDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *AgentReincarnationClient) DeleteOne(_m *AgentReincarnation) *AgentReincarnationDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *AgentReincarnationClient) DeleteOneID(id uuid.UUID) *AgentReincarnationDeleteOne {
+	builder := c.Delete().Where(agentreincarnation.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &AgentReincarnationDeleteOne{builder}
+}
+
+// Query returns a query builder for AgentReincarnation.
+func (c *AgentReincarnationClient) Query() *AgentReincarnationQuery {
+	return &AgentReincarnationQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeAgentReincarnation},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a AgentReincarnation entity by its id.
+func (c *AgentReincarnationClient) Get(ctx context.Context, id uuid.UUID) (*AgentReincarnation, error) {
+	return c.Query().Where(agentreincarnation.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *AgentReincarnationClient) GetX(ctx context.Context, id uuid.UUID) *AgentReincarnation {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *AgentReincarnationClient) Hooks() []Hook {
+	return c.hooks.AgentReincarnation
+}
+
+// Interceptors returns the client interceptors.
+func (c *AgentReincarnationClient) Interceptors() []Interceptor {
+	return c.inters.AgentReincarnation
+}
+
+func (c *AgentReincarnationClient) mutate(ctx context.Context, m *AgentReincarnationMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&AgentReincarnationCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&AgentReincarnationUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&AgentReincarnationUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&AgentReincarnationDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown AgentReincarnation mutation op: %q", m.Op())
 	}
 }
 
@@ -2081,6 +2572,139 @@ func (c *BrokerSecretClient) mutate(ctx context.Context, m *BrokerSecretMutation
 		return (&BrokerSecretDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown BrokerSecret mutation op: %q", m.Op())
+	}
+}
+
+// BrokerSettingClient is a client for the BrokerSetting schema.
+type BrokerSettingClient struct {
+	config
+}
+
+// NewBrokerSettingClient returns a client for the BrokerSetting from the given config.
+func NewBrokerSettingClient(c config) *BrokerSettingClient {
+	return &BrokerSettingClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `brokersetting.Hooks(f(g(h())))`.
+func (c *BrokerSettingClient) Use(hooks ...Hook) {
+	c.hooks.BrokerSetting = append(c.hooks.BrokerSetting, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `brokersetting.Intercept(f(g(h())))`.
+func (c *BrokerSettingClient) Intercept(interceptors ...Interceptor) {
+	c.inters.BrokerSetting = append(c.inters.BrokerSetting, interceptors...)
+}
+
+// Create returns a builder for creating a BrokerSetting entity.
+func (c *BrokerSettingClient) Create() *BrokerSettingCreate {
+	mutation := newBrokerSettingMutation(c.config, OpCreate)
+	return &BrokerSettingCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of BrokerSetting entities.
+func (c *BrokerSettingClient) CreateBulk(builders ...*BrokerSettingCreate) *BrokerSettingCreateBulk {
+	return &BrokerSettingCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *BrokerSettingClient) MapCreateBulk(slice any, setFunc func(*BrokerSettingCreate, int)) *BrokerSettingCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &BrokerSettingCreateBulk{err: fmt.Errorf("calling to BrokerSettingClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*BrokerSettingCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &BrokerSettingCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for BrokerSetting.
+func (c *BrokerSettingClient) Update() *BrokerSettingUpdate {
+	mutation := newBrokerSettingMutation(c.config, OpUpdate)
+	return &BrokerSettingUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *BrokerSettingClient) UpdateOne(_m *BrokerSetting) *BrokerSettingUpdateOne {
+	mutation := newBrokerSettingMutation(c.config, OpUpdateOne, withBrokerSetting(_m))
+	return &BrokerSettingUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *BrokerSettingClient) UpdateOneID(id uuid.UUID) *BrokerSettingUpdateOne {
+	mutation := newBrokerSettingMutation(c.config, OpUpdateOne, withBrokerSettingID(id))
+	return &BrokerSettingUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for BrokerSetting.
+func (c *BrokerSettingClient) Delete() *BrokerSettingDelete {
+	mutation := newBrokerSettingMutation(c.config, OpDelete)
+	return &BrokerSettingDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *BrokerSettingClient) DeleteOne(_m *BrokerSetting) *BrokerSettingDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *BrokerSettingClient) DeleteOneID(id uuid.UUID) *BrokerSettingDeleteOne {
+	builder := c.Delete().Where(brokersetting.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &BrokerSettingDeleteOne{builder}
+}
+
+// Query returns a query builder for BrokerSetting.
+func (c *BrokerSettingClient) Query() *BrokerSettingQuery {
+	return &BrokerSettingQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeBrokerSetting},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a BrokerSetting entity by its id.
+func (c *BrokerSettingClient) Get(ctx context.Context, id uuid.UUID) (*BrokerSetting, error) {
+	return c.Query().Where(brokersetting.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *BrokerSettingClient) GetX(ctx context.Context, id uuid.UUID) *BrokerSetting {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *BrokerSettingClient) Hooks() []Hook {
+	return c.hooks.BrokerSetting
+}
+
+// Interceptors returns the client interceptors.
+func (c *BrokerSettingClient) Interceptors() []Interceptor {
+	return c.inters.BrokerSetting
+}
+
+func (c *BrokerSettingClient) mutate(ctx context.Context, m *BrokerSettingMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&BrokerSettingCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&BrokerSettingUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&BrokerSettingUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&BrokerSettingDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown BrokerSetting mutation op: %q", m.Op())
 	}
 }
 
@@ -3028,6 +3652,155 @@ func (c *EnvVarClient) mutate(ctx context.Context, m *EnvVarMutation) (Value, er
 		return (&EnvVarDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown EnvVar mutation op: %q", m.Op())
+	}
+}
+
+// ExternalIdentityClient is a client for the ExternalIdentity schema.
+type ExternalIdentityClient struct {
+	config
+}
+
+// NewExternalIdentityClient returns a client for the ExternalIdentity from the given config.
+func NewExternalIdentityClient(c config) *ExternalIdentityClient {
+	return &ExternalIdentityClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `externalidentity.Hooks(f(g(h())))`.
+func (c *ExternalIdentityClient) Use(hooks ...Hook) {
+	c.hooks.ExternalIdentity = append(c.hooks.ExternalIdentity, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `externalidentity.Intercept(f(g(h())))`.
+func (c *ExternalIdentityClient) Intercept(interceptors ...Interceptor) {
+	c.inters.ExternalIdentity = append(c.inters.ExternalIdentity, interceptors...)
+}
+
+// Create returns a builder for creating a ExternalIdentity entity.
+func (c *ExternalIdentityClient) Create() *ExternalIdentityCreate {
+	mutation := newExternalIdentityMutation(c.config, OpCreate)
+	return &ExternalIdentityCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of ExternalIdentity entities.
+func (c *ExternalIdentityClient) CreateBulk(builders ...*ExternalIdentityCreate) *ExternalIdentityCreateBulk {
+	return &ExternalIdentityCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *ExternalIdentityClient) MapCreateBulk(slice any, setFunc func(*ExternalIdentityCreate, int)) *ExternalIdentityCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &ExternalIdentityCreateBulk{err: fmt.Errorf("calling to ExternalIdentityClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*ExternalIdentityCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &ExternalIdentityCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for ExternalIdentity.
+func (c *ExternalIdentityClient) Update() *ExternalIdentityUpdate {
+	mutation := newExternalIdentityMutation(c.config, OpUpdate)
+	return &ExternalIdentityUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *ExternalIdentityClient) UpdateOne(_m *ExternalIdentity) *ExternalIdentityUpdateOne {
+	mutation := newExternalIdentityMutation(c.config, OpUpdateOne, withExternalIdentity(_m))
+	return &ExternalIdentityUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *ExternalIdentityClient) UpdateOneID(id uuid.UUID) *ExternalIdentityUpdateOne {
+	mutation := newExternalIdentityMutation(c.config, OpUpdateOne, withExternalIdentityID(id))
+	return &ExternalIdentityUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for ExternalIdentity.
+func (c *ExternalIdentityClient) Delete() *ExternalIdentityDelete {
+	mutation := newExternalIdentityMutation(c.config, OpDelete)
+	return &ExternalIdentityDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *ExternalIdentityClient) DeleteOne(_m *ExternalIdentity) *ExternalIdentityDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *ExternalIdentityClient) DeleteOneID(id uuid.UUID) *ExternalIdentityDeleteOne {
+	builder := c.Delete().Where(externalidentity.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &ExternalIdentityDeleteOne{builder}
+}
+
+// Query returns a query builder for ExternalIdentity.
+func (c *ExternalIdentityClient) Query() *ExternalIdentityQuery {
+	return &ExternalIdentityQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeExternalIdentity},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a ExternalIdentity entity by its id.
+func (c *ExternalIdentityClient) Get(ctx context.Context, id uuid.UUID) (*ExternalIdentity, error) {
+	return c.Query().Where(externalidentity.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *ExternalIdentityClient) GetX(ctx context.Context, id uuid.UUID) *ExternalIdentity {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// QueryUser queries the user edge of a ExternalIdentity.
+func (c *ExternalIdentityClient) QueryUser(_m *ExternalIdentity) *UserQuery {
+	query := (&UserClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(externalidentity.Table, externalidentity.FieldID, id),
+			sqlgraph.To(user.Table, user.FieldID),
+			sqlgraph.Edge(sqlgraph.M2O, true, externalidentity.UserTable, externalidentity.UserColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// Hooks returns the client hooks.
+func (c *ExternalIdentityClient) Hooks() []Hook {
+	return c.hooks.ExternalIdentity
+}
+
+// Interceptors returns the client interceptors.
+func (c *ExternalIdentityClient) Interceptors() []Interceptor {
+	return c.inters.ExternalIdentity
+}
+
+func (c *ExternalIdentityClient) mutate(ctx context.Context, m *ExternalIdentityMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&ExternalIdentityCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&ExternalIdentityUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&ExternalIdentityUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&ExternalIdentityDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown ExternalIdentity mutation op: %q", m.Op())
 	}
 }
 
@@ -4486,6 +5259,139 @@ func (c *InviteCodeClient) mutate(ctx context.Context, m *InviteCodeMutation) (V
 		return (&InviteCodeDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
 	default:
 		return nil, fmt.Errorf("ent: unknown InviteCode mutation op: %q", m.Op())
+	}
+}
+
+// LaunchReaperStateClient is a client for the LaunchReaperState schema.
+type LaunchReaperStateClient struct {
+	config
+}
+
+// NewLaunchReaperStateClient returns a client for the LaunchReaperState from the given config.
+func NewLaunchReaperStateClient(c config) *LaunchReaperStateClient {
+	return &LaunchReaperStateClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `launchreaperstate.Hooks(f(g(h())))`.
+func (c *LaunchReaperStateClient) Use(hooks ...Hook) {
+	c.hooks.LaunchReaperState = append(c.hooks.LaunchReaperState, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `launchreaperstate.Intercept(f(g(h())))`.
+func (c *LaunchReaperStateClient) Intercept(interceptors ...Interceptor) {
+	c.inters.LaunchReaperState = append(c.inters.LaunchReaperState, interceptors...)
+}
+
+// Create returns a builder for creating a LaunchReaperState entity.
+func (c *LaunchReaperStateClient) Create() *LaunchReaperStateCreate {
+	mutation := newLaunchReaperStateMutation(c.config, OpCreate)
+	return &LaunchReaperStateCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of LaunchReaperState entities.
+func (c *LaunchReaperStateClient) CreateBulk(builders ...*LaunchReaperStateCreate) *LaunchReaperStateCreateBulk {
+	return &LaunchReaperStateCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *LaunchReaperStateClient) MapCreateBulk(slice any, setFunc func(*LaunchReaperStateCreate, int)) *LaunchReaperStateCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &LaunchReaperStateCreateBulk{err: fmt.Errorf("calling to LaunchReaperStateClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*LaunchReaperStateCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &LaunchReaperStateCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for LaunchReaperState.
+func (c *LaunchReaperStateClient) Update() *LaunchReaperStateUpdate {
+	mutation := newLaunchReaperStateMutation(c.config, OpUpdate)
+	return &LaunchReaperStateUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *LaunchReaperStateClient) UpdateOne(_m *LaunchReaperState) *LaunchReaperStateUpdateOne {
+	mutation := newLaunchReaperStateMutation(c.config, OpUpdateOne, withLaunchReaperState(_m))
+	return &LaunchReaperStateUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *LaunchReaperStateClient) UpdateOneID(id string) *LaunchReaperStateUpdateOne {
+	mutation := newLaunchReaperStateMutation(c.config, OpUpdateOne, withLaunchReaperStateID(id))
+	return &LaunchReaperStateUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for LaunchReaperState.
+func (c *LaunchReaperStateClient) Delete() *LaunchReaperStateDelete {
+	mutation := newLaunchReaperStateMutation(c.config, OpDelete)
+	return &LaunchReaperStateDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *LaunchReaperStateClient) DeleteOne(_m *LaunchReaperState) *LaunchReaperStateDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *LaunchReaperStateClient) DeleteOneID(id string) *LaunchReaperStateDeleteOne {
+	builder := c.Delete().Where(launchreaperstate.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &LaunchReaperStateDeleteOne{builder}
+}
+
+// Query returns a query builder for LaunchReaperState.
+func (c *LaunchReaperStateClient) Query() *LaunchReaperStateQuery {
+	return &LaunchReaperStateQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeLaunchReaperState},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a LaunchReaperState entity by its id.
+func (c *LaunchReaperStateClient) Get(ctx context.Context, id string) (*LaunchReaperState, error) {
+	return c.Query().Where(launchreaperstate.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *LaunchReaperStateClient) GetX(ctx context.Context, id string) *LaunchReaperState {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *LaunchReaperStateClient) Hooks() []Hook {
+	return c.hooks.LaunchReaperState
+}
+
+// Interceptors returns the client interceptors.
+func (c *LaunchReaperStateClient) Interceptors() []Interceptor {
+	return c.inters.LaunchReaperState
+}
+
+func (c *LaunchReaperStateClient) mutate(ctx context.Context, m *LaunchReaperStateMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&LaunchReaperStateCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&LaunchReaperStateUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&LaunchReaperStateUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&LaunchReaperStateDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown LaunchReaperState mutation op: %q", m.Op())
 	}
 }
 
@@ -8662,6 +9568,38 @@ func (c *UserClient) QueryPolicyBindings(_m *User) *PolicyBindingQuery {
 	return query
 }
 
+// QueryExternalIdentities queries the external_identities edge of a User.
+func (c *UserClient) QueryExternalIdentities(_m *User) *ExternalIdentityQuery {
+	query := (&ExternalIdentityClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(user.Table, user.FieldID, id),
+			sqlgraph.To(externalidentity.Table, externalidentity.FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, user.ExternalIdentitiesTable, user.ExternalIdentitiesColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// QueryTerminalWorkspace queries the terminal_workspace edge of a User.
+func (c *UserClient) QueryTerminalWorkspace(_m *User) *UserTerminalWorkspaceQuery {
+	query := (&UserTerminalWorkspaceClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(user.Table, user.FieldID, id),
+			sqlgraph.To(userterminalworkspace.Table, userterminalworkspace.FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, false, user.TerminalWorkspaceTable, user.TerminalWorkspaceColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
 // Hooks returns the client hooks.
 func (c *UserClient) Hooks() []Hook {
 	return c.hooks.User
@@ -8820,36 +9758,190 @@ func (c *UserAccessTokenClient) mutate(ctx context.Context, m *UserAccessTokenMu
 	}
 }
 
+// UserTerminalWorkspaceClient is a client for the UserTerminalWorkspace schema.
+type UserTerminalWorkspaceClient struct {
+	config
+}
+
+// NewUserTerminalWorkspaceClient returns a client for the UserTerminalWorkspace from the given config.
+func NewUserTerminalWorkspaceClient(c config) *UserTerminalWorkspaceClient {
+	return &UserTerminalWorkspaceClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `userterminalworkspace.Hooks(f(g(h())))`.
+func (c *UserTerminalWorkspaceClient) Use(hooks ...Hook) {
+	c.hooks.UserTerminalWorkspace = append(c.hooks.UserTerminalWorkspace, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `userterminalworkspace.Intercept(f(g(h())))`.
+func (c *UserTerminalWorkspaceClient) Intercept(interceptors ...Interceptor) {
+	c.inters.UserTerminalWorkspace = append(c.inters.UserTerminalWorkspace, interceptors...)
+}
+
+// Create returns a builder for creating a UserTerminalWorkspace entity.
+func (c *UserTerminalWorkspaceClient) Create() *UserTerminalWorkspaceCreate {
+	mutation := newUserTerminalWorkspaceMutation(c.config, OpCreate)
+	return &UserTerminalWorkspaceCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of UserTerminalWorkspace entities.
+func (c *UserTerminalWorkspaceClient) CreateBulk(builders ...*UserTerminalWorkspaceCreate) *UserTerminalWorkspaceCreateBulk {
+	return &UserTerminalWorkspaceCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *UserTerminalWorkspaceClient) MapCreateBulk(slice any, setFunc func(*UserTerminalWorkspaceCreate, int)) *UserTerminalWorkspaceCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &UserTerminalWorkspaceCreateBulk{err: fmt.Errorf("calling to UserTerminalWorkspaceClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*UserTerminalWorkspaceCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &UserTerminalWorkspaceCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for UserTerminalWorkspace.
+func (c *UserTerminalWorkspaceClient) Update() *UserTerminalWorkspaceUpdate {
+	mutation := newUserTerminalWorkspaceMutation(c.config, OpUpdate)
+	return &UserTerminalWorkspaceUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *UserTerminalWorkspaceClient) UpdateOne(_m *UserTerminalWorkspace) *UserTerminalWorkspaceUpdateOne {
+	mutation := newUserTerminalWorkspaceMutation(c.config, OpUpdateOne, withUserTerminalWorkspace(_m))
+	return &UserTerminalWorkspaceUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *UserTerminalWorkspaceClient) UpdateOneID(id uuid.UUID) *UserTerminalWorkspaceUpdateOne {
+	mutation := newUserTerminalWorkspaceMutation(c.config, OpUpdateOne, withUserTerminalWorkspaceID(id))
+	return &UserTerminalWorkspaceUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for UserTerminalWorkspace.
+func (c *UserTerminalWorkspaceClient) Delete() *UserTerminalWorkspaceDelete {
+	mutation := newUserTerminalWorkspaceMutation(c.config, OpDelete)
+	return &UserTerminalWorkspaceDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *UserTerminalWorkspaceClient) DeleteOne(_m *UserTerminalWorkspace) *UserTerminalWorkspaceDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *UserTerminalWorkspaceClient) DeleteOneID(id uuid.UUID) *UserTerminalWorkspaceDeleteOne {
+	builder := c.Delete().Where(userterminalworkspace.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &UserTerminalWorkspaceDeleteOne{builder}
+}
+
+// Query returns a query builder for UserTerminalWorkspace.
+func (c *UserTerminalWorkspaceClient) Query() *UserTerminalWorkspaceQuery {
+	return &UserTerminalWorkspaceQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeUserTerminalWorkspace},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a UserTerminalWorkspace entity by its id.
+func (c *UserTerminalWorkspaceClient) Get(ctx context.Context, id uuid.UUID) (*UserTerminalWorkspace, error) {
+	return c.Query().Where(userterminalworkspace.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *UserTerminalWorkspaceClient) GetX(ctx context.Context, id uuid.UUID) *UserTerminalWorkspace {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// QueryUser queries the user edge of a UserTerminalWorkspace.
+func (c *UserTerminalWorkspaceClient) QueryUser(_m *UserTerminalWorkspace) *UserQuery {
+	query := (&UserClient{config: c.config}).Query()
+	query.path = func(context.Context) (fromV *sql.Selector, _ error) {
+		id := _m.ID
+		step := sqlgraph.NewStep(
+			sqlgraph.From(userterminalworkspace.Table, userterminalworkspace.FieldID, id),
+			sqlgraph.To(user.Table, user.FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, true, userterminalworkspace.UserTable, userterminalworkspace.UserColumn),
+		)
+		fromV = sqlgraph.Neighbors(_m.driver.Dialect(), step)
+		return fromV, nil
+	}
+	return query
+}
+
+// Hooks returns the client hooks.
+func (c *UserTerminalWorkspaceClient) Hooks() []Hook {
+	return c.hooks.UserTerminalWorkspace
+}
+
+// Interceptors returns the client interceptors.
+func (c *UserTerminalWorkspaceClient) Interceptors() []Interceptor {
+	return c.inters.UserTerminalWorkspace
+}
+
+func (c *UserTerminalWorkspaceClient) mutate(ctx context.Context, m *UserTerminalWorkspaceMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&UserTerminalWorkspaceCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&UserTerminalWorkspaceUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&UserTerminalWorkspaceUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&UserTerminalWorkspaceDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown UserTerminalWorkspace mutation op: %q", m.Op())
+	}
+}
+
 // hooks and interceptors per client, for fast access.
 type (
 	hooks struct {
-		AccessConstraint, AccessPolicy, Agent, AgentCredential, AgentSessionMetrics,
-		AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken, BrokerSecret,
+		AccessConstraint, AccessConstraintHistory, AccessPolicy, Agent, AgentCredential,
+		AgentIdentityKey, AgentReincarnation, AgentSessionMetrics, AllowListEntry,
+		ApiKey, BrokerDispatch, BrokerJoinToken, BrokerSecret, BrokerSetting,
 		ChatLinkCode, Conversation, ConversationParticipant, DecisionAudit,
-		DelegationEdge, EntitlementBinding, EnvVar, GCPServiceAccount,
-		GitHubResolutionCache, GithubInstallation, Group, GroupMembership,
-		HarnessConfig, HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
-		LifecycleHook, LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
+		DelegationEdge, EntitlementBinding, EnvVar, ExternalIdentity,
+		GCPServiceAccount, GitHubResolutionCache, GithubInstallation, Group,
+		GroupMembership, HarnessConfig, HubSetting, IntegrationConfig,
+		IntegrationUpdate, InviteCode, LaunchReaperState, LifecycleHook,
+		LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
 		MaintenanceOperationRun, Message, MessageAddressee, MutationAudit, NonceCache,
 		Notification, NotificationSubscription, PolicyBinding, Project,
 		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RoleBinding,
 		RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret, Skill,
 		SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate, Template,
-		UsageReservation, User, UserAccessToken []ent.Hook
+		UsageReservation, User, UserAccessToken, UserTerminalWorkspace []ent.Hook
 	}
 	inters struct {
-		AccessConstraint, AccessPolicy, Agent, AgentCredential, AgentSessionMetrics,
-		AllowListEntry, ApiKey, BrokerDispatch, BrokerJoinToken, BrokerSecret,
+		AccessConstraint, AccessConstraintHistory, AccessPolicy, Agent, AgentCredential,
+		AgentIdentityKey, AgentReincarnation, AgentSessionMetrics, AllowListEntry,
+		ApiKey, BrokerDispatch, BrokerJoinToken, BrokerSecret, BrokerSetting,
 		ChatLinkCode, Conversation, ConversationParticipant, DecisionAudit,
-		DelegationEdge, EntitlementBinding, EnvVar, GCPServiceAccount,
-		GitHubResolutionCache, GithubInstallation, Group, GroupMembership,
-		HarnessConfig, HubSetting, IntegrationConfig, IntegrationUpdate, InviteCode,
-		LifecycleHook, LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
+		DelegationEdge, EntitlementBinding, EnvVar, ExternalIdentity,
+		GCPServiceAccount, GitHubResolutionCache, GithubInstallation, Group,
+		GroupMembership, HarnessConfig, HubSetting, IntegrationConfig,
+		IntegrationUpdate, InviteCode, LaunchReaperState, LifecycleHook,
+		LifecycleHookAgentPhase, LimitDefinition, MaintenanceOperation,
 		MaintenanceOperationRun, Message, MessageAddressee, MutationAudit, NonceCache,
 		Notification, NotificationSubscription, PolicyBinding, Project,
 		ProjectContributor, ProjectPreStartHook, ProjectSyncState, RoleBinding,
 		RoleDefinition, RuntimeBroker, Schedule, ScheduledEvent, Secret, Skill,
 		SkillInjection, SkillRegistry, SkillVersion, SubscriptionTemplate, Template,
-		UsageReservation, User, UserAccessToken []ent.Interceptor
+		UsageReservation, User, UserAccessToken,
+		UserTerminalWorkspace []ent.Interceptor
 	}
 )

@@ -226,7 +226,8 @@ const PLATFORM_FIELDS: Record<string, PlatformFieldDef[]> = {
     {
       key: 'register_url',
       label: 'Register URL',
-      description: 'Public URL for user-facing registration links. Used instead of internal hub_url when behind auth proxies or custom domains.',
+      description:
+        'Public URL for user-facing registration links. Used instead of internal hub_url when behind auth proxies or custom domains.',
       defaultValue: '',
       placeholder: 'https://scion.example.com',
     },
@@ -249,7 +250,8 @@ const PLATFORM_FIELDS: Record<string, PlatformFieldDef[]> = {
     {
       key: 'register_url',
       label: 'Register URL',
-      description: 'Public URL for user-facing registration links. Used instead of internal hub_url when behind auth proxies or custom domains.',
+      description:
+        'Public URL for user-facing registration links. Used instead of internal hub_url when behind auth proxies or custom domains.',
       defaultValue: '',
       placeholder: 'https://scion.example.com',
     },
@@ -571,6 +573,17 @@ export class ScionPageAdminIntegrations extends LitElement {
       font-size: 0.875rem;
       border-color: var(--scion-border, #e2e8f0);
       background: var(--scion-surface, #ffffff);
+    }
+
+    /* This local override replaces the app-wide --sl-input-font-size-*
+       variable with a fixed value, which would otherwise defeat the
+       pointer:coarse 16px floor (see pkg/hub/web.go / web/index.html) on
+       touch — re-floor it here too, desktop unchanged. */
+    @media (pointer: coarse) {
+      sl-input::part(base),
+      sl-select::part(combobox) {
+        font-size: max(16px, 0.875rem);
+      }
     }
 
     sl-input::part(input) {

@@ -34,7 +34,8 @@ Choosing the right recipient is critical to avoid spam and ensure the message re
   user's native-surface DM conversation, a *different* conversation from the
   one the message came from. Reply with `@<email>` only when you are
   deliberately starting a new, separate DM — not when replying to something
-  you were addressed in.
+  you were addressed in. View its details with
+  `scion conversation get conv:<uuid>`; see the `scion-conversation` skill.
 
 ### Mentions
 
@@ -102,7 +103,7 @@ The `scion message` command provides the following flags:
 - **`--interrupt`**: Interrupts the target agent's harness before sending the message (use with caution).
 - **`--attach <file>`**: Attaches one or more file paths to the message. Repeatable.
 **Capabilities that exist as separate commands:**
-- **Raw keystrokes**: Use `scion keys` to send literal keystrokes to an agent's tmux terminal.
+- **Literal keystrokes**: Use `scion keys <agent> <keys>` to send input to an agent's tmux terminal, with no envelope and no automatic Enter. One call sends exactly one tmux argument — there is no sequence syntax, so `scion keys <agent> "Up Up Enter"` types eleven literal characters, not three key presses; send each key press as a separate call. Works for container-backed agents in local and Hub mode; not supported for managed-runtime agents. As an agent, you can only target agents in your own project — cross-project targets are refused. **Authority:** in Hub mode, `scion keys` is authorized like terminal attach, not like messaging — being able to message an agent does not mean you can send it keys, and as an agent caller you also need a live attach relationship on the target, not just shared project membership. Each call reports `dispatched`, `rejected`, or `unknown`; on `unknown`, check with `scion look` before resending.
 - **Scheduled messages**: Use `scion schedule create` to schedule messages for future delivery. See the `scion-scheduler` skill.
 - **Notifications**: Use `scion notifications subscribe` to subscribe to agent state changes.
 
@@ -118,6 +119,10 @@ In projects with multiple users:
 - Reply to direct messages from each user independently.
 - Do not repeat messages in a group for each user you've interacted with in that group, assume they can see it, use mentions if you want to draw a specific user's attention to a message.
 - Handle each user's requests within their own context.
+
+For managing conversation metadata, participants, and message history, see the
+`scion-conversation` skill. The `scion conversation` command handles reading
+and administration; `scion message` handles sending.
 
 ## Message Length Limit
 

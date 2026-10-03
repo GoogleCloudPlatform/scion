@@ -4,14 +4,16 @@ title: Release Notes
 
 Scion release notes are published weekly.
 
-## Latest: Week of September 7 -- 13, 2026
+## Latest: Week of September 21 -- 27, 2026
 
-The week's defining event was the landing of the full authorization audit — 131 commits classifying every registered route — followed by an intensive stabilization effort that resolved a cascade of P0 regressions across progeny secrets, broker reads, template resolution, and agent scoping. In parallel, GCP identity support for sandbox runtimes was unblocked end-to-end with passthrough-to-assign credential translation, and broker lifecycle management matured with heartbeat timeouts, hub-level default selection, and clean unregistration.
+The grove→project rename reached its breaking phase: legacy grove routes, CLI flags, API keys, event topics, container labels, environment variables and hub↔broker wire fields were removed, on-disk state now migrates automatically, and hub and broker must be upgraded together. Alongside it, a broad authorization sweep closed cross-member and cross-project exposure paths, single-node VM deployment became headless, self-updating and Vertex-ready out of the box, and the persistent terminal workspace gained shareable layouts and auto-reconnect.
 
-[Read the full release notes for this week ->](/scion/release-notes/2026-09-07/)
+[Read the full release notes for this week ->](/scion/release-notes/2026-09-21/)
 
 ## Previous Weeks
 
+- [Week of September 14 -- 20, 2026](/scion/release-notes/2026-09-14/)
+- [Week of September 7 -- 13, 2026](/scion/release-notes/2026-09-07/)
 - [Week of August 31 -- September 6, 2026](/scion/release-notes/2026-08-31/)
 - [Week of August 24 -- 30, 2026](/scion/release-notes/2026-08-24/)
 - [Week of August 17 -- 23, 2026](/scion/release-notes/2026-08-17/)

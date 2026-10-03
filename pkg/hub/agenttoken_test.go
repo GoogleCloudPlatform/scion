@@ -22,7 +22,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -46,6 +46,124 @@ func TestAgentTokenService_GenerateAndValidate(t *testing.T) {
 	assert.Equal(t, "project-456", claims.ProjectID)
 	assert.Contains(t, claims.Scopes, ScopeAgentStatusUpdate)
 	assert.Equal(t, AgentTokenIssuer, claims.Issuer)
+}
+
+// TestAgentTokenService_ScopeSchemaStampedOnEveryToken pins ptone/scion#2339's
+// compatibility metadata: every token this service mints or re-mints (a
+// refresh is just another call to GenerateAgentToken with the agent's
+// current role scopes) carries the current scope schema on the wire. It also
+// pins that AgentRoleFull's scope bundle carries both the agent-create and
+// the service-account-assign agent scopes, so a role=full agent keeps both
+// permissions once its token is next minted or refreshed.
+func TestAgentTokenService_ScopeSchemaStampedOnEveryToken(t *testing.T) {
+	service, err := NewAgentTokenService(AgentTokenConfig{
+		SigningKey:    make([]byte, 32),
+		TokenDuration: time.Hour,
+	})
+	require.NoError(t, err)
+
+	token, err := service.GenerateAgentToken("agent-full", "project-456", ScopesForRole(AgentRoleFull), nil)
+	require.NoError(t, err)
+
+	claims, err := service.ValidateAgentToken(token)
+	require.NoError(t, err)
+	assert.Equal(t, CurrentAgentScopeSchema, claims.ScopeSchema,
+		"a freshly (re)generated token must carry the current scope schema")
+	assert.Contains(t, claims.Scopes, ScopeAgentCreate)
+	assert.Contains(t, claims.Scopes, ScopeAgentSAAssign)
+}
+
+// TestAgentTokenService_ValidateAgentToken_LegacyRoundTrip pins the
+// wire-level discriminator: ValidateAgentToken reads a verified token that
+// carries no scope_schema claim as a legacy pre-split token, and a verified
+// token stamped with the current schema as not legacy. GenerateAgentToken is
+// the only production minter and always stamps the current schema, so the
+// "no claim" case is constructed directly here, using the service's own
+// signer instead of GenerateAgentToken, to simulate a genuine token signed
+// before AgentTokenClaims.ScopeSchema existed.
+func TestAgentTokenService_ValidateAgentToken_LegacyRoundTrip(t *testing.T) {
+	service, err := NewAgentTokenService(AgentTokenConfig{
+		SigningKey:    make([]byte, 32),
+		TokenDuration: time.Hour,
+	})
+	require.NoError(t, err)
+
+	now := time.Now()
+	legacyClaims := AgentTokenClaims{
+		Claims: jwt.Claims{
+			Issuer:    AgentTokenIssuer,
+			Subject:   "legacy-agent",
+			Audience:  jwt.Audience{AgentTokenAudience},
+			IssuedAt:  jwt.NewNumericDate(now),
+			Expiry:    jwt.NewNumericDate(now.Add(time.Hour)),
+			NotBefore: jwt.NewNumericDate(now),
+		},
+		ProjectID: "proj-legacy",
+		Scopes:    []AgentTokenScope{ScopeAgentCreate},
+		// ScopeSchema is deliberately left unset (its zero value, omitted
+		// from the wire via omitempty), simulating a token signed before
+		// this field existed.
+	}
+	legacyToken, err := jwt.Signed(service.signer).Claims(legacyClaims).Serialize()
+	require.NoError(t, err)
+
+	legacyParsed, err := service.ValidateAgentToken(legacyToken)
+	require.NoError(t, err)
+	assert.True(t, isLegacyPreSplitAgentJWT(&agentIdentityWrapper{legacyParsed}),
+		"a verified token with no scope_schema claim must read as a legacy pre-split token")
+
+	currentToken, err := service.GenerateAgentToken("current-agent", "proj-current", []AgentTokenScope{ScopeAgentCreate}, nil)
+	require.NoError(t, err)
+	currentParsed, err := service.ValidateAgentToken(currentToken)
+	require.NoError(t, err)
+	assert.False(t, isLegacyPreSplitAgentJWT(&agentIdentityWrapper{currentParsed}),
+		"a freshly minted token must never read as a legacy pre-split token")
+}
+
+// TestAgentTokenService_ValidateAgentToken_UnknownScopeSchemaIsNotLegacy pins
+// the non-widening direction for a scope_schema value this package does not
+// recognize: only a MISSING claim (ScopeSchema's Go zero value after a
+// verified parse) reads as legacy. A PRESENT but unknown value — a schema
+// from a future split (CurrentAgentScopeSchema+1) or a malformed one (-1) —
+// must not, since treating an unrecognized marker as legacy would resolve
+// the ambiguity in the direction that regrants project:agent:sa_assign,
+// which is exactly the widening the compatibility rule forbids.
+func TestAgentTokenService_ValidateAgentToken_UnknownScopeSchemaIsNotLegacy(t *testing.T) {
+	service, err := NewAgentTokenService(AgentTokenConfig{
+		SigningKey:    make([]byte, 32),
+		TokenDuration: time.Hour,
+	})
+	require.NoError(t, err)
+
+	for _, schema := range []int{CurrentAgentScopeSchema + 1, -1} {
+		t.Run(fmt.Sprintf("scope_schema=%d", schema), func(t *testing.T) {
+			now := time.Now()
+			claims := AgentTokenClaims{
+				Claims: jwt.Claims{
+					Issuer:    AgentTokenIssuer,
+					Subject:   "unknown-schema-agent",
+					Audience:  jwt.Audience{AgentTokenAudience},
+					IssuedAt:  jwt.NewNumericDate(now),
+					Expiry:    jwt.NewNumericDate(now.Add(time.Hour)),
+					NotBefore: jwt.NewNumericDate(now),
+				},
+				ProjectID:   "proj-unknown-schema",
+				Scopes:      []AgentTokenScope{ScopeAgentCreate},
+				ScopeSchema: schema,
+			}
+			token, err := jwt.Signed(service.signer).Claims(claims).Serialize()
+			require.NoError(t, err)
+
+			parsed, err := service.ValidateAgentToken(token)
+			require.NoError(t, err)
+
+			identity := &agentIdentityWrapper{parsed}
+			assert.False(t, isLegacyPreSplitAgentJWT(identity),
+				"a present, unrecognized scope_schema value must not read as legacy")
+			assert.Equal(t, []AgentTokenScope{ScopeAgentCreate}, effectiveAgentScopes(identity),
+				"an unrecognized scope_schema must not regain project:agent:sa_assign")
+		})
+	}
 }
 
 func TestAgentTokenService_DefaultScopes(t *testing.T) {
@@ -271,221 +389,6 @@ func TestRequireAgentScope(t *testing.T) {
 
 		assert.Equal(t, http.StatusUnauthorized, rr.Code)
 	})
-}
-
-func TestAgentTokenService_RefreshToken(t *testing.T) {
-	service, err := NewAgentTokenService(AgentTokenConfig{
-		SigningKey:    make([]byte, 32),
-		TokenDuration: time.Hour,
-	})
-	require.NoError(t, err)
-
-	// Generate a token
-	originalToken, err := service.GenerateAgentToken("agent-123", "project-456",
-		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeAgentTokenRefresh}, nil)
-	require.NoError(t, err)
-
-	// Refresh the token
-	newToken, newExpiry, err := service.RefreshAgentToken(context.Background(), originalToken)
-	require.NoError(t, err)
-	assert.NotEmpty(t, newToken)
-	assert.NotEqual(t, originalToken, newToken)
-	assert.True(t, newExpiry.After(time.Now()))
-
-	// Validate the new token has the same claims
-	claims, err := service.ValidateAgentToken(newToken)
-	require.NoError(t, err)
-	assert.Equal(t, "agent-123", claims.Subject)
-	assert.Equal(t, "project-456", claims.ProjectID)
-	assert.True(t, claims.HasScope(ScopeAgentStatusUpdate))
-	assert.True(t, claims.HasScope(ScopeAgentTokenRefresh))
-}
-
-func TestAgentTokenService_RefreshExpiredToken(t *testing.T) {
-	service, err := NewAgentTokenService(AgentTokenConfig{
-		SigningKey:    make([]byte, 32),
-		TokenDuration: -time.Hour, // Already expired
-	})
-	require.NoError(t, err)
-
-	// Generate an expired token
-	expiredToken, err := service.GenerateAgentToken("agent-123", "project-456", nil, nil)
-	require.NoError(t, err)
-
-	// Refresh should fail for expired token
-	_, _, err = service.RefreshAgentToken(context.Background(), expiredToken)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "cannot refresh invalid token")
-}
-
-// mockCredentialChecker is a test double for CredentialChecker.
-type mockCredentialChecker struct {
-	credentials map[string]*store.AgentCredential
-	// err, when non-nil, is returned for every lookup (simulates store errors).
-	err error
-}
-
-func (m *mockCredentialChecker) GetAgentCredentialByJTIHash(_ context.Context, jtiHash string) (*store.AgentCredential, error) {
-	if m.err != nil {
-		return nil, m.err
-	}
-	if cred, ok := m.credentials[jtiHash]; ok {
-		return cred, nil
-	}
-	return nil, store.ErrNotFound
-}
-
-func TestAgentTokenService_RefreshRevokedTokenFails(t *testing.T) {
-	service, err := NewAgentTokenService(AgentTokenConfig{
-		SigningKey:    make([]byte, 32),
-		TokenDuration: time.Hour,
-	})
-	require.NoError(t, err)
-
-	// Generate a token
-	token, err := service.GenerateAgentToken("agent-123", "project-456",
-		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeAgentTokenRefresh}, nil)
-	require.NoError(t, err)
-
-	// Extract the JTI so we can mark it revoked in the mock store
-	claims, err := service.ValidateAgentToken(token)
-	require.NoError(t, err)
-	jtiHash := hashJTI(claims.ID)
-
-	// Set up a mock credential checker with the token marked as revoked
-	revokedAt := time.Now()
-	checker := &mockCredentialChecker{
-		credentials: map[string]*store.AgentCredential{
-			jtiHash: {
-				ID:           "cred-1",
-				AgentID:      "agent-123",
-				ProjectID:    "project-456",
-				TokenJTIHash: jtiHash,
-				IssuedAt:     time.Now(),
-				ExpiresAt:    time.Now().Add(time.Hour),
-				RevokedAt:    &revokedAt,
-			},
-		},
-	}
-	service.SetCredentialChecker(checker)
-
-	// Attempt to refresh the revoked token — must fail
-	_, _, err = service.RefreshAgentToken(context.Background(), token)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cannot refresh revoked token")
-}
-
-func TestAgentTokenService_RefreshUnrevokedTokenSucceeds(t *testing.T) {
-	service, err := NewAgentTokenService(AgentTokenConfig{
-		SigningKey:    make([]byte, 32),
-		TokenDuration: time.Hour,
-	})
-	require.NoError(t, err)
-
-	// Generate a token
-	token, err := service.GenerateAgentToken("agent-123", "project-456",
-		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeAgentTokenRefresh}, nil)
-	require.NoError(t, err)
-
-	// Extract the JTI
-	claims, err := service.ValidateAgentToken(token)
-	require.NoError(t, err)
-	jtiHash := hashJTI(claims.ID)
-
-	// Set up a mock credential checker with the token NOT revoked
-	checker := &mockCredentialChecker{
-		credentials: map[string]*store.AgentCredential{
-			jtiHash: {
-				ID:           "cred-1",
-				AgentID:      "agent-123",
-				ProjectID:    "project-456",
-				TokenJTIHash: jtiHash,
-				IssuedAt:     time.Now(),
-				ExpiresAt:    time.Now().Add(time.Hour),
-				RevokedAt:    nil, // not revoked
-			},
-		},
-	}
-	service.SetCredentialChecker(checker)
-
-	// Refresh should succeed
-	newToken, newExpiry, err := service.RefreshAgentToken(context.Background(), token)
-	require.NoError(t, err)
-	assert.NotEmpty(t, newToken)
-	assert.NotEqual(t, token, newToken)
-	assert.True(t, newExpiry.After(time.Now()))
-}
-
-func TestAgentTokenService_RefreshLegacyTokenAllowed(t *testing.T) {
-	service, err := NewAgentTokenService(AgentTokenConfig{
-		SigningKey:    make([]byte, 32),
-		TokenDuration: time.Hour,
-	})
-	require.NoError(t, err)
-
-	// Generate a token
-	token, err := service.GenerateAgentToken("agent-123", "project-456",
-		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeAgentTokenRefresh}, nil)
-	require.NoError(t, err)
-
-	// Set up a mock credential checker with NO credentials (simulates pre-table token)
-	checker := &mockCredentialChecker{
-		credentials: map[string]*store.AgentCredential{},
-	}
-	service.SetCredentialChecker(checker)
-
-	// Refresh should succeed (compatibility window for legacy tokens)
-	newToken, newExpiry, err := service.RefreshAgentToken(context.Background(), token)
-	require.NoError(t, err)
-	assert.NotEmpty(t, newToken)
-	assert.True(t, newExpiry.After(time.Now()))
-}
-
-func TestAgentTokenService_RefreshStoreErrorFailsClosed(t *testing.T) {
-	service, err := NewAgentTokenService(AgentTokenConfig{
-		SigningKey:    make([]byte, 32),
-		TokenDuration: time.Hour,
-	})
-	require.NoError(t, err)
-
-	// Generate a valid token
-	token, err := service.GenerateAgentToken("agent-123", "project-456",
-		[]AgentTokenScope{ScopeAgentStatusUpdate, ScopeAgentTokenRefresh}, nil)
-	require.NoError(t, err)
-
-	// Set up a credential checker that returns a store error (e.g. database unavailable)
-	checker := &mockCredentialChecker{
-		err: fmt.Errorf("connection refused"),
-	}
-	service.SetCredentialChecker(checker)
-
-	// Refresh must fail closed — store errors must not mint a new token
-	_, _, err = service.RefreshAgentToken(context.Background(), token)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "credential store unavailable")
-	assert.Contains(t, err.Error(), "connection refused")
-}
-
-func TestAgentTokenService_GenerateAgentTokenWithExpiry(t *testing.T) {
-	service, err := NewAgentTokenService(AgentTokenConfig{
-		SigningKey:    make([]byte, 32),
-		TokenDuration: 10 * time.Hour,
-	})
-	require.NoError(t, err)
-
-	token, expiry, err := service.GenerateAgentTokenWithExpiry("agent-123", "project-456",
-		[]AgentTokenScope{ScopeAgentStatusUpdate}, nil)
-	require.NoError(t, err)
-	assert.NotEmpty(t, token)
-
-	// Expiry should be ~10 hours from now
-	expectedExpiry := time.Now().Add(10 * time.Hour)
-	assert.WithinDuration(t, expectedExpiry, expiry, 5*time.Second)
-
-	// Token should be valid
-	claims, err := service.ValidateAgentToken(token)
-	require.NoError(t, err)
-	assert.Equal(t, "agent-123", claims.Subject)
 }
 
 func TestGetAgentFromContext(t *testing.T) {

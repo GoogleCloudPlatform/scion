@@ -172,11 +172,6 @@ func init() {
 		cmd.Flags().StringVar(&envProjectScope, "project", "", "Project scope (bare flag infers current project, or use --project=<name|id>)")
 		cmd.Flags().Lookup("project").NoOptDefVal = scopeInferSentinel
 
-		cmd.Flags().StringVar(&envProjectScope, "grove", "", "Deprecated alias for --project")
-		cmd.Flags().Lookup("grove").NoOptDefVal = scopeInferSentinel
-		_ = cmd.Flags().MarkDeprecated("grove", "use --project instead")
-		_ = cmd.Flags().MarkHidden("grove")
-
 		cmd.Flags().StringVar(&envBrokerScope, "broker", "", "Broker scope (bare flag infers current broker, or use --broker=<name|id>)")
 		cmd.Flags().Lookup("broker").NoOptDefVal = scopeInferSentinel
 	}
@@ -197,7 +192,6 @@ func init() {
 func resolveEnvScope(cmd *cobra.Command, settings *config.Settings) (scope, scopeID string, err error) {
 	scopeSet := cmd.Flags().Changed("scope")
 	projectSet := cmd.Flags().Changed("project")
-	projectAliasSet := cmd.Flags().Changed("grove")
 	brokerSet := cmd.Flags().Changed("broker")
 
 	// Enforce mutual exclusivity
@@ -205,7 +199,7 @@ func resolveEnvScope(cmd *cobra.Command, settings *config.Settings) (scope, scop
 	if scopeSet {
 		setCount++
 	}
-	if projectSet || projectAliasSet {
+	if projectSet {
 		setCount++
 	}
 	if brokerSet {
@@ -226,7 +220,7 @@ func resolveEnvScope(cmd *cobra.Command, settings *config.Settings) (scope, scop
 		}
 	}
 
-	if projectSet || projectAliasSet {
+	if projectSet {
 		scope = "project"
 		projectVal := envProjectScope
 		if projectVal == scopeInferSentinel {

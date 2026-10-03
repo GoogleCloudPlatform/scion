@@ -64,30 +64,36 @@ func runDoctor() error {
 	fmt.Printf("\n%sHub Health%s\n", util.Bold, util.Reset)
 	var hubChecks []scionruntime.CheckResult
 
-	// Resolve hub endpoint
-	hubEP := hubEndpoint
-	if hubEP == "" {
-		hubEP = os.Getenv("SCION_HUB_ENDPOINT")
+	// Resolve settings and hub endpoint
+	gp := projectPath
+	if gp == "" && globalMode {
+		gp = "global"
 	}
-	if hubEP == "" {
-		hubEP = os.Getenv("SCION_HUB_URL")
+	resolvedSettingsPath, _, _ := config.ResolveProjectPath(gp)
+	settings, err := config.LoadSettings(resolvedSettingsPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to load settings: %v\n", err)
+	}
+	if settings == nil {
+		settings = &config.Settings{}
 	}
 
-	// D1: Hub Connectivity
-	d1 := checkDoctorHubConnectivity(hubEP)
-	hubChecks = append(hubChecks, d1)
-	printCheck(d1.Name, d1.Status, d1.Message, d1.Remediation)
+	hubEP := GetHubEndpoint(settings)
 
-	hubConnected := d1.Status == "pass" || d1.Status == "warn"
-
-	// Create authenticated client for D2-D5 if Hub is reachable
+	// Create authenticated client for D1-D5 if Hub endpoint is configured
 	var hubClient hubclient.Client
-	if hubEP != "" && hubConnected {
-		settings, _ := config.LoadSettings(projectPath)
+	if hubEP != "" {
 		if c, err := getHubClient(settings); err == nil {
 			hubClient = c
 		}
 	}
+
+	// D1: Hub Connectivity
+	d1 := checkDoctorHubConnectivity(hubEP, hubClient)
+	hubChecks = append(hubChecks, d1)
+	printCheck(d1.Name, d1.Status, d1.Message, d1.Remediation)
+
+	hubConnected := d1.Status == "pass" || d1.Status == "warn"
 
 	// D2: Hub Authentication
 	d2 := checkDoctorHubAuth(hubEP, hubConnected, hubClient)
@@ -327,7 +333,7 @@ func outputDoctorJSON(report *scionruntime.DiagnosticReport, hubChecks []scionru
 }
 
 // checkDoctorHubConnectivity performs D1: Hub connectivity check via /healthz.
-func checkDoctorHubConnectivity(hubEP string) scionruntime.CheckResult {
+func checkDoctorHubConnectivity(hubEP string, client hubclient.Client) scionruntime.CheckResult {
 	if hubEP == "" {
 		return scionruntime.CheckResult{
 			Name:        "hub-connectivity",
@@ -340,7 +346,33 @@ func checkDoctorHubConnectivity(hubEP string) scionruntime.CheckResult {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, hubEP+"/healthz", nil)
+	// Prefer authenticated Hub client health check (handles bearer tokens and proxy fallbacks)
+	if client != nil {
+		healthResp, err := client.Health(ctx)
+		if err != nil {
+			return scionruntime.CheckResult{
+				Name:        "hub-connectivity",
+				Status:      "fail",
+				Message:     fmt.Sprintf("Cannot reach Hub at %s: %v", hubEP, hubclient.HintProxyError(err)),
+				Remediation: "Verify the Hub is running and the endpoint is correct",
+			}
+		}
+		if healthResp.Status == "degraded" {
+			return scionruntime.CheckResult{
+				Name:    "hub-connectivity",
+				Status:  "warn",
+				Message: fmt.Sprintf("Hub at %s is degraded", hubEP),
+			}
+		}
+		return scionruntime.CheckResult{
+			Name:    "hub-connectivity",
+			Status:  "pass",
+			Message: fmt.Sprintf("Hub at %s is healthy", hubEP),
+		}
+	}
+
+	cleanEP := strings.TrimRight(hubEP, "/")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, cleanEP+"/healthz", nil)
 	if err != nil {
 		return scionruntime.CheckResult{
 			Name:        "hub-connectivity",

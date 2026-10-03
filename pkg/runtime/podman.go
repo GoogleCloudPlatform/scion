@@ -18,13 +18,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os/exec"
 	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -193,6 +194,13 @@ func (r *PodmanRuntime) Run(ctx context.Context, config RunConfig) (string, erro
 
 	out, err := runSimpleCommand(ctx, r.Command, newArgs...)
 	if err != nil {
+		if ctx.Err() != nil {
+			// The caller gave up while the daemon may still have been
+			// creating/starting the container. Clean up any partial result
+			// instead of leaking it. See ptone/scion#1886.
+			rollbackCancelledCreate(r.Command, config.Name)
+			return "", ctx.Err()
+		}
 		return "", fmt.Errorf("container run failed: %w (output: %s)", err, out)
 	}
 
@@ -261,15 +269,15 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 			actual := labels[k]
 			if actual == "" {
 				switch k {
-				case projectcompat.LabelProject:
-					actual = projectcompat.ProjectNameFromLabels(labels)
-				case projectcompat.LabelProjectID:
-					actual = projectcompat.ProjectIDFromLabels(labels)
-				case projectcompat.LabelProjectPath:
-					actual = projectcompat.ProjectPathFromLabels(labels)
+				case projectkeys.LabelProject:
+					actual = projectkeys.ProjectNameFromLabels(labels)
+				case projectkeys.LabelProjectID:
+					actual = projectkeys.ProjectIDFromLabels(labels)
+				case projectkeys.LabelProjectPath:
+					actual = projectkeys.ProjectPathFromLabels(labels)
 				}
 			}
-			if actual != v {
+			if !projectkeys.LabelValuesMatch(k, actual, v) {
 				match = false
 				break
 			}
@@ -295,9 +303,9 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 				Template:        labels["scion.template"],
 				HarnessConfig:   labels["scion.harness_config"],
 				HarnessAuth:     labels["scion.harness_auth"],
-				Project:         projectcompat.ProjectNameFromLabels(labels),
-				ProjectID:       projectcompat.ProjectIDFromLabels(labels),
-				ProjectPath:     projectcompat.ProjectPathFromLabels(labels),
+				Project:         projectkeys.ProjectNameFromLabels(labels),
+				ProjectID:       projectkeys.ProjectIDFromLabels(labels),
+				ProjectPath:     projectkeys.ProjectPathFromLabels(labels),
 				Runtime:         r.Name(),
 			}
 			if code, ok := ExitCodeFromContainerStatus(c.Status); ok {
@@ -414,6 +422,17 @@ func (r *PodmanRuntime) Exec(ctx context.Context, id string, cmd []string) (stri
 	}
 	args := append([]string{"exec", "--user", r.ExecUser(), id}, cmd...)
 	return runSimpleCommand(ctx, r.Command, args...)
+}
+
+// ExecWithStdin runs cmd inside the container with stdin piped from the
+// given reader. The -i flag is required for `podman exec` to attach stdin.
+// See #1355.
+func (r *PodmanRuntime) ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+	if agents, err := r.List(ctx, nil); err == nil {
+		id = resolveContainerID(agents, id)
+	}
+	args := append([]string{"exec", "-i", "--user", r.ExecUser(), id}, cmd...)
+	return runSimpleCommandWithStdin(ctx, stdin, r.Command, args...)
 }
 
 // GetWorkspacePath returns the host path to the container's /workspace mount.

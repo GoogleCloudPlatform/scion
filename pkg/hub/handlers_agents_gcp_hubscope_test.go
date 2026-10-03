@@ -117,16 +117,18 @@ func hubAdminUser(t *testing.T, f *bypassAgentsFixture) *store.User {
 
 // createAgentAsOwner posts to the project agent route as the project owner.
 //
-// It first materialises the project's members group. The bypassAgents fixture
-// builds its projects directly in the store, so the group that the project
-// create handler would have made does not exist, and without it the owner has
-// no rights over the project at all — agent create is refused before any
+// It first materialises the project's members group and grants the owner a
+// project-owner role binding. The bypassAgents fixture builds its projects
+// directly in the store, so neither the group nor the role binding that the
+// project create handler would have made exists, and without them the owner
+// has no rights over the project at all — agent create is refused before any
 // service-account logic runs. Those tests never noticed because their callers
 // are agents; these tests use a human caller, which is the realistic one for
-// picking a hub-wide account. The call is idempotent.
+// picking a hub-wide account. Both calls are idempotent.
 func createAgentAsOwner(t *testing.T, f *bypassAgentsFixture, req CreateAgentRequest) *httptest.ResponseRecorder {
 	t.Helper()
-	f.srv.createProjectMembersGroup(context.Background(), f.proj, f.owner.ID)
+	f.srv.seedProjectCreatorMembership(context.Background(), f.proj)
+	require.NoError(t, f.srv.createProjectOwnerRoleBinding(context.Background(), f.proj.ID, f.owner.ID))
 	return doRequestAsUser(t, f.srv, f.owner, http.MethodPost,
 		"/api/v1/projects/"+f.proj.ID+"/agents", req)
 }
@@ -224,7 +226,8 @@ func TestAgentCreate_HubScopedSA_AssignableByCreatorAndAdmin(t *testing.T) {
 		sa := hubScopedSAForAgent(t, f, true) // created by a stranger
 		admin := hubAdminUser(t, f)
 
-		f.srv.createProjectMembersGroup(context.Background(), f.proj, f.owner.ID)
+		f.srv.seedProjectCreatorMembership(context.Background(), f.proj)
+		require.NoError(t, f.srv.createProjectOwnerRoleBinding(context.Background(), f.proj.ID, f.owner.ID))
 		rec := doRequestAsUser(t, f.srv, admin, http.MethodPost,
 			"/api/v1/projects/"+f.proj.ID+"/agents", CreateAgentRequest{
 				Name: "hub-sa-agent-admin",
@@ -675,6 +678,20 @@ func setStaleProjectDefaultSA(t *testing.T, f *bypassAgentsFixture, saID string)
 // returns the identity the project default produced.
 func createdAgentIdentity(t *testing.T, f *bypassAgentsFixture, name string) *store.GCPIdentityConfig {
 	t.Helper()
+	got := createdAgentIdentityOrNil(t, f, name)
+	require.NotNil(t, got, "agent should have a resolved GCP identity")
+	return got
+}
+
+// createdAgentIdentityOrNil is createdAgentIdentity's nil-tolerant twin, for
+// the rungs of the ladder that deliberately leave AppliedConfig.GCPIdentity
+// unset — nothing configured at all (at either the project or hub level), or
+// a hub-default passthrough grant denied (e.g. non-embedded broker, or a
+// runtime profile the grant does not cover) — so the broker can apply its
+// own runtime-aware default (ptone/scion#2328) rather than an explicit
+// "block" record.
+func createdAgentIdentityOrNil(t *testing.T, f *bypassAgentsFixture, name string) *store.GCPIdentityConfig {
+	t.Helper()
 	rec := createAgentAsOwner(t, f, CreateAgentRequest{Name: name})
 	require.Equal(t, http.StatusCreated, rec.Code,
 		"agent creation should succeed; got: %s", rec.Body.String())
@@ -686,7 +703,6 @@ func createdAgentIdentity(t *testing.T, f *bypassAgentsFixture, name string) *st
 	got, err := f.store.GetAgent(context.Background(), resp.Agent.ID)
 	require.NoError(t, err)
 	require.NotNil(t, got.AppliedConfig, "agent should have applied config")
-	require.NotNil(t, got.AppliedConfig.GCPIdentity, "agent should have a resolved GCP identity")
 	return got.AppliedConfig.GCPIdentity
 }
 
@@ -700,6 +716,7 @@ func createdAgentIdentity(t *testing.T, f *bypassAgentsFixture, name string) *st
 // because authorizeSAAssignment enforces mode coupling (D4) and Hub policy.
 func TestAgentCreate_HubScopedProjectDefault_IsApplied(t *testing.T) {
 	f := bypassAgentsSetup(t)
+	bindFixtureOwner(t, f)
 	// P10: mode=enforce + hub membership required for hub-scoped default
 	setMode(f.srv, SAAssignCheckEnforce)
 	f.srv.SetGCPTokenGenerator(&mockGCPTokenGenerator{email: "hub@test.iam.gserviceaccount.com"})

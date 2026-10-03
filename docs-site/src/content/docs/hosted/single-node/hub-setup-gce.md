@@ -1,11 +1,11 @@
 ---
 title: Hub Setup on GCE
-description: Deploy a Scion Hub on a Google Compute Engine VM using the starter scripts.
+description: Deploy a Scion Hub on a Google Compute Engine VM using the Developer Hub scripts or the binary-release single-node VM script.
 ---
 
 ## Overview
 
-The quickest path to a deployed Scion Hub is a single Google Compute Engine VM using the starter scripts in `scripts/starter-hub/`. These scripts automate VM provisioning, repository setup, TLS configuration, and Hub startup.
+The quickest path to a deployed Scion Hub that builds from source is a single Google Compute Engine VM using the Developer Hub scripts in `scripts/starter-hub/`. These scripts automate VM provisioning, repository setup, TLS configuration, and Hub startup.
 
 ## Prerequisites
 
@@ -15,7 +15,7 @@ The quickest path to a deployed Scion Hub is a single Google Compute Engine VM u
 
 ## Steps
 
-The starter scripts are designed to be run in sequence from your local machine.
+The Developer Hub scripts are designed to be run in sequence from your local machine.
 
 ### 1. Provision the VM
 
@@ -78,6 +78,44 @@ Once the Hub is running:
 3. **Register a Runtime Broker** — Connect a machine to execute agents. See [Runtime Broker](/scion/hosted/ha/runtime-broker/) for details on registering your local machine or a remote VM.
 
 For ongoing Hub administration (auth, permissions, observability), see the other guides in the Hub Administration section.
+
+## Binary Release Deployment (single-node VM)
+
+If you don't need to build from source, `scripts/single-node-vm/deploy.sh` stands up a Hub from a published GitHub Release instead. It creates a GCE VM with no public IP that runs the `scion` binary under systemd with embedded SQLite, plus a Cloud Run reverse proxy protected by Identity-Aware Proxy (IAP). The proxy image is built on the VM, pushed to the `cloud-run-source-deploy` Artifact Registry repository, and deployed with `--image`. The deployment does not upload source to Cloud Storage, so it works in organizations whose policies block `storage.googleapis.com`. Re-running the script is idempotent.
+
+**IAP SSH firewall rule.** The `scion-hub-HUB_NAME-allow-iap-ssh` rule targets only the hub VM's network tag, not every VM on the network. Deployments made before this scoping have an unscoped rule. Re-running `deploy.sh` narrows that rule in place, but only once it confirms the tag is on the hub VM. Any other VM that relied on the old rule for IAP SSH loses that access and needs its own firewall rule.
+
+```bash
+./scripts/single-node-vm/deploy.sh                    # interactive wizard
+./scripts/single-node-vm/deploy.sh --version v0.5.0   # pin a release
+```
+
+The wizard asks for the Hub name, region, machine size, disk size, chat plugins, container image source, admin email, and **update policy**.
+
+**Headless installs.** Pass `--config <file>` to pre-answer the wizard from JSON. This is intended for non-interactive and agent-driven installs:
+
+```bash
+./scripts/single-node-vm/deploy.sh --config my-deploy-config.json
+```
+
+Fields in the file skip their prompt. Missing fields fall back to a prompt when a terminal is attached, or to defaults otherwise. With no terminal, a missing required field makes the script exit with an error rather than hang. See `scripts/single-node-vm/deploy-config.example.json` for every field, including `update_policy` and `release_channel`.
+
+**Vertex AI out of the box.** The script enables the Vertex AI API (`aiplatform.googleapis.com`) and grants the VM service account `roles/aiplatform.user`. It then sets two things so agents can use that service account:
+
+- `default_gcp_identity_mode: passthrough` in `settings.yaml`. This is the [hub-default GCP identity](/scion/hosted/ha/permissions/#hub-default-gcp-identity), so new agents on the Hub's embedded broker inherit the VM service account unless the create request or project sets a different identity. To turn this off, change the mode to `block` or `assign` in **Admin > Server Config > Agent Defaults**.
+- `GOOGLE_CLOUD_PROJECT` (the VM's project) and `GOOGLE_CLOUD_LOCATION` (`global`) as hub-scoped environment variables with injection mode `always`. The script only creates them if they are missing, so a redeploy never overwrites your edits. If this step fails, the script prints a warning and you can set them yourself with `scion hub env set --scope hub`.
+
+Agents on the `antigravity` harness detect the metadata-server identity and select Vertex AI auth without a `gcloud-adc` file, so a fresh Hub runs Vertex AI inference with no manual credential setup.
+
+**Automatic updates.** The script writes a `server.maintenance` section with `deployment_tier: binary`, so the Hub checks GitHub Releases on a schedule. It installs updates automatically (`auto`), shows an update banner in the admin UI (`notify`), or does neither (`disabled`). The release channel defaults to `nightly` unless you set it. See [Maintenance (`server.maintenance`)](/scion/reference/server-config/#maintenance-servermaintenance) for all fields.
+
+**Verified downloads.** Releases publish a `SHA256SUMS` file. `deploy.sh` checks that the chosen release has one before creating any GCP resources, and verifies the `scion` binary and chat plugins against it before installing them. The Hub's automatic updater also verifies downloads and refuses to install a release that has no `SHA256SUMS` file. To deploy an older release built before checksums were published, set `ALLOW_UNVERIFIED_RELEASE=true` when running `deploy.sh`.
+
+**Optional GKE runtime (hybrid tier).** Set `gke_target.name` and `gke_target.location` in the config file to attach an existing GKE cluster as a second, Kubernetes-based runtime alongside the VM's co-located Docker broker. The script also serves an NFS export from the VM and creates a PersistentVolumeClaim in the cluster, so agents on both runtimes share the same project [shared directories](/scion/reference/server-config/#shared-directory-storage-servershared_dir_storage). The tier is off by default. The script attaches to the cluster but never creates or deletes it, and the cluster must be in the same project. With the tier enabled, `container_images.source: build` is refused (GKE nodes cannot pull from the VM's local Docker store), and `user_access_mode` must be `invite_only` (the default) or `domain_restricted`. See [`docs/deploy/hybrid-tier.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/hybrid-tier.md) for the full field list and teardown behavior.
+
+For the full guide, including architecture, access patterns, and troubleshooting, see [`docs/deploy/single-node-vm.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/single-node-vm.md). If an AI agent is running the deployment for you, point it at the step-by-step [agent deployment runbook](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/agent-runbook-single-node-vm.md). The runbook covers GCP preflight checks, the questions to ask the user, config file generation, and troubleshooting.
+
+Deploying into a GCP organization with a security-hardening baseline (no default network, Shielded VM required, etc.)? See [Deploy on a VM (Hardened Org)](/scion/hosted/single-node/hub-setup-gce-hardened-org/) for the one manual prerequisite and what the script already handles for you.
 
 ## Internal Deployments (BYO TLS)
 

@@ -58,6 +58,12 @@ interface ParsedMessage {
   timestamp: string;
   insertId: string;
   raw: MessageLogEntry | null;
+  /** Sender's project ID for cross-project provenance. */
+  senderProjectId?: string | undefined;
+  /** Recipient's project ID for cross-project provenance. */
+  recipientProjectId?: string | undefined;
+  /** Whether this message crossed project boundaries. */
+  crossProject?: boolean | undefined;
 }
 
 const MAX_BUFFER = 500;
@@ -113,6 +119,13 @@ export class ScionAgentMessageViewer extends LitElement {
   @property()
   broadcastUrl = '';
 
+  /**
+   * Current project ID, used to detect cross-project messages.
+   * When set, messages from/to a different project get a cross-project badge.
+   */
+  @property()
+  projectId = '';
+
   @state() private messages: ParsedMessage[] = [];
   @state() private entryMap = new Map<string, ParsedMessage>();
   @state() private loading = false;
@@ -164,6 +177,16 @@ export class ScionAgentMessageViewer extends LitElement {
     }
     .compose-input sl-input::part(base) {
       font-size: 0.875rem;
+    }
+
+    /* This local override replaces the app-wide --sl-input-font-size-*
+       variable with a fixed value, which would otherwise defeat the
+       pointer:coarse 16px floor (see pkg/hub/web.go / web/index.html) on
+       touch — re-floor it here too, desktop unchanged. */
+    @media (pointer: coarse) {
+      .compose-input sl-input::part(base) {
+        font-size: max(16px, 0.875rem);
+      }
     }
     .compose-actions {
       display: flex;
@@ -327,6 +350,13 @@ export class ScionAgentMessageViewer extends LitElement {
       background: var(--scion-warning-50, #fffbeb);
       color: var(--scion-warning-700, #b45309);
     }
+    .badge-cross-project {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.1875rem;
+      background: var(--sl-color-success-100, #dcfce7);
+      color: var(--sl-color-success-700, #15803d);
+    }
 
     .msg-body {
       font-size: 0.8125rem;
@@ -480,6 +510,12 @@ export class ScionAgentMessageViewer extends LitElement {
     const direction: 'sent' | 'received' =
       !this.agentId || msg.senderId === this.agentId ? 'sent' : 'received';
 
+    // Cross-project detection: if either project ID differs from the current project
+    const crossProject =
+      !!this.projectId &&
+      ((!!msg.senderProjectId && msg.senderProjectId !== this.projectId) ||
+        (!!msg.recipientProjectId && msg.recipientProjectId !== this.projectId));
+
     return {
       sender: msg.sender,
       recipient: msg.recipient,
@@ -491,6 +527,9 @@ export class ScionAgentMessageViewer extends LitElement {
       timestamp: msg.createdAt,
       insertId: `hub:${msg.id}`,
       raw: null,
+      senderProjectId: msg.senderProjectId,
+      recipientProjectId: msg.recipientProjectId,
+      crossProject,
     };
   }
 
@@ -553,6 +592,14 @@ export class ScionAgentMessageViewer extends LitElement {
     // The actual message body is in payload['message_content'].
     const body = (payload['message_content'] as string) || '';
 
+    // Cross-project provenance from log labels
+    const senderProjectId = (labels['sender_project_id'] as string) || undefined;
+    const recipientProjectId = (labels['recipient_project_id'] as string) || undefined;
+    const crossProject =
+      !!this.projectId &&
+      ((!!senderProjectId && senderProjectId !== this.projectId) ||
+        (!!recipientProjectId && recipientProjectId !== this.projectId));
+
     return {
       sender,
       recipient,
@@ -564,6 +611,9 @@ export class ScionAgentMessageViewer extends LitElement {
       timestamp: entry.timestamp,
       insertId: entry.insertId,
       raw: entry,
+      senderProjectId,
+      recipientProjectId,
+      crossProject,
     };
   }
 
@@ -925,6 +975,11 @@ export class ScionAgentMessageViewer extends LitElement {
               <sl-icon name="arrow-right" class="msg-arrow" style="font-size:0.6875rem"></sl-icon>
               <span class="msg-target">${toLabel}</span>
               <div class="msg-badges">
+                ${msg.crossProject
+                  ? html`<span class="msg-badge badge-cross-project"
+                      ><sl-icon name="globe" style="font-size:0.625rem"></sl-icon> cross-project</span
+                    >`
+                  : nothing}
                 ${msg.msgType
                   ? html`<span class="msg-badge badge-type">${msg.msgType}</span>`
                   : nothing}
@@ -962,6 +1017,11 @@ export class ScionAgentMessageViewer extends LitElement {
       broadcasted: msg.broadcasted,
       message: msg.body,
     };
+    if (msg.crossProject) {
+      detail['crossProject'] = true;
+      if (msg.senderProjectId) detail['senderProjectId'] = msg.senderProjectId;
+      if (msg.recipientProjectId) detail['recipientProjectId'] = msg.recipientProjectId;
+    }
     if (msg.raw) {
       if (msg.raw.labels && Object.keys(msg.raw.labels).length > 0) {
         detail['labels'] = msg.raw.labels;

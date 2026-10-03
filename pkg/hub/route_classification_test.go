@@ -37,6 +37,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/auth/token":                             "public:auth",
 	"/api/v1/auth/refresh":                           "public:auth",
 	"/api/v1/auth/validate":                          "public:auth",
+	"/api/v1/experiments":                            "authenticated:experiments",
 	"/api/v1/auth/admin-status":                      "authenticated:user",
 	"/api/v1/auth/logout":                            "authenticated:user",
 	"/api/v1/auth/me":                                "authenticated:user",
@@ -49,20 +50,25 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/auth/cli/token":                         "public:cli-oauth",
 	"/api/v1/auth/cli/device":                        "public:cli-oauth",
 	"/api/v1/auth/cli/device/token":                  "public:cli-oauth",
+	"/api/v1/auth/integrations/google/exchange":      "public:ge-auth",
+	"/api/v1/conversations":                          "authenticated:conversation",
+	"/api/v1/conversations/":                         "authenticated:conversation",
+	"/api/v1/conversations/resolve":                  "authenticated:conversation",
 	"/api/v1/agents":                                 "policy:agent",
 	"/api/v1/agents/":                                "policy:agent",
 	"/api/v1/projects":                               "policy:project",
 	"/api/v1/projects/register":                      "policy:project-register",
 	"/api/v1/projects/":                              "policy:project-subroute",
-	"/api/v1/groves":                                 "policy:legacy-project",
-	"/api/v1/groves/register":                        "policy:legacy-project-register",
-	"/api/v1/groves/":                                "policy:legacy-project-subroute",
 	"/api/v1/runtime-brokers":                        "policy:broker",
 	"/api/v1/runtime-brokers/":                       "policy:broker",
 	"/api/v1/templates":                              "policy:template",
 	"/api/v1/templates/":                             "policy:template",
 	"/api/v1/gcp-service-accounts":                   "policy:gcp-service-account",
 	"/api/v1/gcp-service-accounts/":                  "policy:gcp-service-account",
+	"/api/v1/gcp-service-accounts/mint":              "policy:gcp-service-account",
+	"/api/v1/gcs/object":                             "authenticated:gcs",
+	"/api/v1/messaging/capabilities":                 "authenticated:messaging",
+	"/api/v1/messaging/targets/resolve":              "authenticated:messaging",
 	"/api/v1/skills":                                 "policy:skill",
 	"/api/v1/skills/":                                "policy:skill",
 	"/api/v1/skill-registries":                       "hub-admin:skill-registry",
@@ -88,6 +94,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/users/me/injected-skills/":              "authenticated:injected-skills",
 	"/api/v1/users/me/templates":                     "authenticated:user-templates",
 	"/api/v1/users/me/templates/":                    "authenticated:user-templates",
+	"/api/v1/users/me/terminal-workspace":            "authenticated:user-terminal-workspace",
 	"/api/v1/hub/settings/injected-skills":           "authenticated:injected-skills",
 	"/api/v1/brokers":                                "broker-hmac:registration",
 	"/api/v1/brokers/join":                           "broker-hmac:registration",
@@ -102,6 +109,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/admin/maintenance/migrations/":          "hub-admin:maintenance",
 	"/api/v1/admin/maintenance/check-updates":        "hub-admin:maintenance",
 	"/api/v1/admin/maintenance/restart":              "hub-admin:maintenance",
+	"/api/v1/admin/maintenance/update-available":     "hub-admin:maintenance",
 	"/api/v1/admin/scheduler":                        "hub-admin:scheduler",
 	"/api/v1/admin/allow-list":                       "hub-admin:allow-list",
 	"/api/v1/admin/allow-list/":                      "hub-admin:allow-list",
@@ -125,6 +133,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/admin/diagnostics/logs":                 "hub-admin:diagnostics",
 	"/api/v1/admin/health/summary":                   "hub-admin:health",
 	"/api/v1/admin/messaging":                        "hub-admin:messaging",
+	"/api/v1/admin/experiments":                      "hub-admin:experiments",
 	"/api/v1/admin/messaging/divergence":             "hub-admin:diagnostics",
 	"/api/v1/metrics/":                               "hub-admin:metrics-dashboard",
 	"/api/v1/admin/metrics-dashboard":                "hub-admin:metrics-dashboard",
@@ -134,8 +143,6 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/messages/":                              "authenticated:messages",
 	"/api/v1/message-channels":                       "authenticated:messages",
 	"/api/v1/chat/prefs":                             "policy:chat",
-	"/api/v1/chat/threads":                           "policy:chat",
-	"/api/v1/chat/threads/":                          "policy:chat",
 	"/api/v1/chat/spaces":                            "policy:chat",
 	"/api/v1/chat/spaces/":                           "policy:chat",
 	"/api/v1/chat/conversations/":                    "policy:chat",
@@ -205,8 +212,9 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/admin/permissions":    "hub-admin:role",
 
 	// Access Constraints (AC1)
-	"/api/v1/admin/access-constraints":  "hub-admin:access_constraint",
-	"/api/v1/admin/access-constraints/": "hub-admin:access_constraint",
+	"/api/v1/admin/access-constraints":                "hub-admin:access_constraint",
+	"/api/v1/admin/access-constraints/":               "hub-admin:access_constraint",
+	"GET /api/v1/admin/access-constraints/{id}/audit": "policy:audit",
 
 	// Access Constraint Previews (B7)
 	"/api/v1/admin/access-constraint-previews":  "hub-admin:access_constraint",
@@ -218,6 +226,23 @@ var routePermissionClassifications = map[string]string{
 	// Role import/export
 	"/api/v1/admin/roles/export": "hub-admin:role",
 	"/api/v1/admin/roles/import": "hub-admin:role",
+}
+
+func TestConstraintAuditRoutePermissionClassification(t *testing.T) {
+	const pattern = "GET /api/v1/admin/access-constraints/{id}/audit"
+
+	if got := routePermissionClassifications[pattern]; got != "policy:audit" {
+		t.Fatalf("permission classification for %s = %q, want %q", pattern, got, "policy:audit")
+	}
+
+	meta, ok := routeMetadataTable[pattern]
+	if !ok {
+		t.Fatalf("route metadata missing for %s", pattern)
+	}
+	if meta.Classification != RoutePolicy || meta.Permission != "hub.audit.read" {
+		t.Fatalf("route metadata for %s = classification %q, permission %q; want %q and %q",
+			pattern, meta.Classification, meta.Permission, RoutePolicy, "hub.audit.read")
+	}
 }
 
 func TestRegisteredRoutesHavePermissionClassification(t *testing.T) {

@@ -50,6 +50,13 @@ const (
 	// immediate agent creator. This surface produces DECISION records via
 	// authorizeSAAssignment, not the binding records it produced before P10.
 	SurfaceProjectDefault = "project-default"
+
+	// SurfaceHubDefault is an SA assigned from the hub-level agent_defaults
+	// operational setting, one rung below SurfaceProjectDefault in the GCP
+	// identity fallback ladder (explicit request -> project default -> hub
+	// default -> unset, the broker applies its runtime default). Same
+	// authorization gate as SurfaceProjectDefault.
+	SurfaceHubDefault = "hub-default"
 )
 
 // saAssignCheckMode values. The mode gates the GCP layer only; the Hub policy
@@ -222,10 +229,13 @@ func (s *Server) hookIdentityCheckerFor() store.CallerPermissionChecker {
 // layer that owns it.
 //
 // ⚠️ ActionAssign, not ActionRead. A grant to READ a service account is not a
-// grant to ASSIGN one; the two were conflated here until svc-accnt Step 2.
-// Reachability is preserved by the assign baselines that landed first for this
-// purpose: authz.go step 3b for agent callers, the per-project
-// member-assign-service-accounts policy in seed.go for humans.
+// grant to ASSIGN one. Reachability for project-scoped accounts comes from
+// authz.go's AgentScopes wiring (project:agent:sa_assign) for agent callers,
+// and from the gcp_service_account.assign permission curated into the
+// project-owner, project-admin and project-member RoleDefinitions in
+// seed.go for humans (ptone/scion#2147). effectiveAgentScopes also grants
+// project:agent:sa_assign to a verified agent JWT that carries no
+// scope_schema claim and holds project:agent:create.
 //
 // ⚠️ WHAT THE CONVERSION CHANGES DEPENDS ON THE CALLER KIND. Hub scope removes
 // confinement for humans and adds it for agents, so no single sentence about
@@ -257,12 +267,107 @@ func (s *Server) hookIdentityCheckerFor() store.CallerPermissionChecker {
 // Returns true if the assignment may proceed. On false it has already written
 // the response and the caller must return immediately.
 func (s *Server) authorizeSAAssignment(w http.ResponseWriter, r *http.Request, sa *store.GCPServiceAccount, surface string) bool {
+	denial := s.evaluateSAAssignment(r.Context(), r, sa, surface)
+	if denial == nil {
+		return true
+	}
+	denial.write(w)
+	return false
+}
+
+// saAssignDenialKind selects how an saAssignDenial is rendered as HTTP.
+type saAssignDenialKind int
+
+const (
+	saAssignDenyForbidden saAssignDenialKind = iota
+	saAssignDenyForbiddenStructured
+	saAssignDenyUnauthorized
+)
+
+// saAssignDenial is a refusal from evaluateSAAssignment. It carries exactly
+// what the HTTP surface writes, so authorizeSAAssignment's responses are
+// unchanged, and it satisfies error so non-HTTP callers (the scheduler's
+// dispatch_agent path) can fail with the same message.
+type saAssignDenial struct {
+	kind         saAssignDenialKind
+	msg          string
+	resourceType string
+}
+
+func (d *saAssignDenial) Error() string {
+	switch {
+	case d.kind == saAssignDenyUnauthorized:
+		return "service-account assignment denied: no caller identity"
+	case d.msg != "":
+		return "service-account assignment denied: " + d.msg
+	default:
+		return "service-account assignment denied: insufficient permissions"
+	}
+}
+
+func (d *saAssignDenial) write(w http.ResponseWriter) {
+	switch d.kind {
+	case saAssignDenyUnauthorized:
+		Unauthorized(w)
+	case saAssignDenyForbiddenStructured:
+		writeForbiddenStructured(w, d.msg, d.resourceType, ActionAssign)
+	default:
+		writeForbidden(w, d.msg)
+	}
+}
+
+// saAssignGenericForbiddenMsg is the response for every SA-assign denial that
+// has no more specific diagnosis. That spans both layers: Layer 1 (Hub
+// policy) uses it for ordinary policy denials, a ceiling store fault
+// (DenyCauseCeilingError), and the no-authz-service guard; Layer 2 (GCP
+// actAs) uses it when the caller principal cannot be resolved. It must stay
+// byte-identical: it predates DenyCause and callers may already match on it.
+const saAssignGenericForbiddenMsg = "You don't have permission to assign this GCP service account"
+
+// saAssignForbiddenMessage maps a Decision.DenyCause to the 403 body Layer 1
+// of evaluateSAAssignment returns. Pulled out as its own function so a table
+// test can drive every DenyCause value, including one no constant names,
+// without going through the full evaluateSAAssignment call chain.
+//
+// The two ceiling messages name "a principal in its delegation chain" rather
+// than "the principal that created it": cause is set (and propagated) at
+// every depth of walkDelegationChain's recursion (authz_delegation_ceiling.go),
+// so the failing link can be the agent's own creator or any creator further
+// up the chain. Saying "the principal that created it" would be false
+// whenever the failure is a grandparent or higher — see the DenyCause doc
+// comment on authz.go, which already says "directly or transitively".
+//
+// DenyCauseCeilingError and any unrecognised cause (including "", the zero
+// value) fall through to the generic message: a store fault is
+// transient/internal, not a fact about the caller worth surfacing, and an
+// unknown cause is safer treated as no diagnosis than guessed at.
+func saAssignForbiddenMessage(cause DenyCause) string {
+	switch cause {
+	case DenyCauseCeilingOrphaned:
+		return "This agent cannot assign service accounts: a principal in its delegation chain " +
+			"(the user or agent that created it, or one of their creators) does not exist. " +
+			"Ask an admin to recreate the agent under a current user."
+	case DenyCauseCeilingDelegatorLacksPermission:
+		return "This agent cannot assign service accounts: a principal in its delegation chain " +
+			"(the user or agent that created it, or one of their creators) does not hold permission " +
+			"to assign this service account."
+	default:
+		return saAssignGenericForbiddenMsg
+	}
+}
+
+// evaluateSAAssignment is the transport-independent body of
+// authorizeSAAssignment: every check, log line and audit record, with the
+// caller taken from the identity on ctx. It returns nil when the assignment
+// may proceed. r is used only to name the request path in denial logs and may
+// be nil for callers with no HTTP request (the scheduler); logAuthzDenial
+// accepts a nil request, and TestEvaluateSAAssignment_NilRequest* pin that.
+func (s *Server) evaluateSAAssignment(ctx context.Context, r *http.Request, sa *store.GCPServiceAccount, surface string) *saAssignDenial {
 	if sa == nil {
 		// Caller bug rather than a policy outcome; deny rather than panic.
 		slog.Error("service-account assignment denied: nil service account",
 			"surface", surface)
-		writeForbidden(w, "")
-		return false
+		return &saAssignDenial{kind: saAssignDenyForbidden}
 	}
 
 	// Precondition: hub-scoped SA assignment requires gcpIamCheckMode=enforce.
@@ -279,27 +384,35 @@ func (s *Server) authorizeSAAssignment(w http.ResponseWriter, r *http.Request, s
 		if mode != SAAssignCheckEnforce {
 			slog.Warn("hub-scoped SA assignment denied: gcpIamCheckMode is not enforce",
 				"surface", surface, "targetSA", sa.Email, "mode", mode)
-			writeForbidden(w, "Hub-scoped service account assignment requires gcpIamCheckMode=enforce")
-			return false
+			return &saAssignDenial{kind: saAssignDenyForbidden,
+				msg: "Hub-scoped service account assignment requires gcpIamCheckMode=enforce"}
 		}
 	}
 
-	// Layer 1: Hub policy.
-	if !s.authorizeMsg(w, r, gcpServiceAccountResource(sa), ActionAssign,
-		"You don't have permission to assign this GCP service account") {
-		return false
-	}
-
-	// Layer 2: GCP actAs.
-	ctx := r.Context()
 	identity := GetIdentityFromContext(ctx)
 	resource := gcpServiceAccountResource(sa)
 
+	// Layer 1: Hub policy. Same decision and responses as authorizeMsg.
+	if identity == nil {
+		return &saAssignDenial{kind: saAssignDenyUnauthorized}
+	}
+	if s.authzService == nil {
+		logAuthzDenial(r, identity, resource, ActionAssign, "no authz service")
+		return &saAssignDenial{kind: saAssignDenyForbiddenStructured,
+			msg: saAssignGenericForbiddenMsg, resourceType: resource.Type}
+	}
+	if decision := s.authzService.CheckAccess(ctx, identity, resource, ActionAssign); !decision.Allowed {
+		logAuthzDenial(r, identity, resource, ActionAssign, decision.Reason)
+		return &saAssignDenial{kind: saAssignDenyForbiddenStructured,
+			msg: saAssignForbiddenMessage(decision.DenyCause), resourceType: resource.Type}
+	}
+
+	// Layer 2: GCP actAs.
 	principal, err := s.callerPrincipal(ctx)
 	if err != nil {
 		logAuthzDenial(r, identity, resource, ActionAssign, "caller principal: "+err.Error())
-		writeForbidden(w, "You don't have permission to assign this GCP service account")
-		return false
+		return &saAssignDenial{kind: saAssignDenyForbidden,
+			msg: saAssignGenericForbiddenMsg}
 	}
 
 	// The decision sequence — same-account propagation, no-GCP-identity denial,
@@ -347,26 +460,27 @@ func (s *Server) authorizeSAAssignment(w http.ResponseWriter, r *http.Request, s
 		// agent one, and an unwired checker is fixed by an operator and not by
 		// the caller at all. Mechanism is not secret — it names which check
 		// ran, never what any policy contains.
+		var msg string
 		switch result.Mechanism {
 		case store.MechanismNoCallerIdentity:
-			writeForbidden(w, "Your identity cannot be granted permission to use this GCP service account")
+			msg = "Your identity cannot be granted permission to use this GCP service account"
 		case store.MechanismCheckUnwired, store.MechanismCheckUnavailable:
-			writeForbidden(w, "GCP permission checking is not available on this Hub; "+
-				"service-account assignment is refused until it is configured")
+			msg = "GCP permission checking is not available on this Hub; " +
+				"service-account assignment is refused until it is configured"
 		case store.MechanismCheckFailed:
 			// Transient and not the caller's fault. Deliberately does not tell
 			// them to request a grant they may already hold.
-			writeForbidden(w, "Could not verify your permission to use this GCP service "+
-				"account because the check did not complete; try again")
+			msg = "Could not verify your permission to use this GCP service " +
+				"account because the check did not complete; try again"
 		case store.MechanismUnattributableAllow:
 			// A checker bug, not a caller problem. Says nothing actionable to
 			// the caller because there is nothing they can do about it.
-			writeForbidden(w, "Could not verify your permission to use this GCP service account")
+			msg = "Could not verify your permission to use this GCP service account"
 		default:
-			writeForbidden(w, "You don't have permission to use this GCP service account ("+
-				store.PermissionActAs+" is required on "+sa.Email+")")
+			msg = "You don't have permission to use this GCP service account (" +
+				store.PermissionActAs + " is required on " + sa.Email + ")"
 		}
-		return false
+		return &saAssignDenial{kind: saAssignDenyForbidden, msg: msg}
 	}
 
 	// Mechanism is recorded on the allow path too, and this is the point of it:
@@ -377,5 +491,5 @@ func (s *Server) authorizeSAAssignment(w http.ResponseWriter, r *http.Request, s
 		"surface", surface, "callerKind", principal.Kind.String(),
 		"caller", principal.ID, "targetSA", sa.Email,
 		"mechanism", result.Mechanism)
-	return true
+	return nil
 }

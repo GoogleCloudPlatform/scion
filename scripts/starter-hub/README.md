@@ -1,6 +1,12 @@
-# Starter Hub — GCE Demo Deployment
+# Developer Hub — GCE Demo Deployment
+
+> **Note:** The directory is still named `scripts/starter-hub/` for backward
+> compatibility. The deployment tier is now called **Developer Hub**.
 
 Scripts for provisioning and operating a Scion Hub on a Google Compute Engine VM.
+This tier builds from source, uses GCS for storage, and GCP Secret Manager for
+secrets. For a simpler binary-based deployment, see the
+[Single-Node VM](../../docs/deploy/single-node-vm.md) tier.
 
 ## Prerequisites
 

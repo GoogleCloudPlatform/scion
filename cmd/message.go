@@ -225,7 +225,11 @@ Examples:
 			return fmt.Errorf("--thread-id requires --channel to be set")
 		}
 
-		// Validate --raw restrictions
+		// Validate --raw restrictions. --raw is a thin alias of the keys
+		// client (sendKeysViaHub/sendKeysLocal, shared with `scion keys`):
+		// anything keys itself does not support must be rejected here,
+		// before any send is attempted, exactly like every other
+		// invalid-combination check in this block.
 		if msgRaw {
 			if msgPlain {
 				return fmt.Errorf("--raw and --plain are mutually exclusive")
@@ -235,6 +239,32 @@ Examples:
 			}
 			if len(msgAttach) > 0 {
 				return fmt.Errorf("--raw cannot be combined with --attach")
+			}
+			if msgNotify {
+				return fmt.Errorf("--raw cannot be combined with --notify")
+			}
+			if msgInterrupt {
+				return fmt.Errorf("--raw cannot be combined with --interrupt; keys has no interrupt step")
+			}
+			// --thread-id checked before --channel: --thread-id requires
+			// --channel to be set at all (checked earlier, unconditionally),
+			// so the only way to reach this block with --thread-id set is
+			// with --channel also set — checking thread-id first lets its
+			// own, more specific message fire instead of being masked by
+			// the channel check.
+			if msgThreadID != "" {
+				return fmt.Errorf("--raw cannot be combined with --thread-id")
+			}
+			if msgChannel != "" {
+				return fmt.Errorf("--raw cannot be combined with --channel")
+			}
+			// Only a same-project @agent reference is an alias for `scion
+			// keys` (routed below, in place of sendMessageViaConversation);
+			// conv:/#thread/@email have no single-agent-keys equivalent and
+			// must not reach the legacy Raw StructuredMessage path that
+			// sendMessageViaConversation would otherwise use for them.
+			if convRef != nil && convRef.Kind != messaging.RefAgent {
+				return fmt.Errorf("--raw cannot be used with %s addressing; target the agent directly instead (e.g. 'scion keys <agent> ...')", convRef.Raw)
 			}
 		}
 
@@ -316,20 +346,71 @@ Examples:
 			}
 		}
 
+		// Cross-project detection: when running as an agent and --project
+		// specifies a different project than the sender's own, the --project
+		// value is the TARGET project, not the sender's working context.
+		// Set up hub context using the agent's own project and capture the
+		// target project slug for cross-project resolution.
+		//
+		// When --project matches the agent's own project (by slug or ID),
+		// skip cross-project detection to preserve normal same-project
+		// sending — which works even when CPM is disabled. Without this
+		// guard, the cross-project resolver would reject at Hub-off before
+		// lookup, breaking ordinary same-project sends with explicit --project.
+		var crossProjectTarget string
+		senderProjectPath := projectPath
+		hasAgentTarget := agentName != "" || (convRef != nil && convRef.Kind == messaging.RefAgent)
+		if hasAgentTarget {
+			crossProjectTarget = detectCrossProjectTarget(cmd)
+			if crossProjectTarget != "" {
+				senderProjectPath = "" // let hub context resolve from agent's own config
+			}
+		}
+
+		// --raw cannot cross a project boundary: the deprecated keystroke
+		// path skips the wrapped envelope, so a cross-project send must
+		// refuse it the same way `scion keys` refuses cross-project targets
+		// outright. This CLI check is UX only; the authoritative refusal is
+		// hub-side (ExecuteAgentKeys, via authorizeAgentKeys).
+		if crossProjectTarget != "" && msgRaw {
+			return fmt.Errorf("--raw cannot be used with a cross-project target; message the agent from within its own project")
+		}
+
+		// conv:<id> with explicit --project mismatch in agent mode: reject.
+		// The conversation ID already identifies its project context;
+		// reinterpreting the sender context via --project would be silently
+		// wrong. This intentionally does NOT reuse detectCrossProjectTarget:
+		// that helper treats an explicitly empty --project ("") as
+		// same-project, but this check must still reject it, matching
+		// pre-existing behavior.
+		if convRef != nil && convRef.Kind == messaging.RefConversation &&
+			os.Getenv("SCION_AGENT_NAME") != "" && cmd.Flags().Changed("project") {
+			ownProjectSlug := os.Getenv("SCION_PROJECT")
+			ownProjectID := os.Getenv("SCION_PROJECT_ID")
+			isSameProject := (ownProjectSlug != "" && projectPath == ownProjectSlug) ||
+				(ownProjectID != "" && projectPath == ownProjectID)
+			if !isSameProject {
+				return fmt.Errorf("--project cannot be used with conv: references; the conversation already identifies its project context")
+			}
+		}
+
 		// Check if Hub should be used
 		var hubCtx *HubContext
 		if convRef != nil {
 			// Conversation references require Hub mode for resolution
-			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
+			hubCtx, err = CheckHubAvailabilityWithOptions(senderProjectPath, true)
 		} else if len(groupRecipients) > 0 {
 			// Group recipients: skip sync (multiple recipients, no single agent)
-			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
+			hubCtx, err = CheckHubAvailabilityWithOptions(senderProjectPath, true)
 		} else if userRecipient != "" {
 			// User recipient: skip sync (no agent involved)
-			hubCtx, err = CheckHubAvailabilityWithOptions(projectPath, true)
+			hubCtx, err = CheckHubAvailabilityWithOptions(senderProjectPath, true)
+		} else if crossProjectTarget != "" {
+			// Cross-project: set up hub from agent's own project
+			hubCtx, err = CheckHubAvailabilityWithOptions(senderProjectPath, true)
 		} else {
 			// Single agent: exclude target from sync requirements
-			hubCtx, err = CheckHubAvailabilityForAgent(projectPath, agentName, true)
+			hubCtx, err = CheckHubAvailabilityForAgent(senderProjectPath, agentName, true)
 		}
 		if err != nil {
 			return err
@@ -377,8 +458,30 @@ Examples:
 			msgAttach = staged
 		}
 
+		// Cross-project agent addressing: intercept @agent and bare agent
+		// names BEFORE the generic convRef dispatch. When crossProjectTarget
+		// is set, both forms route through the cross-project send path.
+		if hubCtx != nil && crossProjectTarget != "" {
+			if convRef != nil && convRef.Kind == messaging.RefAgent {
+				return sendCrossProjectMessage(hubCtx, crossProjectTarget, convRef.Value, message, msgInterrupt, msgWake, msgAttach)
+			}
+			if agentName != "" {
+				return sendCrossProjectMessage(hubCtx, crossProjectTarget, agentName, message, msgInterrupt, msgWake, msgAttach)
+			}
+		}
+
 		// Conversation-reference messages: resolve and send via Hub
 		if convRef != nil {
+			if msgRaw {
+				// Validated above: only RefAgent (same-project @agent) can
+				// still be msgRaw here. It is a plain alias for `scion
+				// keys` against that same agent slug — never
+				// sendMessageViaConversation, which would otherwise build a
+				// Raw StructuredMessage for it. Slugify like every other
+				// keys entry point so `@Builder` and `Builder` address the
+				// same agent.
+				return sendKeysViaHub(hubCtx, api.Slugify(convRef.Value), message)
+			}
 			return sendMessageViaConversation(hubCtx, convRef, message, msgInterrupt, msgWake, msgAttach)
 		}
 
@@ -393,6 +496,12 @@ Examples:
 		}
 
 		if hubCtx != nil {
+			if msgRaw {
+				// The temporary --raw alias: identical operation to `scion
+				// keys`, through the same dedicated /keys client path —
+				// never /message, never a Raw StructuredMessage.
+				return sendKeysViaHub(hubCtx, agentName, message)
+			}
 			return sendMessageViaHub(hubCtx, agentName, message, msgInterrupt, msgNotify, msgWake)
 		}
 
@@ -408,6 +517,13 @@ Examples:
 			return fmt.Errorf("--attach requires Hub mode (use 'scion hub enable' first); in local mode, include the file contents in the message text")
 		}
 
+		// The temporary --raw alias in local mode: the same project-scoped,
+		// ambiguity-safe keys path `scion keys` uses (sendKeysLocal), never
+		// the legacy MessageRaw primitive.
+		if msgRaw {
+			return sendKeysLocal(agentName, message)
+		}
+
 		// Local mode — structured messages are only available in Hub mode,
 		// so local mode continues to use plain text delivery.
 		ctx := context.Background()
@@ -415,12 +531,6 @@ Examples:
 		rt := runtime.GetRuntime(projectPath, profile)
 		mgr := agent.NewManager(rt)
 		defer mgr.Close()
-
-		// Raw mode: send literal bytes via send-keys with no trailing Enter
-		if msgRaw {
-			fmt.Printf("Sending raw keys to agent '%s'...\n", agentName)
-			return mgr.MessageRaw(ctx, agentName, "", message)
-		}
 
 		fmt.Printf("Sending message to agent '%s'...\n", agentName)
 		if err := mgr.Message(ctx, agentName, "", message, msgInterrupt); err != nil {
@@ -459,11 +569,15 @@ func resolveSenderIdentity(hubCtx *HubContext) string {
 }
 
 // buildStructuredMessage constructs a StructuredMessage from CLI parameters.
-func buildStructuredMessage(sender, recipient, message string, attachments []string) *messages.StructuredMessage {
+// raw, plain and urgent are passed explicitly (rather than read from the
+// message-command package globals) so non-`scion message` callers — e.g.
+// `scion keys`, which always wants Raw=true and never sets the message
+// package's flag globals — can reuse this helper without forking it.
+func buildStructuredMessage(sender, recipient, message string, attachments []string, raw, plain, urgent bool) *messages.StructuredMessage {
 	msg := messages.NewInstruction(sender, recipient, message)
-	msg.Plain = msgPlain
-	msg.Raw = msgRaw
-	msg.Urgent = msgInterrupt
+	msg.Plain = plain
+	msg.Raw = raw
+	msg.Urgent = urgent
 	if len(attachments) > 0 {
 		msg.Attachments = attachments
 	}
@@ -501,30 +615,108 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	msg := buildStructuredMessage(sender, "agent:"+agentName, message, msgAttach)
+	msg := buildStructuredMessage(sender, "agent:"+agentName, message, msgAttach, msgRaw, msgPlain, interrupt)
 	// Validate through the new envelope choke point (Phase 7, AC-8).
 	if err := messaging.ValidateLegacyMessage(msg); err != nil {
 		return fmt.Errorf("message validation failed: %w", err)
 	}
-	if _, err := agentSvc.SendStructuredMessage(ctx, agentName, msg, interrupt, notify, wake); err != nil {
+
+	// Server-side @mention fan-out: the hub parses the body itself and
+	// delivers each mention, so the CLI sends a single request. It still
+	// sends an explicit mentions list — unioned with --cc — so a hub that
+	// only fans out from the explicit field still delivers it. Filtering
+	// self and the primary here matters because such a hub does not
+	// exclude the sender.
+	mentions := filterMentionNames(
+		messages.DedupMentionNames(extractMentions(message), parseCCFlag(msgCC)),
+		strings.TrimPrefix(sender, "agent:"), agentName)
+
+	resp, err := agentSvc.SendStructuredMessageWithOptions(ctx, agentName, msg, hubclient.SendMessageOptions{
+		Interrupt: interrupt,
+		Notify:    notify,
+		Wake:      wake,
+		Mentions:  mentions,
+	})
+	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", agentName, err))
 	}
 
-	if !isJSONOutput() {
-		fmt.Printf("Message delivered to agent '%s'.\n", agentName)
-		if notify {
-			fmt.Printf("Subscribed to notifications for agent '%s'.\n", agentName)
+	if isJSONOutput() {
+		if resp != nil {
+			return outputJSON(resp)
 		}
+		return nil
+	}
+	if resp != nil && resp.Status == "deferred" {
+		// Design agent-reincarnate §3.7: the recipient is mid-`scion
+		// reincarnate`. The message was saved to history, not dropped.
+		fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", agentName, resp.MessageID)
+	} else {
+		fmt.Printf("Message delivered to agent '%s'.\n", agentName)
+	}
+	if notify {
+		fmt.Printf("Subscribed to notifications for agent '%s'.\n", agentName)
+	}
+	if resp != nil {
+		printMentionResults(resp.MentionResults)
 	}
 
-	// @mention and --cc fan-out: send TypeMention messages to mentioned agents
-	var mentionNames []string
-	// Parse @mentions from message body
-	mentionNames = append(mentionNames, extractMentions(message)...)
-	// Parse --cc flag
-	mentionNames = append(mentionNames, parseCCFlag(msgCC)...)
-	if len(mentionNames) > 0 {
-		sendMentionMessages(hubCtx, sender, "agent:"+agentName, message, mentionNames, agentSvc)
+	return nil
+}
+
+// sendCrossProjectMessage resolves a target agent in a foreign project and
+// sends a message via the non-project-scoped agent message endpoint. The
+// sender's authenticated identity is preserved; only target resolution
+// crosses the project boundary.
+func sendCrossProjectMessage(hubCtx *HubContext, targetProject, agentSlug, message string, interrupt, wake bool, attachments []string) error {
+	if !isJSONOutput() {
+		PrintUsingHub(hubCtx.Endpoint)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Step 1: Resolve the target agent in the foreign project.
+	result, err := hubCtx.Client.Messaging().ResolveTarget(ctx, targetProject, agentSlug)
+	if err != nil {
+		return wrapHubError(fmt.Errorf("failed to resolve agent %q in project %q: %w", agentSlug, targetProject, err))
+	}
+	if result.Agent == nil {
+		return fmt.Errorf("agent %q not found in project %q", agentSlug, targetProject)
+	}
+
+	if !isJSONOutput() {
+		fmt.Printf("Sending cross-project message to agent '%s' in project '%s'...\n", agentSlug, targetProject)
+	}
+
+	// Step 2: Build the structured message with the sender's identity.
+	sender := resolveSenderIdentity(hubCtx)
+	msg := buildStructuredMessage(sender, "agent:"+agentSlug, message, attachments, msgRaw, msgPlain, interrupt)
+	if err := messaging.ValidateLegacyMessage(msg); err != nil {
+		return fmt.Errorf("message validation failed: %w", err)
+	}
+
+	// Step 3: Send via the non-project-scoped endpoint using the target's UUID.
+	// ProjectAgents("") produces /api/v1/agents/{uuid}/message which bypasses
+	// the project-scoped slug lookup and its project isolation check.
+	agentSvc := hubCtx.Client.ProjectAgents("")
+	resp, err := agentSvc.SendStructuredMessage(ctx, result.Agent.ID, msg, interrupt, false, wake)
+	if err != nil {
+		return wrapHubError(fmt.Errorf("failed to send cross-project message to agent '%s': %w", agentSlug, err))
+	}
+
+	// The hub fans body @mentions out for this path too, the same as any
+	// other agent message; report the results the same way the other send
+	// paths do.
+	if isJSONOutput() {
+		if resp != nil {
+			return outputJSON(resp)
+		}
+		return nil
+	}
+	fmt.Printf("Message delivered to agent '%s' in project '%s'.\n", agentSlug, targetProject)
+	if resp != nil {
+		printMentionResults(resp.MentionResults)
 	}
 
 	return nil
@@ -561,6 +753,10 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 	// DEF-142 P5: when running in an agent context, send ALL ref kinds via
 	// the outbound endpoint with conversation_ref. The server resolves the
 	// ref inline (P3) and routes through the existing DEF-138 auth block.
+	//
+	// CPM cutover (#1693): conv: references now route through the outbound
+	// endpoint like @email and #thread, eliminating the duplicate conversation
+	// send API path. Wake and attachments are fully supported.
 	senderAgent := os.Getenv("SCION_AGENT_NAME")
 	if senderAgent != "" {
 		// DEF-164: agent-to-agent messages use the structured message
@@ -571,25 +767,51 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		// and the orphan rows.
 		if ref.Kind == messaging.RefAgent {
 			sender := "agent:" + senderAgent
-			agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments)
+			agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments, msgRaw, msgPlain, interrupt)
 			if err := messaging.ValidateLegacyMessage(agentMsg); err != nil {
 				return fmt.Errorf("message validation failed: %w", err)
 			}
-			if _, err := agentSvc.SendStructuredMessage(ctx, ref.Value, agentMsg, interrupt, false, wake); err != nil {
+			// Server-side @mention fan-out: no --cc here (not accepted on
+			// this path), just the body's @mentions, filtered of the sender
+			// and the primary for old-hub compatibility.
+			mentions := filterMentionNames(extractMentions(message), senderAgent, ref.Value)
+			resp, err := agentSvc.SendStructuredMessageWithOptions(ctx, ref.Value, agentMsg, hubclient.SendMessageOptions{
+				Wake:     wake,
+				Mentions: mentions,
+			})
+			if err != nil {
 				return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", ref.Value, err))
 			}
-			if !isJSONOutput() {
+			if isJSONOutput() {
+				if resp != nil {
+					return outputJSON(resp)
+				}
+				return nil
+			}
+			if resp != nil && resp.Status == "deferred" {
+				// Design agent-reincarnate §3.7: the recipient is
+				// mid-`scion reincarnate`. The message was saved to
+				// history, not dropped.
+				fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", ref.Value, resp.MessageID)
+			} else {
 				fmt.Printf("Message delivered to agent '%s'.\n", ref.Value)
+			}
+			if resp != nil {
+				printMentionResults(resp.MentionResults)
 			}
 			return nil
 		}
 
+		// All non-agent ref kinds (conv:, @email, #thread) route through
+		// the outbound endpoint with conversation_ref. The server resolves
+		// the ref inline and handles wake, attachments, and auth.
 		outMsg := &hubclient.OutboundMessageRequest{
 			Msg:             message,
 			Type:            "instruction",
 			Urgent:          interrupt,
 			ConversationRef: ref.Raw,
 			Attachments:     attachments,
+			Wake:            wake,
 		}
 		if ref.Kind == messaging.RefEmail {
 			outMsg.Recipient = "user:" + ref.Value
@@ -613,12 +835,35 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 			return fmt.Errorf("message validation failed: %w", err)
 		}
 
-		if err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
+		result, err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg)
+		if err != nil {
 			return wrapHubError(fmt.Errorf("failed to send message to %s: %w", ref.Raw, err))
 		}
-		if !isJSONOutput() {
-			fmt.Printf("Message sent to %s.\n", ref.Raw)
+		if isJSONOutput() {
+			// JSON output with full result (MentionResults included, if any).
+			// outputJSON encodes a nil *OutboundMessageResult as JSON null,
+			// which is valid output and does not panic.
+			return outputJSON(result)
 		}
+		// apiclient.DecodeResponse returns (nil, nil) on 204 No Content, so
+		// result can be nil with a nil err; print the minimal confirmation
+		// instead of dereferencing a nil result.
+		if result == nil {
+			fmt.Printf("Message dispatched to %s.\n", ref.Raw)
+			return nil
+		}
+		// Distinguish accepted dispatch from confirmed delivery.
+		switch result.Status {
+		case "sent":
+			fmt.Printf("Message sent to %s (message %s).\n", ref.Raw, result.MessageID)
+		case "deferred":
+			// Design agent-reincarnate §3.7: the recipient is mid-`scion
+			// reincarnate`. The message was saved to history, not dropped.
+			fmt.Printf("agent %s is reincarnating; message saved to history and will be seen on catch-up (message %s).\n", ref.Raw, result.MessageID)
+		default:
+			fmt.Printf("Message dispatched to %s (message %s, status: %s).\n", ref.Raw, result.MessageID, result.Status)
+		}
+		printMentionResults(result.MentionResults)
 		return nil
 	}
 
@@ -636,7 +881,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 	// message endpoint. The server derives the conversation from the
 	// sender/recipient principals (DEF-138 Rule 3).
 	sender := resolveSenderIdentity(hubCtx)
-	agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments)
+	agentMsg := buildStructuredMessage(sender, "agent:"+ref.Value, message, attachments, msgRaw, msgPlain, interrupt)
 	if err := messaging.ValidateLegacyMessage(agentMsg); err != nil {
 		return fmt.Errorf("message validation failed: %w", err)
 	}
@@ -718,12 +963,20 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 		ThreadID:    msgThreadID,
 	}
 
-	if err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
+	result, err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg)
+	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to send message to %s: %w", userRecipient, err))
 	}
 
-	if !isJSONOutput() {
-		fmt.Printf("Message sent to %s via Hub.\n", userRecipient)
+	if isJSONOutput() {
+		if result != nil {
+			return outputJSON(result)
+		}
+		return nil
+	}
+	fmt.Printf("Message sent to %s via Hub.\n", userRecipient)
+	if result != nil {
+		printMentionResults(result.MentionResults)
 	}
 	return nil
 }
@@ -759,6 +1012,12 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 		Error     string `json:"error,omitempty"`
 	}
 
+	// A25.6 F2: the group[] fan-out prints its per-recipient status from the
+	// send response, not an assumption. Report-7-gteam-2a: while a target
+	// was reincarnating, the human CLI printed "Delivered" for it anyway —
+	// the response was discarded. Mirror the single-recipient path's own
+	// "Status == deferred" check (see sendMessageViaHub above).
+
 	results := make([]recipientResult, len(recipients))
 	var wg sync.WaitGroup
 
@@ -773,14 +1032,22 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 			switch recip.Kind {
 			case messages.RecipientAgent:
 				slug := api.Slugify(recip.Name)
-				msg := buildStructuredMessage(sender, "agent:"+slug, message, msgAttach)
+				msg := buildStructuredMessage(sender, "agent:"+slug, message, msgAttach, msgRaw, msgPlain, interrupt)
 				msg.Type = messages.TypeGroupSet
 				msg.Recipients = recipientsStr
 				msg.Metadata = map[string]string{"group_id": groupID}
-				if _, err := agentSvc.SendStructuredMessage(ctx, slug, msg, interrupt, false, false); err != nil {
+				sendResp, err := agentSvc.SendStructuredMessage(ctx, slug, msg, interrupt, false, false)
+				if err != nil {
 					results[idx] = recipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
 					if !isJSONOutput() {
 						fmt.Printf("  Failed: %s: %s\n", recipStr, err)
+					}
+					return
+				}
+				if sendResp != nil && sendResp.Status == "deferred" {
+					results[idx] = recipientResult{Recipient: recipStr, Status: "deferred"}
+					if !isJSONOutput() {
+						fmt.Printf("  Deferred: %s (agent is reincarnating; saved)\n", recipStr)
 					}
 					return
 				}
@@ -812,7 +1079,7 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 					ThreadID:    msgThreadID,
 					Metadata:    map[string]string{"recipients": recipientsStr, "group_id": groupID},
 				}
-				if err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
+				if _, err := agentSvc.SendOutboundMessage(ctx, senderAgent, outMsg); err != nil {
 					results[idx] = recipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
 					if !isJSONOutput() {
 						fmt.Printf("  Failed: %s: %s\n", recipStr, err)
@@ -829,13 +1096,30 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 	wg.Wait()
 
 	delivered := 0
+	deferred := 0
+	failed := 0
 	for _, r := range results {
-		if r.Status == "delivered" {
+		switch r.Status {
+		case "delivered":
 			delivered++
+		case "deferred":
+			deferred++
+		default:
+			failed++
 		}
 	}
 
-	if !isJSONOutput() {
+	// A25.7 O1: honour --json for group sends the same way the
+	// single-recipient paths do (outputJSON(result)) — the per-recipient
+	// status, including "deferred", was previously only ever printed as
+	// human text; --json produced no output at all.
+	if isJSONOutput() {
+		if err := outputJSON(results); err != nil {
+			return err
+		}
+	} else if deferred > 0 {
+		fmt.Printf("Group delivery complete: %d/%d delivered, %d deferred.\n", delivered, len(recipients), deferred)
+	} else {
 		fmt.Printf("Group delivery complete: %d/%d delivered.\n", delivered, len(recipients))
 	}
 
@@ -875,11 +1159,22 @@ func sendGroupMessageViaHub(hubCtx *HubContext, recipients []messages.GroupRecip
 		}
 	}
 
-	if delivered == 0 {
-		return fmt.Errorf("group delivery failed: 0/%d recipients received the message", len(recipients))
+	// A25.6 F2: a deferred recipient is not a failure (design agent-reincarnate
+	// §3.7 — the message is saved for catch-up, not dropped), so it must not
+	// trip the partial-failure error below on its own.
+	//
+	// A25.7 O2: report delivered, deferred and failed counts explicitly. The
+	// previous "%d/%d delivered" wording folded deferred into "delivered" for
+	// this message only (the counts above were already separated), which
+	// could describe e.g. 1 delivered + 1 deferred + 1 failed as "2/3
+	// delivered" — technically true of the denominator, but it hides that a
+	// real failure occurred.
+	succeeded := delivered + deferred
+	if succeeded == 0 {
+		return fmt.Errorf("group delivery failed: 0 delivered, 0 deferred, %d failed (of %d total)", failed, len(recipients))
 	}
-	if delivered < len(recipients) {
-		return fmt.Errorf("group delivery partially failed: %d/%d delivered", delivered, len(recipients))
+	if succeeded < len(recipients) {
+		return fmt.Errorf("group delivery partially failed: %d delivered, %d deferred, %d failed (of %d total)", delivered, deferred, failed, len(recipients))
 	}
 
 	return nil
@@ -998,9 +1293,13 @@ func validateChannel(hubCtx *HubContext, channel string) error {
 	return fmt.Errorf("channel %q is not registered; available channels: %s", channel, strings.Join(available, ", "))
 }
 
-// extractMentions delegates to the shared messages.ExtractMentions.
+// extractMentions delegates to the shared messages.ExtractProseMentions, so
+// an @-mention inside a fenced code block, an inline backtick span, or a
+// quoted '>' line is not treated as an address. Agent bodies pasting logs or
+// diffs are common enough that this matters for the CLI's own
+// explicit-mentions list, same as it does for the server's body parsing.
 func extractMentions(text string) []string {
-	return messages.ExtractMentions(text)
+	return messages.ExtractProseMentions(text)
 }
 
 // parseCCFlag delegates to the shared messages.ParseCCFlags. The --cc flag is
@@ -1011,6 +1310,70 @@ func parseCCFlag(cc []string) []string {
 
 // maxMentionRecipients is an alias for the shared constant.
 const maxMentionRecipients = messages.MaxMentionRecipients
+
+// filterMentionNames drops any name equal (case-insensitively) to selfSlug or
+// primarySlug. This matters against an old hub, which does not exclude the
+// sender from an explicit mentions list the way the new hub's
+// fanOutAgentMentions does.
+func filterMentionNames(names []string, selfSlug, primarySlug string) []string {
+	if len(names) == 0 {
+		return nil
+	}
+	var out []string
+	for _, name := range names {
+		if selfSlug != "" && strings.EqualFold(name, selfSlug) {
+			continue
+		}
+		if primarySlug != "" && strings.EqualFold(name, primarySlug) {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
+}
+
+// printMentionResults prints one line per mention result to stderr,
+// describing the outcome for names that were not cleanly delivered. Skipped
+// entirely under --json output, where the caller includes the results in the
+// JSON response instead.
+func printMentionResults(results []messages.MentionResult) {
+	if isJSONOutput() {
+		return
+	}
+	for _, r := range results {
+		switch r.Status {
+		case "delivered":
+			// AgentPhase covers every non-running phase alike (stopped,
+			// suspended, errored, still starting, ...) — the hub delivers
+			// a mention regardless of which one it is, so the wording here
+			// must not claim it "resumes", which is only accurate for
+			// stopped/suspended.
+			if r.AgentPhase != "" && r.AgentPhase != "running" {
+				fmt.Fprintf(os.Stderr, "@%s is %s; it will see this mention once it is running.\n", r.Slug, r.AgentPhase)
+			} else {
+				fmt.Fprintf(os.Stderr, "Mention notification sent to @%s.\n", r.Slug)
+			}
+		case "not_found":
+			fmt.Fprintf(os.Stderr, "Warning: @%s does not match any agent in this project; skipping mention\n", r.Slug)
+		case "unauthorized":
+			fmt.Fprintf(os.Stderr, "Warning: mention to @%s was denied (message delivery not authorized)\n", r.Slug)
+		case "suppressed":
+			fmt.Fprintf(os.Stderr, "Warning: mention to @%s was suppressed by loop protection; retry later\n", r.Slug)
+		case "rate_limited":
+			fmt.Fprintf(os.Stderr, "Warning: mention to @%s was rate-limited; retry later\n", r.Slug)
+		case "ambiguous":
+			fmt.Fprintf(os.Stderr, "Warning: mention to @%s delivery is ambiguous; it may or may not have been delivered\n", r.Slug)
+		case "timeout":
+			fmt.Fprintf(os.Stderr, "Warning: mention to @%s timed out and was not attempted\n", r.Slug)
+		default:
+			if r.Error != "" {
+				fmt.Fprintf(os.Stderr, "Warning: mention to @%s failed: %s\n", r.Slug, r.Error)
+			} else {
+				fmt.Fprintf(os.Stderr, "Warning: mention to @%s: %s\n", r.Slug, r.Status)
+			}
+		}
+	}
+}
 
 // sendMentionMessages resolves @mentions and --cc names against project agents
 // and sends TypeMention messages to each resolved agent. The primary recipient
@@ -1034,10 +1397,13 @@ func sendMentionMessages(hubCtx *HubContext, sender, primaryRecipient, messageTe
 		return
 	}
 
-	// Build lookup map of known agents (slug -> slug with original case)
+	// Build lookup map of known agents (slug -> slug with original case).
+	// Keyed by Slug, not Name: a mention names the agent's slug (e.g.
+	// "@my-agent"), which can differ from its display Name, so looking up
+	// by Name missed or mis-resolved any agent whose Name and Slug diverge.
 	knownAgents := make(map[string]string, len(resp.Agents))
 	for _, a := range resp.Agents {
-		knownAgents[strings.ToLower(a.Name)] = a.Name
+		knownAgents[strings.ToLower(a.Slug)] = a.Slug
 	}
 
 	// Determine the primary recipient's slug for dedup

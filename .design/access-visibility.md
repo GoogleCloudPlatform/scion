@@ -1,7 +1,15 @@
 # Access & Visibility: Design Analysis and Phased Plan
 
+> **Superseded by [ptone/scion#1793](https://github.com/ptone/scion/issues/1793).** This
+> document proposes building the `visibility` trait out into a full access-control mechanism.
+> The opposite decision was made: `visibility` is being removed. It has already been removed
+> from agents, templates, and harness configs (ptone/scion#1904); the skills slice — the only
+> one with live behavior — is tracked separately (ptone/scion#1903). Do not use this document
+> to guide new work; it is retained only for historical context on the analysis that preceded
+> the removal decision.
+
 ## Status
-**Proposed**
+**Proposed** (superseded — see notice above)
 
 ---
 

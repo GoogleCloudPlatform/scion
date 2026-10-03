@@ -46,6 +46,9 @@ func TestPipeline_StartStop(t *testing.T) {
 	t.Setenv(EnvCloudEnabled, "false")
 	t.Setenv(EnvGRPCPort, "0")
 	t.Setenv(EnvHTTPPort, "0")
+	// A deriver built with GRPCPort=0 dials 127.0.0.1:0 on shutdown; opt out
+	// of native explicitly instead of relying on ambient absence.
+	t.Setenv("SCION_USAGE_SOURCE", "")
 
 	pipeline := New()
 	if pipeline == nil {
@@ -85,6 +88,9 @@ func TestPipeline_DoubleStart(t *testing.T) {
 	t.Setenv(EnvCloudEnabled, "false")
 	t.Setenv(EnvGRPCPort, "0")
 	t.Setenv(EnvHTTPPort, "0")
+	// A deriver built with GRPCPort=0 dials 127.0.0.1:0 on shutdown; opt out
+	// of native explicitly instead of relying on ambient absence.
+	t.Setenv("SCION_USAGE_SOURCE", "")
 
 	pipeline := New()
 	if pipeline == nil {
@@ -162,9 +168,10 @@ func TestPipeline_HandleMetrics_NilExporter(t *testing.T) {
 		t.Fatal("Expected non-nil pipeline")
 	}
 
-	// handleMetrics with nil exporter should not error
+	// A valid metric with no configured exporter is accepted and counted as a
+	// deliberate local drop.
 	err := pipeline.handleMetrics(context.Background(), []*metricpb.ResourceMetrics{
-		{ScopeMetrics: []*metricpb.ScopeMetrics{{Metrics: []*metricpb.Metric{{Name: "test"}}}}},
+		testMetricResource("native", "scope", "", "", testNumber("test", metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE, 1, 2, 1)),
 	})
 	if err != nil {
 		t.Errorf("handleMetrics should not return error without exporter, got: %v", err)
@@ -195,6 +202,9 @@ func TestPipeline_MetricHandlerRegistered(t *testing.T) {
 	t.Setenv(EnvCloudEnabled, "false")
 	t.Setenv(EnvGRPCPort, "0")
 	t.Setenv(EnvHTTPPort, "0")
+	// A deriver built with GRPCPort=0 dials 127.0.0.1:0 on shutdown; opt out
+	// of native explicitly instead of relying on ambient absence.
+	t.Setenv("SCION_USAGE_SOURCE", "")
 
 	pipeline := New()
 	if pipeline == nil {
@@ -264,6 +274,9 @@ func TestPipeline_LogHandlerRegistered(t *testing.T) {
 	t.Setenv(EnvCloudEnabled, "false")
 	t.Setenv(EnvGRPCPort, "0")
 	t.Setenv(EnvHTTPPort, "0")
+	// A deriver built with GRPCPort=0 dials 127.0.0.1:0 on shutdown; opt out
+	// of native explicitly instead of relying on ambient absence.
+	t.Setenv("SCION_USAGE_SOURCE", "")
 
 	pipeline := New()
 	if pipeline == nil {

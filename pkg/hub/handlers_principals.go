@@ -49,7 +49,7 @@ type GroupsResponse struct {
 // handleMyGroups handles GET /api/v1/users/me/groups.
 func (s *Server) handleMyGroups(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -83,7 +83,7 @@ func (s *Server) handleMyGroups(w http.ResponseWriter, r *http.Request) {
 // handleAgentGroups handles GET /api/v1/agents/{id}/groups.
 func (s *Server) handleAgentGroups(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -118,7 +118,7 @@ func (s *Server) handleAgentGroups(w http.ResponseWriter, r *http.Request, agent
 // handlePrincipalRoutes handles GET /api/v1/principals/{principalType}/{principalId}.
 func (s *Server) handlePrincipalRoutes(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 

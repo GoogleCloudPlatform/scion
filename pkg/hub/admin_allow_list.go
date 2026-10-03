@@ -69,7 +69,7 @@ func (s *Server) handleAdminAllowList(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.handleAdminAllowListAdd(w, r, user)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -86,7 +86,7 @@ func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Requ
 	case "import":
 		setDeprecationHeader(w)
 		if r.Method != http.MethodPost {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
 		s.handleAdminAllowListImport(w, r, user)
@@ -94,7 +94,7 @@ func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Requ
 	case "domains":
 		// Not deprecated — no Deprecation header.
 		if r.Method != http.MethodGet {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet)
 			return
 		}
 		s.handleAdminAllowListDomains(w, r)
@@ -105,7 +105,7 @@ func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Requ
 	setDeprecationHeader(w)
 
 	if r.Method != http.MethodDelete {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodDelete)
 		return
 	}
 
@@ -239,7 +239,7 @@ func (s *Server) handleAdminAllowListAdd(w http.ResponseWriter, r *http.Request,
 		ID:         uuid.New().String(),
 		Email:      email,
 		Status:     store.UserStatusInvited,
-		Role:       store.UserRoleMember,
+		Role:       store.UserRoleMember, // placeholder; the real role is assigned at first sign-in (see determineUserRole)
 		InvitedBy:  &invitedBy,
 		InviteNote: note,
 	}
@@ -356,7 +356,7 @@ func (s *Server) handleAdminAllowListImport(w http.ResponseWriter, r *http.Reque
 			ID:         uuid.New().String(),
 			Email:      email,
 			Status:     store.UserStatusInvited,
-			Role:       store.UserRoleMember,
+			Role:       store.UserRoleMember, // placeholder; the real role is assigned at first sign-in (see determineUserRole)
 			InvitedBy:  &invitedBy,
 			InviteNote: note,
 		}

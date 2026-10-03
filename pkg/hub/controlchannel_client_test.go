@@ -16,12 +16,17 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 )
 
@@ -29,6 +34,17 @@ type mockControlChannelTunnel struct {
 	connected   bool
 	lastBroker  string
 	lastRequest *wsprotocol.RequestEnvelope
+	status      int               // response status; 0 means 200
+	body        []byte            // response body; nil means no body
+	headers     map[string]string // response headers; nil means none
+	// err, when non-nil, makes TunnelRequest fail instead of returning a
+	// response — used by keys fault-injection tests (e.g. a broker
+	// reconnect or response-loss mid-flight, after the pre-send connection
+	// check already passed).
+	err error
+	// calls counts TunnelRequest invocations, so tests can prove a caller
+	// made at most one dispatch attempt (no reconnect/retry).
+	calls int
 }
 
 func (m *mockControlChannelTunnel) IsConnected(string) bool {
@@ -36,9 +52,17 @@ func (m *mockControlChannelTunnel) IsConnected(string) bool {
 }
 
 func (m *mockControlChannelTunnel) TunnelRequest(_ context.Context, brokerID string, req *wsprotocol.RequestEnvelope) (*wsprotocol.ResponseEnvelope, error) {
+	m.calls++
 	m.lastBroker = brokerID
 	m.lastRequest = req
-	return wsprotocol.NewResponseEnvelope(req.RequestID, http.StatusOK, nil, nil), nil
+	if m.err != nil {
+		return nil, m.err
+	}
+	status := m.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	return wsprotocol.NewResponseEnvelope(req.RequestID, status, m.headers, m.body), nil
 }
 
 type mockBrokerSigner struct {
@@ -111,12 +135,15 @@ func TestControlChannelBrokerClient_StartAgentSignsTunneledRequest(t *testing.T)
 		"/tmp/project",
 		"project-slug",
 		"",
+		"",
+		"",
 		nil,
 		nil,
 		nil,
 		nil,
 		false,
 		false,
+		StartExtras{},
 	)
 	if err != nil {
 		t.Fatalf("StartAgent returned error: %v", err)
@@ -140,6 +167,102 @@ func TestControlChannelBrokerClient_StartAgentSignsTunneledRequest(t *testing.T)
 	}
 }
 
+// TestControlChannelBrokerClient_StartAgentSendsWorkspaceDispatchFields proves
+// the control-channel transport writes StartExtras.Workspace's fields onto
+// the wire the same way the HTTP transport does (GoogleCloudPlatform/scion#1931):
+// gitClone (including its nested depth), branch, and workspaceMode, all via
+// the shared applyStartExtras builder.
+func TestControlChannelBrokerClient_StartAgentSendsWorkspaceDispatchFields(t *testing.T) {
+	tunnel := &mockControlChannelTunnel{connected: true}
+	signer := &mockBrokerSigner{}
+	client := &ControlChannelBrokerClient{
+		manager: tunnel,
+		signer:  signer,
+	}
+
+	depth := 1
+	extras := StartExtras{
+		HubEndpoint: "https://hub.example.com",
+		Workspace: WorkspaceDispatchSpec{
+			GitClone:      &api.GitCloneConfig{URL: "https://github.com/example/repo.git", Branch: "main", Depth: &depth},
+			Branch:        "feature-branch",
+			WorkspaceMode: store.WorkspaceModeWorktreePerAgent,
+		},
+	}
+
+	_, err := client.StartAgent(
+		context.Background(), "broker-1", "unused", "agent-1", "project-id-1",
+		"", "", "", "", "", "", nil, nil, nil, nil, false, false, extras,
+	)
+	if err != nil {
+		t.Fatalf("StartAgent returned error: %v", err)
+	}
+
+	if tunnel.lastRequest == nil {
+		t.Fatal("expected tunneled request to be captured")
+	}
+	var wire struct {
+		HubEndpoint string `json:"hubEndpoint"`
+		GitClone    struct {
+			URL    string `json:"url"`
+			Branch string `json:"branch"`
+			Depth  int    `json:"depth"`
+		} `json:"gitClone"`
+		Branch        string `json:"branch"`
+		WorkspaceMode string `json:"workspaceMode"`
+	}
+	if err := json.Unmarshal(tunnel.lastRequest.Body, &wire); err != nil {
+		t.Fatalf("failed to unmarshal tunneled body: %v", err)
+	}
+	if wire.HubEndpoint != extras.HubEndpoint {
+		t.Errorf("hubEndpoint = %q, want %q", wire.HubEndpoint, extras.HubEndpoint)
+	}
+	if wire.GitClone.URL != extras.Workspace.GitClone.URL {
+		t.Errorf("gitClone.url = %q, want %q", wire.GitClone.URL, extras.Workspace.GitClone.URL)
+	}
+	if wire.GitClone.Branch != extras.Workspace.GitClone.Branch {
+		t.Errorf("gitClone.branch = %q, want %q", wire.GitClone.Branch, extras.Workspace.GitClone.Branch)
+	}
+	if wire.GitClone.Depth != depth {
+		t.Errorf("gitClone.depth = %d, want %d", wire.GitClone.Depth, depth)
+	}
+	if wire.Branch != extras.Workspace.Branch {
+		t.Errorf("branch = %q, want %q", wire.Branch, extras.Workspace.Branch)
+	}
+	if wire.WorkspaceMode != extras.Workspace.WorkspaceMode {
+		t.Errorf("workspaceMode = %q, want %q", wire.WorkspaceMode, extras.Workspace.WorkspaceMode)
+	}
+}
+
+// TestControlChannelBrokerClient_RestartAgentOmitsWorkspaceFieldsWhenZero
+// pins that a zero-value StartExtras.Workspace (restart does not populate it)
+// sends no gitClone/branch/workspaceMode keys at all, rather than empty ones.
+func TestControlChannelBrokerClient_RestartAgentOmitsWorkspaceFieldsWhenZero(t *testing.T) {
+	tunnel := &mockControlChannelTunnel{connected: true}
+	signer := &mockBrokerSigner{}
+	client := &ControlChannelBrokerClient{
+		manager: tunnel,
+		signer:  signer,
+	}
+
+	err := client.RestartAgent(context.Background(), "broker-1", "unused", "agent-1", "project-id-1", nil, StartExtras{HubEndpoint: "https://hub.example.com"})
+	if err != nil {
+		t.Fatalf("RestartAgent returned error: %v", err)
+	}
+	if tunnel.lastRequest == nil {
+		t.Fatal("expected tunneled request to be captured")
+	}
+	var wire map[string]interface{}
+	if err := json.Unmarshal(tunnel.lastRequest.Body, &wire); err != nil {
+		t.Fatalf("failed to unmarshal tunneled body: %v", err)
+	}
+	for _, key := range []string{"gitClone", "branch", "workspaceMode"} {
+		if _, ok := wire[key]; ok {
+			t.Errorf("wire payload should not contain %q when Workspace is the zero value, got %v", key, wire[key])
+		}
+	}
+}
+
 func headerValue(headers map[string]string, name string) string {
 	for key, value := range headers {
 		if strings.EqualFold(key, name) {
@@ -147,4 +270,103 @@ func headerValue(headers map[string]string, name string) string {
 		}
 	}
 	return ""
+}
+
+// A broker 404 on delete means "no such agent in this project" and must be an
+// idempotent success, matching brokerHTTPTransport.DeleteAgent. Previously
+// doRequest turned every >=400 status into an error, so the 404 allowance in
+// DeleteAgent was dead code (ptone/scion#1819 UAT).
+func TestControlChannelBrokerClient_DeleteAgent404IsIdempotentSuccess(t *testing.T) {
+	tunnel := &mockControlChannelTunnel{connected: true, status: http.StatusNotFound}
+	client := &ControlChannelBrokerClient{manager: tunnel}
+
+	if err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", true, false, false, time.Time{}); err != nil {
+		t.Fatalf("expected nil error for broker 404 on delete, got %v", err)
+	}
+}
+
+// The StatusServiceUnavailable case is a regression test for
+// ptone/scion#2165: a 503 (the broker's container runtime transiently
+// unavailable) means "unknown, retry" — not "no such agent" — and must
+// propagate as an error rather than be folded into the 404
+// idempotent-success carve-out above.
+func TestControlChannelBrokerClient_DeleteAgentOtherErrorsPropagate(t *testing.T) {
+	for _, status := range []int{http.StatusConflict, http.StatusInternalServerError, http.StatusServiceUnavailable} {
+		tunnel := &mockControlChannelTunnel{connected: true, status: status}
+		client := &ControlChannelBrokerClient{manager: tunnel}
+
+		err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", true, false, false, time.Time{})
+		if err == nil {
+			t.Fatalf("status %d: expected error, got nil", status)
+		}
+		if !isBrokerStatus(err, status) {
+			t.Errorf("status %d: expected brokerStatusError carrying the status, got %v", status, err)
+		}
+	}
+}
+
+// A linked project's broker-local path is forwarded so the broker can find a
+// file-only agent there.
+func TestControlChannelBrokerClient_DeleteAgentForwardsProjectPath(t *testing.T) {
+	tunnel := &mockControlChannelTunnel{connected: true}
+	client := &ControlChannelBrokerClient{manager: tunnel}
+
+	ctx := withDeleteProjectPath(context.Background(), "/home/u/my repo")
+	if err := client.DeleteAgent(ctx, "broker-1", "unused", "agent-1", "proj-1", true, false, false, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	q, err := url.ParseQuery(tunnel.lastRequest.Query)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := q.Get("projectPath"); got != "/home/u/my repo" {
+		t.Errorf("projectPath = %q, want %q (query %q)", got, "/home/u/my repo", tunnel.lastRequest.Query)
+	}
+
+	if err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", true, false, false, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	if q, _ := url.ParseQuery(tunnel.lastRequest.Query); q.Has("projectPath") {
+		t.Errorf("projectPath sent without a hint: %q", tunnel.lastRequest.Query)
+	}
+}
+
+// TestControlChannelBrokerClient_CreateAgentWithGather_ErrorCarriesStatus
+// proves the control-channel counterpart of brokerHTTPTransport's
+// CreateAgentWithGather: a broker error status must survive as a
+// *brokerStatusError, including its Retry-After header, so
+// dispatchCreateErrorResponse can relay a skill-resolution 429/404/504/502
+// instead of every control-channel create failure losing its status to a
+// bare fmt.Errorf (#2546 R2).
+func TestControlChannelBrokerClient_CreateAgentWithGather_ErrorCarriesStatus(t *testing.T) {
+	body := []byte(`{"error":{"code":"skill_resolution_failed","message":"required skill \"gh://owner/repo/my-skill@main\" could not be resolved: rate limited","details":{"skill":"gh://owner/repo/my-skill@main","cause":"rate_limited"}}}`)
+	tunnel := &mockControlChannelTunnel{
+		connected: true,
+		status:    http.StatusTooManyRequests,
+		body:      body,
+		headers:   map[string]string{"Retry-After": "120"},
+	}
+	client := &ControlChannelBrokerClient{manager: tunnel}
+
+	_, _, err := client.CreateAgentWithGather(context.Background(), "broker-1", "unused", &RemoteCreateAgentRequest{Name: "new-agent"})
+	if err == nil {
+		t.Fatal("expected an error for the broker's 429 response")
+	}
+
+	var se *brokerStatusError
+	if !errors.As(err, &se) {
+		t.Fatalf("expected a *brokerStatusError, got %T: %v", err, err)
+	}
+	if se.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("expected status %d, got %d", http.StatusTooManyRequests, se.StatusCode)
+	}
+	if se.RetryAfter != "120" {
+		t.Errorf("expected RetryAfter %q, got %q", "120", se.RetryAfter)
+	}
+	if se.brokerErrorCode() != skillResolutionErrorCode {
+		t.Errorf("expected broker error code %q, got %q", skillResolutionErrorCode, se.brokerErrorCode())
+	}
+	if !strings.Contains(se.brokerErrorMessage(), "gh://owner/repo/my-skill@main") {
+		t.Errorf("expected broker error message to name the ref, got: %s", se.brokerErrorMessage())
+	}
 }

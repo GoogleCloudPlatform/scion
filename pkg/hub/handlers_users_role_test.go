@@ -289,25 +289,34 @@ func TestUpdateUser_UnsupportedRoleRejected(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code, "unsupported role should be rejected")
 }
 
-func TestUpdateUser_UnsupportedRoleRejectedEvenIfMatching(t *testing.T) {
+// TestUpdateUser_UnsupportedRoleRejectedWithAllValidRolesListed replaces the
+// former "rejected even if matching" test: every storable role (the ent enum
+// admin|member|viewer) is now a valid PATCH value, so a PATCH that matches the
+// stored role can no longer be unsupported.
+func TestUpdateUser_UnsupportedRoleRejectedWithAllValidRolesListed(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	// Create a user with legacy "viewer" role to test that setting
-	// role="viewer" is rejected even when it matches the current role.
 	user := &store.User{
-		ID:          tid("legacy-viewer"),
-		Email:       "viewer@example.com",
-		DisplayName: "Legacy Viewer",
-		Role:        "viewer",
+		ID:          tid("bogus-role"),
+		Email:       "bogus@example.com",
+		DisplayName: "Bogus Role",
+		Role:        "member",
 		Status:      "active",
 	}
 	require.NoError(t, s.CreateUser(ctx, user))
 
-	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
-		map[string]string{"role": "viewer"})
-	assert.Equal(t, http.StatusBadRequest, rec.Code,
-		"unsupported role 'viewer' should be rejected even when matching current role")
+	for _, role := range []string{"bogus", "", "Viewer", "hub-viewer"} {
+		rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+			map[string]string{"role": role})
+		assert.Equal(t, http.StatusBadRequest, rec.Code, "role %q should be rejected", role)
+		assert.Contains(t, rec.Body.String(), `\"admin\", \"member\" and \"viewer\"`,
+			"error text should list all three valid roles")
+	}
+
+	updated, err := s.GetUser(ctx, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "member", updated.Role, "rejected PATCH must not change the role")
 }
 
 func TestUpdateUser_MetadataPreservedWhenRoleOmitted(t *testing.T) {
@@ -2567,4 +2576,488 @@ func TestBindingStateDrift_DemoteRejectsUnauthorizedBinding(t *testing.T) {
 	// Verify the binding is still intact (not removed).
 	assert.Equal(t, 1, superAdminBindingCount(t, s, target.ID),
 		"binding should NOT be removed when state drifted")
+}
+
+// ---------------------------------------------------------------------------
+// Viewer role transitions (design §5.B / §5.D, AC 3)
+// ---------------------------------------------------------------------------
+
+// assertHubRoleAccess checks the immediate authz effect of a hub role:
+// template.list is allowed for member and viewer; project.create is allowed
+// only for member.
+func assertHubRoleAccess(t *testing.T, srv *Server, s store.Store, userID string, wantProjectCreate bool) {
+	t.Helper()
+	ctx := context.Background()
+	u, err := s.GetUser(ctx, userID)
+	require.NoError(t, err)
+	identity := NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, "web")
+
+	d := srv.authzService.CheckAccess(ctx, identity, templateScopeResource(store.TemplateScopeGlobal, ""), ActionList)
+	assert.True(t, d.Allowed, "template.list should be allowed; reason=%q", d.Reason)
+
+	d = srv.authzService.CheckAccess(ctx, identity, Resource{Type: "project"}, ActionCreate)
+	assert.Equal(t, wantProjectCreate, d.Allowed, "project.create allowed; reason=%q", d.Reason)
+}
+
+func TestUpdateUser_MemberToViewer(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("m2v-target"),
+		Email:       "m2v@example.com",
+		DisplayName: "Member To Viewer",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	// Precondition: a member can create projects.
+	assertHubRoleAccess(t, srv, s, user.ID, true)
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"role": "viewer"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp store.User
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, "viewer", resp.Role)
+
+	updated, err := s.GetUser(ctx, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "viewer", updated.Role)
+
+	grants := observeHubRoleGrants(t, s, user.ID)
+	assert.False(t, grants.InHubMembers, "viewer must be removed from hub-members")
+	assert.Equal(t, 1, grants.HubViewerBindings, "viewer must have a hub-viewer binding")
+	assert.Equal(t, 0, grants.SuperAdminBinding)
+
+	// Immediately: no restart, no backfill.
+	assertHubRoleAccess(t, srv, s, user.ID, false)
+}
+
+func TestUpdateUser_ViewerToMember(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("v2m-target"),
+		Email:       "v2m@example.com",
+		DisplayName: "Viewer To Member",
+		Role:        "viewer",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	require.NoError(t, syncHubRoleGrants(ctx, s, user.ID, "viewer", store.SystemBackfillCreatedBy))
+	assertHubRoleAccess(t, srv, s, user.ID, false)
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"role": "member"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetUser(ctx, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "member", updated.Role)
+
+	grants := observeHubRoleGrants(t, s, user.ID)
+	assert.True(t, grants.InHubMembers, "member must be in hub-members")
+	assert.Equal(t, 0, grants.HubViewerBindings, "hub-viewer binding must be removed")
+
+	assertHubRoleAccess(t, srv, s, user.ID, true)
+}
+
+func TestUpdateUser_ViewerSameRoleRepairsGrants(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// A viewer with stale grants: in hub-members and without a binding.
+	user := &store.User{
+		ID:          tid("v2v-repair"),
+		Email:       "v2v@example.com",
+		DisplayName: "Viewer Repair",
+		Role:        "viewer",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"role": "viewer"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	grants := observeHubRoleGrants(t, s, user.ID)
+	assert.False(t, grants.InHubMembers)
+	assert.Equal(t, 1, grants.HubViewerBindings)
+	assertHubRoleAccess(t, srv, s, user.ID, false)
+}
+
+func TestUpdateUser_AdminToViewer(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("a2v-target"),
+		Email:       "a2v@example.com",
+		DisplayName: "Admin To Viewer",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+	ensureHubMembership(ctx, s, user.ID)
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"role": "admin"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, 1, superAdminBindingCount(t, s, user.ID))
+
+	// The dev user (actor) remains an admin, so this is not the last admin.
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+
+	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"role": "viewer"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetUser(ctx, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "viewer", updated.Role)
+
+	grants := observeHubRoleGrants(t, s, user.ID)
+	assert.Equal(t, 0, grants.SuperAdminBinding, "super-admin binding must be removed")
+	assert.False(t, grants.InHubMembers, "viewer must be removed from hub-members")
+	assert.Equal(t, 1, grants.HubViewerBindings)
+
+	assertHubRoleAccess(t, srv, s, user.ID, false)
+}
+
+func TestUpdateUser_AdminToViewer_SelfDemotionBlocked(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	devUser := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, devUser.ID)
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+devUser.ID,
+		map[string]string{"role": "viewer"})
+	assert.Equal(t, http.StatusConflict, rec.Code, "self-demotion to viewer should be rejected")
+
+	updated, err := s.GetUser(ctx, devUser.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "admin", updated.Role)
+	assert.Equal(t, 1, superAdminBindingCount(t, s, devUser.ID))
+	assert.Equal(t, 0, observeHubRoleGrants(t, s, devUser.ID).HubViewerBindings)
+}
+
+func TestUpdateUser_AdminToViewer_LastAdminBlocked(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// The HTTP path cannot reach this state (the dev-user actor is itself a
+	// super-admin, so the target is never the last admin). Drive the in-tx
+	// transition directly with the target as the only active super-admin,
+	// as TestDemoteUser_LastSuperAdminBlocked does for admin→member.
+	target := &store.User{
+		ID:          tid("a2v-last"),
+		Email:       "a2vlast@example.com",
+		DisplayName: "Last Admin",
+		Role:        "admin",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+	srv.ensureSuperAdminBinding(ctx, target.ID)
+
+	superAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err)
+	preAuth, err := srv.superAdminBindingStateForUser(ctx, s, target.ID, superAdminRD)
+	require.NoError(t, err)
+
+	// Make the target the only active super-admin (the dev user may hold a
+	// seeded binding; remove every other active super-admin binding).
+	bindings, err := s.ListRoleBindingsForScope(ctx, store.RoleScopeSystem, "")
+	require.NoError(t, err)
+	for _, b := range bindings {
+		if b.RoleDefinitionID == superAdminRD.ID && b.PrincipalID != target.ID {
+			require.NoError(t, s.DeleteRoleBinding(ctx, b.ID))
+		}
+	}
+
+	err = s.WithTx(ctx, func(tx store.Store) error {
+		txUser, err := tx.GetUser(ctx, target.ID)
+		if err != nil {
+			return err
+		}
+		_, err = srv.executeRoleTransition(ctx, tx, txUser, "viewer", superAdminRD, "some-other-actor", preAuth)
+		return err
+	})
+	assert.ErrorIs(t, err, errLastSuperAdmin, "demoting the last admin to viewer must be blocked")
+
+	// Nothing changed: binding kept, no hub-viewer binding.
+	assert.Equal(t, 1, superAdminBindingCount(t, s, target.ID))
+	assert.Equal(t, 0, observeHubRoleGrants(t, s, target.ID).HubViewerBindings)
+}
+
+// TestUpdateUser_ViewerMemberNeedsOnlyPromote verifies design §5.B: viewer ↔
+// member needs user.promote only, while any transition involving the
+// super-admin binding still needs CanDelegate.
+func TestUpdateUser_ViewerMemberNeedsOnlyPromote(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Actor holds a custom system role with user.promote only.
+	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "test-user-promoter",
+		ScopeType:   store.RoleScopeSystem,
+		Permissions: []string{"user.promote"},
+	})
+	require.NoError(t, err)
+	actor := &store.User{
+		ID:          tid("promoter-actor"),
+		Email:       "promoter@example.com",
+		DisplayName: "Promoter",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, actor))
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      actor.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	target := &store.User{
+		ID:          tid("promoter-target"),
+		Email:       "promotertarget@example.com",
+		DisplayName: "Promoter Target",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, target))
+	ensureHubMembership(ctx, s, target.ID)
+
+	rec := doRequestAsUser(t, srv, actor, http.MethodPatch, "/api/v1/users/"+target.ID,
+		map[string]string{"role": "viewer"})
+	require.Equal(t, http.StatusOK, rec.Code, "member→viewer needs only user.promote: %s", rec.Body.String())
+	assert.Equal(t, 1, observeHubRoleGrants(t, s, target.ID).HubViewerBindings)
+
+	rec = doRequestAsUser(t, srv, actor, http.MethodPatch, "/api/v1/users/"+target.ID,
+		map[string]string{"role": "member"})
+	require.Equal(t, http.StatusOK, rec.Code, "viewer→member needs only user.promote: %s", rec.Body.String())
+	assert.True(t, observeHubRoleGrants(t, s, target.ID).InHubMembers)
+
+	// Promotion to admin involves the super-admin binding → CanDelegate denied.
+	rec = doRequestAsUser(t, srv, actor, http.MethodPatch, "/api/v1/users/"+target.ID,
+		map[string]string{"role": "admin"})
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+
+	// admin → viewer also involves the super-admin binding → CanDelegate denied.
+	admin := &store.User{
+		ID:          tid("promoter-admin-target"),
+		Email:       "promoteradmin@example.com",
+		DisplayName: "Admin Target",
+		Role:        "admin",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, admin))
+	srv.ensureSuperAdminBinding(ctx, admin.ID)
+	rec = doRequestAsUser(t, srv, actor, http.MethodPatch, "/api/v1/users/"+admin.ID,
+		map[string]string{"role": "viewer"})
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, 1, superAdminBindingCount(t, s, admin.ID))
+	assert.Equal(t, 0, observeHubRoleGrants(t, s, admin.ID).HubViewerBindings)
+}
+
+// TestUpdateUser_ViewerAuditRecorded verifies the role change to viewer is
+// audited with before/after role.
+func TestUpdateUser_ViewerAuditRecorded(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	user := &store.User{
+		ID:          tid("viewer-audit"),
+		Email:       "vaudit@example.com",
+		DisplayName: "Viewer Audit",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, user))
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"role": "viewer"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	audits, _, err := s.ListMutationAudits(ctx, store.MutationAuditFilter{
+		TargetType: "user",
+		TargetID:   user.ID,
+	})
+	require.NoError(t, err)
+	found := false
+	for _, a := range audits {
+		if a.MutationType == "user_role_change" {
+			found = true
+			assert.Contains(t, a.BeforeSummary, `"role":"member"`)
+			assert.Equal(t, `{"role":"viewer"}`, a.AfterSummary)
+		}
+	}
+	assert.True(t, found, "user_role_change audit record should exist for member→viewer")
+}
+
+// ---------------------------------------------------------------------------
+// Invited users: role is assigned at first sign-in
+// ---------------------------------------------------------------------------
+
+func createInvitedUser(t *testing.T, s store.Store, suffix string) *store.User {
+	t.Helper()
+	user := &store.User{
+		ID:          tid("invited-" + suffix),
+		Email:       "invited-" + suffix + "@example.com",
+		DisplayName: "Invited " + suffix,
+		Role:        store.UserRoleMember, // placeholder
+		Status:      store.UserStatusInvited,
+	}
+	require.NoError(t, s.CreateUser(context.Background(), user))
+	return user
+}
+
+// TestUpdateUser_RoleOnInvitedUserConflict verifies PATCH role on an invited
+// user returns 409 for every role (including the placeholder) and leaves the
+// user and its grants untouched.
+func TestUpdateUser_RoleOnInvitedUserConflict(t *testing.T) {
+	for _, role := range []string{store.UserRoleAdmin, store.UserRoleMember, store.UserRoleViewer} {
+		t.Run(role, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+			user := createInvitedUser(t, s, role)
+
+			rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+				map[string]string{"role": role})
+			require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "role is assigned when the user first signs in")
+
+			got, err := s.GetUser(ctx, user.ID)
+			require.NoError(t, err)
+			assert.Equal(t, store.UserStatusInvited, got.Status)
+			assert.Equal(t, store.UserRoleMember, got.Role)
+			assert.Equal(t, 0, superAdminBindingCount(t, s, user.ID))
+			grants := observeHubRoleGrants(t, s, user.ID)
+			assert.False(t, grants.InHubMembers)
+			assert.Equal(t, 0, grants.HubViewerBindings)
+		})
+	}
+}
+
+// TestUpdateUser_RoleAndStatusOnInvitedUserConflict verifies a mixed PATCH
+// carrying a role is rejected as a whole, so the status is not changed either.
+func TestUpdateUser_RoleAndStatusOnInvitedUserConflict(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	user := createInvitedUser(t, s, "mixed")
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"role": "viewer", "status": "suspended"})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+
+	got, err := s.GetUser(ctx, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserStatusInvited, got.Status)
+}
+
+// TestSuspendUser_InvitedUserAllowed verifies status changes on invited users
+// remain allowed.
+func TestSuspendUser_InvitedUserAllowed(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	user := createInvitedUser(t, s, "suspend")
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"status": "suspended"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	got, err := s.GetUser(ctx, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "suspended", got.Status)
+}
+
+// TestUpdateUser_RoleOnInvitedUserNonAdminDenied verifies authorization runs
+// before the invited guard: an actor without user.promote gets 403, not 409.
+func TestUpdateUser_RoleOnInvitedUserNonAdminDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	user := createInvitedUser(t, s, "nonadmin")
+
+	actor := &store.User{
+		ID:          tid("invited-guard-actor"),
+		Email:       "invitedguardactor@example.com",
+		DisplayName: "Plain Member",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, actor))
+
+	rec := doRequestAsUser(t, srv, actor, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"role": "viewer"})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+}
+
+// TestUpdateUser_ActivateInvitedUserConflict verifies PATCH status=active on
+// an invited user returns 409: activation happens at first sign-in, where the
+// hub default role is applied. The user and its grants are left untouched.
+func TestUpdateUser_ActivateInvitedUserConflict(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	user := createInvitedUser(t, s, "activate")
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"status": "active"})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "invited users are activated at first sign-in")
+
+	got, err := s.GetUser(ctx, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserStatusInvited, got.Status)
+	assert.Equal(t, store.UserRoleMember, got.Role)
+	grants := observeHubRoleGrants(t, s, user.ID)
+	assert.False(t, grants.InHubMembers)
+	assert.Equal(t, 0, grants.HubViewerBindings)
+}
+
+// TestUpdateUser_ActivateInvitedUserNonAdminDenied verifies authorization
+// runs before the activation guard: without user.suspend the caller gets 403.
+func TestUpdateUser_ActivateInvitedUserNonAdminDenied(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	user := createInvitedUser(t, s, "activate-nonadmin")
+
+	actor := &store.User{
+		ID:          tid("invited-activate-actor"),
+		Email:       "invitedactivateactor@example.com",
+		DisplayName: "Plain Member",
+		Role:        "member",
+		Status:      "active",
+	}
+	require.NoError(t, s.CreateUser(ctx, actor))
+
+	rec := doRequestAsUser(t, srv, actor, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"status": "active"})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+}
+
+// TestUpdateUser_ActivateInvitedUserWithMetadataConflict verifies a PATCH
+// that combines status=active with profile fields is rejected as a whole.
+func TestUpdateUser_ActivateInvitedUserWithMetadataConflict(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	user := createInvitedUser(t, s, "activate-mixed")
+
+	rec := doRequest(t, srv, http.MethodPatch, "/api/v1/users/"+user.ID,
+		map[string]string{"status": "active", "displayName": "Renamed"})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+
+	got, err := s.GetUser(ctx, user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.UserStatusInvited, got.Status)
+	assert.Equal(t, "Invited activate-mixed", got.DisplayName)
 }

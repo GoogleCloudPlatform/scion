@@ -13,15 +13,19 @@ import (
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstraint"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstrainthistory"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accesspolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentcredential"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentreincarnation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentsessionmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/allowlistentry"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/apikey"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerdispatch"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokerjointoken"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
@@ -29,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entitlementbinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/externalidentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/gcpserviceaccount"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubinstallation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/githubresolutioncache"
@@ -39,6 +44,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationconfig"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/integrationupdate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/invitecode"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/launchreaperstate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/lifecyclehook"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/lifecyclehookagentphase"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/limitdefinition"
@@ -70,6 +76,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 )
 
 // ent aliases to avoid import conflicts in user's code.
@@ -131,15 +138,19 @@ func checkColumn(t, c string) error {
 	initCheck.Do(func() {
 		columnCheck = sql.NewColumnCheck(map[string]func(string) bool{
 			accessconstraint.Table:         accessconstraint.ValidColumn,
+			accessconstrainthistory.Table:  accessconstrainthistory.ValidColumn,
 			accesspolicy.Table:             accesspolicy.ValidColumn,
 			agent.Table:                    agent.ValidColumn,
 			agentcredential.Table:          agentcredential.ValidColumn,
+			agentidentitykey.Table:         agentidentitykey.ValidColumn,
+			agentreincarnation.Table:       agentreincarnation.ValidColumn,
 			agentsessionmetrics.Table:      agentsessionmetrics.ValidColumn,
 			allowlistentry.Table:           allowlistentry.ValidColumn,
 			apikey.Table:                   apikey.ValidColumn,
 			brokerdispatch.Table:           brokerdispatch.ValidColumn,
 			brokerjointoken.Table:          brokerjointoken.ValidColumn,
 			brokersecret.Table:             brokersecret.ValidColumn,
+			brokersetting.Table:            brokersetting.ValidColumn,
 			chatlinkcode.Table:             chatlinkcode.ValidColumn,
 			conversation.Table:             conversation.ValidColumn,
 			conversationparticipant.Table:  conversationparticipant.ValidColumn,
@@ -147,6 +158,7 @@ func checkColumn(t, c string) error {
 			delegationedge.Table:           delegationedge.ValidColumn,
 			entitlementbinding.Table:       entitlementbinding.ValidColumn,
 			envvar.Table:                   envvar.ValidColumn,
+			externalidentity.Table:         externalidentity.ValidColumn,
 			gcpserviceaccount.Table:        gcpserviceaccount.ValidColumn,
 			githubresolutioncache.Table:    githubresolutioncache.ValidColumn,
 			githubinstallation.Table:       githubinstallation.ValidColumn,
@@ -157,6 +169,7 @@ func checkColumn(t, c string) error {
 			integrationconfig.Table:        integrationconfig.ValidColumn,
 			integrationupdate.Table:        integrationupdate.ValidColumn,
 			invitecode.Table:               invitecode.ValidColumn,
+			launchreaperstate.Table:        launchreaperstate.ValidColumn,
 			lifecyclehook.Table:            lifecyclehook.ValidColumn,
 			lifecyclehookagentphase.Table:  lifecyclehookagentphase.ValidColumn,
 			limitdefinition.Table:          limitdefinition.ValidColumn,
@@ -188,6 +201,7 @@ func checkColumn(t, c string) error {
 			usagereservation.Table:         usagereservation.ValidColumn,
 			user.Table:                     user.ValidColumn,
 			useraccesstoken.Table:          useraccesstoken.ValidColumn,
+			userterminalworkspace.Table:    userterminalworkspace.ValidColumn,
 		})
 	})
 	return columnCheck(t, c)

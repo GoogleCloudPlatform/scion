@@ -39,7 +39,7 @@ func (s *Server) handleProjectGCPServiceAccounts(w http.ResponseWriter, r *http.
 	case http.MethodPost:
 		s.createGCPServiceAccount(w, r, projectID)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -74,7 +74,7 @@ func (s *Server) handleProjectGCPServiceAccountByID(w http.ResponseWriter, r *ht
 	case http.MethodDelete:
 		s.deleteGCPServiceAccount(w, r, projectID, saID)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodDelete)
 	}
 }
 
@@ -388,6 +388,8 @@ type GCPServiceAccountWithCapabilities struct {
 type GCPMintQuotaInfo struct {
 	ProjectMinted int `json:"project_minted"`
 	ProjectCap    int `json:"project_cap"` // 0 = unlimited
+	HubMinted     int `json:"hub_minted,omitempty"`
+	HubCap        int `json:"hub_cap,omitempty"`
 	GlobalMinted  int `json:"global_minted"`
 	GlobalCap     int `json:"global_cap"`
 }
@@ -961,7 +963,7 @@ type GCPQuotaResponse struct {
 func (s *Server) handleAdminGCPQuota(w http.ResponseWriter, r *http.Request) {
 	// Route guard enforces hub.health.read permission.
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -1013,11 +1015,67 @@ func (s *Server) handleAdminGCPQuota(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// resolveAgentGCPAssignment rechecks the agent-side half of a token-mint
+// request: the agent record is current (not soft-deleted) and its applied
+// GCP identity is still in assign mode. It intentionally does not touch the
+// service account row -- the caller runs the token-scope compare against the
+// returned config before paying for that lookup, so that a denial from a
+// mismatched scope never depends on, and so never reveals, the assigned
+// account's current row state.
+func (s *Server) resolveAgentGCPAssignment(agentRecord *store.Agent) (*store.GCPIdentityConfig, bool) {
+	if agentRecord == nil || !agentRecord.DeletedAt.IsZero() {
+		return nil, false
+	}
+	if agentRecord.AppliedConfig == nil || agentRecord.AppliedConfig.GCPIdentity == nil ||
+		agentRecord.AppliedConfig.GCPIdentity.MetadataMode != store.GCPMetadataModeAssign {
+		return nil, false
+	}
+	return agentRecord.AppliedConfig.GCPIdentity, true
+}
+
+// resolveAgentGCPMintFacts rechecks, for one token-mint request and after the
+// token-scope compare has already passed: the assigned service account still
+// loads by ID, is still verified under the same email, is still reachable
+// from the agent's project, and -- for a hub-scoped account -- that
+// saAssignCheckMode is still enforce. Every fresh mint is a new authorization
+// event, so none of these facts is read once and trusted for the life of the
+// token; each mint re-derives them from the store.
+//
+// A false return covers every failure in the same path, including any store
+// lookup error, so the caller renders the same "no GCP identity assigned" denial
+// it uses when no GCP identity is assigned -- a refusal here discloses nothing
+// beyond what that denial discloses.
+func (s *Server) resolveAgentGCPMintFacts(ctx context.Context, gcpID *store.GCPIdentityConfig, agentProjectID string) bool {
+	if gcpID == nil {
+		return false
+	}
+	sa, err := s.store.GetGCPServiceAccount(ctx, gcpID.ServiceAccountID)
+	if err != nil || sa == nil {
+		return false
+	}
+	if !sa.Verified || sa.VerificationStatus != store.GCPVerificationVerified || sa.Email != gcpID.ServiceAccountEmail {
+		return false
+	}
+	if !sa.ReachableFromProject(agentProjectID) {
+		return false
+	}
+	if sa.Scope == store.ScopeHub {
+		s.mu.RLock()
+		mode := s.saAssignCheckMode
+		s.mu.RUnlock()
+		if mode != SAAssignCheckEnforce {
+			return false
+		}
+	}
+
+	return true
+}
+
 // handleAgentGCPToken handles POST /api/v1/agent/gcp-token.
 // Called by the metadata sidecar to obtain a GCP access token for the agent's assigned SA.
 func (s *Server) handleAgentGCPToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -1045,18 +1103,27 @@ func (s *Server) handleAgentGCPToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if agentRecord.AppliedConfig == nil || agentRecord.AppliedConfig.GCPIdentity == nil ||
-		agentRecord.AppliedConfig.GCPIdentity.MetadataMode != store.GCPMetadataModeAssign {
+	// Recheck the agent record and assignment mode from the store, then the
+	// JWT scope, before paying for the service-account row lookup below -- a
+	// wrong-scope denial must never depend on, and so never reveal, that
+	// row's current state.
+	gcpID, ok := s.resolveAgentGCPAssignment(agentRecord)
+	if !ok {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "no GCP identity assigned", nil)
 		return
 	}
-
-	gcpID := agentRecord.AppliedConfig.GCPIdentity
 
 	// Verify the agent's JWT has the correct scope
 	requiredScope := GCPTokenScopeForSA(gcpID.ServiceAccountID)
 	if !agent.HasScope(requiredScope) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "missing required GCP token scope", nil)
+		return
+	}
+
+	// Recheck the service account row's verification, reachability and mode
+	// facts from the store on every mint request.
+	if !s.resolveAgentGCPMintFacts(r.Context(), gcpID, agentRecord.ProjectID) {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "no GCP identity assigned", nil)
 		return
 	}
 
@@ -1100,7 +1167,7 @@ func (s *Server) handleAgentGCPToken(w http.ResponseWriter, r *http.Request) {
 // Called by the metadata sidecar to obtain a GCP OIDC identity token.
 func (s *Server) handleAgentGCPIdentityToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -1127,16 +1194,25 @@ func (s *Server) handleAgentGCPIdentityToken(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if agentRecord.AppliedConfig == nil || agentRecord.AppliedConfig.GCPIdentity == nil ||
-		agentRecord.AppliedConfig.GCPIdentity.MetadataMode != store.GCPMetadataModeAssign {
+	// Recheck the agent record and assignment mode from the store, then the
+	// JWT scope, before paying for the service-account row lookup below -- a
+	// wrong-scope denial must never depend on, and so never reveal, that
+	// row's current state.
+	gcpID, ok := s.resolveAgentGCPAssignment(agentRecord)
+	if !ok {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "no GCP identity assigned", nil)
 		return
 	}
-
-	gcpID := agentRecord.AppliedConfig.GCPIdentity
 	requiredScope := GCPTokenScopeForSA(gcpID.ServiceAccountID)
 	if !agent.HasScope(requiredScope) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "missing required GCP token scope", nil)
+		return
+	}
+
+	// Recheck the service account row's verification, reachability and mode
+	// facts from the store on every mint request.
+	if !s.resolveAgentGCPMintFacts(r.Context(), gcpID, agentRecord.ProjectID) {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, "no GCP identity assigned", nil)
 		return
 	}
 

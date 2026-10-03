@@ -311,7 +311,6 @@ func (rs *ResourceStore) bootstrapSourceCreate(
 		StorageBucket: stor.Bucket(),
 		StorageURI:    storage.ResourceStorageURI(rs.hubID, stor.Bucket(), kind, meta.Scope, meta.ScopeID, slug),
 		SourceURL:     meta.SourceURL,
-		Visibility:    p.DefaultVisibility(),
 	}
 	if err := p.Create(ctx, rec, dir); err != nil {
 		if errors.Is(err, store.ErrAlreadyExists) {

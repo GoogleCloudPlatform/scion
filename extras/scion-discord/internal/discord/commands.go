@@ -11,7 +11,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/bwmarrin/discordgo"
 )
@@ -1100,7 +1100,7 @@ func (h *CommandHandler) HandleMessage(s *discordgo.Session, i *discordgo.Intera
 		return
 	}
 
-	topic := projectcompat.AgentTopic(link.ProjectID, agentSlug)
+	topic := projectkeys.AgentTopic(link.ProjectID, agentSlug)
 	msg := &messages.StructuredMessage{
 		Version:   messages.Version,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
@@ -1719,7 +1719,7 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 
 	// Step 3: deliverInbound kickoff message.
 	if h.deliverInbound != nil {
-		topic := projectcompat.AgentTopic(link.ProjectID, agentResp.Slug)
+		topic := projectkeys.AgentTopic(link.ProjectID, agentResp.Slug)
 		kickoffMsg := &messages.StructuredMessage{
 			Version:   messages.Version,
 			Timestamp: time.Now().UTC().Format(time.RFC3339),

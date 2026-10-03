@@ -17,7 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 // routedTestFixture sets up a real SQLite store seeded with a channel link and
@@ -200,7 +200,7 @@ func TestDeliverUserMessage_RoutedDisabled_LegacyPayload(t *testing.T) {
 	require.Len(t, f.routedCalls, 0, "no routed request expected when routed is disabled")
 
 	p := f.legacyCalls[0]
-	expectedTopic := projectcompat.AgentTopic("proj-001", "alpha")
+	expectedTopic := projectkeys.AgentTopic("proj-001", "alpha")
 	assert.Equal(t, expectedTopic, p.Topic)
 	assert.NotNil(t, p.Message)
 	assert.Equal(t, "hello legacy", p.Message.Msg)

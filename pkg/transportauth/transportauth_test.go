@@ -557,6 +557,48 @@ func TestFromEnv_MetadataBlocked(t *testing.T) {
 	assert.Nil(t, src, "should return nil when SCION_METADATA_MODE is set")
 }
 
+// TestFromEnv_MetadataPassthrough_StillUsesMetadataSource is the regression
+// guard for ptone/scion#1882: the broker now records
+// SCION_METADATA_MODE=passthrough on the agent-create path (previously it
+// was absent there, only present on start/restart). Passthrough deliberately
+// does not redirect 169.254.169.254 — the agent reaches the real GCE
+// metadata server — so it must not be treated the same as assign/block,
+// which do redirect it to the scion sidecar.
+func TestFromEnv_MetadataPassthrough_StillUsesMetadataSource(t *testing.T) {
+	cleanup := overrideGCPDetection(true)
+	defer cleanup()
+
+	_ = os.Unsetenv(EnvTransportToken)
+	t.Setenv(EnvMetadataMode, "passthrough")
+	t.Setenv(EnvTransportAudience, "https://audience.example.com")
+
+	src, err := FromEnv()
+	require.NoError(t, err)
+	require.NotNil(t, src, "passthrough must not disable ambient-SA OIDC transport")
+	_, ok := src.(*MetadataSource)
+	assert.True(t, ok, "should return MetadataSource")
+}
+
+func TestIsMetadataRedirected(t *testing.T) {
+	tests := []struct {
+		mode string
+		want bool
+	}{
+		{"", false},
+		{"passthrough", false},
+		{"assign", true},
+		{"block", true},
+		{"blocked", true}, // corruption / unrecognised — fail closed
+	}
+	for _, tt := range tests {
+		t.Run("mode="+tt.mode, func(t *testing.T) {
+			if got := IsMetadataRedirected(tt.mode); got != tt.want {
+				t.Errorf("IsMetadataRedirected(%q) = %v, want %v", tt.mode, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestFromEnv_InjectedPriority(t *testing.T) {
 	cleanup := overrideGCPDetection(true)
 	defer cleanup()
@@ -710,4 +752,23 @@ func TestFromSettings_MetadataOnGCE(t *testing.T) {
 	require.NotNil(t, src)
 	_, ok := src.(*MetadataSource)
 	assert.True(t, ok, "should prefer metadata on GCE")
+}
+
+// TestFromSettings_MetadataPassthrough is FromSettings' twin of
+// TestFromEnv_MetadataPassthrough_StillUsesMetadataSource (ptone/scion#1882).
+func TestFromSettings_MetadataPassthrough(t *testing.T) {
+	cleanup := overrideGCPDetection(true)
+	defer cleanup()
+
+	_ = os.Unsetenv(EnvTransportToken)
+	_ = os.Unsetenv(EnvTransportAudience)
+	_ = os.Unsetenv(EnvHubOIDCAudience)
+	t.Setenv(EnvMetadataMode, "passthrough")
+
+	settings := &TransportSettings{Mode: "iap", Audience: "https://audience.example.com"}
+	src, _, err := FromSettings(settings, fakeADCNew)
+	require.NoError(t, err)
+	require.NotNil(t, src, "passthrough must not disable ambient-SA OIDC transport")
+	_, ok := src.(*MetadataSource)
+	assert.True(t, ok, "should prefer metadata on GCE even under passthrough")
 }

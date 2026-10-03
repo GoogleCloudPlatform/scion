@@ -97,11 +97,17 @@ type Client interface {
 	// Messages returns the user message inbox operations interface.
 	Messages() MessageService
 
+	// Conversations returns the conversation operations interface.
+	Conversations() ConversationService
+
 	// AllowList returns the allow list management operations interface.
 	AllowList() AllowListService
 
 	// Invites returns the invite code management operations interface.
 	Invites() InviteService
+
+	// Messaging returns the cross-project messaging operations interface.
+	Messaging() MessagingService
 
 	// ProjectInjectedSkills returns an InjectedSkillsService scoped to a project.
 	ProjectInjectedSkills(projectID string) InjectedSkillsService
@@ -145,8 +151,10 @@ type client struct {
 	subscriptions         *subscriptionService
 	subscriptionTemplates *subscriptionTemplateService
 	messages              *messageService
+	conversations         *conversationService
 	allowList             *allowListService
 	invites               *inviteService
+	messaging             *messagingService
 }
 
 // New creates a new Hub API client.
@@ -197,8 +205,10 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.subscriptions = &subscriptionService{c: c}
 	c.subscriptionTemplates = &subscriptionTemplateService{c: c}
 	c.messages = &messageService{c: c}
+	c.conversations = &conversationService{c: c}
 	c.allowList = &allowListService{c: c}
 	c.invites = &inviteService{c: c}
+	c.messaging = &messagingService{c: c}
 
 	return c, nil
 }
@@ -313,6 +323,11 @@ func (c *client) Messages() MessageService {
 	return c.messages
 }
 
+// Conversations returns the conversation operations interface.
+func (c *client) Conversations() ConversationService {
+	return c.conversations
+}
+
 // AllowList returns the allow list management operations interface.
 func (c *client) AllowList() AllowListService {
 	return c.allowList
@@ -323,100 +338,49 @@ func (c *client) Invites() InviteService {
 	return c.invites
 }
 
-// get performs an HTTP GET request with fallback.
+// Messaging returns the cross-project messaging operations interface.
+func (c *client) Messaging() MessagingService {
+	return c.messaging
+}
+
+// get performs an HTTP GET request.
 func (c *client) get(ctx context.Context, path string, headers http.Header) (*http.Response, error) {
 	return c.getWithQuery(ctx, path, nil, headers)
 }
 
-// getWithQuery performs an HTTP GET request with query parameters and fallback.
+// getWithQuery performs an HTTP GET request with query parameters.
 func (c *client) getWithQuery(ctx context.Context, path string, query url.Values, headers http.Header) (*http.Response, error) {
-	resp, err := c.transport.GetWithQuery(ctx, path, query, headers)
-	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
-		ct := strings.ToLower(resp.Header.Get("Content-Type"))
-		if !strings.Contains(ct, "application/json") {
-			legacyPath := strings.Replace(path, "/projects", "/groves", 1)
-			_ = resp.Body.Close()
-			resp, err = c.transport.GetWithQuery(ctx, legacyPath, query, headers)
-			c.checkForDeprecation(resp)
-			return resp, err
-		}
-	}
-	return resp, err
+	return c.transport.GetWithQuery(ctx, path, query, headers)
 }
 
-// post performs an HTTP POST request with fallback.
+// post performs an HTTP POST request.
 func (c *client) post(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
-	resp, err := c.transport.Post(ctx, path, body, headers)
-	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
-		ct := strings.ToLower(resp.Header.Get("Content-Type"))
-		if !strings.Contains(ct, "application/json") {
-			legacyPath := strings.Replace(path, "/projects", "/groves", 1)
-			_ = resp.Body.Close()
-			resp, err = c.transport.Post(ctx, legacyPath, body, headers)
-			c.checkForDeprecation(resp)
-			return resp, err
-		}
-	}
-	return resp, err
+	return c.transport.Post(ctx, path, body, headers)
 }
 
-// put performs an HTTP PUT request with fallback.
+// postNoRetry performs an HTTP POST request exactly once: it bypasses the
+// transport's configured retry policy (including a client built with
+// WithRetry) and does not follow redirects. Used by operations — currently
+// only agent keys injection — for which the generic transport retry/redirect
+// behavior would risk sending a non-idempotent request more than once. See
+// apiclient.Transport.DoNoRetry.
+func (c *client) postNoRetry(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
+	return c.transport.PostNoRetry(ctx, path, body, headers)
+}
+
+// put performs an HTTP PUT request.
 func (c *client) put(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
-	resp, err := c.transport.Put(ctx, path, body, headers)
-	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
-		ct := strings.ToLower(resp.Header.Get("Content-Type"))
-		if !strings.Contains(ct, "application/json") {
-			legacyPath := strings.Replace(path, "/projects", "/groves", 1)
-			_ = resp.Body.Close()
-			resp, err = c.transport.Put(ctx, legacyPath, body, headers)
-			c.checkForDeprecation(resp)
-			return resp, err
-		}
-	}
-	return resp, err
+	return c.transport.Put(ctx, path, body, headers)
 }
 
-// patch performs an HTTP PATCH request with fallback.
+// patch performs an HTTP PATCH request.
 func (c *client) patch(ctx context.Context, path string, body interface{}, headers http.Header) (*http.Response, error) {
-	resp, err := c.transport.Patch(ctx, path, body, headers)
-	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
-		ct := strings.ToLower(resp.Header.Get("Content-Type"))
-		if !strings.Contains(ct, "application/json") {
-			legacyPath := strings.Replace(path, "/projects", "/groves", 1)
-			_ = resp.Body.Close()
-			resp, err = c.transport.Patch(ctx, legacyPath, body, headers)
-			c.checkForDeprecation(resp)
-			return resp, err
-		}
-	}
-	return resp, err
+	return c.transport.Patch(ctx, path, body, headers)
 }
 
-// delete performs an HTTP DELETE request with fallback.
+// delete performs an HTTP DELETE request.
 func (c *client) delete(ctx context.Context, path string, headers http.Header) (*http.Response, error) {
-	resp, err := c.transport.Delete(ctx, path, headers)
-	if err == nil && resp.StatusCode == http.StatusNotFound && strings.Contains(path, "/projects") {
-		ct := strings.ToLower(resp.Header.Get("Content-Type"))
-		if !strings.Contains(ct, "application/json") {
-			legacyPath := strings.Replace(path, "/projects", "/groves", 1)
-			_ = resp.Body.Close()
-			resp, err = c.transport.Delete(ctx, legacyPath, headers)
-			c.checkForDeprecation(resp)
-			return resp, err
-		}
-	}
-	return resp, err
-}
-
-// checkForDeprecation logs a warning if the response contains a Deprecation header.
-func (c *client) checkForDeprecation(resp *http.Response) {
-	if resp != nil && resp.Header.Get("Deprecation") == "true" {
-		path := ""
-		if resp.Request != nil {
-			path = resp.Request.URL.Path
-		}
-		util.Debugf("WARNING: Calling deprecated endpoint %s. Please update to /projects version.", path)
-	}
+	return c.transport.Delete(ctx, path, headers)
 }
 
 // isProxyIntercepted reports whether a 2xx response looks like a proxy

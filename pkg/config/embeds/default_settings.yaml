@@ -14,7 +14,7 @@
 
 # Scion Agent Configuration (v1)
 #
-# Settings merge order: defaults -> global (~/.scion/) -> grove (.scion/)
+# Settings merge order: defaults -> global (~/.scion/) -> project (.scion/)
 # Top-level settings can be overridden via environment variables.
 
 schema_version: "1"

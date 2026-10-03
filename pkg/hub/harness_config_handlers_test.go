@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -32,15 +33,14 @@ func TestHarnessConfigList(t *testing.T) {
 	ctx := context.Background()
 
 	hc := &store.HarnessConfig{
-		ID:         tid("hc_test1"),
-		Slug:       "test-hc",
-		Name:       "Test HC",
-		Harness:    "claude",
-		Scope:      "global",
-		Visibility: store.VisibilityPublic,
-		Status:     store.HarnessConfigStatusActive,
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      tid("hc_test1"),
+		Slug:    "test-hc",
+		Name:    "Test HC",
+		Harness: "claude",
+		Scope:   "global",
+		Status:  store.HarnessConfigStatusActive,
+		Created: time.Now(),
+		Updated: time.Now(),
 	}
 	if err := s.CreateHarnessConfig(ctx, hc); err != nil {
 		t.Fatalf("failed to create harness config: %v", err)
@@ -71,7 +71,7 @@ func TestHarnessConfigListByProjectID(t *testing.T) {
 	if err := s.CreateHarnessConfig(ctx, &store.HarnessConfig{
 		ID: tid("hc_global1"), Slug: "global-hc", Name: "Global HC",
 		Harness: "claude", Scope: "global",
-		Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive,
+		Status:  store.HarnessConfigStatusActive,
 		Created: now, Updated: now,
 	}); err != nil {
 		t.Fatalf("failed to create global harness config: %v", err)
@@ -81,7 +81,7 @@ func TestHarnessConfigListByProjectID(t *testing.T) {
 	if err := s.CreateHarnessConfig(ctx, &store.HarnessConfig{
 		ID: tid("hc_project1"), Slug: "project-hc", Name: "Project HC",
 		Harness: "gemini", Scope: "project", ScopeID: tid("project_abc"),
-		Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive,
+		Status:  store.HarnessConfigStatusActive,
 		Created: now, Updated: now,
 	}); err != nil {
 		t.Fatalf("failed to create project harness config: %v", err)
@@ -91,7 +91,7 @@ func TestHarnessConfigListByProjectID(t *testing.T) {
 	if err := s.CreateHarnessConfig(ctx, &store.HarnessConfig{
 		ID: tid("hc_project2"), Slug: "other-project-hc", Name: "Other Project HC",
 		Harness: "claude", Scope: "project", ScopeID: tid("project_xyz"),
-		Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive,
+		Status:  store.HarnessConfigStatusActive,
 		Created: now, Updated: now,
 	}); err != nil {
 		t.Fatalf("failed to create other project harness config: %v", err)
@@ -101,7 +101,7 @@ func TestHarnessConfigListByProjectID(t *testing.T) {
 	if err := s.CreateHarnessConfig(ctx, &store.HarnessConfig{
 		ID: tid("hc_user1"), Slug: "user-hc", Name: "User HC",
 		Harness: "claude", Scope: "user", ScopeID: tid("user_123"),
-		Visibility: store.VisibilityPrivate, Status: store.HarnessConfigStatusActive,
+		Status:  store.HarnessConfigStatusActive,
 		Created: now, Updated: now,
 	}); err != nil {
 		t.Fatalf("failed to create user harness config: %v", err)
@@ -152,11 +152,11 @@ func TestHarnessConfigListByScopeAndProject(t *testing.T) {
 
 	for _, hc := range []*store.HarnessConfig{
 		{ID: tid("hc_g"), Slug: "g", Name: "G", Harness: "claude", Scope: "global",
-			Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive, Created: now, Updated: now},
+			Status: store.HarnessConfigStatusActive, Created: now, Updated: now},
 		{ID: tid("hc_a"), Slug: "a", Name: "A", Harness: "claude", Scope: "project", ScopeID: tid("project_abc"),
-			Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive, Created: now, Updated: now},
+			Status: store.HarnessConfigStatusActive, Created: now, Updated: now},
 		{ID: tid("hc_b"), Slug: "b", Name: "B", Harness: "claude", Scope: "project", ScopeID: tid("project_xyz"),
-			Visibility: store.VisibilityPublic, Status: store.HarnessConfigStatusActive, Created: now, Updated: now},
+			Status: store.HarnessConfigStatusActive, Created: now, Updated: now},
 	} {
 		if err := s.CreateHarnessConfig(ctx, hc); err != nil {
 			t.Fatalf("failed to create harness config %s: %v", hc.ID, err)
@@ -185,11 +185,10 @@ func TestHarnessConfigCreate(t *testing.T) {
 	srv, _ := testServer(t)
 
 	body := map[string]interface{}{
-		"slug":       "new-hc",
-		"name":       "New HC",
-		"harness":    "claude",
-		"scope":      "global",
-		"visibility": "private",
+		"slug":    "new-hc",
+		"name":    "New HC",
+		"harness": "claude",
+		"scope":   "global",
 	}
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs", body)
@@ -211,10 +210,6 @@ func TestHarnessConfigCreate(t *testing.T) {
 		t.Errorf("expected slug 'new-hc', got %q", resp.HarnessConfig.Slug)
 	}
 
-	if resp.HarnessConfig.Visibility != store.VisibilityPrivate {
-		t.Errorf("expected visibility 'private', got %q", resp.HarnessConfig.Visibility)
-	}
-
 	if resp.HarnessConfig.Status != store.HarnessConfigStatusActive {
 		t.Errorf("expected status 'active' (no files), got %q", resp.HarnessConfig.Status)
 	}
@@ -225,15 +220,14 @@ func TestHarnessConfigGet(t *testing.T) {
 	ctx := context.Background()
 
 	hc := &store.HarnessConfig{
-		ID:         tid("hc_get1"),
-		Slug:       "get-test",
-		Name:       "Get Test",
-		Harness:    "gemini",
-		Scope:      "global",
-		Visibility: store.VisibilityPublic,
-		Status:     store.HarnessConfigStatusActive,
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      tid("hc_get1"),
+		Slug:    "get-test",
+		Name:    "Get Test",
+		Harness: "gemini",
+		Scope:   "global",
+		Status:  store.HarnessConfigStatusActive,
+		Created: time.Now(),
+		Updated: time.Now(),
 	}
 	if err := s.CreateHarnessConfig(ctx, hc); err != nil {
 		t.Fatalf("failed to create harness config: %v", err)
@@ -263,15 +257,14 @@ func TestHarnessConfigDelete(t *testing.T) {
 	ctx := context.Background()
 
 	hc := &store.HarnessConfig{
-		ID:         tid("hc_del1"),
-		Slug:       "del-test",
-		Name:       "Del Test",
-		Harness:    "claude",
-		Scope:      "global",
-		Visibility: store.VisibilityPublic,
-		Status:     store.HarnessConfigStatusActive,
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      tid("hc_del1"),
+		Slug:    "del-test",
+		Name:    "Del Test",
+		Harness: "claude",
+		Scope:   "global",
+		Status:  store.HarnessConfigStatusActive,
+		Created: time.Now(),
+		Updated: time.Now(),
 	}
 	if err := s.CreateHarnessConfig(ctx, hc); err != nil {
 		t.Fatalf("failed to create harness config: %v", err)
@@ -294,15 +287,14 @@ func TestHarnessConfigPatch(t *testing.T) {
 	ctx := context.Background()
 
 	hc := &store.HarnessConfig{
-		ID:         tid("hc_patch1"),
-		Slug:       "patch-test",
-		Name:       "Patch Test",
-		Harness:    "claude",
-		Scope:      "global",
-		Visibility: store.VisibilityPublic,
-		Status:     store.HarnessConfigStatusActive,
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      tid("hc_patch1"),
+		Slug:    "patch-test",
+		Name:    "Patch Test",
+		Harness: "claude",
+		Scope:   "global",
+		Status:  store.HarnessConfigStatusActive,
+		Created: time.Now(),
+		Updated: time.Now(),
 	}
 	if err := s.CreateHarnessConfig(ctx, hc); err != nil {
 		t.Fatalf("failed to create harness config: %v", err)
@@ -332,20 +324,62 @@ func TestHarnessConfigPatch(t *testing.T) {
 	}
 }
 
+// TestHandleHarnessConfigFinalize_PersistsModelAliases is a regression test
+// for ptone/scion#2365 review round 1 (R2): the production record that
+// triggered the bug was written through the push/finalize path
+// (handleHarnessConfigFinalize), not the directory-bootstrap sync covered
+// by TestBootstrapHarnessConfigsFromDir_PersistsModelAliases. Without this
+// test, a regression in the finalize handler specifically would go
+// unnoticed because the read-time backfill would silently mask it (aliases
+// would still resolve correctly, just via an extra storage download on
+// every create instead of the already-stamped record).
+func TestHandleHarnessConfigFinalize_PersistsModelAliases(t *testing.T) {
+	srv, s, _ := testHarnessConfigFileServer(t)
+	ctx := context.Background()
+
+	hc := createTestHarnessConfigWithFiles(t, s, nil, nil)
+	stor := srv.GetStorage().(*contentMockStorage)
+
+	configYAML := "harness: codex\nmodel_aliases:\n  small: tiny-model\n  large: finalize-large-model\n"
+	objectPath := hc.StoragePath + "/config.yaml"
+	stor.content[objectPath] = []byte(configYAML)
+	stor.objects[objectPath] = &storage.Object{Name: objectPath, Size: int64(len(configYAML))}
+
+	body := map[string]interface{}{
+		"manifest": map[string]interface{}{
+			"files": []map[string]interface{}{
+				{"path": "config.yaml", "size": len(configYAML), "hash": "sha256:placeholder"},
+			},
+		},
+	}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/finalize", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	updated, err := s.GetHarnessConfig(ctx, hc.ID)
+	if err != nil {
+		t.Fatalf("failed to get updated harness config: %v", err)
+	}
+	if updated.Config == nil || updated.Config.ModelAliases["large"] != "finalize-large-model" {
+		t.Errorf("expected Config.ModelAliases[large] = %q after finalize, got %+v", "finalize-large-model", updated.Config)
+	}
+}
+
 func TestHarnessConfigExposesCapabilities(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 
 	hc := &store.HarnessConfig{
-		ID:         tid("hc_caps1"),
-		Slug:       "caps-hc",
-		Name:       "Caps HC",
-		Harness:    "claude",
-		Scope:      "global",
-		Visibility: store.VisibilityPublic,
-		Status:     store.HarnessConfigStatusActive,
-		Created:    time.Now(),
-		Updated:    time.Now(),
+		ID:      tid("hc_caps1"),
+		Slug:    "caps-hc",
+		Name:    "Caps HC",
+		Harness: "claude",
+		Scope:   "global",
+		Status:  store.HarnessConfigStatusActive,
+		Created: time.Now(),
+		Updated: time.Now(),
 	}
 	if err := s.CreateHarnessConfig(ctx, hc); err != nil {
 		t.Fatalf("failed to create harness config: %v", err)

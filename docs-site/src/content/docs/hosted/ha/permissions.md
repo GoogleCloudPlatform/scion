@@ -20,6 +20,7 @@ Access is granted through explicit role assignments:
 
 ### Delegation and Revocation
 - **CanDelegate Admission Gate**: Prevents lateral privilege escalation by ensuring a principal can only grant roles or permissions they themselves possess.
+- **Delegation Ceiling**: An agent acts with authority delegated by whoever created it, and that authority can never exceed its delegators'. For lifecycle actions and agent creation, every link in the agent's delegation chain must name a live delegator that holds the permission on the target resource: an active user, or an agent that exists and is not deleted (a stopped agent still counts). A deleted or deactivated delegator supplies no authority. The chain walk is limited to 10 links, and a cycle, a chain that is too deep, or a failed lookup denies the request. Delegation edges are project-scoped, so a resource in another project is denied.
 - **Credential Revocation**: Agent credentials and User Access Tokens can be instantly revoked, terminating access system-wide.
 
 ### Observability
@@ -43,18 +44,20 @@ Permissions are granted on specific resource types:
 Scion uses a standardized set of actions:
 - **CRUD**: `create`, `read`, `update`, `delete`, `list`.
 - **Administrative**: `manage`.
-- **Resource-Specific**: `start`, `stop`, `attach`, `message`.
+- **Resource-Specific**: `lifecycle` (start, stop, suspend, restart, restore), `attach` (terminal, exec, env, reset-auth, the `POST /:id/keys` literal-terminal-input operation), `port_access`, `message`.
 
 ## Access Control & Authorization
 
 Scion enforces strict role-binding-based authorization for all agent operations:
 - **Agent Creation**: Requires active membership in the target project.
 - **Agent Interaction**: Interacting with an agent (e.g., via PTY/terminal or structured messaging) is restricted to the agent's owner (the creator), users in the agent's ancestry chain, or system administrators. The default project-member role does not grant the `agent:message` permission — messaging authorization is aligned with the terminal attach permission gate.
+- **Lifecycle vs. Attach**: Lifecycle operations (start, stop, suspend, restart, restore, reincarnate) are gated by `agent.lifecycle`, separately from `agent.attach` (terminal, exec, env, reset-auth) and `agent.port_access`. Because an agent runs with its creator's user-scoped secrets, the built-in `project-owner` and `project-admin` roles grant `agent.lifecycle` and messaging but **not** `agent.attach` or `agent.port_access`. Owners and admins can start, stop, and message other members' agents, but cannot open a terminal on them or reach their forwarded ports. They keep full access to their own agents and descendants through the resource-owner and ancestry grants.
+- **Keys (`POST /:id/keys`)**: Sending literal terminal input through this dedicated Hub operation is authorized exactly like `agent.attach`, never through `agent.message` or a message-mode setting — a closed or `none` message mode does not block it, and message authority alone does not grant it. A human session or User Access Token needs live `ActionAttach` on the target; an agent credential additionally needs `ScopeAgentLifecycle`, the same project as the target, **and** a live attach relationship on the target evaluated through the shared relationship pipeline — same-project membership alone is not sufficient for an agent caller. An authenticated agent crossing its own project boundary is refused (`422`) on the project-scoped route unconditionally — that comparison runs before any scope or target check — and on the top-level route provided it already holds the lifecycle scope above (an agent lacking that scope is refused with `403 keys_denied` first, regardless of project). The disclosure also differs by route: on the project-scoped route this is decided before any target lookup, so it discloses nothing about whether the target exists in the foreign project; on the top-level route the target is resolved first (as for every other action on that route), so a foreign *existing* agent and a *nonexistent* one get different outcomes — the same disclosure trade-off that route's other lifecycle actions already make today, not a new trade-off introduced by keys. A federated (cross-Hub) agent identity is never one of the two caller kinds above — it is always denied, the same as any other unrecognized principal kind. The `scion keys` CLI command (and its deprecated `scion message --raw` alias) calls this operation in Hub mode, and a legacy `raw` request on `POST /:id/message` is normalized into it before message-mode authorization runs, so all three are authorized the same way — see [CLI Reference](/scion/reference/cli/#scion-keys) and [API Reference](/scion/reference/api/#agents-apiv1agents).
 - **Agent Deletion**: Only the agent's owner, a system administrator, or authorized agent callers can delete an agent. For an agent caller to perform a deletion, it must have `project:agent:lifecycle` (associated with the `full` role) and must target an agent within its own project (which closes a cross-project agent deletion vulnerability).
 
 ### Membership-Based Project Access (Visibility Eradication)
 
-The legacy, non-functional project `Visibility` field (e.g., `private`, `team`, or `public`) has been completely eradicated. Instead, access control is governed entirely by membership-based policies.
+The legacy, non-functional project `Visibility` field (e.g., `private`, `team`, or `public`) has been completely eradicated. Instead, access control is governed entirely by membership-based policies. The same applies to agents, templates, harness configs, and skills: their `visibility` field has been removed from the API (including the agent SSE payload), and access depends only on scope and grants. User- and project-scoped templates, harness configs, and skills are readable only by their owner, project members, and Hub admins; Hub-wide member and viewer grants cover only hub- and global-scoped records (see [Security](/scion/reference/security/#34-fail-closed-api-authorization-and-resource-isolation)).
 - **Project Scope Governance**: Access to a project and its associated resources is restricted to principals belonging to the project's member group (i.e. `project:<slug>:members`). This group is bound to per-project read and access roles using Project-scoped RoleBindings (such as `project:<slug>:member-read-project` and `project:<slug>:member-read-agent` mappings).
 - **Fail-Closed Retrieval (404 Gate)**: Project read access is verified via a `CheckAccess` gate on retrieval. If a caller is not authorized to read the project, the API responds with a standard `404 Not Found` (rather than a `403 Forbidden`) to prevent callers from probing the existence of private projects.
 
@@ -108,8 +111,8 @@ The Hub API and Web UI utilize a capability gating system. Resource responses fr
 
 To prevent lateral privilege escalation—where an agent with low privileges creates a child agent with high privileges, or a user assigns a highly privileged GCP service account they shouldn't have access to—Scion implements a secure, **two-layer gate** for binding a GCP service account to any agent:
 
-1. **Layer 1: Scion Hub Authorization**: The Hub's built-in authorization engine verifies the caller has the `ActionAssign` permission on the GCP service account resource within Scion.
-2. **Layer 2: GCP IAM Policy (`actAs`)**: If `gcp_iam_check_mode` is set to `enforce` (see [Server Configuration Reference](/scion/reference/server-config/)), the Hub evaluates Google Cloud's IAM delegation model via the **GCP Policy Troubleshooter v3 API**. It verifies that the caller's GCP principal possesses `iam.serviceAccounts.actAs` permission on the target service account.
+1. **Layer 1: Scion Hub Authorization**: The Hub's built-in authorization engine verifies the caller has the `ActionAssign` permission on the GCP service account resource within Scion. For project-scoped service accounts, the `project-owner`, `project-admin` and `project-member` roles hold `gcp_service_account.assign`, so every owner, admin and member of a project passes this layer for any project-scoped service account in that project.
+2. **Layer 2: GCP IAM Policy (`actAs`)**: This layer runs only when `gcp_iam_check_mode` is set to `enforce`; in the default `off` mode, Layer 1 alone decides project-scoped assignment. `enforce` is strongly recommended, see the caution under [GCP IAM Check Mode](/scion/reference/server-config/#gcp-iam-check-mode). Under `enforce`, the Hub evaluates Google Cloud's IAM delegation model via the **GCP Policy Troubleshooter v3 API**. It verifies that the caller's GCP principal possesses `iam.serviceAccounts.actAs` permission on the target service account.
 
 ### The `actAs` Validation Gate
 
@@ -153,6 +156,29 @@ To prevent unauthorized assignment of global resources, Scion applies specialize
 To streamline the agent creation workflow, project administrators can configure a project-default GCP service account that is automatically applied to newly created agents. However, to prevent privilege-escalation bypasses, this assignment is strictly gated:
 - **Enforced at Creation and Selection**: The Policy Troubleshooter `actAs` evaluation is automatically triggered whenever an agent is created using the project's default service account, or when a user selects the default service account option.
 - **Unauthorized Bypass Prevention**: If a user does not possess `iam.serviceAccounts.actAs` permission on the project's default service account, they are barred from creating agents under that project with the default identity, even if they have full project access.
+
+### Hub-Default GCP Identity
+
+Hub administrators can set a hub-wide default GCP identity in **Admin > Server Config > Agent Defaults > General** (`agent_defaults.default_gcp_identity_mode` and `default_gcp_identity_service_account_id`). The Hub picks the identity for a new agent from the first of these that is set:
+
+1. The GCP identity in the agent create request. Not applicable to an agent dispatched by a schedule, which carries no explicit identity.
+2. The project's default GCP identity. An explicit project **Block** counts as set, so the hub default is not consulted.
+3. The hub default. An explicit hub default of **Block** counts as set too.
+4. Nothing configured at any rung: the runtime broker applies its own default — **Block** on every runtime except Kubernetes.
+
+This ladder applies the same way whether the agent is created interactively/via the API or dispatched by a schedule (ptone/scion#1927): a scheduled dispatch starts at rung 2, and a hub default with no project-level override reaches it exactly as it would an interactive create.
+
+**Kubernetes runtime note**: **Block** is not offered on the Kubernetes runtime. If any rung above resolves to an explicit **Block** — the create request, an explicit project default, or an explicit hub default — dispatching that agent to the Kubernetes runtime fails with an actionable error naming **Assign** and **Passthrough** as the alternatives, rather than starting the agent. Rung 4 differs by runtime, and so does a denied hub-default **Passthrough** (below).
+
+This also applies to agents created before this restriction existed. An earlier Hub or web UI version could write an explicit **Block** into an agent's own stored GCP identity even when the intent was "nothing configured" (the web UI, for example, sent an explicit **Block** on every create or save until it was updated to stop doing so). That stored value is **not migrated**: starting, restarting, or resuming such an agent dispatched to the Kubernetes runtime fails with the same actionable error as a newly-created agent would. The fix is the same in both cases — edit the affected agent's own GCP identity mode to **Assign** or **Passthrough** (a project or hub default only affects agents created after the change, not this agent's already-stored value).
+
+This rung-4 **Passthrough** reaches the pod's ambient identity (the node's or the pod's own Kubernetes ServiceAccount, whatever Workload Identity or the cluster otherwise provides) for any agent creator, without the broker-owner and host-SA checks an *explicit* passthrough request goes through, and without the embedded-broker-only restriction that applies to an explicit hub-default passthrough. Operators who want those checks enforced on Kubernetes should configure **Assign** — at the project or hub default level, or per agent — rather than relying on rung 4.
+
+A hub-default **Passthrough** denied by either gate below — not the embedded Runtime Broker, or resolved to a non-local runtime profile — is treated the same as rung 4 on every runtime, not just Kubernetes: the Hub leaves the agent's GCP identity unset rather than writing an explicit **Block**, since the operator chose **Passthrough**, not **Block**, and a denial should not silently become a mode nobody asked for. On every runtime except Kubernetes the broker's own default for "nothing configured" is still **Block**, so this is not an observable change there; on Kubernetes a denied hub-default passthrough falls back to the same **Passthrough** rung 4 gives, rather than being rejected. An *explicit* per-agent passthrough request denied by its own equivalent check still fails with its own clear error — this only changes what the hub *default* ladder does when it can't honor its own choice.
+
+The hub default does not bypass the existing gates:
+- **Assign**: the service account must be verified and hub-scoped, and `gcp_iam_check_mode` must be `enforce`. These are checked when the setting is saved. Each agent creation also runs the same creator `actAs` authorization as project-default assignment, recorded under the audit surface `hub-default`. For a scheduled dispatch, the "creator" is the schedule's immediate creator (the user or agent that created the schedule), the same principal the project-default rung already authorizes against on that path.
+- **Passthrough**: applies only when the agent is dispatched to the Hub's embedded (co-located) Runtime Broker. The Hub identifies its embedded Runtime Broker by the ID it records when it starts it, not by the `scion.io/broker-role` label, because a Runtime Broker's owner can set its labels. During startup the Hub API can accept requests before the embedded Runtime Broker has registered; an agent created in that window waits up to 15 seconds for registration rather than being denied immediately. If registration fails, the Hub has no embedded Runtime Broker until it restarts, and the Hub log says so on each affected create. This covers the single-node deployment. Even on the embedded Runtime Broker, passthrough also requires the agent's resolved runtime profile to be a local container runtime (`docker` or `podman`) that shares the host's metadata server. The profile is the one named in the request or the project's active profile, falling back to the Runtime Broker's default profile. A `kubernetes` profile, any other type (including Apple `container`), or a profile the Hub cannot resolve is denied this grant, as is any agent on a Runtime Broker other than the embedded one. In both cases the Hub leaves the agent's GCP identity unset rather than writing **Block**, and logs why. The Runtime Broker re-checks the resolved runtime before it honors passthrough, and applies its own runtime-aware default (**Block**, except **Passthrough** on Kubernetes) when this rung leaves the identity unset. Without this limit, a hub-wide default would expose the host identity of every registered Runtime Broker to every agent creator. It would also skip the checks on the Runtime Broker's owner and host service account that explicit passthrough requests go through.
 
 ### Passthrough Mode Security & PATCH Parity
 
@@ -202,11 +228,36 @@ These built-in roles bundle common permissions for human users:
 
 | Role | Description |
 |------|-------------|
-| `hub-admin` | Full control over the entire Hub (System Role). |
-| `hub:member` | Standard user; can create their own projects. |
-| `project:admin` | Full control over a specific project and its agents. |
-| `project:developer` | Can create and manage agents within a project. |
-| `project:viewer` | Read-only access to project status and logs. |
+| `super-admin` | Full platform administrator with all permissions (System Role). |
+| `hub-admin` | Hub administrator with scopeable admin permissions (System Role). |
+| `hub-member` | Standard user; read access to directory resources, can create their own projects and register Runtime Brokers (`broker.create`) (System Role). |
+| `hub-viewer` | Read-only access to directory resources (System Role). |
+| `global-catalog-author` | Non-admin global skill authoring; grants only `skill.create_global` (System Role). |
+| `project-owner` | Full project permissions, including agent lifecycle and messaging. Does not include `agent.attach` or `agent.port_access` on other members' agents. |
+| `project-admin` | Like `project-owner`, but without `agent.delete` or `agent.set_message_mode`. |
+| `project-member` | Basic project permissions. |
+
+:::caution[Breaking change: role revision 3]
+The `project-owner` and `project-admin` roles are at revision 3. On upgrade, existing Hubs reconcile these roles automatically: `agent.attach` and `agent.port_access` are removed and `agent.lifecycle` is added. Owners and admins who previously attached to other members' agents can no longer do so. User access tokens minted before the split that hold `agent:attach` keep lifecycle authority so existing automation continues to work. See [Personal Access Tokens](/scion/hosted/user/personal-access-tokens/) for the current scope list.
+:::
+
+### Hub Roles
+
+Every user has one **hub role**: `admin`, `member` or `viewer`. It is shown in **Admin > Users** and as a badge on the user's own profile page. The hub role decides what a user can do across the whole hub. The hub grants it through the system roles above:
+
+| Hub role | Granted through | What it allows |
+|----------|-----------------|----------------|
+| `admin` | A system-scope `super-admin` binding | Full administrative access to the hub. |
+| `member` | Membership of the `hub-members` group, which holds the `hub-member` role | Read the hub directory and catalogs (users, groups, templates, harness configs, brokers, skills, and so on), **create projects** and **register Runtime Brokers**. |
+| `viewer` | A system-scope `hub-viewer` binding | The same as `member`, but **cannot create projects** or **register Runtime Brokers**. This includes cloning a project. |
+
+- **Project roles are independent of the hub role.** A viewer can still be added to a project, and then works in it according to their project role (`project-member`, `project-admin` or `project-owner`). The hub role only controls hub-level actions, such as creating a project.
+- **New users** get the hub role set by [`server.auth.default_user_role`](/scion/reference/server-config/#authentication-serverauth) (`member` unless configured otherwise). It is applied when the account is first created or activated, which includes the first sign-in of an invited or allow-listed user. Invites and allow-list entries carry no role of their own. Users listed in `admin_emails` are always admins.
+- **Changing the default does not change existing users.** To change an individual user's role, use **Change role** in the actions menu on **Admin > Users**, or `PATCH /api/v1/users/{id}` with `{"role": "viewer"}` (`admin`, `member` or `viewer`). A pending invite has no role yet, so its role cannot be changed until the user has signed in.
+- **Role changes take effect immediately.** The hub updates the user's group membership and role bindings when the role changes, whether an admin changes it or it changes at sign-in. No hub restart is needed.
+- The UI hides controls the user's hub role does not allow. For example, a viewer does not see **Create Project**.
+
+`server.auth.default_user_role` is not the same setting as `server.federation.trusted_issuers[].default_role`, which sets the role for users who authenticate with federated OIDC tokens.
 
 ### Tiered Agent Authorization Roles
 
@@ -219,7 +270,7 @@ Agents are assigned one of four named roles, each mapping to a fixed set of JWT 
 | `none` | *None* | No access to the Hub API (runs with no authorization claims). |
 | `readonly` | `project:read` | Can view and query project state, but cannot report status, register port forwards, or manage other agents. |
 | `baseline` | `project:read`<br>`agent:status:update`<br>`agent:token:refresh`<br>`project:agent:notify`<br>`agent:port:forward` | Standard execution permissions. Allows the agent to report progress, refresh its token, register reverse-proxied port forwards, send notifications, and manage its own notification subscriptions. |
-| `full` | *All baseline scopes* +<br>`project:agent:create`<br>`project:agent:lifecycle`<br>`project:secret:read` | Complete agent control. Allows spawning child (sub) agents, managing their lifecycles, and reading project-scoped secrets from the secret backend. |
+| `full` | *All baseline scopes* +<br>`project:agent:create`<br>`project:agent:sa_assign`<br>`project:agent:lifecycle`<br>`project:secret:read` | Complete agent control. Allows spawning child (sub) agents, assigning GCP service accounts to agents, managing their lifecycles, and reading project-scoped secrets from the secret backend. |
 
 #### Creation-Time Role Ceilings
 The effective role granted to an agent at creation depends on the caller:
@@ -285,7 +336,7 @@ The Scion Web Dashboard includes a centralized **Admin Management Suite** (acces
   - **Guided Authoring Workflow**: A step-by-step UI workflow for creating and editing boundaries, including targeting individual principals, group closures, or all principals, and specifying allowed maximum permissions.
   - **Preview Engine**: An interactive evaluation sandbox enabling administrators to simulate, dry-run, and verify the impact of an access boundary on a principal's effective permissions prior to committing. Backed by the **Provenance/Explain API**, it details exactly which positive permissions are restricted and why.
   - **Transactional Governance & Atomic Audit**: Built-in backend security guarantees that all access boundary operations are transactionally secure and recorded in the atomic mutation audit log.
-- **Role & Binding Management**: Full CRUD interfaces for Role Definitions and Role Bindings. Administrators can define custom roles, map permissions, and bind them to users, groups, or agents at the Hub or Project scope, while the system enforces `CanDelegate` checks to prevent privilege escalation.
+- **Role & Binding Management**: Full CRUD interfaces for Role Definitions and Role Bindings. Administrators can define custom roles, map permissions, and bind them to users, groups, or agents at the Hub or Project scope, while the system enforces `CanDelegate` checks to prevent privilege escalation. Project owners can also assign and remove existing custom project roles for users and groups on their own project from the project's Members editor, alongside the member's built-in role (owner, admin or member); each save is applied atomically and audited, and the same `CanDelegate` ceiling applies, so an owner can only grant permissions they hold themselves. Project admins see custom roles read-only. Custom roles can't be granted to agents from the Members editor; hub administrators can still bind them through the admin Role Bindings page.
 - **Quota Management**: Dedicated admin view to manage the Quota System. Administrators can view, create, and update `LimitDefinition` thresholds and monitor `EntitlementBinding` status across projects.
 - **Admin Security & Navigation**: The dashboard uses a **Per-Resource Permission-Gated Admin UI** to render and restrict access to the Admin Suite. Instead of a binary `role===admin` check:
   - Nav and route guards use granular, per-item permission checks.
@@ -326,4 +377,9 @@ This command modifies the database directly. Use it only when normal admin acces
 
 ### AdminEmails and UI-Promoted Admins
 
-The `admin_emails` server setting is additive only: users listed in `admin_emails` are promoted to admin on login, but the list never demotes or overwrites a role that was set through the Web Dashboard (e.g., a user promoted to admin via the Users list). Changing a user's role is always an explicit admin action — removing an email from `admin_emails` does not revoke admin access that was granted through the UI.
+Users listed in the `admin_emails` server setting are always admins: they are promoted to admin when they sign in. When the list is non-empty, removing an email from it demotes that admin to the hub's [default role for new users](#hub-roles) (`server.auth.default_user_role`) at the next hub restart or their next sign-in, whichever comes first. Their permissions change at once. At restart, both `admin_emails` and the default role come from `settings.yaml` or the environment, so a change made only in the Admin UI (Postgres mode) takes effect at the user's next sign-in. If the default role was set only in the Admin UI, a user demoted at restart becomes Member.
+
+There are two exceptions:
+
+- **UI-promoted admins keep admin.** A user promoted to admin through the Web Dashboard (the Users list) or the users API holds admin because of that explicit action, not because of `admin_emails`. Removing their email from `admin_emails` does not demote them. To remove their admin role, change it on **Admin > Users**.
+- **The startup safety check must have passed.** When the hub starts, it checks that the `admin_emails` from its startup configuration (`settings.yaml` or the environment) matches at least one existing user, or that at least one UI-promoted admin exists. If not, the hub refuses all demotions, both at startup and at sign-in, until the configuration is fixed **and the hub is restarted**. This stops a configuration mistake from removing every administrator.

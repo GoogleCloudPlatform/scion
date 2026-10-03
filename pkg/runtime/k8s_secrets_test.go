@@ -356,9 +356,9 @@ func TestCreateAgentSecret(t *testing.T) {
 	}
 
 	labels := map[string]string{
-		"scion.name":  "test-agent",
-		"scion.grove": "test-project",
-		"app":         "other", // Non-scion label should not be copied
+		"scion.name":    "test-agent",
+		"scion.project": "test-project",
+		"app":           "other", // Non-scion label should not be copied
 	}
 
 	name, err := rt.createAgentSecret(ctx, "default", "test-agent", secrets, labels)
@@ -402,8 +402,8 @@ func TestCreateAgentSecret(t *testing.T) {
 	if secret.Labels["scion.name"] != "test-agent" {
 		t.Errorf("expected scion.name label propagated")
 	}
-	if secret.Labels["scion.grove"] != "test-project" {
-		t.Errorf("expected scion.grove label propagated")
+	if secret.Labels["scion.project"] != "test-project" {
+		t.Errorf("expected scion.project label propagated")
 	}
 	if _, ok := secret.Labels["app"]; ok {
 		t.Error("non-scion label should not be copied to secret")
@@ -618,6 +618,33 @@ func TestCreateAuthFileSecret_AlreadyExists(t *testing.T) {
 	}
 	if string(s.Data["auth-file-0"]) != "new-content" {
 		t.Errorf("expected new-content, got %s", string(s.Data["auth-file-0"]))
+	}
+}
+
+func TestCreateAuthFileSecret_EmptySourcePathSkipped(t *testing.T) {
+	// Regression test: in broker mode, SourcePath is cleared for all file
+	// mappings. createAuthFileSecret must skip these entries so the Secret's
+	// data map does not reference files that don't exist on the host.
+	rt, clientset, _ := newTestK8sRuntime()
+	ctx := context.Background()
+
+	files := []api.FileMapping{
+		{SourcePath: "", ContainerPath: "~/.config/gcloud/application_default_credentials.json"},
+		{SourcePath: "", ContainerPath: "~/.config/gcloud/credentials.db"},
+	}
+	labels := map[string]string{"scion.name": "test-agent"}
+
+	err := rt.createAuthFileSecret(ctx, "default", "test-agent", files, labels)
+	if err != nil {
+		t.Fatalf("createAuthFileSecret should succeed with empty SourcePaths, got: %v", err)
+	}
+
+	s, err := clientset.CoreV1().Secrets("default").Get(ctx, "scion-auth-test-agent", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("failed to get auth secret: %v", err)
+	}
+	if len(s.Data) != 0 {
+		t.Errorf("expected empty Secret data map for all-empty SourcePaths, got %d entries: %v", len(s.Data), s.Data)
 	}
 }
 

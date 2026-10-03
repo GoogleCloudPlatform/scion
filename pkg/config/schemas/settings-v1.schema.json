@@ -110,14 +110,8 @@
         },
         "project_id": {
           "type": "string",
-          "description": "Project identifier when registered with the Hub. Formerly known as 'grove_id', which is still accepted for backward compatibility.",
+          "description": "Project identifier when registered with the Hub.",
           "x-env-var": "SCION_HUB_PROJECT_ID",
-          "x-since": "1"
-        },
-        "grove_id": {
-          "type": "string",
-          "description": "Deprecated: Use 'project_id' instead.",
-          "x-env-var": "SCION_HUB_GROVE_ID",
           "x-since": "1"
         },
         "local_only": {
@@ -154,7 +148,7 @@
     },
     "telemetry": {
       "$ref": "#/$defs/telemetryConfig",
-      "description": "Telemetry and observability settings. Merged across global, grove, template, and agent scopes (last write wins).",
+      "description": "Telemetry and observability settings. Merged across global, project, template, and agent scopes (last write wins).",
       "x-scope": "any",
       "x-since": "1"
     },
@@ -254,6 +248,45 @@
       "description": "Default role assigned to new agents when not explicitly specified.",
       "x-scope": "any",
       "x-since": "1"
+    },
+    "default_gcp_identity_mode": {
+      "type": "string",
+      "enum": ["", "block", "passthrough", "assign"],
+      "description": "Hub-wide fallback GCP metadata mode for new agents, applied when neither the agent create request nor the project's default GCP identity setting names one.",
+      "x-scope": "any",
+      "x-since": "1"
+    },
+    "default_gcp_identity_service_account_id": {
+      "type": "string",
+      "description": "Service account used when default_gcp_identity_mode is \"assign\".",
+      "x-scope": "any",
+      "x-since": "1"
+    },
+    "quotas": {
+      "type": "object",
+      "description": "Hub-level quota enforcement settings. Global-only.",
+      "x-scope": "global",
+      "x-since": "1",
+      "properties": {
+        "enforce_broker_quotas": {
+          "type": "boolean",
+          "description": "Whether the per-broker agent quota cap (max_agents_per_broker) is enforced on create. Default true (enforced) when absent; when false, agent creates beyond the cap succeed but usage is still counted."
+        }
+      },
+      "additionalProperties": false
+    },
+    "agent_secrets": {
+      "type": "object",
+      "description": "Hub-level policy for secrets written by agents. Global-only.",
+      "x-scope": "global",
+      "x-since": "1",
+      "properties": {
+        "user_scope_only": {
+          "type": "boolean",
+          "description": "When true, agents may only write user (profile) scope secrets. The hub rejects agent writes at project scope, including harness auth capture. User-originated writes are unaffected. Default false."
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false,
@@ -278,6 +311,12 @@
           "type": "boolean",
           "default": false,
           "description": "Enable GKE-specific features (e.g., Workload Identity)."
+        },
+        "priority_class_name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+          "description": "Kubernetes-runtime-only default PriorityClass name (DNS-1123 subdomain) applied to agent pods using this runtime entry, or the empty string for unset. The PriorityClass must already exist on the cluster; Scion does not create one. An explicit template/agent-config kubernetes.priorityClassName overrides this."
         }
       },
       "additionalProperties": false
@@ -299,6 +338,11 @@
         "image": {
           "type": "string",
           "description": "Container image URI."
+        },
+        "image_pull_policy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"],
+          "description": "Kubernetes-runtime-only default image pull policy. Ignored by non-Kubernetes runtimes. An explicit template/agent-config kubernetes.imagePullPolicy still outranks this."
         },
         "user": {
           "type": "string",
@@ -708,6 +752,11 @@
       "type": "object",
       "properties": {
         "image": { "type": "string" },
+        "image_pull_policy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"],
+          "description": "Kubernetes-runtime-only default image pull policy for this profile. Overrides harness_configs.<name>.image_pull_policy."
+        },
         "user": { "type": "string" },
         "env": {
           "type": "object",
@@ -783,6 +832,13 @@
           "x-env-var": "SCION_SERVER_HUB_ENDPOINT",
           "x-env-var-alias": "SCION_SERVER_HUB_PUBLIC_URL"
         },
+        "agent_endpoint": {
+          "type": "string",
+          "format": "uri",
+          "description": "Optional override of public_url used only for the Hub URL injected into agents (SCION_HUB_ENDPOINT). It is injected into agents on every runtime broker attached to this Hub, including remote brokers, so only set it if every broker's agents can reach the address and it is this Hub on each of those networks. Invite links, chat-bridge links, the OIDC issuer default, and the cloudrun_invoker audience default keep using public_url. Must be scheme://host[:port] only: http or https, an IP literal or a hostname of letters, digits, '_', '-', and '.', no path, query, fragment, or credentials (a trailing / is stripped); the Hub fails to start otherwise. When unset, agents receive the Hub's regular endpoint (public_url, or the endpoint the Hub resolves when public_url is unset). In file mode this key can also be set through the admin server-config API (admin only), validated the same way, and takes effect at the next restart. Security: with an http:// value, agent bearer tokens and the secrets and tokens agents fetch from the Hub travel unencrypted between agents and the Hub; use https:// unless that network is trusted and isolated.",
+          "x-env-var": "SCION_SERVER_HUB_AGENTENDPOINT",
+          "x-since": "1"
+        },
         "read_timeout": { "type": "string", "default": "30s", "x-env-var": "SCION_SERVER_HUB_READTIMEOUT" },
         "write_timeout": { "type": "string", "default": "60s", "x-env-var": "SCION_SERVER_HUB_WRITETIMEOUT" },
         "cors": { "$ref": "#/$defs/corsConfig" },
@@ -815,6 +871,30 @@
           "description": "Duration before marking agents as stalled (e.g. '5m', '10m', '30m').",
           "x-env-var": "SCION_SERVER_HUB_STALLED_THRESHOLD",
           "x-since": "1"
+        },
+        "async_agent_launch": {
+          "type": "boolean",
+          "description": "Reserved: no create path reads this yet, so setting it has no effect until the async dispatch path lands. Once live: the non-blocking agent create kill switch, off by default; a launch is non-blocking only when this is on AND the client request also opts in (acceptAsyncLaunch). Restart required to change.",
+          "x-env-var": "SCION_SERVER_HUB_ASYNCAGENTLAUNCH",
+          "x-since": "1"
+        },
+        "launch_timeout": {
+          "type": "string",
+          "description": "Reserved: not yet read by any create path. Once live: the whole-launch budget for an opted-in launch, from acceptance to a terminal Hub state (e.g. '5m'). Below 30s is rejected and the default is used, since the broker's fixed 20s abort margin would leave no time for a launch to run. Restart required to change.",
+          "x-env-var": "SCION_SERVER_HUB_LAUNCHTIMEOUT",
+          "x-since": "1"
+        },
+        "launch_keepalive_seconds": {
+          "type": "integer",
+          "description": "Broker keepalive interval, in seconds. Today it sets only the reaper's staleness window (8x this value); it will also be sent to the broker once the async dispatch path lands. Restart required to change.",
+          "x-env-var": "SCION_SERVER_HUB_LAUNCHKEEPALIVESECONDS",
+          "x-since": "1"
+        },
+        "missing_agent_grace": {
+          "type": "string",
+          "description": "How long a running agent must be absent from its runtime broker's complete heartbeat inventory before the Hub marks it phase 'error' with exit reason 'container_missing' (an existing preempted or evicted exit reason is kept) (e.g. '3m'; default '3m', minimum '1m').",
+          "x-env-var": "SCION_SERVER_HUB_MISSINGAGENTGRACE",
+          "x-since": "1"
         }
       }
     },
@@ -846,7 +926,7 @@
         },
         "auto_provide": {
           "type": "boolean",
-          "description": "Automatically add as provider for new groves.",
+          "description": "Automatically add as provider for new projects.",
           "x-env-var": "SCION_SERVER_BROKER_AUTOPROVIDE"
         },
         "broker_name": {
@@ -922,6 +1002,14 @@
           "type": "string",
           "description": "Controls user access: 'open' (anyone can sign in), 'invite' (admin must invite), 'closed' (no new users).",
           "x-env-var": "SCION_SERVER_AUTH_USER_ACCESS_MODE",
+          "x-since": "1"
+        },
+        "default_user_role": {
+          "type": "string",
+          "description": "Role assigned to new users not in admin_emails. Values: 'member' (default), 'viewer'. 'admin' is blocked.",
+          "enum": ["member", "viewer"],
+          "default": "member",
+          "x-env-var": "SCION_SERVER_AUTH_DEFAULTUSERROLE",
           "x-since": "1"
         }
       }
@@ -1081,8 +1169,8 @@
         "insecure_skip_verify": {
           "type": "boolean",
           "default": false,
-          "description": "Skip TLS certificate verification.",
-          "x-env-var": "SCION_OTEL_INSECURE",
+          "description": "Keep TLS encryption but skip certificate verification. Cannot be enabled when tls.enabled is false.",
+          "x-env-var": "SCION_OTEL_SKIP_TLS_VERIFY",
           "x-since": "1"
         },
         "ca_file": {

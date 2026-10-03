@@ -72,6 +72,8 @@ function serveUserPrefs(stored: Record<string, string> = {}): void {
         spaceSortMode: body.spaceSortMode || 'activity',
         threadSortMode: body.threadSortMode || 'activity',
         spaceOrder: body.spaceOrder ?? '',
+        threadOrder: body.threadOrder ?? '{}',
+        threadGroups: body.threadGroups ?? '{}',
       };
     }
     return Promise.resolve(new Response(JSON.stringify(stored), { status: 200 }));
@@ -145,6 +147,86 @@ describe('space rail — prefs round trip', () => {
     expect(el.prefs.spaceOrder).toBeUndefined();
   });
 
+  it('derives alpha thread sort from an alpha space sort even though the hub always sends threadSortMode: activity', async () => {
+    const el = createRail();
+    serveUserPrefs({ spaceSortMode: 'alpha', threadSortMode: 'activity' });
+
+    await el.loadPrefs();
+
+    expect(el.prefs.spaceSortMode).toBe('alpha');
+    expect(el.prefs.threadSortMode).toBe('alpha');
+  });
+
+  it('does not derive alpha thread sort when the space sort is not alpha', async () => {
+    const el = createRail();
+    serveUserPrefs({ spaceSortMode: 'custom', threadSortMode: 'activity' });
+
+    await el.loadPrefs();
+
+    expect(el.prefs.threadSortMode).toBe('activity');
+  });
+
+  it("migrates a legacy threadSortMode: 'custom' to alpha when the space sort is alpha, keeping threadOrder", async () => {
+    const el = createRail();
+    serveUserPrefs({
+      spaceSortMode: 'alpha',
+      threadSortMode: 'custom',
+      threadOrder: JSON.stringify({ 'p-a': ['t-1', 't-2'] }),
+    });
+
+    await el.loadPrefs();
+
+    expect(el.prefs.threadSortMode).toBe('alpha');
+    expect(el.prefs.threadOrder).toEqual({ 'p-a': ['t-1', 't-2'] });
+  });
+
+  it("migrates a legacy threadSortMode: 'custom' to activity when the space sort is not alpha, keeping threadOrder", async () => {
+    const el = createRail();
+    serveUserPrefs({
+      spaceSortMode: 'activity',
+      threadSortMode: 'custom',
+      threadOrder: JSON.stringify({ 'p-a': ['t-1', 't-2'] }),
+    });
+
+    await el.loadPrefs();
+
+    expect(el.prefs.threadSortMode).toBe('activity');
+    expect(el.prefs.threadOrder).toEqual({ 'p-a': ['t-1', 't-2'] });
+  });
+
+  it('a saved thread order survives a cold reload, and a later save elsewhere keeps it', async () => {
+    const el = createRail();
+    serveUserPrefs();
+
+    await el.savePrefs({
+      spaceSortMode: 'alpha',
+      threadSortMode: 'alpha',
+      threadOrder: { 'p-a': ['t-2', 't-1'] },
+    });
+
+    // A fresh rail and a fresh load, the way a page reload would see it.
+    const reloaded = createRail();
+    await reloaded.loadPrefs();
+    expect(reloaded.prefs.threadOrder).toEqual({ 'p-a': ['t-2', 't-1'] });
+
+    // A save that touches a different space must not erase it.
+    await reloaded.savePrefs({ spaceOrder: ['p-b', 'p-a', 'p-c'] });
+    expect(reloaded.prefs.threadOrder).toEqual({ 'p-a': ['t-2', 't-1'] });
+  });
+
+  it('keeps threadOrder when reconciling its own save echo', async () => {
+    const el = createRail();
+    serveUserPrefs();
+
+    await el.savePrefs({
+      spaceSortMode: 'alpha',
+      threadSortMode: 'alpha',
+      threadOrder: { 'p-a': ['t-1', 't-2'] },
+    });
+
+    expect(el.prefs.threadOrder).toEqual({ 'p-a': ['t-1', 't-2'] });
+  });
+
   it('writes the order as a JSON array string', async () => {
     const el = createRail();
 
@@ -154,6 +236,8 @@ describe('space rail — prefs round trip', () => {
       spaceSortMode: 'custom',
       threadSortMode: 'activity',
       spaceOrder: JSON.stringify(['p-b', 'p-a']),
+      threadOrder: '{}',
+      threadGroups: '{}',
     });
     expect(el.prefs.spaceOrder).toEqual(['p-b', 'p-a']);
   });
@@ -224,7 +308,11 @@ describe('space rail — sort mode selection', () => {
 
   it('keeps an existing custom order when custom is re-selected', async () => {
     const el = createRail();
-    el.prefs = { spaceSortMode: 'activity', threadSortMode: 'activity', spaceOrder: ['p-c', 'p-a'] };
+    el.prefs = {
+      spaceSortMode: 'activity',
+      threadSortMode: 'activity',
+      spaceOrder: ['p-c', 'p-a'],
+    };
 
     selectSort(el, 'custom');
     await Promise.resolve();
@@ -361,11 +449,7 @@ describe('space rail — sort menu and space menu rendering', () => {
     await el.updateComplete;
 
     const items = [...el.shadowRoot.querySelectorAll('.rail-toolbar sl-menu-item')];
-    expect(items.map((i: any) => i.getAttribute('value'))).toEqual([
-      'activity',
-      'alpha',
-      'custom',
-    ]);
+    expect(items.map((i: any) => i.getAttribute('value'))).toEqual(['activity', 'alpha', 'custom']);
     const checked = items.filter((i: any) => i.hasAttribute('checked'));
     expect(checked).toHaveLength(1);
     expect(checked[0]?.getAttribute('value')).toBe('custom');

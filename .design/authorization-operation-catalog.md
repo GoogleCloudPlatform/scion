@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 96
+**Operations:** 103
 
 ## Table of Contents
 
@@ -30,6 +30,12 @@
 - [gcp.identity.mint](#gcpidentitymint) — Mint a GCP access token for a service account
 - [agent.lifecycle.create](#agentlifecyclecreate) — Create an agent in a project
 - [agent.lifecycle.delete](#agentlifecycledelete) — Delete an agent
+- [agent.lifecycle.control](#agentlifecyclecontrol) — Start, stop, suspend or restart an agent
+- [agent.lifecycle.restore](#agentlifecyclerestore) — Restore a soft-deleted agent
+- [agent.lifecycle.exec](#agentlifecycleexec) — Run a command in an agent's container
+- [agent.lifecycle.env](#agentlifecycleenv) — Submit environment values to an agent
+- [agent.lifecycle.resetauth](#agentlifecycleresetauth) — Reset an agent's harness authentication
+- [agent.lifecycle.reincarnate](#agentlifecyclereincarnate) — Reincarnate an agent
 - [project.lifecycle.create](#projectlifecyclecreate) — Create a new project
 - [project.lifecycle.delete](#projectlifecycledelete) — Delete a project with cascading security state cleanup and atomic audit
 - [agent.message.send](#agentmessagesend) — Send a message to an agent
@@ -43,6 +49,7 @@
 - [hub.config.read](#hubconfigread) — Read server configuration and schema
 - [hub.config.update](#hubconfigupdate) — Update server configuration sections
 - [hub.messaging.update](#hubmessagingupdate) — Read and update messaging configuration switches
+- [hub.experiments.update](#hubexperimentsupdate) — Read and update hub-wide experiment overrides
 - [hub.maintenance.execute](#hubmaintenanceexecute) — Execute maintenance operations including migrations and restarts
 - [hub.adminmode.update](#hubadminmodeupdate) — Toggle admin/maintenance mode
 - [hub.allowlist.update](#huballowlistupdate) — Manage the platform email allow list
@@ -67,7 +74,7 @@
 - [project.read](#projectread) — Read a single project's metadata by ID or slug
 - [project.list](#projectlist) — List projects within the caller's authorized scope
 - [project.update](#projectupdate) — Update project settings and metadata
-- [project.register](#projectregister) — Register a project or grove from an external source
+- [project.register](#projectregister) — Register a project from an external source
 - [skill.read](#skillread) — Read skill definitions or list/discover skills
 - [skill.create](#skillcreate) — Create a new skill definition
 - [skill.update](#skillupdate) — Update an existing skill definition
@@ -602,7 +609,7 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | DELETE | `/api/v1/groups/{id}/members/{memberId}` |
+| http_route | DELETE | `/api/v1/groups/{id}/members/{memberType}/{memberId}` |
 
 **Principals:** `user`
 
@@ -993,7 +1000,8 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | POST | `/api/v1/gcp-service-accounts/{id}/assign` |
+| internal_dispatch | — | `createAgentInProject:gcp-identity-assign` |
+| internal_dispatch | — | `applyAgentUpdate:gcp-identity-assign` |
 
 **Principals:** `user`
 
@@ -1090,11 +1098,18 @@
 
 **Effects:** `create-resource`
 
+### Delegation
+
+- **Kind:** `non_amplification`
+- Actor must hold the role and scopes delegated to the new agent (CanDelegate non-amplification); an agent actor is also evaluated against the delegation ceiling of its live delegation chain for agent.create on the target project
+
 **Denial Codes:** `forbidden`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestAgentCreate_ExplicitRoleAboveParentDenied`
+- `pkg/hub:TestAgentCreate_RequiresLiveDelegator`
 
 ---
 
@@ -1132,6 +1147,198 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## agent.lifecycle.control
+
+**Domain:** agent
+
+**Description:** Start, stop, suspend or restart an agent
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/start` |
+| http_route | POST | `/api/v1/agents/{id}/stop` |
+| http_route | POST | `/api/v1/agents/{id}/suspend` |
+| http_route | POST | `/api/v1/agents/{id}/restart` |
+| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/start` |
+| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/stop` |
+| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/suspend` |
+| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/restart` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Base Permission:** `agent.lifecycle`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAgentSubRoute_CatalogDrift`
+
+---
+
+## agent.lifecycle.restore
+
+**Domain:** agent
+
+**Description:** Restore a soft-deleted agent
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/restore` |
+| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/restore` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Base Permission:** `agent.lifecycle`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAgentSubRoute_CatalogDrift`
+
+---
+
+## agent.lifecycle.exec
+
+**Domain:** agent
+
+**Description:** Run a command in an agent's container
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/exec` |
+| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/exec` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Base Permission:** `agent.attach`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAgentSubRoute_CatalogDrift`
+
+---
+
+## agent.lifecycle.env
+
+**Domain:** agent
+
+**Description:** Submit environment values to an agent
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/env` |
+| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/env` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Base Permission:** `agent.attach`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAgentSubRoute_CatalogDrift`
+
+---
+
+## agent.lifecycle.resetauth
+
+**Domain:** agent
+
+**Description:** Reset an agent's harness authentication
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/reset-auth` |
+| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/reset-auth` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Base Permission:** `agent.attach`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAgentSubRoute_CatalogDrift`
+
+---
+
+## agent.lifecycle.reincarnate
+
+**Domain:** agent
+
+**Description:** Reincarnate an agent
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/reincarnate` |
+| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/reincarnate` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Base Permission:** `agent.lifecycle`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestAgentSubRoute_CatalogDrift`
 
 ---
 
@@ -1234,7 +1441,6 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | POST | `/api/v1/chat/threads/{id}/messages` |
 | broker_call | — | `broker.inbound` |
 
 **Principals:** `user`, `agent`, `broker`
@@ -1356,7 +1562,6 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | POST | `/api/v1/secrets` |
 | http_route | PUT | `/api/v1/secrets/{key}` |
 | http_route | DELETE | `/api/v1/secrets/{key}` |
 
@@ -1596,7 +1801,8 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | PUT | `/api/v1/admin/server-config/sections/{id}` |
+| http_route | PUT | `/api/v1/admin/server-config` |
+| http_route | DELETE | `/api/v1/admin/server-config/sections/{id}` |
 
 **Principals:** `user`
 
@@ -1647,6 +1853,38 @@
 
 ---
 
+## hub.experiments.update
+
+**Domain:** hub
+
+**Description:** Read and update hub-wide experiment overrides
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/admin/experiments` |
+| http_route | PUT | `/api/v1/admin/experiments` |
+| http_route | DELETE | `/api/v1/admin/experiments` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Base Permission:** `hub.experiments.update`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
 ## hub.maintenance.execute
 
 **Domain:** hub
@@ -1657,12 +1895,14 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | POST | `/api/v1/admin/maintenance/operations` |
 | http_route | GET | `/api/v1/admin/maintenance/operations` |
 | http_route | GET | `/api/v1/admin/maintenance/operations/{id}` |
+| http_route | POST | `/api/v1/admin/maintenance/operations/{id}/run` |
 | http_route | POST | `/api/v1/admin/maintenance/restart` |
 | http_route | POST | `/api/v1/admin/maintenance/check-updates` |
-| http_route | POST | `/api/v1/admin/maintenance/migrations/{id}` |
+| http_route | POST | `/api/v1/admin/maintenance/migrations/{id}/run` |
+| http_route | GET | `/api/v1/admin/maintenance/update-available` |
+| http_route | DELETE | `/api/v1/admin/maintenance/update-available` |
 
 **Principals:** `user`
 
@@ -1723,8 +1963,7 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/admin/allow-list` |
-| http_route | PUT | `/api/v1/admin/allow-list` |
-| http_route | PUT | `/api/v1/admin/allow-list/{email}` |
+| http_route | POST | `/api/v1/admin/allow-list` |
 | http_route | DELETE | `/api/v1/admin/allow-list/{email}` |
 
 **Principals:** `user`
@@ -1787,7 +2026,7 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/admin/diagnostics/logs` |
-| http_route | GET | `/api/v1/admin/diagnostics/logs/stream` |
+| sse | GET | `/api/v1/admin/diagnostics/logs/stream` |
 | http_route | GET | `/api/v1/admin/messaging/divergence` |
 
 **Principals:** `user`
@@ -1909,7 +2148,7 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | POST | `/api/v1/admin/validate-resources` |
+| http_route | GET | `/api/v1/admin/validate-resources` |
 
 **Principals:** `user`
 
@@ -2181,7 +2420,7 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | PUT | `/api/v1/agents/{id}` |
+| http_route | PATCH | `/api/v1/agents/{id}` |
 
 **Principals:** `user`
 
@@ -2211,7 +2450,7 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| websocket | GET | `/api/v1/agents/{id}/attach` |
+| websocket | GET | `/api/v1/agents/{id}/pty` |
 
 **Principals:** `user`, `agent`
 
@@ -2242,10 +2481,15 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/agents/{id}/ports` |
+| http_route | GET | `/api/v1/agents/{id}/ports/{port}/proxy` |
+| http_route | POST | `/api/v1/agents/{id}/ports/{port}/proxy` |
+| http_route | PUT | `/api/v1/agents/{id}/ports/{port}/proxy` |
+| http_route | DELETE | `/api/v1/agents/{id}/ports/{port}/proxy` |
+| http_route | GET | `/api/v1/agents/{id}/ports/{port}/proxy/{subpath}` |
 
-**Principals:** `user`
+**Principals:** `user`, `agent`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
 
 **Base Permission:** `agent.port_access`
 
@@ -2301,7 +2545,8 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | PUT | `/api/v1/agents/{id}/message-mode` |
+| http_route | POST | `/api/v1/agents/{id}/set_message_mode` |
+| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/set_message_mode` |
 
 **Principals:** `user`
 
@@ -2332,7 +2577,6 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/projects/{id}` |
-| http_route | GET | `/api/v1/groves/{id}` |
 
 **Principals:** `user`, `agent`
 
@@ -2363,7 +2607,6 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/projects` |
-| http_route | GET | `/api/v1/groves` |
 
 **Principals:** `user`, `agent`
 
@@ -2419,8 +2662,7 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | PUT | `/api/v1/projects/{id}` |
-| http_route | PUT | `/api/v1/groves/{id}` |
+| http_route | PATCH | `/api/v1/projects/{id}` |
 
 **Principals:** `user`
 
@@ -2444,14 +2686,13 @@
 
 **Domain:** project
 
-**Description:** Register a project or grove from an external source
+**Description:** Register a project from an external source
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | POST | `/api/v1/projects/register` |
-| http_route | POST | `/api/v1/groves/register` |
 
 **Principals:** `user`
 
@@ -2483,7 +2724,7 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/skills` |
 | http_route | GET | `/api/v1/skills/{id}` |
-| http_route | GET | `/api/v1/skills/discover-directory` |
+| http_route | POST | `/api/v1/skills/discover-directory` |
 
 **Principals:** `user`
 
@@ -2543,7 +2784,7 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | PUT | `/api/v1/skills/{id}` |
+| http_route | PATCH | `/api/v1/skills/{id}` |
 
 **Principals:** `user`
 
@@ -2653,7 +2894,7 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/templates` |
 | http_route | GET | `/api/v1/templates/{id}` |
-| http_route | GET | `/api/v1/resources/discover` |
+| http_route | POST | `/api/v1/resources/discover` |
 
 **Principals:** `user`
 
@@ -2970,7 +3211,7 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | PUT | `/api/v1/groups/{id}` |
+| http_route | PATCH | `/api/v1/groups/{id}` |
 
 **Principals:** `user`
 
@@ -3063,6 +3304,7 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/runtime-brokers` |
 | http_route | GET | `/api/v1/runtime-brokers/{id}` |
+| http_route | GET | `/api/v1/runtime-brokers/{id}/settings` |
 
 **Principals:** `user`
 
@@ -3200,7 +3442,7 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/admin/role-bindings` |
-| http_route | GET | `/api/v1/admin/role-bindings/{id}` |
+| http_route | GET | `/api/v1/admin/role-bindings/user/{userId}` |
 
 **Principals:** `user`
 
@@ -3296,7 +3538,7 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | POST | `/api/v1/admin/limits` |
-| http_route | POST | `/api/v1/admin/entitlements/{id}` |
+| http_route | POST | `/api/v1/admin/limits/{id}/entitlements` |
 
 **Principals:** `user`
 
@@ -3328,6 +3570,7 @@
 |------|--------|---------|
 | http_route | PUT | `/api/v1/admin/limits/{id}` |
 | http_route | PUT | `/api/v1/admin/entitlements/{id}` |
+| http_route | PUT | `/api/v1/runtime-brokers/{id}/settings` |
 
 **Principals:** `user`
 
@@ -3459,7 +3702,7 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | PUT | `/api/v1/projects/{projectId}/schedules/{id}` |
+| http_route | PATCH | `/api/v1/projects/{projectId}/schedules/{id}` |
 
 **Principals:** `user`
 
@@ -3529,15 +3772,13 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/chat/prefs` |
 | http_route | PUT | `/api/v1/chat/prefs` |
-| http_route | GET | `/api/v1/chat/threads` |
-| http_route | GET | `/api/v1/chat/threads/{id}` |
 | http_route | GET | `/api/v1/chat/spaces` |
-| http_route | GET | `/api/v1/chat/spaces/{id}` |
-| http_route | GET | `/api/v1/chat/conversations/{id}` |
+| http_route | GET | `/api/v1/chat/spaces/{id}/threads` |
+| http_route | GET | `/api/v1/chat/conversations/{id}/messages` |
 | http_route | GET | `/api/v1/chat/topics/{id}` |
 | http_route | GET | `/api/v1/chat/dms` |
 | http_route | GET | `/api/v1/chat/search` |
-| http_route | GET | `/api/v1/chat/attachments` |
+| http_route | POST | `/api/v1/chat/attachments` |
 | http_route | GET | `/api/v1/chat/attachments/{id}` |
 
 **Principals:** `user`

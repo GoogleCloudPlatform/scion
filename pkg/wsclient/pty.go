@@ -18,6 +18,7 @@ package wsclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -43,6 +44,16 @@ const (
 	// This helps detect when the server-side PTY stream fails silently
 	initialDataTimeout = 30 * time.Second
 )
+
+// attachUnsupportedMessage is the one fixed, actionable error text a caller
+// sees when the target runtime has no exec/attach/TTY primitive at all,
+// regardless of which of the two points where the broker can learn that
+// rejects the attempt: the pre-upgrade HTTP 501/runtime_attach_unsupported
+// response Connect checks for below, or the post-upgrade
+// 4501/attach_unsupported close code readFromWebSocket checks for. Kept as
+// one constant so the two call sites can never drift into two different
+// wordings for the same outcome.
+const attachUnsupportedMessage = "attach is not supported for this agent's runtime"
 
 // PTYClientConfig holds configuration for the PTY client.
 type PTYClientConfig struct {
@@ -72,6 +83,15 @@ type PTYClient struct {
 	ctx          context.Context
 	cancel       context.CancelFunc
 	receivedData bool // tracks whether we've received any data
+
+	// stdin is read once here and never re-read from the os.Stdin package
+	// variable elsewhere, so a test can inject its own reader without ever
+	// mutating the (process-wide, shared) global: readFromStdin's inner
+	// reader goroutine can outlive both Run() and the test that started it
+	// (it only returns once its blocking Read call itself returns), so
+	// swapping os.Stdin back out from under it would be a data race, not
+	// just a functional risk.
+	stdin io.Reader
 }
 
 // NewPTYClient creates a new PTY client.
@@ -79,6 +99,7 @@ func NewPTYClient(config PTYClientConfig) *PTYClient {
 	return &PTYClient{
 		config: config,
 		oldFd:  int(os.Stdin.Fd()),
+		stdin:  os.Stdin,
 	}
 }
 
@@ -116,17 +137,60 @@ func (c *PTYClient) Connect(ctx context.Context) error {
 
 	conn, resp, err := dialer.DialContext(dialCtx, wsURL, headers)
 	if err != nil {
+		// gorilla/websocket returns a non-nil resp (with an unread body) on a
+		// failed handshake so callers can inspect the status/body. Close it
+		// once parseAttachFailureBody has had a chance to read it, or it leaks.
+		if resp != nil && resp.Body != nil {
+			defer func() { _ = resp.Body.Close() }()
+		}
 		if dialCtx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("connection timed out after %v", connectTimeout)
 		}
 		if resp != nil && resp.StatusCode >= 400 {
-			return fmt.Errorf("connection failed with status %d: %w", resp.StatusCode, err)
+			code, detail := parseAttachFailureBody(resp, err)
+			if resp.StatusCode == http.StatusNotImplemented && code == wsprotocol.ErrCodeRuntimeAttachUnsupported {
+				return errors.New(attachUnsupportedMessage)
+			}
+			return fmt.Errorf("connection failed with status %d: %s", resp.StatusCode, detail)
 		}
 		return fmt.Errorf("connection failed: %w", err)
 	}
 
 	c.conn = conn
 	return nil
+}
+
+// attachErrorBody mirrors the shape of runtimebroker's JSON error envelope
+// (APIError/ErrorResponse) closely enough to pull out the machine-readable
+// code and human-readable message without importing the broker package.
+type attachErrorBody struct {
+	Error struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	} `json:"error"`
+}
+
+// parseAttachFailureBody reads resp's body once and returns the parsed error
+// code (empty if the body isn't the runtimebroker error envelope shape) and
+// a best-effort human-readable detail: the envelope's message when present,
+// otherwise the raw body, otherwise fallback's own text. Centralizing the
+// single body read here (rather than letting each caller drain it) avoids
+// handing back an empty detail to a second reader of an already-consumed
+// body.
+func parseAttachFailureBody(resp *http.Response, fallback error) (code, detail string) {
+	if resp == nil || resp.Body == nil {
+		return "", fallback.Error()
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if err != nil || len(body) == 0 {
+		return "", fallback.Error()
+	}
+
+	var parsed attachErrorBody
+	if err := json.Unmarshal(body, &parsed); err == nil && parsed.Error.Message != "" {
+		return parsed.Error.Code, parsed.Error.Message
+	}
+	return "", strings.TrimSpace(string(body))
 }
 
 // buildWebSocketURL constructs the WebSocket URL.
@@ -329,7 +393,7 @@ func (c *PTYClient) readFromStdin() error {
 	go func() {
 		buf := make([]byte, 4096)
 		for {
-			n, err := os.Stdin.Read(buf)
+			n, err := c.stdin.Read(buf)
 			if err != nil {
 				slog.Debug("PTY stdin inner reader got error", "error", err)
 				readCh <- readResult{nil, err}
@@ -392,6 +456,9 @@ func (c *PTYClient) readFromWebSocket() error {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 				slog.Debug("PTY websocket reader: clean close")
 				return nil
+			}
+			if websocket.IsCloseError(err, wsprotocol.ClosePTYAttachUnsupported) {
+				return errors.New(attachUnsupportedMessage)
 			}
 			// Check if this is a timeout on initial data
 			if !c.receivedData {

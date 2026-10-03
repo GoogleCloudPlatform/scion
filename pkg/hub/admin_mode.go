@@ -152,7 +152,7 @@ func (ws *WebServer) adminModeWebMiddleware(next http.Handler) http.Handler {
 		}
 
 		// Allow static assets (required for login page).
-		if strings.HasPrefix(path, "/assets/") || strings.HasPrefix(path, "/shoelace/") || path == "/favicon.ico" {
+		if strings.HasPrefix(path, "/assets/") || strings.HasPrefix(path, "/shoelace/") || isAppIconPath(path) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -178,6 +178,26 @@ func (ws *WebServer) adminModeWebMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// appIconPaths are the root-level app icon and web app manifest files
+// from web/public/. Browsers fetch them without credentials (the
+// manifest is a CORS request with no cookies), so they must load on the
+// maintenance-mode login page too. Keep this list exact rather than
+// allowing every root-level file.
+var appIconPaths = map[string]bool{
+	"/favicon.ico":           true,
+	"/favicon.svg":           true,
+	"/apple-touch-icon.png":  true,
+	"/icon-192.png":          true,
+	"/icon-512.png":          true,
+	"/icon-maskable-512.png": true,
+	"/manifest.webmanifest":  true,
+}
+
+// isAppIconPath reports whether path is one of appIconPaths.
+func isAppIconPath(path string) bool {
+	return appIconPaths[path]
+}
+
 // handleAdminMaintenance handles GET and PUT /api/v1/admin/maintenance.
 // GET returns the current maintenance state; PUT updates it.
 // Authorization: enforced by routeGuard via hub.admin_mode.update permission.
@@ -193,7 +213,7 @@ func (s *Server) handleAdminMaintenance(w http.ResponseWriter, r *http.Request) 
 		case http.MethodPut:
 			s.handlePutMaintenanceDB(w, r, ops)
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodPut)
 		}
 		return
 	}
@@ -226,7 +246,7 @@ func (s *Server) handleAdminMaintenance(w http.ResponseWriter, r *http.Request) 
 		})
 
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut)
 	}
 }
 
@@ -236,7 +256,7 @@ func (s *Server) handleAdminMaintenance(w http.ResponseWriter, r *http.Request) 
 // Authorization: enforced by routeGuard via hub.scheduler.read permission.
 func (s *Server) handleAdminScheduler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 

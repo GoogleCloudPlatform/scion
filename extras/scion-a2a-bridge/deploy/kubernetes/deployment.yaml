@@ -1,0 +1,114 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scion-a2a-bridge
+  labels:
+    app.kubernetes.io/name: scion-a2a-bridge
+    app.kubernetes.io/part-of: scion
+spec:
+  # HA multi-replica deployment requires minimum 2 replicas
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: scion-a2a-bridge
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: scion-a2a-bridge
+    spec:
+      containers:
+        - name: bridge
+          # PLACEHOLDER ONLY: substitute the deployed image's immutable digest as
+          # described in docs/deployment.md; the all-zero digest cannot be pulled.
+          image: gcr.io/scion-prod/scion-a2a-bridge@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http-h2c
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "8080"
+            - name: MUX_PORTS
+              value: "true"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: a2a-postgres-secret
+                  key: database-url
+            - name: GRPC_AUTH_MODE
+              value: "google_id_token"
+            - name: GRPC_AUTH_AUDIENCE
+              value: "https://a2a-bridge.scion.svc.cluster.local"
+            - name: GRPC_AUTH_SUBJECTS
+              value: "hub-sa@scion-hub-prod.iam.gserviceaccount.com"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: scion-a2a-bridge
+  labels:
+    app.kubernetes.io/name: scion-a2a-bridge
+spec:
+  type: ClusterIP
+  ports:
+    - name: http-h2c
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+      appProtocol: kubernetes.io/h2c
+  selector:
+    app.kubernetes.io/name: scion-a2a-bridge
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: scion-a2a-bridge
+  annotations:
+    # SECURITY PREREQUISITE: configure the chosen Ingress/Gateway authorization
+    # layer (and Workload Identity where applicable) to admit only the distinct
+    # GE invoker principal. This example documents, but does not install, that policy.
+    kubernetes.io/ingress.class: "gce"
+    networking.gke.io/v1beta1.FrontendConfig: "scion-a2a-frontend-config"
+spec:
+  tls:
+    - hosts:
+        - bridge.example.com
+      secretName: scion-a2a-bridge-tls
+  rules:
+    - host: bridge.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: scion-a2a-bridge
+                port:
+                  number: 8080

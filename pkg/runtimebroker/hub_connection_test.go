@@ -210,6 +210,76 @@ func TestMultiKeyBrokerAuth_MatchesAnyKey(t *testing.T) {
 	}
 }
 
+// TestMultiKeyBrokerAuth_SetsAuthenticatingHubConnContextValue covers the
+// middleware setting authenticatingHubConnCtxKey to the name of the hub
+// connection whose key verified the request, not just letting the request
+// through, so resolveHubNameForLaunch's routing rule 2 (design §3.8.5) has
+// something real to read.
+func TestMultiKeyBrokerAuth_SetsAuthenticatingHubConnContextValue(t *testing.T) {
+	secret1 := []byte("secret-key-for-hub-1-32bytes!!!!")
+	secret2 := []byte("secret-key-for-hub-2-32bytes!!!!")
+
+	middleware := NewMultiKeyBrokerAuthMiddleware(true, 5*time.Minute, false)
+	middleware.UpdateKeys([]secretKeyEntry{
+		{hubName: "hub-1", secretKey: secret1},
+		{hubName: "hub-2", secretKey: secret2},
+	})
+
+	var gotHubName string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHubName = authenticatingHubConnFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil)
+	signRequest(req, "broker-1", secret2)
+	rr := httptest.NewRecorder()
+	middleware.Middleware(handler).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	if gotHubName != "hub-2" {
+		t.Fatalf("authenticatingHubConnFromContext = %q, want hub-2 (the key that verified the request)", gotHubName)
+	}
+}
+
+// TestMultiKeyBrokerAuth_NoContextValueWhenUnauthenticated covers the
+// disabled/allow-unauthenticated paths, where there is no key to attribute
+// the request to.
+func TestMultiKeyBrokerAuth_NoContextValueWhenUnauthenticated(t *testing.T) {
+	middleware := NewMultiKeyBrokerAuthMiddleware(true, 5*time.Minute, true)
+
+	var gotHubName string
+	var sawContextValue bool
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHubName, sawContextValue = ctxValueOK(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/test", nil) // no HMAC headers at all
+	rr := httptest.NewRecorder()
+	middleware.Middleware(handler).ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 (allowUnauthenticated), got %d", rr.Code)
+	}
+	if sawContextValue {
+		t.Fatalf("expected no authenticatingHubConnCtxKey value, got %q", gotHubName)
+	}
+}
+
+// ctxValueOK is authenticatingHubConnFromContext with an explicit "was it
+// set at all" bit, for the unauthenticated-path test above.
+func ctxValueOK(ctx context.Context) (string, bool) {
+	v := ctx.Value(authenticatingHubConnCtxKey{})
+	if v == nil {
+		return "", false
+	}
+	name, ok := v.(string)
+	return name, ok
+}
+
 func TestMultiKeyBrokerAuth_Disabled(t *testing.T) {
 	middleware := NewMultiKeyBrokerAuthMiddleware(false, 5*time.Minute, false)
 
@@ -328,16 +398,16 @@ func TestHeartbeatService_ProjectFilter(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 	manager := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "agent-1", ProjectID: "grove-hub1", Phase: "running"},
-			{Name: "agent-2", ProjectID: "grove-hub1", Phase: "running"},
-			{Name: "agent-3", ProjectID: "grove-hub2", Phase: "running"},
-			{Name: "agent-4", ProjectID: "grove-shared", Phase: "running"},
+			{Name: "agent-1", ProjectID: "project-hub1", Phase: "running"},
+			{Name: "agent-2", ProjectID: "project-hub1", Phase: "running"},
+			{Name: "agent-3", ProjectID: "project-hub2", Phase: "running"},
+			{Name: "agent-4", ProjectID: "project-shared", Phase: "running"},
 		},
 	}
 
-	// Filter: only include grove-hub1 projects
+	// Filter: only include project-hub1 projects
 	projectFilter := func(projectID string) bool {
-		return projectID == "grove-hub1"
+		return projectID == "project-hub1"
 	}
 
 	svc := NewHeartbeatService(client, "test-host", time.Hour, manager, projectFilter, slog.Default())
@@ -353,17 +423,17 @@ func TestHeartbeatService_ProjectFilter(t *testing.T) {
 
 	heartbeat := calls[0].Heartbeat
 
-	// Should only include grove-hub1 (2 agents), not grove-hub2 or grove-shared
+	// Should only include project-hub1 (2 agents), not project-hub2 or project-shared
 	if len(heartbeat.Projects) != 1 {
 		t.Errorf("Expected 1 project in heartbeat (filtered), got %d", len(heartbeat.Projects))
 	}
 
-	if len(heartbeat.Projects) > 0 && heartbeat.Projects[0].ProjectID != "grove-hub1" {
-		t.Errorf("Expected grove-hub1, got %q", heartbeat.Projects[0].ProjectID)
+	if len(heartbeat.Projects) > 0 && heartbeat.Projects[0].ProjectID != "project-hub1" {
+		t.Errorf("Expected project-hub1, got %q", heartbeat.Projects[0].ProjectID)
 	}
 
 	if len(heartbeat.Projects) > 0 && heartbeat.Projects[0].AgentCount != 2 {
-		t.Errorf("Expected 2 agents in grove-hub1, got %d", heartbeat.Projects[0].AgentCount)
+		t.Errorf("Expected 2 agents in project-hub1, got %d", heartbeat.Projects[0].AgentCount)
 	}
 }
 
@@ -371,8 +441,8 @@ func TestHeartbeatService_NilProjectFilter(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 	manager := &heartbeatMockManager{
 		agents: []api.AgentInfo{
-			{Name: "agent-1", ProjectID: "grove-1", Phase: "running"},
-			{Name: "agent-2", ProjectID: "grove-2", Phase: "running"},
+			{Name: "agent-1", ProjectID: "project-1", Phase: "running"},
+			{Name: "agent-2", ProjectID: "project-2", Phase: "running"},
 		},
 	}
 
@@ -535,8 +605,8 @@ func TestGlobalProjectRejection_MultiHub(t *testing.T) {
 	if !ok {
 		t.Fatal("expected error object in response")
 	}
-	if errObj["code"] != "global_grove_disabled" {
-		t.Errorf("expected error code 'global_grove_disabled', got %q", errObj["code"])
+	if errObj["code"] != "global_project_disabled" {
+		t.Errorf("expected error code 'global_project_disabled', got %q", errObj["code"])
 	}
 }
 
@@ -575,8 +645,8 @@ func TestGlobalProjectRejection_WithProjectID_MultiHub(t *testing.T) {
 
 	body := `{
 		"name": "scoped-agent",
-		"groveId": "my-project",
-		"grovePath": "/some/path/.scion",
+		"projectId": "my-project",
+		"projectPath": "/some/path/.scion",
 		"config": {"template": "claude"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
@@ -606,8 +676,8 @@ func TestGlobalProjectRejection_GitProjectWithProjectID_NoPath_MultiHub(t *testi
 	srv.hubMu.Unlock()
 
 	body := `{
-		"name": "git-grove-agent",
-		"groveId": "abc-123-grove-id",
+		"name": "git-project-agent",
+		"projectId": "abc-123-project-id",
 		"config": {"template": "claude"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))

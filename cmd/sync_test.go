@@ -30,7 +30,7 @@ import (
 
 func TestResolveAgentID_AgentFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/projects/grove-1/agents" && r.Method == http.MethodGet {
+		if r.URL.Path == "/api/v1/projects/project-1/agents" && r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []map[string]interface{}{
@@ -49,7 +49,7 @@ func TestResolveAgentID_AgentFound(t *testing.T) {
 		t.Fatalf("failed to create client: %v", err)
 	}
 
-	agentID, err := resolveAgentID(context.Background(), client, "grove-1", "my-agent")
+	agentID, err := resolveAgentID(context.Background(), client, "project-1", "my-agent")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestResolveAgentID_AgentFound(t *testing.T) {
 
 func TestResolveAgentID_AgentNotFound(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/projects/grove-1/agents" && r.Method == http.MethodGet {
+		if r.URL.Path == "/api/v1/projects/project-1/agents" && r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []map[string]interface{}{
@@ -78,7 +78,7 @@ func TestResolveAgentID_AgentNotFound(t *testing.T) {
 		t.Fatalf("failed to create client: %v", err)
 	}
 
-	_, err = resolveAgentID(context.Background(), client, "grove-1", "nonexistent-agent")
+	_, err = resolveAgentID(context.Background(), client, "project-1", "nonexistent-agent")
 	if err == nil {
 		t.Fatal("expected error for non-existent agent")
 	}
@@ -89,7 +89,7 @@ func TestResolveAgentID_AgentNotFound(t *testing.T) {
 
 func TestResolveAgentID_AgentNotRunning(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/projects/grove-1/agents" && r.Method == http.MethodGet {
+		if r.URL.Path == "/api/v1/projects/project-1/agents" && r.Method == http.MethodGet {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"agents": []map[string]interface{}{
@@ -107,7 +107,7 @@ func TestResolveAgentID_AgentNotRunning(t *testing.T) {
 		t.Fatalf("failed to create client: %v", err)
 	}
 
-	_, err = resolveAgentID(context.Background(), client, "grove-1", "my-agent")
+	_, err = resolveAgentID(context.Background(), client, "project-1", "my-agent")
 	if err == nil {
 		t.Fatal("expected error for stopped agent")
 	}

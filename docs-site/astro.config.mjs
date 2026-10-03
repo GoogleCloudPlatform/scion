@@ -97,6 +97,8 @@ export default defineConfig({
 							label: 'Release Notes',
 							items: [
 								{ label: 'Overview', slug: 'release-notes' },
+								{ label: 'Sep 21 -- 27', slug: 'release-notes/2026-09-21' },
+								{ label: 'Sep 14 -- 20', slug: 'release-notes/2026-09-14' },
 								{ label: 'Sep 7 -- 13', slug: 'release-notes/2026-09-07' },
 								{ label: 'Aug 31 -- Sep 6', slug: 'release-notes/2026-08-31' },
 								{ label: 'Aug 24 -- 30', slug: 'release-notes/2026-08-24' },
@@ -156,6 +158,7 @@ export default defineConfig({
 							        { label: 'Single-node Overview', slug: 'hosted/single-node/overview' },
 							        { label: 'Hub Setup', slug: 'hosted/single-node/hub-server' },
 							        { label: 'Deploy on a VM (GCE)', slug: 'hosted/single-node/hub-setup-gce' },
+							        { label: 'Deploy on a VM (Hardened Org)', slug: 'hosted/single-node/hub-setup-gce-hardened-org' },
 							        { label: 'Deploy on Cloud Run (Sandbox)', slug: 'hosted/single-node/hub-setup-cloudrun' },
 							        { label: 'Auth & Tenancy', slug: 'hosted/single-node/auth' },
 							        { label: 'Managed Agents', slug: 'hosted/single-node/managed-agents' },
@@ -175,6 +178,7 @@ export default defineConfig({
 							items: [
 								{ label: 'HA Overview', slug: 'hosted/ha/overview' },
 								{ label: 'Deploy on GCP (Cloud Run + GKE)', slug: 'hosted/ha/setup-gcp' },
+								{ label: 'Multi-Hub HA with Terraform', slug: 'hosted/ha/terraform' },
 								{ label: 'Deploy via Helm (GKE)', slug: 'hosted/ha/helm' },
 								{ label: 'Kubernetes Runtime', slug: 'hosted/ha/kubernetes' },
 								{ label: 'Runtime Brokers & Profiles', slug: 'hosted/ha/runtime-broker' },

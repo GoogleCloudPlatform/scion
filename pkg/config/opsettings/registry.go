@@ -21,6 +21,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
@@ -31,6 +32,13 @@ type Section struct {
 	KoanfPaths []string
 	New        func() any
 }
+
+// dns1123SubdomainOrEmptyPattern mirrors the pattern used for
+// priority_class_name / priorityClassName in settings-v1.schema.json and
+// agent-v1.schema.json: a DNS-1123 subdomain (the Kubernetes PriorityClass
+// name format), or the empty string, which means unset to the runtime and
+// would otherwise fail the strict subdomain pattern.
+const dns1123SubdomainOrEmptyPattern = `^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 
 // Registry is the single source of truth for Layer-0 vs Layer-1 classification.
 // Every Layer-1 section is listed here; any koanf key not owned by a section is
@@ -47,7 +55,7 @@ func init() {
 	Registry = []Section{
 		{
 			Name:       "access",
-			KoanfPaths: []string{"server.hub.admin_emails", "server.auth.user_access_mode", "server.auth.authorized_domains"},
+			KoanfPaths: []string{"server.hub.admin_emails", "server.auth.user_access_mode", "server.auth.default_user_role", "server.auth.authorized_domains"},
 			New:        func() any { return &AccessSettings{} },
 		},
 		{
@@ -97,6 +105,20 @@ func init() {
 			New: func() any { return &AutoExposePortsSettings{} },
 		},
 		{
+			Name: "quotas",
+			KoanfPaths: []string{
+				"quotas.enforce_broker_quotas",
+			},
+			New: func() any { return &QuotaSettings{} },
+		},
+		{
+			Name: "agent_secrets",
+			KoanfPaths: []string{
+				"agent_secrets.user_scope_only",
+			},
+			New: func() any { return &AgentSecretsSettings{} },
+		},
+		{
 			Name: "agent_defaults",
 			KoanfPaths: []string{
 				"default_template", "default_harness_config",
@@ -105,6 +127,9 @@ func init() {
 				"default_model", "default_thinking_level",
 				"default_max_agent_role", "default_agent_role",
 				"default_runtime_broker",
+				"default_timezone",
+				"default_gcp_identity_mode",
+				"default_gcp_identity_service_account_id",
 			},
 			New: func() any { return &AgentDefaultsSettings{} },
 		},
@@ -168,6 +193,16 @@ func init() {
 			Name:       "harness_configs",
 			KoanfPaths: []string{"harness_configs"},
 			New:        func() any { m := make(HarnessConfigsSettings); return &m },
+		},
+		{
+			// experiments is durable via DB but has no settings.yaml
+			// representation. It is runtime/API-owned state: absent DB
+			// row = compiled registry defaults for every experiment.
+			// Seeding skips this section (KoanfPaths nil) -- experiment
+			// names contain dots, which koanf would otherwise split on.
+			Name:       "experiments",
+			KoanfPaths: nil,
+			New:        func() any { return &ExperimentsSettings{} },
 		},
 	}
 
@@ -289,6 +324,7 @@ func compileSchemas() {
 			"properties": map[string]interface{}{
 				"admin_emails":       getSchemaProperty(root, "server", "hub", "admin_emails"),
 				"user_access_mode":   getSchemaProperty(root, "server", "auth", "user_access_mode"),
+				"default_user_role":  getSchemaProperty(root, "server", "auth", "default_user_role"),
 				"authorized_domains": getSchemaProperty(root, "server", "auth", "authorized_domains"),
 			},
 			"additionalProperties": false,
@@ -324,7 +360,9 @@ func compileSchemas() {
 		"messaging": {
 			"type": "object",
 			"properties": map[string]interface{}{
-				"conversation_envelope_switch": map[string]interface{}{"type": "boolean"},
+				"conversation_envelope_switch":    map[string]interface{}{"type": "boolean"},
+				"cross_project_messaging_enabled": map[string]interface{}{"type": "boolean"},
+				"offload_threshold_runes":         map[string]interface{}{"type": "integer", "minimum": 0},
 			},
 			"additionalProperties": false,
 		},
@@ -335,21 +373,61 @@ func compileSchemas() {
 			},
 			"additionalProperties": false,
 		},
+		// quotas schema is hand-written — like auto_expose_ports, it has no
+		// $defs in settings-v1.schema.json.
+		"quotas": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"enforce_broker_quotas": map[string]interface{}{"type": "boolean"},
+			},
+			"additionalProperties": false,
+		},
+		// agent_secrets schema is hand-written — like quotas, it has no
+		// $defs in settings-v1.schema.json.
+		"agent_secrets": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"user_scope_only": map[string]interface{}{"type": "boolean"},
+			},
+			"additionalProperties": false,
+		},
+		// experiments schema is hand-written -- it is runtime/API-owned
+		// state with no $defs in settings-v1.schema.json (like maintenance
+		// and messaging). overrides is a map of experiment name -> bool;
+		// the pattern is the single definition in experiments.NamePattern
+		// (pkg/experiments), so this schema cannot drift from NewRegistry's
+		// own name validation.
+		"experiments": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"overrides": map[string]interface{}{
+					"type": "object",
+					"patternProperties": map[string]interface{}{
+						experiments.NamePattern: map[string]interface{}{"type": "boolean"},
+					},
+					"additionalProperties": false,
+				},
+			},
+			"additionalProperties": false,
+		},
 		"telemetry": buildTelemetrySchema(defs),
 		"agent_defaults": {
 			"type": "object",
 			"properties": map[string]interface{}{
-				"default_template":        getSchemaProperty(root, "default_template"),
-				"default_harness_config":  getSchemaProperty(root, "default_harness_config"),
-				"default_max_turns":       getSchemaProperty(root, "default_max_turns"),
-				"default_max_model_calls": getSchemaProperty(root, "default_max_model_calls"),
-				"default_max_duration":    getSchemaProperty(root, "default_max_duration"),
-				"default_resources":       getSchemaProperty(root, "default_resources"),
-				"default_model":           map[string]interface{}{"type": "string"},
-				"default_thinking_level":  map[string]interface{}{"type": "integer"},
-				"default_max_agent_role":  getSchemaProperty(root, "default_max_agent_role"),
-				"default_agent_role":      getSchemaProperty(root, "default_agent_role"),
-				"default_runtime_broker":  map[string]interface{}{"type": "string"},
+				"default_template":                        getSchemaProperty(root, "default_template"),
+				"default_harness_config":                  getSchemaProperty(root, "default_harness_config"),
+				"default_max_turns":                       getSchemaProperty(root, "default_max_turns"),
+				"default_max_model_calls":                 getSchemaProperty(root, "default_max_model_calls"),
+				"default_max_duration":                    getSchemaProperty(root, "default_max_duration"),
+				"default_resources":                       getSchemaProperty(root, "default_resources"),
+				"default_model":                           map[string]interface{}{"type": "string"},
+				"default_thinking_level":                  map[string]interface{}{"type": "integer"},
+				"default_max_agent_role":                  getSchemaProperty(root, "default_max_agent_role"),
+				"default_agent_role":                      getSchemaProperty(root, "default_agent_role"),
+				"default_runtime_broker":                  map[string]interface{}{"type": "string"},
+				"default_timezone":                        map[string]interface{}{"type": "string"},
+				"default_gcp_identity_mode":               getSchemaProperty(root, "default_gcp_identity_mode"),
+				"default_gcp_identity_service_account_id": getSchemaProperty(root, "default_gcp_identity_service_account_id"),
 			},
 			"additionalProperties": false,
 		},
@@ -400,6 +478,7 @@ func compileSchemas() {
 					"sync":                map[string]interface{}{"type": "string"},
 					"gke":                 map[string]interface{}{"type": "boolean"},
 					"list_all_namespaces": map[string]interface{}{"type": "boolean"},
+					"priority_class_name": map[string]interface{}{"type": "string", "maxLength": 253, "pattern": dns1123SubdomainOrEmptyPattern},
 					"cloudrun":            map[string]interface{}{"type": "object"},
 				},
 			},
@@ -418,8 +497,23 @@ func compileSchemas() {
 					"env":                    map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string"}},
 					"volumes":                map[string]interface{}{"type": "array"},
 					"resources":              map[string]interface{}{"type": "object"},
-					"harness_overrides":      map[string]interface{}{"type": "object"},
-					"secrets":                map[string]interface{}{"type": "array"},
+					"harness_overrides": map[string]interface{}{
+						"type": "object",
+						"additionalProperties": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"image":              map[string]interface{}{"type": "string"},
+								"image_pull_policy":  map[string]interface{}{"type": "string", "enum": []string{"Always", "IfNotPresent", "Never"}},
+								"user":               map[string]interface{}{"type": "string"},
+								"env":                map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string"}},
+								"volumes":            map[string]interface{}{"type": "array"},
+								"resources":          map[string]interface{}{"type": "object"},
+								"auth_selected_type": map[string]interface{}{"type": "string"},
+							},
+						},
+					},
+					"secrets":  map[string]interface{}{"type": "array"},
+					"timezone": map[string]interface{}{"type": "string"},
 				},
 			},
 		},
@@ -434,6 +528,7 @@ func compileSchemas() {
 					"name":               map[string]interface{}{"type": "string"},
 					"harness":            map[string]interface{}{"type": "string"},
 					"image":              map[string]interface{}{"type": "string"},
+					"image_pull_policy":  map[string]interface{}{"type": "string", "enum": []string{"Always", "IfNotPresent", "Never"}},
 					"user":               map[string]interface{}{"type": "string"},
 					"model":              map[string]interface{}{"type": "string"},
 					"task_flag":          map[string]interface{}{"type": "string"},
@@ -458,15 +553,17 @@ func compileSchemas() {
 						"type":     "object",
 						"required": []string{"issuer_url"},
 						"properties": map[string]interface{}{
-							"issuer_url":         map[string]interface{}{"type": "string", "minLength": 1},
-							"jwks_url":           map[string]interface{}{"type": "string"},
-							"expected_audience":  map[string]interface{}{"type": "string"},
-							"allowed_projects":   map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-							"allowed_root_users": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-							"default_scopes":     map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-							"issuer_type":        map[string]interface{}{"type": "string", "enum": []string{"hub", "service_account", "user"}},
-							"default_role":       map[string]interface{}{"type": "string"},
-							"allowed_emails":     map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+							"issuer_url":           map[string]interface{}{"type": "string", "minLength": 1},
+							"jwks_url":             map[string]interface{}{"type": "string"},
+							"expected_audience":    map[string]interface{}{"type": "string"},
+							"allowed_projects":     map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+							"allowed_root_users":   map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+							"default_scopes":       map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+							"issuer_type":          map[string]interface{}{"type": "string", "enum": []string{"hub", "service_account", "user"}},
+							"default_role":         map[string]interface{}{"type": "string"},
+							"allowed_emails":       map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+							"allowed_gcp_projects": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+							"allowed_domains":      map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
 						},
 						"additionalProperties": false,
 					},

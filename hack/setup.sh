@@ -35,8 +35,8 @@ if [ ! -d ".git" ]; then
 fi
 echo ".scion/agents/" > .gitignore
 
-echo "=== Initializing grove ==="
-scion grove init
+echo "=== Initializing project ==="
+scion project init
 
 echo "=== Setup Complete ==="
 ls -A1 .scion

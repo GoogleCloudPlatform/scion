@@ -17,8 +17,10 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math/rand"
 	"sync"
 	"time"
@@ -49,6 +51,18 @@ type sectionState struct {
 	// distinguish "validated document" from "unreadable document" without
 	// re-parsing and without swallowing errors silently.
 	Malformed bool
+
+	// ExperimentsOverrides is the parsed overrides for the "experiments"
+	// section only; nil for every other section, and nil for "experiments"
+	// itself when absent, malformed, or a valid document with no overrides
+	// field. Populated at the same ingest points as Malformed (Refresh,
+	// Update), so it is always part of the same sectionState value and is
+	// replaced or removed together with it — a delete, a replace, or an
+	// eviction can never leave it stale. ExperimentsSnapshot is on a hot
+	// path (GET /api/v1/experiments runs on every page load, and
+	// requireExperiment runs per request), so parsing once here rather than
+	// per read matters.
+	ExperimentsOverrides map[string]bool
 }
 
 // Layer1Snapshot is an immutable merged view of all Layer-1 operational settings.
@@ -63,15 +77,18 @@ type sectionState struct {
 //     DefaultTemplate, DefaultHarnessConfig, DefaultMaxTurns, DefaultMaxModelCalls,
 //     DefaultMaxDuration, DefaultResources, and NotificationChannels.
 //   - File mode (BuildLayer1SnapshotFromFile): only the fields that the old
-//     reloadSettings() consumed are populated. Fields like SoftDeleteRetention,
-//     DefaultTemplate, etc. remain at zero values because the old reloadSettings
-//     never applied them on reload — they are consumed only at startup. This
-//     maintains file-mode parity (the pre-refactor code never touched them on
-//     config reload either).
+//     reloadSettings() consumed are populated, plus DefaultHarnessConfig and
+//     DefaultTimezone, which are read from the top-level
+//     default_harness_config and default_timezone keys in settings.yaml.
+//     Fields like SoftDeleteRetention, DefaultTemplate, etc. remain at zero
+//     values because the old reloadSettings never applied them on reload — they
+//     are consumed only at startup. This maintains file-mode parity (the
+//     pre-refactor code never touched them on config reload either).
 type Layer1Snapshot struct {
 	// Access
 	AdminEmails       []string
 	UserAccessMode    string
+	DefaultUserRole   string
 	AuthorizedDomains []string
 
 	// Lifecycle
@@ -97,6 +114,12 @@ type Layer1Snapshot struct {
 	// Auto-expose ports
 	AutoExposePortsEnabled *bool
 
+	// Quotas
+	EnforceBrokerQuotas *bool
+
+	// Agent secrets
+	AgentSecretsUserScopeOnly *bool
+
 	// Project defaults
 	DefaultScratchpad *bool
 
@@ -110,6 +133,11 @@ type Layer1Snapshot struct {
 	DefaultModel         string
 	DefaultThinkingLevel *int
 	DefaultRuntimeBroker string
+	DefaultTimezone      string
+	// DefaultGCPIdentityMode/DefaultGCPIdentityServiceAccountID are the
+	// hub-wide GCP identity default, postgres-mode only (see type comment).
+	DefaultGCPIdentityMode             string
+	DefaultGCPIdentityServiceAccountID string
 
 	// Endpoints
 	PublicURL     string
@@ -252,13 +280,15 @@ func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 				)
 			}
 		}
+		experimentsOverrides, malformed := experimentsOverridesFor(row.Section, row.Value, malformed)
 		o.cache[row.Section] = sectionState{
-			Value:     row.Value,
-			Revision:  row.Revision,
-			UpdatedAt: row.UpdatedAt,
-			UpdatedBy: row.UpdatedBy,
-			Origin:    row.Origin,
-			Malformed: malformed,
+			Value:                row.Value,
+			Revision:             row.Revision,
+			UpdatedAt:            row.UpdatedAt,
+			UpdatedBy:            row.UpdatedBy,
+			Origin:               row.Origin,
+			Malformed:            malformed,
+			ExperimentsOverrides: experimentsOverrides,
 		}
 	}
 
@@ -271,6 +301,33 @@ func (o *OperationalSettings) Refresh(ctx context.Context) ([]string, error) {
 	}
 
 	return changed, nil
+}
+
+// experimentsOverridesFor returns the parsed "experiments" section overrides
+// and the (possibly updated) malformed flag, for storage in sectionState
+// alongside the generic ingest check that produced malformed. It is a no-op
+// for any section other than "experiments": callers pass malformed straight
+// through unchanged and get a nil map back.
+//
+// Folding this into sectionState (rather than a second, separately-tracked
+// field on OperationalSettings) means every write, delete, or replace of the
+// cache entry carries the parsed overrides automatically — there is no
+// second place that can go out of step with the cache.
+func experimentsOverridesFor(section string, raw json.RawMessage, malformed bool) (map[string]bool, bool) {
+	if section != "experiments" || malformed {
+		return nil, malformed
+	}
+	doc, docMalformed := opsettings.ParseExperimentsDoc(raw)
+	if docMalformed {
+		// The caller's ingest check (Refresh/Update's sec.New() unmarshal)
+		// already applies the same predicate (the "experiments" section's
+		// New() unmarshals into the same ExperimentsSettings shape
+		// ParseExperimentsDoc uses), so this cannot happen in practice. Fail
+		// closed rather than trust an inconsistent parse, and let it show up
+		// in Malformed too.
+		return nil, true
+	}
+	return doc.Overrides, malformed
 }
 
 // Snapshot returns an immutable merged Layer-1 view.
@@ -515,14 +572,16 @@ func (o *OperationalSettings) Update(
 			)
 		}
 	}
+	experimentsOverrides, malformed := experimentsOverridesFor(section, result.Value, malformed)
 	o.mu.Lock()
 	o.cache[section] = sectionState{
-		Value:     result.Value,
-		Revision:  result.Revision,
-		UpdatedAt: result.UpdatedAt,
-		UpdatedBy: result.UpdatedBy,
-		Origin:    result.Origin,
-		Malformed: malformed,
+		Value:                result.Value,
+		Revision:             result.Revision,
+		UpdatedAt:            result.UpdatedAt,
+		UpdatedBy:            result.UpdatedBy,
+		Origin:               result.Origin,
+		Malformed:            malformed,
+		ExperimentsOverrides: experimentsOverrides,
 	}
 	o.mu.Unlock()
 
@@ -748,6 +807,7 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	// Access
 	snap.AdminEmails = k.Strings("server.hub.admin_emails")
 	snap.UserAccessMode = k.String("server.auth.user_access_mode")
+	snap.DefaultUserRole = k.String("server.auth.default_user_role")
 	snap.AuthorizedDomains = k.Strings("server.auth.authorized_domains")
 
 	// Lifecycle
@@ -766,6 +826,18 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	if k.Exists("auto_expose_ports.enabled") {
 		v := k.Bool("auto_expose_ports.enabled")
 		snap.AutoExposePortsEnabled = &v
+	}
+
+	// Quotas
+	if k.Exists("quotas.enforce_broker_quotas") {
+		v := k.Bool("quotas.enforce_broker_quotas")
+		snap.EnforceBrokerQuotas = &v
+	}
+
+	// Agent secrets
+	if k.Exists("agent_secrets.user_scope_only") {
+		v := k.Bool("agent_secrets.user_scope_only")
+		snap.AgentSecretsUserScopeOnly = &v
 	}
 
 	// Project defaults
@@ -792,6 +864,9 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	snap.DefaultMaxDuration = k.String("default_max_duration")
 	snap.DefaultModel = k.String("default_model")
 	snap.DefaultRuntimeBroker = k.String("default_runtime_broker")
+	snap.DefaultTimezone = k.String("default_timezone")
+	snap.DefaultGCPIdentityMode = k.String("default_gcp_identity_mode")
+	snap.DefaultGCPIdentityServiceAccountID = k.String("default_gcp_identity_service_account_id")
 	if k.Exists("default_thinking_level") {
 		v := k.Int("default_thinking_level")
 		snap.DefaultThinkingLevel = &v
@@ -879,10 +954,16 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 // values — the old reloadSettings never applied those on config reload (they
 // are consumed at startup, not on reload). In postgres mode, the full koanf-based
 // Snapshot() populates all fields. See the Layer1Snapshot type comment for details.
+//
+// Exception: DefaultHarnessConfig, DefaultTimezone, DefaultGCPIdentityMode and
+// DefaultGCPIdentityServiceAccountID are populated from GlobalConfig so that
+// hubAgentDefaults() reflects them in file mode, including immediately after a
+// file-mode admin PUT (reloadSettings).
 func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	snap := Layer1Snapshot{
 		AdminEmails:        gc.Hub.AdminEmails,
 		UserAccessMode:     gc.Auth.UserAccessMode,
+		DefaultUserRole:    gc.Auth.DefaultUserRole,
 		AuthorizedDomains:  gc.Auth.AuthorizedDomains,
 		AutoSuspendStalled: gc.Hub.AutoSuspendStalled,
 		TelemetryEnabled:   gc.TelemetryEnabled,
@@ -904,12 +985,38 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 	// Project defaults — read from settings.yaml project_defaults section
 	snap.DefaultScratchpad = gc.DefaultScratchpad
 
+	// Quotas — read from settings.yaml top-level quotas section, so a
+	// file-mode admin save takes effect without a restart (unlike
+	// AutoExposePortsEnabled, which is intentionally not populated here).
+	snap.EnforceBrokerQuotas = gc.EnforceBrokerQuotas
+
+	// Agent secrets — read from settings.yaml top-level agent_secrets
+	// section, so a file-mode admin save takes effect without a restart.
+	snap.AgentSecretsUserScopeOnly = gc.AgentSecretsUserScopeOnly
+
+	// Agent defaults — read from settings.yaml top-level keys
+	snap.DefaultHarnessConfig = gc.DefaultHarnessConfig
+	snap.DefaultTimezone = gc.DefaultTimezone
+	snap.DefaultGCPIdentityMode = gc.DefaultGCPIdentityMode
+	snap.DefaultGCPIdentityServiceAccountID = gc.DefaultGCPIdentityServiceAccountID
+
 	// Federation — read from GlobalConfig
 	if gc.Federation.Enabled || len(gc.Federation.TrustedIssuers) > 0 {
 		snap.FederationConfig = &gc.Federation
 	}
 
 	return snap
+}
+
+// boolPtrEqual reports whether two *bool values are equal, treating nil as a
+// distinct value from both true and false (unlike dereferencing, which would
+// panic on nil, or treating nil as false, which would conflate "unset" with
+// "explicitly false").
+func boolPtrEqual(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 // ApplySnapshot writes the Layer1Snapshot values into the Server's config
@@ -955,6 +1062,31 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		}
 	}
 
+	// Quotas. Unlike the other *bool settings above, nil here is a real,
+	// meaningful value — the fail-safe default (enforced) — not "unset,
+	// leave the current value alone". So this assigns unconditionally: a
+	// snapshot with EnforceBrokerQuotas==nil (switch cleared, section
+	// deleted, or a PUT of {}) must flip the live hub back to enforced, not
+	// silently keep an old in-memory `false` in place while GET/the UI both
+	// report "enforced" (findings F3).
+	oldEnforceBrokerQuotas := s.config.EnforceBrokerQuotas
+	s.config.EnforceBrokerQuotas = snap.EnforceBrokerQuotas
+	if !boolPtrEqual(oldEnforceBrokerQuotas, snap.EnforceBrokerQuotas) {
+		applied = append(applied, "enforce_broker_quotas")
+	}
+
+	// Agent secrets. Like quotas above, nil is a real, meaningful value —
+	// the permissive default (agents may write project scope) — not
+	// "unset, leave the current value alone". So this assigns
+	// unconditionally: a snapshot with AgentSecretsUserScopeOnly==nil
+	// (switch cleared, section deleted, or a PUT of {}) must flip live
+	// enforcement off immediately.
+	oldAgentSecretsUserScopeOnly := s.config.AgentSecretsUserScopeOnly
+	s.config.AgentSecretsUserScopeOnly = snap.AgentSecretsUserScopeOnly
+	if !boolPtrEqual(oldAgentSecretsUserScopeOnly, snap.AgentSecretsUserScopeOnly) {
+		applied = append(applied, "agent_secrets_user_scope_only")
+	}
+
 	// Admin emails — sanitize (TrimSpace + ToLower, drop empties) to match
 	// the normalization the user store applies (D11-fix).
 	if len(snap.AdminEmails) > 0 {
@@ -996,6 +1128,28 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "user_access_mode")
 	}
 
+	// Default user role. Writes are validated (schema enum in DB mode,
+	// explicit check in the file-mode PUT), but a hand-edited settings.yaml
+	// or DB row can still hold garbage. Normalize anything other than
+	// member/viewer to member so the live config never grants an
+	// unexpected role at user creation (design D6). The rule itself lives in
+	// normalizedDefaultRole; "" stays unset here (clear semantics).
+	defaultRole := snap.DefaultUserRole
+	if defaultRole != "" {
+		if n := normalizedDefaultRole(defaultRole); n != defaultRole {
+			slog.Warn("invalid default_user_role, using member",
+				"configured", defaultRole, "allowed", []string{store.UserRoleMember, store.UserRoleViewer})
+			defaultRole = n
+		}
+	}
+	if defaultRole != "" {
+		s.config.DefaultUserRole = defaultRole
+		applied = append(applied, "default_user_role")
+	} else if s.config.DefaultUserRole != "" {
+		s.config.DefaultUserRole = ""
+		applied = append(applied, "default_user_role")
+	}
+
 	// GitHub App non-sensitive config
 	if snap.GitHubAppID != 0 {
 		s.config.GitHubAppConfig.AppID = snap.GitHubAppID
@@ -1028,19 +1182,23 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	// Agent defaults (hub operational agent_defaults section).
 	//
 	// Written unconditionally from the snapshot rather than only-if-non-empty,
-	// so that clearing a value in the DB clears it here too. In file mode the
-	// snapshot's agent-defaults fields are always zero — see
-	// BuildLayer1SnapshotFromFile — so this assignment is a no-op there and
-	// file-mode dispatch is unchanged.
+	// so that clearing a value in the DB clears it here too. In file mode,
+	// BuildLayer1SnapshotFromFile populates DefaultHarnessConfig,
+	// DefaultTimezone and the two GCP identity defaults; other agent-defaults
+	// fields remain at zero values in file mode, so this assignment is a
+	// no-op for those fields and file-mode dispatch is unchanged.
 	newDefaults := opsettings.AgentDefaultsSettings{
-		DefaultTemplate:      snap.DefaultTemplate,
-		DefaultHarnessConfig: snap.DefaultHarnessConfig,
-		DefaultMaxTurns:      snap.DefaultMaxTurns,
-		DefaultMaxModelCalls: snap.DefaultMaxModelCalls,
-		DefaultMaxDuration:   snap.DefaultMaxDuration,
-		DefaultModel:         snap.DefaultModel,
-		DefaultThinkingLevel: snap.DefaultThinkingLevel,
-		DefaultRuntimeBroker: snap.DefaultRuntimeBroker,
+		DefaultTemplate:                    snap.DefaultTemplate,
+		DefaultHarnessConfig:               snap.DefaultHarnessConfig,
+		DefaultMaxTurns:                    snap.DefaultMaxTurns,
+		DefaultMaxModelCalls:               snap.DefaultMaxModelCalls,
+		DefaultMaxDuration:                 snap.DefaultMaxDuration,
+		DefaultModel:                       snap.DefaultModel,
+		DefaultThinkingLevel:               snap.DefaultThinkingLevel,
+		DefaultRuntimeBroker:               snap.DefaultRuntimeBroker,
+		DefaultTimezone:                    snap.DefaultTimezone,
+		DefaultGCPIdentityMode:             snap.DefaultGCPIdentityMode,
+		DefaultGCPIdentityServiceAccountID: snap.DefaultGCPIdentityServiceAccountID,
 	}
 	// Deep-copy the one pointer field, symmetrically with hubAgentDefaults()'s
 	// read side. Aliasing the snapshot's pointee would leave the CALLER of
@@ -1247,6 +1405,222 @@ func (o *OperationalSettings) ConversationEnvelopeSwitch() bool {
 		return *ms.ConversationEnvelopeSwitch
 	}
 	return true // field omitted in doc → compiled default → ON
+}
+
+// OffloadThresholdRunes returns the rune-count threshold above which an
+// agent-recipient DM body is offloaded to a fetch stub at dispatch
+// (ptone/scion#2257, design auto-offload-large-dm §5, §8.1). Returns 0
+// (disabled) when the section is absent, the document is malformed, the
+// field is omitted, or the stored value is negative — matching
+// messaging.OffloadPolicy's "<= 0 disables" contract.
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) OffloadThresholdRunes() int {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache["messaging"]
+	if !ok {
+		return 0 // section absent → compiled default → disabled
+	}
+	if state.Malformed {
+		return 0 // unreadable → fail closed → disabled
+	}
+
+	var ms opsettings.MessagingSettings
+	if err := json.Unmarshal(state.Value, &ms); err != nil {
+		return 0 // parse error → fail closed → disabled
+	}
+
+	if ms.OffloadThresholdRunes == nil {
+		return 0 // field omitted → compiled default → disabled
+	}
+	if *ms.OffloadThresholdRunes < 0 {
+		return 0
+	}
+	return *ms.OffloadThresholdRunes
+}
+
+// SectionRevision returns the current revision of the named settings section.
+// Returns 0 if the section does not exist or operational settings are unavailable.
+func (o *OperationalSettings) SectionRevision(section string) int64 {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache[section]
+	if !ok {
+		return 0
+	}
+	return state.Revision
+}
+
+// CrossProjectMessagingEnabled returns whether cross-project agent messaging
+// is enabled on this Hub. Default is false (off). This is a security-critical
+// control: when disabled, no cross-project agent messages are authorized.
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) CrossProjectMessagingEnabled() bool {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache["messaging"]
+	if !ok {
+		return false // section absent → compiled default → OFF
+	}
+
+	if state.Malformed {
+		return false // unreadable → fail closed → OFF
+	}
+
+	var ms opsettings.MessagingSettings
+	if err := json.Unmarshal(state.Value, &ms); err != nil {
+		return false // parse error → fail closed → OFF
+	}
+
+	if ms.CrossProjectMessagingEnabled != nil {
+		return *ms.CrossProjectMessagingEnabled
+	}
+	return false // field omitted → compiled default → OFF
+}
+
+// CrossProjectSettingResult holds the authoritative cross-project messaging
+// setting and its revision, read directly from the store (not the cache).
+type CrossProjectSettingResult struct {
+	Enabled  bool
+	Revision int64
+	Err      error
+}
+
+// ReadAuthoritativeCrossProjectEnabled reads the cross_project_messaging_enabled
+// setting directly from the store, bypassing the replica-local cache. This
+// provides an authoritative read for security-critical cross-project admission
+// decisions, ensuring that the very next send after a policy change enforces the
+// current setting regardless of cache/notification propagation state.
+//
+// Defaults:
+//   - Section absent from store → false (off), revision 0.
+//   - Section present but field omitted → false (off).
+//   - Malformed JSON → false (fail closed).
+//   - Store read error → false with Err set (fail closed).
+func (o *OperationalSettings) ReadAuthoritativeCrossProjectEnabled(ctx context.Context) CrossProjectSettingResult {
+	setting, err := o.store.GetHubSetting(ctx, "messaging")
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			// Section absent → compiled default → OFF.
+			return CrossProjectSettingResult{Enabled: false, Revision: 0}
+		}
+		// Store infrastructure error → fail closed.
+		slog.Warn("ReadAuthoritativeCrossProjectEnabled: store read failed, failing closed",
+			"error", err)
+		return CrossProjectSettingResult{Enabled: false, Err: fmt.Errorf("authoritative setting read: %w", err)}
+	}
+
+	if !json.Valid(setting.Value) {
+		// Malformed document → fail closed.
+		slog.Warn("ReadAuthoritativeCrossProjectEnabled: malformed JSON in messaging section, failing closed",
+			"revision", setting.Revision)
+		return CrossProjectSettingResult{Enabled: false, Revision: setting.Revision}
+	}
+
+	var ms opsettings.MessagingSettings
+	if err := json.Unmarshal(setting.Value, &ms); err != nil {
+		// Parse error → fail closed.
+		slog.Warn("ReadAuthoritativeCrossProjectEnabled: failed to unmarshal messaging section, failing closed",
+			"revision", setting.Revision, "error", err)
+		return CrossProjectSettingResult{Enabled: false, Revision: setting.Revision}
+	}
+
+	if ms.CrossProjectMessagingEnabled != nil {
+		return CrossProjectSettingResult{
+			Enabled:  *ms.CrossProjectMessagingEnabled,
+			Revision: setting.Revision,
+		}
+	}
+	// Field omitted → compiled default → OFF.
+	return CrossProjectSettingResult{Enabled: false, Revision: setting.Revision}
+}
+
+// ExperimentsSnapshot is one consistent view of the cached "experiments"
+// section, taken under a single RLock, so revision, overrides, malformed
+// flag and metadata always belong to the same refresh.
+type ExperimentsSnapshot struct {
+	// Overrides is a copy of the stored admin overrides; empty when
+	// malformed or absent. May contain names this binary does not know
+	// (ptone/scion#2217).
+	Overrides map[string]bool
+	Revision  int64
+	Malformed bool
+	UpdatedAt time.Time
+	UpdatedBy string
+	// Present is false when no row exists.
+	Present bool
+}
+
+// ExperimentsSnapshot returns one consistent view of the cached "experiments"
+// section. Read path: it never parses JSON. state.ExperimentsOverrides is
+// parsed once, when the cache entry is written (Refresh, Update); this only
+// clones that already-parsed map, so a caller mutating the returned map can
+// never affect another caller or a later snapshot. No logging here (Refresh
+// logs once per ingest).
+func (o *OperationalSettings) ExperimentsSnapshot() ExperimentsSnapshot {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache["experiments"]
+	if !ok {
+		return ExperimentsSnapshot{Overrides: map[string]bool{}}
+	}
+
+	snap := ExperimentsSnapshot{
+		Revision:  state.Revision,
+		Malformed: state.Malformed,
+		UpdatedAt: state.UpdatedAt,
+		UpdatedBy: state.UpdatedBy,
+		Present:   true,
+	}
+	snap.Overrides = maps.Clone(state.ExperimentsOverrides)
+	if snap.Overrides == nil {
+		snap.Overrides = map[string]bool{}
+	}
+	return snap
+}
+
+// ExperimentsReadResult holds the authoritative experiments overrides and
+// revision, read directly from the store (not the cache).
+type ExperimentsReadResult struct {
+	Overrides map[string]bool
+	Revision  int64
+	Malformed bool
+	Err       error
+}
+
+// ReadAuthoritativeExperiments reads the "experiments" section straight from
+// the store, bypassing the replica-local cache. Write path only; the
+// precedent is ReadAuthoritativeCrossProjectEnabled.
+//
+//	row absent (store.ErrNotFound)             → {Overrides: {}, Revision: 0}
+//	row present, ParseExperimentsDoc ok        → {Overrides, Revision}
+//	row present, ParseExperimentsDoc malformed → {Overrides: {}, Revision, Malformed: true}
+//	store error                                → {Err}
+func (o *OperationalSettings) ReadAuthoritativeExperiments(ctx context.Context) ExperimentsReadResult {
+	setting, err := o.store.GetHubSetting(ctx, "experiments")
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ExperimentsReadResult{Overrides: map[string]bool{}, Revision: 0}
+		}
+		slog.Warn("ReadAuthoritativeExperiments: store read failed", "error", err)
+		return ExperimentsReadResult{Err: fmt.Errorf("authoritative experiments read: %w", err)}
+	}
+
+	doc, malformed := opsettings.ParseExperimentsDoc(setting.Value)
+	if malformed {
+		return ExperimentsReadResult{Overrides: map[string]bool{}, Revision: setting.Revision, Malformed: true}
+	}
+	overrides := doc.Overrides
+	if overrides == nil {
+		overrides = map[string]bool{}
+	}
+	return ExperimentsReadResult{Overrides: overrides, Revision: setting.Revision}
 }
 
 // applySnapshotLogLevel applies the log-level portion of the snapshot.

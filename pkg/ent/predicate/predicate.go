@@ -9,6 +9,9 @@ import (
 // AccessConstraint is the predicate function for accessconstraint builders.
 type AccessConstraint func(*sql.Selector)
 
+// AccessConstraintHistory is the predicate function for accessconstrainthistory builders.
+type AccessConstraintHistory func(*sql.Selector)
+
 // AccessPolicy is the predicate function for accesspolicy builders.
 type AccessPolicy func(*sql.Selector)
 
@@ -17,6 +20,12 @@ type Agent func(*sql.Selector)
 
 // AgentCredential is the predicate function for agentcredential builders.
 type AgentCredential func(*sql.Selector)
+
+// AgentIdentityKey is the predicate function for agentidentitykey builders.
+type AgentIdentityKey func(*sql.Selector)
+
+// AgentReincarnation is the predicate function for agentreincarnation builders.
+type AgentReincarnation func(*sql.Selector)
 
 // AgentSessionMetrics is the predicate function for agentsessionmetrics builders.
 type AgentSessionMetrics func(*sql.Selector)
@@ -35,6 +44,9 @@ type BrokerJoinToken func(*sql.Selector)
 
 // BrokerSecret is the predicate function for brokersecret builders.
 type BrokerSecret func(*sql.Selector)
+
+// BrokerSetting is the predicate function for brokersetting builders.
+type BrokerSetting func(*sql.Selector)
 
 // ChatLinkCode is the predicate function for chatlinkcode builders.
 type ChatLinkCode func(*sql.Selector)
@@ -56,6 +68,9 @@ type EntitlementBinding func(*sql.Selector)
 
 // EnvVar is the predicate function for envvar builders.
 type EnvVar func(*sql.Selector)
+
+// ExternalIdentity is the predicate function for externalidentity builders.
+type ExternalIdentity func(*sql.Selector)
 
 // GCPServiceAccount is the predicate function for gcpserviceaccount builders.
 type GCPServiceAccount func(*sql.Selector)
@@ -86,6 +101,9 @@ type IntegrationUpdate func(*sql.Selector)
 
 // InviteCode is the predicate function for invitecode builders.
 type InviteCode func(*sql.Selector)
+
+// LaunchReaperState is the predicate function for launchreaperstate builders.
+type LaunchReaperState func(*sql.Selector)
 
 // LifecycleHook is the predicate function for lifecyclehook builders.
 type LifecycleHook func(*sql.Selector)
@@ -179,3 +197,6 @@ type User func(*sql.Selector)
 
 // UserAccessToken is the predicate function for useraccesstoken builders.
 type UserAccessToken func(*sql.Selector)
+
+// UserTerminalWorkspace is the predicate function for userterminalworkspace builders.
+type UserTerminalWorkspace func(*sql.Selector)

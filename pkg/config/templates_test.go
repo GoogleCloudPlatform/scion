@@ -15,6 +15,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -567,6 +568,13 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 		if !strings.Contains(err.Error(), "not found") {
 			t.Errorf("expected error to contain 'not found', got: %v", err)
 		}
+		// ptone/scion#1316 fault 3: callers must be able to distinguish "this
+		// named template does not exist" from any other failure via
+		// errors.Is, so the runtime broker can report a 404 naming the
+		// resource instead of folding it into a generic 5xx.
+		if !errors.Is(err, ErrTemplateNotFound) {
+			t.Errorf("expected errors.Is(err, ErrTemplateNotFound) to be true, got err: %v", err)
+		}
 	})
 
 	t.Run("absolute path bypasses project resolution", func(t *testing.T) {
@@ -580,11 +588,11 @@ func TestFindTemplateInProjectPath(t *testing.T) {
 	})
 }
 
-func TestFindTemplateInProjectPath_GitGroveInRepoTemplates(t *testing.T) {
+func TestFindTemplateInProjectPath_GitProjectInRepoTemplates(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
 
-	// Simulate a git project: in-repo .scion/ with grove-id and templates/ in-repo.
+	// Simulate a git project: in-repo .scion/ with project-id and templates/ in-repo.
 	// Templates live in-repo so they can be committed to the repository.
 	projectDir := filepath.Join(t.TempDir(), "my-git-project", ".scion")
 	_ = os.MkdirAll(projectDir, 0755)
@@ -1104,6 +1112,7 @@ func TestMergeScionConfig_NewFields(t *testing.T) {
 				Namespace:          "base-ns",
 				RuntimeClassName:   "base-runtime",
 				ServiceAccountName: "base-sa",
+				PriorityClassName:  "base-priority",
 				Resources: &api.K8sResources{
 					Requests: map[string]string{"cpu": "250m"},
 					Limits:   map[string]string{"memory": "512Mi"},
@@ -1121,6 +1130,7 @@ func TestMergeScionConfig_NewFields(t *testing.T) {
 				Namespace:          "override-ns",
 				RuntimeClassName:   "override-runtime",
 				ServiceAccountName: "override-sa",
+				PriorityClassName:  "override-priority",
 				Resources: &api.K8sResources{
 					Requests: map[string]string{"memory": "1Gi"},
 					Limits:   map[string]string{"cpu": "500m"},
@@ -1148,6 +1158,9 @@ func TestMergeScionConfig_NewFields(t *testing.T) {
 		}
 		if got.Kubernetes.ServiceAccountName != "override-sa" {
 			t.Errorf("expected ServiceAccountName override, got %q", got.Kubernetes.ServiceAccountName)
+		}
+		if got.Kubernetes.PriorityClassName != "override-priority" {
+			t.Errorf("expected PriorityClassName override, got %q", got.Kubernetes.PriorityClassName)
 		}
 		if got.Kubernetes.ImagePullPolicy != "Never" {
 			t.Errorf("expected ImagePullPolicy override, got %q", got.Kubernetes.ImagePullPolicy)

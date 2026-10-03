@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"entgo.io/ent/dialect"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -1402,4 +1403,10 @@ func TestDeleteGroup_CascadesRoleBindings(t *testing.T) {
 	}, nil, nil)
 	require.NoError(t, err)
 	assert.Empty(t, bindings, "expected zero bindings after group deletion")
+}
+
+func TestSQLUUIDPh(t *testing.T) {
+	assert.Equal(t, "$1::uuid", sqlUUIDPh(dialect.Postgres, 1))
+	assert.Equal(t, "$12::uuid", sqlUUIDPh(dialect.Postgres, 12))
+	assert.Equal(t, "?", sqlUUIDPh(dialect.SQLite, 1))
 }

@@ -755,6 +755,52 @@ func HasPolicyBindingsWith(preds ...predicate.PolicyBinding) predicate.User {
 	})
 }
 
+// HasExternalIdentities applies the HasEdge predicate on the "external_identities" edge.
+func HasExternalIdentities() predicate.User {
+	return predicate.User(func(s *sql.Selector) {
+		step := sqlgraph.NewStep(
+			sqlgraph.From(Table, FieldID),
+			sqlgraph.Edge(sqlgraph.O2M, false, ExternalIdentitiesTable, ExternalIdentitiesColumn),
+		)
+		sqlgraph.HasNeighbors(s, step)
+	})
+}
+
+// HasExternalIdentitiesWith applies the HasEdge predicate on the "external_identities" edge with a given conditions (other predicates).
+func HasExternalIdentitiesWith(preds ...predicate.ExternalIdentity) predicate.User {
+	return predicate.User(func(s *sql.Selector) {
+		step := newExternalIdentitiesStep()
+		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
+			for _, p := range preds {
+				p(s)
+			}
+		})
+	})
+}
+
+// HasTerminalWorkspace applies the HasEdge predicate on the "terminal_workspace" edge.
+func HasTerminalWorkspace() predicate.User {
+	return predicate.User(func(s *sql.Selector) {
+		step := sqlgraph.NewStep(
+			sqlgraph.From(Table, FieldID),
+			sqlgraph.Edge(sqlgraph.O2O, false, TerminalWorkspaceTable, TerminalWorkspaceColumn),
+		)
+		sqlgraph.HasNeighbors(s, step)
+	})
+}
+
+// HasTerminalWorkspaceWith applies the HasEdge predicate on the "terminal_workspace" edge with a given conditions (other predicates).
+func HasTerminalWorkspaceWith(preds ...predicate.UserTerminalWorkspace) predicate.User {
+	return predicate.User(func(s *sql.Selector) {
+		step := newTerminalWorkspaceStep()
+		sqlgraph.HasNeighborsWith(s, step, func(s *sql.Selector) {
+			for _, p := range preds {
+				p(s)
+			}
+		})
+	})
+}
+
 // And groups predicates with the AND operator between them.
 func And(predicates ...predicate.User) predicate.User {
 	return predicate.User(sql.AndPredicates(predicates...))

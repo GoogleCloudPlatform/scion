@@ -38,7 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
@@ -482,7 +482,7 @@ func (b *TelegramBrokerV2) importV1ChatRoutes(ctx context.Context, routesJSON st
 			continue
 		}
 
-		projectID, agentSlug := parseTopicComponents(topic)
+		projectID, agentSlug := parseTopicComponents(normalizeV1RouteTopic(topic))
 		// Attempt to resolve the project slug from the hub. Falls back to
 		// the project ID if the hub is unavailable during migration.
 		projectSlug := projectID
@@ -533,18 +533,17 @@ func (b *TelegramBrokerV2) importV1UserMappings(ctx context.Context, mappingsJSO
 }
 
 // parseTopicComponents extracts projectID and agentSlug from a broker topic.
-// Legacy scion.grove topics are accepted by projectcompat at this adapter boundary.
 func parseTopicComponents(topic string) (projectID, agentSlug string) {
-	parsed, err := projectcompat.ParseTopic(topic)
+	parsed, err := projectkeys.ParseTopic(topic)
 	if err == nil {
 		projectID = parsed.ProjectID
-		if parsed.Kind == projectcompat.TopicKindAgent {
+		if parsed.Kind == projectkeys.TopicKindAgent {
 			agentSlug = parsed.Actor
 		}
 	} else {
 		parts := strings.Split(topic, ".")
 		for i, part := range parts {
-			if (part == "grove" || part == "project") && i+1 < len(parts) {
+			if part == "project" && i+1 < len(parts) {
 				projectID = parts[i+1]
 			}
 			if part == "agent" && i+1 < len(parts) {
@@ -556,6 +555,21 @@ func parseTopicComponents(topic string) (projectID, agentSlug string) {
 		projectID = topic
 	}
 	return projectID, agentSlug
+}
+
+// v1LegacyRouteTopicPrefix is the topic prefix used by v1 chat-route exports.
+// v1 exports are an immutable snapshot format, so this is the only place
+// that recognizes it: normalizeV1RouteTopic rewrites it to the canonical
+// prefix before the route is parsed.
+const v1LegacyRouteTopicPrefix = "scion.grove."
+
+// normalizeV1RouteTopic rewrites a v1 chat-route export's topic string to use
+// the canonical topic prefix, if it still uses the frozen v1 prefix.
+func normalizeV1RouteTopic(topic string) string {
+	if rest, ok := strings.CutPrefix(topic, v1LegacyRouteTopicPrefix); ok {
+		return projectkeys.CanonicalTopicPrefix + "." + rest
+	}
+	return topic
 }
 
 // --- Publish (outbound: Hub → Telegram) ---
@@ -784,7 +798,7 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		if strings.HasPrefix(msg.Recipient, "user:") {
 			recipientUsername = b.resolveRecipientUsername(ctx, store, msg.Recipient)
 		}
-		// Fallback: extract user ID from topic (scion.grove.<id>.user.<userid>.messages)
+		// Fallback: extract user ID from topic (scion.project.<id>.user.<userid>.messages)
 		if recipientUsername == "" {
 			if userID := extractUserIDFromTopic(topic); userID != "" {
 				recipientUsername = b.resolveRecipientUsername(ctx, store, "user:"+userID)
@@ -1961,11 +1975,23 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 	}
 
 	// Check for scion identity mapping — unregistered users cannot route messages.
+	// hubSenderID carries the resolved Hub user UUID (when registered) for the
+	// outbound StructuredMessage.SenderID; senderID itself must stay the raw
+	// Telegram numeric ID since it also keys ConversationContext.TelegramUserID
+	// below. Without this split, the Hub's reply-affinity lookup
+	// (webchat_conversation_context, keyed by Hub user ID) never matches what
+	// gets recorded here, so an agent's reply falls back to whatever channel
+	// that Hub user last used elsewhere (e.g. the web dashboard) instead of
+	// routing back to Telegram.
+	hubSenderID := senderID
 	if senderID != "" {
 		mapping, err := b.store.GetUserMapping(ctx, senderID)
 		if err == nil && mapping != nil {
 			if mapping.ScionEmail != "" {
 				sender = "user:" + mapping.ScionEmail
+			}
+			if mapping.ScionUserID != "" {
+				hubSenderID = mapping.ScionUserID
 			}
 		} else if mapping == nil {
 			b.log.Debug("Unregistered user tried to mention agent", "sender_id", senderID)
@@ -2110,14 +2136,14 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 			}
 		}
 
-		topic := projectcompat.AgentTopic(link.ProjectID, agentSlug)
+		topic := projectkeys.AgentTopic(link.ProjectID, agentSlug)
 		recipient := "agent:" + agentSlug
 
 		msg := &messages.StructuredMessage{
 			Version:    messages.Version,
 			Timestamp:  time.Unix(tgMsg.Date, 0).UTC().Format(time.RFC3339),
 			Sender:     sender,
-			SenderID:   senderID,
+			SenderID:   hubSenderID,
 			Recipient:  recipient,
 			Recipients: recipientsSet,
 			Msg:        msgText,
@@ -2213,7 +2239,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 			}
 
 			mentionRecipient := "agent:" + mention.Name
-			mentionTopic := projectcompat.AgentTopic(link.ProjectID, mention.Name)
+			mentionTopic := projectkeys.AgentTopic(link.ProjectID, mention.Name)
 
 			mentionMsg := messages.NewMention(sender, mentionRecipient, mentionText, mentionSource)
 			mentionMsg.SenderID = senderID
@@ -2529,7 +2555,7 @@ func (b *TelegramBrokerV2) handleCallbackQuery(ctx context.Context, cb *Callback
 	}
 
 	// Deliver the ask-user response to the hub.
-	topic := projectcompat.AgentTopic(resp.ProjectID, resp.AgentSlug)
+	topic := projectkeys.AgentTopic(resp.ProjectID, resp.AgentSlug)
 
 	// Determine sender identity from the callback user.
 	sender := "telegram:unknown"
@@ -2543,8 +2569,13 @@ func (b *TelegramBrokerV2) handleCallbackQuery(ctx context.Context, cb *Callback
 		}
 
 		mapping, mErr := b.store.GetUserMapping(ctx, senderID)
-		if mErr == nil && mapping != nil && mapping.ScionEmail != "" {
-			sender = "user:" + mapping.ScionEmail
+		if mErr == nil && mapping != nil {
+			if mapping.ScionEmail != "" {
+				sender = "user:" + mapping.ScionEmail
+			}
+			if mapping.ScionUserID != "" {
+				senderID = mapping.ScionUserID
+			}
 		}
 	}
 
@@ -2855,7 +2886,7 @@ func FormatMessageV2(msg *messages.StructuredMessage, agentSlug string, recipien
 }
 
 // extractUserIDFromTopic extracts the user ID from a topic of the form
-// scion.grove.<id>.user.<userid>.messages or scion.project.<id>.user.<userid>.messages.
+// scion.project.<id>.user.<userid>.messages.
 func extractUserIDFromTopic(topic string) string {
 	parts := strings.Split(topic, ".")
 	for i, p := range parts {

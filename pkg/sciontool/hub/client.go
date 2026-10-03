@@ -29,11 +29,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
@@ -162,6 +165,16 @@ type Client struct {
 	retryBaseDelay time.Duration
 	retryMaxDelay  time.Duration
 	oidcSource     transportauth.TokenSource // transport-layer OIDC token source (nil = disabled)
+	// tokenChownUID and tokenChownGID are the ownership StartTokenRefresh
+	// applies (via WriteTokenFile) to the token file after every refresh.
+	// Guarded by tokenMu alongside token itself. Set once, before the
+	// refresh loop's first iteration; RefreshToken reads them under the
+	// same lock it already takes to update token, so a direct RefreshToken
+	// call outside StartTokenRefresh (as tests do) sees the zero value and
+	// skips the chown, matching WriteTokenFile's own "uid<=0 skips chown"
+	// contract.
+	tokenChownUID int
+	tokenChownGID int
 }
 
 // NewClient creates a new Hub client from environment variables.
@@ -751,11 +764,15 @@ func (c *Client) RefreshToken(ctx context.Context) (string, time.Time, error) {
 	// Update the client's token under write lock
 	c.tokenMu.Lock()
 	c.token = result.Token
+	chownUID, chownGID := c.tokenChownUID, c.tokenChownGID
 	c.tokenMu.Unlock()
 
 	// Persist the new token to a file so child processes can read it.
 	// Errors are non-fatal — the in-memory token is already updated.
-	if err := WriteTokenFile(result.Token); err != nil {
+	// Ownership is applied by WriteTokenFile itself (fchown on the open fd,
+	// before the rename onto the final path), not by a separate path-based
+	// os.Chown call afterwards.
+	if err := WriteTokenFile(result.Token, chownUID, chownGID); err != nil {
 		// Log will be handled by caller; we don't import log here
 		_ = err
 	}
@@ -901,6 +918,13 @@ func (c *Client) StartTokenRefresh(ctx context.Context, config *TokenRefreshConf
 		retryMax = retryBase
 	}
 
+	if config != nil {
+		c.tokenMu.Lock()
+		c.tokenChownUID = config.ChownUID
+		c.tokenChownGID = config.ChownGID
+		c.tokenMu.Unlock()
+	}
+
 	go func() {
 		defer close(done)
 
@@ -972,15 +996,6 @@ func (c *Client) StartTokenRefresh(ctx context.Context, config *TokenRefreshConf
 			consecutiveFailures = 0
 			authLostNotified = false
 			tokenExpiry = newExpiry
-
-			// Fix ownership after atomic rewrite (init runs as root).
-			if config.ChownUID > 0 {
-				if chownErr := os.Chown(TokenFilePath(), config.ChownUID, config.ChownGID); chownErr != nil {
-					if config.OnError != nil {
-						config.OnError(fmt.Errorf("failed to chown token file: %w", chownErr))
-					}
-				}
-			}
 
 			if config != nil && config.OnRefreshed != nil {
 				config.OnRefreshed(newExpiry)
@@ -1164,31 +1179,21 @@ func (c *Client) StartGitHubTokenRefresh(ctx context.Context, config *GitHubToke
 				continue
 			}
 
-			// Write the fresh token and expiry to the token file
+			// Write the fresh token and expiry to the token file. Ownership
+			// is applied by WriteGitHubTokenFile/WriteGitHubTokenExpiry
+			// themselves (fchown on the open fd, before the rename) rather
+			// than by a separate path-based os.Chown call afterwards.
 			if config.TokenPath != "" {
-				if writeErr := WriteGitHubTokenFile(config.TokenPath, newToken); writeErr != nil {
+				if writeErr := WriteGitHubTokenFile(config.TokenPath, newToken, config.ChownUID, config.ChownGID); writeErr != nil {
 					if config.OnError != nil {
 						config.OnError(fmt.Errorf("failed to write GitHub token file: %w", writeErr))
 					}
 				} else {
 					// Write the companion expiry file so the credential helper
 					// (a separate process) can detect stale tokens.
-					if expiryErr := WriteGitHubTokenExpiry(config.TokenPath, newExpiry); expiryErr != nil {
+					if expiryErr := WriteGitHubTokenExpiry(config.TokenPath, newExpiry, config.ChownUID, config.ChownGID); expiryErr != nil {
 						if config.OnError != nil {
 							config.OnError(fmt.Errorf("failed to write GitHub token expiry file: %w", expiryErr))
-						}
-					}
-					if config.ChownUID > 0 {
-						if chownErr := os.Chown(config.TokenPath, config.ChownUID, config.ChownGID); chownErr != nil {
-							if config.OnError != nil {
-								config.OnError(fmt.Errorf("failed to chown GitHub token file: %w", chownErr))
-							}
-						}
-						expiryPath := GitHubTokenExpiryPath(config.TokenPath)
-						if chownErr := os.Chown(expiryPath, config.ChownUID, config.ChownGID); chownErr != nil {
-							if config.OnError != nil {
-								config.OnError(fmt.Errorf("failed to chown GitHub token expiry file: %w", chownErr))
-							}
 						}
 					}
 				}
@@ -1213,21 +1218,97 @@ func (c *Client) StartGitHubTokenRefresh(ctx context.Context, config *GitHubToke
 	return done
 }
 
-// WriteGitHubTokenFile writes a GitHub token to the specified path atomically.
-func WriteGitHubTokenFile(path, token string) error {
+// githubTokenFileMode is the mode both the token file and its companion
+// expiry file are created with. It has not changed by this hardening: only
+// how it gets applied has (fchmod on the open fd instead of the mode
+// argument to a path-based write).
+const githubTokenFileMode = 0600
+
+// fchownFn performs the fd-based ownership change WriteFileNoFollowChown
+// uses. It is a package var purely so tests that don't run as root can
+// replace it with a fake and still exercise the call site; production code
+// never overrides it.
+var fchownFn = syscall.Fchown
+
+// enforceTokenFileOwnerChecks gates the extra "owner is root or the
+// containing directory's owner" check that ReadTokenFile and
+// ChownTokenFile apply on top of their always-on regular-file/Nlink==1
+// checks. Left at its default (false) for a caller that can legitimately
+// hand the container a host-written token file whose owner isn't provably
+// root or the target uid (see ReadTokenFile's doc comment) — enforcing the
+// check there risks treating a valid token as absent. A caller that
+// enforces InitRunOptions.RequirePrivilegeDrop always has an actual,
+// less-privileged workload user to defend the token file against, and
+// calls EnforceTokenFileOwnerChecks(true) once, early, with that same
+// value (see InitRunOptions.RequirePrivilegeDrop). Gating it here, rather than
+// proving byte-identical behaviour across every other token-provisioning
+// path, makes the default case provably unchanged: the check simply never
+// runs unless this is called with true.
+var enforceTokenFileOwnerChecks atomic.Bool
+
+// EnforceTokenFileOwnerChecks enables or disables the owner check described
+// above. Call once, early in process startup, before any ReadTokenFile or
+// ChownTokenFile call — see the variable's doc comment for when to pass
+// true.
+func EnforceTokenFileOwnerChecks(enabled bool) {
+	enforceTokenFileOwnerChecks.Store(enabled)
+}
+
+// WriteGitHubTokenFile writes a GitHub token to the specified path
+// atomically. When uid > 0, the final file is chowned to uid:gid (the
+// scion container user); uid <= 0 leaves ownership as the writing process
+// (matching the zero-value "skip chown" contract the caller configs already
+// document). See WriteFileNoFollowChown for the symlink/non-regular-file
+// handling this relies on.
+func WriteGitHubTokenFile(path, token string, uid, gid int) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	// dirfd.EnsureDirNoFollow, not os.MkdirAll: this can run as root
+	// (sciontool init, before privilege drop) against a world-writable
+	// directory (in practice /tmp, DefaultGitHubTokenPath's parent) where
+	// the workload can plant a symlink at the leaf. A symlinked dir would
+	// make os.MkdirAll's own Stat-based existence check treat "the
+	// symlink's target is a directory" as "dir already exists" and
+	// silently no-op through it. dirfd.EnsureDirNoFollow only ever creates
+	// dir's own leaf (its parent must already exist) and refuses a
+	// symlinked leaf outright instead.
+	d, err := dirfd.EnsureDirNoFollow(dir, 0700)
+	if err != nil {
 		return fmt.Errorf("failed to create token file directory: %w", err)
 	}
-
-	// Write to temp file then rename for atomicity
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(token), 0600); err != nil {
+	_ = d.Close()
+	if err := WriteFileNoFollowChown(path, []byte(token), githubTokenFileMode, uid, gid); err != nil {
 		return fmt.Errorf("failed to write GitHub token file: %w", err)
 	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("failed to rename GitHub token file: %w", err)
+	return nil
+}
+
+// WriteFileNoFollowChown atomically writes data to path without ever
+// following a symlink — at path's own leaf or at any directory component
+// above it — and without chowning/chmoding by path.
+//
+// Exported for reuse by any other root-owned writer under a
+// workload-writable directory (e.g. cmd/sciontool/commands' scion-env
+// writer), not just the token writers in this package that first needed it.
+//
+// This is a thin wrapper over dirfd.WriteFileNoFollowWithChown, passing
+// dirfd.RefuseSymlink: a planted symlink or other non-regular entry at
+// path's leaf is refused outright — no write at all — rather than silently
+// replaced, since every caller of this specific entry point writes a
+// credential or state file (an auth token, a GitHub token's expiry
+// companion, scion-env) where that substitution means tampering worth
+// reporting, not a stale leaf to overwrite quietly. (Compare
+// dirfd.ReplaceLeaf, used for installs into a directory the workload owns
+// outright, e.g. agent-limits.json or agent-info.json, where the opposite
+// is true.)
+// dirfd itself does the actual parent-directory walk, temp-file creation,
+// write, fsync, and fd-based chmod/chown/rename — see its own doc comment
+// for the full safety argument.
+//
+// fchownFn is threaded through as the chown callback so this package's own
+// tests can intercept the fd-based chown call directly.
+func WriteFileNoFollowChown(path string, data []byte, mode os.FileMode, uid, gid int) error {
+	if err := dirfd.WriteFileNoFollowWithChown(path, data, mode, uid, gid, dirfd.RefuseSymlink, fchownFn); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
 }
@@ -1249,10 +1330,11 @@ func GitHubTokenExpiryPath(tokenPath string) string {
 
 // WriteGitHubTokenExpiry writes the token expiry time to a companion file
 // alongside the token file. This allows the credential helper (a separate
-// process) to check whether the cached token is still valid.
-func WriteGitHubTokenExpiry(tokenPath string, expiry time.Time) error {
+// process) to check whether the cached token is still valid. Ownership
+// follows the same uid/gid contract as WriteGitHubTokenFile.
+func WriteGitHubTokenExpiry(tokenPath string, expiry time.Time, uid, gid int) error {
 	expiryPath := GitHubTokenExpiryPath(tokenPath)
-	return os.WriteFile(expiryPath, []byte(expiry.Format(time.RFC3339)), 0600)
+	return WriteFileNoFollowChown(expiryPath, []byte(expiry.Format(time.RFC3339)), githubTokenFileMode, uid, gid)
 }
 
 // ReadGitHubTokenExpiry reads the token expiry time from the companion expiry
@@ -1406,10 +1488,18 @@ func TokenFilePath() string {
 	return filepath.Join(tokenHomeResolver(), ".scion", TokenFile)
 }
 
-// WriteTokenFile writes the agent token to the canonical token file.
-// Called by sciontool init to seed the initial value and by the refresh
-// loop to persist updated tokens. Written atomically via temp file + rename.
-func WriteTokenFile(token string) error {
+// tokenFileMode is the mode the agent token file is created with.
+const tokenFileMode = 0600
+
+// WriteTokenFile writes the agent token to the canonical token file. Called
+// by sciontool init to seed the initial value and by the refresh loop to
+// persist updated tokens. When uid > 0, the final file is chowned to
+// uid:gid (the scion container user) via WriteFileNoFollowChown — an fchown
+// on the open file descriptor, before the rename, never a path-based chown
+// that a symlink swapped in afterwards could redirect. uid <= 0 leaves
+// ownership as the writing process, matching the zero-value "skip chown"
+// contract TokenRefreshConfig.ChownUID already documents.
+func WriteTokenFile(token string, uid, gid int) error {
 	// Guardrail: under `go test`, refuse to write the real token file unless a
 	// test has explicitly isolated it via SetTokenHome. resolveTokenHome
 	// resolves to the live scion user's home inside agent containers, so a test
@@ -1424,37 +1514,158 @@ func WriteTokenFile(token string) error {
 	path := TokenFilePath()
 	dir := filepath.Dir(path)
 
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	// dirfd.EnsureDirNoFollow, not os.MkdirAll: this can run as root
+	// (sciontool init, before privilege drop) against ".scion" under the
+	// scion user's home, which the workload owns and can replace with a
+	// symlink — see WriteGitHubTokenFile's identical reasoning. dir's own
+	// parent (the home directory itself) always already exists here, so
+	// EnsureDirNoFollow's single-leaf-only creation is not a capability
+	// loss versus os.MkdirAll's full recursive create.
+	d, err := dirfd.EnsureDirNoFollow(dir, 0700)
+	if err != nil {
 		return fmt.Errorf("failed to create token file directory: %w", err)
 	}
+	_ = d.Close()
 
-	// Write to temp file then rename for atomicity
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(token), 0600); err != nil {
+	if err := WriteFileNoFollowChown(path, []byte(token), tokenFileMode, uid, gid); err != nil {
 		return fmt.Errorf("failed to write token file: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("failed to rename token file: %w", err)
 	}
 	return nil
 }
 
+// ChownTokenFile fixes the ownership of an already-written token file to
+// uid:gid — used when the token file was written by another process (the
+// host-side agent manager, before this container started) and this
+// (root) process only needs to hand it off to the scion user, not rewrite
+// its content.
+//
+// It resolves the token file's parent directory the same symlink-safe way
+// WriteFileNoFollowChown does (dirfd.OpenParentNoFollow), then opens the
+// leaf itself without following a symlink, and refuses to chown anything
+// but a single-link regular file — a hardlink to a root-owned file would
+// otherwise pass a bare "is this a regular file" check and hand that file
+// to the scion user. This check always applies, on every runtime. The
+// chown is fchown on that open fd, never a path-based chown that a symlink
+// swapped in afterwards could redirect.
+//
+// When EnforceTokenFileOwnerChecks(true) has been called, it additionally
+// requires the file's current owner to be root or the containing
+// directory's own owner before chowning it — the same rule
+// readTokenFileGuarded applies, gated the same way and for the same
+// reason: it isn't provably safe to require on every caller's
+// token-provisioning path, only on the one that requires privilege drop.
+func ChownTokenFile(uid, gid int) error {
+	path := TokenFilePath()
+	dirFd, leaf, err := dirfd.OpenParentNoFollow(path)
+	if err != nil {
+		return fmt.Errorf("failed to open parent directory of token file: %w", err)
+	}
+	defer func() { _ = syscall.Close(dirFd) }()
+
+	var dirSt syscall.Stat_t
+	if err := syscall.Fstat(dirFd, &dirSt); err != nil {
+		return fmt.Errorf("failed to stat parent directory of token file: %w", err)
+	}
+
+	f, err := dirfd.OpenAt(dirFd, leaf, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return fmt.Errorf("failed to open token file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	var st syscall.Stat_t
+	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
+		return fmt.Errorf("failed to stat token file: %w", err)
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFREG || st.Nlink != 1 {
+		return fmt.Errorf("refusing to chown token file: not a single-link regular file")
+	}
+	if enforceTokenFileOwnerChecks.Load() && st.Uid != 0 && st.Uid != dirSt.Uid {
+		return fmt.Errorf("refusing to chown token file: unexpected owner")
+	}
+	if err := f.Chown(uid, gid); err != nil {
+		return fmt.Errorf("failed to chown token file: %w", err)
+	}
+	return nil
+}
+
+// tokenFileMaxBytes bounds readTokenFileGuarded's read: the agent token is
+// a compact JWT-style string, so anything this long already isn't a token
+// this process (or the host-side agent manager) wrote.
+const tokenFileMaxBytes = 8192
+
 // ReadTokenFile reads the agent token from the canonical token file.
 // Returns empty string if the file doesn't exist or can't be read.
+//
+// This runs inside sciontool init, which is root for its whole life, so
+// the read goes through the same symlink-safe path WriteFileNoFollowChown
+// and ChownTokenFile use: a workload that owns $HOME/.scion can otherwise
+// swap scion-token for a symlink to any root-readable file (or a hardlink
+// to one) and have root read that file's contents back and forward them to
+// the Hub as if they were the agent's bearer token.
 func ReadTokenFile() string {
-	data, err := os.ReadFile(TokenFilePath())
+	token, err := readTokenFileGuarded(TokenFilePath())
 	if err != nil {
 		return ""
 	}
-	token := strings.TrimSpace(string(data))
+	token = strings.TrimSpace(token)
 	if token == "" {
 		return ""
 	}
 	return token
 }
 
-// OutboundMessage is the payload for sending an agent-to-human outbound message.
+// readTokenFileGuarded resolves path through the dirfd parent-directory
+// chain (so a symlink at any intermediate component, not just the leaf, is
+// refused) and refuses to read anything but a single-link regular file — a
+// hardlink to some unrelated file (Nlink>1) is refused instead of read.
+// This check always applies, on every runtime.
+//
+// When EnforceTokenFileOwnerChecks(true) has been called (see its doc
+// comment), it additionally requires the owner to be root or
+// the containing directory's own owner, the only two legitimate states for
+// the token file: the host-side agent manager writes it before the
+// container starts (commonly as root or whatever uid the host process runs
+// as), and WriteTokenFile/ChownTokenFile hand it to the scion user
+// afterwards. O_NONBLOCK keeps a FIFO planted at the path from blocking
+// the open.
+func readTokenFileGuarded(path string) (string, error) {
+	dirFd, leaf, err := dirfd.OpenParentNoFollow(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = syscall.Close(dirFd) }()
+
+	var dirSt syscall.Stat_t
+	if err := syscall.Fstat(dirFd, &dirSt); err != nil {
+		return "", fmt.Errorf("failed to stat parent directory of %s: %w", path, err)
+	}
+
+	f, err := dirfd.OpenAt(dirFd, leaf, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+
+	var st syscall.Stat_t
+	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
+		return "", fmt.Errorf("failed to stat %s: %w", path, err)
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFREG || st.Nlink != 1 {
+		return "", fmt.Errorf("refusing to read %s: not a single-link regular file", path)
+	}
+	if enforceTokenFileOwnerChecks.Load() && st.Uid != 0 && st.Uid != dirSt.Uid {
+		return "", fmt.Errorf("refusing to read %s: unexpected owner", path)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(f, tokenFileMaxBytes))
+	if err != nil {
+		return "", fmt.Errorf("failed to read %s: %w", path, err)
+	}
+	return string(data), nil
+}
+
+// OutboundMessage is the payload for sending an outbound message from an agent.
 type OutboundMessage struct {
 	Recipient   string            `json:"recipient,omitempty"`
 	RecipientID string            `json:"recipient_id,omitempty"`
@@ -1462,11 +1673,15 @@ type OutboundMessage struct {
 	Type        string            `json:"type,omitempty"`
 	Urgent      bool              `json:"urgent,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`
+	// Wake requests that a suspended target agent be resumed before
+	// delivering the message. Ignored for non-agent recipients.
+	Wake bool `json:"wake,omitempty"`
 }
 
-// SendOutboundMessage sends an outbound message from the agent to a human inbox.
-// Posts to POST /api/v1/agents/{agentID}/outbound-message using the agent token.
-// No retries — this is a best-effort fire-and-forget call.
+// SendOutboundMessage sends an outbound message from the agent via the hub.
+// The recipient may be a human user or another agent; the hub determines the
+// delivery path. Posts to POST /api/v1/agents/{agentID}/outbound-message using
+// the agent token. No retries — this is a best-effort fire-and-forget call.
 func (c *Client) SendOutboundMessage(ctx context.Context, msg OutboundMessage) error {
 	if !c.IsConfigured() {
 		return fmt.Errorf("hub client not configured")

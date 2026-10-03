@@ -19,6 +19,31 @@ import (
 	"testing"
 )
 
+func TestNewAggregator_ProjectIDEnvPrecedence(t *testing.T) {
+	// SCION_GROVE_ID is no longer read; only SCION_PROJECT_ID is consulted.
+	tests := []struct {
+		name      string
+		projectID string
+		groveID   string
+		want      string
+	}{
+		{name: "project id set", projectID: "proj-1", groveID: "", want: "proj-1"},
+		{name: "grove id alone is ignored", projectID: "", groveID: "legacy-1", want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("SCION_PROJECT_ID", tt.projectID)
+			t.Setenv("SCION_GROVE_ID", tt.groveID)
+
+			a := NewAggregator()
+			if a.projectID != tt.want {
+				t.Errorf("NewAggregator().projectID = %q, want %q", a.projectID, tt.want)
+			}
+		})
+	}
+}
+
 func TestAggregator_BasicFlow(t *testing.T) {
 	a := &Aggregator{
 		agentID:   "agent-1",

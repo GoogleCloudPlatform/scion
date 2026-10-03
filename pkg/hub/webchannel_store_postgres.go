@@ -102,7 +102,9 @@ CREATE TABLE IF NOT EXISTS webchat_user_prefs (
     user_id         TEXT PRIMARY KEY,
     space_sort_mode TEXT NOT NULL DEFAULT 'activity',
     space_order     TEXT,
-    thread_sort_mode TEXT NOT NULL DEFAULT 'activity'
+    thread_sort_mode TEXT NOT NULL DEFAULT 'activity',
+    thread_order    TEXT,
+    thread_groups   TEXT
 );
 
 CREATE TABLE IF NOT EXISTS webchat_dm (
@@ -294,20 +296,6 @@ SELECT agent_id, COALESCE(last_message_id, ''), last_activity_at, last_read_at
 	return threads, rows.Err()
 }
 
-// MarkThreadRead advances the last_read_at watermark to now.
-func (s *pgWebChatStore) MarkThreadRead(ctx context.Context, userID, projectID, agentID string) error {
-	const query = `
-UPDATE webchat_thread
-   SET last_read_at = NOW()
- WHERE user_id = $1 AND project_id = $2 AND agent_id = $3
-`
-	_, err := s.db.ExecContext(ctx, query, userID, projectID, agentID)
-	if err != nil {
-		return fmt.Errorf("webchat store: mark thread read: %w", err)
-	}
-	return nil
-}
-
 // ---------------------------------------------------------------------------
 // Wave-2 Topic methods (Postgres)
 // ---------------------------------------------------------------------------
@@ -390,10 +378,14 @@ func (s *pgWebChatStore) CreateTopic(ctx context.Context, topic WebChatTopic) er
 		// Group conversation participants are derived from project membership, not
 		// from an explicit participant table. The participant table is a listing
 		// index, NEVER the access authority (design doc §2.4.2.1).
+		var defaultAgentID interface{}
+		if topic.DefaultAgentID != "" {
+			defaultAgentID = topic.DefaultAgentID
+		}
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
-			 VALUES ($1, $2, 'group', 'native', $3, '', $4, 'active', $5, $6)`,
-			topic.ConversationID, topic.ProjectID, extRef, topic.Name, topic.CreatedAt, topic.CreatedAt)
+			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, default_agent_id, drift_state, last_activity_at, created_at)
+			 VALUES ($1, $2, 'group', 'native', $3, '', $4, $5, 'active', $6, $7)`,
+			topic.ConversationID, topic.ProjectID, extRef, topic.Name, defaultAgentID, topic.CreatedAt, topic.CreatedAt)
 		if err != nil {
 			return fmt.Errorf("webchat store: create conversation for topic: %w", err)
 		}
@@ -454,7 +446,6 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 	defer func() { _ = rows.Close() }()
 
 	var topics []WebChatTopic
-	hasGeneral := false
 	for rows.Next() {
 		var t WebChatTopic
 		var activityAt *time.Time
@@ -468,32 +459,21 @@ SELECT id, project_id, name, is_general, COALESCE(default_agent, ''),
 			t.LastActivityAt = *activityAt
 		}
 		t.DeletedAt = deletedAt
-		if t.IsGeneral {
-			hasGeneral = true
-		}
 		topics = append(topics, t)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("webchat store: list topics rows: %w", err)
 	}
 
-	// Lazy #general creation for pre-existing projects.
-	if !hasGeneral {
-		generalID, _, err := s.EnsureGeneralTopic(ctx, projectID, "system")
-		if err != nil {
-			slog.Warn("webchat store: lazy #general creation failed", "project_id", projectID, "error", err)
-		} else {
-			general, err := s.GetTopic(ctx, generalID)
-			if err == nil && general != nil {
-				topics = append([]WebChatTopic{*general}, topics...)
-			}
-		}
-	}
-
 	return topics, nil
 }
 
-// UpdateTopic applies partial updates to a topic.
+// UpdateTopic applies partial updates to a topic. When updates.DefaultAgentID
+// is set, it also converges the linked conversation's default_agent_id in
+// the same transaction (design doc: F1 write-time convergence). Postgres
+// migrations guarantee the conversations table exists (see CreateTopic's
+// DEF-89 comment above), so unlike the SQLite store there is no
+// hasConversationsTable() gate here.
 func (s *pgWebChatStore) UpdateTopic(ctx context.Context, topicID string, updates TopicUpdate) error {
 	var sets []string
 	var args []interface{}
@@ -513,40 +493,117 @@ func (s *pgWebChatStore) UpdateTopic(ctx context.Context, topicID string, update
 		args = append(args, val)
 		argIdx++
 	}
-	if len(sets) == 0 {
+	if len(sets) == 0 && updates.DefaultAgentID == nil {
 		return nil
 	}
 
-	args = append(args, topicID)
-	query := fmt.Sprintf("UPDATE webchat_topic SET %s WHERE id = $%d AND deleted_at IS NULL",
-		strings.Join(sets, ", "), argIdx)
-	_, err := s.db.ExecContext(ctx, query, args...)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("webchat store: update topic: %w", err)
+		return fmt.Errorf("webchat store: begin update topic tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if len(sets) > 0 {
+		topicArgs := append(append([]interface{}{}, args...), topicID)
+		query := fmt.Sprintf("UPDATE webchat_topic SET %s WHERE id = $%d AND deleted_at IS NULL",
+			strings.Join(sets, ", "), argIdx)
+		if _, err := tx.ExecContext(ctx, query, topicArgs...); err != nil {
+			return fmt.Errorf("webchat store: update topic: %w", err)
+		}
+	}
+
+	if updates.DefaultAgentID != nil {
+		// The subquery naturally no-ops (zero rows affected, not an error)
+		// when the topic's conversation_id is NULL — a legacy unlinked
+		// topic. This UPDATE only ever touches default_agent_id.
+		//
+		// The subquery's own "AND deleted_at IS NULL" (review round 1)
+		// matters even though the outer WHERE also filters deleted_at:
+		// without it, a soft-deleted topic would still resolve its
+		// conversation_id and change a conversation that the topic no
+		// longer represents.
+		var val interface{}
+		if *updates.DefaultAgentID != "" {
+			val = *updates.DefaultAgentID
+		}
+		// Review round 1 finding #1 (Critical): conversations.id is a native
+		// Postgres uuid column (Ent field.UUID), but webchat_topic.conversation_id
+		// is TEXT — Postgres has no implicit text->uuid cast for a column
+		// comparison, so this failed at runtime with "operator does not
+		// exist: uuid = text" and rolled back the whole transaction,
+		// including the topic UPDATE above. The explicit ::uuid cast is safe
+		// because every conversation_id value is a minted UUID string.
+		_, err := tx.ExecContext(ctx,
+			`UPDATE conversations SET default_agent_id = $1
+			  WHERE id = (SELECT conversation_id::uuid FROM webchat_topic WHERE id = $2 AND deleted_at IS NULL)
+			    AND deleted_at IS NULL`,
+			val, topicID)
+		if err != nil {
+			return fmt.Errorf("webchat store: update linked conversation default agent: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("webchat store: commit update topic tx: %w", err)
 	}
 	return nil
 }
 
-// DeleteTopic soft-deletes a topic. Returns an error if it is #general.
+// DeleteTopic soft-deletes a topic. Returns an error if it is the last thread.
+// The count-check and soft-delete are wrapped in a transaction with FOR UPDATE
+// to prevent a TOCTOU race where two concurrent deletes both see count=2 and
+// leave 0 threads.
 func (s *pgWebChatStore) DeleteTopic(ctx context.Context, topicID string) error {
-	var isGeneral bool
-	err := s.db.QueryRowContext(ctx, "SELECT is_general FROM webchat_topic WHERE id = $1", topicID).Scan(&isGeneral)
+	var projectID string
+	err := s.db.QueryRowContext(ctx, "SELECT project_id FROM webchat_topic WHERE id = $1 AND deleted_at IS NULL", topicID).Scan(&projectID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil
 		}
 		return fmt.Errorf("webchat store: delete topic check: %w", err)
 	}
-	if isGeneral {
-		return fmt.Errorf("webchat store: delete topic: cannot delete #general topic")
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("webchat store: delete topic begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	// Lock all active topic rows for this project to prevent concurrent deletes.
+	// We SELECT individual rows with FOR UPDATE rather than COUNT(*) because
+	// PostgreSQL does not allow FOR UPDATE with aggregate functions.
+	rows, err := tx.QueryContext(ctx,
+		"SELECT id FROM webchat_topic WHERE project_id = $1 AND deleted_at IS NULL FOR UPDATE",
+		projectID)
+	if err != nil {
+		return fmt.Errorf("webchat store: delete topic lock: %w", err)
+	}
+	var count int
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("webchat store: delete topic scan: %w", err)
+		}
+		count++
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("webchat store: delete topic rows: %w", err)
+	}
+	if count <= 1 {
+		return fmt.Errorf("webchat store: delete topic: cannot delete the last thread")
 	}
 
-	const query = `UPDATE webchat_topic SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL`
-	_, err = s.db.ExecContext(ctx, query, topicID)
+	// Soft-delete within the same transaction.
+	_, err = tx.ExecContext(ctx,
+		"UPDATE webchat_topic SET deleted_at = NOW() WHERE id = $1 AND deleted_at IS NULL",
+		topicID)
 	if err != nil {
 		return fmt.Errorf("webchat store: delete topic: %w", err)
 	}
-	return nil
+
+	return tx.Commit()
 }
 
 // TouchTopicActivity updates last_activity_at and, when messageID is
@@ -786,13 +843,15 @@ func (s *pgWebChatStore) IsConversationMuted(ctx context.Context, userID, conver
 // GetUserPrefs returns the user's rail preferences. Returns defaults if no row.
 func (s *pgWebChatStore) GetUserPrefs(ctx context.Context, userID string) (*WebChatUserPrefs, error) {
 	const query = `
-SELECT user_id, space_sort_mode, COALESCE(space_order, ''), thread_sort_mode
+SELECT user_id, space_sort_mode, COALESCE(space_order, ''), thread_sort_mode,
+       COALESCE(thread_order, ''), COALESCE(thread_groups, '')
   FROM webchat_user_prefs
  WHERE user_id = $1
 `
 	var p WebChatUserPrefs
 	err := s.db.QueryRowContext(ctx, query, userID).Scan(
-		&p.UserID, &p.SpaceSortMode, &p.SpaceOrder, &p.ThreadSortMode)
+		&p.UserID, &p.SpaceSortMode, &p.SpaceOrder, &p.ThreadSortMode,
+		&p.ThreadOrder, &p.ThreadGroups)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return &WebChatUserPrefs{
@@ -809,20 +868,30 @@ SELECT user_id, space_sort_mode, COALESCE(space_order, ''), thread_sort_mode
 // SetUserPrefs upserts the user's rail preferences.
 func (s *pgWebChatStore) SetUserPrefs(ctx context.Context, userID string, prefs WebChatUserPrefs) error {
 	const query = `
-INSERT INTO webchat_user_prefs (user_id, space_sort_mode, space_order, thread_sort_mode)
-VALUES ($1, $2, $3, $4)
+INSERT INTO webchat_user_prefs (user_id, space_sort_mode, space_order, thread_sort_mode, thread_order, thread_groups)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (user_id)
 DO UPDATE SET
     space_sort_mode = EXCLUDED.space_sort_mode,
     space_order = EXCLUDED.space_order,
-    thread_sort_mode = EXCLUDED.thread_sort_mode
+    thread_sort_mode = EXCLUDED.thread_sort_mode,
+    thread_order = EXCLUDED.thread_order,
+    thread_groups = EXCLUDED.thread_groups
 `
 	var spaceOrder interface{}
 	if prefs.SpaceOrder != "" {
 		spaceOrder = prefs.SpaceOrder
 	}
+	var threadOrder interface{}
+	if prefs.ThreadOrder != "" {
+		threadOrder = prefs.ThreadOrder
+	}
+	var threadGroups interface{}
+	if prefs.ThreadGroups != "" {
+		threadGroups = prefs.ThreadGroups
+	}
 	_, err := s.db.ExecContext(ctx, query, userID, prefs.SpaceSortMode,
-		spaceOrder, prefs.ThreadSortMode)
+		spaceOrder, prefs.ThreadSortMode, threadOrder, threadGroups)
 	if err != nil {
 		return fmt.Errorf("webchat store: set user prefs: %w", err)
 	}
@@ -969,6 +1038,23 @@ func (s *pgWebChatStore) SearchChatMessages(ctx context.Context, filter ChatSear
 		conditions = append(conditions, fmt.Sprintf("project_id IN (%s)", strings.Join(placeholders, ",")))
 	}
 
+	// DM threads are private to their participants. Unless the search is
+	// scoped to one (already authorized) conversation, include a DM only when
+	// the caller occupies one of its user slots. Exact prefix/suffix
+	// comparison, not LIKE, so IDs are never treated as patterns.
+	if filter.ConversationKey == "" {
+		if filter.DMParticipantUserID == "" {
+			conditions = append(conditions, "(thread_id IS NULL OR left(thread_id, 3) <> 'dm:')")
+		} else {
+			prefix, suffix := dmParticipantBounds(filter.DMParticipantUserID)
+			conditions = append(conditions, fmt.Sprintf(
+				"(thread_id IS NULL OR left(thread_id, 3) <> 'dm:' OR left(thread_id, length($%d::text)) = $%d::text OR right(thread_id, length($%d::text)) = $%d::text)",
+				argIdx, argIdx, argIdx+1, argIdx+1))
+			args = append(args, prefix, suffix)
+			argIdx += 2
+		}
+	}
+
 	// Keyset pagination cursor: "timestamp|id"
 	if filter.Cursor != "" {
 		cursorParts := strings.SplitN(filter.Cursor, "|", 2)
@@ -1107,6 +1193,9 @@ func (s *pgWebChatStore) runMigrations() error {
 	}
 	if err := s.backfillTopicConversations(); err != nil {
 		return fmt.Errorf("topic conversation backfill: %w", err)
+	}
+	if err := s.addUserPrefsThreadColumns(); err != nil {
+		return fmt.Errorf("user prefs thread columns: %w", err)
 	}
 	return nil
 }
@@ -1247,6 +1336,29 @@ func (s *pgWebChatStore) backfillTopicConversations() error {
 	}
 
 	return s.markMigrationCompleted("topic_conversation_backfill")
+}
+
+// addUserPrefsThreadColumns adds thread_order and thread_groups columns to
+// webchat_user_prefs for existing databases that lack them.
+func (s *pgWebChatStore) addUserPrefsThreadColumns() error {
+	done, err := s.migrationCompleted("user_prefs_thread_columns")
+	if err != nil {
+		return err
+	}
+	if done {
+		return nil
+	}
+
+	_, err = s.db.Exec(`ALTER TABLE webchat_user_prefs ADD COLUMN IF NOT EXISTS thread_order TEXT`)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`ALTER TABLE webchat_user_prefs ADD COLUMN IF NOT EXISTS thread_groups TEXT`)
+	if err != nil {
+		return err
+	}
+
+	return s.markMigrationCompleted("user_prefs_thread_columns")
 }
 
 // migrationCompleted checks whether a named migration has already run.
@@ -1734,10 +1846,20 @@ func (s *pgWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, keys
 		// Group conversation participants are derived from project membership, not
 		// from an explicit participant table. The participant table is a listing
 		// index, NEVER the access authority (design doc §2.4.2.1).
+		//
+		// Review round 1 finding #4: also seed default_agent_id from
+		// topic.DefaultAgentID (NULL when empty) — same as CreateTopic's mint
+		// branch — so a promoted DM doesn't start with a topic default that
+		// has no conversation-side counterpart. The bound parameter is
+		// inferred as uuid, same as id/project_id above; no cast needed.
+		var defaultAgentID interface{}
+		if topic.DefaultAgentID != "" {
+			defaultAgentID = topic.DefaultAgentID
+		}
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, drift_state, last_activity_at, created_at)
-			 VALUES ($1, $2, 'group', 'native', $3, '', $4, 'active', $5, $6)`,
-			topic.ConversationID, topic.ProjectID, extRef, topic.Name, topic.CreatedAt, topic.CreatedAt)
+			`INSERT INTO conversations (id, project_id, kind, surface, external_ref, parent_ref, display_name, default_agent_id, drift_state, last_activity_at, created_at)
+			 VALUES ($1, $2, 'group', 'native', $3, '', $4, $5, 'active', $6, $7)`,
+			topic.ConversationID, topic.ProjectID, extRef, topic.Name, defaultAgentID, topic.CreatedAt, topic.CreatedAt)
 		if err != nil {
 			return nil, fmt.Errorf("webchat store: create conversation in promote: %w", err)
 		}
@@ -1750,8 +1872,10 @@ func (s *pgWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, keys
 	// The WHERE uses two arms:
 	//   1. conversation_id = directConvID (modern population — 99.7% of DM rows)
 	//   2. thread_id = dmKey (legacy arm — pre-conversation-stamp rows)
-	// The $N <> '' guard on arm 1 prevents an empty directConvID from matching
-	// every unstamped message on the hub (design §3.1 C2).
+	// NULLIF($N, '')::uuid on arm 1 turns an empty directConvID into NULL so it
+	// never matches, preventing it from matching every unstamped message on the
+	// hub (design §3.1 C2), while keeping the conversation_id uuid comparison
+	// sargable for index usage.
 	//
 	// C2a guard: if topic.ConversationID is empty, set only thread_id to
 	// avoid blanking conversation_id on moved rows (design §3.1 C2a).
@@ -1759,7 +1883,7 @@ func (s *pgWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, keys
 	if topic.ConversationID != "" {
 		res, err = tx.ExecContext(ctx,
 			`UPDATE messages SET thread_id = $1, conversation_id = $2
-			 WHERE ($3 <> '' AND conversation_id = $3)
+			 WHERE conversation_id = NULLIF($3, '')::uuid
 			    OR thread_id = $4`,
 			topic.ID, topic.ConversationID,
 			directConvID,
@@ -1767,7 +1891,7 @@ func (s *pgWebChatStore) PromoteDM(ctx context.Context, topic WebChatTopic, keys
 	} else {
 		res, err = tx.ExecContext(ctx,
 			`UPDATE messages SET thread_id = $1
-			 WHERE ($2 <> '' AND conversation_id = $2)
+			 WHERE conversation_id = NULLIF($2, '')::uuid
 			    OR thread_id = $3`,
 			topic.ID,
 			directConvID,

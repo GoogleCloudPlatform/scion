@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os/exec"
 	"strings"
@@ -25,7 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 )
 
@@ -100,6 +101,13 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 
 	out, err := runSimpleCommand(ctx, r.Command, newArgs...)
 	if err != nil {
+		if ctx.Err() != nil {
+			// The caller gave up while the daemon may still have been
+			// creating/starting the container. Clean up any partial result
+			// instead of leaking it. See ptone/scion#1886.
+			rollbackCancelledCreate(r.Command, config.Name)
+			return "", ctx.Err()
+		}
 		return "", fmt.Errorf("container run failed: %w (output: %s)", err, out)
 	}
 
@@ -195,15 +203,15 @@ func (r *AppleContainerRuntime) List(ctx context.Context, labelFilter map[string
 				actual := c.Configuration.Labels[k]
 				if actual == "" {
 					switch k {
-					case projectcompat.LabelProject:
-						actual = projectcompat.ProjectNameFromLabels(c.Configuration.Labels)
-					case projectcompat.LabelProjectID:
-						actual = projectcompat.ProjectIDFromLabels(c.Configuration.Labels)
-					case projectcompat.LabelProjectPath:
-						actual = projectcompat.ProjectPathFromLabels(c.Configuration.Labels)
+					case projectkeys.LabelProject:
+						actual = projectkeys.ProjectNameFromLabels(c.Configuration.Labels)
+					case projectkeys.LabelProjectID:
+						actual = projectkeys.ProjectIDFromLabels(c.Configuration.Labels)
+					case projectkeys.LabelProjectPath:
+						actual = projectkeys.ProjectPathFromLabels(c.Configuration.Labels)
 					}
 				}
-				if actual != v {
+				if !projectkeys.LabelValuesMatch(k, actual, v) {
 					match = false
 					break
 				}
@@ -219,9 +227,9 @@ func (r *AppleContainerRuntime) List(ctx context.Context, labelFilter map[string
 			Template:        c.Configuration.Labels["scion.template"],
 			HarnessConfig:   c.Configuration.Labels["scion.harness_config"],
 			HarnessAuth:     c.Configuration.Labels["scion.harness_auth"],
-			Project:         projectcompat.ProjectNameFromLabels(c.Configuration.Labels),
-			ProjectID:       projectcompat.ProjectIDFromLabels(c.Configuration.Labels),
-			ProjectPath:     projectcompat.ProjectPathFromLabels(c.Configuration.Labels),
+			Project:         projectkeys.ProjectNameFromLabels(c.Configuration.Labels),
+			ProjectID:       projectkeys.ProjectIDFromLabels(c.Configuration.Labels),
+			ProjectPath:     projectkeys.ProjectPathFromLabels(c.Configuration.Labels),
 			Labels:          c.Configuration.Labels,
 			Annotations:     c.Configuration.Labels,
 			ContainerStatus: c.Status.State,
@@ -334,6 +342,17 @@ func (r *AppleContainerRuntime) Exec(ctx context.Context, id string, cmd []strin
 	}
 	args := append([]string{"exec", "--user", "scion", id}, cmd...)
 	return runSimpleCommand(ctx, r.Command, args...)
+}
+
+// ExecWithStdin runs cmd inside the container with stdin piped from the
+// given reader. The -i flag is required for `container exec` to attach
+// stdin, mirroring Docker/Podman's exec semantics. See #1355.
+func (r *AppleContainerRuntime) ExecWithStdin(ctx context.Context, id string, cmd []string, stdin io.Reader) (string, error) {
+	if agents, err := r.List(ctx, nil); err == nil {
+		id = resolveContainerID(agents, id)
+	}
+	args := append([]string{"exec", "-i", "--user", "scion", id}, cmd...)
+	return runSimpleCommandWithStdin(ctx, stdin, r.Command, args...)
 }
 
 // stripUnsupportedAppleFlags removes flag-value pairs that the Apple

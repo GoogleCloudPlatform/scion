@@ -100,8 +100,20 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleHubAdmin,
 			Description: "Hub administrator with scopeable admin permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    3,
+			Revision:    4,
 			Permissions: hubAdminPermissionIDs(),
+		},
+		{
+			// global-catalog-author: Phase 1 (ptone/scion#1713) grants only
+			// skill.create_global. Phase 2 extends this to update/delete for
+			// skills and templates. Seeded as a role *definition only* — no
+			// binding is created. An operator grants it deliberately.
+			// See design doc §3.1 (roles).
+			Name:        store.SystemRoleGlobalCatalogAuthor,
+			Description: "Creates global (hub-scoped) skills",
+			ScopeType:   store.RoleScopeSystem,
+			Revision:    1,
+			Permissions: globalCatalogAuthorPermissionIDs(),
 		},
 		{
 			// hub-member: curated read permissions for directory/catalog resources.
@@ -112,7 +124,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleHubMember,
 			Description: "Hub member with read access to directory resources and project creation",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    2,
+			Revision:    3, // R3: add broker.create (ptone/scion#2138) — explicit hub-member grant for broker registration
 			Permissions: hubMemberPermissionIDs(),
 		},
 		{
@@ -131,21 +143,21 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.ProjectRoleOwner,
 			Description: "Project owner with full project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    2, // R2: remove agent-self and hub-level permissions
+			Revision:    4, // R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectOwnerPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleAdmin,
 			Description: "Project admin with most project permissions (no delete, no set_message_mode)",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    2, // R2: remove agent-self and hub-level permissions
+			Revision:    4, // R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectAdminPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleMember,
 			Description: "Project member with basic project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    3, // R3: remove agent.message (policy alignment with agent.attach)
+			Revision:    4, // R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectMemberCuratedPermissionIDs(),
 		},
 
@@ -202,9 +214,12 @@ func hubMemberPermissionIDs() []string {
 		// Harness config catalog (read-only)
 		"harness_config.read",
 		"harness_config.list",
-		// Broker catalog (read-only)
+		// Broker catalog (read-only), plus registration (ptone/scion#2138):
+		// merely being an authenticated user is not enough to register a
+		// broker — it requires this explicit hub-member grant.
 		"broker.read",
 		"broker.list",
+		"broker.create",
 		// GCP service account catalog (read-only)
 		"gcp_service_account.read",
 		"gcp_service_account.list",
@@ -268,16 +283,30 @@ func projectOwnerPermissionIDs() []string {
 		// Agent-self credential permissions (status_update, log_append,
 		// token_refresh, identity_token, port_forward, notify) are excluded:
 		// those are intended for agent identities, not human project admins.
-		"agent.attach",
+		//
+		// agent.attach and agent.port_access are excluded (R3,
+		// miller79/scion#88): agents run with their creator's user-scoped
+		// secrets, so terminal/port access to another member's agent would
+		// expose that member's credentials. Owners reach their own agents
+		// and progeny via the resource-owner and ancestor relationship grants.
+		// agent.lifecycle (start/stop/suspend/restart/restore) is retained so
+		// owners keep management oversight of members' agents.
 		"agent.create",
 		"agent.delete",
+		"agent.lifecycle",
 		"agent.list",
 		"agent.message",
-		"agent.port_access",
 		"agent.read",
 		"agent.set_message_mode",
 		"agent.stop_all",
 		"agent.update",
+		// GCP service account management (project-scoped). Lets a project
+		// owner assign project-scoped service accounts in the project
+		// (ptone/scion#2147). When gcpIamCheckMode is enforce, the immediate
+		// creator's IAM actAs grant (iam.serviceAccounts.actAs) is also
+		// checked; in the default off mode this permission alone authorizes
+		// assignment of project-scoped service accounts.
+		"gcp_service_account.assign",
 		// Harness config management
 		"harness_config.create",
 		"harness_config.delete",
@@ -332,15 +361,22 @@ func projectOwnerPermissionIDs() []string {
 func projectAdminPermissionIDs() []string {
 	return []string{
 		// Agent lifecycle and operations (no delete, no set_message_mode,
-		// no agent-self credential permissions)
-		"agent.attach",
+		// no agent-self credential permissions, no attach/port_access — see
+		// projectOwnerPermissionIDs for the miller79/scion#88 rationale)
 		"agent.create",
+		"agent.lifecycle",
 		"agent.list",
 		"agent.message",
-		"agent.port_access",
 		"agent.read",
 		"agent.stop_all",
 		"agent.update",
+		// GCP service account management (project-scoped). Lets a project
+		// admin assign project-scoped service accounts in the project
+		// (ptone/scion#2147). When gcpIamCheckMode is enforce, the immediate
+		// creator's IAM actAs grant (iam.serviceAccounts.actAs) is also
+		// checked; in the default off mode this permission alone authorizes
+		// assignment of project-scoped service accounts.
+		"gcp_service_account.assign",
 		// Harness config management (no delete)
 		"harness_config.create",
 		"harness_config.list",
@@ -390,6 +426,13 @@ func projectMemberCuratedPermissionIDs() []string {
 		"agent.create",
 		"agent.list",
 		"agent.read",
+		// GCP service account management (project-scoped). Lets a project
+		// member assign project-scoped service accounts in the project
+		// (ptone/scion#2147). When gcpIamCheckMode is enforce, the immediate
+		// creator's IAM actAs grant (iam.serviceAccounts.actAs) is also
+		// checked; in the default off mode this permission alone authorizes
+		// assignment of project-scoped service accounts.
+		"gcp_service_account.assign",
 		// Harness config (create, read, list)
 		"harness_config.create",
 		"harness_config.list",
@@ -737,12 +780,13 @@ func hubAdminPermissionIDs() []string {
 		"project.list":   true,
 		"project.update": true,
 		// Skill registries
-		"skill.read":     true,
-		"skill.list":     true,
-		"skill.create":   true,
-		"skill.update":   true,
-		"skill.delete":   true,
-		"skill.register": true,
+		"skill.read":          true,
+		"skill.list":          true,
+		"skill.create":        true,
+		"skill.update":        true,
+		"skill.delete":        true,
+		"skill.register":      true,
+		"skill.create_global": true,
 		// Access constraints — full operator control.
 		// hub-admin can read and administer access constraints so that
 		// operators who are not super-admins can manage them via the web UI.
@@ -757,6 +801,16 @@ func hubAdminPermissionIDs() []string {
 		}
 	}
 	return ids
+}
+
+// globalCatalogAuthorPermissionIDs returns the exact permission set for the
+// global-catalog-author role. This role is system-scoped, so its safety relies
+// on the permission set containing ONLY global-catalog IDs — a careless
+// addition would silently grant hub-wide authority. Pin with a test.
+func globalCatalogAuthorPermissionIDs() []string {
+	return []string{
+		"skill.create_global",
+	}
 }
 
 // agentRolePermissionIDs maps an AgentRole to permission IDs by examining
@@ -793,12 +847,6 @@ func BackfillRoleBindings(ctx context.Context, s store.Store) error {
 		return fmt.Errorf("backfill user role bindings: %w", err)
 	}
 
-	// Remove viewers from hub-members group. Older code paths added all users
-	// (including viewers) unconditionally; this reconciles existing state.
-	if err := reconcileViewerHubMemberships(ctx, s); err != nil {
-		return fmt.Errorf("reconcile viewer hub memberships: %w", err)
-	}
-
 	// Backfill project-owner role bindings from Project.CreatedBy.
 	// Pre-existing projects (created before project-scoped RoleBindings were
 	// introduced) have a legacy CreatedBy/OwnerID but no project-owner
@@ -811,20 +859,23 @@ func BackfillRoleBindings(ctx context.Context, s store.Store) error {
 	return nil
 }
 
-// backfillUserRoleBindings creates system-scoped role bindings from User.Role
-// for admin and viewer users. Members receive hub-member permissions via the
-// canonical Hub Members group (ensureHubMembership), not via direct role bindings.
-// It paginates through all users to avoid silent truncation by store defaults.
+// backfillUserRoleBindings brings hub-level grants in line with User.Role for
+// every non-invited user (active and suspended) at startup:
+//   - admin → system-scoped super-admin role binding (created here; the
+//     hub role grant helper does not own super-admin).
+//   - every role → syncHubRoleGrants, which ensures hub-members membership for
+//     members, removes it from viewers and ensures their hub-viewer binding,
+//     and removes stale hub-viewer bindings from members and admins.
+//
+// Invited users are skipped: the role stored on an invited row is a
+// placeholder (the real role is assigned at first sign-in), so they get no
+// grants until they sign in. The loop is idempotent, logs and continues on
+// per-user errors, and paginates through all users to avoid silent
+// truncation by store defaults.
 func backfillUserRoleBindings(ctx context.Context, s store.Store) error {
-	// Only admin and viewer get direct bindings; members use group membership.
-	userRoleMap := map[string]string{
-		"admin":  store.SystemRoleSuperAdmin,
-		"viewer": store.SystemRoleHubViewer,
-	}
-
 	var cursor string
 	var createdBindings int
-	var createdMemberships int
+	var synced int
 	for {
 		users, err := s.ListUsers(ctx, store.UserFilter{}, store.ListOptions{
 			Limit:  200,
@@ -837,41 +888,26 @@ func backfillUserRoleBindings(ctx context.Context, s store.Store) error {
 		for i := range users.Items {
 			u := &users.Items[i]
 
-			// Members get hub-member permissions via the canonical group.
-			if u.Role == "member" {
-				ensureHubMembership(ctx, s, u.ID)
-				createdMemberships++
+			if u.Status == store.UserStatusInvited {
 				continue
 			}
 
-			roleName, ok := userRoleMap[u.Role]
-			if !ok {
-				continue
-			}
-
-			rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeSystem)
-			if err != nil {
-				slog.Warn("role definition not found during backfill", "role", roleName, "error", err)
-				continue
-			}
-
-			_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-				RoleDefinitionID: rd.ID,
-				PrincipalType:    store.RoleBindingPrincipalUser,
-				PrincipalID:      u.ID,
-				ScopeType:        store.RoleScopeSystem,
-				ScopeID:          "",
-				CreatedBy:        store.SystemBackfillCreatedBy,
-			})
-			if err != nil {
-				if errors.Is(err, store.ErrAlreadyExists) {
-					continue // already backfilled
+			if u.Role == store.UserRoleAdmin {
+				created, err := backfillSuperAdminBinding(ctx, s, u.ID)
+				if err != nil {
+					slog.Warn("failed to backfill super-admin role binding",
+						"user_id", u.ID, "error", err)
+				} else if created {
+					createdBindings++
 				}
-				slog.Warn("failed to create role binding during backfill",
-					"user_id", u.ID, "role", roleName, "error", err)
+			}
+
+			if err := syncHubRoleGrants(ctx, s, u.ID, u.Role, store.SystemBackfillCreatedBy); err != nil {
+				slog.Warn("failed to sync hub role grants during backfill",
+					"user_id", u.ID, "role", u.Role, "error", err)
 				continue
 			}
-			createdBindings++
+			synced++
 		}
 
 		if users.NextCursor == "" {
@@ -881,77 +917,49 @@ func backfillUserRoleBindings(ctx context.Context, s store.Store) error {
 	}
 
 	if createdBindings > 0 {
-		slog.Info("backfilled user role bindings", "created", createdBindings)
+		slog.Info("backfilled super-admin role bindings", "created", createdBindings)
 	}
-	if createdMemberships > 0 {
-		slog.Info("backfilled hub-member group memberships", "ensured", createdMemberships)
+	if synced > 0 {
+		slog.Info("synced hub role grants", "users", synced)
 	}
 	return nil
 }
 
-// reconcileViewerHubMemberships removes viewer-role users from the hub-members
-// group. Earlier code unconditionally added every user on login; this startup
-// reconciliation cleans up stale memberships so viewer restrictions take effect.
-//
-// To avoid an N+1 query pattern (GetUser per group member), we first collect
-// all viewer-role user IDs via ListUsers, then iterate group members and remove
-// only those whose IDs appear in the viewer set.
-func reconcileViewerHubMemberships(ctx context.Context, s store.Store) error {
-	group, err := s.GetGroupBySlug(ctx, "hub-members")
+// backfillSuperAdminBinding creates the system-scoped super-admin binding for
+// an admin user if it does not exist. It reports whether a binding was created.
+func backfillSuperAdminBinding(ctx context.Context, s store.Store, userID string) (bool, error) {
+	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
 	if err != nil {
-		// Group doesn't exist yet — nothing to reconcile.
-		slog.Debug("hub-members group not found, skipping viewer reconciliation", "error", err)
-		return nil
+		return false, fmt.Errorf("super-admin role definition lookup: %w", err)
 	}
-
-	// Collect all viewer-role user IDs in a single paginated query.
-	viewerIDs := make(map[string]struct{})
-	var cursor string
-	for {
-		viewers, err := s.ListUsers(ctx, store.UserFilter{Role: store.UserRoleViewer}, store.ListOptions{
-			Limit:  200,
-			Cursor: cursor,
-		})
-		if err != nil {
-			return fmt.Errorf("list viewer-role users: %w", err)
-		}
-		for i := range viewers.Items {
-			viewerIDs[viewers.Items[i].ID] = struct{}{}
-		}
-		if viewers.NextCursor == "" {
-			break
-		}
-		cursor = viewers.NextCursor
-	}
-
-	if len(viewerIDs) == 0 {
-		return nil // no viewers — nothing to remove
-	}
-
-	members, err := s.GetGroupMembers(ctx, group.ID)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        store.SystemBackfillCreatedBy,
+	})
 	if err != nil {
-		return fmt.Errorf("list hub-members group members: %w", err)
+		if errors.Is(err, store.ErrAlreadyExists) {
+			return false, nil // already backfilled
+		}
+		return false, err
 	}
+	return true, nil
+}
 
-	var removed int
-	for _, m := range members {
-		if m.MemberType != store.GroupMemberTypeUser {
-			continue
-		}
-		if _, isViewer := viewerIDs[m.MemberID]; !isViewer {
-			continue
-		}
-		if err := s.RemoveGroupMember(ctx, group.ID, store.GroupMemberTypeUser, m.MemberID); err != nil {
-			slog.Warn("failed to remove viewer from hub-members group", "userID", m.MemberID, "error", err)
-			continue
-		}
-		removed++
+// reconcileSyncHubRoleGrants syncs hub role grants after the startup
+// reconciler changed a user's role. Invited users are skipped (placeholder
+// role). Best-effort: errors are logged.
+func reconcileSyncHubRoleGrants(ctx context.Context, s store.Store, u *store.User) {
+	if u.Status == store.UserStatusInvited {
+		return
 	}
-
-	if removed > 0 {
-		slog.Info("removed viewers from hub-members group", "removed", removed)
+	if err := syncHubRoleGrants(ctx, s, u.ID, u.Role, store.SystemReconcileCreatedBy); err != nil {
+		slog.Warn("failed to sync hub role grants during super-admin reconciliation",
+			"user_id", u.ID, "role", u.Role, "error", err)
 	}
-	return nil
 }
 
 // backfillProjectOwnerRoleBindings creates project-scoped project-owner role
@@ -960,6 +968,13 @@ func reconcileViewerHubMemberships(ctx context.Context, s store.Store) error {
 // user but no corresponding project-owner RoleBinding, which causes the
 // project members view to show "no members". This function is idempotent:
 // it skips projects that already have the binding.
+//
+// The backfill only runs for a project that has ZERO project-owner bindings
+// (for any principal). It runs on every startup, so without that gate a
+// creator who was later removed, or who transferred ownership and was then
+// removed, would be re-made owner on each restart (ptone/scion#2554). A
+// project that has an owner is never a legacy pre-RoleBinding project, so
+// skipping it loses nothing.
 func backfillProjectOwnerRoleBindings(ctx context.Context, s store.Store) error {
 	ownerRoleDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
 	if err != nil {
@@ -981,11 +996,22 @@ func backfillProjectOwnerRoleBindings(ctx context.Context, s store.Store) error 
 
 		for i := range projects.Items {
 			p := &projects.Items[i]
+			warnOwnerOnlyLegacyProject(ctx, s, p, ownerRoleDef.ID)
 			if p.CreatedBy == "" {
 				continue
 			}
 
-			_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+			hasOwner, err := projectHasOwnerBinding(ctx, s, p.ID, ownerRoleDef.ID)
+			if err != nil {
+				slog.Warn("failed to check project owner bindings during backfill; skipping",
+					"project_id", p.ID, "error", err)
+				continue
+			}
+			if hasOwner {
+				continue
+			}
+
+			_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
 				RoleDefinitionID: ownerRoleDef.ID,
 				PrincipalType:    store.RoleBindingPrincipalUser,
 				PrincipalID:      p.CreatedBy,
@@ -1016,6 +1042,70 @@ func backfillProjectOwnerRoleBindings(ctx context.Context, s store.Store) error 
 	return nil
 }
 
+// projectHasOwnerBinding reports whether any principal holds a project-owner
+// role binding on the given project.
+func projectHasOwnerBinding(ctx context.Context, s store.Store, projectID, ownerRoleDefID string) (bool, error) {
+	bindings, err := s.ListRoleBindingsForScope(ctx, store.RoleScopeProject, projectID)
+	if err != nil {
+		return false, err
+	}
+	for _, b := range bindings {
+		if b != nil && b.RoleDefinitionID == ownerRoleDefID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// warnOwnerOnlyLegacyProject logs, once per project per startup, a project
+// whose OwnerID is not backed by a project-owner binding. Project.OwnerID is
+// not an authorization source (ptone/scion#2586), so it grants nothing; this
+// only logs and never grants. Two shapes warn:
+//   - OwnerID set, CreatedBy empty, and no project-owner binding at all: the
+//     project has no owner until an admin grants one.
+//   - OwnerID set, CreatedBy set but different, and OwnerID itself holds no
+//     project-owner binding: the named owner has no access through OwnerID.
+//
+// A project where OwnerID equals CreatedBy never warns; the backfill grants
+// CreatedBy.
+func warnOwnerOnlyLegacyProject(ctx context.Context, s store.Store, p *store.Project, ownerRoleDefID string) {
+	if p.OwnerID == "" || p.OwnerID == p.CreatedBy {
+		return
+	}
+	if p.CreatedBy == "" {
+		hasOwner, err := projectHasOwnerBinding(ctx, s, p.ID, ownerRoleDefID)
+		if err != nil {
+			slog.Warn("failed to check project owner bindings for owner-only legacy project; skipping",
+				"project_id", p.ID, "error", err)
+			return
+		}
+		if hasOwner {
+			return // any owner binding: the project has an owner
+		}
+		slog.Warn("project has OwnerID but no CreatedBy and no project-owner binding; OwnerID grants no access, an admin must add an owner",
+			"project_id", p.ID, "owner_id", p.OwnerID)
+		return
+	}
+	// OwnerID differs from a non-empty CreatedBy. projectHasOwnerBinding
+	// answers "does anyone own the project", which is not this question:
+	// the backfill grants CreatedBy, so check that OwnerID itself holds a
+	// project-owner binding.
+	bindings, err := s.ListRoleBindingsForScope(ctx, store.RoleScopeProject, p.ID)
+	if err != nil {
+		slog.Warn("failed to check project owner bindings for owner-only legacy project; skipping",
+			"project_id", p.ID, "error", err)
+		return
+	}
+	for _, b := range bindings {
+		if b != nil && b.RoleDefinitionID == ownerRoleDefID &&
+			b.PrincipalType == store.RoleBindingPrincipalUser && b.PrincipalID == p.OwnerID {
+			return
+		}
+	}
+	slog.Warn("project OwnerID differs from CreatedBy and holds no project-owner binding; OwnerID grants no access",
+		"project_id", p.ID, "owner_id", p.OwnerID, "created_by", p.CreatedBy)
+}
+
 // ReconcileSuperAdminBindings ensures bidirectional consistency between
 // User.Role == "admin", the AdminEmails config list, and system-scoped
 // super-admin role bindings (Phase 1F, D11 revocability fix). On startup:
@@ -1026,8 +1116,13 @@ func backfillProjectOwnerRoleBindings(ctx context.Context, s store.Store) error 
 //	  - If the user is in adminEmails: promote Role to "admin" (if needed) and
 //	    ensure a super-admin binding exists.
 //	  - If the user is NOT in adminEmails AND adminEmails is non-empty: demote
-//	    Role from "admin" to "member" (if needed) and delete any super-admin
-//	    binding. Ordinary grants (non-super-admin) are NOT touched.
+//	    Role from "admin" to defaultRole (normalized: "viewer" or "member") if
+//	    needed and delete any super-admin binding.
+//	  - After a successful role change, syncHubRoleGrants brings the
+//	    hub-members group and hub-viewer binding in line with the new role
+//	    (this runs after BackfillRoleBindings, so grants would otherwise be
+//	    stale until the next restart). Invited users are not synced: their
+//	    stored role is a placeholder until first sign-in.
 //
 // Empty-list safety guard:
 //   - When adminEmails is nil or empty, no demotions occur and a warning is
@@ -1038,7 +1133,11 @@ func backfillProjectOwnerRoleBindings(ctx context.Context, s store.Store) error 
 // Revocation latency: super-admin revocation takes effect on next hub restart.
 //
 // This is called after BackfillRoleBindings and is idempotent.
-func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails []string) (demotionSafe bool, err error) {
+func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails []string, defaultRole string) (demotionSafe bool, err error) {
+	// Demotion lands on the configured default role, exactly like login-time
+	// demotion in determineUserRole.
+	demoteTo := normalizedDefaultRole(defaultRole)
+
 	rd, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleSuperAdmin, store.RoleScopeSystem)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -1154,6 +1253,8 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 					if err := s.UpdateUser(ctx, u); err != nil {
 						slog.Warn("failed to promote user during reconciliation",
 							"user_id", u.ID, "error", err)
+					} else {
+						reconcileSyncHubRoleGrants(ctx, s, u)
 					}
 				}
 				_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
@@ -1194,13 +1295,14 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 				// Reverse: demote role and delete super-admin binding (config-granted only).
 				if u.Role == "admin" {
 					slog.Warn("demoting user: removed from AdminEmails",
-						"user_id", u.ID, "email", u.Email, "old_role", "admin", "new_role", "member")
-					u.Role = "member"
+						"user_id", u.ID, "email", u.Email, "old_role", "admin", "new_role", demoteTo)
+					u.Role = demoteTo
 					if err := s.UpdateUser(ctx, u); err != nil {
 						slog.Warn("failed to demote user during reconciliation",
 							"user_id", u.ID, "error", err)
 					} else {
 						demoted++
+						reconcileSyncHubRoleGrants(ctx, s, u)
 					}
 				}
 				// Delete orphaned super-admin bindings for users NOT in adminEmails.
@@ -1236,9 +1338,36 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 }
 
 // seedLimitDefinitions creates the system limit definitions if they don't
-// already exist. Shipped with DefaultValue=0 (unlimited) for discoverability
-// per sponsor decision OQ-2 Option B. It is called once during Hub
-// initialization and is idempotent.
+// already exist. Most are shipped with DefaultValue=0 (unlimited) for
+// discoverability per sponsor decision OQ-2 Option B — opt-in fairness
+// quotas that do nothing until an operator sets them. It is called once
+// during Hub initialization and is idempotent.
+//
+// max_agents_per_broker is the deliberate exception: it is an infra-scoped
+// crash-prevention gate, not a per-user/per-project fairness quota
+// (ptone/scion#1303 — exceeding a runtime broker's agent capacity destroys
+// the whole Instance it runs on, including the control plane in the
+// single-node tier, after already returning HTTP 201). Seeding it at 0 would
+// leave every new deployment exposed to that crash until an operator
+// discovers and sets the limit, which defeats the fix.
+//
+// The default below is ptone's ruling (2026-09-29): keep the global default
+// at 100 for now, matching what scion-next already runs, rather than the
+// old 12. No per-broker tuning until there is a proper UI (ptone/scion#2177,
+// folded into ptone/scion#2061 P2); until then this is one global value for
+// every broker on the hub.
+//
+// 100 is above the observed crash point of single-node Cloud Run (~19-20
+// idle agents on 4 CPU/8 GiB, ~51 idle on 8 CPU/32 GiB — see
+// .design/hosted/cloud-run-single-node.md §9.1), so a fresh single-node
+// Cloud Run deployment is effectively unguarded by this default alone; the
+// cap still stops an unbounded runaway loop. Operators deploying single-node
+// Cloud Run should lower this value right after deploying (about 16 is
+// recommended) via Admin → Quotas, or PUT /api/v1/admin/limits/{id} for the
+// max_agents_per_broker system limit definition (ptone/scion#2061 P1a,
+// ptone/scion#2063). Seeding is insert-only: it never overwrites an existing
+// row, so a hub that already has 12, 30, or any other deliberately-set value
+// keeps it across upgrades.
 func seedLimitDefinitions(ctx context.Context, s store.Store) {
 	systemLimits := []struct {
 		name         string
@@ -1250,6 +1379,7 @@ func seedLimitDefinitions(ctx context.Context, s store.Store) {
 		{store.LimitMaxAgentsPerProject, "agent", "count", "Maximum agents per project", 0},
 		{store.LimitMaxProjectsPerUser, "project", "count", "Maximum projects per user", 0},
 		{store.LimitMaxMembersPerGroup, "group", "count", "Maximum members per group", 0},
+		{store.LimitMaxAgentsPerBroker, "agent", "count", "Maximum concurrently live agents per runtime broker (crash-prevention ceiling, ptone/scion#1303)", 100},
 	}
 
 	for _, lim := range systemLimits {
@@ -1436,22 +1566,159 @@ func CleanupRedundantHubMemberBindings(ctx context.Context, s store.Store) error
 	return nil
 }
 
-// ensureHubMembership adds the given user to the hub-members group.
-// This is best-effort; errors are logged at debug level and ignored.
-func ensureHubMembership(ctx context.Context, s store.Store, userID string) {
-	group, err := s.GetGroupBySlug(ctx, "hub-members")
+// ensureHubMembershipTx idempotently adds the given user to the canonical
+// Hub Members group using the provided store (which may be a transaction).
+// This is the single implementation of hub-members membership grants.
+// Returns an error if the group cannot be found (fail-closed).
+func ensureHubMembershipTx(ctx context.Context, tx store.Store, userID string) error {
+	group, err := tx.GetGroupBySlug(ctx, hubMembersSlug)
 	if err != nil {
-		slog.Debug("hub-members group not found, skipping membership", "error", err)
-		return
+		return fmt.Errorf("hub-members group lookup: %w", err)
 	}
 
-	err = s.AddGroupMember(ctx, &store.GroupMember{
+	err = tx.AddGroupMember(ctx, &store.GroupMember{
 		GroupID:    group.ID,
 		MemberType: store.GroupMemberTypeUser,
 		MemberID:   userID,
 		Role:       store.GroupMemberRoleMember,
 	})
 	if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
-		slog.Debug("failed to add user to hub-members group", "userID", userID, "error", err)
+		return fmt.Errorf("add user to hub-members group: %w", err)
 	}
+	return nil
+}
+
+// removeHubMembershipTx removes the given user from the canonical Hub Members
+// group using the provided store (which may be a transaction). This is the
+// counterpart to ensureHubMembershipTx, used when a user's role changes to
+// viewer so they no longer carry hub-member permissions.
+// A missing group or membership is not an error (idempotent).
+func removeHubMembershipTx(ctx context.Context, tx store.Store, userID string) error {
+	group, err := tx.GetGroupBySlug(ctx, hubMembersSlug)
+	if err != nil {
+		// Group doesn't exist yet — nothing to remove.
+		if errors.Is(err, store.ErrNotFound) {
+			return nil
+		}
+		return fmt.Errorf("hub-members group lookup: %w", err)
+	}
+
+	err = tx.RemoveGroupMember(ctx, group.ID, store.GroupMemberTypeUser, userID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return fmt.Errorf("remove user from hub-members group: %w", err)
+	}
+	return nil
+}
+
+// syncHubRoleGrants makes the hub-level grants for a user match their hub
+// role (User.Role). It is the single place that reconciles the hub-members
+// group membership and the system-scoped hub-viewer role binding with the
+// role, and is idempotent. Call it after (or in the same transaction as)
+// persisting User.Role. st may be a transaction store.
+//
+//	member → ensure hub-members membership; delete hub-viewer binding(s)
+//	viewer → remove hub-members membership; ensure an unconditional hub-viewer binding
+//	admin  → delete hub-viewer binding(s); hub-members membership is left as-is
+//
+// The super-admin binding is NOT handled here; the existing super-admin
+// ensure/delete paths own it. createdBy records provenance on a newly created
+// hub-viewer binding (store.AdminAPICreatedBy for the admin API,
+// store.SystemReconcileCreatedBy for login paths).
+//
+// Any other role value is an error. Errors are returned to the caller, which
+// decides whether to fail closed (transactions) or log and continue (login).
+func syncHubRoleGrants(ctx context.Context, st store.Store, userID, role, createdBy string) error {
+	switch role {
+	case store.UserRoleMember:
+		if err := ensureHubMembershipTx(ctx, st, userID); err != nil {
+			return err
+		}
+		return deleteHubViewerBindingsTx(ctx, st, userID)
+	case store.UserRoleViewer:
+		if err := removeHubMembershipTx(ctx, st, userID); err != nil {
+			return err
+		}
+		return ensureHubViewerBindingTx(ctx, st, userID, createdBy)
+	case store.UserRoleAdmin:
+		return deleteHubViewerBindingsTx(ctx, st, userID)
+	default:
+		return fmt.Errorf("sync hub role grants: unsupported role %q", role)
+	}
+}
+
+// hubViewerBindingsForUser returns the user's system-scoped hub-viewer role
+// bindings in every lifecycle state, and whether one of them is
+// unconditional (no NotBefore and no ExpiresAt).
+func hubViewerBindingsForUser(ctx context.Context, st store.Store, userID string) (*store.RoleDefinition, []*store.RoleBinding, bool, error) {
+	rd, err := st.GetRoleDefinitionByName(ctx, store.SystemRoleHubViewer, store.RoleScopeSystem)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("hub-viewer role definition lookup: %w", err)
+	}
+	if rd == nil {
+		return nil, nil, false, fmt.Errorf("hub-viewer role definition not found")
+	}
+	bindings, err := st.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("list role bindings for user: %w", err)
+	}
+	var matched []*store.RoleBinding
+	unconditional := false
+	for _, b := range bindings {
+		if b.ScopeType != store.RoleScopeSystem || b.RoleDefinitionID != rd.ID {
+			continue
+		}
+		matched = append(matched, b)
+		if b.NotBefore == nil && b.ExpiresAt == nil {
+			unconditional = true
+		}
+	}
+	return rd, matched, unconditional, nil
+}
+
+// ensureHubViewerBindingTx ensures the user has an unconditional
+// system-scoped hub-viewer role binding. The viewer role is permanent, so the
+// grant is too: a time-limited binding (expired, scheduled, or active with a
+// future ExpiresAt) does not satisfy it and is replaced. The replacement is
+// delete-then-create because the (role, principal, scope) tuple is unique
+// regardless of lifecycle.
+func ensureHubViewerBindingTx(ctx context.Context, st store.Store, userID, createdBy string) error {
+	rd, existing, unconditional, err := hubViewerBindingsForUser(ctx, st, userID)
+	if err != nil {
+		return err
+	}
+	if unconditional {
+		return nil
+	}
+	for _, b := range existing {
+		if err := st.DeleteRoleBinding(ctx, b.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("delete time-limited hub-viewer binding %s: %w", b.ID, err)
+		}
+	}
+	_, err = st.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        createdBy,
+	})
+	if err != nil && !errors.Is(err, store.ErrAlreadyExists) {
+		return fmt.Errorf("create hub-viewer binding: %w", err)
+	}
+	return nil
+}
+
+// deleteHubViewerBindingsTx removes all system-scoped hub-viewer role
+// bindings for the user (any lifecycle state). Idempotent.
+func deleteHubViewerBindingsTx(ctx context.Context, st store.Store, userID string) error {
+	_, existing, _, err := hubViewerBindingsForUser(ctx, st, userID)
+	if err != nil {
+		return err
+	}
+	for _, b := range existing {
+		if err := st.DeleteRoleBinding(ctx, b.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return fmt.Errorf("delete hub-viewer binding %s: %w", b.ID, err)
+		}
+	}
+	return nil
 }

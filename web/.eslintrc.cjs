@@ -26,6 +26,87 @@ module.exports = {
         sourceType: 'module',
         project: './tsconfig.json',
     },
+    overrides: [
+        {
+            files: ['e2e/terminal-workspace/*.ts'],
+            parserOptions: { project: './e2e/terminal-workspace/tsconfig.json' },
+        },
+        {
+            files: ['e2e/terminal-entrypoints/*.ts'],
+            parserOptions: { project: './e2e/terminal-entrypoints/tsconfig.json' },
+        },
+        {
+            files: ['e2e/terminal-hidden/*.ts'],
+            parserOptions: { project: './e2e/terminal-hidden/tsconfig.json' },
+        },
+        {
+            files: ['e2e/chat-mobile/*.ts'],
+            parserOptions: { project: './e2e/chat-mobile/tsconfig.json' },
+        },
+        {
+            files: ['src/client/terminal-*.test.ts'],
+            parserOptions: { project: './src/client/tsconfig.terminal-tests.json' },
+        },
+        // Explicit lists, not globs: only these files are lint-clean against
+        // their project. Other files in the same directories are not.
+        {
+            files: [
+                'src/components/shared/palette/quick-palette.test.ts',
+                'src/components/shared/palette/quick-palette-groups.test.ts',
+                'src/components/shared/palette/quick-palette-ranking-memo.test.ts',
+                'src/components/shared/open-modal.test.ts',
+                'src/components/terminal/terminal-pane.test.ts',
+                'src/components/shared/header.test.ts',
+            ],
+            parserOptions: { project: './src/components/tsconfig.component-tests.json' },
+        },
+        {
+            files: [
+                'e2e/chat-palette/accessibility.pw.ts',
+                'e2e/chat-palette/agent-selection.pw.ts',
+                'e2e/chat-palette/agents-livelock.pw.ts',
+                'e2e/chat-palette/agents-progressive.pw.ts',
+                'e2e/chat-palette/document-preview.pw.ts',
+                'e2e/chat-palette/fixture.ts',
+                'e2e/chat-palette/focus-and-guards.pw.ts',
+                'e2e/chat-palette/group-navigation.pw.ts',
+                'e2e/chat-palette/palette-button.pw.ts',
+                'e2e/chat-palette/playwright.config.ts',
+                'e2e/chat-palette/reopen-race.pw.ts',
+                'e2e/chat-palette/terminal-and-modal.pw.ts',
+                'e2e/chat-palette/terminal-guard-under-shell.pw.ts',
+                'e2e/chat-palette/thread-navigation.pw.ts',
+                'e2e/chat-palette/typography.pw.ts',
+                'e2e/palette-typography.ts',
+            ],
+            parserOptions: { project: './e2e/chat-palette/tsconfig.json' },
+        },
+        // e2e-perf/*.mjs (the large-project performance harness's browser
+        // benchmark) isn't part of the tsconfig.json TS program the root
+        // parserOptions.project requires, so it needs the plain ESLint
+        // parser and non-type-checked rules rather than inheriting the
+        // root @typescript-eslint/recommended-requiring-type-checking
+        // config, which would fail to parse it. Mixes Node-side
+        // orchestration code with inline functions passed to Playwright's
+        // page.evaluate()/addInitScript(), which run in the browser -- both
+        // sets of globals are legitimately used in this one file.
+        {
+            files: ['e2e-perf/**/*.mjs'],
+            env: { node: true, browser: true, es2022: true },
+            parser: 'espree',
+            parserOptions: { ecmaVersion: 'latest', sourceType: 'module', project: null },
+            extends: [
+                'eslint:recommended',
+                'plugin:@typescript-eslint/disable-type-checked',
+                'plugin:prettier/recommended',
+            ],
+            rules: {
+                'no-console': 'off',
+                // Return-type annotations aren't meaningful in plain (non-TS) JS.
+                '@typescript-eslint/explicit-function-return-type': 'off',
+            },
+        },
+    ],
     plugins: ['@typescript-eslint', 'prettier'],
     extends: [
         'eslint:recommended',

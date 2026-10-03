@@ -38,6 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 var (
@@ -57,6 +58,31 @@ Configure the Hub endpoint via:
   - SCION_HUB_ENDPOINT environment variable
   - hub.endpoint in settings.yaml
   - --hub flag on any command`,
+	// Args/Run make this command Runnable so cobra validates subcommand
+	// names: an unrecognized subcommand (e.g. a removed alias) returns an
+	// "unknown command" error instead of silently falling through to this
+	// command's own help with exit status 0.
+	//
+	// A bare "hub" (no subcommand), and "hub help ..." (cobra only
+	// registers a real "help" subcommand on the root command, so under
+	// "hub" it would otherwise hit the same unknown-command path) return
+	// pflag.ErrHelp instead of going through cobra.NoArgs. Cobra's
+	// ExecuteC handles ErrHelp specially: it prints help and returns a nil
+	// error *before* any PersistentPreRunE hook runs. That distinction
+	// matters here because root's PersistentPreRunE requires an active
+	// scion project for "hub" (it's not in the exempt command list), so
+	// letting a bare "hub" fall through to a normal nil return would turn
+	// "scion hub" run outside a project into a "not in a scion project"
+	// error instead of printing help.
+	Args: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 || args[0] == "help" {
+			return pflag.ErrHelp
+		}
+		return cobra.NoArgs(cmd, args)
+	},
+	// Must be Runnable (any Run/RunE) for the Args validator above to be
+	// evaluated at all; the actual printing happens via the ErrHelp path.
+	Run: func(cmd *cobra.Command, args []string) {},
 }
 
 // hubStatusCmd shows Hub connection status
@@ -306,23 +332,6 @@ func init() {
 	hubProjectsCmd.AddCommand(hubProjectsDeleteCmd)
 	hubProjectsCmd.AddCommand(hubProjectCreateCmd)
 
-	// Hidden aliases for 'groves' for backward compatibility
-	hubGrovesCmd := &cobra.Command{
-		Use:     "groves",
-		Aliases: []string{"grove"},
-		Hidden:  true,
-		Short:   "Alias for 'projects'",
-		RunE:    runHubProjects,
-		Args:    cobra.MaximumNArgs(1),
-	}
-	hubCmd.AddCommand(hubGrovesCmd)
-
-	// Add the same subcommands to the hidden alias
-	hubGrovesInfoCmd := *hubProjectsInfoCmd
-	hubGrovesDeleteCmd := *hubProjectsDeleteCmd
-	hubGrovesCreateCmd := *hubProjectCreateCmd
-	hubGrovesCmd.AddCommand(&hubGrovesInfoCmd, &hubGrovesDeleteCmd, &hubGrovesCreateCmd)
-
 	// Broker subcommands
 	hubBrokersCmd.AddCommand(hubBrokersInfoCmd)
 	hubBrokersCmd.AddCommand(hubBrokersDeleteCmd)
@@ -341,15 +350,6 @@ func init() {
 	hubProjectCreateCmd.Flags().StringVar(&hubProjectCreateName, "name", "", "Human-friendly display name (defaults to repo name)")
 	hubProjectCreateCmd.Flags().StringVar(&hubProjectCreateBranch, "branch", "", "Base branch for the project (defaults to detected default branch, or main)")
 	hubProjectCreateCmd.Flags().BoolVar(&hubOutputJSON, "json", false, "Output in JSON format")
-
-	// Also link flags to the hidden alias subcommands so they work too
-	hubGrovesInfoCmd.Flags().BoolVar(&hubOutputJSON, "json", false, "Output in JSON format")
-	hubGrovesDeleteCmd.Flags().BoolVarP(&autoConfirm, "yes", "y", false, "Skip confirmation prompt")
-	hubGrovesDeleteCmd.Flags().BoolVar(&nonInteractive, "non-interactive", false, "Non-interactive mode: implies --yes, errors on ambiguous prompts")
-	hubGrovesCreateCmd.Flags().StringVar(&hubProjectCreateSlug, "slug", "", "Override the auto-derived slug")
-	hubGrovesCreateCmd.Flags().StringVar(&hubProjectCreateName, "name", "", "Human-friendly display name (defaults to repo name)")
-	hubGrovesCreateCmd.Flags().StringVar(&hubProjectCreateBranch, "branch", "", "Base branch for the project (defaults to detected default branch, or main)")
-	hubGrovesCreateCmd.Flags().BoolVar(&hubOutputJSON, "json", false, "Output in JSON format")
 
 	// Broker subcommand flags
 	hubBrokersInfoCmd.Flags().BoolVar(&hubOutputJSON, "json", false, "Output in JSON format")
@@ -449,6 +449,11 @@ func getAuthInfo(settings *config.Settings, endpoint string) authInfo {
 	// When the endpoint is localhost and dev auth is available, prefer dev auth
 	// over a non-dev agent token — the scion-token may be stale from a previous
 	// remote hub connection while the dev-token was written by the running local server.
+	// Not for hub-managed agents (config.IsHubManagedAgent()): inside a
+	// broker-started container the scion-token is freshly minted for this Hub,
+	// not stale, and dev auth doesn't carry the per-agent identity some
+	// endpoints require — see the comment on createHubClient in
+	// pkg/hubsync/sync.go.
 	if token := readAgentTokenFile(); token != "" {
 		if apiclient.IsDevToken(token) {
 			info.Method = "Agent token (dev)"
@@ -458,7 +463,7 @@ func getAuthInfo(settings *config.Settings, endpoint string) authInfo {
 			info.TokenExpiry = parseJWTExpiry(token)
 			return info
 		}
-		if isLocalhostEndpoint(endpoint) {
+		if isLocalhostEndpoint(endpoint) && !config.IsHubManagedAgent() {
 			if devToken, devSource := apiclient.ResolveDevTokenWithSource(); devToken != "" {
 				util.Debugf("Skipping non-dev agent token from scion-token file; using dev auth (%s) for localhost endpoint", devSource)
 				info.Method = "Dev auth"
@@ -537,7 +542,9 @@ func getHubClient(settings *config.Settings) (hubclient.Client, error) {
 	// Note: hub.token and hub.apiKey are deprecated and no longer used for auth.
 	// Auth priority: OAuth credentials > scion-token file > SCION_AUTH_TOKEN env > SCION_HUB_TOKEN env > auto dev auth.
 	// Exception: for localhost endpoints, dev auth takes priority over non-dev agent tokens
-	// to avoid stale scion-token files from previous remote hub connections.
+	// to avoid stale scion-token files from previous remote hub connections. This exception
+	// is suppressed for hub-managed agents (config.IsHubManagedAgent()) — see the matching
+	// comment on createHubClient in pkg/hubsync/sync.go for why.
 	authConfigured := false
 
 	// Check for OAuth credentials from scion hub auth login
@@ -549,7 +556,7 @@ func getHubClient(settings *config.Settings) (hubclient.Client, error) {
 	// Check for agent auth token from canonical token file, then bootstrap env var
 	if !authConfigured {
 		if token := readAgentTokenFile(); token != "" {
-			if !apiclient.IsDevToken(token) && isLocalhostEndpoint(endpoint) {
+			if !apiclient.IsDevToken(token) && isLocalhostEndpoint(endpoint) && !config.IsHubManagedAgent() {
 				if devToken := apiclient.ResolveDevToken(); devToken != "" {
 					opts = append(opts, hubclient.WithBearerToken(devToken))
 					authConfigured = true
@@ -1307,6 +1314,11 @@ func runHubProjectsInfo(cmd *cobra.Command, args []string) error {
 	}
 
 	if isJSONOutput() {
+		// Note: this top-level "agentCount" is the project's own agent
+		// count. It is a different quantity from "agentCount" inside each
+		// entry of "providers" below, which is the broker-wide active
+		// reservation count (ptone/scion#2161; see
+		// hubclient.ProjectProvider.AgentCount).
 		output := map[string]interface{}{
 			"id":         project.ID,
 			"name":       project.Name,
@@ -1365,10 +1377,11 @@ func runHubProjectsInfo(cmd *cobra.Command, args []string) error {
 			if p.BrokerID == project.DefaultRuntimeBrokerID {
 				defaultIndicator = " (default)"
 			}
+			capacityIndicator := providerCapacityIndicator(p)
 			if p.LocalPath != "" {
-				fmt.Printf("  - %s %s%s\n    Path: %s\n", p.BrokerName, statusIndicator, defaultIndicator, p.LocalPath)
+				fmt.Printf("  - %s %s%s%s\n    Path: %s\n", p.BrokerName, statusIndicator, defaultIndicator, capacityIndicator, p.LocalPath)
 			} else {
-				fmt.Printf("  - %s %s%s\n", p.BrokerName, statusIndicator, defaultIndicator)
+				fmt.Printf("  - %s %s%s%s\n", p.BrokerName, statusIndicator, defaultIndicator, capacityIndicator)
 			}
 		}
 	} else {
@@ -1377,6 +1390,47 @@ func runHubProjectsInfo(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// formatProviderCapacity renders a provider's broker capacity as
+// "count/limit" (e.g. "12/12"), just the count when the broker is unlimited
+// (e.g. "5"), or "-" when the hub reports no capacity for this provider (no
+// quota enforcement or limit definition, resolution failed, or an older hub
+// that does not send the fields) (ptone/scion#2161). AgentCount nil means
+// capacity resolution failed or was unavailable; AgentLimit nil (with
+// AgentCount set) means the broker has no effective agent limit. AgentCount
+// here is broker-wide (see hubclient.ProjectProvider.AgentCount) and, on an
+// unlimited broker, may lag up to the reconcile interval — it is not the
+// project's own agent count.
+//
+// When AgentLimitSource is "not_enforced" (Amendment A1: the P1b enforcement
+// switch is off), " (not enforced)" is appended after the count/limit, e.g.
+// "7/30 (not enforced)" — AgentLimit is still shown, since it is the real
+// resolved cap, but the suffix makes clear it is not currently rejecting
+// creates.
+func formatProviderCapacity(p hubclient.ProjectProvider) string {
+	if p.AgentCount == nil {
+		return "-"
+	}
+	var capacity string
+	if p.AgentLimit != nil {
+		capacity = fmt.Sprintf("%d/%d", *p.AgentCount, *p.AgentLimit)
+	} else {
+		capacity = fmt.Sprintf("%d", *p.AgentCount)
+	}
+	if p.AgentLimitSource == "not_enforced" {
+		capacity += " (not enforced)"
+	}
+	return capacity
+}
+
+// providerCapacityIndicator renders the parenthesized, labeled suffix shown
+// after a provider's status in `scion hub projects info` text output, e.g.
+// " (agents: 12/12)". Labeled so the number isn't mistaken for something
+// else next to the status and default indicators (ptone/scion#2161): a bare
+// "(12/12)" or "(-)" doesn't say what it measures.
+func providerCapacityIndicator(p hubclient.ProjectProvider) string {
+	return fmt.Sprintf(" (agents: %s)", formatProviderCapacity(p))
 }
 
 func runHubProjectsDelete(cmd *cobra.Command, args []string) error {

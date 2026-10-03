@@ -275,6 +275,41 @@ func (_u *ProjectUpdate) ClearGitIdentity() *ProjectUpdate {
 	return _u
 }
 
+// SetCrossProjectInbound sets the "cross_project_inbound" field.
+func (_u *ProjectUpdate) SetCrossProjectInbound(v project.CrossProjectInbound) *ProjectUpdate {
+	_u.mutation.SetCrossProjectInbound(v)
+	return _u
+}
+
+// SetNillableCrossProjectInbound sets the "cross_project_inbound" field if the given value is not nil.
+func (_u *ProjectUpdate) SetNillableCrossProjectInbound(v *project.CrossProjectInbound) *ProjectUpdate {
+	if v != nil {
+		_u.SetCrossProjectInbound(*v)
+	}
+	return _u
+}
+
+// SetCrossProjectInboundRevision sets the "cross_project_inbound_revision" field.
+func (_u *ProjectUpdate) SetCrossProjectInboundRevision(v int64) *ProjectUpdate {
+	_u.mutation.ResetCrossProjectInboundRevision()
+	_u.mutation.SetCrossProjectInboundRevision(v)
+	return _u
+}
+
+// SetNillableCrossProjectInboundRevision sets the "cross_project_inbound_revision" field if the given value is not nil.
+func (_u *ProjectUpdate) SetNillableCrossProjectInboundRevision(v *int64) *ProjectUpdate {
+	if v != nil {
+		_u.SetCrossProjectInboundRevision(*v)
+	}
+	return _u
+}
+
+// AddCrossProjectInboundRevision adds value to the "cross_project_inbound_revision" field.
+func (_u *ProjectUpdate) AddCrossProjectInboundRevision(v int64) *ProjectUpdate {
+	_u.mutation.AddCrossProjectInboundRevision(v)
+	return _u
+}
+
 // AddAgentIDs adds the "agents" edge to the Agent entity by IDs.
 func (_u *ProjectUpdate) AddAgentIDs(ids ...uuid.UUID) *ProjectUpdate {
 	_u.mutation.AddAgentIDs(ids...)
@@ -362,6 +397,11 @@ func (_u *ProjectUpdate) check() error {
 	if v, ok := _u.mutation.Slug(); ok {
 		if err := project.SlugValidator(v); err != nil {
 			return &ValidationError{Name: "slug", err: fmt.Errorf(`ent: validator failed for field "Project.slug": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.CrossProjectInbound(); ok {
+		if err := project.CrossProjectInboundValidator(v); err != nil {
+			return &ValidationError{Name: "cross_project_inbound", err: fmt.Errorf(`ent: validator failed for field "Project.cross_project_inbound": %w`, err)}
 		}
 	}
 	return nil
@@ -456,6 +496,15 @@ func (_u *ProjectUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.GitIdentityCleared() {
 		_spec.ClearField(project.FieldGitIdentity, field.TypeString)
+	}
+	if value, ok := _u.mutation.CrossProjectInbound(); ok {
+		_spec.SetField(project.FieldCrossProjectInbound, field.TypeEnum, value)
+	}
+	if value, ok := _u.mutation.CrossProjectInboundRevision(); ok {
+		_spec.SetField(project.FieldCrossProjectInboundRevision, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedCrossProjectInboundRevision(); ok {
+		_spec.AddField(project.FieldCrossProjectInboundRevision, field.TypeInt64, value)
 	}
 	if _u.mutation.AgentsCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -767,6 +816,41 @@ func (_u *ProjectUpdateOne) ClearGitIdentity() *ProjectUpdateOne {
 	return _u
 }
 
+// SetCrossProjectInbound sets the "cross_project_inbound" field.
+func (_u *ProjectUpdateOne) SetCrossProjectInbound(v project.CrossProjectInbound) *ProjectUpdateOne {
+	_u.mutation.SetCrossProjectInbound(v)
+	return _u
+}
+
+// SetNillableCrossProjectInbound sets the "cross_project_inbound" field if the given value is not nil.
+func (_u *ProjectUpdateOne) SetNillableCrossProjectInbound(v *project.CrossProjectInbound) *ProjectUpdateOne {
+	if v != nil {
+		_u.SetCrossProjectInbound(*v)
+	}
+	return _u
+}
+
+// SetCrossProjectInboundRevision sets the "cross_project_inbound_revision" field.
+func (_u *ProjectUpdateOne) SetCrossProjectInboundRevision(v int64) *ProjectUpdateOne {
+	_u.mutation.ResetCrossProjectInboundRevision()
+	_u.mutation.SetCrossProjectInboundRevision(v)
+	return _u
+}
+
+// SetNillableCrossProjectInboundRevision sets the "cross_project_inbound_revision" field if the given value is not nil.
+func (_u *ProjectUpdateOne) SetNillableCrossProjectInboundRevision(v *int64) *ProjectUpdateOne {
+	if v != nil {
+		_u.SetCrossProjectInboundRevision(*v)
+	}
+	return _u
+}
+
+// AddCrossProjectInboundRevision adds value to the "cross_project_inbound_revision" field.
+func (_u *ProjectUpdateOne) AddCrossProjectInboundRevision(v int64) *ProjectUpdateOne {
+	_u.mutation.AddCrossProjectInboundRevision(v)
+	return _u
+}
+
 // AddAgentIDs adds the "agents" edge to the Agent entity by IDs.
 func (_u *ProjectUpdateOne) AddAgentIDs(ids ...uuid.UUID) *ProjectUpdateOne {
 	_u.mutation.AddAgentIDs(ids...)
@@ -867,6 +951,11 @@ func (_u *ProjectUpdateOne) check() error {
 	if v, ok := _u.mutation.Slug(); ok {
 		if err := project.SlugValidator(v); err != nil {
 			return &ValidationError{Name: "slug", err: fmt.Errorf(`ent: validator failed for field "Project.slug": %w`, err)}
+		}
+	}
+	if v, ok := _u.mutation.CrossProjectInbound(); ok {
+		if err := project.CrossProjectInboundValidator(v); err != nil {
+			return &ValidationError{Name: "cross_project_inbound", err: fmt.Errorf(`ent: validator failed for field "Project.cross_project_inbound": %w`, err)}
 		}
 	}
 	return nil
@@ -978,6 +1067,15 @@ func (_u *ProjectUpdateOne) sqlSave(ctx context.Context) (_node *Project, err er
 	}
 	if _u.mutation.GitIdentityCleared() {
 		_spec.ClearField(project.FieldGitIdentity, field.TypeString)
+	}
+	if value, ok := _u.mutation.CrossProjectInbound(); ok {
+		_spec.SetField(project.FieldCrossProjectInbound, field.TypeEnum, value)
+	}
+	if value, ok := _u.mutation.CrossProjectInboundRevision(); ok {
+		_spec.SetField(project.FieldCrossProjectInboundRevision, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedCrossProjectInboundRevision(); ok {
+		_spec.AddField(project.FieldCrossProjectInboundRevision, field.TypeInt64, value)
 	}
 	if _u.mutation.AgentsCleared() {
 		edge := &sqlgraph.EdgeSpec{

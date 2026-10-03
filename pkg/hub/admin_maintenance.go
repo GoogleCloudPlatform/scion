@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
 // maintenanceLogAttrs returns common slog attributes for maintenance operation logging.
@@ -46,7 +47,7 @@ func (s *Server) handleAdminMaintenanceOps(w http.ResponseWriter, r *http.Reques
 
 	if subPath == "" {
 		if r.Method != http.MethodGet {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet)
 			return
 		}
 		s.listMaintenanceOperations(w, r)
@@ -59,7 +60,7 @@ func (s *Server) handleAdminMaintenanceOps(w http.ResponseWriter, r *http.Reques
 
 	if len(parts) == 1 {
 		if r.Method != http.MethodGet {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet)
 			return
 		}
 		s.getMaintenanceOperation(w, r, key)
@@ -71,13 +72,13 @@ func (s *Server) handleAdminMaintenanceOps(w http.ResponseWriter, r *http.Reques
 	switch action {
 	case "run":
 		if r.Method != http.MethodPost {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodPost)
 			return
 		}
 		s.executeOperation(w, r, key, user)
 	case "runs":
 		if r.Method != http.MethodGet {
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet)
 			return
 		}
 		if len(parts) == 3 && parts[2] != "" {
@@ -95,7 +96,7 @@ func (s *Server) handleAdminMaintenanceOps(w http.ResponseWriter, r *http.Reques
 // Authorization: enforced by routeGuard via hub.maintenance.execute permission.
 func (s *Server) handleAdminMaintenanceMigrations(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -140,9 +141,11 @@ func (s *Server) executeMigration(w http.ResponseWriter, r *http.Request, key st
 		return
 	}
 
-	// Prevent re-running completed migrations (use CLI --force for that).
+	// Prevent re-running completed migrations. There is no CLI flag that
+	// re-runs a completed migration through this endpoint; the message must
+	// not claim one exists.
 	if op.Status == store.MaintenanceStatusCompleted {
-		writeError(w, http.StatusConflict, ErrCodeConflict, "Migration already completed; use CLI --force to re-run", nil)
+		writeError(w, http.StatusConflict, ErrCodeConflict, "Migration already completed", nil)
 		return
 	}
 
@@ -257,6 +260,11 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 			store:         s.store,
 			secretBackend: backend,
 		}, nil
+	case "applied-config-env-cleanup":
+		return &AppliedConfigEnvCleanupExecutor{
+			Store:         s.store,
+			SecretBackend: s.GetSecretBackend(),
+		}, nil
 	case "pull-images":
 		log.Debug("Resolved pull-images executor",
 			"runtime_bin", mc.RuntimeBin, "registry", mc.ImageRegistry,
@@ -298,6 +306,16 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 			registry:   mc.ImageRegistry,
 			tag:        mc.ImageTag,
 			gcpProject: s.config.GCPProjectID,
+		}, nil
+	case "update-binary":
+		log.Debug("Resolved update-binary executor",
+			"service_name", mc.ServiceName, "github_repo", mc.GitHubRepo,
+			"release_channel", mc.ReleaseChannel)
+		return &BinaryUpdateExecutor{
+			serviceName: mc.ServiceName,
+			githubRepo:  mc.GitHubRepo,
+			channel:     mc.ReleaseChannel,
+			store:       s.store,
 		}, nil
 	default:
 		return nil, fmt.Errorf("no executor registered for operation %q", key)
@@ -636,29 +654,131 @@ func toMaintenanceRunResponse(run store.MaintenanceOperationRun) maintenanceRunR
 }
 
 // handleCheckForUpdates handles POST /api/v1/admin/maintenance/check-updates.
-// It fetches from origin and compares the local HEAD against origin/main.
+// It dispatches to the appropriate update checker based on the deployment tier:
+//   - "binary": checks for release updates via LATEST.json manifest
+//   - "source" (default): checks for git updates via origin fetch
+//
 // Authorization: enforced by routeGuard via hub.maintenance.execute permission.
 func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
 	mc := s.config.MaintenanceConfig
-	if mc.RepoPath == "" {
-		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
-			"No repository path configured; set maintenance.repo_path in settings", nil)
+
+	switch mc.DeploymentTier {
+	case "binary":
+		result, err := CheckForReleaseUpdates(r.Context(), version.Version, mc.ReleaseChannel, mc.GitHubRepo)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"Failed to check for release updates: "+err.Error(), nil)
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+
+	default:
+		// Source tier: existing git-based check.
+		if mc.RepoPath == "" {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+				"No repository path configured; set maintenance.repo_path in settings", nil)
+			return
+		}
+
+		result, err := CheckForUpdates(r.Context(), mc.RepoPath)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"Failed to check for updates: "+err.Error(), nil)
+			return
+		}
+
+		// Wrap the existing result with a tier discriminator.
+		resp := map[string]interface{}{
+			"tier":             "source",
+			"update_available": result.UpdateAvailable,
+			"current_commit":   result.CurrentCommit,
+			"latest_commit":    result.LatestCommit,
+			"current_branch":   result.CurrentBranch,
+			"tracking_ref":     result.TrackingRef,
+			"commits_behind":   result.CommitsBehind,
+		}
+		if len(result.NewCommits) > 0 {
+			resp["new_commits"] = result.NewCommits
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+// handleGetUpdateAvailable handles GET /api/v1/admin/maintenance/update-available.
+// It returns the stored system.update_available hub setting, or a null/empty
+// response if no update notification is stored. This allows the admin UI to
+// show an "update available" banner without performing a live check.
+//
+// Authorization: enforced by routeGuard via hub.maintenance.execute permission.
+func (s *Server) handleGetUpdateAvailable(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
-	result, err := CheckForUpdates(r.Context(), mc.RepoPath)
+	setting, err := s.store.GetHubSetting(r.Context(), HubSettingSectionUpdateAvailable)
 	if err != nil {
+		if err == store.ErrNotFound {
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"update_available": false,
+			})
+			return
+		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-			"Failed to check for updates: "+err.Error(), nil)
+			"Failed to read update_available setting", nil)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	// Return the stored update info with update_available=true wrapper.
+	var info UpdateAvailableInfo
+	if err := json.Unmarshal(setting.Value, &info); err != nil {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"Failed to parse update_available setting", nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"update_available": true,
+		"update":           info,
+	})
+}
+
+// handleDismissUpdateAvailable handles DELETE /api/v1/admin/maintenance/update-available.
+// It clears the stored update notification so the admin UI banner is dismissed.
+//
+// Authorization: enforced by routeGuard via hub.maintenance.execute permission.
+func (s *Server) handleDismissUpdateAvailable(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		MethodNotAllowed(w, http.MethodDelete)
+		return
+	}
+
+	if err := s.store.DeleteHubSetting(r.Context(), HubSettingSectionUpdateAvailable); err != nil && err != store.ErrNotFound {
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+			"Failed to clear update_available setting", nil)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"update_available": false,
+	})
+}
+
+// handleUpdateAvailable dispatches GET and DELETE to the appropriate handler.
+func (s *Server) handleUpdateAvailable(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.handleGetUpdateAvailable(w, r)
+	case http.MethodDelete:
+		s.handleDismissUpdateAvailable(w, r)
+	default:
+		MethodNotAllowed(w, http.MethodGet, http.MethodDelete)
+	}
 }
 
 // handleAdminRestart handles POST /api/v1/admin/maintenance/restart.
@@ -668,7 +788,7 @@ func (s *Server) handleCheckForUpdates(w http.ResponseWriter, r *http.Request) {
 // Authorization: enforced by routeGuard via hub.maintenance.execute permission.
 func (s *Server) handleAdminRestart(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 

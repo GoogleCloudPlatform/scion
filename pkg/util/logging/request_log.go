@@ -61,6 +61,15 @@ type RequestMeta struct {
 	RequestID string
 	TraceID   string
 	Component string
+
+	// AuthType and AuthAttrs are set by the auth layer via SetRequestAuth
+	// once it has classified (or rejected) the credential. Auth calls
+	// SetRequestAuth on this shared, pointer-identical RequestMeta —
+	// reachable from every context derived from the one RequestLogMiddleware
+	// installs — and RequestLogMiddleware reads it back after next returns,
+	// so a request auth rejects outright is logged too.
+	AuthType  string
+	AuthAttrs []slog.Attr
 }
 
 // InstrumentedResponseWriter captures status code and bytes written.
@@ -157,6 +166,28 @@ func SetRequestBrokerID(ctx context.Context, brokerID string) {
 	}
 }
 
+// SetRequestAuth records the outcome of authentication for RequestLogMiddleware
+// to render once the request completes: the coarse auth mechanism (authType,
+// e.g. "uat", "agent", "jwt") plus any additional attributes the caller wants
+// attached to the request-log line (for example a user_id, principal_kind, or
+// a "credential" group). Logging does not interpret attrs — callers control
+// exactly what is rendered, and nothing is logged if SetRequestAuth is never
+// called (e.g. a request with no credential at all).
+//
+// Safe to call more than once per request (e.g. once per credential branch as
+// auth narrows down the token type); the last call before the handler chain
+// returns wins. See RequestMeta.AuthType/AuthAttrs for why this indirection
+// through a shared, mutable, pointer-identity struct is necessary once
+// RequestLogMiddleware wraps auth instead of being wrapped by it.
+func SetRequestAuth(ctx context.Context, authType string, attrs ...slog.Attr) {
+	if meta := RequestMetaFromContext(ctx); meta != nil {
+		meta.mu.Lock()
+		meta.AuthType = authType
+		meta.AuthAttrs = attrs
+		meta.mu.Unlock()
+	}
+}
+
 // RequestLoggerConfig configures the dedicated request logger.
 type RequestLoggerConfig struct {
 	FilePath    string         // From SCION_SERVER_REQUEST_LOG_PATH
@@ -237,7 +268,7 @@ func NewRequestLogger(cfg RequestLoggerConfig) (*slog.Logger, func(), error) {
 
 // PathPattern defines a URL pattern for extracting project/agent IDs.
 type PathPattern struct {
-	Prefix     string // e.g. "/api/v1/groves/"
+	Prefix     string // e.g. "/api/v1/projects/"
 	ProjectIdx int    // segment index after prefix for project ID (-1 if N/A)
 	AgentIdx   int    // segment index after prefix for agent ID (-1 if N/A)
 }
@@ -246,7 +277,6 @@ type PathPattern struct {
 func HubPathPatterns() []PathPattern {
 	return []PathPattern{
 		{Prefix: "/api/v1/projects/", ProjectIdx: 0, AgentIdx: -1},
-		{Prefix: "/api/v1/groves/", ProjectIdx: 0, AgentIdx: -1},
 		{Prefix: "/api/v1/agents/", ProjectIdx: -1, AgentIdx: 0},
 	}
 }
@@ -255,7 +285,6 @@ func HubPathPatterns() []PathPattern {
 func BrokerPathPatterns() []PathPattern {
 	return []PathPattern{
 		{Prefix: "/api/v1/projects/", ProjectIdx: 0, AgentIdx: -1},
-		{Prefix: "/api/v1/groves/", ProjectIdx: 0, AgentIdx: -1},
 		{Prefix: "/api/v1/agents/", ProjectIdx: -1, AgentIdx: 0},
 	}
 }
@@ -318,8 +347,10 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 			ctx := ContextWithRequestMeta(r.Context(), meta)
 			r = r.WithContext(ctx)
 
-			// Read auth type from context (set by auth middleware before this point)
-			authType, _ := r.Context().Value(AuthTypeKey{}).(string)
+			// Echo the request ID so a caller and this line can be joined
+			// without parsing the body, and so APIError responses that choose
+			// to surface it (writeErrorFromErr) agree with what got logged.
+			w.Header().Set("X-Request-ID", requestID)
 
 			// Wrap response writer
 			wrapped := &InstrumentedResponseWriter{
@@ -329,21 +360,28 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 
 			next.ServeHTTP(wrapped, r)
 
-			// Read final metadata (handlers may have enriched it)
+			// Read final metadata (handlers/auth may have enriched it).
+			// auth_type and its attributes are read here, after next returns,
+			// so that a request auth rejects outright (writing a response and
+			// never calling next further down) still reaches this point with
+			// wrapped.statusCode set to whatever auth wrote, and with
+			// AuthType/AuthAttrs set if auth called SetRequestAuth before
+			// rejecting. A request with no credential at all leaves AuthType
+			// empty.
 			meta.mu.Lock()
 			finalProjectID := meta.ProjectID
 			finalAgentID := meta.AgentID
 			finalBrokerID := meta.BrokerID
+			finalAuthType := meta.AuthType
+			finalAuthAttrs := append([]slog.Attr(nil), meta.AuthAttrs...)
 			meta.mu.Unlock()
-
-			finalAuthType := authType
 
 			duration := time.Since(start)
 
 			// Build HttpRequest struct
 			httpReq := HttpRequest{
 				RequestMethod: r.Method,
-				RequestUrl:    r.URL.String(),
+				RequestUrl:    RedactURL(r.URL),
 				RequestSize:   r.ContentLength,
 				Status:        wrapped.statusCode,
 				ResponseSize:  wrapped.bytesWritten,
@@ -400,6 +438,11 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 			if traceID != "" {
 				attrs = append(attrs, slog.String(AttrTraceID, traceID))
 			}
+
+			// E.2a: principal/credential attributes set by auth via
+			// SetRequestAuth (e.g. user_id, principal_kind, a "credential"
+			// decoration group). Emitted only when auth actually set them.
+			attrs = append(attrs, finalAuthAttrs...)
 
 			logger.LogAttrs(ctx, level, "", attrs...)
 		})

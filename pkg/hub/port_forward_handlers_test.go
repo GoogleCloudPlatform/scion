@@ -20,6 +20,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -30,6 +32,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	scionhub "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
+	sciontoollog "github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	scionportforward "github.com/GoogleCloudPlatform/scion/pkg/sciontool/portforward"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -114,12 +117,13 @@ func TestAuthorizePortRegistrationRejectsFederatedAdmin(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 	agent := &store.Agent{
 		ID: tid("federated-port-agent"), Slug: "federated-port-agent", Name: "Federated Port Agent",
-		ProjectID: project.ID, OwnerID: tid("different-owner"), Phase: string(state.PhaseRunning),
+		ProjectID: project.ID, OwnerID: caller.ID(), Phase: string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
-	// CO1: Replace old policy with a project-scoped role binding so the caller
-	// passes authorizePortAccess but still lacks the hub-level permission
-	// checked by authorizePortRegistration.
+	// The caller owns the agent, so it passes authorizePortAccess via the
+	// resource-owner relationship grant (project-owner no longer carries
+	// agent.port_access, miller79/scion#88) but still lacks the hub-level
+	// permission checked by authorizePortRegistration.
 	createTestUserWithProjectRole(t, s, caller.ID(), caller.Email(), project.ID, store.ProjectRoleOwner)
 
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", nil)
@@ -312,6 +316,15 @@ func TestAgentPortProxyThroughTunnel(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+
+	// ptone/scion#2337: sciontool/log lazily calls Init() on first write, and Init()
+	// permanently replaces slog.Default(). Trip that guard here and restore the globals.
+	prevDefault, prevWriter, prevFlags := slog.Default(), log.Writer(), log.Flags()
+	sciontoollog.Init()
+	slog.SetDefault(prevDefault)
+	log.SetOutput(prevWriter)
+	log.SetFlags(prevFlags)
+
 	manager := scionportforward.NewManager(scionhub.NewClientWithConfig(hubHTTP.URL, token, agent.ID))
 	go manager.Run(ctx)
 	require.Eventually(t, func() bool {

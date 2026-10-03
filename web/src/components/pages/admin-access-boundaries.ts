@@ -50,7 +50,6 @@ import type {
 } from '../../shared/access-boundaries.js';
 import { canAccessBoundary } from '../../shared/access-boundaries.js';
 
-
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------

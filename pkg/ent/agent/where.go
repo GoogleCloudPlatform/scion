@@ -91,11 +91,6 @@ func DelegationEnabled(v bool) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldDelegationEnabled, v))
 }
 
-// Visibility applies equality check predicate on the "visibility" field. It's identical to VisibilityEQ.
-func Visibility(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldEQ(FieldVisibility, v))
-}
-
 // Phase applies equality check predicate on the "phase" field. It's identical to PhaseEQ.
 func Phase(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldPhase, v))
@@ -191,6 +186,11 @@ func AppliedConfig(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldAppliedConfig, v))
 }
 
+// HarnessConfig applies equality check predicate on the "harness_config" field. It's identical to HarnessConfigEQ.
+func HarnessConfig(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldHarnessConfig, v))
+}
+
 // Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
 func Created(v time.Time) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldCreated, v))
@@ -224,6 +224,76 @@ func DeletedAt(v time.Time) predicate.Agent {
 // StateVersion applies equality check predicate on the "state_version" field. It's identical to StateVersionEQ.
 func StateVersion(v int64) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldStateVersion, v))
+}
+
+// Generation applies equality check predicate on the "generation" field. It's identical to GenerationEQ.
+func Generation(v int) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldGeneration, v))
+}
+
+// ReincarnationState applies equality check predicate on the "reincarnation_state" field. It's identical to ReincarnationStateEQ.
+func ReincarnationState(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldReincarnationState, v))
+}
+
+// ReincarnationUpdatedAt applies equality check predicate on the "reincarnation_updated_at" field. It's identical to ReincarnationUpdatedAtEQ.
+func ReincarnationUpdatedAt(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldReincarnationUpdatedAt, v))
+}
+
+// LaunchAsyncOptIn applies equality check predicate on the "launch_async_opt_in" field. It's identical to LaunchAsyncOptInEQ.
+func LaunchAsyncOptIn(v bool) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchAsyncOptIn, v))
+}
+
+// LaunchID applies equality check predicate on the "launch_id" field. It's identical to LaunchIDEQ.
+func LaunchID(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchID, v))
+}
+
+// LaunchState applies equality check predicate on the "launch_state" field. It's identical to LaunchStateEQ.
+func LaunchState(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchState, v))
+}
+
+// LaunchEndReason applies equality check predicate on the "launch_end_reason" field. It's identical to LaunchEndReasonEQ.
+func LaunchEndReason(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchEndReason, v))
+}
+
+// LaunchKind applies equality check predicate on the "launch_kind" field. It's identical to LaunchKindEQ.
+func LaunchKind(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchKind, v))
+}
+
+// LaunchDeadline applies equality check predicate on the "launch_deadline" field. It's identical to LaunchDeadlineEQ.
+func LaunchDeadline(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchDeadline, v))
+}
+
+// LaunchLastReportAt applies equality check predicate on the "launch_last_report_at" field. It's identical to LaunchLastReportAtEQ.
+func LaunchLastReportAt(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchLastReportAt, v))
+}
+
+// LaunchOwner applies equality check predicate on the "launch_owner" field. It's identical to LaunchOwnerEQ.
+func LaunchOwner(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchOwner, v))
+}
+
+// LaunchSeq applies equality check predicate on the "launch_seq" field. It's identical to LaunchSeqEQ.
+func LaunchSeq(v int64) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchSeq, v))
+}
+
+// LaunchStep applies equality check predicate on the "launch_step" field. It's identical to LaunchStepEQ.
+func LaunchStep(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchStep, v))
+}
+
+// LaunchError applies equality check predicate on the "launch_error" field. It's identical to LaunchErrorEQ.
+func LaunchError(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchError, v))
 }
 
 // SlugEQ applies the EQ predicate on the "slug" field.
@@ -579,71 +649,6 @@ func DelegationEnabledEQ(v bool) predicate.Agent {
 // DelegationEnabledNEQ applies the NEQ predicate on the "delegation_enabled" field.
 func DelegationEnabledNEQ(v bool) predicate.Agent {
 	return predicate.Agent(sql.FieldNEQ(FieldDelegationEnabled, v))
-}
-
-// VisibilityEQ applies the EQ predicate on the "visibility" field.
-func VisibilityEQ(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldEQ(FieldVisibility, v))
-}
-
-// VisibilityNEQ applies the NEQ predicate on the "visibility" field.
-func VisibilityNEQ(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldNEQ(FieldVisibility, v))
-}
-
-// VisibilityIn applies the In predicate on the "visibility" field.
-func VisibilityIn(vs ...string) predicate.Agent {
-	return predicate.Agent(sql.FieldIn(FieldVisibility, vs...))
-}
-
-// VisibilityNotIn applies the NotIn predicate on the "visibility" field.
-func VisibilityNotIn(vs ...string) predicate.Agent {
-	return predicate.Agent(sql.FieldNotIn(FieldVisibility, vs...))
-}
-
-// VisibilityGT applies the GT predicate on the "visibility" field.
-func VisibilityGT(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldGT(FieldVisibility, v))
-}
-
-// VisibilityGTE applies the GTE predicate on the "visibility" field.
-func VisibilityGTE(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldGTE(FieldVisibility, v))
-}
-
-// VisibilityLT applies the LT predicate on the "visibility" field.
-func VisibilityLT(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldLT(FieldVisibility, v))
-}
-
-// VisibilityLTE applies the LTE predicate on the "visibility" field.
-func VisibilityLTE(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldLTE(FieldVisibility, v))
-}
-
-// VisibilityContains applies the Contains predicate on the "visibility" field.
-func VisibilityContains(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldContains(FieldVisibility, v))
-}
-
-// VisibilityHasPrefix applies the HasPrefix predicate on the "visibility" field.
-func VisibilityHasPrefix(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldHasPrefix(FieldVisibility, v))
-}
-
-// VisibilityHasSuffix applies the HasSuffix predicate on the "visibility" field.
-func VisibilityHasSuffix(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldHasSuffix(FieldVisibility, v))
-}
-
-// VisibilityEqualFold applies the EqualFold predicate on the "visibility" field.
-func VisibilityEqualFold(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldEqualFold(FieldVisibility, v))
-}
-
-// VisibilityContainsFold applies the ContainsFold predicate on the "visibility" field.
-func VisibilityContainsFold(v string) predicate.Agent {
-	return predicate.Agent(sql.FieldContainsFold(FieldVisibility, v))
 }
 
 // MessageModeEQ applies the EQ predicate on the "message_mode" field.
@@ -1896,6 +1901,81 @@ func AppliedConfigContainsFold(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldContainsFold(FieldAppliedConfig, v))
 }
 
+// HarnessConfigEQ applies the EQ predicate on the "harness_config" field.
+func HarnessConfigEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldHarnessConfig, v))
+}
+
+// HarnessConfigNEQ applies the NEQ predicate on the "harness_config" field.
+func HarnessConfigNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldHarnessConfig, v))
+}
+
+// HarnessConfigIn applies the In predicate on the "harness_config" field.
+func HarnessConfigIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldHarnessConfig, vs...))
+}
+
+// HarnessConfigNotIn applies the NotIn predicate on the "harness_config" field.
+func HarnessConfigNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldHarnessConfig, vs...))
+}
+
+// HarnessConfigGT applies the GT predicate on the "harness_config" field.
+func HarnessConfigGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldHarnessConfig, v))
+}
+
+// HarnessConfigGTE applies the GTE predicate on the "harness_config" field.
+func HarnessConfigGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldHarnessConfig, v))
+}
+
+// HarnessConfigLT applies the LT predicate on the "harness_config" field.
+func HarnessConfigLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldHarnessConfig, v))
+}
+
+// HarnessConfigLTE applies the LTE predicate on the "harness_config" field.
+func HarnessConfigLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldHarnessConfig, v))
+}
+
+// HarnessConfigContains applies the Contains predicate on the "harness_config" field.
+func HarnessConfigContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldHarnessConfig, v))
+}
+
+// HarnessConfigHasPrefix applies the HasPrefix predicate on the "harness_config" field.
+func HarnessConfigHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldHarnessConfig, v))
+}
+
+// HarnessConfigHasSuffix applies the HasSuffix predicate on the "harness_config" field.
+func HarnessConfigHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldHarnessConfig, v))
+}
+
+// HarnessConfigIsNil applies the IsNil predicate on the "harness_config" field.
+func HarnessConfigIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldHarnessConfig))
+}
+
+// HarnessConfigNotNil applies the NotNil predicate on the "harness_config" field.
+func HarnessConfigNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldHarnessConfig))
+}
+
+// HarnessConfigEqualFold applies the EqualFold predicate on the "harness_config" field.
+func HarnessConfigEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldHarnessConfig, v))
+}
+
+// HarnessConfigContainsFold applies the ContainsFold predicate on the "harness_config" field.
+func HarnessConfigContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldHarnessConfig, v))
+}
+
 // AncestryIsNil applies the IsNil predicate on the "ancestry" field.
 func AncestryIsNil() predicate.Agent {
 	return predicate.Agent(sql.FieldIsNull(FieldAncestry))
@@ -2224,6 +2304,846 @@ func StateVersionLT(v int64) predicate.Agent {
 // StateVersionLTE applies the LTE predicate on the "state_version" field.
 func StateVersionLTE(v int64) predicate.Agent {
 	return predicate.Agent(sql.FieldLTE(FieldStateVersion, v))
+}
+
+// GenerationEQ applies the EQ predicate on the "generation" field.
+func GenerationEQ(v int) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldGeneration, v))
+}
+
+// GenerationNEQ applies the NEQ predicate on the "generation" field.
+func GenerationNEQ(v int) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldGeneration, v))
+}
+
+// GenerationIn applies the In predicate on the "generation" field.
+func GenerationIn(vs ...int) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldGeneration, vs...))
+}
+
+// GenerationNotIn applies the NotIn predicate on the "generation" field.
+func GenerationNotIn(vs ...int) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldGeneration, vs...))
+}
+
+// GenerationGT applies the GT predicate on the "generation" field.
+func GenerationGT(v int) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldGeneration, v))
+}
+
+// GenerationGTE applies the GTE predicate on the "generation" field.
+func GenerationGTE(v int) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldGeneration, v))
+}
+
+// GenerationLT applies the LT predicate on the "generation" field.
+func GenerationLT(v int) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldGeneration, v))
+}
+
+// GenerationLTE applies the LTE predicate on the "generation" field.
+func GenerationLTE(v int) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldGeneration, v))
+}
+
+// ReincarnationStateEQ applies the EQ predicate on the "reincarnation_state" field.
+func ReincarnationStateEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldReincarnationState, v))
+}
+
+// ReincarnationStateNEQ applies the NEQ predicate on the "reincarnation_state" field.
+func ReincarnationStateNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldReincarnationState, v))
+}
+
+// ReincarnationStateIn applies the In predicate on the "reincarnation_state" field.
+func ReincarnationStateIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldReincarnationState, vs...))
+}
+
+// ReincarnationStateNotIn applies the NotIn predicate on the "reincarnation_state" field.
+func ReincarnationStateNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldReincarnationState, vs...))
+}
+
+// ReincarnationStateGT applies the GT predicate on the "reincarnation_state" field.
+func ReincarnationStateGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldReincarnationState, v))
+}
+
+// ReincarnationStateGTE applies the GTE predicate on the "reincarnation_state" field.
+func ReincarnationStateGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldReincarnationState, v))
+}
+
+// ReincarnationStateLT applies the LT predicate on the "reincarnation_state" field.
+func ReincarnationStateLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldReincarnationState, v))
+}
+
+// ReincarnationStateLTE applies the LTE predicate on the "reincarnation_state" field.
+func ReincarnationStateLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldReincarnationState, v))
+}
+
+// ReincarnationStateContains applies the Contains predicate on the "reincarnation_state" field.
+func ReincarnationStateContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldReincarnationState, v))
+}
+
+// ReincarnationStateHasPrefix applies the HasPrefix predicate on the "reincarnation_state" field.
+func ReincarnationStateHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldReincarnationState, v))
+}
+
+// ReincarnationStateHasSuffix applies the HasSuffix predicate on the "reincarnation_state" field.
+func ReincarnationStateHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldReincarnationState, v))
+}
+
+// ReincarnationStateIsNil applies the IsNil predicate on the "reincarnation_state" field.
+func ReincarnationStateIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldReincarnationState))
+}
+
+// ReincarnationStateNotNil applies the NotNil predicate on the "reincarnation_state" field.
+func ReincarnationStateNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldReincarnationState))
+}
+
+// ReincarnationStateEqualFold applies the EqualFold predicate on the "reincarnation_state" field.
+func ReincarnationStateEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldReincarnationState, v))
+}
+
+// ReincarnationStateContainsFold applies the ContainsFold predicate on the "reincarnation_state" field.
+func ReincarnationStateContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldReincarnationState, v))
+}
+
+// ReincarnationUpdatedAtEQ applies the EQ predicate on the "reincarnation_updated_at" field.
+func ReincarnationUpdatedAtEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldReincarnationUpdatedAt, v))
+}
+
+// ReincarnationUpdatedAtNEQ applies the NEQ predicate on the "reincarnation_updated_at" field.
+func ReincarnationUpdatedAtNEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldReincarnationUpdatedAt, v))
+}
+
+// ReincarnationUpdatedAtIn applies the In predicate on the "reincarnation_updated_at" field.
+func ReincarnationUpdatedAtIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldReincarnationUpdatedAt, vs...))
+}
+
+// ReincarnationUpdatedAtNotIn applies the NotIn predicate on the "reincarnation_updated_at" field.
+func ReincarnationUpdatedAtNotIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldReincarnationUpdatedAt, vs...))
+}
+
+// ReincarnationUpdatedAtGT applies the GT predicate on the "reincarnation_updated_at" field.
+func ReincarnationUpdatedAtGT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldReincarnationUpdatedAt, v))
+}
+
+// ReincarnationUpdatedAtGTE applies the GTE predicate on the "reincarnation_updated_at" field.
+func ReincarnationUpdatedAtGTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldReincarnationUpdatedAt, v))
+}
+
+// ReincarnationUpdatedAtLT applies the LT predicate on the "reincarnation_updated_at" field.
+func ReincarnationUpdatedAtLT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldReincarnationUpdatedAt, v))
+}
+
+// ReincarnationUpdatedAtLTE applies the LTE predicate on the "reincarnation_updated_at" field.
+func ReincarnationUpdatedAtLTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldReincarnationUpdatedAt, v))
+}
+
+// ReincarnationUpdatedAtIsNil applies the IsNil predicate on the "reincarnation_updated_at" field.
+func ReincarnationUpdatedAtIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldReincarnationUpdatedAt))
+}
+
+// ReincarnationUpdatedAtNotNil applies the NotNil predicate on the "reincarnation_updated_at" field.
+func ReincarnationUpdatedAtNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldReincarnationUpdatedAt))
+}
+
+// LaunchAsyncOptInEQ applies the EQ predicate on the "launch_async_opt_in" field.
+func LaunchAsyncOptInEQ(v bool) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchAsyncOptIn, v))
+}
+
+// LaunchAsyncOptInNEQ applies the NEQ predicate on the "launch_async_opt_in" field.
+func LaunchAsyncOptInNEQ(v bool) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldLaunchAsyncOptIn, v))
+}
+
+// LaunchIDEQ applies the EQ predicate on the "launch_id" field.
+func LaunchIDEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchID, v))
+}
+
+// LaunchIDNEQ applies the NEQ predicate on the "launch_id" field.
+func LaunchIDNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldLaunchID, v))
+}
+
+// LaunchIDIn applies the In predicate on the "launch_id" field.
+func LaunchIDIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldLaunchID, vs...))
+}
+
+// LaunchIDNotIn applies the NotIn predicate on the "launch_id" field.
+func LaunchIDNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldLaunchID, vs...))
+}
+
+// LaunchIDGT applies the GT predicate on the "launch_id" field.
+func LaunchIDGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldLaunchID, v))
+}
+
+// LaunchIDGTE applies the GTE predicate on the "launch_id" field.
+func LaunchIDGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldLaunchID, v))
+}
+
+// LaunchIDLT applies the LT predicate on the "launch_id" field.
+func LaunchIDLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldLaunchID, v))
+}
+
+// LaunchIDLTE applies the LTE predicate on the "launch_id" field.
+func LaunchIDLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldLaunchID, v))
+}
+
+// LaunchIDContains applies the Contains predicate on the "launch_id" field.
+func LaunchIDContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldLaunchID, v))
+}
+
+// LaunchIDHasPrefix applies the HasPrefix predicate on the "launch_id" field.
+func LaunchIDHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldLaunchID, v))
+}
+
+// LaunchIDHasSuffix applies the HasSuffix predicate on the "launch_id" field.
+func LaunchIDHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldLaunchID, v))
+}
+
+// LaunchIDIsNil applies the IsNil predicate on the "launch_id" field.
+func LaunchIDIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldLaunchID))
+}
+
+// LaunchIDNotNil applies the NotNil predicate on the "launch_id" field.
+func LaunchIDNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldLaunchID))
+}
+
+// LaunchIDEqualFold applies the EqualFold predicate on the "launch_id" field.
+func LaunchIDEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldLaunchID, v))
+}
+
+// LaunchIDContainsFold applies the ContainsFold predicate on the "launch_id" field.
+func LaunchIDContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldLaunchID, v))
+}
+
+// LaunchStateEQ applies the EQ predicate on the "launch_state" field.
+func LaunchStateEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchState, v))
+}
+
+// LaunchStateNEQ applies the NEQ predicate on the "launch_state" field.
+func LaunchStateNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldLaunchState, v))
+}
+
+// LaunchStateIn applies the In predicate on the "launch_state" field.
+func LaunchStateIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldLaunchState, vs...))
+}
+
+// LaunchStateNotIn applies the NotIn predicate on the "launch_state" field.
+func LaunchStateNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldLaunchState, vs...))
+}
+
+// LaunchStateGT applies the GT predicate on the "launch_state" field.
+func LaunchStateGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldLaunchState, v))
+}
+
+// LaunchStateGTE applies the GTE predicate on the "launch_state" field.
+func LaunchStateGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldLaunchState, v))
+}
+
+// LaunchStateLT applies the LT predicate on the "launch_state" field.
+func LaunchStateLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldLaunchState, v))
+}
+
+// LaunchStateLTE applies the LTE predicate on the "launch_state" field.
+func LaunchStateLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldLaunchState, v))
+}
+
+// LaunchStateContains applies the Contains predicate on the "launch_state" field.
+func LaunchStateContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldLaunchState, v))
+}
+
+// LaunchStateHasPrefix applies the HasPrefix predicate on the "launch_state" field.
+func LaunchStateHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldLaunchState, v))
+}
+
+// LaunchStateHasSuffix applies the HasSuffix predicate on the "launch_state" field.
+func LaunchStateHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldLaunchState, v))
+}
+
+// LaunchStateIsNil applies the IsNil predicate on the "launch_state" field.
+func LaunchStateIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldLaunchState))
+}
+
+// LaunchStateNotNil applies the NotNil predicate on the "launch_state" field.
+func LaunchStateNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldLaunchState))
+}
+
+// LaunchStateEqualFold applies the EqualFold predicate on the "launch_state" field.
+func LaunchStateEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldLaunchState, v))
+}
+
+// LaunchStateContainsFold applies the ContainsFold predicate on the "launch_state" field.
+func LaunchStateContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldLaunchState, v))
+}
+
+// LaunchEndReasonEQ applies the EQ predicate on the "launch_end_reason" field.
+func LaunchEndReasonEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchEndReason, v))
+}
+
+// LaunchEndReasonNEQ applies the NEQ predicate on the "launch_end_reason" field.
+func LaunchEndReasonNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldLaunchEndReason, v))
+}
+
+// LaunchEndReasonIn applies the In predicate on the "launch_end_reason" field.
+func LaunchEndReasonIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldLaunchEndReason, vs...))
+}
+
+// LaunchEndReasonNotIn applies the NotIn predicate on the "launch_end_reason" field.
+func LaunchEndReasonNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldLaunchEndReason, vs...))
+}
+
+// LaunchEndReasonGT applies the GT predicate on the "launch_end_reason" field.
+func LaunchEndReasonGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldLaunchEndReason, v))
+}
+
+// LaunchEndReasonGTE applies the GTE predicate on the "launch_end_reason" field.
+func LaunchEndReasonGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldLaunchEndReason, v))
+}
+
+// LaunchEndReasonLT applies the LT predicate on the "launch_end_reason" field.
+func LaunchEndReasonLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldLaunchEndReason, v))
+}
+
+// LaunchEndReasonLTE applies the LTE predicate on the "launch_end_reason" field.
+func LaunchEndReasonLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldLaunchEndReason, v))
+}
+
+// LaunchEndReasonContains applies the Contains predicate on the "launch_end_reason" field.
+func LaunchEndReasonContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldLaunchEndReason, v))
+}
+
+// LaunchEndReasonHasPrefix applies the HasPrefix predicate on the "launch_end_reason" field.
+func LaunchEndReasonHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldLaunchEndReason, v))
+}
+
+// LaunchEndReasonHasSuffix applies the HasSuffix predicate on the "launch_end_reason" field.
+func LaunchEndReasonHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldLaunchEndReason, v))
+}
+
+// LaunchEndReasonIsNil applies the IsNil predicate on the "launch_end_reason" field.
+func LaunchEndReasonIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldLaunchEndReason))
+}
+
+// LaunchEndReasonNotNil applies the NotNil predicate on the "launch_end_reason" field.
+func LaunchEndReasonNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldLaunchEndReason))
+}
+
+// LaunchEndReasonEqualFold applies the EqualFold predicate on the "launch_end_reason" field.
+func LaunchEndReasonEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldLaunchEndReason, v))
+}
+
+// LaunchEndReasonContainsFold applies the ContainsFold predicate on the "launch_end_reason" field.
+func LaunchEndReasonContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldLaunchEndReason, v))
+}
+
+// LaunchKindEQ applies the EQ predicate on the "launch_kind" field.
+func LaunchKindEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchKind, v))
+}
+
+// LaunchKindNEQ applies the NEQ predicate on the "launch_kind" field.
+func LaunchKindNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldLaunchKind, v))
+}
+
+// LaunchKindIn applies the In predicate on the "launch_kind" field.
+func LaunchKindIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldLaunchKind, vs...))
+}
+
+// LaunchKindNotIn applies the NotIn predicate on the "launch_kind" field.
+func LaunchKindNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldLaunchKind, vs...))
+}
+
+// LaunchKindGT applies the GT predicate on the "launch_kind" field.
+func LaunchKindGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldLaunchKind, v))
+}
+
+// LaunchKindGTE applies the GTE predicate on the "launch_kind" field.
+func LaunchKindGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldLaunchKind, v))
+}
+
+// LaunchKindLT applies the LT predicate on the "launch_kind" field.
+func LaunchKindLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldLaunchKind, v))
+}
+
+// LaunchKindLTE applies the LTE predicate on the "launch_kind" field.
+func LaunchKindLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldLaunchKind, v))
+}
+
+// LaunchKindContains applies the Contains predicate on the "launch_kind" field.
+func LaunchKindContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldLaunchKind, v))
+}
+
+// LaunchKindHasPrefix applies the HasPrefix predicate on the "launch_kind" field.
+func LaunchKindHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldLaunchKind, v))
+}
+
+// LaunchKindHasSuffix applies the HasSuffix predicate on the "launch_kind" field.
+func LaunchKindHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldLaunchKind, v))
+}
+
+// LaunchKindIsNil applies the IsNil predicate on the "launch_kind" field.
+func LaunchKindIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldLaunchKind))
+}
+
+// LaunchKindNotNil applies the NotNil predicate on the "launch_kind" field.
+func LaunchKindNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldLaunchKind))
+}
+
+// LaunchKindEqualFold applies the EqualFold predicate on the "launch_kind" field.
+func LaunchKindEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldLaunchKind, v))
+}
+
+// LaunchKindContainsFold applies the ContainsFold predicate on the "launch_kind" field.
+func LaunchKindContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldLaunchKind, v))
+}
+
+// LaunchDeadlineEQ applies the EQ predicate on the "launch_deadline" field.
+func LaunchDeadlineEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchDeadline, v))
+}
+
+// LaunchDeadlineNEQ applies the NEQ predicate on the "launch_deadline" field.
+func LaunchDeadlineNEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldLaunchDeadline, v))
+}
+
+// LaunchDeadlineIn applies the In predicate on the "launch_deadline" field.
+func LaunchDeadlineIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldLaunchDeadline, vs...))
+}
+
+// LaunchDeadlineNotIn applies the NotIn predicate on the "launch_deadline" field.
+func LaunchDeadlineNotIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldLaunchDeadline, vs...))
+}
+
+// LaunchDeadlineGT applies the GT predicate on the "launch_deadline" field.
+func LaunchDeadlineGT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldLaunchDeadline, v))
+}
+
+// LaunchDeadlineGTE applies the GTE predicate on the "launch_deadline" field.
+func LaunchDeadlineGTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldLaunchDeadline, v))
+}
+
+// LaunchDeadlineLT applies the LT predicate on the "launch_deadline" field.
+func LaunchDeadlineLT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldLaunchDeadline, v))
+}
+
+// LaunchDeadlineLTE applies the LTE predicate on the "launch_deadline" field.
+func LaunchDeadlineLTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldLaunchDeadline, v))
+}
+
+// LaunchDeadlineIsNil applies the IsNil predicate on the "launch_deadline" field.
+func LaunchDeadlineIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldLaunchDeadline))
+}
+
+// LaunchDeadlineNotNil applies the NotNil predicate on the "launch_deadline" field.
+func LaunchDeadlineNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldLaunchDeadline))
+}
+
+// LaunchLastReportAtEQ applies the EQ predicate on the "launch_last_report_at" field.
+func LaunchLastReportAtEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchLastReportAt, v))
+}
+
+// LaunchLastReportAtNEQ applies the NEQ predicate on the "launch_last_report_at" field.
+func LaunchLastReportAtNEQ(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldLaunchLastReportAt, v))
+}
+
+// LaunchLastReportAtIn applies the In predicate on the "launch_last_report_at" field.
+func LaunchLastReportAtIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldLaunchLastReportAt, vs...))
+}
+
+// LaunchLastReportAtNotIn applies the NotIn predicate on the "launch_last_report_at" field.
+func LaunchLastReportAtNotIn(vs ...time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldLaunchLastReportAt, vs...))
+}
+
+// LaunchLastReportAtGT applies the GT predicate on the "launch_last_report_at" field.
+func LaunchLastReportAtGT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldLaunchLastReportAt, v))
+}
+
+// LaunchLastReportAtGTE applies the GTE predicate on the "launch_last_report_at" field.
+func LaunchLastReportAtGTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldLaunchLastReportAt, v))
+}
+
+// LaunchLastReportAtLT applies the LT predicate on the "launch_last_report_at" field.
+func LaunchLastReportAtLT(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldLaunchLastReportAt, v))
+}
+
+// LaunchLastReportAtLTE applies the LTE predicate on the "launch_last_report_at" field.
+func LaunchLastReportAtLTE(v time.Time) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldLaunchLastReportAt, v))
+}
+
+// LaunchLastReportAtIsNil applies the IsNil predicate on the "launch_last_report_at" field.
+func LaunchLastReportAtIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldLaunchLastReportAt))
+}
+
+// LaunchLastReportAtNotNil applies the NotNil predicate on the "launch_last_report_at" field.
+func LaunchLastReportAtNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldLaunchLastReportAt))
+}
+
+// LaunchOwnerEQ applies the EQ predicate on the "launch_owner" field.
+func LaunchOwnerEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchOwner, v))
+}
+
+// LaunchOwnerNEQ applies the NEQ predicate on the "launch_owner" field.
+func LaunchOwnerNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldLaunchOwner, v))
+}
+
+// LaunchOwnerIn applies the In predicate on the "launch_owner" field.
+func LaunchOwnerIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldLaunchOwner, vs...))
+}
+
+// LaunchOwnerNotIn applies the NotIn predicate on the "launch_owner" field.
+func LaunchOwnerNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldLaunchOwner, vs...))
+}
+
+// LaunchOwnerGT applies the GT predicate on the "launch_owner" field.
+func LaunchOwnerGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldLaunchOwner, v))
+}
+
+// LaunchOwnerGTE applies the GTE predicate on the "launch_owner" field.
+func LaunchOwnerGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldLaunchOwner, v))
+}
+
+// LaunchOwnerLT applies the LT predicate on the "launch_owner" field.
+func LaunchOwnerLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldLaunchOwner, v))
+}
+
+// LaunchOwnerLTE applies the LTE predicate on the "launch_owner" field.
+func LaunchOwnerLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldLaunchOwner, v))
+}
+
+// LaunchOwnerContains applies the Contains predicate on the "launch_owner" field.
+func LaunchOwnerContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldLaunchOwner, v))
+}
+
+// LaunchOwnerHasPrefix applies the HasPrefix predicate on the "launch_owner" field.
+func LaunchOwnerHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldLaunchOwner, v))
+}
+
+// LaunchOwnerHasSuffix applies the HasSuffix predicate on the "launch_owner" field.
+func LaunchOwnerHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldLaunchOwner, v))
+}
+
+// LaunchOwnerIsNil applies the IsNil predicate on the "launch_owner" field.
+func LaunchOwnerIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldLaunchOwner))
+}
+
+// LaunchOwnerNotNil applies the NotNil predicate on the "launch_owner" field.
+func LaunchOwnerNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldLaunchOwner))
+}
+
+// LaunchOwnerEqualFold applies the EqualFold predicate on the "launch_owner" field.
+func LaunchOwnerEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldLaunchOwner, v))
+}
+
+// LaunchOwnerContainsFold applies the ContainsFold predicate on the "launch_owner" field.
+func LaunchOwnerContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldLaunchOwner, v))
+}
+
+// LaunchSeqEQ applies the EQ predicate on the "launch_seq" field.
+func LaunchSeqEQ(v int64) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchSeq, v))
+}
+
+// LaunchSeqNEQ applies the NEQ predicate on the "launch_seq" field.
+func LaunchSeqNEQ(v int64) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldLaunchSeq, v))
+}
+
+// LaunchSeqIn applies the In predicate on the "launch_seq" field.
+func LaunchSeqIn(vs ...int64) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldLaunchSeq, vs...))
+}
+
+// LaunchSeqNotIn applies the NotIn predicate on the "launch_seq" field.
+func LaunchSeqNotIn(vs ...int64) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldLaunchSeq, vs...))
+}
+
+// LaunchSeqGT applies the GT predicate on the "launch_seq" field.
+func LaunchSeqGT(v int64) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldLaunchSeq, v))
+}
+
+// LaunchSeqGTE applies the GTE predicate on the "launch_seq" field.
+func LaunchSeqGTE(v int64) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldLaunchSeq, v))
+}
+
+// LaunchSeqLT applies the LT predicate on the "launch_seq" field.
+func LaunchSeqLT(v int64) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldLaunchSeq, v))
+}
+
+// LaunchSeqLTE applies the LTE predicate on the "launch_seq" field.
+func LaunchSeqLTE(v int64) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldLaunchSeq, v))
+}
+
+// LaunchStepEQ applies the EQ predicate on the "launch_step" field.
+func LaunchStepEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchStep, v))
+}
+
+// LaunchStepNEQ applies the NEQ predicate on the "launch_step" field.
+func LaunchStepNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldLaunchStep, v))
+}
+
+// LaunchStepIn applies the In predicate on the "launch_step" field.
+func LaunchStepIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldLaunchStep, vs...))
+}
+
+// LaunchStepNotIn applies the NotIn predicate on the "launch_step" field.
+func LaunchStepNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldLaunchStep, vs...))
+}
+
+// LaunchStepGT applies the GT predicate on the "launch_step" field.
+func LaunchStepGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldLaunchStep, v))
+}
+
+// LaunchStepGTE applies the GTE predicate on the "launch_step" field.
+func LaunchStepGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldLaunchStep, v))
+}
+
+// LaunchStepLT applies the LT predicate on the "launch_step" field.
+func LaunchStepLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldLaunchStep, v))
+}
+
+// LaunchStepLTE applies the LTE predicate on the "launch_step" field.
+func LaunchStepLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldLaunchStep, v))
+}
+
+// LaunchStepContains applies the Contains predicate on the "launch_step" field.
+func LaunchStepContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldLaunchStep, v))
+}
+
+// LaunchStepHasPrefix applies the HasPrefix predicate on the "launch_step" field.
+func LaunchStepHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldLaunchStep, v))
+}
+
+// LaunchStepHasSuffix applies the HasSuffix predicate on the "launch_step" field.
+func LaunchStepHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldLaunchStep, v))
+}
+
+// LaunchStepIsNil applies the IsNil predicate on the "launch_step" field.
+func LaunchStepIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldLaunchStep))
+}
+
+// LaunchStepNotNil applies the NotNil predicate on the "launch_step" field.
+func LaunchStepNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldLaunchStep))
+}
+
+// LaunchStepEqualFold applies the EqualFold predicate on the "launch_step" field.
+func LaunchStepEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldLaunchStep, v))
+}
+
+// LaunchStepContainsFold applies the ContainsFold predicate on the "launch_step" field.
+func LaunchStepContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldLaunchStep, v))
+}
+
+// LaunchErrorEQ applies the EQ predicate on the "launch_error" field.
+func LaunchErrorEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchError, v))
+}
+
+// LaunchErrorNEQ applies the NEQ predicate on the "launch_error" field.
+func LaunchErrorNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldLaunchError, v))
+}
+
+// LaunchErrorIn applies the In predicate on the "launch_error" field.
+func LaunchErrorIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldLaunchError, vs...))
+}
+
+// LaunchErrorNotIn applies the NotIn predicate on the "launch_error" field.
+func LaunchErrorNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldLaunchError, vs...))
+}
+
+// LaunchErrorGT applies the GT predicate on the "launch_error" field.
+func LaunchErrorGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldLaunchError, v))
+}
+
+// LaunchErrorGTE applies the GTE predicate on the "launch_error" field.
+func LaunchErrorGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldLaunchError, v))
+}
+
+// LaunchErrorLT applies the LT predicate on the "launch_error" field.
+func LaunchErrorLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldLaunchError, v))
+}
+
+// LaunchErrorLTE applies the LTE predicate on the "launch_error" field.
+func LaunchErrorLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldLaunchError, v))
+}
+
+// LaunchErrorContains applies the Contains predicate on the "launch_error" field.
+func LaunchErrorContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldLaunchError, v))
+}
+
+// LaunchErrorHasPrefix applies the HasPrefix predicate on the "launch_error" field.
+func LaunchErrorHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldLaunchError, v))
+}
+
+// LaunchErrorHasSuffix applies the HasSuffix predicate on the "launch_error" field.
+func LaunchErrorHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldLaunchError, v))
+}
+
+// LaunchErrorIsNil applies the IsNil predicate on the "launch_error" field.
+func LaunchErrorIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldLaunchError))
+}
+
+// LaunchErrorNotNil applies the NotNil predicate on the "launch_error" field.
+func LaunchErrorNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldLaunchError))
+}
+
+// LaunchErrorEqualFold applies the EqualFold predicate on the "launch_error" field.
+func LaunchErrorEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldLaunchError, v))
+}
+
+// LaunchErrorContainsFold applies the ContainsFold predicate on the "launch_error" field.
+func LaunchErrorContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldLaunchError, v))
 }
 
 // HasProject applies the HasEdge predicate on the "project" edge.

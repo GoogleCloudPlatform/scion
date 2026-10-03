@@ -752,6 +752,14 @@ message. They move into a per-delivery options struct that is not persisted on t
 row and not part of the conversation history. `Raw` in particular is not messaging at all —
 it is keystroke injection, and it becomes a separate verb (§2.9).
 
+> **Updated — see `.design/agent-keys-contract.md` (ptone/scion#2191).** That document is now
+> the frozen contract for the separate keystroke-injection verb this paragraph anticipates: a
+> dedicated `POST /api/v1/agents/{id}/keys` Hub route and internal broker contract, not a
+> Raw-flagged StructuredMessage forever. It is a Hub-mediated operation like any other agent
+> action, subject to attach authority and agent project isolation (§3 of the contract), not to
+> message modes or message authority (those govern messaging but do not grant or deny keys). It is
+> not a local/terminal-only primitive either — see the correction to §2.9 below.
+
 ### 2.9 CLI surface
 
 The current command conflates addressing, scheduling, delivery mechanics, subscription
@@ -762,7 +770,7 @@ management, attachments and broadcast, producing 34 exclusion rules. Splitting b
 | `scion message <conv> <text>` | post to a conversation | — |
 | `scion broadcast <text>` | project / global fan-out (not a conversation) | ~12 rules |
 | `scion schedule create …` | deferred send (exists, but see the correction below) | ~8 rules |
-| `scion keys <agent> <literal>` | raw keystroke injection, local/terminal only | ~5 rules |
+| `scion keys <agent> <literal>` | raw keystroke injection ([now a dedicated Hub operation, not local/terminal only](agent-keys-contract.md)) | ~5 rules |
 | `scion notifications subscribe` | subscription management (already exists) | ~2 rules |
 
 `scion message` retains six flags: `--to`, `--attach`, `--reply-to`, `--interrupt`,
@@ -1804,6 +1812,13 @@ Commit-sized, ordered, each independently reviewable.
   > the docs must cover them too, or the one surface a user cannot avoid reading is the one
   > surface nothing verifies.
 
+  > **Pointer, added for ptone/scion#2191 (agent-keys 0.1) — no new rule.** The eventual
+  > `message --raw` deprecation warning (`.design/agent-keys-contract.md`, decisions 4-5, and
+  > that document's acceptance IDs AK-35/AK-36) is a deprecation warning like any other and this
+  > criterion already governs it unmodified: it may only name `/keys`/`scion keys` once that
+  > replacement works in the same build, and a permanent test must execute it. Nothing about the
+  > keys cutover needs a different or additional AC-15a rule.
+
   > **Amended 2026-08-27 after S5 round 2. The verifier must assert it verified something.**
   > The round-2 test resolved every single-quoted `'scion …'` reference correctly and was
   > load-bearing against the exact I-1 defect — and still passed with the warning emitter
@@ -1975,7 +1990,7 @@ SEE ALSO
 | `--cc` | `--to` | CC implied a copy. These are addressees. |
 | `--broadcast` / `--all` | `scion broadcast` | Not conversations. Removes ~12 exclusion rules. |
 | `--in` / `--at` | `scion schedule create --in/--at` | Removes ~8 rules. The dropped-envelope fix needs conversation addressing on scheduled events — DEF-6, not yet built. |
-| `--raw` | `scion keys` | Keystroke injection, not messaging. Also honest that it is local-only. |
+| `--raw` | `scion keys` | Keystroke injection, not messaging — a dedicated Hub-mediated operation per `.design/agent-keys-contract.md` (ptone/scion#2191), not local-only. |
 | `--notify` | `scion notifications subscribe` | Subscription management. |
 | `--plain` | (removed) | A rendering hint that leaked into the envelope. |
 | 13 flags, 34 exclusion rules | 6 flags, 3 rules | — |

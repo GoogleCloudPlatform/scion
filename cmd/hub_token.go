@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -70,6 +71,14 @@ var hubTokenCreateCmd = &cobra.Command{
 
 The token value is displayed only once on creation. Store it securely.
 
+Scopes are restrictions, not grants: selecting a scope limits what the
+token may ever do, but access to any specific target is still checked on
+every request against your current authority there. For agent:attach and
+agent:port_access, that means your own agents and their descendants --
+checked per agent, not enumerated when you select the scope. Run
+"scion hub token scopes --project <project>" to see which scopes you may
+currently select and why.
+
 Available scopes:
 %s
 
@@ -82,6 +91,26 @@ Examples:
   scion hub token create --project my-project --name deploy --scopes agent:manage --expires 30d`, permissions.UATScopeHelp()),
 	Args: cobra.NoArgs,
 	RunE: runTokenCreate,
+}
+
+var hubTokenScopesCmd = &cobra.Command{
+	Use:   "scopes",
+	Short: "List token scopes and mint eligibility",
+	Long: `List every scope accepted by "hub token create --scopes", and with
+--project, report which of them you may currently select as a restriction
+on a token scoped to that project.
+
+Eligibility answers only "may you select this restriction" -- it is not a
+target list, and it is not a promise of access. Whether a resulting token
+can actually reach a given agent, port, or other target is still checked on
+every request, independently of what was eligible at mint time.
+
+Examples:
+  scion hub token scopes
+  scion hub token scopes --project my-project
+  scion hub token scopes --project my-project --json`,
+	Args: cobra.NoArgs,
+	RunE: runTokenScopes,
 }
 
 var hubTokenListCmd = &cobra.Command{
@@ -125,7 +154,10 @@ var (
 	tokenCreateProject string
 	tokenCreateScopes  []string
 	tokenCreateExpires string
+	tokenCreatePurpose string
+	tokenCreateLabels  []string
 	tokenListProject   string
+	tokenScopesProject string
 )
 
 func init() {
@@ -134,15 +166,21 @@ func init() {
 	hubTokenCmd.AddCommand(hubTokenListCmd)
 	hubTokenCmd.AddCommand(hubTokenRevokeCmd)
 	hubTokenCmd.AddCommand(hubTokenDeleteCmd)
+	hubTokenCmd.AddCommand(hubTokenScopesCmd)
 
 	hubTokenCreateCmd.Flags().StringVar(&tokenCreateName, "name", "", "Token name/label (required)")
 	hubTokenCreateCmd.Flags().StringVar(&tokenCreateProject, "project", "", "Project name or ID to scope the token to (required)")
-	hubTokenCreateCmd.Flags().StringVar(&tokenCreateProject, "grove", "", "Deprecated alias for --project")
-	_ = hubTokenCreateCmd.Flags().MarkDeprecated("grove", "use --project instead")
-	_ = hubTokenCreateCmd.Flags().MarkHidden("grove")
 
 	hubTokenCreateCmd.Flags().StringArrayVar(&tokenCreateScopes, "scopes", nil, "Scope to grant (required, repeatable; also accepts a comma-separated list)")
 	hubTokenCreateCmd.Flags().StringVar(&tokenCreateExpires, "expires", "", "Expiry duration (e.g., 30d, 90d, 1y) or RFC 3339 date (default: 90d)")
+	// --json was checked in runTokenCreate but never registered here, so it
+	// silently fell back to text output. Register it explicitly.
+	hubTokenCreateCmd.Flags().BoolVar(&tokenOutputJSON, "json", false, "Output in JSON format")
+	// E.1 descriptive credential metadata: optional, bounded, immutable
+	// after issuance (there is no update command). Requires a hub connection,
+	// like the rest of `scion hub token`.
+	hubTokenCreateCmd.Flags().StringVar(&tokenCreatePurpose, "purpose", "", "Optional bounded description of what this token is for")
+	hubTokenCreateCmd.Flags().StringArrayVar(&tokenCreateLabels, "label", nil, "Optional bounded label as key=value (repeatable)")
 
 	_ = hubTokenCreateCmd.MarkFlagRequired("name")
 	_ = hubTokenCreateCmd.MarkFlagRequired("project")
@@ -150,9 +188,9 @@ func init() {
 
 	hubTokenListCmd.Flags().BoolVar(&tokenOutputJSON, "json", false, "Output in JSON format")
 	hubTokenListCmd.Flags().StringVar(&tokenListProject, "project", "", "Filter tokens by project name or ID")
-	hubTokenListCmd.Flags().StringVar(&tokenListProject, "grove", "", "Deprecated alias for --project")
-	_ = hubTokenListCmd.Flags().MarkDeprecated("grove", "use --project instead")
-	_ = hubTokenListCmd.Flags().MarkHidden("grove")
+
+	hubTokenScopesCmd.Flags().StringVar(&tokenScopesProject, "project", "", "Project name or ID to compute mint eligibility for")
+	hubTokenScopesCmd.Flags().BoolVar(&tokenOutputJSON, "json", false, "Output in JSON format")
 }
 
 func runTokenCreate(cmd *cobra.Command, args []string) error {
@@ -184,15 +222,31 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 		expiresAt = &t
 	}
 
+	labels, err := parseLabelFlags(tokenCreateLabels)
+	if err != nil {
+		return err
+	}
+
 	req := &hubclient.CreateTokenRequest{
 		Name:      tokenCreateName,
 		ProjectID: project.ID,
 		Scopes:    scopes,
 		ExpiresAt: expiresAt,
+		Purpose:   tokenCreatePurpose,
+		Labels:    labels,
 	}
 
 	resp, err := client.Tokens().Create(ctx, req)
 	if err != nil {
+		if selector, reason, ok := hubclient.AsScopeViolation(err); ok {
+			// An older hub's scope_violation body may carry no details; in
+			// that case naming an empty selector would be misleading, but
+			// the hint to check eligibility is still useful either way.
+			if selector != "" {
+				fmt.Fprintf(os.Stderr, "Denied scope %q (%s).\n", selector, reason)
+			}
+			fmt.Fprintf(os.Stderr, "Run `scion hub token scopes --project %s` to see which scopes you may currently select and why.\n", tokenCreateProject)
+		}
 		return fmt.Errorf("failed to create token: %w", err)
 	}
 
@@ -208,6 +262,12 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Scopes:  %s\n", strings.Join(resp.AccessToken.Scopes, ", "))
 	if resp.AccessToken.ExpiresAt != nil {
 		fmt.Printf("  Expires: %s\n", resp.AccessToken.ExpiresAt.Format(time.RFC3339))
+	}
+	if resp.AccessToken.Purpose != "" {
+		fmt.Printf("  Purpose: %s\n", resp.AccessToken.Purpose)
+	}
+	if len(resp.AccessToken.Labels) > 0 {
+		fmt.Printf("  Labels:  %s\n", formatLabels(resp.AccessToken.Labels))
 	}
 	fmt.Println()
 	fmt.Printf("Token: %s\n", resp.Token)
@@ -292,6 +352,76 @@ func runTokenList(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+func runTokenScopes(cmd *cobra.Command, args []string) error {
+	_, client, err := loadHubClient()
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	opts := &hubclient.ListScopesOptions{}
+	if tokenScopesProject != "" {
+		project, err := resolveProjectByNameOrID(ctx, client, tokenScopesProject)
+		if err != nil {
+			return fmt.Errorf("failed to resolve project %q: %w", tokenScopesProject, err)
+		}
+		opts.ProjectID = project.ID
+	}
+
+	resp, err := client.Tokens().ListScopes(ctx, opts)
+	if err != nil {
+		return fmt.Errorf("failed to list scopes: %w", err)
+	}
+
+	if tokenOutputJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(resp)
+	}
+
+	printScopeTable(resp, tokenScopesProject != "")
+	return nil
+}
+
+// printScopeTable renders GET /api/v1/auth/scopes output as text. When
+// withEligibility is false (no --project given), it prints the unchanged
+// selector catalog. Otherwise it adds ELIGIBLE/REASON columns -- eligible
+// answers only "may you select this restriction," never a target list.
+func printScopeTable(resp *hubclient.ScopesResponse, withEligibility bool) {
+	if !withEligibility {
+		fmt.Printf("%-24s  %s\n", "SCOPE", "DESCRIPTION")
+		for _, s := range resp.Scopes {
+			fmt.Printf("%-24s  %s\n", s.ID, s.Description)
+		}
+		for _, a := range resp.Aliases {
+			fmt.Printf("%-24s  %s\n", a.ID, a.Description)
+		}
+		return
+	}
+
+	fmt.Printf("%-24s  %-9s  %s\n", "SCOPE", "ELIGIBLE", "REASON")
+	for _, s := range resp.Scopes {
+		eligible, reason := "-", ""
+		if s.Eligibility != nil {
+			eligible = fmt.Sprintf("%v", s.Eligibility.Eligible)
+			reason = s.Eligibility.Reason
+		}
+		fmt.Printf("%-24s  %-9s  %s\n", s.ID, eligible, reason)
+	}
+	for _, a := range resp.Aliases {
+		eligible, reason := "-", ""
+		if a.Eligibility != nil {
+			eligible = fmt.Sprintf("%v", a.Eligibility.Eligible)
+			if !a.Eligibility.Eligible && len(a.Eligibility.IneligibleMembers) > 0 {
+				reason = "members: " + strings.Join(a.Eligibility.IneligibleMembers, ",")
+			}
+		}
+		fmt.Printf("%-24s  %-9s  %s\n", a.ID, eligible, reason)
+	}
+}
+
 func runTokenRevoke(cmd *cobra.Command, args []string) error {
 	tokenID := args[0]
 
@@ -328,6 +458,44 @@ func runTokenDelete(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Token %s deleted.\n", tokenID)
 	return nil
+}
+
+// parseLabelFlags parses repeated --label key=value flags into a map,
+// rejecting a repeated key rather than silently keeping the last value
+// (review finding F12). It does not otherwise enforce the bounded label
+// schema; the hub validates and rejects out-of-schema labels server-side
+// (E.1), so the CLI reports the server's error rather than duplicating the
+// rule set.
+func parseLabelFlags(labels []string) (map[string]string, error) {
+	if len(labels) == 0 {
+		return nil, nil
+	}
+	result := make(map[string]string, len(labels))
+	for _, l := range labels {
+		key, value, ok := strings.Cut(l, "=")
+		if !ok {
+			return nil, fmt.Errorf("invalid --label %q: expected key=value", l)
+		}
+		if _, exists := result[key]; exists {
+			return nil, fmt.Errorf("duplicate --label key %q", key)
+		}
+		result[key] = value
+	}
+	return result, nil
+}
+
+// formatLabels renders labels as a stable, comma-separated key=value list.
+func formatLabels(labels map[string]string) string {
+	keys := make([]string, 0, len(labels))
+	for k := range labels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+labels[k])
+	}
+	return strings.Join(parts, ", ")
 }
 
 // parseExpiry parses an expiry string as either a duration shorthand (30d, 90d, 1y)

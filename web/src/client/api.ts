@@ -25,11 +25,24 @@
  * Phase 3 will migrate them to apiFetch().
  */
 
+import { dispatchTeardown } from '../utils/auth.js';
+
 /** Detail payload for the scion:access-denied custom event. */
 export interface AccessDeniedDetail {
   resource?: string;
   action?: string;
   reason?: string;
+}
+
+/**
+ * Fire the account-teardown event when we detect session expiry.
+ * Guarded against double-dispatch: the flag is shared with the redirect guard.
+ */
+let authExpiredTeardownDispatched = false;
+function dispatchAuthExpiredTeardown(): void {
+  if (authExpiredTeardownDispatched) return;
+  authExpiredTeardownDispatched = true;
+  dispatchTeardown('auth-expired');
 }
 
 /** Options for {@link apiFetch}, extending the standard RequestInit. */
@@ -85,6 +98,9 @@ export async function apiFetch(path: string, options?: ApiFetchOptions): Promise
     // Use a flag to prevent multiple concurrent redirects.
     if (!sessionExpiredRedirectPending) {
       sessionExpiredRedirectPending = true;
+      // Dispose terminal sessions before navigating to login so no hidden
+      // active terminals survive the transition (acceptance criterion 4).
+      dispatchAuthExpiredTeardown();
       const returnTo = encodeURIComponent(window.location.pathname);
       window.location.href = `/login?error=session_expired&returnTo=${returnTo}`;
     }

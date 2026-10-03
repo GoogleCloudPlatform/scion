@@ -40,7 +40,10 @@ func (AgentSessionMetrics) Fields() []ent.Field {
 			Immutable(),
 		field.String("agent_id").
 			NotEmpty(),
-		field.String("grove_id").
+		// The physical column is named grove_id and must not change
+		// without a data migration.
+		field.String("project_id").
+			StorageKey("grove_id").
 			NotEmpty(),
 		field.String("session_id").
 			NotEmpty(),
@@ -83,7 +86,12 @@ func (AgentSessionMetrics) Fields() []ent.Field {
 func (AgentSessionMetrics) Indexes() []ent.Index {
 	return []ent.Index{
 		index.Fields("agent_id"),
-		index.Fields("grove_id"),
+		// The physical index is named agentsessionmetrics_grove_id and
+		// must not change without a data migration; the explicit
+		// StorageKey pins it (ent derives the same name from the
+		// column's storage key either way).
+		index.Fields("project_id").
+			StorageKey("agentsessionmetrics_grove_id"),
 		index.Fields("started_at"),
 	}
 }

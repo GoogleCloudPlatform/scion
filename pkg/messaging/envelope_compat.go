@@ -23,6 +23,18 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
+// internalMetadataKeys lists metadata keys that are platform-internal and
+// should not appear in the new-format delivery envelope. These are either
+// represented as first-class envelope fields or are implementation details.
+var internalMetadataKeys = map[string]bool{
+	"system_category":  true,
+	"__attachments":    true,
+	"mention_source":   true,
+	"mention_position": true,
+	"channel":          true,
+	"thread_id":        true,
+}
+
 // MapLegacyType maps an old type enum value (and optional system_category
 // metadata) to the new split taxonomy: kind, intent, and event body.
 //
@@ -44,6 +56,11 @@ func MapLegacyType(oldType, systemCategory string, hasAddressee bool) (MessageKi
 
 	case messages.TypeChat:
 		intent := IntentInform
+		return KindText, &intent, nil
+
+	case messages.TypeReply:
+		// A reply to an agent is still a request, same as TypeInstruction.
+		intent := IntentRequest
 		return KindText, &intent, nil
 
 	case messages.TypeAssistantReply:
@@ -94,6 +111,15 @@ func mapSystemCategory(category string) *EventBody {
 		return &EventBody{Type: EventPortExposed}
 	case messages.SystemCategoryDeliveryFailed:
 		return &EventBody{Type: EventDeliveryFailed}
+	case messages.SystemCategoryDeliveryDeferred:
+		// O-c (p2a-r2 review): design agent-reincarnate §3.7's deferred
+		// notice (publishDeliveryDeferred) is not a failure — the message
+		// was saved, not dropped — but there is no dedicated EventType for
+		// it. Reuse EventDeliveryFailed's type with a distinct Status so
+		// the category round-trips instead of falling to default (which
+		// would both warn and silently reclassify it as
+		// agent.state-changed).
+		return &EventBody{Type: EventDeliveryFailed, Status: "DELIVERY_DEFERRED"}
 	default:
 		slog.Warn("unknown system_category, defaulting to agent.state-changed",
 			"system_category", category)
@@ -140,6 +166,14 @@ func MapLegacyEnvelope(old *messages.StructuredMessage, ident PersistedIdentity)
 	systemCategory := old.Metadata["system_category"]
 	kind, intent, event := MapLegacyType(old.Type, systemCategory, hasAddressee)
 
+	// Human-to-human replies should be inform, not request.
+	// MapLegacyType maps TypeReply to IntentRequest (correct for agent
+	// recipients), but human-to-human replies are informational.
+	if old.Type == messages.TypeReply && !strings.HasPrefix(old.Recipient, "agent:") {
+		inform := IntentInform
+		intent = &inform
+	}
+
 	// Enrich event body from old fields where possible.
 	if event != nil {
 		if old.Status != "" {
@@ -184,6 +218,23 @@ func MapLegacyEnvelope(old *messages.StructuredMessage, ident PersistedIdentity)
 		Attachments: attachments,
 		Urgent:      old.Urgent,
 		CreatedAt:   createdAt,
+	}
+
+	// Copy client-supplied metadata, filtering out internal keys that are
+	// either represented as first-class envelope fields (mention_source,
+	// mention_position, channel, thread_id, system_category) or are
+	// platform-specific implementation details (__attachments).
+	if len(old.Metadata) > 0 {
+		filtered := make(map[string]string)
+		for k, v := range old.Metadata {
+			if internalMetadataKeys[k] {
+				continue
+			}
+			filtered[k] = v
+		}
+		if len(filtered) > 0 {
+			msg.Metadata = filtered
+		}
 	}
 
 	// Build addressees.
@@ -327,7 +378,7 @@ func NewEnvelopeToLegacy(msg *Message, addrs []Addressee) *messages.StructuredMe
 	// Map metadata from event body.
 	if msg.Event != nil {
 		old.Metadata = make(map[string]string)
-		if cat := eventTypeToSystemCategory(msg.Event.Type); cat != "" {
+		if cat := eventTypeToSystemCategory(msg.Event); cat != "" {
 			old.Metadata["system_category"] = cat
 		}
 		if msg.Event.Status != "" {
@@ -399,14 +450,26 @@ func mapNewTypeToLegacy(msg *Message) string {
 	}
 }
 
-// eventTypeToSystemCategory maps an EventType back to the old system_category.
-func eventTypeToSystemCategory(et EventType) string {
-	switch et {
+// eventTypeToSystemCategory maps an EventBody back to the old system_category.
+// Takes the full body, not just the Type, because O-c (p2a-r2 review) reuses
+// EventDeliveryFailed's Type for the deferred notice (there is no dedicated
+// EventType for it) and distinguishes it only by Status — without checking
+// Status here, a deferred notice would round-trip back to
+// SystemCategoryDeliveryFailed and lose the distinction mapSystemCategory
+// made on the way in.
+func eventTypeToSystemCategory(body *EventBody) string {
+	if body == nil {
+		return ""
+	}
+	switch body.Type {
 	case EventScheduleFired:
 		return messages.SystemCategoryScheduler
 	case EventPortExposed:
 		return messages.SystemCategoryPortForward
 	case EventDeliveryFailed:
+		if body.Status == "DELIVERY_DEFERRED" {
+			return messages.SystemCategoryDeliveryDeferred
+		}
 		return messages.SystemCategoryDeliveryFailed
 	default:
 		return ""

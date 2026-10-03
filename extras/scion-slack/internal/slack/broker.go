@@ -24,7 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 )
 
 const (
@@ -311,7 +311,7 @@ func (b *SlackBroker) Configure(config map[string]string) error {
 				if hc == nil {
 					continue
 				}
-				if err := hc.RequestSubscription(projectcompat.AllProjectsPattern()); err != nil {
+				if err := hc.RequestSubscription(projectkeys.AllProjectsPattern()); err != nil {
 					b.log.Warn("Failed to request bootstrap subscription", "error", err)
 					continue
 				}
@@ -925,16 +925,16 @@ func (b *SlackBroker) resolveRecipientChannels(ctx context.Context, recipient, p
 // --- Topic parsing ---
 
 func parseTopicComponents(topic string) (projectID, agentSlug string) {
-	parsed, err := projectcompat.ParseTopic(topic)
+	parsed, err := projectkeys.ParseTopic(topic)
 	if err == nil {
 		projectID = parsed.ProjectID
-		if parsed.Kind == projectcompat.TopicKindAgent {
+		if parsed.Kind == projectkeys.TopicKindAgent {
 			agentSlug = parsed.Actor
 		}
 	} else {
 		parts := strings.Split(topic, ".")
 		for i, part := range parts {
-			if (part == "grove" || part == "project") && i+1 < len(parts) {
+			if part == "project" && i+1 < len(parts) {
 				projectID = parts[i+1]
 			}
 			if part == "agent" && i+1 < len(parts) {

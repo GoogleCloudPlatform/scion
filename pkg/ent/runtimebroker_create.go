@@ -176,31 +176,29 @@ func (_c *RuntimeBrokerCreate) SetNillableRuntimes(v *string) *RuntimeBrokerCrea
 	return _c
 }
 
+// SetDefaultProfile sets the "default_profile" field.
+func (_c *RuntimeBrokerCreate) SetDefaultProfile(v string) *RuntimeBrokerCreate {
+	_c.mutation.SetDefaultProfile(v)
+	return _c
+}
+
+// SetNillableDefaultProfile sets the "default_profile" field if the given value is not nil.
+func (_c *RuntimeBrokerCreate) SetNillableDefaultProfile(v *string) *RuntimeBrokerCreate {
+	if v != nil {
+		_c.SetDefaultProfile(*v)
+	}
+	return _c
+}
+
 // SetLabels sets the "labels" field.
-func (_c *RuntimeBrokerCreate) SetLabels(v string) *RuntimeBrokerCreate {
+func (_c *RuntimeBrokerCreate) SetLabels(v map[string]string) *RuntimeBrokerCreate {
 	_c.mutation.SetLabels(v)
 	return _c
 }
 
-// SetNillableLabels sets the "labels" field if the given value is not nil.
-func (_c *RuntimeBrokerCreate) SetNillableLabels(v *string) *RuntimeBrokerCreate {
-	if v != nil {
-		_c.SetLabels(*v)
-	}
-	return _c
-}
-
 // SetAnnotations sets the "annotations" field.
-func (_c *RuntimeBrokerCreate) SetAnnotations(v string) *RuntimeBrokerCreate {
+func (_c *RuntimeBrokerCreate) SetAnnotations(v map[string]string) *RuntimeBrokerCreate {
 	_c.mutation.SetAnnotations(v)
-	return _c
-}
-
-// SetNillableAnnotations sets the "annotations" field if the given value is not nil.
-func (_c *RuntimeBrokerCreate) SetNillableAnnotations(v *string) *RuntimeBrokerCreate {
-	if v != nil {
-		_c.SetAnnotations(*v)
-	}
 	return _c
 }
 
@@ -550,12 +548,16 @@ func (_c *RuntimeBrokerCreate) createSpec() (*RuntimeBroker, *sqlgraph.CreateSpe
 		_spec.SetField(runtimebroker.FieldRuntimes, field.TypeString, value)
 		_node.Runtimes = value
 	}
+	if value, ok := _c.mutation.DefaultProfile(); ok {
+		_spec.SetField(runtimebroker.FieldDefaultProfile, field.TypeString, value)
+		_node.DefaultProfile = value
+	}
 	if value, ok := _c.mutation.Labels(); ok {
-		_spec.SetField(runtimebroker.FieldLabels, field.TypeString, value)
+		_spec.SetField(runtimebroker.FieldLabels, field.TypeJSON, value)
 		_node.Labels = value
 	}
 	if value, ok := _c.mutation.Annotations(); ok {
-		_spec.SetField(runtimebroker.FieldAnnotations, field.TypeString, value)
+		_spec.SetField(runtimebroker.FieldAnnotations, field.TypeJSON, value)
 		_node.Annotations = value
 	}
 	if value, ok := _c.mutation.Endpoint(); ok {
@@ -836,8 +838,26 @@ func (u *RuntimeBrokerUpsert) ClearRuntimes() *RuntimeBrokerUpsert {
 	return u
 }
 
+// SetDefaultProfile sets the "default_profile" field.
+func (u *RuntimeBrokerUpsert) SetDefaultProfile(v string) *RuntimeBrokerUpsert {
+	u.Set(runtimebroker.FieldDefaultProfile, v)
+	return u
+}
+
+// UpdateDefaultProfile sets the "default_profile" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsert) UpdateDefaultProfile() *RuntimeBrokerUpsert {
+	u.SetExcluded(runtimebroker.FieldDefaultProfile)
+	return u
+}
+
+// ClearDefaultProfile clears the value of the "default_profile" field.
+func (u *RuntimeBrokerUpsert) ClearDefaultProfile() *RuntimeBrokerUpsert {
+	u.SetNull(runtimebroker.FieldDefaultProfile)
+	return u
+}
+
 // SetLabels sets the "labels" field.
-func (u *RuntimeBrokerUpsert) SetLabels(v string) *RuntimeBrokerUpsert {
+func (u *RuntimeBrokerUpsert) SetLabels(v map[string]string) *RuntimeBrokerUpsert {
 	u.Set(runtimebroker.FieldLabels, v)
 	return u
 }
@@ -855,7 +875,7 @@ func (u *RuntimeBrokerUpsert) ClearLabels() *RuntimeBrokerUpsert {
 }
 
 // SetAnnotations sets the "annotations" field.
-func (u *RuntimeBrokerUpsert) SetAnnotations(v string) *RuntimeBrokerUpsert {
+func (u *RuntimeBrokerUpsert) SetAnnotations(v map[string]string) *RuntimeBrokerUpsert {
 	u.Set(runtimebroker.FieldAnnotations, v)
 	return u
 }
@@ -1290,8 +1310,29 @@ func (u *RuntimeBrokerUpsertOne) ClearRuntimes() *RuntimeBrokerUpsertOne {
 	})
 }
 
+// SetDefaultProfile sets the "default_profile" field.
+func (u *RuntimeBrokerUpsertOne) SetDefaultProfile(v string) *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetDefaultProfile(v)
+	})
+}
+
+// UpdateDefaultProfile sets the "default_profile" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertOne) UpdateDefaultProfile() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateDefaultProfile()
+	})
+}
+
+// ClearDefaultProfile clears the value of the "default_profile" field.
+func (u *RuntimeBrokerUpsertOne) ClearDefaultProfile() *RuntimeBrokerUpsertOne {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearDefaultProfile()
+	})
+}
+
 // SetLabels sets the "labels" field.
-func (u *RuntimeBrokerUpsertOne) SetLabels(v string) *RuntimeBrokerUpsertOne {
+func (u *RuntimeBrokerUpsertOne) SetLabels(v map[string]string) *RuntimeBrokerUpsertOne {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.SetLabels(v)
 	})
@@ -1312,7 +1353,7 @@ func (u *RuntimeBrokerUpsertOne) ClearLabels() *RuntimeBrokerUpsertOne {
 }
 
 // SetAnnotations sets the "annotations" field.
-func (u *RuntimeBrokerUpsertOne) SetAnnotations(v string) *RuntimeBrokerUpsertOne {
+func (u *RuntimeBrokerUpsertOne) SetAnnotations(v map[string]string) *RuntimeBrokerUpsertOne {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.SetAnnotations(v)
 	})
@@ -1942,8 +1983,29 @@ func (u *RuntimeBrokerUpsertBulk) ClearRuntimes() *RuntimeBrokerUpsertBulk {
 	})
 }
 
+// SetDefaultProfile sets the "default_profile" field.
+func (u *RuntimeBrokerUpsertBulk) SetDefaultProfile(v string) *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.SetDefaultProfile(v)
+	})
+}
+
+// UpdateDefaultProfile sets the "default_profile" field to the value that was provided on create.
+func (u *RuntimeBrokerUpsertBulk) UpdateDefaultProfile() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.UpdateDefaultProfile()
+	})
+}
+
+// ClearDefaultProfile clears the value of the "default_profile" field.
+func (u *RuntimeBrokerUpsertBulk) ClearDefaultProfile() *RuntimeBrokerUpsertBulk {
+	return u.Update(func(s *RuntimeBrokerUpsert) {
+		s.ClearDefaultProfile()
+	})
+}
+
 // SetLabels sets the "labels" field.
-func (u *RuntimeBrokerUpsertBulk) SetLabels(v string) *RuntimeBrokerUpsertBulk {
+func (u *RuntimeBrokerUpsertBulk) SetLabels(v map[string]string) *RuntimeBrokerUpsertBulk {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.SetLabels(v)
 	})
@@ -1964,7 +2026,7 @@ func (u *RuntimeBrokerUpsertBulk) ClearLabels() *RuntimeBrokerUpsertBulk {
 }
 
 // SetAnnotations sets the "annotations" field.
-func (u *RuntimeBrokerUpsertBulk) SetAnnotations(v string) *RuntimeBrokerUpsertBulk {
+func (u *RuntimeBrokerUpsertBulk) SetAnnotations(v map[string]string) *RuntimeBrokerUpsertBulk {
 	return u.Update(func(s *RuntimeBrokerUpsert) {
 		s.SetAnnotations(v)
 	})

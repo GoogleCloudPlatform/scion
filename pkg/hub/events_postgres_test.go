@@ -178,8 +178,7 @@ func TestChannelsForSubject(t *testing.T) {
 		subject string
 		want    []string
 	}{
-		{"project.G1.agent.status", []string{groveChannel("G1"), pgGlobalChannel}},
-		{"grove.G2.notification", []string{groveChannel("G2"), pgGlobalChannel}},
+		{"project.G1.agent.status", []string{projectChannel("G1"), pgGlobalChannel}},
 		{"agent.A1.status", []string{pgGlobalChannel}},
 		{"user.U1.message", []string{pgGlobalChannel}},
 		{"broker.B1.status", []string{pgGlobalChannel}},
@@ -199,10 +198,9 @@ func TestChannelsForPattern(t *testing.T) {
 		pattern string
 		want    []string
 	}{
-		{"project.G1.>", []string{groveChannel("G1")}},
-		{"grove.G2.agent.status", []string{groveChannel("G2")}},
+		{"project.G1.>", []string{projectChannel("G1")}},
 		{"project.>.agent.status", []string{pgGlobalChannel}}, // spanning wildcard
-		{"project.*.agent.status", []string{pgGlobalChannel}}, // single-token wildcard grove
+		{"project.*.agent.status", []string{pgGlobalChannel}}, // single-token wildcard project
 		{"agent.A1.message", []string{pgGlobalChannel}},
 		{"notification.created", []string{pgGlobalChannel}},
 	}
@@ -214,20 +212,46 @@ func TestChannelsForPattern(t *testing.T) {
 	}
 }
 
-func TestGroveChannel_BoundedLength(t *testing.T) {
+func TestProjectChannel_BoundedLength(t *testing.T) {
 	long := strings.Repeat("x", 200)
-	got := groveChannel(long)
+	got := projectChannel(long)
 	if len(got) > maxPGIdentifier {
-		t.Errorf("groveChannel(long) length = %d, want <= %d", len(got), maxPGIdentifier)
+		t.Errorf("projectChannel(long) length = %d, want <= %d", len(got), maxPGIdentifier)
 	}
 	// Deterministic.
-	if got != groveChannel(long) {
-		t.Errorf("groveChannel not deterministic")
+	if got != projectChannel(long) {
+		t.Errorf("projectChannel not deterministic")
 	}
 	// A normal UUID-length id is passed through unhashed.
 	uuidLike := "11111111-2222-3333-4444-555555555555"
-	if groveChannel(uuidLike) != pgChannelPrefix+"g_"+uuidLike {
-		t.Errorf("groveChannel(uuid) = %q, want passthrough", groveChannel(uuidLike))
+	if projectChannel(uuidLike) != pgChannelPrefix+"g_"+uuidLike {
+		t.Errorf("projectChannel(uuid) = %q, want passthrough", projectChannel(uuidLike))
+	}
+}
+
+// TestProjectChannel_WirePrefixPinned pins the Postgres NOTIFY channel prefix
+// ("scion_ev_g_<id>") byte-for-byte: it is an internal key shared by hub
+// replicas, so changing it would drop cross-replica events during a rolling
+// deploy.
+func TestProjectChannel_WirePrefixPinned(t *testing.T) {
+	if got, want := projectChannel("abc123"), "scion_ev_g_abc123"; got != want {
+		t.Errorf("projectChannel(%q) = %q, want %q", "abc123", got, want)
+	}
+}
+
+func TestChannelScope(t *testing.T) {
+	tests := []struct {
+		subject string
+		want    string
+	}{
+		{"project.G1.agent.status", "project"},
+		{"agent.A1.status", "global"},
+		{"notification.created", "global"},
+	}
+	for _, tt := range tests {
+		if got := channelScope(tt.subject); got != tt.want {
+			t.Errorf("channelScope(%q) = %q, want %q", tt.subject, got, tt.want)
+		}
 	}
 }
 
@@ -239,9 +263,10 @@ func TestEventTypeName(t *testing.T) {
 
 // --- registry / fan-out tests (no database required) ---
 
-// TestPostgresFanout_ScopedSubscriberNoDoubleDelivery verifies a grove-scoped
-// subscriber receives grove events on the grove channel exactly once and is not
-// also matched on the global channel (which carries a mirror of grove events).
+// TestPostgresFanout_ScopedSubscriberNoDoubleDelivery verifies a project-scoped
+// subscriber receives project events on the project channel exactly once and is
+// not also matched on the global channel (which carries a mirror of project
+// events).
 func TestPostgresFanout_ScopedSubscriberNoDoubleDelivery(t *testing.T) {
 	p := newTestPostgresPublisher(nil)
 	ch, unsub := p.Subscribe("project.G1.>")
@@ -249,15 +274,15 @@ func TestPostgresFanout_ScopedSubscriberNoDoubleDelivery(t *testing.T) {
 
 	evt := Event{Subject: "project.G1.agent.status", Data: []byte(`{}`)}
 
-	// Delivered on the grove channel.
-	p.fanout(groveChannel("G1"), evt)
+	// Delivered on the project channel.
+	p.fanout(projectChannel("G1"), evt)
 	select {
 	case got := <-ch:
 		if got.Subject != evt.Subject {
 			t.Fatalf("got subject %q", got.Subject)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("expected delivery on grove channel")
+		t.Fatal("expected delivery on project channel")
 	}
 
 	// NOT delivered again on the global channel: the subscriber's patterns do
@@ -270,9 +295,9 @@ func TestPostgresFanout_ScopedSubscriberNoDoubleDelivery(t *testing.T) {
 	}
 }
 
-// TestPostgresFanout_SpanningSubscriber verifies a grove-spanning subscriber
-// (e.g. the notification dispatcher) receives grove events via the global
-// channel and not via the per-grove channel.
+// TestPostgresFanout_SpanningSubscriber verifies a project-spanning subscriber
+// (e.g. the notification dispatcher) receives project events via the global
+// channel and not via the per-project channel.
 func TestPostgresFanout_SpanningSubscriber(t *testing.T) {
 	p := newTestPostgresPublisher(nil)
 	ch, unsub := p.Subscribe("project.>.agent.status")
@@ -290,18 +315,18 @@ func TestPostgresFanout_SpanningSubscriber(t *testing.T) {
 		t.Fatal("expected delivery on global channel for spanning subscriber")
 	}
 
-	// The per-grove channel must not deliver to a spanning subscriber.
-	p.fanout(groveChannel("G9"), evt)
+	// The per-project channel must not deliver to a spanning subscriber.
+	p.fanout(projectChannel("G9"), evt)
 	select {
 	case got := <-ch:
-		t.Fatalf("unexpected delivery on grove channel: %q", got.Subject)
+		t.Fatalf("unexpected delivery on project channel: %q", got.Subject)
 	case <-time.After(100 * time.Millisecond):
 	}
 }
 
 // TestPostgresFanout_MixedPatternsNoDuplicate verifies that a single Subscribe
-// call mixing a grove-scoped and a non-grove pattern never double-delivers an
-// event that happens to be mirrored onto both channels.
+// call mixing a project-scoped and a non-project pattern never double-delivers
+// an event that happens to be mirrored onto both channels.
 func TestPostgresFanout_MixedPatternsNoDuplicate(t *testing.T) {
 	p := newTestPostgresPublisher(nil)
 	ch, unsub := p.Subscribe("project.G1.agent.status", "agent.A1.message")
@@ -312,8 +337,8 @@ func TestPostgresFanout_MixedPatternsNoDuplicate(t *testing.T) {
 	// On the global channel, only the agent.A1.message pattern is active, which
 	// does not match the project subject -> no delivery here.
 	p.fanout(pgGlobalChannel, evt)
-	// On the grove channel, the project pattern matches -> exactly one delivery.
-	p.fanout(groveChannel("G1"), evt)
+	// On the project channel, the project pattern matches -> exactly one delivery.
+	p.fanout(projectChannel("G1"), evt)
 
 	received := 0
 	for {
@@ -333,7 +358,7 @@ func TestPostgresSubscribe_Unsubscribe(t *testing.T) {
 	p := newTestPostgresPublisher(nil)
 	ch, unsub := p.Subscribe("project.G1.>")
 
-	gc := groveChannel("G1")
+	gc := projectChannel("G1")
 	if p.desired[gc] != 1 {
 		t.Fatalf("desired[%s] = %d, want 1", gc, p.desired[gc])
 	}
@@ -361,7 +386,7 @@ func TestBuildAndNotify_SmallPayload(t *testing.T) {
 		t.Fatalf("buildAndNotify: %v", err)
 	}
 
-	// Grove subject -> NOTIFY on grove channel and global channel.
+	// Project subject -> NOTIFY on project channel and global channel.
 	notifies := exec.notifyCalls()
 	if len(notifies) != 2 {
 		t.Fatalf("expected 2 pg_notify calls, got %d", len(notifies))
@@ -384,7 +409,7 @@ func TestBuildAndNotify_SmallPayload(t *testing.T) {
 			t.Fatal("envelope data should be inline")
 		}
 	}
-	if !gotChannels[groveChannel("G1")] || !gotChannels[pgGlobalChannel] {
+	if !gotChannels[projectChannel("G1")] || !gotChannels[pgGlobalChannel] {
 		t.Fatalf("notify channels = %v", gotChannels)
 	}
 	if len(exec.inserts()) != 0 {
@@ -410,7 +435,7 @@ func TestBuildAndNotify_OversizedPayloadOffloaded(t *testing.T) {
 		t.Fatalf("oversized payload should INSERT once, got %d", got)
 	}
 	notifies := exec.notifyCalls()
-	if len(notifies) != 1 { // non-grove subject -> global only
+	if len(notifies) != 1 { // non-project subject -> global only
 		t.Fatalf("expected 1 pg_notify, got %d", len(notifies))
 	}
 	var env pgEnvelope
@@ -435,7 +460,7 @@ func TestPublishTx_UsesProvidedExecutor(t *testing.T) {
 	p := newTestPostgresPublisher(nil)
 	tx := &recExec{}
 
-	if err := p.PublishTx(context.Background(), tx, "grove.G1.created", ProjectCreatedEvent{ProjectID: "G1"}); err != nil {
+	if err := p.PublishTx(context.Background(), tx, "project.G1.created", ProjectCreatedEvent{ProjectID: "G1"}); err != nil {
 		t.Fatalf("PublishTx: %v", err)
 	}
 	if len(tx.notifyCalls()) == 0 {
@@ -525,7 +550,7 @@ func TestPostgresIntegration_CrossReplicaDelivery(t *testing.T) {
 	ch, unsub := b.Subscribe("project." + pid + ".>")
 	defer unsub()
 
-	// Give B's listener time to LISTEN on the grove channel.
+	// Give B's listener time to LISTEN on the project channel.
 	time.Sleep(2 * listenPollInterval)
 
 	a.PublishProjectCreated(ctx, mkProject(pid))

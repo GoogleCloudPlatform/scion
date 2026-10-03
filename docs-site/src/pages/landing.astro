@@ -21,8 +21,8 @@ const base = import.meta.env.BASE_URL;
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Scion — Multi-Agent Orchestration for Deep Agents</title>
-  <meta name="description" content="Run multiple AI agents in parallel, each in its own container with isolated workspaces. Orchestrate Claude Code, Gemini CLI, Codex, and more." />
+  <title>Scion — An Open Foundation for Agent Collaboration</title>
+  <meta name="description" content="Build teams of AI agents with your choice of harnesses, models, and infrastructure. Open-source orchestration for collaboration, from your laptop to hosted teams." />
   <link rel="icon" type="image/svg+xml" href={`${base}/favicon.svg`} />
 
   <!-- Fonts for both landing page and integrated slideshow -->
@@ -100,6 +100,13 @@ const base = import.meta.env.BASE_URL;
       font-style: italic;
       margin-bottom: 1.5rem;
       letter-spacing: 0.02em;
+    }
+
+    .hero-title {
+      font-size: clamp(1.8rem, 4vw, 3rem);
+      line-height: 1.2;
+      max-width: 800px;
+      margin-bottom: 1.5rem;
     }
 
     .hero-subtitle {
@@ -316,6 +323,7 @@ const base = import.meta.env.BASE_URL;
 
     .step code {
       display: block;
+      overflow-wrap: anywhere;
       margin-top: 0.5rem;
       font-size: 0.8rem;
       color: var(--accent-emerald);
@@ -1251,10 +1259,11 @@ const base = import.meta.env.BASE_URL;
   <section class="hero">
     <img src={`${base}/scion-graphic.png`} alt="Scion" class="hero-graphic" />
     <p class="hero-tagline">sci·on /ˈsīən/ — a young shoot or twig, cut for grafting or rooting.</p>
+    <h1 class="hero-title">An open foundation for agent collaboration.</h1>
     <p class="hero-subtitle">
-      A containerized orchestration system for multi-agent workflows.
-      Run multiple AI agents in parallel — each in its own sandbox, with isolated workspaces —
-      collaborating on your code simultaneously.
+      Build teams of AI agents that delegate, share findings, and work alongside you.
+      Bring your choice of harnesses and models, shape how they collaborate,
+      and run them on your laptop or across cloud infrastructure.
     </p>
     <div class="hero-buttons">
       <a href="https://googlecloudplatform.github.io/scion/getting-started/install/" class="btn btn-primary">
@@ -1276,7 +1285,7 @@ const base = import.meta.env.BASE_URL;
   <section class="landing-section" style="background: var(--bg-secondary); border-top: 1px solid var(--border-subtle); border-bottom: 1px solid var(--border-subtle);">
     <div class="section-inner" style="max-width: 1200px;">
       <h2 class="section-title">Scion Core</h2>
-      <p class="section-subtitle">A five-part containerized orchestration system for multi-agent workflows.</p>
+      <p class="section-subtitle">Simple building blocks for teams that adapt as the work unfolds.</p>
 
       <div class="scion-deck" id="scion-deck">
         <!-- Background glows -->
@@ -1289,7 +1298,7 @@ const base = import.meta.env.BASE_URL;
         <header class="presentation-header">
           <div class="logo-container">
             <span style="font-size: 1.2rem; filter: drop-shadow(0 0 4px rgba(96, 165, 250, 0.2));">🌱</span>
-            <h1 class="logo-text">SCION<span>.</span></h1>
+            <div class="logo-text">SCION<span>.</span></div>
           </div>
           <div class="deck-title">Multi-Agent Orchestration Explainer</div>
         </header>
@@ -1301,7 +1310,7 @@ const base = import.meta.env.BASE_URL;
           <section class="slide active slide-full" id="deck-slide-0">
             <h2 class="slide-title" style="font-size: 1.8rem; margin-bottom: 0.3rem;">Scion Core</h2>
             <p class="slide-desc" style="max-width: 600px; margin-bottom: 1.5rem; text-align: center; font-size: 0.9rem;">
-              A five-part containerized orchestration system for multi-agent workflows.
+              Define responsibilities. Run agents. Delegate, communicate, and share the work.
             </p>
             <div class="agenda-grid">
               <div class="agenda-card" data-target-slide="1">
@@ -1317,7 +1326,7 @@ const base = import.meta.env.BASE_URL;
               <div class="agenda-card" data-target-slide="3">
                 <div class="agenda-num">03</div>
                 <h3 class="agenda-title">Spawn</h3>
-                <p class="agenda-subtitle">Swarm Hierarchies</p>
+                <p class="agenda-subtitle">Adaptive Teams</p>
               </div>
               <div class="agenda-card" data-target-slide="4">
                 <div class="agenda-num">04</div>
@@ -1336,7 +1345,7 @@ const base = import.meta.env.BASE_URL;
           <section class="slide slide-full" id="deck-slide-1">
             <h2 class="slide-title" style="font-size: 1.5rem; margin-bottom: 0.25rem;">Agent Definition</h2>
             <p class="slide-desc" style="max-width: 600px; margin-bottom: 0.75rem; text-align: center;">
-              In Scion, an agent is defined by a structured template consisting of four core layers.
+              Combine reusable instructions, skills, and tools to give each agent a clear purpose.
             </p>
             <div class="agent-definition-grid">
               <div class="def-card">
@@ -1344,28 +1353,28 @@ const base = import.meta.env.BASE_URL;
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
                 </div>
                 <h3 class="def-card-title">1. System Instruction</h3>
-                <p class="def-card-body">A system instruction defining the agent's primary purpose, persona, and core role. Configured as the foundational LLM boundary.</p>
+                <p class="def-card-body">Define the agent's purpose and responsibilities, from research and implementation to independent review.</p>
               </div>
               <div class="def-card">
                 <div class="def-card-icon">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
                 </div>
                 <h3 class="def-card-title">2. Agent Instructions</h3>
-                <p class="def-card-body">Detailing how the agent gets its work done. Scion dynamically appends contextual instructions based on its workspace.</p>
+                <p class="def-card-body">Describe how the agent works with its team. Scion adds context about the workspace and available capabilities.</p>
               </div>
               <div class="def-card">
                 <div class="def-card-icon">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
                 </div>
                 <h3 class="def-card-title">3. Agent Skills</h3>
-                <p class="def-card-body">A set of specialized skills conforming to the Agent Skills Specification to perform deterministic CLI tasks.</p>
+                <p class="def-card-body">Give agents reusable procedures and tool guidance. Publish and version skills through the Skill Bank and connected registries.</p>
               </div>
               <div class="def-card">
                 <div class="def-card-icon">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
                 </div>
                 <h3 class="def-card-title">4. Model Context Protocol (MCP)</h3>
-                <p class="def-card-body">Optionally configures MCP server connections to dynamically expose external tools, with container harnesses as optional execution details.</p>
+                <p class="def-card-body">Connect external tools and data through MCP server configuration for supported harnesses.</p>
               </div>
             </div>
           </section>
@@ -1374,12 +1383,12 @@ const base = import.meta.env.BASE_URL;
           <section class="slide" id="deck-slide-2">
             <div class="slide-content">
               <h2 class="slide-title">Agent Runtime</h2>
-              <p class="slide-desc">Scion abstracts complex system execution, managing secure, isolated processes across varied backends under a managed control plane.</p>
+              <p class="slide-desc">Give agents a working environment, then choose where it runs: a laptop, a remote machine, or cloud infrastructure.</p>
               <ul class="slide-bullets">
-                <li><strong>Agent Lifecycle:</strong> Uniform control commands (<code>create</code>, <code>start</code>, <code>stop</code>, <code>attach</code>, <code>delete</code>) regardless of the underlying agent implementation.</li>
-                <li><strong>Container Runtimes:</strong> Seamlessly executes sandboxed processes across <strong>Docker</strong>, <strong>Podman</strong>, macOS native <strong>Apple Virtualization</strong>, or remote <strong>Kubernetes</strong>.</li>
-                <li><strong>Env &amp; Volume Mounts:</strong> Projects explicitly defined environment variables, mounts read-only secrets/credentials, and maps isolated <code>tmpfs</code> shadow volumes.</li>
-                <li><strong>Native &amp; Federated Identity:</strong> Binds native project-scoped identities to federated systems like GCP service accounts or Agent Platform credentials.</li>
+                <li><strong>Agent Lifecycle:</strong> Create, start, stop, and inspect agents through a common CLI. Attach to supported interactive sessions.</li>
+                <li><strong>Runtime Choice:</strong> Run on Docker, Podman, Apple Container, Kubernetes, or Cloud Run.</li>
+                <li><strong>Working Environment:</strong> Configure each agent's tools, environment, credentials, and workspace sharing.</li>
+                <li><strong>Hosted Controls:</strong> Use roles, access boundaries, scoped secrets, and federated identity as the team grows.</li>
               </ul>
             </div>
             <div class="slide-visual">
@@ -1441,12 +1450,12 @@ const base = import.meta.env.BASE_URL;
           <section class="slide" id="deck-slide-3">
             <div class="slide-content">
               <h2 class="slide-title">Agent Collaborators</h2>
-              <p class="slide-desc">Scion supports teams of humans working with teams of agents. Both are treated as actors in the system, enabling dynamic, self-directed collaboration instead of rigid, hard-coded orchestration graphs.</p>
+              <p class="slide-desc">Teams of humans and agents work toward a shared goal. Instructions guide how they delegate, exchange findings, and ask for help.</p>
               <ul class="slide-bullets">
-                <li><strong>Actor Interaction:</strong> Both humans and agents can query, message, or inspect Agents.</li>
-                <li><strong>Self-Directed Management:</strong> Agents are equipped with access to the <code>scion</code> CLI, letting agents themselves dynamically spawn, query, or stop sub-agents.</li>
-                <li><strong>Asynchronous Messaging:</strong> Collaborators communicate asynchronously, sending messages and delegating work across safe, pluggable brokers.</li>
-                <li><strong>Interactive Inspection:</strong> Humans and parent agents can attach or "look" at running agent processes (via <code>tmux</code>) or view logs.</li>
+                <li><strong>Adaptive Teams:</strong> Authorized agents use the <code>scion</code> CLI to create and manage collaborators as new tasks emerge.</li>
+                <li><strong>Shared Conversations:</strong> Exchange messages, mentions, and attachments through web chat and connected chat services.</li>
+                <li><strong>Human Participation:</strong> Answer questions, redirect work, or join an interactive harness session.</li>
+                <li><strong>Visible Progress:</strong> Follow agent activity, inspect logs, and trace who delegated work to whom.</li>
               </ul>
             </div>
             <div class="slide-visual">
@@ -1525,12 +1534,12 @@ const base = import.meta.env.BASE_URL;
           <section class="slide" id="deck-slide-4">
             <div class="slide-content">
               <h2 class="slide-title">Agent Notifications</h2>
-              <p class="slide-desc">Scion combines state and messages into notifications to provide robust asynchronous event driven orchestration patterns.</p>
+              <p class="slide-desc">Let work proceed asynchronously, with notifications that bring collaborators back when they are needed.</p>
               <ul class="slide-bullets">
-                <li><strong>State &amp; Message Intersection:</strong> Notifications represent events triggered when an agent transitions state (e.g. from <code>working</code> to <code>waiting_for_input</code>).</li>
-                <li><strong>Sub-Agent Suspend Pattern:</strong> When an agent delegates a task, it invokes a child, updates its activity to <code>blocked</code>, and sleeps. No active polling occurs.</li>
-                <li><strong>Event-Driven Wakeup:</strong> Once the sub-agent completes, stalls, or needs input, a notification hook automatically wakes the parent agent up.</li>
-                <li><strong>Human Attention Alerts:</strong> Triggers notifications to Slack, terminals, or dashboards the instant an agent gets stuck or requires human confirmation.</li>
+                <li><strong>Progress Signals:</strong> Agents report when they are working, blocked, finished, or waiting for input.</li>
+                <li><strong>Delegation:</strong> A parent can wait for a child task and continue when a notification arrives.</li>
+                <li><strong>Subscriptions:</strong> Route completion, stall, and input requests to the collaborators who need them.</li>
+                <li><strong>Human Attention:</strong> Surface requests for help through the web UI and configured chat integrations.</li>
               </ul>
             </div>
             <div class="slide-visual">
@@ -1592,12 +1601,12 @@ const base = import.meta.env.BASE_URL;
           <section class="slide" id="deck-slide-5">
             <div class="slide-content">
               <h2 class="slide-title">Shared Filesystem</h2>
-              <p class="slide-desc">For multi-agent workflows, sharing a high-performance filesystem provides frictionless code modification, test execution, and file exchanges. Scion manages concurrent file access safely.</p>
+              <p class="slide-desc">Give agents a place to exchange code, research, and artifacts. Choose what they share and where they work independently.</p>
               <ul class="slide-bullets">
-                <li><strong>Shared File Volume Mounts:</strong><ul><li>Agent workspaces share the same physical project directory, avoiding heavy git clone replication delays and preserving disk space.</li></ul></li>
-                <li><strong>Pass Context by Reference:</strong><ul><li>Instead of bloating LLM payloads with massive files or logs, agents pass a file path reference on the shared volume, drastically saving token bandwidth.</li></ul></li>
-                <li><strong>Shared Learnings &amp; Progress Notes:</strong><ul><li>Sibling agents read and write shared folders to exchange progress summaries and execution logs in real time.</li></ul></li>
-                <li><strong>Workspace Branch Isolation:</strong><ul><li>If Git isolation is needed, agents can initialize local branches or isolated worktrees, but they still operate on the shared disk storage.</li></ul></li>
+                <li><strong>Workspace Choice:</strong><ul><li>Use a shared workspace, separate Git worktrees, or independent clones to match the project.</li></ul></li>
+                <li><strong>Context by Reference:</strong><ul><li>Share artifact paths so collaborators can read what they need when they need it.</li></ul></li>
+                <li><strong>Shared Notes:</strong><ul><li>Keep findings, handoffs, and progress summaries in project shared directories.</li></ul></li>
+                <li><strong>Explicit Coordination:</strong><ul><li>Use team instructions to establish file ownership and coordinate overlapping edits.</li></ul></li>
               </ul>
             </div>
             <div class="slide-visual">
@@ -1657,7 +1666,7 @@ const base = import.meta.env.BASE_URL;
           <section class="slide slide-full" id="deck-slide-6">
             <h2 class="slide-title" style="text-align: center; margin-bottom: 0.25rem; font-size: 1.5rem;">Scion Orchestration Review</h2>
             <p class="slide-desc" style="max-width: 700px; margin-bottom: 1.25rem; text-align: center; font-size: 0.85rem;">
-              From declarative template definitions to secure, low-latency filesystem execution, Scion coordinates complex agentic workflows in five key stages.
+              Combine these building blocks to explore your own collaboration patterns, from a pair of specialists to a changing team.
             </p>
             <div class="pipeline-grid summary-grid">
               <div class="pipeline-card summary-card">
@@ -1665,35 +1674,35 @@ const base = import.meta.env.BASE_URL;
                   <svg viewBox="0 0 80 50" style="width: 100%; height: 36px;"><rect x="20" y="5" width="40" height="40" rx="3" fill="rgba(245, 158, 11, 0.03)" stroke="var(--scion-border)" stroke-width="1.5" /><rect x="25" y="10" width="18" height="3" rx="0.5" fill="#f59e0b" opacity="0.8" /><line x1="25" y1="18" x2="55" y2="18" stroke="var(--scion-text-secondary)" stroke-width="1.5" stroke-linecap="round" opacity="0.5" /><line x1="25" y1="24" x2="48" y2="24" stroke="var(--scion-text-secondary)" stroke-width="1.5" stroke-linecap="round" opacity="0.5" /><line x1="25" y1="30" x2="52" y2="30" stroke="var(--scion-text-secondary)" stroke-width="1.5" stroke-linecap="round" opacity="0.5" /></svg>
                 </div>
                 <h3 class="pipeline-card-title">1. Define</h3>
-                <p class="pipeline-card-body">Parses declarative agent templates containing system instructions, prompts, custom skills, and MCP configurations.</p>
+                <p class="pipeline-card-body">Give each agent a purpose with reusable instructions, skills, and tools.</p>
               </div>
               <div class="pipeline-card summary-card">
                 <div class="pipeline-card-icon">
                   <svg viewBox="0 0 80 50" style="width: 100%; height: 36px;"><rect x="22" y="12" width="36" height="26" rx="4" fill="rgba(168, 85, 247, 0.03)" stroke="#a855f7" stroke-width="1.5" /><circle cx="40" cy="25" r="5" fill="#a855f7" opacity="0.15" /><circle cx="40" cy="25" r="2.5" fill="#a855f7" /></svg>
                 </div>
                 <h3 class="pipeline-card-title">2. Run</h3>
-                <p class="pipeline-card-body">Launches standard execution sandboxes, isolating credentials, variables, and runtime boundaries dynamically.</p>
+                <p class="pipeline-card-body">Choose a runtime and configure each agent's environment and credentials.</p>
               </div>
               <div class="pipeline-card summary-card">
                 <div class="pipeline-card-icon">
                   <svg viewBox="0 0 80 50" style="width: 100%; height: 36px;"><circle cx="40" cy="11" r="5" fill="rgba(59, 130, 246, 0.15)" stroke="#3b82f6" stroke-width="1.5" /><circle cx="22" cy="38" r="4.5" fill="none" stroke="var(--scion-border)" stroke-width="1.5" /><circle cx="40" cy="38" r="4.5" fill="none" stroke="var(--scion-border)" stroke-width="1.5" /><circle cx="58" cy="38" r="4.5" fill="none" stroke="var(--scion-border)" stroke-width="1.5" /><line x1="36" y1="15" x2="25" y2="33" stroke="var(--scion-border)" stroke-width="1" stroke-dasharray="2 2" /><line x1="40" y1="16" x2="40" y2="33" stroke="var(--scion-border)" stroke-width="1" stroke-dasharray="2 2" /><line x1="44" y1="15" x2="55" y2="33" stroke="var(--scion-border)" stroke-width="1" stroke-dasharray="2 2" /></svg>
                 </div>
                 <h3 class="pipeline-card-title">3. Spawn</h3>
-                <p class="pipeline-card-body">Coordinates human actors and P2P agent hierarchies with lateral peer-to-peer messaging brokers.</p>
+                <p class="pipeline-card-body">Delegate to specialists and exchange findings as the work develops.</p>
               </div>
               <div class="pipeline-card summary-card">
                 <div class="pipeline-card-icon">
                   <svg viewBox="0 0 80 50" style="width: 100%; height: 36px;"><path d="M 52 32 C 52 32 52 26 56 26 C 60 26 60 32 60 32 L 63 32 L 61 34 L 51 34 L 49 32 Z" fill="rgba(6, 182, 212, 0.1)" stroke="#06b6d4" stroke-width="1.5" /><circle cx="56" cy="36" r="1.5" fill="#06b6d4" /><path d="M 64 23 C 66 25 66 29 64 31" fill="none" stroke="#06b6d4" stroke-width="1" stroke-linecap="round" /><path d="M 36 25 C 41 21 44 29 49 25" fill="none" stroke="#06b6d4" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="1.5 2" /></svg>
                 </div>
                 <h3 class="pipeline-card-title">4. Notify</h3>
-                <p class="pipeline-card-body">Enforces reactive wakeup sleep cycles (suspends parent, wakes instantly on child completion notification).</p>
+                <p class="pipeline-card-body">Bring collaborators back when tasks finish or an agent needs help.</p>
               </div>
               <div class="pipeline-card summary-card">
                 <div class="pipeline-card-icon">
                   <svg viewBox="0 0 80 50" style="width: 100%; height: 36px;"><rect x="30" y="20" width="20" height="24" rx="2" fill="rgba(234, 179, 8, 0.03)" stroke="var(--scion-border)" stroke-width="1.2" /><line x1="35" y1="26" x2="45" y2="26" stroke="var(--scion-text-secondary)" stroke-width="1" opacity="0.5" /><line x1="35" y1="32" x2="45" y2="32" stroke="var(--scion-text-secondary)" stroke-width="1" opacity="0.5" /><circle cx="53" cy="16" r="5" fill="var(--scion-bg)" stroke="#eab308" stroke-width="1.2" /><path d="M 12 25 L 26 25" fill="none" stroke="#eab308" stroke-width="1.2" stroke-linecap="round" /><polygon points="26 25 22 22 22 28" fill="#eab308" /></svg>
                 </div>
                 <h3 class="pipeline-card-title">5. Sync</h3>
-                <p class="pipeline-card-body">Shares folder filesystems concurrently to pass large context by reference and exchange shared progress notes.</p>
+                <p class="pipeline-card-body">Share artifacts and notes, with workspace boundaries chosen for the project.</p>
               </div>
             </div>
           </section>
@@ -1740,68 +1749,68 @@ const base = import.meta.env.BASE_URL;
   <!-- Features (detailed breakdown) -->
   <section class="landing-section features">
     <div class="section-inner">
-      <h2 class="section-title">How It Works</h2>
-      <p class="section-subtitle">Each pillar of Scion addresses a core challenge in multi-agent orchestration.</p>
+      <h2 class="section-title">Build the Team Your Project Needs</h2>
+      <p class="section-subtitle">Open-source infrastructure for experimenting with collaboration and operating the patterns that prove useful.</p>
       <div class="feature-grid">
         <div class="feature-card">
           <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
-          <h3>Agent Definition</h3>
-          <p>Agents are defined declaratively through templates combining four layers:</p>
+          <h3>Your Agents, Your Models</h3>
+          <p>Combine the strengths of different harnesses and models in one team.</p>
           <ul>
-            <li><strong>System Instruction</strong> — the agent's primary purpose, persona, and core role.</li>
-            <li><strong>Agent Instructions</strong> — operational context, dynamically appended based on workspace.</li>
-            <li><strong>Agent Skills</strong> — deterministic CLI skills conforming to the Agent Skills Specification.</li>
-            <li><strong>MCP Servers</strong> — optional Model Context Protocol connections for external tools.</li>
+            <li><strong>Harness choice</strong> — Claude Code, Gemini CLI, Codex, OpenCode, and more.</li>
+            <li><strong>Extensible setup</strong> — configure provisioning and authentication through harness bundles.</li>
+            <li><strong>Specialized roles</strong> — define responsibilities and tools through templates.</li>
           </ul>
         </div>
         <div class="feature-card">
           <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
-          <h3>Agent Runtime</h3>
-          <p>Scion abstracts complex system execution, managing secure, isolated processes across varied backends.</p>
+          <h3>From Laptop to Hosted Team</h3>
+          <p>Choose the infrastructure that fits the project and the people using it.</p>
           <ul>
-            <li><strong>Lifecycle control</strong> — uniform <code>create</code>, <code>start</code>, <code>stop</code>, <code>attach</code>, <code>delete</code> commands.</li>
-            <li><strong>Container runtimes</strong> — Docker, Podman, Apple Virtualization, or Kubernetes.</li>
-            <li><strong>Env &amp; mounts</strong> — explicit environment variables, read-only secrets, and isolated tmpfs volumes.</li>
-            <li><strong>Federated identity</strong> — binds project-scoped identities to GCP service accounts or Agent Platform credentials.</li>
+            <li><strong>Start locally</strong> — use the CLI or a Workstation Hub with a web UI.</li>
+            <li><strong>Host a team</strong> — single-node and HA deployment options.</li>
+            <li><strong>Runtime choice</strong> — Docker, Podman, Apple Container, Kubernetes, and Cloud Run.</li>
           </ul>
         </div>
         <div class="feature-card">
           <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
-          <h3>Agent Collaborators</h3>
-          <p>Teams of humans working with teams of agents. Both are treated as actors in the system.</p>
+          <h3>Stay in the Conversation</h3>
+          <p>Delegate work and stay involved as agents exchange findings and ask for direction.</p>
           <ul>
-            <li><strong>Actor interaction</strong> — humans and agents can query, message, or inspect any agent.</li>
-            <li><strong>Self-directed management</strong> — agents use the <code>scion</code> CLI to dynamically spawn or stop sub-agents.</li>
-            <li><strong>Async messaging</strong> — asynchronous communication across safe, pluggable brokers.</li>
-            <li><strong>Interactive inspection</strong> — attach or look at running agent processes via <code>tmux</code> or logs.</li>
+            <li><strong>Native web chat</strong> — threads, mentions, attachments, and conversation export.</li>
+            <li><strong>Connected channels</strong> — Telegram, Discord, Slack, Google Chat, and Microsoft Teams.</li>
+            <li><strong>Human participation</strong> — receive requests for input or attach to supported agent sessions.</li>
           </ul>
         </div>
         <div class="feature-card">
           <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
-          <h3>Agent Notifications</h3>
-          <p>State and messages combine into notifications for robust asynchronous, event-driven orchestration.</p>
+          <h3>Make Expertise Reusable</h3>
+          <p>Turn what works into templates and skills that other agents and teams can use.</p>
           <ul>
-            <li><strong>State transitions</strong> — events fire when agents move between states.</li>
-            <li><strong>Suspend pattern</strong> — parent delegates a task, updates activity to <code>blocked</code>, and sleeps. No polling.</li>
-            <li><strong>Event-driven wakeup</strong> — notification hook automatically wakes the parent on child completion.</li>
-            <li><strong>Human alerts</strong> — triggers notifications to Slack, terminals, or dashboards when agents need help.</li>
+            <li><strong>Skill Bank</strong> — publish, version, discover, and resolve reusable skills.</li>
+            <li><strong>Connected registries</strong> — bring skills from GitHub and external sources.</li>
+            <li><strong>Project context</strong> — share artifacts, handoffs, and findings through shared directories.</li>
           </ul>
         </div>
         <div class="feature-card">
           <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V9z"/><polyline points="13 2 13 9 20 9"/></svg>
-          <h3>Shared Filesystem</h3>
-          <p>High-performance shared volumes enable frictionless code modification, test execution, and file exchange.</p>
+          <h3>See and Control the Work</h3>
+          <p>Understand what agents are doing and set the boundaries for how they operate.</p>
           <ul>
-            <li><strong>Shared volume mounts</strong> — agents share the same physical project directory, avoiding clone delays.</li>
-            <li><strong>Context by reference</strong> — pass file path references instead of bloating LLM payloads with large files.</li>
-            <li><strong>Shared learnings</strong> — sibling agents exchange progress summaries and execution logs in real time.</li>
-            <li><strong>Branch isolation</strong> — when needed, agents initialize local branches or isolated worktrees on shared storage.</li>
+            <li><strong>Observability</strong> — agent logs, session metrics, and system health.</li>
+            <li><strong>Hosted access controls</strong> — roles, access boundaries, scoped secrets, and federated identity.</li>
+            <li><strong>Deliberate sharing</strong> — choose shared workspaces or separate worktrees and clones.</li>
           </ul>
         </div>
         <div class="feature-card">
           <svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/></svg>
-          <h3>Harness Agnostic</h3>
-          <p>Works with Claude Code, Gemini CLI, OpenCode, and Codex. The underlying container harness is an optional execution detail — adaptable to anything that runs in a container.</p>
+          <h3>Open to Your Ecosystem</h3>
+          <p>Compose Scion with the tools and services your project needs.</p>
+          <ul>
+            <li><strong>Open interfaces</strong> — CLI, APIs, lifecycle hooks, MCP configuration, and an A2A bridge.</li>
+            <li><strong>Your tools</strong> — connect task tracking, memory, and data systems.</li>
+            <li><strong>Open source</strong> — Apache 2.0, with room to contribute new harnesses, skills, and collaboration patterns.</li>
+          </ul>
         </div>
       </div>
     </div>
@@ -1811,7 +1820,7 @@ const base = import.meta.env.BASE_URL;
   <section class="landing-section video-section">
     <div class="section-inner">
       <h2 class="section-title">See It In Action</h2>
-      <p class="section-subtitle">Watch a guided tour of Scion's capabilities.</p>
+      <p class="section-subtitle">Explore how agents run, communicate, and collaborate in Scion.</p>
       <div class="video-container">
         <iframe
           src="https://www.youtube.com/embed/d9yxsbz6_dA?autoplay=1&mute=1&rel=0"
@@ -1826,31 +1835,31 @@ const base = import.meta.env.BASE_URL;
   <!-- How it works -->
   <section class="landing-section how-it-works">
     <div class="section-inner">
-      <h2 class="section-title">Get Running in Minutes</h2>
-      <p class="section-subtitle">From install to your first parallel agent session.</p>
+      <h2 class="section-title">Start with One Agent. Explore What a Team Can Do.</h2>
+      <p class="section-subtitle">The Workstation onboarding wizard helps you choose a runtime, configure credentials, and create your first project.</p>
       <div class="steps">
         <div class="step">
           <div class="step-number">1</div>
           <h3>Install</h3>
-          <p>Install from source with Go.</p>
-          <code>go install .../scion@latest</code>
+          <p>Use the community Homebrew tap.</p>
+          <code>brew install homebrew-scion/scion/scion</code>
         </div>
         <div class="step">
           <div class="step-number">2</div>
-          <h3>Initialize</h3>
-          <p>Create a project in your repo.</p>
-          <code>scion init</code>
+          <h3>Set Up</h3>
+          <p>Open the guided Workstation setup.</p>
+          <code>scion server start</code>
         </div>
         <div class="step">
           <div class="step-number">3</div>
           <h3>Launch</h3>
-          <p>Start agents with a task.</p>
+          <p>Give an agent a concrete task.</p>
           <code>scion start debug "Fix the bug"</code>
         </div>
         <div class="step">
           <div class="step-number">4</div>
-          <h3>Orchestrate</h3>
-          <p>Attach, message, and manage your swarm.</p>
+          <h3>Collaborate</h3>
+          <p>Join the session and shape the next step.</p>
           <code>scion attach debug</code>
         </div>
       </div>
@@ -1859,8 +1868,8 @@ const base = import.meta.env.BASE_URL;
 
   <!-- CTA -->
   <section class="cta">
-    <h2 class="section-title">Start Orchestrating</h2>
-    <p class="section-subtitle">Scion is open source and ready for experimentation.</p>
+    <h2 class="section-title">Help Shape How Agents Work Together</h2>
+    <p class="section-subtitle">Scion is an active, pre-release open-source project. Try a collaboration pattern, share what you learn, and help improve the tools behind it.</p>
     <div class="cta-links">
       <a href="https://github.com/GoogleCloudPlatform/scion" class="btn btn-primary">
         <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>

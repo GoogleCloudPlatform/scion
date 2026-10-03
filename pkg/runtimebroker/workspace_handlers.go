@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 )
@@ -39,7 +40,7 @@ type WorkspaceUploadRequest struct {
 	// Slug is the identifier of the agent whose workspace to upload.
 	Slug string `json:"slug"`
 	// StoragePath is the path within the bucket where files should be uploaded.
-	// Format: "workspaces/{groveId}/{slug}"
+	// Format: "workspaces/{projectId}/{slug}"
 	StoragePath string `json:"storagePath"`
 	// Bucket is the GCS bucket name for storage.
 	Bucket string `json:"bucket,omitempty"`
@@ -62,7 +63,7 @@ type WorkspaceApplyRequest struct {
 	// Slug is the identifier of the agent whose workspace to update.
 	Slug string `json:"slug"`
 	// StoragePath is the path within the bucket where files are stored.
-	// Format: "workspaces/{groveId}/{slug}"
+	// Format: "workspaces/{projectId}/{slug}"
 	StoragePath string `json:"storagePath"`
 	// Bucket is the GCS bucket name for storage.
 	Bucket string `json:"bucket,omitempty"`
@@ -313,7 +314,18 @@ func (s *Server) getAgentWorkspacePath(ctx context.Context, agentID string) (str
 		if err == nil && workspacePath != "" {
 			// Verify the path exists
 			if _, statErr := os.Stat(workspacePath); statErr == nil {
-				return workspacePath, nil
+				// No per-project root is available for this branch: the
+				// value comes from the runtime layer, which already
+				// validates a workspace source at the point it becomes a
+				// mount (pkg/agent Start(), buildCommonRunArgs). This is a
+				// second gate before it's used as an upload source or an
+				// apply destination, using the resolved, symlink-free path
+				// it returns; only the fixed deny-set applies here.
+				resolved, verr := runtime.ValidateWorkspaceSource(workspacePath, "")
+				if verr != nil {
+					return "", verr
+				}
+				return resolved, nil
 			}
 		}
 	}
@@ -327,7 +339,13 @@ func (s *Server) getAgentWorkspacePath(ctx context.Context, agentID string) (str
 
 		worktreePath := filepath.Join(projectParent, ".scion_worktrees", projectName, agentName)
 		if _, statErr := os.Stat(worktreePath); statErr == nil {
-			return worktreePath, nil
+			// worktreePath is constructed directly under projectParent, so
+			// that's the natural root for the containment check.
+			resolved, verr := runtime.ValidateWorkspaceSource(worktreePath, projectParent)
+			if verr != nil {
+				return "", verr
+			}
+			return resolved, nil
 		}
 	}
 
@@ -335,7 +353,13 @@ func (s *Server) getAgentWorkspacePath(ctx context.Context, agentID string) (str
 	if s.config.WorktreeBase != "" && agentName != "" {
 		worktreePath := filepath.Join(s.config.WorktreeBase, agentName)
 		if _, statErr := os.Stat(worktreePath); statErr == nil {
-			return worktreePath, nil
+			// worktreePath is constructed directly under WorktreeBase, so
+			// that's the natural root for the containment check.
+			resolved, verr := runtime.ValidateWorkspaceSource(worktreePath, s.config.WorktreeBase)
+			if verr != nil {
+				return "", verr
+			}
+			return resolved, nil
 		}
 	}
 
@@ -462,36 +486,6 @@ type ProjectWorkspaceUploadRequest struct {
 	ExcludePatterns []string `json:"excludePatterns,omitempty"`
 }
 
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (r *ProjectWorkspaceUploadRequest) UnmarshalJSON(data []byte) error {
-	type Alias ProjectWorkspaceUploadRequest
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy grove fields.
-func (r ProjectWorkspaceUploadRequest) MarshalJSON() ([]byte, error) {
-	type Alias ProjectWorkspaceUploadRequest
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId,omitempty"`
-	}{
-		Alias:   Alias(r),
-		GroveID: r.ProjectID,
-	})
-}
-
 // ProjectWorkspaceUploadResponse is the response after uploading a project workspace.
 type ProjectWorkspaceUploadResponse struct {
 	// Manifest contains the list of files uploaded with their hashes.
@@ -502,7 +496,7 @@ type ProjectWorkspaceUploadResponse struct {
 	UploadedBytes int64 `json:"uploadedBytes"`
 }
 
-// handleProjectWorkspaceUpload handles POST /api/v1/workspace/project-upload (and legacy grove-upload)
+// handleProjectWorkspaceUpload handles POST /api/v1/workspace/project-upload.
 // It uploads the project's workspace directory to GCS so the hub can cache it.
 func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -542,7 +536,28 @@ func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Verify workspace path exists
+	// Reject a workspace path that is not an allowed workspace path before
+	// touching the filesystem at all. req.WorkspacePath is caller
+	// (request-body) supplied, not derived from an agent lookup, so this is
+	// the only gate it goes through. No per-project root is available at
+	// this call site — req.ProjectID identifies the project but not a
+	// filesystem location — so only the fixed deny-set (and its named
+	// ~/.scion allow list) applies. This must run before any os.Stat: a
+	// relative path must be refused outright rather than resolved against
+	// the broker's own working directory, and a rejected path must produce
+	// the same response whether or not it exists (an os.Stat run first
+	// would answer that through the choice between a 404 and a 500). A
+	// request-body validation failure is the caller's bad input, not a
+	// broker runtime failure, so it is reported the same way as the
+	// required-field checks above (400), not as a 500.
+	resolvedWorkspacePath, err := runtime.ValidateWorkspaceSource(req.WorkspacePath)
+	if err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
+	req.WorkspacePath = resolvedWorkspacePath
+
+	// Verify the resolved workspace path exists.
 	if _, err := os.Stat(req.WorkspacePath); err != nil {
 		if os.IsNotExist(err) {
 			NotFound(w, "Project workspace path")

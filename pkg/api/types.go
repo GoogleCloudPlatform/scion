@@ -16,7 +16,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -200,6 +199,11 @@ type AgentK8sMetadata struct {
 	Namespace string `json:"namespace"`
 	PodName   string `json:"podName"`
 	SyncedAt  string `json:"syncedAt,omitempty"`
+	// UID is the pod's Kubernetes-assigned unique identifier, distinct from
+	// PodName. Populated by KubernetesRuntime.List when available; empty for
+	// any other backend, or for a Kubernetes pod fetched through a path
+	// that does not set it.
+	UID string `json:"uid,omitempty"`
 }
 
 // SharedDir defines a project-level shared directory available to all agents.
@@ -312,10 +316,17 @@ func ValidateVolumes(volumes []VolumeMount) error {
 }
 
 type KubernetesConfig struct {
-	Context               string            `json:"context,omitempty" yaml:"context,omitempty"`
-	Namespace             string            `json:"namespace,omitempty" yaml:"namespace,omitempty"`
-	RuntimeClassName      string            `json:"runtimeClassName,omitempty" yaml:"runtimeClassName,omitempty"`
-	ServiceAccountName    string            `json:"serviceAccountName,omitempty" yaml:"serviceAccountName,omitempty"` // For Workload Identity
+	Context            string `json:"context,omitempty" yaml:"context,omitempty"`
+	Namespace          string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+	RuntimeClassName   string `json:"runtimeClassName,omitempty" yaml:"runtimeClassName,omitempty"`
+	ServiceAccountName string `json:"serviceAccountName,omitempty" yaml:"serviceAccountName,omitempty"` // For Workload Identity
+	// PriorityClassName sets spec.priorityClassName on the agent pod. Must
+	// name a PriorityClass that already exists on the cluster — Scion does
+	// not create one. Validated as a DNS-1123 subdomain. Unset means today's
+	// behaviour (no priorityClassName, so the pod schedules at priority 0
+	// and is an ordinary preemption target). Overrides the runtime-level
+	// default set by runtimes.<name>.priority_class_name, if any.
+	PriorityClassName     string            `json:"priorityClassName,omitempty" yaml:"priorityClassName,omitempty"`
 	Resources             *K8sResources     `json:"resources,omitempty" yaml:"resources,omitempty"`
 	NodeSelector          map[string]string `json:"nodeSelector,omitempty" yaml:"nodeSelector,omitempty"`
 	Tolerations           []K8sToleration   `json:"tolerations,omitempty" yaml:"tolerations,omitempty"`
@@ -591,6 +602,21 @@ type AgentInfo struct {
 	Kubernetes *AgentK8sMetadata `json:"kubernetes,omitempty"`
 	Warnings   []string          `json:"warnings,omitempty"`
 
+	// ExplicitImage and ExplicitImagePullPolicy record the image /
+	// kubernetes.imagePullPolicy that the INLINE config (--config), not a
+	// template, explicitly set at provision time — deliberately not a
+	// template's contribution, since a template is re-read live on every
+	// Start and so needs no persisted copy; only the inline config, which
+	// has no live source to re-derive from on a later restart, does. A
+	// restart whose own request supplies no inline image/pull-policy of its
+	// own — including one that passes --harness-auth or an unrelated
+	// --config field — falls back to these fields, so a value pinned via
+	// --config at create time is not silently replaced by a Hub settings or
+	// file-default value that was only ever meant to apply when nothing more
+	// specific was set (ptone/scion#2156).
+	ExplicitImage           string `json:"explicitImage,omitempty"`
+	ExplicitImagePullPolicy string `json:"explicitImagePullPolicy,omitempty"`
+
 	// Timestamps
 	Created           time.Time `json:"created,omitempty"`           // When the agent was created
 	Updated           time.Time `json:"updated,omitempty"`           // Last modification timestamp
@@ -599,10 +625,9 @@ type AgentInfo struct {
 	DeletedAt         time.Time `json:"deletedAt,omitempty"`         // When the agent was soft-deleted
 
 	// Ownership & access
-	CreatedBy  string   `json:"createdBy,omitempty"`  // User/system that created the agent
-	OwnerID    string   `json:"ownerId,omitempty"`    // Current owner user ID
-	Visibility string   `json:"visibility,omitempty"` // Access level: private, team, public
-	Ancestry   []string `json:"ancestry,omitempty"`   // Ordered ancestor chain [root, ..., parent] for transitive access
+	CreatedBy string   `json:"createdBy,omitempty"` // User/system that created the agent
+	OwnerID   string   `json:"ownerId,omitempty"`   // Current owner user ID
+	Ancestry  []string `json:"ancestry,omitempty"`  // Ordered ancestor chain [root, ..., parent] for transitive access
 
 	// Hosted/distributed mode fields
 	RuntimeBrokerID   string `json:"runtimeBrokerId,omitempty"`   // ID of the Runtime Broker managing this agent
@@ -615,48 +640,6 @@ type AgentInfo struct {
 
 	// Optimistic locking
 	StateVersion int64 `json:"stateVersion,omitempty"` // Version for concurrent update detection
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy grove fields.
-func (a *AgentInfo) UnmarshalJSON(data []byte) error {
-	type Alias AgentInfo
-	aux := &struct {
-		Grove     string `json:"grove"`
-		GroveID   string `json:"groveId"`
-		GrovePath string `json:"grovePath"`
-		*Alias
-	}{
-		Alias: (*Alias)(a),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if a.Project == "" && aux.Grove != "" {
-		a.Project = aux.Grove
-	}
-	if a.ProjectID == "" && aux.GroveID != "" {
-		a.ProjectID = aux.GroveID
-	}
-	if a.ProjectPath == "" && aux.GrovePath != "" {
-		a.ProjectPath = aux.GrovePath
-	}
-	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy grove fields.
-func (a AgentInfo) MarshalJSON() ([]byte, error) {
-	type Alias AgentInfo
-	return json.Marshal(&struct {
-		Alias
-		Grove     string `json:"grove,omitempty"`
-		GroveID   string `json:"groveId,omitempty"`
-		GrovePath string `json:"grovePath,omitempty"`
-	}{
-		Alias:     Alias(a),
-		Grove:     a.Project,
-		GroveID:   a.ProjectID,
-		GrovePath: a.ProjectPath,
-	})
 }
 
 // AgentDetail provides freeform context about the current activity.
@@ -732,35 +715,6 @@ type ResolvedSecret struct {
 	Value  string `json:"value"`         // Decrypted secret value
 	Source string `json:"source"`        // Scope that provided this secret (user, project, runtime_broker)
 	Ref    string `json:"ref,omitempty"` // External secret reference (e.g., "gcpsm:projects/123/secrets/name")
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy "grove" source.
-func (s *ResolvedSecret) UnmarshalJSON(data []byte) error {
-	type Alias ResolvedSecret
-	aux := (*Alias)(s)
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if s.Source == "grove" {
-		s.Source = "project"
-	}
-	return nil
-}
-
-// MarshalJSON implements custom marshaling to support legacy "grove" source.
-func (s ResolvedSecret) MarshalJSON() ([]byte, error) {
-	type Alias ResolvedSecret
-	var grove string
-	if s.Source == "project" {
-		grove = "grove"
-	}
-	return json.Marshal(&struct {
-		Alias
-		Grove string `json:"grove,omitempty"`
-	}{
-		Alias: Alias(s),
-		Grove: grove,
-	})
 }
 
 // EnvKind classifies the origin and delivery channel of an environment
@@ -858,6 +812,24 @@ func GitCloneFromContext(ctx context.Context) *GitCloneConfig {
 	return gc
 }
 
+type freshProvisionContextKey struct{}
+
+// ContextWithFreshProvision returns a new context marking this dispatch as a
+// fresh provision: an agent directory left over from a same-named agent may
+// be wiped and re-cloned. Set only for a create dispatch
+// (GoogleCloudPlatform/scion#1931) — start and restart never carry this, so
+// GetAgent preserves an existing populated workspace on those paths.
+func ContextWithFreshProvision(ctx context.Context) context.Context {
+	return context.WithValue(ctx, freshProvisionContextKey{}, true)
+}
+
+// IsFreshProvisionFromContext returns true if the context marks this
+// dispatch as a fresh provision.
+func IsFreshProvisionFromContext(ctx context.Context) bool {
+	v, _ := ctx.Value(freshProvisionContextKey{}).(bool)
+	return v
+}
+
 type sharedWorkspaceContextKey struct{}
 
 // ContextWithSharedWorkspace returns a new context with the shared workspace flag attached.
@@ -895,6 +867,45 @@ func ContextWithBrokerMode(ctx context.Context) context.Context {
 func IsBrokerModeFromContext(ctx context.Context) bool {
 	v, _ := ctx.Value(brokerModeContextKey{}).(bool)
 	return v
+}
+
+type reprovisionContextKey struct{}
+
+// ContextWithReprovision returns a new context flagged as a reincarnation
+// reprovision (design: /scion-volumes/scratchpad/projects/agent-migrate/design.md
+// §3.4). Provisioning uses this to force-overwrite content that a normal
+// provision call leaves alone once present (e.g. a platform skill directory
+// whose embedded content changed in a newer broker binary), while still
+// preserving the agent's home directory and workspace/worktree as a whole.
+func ContextWithReprovision(ctx context.Context) context.Context {
+	return context.WithValue(ctx, reprovisionContextKey{}, true)
+}
+
+// IsReprovisionFromContext returns true if the context indicates a
+// reincarnation reprovision rather than a normal (first-time or restart)
+// provision.
+func IsReprovisionFromContext(ctx context.Context) bool {
+	v, _ := ctx.Value(reprovisionContextKey{}).(bool)
+	return v
+}
+
+// ReincarnateEligible implements the eligibility predicate of design §3.4
+// Amendment A23: a `scion reincarnate` reprovision is safe to attempt for a
+// workspace that is either clone-per-agent (a real GitClone) or an explicit
+// mount (no GitClone, but a non-empty Workspace). Both the Hub (deciding
+// whether to accept a reincarnate request, using AppliedConfig.GitClone and
+// AppliedConfig.Workspace) and the broker (deciding whether Manager.Reprovision
+// may run, using the equivalent StartOptions fields) call this one helper so
+// the two gates cannot drift apart.
+//
+// Neither side treats this as sufficient on its own: the Hub additionally
+// excludes worktree-per-agent projects (which it can detect from the project
+// record but this helper cannot, since GitClone is also set for
+// worktree-per-agent agents — see design §3.4 Amendment A4), and the broker
+// additionally requires the workspace to already exist on disk — Reprovision
+// never creates, clones, pulls, resets, or removes a workspace.
+func ReincarnateEligible(hasGitClone bool, workspace string) bool {
+	return hasGitClone || workspace != ""
 }
 
 type harnessConfigPathContextKey struct{}
@@ -987,10 +998,16 @@ type StartOptions struct {
 	Workspace         string
 	GitClone          *GitCloneConfig // When set, skip workspace creation; sciontool clones inside container
 	SharedWorkspace   bool            // When true, workspace is a shared git clone (git-workspace hybrid); skip worktree, configure credential helper
-	TelemetryOverride *bool           // Explicit telemetry override from CLI flags (--enable-telemetry / --disable-telemetry)
-	InlineConfig      *ScionConfig    // Inline config from --config flag, merged over template config
-	SharedDirs        []SharedDir     // Project-level shared directories (from Hub, merged with settings)
-	ExtraHosts        []string        // Extra --add-host entries for container networking (e.g. "example.com:host-gateway")
+	// FreshProvision marks this dispatch as a create, not a start or restart:
+	// GetAgent wipes and re-clones an existing populated workspace only when
+	// this is set, so a same-named leftover agent directory is not confused
+	// with a start/restart that must preserve un-pushed work
+	// (GoogleCloudPlatform/scion#1931).
+	FreshProvision    bool
+	TelemetryOverride *bool        // Explicit telemetry override from CLI flags (--enable-telemetry / --disable-telemetry)
+	InlineConfig      *ScionConfig // Inline config from --config flag, merged over template config
+	SharedDirs        []SharedDir  // Project-level shared directories (from Hub, merged with settings)
+	ExtraHosts        []string     // Extra --add-host entries for container networking (e.g. "example.com:host-gateway")
 
 	// ProjectPreStartHookScript is the project-owner-supplied shell script
 	// inlined from the project's active ProjectPreStartHook at agent-create

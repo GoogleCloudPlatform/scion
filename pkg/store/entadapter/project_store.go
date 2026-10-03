@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/project"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
@@ -135,6 +136,9 @@ func entProjectToStore(p *ent.Project) *store.Project {
 		sp.GitIdentity = &store.GitIdentityConfig{}
 		unmarshalRawJSON(p.GitIdentity, sp.GitIdentity)
 	}
+	// Cross-project inbound policy
+	sp.CrossProjectInbound = string(p.CrossProjectInbound)
+	sp.CrossProjectInboundRevision = p.CrossProjectInboundRevision
 	return sp
 }
 
@@ -376,6 +380,70 @@ func (s *ProjectStore) UpdateProject(ctx context.Context, p *store.Project) erro
 	}
 	p.Updated = updated.Updated
 	return nil
+}
+
+// SetProjectOwnerID updates only the owner_id column of a project.
+func (s *ProjectStore) SetProjectOwnerID(ctx context.Context, projectID, ownerID string) error {
+	uid, err := parseUUID(projectID)
+	if err != nil {
+		return err
+	}
+	if err := s.client.Project.UpdateOneID(uid).SetOwnerID(ownerID).Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
+// UpdateProjectMessagingPolicy atomically updates the cross-project inbound
+// policy using optimistic concurrency on the revision counter. Returns the
+// updated project or ErrRevisionConflict if expectedRevision does not match.
+func (s *ProjectStore) UpdateProjectMessagingPolicy(ctx context.Context, projectID string, inbound string, expectedRevision int64) (*store.Project, error) {
+	uid, err := parseUUID(projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate the inbound value maps to a valid Ent enum.
+	inboundEnum := project.CrossProjectInbound(inbound)
+	if err := project.CrossProjectInboundValidator(inboundEnum); err != nil {
+		return nil, store.ErrInvalidInput
+	}
+
+	// Optimistic concurrency: update only if the revision matches.
+	n, err := s.client.Project.Update().
+		Where(
+			project.IDEQ(uid),
+			project.CrossProjectInboundRevisionEQ(expectedRevision),
+		).
+		SetCrossProjectInbound(inboundEnum).
+		SetCrossProjectInboundRevision(expectedRevision + 1).
+		Save(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	if n == 0 {
+		// No rows affected — either project doesn't exist or revision mismatch.
+		// Check if the project exists to distinguish.
+		exists, existErr := s.client.Project.Query().Where(project.IDEQ(uid)).Exist(ctx)
+		if existErr != nil {
+			return nil, mapError(existErr)
+		}
+		if !exists {
+			return nil, store.ErrNotFound
+		}
+		return nil, store.ErrRevisionConflict
+	}
+
+	// Read back the updated project.
+	p, err := s.client.Project.Get(ctx, uid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	sp := entProjectToStore(p)
+	if err := s.populateProjectComputed(ctx, sp, uid); err != nil {
+		return nil, err
+	}
+	return sp, nil
 }
 
 // DeleteProject removes a project by ID.
@@ -671,8 +739,15 @@ func entBrokerToStore(b *ent.RuntimeBroker) *store.RuntimeBroker {
 	unmarshalRawJSON(b.Capabilities, &sb.Capabilities)
 	// Profiles are persisted in the "runtimes" column (legacy naming).
 	unmarshalRawJSON(b.Runtimes, &sb.Profiles)
-	unmarshalRawJSON(b.Labels, &sb.Labels)
-	unmarshalRawJSON(b.Annotations, &sb.Annotations)
+	sb.DefaultProfile = b.DefaultProfile
+	sb.Labels = b.Labels
+	if sb.Labels == nil {
+		sb.Labels = make(map[string]string)
+	}
+	sb.Annotations = b.Annotations
+	if sb.Annotations == nil {
+		sb.Annotations = make(map[string]string)
+	}
 	return sb
 }
 
@@ -691,8 +766,9 @@ func (s *ProjectStore) CreateRuntimeBroker(ctx context.Context, b *store.Runtime
 		SetAutoProvide(b.AutoProvide).
 		SetCapabilities(marshalRawJSON(b.Capabilities)).
 		SetRuntimes(marshalRawJSON(b.Profiles)).
-		SetLabels(marshalRawJSON(b.Labels)).
-		SetAnnotations(marshalRawJSON(b.Annotations))
+		SetDefaultProfile(b.DefaultProfile).
+		SetLabels(b.Labels).
+		SetAnnotations(b.Annotations)
 
 	if b.Version != "" {
 		create.SetVersion(b.Version)
@@ -791,8 +867,9 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 			SetLastHeartbeat(b.LastHeartbeat).
 			SetCapabilities(marshalRawJSON(b.Capabilities)).
 			SetRuntimes(marshalRawJSON(b.Profiles)).
-			SetLabels(marshalRawJSON(b.Labels)).
-			SetAnnotations(marshalRawJSON(b.Annotations)).
+			SetDefaultProfile(b.DefaultProfile).
+			SetLabels(b.Labels).
+			SetAnnotations(b.Annotations).
 			SetEndpoint(b.Endpoint).
 			SetAutoProvide(b.AutoProvide).
 			SetUpdated(now).
@@ -836,14 +913,68 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 	return store.ErrVersionConflict
 }
 
-// DeleteRuntimeBroker removes a runtime broker by ID.
+// SetRuntimeBrokerCreatedByIfEmpty atomically sets created_by on a runtime
+// broker, but only if it is currently empty. It is a plain conditional
+// update guarded by an empty-created_by precondition, rather than the
+// lock_version CAS loop UpdateRuntimeBroker uses: the only precondition that
+// matters here is "still unset", not "unchanged since last read", so a
+// single statement is sufficient and race-safe across concurrent
+// writers/nodes.
+//
+// "Empty" matches both an empty string and SQL NULL: created_by is an
+// Optional (not Nillable) ent field, so an unset value round-trips through
+// Go as "" but may be stored as NULL — a plain CreatedByEQ("") predicate
+// would silently match zero rows for NULL-backed columns and turn every
+// attribution into a no-op.
+func (s *ProjectStore) SetRuntimeBrokerCreatedByIfEmpty(ctx context.Context, id, createdBy string) (bool, error) {
+	uid, err := parseUUID(id)
+	if err != nil {
+		return false, err
+	}
+	affected, err := s.client.RuntimeBroker.Update().
+		Where(
+			runtimebroker.IDEQ(uid),
+			runtimebroker.Or(runtimebroker.CreatedByIsNil(), runtimebroker.CreatedByEQ("")),
+		).
+		SetCreatedBy(createdBy).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return affected == 1, nil
+}
+
+// DeleteRuntimeBroker removes a runtime broker by ID. runtime_brokers has no
+// edge to broker_settings (design.md §5.1), so the settings row, if any, is
+// deleted explicitly rather than relying on an FK cascade
+// (ptone/scion#2061 P2, AC-P2-4). Both deletes run in one transaction so a
+// failure partway through never orphans a settings row for an ID that no
+// longer has a broker (ptone/scion#2061 P2 review round 1, F10).
 func (s *ProjectStore) DeleteRuntimeBroker(ctx context.Context, id string) error {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return err
 	}
-	if err := s.client.RuntimeBroker.DeleteOneID(uid).Exec(ctx); err != nil {
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return fmt.Errorf("delete runtime broker: begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if err := tx.RuntimeBroker.DeleteOneID(uid).Exec(ctx); err != nil {
 		return mapError(err)
+	}
+	// Key off uid.String() (the canonical form), not the raw id parameter:
+	// PutBrokerSettings/GetBrokerSettings always store/read under the
+	// canonical broker ID (pkg/hub/broker_settings_handlers.go), so
+	// deleting by the raw, possibly non-canonical id here would silently
+	// miss the row for any caller that used an uppercase/braced/urn UUID
+	// form (AC-P2-4, ptone/scion#2061 P2 review round 2, R3).
+	if _, err := tx.BrokerSetting.Delete().Where(brokersetting.BrokerIDEQ(uid.String())).Exec(ctx); err != nil {
+		return fmt.Errorf("delete runtime broker: delete broker settings: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("delete runtime broker: commit: %w", err)
 	}
 	return nil
 }
@@ -899,9 +1030,29 @@ func (s *ProjectStore) ListRuntimeBrokers(ctx context.Context, filter store.Runt
 		limit = 50
 	}
 
+	// Keyset pagination, mirroring ListProjects exactly (Order DESC on
+	// (created, id), Limit(limit+1), trim and derive NextCursor from the
+	// last row on overflow). Without this, opts.Cursor was silently
+	// ignored and NextCursor was never set: any caller that paginates
+	// through more than one page only ever sees the first `limit` newest
+	// brokers and then stops, believing the list is exhausted. Ordering
+	// stays DESC so every caller's first page is unchanged: the only
+	// caller that forwards a client cursor is the runtime-brokers list API
+	// (listOptionsFromQuery), where it previously had no effect — a
+	// client-supplied cursor is now honored there instead of being
+	// silently dropped, and its first page (no cursor) is unchanged apart
+	// from the id tiebreak on rows sharing a Created timestamp.
+	if opts.Cursor != "" {
+		cursorCreated, cursorID, err := decodeListCursor(opts.Cursor, opts.CursorBinding)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cursor: %w", err)
+		}
+		query.Where(runtimeBrokerBeforeCursor(cursorCreated, cursorID))
+	}
+
 	rows, err := query.
-		Order(ent.Desc(runtimebroker.FieldCreated)).
-		Limit(limit).
+		Order(ent.Desc(runtimebroker.FieldCreated), ent.Desc(runtimebroker.FieldID)).
+		Limit(limit + 1).
 		All(ctx)
 	if err != nil {
 		return nil, err
@@ -911,10 +1062,22 @@ func (s *ProjectStore) ListRuntimeBrokers(ctx context.Context, filter store.Runt
 	for _, b := range rows {
 		items = append(items, *entBrokerToStore(b))
 	}
-	return &store.ListResult[store.RuntimeBroker]{
-		Items:      items,
-		TotalCount: totalCount,
-	}, nil
+
+	result := &store.ListResult[store.RuntimeBroker]{TotalCount: totalCount}
+	if len(items) > limit {
+		result.Items = items[:limit]
+		last := result.Items[len(result.Items)-1]
+		result.NextCursor = encodeListCursor(last.Created, last.ID, opts.CursorBinding)
+	} else {
+		result.Items = items
+	}
+	return result, nil
+}
+
+// runtimeBrokerBeforeCursor returns a predicate for keyset pagination after
+// the given cursor, mirroring projectBeforeCursor/templateBeforeCursor.
+func runtimeBrokerBeforeCursor(cursorCreated time.Time, cursorID uuid.UUID) predicate.RuntimeBroker {
+	return keysetBeforeCursor(runtimebroker.FieldCreated, runtimebroker.FieldID, cursorCreated, cursorID)
 }
 
 // FindEmbeddedBroker returns the single embedded broker if exactly one exists,

@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -36,7 +37,7 @@ import (
 // processes installation lifecycle events idempotently.
 func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -51,10 +52,25 @@ func (s *Server) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	webhookSecret := s.config.GitHubAppConfig.WebhookSecret
 	s.mu.RUnlock()
+	var secretLookupErr error
 	if webhookSecret == "" {
 		if sec, err := s.loadGitHubAppSecret(r.Context(), GitHubAppSecretWebhookSecret); err == nil {
 			webhookSecret = sec
+		} else if !errors.Is(err, store.ErrNotFound) {
+			secretLookupErr = err
 		}
+	}
+
+	// SECURITY-GATE: webhook signature — unauthenticated route; reject unless a webhook secret resolves and the signature verifies.
+	if webhookSecret == "" {
+		if secretLookupErr != nil {
+			slog.Warn("GitHub webhook secret lookup failed", "error", secretLookupErr)
+		}
+		s.githubWebhookNoSecretWarnOnce.Do(func() {
+			slog.Warn("GitHub webhook received but no webhook secret is configured; rejecting")
+		})
+		writeError(w, http.StatusServiceUnavailable, ErrCodeInternalError, "GitHub webhook is not configured", nil)
+		return
 	}
 
 	signature := r.Header.Get("X-Hub-Signature-256")
@@ -291,7 +307,7 @@ func (s *Server) handleInstallationRepositoriesWebhook(w http.ResponseWriter, r 
 // GitHub redirects here after a user installs or configures the app.
 func (s *Server) handleGitHubAppSetup(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -387,7 +403,7 @@ func (s *Server) handleGitHubAppSetup(w http.ResponseWriter, r *http.Request) {
 // then auto-matches installations to projects.
 func (s *Server) handleGitHubAppDiscover(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -789,7 +805,7 @@ func (s *Server) mintGitHubAppToken(ctx context.Context, project *store.Project)
 		s.events.PublishProjectUpdated(ctx, project)
 	}
 
-	return token.Token, token.ExpiresAt.Format("2006-01-02T15:04:05Z"), nil
+	return token.Token, token.ExpiresAt.UTC().Format("2006-01-02T15:04:05Z"), nil
 }
 
 // updateProjectGitHubAppStatus is a helper to update a project's GitHub App status.

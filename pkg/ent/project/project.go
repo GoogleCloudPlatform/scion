@@ -3,6 +3,7 @@
 package project
 
 import (
+	"fmt"
 	"time"
 
 	"entgo.io/ent/dialect/sql"
@@ -45,6 +46,10 @@ const (
 	FieldGithubAppStatus = "github_app_status"
 	// FieldGitIdentity holds the string denoting the git_identity field in the database.
 	FieldGitIdentity = "git_identity"
+	// FieldCrossProjectInbound holds the string denoting the cross_project_inbound field in the database.
+	FieldCrossProjectInbound = "cross_project_inbound"
+	// FieldCrossProjectInboundRevision holds the string denoting the cross_project_inbound_revision field in the database.
+	FieldCrossProjectInboundRevision = "cross_project_inbound_revision"
 	// EdgeAgents holds the string denoting the agents edge name in mutations.
 	EdgeAgents = "agents"
 	// Table holds the table name of the project in the database.
@@ -76,6 +81,8 @@ var Columns = []string{
 	FieldGithubPermissions,
 	FieldGithubAppStatus,
 	FieldGitIdentity,
+	FieldCrossProjectInbound,
+	FieldCrossProjectInboundRevision,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -99,9 +106,38 @@ var (
 	DefaultUpdated func() time.Time
 	// UpdateDefaultUpdated holds the default value on update for the "updated" field.
 	UpdateDefaultUpdated func() time.Time
+	// DefaultCrossProjectInboundRevision holds the default value on creation for the "cross_project_inbound_revision" field.
+	DefaultCrossProjectInboundRevision int64
 	// DefaultID holds the default value on creation for the "id" field.
 	DefaultID func() uuid.UUID
 )
+
+// CrossProjectInbound defines the type for the "cross_project_inbound" enum field.
+type CrossProjectInbound string
+
+// CrossProjectInboundNone is the default value of the CrossProjectInbound enum.
+const DefaultCrossProjectInbound = CrossProjectInboundNone
+
+// CrossProjectInbound values.
+const (
+	CrossProjectInboundNone    CrossProjectInbound = "none"
+	CrossProjectInboundMembers CrossProjectInbound = "members"
+	CrossProjectInboundAny     CrossProjectInbound = "any"
+)
+
+func (cpi CrossProjectInbound) String() string {
+	return string(cpi)
+}
+
+// CrossProjectInboundValidator is a validator for the "cross_project_inbound" field enum values. It is called by the builders before save.
+func CrossProjectInboundValidator(cpi CrossProjectInbound) error {
+	switch cpi {
+	case CrossProjectInboundNone, CrossProjectInboundMembers, CrossProjectInboundAny:
+		return nil
+	default:
+		return fmt.Errorf("project: invalid enum value for cross_project_inbound field: %q", cpi)
+	}
+}
 
 // OrderOption defines the ordering options for the Project queries.
 type OrderOption func(*sql.Selector)
@@ -174,6 +210,16 @@ func ByGithubAppStatus(opts ...sql.OrderTermOption) OrderOption {
 // ByGitIdentity orders the results by the git_identity field.
 func ByGitIdentity(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldGitIdentity, opts...).ToFunc()
+}
+
+// ByCrossProjectInbound orders the results by the cross_project_inbound field.
+func ByCrossProjectInbound(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCrossProjectInbound, opts...).ToFunc()
+}
+
+// ByCrossProjectInboundRevision orders the results by the cross_project_inbound_revision field.
+func ByCrossProjectInboundRevision(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldCrossProjectInboundRevision, opts...).ToFunc()
 }
 
 // ByAgentsCount orders the results by agents count.

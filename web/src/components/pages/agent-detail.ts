@@ -22,6 +22,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type {
@@ -36,12 +37,16 @@ import type {
   Subscription,
   AgentMetricsSummary,
 } from '../../shared/types.js';
+import type { AgentLifecycleAction } from '../../shared/types.js';
 import {
   can,
   canLifecycle,
+  canMessageAgent,
   isTerminalAvailable,
   getAgentDisplayStatus,
   isAgentRunning,
+  RESUME_BEST_EFFORT_CONFIRM_MESSAGE,
+  lifecycleActionRequestInit,
 } from '../../shared/types.js';
 
 interface AgentNotificationsResponse {
@@ -75,6 +80,7 @@ import '../shared/effective-role-provenance.js';
 import '../shared/effective-access-boundary-notice.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
+import { terminalHref } from '../../client/open-terminal.js';
 
 /**
  * Parse a Go-style duration string (e.g. "2h30m", "1h", "45m", "90s") into
@@ -101,6 +107,14 @@ function parseDuration(s: string): number {
   }
   return total;
 }
+
+/**
+ * How long to show the client-side "deleted" state before SPA-navigating
+ * away, after a successful delete (or an SSE `deleted` event for this
+ * agent). Exported (rather than a magic number) so tests can reason about
+ * it and use fake timers.
+ */
+export const DELETE_REDIRECT_DELAY_MS = 1000;
 
 /**
  * Format seconds as "Xh Ym Zs".
@@ -140,6 +154,14 @@ export class ScionPageAgentDetail extends LitElement {
   @state()
   private actionLoading: Record<string, boolean> = {};
 
+  /**
+   * True once this agent has been deleted (either by this page or by an
+   * SSE `deleted` event). Shows a brief client-side-only "deleted" view
+   * before the SPA redirect fires.
+   */
+  @state()
+  private deleted = false;
+
   @state()
   private userNotifications: Notification[] = [];
 
@@ -164,6 +186,10 @@ export class ScionPageAgentDetail extends LitElement {
   /** Whether the Chat|Log toggle is in "chat" mode (vs "log" mode). */
   @state()
   private chatViewActive = true;
+
+  /** Current user ID for constructing the DM conversation key. */
+  @state()
+  private currentUserId = '';
 
   /** Whether the native chat feature flag is enabled. */
   private get nativeChatEnabled(): boolean {
@@ -595,24 +621,19 @@ export class ScionPageAgentDetail extends LitElement {
       text-decoration: underline;
       color: #22c55e;
     }
-
-    /* ---- Visibility badge ---- */
-    .visibility-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.25rem;
-      padding: 0.125rem 0.5rem;
-      border-radius: 9999px;
-      font-size: 0.8125rem;
-      font-weight: 500;
-      background: var(--scion-bg-subtle, #f1f5f9);
-      color: var(--scion-text-muted, #64748b);
-    }
   `;
 
   private boundOnAgentsUpdated = this.onAgentsUpdated.bind(this);
   private boundOnProjectsUpdated = this.onProjectsUpdated.bind(this);
   private relativeTimeInterval: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Pending SPA-redirect timer for the deleted state; cancellable on
+   * disconnect. `@state()` so `renderDeletedState` re-renders (dropping
+   * "Redirecting…") the moment the timer fires or is cleared, not just when
+   * `deleted` changes.
+   */
+  @state()
+  private deleteRedirectTimer: ReturnType<typeof setTimeout> | null = null;
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -641,13 +662,91 @@ export class ScionPageAgentDetail extends LitElement {
       clearInterval(this.relativeTimeInterval);
       this.relativeTimeInterval = null;
     }
+    if (this.deleteRedirectTimer) {
+      clearTimeout(this.deleteRedirectTimer);
+      this.deleteRedirectTimer = null;
+    }
   }
 
   private onAgentsUpdated(): void {
     const updatedAgent = stateManager.getAgent(this.agentId);
     if (updatedAgent && this.agent) {
       this.agent = { ...this.agent, ...updatedAgent };
+      return;
     }
+    // The agent is missing from stateManager's map. That alone does not
+    // mean it was deleted: setScope() clears the map before this page's
+    // own reseed lands at the end of loadData (which awaits the project,
+    // auth/me, notification and subscription fetches first), and
+    // removeAgent() prunes stale rows without a tombstone. Either way, an
+    // unrelated `agents-updated` flush during that window would otherwise
+    // be read as "this agent was deleted". Key on the authoritative
+    // tombstone instead of absence. (No `!this.deleted` guard here:
+    // `showDeletedStateThenRedirect` already no-ops once `deleted` is true.)
+    if (!updatedAgent && this.agent && stateManager.getDeletedAgentIds().has(this.agentId)) {
+      this.showDeletedStateThenRedirect();
+    }
+  }
+
+  /** Dispatch SPA navigation via the document-level nav-click listener. */
+  private navigateViaSpa(path: string): void {
+    this.dispatchEvent(
+      new CustomEvent('nav-click', { detail: { path }, bubbles: true, composed: true })
+    );
+  }
+
+  /**
+   * True while this element is still attached AND the app's current route
+   * is still this agent's detail page. Guards the deferred SPA-redirect in
+   * {@link showDeletedStateThenRedirect}: `renderRoute` (main.ts) keeps the
+   * previous page connected-but-hidden behind `/terminals`, so
+   * `isConnected` alone cannot distinguish "visible" from "hidden behind
+   * another route". An `endsWith` check (rather than importing
+   * `stripBasePath` from main.ts, which is out of scope for this fix)
+   * tolerates a reverse-proxy base path. Trailing slashes are stripped
+   * first so `/agents/<id>/` still counts as this agent's route.
+   */
+  private isOnThisAgentRoute(): boolean {
+    if (!this.isConnected || typeof window === 'undefined') return false;
+    const pathname = window.location.pathname.replace(/\/+$/, '');
+    return pathname.endsWith(`/agents/${this.agentId}`);
+  }
+
+  /**
+   * Where the deleted-state redirect (and its link/back-link fallbacks) go:
+   * the agent's project page if known, otherwise the agents list. Shared by
+   * the deferred redirect timer, `renderDeletedState` and `renderError` so
+   * they cannot disagree about the destination computed from the same
+   * `this.project`. Deliberately *not* captured at schedule time: the timer
+   * re-reads this getter when it fires, so a project that finishes loading
+   * after the delete but before the 1s redirect still wins. The two can only
+   * differ in that window, and both destinations are valid.
+   */
+  private get redirectTarget(): string {
+    return this.project ? `/projects/${this.project.id}` : '/agents';
+  }
+
+  /**
+   * Show a brief client-side-only "deleted" state, then SPA-navigate to the
+   * project page (or /agents if there is no project). Used both for a
+   * delete/force-delete initiated from this page and for an SSE `deleted`
+   * event removing this agent elsewhere. The timer is cancellable so a
+   * disconnect (or a test using fake timers) does not leak it. The redirect
+   * itself only fires while this page is still the active route — see
+   * `isOnThisAgentRoute` — so it never pulls the user out of `/terminals`.
+   * When the redirect is skipped (or the element is disconnected and
+   * reconnected with no timer left to fire), `renderDeletedState` still
+   * offers a link out instead of leaving the page on "Redirecting…" forever.
+   */
+  private showDeletedStateThenRedirect(): void {
+    if (this.deleted) return;
+    this.deleted = true;
+    this.deleteRedirectTimer = setTimeout(() => {
+      this.deleteRedirectTimer = null;
+      if (this.isOnThisAgentRoute()) {
+        this.navigateViaSpa(this.redirectTarget);
+      }
+    }, DELETE_REDIRECT_DELAY_MS);
   }
 
   private onProjectsUpdated(): void {
@@ -705,6 +804,25 @@ export class ScionPageAgentDetail extends LitElement {
             })
             .catch(() => {
               // Project loading is optional
+            })
+        );
+      }
+
+      // Resolve current user ID for the DM conversation key.
+      // Use pageData first, fall back to auth/me endpoint.
+      if (this.pageData?.user?.id) {
+        this.currentUserId = this.pageData.user.id;
+      } else if (!this.currentUserId) {
+        parallel.push(
+          apiFetch('/api/v1/auth/me')
+            .then(async (res) => {
+              if (res.ok) {
+                const data = (await res.json()) as { id?: string };
+                if (data.id) this.currentUserId = data.id;
+              }
+            })
+            .catch(() => {
+              // User ID resolution is optional; chat will degrade gracefully
             })
         );
       }
@@ -827,14 +945,26 @@ export class ScionPageAgentDetail extends LitElement {
     }
   }
 
-  private async handleAction(
-    action: 'start' | 'stop' | 'suspend' | 'resume' | 'delete',
-    event?: MouseEvent
-  ): Promise<void> {
+  private async handleAction(action: AgentLifecycleAction, event?: MouseEvent): Promise<void> {
     if (!this.agent) return;
 
+    if (action === 'force-resume') {
+      if (
+        !(await showConfirm(RESUME_BEST_EFFORT_CONFIRM_MESSAGE, {
+          title: 'Resume (best effort)',
+          confirmText: 'Resume',
+          variant: 'primary',
+        }))
+      ) {
+        return;
+      }
+    }
+
     if (action === 'delete') {
-      if (!event?.altKey && !(await showConfirm('Are you sure you want to delete this agent?'))) {
+      if (
+        !event?.altKey &&
+        !(await showConfirm(`Are you sure you want to delete agent "${this.agent.name}"?`))
+      ) {
         return;
       }
       this.actionLoading = { ...this.actionLoading, delete: true };
@@ -852,25 +982,22 @@ export class ScionPageAgentDetail extends LitElement {
               { title: 'Force Delete', confirmText: 'Force Delete', variant: 'danger' }
             );
             if (forceConfirmed) {
-              const forceResponse = await apiFetch(
-                `/api/v1/agents/${this.agentId}?force=true`,
-                { method: 'DELETE' }
-              );
+              const forceResponse = await apiFetch(`/api/v1/agents/${this.agentId}?force=true`, {
+                method: 'DELETE',
+              });
               if (!forceResponse.ok) {
                 throw new Error(
                   await extractApiError(forceResponse, 'Failed to force delete agent')
                 );
               }
-              window.location.href = this.project
-                ? `/projects/${this.project.id}`
-                : '/agents';
+              this.showDeletedStateThenRedirect();
               return;
             }
           }
           throw new Error(await extractApiError(response, 'Failed to delete agent'));
         }
 
-        window.location.href = this.project ? `/projects/${this.project.id}` : '/agents';
+        this.showDeletedStateThenRedirect();
       } catch (err) {
         console.error('Failed to delete agent:', err);
         showToast(err instanceof Error ? err.message : 'Failed to delete agent');
@@ -885,6 +1012,7 @@ export class ScionPageAgentDetail extends LitElement {
       stop: 'stopping',
       suspend: 'stopping',
       resume: 'starting',
+      'force-resume': 'starting',
     };
     this.agent = {
       ...this.agent,
@@ -896,10 +1024,11 @@ export class ScionPageAgentDetail extends LitElement {
       stop: `/api/v1/agents/${this.agentId}/stop`,
       suspend: `/api/v1/agents/${this.agentId}/suspend`,
       resume: `/api/v1/agents/${this.agentId}/start`,
+      'force-resume': `/api/v1/agents/${this.agentId}/start`,
     };
 
     try {
-      const response = await apiFetch(actionUrls[action], { method: 'POST' });
+      const response = await apiFetch(actionUrls[action], lifecycleActionRequestInit(action));
 
       if (!response.ok) {
         throw new Error(await extractApiError(response, `Failed to ${action} agent`));
@@ -1012,6 +1141,10 @@ export class ScionPageAgentDetail extends LitElement {
   // ---------------------------------------------------------------------------
 
   override render() {
+    if (this.deleted) {
+      return this.renderDeletedState();
+    }
+
     if (this.loading) {
       return this.renderLoading();
     }
@@ -1119,7 +1252,7 @@ export class ScionPageAgentDetail extends LitElement {
         <scion-agent-message-viewer
           agentId=${this.agentId}
           agentName=${agent.name || ''}
-          ?canSend=${can(agent._capabilities, 'attach') &&
+          ?canSend=${canMessageAgent(agent._capabilities) &&
           agent._messageability?.canMessage !== false}
           ?cloudLogging=${agent.cloudLogging || false}
         ></scion-agent-message-viewer>
@@ -1151,7 +1284,11 @@ export class ScionPageAgentDetail extends LitElement {
       <scion-chat-thread
         agentId=${this.agentId}
         agentName=${agent.name || ''}
-        ?canSend=${can(agent._capabilities, 'attach') &&
+        .conversationKey=${this.currentUserId ? `dm:agent:${this.agentId}:user:${this.currentUserId}` : ''}
+        .projectId=${agent.projectId || ''}
+        .currentUserId=${this.currentUserId}
+        ?isDM=${true}
+        ?canSend=${canMessageAgent(agent._capabilities) &&
         agent._messageability?.canMessage !== false}
         ?showVisibilityToggle=${true}
         style="display: ${this.chatViewActive ? '' : 'none'}"
@@ -1159,7 +1296,8 @@ export class ScionPageAgentDetail extends LitElement {
       <scion-agent-message-viewer
         agentId=${this.agentId}
         agentName=${agent.name || ''}
-        ?canSend=${can(agent._capabilities, 'attach') &&
+        .projectId=${agent.projectId || ''}
+        ?canSend=${canMessageAgent(agent._capabilities) &&
         agent._messageability?.canMessage !== false}
         ?cloudLogging=${agent.cloudLogging || false}
         style="display: ${this.chatViewActive ? 'none' : ''}"
@@ -1212,6 +1350,18 @@ export class ScionPageAgentDetail extends LitElement {
           </div>
         </div>
         <div class="header-actions">
+          <sl-tooltip content="See this agent in graph">
+            <a
+              href="/agents/graph?project=${encodeURIComponent(
+                agent.projectId
+              )}&focus=${encodeURIComponent(this.agentId)}"
+              style="text-decoration: none;"
+            >
+              <sl-button variant="default" size="small">
+                <sl-icon slot="prefix" name="diagram-3"></sl-icon>
+              </sl-button>
+            </a>
+          </sl-tooltip>
           ${agent.messageMode === 'none'
             ? nothing
             : agent._messageability?.canMessage === false
@@ -1225,7 +1375,7 @@ export class ScionPageAgentDetail extends LitElement {
                     </sl-button>
                   </sl-tooltip>
                 `
-              : can(agent._capabilities, 'attach')
+              : canMessageAgent(agent._capabilities)
                 ? html`
                     <sl-button
                       variant="default"
@@ -1242,7 +1392,7 @@ export class ScionPageAgentDetail extends LitElement {
                 : nothing}
           ${can(agent._capabilities, 'attach')
             ? html`
-                <a href="/agents/${this.agentId}/terminal" style="text-decoration: none;">
+                <a href=${terminalHref(this.agentId)} style="text-decoration: none;">
                   <sl-button
                     variant="primary"
                     size="small"
@@ -1304,6 +1454,21 @@ export class ScionPageAgentDetail extends LitElement {
                 : nothing
               : canLifecycle(agent._capabilities)
                 ? html`
+                    ${agent.phase === 'error'
+                      ? html`
+                          <sl-button
+                            variant="default"
+                            outline
+                            size="small"
+                            ?loading=${this.actionLoading['force-resume']}
+                            ?disabled=${this.actionLoading['force-resume']}
+                            @click=${() => this.handleAction('force-resume')}
+                          >
+                            <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                            Resume (best effort)
+                          </sl-button>
+                        `
+                      : nothing}
                     <sl-button
                       variant="success"
                       size="small"
@@ -1326,16 +1491,6 @@ export class ScionPageAgentDetail extends LitElement {
                 </a>
               `
             : nothing}
-          <sl-tooltip content="See this agent in graph">
-            <a
-              href="/agents/graph?project=${agent.projectId}&focus=${this.agentId}"
-              style="text-decoration: none;"
-            >
-              <sl-button variant="default" size="small">
-                <sl-icon slot="prefix" name="diagram-3"></sl-icon>
-              </sl-button>
-            </a>
-          </sl-tooltip>
           ${can(agent._capabilities, 'delete')
             ? html`
                 <sl-button
@@ -1776,6 +1931,11 @@ export class ScionPageAgentDetail extends LitElement {
                         `
                       )}
                     </sl-select>
+                    ${(agent.messageMode || 'project') === 'hub'
+                      ? html`<div style="font-size: 0.75rem; color: var(--sl-color-neutral-500); margin-top: 0.25rem; max-width: 360px;">
+                          Hub mode: sends within this project and to permitted agents in other projects. External messaging requires the Hub cross-project switch to be enabled.
+                        </div>`
+                      : nothing}
                   `
                 : html`
                     <scion-message-mode-badge
@@ -1785,6 +1945,11 @@ export class ScionPageAgentDetail extends LitElement {
                     <span style="margin-left: 0.5em; color: var(--sl-color-neutral-600);">
                       ${modeDisplay.description}
                     </span>
+                    ${(agent.messageMode || 'project') === 'hub'
+                      ? html`<div style="font-size: 0.75rem; color: var(--sl-color-neutral-500); margin-top: 0.25rem;">
+                          External messaging requires the Hub cross-project switch to be enabled.
+                        </div>`
+                      : nothing}
                   `}
             </span>
           </div>
@@ -1793,8 +1958,8 @@ export class ScionPageAgentDetail extends LitElement {
                 <div class="info-item">
                   <span class="info-label">Reachability</span>
                   <span class="info-value">
-                    Can message: ${messageability.reachableAgentCount} agents,
-                    ${messageability.reachableUserCount} users
+                    Can reach ${messageability.reachableAgentCount} agents,
+                    ${messageability.reachableUserCount} users in this project
                   </span>
                 </div>
               `
@@ -1902,6 +2067,13 @@ export class ScionPageAgentDetail extends LitElement {
       });
 
       if (!response.ok) {
+        // Detect hub mode grant denial: server returns 403 when the caller
+        // lacks full-role + current-hub-mode authority to grant hub.
+        if (response.status === 403 && newMode === 'hub') {
+          throw new Error(
+            'Cannot grant Hub mode: the granting agent or user must have full role and already be in Hub mode.'
+          );
+        }
         throw new Error(await extractApiError(response, 'Failed to change message mode.'));
       }
 
@@ -1976,16 +2148,6 @@ export class ScionPageAgentDetail extends LitElement {
                               : 'neutral'}
                       >${agent.appliedConfig.agentRole}</sl-badge
                     >
-                  </span>
-                </div>
-              `
-            : ''}
-          ${agent.visibility
-            ? html`
-                <div class="info-item">
-                  <span class="info-label">Visibility</span>
-                  <span class="info-value">
-                    <span class="visibility-badge">${agent.visibility}</span>
                   </span>
                 </div>
               `
@@ -2500,9 +2662,35 @@ export class ScionPageAgentDetail extends LitElement {
     `;
   }
 
+  /**
+   * Brief client-side-only state shown after a successful delete (or an
+   * SSE `deleted` event for this agent), before the SPA redirect fires.
+   * Action buttons are not rendered here, so there is nothing left to
+   * click on the way out. "Redirecting…" is shown only while
+   * `deleteRedirectTimer` is still pending; once it has fired (or was
+   * skipped — hidden behind `/terminals`, see `isOnThisAgentRoute` — or
+   * never re-armed after a disconnect/reconnect while deleted), the copy
+   * drops back to a plain statement so the page never claims a redirect
+   * that is not actually coming. The link covers all of those cases, so
+   * the user always has a way out.
+   */
+  private renderDeletedState(): TemplateResult {
+    const targetLabel = this.project ? `Go to ${this.project.name}` : 'Go to Agents';
+    return html`
+      <div class="loading-state" data-testid="agent-deleted-state">
+        <sl-icon name="trash"></sl-icon>
+        <p>Agent deleted.${this.deleteRedirectTimer ? ' Redirecting…' : ''}</p>
+        <a href="${this.redirectTarget}" class="back-link" data-testid="agent-deleted-link">
+          <sl-icon name="arrow-left"></sl-icon>
+          ${targetLabel}
+        </a>
+      </div>
+    `;
+  }
+
   private renderError() {
     return html`
-      <a href="${this.project ? `/projects/${this.project.id}` : '/agents'}" class="back-link">
+      <a href="${this.redirectTarget}" class="back-link">
         <sl-icon name="arrow-left"></sl-icon>
         ${this.project ? `To ${this.project.name}` : 'Back to Agents'}
       </a>

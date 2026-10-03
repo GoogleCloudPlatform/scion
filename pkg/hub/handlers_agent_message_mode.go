@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -30,7 +31,7 @@ import (
 
 // SetMessageModeRequest is the request body for the set_message_mode action.
 type SetMessageModeRequest struct {
-	Mode    string `json:"mode"`              // Required: "none", "lineage", "branch", "project"
+	Mode    string `json:"mode"`              // Required: "none", "lineage", "branch", "project", "hub"
 	Cascade bool   `json:"cascade,omitempty"` // Optional: apply to all descendants
 }
 
@@ -63,14 +64,17 @@ type CascadeResult struct {
 
 // handleSetMessageMode handles the set_message_mode action on an agent.
 //
-// Authorization enforces D7: this is a human-only operation. The following
-// callers are denied unconditionally:
-//   - Agent callers (no agent scope exists or will ever exist)
+// Authorization enforces D7 (amended): human users and full-role agents
+// within the same project may change message mode. The following callers
+// are denied:
+//   - Agents without project:agent:set_message_mode scope (requires full role)
+//   - Agents targeting agents in a different project
 //   - UATs / scoped tokens (no UAT scope exists)
 //   - Project admins who are not also project owners or lineage owners
+//   - Federated agents
 //
 // Allowed callers: super-admin, project owner, lineage owner (user in the
-// agent's ancestry chain).
+// agent's ancestry chain), full-role agent (same project).
 //
 // Mode changes are live (D10): the new mode takes effect on the next message
 // delivery. Every change emits an audit record. All transitions are legal
@@ -98,7 +102,7 @@ func (s *Server) handleSetMessageMode(w http.ResponseWriter, r *http.Request, id
 
 	// 2. Validate mode value.
 	if !store.IsValidMessageMode(req.Mode) {
-		ValidationError(w, "invalid message mode: must be one of none, lineage, branch, project", nil)
+		ValidationError(w, "invalid message mode: must be one of none, lineage, branch, project, hub", nil)
 		return
 	}
 
@@ -109,66 +113,108 @@ func (s *Server) handleSetMessageMode(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	// 4. D7: Human-only — DENY agent callers unconditionally.
+	// 4. D7 (amended): allow "user", "dev", "federated_user", and
+	// "agent" callers with full role. All other identity types denied.
 	identity := GetIdentityFromContext(ctx)
 	if identity == nil {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Authentication required", nil)
 		return
 	}
-	// D7: Human-only — DENY all non-user callers unconditionally.
-	// This catches "agent", "federated_agent", "federated_service", "broker", etc.
+	agentCallerAuthorized := false
 	switch identity.Type() {
 	case "user", "dev", "federated_user":
-		// Allowed identity types — continue to further checks.
+		// Allowed identity types — continue to user-specific checks below.
+	case "agent":
+		// D7 amendment: full-role agents may call set_message_mode.
+		agentIdent, ok := identity.(AgentIdentity)
+		if !ok {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"invalid agent identity", nil)
+			return
+		}
+
+		// Verify the agent has the required scope.
+		if !agentIdent.HasScope(ScopeAgentSetMessageMode) {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"agent lacks project:agent:set_message_mode scope (requires full role)", nil)
+			return
+		}
+
+		// Project constraint: agent can only set modes within its own project.
+		// Answer with 404 instead of 403 to prevent cross-project existence oracle.
+		if agentIdent.ProjectID() != agent.ProjectID {
+			NotFound(w, "Agent")
+			return
+		}
+
+		agentCallerAuthorized = true
 	default:
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"Only human users can change message mode (D7: human-only operation)", nil)
+			"Only human users or full-role agents can change message mode", nil)
 		return
 	}
 
-	// 5. D7: DENY UATs — no scope exists for set_message_mode.
-	if _, ok := identity.(*ScopedUserIdentity); ok {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"Scoped tokens cannot change message mode", nil)
-		return
-	}
-
-	// 5.5. D7: DENY project admins (non-owners).
-	// The generic authz bypass grants project admins full access, but D7
-	// restricts set_message_mode to project owners, lineage owners, and
-	// super-admins. Project admins who are NOT super-admins must be denied.
-	if userIdent, ok := identity.(UserIdentity); ok && !IsUnscopedLocalPlatformAdmin(userIdent) {
-		membership, err := s.store.GetProjectMembership(ctx, agent.ProjectID, userIdent.ID())
-		if err != nil {
-			// Fail closed: if we can't verify role, deny rather than skip the check.
-			slog.Error("failed to check project membership for set_message_mode",
-				"user_id", userIdent.ID(), "project_id", agent.ProjectID, "error", err)
-			RuntimeError(w, "Failed to verify project membership")
+	if !agentCallerAuthorized {
+		// 5. D7: DENY UATs — no scope exists for set_message_mode.
+		if _, ok := identity.(*ScopedUserIdentity); ok {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"Scoped tokens cannot change message mode", nil)
 			return
 		}
-		// Also check ancestry before denying admins — a user who is both admin
-		// AND lineage owner should be allowed via lineage ownership (LOW-3).
-		isLineageOwner := false
-		for _, ancestorID := range agent.Ancestry {
-			if ancestorID == userIdent.ID() {
-				isLineageOwner = true
-				break
+
+		// 5.5. D7: DENY project admins (non-owners).
+		// The generic authz bypass grants project admins full access, but D7
+		// restricts set_message_mode to project owners, lineage owners, and
+		// super-admins. Project admins who are NOT super-admins must be denied.
+		if userIdent, ok := identity.(UserIdentity); ok && !IsUnscopedLocalPlatformAdmin(userIdent) {
+			membership, err := s.store.GetProjectMembership(ctx, agent.ProjectID, userIdent.ID())
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				// Fail closed: if we can't verify role, deny rather than skip the check.
+				slog.Error("failed to check project membership for set_message_mode",
+					"user_id", userIdent.ID(), "project_id", agent.ProjectID, "error", err)
+				RuntimeError(w, "Failed to verify project membership")
+				return
+			}
+			// ErrNotFound means the caller has no project membership row at
+			// all (a non-member) -- membership stays nil and falls through
+			// to the same authorize() call every other caller goes through
+			// below, which denies with 403 rather than the 500-class error
+			// above. Only an actual lookup failure hits that error path.
+			// Also check ancestry before denying admins — a user who is both admin
+			// AND lineage owner should be allowed via lineage ownership (LOW-3).
+			isLineageOwner := false
+			for _, ancestorID := range agent.Ancestry {
+				if ancestorID == userIdent.ID() {
+					isLineageOwner = true
+					break
+				}
+			}
+			if !isLineageOwner && membership != nil && membership.Role == store.ProjectRoleAdmin {
+				writeError(w, http.StatusForbidden, ErrCodeForbidden,
+					"Project admins cannot change message mode (D7: owner-only operation)", nil)
+				return
 			}
 		}
-		if !isLineageOwner && membership != nil && membership.Role == store.ProjectRoleAdmin {
+
+		// 6. Authorize: agent.set_message_mode permission (CapabilityResource).
+		// This checks: lineage owner (ancestry), project owner, super-admin.
+		if !s.authorize(w, r, agentResource(agent), ActionSetMessageMode) {
+			return // authorize writes 403
+		}
+	}
+
+	// 7. Hub-mode grant guard: if the requested mode is hub and the agent
+	// does not already have hub mode, apply the non-escalation check.
+	if isNewHubGrant(agent.MessageMode, req.Mode) {
+		decision := s.AuthorizeMessageModeGrant(ctx, identity, agent.ProjectID, req.Mode)
+		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"Project admins cannot change message mode (D7: owner-only operation)", nil)
+				"Cannot grant hub message mode: "+decision.Reason, nil)
 			return
 		}
 	}
 
-	// 6. Authorize: agent.set_message_mode permission (CapabilityResource).
-	// This checks: lineage owner (ancestry), project owner, super-admin.
-	if !s.authorize(w, r, agentResource(agent), ActionSetMessageMode) {
-		return // authorize writes 403
-	}
-
-	// 7. Record previous mode.
+	// 8. Record previous mode.
 	previousMode := agent.MessageMode
 
 	// --- Dry-run path: preview cascade effects without applying changes ---
@@ -262,8 +308,16 @@ func (s *Server) handleSetMessageMode(w http.ResponseWriter, r *http.Request, id
 // When dryRun is true, it computes which agents would be affected but does not
 // modify any records — this uses the same code path so the preview cannot
 // disagree with what a real apply would do.
+//
+// The hub-mode grant guard is applied to each descendant that would newly
+// receive hub mode, using the same check as the direct mutation path.
+// Dry-run uses the same guard so previews cannot disagree with real execution.
+//
 // Best-effort per agent: a failure to update one descendant does not stop the rest.
 func (s *Server) cascadeMessageMode(ctx context.Context, root *store.Agent, mode string, dryRun bool) (*CascadeResult, error) {
+	// Resolve the identity of the caller for hub grant checks.
+	identity := GetIdentityFromContext(ctx)
+
 	descendants, err := s.store.ListAgents(ctx, store.AgentFilter{
 		ProjectID:  root.ProjectID,
 		AncestorID: root.ID,
@@ -285,6 +339,34 @@ func (s *Server) cascadeMessageMode(ctx context.Context, root *store.Agent, mode
 		oldMode := desc.MessageMode
 		if oldMode == mode {
 			continue // already at target mode
+		}
+
+		// Hub-mode grant guard for each descendant that would newly receive hub.
+		if isNewHubGrant(oldMode, mode) {
+			if identity == nil {
+				slog.Warn("cascade hub grant denied: no authenticated identity",
+					"agent_id", desc.ID)
+				result.Details = append(result.Details, CascadeAgentDetail{
+					AgentID:     desc.ID,
+					AgentName:   agentDisplayName(desc),
+					CurrentMode: oldMode,
+					NewMode:     oldMode,
+				})
+				continue
+			}
+			decision := s.AuthorizeMessageModeGrant(ctx, identity, desc.ProjectID, mode)
+			if !decision.Allowed {
+				slog.Warn("cascade hub grant denied for descendant",
+					"agent_id", desc.ID, "reason", decision.Reason)
+				// Do not silently clamp — skip this descendant and record the denial.
+				result.Details = append(result.Details, CascadeAgentDetail{
+					AgentID:     desc.ID,
+					AgentName:   agentDisplayName(desc),
+					CurrentMode: oldMode,
+					NewMode:     oldMode, // unchanged — grant denied
+				})
+				continue
+			}
 		}
 
 		if dryRun {

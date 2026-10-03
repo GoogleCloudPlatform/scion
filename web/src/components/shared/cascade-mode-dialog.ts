@@ -214,9 +214,7 @@ export class ScionCascadeModeDialog extends LitElement {
       );
 
       if (!response.ok) {
-        throw new Error(
-          await extractApiError(response, 'Failed to load cascade preview.')
-        );
+        throw new Error(await extractApiError(response, 'Failed to load cascade preview.'));
       }
 
       this.preview = (await response.json()) as CascadePreview;
@@ -239,22 +237,17 @@ export class ScionCascadeModeDialog extends LitElement {
     this.error = null;
 
     try {
-      const response = await apiFetch(
-        `/api/v1/agents/${this.agentId}/set_message_mode`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            mode: this.selectedMode,
-            cascade: true,
-          }),
-        }
-      );
+      const response = await apiFetch(`/api/v1/agents/${this.agentId}/set_message_mode`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mode: this.selectedMode,
+          cascade: true,
+        }),
+      });
 
       if (!response.ok) {
-        throw new Error(
-          await extractApiError(response, 'Failed to apply cascade mode change.')
-        );
+        throw new Error(await extractApiError(response, 'Failed to apply cascade mode change.'));
       }
 
       const count = this.preview?.cascade?.count ?? 0;
@@ -265,9 +258,7 @@ export class ScionCascadeModeDialog extends LitElement {
       );
 
       // Dispatch custom event so the parent can refresh
-      this.dispatchEvent(
-        new CustomEvent('cascade-applied', { bubbles: true, composed: true })
-      );
+      this.dispatchEvent(new CustomEvent('cascade-applied', { bubbles: true, composed: true }));
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to apply cascade.';
     } finally {
@@ -282,9 +273,7 @@ export class ScionCascadeModeDialog extends LitElement {
 
   private close(): void {
     this.open = false;
-    this.dispatchEvent(
-      new CustomEvent('sl-request-close', { bubbles: true, composed: true })
-    );
+    this.dispatchEvent(new CustomEvent('sl-request-close', { bubbles: true, composed: true }));
   }
 
   override render() {
@@ -325,18 +314,11 @@ export class ScionCascadeModeDialog extends LitElement {
                 </div>
               `
             : this.renderPreview()}
-
-          ${this.error
-            ? html`<div class="dialog-error">${this.error}</div>`
-            : nothing}
+          ${this.error ? html`<div class="dialog-error">${this.error}</div>` : nothing}
         </div>
 
         <div slot="footer">
-          <sl-button
-            variant="default"
-            @click=${this.close}
-            ?disabled=${this.applying}
-          >
+          <sl-button variant="default" @click=${this.close} ?disabled=${this.applying}>
             Cancel
           </sl-button>
           <sl-button
@@ -371,21 +353,15 @@ export class ScionCascadeModeDialog extends LitElement {
     const changingDetails = details.filter(
       (d) => (d.current_mode || 'project') !== (d.new_mode || 'project')
     );
-    const sealCount = changingDetails.filter(
-      (d) => d.new_mode === 'none'
-    ).length;
-    const unsealCount = changingDetails.filter(
-      (d) => d.current_mode === 'none'
-    ).length;
+    const sealCount = changingDetails.filter((d) => d.new_mode === 'none').length;
+    const unsealCount = changingDetails.filter((d) => d.current_mode === 'none').length;
 
     return html`
       <div>
         <div style="font-size: 0.8125rem; font-weight: 500; margin-bottom: 0.5rem;">
           Affected agents (${changingDetails.length}):
         </div>
-        <div class="affected-list">
-          ${details.map((d) => this.renderAffectedAgent(d))}
-        </div>
+        <div class="affected-list">${details.map((d) => this.renderAffectedAgent(d))}</div>
       </div>
 
       ${this.renderImpactSummary(changingDetails.length, sealCount, unsealCount)}
@@ -411,12 +387,8 @@ export class ScionCascadeModeDialog extends LitElement {
                 ${currentDisplay.label}
                 <sl-icon name="arrow-right" style="font-size: 0.625rem;"></sl-icon>
                 ${newDisplay.label}
-                ${isUnseal
-                  ? html`<span class="affected-flag flag-unseal">unseal</span>`
-                  : nothing}
-                ${isSeal
-                  ? html`<span class="affected-flag flag-seal">seal</span>`
-                  : nothing}
+                ${isUnseal ? html`<span class="affected-flag flag-unseal">unseal</span>` : nothing}
+                ${isSeal ? html`<span class="affected-flag flag-seal">seal</span>` : nothing}
               `}
         </span>
       </div>
@@ -434,8 +406,8 @@ export class ScionCascadeModeDialog extends LitElement {
       return html`
         <div class="impact-summary danger">
           <sl-icon name="exclamation-triangle" style="margin-right: 0.375rem;"></sl-icon>
-          All ${total} agent${total !== 1 ? 's' : ''} will be sealed. Only super-admins
-          will be able to message them. This takes effect immediately.
+          All ${total} agent${total !== 1 ? 's' : ''} will be sealed. Only super-admins will be able
+          to message them. This takes effect immediately.
         </div>
       `;
     }

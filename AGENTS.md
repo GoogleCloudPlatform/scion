@@ -3,7 +3,7 @@
 ## Overview
 > **Note**: This project is currently in a pre-release/alpha stage.
 
-> **Important Terminology Change**: The concept previously called "grove" has been renamed to "project" throughout the product. You will encounter "grove" in existing code, database schemas, API endpoints, issues, and documentation — treat "grove" and "project" as synonymous. New code should prefer "project" where feasible, but the rename is ongoing and many internal references still use "grove".
+> **Terminology note**: The concept now called "project" was formerly called "grove". You may still encounter "grove" in historical issues, commit history, or older documentation, and in the compatibility code described under the terminology guardrail below; treat it as a synonym for "project". See `docs-site/src/content/docs/reference/grove-removal.md` for what changed.
 
 `scion` is a container-based orchestration platform designed to manage concurrent LLM-based code agents. It supports both a standalone local CLI mode and a distributed "Hosted" architecture where state is centralized in a Hub and agents execute on disparate Runtime Brokers (local Docker, remote servers, or Kubernetes clusters).
 
@@ -96,7 +96,13 @@ All icons in the web frontend use the Shoelace `<sl-icon>` component (Bootstrap 
 - **Hub/Runtime Separation**: Ensure distinct separation between state management (Hub) and execution logic (Runtime Broker).
 - **Harness Logic**: LLM-specific interactions should be encapsulated in `pkg/harness`.
 - **Refactoring**: Since the project is in alpha, refactoring that modifies or removes behavior does not require graceful deprecation.
-- **Project terminology guardrail**: New code should use `project` vocabulary. Legacy `grove` literals are only allowed in explicit compatibility adapters, compatibility tests/fixtures, migrations, or examples that intentionally demonstrate legacy behavior. Route legacy inputs through `pkg/projectcompat` instead of open-coding aliases, and run `make compat-literals` when touching project/grove compatibility surfaces.
+- **Project terminology guardrail**: Use `project` vocabulary in new code. The legacy `grove` name is retired but may still appear in explicit compatibility adapters, compatibility tests/fixtures, migrations, or examples that intentionally demonstrate historical behavior. Route any remaining legacy literals through `pkg/projectkeys` instead of open-coding aliases, and run `make compat-literals` when touching project/grove compatibility surfaces.
+
+## Experimental features
+
+- New experimental user-facing features must be launched behind a registered experiment (`pkg/experiments/registry.go`); see `docs-site/src/content/docs/reference/experiments.md`.
+- Browser-side flag values are user-editable and only affect presentation; if an experiment changes hub behaviour, register it with the server layer and check it in the hub (`requireExperiment` / `experimentEnabled`).
+- Do not add ad-hoc `scion:feature:` string literals or new booleans to `/api/v1/settings/public`.
 
 ## Glossary and project development terminology
 
@@ -154,7 +160,7 @@ Learned the hard way; these are specific to running inside this container.
 * **`go build ./...` fails with `error obtaining VCS status: exit status 128`** inside a worktree. Use `go build -buildvcs=false ./...`.
 * **Inspecting `main` without disturbing it:** you cannot `git worktree add` the `main` *branch* — it is already checked out in the primary repo dir (e.g. `/repo-root`), which may not even be a usable module root. To run or read code at main's tip, add a **detached** worktree at the commit SHA: `git worktree add --detach /tmp/check <main-sha>`, then `git worktree remove --force /tmp/check` when done. Prefer `git show main:path/to/file` for quick single-file reads.
 * **`golangci-lint` can OOM (exit 137)** over `./...` in the sandbox. Scope it to the packages you touched and lower GC pressure, e.g. `GOGC=40 golangci-lint run --new-from-rev=main --concurrency=1 ./pkg/foo/... ./cmd/...`. The `--new-from-rev=main` filter (what `make golangci-lint` uses) hides pre-existing issues so you only see what your change introduced.
-* **Leaked `SCION_*` env vars:** the container exports `SCION_PROJECT`, `SCION_GROVE`, `SCION_CREATOR`, etc. Tests that don't clear the environment can pick these up. They are rarely the real cause of a failure, but when a config/hub/sync test behaves oddly, rule them in or out with `env -u SCION_GROVE -u SCION_PROJECT … go test …`.
+* **Leaked `SCION_*` env vars:** the container exports `SCION_PROJECT`, `SCION_CREATOR`, etc. Tests that don't clear the environment can pick these up. They are rarely the real cause of a failure, but when a config/hub/sync test behaves oddly, rule them in or out with `env -u SCION_PROJECT … go test …`.
 * **Getting the latest `main`:** you cannot `git fetch`/`git pull` from a worktree. The human pulls `origin/main` into the primary repo dir; once they have, `git rebase main` from your branch sees the updated tip with no network access. A green local result can still hide a CI-only gap if `main` itself was committed red — when fixing a test, re-check whether the same test already fails on `main` (via a detached worktree) so you fix main's current version, not a stale local one.
 
 ## General workflow
@@ -188,7 +194,7 @@ When in doubt, check `.gitignore` before staging. If a new category of generated
 **Persist durable guidance, learnings, and project notes only in committed project files** — this `AGENTS.md`, the `.design/` docs, or other tracked files. If you discover something worth remembering for future sessions, write it here (or in the relevant design doc) and commit it.
 
 ### Working learnings (migrated here from ephemeral agent memory)
-- **Lean forward on "project" over legacy "grove".** The grove→project rename is the product direction and is still ongoing — actively prefer `project` naming in new/edited code, tests, and fixtures (e.g. the settings key `project_id`, not legacy `grove_id`). When a test or fixture still uses a legacy `grove_id` key, updating it to `project_id` is the preferred fix over propping up legacy-key compat. Known gap: the legacy *top-level* `grove_id` *file* key no longer resolves to `project_id` in config loading (only `SCION_GROVE_ID` env and v1 `hub.grove_id` are remapped) — surfaced via two tests that were red on `main` and fixed by moving their fixtures to `project_id`.
+- **Use `project` naming, not legacy `grove`.** `project` is the current vocabulary in code, tests, and fixtures (e.g. the settings key `project_id`, not legacy `grove_id`). When a test or fixture still uses a legacy `grove_id` key, update it to `project_id` rather than propping up legacy-key compat. Known gap: the legacy *top-level* `grove_id` *file* key no longer resolves to `project_id` in config loading (only v1 `hub.grove_id` is remapped) — surfaced via two tests that were red on `main` and fixed by moving their fixtures to `project_id`.
 - **Proactively raise adjacent cleanup.** When doing a scoped task, surface other architecture/design improvements, drift risks, and simplifications you notice — with specifics (file/function, payoff, blast radius) so the human can decide. Raise them; don't implement them unprompted. The human treats you as a design collaborator, not just an executor.
 
 ## Final important request

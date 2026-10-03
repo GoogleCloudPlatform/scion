@@ -48,6 +48,13 @@ func (a *testRelAgentIdentity) OriginUserID() string {
 }
 func (a *testRelAgentIdentity) TokenID() string { return "" }
 
+// localAncestryProvenance opts this fake into AncestryIsHubAttested, matching
+// the "hub-attested (non-federated)" doc comment above: the marker is not
+// inherited from Type() == "agent", so test fakes must opt in explicitly.
+func (a *testRelAgentIdentity) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceAgentJWT
+}
+
 // =============================================================================
 // Merge gate: Forged/federated ancestry cannot grant local authority
 // =============================================================================
@@ -433,6 +440,7 @@ func TestRelationshipTypeForResource(t *testing.T) {
 	}{
 		{"secret", RelProgenySecretRead},
 		{"envvar", RelProgenyEnvVarRead},
+		{"env_var", RelProgenyEnvVarRead},
 		{"skill_injection", RelProgenySkillInjectionRead},
 		{"project", ""},
 		{"agent", ""},

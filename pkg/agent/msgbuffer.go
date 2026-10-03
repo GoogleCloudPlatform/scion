@@ -15,6 +15,8 @@
 package agent
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"sync"
@@ -46,15 +48,85 @@ type MessageBuffer struct {
 	// It receives the agent ID, project ID, the concatenated message text, and the interrupt flag.
 	deliverFunc func(agentID, projectID string, message string, interrupt bool) error
 
+	// maxFlushAttempts bounds how many times flush retries a coalesced
+	// delivery before giving up and reporting it to onFailure handlers. It
+	// is small: a transient failure (container briefly unreachable, "docker
+	// ps failed") is worth a couple of quick retries, but flush runs
+	// synchronously in the buffer's timer goroutine and holds up delivery
+	// of this agent's messages while retrying, so it must not retry for
+	// long (ptone/scion#1866). Set to a default by NewMessageBuffer; tests
+	// may override it per instance.
+	maxFlushAttempts int
+
+	// flushRetryBackoff is the delay between retry attempts. Set to a
+	// default by NewMessageBuffer; tests may override it per instance.
+	flushRetryBackoff time.Duration
+
 	mu      sync.Mutex
 	buffers map[string]*agentBuffer // keyed by agentID + "\x00" + projectID
 }
+
+// defaultMaxFlushAttempts and defaultFlushRetryBackoff are the production
+// values NewMessageBuffer uses for a MessageBuffer's retry bounds.
+const (
+	defaultMaxFlushAttempts  = 3
+	defaultFlushRetryBackoff = 500 * time.Millisecond
+)
 
 // agentBuffer holds the pending messages and timer for a single agent.
 type agentBuffer struct {
 	messages  []string    // accumulated messages waiting for delivery
 	timer     *time.Timer // debounce timer; fires to trigger delivery
 	projectID string      // project scope for delivery
+
+	// onFailure holds per-message failure callbacks registered by the
+	// sender (nil entries allowed). They are invoked when the coalesced
+	// delivery fails, because the caller was already told the message was
+	// accepted and has no other way to learn it was lost (#1820).
+	onFailure []DeliveryFailureHandler
+}
+
+// DeliveryFailureHandler is called when a buffered message could not be
+// delivered after the caller was told it was accepted. It is invoked from
+// the buffer's timer goroutine and must not block for long.
+type DeliveryFailureHandler func(err error)
+
+// PartialDeliveryError marks a deliverFunc failure as unsafe to retry: some
+// of the coalesced message content already reached the agent's terminal
+// before the failure occurred (e.g. the text was pasted but the trailing
+// Enter keypress failed). Retrying such a failure would re-run the whole
+// delivery — including the paste — and the agent would see the same text
+// twice (ptone/scion#1866). deliverFunc implementations should wrap errors
+// this way once they can no longer guarantee a retry is side-effect free;
+// flush's bounded retry only retries errors that are not wrapped this way.
+type PartialDeliveryError struct {
+	Err error
+}
+
+func (e *PartialDeliveryError) Error() string { return e.Err.Error() }
+func (e *PartialDeliveryError) Unwrap() error { return e.Err }
+
+type deliveryFailureHandlerKey struct{}
+
+// WithDeliveryFailureHandler returns a context carrying fn. When passed to
+// AgentManager.Message for a non-interrupt message, fn is invoked if the
+// buffered delivery later fails. Only the value is read from ctx; its
+// cancellation does not affect the buffered delivery.
+func WithDeliveryFailureHandler(ctx context.Context, fn DeliveryFailureHandler) context.Context {
+	if fn == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, deliveryFailureHandlerKey{}, fn)
+}
+
+// DeliveryFailureHandlerFromContext returns the handler attached with
+// WithDeliveryFailureHandler, or nil.
+func DeliveryFailureHandlerFromContext(ctx context.Context) DeliveryFailureHandler {
+	if ctx == nil {
+		return nil
+	}
+	fn, _ := ctx.Value(deliveryFailureHandlerKey{}).(DeliveryFailureHandler)
+	return fn
 }
 
 // NewMessageBuffer creates a new MessageBuffer with the given debounce delay
@@ -62,9 +134,11 @@ type agentBuffer struct {
 // buffer flushes — it should perform the actual tmux send-keys delivery.
 func NewMessageBuffer(delay time.Duration, deliverFunc func(agentID, projectID string, message string, interrupt bool) error) *MessageBuffer {
 	return &MessageBuffer{
-		bufferDelay: delay,
-		deliverFunc: deliverFunc,
-		buffers:     make(map[string]*agentBuffer),
+		bufferDelay:       delay,
+		deliverFunc:       deliverFunc,
+		maxFlushAttempts:  defaultMaxFlushAttempts,
+		flushRetryBackoff: defaultFlushRetryBackoff,
+		buffers:           make(map[string]*agentBuffer),
 	}
 }
 
@@ -74,6 +148,12 @@ func NewMessageBuffer(delay time.Duration, deliverFunc func(agentID, projectID s
 // asynchronously once the timer fires.
 // projectID scopes delivery to a specific project.
 func (mb *MessageBuffer) Send(agentID, projectID string, message string) {
+	mb.SendWithFailureHandler(agentID, projectID, message, nil)
+}
+
+// SendWithFailureHandler is Send with a callback that is invoked if the
+// eventual coalesced delivery containing this message fails.
+func (mb *MessageBuffer) SendWithFailureHandler(agentID, projectID string, message string, onFailure DeliveryFailureHandler) {
 	mb.mu.Lock()
 	defer mb.mu.Unlock()
 
@@ -86,6 +166,7 @@ func (mb *MessageBuffer) Send(agentID, projectID string, message string) {
 
 	// Append the message to the pending list.
 	buf.messages = append(buf.messages, message)
+	buf.onFailure = append(buf.onFailure, onFailure)
 	util.Debugf("msgbuffer: queued message for agent %s project %s (%d pending)", agentID, projectID, len(buf.messages))
 
 	// Reset or start the debounce timer. If a timer is already running,
@@ -104,6 +185,12 @@ func bufferKey(agentID, projectID string) string {
 
 // flush delivers all buffered messages for the given agent as a single
 // concatenated string. Called when the debounce timer fires.
+//
+// A failure is retried up to mb.maxFlushAttempts times with a short backoff,
+// unless it is a PartialDeliveryError: once some of the coalesced text has
+// reached the agent's terminal, retrying would re-deliver it and the agent
+// would see it twice, so that class of failure is reported immediately
+// instead (ptone/scion#1866).
 func (mb *MessageBuffer) flush(agentID, key string) {
 	mb.mu.Lock()
 	buf, exists := mb.buffers[key]
@@ -114,6 +201,7 @@ func (mb *MessageBuffer) flush(agentID, key string) {
 
 	// Take ownership of the pending messages and clean up the buffer entry.
 	pending := buf.messages
+	handlers := buf.onFailure
 	projectID := buf.projectID
 	delete(mb.buffers, key)
 	mb.mu.Unlock()
@@ -123,13 +211,39 @@ func (mb *MessageBuffer) flush(agentID, key string) {
 	combined := strings.Join(pending, "\n\n")
 	util.Debugf("msgbuffer: flushing %d message(s) for agent %s project %s", len(pending), agentID, projectID)
 
-	if err := mb.deliverFunc(agentID, projectID, combined, false); err != nil {
-		slog.Warn("msgbuffer: message delivery failed",
-			"agent_id", agentID,
-			"grove_id", projectID,
-			"pending_count", len(pending),
-			"error", err,
-		)
+	var err error
+	for attempt := 1; attempt <= mb.maxFlushAttempts; attempt++ {
+		err = mb.deliverFunc(agentID, projectID, combined, false)
+		if err == nil {
+			return
+		}
+
+		var partial *PartialDeliveryError
+		if errors.As(err, &partial) {
+			break
+		}
+		if attempt < mb.maxFlushAttempts {
+			slog.Warn("msgbuffer: delivery attempt failed, retrying",
+				"agent_id", agentID,
+				"project_id", projectID,
+				"attempt", attempt,
+				"max_attempts", mb.maxFlushAttempts,
+				"error", err,
+			)
+			time.Sleep(mb.flushRetryBackoff)
+		}
+	}
+
+	slog.Warn("msgbuffer: message delivery failed",
+		"agent_id", agentID,
+		"project_id", projectID,
+		"pending_count", len(pending),
+		"error", err,
+	)
+	for _, fn := range handlers {
+		if fn != nil {
+			fn(err)
+		}
 	}
 }
 

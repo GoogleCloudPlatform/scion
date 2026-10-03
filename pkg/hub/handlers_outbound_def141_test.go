@@ -49,12 +49,11 @@ func TestDEF141_AC1_DerivedRouting_IncrementsDerivedRoutes(t *testing.T) {
 
 	agentID := api.NewUUID()
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID:         agentID,
-		Name:       "d141-derived-agent",
-		Slug:       "d141-derived-agent",
-		ProjectID:  projectID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        agentID,
+		Name:      "d141-derived-agent",
+		Slug:      "d141-derived-agent",
+		ProjectID: projectID,
+		Phase:     "running",
 	}))
 
 	recipientID := api.NewUUID()
@@ -132,12 +131,11 @@ func TestDEF141_AC2_ExplicitRouting_IncrementsExplicitRoutes(t *testing.T) {
 
 	agentID := api.NewUUID()
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID:         agentID,
-		Name:       "d141-explicit-agent",
-		Slug:       "d141-explicit-agent",
-		ProjectID:  projectID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        agentID,
+		Name:      "d141-explicit-agent",
+		Slug:      "d141-explicit-agent",
+		ProjectID: projectID,
+		Phase:     "running",
 	}))
 
 	recipientID := api.NewUUID()
@@ -213,12 +211,11 @@ func def141BrokerSetup(t *testing.T) (srv *Server, s store.Store, project *store
 	require.NoError(t, s.CreateUser(ctx, user))
 
 	agent = &store.Agent{
-		ID:         tid("d141-broker-agent"),
-		Name:       "d141-broker-agent",
-		Slug:       "d141-broker-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        tid("d141-broker-agent"),
+		Name:      "d141-broker-agent",
+		Slug:      "d141-broker-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -497,12 +494,11 @@ func TestDEF141_AC7_ConsistencyCheckRunsOnAllPaths(t *testing.T) {
 
 	agentID := api.NewUUID()
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID:         agentID,
-		Name:       "d141-cc-agent",
-		Slug:       "d141-cc-agent",
-		ProjectID:  projectID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        agentID,
+		Name:      "d141-cc-agent",
+		Slug:      "d141-cc-agent",
+		ProjectID: projectID,
+		Phase:     "running",
 	}))
 
 	recipientID := api.NewUUID()

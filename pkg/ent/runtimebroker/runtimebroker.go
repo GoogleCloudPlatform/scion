@@ -38,6 +38,8 @@ const (
 	FieldResources = "resources"
 	// FieldRuntimes holds the string denoting the runtimes field in the database.
 	FieldRuntimes = "runtimes"
+	// FieldDefaultProfile holds the string denoting the default_profile field in the database.
+	FieldDefaultProfile = "default_profile"
 	// FieldLabels holds the string denoting the labels field in the database.
 	FieldLabels = "labels"
 	// FieldAnnotations holds the string denoting the annotations field in the database.
@@ -81,6 +83,7 @@ var Columns = []string{
 	FieldSupportedHarnesses,
 	FieldResources,
 	FieldRuntimes,
+	FieldDefaultProfile,
 	FieldLabels,
 	FieldAnnotations,
 	FieldEndpoint,
@@ -198,14 +201,9 @@ func ByRuntimes(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldRuntimes, opts...).ToFunc()
 }
 
-// ByLabels orders the results by the labels field.
-func ByLabels(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldLabels, opts...).ToFunc()
-}
-
-// ByAnnotations orders the results by the annotations field.
-func ByAnnotations(opts ...sql.OrderTermOption) OrderOption {
-	return sql.OrderByField(FieldAnnotations, opts...).ToFunc()
+// ByDefaultProfile orders the results by the default_profile field.
+func ByDefaultProfile(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDefaultProfile, opts...).ToFunc()
 }
 
 // ByEndpoint orders the results by the endpoint field.

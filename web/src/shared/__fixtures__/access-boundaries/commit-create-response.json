@@ -18,9 +18,20 @@
     "scope": { "type": "project", "projectId": "proj-atlas" },
     "status": "active",
     "maximumPermissions": [
-      "agent.read", "agent.list", "agent.logs.read", "project.read", "project.list",
-      "skill.read", "skill.list", "role.read", "role_binding.read", "group.read",
-      "user.read", "hub.health.read", "quota.read", "scheduled_event.read"
+      "agent.read",
+      "agent.list",
+      "agent.logs.read",
+      "project.read",
+      "project.list",
+      "skill.read",
+      "skill.list",
+      "role.read",
+      "role_binding.read",
+      "group.read",
+      "user.read",
+      "hub.health.read",
+      "quota.read",
+      "scheduled_event.read"
     ],
     "appliesWhen": { "notBefore": null, "expiresAt": null },
     "createdBy": { "type": "user", "id": "usr-mori", "displayName": "Sam Mori" },
@@ -28,7 +39,15 @@
     "updatedBy": { "type": "user", "id": "usr-mori", "displayName": "Sam Mori" },
     "updatedAt": "2026-08-31T14:31:02Z",
     "_capabilities": {
-      "actions": ["read", "readAudit", "previewCreate", "previewTighten", "previewRelax", "commit", "delete"]
+      "actions": [
+        "read",
+        "readAudit",
+        "previewCreate",
+        "previewTighten",
+        "previewRelax",
+        "commit",
+        "delete"
+      ]
     }
   },
   "revision": "1",

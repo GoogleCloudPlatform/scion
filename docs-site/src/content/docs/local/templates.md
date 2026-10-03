@@ -324,7 +324,7 @@ A **harness-config** is the counterpart to a template: it holds the runtime *mec
 
 ### Model size aliases
 
-Templates should express model choice with abstract **size aliases** — `small`, `medium`, `large`, `extra-large` (`xl`) — rather than provider model names. Each harness-config maps those aliases to real models:
+Templates should express model choice with abstract **size aliases** — `small`, `medium`, `large`, `extra-large` — rather than provider model names. The shorthand tiers `s`, `m`, `l`, and `xl` are accepted too, case-insensitively (so `L` means `large`). Each harness-config maps those aliases to real models:
 
 ```yaml
 # ~/.scion/harness-configs/claude/config.yaml
@@ -349,7 +349,7 @@ model_aliases:
 A template that sets `model: large` then resolves to `opus` under Claude and `gemini-pro` under Gemini — the same role, portable across harnesses. Concrete model names still pass through unchanged (for backward compatibility) but tie the template to one harness.
 
 :::note
-Model aliases are resolved by the Hub before they are stored in the agent's `AppliedConfig` and injected as the `SCION_MODEL` environment variable. This ensures harness provision scripts receive the fully resolved concrete model name (such as `gemini-pro`) rather than an unresolved alias.
+Model aliases are resolved by the Hub before they are stored in the agent's `AppliedConfig` and injected as the `SCION_MODEL` environment variable. This ensures harness provision scripts receive the fully resolved concrete model name (such as `gemini-pro`) rather than an unresolved alias. The Hub keeps a harness-config's `model_aliases` and `model` on every write path, so tier picks resolve correctly whether an agent is created, edited, or restarted. As a fallback, harness provision scripts resolve any size alias that still reaches them through `SCION_MODEL` with the shared `scion_harness.resolve_model` helper.
 :::
 
 ### Customizing and creating variants

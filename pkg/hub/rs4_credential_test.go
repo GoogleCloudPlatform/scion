@@ -189,6 +189,42 @@ func TestRS4_IssuerAuthority(t *testing.T) {
 		assert.ErrorIs(t, err, ErrUATScopeViolation, "T-I2: scope not held must be denied")
 	})
 
+	t.Run("T-I11_dangling_role_definition_fails_closed", func(t *testing.T) {
+		// A role binding whose role definition is missing/unloadable must
+		// fail the mint closed (ErrUATProjectForbidden), not silently skip
+		// the dangling binding and resolve authority from whatever bindings
+		// remain. The store's own integrity checks refuse to delete a role
+		// definition that still has an active binding (by design), so this
+		// injects the failure at the exact point unionScopedRoleBindingPermissions
+		// reads it (store.GetRoleDefinition), rather than trying to force an
+		// inconsistent state the store is specifically built to prevent.
+		srv, s := testServer(t)
+		ctx := context.Background()
+		projectID := tid("rs4-i11-p")
+		ownerID := tid("rs4-i11-o")
+		userID := tid("rs4-i11-u")
+		rs4Project(t, s, projectID, ownerID)
+		require.NoError(t, s.CreateUser(ctx, &store.User{ID: userID, Email: "rs4i11@test.com", DisplayName: "u", Role: "member", Status: store.UserStatusActive}))
+
+		rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+			Name: "rs4-i11-role", ScopeType: store.RoleScopeProject, Permissions: []string{"agent.read"},
+		})
+		require.NoError(t, err)
+		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+			RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: userID,
+			ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: "test",
+		})
+		require.NoError(t, err)
+
+		fs := &r2FailingStore{failGetRoleDefinition: store.ErrNotFound}
+		restore := installFailStore(srv, fs)
+		defer restore()
+
+		mintCtx := rs4MintContext(userID)
+		_, _, err = srv.uatService.CreateToken(mintCtx, userID, "dangle", projectID, []string{"agent:read"}, nil)
+		assert.ErrorIs(t, err, ErrUATProjectForbidden, "T-I11: a dangling role-definition binding must deny the mint, not skip silently")
+	})
+
 	t.Run("T-I3_mixed_held_and_unheld", func(t *testing.T) {
 		srv, s := testServer(t)
 		projectID := tid("rs4-i3-p")
@@ -1063,7 +1099,13 @@ func TestRS4_Regression_ValidateTokenStillWorks(t *testing.T) {
 	ownerID := tid("rs4-rv-o")
 	rs4Project(t, s, projectID, ownerID)
 
-	uatKey := mintScopedUAT(t, srv, ownerID, projectID, []string{"agent:read"})
+	// listProjectAgents now requires agent.list on the project (fix-1908 F1 --
+	// this route used to have no authorization check for a user identity at
+	// all, so any scope, including a token that only carried agent:read,
+	// used to reach it). The UAT's caveat can only narrow the owner's
+	// underlying authority, never grant beyond what it's scoped to, so the
+	// token needs agent:list explicitly to exercise this endpoint now.
+	uatKey := mintScopedUAT(t, srv, ownerID, projectID, []string{"agent:read", "agent:list"})
 
 	// The minted token should be usable for authorized operations.
 	rec := doRequestWithUAT(t, srv, uatKey, http.MethodGet,
@@ -1533,10 +1575,11 @@ func TestRS4_CrossProjectMembershipDenied(t *testing.T) {
 // permissions could theoretically be revoked. This is acceptable because:
 //
 // 1. The TOCTOU window is microseconds on a single-node SQLite backend.
-// 2. Use-time enforcement (enforceUATConstraints → uatScopeRestriction) narrows
-//    every token request to the intersection of token scopes and the user's
-//    current effective permissions. A token minted during the TOCTOU window is
-//    immediately ineffective if the user's authority was truly revoked.
+// 2. Use-time enforcement (enforceUATConstraints and the ceilingRestriction
+//    built from the token's permission ceiling) narrows every token request
+//    to the intersection of token scopes and the user's current effective
+//    permissions. A token minted during the TOCTOU window is immediately
+//    ineffective if the user's authority was truly revoked.
 // 3. The RS1 pattern (authorization inside tx with LockProjectForMembership) is
 //    designed for mutual-exclusion of membership mutations, which can conflict
 //    structurally. Token minting does not mutate authority state — it only reads

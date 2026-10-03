@@ -41,6 +41,10 @@ telemetry:
 
   cloud:
     enabled: true
+    # Required when exporting to Google Cloud. The metrics dashboard queries
+    # Cloud Monitoring for this project, so without it the export has no
+    # destination and the dashboard stays empty with no error shown.
+    gcp_project_id: "my-gcp-project"
     endpoint: "monitoring.googleapis.com:443"
     protocol: grpc
     headers:
@@ -190,8 +194,33 @@ All metrics and traces emitted by Scion are enriched with context-aware OpenTele
 
 - `scion.harness`: The type of harness running the agent (e.g., `gemini`, `claude`, `codex`).
 - `scion.model`: The specific LLM model being used.
-- `scion.broker`: The ID of the Runtime Broker executing the agent.
-- `project_id`: The ID of the agent's parent project.
+- `scion.broker.name`: The name of the Runtime Broker executing the agent, when available.
+- `scion.project.id`: The authoritative ID of the agent's parent project, when available.
+
+#### Identity Enforcement
+
+The `sciontool` receiver enforces authoritative identity on all incoming telemetry. Reserved identity attributes (`scion.agent.id`, `scion.agent.slug`, `scion.project.id`, `scion.harness`, `scion.model`, `scion.broker.name`, and related keys) are stripped from agent-submitted resource attributes and replaced with Hub-sourced values. This prevents agents from spoofing their identity in exported telemetry.
+
+In addition to the resource attributes above, every exported metric **point** carries three canonical labels, stamped from that same authoritative identity by the exporter (GCP-native and generic OTLP alike), never by a producer:
+
+- `scion_agent_id`
+- `scion_project_id`
+- `scion_agent_slug` — a display-friendly form of `scion_agent_id`, 1:1 with it, and read straight off the series (no Hub database lookup, so it survives agent deletion)
+
+These are the labels the Hub dashboard filters and groups on (`metric.labels.scion_project_id` for the project view, `metric.labels.scion_agent_id` for agent grouping). A producer that sets one of these three keys itself is rejected. They are distinct from the pre-existing, non-canonical point labels `agent_id` and `project_id` that some hook metrics also carry for historical, descriptor-compatibility reasons; the dashboard does not read those.
+
+### Native Event Name Normalization
+
+When harnesses emit native OTLP log records or events, `sciontool` normalizes their harness-specific event names into the canonical `agent.*` namespace before forwarding. This ensures consistent filtering and querying across harnesses:
+
+| Harness | Native event name | Normalized name |
+|---------|------------------|-----------------|
+| Claude Code | `user_prompt` (scope `com.anthropic.claude_code.events`) | `agent.user.prompt` |
+| Codex | `codex.user_prompt` | `agent.user.prompt` |
+| Codex | `codex.tool_result` | `agent.tool.result` |
+| Gemini CLI | `gemini_cli.user_prompt` | `agent.user.prompt` |
+
+Event names that do not match a known alias are forwarded unchanged. All log records carry a normalized `event.name` attribute after processing.
 
 ### Automated Metrics Collection
 
@@ -199,16 +228,96 @@ When harness events occur (via hooks), sciontool automatically records the follo
 
 | Metric | Type | Unit | Description |
 |--------|------|------|-------------|
-| `gen_ai.tokens.input` | Counter | tokens | Number of input tokens processed |
-| `gen_ai.tokens.output` | Counter | tokens | Number of output tokens generated |
-| `gen_ai.tokens.cached` | Counter | tokens | Number of tokens retrieved from cache |
+| `scion.usage.tokens` | Counter | tokens | Tokens reported by model-end hooks, broken down by the `token_type` label (see "Canonical usage contract" below) |
 | `agent.tool.calls` | Counter | calls | Total number of tool executions |
-| `agent.tool.duration` | Histogram | ms | Latency of tool executions |
-| `agent.session.count` | Counter | sessions | Total number of agent sessions |
+| `agent.tool.duration` | Histogram | ms | Tool duration when paired start and end events are available in one process |
+| `agent.session.count` | Counter | sessions | Session-end events emitted by each source |
 | `gen_ai.api.calls` | Counter | calls | Total number of LLM API requests |
-| `gen_ai.api.duration` | Histogram | ms | Latency of LLM API requests |
+| `gen_ai.api.duration` | Histogram | ms | Model duration when paired start and end events are available in one process |
 
-*(Note: The Codex harness has been expanded to capture comprehensive telemetry including tool usage, detailed tool input/output, and granular token counts for input, output, and cached tokens).*
+Token and API-call counters appear only when a hook provides them, and only
+when the harness's usage source is `hooks` (see "Usage source" below) —
+`gen_ai.api.calls` is gated the same way as `scion.usage.tokens`, not just the
+token counters. The retired `scion.hook.tokens.{input,output,cached}` names
+are rejected by the receiver on the hook scope, the same way `gen_ai.tokens.*`
+is.
+
+A hook-sourced harness's dialect can populate all five `token_type` values on
+`scion.usage.tokens`, not just three. A Go dialect sets the `EventData`
+fields `InputTokens`, `OutputTokens`, `CachedTokens`, `CacheWriteTokens` and
+`ReasoningTokens`; a `dialect.yaml` `fields` mapping uses the YAML keys
+`input_tokens` (→ `input`), `output_tokens` (→ `output`), `cached_tokens`
+(→ `cache_read`), `cache_write_tokens` (→ `cache_write`) and
+`reasoning_tokens` (→ `reasoning`, informational, already included in
+`output` and never added again). `output_tokens`/`OutputTokens` must be the
+*total* output including reasoning (canonical usage contract,
+`.design/hosted/usage-telemetry.md` §3.2): a `dialect.yaml` `fields`
+mapping is a pure path copy with no arithmetic, so a harness that reports
+output and reasoning as exclusive values needs a Go dialect or bridge-side
+summing to produce a combined `output_tokens` — the YAML mapping alone
+cannot add them together. A point is emitted only for a token type
+whose field was actually populated (a positive value); a
+dialect that never maps a given field simply never emits that `token_type`.
+
+#### Canonical usage contract: `gen_ai.api.calls` and `scion.usage.tokens`
+
+The Hub dashboard reads exactly two usage metrics, regardless of source:
+
+| Metric | Point labels | Meaning |
+|--------|--------------|---------|
+| `gen_ai.api.calls` | `harness`, `model`, `status` (`success`\|`error`), `scion_agent_id`, `scion_project_id`, `scion_agent_slug` | One completed model response, or a failed request where the source reports it. |
+| `scion.usage.tokens` | `harness`, `model`, `token_type`, `scion_agent_id`, `scion_project_id`, `scion_agent_slug` | Tokens attributed to model requests. |
+
+`token_type` is a closed enum: `input` (non-cached prompt tokens), `output` (generated tokens, including reasoning), `cache_read`, `cache_write`, and `reasoning` (an informational subset of `output`, already counted there — never add it to a total alongside `output`). `scion.usage.tokens` is the only token metric either source writes; the retired `scion.hook.tokens.*` family is rejected at admission (see above). A harness's native events and its hooks can in principle both populate it, but never both at once for the same harness (see "Usage source" below).
+
+Each harness declares **one** usage source in its `provision.py`, via `SCION_USAGE_SOURCE=native|hooks`. When native, sciontool's receiver derives `gen_ai.api.calls`/`scion.usage.tokens` itself from the harness's own OTLP signals, so no hook needs to carry usage at all. Claude and Codex derive it from native **log events** (Claude's `api_request`/`api_error`; Codex's `codex.sse_event` with `event.kind=response.completed`). Copilot is metric-sourced instead: calls come from the per-export observation count of its `gen_ai.client.inference.operation.input_tokens` histogram (a real capture confirms exactly one observation per model call), and tokens from its `gen_ai.client.inference.usage.*` counters (`input_tokens`, `output_tokens`, `cache_read.input_tokens`, `cache_write.input_tokens`, `reasoning.output_tokens`). Every Copilot metric point is cumulative regardless of the delta-preference env var sciontool requests (Copilot documents no temporality override), and `input_tokens` is not exclusive of its own cached tokens, so sciontool's deriver converts cumulative points to per-export deltas and subtracts `cache_read`/`cache_write` from `input` itself, within one received export at a time. Claude, Codex and Copilot declare `SCION_USAGE_SOURCE=native`; on the GCP provider, Codex's native metrics stay off (they would be rejected at admission today) while its logs — the source of its derivation — stay on, and Copilot's raw usage metrics are consumed — removed from the request once derived, rather than rejected for carrying vendor attributes outside the Cloud allowlist or admitted as-is; on generic OTLP they are forwarded unchanged alongside the derived counters.
+
+An unset `SCION_USAGE_SOURCE` means **no usage is published** from hooks for that harness (design D10, the vetting gate) — an unvetted guess is worse than a visible gap. A harness publishes hook-sourced usage only once its `provision.py` declares `SCION_USAGE_SOURCE=hooks`, behind a PR that checks in a captured fixture proving the mapping. opencode and antigravity have both opted in this way (phase 3b and this phase, respectively — see below for each). Tool, session, turn and every other hook metric, span and log is unaffected by `SCION_USAGE_SOURCE` in every case (design D4, narrow).
+
+**opencode (phase 3b).** `harnesses/opencode/provision.py` declares `SCION_USAGE_SOURCE=hooks`. `harnesses/opencode/dialect.yaml` maps one model-end per completed LLM step: OpenCode's own event bus emits a `step-finish` part per provider response, delivered to the harness only through OpenCode's generic `event` plugin hook (not through same-named keyed hooks, which never fire for these event types) and routed by `harnesses/opencode/home/.config/opencode/plugins/scion-bridge.js`. The bridge dedupes on `(sessionID, messageID, part.id)` and excludes replayed parts from a forked session by tracking which assistant messages it observed live. Tokens are exclusive in OpenCode's own accounting, so the bridge sums `reasoning` into `output` before emitting (`output_tokens`), matching the canonical contract. Known undercount: a model call that produces no `step-finish` part (a failed or retried attempt, an abort, title generation, or agent generation) is not counted, consistent with the contract's "completed model responses" meaning.
+
+**Antigravity: calls-only.** Antigravity's `PreInvocation`/`PostInvocation` hooks (`model-start`/`model-end`) carry no usage or token field at all, in either direction, regardless of whether the underlying model response had one — confirmed against a real captured fixture (real `agy` 1.2.12 binary, mock model backend: `pkg/sciontool/hooks/dialects/testdata/antigravity/`). So `gen_ai.api.calls` is populated (one per main-loop model request — `PostInvocation` fires per request, not per turn) and `scion.usage.tokens` never gets a point from this harness. This is a deliberate, vetted outcome, not a gap: publishing a guessed token value would be worse than publishing none (D10's own principle). Known undercount: `agy`'s own auxiliary calls (for example conversation title generation) fire no Invocation hook at all, and failed or retried attempts were not captured, so their `PostInvocation`/`status` behavior is uncharacterized. The `model` label comes from the agent's configured `SCION_MODEL`, not the per-invocation payload — see the harness README for why.
+
+**Known gap: gemini-cli, muse-code.** With `SCION_USAGE_SOURCE` unset, these harnesses publish no usage at all until each lands its own fixture-backed `provision.py` PR (gemini-cli's native rule is deferred, D6). Codex, opencode and antigravity are no longer in this list: codex declares `SCION_USAGE_SOURCE=native`, deriving its calls and tokens from its own OTLP log events once `scion-base` is rebuilt; opencode declares `SCION_USAGE_SOURCE=hooks` (phase 3b, above); antigravity declares `SCION_USAGE_SOURCE=hooks` and publishes calls only (see above — it has no token source to report).
+
+All of this — the deriver, the hook vetting gate, and the allowlist changes below — is sciontool-side value: it takes effect only after an operator rebuilds `scion-base` and then the harness images. An unrebuilt `scion-base` keeps today's behavior unchanged; it does not error, and it does not need a `provision.py` workaround.
+
+For Cloud Monitoring, the normalized hook counters and the derived usage counters in this table use a
+collector observation epoch and the time sciontool takes each cumulative
+snapshot. A counter's Cloud point time therefore describes when this collector
+observed the total, rather than the time of the last hook event. Retries keep
+the original snapshot time. Generic OTLP forwarding and native metric points
+keep their source timestamps through sciontool. The Monitoring SDK maps
+non-gauge intervals shorter than two milliseconds to a one-millisecond
+interval; admission checks use that mapped end. A native point known to be less than five seconds
+after a possibly written point in the same Cloud series is rejected before
+admission; a request containing that point is rejected as a whole. Scope and
+metric names select the hook counter behavior, so local producers using those
+reserved names also opt into it. This does not authenticate the producer.
+Session-end totals do not add a second copy of model-end usage. Short-lived
+hook processes normally cannot pair start and end events, so duration
+histograms are not guaranteed.
+
+`agent.session.count` has two distinct sources: harness `session-end` hooks and
+the `sciontool init` lifecycle `session-end` event. They keep the same metric
+name and unit, but use distinct instrumentation scopes. In Cloud Monitoring,
+filter the `scion_metric_scope_id` label for the source you intend to inspect:
+the hook scope is `github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/handlers`,
+and the init lifecycle scope adds `/lifecycle`. The Cloud label contains a
+digest of the scope identity, so inspect a sample series to obtain its value.
+These are source event counts; summing both does not produce a canonical count
+of logical sessions. The Hub dashboard does not reconcile them.
+
+The Hub dashboard reads only `gen_ai.api.calls` and `scion.usage.tokens` (never
+`gen_ai.tokens.*` or `scion.hook.tokens.*`), and computes totals from each
+series' cumulative increase per flush rather than summing raw points — summing
+raw points on a CUMULATIVE counter over-counts by roughly the flush count.
+A harness whose `provision.py` declares `SCION_USAGE_SOURCE=hooks` keeps
+appearing on the dashboard from its hooks. Claude's usage instead comes from
+its native events, since its `provision.py` declares `SCION_USAGE_SOURCE=native`;
+see "Canonical usage contract" above. An as-yet-unvetted hook-sourced harness's
+usage does not appear until its `provision.py` opts in under a fixture-backed
+PR (the vetting gate described there).
 
 ### Correlated Logs
 
@@ -356,6 +465,10 @@ The aggregated relational metrics are exposed directly within the Hub's Web UI:
 - **Agents List Stats Columns**: Displays high-level stats columns (such as total token consumption) directly on the main agents index table.
 - **Project Summary Panel**: Provides an operational cost and model usage dashboard across all agents in the selected project.
 
+
+## Upgrading
+
+`sciontool`'s telemetry code (including usage-metrics fixes) is compiled into the `scion-base` image; harness and hub images only build on top of it. A `sciontool`-side fix reaches running agents only after `scion-base` is rebuilt, then the harness/hub images on top of it — rebuilding harnesses alone against an old `scion-base` keeps the old telemetry behavior. See [Build provenance and stale sciontool](https://github.com/GoogleCloudPlatform/scion/blob/main/image-build/README.md#build-provenance-and-stale-sciontool) for how to check which commit is embedded in a given image and the required rebuild order.
 
 ## Implementation Details
 

@@ -171,3 +171,126 @@ func TestHubAgentDefaults_ConcurrentWithApplySnapshot(t *testing.T) {
 
 	wg.Wait()
 }
+
+// TestApplySnapshot_DefaultTimezone verifies that the hub-level DefaultTimezone
+// field flows through Snapshot → ApplySnapshot → hubAgentDefaults.
+func TestApplySnapshot_DefaultTimezone(t *testing.T) {
+	srv := &Server{maintenance: NewMaintenanceState(false, "")}
+	ApplySnapshot(srv, Layer1Snapshot{DefaultTimezone: "America/Los_Angeles"})
+
+	got := srv.hubAgentDefaults()
+	if got.DefaultTimezone != "America/Los_Angeles" {
+		t.Errorf("DefaultTimezone: want America/Los_Angeles, got %q", got.DefaultTimezone)
+	}
+}
+
+// TestAgentDefaultsEqual_Timezone ensures that agentDefaultsEqual detects
+// changes in the DefaultTimezone field.
+func TestAgentDefaultsEqual_Timezone(t *testing.T) {
+	a := opsettings.AgentDefaultsSettings{DefaultTimezone: "UTC"}
+	b := opsettings.AgentDefaultsSettings{DefaultTimezone: "America/New_York"}
+	if agentDefaultsEqual(a, b) {
+		t.Error("agentDefaultsEqual should return false for different timezones")
+	}
+	b.DefaultTimezone = "UTC"
+	if !agentDefaultsEqual(a, b) {
+		t.Error("agentDefaultsEqual should return true for equal timezones")
+	}
+}
+
+// TestApplySnapshot_DefaultGCPIdentity verifies that the hub-level default GCP
+// identity fields flow through Snapshot → ApplySnapshot → hubAgentDefaults,
+// and that a later snapshot without them clears them.
+func TestApplySnapshot_DefaultGCPIdentity(t *testing.T) {
+	srv := &Server{maintenance: NewMaintenanceState(false, "")}
+	ApplySnapshot(srv, Layer1Snapshot{
+		DefaultGCPIdentityMode:             "assign",
+		DefaultGCPIdentityServiceAccountID: "sa-1",
+	})
+
+	got := srv.hubAgentDefaults()
+	if got.DefaultGCPIdentityMode != "assign" {
+		t.Errorf("DefaultGCPIdentityMode: want assign, got %q", got.DefaultGCPIdentityMode)
+	}
+	if got.DefaultGCPIdentityServiceAccountID != "sa-1" {
+		t.Errorf("DefaultGCPIdentityServiceAccountID: want sa-1, got %q", got.DefaultGCPIdentityServiceAccountID)
+	}
+
+	ApplySnapshot(srv, Layer1Snapshot{})
+	got = srv.hubAgentDefaults()
+	if got.DefaultGCPIdentityMode != "" || got.DefaultGCPIdentityServiceAccountID != "" {
+		t.Errorf("clearing snapshot should clear GCP identity defaults, got %+v", got)
+	}
+}
+
+// TestAgentDefaultsEqual_GCPIdentity ensures that agentDefaultsEqual detects
+// changes in either default GCP identity field.
+func TestAgentDefaultsEqual_GCPIdentity(t *testing.T) {
+	a := opsettings.AgentDefaultsSettings{DefaultGCPIdentityMode: "assign", DefaultGCPIdentityServiceAccountID: "sa-1"}
+
+	b := a
+	b.DefaultGCPIdentityMode = "passthrough"
+	if agentDefaultsEqual(a, b) {
+		t.Error("agentDefaultsEqual should return false for different GCP identity modes")
+	}
+
+	b = a
+	b.DefaultGCPIdentityServiceAccountID = "sa-2"
+	if agentDefaultsEqual(a, b) {
+		t.Error("agentDefaultsEqual should return false for different GCP identity service accounts")
+	}
+
+	b = a
+	if !agentDefaultsEqual(a, b) {
+		t.Error("agentDefaultsEqual should return true for equal GCP identity defaults")
+	}
+}
+
+// TestBuildLayer1SnapshotFromFile_DefaultGCPIdentity verifies the file/SQLite
+// snapshot carries the hub default GCP identity, so a file-mode admin save
+// reaches hubAgentDefaults() via reloadSettings.
+func TestBuildLayer1SnapshotFromFile_DefaultGCPIdentity(t *testing.T) {
+	gc := config.DefaultGlobalConfig()
+	gc.DefaultGCPIdentityMode = "passthrough"
+	gc.DefaultGCPIdentityServiceAccountID = "sa-1"
+
+	snap := BuildLayer1SnapshotFromFile(&gc)
+	if snap.DefaultGCPIdentityMode != "passthrough" {
+		t.Errorf("DefaultGCPIdentityMode: want passthrough, got %q", snap.DefaultGCPIdentityMode)
+	}
+	if snap.DefaultGCPIdentityServiceAccountID != "sa-1" {
+		t.Errorf("DefaultGCPIdentityServiceAccountID: want sa-1, got %q", snap.DefaultGCPIdentityServiceAccountID)
+	}
+}
+
+// TestProfileTimezone_ReturnsTimezoneFromOverlay verifies the profileTimezone
+// method returns the timezone from the global settings overlay.
+func TestProfileTimezone_ReturnsTimezoneFromOverlay(t *testing.T) {
+	// Set up global overlay with a profile that has a timezone.
+	overlay := config.NewSettingsOverlay()
+	overlay.Update(nil, map[string]config.V1ProfileConfig{
+		"pacific": {Runtime: "docker", Timezone: "America/Los_Angeles"},
+		"no-tz":   {Runtime: "docker"},
+	}, nil, "")
+	config.SetGlobalSettingsOverlay(overlay)
+	defer config.SetGlobalSettingsOverlay(nil)
+
+	srv := &Server{maintenance: NewMaintenanceState(false, "")}
+
+	// Profile with timezone.
+	if got := srv.profileTimezone("pacific"); got != "America/Los_Angeles" {
+		t.Errorf("profileTimezone(pacific): want America/Los_Angeles, got %q", got)
+	}
+	// Profile without timezone.
+	if got := srv.profileTimezone("no-tz"); got != "" {
+		t.Errorf("profileTimezone(no-tz): want empty, got %q", got)
+	}
+	// Non-existent profile.
+	if got := srv.profileTimezone("nonexistent"); got != "" {
+		t.Errorf("profileTimezone(nonexistent): want empty, got %q", got)
+	}
+	// Empty profile name.
+	if got := srv.profileTimezone(""); got != "" {
+		t.Errorf("profileTimezone(\"\"): want empty, got %q", got)
+	}
+}

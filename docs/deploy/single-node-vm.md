@@ -1,0 +1,563 @@
+# Single-Node VM Deployment Guide
+
+Deploy a Scion Hub on a Google Compute Engine (GCE) VM with Identity-Aware Proxy
+(IAP) authentication. This tier uses released binaries, local storage, and a
+Cloud Run IAP reverse proxy — no container builds, no GCS, no external database.
+
+> Part of the Single-Node-VM deploy tier (ptone/scion#1575).
+
+> **Adding a GKE target for shared-dir storage?** See the
+> [Hybrid Deployment Tier](hybrid-tier.md) page — it extends this same VM with
+> a second, Kubernetes-based place to run agents, sharing project scratchpads
+> between the two runtimes over an NFS export served from this VM
+> (`ptone/scion#1777`).
+
+## Overview
+
+The single-node-VM tier stands up a persistent GCE VM running the `scion` binary
+from a GitHub Release. A Cloud Run service acts as an IAP-authenticated reverse
+proxy, giving users browser access without exposing the VM directly. Agents
+running on the VM connect to the Hub over localhost, bypassing IAP entirely.
+
+Key properties:
+
+- **Binary-based** — downloads a pre-built release; no source checkout or
+  container build required.
+- **Checksum-verified** — every downloaded binary and chat-plugin tarball is
+  verified against the release's `SHA256SUMS` asset before it is extracted;
+  see [Quick Start](#quick-start) below.
+- **Local storage** — Hub state lives in embedded SQLite on the VM disk; no GCS
+  or Cloud SQL.
+- **Local secrets** — secrets are stored on disk (`hub.env`); no Secret Manager.
+- **IAP auth** — users authenticate via Google IAP through the Cloud Run proxy.
+- **Idempotent** — re-running the deploy script converges without duplication.
+
+## Prerequisites
+
+| Requirement | Details |
+|-------------|---------|
+| GCP project | A Google Cloud project with billing enabled |
+| `gcloud` CLI | Authenticated (`gcloud auth login`) with a project set (`gcloud config set project PROJECT_ID`) |
+| Required APIs | `compute`, `run`, `iap`, `cloudbuild`, `artifactregistry` — enabled automatically by the script |
+| Permissions | Project Owner, or Editor plus `roles/resourcemanager.projectIamAdmin` and `roles/run.admin` (create VMs, Cloud Run services, service accounts, IAM bindings) — Editor alone lacks both `resourcemanager.projects.setIamPolicy` (the project-level IAM bindings this script creates) and `run.services.setIamPolicy` (the Cloud Run service's own invoker binding); `projectIamAdmin` covers the first but not the second, hence `run.admin` too. Both Owner and Editor already include `iam.serviceAccounts.actAs` on the service accounts the script uses, so no separate Service Account User grant is needed. The script also grants `roles/iap.tunnelResourceAccessor` to the deployer for SSH access to the private VM. With the optional hybrid tier enabled, also `roles/iam.serviceAccountAdmin` (`iam.serviceAccounts.setIamPolicy`, for the transport service account's token-creator binding) and `roles/iap.admin` (`iap.webServices.setIamPolicy`, for its IAP access grant). Owner already covers both. |
+| VM OS image | Ubuntu 22.04 LTS — pinned, not currently configurable (see [Architecture](#architecture)). |
+
+## Quick Start
+
+From the repository root:
+
+```bash
+./scripts/single-node-vm/deploy.sh
+```
+
+The script runs interactively, prompting for:
+
+1. **Hub name** (default: `my-hub`) — used to derive resource names
+2. **GCP region** (default: `us-central1`)
+3. **Machine size** — Small (e2-standard-4) or Medium (n2-standard-16)
+4. **Disk size** — 200 GB, 500 GB, or custom
+5. **Chat plugins** — Telegram, Discord, Slack, Teams, or none
+6. **Container images** — provide a registry path or build locally on the VM
+7. **Admin email** — email address to grant super-admin access (defaults to deployer identity)
+8. **Update policy** — Auto (install updates automatically), Notify (check and notify only), or Disabled
+
+To install a specific release version:
+
+```bash
+./scripts/single-node-vm/deploy.sh --version v0.5.0
+```
+
+Before downloading anything, the script checks that the chosen release
+publishes a `SHA256SUMS` checksums asset, and downloads and verifies every
+binary and chat-plugin tarball against it before installing.
+A release published before checksum publishing existed has no `SHA256SUMS`
+asset; targeting one with `--version` (or letting auto-detect pick a nightly
+that predates it) fails immediately, before any GCP resource is created, with
+an error naming the release. To install such a release anyway, without
+verification, set `ALLOW_UNVERIFIED_RELEASE=true` in the environment — this
+prints a loud warning and is not recommended outside of migrating off an old
+pinned version.
+
+### Config File (Headless Mode)
+
+To run the deployment without interactive prompts, create a JSON config file
+that pre-answers all wizard questions and pass it with `--config`:
+
+```bash
+./scripts/single-node-vm/deploy.sh --config my-deploy-config.json
+```
+
+See `scripts/single-node-vm/deploy-config.example.json` for a documented
+template with all available fields.
+
+When a config file is provided:
+- Fields present in the config are used directly (no prompt).
+- Missing fields fall back to interactive prompts (if a terminal is
+  attached) or sensible defaults.
+- In fully non-interactive mode (no terminal on stdin), missing required
+  fields cause the script to exit with an error rather than hanging on a
+  `read`.
+
+Example minimal config for headless deployment:
+
+```json
+{
+  "hub_name": "my-hub",
+  "region": "us-central1",
+  "machine_size": "small",
+  "disk_size_gb": 200,
+  "container_images": {
+    "source": "build"
+  }
+}
+```
+
+This is particularly useful for agent-driven deployments where a
+conversational agent gathers answers from a user, writes the config file,
+and runs `deploy.sh --config` headlessly.
+
+## Architecture
+
+```
+                 ┌─────────────────────────────┐
+                 │         GCP Project          │
+                 │                              │
+  User ──────►  │  Cloud Run IAP Proxy ──────► │ ──► GCE VM (no public IP)
+  (browser)     │  (IAP-authenticated)         │     ┌──────────────────┐
+                 │                              │     │ scion binary     │
+                 │                              │     │ systemd service  │
+                 │                              │     │ SQLite + local   │
+                 │                              │     │ storage          │
+                 │                              │     │                  │
+                 │                              │     │ Agents ──► localhost:8080
+                 │                              │     └──────────────────┘
+                 └─────────────────────────────┘
+```
+
+- **User (browser)** — connects to the Cloud Run proxy URL; Google IAP
+  authenticates the request before it reaches the proxy.
+- **Cloud Run IAP Proxy** — a lightweight reverse proxy deployed from
+  `extras/cloudrun-iap-proxy`. Forwards authenticated requests to the VM's
+  internal IP on port 8080.
+- **GCE VM** — runs the Scion Hub via a systemd unit (`scion-hub.service`)
+  with the runtime broker co-located in the same process (`--enable-runtime-broker`).
+  Has no public IP address. Sits on the default VPC so the Cloud Run proxy
+  can reach it via internal networking. Docker is installed by cloud-init.
+  The VM image is pinned to **Ubuntu 22.04 LTS** (`ubuntu-2204-lts` /
+  `ubuntu-os-cloud` in `deploy.sh`); `cloud-init.yaml`'s Docker apt-repo setup
+  is written specifically for this image. This is a deliberate design
+  decision, not currently configurable — there is no demand for other
+  distros, and making the image configurable would multiply an already-zero
+  test matrix. Ubuntu 22.04 standard support ends April 2027; a bump to
+  24.04 LTS should be its own tested change when the time comes.
+- **Agents** — launched as Docker containers on the VM by the runtime broker;
+  they connect to the Hub at `localhost:8080`, no IAP needed.
+
+## What Gets Created
+
+The deploy script creates the following GCP resources:
+
+| Resource | Name pattern | Purpose |
+|----------|-------------|---------|
+| GCE VM | `scion-hub-<hub-name>` | Runs the Scion Hub binary via systemd |
+| Service account | `scion-hub-<hub-name>@<project>.iam.gserviceaccount.com` | VM identity with logging/monitoring roles |
+| Service account | `scion-hub-<hub-name>-proxy@<project>.iam.gserviceaccount.com` (truncated and hashed for long hub names) | Cloud Run proxy identity, with no project IAM roles |
+| Cloud Run service | `scion-hub-<hub-name>-iap-proxy` | IAP-authenticated reverse proxy to the VM |
+| Firewall rule | `scion-hub-<hub-name>-allow-proxy` | Allows the Cloud Run proxy (Direct VPC egress) to reach the VM on tcp:8080 |
+| IAM bindings | IAP `httpsResourceAccessor` for the deployer; `roles/run.invoker` for the IAP service agent on the Cloud Run proxy | Grants the deployer browser access through IAP; lets IAP itself invoke the proxy service |
+
+On the VM itself:
+
+| Path | Purpose |
+|------|---------|
+| `/usr/local/bin/scion` | The Scion Hub binary |
+| `/home/scion/.scion/settings.yaml` | Hub configuration (auth mode, storage, etc.) |
+| `/home/scion/.scion/hub.env` | Environment variables (session secret, project ID) |
+| `/home/scion/.scion/workspace-storage/` | Local workspace storage directory |
+| `/home/scion/.scion/plugins/broker/` | Chat plugin binaries (if selected) |
+| `/etc/systemd/system/scion-hub.service` | systemd unit file |
+
+The unit runs as `User=scion` with `WorkingDirectory=/home/scion`, matching
+the paths above — the Hub's daemon working directory is that user's home
+directory, not `/`.
+
+## Configuration
+
+### settings.yaml
+
+The Hub configuration file. The deploy script writes it in two stages:
+
+1. **During VM setup (Phase 3)** — `auth.mode: dev` for initial health checks
+   via SSH tunnel.
+2. **After IAP is ready (Phase 5)** — `auth.mode: proxy` with the IAP audience
+   string, enabling IAP-based authentication.
+
+Final configuration:
+
+```yaml
+schema_version: "1"
+image_registry: "localhost/scion"
+server:
+  hub:
+    name: "my-hub"
+    admin_emails:
+      - "you@example.com"
+  maintenance:
+    deployment_tier: "binary"
+    release_channel: "stable"
+    update_policy: "auto"
+  storage:
+    local_path: /home/scion/.scion/workspace-storage
+  secrets:
+    backend: local
+  auth:
+    mode: proxy
+    proxy:
+      provider: iap
+      iap:
+        audience: "/projects/PROJECT_NUMBER/locations/REGION/services/SERVICE"
+  listen_port: 8080
+```
+
+Key settings:
+
+- `schema_version` — must be `"1"` (not `settings_version`).
+- `image_registry` — required, even for locally built images. Set to
+  `localhost/scion` for local builds, or the registry path for remote images.
+- `admin_emails` — email(s) auto-promoted to super-admin on login.
+- `storage.local_path` — all workspace data stored on the VM's local disk.
+- `secrets.backend: local` — secrets are read from `hub.env` on disk, not from
+  GCP Secret Manager.
+- `auth.mode: proxy` — the Hub trusts the IAP proxy header for user identity.
+- `auth.proxy.iap.audience` — the IAP audience string, computed automatically
+  from the project number, region, and proxy service name.
+- `maintenance.deployment_tier` — `"binary"` for release-based deployments
+  (set automatically by the deploy script). Source deployments use `"source"`.
+- `maintenance.release_channel` — which release channel to track for updates:
+  `"stable"` or `"preview"`. Default: `"stable"`.
+- `maintenance.update_policy` — controls automatic update behavior:
+  - `"auto"` — check for updates on a schedule and install automatically
+    (recommended for binary deployments).
+  - `"notify"` — check for updates and show a banner in the admin UI; admin
+    must manually trigger the update.
+  - `"disabled"` — no automatic update checking (manual checks via the admin
+    UI still work).
+
+  Like the initial install, an `"auto"` update verifies the downloaded binary
+  against the target release's `SHA256SUMS` asset and fails the update (with
+  no binary swapped in) if that asset or a matching entry is missing, or the
+  hash doesn't match. Unlike the initial install, there is no override: a
+  release with no checksums simply isn't auto-installed.
+
+### hub.env
+
+Environment variables for the Hub process, stored at
+`/home/scion/.scion/hub.env`:
+
+```bash
+SESSION_SECRET=<randomly-generated-base64>
+SCION_GCP_PROJECT_ID=<your-project-id>
+GOOGLE_CLOUD_PROJECT=<your-project-id>
+```
+
+The `SESSION_SECRET` is generated once during initial deployment and preserved
+on subsequent runs.
+
+### Hub-scoped agent env vars
+
+`hub.env` configures the Hub process only. The env vars that agents receive
+are stored in the hub database. After the Phase 3 health check, the deploy
+script writes these hub-scoped env vars (injection mode `always`) into
+`/home/scion/.scion/hub.db` with `sqlite3`:
+
+| Key | Value |
+|-----|-------|
+| `GOOGLE_CLOUD_PROJECT` | your project ID |
+| `GOOGLE_CLOUD_LOCATION` | `global` (the global Vertex AI endpoint, intentionally) |
+
+They appear in the admin UI as hub env vars, and you can edit them there.
+The deploy only seeds these keys when they are absent. Edits made in the
+admin UI are kept across redeploys, and a deleted key is created again on the
+next deploy. If the write fails, the deploy continues and prints the command to
+run manually.
+
+## Chat Plugins
+
+During deployment, the script prompts you to select chat integrations:
+
+| Option | Plugin | Binary installed |
+|--------|--------|-----------------|
+| 1 | Telegram | `scion-plugin-telegram` |
+| 2 | Discord | `scion-plugin-discord` |
+| 3 | Slack | `scion-plugin-slack` |
+| 4 | Teams | `scion-plugin-teams` |
+| 5 | None | (no plugins) |
+
+You can select multiple plugins by entering comma-separated numbers (e.g.,
+`1,2` for Telegram and Discord).
+
+Plugins are downloaded from the same GitHub Release as the main binary and
+installed to `/home/scion/.scion/plugins/broker/`. Each plugin runs as a
+broker plugin within the Hub process. Like the main binary, each plugin
+tarball is verified against the release's `SHA256SUMS` asset before
+installation (see [Quick Start](#quick-start)).
+
+## Container Images
+
+Agents need container images to run (core-base, scion-base, and harness images
+like scion-antigravity). The deploy wizard offers two options:
+
+### Option 1: Provide a registry path
+
+If you have already pushed images to a container registry (e.g., Artifact
+Registry), select this option and provide the registry path. The Hub will
+pull images from the registry at runtime.
+
+Example registry path: `us-docker.pkg.dev/my-project/scion`
+
+### Option 2: Build images locally on the VM
+
+This option clones the Scion source repository onto the VM and builds the
+minimal set of images needed for deployment: core-base, scion-base, and
+scion-antigravity (the default harness).
+
+The build runs in the background on the VM (via `nohup`) so it survives
+SSH disconnects. The deploy script polls for completion and shows progress.
+
+**Requirements:**
+- Approximately 30-45 minutes of build time
+- Approximately 30 GB of additional disk space
+- The VM must have outbound internet access (provided by Cloud NAT)
+
+Images are tagged under the `localhost/scion` prefix (e.g.,
+`localhost/scion/scion-antigravity:latest`) and `image_registry` is set to
+`localhost/scion` in the Hub configuration. The runtime broker resolves
+images through this registry prefix.
+
+## Access Patterns
+
+### Web access (browser via IAP)
+
+Open the Cloud Run proxy URL printed at the end of deployment:
+
+```
+https://scion-hub-my-hub-iap-proxy-HASH-REGION.a.run.app
+```
+
+You will be prompted to authenticate with your Google account. IAP enforces
+access — only users with the `roles/iap.httpsResourceAccessor` binding on the
+proxy service can reach the Hub.
+
+To grant additional users access:
+
+```bash
+gcloud iap web add-iam-policy-binding \
+  --resource-type=cloud-run \
+  --service=scion-hub-my-hub-iap-proxy \
+  --region=us-central1 \
+  --project=PROJECT_ID \
+  --member=user:colleague@example.com \
+  --role=roles/iap.httpsResourceAccessor
+```
+
+### Agent access (localhost on the VM)
+
+Agents running on the VM connect directly to `localhost:8080`. No IAP
+authentication is needed — the agents are co-located with the Hub.
+
+### CLI access (via IAP)
+
+To use the `scion` CLI from your local machine against the deployed Hub,
+configure it to authenticate through IAP using the Cloud Run proxy URL.
+
+### SSH access (via gcloud)
+
+Since the VM has no public IP, use `gcloud compute ssh` to connect:
+
+```bash
+gcloud compute ssh scion-hub-my-hub \
+  --zone=us-central1-b \
+  --project=PROJECT_ID
+```
+
+To view Hub logs:
+
+```bash
+gcloud compute ssh scion-hub-my-hub \
+  --zone=us-central1-b \
+  --project=PROJECT_ID \
+  --command='sudo journalctl -u scion-hub.service -f'
+```
+
+## Teardown
+
+To delete all resources created by a previous deployment:
+
+```bash
+./scripts/single-node-vm/deploy.sh --delete
+```
+
+The teardown flow prompts for the hub name and region, then deletes:
+
+1. The Cloud Run IAP proxy service
+2. The GCE VM instance
+3. The Cloud NAT and Cloud Router (unless they were reused from a pre-existing gateway on the network/region)
+4. The hub VM's service account
+5. The Cloud Run proxy's service account
+6. The IAP SSH firewall rule
+7. The proxy-to-VM firewall rule (tcp:8080)
+
+**Note:** IAP access bindings are scoped to the region, not to the service.
+Teardown does not remove them. To clean up IAP bindings manually:
+
+```bash
+gcloud iap web get-iam-policy \
+  --project=PROJECT_ID \
+  --region=us-central1 \
+  --resource-type=cloud-run
+```
+
+## Troubleshooting
+
+### Health check fails after deployment
+
+The Hub takes a few seconds to start. If the health check does not pass within
+60 seconds, check the service logs:
+
+```bash
+gcloud compute ssh scion-hub-my-hub \
+  --zone=us-central1-b \
+  --project=PROJECT_ID \
+  --command='sudo journalctl -u scion-hub.service --no-pager -n 50'
+```
+
+Common causes:
+- Cloud-init did not finish (Docker or scion user not yet created)
+- Port conflict on 8080
+- Invalid `hub.env` or `settings.yaml`
+
+### Cannot reach the Cloud Run proxy URL
+
+- **403 Forbidden** — you do not have the IAP access binding. Run the
+  `gcloud iap web add-iam-policy-binding` command above.
+- **IAP not yet enforcing** — IAP takes 30-60 seconds to activate after being
+  enabled. The deploy script waits 60 seconds, but in rare cases it may take
+  longer.
+- **VPC connectivity** — the Cloud Run proxy must be on the same VPC as the VM.
+  The script deploys with `--network=default --subnet=default --vpc-egress=all-traffic`.
+
+### Cloud-init takes too long
+
+Cloud-init installs Docker and creates the `scion` user. The script waits up to
+5 minutes. If it times out, the VM may still be provisioning. SSH into the VM
+and check:
+
+```bash
+gcloud compute ssh scion-hub-my-hub \
+  --zone=us-central1-b \
+  --project=PROJECT_ID \
+  --command='tail -20 /var/log/cloud-init-output.log'
+```
+
+### Hub starts but IAP authentication does not work
+
+After the IAP proxy is deployed, the script updates `settings.yaml` from
+`auth.mode: dev` to `auth.mode: proxy` and restarts the Hub. If authentication
+is not working:
+
+1. Verify the settings on the VM:
+   ```bash
+   gcloud compute ssh scion-hub-my-hub \
+     --zone=us-central1-b \
+     --project=PROJECT_ID \
+     --command='cat /home/scion/.scion/settings.yaml'
+   ```
+2. Confirm `auth.mode` is `proxy` and the `audience` string matches the
+   project number and service name.
+3. Check that the Hub restarted successfully after the settings update.
+
+### Requests IAP rejects never reach Cloud Run or the Hub logs
+
+The proxy is deployed with `--iap` directly on the Cloud Run service (IAP
+enforcing access in front of it, not via a load-balancer backend service). A
+request IAP rejects — for example, the caller lacks the
+`roles/iap.httpsResourceAccessor` binding — never reaches the Cloud Run
+container. It will not appear in the Cloud Run service's own logs, and the
+Hub never sees it either, so from the operator's side the request simply
+vanishes with no local trace. (A mismatched `auth.proxy.iap.audience` is a
+different case: IAP lets that request through and the Hub itself rejects it,
+so it *does* show up in the Hub's logs — `sudo journalctl -u
+scion-hub.service` on the VM, as in *Health check fails after deployment*
+above. The audience check itself is covered in the previous section.)
+
+To get visibility into IAP's own decisions, enable [Data Access audit
+logs](https://cloud.google.com/logging/docs/audit/configure-data-access) for
+the `iap.googleapis.com` service:
+
+- **Console (simpler, recommended):** IAM & Admin > Audit Logs, select the
+  project, then in the **Data Access audit logs configuration** table select
+  **Identity-Aware Proxy** (use the filter to find it), open the **Permission
+  types** tab, enable **Data Read**, then **Save**.
+- **IAM policy (`auditConfigs`):** editing the policy directly requires a
+  read-modify-write so you don't drop existing bindings. `set-iam-policy`
+  replaces the *whole* policy, and the `etag` makes a concurrent change fail
+  loudly instead of being silently overwritten:
+
+  ```bash
+  gcloud projects get-iam-policy PROJECT_ID --format=yaml > /tmp/policy.yaml
+  # Edit /tmp/policy.yaml: add or merge into an `iap.googleapis.com` entry
+  # under `auditConfigs`. Leave `bindings` and `etag` untouched.
+  gcloud projects set-iam-policy PROJECT_ID /tmp/policy.yaml
+  ```
+
+  The `auditConfigs` entry to add or merge in:
+
+  ```yaml
+  auditConfigs:
+    - service: iap.googleapis.com
+      auditLogConfigs:
+        - logType: DATA_READ
+        # - logType: ADMIN_READ  # optional: IAP settings/IAM policy reads,
+        #                        # not needed to see rejected requests
+  ```
+
+Once enabled, IAP's per-request authorization decisions appear as Data Access
+entries in Cloud Logging. To see denials specifically:
+
+```
+log_id("cloudaudit.googleapis.com/data_access")
+protoPayload.serviceName="iap.googleapis.com"
+protoPayload.authorizationInfo.granted=false
+```
+
+**Caveat:** Google's [IAP audit logging
+guide](https://cloud.google.com/iap/docs/audit-log-howto) documents only
+admin API methods (for example `SetIamPolicy`, `GetIamPolicy`,
+`GetIapSettings`, `UpdateIapSettings`) and tunnel-destination-group methods
+in its audited-method list — not a per-request method name. It does,
+however, document `authorizationInfo.granted` as "a boolean representing
+whether IAP permitted the requested access," which is what the filter above
+relies on.
+In practice, per-request entries observed in Cloud Logging carry
+`protoPayload.methodName="AuthorizeUser"`; treat that specific method name as
+empirical rather than a documented guarantee. (Google's [access
+management guide](https://cloud.google.com/iap/docs/managing-access) does
+confirm the general behavior: granting public access, for example, means
+"IAP won't generate Cloud Audit Logs logs for the request".) For enabling
+IAP directly on a Cloud Run service — the mode this deployment uses — see
+[Identity-Aware Proxy for Cloud
+Run](https://cloud.google.com/run/docs/securing/identity-aware-proxy-cloud-run).
+
+**Cost note:** unlike Admin Activity audit logs (always on, no extra charge),
+Data Access audit logs are billed like other Cloud Logging ingestion beyond
+the free monthly allotment. Enable them deliberately rather than by default,
+and turn them off again once you're done diagnosing.
+
+### Re-running the deploy script
+
+The script is idempotent. Re-running it will:
+- Skip creating the VM and service account if they already exist
+- Preserve the existing `hub.env` (and its `SESSION_SECRET`)
+- Seed the hub-scoped `GOOGLE_CLOUD_*` env vars only if they are absent (admin edits are preserved)
+- Overwrite `settings.yaml` with the current configuration
+- Re-deploy the Cloud Run proxy (converges to the same state)

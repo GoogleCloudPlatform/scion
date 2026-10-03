@@ -45,6 +45,7 @@ const (
 	conversationID = "99999999-9999-9999-9999-999999999999"
 	roleDefID      = "aa000000-0000-0000-0000-000000000001"
 	limitDefID     = "bb000000-0000-0000-0000-000000000001"
+	constraintID   = "ac100000-0000-0000-0000-000000000001"
 )
 
 // baseTime is a fixed timestamp so the generated fixture is byte-reproducible
@@ -113,13 +114,13 @@ func Spec() []TableFixture {
 				"project_id": projectID, "labels": unicodeJSON,
 				"applied_config": nestedConfigJSON,
 				"created_at":     baseTime, "updated_at": baseTime,
-				"phase": "running", "visibility": "private", "state_version": 1,
+				"phase": "running", "state_version": 1,
 			},
 			{ // soft-deleted agent (deleted_at populated)
 				"id": "33333333-3333-3333-3333-3333333333aa", "agent_id": "33333333-3333-3333-3333-3333333333aa",
 				"name": "deleted-worker", "template": "claude", "project_id": projectID,
 				"created_at": baseTime, "updated_at": baseTime, "deleted_at": baseTime,
-				"phase": "stopped", "visibility": "private", "state_version": 2,
+				"phase": "stopped", "state_version": 2,
 			},
 		}},
 
@@ -153,13 +154,24 @@ func Spec() []TableFixture {
 		}},
 		{Table: "access_constraints", Rows: []row{
 			{
-				"id": "ac100000-0000-0000-0000-000000000001", "name": "fixture-max-perms",
+				"id": constraintID, "name": "fixture-max-perms",
 				"subject_kind": "principal", "subject_principal_type": "user",
 				"subject_principal_id": userID,
 				"scope_type":           "system", "scope_id": "",
 				"maximum_permissions": `["agent.read","agent.list"]`,
 				"disabled":            false,
 				"created":             baseTime, "updated": baseTime,
+			},
+		}},
+		{Table: "access_constraint_history", Rows: []row{
+			{
+				"event_id": "ae100000-0000-4000-8000-000000000001", "constraint_id": constraintID,
+				"occurred_at": baseTime, "operation": "create",
+				"actor_kind": "user", "actor_id": userID,
+				"correlation_id": "fixture-access-constraint-create",
+				"after_revision": int64(1), "classification": "tighten",
+				"impact_counts_json":  `{"agents":1,"users":1,"projects":0}`,
+				"changed_fields_json": `["maximum_permissions"]`,
 			},
 		}},
 		{Table: "access_policies", Rows: []row{
@@ -200,7 +212,7 @@ func Spec() []TableFixture {
 			{
 				"id": "7e000000-0000-0000-0000-000000000001", "name": "claude", "slug": "claude",
 				"harness": "claude", "image": "scion/claude:latest", "config": nestedConfigJSON,
-				"scope": "global", "status": "active", "visibility": "public",
+				"scope": "global", "status": "active",
 				"created_at": baseTime, "updated_at": baseTime,
 			},
 		}},
@@ -208,7 +220,7 @@ func Spec() []TableFixture {
 			{
 				"id": "4a000000-0000-0000-0000-000000000001", "name": "claude-web", "slug": "claude-web",
 				"harness": "claude", "config": nestedConfigJSON, "scope": "global",
-				"status": "active", "visibility": "public", "created_at": baseTime, "updated_at": baseTime,
+				"status": "active", "created_at": baseTime, "updated_at": baseTime,
 			},
 		}},
 
@@ -347,7 +359,7 @@ func Spec() []TableFixture {
 			{
 				"id": "54000000-0000-0000-0000-000000000001", "name": "Reviewer",
 				"slug": "reviewer", "description": "Review code", "tags": `["code","review"]`,
-				"scope": "global", "status": "active", "visibility": "public",
+				"scope": "global", "status": "active",
 			},
 		}},
 		{Table: "skill_versions", Rows: []row{
@@ -401,6 +413,23 @@ func Spec() []TableFixture {
 				"create_time": baseTime, "update_time": baseTime,
 			},
 		}},
+		{Table: "broker_settings", Rows: []row{
+			{ // exercises the non-NULL updated_by path; hub_settings above
+				// already covers the NULL case for this same document shape.
+				"id": "b5000000-0000-0000-0000-000000000001", "broker_id": brokerID,
+				"value": `{"maxAgents":5}`, "revision": int64(1), "updated_by": userID,
+				"create_time": baseTime, "update_time": baseTime,
+			},
+		}},
+		{Table: "launch_reaper_states", Rows: []row{
+			{ // the single row the launch reaper reads/writes (id is fixed:
+				// launchReaperStateID in pkg/store/entadapter/launch_reaper.go);
+				// populated ok_at/armed_since exercise the non-NULL path, the
+				// nil-means-disarmed NULL path is exercised by production code
+				// creating the row with both unset on its first tick.
+				"id": "agent-launch-reaper", "ok_at": baseTime, "armed_since": baseTime.Add(-time.Hour),
+			},
+		}},
 		{Table: "integration_configs", Rows: []row{
 			{
 				"id": "ic000000-0000-0000-0000-000000000001", "integration": "github",
@@ -445,6 +474,20 @@ func Spec() []TableFixture {
 				"id": "ac000000-0000-0000-0000-000000000001", "agent_id": agentID,
 				"project_id": projectID, "token_jti_hash": "sha256:fixture-jti-hash",
 				"issued_at": baseTime, "expires_at": baseTime.Add(24 * time.Hour),
+			},
+		}},
+
+		// ---- Agent reincarnations ----
+		{Table: "agent_reincarnations", Rows: []row{
+			{ // completed record with both config snapshots
+				"id": "ar000000-0000-0000-0000-000000000001", "agent_id": agentID,
+				"from_generation": 1, "to_generation": 2,
+				"requested_by": userID, "requested_at": baseTime,
+				"updated_at": baseTime, "completed_at": baseTime.Add(time.Minute),
+				"state": "completed", "error": "",
+				"previous_applied_config": nestedConfigJSON,
+				"new_applied_config":      nestedConfigJSON,
+				"handoff":                 "handoff notes: naïve café 北京 🚀",
 			},
 		}},
 
@@ -592,6 +635,37 @@ func Spec() []TableFixture {
 				"limit_definition_id": limitDefID,
 				"subject_id":          projectID, "scope_type": "project", "scope_id": projectID,
 				"resource_id": agentID, "reserved": 1, "created_at": baseTime,
+			},
+		}},
+
+		// ---- Agent identity keys ----
+		{Table: "agent_identity_keys", Rows: []row{
+			{
+				"id": "a1d00000-0000-0000-0000-000000000001", "project_id": projectID,
+				"key": "worker", "agent_id": agentID,
+			},
+		}},
+
+		// ---- External identities ----
+		{Table: "external_identities", Rows: []row{
+			{ // NULL email exercises the optional/informational field
+				"id":       "e1d00000-0000-0000-0000-000000000001",
+				"provider": "fixture-provider", "issuer": "https://issuer.fixture.example",
+				"subject": "fixture-subject-001", "user_id": userID,
+				"created_at": baseTime, "updated_at": baseTime,
+			},
+		}},
+
+		// ---- User terminal workspaces ----
+		{Table: "user_terminal_workspaces", Rows: []row{
+			{
+				"id":                 "c1d00000-0000-0000-0000-000000000001",
+				"user_id":            userID,
+				"agent_ids":          `["` + agentID + `"]`,
+				"frontmost_agent_id": agentID,
+				"schema_version":     1,
+				"revision":           1,
+				"update_time":        baseTime,
 			},
 		}},
 	}

@@ -80,7 +80,12 @@
         "removedPermissionsTruncated": true,
         "removedPermissionCount": 13,
         "grantSources": [
-          { "kind": "role_binding", "id": "rb-88a1", "roleName": "project-member", "scope": { "type": "project", "projectId": "proj-atlas" } }
+          {
+            "kind": "role_binding",
+            "id": "rb-88a1",
+            "roleName": "project-member",
+            "scope": { "type": "project", "projectId": "proj-atlas" }
+          }
         ],
         "_capabilities": { "actions": ["read"] }
       }

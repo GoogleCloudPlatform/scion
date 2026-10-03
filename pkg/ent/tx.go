@@ -14,12 +14,18 @@ type Tx struct {
 	config
 	// AccessConstraint is the client for interacting with the AccessConstraint builders.
 	AccessConstraint *AccessConstraintClient
+	// AccessConstraintHistory is the client for interacting with the AccessConstraintHistory builders.
+	AccessConstraintHistory *AccessConstraintHistoryClient
 	// AccessPolicy is the client for interacting with the AccessPolicy builders.
 	AccessPolicy *AccessPolicyClient
 	// Agent is the client for interacting with the Agent builders.
 	Agent *AgentClient
 	// AgentCredential is the client for interacting with the AgentCredential builders.
 	AgentCredential *AgentCredentialClient
+	// AgentIdentityKey is the client for interacting with the AgentIdentityKey builders.
+	AgentIdentityKey *AgentIdentityKeyClient
+	// AgentReincarnation is the client for interacting with the AgentReincarnation builders.
+	AgentReincarnation *AgentReincarnationClient
 	// AgentSessionMetrics is the client for interacting with the AgentSessionMetrics builders.
 	AgentSessionMetrics *AgentSessionMetricsClient
 	// AllowListEntry is the client for interacting with the AllowListEntry builders.
@@ -32,6 +38,8 @@ type Tx struct {
 	BrokerJoinToken *BrokerJoinTokenClient
 	// BrokerSecret is the client for interacting with the BrokerSecret builders.
 	BrokerSecret *BrokerSecretClient
+	// BrokerSetting is the client for interacting with the BrokerSetting builders.
+	BrokerSetting *BrokerSettingClient
 	// ChatLinkCode is the client for interacting with the ChatLinkCode builders.
 	ChatLinkCode *ChatLinkCodeClient
 	// Conversation is the client for interacting with the Conversation builders.
@@ -46,6 +54,8 @@ type Tx struct {
 	EntitlementBinding *EntitlementBindingClient
 	// EnvVar is the client for interacting with the EnvVar builders.
 	EnvVar *EnvVarClient
+	// ExternalIdentity is the client for interacting with the ExternalIdentity builders.
+	ExternalIdentity *ExternalIdentityClient
 	// GCPServiceAccount is the client for interacting with the GCPServiceAccount builders.
 	GCPServiceAccount *GCPServiceAccountClient
 	// GitHubResolutionCache is the client for interacting with the GitHubResolutionCache builders.
@@ -66,6 +76,8 @@ type Tx struct {
 	IntegrationUpdate *IntegrationUpdateClient
 	// InviteCode is the client for interacting with the InviteCode builders.
 	InviteCode *InviteCodeClient
+	// LaunchReaperState is the client for interacting with the LaunchReaperState builders.
+	LaunchReaperState *LaunchReaperStateClient
 	// LifecycleHook is the client for interacting with the LifecycleHook builders.
 	LifecycleHook *LifecycleHookClient
 	// LifecycleHookAgentPhase is the client for interacting with the LifecycleHookAgentPhase builders.
@@ -128,6 +140,8 @@ type Tx struct {
 	User *UserClient
 	// UserAccessToken is the client for interacting with the UserAccessToken builders.
 	UserAccessToken *UserAccessTokenClient
+	// UserTerminalWorkspace is the client for interacting with the UserTerminalWorkspace builders.
+	UserTerminalWorkspace *UserTerminalWorkspaceClient
 
 	// lazily loaded.
 	client     *Client
@@ -260,15 +274,19 @@ func (tx *Tx) Client() *Client {
 
 func (tx *Tx) init() {
 	tx.AccessConstraint = NewAccessConstraintClient(tx.config)
+	tx.AccessConstraintHistory = NewAccessConstraintHistoryClient(tx.config)
 	tx.AccessPolicy = NewAccessPolicyClient(tx.config)
 	tx.Agent = NewAgentClient(tx.config)
 	tx.AgentCredential = NewAgentCredentialClient(tx.config)
+	tx.AgentIdentityKey = NewAgentIdentityKeyClient(tx.config)
+	tx.AgentReincarnation = NewAgentReincarnationClient(tx.config)
 	tx.AgentSessionMetrics = NewAgentSessionMetricsClient(tx.config)
 	tx.AllowListEntry = NewAllowListEntryClient(tx.config)
 	tx.ApiKey = NewApiKeyClient(tx.config)
 	tx.BrokerDispatch = NewBrokerDispatchClient(tx.config)
 	tx.BrokerJoinToken = NewBrokerJoinTokenClient(tx.config)
 	tx.BrokerSecret = NewBrokerSecretClient(tx.config)
+	tx.BrokerSetting = NewBrokerSettingClient(tx.config)
 	tx.ChatLinkCode = NewChatLinkCodeClient(tx.config)
 	tx.Conversation = NewConversationClient(tx.config)
 	tx.ConversationParticipant = NewConversationParticipantClient(tx.config)
@@ -276,6 +294,7 @@ func (tx *Tx) init() {
 	tx.DelegationEdge = NewDelegationEdgeClient(tx.config)
 	tx.EntitlementBinding = NewEntitlementBindingClient(tx.config)
 	tx.EnvVar = NewEnvVarClient(tx.config)
+	tx.ExternalIdentity = NewExternalIdentityClient(tx.config)
 	tx.GCPServiceAccount = NewGCPServiceAccountClient(tx.config)
 	tx.GitHubResolutionCache = NewGitHubResolutionCacheClient(tx.config)
 	tx.GithubInstallation = NewGithubInstallationClient(tx.config)
@@ -286,6 +305,7 @@ func (tx *Tx) init() {
 	tx.IntegrationConfig = NewIntegrationConfigClient(tx.config)
 	tx.IntegrationUpdate = NewIntegrationUpdateClient(tx.config)
 	tx.InviteCode = NewInviteCodeClient(tx.config)
+	tx.LaunchReaperState = NewLaunchReaperStateClient(tx.config)
 	tx.LifecycleHook = NewLifecycleHookClient(tx.config)
 	tx.LifecycleHookAgentPhase = NewLifecycleHookAgentPhaseClient(tx.config)
 	tx.LimitDefinition = NewLimitDefinitionClient(tx.config)
@@ -317,6 +337,7 @@ func (tx *Tx) init() {
 	tx.UsageReservation = NewUsageReservationClient(tx.config)
 	tx.User = NewUserClient(tx.config)
 	tx.UserAccessToken = NewUserAccessTokenClient(tx.config)
+	tx.UserTerminalWorkspace = NewUserTerminalWorkspaceClient(tx.config)
 }
 
 // txDriver wraps the given dialect.Tx with a nop dialect.Driver implementation.

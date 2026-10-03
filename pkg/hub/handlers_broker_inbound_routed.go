@@ -103,6 +103,15 @@ func (s *Server) handleBrokerInboundRouted(w http.ResponseWriter, r *http.Reques
 		ValidationError(w, "message is required", map[string]interface{}{"field": "message"})
 		return
 	}
+	// Phase 0.2 (ptone/scion#2192): broker/plugin ingress cannot use a raw
+	// message to obtain terminal authority through a claimed sender. Raw is
+	// rejected before sender identity synthesis, routing resolution,
+	// conversation resolution, mention work or dispatch.
+	if req.Message.Raw {
+		writeRawGuardViolation(w, unsupportedRaw(MessageDenialRawBrokerIngressUnsupported,
+			"raw message delivery is not supported on broker inbound ingress"))
+		return
+	}
 	if !strings.HasPrefix(req.Message.Sender, "user:") {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
 			"sender must use user: prefix for mapped identity", nil)
@@ -353,7 +362,7 @@ func (s *Server) dispatchRoutedRecipient(
 	}
 
 	// --- Authorization ---
-	allowed, reason := s.authorizeAgentMessage(ctx, params.sender, agent, false)
+	allowed, reason, _ := s.authorizeAgentMessage(ctx, params.sender, agent, false)
 	if !allowed {
 		s.messageLog.Warn("routed inbound authorization denied",
 			"agent_slug", agent.Slug, "reason", reason)
@@ -431,6 +440,10 @@ func (s *Server) dispatchRoutedRecipient(
 			msg.Metadata[k] = v
 		}
 	}
+	// #2257 P2 (design auto-offload-large-dm §4.2 item 1): strip hub-reserved
+	// offload metadata keys — the switch above doesn't exclude them, so a
+	// plugin could otherwise spoof body_offloaded/body_chars/body_sha256.
+	msg.Metadata = messaging.StripReservedMetadata(msg.Metadata)
 
 	// --- Validate through envelope choke point ---
 	if err := messaging.ValidateLegacyMessage(msg); err != nil {
@@ -591,14 +604,25 @@ func (s *Server) dispatchRoutedRecipient(
 
 	// --- Audit log ---
 	if s.dedicatedMessageLog != nil {
-		s.dedicatedMessageLog.Info("routed inbound message delivered",
+		logAttrs := []any{
 			"agent_id", agent.ID,
 			"agent_slug", agent.Slug,
 			"project_id", params.req.ProjectID,
 			"message_id", msgID,
 			"source", "broker-inbound-routed",
 			"type", msg.Type,
-		)
+		}
+		if storeMsg.ConversationID != "" {
+			logAttrs = append(logAttrs, "conversation_id", storeMsg.ConversationID)
+		}
+		s.dedicatedMessageLog.Info("routed inbound message delivered", logAttrs...)
+	}
+
+	// F2b (design doc §3.3): the agent was just dispatched and persisted
+	// into a group conversation — record it as a participant (listing
+	// index only, best-effort, never fails this response — AC-12).
+	if effectiveConv != nil && effectiveConv.Kind == "group" {
+		s.ensureGroupParticipants(ctx, effectiveConv.ConversationID, []*store.Agent{agent})
 	}
 
 	result.Status = "delivered"

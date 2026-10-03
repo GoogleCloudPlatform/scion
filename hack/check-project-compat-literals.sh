@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Flags legacy grove literals outside known compatibility, test, fixture, and
 # example surfaces. Keep this allowlist explicit: new files with legacy names
-# should either route through pkg/projectcompat or be added here with intent.
+# should either route through pkg/projectkeys or be added here with intent.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -14,214 +14,232 @@ fi
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 
-rg -n 'grove|Grove|scion\.grove|grove_id|groveId|/groves' \
+# With -i, scion\.grove|grove_id|groveId|/groves are all substrings of
+# grove, so the single alternative below is the same match set.
+rc=0
+rg -in 'grove' \
   cmd pkg extras \
   --glob '*.go' \
-  --glob '!pkg/ent/**' >"$tmp" || true
-
-if [[ ! -s "$tmp" ]]; then
-  exit 0
+  --glob '!pkg/ent/**' >"$tmp" || rc=$?
+# rg exits 1 for "no matches", which is normal and leaves $tmp empty; that
+# case falls through to the stale-entry check below so a fully-empty match
+# set still reports every allowlist entry as stale rather than passing
+# silently. Only exit codes above 1 (bad pattern, unreadable path, etc.) are
+# real failures.
+if (( rc > 1 )); then
+  echo "rg failed (exit $rc)" >&2
+  exit "$rc"
 fi
 
 allowed_paths=(
-  # CLI compatibility adapters, hidden deprecated aliases, and examples.
-  "^cmd/broker.go$"
-  "^cmd/cli_mode.go$"
-  "^cmd/config.go$"
-  "^cmd/delete.go$"
-  "^cmd/hub.go$"
-  "^cmd/hub_env.go$"
-  "^cmd/hub_secret.go$"
-  "^cmd/hub_token.go$"
-  "^cmd/list.go$"
-  "^cmd/message.go$"
-  "^cmd/notifications.go$"
-  "^cmd/project.go$"
-  "^cmd/root.go$"
-  "^cmd/scion-broker-repl/main.go$"
-  "^cmd/template_import.go$"
-  "^cmd/template_resolution.go$"
-
   # Current compatibility and migration tests/fixtures.
-  "^cmd/cli_mode_test.go$"
-  "^cmd/common_envgather_test.go$"
-  "^cmd/delete_test.go$"
-  "^cmd/harness_config_install_test.go$"
-  "^cmd/hub_env_test.go$"
-  "^cmd/hub_secret_test.go$"
-  "^cmd/message_test.go$"
-  "^cmd/notifications_test.go$"
-  "^cmd/server_test.go$"
-  "^cmd/sync_test.go$"
+  "^cmd/command_tree_grove_guard_test.go$"
+  "^cmd/config_test.go$"
+  "^cmd/hub_test.go$"
+  "^cmd/legacy_grove_migration_test.go$"
+  "^cmd/list_test.go$"
+  "^cmd/message_project_json_test.go$"
   "^cmd/template_resolution_test.go$"
-  "^cmd/templates_test.go$"
   "^extras/agent-viz/internal/logparser/parser_test.go$"
-  "^extras/scion-a2a-bridge/internal/bridge/auth_test.go$"
-  "^extras/scion-a2a-bridge/internal/bridge/metrics_test.go$"
-  "^extras/scion-a2a-bridge/internal/bridge/middleware_test.go$"
-  "^extras/scion-a2a-bridge/internal/bridge/server_test.go$"
-  "^extras/scion-a2a-bridge/internal/bridge/stream_test.go$"
-  "^extras/scion-a2a-bridge/internal/state/state_test.go$"
-  "^extras/scion-chat-app/internal/chatapp/commands_test.go$"
+  "^extras/fs-watcher-tool/pkg/fswatcher/project_test.go$"
+  # Asserts a scion.grove.* user topic yields no user ID from
+  # extractUserIDFromTopic. The literal is the point of the negative test.
+  "^extras/scion-a2a-bridge/internal/bridge/pgstore_crossprocess_test.go$"
   "^extras/scion-chat-app/internal/chatapp/notifications_test.go$"
   "^extras/scion-chat-app/internal/state/state_test.go$"
+  # Asserts parseTopicComponents does not treat a scion.grove.* prefix as a
+  # project topic: the project ID falls back to the whole topic string. The
+  # literal is the point of the negative test.
+  "^extras/scion-discord/internal/discord/broker_test.go$"
+  "^extras/scion-slack/internal/slack/broker_test.go$"
   "^extras/scion-telegram/internal/telegram/broker_v2_test.go$"
-  "^pkg/agent/list_test.go$"
-  "^pkg/agent/provision_test.go$"
-  "^pkg/agent/stop_project_containers_test.go$"
+  # Asserts SCION_GROVE is absent from RunConfig.Env alongside a SCION_PROJECT
+  # presence check. The literal is the point of the negative assertion.
+  "^pkg/agent/run_test.go$"
+  "^pkg/agent/run_shared_dir_storage_test.go$"
   "^pkg/api/types_test.go$"
-  "^pkg/config/harness_config_test.go$"
-  "^pkg/config/init_project_test.go$"
-  "^pkg/config/init_test.go$"
-  "^pkg/config/koanf_hubcontext_test.go$"
+  "^pkg/brokerclient/agents_test.go$"
   "^pkg/config/koanf_test.go$"
-  "^pkg/config/paths_test.go$"
+  "^pkg/config/legacy_grove_migration_test.go$"
   "^pkg/config/project_discovery_test.go$"
   "^pkg/config/project_marker_test.go$"
-  "^pkg/config/schema_test.go$"
-  "^pkg/config/settings_test.go$"
   "^pkg/config/settings_v1_test.go$"
   "^pkg/config/shared_dirs_test.go$"
-  "^pkg/config/templates_test.go$"
   "^pkg/config/v7_fixes_test.go$"
   "^pkg/hub/capability_marshal_test.go$"
-  "^pkg/hub/events_postgres_test.go$"
+  # Mixes concurrent legacy "grove" and canonical "project" clone requests
+  # for the same destination; the literal is the point of the negative
+  # assertion (every "grove" request must be rejected with 400).
+  "^pkg/hub/clone_concurrency_test.go$"
+  # Regression test proving grove.<projectId>.* duplicate SSE subjects are
+  # never published by pkg/hub/events.go. The literal is the point of the
+  # test: it subscribes to the legacy wildcard and asserts nothing is ever
+  # delivered there.
+  "^pkg/hub/events_test.go$"
   "^pkg/hub/fs_safety_test.go$"
+  # Asserts TokenResponse no longer emits a groveId key alongside projectId.
+  # The literal is the point of the negative test.
+  "^pkg/hub/handlers_auth_test.go$"
   "^pkg/hub/handlers_broker_inbound_test.go$"
+  # Asserts groveId is no longer a recognized notification filter alias: an
+  # unrecognized query param is ignored rather than treated as projectId. The
+  # literal is the point of the negative test.
+  "^pkg/hub/handlers_notifications_test.go$"
   "^pkg/hub/handlers_project_test.go$"
-  "^pkg/hub/heartbeat_legacy_test.go$"
-  "^pkg/hub/route_classification_test.go$"
+  # Asserts a broker heartbeat body keyed by the removed "groves"/"groveId"
+  # names decodes to zero projects and never updates agent state. The
+  # literal is the point of the negative test.
+  "^pkg/hub/handlers_runtime_brokers_test.go$"
+  # Asserts the hub rejects the removed "grove" harness-config scope (and
+  # other unrecognized scopes) with 400 instead of storing it and flattening
+  # its storage path. The literal is the point of the negative tests.
+  "^pkg/hub/harness_config_scope_validation_test.go$"
+  "^pkg/hub/httpdispatcher_test.go$"
+  # Asserts the project cache/sync-status responses no longer emit a groveId
+  # key alongside projectId. The literal is the point of the negative tests.
+  "^pkg/hub/project_cache_test.go$"
+  "^pkg/hub/project_webdav_test.go$"
+  # Regression test for SSE subject authorization default-deny: proves a
+  # non-member is denied on the legacy grove.* subjects and other unknown
+  # namespaces.
+  "^pkg/hub/sse_default_deny_test.go$"
+  "^pkg/hub/template_clone_scope_test.go$"
+  # Asserts the hub rejects the removed "grove" template scope (and other
+  # unrecognized scopes) with 400 instead of storing it as-is. The literal is
+  # the point of the negative test.
+  "^pkg/hub/template_scope_validation_test.go$"
+  "^pkg/hub/web_test.go$"
   "^pkg/hubclient/agents_test.go$"
   "^pkg/hubclient/client_test.go$"
+  "^pkg/hubclient/notifications_test.go$"
+  "^pkg/hubclient/projects_test.go$"
+  # Asserts CreateAgentRequest, CreateSubscriptionRequest,
+  # CreateSubscriptionTemplateRequest and CreateTokenRequest no longer emit a
+  # groveId key. The literal is the point of each negative test.
+  "^pkg/hubclient/request_no_grove_marshal_test.go$"
   "^pkg/hubclient/runtime_brokers_test.go$"
+  "^pkg/hubclient/scheduled_events_test.go$"
+  "^pkg/hubclient/schedules_test.go$"
   "^pkg/hubclient/templates_test.go$"
+  "^pkg/hubclient/tokens_test.go$"
   "^pkg/hubclient/types_test.go$"
-  "^pkg/hubclient/workspace_test.go$"
-  "^pkg/hubsync/resolve_test.go$"
-  "^pkg/hubsync/sync_test.go$"
-  "^pkg/plugin/broker_plugin_test.go$"
-  "^pkg/plugin/manager_test.go$"
-  "^pkg/plugin/refbroker/plugin_integration_test.go$"
-  "^pkg/plugin/refbroker/refbroker_test.go$"
-  "^pkg/projectcompat/config_test.go$"
-  "^pkg/projectcompat/labels_test.go$"
-  "^pkg/projectcompat/topics_test.go$"
-  "^pkg/runtime/k8s_nfs_test.go$"
-  "^pkg/runtime/k8s_secrets_test.go$"
-  "^pkg/runtime/k8s_shared_dirs_test.go$"
+  # Asserts legacy top-level and hub project-id config key names (and the
+  # SCION_GROVE_ID / SCION_HUB_GROVE_ID env vars) are no longer recognized.
+  # The literal is the point of each negative test.
+  "^pkg/projectkeys/config_test.go$"
+  # Asserts a scion.grove.* topic is rejected as malformed rather than parsed
+  # as a project topic. The literal is the point of the negative test.
+  "^pkg/projectkeys/topics_test.go$"
+  "^pkg/runtime/cloudrun_sandbox_runtime_test.go$"
+  # Asserts SCION_GROVE and SCION_GROVE_ID are absent from buildCommonRunArgs
+  # output alongside a SCION_PROJECT/SCION_PROJECT_ID presence check. The
+  # literal is the point of the negative assertion.
+  "^pkg/runtime/common_test.go$"
+  # Builds a legacy ".scion/groves/<name>" path to prove an agent's recorded
+  # project-path label is still found after config.MigrateLegacyGlobalLayout
+  # moves the project and leaves a per-entry symlink behind. The literal is
+  # the point of the test. Same test and reason as pkg/runtime/podman_test.go
+  # below.
+  "^pkg/runtime/docker_test.go$"
+  "^pkg/runtime/k8s_runtime_test.go$"
+  # Builds a legacy ".scion/groves/<name>" path to prove an agent's recorded
+  # project-path label is still found after config.MigrateLegacyGlobalLayout
+  # moves the project and leaves a per-entry symlink behind. The literal is
+  # the point of the test. Same test and reason as pkg/runtime/docker_test.go
+  # above.
   "^pkg/runtime/podman_test.go$"
-  "^pkg/runtimebroker/handlers_envgather_test.go$"
-  "^pkg/runtimebroker/handlers_exec_test.go$"
-  "^pkg/runtimebroker/handlers_reset_auth_test.go$"
+  "^pkg/runtimebroker/delete_project_scope_test.go$"
   "^pkg/runtimebroker/handlers_test.go$"
-  "^pkg/runtimebroker/heartbeat_test.go$"
-  "^pkg/runtimebroker/hub_connection_test.go$"
+  "^pkg/runtimebroker/legacy_layout_migration_test.go$"
   "^pkg/runtimebroker/protocol_mismatch_test.go$"
+  # Asserts that a groveId-only PTY attach query no longer scopes the lookup
+  # (two same-slug agents in different projects become ambiguous). The
+  # literal is the point of the negative test.
   "^pkg/runtimebroker/server_lookup_test.go$"
   "^pkg/runtimebroker/start_context_test.go$"
   "^pkg/runtimebroker/types_test.go$"
   "^pkg/runtimebroker/workspace_handlers_test.go$"
-  "^pkg/sciontool/hooks/handlers/status_test.go$"
-  "^pkg/secret/gcpbackend_test.go$"
-  "^pkg/secret/localbackend_test.go$"
+  "^pkg/sciontool/telemetry/aggregator_test.go$"
   "^pkg/storage/storage_test.go$"
-  "^pkg/store/models_backward_compat_test.go$"
-  "^pkg/util/logging/cloud_handler_test.go$"
-  "^pkg/util/logging/request_log_test.go$"
+  "^pkg/store/entadapter/agent_session_metrics_projectid_test.go$"
+  # Seeds scope='grove' rows with raw SQL to prove the data migration in
+  # legacy_scope_migration.go rewrites them; the literal is the point of the
+  # test.
+  "^pkg/store/entadapter/legacy_scope_migration_test.go$"
+  "^pkg/store/models_json_test.go$"
+  # Asserts ConnectMessage/StreamOpenMessage no longer emit or decode the
+  # removed "groves"/"groveId" names. The literal is the point of the
+  # negative tests.
   "^pkg/wsprotocol/protocol_test.go$"
 
   # First-party integration compatibility boundaries.
   "^extras/agent-viz/internal/logparser/parser.go$"
-  "^extras/fs-watcher-tool/main.go$"
-  "^extras/fs-watcher-tool/pkg/fswatcher/project.go$"
-  "^extras/scion-a2a-bridge/cmd/scion-a2a-bridge/main.go$"
-  "^extras/scion-a2a-bridge/internal/bridge/bridge.go$"
-  "^extras/scion-a2a-bridge/internal/bridge/config.go$"
-  "^extras/scion-a2a-bridge/internal/bridge/executor.go$"
-  "^extras/scion-a2a-bridge/internal/bridge/server.go$"
-  "^extras/scion-chat-app/cmd/scion-chat-app/main.go$"
-  "^extras/scion-chat-app/internal/chatapp/commands.go$"
-  "^extras/scion-chat-app/internal/chatapp/messenger.go$"
-  "^extras/scion-chat-app/internal/chatapp/notifications.go$"
   "^extras/scion-chat-app/internal/state/state.go$"
-  "^extras/scion-discord/internal/discord/broker.go$"
-  "^extras/scion-slack/internal/slack/broker.go$"
-  "^extras/scion-slack/internal/slack/broker_test.go$"
   "^extras/scion-telegram/internal/telegram/broker_v2.go$"
 
   # Core compatibility adapters and bounded legacy protocol/storage surfaces.
-  "^pkg/agent/list.go$"
-  "^pkg/agent/msgbuffer.go$"
-  "^pkg/api/types.go$"
-  "^pkg/brokerclient/agents.go$"
-  "^pkg/config/init.go$"
   "^pkg/config/koanf.go$"
-  "^pkg/config/paths.go$"
-  "^pkg/config/project_discovery.go$"
+  "^pkg/config/legacy_grove_migration.go$"
   "^pkg/config/project_marker.go$"
-  "^pkg/config/settings.go$"
   "^pkg/config/settings_v1.go$"
-  "^pkg/config/shared_dirs.go$"
-  "^pkg/config/templates.go$"
-  "^pkg/hub/events.go$"
-  "^pkg/hub/events_postgres.go$"
-  "^pkg/hub/fs_safety.go$"
-  "^pkg/hub/handlers.go$"
-  "^pkg/hub/handlers_auth.go$"
-  "^pkg/hub/handlers_broker_inbound.go$"
-  "^pkg/hub/handlers_notifications.go$"
-  "^pkg/hub/handlers_projects_core.go$"
-  "^pkg/hub/handlers_runtime_brokers.go$"
-  "^pkg/hub/project_cache.go$"
-  "^pkg/hub/project_compat.go$"
-  "^pkg/hub/project_webdav.go$"
-  "^pkg/hub/response_types.go$"
-  "^pkg/hub/authzop/catalog.go$"
-  "^pkg/hub/route_metadata.go$"
-  "^pkg/hub/server.go$"
-  "^pkg/hub/system_handlers.go$"
+  # Accepts the legacy "grove" template-list scope query value and maps it to
+  # "project" before it drives the scope switch or the store filter.
   "^pkg/hub/template_handlers.go$"
-  "^pkg/hub/web.go$"
-  "^pkg/hubclient/agents.go$"
-  "^pkg/hubclient/client.go$"
-  "^pkg/hubclient/messages.go$"
-  "^pkg/hubclient/notifications.go$"
-  "^pkg/hubclient/projects.go$"
-  "^pkg/hubclient/runtime_brokers.go$"
-  "^pkg/hubclient/scheduled_events.go$"
-  "^pkg/hubclient/schedules.go$"
-  "^pkg/hubclient/templates.go$"
-  "^pkg/hubclient/tokens.go$"
-  "^pkg/hubclient/types.go$"
-  "^pkg/hubsync/sync.go$"
-  "^pkg/projectcompat/.*\\.go$"
-  "^pkg/runtime/common.go$"
-  "^pkg/runtime/k8s_runtime.go$"
   "^pkg/runtimebroker/handlers.go$"
-  "^pkg/runtimebroker/pty_handlers.go$"
-  "^pkg/runtimebroker/server.go$"
-  "^pkg/runtimebroker/start_context.go$"
-  "^pkg/runtimebroker/types.go$"
-  "^pkg/runtimebroker/workspace_handlers.go$"
-  "^pkg/sciontool/hooks/handlers/telemetry.go$"
-  "^pkg/sciontool/telemetry/gcp_exporter.go$"
-  "^pkg/sciontool/telemetry/providers.go$"
+  # Reserved-identity-attribute denylist: the three retired grove-named
+  # telemetry keys (scion.grove, scion.grove.id, scion.grove_id) are kept
+  # here so the receiver still strips them from user-supplied attributes,
+  # even though it no longer treats them as valid identity sources (Q2 = (a)).
+  "^pkg/sciontool/telemetry/policy.go$"
+  "^pkg/sciontool/telemetry/policy_test.go$"
   "^pkg/storage/storage.go$"
-  "^pkg/store/entadapter/agent_session_metrics_store.go$"
   "^pkg/store/entadapter/composite.go$"
-  "^pkg/store/models.go$"
-  "^pkg/store/storetest/domains_project_broker.go$"
-  "^pkg/util/logging/request_log.go$"
-  "^pkg/wsprotocol/protocol.go$"
+  # One-shot data migration rewriting stored scope='grove' rows to 'project';
+  # removed once no hub can have a pre-migration row left to normalize.
+  "^pkg/store/entadapter/legacy_scope_migration.go$"
 )
 
 allowlist="$(printf '%s\n' "${allowed_paths[@]}" | sed 's/\$$/:/' | paste -sd '|' -)"
 
-violations="$(grep -Ev "$allowlist" "$tmp" || true)"
+# Stale entry detection: every allowlisted path is expected to match the
+# literal search above. An entry that matches nothing here is dead
+# bookkeeping - either the legacy literal was removed from that file, or the
+# entry never matched and was copied in by mistake. Fix by deleting the entry,
+# not by re-adding the literal it once excused.
+stale_entries=()
+for path in "${allowed_paths[@]}"; do
+  pattern="${path%\$}:"
+  if ! grep -qE "$pattern" "$tmp"; then
+    stale_entries+=("$path")
+  fi
+done
+
+violations=""
+if [[ -n "$allowlist" ]]; then
+  violations="$(grep -Ev "$allowlist" "$tmp" || true)"
+elif [[ -s "$tmp" ]]; then
+  violations="$(cat "$tmp")"
+fi
+
+# Report both failure classes from one run rather than stopping at whichever
+# is checked first - otherwise fixing one class only reveals the other on
+# the next CI attempt.
+failed=0
+if [[ ${#stale_entries[@]} -gt 0 ]]; then
+  echo "Stale entries in the project compatibility allowlist (match nothing):" >&2
+  printf '  %s\n' "${stale_entries[@]}" >&2
+  echo >&2
+  echo "Remove these entries from hack/check-project-compat-literals.sh." >&2
+  echo >&2
+  failed=1
+fi
 if [[ -n "$violations" ]]; then
   echo "Legacy grove literals found outside the project compatibility allowlist:" >&2
   echo "$violations" >&2
   echo >&2
-  echo "Use project vocabulary for new code, or route legacy handling through pkg/projectcompat." >&2
+  echo "Use project vocabulary for new code, or route legacy handling through pkg/projectkeys." >&2
+  failed=1
+fi
+if [[ "$failed" -eq 1 ]]; then
   exit 1
 fi

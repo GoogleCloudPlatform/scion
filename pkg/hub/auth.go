@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // AuthConfig holds authentication configuration.
@@ -73,6 +74,30 @@ type AuthConfig struct {
 	// The middleware loads from this pointer on each request to see
 	// hot-reloaded authenticators.
 	FederationAuth *atomic.Pointer[FederationAuthenticator]
+	// GoogleValidator verifies Google ID tokens / access tokens for the
+	// external-bearer path (auth_external_bearer.go). nil disables that path
+	// even when FederationAuth trusts accounts.google.com.
+	GoogleValidator GoogleCredentialValidator
+	// GoogleResolver resolves a validated Google identity to a Hub user for
+	// the external-bearer path, sharing decisions with GEExchangeService.
+	GoogleResolver *GoogleIdentityResolver
+	// ExternalBearerLimiter rate-limits the external-bearer path per client
+	// IP, consulted only on a Google-credential-cache miss. nil disables
+	// rate limiting for that path (see authenticateExternalBearer).
+	ExternalBearerLimiter *externalBearerRateLimiter
+	// ExternalBearerMetrics records the outcome of every external-bearer
+	// authentication attempt (the external_bearer counter; see
+	// external_bearer_metrics.go for the closed label set and the real
+	// exported metric names). UnifiedAuthMiddleware captures a copy of this
+	// cfg each time applyMiddleware runs (Start(), Handler()).
+	// cmd/server_foreground.go calls SetExternalBearerMetrics before either,
+	// so a plain field would work today; the *atomic.Pointer (the
+	// FederationAuth shape above) makes a setter call after the handler is
+	// already built still take effect, race-free, so correctness does not
+	// depend on that ordering. A nil pointer, or one currently holding a nil
+	// interface, disables recording; it never changes the external-bearer
+	// path's authentication outcome.
+	ExternalBearerMetrics *atomic.Pointer[ExternalBearerMetricsRecorder]
 	// CredentialStore handles agent credential validation (Phase 1H).
 	// When non-nil, agent tokens are validated against persistent credential state.
 	CredentialStore store.AgentCredentialStore
@@ -84,6 +109,14 @@ type AuthConfig struct {
 	Debug bool
 	// Logger is the subsystem logger for auth middleware (defaults to slog.Default())
 	Logger *slog.Logger
+	// PlatformAuthSA is the hub's configured platform/transport auth service
+	// account email. UnifiedAuthMiddleware's tokenTypeUser and tokenTypeUAT
+	// arms use it to reject an otherwise-valid user JWT or PAT issued for
+	// that identity — see isReservedPlatformIdentity's invariant comment.
+	// Wired from the same server-config value as Server.platformAuthSA (see
+	// server.go's New) so the two cannot diverge. Empty when no transport
+	// service account is configured, which leaves the check inert.
+	PlatformAuthSA string
 }
 
 // tokenType represents the type of authentication token.
@@ -103,6 +136,75 @@ const (
 // drift: if this returns false, nothing downstream authenticates a broker request.
 func brokerAuthActive(svc *BrokerAuthService) bool {
 	return svc != nil && svc.config.Enabled
+}
+
+const constraintAuditPathPrefix = "/api/v1/admin/access-constraints/"
+
+// isConstraintAuditAuthFailureRoute matches only the canonical live-constraint
+// audit subresource. Query parameters are intentionally irrelevant, while an
+// encoded path is rejected even when net/url decodes it to the same URL.Path.
+func isConstraintAuditAuthFailureRoute(r *http.Request) bool {
+	if r.Method != http.MethodGet || r.URL.RawPath != "" || r.URL.EscapedPath() != r.URL.Path {
+		return false
+	}
+	if !strings.HasPrefix(r.URL.Path, constraintAuditPathPrefix) || !strings.HasSuffix(r.URL.Path, "/audit") {
+		return false
+	}
+
+	id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, constraintAuditPathPrefix), "/audit")
+	return id != "" && id != "." && id != ".." && !strings.Contains(id, "/")
+}
+
+// constraintAuditAuthFailureWriter preserves authentication's fail-closed
+// control flow while making credential rejection responses indistinguishable
+// from the endpoint's absent-resource response. It never forwards the rejected
+// body. Infrastructure failures remain unchanged.
+type constraintAuditAuthFailureWriter struct {
+	http.ResponseWriter
+	normalized bool
+}
+
+func (w *constraintAuditAuthFailureWriter) WriteHeader(statusCode int) {
+	if w.normalized {
+		return
+	}
+	switch statusCode {
+	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden:
+		w.normalized = true
+		NotFound(w.ResponseWriter, "Access Constraint")
+		return
+	}
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (w *constraintAuditAuthFailureWriter) Write(body []byte) (int, error) {
+	if w.normalized {
+		return len(body), nil
+	}
+	return w.ResponseWriter.Write(body)
+}
+
+func normalizeConstraintAuditAuthFailures(w http.ResponseWriter, r *http.Request) http.ResponseWriter {
+	if isConstraintAuditAuthFailureRoute(r) {
+		return &constraintAuditAuthFailureWriter{ResponseWriter: w}
+	}
+	return w
+}
+
+// serveAfterAuth unwraps the response normalizer before entering downstream
+// middleware or a handler, so only authentication failures are rewritten.
+func serveAfterAuth(w http.ResponseWriter, next http.Handler, r *http.Request) {
+	if normalizer, ok := w.(*constraintAuditAuthFailureWriter); ok {
+		next.ServeHTTP(normalizer.ResponseWriter, r)
+		return
+	}
+	next.ServeHTTP(w, r)
+}
+
+func handlerAfterAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		serveAfterAuth(w, next, r)
+	})
 }
 
 // UnifiedAuthMiddleware creates middleware that handles all authentication types.
@@ -125,6 +227,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w = normalizeConstraintAuditAuthFailures(w, r)
 			ctx := r.Context()
 
 			if cfg.Debug {
@@ -149,7 +252,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				if cfg.Debug {
 					log.Debug("Skipping auth for unauthenticated endpoint", "path", r.URL.Path)
 				}
-				next.ServeHTTP(w, r)
+				serveAfterAuth(w, next, r)
 				return
 			}
 
@@ -157,33 +260,42 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 			if token := extractAgentToken(r); token != "" {
 				if cfg.AgentTokenSvc != nil {
 					if claims, err := cfg.AgentTokenSvc.ValidateAgentToken(token); err == nil {
-						// Step 1a: Validate against persistent credential state (Phase 1H)
+						// Step 1a: Agent-token authentication requires a successful
+						// credential-status evaluation (Phase 1H). See
+						// evaluateAgentCredentialStatus for the possible outcomes.
 						if cfg.CredentialStore != nil && claims.ID != "" {
-							jtiHash := hashJTI(claims.ID)
-							cred, credErr := cfg.CredentialStore.GetAgentCredentialByJTIHash(ctx, jtiHash)
-							if credErr == nil {
-								// Credential found — check revocation status
-								if cred.RevokedAt != nil {
-									writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
-										"token has been revoked", nil)
-									return
-								}
-								// Store credential ID in context for downstream use
+							cred, isLegacy, credErr := evaluateAgentCredentialStatus(ctx, cfg.CredentialStore, claims.ID)
+							switch {
+							case errors.Is(credErr, errAgentCredentialRevoked):
+								writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+									"token has been revoked", nil)
+								return
+							case credErr != nil:
+								// Any store error other than "not found" must not fall
+								// back to authenticating the request: it means the
+								// credential's status could not actually be determined,
+								// so treat it as a retryable failure.
+								log.Error("Agent credential status lookup failed",
+									"agent_id", claims.Subject, "error", credErr)
+								writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+									"unable to verify credential status", nil)
+								return
+							case isLegacy:
+								// Legacy compatibility path: tokens issued before the
+								// credential table existed have no credential record.
+								// Retained pending a product decision; do not close or
+								// widen this branch.
+								log.Warn("Agent token not found in credential store (legacy/pre-table token)",
+									"agent_id", claims.Subject, "jti_hash", hashJTI(claims.ID)[:8])
+								ctx = context.WithValue(ctx, legacyTokenContextKey{}, true)
+							default:
+								// Credential found and active.
 								ctx = context.WithValue(ctx, agentCredentialIDContextKey{}, cred.ID)
 								// Update last_seen_at (fire-and-forget)
 								go func() {
 									_ = cfg.CredentialStore.UpdateAgentCredentialLastSeen(
 										context.Background(), cred.ID, time.Now())
 								}()
-							} else if errors.Is(credErr, store.ErrNotFound) {
-								// Compatibility window: accept pre-table tokens with a warning
-								log.Warn("Agent token not found in credential store (legacy/pre-table token)",
-									"agent_id", claims.Subject, "jti_hash", jtiHash[:8])
-								ctx = context.WithValue(ctx, legacyTokenContextKey{}, true)
-							} else {
-								// Store error — log and accept (fail open for availability)
-								log.Warn("Credential store lookup failed, accepting token",
-									"agent_id", claims.Subject, "error", credErr)
 							}
 						}
 
@@ -195,7 +307,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						if cfg.Debug {
 							log.Debug("Agent authenticated", "subject", claims.Subject)
 						}
-						next.ServeHTTP(w, r.WithContext(ctx))
+						serveAfterAuth(w, next, r.WithContext(ctx))
 						return
 					} else if r.Header.Get("X-Scion-Agent-Token") != "" {
 						// Agent token header was present but invalid
@@ -237,7 +349,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						"type", identity.Type(),
 						"id", identity.ID())
 				}
-				next.ServeHTTP(w, r.WithContext(ctx))
+				serveAfterAuth(w, next, r.WithContext(ctx))
 				return
 			}
 
@@ -264,6 +376,9 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					log.Debug("Broker auth headers present, deferring to BrokerAuthMiddleware", "brokerID", brokerID)
 				}
 				ctx = contextWithAuthType(ctx, AuthTypeBroker)
+				// Broker HMAC and on-behalf-of authentication run downstream.
+				// Keep the exact-route normalizer attached until that delegated
+				// authentication succeeds inside the broker middleware.
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
@@ -309,7 +424,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						if cfg.Debug {
 							log.Debug("Proxy user authenticated", "provider", cfg.ProxyAuthenticator.Name(), "email", proxyUser.Email)
 						}
-						next.ServeHTTP(w, r.WithContext(ctx))
+						serveAfterAuth(w, next, r.WithContext(ctx))
 						return
 					}
 					// (nil, nil) = no assertion present, fall through
@@ -325,9 +440,22 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						if cfg.Debug {
 							log.Debug("Proxy user authenticated (legacy)", "email", user.Email())
 						}
-						next.ServeHTTP(w, r.WithContext(ctx))
+						serveAfterAuth(w, next, r.WithContext(ctx))
 						return
 					}
+				}
+
+				// Step 3c: Skill file capability URL (#1792). A credential-less
+				// GET of /api/v1/skills/{id}/files/{path} carrying exp/sig
+				// parameters is passed through WITHOUT an identity. Only the
+				// request shape is checked here; handleSkillFileRead verifies
+				// the HMAC signature unconditionally and rejects the request
+				// if it does not validate, and every other handler sees an
+				// anonymous request exactly as it would for a public route.
+				if isSignedSkillFileRequest(r) {
+					ctx = contextWithAuthType(ctx, AuthTypeSignedURL)
+					serveAfterAuth(w, next, r.WithContext(ctx))
+					return
 				}
 
 				writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
@@ -364,6 +492,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 				scopedUser, err := cfg.UATSvc.ValidateToken(ctx, token)
 				if err != nil {
+					logUATRejection(log, ctx, err)
 					if errors.Is(err, ErrUserSuspended) {
 						writeError(w, http.StatusForbidden, "user_suspended",
 							"access denied: user account is suspended", nil)
@@ -373,12 +502,22 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						"invalid access token", nil)
 					return
 				}
+				// See isReservedPlatformIdentity: every credential-acceptance
+				// point checks this too, including a PAT issued under a
+				// reserved-identity user row.
+				if isReservedPlatformIdentity(scopedUser.Email(), cfg.PlatformAuthSA) {
+					logCredentialRejected(log, ctx, "reserved_identity", true, scopedUser.CredentialID())
+					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+						"invalid access token", nil)
+					return
+				}
 				ctx = context.WithValue(ctx, userContextKey{}, scopedUser)
 				ctx = contextWithIdentity(ctx, scopedUser)
 				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(scopedUser))
 				ctx = contextWithAuthType(ctx, AuthTypeUAT)
 				if cfg.Debug {
-					log.Debug("UAT authenticated", "email", scopedUser.Email(), "project_id", scopedUser.ScopedProjectID())
+					boundary := scopedUser.Boundary()
+					log.Debug("UAT authenticated", "email", scopedUser.Email(), "boundary_kind", string(boundary.Kind), "project_id", boundary.ProjectID)
 				}
 
 			case tokenTypeUser:
@@ -392,7 +531,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						if cfg.Debug {
 							log.Debug("Dev user authenticated (fallback)")
 						}
-						next.ServeHTTP(w, r.WithContext(ctx))
+						serveAfterAuth(w, next, r.WithContext(ctx))
 						return
 					}
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
@@ -401,8 +540,26 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 				claims, err := cfg.UserTokenSvc.ValidateUserToken(token)
 				if err != nil {
+					// Not a Hub-issued user JWT. It may be a Google ID token
+					// forwarded verbatim by a trusted external caller.
+					if serveExternalBearer(w, r, handlerAfterAuth(next), ctx, token, cfg, log) {
+						return
+					}
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 						"invalid access token: "+err.Error(), nil)
+					return
+				}
+				// PRIMARY choke: see isReservedPlatformIdentity's invariant
+				// comment. This check applies to every self-contained user
+				// JWT that reaches this point, independent of which mint
+				// site issued it or how long ago — it is what revokes an
+				// already-issued, unexpired access token for the reserved
+				// identity. Agent, federation, and broker credentials never
+				// reach this arm (see UnifiedAuthMiddleware's earlier steps),
+				// so this cannot deny an agent or broker token.
+				if isReservedPlatformIdentity(claims.Email, cfg.PlatformAuthSA) {
+					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+						"invalid access token", nil)
 					return
 				}
 				// JWT tokens are self-contained; check current user status
@@ -448,14 +605,72 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 
 			default:
+				// Opaque (non-JWT) bearer tokens land here — detectTokenType
+				// routes every 3-segment token to tokenTypeUser, so this arm
+				// never sees a JWT. This is the external-bearer path's
+				// access-token hook site (auth_external_bearer.go):
+				// serveExternalBearer returns true whenever it has fully
+				// handled the request (Google trust configured, whether
+				// validation succeeds or fails), so this arm returns and the
+				// "unrecognized token format" rejection below never runs. It
+				// returns false only when the token is not applicable to
+				// this path at all (e.g. no Google trust configured), in
+				// which case that rejection runs as usual. The ID-token hook
+				// site is reached only from the tokenTypeUser case above.
+				if serveExternalBearer(w, r, handlerAfterAuth(next), ctx, token, cfg, log) {
+					return
+				}
 				writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 					"unrecognized token format", nil)
 				return
 			}
 
-			next.ServeHTTP(w, r.WithContext(ctx))
+			serveAfterAuth(w, next, r.WithContext(ctx))
 		})
 	}
+}
+
+// logUATRejection logs a single "credential rejected" line for a UAT that
+// failed ValidateToken (plan §3.1(3)). It classifies the reason from the
+// returned error's *UATRejection, when present. Any other error shape means
+// ValidateToken itself could not complete — a store or database failure, not
+// a client-presented bad credential — so it is logged distinctly (reason
+// "lookup_error", at Error level), never folded into the client-facing
+// "invalid" reason: an operator must be able to tell an outage from a wave
+// of bad tokens.
+func logUATRejection(log *slog.Logger, ctx context.Context, err error) {
+	var rej *UATRejection
+	if errors.As(err, &rej) {
+		logCredentialRejected(log, ctx, rej.Reason, rej.Found, rej.TokenID)
+		return
+	}
+	logCredentialRejectedAtLevel(log, ctx, slog.LevelError, "lookup_error", false, "")
+}
+
+// logCredentialRejected logs the standard "credential rejected" warning line.
+// The token ID is included only when found is true, i.e. the presented value
+// matched a server-verified stored record — this marks the record as
+// rejected, never as an authenticated principal (rulings, plan correction
+// (b)). The presented token string itself is never logged (ruling Q3).
+func logCredentialRejected(log *slog.Logger, ctx context.Context, reason string, found bool, tokenID string) {
+	logCredentialRejectedAtLevel(log, ctx, slog.LevelWarn, reason, found, tokenID)
+}
+
+// logCredentialRejectedAtLevel is logCredentialRejected's implementation,
+// parameterized on level so an internal lookup failure (logUATRejection's
+// fallback) can be distinguished from an ordinary client-side rejection.
+func logCredentialRejectedAtLevel(log *slog.Logger, ctx context.Context, level slog.Level, reason string, found bool, tokenID string) {
+	attrs := []any{
+		slog.String("auth_type", AuthTypeUAT),
+		slog.String("reason", reason),
+	}
+	if found && tokenID != "" {
+		attrs = append(attrs, slog.String("credential.id", tokenID))
+	}
+	if reqID := logging.RequestIDFromContext(ctx); reqID != "" {
+		attrs = append(attrs, slog.String(logging.AttrRequestID, reqID))
+	}
+	log.Log(ctx, level, "credential rejected", attrs...)
 }
 
 // detectTokenType identifies the type of token.
@@ -528,6 +743,8 @@ func isUnauthenticatedEndpoint(path string) bool {
 		return true
 	case "/api/v1/auth/cli/device/token": // CLI device flow token polling
 		return true
+	case "/api/v1/auth/integrations/google/exchange": // GE Google credential exchange (pre-auth; handler validates Google credential)
+		return true
 	case "/api/v1/auth/test-login": // Test-login for integration testing (gated by --enable-test-login)
 		return true
 	case "/api/v1/brokers/join": // Broker registration bootstrap (uses join token)
@@ -544,6 +761,50 @@ func isUnauthenticatedEndpoint(path string) bool {
 		return true
 	}
 	return false
+}
+
+// isReservedPlatformIdentity reports whether email is the hub's configured
+// platform/transport auth service account. A reserved-platform-identity
+// credential is never minted, re-minted, accepted as valid at validation, or
+// reported valid — and the validation choke (below) also revokes an
+// already-issued, unexpired token, not just new ones.
+//
+// Invariant: every path that provisions a user, or mints, re-mints, or
+// validates a hub token, checks this. That covers, today:
+//   - Provisioning: Server.provisionUser (API proxy/IAP, OAuth, and session
+//     login), GoogleIdentityResolver.Resolve (GE exchange and the
+//     external-bearer path), WebServer.proxyAuthMiddleware's fresh-identity
+//     branch, and the web OAuth callback.
+//   - Re-minting from an existing credential: Server.handleAuthRefresh,
+//     WebServer.proxyAuthMiddleware's existing-session branch, and
+//     WebServer.sessionToBearerMiddleware (both its cookie-overflow mint and
+//     its refresh branches).
+//   - Validation (the choke that also revokes an already-issued token):
+//     UnifiedAuthMiddleware's tokenTypeUser arm (the primary choke — every
+//     self-contained hub-issued user JWT passes through it) and its
+//     tokenTypeUAT arm (PATs), and Server.handleAuthValidate.
+//
+// Intentionally NOT checked, because none of them can authenticate as this
+// identity or are gated some other way: devAuthMiddleware (mints a token
+// only for the fixed dev-user identity, never an external one),
+// handlers_test_login (gated behind --enable-test-login, never enabled in
+// production), and the a2a-bridge's synthetic service token (server.go,
+// an internal token that never carries an external identity's email).
+//
+// Stating the covered and excluded sites here makes the guard set auditable
+// by checking this list against the code, rather than by a reachability
+// argument for each new call site.
+//
+// Comparison trims surrounding whitespace and is case-insensitive on both
+// sides. Returns false whenever platformAuthSA is empty, so the check is
+// inert on hubs that do not configure a transport service account (the
+// common case).
+func isReservedPlatformIdentity(email, platformAuthSA string) bool {
+	platformAuthSA = strings.TrimSpace(platformAuthSA)
+	if platformAuthSA == "" {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(email), platformAuthSA)
 }
 
 // parseTrustedProxies parses a list of IP addresses and CIDR ranges.

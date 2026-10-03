@@ -18,15 +18,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/resources"
@@ -157,6 +161,183 @@ harness_configs:
 		if persistedCfg.Env[k] != v {
 			t.Errorf("persisted: expected env[%s] = %q, got %q", k, v, persistedCfg.Env[k])
 		}
+	}
+}
+
+// TestProvisionAgent_ImageAndPullPolicyPrecedence pins the full precedence
+// order for ptone/scion#2156 (settings win over the harness-config file's
+// own default, but an explicit template override still outranks settings):
+// harness-config file default < Hub settings harness_configs.<h>
+// (profile harness_overrides outranking the base entry) < explicit
+// template/agent config. kubernetes.imagePullPolicy is new to both the
+// harness-config file (config.yaml `image_pull_policy:`) and Hub settings,
+// and follows the identical rule.
+func TestProvisionAgent_ImageAndPullPolicyPrecedence(t *testing.T) {
+	tests := []struct {
+		name                  string
+		fileDefaultPolicy     string
+		settingsImage         string
+		settingsPolicy        string
+		profileOverrideImage  string
+		profileOverridePolicy string
+		templateImage         string
+		templatePolicy        string
+		wantImage             string
+		wantPolicy            string
+	}{
+		{
+			name:      "no settings, no template override: falls back to the harness-config file default",
+			wantImage: "test-image:latest",
+		},
+		{
+			name:              "harness-config file's own image_pull_policy is the lowest tier",
+			fileDefaultPolicy: "Never",
+			wantImage:         "test-image:latest",
+			wantPolicy:        "Never",
+		},
+		{
+			name:          "settings image overrides the harness-config file default",
+			settingsImage: "example.com/settings-pinned:v1",
+			wantImage:     "example.com/settings-pinned:v1",
+		},
+		{
+			name:          "explicit template image still outranks settings",
+			settingsImage: "example.com/settings-pinned:v1",
+			templateImage: "example.com/template-pinned:v2",
+			wantImage:     "example.com/template-pinned:v2",
+		},
+		{
+			name:           "settings image_pull_policy applies with no template override",
+			settingsPolicy: "Always",
+			wantImage:      "test-image:latest",
+			wantPolicy:     "Always",
+		},
+		{
+			name:           "explicit template imagePullPolicy still outranks settings",
+			settingsPolicy: "Always",
+			templatePolicy: "Never",
+			wantImage:      "test-image:latest",
+			wantPolicy:     "Never",
+		},
+		{
+			name:                  "profile harness_overrides outranks the base settings entry",
+			settingsImage:         "example.com/settings-pinned:v1",
+			settingsPolicy:        "IfNotPresent",
+			profileOverrideImage:  "example.com/profile-pinned:v3",
+			profileOverridePolicy: "Always",
+			wantImage:             "example.com/profile-pinned:v3",
+			wantPolicy:            "Always",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			oldWd, _ := os.Getwd()
+			_ = os.Chdir(tmpDir)
+			defer func() { _ = os.Chdir(oldWd) }()
+
+			originalHome := os.Getenv("HOME")
+			defer func() { _ = os.Setenv("HOME", originalHome) }()
+			_ = os.Setenv("HOME", tmpDir)
+
+			globalScionDir := filepath.Join(tmpDir, ".scion")
+			globalTemplatesDir := filepath.Join(globalScionDir, "templates")
+			_ = os.MkdirAll(globalTemplatesDir, 0755)
+			seedTestHarnessConfig(t, globalScionDir, "test-harness", "test-harness")
+			if tt.fileDefaultPolicy != "" {
+				hcConfigPath := filepath.Join(globalScionDir, "harness-configs", "test-harness", "config.yaml")
+				existing, err := os.ReadFile(hcConfigPath)
+				if err != nil {
+					t.Fatalf("read seeded harness-config: %v", err)
+				}
+				updated := string(existing) + "image_pull_policy: " + tt.fileDefaultPolicy + "\n"
+				if err := os.WriteFile(hcConfigPath, []byte(updated), 0644); err != nil {
+					t.Fatalf("append image_pull_policy to harness-config: %v", err)
+				}
+			}
+
+			tplFields := map[string]any{"default_harness_config": "test-harness"}
+			if tt.templateImage != "" {
+				tplFields["image"] = tt.templateImage
+			}
+			if tt.templatePolicy != "" {
+				tplFields["kubernetes"] = map[string]any{"imagePullPolicy": tt.templatePolicy}
+			}
+			tplDir := filepath.Join(globalTemplatesDir, "test-tpl")
+			_ = os.MkdirAll(tplDir, 0755)
+			tplJSON, err := json.Marshal(tplFields)
+			if err != nil {
+				t.Fatalf("marshal template config: %v", err)
+			}
+			_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), tplJSON, 0644)
+
+			projectDir := filepath.Join(tmpDir, "project")
+			projectScionDir := filepath.Join(projectDir, ".scion")
+			_ = os.MkdirAll(projectScionDir, 0755)
+
+			profileName := ""
+			if tt.settingsImage != "" || tt.settingsPolicy != "" {
+				var sb strings.Builder
+				sb.WriteString("schema_version: \"1\"\nharness_configs:\n  test-harness:\n    harness: test-harness\n")
+				if tt.settingsImage != "" {
+					sb.WriteString("    image: " + tt.settingsImage + "\n")
+				}
+				if tt.settingsPolicy != "" {
+					sb.WriteString("    image_pull_policy: " + tt.settingsPolicy + "\n")
+				}
+				if tt.profileOverrideImage != "" || tt.profileOverridePolicy != "" {
+					profileName = "test-profile"
+					sb.WriteString("profiles:\n  test-profile:\n    runtime: docker\n    harness_overrides:\n      test-harness:\n")
+					if tt.profileOverrideImage != "" {
+						sb.WriteString("        image: " + tt.profileOverrideImage + "\n")
+					}
+					if tt.profileOverridePolicy != "" {
+						sb.WriteString("        image_pull_policy: " + tt.profileOverridePolicy + "\n")
+					}
+				}
+				_ = os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte(sb.String()), 0644)
+			}
+
+			agentName := "test-agent"
+			_, _, cfg, err := ProvisionAgent(context.Background(), agentName, "test-tpl", "", "", projectScionDir, profileName, "", "", "")
+			if err != nil {
+				t.Fatalf("ProvisionAgent failed: %v", err)
+			}
+			if cfg.Image != tt.wantImage {
+				t.Errorf("cfg.Image = %q, want %q", cfg.Image, tt.wantImage)
+			}
+			gotPolicy := ""
+			if cfg.Kubernetes != nil {
+				gotPolicy = cfg.Kubernetes.ImagePullPolicy
+			}
+			if gotPolicy != tt.wantPolicy {
+				t.Errorf("cfg.Kubernetes.ImagePullPolicy = %q, want %q", gotPolicy, tt.wantPolicy)
+			}
+
+			// The "created" response (ProvisionOnly dispatch path) reads the
+			// persisted scion-agent.json directly, so the same values must
+			// round-trip through disk.
+			agentScionJSON := filepath.Join(projectScionDir, "agents", agentName, "scion-agent.json")
+			data, err := os.ReadFile(agentScionJSON)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var persisted api.ScionConfig
+			if err := json.Unmarshal(data, &persisted); err != nil {
+				t.Fatal(err)
+			}
+			if persisted.Image != tt.wantImage {
+				t.Errorf("persisted image = %q, want %q", persisted.Image, tt.wantImage)
+			}
+			persistedPolicy := ""
+			if persisted.Kubernetes != nil {
+				persistedPolicy = persisted.Kubernetes.ImagePullPolicy
+			}
+			if persistedPolicy != tt.wantPolicy {
+				t.Errorf("persisted imagePullPolicy = %q, want %q", persistedPolicy, tt.wantPolicy)
+			}
+		})
 	}
 }
 
@@ -365,13 +546,19 @@ func TestProvisionAgentNonGitWorkspace(t *testing.T) {
 	}
 	globalScionDir, _ := config.GetGlobalDir()
 
-	// Change into a subdirectory to act as CWD
+	// Change into an unrelated subdirectory to prove the global project's
+	// workspace does not depend on the CLI's current working directory.
 	cwd := filepath.Join(tmpDir, "some-dir")
 	_ = os.MkdirAll(cwd, 0755)
 	if err := os.Chdir(cwd); err != nil {
 		t.Fatal(err)
 	}
-	evalCWD, _ := filepath.EvalSymlinks(cwd)
+
+	wantGlobalWorkspaceRoot := filepath.Join(globalScionDir, "workspace")
+	wantGlobalWorkspace := filepath.Join(wantGlobalWorkspaceRoot, "global-agent")
+	if _, err := os.Stat(wantGlobalWorkspaceRoot); !os.IsNotExist(err) {
+		t.Fatalf("expected global project workspace directory to not exist yet, stat err = %v", err)
+	}
 
 	_, ws, cfg, err = ProvisionAgent(context.Background(), "global-agent", "default", "", "", globalScionDir, "", "", "", "")
 	if err != nil {
@@ -382,18 +569,141 @@ func TestProvisionAgentNonGitWorkspace(t *testing.T) {
 		t.Errorf("expected empty workspace path for global agent, got %q", ws)
 	}
 
+	if info, err := os.Stat(wantGlobalWorkspace); err != nil || !info.IsDir() {
+		t.Fatalf("expected global project workspace directory to be created at %q on first use: %v", wantGlobalWorkspace, err)
+	}
+	evalWantGlobalWorkspace, _ := filepath.EvalSymlinks(wantGlobalWorkspace)
+
 	found = false
 	for _, v := range cfg.Volumes {
 		if v.Target == "/workspace" {
 			found = true
 			evalSource, _ := filepath.EvalSymlinks(v.Source)
-			if evalSource != evalCWD {
-				t.Errorf("expected global agent volume source %q (CWD), got %q", evalCWD, evalSource)
+			if evalSource != evalWantGlobalWorkspace {
+				t.Errorf("expected global agent volume source %q, got %q", evalWantGlobalWorkspace, evalSource)
 			}
 		}
 	}
 	if !found {
 		t.Error("expected /workspace volume mount not found in global agent config")
+	}
+
+	// A second global agent, provisioned from a different CWD, gets its own
+	// workspace subdirectory under the same project workspace root instead
+	// of sharing the first agent's directory: two global-project agents
+	// must never read and write the same files.
+	cwd2 := filepath.Join(tmpDir, "another-dir")
+	_ = os.MkdirAll(cwd2, 0755)
+	if err := os.Chdir(cwd2); err != nil {
+		t.Fatal(err)
+	}
+
+	wantSecondGlobalWorkspace := filepath.Join(wantGlobalWorkspaceRoot, "global-agent-2")
+	_, ws2, cfg2, err := ProvisionAgent(context.Background(), "global-agent-2", "default", "", "", globalScionDir, "", "", "", "")
+	if err != nil {
+		t.Fatalf("ProvisionAgent failed for second global agent: %v", err)
+	}
+	if ws2 != "" {
+		t.Errorf("expected empty workspace path for second global agent, got %q", ws2)
+	}
+	evalWantSecondGlobalWorkspace, _ := filepath.EvalSymlinks(wantSecondGlobalWorkspace)
+
+	found = false
+	for _, v := range cfg2.Volumes {
+		if v.Target == "/workspace" {
+			found = true
+			evalSource, _ := filepath.EvalSymlinks(v.Source)
+			if evalSource != evalWantSecondGlobalWorkspace {
+				t.Errorf("expected second global agent volume source %q, got %q", evalWantSecondGlobalWorkspace, evalSource)
+			}
+			if evalSource == evalWantGlobalWorkspace {
+				t.Error("expected second global agent to get its own workspace directory, got the first agent's")
+			}
+		}
+	}
+	if !found {
+		t.Error("expected /workspace volume mount not found in second global agent config")
+	}
+}
+
+// TestProvisionAgentNonGitDirectoryNamedGlobal covers an ordinary, non-git
+// project whose own directory happens to be named "global" -- not the real
+// global project, which lives at the resolved global directory regardless
+// of name. It must be provisioned the same way any other non-git project
+// is: a plain workspace mount at the project's own directory, not the
+// global project's dedicated, agent-namespaced workspace subdirectory.
+func TestProvisionAgentNonGitDirectoryNamedGlobal(t *testing.T) {
+	mockRuntimeForTest(t)
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	// HOME is a separate directory from the project below, so the real
+	// global directory (HOME/.scion) and this project's own directory are
+	// unambiguously different paths.
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	home := filepath.Join(tmpDir, "home")
+	_ = os.Setenv("HOME", home)
+
+	if err := config.InitMachine(getTestHarnesses()); err != nil {
+		t.Fatalf("InitMachine failed: %v", err)
+	}
+
+	projectDir := filepath.Join(tmpDir, "global")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := config.InitProject(projectScionDir, getTestHarnesses()); err != nil {
+		t.Fatalf("InitProject failed: %v", err)
+	}
+
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatal(err)
+	}
+
+	evalProjectDir, _ := filepath.EvalSymlinks(projectDir)
+
+	// The shape ProvisionAgent must NOT produce for this project: a
+	// dedicated, agent-namespaced workspace subdirectory, the shape
+	// reserved for the real global project alone. InitProject writes a
+	// project-id marker for a non-git project, so ProvisionAgent resolves
+	// projectScionDir to its externalized directory before anything else
+	// runs -- the wrong root must be computed from that same resolved
+	// directory, not the nominal projectScionDir, or a misclassification
+	// that produces the wrong root at the externalized path would pass this
+	// check by never matching it in the first place.
+	resolvedProjectDir, _, err := config.ResolveProjectPath(projectScionDir)
+	if err != nil {
+		t.Fatalf("ResolveProjectPath failed: %v", err)
+	}
+	wrongWorkspaceRoot := filepath.Join(resolvedProjectDir, "workspace")
+
+	_, ws, cfg, err := ProvisionAgent(context.Background(), "test-agent", "default", "", "", projectScionDir, "", "", "", "")
+	if err != nil {
+		t.Fatalf("ProvisionAgent failed: %v", err)
+	}
+
+	if ws != "" {
+		t.Errorf("expected empty workspace path for a non-git project, got %q", ws)
+	}
+
+	if info, statErr := os.Stat(wrongWorkspaceRoot); statErr == nil && info.IsDir() {
+		t.Errorf("expected no agent-namespaced workspace directory to be created at %q", wrongWorkspaceRoot)
+	}
+
+	found := false
+	for _, v := range cfg.Volumes {
+		if v.Target == "/workspace" {
+			found = true
+			evalSource, _ := filepath.EvalSymlinks(v.Source)
+			if evalSource != evalProjectDir {
+				t.Errorf("expected volume source %q (the project's own directory), got %q", evalProjectDir, evalSource)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected /workspace volume mount not found in config")
 	}
 }
 
@@ -609,13 +919,13 @@ func TestProvisionAgentUsesProjectTemplate(t *testing.T) {
 
 	// Create global harness-configs
 	globalScionDir := filepath.Join(tmpDir, ".scion")
-	seedTestHarnessConfig(t, globalScionDir, "grove-harness", "grove-harness")
+	seedTestHarnessConfig(t, globalScionDir, "project-harness", "project-harness")
 
 	// Create a global agnostic template
 	globalTplDir := filepath.Join(globalScionDir, "templates", "my-tpl")
 	_ = os.MkdirAll(globalTplDir, 0755)
 	_ = os.WriteFile(filepath.Join(globalTplDir, "scion-agent.json"), []byte(`{
-		"default_harness_config": "grove-harness",
+		"default_harness_config": "project-harness",
 		"env": {"SOURCE": "global"}
 	}`), 0644)
 
@@ -625,7 +935,7 @@ func TestProvisionAgentUsesProjectTemplate(t *testing.T) {
 	projectTplDir := filepath.Join(projectPath, "templates", "my-tpl")
 	_ = os.MkdirAll(projectTplDir, 0755)
 	_ = os.WriteFile(filepath.Join(projectTplDir, "scion-agent.json"), []byte(`{
-		"default_harness_config": "grove-harness",
+		"default_harness_config": "project-harness",
 		"env": {"SOURCE": "project"}
 	}`), 0644)
 
@@ -637,8 +947,8 @@ func TestProvisionAgentUsesProjectTemplate(t *testing.T) {
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
 
-	if cfg.Harness != "grove-harness" {
-		t.Errorf("expected harness 'grove-harness' (from harness-config), got %q", cfg.Harness)
+	if cfg.Harness != "project-harness" {
+		t.Errorf("expected harness 'project-harness' (from harness-config), got %q", cfg.Harness)
 	}
 	if cfg.Env["SOURCE"] != "project" {
 		t.Errorf("expected env[SOURCE] = 'project', got %q", cfg.Env["SOURCE"])
@@ -1048,7 +1358,9 @@ func TestGetAgentGitClone_ClearsExistingWorkspace(t *testing.T) {
 		Branch: "main",
 		Depth:  intPtr(1),
 	}
-	ctx := api.ContextWithGitClone(context.Background(), gitClone)
+	// A fresh provision (create): the leftover workspace from a same-named
+	// agent that the hub deleted without cleaning up local files is cleared.
+	ctx := api.ContextWithFreshProvision(api.ContextWithGitClone(context.Background(), gitClone))
 
 	_, _, wsPath, _, err := GetAgent(ctx, "reused-agent", "claude", "", "", projectScionDir, "", "", "", "")
 	if err != nil {
@@ -1066,6 +1378,79 @@ func TestGetAgentGitClone_ClearsExistingWorkspace(t *testing.T) {
 			names[i] = e.Name()
 		}
 		t.Errorf("expected empty workspace after clearing stale content, got: %v", names)
+	}
+}
+
+// TestGetAgentGitClone_StartPreservesExistingWorkspace proves that on start
+// (no FreshProvision), GetAgent never clears a populated workspace even when
+// GitClone is set, since start also carries GitClone (so a workspace that
+// did not survive a stop can be recreated) but must not discard un-pushed
+// work in one that did (GoogleCloudPlatform/scion#1931).
+func TestGetAgentGitClone_StartPreservesExistingWorkspace(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	_ = os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+	tplDir := filepath.Join(globalScionDir, "templates", "claude")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"claude"}`), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	// A fully provisioned agent directory with a populated, real-looking
+	// workspace: a .git pointer and an un-pushed file.
+	agentDir := filepath.Join(projectScionDir, "agents", "existing-agent")
+	agentWorkspace := filepath.Join(agentDir, "workspace")
+	agentHome := filepath.Join(agentDir, "home")
+	if err := os.MkdirAll(agentWorkspace, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(agentHome, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"),
+		[]byte(`{"harness":"claude","default_harness_config":"claude"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentWorkspace, ".git"),
+		[]byte("gitdir: ../../../.git/worktrees/existing-agent\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	const unpushedContent = "package main // un-pushed change\n"
+	if err := os.WriteFile(filepath.Join(agentWorkspace, "unpushed.go"), []byte(unpushedContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	gitClone := &api.GitCloneConfig{
+		URL:    "https://github.com/example/repo.git",
+		Branch: "main",
+		Depth:  intPtr(1),
+	}
+	// Start: GitClone is set, but FreshProvision is not.
+	ctx := api.ContextWithGitClone(context.Background(), gitClone)
+
+	_, _, wsPath, _, err := GetAgent(ctx, "existing-agent", "claude", "", "", projectScionDir, "", "", "", "")
+	if err != nil {
+		t.Fatalf("GetAgent failed: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(wsPath, "unpushed.go"))
+	if err != nil {
+		t.Fatalf("un-pushed file must survive a start dispatch, but reading it failed: %v", err)
+	}
+	if string(got) != unpushedContent {
+		t.Errorf("un-pushed file content = %q, want %q", got, unpushedContent)
 	}
 }
 
@@ -1701,6 +2086,78 @@ func TestGetAgent_MissingWorkspaceNonGit(t *testing.T) {
 	}
 }
 
+// TestGetAgent_ResumeWithoutTemplateChainResolvesModelAlias is a regression
+// test for ptone/scion#1869: Claude agents got ANTHROPIC_MODEL=large (an
+// unresolved size alias) on resume because GetAgent returned early —
+// skipping model alias resolution entirely — whenever the agent's recorded
+// template could not be found locally in config.GetTemplateChainInProject.
+// This is the common shape for hub-dispatched agents: the broker they resume
+// on has the agent's own scion-agent.json and a local harness-config, but
+// not the named template that originally provisioned it.
+//
+// It also exercises the built-in alias fallback: the local harness-config
+// here (like a real hub-managed one can be) carries no model_aliases of its
+// own, so resolution must fall back to the harness's built-in table
+// (harnesses/claude/config.yaml) rather than passing "large" through.
+func TestGetAgent_ResumeWithoutTemplateChainResolvesModelAlias(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	// Global harness-config for "claude" with NO model_aliases — this
+	// mirrors a hub-managed harness-config that never got the alias table,
+	// forcing resolution through the harness's built-in defaults.
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	_ = os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+
+	// Deliberately do NOT create a "vanished-template" directory anywhere —
+	// GetTemplateChainInProject must fail to find it, taking GetAgent down
+	// the early-return path this test guards.
+	const missingTemplate = "vanished-template"
+
+	// Non-git project directory (keeps worktree recovery out of scope).
+	projectDir := filepath.Join(tmpDir, "project")
+	scionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(scionDir, 0755)
+
+	agentName := "resume-alias-agent"
+	agentDir := filepath.Join(scionDir, "agents", agentName)
+	agentHome := config.GetAgentHomePath(scionDir, agentName)
+	_ = os.MkdirAll(agentDir, 0755)
+	_ = os.MkdirAll(agentHome, 0755)
+
+	// Persisted agent config with an unresolved size alias, as a hub-applied
+	// config would leave it when the hub's own store had no alias table
+	// either (the paired bug fixed in pkg/hub/harness_capabilities.go).
+	_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"),
+		[]byte(`{"harness":"claude","harness_config":"claude","model":"large"}`), 0644)
+	_ = os.WriteFile(filepath.Join(agentHome, "agent-info.json"),
+		[]byte(`{"name":"`+agentName+`","template":"`+missingTemplate+`"}`), 0644)
+
+	_, _, _, cfg, err := GetAgent(context.Background(), agentName, "", "", "", scionDir, "", "", "", "")
+	if err != nil {
+		t.Fatalf("GetAgent failed: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("expected non-nil config from GetAgent")
+	}
+	if cfg.Model == "large" {
+		t.Fatal("GetAgent returned the unresolved model alias \"large\" — " +
+			"resume must resolve it before returning, even without a local template chain")
+	}
+	const wantModel = "claude-opus-5-5" // harnesses/claude/config.yaml model_aliases.large
+	if cfg.Model != wantModel {
+		t.Errorf("expected model alias resolved to built-in default %q, got %q", wantModel, cfg.Model)
+	}
+}
+
 func TestProvisionAgent_SkillsWithMockResolver(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -1850,6 +2307,214 @@ func TestProvisionAgent_OptionalSkillsNoResolver(t *testing.T) {
 	_, _, _, err := ProvisionAgent(context.Background(), "optional-agent", "optional-skill-tpl", "", "", projectScionDir, "", "", "", "")
 	if err != nil {
 		t.Fatalf("expected provisioning to succeed with optional-only skills and no resolver, got: %v", err)
+	}
+}
+
+// TestProvisionAgent_RequiredGHSkillWithResolver_Provisions is the positive
+// counterpart to TestProvisionAgent_RequiredSkillsNoResolver (#1960): a
+// missing agent dir (first provision) plus a template declaring a required
+// gh:// skill must succeed — not fail closed — once a working skill resolver
+// is present on ctx. This is the exact shape of the fleet-outage repro
+// (#1954): the broker's start/restart handlers must attach a resolver before
+// reaching this code path, just like create already does.
+func TestProvisionAgent_RequiredGHSkillWithResolver_Provisions(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+
+	tplDir := filepath.Join(globalTemplatesDir, "gh-skill-tpl")
+	_ = os.MkdirAll(tplDir, 0755)
+	tplConfig := `{
+		"default_harness_config": "claude",
+		"skills": [
+			{"uri": "gh://octo-org/octo-repo/skills/deploy@main"}
+		]
+	}`
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	resolver := &mockResolver{
+		resolved: []ResolvedSkill{
+			{
+				Name:    "deploy",
+				URI:     "gh://octo-org/octo-repo/skills/deploy@main",
+				Version: "main",
+				Files:   []ResolvedFile{},
+			},
+		},
+	}
+
+	// Agent dir does not exist yet — this is a first provision (mirrors both
+	// create and a re-provision reached via start/restart after the broker
+	// deleted a stale agent dir).
+	ctx := ContextWithSkillResolver(context.Background(), resolver)
+	agentHome, _, _, err := ProvisionAgent(ctx, "gh-skill-agent", "gh-skill-tpl", "", "", projectScionDir, "", "", "", "")
+	if err != nil {
+		t.Fatalf("expected provisioning to succeed with a required gh:// skill and a working resolver, got: %v", err)
+	}
+
+	recordPath := filepath.Join(agentHome, ".scion", "resolved-skills.json")
+	data, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatalf("expected resolved-skills.json at %s, got error: %v", recordPath, err)
+	}
+	if !strings.Contains(string(data), "deploy") {
+		t.Errorf("resolution record should contain skill name, got: %s", string(data))
+	}
+}
+
+// TestProvisionAgent_RequiredGHSkillRateLimited_YieldsSkillResolutionError
+// exercises provision.go's SkillResolutionError construction through the
+// actual ProvisionAgent entry point with a real GitHubSkillResolver, rather
+// than injecting the error directly into a runtimebroker mock as the broker
+// tests do (#2546 O3). The test server returns a 429 with Retry-After: 120,
+// and ctx carries a 2-minute deadline. The rate-limit cooldown ends the call
+// at that first response, without retrying. A watchdog cancels ctx if it
+// does not, so a regression fails in seconds. The test also pins RetryAfter
+// end to end: cooldown -> cooldownRetryAfter -> ResolveError ->
+// SkillResolutionError.
+func TestProvisionAgent_RequiredGHSkillRateLimited_YieldsSkillResolutionError(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+
+	tplDir := filepath.Join(globalTemplatesDir, "gh-skill-ratelimit-tpl")
+	_ = os.MkdirAll(tplDir, 0755)
+	tplConfig := `{
+		"default_harness_config": "claude",
+		"skills": [
+			{"uri": "gh://owner/repo/my-skill@main"}
+		]
+	}`
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	server, mux := newTestGitHubServer(t)
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "120") // starts a 120s cooldown
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	resolver := newTestGitHubResolver(server)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	watchdog := time.AfterFunc(3*time.Second, cancel)
+	defer watchdog.Stop()
+	ctx = ContextWithSkillResolver(ctx, resolver)
+	_, _, _, err := ProvisionAgent(ctx, "gh-ratelimit-agent", "gh-skill-ratelimit-tpl", "", "", projectScionDir, "", "", "", "")
+	if err == nil {
+		t.Fatal("expected provisioning to fail when the required gh:// skill is rate limited")
+	}
+
+	var skillErr *SkillResolutionError
+	if !errors.As(err, &skillErr) {
+		t.Fatalf("expected a *SkillResolutionError, got %T: %v", err, err)
+	}
+	if skillErr.Code != SkillErrCodeRateLimited {
+		t.Errorf("expected code %s, got %s", SkillErrCodeRateLimited, skillErr.Code)
+	}
+	if skillErr.URI != "gh://owner/repo/my-skill@main" {
+		t.Errorf("expected URI to name the ref, got %s", skillErr.URI)
+	}
+	// The cooldown runs on the real clock, so allow one second of slip
+	// between the 429 and cooldownRetryAfter reading the time left.
+	if skillErr.RetryAfter != "120" && skillErr.RetryAfter != "119" {
+		t.Errorf("expected RetryAfter 120 (or 119), got %q", skillErr.RetryAfter)
+	}
+}
+
+// TestProvisionAgent_PreResolvedSkillCreatorDenied_FailsWithCreatePathError
+// pins the design constraint from #1960: the start/restart paths must resolve
+// Hub-registry skills exactly as create does — via PreResolvedSkills, using
+// the Hub's per-skill outcome for the agent's creator — never with the
+// broker's own identity. When the Hub already resolved a required skill as an
+// error (e.g. the creator lost read access), that error is authoritative and
+// must surface verbatim as "required skill ... could not be resolved: <hub
+// message>", the same error create would produce. It must NOT be masked by
+// (or confused with) the unrelated "no skill resolver available" fail-closed
+// error, which only fires when there is no resolver at all.
+func TestProvisionAgent_PreResolvedSkillCreatorDenied_FailsWithCreatePathError(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+
+	const deniedURI = "skill://scion/project/proj-1/private-skill@1.0.0"
+	tplDir := filepath.Join(globalTemplatesDir, "denied-skill-tpl")
+	_ = os.MkdirAll(tplDir, 0755)
+	tplConfig := `{
+		"default_harness_config": "claude",
+		"skills": [
+			{"uri": "` + deniedURI + `"}
+		]
+	}`
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	// Simulate the Hub's PreResolvedSkills carrying an authoritative error for
+	// this skill (creator can no longer read it), exactly as it would arrive
+	// on create. next is nil: a denied hub-registry skill must never fall
+	// through to be re-resolved with the broker's own identity.
+	pre := &hubclient.ResolveSkillsResponse{
+		Errors: []hubclient.ResolveSkillError{
+			{URI: deniedURI, Code: "forbidden", Message: "creator no longer has read access to this skill"},
+		},
+	}
+	ctx := ContextWithSkillResolver(context.Background(), NewPreResolvedSkillResolver(pre, nil, ""))
+
+	_, _, _, err := ProvisionAgent(ctx, "denied-skill-agent", "denied-skill-tpl", "", "", projectScionDir, "", "", "", "")
+	if err == nil {
+		t.Fatal("expected provisioning to fail when the creator cannot read a required pre-resolved skill")
+	}
+	if !strings.Contains(err.Error(), "required skill") || !strings.Contains(err.Error(), "could not be resolved") {
+		t.Errorf("expected the create-path 'required skill ... could not be resolved' error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "creator no longer has read access to this skill") {
+		t.Errorf("expected the Hub's authoritative denial message to surface verbatim, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "no skill resolver available") {
+		t.Errorf("must not report the no-resolver fail-closed error when a resolver denied the skill: %v", err)
 	}
 }
 
@@ -2307,6 +2972,109 @@ func TestInjectPlatformSkills(t *testing.T) {
 		}
 		if string(data) != tplContent {
 			t.Errorf("template skill was overwritten: got %q, want %q", string(data), tplContent)
+		}
+	})
+
+	t.Run("stale platform skill is left alone without ForceOverwrite", func(t *testing.T) {
+		agentHome := t.TempDir()
+		skillsDir := ".claude/commands"
+
+		staleContent := "stale platform version from a previous generation"
+		staleSkillDir := filepath.Join(agentHome, skillsDir, "platform-skill")
+		if err := os.MkdirAll(staleSkillDir, 0755); err != nil {
+			t.Fatalf("failed to create stale skill dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(staleSkillDir, "SKILL.md"), []byte(staleContent), 0644); err != nil {
+			t.Fatalf("failed to write stale skill: %v", err)
+		}
+
+		skillsFS := fstest.MapFS{
+			"platform-skill/SKILL.md": &fstest.MapFile{
+				Data: []byte("---\nname: platform-skill\n---\n\nnew platform version"),
+			},
+		}
+
+		injCtx := workspaceSkillsInjectionContext{}
+		if err := injectPlatformSkills(skillsFS, agentHome, skillsDir, injCtx); err != nil {
+			t.Fatalf("injectPlatformSkills failed: %v", err)
+		}
+
+		data, err := os.ReadFile(filepath.Join(staleSkillDir, "SKILL.md"))
+		if err != nil {
+			t.Fatalf("failed to read skill: %v", err)
+		}
+		if string(data) != staleContent {
+			t.Errorf("expected stale skill left untouched without ForceOverwrite: got %q, want %q", string(data), staleContent)
+		}
+	})
+
+	t.Run("ForceOverwrite refreshes a stale platform skill", func(t *testing.T) {
+		agentHome := t.TempDir()
+		skillsDir := ".claude/commands"
+
+		staleContent := "stale platform version from a previous generation"
+		staleSkillDir := filepath.Join(agentHome, skillsDir, "platform-skill")
+		if err := os.MkdirAll(staleSkillDir, 0755); err != nil {
+			t.Fatalf("failed to create stale skill dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(staleSkillDir, "SKILL.md"), []byte(staleContent), 0644); err != nil {
+			t.Fatalf("failed to write stale skill: %v", err)
+		}
+
+		newContent := "---\nname: platform-skill\n---\n\nnew platform version"
+		skillsFS := fstest.MapFS{
+			"platform-skill/SKILL.md": &fstest.MapFile{Data: []byte(newContent)},
+		}
+
+		injCtx := workspaceSkillsInjectionContext{ForceOverwrite: true}
+		if err := injectPlatformSkills(skillsFS, agentHome, skillsDir, injCtx); err != nil {
+			t.Fatalf("injectPlatformSkills failed: %v", err)
+		}
+
+		data, err := os.ReadFile(filepath.Join(staleSkillDir, "SKILL.md"))
+		if err != nil {
+			t.Fatalf("failed to read skill: %v", err)
+		}
+		if string(data) != newContent {
+			t.Errorf("expected ForceOverwrite to refresh stale skill: got %q, want %q", string(data), newContent)
+		}
+	})
+
+	t.Run("ForceOverwrite still respects template precedence", func(t *testing.T) {
+		agentHome := t.TempDir()
+		skillsDir := ".claude/commands"
+
+		// A template-provided skill of the same name — must never be
+		// clobbered by the platform default, even with ForceOverwrite.
+		tplContent := "template version, must survive ForceOverwrite"
+		tplSkillDir := filepath.Join(agentHome, skillsDir, "conflict-skill")
+		if err := os.MkdirAll(tplSkillDir, 0755); err != nil {
+			t.Fatalf("failed to create template skill dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(tplSkillDir, "SKILL.md"), []byte(tplContent), 0644); err != nil {
+			t.Fatalf("failed to write template skill: %v", err)
+		}
+
+		skillsFS := fstest.MapFS{
+			"conflict-skill/SKILL.md": &fstest.MapFile{
+				Data: []byte("---\nname: conflict-skill\n---\n\nplatform version"),
+			},
+		}
+
+		injCtx := workspaceSkillsInjectionContext{
+			ForceOverwrite:     true,
+			TemplateSkillNames: map[string]bool{"conflict-skill": true},
+		}
+		if err := injectPlatformSkills(skillsFS, agentHome, skillsDir, injCtx); err != nil {
+			t.Fatalf("injectPlatformSkills failed: %v", err)
+		}
+
+		data, err := os.ReadFile(filepath.Join(tplSkillDir, "SKILL.md"))
+		if err != nil {
+			t.Fatalf("failed to read skill: %v", err)
+		}
+		if string(data) != tplContent {
+			t.Errorf("template skill was overwritten despite ForceOverwrite: got %q, want %q", string(data), tplContent)
 		}
 	})
 

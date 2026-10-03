@@ -362,18 +362,12 @@ func init() {
 
 	// Provide/withdraw flags
 	brokerProvideCmd.Flags().StringVar(&brokerProjectID, "project", "", "Project name or ID to add as provider for")
-	brokerProvideCmd.Flags().StringVar(&brokerProjectID, "grove", "", "Deprecated alias for --project")
-	_ = brokerProvideCmd.Flags().MarkDeprecated("grove", "use --project instead")
-	_ = brokerProvideCmd.Flags().MarkHidden("grove")
 
 	brokerProvideCmd.Flags().StringVar(&brokerBrokerID, "broker", "", "Broker name or ID to use (for remote broker operations)")
 	brokerProvideCmd.Flags().BoolVar(&brokerMakeDefault, "make-default", false, "Set this broker as the default for the project")
 	brokerProvideCmd.Flags().StringVar(&brokerHubFlag, "hub", "", "Hub connection name (from 'scion runtime-broker hubs')")
 
 	brokerWithdrawCmd.Flags().StringVar(&brokerProjectID, "project", "", "Project name or ID to remove as provider from")
-	brokerWithdrawCmd.Flags().StringVar(&brokerProjectID, "grove", "", "Deprecated alias for --project")
-	_ = brokerWithdrawCmd.Flags().MarkDeprecated("grove", "use --project instead")
-	_ = brokerWithdrawCmd.Flags().MarkHidden("grove")
 
 	brokerWithdrawCmd.Flags().StringVar(&brokerBrokerID, "broker", "", "Broker name or ID to use (for remote broker operations)")
 	brokerWithdrawCmd.Flags().StringVar(&brokerHubFlag, "hub", "", "Hub connection name (from 'scion runtime-broker hubs')")
@@ -536,13 +530,10 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 
 		// Phase 1: Create broker registration
 		createReq := &hubclient.CreateBrokerRequest{
-			BrokerID: stableBrokerID,
-			Name:     brokerName,
-			Capabilities: []string{
-				"sync",
-				"attach",
-			},
-			AutoProvide: brokerAutoProvide,
+			BrokerID:     stableBrokerID,
+			Name:         brokerName,
+			Capabilities: brokerRegistrationCapabilities(),
+			AutoProvide:  brokerAutoProvide,
 			Labels: map[string]string{
 				"scion.io/broker-role": "remote",
 			},
@@ -564,15 +555,12 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 
 		// Phase 2: Complete broker join with join token
 		joinReq := &hubclient.JoinBrokerRequest{
-			BrokerID:  createResp.BrokerID,
-			JoinToken: createResp.JoinToken,
-			Hostname:  brokerName,
-			Version:   version.Version,
-			Capabilities: []string{
-				"sync",
-				"attach",
-			},
-			Profiles: profiles,
+			BrokerID:     createResp.BrokerID,
+			JoinToken:    createResp.JoinToken,
+			Hostname:     brokerName,
+			Version:      version.Version,
+			Capabilities: brokerRegistrationCapabilities(),
+			Profiles:     profiles,
 		}
 
 		joinResp, err := client.RuntimeBrokers().Join(ctx, joinReq)
@@ -804,6 +792,44 @@ func isServerDaemonManagingBroker(globalDir string) (running bool, pid int) {
 	return true, serverPID
 }
 
+// buildBrokerForegroundArgs constructs the `server start` args used when
+// `runtime-broker start --foreground` runs the server command directly,
+// in-process, via serverStartCmd.RunE (no re-exec, no daemon).
+//
+// --foreground MUST be included here: runServerStartOrDaemon (serverStartCmd's
+// RunE) decides whether to daemonize based on the --foreground flag being set
+// on serverStartCmd itself, not on the fact that the caller is already inside
+// runBrokerStart's foreground branch. Dropping it caused serverStartCmd.RunE
+// to spawn a background daemon child instead of running inline: fatal under a
+// systemd Type=simple unit, whose ExecStart is expected to stay in the
+// foreground, since the parent then exits 0 immediately and systemd's cgroup
+// cleanup reaps the now-orphaned daemon child.
+func buildBrokerForegroundArgs(port int, autoProvide, debug bool) []string {
+	// Use --hosted to avoid workstation defaults (we only want the broker).
+	args := []string{"--foreground", "--hosted", "--enable-runtime-broker"}
+	if port != DefaultBrokerPort {
+		args = append(args, fmt.Sprintf("--runtime-broker-port=%d", port))
+	}
+	if autoProvide {
+		args = append(args, "--auto-provide")
+	}
+	if debug {
+		args = append(args, "--debug")
+	}
+	return args
+}
+
+// buildBrokerDaemonArgs constructs the `server start --foreground` argv used
+// to (re-)launch the broker as a background daemon: the re-exec'd child itself
+// runs with --foreground, and daemon.Start is what backgrounds that child.
+// Shared by runBrokerStart's daemon path and runBrokerRestart. Built on top of
+// buildBrokerForegroundArgs (with the "server", "start" command name prefixed)
+// so the flag list can't drift between the two paths the way --foreground once
+// did.
+func buildBrokerDaemonArgs(port int, autoProvide, debug bool) []string {
+	return append([]string{"server", "start"}, buildBrokerForegroundArgs(port, autoProvide, debug)...)
+}
+
 func runBrokerStart(cmd *cobra.Command, args []string) error {
 	// Get global directory for daemon files
 	globalDir, err := config.GetGlobalDir()
@@ -818,18 +844,7 @@ func runBrokerStart(cmd *cobra.Command, args []string) error {
 
 	// Foreground mode - just run the server command directly
 	if brokerStartForeground {
-		// Build args for server start (just the flags, no command names)
-		// Use --hosted to avoid workstation defaults (we only want the broker)
-		serverArgs := []string{"--hosted", "--enable-runtime-broker"}
-		if brokerStartPort != DefaultBrokerPort {
-			serverArgs = append(serverArgs, fmt.Sprintf("--runtime-broker-port=%d", brokerStartPort))
-		}
-		if brokerStartAutoProvide {
-			serverArgs = append(serverArgs, "--auto-provide")
-		}
-		if brokerStartDebug {
-			serverArgs = append(serverArgs, "--debug")
-		}
+		serverArgs := buildBrokerForegroundArgs(brokerStartPort, brokerStartAutoProvide, brokerStartDebug)
 
 		fmt.Printf("Starting broker in foreground on port %d...\n", brokerStartPort)
 		fmt.Println("Press Ctrl+C to stop.")
@@ -858,18 +873,7 @@ func runBrokerStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build args for the daemon process
-	// Use --foreground so the child process runs directly (daemon.Start handles backgrounding)
-	// Use --hosted to avoid workstation defaults (we only want the broker)
-	daemonArgs := []string{"server", "start", "--foreground", "--hosted", "--enable-runtime-broker"}
-	if brokerStartPort != DefaultBrokerPort {
-		daemonArgs = append(daemonArgs, fmt.Sprintf("--runtime-broker-port=%d", brokerStartPort))
-	}
-	if brokerStartAutoProvide {
-		daemonArgs = append(daemonArgs, "--auto-provide")
-	}
-	if brokerStartDebug {
-		daemonArgs = append(daemonArgs, "--debug")
-	}
+	daemonArgs := buildBrokerDaemonArgs(brokerStartPort, brokerStartAutoProvide, brokerStartDebug)
 
 	// Start daemon
 	fmt.Printf("Starting broker as daemon on port %d...\n", brokerStartPort)
@@ -977,18 +981,7 @@ func runBrokerRestart(cmd *cobra.Command, args []string) error {
 	}
 
 	// Build args for the daemon process
-	// Use --foreground so the child process runs directly (daemon.Start handles backgrounding)
-	// Use --hosted to avoid workstation defaults (we only want the broker)
-	daemonArgs := []string{"server", "start", "--foreground", "--hosted", "--enable-runtime-broker"}
-	if brokerRestartPort != DefaultBrokerPort {
-		daemonArgs = append(daemonArgs, fmt.Sprintf("--runtime-broker-port=%d", brokerRestartPort))
-	}
-	if brokerRestartAutoProvide {
-		daemonArgs = append(daemonArgs, "--auto-provide")
-	}
-	if brokerRestartDebug {
-		daemonArgs = append(daemonArgs, "--debug")
-	}
+	daemonArgs := buildBrokerDaemonArgs(brokerRestartPort, brokerRestartAutoProvide, brokerRestartDebug)
 
 	// Start new daemon
 	fmt.Printf("Starting broker with new binary...\n")
@@ -1451,7 +1444,11 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 					// Get projects this broker provides for (only if still registered)
 					if status.Registered {
 						projectsResp, err := client.RuntimeBrokers().ListProjects(ctx, status.BrokerID)
-						if err == nil && projectsResp != nil {
+						if err != nil {
+							// Record the failure instead of silently treating
+							// it the same as a confirmed-empty provider list.
+							status.ProjectsError = err.Error()
+						} else if projectsResp != nil {
 							for _, g := range projectsResp.Projects {
 								status.Projects = append(status.Projects, brokerProjectStatus{
 									ID:   g.ProjectID,
@@ -1579,6 +1576,13 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 		for _, g := range status.Projects {
 			fmt.Printf("  - %s (ID: %s)\n", g.Name, g.ID)
 		}
+	} else if status.ProjectsError != "" {
+		// Distinguish a failed lookup from a confirmed-empty list: printing
+		// "(none)" here would tell the operator to re-provide a project that
+		// may already be provisioned correctly.
+		fmt.Println("Projects (Provider)")
+		fmt.Println("-----------------")
+		fmt.Printf("  (unknown - failed to fetch provider list: %s)\n", status.ProjectsError)
 	} else if status.Registered {
 		fmt.Println("Projects (Provider)")
 		fmt.Println("-----------------")
@@ -1692,7 +1696,9 @@ func runRemoteBrokerStatus(brokerID string) error {
 
 	// Get projects this broker provides for
 	projectsResp, err := client.RuntimeBrokers().ListProjects(ctx, brokerID)
-	if err == nil && projectsResp != nil {
+	if err != nil {
+		status.ProjectsError = err.Error()
+	} else if projectsResp != nil {
 		for _, g := range projectsResp.Projects {
 			status.Projects = append(status.Projects, brokerProjectStatus{
 				ID:   g.ProjectID,
@@ -1732,6 +1738,10 @@ func runRemoteBrokerStatus(brokerID string) error {
 		for _, g := range status.Projects {
 			fmt.Printf("  - %s (ID: %s)\n", g.Name, g.ID)
 		}
+	} else if status.ProjectsError != "" {
+		fmt.Println("Projects (Provider)")
+		fmt.Println("-----------------")
+		fmt.Printf("  (unknown - failed to fetch provider list: %s)\n", status.ProjectsError)
 	} else {
 		fmt.Println("Projects (Provider)")
 		fmt.Println("-----------------")
@@ -1776,6 +1786,10 @@ type brokerStatusInfo struct {
 
 	// Projects
 	Projects []brokerProjectStatus `json:"projects,omitempty"`
+	// ProjectsError records why the provider list could not be fetched, so a
+	// failed lookup (e.g. a transient Hub error) is never displayed the same
+	// way as a confirmed-empty list.
+	ProjectsError string `json:"projectsError,omitempty"`
 }
 
 // brokerHubConnectionStatus holds status for a single hub connection.
@@ -1902,6 +1916,20 @@ func getLocalBrokerID() string {
 	}
 
 	return ""
+}
+
+// brokerRegistrationCapabilities builds the capability-name list this
+// command reports at registration/join time. There is no live runtime
+// instance available here to ask (this command only sends metadata to the
+// Hub; it does not start the broker daemon or construct a runtime), so
+// "attach" is always included — the same missing-capability-implies-
+// supported default used everywhere else this feature answers the
+// question, applied because there is nothing here to say otherwise. A
+// runtime that actually opts out reports it once the broker itself runs
+// and registers/heartbeats with a live instance in hand (see
+// buildStoreBrokerProfiles and HeartbeatService.buildHeartbeat).
+func brokerRegistrationCapabilities() []string {
+	return []string{"sync", "attach", "reprovision"}
 }
 
 // buildBrokerProfiles builds BrokerProfile objects from settings.Profiles.

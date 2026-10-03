@@ -438,6 +438,108 @@ func TestDetectAuthTypeFromGCPIdentityFromConfig_BuiltInHarnesses(t *testing.T) 
 	}
 }
 
+// TestAutoDetectAuthType_DefaultTypeCredentialBeatsGCPIdentity is the
+// regression guard for ptone/scion#1882: a present credential for the
+// harness's own default_type must win over the GCP-identity leg, using the
+// real built-in harness configs (not a synthetic fixture) so the fix is
+// pinned against the exact repro the review found:
+//
+//   - claude (default_type: api-key) with ANTHROPIC_API_KEY present and a
+//     GCP SA reachable (assign/passthrough) must stay on api-key, not
+//     switch to vertex-ai.
+//   - antigravity (default_type: oauth-token) with AGY_TOKEN present and a
+//     GCP SA reachable must stay on oauth-token, not switch to vertex-ai.
+//
+// Before the fix, DetectAuthTypeFromEnvVarsFromConfig returning "" (which
+// pickAutodetectCandidate uses to mean "already on default, no override
+// needed" — not "nothing found") was indistinguishable to a caller from
+// "no env credential present at all", so callers chaining "if empty, try the
+// next leg" fell through to DetectAuthTypeFromGCPIdentityFromConfig and got
+// vertex-ai instead.
+func TestAutoDetectAuthType_DefaultTypeCredentialBeatsGCPIdentity(t *testing.T) {
+	cases := []struct {
+		harness string
+		envKeys []string
+		want    string
+	}{
+		{"claude", []string{"ANTHROPIC_API_KEY"}, "api-key"},
+		{"antigravity", []string{"AGY_TOKEN"}, "oauth-token"},
+		// Non-default credentials must still win over identity too — this
+		// was already correct before the fix (DetectAuthTypeFromEnvVarsFromConfig
+		// returns the credential's type directly, never ""), but pin it here
+		// so a future refactor of AutoDetectAuthType can't regress it.
+		{"claude", []string{"CLAUDE_CODE_OAUTH_TOKEN"}, "oauth-token"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.harness+"/sa-assigned", func(t *testing.T) {
+			authMeta := loadAuthMetaFromHarness(t, tc.harness)
+			got := AutoDetectAuthType(authMeta, nil, keySet(tc.envKeys), true /* gcpSAAssigned */)
+			if got != tc.want {
+				t.Errorf("AutoDetectAuthType(gcpSAAssigned=true) = %q, want %q (identity must not override a present default-type credential)", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAutoDetectAuthType_BuiltInHarnesses is the composite-precedence
+// counterpart to the three Detect*FromConfig_BuiltInHarnesses tests above:
+// it exercises AutoDetectAuthType (file -> env -> identity, with the
+// default-type disambiguation) end to end against the real harness configs.
+func TestAutoDetectAuthType_BuiltInHarnesses(t *testing.T) {
+	cases := []struct {
+		harness       string
+		fileKeys      []string
+		envKeys       []string
+		gcpSAAssigned bool
+		want          string
+	}{
+		// No credentials, no identity: nothing detected.
+		{"claude", nil, nil, false, ""},
+		// No credentials, but a GCP SA is reachable: identity leg fires.
+		{"claude", nil, nil, true, "vertex-ai"},
+		{"antigravity", nil, nil, true, "vertex-ai"},
+		// Default-type credential present: wins, identity leg never runs,
+		// regardless of whether a GCP SA happens to be reachable too.
+		{"claude", nil, []string{"ANTHROPIC_API_KEY"}, true, "api-key"},
+		{"claude", nil, []string{"ANTHROPIC_API_KEY"}, false, "api-key"},
+		{"antigravity", nil, []string{"AGY_TOKEN"}, true, "oauth-token"},
+		// A non-default credential also wins over identity.
+		{"claude", nil, []string{"CLAUDE_CODE_OAUTH_TOKEN"}, true, "oauth-token"},
+		// A file secret outranks env vars and identity.
+		{"claude", []string{"CLAUDE_AUTH"}, []string{"ANTHROPIC_API_KEY"}, true, "auth-file"},
+		// An ADC file present resolves to vertex-ai without needing identity.
+		{"claude", []string{"gcloud-adc"}, nil, false, "vertex-ai"},
+		// codex has no vertex-ai type at all, so identity never contributes.
+		{"codex", nil, nil, true, ""},
+	}
+	for _, tc := range cases {
+		name := tc.harness
+		for _, k := range tc.fileKeys {
+			name += "/file=" + k
+		}
+		for _, k := range tc.envKeys {
+			name += "/env=" + k
+		}
+		if tc.gcpSAAssigned {
+			name += "/sa-assigned"
+		}
+		t.Run(name, func(t *testing.T) {
+			authMeta := loadAuthMetaFromHarness(t, tc.harness)
+			got := AutoDetectAuthType(authMeta, keySet(tc.fileKeys), keySet(tc.envKeys), tc.gcpSAAssigned)
+			if got != tc.want {
+				t.Errorf("AutoDetectAuthType() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAutoDetectAuthType_NilAuthMeta guards the nil path.
+func TestAutoDetectAuthType_NilAuthMeta(t *testing.T) {
+	if got := AutoDetectAuthType(nil, keySet(nil), keySet(nil), true); got != "" {
+		t.Errorf("AutoDetectAuthType(nil authMeta) = %q, want empty", got)
+	}
+}
+
 // TestGatherConfigEnvVars_BuiltInHarnesses verifies that config-driven env
 // var gathering produces expected keys for built-in harnesses.
 func TestGatherConfigEnvVars_BuiltInHarnesses(t *testing.T) {

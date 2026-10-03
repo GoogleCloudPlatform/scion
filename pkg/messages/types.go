@@ -42,6 +42,11 @@ const MaxMetadataKeySize = 256
 // Maximum size of a single metadata value in bytes.
 const MaxMetadataValueSize = 4 * 1024 // 4KB
 
+// AttachmentsMetadataKey is the StructuredMessage.Metadata key carrying the
+// JSON-encoded attachment refs of a message's attachments. It is used by
+// pkg/hub for internal transport and must be stripped before logging.
+const AttachmentsMetadataKey = "attachments"
+
 // Maximum length of the Channel field.
 const MaxChannelLength = 64
 
@@ -80,6 +85,12 @@ const (
 	//       type validation is in StructuredMessage.Validate(), and chat is now
 	//       in validTypes. No plugin Publish or Validate method rejects unknown types.
 	TypeChat = "chat"
+
+	// TypeReply is used when a user replies to a specific message. It carries
+	// reply-to metadata (e.g. RE-to) so that agents can see the context of
+	// what was replied to. Mapped to text/request in the envelope taxonomy
+	// (same as TypeInstruction — a reply to an agent is still a request).
+	TypeReply = "reply"
 )
 
 // System message category constants identify the origin of a system message.
@@ -87,6 +98,11 @@ const (
 	SystemCategoryScheduler      = "scheduler"
 	SystemCategoryPortForward    = "port-forward"
 	SystemCategoryDeliveryFailed = "delivery-failed"
+	// SystemCategoryDeliveryDeferred marks the notice sent to an agent
+	// sender when the migration gate (design agent-reincarnate §3.7)
+	// deferred their message instead of dispatching it — distinct from
+	// SystemCategoryDeliveryFailed: the message was saved, not dropped.
+	SystemCategoryDeliveryDeferred = "delivery-deferred"
 )
 
 // validTypes is the set of valid message types.
@@ -99,6 +115,7 @@ var validTypes = map[string]bool{
 	TypeMention:        true,
 	TypeSystem:         true,
 	TypeChat:           true,
+	TypeReply:          true,
 }
 
 // StructuredMessage represents a formatted Scion message.
@@ -267,13 +284,31 @@ func NewSystemMessage(sender, recipient, msg, category string) *StructuredMessag
 	}
 }
 
+// logMetadataSkipKeys lists metadata keys that are internal transport
+// mechanisms and should never appear in log output. Defense-in-depth:
+// even if a new call site forgets to strip the key after consuming it,
+// LogAttrs will not emit it.
+var logMetadataSkipKeys = map[string]bool{
+	AttachmentsMetadataKey: true, // internal attachment-ref transport; see pkg/hub/attachments_agent.go
+}
+
+// redactedRawContent replaces message_content in log output for raw
+// messages. Raw payloads are literal terminal keystrokes and must never
+// appear in Hub/broker message logs (normal or debug) while legacy raw
+// delivery remains reachable (ptone/scion#2192).
+const redactedRawContent = "[redacted: raw message content]"
+
 // LogAttrs returns slog attributes for structured logging of this message.
 func (m *StructuredMessage) LogAttrs() []any {
+	messageContent := m.Msg
+	if m.Raw {
+		messageContent = redactedRawContent
+	}
 	attrs := []any{
 		"sender", m.Sender,
 		"recipient", m.Recipient,
 		"msg_type", m.Type,
-		"message_content", m.Msg,
+		"message_content", messageContent,
 		"urgent", m.Urgent,
 		"broadcasted", m.Broadcasted,
 		"plain", m.Plain,
@@ -293,6 +328,15 @@ func (m *StructuredMessage) LogAttrs() []any {
 	}
 	if m.ThreadID != "" {
 		attrs = append(attrs, "thread_id", m.ThreadID)
+	}
+	if m.ConversationID != "" {
+		attrs = append(attrs, "conversation_id", m.ConversationID)
+	}
+	for k, v := range m.Metadata {
+		if logMetadataSkipKeys[k] {
+			continue
+		}
+		attrs = append(attrs, "meta_"+k, v)
 	}
 	return attrs
 }

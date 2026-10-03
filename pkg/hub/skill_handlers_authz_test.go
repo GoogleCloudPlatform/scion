@@ -74,7 +74,7 @@ func setupSkillAuthzTest(t *testing.T) (srv *Server, s store.Store, alice, bob *
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	return srv, s, alice, bob, project
 }
@@ -90,7 +90,6 @@ func createTestSkill(t *testing.T, s store.Store, name, scope, scopeID, ownerID 
 		ScopeID:     scopeID,
 		OwnerID:     ownerID,
 		Status:      "active",
-		Visibility:  store.VisibilityPrivate,
 		StoragePath: fmt.Sprintf("skills/%s/%s", scope, api.Slugify(name)),
 		Created:     time.Now(),
 		Updated:     time.Now(),
@@ -219,7 +218,12 @@ func TestSkillAuthz_Resolve_ForbiddenSkill(t *testing.T) {
 
 	assert.Empty(t, resp.Resolved, "forbidden skill should not be in resolved list")
 	require.NotEmpty(t, resp.Errors, "forbidden skill should produce an error")
-	assert.Equal(t, "forbidden", resp.Errors[0].Code)
+	// ptone/scion#1901 finding F2: a scion-registry resolve of a skill the
+	// caller cannot read must be indistinguishable from resolving a
+	// nonexistent one — "not_found", not a separate "forbidden" code. This
+	// is unrelated to the gh:// project-token gate (canUseProjectGitHubToken),
+	// which still reports "forbidden" — see TestSkillAuthz_Resolve_GH_ForbiddenProject.
+	assert.Equal(t, "not_found", resp.Errors[0].Code)
 }
 
 // TestSkillAuthz_Resolve_GH_ForbiddenProject guards the cross-project token-borrowing
@@ -336,13 +340,14 @@ func TestSkillAuthz_Resolve_GH_BrokerDenied(t *testing.T) {
 	assert.Equal(t, "forbidden", resp.Errors[0].Code)
 }
 
-func TestSkillAuthz_Resolve_PublicSkillAllowed(t *testing.T) {
+// TestSkillAuthz_Resolve_NonHubMemberDenied replaces the former
+// TestSkillAuthz_Resolve_PublicSkillAllowed. Visibility no longer widens
+// reads (ptone/scion#1903): a hub-scoped (global) skill is readable only
+// through the ordinary scope check, so a non-hub-member is denied exactly
+// as any other non-hub-scoped read, with no bypass available.
+func TestSkillAuthz_Resolve_NonHubMemberDenied(t *testing.T) {
 	srv, s, alice, bob, _ := setupSkillAuthzTest(t)
-	skill := createTestSkill(t, s, "public-skill", store.SkillScopeGlobal, "", alice.ID)
-
-	// Mark the skill as public.
-	skill.Visibility = store.VisibilityPublic
-	require.NoError(t, s.UpdateSkill(context.Background(), skill))
+	skill := createTestSkill(t, s, "formerly-public-skill", store.SkillScopeGlobal, "", alice.ID)
 
 	sv := &store.SkillVersion{
 		ID:      api.NewUUID(),
@@ -354,16 +359,18 @@ func TestSkillAuthz_Resolve_PublicSkillAllowed(t *testing.T) {
 	require.NoError(t, s.CreateSkillVersion(context.Background(), sv))
 
 	rec := doRequestAsUser(t, srv, bob, http.MethodPost, "/api/v1/skills/resolve", ResolveSkillsRequest{
-		Skills: []ResolveSkillRef{{URI: "skill://scion/global/public-skill"}},
+		Skills: []ResolveSkillRef{{URI: "skill://scion/global/formerly-public-skill"}},
 	})
 	assert.Equal(t, http.StatusOK, rec.Code)
 
 	var resp ResolveSkillsResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
-	assert.Empty(t, resp.Errors, "public skill should not produce authorization errors")
-	require.NotEmpty(t, resp.Resolved, "public skill should be resolved for any authenticated user")
-	assert.Equal(t, "public-skill", resp.Resolved[0].Name)
+	assert.Empty(t, resp.Resolved, "a non-hub-member must not resolve a hub-scoped skill")
+	require.NotEmpty(t, resp.Errors, "a non-hub-member should get an error")
+	// ptone/scion#1901 finding F2: a denied candidate is indistinguishable
+	// from a missing one — see the comment on TestSkillAuthz_Resolve_ForbiddenSkill.
+	assert.Equal(t, "not_found", resp.Errors[0].Code)
 }
 
 // ============================================================================
@@ -398,18 +405,49 @@ func TestSkillAuthz_CreateSkill_UserScope_UnauthenticatedRejected(t *testing.T) 
 		"unauthenticated user-scope create should be rejected; got: %s", rec.Body.String())
 }
 
+func TestSkillAuthz_CreateSkill_ProjectScope_RequiresScopeID(t *testing.T) {
+	srv, _, _, _, _ := setupSkillAuthzTest(t)
+
+	// Even a super-admin must supply a scopeId for project-scoped skills;
+	// otherwise a parentless project skill would be created (ptone/scion#1786).
+	admin := &store.User{ID: DevUserID, Email: "dev@localhost", DisplayName: "Development User", Role: store.UserRoleAdmin}
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/skills", CreateSkillRequest{
+		Name:  "orphan-project-skill",
+		Scope: "project",
+	})
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"project scope create without scopeId should be rejected; got: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "scope_id_required")
+}
+
+func TestSkillAuthz_CreateSkill_ProjectScope_WithScopeIDSucceeds(t *testing.T) {
+	srv, _, alice, _, project := setupSkillAuthzTest(t)
+
+	rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills", CreateSkillRequest{
+		Name:    "project-skill",
+		Scope:   "project",
+		ScopeID: project.ID,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "got: %s", rec.Body.String())
+	var resp CreateSkillResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	assert.Equal(t, project.ID, resp.Skill.ScopeID)
+}
+
 // ============================================================================
 // Unauthenticated access to private skills
 // ============================================================================
 
-func TestSkillAuthz_ListSkills_NilIdentitySeesOnlyPublic(t *testing.T) {
+// TestSkillAuthz_ListSkills_NilIdentitySeesNothing replaces the former
+// TestSkillAuthz_ListSkills_NilIdentitySeesOnlyPublic. Visibility no longer
+// widens reads (ptone/scion#1903): there is no bypass left for a nil
+// identity, so the list must come back empty regardless of any skill's
+// former public/private status.
+func TestSkillAuthz_ListSkills_NilIdentitySeesNothing(t *testing.T) {
 	srv, s, alice, _, project := setupSkillAuthzTest(t)
 
 	createTestSkill(t, s, "private-skill", store.SkillScopeProject, project.ID, alice.ID)
-
-	publicSkill := createTestSkill(t, s, "public-list-skill", store.SkillScopeProject, project.ID, alice.ID)
-	publicSkill.Visibility = store.VisibilityPublic
-	require.NoError(t, s.UpdateSkill(context.Background(), publicSkill))
+	createTestSkill(t, s, "formerly-public-list-skill", store.SkillScopeProject, project.ID, alice.ID)
 
 	// Bypass auth middleware to reach the handler with nil identity (defense-in-depth).
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/skills?scope=project&scopeId="+project.ID, nil)
@@ -420,11 +458,7 @@ func TestSkillAuthz_ListSkills_NilIdentitySeesOnlyPublic(t *testing.T) {
 	var resp ListSkillsResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
-	for _, sk := range resp.Skills {
-		assert.Equal(t, store.VisibilityPublic, sk.Visibility,
-			"nil-identity list should only contain public skills, got %q with visibility %q", sk.Name, sk.Visibility)
-	}
-	assert.Equal(t, 1, len(resp.Skills), "should see exactly the one public skill")
+	assert.Empty(t, resp.Skills, "nil-identity list must see nothing now that visibility no longer widens reads")
 }
 
 func TestSkillAuthz_Resolve_NilIdentityPrivateDenied(t *testing.T) {
@@ -457,8 +491,9 @@ func TestSkillAuthz_Resolve_NilIdentityPrivateDenied(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
 	assert.Empty(t, resp.Resolved, "private skill should not be resolved with nil identity")
-	require.NotEmpty(t, resp.Errors, "private skill should produce a forbidden error")
-	assert.Equal(t, "forbidden", resp.Errors[0].Code)
+	require.NotEmpty(t, resp.Errors, "private skill should produce an error")
+	// ptone/scion#1901 finding F2: see the comment in TestSkillAuthz_Resolve_ForbiddenSkill.
+	assert.Equal(t, "not_found", resp.Errors[0].Code)
 }
 
 // ============================================================================

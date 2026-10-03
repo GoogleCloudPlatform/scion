@@ -44,8 +44,6 @@ type Skill struct {
 	CreatedBy string `json:"created_by,omitempty"`
 	// UpdatedBy holds the value of the "updated_by" field.
 	UpdatedBy string `json:"updated_by,omitempty"`
-	// Visibility holds the value of the "visibility" field.
-	Visibility string `json:"visibility,omitempty"`
 	// Created holds the value of the "created" field.
 	Created time.Time `json:"created,omitempty"`
 	// Updated holds the value of the "updated" field.
@@ -58,7 +56,7 @@ func (*Skill) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case skill.FieldName, skill.FieldSlug, skill.FieldDescription, skill.FieldTags, skill.FieldScope, skill.FieldScopeID, skill.FieldStorageURI, skill.FieldStorageBucket, skill.FieldStoragePath, skill.FieldStatus, skill.FieldOwnerID, skill.FieldCreatedBy, skill.FieldUpdatedBy, skill.FieldVisibility:
+		case skill.FieldName, skill.FieldSlug, skill.FieldDescription, skill.FieldTags, skill.FieldScope, skill.FieldScopeID, skill.FieldStorageURI, skill.FieldStorageBucket, skill.FieldStoragePath, skill.FieldStatus, skill.FieldOwnerID, skill.FieldCreatedBy, skill.FieldUpdatedBy:
 			values[i] = new(sql.NullString)
 		case skill.FieldCreated, skill.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -163,12 +161,6 @@ func (_m *Skill) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.UpdatedBy = value.String
 			}
-		case skill.FieldVisibility:
-			if value, ok := values[i].(*sql.NullString); !ok {
-				return fmt.Errorf("unexpected type %T for field visibility", values[i])
-			} else if value.Valid {
-				_m.Visibility = value.String
-			}
 		case skill.FieldCreated:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field created", values[i])
@@ -255,9 +247,6 @@ func (_m *Skill) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("updated_by=")
 	builder.WriteString(_m.UpdatedBy)
-	builder.WriteString(", ")
-	builder.WriteString("visibility=")
-	builder.WriteString(_m.Visibility)
 	builder.WriteString(", ")
 	builder.WriteString("created=")
 	builder.WriteString(_m.Created.Format(time.ANSIC))

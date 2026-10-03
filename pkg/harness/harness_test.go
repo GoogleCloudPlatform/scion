@@ -16,13 +16,16 @@ package harness
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNew_EmbedFSHarnesses(t *testing.T) {
@@ -41,6 +44,53 @@ func TestNew_UnknownFallsToGeneric(t *testing.T) {
 func TestEmbedOnlyHarnesses_ReturnsEmpty(t *testing.T) {
 	all := EmbedOnlyHarnesses()
 	assert.Empty(t, all)
+}
+
+// TestDefaultModelAliases_KnownHarnessReturnsBuiltInTable is a regression
+// test for the ptone/scion#1869 fallback: the built-in alias table read from
+// the embedded harnesses/claude/config.yaml must be non-empty and contain
+// the "large" size alias, since resume/restart paths depend on it when no
+// project- or hub-stored harness-config carries model_aliases.
+func TestDefaultModelAliases_KnownHarnessReturnsBuiltInTable(t *testing.T) {
+	aliases := DefaultModelAliases("claude")
+	assert.NotEmpty(t, aliases)
+	assert.Contains(t, aliases, "large")
+	// Each alias must resolve to a concrete model. Model strings are not
+	// pinned here because they are bumped intentionally in config.yaml.
+	for alias, model := range aliases {
+		assert.NotEmpty(t, model, "alias %q", alias)
+		assert.NotEqual(t, alias, model, "alias %q resolves to itself", alias)
+	}
+}
+
+// TestGeminiCLIDefaultModel_ResolvesThroughAliases guards ptone/scion#2674:
+// the embedded gemini-cli config.yaml must declare the "medium" default tier,
+// and that tier must resolve through its own model_aliases to a concrete
+// model. ProvisionAgent (pkg/agent/provision.go) layers this model under the
+// template config and resolves it with config.ResolveModelAlias before
+// RunAgent injects it as SCION_MODEL, so an agent started with no model gets
+// the concrete medium model rather than an image-pinned one.
+func TestGeminiCLIDefaultModel_ResolvesThroughAliases(t *testing.T) {
+	data, err := fs.ReadFile(HarnessesFS(), "gemini-cli/config.yaml")
+	require.NoError(t, err)
+	entry, err := config.ParseHarnessConfigYAML(data)
+	require.NoError(t, err)
+	assert.Equal(t, "medium", entry.Model)
+	resolved := config.ResolveModelAlias(entry.Model, entry.ModelAliases)
+	assert.Equal(t, entry.ModelAliases["medium"], resolved)
+	assert.NotEmpty(t, resolved)
+	assert.NotEqual(t, "medium", resolved)
+}
+
+// TestDefaultModelAliases_UnknownOrEmptyHarnessReturnsNil is the "nil/empty
+// config" guard test for harness.go's DefaultModelAliases: a harness name
+// with no embedded config.yaml (fs.ReadFile error) and one whose name is
+// empty must both resolve to a nil map rather than panicking, exercising the
+// same code path the gemini review on GoogleCloudPlatform/scion#1891 flagged
+// for a defensive nil check around the parsed YAML entry.
+func TestDefaultModelAliases_UnknownOrEmptyHarnessReturnsNil(t *testing.T) {
+	assert.Nil(t, DefaultModelAliases("unknown-harness"))
+	assert.Nil(t, DefaultModelAliases(""))
 }
 
 func TestAllHarnessNames_IncludesAll(t *testing.T) {

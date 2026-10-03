@@ -36,10 +36,7 @@ import { customElement, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { navigateTo } from '../../client/main.js';
 import { setDocumentTitle } from '../../client/page-title.js';
-import {
-  getPrincipalIcon,
-  formatDateTime,
-} from '../shared/role-binding-utils.js';
+import { getPrincipalIcon, formatDateTime } from '../shared/role-binding-utils.js';
 import '../shared/principal-picker.js';
 import '../shared/project-picker.js';
 import type { AssignmentFormValues } from '../shared/role-binding-assignment-form.js';
@@ -121,8 +118,7 @@ export class ScionPageAdminRoleDetail extends LitElement {
 
   // Action state
   @state() private actionInProgress = false;
-  @state() private actionFeedback: { message: string; variant: 'success' | 'danger' } | null =
-    null;
+  @state() private actionFeedback: { message: string; variant: 'success' | 'danger' } | null = null;
 
   // Add binding form
   @state() private showAddBindingForm = false;
@@ -770,8 +766,7 @@ export class ScionPageAdminRoleDetail extends LitElement {
         return;
       }
 
-      const name =
-        this.deletingBinding.principalDisplayName || this.deletingBinding.principalId;
+      const name = this.deletingBinding.principalDisplayName || this.deletingBinding.principalId;
       this.showDeleteBindingDialog = false;
       this.deletingBinding = null;
       this.actionFeedback = { message: `Binding for "${name}" deleted`, variant: 'success' };
@@ -849,8 +844,8 @@ export class ScionPageAdminRoleDetail extends LitElement {
           : this.error
             ? this.renderError()
             : this.renderDetail()}
-      ${this.renderEditDialog()} ${this.renderDeleteDialog()}
-      ${this.renderDuplicateDialog()} ${this.renderDeleteBindingDialog()}
+      ${this.renderEditDialog()} ${this.renderDeleteDialog()} ${this.renderDuplicateDialog()}
+      ${this.renderDeleteBindingDialog()}
     `;
   }
 
@@ -892,9 +887,7 @@ export class ScionPageAdminRoleDetail extends LitElement {
       <div class="empty-state">
         <sl-icon name="shield-lock"></sl-icon>
         <h2>Role Not Found</h2>
-        <p>
-          The role "${this.roleId}" does not exist or you do not have permission to view it.
-        </p>
+        <p>The role "${this.roleId}" does not exist or you do not have permission to view it.</p>
         <sl-button
           variant="primary"
           style="margin-top: 1rem"
@@ -965,7 +958,12 @@ export class ScionPageAdminRoleDetail extends LitElement {
                   <sl-icon slot="prefix" name="pencil"></sl-icon>
                   Edit
                 </sl-button>
-                <sl-button variant="danger" size="small" outline @click=${() => this.openDeleteDialog()}>
+                <sl-button
+                  variant="danger"
+                  size="small"
+                  outline
+                  @click=${() => this.openDeleteDialog()}
+                >
                   <sl-icon slot="prefix" name="trash"></sl-icon>
                   Delete
                 </sl-button>
@@ -1024,7 +1022,10 @@ export class ScionPageAdminRoleDetail extends LitElement {
               ${perms.map(
                 (perm) => html`
                   <div class="permission-item">
-                    <sl-icon name="check-lg" style="color: var(--sl-color-success-600, #16a34a); flex-shrink: 0; margin-top: 2px;"></sl-icon>
+                    <sl-icon
+                      name="check-lg"
+                      style="color: var(--sl-color-success-600, #16a34a); flex-shrink: 0; margin-top: 2px;"
+                    ></sl-icon>
                     <div>
                       <div class="permission-label">${perm.ID}</div>
                       <div class="permission-desc">${perm.Description}</div>
@@ -1068,7 +1069,6 @@ export class ScionPageAdminRoleDetail extends LitElement {
       </div>
 
       ${this.showAddBindingForm ? this.renderAddBindingForm() : nothing}
-
       ${this.bindingsLoading
         ? html`
             <div class="loading-state" role="status">
@@ -1387,8 +1387,7 @@ export class ScionPageAdminRoleDetail extends LitElement {
   private renderDeleteBindingDialog() {
     if (!this.showDeleteBindingDialog || !this.deletingBinding) return nothing;
 
-    const name =
-      this.deletingBinding.principalDisplayName || this.deletingBinding.principalId;
+    const name = this.deletingBinding.principalDisplayName || this.deletingBinding.principalId;
 
     return html`
       <sl-dialog

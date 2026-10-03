@@ -89,6 +89,26 @@ export class ScionMentionAutocomplete extends LitElement {
   /** Internal tracking of the trigger position. */
   private triggerStart = -1;
 
+  /**
+   * Start offset of a trigger the user explicitly dismissed, or null.
+   *
+   * Without this, Escape only holds until the next keystroke: handleInput runs
+   * on every input event and re-derives `active` from text that still contains
+   * the `@`, so the dropdown reopens on the next character typed.
+   */
+  private dismissedTriggerStart: number | null = null;
+
+  /**
+   * The query string at the time the user dismissed the dropdown.
+   * Used together with dismissedTriggerStart so that backspacing past the
+   * dismissed query or pasting new content at the same trigger position
+   * re-opens the dropdown instead of staying permanently dismissed.
+   */
+  private dismissedQuery: string | null = null;
+
+  /** The query string from the most recent handleInput call (for dismiss). */
+  private currentQuery = '';
+
   /** Cached mirror div for caret position measurement (O2 fix). */
   private mirrorDiv: HTMLDivElement | null = null;
 
@@ -121,7 +141,7 @@ export class ScionMentionAutocomplete extends LitElement {
       flex-direction: column;
       padding: 0.375rem 0.75rem;
       cursor: pointer;
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
       transition: background 0.1s;
     }
 
@@ -136,7 +156,7 @@ export class ScionMentionAutocomplete extends LitElement {
     }
 
     .dropdown-item .name {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       color: var(--scion-text-muted, #64748b);
       overflow: hidden;
       text-overflow: ellipsis;
@@ -145,7 +165,7 @@ export class ScionMentionAutocomplete extends LitElement {
 
     .no-results {
       padding: 0.5rem 0.75rem;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #64748b);
       font-style: italic;
     }
@@ -188,7 +208,7 @@ export class ScionMentionAutocomplete extends LitElement {
               <span class="slug">
                 <sl-icon
                   name="${candidate.kind === 'agent' ? 'cpu' : 'person'}"
-                  style="font-size: 0.6875rem; vertical-align: -1px; margin-right: 0.125rem;"
+                  style="font-size: var(--chat-fs-sm); vertical-align: -1px; margin-right: 0.125rem;"
                 ></sl-icon>
                 @${candidate.slug}
               </span>
@@ -215,12 +235,29 @@ export class ScionMentionAutocomplete extends LitElement {
     const triggerInfo = this.findTrigger(text, cursorPos);
 
     if (!triggerInfo) {
+      // The trigger is gone, so a previous dismissal no longer applies.
+      this.dismissedTriggerStart = null;
+      this.dismissedQuery = null;
       this.dismiss();
       return;
     }
 
     this.triggerStart = triggerInfo.start;
     const query = text.slice(triggerInfo.start + 1, cursorPos);
+    this.currentQuery = query;
+
+    // A trigger the user dismissed stays dismissed while the query is a
+    // continuation of the dismissed text. Backspacing past or typing something
+    // different clears the dismissal so the dropdown reopens.
+    if (
+      triggerInfo.start === this.dismissedTriggerStart &&
+      this.dismissedQuery !== null &&
+      query.startsWith(this.dismissedQuery)
+    ) {
+      return;
+    }
+    this.dismissedTriggerStart = null;
+    this.dismissedQuery = null;
 
     // Filter and rank agents + members.
     const matched = this.matchCandidates(query);
@@ -264,7 +301,7 @@ export class ScionMentionAutocomplete extends LitElement {
 
       case 'Escape':
         e.preventDefault();
-        this.dismiss();
+        this.dismiss(true);
         return true;
 
       default:
@@ -272,10 +309,28 @@ export class ScionMentionAutocomplete extends LitElement {
     }
   }
 
-  /** Dismiss the dropdown. */
-  dismiss(): void {
+  /**
+   * Dismiss the dropdown.
+   *
+   * @param userInitiated when true the current trigger is remembered so input
+   *   handling does not immediately reopen it. Internal dismissals (no trigger,
+   *   no matches) must not set it, or a later legitimate trigger is swallowed.
+   */
+  dismiss(userInitiated = false): void {
+    if (userInitiated && this.triggerStart >= 0) {
+      this.dismissedTriggerStart = this.triggerStart;
+      // Store the current query so only continuations stay dismissed.
+      // The query was last derived by handleInput from the textarea text;
+      // re-derive it from the candidates' source would be fragile, so we
+      // read it from the textarea via the trigger position. The parent always
+      // calls handleInput (which sets triggerStart) before a keydown can
+      // reach dismiss(), so the textarea still has the relevant content.
+      // However, dismiss() has no direct access to the textarea text — so
+      // instead we track currentQuery as it is computed in handleInput.
+      this.dismissedQuery = this.currentQuery;
+    }
     this.active = false;
-    this.candidates = [];
+    if (this.candidates.length > 0) this.candidates = [];
     this.highlightIndex = 0;
     this.triggerStart = -1;
   }
@@ -339,10 +394,13 @@ export class ScionMentionAutocomplete extends LitElement {
   private matchCandidates(query: string): MentionCandidate[] {
     // Build a unified list of candidates from agents + members
     const allCandidates: MentionCandidate[] = [];
+    const slugs = new Set<string>();
 
     for (const agent of this.agents || []) {
+      const rawSlug = agent.slug || agent.name || '';
+      slugs.add(rawSlug.toLowerCase().replace(/\s+/g, '-'));
       allCandidates.push({
-        slug: agent.slug || agent.name || '',
+        slug: rawSlug,
         name: agent.name || '',
         kind: 'agent',
         avatarUrl: undefined,
@@ -352,7 +410,8 @@ export class ScionMentionAutocomplete extends LitElement {
     for (const member of this.members || []) {
       // Avoid duplicate entries if a member is also an agent
       const slug = member.name.toLowerCase().replace(/\s+/g, '-');
-      if (!allCandidates.some((c) => c.slug === slug)) {
+      if (!slugs.has(slug)) {
+        slugs.add(slug);
         allCandidates.push({
           slug,
           name: member.name,
@@ -405,6 +464,9 @@ export class ScionMentionAutocomplete extends LitElement {
 
   /** Dispatch the accept event and close the dropdown. */
   private acceptCandidate(index: number): void {
+    // An accepted mention ends this trigger; a later @ must work normally.
+    this.dismissedTriggerStart = null;
+    this.dismissedQuery = null;
     const candidate = this.candidates[index];
     if (!candidate) return;
 

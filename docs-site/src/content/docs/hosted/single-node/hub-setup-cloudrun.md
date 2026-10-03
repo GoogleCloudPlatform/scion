@@ -367,6 +367,41 @@ To change the Instance size:
   --image us-central1-docker.pkg.dev/YOUR_PROJECT/scion/scion-omni:YOUR_TAG
 ```
 
+### Set the agent cap after deploying
+
+The Hub's `max_agents_per_broker` limit defaults to **100** hub-wide, which is above
+the measured ceiling of both Instance sizes above and does not by itself protect a
+single-node deployment. Right after deploying, lower it to about **16** — safely
+under the 4 CPU/8 GiB idle ceiling — from **Admin → Quotas** in the web UI, or with:
+
+```bash
+# PUT replaces the whole limit definition, so fetch the current one first and
+# only change defaultValue — omitting name gets 400 "name is required";
+# omitting resourceType or unit gets 403 (system limit); omitting description
+# is accepted but erases it.
+curl "$HUB_URL/api/v1/admin/limits/$LIMIT_ID" -H "Authorization: Bearer $TOKEN"
+
+curl -X PUT "$HUB_URL/api/v1/admin/limits/$LIMIT_ID" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "name": "max_agents_per_broker",
+        "resourceType": "agent",
+        "unit": "count",
+        "description": "Maximum concurrently live agents per runtime broker (crash-prevention ceiling, ptone/scion#1303)",
+        "defaultValue": 16
+      }'
+```
+
+(`$LIMIT_ID` comes from `GET /api/v1/admin/limits`; the `description` above is
+the value the Hub seeds — check the `GET` response in case it has been edited.)
+This is the hub-wide default; to set a different cap for one broker, use that
+broker's `maxAgents` setting instead — see [Broker
+Settings](/scion/reference/api/#broker-settings-apiv1runtime-brokersidsettings).
+If you deploy at 8 CPU/32 GiB instead, scale the cap proportionally, keeping
+the same margin below that tier's measured ceiling — not up to it; see
+[Sizing](#4-sizing) above.
+
 ---
 
 ## 5. Durability

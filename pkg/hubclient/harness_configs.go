@@ -108,7 +108,6 @@ type CreateHarnessConfigRequest struct {
 	Scope       string              `json:"scope"`
 	ScopeID     string              `json:"scopeId,omitempty"`
 	Config      *HarnessConfigData  `json:"config,omitempty"`
-	Visibility  string              `json:"visibility,omitempty"`
 	Files       []FileUploadRequest `json:"files,omitempty"`
 }
 
@@ -124,7 +123,6 @@ type UpdateHarnessConfigRequest struct {
 	Name        string `json:"name,omitempty"`
 	DisplayName string `json:"displayName,omitempty"`
 	Description string `json:"description,omitempty"`
-	Visibility  string `json:"visibility,omitempty"`
 }
 
 // HarnessConfigManifest is the manifest of uploaded harness config files.

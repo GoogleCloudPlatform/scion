@@ -19,11 +19,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/providers/env"
@@ -83,6 +86,9 @@ func (vs *VersionedSettings) ResolveHarnessConfig(profileName, harnessConfigName
 		if override, ok := profile.HarnessOverrides[harnessConfigName]; ok {
 			if override.Image != "" {
 				result.Image = override.Image
+			}
+			if override.ImagePullPolicy != "" {
+				result.ImagePullPolicy = override.ImagePullPolicy
 			}
 			if override.User != "" {
 				result.User = override.User
@@ -291,6 +297,20 @@ type VersionedSettings struct {
 	// Default runtime broker (hub-level)
 	DefaultRuntimeBroker string `json:"default_runtime_broker,omitempty" yaml:"default_runtime_broker,omitempty" koanf:"default_runtime_broker"`
 
+	// DefaultTimezone is the hub-level IANA timezone fallback (e.g.
+	// "America/Los_Angeles"). Applied as TZ when neither the profile's
+	// first-class timezone field nor a raw TZ in the profile env is set.
+	DefaultTimezone string `json:"default_timezone,omitempty" yaml:"default_timezone,omitempty" koanf:"default_timezone"`
+
+	// DefaultGCPIdentityMode is the hub-level default GCP metadata mode
+	// ("block", "passthrough", "assign") applied to new agents whose project
+	// has no default of its own. Empty means no hub default (block).
+	DefaultGCPIdentityMode string `json:"default_gcp_identity_mode,omitempty" yaml:"default_gcp_identity_mode,omitempty" koanf:"default_gcp_identity_mode"`
+
+	// DefaultGCPIdentityServiceAccountID is the hub-scoped service account
+	// assigned when DefaultGCPIdentityMode is "assign".
+	DefaultGCPIdentityServiceAccountID string `json:"default_gcp_identity_service_account_id,omitempty" yaml:"default_gcp_identity_service_account_id,omitempty" koanf:"default_gcp_identity_service_account_id"`
+
 	// AutoInjectGcloudADC controls whether the host's gcloud Application Default
 	// Credentials file is automatically injected into agent containers in
 	// co-located (workstation) mode.
@@ -301,6 +321,12 @@ type VersionedSettings struct {
 
 	// ProjectDefaults controls hub-level defaults applied at project creation time.
 	ProjectDefaults *ProjectDefaultsSettings `json:"project_defaults,omitempty" yaml:"project_defaults,omitempty" koanf:"project_defaults"`
+
+	// Quotas controls hub-level quota enforcement toggles.
+	Quotas *QuotaSettings `json:"quotas,omitempty" yaml:"quotas,omitempty" koanf:"quotas"`
+
+	// AgentSecrets controls hub-level policy for secrets written by agents.
+	AgentSecrets *AgentSecretsSettings `json:"agent_secrets,omitempty" yaml:"agent_secrets,omitempty" koanf:"agent_secrets"`
 }
 
 // AutoExposePortsSettings holds the auto-expose ports configuration.
@@ -308,9 +334,36 @@ type AutoExposePortsSettings struct {
 	Enabled *bool `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
 }
 
+// QuotaSettings holds the quota enforcement configuration in settings.yaml.
+type QuotaSettings struct {
+	// EnforceBrokerQuotas controls whether max_agents_per_broker is enforced
+	// on create. Default true (fail-safe) when absent.
+	EnforceBrokerQuotas *bool `json:"enforce_broker_quotas,omitempty" yaml:"enforce_broker_quotas,omitempty" koanf:"enforce_broker_quotas"`
+}
+
+// AgentSecretsSettings holds the hub-level policy for secrets written by
+// agents in settings.yaml.
+type AgentSecretsSettings struct {
+	// UserScopeOnly, when true, restricts agents to writing user (profile)
+	// scope secrets only. Default false (nil is false): agents may write
+	// project scope as they do today.
+	UserScopeOnly *bool `json:"user_scope_only,omitempty" yaml:"user_scope_only,omitempty" koanf:"user_scope_only"`
+}
+
 // ProjectDefaultsSettings holds project creation defaults in settings.yaml.
 type ProjectDefaultsSettings struct {
 	DefaultScratchpad *bool `json:"default_scratchpad,omitempty" yaml:"default_scratchpad,omitempty" koanf:"default_scratchpad"`
+}
+
+// V1MaintenanceConfig holds maintenance/update configuration under server.maintenance
+// in settings.yaml. Controls the deployment tier, release channel, update policy,
+// and related settings for the binary auto-update feature.
+type V1MaintenanceConfig struct {
+	DeploymentTier     string `json:"deployment_tier,omitempty" yaml:"deployment_tier,omitempty" koanf:"deployment_tier"`
+	ReleaseChannel     string `json:"release_channel,omitempty" yaml:"release_channel,omitempty" koanf:"release_channel"`
+	UpdatePolicy       string `json:"update_policy,omitempty" yaml:"update_policy,omitempty" koanf:"update_policy"`
+	CheckIntervalHours int    `json:"check_interval_hours,omitempty" yaml:"check_interval_hours,omitempty" koanf:"check_interval_hours"`
+	GitHubRepo         string `json:"github_repo,omitempty" yaml:"github_repo,omitempty" koanf:"github_repo"`
 }
 
 // V1ServerConfig holds server-side configuration in the versioned settings format.
@@ -329,9 +382,16 @@ type V1ServerConfig struct {
 	OAuth            *V1OAuthConfig            `json:"oauth,omitempty" yaml:"oauth,omitempty" koanf:"oauth"`
 	Storage          *V1StorageConfig          `json:"storage,omitempty" yaml:"storage,omitempty" koanf:"storage"`
 	WorkspaceStorage *V1WorkspaceStorageConfig `json:"workspace_storage,omitempty" yaml:"workspace_storage,omitempty" koanf:"workspace_storage"`
+	// SharedDirStorage selects the storage backend for project shared
+	// directories, independent of WorkspaceStorage (design
+	// deploy-config-explore §3.2). See V1SharedDirStorageConfig.
+	SharedDirStorage *V1SharedDirStorageConfig `json:"shared_dir_storage,omitempty" yaml:"shared_dir_storage,omitempty" koanf:"shared_dir_storage"`
 	Secrets          *V1SecretsConfig          `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
 	LogLevel         string                    `json:"log_level,omitempty" yaml:"log_level,omitempty" koanf:"log_level"`
 	LogFormat        string                    `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
+
+	// Maintenance holds binary auto-update and deployment tier settings.
+	Maintenance *V1MaintenanceConfig `json:"maintenance,omitempty" yaml:"maintenance,omitempty" koanf:"maintenance"`
 
 	// NotificationChannels configures external notification delivery channels.
 	// Secrets (webhook URLs, API tokens) are held in memory only — never persisted to a database.
@@ -425,6 +485,14 @@ type V1TrustedIssuerConfig struct {
 	IssuerType       string   `json:"issuer_type,omitempty" yaml:"issuer_type,omitempty" koanf:"issuer_type"`
 	DefaultRole      string   `json:"default_role,omitempty" yaml:"default_role,omitempty" koanf:"default_role"`
 	AllowedEmails    []string `json:"allowed_emails,omitempty" yaml:"allowed_emails,omitempty" koanf:"allowed_emails"`
+	// AllowedGCPProjects and AllowedDomains must stay the last two fields, in
+	// the same position and order as on TrustedIssuerConfig
+	// (federation_config.go): this file's own GlobalConfig<->V1Settings
+	// conversions do a direct struct type conversion between the two
+	// (TrustedIssuerConfig(vi) and V1TrustedIssuerConfig(ti), below), which
+	// requires identical field name/type/order (struct tags aside).
+	AllowedGCPProjects []string `json:"allowed_gcp_projects,omitempty" yaml:"allowed_gcp_projects,omitempty" koanf:"allowed_gcp_projects"`
+	AllowedDomains     []string `json:"allowed_domains,omitempty" yaml:"allowed_domains,omitempty" koanf:"allowed_domains"`
 }
 
 // V1NotificationChannelConfig holds configuration for an external notification channel.
@@ -504,19 +572,37 @@ type V1PluginEntry struct {
 	TLSCAFile string `json:"tls_ca_file,omitempty" yaml:"tls_ca_file,omitempty" koanf:"tls_ca_file"`
 	// TLSSkipVerify disables TLS certificate verification (for development).
 	TLSSkipVerify bool `json:"tls_skip_verify,omitempty" yaml:"tls_skip_verify,omitempty" koanf:"tls_skip_verify"`
+
+	// AuthType selects the per-RPC authentication mode for gRPC connections.
+	// Supported values: "" or "none" (no auth), "google_id_token" (Google OIDC
+	// ID token via metadata server or ADC). Required for authenticated remote
+	// gRPC transport (Cloud Run, Kubernetes).
+	AuthType string `json:"auth_type,omitempty" yaml:"auth_type,omitempty" koanf:"auth_type"`
+
+	// AuthAudience is the target audience for ID tokens when AuthType is
+	// "google_id_token". For Cloud Run, this is the service URL. For
+	// Kubernetes, this is the bridge's expected audience claim.
+	AuthAudience string `json:"auth_audience,omitempty" yaml:"auth_audience,omitempty" koanf:"auth_audience"`
 }
 
 // V1ServerHubConfig holds the Hub API server settings (when running scion-server).
 type V1ServerHubConfig struct {
-	Port         int           `json:"port,omitempty" yaml:"port,omitempty" koanf:"port"`
-	Host         string        `json:"host,omitempty" yaml:"host,omitempty" koanf:"host"`
-	HubID        string        `json:"hub_id,omitempty" yaml:"hub_id,omitempty" koanf:"hub_id"`
-	HubName      string        `json:"hub_name,omitempty" yaml:"hub_name,omitempty" koanf:"hub_name"`
-	PublicURL    string        `json:"public_url,omitempty" yaml:"public_url,omitempty" koanf:"public_url"`
-	ReadTimeout  string        `json:"read_timeout,omitempty" yaml:"read_timeout,omitempty" koanf:"read_timeout"`
-	WriteTimeout string        `json:"write_timeout,omitempty" yaml:"write_timeout,omitempty" koanf:"write_timeout"`
-	CORS         *V1CORSConfig `json:"cors,omitempty" yaml:"cors,omitempty" koanf:"cors"`
-	AdminEmails  []string      `json:"admin_emails,omitempty" yaml:"admin_emails,omitempty" koanf:"admin_emails"`
+	Port      int    `json:"port,omitempty" yaml:"port,omitempty" koanf:"port"`
+	Host      string `json:"host,omitempty" yaml:"host,omitempty" koanf:"host"`
+	HubID     string `json:"hub_id,omitempty" yaml:"hub_id,omitempty" koanf:"hub_id"`
+	HubName   string `json:"hub_name,omitempty" yaml:"hub_name,omitempty" koanf:"hub_name"`
+	PublicURL string `json:"public_url,omitempty" yaml:"public_url,omitempty" koanf:"public_url"`
+	// AgentEndpoint optionally overrides the Hub URL injected into agents as
+	// SCION_HUB_ENDPOINT, without changing PublicURL's other uses (invite
+	// links, chat-bridge links, the OIDC issuer default, the cloudrun_invoker
+	// audience default). Must be scheme://host[:port] only when set — see
+	// config.ValidateAgentEndpoint for the exact rules and the normalized
+	// form this field should hold.
+	AgentEndpoint string        `json:"agent_endpoint,omitempty" yaml:"agent_endpoint,omitempty" koanf:"agent_endpoint"`
+	ReadTimeout   string        `json:"read_timeout,omitempty" yaml:"read_timeout,omitempty" koanf:"read_timeout"`
+	WriteTimeout  string        `json:"write_timeout,omitempty" yaml:"write_timeout,omitempty" koanf:"write_timeout"`
+	CORS          *V1CORSConfig `json:"cors,omitempty" yaml:"cors,omitempty" koanf:"cors"`
+	AdminEmails   []string      `json:"admin_emails,omitempty" yaml:"admin_emails,omitempty" koanf:"admin_emails"`
 
 	// SoftDeleteRetention is how long soft-deleted agents are retained (e.g., "72h").
 	SoftDeleteRetention string `json:"soft_delete_retention,omitempty" yaml:"soft_delete_retention,omitempty" koanf:"soft_delete_retention"`
@@ -533,8 +619,20 @@ type V1ServerHubConfig struct {
 	AutoSuspendStalled *bool `json:"auto_suspend_stalled,omitempty" yaml:"auto_suspend_stalled,omitempty" koanf:"auto_suspend_stalled"`
 	// StalledThreshold is how long before an agent is marked stalled (e.g., "5m", "10m").
 	StalledThreshold string `json:"stalled_threshold,omitempty" yaml:"stalled_threshold,omitempty" koanf:"stalled_threshold"`
+	// MissingAgentGrace is how long a running agent must be absent from its
+	// runtime broker's complete heartbeat inventory before the Hub marks it
+	// as having no container (e.g., "3m"; minimum "1m").
+	MissingAgentGrace string `json:"missing_agent_grace,omitempty" yaml:"missing_agent_grace,omitempty" koanf:"missing_agent_grace"`
 	// DisableLegacyStorageFallback disables legacy un-namespaced storage path fallback.
 	DisableLegacyStorageFallback *bool `json:"disable_legacy_storage_fallback,omitempty" yaml:"disable_legacy_storage_fallback,omitempty" koanf:"disable_legacy_storage_fallback"`
+	// AsyncAgentLaunch is the non-blocking agent create kill switch.
+	AsyncAgentLaunch *bool `json:"async_agent_launch,omitempty" yaml:"async_agent_launch,omitempty" koanf:"async_agent_launch"`
+	// LaunchTimeout is the whole-launch budget for an opted-in launch (e.g., "5m").
+	LaunchTimeout string `json:"launch_timeout,omitempty" yaml:"launch_timeout,omitempty" koanf:"launch_timeout"`
+	// LaunchKeepaliveSeconds is the broker keepalive interval, in seconds.
+	// Today it only sets the reaper's staleness window (8x this value); it
+	// will also be sent to the broker once the async dispatch path lands.
+	LaunchKeepaliveSeconds *int `json:"launch_keepalive_seconds,omitempty" yaml:"launch_keepalive_seconds,omitempty" koanf:"launch_keepalive_seconds"`
 }
 
 // V1BrokerConfig holds Runtime Broker configuration.
@@ -579,6 +677,7 @@ type V1AuthConfig struct {
 	DevTokenFile      string             `json:"dev_token_file,omitempty" yaml:"dev_token_file,omitempty" koanf:"dev_token_file"`
 	AuthorizedDomains []string           `json:"authorized_domains,omitempty" yaml:"authorized_domains,omitempty" koanf:"authorized_domains"`
 	UserAccessMode    string             `json:"user_access_mode,omitempty" yaml:"user_access_mode,omitempty" koanf:"user_access_mode"`
+	DefaultUserRole   string             `json:"default_user_role,omitempty" yaml:"default_user_role,omitempty" koanf:"default_user_role"`
 	Proxy             *V1ProxyConfig     `json:"proxy,omitempty" yaml:"proxy,omitempty" koanf:"proxy"`
 	Transport         *V1TransportConfig `json:"transport,omitempty" yaml:"transport,omitempty" koanf:"transport"`
 	Username          string             `json:"username,omitempty" yaml:"username,omitempty" koanf:"username"`
@@ -598,10 +697,12 @@ type V1TransportConfig struct {
 
 // V1ProxyConfig holds proxy authentication settings (consulted when auth.mode == "proxy").
 type V1ProxyConfig struct {
-	// Provider selects the proxy auth provider: "iap" or "header".
+	// Provider selects the proxy auth provider: "iap", "jwt", or "header".
 	Provider string `json:"provider,omitempty" yaml:"provider,omitempty" koanf:"provider"`
 	// IAP holds Google IAP-specific settings.
 	IAP *V1IAPConfig `json:"iap,omitempty" yaml:"iap,omitempty" koanf:"iap"`
+	// JWT holds settings for the generic JWT proxy auth provider.
+	JWT *V1JWTAuthConfig `json:"jwt,omitempty" yaml:"jwt,omitempty" koanf:"jwt"`
 	// RequireTrustedProxyIP enables defense-in-depth IP allowlisting.
 	RequireTrustedProxyIP bool `json:"require_trusted_proxy_ip,omitempty" yaml:"require_trusted_proxy_ip,omitempty" koanf:"require_trusted_proxy_ip"`
 }
@@ -614,6 +715,28 @@ type V1IAPConfig struct {
 	Issuer string `json:"issuer,omitempty" yaml:"issuer,omitempty" koanf:"issuer"`
 	// JWKSURL overrides the default IAP JWKS URL (for testing).
 	JWKSURL string `json:"jwks_url,omitempty" yaml:"jwks_url,omitempty" koanf:"jwks_url"`
+}
+
+// V1JWTAuthConfig holds settings for the generic JWT proxy auth provider
+// (V1/snake_case settings.yaml equivalent of JWTAuthConfig).
+type V1JWTAuthConfig struct {
+	Header        string             `json:"header,omitempty" yaml:"header,omitempty" koanf:"header"`
+	Algorithm     string             `json:"algorithm,omitempty" yaml:"algorithm,omitempty" koanf:"algorithm"`
+	Issuer        string             `json:"issuer,omitempty" yaml:"issuer,omitempty" koanf:"issuer"`
+	Audience      string             `json:"audience,omitempty" yaml:"audience,omitempty" koanf:"audience"`
+	JWKSURL       string             `json:"jwks_url,omitempty" yaml:"jwks_url,omitempty" koanf:"jwks_url"`
+	JWKSFile      string             `json:"jwks_file,omitempty" yaml:"jwks_file,omitempty" koanf:"jwks_file"`
+	PublicKeyFile string             `json:"public_key_file,omitempty" yaml:"public_key_file,omitempty" koanf:"public_key_file"`
+	Claims        *V1JWTClaimsConfig `json:"claims,omitempty" yaml:"claims,omitempty" koanf:"claims"`
+}
+
+// V1JWTClaimsConfig maps JWT claim names to identity fields (V1/snake_case
+// settings.yaml equivalent of JWTClaimsConfig).
+type V1JWTClaimsConfig struct {
+	Email       string `json:"email,omitempty" yaml:"email,omitempty" koanf:"email"`
+	Subject     string `json:"subject,omitempty" yaml:"subject,omitempty" koanf:"subject"`
+	DisplayName string `json:"display_name,omitempty" yaml:"display_name,omitempty" koanf:"display_name"`
+	Domain      string `json:"domain,omitempty" yaml:"domain,omitempty" koanf:"domain"`
 }
 
 // V1OAuthConfig holds OAuth provider configurations.
@@ -738,6 +861,164 @@ func (ws *V1WorkspaceStorageConfig) ValidateNFS() error {
 			"add at least one entry under workspace_storage.nfs.shares")
 	}
 	return nil
+}
+
+// V1SharedDirStorageConfig selects the storage backend for a project's
+// shared directories (design deploy-config-explore §3.2), decoupled from
+// V1WorkspaceStorageConfig. Backend defaults to "local" (today's behavior:
+// shared dirs live next to the project's local config, resolved by
+// GetSharedDirsBasePath). When set to "nfs", the reused V1NFSConfig block
+// configures the shared NFS export that both Docker/Podman/Apple and
+// Kubernetes runtimes resolve into the same layout:
+//
+//	<nfs.mount_root>/<nfs.shares[0].id>/<nfs.subpath_root>/<projectID>/shared-dirs/<name>
+//
+// shared_dir_storage is Layer-0 (see opsettings/koanf.go layer0Prefixes):
+// never written to the DB, requires a restart to take effect, and — per
+// design §3.2.1 "global-only" and AC5 — read from each broker process's
+// GLOBAL settings.yaml only. Callers must source this block via
+// LoadGlobalSettings(), not from the project-merged VersionedSettings that
+// LoadEffectiveSettings(dir) returns for a project directory, AND NOT via
+// LoadEffectiveSettings("") — an empty path resolves a project from the
+// current working directory (FindProjectRoot) and merges it on top of
+// global, so it is not global-only either (round 2 review findings
+// C1/T1/S-F2). A project's settings must not be able to redirect Docker
+// bind-mount sources to an operator-unapproved host path.
+//
+// The workspace-storage-only fields on V1NFSConfig (UID, GID, MountOptions,
+// StorageClass) are not used by shared_dir_storage. Warning about them being
+// set-but-ignored is phase 2 (design §3.2.1), not implemented here.
+type V1SharedDirStorageConfig struct {
+	Backend string       `json:"backend,omitempty" yaml:"backend,omitempty" koanf:"backend"` // "" | "local" | "nfs"
+	NFS     *V1NFSConfig `json:"nfs,omitempty" yaml:"nfs,omitempty" koanf:"nfs"`
+}
+
+// Validate returns an error unless Backend is exactly one of "", "local", or
+// "nfs" — no trimming or case folding, so a typo such as "NFS " or "Nfs"
+// fails closed rather than silently taking the local-layout branch (design
+// G5) — and, when Backend is "nfs", unless the block is fully configured.
+// Unlike V1WorkspaceStorageConfig.ValidateNFS, this requires MountRoot and
+// the first share's ID to be non-empty: shared_dir_storage has no other
+// source for the host mount point used by local-container bind mounts
+// (design deploy-config-explore §3.2.1).
+func (s *V1SharedDirStorageConfig) Validate() error {
+	if s == nil {
+		return nil
+	}
+	switch s.Backend {
+	case "", "local":
+		return nil
+	case "nfs":
+		// fall through to the nfs-specific checks below.
+	default:
+		return fmt.Errorf(
+			"server.shared_dir_storage.backend must be \"\", \"local\", or \"nfs\" (got %q)", s.Backend)
+	}
+	if s.NFS == nil {
+		return fmt.Errorf(
+			"server.shared_dir_storage.backend is \"nfs\" but no nfs block is configured; add server.shared_dir_storage.nfs")
+	}
+	if len(s.NFS.Shares) == 0 {
+		return fmt.Errorf(
+			"server.shared_dir_storage.backend is \"nfs\" but no NFS shares are defined; " +
+				"add at least one entry under server.shared_dir_storage.nfs.shares")
+	}
+	if s.NFS.MountRoot == "" {
+		return fmt.Errorf("server.shared_dir_storage.backend is \"nfs\" but nfs.mount_root is empty")
+	}
+	if s.NFS.Shares[0].ID == "" {
+		return fmt.Errorf("server.shared_dir_storage.backend is \"nfs\" but nfs.shares[0].id is empty")
+	}
+	if s.NFS.SubPathRoot != "" {
+		if err := validateSubPathRoot(s.NFS.SubPathRoot); err != nil {
+			return fmt.Errorf("server.shared_dir_storage.nfs.subpath_root %w", err)
+		}
+	}
+	return nil
+}
+
+// validateSubPathRoot rejects a subpath_root that would produce a
+// confusing error or an unsafe path-component chain once joined with the
+// project ID and shared-dir name (round 6 review nit #6). An absolute
+// value (e.g. "/projects") produces a leading empty path component when
+// the resulting relative path is split on "/", which the component walk in
+// pkg/agent/shared_dir_storage_unix.go then reports as a confusing
+// low-level "mkdir path component \"\": no such file or directory" instead
+// of a clear configuration error — it still fails closed either way, but
+// this catches the operator mistake at config-validation time with an
+// actionable message instead. "." and ".." components have no meaningful
+// interpretation here either: subpath_root exists to name one literal,
+// fixed subdirectory of the export, not to navigate the tree.
+func validateSubPathRoot(subPathRoot string) error {
+	if filepath.IsAbs(subPathRoot) {
+		return fmt.Errorf("must be relative, not absolute (got %q)", subPathRoot)
+	}
+	for _, comp := range strings.Split(filepath.ToSlash(subPathRoot), "/") {
+		switch comp {
+		case "":
+			return fmt.Errorf("must not contain an empty path component (got %q)", subPathRoot)
+		case ".":
+			return fmt.Errorf("must not contain a \".\" path component (got %q)", subPathRoot)
+		case "..":
+			return fmt.Errorf("must not contain a \"..\" path component (got %q)", subPathRoot)
+		}
+	}
+	return nil
+}
+
+// sharedDirStorageIgnoredNFSFields lists the V1NFSConfig fields that are
+// meaningful for workspace_storage but never consulted by shared_dir_storage
+// (design deploy-config-explore §3.2.1's "warned and ignored if set").
+var sharedDirStorageIgnoredNFSFields = []struct {
+	name string
+	set  func(nfs *V1NFSConfig) bool
+}{
+	{"uid", func(nfs *V1NFSConfig) bool { return nfs.UID != 0 }},
+	{"gid", func(nfs *V1NFSConfig) bool { return nfs.GID != 0 }},
+	{"mount_options", func(nfs *V1NFSConfig) bool { return nfs.MountOptions != "" }},
+	{"storage_class", func(nfs *V1NFSConfig) bool { return nfs.StorageClass != "" }},
+}
+
+// IgnoredNFSFields returns the names of the workspace-storage-only NFS
+// fields (uid, gid, mount_options, storage_class) that are set on s but
+// never used by shared_dir_storage, for a one-time startup warning (Phase 2
+// item 5, design §7 Phase 2: "startup validation warns about ignored
+// fields"). Returns nil if s is nil, s.NFS is nil, or backend isn't "nfs" —
+// there is nothing to warn about in any of those cases.
+func (s *V1SharedDirStorageConfig) IgnoredNFSFields() []string {
+	if s == nil || s.NFS == nil || s.Backend != "nfs" {
+		return nil
+	}
+	var ignored []string
+	for _, f := range sharedDirStorageIgnoredNFSFields {
+		if f.set(s.NFS) {
+			ignored = append(ignored, f.name)
+		}
+	}
+	return ignored
+}
+
+// ResolvedLayoutSummary returns a one-line, human-readable summary of the
+// resolved shared_dir_storage layout — backend, host base, subpath_root,
+// pv_name — for the single startup log line design §7 Phase 2 calls for.
+// Returns "" if s is nil, s.NFS is nil, or backend isn't "nfs" (nothing to
+// log: the unset/local case is unchanged Phase 1 behavior, not a new
+// resolved layout).
+func (s *V1SharedDirStorageConfig) ResolvedLayoutSummary() string {
+	if s == nil || s.NFS == nil || s.Backend != "nfs" {
+		return ""
+	}
+	hostBase := ""
+	pvName := ""
+	if len(s.NFS.Shares) > 0 {
+		hostBase = filepath.Join(s.NFS.MountRoot, s.NFS.Shares[0].ID)
+		pvName = s.NFS.Shares[0].PVName
+	}
+	subPathRoot := s.NFS.SubPathRoot
+	if subPathRoot == "" {
+		subPathRoot = "projects"
+	}
+	return fmt.Sprintf("backend=nfs host_base=%s subpath_root=%s pv_name=%s", hostBase, subPathRoot, pvName)
 }
 
 // V1SecretsConfig holds secrets backend settings.
@@ -881,6 +1162,9 @@ type V1CloudRunSandboxConfig struct {
 }
 
 // V1RuntimeConfig extends RuntimeConfig with a Type field.
+//
+// Env is parsed and round-tripped but not applied to agent containers; no
+// code reads it.
 type V1RuntimeConfig struct {
 	Type              string            `json:"type,omitempty" yaml:"type,omitempty" koanf:"type"`
 	Host              string            `json:"host,omitempty" yaml:"host,omitempty" koanf:"host"`
@@ -890,6 +1174,12 @@ type V1RuntimeConfig struct {
 	Sync              string            `json:"sync,omitempty" yaml:"sync,omitempty" koanf:"sync"`
 	GKE               bool              `json:"gke,omitempty" yaml:"gke,omitempty" koanf:"gke"`
 	ListAllNamespaces bool              `json:"list_all_namespaces,omitempty" yaml:"list_all_namespaces,omitempty" koanf:"list_all_namespaces"`
+	// PriorityClassName is the Kubernetes-runtime-only default
+	// spec.priorityClassName for agent pods using this runtime entry. Must
+	// name a PriorityClass that already exists on the cluster — Scion does
+	// not create one. Validated as a DNS-1123 subdomain. An explicit
+	// template/agent-config kubernetes.priorityClassName outranks this.
+	PriorityClassName string `json:"priority_class_name,omitempty" yaml:"priority_class_name,omitempty" koanf:"priority_class_name"`
 	// CloudRun holds Cloud Run-specific settings when Type is "cloudrun".
 	CloudRun *CloudRunConfig `json:"cloudrun,omitempty" yaml:"cloudrun,omitempty" koanf:"cloudrun"`
 	// CloudRunInstances holds Cloud Run Instances-specific settings when Type is "cloudrun-instances".
@@ -914,10 +1204,17 @@ type V1RuntimeDefaultsConfig struct {
 
 // HarnessConfigEntry defines a harness configuration entry in versioned settings.
 // The Harness field is required and specifies the harness type this config applies to.
+//
+// ImagePullPolicy is a Kubernetes-runtime-only default (Always, IfNotPresent,
+// or Never). It is ignored by non-Kubernetes runtimes. See ResolveHarnessConfig
+// and provision.go for its precedence relative to the on-disk harness-config
+// file default and an explicit template/agent kubernetes.imagePullPolicy
+// override.
 type HarnessConfigEntry struct {
 	Name             string               `json:"name,omitempty" yaml:"name,omitempty" koanf:"name"`
 	Harness          string               `json:"harness" yaml:"harness" koanf:"harness"`
 	Image            string               `json:"image,omitempty" yaml:"image,omitempty" koanf:"image"`
+	ImagePullPolicy  string               `json:"image_pull_policy,omitempty" yaml:"image_pull_policy,omitempty" koanf:"image_pull_policy"`
 	User             string               `json:"user,omitempty" yaml:"user,omitempty" koanf:"user"`
 	Model            string               `json:"model,omitempty" yaml:"model,omitempty" koanf:"model"`
 	TaskFlag         string               `json:"task_flag,omitempty" yaml:"task_flag,omitempty" koanf:"task_flag"`
@@ -1020,6 +1317,7 @@ type HarnessMCPConfig struct {
 // Uses snake_case tags, unlike the legacy HarnessOverride (which uses camelCase auth_selectedType).
 type V1HarnessOverride struct {
 	Image            string            `json:"image,omitempty" yaml:"image,omitempty" koanf:"image"`
+	ImagePullPolicy  string            `json:"image_pull_policy,omitempty" yaml:"image_pull_policy,omitempty" koanf:"image_pull_policy"`
 	User             string            `json:"user,omitempty" yaml:"user,omitempty" koanf:"user"`
 	Env              map[string]string `json:"env,omitempty" yaml:"env,omitempty" koanf:"env"`
 	Volumes          []api.VolumeMount `json:"volumes,omitempty" yaml:"volumes,omitempty" koanf:"volumes"`
@@ -1037,6 +1335,11 @@ type V1ProfileConfig struct {
 	Resources            *api.ResourceSpec            `json:"resources,omitempty" yaml:"resources,omitempty" koanf:"resources"`
 	HarnessOverrides     map[string]V1HarnessOverride `json:"harness_overrides,omitempty" yaml:"harness_overrides,omitempty" koanf:"harness_overrides"`
 	Secrets              []api.RequiredSecret         `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
+	// Timezone is an IANA timezone name (e.g. "America/Los_Angeles") injected
+	// as the TZ environment variable into agent containers using this profile.
+	// Validated with time.LoadLocation on write. Takes precedence over a raw
+	// TZ entry in the profile's env map and the hub-level default_timezone.
+	Timezone string `json:"timezone,omitempty" yaml:"timezone,omitempty" koanf:"timezone"`
 }
 
 // resolveEffectiveProjectPath resolves the effective project path for settings loading.
@@ -1076,30 +1379,67 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 
 	// 2. Load global settings (~/.scion/settings.yaml or .json)
 	globalDir, _ := GetGlobalDir()
+	var globalMigratedHub bool
 	if globalDir != "" {
-		if err := loadSettingsFile(k, globalDir); err != nil {
+		var err error
+		globalMigratedHub, err = loadSettingsFile(k, globalDir)
+		if err != nil {
 			return nil, err
 		}
+	}
+	// Captured once, right after the global layer loads — see
+	// LoadSettingsKoanf's identical comment for why both step 3 and step 4
+	// compare against this same value, and why a migrated global value is
+	// not compared against at all.
+	globalHubProjectID := k.String(projectkeys.ConfigHubProjectIDKey)
+	if globalMigratedHub {
+		globalHubProjectID = ""
 	}
 
 	// 3. Load in-repo project settings (.scion/settings.yaml)
 	effectiveProjectPath := resolveEffectiveProjectPath(projectPath)
 	if projectPath != "" && projectPath != globalDir {
-		if err := loadSettingsFile(k, projectPath); err != nil {
+		migratedHub, err := loadSettingsFile(k, projectPath)
+		if err != nil {
 			return nil, err
+		}
+		if migratedHub {
+			logHubProjectIDPrecedenceChange(k, projectPath, globalHubProjectID)
 		}
 		warnIfInRepoHasGlobalKeys(projectPath, effectiveProjectPath)
 	}
 
-	// 4. Load external project config settings (overrides in-repo for split storage)
+	// 4. Load external project config settings (overrides in-repo for split
+	// storage), and where a plain project's settings.yaml is actually loaded
+	// when projectPath is "" (cwd-resolved) — see LoadSettingsKoanf's step 4.
 	if effectiveProjectPath != "" && effectiveProjectPath != globalDir && effectiveProjectPath != projectPath {
-		if err := loadSettingsFile(k, effectiveProjectPath); err != nil {
+		migratedHub, err := loadSettingsFile(k, effectiveProjectPath)
+		if err != nil {
 			return nil, err
+		}
+		if migratedHub {
+			logHubProjectIDPrecedenceChange(k, effectiveProjectPath, globalHubProjectID)
 		}
 	}
 
 	// 4. Load environment variables (SCION_ prefix)
-	_ = k.Load(env.Provider("SCION_", ".", versionedEnvKeyMapper), nil)
+	_ = k.Load(env.ProviderWithValue("SCION_", ".", func(key, value string) (string, interface{}) {
+		// An empty plaintext switch is unset, not a request to disable TLS.
+		// Skip it before koanf maps the empty value onto tls.enabled.
+		if key == "SCION_OTEL_INSECURE" && value == "" {
+			return "", nil
+		}
+		return versionedEnvKeyMapper(key), value
+	}), nil)
+	// SCION_OTEL_INSECURE is a plaintext switch. Its value is the inverse of
+	// telemetry.cloud.tls.enabled, so a key-only mapper cannot apply it.
+	if raw, present := os.LookupEnv("SCION_OTEL_INSECURE"); present && raw != "" {
+		plaintext, err := strconv.ParseBool(raw)
+		if err != nil {
+			return nil, fmt.Errorf("SCION_OTEL_INSECURE: %w", err)
+		}
+		_ = k.Load(confmap.Provider(map[string]interface{}{"telemetry.cloud.tls.enabled": !plaintext}, "."), nil)
+	}
 
 	// For git projects, the project_id is stored in a project-id file inside the
 	// .scion directory rather than in the settings file. Read it here so that
@@ -1109,19 +1449,10 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 		if projectPath != globalDir {
 			if projectID, err := ReadProjectID(projectPath); err == nil && projectID != "" {
 				_ = k.Load(confmap.Provider(map[string]interface{}{
-					projectcompat.ConfigHubProjectIDKey: projectID,
+					projectkeys.ConfigHubProjectIDKey: projectID,
 				}, "."), nil)
 			}
 		}
-	}
-
-	// Remap hub.grove_id to hub.project_id for backward compatibility.
-	// Old settings files may still use grove_id; the V1HubClientConfig struct
-	// now uses koanf:"project_id", so grove_id values must be copied across.
-	if k.Exists(projectcompat.ConfigHubGroveIDKey) && !k.Exists(projectcompat.ConfigHubProjectIDKey) {
-		_ = k.Load(confmap.Provider(map[string]interface{}{
-			projectcompat.ConfigHubProjectIDKey: k.String(projectcompat.ConfigHubGroveIDKey),
-		}, "."), nil)
 	}
 
 	// Unmarshal into VersionedSettings struct
@@ -1134,15 +1465,64 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 	if err := k.Unmarshal("", settings); err != nil {
 		return nil, err
 	}
+	if settings.Telemetry != nil && settings.Telemetry.Cloud != nil && settings.Telemetry.Cloud.TLS != nil {
+		tls := settings.Telemetry.Cloud.TLS
+		if tls.Enabled != nil && !*tls.Enabled && ((tls.InsecureSkipVerify != nil && *tls.InsecureSkipVerify) || tls.CAFile != "") {
+			return nil, fmt.Errorf("telemetry.cloud.tls: plaintext conflicts with certificate verification settings")
+		}
+	}
 
 	return settings, nil
+}
+
+// settingsExcludedEnvVars lists SCION_* variables that are never settings
+// overrides: they are consumed directly by another subsystem, and their
+// generic mapped key happens to collide with a struct-typed settings field.
+// Both the versioned and legacy env key mappers drop them via this list so
+// that koanf's Unmarshal never fails just because one of them is present in
+// the process environment.
+var settingsExcludedEnvVars = []string{
+	"SCION_AUTO_EXPOSE_PORTS",
+	"SCION_AUTO_EXPOSE_PORTS_LIST",
+}
+
+// isSettingsExcludedEnv reports whether name is in settingsExcludedEnvVars.
+func isSettingsExcludedEnv(name string) bool {
+	for _, e := range settingsExcludedEnvVars {
+		if e == name {
+			return true
+		}
+	}
+	return false
 }
 
 // versionedEnvKeyMapper maps SCION_* environment variables to versioned settings keys.
 // All keys are snake_case so no camelCase conversion is needed.
 func versionedEnvKeyMapper(s string) string {
-	if mapped, ok := projectcompat.EnvProjectIDConfigKey(s, false); ok {
+	if mapped, ok := projectkeys.EnvProjectIDConfigKey(s, false); ok {
 		return mapped
+	}
+	if isSettingsExcludedEnv(s) {
+		// SCION_AUTO_EXPOSE_PORTS and SCION_AUTO_EXPOSE_PORTS_LIST are
+		// consumed directly by sciontool's auto-expose scanner
+		// (pkg/sciontool/autoexpose), not read as settings overrides. Left
+		// mapped, the bare key "auto_expose_ports" collides with the
+		// struct-typed AutoExposePorts field and makes koanf's Unmarshal
+		// fail outright whenever the process happens to have that variable
+		// set (e.g. a broker started inside an agent container, which the
+		// hub sets it in). Returning "" makes the env provider drop the
+		// variable entirely, the same idiom used below for a removed
+		// legacy env var and for SCION_OTEL_INSECURE's empty-value case.
+		return ""
+	}
+	if isRemovedLegacyEnv(s) {
+		// SCION_HUB_GROVE_ID is no longer read, not even via the generic
+		// "hub_" mapping below, which would otherwise land on the
+		// unrecognised key hub.grove_id. Returning "" makes the env
+		// provider drop the variable entirely, the same idiom used for
+		// SCION_OTEL_INSECURE above. WarnRemovedLegacyEnv reports it
+		// separately.
+		return ""
 	}
 	key := strings.ToLower(strings.TrimPrefix(s, "SCION_"))
 
@@ -1179,23 +1559,28 @@ var knownCompoundFields = []string{
 	"require_trusted_proxy_ip",
 	"soft_delete_retain_files",
 	"soft_delete_retention",
+	"missing_agent_grace",
 	"stalled_threshold",
 	"authorized_domains",
 	"platform_auth_sa",
 	"interval_seconds",
+	"public_key_file",
 	"max_concurrency",
 	"oidc_audience",
 	"jwks_url",
+	"jwks_file",
 	"broker_nickname",
 	"allowed_origins",
 	"allowed_methods",
 	"allowed_headers",
 	"dev_token_file",
+	"agent_endpoint",
 	"gcp_project_id",
 	"gcp_credentials",
 	"client_secret",
 	"write_timeout",
 	"read_timeout",
+	"display_name",
 	"broker_token",
 	"admin_emails",
 	"hub_endpoint",
@@ -1278,8 +1663,8 @@ func mapEnvKeyRecursive(key string) string {
 func isSectionName(name string) bool {
 	switch name {
 	case "hub", "broker", "database", "auth", "oauth", "storage", "secrets", "cors",
-		"web", "cli", "device", "google", "github", "proxy", "iap", "transport",
-		"scheduler":
+		"web", "cli", "device", "google", "github", "proxy", "iap", "jwt", "claims",
+		"transport", "scheduler":
 		return true
 	}
 	return false
@@ -1355,7 +1740,8 @@ func mapTelemetryEnvKey(key string) string {
 //	"endpoint" -> "telemetry.cloud.endpoint"
 //	"protocol" -> "telemetry.cloud.protocol"
 //	"headers" -> "telemetry.cloud.headers"
-//	"insecure" -> "telemetry.cloud.tls.insecure_skip_verify"
+//	"insecure" -> "telemetry.cloud.tls.enabled" (value inverted after env load)
+//	"skip_tls_verify" -> "telemetry.cloud.tls.insecure_skip_verify"
 //	"ca_file" -> "telemetry.cloud.tls.ca_file"
 func mapOtelEnvKey(key string) string {
 	switch key {
@@ -1366,6 +1752,8 @@ func mapOtelEnvKey(key string) string {
 	case "headers":
 		return "telemetry.cloud.headers"
 	case "insecure":
+		return "telemetry.cloud.tls.enabled"
+	case "skip_tls_verify":
 		return "telemetry.cloud.tls.insecure_skip_verify"
 	case "ca_file":
 		return "telemetry.cloud.tls.ca_file"
@@ -1415,6 +1803,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.PublicURL != "" {
 			gc.Hub.Endpoint = v1.Hub.PublicURL
 		}
+		if v1.Hub.AgentEndpoint != "" {
+			gc.Hub.AgentEndpoint = v1.Hub.AgentEndpoint
+		}
 		if v1.Hub.ReadTimeout != "" {
 			if d, err := time.ParseDuration(v1.Hub.ReadTimeout); err == nil {
 				gc.Hub.ReadTimeout = d
@@ -1463,6 +1854,22 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.StalledThreshold != "" {
 			if d, err := time.ParseDuration(v1.Hub.StalledThreshold); err == nil {
 				gc.Hub.StalledThreshold = d
+			}
+		}
+		if v1.Hub.AsyncAgentLaunch != nil {
+			gc.Hub.AsyncAgentLaunch = *v1.Hub.AsyncAgentLaunch
+		}
+		if v1.Hub.LaunchTimeout != "" {
+			if d, err := time.ParseDuration(v1.Hub.LaunchTimeout); err == nil {
+				gc.Hub.LaunchTimeout = d
+			}
+		}
+		if v1.Hub.LaunchKeepaliveSeconds != nil {
+			gc.Hub.LaunchKeepaliveSeconds = *v1.Hub.LaunchKeepaliveSeconds
+		}
+		if v1.Hub.MissingAgentGrace != "" {
+			if d, err := time.ParseDuration(v1.Hub.MissingAgentGrace); err == nil {
+				gc.Hub.MissingAgentGrace = d
 			}
 		}
 		if v1.Hub.DisableLegacyStorageFallback != nil {
@@ -1562,6 +1969,9 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Auth.UserAccessMode != "" {
 			gc.Auth.UserAccessMode = v1.Auth.UserAccessMode
 		}
+		if v1.Auth.DefaultUserRole != "" {
+			gc.Auth.DefaultUserRole = v1.Auth.DefaultUserRole
+		}
 		if v1.Auth.Proxy != nil {
 			gc.Auth.Proxy = &ProxyAuthConfig{
 				Provider:              v1.Auth.Proxy.Provider,
@@ -1572,6 +1982,25 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 					Audience: v1.Auth.Proxy.IAP.Audience,
 					Issuer:   v1.Auth.Proxy.IAP.Issuer,
 					JWKSURL:  v1.Auth.Proxy.IAP.JWKSURL,
+				}
+			}
+			if v1.Auth.Proxy.JWT != nil {
+				gc.Auth.Proxy.JWT = &JWTAuthConfig{
+					Header:        v1.Auth.Proxy.JWT.Header,
+					Algorithm:     v1.Auth.Proxy.JWT.Algorithm,
+					Issuer:        v1.Auth.Proxy.JWT.Issuer,
+					Audience:      v1.Auth.Proxy.JWT.Audience,
+					JWKSURL:       v1.Auth.Proxy.JWT.JWKSURL,
+					JWKSFile:      v1.Auth.Proxy.JWT.JWKSFile,
+					PublicKeyFile: v1.Auth.Proxy.JWT.PublicKeyFile,
+				}
+				if v1.Auth.Proxy.JWT.Claims != nil {
+					gc.Auth.Proxy.JWT.Claims = &JWTClaimsConfig{
+						Email:       v1.Auth.Proxy.JWT.Claims.Email,
+						Subject:     v1.Auth.Proxy.JWT.Claims.Subject,
+						DisplayName: v1.Auth.Proxy.JWT.Claims.DisplayName,
+						Domain:      v1.Auth.Proxy.JWT.Claims.Domain,
+					}
 				}
 			}
 		}
@@ -1742,14 +2171,15 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 
 	// Hub server config
 	v1Hub := &V1ServerHubConfig{
-		Port:         gc.Hub.Port,
-		Host:         gc.Hub.Host,
-		HubID:        gc.Hub.HubID,
-		HubName:      gc.Hub.HubName,
-		PublicURL:    gc.Hub.Endpoint,
-		ReadTimeout:  gc.Hub.ReadTimeout.String(),
-		WriteTimeout: gc.Hub.WriteTimeout.String(),
-		AdminEmails:  gc.Hub.AdminEmails,
+		Port:          gc.Hub.Port,
+		Host:          gc.Hub.Host,
+		HubID:         gc.Hub.HubID,
+		HubName:       gc.Hub.HubName,
+		PublicURL:     gc.Hub.Endpoint,
+		AgentEndpoint: gc.Hub.AgentEndpoint,
+		ReadTimeout:   gc.Hub.ReadTimeout.String(),
+		WriteTimeout:  gc.Hub.WriteTimeout.String(),
+		AdminEmails:   gc.Hub.AdminEmails,
 		CORS: &V1CORSConfig{
 			Enabled:        gc.Hub.CORSEnabled,
 			AllowedOrigins: gc.Hub.CORSAllowedOrigins,
@@ -1764,6 +2194,9 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if gc.Hub.StalledThreshold > 0 {
 		v1Hub.StalledThreshold = gc.Hub.StalledThreshold.String()
 	}
+	if gc.Hub.MissingAgentGrace > 0 {
+		v1Hub.MissingAgentGrace = gc.Hub.MissingAgentGrace.String()
+	}
 	if gc.Hub.SoftDeleteRetainFiles {
 		retainFiles := true
 		v1Hub.SoftDeleteRetainFiles = &retainFiles
@@ -1771,6 +2204,17 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if gc.Hub.DisableLegacyStorageFallback {
 		disableLegacy := true
 		v1Hub.DisableLegacyStorageFallback = &disableLegacy
+	}
+	if gc.Hub.AsyncAgentLaunch {
+		asyncLaunch := true
+		v1Hub.AsyncAgentLaunch = &asyncLaunch
+	}
+	if gc.Hub.LaunchTimeout > 0 {
+		v1Hub.LaunchTimeout = gc.Hub.LaunchTimeout.String()
+	}
+	if gc.Hub.LaunchKeepaliveSeconds > 0 {
+		keepalive := gc.Hub.LaunchKeepaliveSeconds
+		v1Hub.LaunchKeepaliveSeconds = &keepalive
 	}
 	v1.Hub = v1Hub
 
@@ -1813,6 +2257,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		DevTokenFile:      gc.Auth.TokenFile,
 		AuthorizedDomains: gc.Auth.AuthorizedDomains,
 		UserAccessMode:    gc.Auth.UserAccessMode,
+		DefaultUserRole:   gc.Auth.DefaultUserRole,
 		Username:          gc.Auth.Username,
 		DisplayName:       gc.Auth.DisplayName,
 		Email:             gc.Auth.Email,
@@ -1827,6 +2272,25 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 				Audience: gc.Auth.Proxy.IAP.Audience,
 				Issuer:   gc.Auth.Proxy.IAP.Issuer,
 				JWKSURL:  gc.Auth.Proxy.IAP.JWKSURL,
+			}
+		}
+		if gc.Auth.Proxy.JWT != nil {
+			v1.Auth.Proxy.JWT = &V1JWTAuthConfig{
+				Header:        gc.Auth.Proxy.JWT.Header,
+				Algorithm:     gc.Auth.Proxy.JWT.Algorithm,
+				Issuer:        gc.Auth.Proxy.JWT.Issuer,
+				Audience:      gc.Auth.Proxy.JWT.Audience,
+				JWKSURL:       gc.Auth.Proxy.JWT.JWKSURL,
+				JWKSFile:      gc.Auth.Proxy.JWT.JWKSFile,
+				PublicKeyFile: gc.Auth.Proxy.JWT.PublicKeyFile,
+			}
+			if gc.Auth.Proxy.JWT.Claims != nil {
+				v1.Auth.Proxy.JWT.Claims = &V1JWTClaimsConfig{
+					Email:       gc.Auth.Proxy.JWT.Claims.Email,
+					Subject:     gc.Auth.Proxy.JWT.Claims.Subject,
+					DisplayName: gc.Auth.Proxy.JWT.Claims.DisplayName,
+					Domain:      gc.Auth.Proxy.JWT.Claims.Domain,
+				}
 			}
 		}
 	}
@@ -2031,11 +2495,21 @@ func AdaptLegacySettings(legacy *Settings) (*VersionedSettings, []string) {
 				Volumes:   pc.Volumes,
 				Resources: pc.Resources,
 			}
-			// Convert HarnessOverride → V1HarnessOverride (camelCase → snake_case tags)
+			// Convert HarnessOverride → V1HarnessOverride (camelCase → snake_case
+			// tags). Field-by-field, not a type conversion: the legacy struct has
+			// no ImagePullPolicy (that field is versioned-settings-only), so the
+			// two types no longer share an identical field set.
 			if pc.HarnessOverrides != nil {
 				profile.HarnessOverrides = make(map[string]V1HarnessOverride, len(pc.HarnessOverrides))
 				for hk, ho := range pc.HarnessOverrides {
-					profile.HarnessOverrides[hk] = V1HarnessOverride(ho)
+					profile.HarnessOverrides[hk] = V1HarnessOverride{
+						Image:            ho.Image,
+						User:             ho.User,
+						Env:              ho.Env,
+						Volumes:          ho.Volumes,
+						AuthSelectedType: ho.AuthSelectedType,
+						Resources:        ho.Resources,
+					}
 				}
 			}
 			vs.Profiles[name] = profile
@@ -2136,10 +2610,20 @@ func convertVersionedToLegacy(vs *VersionedSettings) *Settings {
 				Volumes:   pc.Volumes,
 				Resources: pc.Resources,
 			}
+			// Field-by-field, not a type conversion: V1HarnessOverride carries
+			// ImagePullPolicy, which the legacy HarnessOverride has no room for
+			// (and doesn't need — it's not part of the live resolution path).
 			if pc.HarnessOverrides != nil {
 				profile.HarnessOverrides = make(map[string]HarnessOverride, len(pc.HarnessOverrides))
 				for hk, ho := range pc.HarnessOverrides {
-					profile.HarnessOverrides[hk] = HarnessOverride(ho)
+					profile.HarnessOverrides[hk] = HarnessOverride{
+						Image:            ho.Image,
+						User:             ho.User,
+						Env:              ho.Env,
+						Volumes:          ho.Volumes,
+						AuthSelectedType: ho.AuthSelectedType,
+						Resources:        ho.Resources,
+					}
 				}
 			}
 			s.Profiles[name] = profile
@@ -2149,49 +2633,56 @@ func convertVersionedToLegacy(vs *VersionedSettings) *Settings {
 	return s
 }
 
+// detectDirSettingsFormat checks a single directory's settings file (NOT the
+// hierarchy — no project resolution, no walking up from anywhere) to
+// determine whether it uses the versioned format. Returns (false, false) if
+// dir is empty, has no settings file, or the file cannot be read.
+//
+// Extracted from detectHierarchyFormat (which uses this for both its global
+// and project checks) so that a caller needing a strictly single-file,
+// global-only answer — detectGlobalSettingsFormatOnly, round 6 addendum —
+// can get one without going anywhere near resolveEffectiveProjectPath.
+func detectDirSettingsFormat(dir string) (hasVersioned bool, missingSchemaVersion bool) {
+	if dir == "" {
+		return false, false
+	}
+	path := GetSettingsPath(dir)
+	if path == "" {
+		return false, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false, false
+	}
+	version, _ := DetectSettingsFormat(data)
+	if version == "" {
+		return false, false
+	}
+	var raw map[string]interface{}
+	hasExplicitVersion := false
+	if err := yamlv3.Unmarshal(data, &raw); err == nil && raw != nil {
+		_, hasExplicitVersion = raw["schema_version"]
+	}
+	return true, !hasExplicitVersion
+}
+
 // detectHierarchyFormat checks settings files in the global and project directories
 // to determine if any user file uses the versioned format.
 // Returns:
 //   - hasVersioned: true if any user file is versioned (has schema_version or v1 structural indicators)
 //   - missingSchemaVersion: true if versioned was detected via v1 structural indicators only (schema_version absent)
 func detectHierarchyFormat(projectPath string) (hasVersioned bool, missingSchemaVersion bool) {
-	// fileIsVersionedViaSV returns true if data has an explicit schema_version key.
-	fileHasExplicitVersion := func(data []byte) bool {
-		var raw map[string]interface{}
-		if err := yamlv3.Unmarshal(data, &raw); err != nil || raw == nil {
-			return false
-		}
-		_, ok := raw["schema_version"]
-		return ok
-	}
-
 	// Check global settings
 	globalDir, _ := GetGlobalDir()
-	if globalDir != "" {
-		if path := GetSettingsPath(globalDir); path != "" {
-			if data, err := os.ReadFile(path); err == nil {
-				if version, _ := DetectSettingsFormat(data); version != "" {
-					if !fileHasExplicitVersion(data) {
-						missingSchemaVersion = true
-					}
-					return true, missingSchemaVersion
-				}
-			}
-		}
+	if hv, missing := detectDirSettingsFormat(globalDir); hv {
+		return true, missing
 	}
 
 	// Check project settings
 	effectiveProjectPath := resolveEffectiveProjectPath(projectPath)
 	if effectiveProjectPath != "" && effectiveProjectPath != globalDir {
-		if path := GetSettingsPath(effectiveProjectPath); path != "" {
-			if data, err := os.ReadFile(path); err == nil {
-				if version, _ := DetectSettingsFormat(data); version != "" {
-					if !fileHasExplicitVersion(data) {
-						missingSchemaVersion = true
-					}
-					return true, missingSchemaVersion
-				}
-			}
+		if hv, missing := detectDirSettingsFormat(effectiveProjectPath); hv {
+			return true, missing
 		}
 	}
 
@@ -2282,6 +2773,194 @@ func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, er
 	return vs, warnings, nil
 }
 
+// LoadGlobalSettings loads settings from the broker's global directory
+// (~/.scion) ONLY — no project-level file is merged on top, regardless of
+// the calling process's current working directory.
+//
+// This is deliberately NOT the same as LoadEffectiveSettings(""): an empty
+// projectPath does not mean "global only". resolveEffectiveProjectPath("")
+// calls FindProjectRoot(), which walks up from os.Getwd() and, if the
+// process happens to be running inside a project checkout (the common case
+// for `scion start` run from a repo, or a broker started from a project
+// directory), merges that project's settings.yaml on top of global (design
+// deploy-config-explore round 2 review findings C1/S-F2). Passing the
+// global directory explicitly short-circuits that: with projectPath equal
+// to the global directory, LoadVersionedSettings's project-layer steps are
+// skipped entirely (they each check projectPath != globalDir).
+//
+// Use this for any Layer-0, global-only setting (see
+// opsettings/koanf.go's layer0Prefixes) that must not be overridable by a
+// project's settings.yaml — for example server.shared_dir_storage, which
+// must not let a project (including in-repo settings.yaml content from a
+// cloned repository) redirect where its shared directories are mounted.
+//
+// Round 6 addendum (nfs-gke UAT blocker, hy-em/hy-rev-6/hy-aud-6): this read
+// is now a fully dedicated, standalone loader (loadGlobalSettingsOnly,
+// below) rather than a call into LoadEffectiveSettings/LoadVersionedSettings/
+// LoadSettingsKoanf, for two independent reasons found in the same round:
+//
+//  1. Env-free. Those three functions all merge koanf's SCION_ environment
+//     provider unconditionally. There is no env mapping for
+//     server.shared_dir_storage itself, so an env-free read of the file is
+//     semantically identical for this setting — but koanf's env provider
+//     merges EVERY SCION_* variable present in the broker's process
+//     environment, not just ones this setting cares about, and unmarshals
+//     the merged result as a single struct. A broker env can contain
+//     SCION_* variables with no business being here at all (the ii2 hub's
+//     own 21-variable set, findings/ii2-hub-env-names.txt, or an
+//     in-container helper var like SCION_AUTO_EXPOSE_PORTS) whose mapped
+//     key happens to collide with a struct-typed field elsewhere in
+//     VersionedSettings — e.g. SCION_AUTO_EXPOSE_PORTS maps to the bare key
+//     "auto_expose_ports", and koanf's Unmarshal fails outright if that
+//     collides with a nested map/struct. Before this fix, such a collision
+//     made the ENTIRE global settings load fail to decode, and because
+//     GlobalSettingsMentions found "shared_dir_storage" in the raw file
+//     bytes (an unrelated part of the same file), every agent Start failed
+//     closed — even though the operator's shared_dir_storage config was
+//     never at risk and nothing about it depends on any environment
+//     variable. This is not hypothetical: it reproduces in any shell/agent
+//     container that happens to export SCION_AUTO_EXPOSE_PORTS or similar.
+//  2. Global-only, for real this time. resolveEffectiveProjectPath, called
+//     internally by LoadVersionedSettings/LoadSettingsKoanf/
+//     detectHierarchyFormat, treats WHATEVER path it is given as if it
+//     might be a project directory: if ~/.scion itself contains a
+//     project-id or grove-id file (plausible — a broker's ~/.scion can
+//     double as its own hub-side project identity), it resolves to
+//     GetProjectConfigDir(globalDir), i.e.
+//     ~/.scion/project-configs/<slug>__<id>/.scion — a completely
+//     unrelated project's split-storage settings.yaml — and merges it on
+//     top. That defeats the entire point of "global-only, a project's
+//     settings.yaml cannot override this", which is this setting's core
+//     security property (see the CWD-independence paragraph above).
+//
+// loadGlobalSettingsOnly therefore reads ONLY GetSettingsPath(GetGlobalDir())
+// (plus embedded defaults): no resolveEffectiveProjectPath, no
+// GetProjectConfigDir, no SCION_ environment provider, no DB-backed
+// settings overlay. Every other property is unchanged: global-only (still
+// via GetGlobalDir), CWD-independent, legacy-format detection (via
+// GlobalSettingsIsLegacyFormat, itself rewritten the same way — see its doc
+// comment), the 6' malformed-file substring heuristic, and
+// v1-loader-authoritative behavior for a successfully-parsed file.
+func LoadGlobalSettings() (*VersionedSettings, []string, error) {
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolving global settings directory: %w", err)
+	}
+	return loadGlobalSettingsOnly(globalDir)
+}
+
+// GlobalSettingsMentions reports whether the RAW bytes of the global
+// settings file (read directly, without parsing) contain substr. Intended
+// for a caller that has already failed to parse the global settings file
+// via LoadGlobalSettings and needs to decide whether the operator likely
+// intended to configure a specific Layer-0 setting — round 3 review
+// disposition 6': failing closed on every malformed global settings file
+// would regress every deployment with a default shared-dir scratchpad, even
+// ones that never configured server.shared_dir_storage. Checking for the
+// raw key name lets a caller fail closed only when the setting in question
+// was plausibly in play, and otherwise degrade the way `main` already does.
+//
+// Returns false — "assume not configured" — if the global directory or its
+// settings file cannot be resolved or read; a caller in that situation is
+// already handling a read/parse error itself and should not additionally
+// fail closed because of an unrelated problem finding the raw bytes.
+func GlobalSettingsMentions(substr string) bool {
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return false
+	}
+	path := GetSettingsPath(globalDir)
+	if path == "" {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(data), substr)
+}
+
+// GlobalSettingsIsLegacyFormat reports whether the global settings file was
+// loaded via the legacy (pre-schema_version) format, as opposed to a
+// well-formed versioned (schema_version: "1") file.
+//
+// Round 5 review finding C1=T1=S-L2: GlobalSettingsMentions' raw substring
+// check is a deliberately crude heuristic, accepted ONLY for a global
+// settings file that failed to parse at all (round 3 disposition 6' — see
+// GlobalSettingsMentions' doc comment). It must not also be applied to a
+// file that DID load successfully as a v1 file: a well-formed v1 file with,
+// say, a commented-out "# shared_dir_storage:" block mentions the substring
+// but was not configured, and the loader — not a substring match — is
+// authoritative for what a successfully-parsed file means. Callers must
+// gate any GlobalSettingsMentions-based fail-closed decision on this
+// function returning true, so that a successfully-loaded v1 file's absence
+// of a parsed block is trusted at face value, exactly like main.
+//
+// This calls detectDirSettingsFormat directly on GetGlobalDir(), NOT
+// detectHierarchyFormat(globalDir) as an earlier version of this function
+// did. Round 6 addendum (hy-aud-6): detectHierarchyFormat(globalDir) is NOT
+// actually global-only — it calls resolveEffectiveProjectPath(globalDir)
+// internally, which treats the global directory as if it might itself be a
+// project directory and, if ~/.scion contains a project-id or grove-id
+// file, resolves to a completely unrelated project's split-storage
+// settings.yaml under ~/.scion/project-configs/<slug>__<id>/.scion and
+// merges its format in too. detectDirSettingsFormat never calls
+// resolveEffectiveProjectPath or GetProjectConfigDir, so this function now
+// keys the legacy-format decision off the global settings file alone, with
+// no project layer involved at all — matching LoadGlobalSettings' own
+// global-only, project-free read exactly (see loadGlobalSettingsOnly).
+//
+// Returns true — "treat as legacy" — if the global directory cannot be
+// resolved at all, since there is then no versioned file to trust as
+// authoritative and the caller's substring-based fallback is the only
+// remaining signal.
+func GlobalSettingsIsLegacyFormat() bool {
+	globalDir, err := GetGlobalDir()
+	if err != nil {
+		return true
+	}
+	hasVersioned, _ := detectDirSettingsFormat(globalDir)
+	return !hasVersioned
+}
+
+// loadGlobalSettingsOnly loads the broker's global settings file — and
+// ONLY that file, GetSettingsPath(globalDir), plus embedded defaults — into
+// a VersionedSettings struct. It is entirely independent of
+// LoadVersionedSettings/LoadSettingsKoanf/LoadEffectiveSettings: no
+// resolveEffectiveProjectPath, no GetProjectConfigDir, no SCION_
+// environment provider, no DB-backed settings overlay. See
+// LoadGlobalSettings' doc comment for why (round 6 addendum). The
+// versioned/legacy format decision is made via detectDirSettingsFormat on
+// this same single file, matching GlobalSettingsIsLegacyFormat exactly.
+func loadGlobalSettingsOnly(globalDir string) (*VersionedSettings, []string, error) {
+	hasVersioned, missingSchemaVersion := detectDirSettingsFormat(globalDir)
+
+	if hasVersioned {
+		vs, err := loadVersionedSettingsFileOnly(globalDir)
+		if err != nil {
+			return nil, nil, fmt.Errorf("loading versioned settings: %w", err)
+		}
+		var warnings []string
+		if missingSchemaVersion {
+			warnings = append(warnings, `settings.yaml contains v1 runtime fields (type, cloudrun, gke, list_all_namespaces) but is missing 'schema_version: "1"'; add it as the first line to silence this warning`)
+		}
+		return vs, warnings, nil
+	}
+
+	legacy, err := loadLegacySettingsFileOnly(globalDir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("loading legacy settings: %w", err)
+	}
+	vs, warnings := AdaptLegacySettings(legacy)
+	return vs, warnings, nil
+}
+
+// loadVersionedSettingsFileOnly and loadLegacySettingsFileOnly (the two
+// helpers loadGlobalSettingsOnly calls) live in koanf.go, which already
+// imports the koanf JSON parser under the bare name "json" — settings_v1.go
+// imports the standard library "encoding/json" under that name instead, so
+// they cannot both live here without an import alias.
+
 // MigrationResult reports what happened during a migration.
 type MigrationResult struct {
 	Path             string   `json:"path"`               // settings file that was migrated
@@ -2307,6 +2986,12 @@ func LoadSingleFileVersioned(dir string) (*VersionedSettings, error) {
 		return &VersionedSettings{SchemaVersion: "1"}, nil
 	}
 
+	// Migrate any legacy hub.grove_id key to hub.project_id in place before
+	// reading, so the parse below sees the canonical key directly. override
+	// covers the case where the rewrite could not happen (read-only
+	// filesystem, not owner): the value to use in memory for this call.
+	_, override := migrateProjectSettingsFile(settingsPath)
+
 	data, err := os.ReadFile(settingsPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read %s: %w", settingsPath, err)
@@ -2329,21 +3014,11 @@ func LoadSingleFileVersioned(dir string) (*VersionedSettings, error) {
 		vs.SchemaVersion = "1"
 	}
 
-	// Backward compatibility: old settings files may use hub.grove_id instead of
-	// hub.project_id. Since the struct yaml tag is now "project_id", grove_id
-	// values are not unmarshaled automatically. Check the raw YAML and remap.
-	if vs.Hub == nil || vs.Hub.ProjectID == "" {
-		var raw map[string]interface{}
-		if err := yamlv3.Unmarshal(data, &raw); err == nil {
-			if hub, ok := raw["hub"].(map[string]interface{}); ok {
-				if gid, ok := hub["grove_id"].(string); ok && gid != "" {
-					if vs.Hub == nil {
-						vs.Hub = &V1HubClientConfig{}
-					}
-					vs.Hub.ProjectID = gid
-				}
-			}
+	if override != "" && (vs.Hub == nil || vs.Hub.ProjectID == "") {
+		if vs.Hub == nil {
+			vs.Hub = &V1HubClientConfig{}
 		}
+		vs.Hub.ProjectID = override
 	}
 
 	return &vs, nil
@@ -2358,7 +3033,7 @@ func UpdateVersionedSetting(dir string, key string, value string) error {
 		return err
 	}
 
-	if projectcompat.IsProjectIDConfigKey(key) || projectcompat.IsHubProjectIDConfigKey(key) {
+	if projectkeys.IsProjectIDConfigKey(key) || projectkeys.IsHubProjectIDConfigKey(key) {
 		if vs.Hub == nil {
 			vs.Hub = &V1HubClientConfig{}
 		}
@@ -2486,7 +3161,7 @@ func UpdateVersionedSetting(dir string, key string, value string) error {
 // GetVersionedSettingValue retrieves a specific setting value from a VersionedSettings struct.
 // It mirrors the keys supported by UpdateVersionedSetting for read access.
 func GetVersionedSettingValue(vs *VersionedSettings, key string) (string, error) {
-	if projectcompat.IsProjectIDConfigKey(key) || projectcompat.IsHubProjectIDConfigKey(key) {
+	if projectkeys.IsProjectIDConfigKey(key) || projectkeys.IsHubProjectIDConfigKey(key) {
 		if vs.Hub != nil {
 			return vs.Hub.ProjectID, nil
 		}
@@ -2558,7 +3233,252 @@ func GetVersionedSettingValue(vs *VersionedSettings, key string) (string, error)
 		return "", nil
 	}
 
+	if val, err, handled := getNestedMapSettingValue(vs, key); handled {
+		return val, err
+	}
+
 	return "", fmt.Errorf("unknown or complex setting key: %s", key)
+}
+
+// getNestedMapSettingValue resolves dotted config-get keys of the form
+// "<category>.<name>.<field>" that address a scalar field of a named entry
+// inside the profiles or runtimes maps — e.g. "profiles.local.runtime" or
+// "runtimes.kubernetes.namespace". handled is false when key does not match
+// one of these known-category forms, in which case the caller falls back to
+// its own "unknown key" error.
+//
+// harness_configs is deliberately not supported here even though
+// VersionedSettings has a HarnessConfigs map of the same shape: harness
+// configs are normally resolved from on-disk harness-config directories
+// (LoadHarnessConfigDir / FindHarnessConfigDir, with template/project/global
+// precedence), not merged into this map, so a settings.yaml-only lookup
+// would silently miss the harness configs "scion harness-config" reports.
+// Wiring config get through the same directory-aware resolution is a
+// separate change; use "scion harness-config" to inspect harness configs.
+//
+// A nil vs returns handled=false rather than panicking on vs.Profiles or
+// vs.Runtimes, so the caller's own "unknown key" error fires instead.
+func getNestedMapSettingValue(vs *VersionedSettings, key string) (value string, err error, handled bool) {
+	if vs == nil {
+		return "", nil, false
+	}
+	parts := strings.SplitN(key, ".", 3)
+	if len(parts) != 3 {
+		return "", nil, false
+	}
+	name, field := parts[1], parts[2]
+
+	switch parts[0] {
+	case "profiles":
+		return lookupMapEntryField(vs.Profiles, name, field, key, "profile")
+	case "runtimes":
+		return lookupMapEntryField(vs.Runtimes, name, field, key, "runtime")
+	default:
+		return "", nil, false
+	}
+}
+
+// lookupMapEntryField looks up name in m and, if found, resolves field on
+// the entry via lookupScalarField. label is the human-readable singular name
+// of the map (e.g. "profile") used in error messages; key is the original
+// dotted key, quoted back to the caller so error messages are unambiguous
+// about which lookup failed.
+func lookupMapEntryField[T any](m map[string]T, name, field, key, label string) (value string, err error, handled bool) {
+	entry, ok := m[name]
+	if !ok {
+		return "", fmt.Errorf("unknown or complex setting key: %s (no %s named %q)", key, label, name), true
+	}
+	val, lookupErr := lookupScalarField(entry, field, key, label, name)
+	return val, lookupErr, true
+}
+
+// credentialLikeFieldPattern matches koanf/yaml tag names that look like
+// they hold credential material. lookupScalarField refuses any field whose
+// tag matches, regardless of its Go kind, so that a future scalar field
+// named e.g. "api_key" or "token" on V1ProfileConfig or V1RuntimeConfig is
+// refused by name rather than rendered — see
+// TestLookupScalarFieldRefusesCredentialLikeNames, which proves the refusal
+// fires, and TestScalarFieldsExcludeCredentialLikeNames, a tripwire that
+// fails if a matching scalar field is ever added, forcing a conscious
+// decision about it rather than a silent pass-through.
+//
+// This is name-based coverage only: it protects fields whose tag matches
+// the pattern, not the general case. A scalar field holding credential
+// material under an unmatched name — e.g. "passphrase", "client_cert", or
+// "signing_blob" — would still render in plaintext; nothing here can detect
+// that.
+var credentialLikeFieldPattern = regexp.MustCompile(`(?i)(token|secret|password|passwd|api_?key|credential|_pat$|^pat$|private_?key|ssh_?key|bearer|auth_?header)`)
+
+// lookupScalarField finds the field on struct value v whose koanf (or yaml,
+// as fallback) tag equals the first dot-separated segment of field, and
+// renders it as a config-get string value.
+//
+// Only scalar fields (string, bool, integer, and pointers to those) are
+// supported; structured fields (maps, slices, nested structs) return an
+// error naming the key rather than being silently rendered or partially
+// serialized, since config get has no established rendering for them. A
+// field name matching credentialLikeFieldPattern is refused outright, even
+// if it happens to be a plain scalar. A field parameter containing further
+// dots (e.g. "cloudrun.region") means the caller asked for a path nested
+// below what this lookup supports; that is reported as a "nested paths are
+// not supported" error naming the first segment: as a missing field if it
+// does not resolve, otherwise as a field that has no sub-fields or is not a
+// scalar value.
+func lookupScalarField(v interface{}, field, key, label, name string) (string, error) {
+	head, nested := field, false
+	if idx := strings.IndexByte(field, '.'); idx >= 0 {
+		head, nested = field[:idx], true
+	}
+
+	fv, ok := findFieldByConfigTag(reflect.ValueOf(v), head)
+	if !ok {
+		if nested {
+			return "", fmt.Errorf("unknown or complex setting key: %s (%s %q has no field %q; nested paths are not supported)", key, label, name, head)
+		}
+		return "", fmt.Errorf("unknown or complex setting key: %s (%s %q has no field %q)", key, label, name, head)
+	}
+	if credentialLikeFieldPattern.MatchString(head) {
+		return "", fmt.Errorf("unknown or complex setting key: %s (field %q of %s %q looks like a credential and is not readable via config get)", key, head, label, name)
+	}
+	str, ok := scalarValueString(fv)
+	if nested {
+		if ok {
+			return "", fmt.Errorf("unknown or complex setting key: %s (field %q of %s %q is a scalar value and has no sub-fields; nested paths are not supported)", key, head, label, name)
+		}
+		return "", fmt.Errorf("unknown or complex setting key: %s (field %q of %s %q is not a scalar value; nested paths are not supported)", key, head, label, name)
+	}
+	if !ok {
+		return "", fmt.Errorf("unknown or complex setting key: %s (field %q of %s %q is not a scalar value)", key, field, label, name)
+	}
+	return str, nil
+}
+
+// configTagName returns the config-get field name for struct field f: its
+// koanf tag, falling back to its yaml tag, with any trailing tag options
+// (e.g. ",omitempty") stripped. It returns "" for a field with no koanf or
+// yaml tag, and for one explicitly marked "-" (skip) in either tag — both of
+// which are never valid config-get field names, since findFieldByConfigTag
+// only matches a non-empty name.
+//
+// This is the single source of truth for how a struct field's tag maps to
+// the field name config get resolves: findFieldByConfigTag uses it to find
+// a field by name, and TestScalarFieldsExcludeCredentialLikeNames' tripwire
+// uses it to enumerate the same names, so the two cannot silently diverge —
+// e.g. if this function is later changed to also honor a "json" tag or an
+// ",inline" option, both callers pick that up together.
+// TestConfigTagName exercises the yaml fallback and the "-" skip directly,
+// against a local struct, since no production field takes either path
+// today.
+func configTagName(f reflect.StructField) string {
+	tag := f.Tag.Get("koanf")
+	if tag == "" {
+		tag = f.Tag.Get("yaml")
+	}
+	tag = strings.SplitN(tag, ",", 2)[0]
+	if tag == "-" {
+		return ""
+	}
+	return tag
+}
+
+// findFieldByConfigTag returns the value of the field in struct v whose
+// configTagName (koanf tag, falling back to yaml) matches name exactly. v
+// may be a struct or a (possibly nested) pointer to one; a nil pointer or a
+// non-struct kind returns false rather than panicking, since
+// reflect.Type.NumField panics for non-struct kinds.
+//
+// It does not recurse into anonymous (embedded) struct fields. Neither
+// V1ProfileConfig nor V1RuntimeConfig — the only structs this is used
+// against — embeds another struct today; if one of them gains an
+// inline/squashed embedded field, that field's own fields become
+// unreachable here and lookupScalarField reports "has no field" for them
+// rather than resolving through the embed.
+func findFieldByConfigTag(v reflect.Value, name string) (reflect.Value, bool) {
+	for v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return reflect.Value{}, false
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return reflect.Value{}, false
+	}
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		if tag := configTagName(t.Field(i)); tag != "" && tag == name {
+			return v.Field(i), true
+		}
+	}
+	return reflect.Value{}, false
+}
+
+// isScalarKind is the single source of truth for which Go kinds
+// scalarValueString can render: string, bool, or an integer kind. Both
+// branches of scalarValueString — the nil-pointer path and the concrete
+// (non-nil) value path — gate on this function rather than each keeping its
+// own kind list, and the test-only isScalarFieldType (classifying a static
+// struct field type without a value to inspect) also calls it, so all three
+// are provably in agreement: changing what counts as scalar means changing
+// this one function. TestScalarKindAgreesWithScalarValueString checks that
+// agreement for every reflect.Kind from Bool through UnsafePointer (except
+// Pointer itself, which is exercised separately via pointer indirection),
+// not just the ones currently in use, and asserts the expected scalar-ness
+// of each kind independently rather than deriving it from this function.
+func isScalarKind(k reflect.Kind) bool {
+	switch k {
+	case reflect.String, reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return true
+	default:
+		return false
+	}
+}
+
+// underlyingKind unwraps t through any levels of pointer indirection and
+// returns the final (pointee) kind. Used to classify a nil pointer by its
+// static type — via reflect.Type, which does not require a value to
+// dereference — rather than by a reflect.Value, which cannot be dereferenced
+// once nil.
+func underlyingKind(t reflect.Type) reflect.Kind {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return t.Kind()
+}
+
+// scalarValueString renders v as a config-get string if it is a scalar kind
+// (string, bool, or integer) or a pointer to one; a nil pointer renders as
+// an empty string only if it points to a scalar kind (e.g. a nil *bool).
+// Maps, slices, and structs — including a nil pointer to a struct, such as
+// an unset V1RuntimeConfig.CloudRun — are reported as not scalar via
+// ok=false; classifying by the pointee's static type (rather than treating
+// every nil pointer as scalar) means a field's scalar-ness does not depend
+// on whether it happens to be set.
+func scalarValueString(v reflect.Value) (s string, ok bool) {
+	for v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return "", isScalarKind(underlyingKind(v.Type()))
+		}
+		v = v.Elem()
+	}
+	if !isScalarKind(v.Kind()) {
+		return "", false
+	}
+	switch v.Kind() {
+	case reflect.String:
+		return v.String(), true
+	case reflect.Bool:
+		return strconv.FormatBool(v.Bool()), true
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return strconv.FormatInt(v.Int(), 10), true
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return strconv.FormatUint(v.Uint(), 10), true
+	default:
+		// Unreachable: isScalarKind above already rejected every kind not
+		// handled here.
+		return "", false
+	}
 }
 
 // SaveVersionedSettings writes a VersionedSettings struct as YAML to settings.yaml in dir.

@@ -75,6 +75,34 @@ interface UsageReservation {
   reserved: number;
   createdAt: string;
   releasedAt?: string;
+  /**
+   * The broker's current effective max_agents_per_broker limit, present only
+   * for broker-scoped reservations under that limit (ptone/scion#2061 P2.2,
+   * design.md §5.9). Mirrors Go usageReservationView.BrokerAgentLimit
+   * (pkg/hub/handlers_quota.go) exactly — hand-written since there is no
+   * Go->TS generator (design.md §6). Absent for every other reservation.
+   */
+  brokerAgentLimit?: number;
+  /**
+   * The precedence step that produced brokerAgentLimit: "broker" |
+   * "entitlement" | "hub_default" | "unlimited" | "not_enforced". This names
+   * the step, not whether the result is a cap: when the broker is
+   * unlimited, brokerAgentLimit is absent but brokerAgentLimitSource is
+   * still whichever step produced it ("broker" for a settings.maxAgents=0
+   * override, "entitlement"/"hub_default" for a 0 binding or default).
+   * "unlimited" itself means no limit definition or no quota service is
+   * configured hub-wide, a state in which this reservation (which requires
+   * quota enforcement to have run) would not exist to display in the first
+   * place.
+   *
+   * "not_enforced" (design.md Amendment A1) means the P1b enforcement
+   * switch is off: brokerAgentLimit keeps whatever the precedence steps
+   * resolved (a cap, or absent when that resolves to unlimited, exactly as
+   * above), but the value is informational only — it is not currently
+   * applied. The usage detail must show this visibly, not only in a
+   * tooltip.
+   */
+  brokerAgentLimitSource?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -99,19 +127,46 @@ export class ScionPageAdminQuotas extends LitElement {
   // --- Create/Edit limit dialog ---
   @state() private showLimitDialog = false;
   @state() private editingLimit: LimitDefinition | null = null;
-  @state() private limitForm = { name: '', resourceType: '', unit: '', description: '', defaultValue: 0 };
+  @state() private limitForm: {
+    name: string;
+    resourceType: string;
+    unit: string;
+    description: string;
+    // null means the field is empty or not a valid non-negative integer, so
+    // saveLimitDefinition can tell "cleared by the user" apart from an
+    // explicit 0 (= unlimited) and reject it instead of silently sending 0
+    // (ptone/scion#2061 P1a review F1: clearing this on a system row like
+    // max_agents_per_broker would otherwise turn off the crash ceiling).
+    defaultValue: number | null;
+  } = {
+    name: '',
+    resourceType: '',
+    unit: '',
+    description: '',
+    defaultValue: 0,
+  };
   @state() private limitDialogError: string | null = null;
   @state() private limitDialogSaving = false;
 
   // --- Create entitlement dialog ---
   @state() private showEntitlementDialog = false;
-  @state() private entitlementForm = { subjectType: 'user', subjectId: '', scopeType: 'system', scopeId: '', value: 0 };
+  @state() private entitlementForm = {
+    subjectType: 'user',
+    subjectId: '',
+    scopeType: 'system',
+    scopeId: '',
+    value: 0,
+  };
   @state() private entitlementDialogError: string | null = null;
   @state() private entitlementDialogSaving = false;
 
   // --- Delete confirmation ---
   @state() private showDeleteDialog = false;
-  @state() private deleteTarget: { type: 'limit' | 'entitlement'; id: string; name: string } | null = null;
+  @state() private deleteTarget: {
+    type: 'limit' | 'entitlement';
+    id: string;
+    name: string;
+  } | null = null;
   @state() private deleteLoading = false;
   @state() private deleteDialogError: string | null = null;
 
@@ -231,6 +286,21 @@ export class ScionPageAdminQuotas extends LitElement {
       font-weight: 600;
       background: var(--sl-color-neutral-100, #f1f5f9);
       color: var(--sl-color-neutral-600, #475569);
+    }
+
+    /* Visible marker for a broker cap whose source is "not_enforced"
+     * (design.md Amendment A1): the value shown is a real, resolved cap,
+     * but it is not currently enforced. Must not be tooltip-only. */
+    .not-enforced-marker {
+      display: inline-flex;
+      align-items: center;
+      margin-left: 0.375rem;
+      padding: 0.0625rem 0.375rem;
+      border-radius: 9999px;
+      font-size: 0.6875rem;
+      font-weight: 600;
+      background: var(--sl-color-warning-100, #fef3c7);
+      color: var(--sl-color-warning-700, #a16207);
     }
 
     .meta-text {
@@ -589,6 +659,10 @@ export class ScionPageAdminQuotas extends LitElement {
       this.limitDialogError = 'Resource type is required';
       return;
     }
+    if (this.limitForm.defaultValue === null) {
+      this.limitDialogError = 'Default Value is required and must be a non-negative integer (0 = unlimited)';
+      return;
+    }
 
     this.limitDialogSaving = true;
     this.limitDialogError = null;
@@ -599,7 +673,7 @@ export class ScionPageAdminQuotas extends LitElement {
         resourceType: this.limitForm.resourceType,
         unit: this.limitForm.unit.trim(),
         description: this.limitForm.description.trim(),
-        defaultValue: Number(this.limitForm.defaultValue) || 0,
+        defaultValue: this.limitForm.defaultValue,
       });
 
       let res: Response;
@@ -635,7 +709,13 @@ export class ScionPageAdminQuotas extends LitElement {
   // ---------------------------------------------------------------------------
 
   private openCreateEntitlement(): void {
-    this.entitlementForm = { subjectType: 'user', subjectId: '', scopeType: 'system', scopeId: '', value: 0 };
+    this.entitlementForm = {
+      subjectType: 'user',
+      subjectId: '',
+      scopeType: 'system',
+      scopeId: '',
+      value: 0,
+    };
     this.entitlementDialogError = null;
     this.showEntitlementDialog = true;
   }
@@ -671,7 +751,8 @@ export class ScionPageAdminQuotas extends LitElement {
         await this.loadEntitlements(this.expandedLimitId);
       }
     } catch (err) {
-      this.entitlementDialogError = err instanceof Error ? err.message : 'Failed to create entitlement';
+      this.entitlementDialogError =
+        err instanceof Error ? err.message : 'Failed to create entitlement';
     } finally {
       this.entitlementDialogSaving = false;
     }
@@ -804,7 +885,9 @@ export class ScionPageAdminQuotas extends LitElement {
         <h1>Quotas</h1>
         <div class="header-right">
           ${!this.loading && !this.error
-            ? html`<span class="item-count">${this.limits.length} limit${this.limits.length !== 1 ? 's' : ''}</span>`
+            ? html`<span class="item-count"
+                >${this.limits.length} limit${this.limits.length !== 1 ? 's' : ''}</span
+              >`
             : ''}
           <sl-button variant="primary" size="small" @click=${this.openCreateLimit}>
             <sl-icon slot="prefix" name="plus-lg"></sl-icon>
@@ -813,15 +896,8 @@ export class ScionPageAdminQuotas extends LitElement {
         </div>
       </div>
 
-      ${this.loading
-        ? this.renderLoading()
-        : this.error
-          ? this.renderError()
-          : this.renderLimits()}
-
-      ${this.renderLimitDialog()}
-      ${this.renderEntitlementDialog()}
-      ${this.renderDeleteDialog()}
+      ${this.loading ? this.renderLoading() : this.error ? this.renderError() : this.renderLimits()}
+      ${this.renderLimitDialog()} ${this.renderEntitlementDialog()} ${this.renderDeleteDialog()}
     `;
   }
 
@@ -891,14 +967,32 @@ export class ScionPageAdminQuotas extends LitElement {
   private renderLimitRow(limit: LimitDefinition) {
     const activeCount = this.usageSummary.get(limit.id) ?? 0;
     const isExpanded = this.expandedLimitId === limit.id;
-    const pct = limit.defaultValue > 0 ? Math.min(100, Math.round((activeCount / limit.defaultValue) * 100)) : 0;
+    // max_agents_per_broker's activeCount is a sum across every broker
+    // (ptone/scion#2061 P2.2), while defaultValue is the *per-broker* cap —
+    // dividing one by the other (e.g. "36 / 30" for three brokers at 12
+    // each) reads as a breached quota when no single broker is near its
+    // cap, and ignores per-broker overrides/entitlements entirely. Render
+    // just the count for this one limit; the per-broker expansion below
+    // still shows each broker's real effective cap and source.
+    const isPerBrokerLimit = limit.name === 'max_agents_per_broker';
+    const pct =
+      !isPerBrokerLimit && limit.defaultValue > 0
+        ? Math.min(100, Math.round((activeCount / limit.defaultValue) * 100))
+        : 0;
 
     return html`
-      <tr class="clickable ${isExpanded ? 'expanded' : ''}" @click=${() => this.toggleExpand(limit.id)}>
+      <tr
+        class="clickable ${isExpanded ? 'expanded' : ''}"
+        @click=${() => this.toggleExpand(limit.id)}
+      >
         <td>
           <span style="font-weight: 500">${limit.name}</span>
-          ${limit.system ? html`<span class="system-badge" style="margin-left: 0.5rem">system</span>` : nothing}
-          ${limit.description ? html`<br><span class="meta-text">${limit.description}</span>` : nothing}
+          ${limit.system
+            ? html`<span class="system-badge" style="margin-left: 0.5rem">system</span>`
+            : nothing}
+          ${limit.description
+            ? html`<br /><span class="meta-text">${limit.description}</span>`
+            : nothing}
         </td>
         <td>
           <span class="type-badge ${this.resourceTypeBadgeClass(limit.resourceType)}">
@@ -913,21 +1007,45 @@ export class ScionPageAdminQuotas extends LitElement {
         </td>
         <td class="hide-mobile usage-bar-cell">
           <div class="usage-info">
-            <span>${activeCount}${limit.defaultValue > 0 ? ` / ${limit.defaultValue}` : ''}</span>
-            ${limit.defaultValue > 0
-              ? html`<sl-progress-bar value=${pct}></sl-progress-bar>`
-              : nothing}
+            ${isPerBrokerLimit
+              ? html`
+                  <span>${activeCount}</span>
+                  <span class="meta-text" style="font-size: 0.75rem"
+                    >across all brokers; cap is per broker</span
+                  >
+                `
+              : html`
+                  <span
+                    >${activeCount}${limit.defaultValue > 0 ? ` / ${limit.defaultValue}` : ''}</span
+                  >
+                  ${limit.defaultValue > 0
+                    ? html`<sl-progress-bar value=${pct}></sl-progress-bar>`
+                    : nothing}
+                `}
           </div>
         </td>
         <td class="hide-mobile">
           <span class="meta-text">${this.formatRelativeTime(limit.updatedAt)}</span>
         </td>
         <td class="actions-cell">
-          ${!limit.system ? html`
-            <sl-icon-button name="pencil" label="Edit" @click=${(e: Event) => this.openEditLimit(limit, e)}></sl-icon-button>
-            <sl-icon-button name="trash" label="Delete" @click=${(e: Event) => this.confirmDeleteLimit(limit, e)}></sl-icon-button>
-          ` : nothing}
-          <sl-icon-button name=${isExpanded ? 'chevron-up' : 'chevron-down'} label=${isExpanded ? 'Collapse' : 'Expand'}></sl-icon-button>
+          <sl-icon-button
+            name="pencil"
+            label="Edit"
+            @click=${(e: Event) => this.openEditLimit(limit, e)}
+          ></sl-icon-button>
+          ${!limit.system
+            ? html`
+                <sl-icon-button
+                  name="trash"
+                  label="Delete"
+                  @click=${(e: Event) => this.confirmDeleteLimit(limit, e)}
+                ></sl-icon-button>
+              `
+            : nothing}
+          <sl-icon-button
+            name=${isExpanded ? 'chevron-up' : 'chevron-down'}
+            label=${isExpanded ? 'Collapse' : 'Expand'}
+          ></sl-icon-button>
         </td>
       </tr>
     `;
@@ -946,41 +1064,64 @@ export class ScionPageAdminQuotas extends LitElement {
             </sl-button>
           </div>
           ${this.entitlementsLoading
-            ? html`<div class="loading-state" style="padding: 1.5rem"><sl-spinner></sl-spinner></div>`
+            ? html`<div class="loading-state" style="padding: 1.5rem">
+                <sl-spinner></sl-spinner>
+              </div>`
             : this.entitlementsError
-              ? html`<sl-alert variant="danger" open class="dialog-error">${this.entitlementsError}</sl-alert>`
+              ? html`<sl-alert variant="danger" open class="dialog-error"
+                  >${this.entitlementsError}</sl-alert
+                >`
               : this.entitlements.length === 0
-                ? html`<div class="inline-empty">No entitlement bindings for this limit. The default value (${this.formatValue(limit.defaultValue)}) applies to all subjects.</div>`
+                ? html`<div class="inline-empty">
+                    No entitlement bindings for this limit. The default value
+                    (${this.formatValue(limit.defaultValue)}) applies to all subjects.
+                  </div>`
                 : html`
-                <table class="entitlement-table">
-                  <thead>
-                    <tr>
-                      <th>Subject Type</th>
-                      <th>Subject ID</th>
-                      <th>Scope</th>
-                      <th>Value</th>
-                      <th class="hide-mobile">Created By</th>
-                      <th class="hide-mobile">Created</th>
-                      <th></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    ${this.entitlements.map((b) => html`
-                      <tr>
-                        <td><span class="type-badge default">${b.subjectType}</span></td>
-                        <td><span class="mono">${b.subjectId}</span></td>
-                        <td><span class="mono">${b.scopeType}${b.scopeId ? `:${b.scopeId}` : ''}</span></td>
-                        <td><span class="mono">${this.formatValue(b.value)}</span></td>
-                        <td class="hide-mobile"><span class="meta-text">${b.createdBy || '—'}</span></td>
-                        <td class="hide-mobile"><span class="meta-text">${this.formatRelativeTime(b.createdAt)}</span></td>
-                        <td class="actions-cell">
-                          <sl-icon-button name="trash" label="Delete" @click=${() => this.confirmDeleteEntitlement(b)}></sl-icon-button>
-                        </td>
-                      </tr>
-                    `)}
-                  </tbody>
-                </table>
-              `}
+                    <table class="entitlement-table">
+                      <thead>
+                        <tr>
+                          <th>Subject Type</th>
+                          <th>Subject ID</th>
+                          <th>Scope</th>
+                          <th>Value</th>
+                          <th class="hide-mobile">Created By</th>
+                          <th class="hide-mobile">Created</th>
+                          <th></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        ${this.entitlements.map(
+                          (b) => html`
+                            <tr>
+                              <td><span class="type-badge default">${b.subjectType}</span></td>
+                              <td><span class="mono">${b.subjectId}</span></td>
+                              <td>
+                                <span class="mono"
+                                  >${b.scopeType}${b.scopeId ? `:${b.scopeId}` : ''}</span
+                                >
+                              </td>
+                              <td><span class="mono">${this.formatValue(b.value)}</span></td>
+                              <td class="hide-mobile">
+                                <span class="meta-text">${b.createdBy || '—'}</span>
+                              </td>
+                              <td class="hide-mobile">
+                                <span class="meta-text"
+                                  >${this.formatRelativeTime(b.createdAt)}</span
+                                >
+                              </td>
+                              <td class="actions-cell">
+                                <sl-icon-button
+                                  name="trash"
+                                  label="Delete"
+                                  @click=${() => this.confirmDeleteEntitlement(b)}
+                                ></sl-icon-button>
+                              </td>
+                            </tr>
+                          `
+                        )}
+                      </tbody>
+                    </table>
+                  `}
         </div>
 
         <!-- Usage detail section -->
@@ -989,29 +1130,70 @@ export class ScionPageAdminQuotas extends LitElement {
             <h3>Active Usage</h3>
           </div>
           ${this.entitlementsLoading
-            ? html`<div class="loading-state" style="padding: 1.5rem"><sl-spinner></sl-spinner></div>`
+            ? html`<div class="loading-state" style="padding: 1.5rem">
+                <sl-spinner></sl-spinner>
+              </div>`
             : this.entitlementsError
               ? nothing
               : !this.usageDetail || this.usageDetail.reservations.length === 0
                 ? html`<div class="inline-empty">No active usage reservations.</div>`
                 : html`
-                <div style="margin-bottom: 0.75rem">
-                  <span class="meta-text">Total active: <strong>${this.usageDetail.totalActive}</strong></span>
-                </div>
-                <div class="usage-detail-grid">
-                  ${this.usageDetail.reservations.map((r) => html`
-                    <div class="usage-card">
-                      <div class="usage-card-header">
-                        <span class="usage-card-subject" title=${r.subjectId}>${r.subjectId}</span>
-                        <span class="usage-card-count">${r.reserved} reserved</span>
-                      </div>
-                      <div class="meta-text" style="font-size: 0.75rem">
-                        Resource: <span class="mono">${r.resourceId}</span>
-                      </div>
+                    <div style="margin-bottom: 0.75rem">
+                      <span class="meta-text"
+                        >Total active: <strong>${this.usageDetail.totalActive}</strong></span
+                      >
                     </div>
-                  `)}
-                </div>
-              `}
+                    <div class="usage-detail-grid">
+                      ${this.usageDetail.reservations.map(
+                        (r) => html`
+                          <div class="usage-card">
+                            <div class="usage-card-header">
+                              <span class="usage-card-subject" title=${r.subjectId}
+                                >${r.subjectId}</span
+                              >
+                              <span class="usage-card-count">${r.reserved} reserved</span>
+                            </div>
+                            <div class="meta-text" style="font-size: 0.75rem">
+                              Resource: <span class="mono">${r.resourceId}</span>
+                            </div>
+                            ${r.brokerAgentLimitSource
+                              ? html`
+                                  <div class="meta-text" style="font-size: 0.75rem">
+                                    Broker cap:
+                                    <span class="mono"
+                                      >${r.brokerAgentLimit != null
+                                        ? this.formatValue(r.brokerAgentLimit)
+                                        : 'unlimited'}</span
+                                    >
+                                    <!-- Defensive: brokerAgentLimitSource is
+                                    "unlimited" only when no limit definition
+                                    or quota service is configured hub-wide,
+                                    a state this reservation (which requires
+                                    quota enforcement to have run) can't
+                                    actually reach — kept to avoid ever
+                                    rendering the redundant "(unlimited)".
+                                    "not_enforced" is suppressed here too: the
+                                    ".not-enforced-marker" pill below already
+                                    says "not enforced", so showing the raw
+                                    "(not_enforced)" token alongside it would
+                                    render the same fact twice. -->
+                                    ${r.brokerAgentLimitSource === 'unlimited' ||
+                                    r.brokerAgentLimitSource === 'not_enforced'
+                                      ? nothing
+                                      : html`<span title="Precedence source"
+                                          >(${r.brokerAgentLimitSource})</span
+                                        >`}
+                                    ${r.brokerAgentLimitSource === 'not_enforced'
+                                      ? html`<span class="not-enforced-marker">not enforced</span>`
+                                      : nothing}
+                                  </div>
+                                `
+                              : nothing}
+                          </div>
+                        `
+                      )}
+                    </div>
+                  `}
         </div>
       </div>
     `;
@@ -1023,15 +1205,30 @@ export class ScionPageAdminQuotas extends LitElement {
 
   private renderLimitDialog() {
     const title = this.editingLimit ? 'Edit Limit Definition' : 'Create Limit Definition';
+    // System-seeded limit definitions: only default_value and description
+    // can be changed (enforced server-side too, pkg/hub/handlers_quota.go
+    // updateLimitDefinition). Keep name/resourceType/unit read-only here so
+    // the form can't produce a request the server will 403.
+    const isSystemEdit = !!this.editingLimit?.system;
 
     return html`
       <sl-dialog
         label=${title}
         ?open=${this.showLimitDialog}
-        @sl-hide=${() => { this.showLimitDialog = false; }}
+        @sl-hide=${() => {
+          this.showLimitDialog = false;
+        }}
       >
         ${this.limitDialogError
-          ? html`<sl-alert variant="danger" open class="dialog-error">${this.limitDialogError}</sl-alert>`
+          ? html`<sl-alert variant="danger" open class="dialog-error"
+              >${this.limitDialogError}</sl-alert
+            >`
+          : nothing}
+        ${isSystemEdit
+          ? html`<sl-alert variant="neutral" open class="dialog-error"
+              >This is a system limit definition. Only default value and description can be
+              changed.</sl-alert
+            >`
           : nothing}
 
         <div class="form-row">
@@ -1039,7 +1236,10 @@ export class ScionPageAdminQuotas extends LitElement {
             label="Name"
             placeholder="e.g. max-agents-per-project"
             value=${this.limitForm.name}
-            @sl-input=${(e: Event) => { this.limitForm = { ...this.limitForm, name: (e.target as HTMLInputElement).value }; }}
+            @sl-input=${(e: Event) => {
+              this.limitForm = { ...this.limitForm, name: (e.target as HTMLInputElement).value };
+            }}
+            ?readonly=${isSystemEdit}
             required
           ></sl-input>
         </div>
@@ -1049,11 +1249,18 @@ export class ScionPageAdminQuotas extends LitElement {
             label="Resource Type"
             placeholder="Select resource type"
             value=${this.limitForm.resourceType}
-            @sl-change=${(e: Event) => { this.limitForm = { ...this.limitForm, resourceType: (e.target as HTMLSelectElement).value }; }}
+            @sl-change=${(e: Event) => {
+              this.limitForm = {
+                ...this.limitForm,
+                resourceType: (e.target as HTMLSelectElement).value,
+              };
+            }}
+            ?disabled=${isSystemEdit}
             required
           >
             <sl-option value="agent">agent</sl-option>
             <sl-option value="project">project</sl-option>
+            <sl-option value="group">group</sl-option>
             <sl-option value="group_member">group_member</sl-option>
           </sl-select>
         </div>
@@ -1063,7 +1270,10 @@ export class ScionPageAdminQuotas extends LitElement {
             label="Unit"
             placeholder="e.g. agents, projects, members"
             value=${this.limitForm.unit}
-            @sl-input=${(e: Event) => { this.limitForm = { ...this.limitForm, unit: (e.target as HTMLInputElement).value }; }}
+            @sl-input=${(e: Event) => {
+              this.limitForm = { ...this.limitForm, unit: (e.target as HTMLInputElement).value };
+            }}
+            ?readonly=${isSystemEdit}
           ></sl-input>
         </div>
 
@@ -1073,8 +1283,16 @@ export class ScionPageAdminQuotas extends LitElement {
             type="number"
             min="0"
             placeholder="0 = unlimited"
-            value=${String(this.limitForm.defaultValue)}
-            @sl-input=${(e: Event) => { this.limitForm = { ...this.limitForm, defaultValue: Number((e.target as HTMLInputElement).value) || 0 }; }}
+            help-text="Required. Use 0 for unlimited."
+            value=${this.limitForm.defaultValue === null ? '' : String(this.limitForm.defaultValue)}
+            @sl-input=${(e: Event) => {
+              const raw = (e.target as HTMLInputElement).value.trim();
+              const parsed = raw === '' ? NaN : Number(raw);
+              this.limitForm = {
+                ...this.limitForm,
+                defaultValue: Number.isInteger(parsed) && parsed >= 0 ? parsed : null,
+              };
+            }}
           ></sl-input>
         </div>
 
@@ -1083,7 +1301,12 @@ export class ScionPageAdminQuotas extends LitElement {
             label="Description"
             placeholder="Optional description"
             value=${this.limitForm.description}
-            @sl-input=${(e: Event) => { this.limitForm = { ...this.limitForm, description: (e.target as HTMLInputElement).value }; }}
+            @sl-input=${(e: Event) => {
+              this.limitForm = {
+                ...this.limitForm,
+                description: (e.target as HTMLInputElement).value,
+              };
+            }}
           ></sl-input>
         </div>
 
@@ -1097,7 +1320,9 @@ export class ScionPageAdminQuotas extends LitElement {
         </sl-button>
         <sl-button
           slot="footer"
-          @click=${() => { this.showLimitDialog = false; }}
+          @click=${() => {
+            this.showLimitDialog = false;
+          }}
         >
           Cancel
         </sl-button>
@@ -1110,17 +1335,26 @@ export class ScionPageAdminQuotas extends LitElement {
       <sl-dialog
         label="Create Entitlement Binding"
         ?open=${this.showEntitlementDialog}
-        @sl-hide=${() => { this.showEntitlementDialog = false; }}
+        @sl-hide=${() => {
+          this.showEntitlementDialog = false;
+        }}
       >
         ${this.entitlementDialogError
-          ? html`<sl-alert variant="danger" open class="dialog-error">${this.entitlementDialogError}</sl-alert>`
+          ? html`<sl-alert variant="danger" open class="dialog-error"
+              >${this.entitlementDialogError}</sl-alert
+            >`
           : nothing}
 
         <div class="form-row">
           <sl-select
             label="Subject Type"
             value=${this.entitlementForm.subjectType}
-            @sl-change=${(e: Event) => { this.entitlementForm = { ...this.entitlementForm, subjectType: (e.target as HTMLSelectElement).value }; }}
+            @sl-change=${(e: Event) => {
+              this.entitlementForm = {
+                ...this.entitlementForm,
+                subjectType: (e.target as HTMLSelectElement).value,
+              };
+            }}
           >
             <sl-option value="user">user</sl-option>
             <sl-option value="group">group</sl-option>
@@ -1133,7 +1367,12 @@ export class ScionPageAdminQuotas extends LitElement {
             label="Subject ID"
             placeholder="User or group ID"
             value=${this.entitlementForm.subjectId}
-            @sl-input=${(e: Event) => { this.entitlementForm = { ...this.entitlementForm, subjectId: (e.target as HTMLInputElement).value }; }}
+            @sl-input=${(e: Event) => {
+              this.entitlementForm = {
+                ...this.entitlementForm,
+                subjectId: (e.target as HTMLInputElement).value,
+              };
+            }}
             required
           ></sl-input>
         </div>
@@ -1142,23 +1381,35 @@ export class ScionPageAdminQuotas extends LitElement {
           <sl-select
             label="Scope Type"
             value=${this.entitlementForm.scopeType}
-            @sl-change=${(e: Event) => { this.entitlementForm = { ...this.entitlementForm, scopeType: (e.target as HTMLSelectElement).value }; }}
+            @sl-change=${(e: Event) => {
+              this.entitlementForm = {
+                ...this.entitlementForm,
+                scopeType: (e.target as HTMLSelectElement).value,
+              };
+            }}
           >
             <sl-option value="system">system</sl-option>
             <sl-option value="project">project</sl-option>
           </sl-select>
         </div>
 
-        ${this.entitlementForm.scopeType === 'project' ? html`
-          <div class="form-row">
-            <sl-input
-              label="Scope ID (Project ID)"
-              placeholder="Project ID"
-              value=${this.entitlementForm.scopeId}
-              @sl-input=${(e: Event) => { this.entitlementForm = { ...this.entitlementForm, scopeId: (e.target as HTMLInputElement).value }; }}
-            ></sl-input>
-          </div>
-        ` : nothing}
+        ${this.entitlementForm.scopeType === 'project'
+          ? html`
+              <div class="form-row">
+                <sl-input
+                  label="Scope ID (Project ID)"
+                  placeholder="Project ID"
+                  value=${this.entitlementForm.scopeId}
+                  @sl-input=${(e: Event) => {
+                    this.entitlementForm = {
+                      ...this.entitlementForm,
+                      scopeId: (e.target as HTMLInputElement).value,
+                    };
+                  }}
+                ></sl-input>
+              </div>
+            `
+          : nothing}
 
         <div class="form-row">
           <sl-input
@@ -1167,7 +1418,12 @@ export class ScionPageAdminQuotas extends LitElement {
             min="0"
             placeholder="0 = unlimited"
             value=${String(this.entitlementForm.value)}
-            @sl-input=${(e: Event) => { this.entitlementForm = { ...this.entitlementForm, value: Number((e.target as HTMLInputElement).value) || 0 }; }}
+            @sl-input=${(e: Event) => {
+              this.entitlementForm = {
+                ...this.entitlementForm,
+                value: Number((e.target as HTMLInputElement).value) || 0,
+              };
+            }}
           ></sl-input>
         </div>
 
@@ -1181,7 +1437,9 @@ export class ScionPageAdminQuotas extends LitElement {
         </sl-button>
         <sl-button
           slot="footer"
-          @click=${() => { this.showEntitlementDialog = false; }}
+          @click=${() => {
+            this.showEntitlementDialog = false;
+          }}
         >
           Cancel
         </sl-button>
@@ -1194,13 +1452,20 @@ export class ScionPageAdminQuotas extends LitElement {
       <sl-dialog
         label="Confirm Delete"
         ?open=${this.showDeleteDialog}
-        @sl-hide=${() => { this.showDeleteDialog = false; this.deleteTarget = null; this.deleteDialogError = null; }}
+        @sl-hide=${() => {
+          this.showDeleteDialog = false;
+          this.deleteTarget = null;
+          this.deleteDialogError = null;
+        }}
       >
         ${this.deleteDialogError
-          ? html`<sl-alert variant="danger" open class="dialog-error">${this.deleteDialogError}</sl-alert>`
+          ? html`<sl-alert variant="danger" open class="dialog-error"
+              >${this.deleteDialogError}</sl-alert
+            >`
           : nothing}
         <p>
-          Are you sure you want to delete ${this.deleteTarget?.type === 'limit' ? 'limit definition' : 'entitlement binding'}
+          Are you sure you want to delete
+          ${this.deleteTarget?.type === 'limit' ? 'limit definition' : 'entitlement binding'}
           <strong>${this.deleteTarget?.name}</strong>? This action cannot be undone.
         </p>
         <sl-button
@@ -1213,7 +1478,10 @@ export class ScionPageAdminQuotas extends LitElement {
         </sl-button>
         <sl-button
           slot="footer"
-          @click=${() => { this.showDeleteDialog = false; this.deleteTarget = null; }}
+          @click=${() => {
+            this.showDeleteDialog = false;
+            this.deleteTarget = null;
+          }}
         >
           Cancel
         </sl-button>

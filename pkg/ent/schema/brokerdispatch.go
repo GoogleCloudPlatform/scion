@@ -80,6 +80,31 @@ func (BrokerDispatch) Fields() []ent.Field {
 		field.Time("deadline_at").
 			Optional().
 			Nillable(),
+
+		// Initiator attribution (E.2b, path F). Set once at insert from the
+		// request that originated the cross-node op; never updated
+		// afterward. Deliberately smaller than InitiatorAttribution (no
+		// snapshot/version/revision): a broker dispatch is a transport retry
+		// of an already-authorized operation, not a re-evaluated authoring
+		// point (ruling Q4).
+		field.String("initiator_principal_kind").
+			Optional().
+			Nillable(),
+		field.String("initiator_principal_id").
+			Optional().
+			Nillable(),
+		// session | uat | agent | dev_local | legacy_unknown — see
+		// store.InitiatorCredentialKind*.
+		field.String("initiator_credential_kind").
+			Optional().
+			Nillable(),
+		field.String("initiator_credential_id").
+			Optional().
+			Nillable(),
+		// Ties this row back to the originating request's log/audit trail.
+		field.String("correlation_id").
+			Optional().
+			Nillable(),
 	}
 }
 
@@ -88,6 +113,7 @@ func (BrokerDispatch) Indexes() []ent.Index {
 	return []ent.Index{
 		// Drain query: WHERE broker_id=$X AND state='pending'.
 		index.Fields("broker_id", "state"),
+		index.Fields("correlation_id"),
 	}
 }
 

@@ -179,17 +179,41 @@ def _apply_native_system_prompt(ctx: scion_harness.ProvisionContext) -> bool:
     return _is_meaningful_system_prompt(system_prompt)
 
 
-def _apply_model(ctx: scion_harness.ProvisionContext) -> None:
-    """Apply resolved model from SCION_MODEL to ~/.gemini/settings.json.
+def _resolve_model(ctx: scion_harness.ProvisionContext) -> str:
+    """Resolve the effective Gemini model name.
 
-    SCION_MODEL arrives already resolved by the Go side (pkg/agent/provision.go
-    and pkg/hub/handlers_agent_create_helpers.go resolve size aliases before the
-    container starts). This function writes the concrete model into
-    ~/.gemini/settings.json so the Gemini CLI uses it.
+    Precedence:
+      1. SCION_MODEL (the hub/broker-resolved value), via
+         scion_harness.resolve_model(ctx). An explicit model always wins. A
+         bare size alias that leaked through unresolved (resume/restart paths
+         with no alias table on the Go side) is mapped through this harness's
+         config.yaml model_aliases here.
+      2. harness_config.model (config.yaml's default tier, e.g. "medium"),
+         normalized through the same alias table via
+         scion_harness.normalize_model_alias(), so a tier never reaches
+         settings.json unresolved.
+      3. "" -- no model; the caller clears any stale model.name so the Gemini
+         CLI falls back to its own built-in default rather than a value left
+         over from an image pin or a previous provision.
     """
-    model = os.environ.get("SCION_MODEL", "").strip()
-    if not model:
-        return
+    resolved = scion_harness.resolve_model(ctx)
+    if resolved:
+        return resolved
+    return scion_harness.normalize_model_alias(
+        str(ctx.harness_config.get("model") or ""), ctx.harness_config
+    )
+
+
+def _apply_model(ctx: scion_harness.ProvisionContext) -> None:
+    """Write the resolved model into ~/.gemini/settings.json model.name.
+
+    The image's settings.json deliberately carries no model.name (it used to
+    pin one outside the alias table; ptone/scion#2674). The model is owned
+    here: see _resolve_model() for precedence. When nothing resolves, any
+    existing model.name is removed so a refreshed settings.json never keeps
+    a stale model.
+    """
+    model = _resolve_model(ctx)
 
     settings_path = scion_harness.expand_path(GEMINI_SETTINGS_FILE)
     settings: dict[str, Any] = {}
@@ -203,12 +227,23 @@ def _apply_model(ctx: scion_harness.ProvisionContext) -> None:
 
     model_section = settings.get("model")
     if not isinstance(model_section, dict):
+        if not model:
+            return
         model_section = {}
         settings["model"] = model_section
 
-    model_section["name"] = model
+    if model:
+        if model_section.get("name") == model:
+            ctx.info(f"model={model}")
+            return
+        model_section["name"] = model
+        ctx.info(f"model={model}")
+    else:
+        if "name" not in model_section:
+            return
+        stale = model_section.pop("name")
+        ctx.info(f"model unset; removed stale settings.json model.name={stale!r}")
     scion_harness.atomic_write_json(settings_path, settings)
-    ctx.info(f"model={model}")
 
 
 def provision(ctx: scion_harness.ProvisionContext) -> None:
@@ -218,6 +253,37 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     _update_gemini_settings(GEMINI_SETTINGS_FILE, gemini_auth_type)
 
     env = _build_env_overlay(resolved.method, resolved.env_key)
+    telemetry = ctx.telemetry
+    config = telemetry.get("telemetry") if isinstance(telemetry, dict) else None
+    enabled = isinstance(config, dict) and config.get("enabled", True)
+    source_env = telemetry.get("env", {}) if isinstance(telemetry, dict) else {}
+    port = str(source_env.get("SCION_OTEL_GRPC_PORT") or "4317")
+    if not port.isdecimal() or not 1 <= int(port) <= 65535:
+        raise scion_harness.ProvisionError("invalid local telemetry gRPC port")
+    env.update({
+        "SCION_NATIVE_TELEMETRY_POLICY": "enabled" if enabled else "disabled",
+        "GEMINI_TELEMETRY_ENABLED": "true" if enabled else "false",
+        "GEMINI_TELEMETRY_TARGET": "local",
+        "GEMINI_TELEMETRY_OTLP_ENDPOINT": f"http://127.0.0.1:{port}",
+        "GEMINI_TELEMETRY_OTLP_PROTOCOL": "grpc",
+        "GEMINI_TELEMETRY_LOG_PROMPTS": "false",
+        "GEMINI_TELEMETRY_TRACES_ENABLED": "false",
+        "GEMINI_TELEMETRY_USE_COLLECTOR": "false",
+        "GEMINI_TELEMETRY_OUTFILE": "",
+    })
+    settings_path = scion_harness.expand_path(GEMINI_SETTINGS_FILE)
+    try:
+        settings = scion_harness.load_json(settings_path) if os.path.isfile(settings_path) else {}
+    except (OSError, json.JSONDecodeError):
+        settings = {}
+    if not isinstance(settings, dict):
+        settings = {}
+    settings["telemetry"] = {
+        "enabled": bool(enabled), "target": "local",
+        "otlpEndpoint": f"http://127.0.0.1:{port}", "otlpProtocol": "grpc",
+        "logPrompts": False, "traces": False, "useCollector": False,
+    }
+    scion_harness.atomic_write_json(settings_path, settings)
     extra: dict[str, Any] | None = None
     if resolved.method == "vertex-ai":
         extra = {"vertex_ai": True}
@@ -233,8 +299,8 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     ctx.write_outputs(resolved, env=env, extra=extra)
     ctx.info(f"method={resolved.method}")
 
-    # Apply the resolved model to ~/.gemini/settings.json. SCION_MODEL
-    # arrives already resolved by the Go side.
+    # Apply the resolved model to ~/.gemini/settings.json: SCION_MODEL,
+    # else the harness-config default tier (see _resolve_model).
     _apply_model(ctx)
 
     harness_cfg = ctx.harness_config

@@ -20,15 +20,16 @@ const (
 // assistantDenied lists commands removed in assistant mode (relative to human).
 // Uses dot-separated command paths: "hub.auth", "config.migrate", etc.
 var assistantDenied = map[string]bool{
-	"hub.auth":             true,
-	"hub.token":            true,
-	"grove.reconnect":      true,
-	"config.migrate":       true,
-	"config.cd-config":     true,
-	"config.cd-grove":      true,
-	"cdw":                  true,
-	"clean":                true,
-	"server.recover-authz": true,
+	"hub.auth":                 true,
+	"hub.token":                true,
+	"hub.secret.migrate-names": true,
+	"project.reconnect":        true,
+	"config.migrate":           true,
+	"config.cd-config":         true,
+	"config.cd-project":        true,
+	"cdw":                      true,
+	"clean":                    true,
+	"server.recover-authz":     true,
 }
 
 // agentAllowed lists commands available in agent mode.
@@ -37,10 +38,12 @@ var assistantDenied = map[string]bool{
 var agentAllowed = map[string]bool{
 	"create":                      true,
 	"delete":                      true,
+	"keys":                        true,
 	"list":                        true,
 	"logs":                        true,
 	"look":                        true,
 	"message":                     true,
+	"reincarnate":                 true,
 	"resume":                      true,
 	"start":                       true,
 	"stop":                        true,
@@ -104,11 +107,28 @@ var agentAllowed = map[string]bool{
 	"user.skills.list":            true,
 	"user.skills.add":             true,
 	"user.skills.remove":          true,
+	"skills":                      true,
+	"skills.list":                 true,
+	"skills.show":                 true, // text output also lists versions (skills.versions itself is not allowed)
+	"skill":                       true,
+	"skill.list":                  true,
 	"project":                     true,
 	"project.skills":              true,
 	"project.skills.list":         true,
 	"project.skills.add":          true,
 	"project.skills.remove":       true,
+	"set-message-mode":            true,
+	"conversation":                true,
+	"conversation.list":           true,
+	"conversation.messages":       true,
+	"conversation.get":            true,
+	"conversation.get-message":    true,
+	"conversation.create":         true,
+	"conversation.set-default":    true,
+	"conversation.participants":   true,
+	"conversation.join":           true,
+	"conversation.leave":          true,
+	"conversation.catch-up":       true,
 }
 
 // resolveMode determines the active CLI mode from environment and settings.

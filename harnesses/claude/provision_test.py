@@ -97,7 +97,15 @@ class ModelResolutionTest(unittest.TestCase):
         self.assertEqual(model, "sonnet")
         self.assertEqual(env["ANTHROPIC_MODEL"], "sonnet")
 
-    def test_alias_matching_is_case_insensitive_and_accepts_shorthand(self) -> None:
+    def test_apply_model_is_case_insensitive_and_accepts_shorthand(self) -> None:
+        """scion_harness.resolve_model normalizes shorthand/case before lookup.
+
+        This used to be a claude-local mirror of config.NormalizeModelAlias /
+        config.ResolveModelAlias (pkg/config/templates.go); the mirror moved
+        to the shared scion_harness.resolve_model helper (unit-tested in
+        scion_harness_test.py), so this is now an end-to-end check that
+        _apply_model wires SCION_MODEL through that helper correctly.
+        """
         cases = {
             "Medium": "sonnet",
             "L": "opus",
@@ -109,35 +117,13 @@ class ModelResolutionTest(unittest.TestCase):
             with self.subTest(raw=raw):
                 with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
                     ctx = make_ctx(tmp)
-                    self.assertEqual(provision._resolve_model_alias(ctx, raw), want)
+                    with env_vars(SCION_MODEL=raw, ANTHROPIC_MODEL=None):
+                        env: dict[str, str] = {}
+                        model = provision._apply_model(ctx, env)
+                self.assertEqual(model, want)
+                self.assertEqual(env["ANTHROPIC_MODEL"], want)
 
-    def test_shorthand_set_matches_go_normalize_model_alias(self) -> None:
-        """Python must not accept spellings the Go --model path rejects.
-
-        config.NormalizeModelAlias (pkg/config/templates.go) handles only
-        s/m/l/xl plus lower-casing, and config.ResolveModelAlias gates the
-        map lookup on config.KnownModelAliases. A spelling accepted only here
-        would make ANTHROPIC_MODEL disagree with the higher-precedence
-        --model flag.
-        """
-        self.assertEqual(
-            provision.MODEL_ALIAS_SHORTHAND,
-            {"s": "small", "m": "medium", "l": "large", "xl": "extra-large"},
-        )
-        self.assertEqual(
-            provision.KNOWN_MODEL_ALIASES,
-            frozenset({"small", "medium", "large", "extra-large"}),
-        )
-
-        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
-            ctx = make_ctx(tmp)
-            # Spellings Go does not normalize stay concrete (lower-cased),
-            # exactly as `config.ResolveModelAlias` would leave them.
-            for raw in ("xlarge", "extra_large"):
-                with self.subTest(raw=raw):
-                    self.assertEqual(provision._resolve_model_alias(ctx, raw), raw)
-
-    def test_unmapped_alias_falls_back_to_the_tier_name(self) -> None:
+    def test_apply_model_unmapped_alias_falls_back_to_the_tier_name(self) -> None:
         """Matches config.ResolveModelAlias: unmapped alias passes through."""
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             manifest = {
@@ -145,9 +131,28 @@ class ModelResolutionTest(unittest.TestCase):
                 "harness_config": {"model_aliases": {"small": "haiku"}},
             }
             ctx = scion_harness.ProvisionContext("claude", manifest)
-            self.assertEqual(provision._resolve_model_alias(ctx, "large"), "large")
+            with env_vars(SCION_MODEL="large", ANTHROPIC_MODEL=None):
+                env: dict[str, str] = {}
+                model = provision._apply_model(ctx, env)
+        self.assertEqual(model, "large")
 
-    def test_custom_non_tier_alias_keys_are_ignored(self) -> None:
+    def test_apply_model_missing_harness_config_falls_back_to_tier_name(self) -> None:
+        """Regression guard for the gemini review on GoogleCloudPlatform/scion#1891:
+        ctx.harness_config must never be treated as unconditionally truthy/dict-like
+        without a guard. A manifest with no "harness_config" key at all (so the
+        property defaults to {}) must resolve to the bare tier name, not raise.
+        """
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            manifest = {
+                "harness_bundle_dir": os.path.join(tmp, ".scion", "harness"),
+            }
+            ctx = scion_harness.ProvisionContext("claude", manifest)
+            with env_vars(SCION_MODEL="large", ANTHROPIC_MODEL=None):
+                env: dict[str, str] = {}
+                model = provision._apply_model(ctx, env)
+        self.assertEqual(model, "large")
+
+    def test_apply_model_custom_non_tier_alias_keys_are_ignored(self) -> None:
         """Only the four canonical tiers resolve, as on the Go side."""
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
             manifest = {
@@ -155,7 +160,10 @@ class ModelResolutionTest(unittest.TestCase):
                 "harness_config": {"model_aliases": {"fast": "haiku"}},
             }
             ctx = scion_harness.ProvisionContext("claude", manifest)
-            self.assertEqual(provision._resolve_model_alias(ctx, "fast"), "fast")
+            with env_vars(SCION_MODEL="fast", ANTHROPIC_MODEL=None):
+                env: dict[str, str] = {}
+                model = provision._apply_model(ctx, env)
+        self.assertEqual(model, "fast")
 
     def test_concrete_model_passes_through_unchanged(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
@@ -166,6 +174,27 @@ class ModelResolutionTest(unittest.TestCase):
 
         self.assertEqual(model, "claude-sonnet-4-5")
         self.assertEqual(env["ANTHROPIC_MODEL"], "claude-sonnet-4-5")
+
+    def test_concrete_model_case_is_preserved(self) -> None:
+        """Behavior difference from claude's old private mirror (R1 of the
+        round-1 review): the old `_normalize_model_alias` lower-cased every
+        value, tier or not, so a mixed-case concrete model name supplied via
+        an explicit SCION_MODEL (a template/hub `env:` block — Go's
+        reResolveModelAlias only rewrites tier names, not concrete ones)
+        would have been lower-cased before reaching ANTHROPIC_MODEL. The
+        shared scion_harness.resolve_model only normalizes case to decide
+        whether a value is a known tier; a concrete name passes through with
+        the caller's original spelling. Anthropic model IDs happen to be
+        lowercase already, so this is harmless for claude in practice.
+        """
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            ctx = make_ctx(tmp)
+            with env_vars(SCION_MODEL="Claude-Sonnet-4-5", ANTHROPIC_MODEL=None):
+                env: dict[str, str] = {}
+                model = provision._apply_model(ctx, env)
+
+        self.assertEqual(model, "Claude-Sonnet-4-5")
+        self.assertEqual(env["ANTHROPIC_MODEL"], "Claude-Sonnet-4-5")
 
     def test_no_requested_model_falls_back_to_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
@@ -245,6 +274,64 @@ class ModelResolutionTest(unittest.TestCase):
                 provision._apply_model(ctx, {})
 
         self.assertEqual(warnings, [])
+
+    def test_opus_5_5_falls_back_to_opus_4_8_on_old_claude_code(self) -> None:
+        """Claude Code < 2.1.280 rejects claude-opus-5-5* and opus with 400."""
+        for requested in ("claude-opus-5-5", "claude-opus-5-5@default", "opus", None):
+            with self.subTest(requested=requested):
+                warnings: list[str] = []
+                with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+                    ctx = make_ctx(tmp)
+                    ctx.warn = warnings.append  # type: ignore[method-assign]
+                    with env_vars(SCION_MODEL=requested, ANTHROPIC_MODEL=None):
+                        env: dict[str, str] = {}
+                        model = provision._apply_model(ctx, env, claude_version="2.1.270")
+
+                self.assertEqual(model, "claude-opus-4-8")
+                self.assertEqual(env["ANTHROPIC_MODEL"], "claude-opus-4-8")
+                self.assertEqual(len(warnings), 1)
+                self.assertIn("2.1.280", warnings[0])
+                self.assertIn("claude_code_version_too_old", warnings[0])
+
+    def test_opus_5_5_passes_through_on_claude_code_2_1_280_or_newer(self) -> None:
+        for version in ("2.1.280", "2.1.295", "2.2.0"):
+            for requested in ("claude-opus-5-5@default", "opus"):
+                with self.subTest(version=version, requested=requested):
+                    warnings: list[str] = []
+                    with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+                        ctx = make_ctx(tmp)
+                        ctx.warn = warnings.append  # type: ignore[method-assign]
+                        with env_vars(SCION_MODEL=requested, ANTHROPIC_MODEL=None):
+                            env: dict[str, str] = {}
+                            model = provision._apply_model(ctx, env, claude_version=version)
+
+                    self.assertEqual(model, requested)
+                    self.assertEqual(env["ANTHROPIC_MODEL"], requested)
+                    self.assertEqual(warnings, [])
+
+    def test_non_opus_5_5_models_unaffected_by_old_claude_code(self) -> None:
+        for requested in ("claude-opus-4-8", "claude-sonnet-4-5", "haiku"):
+            with self.subTest(requested=requested):
+                warnings: list[str] = []
+                with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+                    ctx = make_ctx(tmp)
+                    ctx.warn = warnings.append  # type: ignore[method-assign]
+                    with env_vars(SCION_MODEL=requested, ANTHROPIC_MODEL=None):
+                        env: dict[str, str] = {}
+                        model = provision._apply_model(ctx, env, claude_version="2.1.270")
+
+                self.assertEqual(model, requested)
+                self.assertEqual(env["ANTHROPIC_MODEL"], requested)
+                self.assertEqual(warnings, [])
+
+    def test_build_env_overlay_disables_autoupdater(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            ctx = make_ctx(tmp)
+            auth = scion_harness.ResolvedAuth(method="api-key", env_key="ANTHROPIC_API_KEY")
+            env = provision._build_env_overlay(ctx, auth)
+
+        self.assertEqual(env.get("CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST"), "1")
+        self.assertEqual(env.get("DISABLE_AUTOUPDATER"), "1")
 
 
 class ConfigYamlTest(unittest.TestCase):

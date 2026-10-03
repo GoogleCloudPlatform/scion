@@ -15,7 +15,9 @@
 package hub
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -71,11 +73,28 @@ type ServerConfigResponse struct {
 	// Default runtime broker (hub-level)
 	DefaultRuntimeBroker string `json:"default_runtime_broker,omitempty"`
 
+	// DefaultTimezone is the hub-level IANA timezone fallback.
+	DefaultTimezone string `json:"default_timezone,omitempty"`
+
+	// DefaultGCPIdentityMode is the hub-wide fallback GCP metadata mode
+	// ("block", "passthrough", or "assign"), applied when neither the agent
+	// create request nor the project's default GCP identity setting names one.
+	DefaultGCPIdentityMode string `json:"default_gcp_identity_mode,omitempty"`
+	// DefaultGCPIdentityServiceAccountID is the service account used when
+	// DefaultGCPIdentityMode is "assign".
+	DefaultGCPIdentityServiceAccountID string `json:"default_gcp_identity_service_account_id,omitempty"`
+
 	// AutoInjectGcloudADC controls whether gcloud ADC is injected into agent containers.
 	AutoInjectGcloudADC bool `json:"auto_inject_gcloud_adc,omitempty"`
 
 	// AutoExposePorts controls whether ports are automatically exposed in agent containers.
 	AutoExposePorts *config.AutoExposePortsSettings `json:"auto_expose_ports,omitempty"`
+
+	// Quotas controls hub-level quota enforcement toggles.
+	Quotas *config.QuotaSettings `json:"quotas,omitempty"`
+
+	// AgentSecrets controls hub-level policy for secrets written by agents.
+	AgentSecrets *config.AgentSecretsSettings `json:"agent_secrets,omitempty"`
 
 	// Federation holds the federation authentication config for the admin API.
 	Federation *config.V1FederationConfig `json:"federation,omitempty"`
@@ -117,11 +136,27 @@ type ServerConfigUpdateRequest struct {
 	// Default runtime broker (hub-level)
 	DefaultRuntimeBroker *string `json:"default_runtime_broker,omitempty"`
 
+	// DefaultTimezone is the hub-level IANA timezone fallback.
+	DefaultTimezone *string `json:"default_timezone,omitempty"`
+
+	// DefaultGCPIdentityMode is the hub-wide fallback GCP metadata mode
+	// ("block", "passthrough", or "assign").
+	DefaultGCPIdentityMode *string `json:"default_gcp_identity_mode,omitempty"`
+	// DefaultGCPIdentityServiceAccountID is the service account used when
+	// DefaultGCPIdentityMode is "assign".
+	DefaultGCPIdentityServiceAccountID *string `json:"default_gcp_identity_service_account_id,omitempty"`
+
 	// AutoInjectGcloudADC controls whether gcloud ADC is injected into agent containers.
 	AutoInjectGcloudADC *bool `json:"auto_inject_gcloud_adc,omitempty"`
 
 	// AutoExposePorts controls whether ports are automatically exposed in agent containers.
 	AutoExposePorts *config.AutoExposePortsSettings `json:"auto_expose_ports,omitempty"`
+
+	// Quotas controls hub-level quota enforcement toggles.
+	Quotas *config.QuotaSettings `json:"quotas,omitempty"`
+
+	// AgentSecrets controls hub-level policy for secrets written by agents.
+	AgentSecrets *config.AgentSecretsSettings `json:"agent_secrets,omitempty"`
 
 	// Federation holds the federation authentication config update.
 	Federation *config.V1FederationConfig `json:"federation,omitempty"`
@@ -159,7 +194,7 @@ func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request)
 			}
 			s.handlePutServerConfigDB(w, r, ops)
 		default:
-			MethodNotAllowed(w)
+			MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodPost)
 		}
 		return
 	}
@@ -188,7 +223,7 @@ func (s *Server) handleAdminServerConfig(w http.ResponseWriter, r *http.Request)
 		}
 		s.handlePutServerConfig(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPut, http.MethodPatch, http.MethodPost)
 	}
 }
 
@@ -200,7 +235,7 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 	user := GetUserIdentityFromContext(r.Context())
 
 	if r.Method != http.MethodDelete {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodDelete)
 		return
 	}
 
@@ -215,6 +250,18 @@ func (s *Server) handleAdminServerConfigSectionReset(w http.ResponseWriter, r *h
 	if sectionName == "" {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 			"Section name is required", nil)
+		return
+	}
+
+	// The "experiments" section has its own compare-and-set reset with a
+	// per-name audit log (DELETE /api/v1/admin/experiments), gated on
+	// hub.experiments.update. This generic route has no compare-and-set and
+	// is gated on hub.config.update, so it must not be a second way to clear
+	// every experiment override (ptone/scion#2217). Rejected before any
+	// store call.
+	if sectionName == "experiments" {
+		writeError(w, http.StatusBadRequest, "validation_failed",
+			"use DELETE /api/v1/admin/experiments", nil)
 		return
 	}
 
@@ -307,8 +354,14 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 		DefaultMaxAgentRole:  vs.DefaultMaxAgentRole,
 		DefaultAgentRole:     vs.DefaultAgentRole,
 		DefaultRuntimeBroker: vs.DefaultRuntimeBroker,
+		DefaultTimezone:      vs.DefaultTimezone,
 		AutoInjectGcloudADC:  vs.AutoInjectGcloudADC,
 		AutoExposePorts:      vs.AutoExposePorts,
+		Quotas:               vs.Quotas,
+		AgentSecrets:         vs.AgentSecrets,
+
+		DefaultGCPIdentityMode:             vs.DefaultGCPIdentityMode,
+		DefaultGCPIdentityServiceAccountID: vs.DefaultGCPIdentityServiceAccountID,
 	}
 
 	// Populate top-level federation field from the server config.
@@ -328,12 +381,62 @@ func (s *Server) handleGetServerConfig(w http.ResponseWriter) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// validateDefaultTimezone checks an agent_defaults.default_timezone
+// candidate against the rule design.md §3 A (d) also uses for the per-user
+// display-timezone preference: it must be a real IANA time zone name, and
+// nonPortableTimezoneNames is rejected even though time.LoadLocation accepts
+// those names. An empty string means UTC and is always valid.
+//
+// Delegates to validateIANATimezone (timezone_validate.go), shared with the
+// per-user display-timezone preference validator (handlers_users_core.go's
+// validateUserTimezone), so the two can't drift. Unlike validateUserTimezone,
+// this one adds no wrapping of its own: errNonPortableTimezone's own text
+// ("not an IANA time zone name") already says everything "default_timezone"
+// needs — there is no "Auto" concept to mention here, which is the only
+// reason validateUserTimezone's wording has to differ from the sentinel's.
+func validateDefaultTimezone(tz string) error {
+	if tz == "" {
+		return nil
+	}
+	return validateIANATimezone(tz)
+}
+
 // handlePutServerConfig updates the global settings.yaml.
 func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	var req ServerConfigUpdateRequest
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
 		return
+	}
+
+	// server.hub.agent_endpoint has no live-reload path (like public_url, it
+	// only takes effect at the next restart), so a malformed value written
+	// here would otherwise only surface as a startup failure later. Reject it
+	// at write time with the same validator the Hub uses at startup, and
+	// persist the normalized form so the written value never diverges from
+	// what the Hub will actually stamp into agents once it restarts.
+	if req.Server != nil && req.Server.Hub != nil && req.Server.Hub.AgentEndpoint != "" {
+		normalized, err := config.ValidateAgentEndpoint(req.Server.Hub.AgentEndpoint)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
+			return
+		}
+		req.Server.Hub.AgentEndpoint = normalized
+	}
+
+	// server.auth.default_user_role must be one of the schema enum values
+	// (design D6). The DB path validates section docs against the schema;
+	// file mode has no schema pass, so validate this key against the same
+	// access-section schema here rather than writing garbage to settings.yaml.
+	if req.Server != nil && req.Server.Auth != nil && req.Server.Auth.DefaultUserRole != "" {
+		doc, err := json.Marshal(opsettings.AccessSettings{DefaultUserRole: req.Server.Auth.DefaultUserRole})
+		if err == nil {
+			if errs := opsettings.Validate("access", doc); len(errs) > 0 {
+				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+					fmt.Sprintf("invalid server.auth.default_user_role %q: must be \"member\" or \"viewer\"", req.Server.Auth.DefaultUserRole), nil)
+				return
+			}
+		}
 	}
 
 	globalDir, err := config.GetGlobalDir()
@@ -358,6 +461,33 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Apply updates by marshaling the request fields and merging
 	applySettingsUpdates(raw, &req)
+
+	// Validate the effective hub default GCP identity (the merged result, so
+	// a PUT that changes only one of the pair is checked against the other's
+	// stored value). Same checks as the DB-mode handler.
+	if req.DefaultGCPIdentityMode != nil || req.DefaultGCPIdentityServiceAccountID != nil {
+		mode, _ := raw["default_gcp_identity_mode"].(string)
+		saID, _ := raw["default_gcp_identity_service_account_id"].(string)
+		if !s.validateHubDefaultGCPIdentity(w, r.Context(), opsettings.AgentDefaultsSettings{
+			DefaultGCPIdentityMode:             mode,
+			DefaultGCPIdentityServiceAccountID: saID,
+		}) {
+			return
+		}
+	}
+
+	// Validate the hub default timezone (IANA name check) before writing.
+	// Same rule, same 422, as the DB-mode handler (admin_settings_db.go) —
+	// without this, an invalid name is written to settings.yaml silently and
+	// never rejected in file mode.
+	if req.DefaultTimezone != nil {
+		tz := *req.DefaultTimezone
+		if err := validateDefaultTimezone(tz); err != nil {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+				fmt.Sprintf("invalid default_timezone %q: %v", tz, err), nil)
+			return
+		}
+	}
 
 	// Ensure schema_version is set
 	if _, ok := raw["schema_version"]; !ok {
@@ -547,6 +677,27 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 			delete(raw, "default_runtime_broker")
 		}
 	}
+	if req.DefaultTimezone != nil {
+		if *req.DefaultTimezone != "" {
+			raw["default_timezone"] = *req.DefaultTimezone
+		} else {
+			delete(raw, "default_timezone")
+		}
+	}
+	if req.DefaultGCPIdentityMode != nil {
+		if *req.DefaultGCPIdentityMode != "" {
+			raw["default_gcp_identity_mode"] = *req.DefaultGCPIdentityMode
+		} else {
+			delete(raw, "default_gcp_identity_mode")
+		}
+	}
+	if req.DefaultGCPIdentityServiceAccountID != nil {
+		if *req.DefaultGCPIdentityServiceAccountID != "" {
+			raw["default_gcp_identity_service_account_id"] = *req.DefaultGCPIdentityServiceAccountID
+		} else {
+			delete(raw, "default_gcp_identity_service_account_id")
+		}
+	}
 	if req.AutoInjectGcloudADC != nil {
 		if *req.AutoInjectGcloudADC {
 			raw["auto_inject_gcloud_adc"] = true
@@ -555,10 +706,32 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 		}
 	}
 	if req.AutoExposePorts != nil {
-		if req.AutoExposePorts.Enabled != nil {
+		// Section-generic zero check; see the Quotas block below.
+		if !isZeroStruct(req.AutoExposePorts) {
 			raw["auto_expose_ports"] = marshalToMap(req.AutoExposePorts)
 		} else {
 			delete(raw, "auto_expose_ports")
+		}
+	}
+	if req.Quotas != nil {
+		// Section-generic zero check (matches isZeroStruct's use elsewhere,
+		// admin_settings_db.go): checking a single named field (e.g.
+		// EnforceBrokerQuotas != nil) would silently stop deleting empty
+		// documents the moment QuotaSettings gains a second field, since a
+		// request with only the new field set would then wrongly delete the
+		// whole section. Delete only when every field is nil/zero.
+		if !isZeroStruct(req.Quotas) {
+			raw["quotas"] = marshalToMap(req.Quotas)
+		} else {
+			delete(raw, "quotas")
+		}
+	}
+	if req.AgentSecrets != nil {
+		// Section-generic zero check; see the Quotas block above.
+		if !isZeroStruct(req.AgentSecrets) {
+			raw["agent_secrets"] = marshalToMap(req.AgentSecrets)
+		} else {
+			delete(raw, "agent_secrets")
 		}
 	}
 	if req.Federation != nil {

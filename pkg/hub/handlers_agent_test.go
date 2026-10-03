@@ -364,6 +364,33 @@ func TestDeleteAgent_DispatchFailure_ReturnsError(t *testing.T) {
 	assert.NoError(t, err, "agent should still exist when broker dispatch fails")
 }
 
+// UAT F4 (#1846): a broker 409 (ambiguous target) is surfaced as a 409 with
+// the broker's message, not as a 502 runtime error.
+func TestDeleteAgent_BrokerConflict_Returns409(t *testing.T) {
+	srv, s := testServer(t)
+
+	disp := &deleteDispatcher{
+		deleteErr: fmt.Errorf("dispatch: %w", &brokerStatusError{
+			StatusCode: http.StatusConflict,
+			Body:       `{"error":{"code":"conflict","message":"agent 'dev' is ambiguous: 2 agents match in project \"p\""}}`,
+		}),
+	}
+	srv.SetDispatcher(disp)
+
+	_, _, agent := setupOnlineBrokerAgent(t, s, "ambig")
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+	assert.Equal(t, http.StatusConflict, rec.Code)
+
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	assert.Equal(t, ErrCodeConflict, errResp.Error.Code)
+	assert.Contains(t, errResp.Error.Message, "ambiguous")
+
+	_, err := s.GetAgent(context.Background(), agent.ID)
+	assert.NoError(t, err, "agent should still exist when the broker refuses the delete")
+}
+
 func TestDeleteAgent_DispatchFailure_ForceDeleteSucceeds(t *testing.T) {
 	srv, s := testServer(t)
 
@@ -785,9 +812,16 @@ type createAgentDispatcher struct {
 	startCalled   bool
 	execOutput    string
 	execExitCode  int
+	// capturedAgent records the agent passed to DispatchAgentCreate, so tests
+	// that need the create-time agent.ID (e.g. to check quota reservations,
+	// ptone/scion#1986) can read it back after the HTTP response, which for
+	// a failure path never echoes the ID.
+	capturedAgent *store.Agent
+	logsErr       error
 }
 
 func (d *createAgentDispatcher) DispatchAgentCreate(_ context.Context, agent *store.Agent) error {
+	d.capturedAgent = agent
 	if d.createPhase != "" {
 		agent.Phase = d.createPhase
 	}
@@ -800,6 +834,11 @@ func (d *createAgentDispatcher) DispatchAgentCreate(_ context.Context, agent *st
 	return nil
 }
 func (d *createAgentDispatcher) DispatchAgentProvision(_ context.Context, agent *store.Agent) error {
+	agent.Phase = string(state.PhaseCreated)
+	return nil
+}
+
+func (d *createAgentDispatcher) DispatchAgentReprovision(_ context.Context, agent *store.Agent) error {
 	agent.Phase = string(state.PhaseCreated)
 	return nil
 }
@@ -843,7 +882,8 @@ type failingCreateDispatcher struct {
 	deleteBranch      bool
 }
 
-func (d *failingCreateDispatcher) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (d *failingCreateDispatcher) DispatchAgentCreateWithGather(_ context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+	d.capturedAgent = agent
 	return nil, d.createErr
 }
 func (d *failingCreateDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Agent, deleteFiles, removeBranch, _ bool, _ time.Time) error {
@@ -853,7 +893,7 @@ func (d *failingCreateDispatcher) DispatchAgentDelete(_ context.Context, _ *stor
 	return nil
 }
 func (d *createAgentDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
-	return "", nil
+	return "", d.logsErr
 }
 func (d *createAgentDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
 	return d.execOutput, d.execExitCode, nil
@@ -4086,6 +4126,14 @@ func TestCreateAgent_DispatchFailure_CleansUpBroker(t *testing.T) {
 	// Verify agent record was deleted from hub store
 	_, err := s.GetAgent(ctx, "auth-fail-agent")
 	assert.ErrorIs(t, err, store.ErrNotFound, "agent should be deleted from hub store after dispatch failure")
+
+	// ptone/scion#1986: a dispatch failure must not strand either quota
+	// reservation the create path took before dispatching.
+	require.NotNil(t, disp.capturedAgent, "dispatcher must have observed the create-time agent")
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, disp.capturedAgent.ID),
+		"a failed create must release the per-broker reservation")
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, disp.capturedAgent.ID),
+		"a failed create must release the per-project reservation")
 }
 
 // --- GCP Identity Assignment Tests ---
@@ -4204,11 +4252,14 @@ func TestCreateAgent_GCPIdentityNoField(t *testing.T) {
 
 	var resp CreateAgentResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	// When no GCP identity is specified, default to "block" to prevent
-	// leaking the underlying compute identity.
-	require.NotNil(t, resp.Agent.AppliedConfig.GCPIdentity, "GCPIdentity should default to block when not specified")
-	assert.Equal(t, store.GCPMetadataModeBlock, resp.Agent.AppliedConfig.GCPIdentity.MetadataMode)
-	assert.Empty(t, resp.Agent.AppliedConfig.GCPIdentity.ServiceAccountID)
+	// When no GCP identity is specified anywhere (no request field, no
+	// project default, no hub default), AppliedConfig.GCPIdentity is left
+	// unset (nil) rather than an explicit "block" record, so the broker can
+	// apply its own runtime-aware default: "block" on every runtime except
+	// Kubernetes (unchanged, still keeping the underlying compute identity
+	// unavailable by default), "passthrough" on Kubernetes, since Kubernetes
+	// does not support "block" (ptone/scion#2328 phase 1).
+	assert.Nil(t, resp.Agent.AppliedConfig.GCPIdentity, "GCPIdentity should stay unset when not specified anywhere, letting the broker apply its runtime-aware default")
 }
 
 func TestCreateAgent_GCPIdentityInvalidMode(t *testing.T) {
@@ -4369,7 +4420,7 @@ func TestCreateAgent_GCPPassthrough_BrokerOwnerAllowed(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Create a broker owned by the same user, with host SA registered (P8).
 	broker := &store.RuntimeBroker{
@@ -4447,7 +4498,7 @@ func TestCreateAgent_GCPPassthrough_NonOwnerDenied(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Create a broker owned by a DIFFERENT user
 	broker := &store.RuntimeBroker{
@@ -4521,7 +4572,7 @@ func TestCreateAgent_GCPPassthrough_AdminAllowed(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	// Broker owned by someone else, with host SA registered (P8).
 	broker := &store.RuntimeBroker{

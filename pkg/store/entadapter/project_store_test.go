@@ -172,6 +172,36 @@ func TestProject_Update(t *testing.T) {
 	assert.Equal(t, int64(424242), *got.GitHubInstallationID)
 }
 
+// TestProject_SetProjectOwnerID pins that SetProjectOwnerID writes only
+// owner_id (name, git remote and labels are left untouched) and returns
+// ErrNotFound for a missing project. It does not model a concurrent stale
+// writer; that interleaving is guarded by review at the call site.
+func TestProject_SetProjectOwnerID(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	p := newProject(1)
+	p.OwnerID = uuid.NewString()
+	require.NoError(t, ps.CreateProject(ctx, p))
+
+	// Give the project non-default name and git remote values to check below.
+	p.Name = "Renamed"
+	p.GitRemote = "https://github.com/acme/renamed.git"
+	require.NoError(t, ps.UpdateProject(ctx, p))
+
+	newOwner := uuid.NewString()
+	require.NoError(t, ps.SetProjectOwnerID(ctx, p.ID, newOwner))
+
+	got, err := ps.GetProject(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, newOwner, got.OwnerID)
+	assert.Equal(t, "Renamed", got.Name, "SetProjectOwnerID must not touch other fields")
+	assert.Equal(t, "https://github.com/acme/renamed.git", got.GitRemote)
+	assert.Equal(t, p.Labels, got.Labels)
+
+	assert.ErrorIs(t, ps.SetProjectOwnerID(ctx, uuid.NewString(), newOwner), store.ErrNotFound)
+}
+
 func TestProject_SharedDirsRoundTrip(t *testing.T) {
 	ps := newTestProjectStore(t)
 	ctx := context.Background()
@@ -328,6 +358,92 @@ func TestBroker_GetByName(t *testing.T) {
 
 	_, err = ps.GetRuntimeBrokerByName(ctx, "nonexistent")
 	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// TestSetRuntimeBrokerCreatedByIfEmpty verifies the atomic, never-overwrite
+// write primitive the broker-ownership backfill depends on: it must set
+// created_by exactly when the row's current value is empty — matching both
+// NULL and "" storage, since created_by is an Optional (not Nillable) field
+// and either representation can occur — leave any non-empty value
+// untouched, and report whether it actually wrote via the applied return
+// value, so a caller can distinguish "I set this" from "someone already
+// had".
+func TestSetRuntimeBrokerCreatedByIfEmpty(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("NULL created_by is set", func(t *testing.T) {
+		ps := newTestProjectStore(t)
+		b := newBroker() // CreateRuntimeBroker never sets CreatedBy, so this stores NULL
+		require.NoError(t, ps.CreateRuntimeBroker(ctx, b))
+		require.Empty(t, b.CreatedBy)
+
+		applied, err := ps.SetRuntimeBrokerCreatedByIfEmpty(ctx, b.ID, "user-a")
+		require.NoError(t, err)
+		assert.True(t, applied)
+
+		got, err := ps.GetRuntimeBroker(ctx, b.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "user-a", got.CreatedBy)
+	})
+
+	t.Run("empty-string created_by is set", func(t *testing.T) {
+		ps := newTestProjectStore(t)
+		b := newBroker()
+		require.NoError(t, ps.CreateRuntimeBroker(ctx, b))
+		// Force an explicit empty string, as opposed to NULL, to prove both
+		// representations of "unset" are matched.
+		_, err := ps.client.RuntimeBroker.UpdateOneID(uuid.MustParse(b.ID)).SetCreatedBy("").Save(ctx)
+		require.NoError(t, err)
+
+		applied, err := ps.SetRuntimeBrokerCreatedByIfEmpty(ctx, b.ID, "user-a")
+		require.NoError(t, err)
+		assert.True(t, applied)
+
+		got, err := ps.GetRuntimeBroker(ctx, b.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "user-a", got.CreatedBy)
+	})
+
+	t.Run("non-empty created_by is left untouched", func(t *testing.T) {
+		ps := newTestProjectStore(t)
+		b := newBroker()
+		b.CreatedBy = "user-existing"
+		require.NoError(t, ps.CreateRuntimeBroker(ctx, b))
+
+		applied, err := ps.SetRuntimeBrokerCreatedByIfEmpty(ctx, b.ID, "user-a")
+		require.NoError(t, err)
+		assert.False(t, applied, "must not overwrite an existing owner")
+
+		got, err := ps.GetRuntimeBroker(ctx, b.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "user-existing", got.CreatedBy)
+	})
+
+	t.Run("missing id is a no-op, not an error", func(t *testing.T) {
+		ps := newTestProjectStore(t)
+
+		applied, err := ps.SetRuntimeBrokerCreatedByIfEmpty(ctx, uuid.NewString(), "user-a")
+		require.NoError(t, err)
+		assert.False(t, applied)
+	})
+
+	t.Run("second call on an already-set row is a no-op", func(t *testing.T) {
+		ps := newTestProjectStore(t)
+		b := newBroker()
+		require.NoError(t, ps.CreateRuntimeBroker(ctx, b))
+
+		first, err := ps.SetRuntimeBrokerCreatedByIfEmpty(ctx, b.ID, "user-a")
+		require.NoError(t, err)
+		require.True(t, first)
+
+		second, err := ps.SetRuntimeBrokerCreatedByIfEmpty(ctx, b.ID, "user-b")
+		require.NoError(t, err)
+		assert.False(t, second, "the row is no longer empty; a second call must not overwrite it")
+
+		got, err := ps.GetRuntimeBroker(ctx, b.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "user-a", got.CreatedBy, "the first writer's value must survive")
+	})
 }
 
 func TestBroker_Update(t *testing.T) {
@@ -658,6 +774,110 @@ func TestListProjects_CursorPagination(t *testing.T) {
 	}
 }
 
+// TestListRuntimeBrokers_CursorPagination verifies ListRuntimeBrokers honors
+// ListOptions.Cursor and enumerates every broker across pages with no gaps or
+// duplicates. Before the keyset-pagination fix, the cursor was silently
+// ignored and NextCursor was never set: a caller could only ever see the
+// first (default 50-row) page. Brokers are listed newest-first, so the rows
+// that fell off permanently were always the oldest ones on any store with
+// more than one page's worth of brokers.
+func TestListRuntimeBrokers_CursorPagination(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	const total = 125 // more than two pages at pageSize=50
+	created := make(map[string]bool, total)
+	for i := 0; i < total; i++ {
+		b := newBroker()
+		require.NoError(t, ps.CreateRuntimeBroker(ctx, b))
+		created[b.ID] = true
+	}
+
+	// Use an explicit page size (50) to exercise cursor across multiple pages.
+	const pageSize = 50
+	first, err := ps.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: pageSize})
+	require.NoError(t, err)
+	assert.LessOrEqual(t, len(first.Items), pageSize, "page must cap at requested limit")
+	assert.NotEmpty(t, first.NextCursor, "more pages exist, so NextCursor must be set")
+
+	// Walking the cursor must enumerate every broker exactly once.
+	seen := make(map[string]bool, total)
+	cursor := ""
+	for pages := 0; ; pages++ {
+		require.LessOrEqual(t, pages, total, "pagination did not terminate")
+		page, err := ps.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: pageSize, Cursor: cursor})
+		require.NoError(t, err)
+		for _, b := range page.Items {
+			require.False(t, seen[b.ID], "duplicate broker across pages: %s", b.ID)
+			seen[b.ID] = true
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+
+	assert.Len(t, seen, total, "cursor pagination must enumerate every broker")
+	for id := range created {
+		assert.True(t, seen[id], "broker missing from pagination: %s", id)
+	}
+}
+
+// TestListRuntimeBrokers_CursorPagination_CreatedTiebreak proves the
+// (created, id) keyset tiebreaker prevents a skip or duplicate at a page
+// boundary when two or more rows share the exact same Created timestamp.
+// CreateRuntimeBroker always stamps Created at Save time, so ordinary
+// sequential creates essentially never collide — this uses the raw Ent
+// client to force an exact collision, since ordering by Created alone (no id
+// tiebreaker) can nondeterministically split or duplicate such a group
+// across a page boundary.
+func TestListRuntimeBrokers_CursorPagination_CreatedTiebreak(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	same := time.Now().UTC().Truncate(time.Second)
+	ids := make(map[string]bool, 4)
+	for i := 0; i < 4; i++ {
+		id := uuid.New()
+		name := fmt.Sprintf("tiebreak-broker-%d-%s", i, id.String()[:8])
+		_, err := ps.client.RuntimeBroker.Create().
+			SetID(id).
+			SetName(name).
+			SetSlug(name).
+			SetCreated(same).
+			SetUpdated(same).
+			Save(ctx)
+		require.NoError(t, err)
+		ids[id.String()] = true
+	}
+
+	// PageSize=1 forces every one of the four identically-timestamped rows
+	// onto its own page — the sharpest possible test of the id tiebreaker:
+	// any missing or duplicated row proves Created-only ordering let a row
+	// fall across two pages' boundary.
+	const pageSize = 1
+	seen := make(map[string]bool, 4)
+	cursor := ""
+	for pages := 0; ; pages++ {
+		require.LessOrEqual(t, pages, 8, "pagination did not terminate")
+		page, err := ps.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: pageSize, Cursor: cursor})
+		require.NoError(t, err)
+		for _, b := range page.Items {
+			require.False(t, seen[b.ID], "duplicate broker across pages at Created tiebreak boundary: %s", b.ID)
+			seen[b.ID] = true
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+
+	assert.Len(t, seen, len(ids), "every identically-timestamped broker must be enumerated exactly once")
+	for id := range ids {
+		assert.True(t, seen[id], "broker missing at Created tiebreak boundary: %s", id)
+	}
+}
+
 // =============================================================================
 // AuthorizedProjectIDs fail-closed filter (R1 — LS1 review)
 // =============================================================================
@@ -764,4 +984,66 @@ func TestListProjects_MaxLimit(t *testing.T) {
 	assert.Equal(t, total, result.TotalCount, "TotalCount should reflect all projects")
 	assert.Len(t, result.Items, 1000, "Limit>1000 must be capped at maxProjectListLimit=1000")
 	assert.NotEmpty(t, result.NextCursor, "more projects exist, so NextCursor must be set")
+}
+
+func TestFindEmbeddedBroker_ReturnsLabeledBroker(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	// Create a broker with the embedded label.
+	embedded := newBroker()
+	embedded.Labels = map[string]string{"scion.io/broker-role": "embedded"}
+	require.NoError(t, ps.CreateRuntimeBroker(ctx, embedded))
+
+	got, err := ps.FindEmbeddedBroker(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, got, "expected FindEmbeddedBroker to return the labeled broker")
+	assert.Equal(t, embedded.ID, got.ID)
+}
+
+func TestFindEmbeddedBroker_IgnoresUnlabeledBrokers(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	// Create a broker with the embedded label.
+	embedded := newBroker()
+	embedded.Labels = map[string]string{"scion.io/broker-role": "embedded"}
+	require.NoError(t, ps.CreateRuntimeBroker(ctx, embedded))
+
+	// Create a second broker without the label — FindEmbeddedBroker must still
+	// return only the first.
+	other := newBroker()
+	other.Labels = map[string]string{"team": "infra"}
+	require.NoError(t, ps.CreateRuntimeBroker(ctx, other))
+
+	got, err := ps.FindEmbeddedBroker(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, got, "expected exactly one embedded broker")
+	assert.Equal(t, embedded.ID, got.ID)
+}
+
+func TestFindEmbeddedBroker_NilWhenNone(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	// No brokers at all.
+	got, err := ps.FindEmbeddedBroker(ctx)
+	require.NoError(t, err)
+	assert.Nil(t, got, "expected nil when no embedded broker exists")
+}
+
+func TestFindEmbeddedBroker_NilWhenMultiple(t *testing.T) {
+	ps := newTestProjectStore(t)
+	ctx := context.Background()
+
+	// Create two brokers with the embedded label — ambiguous, should return nil.
+	for i := 0; i < 2; i++ {
+		b := newBroker()
+		b.Labels = map[string]string{"scion.io/broker-role": "embedded"}
+		require.NoError(t, ps.CreateRuntimeBroker(ctx, b))
+	}
+
+	got, err := ps.FindEmbeddedBroker(ctx)
+	require.NoError(t, err)
+	assert.Nil(t, got, "expected nil when multiple embedded brokers exist")
 }

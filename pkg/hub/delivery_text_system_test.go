@@ -59,7 +59,7 @@ func TestPhase9f_Scheduler_DeliveryText_StampedWhenSwitchOn(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: agentID, Name: "9f-sched-on-agent", Slug: "9f-sched-on-agent",
 		ProjectID: projectID, RuntimeBrokerID: brokerID,
-		Phase: "running", Visibility: store.VisibilityPrivate,
+		Phase: "running",
 	}))
 
 	dispatcher := &recordingDispatcher{}
@@ -117,7 +117,7 @@ func TestPhase9f_Scheduler_DeliveryText_EmptyWhenSwitchOff(t *testing.T) {
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: agentID, Name: "9f-sched-off-agent", Slug: "9f-sched-off-agent",
 		ProjectID: projectID, RuntimeBrokerID: brokerID,
-		Phase: "running", Visibility: store.VisibilityPrivate,
+		Phase: "running",
 	}))
 
 	dispatcher := &recordingDispatcher{}

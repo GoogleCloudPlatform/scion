@@ -65,6 +65,10 @@ func (s *testLoginStore) GetGroupBySlug(_ context.Context, _ string) (*store.Gro
 	return nil, fmt.Errorf("not found")
 }
 
+func (s *testLoginStore) GetRoleDefinitionByName(_ context.Context, _ string, _ string) (*store.RoleDefinition, error) {
+	return nil, store.ErrNotFound
+}
+
 // newTestLoginWebServer creates a WebServer for test-login tests and returns
 // the UserTokenService so callers can mint challenge tokens.
 func newTestLoginWebServer(t *testing.T, enableTestLogin bool) (*WebServer, *UserTokenService) {

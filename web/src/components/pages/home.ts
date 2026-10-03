@@ -20,14 +20,18 @@
  * Displays an overview of the system status with Shoelace components
  */
 
-import { LitElement, html, css } from 'lit';
+import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, Agent, Project, Capabilities } from '../../shared/types.js';
-import { isAgentRunning } from '../../shared/types.js';
+import { can, isAgentRunning } from '../../shared/types.js';
 import '../shared/status-badge.js';
 import { stateManager } from '../../client/state.js';
 import { apiFetch } from '../../client/api.js';
+import {
+  fetchHubProjectCapabilities,
+  seedHubProjectCapabilities,
+} from '../../client/hub-capabilities.js';
 
 interface InviteStats {
   pendingInvites: number;
@@ -61,6 +65,13 @@ export class ScionPageHome extends LitElement {
   @state()
   private inviteStats: InviteStats | null = null;
 
+  /**
+   * Hub-scope project capabilities (`_capabilities` of GET /api/v1/projects).
+   * Gates the "Create Project" quick action; undefined hides it (fail-closed).
+   */
+  @state()
+  private projectScopeCapabilities: Capabilities | undefined;
+
   private boundOnAgentsUpdated = this.onAgentsUpdated.bind(this);
   private boundOnProjectsUpdated = this.onProjectsUpdated.bind(this);
 
@@ -76,10 +87,22 @@ export class ScionPageHome extends LitElement {
     // or when navigating back from a page that already populated the state.
     this.agents = stateManager.getAgents();
     this.projects = stateManager.getProjects();
+    this.projectScopeCapabilities = stateManager.getScopeCapabilities('project');
 
     if (this.agents.length === 0 && this.projects.length === 0) {
       void this.loadData();
+    } else if (!this.projectScopeCapabilities) {
+      // Hydrated from another page (e.g. Agents) that did not carry project
+      // scope capabilities. Ask the shared helper rather than refetching
+      // everything.
+      void this.loadProjectScopeCapabilities();
     }
+  }
+
+  private async loadProjectScopeCapabilities(): Promise<void> {
+    const caps = await fetchHubProjectCapabilities();
+    if (!this.isConnected || stateManager.currentScope?.type !== 'dashboard') return;
+    this.projectScopeCapabilities = caps;
   }
 
   override disconnectedCallback(): void {
@@ -109,7 +132,11 @@ export class ScionPageHome extends LitElement {
       const [agentsResp, projectsResp, inviteStatsResp] = await Promise.all([
         apiFetch('/api/v1/agents'),
         apiFetch('/api/v1/projects'),
-        isAdmin ? apiFetch('/api/v1/admin/invites/stats').catch(() => null) : Promise.resolve(null),
+        isAdmin
+          ? apiFetch('/api/v1/admin/invites/stats', {
+              suppressAccessDeniedToast: true,
+            }).catch(() => null)
+          : Promise.resolve(null),
       ]);
 
       if (!this.isConnected || stateManager.currentScope?.type !== 'dashboard') return;
@@ -132,6 +159,12 @@ export class ScionPageHome extends LitElement {
         const projects = Array.isArray(data) ? data : data.projects || [];
         this.projects = projects;
         stateManager.seedProjects(projects);
+        const caps = Array.isArray(data) ? undefined : data._capabilities;
+        this.projectScopeCapabilities = caps;
+        if (caps) {
+          stateManager.seedScopeCapabilities('project', caps);
+          seedHubProjectCapabilities(caps);
+        }
       }
 
       if (inviteStatsResp?.ok) {
@@ -388,15 +421,19 @@ export class ScionPageHome extends LitElement {
             <p>Spin up a new AI agent</p>
           </div>
         </a>
-        <a href="/projects/new" class="action-card">
-          <div class="action-icon">
-            <sl-icon name="folder-plus"></sl-icon>
-          </div>
-          <div class="action-text">
-            <h4>Create Project</h4>
-            <p>Add a project workspace</p>
-          </div>
-        </a>
+        ${can(this.projectScopeCapabilities, 'create')
+          ? html`
+              <a href="/projects/new" class="action-card">
+                <div class="action-icon">
+                  <sl-icon name="folder-plus"></sl-icon>
+                </div>
+                <div class="action-text">
+                  <h4>Create Project</h4>
+                  <p>Add a project workspace</p>
+                </div>
+              </a>
+            `
+          : nothing}
         <a href="/projects" class="action-card">
           <div class="action-icon">
             <sl-icon name="folder"></sl-icon>

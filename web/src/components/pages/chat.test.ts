@@ -40,11 +40,30 @@ vi.mock('../../client/main.js', () => ({
   stateManager: new EventTarget(),
 }));
 
-vi.mock('../../client/api.js', () => ({
-  apiFetch: vi.fn(() => Promise.resolve(new Response('{}', { status: 200 }))),
-}));
+vi.mock('../../client/api.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../client/api.js')>();
+  return {
+    ...actual,
+    apiFetch: vi.fn(() => Promise.resolve(new Response('{}', { status: 200 }))),
+  };
+});
 
 let ScionPageChat: any;
+
+describe('chat mention roster stability', () => {
+  it('reuses agent props until the member roster or project changes', () => {
+    const page = createPage();
+    page.v2Conversation = { projectId: 'p1' };
+    page.v2Members = [{ id: 'a', kind: 'agent', name: 'Coder', email: '' }];
+    const agents = page.getAgentsFromMembers();
+    page.v2TypingUserIds = ['someone'];
+    expect(page.getAgentsFromMembers()).toBe(agents);
+    page.v2Conversation = { projectId: 'p2' };
+    expect(page.getAgentsFromMembers()[0].projectId).toBe('p2');
+    page.v2Members = [{ id: 'a', kind: 'agent', name: 'Renamed', email: '' }];
+    expect(page.getAgentsFromMembers()[0].name).toBe('Renamed');
+  });
+});
 
 /** A page instance with a signed-in user and a small member roster. */
 function createPage(): any {
@@ -225,7 +244,9 @@ describe('chat page — mobile panel default and header navigation', () => {
   it('gives the members panel a back button to the conversation', () => {
     const el = createPage();
     el.mobilePanel = 'right';
-    const back = renderToFragment(el.renderMobileBackButton('center')).querySelector('.mobile-back');
+    const back = renderToFragment(el.renderMobileBackButton('center')).querySelector(
+      '.mobile-back'
+    );
 
     back?.dispatchEvent(new Event('click'));
 
@@ -290,17 +311,14 @@ describe('chat page — deep-linked thread header', () => {
 });
 
 describe('chat page — mobile swipe navigation', () => {
-  beforeAll(() => {
-    (window as any).innerWidth = 400;
-  });
-
-  afterEach(() => {
-    (window as any).innerWidth = 400;
-  });
-
+  // The element is never connected (see the file doc comment), so the
+  // connectedCallback matchMedia listener that drives `isMobileLayout` in
+  // real usage never runs — set it directly here, the same way `mobilePanel`
+  // is set directly below, instead of mutating `window.innerWidth`.
   it('swipes right from the conversation to the rail, and back left', () => {
     vi.useFakeTimers();
     const el = createPageOnConversation();
+    el.isMobileLayout = true;
 
     swipe(el, { dx: 120 });
     expect(el.mobilePanel).toBe('left');
@@ -312,6 +330,7 @@ describe('chat page — mobile swipe navigation', () => {
   it('swipes left from the conversation to the members panel, and back right', () => {
     vi.useFakeTimers();
     const el = createPageOnConversation();
+    el.isMobileLayout = true;
 
     swipe(el, { dx: -120 });
     expect(el.mobilePanel).toBe('right');
@@ -323,6 +342,7 @@ describe('chat page — mobile swipe navigation', () => {
   it('does not run past the outermost panels', () => {
     vi.useFakeTimers();
     const el = createPage();
+    el.isMobileLayout = true;
     el.mobilePanel = 'left';
 
     swipe(el, { dx: 120 });
@@ -336,10 +356,12 @@ describe('chat page — mobile swipe navigation', () => {
   it('accepts a short fast flick but not a short slow drag', () => {
     vi.useFakeTimers();
     const flick = createPageOnConversation();
+    flick.isMobileLayout = true;
     swipe(flick, { dx: 60, durationMs: 150 });
     expect(flick.mobilePanel).toBe('left');
 
     const slow = createPageOnConversation();
+    slow.isMobileLayout = true;
     swipe(slow, { dx: 60, durationMs: 900 });
     expect(slow.mobilePanel).toBe('center');
   });
@@ -347,6 +369,7 @@ describe('chat page — mobile swipe navigation', () => {
   it('ignores a mostly vertical drag — that is the message list scrolling', () => {
     vi.useFakeTimers();
     const el = createPageOnConversation();
+    el.isMobileLayout = true;
 
     swipe(el, { dx: 120, dy: 200 });
 
@@ -355,8 +378,8 @@ describe('chat page — mobile swipe navigation', () => {
 
   it('ignores swipes on desktop viewports', () => {
     vi.useFakeTimers();
-    (window as any).innerWidth = 1400;
     const el = createPageOnConversation();
+    el.isMobileLayout = false;
 
     swipe(el, { dx: 200 });
 
@@ -436,15 +459,53 @@ describe('chat page — DM mute toggle', () => {
   });
 
   it('renders the bell as filled-through only while muted', () => {
-    const quiet = renderToFragment(pageOnDM(true).renderDMMuteButton(pageOnDM(true).v2Conversation));
+    const quiet = renderToFragment(
+      pageOnDM(true).renderDMMuteButton(pageOnDM(true).v2Conversation)
+    );
     expect(quiet.querySelector('.dm-mute')?.getAttribute('name')).toBe('bell-slash');
 
-    const loud = renderToFragment(pageOnDM(false).renderDMMuteButton(pageOnDM(false).v2Conversation));
+    const loud = renderToFragment(
+      pageOnDM(false).renderDMMuteButton(pageOnDM(false).v2Conversation)
+    );
     expect(loud.querySelector('.dm-mute')?.getAttribute('name')).toBe('bell');
   });
 });
 
 describe('chat page — muted DMs raise no unread dot', () => {
+  it('ignores an older unread response after a newer refresh clears the dot', async () => {
+    const el = createPage();
+    el.v2UnreadFromIds = ['agent-1', 'agent-2'];
+    let resolveOld!: (response: Response) => void;
+    vi.mocked(apiFetch)
+      .mockImplementationOnce(() => new Promise<Response>((resolve) => { resolveOld = resolve; }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        dms: [{ peerId: 'agent-1', hasUnread: false }, { peerId: 'agent-2', hasUnread: true }],
+      })));
+    const oldRequest = el.loadUnreadDMPeers();
+    await el.loadUnreadDMPeers();
+    expect(el.v2UnreadFromIds).toEqual(['agent-2']);
+    resolveOld(new Response(JSON.stringify({
+      dms: [{ peerId: 'agent-1', hasUnread: true }, { peerId: 'agent-2', hasUnread: true }],
+    })));
+    await oldRequest;
+    expect(el.v2UnreadFromIds).toEqual(['agent-2']);
+  });
+
+  it.each([
+    'dm:agent:agent-1:user:user-me',
+    'dm:user:user-me:agent:agent-1',
+  ])('clears the acknowledged peer, not the selected conversation (%s)', (key) => {
+    const el = createPage();
+    el.v2UnreadFromIds = ['agent-1', 'agent-2'];
+    el.v2Conversation = { peerId: 'agent-2' };
+    const refresh = vi.spyOn(el, 'loadUnreadDMPeers').mockResolvedValue(undefined);
+    el._handleReadStateUpdated(new CustomEvent('read-state-updated', {
+      detail: { conversationKey: key },
+    }));
+    expect(el.v2UnreadFromIds).toEqual(['agent-2']);
+    expect(refresh).toHaveBeenCalledOnce();
+  });
+
   /** Answer GET /api/v1/chat/dms with the given entries. */
   function serveDMs(dms: Array<Record<string, unknown>>): void {
     vi.mocked(apiFetch).mockImplementation((url: string) => {
@@ -484,5 +545,333 @@ describe('chat page — muted DMs raise no unread dot', () => {
     await el.loadUnreadDMPeers();
 
     expect(el.v2UnreadFromIds).toEqual([]);
+  });
+});
+
+/**
+ * Page-level coverage for mark-unread's SSE unread gate, mute check, and
+ * same-tab suppression. These tests exercise `_handleOwnReadStateSSE`,
+ * `handleMemberMarkedUnread` and `_handleConversationMarkedUnread` directly,
+ * stubbing the rail/thread elements `shadowRoot.querySelector` would
+ * otherwise find, rather than mounting the full page (which would fire its
+ * own network calls).
+ */
+describe('chat page — mark-unread page-level handling', () => {
+  /** A page with an open DM conversation with the given peer. */
+  function pageOnDM(peerId: string, conversationKey: string): any {
+    const el = createPage();
+    el.v2Conversation = {
+      conversationKey,
+      projectId: 'proj-1',
+      threadName: '',
+      peerName: 'Peer',
+      peerId,
+      peerKind: 'user',
+      isDM: true,
+    };
+    return el;
+  }
+
+  /**
+   * These pages are never appended to the document (by this file's own
+   * design — see the file header — so connectedCallback's network calls
+   * never fire), which means Lit never creates a real shadowRoot to query.
+   * Replace the accessor with a fake one backed by a selector→element map, so
+   * more than one stub (rail and thread) can coexist on the same page — a
+   * single-selector version would silently resolve every other selector to
+   * null, letting a test assert less than its title claims.
+   */
+  function stubShadowRoot(el: any, found: Record<string, unknown>): void {
+    const fakeShadowRoot = { querySelector: (sel: string) => found[sel] ?? null };
+    Object.defineProperty(el, 'shadowRoot', { value: fakeShadowRoot, configurable: true });
+  }
+
+  /** Stub the open thread element so suppressOpenThreadAutoAdvance has something to call. */
+  function stubThread(el: any): { suppressAutoAdvance: ReturnType<typeof vi.fn> } {
+    const thread = { suppressAutoAdvance: vi.fn() };
+    stubShadowRoot(el, { 'scion-chat-thread': thread });
+    return thread;
+  }
+
+  /** Stub the rail element so markThreadUnread calls are observable. */
+  function stubRail(el: any): { markThreadUnread: ReturnType<typeof vi.fn> } {
+    const rail = { markThreadUnread: vi.fn() };
+    stubShadowRoot(el, { 'scion-chat-space-rail': rail });
+    return rail;
+  }
+
+  /**
+   * Stub both the rail and the open thread on the same page — needed for the
+   * topic branch of _handleOwnReadStateSSE, which looks up both: the rail to
+   * mark the thread unread, and (if it is the open conversation) the thread
+   * to suppress its auto-advance.
+   */
+  function stubRailAndThread(el: any): {
+    rail: { markThreadUnread: ReturnType<typeof vi.fn> };
+    thread: { suppressAutoAdvance: ReturnType<typeof vi.fn> };
+  } {
+    const rail = { markThreadUnread: vi.fn() };
+    const thread = { suppressAutoAdvance: vi.fn() };
+    stubShadowRoot(el, { 'scion-chat-space-rail': rail, 'scion-chat-thread': thread });
+    return { rail, thread };
+  }
+
+  describe('_handleOwnReadStateSSE unread gate', () => {
+    it('a self event without unread:true adds no dot and does not mark the rail thread unread', () => {
+      const el = createPage();
+      el.v2UnreadFromIds = [];
+      const rail = stubRail(el);
+
+      el._handleOwnReadStateSSE(
+        new CustomEvent('chat-read-state-updated', {
+          detail: { data: { conversationKey: 'topic-1', userId: 'user-me', messageId: 'm1' } },
+        })
+      );
+
+      expect(el.v2UnreadFromIds).toEqual([]);
+      expect(rail.markThreadUnread).not.toHaveBeenCalled();
+    });
+
+    it('a self event with unread:true for a topic marks the rail thread unread and suppresses the open thread', () => {
+      const el = createPage();
+      el.v2Conversation = { conversationKey: 'topic-1' };
+      const { rail, thread } = stubRailAndThread(el);
+
+      el._handleOwnReadStateSSE(
+        new CustomEvent('chat-read-state-updated', {
+          detail: {
+            data: { conversationKey: 'topic-1', userId: 'user-me', messageId: '', unread: true },
+          },
+        })
+      );
+
+      expect(rail.markThreadUnread).toHaveBeenCalledWith('topic-1');
+      expect(thread.suppressAutoAdvance).toHaveBeenCalledTimes(1);
+    });
+
+    it('a self event with unread:true for a DM updates the dot, hasUnread, and suppresses if open', () => {
+      const dmKey = 'dm:user:user-me:user:user-1';
+      const el = pageOnDM('user-1', dmKey);
+      el.v2DMInfoByPeerId = { 'user-1': { key: dmKey, muted: false, hasUnread: false } };
+      const thread = stubThread(el);
+
+      el._handleOwnReadStateSSE(
+        new CustomEvent('chat-read-state-updated', {
+          detail: {
+            data: { conversationKey: dmKey, userId: 'user-me', messageId: '', unread: true },
+          },
+        })
+      );
+
+      expect(el.v2UnreadFromIds).toEqual(['user-1']);
+      expect(el.v2DMInfoByPeerId['user-1'].hasUnread).toBe(true);
+      expect(thread.suppressAutoAdvance).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('applyDMMarkedUnread mute check and hasUnread state', () => {
+    it('a muted peer gets no dot, but hasUnread flips so the members item hides', () => {
+      const el = createPage();
+      el.v2DMInfoByPeerId = {
+        'user-1': { key: 'dm:user:user-me:user:user-1', muted: true, hasUnread: false },
+      };
+      el.v2UnreadFromIds = [];
+
+      el.handleMemberMarkedUnread(
+        new CustomEvent('member-marked-unread', { detail: { peerId: 'user-1' } })
+      );
+
+      expect(el.v2UnreadFromIds).toEqual([]);
+      expect(el.v2DMInfoByPeerId['user-1'].hasUnread).toBe(true);
+    });
+
+    it('an unmuted peer gets a dot, and hasUnread flips so the members item hides', () => {
+      const el = createPage();
+      el.v2DMInfoByPeerId = {
+        'user-1': { key: 'dm:user:user-me:user:user-1', muted: false, hasUnread: false },
+      };
+      el.v2UnreadFromIds = [];
+
+      el.handleMemberMarkedUnread(
+        new CustomEvent('member-marked-unread', { detail: { peerId: 'user-1' } })
+      );
+
+      expect(el.v2UnreadFromIds).toEqual(['user-1']);
+      expect(el.v2DMInfoByPeerId['user-1'].hasUnread).toBe(true);
+    });
+
+    it('leaves the info map alone for a peer with no existing entry', () => {
+      const el = createPage();
+      el.v2DMInfoByPeerId = {};
+      el.v2UnreadFromIds = [];
+
+      el.handleMemberMarkedUnread(
+        new CustomEvent('member-marked-unread', { detail: { peerId: 'user-1' } })
+      );
+
+      expect(el.v2DMInfoByPeerId).toEqual({});
+      // No mute info to check against, so the dot still goes on — a peer
+      // loadUnreadDMPeers hasn't captured yet is self-correcting on the next load.
+      expect(el.v2UnreadFromIds).toEqual(['user-1']);
+    });
+
+    // Pins the `v2UnreadFromIds.includes(peerId)` duplicate guard. Not
+    // user-visible (a Set-like list either way), but cheap to pin: the local
+    // click and the SSE echo of the same mark-unread both call this, and a
+    // duplicate id would be a real (if harmless) bug.
+    it('does not duplicate the dot when applied twice for the same peer', () => {
+      const el = createPage();
+      el.v2DMInfoByPeerId = {
+        'user-1': { key: 'dm:user:user-me:user:user-1', muted: false, hasUnread: false },
+      };
+      el.v2UnreadFromIds = [];
+
+      el.handleMemberMarkedUnread(
+        new CustomEvent('member-marked-unread', { detail: { peerId: 'user-1' } })
+      );
+      el.handleMemberMarkedUnread(
+        new CustomEvent('member-marked-unread', { detail: { peerId: 'user-1' } })
+      );
+
+      expect(el.v2UnreadFromIds).toEqual(['user-1']);
+    });
+  });
+
+  describe('same-tab suppression calls', () => {
+    it('member-marked-unread for the open conversation suppresses its auto-advance', () => {
+      const dmKey = 'dm:user:user-me:user:user-1';
+      const el = pageOnDM('user-1', dmKey);
+      const thread = stubThread(el);
+
+      el.handleMemberMarkedUnread(
+        new CustomEvent('member-marked-unread', {
+          detail: { peerId: 'user-1', conversationKey: dmKey },
+        })
+      );
+
+      expect(thread.suppressAutoAdvance).toHaveBeenCalledTimes(1);
+    });
+
+    it('member-marked-unread for a DM that is not open does not suppress', () => {
+      const el = pageOnDM('user-1', 'dm:user:user-me:user:user-1');
+      const thread = stubThread(el);
+
+      el.handleMemberMarkedUnread(
+        new CustomEvent('member-marked-unread', {
+          detail: { peerId: 'user-2', conversationKey: 'dm:user:user-me:user:user-2' },
+        })
+      );
+
+      expect(thread.suppressAutoAdvance).not.toHaveBeenCalled();
+    });
+
+    it('conversation-marked-unread for the open conversation suppresses its auto-advance', () => {
+      const el = createPage();
+      el.v2Conversation = { conversationKey: 'topic-1' };
+      const thread = stubThread(el);
+
+      el._handleConversationMarkedUnread(
+        new CustomEvent('conversation-marked-unread', { detail: { conversationKey: 'topic-1' } })
+      );
+
+      expect(thread.suppressAutoAdvance).toHaveBeenCalledTimes(1);
+    });
+
+    it('conversation-marked-unread for a different conversation does not suppress', () => {
+      const el = createPage();
+      el.v2Conversation = { conversationKey: 'topic-1' };
+      const thread = stubThread(el);
+
+      el._handleConversationMarkedUnread(
+        new CustomEvent('conversation-marked-unread', { detail: { conversationKey: 'topic-2' } })
+      );
+
+      expect(thread.suppressAutoAdvance).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe('chat page — promote DM dialog', () => {
+  function pageOnAgentDM(): any {
+    const el = createPage();
+    el.v2Conversation = {
+      conversationKey: 'dm:agent:agent-1:user:user-me',
+      projectId: 'proj-1',
+      projectSlug: '',
+      threadName: '',
+      peerName: 'Coder One',
+      peerId: 'agent-1',
+      peerKind: 'agent',
+      isDM: true,
+    };
+    el.promoteDialogOpen = true;
+    el.promoteThreadName = 'coder-one';
+    return el;
+  }
+
+  it('looks up the project slug when the DM does not carry one', () => {
+    const el = pageOnAgentDM();
+    el._projectIdToSlug.set('proj-1', 'chat-test');
+
+    const dialog = renderToFragment(el.renderPromoteDialog());
+    const projectName = dialog.querySelectorAll('strong')[1];
+
+    expect(projectName?.textContent).toBe('chat-test');
+  });
+
+  it('uses a readable fallback when the project slug is unavailable', () => {
+    const el = pageOnAgentDM();
+
+    const dialog = renderToFragment(el.renderPromoteDialog());
+    const projectName = dialog.querySelectorAll('strong')[1];
+
+    expect(projectName?.textContent).toBe('this project');
+  });
+
+  it('shows the nested backend error message instead of coercing the error object', async () => {
+    const el = pageOnAgentDM();
+    const showPromoteToast = vi.spyOn(el, 'showPromoteToast').mockImplementation(() => undefined);
+    vi.mocked(apiFetch).mockResolvedValue(
+      new Response(
+        JSON.stringify({ error: { code: 'PROMOTION_FAILED', message: 'Promotion unavailable' } }),
+        { status: 422 }
+      )
+    );
+
+    await el.executePromote();
+
+    expect(showPromoteToast).toHaveBeenCalledWith('Promotion unavailable', 'danger');
+  });
+
+  it('shows a string backend error message', async () => {
+    const el = pageOnAgentDM();
+    const showPromoteToast = vi.spyOn(el, 'showPromoteToast').mockImplementation(() => undefined);
+    vi.mocked(apiFetch).mockResolvedValue(
+      new Response(JSON.stringify({ error: 'Promotion unavailable' }), { status: 422 })
+    );
+
+    await el.executePromote();
+
+    expect(showPromoteToast).toHaveBeenCalledWith('Promotion unavailable', 'danger');
+  });
+
+  it('uses the nested backend error code for conflict guidance', async () => {
+    const el = pageOnAgentDM();
+    const showPromoteToast = vi.spyOn(el, 'showPromoteToast').mockImplementation(() => undefined);
+    vi.mocked(apiFetch).mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: { code: 'IN_FLIGHT_MESSAGES', message: 'agent has pending replies' },
+        }),
+        { status: 409 }
+      )
+    );
+
+    await el.executePromote();
+
+    expect(showPromoteToast).toHaveBeenCalledWith(
+      'Agent is still responding. Try again in a few seconds.',
+      'warning'
+    );
   });
 });

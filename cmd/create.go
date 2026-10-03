@@ -143,8 +143,12 @@ arguments are provided, an empty prompt.md is created for later editing.`,
 		if hubErr == nil && hctx != nil && hctx.Client != nil {
 			hubResolver := agent.NewHubSkillResolver(hctx.Client.Skills())
 			resolver := agent.NewRoutingSkillResolver(hubResolver)
-			ghResolver := agent.NewGitHubSkillResolverWithCredentials(os.Getenv("GITHUB_TOKEN"), nil, nil)
+			ghToken := os.Getenv("GITHUB_TOKEN")
+			ghResolver := agent.NewGitHubSkillResolverWithCredentials(ghToken, nil, nil)
 			resolver.Register("gh", ghResolver)
+			// Write resolutions to the disk cache before this process exits,
+			// rather than relying on the cache's delayed write.
+			defer ghResolver.FlushCache()
 
 			registrySvc := hctx.Client.SkillRegistries()
 			gcpLookup := func(ctx context.Context, name string) (*agent.RegistryLookupResult, error) {
@@ -165,6 +169,10 @@ arguments are provided, an empty prompt.md is created for later editing.`,
 			resolver.Register("gcp-skill", agent.NewGCPSkillResolver(gcpLookup))
 
 			ctx = agent.ContextWithSkillResolver(ctx, resolver)
+			// Credentials for install-phase downloads of gh:// skills: the
+			// default for skills the Hub resolved, and the GitHub resolver's
+			// own lookup for skills it served from its disk cache.
+			ctx = ghResolver.WithInstallCredentials(ctx, ghToken)
 			if hctx.ProjectID != "" {
 				ctx = agent.ContextWithResolveProjectID(ctx, hctx.ProjectID)
 			}
@@ -221,6 +229,16 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 		return err
 	}
 
+	// Validate --role flag if provided
+	if err := validateAgentRole(agentRoleFlag); err != nil {
+		return err
+	}
+
+	// Validate --message-mode flag if provided
+	if err := validateMessageMode(messageModeFlag); err != nil {
+		return err
+	}
+
 	// Build create request — always provision-only (create does not start the agent)
 	req := &hubclient.CreateAgentRequest{
 		Name:            agentName,
@@ -233,6 +251,8 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 		Branch:          branch,
 		Labels:          parsedLabels,
 		ProvisionOnly:   true,
+		AgentRole:       agentRoleFlag,
+		MessageMode:     messageModeFlag,
 	}
 
 	// Wire --service-account flag into the GCP identity assignment.
@@ -342,6 +362,14 @@ func init() {
 
 	// Label flags
 	createCmd.Flags().StringArrayVar(&labelFlags, "label", nil, "Label in key=value format (repeatable)")
+
+	// Agent role flag
+	createCmd.Flags().StringVar(&agentRoleFlag, "role", "",
+		"Agent role for Hub API access: none, readonly, baseline, full")
+
+	// Agent message mode flag
+	createCmd.Flags().StringVar(&messageModeFlag, "message-mode", "",
+		"Agent message mode: none, lineage, branch, project")
 
 	// GCP service account assignment flag
 	createCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account ID to assign to this agent (requires Hub mode)")

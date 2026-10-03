@@ -180,7 +180,7 @@ export class ScionPageProjects extends LitElement {
     // Also require scope capabilities — without them the "New Project" button
     // won't render, so we must fetch from the API to get them.
     const hydratedProjects = stateManager.getProjects();
-    const hydratedCaps = stateManager.getScopeCapabilities();
+    const hydratedCaps = stateManager.getScopeCapabilities('project');
     if (hydratedProjects.length > 0 && hydratedCaps && this.projectScope === 'all') {
       this.projects = hydratedProjects;
       this.scopeCapabilities = hydratedCaps;
@@ -265,7 +265,7 @@ export class ScionPageProjects extends LitElement {
       // and so other pages sharing the same scope can reuse capabilities.
       stateManager.seedProjects(this.projects);
       if (this.scopeCapabilities) {
-        stateManager.seedScopeCapabilities(this.scopeCapabilities);
+        stateManager.seedScopeCapabilities('project', this.scopeCapabilities);
       }
     } catch (err) {
       console.error('Failed to load projects:', err);

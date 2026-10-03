@@ -162,6 +162,12 @@ func createSourceProject(t *testing.T, srv *Server, s store.Store) *store.Projec
 // cloneMockStorage wraps mockStorage with a working Copy implementation.
 type cloneMockStorage struct {
 	mockStorage
+
+	// raceBarrier, when set, makes Copy block the calling goroutine until a
+	// fixed number of distinct concurrent requests have all reached their
+	// first Copy call — see copyBarrier in clone_concurrency_test.go. Nil by
+	// default, so every other test using cloneMockStorage is unaffected.
+	raceBarrier *copyBarrier
 }
 
 func newCloneMockStorage(bucket string) *cloneMockStorage {
@@ -174,7 +180,17 @@ func newCloneMockStorage(bucket string) *cloneMockStorage {
 	}
 }
 
-func (m *cloneMockStorage) Copy(_ context.Context, srcPath, dstPath string) (*storage.Object, error) {
+func (m *cloneMockStorage) Copy(ctx context.Context, srcPath, dstPath string) (*storage.Object, error) {
+	if m.raceBarrier != nil {
+		// Must run before the mutex below: every racing goroutine needs to
+		// reach the barrier on its own, so none of them can be holding m.mu
+		// while waiting. Identified by the request's raceRequestID rather
+		// than dstPath: see copyBarrier's doc comment in
+		// clone_concurrency_test.go for why.
+		if id, ok := raceRequestIDFromContext(ctx); ok {
+			m.raceBarrier.arrive(id)
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	srcObj, ok := m.objects[srcPath]
@@ -190,6 +206,22 @@ func (m *cloneMockStorage) Copy(_ context.Context, srcPath, dstPath string) (*st
 		m.content[dstPath] = data
 	}
 	return dstObj, nil
+}
+
+// DeletePrefix actually removes matching keys, unlike the embedded
+// mockStorage's no-op, so tests can observe whether a handler deleted a
+// prefix it should not have (ptone/scion#1916 follow-up: clone failure
+// cleanup must never remove a prefix the request did not itself create).
+func (m *cloneMockStorage) DeletePrefix(_ context.Context, prefix string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for path := range m.objects {
+		if strings.HasPrefix(path, prefix) {
+			delete(m.objects, path)
+			delete(m.content, path)
+		}
+	}
+	return nil
 }
 
 // seedObject inserts data into the mock storage for testing.
@@ -761,4 +793,89 @@ func TestProjectClone_CopiesMaxAgentRole(t *testing.T) {
 
 	assert.Equal(t, "readonly", clone.Annotations[projectSettingMaxAgentRole],
 		"clone should copy max_agent_role annotation from source")
+}
+
+func TestProjectClone_GCPServiceAccountVerifiedAndDefaultRemapped(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Create a source project with a default SA annotation.
+	srcID := api.NewUUID()
+
+	verifiedSA := &store.GCPServiceAccount{
+		ID:        api.NewUUID(),
+		Scope:     store.ScopeProject,
+		ScopeID:   srcID,
+		Email:     "verified@proj.iam.gserviceaccount.com",
+		ProjectID: "gcp-proj",
+		Verified:  true,
+		CreatedBy: DevUserID,
+	}
+	unverifiedSA := &store.GCPServiceAccount{
+		ID:        api.NewUUID(),
+		Scope:     store.ScopeProject,
+		ScopeID:   srcID,
+		Email:     "unverified@proj.iam.gserviceaccount.com",
+		ProjectID: "gcp-proj",
+		Verified:  false,
+		CreatedBy: DevUserID,
+	}
+
+	src := &store.Project{
+		ID:        srcID,
+		Name:      "Source SA Project",
+		Slug:      "source-sa-proj",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+		Annotations: map[string]string{
+			// Default SA points to the verified SA in the source project.
+			projectSettingDefaultGCPIdentitySAID: verifiedSA.ID,
+		},
+	}
+	require.NoError(t, s.CreateProject(ctx, src))
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, verifiedSA))
+	require.NoError(t, s.CreateGCPServiceAccount(ctx, unverifiedSA))
+
+	// Clone the project.
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+		map[string]string{"name": "Cloned SA Project"})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var clone store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&clone))
+
+	// Fetch cloned SAs.
+	cloneSAs, err := s.ListGCPServiceAccounts(ctx, store.GCPServiceAccountFilter{
+		Scope:   store.ScopeProject,
+		ScopeID: clone.ID,
+	})
+	require.NoError(t, err)
+	require.Len(t, cloneSAs, 2, "both SAs should be cloned")
+
+	// Build a lookup by email for assertions.
+	saByEmail := make(map[string]store.GCPServiceAccount, len(cloneSAs))
+	for _, sa := range cloneSAs {
+		saByEmail[sa.Email] = sa
+	}
+
+	// Assert: verified state preserved.
+	clonedVerified, ok := saByEmail["verified@proj.iam.gserviceaccount.com"]
+	require.True(t, ok, "cloned verified SA should exist")
+	assert.True(t, clonedVerified.Verified, "cloned SA should preserve verified=true")
+
+	clonedUnverified, ok := saByEmail["unverified@proj.iam.gserviceaccount.com"]
+	require.True(t, ok, "cloned unverified SA should exist")
+	assert.False(t, clonedUnverified.Verified, "cloned SA should preserve verified=false")
+
+	// Assert: default SA annotation remapped to the cloned SA's ID.
+	// Re-read the clone from the store to get the persisted annotations.
+	persistedClone, err := s.GetProject(ctx, clone.ID)
+	require.NoError(t, err)
+
+	remappedID := persistedClone.Annotations[projectSettingDefaultGCPIdentitySAID]
+	assert.NotEmpty(t, remappedID, "default SA annotation should be set")
+	assert.NotEqual(t, verifiedSA.ID, remappedID,
+		"default SA annotation must not point to source SA ID")
+	assert.Equal(t, clonedVerified.ID, remappedID,
+		"default SA annotation should point to the cloned SA with the same email")
 }

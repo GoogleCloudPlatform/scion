@@ -52,6 +52,7 @@ var layer0Prefixes = []string{
 	"server.secrets",
 	"server.storage",
 	"server.workspace_storage",
+	"server.shared_dir_storage",
 	// Identity/mode
 	"server.mode",
 	"server.env",
@@ -67,6 +68,13 @@ var layer0Prefixes = []string{
 	"server.plugins",
 	// Native chat — routes are registered at startup, so toggling it needs a restart.
 	"server.native_chat",
+	// Async agent create (design §3.7) — the reaper's dedicated scheduler
+	// ticker and the clamp on LaunchTimeout are both established at startup.
+	"server.hub.async_agent_launch",
+	"server.hub.launch_timeout",
+	"server.hub.launch_keepalive_seconds",
+	// Missing-container reconcile grace — read into ServerConfig at startup.
+	"server.hub.missing_agent_grace",
 }
 
 // isLayer0Key reports whether the given koanf key belongs to the Layer-0
@@ -88,6 +96,7 @@ var koanfPathToJSONField = map[string]map[string]string{
 	"access": {
 		"server.hub.admin_emails":        "admin_emails",
 		"server.auth.user_access_mode":   "user_access_mode",
+		"server.auth.default_user_role":  "default_user_role",
 		"server.auth.authorized_domains": "authorized_domains",
 	},
 	"lifecycle": {
@@ -110,6 +119,12 @@ var koanfPathToJSONField = map[string]map[string]string{
 	"auto_expose_ports": {
 		"auto_expose_ports.enabled": "enabled",
 	},
+	"quotas": {
+		"quotas.enforce_broker_quotas": "enforce_broker_quotas",
+	},
+	"agent_secrets": {
+		"agent_secrets.user_scope_only": "user_scope_only",
+	},
 	"project_defaults": {
 		"project_defaults.default_scratchpad": "default_scratchpad",
 	},
@@ -128,6 +143,7 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 	"access": {
 		"admin_emails":       "server.hub.admin_emails",
 		"user_access_mode":   "server.auth.user_access_mode",
+		"default_user_role":  "server.auth.default_user_role",
 		"authorized_domains": "server.auth.authorized_domains",
 	},
 	"lifecycle": {
@@ -149,6 +165,12 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 	},
 	"auto_expose_ports": {
 		"enabled": "auto_expose_ports.enabled",
+	},
+	"quotas": {
+		"enforce_broker_quotas": "quotas.enforce_broker_quotas",
+	},
+	"agent_secrets": {
+		"user_scope_only": "agent_secrets.user_scope_only",
 	},
 	"project_defaults": {
 		"default_scratchpad": "project_defaults.default_scratchpad",
@@ -212,7 +234,8 @@ func extractAgentDefaults(k *koanf.Koanf) (json.RawMessage, error) {
 	fields := []string{"default_template", "default_harness_config", "default_max_turns",
 		"default_max_model_calls", "default_max_duration", "default_resources",
 		"default_model", "default_thinking_level",
-		"default_max_agent_role", "default_agent_role"}
+		"default_max_agent_role", "default_agent_role",
+		"default_gcp_identity_mode", "default_gcp_identity_service_account_id"}
 	for _, f := range fields {
 		if k.Exists(f) {
 			doc[f] = k.Get(f)

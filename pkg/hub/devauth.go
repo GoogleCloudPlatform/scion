@@ -83,6 +83,12 @@ func (u *DevUser) ID() string { return u.id }
 // Type returns the identity type ("dev").
 func (u *DevUser) Type() string { return "dev" }
 
+// localAncestryProvenance reports that a dev user is a local user: the root
+// of its own ancestry chain.
+func (u *DevUser) localAncestryProvenance() ancestryProvenance {
+	return ancestryProvenanceLocalUser
+}
+
 // Username returns the user's login name.
 func (u *DevUser) Username() string { return u.username }
 
@@ -94,6 +100,91 @@ func (u *DevUser) DisplayName() string { return u.displayName }
 
 // Role returns the user role.
 func (u *DevUser) Role() string { return "admin" }
+
+// isTrustedLocalDevUser reports whether identity is the concrete, trusted
+// local development identity constructed by NewDevUser (DevAuthMiddleware /
+// UnifiedAuthMiddleware's dev-token arm; also seed.go's seeding path). This
+// is the single predicate ptone/scion#2342's dev_local attribution and B.3's
+// fire-time reconstruction both call — do not reimplement the type
+// assertion elsewhere.
+//
+// The check is deliberately narrow and exact, per the issue's security
+// contract:
+//   - identity must type-assert to the concrete *DevUser (not merely
+//     satisfy Identity, and not a distinct type that embeds or wraps
+//     *DevUser — Go type assertions do not see through embedding to an
+//     outer type, so a wrapper fails this assertion even though it promotes
+//     DevUser's methods).
+//   - a nil identity, or a non-nil Identity holding a nil *DevUser, is
+//     rejected explicitly rather than by relying on a nil ID() call (which
+//     would panic here, since DevUser.ID() does not guard against a nil
+//     receiver).
+//   - the identity's ID must equal the well-known DevUserID. NewDevUser
+//     always sets this id itself; nothing here reads it from a request.
+//
+// It is never derived from identity.Type() == "dev" alone: that string is
+// self-reported by any Identity implementation and proves nothing about
+// which concrete type produced it.
+func isTrustedLocalDevUser(identity Identity) bool {
+	du, ok := identity.(*DevUser)
+	if !ok || du == nil {
+		return false
+	}
+	return du.ID() == DevUserID
+}
+
+// devLocalAuthorityEnabled reports whether THIS server currently accepts
+// the recognized local dev user as an authority source at all (B.3 R6,
+// ptone/scion#2342): dev-token authentication is enabled and the well-known
+// DevUserID row has been seeded.
+//
+// Both of those are gated by the single ServerConfig.DevAuthToken != ""
+// condition, so that one bit is exactly what this reports:
+//   - New's "Build unified auth configuration" block sets
+//     AuthConfig.DevAuthEnabled from cfg.DevAuthToken != "", and
+//     srv.authConfig (assigned exactly once, in New) is the only AuthConfig
+//     UnifiedAuthMiddleware is ever called with. UnifiedAuthMiddleware's
+//     tokenTypeDev arm checks DevAuthEnabled before accepting a dev token,
+//     and the tokenTypeUser fallback's dev-token arm checks the same field.
+//   - New seeds the DevUserID row (seedDevUser) only when cfg.DevAuthToken
+//     != "", so a server with dev-auth off never seeds it during that
+//     startup (a row seeded some other way, e.g. directly in a test, does
+//     not change this bit — see setDevLocalAuthorityEnabled).
+//
+// A nil receiver (a zero-value or never-constructed AuthzService) reports
+// false: fail closed.
+//
+// Invariant: for any single running server, isTrustedLocalDevUser(id) ==
+// true implies devLocalAuthorityEnabled() == true — the concrete *DevUser
+// this server's request pipeline can produce only ever comes from
+// NewDevUser, itself only reachable through the same dev-token code paths
+// this bit tracks. This method does not change isTrustedLocalDevUser's
+// semantics, and it does not change E.2b's attribution (initiatorCredentialKindFor
+// still requires the identity assertion regardless of this flag); it exists
+// so B.3's fire-time authority decision can additionally confirm this
+// server currently admits dev_local at all before trusting a previously
+// stored dev_local row (a server later reconfigured with dev-auth off must
+// not honor an old dev_local row's authority). Enforced, on both sides of
+// dev-auth on/off and through the real UnifiedAuthMiddleware wiring (not a
+// re-derivation of cfg.DevAuthToken != ""), by
+// TestAuthzService_DevLocalAuthorityEnabled.
+func (a *AuthzService) devLocalAuthorityEnabled() bool {
+	if a == nil {
+		return false
+	}
+	return a.devLocalEnabled
+}
+
+// setDevLocalAuthorityEnabled sets the bit devLocalAuthorityEnabled reports.
+// Called exactly once, at server construction (server.go, immediately after
+// NewAuthzService), from the same cfg.DevAuthToken != "" condition that
+// governs dev-token acceptance and DevUserID seeding — never from a
+// request. A setter (rather than a NewAuthzService parameter) keeps
+// NewAuthzService(store, logger)'s signature unchanged for its many
+// existing callers.
+func (a *AuthzService) setDevLocalAuthorityEnabled(enabled bool) {
+	a.devLocalEnabled = enabled
+}
 
 // userContextKey is the key for storing the user in the request context.
 type userContextKey struct{}
@@ -110,9 +201,10 @@ func DevAuthMiddlewareWithDebug(validToken string, userCfg DevUserConfig, debug 
 	devUser := NewDevUser(userCfg)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w = normalizeConstraintAuditAuthFailures(w, r)
 			// Skip auth for health endpoints
 			if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
-				next.ServeHTTP(w, r)
+				serveAfterAuth(w, next, r)
 				return
 			}
 
@@ -121,7 +213,7 @@ func DevAuthMiddlewareWithDebug(validToken string, userCfg DevUserConfig, debug 
 				if debug {
 					slog.Debug("Auth success: agent token already validated")
 				}
-				next.ServeHTTP(w, r)
+				serveAfterAuth(w, next, r)
 				return
 			}
 
@@ -191,7 +283,7 @@ func DevAuthMiddlewareWithDebug(validToken string, userCfg DevUserConfig, debug 
 
 			// Add dev user context
 			ctx := context.WithValue(r.Context(), userContextKey{}, devUser)
-			next.ServeHTTP(w, r.WithContext(ctx))
+			serveAfterAuth(w, next, r.WithContext(ctx))
 		})
 	}
 }

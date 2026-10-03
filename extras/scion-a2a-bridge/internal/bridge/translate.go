@@ -15,15 +15,30 @@
 package bridge
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/a2aproject/a2a-go/v2/a2a"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
-	"github.com/google/uuid"
 )
+
+// deterministicID produces a stable identifier from a Scion message, so that
+// duplicate delivery of the same broker message yields identical message/artifact
+// IDs — a prerequisite for dedup_key determinism (OPT-1).
+func deterministicID(msg *messages.StructuredMessage, suffix string) string {
+	h := sha256.New()
+	// Include the timestamp and message body — these are stable across re-delivery.
+	fmt.Fprintf(h, "%s|%s|%s", msg.Timestamp, msg.Msg, suffix)
+	for _, att := range msg.Attachments {
+		fmt.Fprintf(h, "|%s", att)
+	}
+	return hex.EncodeToString(h.Sum(nil))[:32]
+}
 
 // A2A task states (matching the A2A protocol spec).
 const (
@@ -154,6 +169,9 @@ func TranslateA2AToScion(parts []Part) *messages.StructuredMessage {
 }
 
 // TranslateScionToA2A converts a Scion StructuredMessage into an A2A Message and optional Artifacts.
+// Message and artifact IDs are derived deterministically from the message content
+// so that duplicate delivery of the same broker message produces identical IDs,
+// enabling reliable dedup_key generation.
 func TranslateScionToA2A(msg *messages.StructuredMessage) (Message, []Artifact) {
 	parts := []Part{{Text: msg.Msg, MediaType: "text/plain"}}
 
@@ -162,7 +180,7 @@ func TranslateScionToA2A(msg *messages.StructuredMessage) (Message, []Artifact) 
 	}
 
 	message := Message{
-		MessageID: uuid.New().String(),
+		MessageID: deterministicID(msg, "msg"),
 		Role:      RoleAgent,
 		Parts:     parts,
 	}
@@ -171,7 +189,7 @@ func TranslateScionToA2A(msg *messages.StructuredMessage) (Message, []Artifact) 
 	switch msg.Type {
 	case "", messages.TypeInstruction, messages.TypeAssistantReply:
 		artifacts = append(artifacts, Artifact{
-			ArtifactID: uuid.New().String(),
+			ArtifactID: deterministicID(msg, "art"),
 			Parts:      parts,
 			LastChunk:  true,
 		})

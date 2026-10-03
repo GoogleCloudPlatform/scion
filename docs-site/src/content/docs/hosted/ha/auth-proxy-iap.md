@@ -19,6 +19,11 @@ Only one mode is active at a time. When `auth.mode` is `proxy`, the OAuth login 
 
 Choose **proxy / IAP** when the Hub is already fronted by IAP (e.g., on Cloud Run with IAP enabled, or behind a GCE/GKE IAP-protected backend service) and you want to eliminate a separate OAuth integration.
 
+Two verified proxy providers are available, selected by `auth.proxy.provider`:
+
+- **`iap`** — Google IAP. Covered by most of this guide.
+- **`jwt`** — any authenticating proxy that forwards a signed JWT. See [Generic JWT proxy provider](#generic-jwt-proxy-provider).
+
 ## Inbound: human IAP authentication
 
 ### How it works
@@ -121,7 +126,7 @@ Provisioning in proxy mode works identically to OAuth — lazy, allow-list-gated
 - **`open`**: any verified email is allowed.
 - **`domain_restricted`**: email domain must be in `authorized_domains`.
 - **`invite_only`**: email must be pre-registered (via admin invite-code flow).
-- **Additive-Only `admin_emails` Floor**: Emails in the `admin_emails` configuration are granted the `admin` role automatically. This setting is strictly additive (acts as a floor, not a ceiling): it never overwrites or demotes roles that have been explicitly promoted or changed via the Admin UI/API, which are stored in the database and preserved verbatim across logins/refreshes.
+- **Roles**: Emails in `admin_emails` are granted the `admin` role automatically. Other new users get `server.auth.default_user_role` (`member` or `viewer`). An admin granted by `admin_emails` who is removed from the list is demoted to the default role; admins promoted through the Admin UI/API are not. See [Hub roles](/scion/hosted/ha/permissions/#hub-roles) and [AdminEmails and UI-promoted admins](/scion/hosted/ha/permissions/#adminemails-and-ui-promoted-admins).
 - If not permitted, the request returns **403**. Deleted users are rejected with **401** or **403**, and suspended users are rejected with **403** (even though upstream IAP may authenticate them).
 - **Database-Backed Token Refresh**: The token refresh endpoint reads the user's active role directly from the database rather than relying on stale session cache, ensuring UI-based role promotions take effect immediately.
 
@@ -133,6 +138,62 @@ In proxy mode, the Hub does not own the session. The `/auth/logout` endpoint:
 
 - **Browser requests**: redirect to `/_gcp_iap/clear_login_cookie` (IAP's cookie-clearing endpoint).
 - **API requests**: return `200 OK` with `{"success": true, "message": "proxy mode: session is managed by the authenticating proxy"}`.
+
+The browser redirect is the same for every proxy provider. With `provider: jwt`, `/_gcp_iap/clear_login_cookie` is a path on your own proxy, so sign-out depends on how that proxy handles it.
+
+## Generic JWT proxy provider
+
+Use `provider: jwt` when the Hub sits behind a bespoke authenticating proxy rather than Google IAP. The proxy must forward a JWT signed with an asymmetric key. The Hub verifies the signature, validates the claims, and then provisions the user exactly as described in [User provisioning](#user-provisioning). The [middleware precedence](#middleware-precedence) is the same as for IAP.
+
+```yaml
+server:
+  auth:
+    mode: proxy
+    proxy:
+      provider: jwt
+      jwt:
+        header: X-Auth-Proxy-JWT     # default
+        algorithm: RS256             # required; asymmetric algorithms only
+        issuer: https://auth.example.com
+        audience: scion-hub
+
+        # Exactly one key source:
+        jwks_url: https://auth.example.com/.well-known/jwks.json
+        # jwks_file: /etc/scion/proxy-jwks.json
+        # public_key_file: /etc/scion/proxy-signing-key.pem
+
+        # Optional claim mapping (OIDC-standard defaults shown):
+        claims:
+          email: email
+          subject: sub
+          display_name: name
+          domain: hd
+    user_access_mode: domain_restricted
+    authorized_domains:
+      - example.com
+```
+
+### Key sources
+
+Configure exactly one key source. If none or more than one is set, the Hub refuses to start.
+
+| Key source | Behavior |
+|------------|----------|
+| `public_key_file` | A single PEM public key (PKIX, PKCS1, or an X.509 certificate), read at startup and applied to every token regardless of `kid`. |
+| `jwks_url` | A remote JWKS endpoint. Keys are matched by `kid` and cached. The cache refreshes hourly in the background and immediately when a token carries an unknown `kid`. Fetches are debounced to at most one attempt every 5 seconds. If a refresh fails, the last-good key set is still served. This matches the IAP provider. |
+| `jwks_file` | A local JWKS JSON document, read at startup. Keys are matched by `kid`, and keys without a `kid` are ignored. The file must contain at least one usable keyed entry. Changes take effect only after a restart. |
+
+Missing or malformed key files are reported at startup, not on the first request.
+
+### Validation rules
+
+- **Algorithm pinning.** Only the configured `algorithm` is accepted. Symmetric (`HS*`) algorithms are rejected at startup.
+- **Issuer and audience** are checked only when `issuer` and `audience` are set. Set both in production. Without an audience, the Hub accepts any token the proxy's key has signed, including tokens minted for other services.
+- **Expiry.** `exp` is required. `exp` and `iat` (if present) are checked with ±30 seconds of clock skew.
+- **Identity claims.** The email claim is required and is lowercased. If the subject claim is missing, the email is used as the subject. Display name and domain are optional.
+- A request without the configured header falls through to the normal unauthenticated handling. A request whose header holds an invalid JWT is rejected.
+
+As with IAP, the Hub must be reachable only through the proxy. Use network controls to keep clients from reaching it directly.
 
 ## Outbound: agent transport auth
 
@@ -158,6 +219,8 @@ When transport auth is configured, the Hub injects these environment variables i
 | `SCION_TRANSPORT_TOKEN` | Initial Google OIDC ID token for the transport layer. |
 | `SCION_TRANSPORT_AUDIENCE` | Audience the transport token was minted for (IAP client ID or hub URL). |
 | `SCION_TRANSPORT_TOKEN_EXPIRY` | Token expiry in RFC 3339 format. |
+
+On the Kubernetes runtime, `SCION_TRANSPORT_TOKEN` comes from the agent's per-agent Secret through `secretKeyRef`, not from a plain value in the Pod spec. See [Hub Transport Credential](/scion/hosted/ha/kubernetes/#hub-transport-credential). Other runtimes set it as a regular environment variable.
 
 ### Refresh response: `tokens[]` array
 
@@ -250,6 +313,10 @@ The Hub uses a dedicated service account solely for transport-layer auth. The Hu
 |-----------|------|--------|
 | Hub's runtime SA | `roles/iam.serviceAccountTokenCreator` | Transport SA (`platform_auth_sa`) |
 | Transport SA | IAP-secured web user **or** Cloud Run invoker | The Hub's backend service |
+
+### Seeing requests IAP rejects
+
+When IAP enforces access directly on a Cloud Run service (for example, the IAP proxy in front of a single-node Hub), a request IAP rejects never reaches the container. It does not appear in the Cloud Run service's logs or the Hub's logs. To see IAP's own authorization decisions, enable **Data Access** audit logs (**Data Read**) for the `iap.googleapis.com` service, then filter Cloud Logging on `protoPayload.serviceName="iap.googleapis.com"` and `protoPayload.authorizationInfo.granted=false`. A mismatched `auth.proxy.iap.audience` is different: IAP passes the request through and the Hub rejects it, so it does show up in the Hub's logs. For step-by-step Console and `auditConfigs` instructions, see [Requests IAP rejects never reach Cloud Run or the Hub logs](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/single-node-vm.md#requests-iap-rejects-never-reach-cloud-run-or-the-hub-logs) in the repository.
 
 ## Security notes
 

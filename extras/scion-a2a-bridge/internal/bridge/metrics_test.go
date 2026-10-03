@@ -102,8 +102,8 @@ func TestNormalizeRoute(t *testing.T) {
 		{"/readyz", "/readyz"},
 		{"/metrics", "/metrics"},
 		{"/.well-known/agent-card.json", "/agent-card"},
-		{"/groves/foo/agents/bar/.well-known/agent-card.json", "/agent-card"},
-		{"/groves/foo/agents/bar/jsonrpc", "/jsonrpc"},
+		{"/projects/foo/agents/bar/.well-known/agent-card.json", "/agent-card"},
+		{"/projects/foo/agents/bar/jsonrpc", "/jsonrpc"},
 		{"/some/random/path", "/other"},
 	}
 	for _, tt := range tests {

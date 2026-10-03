@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -32,6 +33,12 @@ import (
 )
 
 type failingReader struct{}
+
+func otlpHTTPRequest(path string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, path, body)
+	req.Header.Set("Content-Type", "application/x-protobuf")
+	return req
+}
 
 func (failingReader) Read([]byte) (int, error) {
 	return 0, errors.New("read failed")
@@ -103,7 +110,7 @@ func TestReceiverHTTPExports(t *testing.T) {
 				receiver := &Receiver{}
 				test.configure(receiver, &called, nil)
 				response := httptest.NewRecorder()
-				test.serve(receiver, response, httptest.NewRequest(http.MethodPost, test.path, bytes.NewReader(body)))
+				test.serve(receiver, response, otlpHTTPRequest(test.path, bytes.NewReader(body)))
 
 				if response.Code != http.StatusOK {
 					t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
@@ -139,7 +146,7 @@ func TestReceiverHTTPExports(t *testing.T) {
 				receiver := &Receiver{}
 				test.configure(receiver, &called, nil)
 				response := httptest.NewRecorder()
-				test.serve(receiver, response, httptest.NewRequest(http.MethodPost, test.path, failingReader{}))
+				test.serve(receiver, response, otlpHTTPRequest(test.path, failingReader{}))
 
 				if response.Code != http.StatusBadRequest || response.Body.String() != "Failed to read body\n" {
 					t.Fatalf("response = (%d, %q)", response.Code, response.Body.String())
@@ -154,7 +161,7 @@ func TestReceiverHTTPExports(t *testing.T) {
 				receiver := &Receiver{}
 				test.configure(receiver, &called, nil)
 				response := httptest.NewRecorder()
-				test.serve(receiver, response, httptest.NewRequest(http.MethodPost, test.path, bytes.NewReader([]byte{0x80})))
+				test.serve(receiver, response, otlpHTTPRequest(test.path, bytes.NewReader([]byte{0x80})))
 
 				if response.Code != http.StatusBadRequest || response.Body.String() != "Failed to parse OTLP request\n" {
 					t.Fatalf("response = (%d, %q)", response.Code, response.Body.String())
@@ -169,7 +176,7 @@ func TestReceiverHTTPExports(t *testing.T) {
 				receiver := &Receiver{}
 				test.configure(receiver, &called, errors.New("process failed"))
 				response := httptest.NewRecorder()
-				test.serve(receiver, response, httptest.NewRequest(http.MethodPost, test.path, bytes.NewReader(body)))
+				test.serve(receiver, response, otlpHTTPRequest(test.path, bytes.NewReader(body)))
 
 				if response.Code != http.StatusInternalServerError || response.Body.String() != test.processError {
 					t.Fatalf("response = (%d, %q)", response.Code, response.Body.String())
@@ -182,7 +189,7 @@ func TestReceiverHTTPExports(t *testing.T) {
 			t.Run("nil handler", func(t *testing.T) {
 				receiver := &Receiver{}
 				response := httptest.NewRecorder()
-				test.serve(receiver, response, httptest.NewRequest(http.MethodPost, test.path, bytes.NewReader(body)))
+				test.serve(receiver, response, otlpHTTPRequest(test.path, bytes.NewReader(body)))
 
 				if response.Code != http.StatusOK {
 					t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)

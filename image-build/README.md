@@ -15,7 +15,8 @@ core-base          System dependencies (Go, Node, Python)
         ├── harness images  Optional recipes from harnesses/<name>/
         └── hub             Scion hub server
 
-thick-prep         Patches Cloud Workstations base for scion compatibility (amd64 only)
+thick-prep         Patches Cloud Workstations base for scion compatibility,
+                   including git >= 2.47 (amd64 only)
   └── scion-base   Same Dockerfile, different foundation
         ├── harness images
         └── hub
@@ -25,6 +26,42 @@ thick-prep         Patches Cloud Workstations base for scion compatibility (amd6
 build from self-contained bundles under `harnesses/<name>/` when that bundle has
 a `Dockerfile` and `cloudbuild.yaml`. See
 [`harnesses/README.md`](../harnesses/README.md).
+
+### Where git comes from
+
+Scion hard-requires **git >= 2.47.0** (`pkg/util/git.go` `CheckGitVersion`, for
+`git worktree add --relative-paths`). Below that, worktree-per-agent mode is
+disabled.
+
+`scion-base` does **not** install git — it only builds the Go binaries — so git
+is always inherited from whichever foundation is underneath it. Both foundations
+therefore have to provide it independently:
+
+| Foundation | Base OS | glibc | git |
+|---|---|---|---|
+| `core-base` | `node:24-trixie-slim` (Debian 13) | 2.41 | vendored from `chainguard/git` |
+| `thick-prep` | Cloud Workstations base (Ubuntu 24.04) | 2.39 | vendored from `chainguard/git` |
+
+Both copy the same four artifacts out of the Chainguard image. Two constraints
+apply to that copy and are enforced by a build-time assertion in each Dockerfile:
+
+- helpers **must** land in `/usr/libexec/git-core` — that path is compiled into
+  the binary as `GIT_EXEC_PATH`, and getting it wrong produces a misleading
+  `'remote-https' is not a git command`;
+- the binary **must** land at `/usr/bin/git`, overwriting any distro git.
+  Chainguard ships `/usr/libexec/git-core/git` as a relative symlink to
+  `../../bin/git`, and git re-execs itself through that path for internal
+  subcommands. On a base that already has its own `/usr/bin/git` (the thick
+  base has 2.43), installing ours elsewhere leaves that symlink resolving to
+  the **old** binary — `git --version` reports 2.55.0 while subcommands die
+  with `fatal: unknown repository extension found: relativeworktrees`;
+- the base image needs **glibc >= 2.38**. Debian bookworm (2.36) fails at exec
+  with `GLIBC_2.38 not found`, so this gates any future base-image change.
+
+`GIT_IMAGE` defaults to the floating `chainguard/git:latest`. Pin it to a digest
+in CI (`--build-arg GIT_IMAGE=chainguard/git@sha256:...`) and refresh on a
+schedule — a vendored binary stops receiving Chainguard's rebuild cadence the
+moment it is copied out.
 
 ## Scripts
 
@@ -38,6 +75,7 @@ All image-related scripts live under `scripts/`. GitHub Actions workflows remain
 | `scripts/trigger-cloudbuild.sh` | Deprecation shim. Forwards to `build-images.sh --builder cloud-build`. |
 | `scripts/pull-containers.sh` | Pull pre-built images (auto-detects runtime). |
 | `scripts/setup-cloud-build.sh` | One-time GCP setup (APIs, Artifact Registry, permissions). |
+| `scripts/check-harness-coverage.sh` | Fails if a `harnesses/<name>/Dockerfile` is missing from an aggregate `cloudbuild-*.yaml`. |
 | `.github/workflows/build-images.yml` | GitHub Actions workflow for building and pushing images. |
 
 ### Builders
@@ -48,7 +86,7 @@ All image-related scripts live under `scripts/`. GitHub Actions workflows remain
 |---|---|---|---|
 | `local-docker` (default) | `docker buildx` | yes (auto-promotes to `--push`) | honors `--push`; `--load` otherwise |
 | `local-podman` | `podman build` | single-arch by default; multi-arch errors out (manual QEMU setup required) | honors `--push`; built images live in the local store automatically |
-| `cloud-build` | `gcloud builds submit` against a static `cloudbuild-*.yaml` | always amd64+arm64 (server-side) | always pushes |
+| `cloud-build` | `gcloud builds submit` against a static `cloudbuild-*.yaml` (group targets) or a config generated on the fly (individual harness targets) | always amd64+arm64 (server-side) | always pushes |
 
 The orchestrator owns target sequencing, tag computation, and BASE_IMAGE threading. Each builder only knows how to execute one image build (per-image mode) or one target submission (target mode).
 
@@ -71,6 +109,18 @@ The orchestrator owns target sequencing, tag computation, and BASE_IMAGE threadi
 Every image is tagged with both `:<tag>` (controlled by `--tag`, defaults to `latest`) and `:<short-sha>` (computed once from `git rev-parse --short HEAD`). When no SHA is available (e.g. running outside a git working tree), only the mutable tag is emitted.
 
 When two steps in the same run depend on each other, the orchestrator threads `BASE_IMAGE=...:<short-sha>` so chained builds are immune to concurrent overwrites of `:latest`. Standalone targets (e.g. `--target harnesses` on its own) reference the parent image as `:<tag>`.
+
+### Build provenance and stale sciontool
+
+`scion-base` is where the `sciontool` binary is compiled; every harness image and `scion-hub` just `FROM` it without rebuilding Go code. That means **a fix that lands in `sciontool` (or `pkg/version`) does not reach a running agent until `scion-base` is rebuilt, and then the harness/hub images on top of it are rebuilt too.** A harness-only build (`--target harnesses`, `--target hub`, or an individual harness step) reuses whatever `scion-base:<tag>` already exists and will silently keep an old `sciontool` if you skip the base rebuild.
+
+To make that visible:
+
+- `sciontool version` (inside any built image) prints the embedded git commit, and, on an exact release tag, the version.
+- `docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' <image>` prints the same commit as an OCI label on `scion-base` and everything built from it, without starting the container.
+- Running `build-images.sh` with a target that needs `scion-base` but doesn't build it in the same invocation prints a warning naming the `scion-base` image it will inherit (and that image's revision label, when it can be read locally without a pull).
+
+**Upgrade note:** after pulling a `sciontool`-side fix (for example, a usage-telemetry fix), rebuild in this order: `--target scion-base` first, then `--target harnesses` (and `--target hub` if needed). Rebuilding only harnesses on top of an old `scion-base` does not pick up the fix.
 
 ### Quick Start: Build Your Own Images
 
@@ -131,7 +181,7 @@ The workflow shells out to `build-images.sh --builder local-docker`. It is also 
 
 ## Cloud Build Configs
 
-The `cloud-build` builder maps each `--target` to a static YAML file:
+The `cloud-build` builder maps each group `--target` to a static YAML file:
 
 | Target | Config file |
 |---|---|
@@ -145,6 +195,14 @@ The `cloud-build` builder maps each `--target` to a static YAML file:
 | `thick-prep` | `cloudbuild-thick.yaml` (builds the full thick chain — see note below) |
 | `thick` | `cloudbuild-thick.yaml` |
 
+An individual harness step ID (`scion-claude`, `scion-muse-code`, etc.) is also
+a valid `--target` under `cloud-build`: instead of a static file, the builder
+generates a one-step config on the fly — the same `verify-registry` /
+`setup-buildx` / `bootstrap-buildx` / `buildx build` shape as the matching step
+in `cloudbuild-harnesses.yaml`, for that harness alone — submits it, and
+removes it when the run ends. This is how to rebuild one harness on Cloud
+Build (ptone/scion#2354) without resubmitting the whole `harnesses` group.
+
 **Note:** `--target thick-prep` with `--builder cloud-build` builds the full thick
 chain (thick-prep + scion-base + harnesses + hub), since both `thick-prep` and
 `thick` map to the same `cloudbuild-thick.yaml`. With per-image builders
@@ -157,12 +215,16 @@ lineages. The `cloud-build` path uses `gcloudignore-omni` to include web source
 files that the default `.gcloudignore` excludes (the omni Dockerfile runs
 `npm install && npm run build` to embed the web frontend).
 
-These YAMLs reference `$_TAG`, `$_SHORT_SHA`, `$_COMMIT_SHA`, and `$_REGISTRY` substitutions, all forwarded by the orchestrator.
+These YAMLs reference `$_TAG`, `$_SHORT_SHA`, `$_COMMIT_SHA`, `$_REGISTRY`, and (in the five that build `scion-base`: `all`, `common`, `scion-base`, `thick`/`thick-prep`, `omni`) `$_VERSION`, all forwarded by the orchestrator. `_TAG` defaults to `latest` in every YAML's `substitutions:` block; `_VERSION` defaults to `''` in the YAMLs that declare it, so a manual `gcloud builds submit` that omits either still works. The orchestrator itself only forwards a non-empty `_VERSION` when `HEAD` is on an exact git tag (see "Build provenance and stale sciontool" above) — off-tag, it relies on that yaml default.
 
-The aggregate `cloudbuild-harnesses.yaml`, `cloudbuild-common.yaml`, and
-`cloudbuild.yaml` files are static snapshots of the current catalog. When adding
-or removing a harness Dockerfile under `harnesses/<name>/`, update those
-aggregate YAMLs too. Individual harness bundles can also carry their own
+The aggregate `cloudbuild-harnesses.yaml`, `cloudbuild-common.yaml`,
+`cloudbuild.yaml`, and `cloudbuild-thick.yaml` files are static snapshots of
+the current catalog. When adding or removing a harness Dockerfile under
+`harnesses/<name>/`, update those four aggregate YAMLs too (`cloudbuild-omni.yaml`
+is a deliberate subset — see its own header — and is not part of this set).
+`scripts/check-harness-coverage.sh` compares those four files against the
+`harnesses/` tree and fails if one falls out of sync (ptone/scion#2357).
+Individual harness bundles can also carry their own
 `harnesses/<name>/cloudbuild.yaml` for one-off builds.
 
 ## Package Registries

@@ -27,9 +27,15 @@ type UserAccessToken struct {
 	// KeyHash holds the value of the "key_hash" field.
 	KeyHash string `json:"-"`
 	// ProjectID holds the value of the "project_id" field.
-	ProjectID uuid.UUID `json:"project_id,omitempty"`
+	ProjectID *uuid.UUID `json:"project_id,omitempty"`
+	// BoundaryKind holds the value of the "boundary_kind" field.
+	BoundaryKind string `json:"boundary_kind,omitempty"`
 	// Scopes holds the value of the "scopes" field.
 	Scopes string `json:"scopes,omitempty"`
+	// CeilingVersion holds the value of the "ceiling_version" field.
+	CeilingVersion int32 `json:"ceiling_version,omitempty"`
+	// CeilingPermissionIds holds the value of the "ceiling_permission_ids" field.
+	CeilingPermissionIds *string `json:"ceiling_permission_ids,omitempty"`
 	// Revoked holds the value of the "revoked" field.
 	Revoked bool `json:"revoked,omitempty"`
 	// ExpiresAt holds the value of the "expires_at" field.
@@ -37,7 +43,11 @@ type UserAccessToken struct {
 	// LastUsed holds the value of the "last_used" field.
 	LastUsed *time.Time `json:"last_used,omitempty"`
 	// Created holds the value of the "created" field.
-	Created      time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created,omitempty"`
+	// Purpose holds the value of the "purpose" field.
+	Purpose *string `json:"purpose,omitempty"`
+	// Labels holds the value of the "labels" field.
+	Labels       *string `json:"labels,omitempty"`
 	selectValues sql.SelectValues
 }
 
@@ -46,13 +56,17 @@ func (*UserAccessToken) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
+		case useraccesstoken.FieldProjectID:
+			values[i] = &sql.NullScanner{S: new(uuid.UUID)}
 		case useraccesstoken.FieldRevoked:
 			values[i] = new(sql.NullBool)
-		case useraccesstoken.FieldName, useraccesstoken.FieldPrefix, useraccesstoken.FieldKeyHash, useraccesstoken.FieldScopes:
+		case useraccesstoken.FieldCeilingVersion:
+			values[i] = new(sql.NullInt64)
+		case useraccesstoken.FieldName, useraccesstoken.FieldPrefix, useraccesstoken.FieldKeyHash, useraccesstoken.FieldBoundaryKind, useraccesstoken.FieldScopes, useraccesstoken.FieldCeilingPermissionIds, useraccesstoken.FieldPurpose, useraccesstoken.FieldLabels:
 			values[i] = new(sql.NullString)
 		case useraccesstoken.FieldExpiresAt, useraccesstoken.FieldLastUsed, useraccesstoken.FieldCreated:
 			values[i] = new(sql.NullTime)
-		case useraccesstoken.FieldID, useraccesstoken.FieldUserID, useraccesstoken.FieldProjectID:
+		case useraccesstoken.FieldID, useraccesstoken.FieldUserID:
 			values[i] = new(uuid.UUID)
 		default:
 			values[i] = new(sql.UnknownType)
@@ -100,16 +114,36 @@ func (_m *UserAccessToken) assignValues(columns []string, values []any) error {
 				_m.KeyHash = value.String
 			}
 		case useraccesstoken.FieldProjectID:
-			if value, ok := values[i].(*uuid.UUID); !ok {
+			if value, ok := values[i].(*sql.NullScanner); !ok {
 				return fmt.Errorf("unexpected type %T for field project_id", values[i])
-			} else if value != nil {
-				_m.ProjectID = *value
+			} else if value.Valid {
+				_m.ProjectID = new(uuid.UUID)
+				*_m.ProjectID = *value.S.(*uuid.UUID)
+			}
+		case useraccesstoken.FieldBoundaryKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field boundary_kind", values[i])
+			} else if value.Valid {
+				_m.BoundaryKind = value.String
 			}
 		case useraccesstoken.FieldScopes:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field scopes", values[i])
 			} else if value.Valid {
 				_m.Scopes = value.String
+			}
+		case useraccesstoken.FieldCeilingVersion:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field ceiling_version", values[i])
+			} else if value.Valid {
+				_m.CeilingVersion = int32(value.Int64)
+			}
+		case useraccesstoken.FieldCeilingPermissionIds:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field ceiling_permission_ids", values[i])
+			} else if value.Valid {
+				_m.CeilingPermissionIds = new(string)
+				*_m.CeilingPermissionIds = value.String
 			}
 		case useraccesstoken.FieldRevoked:
 			if value, ok := values[i].(*sql.NullBool); !ok {
@@ -136,6 +170,20 @@ func (_m *UserAccessToken) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field created", values[i])
 			} else if value.Valid {
 				_m.Created = value.Time
+			}
+		case useraccesstoken.FieldPurpose:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field purpose", values[i])
+			} else if value.Valid {
+				_m.Purpose = new(string)
+				*_m.Purpose = value.String
+			}
+		case useraccesstoken.FieldLabels:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field labels", values[i])
+			} else if value.Valid {
+				_m.Labels = new(string)
+				*_m.Labels = value.String
 			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
@@ -184,11 +232,24 @@ func (_m *UserAccessToken) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("key_hash=<sensitive>")
 	builder.WriteString(", ")
-	builder.WriteString("project_id=")
-	builder.WriteString(fmt.Sprintf("%v", _m.ProjectID))
+	if v := _m.ProjectID; v != nil {
+		builder.WriteString("project_id=")
+		builder.WriteString(fmt.Sprintf("%v", *v))
+	}
+	builder.WriteString(", ")
+	builder.WriteString("boundary_kind=")
+	builder.WriteString(_m.BoundaryKind)
 	builder.WriteString(", ")
 	builder.WriteString("scopes=")
 	builder.WriteString(_m.Scopes)
+	builder.WriteString(", ")
+	builder.WriteString("ceiling_version=")
+	builder.WriteString(fmt.Sprintf("%v", _m.CeilingVersion))
+	builder.WriteString(", ")
+	if v := _m.CeilingPermissionIds; v != nil {
+		builder.WriteString("ceiling_permission_ids=")
+		builder.WriteString(*v)
+	}
 	builder.WriteString(", ")
 	builder.WriteString("revoked=")
 	builder.WriteString(fmt.Sprintf("%v", _m.Revoked))
@@ -205,6 +266,16 @@ func (_m *UserAccessToken) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("created=")
 	builder.WriteString(_m.Created.Format(time.ANSIC))
+	builder.WriteString(", ")
+	if v := _m.Purpose; v != nil {
+		builder.WriteString("purpose=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.Labels; v != nil {
+		builder.WriteString("labels=")
+		builder.WriteString(*v)
+	}
 	builder.WriteByte(')')
 	return builder.String()
 }

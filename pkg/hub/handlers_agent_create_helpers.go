@@ -62,6 +62,58 @@ func (s *Server) resolveTemplate(ctx context.Context, templateRef, projectID str
 	return template, nil
 }
 
+// authorizeResolvedTemplate reports whether identity may read the resolved
+// template candidate before it is used to populate a new agent's applied
+// config. resolveTemplate's first lookup arm resolves by ID across every
+// scope, so a candidate it returns is not yet known to be one the caller may
+// see — this establishes that, mirroring the read-authorization gate every
+// other template read surface applies via templateResource (ptone/scion#1916).
+//
+// A nil template needs no check. A nil identity is fail-closed, not a
+// pass: both of this gate's callers already require an identity before they
+// can reach it (createAgentInProject runs behind authorizeAgentCreate, which
+// rejects a nil identity outright, and the scheduler path's creatorIdentity
+// is resolved from a scheduled event's CreatedBy before dispatch ever calls
+// this — an empty/unresolvable creator fails the dispatch first). A
+// background/system context that has no principal to check against, such as
+// ValidateStartupDefaults, must not call this gate at all — it calls
+// resolveTemplate directly and never surfaces the candidate to a caller, so
+// there is nothing here for it to pass through. If a genuine internal path
+// ever needs to bypass this check, it must do so explicitly (e.g. a
+// documented system-principal Identity), not by leaving identity nil.
+// A global-scope template is the hub-wide catalog — no confidentiality
+// boundary applies, the same rule filterHubWideTemplateGrants encodes for
+// the curated hub-member/hub-viewer grant (ptone/scion#1901/#1916). It is
+// checked directly here, rather than relying on that grant, because it must
+// also cover agent and broker principals, which never hold a
+// hub-member-equivalent grant of their own but must still be able to resolve
+// the hub-wide default template (e.g. a delegate agent's scheduled dispatch
+// applying the hub's DefaultTemplate setting). A broker identity is scoped
+// by brokerMayReadCatalogResource for the same reason getTemplateV2 and
+// handleTemplateDownload use it: brokers read templates during agent
+// creation (hydration) over HMAC auth, not as user principals, but that is
+// authority to hydrate the projects they serve plus the hub-wide catalog —
+// already covered by the global-scope check above — not every project's or
+// user's private template.
+func (s *Server) authorizeResolvedTemplate(ctx context.Context, identity Identity, tmpl *store.Template) bool {
+	if tmpl == nil {
+		return true
+	}
+	if identity == nil {
+		return false
+	}
+	if tmpl.Scope == store.TemplateScopeGlobal {
+		return true
+	}
+	if broker := GetBrokerIdentityFromContext(ctx); broker != nil {
+		return s.brokerMayReadCatalogResource(ctx, broker, tmpl.Scope, tmpl.ScopeID)
+	}
+	if s.authzService == nil {
+		return false
+	}
+	return s.authzService.CheckAccess(ctx, identity, templateResource(tmpl), ActionRead).Allowed
+}
+
 // getHarnessConfigFromTemplate returns the harness config name from a resolved template,
 // or the fallback value if no template was resolved. Prefers the template's
 // DefaultHarnessConfig (e.g. "claude-web") over the generic Harness type (e.g. "claude").
@@ -80,10 +132,14 @@ func (s *Server) getHarnessConfigFromTemplate(template *store.Template, fallback
 // buildAppliedConfig constructs an AgentAppliedConfig from a CreateAgentRequest.
 // When req.Config is a ScionConfig, its fields are extracted into the applied config
 // and the full ScionConfig is preserved as InlineConfig for threading to the broker.
-func (s *Server) buildAppliedConfig(req CreateAgentRequest, harnessConfig string, creatorName string, effectiveRole AgentRole) *store.AgentAppliedConfig {
+func (s *Server) buildAppliedConfig(req CreateAgentRequest, creatorName string, effectiveRole AgentRole) *store.AgentAppliedConfig {
 	ac := &store.AgentAppliedConfig{
-		Profile:       req.Profile,
-		HarnessConfig: harnessConfig,
+		Profile: req.Profile,
+		// HarnessConfig starts at the requester's explicit value only.
+		// Project-annotation and template-default resolution happen later, in
+		// deriveAgentConfig — not here — so this stays a true record of what
+		// the requester asked for (CreateInputs relies on that below).
+		HarnessConfig: req.HarnessConfig,
 		HarnessAuth:   req.HarnessAuth,
 		Task:          req.Task,
 		Attach:        req.Attach,
@@ -116,11 +172,69 @@ func (s *Server) buildAppliedConfig(req CreateAgentRequest, harnessConfig string
 		ac.InlineConfig = req.Config
 	}
 
-	if ac.HarnessAuth == "none" {
+	if harness.IsNoAuthType(ac.HarnessAuth) {
 		ac.NoAuth = true
 	}
 
+	// Snapshot the explicit inputs now, before resolveDerivedConfig (called
+	// later, from populateAgentConfig) has a chance to fill in template/
+	// harness-config/hub-default values on top of them. This is the only
+	// point at which "explicit" and "derived" are still distinguishable —
+	// several of these fields (Image, Model, Env, HarnessAuth, Workspace,
+	// Branch) are dual-purpose: resolveDerivedConfig/populateAgentConfig only
+	// fill them when empty, so a later read of agent.AppliedConfig cannot
+	// tell "the user set this" from "the template/hub defaulted it".
+	// `scion reincarnate` (design §3.3 Amendment A1) replays CreateInputs,
+	// not the live AppliedConfig, so a migrated agent's derived fields are
+	// recomputed fresh instead of inheriting a stale generation's values.
+	//
+	// InlineConfig is deep-copied rather than aliased: resolveDerivedConfig
+	// mutates agent.AppliedConfig.InlineConfig in place (e.g. stamping hub
+	// telemetry defaults), and CreateInputs must not observe that mutation
+	// through a shared pointer.
+	ac.CreateInputs = &store.AgentCreateInputs{
+		InlineConfig: deepCopyScionConfig(req.Config),
+		// NoAuth is req.NoAuth, NOT ac.NoAuth: by this point ac.NoAuth may
+		// already have been flipped true by the ac.HarnessAuth=="none" check
+		// just above, which is a derived consequence of an explicit
+		// HarnessAuth request, not an explicit NoAuth request in its own
+		// right. req.NoAuth already reflects the role=none mapping the
+		// caller applies before calling buildAppliedConfig (role is itself a
+		// kept field, so its NoAuth consequence must be captured as
+		// explicit too — see design §3.4 Amendment A3.1 and
+		// AgentCreateInputs.NoAuth's doc comment).
+		NoAuth:        req.NoAuth,
+		HarnessConfig: ac.HarnessConfig,
+		HarnessAuth:   ac.HarnessAuth,
+		Profile:       ac.Profile,
+		ThinkingLevel: ac.ThinkingLevel,
+		Branch:        ac.Branch,
+		Workspace:     ac.Workspace,
+	}
+
 	return ac
+}
+
+// deepCopyScionConfig returns an independent copy of cfg via a JSON
+// marshal/unmarshal round trip, so the caller can hold onto a snapshot that
+// later in-place mutation of the original cannot reach. Returns nil for a nil
+// input, and nil (with the error swallowed) if marshaling ever fails — that
+// can only happen for a pathological ScionConfig (e.g. a channel or func
+// field, none of which the type has today), and a snapshot miss here is not
+// worth failing agent creation over.
+func deepCopyScionConfig(cfg *api.ScionConfig) *api.ScionConfig {
+	if cfg == nil {
+		return nil
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		return nil
+	}
+	var out api.ScionConfig
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil
+	}
+	return &out
 }
 
 // populateAgentConfig enriches an agent's AppliedConfig with project-derived and
@@ -171,6 +285,177 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 		agent.AppliedConfig.Branch = defaultBranch
 	}
 
+	s.resolveDerivedConfig(ctx, agent, project, resolvedTemplate)
+}
+
+// deriveAgentConfig is create's whole config-resolution pipeline, run after
+// an agent's explicit inputs are set up (buildAppliedConfig on the create
+// path; the scheduled-dispatch path's equivalent inline setup in server.go):
+// resolve the harness-config name (project annotation, then template
+// default, when the requester didn't give one explicitly), apply
+// project-level defaults, then hub operational defaults (recording via ctx
+// whether the hub default supplied HarnessConfig, for
+// resolveDerivedConfig's not-found log-level attribution), then the full
+// populateAgentConfig pass (GitClone/Workspace/Branch, then
+// resolveDerivedConfig).
+//
+// Both agent-create call sites call this instead of open-coding these steps
+// — the harness-config rung included — so the two pipelines cannot drift,
+// and a future change here cannot silently go missing from one of them (or
+// from a hand-written "recipe" comment: see resolveDerivedConfig's doc
+// comment for why that's a rule here rather than a list). `scion
+// reincarnate` calls it too, on a freshly built AppliedConfig containing
+// only kept fields and explicit inputs — including GCPIdentity, which the
+// auto-no-auth check below reads — never on an existing agent's config.
+//
+// Per-field precedence differs by field, because of where each tier is
+// applied:
+//   - Model: request > project > hub > template. Project and hub run here,
+//     BEFORE resolveDerivedConfig's template fill.
+//   - HarnessConfig: request > project > template > hub. The template rung
+//     also runs here, but BEFORE applyHubAgentDefaults, so the hub-wide
+//     default only fills a slot that request, project, AND template all
+//     left empty (design §5.2 risk (b);
+//     TestCreateAgent_HubDefaultHarnessConfig_LosesToTemplate pins this).
+func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) {
+	// Harness-config resolution: request (already on AppliedConfig.HarnessConfig
+	// from the explicit-inputs setup) > project annotation > template default.
+	if agent.AppliedConfig.HarnessConfig == "" && project != nil && project.Annotations != nil {
+		agent.AppliedConfig.HarnessConfig = project.Annotations[projectSettingDefaultHarnessConfig]
+	}
+	if agent.AppliedConfig.HarnessConfig == "" {
+		agent.AppliedConfig.HarnessConfig = s.getHarnessConfigFromTemplate(resolvedTemplate, "")
+	}
+
+	// Project-level defaults: limits, resources, and any of HarnessConfig/
+	// HarnessAuth/Model/ThinkingLevel/Profile the rungs above left empty. Its
+	// own harness-config fill is a no-op here in practice (the rung above
+	// already applied the same annotation), kept for parity with the
+	// non-harness-config fields it also fills.
+	applyProjectDefaults(agent.AppliedConfig, project)
+
+	// Hub operational agent_defaults — strictly between applyProjectDefaults
+	// and populateAgentConfig. See applyHubAgentDefaults for why that
+	// placement is the whole point: running it before the template rung
+	// above would let the hub default beat the template for HarnessConfig.
+	if applyHubAgentDefaults(agent.AppliedConfig, s.hubAgentDefaults()) {
+		ctx = withHubDefaultHarnessConfig(ctx)
+	}
+
+	s.populateAgentConfig(ctx, agent, project, resolvedTemplate)
+}
+
+// resolveDerivedConfig is fill-if-empty, not recompute-against-the-catalog:
+// for most fields (Image, Model, Env entries, HarnessConfigID/Hash,
+// ProjectPreStartHookID/Script, template-derived InlineConfig.Telemetry) it
+// only writes a slot on agent.AppliedConfig that is still empty, and leaves
+// an already-populated slot alone. Calling it on an agent's EXISTING
+// (already-derived) AppliedConfig therefore keeps every stale value from
+// that derivation — it cannot tell "the caller set this explicitly" from
+// "a previous call to this function derived it".
+//
+// This function alone does not reproduce what create does to an agent's
+// config: a hand-written recipe of "call this plus N other steps" is fragile,
+// because a future change to the pipeline can add a step and update only one
+// caller. So this is a rule, not a list: a caller that
+// wants create's result — `scion reincarnate` is the only one — must reuse
+// create's own code for everything from harness-config resolution through
+// populateAgentConfig, not re-derive a shortened version of it. That shared
+// code is the deriveAgentConfig helper (design §3.3 Amendment A1); call
+// deriveAgentConfig on a freshly built AppliedConfig holding only kept
+// fields and explicit inputs, never on an existing agent's config, and never
+// call this function on its own expecting it to stand in for that helper.
+//
+// The fresh config must also carry AppliedConfig.GCPIdentity (a kept field,
+// copied from the outgoing generation) before deriveAgentConfig runs: the
+// auto-no-auth fallback below reads it, through
+// hasRequiredAuthCredentials -> agentHasGCPIdentityAssigned, and a config
+// missing it can flip NoAuth/HarnessAuth where create did not.
+//
+// For context, not as a substitute for reusing deriveAgentConfig: the
+// resulting per-field precedence differs by field, because of *where* each
+// tier is applied. Model is request > project > hub > template, because the
+// project and hub tiers (applyProjectDefaults, then applyHubAgentDefaults)
+// run before this function's template fill. HarnessConfig is
+// request > project > template > hub, because deriveAgentConfig fills the
+// harness-config rung (request > project annotation > template) before
+// applyProjectDefaults/applyHubAgentDefaults run — so the hub-wide
+// default_harness_config only applies when the request, the project
+// annotation and the template all left the slot empty.
+// applyHubAgentDefaults reports whether it supplied HarnessConfig via its
+// bool return; it does not set the ctx flag itself — the caller does that by
+// wrapping ctx with withHubDefaultHarnessConfig, and this function reads
+// that wrapped ctx.
+//
+// Exceptions — these ignore whether the slot is already set:
+//   - TemplateID and TemplateHash are replaced whenever resolvedTemplate is
+//     non-nil; HubAccessScopes too, but only when the template declares
+//     hubAccess (otherwise an existing value is left as-is).
+//   - Model-alias resolution: when AppliedConfig.Model is an alias, rewrites
+//     it to the resolved concrete name, and overwrites a non-empty
+//     InlineConfig.Model with that same resolved value (InlineConfig.Model
+//     is untouched if it was already empty, and unaffected if
+//     AppliedConfig.Model was not an alias).
+//   - The auto-no-auth fallback can flip NoAuth to true and HarnessAuth from
+//     "" to "none" based on a live credential check, and, once written, that
+//     result is indistinguishable from an explicit --harness-auth none.
+//   - The project's TelemetryEnabled annotation, when set to a valid bool,
+//     overwrites InlineConfig.Telemetry.Enabled, even when the requester set
+//     it inline.
+//   - InlineConfig.Skills is always rewritten by mergeInjectedSkills, and it
+//     is neither fill-if-empty nor additive: whatever is already in Skills
+//     on entry is relabeled Scope="template" (highest precedence), merged
+//     with the *current* hub/user/project injections, and the result
+//     overwrites Skills. The precondition this assumes is that incoming
+//     Skills holds only the requester's explicit inline-config skills
+//     (req.Config.Skills on create) — which this function labels
+//     Scope="template" — and nothing a previous merge produced. (The Hub
+//     template's own skills are not read here; dispatch adds them
+//     separately.) Calling this on a config whose Skills was already merged
+//     (by a prior call to this function) promotes every hub/user/project
+//     skill in it to template scope, permanently outranking the live
+//     injections — deleting the injection can no longer remove it. A caller
+//     reconstructing explicit inputs for reincarnate must capture Skills
+//     before this ever runs, not read it back out afterward, and a legacy
+//     caller with no such capture must drop Skills entirely rather than pass
+//     through whatever InlineConfig currently has.
+//
+// InlineConfig is not a record of the requester's explicit inputs after this
+// runs: this function creates it when nil (mergeInjectedSkills always does,
+// which is why a bare create's InlineConfig is never nil) and writes into it
+// — template/hub/project telemetry defaults, the project- or hub-level
+// SCION_AUTO_EXPOSE_PORTS default (in InlineConfig.Env), the resolved Model
+// alias, and InlineConfig.Skills (see above). It also receives the template
+// env merge below by aliasing, not by a write in this function: the create
+// path's config builder, buildAppliedConfig, sets AppliedConfig.InlineConfig
+// to req.Config itself and AppliedConfig.Env to req.Config.Env, so
+// InlineConfig *is* the request object and AppliedConfig.Env is its Env
+// field — every InlineConfig write listed above also mutates the request,
+// and, in the same direction, when the requester supplied any env, the
+// template-env-merge writes below land in InlineConfig.Env too (and the
+// auto-expose key also appears in AppliedConfig.Env). InlineConfig.Telemetry
+// can also be aliased, by this function's own template-telemetry fill, to
+// resolvedTemplate.Config.Telemetry, so the project TelemetryEnabled write
+// above can mutate the template object through that shared pointer.
+// InlineConfig therefore cannot be stripped back to explicit inputs by
+// removing known hub/project keys — the aliased template-env keys are
+// indistinguishable from explicit ones by inspecting InlineConfig. A caller
+// that needs the original explicit request inputs (reincarnate does) must
+// capture them before this runs, not read them back out of InlineConfig
+// afterward.
+//
+// Precondition: agent.AppliedConfig must be non-nil (populateAgentConfig's
+// caller-facing guard covers today's only call site; a direct caller must
+// check first).
+//
+// This is the tail end of populateAgentConfig, which is itself only part of
+// create's config-resolution pipeline (see deriveAgentConfig). It is not, on
+// its own or combined with just two apply-steps, a stand-in for that whole
+// pipeline — see the rule above. What it deliberately does NOT touch:
+// GitClone, Workspace, and Branch (kept verbatim across a reincarnation per
+// design §3.3) — those are populated by populateAgentConfig above this call,
+// before AppliedConfig is handed here.
+func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, project *store.Project, resolvedTemplate *store.Template) {
 	// Populate template ID, hash, and hub access scopes if template was resolved.
 	if resolvedTemplate != nil {
 		agent.AppliedConfig.TemplateID = resolvedTemplate.ID
@@ -285,7 +570,7 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 					s.agentLifecycleLog.Error("Failed to check auth credentials for fallback", "agent_id", agent.ID, "error", err)
 				} else if !hasCreds {
 					agent.AppliedConfig.NoAuth = true
-					agent.AppliedConfig.HarnessAuth = "none"
+					agent.AppliedConfig.HarnessAuth = harness.AuthTypeNone
 					s.agentLifecycleLog.Info("Auto no-auth fallback: harness supports drop-to-shell and no credentials found",
 						"agent_id", agent.ID, "harness", hc.Harness)
 				}
@@ -722,6 +1007,26 @@ func (s *Server) handleExistingAgent(
 	if existingAgent == nil {
 		return existingAgentNone
 	}
+
+	// Authorization: every branch below starts, resumes, or restarts
+	// existingAgent -- an agent that may belong to a different owner than the
+	// caller of this create request. The only check the caller
+	// (createAgentInProject) has made so far is authorizeAgentCreate, which
+	// confirms the caller may create SOME agent in this project; it says
+	// nothing about managing this SPECIFIC pre-existing one. Without this
+	// gate, any project member who could create an agent could resume or
+	// restart another member's agent by name, and get its response body
+	// (including, pre-redaction, its applied config) back.
+	//
+	// Gate with the same lifecycle authorization the /start route enforces,
+	// before any branch below acts. A denial folds into the ordinary
+	// name-conflict result (existingAgentConflict) rather than a 403, so a
+	// caller who cannot manage the colliding agent learns only that the name
+	// is taken -- not who owns it, its phase, or its configuration.
+	if !s.agentLifecycleAllowed(ctx, GetIdentityFromContext(ctx), existingAgent) {
+		return existingAgentConflict
+	}
+
 	s.agentLifecycleLog.Info("handleExistingAgent: found existing agent",
 		"slug", existingAgent.Slug,
 		"existing_agent_id", existingAgent.ID,
@@ -755,10 +1060,20 @@ func (s *Server) handleExistingAgent(
 			existingAgent.AppliedConfig.Attach = req.Attach
 		}
 
+		// A suspended agent's reservation was released when it was suspended;
+		// re-reserve (with the cap check) before dispatch, same as create
+		// (ptone/scion#1963). Idempotent, and rejects with the same
+		// quota-exceeded response create uses if the broker is at capacity.
+		ok, reserved := s.checkAndReserveBrokerQuotaHTTP(ctx, w, existingAgent)
+		if !ok {
+			return existingAgentErrored
+		}
+
 		// This branch only runs for suspended agents, so resume the harness
 		// session (Claude --continue) rather than starting fresh.
 		resume := existingAgent.Phase == string(state.PhaseSuspended)
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, resume); err != nil {
+			s.rollbackBrokerQuota(ctx, existingAgent, reserved)
 			if isContainerNameConflict(err) {
 				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 			} else {
@@ -770,6 +1085,12 @@ func (s *Server) handleExistingAgent(
 		if existingAgent.Phase == string(state.PhaseSuspended) {
 			existingAgent.Phase = string(state.PhaseRunning)
 		}
+		// Clear any exit reason/code left from the prior generation —
+		// including a disruption reason recorded while the agent was still
+		// running (state.ExitReasonPreempted/ExitReasonEvicted) ahead of its
+		// pod actually stopping, which describes the old pod, not this one.
+		existingAgent.ExitReason = ""
+		existingAgent.ExitCode = nil
 		if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
 			s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
 		}
@@ -780,7 +1101,7 @@ func (s *Server) handleExistingAgent(
 
 		s.enrichAgent(ctx, existingAgent, project, nil)
 		writeJSON(w, http.StatusOK, CreateAgentResponse{
-			Agent: existingAgent,
+			Agent: redactedAgentCopy(ctx, s, existingAgent),
 		})
 		return existingAgentStarted
 	}
@@ -823,7 +1144,15 @@ func (s *Server) handleExistingAgent(
 					"agent_id", existingAgent.ID, "agent", existingAgent.Name,
 					"container_status", existingAgent.ContainerStatus)
 			}
+			// A stopped or errored agent's reservation was released when it
+			// stopped/crashed; re-reserve (with the cap check) before
+			// dispatch, same as create (ptone/scion#1963).
+			ok, reserved := s.checkAndReserveBrokerQuotaHTTP(ctx, w, existingAgent)
+			if !ok {
+				return existingAgentErrored
+			}
 			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, forcedRecovery); err != nil {
+				s.rollbackBrokerQuota(ctx, existingAgent, reserved)
 				if isContainerNameConflict(err) {
 					Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 				} else {
@@ -833,6 +1162,13 @@ func (s *Server) handleExistingAgent(
 			}
 
 			existingAgent.Phase = string(state.PhaseRunning)
+			// Clear any exit reason/code left from the prior generation —
+			// including a disruption reason recorded while the agent was
+			// still running (state.ExitReasonPreempted/ExitReasonEvicted)
+			// ahead of its pod actually stopping, which describes the old
+			// pod, not this one.
+			existingAgent.ExitReason = ""
+			existingAgent.ExitCode = nil
 			if err := s.updateAgentAfterDispatch(ctx, existingAgent); err != nil {
 				s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
 			}
@@ -843,7 +1179,7 @@ func (s *Server) handleExistingAgent(
 
 			s.enrichAgent(ctx, existingAgent, project, nil)
 			writeJSON(w, http.StatusOK, CreateAgentResponse{
-				Agent: existingAgent,
+				Agent: redactedAgentCopy(ctx, s, existingAgent),
 			})
 			return existingAgentStarted
 		}
@@ -864,10 +1200,27 @@ func (s *Server) handleExistingAgent(
 					"agent_id", existingAgent.ID, "agentName", existingAgent.Name, "error", err)
 			}
 		}
+		// This hard-deletes existingAgent the same way the main delete handler
+		// does, just reached via env-gather re-provisioning rather than an
+		// explicit DELETE — so it must revoke with the same reason too
+		// (ptone/scion#1956), before the row is gone and before the
+		// fall-through create below mints a credential for the new agent
+		// row's own (distinct) ID.
+		revokeAgentCredentialsBestEffort(ctx, s.store, existingAgent.ID, agentCredentialRevokeReasonDeleted)
 		if err := s.store.DeleteAgent(ctx, existingAgent.ID); err != nil {
 			writeErrorFromErr(w, err, "")
 			return existingAgentErrored
 		}
+		// ptone/scion#1963 delete-path audit: this hard-deletes a
+		// provisioning-phase agent, which counts against
+		// max_agents_per_broker (isBrokerQuotaCountedPhase). Release both
+		// limits via releaseAgentQuotas, matching the main delete handler
+		// (handlers_agents_core.go). releaseAgentQuotas detaches from ctx
+		// (ptone/scion#2087): the row is already gone, so a release that
+		// failed on a canceled request would strand the per-project
+		// reservation for good — the stale-reservation reconcile only
+		// reclaims max_agents_per_broker.
+		s.releaseAgentQuotas(ctx, existingAgent.ID, existingAgent.RuntimeBrokerID)
 		return existingAgentDeleted
 	}
 
@@ -897,6 +1250,13 @@ func (s *Server) handleExistingAgent(
 			existingAgent.AppliedConfig.Attach = req.Attach
 		}
 
+		// No quota re-reserve here (ptone/scion#1963): created/provisioning is
+		// a counted phase (isBrokerQuotaCountedPhase), so this agent already
+		// holds the reservation createAgentInProject took at CreateAgent time
+		// — it was never released. Re-reserving would be a no-op anyway
+		// (CheckAndReserve is idempotent per resource) but the point is this
+		// path never lost its slot to begin with.
+		//
 		// Dispatch start action — DispatchAgentStart applies the broker's
 		// response (status, container info) onto existingAgent in-place.
 		// A created/provisioning agent has no prior session to resume.
@@ -914,6 +1274,10 @@ func (s *Server) handleExistingAgent(
 			existingAgent.Phase == string(state.PhaseProvisioning) {
 			existingAgent.Phase = string(state.PhaseRunning)
 		}
+		// Clear any exit reason/code left from the prior generation — see
+		// the equivalent clear in the resume branches above.
+		existingAgent.ExitReason = ""
+		existingAgent.ExitCode = nil
 		if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
 			// Log but continue — agent was started.
 			s.agentLifecycleLog.Warn("Failed to update agent status after start", "agent_id", existingAgent.ID, "error", err)
@@ -927,7 +1291,7 @@ func (s *Server) handleExistingAgent(
 		// Enrich and return the existing agent.
 		s.enrichAgent(ctx, existingAgent, project, nil)
 		writeJSON(w, http.StatusOK, CreateAgentResponse{
-			Agent: existingAgent,
+			Agent: redactedAgentCopy(ctx, s, existingAgent),
 		})
 		return existingAgentStarted
 	}
@@ -1008,6 +1372,25 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		// providers aren't established via CLI registration.
 		broker, err := s.findBrokerByIDOrSlug(ctx, requestedBrokerID)
 		if err == nil && broker != nil {
+			// Linking a new provider (and possibly setting it as the project
+			// default) changes where the project's agents may run, so it
+			// requires the same authorization as the providers-add endpoint:
+			// project update.
+			//
+			// SECURITY-GATE: CheckAccess — deny before any state is written;
+			// no provider row and no default broker may persist on denial.
+			identity := GetIdentityFromContext(ctx)
+			if identity == nil {
+				Unauthorized(w)
+				return "", store.ErrNotFound
+			}
+			decision := s.authzService.CheckAccess(ctx, identity, projectResource(project), ActionUpdate)
+			if !decision.Allowed {
+				logAuthzDenial(nil, identity, projectResource(project), ActionUpdate, decision.Reason)
+				writeForbiddenStructured(w, "", projectResource(project).Type, ActionUpdate)
+				return "", store.ErrNotFound
+			}
+
 			provider := &store.ProjectProvider{
 				ProjectID:  project.ID,
 				BrokerID:   broker.ID,
@@ -1228,8 +1611,23 @@ func (s *Server) findBrokerByIDOrSlug(ctx context.Context, identifier string) (*
 }
 
 // agentHasGCPIdentityAssigned returns true when the agent's own GCPIdentity
-// config has MetadataMode set to assign or passthrough, mirroring the broker's
-// check at pkg/runtimebroker/handlers.go:2186-2187.
+// config has MetadataMode set to assign or passthrough, mirroring the
+// broker's own preflight check (pkg/runtimebroker/handlers.go's
+// extractRequiredEnvKeys, via effectiveGCPMetadataMode in start_context.go).
+//
+// Known limitation (ptone/scion#2328): a nil GCPIdentity here returns false
+// ("no GCP credentials"), even though a Kubernetes dispatch with nothing
+// configured resolves to passthrough at the broker — a runtime this function
+// cannot see, because nothing upstream of it resolves a per-dispatch profile
+// to a concrete runtime type today (the broker-side profile/settings
+// resolution this mirrors, resolveManagerForOpts, has no Hub-side
+// equivalent; see ptone/scion#2009 for the closest related work). In
+// practice this only affects hub-side callers of this function — e.g.
+// auth-secret-requirement checks — for an agent whose stored GCPIdentity is
+// nil and that happens to land on Kubernetes; the broker's
+// own preflight (which does know the runtime) is not affected. Fix
+// properly once the Hub can resolve a dispatch's target runtime with
+// confidence; until then this is a documented gap, not a silent one.
 func agentHasGCPIdentityAssigned(agent *store.Agent) bool {
 	if agent == nil || agent.AppliedConfig == nil || agent.AppliedConfig.GCPIdentity == nil {
 		return false

@@ -25,7 +25,6 @@ type resourceMetadataPatch struct {
 	Slug        string `json:"slug,omitempty"`
 	DisplayName string `json:"displayName,omitempty"`
 	Description string `json:"description,omitempty"`
-	Visibility  string `json:"visibility,omitempty"`
 }
 
 type resourceMetadataFields struct {
@@ -33,7 +32,6 @@ type resourceMetadataFields struct {
 	Slug        *string
 	DisplayName *string
 	Description *string
-	Visibility  *string
 }
 
 func applyResourceMetadataPatch(w http.ResponseWriter, r *http.Request, fields resourceMetadataFields) bool {
@@ -57,9 +55,6 @@ func applyResourceMetadataPatch(w http.ResponseWriter, r *http.Request, fields r
 	}
 	if updates.Description != "" {
 		*fields.Description = updates.Description
-	}
-	if updates.Visibility != "" {
-		*fields.Visibility = updates.Visibility
 	}
 	return true
 }

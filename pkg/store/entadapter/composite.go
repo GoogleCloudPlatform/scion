@@ -21,11 +21,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	entsql "entgo.io/ent/dialect/sql"
+	"github.com/google/uuid"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentidentitykey"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	entgroup "github.com/GoogleCloudPlatform/scion/pkg/ent/group"
@@ -42,6 +46,32 @@ const projectAgentsGroupMarkerBackfillSection = "migration_project_agents_group_
 const systemProjectAgentsGroupAnnotation = "scion.io/project-agents-group"
 const adoptionReviewRequiredAnnotation = "scion.io/adoption-review-required"
 const githubTokenInjectionModeMarkerSection = "migration_github_token_injection_mode_always"
+const agentIdentityKeyBackfillMarkerSection = "migration_agent_identity_keys_backfilled"
+
+// harnessConfigReconcilePageSize is a package variable, not a const, purely
+// so tests can lower it (save/restore) to construct a cheap multi-page
+// scenario for ReconcileHarnessConfigColumn without seeding hundreds of rows
+// (ptone/scion#2146). Production code never changes it.
+var harnessConfigReconcilePageSize = 500
+
+// harnessConfigReconcileTestStuckIDs, when non-nil, is a set of agent IDs
+// that ReconcileHarnessConfigColumn will skip updating this call, leaving
+// them pending (still harness_config IS NULL) — a test-only seam with no
+// production use (always nil outside a test). Its purpose: under the
+// sentinel design, every row a real run visits leaves the pending set on
+// that same visit, which means the WHERE clause alone (harness_config IS
+// NULL) shrinks the result set correctly even if the lastID/IDGT keyset
+// cursor is broken — the two mechanisms are behaviorally redundant for any
+// scenario where nothing legitimately stays pending across a call. That
+// makes the cursor otherwise untestable by black-box means (confirmed by
+// directly mutating lastID's advancement into a no-op and observing every
+// other test in this file still pass). This seam constructs the one
+// scenario where the two mechanisms diverge — some rows deliberately stay
+// pending within a call, so a correct cursor must still reach and reconcile
+// the OTHER rows that sort after them, while a broken cursor re-fetches the
+// same stuck rows forever and never makes progress on the rest
+// (ptone/scion#2146).
+var harnessConfigReconcileTestStuckIDs map[uuid.UUID]bool
 
 // CompositeStore is a fully Ent-backed implementation of store.Store. Every
 // domain is served by a dedicated Ent sub-store; CompositeStore embeds them so
@@ -69,6 +99,7 @@ type CompositeStore struct {
 	*SkillStore
 	*SkillRegistryStore
 	*HubSettingStore
+	*BrokerSettingStore
 	*SkillInjectionStore
 	*ProjectPreStartHookStore
 	*AgentSessionMetricsStore
@@ -76,13 +107,34 @@ type CompositeStore struct {
 	*RoleStore
 	*DelegationEdgeStore
 	*AgentCredentialStore
+	*AgentIdentityKeyStore
 	*DecisionAuditStore
 	*MutationAuditStore
 	*QuotaStore
 	*AccessConstraintStore
+	*ExternalIdentityStore
+	*AgentReincarnationStore
+	*UserTerminalWorkspaceStore
 
 	client *ent.Client
 	inTx   bool // true when this CompositeStore wraps a transaction
+
+	// uatCeilingBackfillPageSize overrides BackfillUATCeilings's page size
+	// when non-zero; see defaultUATCeilingBackfillPageSize. Tests set this
+	// per instance to exercise pagination without creating hundreds of
+	// rows, and without a package-level variable that every store instance
+	// (and every test running concurrently) would otherwise share.
+	uatCeilingBackfillPageSize int
+
+	// uatBoundaryValidatePageSize overrides ValidateUserAccessTokenBoundaries's
+	// page size when non-zero; see defaultUATBoundaryValidatePageSize. It is
+	// per instance for the same reason as uatCeilingBackfillPageSize.
+	uatBoundaryValidatePageSize int
+
+	// uatBoundaryLogger receives ValidateUserAccessTokenBoundaries's report
+	// of invalid rows. Nil means slog.Default(). Tests set it per instance
+	// to capture the report without replacing the process-wide logger.
+	uatBoundaryLogger *slog.Logger
 }
 
 // Compile-time assertion that CompositeStore satisfies the full store.Store
@@ -105,6 +157,7 @@ func (c *CompositeStore) WithTx(ctx context.Context, fn func(tx store.Store) err
 	txClient := tx.Client()
 	txStore := NewCompositeStore(txClient)
 	txStore.inTx = true
+	txStore.AccessConstraintStore.inTx = true
 
 	defer func() {
 		// Safety net: if Commit was not called (i.e. fn panicked or returned
@@ -128,36 +181,41 @@ func (c *CompositeStore) WithTx(ctx context.Context, fn func(tx store.Store) err
 // agent -> project) resolve natively without any shadow synchronization.
 func NewCompositeStore(client *ent.Client) *CompositeStore {
 	return &CompositeStore{
-		AgentStore:               NewAgentStore(client),
-		ProjectStore:             NewProjectStore(client),
-		UserStore:                NewUserStore(client),
-		SecretStore:              NewSecretStore(client),
-		TemplateStore:            NewTemplateStore(client),
-		NotificationStore:        NewNotificationStore(client),
-		ScheduleStore:            NewScheduleStore(client),
-		MaintenanceStore:         NewMaintenanceStore(client),
-		MessageStore:             NewMessageStore(client),
-		ExternalStore:            NewExternalStore(client),
-		BrokerSecretStore:        NewBrokerSecretStore(client),
-		AllowListStore:           NewAllowListStore(client),
-		GroupStore:               NewGroupStore(client),
-		BrokerDispatchStore:      NewBrokerDispatchStore(client),
-		LifecycleHookStore:       NewLifecycleHookStore(client),
-		SkillStore:               NewSkillStore(client),
-		SkillRegistryStore:       NewSkillRegistryStore(client),
-		HubSettingStore:          NewHubSettingStore(client),
-		SkillInjectionStore:      NewSkillInjectionStore(client),
-		ProjectPreStartHookStore: NewProjectPreStartHookStore(client),
-		AgentSessionMetricsStore: NewAgentSessionMetricsStore(client),
-		ConversationStore:        NewConversationStore(client),
-		RoleStore:                NewRoleStore(client),
-		DelegationEdgeStore:      NewDelegationEdgeStore(client),
-		AgentCredentialStore:     NewAgentCredentialStore(client),
-		DecisionAuditStore:       NewDecisionAuditStore(client),
-		MutationAuditStore:       NewMutationAuditStore(client),
-		QuotaStore:               NewQuotaStore(client),
-		AccessConstraintStore:    NewAccessConstraintStore(client),
-		client:                   client,
+		AgentStore:                 NewAgentStore(client),
+		ProjectStore:               NewProjectStore(client),
+		UserStore:                  NewUserStore(client),
+		SecretStore:                NewSecretStore(client),
+		TemplateStore:              NewTemplateStore(client),
+		NotificationStore:          NewNotificationStore(client),
+		ScheduleStore:              NewScheduleStore(client),
+		MaintenanceStore:           NewMaintenanceStore(client),
+		MessageStore:               NewMessageStore(client),
+		ExternalStore:              NewExternalStore(client),
+		BrokerSecretStore:          NewBrokerSecretStore(client),
+		AllowListStore:             NewAllowListStore(client),
+		GroupStore:                 NewGroupStore(client),
+		BrokerDispatchStore:        NewBrokerDispatchStore(client),
+		LifecycleHookStore:         NewLifecycleHookStore(client),
+		SkillStore:                 NewSkillStore(client),
+		SkillRegistryStore:         NewSkillRegistryStore(client),
+		HubSettingStore:            NewHubSettingStore(client),
+		BrokerSettingStore:         NewBrokerSettingStore(client),
+		SkillInjectionStore:        NewSkillInjectionStore(client),
+		ProjectPreStartHookStore:   NewProjectPreStartHookStore(client),
+		AgentSessionMetricsStore:   NewAgentSessionMetricsStore(client),
+		ConversationStore:          NewConversationStore(client),
+		RoleStore:                  NewRoleStore(client),
+		DelegationEdgeStore:        NewDelegationEdgeStore(client),
+		AgentCredentialStore:       NewAgentCredentialStore(client),
+		AgentIdentityKeyStore:      NewAgentIdentityKeyStore(client),
+		DecisionAuditStore:         NewDecisionAuditStore(client),
+		MutationAuditStore:         NewMutationAuditStore(client),
+		QuotaStore:                 NewQuotaStore(client),
+		AccessConstraintStore:      NewAccessConstraintStore(client),
+		ExternalIdentityStore:      NewExternalIdentityStore(client),
+		AgentReincarnationStore:    NewAgentReincarnationStore(client),
+		UserTerminalWorkspaceStore: NewUserTerminalWorkspaceStore(client),
+		client:                     client,
 	}
 }
 
@@ -183,6 +241,19 @@ func (c *CompositeStore) DeleteAgent(ctx context.Context, id string) error {
 	}
 	if _, err := c.client.NotificationSubscription.Delete().
 		Where(notificationsubscription.AgentIDEQ(uid)).Exec(ctx); err != nil {
+		return err
+	}
+	// agent_reincarnations.agent_id is likewise a plain field with no DB-level
+	// FK (same reasoning as AgentCredential — the requester side is
+	// polymorphic, so a real FK edge doesn't fit); cascade explicitly.
+	if err := c.DeleteAgentReincarnationsForAgent(ctx, id); err != nil {
+		return err
+	}
+	// agent_identity_keys.agent_id is likewise a plain field with no DB-level
+	// FK (see agent_identity_key.go); cascade explicitly, or the deleted
+	// agent's keys stay reserved forever — including its own slug, which
+	// then blocks renaming any agent later created with that same slug.
+	if err := c.DeleteAgentIdentityKeys(ctx, id); err != nil {
 		return err
 	}
 	return nil
@@ -217,7 +288,149 @@ func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
 			return err
 		}
 	}
+	// agent_identity_keys is keyed by project_id directly, so this is a
+	// single bulk delete rather than one per agent ID. Same reasoning as the
+	// per-agent cascade in DeleteAgent: no DB-level FK, so it must be
+	// explicit or a deleted project's keys stay reserved forever.
+	if _, err := c.client.AgentIdentityKey.Delete().
+		Where(agentidentitykey.ProjectIDEQ(uid)).Exec(ctx); err != nil {
+		return err
+	}
 	return c.ProjectStore.DeleteProject(ctx, id)
+}
+
+// purgeDeletedAgentsBatchSize caps how many agent IDs a single purge
+// statement's IN(...) clause covers, so a large purge-eligible set is
+// processed in bounded chunks rather than one unbounded IN(...) list. A var,
+// not a const, so a test can force multi-batch behavior with a small
+// purge-eligible set instead of needing hundreds of rows to exercise it.
+var purgeDeletedAgentsBatchSize = 500
+
+// purgeDeletedAgentsTestHook, when non-nil, is invoked by PurgeDeletedAgents
+// once per batch, after the candidate IDs for that batch are resolved but
+// before they are deleted, and is passed the same in-flight transaction the
+// purge itself is using. It exists so a test can deterministically write a
+// restore into the exact window the eligibility-predicate re-check on the
+// delete itself (below) must close. That window is a Postgres-specific
+// concern: under READ COMMITTED, a separate connection's restore can commit
+// after this purge's candidate query but before its delete, so the delete
+// must re-check the predicate itself rather than trust the candidate list.
+// SQLite has no such window in this codebase's production configuration --
+// applyDatabasePoolDefaults forces MaxOpenConns to 1 for a sqlite driver
+// (pkg/config/hub_config.go; load-bearing there for the same reason it is
+// here), so no second, independent connection -- let alone transaction --
+// can exist at the same time as this one to interleave with it. This hook
+// writes through the purge's own transaction instead of a second, genuinely
+// concurrent one for exactly that reason: on this package's
+// single-connection SQLite test setup, a second connection attempting to
+// write while this transaction is still open would deadlock against it, not
+// race it. A write made through the given tx is visible to
+// every statement the purge issues afterward on that same tx, which is what
+// a Postgres restore's write would also be, once committed, to a subsequent
+// statement in this transaction under READ COMMITTED. Always nil in
+// production.
+var purgeDeletedAgentsTestHook func(tx *ent.Tx, batchCandidateIDs []uuid.UUID)
+
+// PurgeDeletedAgents permanently removes soft-deleted agents older than
+// cutoff, and their identity-key rows, in one transaction. This overrides
+// the embedded AgentStore's implementation, which bulk-deletes agent rows
+// directly with no re-applied eligibility check and no transaction --
+// splitting the original single-predicate DELETE into a separate select and
+// delete reopened a window where an agent restored in between the two would
+// be hard-deleted anyway, taking its keys with it. That is closed here two
+// ways: the whole purge runs in one transaction, and the eligibility
+// predicate (deleted_at IS NOT NULL AND deleted_at < cutoff) is re-applied
+// directly on the agent delete itself, not just the initial candidate query
+// -- a candidate restored in between no longer matches it at delete time and
+// is excluded, regardless of how stale the candidate list has become.
+// Because a bulk delete reports only a count, not which rows it removed,
+// identity keys are freed only for the subset of candidates that no longer
+// exist afterward (a diff against which of them survived), never for one the
+// predicate excluded.
+//
+// agent_identity_keys has no DB-level FK to agents (see
+// agent_identity_key.go), so this cascade must be explicit, the same as
+// DeleteAgent and DeleteProject, or a purged agent's keys -- including its
+// own slug -- stay reserved forever, blocking any later agent from taking
+// them.
+func (c *CompositeStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error) {
+	tx, err := c.client.Tx(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	candidateIDs, err := tx.Agent.Query().
+		Where(agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff)).
+		IDs(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	var totalDeleted int
+	for _, batch := range chunkUUIDs(candidateIDs, purgeDeletedAgentsBatchSize) {
+		if purgeDeletedAgentsTestHook != nil {
+			purgeDeletedAgentsTestHook(tx, batch)
+		}
+
+		deleted, err := tx.Agent.Delete().
+			Where(agent.IDIn(batch...), agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff)).
+			Exec(ctx)
+		if err != nil {
+			return 0, err
+		}
+		totalDeleted += deleted
+
+		survivorIDs, err := tx.Agent.Query().Where(agent.IDIn(batch...)).IDs(ctx)
+		if err != nil {
+			return 0, err
+		}
+		survived := make(map[uuid.UUID]bool, len(survivorIDs))
+		for _, id := range survivorIDs {
+			survived[id] = true
+		}
+		removedIDs := make([]uuid.UUID, 0, len(batch)-len(survivorIDs))
+		for _, id := range batch {
+			if !survived[id] {
+				removedIDs = append(removedIDs, id)
+			}
+		}
+		if len(removedIDs) > 0 {
+			if _, err := tx.AgentIdentityKey.Delete().
+				Where(agentidentitykey.AgentIDIn(removedIDs...)).Exec(ctx); err != nil {
+				return 0, err
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return totalDeleted, nil
+}
+
+// chunkUUIDs splits ids into slices of at most size, preserving order. A nil
+// or empty ids yields no chunks, so a range over the result is a no-op. A
+// non-positive size yields a single chunk containing all ids.
+func chunkUUIDs(ids []uuid.UUID, size int) [][]uuid.UUID {
+	if len(ids) == 0 {
+		return nil
+	}
+	if size <= 0 {
+		// A non-positive batch size would divide by zero in the capacity hint
+		// below and never advance the loop; treat it as "no batching" and
+		// return all ids as a single chunk.
+		return [][]uuid.UUID{ids}
+	}
+	chunks := make([][]uuid.UUID, 0, (len(ids)+size-1)/size)
+	for i := 0; i < len(ids); i += size {
+		end := i + size
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunks = append(chunks, ids[i:end])
+	}
+	return chunks
 }
 
 // Close closes the underlying Ent client.
@@ -279,6 +492,16 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 		return err
 	}
 
+	// Must run before pkg/hub/storage_migration.go's namespacing migration
+	// (called later, outside CompositeStore.Migrate, once the hub boots)
+	// walks stored templates, harness configs and skills: that migration and
+	// pkg/storage.ResourceStoragePath both resolve a stored scope into a
+	// path, and neither has an arm for "grove". See NormalizeLegacyGroveScopes
+	// for the full rationale.
+	if err := c.NormalizeLegacyGroveScopes(ctx); err != nil {
+		return fmt.Errorf("normalize legacy grove scopes: %w", err)
+	}
+
 	if err := c.BackfillEmptyAgentRoles(ctx); err != nil {
 		return fmt.Errorf("empty agent role backfill: %w", err)
 	}
@@ -290,6 +513,18 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	}
 	if err := c.BackfillProjectAgentsGroupMarkers(ctx); err != nil {
 		return fmt.Errorf("project agents group marker backfill: %w", err)
+	}
+	if err := c.BackfillAgentIdentityKeys(ctx); err != nil {
+		return fmt.Errorf("agent identity key backfill: %w", err)
+	}
+	if err := c.ReconcileHarnessConfigColumn(ctx); err != nil {
+		return fmt.Errorf("harness_config column reconcile: %w", err)
+	}
+	if err := c.BackfillUATCeilings(ctx); err != nil {
+		return fmt.Errorf("user access token ceiling backfill: %w", err)
+	}
+	if err := c.ValidateUserAccessTokenBoundaries(ctx); err != nil {
+		return fmt.Errorf("user access token boundary validation: %w", err)
 	}
 
 	// Migrate AllowListEntry records to User(status=invited) records.
@@ -478,6 +713,179 @@ func (c *CompositeStore) BackfillDelegationEdges(ctx context.Context) error {
 		return nil
 	}
 	return err
+}
+
+// ReconcileHarnessConfigColumn populates the harness_config shadow column
+// (pkg/ent/schema/agent.go) for agents whose column hasn't caught up with
+// their applied_config yet, by extracting it from each row's applied_config
+// JSON document. New rows never need this: CreateAgent/UpdateAgent keep the
+// column in sync going forward (agent_store.go's harnessConfigOf).
+//
+// Runs on every boot (ptone/scion#2146), not once behind a one-shot marker:
+// a marker-gated version would never reconcile a row an old-binary replica
+// writes after a new-binary replica has already run and marked the
+// migration done, during a mixed-version rollout.
+//
+// Residual: a row an upgraded binary already wrote (non-NULL
+// harness_config, real value or the "" sentinel) whose applied_config
+// harness a pre-upgrade binary later changes keeps its stale column value
+// until an upgraded binary next writes the row through UpdateAgent
+// (status-only writes do not re-sync it) — this reconcile only selects
+// NULL rows, so a restart alone does not fix it.
+//
+// NULL means exactly "never reconciled or synced by any binary that knows
+// this column exists." Every write path other than a raw, pre-column
+// legacy row writes a real, non-NULL value: CreateAgent/UpdateAgent call
+// SetHarnessConfig(harnessConfigOf(cfg)) unconditionally (agent_store.go)
+// — including "" when there's no harness — and this function does the same
+// for every row it visits, including one whose applied_config has no
+// harness, doesn't parse as JSON at all, or uses the legacy pre-0be8382
+// "harness" key instead of "harnessConfig". "" never matches a --harness
+// filter (agentFilterPredicates only emits agent.HarnessConfigEQ for a
+// non-empty requested value), so writing "" instead of leaving NULL is
+// invisible to callers, and it's what makes this query converge to empty
+// on a caught-up Hub instead of re-selecting the same
+// no-harness/invalid/legacy rows on every boot forever.
+//
+// A row whose applied_config fails to parse as JSON at all does not fail
+// the whole migration — matching entAgentToStore's own tolerance for
+// corrupt applied_config (log and continue) — but still gets "" written
+// per the sentinel rule above.
+//
+// A row that parses but needed sanitizing (parseAppliedConfig returns a
+// non-nil cfg AND a non-nil error, e.g. an invalid GCP metadata mode) is
+// NOT treated as invalid: its HarnessConfig is used exactly like a clean
+// row, matching entAgentToStore's identical tolerance for the
+// response-facing store.Agent.HarnessConfig.
+//
+// The per-row update is conditioned on
+// Where(HarnessConfigIsNil(), AppliedConfigEQ(a.AppliedConfig)) and preserves
+// the row's own Updated timestamp via SetUpdated, so this migration never
+// overwrites a value another writer set concurrently and never bumps
+// updated as a side effect of a purely internal column sync. The
+// AppliedConfigEQ half also covers a writer that predates this column
+// entirely: a pre-upgrade replica's UpdateAgent rewrites applied_config
+// without touching harness_config, so HarnessConfigIsNil() alone would still
+// match and let this migration write a harness parsed from the
+// now-superseded applied_config it read at SELECT time — permanently, since
+// the row would no longer be NULL for a later boot to pick up. Comparing
+// applied_config too means any change to it since the page read, from a
+// column-aware or a pre-upgrade writer alike, makes the UPDATE match zero
+// rows instead. An ent.IsNotFound from that guard (another writer already
+// reconciled the row, or changed its applied_config since the page read) or
+// a genuine concurrent delete is logged and skipped, not treated as a boot
+// failure — every replica runs this on every boot, so all of these races
+// are reachable in normal multi-replica operation. Any other update error
+// still aborts startup.
+//
+// Residual: a concurrent write that does not change applied_config at all
+// — e.g. UpdateAgentStatus, UpdateAgentExposedPorts, or
+// MarkStaleAgentsOffline, none of which sync harness_config — can still
+// land between the page read and this row's UPDATE. Such a write bumps
+// updated but leaves harness_config NULL and applied_config unchanged, so
+// both guard predicates keep matching and SetUpdated(a.Updated) reverts
+// that updated bump to the page-read value. A portable guard against this
+// does not exist: comparing on Updated instead of/in addition to
+// AppliedConfig fails on SQLite, where the timestamp does not round-trip
+// for equality. The window is bounded by the time to process one page
+// (seconds), and only during boot-time reconcile of NULL rows.
+func (c *CompositeStore) ReconcileHarnessConfigColumn(ctx context.Context) error {
+	pageSize := harnessConfigReconcilePageSize
+	var (
+		lastID                         uuid.UUID
+		totalUpdated, totalInvalidJSON int
+	)
+
+	for {
+		query := c.client.Agent.Query().
+			Where(agent.HarnessConfigIsNil(), agent.AppliedConfigNotNil()).
+			Order(ent.Asc(agent.FieldID)).
+			Limit(pageSize)
+		if lastID != uuid.Nil {
+			query = query.Where(agent.IDGT(lastID))
+		}
+		agents, err := query.Select(agent.FieldID, agent.FieldAppliedConfig, agent.FieldUpdated).All(ctx)
+		if err != nil {
+			return fmt.Errorf("query agents for harness_config reconcile: %w", err)
+		}
+		if len(agents) == 0 {
+			break
+		}
+
+		for _, a := range agents {
+			lastID = a.ID
+
+			// harnessValue defaults to "" — the sentinel for "reconciled,
+			// nothing usable found". It's overwritten below only when
+			// applied_config both parses and has a non-empty HarnessConfig.
+			harnessValue := ""
+			parsed, perr := parseAppliedConfig(a.AppliedConfig)
+			switch {
+			case parsed == nil:
+				// Not valid JSON at all (this also covers an empty
+				// applied_config string, which fails the same way) —
+				// nothing usable to extract, but still gets "" rather than
+				// being left NULL forever.
+				slog.Warn("harness_config reconcile: applied_config is not valid JSON; recording no harness",
+					"agent_id", a.ID, "error", perr)
+				totalInvalidJSON++
+			case perr != nil:
+				// Parsed, but needed sanitizing (e.g. an invalid GCP
+				// metadata mode). The rest of the document, including
+				// HarnessConfig, is still used — see the doc comment above.
+				slog.Warn("harness_config reconcile: applied_config needed sanitizing; harness_config is still used",
+					"agent_id", a.ID, "error", perr)
+				harnessValue = parsed.HarnessConfig
+			default:
+				harnessValue = parsed.HarnessConfig
+			}
+
+			if harnessConfigReconcileTestStuckIDs[a.ID] {
+				// Test-only seam: simulate a row that legitimately
+				// stays pending across this call. lastID has already
+				// advanced past it above, so pagination still proceeds to
+				// later rows within this call; the row itself is revisited
+				// on the next call, same as any real row this run couldn't
+				// fix.
+				continue
+			}
+
+			if err := c.client.Agent.UpdateOneID(a.ID).
+				Where(agent.HarnessConfigIsNil(), agent.AppliedConfigEQ(a.AppliedConfig)).
+				SetHarnessConfig(harnessValue).
+				SetUpdated(a.Updated).
+				Exec(ctx); err != nil {
+				if ent.IsNotFound(err) {
+					// The row was concurrently deleted, another writer
+					// already synced its harness_config (an upgraded
+					// replica's UpdateAgent, or a concurrent reconcile run),
+					// or its applied_config changed since the page read (a
+					// pre-upgrade replica's UpdateAgent, which doesn't touch
+					// harness_config) — any of these means the guard no
+					// longer matches, and none is a boot failure. Not
+					// overwriting a concurrent writer's fresher value, nor a
+					// pre-upgrade writer's change to applied_config, is
+					// exactly the point of the guard.
+					slog.Debug("harness_config reconcile: agent no longer exists, was already reconciled, or its applied_config changed since the page read, skipping",
+						"agent_id", a.ID)
+					continue
+				}
+				return fmt.Errorf("harness_config reconcile: failed to update agent %s: %w", a.ID, err)
+			}
+			totalUpdated++
+		}
+
+		if len(agents) < pageSize {
+			break
+		}
+	}
+
+	if totalUpdated > 0 || totalInvalidJSON > 0 {
+		slog.Info("reconciled harness_config column for existing agents",
+			"rows_updated", totalUpdated, "rows_invalid_json", totalInvalidJSON)
+	}
+
+	return nil
 }
 
 // determineDelegator determines the delegator type and ID for a delegation edge
@@ -700,6 +1108,121 @@ func (c *CompositeStore) BackfillProjectAgentsGroupMarkers(ctx context.Context) 
 		"rows_updated", updated, "rows_skipped", skipped)
 
 	_, err = c.UpsertHubSetting(ctx, projectAgentsGroupMarkerBackfillSection,
+		json.RawMessage(`{"schema_version":1,"completed":true}`), "migration", 0, "seeded")
+	if errors.Is(err, store.ErrRevisionConflict) {
+		return nil
+	}
+	return err
+}
+
+// BackfillAgentIdentityKeys populates agent_identity_keys for every
+// pre-existing agent, including soft-deleted ones, so the identity-key
+// uniqueness invariant covers agents created before this feature existed,
+// not just ones created through the create/rename/restore paths that already
+// write their own keys.
+//
+// Agents are processed in a deterministic order (created ASC, then id ASC):
+// slug keys take precedence, and created order decides among display-name
+// keys, no matter how many times this runs. A collision does not fail the
+// migration -- pre-existing data can hold inconsistencies that predate any
+// uniqueness invariant, and a clean backfill cannot be guaranteed
+// retroactively. The losing agent's key is logged, not silently dropped.
+//
+// This runs in two passes over that same order, not one pass writing each
+// agent's full key set together: pass one inserts every agent's own slug
+// key, pass two inserts display-name keys. A Slug is already unique per
+// (project_id, slug) at the Agent table level, so no two agents can ever
+// collide on their own slug -- pass one alone can never lose a collision.
+// Interleaving slug and display-name inserts per-agent, in created order,
+// would let an EARLIER agent's display-name key claim a LATER agent's own
+// slug before that later agent ever gets to insert it, leaving a live agent
+// with no key for its own immutable identifier: it could not be renamed or
+// restored (both re-assert the slug key and would find it already
+// reserved). Guaranteeing every slug is claimed before any display-name key
+// is attempted keeps each live agent's own slug key intact.
+//
+// Uses api.IdentityKeysFor, the same function restore and rename use, so a
+// legacy Name that slugifies to "" is skipped identically everywhere
+// (agent_identity_keys.key is NotEmpty; an empty insert would be a
+// permanent failure for that agent's every future write). IdentityKeysFor
+// is documented to return the slug first and, when present, the
+// display-name key second; this function's two passes rely on that order.
+//
+// The per-agent, per-key insert is idempotent independent of the completion
+// marker below: a (project_id, key) row that already belongs to the agent
+// currently being processed is left alone (a re-run after a partial
+// failure, or the marker manually cleared, inserts nothing new); one that
+// belongs to a DIFFERENT agent is treated as a collision, the same as a
+// same-run collision.
+func (c *CompositeStore) BackfillAgentIdentityKeys(ctx context.Context) error {
+	if _, err := c.GetHubSetting(ctx, agentIdentityKeyBackfillMarkerSection); err == nil {
+		return nil
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+
+	agents, err := c.client.Agent.Query().
+		Order(ent.Asc(agent.FieldCreated), ent.Asc(agent.FieldID)).
+		All(ctx)
+	if err != nil {
+		return err
+	}
+
+	var inserted, collisions int
+	insertKey := func(a *ent.Agent, key string) error {
+		_, err := c.client.AgentIdentityKey.Create().
+			SetProjectID(a.ProjectID).
+			SetKey(key).
+			SetAgentID(a.ID).
+			Save(ctx)
+		if err == nil {
+			inserted++
+			return nil
+		}
+		if !ent.IsConstraintError(err) {
+			return fmt.Errorf("backfill identity key %q for agent %s: %w", key, a.ID, err)
+		}
+		existing, qErr := c.client.AgentIdentityKey.Query().
+			Where(agentidentitykey.ProjectIDEQ(a.ProjectID), agentidentitykey.KeyEQ(key)).
+			Only(ctx)
+		if qErr != nil {
+			return fmt.Errorf("resolve identity key conflict %q for agent %s: %w", key, a.ID, qErr)
+		}
+		if existing.AgentID == a.ID {
+			// Already backfilled this exact (agent, key) pair: a re-run
+			// after a partial failure, or the marker was cleared.
+			return nil
+		}
+		collisions++
+		slog.Warn("agent identity key backfill: key already held by another agent, skipped",
+			"key", key, "project_id", a.ProjectID,
+			"kept_agent_id", existing.AgentID, "dropped_agent_id", a.ID)
+		return nil
+	}
+
+	// Pass 1: every agent's own slug key first, so a later-created agent's
+	// slug is always claimed before any earlier-created agent's
+	// display-name key could otherwise pre-empt it.
+	for _, a := range agents {
+		if err := insertKey(a, a.Slug); err != nil {
+			return err
+		}
+	}
+	// Pass 2: display-name keys, keep-first by the same created order.
+	for _, a := range agents {
+		keys := api.IdentityKeysFor(a.Slug, a.Name)
+		if len(keys) < 2 {
+			continue // no display-name key distinct from the slug
+		}
+		if err := insertKey(a, keys[1]); err != nil {
+			return err
+		}
+	}
+	if inserted > 0 || collisions > 0 {
+		slog.Info("backfilled agent identity keys", "rows_inserted", inserted, "collisions_logged", collisions)
+	}
+
+	_, err = c.UpsertHubSetting(ctx, agentIdentityKeyBackfillMarkerSection,
 		json.RawMessage(`{"schema_version":1,"completed":true}`), "migration", 0, "seeded")
 	if errors.Is(err, store.ErrRevisionConflict) {
 		return nil

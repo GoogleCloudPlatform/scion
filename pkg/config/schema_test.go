@@ -159,7 +159,7 @@ cli:
 hub:
   enabled: true
   endpoint: "https://hub.example.com"
-  grove_id: "abc-123"
+  project_id: "abc-123"
   local_only: false
 runtimes:
   docker:
@@ -214,6 +214,98 @@ unknown_field: value
 		}
 	}
 	assert.True(t, found, "should report error about unknown_field, got: %v", errors)
+}
+
+// Review finding O1 (ptone/scion#2270 round 3): design 4.4 lists the
+// settings-v1 schema as in scope for the quotas.enforce_broker_quotas
+// toggle. Without a "quotas" entry, the top-level "additionalProperties":
+// false rejected a saved settings.yaml as soon as an admin flipped the
+// switch in file mode, so `scion config validate` (and `config migrate`)
+// would report it as invalid even though the hub itself loads and applies
+// it fine.
+func TestValidateSettings_Quotas(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+quotas:
+  enforce_broker_quotas: false
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.Empty(t, errors, "a valid quotas.enforce_broker_quotas should produce no errors, got: %v", errors)
+}
+
+func TestValidateSettings_QuotasInvalidType(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+quotas:
+  enforce_broker_quotas: "yes"
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "a non-boolean enforce_broker_quotas should produce a validation error")
+}
+
+func TestValidateSettings_QuotasUnknownField(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+quotas:
+  unknown_field: true
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "an unknown field under quotas should produce a validation error")
+}
+
+// TestValidateSettings_AgentSecrets, TestValidateSettings_AgentSecretsInvalidType and
+// TestValidateSettings_AgentSecretsUnknownField mirror the three Quotas tests above
+// (round-1 review Rec1, ptone/scion#2291): the hand-written opsettings schema for
+// agent_secrets is covered by opsettings_test.go's TestValidateValidDoc/InvalidDoc, but the
+// separate settings-v1.schema.json entry — the one scion config validate and a saved
+// settings.yaml actually go through — had no regression test, the same gap round 3 of
+// ptone/scion#2270 found and fixed for quotas.
+//
+// TestValidateSettings_AgentSecrets is table-driven over true, false, and an
+// empty agent_secrets object (round-2 review nit 1): all three are valid
+// documents and must produce no errors.
+func TestValidateSettings_AgentSecrets(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+	}{
+		{"user_scope_only true", "agent_secrets:\n  user_scope_only: true\n"},
+		{"user_scope_only false", "agent_secrets:\n  user_scope_only: false\n"},
+		{"empty agent_secrets", "agent_secrets: {}\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := []byte("schema_version: \"1\"\n" + tt.yaml)
+			errors, err := ValidateSettings(data, "1")
+			require.NoError(t, err)
+			assert.Empty(t, errors, "a valid agent_secrets document should produce no errors, got: %v", errors)
+		})
+	}
+}
+
+func TestValidateSettings_AgentSecretsInvalidType(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+agent_secrets:
+  user_scope_only: "yes"
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "a non-boolean user_scope_only should produce a validation error")
+}
+
+func TestValidateSettings_AgentSecretsUnknownField(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+agent_secrets:
+  unknown_field: true
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "an unknown field under agent_secrets should produce a validation error")
 }
 
 func TestValidateSettings_InvalidSchemaVersion(t *testing.T) {
@@ -495,6 +587,32 @@ max_duration: "2 hours"
 	assert.NotEmpty(t, errors, "invalid max_duration format should produce validation error")
 }
 
+func TestValidateAgentConfig_InvalidPriorityClassName(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+harness_config: gemini
+kubernetes:
+  priorityClassName: "Not_A_Valid_Name"
+`)
+	errors, err := ValidateAgentConfig(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "invalid priorityClassName should produce validation error")
+}
+
+func TestValidateAgentConfig_EmptyPriorityClassName(t *testing.T) {
+	// An explicit empty string means "unset" to buildPod and
+	// mergeKubernetesConfig and must not fail schema validation.
+	data := []byte(`
+schema_version: "1"
+harness_config: gemini
+kubernetes:
+  priorityClassName: ""
+`)
+	errors, err := ValidateAgentConfig(data, "1")
+	require.NoError(t, err)
+	assert.Empty(t, errors, "an empty priorityClassName means unset and must pass validation")
+}
+
 func TestValidateAgentConfig_InvalidMaxTurns(t *testing.T) {
 	data := []byte(`
 schema_version: "1"
@@ -663,7 +781,7 @@ server:
 hub:
   enabled: true
   endpoint: "https://hub.example.com"
-  grove_id: "grove-abc-123"
+  project_id: "project-abc-123"
   local_only: false
 
 cli:
@@ -930,6 +1048,7 @@ kubernetes:
   namespace: "scion-agents"
   runtimeClassName: "gvisor"
   serviceAccountName: "scion-agent-sa"
+  priorityClassName: "scion-agent-priority"
   resources:
     requests:
       cpu: "2"
@@ -956,6 +1075,49 @@ runtimes:
 	errors, err := ValidateSettings(data, "1")
 	require.NoError(t, err)
 	assert.Empty(t, errors, "runtime with gke field should pass validation")
+}
+
+func TestValidateSettings_RuntimeWithPriorityClassName(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    priority_class_name: scion-agent-priority
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.Empty(t, errors, "runtime with a valid priority_class_name should pass validation")
+}
+
+func TestValidateSettings_RuntimeWithInvalidPriorityClassName(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    priority_class_name: Not_A_Valid_Name
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "runtime with an invalid priority_class_name should fail validation")
+}
+
+func TestValidateSettings_RuntimeWithEmptyPriorityClassName(t *testing.T) {
+	// An explicit empty string means "unset" to the runtime (buildPod and
+	// mergeKubernetesConfig both treat "" as unset) and must not fail
+	// schema validation the way a real invalid name does — for example
+	// after settings migration or a round-trip that writes the zero value.
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    priority_class_name: ""
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.Empty(t, errors, "an empty priority_class_name means unset and must pass validation")
 }
 
 func TestValidateSettings_ServerHubSoftDelete(t *testing.T) {

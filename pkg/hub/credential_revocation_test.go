@@ -58,7 +58,7 @@ func setupCredentialTestServer(t *testing.T) (*Server, store.Store, *store.User,
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	return srv, s, user, project
 }
@@ -494,10 +494,9 @@ func TestCredentialRecorderNilSafe(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, token)
 
-	token2, expiry, err := service.GenerateAgentTokenWithExpiry("agent-1", "project-1", nil, nil)
+	token2, err := service.GenerateAgentToken("agent-1", "project-1", nil, nil)
 	require.NoError(t, err)
 	assert.NotEmpty(t, token2)
-	assert.False(t, expiry.IsZero())
 }
 
 // TestCredentialStoreOperations verifies the basic CRUD operations on the

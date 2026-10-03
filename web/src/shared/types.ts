@@ -24,6 +24,20 @@
 export type UserRole = 'admin' | 'member' | 'viewer';
 
 /**
+ * Personal, non-admin-controlled user preferences (tz-refactor task 11,
+ * design.md §3 A "Storage and API"). Present only on the authenticated
+ * caller's own user object — `GET /auth/me` / `GET /api/v1/auth/me` — never
+ * on a listing or another user's record.
+ */
+export interface UserPreferences {
+  /**
+   * IANA display-timezone name, or `''`/absent for Auto (follow the
+   * browser's zone). See `web/src/utils/time.ts`'s `effectiveTimeZone`.
+   */
+  timezone?: string | undefined;
+}
+
+/**
  * User information
  */
 export interface User {
@@ -32,6 +46,7 @@ export interface User {
   name: string;
   avatar?: string | undefined;
   role?: UserRole | undefined;
+  preferences?: UserPreferences | undefined;
 }
 
 /**
@@ -212,7 +227,7 @@ export type AgentPhase =
 /**
  * Message mode controlling an agent's messaging authorization scope
  */
-export type MessageMode = 'none' | 'lineage' | 'branch' | 'project';
+export type MessageMode = 'none' | 'lineage' | 'branch' | 'project' | 'hub';
 
 // ---------------------------------------------------------------------------
 // Cascade mode change types
@@ -251,7 +266,50 @@ export interface AgentMessageability {
     | 'mode_branch_no_edge'
     | 'mode_lineage_agent_to_agent'
     | 'mode_none_sender'
-    | 'missing_permission';
+    | 'missing_permission'
+    | 'cross_project_disabled'
+    | 'cross_project_sender_mode'
+    | 'cross_project_target_mode'
+    | 'cross_project_inbound_none'
+    | 'cross_project_origin_not_member'
+    | 'cross_project_untrusted_origin'
+    | 'cross_project_surface_unsupported'
+    | 'denied';
+  /** Reason code when canReachViewer is false */
+  replyReason?: string;
+}
+
+/**
+ * Cross-project inbound policy for a project.
+ * Controls which external agents may send messages to agents in this project.
+ */
+export type CrossProjectInboundPolicy = 'none' | 'members' | 'any';
+
+/**
+ * Messaging policy for a project (GET /api/v1/projects/{id}/messaging-policy).
+ */
+export interface ProjectMessagingPolicy {
+  /** Configured inbound policy: "none", "members", "any" */
+  crossProjectInbound: CrossProjectInboundPolicy;
+  /** Optimistic concurrency revision */
+  revision: number;
+  /** Effective policy considering Hub switch state */
+  effectiveCrossProjectInbound: CrossProjectInboundPolicy;
+  /** Whether the Hub-level cross-project messaging is enabled */
+  hubCrossProjectEnabled: boolean;
+  /** Supported cross-project conversation kinds */
+  capabilities?: {
+    crossProjectConversationKinds: string[];
+  };
+}
+
+/**
+ * Hub-level messaging settings (GET /api/v1/admin/messaging).
+ */
+export interface HubMessagingSettings {
+  conversation_envelope_switch: boolean;
+  cross_project_messaging_enabled: boolean;
+  revision: number;
 }
 
 /** Present on agent DETAIL responses only. O(n) per agent — too costly for lists. */
@@ -293,7 +351,10 @@ export interface AgentDetail {
  * Terminal is available when the agent is in running or stopping phase
  * and not offline.
  */
-export function isTerminalAvailable(agent: Agent): boolean {
+export function isTerminalAvailable(agent: {
+  phase?: AgentPhase;
+  activity?: AgentActivity;
+}): boolean {
   if (agent.activity === 'offline') return false;
   return agent.phase === 'running' || agent.phase === 'stopping';
 }
@@ -315,6 +376,48 @@ export function getAgentDisplayStatus(agent: Agent): string {
  */
 export function isAgentRunning(agent: Agent): boolean {
   return agent.phase === 'running';
+}
+
+/**
+ * Confirmation copy shown before a best-effort resume of an error-phase
+ * agent (POST /start with `{ forceResume: true }`). The agent's home
+ * directory and harness session are usually still intact even after a host
+ * crash, but the crash itself may have corrupted that state, so the resume
+ * is best-effort rather than guaranteed.
+ */
+export const RESUME_BEST_EFFORT_CONFIRM_MESSAGE =
+  'This agent stopped unexpectedly. Resume will try to continue its previous session from the saved home directory. This may fail or behave oddly if the crash corrupted session state. Start instead begins a fresh session with the original task.';
+
+/**
+ * A lifecycle action a caller can request for an agent from the UI.
+ * `force-resume` posts to the same `/start` endpoint as `start`/`resume`,
+ * but with a body asking the hub for a best-effort resume of an
+ * error-phase agent's interrupted harness session (see
+ * RESUME_BEST_EFFORT_CONFIRM_MESSAGE).
+ */
+export type AgentLifecycleAction =
+  | 'start'
+  | 'stop'
+  | 'suspend'
+  | 'resume'
+  | 'delete'
+  | 'force-resume';
+
+/**
+ * Builds the fetch RequestInit for POSTing an agent lifecycle action.
+ * Only `force-resume` needs a JSON body; every other action (including the
+ * plain `start` that a suspended/stopped/error agent otherwise uses) posts
+ * with no body, matching the Hub's existing `/start` and `/stop` handlers.
+ */
+export function lifecycleActionRequestInit(action: AgentLifecycleAction): RequestInit {
+  if (action === 'force-resume') {
+    return {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ forceResume: true }),
+    };
+  }
+  return { method: 'POST' };
 }
 
 /**
@@ -495,7 +598,6 @@ export interface Agent {
   slug?: string;
   image?: string;
   runtime?: string;
-  visibility?: string;
   createdBy?: string;
   appliedConfig?: AgentAppliedConfig;
 
@@ -706,6 +808,109 @@ export interface RuntimeBroker {
   createdAt: string;
   updatedAt: string;
   _capabilities?: Capabilities;
+  /**
+   * The broker's effective max_agents_per_broker ceiling (ptone/scion#2061
+   * P2.2, design.md §5.6, §5.9). Mirrors Go
+   * RuntimeBrokerWithCapabilities.AgentLimit (pkg/hub/response_types.go)
+   * exactly — hand-written since there is no Go->TS generator (design.md
+   * §6). Absent when unlimited, or when resolution didn't run or failed;
+   * never 0 (a non-positive effective limit means unlimited).
+   */
+  agentLimit?: number;
+  /**
+   * The number of active max_agents_per_broker reservations held by this
+   * broker. Absent only when resolution didn't run or failed. Unlike
+   * agentLimit, it is still present (possibly non-zero) when the broker is
+   * unlimited — agentLimit's absence there means "no cap", not "no count".
+   */
+  agentCount?: number;
+  /**
+   * The precedence step that produced agentLimit: "broker" | "entitlement" |
+   * "hub_default" | "unlimited" | "not_enforced". This names the step, not
+   * whether the result is a cap: when the effective limit is <= 0
+   * (unlimited), agentLimit is absent but agentLimitSource is still
+   * whichever step produced it ("broker" for a settings.maxAgents=0
+   * override, "entitlement"/"hub_default" for a 0 binding or default).
+   * "unlimited" itself means no limit definition or no quota service is
+   * configured hub-wide — in that case resolution does not count either,
+   * and all three fields (agentLimit/agentCount/agentLimitSource) are
+   * absent together.
+   *
+   * "not_enforced" (design.md Amendment A1) means the P1b enforcement
+   * switch is off: agentLimit keeps whatever the precedence steps resolved
+   * (a cap, or absent when that resolves to unlimited, exactly as above),
+   * but the value is informational only — it is not currently applied.
+   * Renderers must show this visibly, not only in a tooltip.
+   */
+  agentLimitSource?: string;
+}
+
+/**
+ * General per-broker settings document (ptone/scion#2061 P2,
+ * ptone/scion#2177). Mirrors the Go store.BrokerSettings JSON tags exactly
+ * (pkg/store/models.go) — hand-written since there is no Go->TS generator
+ * (design.md §6). undefined/absent means "inherit" (fall through to the
+ * entitlement engine / hub-wide default); 0 means unlimited.
+ */
+export interface BrokerSettings {
+  maxAgents?: number;
+}
+
+/**
+ * The resolved value of one broker-settings key plus the precedence step
+ * that produced it (design.md §5.2, §5.9). Mirrors Go EffectiveSetting
+ * (pkg/hub/broker_settings_handlers.go).
+ */
+export interface EffectiveSetting {
+  /** null only when resolution errored outright; source is then "" too.
+   * Every other outcome, including "no quota configured" (source
+   * "unlimited"), is a concrete number (0 = unlimited). */
+  value: number | null;
+  /** "broker" | "entitlement" | "hub_default" | "unlimited" | "not_enforced" | "" */
+  source: string;
+  /** Current active-reservation count for this key, the same value Reserve
+   * counts against (shared via brokerCapacity, AC-P2-9/AC-P2-10). Omitted
+   * when resolution failed or the key isn't quota-backed. */
+  count?: number;
+  /** What value/source would apply if this key's own broker override were
+   * cleared (the entitlement engine: bindings, then the hub-wide default).
+   * Populated in every state, including while an override is active, so the
+   * UI can label "Use hub default (N)" correctly at exactly the moment an
+   * admin is deciding whether to clear it. */
+  inherited: InheritedSetting;
+}
+
+/**
+ * EffectiveSetting.inherited's shape (design.md §5.6, review round 2 R2).
+ * Mirrors Go InheritedSetting (pkg/hub/broker_settings_handlers.go).
+ */
+export interface InheritedSetting {
+  /** null only when resolution errored; source is then "" too. */
+  value: number | null;
+  /** "entitlement" | "hub_default" | "unlimited" | "" */
+  source: string;
+}
+
+/**
+ * GET/PUT /api/v1/runtime-brokers/{id}/settings response (design.md §5.4).
+ * Mirrors Go BrokerSettingsResponse (pkg/hub/broker_settings_handlers.go).
+ */
+export interface BrokerSettingsResponse {
+  brokerId: string;
+  /** Stored values only; a key absent here means "inherit". */
+  settings: BrokerSettings;
+  effective: {
+    maxAgents: EffectiveSetting;
+  };
+  /** Optimistic concurrency revision; 0 when the broker has no settings row. */
+  revision: number;
+  updatedBy?: string;
+  /** Absent when the broker has no settings row yet. */
+  updated?: string;
+  /** Per-key write permission for the caller. */
+  _capabilities: {
+    update: boolean;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -739,12 +944,22 @@ export interface Message {
   dispatchState?: string;
   /** Reason for dispatch failure, if any. */
   dispatchFailureReason?: string;
+  /**
+   * Machine-readable dispatch failure code, e.g. "agent_unreachable"
+   * (nc-delivery-unreachable). Only present on rows returned by the chat v2
+   * send response; history rows fall back to matching the reason prefix.
+   */
+  dispatchFailureCode?: string;
   /** Whether the message was sent with plain formatting. */
   plain?: boolean;
   /** File attachment paths. */
   attachments?: string[];
   /** Arbitrary metadata attached to the message. */
   metadata?: Record<string, unknown>;
+  /** Server-derived sender project ID for cross-project provenance. */
+  senderProjectId?: string;
+  /** Server-derived recipient project ID for cross-project provenance. */
+  recipientProjectId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -818,6 +1033,71 @@ export interface MembershipCapabilities {
   canManageOwners: boolean;
   canTransfer: boolean;
   actions: string[];
+  /**
+   * Whether the actor may grant and remove custom project roles
+   * (ptone/scion#2529). Decided server-side by the same authority function
+   * the members PUT uses; the UI never infers it from owner authority.
+   * Optional: absent means false.
+   */
+  canManageCustomRoles?: boolean;
+}
+
+/**
+ * One project-scope role binding as returned by the project members API,
+ * enriched with role and display names.
+ */
+export interface ProjectMemberBinding {
+  id: string;
+  roleDefinitionId: string;
+  roleName: string;
+  principalType: string;
+  principalId: string;
+  principalDisplayName?: string;
+  scopeType: string;
+  scopeId: string;
+  createdAt: string;
+  notBefore?: string;
+  expiresAt?: string;
+  /** 'direct' for direct bindings, otherwise the group it is inherited through. */
+  source: string;
+  sourceGroupName?: string;
+  /** 'builtin' (owner/admin/member) or 'custom'. */
+  roleKind?: 'builtin' | 'custom';
+}
+
+/**
+ * One principal's project membership: the item type of
+ * `GET /api/v1/projects/{id}/members?groupBy=principal` and the body of
+ * `PUT /api/v1/projects/{id}/members/principals/{type}/{id}`.
+ */
+export interface ProjectMemberGroup {
+  principalType: string;
+  principalId: string;
+  principalDisplayName?: string;
+  /** The built-in membership role name, or '' when the principal holds none. */
+  builtInRoleName: string;
+  /** Built-in binding first, then custom bindings by role name. */
+  bindings: ProjectMemberBinding[];
+  /** PUT responses only. */
+  changed?: boolean;
+}
+
+/**
+ * A project-scoped role the members dialog can offer, from
+ * `GET /api/v1/projects/{id}/members/assignable-roles`. `grantable` is the
+ * members PUT's decision for newly creating the role on a principal that
+ * does not hold it (principal-agnostic, op=add).
+ */
+export interface AssignableProjectRole {
+  id: string;
+  name: string;
+  description: string;
+  roleKind: 'builtin' | 'custom';
+  grantable: boolean;
+  /** Empty when grantable; otherwise the PUT's refusal reason. */
+  reason: string;
+  denialCode?: string;
+  details?: Record<string, unknown>;
 }
 
 /**
@@ -831,22 +1111,29 @@ export function can(capabilities: Capabilities | undefined, action: string): boo
 
 /**
  * Whether the viewer may run agent lifecycle actions (start, stop, suspend,
- * resume).
+ * restart, restore).
  *
- * These are authorized server-side by `authorizeAgentLifecycle`, the same gate
- * that governs `attach` (see handlers_projects_core.go, where AgentActionStart
- * and AgentActionStop route through it). The permission registry defines no
- * `agent.start` and no per-agent `agent.stop` - only the scope-level
- * `agent.stop_all` - so `ComputeCapabilities` can never emit "start" or "stop",
- * and gating on those names hides the controls from every user including
- * super-admins.
- *
- * Gating on the capability the Hub actually enforces keeps the UI truthful. If
- * start/stop should become separately governed, that needs registry entries
- * plus role updates, and this helper is the single place to change.
+ * These are authorized server-side by `authorizeAgentLifecycle` with the
+ * `agent.lifecycle` permission (ActionLifecycle). Project owners/admins hold
+ * it for every agent in the project; other users get it on agents they own or
+ * spawned. It is deliberately separate from `attach`, which gates terminal /
+ * exec / env access and is NOT granted to owners/admins on other members'
+ * agents, because those agents run with their owner's secrets
+ * (miller79/scion#88).
  */
 export function canLifecycle(capabilities: Capabilities | undefined): boolean {
-  return can(capabilities, 'attach');
+  return can(capabilities, 'lifecycle');
+}
+
+/**
+ * Whether the viewer may offer the message composer for an agent. Messaging is
+ * authorized server-side by `authorizeAgentMessage` (a scope-level axis with no
+ * per-agent capability), so the UI uses per-agent management capability as the
+ * proxy: `lifecycle` (owners/admins and the agent's creator) or `attach`.
+ * `_messageability` remains the authoritative per-agent signal where present.
+ */
+export function canMessageAgent(capabilities: Capabilities | undefined): boolean {
+  return can(capabilities, 'lifecycle') || can(capabilities, 'attach');
 }
 
 /**
@@ -902,6 +1189,8 @@ export interface GCPServiceAccount {
 export interface GCPMintQuotaInfo {
   project_minted: number;
   project_cap: number;
+  hub_minted?: number;
+  hub_cap?: number;
   global_minted: number;
   global_cap: number;
 }
@@ -947,7 +1236,6 @@ export interface PolicyConditions {
 // ---------------------------------------------------------------------------
 
 export type SkillScope = 'core' | 'global' | 'project' | 'user';
-export type SkillVisibility = 'public' | 'private';
 export type SkillVersionStatus = 'draft' | 'published' | 'deprecated' | 'archived';
 
 export interface Skill {
@@ -961,7 +1249,6 @@ export interface Skill {
   status: string;
   ownerId?: string;
   createdBy?: string;
-  visibility: SkillVisibility;
   created: string;
   updated: string;
   _capabilities?: Capabilities;

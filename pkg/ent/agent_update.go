@@ -164,20 +164,6 @@ func (_u *AgentUpdate) SetNillableDelegationEnabled(v *bool) *AgentUpdate {
 	return _u
 }
 
-// SetVisibility sets the "visibility" field.
-func (_u *AgentUpdate) SetVisibility(v string) *AgentUpdate {
-	_u.mutation.SetVisibility(v)
-	return _u
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_u *AgentUpdate) SetNillableVisibility(v *string) *AgentUpdate {
-	if v != nil {
-		_u.SetVisibility(*v)
-	}
-	return _u
-}
-
 // SetMessageMode sets the "message_mode" field.
 func (_u *AgentUpdate) SetMessageMode(v agent.MessageMode) *AgentUpdate {
 	_u.mutation.SetMessageMode(v)
@@ -611,6 +597,26 @@ func (_u *AgentUpdate) ClearAppliedConfig() *AgentUpdate {
 	return _u
 }
 
+// SetHarnessConfig sets the "harness_config" field.
+func (_u *AgentUpdate) SetHarnessConfig(v string) *AgentUpdate {
+	_u.mutation.SetHarnessConfig(v)
+	return _u
+}
+
+// SetNillableHarnessConfig sets the "harness_config" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableHarnessConfig(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetHarnessConfig(*v)
+	}
+	return _u
+}
+
+// ClearHarnessConfig clears the value of the "harness_config" field.
+func (_u *AgentUpdate) ClearHarnessConfig() *AgentUpdate {
+	_u.mutation.ClearHarnessConfig()
+	return _u
+}
+
 // SetAncestry sets the "ancestry" field.
 func (_u *AgentUpdate) SetAncestry(v []string) *AgentUpdate {
 	_u.mutation.SetAncestry(v)
@@ -733,6 +739,282 @@ func (_u *AgentUpdate) SetNillableStateVersion(v *int64) *AgentUpdate {
 // AddStateVersion adds value to the "state_version" field.
 func (_u *AgentUpdate) AddStateVersion(v int64) *AgentUpdate {
 	_u.mutation.AddStateVersion(v)
+	return _u
+}
+
+// SetGeneration sets the "generation" field.
+func (_u *AgentUpdate) SetGeneration(v int) *AgentUpdate {
+	_u.mutation.ResetGeneration()
+	_u.mutation.SetGeneration(v)
+	return _u
+}
+
+// SetNillableGeneration sets the "generation" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableGeneration(v *int) *AgentUpdate {
+	if v != nil {
+		_u.SetGeneration(*v)
+	}
+	return _u
+}
+
+// AddGeneration adds value to the "generation" field.
+func (_u *AgentUpdate) AddGeneration(v int) *AgentUpdate {
+	_u.mutation.AddGeneration(v)
+	return _u
+}
+
+// SetReincarnationState sets the "reincarnation_state" field.
+func (_u *AgentUpdate) SetReincarnationState(v string) *AgentUpdate {
+	_u.mutation.SetReincarnationState(v)
+	return _u
+}
+
+// SetNillableReincarnationState sets the "reincarnation_state" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableReincarnationState(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetReincarnationState(*v)
+	}
+	return _u
+}
+
+// ClearReincarnationState clears the value of the "reincarnation_state" field.
+func (_u *AgentUpdate) ClearReincarnationState() *AgentUpdate {
+	_u.mutation.ClearReincarnationState()
+	return _u
+}
+
+// SetReincarnationUpdatedAt sets the "reincarnation_updated_at" field.
+func (_u *AgentUpdate) SetReincarnationUpdatedAt(v time.Time) *AgentUpdate {
+	_u.mutation.SetReincarnationUpdatedAt(v)
+	return _u
+}
+
+// SetNillableReincarnationUpdatedAt sets the "reincarnation_updated_at" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableReincarnationUpdatedAt(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetReincarnationUpdatedAt(*v)
+	}
+	return _u
+}
+
+// ClearReincarnationUpdatedAt clears the value of the "reincarnation_updated_at" field.
+func (_u *AgentUpdate) ClearReincarnationUpdatedAt() *AgentUpdate {
+	_u.mutation.ClearReincarnationUpdatedAt()
+	return _u
+}
+
+// SetLaunchAsyncOptIn sets the "launch_async_opt_in" field.
+func (_u *AgentUpdate) SetLaunchAsyncOptIn(v bool) *AgentUpdate {
+	_u.mutation.SetLaunchAsyncOptIn(v)
+	return _u
+}
+
+// SetNillableLaunchAsyncOptIn sets the "launch_async_opt_in" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableLaunchAsyncOptIn(v *bool) *AgentUpdate {
+	if v != nil {
+		_u.SetLaunchAsyncOptIn(*v)
+	}
+	return _u
+}
+
+// SetLaunchID sets the "launch_id" field.
+func (_u *AgentUpdate) SetLaunchID(v string) *AgentUpdate {
+	_u.mutation.SetLaunchID(v)
+	return _u
+}
+
+// SetNillableLaunchID sets the "launch_id" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableLaunchID(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetLaunchID(*v)
+	}
+	return _u
+}
+
+// ClearLaunchID clears the value of the "launch_id" field.
+func (_u *AgentUpdate) ClearLaunchID() *AgentUpdate {
+	_u.mutation.ClearLaunchID()
+	return _u
+}
+
+// SetLaunchState sets the "launch_state" field.
+func (_u *AgentUpdate) SetLaunchState(v string) *AgentUpdate {
+	_u.mutation.SetLaunchState(v)
+	return _u
+}
+
+// SetNillableLaunchState sets the "launch_state" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableLaunchState(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetLaunchState(*v)
+	}
+	return _u
+}
+
+// ClearLaunchState clears the value of the "launch_state" field.
+func (_u *AgentUpdate) ClearLaunchState() *AgentUpdate {
+	_u.mutation.ClearLaunchState()
+	return _u
+}
+
+// SetLaunchEndReason sets the "launch_end_reason" field.
+func (_u *AgentUpdate) SetLaunchEndReason(v string) *AgentUpdate {
+	_u.mutation.SetLaunchEndReason(v)
+	return _u
+}
+
+// SetNillableLaunchEndReason sets the "launch_end_reason" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableLaunchEndReason(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetLaunchEndReason(*v)
+	}
+	return _u
+}
+
+// ClearLaunchEndReason clears the value of the "launch_end_reason" field.
+func (_u *AgentUpdate) ClearLaunchEndReason() *AgentUpdate {
+	_u.mutation.ClearLaunchEndReason()
+	return _u
+}
+
+// SetLaunchKind sets the "launch_kind" field.
+func (_u *AgentUpdate) SetLaunchKind(v string) *AgentUpdate {
+	_u.mutation.SetLaunchKind(v)
+	return _u
+}
+
+// SetNillableLaunchKind sets the "launch_kind" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableLaunchKind(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetLaunchKind(*v)
+	}
+	return _u
+}
+
+// ClearLaunchKind clears the value of the "launch_kind" field.
+func (_u *AgentUpdate) ClearLaunchKind() *AgentUpdate {
+	_u.mutation.ClearLaunchKind()
+	return _u
+}
+
+// SetLaunchDeadline sets the "launch_deadline" field.
+func (_u *AgentUpdate) SetLaunchDeadline(v time.Time) *AgentUpdate {
+	_u.mutation.SetLaunchDeadline(v)
+	return _u
+}
+
+// SetNillableLaunchDeadline sets the "launch_deadline" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableLaunchDeadline(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetLaunchDeadline(*v)
+	}
+	return _u
+}
+
+// ClearLaunchDeadline clears the value of the "launch_deadline" field.
+func (_u *AgentUpdate) ClearLaunchDeadline() *AgentUpdate {
+	_u.mutation.ClearLaunchDeadline()
+	return _u
+}
+
+// SetLaunchLastReportAt sets the "launch_last_report_at" field.
+func (_u *AgentUpdate) SetLaunchLastReportAt(v time.Time) *AgentUpdate {
+	_u.mutation.SetLaunchLastReportAt(v)
+	return _u
+}
+
+// SetNillableLaunchLastReportAt sets the "launch_last_report_at" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableLaunchLastReportAt(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetLaunchLastReportAt(*v)
+	}
+	return _u
+}
+
+// ClearLaunchLastReportAt clears the value of the "launch_last_report_at" field.
+func (_u *AgentUpdate) ClearLaunchLastReportAt() *AgentUpdate {
+	_u.mutation.ClearLaunchLastReportAt()
+	return _u
+}
+
+// SetLaunchOwner sets the "launch_owner" field.
+func (_u *AgentUpdate) SetLaunchOwner(v string) *AgentUpdate {
+	_u.mutation.SetLaunchOwner(v)
+	return _u
+}
+
+// SetNillableLaunchOwner sets the "launch_owner" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableLaunchOwner(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetLaunchOwner(*v)
+	}
+	return _u
+}
+
+// ClearLaunchOwner clears the value of the "launch_owner" field.
+func (_u *AgentUpdate) ClearLaunchOwner() *AgentUpdate {
+	_u.mutation.ClearLaunchOwner()
+	return _u
+}
+
+// SetLaunchSeq sets the "launch_seq" field.
+func (_u *AgentUpdate) SetLaunchSeq(v int64) *AgentUpdate {
+	_u.mutation.ResetLaunchSeq()
+	_u.mutation.SetLaunchSeq(v)
+	return _u
+}
+
+// SetNillableLaunchSeq sets the "launch_seq" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableLaunchSeq(v *int64) *AgentUpdate {
+	if v != nil {
+		_u.SetLaunchSeq(*v)
+	}
+	return _u
+}
+
+// AddLaunchSeq adds value to the "launch_seq" field.
+func (_u *AgentUpdate) AddLaunchSeq(v int64) *AgentUpdate {
+	_u.mutation.AddLaunchSeq(v)
+	return _u
+}
+
+// SetLaunchStep sets the "launch_step" field.
+func (_u *AgentUpdate) SetLaunchStep(v string) *AgentUpdate {
+	_u.mutation.SetLaunchStep(v)
+	return _u
+}
+
+// SetNillableLaunchStep sets the "launch_step" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableLaunchStep(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetLaunchStep(*v)
+	}
+	return _u
+}
+
+// ClearLaunchStep clears the value of the "launch_step" field.
+func (_u *AgentUpdate) ClearLaunchStep() *AgentUpdate {
+	_u.mutation.ClearLaunchStep()
+	return _u
+}
+
+// SetLaunchError sets the "launch_error" field.
+func (_u *AgentUpdate) SetLaunchError(v string) *AgentUpdate {
+	_u.mutation.SetLaunchError(v)
+	return _u
+}
+
+// SetNillableLaunchError sets the "launch_error" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableLaunchError(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetLaunchError(*v)
+	}
+	return _u
+}
+
+// ClearLaunchError clears the value of the "launch_error" field.
+func (_u *AgentUpdate) ClearLaunchError() *AgentUpdate {
+	_u.mutation.ClearLaunchError()
 	return _u
 }
 
@@ -930,9 +1212,6 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if value, ok := _u.mutation.DelegationEnabled(); ok {
 		_spec.SetField(agent.FieldDelegationEnabled, field.TypeBool, value)
 	}
-	if value, ok := _u.mutation.Visibility(); ok {
-		_spec.SetField(agent.FieldVisibility, field.TypeString, value)
-	}
 	if value, ok := _u.mutation.MessageMode(); ok {
 		_spec.SetField(agent.FieldMessageMode, field.TypeEnum, value)
 	}
@@ -1070,6 +1349,12 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	if _u.mutation.AppliedConfigCleared() {
 		_spec.ClearField(agent.FieldAppliedConfig, field.TypeString)
 	}
+	if value, ok := _u.mutation.HarnessConfig(); ok {
+		_spec.SetField(agent.FieldHarnessConfig, field.TypeString, value)
+	}
+	if _u.mutation.HarnessConfigCleared() {
+		_spec.ClearField(agent.FieldHarnessConfig, field.TypeString)
+	}
 	if value, ok := _u.mutation.Ancestry(); ok {
 		_spec.SetField(agent.FieldAncestry, field.TypeJSON, value)
 	}
@@ -1113,6 +1398,87 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.AddedStateVersion(); ok {
 		_spec.AddField(agent.FieldStateVersion, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.Generation(); ok {
+		_spec.SetField(agent.FieldGeneration, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedGeneration(); ok {
+		_spec.AddField(agent.FieldGeneration, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.ReincarnationState(); ok {
+		_spec.SetField(agent.FieldReincarnationState, field.TypeString, value)
+	}
+	if _u.mutation.ReincarnationStateCleared() {
+		_spec.ClearField(agent.FieldReincarnationState, field.TypeString)
+	}
+	if value, ok := _u.mutation.ReincarnationUpdatedAt(); ok {
+		_spec.SetField(agent.FieldReincarnationUpdatedAt, field.TypeTime, value)
+	}
+	if _u.mutation.ReincarnationUpdatedAtCleared() {
+		_spec.ClearField(agent.FieldReincarnationUpdatedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.LaunchAsyncOptIn(); ok {
+		_spec.SetField(agent.FieldLaunchAsyncOptIn, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.LaunchID(); ok {
+		_spec.SetField(agent.FieldLaunchID, field.TypeString, value)
+	}
+	if _u.mutation.LaunchIDCleared() {
+		_spec.ClearField(agent.FieldLaunchID, field.TypeString)
+	}
+	if value, ok := _u.mutation.LaunchState(); ok {
+		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
+	}
+	if _u.mutation.LaunchStateCleared() {
+		_spec.ClearField(agent.FieldLaunchState, field.TypeString)
+	}
+	if value, ok := _u.mutation.LaunchEndReason(); ok {
+		_spec.SetField(agent.FieldLaunchEndReason, field.TypeString, value)
+	}
+	if _u.mutation.LaunchEndReasonCleared() {
+		_spec.ClearField(agent.FieldLaunchEndReason, field.TypeString)
+	}
+	if value, ok := _u.mutation.LaunchKind(); ok {
+		_spec.SetField(agent.FieldLaunchKind, field.TypeString, value)
+	}
+	if _u.mutation.LaunchKindCleared() {
+		_spec.ClearField(agent.FieldLaunchKind, field.TypeString)
+	}
+	if value, ok := _u.mutation.LaunchDeadline(); ok {
+		_spec.SetField(agent.FieldLaunchDeadline, field.TypeTime, value)
+	}
+	if _u.mutation.LaunchDeadlineCleared() {
+		_spec.ClearField(agent.FieldLaunchDeadline, field.TypeTime)
+	}
+	if value, ok := _u.mutation.LaunchLastReportAt(); ok {
+		_spec.SetField(agent.FieldLaunchLastReportAt, field.TypeTime, value)
+	}
+	if _u.mutation.LaunchLastReportAtCleared() {
+		_spec.ClearField(agent.FieldLaunchLastReportAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.LaunchOwner(); ok {
+		_spec.SetField(agent.FieldLaunchOwner, field.TypeString, value)
+	}
+	if _u.mutation.LaunchOwnerCleared() {
+		_spec.ClearField(agent.FieldLaunchOwner, field.TypeString)
+	}
+	if value, ok := _u.mutation.LaunchSeq(); ok {
+		_spec.SetField(agent.FieldLaunchSeq, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedLaunchSeq(); ok {
+		_spec.AddField(agent.FieldLaunchSeq, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.LaunchStep(); ok {
+		_spec.SetField(agent.FieldLaunchStep, field.TypeString, value)
+	}
+	if _u.mutation.LaunchStepCleared() {
+		_spec.ClearField(agent.FieldLaunchStep, field.TypeString)
+	}
+	if value, ok := _u.mutation.LaunchError(); ok {
+		_spec.SetField(agent.FieldLaunchError, field.TypeString, value)
+	}
+	if _u.mutation.LaunchErrorCleared() {
+		_spec.ClearField(agent.FieldLaunchError, field.TypeString)
 	}
 	if _u.mutation.ProjectCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -1379,20 +1745,6 @@ func (_u *AgentUpdateOne) SetDelegationEnabled(v bool) *AgentUpdateOne {
 func (_u *AgentUpdateOne) SetNillableDelegationEnabled(v *bool) *AgentUpdateOne {
 	if v != nil {
 		_u.SetDelegationEnabled(*v)
-	}
-	return _u
-}
-
-// SetVisibility sets the "visibility" field.
-func (_u *AgentUpdateOne) SetVisibility(v string) *AgentUpdateOne {
-	_u.mutation.SetVisibility(v)
-	return _u
-}
-
-// SetNillableVisibility sets the "visibility" field if the given value is not nil.
-func (_u *AgentUpdateOne) SetNillableVisibility(v *string) *AgentUpdateOne {
-	if v != nil {
-		_u.SetVisibility(*v)
 	}
 	return _u
 }
@@ -1830,6 +2182,26 @@ func (_u *AgentUpdateOne) ClearAppliedConfig() *AgentUpdateOne {
 	return _u
 }
 
+// SetHarnessConfig sets the "harness_config" field.
+func (_u *AgentUpdateOne) SetHarnessConfig(v string) *AgentUpdateOne {
+	_u.mutation.SetHarnessConfig(v)
+	return _u
+}
+
+// SetNillableHarnessConfig sets the "harness_config" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableHarnessConfig(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetHarnessConfig(*v)
+	}
+	return _u
+}
+
+// ClearHarnessConfig clears the value of the "harness_config" field.
+func (_u *AgentUpdateOne) ClearHarnessConfig() *AgentUpdateOne {
+	_u.mutation.ClearHarnessConfig()
+	return _u
+}
+
 // SetAncestry sets the "ancestry" field.
 func (_u *AgentUpdateOne) SetAncestry(v []string) *AgentUpdateOne {
 	_u.mutation.SetAncestry(v)
@@ -1952,6 +2324,282 @@ func (_u *AgentUpdateOne) SetNillableStateVersion(v *int64) *AgentUpdateOne {
 // AddStateVersion adds value to the "state_version" field.
 func (_u *AgentUpdateOne) AddStateVersion(v int64) *AgentUpdateOne {
 	_u.mutation.AddStateVersion(v)
+	return _u
+}
+
+// SetGeneration sets the "generation" field.
+func (_u *AgentUpdateOne) SetGeneration(v int) *AgentUpdateOne {
+	_u.mutation.ResetGeneration()
+	_u.mutation.SetGeneration(v)
+	return _u
+}
+
+// SetNillableGeneration sets the "generation" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableGeneration(v *int) *AgentUpdateOne {
+	if v != nil {
+		_u.SetGeneration(*v)
+	}
+	return _u
+}
+
+// AddGeneration adds value to the "generation" field.
+func (_u *AgentUpdateOne) AddGeneration(v int) *AgentUpdateOne {
+	_u.mutation.AddGeneration(v)
+	return _u
+}
+
+// SetReincarnationState sets the "reincarnation_state" field.
+func (_u *AgentUpdateOne) SetReincarnationState(v string) *AgentUpdateOne {
+	_u.mutation.SetReincarnationState(v)
+	return _u
+}
+
+// SetNillableReincarnationState sets the "reincarnation_state" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableReincarnationState(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetReincarnationState(*v)
+	}
+	return _u
+}
+
+// ClearReincarnationState clears the value of the "reincarnation_state" field.
+func (_u *AgentUpdateOne) ClearReincarnationState() *AgentUpdateOne {
+	_u.mutation.ClearReincarnationState()
+	return _u
+}
+
+// SetReincarnationUpdatedAt sets the "reincarnation_updated_at" field.
+func (_u *AgentUpdateOne) SetReincarnationUpdatedAt(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetReincarnationUpdatedAt(v)
+	return _u
+}
+
+// SetNillableReincarnationUpdatedAt sets the "reincarnation_updated_at" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableReincarnationUpdatedAt(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetReincarnationUpdatedAt(*v)
+	}
+	return _u
+}
+
+// ClearReincarnationUpdatedAt clears the value of the "reincarnation_updated_at" field.
+func (_u *AgentUpdateOne) ClearReincarnationUpdatedAt() *AgentUpdateOne {
+	_u.mutation.ClearReincarnationUpdatedAt()
+	return _u
+}
+
+// SetLaunchAsyncOptIn sets the "launch_async_opt_in" field.
+func (_u *AgentUpdateOne) SetLaunchAsyncOptIn(v bool) *AgentUpdateOne {
+	_u.mutation.SetLaunchAsyncOptIn(v)
+	return _u
+}
+
+// SetNillableLaunchAsyncOptIn sets the "launch_async_opt_in" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableLaunchAsyncOptIn(v *bool) *AgentUpdateOne {
+	if v != nil {
+		_u.SetLaunchAsyncOptIn(*v)
+	}
+	return _u
+}
+
+// SetLaunchID sets the "launch_id" field.
+func (_u *AgentUpdateOne) SetLaunchID(v string) *AgentUpdateOne {
+	_u.mutation.SetLaunchID(v)
+	return _u
+}
+
+// SetNillableLaunchID sets the "launch_id" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableLaunchID(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetLaunchID(*v)
+	}
+	return _u
+}
+
+// ClearLaunchID clears the value of the "launch_id" field.
+func (_u *AgentUpdateOne) ClearLaunchID() *AgentUpdateOne {
+	_u.mutation.ClearLaunchID()
+	return _u
+}
+
+// SetLaunchState sets the "launch_state" field.
+func (_u *AgentUpdateOne) SetLaunchState(v string) *AgentUpdateOne {
+	_u.mutation.SetLaunchState(v)
+	return _u
+}
+
+// SetNillableLaunchState sets the "launch_state" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableLaunchState(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetLaunchState(*v)
+	}
+	return _u
+}
+
+// ClearLaunchState clears the value of the "launch_state" field.
+func (_u *AgentUpdateOne) ClearLaunchState() *AgentUpdateOne {
+	_u.mutation.ClearLaunchState()
+	return _u
+}
+
+// SetLaunchEndReason sets the "launch_end_reason" field.
+func (_u *AgentUpdateOne) SetLaunchEndReason(v string) *AgentUpdateOne {
+	_u.mutation.SetLaunchEndReason(v)
+	return _u
+}
+
+// SetNillableLaunchEndReason sets the "launch_end_reason" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableLaunchEndReason(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetLaunchEndReason(*v)
+	}
+	return _u
+}
+
+// ClearLaunchEndReason clears the value of the "launch_end_reason" field.
+func (_u *AgentUpdateOne) ClearLaunchEndReason() *AgentUpdateOne {
+	_u.mutation.ClearLaunchEndReason()
+	return _u
+}
+
+// SetLaunchKind sets the "launch_kind" field.
+func (_u *AgentUpdateOne) SetLaunchKind(v string) *AgentUpdateOne {
+	_u.mutation.SetLaunchKind(v)
+	return _u
+}
+
+// SetNillableLaunchKind sets the "launch_kind" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableLaunchKind(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetLaunchKind(*v)
+	}
+	return _u
+}
+
+// ClearLaunchKind clears the value of the "launch_kind" field.
+func (_u *AgentUpdateOne) ClearLaunchKind() *AgentUpdateOne {
+	_u.mutation.ClearLaunchKind()
+	return _u
+}
+
+// SetLaunchDeadline sets the "launch_deadline" field.
+func (_u *AgentUpdateOne) SetLaunchDeadline(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetLaunchDeadline(v)
+	return _u
+}
+
+// SetNillableLaunchDeadline sets the "launch_deadline" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableLaunchDeadline(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetLaunchDeadline(*v)
+	}
+	return _u
+}
+
+// ClearLaunchDeadline clears the value of the "launch_deadline" field.
+func (_u *AgentUpdateOne) ClearLaunchDeadline() *AgentUpdateOne {
+	_u.mutation.ClearLaunchDeadline()
+	return _u
+}
+
+// SetLaunchLastReportAt sets the "launch_last_report_at" field.
+func (_u *AgentUpdateOne) SetLaunchLastReportAt(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetLaunchLastReportAt(v)
+	return _u
+}
+
+// SetNillableLaunchLastReportAt sets the "launch_last_report_at" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableLaunchLastReportAt(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetLaunchLastReportAt(*v)
+	}
+	return _u
+}
+
+// ClearLaunchLastReportAt clears the value of the "launch_last_report_at" field.
+func (_u *AgentUpdateOne) ClearLaunchLastReportAt() *AgentUpdateOne {
+	_u.mutation.ClearLaunchLastReportAt()
+	return _u
+}
+
+// SetLaunchOwner sets the "launch_owner" field.
+func (_u *AgentUpdateOne) SetLaunchOwner(v string) *AgentUpdateOne {
+	_u.mutation.SetLaunchOwner(v)
+	return _u
+}
+
+// SetNillableLaunchOwner sets the "launch_owner" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableLaunchOwner(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetLaunchOwner(*v)
+	}
+	return _u
+}
+
+// ClearLaunchOwner clears the value of the "launch_owner" field.
+func (_u *AgentUpdateOne) ClearLaunchOwner() *AgentUpdateOne {
+	_u.mutation.ClearLaunchOwner()
+	return _u
+}
+
+// SetLaunchSeq sets the "launch_seq" field.
+func (_u *AgentUpdateOne) SetLaunchSeq(v int64) *AgentUpdateOne {
+	_u.mutation.ResetLaunchSeq()
+	_u.mutation.SetLaunchSeq(v)
+	return _u
+}
+
+// SetNillableLaunchSeq sets the "launch_seq" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableLaunchSeq(v *int64) *AgentUpdateOne {
+	if v != nil {
+		_u.SetLaunchSeq(*v)
+	}
+	return _u
+}
+
+// AddLaunchSeq adds value to the "launch_seq" field.
+func (_u *AgentUpdateOne) AddLaunchSeq(v int64) *AgentUpdateOne {
+	_u.mutation.AddLaunchSeq(v)
+	return _u
+}
+
+// SetLaunchStep sets the "launch_step" field.
+func (_u *AgentUpdateOne) SetLaunchStep(v string) *AgentUpdateOne {
+	_u.mutation.SetLaunchStep(v)
+	return _u
+}
+
+// SetNillableLaunchStep sets the "launch_step" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableLaunchStep(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetLaunchStep(*v)
+	}
+	return _u
+}
+
+// ClearLaunchStep clears the value of the "launch_step" field.
+func (_u *AgentUpdateOne) ClearLaunchStep() *AgentUpdateOne {
+	_u.mutation.ClearLaunchStep()
+	return _u
+}
+
+// SetLaunchError sets the "launch_error" field.
+func (_u *AgentUpdateOne) SetLaunchError(v string) *AgentUpdateOne {
+	_u.mutation.SetLaunchError(v)
+	return _u
+}
+
+// SetNillableLaunchError sets the "launch_error" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableLaunchError(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetLaunchError(*v)
+	}
+	return _u
+}
+
+// ClearLaunchError clears the value of the "launch_error" field.
+func (_u *AgentUpdateOne) ClearLaunchError() *AgentUpdateOne {
+	_u.mutation.ClearLaunchError()
 	return _u
 }
 
@@ -2179,9 +2827,6 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	if value, ok := _u.mutation.DelegationEnabled(); ok {
 		_spec.SetField(agent.FieldDelegationEnabled, field.TypeBool, value)
 	}
-	if value, ok := _u.mutation.Visibility(); ok {
-		_spec.SetField(agent.FieldVisibility, field.TypeString, value)
-	}
 	if value, ok := _u.mutation.MessageMode(); ok {
 		_spec.SetField(agent.FieldMessageMode, field.TypeEnum, value)
 	}
@@ -2319,6 +2964,12 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	if _u.mutation.AppliedConfigCleared() {
 		_spec.ClearField(agent.FieldAppliedConfig, field.TypeString)
 	}
+	if value, ok := _u.mutation.HarnessConfig(); ok {
+		_spec.SetField(agent.FieldHarnessConfig, field.TypeString, value)
+	}
+	if _u.mutation.HarnessConfigCleared() {
+		_spec.ClearField(agent.FieldHarnessConfig, field.TypeString)
+	}
 	if value, ok := _u.mutation.Ancestry(); ok {
 		_spec.SetField(agent.FieldAncestry, field.TypeJSON, value)
 	}
@@ -2362,6 +3013,87 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if value, ok := _u.mutation.AddedStateVersion(); ok {
 		_spec.AddField(agent.FieldStateVersion, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.Generation(); ok {
+		_spec.SetField(agent.FieldGeneration, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.AddedGeneration(); ok {
+		_spec.AddField(agent.FieldGeneration, field.TypeInt, value)
+	}
+	if value, ok := _u.mutation.ReincarnationState(); ok {
+		_spec.SetField(agent.FieldReincarnationState, field.TypeString, value)
+	}
+	if _u.mutation.ReincarnationStateCleared() {
+		_spec.ClearField(agent.FieldReincarnationState, field.TypeString)
+	}
+	if value, ok := _u.mutation.ReincarnationUpdatedAt(); ok {
+		_spec.SetField(agent.FieldReincarnationUpdatedAt, field.TypeTime, value)
+	}
+	if _u.mutation.ReincarnationUpdatedAtCleared() {
+		_spec.ClearField(agent.FieldReincarnationUpdatedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.LaunchAsyncOptIn(); ok {
+		_spec.SetField(agent.FieldLaunchAsyncOptIn, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.LaunchID(); ok {
+		_spec.SetField(agent.FieldLaunchID, field.TypeString, value)
+	}
+	if _u.mutation.LaunchIDCleared() {
+		_spec.ClearField(agent.FieldLaunchID, field.TypeString)
+	}
+	if value, ok := _u.mutation.LaunchState(); ok {
+		_spec.SetField(agent.FieldLaunchState, field.TypeString, value)
+	}
+	if _u.mutation.LaunchStateCleared() {
+		_spec.ClearField(agent.FieldLaunchState, field.TypeString)
+	}
+	if value, ok := _u.mutation.LaunchEndReason(); ok {
+		_spec.SetField(agent.FieldLaunchEndReason, field.TypeString, value)
+	}
+	if _u.mutation.LaunchEndReasonCleared() {
+		_spec.ClearField(agent.FieldLaunchEndReason, field.TypeString)
+	}
+	if value, ok := _u.mutation.LaunchKind(); ok {
+		_spec.SetField(agent.FieldLaunchKind, field.TypeString, value)
+	}
+	if _u.mutation.LaunchKindCleared() {
+		_spec.ClearField(agent.FieldLaunchKind, field.TypeString)
+	}
+	if value, ok := _u.mutation.LaunchDeadline(); ok {
+		_spec.SetField(agent.FieldLaunchDeadline, field.TypeTime, value)
+	}
+	if _u.mutation.LaunchDeadlineCleared() {
+		_spec.ClearField(agent.FieldLaunchDeadline, field.TypeTime)
+	}
+	if value, ok := _u.mutation.LaunchLastReportAt(); ok {
+		_spec.SetField(agent.FieldLaunchLastReportAt, field.TypeTime, value)
+	}
+	if _u.mutation.LaunchLastReportAtCleared() {
+		_spec.ClearField(agent.FieldLaunchLastReportAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.LaunchOwner(); ok {
+		_spec.SetField(agent.FieldLaunchOwner, field.TypeString, value)
+	}
+	if _u.mutation.LaunchOwnerCleared() {
+		_spec.ClearField(agent.FieldLaunchOwner, field.TypeString)
+	}
+	if value, ok := _u.mutation.LaunchSeq(); ok {
+		_spec.SetField(agent.FieldLaunchSeq, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedLaunchSeq(); ok {
+		_spec.AddField(agent.FieldLaunchSeq, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.LaunchStep(); ok {
+		_spec.SetField(agent.FieldLaunchStep, field.TypeString, value)
+	}
+	if _u.mutation.LaunchStepCleared() {
+		_spec.ClearField(agent.FieldLaunchStep, field.TypeString)
+	}
+	if value, ok := _u.mutation.LaunchError(); ok {
+		_spec.SetField(agent.FieldLaunchError, field.TypeString, value)
+	}
+	if _u.mutation.LaunchErrorCleared() {
+		_spec.ClearField(agent.FieldLaunchError, field.TypeString)
 	}
 	if _u.mutation.ProjectCleared() {
 		edge := &sqlgraph.EdgeSpec{

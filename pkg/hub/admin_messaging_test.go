@@ -21,6 +21,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 )
 
 // newAdminMessagingServer creates a minimal Server with an OperationalSettings
@@ -432,11 +434,102 @@ func TestHandleAdminMessaging_AC97d_NullResetReturnsDefault(t *testing.T) {
 		t.Errorf("expected conversation_envelope_switch=true (null reset → compiled default ON), got %v", resp.ConversationEnvelopeSwitch)
 	}
 
-	// Verify the section was deleted from the store (absent → default path).
+	// Verify the section was reset to default (PR#1705: per-field reset writes
+	// the merged document back, so the section persists with compiled defaults).
 	store.mu.Lock()
-	_, exists := store.settings["messaging"]
+	storedSetting, exists := store.settings["messaging"]
 	store.mu.Unlock()
-	if exists {
-		t.Error("expected messaging section to be deleted after null reset, but it still exists")
+	if !exists {
+		t.Fatal("expected messaging section to exist with default values after null reset")
+	}
+	var stored opsettings.MessagingSettings
+	if err := json.Unmarshal(storedSetting.Value, &stored); err != nil {
+		t.Fatalf("failed to unmarshal stored messaging section: %v", err)
+	}
+	if stored.ConversationEnvelopeSwitch == nil {
+		t.Errorf("expected stored conversation_envelope_switch=true (compiled default), got nil")
+	} else if !*stored.ConversationEnvelopeSwitch {
+		t.Errorf("expected stored conversation_envelope_switch=true (compiled default), got false")
+	}
+}
+
+// --- ptone/scion#2257 (impl review r1 nit 7): offload_threshold_runes ---
+
+func TestHandleAdminMessaging_PutOffloadThresholdRunes(t *testing.T) {
+	srv := newAdminMessagingServer(t, newFakeHubSettingStore())
+
+	putBody := `{"offload_threshold_runes": 4000}`
+	putReq := httptest.NewRequest(http.MethodPut, "/api/v1/admin/messaging",
+		bytes.NewBufferString(putBody))
+	putReq.Header.Set("Content-Type", "application/json")
+	putReq = adminContext(putReq)
+	putRR := httptest.NewRecorder()
+	srv.handleAdminMessaging(putRR, putReq)
+
+	if putRR.Code != http.StatusOK {
+		t.Fatalf("PUT expected 200, got %d: %s", putRR.Code, putRR.Body.String())
+	}
+	var putResp messagingResponse
+	if err := json.NewDecoder(putRR.Body).Decode(&putResp); err != nil {
+		t.Fatalf("failed to decode PUT response: %v", err)
+	}
+	if putResp.OffloadThresholdRunes == nil || *putResp.OffloadThresholdRunes != 4000 {
+		t.Errorf("PUT response: expected offload_threshold_runes=4000, got %v", putResp.OffloadThresholdRunes)
+	}
+
+	// GET to verify persistence.
+	getReq := httptest.NewRequest(http.MethodGet, "/api/v1/admin/messaging", nil)
+	getReq = adminContext(getReq)
+	getRR := httptest.NewRecorder()
+	srv.handleAdminMessaging(getRR, getReq)
+	var getResp messagingResponse
+	if err := json.NewDecoder(getRR.Body).Decode(&getResp); err != nil {
+		t.Fatalf("failed to decode GET response: %v", err)
+	}
+	if getResp.OffloadThresholdRunes == nil || *getResp.OffloadThresholdRunes != 4000 {
+		t.Errorf("GET after PUT: expected offload_threshold_runes=4000, got %v", getResp.OffloadThresholdRunes)
+	}
+}
+
+func TestHandleAdminMessaging_PutOffloadThresholdRunes_NullResetReturnsZero(t *testing.T) {
+	store := newFakeHubSettingStore()
+	store.seed("messaging", json.RawMessage(`{"offload_threshold_runes":4000}`))
+	srv := newAdminMessagingServer(t, store)
+
+	putBody := `{"offload_threshold_runes": null}`
+	putReq := httptest.NewRequest(http.MethodPut, "/api/v1/admin/messaging",
+		bytes.NewBufferString(putBody))
+	putReq.Header.Set("Content-Type", "application/json")
+	putReq = adminContext(putReq)
+	putRR := httptest.NewRecorder()
+	srv.handleAdminMessaging(putRR, putReq)
+
+	if putRR.Code != http.StatusOK {
+		t.Fatalf("PUT expected 200, got %d: %s", putRR.Code, putRR.Body.String())
+	}
+	var resp messagingResponse
+	if err := json.NewDecoder(putRR.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.OffloadThresholdRunes == nil || *resp.OffloadThresholdRunes != 0 {
+		t.Errorf("expected offload_threshold_runes=0 (null reset -> compiled default), got %v", resp.OffloadThresholdRunes)
+	}
+}
+
+func TestHandleAdminMessaging_PutOffloadThresholdRunes_NegativeRejected(t *testing.T) {
+	// impl review r1 nit 7: a negative value must be rejected at the API,
+	// not silently stored and read back as 0.
+	srv := newAdminMessagingServer(t, newFakeHubSettingStore())
+
+	putBody := `{"offload_threshold_runes": -5}`
+	putReq := httptest.NewRequest(http.MethodPut, "/api/v1/admin/messaging",
+		bytes.NewBufferString(putBody))
+	putReq.Header.Set("Content-Type", "application/json")
+	putReq = adminContext(putReq)
+	putRR := httptest.NewRecorder()
+	srv.handleAdminMessaging(putRR, putReq)
+
+	if putRR.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a negative offload_threshold_runes, got %d: %s", putRR.Code, putRR.Body.String())
 	}
 }

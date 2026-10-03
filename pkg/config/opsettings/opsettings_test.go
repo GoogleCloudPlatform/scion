@@ -32,7 +32,7 @@ import (
 func TestRegistryHasAllSections(t *testing.T) {
 	expected := []string{"access", "lifecycle", "maintenance", "messaging",
 		"telemetry", "agent_defaults", "endpoints", "github_app", "notifications",
-		"project_defaults", "auto_expose_ports", "federation"}
+		"project_defaults", "auto_expose_ports", "quotas", "agent_secrets", "federation", "experiments"}
 	for _, name := range expected {
 		if SectionByName(name) == nil {
 			t.Errorf("section %q not found in registry", name)
@@ -69,6 +69,7 @@ func TestSectionHasKoanfPaths(t *testing.T) {
 	dbOnlySections := map[string]bool{
 		"maintenance": true,
 		"messaging":   true,
+		"experiments": true,
 	}
 	for _, sec := range Registry {
 		if dbOnlySections[sec.Name] {
@@ -115,6 +116,8 @@ func TestOwningSection(t *testing.T) {
 		{"server.github_app.webhooks_enabled", "github_app"},
 		{"server.notification_channels", "notifications"},
 		{"auto_expose_ports.enabled", "auto_expose_ports"},
+		{"quotas.enforce_broker_quotas", "quotas"},
+		{"agent_secrets.user_scope_only", "agent_secrets"},
 		{"server.federation.enabled", "federation"},
 		{"server.federation.trusted_issuers", "federation"},
 		{"server.federation.algorithms", "federation"},
@@ -227,9 +230,19 @@ func TestValidateValidDoc(t *testing.T) {
 		{"project_defaults", `{}`},
 		{"auto_expose_ports", `{"enabled":true}`},
 		{"auto_expose_ports", `{}`},
+		{"quotas", `{"enforce_broker_quotas":true}`},
+		{"quotas", `{"enforce_broker_quotas":false}`},
+		{"quotas", `{}`},
+		{"agent_secrets", `{"user_scope_only":true}`},
+		{"agent_secrets", `{"user_scope_only":false}`},
+		{"agent_secrets", `{}`},
 		{"federation", `{"enabled":true,"trusted_issuers":[{"issuer_url":"https://hub.example.com","issuer_type":"hub"}],"algorithms":["RS256"]}`},
 		{"federation", `{"enabled":false}`},
 		{"federation", `{}`},
+		{"federation", `{"enabled":true,"trusted_issuers":[{"issuer_url":"https://accounts.google.com","issuer_type":"user","expected_audience":"client-id","allowed_gcp_projects":["my-project"]}]}`},
+		{"federation", `{"enabled":true,"trusted_issuers":[{"issuer_url":"https://accounts.google.com","issuer_type":"user","expected_audience":"client-id","allowed_domains":["example.com"]}]}`},
+		{"harness_configs", `{"claude":{"harness":"claude","image":"scion-claude:latest","image_pull_policy":"IfNotPresent"}}`},
+		{"profiles", `{"staging":{"runtime":"docker","harness_overrides":{"claude":{"image":"scion-claude:staging","image_pull_policy":"Always"}}}}`},
 	}
 	for _, tt := range tests {
 		errs := Validate(tt.section, json.RawMessage(tt.doc))
@@ -252,10 +265,16 @@ func TestValidateInvalidDoc(t *testing.T) {
 		{"github_app", `{"app_id":"not-a-number"}`, "wrong type for int64"},
 		{"project_defaults", `{"default_scratchpad":"yes"}`, "wrong type for boolean"},
 		{"project_defaults", `{"unknown_field":true}`, "additional property"},
+		{"quotas", `{"enforce_broker_quotas":"yes"}`, "wrong type for boolean"},
+		{"quotas", `{"unknown_field":true}`, "additional property"},
+		{"agent_secrets", `{"user_scope_only":"yes"}`, "wrong type for boolean"},
+		{"agent_secrets", `{"unknown_field":true}`, "additional property"},
 		{"federation", `{"trusted_issuers":[{"issuer_url":""}]}`, "empty issuer_url (minLength)"},
 		{"federation", `{"algorithms":["INVALID"]}`, "invalid algorithm enum"},
 		{"federation", `{"trusted_issuers":[{"issuer_type":"unknown"}]}`, "invalid issuer_type enum"},
 		{"federation", `{"unknown_field": true}`, "additional property"},
+		{"harness_configs", `{"claude":{"harness":"claude","image_pull_policy":"always"}}`, "invalid image_pull_policy enum (case-sensitive)"},
+		{"profiles", `{"staging":{"runtime":"docker","harness_overrides":{"claude":{"image_pull_policy":"always"}}}}`, "invalid profile harness_overrides image_pull_policy enum"},
 	}
 	for _, tt := range tests {
 		errs := Validate(tt.section, json.RawMessage(tt.doc))
@@ -295,6 +314,13 @@ func TestFederationSettingsRoundTrip(t *testing.T) {
 				DefaultScopes:    []string{"agent:status:update"},
 				IssuerType:       "hub",
 			},
+			{
+				IssuerURL:          "https://accounts.google.com",
+				ExpectedAudience:   "client-id.apps.googleusercontent.com",
+				IssuerType:         "user",
+				AllowedGCPProjects: []string{"gcp-proj-1"},
+				AllowedDomains:     []string{"Example.com"},
+			},
 		},
 		Algorithms:       []string{"RS256"},
 		RefreshInterval:  "1h",
@@ -314,14 +340,20 @@ func TestFederationSettingsRoundTrip(t *testing.T) {
 	if *restored.Enabled != true {
 		t.Errorf("Enabled: got %v, want true", *restored.Enabled)
 	}
-	if len(restored.TrustedIssuers) != 1 {
-		t.Fatalf("TrustedIssuers: got %d, want 1", len(restored.TrustedIssuers))
+	if len(restored.TrustedIssuers) != 2 {
+		t.Fatalf("TrustedIssuers: got %d, want 2", len(restored.TrustedIssuers))
 	}
 	if restored.TrustedIssuers[0].IssuerURL != "https://hub-a.example.com" {
 		t.Errorf("IssuerURL: got %q, want %q", restored.TrustedIssuers[0].IssuerURL, "https://hub-a.example.com")
 	}
 	if restored.TrustedIssuers[0].IssuerType != "hub" {
 		t.Errorf("IssuerType: got %q, want %q", restored.TrustedIssuers[0].IssuerType, "hub")
+	}
+	if got, want := restored.TrustedIssuers[1].AllowedGCPProjects, []string{"gcp-proj-1"}; len(got) != 1 || got[0] != want[0] {
+		t.Errorf("AllowedGCPProjects: got %v, want %v", got, want)
+	}
+	if got, want := restored.TrustedIssuers[1].AllowedDomains, []string{"Example.com"}; len(got) != 1 || got[0] != want[0] {
+		t.Errorf("AllowedDomains: got %v, want %v", got, want)
 	}
 	if restored.RefreshInterval != "1h" {
 		t.Errorf("RefreshInterval: got %q, want %q", restored.RefreshInterval, "1h")
@@ -363,9 +395,10 @@ func TestExtractSectionFromKoanf(t *testing.T) {
 		"server.notification_channels": []interface{}{
 			map[string]interface{}{"type": "slack", "params": map[string]interface{}{"url": "https://hooks.slack.com/test"}},
 		},
-		"server.database.driver":    "postgres",
-		"server.hub.port":           9810,
-		"auto_expose_ports.enabled": true,
+		"server.database.driver":       "postgres",
+		"server.hub.port":              9810,
+		"auto_expose_ports.enabled":    true,
+		"quotas.enforce_broker_quotas": false,
 	}, "."), nil)
 	if err != nil {
 		t.Fatalf("load koanf: %v", err)
@@ -424,6 +457,11 @@ func TestExtractSectionFromKoanf(t *testing.T) {
 		{"auto_expose_ports", func(t *testing.T, doc map[string]interface{}) {
 			if doc["enabled"] != true {
 				t.Errorf("expected enabled=true, got %v", doc["enabled"])
+			}
+		}},
+		{"quotas", func(t *testing.T, doc map[string]interface{}) {
+			if doc["enforce_broker_quotas"] != false {
+				t.Errorf("expected enforce_broker_quotas=false, got %v", doc["enforce_broker_quotas"])
 			}
 		}},
 	}
@@ -522,9 +560,10 @@ func TestRoundTrip(t *testing.T) {
 		"server.notification_channels": []interface{}{
 			map[string]interface{}{"type": "slack"},
 		},
-		"server.database.driver":    "postgres",
-		"server.hub.port":           9810,
-		"auto_expose_ports.enabled": true,
+		"server.database.driver":       "postgres",
+		"server.hub.port":              9810,
+		"auto_expose_ports.enabled":    true,
+		"quotas.enforce_broker_quotas": false,
 	}
 	if err := k.Load(confmap.Provider(original, "."), nil); err != nil {
 		t.Fatalf("load original: %v", err)
@@ -557,6 +596,7 @@ func TestRoundTrip(t *testing.T) {
 		{"server.github_app.app_id", nil},
 		{"server.github_app.webhooks_enabled", true},
 		{"auto_expose_ports.enabled", true},
+		{"quotas.enforce_broker_quotas", false},
 	}
 
 	for _, c := range checks {
@@ -612,6 +652,33 @@ func TestRoundTripDefaultResources(t *testing.T) {
 	}
 	if settings.DefaultResources.Disk != "20Gi" {
 		t.Errorf("expected Disk=20Gi, got %q", settings.DefaultResources.Disk)
+	}
+}
+
+// The hub-default GCP identity keys must survive bootstrap extraction:
+// syncHubSettings seeds/re-syncs the agent_defaults row from this document on
+// every boot, so a key missing here is silently dropped on SQLite restart.
+func TestExtractAgentDefaults_GCPIdentityKeys(t *testing.T) {
+	k := koanf.New(".")
+	_ = k.Load(confmap.Provider(map[string]interface{}{
+		"default_gcp_identity_mode":               "assign",
+		"default_gcp_identity_service_account_id": "sa-123",
+	}, "."), nil)
+
+	raw, err := ExtractSectionFromKoanf(k, "agent_defaults")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	var settings AgentDefaultsSettings
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		t.Fatalf("unmarshal into AgentDefaultsSettings: %v", err)
+	}
+	if settings.DefaultGCPIdentityMode != "assign" {
+		t.Errorf("DefaultGCPIdentityMode = %q, want assign", settings.DefaultGCPIdentityMode)
+	}
+	if settings.DefaultGCPIdentityServiceAccountID != "sa-123" {
+		t.Errorf("DefaultGCPIdentityServiceAccountID = %q, want sa-123", settings.DefaultGCPIdentityServiceAccountID)
 	}
 }
 
@@ -884,6 +951,8 @@ func TestClassifyKeys_AllLayer0Prefixes(t *testing.T) {
 		"server.secrets",
 		"server.storage",
 		"server.workspace_storage",
+		"server.shared_dir_storage",
+		"server.shared_dir_storage.nfs",
 		"server.mode",
 		"server.env",
 		"server.hub.hub_id",
@@ -1207,6 +1276,124 @@ func TestAutoExposePortsEmptyExtract(t *testing.T) {
 	}
 }
 
+// TestQuotasKoanfRoundTrip verifies that quotas can be extracted from koanf
+// and loaded back without data loss.
+func TestQuotasKoanfRoundTrip(t *testing.T) {
+	k := koanf.New(".")
+	err := k.Load(confmap.Provider(map[string]interface{}{
+		"quotas.enforce_broker_quotas": false,
+	}, "."), nil)
+	if err != nil {
+		t.Fatalf("load koanf: %v", err)
+	}
+
+	// Extract the section.
+	raw, err := ExtractSectionFromKoanf(k, "quotas")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	var doc map[string]interface{}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if doc["enforce_broker_quotas"] != false {
+		t.Errorf("expected enforce_broker_quotas=false in extracted doc, got %v", doc["enforce_broker_quotas"])
+	}
+
+	// Reload into a fresh koanf.
+	sections := map[string]json.RawMessage{
+		"quotas": raw,
+	}
+	reloaded, err := LoadSectionsIntoKoanf(sections)
+	if err != nil {
+		t.Fatalf("load sections: %v", err)
+	}
+
+	if !reloaded.Exists("quotas.enforce_broker_quotas") {
+		t.Fatal("expected quotas.enforce_broker_quotas to exist in reloaded koanf")
+	}
+	if reloaded.Bool("quotas.enforce_broker_quotas") != false {
+		t.Errorf("expected quotas.enforce_broker_quotas=false, got %v", reloaded.Get("quotas.enforce_broker_quotas"))
+	}
+}
+
+// TestQuotasEmptyExtract verifies that ExtractSectionFromKoanf returns an
+// empty doc when quotas is not set.
+func TestQuotasEmptyExtract(t *testing.T) {
+	k := koanf.New(".")
+	raw, err := ExtractSectionFromKoanf(k, "quotas")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	var doc map[string]interface{}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(doc) != 0 {
+		t.Errorf("expected empty doc for absent quotas, got %v", doc)
+	}
+}
+
+// TestAgentSecretsKoanfRoundTrip verifies that agent_secrets can be
+// extracted from koanf and loaded back without data loss.
+func TestAgentSecretsKoanfRoundTrip(t *testing.T) {
+	k := koanf.New(".")
+	err := k.Load(confmap.Provider(map[string]interface{}{
+		"agent_secrets.user_scope_only": true,
+	}, "."), nil)
+	if err != nil {
+		t.Fatalf("load koanf: %v", err)
+	}
+
+	// Extract the section.
+	raw, err := ExtractSectionFromKoanf(k, "agent_secrets")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	var doc map[string]interface{}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if doc["user_scope_only"] != true {
+		t.Errorf("expected user_scope_only=true in extracted doc, got %v", doc["user_scope_only"])
+	}
+
+	// Reload into a fresh koanf.
+	sections := map[string]json.RawMessage{
+		"agent_secrets": raw,
+	}
+	reloaded, err := LoadSectionsIntoKoanf(sections)
+	if err != nil {
+		t.Fatalf("load sections: %v", err)
+	}
+
+	if !reloaded.Exists("agent_secrets.user_scope_only") {
+		t.Fatal("expected agent_secrets.user_scope_only to exist in reloaded koanf")
+	}
+	if reloaded.Bool("agent_secrets.user_scope_only") != true {
+		t.Errorf("expected agent_secrets.user_scope_only=true, got %v", reloaded.Get("agent_secrets.user_scope_only"))
+	}
+}
+
+// TestAgentSecretsEmptyExtract verifies that ExtractSectionFromKoanf returns
+// an empty doc when agent_secrets is not set.
+func TestAgentSecretsEmptyExtract(t *testing.T) {
+	k := koanf.New(".")
+	raw, err := ExtractSectionFromKoanf(k, "agent_secrets")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	var doc map[string]interface{}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(doc) != 0 {
+		t.Errorf("expected empty doc for absent agent_secrets, got %v", doc)
+	}
+}
+
 // TestRuntimesKoanfRoundTrip verifies that runtimes can be extracted from
 // koanf and loaded back without data loss (map-of-objects section).
 func TestRuntimesKoanfRoundTrip(t *testing.T) {
@@ -1428,6 +1615,26 @@ func TestMapSectionsSchemaValidation(t *testing.T) {
 	errs := Validate("runtimes", json.RawMessage(`{"docker": {"type": "docker"}}`))
 	if len(errs) > 0 {
 		t.Errorf("expected valid runtimes doc, got errors: %v", errs)
+	}
+
+	// Valid priority_class_name on a kubernetes runtime entry.
+	errs = Validate("runtimes", json.RawMessage(`{"k8s": {"type": "kubernetes", "priority_class_name": "scion-agent-priority"}}`))
+	if len(errs) > 0 {
+		t.Errorf("expected valid priority_class_name to pass, got errors: %v", errs)
+	}
+
+	// An empty priority_class_name means unset and must also pass — this
+	// route (the admin settings API) has no DNS-1123 check of its own
+	// before buildPod, so the schema is the only gate.
+	errs = Validate("runtimes", json.RawMessage(`{"k8s": {"type": "kubernetes", "priority_class_name": ""}}`))
+	if len(errs) > 0 {
+		t.Errorf("expected empty priority_class_name to pass, got errors: %v", errs)
+	}
+
+	// Invalid priority_class_name must fail.
+	errs = Validate("runtimes", json.RawMessage(`{"k8s": {"type": "kubernetes", "priority_class_name": "Not_A_Valid_Name"}}`))
+	if len(errs) == 0 {
+		t.Error("expected invalid priority_class_name to fail validation")
 	}
 
 	// Valid profiles doc.

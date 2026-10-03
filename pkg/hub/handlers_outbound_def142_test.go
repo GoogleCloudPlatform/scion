@@ -341,12 +341,11 @@ func TestDEF142_AC3_NotFound_vs_NotParticipant_ByteIdentical(t *testing.T) {
 	// (def138-agent) is NOT a participant.
 	otherAgentID := tid("d142-ac3-other-agent")
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-		ID:         otherAgentID,
-		Name:       "d142-ac3-other",
-		Slug:       "d142-ac3-other",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        otherAgentID,
+		Name:      "d142-ac3-other",
+		Slug:      "d142-ac3-other",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}))
 	otherUserID := tid("d142-ac3-other-user")
 	require.NoError(t, s.CreateUser(ctx, &store.User{
@@ -502,13 +501,23 @@ func TestDEF164_AtAgentSlug_DeliversToAgent(t *testing.T) {
 	srv, s, project, agent, _ := def141BrokerSetup(t)
 	ctx := context.Background()
 
+	brokerID := tid("d164-broker")
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID:     brokerID,
+		Name:   "d164-broker",
+		Slug:   "d164-broker",
+		Status: store.BrokerStatusOnline,
+	}))
+	dispatcher := &brokerMockDispatcher{}
+	srv.SetDispatcher(dispatcher)
+
 	targetAgent := &store.Agent{
-		ID:         tid("d164-target-agent"),
-		Name:       "d164-target-agent",
-		Slug:       "d164-target-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:              tid("d164-target-agent"),
+		Name:            "d164-target-agent",
+		Slug:            "d164-target-agent",
+		ProjectID:       project.ID,
+		Phase:           "running",
+		RuntimeBrokerID: brokerID,
 	}
 	require.NoError(t, s.CreateAgent(ctx, targetAgent))
 
@@ -519,6 +528,17 @@ func TestDEF164_AtAgentSlug_DeliversToAgent(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code,
 		"DEF-164: @agent-slug on outbound endpoint must succeed: %s",
 		rr.Body.String())
+
+	// Verify the mock dispatcher was actually invoked for the target agent,
+	// not merely that persistence succeeded. Dispatch (agent_dm_operation.go
+	// step 11) runs synchronously before the HTTP response is written, so no
+	// wait is needed.
+	dispatched := dispatcher.getMessages()
+	require.Len(t, dispatched, 1, "dispatcher must be invoked exactly once")
+	assert.Equal(t, targetAgent.Slug, dispatched[0].agentSlug,
+		"dispatched message must target the resolved agent")
+	assert.Equal(t, "hello agent", dispatched[0].msg,
+		"dispatched message text must match the outbound request")
 
 	// Verify the response contains a message_id and correct recipient.
 	var resp map[string]interface{}
@@ -551,13 +571,23 @@ func TestDEF164_AtAgentSlug_DMConversationCreated(t *testing.T) {
 	srv, s, project, agent, _ := def141BrokerSetup(t)
 	ctx := context.Background()
 
+	brokerID := tid("d164-dm-broker")
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID:     brokerID,
+		Name:   "d164-dm-broker",
+		Slug:   "d164-dm-broker",
+		Status: store.BrokerStatusOnline,
+	}))
+	dispatcher := &brokerMockDispatcher{}
+	srv.SetDispatcher(dispatcher)
+
 	targetAgent := &store.Agent{
-		ID:         tid("d164-dm-target"),
-		Name:       "d164-dm-target",
-		Slug:       "d164-dm-target",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:              tid("d164-dm-target"),
+		Name:            "d164-dm-target",
+		Slug:            "d164-dm-target",
+		ProjectID:       project.ID,
+		Phase:           "running",
+		RuntimeBrokerID: brokerID,
 	}
 	require.NoError(t, s.CreateAgent(ctx, targetAgent))
 
@@ -565,6 +595,13 @@ func TestDEF164_AtAgentSlug_DMConversationCreated(t *testing.T) {
 		"dm conv test", "@"+targetAgent.Slug)
 	require.Equal(t, http.StatusOK, rr.Code,
 		"delivery must succeed: %s", rr.Body.String())
+
+	// Verify the mock dispatcher was actually invoked for the target agent,
+	// not merely that persistence succeeded.
+	dispatched := dispatcher.getMessages()
+	require.Len(t, dispatched, 1, "dispatcher must be invoked exactly once")
+	assert.Equal(t, targetAgent.Slug, dispatched[0].agentSlug,
+		"dispatched message must target the resolved agent")
 
 	// Verify the DM conversation was created with correct key format.
 	var resp map[string]interface{}
@@ -633,12 +670,11 @@ func TestDEF142_AC7_ConversationRef_ThroughRealMux(t *testing.T) {
 	require.NoError(t, s.CreateUser(ctx, user))
 
 	agent := &store.Agent{
-		ID:         tid("d142-ac7-agent"),
-		Name:       "d142-ac7-agent",
-		Slug:       "d142-ac7-agent",
-		ProjectID:  project.ID,
-		Phase:      "running",
-		Visibility: store.VisibilityPrivate,
+		ID:        tid("d142-ac7-agent"),
+		Name:      "d142-ac7-agent",
+		Slug:      "d142-ac7-agent",
+		ProjectID: project.ID,
+		Phase:     "running",
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 

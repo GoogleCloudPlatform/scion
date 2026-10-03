@@ -63,6 +63,8 @@ func init() {
 }
 
 func runMigrateStorage(cmd *cobra.Command, _ []string) error {
+	pinProcessUTC()
+
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 
@@ -87,7 +89,7 @@ func runMigrateStorage(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("storage bucket is required; set storage.bucket in config or --storage-bucket flag")
 	}
 
-	_, _ = fmt.Fprintf(out, "Opening database: %s (%s)\n", cfg.Database.Driver, cfg.Database.URL)
+	_, _ = fmt.Fprintf(out, "Opening database: %s (%s)\n", cfg.Database.Driver, config.RedactDatabaseURL(cfg.Database.Driver, cfg.Database.URL))
 	var s *entadapter.CompositeStore
 	switch cfg.Database.Driver {
 	case "sqlite":

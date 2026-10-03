@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -185,10 +186,12 @@ func TestAuthenticatedBrokerClient_StartAgent(t *testing.T) {
 	// Create a test server
 	var receivedPath string
 	var receivedMethod string
+	var receivedBody []byte
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedPath = r.URL.Path
 		receivedMethod = r.Method
+		receivedBody, _ = io.ReadAll(r.Body)
 
 		// Verify signature is present
 		if r.Header.Get(apiclient.HeaderSignature) == "" {
@@ -210,8 +213,15 @@ func TestAuthenticatedBrokerClient_StartAgent(t *testing.T) {
 	// Create authenticated client
 	client := NewAuthenticatedBrokerClient(db, false)
 
-	// Make request
-	resp, err := client.StartAgent(context.Background(), brokerID, server.URL, "my-agent", "", "", "", "", "", nil, nil, nil, nil, false, false)
+	// Make request, including a Workspace payload (GoogleCloudPlatform/scion#1931)
+	// to prove this pass-through layer doesn't drop it.
+	extras := StartExtras{
+		Workspace: WorkspaceDispatchSpec{
+			Branch:        "feature-branch",
+			WorkspaceMode: "worktree-per-agent",
+		},
+	}
+	resp, err := client.StartAgent(context.Background(), brokerID, server.URL, "my-agent", "", "", "", "", "", "", "", nil, nil, nil, nil, false, false, extras)
 	if err != nil {
 		t.Fatalf("StartAgent failed: %v", err)
 	}
@@ -222,6 +232,17 @@ func TestAuthenticatedBrokerClient_StartAgent(t *testing.T) {
 
 	if receivedPath != "/api/v1/agents/my-agent/start" {
 		t.Errorf("wrong path: got %s, want /api/v1/agents/my-agent/start", receivedPath)
+	}
+
+	var wire map[string]interface{}
+	if err := json.Unmarshal(receivedBody, &wire); err != nil {
+		t.Fatalf("failed to unmarshal request body %s: %v", receivedBody, err)
+	}
+	if wire["branch"] != "feature-branch" {
+		t.Errorf("expected wire branch=%q, got %v", "feature-branch", wire["branch"])
+	}
+	if wire["workspaceMode"] != "worktree-per-agent" {
+		t.Errorf("expected wire workspaceMode=%q, got %v", "worktree-per-agent", wire["workspaceMode"])
 	}
 
 	if resp == nil || resp.Agent == nil {
@@ -404,7 +425,7 @@ func TestAuthenticatedBrokerClient_StartAgent_InvalidJSONFails(t *testing.T) {
 	defer server.Close()
 
 	client := NewAuthenticatedBrokerClient(db, false)
-	_, err = client.StartAgent(context.Background(), brokerID, server.URL, tid("agent-1"), "", "", "", "", "", nil, nil, nil, nil, false, false)
+	_, err = client.StartAgent(context.Background(), brokerID, server.URL, tid("agent-1"), "", "", "", "", "", "", "", nil, nil, nil, nil, false, false, StartExtras{})
 	if err == nil {
 		t.Fatal("expected StartAgent to fail on invalid JSON response")
 	}
@@ -492,7 +513,7 @@ func TestAuthenticatedBrokerClient_AllOperations(t *testing.T) {
 		t.Errorf("CreateAgent failed: %v", err)
 	}
 
-	_, err = client.StartAgent(ctx, brokerID, server.URL, "test-agent", "", "", "", "", "", nil, nil, nil, nil, false, false)
+	_, err = client.StartAgent(ctx, brokerID, server.URL, "test-agent", "", "", "", "", "", "", "", nil, nil, nil, nil, false, false, StartExtras{})
 	if err != nil {
 		t.Errorf("StartAgent failed: %v", err)
 	}
@@ -502,7 +523,7 @@ func TestAuthenticatedBrokerClient_AllOperations(t *testing.T) {
 		t.Errorf("StopAgent failed: %v", err)
 	}
 
-	err = client.RestartAgent(ctx, brokerID, server.URL, "test-agent", "", nil)
+	err = client.RestartAgent(ctx, brokerID, server.URL, "test-agent", "", nil, StartExtras{})
 	if err != nil {
 		t.Errorf("RestartAgent failed: %v", err)
 	}

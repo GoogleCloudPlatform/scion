@@ -169,7 +169,7 @@ func TestImageStatusHandler_SingleReachableBroker(t *testing.T) {
 
 	req := imageStatusRequest(http.MethodGet, "/api/v1/harness-configs/"+hc.ID+"/image-status")
 	rr := httptest.NewRecorder()
-	srv.handleHarnessConfigImageStatus(rr, req, hc.ID)
+	srv.handleHarnessConfigImageStatus(rr, req, hc)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
@@ -205,7 +205,7 @@ func TestImageStatusHandler_UnreachableBroker(t *testing.T) {
 
 	req := imageStatusRequest(http.MethodGet, "/api/v1/harness-configs/"+hc.ID+"/image-status")
 	rr := httptest.NewRecorder()
-	srv.handleHarnessConfigImageStatus(rr, req, hc.ID)
+	srv.handleHarnessConfigImageStatus(rr, req, hc)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
@@ -241,7 +241,7 @@ func TestImageStatusHandler_OldBroker404(t *testing.T) {
 
 	req := imageStatusRequest(http.MethodGet, "/api/v1/harness-configs/"+hc.ID+"/image-status")
 	rr := httptest.NewRecorder()
-	srv.handleHarnessConfigImageStatus(rr, req, hc.ID)
+	srv.handleHarnessConfigImageStatus(rr, req, hc)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
@@ -278,7 +278,7 @@ func TestImageStatusHandler_NoNodeBoundBrokers(t *testing.T) {
 
 	req := imageStatusRequest(http.MethodGet, "/api/v1/harness-configs/"+hc.ID+"/image-status")
 	rr := httptest.NewRecorder()
-	srv.handleHarnessConfigImageStatus(rr, req, hc.ID)
+	srv.handleHarnessConfigImageStatus(rr, req, hc)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
@@ -326,7 +326,7 @@ func TestImageStatusHandler_ProxyBrokersWithLocalImageManager(t *testing.T) {
 
 	req := imageStatusRequest(http.MethodGet, "/api/v1/harness-configs/"+hc.ID+"/image-status")
 	rr := httptest.NewRecorder()
-	srv.handleHarnessConfigImageStatus(rr, req, hc.ID)
+	srv.handleHarnessConfigImageStatus(rr, req, hc)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
@@ -370,7 +370,7 @@ func TestImageStatusHandler_BareImageCheck(t *testing.T) {
 
 	req := imageStatusRequest(http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/check-image")
 	rr := httptest.NewRecorder()
-	srv.handleHarnessConfigCheckImage(rr, req, hc.ID)
+	srv.handleHarnessConfigCheckImage(rr, req, hc)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
@@ -411,7 +411,7 @@ func TestImageStatusHandler_MultipleBrokersMixed(t *testing.T) {
 
 	req := imageStatusRequest(http.MethodGet, "/api/v1/harness-configs/"+hc.ID+"/image-status")
 	rr := httptest.NewRecorder()
-	srv.handleHarnessConfigImageStatus(rr, req, hc.ID)
+	srv.handleHarnessConfigImageStatus(rr, req, hc)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())

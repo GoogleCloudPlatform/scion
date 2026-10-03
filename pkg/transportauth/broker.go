@@ -53,9 +53,14 @@ func ResolveBrokerTransport(transportMode, transportAudience string, adcNew ADCS
 
 	headerMode := ModeFromString(mode)
 
-	// Prefer the metadata server when on GCE.
+	// Prefer the metadata server when on GCE. SCION_METADATA_MODE is normally
+	// unset in the broker's own host environment (it is a per-agent-container
+	// signal set by pkg/runtimebroker/start_context.go, not something the
+	// broker process itself runs under), but using the same
+	// IsMetadataRedirected check as the agent-facing paths keeps this
+	// function consistent with them if that ever changes.
 	if IsOnGCEFunc() {
-		if metaMode := os.Getenv(EnvMetadataMode); metaMode == "" {
+		if metaMode := os.Getenv(EnvMetadataMode); !IsMetadataRedirected(metaMode) {
 			return NewMetadataSource(audience), headerMode, nil
 		}
 	}

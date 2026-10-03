@@ -15,6 +15,7 @@
 package config
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -472,6 +473,257 @@ hub:
 	})
 }
 
+// TestAgentEndpointConfiguration tests the optional server.hub.agent_endpoint
+// override: it is empty by default, loadable from settings.yaml (v1,
+// snake_case), from legacy server.yaml (camelCase), and overridable via
+// SCION_SERVER_HUB_AGENTENDPOINT — independently of Hub.Endpoint.
+func TestAgentEndpointConfiguration(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Run("default is empty", func(t *testing.T) {
+		cfg := DefaultGlobalConfig()
+		if cfg.Hub.AgentEndpoint != "" {
+			t.Errorf("expected Hub.AgentEndpoint to be empty by default, got %q", cfg.Hub.AgentEndpoint)
+		}
+	})
+
+	t.Run("from settings.yaml", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("HOME", tmpDir)
+		configPath := filepath.Join(tmpDir, "settings.yaml")
+
+		configContent := `
+schema_version: "1"
+server:
+  hub:
+    public_url: "https://hub.example.com"
+    agent_endpoint: "http://192.0.2.10:8080"
+`
+		if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+			t.Fatalf("failed to write config file: %v", err)
+		}
+
+		cfg, err := LoadGlobalConfig(configPath)
+		if err != nil {
+			t.Fatalf("failed to load config: %v", err)
+		}
+
+		if cfg.Hub.Endpoint != "https://hub.example.com" {
+			t.Errorf("expected Hub.Endpoint 'https://hub.example.com', got %q", cfg.Hub.Endpoint)
+		}
+		if cfg.Hub.AgentEndpoint != "http://192.0.2.10:8080" {
+			t.Errorf("expected Hub.AgentEndpoint 'http://192.0.2.10:8080', got %q", cfg.Hub.AgentEndpoint)
+		}
+	})
+
+	t.Run("from legacy server.yaml", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("HOME", tmpDir)
+		configPath := filepath.Join(tmpDir, "server.yaml")
+
+		configContent := `
+hub:
+  endpoint: "https://hub.example.com"
+  agentEndpoint: "http://192.0.2.10:8080"
+`
+		if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+			t.Fatalf("failed to write config file: %v", err)
+		}
+
+		cfg, err := LoadGlobalConfig(configPath)
+		if err != nil {
+			t.Fatalf("failed to load config: %v", err)
+		}
+
+		if cfg.Hub.AgentEndpoint != "http://192.0.2.10:8080" {
+			t.Errorf("expected Hub.AgentEndpoint 'http://192.0.2.10:8080', got %q", cfg.Hub.AgentEndpoint)
+		}
+	})
+
+	t.Run("from environment variable, independent of Hub.Endpoint", func(t *testing.T) {
+		t.Setenv("SCION_SERVER_HUB_ENDPOINT", "https://hub.example.com")
+		t.Setenv("SCION_SERVER_HUB_AGENTENDPOINT", "http://192.0.2.10:8080")
+
+		cfg, err := LoadGlobalConfig("")
+		if err != nil {
+			t.Fatalf("failed to load config: %v", err)
+		}
+
+		if cfg.Hub.Endpoint != "https://hub.example.com" {
+			t.Errorf("expected Hub.Endpoint 'https://hub.example.com', got %q", cfg.Hub.Endpoint)
+		}
+		if cfg.Hub.AgentEndpoint != "http://192.0.2.10:8080" {
+			t.Errorf("expected Hub.AgentEndpoint 'http://192.0.2.10:8080', got %q", cfg.Hub.AgentEndpoint)
+		}
+	})
+
+	t.Run("environment variable overrides settings.yaml", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		t.Setenv("HOME", tmpDir)
+		configPath := filepath.Join(tmpDir, "settings.yaml")
+
+		configContent := `
+schema_version: "1"
+server:
+  hub:
+    agent_endpoint: "http://192.0.2.20:8080"
+`
+		if err := os.WriteFile(configPath, []byte(configContent), 0644); err != nil {
+			t.Fatalf("failed to write config file: %v", err)
+		}
+		t.Setenv("SCION_SERVER_HUB_AGENTENDPOINT", "http://192.0.2.10:8080")
+
+		cfg, err := LoadGlobalConfig(configPath)
+		if err != nil {
+			t.Fatalf("failed to load config: %v", err)
+		}
+
+		if cfg.Hub.AgentEndpoint != "http://192.0.2.10:8080" {
+			t.Errorf("expected env var to win over settings.yaml, got %q", cfg.Hub.AgentEndpoint)
+		}
+	})
+}
+
+// TestValidateAgentEndpoint covers the startup validation for
+// server.hub.agent_endpoint: unset is fine, set values must be absolute
+// http(s) URLs naming only a host and optional port, and valid values come
+// back normalized (lowercase scheme, scheme://host[:port], no path).
+func TestValidateAgentEndpoint(t *testing.T) {
+	tests := []struct {
+		name           string
+		input          string
+		wantErr        bool
+		wantErrContain string // when set, asserted as a substring of the error
+		wantNormalized string
+	}{
+		{name: "empty is valid (feature disabled)", input: "", wantErr: false, wantNormalized: ""},
+		{name: "valid http URL", input: "http://192.0.2.10:8080", wantErr: false, wantNormalized: "http://192.0.2.10:8080"},
+		{name: "valid https URL", input: "https://hub-internal.example.com", wantErr: false, wantNormalized: "https://hub-internal.example.com"},
+		{name: "invalid scheme", input: "ftp://hub.example.com", wantErr: true},
+		{name: "missing scheme", input: "hub.example.com", wantErr: true},
+		{name: "relative path", input: "/invite", wantErr: true},
+		{name: "empty host", input: "http://", wantErr: true},
+		{name: "scheme with no host, just a path", input: "http:///path", wantErr: true},
+		{name: "port only, no host", input: "http://:8080", wantErr: true},
+		{name: "port only, no host, trailing slash", input: "http://:8080/", wantErr: true},
+		{name: "userinfo", input: "http://user:pass@hub.example.com", wantErr: true},
+		{name: "query string", input: "http://hub.example.com?x=1", wantErr: true},
+		{name: "fragment", input: "http://hub.example.com#frag", wantErr: true},
+		{name: "path beyond root", input: "http://hub.example.com/some/path", wantErr: true},
+		{name: "port out of range", input: "http://hub.example.com:99999", wantErr: true},
+		{name: "port zero", input: "http://hub.example.com:0", wantErr: true},
+		{name: "port at the top of the valid range", input: "http://hub.example.com:65535", wantErr: false, wantNormalized: "http://hub.example.com:65535"},
+		{name: "port one above the valid range", input: "http://hub.example.com:65536", wantErr: true},
+		{name: "wildcard host", input: "https://*.example.com", wantErr: true},
+		{name: "uppercase scheme normalizes to lowercase", input: "HTTP://hub.example.com", wantErr: false, wantNormalized: "http://hub.example.com"},
+		{name: "trailing slash is stripped", input: "http://hub.example.com/", wantErr: false, wantNormalized: "http://hub.example.com"},
+		{name: "IPv6 literal with port", input: "http://[::1]:8080", wantErr: false, wantNormalized: "http://[::1]:8080"},
+		{name: "IPv6 literal without port gets bracketed", input: "http://[::1]", wantErr: false, wantNormalized: "http://[::1]"},
+		{name: "empty port after trailing colon is dropped", input: "http://hub.example.com:", wantErr: false, wantNormalized: "http://hub.example.com"},
+		{name: "leading zeros in the port are dropped", input: "http://hub.example.com:08080", wantErr: false, wantNormalized: "http://hub.example.com:8080"},
+		{name: "IPv6 zone is rejected", input: "http://[fe80::1%25eth0]:8080", wantErr: true, wantErrContain: "IPv6 zone"},
+		{name: "host with semicolon is rejected", input: "http://h;x", wantErr: true},
+		{name: "host with exclamation mark is rejected", input: "http://h!x", wantErr: true},
+		{name: "underscore in a single-label host is accepted", input: "http://scion_hub:8080", wantErr: false, wantNormalized: "http://scion_hub:8080"},
+		{name: "underscore mid-label is accepted", input: "http://h_x", wantErr: false, wantNormalized: "http://h_x"},
+		{name: "hyphenated multi-label host is accepted", input: "http://hub-internal.example.com:8080", wantErr: false, wantNormalized: "http://hub-internal.example.com:8080"},
+		{name: "single trailing dot (FQDN) is accepted", input: "http://hub.example.com.", wantErr: false, wantNormalized: "http://hub.example.com."},
+		{name: "label starting with hyphen is rejected", input: "http://-h", wantErr: true},
+		{name: "label ending with hyphen is rejected", input: "http://h-", wantErr: true},
+		{name: "empty label from a doubled dot is rejected", input: "http://h..x", wantErr: true},
+		{name: "two trailing dots are rejected", input: "http://h..", wantErr: true},
+		{name: "empty leading label is rejected", input: "http://.h", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ValidateAgentEndpoint(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("ValidateAgentEndpoint(%q): expected error, got nil (normalized %q)", tt.input, got)
+					return
+				}
+				if tt.wantErrContain != "" && !strings.Contains(err.Error(), tt.wantErrContain) {
+					t.Errorf("ValidateAgentEndpoint(%q) error = %q, want it to contain %q", tt.input, err.Error(), tt.wantErrContain)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("ValidateAgentEndpoint(%q): unexpected error: %v", tt.input, err)
+				return
+			}
+			if got != tt.wantNormalized {
+				t.Errorf("ValidateAgentEndpoint(%q) = %q, want %q", tt.input, got, tt.wantNormalized)
+			}
+			if got == "" {
+				return
+			}
+			reparsed, err := url.Parse(got)
+			if err != nil {
+				t.Fatalf("normalized form %q does not re-parse: %v", got, err)
+			}
+			original, err := url.Parse(tt.input)
+			if err != nil {
+				t.Fatalf("test input %q unexpectedly failed to parse: %v", tt.input, err)
+			}
+			if reparsed.Scheme != strings.ToLower(original.Scheme) {
+				t.Errorf("normalized form %q re-parses to scheme %q, want %q", got, reparsed.Scheme, strings.ToLower(original.Scheme))
+			}
+			if reparsed.Host != original.Host && reparsed.Hostname() != original.Hostname() {
+				t.Errorf("normalized form %q re-parses to host %q, want it to match input host %q", got, reparsed.Host, original.Host)
+			}
+		})
+	}
+}
+
+// TestValidateAgentEndpoint_ErrorsNeverEchoValue proves that no rejected
+// value — including a credential in userinfo, an opaque or scheme-less body,
+// a path, query, fragment, or IPv6-zone segment, an invalid host character, a
+// parse failure, an out-of-range port, or the scheme itself (which could be a
+// leaked username or secret) — ever appears in the returned error, so a
+// credential an operator pastes into the setting by mistake is not echoed
+// back into the startup log or an admin API response.
+func TestValidateAgentEndpoint_ErrorsNeverEchoValue(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		secrets []string // substrings that must not appear anywhere in the error
+	}{
+		{name: "hierarchical URL with userinfo", input: "http://someuser:supersecret@hub.example.com", secrets: []string{"someuser", "supersecret"}},
+		{name: "scheme-less opaque value", input: "someuser:supersecret@10.0.0.1:8080", secrets: []string{"someuser", "supersecret"}},
+		{name: "opaque value with a colon-separated word as scheme", input: "someuser:supersecret@host", secrets: []string{"someuser", "supersecret"}},
+		{name: "http scheme with an opaque, host-less body", input: "http:someuser:supersecret@host", secrets: []string{"someuser", "supersecret"}},
+		{name: "single-slash hierarchical value: credentials land in Path", input: "http:/admin:secret@h", secrets: []string{"secret"}},
+		{name: "empty-authority hierarchical value: credentials land in Path", input: "http:///admin:secret@h", secrets: []string{"secret"}},
+		{name: "credentials in an ordinary path segment", input: "http://h/admin:secret", secrets: []string{"secret"}},
+		{name: "credentials in a query value", input: "http://h?token=secret", secrets: []string{"secret"}},
+		{name: "credentials plus a parse failure from a bad port", input: "http://someuser:supersecret@hub.example.com:bad", secrets: []string{"someuser", "supersecret"}},
+		{name: "credentials plus a parse failure from bad percent-encoding", input: "http://someuser:supersecret@h%zz", secrets: []string{"someuser", "supersecret"}},
+		{name: "credentials with a non-http(s) scheme", input: "ftp://someuser:supersecret@hub.example.com", secrets: []string{"someuser", "supersecret"}},
+		{name: "secret-like word before a single slash", input: "u:/secret@h", secrets: []string{"secret", "u:"}},
+		{name: "secret-like word used as the scheme itself", input: "secret://h", secrets: []string{"secret"}},
+		{name: "username-like word used as the scheme, with a secret in the path", input: "admin:/secret@h", secrets: []string{"admin", "secret"}},
+		{name: "secret in the fragment", input: "http://h#secret", secrets: []string{"secret"}},
+		{name: "secret in the IPv6 zone", input: "http://[fe80::1%25secret]", secrets: []string{"secret"}},
+		{name: "secret-like word rejected by the hostname charset check", input: "http://se*cret", secrets: []string{"se*cret"}},
+		{name: "secret-like host with an out-of-range port", input: "http://admin:123456", secrets: []string{"admin", "123456"}},
+		{name: "digits-only port with an empty host", input: "http://:123456", secrets: []string{"123456"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ValidateAgentEndpoint(tt.input)
+			if err == nil {
+				t.Fatalf("ValidateAgentEndpoint(%q): expected an error", tt.input)
+			}
+			msg := err.Error()
+			for _, secret := range tt.secrets {
+				if strings.Contains(msg, secret) {
+					t.Errorf("ValidateAgentEndpoint(%q): error must not echo %q, got: %s", tt.input, secret, msg)
+				}
+			}
+		})
+	}
+}
+
 // TestRuntimeBrokerHubEndpointConfiguration tests RuntimeBroker hubEndpoint config.
 // This relates to Fix 4/6 in progress-report.md: RuntimeBroker hub endpoint configuration.
 func TestRuntimeBrokerHubEndpointConfiguration(t *testing.T) {
@@ -734,6 +986,94 @@ hub:
 	_, found := loadServerFromSettingsFile(dir)
 	if found {
 		t.Fatal("expected not to find server config in settings.yaml")
+	}
+}
+
+func TestLoadServerFromSettingsFile_QuotasEnforceBrokerQuotas(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.yaml")
+	err := os.WriteFile(settingsPath, []byte(`schema_version: "1"
+server:
+  hub:
+    port: 9810
+quotas:
+  enforce_broker_quotas: false
+`), 0644)
+	if err != nil {
+		t.Fatalf("failed to write settings.yaml: %v", err)
+	}
+
+	gc, found := loadServerFromSettingsFile(dir)
+	if !found {
+		t.Fatal("expected to find server config in settings.yaml")
+	}
+	if gc.EnforceBrokerQuotas == nil || *gc.EnforceBrokerQuotas != false {
+		t.Errorf("expected EnforceBrokerQuotas=false, got %v", gc.EnforceBrokerQuotas)
+	}
+}
+
+func TestLoadServerFromSettingsFile_QuotasAbsent(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.yaml")
+	err := os.WriteFile(settingsPath, []byte(`schema_version: "1"
+server:
+  hub:
+    port: 9810
+`), 0644)
+	if err != nil {
+		t.Fatalf("failed to write settings.yaml: %v", err)
+	}
+
+	gc, found := loadServerFromSettingsFile(dir)
+	if !found {
+		t.Fatal("expected to find server config in settings.yaml")
+	}
+	if gc.EnforceBrokerQuotas != nil {
+		t.Errorf("expected EnforceBrokerQuotas=nil when absent, got %v", *gc.EnforceBrokerQuotas)
+	}
+}
+
+func TestLoadServerFromSettingsFile_AgentSecretsUserScopeOnly(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.yaml")
+	err := os.WriteFile(settingsPath, []byte(`schema_version: "1"
+server:
+  hub:
+    port: 9810
+agent_secrets:
+  user_scope_only: true
+`), 0644)
+	if err != nil {
+		t.Fatalf("failed to write settings.yaml: %v", err)
+	}
+
+	gc, found := loadServerFromSettingsFile(dir)
+	if !found {
+		t.Fatal("expected to find server config in settings.yaml")
+	}
+	if gc.AgentSecretsUserScopeOnly == nil || *gc.AgentSecretsUserScopeOnly != true {
+		t.Errorf("expected AgentSecretsUserScopeOnly=true, got %v", gc.AgentSecretsUserScopeOnly)
+	}
+}
+
+func TestLoadServerFromSettingsFile_AgentSecretsAbsent(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, "settings.yaml")
+	err := os.WriteFile(settingsPath, []byte(`schema_version: "1"
+server:
+  hub:
+    port: 9810
+`), 0644)
+	if err != nil {
+		t.Fatalf("failed to write settings.yaml: %v", err)
+	}
+
+	gc, found := loadServerFromSettingsFile(dir)
+	if !found {
+		t.Fatal("expected to find server config in settings.yaml")
+	}
+	if gc.AgentSecretsUserScopeOnly != nil {
+		t.Errorf("expected AgentSecretsUserScopeOnly=nil when absent, got %v", *gc.AgentSecretsUserScopeOnly)
 	}
 }
 
@@ -1003,5 +1343,265 @@ func TestResolveHubIDFromEnv_WorkstationFallback(t *testing.T) {
 	expected := DefaultHubID()
 	if id != expected {
 		t.Errorf("ResolveHubIDFromEnv() = %q on workstation, want %q", id, expected)
+	}
+}
+
+// TestResolveHubIDFromEnvReadOnly covers ResolveHubIDFromEnvReadOnly
+// directly (ptone/scion#2152 round-5 review nit 5): previously it was only
+// exercised indirectly through cmd's migrate-names tests.
+func TestResolveHubIDFromEnvReadOnly(t *testing.T) {
+	cases := []struct {
+		name          string
+		explicitEnv   string
+		kService      string
+		persistedFile string // if non-empty, pre-create ~/.scion/hub-id with this content
+		wantOK        bool
+		wantID        string // only checked when wantOK
+	}{
+		{
+			name:        "explicit env var wins",
+			explicitEnv: "explicit-hub-id",
+			kService:    "my-cloud-run-service", // must be ignored
+			wantOK:      true,
+			wantID:      "explicit-hub-id",
+		},
+		{
+			name:     "K_SERVICE derives without persisting",
+			kService: "my-cloud-run-service",
+			wantOK:   true,
+		},
+		{
+			name:          "persisted file is read, not derived",
+			persistedFile: "persisted-hub-id",
+			wantOK:        true,
+			wantID:        "persisted-hub-id",
+		},
+		{
+			name:   "nothing available refuses rather than deriving and persisting",
+			wantOK: false,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			t.Setenv("HOME", tmpDir)
+			t.Setenv("SCION_SERVER_HUB_HUBID", c.explicitEnv)
+			t.Setenv("K_SERVICE", c.kService)
+
+			if c.persistedFile != "" {
+				scionDir := filepath.Join(tmpDir, ".scion")
+				if err := os.MkdirAll(scionDir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(scionDir, "hub-id"), []byte(c.persistedFile+"\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			id, ok := ResolveHubIDFromEnvReadOnly()
+			if ok != c.wantOK {
+				t.Fatalf("ResolveHubIDFromEnvReadOnly() ok = %v, want %v (id=%q)", ok, c.wantOK, id)
+			}
+			if c.wantOK && c.wantID != "" && id != c.wantID {
+				t.Errorf("ResolveHubIDFromEnvReadOnly() id = %q, want %q", id, c.wantID)
+			}
+
+			// Never writes, regardless of outcome.
+			if _, statErr := os.Stat(filepath.Join(tmpDir, ".scion", "hub-id")); c.persistedFile == "" && !os.IsNotExist(statErr) {
+				t.Errorf("ResolveHubIDFromEnvReadOnly must not create ~/.scion/hub-id; stat error: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestServerConfigSources_OmitsMissingFiles(t *testing.T) {
+	// Neither the global dir nor "." has a server.yaml/yml: nothing should
+	// be reported, matching settingsHierarchySources' "omit missing files"
+	// behavior. Round-2 review finding 2.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+
+	got := serverConfigSources("")
+	if len(got) != 0 {
+		t.Errorf("serverConfigSources(\"\") with no files present = %v, want empty", got)
+	}
+}
+
+func TestServerConfigSources_ResolvesGlobalDirFile(t *testing.T) {
+	// A real server.yaml in the global dir must be reported as that exact
+	// file path, not the bare directory.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+
+	globalDir := filepath.Join(home, GlobalDir)
+	if err := os.MkdirAll(globalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	globalServerYAML := filepath.Join(globalDir, "server.yaml")
+	if err := os.WriteFile(globalServerYAML, []byte("hub:\n  port: 9810\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := serverConfigSources("")
+	if len(got) != 1 || got[0] != globalServerYAML {
+		t.Errorf("serverConfigSources(\"\") = %v, want [%q]", got, globalServerYAML)
+	}
+}
+
+func TestServerConfigSources_ResolvesConfigPathDirFile(t *testing.T) {
+	// configPath naming a directory with a server.yaml resolves to that
+	// file's absolute path, not the bare directory.
+	home := t.TempDir()
+	t.Setenv("HOME", home) // no global server.yaml here
+
+	localDir := t.TempDir()
+	localServerYAML := filepath.Join(localDir, "server.yaml")
+	if err := os.WriteFile(localServerYAML, []byte("hub:\n  port: 9810\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := serverConfigSources(localDir)
+	if len(got) != 1 || got[0] != localServerYAML {
+		t.Errorf("serverConfigSources(%q) = %v, want [%q]", localDir, got, localServerYAML)
+	}
+}
+
+func TestServerConfigSources_ResolvesConfigPathFileDirectly(t *testing.T) {
+	// configPath naming a file directly (not a directory) is reported as its
+	// absolute path, mirroring loadGlobalConfigLegacy loading it as-is.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	localDir := t.TempDir()
+	explicitFile := filepath.Join(localDir, "my-server-config.yaml")
+	if err := os.WriteFile(explicitFile, []byte("hub:\n  port: 9810\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := serverConfigSources(explicitFile)
+	if len(got) != 1 || got[0] != explicitFile {
+		t.Errorf("serverConfigSources(%q) = %v, want [%q]", explicitFile, got, explicitFile)
+	}
+}
+
+func TestServerConfigSources_ResolvesRelativeConfigPathFileToAbsolute(t *testing.T) {
+	// A relative, file-valued configPath goes through its own filepath.Abs
+	// call, separate from the directory/cwd branch's. Every other
+	// file-valued-configPath test passes an already-absolute t.TempDir()
+	// path, so removing just this branch's Abs call would otherwise leave
+	// the suite green. Round-4 review finding 1.
+	home := t.TempDir()
+	t.Setenv("HOME", home) // no global server.yaml here
+
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	relFile := "my-server.yaml"
+	if err := os.WriteFile(filepath.Join(cwd, relFile), []byte("hub:\n  port: 9810\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	want := filepath.Join(cwd, relFile)
+	got := serverConfigSources(relFile)
+	if len(got) != 1 {
+		t.Fatalf("serverConfigSources(%q) = %v, want exactly one path", relFile, got)
+	}
+	if !filepath.IsAbs(got[0]) {
+		t.Errorf("serverConfigSources(%q) = %v, want an absolute path", relFile, got)
+	}
+	if got[0] != want {
+		t.Errorf("serverConfigSources(%q) = %v, want [%q]", relFile, got, want)
+	}
+}
+
+func TestServerConfigSources_ResolvesRelativeConfigPathDirToAbsolute(t *testing.T) {
+	// A relative, directory-valued configPath (distinct from both the
+	// file-valued case above and the configPath=="" default) also resolves
+	// through the dir/cwd branch's filepath.Abs call.
+	home := t.TempDir()
+	t.Setenv("HOME", home) // no global server.yaml here
+
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	relDir := "cfg"
+	if err := os.MkdirAll(filepath.Join(cwd, relDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(cwd, relDir, "server.yaml")
+	if err := os.WriteFile(want, []byte("hub:\n  port: 9810\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := serverConfigSources(relDir)
+	if len(got) != 1 {
+		t.Fatalf("serverConfigSources(%q) = %v, want exactly one path", relDir, got)
+	}
+	if !filepath.IsAbs(got[0]) {
+		t.Errorf("serverConfigSources(%q) = %v, want an absolute path", relDir, got)
+	}
+	if got[0] != want {
+		t.Errorf("serverConfigSources(%q) = %v, want [%q]", relDir, got, want)
+	}
+}
+
+func TestServerConfigSources_DedupesWhenLocalLocationIsGlobalDir(t *testing.T) {
+	// When configPath resolves to the same server.yaml as the global dir
+	// (either passed explicitly, or via an empty configPath whose cwd
+	// default happens to be the global dir), the file must be listed once,
+	// not twice. Round-3 review finding 1.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	globalDir := filepath.Join(home, GlobalDir)
+	if err := os.MkdirAll(globalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	globalServerYAML := filepath.Join(globalDir, "server.yaml")
+	if err := os.WriteFile(globalServerYAML, []byte("hub:\n  port: 9810\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("configPath is the global dir", func(t *testing.T) {
+		got := serverConfigSources(globalDir)
+		if len(got) != 1 || got[0] != globalServerYAML {
+			t.Errorf("serverConfigSources(%q) = %v, want [%q]", globalDir, got, globalServerYAML)
+		}
+	})
+
+	t.Run("configPath is empty and cwd is the global dir", func(t *testing.T) {
+		t.Chdir(globalDir)
+		got := serverConfigSources("")
+		if len(got) != 1 || got[0] != globalServerYAML {
+			t.Errorf("serverConfigSources(\"\") = %v, want [%q]", got, globalServerYAML)
+		}
+	})
+}
+
+func TestServerConfigSources_ResolvesRelativeCwdToAbsolute(t *testing.T) {
+	// configPath == "" (the default relative ".") resolves the cwd's
+	// server.yaml to an absolute path. Round-3 review finding 2.
+	home := t.TempDir()
+	t.Setenv("HOME", home) // no global server.yaml here
+
+	cwd := t.TempDir()
+	cwdServerYAML := filepath.Join(cwd, "server.yaml")
+	if err := os.WriteFile(cwdServerYAML, []byte("hub:\n  port: 9810\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cwd)
+
+	got := serverConfigSources("")
+	if len(got) != 1 {
+		t.Fatalf("serverConfigSources(\"\") = %v, want exactly one path", got)
+	}
+	if !filepath.IsAbs(got[0]) {
+		t.Errorf("serverConfigSources(\"\") = %v, want an absolute path", got)
+	}
+	if got[0] != cwdServerYAML {
+		t.Errorf("serverConfigSources(\"\") = %v, want [%q]", got, cwdServerYAML)
 	}
 }

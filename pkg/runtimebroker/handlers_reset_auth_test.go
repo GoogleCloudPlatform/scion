@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -36,7 +37,7 @@ func resetAuthAgents() *filteringMockManager {
 		{
 			ContainerID: "container-A",
 			Name:        "coordinator",
-			Labels:      map[string]string{"scion.name": "coordinator", "scion.grove_id": "grove-A"},
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
 		},
 	}
 	return mgr
@@ -46,7 +47,7 @@ func doResetAuth(t *testing.T, srv *Server, token string) *httptest.ResponseReco
 	t.Helper()
 	body, _ := json.Marshal(ResetAuthRequest{Token: token})
 	r := httptest.NewRequest(http.MethodPost,
-		"/api/v1/agents/coordinator/reset-auth?projectId=grove-A", bytes.NewReader(body))
+		"/api/v1/agents/coordinator/reset-auth?projectId=project-A", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	srv.handleAgentByID(w, r)
 	return w
@@ -109,6 +110,202 @@ func TestResetAuth_SignalSuccessReturns200(t *testing.T) {
 	}
 	if !signaled {
 		t.Error("expected PID 1 to be signaled via kill -USR2 1")
+	}
+}
+
+// TestResetAuth_TokenDeliveredViaStdinNotArgv is the regression test for
+// ptone/scion#1355: the token must reach the container over the exec's
+// stdin, never as a substring of the exec's cmd slice. The cmd slice is what
+// runtimes append to a host process's argv (e.g. `docker exec ... sh -c
+// "<cmd>"`), which is readable via /proc/<pid>/cmdline for the lifetime of
+// the exec — a heredoc embedded in cmd does not change that, since the
+// heredoc body is still part of cmd's text.
+func TestResetAuth_TokenDeliveredViaStdinNotArgv(t *testing.T) {
+	mgr := resetAuthAgents()
+	const token = "super-secret-reset-auth-token"
+
+	var (
+		writeCalled    bool
+		stdinDelivered string
+	)
+	rt := &scionrt.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		// Exec (argv-only) must never see the token. If the fix regresses to
+		// embedding the token in cmd and calling Exec instead of
+		// ExecWithStdin, this fires and fails the test.
+		ExecFunc: func(_ context.Context, _ string, cmd []string) (string, error) {
+			for _, arg := range cmd {
+				if strings.Contains(arg, token) {
+					t.Errorf("token leaked into argv-only Exec: %q", arg)
+				}
+			}
+			if len(cmd) > 0 && cmd[0] == "kill" {
+				return "", nil
+			}
+			t.Error("token write should go through ExecWithStdin, not Exec")
+			return "", nil
+		},
+		ExecWithStdinFunc: func(_ context.Context, _ string, cmd []string, stdin io.Reader) (string, error) {
+			writeCalled = true
+			for _, arg := range cmd {
+				if strings.Contains(arg, token) {
+					t.Errorf("token embedded in ExecWithStdin's cmd (argv): %q", arg)
+				}
+			}
+			b, err := io.ReadAll(stdin)
+			if err != nil {
+				t.Fatalf("failed to read stdin: %v", err)
+			}
+			stdinDelivered = string(b)
+			return "", nil
+		},
+	}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	w := doResetAuth(t, srv, token)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d (%s)", w.Code, w.Body.String())
+	}
+	if !writeCalled {
+		t.Error("expected token write to go through ExecWithStdin")
+	}
+	if stdinDelivered != token {
+		t.Errorf("token not delivered via stdin verbatim: got %q, want %q", stdinDelivered, token)
+	}
+}
+
+// TestResetAuth_ListUnavailableReturns503 is a regression test for
+// ptone/scion#2165: when the container runtime itself fails to answer the
+// agent lookup (LookupContainerID wraps that in ErrAgentListUnavailable),
+// resetAuth must report a retryable 503 rather than a terminal 404.
+func TestResetAuth_ListUnavailableReturns503(t *testing.T) {
+	mgr := resetAuthAgents()
+	mgr.listErr = fmt.Errorf("docker ps failed: exit status 1")
+
+	execCalled := false
+	rt := &scionrt.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		ExecFunc: func(_ context.Context, _ string, _ []string) (string, error) {
+			execCalled = true
+			return "", nil
+		},
+	}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	w := doResetAuth(t, srv, "fresh-token")
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when the runtime listing is unavailable, got %d (%s)", w.Code, w.Body.String())
+	}
+	if execCalled {
+		t.Error("reset-auth must not exec when the agent lookup itself failed")
+	}
+	if strings.Contains(w.Body.String(), "docker ps failed") {
+		t.Errorf("response body must not leak the raw runtime error text: %s", w.Body.String())
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+	}
+	if resp.Error.Code != ErrCodeRuntimeUnavailable {
+		t.Errorf("expected error code %q, got %q", ErrCodeRuntimeUnavailable, resp.Error.Code)
+	}
+	if want := agentLookupUnavailableMessage("coordinator", ""); resp.Error.Message != want {
+		t.Errorf("expected message %q, got %q", want, resp.Error.Message)
+	}
+}
+
+// TestResetAuth_NotFoundReturns404 is the regression companion to
+// TestResetAuth_ListUnavailableReturns503: a genuine "not found" (a
+// successful, empty list — no lookup error at all) must still 404, not 503,
+// and must never invoke the exec. Without this test, a mutation that turns
+// every lookup error (or even no error) into a 503 would only be caught by
+// the exec handler's equivalent tests, leaving resetAuth's 404 branch
+// unpinned.
+func TestResetAuth_NotFoundReturns404(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{}
+
+	execCalled := false
+	rt := &scionrt.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		ExecFunc: func(_ context.Context, _ string, _ []string) (string, error) {
+			execCalled = true
+			return "", nil
+		},
+	}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	w := doResetAuth(t, srv, "fresh-token")
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for a genuinely missing agent, got %d (%s)", w.Code, w.Body.String())
+	}
+	if execCalled {
+		t.Error("reset-auth must not exec when the agent was not found")
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+	}
+	if resp.Error.Code != ErrCodeAgentNotFound {
+		t.Errorf("expected error code %q, got %q", ErrCodeAgentNotFound, resp.Error.Code)
+	}
+}
+
+// TestResetAuth_AmbiguousMatchReturns500 is a regression test for
+// GoogleCloudPlatform/scion#2098: when LookupContainerID finds more than one
+// distinct container matching the slug (uniqueAgentEntry's ambiguous case),
+// that is a real lookup failure, not a "not found," so resetAuth must return
+// a 500 runtime_error and must NOT exec — a lookup that can't tell which
+// container to target must not guess and write the token into one of them
+// anyway. Mirrors TestExecCommand_AmbiguousMatchReturns500.
+//
+// The status and code are pinned exactly (500 runtime_error, not just "some
+// 5xx") because an ambiguous match is NOT ErrAgentListUnavailable: the
+// runtime answered fine, it just returned two entries. A mutation that widens
+// the list-unavailable branch to catch every lookup error (turning this into
+// a 503 runtime_unavailable) must fail this test.
+func TestResetAuth_AmbiguousMatchReturns500(t *testing.T) {
+	mgr := &filteringMockManager{}
+	mgr.agents = []api.AgentInfo{
+		{
+			ContainerID: "container-A",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
+		},
+		{
+			ContainerID: "container-A2",
+			Name:        "coordinator",
+			Labels:      map[string]string{"scion.name": "coordinator", "scion.project_id": "project-A"},
+		},
+	}
+
+	execCalled := false
+	rt := &scionrt.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		ExecFunc: func(_ context.Context, _ string, _ []string) (string, error) {
+			execCalled = true
+			return "", nil
+		},
+	}
+	srv := New(DefaultServerConfig(), mgr, rt)
+
+	w := doResetAuth(t, srv, "fresh-token")
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected exactly 500 for an ambiguous match, got %d (%s)", w.Code, w.Body.String())
+	}
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+	}
+	if resp.Error.Code != ErrCodeRuntimeError {
+		t.Errorf("expected error code %q, got %q", ErrCodeRuntimeError, resp.Error.Code)
+	}
+	if execCalled {
+		t.Error("reset-auth must not exec when the lookup found an ambiguous match")
 	}
 }
 

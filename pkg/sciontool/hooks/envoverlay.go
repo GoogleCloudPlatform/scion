@@ -6,10 +6,14 @@ package hooks
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 )
 
 // maxEnvOverlayBytes caps the env overlay file size to prevent abuse from
@@ -20,6 +24,83 @@ const maxEnvOverlayBytes = 1 << 20 // 1 MiB
 // files are env values, not arbitrary blobs; legitimate API keys and tokens
 // are well under 64 KiB.
 const maxEnvSecretFileBytes = 64 * 1024
+
+// NativeTelemetryPolicyKey is emitted by provisioners that configure native
+// telemetry. It is a runtime contract, not an environment variable for the child.
+const NativeTelemetryPolicyKey = "SCION_NATIVE_TELEMETRY_POLICY"
+
+// ValidateNativeTelemetryEnv rejects runtime values that could change a
+// provisioner's native telemetry policy. The generated overlay is the complete
+// set of permitted reserved keys; this also rejects alternate endpoint aliases.
+// Errors name keys only, never values.
+func ValidateNativeTelemetryEnv(policy string, env []string, overlay, overrides map[string]string) error {
+	if policy != "enabled" && policy != "disabled" {
+		return fmt.Errorf("invalid native telemetry policy")
+	}
+	for _, entry := range env {
+		i := strings.IndexByte(entry, '=')
+		if i > 0 && entry[:i] == NativeTelemetryPolicyKey {
+			return fmt.Errorf("native telemetry policy conflict: %s", NativeTelemetryPolicyKey)
+		}
+		if i <= 0 || (!reservedNativeTelemetryKey(entry[:i]) && (entry[:i] != "CODEX_HOME" || overlay["CODEX_HOME"] == "")) {
+			continue
+		}
+		key := entry[:i]
+		want, ok := overlay[key]
+		if !ok || entry[i+1:] != want {
+			return fmt.Errorf("native telemetry policy conflict: %s", key)
+		}
+	}
+	keys := make([]string, 0, len(overrides))
+	for key := range overrides {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		value := overrides[key]
+		if key == NativeTelemetryPolicyKey {
+			return fmt.Errorf("native telemetry policy conflict: %s", key)
+		}
+		if !reservedNativeTelemetryKey(key) && (key != "CODEX_HOME" || overlay["CODEX_HOME"] == "") {
+			continue
+		}
+		want, ok := overlay[key]
+		if !ok || value != want {
+			return fmt.Errorf("native telemetry policy conflict: %s", key)
+		}
+	}
+	return nil
+}
+
+// MergeEnvOverlayWithNativeTelemetryPolicy validates protected keys before
+// applying the ordinary additive merge. Secret overrides are checked here
+// even though the caller applies them after this merge.
+func MergeEnvOverlayWithNativeTelemetryPolicy(policy string, env []string, overlay, overrides map[string]string) ([]string, error) {
+	if err := ValidateNativeTelemetryEnv(policy, env, overlay, overrides); err != nil {
+		return nil, err
+	}
+	return MergeEnvOverlay(env, overlay), nil
+}
+
+// OTEL_ keys can change SDK behavior, including OTEL_SDK_DISABLED. Under an
+// active policy, unknown inherited aliases are rejected rather than allowed
+// to silently change the generated configuration. COPILOT_OTEL_* and
+// GROK_TELEMETRY_*/GROK_EXTERNAL_OTEL are the copilot/grok-build equivalents
+// of CLAUDE_CODE_ENABLE_TELEMETRY and GEMINI_TELEMETRY_*: they switch native
+// telemetry on/off and pick the exporter, so they get the same protection
+// (harnesses/copilot/provision.py, harnesses/grok-build/provision.py).
+func reservedNativeTelemetryKey(key string) bool {
+	if key == "CLAUDE_CODE_ENABLE_TELEMETRY" || key == "GROK_EXTERNAL_OTEL" {
+		return true
+	}
+	if strings.HasPrefix(key, "GEMINI_TELEMETRY_") || strings.HasPrefix(key, "COPILOT_OTEL_") || strings.HasPrefix(key, "GROK_TELEMETRY_") {
+		return true
+	}
+	if strings.HasPrefix(key, "OTEL_") {
+		return true
+	}
+	return false
+}
 
 // LoadEnvOverlay reads the env overlay JSON written by a container-script
 // harness's pre-start provisioner and returns the resolved key/value pairs.
@@ -40,19 +121,22 @@ func LoadEnvOverlay(path string, allowedRoots []string) (map[string]string, erro
 	if path == "" {
 		return nil, nil
 	}
-	info, err := os.Stat(path)
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
+	// This overlay file is written by a pre-start provisioner running as
+	// the workload user, into a directory the workload owns outright, and
+	// is then read back here — potentially by root, if a future caller
+	// moves overlay loading earlier. dirfd.ReadFileNoFollow refuses a
+	// symlink at any component, requires a single-link regular file, and
+	// bounds the read; a separate os.Stat-then-os.ReadFile would be a
+	// TOCTOU (the file could change between the two calls), and
+	// os.ReadFile follows symlinks unconditionally.
+	data, err := dirfd.ReadFileNoFollow(path, maxEnvOverlayBytes)
 	if err != nil {
-		return nil, fmt.Errorf("stat env overlay %s: %w", path, err)
-	}
-	if info.Size() > maxEnvOverlayBytes {
-		return nil, fmt.Errorf("env overlay %s exceeds %d bytes", path, maxEnvOverlayBytes)
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		if errors.Is(err, dirfd.ErrTooLarge) {
+			return nil, fmt.Errorf("env overlay %s exceeds %d bytes: %w", path, maxEnvOverlayBytes, err)
+		}
 		return nil, fmt.Errorf("read env overlay %s: %w", path, err)
 	}
 
@@ -102,28 +186,89 @@ func resolveEnvValue(raw json.RawMessage, allowedRoots []string) (string, error)
 	if err != nil {
 		return "", fmt.Errorf("resolve from_file %q: %w", from, err)
 	}
-	if !pathInAnyRoot(cleaned, allowedRoots) {
-		return "", fmt.Errorf("from_file %q escapes allowed roots %v", cleaned, allowedRoots)
-	}
 
-	info, err := os.Stat(cleaned)
+	content, err := readFromFileNoFollow(cleaned, allowedRoots)
 	if err != nil {
-		return "", fmt.Errorf("from_file %q not found: %w", cleaned, err)
-	}
-	if info.IsDir() {
-		return "", fmt.Errorf("from_file %q is a directory", cleaned)
-	}
-	if info.Size() > maxEnvSecretFileBytes {
-		return "", fmt.Errorf("from_file %q exceeds %d bytes", cleaned, maxEnvSecretFileBytes)
-	}
-
-	content, err := os.ReadFile(cleaned)
-	if err != nil {
-		return "", fmt.Errorf("read from_file %q: %w", cleaned, err)
+		return "", err
 	}
 	// Trim trailing whitespace; tokens written via shell heredoc/echo often
 	// pick up a trailing newline that breaks Bearer-token comparisons.
 	return strings.TrimRight(string(content), "\r\n \t"), nil
+}
+
+// readFromFileNoFollow reads a from_file referent through the same
+// fd-anchored, no-follow, bounded primitives used everywhere else in this
+// package. Containment is enforced by the fd walk, not by the path's
+// textual form, which a symlink defeats: a symlink whose own name sits
+// inside an allowed root but whose target does not would pass a
+// filepath.Abs + string-prefix check yet still resolve outside it.
+//
+// If allowedRoots is empty there is no containment policy to enforce —
+// matching pathInAnyRoot's historical "no roots configured" behaviour, used
+// only by tests — and cleaned is read directly (dirfd.ReadFileNoFollow,
+// which refuses every symlink outright: with no root there is nothing to
+// prove a target stays inside). Otherwise cleaned must resolve to inside
+// one of allowedRoots, which dirfd.ReadUnderRootNoFollow verifies by
+// walking an openat(O_NOFOLLOW) fd chain down from that root rather than by
+// comparing path strings, so containment itself becomes symlink-safe.
+//
+// A symlink cleaned resolves through — at any component, including
+// cleaned's own leaf — is followed, not refused, as long as
+// ReadUnderRootNoFollow can prove its target stays under that same root
+// through the fd-anchored walk itself. This is required, not optional: a
+// Kubernetes projected-secret volume's key files are exactly this shape
+// ("key" -> "..data/key", "..data" -> a timestamped sibling directory), so
+// refusing every symlink unconditionally broke from_file for every secret
+// mounted that way. A symlink whose name sits under allowedRoots but whose
+// real target does not is still refused; see ReadUnderRootNoFollow's doc
+// comment for exactly what "prove" means here and why a textual containment
+// check is not enough. There is deliberately no separate stat anywhere in
+// this path: the file is fstat'd and read exactly once, from the fd the
+// walk finally verifies.
+//
+// Error messages preserve their pre-existing shapes ("not found", "escapes
+// allowed roots", "exceeds N bytes") so callers and tests that key off
+// those substrings keep working; only the mechanism producing them changed.
+func readFromFileNoFollow(cleaned string, allowedRoots []string) ([]byte, error) {
+	if len(allowedRoots) == 0 {
+		data, err := dirfd.ReadFileNoFollow(cleaned, maxEnvSecretFileBytes)
+		if err != nil {
+			return nil, wrapFromFileErr(cleaned, err)
+		}
+		return data, nil
+	}
+
+	lastErr := dirfd.ErrPathEscapesRoot
+	for _, root := range allowedRoots {
+		if root == "" {
+			continue
+		}
+		data, err := dirfd.ReadUnderRootNoFollow(root, cleaned, maxEnvSecretFileBytes)
+		if err == nil {
+			return data, nil
+		}
+		if errors.Is(err, dirfd.ErrPathEscapesRoot) {
+			lastErr = err
+			continue
+		}
+		return nil, wrapFromFileErr(cleaned, err)
+	}
+	return nil, fmt.Errorf("from_file %q escapes allowed roots %v: %w", cleaned, allowedRoots, lastErr)
+}
+
+// wrapFromFileErr translates a dirfd sentinel error into the from_file
+// error message shape callers already depend on.
+func wrapFromFileErr(cleaned string, err error) error {
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("from_file %q not found: %w", cleaned, err)
+	case errors.Is(err, dirfd.ErrTooLarge):
+		return fmt.Errorf("from_file %q exceeds %d bytes: %w", cleaned, maxEnvSecretFileBytes, err)
+	case errors.Is(err, dirfd.ErrNotSingleLinkRegular):
+		return fmt.Errorf("from_file %q is not a plain file: %w", cleaned, err)
+	default:
+		return fmt.Errorf("read from_file %q: %w", cleaned, err)
+	}
 }
 
 // MergeEnvOverlay merges overlay values into env and returns the result.
@@ -184,28 +329,4 @@ func validEnvKey(k string) bool {
 		}
 	}
 	return len(k) > 0
-}
-
-func pathInAnyRoot(path string, roots []string) bool {
-	if len(roots) == 0 {
-		return true
-	}
-	for _, root := range roots {
-		if root == "" {
-			continue
-		}
-		abs, err := filepath.Abs(root)
-		if err != nil {
-			continue
-		}
-		// Use Rel to avoid prefix-mismatch (e.g. /foo vs /foobar).
-		rel, err := filepath.Rel(abs, path)
-		if err != nil {
-			continue
-		}
-		if rel == "." || (!strings.HasPrefix(rel, "..") && !filepath.IsAbs(rel)) {
-			return true
-		}
-	}
-	return false
 }

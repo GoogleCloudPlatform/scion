@@ -54,13 +54,13 @@ import { customElement, property } from 'lit/decorators.js';
  * far rarer for the 8–16 members typically visible in one sidebar.
  */
 export const AVATAR_PALETTE = [
-  'hsl(0, 58%, 50%)',   // red
-  'hsl(15, 70%, 34%)',  // brick
-  'hsl(30, 58%, 44%)',  // orange
-  'hsl(45, 70%, 30%)',  // bronze
-  'hsl(60, 50%, 38%)',  // olive
-  'hsl(75, 62%, 26%)',  // dark olive
-  'hsl(90, 45%, 38%)',  // lime
+  'hsl(0, 58%, 50%)', // red
+  'hsl(15, 70%, 34%)', // brick
+  'hsl(30, 58%, 44%)', // orange
+  'hsl(45, 70%, 30%)', // bronze
+  'hsl(60, 50%, 38%)', // olive
+  'hsl(75, 62%, 26%)', // dark olive
+  'hsl(90, 45%, 38%)', // lime
   'hsl(105, 60%, 26%)', // forest
   'hsl(120, 42%, 38%)', // green
   'hsl(135, 60%, 26%)', // deep green

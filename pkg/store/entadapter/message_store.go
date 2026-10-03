@@ -277,7 +277,7 @@ func decodeListCursor(cursor, binding string) (time.Time, uuid.UUID, error) {
 }
 
 // ListMessages returns messages matching the given filter, ordered by
-// created_at DESC.
+// created_at descending unless opts.SortDir is "asc".
 func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFilter, opts store.ListOptions) (*store.ListResult[store.Message], error) {
 	query := s.client.Message.Query()
 
@@ -312,6 +312,9 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 	if filter.Type != "" {
 		query.Where(message.TypeEQ(filter.Type))
 	}
+	if filter.ExcludeType != "" {
+		query.Where(message.TypeNEQ(filter.ExcludeType))
+	}
 	if filter.Channel != "" {
 		query.Where(message.ChannelEQ(filter.Channel))
 	}
@@ -335,10 +338,16 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 	// totalCount represents the total number of messages matching the base
 	// filter (before cursor pagination is applied). Clone and count before
 	// adding the cursor predicate so the count stays stable across pages.
-	totalCount, err := query.Clone().Count(ctx)
-	if err != nil {
-		return nil, err
+	var totalCount int
+	if !opts.SkipTotalCount {
+		var err error
+		totalCount, err = query.Clone().Count(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
+
+	ascending := strings.EqualFold(opts.SortDir, "asc")
 
 	// Apply cursor-based keyset pagination.
 	// The cursor is a self-contained base64-encoded string carrying (created, id).
@@ -348,19 +357,35 @@ func (s *MessageStore) ListMessages(ctx context.Context, filter store.MessageFil
 		if err != nil {
 			return nil, fmt.Errorf("invalid cursor: %w", err)
 		}
-		query.Where(message.Or(
-			message.CreatedLT(cursorCreated),
-			message.And(
-				message.CreatedEQ(cursorCreated),
-				message.IDLT(cursorID),
-			),
-		))
+		if ascending {
+			query.Where(message.Or(
+				message.CreatedGT(cursorCreated),
+				message.And(
+					message.CreatedEQ(cursorCreated),
+					message.IDGT(cursorID),
+				),
+			))
+		} else {
+			query.Where(message.Or(
+				message.CreatedLT(cursorCreated),
+				message.And(
+					message.CreatedEQ(cursorCreated),
+					message.IDLT(cursorID),
+				),
+			))
+		}
 	}
 
 	limit := clampLimit(opts.Limit)
+	createdOrder := entsql.OrderDesc()
+	idOrder := entsql.OrderDesc()
+	if ascending {
+		createdOrder = entsql.OrderAsc()
+		idOrder = entsql.OrderAsc()
+	}
 	entities, err := query.
-		Order(message.ByCreated(entsql.OrderDesc())).
-		Order(message.ByID(entsql.OrderDesc())).
+		Order(message.ByCreated(createdOrder)).
+		Order(message.ByID(idOrder)).
 		Limit(limit + 1).
 		All(ctx)
 	if err != nil {
@@ -422,6 +447,29 @@ func (s *MessageStore) PurgeOldMessages(ctx context.Context, readCutoff time.Tim
 		Exec(ctx)
 	if err != nil {
 		return 0, err
+	}
+	return n, nil
+}
+
+// PurgeFailedMessages removes messages with dispatch_state="failed" whose
+// created timestamp is before cutoff. Returns the number of messages removed.
+// Unlike PurgeOldMessages, this filters strictly on dispatch_state so
+// successfully delivered (dispatched) message history is never touched.
+// Scoped to agent recipients only (message.RecipientHasPrefix "agent:"):
+// only a message addressed to an agent can have genuinely and irrecoverably
+// failed dispatch. A "user:" recipient row reaching "failed" only ever came
+// from ExpireStuckPendingMessages sweeping a writer bug (nc-promote-busy);
+// deleting it would destroy real chat history the user never saw fail.
+func (s *MessageStore) PurgeFailedMessages(ctx context.Context, cutoff time.Time) (int, error) {
+	n, err := s.client.Message.Delete().
+		Where(
+			message.DispatchStateEQ(store.MessageDispatchFailed),
+			message.CreatedLT(cutoff),
+			message.RecipientHasPrefix("agent:"),
+		).
+		Exec(ctx)
+	if err != nil {
+		return 0, mapError(err)
 	}
 	return n, nil
 }

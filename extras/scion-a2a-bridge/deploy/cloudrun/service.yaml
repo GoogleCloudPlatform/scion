@@ -1,0 +1,70 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: scion-a2a-bridge
+  annotations:
+    # SECURITY PREREQUISITE: Because ingress is public at the network layer, grant
+    # roles/run.invoker only to the distinct Hub and GE invoker service accounts
+    # described in docs/deployment.md. Never grant allUsers/allAuthenticatedUsers.
+    # The bridge's application-level JWT validation remains required as defense in depth.
+    run.googleapis.com/ingress: all
+    run.googleapis.com/description: "A2A Bridge multi-instance HA deployment with dual-header authentication"
+spec:
+  template:
+    metadata:
+      annotations:
+        # Minimum 2 replicas to satisfy HA multi-replica invariants
+        autoscaling.knative.dev/minScale: "2"
+        autoscaling.knative.dev/maxScale: "10"
+        run.googleapis.com/cpu-throttling: "false"
+        run.googleapis.com/execution-environment: gen2
+    spec:
+      containerConcurrency: 80
+      timeoutSeconds: 300
+      containers:
+        # PLACEHOLDER ONLY: substitute the deployed image's immutable digest as
+        # described in docs/deployment.md; the all-zero digest cannot be deployed.
+        - image: gcr.io/scion-prod/scion-a2a-bridge@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          ports:
+            # h2c enables HTTP/2 cleartext transport behind Cloud Run TLS termination
+            - name: h2c
+              containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: K_SERVICE
+              value: "scion-a2a-bridge"
+            - name: MUX_PORTS
+              value: "true"
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: a2a-postgres-secret
+                  key: database-url
+            - name: GRPC_AUTH_MODE
+              value: "google_id_token"
+            - name: GRPC_AUTH_AUDIENCE
+              value: "https://scion-a2a-bridge-uc.a.run.app"
+            - name: GRPC_AUTH_SUBJECTS
+              # Only the Hub service account is authorized for gRPC control methods
+              value: "hub-sa@scion-hub-prod.iam.gserviceaccount.com"
+            - name: GE_INVOKER_SERVICE_ACCOUNT
+              # Distinct GE Discovery Engine invoker service account (cannot call gRPC control)
+              value: "ge-invoker@ge-prod.iam.gserviceaccount.com"
+          resources:
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 3

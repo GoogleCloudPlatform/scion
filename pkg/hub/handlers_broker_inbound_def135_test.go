@@ -77,6 +77,10 @@ func (d *def135Dispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent
 func (d *def135Dispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error {
 	return nil
 }
+
+func (d *def135Dispatcher) DispatchAgentReprovision(_ context.Context, _ *store.Agent) error {
+	return nil
+}
 func (d *def135Dispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ string, _ bool) error {
 	return nil
 }
@@ -147,7 +151,7 @@ func setupDEF135(t *testing.T) def135Fixture {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	agent := &store.Agent{
 		ID:           tid("agent-def135"),
@@ -499,7 +503,7 @@ func TestDEF135_AC5_WriteDeny409_DispatcherNeverCalled(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s2.CreateProject(ctx, project2))
-	srv2.createProjectMembersGroup(ctx, project2)
+	srv2.seedProjectCreatorMembership(ctx, project2)
 
 	agent2 := &store.Agent{
 		ID:           tid("agent-def135-ac5"),

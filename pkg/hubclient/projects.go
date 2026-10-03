@@ -16,7 +16,6 @@ package hubclient
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"time"
@@ -123,27 +122,12 @@ type BrokerInfo struct {
 
 // RegisterProjectResponse is the response from registering a project.
 type RegisterProjectResponse struct {
-	Project       *Project       `json:"project"`
-	LegacyProject *Project       `json:"grove,omitempty"`       // Legacy alias for compatibility
-	Broker        *RuntimeBroker `json:"broker,omitempty"`      // Populated if brokerId or broker provided
-	Created       bool           `json:"created"`               // True if project was newly created
-	Matches       []ProjectMatch `json:"matches,omitempty"`     // Populated when multiple projects share the same git remote
-	BrokerToken   string         `json:"brokerToken,omitempty"` // DEPRECATED: use two-phase registration
-	SecretKey     string         `json:"secretKey,omitempty"`   // DEPRECATED: secrets only from /brokers/join
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy grove field.
-func (r *RegisterProjectResponse) UnmarshalJSON(data []byte) error {
-	type alias RegisterProjectResponse
-	var aux alias
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	*r = RegisterProjectResponse(aux)
-	if r.Project == nil && r.LegacyProject != nil {
-		r.Project = r.LegacyProject
-	}
-	return nil
+	Project     *Project       `json:"project"`
+	Broker      *RuntimeBroker `json:"broker,omitempty"`      // Populated if brokerId or broker provided
+	Created     bool           `json:"created"`               // True if project was newly created
+	Matches     []ProjectMatch `json:"matches,omitempty"`     // Populated when multiple projects share the same git remote
+	BrokerToken string         `json:"brokerToken,omitempty"` // DEPRECATED: use two-phase registration
+	SecretKey   string         `json:"secretKey,omitempty"`   // DEPRECATED: secrets only from /brokers/join
 }
 
 // ProjectMatch holds summary information about a project for disambiguation.
@@ -235,10 +219,9 @@ func (s *projectService) List(ctx context.Context, opts *ListProjectsOptions) (*
 	}
 
 	type listResponse struct {
-		Projects       []Project `json:"projects"`
-		LegacyProjects []Project `json:"groves,omitempty"`
-		NextCursor     string    `json:"nextCursor,omitempty"`
-		TotalCount     int       `json:"totalCount,omitempty"`
+		Projects   []Project `json:"projects"`
+		NextCursor string    `json:"nextCursor,omitempty"`
+		TotalCount int       `json:"totalCount,omitempty"`
 	}
 
 	result, err := apiclient.DecodeResponse[listResponse](resp)
@@ -246,13 +229,8 @@ func (s *projectService) List(ctx context.Context, opts *ListProjectsOptions) (*
 		return nil, err
 	}
 
-	projects := result.Projects
-	if len(projects) == 0 && len(result.LegacyProjects) > 0 {
-		projects = result.LegacyProjects
-	}
-
 	return &ListProjectsResponse{
-		Projects: projects,
+		Projects: result.Projects,
 		Page: apiclient.PageResult{
 			NextCursor: result.NextCursor,
 			TotalCount: result.TotalCount,
@@ -318,6 +296,21 @@ func (s *projectService) ListAgents(ctx context.Context, projectID string, opts 
 		}
 		for k, v := range opts.Labels {
 			query.Add("label", fmt.Sprintf("%s=%s", k, v))
+		}
+		if opts.OwnerID != "" {
+			query.Set("ownerId", opts.OwnerID)
+		}
+		if opts.AncestorID != "" {
+			query.Set("ancestorId", opts.AncestorID)
+		}
+		if opts.HarnessConfig != "" {
+			query.Set("harnessConfig", opts.HarnessConfig)
+		}
+		for _, id := range opts.IDs {
+			query.Add("id", id)
+		}
+		if opts.LineageRootID != "" {
+			query.Set("lineageRootId", opts.LineageRootID)
 		}
 		opts.Page.ToQuery(query)
 	}
@@ -433,36 +426,6 @@ type ProjectCacheRefreshResponse struct {
 	CachedAt   time.Time `json:"cachedAt"`
 }
 
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (r ProjectCacheRefreshResponse) MarshalJSON() ([]byte, error) {
-	type Alias ProjectCacheRefreshResponse
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(r),
-		GroveID: r.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (r *ProjectCacheRefreshResponse) UnmarshalJSON(data []byte) error {
-	type Alias ProjectCacheRefreshResponse
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
-}
-
 // ProjectCacheStatusResponse is the response for project cache status.
 type ProjectCacheStatusResponse struct {
 	ProjectID   string     `json:"projectId"`
@@ -471,36 +434,6 @@ type ProjectCacheStatusResponse struct {
 	FileCount   int        `json:"fileCount"`
 	TotalBytes  int64      `json:"totalBytes"`
 	LastRefresh *time.Time `json:"lastRefresh,omitempty"`
-}
-
-// MarshalJSON implements custom marshaling to support legacy groveId field.
-func (r ProjectCacheStatusResponse) MarshalJSON() ([]byte, error) {
-	type Alias ProjectCacheStatusResponse
-	return json.Marshal(&struct {
-		Alias
-		GroveID string `json:"groveId"`
-	}{
-		Alias:   Alias(r),
-		GroveID: r.ProjectID,
-	})
-}
-
-// UnmarshalJSON implements custom unmarshaling to support legacy groveId field.
-func (r *ProjectCacheStatusResponse) UnmarshalJSON(data []byte) error {
-	type Alias ProjectCacheStatusResponse
-	aux := &struct {
-		GroveID string `json:"groveId"`
-		*Alias
-	}{
-		Alias: (*Alias)(r),
-	}
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return err
-	}
-	if r.ProjectID == "" && aux.GroveID != "" {
-		r.ProjectID = aux.GroveID
-	}
-	return nil
 }
 
 // RefreshCache triggers a cache refresh for a linked project.

@@ -28,14 +28,17 @@ import type {
   Agent,
   AgentPhase,
   Capabilities,
-  AgentMetricsSummary,
+  AgentLifecycleAction,
 } from '../../shared/types.js';
 import {
   can,
   canLifecycle,
+  canMessageAgent,
   isTerminalAvailable,
   getAgentDisplayStatus,
   isAgentRunning,
+  RESUME_BEST_EFFORT_CONFIRM_MESSAGE,
+  lifecycleActionRequestInit,
 } from '../../shared/types.js';
 
 type AgentSortField = 'name' | 'status' | 'created' | 'updated';
@@ -43,6 +46,8 @@ type SortDir = 'asc' | 'desc';
 import type { StatusType } from '../shared/status-badge.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
+import type { AgentsChangedDetail } from '../../client/state.js';
+import { mergeChanged, dropTombstoned } from '../../client/agent-merge.js';
 import { listPageStyles } from '../shared/resource-styles.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
@@ -51,10 +56,15 @@ import '../shared/messageability-indicator.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
 import '../shared/quick-message-dialog.js';
-import { getDenialMessage, MESSAGE_MODE_DISPLAY, getMessageModeDisplay } from '../../shared/message-mode.js';
+import {
+  getDenialMessage,
+  MESSAGE_MODE_DISPLAY,
+  getMessageModeDisplay,
+} from '../../shared/message-mode.js';
 import type { MessageMode } from '../../shared/types.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
+import { terminalHref } from '../../client/open-terminal.js';
 
 @customElement('scion-page-agents')
 export class ScionPageAgents extends LitElement {
@@ -112,6 +122,16 @@ export class ScionPageAgents extends LitElement {
   @state()
   private agentScope: 'all' | 'mine' | 'shared' = 'all';
 
+  /**
+   * The scope `this.agents` was actually fetched for — set alongside
+   * `this.agents` itself (never alongside `agentScope`, which changes
+   * synchronously on click while the new list is still in flight). The graph
+   * view's filterKey reads this, not `agentScope`, so a scope switch isn't
+   * mistaken for a delete before the new list lands.
+   */
+  @state()
+  private loadedScope: 'all' | 'mine' | 'shared' = 'all';
+
   @state()
   private phaseFilter: AgentPhase | '' = '';
 
@@ -136,10 +156,6 @@ export class ScionPageAgents extends LitElement {
   @state()
   private quickMessageOpen = false;
 
-  /** Per-agent metrics summaries, keyed by agent ID. */
-  @state()
-  private agentMetrics: Record<string, AgentMetricsSummary> = {};
-
   static override styles = [
     listPageStyles,
     css`
@@ -148,6 +164,43 @@ export class ScionPageAgents extends LitElement {
         align-items: flex-start;
         justify-content: space-between;
         margin-bottom: 0.75rem;
+        gap: 0.5rem;
+        /* Cards are minmax(320px, 1fr), so the header has ~270px to work with
+           and the badges claim most of it. Wrapping lets them drop to their own
+           line instead of squeezing the name into a few characters. */
+        flex-wrap: wrap;
+      }
+
+      /* The name column must be allowed to shrink for the wrapping in
+         .resource-name to take effect — min-width:auto on this flex item
+         would otherwise hold the header open at the full name width. It is
+         the only div in the header; the siblings are badge elements.
+
+         flex:1 matters as much as min-width:0. With only min-width:0 the
+         column sizes to its content and, because the badges never shrink,
+         absorbs the entire overflow — collapsing to a few characters and
+         wrapping the meta lines into a narrow ribbon. Growing into the space
+         the badges leave keeps names on as few lines as possible. */
+      .agent-header > div {
+        /* Full-width basis, so the badges always wrap to their own row rather
+           than sometimes fitting beside the name and sometimes not. A per-card
+           decision left the grid looking ragged — one card with its status
+           badge on the title row, the next with it underneath.
+
+           This also removes the crushing problem at its root: the name column
+           is never asked to share the row, so it cannot be squeezed down to a
+           few characters. Long names still wrap inside .resource-name, which
+           keeps its own min-width:0. */
+        flex: 1 1 100%;
+        min-width: 0;
+      }
+
+      /* The badges keep their intrinsic size so the name absorbs the
+         shrinking rather than squeezing the status indicators. */
+      .agent-header > scion-status-badge,
+      .agent-header > scion-message-mode-badge,
+      .agent-header > scion-messageability-indicator {
+        flex-shrink: 0;
       }
 
       .agent-meta {
@@ -338,7 +391,7 @@ export class ScionPageAgents extends LitElement {
     `,
   ];
 
-  private boundOnAgentsUpdated = this.onAgentsUpdated.bind(this);
+  private boundOnAgentsChanged = this.onAgentsChanged.bind(this);
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -407,9 +460,10 @@ export class ScionPageAgents extends LitElement {
     // Also require scope capabilities — without them the "New Agent" button
     // won't render, so we must fetch from the API to get them.
     const hydratedAgents = stateManager.getAgents();
-    const hydratedCaps = stateManager.getScopeCapabilities();
+    const hydratedCaps = stateManager.getScopeCapabilities('agent');
     if (hydratedAgents.length > 0 && hydratedCaps && this.agentScope === 'all') {
       this.agents = hydratedAgents;
+      this.loadedScope = 'all';
       this.scopeCapabilities = hydratedCaps;
       this.loading = false;
       stateManager.seedAgents(this.agents);
@@ -418,44 +472,35 @@ export class ScionPageAgents extends LitElement {
     }
 
     // Listen for real-time agent updates
-    stateManager.addEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
+    stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    stateManager.removeEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
+    stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
   }
 
-  private onAgentsUpdated(): void {
-    const updatedAgents = stateManager.getAgents();
-    // Merge SSE agent deltas into local agent list
-    const agentMap = new Map(this.agents.map((a) => [a.id, a]));
-    for (const agent of updatedAgents) {
-      const existing = agentMap.get(agent.id);
-      // When a scope filter is active, only update agents already in the
-      // filtered list — don't add new agents that weren't in the REST response.
-      // The server-side filter is the source of truth for ownership/membership.
-      if (!existing && this.agentScope !== 'all') {
-        continue;
-      }
-      const merged = { ...existing, ...agent } as Agent;
-      // Preserve _capabilities from existing state when the delta lacks them.
-      // For brand-new agents from SSE, inherit scope-level capabilities.
-      if (!merged._capabilities) {
-        if (existing?._capabilities) {
-          merged._capabilities = existing._capabilities;
-        } else if (this.scopeCapabilities) {
-          merged._capabilities = this.scopeCapabilities;
-        }
-      }
-      agentMap.set(agent.id, merged);
+  /**
+   * Live updates (design §7, §11): one `agents-changed` flush merged
+   * through `mergeChanged`, replacing the old `onAgentsUpdated` per-event
+   * full rebuild over `stateManager.getAgents()`.
+   */
+  private onAgentsChanged(e: Event): void {
+    // `notifyWithData` wraps the payload as `{state, data}` (state.ts); the
+    // `AgentsChangedDetail` itself is `detail.data`.
+    const detail = (e as CustomEvent<{ data: AgentsChangedDetail }>).detail.data;
+    const merged = mergeChanged(this.agents, detail, {
+      getAgent: (id) => stateManager.getAgent(id),
+      // Today's add rule (design §6.2): global page, scope `all` only — a
+      // scope filter's server-side response is the source of truth for
+      // membership, so a brand-new SSE agent is not added under a filter.
+      // An ID already held keeps getting its updates regardless.
+      shouldAdd: () => this.agentScope === 'all',
+      scopeCapabilities: this.scopeCapabilities,
+    });
+    if (merged !== this.agents) {
+      this.agents = merged;
     }
-    // Remove agents that were explicitly deleted via SSE
-    const deletedIds = stateManager.getDeletedAgentIds();
-    for (const id of deletedIds) {
-      agentMap.delete(id);
-    }
-    this.agents = Array.from(agentMap.values());
   }
 
   private async loadAgents(): Promise<void> {
@@ -464,43 +509,11 @@ export class ScionPageAgents extends LitElement {
 
     try {
       await this.fetchAndMergeAgents();
-      // Load metrics in background — non-blocking.
-      this.loadAgentMetrics();
     } catch (err) {
       console.error('Failed to load agents:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load agents';
     } finally {
       this.loading = false;
-    }
-  }
-
-  /**
-   * Load metrics summaries for displayed agents. Caps the number of requests
-   * and limits concurrency to avoid overwhelming the backend.
-   */
-  private async loadAgentMetrics(): Promise<void> {
-    const maxAgents = 20;
-    const concurrency = 5;
-    const subset = this.agents.slice(0, maxAgents);
-    const accumulatedMetrics = { ...this.agentMetrics };
-
-    // Process in batches of `concurrency`.
-    for (let i = 0; i < subset.length; i += concurrency) {
-      const batch = subset.slice(i, i + concurrency);
-      await Promise.all(
-        batch.map(async (agent) => {
-          try {
-            const res = await apiFetch(`/api/v1/agents/${agent.id}/metrics/summary`);
-            if (res.ok) {
-              const data = (await res.json()) as AgentMetricsSummary;
-              accumulatedMetrics[agent.id] = data;
-            }
-          } catch {
-            // Metrics loading is optional per agent.
-          }
-        })
-      );
-      this.agentMetrics = { ...accumulatedMetrics };
     }
   }
 
@@ -511,9 +524,13 @@ export class ScionPageAgents extends LitElement {
   }
 
   private async fetchAndMergeAgents(): Promise<void> {
+    // Captured now, not read again after the await: agentScope can change
+    // (another click) while this request is in flight, and loadedScope must
+    // reflect the scope *this response* was fetched for.
+    const requestedScope = this.agentScope;
     const params = new URLSearchParams();
-    if (this.agentScope !== 'all') {
-      params.set('scope', this.agentScope);
+    if (requestedScope !== 'all') {
+      params.set('scope', requestedScope);
     }
     if (this.labelFilter.trim() && this.labelFilter.includes('=')) {
       params.append('label', this.labelFilter.trim());
@@ -532,6 +549,7 @@ export class ScionPageAgents extends LitElement {
     const data = (await response.json()) as
       | { agents?: Agent[]; _capabilities?: Capabilities }
       | Agent[];
+    this.loadedScope = requestedScope;
     if (Array.isArray(data)) {
       this.agents = data;
       this.scopeCapabilities = undefined;
@@ -539,19 +557,40 @@ export class ScionPageAgents extends LitElement {
       this.agents = data.agents || [];
       this.scopeCapabilities = data._capabilities;
     }
+    // A REST response can race an SSE `deleted` already processed in an
+    // earlier flush; drop any such ID before it enters `this.agents`
+    // (`stateManager.seedAgents` already drops it from its own map, but
+    // this page's own array is a separate copy).
+    this.agents = dropTombstoned(this.agents, stateManager.getDeletedAgentIds());
     stateManager.seedAgents(this.agents);
     if (this.scopeCapabilities) {
-      stateManager.seedScopeCapabilities(this.scopeCapabilities);
+      stateManager.seedScopeCapabilities('agent', this.scopeCapabilities);
     }
   }
 
   private async handleAgentAction(
     agentId: string,
-    action: 'start' | 'stop' | 'suspend' | 'resume' | 'delete',
+    action: AgentLifecycleAction,
     event?: MouseEvent
   ): Promise<void> {
+    if (action === 'force-resume') {
+      if (
+        !(await showConfirm(RESUME_BEST_EFFORT_CONFIRM_MESSAGE, {
+          title: 'Resume (best effort)',
+          confirmText: 'Resume',
+          variant: 'primary',
+        }))
+      ) {
+        return;
+      }
+    }
+
     if (action === 'delete') {
-      if (!event?.altKey && !(await showConfirm('Are you sure you want to delete this agent?'))) {
+      const agentName = this.agents.find((a) => a.id === agentId)?.name ?? 'this agent';
+      if (
+        !event?.altKey &&
+        !(await showConfirm(`Are you sure you want to delete agent "${agentName}"?`))
+      ) {
         return;
       }
       // Show per-button spinner for delete; don't optimistically remove
@@ -605,6 +644,7 @@ export class ScionPageAgents extends LitElement {
       stop: 'stopping',
       suspend: 'stopping',
       resume: 'starting',
+      'force-resume': 'starting',
     };
     const agentIndex = this.agents.findIndex((a) => a.id === agentId);
     if (agentIndex >= 0) {
@@ -619,10 +659,11 @@ export class ScionPageAgents extends LitElement {
       stop: `/api/v1/agents/${agentId}/stop`,
       suspend: `/api/v1/agents/${agentId}/suspend`,
       resume: `/api/v1/agents/${agentId}/start`,
+      'force-resume': `/api/v1/agents/${agentId}/start`,
     };
 
     try {
-      const response = await apiFetch(actionUrls[action], { method: 'POST' });
+      const response = await apiFetch(actionUrls[action], lifecycleActionRequestInit(action));
 
       if (!response.ok) {
         throw new Error(await extractApiError(response, `Failed to ${action} agent`));
@@ -1081,7 +1122,12 @@ export class ScionPageAgents extends LitElement {
     }
 
     if (this.viewMode === 'graph') {
-      return html`<scion-agent-tree-view .agents=${filtered}></scion-agent-tree-view>`;
+      // Everything that can narrow/widen `filtered` independent of a delete.
+      const filterKey = `${this.loadedScope}|${this.phaseFilter}|${this.modeFilter}|${this.labelFilter}`;
+      return html`<scion-agent-tree-view
+        .agents=${filtered}
+        filterKey=${filterKey}
+      ></scion-agent-tree-view>`;
     }
     return this.viewMode === 'grid' ? this.renderGrid() : this.renderTable();
   }
@@ -1142,7 +1188,7 @@ export class ScionPageAgents extends LitElement {
                 </span>
               </sl-tooltip>
             `
-          : can(agent._capabilities, 'attach')
+          : canMessageAgent(agent._capabilities)
             ? html`
                 <sl-tooltip content="Message">
                   <span style="display: inline-flex">
@@ -1172,7 +1218,7 @@ export class ScionPageAgents extends LitElement {
                   class="action-btn-primary"
                   variant="primary"
                   size="small"
-                  href="/agents/${agent.id}/terminal"
+                  href=${terminalHref(agent.id)}
                   ?disabled=${!isTerminalAvailable(agent)}
                   aria-label="Terminal"
                 >
@@ -1240,6 +1286,22 @@ export class ScionPageAgents extends LitElement {
             : nothing
           : canLifecycle(agent._capabilities)
             ? html`
+                ${agent.phase === 'error'
+                  ? html`
+                      <sl-tooltip content="Resume (best effort)">
+                        <sl-button
+                          size="small"
+                          outline
+                          ?loading=${isLoading}
+                          ?disabled=${isLoading}
+                          @click=${() => this.handleAgentAction(agent.id, 'force-resume')}
+                          aria-label="Resume (best effort)"
+                        >
+                          <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                        </sl-button>
+                      </sl-tooltip>
+                    `
+                  : nothing}
                 <sl-tooltip content="Start">
                   <sl-button
                     class="action-btn-success"
@@ -1332,26 +1394,6 @@ export class ScionPageAgents extends LitElement {
         </div>
 
         ${agent.taskSummary ? html` <div class="agent-task">${agent.taskSummary}</div> ` : ''}
-        ${this.agentMetrics[agent.id]
-          ? html`
-              <div
-                class="agent-meta"
-                style="margin-top: 0.5em; font-size: 0.8em; color: var(--scion-text-muted, #888);"
-              >
-                <div>
-                  <sl-icon name="bar-chart"></sl-icon> ${this.agentMetrics[agent.id].totalSessions}
-                  sessions
-                </div>
-                <div>
-                  <sl-icon name="hash"></sl-icon> ${(
-                    this.agentMetrics[agent.id].totalTokensInput +
-                    this.agentMetrics[agent.id].totalTokensOutput
-                  ).toLocaleString()}
-                  tokens
-                </div>
-              </div>
-            `
-          : nothing}
         ${agent.labels && Object.keys(agent.labels).length > 0
           ? html`<div class="agent-labels" style="margin-top: 0.5em;">
               ${Object.entries(agent.labels).map(
@@ -1396,8 +1438,6 @@ export class ScionPageAgents extends LitElement {
                 Updated <span class="sort-indicator">${this.sortIndicator('updated')}</span>
               </th>
               <th class="hide-mobile">Task</th>
-              <th class="hide-mobile">Sessions</th>
-              <th class="hide-mobile">Tokens</th>
               <th style="text-align: right">Actions</th>
             </tr>
           </thead>
@@ -1457,17 +1497,6 @@ export class ScionPageAgents extends LitElement {
         </td>
         <td class="hide-mobile">
           <span class="task-cell">${agent.taskSummary || '\u2014'}</span>
-        </td>
-        <td class="hide-mobile">
-          ${this.agentMetrics[agent.id] ? this.agentMetrics[agent.id].totalSessions : '\u2014'}
-        </td>
-        <td class="hide-mobile">
-          ${this.agentMetrics[agent.id]
-            ? (
-                this.agentMetrics[agent.id].totalTokensInput +
-                this.agentMetrics[agent.id].totalTokensOutput
-              ).toLocaleString()
-            : '\u2014'}
         </td>
         <td class="actions-cell">
           <span class="table-actions"> ${this.renderActionButtons(agent)} </span>

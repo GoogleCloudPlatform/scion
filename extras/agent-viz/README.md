@@ -56,7 +56,7 @@ The input is a JSON array of log entries exported from Google Cloud Logging. The
 |------------|----------|
 | `scion-agents` | Agent state changes, tool calls, file edit detection |
 | `scion-messages` | Message flow between agents |
-| `scion-server` | Context (grove setup, broker registration) |
+| `scion-server` | Context (project setup, broker registration) |
 
 Export logs from GCP with:
 

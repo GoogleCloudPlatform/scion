@@ -19,6 +19,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 )
 
 // TestNativeChatEnabled covers the tri-state toggle. Native chat shipped
@@ -80,6 +82,117 @@ func TestPublicSettingsNativeChat(t *testing.T) {
 			}
 			if resp.NativeChatEnabled != tc.want {
 				t.Errorf("nativeChatEnabled = %v, want %v", resp.NativeChatEnabled, tc.want)
+			}
+		})
+	}
+}
+
+// TestPublicSettingsAgentDefaults verifies that hub-level agent defaults
+// (harness config, template, model) are exposed through the public settings
+// endpoint so the web form can use them as fallback values instead of
+// hardcoding a harness name.
+func TestPublicSettingsAgentDefaults(t *testing.T) {
+	tests := []struct {
+		name              string
+		defaults          opsettings.AgentDefaultsSettings
+		wantHarnessConfig string
+		wantTemplate      string
+		wantModel         string
+	}{
+		{
+			name:              "empty defaults",
+			defaults:          opsettings.AgentDefaultsSettings{},
+			wantHarnessConfig: "",
+			wantTemplate:      "",
+			wantModel:         "",
+		},
+		{
+			name: "all defaults set",
+			defaults: opsettings.AgentDefaultsSettings{
+				DefaultHarnessConfig: "claude",
+				DefaultTemplate:      "ops-template",
+				DefaultModel:         "gemini-2.5-pro",
+			},
+			wantHarnessConfig: "claude",
+			wantTemplate:      "ops-template",
+			wantModel:         "gemini-2.5-pro",
+		},
+		{
+			name: "partial defaults",
+			defaults: opsettings.AgentDefaultsSettings{
+				DefaultHarnessConfig: "gemini-cli",
+			},
+			wantHarnessConfig: "gemini-cli",
+			wantTemplate:      "",
+			wantModel:         "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := &Server{config: ServerConfig{AgentDefaults: tc.defaults}}
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/public", nil)
+			rr := httptest.NewRecorder()
+			srv.handlePublicSettings(rr, req)
+
+			if rr.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+			}
+
+			var resp PublicSettingsResponse
+			if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("invalid JSON: %v", err)
+			}
+			if resp.DefaultHarnessConfig != tc.wantHarnessConfig {
+				t.Errorf("DefaultHarnessConfig = %q, want %q", resp.DefaultHarnessConfig, tc.wantHarnessConfig)
+			}
+			if resp.DefaultTemplate != tc.wantTemplate {
+				t.Errorf("DefaultTemplate = %q, want %q", resp.DefaultTemplate, tc.wantTemplate)
+			}
+			if resp.DefaultModel != tc.wantModel {
+				t.Errorf("DefaultModel = %q, want %q", resp.DefaultModel, tc.wantModel)
+			}
+		})
+	}
+}
+
+// TestPublicSettingsAgentSecretsUserScopeOnly is design §10 test 5:
+// agentSecretsUserScopeOnly reflects the setting, false by default. It
+// mirrors TestPublicSettingsNativeChat's tri-state shape, but the default
+// direction is inverted (permissive, not enabled) — unset and false both
+// report false, only explicit true reports true.
+func TestPublicSettingsAgentSecretsUserScopeOnly(t *testing.T) {
+	on, off := true, false
+
+	tests := []struct {
+		name    string
+		setting *bool
+		want    bool
+	}{
+		{"unset is reported as false (permissive default)", nil, false},
+		{"explicit false is reported as false", &off, false},
+		{"explicit true is reported as true", &on, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := &Server{config: ServerConfig{AgentSecretsUserScopeOnly: tc.setting}}
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/settings/public", nil)
+			rr := httptest.NewRecorder()
+			srv.handlePublicSettings(rr, req)
+
+			if rr.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+			}
+
+			var resp PublicSettingsResponse
+			if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("invalid JSON: %v", err)
+			}
+			if resp.AgentSecretsUserScopeOnly != tc.want {
+				t.Errorf("agentSecretsUserScopeOnly = %v, want %v", resp.AgentSecretsUserScopeOnly, tc.want)
 			}
 		})
 	}

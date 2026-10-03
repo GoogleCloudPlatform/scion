@@ -98,6 +98,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/auth/providers", RouteID: "auth.providers",
 		Classification: RoutePublic,
 	},
+	"/api/v1/auth/integrations/google/exchange": {
+		Pattern: "/api/v1/auth/integrations/google/exchange", RouteID: "auth.integrations.google.exchange",
+		Classification: RoutePublic,
+	},
 	"/api/v1/auth/invite/redeem": {
 		Pattern: "/api/v1/auth/invite/redeem", RouteID: "auth.invite.redeem",
 		Classification: RoutePublic,
@@ -150,6 +154,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/auth/me", RouteID: "auth.me",
 		Classification: RouteAuthenticated,
 	},
+	"/api/v1/experiments": {
+		Pattern: "/api/v1/experiments", RouteID: "experiments.resolved",
+		Classification: RouteAuthenticated,
+	},
 	"/api/v1/auth/admin-status": {
 		Pattern: "/api/v1/auth/admin-status", RouteID: "auth.admin-status",
 		Classification: RouteAuthenticated,
@@ -186,6 +194,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/users/me/injected-skills/", RouteID: "users.me.injectedSkills.byId",
 		Classification: RouteAuthenticated,
 	},
+	"/api/v1/users/me/terminal-workspace": {
+		Pattern: "/api/v1/users/me/terminal-workspace", RouteID: "users.me.terminalWorkspace",
+		Classification: RouteAuthenticated,
+	},
 	"/api/v1/users/me/templates": {
 		Pattern: "/api/v1/users/me/templates", RouteID: "users.me.templates",
 		Classification: RouteAuthenticated,
@@ -214,6 +226,29 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/message-channels", RouteID: "messageChannels.list",
 		Classification: RouteAuthenticated,
 	},
+	"/api/v1/conversations": {
+		Pattern: "/api/v1/conversations", RouteID: "conversations.list",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/conversations/": {
+		Pattern: "/api/v1/conversations/", RouteID: "conversations.byId",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/conversations/resolve": {
+		Pattern: "/api/v1/conversations/resolve", RouteID: "conversations.resolve",
+		Classification: RouteAuthenticated,
+	},
+
+	// Cross-project messaging (Phase 3)
+	"/api/v1/messaging/capabilities": {
+		Pattern: "/api/v1/messaging/capabilities", RouteID: "messaging.capabilities",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/messaging/targets/resolve": {
+		Pattern: "/api/v1/messaging/targets/resolve", RouteID: "messaging.targets.resolve",
+		Classification: RouteAuthenticated,
+	},
+
 	"/api/v1/chat/user-prefs": {
 		Pattern: "/api/v1/chat/user-prefs", RouteID: "chat.userPrefs",
 		Classification: RouteAuthenticated,
@@ -297,25 +332,6 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 
 	// -------------------------------------------------------------------------
-	// Policy: Legacy groves (aliases for projects)
-	// -------------------------------------------------------------------------
-	"/api/v1/groves": {
-		Pattern: "/api/v1/groves", RouteID: "groves.list",
-		Classification: RoutePolicy,
-		Permission:     "project.read", Resource: "project", Action: "read",
-	},
-	"/api/v1/groves/register": {
-		Pattern: "/api/v1/groves/register", RouteID: "groves.register",
-		Classification: RoutePolicy,
-		Permission:     "project.register", Resource: "project", Action: "register",
-	},
-	"/api/v1/groves/": {
-		Pattern: "/api/v1/groves/", RouteID: "groves.byId",
-		Classification: RoutePolicy,
-		Permission:     "project.read", Resource: "project", Action: "read",
-	},
-
-	// -------------------------------------------------------------------------
 	// Policy: Runtime brokers
 	// -------------------------------------------------------------------------
 	"/api/v1/runtime-brokers": {
@@ -351,10 +367,24 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RoutePolicy,
 		Permission:     "gcp_service_account.read", Resource: "gcp_service_account", Action: "read",
 	},
+	"/api/v1/gcp-service-accounts/mint": {
+		Pattern: "/api/v1/gcp-service-accounts/mint", RouteID: "gcpServiceAccounts.mint",
+		Classification: RoutePolicy,
+		Permission:     "gcp_service_account.create", Resource: "gcp_service_account", Action: "create",
+	},
 	"/api/v1/gcp-service-accounts/": {
 		Pattern: "/api/v1/gcp-service-accounts/", RouteID: "gcpServiceAccounts.byId",
 		Classification: RoutePolicy,
 		Permission:     "gcp_service_account.read", Resource: "gcp_service_account", Action: "read",
+	},
+
+	// gs:// link fetch: identity-only at the route level (any identity may
+	// reach the handler); the handler itself requires a user identity and
+	// derives every further check from the requested message, never from a
+	// registry permission — see handleGCSObject.
+	"/api/v1/gcs/object": {
+		Pattern: "/api/v1/gcs/object", RouteID: "gcs.object",
+		Classification: RouteAuthenticated,
 	},
 
 	// -------------------------------------------------------------------------
@@ -478,16 +508,6 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RoutePolicy,
 		Permission:     "project.read", Resource: "project", Action: "read",
 	},
-	"/api/v1/chat/threads": {
-		Pattern: "/api/v1/chat/threads", RouteID: "chat.threads.list",
-		Classification: RoutePolicy,
-		Permission:     "project.read", Resource: "project", Action: "read",
-	},
-	"/api/v1/chat/threads/": {
-		Pattern: "/api/v1/chat/threads/", RouteID: "chat.threads.byId",
-		Classification: RoutePolicy,
-		Permission:     "project.read", Resource: "project", Action: "read",
-	},
 	"/api/v1/chat/spaces": {
 		Pattern: "/api/v1/chat/spaces", RouteID: "chat.spaces.list",
 		Classification: RoutePolicy,
@@ -602,6 +622,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
 	},
+	"/api/v1/admin/maintenance/update-available": {
+		Pattern: "/api/v1/admin/maintenance/update-available", RouteID: "admin.maintenance.updateAvailable",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.maintenance.execute", Resource: "hub", Action: "execute",
+	},
 	"/api/v1/admin/maintenance/restart": {
 		Pattern: "/api/v1/admin/maintenance/restart", RouteID: "admin.maintenance.restart",
 		Classification: RouteHubAdmin,
@@ -666,6 +691,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/admin/messaging", RouteID: "admin.messaging",
 		Classification: RouteHubAdmin,
 		Permission:     "hub.messaging.update", Resource: "hub", Action: "update",
+	},
+	"/api/v1/admin/experiments": {
+		Pattern: "/api/v1/admin/experiments", RouteID: "admin.experiments",
+		Classification: RouteHubAdmin,
+		Permission:     "hub.experiments.update", Resource: "hub", Action: "update",
 	},
 	"/api/v1/admin/agents/reset-auth-all": {
 		Pattern: "/api/v1/admin/agents/reset-auth-all", RouteID: "admin.agents.resetAuthAll",
@@ -828,6 +858,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "access_constraint.read", Resource: "access_constraint", Action: "read",
 	},
+	"GET /api/v1/admin/access-constraints/{id}/audit": {
+		Pattern: "GET /api/v1/admin/access-constraints/{id}/audit", RouteID: "admin.accessConstraints.audit",
+		Classification: RoutePolicy,
+		Permission:     "hub.audit.read", Resource: "access_constraint", Action: "manage",
+	},
 	"/api/v1/admin/access-constraint-previews": {
 		Pattern: "/api/v1/admin/access-constraint-previews", RouteID: "admin.accessConstraintPreviews",
 		Classification: RouteHubAdmin,
@@ -904,9 +939,19 @@ var routeMetadataTable = map[string]RouteMetadata{
 
 	// -------------------------------------------------------------------------
 	// Broker HMAC: Registration and lifecycle
+	//
+	// These routes are RouteBrokerHMAC (route-guard pass-through) because
+	// several of them (join, inbound, callback) are broker-credentialed or
+	// unauthenticated by design, not because none of them need a permission
+	// check. POST /api/v1/brokers is user-credentialed and enforces
+	// broker.create itself, in-handler, via authorizeBrokerCreate
+	// (handlers_brokers.go) — see createBrokerRegistration and its
+	// ptone/scion#2138 gate. It is not RoutePolicy because the same path
+	// also carries the additional target owner/super-admin re-registration
+	// check, which a declarative Permission entry cannot express.
 	// -------------------------------------------------------------------------
 	"/api/v1/brokers": {
-		Pattern: "/api/v1/brokers", RouteID: "brokers.list",
+		Pattern: "/api/v1/brokers", RouteID: "brokers.create",
 		Classification: RouteBrokerHMAC,
 	},
 	"/api/v1/brokers/join": {
@@ -1040,6 +1085,10 @@ func (s *Server) guarded(pattern string, handler http.HandlerFunc) http.HandlerF
 // It runs BEFORE the handler. The handler's own authorization checks remain as defense-in-depth.
 func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Every guarded route's decision audit carries its RouteID.
+		if meta.RouteID != "" {
+			r = r.WithContext(ContextWithRoute(r.Context(), meta.RouteID))
+		}
 		switch meta.Classification {
 		case RoutePublic:
 			// No guard — pass through
@@ -1057,6 +1106,15 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 			// The handler performs per-resource authorization with full context.
 			// The declarative guard classifies the route; enforcement stays in
 			// the handler where resource IDs, ownership, and visibility are known.
+			if agentSubRouteGuardedRoutes[meta.RouteID] {
+				// Agent sub-routes resolve once here, for every caller
+				// kind; handlers dispatch on the stored value.
+				resolved, ok := resolveAgentSubRouteForRequest(w, r)
+				if !ok {
+					return
+				}
+				r = resolved
+			}
 			next(w, r)
 		case RouteHubAdmin:
 			if meta.Permission != "" && s.authzService != nil {

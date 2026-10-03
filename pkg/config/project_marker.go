@@ -21,7 +21,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/projectcompat"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"gopkg.in/yaml.v3"
 )
 
@@ -33,34 +33,6 @@ type ProjectMarker struct {
 	ProjectName string `yaml:"project-name"`
 	ProjectSlug string `yaml:"project-slug"`
 	Type        string `yaml:"type,omitempty"` // "shadow" for shadowed projects
-}
-
-// UnmarshalYAML implements custom unmarshaling to handle legacy "grove-" tags.
-func (m *ProjectMarker) UnmarshalYAML(value *yaml.Node) error {
-	type Alias ProjectMarker
-	var aux struct {
-		GroveID   string `yaml:"grove-id"`
-		GroveName string `yaml:"grove-name"`
-		GroveSlug string `yaml:"grove-slug"`
-		Alias     Alias  `yaml:",inline"`
-	}
-
-	if err := value.Decode(&aux); err != nil {
-		return err
-	}
-
-	*m = ProjectMarker(aux.Alias)
-
-	if m.ProjectID == "" {
-		m.ProjectID = aux.GroveID
-	}
-	if m.ProjectName == "" {
-		m.ProjectName = aux.GroveName
-	}
-	if m.ProjectSlug == "" {
-		m.ProjectSlug = aux.GroveSlug
-	}
-	return nil
 }
 
 // IsShadow returns true if this marker represents a shadowed project.
@@ -84,31 +56,24 @@ func (m ProjectMarker) DirName() string {
 
 // ExternalProjectPath returns the absolute path to the external project config
 // directory: ~/.scion/project-configs/<project-slug>__<short-uuid>/.scion/
-// Checks project-configs first, falling back to legacy grove-configs if not found.
 func (m ProjectMarker) ExternalProjectPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
 
-	// 1. Try project-configs/
-	projectPath := filepath.Join(home, GlobalDir, ProjectConfigsDir, m.DirName(), DotScion)
-	if _, err := os.Stat(projectPath); err == nil {
-		return projectPath, nil
-	}
-
-	// 2. Fallback to legacy grove-configs/
-	legacyPath := filepath.Join(home, GlobalDir, GroveConfigsDir, m.DirName(), DotScion)
-	if _, err := os.Stat(legacyPath); err == nil {
-		return legacyPath, nil
-	}
-
-	// 3. Default to project-configs/
-	return projectPath, nil
+	return filepath.Join(home, GlobalDir, ProjectConfigsDir, m.DirName(), DotScion), nil
 }
 
-// ReadProjectMarker reads and parses a .scion marker file.
+// ReadProjectMarker reads and parses a .scion marker file. A legacy
+// grove-id/grove-name/grove-slug key is migrated to project-id/project-name/
+// project-slug as a side effect on every call (see migrateLegacyMarkerFile;
+// each migration event is reported at most once per process, but the
+// filesystem is always re-checked): when the rewrite cannot happen (e.g. a
+// read-only filesystem), the legacy value is used for this call only.
 func ReadProjectMarker(path string) (*ProjectMarker, error) {
+	overrides := migrateLegacyMarkerFile(path)
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -116,6 +81,15 @@ func ReadProjectMarker(path string) (*ProjectMarker, error) {
 	var marker ProjectMarker
 	if err := yaml.Unmarshal(data, &marker); err != nil {
 		return nil, fmt.Errorf("invalid project marker at %s: %w", path, err)
+	}
+	if marker.ProjectID == "" {
+		marker.ProjectID = overrides["project-id"]
+	}
+	if marker.ProjectName == "" {
+		marker.ProjectName = overrides["project-name"]
+	}
+	if marker.ProjectSlug == "" {
+		marker.ProjectSlug = overrides["project-slug"]
 	}
 	if marker.ProjectID == "" || marker.ProjectSlug == "" {
 		return nil, fmt.Errorf("invalid project marker at %s: missing project-id or project-slug", path)
@@ -189,12 +163,11 @@ func IsOldStyleNonGitProject(scionPath string) bool {
 // indicating the CLI is running inside a hub-connected agent container where
 // project data should be accessed via the Hub API rather than the local filesystem.
 // Checks SCION_HUB_ENDPOINT (primary), SCION_HUB_URL (legacy), and
-// SCION_GROVE_ID (always set for broker-dispatched agents).
+// SCION_PROJECT_ID (always set for broker-dispatched agents).
 func IsHubContext() bool {
 	return os.Getenv("SCION_HUB_ENDPOINT") != "" ||
 		os.Getenv("SCION_HUB_URL") != "" ||
-		os.Getenv(projectcompat.EnvGroveID) != "" ||
-		os.Getenv(projectcompat.EnvProjectID) != ""
+		os.Getenv(projectkeys.EnvProjectID) != ""
 }
 
 // WriteWorkspaceMarker writes a minimal .scion marker file into a workspace
@@ -222,29 +195,32 @@ func ExtractSlugFromExternalDir(dirName string) string {
 	return ""
 }
 
-// ReadProjectID reads the project-id file from a git project's .scion directory.
-// Checks project-id first, then falls back to grove-id for legacy projects.
+// ReadProjectID reads the project-id file from a git project's .scion
+// directory. A legacy .scion/grove-id file is migrated to project-id as a
+// side effect on every call (see MigrateLegacyProject; each migration event
+// is reported at most once per process, but the filesystem is always
+// re-checked, so a project-id removed later or a grove-id that appears
+// later are both handled correctly): when the rewrite cannot happen (e.g. a
+// read-only filesystem), the legacy value is used for this call only.
 func ReadProjectID(projectDir string) (string, error) {
-	// 1. Try project-id
-	data, err := os.ReadFile(filepath.Join(projectDir, projectcompat.ProjectIDFile))
+	overrides := MigrateLegacyProject(projectDir, currentProjectMigrationReporter())
+
+	data, err := os.ReadFile(filepath.Join(projectDir, projectkeys.ProjectIDFile))
 	if err == nil {
 		return strings.TrimSpace(string(data)), nil
 	}
 	if !os.IsNotExist(err) {
 		return "", err
 	}
-
-	// 2. Fallback to legacy grove-id
-	data, err = os.ReadFile(filepath.Join(projectDir, projectcompat.GroveIDFile))
-	if err != nil {
-		return "", err
+	if overrides.ProjectID != "" {
+		return overrides.ProjectID, nil
 	}
-	return strings.TrimSpace(string(data)), nil
+	return "", err
 }
 
 // WriteProjectID writes a project-id file to a git project's .scion directory.
 func WriteProjectID(projectDir string, projectID string) error {
-	return os.WriteFile(filepath.Join(projectDir, projectcompat.ProjectIDFile), []byte(projectID+"\n"), 0644)
+	return os.WriteFile(filepath.Join(projectDir, projectkeys.ProjectIDFile), []byte(projectID+"\n"), 0644)
 }
 
 // GetGitProjectExternalConfigDir returns the external config directory for a git project.
@@ -311,6 +287,24 @@ func GetAgentHomePath(projectDir, agentName string) string {
 	return filepath.Join(projectDir, "agents", agentName, "home")
 }
 
+// SelectAgentsRoot returns the directory GetAgentDir addresses a given
+// agent's directory under, for the same (projectDir, sharedWorkspace)
+// inputs: the external agents directory when sharedWorkspace is true and one
+// is configured, otherwise <projectDir>/agents. GetAgentDir is defined in
+// terms of this function so the two can never select different roots; a
+// caller that needs to confirm a computed agent directory is still under
+// the intended root (for example, before a directory removal) should
+// recompute the root with this function rather than assuming
+// <projectDir>/agents.
+func SelectAgentsRoot(projectDir string, sharedWorkspace bool) string {
+	if sharedWorkspace {
+		if externalDir, err := GetGitProjectExternalAgentsDir(projectDir); err == nil && externalDir != "" {
+			return externalDir
+		}
+	}
+	return filepath.Join(projectDir, "agents")
+}
+
 // GetAgentDir returns the broker-side directory for an agent's per-agent state
 // files (prompt.md, scion-agent.json, and — in worktree mode — the workspace
 // subdir).
@@ -326,12 +320,7 @@ func GetAgentHomePath(projectDir, agentName string) string {
 // <projectDir>/agents/<name>/ — preserving the worktree-relative layout that
 // git's worktree pointers depend on.
 func GetAgentDir(projectDir, agentName string, sharedWorkspace bool) string {
-	if sharedWorkspace {
-		if externalDir, err := GetGitProjectExternalAgentsDir(projectDir); err == nil && externalDir != "" {
-			return filepath.Join(externalDir, agentName)
-		}
-	}
-	return filepath.Join(projectDir, "agents", agentName)
+	return filepath.Join(SelectAgentsRoot(projectDir, sharedWorkspace), agentName)
 }
 
 // ResolveAgentDir returns the broker-side per-agent state directory when the

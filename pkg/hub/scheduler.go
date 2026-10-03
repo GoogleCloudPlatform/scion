@@ -68,6 +68,12 @@ type Scheduler struct {
 	// Recurring handlers
 	recurring []RecurringHandler
 
+	// launchReaper is the async launch reaper's registration, if
+	// any (RegisterLaunchReaper). It runs on its own dedicated ticker,
+	// separate from the root ticker and recurring above — see
+	// RegisterLaunchReaper's doc comment for why.
+	launchReaper *launchReaperRegistration
+
 	// Event type handlers for one-shot events
 	eventHandlers map[string]EventHandler
 
@@ -90,9 +96,16 @@ type Scheduler struct {
 
 // RecurringHandler defines a periodic task driven by the root ticker.
 type RecurringHandler struct {
-	Name     string                    // Human-readable name for logging
-	Interval int                       // Run every N ticks (must be >= 1)
-	Fn       func(ctx context.Context) // The work to perform
+	Name      string                    // Human-readable name for logging
+	Interval  int                       // Run every N ticks (must be >= 1)
+	Fn        func(ctx context.Context) // The work to perform
+	Singleton bool                      // true if registered via RegisterRecurringSingleton
+}
+
+// launchReaperRegistration holds a RegisterLaunchReaper call's arguments.
+type launchReaperRegistration struct {
+	interval time.Duration
+	fn       func(ctx context.Context)
 }
 
 // scheduledTimer wraps a time.Timer with metadata for one-shot events.
@@ -175,13 +188,23 @@ func (s *Scheduler) GetEventHandler(eventType string) (EventHandler, bool) {
 // Tick-Zero Behavior: All recurring handlers run immediately on startup (tick 0)
 // because 0 % N == 0 for any interval N. This is intentional.
 func (s *Scheduler) RegisterRecurring(name string, intervalMinutes int, fn func(ctx context.Context)) {
+	s.registerRecurring(name, intervalMinutes, fn, false)
+}
+
+// registerRecurring is the shared implementation behind RegisterRecurring and
+// RegisterRecurringSingleton. singleton records the registration mode on the
+// resulting RecurringHandler so callers (and tests) can tell which path a
+// handler was registered through without relying on function identity, which
+// inlining can make ambiguous.
+func (s *Scheduler) registerRecurring(name string, intervalMinutes int, fn func(ctx context.Context), singleton bool) {
 	if intervalMinutes < 1 {
 		intervalMinutes = 1
 	}
 	s.recurring = append(s.recurring, RecurringHandler{
-		Name:     name,
-		Interval: intervalMinutes,
-		Fn:       fn,
+		Name:      name,
+		Interval:  intervalMinutes,
+		Fn:        fn,
+		Singleton: singleton,
 	})
 }
 
@@ -196,7 +219,7 @@ func (s *Scheduler) RegisterRecurring(name string, intervalMinutes int, fn func(
 // If the store does not implement store.AdvisoryLocker, the handler runs
 // unguarded (correct for a single replica).
 func (s *Scheduler) RegisterRecurringSingleton(name string, intervalMinutes int, key store.AdvisoryLockKey, fn func(ctx context.Context)) {
-	s.RegisterRecurring(name, intervalMinutes, s.singletonGuard(name, key, fn))
+	s.registerRecurring(name, intervalMinutes, s.singletonGuard(name, key, fn), true)
 }
 
 // singletonGuard wraps fn so it only runs while this replica holds the named
@@ -240,6 +263,74 @@ func (s *Scheduler) singletonGuard(name string, key store.AdvisoryLockKey, fn fu
 	}
 }
 
+// RegisterLaunchReaper registers the async-create launch reaper's tick
+// handler on its own dedicated ticker (design §3.7), separate from the root
+// ticker's whole-minute RegisterRecurring mechanism:
+// NewScheduler fixes the root tickInterval at 1 minute, and WithTickInterval
+// changes it for every handler at once, so the root ticker cannot give one
+// handler a 15 s cadence on its own.
+//
+// fn's ticks run synchronously on their own goroutine — the next tick is
+// never fired until fn returns, so ticks never overlap — and bypass s.sem
+// (the root ticker's MaxConcurrency semaphore) entirely: unrelated
+// maintenance backpressure on s.sem must never silently disable the
+// deadline/staleness safety net. Must be called before Start; not safe for
+// concurrent use, matching RegisterRecurring.
+func (s *Scheduler) RegisterLaunchReaper(interval time.Duration, fn func(ctx context.Context)) {
+	s.launchReaper = &launchReaperRegistration{interval: interval, fn: fn}
+}
+
+// runLaunchReaperLoop drives the launch reaper's dedicated ticker until Stop
+// or ctx is cancelled. It is started by Start (only when a reaper was
+// registered) and tracked by s.wg like the root ticker goroutine, so Stop
+// waits for an in-flight tick to finish before returning.
+func (s *Scheduler) runLaunchReaperLoop(ctx context.Context, reg *launchReaperRegistration) {
+	defer s.wg.Done()
+
+	ticker := time.NewTicker(reg.interval)
+	defer ticker.Stop()
+
+	// Tick immediately on startup, matching the root ticker's tick-zero
+	// behavior, so the reaper is observed/armed from process start rather
+	// than waiting a full interval for its first run.
+	s.runLaunchReaperTick(ctx, reg.fn)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.stopCh:
+			return
+		case <-ticker.C:
+			// A stop/cancel signalled while this tick's own select was
+			// choosing ticker.C is not re-checked by that select (once
+			// multiple cases are ready, Go picks arbitrarily among them), so
+			// check explicitly before running the tick. Without this, a tick
+			// could still start immediately after Stop was called, running
+			// with an already-cancelled ctx.
+			select {
+			case <-ctx.Done():
+				return
+			case <-s.stopCh:
+				return
+			default:
+			}
+			s.runLaunchReaperTick(ctx, reg.fn)
+		}
+	}
+}
+
+// runLaunchReaperTick invokes fn with panic recovery, deliberately not going
+// through s.sem or a per-tick goroutine (see RegisterLaunchReaper).
+func (s *Scheduler) runLaunchReaperTick(ctx context.Context, fn func(ctx context.Context)) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.log.Error("Scheduler: launch reaper tick panicked", "panic", r)
+		}
+	}()
+	fn(ctx)
+}
+
 // Start begins the root ticker loop and runs eligible handlers immediately
 // on startup (tick 0). The provided context is used as the parent for handler
 // invocations. Before starting the ticker, persisted one-shot timers are
@@ -276,12 +367,22 @@ func (s *Scheduler) Start(ctx context.Context) {
 			}
 		}
 	}()
+
+	if s.launchReaper != nil {
+		s.wg.Add(1)
+		go s.runLaunchReaperLoop(ctx, s.launchReaper)
+	}
 }
 
 // Stop signals the scheduler to stop, cancels all pending one-shot timers,
-// and waits for the root ticker goroutine to exit. In-flight handler
-// goroutines are not tracked; they will be cancelled via the parent context
-// when the server shuts down. It is safe to call multiple times.
+// and waits for the root ticker goroutine to exit. In-flight recurring
+// handler goroutines (spawned per tick by runRecurringHandlers) are not
+// tracked; they will be cancelled via the parent context when the server
+// shuts down. The launch reaper's dedicated goroutine is different: it runs
+// synchronously (no per-tick goroutine), is tracked by the same s.wg, and so
+// Stop also waits for it to exit — including finishing any tick already in
+// flight, bounded by the store's 10s tick timeout plus its up-to-2s
+// best-effort disarm write. It is safe to call Stop multiple times.
 func (s *Scheduler) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stopCh)
@@ -461,6 +562,10 @@ func (s *Scheduler) scheduleTimer(ctx context.Context, evt store.ScheduledEvent)
 // database status. wasExpired indicates the timer was past its fire_at when
 // loaded on startup.
 func (s *Scheduler) fireEvent(ctx context.Context, evt store.ScheduledEvent, wasExpired bool) {
+	// E.2b: mark this as deferred execution of an earlier request, distinct
+	// from the initiator recorded on evt. Covers one-shot fires and restart
+	// replay of overdue events alike, since both paths call fireEvent.
+	ctx = ContextWithExecutor(ctx, ExecutorContext{Kind: "scheduler", ID: "scheduled_event:" + evt.ID})
 	handlerCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 

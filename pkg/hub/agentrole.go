@@ -60,9 +60,11 @@ func ScopesForRole(role AgentRole) []AgentTokenScope {
 			ScopeAgentNotify,
 			ScopeAgentPortForward,
 			ScopeAgentCreate,
+			ScopeAgentSAAssign,
 			ScopeAgentLifecycle,
 			ScopeProjectSecretRead,
 			ScopeProjectTemplateWrite,
+			ScopeAgentSetMessageMode,
 		}
 	case "":
 		return ScopesForRole(AgentRoleNone)

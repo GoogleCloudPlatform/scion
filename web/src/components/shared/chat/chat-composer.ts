@@ -24,21 +24,41 @@
  * - Sends via `chat-send` custom event: {text, plain, interrupt, mentions}
  * - @-mention autocomplete integration (Phase 4)
  * - The composer knows nothing about the network
- * - Send on Enter (Shift+Enter for newline)
+ * - Send on Enter (Shift+Enter for newline); on touch-primary devices Enter
+ *   inserts a newline instead, since there is no Shift+Enter combo
  * - Right-click send button for "Send with interruption"
  */
 
 import { LitElement, html, css, nothing } from 'lit';
 import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import { guard } from 'lit/directives/guard.js';
+import { live } from 'lit/directives/live.js';
 import type { Agent } from '../../../shared/types.js';
 import type { MentionAcceptDetail } from './mention-autocomplete.js';
 import type { SlashCommandDetail } from './slash-autocomplete.js';
 import './mention-autocomplete.js';
 import './slash-autocomplete.js';
+import { showToast } from '../../../utils/toast.js';
+import { LongPressController } from './long-press.js';
+import type { ActionSheetItem, ActionSheetSelectDetail } from './chat-action-sheet.js';
+import './chat-action-sheet.js';
+
+/** The touch presentation of the send button's right-click menu. */
+const SEND_SHEET_ITEMS: ActionSheetItem[] = [
+  { id: 'send-interrupt', label: 'Send with interruption', icon: 'lightning-charge' },
+];
 
 /** Maximum message length in rune count. */
 const MAX_MESSAGE_LENGTH = 2000;
+
+const GRAPHEME_SEGMENTER =
+  typeof Intl !== 'undefined' && 'Segmenter' in Intl
+    ? new Intl.Segmenter('en', { granularity: 'grapheme' })
+    : null;
+
+/** Pastes exceeding this rune count are auto-converted to text attachments. */
+export const PASTE_TO_ATTACHMENT_THRESHOLD = 1000;
 
 /** Uploaded attachment info returned from the server. */
 export interface UploadedAttachment {
@@ -75,11 +95,15 @@ export interface ChatSendDetail {
   plain: boolean;
   interrupt: boolean;
   onSuccess: () => void;
+  /** Restore composer state on send failure. */
+  onError?: (errorMsg: string) => void;
   mentions: string[];
   /** W7: Attachment IDs to include with the message. */
   attachmentIds: string[];
   /** Phase-3: Reply-to message ID. */
   replyToId?: string;
+  /** Reply-to content for RE_msg_starting metadata. */
+  replyToContent?: string;
 }
 
 /** Event detail for the chat-edit custom event (Phase 3). */
@@ -98,15 +122,41 @@ export interface MemberInfo {
 }
 
 /**
+ * A span of `this.text` occupied by an accepted mention token, `@slug `
+ * (including the trailing space inserted on accept). `start`/`end` are
+ * indices into `this.text`, kept in sync as the surrounding text changes.
+ */
+interface MentionRange {
+  start: number;
+  end: number;
+  slug: string;
+}
+
+/**
+ * Whether the primary input mechanism does not support hover — i.e. touch is
+ * the primary way of interacting with this device. Mice and trackpads
+ * support hover; fingers do not. This is more accurate than `ontouchstart`
+ * presence checks, which also flag laptops with touchscreens where a mouse
+ * or trackpad is still the primary input.
+ */
+let _isPrimaryInputTouchCached: boolean | undefined;
+function isPrimaryInputTouch(): boolean {
+  if (_isPrimaryInputTouchCached === undefined) {
+    _isPrimaryInputTouchCached =
+      typeof window !== 'undefined' && window.matchMedia('(hover: none)').matches;
+  }
+  return _isPrimaryInputTouchCached;
+}
+
+/**
  * Count "runes" (user-perceived characters) in a string.
  * Uses Intl.Segmenter where available, falls back to spread length.
  */
 function countRunes(text: string): number {
-  if (typeof Intl !== 'undefined' && 'Segmenter' in Intl) {
-    const segmenter = new Intl.Segmenter('en', { granularity: 'grapheme' });
+  if (GRAPHEME_SEGMENTER) {
     let count = 0;
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    for (const _ of segmenter.segment(text)) count++;
+    for (const _ of GRAPHEME_SEGMENTER.segment(text)) count++;
     return count;
   }
   // Fallback: spread into an array (handles surrogate pairs but not all grapheme clusters)
@@ -115,6 +165,11 @@ function countRunes(text: string): number {
 
 @customElement('scion-chat-composer')
 export class ScionChatComposer extends LitElement {
+  // Let capable browsers size the input during their normal layout pass.
+  // Older engines retain Shoelace's JS autosizing behavior.
+  private readonly nativeTextareaSizing =
+    typeof CSS !== 'undefined' && CSS.supports('field-sizing', 'content');
+
   /** Whether the send button should be disabled (e.g. while sending). */
   @property({ type: Boolean })
   disabled = false;
@@ -161,8 +216,13 @@ export class ScionChatComposer extends LitElement {
   /** Whether the right-click send context menu is visible. */
   @state() private showSendContextMenu = false;
 
-  /** Live mention override for the destination chip. */
-  @state() private liveMentionOverride = '';
+  /** Whether the send menu is open as an action sheet (a long-press on Send). */
+  @state() private showSendSheet = false;
+
+  /** "Send with interruption" was chosen from the sheet; sent once it has closed. */
+  private sendInterruptOnSheetClose = false;
+
+  private readonly sendLongPress = new LongPressController(this);
 
   /** W7: Pending file uploads before send. */
   @state() private pendingFiles: UploadedAttachment[] = [];
@@ -183,13 +243,39 @@ export class ScionChatComposer extends LitElement {
   /** Set of accepted mention slugs. Filtered to those still present on send. */
   private acceptedMentions = new Set<string>();
 
+  /**
+   * Ranges of `this.text` occupied by an *accepted* (resolved) mention —
+   * `@slug ` including its trailing space, as inserted on accept. Backspace/
+   * Delete at the edges of one of these ranges removes the whole token in a
+   * single keystroke (#1912). Edits that land inside a range invalidate it —
+   * it is no longer a clean resolved mention, so it reverts to plain text
+   * that deletes one character at a time like any other typed text.
+   */
+  private mentionRanges: MentionRange[] = [];
+
+  /** Reset per-message mention bookkeeping (ranges + accepted set). */
+  private resetMentionTracking(): void {
+    this.mentionRanges = [];
+    this.acceptedMentions.clear();
+  }
+
   /** Phase-3 + Phase-4: Handle editMessage and conversationKey changes. */
   override updated(changedProperties: Map<string, unknown>): void {
     super.updated(changedProperties);
     if (changedProperties.has('editMessage') && this.editMessage) {
       this.text = this.editMessage.content;
       this.runeCount = countRunes(this.editMessage.content);
+      // Edited content is historical plain text, not a just-accepted
+      // mention — it must not be atomically deletable.
+      this.resetMentionTracking();
       this.focusTextarea();
+    }
+    // A new reply target (including switching from one message to another)
+    // must move focus into the textarea, caret at the end of the draft, so
+    // the user can start typing the reply immediately. Clearing `replyTo`
+    // (cancel/send) must not re-steal focus, hence the truthy check.
+    if (changedProperties.has('replyTo') && this.replyTo) {
+      this.focusTextareaCaretEnd();
     }
     if (changedProperties.has('conversationKey')) {
       // Save the draft for the OLD conversation immediately before switching.
@@ -200,6 +286,7 @@ export class ScionChatComposer extends LitElement {
       // Reset text so stale content from the old conversation is not carried over.
       this.text = '';
       this.runeCount = 0;
+      this.resetMentionTracking();
       this.restoreDraft();
     }
   }
@@ -233,7 +320,7 @@ export class ScionChatComposer extends LitElement {
     }
 
     sl-textarea::part(base) {
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
       border-radius: 0.75rem;
       background: var(--scion-surface-raised, #ffffff);
       border-color: var(--scion-border, #e2e8f0);
@@ -244,8 +331,68 @@ export class ScionChatComposer extends LitElement {
       color: var(--scion-text, #1e293b);
     }
 
+    @supports (field-sizing: content) {
+      sl-textarea::part(textarea) {
+        field-sizing: content;
+        min-width: 0;
+      }
+    }
+
     sl-textarea::part(form-control) {
       color: var(--scion-text, #1e293b);
+    }
+
+    /* Stop iOS/Android focus-zoom: the composer's inner native textarea
+       computes at 16px or more on a coarse (touch) pointer, even though
+       the Shoelace font-size custom property (set app-wide in critical
+       CSS) only reaches ::part(base), not the inner textarea itself. */
+    @media (pointer: coarse) {
+      sl-textarea::part(textarea) {
+        font-size: max(16px, var(--chat-fs-lg));
+      }
+    }
+
+    @media (max-width: 768px) {
+      .attach-btn::part(base) {
+        min-height: 44px;
+      }
+
+      /* Icon-only on mobile: a square accent button, freeing the width the
+         text label used for the textarea. The label stays in the DOM
+         (visually hidden, not removed) so the accessible name is still
+         "Send" / "Save Edit" without a separate aria-label. */
+      .send-btn::part(base) {
+        width: 44px;
+        height: 44px;
+        min-height: 44px;
+        padding: 0;
+        justify-content: center;
+      }
+
+      .send-btn::part(prefix) {
+        margin-inline-end: 0;
+      }
+
+      /* The label slot wrapper keeps its own padding even though the
+         slotted content (the clip-rect-hidden span) collapses to 1x1 —
+         without this, the icon sits visibly off-centre in the square
+         button instead of in the middle of it. */
+      .send-btn::part(label) {
+        padding: 0;
+      }
+
+      .send-btn sl-icon {
+        font-size: 20px;
+      }
+
+      .send-btn .send-label {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+      }
     }
 
     .send-container {
@@ -255,6 +402,16 @@ export class ScionChatComposer extends LitElement {
 
     .send-btn {
       flex-shrink: 0;
+    }
+
+    /* Long-press on Send opens its menu; keep iOS's callout and text
+       selection from claiming the press. */
+    @media (hover: none) {
+      .send-btn {
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
     }
 
     .send-context-overlay {
@@ -282,7 +439,7 @@ export class ScionChatComposer extends LitElement {
       align-items: center;
       gap: 0.5rem;
       padding: 0.375rem 0.75rem;
-      font-size: 0.8125rem;
+      font-size: var(--chat-fs-md);
       cursor: pointer;
       color: var(--scion-text, #1e293b);
       white-space: nowrap;
@@ -309,14 +466,14 @@ export class ScionChatComposer extends LitElement {
       display: flex;
       align-items: center;
       gap: 0.25rem;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #64748b);
       cursor: pointer;
       white-space: nowrap;
     }
 
     .char-counter {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       color: var(--scion-text-muted, #64748b);
       white-space: nowrap;
     }
@@ -336,7 +493,7 @@ export class ScionChatComposer extends LitElement {
       align-items: center;
       gap: 0.375rem;
       padding: 0.25rem 0.75rem;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-text-muted, #64748b);
       background: var(--scion-bg-subtle, #f1f5f9);
       border-radius: 0.5rem 0.5rem 0 0;
@@ -363,11 +520,6 @@ export class ScionChatComposer extends LitElement {
       opacity: 0.8;
     }
 
-    .destination-chip .mention-override {
-      font-weight: 600;
-      color: var(--scion-warning-600, #d97706);
-    }
-
     .destination-chip.clickable {
       cursor: pointer;
       transition: background 0.15s;
@@ -378,7 +530,7 @@ export class ScionChatComposer extends LitElement {
     }
 
     .chip-chevron {
-      font-size: 0.625rem;
+      font-size: var(--chat-fs-xs);
       margin-left: auto;
       opacity: 0.6;
     }
@@ -393,7 +545,7 @@ export class ScionChatComposer extends LitElement {
     }
 
     .attach-btn::part(base) {
-      font-size: 1rem;
+      font-size: var(--chat-fs-2xl);
     }
 
     .pending-files {
@@ -411,7 +563,7 @@ export class ScionChatComposer extends LitElement {
       background: var(--scion-bg-subtle, #f1f5f9);
       border: 1px solid var(--scion-border, #e2e8f0);
       border-radius: 0.375rem;
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       color: var(--scion-text, #1e293b);
       max-width: 200px;
     }
@@ -437,7 +589,7 @@ export class ScionChatComposer extends LitElement {
       line-height: 1;
       background: none;
       border: none;
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
     }
 
     .pending-file .remove-btn:hover {
@@ -455,7 +607,7 @@ export class ScionChatComposer extends LitElement {
       display: flex;
       align-items: center;
       gap: 0.25rem;
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       color: var(--scion-danger-600, #dc2626);
     }
 
@@ -471,11 +623,11 @@ export class ScionChatComposer extends LitElement {
       line-height: 1;
       background: none;
       border: none;
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
     }
 
     .upload-progress {
-      font-size: 0.6875rem;
+      font-size: var(--chat-fs-sm);
       color: var(--scion-text-muted, #64748b);
       padding: 0 0.25rem;
     }
@@ -489,7 +641,7 @@ export class ScionChatComposer extends LitElement {
       background: var(--scion-surface-50, #f8fafc);
       border-left: 3px solid var(--scion-primary-400, #60a5fa);
       border-radius: 0 0.25rem 0.25rem 0;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-neutral-600, #475569);
     }
 
@@ -512,7 +664,7 @@ export class ScionChatComposer extends LitElement {
 
     .reply-bar sl-icon-button::part(base) {
       padding: 0.125rem;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-neutral-400, #94a3b8);
     }
 
@@ -525,7 +677,7 @@ export class ScionChatComposer extends LitElement {
       background: var(--scion-warning-50, #fffbeb);
       border-left: 3px solid var(--scion-warning-400, #fbbf24);
       border-radius: 0 0.25rem 0.25rem 0;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-neutral-600, #475569);
     }
 
@@ -536,7 +688,7 @@ export class ScionChatComposer extends LitElement {
 
     .edit-bar sl-icon-button::part(base) {
       padding: 0.125rem;
-      font-size: 0.75rem;
+      font-size: var(--chat-fs-base);
       color: var(--scion-neutral-400, #94a3b8);
     }
 
@@ -559,7 +711,7 @@ export class ScionChatComposer extends LitElement {
     }
 
     .drop-zone-overlay span {
-      font-size: 0.875rem;
+      font-size: var(--chat-fs-lg);
       font-weight: 600;
       color: var(--scion-primary, #3b82f6);
     }
@@ -661,7 +813,9 @@ export class ScionChatComposer extends LitElement {
     const sendVariant = inEditMode ? 'warning' : 'primary';
 
     return html`
-      ${this.conversationMode ? this.renderDestinationChip() : nothing}
+      ${guard([this.conversationMode, this.peerName, this.defaultAgent, this.members], () =>
+        this.conversationMode ? this.renderDestinationChip() : nothing
+      )}
       <div
         class="composer-wrapper"
         @dragover=${this.handleDragOver}
@@ -679,72 +833,78 @@ export class ScionChatComposer extends LitElement {
           ${this.uploadFailures.length > 0 ? this.renderUploadFailures() : nothing}
           ${this.uploading ? html`<div class="upload-progress">Uploading...</div>` : nothing}
           <div class="input-row">
-          ${this.conversationMode && !inEditMode
-            ? html`
-                <sl-icon-button
-                  class="attach-btn"
-                  name="paperclip"
-                  label="Attach file"
-                  @click=${this.handleAttachClick}
-                  ?disabled=${this.disabled || this.uploading}
-                ></sl-icon-button>
-                <input
-                  type="file"
-                  multiple
-                  style="display:none"
-                  @change=${this.handleFileSelected}
-                />
-              `
-            : nothing}
-          <div class="textarea-wrapper">
-            <sl-textarea
-              placeholder=${inEditMode ? 'Edit your message...' : 'Send a message...'}
-              size="small"
-              rows="1"
-              resize="auto"
-              .value=${this.text}
-              @sl-input=${this.handleInput}
-              @keydown=${this.handleKeydown}
-              @paste=${this.handlePaste}
-              ?disabled=${this.disabled}
-            ></sl-textarea>
-            <scion-mention-autocomplete
-              .agents=${this.agents}
-              .members=${this.members}
-              @mention-accept=${this.handleMentionAccept}
-            ></scion-mention-autocomplete>
-            <scion-slash-autocomplete
-              @slash-command=${this.handleSlashCommand}
-            ></scion-slash-autocomplete>
-          </div>
-          <div class="send-container">
-            <sl-button
-              class="send-btn"
-              size="small"
-              variant=${sendVariant}
-              ?disabled=${!canSend}
-              @click=${this.handleSend}
-              @contextmenu=${this.handleSendContextMenu}
-            >
-              <sl-icon slot="prefix" name=${sendIcon}></sl-icon>
-              ${sendLabel}
-            </sl-button>
-            ${this.showSendContextMenu && !inEditMode
+            ${this.conversationMode && !inEditMode
               ? html`
-                  <div
-                    class="send-context-overlay"
-                    @click=${this.closeSendContextMenu}
-                  ></div>
-                  <div class="send-context-menu">
-                    <div class="send-context-item" @click=${this.handleSendWithInterrupt}>
-                      <sl-icon name="lightning-charge"></sl-icon>
-                      Send with interruption
-                    </div>
-                  </div>
+                  <sl-icon-button
+                    class="attach-btn"
+                    name="paperclip"
+                    label="Attach file"
+                    @click=${this.handleAttachClick}
+                    ?disabled=${this.disabled || this.uploading}
+                  ></sl-icon-button>
+                  <input
+                    type="file"
+                    multiple
+                    style="display:none"
+                    @change=${this.handleFileSelected}
+                  />
                 `
               : nothing}
+            <div class="textarea-wrapper">
+              <sl-textarea
+                enterkeyhint="enter"
+                placeholder=${inEditMode ? 'Edit your message...' : 'Send a message...'}
+                size="small"
+                rows="1"
+                resize=${this.nativeTextareaSizing ? 'none' : 'auto'}
+                .value=${live(this.text)}
+                @sl-input=${this.handleInput}
+                @keydown=${this.handleKeydown}
+                @paste=${this.handlePaste}
+                ?disabled=${this.disabled}
+              ></sl-textarea>
+              <scion-mention-autocomplete
+                .agents=${this.agents}
+                .members=${this.members}
+                @mention-accept=${this.handleMentionAccept}
+              ></scion-mention-autocomplete>
+              <scion-slash-autocomplete
+                @slash-command=${this.handleSlashCommand}
+              ></scion-slash-autocomplete>
+            </div>
+            <div class="send-container">
+              <sl-button
+                class="send-btn"
+                size="small"
+                variant=${sendVariant}
+                ?disabled=${!canSend}
+                @click=${this.handleSend}
+                @pointerdown=${this.handleSendPointerDown}
+                @contextmenu=${this.handleSendContextMenu}
+              >
+                <sl-icon slot="prefix" name=${sendIcon}></sl-icon>
+                <span class="send-label">${sendLabel}</span>
+              </sl-button>
+              ${this.showSendContextMenu && !inEditMode
+                ? html`
+                    <div class="send-context-overlay" @click=${this.closeSendContextMenu}></div>
+                    <div class="send-context-menu">
+                      <div class="send-context-item" @click=${this.handleSendWithInterrupt}>
+                        <sl-icon name="lightning-charge"></sl-icon>
+                        Send with interruption
+                      </div>
+                    </div>
+                  `
+                : nothing}
+              <scion-action-sheet
+                heading="Send options"
+                .items=${SEND_SHEET_ITEMS}
+                .open=${this.showSendSheet && !inEditMode}
+                @action-sheet-select=${this.handleSendSheetSelect}
+                @action-sheet-close=${this.handleSendSheetClose}
+              ></scion-action-sheet>
+            </div>
           </div>
-        </div>
           <div class="footer-row">
             ${this.runeCount > 0 || isNearLimit
               ? html`
@@ -784,24 +944,26 @@ export class ScionChatComposer extends LitElement {
     return html`
       <div class="edit-bar">
         <span class="edit-info">Editing message</span>
-        <sl-icon-button
-          name="x-lg"
-          label="Cancel edit"
-          @click=${this.cancelEdit}
-        ></sl-icon-button>
+        <sl-icon-button name="x-lg" label="Cancel edit" @click=${this.cancelEdit}></sl-icon-button>
       </div>
     `;
   }
 
   private cancelReply(): void {
-    this.replyTo = null;
+    // `replyTo` is owned by the parent and pushed down as a property. Clearing
+    // it here would be undone the moment the parent re-renders for any reason
+    // (an inbound message, a typing tick), so ask the parent to clear instead.
+    this.dispatchEvent(new CustomEvent('chat-cancel-reply', { bubbles: true, composed: true }));
     this.focusTextarea();
   }
 
   private cancelEdit(): void {
-    this.editMessage = null;
+    // `text`/`runeCount` are local state and stay here; `editMessage` belongs
+    // to the parent (see cancelReply).
     this.text = '';
     this.runeCount = 0;
+    this.resetMentionTracking();
+    this.dispatchEvent(new CustomEvent('chat-cancel-edit', { bubbles: true, composed: true }));
     this.focusTextarea();
   }
 
@@ -816,17 +978,6 @@ export class ScionChatComposer extends LitElement {
       `;
     }
 
-    // Thread mode with live mention override
-    if (this.liveMentionOverride) {
-      return html`
-        <div class="destination-chip">
-          <span class="arrow">&rarr;</span>
-          <span class="mention-override">@${this.liveMentionOverride}</span>
-          <span class="hint">(mention)</span>
-        </div>
-      `;
-    }
-
     // Thread mode: clickable chip to set/change default agent
     const agentMembers = this.members.filter((m) => m.kind === 'agent');
     const hasAgents = agentMembers.length > 0;
@@ -836,7 +987,7 @@ export class ScionChatComposer extends LitElement {
         <sl-dropdown>
           <div class="destination-chip clickable" slot="trigger">
             <span class="arrow">&rarr;</span>
-            <span style="font-size: 0.75rem">\u{1F916}</span>
+            <span style="font-size: var(--chat-fs-base)">🤖</span>
             <span class="agent-name">${this.defaultAgent}</span>
             <span class="hint">(thread default)</span>
             ${hasAgents
@@ -867,11 +1018,13 @@ export class ScionChatComposer extends LitElement {
   private renderAgentMenu(agentMembers: MemberInfo[]) {
     return html`
       <sl-menu @sl-select=${this.handleAgentMenuSelect}>
-        <sl-menu-label style="padding: 0 var(--sl-spacing-medium);">Set thread default agent</sl-menu-label>
+        <sl-menu-label style="padding: 0 var(--sl-spacing-medium);"
+          >Set thread default agent</sl-menu-label
+        >
         ${agentMembers.map(
           (m) => html`
             <sl-menu-item value=${m.name} ?checked=${this.defaultAgent === m.name}>
-              <span slot="prefix" style="font-size: 1.1em;">\u{1F916}</span>
+              <span slot="prefix" style="font-size: 1.1em;">🤖</span>
               ${m.name}
             </sl-menu-item>
           `
@@ -905,7 +1058,11 @@ export class ScionChatComposer extends LitElement {
 
   private handleInput(e: Event): void {
     const target = e.target as HTMLInputElement;
-    this.text = target.value;
+    const oldText = this.text;
+    const newText = target.value;
+    const caretAfterEdit = this.getTextareaElement()?.selectionStart ?? newText.length;
+    this.reconcileMentionRangesForEdit(oldText, newText, caretAfterEdit);
+    this.text = newText;
     this.runeCount = countRunes(this.text);
 
     // Persist draft with debounce.
@@ -916,21 +1073,24 @@ export class ScionChatComposer extends LitElement {
       this.dispatchEvent(new CustomEvent('chat-typing', { bubbles: true, composed: true }));
     }
 
-    // Update live mention override for destination chip
-    this.updateLiveMentionOverride();
-
     // Feed the autocomplete components.
+    this.notifyMentionAutocompleteOfTextChange();
+    this.notifySlashAutocompleteOfTextChange();
+  }
+
+  /** Tell the mention-autocomplete component about the current text/cursor. */
+  private notifyMentionAutocompleteOfTextChange(): void {
     const autocomplete = this.shadowRoot?.querySelector('scion-mention-autocomplete') as
       | import('./mention-autocomplete.js').ScionMentionAutocomplete
       | null;
-    if (autocomplete) {
-      const textarea = this.getTextareaElement();
-      if (textarea) {
-        autocomplete.handleInput(this.text, textarea.selectionStart ?? this.text.length, textarea);
-      }
+    const textarea = this.getTextareaElement();
+    if (autocomplete && textarea) {
+      autocomplete.handleInput(this.text, textarea.selectionStart ?? this.text.length, textarea);
     }
+  }
 
-    // Feed slash command autocomplete.
+  /** Tell the slash-autocomplete component about the current text/cursor. */
+  private notifySlashAutocompleteOfTextChange(): void {
     const slashAutocomplete = this.shadowRoot?.querySelector('scion-slash-autocomplete') as
       | import('./slash-autocomplete.js').ScionSlashAutocomplete
       | null;
@@ -940,35 +1100,76 @@ export class ScionChatComposer extends LitElement {
     }
   }
 
-  /** Update live mention override based on @mentions in the text. */
-  private updateLiveMentionOverride(): void {
-    if (!this.conversationMode || this.conversationMode === 'dm') {
-      this.liveMentionOverride = '';
-      return;
+  /**
+   * Keep `mentionRanges` in sync with an arbitrary text edit (typing,
+   * pasting, selecting-and-replacing, or a native backspace/delete that we
+   * did not intercept as an atomic mention delete).
+   *
+   * Ranges entirely before or after the edited region are unaffected or
+   * shifted by the length delta. A range that overlaps the edited region is
+   * no longer a clean `@slug ` token — it has been hand-edited — so it is
+   * dropped from `mentionRanges` (it loses atomic delete). Its slug is
+   * *not* removed from `acceptedMentions` here: only an atomic delete
+   * (`deleteMentionRange`) does that. The send-time
+   * `trimmed.includes('@slug')` filter in `doSend` already de-routes text
+   * that no longer reads `@slug` for any other reason (R1 in #1912 round 2).
+   */
+  private reconcileMentionRangesForEdit(
+    oldText: string,
+    newText: string,
+    caretAfterEdit: number
+  ): void {
+    if (this.mentionRanges.length === 0 || oldText === newText) return;
+
+    const maxPrefix = Math.min(oldText.length, newText.length);
+    let prefixLen = 0;
+    while (prefixLen < maxPrefix && oldText[prefixLen] === newText[prefixLen]) prefixLen++;
+
+    const delta = newText.length - oldText.length;
+
+    // A plain greedy common-prefix/suffix diff can misplace the edit when an
+    // inserted or trailing character happens to match the adjacent range's
+    // boundary character (e.g. typing "@" right before an accepted "@slug "
+    // mention: the prefix match greedily swallows that shared "@", putting
+    // the edit *inside* the range instead of outside it). Anchor the diff to
+    // where the caret actually ended up: the edit cannot start later than
+    // that, less any inserted length, so it never creeps past the real edit
+    // point into an adjacent range.
+    const caretCap = Math.max(0, caretAfterEdit - Math.max(delta, 0));
+    prefixLen = Math.min(prefixLen, caretCap);
+
+    const maxSuffix = maxPrefix - prefixLen;
+    let suffixLen = 0;
+    while (
+      suffixLen < maxSuffix &&
+      oldText[oldText.length - 1 - suffixLen] === newText[newText.length - 1 - suffixLen]
+    ) {
+      suffixLen++;
     }
-    // When no default agent is explicitly set, @-mentions should not affect the
-    // destination chip — there is nothing to "override". (#1151)
-    if (!this.defaultAgent) {
-      this.liveMentionOverride = '';
-      return;
-    }
-    // Find the first @mention in the text
-    const mentionMatch = this.text.match(/@(\S+)/);
-    if (mentionMatch) {
-      const slug = mentionMatch[1];
-      // Check if this matches a known agent
-      const matchedAgent = this.agents.find(
-        (a) => (a.slug || a.name || '').toLowerCase() === slug.toLowerCase()
-      );
-      if (matchedAgent) {
-        this.liveMentionOverride = matchedAgent.slug || matchedAgent.name || slug;
-        return;
+
+    const editStart = prefixLen;
+    const editOldEnd = oldText.length - suffixLen;
+
+    const survivors: MentionRange[] = [];
+    for (const range of this.mentionRanges) {
+      if (range.end <= editStart) {
+        survivors.push(range);
+      } else if (range.start >= editOldEnd) {
+        survivors.push({ ...range, start: range.start + delta, end: range.end + delta });
       }
+      // else: the edit landed inside this range — drop it from tracking.
     }
-    this.liveMentionOverride = '';
+    this.mentionRanges = survivors;
   }
 
   private handleKeydown(e: KeyboardEvent): void {
+    // Backspace/Delete right at the edge of an accepted mention removes the
+    // whole token atomically, ahead of the slash/mention autocomplete's own
+    // key handling (neither of which claims these keys).
+    if ((e.key === 'Backspace' || e.key === 'Delete') && this.tryAtomicMentionDelete(e)) {
+      return;
+    }
+
     // Let slash command autocomplete handle keys first.
     const slashAutocomplete = this.shadowRoot?.querySelector('scion-slash-autocomplete') as
       | import('./slash-autocomplete.js').ScionSlashAutocomplete
@@ -985,10 +1186,83 @@ export class ScionChatComposer extends LitElement {
       return; // consumed by autocomplete
     }
 
-    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+    // On touch devices there is no Shift+Enter combo to insert a newline, so
+    // Enter is left to its default textarea behavior there instead of sending.
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && !isPrimaryInputTouch()) {
       e.preventDefault();
       this.handleSend();
     }
+  }
+
+  /**
+   * If the caret sits at the edge of an accepted-mention range with no
+   * active selection, delete the whole range in one keystroke: Backspace at
+   * the range's end, Delete at its start. Returns true if it handled the
+   * key (and called preventDefault), so the caller should not fall through
+   * to default text-editing behavior.
+   */
+  private tryAtomicMentionDelete(e: KeyboardEvent): boolean {
+    if (e.shiftKey || e.altKey || e.metaKey || e.ctrlKey || e.isComposing) return false;
+    if (this.mentionRanges.length === 0) return false;
+
+    const textarea = this.getTextareaElement();
+    if (!textarea) return false;
+
+    const selStart = textarea.selectionStart ?? this.text.length;
+    const selEnd = textarea.selectionEnd ?? this.text.length;
+    if (selStart !== selEnd) return false; // a real selection deletes normally
+
+    const isBackspace = e.key === 'Backspace';
+    const range = this.mentionRanges.find((r) =>
+      isBackspace ? r.end === selStart : r.start === selStart
+    );
+    if (!range) return false;
+
+    e.preventDefault();
+    this.deleteMentionRange(range);
+    return true;
+  }
+
+  /** Remove an accepted-mention range from `this.text` in one shot. */
+  private deleteMentionRange(range: MentionRange): void {
+    const before = this.text.slice(0, range.start);
+    const after = this.text.slice(range.end);
+    this.text = before + after;
+    this.runeCount = countRunes(this.text);
+
+    const delta = range.start - range.end; // negative: text got shorter
+    this.mentionRanges = this.mentionRanges
+      .filter((r) => r !== range)
+      .map((r) =>
+        r.start >= range.end ? { ...r, start: r.start + delta, end: r.end + delta } : r
+      );
+
+    // Drop the slug from send-time routing unless the text still literally
+    // reads `@slug` elsewhere (e.g. a second mention of the same agent, or a
+    // hand-edited remnant that lost its tracked range but kept the text).
+    // This mirrors the send-time `trimmed.includes('@slug')` filter exactly,
+    // so an atomic delete never de-routes an agent the send-time check would
+    // still route (and vice versa).
+    if (!this.text.includes('@' + range.slug)) {
+      this.acceptedMentions.delete(range.slug);
+    }
+
+    this.saveDraft();
+
+    const cursorPos = range.start;
+    void this.updateComplete.then(() => {
+      const ta = this.getTextareaElement();
+      if (ta) {
+        ta.setSelectionRange(cursorPos, cursorPos);
+      }
+      // An atomic delete bypasses the native input event both autocomplete
+      // components normally listen to. Tell them directly so their own
+      // bookkeeping (e.g. a dismissed-trigger position) doesn't go stale
+      // relative to the new text, and each stays closed rather than
+      // reopening on stale state (#1912).
+      this.notifyMentionAutocompleteOfTextChange();
+      this.notifySlashAutocompleteOfTextChange();
+    });
   }
 
   private handleSlashCommand(e: CustomEvent<SlashCommandDetail>): void {
@@ -1009,6 +1283,7 @@ export class ScionChatComposer extends LitElement {
     // Clear the text input after dispatching.
     this.text = '';
     this.runeCount = 0;
+    this.resetMentionTracking();
     this.clearDraft();
     this.focusTextarea();
   }
@@ -1027,15 +1302,32 @@ export class ScionChatComposer extends LitElement {
     this.text = before + insertion + after;
     this.runeCount = countRunes(this.text);
 
-    // Track the accepted mention.
+    // Shift any existing mention ranges that sit after the replaced region
+    // (there's an accepted mention later in the text and this one was
+    // inserted before it). The replaced region itself — the `@partial` query
+    // just typed — cannot already contain a range: an accepted mention's
+    // trailing space would have blocked the trigger from being found there.
+    const delta = insertion.length - (cursorPos - triggerStart);
+    this.mentionRanges = this.mentionRanges.map((r) =>
+      r.start >= cursorPos ? { ...r, start: r.start + delta, end: r.end + delta } : r
+    );
+
+    // Track the newly accepted mention, including its trailing space, so
+    // Backspace/Delete at its edges can remove it atomically (#1912).
+    this.mentionRanges.push({ start: triggerStart, end: triggerStart + insertion.length, slug });
     this.acceptedMentions.add(slug);
 
-    // Restore cursor position after the inserted text.
+    // Restore cursor position after the inserted text. The value itself is
+    // already driven by `this.text` via the `live()`-bound textarea — no
+    // need (and no longer safe) to also poke the native element's `.value`
+    // directly here; doing so bypassed both Lit's and sl-textarea's own
+    // dirty-checking and is what made later keystrokes stop visibly
+    // updating the input until an unrelated re-render forced a resync
+    // (#1912, and the reason #1689 removed the old liveMentionOverride).
     const newCursorPos = triggerStart + insertion.length;
     void this.updateComplete.then(() => {
       const ta = this.getTextareaElement();
       if (ta) {
-        ta.value = this.text;
         ta.setSelectionRange(newCursorPos, newCursorPos);
         ta.focus();
       }
@@ -1051,7 +1343,7 @@ export class ScionChatComposer extends LitElement {
             <div class="pending-file">
               ${file.mime.startsWith('image/')
                 ? html`<img src=${file.url} alt=${file.name} />`
-                : html`<sl-icon name="file-earmark" style="font-size:0.875rem"></sl-icon>`}
+                : html`<sl-icon name="file-earmark" style="font-size:var(--chat-fs-lg)"></sl-icon>`}
               <span class="file-name" title=${file.name}>${file.name}</span>
               <button class="remove-btn" @click=${() => this.removePendingFile(idx)}>
                 &times;
@@ -1074,7 +1366,7 @@ export class ScionChatComposer extends LitElement {
         ${this.uploadFailures.map(
           (failure, index) => html`
             <div class="upload-failure">
-              <sl-icon name="exclamation-triangle" style="font-size:0.75rem"></sl-icon>
+              <sl-icon name="exclamation-triangle" style="font-size:var(--chat-fs-base)"></sl-icon>
               <span class="failure-name">${failure.name}</span>
               <span class="failure-reason">${failure.error}</span>
               <button
@@ -1207,6 +1499,25 @@ export class ScionChatComposer extends LitElement {
     if (imageFiles.length > 0) {
       e.preventDefault();
       void this.uploadFiles(imageFiles);
+      return;
+    }
+
+    // Auto-convert large text pastes to attachment (skip in edit mode —
+    // edits don't support attachments).
+    if (!this.editMessage) {
+      const pastedText = e.clipboardData?.getData('text/plain');
+      if (pastedText && countRunes(pastedText) > PASTE_TO_ATTACHMENT_THRESHOLD) {
+        // Don't convert if already at attachment limit — let text enter textarea.
+        if (this.pendingFiles.length >= 10) {
+          return;
+        }
+        e.preventDefault();
+        const blob = new Blob([pastedText], { type: 'text/plain' });
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        const file = new File([blob], `pasted-text-${timestamp}.txt`, { type: 'text/plain' });
+        void this.uploadFiles([file]);
+        showToast('Large paste converted to text attachment', 'primary');
+      }
     }
   }
 
@@ -1224,7 +1535,7 @@ export class ScionChatComposer extends LitElement {
   /** Hide the drop zone overlay on drag leave. */
   private handleDragLeave(e: DragEvent): void {
     // Only hide if we're leaving the composer-wrapper, not entering a child.
-    const wrapper = (e.currentTarget as HTMLElement);
+    const wrapper = e.currentTarget as HTMLElement;
     const related = e.relatedTarget as Node | null;
     if (related && wrapper.contains(related)) return;
     this.dragOver = false;
@@ -1251,10 +1562,8 @@ export class ScionChatComposer extends LitElement {
 
   /** Send the current message with the given interrupt flag. */
   private doSend(interrupt: boolean): void {
+    if (!this.hasSendableContent()) return;
     const trimmed = this.text.trim();
-    const hasAttachments = this.pendingFiles.length > 0;
-    if ((!trimmed && !hasAttachments) || this.runeCount > MAX_MESSAGE_LENGTH || this.disabled)
-      return;
 
     // Phase-3: If in edit mode, dispatch chat-edit instead of chat-send.
     if (this.editMessage) {
@@ -1270,8 +1579,9 @@ export class ScionChatComposer extends LitElement {
       );
       this.text = '';
       this.runeCount = 0;
-      this.editMessage = null;
-      this.focusTextarea();
+      this.resetMentionTracking();
+      this.dispatchEvent(new CustomEvent('chat-cancel-edit', { bubbles: true, composed: true }));
+      this.settleFocusAfterSend();
       return;
     }
 
@@ -1281,6 +1591,14 @@ export class ScionChatComposer extends LitElement {
     // W7: Collect attachment IDs from pending uploads.
     const attachmentIds = this.pendingFiles.map((f) => f.id);
 
+    // Save state for error recovery before clearing.
+    const savedText = this.text;
+    const savedRuneCount = this.runeCount;
+    const savedMentions = new Set(this.acceptedMentions);
+    const savedMentionRanges = [...this.mentionRanges];
+    const savedPendingFiles = [...this.pendingFiles];
+    const savedReplyTo = this.replyTo;
+
     // Phase-3: Build detail with optional replyToId.
     const detail: ChatSendDetail = {
       text: trimmed,
@@ -1289,19 +1607,42 @@ export class ScionChatComposer extends LitElement {
       mentions,
       attachmentIds,
       onSuccess: () => {
-        this.text = '';
-        this.runeCount = 0;
-        this.acceptedMentions.clear();
-        this.pendingFiles = [];
-        this.clearDraft();
-        // Phase-3: Clear reply context after successful send.
-        this.replyTo = null;
-        this.focusTextarea();
+        // Input already cleared — nothing to do.
+      },
+      onError: () => {
+        // Restore composer state so the user can retry.
+        this.text = savedText;
+        this.runeCount = savedRuneCount;
+        this.acceptedMentions = savedMentions;
+        this.mentionRanges = savedMentionRanges;
+        this.pendingFiles = savedPendingFiles;
+        if (savedReplyTo) {
+          this.replyTo = savedReplyTo;
+        }
+        // A failed send must not pop the keyboard back up on touch; the
+        // user taps to retry or edit instead.
+        this.settleFocusAfterSend();
       },
     };
     if (this.replyTo) {
       detail.replyToId = this.replyTo.messageId;
+      if (this.replyTo.content) {
+        detail.replyToContent = this.replyTo.content;
+      }
     }
+
+    // Optimistic clear — input empties immediately so the user can type the
+    // next message without waiting for the network round-trip.
+    // Note: reply-to state is NOT cleared here. The parent (chat-thread)
+    // owns composerReplyTo and manages it: clearing on success, restoring
+    // on failure. Dispatching chat-cancel-reply here would clear the
+    // parent's state prematurely, making it unrecoverable on send failure.
+    this.text = '';
+    this.runeCount = 0;
+    this.resetMentionTracking();
+    this.pendingFiles = [];
+    this.clearDraft();
+    this.settleFocusAfterSend();
 
     this.dispatchEvent(
       new CustomEvent<ChatSendDetail>('chat-send', {
@@ -1312,27 +1653,150 @@ export class ScionChatComposer extends LitElement {
     );
   }
 
+  /**
+   * After a send (successful or failed) or a saved edit, touch devices
+   * blur the composer so the on-screen keyboard retracts instead of
+   * staying up over the thread the user is waiting to read. Desktop keeps
+   * today's re-focus, since Enter still sends there and the user is likely
+   * to keep typing.
+   */
+  private settleFocusAfterSend(): void {
+    if (isPrimaryInputTouch()) {
+      this.blurTextarea();
+    } else {
+      this.focusTextarea();
+    }
+  }
+
+  /** Blur the composer's textarea, retracting the on-screen keyboard. */
+  private blurTextarea(): void {
+    const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
+    (slTextarea as HTMLElement | null)?.blur();
+  }
+
   /** Focus the textarea after send/cancel. */
   private focusTextarea(): void {
     void this.updateComplete.then(() => {
       requestAnimationFrame(() => {
         const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
         if (slTextarea) {
-          (slTextarea as HTMLElement).focus();
+          // preventScroll: this is not the fix for the off-screen-panel
+          // horizontal drift (overflow:clip + inert on the panels is), but it
+          // stops the message list from jumping when this runs while the
+          // composer's panel isn't the one on screen.
+          (slTextarea as HTMLElement).focus({ preventScroll: true });
         }
       });
     });
   }
 
-  /** Show the right-click send context menu. */
-  private handleSendContextMenu(e: MouseEvent): void {
-    e.preventDefault();
-    const trimmed = this.text.trim();
-    const hasAttachments = this.pendingFiles.length > 0;
-    if ((!trimmed && !hasAttachments) || this.runeCount > MAX_MESSAGE_LENGTH || this.disabled)
+  /**
+   * Focus the textarea with the caret placed after the last character of the
+   * current draft. Used for entry points (e.g. Reply) that must not disturb
+   * the existing draft text but still need the caret at a predictable spot
+   * so typing continues the message rather than landing mid-draft.
+   */
+  private focusTextareaCaretEnd(): void {
+    void this.updateComplete.then(() => {
+      requestAnimationFrame(() => {
+        void this.applyCaretEndFocus();
+      });
+    });
+  }
+
+  /**
+   * Does the actual work for `focusTextareaCaretEnd()`. If `<sl-textarea>`
+   * has not finished its own first render yet — e.g. `replyTo` is already
+   * set on initial mount, before the child element has upgraded —
+   * `getTextareaElement()` returns null because its shadow DOM doesn't exist
+   * yet. In that case, wait once for the child's own `updateComplete` (if it
+   * exposes one) and retry before giving up. If the inner textarea is still
+   * unavailable, fall back to focusing the `<sl-textarea>` host so focus is
+   * not silently dropped.
+   */
+  private async applyCaretEndFocus(): Promise<void> {
+    let ta = this.getTextareaElement();
+    if (!ta) {
+      const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
+      const pendingUpdate = (slTextarea as { updateComplete?: Promise<unknown> } | null)
+        ?.updateComplete;
+      if (pendingUpdate) {
+        await pendingUpdate;
+      }
+      ta = this.getTextareaElement();
+    }
+    if (ta) {
+      const end = ta.value.length;
+      ta.setSelectionRange(end, end);
+      ta.focus({ preventScroll: true });
       return;
+    }
+    const slTextarea = this.shadowRoot?.querySelector('sl-textarea');
+    if (slTextarea) {
+      (slTextarea as HTMLElement).focus({ preventScroll: true });
+    }
+  }
+
+  /** Text or attachments, within the length limit, while the composer is enabled. */
+  private hasSendableContent(): boolean {
+    const hasContent = this.text.trim() !== '' || this.pendingFiles.length > 0;
+    return hasContent && this.runeCount <= MAX_MESSAGE_LENGTH && !this.disabled;
+  }
+
+  /** Is there something sendable, so the send menu has an action to offer? */
+  private canOfferSendMenu(): boolean {
+    return this.hasSendableContent() && !this.editMessage;
+  }
+
+  /**
+   * Show the send menu: the popup for a right-click, the action sheet for
+   * the browser's own touch long-press (Android fires `contextmenu` for it).
+   */
+  private handleSendContextMenu(e: MouseEvent): void {
+    const fromTouchPress = this.sendLongPress.pressing;
+    if (this.sendLongPress.contextMenu(e)) return;
+    e.preventDefault();
+    if (!this.hasSendableContent()) return;
+    if (fromTouchPress) {
+      if (this.canOfferSendMenu()) this.showSendSheet = true;
+      return;
+    }
     this.showSendContextMenu = true;
   }
+
+  /**
+   * A touch long-press on Send opens the send menu as an action sheet. The
+   * long-press swallows the press's own click, so it never also sends.
+   */
+  private readonly handleSendPointerDown = (e: PointerEvent): void => {
+    if (!this.canOfferSendMenu()) {
+      this.sendLongPress.cancel();
+      return;
+    }
+    this.sendLongPress.pointerDown(e, () => {
+      if (!this.canOfferSendMenu()) return;
+      this.showSendContextMenu = false;
+      this.showSendSheet = true;
+    });
+  };
+
+  private readonly handleSendSheetSelect = (e: CustomEvent<ActionSheetSelectDetail>): void => {
+    if (e.detail.id === 'send-interrupt') this.sendInterruptOnSheetClose = true;
+  };
+
+  /**
+   * The sheet has closed, by a choice, Cancel, Esc or the backdrop. The
+   * send runs only now: closing the dialog hands focus back to whatever
+   * had it before (often the textarea), and sending first would let that
+   * restore undo the send's touch blur and bring the keyboard back up.
+   * Cancel sends nothing and leaves the draft and focus as they were.
+   */
+  private readonly handleSendSheetClose = (): void => {
+    this.showSendSheet = false;
+    if (!this.sendInterruptOnSheetClose) return;
+    this.sendInterruptOnSheetClose = false;
+    this.doSend(true);
+  };
 
   /** Send the message with interruption from the context menu. */
   private handleSendWithInterrupt(): void {

@@ -6,7 +6,7 @@ description: Standardized terminology for the Scion project.
 This glossary defines key terms used throughout the Scion documentation and ecosystem. It is a projection of the project's canonical [`GLOSSARY.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/GLOSSARY.md); when the two disagree, the root glossary wins.
 
 :::note[Two naming rules run throughout]
-- The concept formerly called *grove* is now **Project**.
+- The concept formerly called *grove* is now **Project**. See [Migrating from grove names](/scion/reference/grove-removal/) for what changed.
 - Bare **"broker"** is never used on its own — it is ambiguous across **Runtime Broker**, **Message Broker**, and the **Event Bus**, so it must always be qualified.
 :::
 
@@ -17,6 +17,9 @@ An isolated worker: one LLM-plus-harness loop in its own container with its own 
 
 ### Sub-agent
 An agent spawned by another agent; "sub" only from the orchestrating user's view, since it is a full agent in capability.
+
+### Reincarnation
+Migrating an existing agent to a new *generation*: the Hub re-resolves its template, image, and harness-config, then starts it again with the same agent ID and slug and a handoff as its first task. Done with [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate). Distinct from *restart* (same config) and *resume* (same harness session).
 
 ### Project
 A namespace and collection of agents and configuration, represented by a `.scion` directory and usually one-to-one with a git repository. Not the same as a **Group**.
@@ -78,7 +81,7 @@ A workspace sharing mode where each agent gets its own git worktree over a share
 A workspace sharing mode where each agent gets its own full git clone of the repository.
 
 ### Shared directory
-A persistent, mutable volume shared by the agents within one project. Backed by host filesystem directories (local) or Kubernetes PersistentVolumeClaims (K8s).
+A persistent, mutable volume shared by the agents within one project. Backed by host filesystem directories (local) or Kubernetes PersistentVolumeClaims (K8s). In hosted deployments, `server.shared_dir_storage` can place them on a shared NFS export so they span Runtime Brokers.
 
 ### Agent home
 The directory mounted as the container user's home folder, holding that agent's unique config and history.
@@ -171,7 +174,14 @@ _Avoid_: rate limits, usage caps
 ### LimitDefinition
 A seeded system or custom limit configuration that defines a quota boundary within the Quota System.
 
+### Runtime Broker Settings
+A settings document on the Hub for one Runtime Broker (`/api/v1/runtime-brokers/{id}/settings`). Its first key, `maxAgents`, overrides the `max_agents_per_broker` limit for that Runtime Broker. The effective cap resolves from the Runtime Broker's setting, then an entitlement binding, then the hub default.
+_Avoid_: Broker Settings (bare "broker"); an entitlement binding scoped to a Runtime Broker (the retired way to set a cap for one Runtime Broker)
+
 ## Messaging
+
+### Conversation
+A surface-agnostic container for a message thread, owned by the Hub. Every exchange — whether it originates in the web chat, CLI, Discord, Telegram, or another channel — is routed through a conversation. Conversations have a kind (`direct` for 1-on-1, `group` for multi-participant) and a surface that identifies where they were created. Managed via the `scion conversation` CLI command (alias `conv`) or the Web Dashboard.
 
 ### Branch mode (message mode)
 A message mode that permits messaging from ancestry users (like lineage) plus the agent's direct parent and child agents. Project owners can pierce branch mode.
@@ -179,8 +189,11 @@ A message mode that permits messaging from ancestry users (like lineage) plus th
 ### Lineage mode (message mode)
 A message mode that restricts messaging to users in the agent's ancestry chain — the creating user and their ancestors. No agent-to-agent messaging is permitted for lineage-mode agents. Project owners can pierce lineage mode.
 
+### Hub mode (message mode)
+A message mode that behaves like Project mode within the agent's own project and additionally permits the agent to send direct messages across project boundaries (when cross-project messaging is enabled at the Hub and receiving-project level). A project-mode agent can receive a cross-project DM but cannot reply until granted Hub mode. Hub mode is subject to a non-escalation grant guard: an agent can only grant it to another agent if the granting agent is itself in Hub mode and has the `full` authorization role.
+
 ### Message Mode
-A per-agent setting that controls which actors (users and agents) can send messages to that agent. One of four values: `none`, `lineage`, `branch`, or `project` (the default). Set by the agent's owner or a project admin via the `set_message_mode` action; changeable at any time with immediate effect. Stored on the agent record as `message_mode`.
+A per-agent setting that controls which actors (users and agents) can send messages to that agent. One of five values: `none`, `lineage`, `branch`, `project` (the default), or `hub`. Set by the agent's owner or a project admin via the `set_message_mode` action; changeable at any time with immediate effect. Stored on the agent record as `message_mode`.
 
 ### Messageability
 A server-computed assessment of whether a specific viewer can message a specific agent, considering the agent's message mode, the viewer's identity, ancestry relationship, and permissions. Exposed in API responses as `_messageability` with `canMessage` and `canReachViewer` booleans. Used by the UI to gate message buttons and show reachability indicators.
@@ -196,6 +209,9 @@ The ability of a privileged user to bypass an agent's message mode restrictions.
 
 ### Project mode (message mode)
 The default message mode. Any user with the `agent:message` permission in the project scope can message the agent, and any same-project agent in project or branch mode can message it. The most permissive mode. Note that the default project-member role does not include `agent:message` — messaging requires an owner, admin, or ancestry relationship with the agent.
+
+### Cross-project inbound policy
+A project-level setting (`crossProjectInbound`) that controls whether the project accepts agent messages originating from other projects. One of three values: `none` (default — reject all), `members` (accept only when the sender's originating human is a member of this project), or `any` (accept from any project on the Hub). One of three independent controls required for cross-project messaging.
 
 ### Message Group
 A set of recipients addressed by a single send, correlated by a shared `group_id`, as opposed to a direct message to one recipient or a broadcast to all agents in a project. Distinct from **Group** (Hub users).
@@ -253,7 +269,7 @@ Running a single-tenant Scion server (Hub + Runtime Broker + Web combined) on yo
 The umbrella term for running against a networked Hub — reachable beyond a single machine — that coordinates state across users, projects, and runtime brokers. Spans two **availability tiers**, **Single-node hosted** and **HA hosted**, distinguished by control-plane durability and cost; the tier is fixed by the Hub's database driver (embedded `sqlite` vs. external `postgres`). Orthogonal to the tier is **Tenancy** (single- vs. multi-user).
 
 ### Single-node hosted
-A hosted deployment whose control plane — the Hub — runs as a single instance on one compute node, keeping state in an embedded SQLite database, with no external database. Non-HA: it accepts restart/redeploy downtime and single-volume durability in exchange for low cost and operational simplicity. Realized as a single VM (e.g. the starter-hub scripts) or a single Cloud Run instance backed by SQLite. "Single-node" scopes the control plane only — agents may run on other nodes.
+A hosted deployment whose control plane — the Hub — runs as a single instance on one compute node, keeping state in an embedded SQLite database, with no external database. Non-HA: it accepts restart/redeploy downtime and single-volume durability in exchange for low cost and operational simplicity. Realized as a single VM (e.g. the Developer Hub or single-node-vm scripts) or a single Cloud Run instance backed by SQLite. "Single-node" scopes the control plane only — agents may run on other nodes.
 
 ### HA hosted
 A hosted deployment whose control plane is replicated across multiple Hub instances behind a load balancer, backed by an external managed database (Cloud SQL Postgres) and object storage (GCS), with stateless proxy/hosted brokers. Highly available and durable — it survives node loss and redeploys without downtime — at the cost of running and paying for that external infrastructure. Realized by the Cloud Run deployment (Cloud Run with min-instances ≥ 2 plus Cloud SQL).
@@ -298,9 +314,6 @@ A named authority tier (one of `none`, `readonly`, `baseline`, or `full`) assign
 
 ### Group
 A named collection of Hub users (and nested groups) used by the Hub permissions system to assign access. This is the primary meaning of "group" in Scion.
-
-### User Access Token (UAT)
-A scoped, revocable bearer token (prefixed with `scion_pat_`) linked to a user account and used for non-interactive Hub authentication (e.g., CLI, CI/CD pipelines, desktop app integration). Every UAT is scoped to a single project and carries a specific list of action permissions (scopes).
 
 ### Owner-Based Access Control
 An authorization model where certain resources (such as scheduled events, recurring schedules, and individual agents) are strictly restricted so they can only be viewed, updated, deleted, or managed by their respective creator (the "owner") or system-wide administrators. Enforced via owner-ID validation at the API layer.
