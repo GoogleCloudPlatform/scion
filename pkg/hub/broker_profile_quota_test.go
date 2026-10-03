@@ -41,10 +41,10 @@ import (
 func profileLimitSettings(srv *Server, vs *config.VersionedSettings) func(*config.VersionedSettings) {
 	var mu sync.Mutex
 	cur := vs
-	srv.agentLimitSettingsFn = func() *config.VersionedSettings {
+	srv.agentLimitSettingsFn = func() (*config.VersionedSettings, bool) {
 		mu.Lock()
 		defer mu.Unlock()
-		return cur
+		return cur, true
 	}
 	return func(next *config.VersionedSettings) {
 		mu.Lock()
@@ -412,9 +412,121 @@ func TestBrokerProfileQuota_ReconcileSkipsActiveLaunch(t *testing.T) {
 }
 
 func TestBrokerProfileQuota_LaunchInFlightPredicate(t *testing.T) {
-	assert.True(t, brokerQuotaLaunchInFlight(&store.Agent{Phase: "running", LaunchState: "active"}))
-	assert.True(t, brokerQuotaLaunchInFlight(&store.Agent{Phase: "starting"}))
-	assert.False(t, brokerQuotaLaunchInFlight(&store.Agent{Phase: "running", LaunchState: "ended"}))
+	now := time.Now()
+	assert.True(t, brokerQuotaLaunchInFlight(&store.Agent{Phase: "running", LaunchState: store.LaunchStateActive, LaunchDeadline: now.Add(time.Minute)}, now))
+	assert.True(t, brokerQuotaLaunchInFlight(&store.Agent{Phase: "running", LaunchState: store.LaunchStateActive}, now), "an active launch with no deadline is in flight")
+	assert.True(t, brokerQuotaLaunchInFlight(&store.Agent{Phase: "starting"}, now))
+	assert.False(t, brokerQuotaLaunchInFlight(&store.Agent{Phase: "running", LaunchState: store.LaunchStateEnded}, now))
+	assert.False(t, brokerQuotaLaunchInFlight(&store.Agent{Phase: "running"}, now))
+}
+
+// A launch past its deadline is no longer in flight, so reconcile may move
+// that agent's reservation; an in-flight phase still counts as in flight.
+func TestBrokerProfileQuota_ExpiredLaunchNotInFlight(t *testing.T) {
+	now := time.Now()
+	expired := &store.Agent{Phase: "running", LaunchState: store.LaunchStateActive, LaunchDeadline: now.Add(-time.Second)}
+	assert.False(t, brokerQuotaLaunchInFlight(expired, now))
+	assert.False(t, brokerQuotaLaunchInFlight(&store.Agent{Phase: "running", LaunchState: store.LaunchStateActive, LaunchDeadline: now}, now), "a launch at its deadline has expired")
+	assert.True(t, brokerQuotaLaunchInFlight(&store.Agent{Phase: "starting", LaunchState: store.LaunchStateActive, LaunchDeadline: now.Add(-time.Second)}, now))
+}
+
+// Reincarnation rebuilds the applied config; the recorded quota profile is
+// kept, so the new generation counts against the same limit.
+func TestBrokerProfileQuota_ReincarnationKeepsQuotaProfile(t *testing.T) {
+	srv, s, project, broker := setupReincarnateTestServer(t, newReincarnateTestDispatcher())
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.AppliedConfig.QuotaProfile = "gke"
+	})
+	fresh, _, err := srv.buildFreshAppliedConfig(context.Background(), agent, project, "")
+	require.NoError(t, err)
+	assert.Equal(t, "gke", fresh.QuotaProfile)
+}
+
+// An agent that reaches its first reservation with no recorded profile (for
+// example one created without a broker that gets one on a later start or
+// resume) has the broker's default profile recorded and stored, and later
+// starts keep counting against it after the broker's default changes.
+func TestBrokerProfileQuota_FirstReserveRecordsProfile(t *testing.T) {
+	srv, s := testServer(t)
+	disp := &quotaLifecycleDispatcher{}
+	srv.SetDispatcher(disp)
+	profileLimitSettings(srv, pqSettings())
+	broker, project := newQuotaTestBrokerAndProject(t, s, "firstreserve")
+	ctx := context.Background()
+	gkeScope := profileScopeID(broker.ID, "profiles", "gke")
+	broker.DefaultProfile = "gke"
+	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+
+	a := newProfileQuotaAgent(t, s, broker, project, "first-reserve", state.PhaseStopped, nil)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.AppliedConfig)
+	assert.Equal(t, "gke", got.AppliedConfig.QuotaProfile, "the profile is stored on first reserve")
+	assert.EqualValues(t, 1, profileReservationCount(t, s, broker.ID, gkeScope))
+
+	broker.DefaultProfile = "open"
+	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/stop", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.EqualValues(t, 1, profileReservationCount(t, s, broker.ID, gkeScope), "restart keys on the stored profile")
+	assert.EqualValues(t, 0, brokerReservationCount(t, s, broker.ID))
+}
+
+// A reconcile move whose reservation was released after reconcile read it
+// (a stop landing in between) changes nothing: no reservation is created
+// in the new scope.
+func TestBrokerProfileQuota_MoveAfterReleaseIsNoop(t *testing.T) {
+	srv, s := testServer(t)
+	broker, project := newQuotaTestBrokerAndProject(t, s, "moverelease")
+	ctx := context.Background()
+	gkeScope := profileScopeID(broker.ID, "profiles", "gke")
+	def, err := s.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+
+	a := newProfileQuotaAgent(t, s, broker, project, "move-release", state.PhaseRunning, &store.AgentAppliedConfig{QuotaProfile: "gke"})
+	reserveBrokerSlot(t, s, broker, a.ID)
+	read, err := s.ListActiveReservations(ctx, def.ID, store.QuotaScopeBroker, broker.ID)
+	require.NoError(t, err)
+	require.Len(t, read, 1)
+
+	srv.releaseBrokerQuota(ctx, a) // the stop lands between read and move
+	to := brokerQuotaScopeFor(pqSettings(), broker.ID, "gke")
+	assert.False(t, srv.moveBrokerQuotaReservation(ctx, def.ID, a, read[0], to))
+	assert.False(t, hasBrokerReservation(t, s, a.ID), "the released reservation must stay released")
+	assert.EqualValues(t, 0, profileReservationCount(t, s, broker.ID, gkeScope))
+
+	// A reservation already moved elsewhere is not moved again from the
+	// stale scope.
+	b := newProfileQuotaAgent(t, s, broker, project, "move-moved", state.PhaseRunning, &store.AgentAppliedConfig{QuotaProfile: "gke"})
+	reserveProfileSlot(t, s, broker, gkeScope, b.ID)
+	stale := &store.UsageReservation{ScopeType: store.QuotaScopeBroker, ScopeID: broker.ID, ResourceID: b.ID}
+	assert.False(t, srv.moveBrokerQuotaReservation(ctx, def.ID, b, stale, brokerQuotaScope{ScopeType: store.QuotaScopeBrokerProfile, ScopeID: profileScopeID(broker.ID, "runtimes", "k8s")}))
+	assert.EqualValues(t, 1, profileReservationCount(t, s, broker.ID, gkeScope))
+}
+
+// When the settings fail to load, reconcile moves no reservation (the
+// profile-scope row stays where it is) and backfills an unreserved
+// counted agent into the broker-wide total, which stays enforced.
+func TestBrokerProfileQuota_ReconcileSettingsLoadFailure(t *testing.T) {
+	srv, s := testServer(t)
+	srv.agentLimitSettingsFn = func() (*config.VersionedSettings, bool) { return nil, false }
+	broker, project := newQuotaTestBrokerAndProject(t, s, "recfail")
+	gkeScope := profileScopeID(broker.ID, "profiles", "gke")
+
+	held := newProfileQuotaAgent(t, s, broker, project, "fail-held", state.PhaseRunning, &store.AgentAppliedConfig{QuotaProfile: "gke"})
+	reserveProfileSlot(t, s, broker, gkeScope, held.ID)
+	unreserved := newProfileQuotaAgent(t, s, broker, project, "fail-unreserved", state.PhaseRunning, &store.AgentAppliedConfig{QuotaProfile: "gke"})
+
+	srv.ReconcileStaleBrokerQuotaReservations(context.Background())
+
+	assert.EqualValues(t, 1, profileReservationCount(t, s, broker.ID, gkeScope), "the profile-scope reservation is not moved")
+	assert.True(t, hasBrokerReservation(t, s, held.ID))
+	assert.True(t, hasBrokerReservation(t, s, unreserved.ID))
+	assert.EqualValues(t, 1, brokerReservationCount(t, s, broker.ID), "the unreserved agent is backfilled into the broker-wide total")
 }
 
 // The admin usage view lists profile-scope reservations with the limit
@@ -457,6 +569,19 @@ func TestBrokerProfileQuota_AdminUsageListsProfileRows(t *testing.T) {
 	brokerRow := reservationByScopeID(resp.Reservations, broker.ID)
 	require.NotNil(t, brokerRow)
 	assert.Nil(t, brokerRow.EntryAgentLimit)
+	assert.False(t, gke.EntryAgentLimitUnknown)
+
+	// Settings that fail to load report the limit as unknown, not unset.
+	srv.agentLimitSettingsFn = func() (*config.VersionedSettings, bool) { return nil, false }
+	rec = doRequest(t, srv, http.MethodGet, "/api/v1/admin/usage/"+def.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	resp = usageByLimitResponse{}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	gke = reservationByScopeID(resp.Reservations, gkeScope)
+	require.NotNil(t, gke)
+	assert.True(t, gke.EntryAgentLimitUnknown)
+	assert.Nil(t, gke.EntryAgentLimit)
+	assert.Equal(t, "profiles.gke.max_agents", gke.EntryAgentLimitKey)
 }
 
 func TestBrokerQuotaScopeFor(t *testing.T) {

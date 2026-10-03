@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -91,9 +92,9 @@ func brokerQuotaScopeFor(vs *config.VersionedSettings, brokerID, profile string)
 }
 
 // agentQuotaProfile is the profile an agent's broker capacity is counted
-// against: the one recorded at create (AppliedConfig.QuotaProfile), else,
-// for agents created before it was recorded, AppliedConfig.Profile. Empty
-// means the broker-wide total.
+// against: the recorded one (AppliedConfig.QuotaProfile), else, for agents
+// with none recorded yet, AppliedConfig.Profile. Empty means the
+// broker-wide total.
 func agentQuotaProfile(agent *store.Agent) string {
 	if agent == nil || agent.AppliedConfig == nil {
 		return ""
@@ -114,7 +115,7 @@ func agentQuotaProfile(agent *store.Agent) string {
 // reconcile pass knows not to move reservations on that basis.
 func (s *Server) agentLimitSettings(ctx context.Context) (vs *config.VersionedSettings, ok bool) {
 	if s.agentLimitSettingsFn != nil {
-		return s.agentLimitSettingsFn(), true
+		return s.agentLimitSettingsFn()
 	}
 	ok = true
 	vs, _, err := config.LoadGlobalSettingsWithOverlay()
@@ -150,12 +151,14 @@ func (s *Server) agentBrokerQuotaScope(ctx context.Context, agent *store.Agent) 
 	return brokerQuotaScopeFor(vs, agent.RuntimeBrokerID, profile)
 }
 
-// recordAgentQuotaProfile records on a new agent the profile its broker
-// capacity is counted against: AppliedConfig.Profile, else the broker's
-// default profile (what the broker dispatches with when none is named).
-// Called once at create, before the first reservation; the value is kept
-// for the agent's lifetime so reserve, release and reconcile key on the
-// same profile across restarts even if the broker's default changes.
+// recordAgentQuotaProfile records on agent, in memory, the profile its
+// broker capacity is counted against: AppliedConfig.Profile, else the
+// broker's default profile (what the broker dispatches with when none is
+// named). It does nothing when a profile is already recorded or the agent
+// has no broker yet. Called at create and before every reservation; once
+// set, the value is kept for the agent's lifetime (reincarnation carries it
+// over) so reserve, release and reconcile key on the same profile across
+// restarts even if the broker's default changes.
 func (s *Server) recordAgentQuotaProfile(ctx context.Context, agent *store.Agent) {
 	if agent == nil || agent.RuntimeBrokerID == "" {
 		return
@@ -183,7 +186,13 @@ func (s *Server) recordAgentQuotaProfile(ctx context.Context, agent *store.Agent
 // reserveBrokerQuota reserves agent's max_agents_per_broker slot in the
 // scope its recorded profile resolves to. It returns the scope used, so a
 // refusal can name it.
+//
+// An agent that reaches its first reservation without a recorded profile
+// (one created without a broker, which gets its broker on a later start or
+// resume) has it recorded here and persisted, so later reservations,
+// releases and the reconcile pass agree on its scope.
 func (s *Server) reserveBrokerQuota(ctx context.Context, agent *store.Agent) (created bool, scope brokerQuotaScope, err error) {
+	s.ensureAgentQuotaProfile(ctx, agent)
 	scope = s.agentBrokerQuotaScope(ctx, agent)
 	if scope.ownLimit() {
 		created, err = s.quotaService.ReserveWithLimit(ctx, store.LimitMaxAgentsPerBroker, agent.RuntimeBrokerID, scope.ScopeType, scope.ScopeID, agent.ID, scope.Limit)
@@ -194,6 +203,29 @@ func (s *Server) reserveBrokerQuota(ctx context.Context, agent *store.Agent) (cr
 		err = &brokerQuotaExceededError{scope: scope}
 	}
 	return created, scope, err
+}
+
+// ensureAgentQuotaProfile records agent's quota profile when none is
+// recorded and stores it. The store write only sets the key when it is
+// still unset and touches nothing else, so it is safe alongside the
+// caller's own later writes. A failed write is logged; the in-memory value
+// is still used for this reservation. On the create path the agent row does
+// not exist yet and the write is a no-op; the create stores it.
+func (s *Server) ensureAgentQuotaProfile(ctx context.Context, agent *store.Agent) {
+	if agent == nil || agent.RuntimeBrokerID == "" {
+		return
+	}
+	if agent.AppliedConfig != nil && agent.AppliedConfig.QuotaProfile != "" {
+		return
+	}
+	s.recordAgentQuotaProfile(ctx, agent)
+	if agent.AppliedConfig == nil || agent.AppliedConfig.QuotaProfile == "" {
+		return
+	}
+	if _, err := s.store.SetAgentQuotaProfile(ctx, agent.ID, agent.AppliedConfig.QuotaProfile); err != nil {
+		s.agentLifecycleLog.WarnContext(ctx, "quota: failed to store the agent's quota profile",
+			"agent_id", agent.ID, "quota_profile", agent.AppliedConfig.QuotaProfile, "error", err)
+	}
 }
 
 // brokerQuotaExceededError is store.ErrQuotaExceeded for a broker capacity
@@ -217,33 +249,33 @@ func brokerQuotaExceededMessage(err error) string {
 	return quotaExceededMessage(store.LimitMaxAgentsPerBroker)
 }
 
-// brokerQuotaLaunchInFlight reports whether agent has a launch in flight:
-// an async launch that is still active, or a phase on the way to running.
-// The reconcile pass never moves such an agent's reservation between
-// scopes; it is handled on a later pass once the launch settles.
-func brokerQuotaLaunchInFlight(agent *store.Agent) bool {
-	return agent.LaunchState == "active" || store.InFlightPhases[agent.Phase]
+// brokerQuotaLaunchInFlight reports whether agent has a launch in flight
+// at now: an async launch that is active and not past its deadline, or a
+// phase on the way to running. A launch past its deadline is no longer in
+// flight (the launch sweeper ends it). The reconcile pass never moves an
+// in-flight agent's reservation between scopes; it is handled on a later
+// pass once the launch settles.
+func brokerQuotaLaunchInFlight(agent *store.Agent, now time.Time) bool {
+	if agent.LaunchState == store.LaunchStateActive && (agent.LaunchDeadline.IsZero() || now.Before(agent.LaunchDeadline)) {
+		return true
+	}
+	return store.InFlightPhases[agent.Phase]
 }
 
 // moveBrokerQuotaReservation moves agent's active reservation res to scope
 // to. Accounting only, like the reconcile backfill: the agent is already
-// running, so no cap is checked. Returns whether the move happened.
+// running, so no cap is checked. The move is one conditional store update
+// that matches only while the reservation is still active and still in
+// res's scope, so a stop, suspend or delete that releases it first is never
+// undone. Returns whether the move happened.
 func (s *Server) moveBrokerQuotaReservation(ctx context.Context, limitDefID string, agent *store.Agent, res *store.UsageReservation, to brokerQuotaScope) bool {
-	if err := s.store.ReleaseReservation(ctx, limitDefID, agent.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
-		s.agentLifecycleLog.WarnContext(ctx, "quota reconcile: failed to release reservation for scope move",
-			"agent_id", agent.ID, "error", err)
+	moved, err := s.store.MoveActiveReservationScope(ctx, limitDefID, agent.ID, res.ScopeType, res.ScopeID, to.ScopeType, to.ScopeID)
+	if err != nil {
+		s.agentLifecycleLog.WarnContext(ctx, "quota reconcile: failed to move reservation to its current capacity scope",
+			"agent_id", agent.ID, "to_scope_type", to.ScopeType, "to_scope_id", to.ScopeID, "error", err)
 		return false
 	}
-	if _, err := s.store.CreateUsageReservation(ctx, &store.UsageReservation{
-		LimitDefinitionID: limitDefID,
-		SubjectID:         agent.RuntimeBrokerID,
-		ScopeType:         to.ScopeType,
-		ScopeID:           to.ScopeID,
-		ResourceID:        agent.ID,
-		Reserved:          1,
-	}); err != nil {
-		s.agentLifecycleLog.WarnContext(ctx, "quota reconcile: failed to recreate reservation after scope move",
-			"agent_id", agent.ID, "to_scope_type", to.ScopeType, "to_scope_id", to.ScopeID, "error", err)
+	if !moved {
 		return false
 	}
 	s.agentLifecycleLog.InfoContext(ctx, "quota reconcile: moved agent reservation to its current capacity scope",

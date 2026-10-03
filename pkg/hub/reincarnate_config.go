@@ -118,6 +118,11 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 		Branch:                 old.Branch,
 		GCPIdentity:            old.GCPIdentity,
 
+		// The profile whose agent limit this agent's quota reservations count
+		// against. Recorded once, so later starts and restarts keep counting
+		// against the same limit even if the broker's default profile changes.
+		QuotaProfile: old.QuotaProfile,
+
 		// Writer (d) of ExplicitTimezone: the pin, its legacy label and the
 		// unpin record are carried forward. deriveAgentConfig's create-time
 		// capture never overwrites a non-empty pin and moves nothing when

@@ -146,10 +146,14 @@ type usageReservationView struct {
 	// settings key, e.g. "profiles.gke.max_agents". EntryAgentLimit is the
 	// current value, nil when that key is no longer set (the reconcile
 	// pass then moves the reservation to the broker-wide total).
+	// EntryAgentLimitUnknown is true when the hub's settings could not be
+	// loaded, so the current value cannot be read; EntryAgentLimit is then
+	// nil without meaning the key was removed.
 	// EntryAgentLimitEnforced is false when broker quota enforcement is
 	// switched off; the limit is then informational only.
 	EntryAgentLimit         *int64 `json:"entryAgentLimit,omitempty"`
 	EntryAgentLimitKey      string `json:"entryAgentLimitKey,omitempty"`
+	EntryAgentLimitUnknown  bool   `json:"entryAgentLimitUnknown,omitempty"`
 	EntryAgentLimitEnforced *bool  `json:"entryAgentLimitEnforced,omitempty"`
 }
 
@@ -779,18 +783,21 @@ func (s *Server) getUsageByLimit(w http.ResponseWriter, r *http.Request, limitID
 	// lookup, so no second query is needed.
 	brokerCapacityCache := make(map[string]BrokerCapacity)
 	var limitSettings *config.VersionedSettings
-	limitSettingsLoaded := false
+	limitSettingsLoaded, limitSettingsOK := false, false
 	views := make([]usageReservationView, len(reservations))
 	for i, res := range reservations {
 		views[i] = usageReservationView{UsageReservation: res}
 		if def.Name == store.LimitMaxAgentsPerBroker && res.ScopeType == store.QuotaScopeBrokerProfile {
 			if !limitSettingsLoaded {
-				limitSettings, _ = s.agentLimitSettings(ctx)
+				limitSettings, limitSettingsOK = s.agentLimitSettings(ctx)
 				limitSettingsLoaded = true
 			}
 			limit, key := entryAgentLimitForScope(limitSettings, res.SubjectID, res.ScopeID)
 			views[i].EntryAgentLimitKey = key
-			if limit > 0 {
+			switch {
+			case !limitSettingsOK:
+				views[i].EntryAgentLimitUnknown = true
+			case limit > 0:
 				views[i].EntryAgentLimit = &limit
 			}
 			enforced := s.brokerQuotasEnforced()

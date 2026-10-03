@@ -1208,8 +1208,9 @@ type Server struct {
 	agentMetricsLog   *slog.Logger
 
 	// agentLimitSettingsFn, when set (tests only), replaces the settings
-	// source for per-profile max_agents (see agentLimitSettings).
-	agentLimitSettingsFn func() *config.VersionedSettings
+	// source for per-profile max_agents (see agentLimitSettings); the bool
+	// reports whether the settings loaded.
+	agentLimitSettingsFn func() (*config.VersionedSettings, bool)
 
 	// Cached rate limit info from the most recent GitHub App API call
 	githubAppRateLimit *githubapp.RateLimitInfo

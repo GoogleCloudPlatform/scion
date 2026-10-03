@@ -56,7 +56,8 @@ func isBrokerQuotaCountedPhase(phase string) bool {
 
 // releaseBrokerQuota releases agent's max_agents_per_broker reservation, if
 // any, whatever its scope (broker-wide or a profile or runtime entry's own
-// limit): the release matches on the limit and the agent ID only. Best-effort and safe to call unconditionally (e.g. on every stop or
+// limit): the release matches on the limit and the agent ID only.
+// Best-effort and safe to call unconditionally (e.g. on every stop or
 // suspend) — a no-op when the agent has no runtime broker assigned, and
 // QuotaService.Release itself is a no-op when no reservation exists.
 func (s *Server) releaseBrokerQuota(ctx context.Context, agent *store.Agent) {
@@ -274,7 +275,7 @@ func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 			// was added, changed scope, or removed since it was made. Never
 			// while a launch is in flight, and never on settings that
 			// failed to load.
-			if !settingsOK || brokerQuotaLaunchInFlight(agent) {
+			if !settingsOK || brokerQuotaLaunchInFlight(agent, time.Now()) {
 				continue
 			}
 			want := brokerQuotaScopeFor(limitSettings, broker.ID, agentQuotaProfile(agent))
