@@ -144,6 +144,9 @@ var SecurityMutationSymbols = map[string]string{
 
 	// Agent lifecycle
 	"DeleteAgent": "delete-resource",
+	// FinalizeAgentDeletion is the delete engine's one-transaction soft or
+	// hard delete (with cascade). It replaced the handler's DeleteAgent call.
+	"FinalizeAgentDeletion": "delete-resource",
 }
 
 // Catalog is the authoritative operation catalog. Every externally reachable
@@ -2926,6 +2929,11 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/handlers_agents_core.go", Function: "cleanupFailedCreate", Symbol: "DeleteAgent", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Agent create rollback, deletes on creation failure", Scope: "pkg/hub/handlers_agents_core.go"}},
 	{File: "pkg/hub/handlers_agents_core.go", Function: "handleAgentTokenRefresh", Symbol: "RevokeAgentCredential", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Agent token refresh, agent-JWT auth; old credential revoked on refresh", Scope: "pkg/hub/handlers_agents_core.go"}},
 	{File: "pkg/hub/handlers_agents_core.go", Function: "ensureHostSARecord", Symbol: "CreateGCPServiceAccount", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Host SA record creation during agent assignment, broker-HMAC authenticated", Scope: "pkg/hub/handlers_agents_core.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/agent_delete_engine.go — agent delete engine (ptone/scion#2483)
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/agent_delete_engine.go", Function: "finalizeAgentDeletion", Symbol: "FinalizeAgentDeletion", Exemption: &MutationExemption{Kind: ExemptionRouteGuarded, Reason: "Delete engine's terminal soft or hard delete. The engine only runs under a claim taken by performAgentDelete, which authorizes agent.delete on the target agent (authorizeAgentTargetAction) for both the agent and the project-scoped DELETE routes; the write is CAS-guarded by that claim", Scope: "pkg/hub/agent_delete_engine.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/handlers_agent_create_helpers.go
