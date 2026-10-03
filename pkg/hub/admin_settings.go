@@ -450,21 +450,42 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// shared_dir_storage_backend on runtime and profile entries must be
 	// "local" or "nfs", and "nfs" needs a complete
 	// server.shared_dir_storage.nfs block (from this request, else the
-	// current global settings). Configuration only; no mount is checked.
-	if len(req.Runtimes) > 0 || len(req.Profiles) > 0 {
+	// current global settings). When the request changes
+	// server.shared_dir_storage, it is also checked against the runtimes
+	// and profiles already stored, so removing or emptying the nfs block
+	// cannot strand an existing nfs override. Configuration only; no mount
+	// is checked.
+	sdInRequest := req.Server != nil && req.Server.SharedDirStorage != nil
+	if req.Runtimes != nil || req.Profiles != nil || sdInRequest {
+		runtimes, profiles := req.Runtimes, req.Profiles
 		var sdGlobal *config.V1SharedDirStorageConfig
-		sdKnown := true
-		if req.Server != nil && req.Server.SharedDirStorage != nil {
+		if sdInRequest {
 			sdGlobal = req.Server.SharedDirStorage
-		} else if gs, _, gErr := config.LoadGlobalSettings(); gErr == nil {
-			if gs != nil && gs.Server != nil {
-				sdGlobal = gs.Server.SharedDirStorage
+		}
+		sdKnown := true
+		if !sdInRequest || runtimes == nil || profiles == nil {
+			gs, _, gErr := config.LoadGlobalSettings()
+			switch {
+			case gErr != nil:
+				// The current settings cannot be read, so the merged
+				// result is unknown; validation at agent start still
+				// applies.
+				sdKnown = false
+			case gs != nil:
+				if sdInRequest {
+					if runtimes == nil {
+						runtimes = gs.Runtimes
+					}
+					if profiles == nil {
+						profiles = gs.Profiles
+					}
+				} else if gs.Server != nil {
+					sdGlobal = gs.Server.SharedDirStorage
+				}
 			}
-		} else {
-			sdKnown = false
 		}
 		if sdKnown {
-			if errs := config.ValidateSharedDirStorageBackends(req.Runtimes, req.Profiles, sdGlobal); len(errs) > 0 {
+			if errs := config.ValidateSharedDirStorageBackends(runtimes, profiles, sdGlobal); len(errs) > 0 {
 				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
 				return
 			}

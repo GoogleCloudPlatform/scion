@@ -1158,3 +1158,92 @@ server:
 		t.Fatalf("gke should still resolve to nfs after another write, got %+v; settings.yaml: %s", cfg, data)
 	}
 }
+
+// sdsWriteFileWithNFSOverride writes a global settings.yaml whose gke
+// profile selects nfs, with a complete nfs block, and returns its path.
+func sdsWriteFileWithNFSOverride(t *testing.T) string {
+	t.Helper()
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	dir := filepath.Join(tmpHome, ".scion")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(dir, "settings.yaml")
+	if err := os.WriteFile(settingsPath, []byte(`schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+profiles:
+  gke:
+    runtime: k8s
+    shared_dir_storage_backend: nfs
+server:
+  shared_dir_storage:
+    backend: local
+    nfs:
+      mount_root: /srv/nfs
+      shares:
+        - id: share-1
+          pv_name: pv-1
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return settingsPath
+}
+
+// A file-mode PUT that changes only server.shared_dir_storage is checked
+// against the runtimes and profiles already stored: removing or emptying
+// the nfs block while a stored override selects nfs is rejected, naming
+// the override, and nothing is written.
+func TestHandlePutServerConfig_SharedDirStorage_CheckedAgainstStoredOverrides(t *testing.T) {
+	for name, body := range map[string]string{
+		"nfs block removed": `{"server":{"shared_dir_storage":{"backend":"local"}}}`,
+		"no shares":         `{"server":{"shared_dir_storage":{"backend":"local","nfs":{"mount_root":"/srv/nfs"}}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			settingsPath := sdsWriteFileWithNFSOverride(t)
+			before, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv := &Server{}
+			rr := httptest.NewRecorder()
+			srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body))
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), "profiles.gke.shared_dir_storage_backend") {
+				t.Errorf("400 body should name the stored override, got: %s", rr.Body.String())
+			}
+			after, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != string(before) {
+				t.Errorf("settings.yaml must be unchanged, got: %s", after)
+			}
+		})
+	}
+}
+
+// A file-mode PUT of server.shared_dir_storage is accepted when the merged
+// result is consistent: a new complete nfs block, or a request that also
+// drops the stored nfs override.
+func TestHandlePutServerConfig_SharedDirStorage_MergedResultAccepted(t *testing.T) {
+	for name, body := range map[string]string{
+		"new complete nfs block": `{"server":{"shared_dir_storage":{"backend":"local","nfs":{"mount_root":"/mnt/other","shares":[{"id":"share-2","pv_name":"pv-2"}]}}}}`,
+		"override dropped too":   `{"server":{"shared_dir_storage":{"backend":"local"}},"profiles":{"gke":{"runtime":"k8s"}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			settingsPath := sdsWriteFileWithNFSOverride(t)
+			srv := &Server{}
+			rr := httptest.NewRecorder()
+			srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body))
+			if rr.Code != http.StatusOK {
+				data, _ := os.ReadFile(settingsPath)
+				t.Fatalf("expected 200, got %d: %s; settings.yaml: %s", rr.Code, rr.Body.String(), data)
+			}
+		})
+	}
+}
