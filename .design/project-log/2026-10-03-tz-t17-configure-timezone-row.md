@@ -15,11 +15,14 @@
 - **On load** the agent GET carries only `appliedConfig.explicitTimezone`/`explicitTimezoneLegacy`,
   so the row shows the pin (source explicit or legacy) or "Not pinned" with the resolution order.
   The resolved zone of an unpinned agent appears only after a PATCH.
-- **Non-created phases.** The page still says the agent cannot be configured, but it renders the
-  Timezone row under that notice, because the hub accepts `explicitTimezone` in any phase. In
-  cloning/starting/running (the hub's live-container phases), or when the PATCH returns the hub's
-  next-start warning, the row says the change applies on next start. agent-detail still links
-  Configure only for created agents.
+- **Non-created phases.** The hub accepts `explicitTimezone` in any phase. So outside `created` the
+  page shows a neutral notice ("only its timezone can be changed here") and the Timezone row, with
+  no other form fields, and a back link to the agent. In every non-created phase, or when the PATCH
+  returns the hub's next-start warning, the row says "A timezone change applies on the agent's next
+  start."
+- **Entry point.** `agent-detail.ts` now shows the Configure button in every phase when the caller
+  has the agent `update` capability, and still in `created` as before. This makes the row reachable
+  for existing (often legacy-pinned) agents, which the task 16 release note relies on.
 - **Env table.** `TZ` is filtered out on load, so an empty gathered `TZ` is never a "required" row.
   In `buildConfig` it is skipped on both the current and the loaded side, so a typed `TZ` row is
   never sent and a loaded `TZ` never counts as an env edit. The Environment tab says where `TZ` is managed.
@@ -33,9 +36,13 @@ progeny = "Inherited TZ environment variable"; hub-default = "Hub default timezo
 
 ## Tests
 
-`web/src/components/pages/agent-configure-timezone.test.ts` (21 cases): pin, unpin, a pin-then-unpin
+`web/src/components/pages/agent-configure-timezone.test.ts`: pin, unpin, a pin-then-unpin
 round-trip through a mocked PATCH, every source label from the PATCH response, invalid zone, PATCH
-failure, Save response, running/stopped agents, and the TZ env filter on load and save. The display
+failure, Save response, a response without the resolved fields (pin and unpin), a running agent
+(pin, resolved value and source), a legacy-pinned running agent (unpin), the next-start hint in
+stopped/starting/suspended/error, and the TZ env filter on load and save.
+`agent-detail-header.test.ts` checks that Configure shows for running/stopped/suspended/error agents
+with `update` capability and is hidden without it (reverting the condition fails 5 cases). The display
 preference is set to a zone that differs from the browser zone. A mutation check (removing the
 filters or changing the PATCH body) fails 8 cases. These ran under TZ=UTC, Asia/Tokyo and
 Asia/Kathmandu with the neighbouring configure tests, the picker tests and the format scan.
@@ -44,5 +51,4 @@ Asia/Kathmandu with the neighbouring configure tests, the picker tests and the f
 ## Follow-ups
 
 - A GET field for `resolvedTimezone`/`timezoneSource` would let the row show the resolved zone on
-  load (requested as a hub follow-up).
-- No Configure entry point for non-created agents. The row is reachable there only by URL.
+  load. Tracked as ptone/scion#2767.

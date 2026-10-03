@@ -291,6 +291,26 @@ describe('agent-configure Timezone row', () => {
     expect(text(el, 'timezone-source')).toBe(label);
   });
 
+  it('falls back to the pinned value when a pin response lacks the timezone fields', async () => {
+    const el = await mount(makeAgent('created', { explicitTimezone: 'Europe/Paris' }));
+    patchReplies.push({ body: {} });
+    await pin(el, 'Asia/Tokyo');
+    expect(patchCalls).toEqual([{ body: { explicitTimezone: 'Asia/Tokyo' } }]);
+    expect(text(el, 'timezone-value')).toBe('Asia/Tokyo');
+    expect(text(el, 'timezone-source')).toBe('Pinned on this agent');
+    expect(q(el, 'timezone-unpin')).not.toBeNull();
+  });
+
+  it('shows "Not pinned" when an unpin response lacks the timezone fields', async () => {
+    const el = await mount(makeAgent('created', { explicitTimezone: 'Europe/Paris' }));
+    patchReplies.push({ body: {} });
+    await click(el, 'timezone-unpin');
+    expect(patchCalls).toEqual([{ body: { explicitTimezone: '' } }]);
+    expect(text(el, 'timezone-value')).toBe('Not pinned');
+    expect(text(el, 'timezone-source')).toContain('hub default timezone');
+    expect(q(el, 'timezone-unpin')).toBeNull();
+  });
+
   it('rejects an invalid zone without sending a PATCH', async () => {
     const el = await mount(makeAgent('created'));
     await pin(el, 'Mars/Olympus');
@@ -325,13 +345,19 @@ describe('agent-configure Timezone row', () => {
 describe('agent-configure Timezone row on a non-created agent', () => {
   it('a running agent shows the row and "applies on next start", and can pin', async () => {
     const el = await mount(makeAgent('running', { explicitTimezone: 'Europe/Paris' }));
-    // The rest of the form is not editable in this phase; the notice stays.
-    expect(el.shadowRoot!.querySelector('.error-banner')?.textContent).toContain(
-      'cannot be configured'
-    );
+    // Only the timezone is editable in this phase: a neutral notice says so,
+    // no error banner, and none of the other form fields render.
+    expect(q(el, 'phase-notice')?.textContent).toContain('only its timezone can be changed');
+    expect(el.shadowRoot!.querySelector('.error-banner')).toBeNull();
     expect(el.shadowRoot!.querySelector('sl-tab-group')).toBeNull();
+    expect(el.shadowRoot!.querySelector('sl-input, sl-textarea, sl-select')).toBeNull();
+    expect(el.shadowRoot!.querySelector('a.back-link')?.getAttribute('href')).toBe(
+      '/agents/agent-1'
+    );
     expect(text(el, 'timezone-value')).toBe('Europe/Paris');
-    expect(text(el, 'timezone-next-start')).toContain('applies on next start');
+    expect(text(el, 'timezone-next-start')).toBe(
+      "A timezone change applies on the agent's next start."
+    );
 
     patchReplies.push({
       body: {
@@ -344,14 +370,44 @@ describe('agent-configure Timezone row on a non-created agent', () => {
     await pin(el, 'Asia/Kathmandu');
     expect(patchCalls).toEqual([{ body: { explicitTimezone: 'Asia/Kathmandu' } }]);
     expect(text(el, 'timezone-value')).toBe('Asia/Kathmandu');
+    expect(text(el, 'timezone-source')).toBe('Pinned on this agent');
     expect(q(el, 'timezone-next-start')).not.toBeNull();
   });
 
-  it('a stopped agent shows the row without the next-start hint', async () => {
-    const el = await mount(makeAgent('stopped'));
-    expect(text(el, 'timezone-value')).toBe('Not pinned');
-    expect(q(el, 'timezone-next-start')).toBeNull();
+  it('a legacy-pinned running agent can be unpinned and shows the resolved value', async () => {
+    const el = await mount(
+      makeAgent('running', { explicitTimezone: 'Europe/Paris', explicitTimezoneLegacy: true })
+    );
+    expect(text(el, 'timezone-value')).toBe('Europe/Paris');
+    expect(text(el, 'timezone-source')).toBe('Pinned (kept from an earlier TZ setting)');
+    expect(q(el, 'timezone-next-start')).not.toBeNull();
+
+    patchReplies.push({
+      body: {
+        appliedConfig: {},
+        resolvedTimezone: 'America/Chicago',
+        timezoneSource: 'project',
+        warnings: ["explicitTimezone applies at the agent's next start"],
+      },
+    });
+    await click(el, 'timezone-unpin');
+    expect(patchCalls).toEqual([{ body: { explicitTimezone: '' } }]);
+    expect(text(el, 'timezone-value')).toBe('America/Chicago');
+    expect(text(el, 'timezone-source')).toBe('Project TZ environment variable');
+    expect(q(el, 'timezone-unpin')).toBeNull();
+    expect(q(el, 'timezone-next-start')).not.toBeNull();
   });
+
+  it.each(['stopped', 'starting', 'suspended', 'error'])(
+    'a %s agent shows the row with the phase-neutral next-start hint',
+    async (phase) => {
+      const el = await mount(makeAgent(phase));
+      expect(text(el, 'timezone-value')).toBe('Not pinned');
+      expect(text(el, 'timezone-next-start')).toBe(
+        "A timezone change applies on the agent's next start."
+      );
+    }
+  );
 
   it('shows the next-start hint when the PATCH reports it, whatever the loaded phase', async () => {
     const el = await mount(makeAgent('stopped'));

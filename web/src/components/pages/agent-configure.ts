@@ -92,12 +92,6 @@ const AUTO_EXPOSE_ENV_KEYS_SET: ReadonlySet<string> = new Set(AUTO_EXPOSE_ENV_KE
 const TZ_ENV_KEY = 'TZ';
 
 /**
- * Phases in which the agent has a live container, so a timezone change only
- * takes effect at its next start. Mirrors the hub's phaseHasLiveContainer.
- */
-const LIVE_CONTAINER_PHASES: ReadonlySet<string> = new Set(['cloning', 'starting', 'running']);
-
-/**
  * The warning the hub's agent PATCH returns when an explicitTimezone edit
  * changes the zone of an agent whose container is live
  * (explicitTimezoneNextStartWarning in pkg/hub/agent_tz_writers.go).
@@ -564,6 +558,24 @@ export class ScionPageAgentConfigure extends LitElement {
       margin-top: 0.125rem;
     }
 
+    .phase-notice {
+      background: var(--sl-color-neutral-50, #f8fafc);
+      border: 1px solid var(--sl-color-neutral-200, #e2e8f0);
+      border-radius: var(--scion-radius, 0.5rem);
+      padding: 0.75rem 1rem;
+      margin-bottom: 1.25rem;
+      display: flex;
+      align-items: flex-start;
+      gap: 0.5rem;
+      color: var(--sl-color-neutral-700, #334155);
+      font-size: 0.875rem;
+    }
+
+    .phase-notice sl-icon {
+      flex-shrink: 0;
+      margin-top: 0.125rem;
+    }
+
     .success-banner {
       background: var(--sl-color-success-50, #f0fdf4);
       border: 1px solid var(--sl-color-success-200, #bbf7d0);
@@ -749,8 +761,9 @@ export class ScionPageAgentConfigure extends LitElement {
       // loaded (and rendered) even when the rest of the form is not.
       this.populateTimezone();
 
+      // Outside "created" only the Timezone row is editable; render()
+      // shows a phase notice instead of the form.
       if (this.agent.phase !== 'created') {
-        this.error = `This agent is in "${this.agent.phase}" phase and cannot be configured. Only agents in "created" phase can be edited. The timezone can still be pinned or unpinned below.`;
         return;
       }
 
@@ -916,10 +929,6 @@ export class ScionPageAgentConfigure extends LitElement {
     }
   }
 
-  private get agentHasLiveContainer(): boolean {
-    return LIVE_CONTAINER_PHASES.has(this.agent?.phase ?? '');
-  }
-
   /**
    * Writes explicitTimezone: a zone name pins it, '' unpins it. Sent on its
    * own, never together with config, so it neither depends on nor changes
@@ -938,9 +947,14 @@ export class ScionPageAgentConfigure extends LitElement {
         throw new Error(await extractApiError(res, `HTTP ${res.status}`));
       }
       const data = (await res.json()) as AgentPatchResponse;
-      // The PATCH response always reports the outcome, but fall back to the
-      // value just written if an older hub omits appliedConfig.
+      // The hub's PATCH response reports the pin and the resolved zone. If a
+      // response lacks either part (an older hub, or a proxy), fall back to
+      // what was just written, so the row never shows the previous pin.
       this.tzPinned = value;
+      if (typeof data.resolvedTimezone !== 'string' || !data.timezoneSource) {
+        this.tzResolved = value || null;
+        this.tzSource = value ? 'explicit' : null;
+      }
       this.applyTimezoneFromResponse(data);
       this.tzNextStartWarned = (data.warnings ?? []).includes(TZ_NEXT_START_WARNING);
       this.tzPicking = false;
@@ -1319,7 +1333,6 @@ export class ScionPageAgentConfigure extends LitElement {
             <sl-icon name="exclamation-triangle"></sl-icon>
             <span>${this.error || 'Agent not found'}</span>
           </div>
-          ${this.agent ? this.renderTimezoneRow() : nothing}
           <sl-button
             variant="default"
             @click=${() => {
@@ -1328,6 +1341,37 @@ export class ScionPageAgentConfigure extends LitElement {
           >
             Back to Agents
           </sl-button>
+        </div>
+      `;
+    }
+
+    if (this.agent.phase !== 'created') {
+      // Reached from the agent-detail Configure button in any phase. Only the
+      // timezone pin can change after the agent has started, so the other
+      // settings are not rendered here.
+      return html`
+        <a href="/agents/${this.agent.id || this.agentId}" class="back-link">
+          <sl-icon name="arrow-left"></sl-icon>
+          Back to Agent
+        </a>
+
+        <div class="page-header">
+          <h1>
+            <sl-icon name="sliders"></sl-icon>
+            Configure Agent: ${this.agent.name}
+          </h1>
+          <p class="subtitle">Status: ${this.agent.phase}</p>
+        </div>
+
+        <div class="form-card">
+          <div class="phase-notice" data-testid="phase-notice">
+            <sl-icon name="info-circle"></sl-icon>
+            <span
+              >This agent is in "${this.agent.phase}" phase, so only its timezone can be changed
+              here. Other settings can be edited only while an agent is in "created" phase.</span
+            >
+          </div>
+          ${this.renderTimezoneRow()}
         </div>
       `;
     }
@@ -2069,7 +2113,10 @@ export class ScionPageAgentConfigure extends LitElement {
     const sourceText = known
       ? timezoneSourceLabel(this.tzSource ?? '')
       : 'Resolved at start: a TZ environment variable (user, project, hub or broker scope), then the hub default timezone, then UTC.';
-    const showNextStart = this.agentHasLiveContainer || this.tzNextStartWarned;
+    // Outside the created phase the agent has been started before, so a
+    // change reaches its container only at the next start (the hub also
+    // warns when the container is live).
+    const showNextStart = this.agent?.phase !== 'created' || this.tzNextStartWarned;
 
     return html`
       <div class="form-field timezone-row" data-testid="timezone-row">
@@ -2154,7 +2201,7 @@ export class ScionPageAgentConfigure extends LitElement {
           : nothing}
         ${showNextStart
           ? html`<div class="hint" data-testid="timezone-next-start">
-              This agent's container is running: a timezone change applies on next start.
+              A timezone change applies on the agent's next start.
             </div>`
           : nothing}
         ${this.tzError
