@@ -237,9 +237,13 @@ func (s *Server) runAgentDeletion(reqCtx context.Context, plan *agentDeletionPla
 		defer func() {
 			if rec := recover(); rec != nil {
 				s.agentLifecycleLog.Error("delete engine panicked",
-					"agent_id", plan.snapshot.ID, "claim", plan.claim, "panic", fmt.Sprint(rec))
-				e.stopRenewal()
-				out = e.abandonOutcome()
+					"agent_id", plan.snapshot.ID, "claim", plan.claim, "finished", e.finished, "panic", fmt.Sprint(rec))
+				if e.finished {
+					// The delete committed: report it, never "retry".
+					out = deletionOutcome{kind: deletionOutcomeDeleted}
+				} else {
+					out = e.abandonOutcome()
+				}
 			}
 			e.stopRenewal()
 			cancel(nil)
@@ -262,6 +266,23 @@ type deletionEngine struct {
 	renewOnce sync.Once
 	renewStop chan struct{}
 	renewDone chan struct{}
+
+	// finished is set once finish() has committed the soft or hard delete.
+	// Only the engine goroutine touches it.
+	finished bool
+}
+
+// tailStep runs one best-effort step after the delete committed, recovering
+// a panic so the remaining steps (quota release, topic clear) still run and
+// the outcome stays deleted.
+func (e *deletionEngine) tailStep(name string, fn func()) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			e.s.agentLifecycleLog.Error("delete engine: post-finish step panicked",
+				"agent_id", e.agentID(), "step", name, "panic", fmt.Sprint(rec))
+		}
+	}()
+	fn()
 }
 
 func (e *deletionEngine) agentID() string { return e.plan.snapshot.ID }
@@ -476,18 +497,19 @@ func (e *deletionEngine) run() deletionOutcome {
 		return out
 	}
 
-	// Persist and deliver only after the row change succeeded.
+	// Persist and deliver only after the row change succeeded. Each tail
+	// step recovers on its own: the delete has committed.
 	if nd := s.notificationDispatcher; nd != nil && len(pending) > 0 {
-		nd.DeliverDeletedNotifications(e.base, pending)
+		e.tailStep("deliver notifications", func() { nd.DeliverDeletedNotifications(e.base, pending) })
 	}
 
 	// Release quotas and the topic default binding (each bounded).
-	s.releaseAgentQuotas(e.base, agent.ID, agent.RuntimeBrokerID)
-	func() {
+	e.tailStep("release quotas", func() { s.releaseAgentQuotas(e.base, agent.ID, agent.RuntimeBrokerID) })
+	e.tailStep("clear topic default", func() {
 		ctx, cancel := context.WithTimeout(e.base, deleteStepTimeout)
 		defer cancel()
 		s.ClearTopicDefaultAgent(ctx, agent.ID, agent.Slug, agent.ProjectID)
-	}()
+	})
 
 	return deletionOutcome{kind: deletionOutcomeDeleted}
 }
@@ -693,7 +715,7 @@ func (e *deletionEngine) failFinalizing(code, msg string) deletionOutcome {
 	if err != nil {
 		e.s.agentLifecycleLog.Error("delete engine: failure write failed",
 			"agent_id", e.agentID(), "code", code, "error", err)
-		return deletionOutcome{kind: deletionOutcomeFailed, code: code, message: msg}
+		return e.abandonOutcome()
 	}
 	if n == 0 {
 		return e.lost()
@@ -749,7 +771,8 @@ func (e *deletionEngine) finish() (deletionOutcome, bool) {
 		if n == 0 {
 			return e.lost(), false
 		}
-		s.events.PublishAgentDeleted(e.base, agent.ID, agent.ProjectID)
+		e.finished = true
+		e.tailStep("publish deleted", func() { s.events.PublishAgentDeleted(e.base, agent.ID, agent.ProjectID) })
 		return deletionOutcome{}, true
 	}
 
@@ -765,6 +788,7 @@ func (e *deletionEngine) finish() (deletionOutcome, bool) {
 		cancel()
 		if err == nil {
 			if n == 1 || e.rowGone() {
+				e.finished = true
 				return deletionOutcome{}, true
 			}
 			return e.lost(), false

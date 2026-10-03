@@ -257,31 +257,38 @@ func (nd *NotificationDispatcher) DeliverDeletedNotifications(ctx context.Contex
 	ctx = context.WithoutCancel(ctx)
 	go func() {
 		defer close(done)
-		defer func() {
-			if rec := recover(); rec != nil {
-				nd.log.Error("DELETED notification delivery panicked", "panic", fmt.Sprint(rec))
-			}
-		}()
 		for i := range pending {
-			p := &pending[i]
-			evt := AgentStatusEvent{
-				AgentID:   p.agent.ID,
-				ProjectID: p.agent.ProjectID,
-				Phase:     "stopped",
-				Activity:  "DELETED",
-				// The agent is gone: no delete view (explicit null on the wire).
-				Deletion: nil,
-			}
-			// storeAndDispatch's stale-event check is intentionally skipped.
-			// It drops re-reported statuses older than the subscription,
-			// judged by the agent's last activity. A DELETED event is never a
-			// re-report: the delete is happening now, after any subscription
-			// that exists. An idle agent's last activity can predate a newer
-			// subscription, so the check would wrongly drop the event.
-			nd.storeAndDispatchForAgent(ctx, &p.sub, evt, &p.agent)
+			nd.deliverDeletedNotification(ctx, &pending[i])
 		}
 	}()
 	return done
+}
+
+// deliverDeletedNotification persists and delivers one resolved DELETED
+// notification. A panic is recovered per item, so it cannot drop the
+// remaining subscribers' notifications.
+func (nd *NotificationDispatcher) deliverDeletedNotification(ctx context.Context, p *pendingDeletedNotification) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			nd.log.Error("DELETED notification delivery panicked",
+				"agent_id", p.agent.ID, "subscriptionID", p.sub.ID, "panic", fmt.Sprint(rec))
+		}
+	}()
+	evt := AgentStatusEvent{
+		AgentID:   p.agent.ID,
+		ProjectID: p.agent.ProjectID,
+		Phase:     "stopped",
+		Activity:  "DELETED",
+		// The agent is gone: no delete view (explicit null on the wire).
+		Deletion: nil,
+	}
+	// storeAndDispatch's stale-event check is intentionally skipped. It
+	// drops re-reported statuses older than the subscription, judged by the
+	// agent's last activity. A DELETED event is never a re-report: the
+	// delete is happening now, after any subscription that exists. An idle
+	// agent's last activity can predate a newer subscription, so the check
+	// would wrongly drop the event.
+	nd.storeAndDispatchForAgent(ctx, &p.sub, evt, &p.agent)
 }
 
 // storeAndDispatch creates a notification record and dispatches it to the subscriber.

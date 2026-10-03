@@ -375,6 +375,27 @@ func TestAgentDeleteEngine_TerminalWriteErrorAbandons(t *testing.T) {
 		require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 		assert.True(t, agentGone(t, s, agent.ID))
 	})
+	t.Run("finalizing failure", func(t *testing.T) {
+		// Round-2 N1: the revoke_failed write itself errors.
+		srv, s, _, disp := engineTestServer(t)
+		hooks := &engineHookStore{Store: s}
+		srv.store = hooks
+		agent := setupBrokerAgentInPhase(t, s, "abandon-ff", state.PhaseRunning)
+		hooks.setRevokeErr(errors.New("revoke boom"))
+		hooks.setFailDeletionWrite(func(set store.DeletionFields) bool {
+			return set.Code != nil && *set.Code == store.DeletionCodeRevokeFailed
+		})
+
+		rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+		requireAbandoned(t, s, agent.ID, rec)
+		assert.Equal(t, store.DeletionStateFinalizing, mustGetAgent(t, s, agent.ID).DeletionState)
+
+		hooks.setRevokeErr(nil)
+		rec = doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+		require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+		assert.True(t, agentGone(t, s, agent.ID))
+		assert.Equal(t, 1, disp.callCount(), "re-claiming a finalizing row skips the dispatch")
+	})
 	t.Run("in_doubt", func(t *testing.T) {
 		setDeleteWaitTimeout(t, func(context.Context) time.Duration { return 100 * time.Millisecond })
 		f := newDeferredDeleteFixture(t, "abandon-id", nil)
@@ -420,4 +441,158 @@ func TestAgentDeleteEngine_RepeatedClaimMissDoesNotReportOldFailure(t *testing.T
 	assert.GreaterOrEqual(t, hooks.claimMisses, 3)
 	hooks.mu.Unlock()
 	assert.Zero(t, disp.callCount())
+}
+
+// panicDeletedPublisher panics on PublishAgentDeleted.
+type panicDeletedPublisher struct{ EventPublisher }
+
+func (panicDeletedPublisher) PublishAgentDeleted(context.Context, string, string) {
+	panic("publish deleted boom")
+}
+
+// panicQuotaStore panics on the quota lookup releaseAgentQuotas makes.
+type panicQuotaStore struct{ store.Store }
+
+func (panicQuotaStore) GetLimitDefinitionByName(context.Context, string) (*store.LimitDefinition, error) {
+	panic("quota boom")
+}
+
+// Round-2 N2: a panic after the delete committed reports deleted (204), not
+// abandoned, and the rest of the post-finish tail still runs.
+func TestAgentDeleteEngine_PanicAfterFinishReportsDeleted(t *testing.T) {
+	t.Run("soft publish panics", func(t *testing.T) {
+		srv, s, _, _ := engineTestServer(t)
+		srv.config.SoftDeleteRetention = time.Hour
+		srv.events = panicDeletedPublisher{srv.events}
+		releases := countQuotaReleases(t, srv)
+		agent := setupBrokerAgentInPhase(t, s, "tailpanic-soft", state.PhaseRunning)
+
+		rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+		require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+		assert.False(t, mustGetAgent(t, s, agent.ID).DeletedAt.IsZero(), "soft-deleted")
+		assert.Equal(t, 1, releases(), "the quota release still ran")
+	})
+	t.Run("hard quota release panics", func(t *testing.T) {
+		srv, s, pub, _ := engineTestServer(t)
+		srv.quotaService = &QuotaService{store: panicQuotaStore{s}, logger: slog.Default()}
+		agent := setupBrokerAgentInPhase(t, s, "tailpanic-hard", state.PhaseRunning)
+
+		rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+		require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+		assert.True(t, agentGone(t, s, agent.ID))
+		assert.Equal(t, 1, pub.count("deleted"))
+	})
+}
+
+// listThenSeedStore returns ListAgents' snapshot, then seeds a live delete
+// on target, so the row changes after stop-all read the list.
+type listThenSeedStore struct {
+	store.Store
+	t      *testing.T
+	target string
+}
+
+func (l *listThenSeedStore) ListAgents(ctx context.Context, f store.AgentFilter, o store.ListOptions) (*store.ListResult[store.Agent], error) {
+	res, err := l.Store.ListAgents(ctx, f, o)
+	if err == nil {
+		seedAgentDeletion(l.t, l.Store, l.target, seedLiveDeleting)
+	}
+	return res, err
+}
+
+// Round-2 N3: a delete that claims a row after stop-all listed it is still
+// skipped (the per-agent re-read), with no result and no phase change.
+func TestAgentDeleteRouted_StopAllSkipsRowClaimedAfterList(t *testing.T) {
+	srv, s, _, _ := engineTestServer(t)
+	ctx := context.Background()
+	target := setupBrokerAgentInPhase(t, s, "stopall-late", state.PhaseRunning)
+	other := &store.Agent{
+		ID: tid("stopall-late-other"), Slug: "stopall-late-other", Name: "Stop All Late Other",
+		ProjectID: target.ProjectID, RuntimeBrokerID: target.RuntimeBrokerID,
+		Phase: string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, other))
+	srv.store = &listThenSeedStore{Store: s, t: t, target: target.ID}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+target.ProjectID+"/agents/stop-all", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp StopAllAgentsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	for _, r := range resp.Results {
+		assert.NotEqual(t, target.ID, r.ID, "no result for the row a delete claimed")
+	}
+	assert.Equal(t, 1, resp.Total)
+	got := mustGetAgent(t, s, target.ID)
+	assert.Equal(t, string(state.PhaseRunning), got.Phase, "phase unchanged")
+	assert.Equal(t, store.DeletionStateDeleting, got.DeletionState)
+	assert.Equal(t, string(state.PhaseStopped), mustGetAgent(t, s, other.ID).Phase)
+}
+
+// panicOnceNotificationStore panics on the first CreateNotification.
+type panicOnceNotificationStore struct {
+	store.Store
+	once sync.Once
+}
+
+func (p *panicOnceNotificationStore) CreateNotification(ctx context.Context, n *store.Notification) error {
+	p.once.Do(func() { panic("create notification boom") })
+	return p.Store.CreateNotification(ctx, n)
+}
+
+// Round-2 n2: a panic delivering one DELETED notification does not drop the
+// others.
+func TestDeliverDeletedNotifications_PanicIsPerItem(t *testing.T) {
+	srv, s, _, _ := engineTestServer(t)
+	agent := setupBrokerAgentInPhase(t, s, "deliverpanic", state.PhaseRunning)
+	deletedSubscription(t, s, agent, store.SubscriberTypeUser, "watcher-a")
+	deletedSubscription(t, s, agent, store.SubscriberTypeUser, "watcher-b")
+	nd := NewNotificationDispatcher(&panicOnceNotificationStore{Store: s}, srv.events,
+		func() AgentDispatcher { return &recordingDispatcher{} }, slog.Default())
+	ctx := context.Background()
+	pending := nd.ResolveDeletedNotifications(ctx, agent)
+	require.Len(t, pending, 2)
+
+	select {
+	case <-nd.DeliverDeletedNotifications(ctx, pending):
+	case <-time.After(5 * time.Second):
+		t.Fatal("delivery did not finish")
+	}
+	total := 0
+	for _, id := range []string{"watcher-a", "watcher-b"} {
+		n, err := s.GetNotifications(ctx, store.SubscriberTypeUser, id, false)
+		require.NoError(t, err)
+		total += len(n)
+	}
+	assert.Equal(t, 1, total, "the second subscriber is still notified")
+}
+
+// renewalPanicStore panics on a lease renewal write (KeepUpdated).
+type renewalPanicStore struct{ store.Store }
+
+func (r renewalPanicStore) UpdateAgentDeletion(ctx context.Context, id string, pred store.DeletionPredicate, set store.DeletionFields) (int, error) {
+	if set.KeepUpdated {
+		panic("renewal boom")
+	}
+	return r.Store.UpdateAgentDeletion(ctx, id, pred, set)
+}
+
+// Round-2 n2: a panic in lease renewal is recovered (the hub survives) and
+// stops the engine: the in-flight dispatch sees its context cancelled.
+func TestAgentDeleteEngine_RenewalPanicStopsEngine(t *testing.T) {
+	setDeleteKnob(t, &deleteLeaseRenewInterval, 20*time.Millisecond)
+	setDeleteKnob(t, &deleteSyncWait, 2*time.Second)
+	srv, s, _, disp := engineTestServer(t)
+	srv.store = renewalPanicStore{s}
+	cancelled := make(chan struct{})
+	disp.setFn(func(ctx context.Context, _ *store.Agent) error {
+		<-ctx.Done()
+		close(cancelled)
+		return ctx.Err()
+	})
+	agent := setupBrokerAgentInPhase(t, s, "renewpanic", state.PhaseRunning)
+
+	res := deleteAsync(t, srv, "/api/v1/agents/"+agent.ID, nil)
+	waitClosed(t, cancelled, 5*time.Second, "the dispatch ctx is cancelled after the renewal panic")
+	r := waitDelete(t, res, 5*time.Second)
+	assert.NotEqual(t, http.StatusNoContent, r.rec.Code, r.rec.Body.String())
 }

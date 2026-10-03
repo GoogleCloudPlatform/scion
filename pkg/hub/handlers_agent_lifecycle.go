@@ -806,7 +806,11 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 					// Release the per-broker reservation, same as a single
 					// explicit stop (ptone/scion#1963).
 					s.releaseBrokerQuota(ctx, agent)
-					s.events.PublishAgentStatus(ctx, agent)
+					// settleLifecycleWrite reloaded DeletedAt: a delete that
+					// soft-finished meanwhile gets no stale stopped status.
+					if agent.DeletedAt.IsZero() {
+						s.events.PublishAgentStatus(ctx, agent)
+					}
 				}
 			}
 
