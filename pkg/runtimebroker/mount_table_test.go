@@ -19,7 +19,7 @@ import (
 	"testing"
 )
 
-func TestFindMountSource(t *testing.T) {
+func TestParseMountTable(t *testing.T) {
 	table := strings.Join([]string{
 		"proc /proc proc rw 0 0",
 		"10.0.0.9:/old /mnt/nfs/ws1 nfs rw 0 0",
@@ -37,12 +37,30 @@ func TestFindMountSource(t *testing.T) {
 		{"/mnt/nfs/ws2", "", false},
 	}
 	for _, tc := range cases {
-		src, mounted, err := FindMountSource(strings.NewReader(table), tc.path)
-		if err != nil || src != tc.wantSource || mounted != tc.wantMounted {
-			t.Errorf("FindMountSource(%q) = %q, %v, %v; want %q, %v", tc.path, src, mounted, err, tc.wantSource, tc.wantMounted)
+		mt, err := ParseMountTable(strings.NewReader(table))
+		if err != nil {
+			t.Fatalf("ParseMountTable: %v", err)
+		}
+		src, mounted := mt.Lookup(tc.path)
+		if src != tc.wantSource || mounted != tc.wantMounted {
+			t.Errorf("Lookup(%q) = %q, %v; want %q, %v", tc.path, src, mounted, tc.wantSource, tc.wantMounted)
 		}
 	}
 	if got := unescapeMountField(`a\134b\0`); got != `a\b\0` {
 		t.Errorf("unescapeMountField = %q", got)
+	}
+}
+
+// TestParseMountTable_LongLine verifies that a line longer than
+// bufio.Scanner's 64 KiB default does not fail the whole table.
+func TestParseMountTable_LongLine(t *testing.T) {
+	long := "tmpfs /mnt/long tmpfs rw," + strings.Repeat("x", 100*1024) + " 0 0"
+	table := long + "\n10.0.0.2:/e /mnt/nfs/ws1 nfs rw 0 0\n"
+	mt, err := ParseMountTable(strings.NewReader(table))
+	if err != nil {
+		t.Fatalf("ParseMountTable = %v", err)
+	}
+	if src, ok := mt.Lookup("/mnt/nfs/ws1"); !ok || src != "10.0.0.2:/e" {
+		t.Errorf("Lookup = %q, %v", src, ok)
 	}
 }

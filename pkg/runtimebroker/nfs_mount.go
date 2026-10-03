@@ -31,11 +31,11 @@ import (
 // This allows unit tests to assert reconciliation logic (mountpoint check,
 // server:export verify, idempotency) without real NFS.
 type MountChecker interface {
-	// MountSource reports whether path is a mountpoint and, if so, the
-	// source mounted there (server:export for NFS), from the mount table
-	// (/proc/mounts) only. It does not stat path, so a hung NFS mount
-	// cannot block it. This is what decides whether a share is mounted.
-	MountSource(path string) (source string, mounted bool, err error)
+	// ReadMountTable returns the current mount table (/proc/mounts). It
+	// does not stat any mountpoint, so a hung NFS mount cannot block it.
+	// This is what decides whether a share is mounted, and from where. The
+	// reconciler reads it once per pass.
+	ReadMountTable() (MountTable, error)
 
 	// IsMountpoint asks the kernel whether path is a mountpoint
 	// (mountpoint(1)). It can block on a hung mount, so ctx bounds it. The
@@ -180,30 +180,34 @@ func (r *NFSMountReconciler) Reconcile(ctx context.Context) error {
 		mountOpts = "vers=3,hard,nconnect=4,_netdev"
 	}
 
-	for _, share := range r.cfg.Shares {
-		if err := r.reconcileShare(ctx, share, mountOpts); err != nil {
-			return err
-		}
-	}
-
-	return nil
+	return r.reconcileShares(ctx, r.cfg.Shares, mountOpts)
 }
 
-// reconcileShare handles a single share's mount reconciliation. It returns
-// an error only when ctx is done before or while the share is checked;
-// mount problems are recorded in the share's status.
-func (r *NFSMountReconciler) reconcileShare(ctx context.Context, share config.V1NFSShare, mountOpts string) error {
+// reconcileShares reconciles shares as one pass: it holds the reconcile
+// semaphore for the whole pass and reads the mount table once, before the
+// first share. It returns an error only when ctx is done before or during
+// the pass; mount problems are recorded in each share's status.
+func (r *NFSMountReconciler) reconcileShares(ctx context.Context, shares []config.V1NFSShare, mountOpts string) error {
 	select {
 	case r.reconcileSem <- struct{}{}:
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 	defer func() { <-r.reconcileSem }()
-	r.reconcileShareLocked(ctx, share, mountOpts)
-	return ctx.Err()
+
+	// Each share's mount or remount touches only its own target, so one
+	// read serves every share in the pass.
+	table, tableErr := r.checker.ReadMountTable()
+	for _, share := range shares {
+		r.reconcileShareLocked(ctx, share, mountOpts, table, tableErr)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-func (r *NFSMountReconciler) reconcileShareLocked(ctx context.Context, share config.V1NFSShare, mountOpts string) {
+func (r *NFSMountReconciler) reconcileShareLocked(ctx context.Context, share config.V1NFSShare, mountOpts string, table MountTable, tableErr error) {
 	target := filepath.Join(r.cfg.MountRoot, share.ID)
 	wantServerExport := fmt.Sprintf("%s:%s", share.Server, share.Export)
 	mounts := r.MountsShares()
@@ -226,11 +230,11 @@ func (r *NFSMountReconciler) reconcileShareLocked(ctx context.Context, share con
 		"server", share.Server, "export", share.Export,
 		"mountsShares", mounts)
 
-	currentServerExport, mounted, err := r.checker.MountSource(target)
-	if err != nil {
-		fail(fmt.Sprintf("failed to read mount table: %v", err))
+	if tableErr != nil {
+		fail(fmt.Sprintf("failed to read mount table: %v", tableErr))
 		return
 	}
+	currentServerExport, mounted := table.Lookup(target)
 
 	if mounted && currentServerExport == wantServerExport {
 		r.setStatus(share.ID, target, true, "already mounted correctly")
@@ -455,7 +459,7 @@ func (r *NFSMountReconciler) EnsureShareMounted(ctx context.Context, shareID str
 
 	for _, share := range r.cfg.Shares {
 		if share.ID == shareID {
-			if err := r.reconcileShare(ctx, share, mountOpts); err != nil {
+			if err := r.reconcileShares(ctx, []config.V1NFSShare{share}, mountOpts); err != nil {
 				return fmt.Errorf("NFS share %q not checked: %w", shareID, err)
 			}
 			if err := ctx.Err(); err != nil {

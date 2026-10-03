@@ -73,11 +73,14 @@ func (m *syncMountChecker) IsMountpoint(_ context.Context, path string) (bool, e
 	return ok, nil
 }
 
-func (m *syncMountChecker) MountSource(path string) (string, bool, error) {
+func (m *syncMountChecker) ReadMountTable() (MountTable, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	src, ok := m.mountpoints[path]
-	return src, ok, nil
+	t := MountTable{}
+	for path, src := range m.mountpoints {
+		t[filepath.Clean(path)] = src
+	}
+	return t, nil
 }
 
 func (m *syncMountChecker) Mount(ctx context.Context, server, export, target, options string) error {

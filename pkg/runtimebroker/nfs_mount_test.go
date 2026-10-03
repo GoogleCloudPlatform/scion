@@ -16,9 +16,11 @@ package runtimebroker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -39,7 +41,9 @@ type mockMountChecker struct {
 
 	// Inject errors for specific operations.
 	isMountpointErr map[string]error
-	mountSourceErr  map[string]error
+	mountTableErr   error
+	// mountTableReads counts ReadMountTable calls.
+	mountTableReads int
 	// kernelOnlyMounts are paths mountpoint(1) reports as mounted although
 	// the mount table does not list them.
 	kernelOnlyMounts map[string]bool
@@ -58,7 +62,6 @@ func newMockMountChecker() *mockMountChecker {
 	return &mockMountChecker{
 		mountpoints:      make(map[string]string),
 		isMountpointErr:  make(map[string]error),
-		mountSourceErr:   make(map[string]error),
 		kernelOnlyMounts: make(map[string]bool),
 	}
 }
@@ -72,12 +75,16 @@ func (m *mockMountChecker) IsMountpoint(_ context.Context, path string) (bool, e
 	return ok || m.kernelOnlyMounts[path], nil
 }
 
-func (m *mockMountChecker) MountSource(path string) (string, bool, error) {
-	if err, ok := m.mountSourceErr[path]; ok {
-		return "", false, err
+func (m *mockMountChecker) ReadMountTable() (MountTable, error) {
+	m.mountTableReads++
+	if m.mountTableErr != nil {
+		return nil, m.mountTableErr
 	}
-	se, ok := m.mountpoints[path]
-	return se, ok, nil
+	t := MountTable{}
+	for path, src := range m.mountpoints {
+		t[filepath.Clean(path)] = src
+	}
+	return t, nil
 }
 
 func (m *mockMountChecker) Mount(_ context.Context, server, export, target, options string) error {
@@ -239,6 +246,57 @@ func TestReconcile_MultipleShares(t *testing.T) {
 	statuses := r.ShareStatuses()
 	if len(statuses) != 2 {
 		t.Errorf("ShareStatuses len = %d, want 2", len(statuses))
+	}
+}
+
+func TestReconcile_ReadsMountTableOncePerPass(t *testing.T) {
+	mc := newMockMountChecker()
+	cfg := testNFSConfig()
+	cfg.Shares = append(cfg.Shares,
+		config.V1NFSShare{ID: "ws2", Server: "10.0.0.3", Export: "/export-b"},
+		config.V1NFSShare{ID: "ws3", Server: "10.0.0.4", Export: "/export-c"})
+	mc.mountpoints[filepath.Join("/mnt/nfs", "ws2")] = "10.0.0.3:/export-b"
+	r := NewNFSMountReconciler(cfg, mc, nil)
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if mc.mountTableReads != 1 {
+		t.Errorf("ReadMountTable calls = %d, want 1 per pass", mc.mountTableReads)
+	}
+	if len(mc.mountCalls) != 2 {
+		t.Errorf("mountCalls = %d, want 2 (ws2 already mounted)", len(mc.mountCalls))
+	}
+	if !r.IsHealthy() {
+		t.Error("expected healthy")
+	}
+
+	if err := r.EnsureShareMounted(context.Background(), "ws1"); err != nil {
+		t.Fatalf("EnsureShareMounted: %v", err)
+	}
+	if mc.mountTableReads != 2 {
+		t.Errorf("ReadMountTable calls = %d after EnsureShareMounted, want 2", mc.mountTableReads)
+	}
+}
+
+func TestReconcile_MountTableError_EveryShareUnhealthy(t *testing.T) {
+	mc := newMockMountChecker()
+	mc.mountTableErr = errors.New("read /proc/mounts: boom")
+	cfg := testNFSConfig()
+	cfg.Shares = append(cfg.Shares, config.V1NFSShare{ID: "ws2", Server: "10.0.0.3", Export: "/export-b"})
+	r := NewNFSMountReconciler(cfg, mc, nil)
+
+	if err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if len(mc.mountCalls) != 0 {
+		t.Errorf("mountCalls = %d, want 0 when the mount table cannot be read", len(mc.mountCalls))
+	}
+	for _, id := range []string{"ws1", "ws2"} {
+		st, ok := r.ShareStatus(id)
+		if !ok || st.Healthy || !strings.Contains(st.Message, "failed to read mount table") {
+			t.Errorf("status %s = %+v (ok=%v), want unhealthy with mount table error", id, st, ok)
+		}
 	}
 }
 

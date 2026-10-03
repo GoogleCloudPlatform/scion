@@ -133,9 +133,9 @@ func (e *ExecMountChecker) IsMountpoint(ctx context.Context, path string) (bool,
 	return true, nil
 }
 
-// MountSource looks path up in /proc/mounts (see ProcMountSource).
-func (e *ExecMountChecker) MountSource(path string) (string, bool, error) {
-	return ProcMountSource(path)
+// ReadMountTable reads /proc/mounts (see ReadProcMountTable).
+func (e *ExecMountChecker) ReadMountTable() (MountTable, error) {
+	return ReadProcMountTable()
 }
 
 // Mount executes the NFS mount command.
