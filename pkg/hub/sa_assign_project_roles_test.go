@@ -107,7 +107,7 @@ func TestSAAssign2147_OtherProjectMember_Denied(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, projectB))
-	srv.createProjectMembersGroup(ctx, projectB)
+	srv.seedProjectCreatorMembership(ctx, projectB)
 
 	memberOfA := makeProjectMemberUser(t, s, projectA, tid("2147-member-of-a"), "Member A", store.GroupMemberRoleMember)
 
@@ -366,8 +366,21 @@ func TestSAAssign2147_SeedReconciliation_ExistingHubGetsAssignPermission(t *test
 			"%s should have gcp_service_account.assign after reconciliation", roleName)
 
 		marker := getAppliedBuiltInRoleMarker(ctx, s, roleName)
-		assert.Equal(t, 4, marker.Revision, "%s marker should advance to revision 4", roleName)
+		assert.Equal(t, builtInRoleRevision(t, roleName), marker.Revision,
+			"%s marker should advance to its current revision", roleName)
 	}
+}
+
+// builtInRoleRevision returns the declared revision of a built-in project role.
+func builtInRoleRevision(t *testing.T, name string) int {
+	t.Helper()
+	for _, role := range BuiltInRoles() {
+		if role.Name == name && role.ScopeType == store.RoleScopeProject {
+			return role.Revision
+		}
+	}
+	t.Fatalf("no built-in project role %q", name)
+	return 0
 }
 
 // ---------------------------------------------------------------------------
@@ -457,7 +470,7 @@ type memberAssignFixture struct {
 func setupMemberAssign(t *testing.T) *memberAssignFixture {
 	t.Helper()
 	f := bypassAgentsSetup(t)
-	f.srv.createProjectMembersGroup(context.Background(), f.proj)
+	f.srv.seedProjectCreatorMembership(context.Background(), f.proj)
 	member := makeProjectMemberUser(t, f.store, f.proj, tid("2147-path-member"), "Path Member", store.GroupMemberRoleMember)
 	return &memberAssignFixture{bypassAgentsFixture: f, member: member}
 }

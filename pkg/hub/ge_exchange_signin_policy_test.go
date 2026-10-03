@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -26,11 +25,8 @@ import (
 	"testing"
 	"time"
 
-	"entgo.io/ent/dialect"
-	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
@@ -70,17 +66,17 @@ func newSignInPolicyHarness(t *testing.T, cfg ServerConfig, validator GoogleCred
 	}
 
 	dbPath := t.TempDir() + "/signin-policy-test.db"
-	dsn := "file:" + dbPath + "?_journal_mode=WAL&_busy_timeout=5000"
-	db, err := sql.Open(driverName, dsn)
+	// Opens through entc.OpenSQLite (not a raw sql.Open) so the store
+	// boundary gets the same "_timezone=UTC" DSN option and UTC mutation
+	// hook as every other ent/SQLite client (tz-refactor design §2.1.2) — a
+	// raw sql.Open here previously bypassed both, so a bare time.Now()
+	// default (e.g. ExternalIdentity.CreatedAt, User.Created) stored a
+	// numeric-zone-abbreviation wall clock under a Kathmandu-like
+	// time.Local, which ent then failed to Scan back.
+	client, err := entc.OpenSQLite("file:"+dbPath, entc.PoolConfig{MaxOpenConns: 1})
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
-	db.SetMaxOpenConns(1)
-	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
-		_ = db.Close()
-		t.Fatalf("enable sqlite foreign keys: %v", err)
-	}
-	client := ent.NewClient(ent.Driver(entsql.OpenDB(dialect.SQLite, db)))
 	t.Cleanup(func() { _ = client.Close() })
 	if err := entc.AutoMigrate(context.Background(), client); err != nil {
 		t.Fatalf("migrate: %v", err)
@@ -157,6 +153,9 @@ func (l *recordingAuditLogger) LogBrokerAuthEvent(context.Context, *BrokerAuthEv
 	return nil
 }
 func (l *recordingAuditLogger) LogGCPTokenEvent(context.Context, *GCPTokenEvent) error { return nil }
+func (l *recordingAuditLogger) LogGCSLinkFetchEvent(context.Context, *GCSLinkFetchEvent) error {
+	return nil
+}
 func (l *recordingAuditLogger) LogInviteAuditEvent(_ context.Context, event *InviteAuditEvent) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()

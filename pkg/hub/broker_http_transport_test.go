@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -159,5 +160,41 @@ func TestBrokerHTTPTransport_StartAgentSendsWorkspaceDispatchFields(t *testing.T
 	}
 	if wire.WorkspaceMode != extras.Workspace.WorkspaceMode {
 		t.Errorf("workspaceMode = %q, want %q", wire.WorkspaceMode, extras.Workspace.WorkspaceMode)
+	}
+}
+
+// TestBrokerHTTPTransport_CreateAgentWithGather_SkillResolutionErrorCarriesStatus
+// is the HTTP-transport counterpart of the control-channel test: the broker's
+// 429 response, including its Retry-After header, must survive as a
+// *brokerStatusError so dispatchCreateErrorResponse can relay it instead of
+// folding it into the generic 502 (#2546 R2).
+func TestBrokerHTTPTransport_CreateAgentWithGather_SkillResolutionErrorCarriesStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "120")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"code":"skill_resolution_failed","message":"required skill \"gh://owner/repo/my-skill@main\" could not be resolved: rate limited","details":{"skill":"gh://owner/repo/my-skill@main","cause":"rate_limited"}}}`))
+	}))
+	defer srv.Close()
+
+	transport := newBrokerHTTPTransport(false, nil)
+
+	_, _, err := transport.CreateAgentWithGather(context.Background(), "broker-1", srv.URL, &RemoteCreateAgentRequest{Name: "new-agent"})
+	if err == nil {
+		t.Fatal("expected an error for the broker's 429 response")
+	}
+
+	var se *brokerStatusError
+	if !errors.As(err, &se) {
+		t.Fatalf("expected a *brokerStatusError, got %T: %v", err, err)
+	}
+	if se.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("expected status %d, got %d", http.StatusTooManyRequests, se.StatusCode)
+	}
+	if se.RetryAfter != "120" {
+		t.Errorf("expected RetryAfter %q, got %q", "120", se.RetryAfter)
+	}
+	if se.brokerErrorCode() != skillResolutionErrorCode {
+		t.Errorf("expected broker error code %q, got %q", skillResolutionErrorCode, se.brokerErrorCode())
 	}
 }

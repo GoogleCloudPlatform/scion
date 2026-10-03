@@ -37,6 +37,7 @@ import (
 
 	policytroubleshooteriam "cloud.google.com/go/policytroubleshooter/iam/apiv3"
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/metric"
 	"google.golang.org/api/option"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
@@ -54,6 +55,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubtracing"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
 	scionplugin "github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin/grpcbroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -115,7 +117,20 @@ func chdirHomeIfAtFilesystemRoot() {
 	log.Printf("Working directory was %s; changed to home directory %s", wd, home)
 }
 
+// pinProcessUTC is util.PinProcessUTC; a var so the cmd test binary can
+// disable it (see TestMain in main_test.go). Running the real pin inside a
+// test would race goroutines leaked by earlier tests (both read and write
+// time.Local) and would silently switch every later test in the binary to
+// UTC regardless of TZ, masking real timezone bugs. Placement of every call
+// to this seam is enforced by the AST test in pin_process_utc_test.go, not
+// by this comment.
+var pinProcessUTC = util.PinProcessUTC
+
 func runServerStart(cmd *cobra.Command, args []string) error {
+	// Pin the process to UTC before anything else runs (log timestamps, cron
+	// parsing, ent's Default(time.Now), etc. all read time.Local).
+	pinProcessUTC()
+
 	// 1. Initialize logging
 	logCleanups, requestLogger, messageLogger, err := initServerLogging(cmd)
 	if err != nil {
@@ -386,20 +401,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 					_ = mp.Shutdown(shutdownCtx)
 				}()
 
-				dbRec, dbErr := dbmetrics.New(mp)
-				if dbErr != nil {
-					log.Printf("WARNING: hub db metrics disabled: %v", dbErr)
-				} else {
-					hubDBRec = dbRec
-					hubSrv.SetDBMetrics(dbRec)
-				}
-
-				dispRec, dispErr := dispatchmetrics.New(mp)
-				if dispErr != nil {
-					log.Printf("WARNING: hub dispatch metrics disabled: %v", dispErr)
-				} else {
-					hubSrv.SetDispatchMetrics(dispRec)
-				}
+				hubDBRec = wireHubCoreMetrics(hubSrv, mp)
 
 				if hubSrv.GetBrokerAuthService() != nil {
 					otelMetrics, otelAuthErr := hub.NewOTelMetricsRecorder(mp)
@@ -1794,8 +1796,12 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		AgentEndpoint:                cfg.Hub.AgentEndpoint,
 		SlowRequestThreshold:         cfg.SlowRequestThreshold,
 		StalledThreshold:             cfg.Hub.StalledThreshold,
+		MissingAgentGrace:            cfg.Hub.MissingAgentGrace,
 		SoftDeleteRetention:          cfg.Hub.SoftDeleteRetention,
 		SoftDeleteRetainFiles:        cfg.Hub.SoftDeleteRetainFiles,
+		AsyncAgentLaunch:             cfg.Hub.AsyncAgentLaunch,
+		LaunchTimeout:                cfg.Hub.LaunchTimeout,
+		LaunchKeepaliveSeconds:       cfg.Hub.LaunchKeepaliveSeconds,
 		AdminMode:                    adminMode,
 		MaintenanceMessage:           maintenanceMessage,
 		SchedulerIntervalSeconds:     cfg.Scheduler.IntervalSeconds,
@@ -1890,6 +1896,41 @@ func resolveTransportAudience(oidcAudience, mode, hubEndpoint string) string {
 		return hubEndpoint
 	}
 	return ""
+}
+
+// wireHubCoreMetrics wires the Hub's db, broker-dispatch and launch-reaper
+// metrics recorders to mp, returning the db recorder for callers that need
+// to pass it along separately (event publisher / web server construction).
+// Extracted from runServerStart's OTel-metrics block above so it can be
+// exercised directly in a test with a ManualReader-backed MeterProvider (see
+// server_foreground_metrics_test.go), rather than only indirectly through
+// the whole runServerStart path.
+func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.Recorder {
+	var hubDBRec dbmetrics.Recorder
+
+	dbRec, dbErr := dbmetrics.New(mp)
+	if dbErr != nil {
+		log.Printf("WARNING: hub db metrics disabled: %v", dbErr)
+	} else {
+		hubDBRec = dbRec
+		hubSrv.SetDBMetrics(dbRec)
+	}
+
+	dispRec, dispErr := dispatchmetrics.New(mp)
+	if dispErr != nil {
+		log.Printf("WARNING: hub dispatch metrics disabled: %v", dispErr)
+	} else {
+		hubSrv.SetDispatchMetrics(dispRec)
+	}
+
+	reaperRec, reaperErr := reapermetrics.New(mp)
+	if reaperErr != nil {
+		log.Printf("WARNING: hub launch reaper metrics disabled: %v", reaperErr)
+	} else {
+		hubSrv.SetReaperMetrics(reaperRec)
+	}
+
+	return hubDBRec
 }
 
 func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
@@ -2848,6 +2889,22 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		}
 	}
 
+	// NFS workspace storage: lets the broker check (and, with
+	// server.workspace_storage.nfs.auto_mount, mount) the configured shares.
+	// Nil when the backend is not nfs. Read from the broker's global
+	// settings only, like shared_dir_storage: a project picked up from the
+	// working directory does not decide what the broker mounts.
+	var brokerNFS *config.V1NFSConfig
+	if globalVS, _, gErr := config.LoadGlobalSettings(); gErr != nil {
+		log.Printf("WARNING: NFS mount checks disabled: loading global settings: %v", gErr)
+	} else {
+		var nfsWarning string
+		brokerNFS, nfsWarning = brokerNFSConfig(globalVS)
+		if nfsWarning != "" {
+			log.Printf("WARNING: %s", nfsWarning)
+		}
+	}
+
 	// Create Runtime Broker server configuration
 	rhCfg := runtimebroker.ServerConfig{
 		Port:                          cfg.RuntimeBroker.Port,
@@ -2865,6 +2922,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		CORSAllowedHeaders:            cfg.RuntimeBroker.CORSAllowedHeaders,
 		CORSMaxAge:                    cfg.RuntimeBroker.CORSMaxAge,
 		AllowContainerScriptHarnesses: cfg.RuntimeBroker.AllowContainerScriptHarnesses,
+		NFSConfig:                     brokerNFS,
 		Debug:                         enableDebug,
 		SlowRequestThreshold:          cfg.SlowRequestThreshold,
 

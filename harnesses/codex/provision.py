@@ -56,7 +56,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
 import tomllib
 from typing import Any
@@ -246,137 +245,50 @@ def _resolve_reasoning_effort(level: int) -> str:
     return "low"
 
 
-def _is_toml_key_line(line: str, key: str) -> bool:
-    """True if line is a top-level TOML assignment for exactly `key`."""
-    s = line.strip()
-    if not s.startswith(key):
-        return False
-    rest = s[len(key):]
-    return len(rest) > 0 and rest[0] in (" ", "=", "\t")
+# Codex-only fallback effort when SCION_THINKING_LEVEL gives no explicit
+# level (ptone/scion#2479) -- see _resolve_reasoning_effort_env below.
+_DEFAULT_REASONING_EFFORT = "medium"
 
 
-# Matches a table header ([table] / [[table]]) with an optional trailing
-# comment, and nothing else on the line. The header's inner content allows
-# quoted segments (which may themselves contain `=`, `]`, `#`, or `[`, e.g.
-# `[projects."/a=b"]`) as well as ordinary bare-key characters, but rejects
-# anything else — in particular a trailing `,` (an array element, not a
-# header) or an unquoted `=`/`]` (which would make it a key assignment, not
-# a header). Used together with _toml_entering_array_depths: a line can only
-# be a genuine header if it also has zero open-bracket depth entering it —
-# see that function's docstring for why the shape check alone isn't enough.
-#
-# In valid TOML outside a multi-line string, "depth == 0 and starts with
-# '['" is already sufficient on its own — this shape check mostly overlaps
-# with depth tracking (ptone/scion#2365 review round 4 mutation testing:
-# reverting this regex to a bare `startswith("[")` while keeping depth
-# tracking still passes the full suite). It's kept anyway as a second,
-# independent line of defense: the one case where it earns its keep is a
-# line *inside* a top-level multi-line string that happens to look like a
-# header, e.g. `[projects."/a=b"]` in prose — there, `_toml_edit_preserves`
-# (the tomllib round-trip/preservation backstop below) is what actually
-# fails the edit safely either way, but rejecting the shape earlier means
-# fewer edits need that backstop to save them.
-_TOML_TABLE_HEADER_RE = re.compile(
-    r'^\s*\[\[?\s*(?:[^\[\]="\'#]|"(?:\\.|[^"\\])*"|\'[^\']*\')+\]\]?\s*(#.*)?$'
-)
+def _resolve_reasoning_effort_env(ctx: scion_harness.ProvisionContext, thinking_raw: str) -> str:
+    """Resolve the (already-stripped) SCION_THINKING_LEVEL value into a
+    reasoning_effort, logging the decision.
 
-# Matches a single-line basic ("...") or literal ('...') string, or a
-# trailing comment, for masking before bracket-counting (see
-# _toml_mask_strings_and_comments). Does not match triple-quoted
-# (multi-line) strings — that gap is closed separately by
-# _toml_edit_preserves validating the finished file with tomllib rather
-# than trying to make the masking itself fully TOML-aware.
-_TOML_STR_OR_COMMENT_RE = re.compile(r'"(?:\\.|[^"\\])*"|\'[^\']*\'|#.*')
-
-
-def _toml_mask_strings_and_comments(line: str) -> str:
-    """Blank out string literals and strip trailing comments so bracket
-    counting on the result only sees TOML structure, not `[`/`]` characters
-    that happen to appear inside a string value or a comment (e.g. `#
-    temperature range [0, 1)` or `hint = "press [ to go"`, neither of which
-    opens a real array)."""
-    return _TOML_STR_OR_COMMENT_RE.sub(
-        lambda m: "" if m.group(0).startswith("#") else '""', line
-    )
-
-
-def _toml_entering_array_depths(lines: list[str]) -> list[int]:
-    """Per-line count of unmatched `[` brackets carried in from prior lines.
-
-    A line inside a multi-line array can itself be a bracketed value (e.g.
-    a nested single-element array `["x"]`, or a table header spelled with a
-    quoted key, `["x"]`, are syntactically indistinguishable by shape alone)
-    — so a naive "line starts with `[`" check misidentifies an array
-    continuation line as a table header. Tracking bracket depth resolves the
-    ambiguity: a `[`-shaped line only means "table header" when depth is
-    zero entering it, i.e. no multi-line array is still open.
-
-    Brackets are counted after masking out string literals and comments
-    (_toml_mask_strings_and_comments), so a stray `[`/`]` inside either one
-    doesn't throw off the whole file's section tracking — an earlier version
-    of this function counted raw brackets and could silently delete
-    table-scoped keys (e.g. `[profiles.fast]`'s `model`) after a single
-    unbalanced bracket in an unrelated comment (ptone/scion#2365 review
-    round 3). This is still line-oriented rather than a full tokenizer, so
-    it does not understand triple-quoted (multi-line) strings; that residual
-    gap is caught by _toml_edit_preserves validating the finished file with
-    tomllib, not by making this counter fully TOML-aware.
+    An explicit integer value always wins and uses _resolve_reasoning_effort's
+    mapping. An unset/blank value, or one that isn't a valid integer, falls
+    back to _DEFAULT_REASONING_EFFORT: both cases mean this script has no
+    explicit signal from CLI/web/template/hub, so they're treated the same
+    way rather than letting an invalid value silently reproduce the
+    "low" bug this fallback exists to fix.
     """
-    depths = []
-    depth = 0
-    for line in lines:
-        depths.append(depth)
-        code = _toml_mask_strings_and_comments(line)
-        depth = max(0, depth + code.count("[") - code.count("]"))
-    return depths
+    if thinking_raw:
+        try:
+            thinking_level = int(thinking_raw)
+        except ValueError:
+            # Every Go path produces this value with strconv.Itoa, so a
+            # non-integer here means something upstream (a hand-set env, a
+            # template, or a harness-config env) is misconfigured -- warn
+            # rather than log at the same level as the normal paths below.
+            ctx.warn(
+                f"thinking_level={thinking_raw!r} is not a valid integer; "
+                f"reasoning_effort={_DEFAULT_REASONING_EFFORT} (default)"
+            )
+            return _DEFAULT_REASONING_EFFORT
+        reasoning_effort = _resolve_reasoning_effort(thinking_level)
+        ctx.info(f"thinking_level={thinking_level} reasoning_effort={reasoning_effort}")
+        return reasoning_effort
+    ctx.info(f"thinking_level=<unset>, reasoning_effort={_DEFAULT_REASONING_EFFORT} (default)")
+    return _DEFAULT_REASONING_EFFORT
 
 
-def _is_toml_table_header(line: str, depth: int) -> bool:
-    """True if `line` is a top-level table header, given the bracket-nesting
-    `depth` entering it (0 means no multi-line array is currently open)."""
-    return depth == 0 and _TOML_TABLE_HEADER_RE.match(line) is not None
-
-
-def _strip_toml_top_level_key(content: str, key: str) -> str:
-    """Remove a top-level TOML key = value line from content."""
-    lines = content.split("\n")
-    depths = _toml_entering_array_depths(lines)
-    kept = []
-    in_section = False
-    for line, depth in zip(lines, depths):
-        if _is_toml_table_header(line, depth):
-            in_section = True
-        if not in_section and _is_toml_key_line(line, key):
-            continue
-        kept.append(line)
-    return "\n".join(kept)
-
-
-def _insert_toml_top_level_line(content: str, line: str) -> str:
-    """Insert a top-level `key = value` line before the first table header.
-
-    TOML requires top-level keys to precede every `[table]`/`[[array-of-
-    tables]]` header; a key appended after one is parsed as belonging to
-    that table instead of being a top-level key. Appending at EOF used to
-    land `model`/`model_reasoning_effort` inside whatever table happened to
-    be last in the file (e.g. `[projects."/workspace"]`), which both had no
-    effect on codex and produced a duplicate-key TOML parse error on the
-    next provision, since `_strip_toml_top_level_key` only looks at
-    top-level lines and can't find (or remove) the misplaced copy
-    (ptone/scion#2365). Inserting here keeps the reconcile idempotent: the
-    next call's strip finds this line at top level and removes it cleanly
-    before a fresh copy is inserted in the same place.
-    """
-    lines = content.split("\n")
-    depths = _toml_entering_array_depths(lines)
-    insert_at = len(lines)
-    for i, (existing, depth) in enumerate(zip(lines, depths)):
-        if _is_toml_table_header(existing, depth):
-            insert_at = i
-            break
-    lines.insert(insert_at, line)
-    return "\n".join(lines)
-
+# The line-oriented TOML string/comment masking, bracket-depth tracking,
+# header detection, top-level key strip/insert, and the tomllib
+# round-trip/preservation backstop all live in scion_harness now (shared
+# with grok-build, which has the same class of TOML-editing needs) — see
+# scion_harness.strip_toml_top_level_key, .insert_toml_top_level_line, and
+# .toml_edit_preserves. This module keeps only the codex-specific parts:
+# the managed-key list and the model/effort value checks layered on top of
+# the shared preservation check.
 
 # Top-level keys this script owns the value of. _toml_edit_preserves ignores
 # these when comparing the original file to an edited one — they're
@@ -398,22 +310,23 @@ def _toml_edit_preserves(
     (`model`, `model_reasoning_effort`) equal the values it meant to write,
     when those values were supplied; and every top-level key `content`
     doesn't own (i.e. not in _MANAGED_TOP_LEVEL_KEYS) is unchanged from
-    `original`.
+    `original` (scion_harness.toml_edit_preserves).
 
     This is the backstop for this module's line-oriented TOML editing,
     which — despite the string/comment masking and bracket-depth tracking
-    above — is still not a full TOML tokenizer. An earlier version of this
-    function only checked "does it parse" and "is the top-level model
-    correct", which passes even when a top-level multi-line string's body
-    gets a `model`/`model_reasoning_effort`-shaped line spliced into or
-    deleted from it: the file is still valid TOML, and when the edit was
-    only inserting `model_reasoning_effort` (no `model` supplied), the
-    'model' check has nothing to catch it at all (ptone/scion#2365 review
-    round 4). Comparing everything the script doesn't own closes that
-    whole class of edit, not just the one shape a given review happened to
-    try. Rather than trust every edit blindly, the caller verifies the
-    finished content before writing it to disk, and leaves the existing
-    file untouched (logging a warning) when this returns False.
+    in scion_harness — is still not a full TOML tokenizer. An earlier
+    version of this function only checked "does it parse" and "is the
+    top-level model correct", which passes even when a top-level
+    multi-line string's body gets a `model`/`model_reasoning_effort`-shaped
+    line spliced into or deleted from it: the file is still valid TOML, and
+    when the edit was only inserting `model_reasoning_effort` (no `model`
+    supplied), the 'model' check has nothing to catch it at all
+    (ptone/scion#2365 review round 4). Comparing everything the script
+    doesn't own closes that whole class of edit, not just the one shape a
+    given review happened to try. Rather than trust every edit blindly, the
+    caller verifies the finished content before writing it to disk, and
+    leaves the existing file untouched (logging a warning) when this
+    returns False.
     """
     try:
         after = tomllib.loads(content)
@@ -423,18 +336,7 @@ def _toml_edit_preserves(
         return False
     if effort and after.get("model_reasoning_effort") != effort:
         return False
-    try:
-        before = tomllib.loads(original)
-    except tomllib.TOMLDecodeError:
-        # No parseable baseline to compare against (missing, empty, or
-        # already-invalid file) — the checks above are all there is to
-        # validate, and they've already passed.
-        return True
-
-    def _unmanaged(data: dict[str, Any]) -> dict[str, Any]:
-        return {k: v for k, v in data.items() if k not in _MANAGED_TOP_LEVEL_KEYS}
-
-    return _unmanaged(before) == _unmanaged(after)
+    return scion_harness.toml_edit_preserves(original, content, _MANAGED_TOP_LEVEL_KEYS)
 
 
 def _warn_if_stale_top_level_model_survives(
@@ -497,17 +399,17 @@ def _reconcile_codex_toml(
         stripped = stripped.rstrip("\n\t ") + "\n\n" + otel_section
         return stripped.strip() + "\n"
 
-    content = _strip_toml_top_level_key(original, "reasoning_effort")
-    content = _strip_toml_top_level_key(content, "model_reasoning_effort")
-    content = _strip_toml_top_level_key(content, "model")
+    content = scion_harness.strip_toml_top_level_key(original, "reasoning_effort")
+    content = scion_harness.strip_toml_top_level_key(content, "model_reasoning_effort")
+    content = scion_harness.strip_toml_top_level_key(content, "model")
 
     if model:
         model_line = f'model = "{scion_harness.toml_escape(model)}"'
-        content = _insert_toml_top_level_line(content, model_line)
+        content = scion_harness.insert_toml_top_level_line(content, model_line)
 
     if reasoning_effort:
         re_line = f'model_reasoning_effort = "{scion_harness.toml_escape(reasoning_effort)}"'
-        content = _insert_toml_top_level_line(content, re_line)
+        content = scion_harness.insert_toml_top_level_line(content, re_line)
 
     content = _with_reconciled_otel(content)
 
@@ -609,23 +511,26 @@ def _build_mcp_section(name: str, spec: dict[str, Any]) -> str | None:
     return "\n".join(body) + "\n"
 
 
-def _write_mcp_to_config(servers: dict[str, str]) -> None:
+def _write_mcp_to_config(ctx: scion_harness.ProvisionContext, servers: dict[str, str]) -> None:
     """Write translated MCP server sections into ~/.codex/config.toml."""
     codex_dir = scion_harness.expand_path("~/.codex")
     os.makedirs(codex_dir, exist_ok=True)
     config_path = os.path.join(codex_dir, "config.toml")
-    content = ""
+    original = ""
     if os.path.isfile(config_path):
         with open(config_path, "r", encoding="utf-8") as f:
-            content = f.read()
+            original = f.read()
     content = scion_harness.strip_toml_sections(
-        content, lambda h: h.startswith("[mcp_servers.")
+        original, lambda h: h.startswith("[mcp_servers.")
     )
     sections = list(servers.values())
     appended = "\n".join(sections)
     content = content.rstrip("\n\t ") + "\n\n" + appended
     content = content.strip() + "\n"
-    scion_harness.atomic_write_text(config_path, content)
+    scion_harness.write_toml_if_preserves(
+        ctx, config_path, original, content,
+        managed_keys={"mcp_servers"}, what="MCP server registration",
+    )
 
 
 # --- Entry point -----------------------------------------------------------
@@ -677,14 +582,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     scion_harness.project_instructions(ctx, instructions_file)
 
     thinking_raw = os.environ.get("SCION_THINKING_LEVEL", "").strip()
-    reasoning_effort: str | None = None
-    if thinking_raw:
-        try:
-            thinking_level = int(thinking_raw)
-            reasoning_effort = _resolve_reasoning_effort(thinking_level)
-            ctx.info(f"thinking_level={thinking_level} reasoning_effort={reasoning_effort}")
-        except ValueError:
-            pass
+    reasoning_effort = _resolve_reasoning_effort_env(ctx, thinking_raw)
 
     telemetry_payload = ctx.telemetry
     telemetry = telemetry_payload.get("telemetry") if isinstance(telemetry_payload, dict) else None
@@ -718,7 +616,9 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     env.update(_telemetry_output_env(telemetry))
     ctx.write_outputs(resolved, env=env, extra=extra)
 
-    scion_harness.apply_mcp_translated(ctx, _build_mcp_section, _write_mcp_to_config)
+    scion_harness.apply_mcp_translated(
+        ctx, _build_mcp_section, lambda servers: _write_mcp_to_config(ctx, servers)
+    )
 
     ctx.info(f"method={resolved.method}")
 

@@ -23,6 +23,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -40,12 +41,17 @@ import (
 //   - the requester's original explicit inputs (Image, Model, Env,
 //     InlineConfig, HarnessConfig, HarnessAuth, Profile, ThinkingLevel), from
 //     AppliedConfig.CreateInputs, or a heuristic reconstruction for an agent
-//     that predates that field. HarnessConfig and HarnessAuth are
-//     dual-purpose exactly like Model, NOT kept fields — left empty here
-//     (rather than copied from the live config) is what lets
-//     deriveAgentConfig's project/template/hub resolution below fill them
-//     fresh from the CURRENT catalog when the requester never set them,
-//     instead of freezing in whatever generation N happened to resolve;
+//     that predates that field. Since Option C (ptone/scion#2493),
+//     CreateInputs also picks up any later PATCH /api/v1/agents/{id} edit
+//     that changed one of these fields' (or an Env key's) live value — see
+//     recordExplicitEdits — so "explicit inputs" here means the create
+//     request plus any explicit edit made since, not just what create itself
+//     saw. HarnessConfig and HarnessAuth are dual-purpose exactly like Model,
+//     NOT kept fields — left empty here (rather than copied from the live
+//     config) is what lets deriveAgentConfig's project/template/hub
+//     resolution below fill them fresh from the CURRENT catalog when the
+//     requester never set them, instead of freezing in whatever generation N
+//     happened to resolve;
 //   - then deriveAgentConfig run on THAT fresh config: harness-config
 //     resolution, applyProjectDefaults, applyHubAgentDefaults, then
 //     populateAgentConfig/resolveDerivedConfig — so every derived slot is
@@ -82,6 +88,11 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 		templateEnv = resolvedTemplate.Config.Env
 	}
 
+	// Adopt a legacy env TZ into ExplicitTimezone before anything reads
+	// old's env: legacyCreateInputsFromAppliedConfig below would otherwise
+	// replay it as a create-time env value instead of a carried-forward pin.
+	adoptLegacyTZ(old)
+
 	createInputs := old.CreateInputs
 	var warnings []string
 	if createInputs == nil {
@@ -106,6 +117,15 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 		WorkspaceStoragePath:   old.WorkspaceStoragePath,
 		Branch:                 old.Branch,
 		GCPIdentity:            old.GCPIdentity,
+
+		// Writer (d) of ExplicitTimezone: the pin, its legacy label and the
+		// unpin record are carried forward. deriveAgentConfig's create-time
+		// capture never overwrites a non-empty pin and moves nothing when
+		// the agent was unpinned, so only an agent with neither re-derives
+		// its timezone from CreateInputs and the current template.
+		ExplicitTimezone:         old.ExplicitTimezone,
+		ExplicitTimezoneLegacy:   old.ExplicitTimezoneLegacy,
+		ExplicitTimezoneUnpinned: old.ExplicitTimezoneUnpinned,
 
 		// Explicit-only: empty here (rather than copied from `old`) is what
 		// lets deriveAgentConfig's pipeline fill these fresh from the CURRENT
@@ -162,7 +182,7 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 	// agent — reincarnate with NoAuth reset to false and regain injected
 	// secrets on its next start. This is OR'd, never overwritten: nothing
 	// here can flip a true back to false.
-	if createInputs.NoAuth || fresh.HarnessAuth == "none" || fresh.AgentRole == string(AgentRoleNone) {
+	if createInputs.NoAuth || harness.IsNoAuthType(fresh.HarnessAuth) || fresh.AgentRole == string(AgentRoleNone) {
 		fresh.NoAuth = true
 	}
 
@@ -243,6 +263,9 @@ func (s *Server) buildFreshAppliedConfig(ctx context.Context, agent *store.Agent
 	// and for an already-qualified name.
 	fresh.Image = config.RewriteImageRegistry(fresh.Image, imageRegistry)
 
+	// deriveAgentConfig's timezone capture already stripped TZ from the
+	// fresh env copies; strip again so no step after it can leave one.
+	stripAgentEnvTZ(fresh)
 	return fresh, warnings, nil
 }
 

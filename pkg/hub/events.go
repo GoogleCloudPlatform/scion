@@ -155,13 +155,19 @@ type AgentDetail struct {
 
 // AgentStatusEvent is published when an agent's status changes.
 type AgentStatusEvent struct {
-	AgentID           string       `json:"agentId"`
-	ProjectID         string       `json:"projectId"`
-	Phase             string       `json:"phase,omitempty"`
-	Activity          string       `json:"activity,omitempty"`
-	Detail            *AgentDetail `json:"detail,omitempty"`
-	ContainerStatus   string       `json:"containerStatus,omitempty"`
-	LastActivityEvent string       `json:"lastActivityEvent,omitempty"`
+	AgentID           string             `json:"agentId"`
+	ProjectID         string             `json:"projectId"`
+	Phase             string             `json:"phase,omitempty"`
+	Activity          string             `json:"activity,omitempty"`
+	Detail            *AgentDetail       `json:"detail,omitempty"`
+	ContainerStatus   string             `json:"containerStatus,omitempty"`
+	LastActivityEvent string             `json:"lastActivityEvent,omitempty"`
+	Launch            *store.AgentLaunch `json:"launch,omitempty"` // design §3.2; a snapshot taken at publish time
+	// Deletion is the delete view (design ptone/scion#2483 §2.2), a
+	// snapshot taken at publish time. Always present on the wire: an
+	// explicit null when no delete is active or failed, so the web's delta
+	// merge clears it.
+	Deletion *store.DeletionInfo `json:"deletion"`
 }
 
 // AgentCreatedEvent is published when an agent is created.
@@ -183,6 +189,10 @@ type AgentCreatedEvent struct {
 	TaskSummary     string   `json:"taskSummary,omitempty"`
 	Created         string   `json:"created,omitempty"`
 	Ancestry        []string `json:"ancestry,omitempty"`
+	// Launch is the async-launch view (design §3.2), nil when the agent has
+	// no launch (e.g. a synchronous create, or before any dispatch path
+	// starts one).
+	Launch *store.AgentLaunch `json:"launch,omitempty"`
 }
 
 // AgentDeletedEvent is published when an agent is deleted.
@@ -474,15 +484,18 @@ func (p *ChannelEventPublisher) Close() {
 // PublishAgentStatus publishes an agent status event to both agent-specific
 // and project-scoped subjects (dual-publish pattern).
 func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent) {
+	now := time.Now()
 	evt := AgentStatusEvent{
 		AgentID:         agent.ID,
 		ProjectID:       agent.ProjectID,
 		Phase:           agent.Phase,
 		Activity:        agent.Activity,
 		ContainerStatus: agent.ContainerStatus,
+		Launch:          store.ComputeAgentLaunch(agent, now),
+		Deletion:        store.ComputeAgentDeletion(agent, now),
 	}
 	if !agent.LastActivityEvent.IsZero() {
-		evt.LastActivityEvent = agent.LastActivityEvent.Format("2006-01-02T15:04:05Z07:00")
+		evt.LastActivityEvent = agent.LastActivityEvent.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
 
 	detail := AgentDetail{
@@ -493,7 +506,7 @@ func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent)
 		CurrentModelCalls: agent.CurrentModelCalls,
 	}
 	if !agent.StartedAt.IsZero() {
-		detail.StartedAt = agent.StartedAt.Format("2006-01-02T15:04:05Z07:00")
+		detail.StartedAt = agent.StartedAt.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
 	if detail != (AgentDetail{}) {
 		evt.Detail = &detail
@@ -522,9 +535,10 @@ func (p *eventBuilder) PublishAgentCreated(_ context.Context, agent *store.Agent
 		CreatedBy:       agent.CreatedBy,
 		TaskSummary:     agent.TaskSummary,
 		Ancestry:        agent.Ancestry,
+		Launch:          store.ComputeAgentLaunch(agent, time.Now()),
 	}
 	if !agent.Created.IsZero() {
-		evt.Created = agent.Created.Format("2006-01-02T15:04:05Z07:00")
+		evt.Created = agent.Created.UTC().Format("2006-01-02T15:04:05Z07:00")
 	}
 	p.sink("agent."+agent.ID+".created", evt)
 	if agent.ProjectID != "" {
@@ -715,7 +729,7 @@ func (p *eventBuilder) PublishUserMessage(_ context.Context, msg *store.Message,
 		Urgent:        msg.Urgent,
 		Broadcasted:   msg.Broadcasted,
 		AgentID:       msg.AgentID,
-		CreatedAt:     msg.CreatedAt.Format("2006-01-02T15:04:05.000Z"),
+		CreatedAt:     msg.CreatedAt.UTC().Format(time.RFC3339Nano),
 		Channel:       msg.Channel,
 		ThreadID:      msg.ThreadID,
 		GroupID:       msg.GroupID,

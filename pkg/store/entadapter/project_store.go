@@ -382,6 +382,18 @@ func (s *ProjectStore) UpdateProject(ctx context.Context, p *store.Project) erro
 	return nil
 }
 
+// SetProjectOwnerID updates only the owner_id column of a project.
+func (s *ProjectStore) SetProjectOwnerID(ctx context.Context, projectID, ownerID string) error {
+	uid, err := parseUUID(projectID)
+	if err != nil {
+		return err
+	}
+	if err := s.client.Project.UpdateOneID(uid).SetOwnerID(ownerID).Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
 // UpdateProjectMessagingPolicy atomically updates the cross-project inbound
 // policy using optimistic concurrency on the revision counter. Returns the
 // updated project or ErrRevisionConflict if expectedRevision does not match.
@@ -727,6 +739,7 @@ func entBrokerToStore(b *ent.RuntimeBroker) *store.RuntimeBroker {
 	unmarshalRawJSON(b.Capabilities, &sb.Capabilities)
 	// Profiles are persisted in the "runtimes" column (legacy naming).
 	unmarshalRawJSON(b.Runtimes, &sb.Profiles)
+	sb.DefaultProfile = b.DefaultProfile
 	sb.Labels = b.Labels
 	if sb.Labels == nil {
 		sb.Labels = make(map[string]string)
@@ -753,6 +766,7 @@ func (s *ProjectStore) CreateRuntimeBroker(ctx context.Context, b *store.Runtime
 		SetAutoProvide(b.AutoProvide).
 		SetCapabilities(marshalRawJSON(b.Capabilities)).
 		SetRuntimes(marshalRawJSON(b.Profiles)).
+		SetDefaultProfile(b.DefaultProfile).
 		SetLabels(b.Labels).
 		SetAnnotations(b.Annotations)
 
@@ -853,6 +867,7 @@ func (s *ProjectStore) UpdateRuntimeBroker(ctx context.Context, b *store.Runtime
 			SetLastHeartbeat(b.LastHeartbeat).
 			SetCapabilities(marshalRawJSON(b.Capabilities)).
 			SetRuntimes(marshalRawJSON(b.Profiles)).
+			SetDefaultProfile(b.DefaultProfile).
 			SetLabels(b.Labels).
 			SetAnnotations(b.Annotations).
 			SetEndpoint(b.Endpoint).

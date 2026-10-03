@@ -58,7 +58,7 @@ func grantGuardSetup(t *testing.T) (*Server, store.Store, string, *store.User) {
 		Updated:   time.Now(),
 	}
 	require_NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 
 	return srv, s, projectID, owner
 }

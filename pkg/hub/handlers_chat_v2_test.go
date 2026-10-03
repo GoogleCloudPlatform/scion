@@ -1386,41 +1386,6 @@ func TestChatV2_Search_Stub(t *testing.T) {
 	}
 }
 
-func TestChatV2_LegacyThreads_AuthzFix(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	// Create a project that only admins can see — the dev user is admin
-	// by default so this test just verifies the authz call is present
-	// by checking the endpoint doesn't error on a valid project.
-	proj := &store.Project{ID: tid("legacy-authz"), Name: "legacy-authz", Slug: "legacy-authz", Created: time.Now(), Updated: time.Now()}
-	if err := s.CreateProject(ctx, proj); err != nil {
-		t.Fatalf("CreateProject: %v", err)
-	}
-
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-	wcs := NewWebChatStore(db, "sqlite3")
-	if err := wcs.Init(); err != nil {
-		t.Fatalf("Init: %v", err)
-	}
-	srv.SetWebChatStore(wcs)
-
-	rec := doRequest(t, srv, http.MethodGet, "/api/v1/chat/threads?projectId="+proj.ID, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	// Non-existent project should 404.
-	rec = doRequest(t, srv, http.MethodGet, "/api/v1/chat/threads?projectId=nonexistent", nil)
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("nonexistent project: expected 404, got %d", rec.Code)
-	}
-}
-
 func TestChatV2_SpaceRead(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -2141,15 +2106,20 @@ func TestParseDMKeyIDs(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // newTestWebChatStoreWithMessages creates a WebChatStore backed by an in-memory
-// SQLite DB, including a minimal messages table for search testing.
+// SQLite DB, including a minimal messages table for search testing. It uses
+// the production driver (modernc) and a DATETIME created column bound with a
+// time.Time, so created holds the same time.Time.String() text the ent
+// migrated table does. TestSearchChatMessages_PagesToExhaustionOnEntSchema
+// covers paging on the real ent schema.
 func newTestWebChatStoreWithMessages(t *testing.T) (WebChatStore, *sql.DB) {
 	t.Helper()
-	db, err := sql.Open("sqlite3", ":memory:")
+	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
+	db.SetMaxOpenConns(1) // one connection, so every query sees the same in-memory database
 
-	store := NewWebChatStore(db, "sqlite3")
+	store := NewWebChatStore(db, "sqlite")
 	if err := store.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2168,7 +2138,7 @@ CREATE TABLE IF NOT EXISTS messages (
     type TEXT NOT NULL DEFAULT 'instruction',
     channel TEXT,
     thread_id TEXT,
-    created TEXT NOT NULL
+    created DATETIME NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_created ON messages (created);
 `
@@ -2183,7 +2153,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_created ON messages (created);
 func insertTestMessage(t *testing.T, db *sql.DB, id, projectID, threadID, sender, msg string, created time.Time) {
 	t.Helper()
 	const query = `INSERT INTO messages (id, project_id, thread_id, sender, msg, channel, created) VALUES (?, ?, ?, ?, ?, 'web', ?)`
-	_, err := db.Exec(query, id, projectID, threadID, sender, msg, created.UTC().Format(time.RFC3339Nano))
+	_, err := db.Exec(query, id, projectID, threadID, sender, msg, created.UTC())
 	if err != nil {
 		t.Fatalf("insert test message: %v", err)
 	}
@@ -4985,7 +4955,7 @@ func TestChatV2_Send_SenderUsesEmailNotDisplayName(t *testing.T) {
 	// Grant the user hub membership and project access so the authz
 	// middleware doesn't reject the request.
 	ensureHubMembership(ctx, s, user.ID)
-	srv.createProjectMembersGroup(ctx, proj)
+	srv.seedProjectCreatorMembership(ctx, proj)
 	addProjectMemberWithRole(t, s, proj, user.ID, store.GroupMemberRoleMember)
 
 	// --- Subtest 1: human-to-human (no agent, type:chat) path ---

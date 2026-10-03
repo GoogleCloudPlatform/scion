@@ -262,6 +262,13 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 		}
 	}
 
+	// Agent secrets
+	if snap.AgentSecretsUserScopeOnly != nil {
+		resp.AgentSecrets = &config.AgentSecretsSettings{
+			UserScopeOnly: snap.AgentSecretsUserScopeOnly,
+		}
+	}
+
 	// Federation — populate from snapshot's FederationConfig.
 	if snap.FederationConfig != nil {
 		gc := &config.GlobalConfig{Federation: *snap.FederationConfig}
@@ -611,16 +618,33 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			}
 		}
 	}
-	// Validate hub-level default_timezone (IANA name check).
+	// Validate shared_dir_size on runtime and profile entries (beyond JSON
+	// schema — Kubernetes quantity check), naming the offending key so a bad
+	// value is rejected here instead of failing every agent start later.
+	{
+		var runtimes opsettings.RuntimesSettings
+		var profiles opsettings.ProfilesSettings
+		if doc, ok := sectionDocs["runtimes"]; ok {
+			_ = json.Unmarshal(doc, &runtimes)
+		}
+		if doc, ok := sectionDocs["profiles"]; ok {
+			_ = json.Unmarshal(doc, &profiles)
+		}
+		if errs := config.ValidateSharedDirSizes(runtimes, profiles); len(errs) > 0 {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
+			return
+		}
+	}
+	// Validate hub-level default_timezone (IANA name check; rejects "Local",
+	// same rule as the file-mode handler and as the per-user display
+	// preference — design §3 A (d)).
 	if doc, ok := sectionDocs["agent_defaults"]; ok {
 		var agentDefaults opsettings.AgentDefaultsSettings
 		if err := json.Unmarshal(doc, &agentDefaults); err == nil {
-			if agentDefaults.DefaultTimezone != "" {
-				if _, err := time.LoadLocation(agentDefaults.DefaultTimezone); err != nil {
-					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-						fmt.Sprintf("invalid default_timezone %q: %v", agentDefaults.DefaultTimezone, err), nil)
-					return
-				}
+			if err := validateDefaultTimezone(agentDefaults.DefaultTimezone); err != nil {
+				writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
+					fmt.Sprintf("invalid default_timezone %q: %v", agentDefaults.DefaultTimezone, err), nil)
+				return
 			}
 			if !s.validateHubDefaultGCPIdentity(w, r.Context(), agentDefaults) {
 				return
@@ -892,6 +916,10 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 		keys = append(keys, "quotas.enforce_broker_quotas")
 	}
 
+	if req.AgentSecrets != nil {
+		keys = append(keys, "agent_secrets.user_scope_only")
+	}
+
 	if req.Telemetry != nil {
 		keys = append(keys, "telemetry.enabled")
 	}
@@ -959,6 +987,15 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			}
 			if hub.CORS != nil {
 				keys = append(keys, "server.hub.cors")
+			}
+			if hub.AsyncAgentLaunch != nil {
+				keys = append(keys, "server.hub.async_agent_launch")
+			}
+			if hub.LaunchTimeout != "" {
+				keys = append(keys, "server.hub.launch_timeout")
+			}
+			if hub.LaunchKeepaliveSeconds != nil {
+				keys = append(keys, "server.hub.launch_keepalive_seconds")
 			}
 		}
 		if srv.Auth != nil {
@@ -1421,6 +1458,13 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 	case "quotas":
 		if req.Quotas != nil {
 			doc = req.Quotas
+		} else {
+			return nil, nil
+		}
+
+	case "agent_secrets":
+		if req.AgentSecrets != nil {
+			doc = req.AgentSecrets
 		} else {
 			return nil, nil
 		}

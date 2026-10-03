@@ -29,6 +29,7 @@ import '../shared/header.js';
 import type { User } from '../../shared/types.js';
 import { performLogout } from '../../utils/auth.js';
 import { setDocumentTitle } from '../../client/page-title.js';
+import { enterAppFrame, exitAppFrame } from '../shared/app-frame.js';
 
 const PROFILE_TITLES: Record<string, string> = {
   '/profile': 'Profile',
@@ -57,9 +58,9 @@ export class ScionProfileShell extends LitElement {
   static override styles = css`
     :host {
       display: flex;
-      height: 100vh;
-      height: 100dvh;
+      height: var(--scion-app-height, 100dvh);
       background: var(--scion-bg, #f8fafc);
+      touch-action: manipulation;
     }
 
     .sidebar {
@@ -67,7 +68,7 @@ export class ScionProfileShell extends LitElement {
       flex-shrink: 0;
       position: sticky;
       top: 0;
-      height: 100vh;
+      height: var(--scion-app-height, 100dvh);
     }
 
     @media (max-width: 768px) {
@@ -129,11 +130,17 @@ export class ScionProfileShell extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
+    enterAppFrame();
     try {
       this._sidebarCollapsed = localStorage.getItem('scion-sidebar-collapsed') === 'true';
     } catch {
       // localStorage may be unavailable (SecurityError in restricted contexts)
     }
+  }
+
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    exitAppFrame();
   }
 
   override updated(changedProperties: Map<string, unknown>): void {
@@ -189,7 +196,6 @@ export class ScionProfileShell extends LitElement {
           </div>
         </div>
       </main>
-
     `;
   }
 

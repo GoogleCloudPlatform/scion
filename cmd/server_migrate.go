@@ -83,6 +83,8 @@ func init() {
 }
 
 func runServerMigrate(cmd *cobra.Command, _ []string) error {
+	pinProcessUTC()
+
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 

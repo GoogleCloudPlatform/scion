@@ -30,6 +30,7 @@ import { listPageStyles, brokerTypeBadgeStyles } from '../shared/resource-styles
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
 import '../shared/view-toggle.js';
+import { formatRelative } from '../../utils/time.js';
 
 @customElement('scion-page-brokers')
 export class ScionPageBrokers extends LitElement {
@@ -226,31 +227,6 @@ export class ScionPageBrokers extends LitElement {
     }
   }
 
-  private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
-  }
-
   private onViewChange(e: CustomEvent<{ view: ViewMode }>): void {
     this.viewMode = e.detail.view;
   }
@@ -391,7 +367,7 @@ export class ScionPageBrokers extends LitElement {
         <div class="broker-meta">
           <div class="stat">
             <span class="stat-label">Last Heartbeat</span>
-            <span class="stat-value">${this.formatRelativeTime(broker.lastHeartbeat)}</span>
+            <span class="stat-value">${formatRelative(broker.lastHeartbeat)}</span>
           </div>
           ${broker.profiles
             ? html`
@@ -498,7 +474,7 @@ export class ScionPageBrokers extends LitElement {
             : '\u2014'}
         </td>
         <td>
-          <span class="meta-text">${this.formatRelativeTime(broker.lastHeartbeat)}</span>
+          <span class="meta-text">${formatRelative(broker.lastHeartbeat)}</span>
         </td>
         <td class="hide-mobile">${broker.profiles ? broker.profiles.length : '\u2014'}</td>
         <td class="hide-mobile">${this.renderAgentCapacity(broker)}</td>

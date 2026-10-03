@@ -805,7 +805,7 @@ func (s *Server) mintGitHubAppToken(ctx context.Context, project *store.Project)
 		s.events.PublishProjectUpdated(ctx, project)
 	}
 
-	return token.Token, token.ExpiresAt.Format("2006-01-02T15:04:05Z"), nil
+	return token.Token, token.ExpiresAt.UTC().Format("2006-01-02T15:04:05Z"), nil
 }
 
 // updateProjectGitHubAppStatus is a helper to update a project's GitHub App status.

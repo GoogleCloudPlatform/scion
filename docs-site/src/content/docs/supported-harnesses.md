@@ -35,6 +35,8 @@ Auth type can be explicitly set via `auth_selectedType` in your Scion settings p
 - **Settings File**: `~/.gemini/settings.json` (inside the agent container). Scion automatically updates `security.auth.selectedType` in this file to match the resolved auth method.
 - **System Prompt**: `~/.gemini/system_prompt.md` is automatically seeded if `system_prompt` is provided in the agent config. Additionally, Scion injects the system prompt into the `GEMINI_SYSTEM_MD` environment variable to ensure direct pickup by the Gemini CLI tool during initialization.
 - **Model Aliases**: Supports both traditional alias sizes and single-letter model alias mappings (`S` / `M` / `L` for Small / Medium / Large). The `provision.py` script automatically maps and handles fallback alias resolution during startup.
+- **Default model**: the harness-config declares `model: medium`, so an agent started without a model runs on the model that the `medium` alias maps to in `model_aliases` (see `harnesses/gemini-cli/config.yaml`). The broker resolves that tier before it sets `SCION_MODEL`. The container image does not pin a model in `settings.json`.
+- **Model selection**: the model is resolved in this order: the agent's resolved model (`--model`, template `model:`, or `SCION_MODEL`), then `harness_config.model`. Tier aliases (`small`, `medium`, `large`, `extra-large`, and `S` / `M` / `L` / `XL`) are resolved through the harness's `model_aliases` table. The provisioner writes the resolved model to `model.name` in `~/.gemini/settings.json` on every provision. If neither source gives a model, it removes any existing `model.name`, so a stale value is never kept and the Gemini CLI uses its own built-in default.
 
 ### Known Limitations
 - The `gemini` CLI tool must be installed in the container image (included in default images).
@@ -89,7 +91,7 @@ OpenCode supports two authentication methods (auto-detected in this order):
 ### Configuration
 - **Config File**: `~/.config/opencode/opencode.json`.
 - **Environment**: Respects standard OpenCode environment variables.
-- **Model Resolution**: Supports model selection via the `SCION_MODEL` environment variable. When `ctx.model_resolution` is empty, the provisioning script automatically falls back to `SCION_MODEL` to resolve and configure the underlying model.
+- **Model Resolution**: Supports model selection via the `SCION_MODEL` environment variable. The provisioning script resolves it with `scion_harness.resolve_model`, which maps a size alias through the harness-config's `model_aliases` to configure the underlying model.
 - **Catalog Pre-fetch**: The provisioner automatically pre-fetches the `models.dev` catalog to ensure fresh model data is available before startup.
 
 ### Hooks
@@ -127,6 +129,8 @@ When `SCION_THINKING_LEVEL` is set (a value from 0–100, provided via `--thinki
 | 76–100 | `xhigh` |
 
 Values outside the 0–100 range are clamped to the nearest boundary.
+
+When `SCION_THINKING_LEVEL` is unset, blank, or not a valid integer, the provisioner writes `model_reasoning_effort = "medium"` rather than leaving the key unwritten. This keeps Codex's own per-model catalog default (which can be `low` for some models) from silently taking over when no one has expressed an explicit preference.
 
 ### Known Limitations
 - **Auth File Copy**: The `auth.json` file is only copied when the agent is **created**.
@@ -192,7 +196,7 @@ with `capture_auth.py`.
 - **Instructions**: `agent_instructions` and `system_prompt` are projected into `AGENTS.md`. Hermes has no native system-prompt flag, so the system prompt is *prepended to `AGENTS.md`*.
 - **MCP**: `~/.hermes/mcp.json`. Project-scoped MCP servers are not supported.
 - **Model aliases**: `small` → `google/gemini-3.5-flash`, `medium` → `anthropic/claude-sonnet-4`, `large` → `anthropic/claude-opus-4`.
-- **Model Resolution**: Integrates with the `SCION_MODEL` environment variable for fallback model alias resolution. When `ctx.model_resolution` is empty, the `provision.py` script falls back to `SCION_MODEL` to map size aliases to the correct Nous Research endpoints.
+- **Model Resolution**: Integrates with the `SCION_MODEL` environment variable for fallback model alias resolution. The `provision.py` script resolves it with `scion_harness.resolve_model`, which maps size aliases to the provider/model strings above.
 
 ### Known Limitations
 - **System Prompt**: approximated via `AGENTS.md` (no native override).
@@ -231,7 +235,7 @@ the Antigravity bundle's `capture_auth.py` (which can also extract the token fro
 - **MCP**: `~/.gemini/config/mcp_config.json`.
 - **Hooks**: Antigravity ships a hook dialect (`dialect.yaml`) mapping `agy` events to Scion lifecycle events. Hooks fire **project-locally** (wired via `/workspace/.agents/hooks.json`).
 - **Runtime**: requires gnome-keyring and D-Bus in the container (provided by the base image); a generated wrapper script bootstraps the keyring and injects the token before launching `agy`.
-- **Default model**: `Gemini 3.8 Flash (Medium)` (override via `AGY_MODEL`).
+- **Model selection**: the model is resolved in this order: the agent's model (`--model` / `SCION_MODEL`), then `harness_config.model`, then the operator-set `AGY_MODEL` env var, then the default `Gemini 3.8 Flash (Medium)`. Tier aliases (`small`, `medium`, `large`, `extra-large`) are resolved through the harness's `model_aliases` table. The resolved model is written into `settings.json` on every provision, including into an existing `settings.json`, so changing the model takes effect on the next start.
 
 ### Known Limitations
 - **System Prompt**: approximated via `GEMINI.md` (no native override).

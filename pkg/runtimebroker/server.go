@@ -28,10 +28,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
@@ -39,6 +41,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -157,11 +160,18 @@ type ServerConfig struct {
 	// projected secrets. Defaults to true; set false to block such dispatches.
 	AllowContainerScriptHarnesses bool
 
-	// NFSConfig holds NFS workspace storage settings for this broker.
-	// When non-nil with shares configured, the broker can provision and
-	// clean up NFS-backed workspace subtrees. Used by deleteProject (N1-6)
-	// to also remove the NFS project subtree on project deletion.
+	// NFSConfig holds NFS workspace storage settings for this broker. The
+	// server command sets it from server.workspace_storage when the backend
+	// is "nfs" (see brokerNFSConfig in cmd). When non-nil with shares
+	// configured, the broker constructs an NFSMountReconciler that mounts
+	// each share at <MountRoot>/<share.ID> in the background at startup,
+	// reports per-share state in /healthz, and re-checks the shares before
+	// NFS-backed agent dispatches. Nil leaves all NFS handling off.
 	NFSConfig *config.V1NFSConfig
+
+	// NFSMountChecker overrides the mount layer the NFS reconciler uses.
+	// Nil selects ExecMountChecker (mount(8)/umount(8)); tests set a fake.
+	NFSMountChecker MountChecker
 
 	// ColocatedStorage is the storage backend of a Hub running co-located in the
 	// same process. When set and backed by the local filesystem, the broker
@@ -232,14 +242,41 @@ type Server struct {
 	dispatchAttempts   map[string]*dispatchAttempt
 	dispatchAttemptsMu sync.Mutex
 
+	// launchRegistry is this replica's local bookkeeping for in-flight async
+	// launches (design t1-async-create-v11.md §3.8.1, §7 P1b-1). It is an
+	// optimisation only -- correctness comes from the Hub's answers.
+	launchRegistry *launchRegistry
+	// launchInstanceID identifies this broker process as a launch owner
+	// (design §3.2's LaunchInstanceID / launch_owner), generated once here at
+	// startup.
+	launchInstanceID string
+
+	// syncStartSupersedeWait overrides defaultSyncStartSupersedeWait when
+	// positive (see beginSyncStart). Zero in production.
+	syncStartSupersedeWait time.Duration
+
 	stateDir string
 
 	// auxiliaryRuntimes holds runtime+manager pairs for non-default runtimes
 	// created via profile resolution (e.g. kubernetes when default is docker).
 	// Used by LookupContainerID/LookupAgent as a fallback when the default
 	// manager can't find an agent.
+	//
+	// Keyed by auxiliaryRuntimeIdentity (a per-instance key, not the runtime
+	// type); read through sortedAuxiliaryRuntimes or
+	// findAuxiliaryRuntimeByType rather than indexing by type.
 	auxiliaryRuntimes   map[string]auxiliaryRuntime
 	auxiliaryRuntimesMu sync.RWMutex
+
+	// resolveAuxiliaryRuntime resolves the runtime.Runtime for a project path
+	// and profile name when discovering or creating auxiliary runtimes, and
+	// in resolveManagerForOpts when settings resolve to something other than
+	// the broker's default runtime. It is a field (defaulting to
+	// agent.ResolveRuntime, set in New) rather than a direct call, so tests
+	// can substitute a stub that does not require live cluster/network
+	// access — resolving a real Kubernetes runtime calls Verify() against
+	// the API server.
+	resolveAuxiliaryRuntime func(projectPath, agentName, profileFlag string) scionrt.Runtime
 
 	// projectProvisionMu serializes worktree provisioning per project on this
 	// node. Without this, concurrent agent creations for the same project could
@@ -249,6 +286,15 @@ type Server struct {
 
 	// NFS mount reconciler (nil when backend != "nfs")
 	nfsMountReconciler *NFSMountReconciler
+	// NFS reconcile loop state (all unused when nfsMountReconciler is nil).
+	// nfsStartupReconcileDone is closed once the loop's first pass has
+	// finished; nfsReconcileStopped is closed when the loop exits.
+	nfsStartupReconcileDone chan struct{}
+	nfsReconcileStopped     chan struct{}
+	nfsReconcileOnce        sync.Once
+	nfsReconcileCancel      context.CancelFunc
+	// nfsReconcileInterval overrides DefaultNFSReconcileInterval (tests).
+	nfsReconcileInterval time.Duration
 
 	// Dedicated request logger (nil = disabled)
 	requestLogger *slog.Logger
@@ -302,6 +348,13 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		dispatchAttempts:  make(map[string]*dispatchAttempt),
 		auxiliaryRuntimes: make(map[string]auxiliaryRuntime),
 
+		// Defaults to the real profile-resolution path; tests substitute a
+		// stub that does not require live cluster/network access (see
+		// discoverAuxiliaryRuntimesForProjects and resolveManagerForOpts).
+		resolveAuxiliaryRuntime: agent.ResolveRuntime,
+		launchRegistry:          newLaunchRegistry(),
+		launchInstanceID:        uuid.NewString(),
+
 		// Subsystem loggers
 		agentLifecycleLog: logging.Subsystem("broker.agent-lifecycle"),
 		messageLog:        logging.Subsystem("broker.messages"),
@@ -328,14 +381,33 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 	}
 
 	// Initialize NFS mount reconciler when NFS storage is configured.
-	// This only constructs the reconciler; Reconcile() is called in Start().
+	// This only constructs the reconciler; its loop is started in Start().
 	if cfg.NFSConfig != nil && len(cfg.NFSConfig.Shares) > 0 {
 		nfsLog := logging.Subsystem("broker.nfs-mount")
-		checker := NewExecMountChecker(nfsLog)
+		checker := cfg.NFSMountChecker
+		if checker == nil {
+			checker = NewExecMountChecker(nfsLog)
+		}
 		srv.nfsMountReconciler = NewNFSMountReconciler(cfg.NFSConfig, checker, nfsLog)
+		// On Kubernetes and Cloud Run the platform mounts the export into
+		// the agent, so the broker never mounts it; it only verifies.
+		if rt != nil && NFSWarnOnlyRuntime(rt.Name()) {
+			srv.nfsMountReconciler.SetVerifyOnly(fmt.Sprintf(
+				"the broker's default runtime is %s, so the broker does not mount it", rt.Name()))
+		}
+		srv.nfsStartupReconcileDone = make(chan struct{})
+		srv.nfsReconcileStopped = make(chan struct{})
 		slog.Info("NFS mount reconciler initialized",
 			"shares", len(cfg.NFSConfig.Shares),
-			"mountRoot", cfg.NFSConfig.MountRoot)
+			"mountRoot", cfg.NFSConfig.MountRoot,
+			"autoMount", cfg.NFSConfig.AutoMount,
+			"brokerMounts", srv.nfsMountReconciler.MountsShares())
+		if srv.nfsMountReconciler.MountsShares() {
+			if err := srv.nfsMountReconciler.mountPrivilegeError(); err != nil {
+				slog.Warn("server.workspace_storage.nfs.auto_mount is on but the broker cannot mount; shares are checked only",
+					"reason", err)
+			}
+		}
 	}
 
 	// Initialize Hub integration if enabled
@@ -380,6 +452,7 @@ func (s *Server) SwapRuntime(rt scionrt.Runtime) {
 		conn.mu.RUnlock()
 		if hb != nil {
 			hb.SwapManager(newMgr)
+			hb.SetDefaultRuntime(rt)
 		}
 	}
 	s.hubMu.RUnlock()
@@ -959,19 +1032,13 @@ func (s *Server) Start(ctx context.Context) error {
 	// a broker restart.
 	s.discoverAuxiliaryRuntimes()
 
-	// Reconcile NFS mounts at startup (ensure configured shares are mounted).
-	if s.nfsMountReconciler != nil {
-		if err := s.nfsMountReconciler.Reconcile(); err != nil {
-			slog.Warn("NFS mount reconciliation returned error at startup", "error", err)
-		}
-		if !s.nfsMountReconciler.IsHealthy() {
-			slog.Error("NFS mounts unhealthy at startup",
-				"detail", s.nfsMountReconciler.HealthCheckString())
-		} else {
-			slog.Info("NFS mounts reconciled at startup",
-				"status", s.nfsMountReconciler.HealthCheckString())
-		}
-	}
+	// Check (and, with nfs.auto_mount, mount) the configured NFS shares.
+	// This runs in the background: an NFS mount or mountpoint check against
+	// an unreachable server can block for minutes, and a failed mount must
+	// not delay or stop the broker from serving projects that do not use
+	// NFS. Until the first pass finishes, /healthz reports the shares as not
+	// reconciled.
+	s.startNFSReconcileLoop(ctx)
 
 	// Start all hub connections' services
 	s.hubMu.RLock()
@@ -1006,8 +1073,54 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
+// startNFSReconcileLoop starts the NFS reconciler's background loop (see
+// NFSMountReconciler.Run). It is a no-op when NFS is not configured, and
+// starts at most one loop per Server. The loop stops when ctx is cancelled
+// or Shutdown is called.
+func (s *Server) startNFSReconcileLoop(ctx context.Context) {
+	if s.nfsMountReconciler == nil {
+		return
+	}
+	s.nfsReconcileOnce.Do(func() {
+		loopCtx, cancel := context.WithCancel(ctx)
+		s.mu.Lock()
+		s.nfsReconcileCancel = cancel
+		s.mu.Unlock()
+		go func() {
+			defer close(s.nfsReconcileStopped)
+			s.nfsMountReconciler.Run(loopCtx, s.nfsReconcileInterval, func() {
+				s.logNFSStartupResult()
+				close(s.nfsStartupReconcileDone)
+			})
+		}()
+	})
+}
+
+// logNFSStartupResult logs the outcome of the first reconcile pass. Failures
+// are recorded per share (surfaced in /healthz and by scion doctor) and
+// never stop the broker.
+func (s *Server) logNFSStartupResult() {
+	r := s.nfsMountReconciler
+	if r.IsHealthy() {
+		slog.Info("NFS mounts checked at startup",
+			"status", r.HealthCheckString(), "autoMount", r.AutoMount())
+		return
+	}
+	slog.Error("NFS mounts unhealthy at startup; the broker keeps serving",
+		"detail", r.HealthCheckString(), "autoMount", r.AutoMount())
+}
+
 // Shutdown gracefully shuts down the server.
 func (s *Server) Shutdown(ctx context.Context) error {
+	// Write any resolution cache entries still waiting for their delayed
+	// write. Deferred so it runs on every return path, and after the HTTP
+	// server has drained, when in-flight requests have finished adding to it.
+	defer func() {
+		if s.ghResolutionCache != nil {
+			s.ghResolutionCache.Flush()
+		}
+	}()
+
 	// Stop credential watcher
 	s.mu.RLock()
 	srv := s.httpServer
@@ -1017,6 +1130,16 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if credWatcherStop != nil {
 		slog.Info("Stopping credential watcher...")
 		close(credWatcherStop)
+	}
+
+	// Stop the NFS reconcile loop. Cancelling its context kills a mount
+	// command in progress (its whole process group), so the loop ends
+	// promptly; it is not waited for.
+	s.mu.RLock()
+	nfsCancel := s.nfsReconcileCancel
+	s.mu.RUnlock()
+	if nfsCancel != nil {
+		nfsCancel()
 	}
 
 	// Stop all hub connections
@@ -1046,14 +1169,44 @@ func (s *Server) Handler() http.Handler {
 
 // getAuxiliaryManagers returns the managers for all registered auxiliary runtimes.
 func (s *Server) getAuxiliaryManagers() []agent.Manager {
-	s.auxiliaryRuntimesMu.RLock()
-	defer s.auxiliaryRuntimesMu.RUnlock()
-
-	managers := make([]agent.Manager, 0, len(s.auxiliaryRuntimes))
-	for _, aux := range s.auxiliaryRuntimes {
+	entries := s.sortedAuxiliaryRuntimes()
+	managers := make([]agent.Manager, 0, len(entries))
+	for _, aux := range entries {
 		managers = append(managers, aux.Manager)
 	}
 	return managers
+}
+
+// namedAuxiliaryRuntime pairs an auxiliaryRuntime with the identity key it is
+// stored under, for callers (logging, debugging) that want both.
+type namedAuxiliaryRuntime struct {
+	identity string
+	auxiliaryRuntime
+}
+
+// sortedAuxiliaryRuntimes returns a snapshot of the currently registered
+// auxiliary runtimes ordered by identity key. More than one auxiliary
+// runtime of the same type can be registered (see
+// auxiliaryRuntimeIdentity), so first-match-wins consumers (LookupAgent,
+// resolveAgentRuntimeTarget, and LookupContainerID via auxListAgentsSorted,
+// which sorts the same keys) need a deterministic iteration order — the
+// same pattern resolveDeleteTarget already used for its manager list —
+// rather than depending on Go's randomized map order.
+func (s *Server) sortedAuxiliaryRuntimes() []namedAuxiliaryRuntime {
+	s.auxiliaryRuntimesMu.RLock()
+	defer s.auxiliaryRuntimesMu.RUnlock()
+
+	keys := make([]string, 0, len(s.auxiliaryRuntimes))
+	for k := range s.auxiliaryRuntimes {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	entries := make([]namedAuxiliaryRuntime, 0, len(keys))
+	for _, k := range keys {
+		entries = append(entries, namedAuxiliaryRuntime{identity: k, auxiliaryRuntime: s.auxiliaryRuntimes[k]})
+	}
+	return entries
 }
 
 // discoverAuxiliaryRuntimes scans project settings for runtime profiles that
@@ -1061,8 +1214,6 @@ func (s *Server) getAuxiliaryManagers() []agent.Manager {
 // non-default runtimes are registered as auxiliary runtimes so that agents
 // running on them (e.g. Kubernetes pods) can be found after a broker restart.
 func (s *Server) discoverAuxiliaryRuntimes() {
-	defaultRT := s.runtime.Name()
-
 	// Collect project paths to scan
 	var projectPaths []string
 
@@ -1089,7 +1240,37 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 		projectPaths = append(projectPaths, pd)
 	}
 
-	discovered := make(map[string]bool)
+	s.discoverAuxiliaryRuntimesForProjects(projectPaths)
+}
+
+// discoverAuxiliaryRuntimesForProjects scans the given project settings
+// directories for runtime profiles that resolve to a runtime different from
+// the broker's default, and registers each distinct resolved runtime once.
+//
+// De-duplication is keyed by the resolved runtime's IDENTITY (see
+// auxiliaryRuntimeIdentity), not by its TYPE: two profiles that resolve to
+// different Kubernetes clusters/contexts/namespaces are distinct runtimes and
+// must both be registered, while two profiles that resolve to the same
+// underlying runtime must be registered once. Keying by type alone would
+// register only one of several distinct same-type runtimes, chosen by map
+// iteration order. See ptone/scion#2260.
+//
+// Iteration over profile names is sorted so registration does not depend on
+// map order.
+//
+// Split out from discoverAuxiliaryRuntimes so tests can exercise resolution,
+// de-duplication and registration directly, without depending on the
+// broker's on-disk project discovery.
+func (s *Server) discoverAuxiliaryRuntimesForProjects(projectPaths []string) {
+	// Compared against every resolved profile below so that a profile
+	// pointing at the broker's own runtime instance — not merely the same
+	// TYPE as the broker's default — is recognized and skipped. A broker
+	// whose default is Kubernetes must still register a profile aimed at a
+	// different cluster/context/namespace as an auxiliary runtime; comparing
+	// types alone would wrongly treat it as "the default" and drop it.
+	defaultIdentity := auxiliaryRuntimeIdentity(s.runtime)
+
+	discoveredIdentities := make(map[string]bool)
 
 	for _, gp := range projectPaths {
 		vs, _, _ := config.LoadEffectiveSettings(gp)
@@ -1097,29 +1278,164 @@ func (s *Server) discoverAuxiliaryRuntimes() {
 			continue
 		}
 
+		profileNames := make([]string, 0, len(vs.Profiles))
 		for profileName := range vs.Profiles {
-			_, runtimeType, err := vs.ResolveRuntime(profileName)
-			if err != nil || runtimeType == defaultRT || discovered[runtimeType] {
-				continue
-			}
-			discovered[runtimeType] = true
+			profileNames = append(profileNames, profileName)
+		}
+		sort.Strings(profileNames)
 
-			resolved := agent.ResolveRuntime(gp, "", profileName)
-			if resolved.Name() == "error" {
-				slog.Warn("Failed to resolve auxiliary runtime",
-					"runtime", runtimeType, "profile", profileName)
+		for _, profileName := range profileNames {
+			// Only used here to skip profiles whose runtime entry doesn't
+			// exist at all; the actual default/de-dup comparisons below are
+			// by resolved IDENTITY, not by this settings-level type string,
+			// so settings spellings that alias one runtime type (e.g. "k8s"
+			// and "kubernetes") don't register twice.
+			if _, _, err := vs.ResolveRuntime(profileName); err != nil {
 				continue
 			}
+
+			resolved := s.resolveAuxiliaryRuntime(gp, "", profileName)
+			if resolved.Name() == "error" {
+				slog.Warn("Failed to resolve auxiliary runtime", "profile", profileName)
+				continue
+			}
+
+			identity := auxiliaryRuntimeIdentity(resolved)
+			if identity == defaultIdentity || discoveredIdentities[identity] {
+				continue
+			}
+			discoveredIdentities[identity] = true
 
 			mgr := agent.NewManager(resolved)
 			s.auxiliaryRuntimesMu.Lock()
-			s.auxiliaryRuntimes[resolved.Name()] = auxiliaryRuntime{Runtime: resolved, Manager: mgr}
+			s.auxiliaryRuntimes[identity] = auxiliaryRuntime{Runtime: resolved, Manager: mgr}
 			s.auxiliaryRuntimesMu.Unlock()
 
 			slog.Info("Discovered auxiliary runtime from project settings",
-				"runtime", resolved.Name(), "profile", profileName)
+				"runtime", resolved.Name(), "identity", identity, "profile", profileName)
 		}
 	}
+}
+
+// auxiliaryRuntimeIdentity returns a key that identifies a specific resolved
+// runtime INSTANCE, not merely its type. It is used to de-duplicate
+// discovered auxiliary runtimes, as the key under which they are stored in
+// Server.auxiliaryRuntimes, and to compare a resolved profile against the
+// broker's own default runtime — so that two distinct instances of the same
+// runtime type (e.g. Kubernetes pointed at different clusters/contexts/
+// namespaces) are tracked and addressed separately, while two profiles that
+// resolve to the same instance collapse to one entry.
+//
+// The type component always comes from rt.Name() — the runtime's own
+// canonical name — never from a settings-level type string: two settings
+// spellings that alias one runtime type (e.g. "k8s" and "kubernetes", both
+// accepted by runtime.GetRuntime) must produce the same identity.
+//
+// Extra fields are appended only for a runtime type with per-instance config
+// that both (a) varies between two profiles of the same type on one broker
+// process and (b) is actually consumed by the runtime, so it genuinely
+// distinguishes one reachable target from another: Kubernetes (context,
+// namespace). Every other type keeps the bare type-name identity today:
+//
+//   - Docker/Podman: Host is assigned onto DockerRuntime/PodmanRuntime from
+//     settings, but neither runtime reads it back (no -H/--host flag, no
+//     DOCKER_HOST/CONTAINER_HOST wiring) — every instance talks to the same
+//     local daemon regardless of Host, so Host cannot distinguish one from
+//     another. It also isn't normalized (an empty host, "unix:///var/run/
+//     docker.sock" and "/var/run/docker.sock" would otherwise be three
+//     identities for one daemon). If per-host Docker/Podman is wanted later,
+//     it belongs with the change that wires Host into the command actually
+//     run, together with socket-spelling normalization.
+//   - Cloud Run: ProjectID/Location are resolved lazily from GCE metadata
+//     when auto-detected, so an unresolved instance and the same instance
+//     after its first API call would otherwise produce two identities for
+//     one target, and reading them here would be unsynchronized with
+//     CloudRunRuntime's own resolution: that path holds a mutex while it
+//     writes ProjectID/Location, and this identity function does not take
+//     that lock. Project/region disambiguation for Cloud Run is a follow-up,
+//     not made here.
+//   - Apple container, Cloud Run Sandbox: no per-instance config exists at
+//     all today.
+func auxiliaryRuntimeIdentity(rt scionrt.Runtime) string {
+	switch r := rt.(type) {
+	case *scionrt.KubernetesRuntime:
+		ctx := ""
+		if r.Client != nil {
+			ctx = r.Client.CurrentContext
+		}
+		return fmt.Sprintf("%s|context=%s|namespace=%s", rt.Name(), ctx, r.DefaultNamespace)
+	default:
+		return rt.Name()
+	}
+}
+
+// canonicalRuntimeTypeName normalizes "k8s" to "kubernetes" for comparing a
+// profile's declared type against a resolved runtime's Name(): "k8s" and
+// "kubernetes" both resolve to the same KubernetesRuntime (see
+// runtime.GetRuntime), but Name() always returns "kubernetes". Other
+// settings-level aliases of "kubernetes" (e.g. "remote") are not normalized
+// here, so a profile declared with one of those falls through to full
+// resolution instead of being matched by this cheap comparison.
+func canonicalRuntimeTypeName(runtimeType string) string {
+	if runtimeType == "k8s" {
+		return "kubernetes"
+	}
+	return runtimeType
+}
+
+// defaultRuntimeMatchesProfile reports whether a profile's settings-declared
+// runtime type (and, for Kubernetes, target cluster/namespace) is the same as
+// the broker's own default runtime — WITHOUT fully resolving the profile
+// (runtime.GetRuntime, which for Kubernetes also calls Client.Verify(), a
+// live API round trip). This lets resolveManagerForOpts return the shared
+// manager for the common case (a start on the broker's own default) at the
+// cost of a settings-string comparison, instead of paying a network call —
+// and risking a start failing on a transient Verify error — for every single
+// agent start.
+//
+// A false result does not mean "this is definitely a different runtime"; it
+// means the cheap check could not prove a match, so the caller should fall
+// back to fully resolving the profile for a conclusive answer.
+func (s *Server) defaultRuntimeMatchesProfile(runtimeType string, rtConfig config.V1RuntimeConfig) bool {
+	if canonicalRuntimeTypeName(runtimeType) != s.runtime.Name() {
+		return false
+	}
+
+	defaultK8s, isDefaultK8s := s.runtime.(*scionrt.KubernetesRuntime)
+	if !isDefaultK8s {
+		// Every non-Kubernetes type uses the bare type-name identity
+		// (see auxiliaryRuntimeIdentity): a type match is an identity match,
+		// so there is nothing further to resolve.
+		return true
+	}
+	if defaultK8s.Client == nil {
+		return false
+	}
+
+	context := rtConfig.Context
+	if context == "" {
+		// An unset context targets the kubeconfig's current context. Resolve
+		// it the same way runtime.GetRuntime does (k8s.NewClientWithContext),
+		// but without the Verify() call that follows it there: building the
+		// client only reads local kubeconfig/in-cluster files, it never
+		// dials the cluster. A failure here is not conclusive — e.g. no
+		// kubeconfig reachable from this process — so fall back to the full
+		// resolution path rather than guessing.
+		client, err := k8s.NewClientWithContext(os.Getenv("KUBECONFIG"), "")
+		if err != nil {
+			return false
+		}
+		context = client.CurrentContext
+	}
+	if context != defaultK8s.Client.CurrentContext {
+		return false
+	}
+
+	namespace := rtConfig.Namespace
+	if namespace == "" {
+		namespace = scionrt.DefaultKubernetesNamespace()
+	}
+	return namespace == defaultK8s.DefaultNamespace
 }
 
 // ErrAgentListUnavailable wraps a runtime.List failure encountered while
@@ -1159,9 +1475,78 @@ func (e *agentNotFoundError) Is(target error) bool {
 // LookupContainerID implements AgentLookup interface.
 // It looks up an agent by slug and returns its container ID.
 // projectID scopes the lookup to prevent cross-project collision.
+// See lookupAgentTarget for the resolution rules and error types.
 func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) (string, error) {
+	containerID, _, _, err := s.lookupAgentTarget(ctx, slug, projectID)
+	return containerID, err
+}
+
+// lookupAgentTarget resolves an agent slug to its container identifier
+// (container ID for docker/podman, pod name for k8s, or whatever a runtime
+// reports) and also returns the agent.Manager and scionrt.Runtime pair
+// whose List call produced the match, so a caller that goes on to act on
+// the target (e.g. Stop, Exec) sends the operation to the same runtime the
+// identifier came from rather than to a manager or runtime re-derived by a
+// second, independent lookup. The manager and runtime are paired at the
+// stage that produced the match — the default runtime's own manager and
+// runtime together when the default stage matches, or the single
+// auxiliaryRuntime entry auxListAgentsSorted matched against — so there is
+// no point at which one is resolved independently of the other.
+//
+// Resolution runs in two stages, each consulting the default runtime first
+// and then every auxiliary runtime in sorted identity order (auxListAgentsSorted):
+//
+//  1. a project-scoped search (scion.name plus the project label);
+//  2. only when projectID is set and stage 1 found nothing, a slug-only
+//     search that accepts just containers carrying no project label at all
+//     (pre-label or solo/CLI containers — see agentsWithoutProjectLabel).
+//
+// Errors:
+//   - a default-runtime List failure, in either stage, wraps
+//     ErrAgentListUnavailable;
+//   - an auxiliary-runtime List failure is decisive only when no runtime
+//     produced a match in that stage: a match found on another runtime is
+//     authoritative over an error seen along the way, but "no match after a
+//     failed List" wraps ErrAgentListUnavailable rather than claiming the
+//     agent is absent, and ends the lookup without running the next stage;
+//   - more than one matching entry returns uniqueAgentEntry's (unwrapped)
+//     ambiguity error;
+//   - no match at all, or a matched record carrying no container identifier
+//     (nothing addressable to act on), satisfies errors.Is(err,
+//     ErrAgentNotFound).
+//
+// Every error errs toward an explicit failure, never toward a false
+// not-found or a wrong target.
+func (s *Server) lookupAgentTarget(ctx context.Context, slug, projectID string) (string, agent.Manager, scionrt.Runtime, error) {
+	m, err := s.lookupAgentMatch(ctx, slug, projectID)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	return m.containerID, m.manager, m.runtime, nil
+}
+
+// agentMatch is the result of lookupAgentMatch: the container identifier,
+// the manager and runtime that listed it, and the listed entry itself.
+//
+// matched reports that exactly one entry matched. It is also set alongside
+// the ErrAgentNotFound returned for a matched entry that carries no
+// container identifier: there is nothing to act on, but the entry's listed
+// name and project path are still the agent's.
+type agentMatch struct {
+	containerID string
+	manager     agent.Manager
+	runtime     scionrt.Runtime
+	entry       api.AgentInfo
+	matched     bool
+}
+
+// lookupAgentMatch is lookupAgentTarget's search, returning the matched
+// entry as well, so a caller that needs the agent's listed name or project
+// path reads them from the same entry it acts on. Resolution order and
+// errors are exactly lookupAgentTarget's.
+func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (agentMatch, error) {
 	if s.manager == nil {
-		return "", fmt.Errorf("agent manager not available")
+		return agentMatch{}, fmt.Errorf("agent manager not available")
 	}
 
 	slug = strings.ToLower(slug)
@@ -1169,39 +1554,21 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 	filter := scopedNameFilter(slug, projectID)
 	agents, err := s.manager.List(ctx, filter)
 	if err != nil {
-		return "", fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+		return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 	}
 	agents = agentsForProject(agents, projectID)
-
-	// listUnavailable tracks whether any consulted runtime's List call itself
-	// failed (as opposed to succeeding with zero matches). A failure here must
-	// not be indistinguishable from "no such agent": callers (execCommand,
-	// resetAuth, projectScopedTarget) need to tell a genuinely missing agent
-	// (404) from a runtime that briefly could not answer (503, retry).
-	var listUnavailable bool
+	matchManager := s.manager
+	matchRuntime := s.runtime
 
 	// Fall back to auxiliary runtimes (e.g. kubernetes when default is docker)
 	if len(agents) == 0 {
-		s.auxiliaryRuntimesMu.RLock()
-		auxRuntimes := make(map[string]auxiliaryRuntime, len(s.auxiliaryRuntimes))
-		for k, v := range s.auxiliaryRuntimes {
-			auxRuntimes[k] = v
+		auxAgents, auxManager, auxRuntime, auxErr := s.auxListAgentsSorted(ctx, slug, false, filter, func(a []api.AgentInfo) []api.AgentInfo { return agentsForProject(a, projectID) })
+		if auxErr != nil {
+			return agentMatch{}, auxErr
 		}
-		s.auxiliaryRuntimesMu.RUnlock()
-
-		for rtName, aux := range auxRuntimes {
-			auxAgents, auxErr := aux.Manager.List(ctx, filter)
-			if auxErr != nil {
-				listUnavailable = true
-				continue
-			}
-			auxAgents = agentsForProject(auxAgents, projectID)
-			if len(auxAgents) > 0 {
-				agents = auxAgents
-				slog.Debug("Agent found via auxiliary runtime", "slug", slug, "runtime", rtName)
-				break
-			}
-		}
+		agents = auxAgents
+		matchManager = auxManager
+		matchRuntime = auxRuntime
 	}
 
 	// Backward compatibility: retry without project filter, but only accept
@@ -1212,59 +1579,111 @@ func (s *Server) LookupContainerID(ctx context.Context, slug, projectID string) 
 		fallbackFilter := map[string]string{"scion.name": slug}
 		agents, err = s.manager.List(ctx, fallbackFilter)
 		if err != nil {
-			return "", fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+			return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
 		}
 		agents = agentsWithoutProjectLabel(agents)
+		matchManager = s.manager
+		matchRuntime = s.runtime
 		if len(agents) == 0 {
-			s.auxiliaryRuntimesMu.RLock()
-			auxRuntimes := make(map[string]auxiliaryRuntime, len(s.auxiliaryRuntimes))
-			for k, v := range s.auxiliaryRuntimes {
-				auxRuntimes[k] = v
+			auxAgents, auxManager, auxRuntime, auxErr := s.auxListAgentsSorted(ctx, slug, true, fallbackFilter, agentsWithoutProjectLabel)
+			if auxErr != nil {
+				return agentMatch{}, auxErr
 			}
-			s.auxiliaryRuntimesMu.RUnlock()
-
-			for rtName, aux := range auxRuntimes {
-				auxAgents, auxErr := aux.Manager.List(ctx, fallbackFilter)
-				if auxErr != nil {
-					listUnavailable = true
-					continue
-				}
-				auxAgents = agentsWithoutProjectLabel(auxAgents)
-				if len(auxAgents) > 0 {
-					agents = auxAgents
-					slog.Debug("Agent found via auxiliary runtime (fallback)", "slug", slug, "runtime", rtName)
-					break
-				}
-			}
+			agents = auxAgents
+			matchManager = auxManager
+			matchRuntime = auxRuntime
 		}
 	}
 
 	if len(agents) == 0 {
-		if listUnavailable {
-			return "", fmt.Errorf("%w: an auxiliary runtime failed to list agents while resolving '%s'", ErrAgentListUnavailable, slug)
-		}
-		return "", &agentNotFoundError{slug: slug}
+		return agentMatch{}, &agentNotFoundError{slug: slug}
 	}
 
-	agent, err := uniqueAgentEntry(slug, agents)
+	entry, err := uniqueAgentEntry(slug, agents)
 	if err != nil {
-		return "", err
+		return agentMatch{}, err
 	}
 
 	// Get container ID - prefer label, then ContainerID from runtime, then ID
-	containerID := agent.Labels["scion.container.id"]
+	containerID := entry.Labels["scion.container.id"]
 	if containerID == "" {
-		containerID = agent.ContainerID
+		containerID = entry.ContainerID
 	}
 	if containerID == "" {
-		containerID = agent.ID
+		containerID = entry.ID
 	}
 	if containerID == "" {
-		return "", fmt.Errorf("agent '%s' has no container ID: %w", slug, ErrAgentNotFound)
+		return agentMatch{manager: matchManager, runtime: matchRuntime, entry: entry, matched: true},
+			fmt.Errorf("agent '%s' has no container ID: %w", slug, ErrAgentNotFound)
 	}
 
-	return containerID, nil
+	return agentMatch{containerID: containerID, manager: matchManager, runtime: matchRuntime, entry: entry, matched: true}, nil
 }
+
+// auxListAgentsSorted queries every currently registered auxiliary runtime
+// with filter, in sorted identity order (the same order allManagers() uses),
+// and returns the first non-empty match after filterAgents narrows it, together
+// with the agent.Manager whose List call produced that match.
+//
+// A match is authoritative: once one auxiliary runtime's List call succeeds
+// and filterAgents leaves at least one entry, the remaining auxiliary
+// runtimes are not consulted at all, regardless of whether an earlier one
+// in the sorted order failed to list. Only when no auxiliary runtime
+// produces a match does a List error along the way turn into an
+// ErrAgentListUnavailable-wrapped error — an error from a runtime that was
+// never going to match must not block a genuine match found elsewhere, but
+// a failed List on the one runtime that may hold the agent must not be
+// misread as "not found" either. The fixed iteration order keeps the
+// outcome the same from one call to the next instead of depending on Go's
+// randomized map order.
+//
+// slug and fallback are used only for the debug line logged on a match.
+//
+// The returned agent.Manager and scionrt.Runtime are always the pair
+// registered together for the same auxiliary runtime identity (auxiliaryRuntime
+// stores them together), so a caller never has to re-derive one from the
+// other: they are paired at the moment the match is found, not looked up
+// again afterward.
+func (s *Server) auxListAgentsSorted(ctx context.Context, slug string, fallback bool, filter map[string]string, filterAgents func([]api.AgentInfo) []api.AgentInfo) ([]api.AgentInfo, agent.Manager, scionrt.Runtime, error) {
+	s.auxiliaryRuntimesMu.RLock()
+	auxNames := make([]string, 0, len(s.auxiliaryRuntimes))
+	auxRuntimes := make(map[string]auxiliaryRuntime, len(s.auxiliaryRuntimes))
+	for name, aux := range s.auxiliaryRuntimes {
+		auxNames = append(auxNames, name)
+		auxRuntimes[name] = aux
+	}
+	s.auxiliaryRuntimesMu.RUnlock()
+	sort.Strings(auxNames)
+
+	var listErr error
+	for _, rtName := range auxNames {
+		auxAgents, auxErr := auxRuntimes[rtName].Manager.List(ctx, filter)
+		if auxErr != nil {
+			if listErr == nil {
+				listErr = fmt.Errorf("%w %q: %v", errAuxiliaryRuntimeList, rtName, auxErr)
+			}
+			continue
+		}
+		if matched := filterAgents(auxAgents); len(matched) > 0 {
+			msg := "Agent found via auxiliary runtime"
+			if fallback {
+				msg += " (fallback)"
+			}
+			slog.Debug(msg, "slug", slug, "runtime", rtName)
+			return matched, auxRuntimes[rtName].Manager, auxRuntimes[rtName].Runtime, nil
+		}
+	}
+	if listErr != nil {
+		return nil, nil, nil, fmt.Errorf("%w: %w", ErrAgentListUnavailable, listErr)
+	}
+	return nil, nil, nil, nil
+}
+
+// errAuxiliaryRuntimeList marks an ErrAgentListUnavailable error that came
+// from an auxiliary runtime's List call (the default runtime listed
+// successfully), so a caller can treat it differently from a default-runtime
+// failure.
+var errAuxiliaryRuntimeList = errors.New("auxiliary runtime")
 
 // LookupAgent implements AgentLookup interface.
 // It looks up an agent by slug and returns detailed info including the runtime.
@@ -1294,16 +1713,13 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	// terminal) from a runtime that briefly could not answer (4503, retry).
 	var listUnavailable bool
 
-	// Fall back to auxiliary runtimes
+	// Fall back to auxiliary runtimes, in a deterministic (identity-sorted)
+	// order: more than one auxiliary runtime can share a type, and in
+	// pathological overlap cases (e.g. two Kubernetes namespace-scoped
+	// entries plus one with ListAllNamespaces) more than one could plausibly
+	// answer for the same slug.
 	if len(agents) == 0 {
-		s.auxiliaryRuntimesMu.RLock()
-		auxRuntimes := make(map[string]auxiliaryRuntime, len(s.auxiliaryRuntimes))
-		for k, v := range s.auxiliaryRuntimes {
-			auxRuntimes[k] = v
-		}
-		s.auxiliaryRuntimesMu.RUnlock()
-
-		for rtName, aux := range auxRuntimes {
+		for _, aux := range s.sortedAuxiliaryRuntimes() {
 			auxAgents, auxErr := aux.Manager.List(ctx, filter)
 			if auxErr != nil {
 				listUnavailable = true
@@ -1312,9 +1728,13 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 			auxAgents = agentsForProject(auxAgents, projectID)
 			if len(auxAgents) > 0 {
 				agents = auxAgents
-				runtimeName = rtName
+				// runtimeName must stay a canonical runtime type (e.g.
+				// "kubernetes"), not the aux map key: that key is a
+				// per-instance identity (see auxiliaryRuntimeIdentity) so
+				// distinct same-type runtimes can be tracked separately.
+				runtimeName = aux.Runtime.Name()
 				matchedRuntime = aux.Runtime
-				slog.Debug("Agent found via auxiliary runtime", "slug", slug, "runtime", rtName)
+				slog.Debug("Agent found via auxiliary runtime", "slug", slug, "runtime", aux.identity)
 				break
 			}
 		}
@@ -1332,14 +1752,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 		}
 		agents = agentsWithoutProjectLabel(agents)
 		if len(agents) == 0 {
-			s.auxiliaryRuntimesMu.RLock()
-			auxRuntimes := make(map[string]auxiliaryRuntime, len(s.auxiliaryRuntimes))
-			for k, v := range s.auxiliaryRuntimes {
-				auxRuntimes[k] = v
-			}
-			s.auxiliaryRuntimesMu.RUnlock()
-
-			for rtName, aux := range auxRuntimes {
+			for _, aux := range s.sortedAuxiliaryRuntimes() {
 				auxAgents, auxErr := aux.Manager.List(ctx, fallbackFilter)
 				if auxErr != nil {
 					listUnavailable = true
@@ -1348,9 +1761,11 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 				auxAgents = agentsWithoutProjectLabel(auxAgents)
 				if len(auxAgents) > 0 {
 					agents = auxAgents
-					runtimeName = rtName
+					// See the identity note above: use the runtime's own
+					// type, not the per-instance aux map key.
+					runtimeName = aux.Runtime.Name()
 					matchedRuntime = aux.Runtime
-					slog.Debug("Agent found via auxiliary runtime (fallback)", "slug", slug, "runtime", rtName)
+					slog.Debug("Agent found via auxiliary runtime (fallback)", "slug", slug, "runtime", aux.identity)
 					break
 				}
 			}
@@ -1389,6 +1804,14 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 		execUser = resolvedRuntime.ExecUser()
 	}
 
+	// resolvedRuntime (computed above) is also the live instance that
+	// actually produced this match: matchedRuntime is set on every
+	// auxiliary-runtime match path above (including the no-project-label
+	// fallback stage), and stays nil only when the match came from the
+	// primary manager, in which case it's s.runtime. Callers use this to
+	// ask capability questions (e.g. scionrt.HasAttachSupport) about the
+	// runtime that actually owns the agent, not assume it is the broker's
+	// default.
 	result := &AgentLookupResult{
 		ContainerID: containerID,
 		RuntimeName: runtimeName,
@@ -1403,7 +1826,8 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 		// need to know the container's actual state right now — like
 		// classifyAttachEnd's stopped check — need the runtime's own
 		// unmerged phase instead.
-		Phase: rawRuntimePhase(ctx, resolvedRuntime, slug, containerID),
+		Phase:   rawRuntimePhase(ctx, resolvedRuntime, slug, containerID),
+		Runtime: resolvedRuntime,
 	}
 
 	// Include K8s metadata if available
@@ -1743,6 +2167,48 @@ func (s *Server) resolveHubConnection(r *http.Request) *HubConnection {
 		}
 	}
 	return nil
+}
+
+// resolveHubNameForLaunch picks the hub connection name a launch's reports
+// should target, following design t1-async-create-v11.md §3.8.5's routing
+// order, stopping at the first that resolves to a connection with a
+// HubClient: (1) the X-Scion-Hub-Connection header (set by the control
+// channel, controlchannel.go); (2) the hub whose key authenticated the
+// request (brokerauth.go's authenticatingHubConnFromContext); (3) the only
+// connection. Returns "" when none of these resolve (e.g. more than one
+// connection and neither 1 nor 2 identified one) — the sender then fans out
+// to every connection with a HubClient (routing rule 4), exactly as
+// reportMessageFailure does.
+func (s *Server) resolveHubNameForLaunch(r *http.Request) string {
+	s.hubMu.RLock()
+	defer s.hubMu.RUnlock()
+
+	if connName := r.Header.Get("X-Scion-Hub-Connection"); connName != "" {
+		if conn, ok := s.hubConnections[connName]; ok && conn.HubClient != nil {
+			return connName
+		}
+	}
+	if connName := authenticatingHubConnFromContext(r.Context()); connName != "" {
+		if conn, ok := s.hubConnections[connName]; ok && conn.HubClient != nil {
+			return connName
+		}
+	}
+	var only string
+	count := 0
+	for name, conn := range s.hubConnections {
+		if conn.HubClient == nil {
+			continue
+		}
+		only = name
+		count++
+		if count > 1 {
+			return ""
+		}
+	}
+	if count == 1 {
+		return only
+	}
+	return ""
 }
 
 // resolveHubEndpointFromRequest returns the hub endpoint for the hub connection

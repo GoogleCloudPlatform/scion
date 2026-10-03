@@ -881,6 +881,98 @@ func isConversationParticipant(ctx context.Context, st store.Store, conversation
 	return false, nil
 }
 
+// canReadGroupConversation is the non-writing read-access decision for a
+// non-direct (group) conversation: the projectless legacy fallback
+// (participant rows) or, for a project-scoped conversation, the strict
+// cross-project agent rule plus project.read. It returns the same decision
+// authorizeGroupConversationAccess enforces for a RoutePolicy handler, minus
+// the HTTP response and denial logging, so a caller like canUserReadMessage
+// can ask "may this identity read this conversation" without writing to an
+// http.ResponseWriter. A non-nil error means the lookup itself failed (for
+// example a store error), distinct from a plain "no" decision.
+func (s *Server) canReadGroupConversation(ctx context.Context, identity Identity, conv *store.Conversation) (bool, error) {
+	if identity == nil {
+		return false, nil
+	}
+
+	if conv.ProjectID == nil || *conv.ProjectID == "" {
+		return isConversationParticipant(ctx, s.store, conv.ID, identity.Type(), identity.ID())
+	}
+
+	if agentIdent, ok := identity.(AgentIdentity); ok {
+		if agentIdent.ProjectID() != *conv.ProjectID {
+			return false, nil
+		}
+	}
+
+	project, err := s.store.GetProject(ctx, *conv.ProjectID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	decision := s.authzService.CheckAccess(ctx, identity, projectResource(project), ActionRead)
+	return decision.Allowed, nil
+}
+
+// canUserReadMessage reports whether user may read msg: its conversation must
+// be visible to user (DM participant, or group project.read via
+// canReadGroupConversation), and the message must not be soft-deleted on the
+// web-chat channel. Assembled from the same checks handleGetConversationMessage
+// applies given a conversation id. The gs:// link endpoint is the only caller
+// today; its viewer is always a user identity by the time this runs.
+func (s *Server) canUserReadMessage(ctx context.Context, user Identity, msg *store.Message) bool {
+	if msg.ConversationID == "" {
+		return false
+	}
+
+	conv, err := s.store.GetConversation(ctx, msg.ConversationID)
+	if err != nil {
+		// A missing conversation (store.ErrNotFound) is an ordinary deny, not
+		// a fault — only log the genuine-fault case, so a real outage is
+		// diagnosable instead of only ever showing up as
+		// "message_not_readable" in the audit trail, without making every
+		// stale/bad conversation id noisy.
+		if !errors.Is(err, store.ErrNotFound) {
+			slog.WarnContext(ctx, "canUserReadMessage: GetConversation failed", "message_id", msg.ID, "error", err)
+		}
+		return false
+	}
+
+	if conv.Kind == "direct" {
+		if !authorizeDMRead(conv, user.Type(), user.ID()) {
+			return false
+		}
+	} else {
+		allowed, err := s.canReadGroupConversation(ctx, user, conv)
+		if err != nil {
+			slog.WarnContext(ctx, "canUserReadMessage: canReadGroupConversation failed", "message_id", msg.ID, "error", err)
+			return false
+		}
+		if !allowed {
+			return false
+		}
+	}
+
+	if s.webChatStore != nil {
+		ext, err := s.webChatStore.GetMessageExt(ctx, msg.ID)
+		// A missing row already returns (nil, nil), so an error here is a
+		// genuine store fault, not "not soft-deleted" — fail closed rather
+		// than let a lookup failure silently grant a read.
+		if err != nil {
+			slog.WarnContext(ctx, "canUserReadMessage: GetMessageExt failed", "message_id", msg.ID, "error", err)
+			return false
+		}
+		if ext != nil && ext.DeletedAt != nil {
+			return false
+		}
+	}
+
+	return true
+}
+
 // authorizeGroupConversationAccess is the read gate for group conversations
 // on the conversation API (design doc §3.2, F2a, Q2 = b decided with ptone):
 // project membership is the authority, not the participant table — the
@@ -900,12 +992,12 @@ func (s *Server) authorizeGroupConversationAccess(w http.ResponseWriter, r *http
 			Forbidden(w)
 			return false
 		}
-		isParticipant, err := isConversationParticipant(ctx, s.store, conv.ID, identity.Type(), identity.ID())
+		allowed, err := s.canReadGroupConversation(ctx, identity, conv)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return false
 		}
-		if !isParticipant {
+		if !allowed {
 			Forbidden(w)
 			return false
 		}

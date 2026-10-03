@@ -114,6 +114,7 @@ type CompositeStore struct {
 	*AccessConstraintStore
 	*ExternalIdentityStore
 	*AgentReincarnationStore
+	*UserTerminalWorkspaceStore
 
 	client *ent.Client
 	inTx   bool // true when this CompositeStore wraps a transaction
@@ -124,6 +125,16 @@ type CompositeStore struct {
 	// rows, and without a package-level variable that every store instance
 	// (and every test running concurrently) would otherwise share.
 	uatCeilingBackfillPageSize int
+
+	// uatBoundaryValidatePageSize overrides ValidateUserAccessTokenBoundaries's
+	// page size when non-zero; see defaultUATBoundaryValidatePageSize. It is
+	// per instance for the same reason as uatCeilingBackfillPageSize.
+	uatBoundaryValidatePageSize int
+
+	// uatBoundaryLogger receives ValidateUserAccessTokenBoundaries's report
+	// of invalid rows. Nil means slog.Default(). Tests set it per instance
+	// to capture the report without replacing the process-wide logger.
+	uatBoundaryLogger *slog.Logger
 }
 
 // Compile-time assertion that CompositeStore satisfies the full store.Store
@@ -146,6 +157,7 @@ func (c *CompositeStore) WithTx(ctx context.Context, fn func(tx store.Store) err
 	txClient := tx.Client()
 	txStore := NewCompositeStore(txClient)
 	txStore.inTx = true
+	txStore.AccessConstraintStore.inTx = true
 
 	defer func() {
 		// Safety net: if Commit was not called (i.e. fn panicked or returned
@@ -169,40 +181,41 @@ func (c *CompositeStore) WithTx(ctx context.Context, fn func(tx store.Store) err
 // agent -> project) resolve natively without any shadow synchronization.
 func NewCompositeStore(client *ent.Client) *CompositeStore {
 	return &CompositeStore{
-		AgentStore:               NewAgentStore(client),
-		ProjectStore:             NewProjectStore(client),
-		UserStore:                NewUserStore(client),
-		SecretStore:              NewSecretStore(client),
-		TemplateStore:            NewTemplateStore(client),
-		NotificationStore:        NewNotificationStore(client),
-		ScheduleStore:            NewScheduleStore(client),
-		MaintenanceStore:         NewMaintenanceStore(client),
-		MessageStore:             NewMessageStore(client),
-		ExternalStore:            NewExternalStore(client),
-		BrokerSecretStore:        NewBrokerSecretStore(client),
-		AllowListStore:           NewAllowListStore(client),
-		GroupStore:               NewGroupStore(client),
-		BrokerDispatchStore:      NewBrokerDispatchStore(client),
-		LifecycleHookStore:       NewLifecycleHookStore(client),
-		SkillStore:               NewSkillStore(client),
-		SkillRegistryStore:       NewSkillRegistryStore(client),
-		HubSettingStore:          NewHubSettingStore(client),
-		BrokerSettingStore:       NewBrokerSettingStore(client),
-		SkillInjectionStore:      NewSkillInjectionStore(client),
-		ProjectPreStartHookStore: NewProjectPreStartHookStore(client),
-		AgentSessionMetricsStore: NewAgentSessionMetricsStore(client),
-		ConversationStore:        NewConversationStore(client),
-		RoleStore:                NewRoleStore(client),
-		DelegationEdgeStore:      NewDelegationEdgeStore(client),
-		AgentCredentialStore:     NewAgentCredentialStore(client),
-		AgentIdentityKeyStore:    NewAgentIdentityKeyStore(client),
-		DecisionAuditStore:       NewDecisionAuditStore(client),
-		MutationAuditStore:       NewMutationAuditStore(client),
-		QuotaStore:               NewQuotaStore(client),
-		AccessConstraintStore:    NewAccessConstraintStore(client),
-		ExternalIdentityStore:    NewExternalIdentityStore(client),
-		AgentReincarnationStore:  NewAgentReincarnationStore(client),
-		client:                   client,
+		AgentStore:                 NewAgentStore(client),
+		ProjectStore:               NewProjectStore(client),
+		UserStore:                  NewUserStore(client),
+		SecretStore:                NewSecretStore(client),
+		TemplateStore:              NewTemplateStore(client),
+		NotificationStore:          NewNotificationStore(client),
+		ScheduleStore:              NewScheduleStore(client),
+		MaintenanceStore:           NewMaintenanceStore(client),
+		MessageStore:               NewMessageStore(client),
+		ExternalStore:              NewExternalStore(client),
+		BrokerSecretStore:          NewBrokerSecretStore(client),
+		AllowListStore:             NewAllowListStore(client),
+		GroupStore:                 NewGroupStore(client),
+		BrokerDispatchStore:        NewBrokerDispatchStore(client),
+		LifecycleHookStore:         NewLifecycleHookStore(client),
+		SkillStore:                 NewSkillStore(client),
+		SkillRegistryStore:         NewSkillRegistryStore(client),
+		HubSettingStore:            NewHubSettingStore(client),
+		BrokerSettingStore:         NewBrokerSettingStore(client),
+		SkillInjectionStore:        NewSkillInjectionStore(client),
+		ProjectPreStartHookStore:   NewProjectPreStartHookStore(client),
+		AgentSessionMetricsStore:   NewAgentSessionMetricsStore(client),
+		ConversationStore:          NewConversationStore(client),
+		RoleStore:                  NewRoleStore(client),
+		DelegationEdgeStore:        NewDelegationEdgeStore(client),
+		AgentCredentialStore:       NewAgentCredentialStore(client),
+		AgentIdentityKeyStore:      NewAgentIdentityKeyStore(client),
+		DecisionAuditStore:         NewDecisionAuditStore(client),
+		MutationAuditStore:         NewMutationAuditStore(client),
+		QuotaStore:                 NewQuotaStore(client),
+		AccessConstraintStore:      NewAccessConstraintStore(client),
+		ExternalIdentityStore:      NewExternalIdentityStore(client),
+		AgentReincarnationStore:    NewAgentReincarnationStore(client),
+		UserTerminalWorkspaceStore: NewUserTerminalWorkspaceStore(client),
+		client:                     client,
 	}
 }
 
@@ -509,6 +522,9 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	}
 	if err := c.BackfillUATCeilings(ctx); err != nil {
 		return fmt.Errorf("user access token ceiling backfill: %w", err)
+	}
+	if err := c.ValidateUserAccessTokenBoundaries(ctx); err != nil {
+		return fmt.Errorf("user access token boundary validation: %w", err)
 	}
 
 	// Migrate AllowListEntry records to User(status=invited) records.

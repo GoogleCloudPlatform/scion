@@ -50,9 +50,9 @@ export const PROJECT_OWNER_ROLE_NAMES = ['project-owner', 'owner'];
 export const PROJECT_ADMIN_ROLE_NAMES = ['project-admin', 'admin'];
 
 /**
- * Built-in project membership role names. The project members editor should
- * only list these roles; custom project-scoped roles are managed via the
- * admin role-bindings page.
+ * Built-in project membership role names. A principal holds at most one of
+ * these per project; the project members editor offers them as a radio
+ * group and lists every other project-scoped role as a custom role.
  *
  * SYNC: This list must match BuiltInProjectMembershipRoles in
  * pkg/store/models.go. If a role is added or removed here, update the Go
@@ -110,30 +110,6 @@ export function getLifecycleStatus(binding: {
   }
 
   return 'active';
-}
-
-// ---------------------------------------------------------------------------
-// Formatting helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Format a date string to a short human-readable form.
- * Example: "Aug 30, 2026, 5:42 PM"
- */
-export function formatDateTime(dateString: string): string {
-  try {
-    const date = new Date(dateString);
-    if (isNaN(date.getTime())) return dateString;
-    return date.toLocaleString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit',
-    });
-  } catch {
-    return dateString;
-  }
 }
 
 // ---------------------------------------------------------------------------

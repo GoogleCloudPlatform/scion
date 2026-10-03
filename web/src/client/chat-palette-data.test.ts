@@ -34,6 +34,7 @@ vi.mock('./api.js', async (importOriginal) => {
 });
 
 import { apiFetch } from './api.js';
+import { setPreferredTimeZone } from '../utils/time.js';
 import {
   fetchAllPaletteAgents,
   fetchPaletteDms,
@@ -45,6 +46,7 @@ import {
   fetchPaletteSpaces,
   fetchPaletteThreadsForSpace,
   buildThreadCandidates,
+  buildDocumentCandidates,
   PaletteLoadError,
   ChatPaletteDataController,
   type RawPaletteAgent,
@@ -53,6 +55,7 @@ import {
   type RawPaletteSpace,
   type RawPaletteThread,
 } from './chat-palette-data.js';
+import type { RecentFile } from './chat-recent-files.js';
 
 const apiFetchMock = vi.mocked(apiFetch);
 
@@ -62,6 +65,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 
 afterEach(() => {
   apiFetchMock.mockReset();
+  vi.useRealTimers();
 });
 
 describe('fetchAllPaletteAgents: full pagination', () => {
@@ -760,6 +764,272 @@ describe('ChatPaletteDataController: cancellation and stale-load guarding', () =
       .mockResolvedValueOnce(jsonResponse({}, 500));
     const controller = new ChatPaletteDataController();
     await expect(controller.loadAgentsGroup()).rejects.toThrow(PaletteLoadError);
+  });
+});
+
+describe('ChatPaletteDataController: Agents group progressive onProgress', () => {
+  it('publishes each page as it arrives, ahead of the final DM-joined result', async () => {
+    apiFetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          agents: [{ id: 'a0', name: 'First', _capabilities: { actions: ['attach'] } }],
+          nextCursor: 'c1',
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          agents: [{ id: 'a1', name: 'Second', _capabilities: { actions: ['attach'] } }],
+        })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          dms: [
+            {
+              conversationKey: 'k',
+              peerId: 'a1',
+              peerKind: 'agent',
+              lastActivityAt: '2026-01-01T00:00:00Z',
+            },
+          ],
+        })
+      );
+
+    const progressCalls: Array<ReadonlyArray<{ label: string; activityMs: number }>> = [];
+    const controller = new ChatPaletteDataController();
+    const candidates = await controller.loadAgentsGroup((partial) => {
+      progressCalls.push(partial.map((c) => ({ label: c.label, activityMs: c.activityMs })));
+    });
+
+    // Two progress calls, one per page, each cumulative and with unknown
+    // recency (no DMs fetched yet at that point).
+    expect(progressCalls).toEqual([
+      [{ label: 'First', activityMs: 0 }],
+      [
+        { label: 'First', activityMs: 0 },
+        { label: 'Second', activityMs: 0 },
+      ],
+    ]);
+
+    // The final resolved value is the real, DM-joined result — Second's
+    // recency is no longer 0 once the DM list is known.
+    expect(candidates).toHaveLength(2);
+    const second = candidates.find((c) => c.label === 'Second');
+    expect(second?.activityMs).toBeGreaterThan(0);
+  });
+
+  it('a superseded load never publishes progress through onProgress after the newer load starts', async () => {
+    let resolveSecondAgentsPage!: (v: Response) => void;
+    apiFetchMock
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            resolveSecondAgentsPage = resolve;
+          })
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          agents: [{ id: 'a1', name: 'Second', _capabilities: { actions: ['attach'] } }],
+        })
+      )
+      .mockResolvedValueOnce(jsonResponse({ dms: [] }));
+
+    const controller = new ChatPaletteDataController();
+    const staleProgress: unknown[] = [];
+    const firstLoad = controller.loadAgentsGroup((partial) => staleProgress.push(partial));
+    const secondLoad = controller.loadAgentsGroup();
+
+    // The stale first load's own pending page now resolves — its onProgress
+    // must not fire, since a newer load has already started.
+    resolveSecondAgentsPage(
+      jsonResponse({
+        agents: [{ id: 'a0', name: 'First', _capabilities: { actions: ['attach'] } }],
+      })
+    );
+
+    await expect(firstLoad).rejects.toMatchObject({ name: 'AbortError' });
+    await secondLoad;
+    expect(staleProgress).toEqual([]);
+  });
+});
+
+describe('ChatPaletteDataController: Agents group idle timeout', () => {
+  it('a request that never settles is aborted after the idle bound and surfaces a retryable PaletteLoadError, not a silent AbortError', async () => {
+    vi.useFakeTimers();
+    apiFetchMock.mockImplementationOnce((_url, options) => {
+      return new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => {
+          reject(new DOMException('aborted', 'AbortError'));
+        });
+      });
+    });
+
+    const controller = new ChatPaletteDataController();
+    const load = controller.loadAgentsGroup();
+    // Attach the rejection expectation before advancing timers so the
+    // rejection (which lands mid-advance) is never briefly unhandled.
+    const expectation = expect(load).rejects.toBeInstanceOf(PaletteLoadError);
+    // Just past the 90s idle bound.
+    await vi.advanceTimersByTimeAsync(90_000 + 1);
+
+    await expectation;
+  });
+
+  it('does not trip 1ms before the idle bound, but does 1ms after — pinning the exact bound, not just its rough size', async () => {
+    // Distinguishes the real 90s bound from a mutated one (larger or
+    // smaller): either direction would move one of these two checks to the
+    // wrong side of its assertion.
+    vi.useFakeTimers();
+    let aborted = false;
+    apiFetchMock.mockImplementationOnce((_url, options) => {
+      return new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => {
+          aborted = true;
+          reject(new DOMException('aborted', 'AbortError'));
+        });
+      });
+    });
+
+    const controller = new ChatPaletteDataController();
+    const load = controller.loadAgentsGroup();
+    load.catch(() => {}); // settles later; avoids a transient unhandled-rejection warning below
+
+    await vi.advanceTimersByTimeAsync(89_999);
+    expect(aborted).toBe(false);
+
+    const expectation = expect(load).rejects.toBeInstanceOf(PaletteLoadError);
+    await vi.advanceTimersByTimeAsync(2);
+    expect(aborted).toBe(true);
+    await expectation;
+  });
+
+  it('a load whose total duration exceeds the idle bound still succeeds, as long as each step arrives before its own idle window elapses', async () => {
+    // Proves this is a *stall* timeout reset per step, not a cap on total
+    // duration: four steps at 30s apart (120s total, well past the 90s
+    // bound) all complete, each comfortably inside its own 90s window. Three
+    // agents pages (not two) makes the cumulative page time before the DM
+    // fetch even starts reach 90s on its own, so this only holds if every
+    // page's own reset counts toward the bound — not just the initial reset
+    // and the one covering the DM fetch — with a full 30s of margin so the
+    // boundary isn't a coin flip. Each mocked step also rejects on its
+    // request's own abort signal, like a real fetch would — without that, an
+    // idle-timeout abort would have no observable effect here, and this test
+    // would pass regardless of whether the production code resets anything
+    // at all.
+    vi.useFakeTimers();
+    let resolvePage1!: (v: Response) => void;
+    let resolvePage2!: (v: Response) => void;
+    let resolvePage3!: (v: Response) => void;
+    let resolveDms!: (v: Response) => void;
+    const abortable = (resolve: (fn: (v: Response) => void) => void) => {
+      return (_url: string, options?: { signal?: AbortSignal }) =>
+        new Promise<Response>((res, reject) => {
+          resolve(res);
+          options?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('aborted', 'AbortError'))
+          );
+        });
+    };
+    apiFetchMock
+      .mockImplementationOnce(abortable((r) => (resolvePage1 = r)))
+      .mockImplementationOnce(abortable((r) => (resolvePage2 = r)))
+      .mockImplementationOnce(abortable((r) => (resolvePage3 = r)))
+      .mockImplementationOnce(abortable((r) => (resolveDms = r)));
+
+    const controller = new ChatPaletteDataController();
+    const load = controller.loadAgentsGroup();
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    resolvePage1(
+      jsonResponse({
+        agents: [{ id: 'a0', name: 'Coder', _capabilities: { actions: ['attach'] } }],
+        nextCursor: 'c1',
+      })
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+    resolvePage2(
+      jsonResponse({
+        agents: [{ id: 'a1', name: 'Second', _capabilities: { actions: ['attach'] } }],
+        nextCursor: 'c2',
+      })
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+    resolvePage3(jsonResponse({ agents: [] }));
+    await vi.advanceTimersByTimeAsync(30_000);
+    resolveDms(jsonResponse({ dms: [] }));
+
+    const candidates = await load;
+    expect(candidates).toHaveLength(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('clears its idle timer once a load settles successfully, leaving no pending timers behind', async () => {
+    vi.useFakeTimers();
+    apiFetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          agents: [{ id: 'a0', name: 'Coder', _capabilities: { actions: ['attach'] } }],
+        })
+      )
+      .mockResolvedValueOnce(jsonResponse({ dms: [] }));
+
+    const controller = new ChatPaletteDataController();
+    const candidates = await controller.loadAgentsGroup();
+    expect(candidates).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('clears its idle timer when the load is cancelled, leaving no pending timers behind', async () => {
+    vi.useFakeTimers();
+    apiFetchMock.mockImplementationOnce((_url, options) => {
+      return new Promise((_resolve, reject) => {
+        options?.signal?.addEventListener('abort', () => {
+          reject(new DOMException('aborted', 'AbortError'));
+        });
+      });
+    });
+
+    const controller = new ChatPaletteDataController();
+    const load = controller.loadAgentsGroup();
+    const expectation = expect(load).rejects.toMatchObject({ name: 'AbortError' });
+    controller.cancel();
+    await expectation;
+
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('a DM fetch that hangs after every agents page lands is still aborted by the idle bound, not left running past it', async () => {
+    // The last agents page's own reset is the only reset covering the DM
+    // fetch (see AGENTS_IDLE_TIMEOUT_MS's doc comment) — this pins that the
+    // DM step is actually bounded by it, not left to run unbounded once
+    // pagination itself is done.
+    vi.useFakeTimers();
+    let dmAborted = false;
+    apiFetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          agents: [{ id: 'a0', name: 'Coder', _capabilities: { actions: ['attach'] } }],
+        })
+      )
+      .mockImplementationOnce((_url, options) => {
+        return new Promise((_resolve, reject) => {
+          options?.signal?.addEventListener('abort', () => {
+            dmAborted = true;
+            reject(new DOMException('aborted', 'AbortError'));
+          });
+        });
+      });
+
+    const controller = new ChatPaletteDataController();
+    const load = controller.loadAgentsGroup();
+    load.catch(() => {}); // settles later; avoids a transient unhandled-rejection warning below
+
+    await vi.advanceTimersByTimeAsync(89_999);
+    expect(dmAborted).toBe(false);
+
+    const expectation = expect(load).rejects.toBeInstanceOf(PaletteLoadError);
+    await vi.advanceTimersByTimeAsync(2);
+    expect(dmAborted).toBe(true);
+    await expectation;
   });
 });
 
@@ -1853,5 +2123,177 @@ describe('ChatPaletteDataController: Threads group', () => {
       expect(finalResult.incomplete).toBe(false);
       expect(finalResult.candidates.map((c) => c.target.threadId)).toEqual(['t3']);
     });
+  });
+});
+
+describe('buildDocumentCandidates', () => {
+  function pathFile(overrides: Partial<RecentFile> = {}): RecentFile {
+    return {
+      key: JSON.stringify(['path', 'p1', 'workspace', '', 'notes.txt']),
+      name: 'notes.txt',
+      source: {
+        conversationKey: 'topic-1',
+        messageId: 'm1',
+        sentAt: '2026-09-28T12:00:00Z',
+        projectId: 'p1',
+        projectName: 'Alpha',
+      },
+      target: {
+        kind: 'path',
+        projectId: 'p1',
+        containerPath: '/workspace/notes.txt',
+        location: { kind: 'workspace', filePath: 'notes.txt' },
+      },
+      ...overrides,
+    } as RecentFile;
+  }
+
+  function attachmentFile(overrides: Partial<RecentFile> = {}): RecentFile {
+    return {
+      key: JSON.stringify(['attachment', 'att-1']),
+      name: 'photo.png',
+      source: {
+        conversationKey: 'dm:agent:a1:user:self',
+        messageId: 'm2',
+        sentAt: '2026-09-28T12:00:00Z',
+        projectId: 'p1',
+        projectName: 'Alpha',
+      },
+      target: { kind: 'attachment', id: 'att-1', mime: 'image/png', size: 1234 },
+      ...overrides,
+    } as RecentFile;
+  }
+
+  it('maps a path file to a Documents-group candidate with the container path and project in searchFields', () => {
+    const [candidate] = buildDocumentCandidates([pathFile()]);
+    expect(candidate.group).toBe('documents');
+    expect(candidate.label).toBe('notes.txt');
+    expect(candidate.searchFields).toEqual(['notes.txt', '/workspace/notes.txt', 'Alpha']);
+    expect(candidate.secondaryLabel).toBe('Alpha — /workspace/notes.txt');
+    expect(candidate.activityMs).toBe(Date.parse('2026-09-28T12:00:00Z'));
+    expect(candidate.target).toEqual({ kind: 'document', file: pathFile() });
+  });
+
+  it('maps an attachment file with a project-and-metadata-labeled secondary line and no path in searchFields', () => {
+    const [candidate] = buildDocumentCandidates([attachmentFile()]);
+    expect(candidate.group).toBe('documents');
+    expect(candidate.label).toBe('photo.png');
+    expect(candidate.searchFields).toEqual(['photo.png', 'Alpha']);
+    expect(candidate.secondaryLabel).toBe('Alpha — Attachment · 1.2 KB · Sep 28, 2026');
+  });
+
+  it('two attachments sharing a name and project are distinguishable by size and date', () => {
+    // Midday UTC, not midnight: the formatted date is in the display zone
+    // (Auto falls back to the browser zone), and a midnight-UTC fixture
+    // rolls back to the previous day in every zone west of UTC.
+    const older = attachmentFile({
+      key: 'att-older',
+      target: { kind: 'attachment', id: 'att-older', mime: 'image/png', size: 500 },
+      source: {
+        conversationKey: 'dm:a',
+        messageId: 'm-older',
+        sentAt: '2026-01-01T12:00:00Z',
+        projectId: 'p1',
+        projectName: 'Alpha',
+      },
+    });
+    const newer = attachmentFile({
+      key: 'att-newer',
+      target: { kind: 'attachment', id: 'att-newer', mime: 'image/png', size: 50_000 },
+      source: {
+        conversationKey: 'dm:b',
+        messageId: 'm-newer',
+        sentAt: '2026-06-01T12:00:00Z',
+        projectId: 'p1',
+        projectName: 'Alpha',
+      },
+    });
+    const [a, b] = buildDocumentCandidates([older, newer]);
+    expect(a.label).toBe(b.label); // both "photo.png" — the same-name case this exists for
+    expect(a.secondaryLabel).not.toBe(b.secondaryLabel);
+    expect(a.secondaryLabel).toBe('Alpha — Attachment · 500 B · Jan 1, 2026');
+    expect(b.secondaryLabel).toBe('Alpha — Attachment · 48.8 KB · Jun 1, 2026');
+  });
+
+  it('dates an attachment in the display zone, not the browser zone', () => {
+    // vitest pins the browser zone to UTC; 15:00Z is the next day in Tokyo.
+    setPreferredTimeZone('Asia/Tokyo');
+    try {
+      const file = attachmentFile({
+        source: {
+          conversationKey: 'dm:x',
+          messageId: 'm2',
+          sentAt: '2026-09-28T15:00:00Z',
+          projectId: 'p1',
+          projectName: 'Alpha',
+        },
+      });
+      const [candidate] = buildDocumentCandidates([file]);
+      expect(candidate.secondaryLabel).toBe('Alpha — Attachment · 1.2 KB · Sep 29, 2026');
+    } finally {
+      setPreferredTimeZone('');
+    }
+  });
+
+  it('omits the date from an attachment secondary label when sentAt is a Go zero timestamp', () => {
+    const file = attachmentFile({
+      source: {
+        conversationKey: 'dm:x',
+        messageId: 'm2',
+        sentAt: '0001-01-01T00:00:00Z',
+        projectId: 'p1',
+        projectName: 'Alpha',
+      },
+    });
+    const [candidate] = buildDocumentCandidates([file]);
+    expect(candidate.secondaryLabel).toBe('Alpha — Attachment · 1.2 KB');
+  });
+
+  it('omits the project name from the path secondary label and searchFields when absent', () => {
+    const file = pathFile({
+      source: { conversationKey: 'topic-1', messageId: 'm1', sentAt: '2026-09-28T12:00:00Z' },
+    });
+    const [candidate] = buildDocumentCandidates([file]);
+    expect(candidate.secondaryLabel).toBe('/workspace/notes.txt');
+    expect(candidate.searchFields).toEqual(['notes.txt', '/workspace/notes.txt']);
+  });
+
+  it('falls back to plain "Attachment · <size> · <date>" when an attachment has no captured project name', () => {
+    const file = attachmentFile({
+      source: { conversationKey: 'dm:x', messageId: 'm2', sentAt: '2026-09-28T12:00:00Z' },
+    });
+    const [candidate] = buildDocumentCandidates([file]);
+    expect(candidate.secondaryLabel).toBe('Attachment · 1.2 KB · Sep 28, 2026');
+    expect(candidate.searchFields).toEqual(['photo.png']);
+  });
+
+  it('produces a stable JSON-tuple candidate ID from the file key', () => {
+    const file = pathFile();
+    const [candidate] = buildDocumentCandidates([file]);
+    expect(candidate.id).toBe(JSON.stringify(['document', file.key]));
+  });
+
+  it('treats a Go-zero sentAt as activityMs 0', () => {
+    const file = pathFile({
+      source: {
+        conversationKey: 'topic-1',
+        messageId: 'm1',
+        sentAt: '0001-01-01T00:00:00Z',
+        projectId: 'p1',
+      },
+    });
+    const [candidate] = buildDocumentCandidates([file]);
+    expect(candidate.activityMs).toBe(0);
+  });
+
+  it('maps every record in the snapshot, preserving order', () => {
+    const a = pathFile({ key: 'a', name: 'a.txt' });
+    const b = attachmentFile({ key: 'b', name: 'b.png' });
+    const candidates = buildDocumentCandidates([a, b]);
+    expect(candidates.map((c) => c.label)).toEqual(['a.txt', 'b.png']);
+  });
+
+  it('returns an empty list for an empty snapshot', () => {
+    expect(buildDocumentCandidates([])).toEqual([]);
   });
 });

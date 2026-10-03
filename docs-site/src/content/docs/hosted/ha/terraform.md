@@ -25,6 +25,13 @@ once per project, and `hub`, applied once per hub on top of it. Hubs sharing
 this infra form **one trust domain, not a hard multi-tenancy boundary** — see
 the module README for exactly what is and isn't isolated between them.
 
+The modules are safe to apply in a project that already runs other Scion
+infrastructure. Every resource name derives from a prefix (`name_prefix` for
+the shared layer, `hub_name` for a hub), and nothing existing is imported or
+adopted: a name collision fails the apply. All IAM grants are additive
+(`google_*_iam_member` only), so applying never replaces a project's existing
+IAM bindings.
+
 ## When to choose it
 
 Choose this over the manual GCP setup guide when you want:
@@ -58,6 +65,17 @@ teardown — lives in the repository, not duplicated here:
 - [`docs/deploy/agent-runbook-terraform-ha.md`](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/agent-runbook-terraform-ha.md) —
   a step-by-step runbook for an AI agent to run the deployment end to end,
   including the plan-review gates required before every apply or destroy.
+
+:::caution[Upgrading an existing hub]
+Current `terraform-ha` modules no longer create the legacy hub-scope Secret
+Manager grant or pre-create the hub's OIDC signing key: a fresh hub generates
+its own key on first boot, and an existing hub keeps its migrated key. Before
+applying this module version to an existing hub, finish the secret-name
+migration and check the expected plan delta in
+[`docs/deploy/migrate-names-cloudrun.md` §7](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/migrate-names-cloudrun.md#7-for-terraform-managed-hubs-what-can-be-removed-afterward).
+Applying it to a hub whose secrets have not been migrated deletes the only
+copy of its OIDC signing key.
+:::
 
 After a hub is up, the [hosted user guide](/scion/hosted/user/hosted-user/)
 covers connecting to it, and the rest of this Admin Guide

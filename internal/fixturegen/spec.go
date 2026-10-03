@@ -45,6 +45,7 @@ const (
 	conversationID = "99999999-9999-9999-9999-999999999999"
 	roleDefID      = "aa000000-0000-0000-0000-000000000001"
 	limitDefID     = "bb000000-0000-0000-0000-000000000001"
+	constraintID   = "ac100000-0000-0000-0000-000000000001"
 )
 
 // baseTime is a fixed timestamp so the generated fixture is byte-reproducible
@@ -153,13 +154,24 @@ func Spec() []TableFixture {
 		}},
 		{Table: "access_constraints", Rows: []row{
 			{
-				"id": "ac100000-0000-0000-0000-000000000001", "name": "fixture-max-perms",
+				"id": constraintID, "name": "fixture-max-perms",
 				"subject_kind": "principal", "subject_principal_type": "user",
 				"subject_principal_id": userID,
 				"scope_type":           "system", "scope_id": "",
 				"maximum_permissions": `["agent.read","agent.list"]`,
 				"disabled":            false,
 				"created":             baseTime, "updated": baseTime,
+			},
+		}},
+		{Table: "access_constraint_history", Rows: []row{
+			{
+				"event_id": "ae100000-0000-4000-8000-000000000001", "constraint_id": constraintID,
+				"occurred_at": baseTime, "operation": "create",
+				"actor_kind": "user", "actor_id": userID,
+				"correlation_id": "fixture-access-constraint-create",
+				"after_revision": int64(1), "classification": "tighten",
+				"impact_counts_json":  `{"agents":1,"users":1,"projects":0}`,
+				"changed_fields_json": `["maximum_permissions"]`,
 			},
 		}},
 		{Table: "access_policies", Rows: []row{
@@ -641,6 +653,19 @@ func Spec() []TableFixture {
 				"provider": "fixture-provider", "issuer": "https://issuer.fixture.example",
 				"subject": "fixture-subject-001", "user_id": userID,
 				"created_at": baseTime, "updated_at": baseTime,
+			},
+		}},
+
+		// ---- User terminal workspaces ----
+		{Table: "user_terminal_workspaces", Rows: []row{
+			{
+				"id":                 "c1d00000-0000-0000-0000-000000000001",
+				"user_id":            userID,
+				"agent_ids":          `["` + agentID + `"]`,
+				"frontmost_agent_id": agentID,
+				"schema_version":     1,
+				"revision":           1,
+				"update_time":        baseTime,
 			},
 		}},
 	}

@@ -403,7 +403,32 @@ func wrapHubError(err error) error {
 //  3. Git remote lookup via Hub API
 //
 // Returns the project ID if found, or an error if the project is not registered.
+//
+// When several projects share the same git remote, this silently picks the
+// first one (resp.Projects[0]) — a pre-existing, deliberately unchanged
+// behavior for every caller of this function except the keys command (see
+// getProjectIDForKeys below: ambiguous resolution must fail rather than
+// guess for the keys path specifically). Widening that fail-closed behavior
+// to every command here would be a much larger, separately-scoped change.
 func GetProjectID(hubCtx *HubContext) (string, error) {
+	return resolveProjectIDByGitRemote(hubCtx, false)
+}
+
+// getProjectIDForKeys is GetProjectID's keys-path variant, scoped to the
+// keys CLI path only (ptone/scion#2200 contract C§3: "ambiguous resolution
+// fails rather than guessing"). It shares every step of GetProjectID's resolution order
+// except the final git-remote-ambiguity case, where it fails closed with a
+// message naming --project instead of silently picking the first match.
+func getProjectIDForKeys(hubCtx *HubContext) (string, error) {
+	return resolveProjectIDByGitRemote(hubCtx, true)
+}
+
+// resolveProjectIDByGitRemote implements GetProjectID's resolution order.
+// failOnAmbiguousGitRemote selects between the two callers' divergent
+// behavior for exactly one case: more than one project sharing the queried
+// git remote. Every other branch (context/settings short-circuit, missing
+// remote, zero matches) is identical for both callers.
+func resolveProjectIDByGitRemote(hubCtx *HubContext, failOnAmbiguousGitRemote bool) (string, error) {
 	// First, check if ProjectID is already set in the context
 	if hubCtx.ProjectID != "" {
 		return hubCtx.ProjectID, nil
@@ -442,6 +467,10 @@ func GetProjectID(hubCtx *HubContext) (string, error) {
 
 	if len(resp.Projects) == 0 {
 		return "", fmt.Errorf("no project found for git remote: %s\n\nRun 'scion hub link' to link this project with the Hub", gitRemote)
+	}
+
+	if failOnAmbiguousGitRemote && len(resp.Projects) > 1 {
+		return "", fmt.Errorf("multiple projects match git remote %s; pass --project to disambiguate", gitRemote)
 	}
 
 	// Return the first matching project
@@ -1129,6 +1158,9 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 					if !attach {
 						return nil
 					}
+					if err := attachUnsupportedErr(pollCtx, hubCtx, agent.Runtime, agent.RuntimeBrokerID, agentProfileName(agent)); err != nil {
+						return err
+					}
 					// Fall through to attach logic below
 					agentID := agent.ID
 					if agentID == "" {
@@ -1196,6 +1228,9 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 
 	// Attach mode: wait for agent to be running, then attach via WebSocket
 	agentID := ""
+	agentRuntime := ""
+	agentBrokerID := ""
+	agentProfile := ""
 	if resp.Agent != nil {
 		agentID = resp.Agent.ID
 	}
@@ -1222,10 +1257,20 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 			}
 			agentPhase, _ := hubAgentPhaseActivity(agent.Phase, agent.Activity, agent.Status)
 			if agentPhase == string(state.PhaseRunning) {
-				// Use the agent's ID from the latest fetch
+				// agentID keeps its prior value (the create response's ID, or
+				// agentName) unless this fetch returned a non-empty one, since
+				// an empty ID here would be a regression, not new information.
 				if agent.ID != "" {
 					agentID = agent.ID
 				}
+				// agentRuntime, agentBrokerID and agentProfile always take
+				// this fetch's value, even if empty: unlike agentID there is
+				// no better fallback to protect, and "" is itself a
+				// meaningful attach-is-supported value to
+				// attachUnsupportedErr below.
+				agentRuntime = agent.Runtime
+				agentBrokerID = agent.RuntimeBrokerID
+				agentProfile = agentProfileName(agent)
 				goto ready
 			}
 			if agentPhase == string(state.PhaseError) || agentPhase == string(state.PhaseStopped) {
@@ -1239,6 +1284,10 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 	}
 
 ready:
+	if err := attachUnsupportedErr(pollCtx, hubCtx, agentRuntime, agentBrokerID, agentProfile); err != nil {
+		return err
+	}
+
 	// Resolve transport auth for IAP/Cloud Run traversal FIRST — in IAP mode
 	// there is no application-level token by design, so transport auth must be
 	// determined before deciding whether an app token is required.

@@ -981,6 +981,9 @@ func mergeKubernetesConfig(base, override *api.KubernetesConfig) *api.Kubernetes
 	if override.ServiceAccountName != "" {
 		result.ServiceAccountName = override.ServiceAccountName
 	}
+	if override.PriorityClassName != "" {
+		result.PriorityClassName = override.PriorityClassName
+	}
 	if override.Resources != nil {
 		if result.Resources == nil {
 			result.Resources = &api.K8sResources{}

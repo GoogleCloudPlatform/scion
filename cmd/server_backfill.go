@@ -85,6 +85,8 @@ func backfillConfigFromFlags() messaging.BackfillConfig {
 }
 
 func runServerBackfill(cmd *cobra.Command, _ []string) error {
+	pinProcessUTC()
+
 	ctx := cmd.Context()
 	out := cmd.OutOrStdout()
 

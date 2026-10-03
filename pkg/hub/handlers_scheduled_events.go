@@ -223,6 +223,19 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 		ValidationError(w, fmt.Sprintf("unsupported event type: %s (supported: message, dispatch_agent)", req.EventType), nil)
 		return
 	}
+	// The top-level payload "raw" tombstone (ptone/scion#2200)
+	// applies to both supported event types, not just "message" —
+	// the advanced Payload field (req.Payload, below) is accepted verbatim
+	// for "dispatch_agent" too (see the "Build payload" block), and neither
+	// MessageEventPayload nor DispatchAgentEventPayload has a Raw field to
+	// forward it to. A caller-supplied "raw" key (any spelling/case, any
+	// value including false/null, decode-time tombstoned before storage) is
+	// rejected here, before either event type's own authorization runs. A
+	// malformed or non-object payload is rejected first, with a sanitized
+	// 400; see validateAndRejectScheduledPayload for the required order.
+	if !s.validateAndRejectScheduledPayload(w, req.EventType, req.Payload) {
+		return
+	}
 	if req.EventType == "dispatch_agent" {
 		if !s.authorizeScheduledDispatchAgentAuthoring(w, r) {
 			return
@@ -236,15 +249,6 @@ func (s *Server) createScheduledEvent(w http.ResponseWriter, r *http.Request, pr
 	// are request-derived (not system-plane) and must pass the same authorization
 	// as direct sends — both at authoring and again at fire time.
 	if req.EventType == "message" {
-		// Phase 0.2 (ptone/scion#2192): scheduled message delivery does not
-		// forward StructuredMessage.Raw — MessageEventPayload has no Raw
-		// field. A caller-supplied "raw" key is rejected at decode (422),
-		// so a caller cannot believe scheduled raw delivery is supported.
-		if err := rejectRawScheduledPayload(req.Payload); err != nil {
-			writeError(w, http.StatusUnprocessableEntity, ErrCodeUnsupportedCapability, err.Error(),
-				map[string]interface{}{"reason": string(MessageDenialRawSchedulingUnsupported)})
-			return
-		}
 		if !s.authorizeScheduledMessageAuthoring(w, r, projectID, req.Payload, req.AgentID, req.AgentName) {
 			return
 		}

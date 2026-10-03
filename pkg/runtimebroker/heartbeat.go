@@ -17,6 +17,7 @@ package runtimebroker
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -26,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // heartbeatAgentKey returns a key that uniquely identifies an agent within the
@@ -75,9 +77,17 @@ type HeartbeatService struct {
 	projectFilter     func(projectID string) bool // returns true if this project belongs to this hub
 	log               *slog.Logger
 
-	mu     sync.Mutex
-	stopCh chan struct{}
-	doneCh chan struct{}
+	// defaultRuntime is the broker's own default runtime instance, set once
+	// by the caller that constructs this service (which already holds it)
+	// and kept in sync by SwapRuntime alongside SwapManager. Used only to
+	// answer the reported Capabilities.Attach via scionrt.HasAttachSupport —
+	// never constructed here.
+	defaultRuntime scionrt.Runtime
+
+	mu          sync.Mutex
+	listFailing map[string]bool // target key -> last listing failed (guarded by mu)
+	stopCh      chan struct{}
+	doneCh      chan struct{}
 }
 
 // SwapManager replaces the agent manager used by the heartbeat service.
@@ -88,6 +98,14 @@ func (s *HeartbeatService) SwapManager(m agent.Manager) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.manager = m
+}
+
+// SetDefaultRuntime records the broker's default runtime instance for the
+// Capabilities.Attach field reported on every heartbeat.
+func (s *HeartbeatService) SetDefaultRuntime(rt scionrt.Runtime) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.defaultRuntime = rt
 }
 
 // NewHeartbeatService creates a new heartbeat service.
@@ -197,33 +215,104 @@ func (s *HeartbeatService) sendHeartbeat(ctx context.Context) error {
 func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.BrokerHeartbeat {
 	status := "online"
 
+	s.mu.Lock()
+	defaultRuntime := s.defaultRuntime
+	s.mu.Unlock()
+
 	heartbeat := &hubclient.BrokerHeartbeat{
 		Status: status,
 		// Design §3.4 Amendment A2.2(b): report capabilities on every heartbeat so the hub's
 		// `scion reincarnate` gate is never stuck on a stale join-time
-		// snapshot for an already-registered broker. Mirrors handleInfo's
-		// hardcoded set (a fixed property of this broker binary, not
-		// runtime-negotiated).
+		// snapshot for an already-registered broker. Sync and Reprovision
+		// are a fixed property of this broker binary; Attach reflects the
+		// default runtime's own optional capability
+		// (scionrt.HasAttachSupport), same as handleInfo's Capabilities.Attach.
 		Capabilities: &hubclient.BrokerCapabilities{
 			WebPTY:      false,
 			Sync:        true,
-			Attach:      true,
+			Attach:      scionrt.HasAttachSupport(defaultRuntime),
 			Reprovision: true,
+			AsyncLaunch: true,
 		},
 	}
 
 	// Gather per-project agent counts. gatherProjectAgents snapshots the
 	// current manager under its own lock and handles nil, so no separate
 	// nil check is needed here.
-	if projectAgents := s.gatherProjectAgents(ctx); len(projectAgents) > 0 {
+	projectAgents, inventory := s.gatherProjectAgents(ctx)
+	if len(projectAgents) > 0 {
 		heartbeat.Projects = projectAgents
 	}
+	heartbeat.Inventory = inventory
 
 	return heartbeat
 }
 
-// gatherProjectAgents collects agent information grouped by project.
-func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) []hubclient.ProjectHeartbeat {
+// runtimeNamer is implemented by agent managers that can name the runtime
+// they list (agent.AgentManager does).
+type runtimeNamer interface {
+	RuntimeName() string
+}
+
+// runtimeTargetNamer lets a manager other than agent.AgentManager (tests)
+// supply its inventory target ID directly.
+type runtimeTargetNamer interface {
+	runtimeTargetID() string
+}
+
+// heartbeatTargetOf returns the inventory target ID and runtime name for a
+// manager, or empty strings when the manager cannot be identified. The ID is
+// the same identity the broker keys its auxiliary runtimes by
+// (auxiliaryRuntimeIdentity), so a Kubernetes target includes its cluster
+// context and namespace.
+func heartbeatTargetOf(m agent.Manager) (id, runtimeName string) {
+	if am, ok := m.(*agent.AgentManager); ok {
+		if am.Runtime == nil {
+			return "", ""
+		}
+		return auxiliaryRuntimeIdentity(am.Runtime), am.Runtime.Name()
+	}
+	if n, ok := m.(runtimeNamer); ok {
+		runtimeName = n.RuntimeName()
+	}
+	if t, ok := m.(runtimeTargetNamer); ok && t.runtimeTargetID() != "" {
+		return t.runtimeTargetID(), runtimeName
+	}
+	return runtimeName, runtimeName
+}
+
+// noteListResult records whether listing a target failed and logs the
+// failure at Warn only when the target's state changes (first failure, or
+// failure after success); repeated failures are logged at Debug, and a
+// recovery is logged once at Info.
+func (s *HeartbeatService) noteListResult(key string, err error) {
+	s.mu.Lock()
+	if s.listFailing == nil {
+		s.listFailing = make(map[string]bool)
+	}
+	wasFailing := s.listFailing[key]
+	s.listFailing[key] = err != nil
+	s.mu.Unlock()
+
+	switch {
+	case err != nil && !wasFailing:
+		s.log.Warn("Runtime target agent listing failed for heartbeat; target reported incomplete",
+			"target", key, "error", err)
+	case err != nil:
+		s.log.Debug("Runtime target agent listing still failing for heartbeat",
+			"target", key, "error", err)
+	case wasFailing:
+		s.log.Info("Runtime target agent listing recovered for heartbeat", "target", key)
+	}
+}
+
+// gatherProjectAgents collects agent information grouped by project, and
+// reports per runtime target whether that information is the target's
+// complete inventory. A target is complete only when its listing succeeded
+// and it can be identified; a failed listing (for example one forbidden by
+// the cluster) marks only that target incomplete. Each reported agent
+// carries the ID of the target whose listing reported it.
+func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) ([]hubclient.ProjectHeartbeat, *hubclient.BrokerInventory) {
 	// Snapshot the current manager under the lock so that a concurrent
 	// SwapManager call (triggered by Server.SwapRuntime) is picked up
 	// on the next heartbeat tick rather than racing with this one.
@@ -231,17 +320,45 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) []hubclient.
 	mgr := s.manager
 	s.mu.Unlock()
 
+	inventory := &hubclient.BrokerInventory{}
 	if mgr == nil {
-		return nil
+		return nil, inventory
 	}
+
+	targetIndex := make(map[string]int)
+	addTarget := func(id, runtimeName string, complete bool) {
+		if id == "" {
+			return
+		}
+		if i, ok := targetIndex[id]; ok {
+			// The same target listed twice is complete only if both
+			// listings succeeded.
+			inventory.Targets[i].Complete = inventory.Targets[i].Complete && complete
+			return
+		}
+		targetIndex[id] = len(inventory.Targets)
+		inventory.Targets = append(inventory.Targets, hubclient.InventoryTarget{ID: id, Runtime: runtimeName, Complete: complete})
+	}
+
+	// agentTargets maps heartbeatAgentKey to the target that reported it.
+	agentTargets := make(map[string]string)
 
 	// List all agents managed by this broker (default runtime).
 	// If the default manager fails (e.g. its runtime binary is missing),
-	// log a warning and continue — auxiliary managers may still work.
+	// continue — auxiliary managers may still work.
+	defaultID, defaultRuntime := heartbeatTargetOf(mgr)
+	defaultKey := defaultID
+	if defaultKey == "" {
+		defaultKey = "default"
+	}
 	agents, err := mgr.List(ctx, nil)
+	s.noteListResult(defaultKey, err)
 	if err != nil {
-		s.log.Warn("Default runtime agent listing failed for heartbeat, trying auxiliary runtimes", "error", err)
 		agents = nil
+	}
+	addTarget(defaultID, defaultRuntime, err == nil)
+	for _, ag := range agents {
+		agentTargets[heartbeatAgentKey(ag)] = defaultID
 	}
 
 	// Also include agents from auxiliary runtimes (e.g. Kubernetes).
@@ -257,8 +374,15 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) []hubclient.
 		for _, ag := range agents {
 			seen[heartbeatAgentKey(ag)] = true
 		}
-		for _, auxMgr := range s.auxiliaryManagers() {
+		for i, auxMgr := range s.auxiliaryManagers() {
+			auxID, auxRuntime := heartbeatTargetOf(auxMgr)
+			key := auxID
+			if key == "" {
+				key = fmt.Sprintf("auxiliary-%d", i)
+			}
 			auxAgents, auxErr := auxMgr.List(ctx, nil)
+			s.noteListResult(key, auxErr)
+			addTarget(auxID, auxRuntime, auxErr == nil)
 			if auxErr != nil {
 				continue
 			}
@@ -267,9 +391,17 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) []hubclient.
 				if !seen[k] {
 					seen[k] = true
 					agents = append(agents, ag)
+					agentTargets[k] = auxID
 				}
 			}
 		}
+	}
+
+	// A project filter (multi-hub mode) drops projects whose ownership is
+	// inferred from local settings, so the reported list is not a reliable
+	// complete inventory of any target for any one hub: claim nothing.
+	if s.projectFilter != nil {
+		inventory.Targets = nil
 	}
 
 	// Group agents by project
@@ -296,6 +428,7 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) []hubclient.
 			Profile:         ag.Profile,
 			ExitCode:        ag.ExitCode,
 			ExitReason:      ag.ExitReason,
+			RuntimeTarget:   agentTargets[heartbeatAgentKey(ag)],
 		}
 		if ag.Detail != nil && ag.Detail.Message != "" {
 			agentHB.Message = ag.Detail.Message
@@ -316,7 +449,7 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) []hubclient.
 		})
 	}
 
-	return projects
+	return projects, inventory
 }
 
 // ForceHeartbeat sends an immediate heartbeat, bypassing the interval.

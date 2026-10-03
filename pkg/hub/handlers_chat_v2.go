@@ -35,12 +35,9 @@
 //   - Storage uses the dual-dialect store (webchannel_store.go for SQLite,
 //     webchannel_store_postgres.go for Postgres) with new webchat_topic,
 //     webchat_read_state, webchat_user_prefs, and webchat_dm tables.
-//   - Wave-1 tables (webchat_thread, webchat_thread_prefs) remain in place
-//     but receive no new writes when the v2 flag is ON (write-stop).
-//
-// Feature flag: web.native_chat_v2 (default ON as of W9). When OFF, the
-// frontend falls back to the wave-1 UI and endpoints in handlers_chat.go.
-// The v2 API endpoints remain registered regardless of the flag state.
+//   - Wave-1 tables (webchat_thread, webchat_thread_prefs) remain in place.
+//     webchat_thread is still written by TouchThread (broker-inbound and
+//     legacy web channel paths) but no longer has a production reader.
 
 package hub
 
@@ -282,10 +279,8 @@ func (s *Server) handleChatConversationRoutes(w http.ResponseWriter, r *http.Req
 	}
 }
 
-// handleChatTopicRoutes dispatches routes under /api/v1/chat/threads/ for
+// handleChatTopicRoutes dispatches routes under /api/v1/chat/topics/ for
 // wave-2 topic-level operations (PATCH, DELETE by topicId).
-// The existing handleChatThreadRoutes handles the wave-1 {agentId}/read path.
-// We register this separately on a path that doesn't conflict.
 func (s *Server) handleChatTopicRoutes(w http.ResponseWriter, r *http.Request) {
 	// Parse: /api/v1/chat/topics/{topicId}
 	topicID := strings.TrimPrefix(r.URL.Path, "/api/v1/chat/topics/")
@@ -869,6 +864,15 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 		ReplyToID      string            `json:"reply_to_id,omitempty"` // Phase-3: reply/quote
 		Metadata       map[string]string `json:"metadata,omitempty"`    // Client-supplied metadata (e.g. RE_msg_starting)
 		IdempotencyKey string            `json:"idempotency_key,omitempty"`
+		// Interrupt asks the hub to interrupt the harness of each agent
+		// recipient (the primary and any @mentioned secondaries) that is
+		// running before delivery. Recipients that are not running get the
+		// ordinary non-interrupt dispatch, which the broker buffers; for a
+		// secondary this includes suspended, stopped and error phases. A
+		// primary whose dispatch is skipped (unreachable or reincarnating)
+		// and a reincarnating secondary ignore it. It only affects
+		// agent-routed sends; human-to-human sends ignore it.
+		Interrupt bool `json:"interrupt,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		BadRequest(w, "invalid request body")
@@ -1061,7 +1065,7 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 
 	// --- Agent routing ---
 	if len(plan.Agents) > 0 {
-		msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, plan.Agents, plan.MentionNames, plan.MentionResults, attachmentRefs, now, body.ReplyToID, body.Metadata)
+		msgID := s.sendAgentRouted(w, r, key, projectID, user, content, senderLabel, plan.Agents, plan.MentionNames, plan.MentionResults, attachmentRefs, now, body.ReplyToID, body.Metadata, body.Interrupt)
 		if msgID == "" {
 			return // error response already written by sendAgentRouted
 		}
@@ -1251,7 +1255,7 @@ func isAgentUnreachable(agent *store.Agent) (bool, string) {
 // Returns the persisted message ID (empty on error).
 func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, projectID string, user UserIdentity,
 	content, senderLabel string, agents []*store.Agent, mentionNames []string, mentionResults []messages.MentionResult,
-	attachmentRefs []AttachmentRef, now time.Time, replyToID string, clientMetadata map[string]string) string {
+	attachmentRefs []AttachmentRef, now time.Time, replyToID string, clientMetadata map[string]string, interrupt bool) string {
 
 	ctx := r.Context()
 
@@ -1584,7 +1588,21 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		// failed even though this synchronous call returns nil (message_delivery_failures.go).
 		retryCtx, cancel := context.WithTimeout(withDispatchMessageID(ctx, storeMsg.ID), 30*time.Second)
 		defer cancel()
-		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, primaryAgent, agentContent, false, msg); err != nil {
+		// interrupt applies to this primary and to each @mention secondary
+		// below, as routed inbound (dispatchRoutedRecipient, which shares
+		// the resolveRoutingAgents planner) propagates urgency to secondary
+		// mention recipients. Like routed inbound, only a recipient whose
+		// phase is running is interrupted: any other phase (created,
+		// provisioning, cloning, starting, ...) gets the ordinary
+		// non-interrupt dispatch, which the runtime broker buffers; an
+		// interrupt there would bypass the buffer and fail synchronously.
+		// Recipients whose dispatch is skipped (an unreachable or
+		// reincarnating primary, a reincarnating secondary) ignore it.
+		// Interrupt delivery is synchronous at the broker for each
+		// recipient, so an interrupted send to a primary plus k mentions
+		// blocks this request for up to k+1 deliveries.
+		primaryInterrupt := interrupt && state.Phase(primaryAgent.Phase) == state.PhaseRunning
+		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, primaryAgent, agentContent, primaryInterrupt, msg); err != nil {
 			s.messageLog.Error("Failed to dispatch to agent", "agent", primaryAgent.Slug, "error", err)
 			_ = s.store.MarkMessageFailed(ctx, storeMsg.ID, err.Error())
 			// Keep storeMsg's in-memory state in sync with the store update
@@ -1754,9 +1772,28 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 				// above, so a buffered-delivery failure on this mention row can
 				// also be reported back and marked failed.
 				retryCtx, cancel := context.WithTimeout(withDispatchMessageID(ctx, mentionStoreMsg.ID), 30*time.Second)
-				if err := dispatchWithBrokerRetry(retryCtx, dispatcher, mentionAgent, agentContent, false, mentionMsg); err != nil {
+				// Same running-only rule as the primary (see above). A
+				// secondary has no unreachable-phase gate, so suspended,
+				// stopped and error secondaries also take the buffered
+				// non-interrupt dispatch.
+				mentionInterrupt := interrupt && state.Phase(mentionAgent.Phase) == state.PhaseRunning
+				if err := dispatchWithBrokerRetry(retryCtx, dispatcher, mentionAgent, agentContent, mentionInterrupt, mentionMsg); err != nil {
 					s.messageLog.Error("Failed to dispatch mention", "slug", mentionAgent.Slug, "error", err)
 					mentionDispatchOK = false
+					// Like the primary: a synchronous dispatch failure must
+					// not leave the row "dispatched" or the client told
+					// "delivered".
+					errText := err.Error()
+					if mentionPersisted {
+						_ = s.store.MarkMessageFailed(ctx, mentionStoreMsg.ID, errText)
+					}
+					for i, mr := range mentionResults {
+						if strings.EqualFold(mr.Slug, mentionAgent.Slug) {
+							mentionResults[i].Status = "error"
+							mentionResults[i].Error = errText
+							break
+						}
+					}
 				}
 				cancel()
 			}
@@ -4111,6 +4148,10 @@ func (s *Server) handleChatSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results, nextCursor, err := wcs.SearchChatMessages(ctx, filter)
+	if errors.Is(err, ErrInvalidSearchCursor) {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidCursor, "invalid cursor: restart pagination from the first page", nil)
+		return
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "search failed", nil)
 		return
@@ -5025,4 +5066,16 @@ type attachmentUploadResult struct {
 	MimeType string `json:"mime"`
 	Size     int64  `json:"size"`
 	URL      string `json:"url"`
+}
+
+// truncatePreview truncates a message to maxLen runes for preview display.
+func truncatePreview(s string, maxLen int) string {
+	if maxLen < 0 {
+		return ""
+	}
+	runes := []rune(s)
+	if len(runes) <= maxLen {
+		return s
+	}
+	return string(runes[:maxLen]) + "..."
 }

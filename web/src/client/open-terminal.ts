@@ -27,7 +27,7 @@
  * between entry-point components and main.ts.
  */
 
-import { isFeatureEnabled } from '../utils/feature-flags.js';
+import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../utils/feature-flags.js';
 
 /**
  * Return the terminal URL path for an agent.
@@ -41,7 +41,7 @@ import { isFeatureEnabled } from '../utils/feature-flags.js';
  * semantics.
  */
 export function terminalHref(agentId: string): string {
-  return isFeatureEnabled('web.terminal_workspace')
+  return isFeatureEnabled(TERMINAL_WORKSPACE_FLAG)
     ? `/terminals/${agentId}`
     : `/agents/${agentId}/terminal`;
 }

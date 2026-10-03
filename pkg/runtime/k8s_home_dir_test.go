@@ -77,47 +77,17 @@ func TestBuildPod_HomeDir(t *testing.T) {
 					t.Fatal("HOME not found in pod env")
 				}
 
-				// Tilde-expanded file secret mount should land under home.
-				wantSSH := tc.home + "/.ssh/id_rsa"
-				foundSSH := false
-				for _, vm := range pod.Spec.Containers[0].VolumeMounts {
-					if vm.Name == "agent-secrets" && vm.SubPath == "SSH_KEY" {
-						foundSSH = true
-						if vm.MountPath != wantSSH {
-							t.Errorf("SSH_KEY MountPath = %q, want %q", vm.MountPath, wantSSH)
-						}
-					}
-				}
-				if !foundSSH {
-					t.Error("expected volume mount for SSH_KEY")
-				}
-
-				// Variable secrets are staged under <home>/.scion/secrets.json.
-				wantSecretsJSON := tc.home + "/.scion/secrets.json"
-				foundSecretsJSON := false
-				for _, vm := range pod.Spec.Containers[0].VolumeMounts {
-					if vm.Name == "agent-secrets" && vm.SubPath == "secrets.json" {
-						foundSecretsJSON = true
-						if vm.MountPath != wantSecretsJSON {
-							t.Errorf("secrets.json MountPath = %q, want %q", vm.MountPath, wantSecretsJSON)
-						}
-					}
-				}
-				if !foundSecretsJSON {
-					t.Error("expected volume mount for secrets.json")
-				}
-
-				// ResolvedAuth file mount should also land under home.
-				wantAuthMount := tc.home + "/.config/gcloud/adc.json"
-				foundAuthMount := false
-				for _, vm := range pod.Spec.Containers[0].VolumeMounts {
-					if vm.Name == "auth-files" && vm.MountPath == wantAuthMount {
-						foundAuthMount = true
-					}
-				}
-				if !foundAuthMount {
-					t.Errorf("expected auth-files volume mount at %q", wantAuthMount)
-				}
+				// Files with targets under home are not mounted there; they
+				// are staged under /run/scion and placed at the home path.
+				assertNoMountsUnderHome(t, pod, tc.home)
+				placements := rt.k8sHomeFilePlacements(config)
+				assertPlacement(t, placements, tc.home+"/.ssh/id_rsa", "/run/scion/agent-secrets/SSH_KEY")
+				// Variable secrets are placed at <home>/.scion/secrets.json.
+				assertPlacement(t, placements, tc.home+"/.scion/secrets.json", "/run/scion/agent-secrets/secrets.json")
+				// ResolvedAuth files are placed under home too.
+				assertPlacement(t, placements, tc.home+"/.config/gcloud/adc.json", "/run/scion/auth-files/auth-file-0")
+				assertStagingMount(t, pod, "agent-secrets")
+				assertStagingMount(t, pod, "auth-files")
 
 				// GCP telemetry credential env var should point under home.
 				wantTelemetry := tc.home + "/.config/gcloud/creds.json"
@@ -157,19 +127,9 @@ func TestBuildPod_HomeDir(t *testing.T) {
 					t.Fatalf("buildPod failed: %v", err)
 				}
 
-				wantPath := tc.home + "/.ssh/id_rsa"
-				found := false
-				for _, vm := range pod.Spec.Containers[0].VolumeMounts {
-					if vm.Name == "secrets-store" && vm.MountPath != "/mnt/secrets-store" {
-						found = true
-						if vm.MountPath != wantPath {
-							t.Errorf("SSH_KEY CSI MountPath = %q, want %q", vm.MountPath, wantPath)
-						}
-					}
-				}
-				if !found {
-					t.Error("expected CSI subPath mount for tilde-expanded file secret")
-				}
+				assertNoMountsUnderHome(t, pod, tc.home)
+				assertStagingMount(t, pod, "secrets-store")
+				assertPlacement(t, rt.k8sHomeFilePlacements(config), tc.home+"/.ssh/id_rsa", "/run/scion/secrets-store/SSH_KEY")
 			})
 		})
 	}

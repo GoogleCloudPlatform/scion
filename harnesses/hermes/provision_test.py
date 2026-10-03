@@ -54,6 +54,23 @@ def temporary_home(path: str):
             os.environ["HOME"] = old_home
 
 
+@contextmanager
+def temporary_env(name: str, value: str | None):
+    """Temporarily set (or unset, with None) a single environment variable."""
+    old = os.environ.get(name)
+    if value is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = value
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = old
+
+
 def _make_ctx(
     bundle_dir: str,
     env_vars: list[str] | None = None,
@@ -191,6 +208,14 @@ class VertexAIProvisionTest(unittest.TestCase):
             self.assertEqual(env["VERTEX_REGION"], "us-central1")
 
     def test_vertex_ai_respects_explicit_model(self) -> None:
+        """A concrete SCION_MODEL outranks the vertex-ai fallback pin.
+
+        Previously this read ctx.model_resolution["resolved_model"] — dead
+        code, since the Go side never populates manifest["model_resolution"]
+        (see G3 in the generalization audit). resolve_model(ctx) reads
+        SCION_MODEL directly instead, which is the value actually set by the
+        broker/hub today.
+        """
         with tempfile.TemporaryDirectory() as tmp, clean_vertex_env():
             home = os.path.join(tmp, "home")
             bundle = os.path.join(tmp, "bundle")
@@ -204,7 +229,6 @@ class VertexAIProvisionTest(unittest.TestCase):
                     "skills_dir": ".hermes/skills",
                     "system_prompt_mode": "none",
                 },
-                "model_resolution": {"resolved_model": "google/gemini-2.5-pro"},
             }
 
             os.makedirs(os.path.join(bundle, "inputs"), exist_ok=True)
@@ -218,7 +242,43 @@ class VertexAIProvisionTest(unittest.TestCase):
             ctx = scion_harness.ProvisionContext("hermes", manifest)
 
             stderr = io.StringIO()
-            with temporary_home(home), redirect_stderr(stderr):
+            with temporary_home(home), temporary_env("SCION_MODEL", "google/gemini-2.5-pro"), redirect_stderr(stderr):
+                provision.provision(ctx)
+
+            with open(os.path.join(bundle, "outputs", "env.json"), "r") as f:
+                env = json.load(f)
+            self.assertEqual(env["HERMES_INFERENCE_MODEL"], "google/gemini-2.5-pro")
+
+    def test_size_alias_now_resolves_through_model_aliases(self) -> None:
+        """Behavior difference from pre-G3: hermes never mapped SCION_MODEL
+        through harness_config.model_aliases — it only ever passed the raw
+        env var straight through (ctx.model_resolution was always empty, so
+        the dead-code read always fell through to `os.environ["SCION_MODEL"]`
+        verbatim). A bare, unresolved size alias (e.g. on a resume path where
+        the Go side had no alias table) would have leaked into
+        HERMES_INFERENCE_MODEL as the literal string "medium". resolve_model
+        now maps it through this harness's own config.yaml model_aliases.
+        """
+        with tempfile.TemporaryDirectory() as tmp, clean_vertex_env():
+            home = os.path.join(tmp, "home")
+            bundle = os.path.join(tmp, "bundle")
+            os.makedirs(os.path.join(bundle, "outputs"))
+            os.makedirs(home)
+
+            ctx = _make_ctx(
+                bundle,
+                env_vars=["VERTEX_PROJECT_ID"],
+                env_secret_files={"VERTEX_PROJECT_ID": ""},
+                harness_config={
+                    "instructions_file": "AGENTS.md",
+                    "skills_dir": ".hermes/skills",
+                    "system_prompt_mode": "none",
+                    "model_aliases": {"medium": "google/gemini-2.5-pro"},
+                },
+            )
+
+            stderr = io.StringIO()
+            with temporary_home(home), temporary_env("SCION_MODEL", "medium"), redirect_stderr(stderr):
                 provision.provision(ctx)
 
             with open(os.path.join(bundle, "outputs", "env.json"), "r") as f:

@@ -422,6 +422,32 @@ const (
 // non-nil error identically to ok=false.
 var ErrProjectAccessDenied = errors.New("project access evidence check failed closed")
 
+// projectAccessLookupError marks a project-access evidence error caused by a
+// store or resolution fault (principal closure, role bindings, role
+// definitions, user record, access constraints), as opposed to a policy fact
+// such as an inactive user, a mismatched target class, or an unsupported
+// principal kind. It is transparent: Error and Unwrap return the wrapped
+// error unchanged, so errors.Is(err, ErrProjectAccessDenied) and the error
+// text are unaffected. Callers that map errors to a Decision use
+// isProjectAccessLookupFault to tag the deny as DenyCauseResolutionError.
+type projectAccessLookupError struct{ err error }
+
+func (e *projectAccessLookupError) Error() string { return e.err.Error() }
+func (e *projectAccessLookupError) Unwrap() error { return e.err }
+
+// projectAccessLookupFault wraps err as a store/resolution fault. See
+// projectAccessLookupError.
+func projectAccessLookupFault(err error) error {
+	return &projectAccessLookupError{err: err}
+}
+
+// isProjectAccessLookupFault reports whether err (or anything it wraps) was
+// produced by projectAccessLookupFault.
+func isProjectAccessLookupFault(err error) bool {
+	var lookupErr *projectAccessLookupError
+	return errors.As(err, &lookupErr)
+}
+
 // ErrUnsupportedPrincipalKind is returned by ProjectMembershipEvidence,
 // SystemAuthorityProof, and ProjectTargetAdmission for any PrincipalKind
 // other than PrincipalKindUser or PrincipalKindDev (local users, including
@@ -606,14 +632,14 @@ func (a *AuthzService) projectScopedGrants(ctx context.Context, principalType, p
 func (a *AuthzService) projectScopedPermissionsStrict(ctx context.Context, principalType, principalID, projectID string) ([]string, error) {
 	perms, closure, err := a.projectScopedGrants(ctx, principalType, principalID, projectID)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrProjectAccessDenied, err)
+		return nil, projectAccessLookupFault(fmt.Errorf("%w: %v", ErrProjectAccessDenied, err))
 	}
 	if len(perms) == 0 {
 		return perms, nil
 	}
 	restrictions, err := a.accessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
 	if err != nil {
-		return nil, fmt.Errorf("%w: access constraint load failed: %v", ErrProjectAccessDenied, err)
+		return nil, projectAccessLookupFault(fmt.Errorf("%w: access constraint load failed: %v", ErrProjectAccessDenied, err))
 	}
 	return applyRestrictions(perms, restrictions), nil
 }
@@ -661,13 +687,9 @@ func (a *AuthzService) ProjectMembershipEvidence(ctx context.Context, principal 
 		return false, "", err
 	}
 
-	refs, directKey, groupKeys, err := a.principalClosure(ctx, principal)
+	directKey, groupKeys, bindings, err := a.projectMembershipInputs(ctx, principal)
 	if err != nil {
-		return false, "", fmt.Errorf("%w: %v", ErrProjectAccessDenied, err)
-	}
-	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, refs, nil, nil)
-	if err != nil {
-		return false, "", fmt.Errorf("%w: binding resolution failed: %v", ErrProjectAccessDenied, err)
+		return false, "", err
 	}
 
 	now := time.Now()
@@ -689,16 +711,72 @@ func (a *AuthzService) ProjectMembershipEvidence(ctx context.Context, principal 
 	return false, "", nil
 }
 
+// projectMembershipInputs loads the principal closure and its unscoped role
+// bindings for ProjectMembershipEvidence. Its query shape (full closure, then
+// ListRoleBindingsForPrincipals with nil scope filters) is exactly the one
+// the request-local authz input memo serves, so when a memo is installed
+// and the mint-eligibility cache is not, it reads through the memo instead
+// of reloading: a scoped UAT's live project-access check and decide's own
+// steps 2-3 for the same principal then share one memo entry. Without a
+// memo (or with the mint-eligibility cache present) it loads exactly as
+// before. Load failures are tagged as project-access lookup faults on both
+// paths.
+func (a *AuthzService) projectMembershipInputs(ctx context.Context, principal PrincipalContext) (directKey string, groupKeys map[string]bool, bindings []*store.RoleBinding, err error) {
+	if mintEligibilityCacheFromContext(ctx) == nil {
+		if h := a.inputsForPrincipal(ctx, principal); h != nil {
+			refs, err := h.Principals()
+			if err != nil {
+				return "", nil, nil, projectAccessLookupFault(fmt.Errorf("%w: group resolution failed (fail-closed): %v", ErrProjectAccessDenied, err))
+			}
+			bindings, err := h.Bindings()
+			if err != nil {
+				return "", nil, nil, projectAccessLookupFault(fmt.Errorf("%w: binding resolution failed: %v", ErrProjectAccessDenied, err))
+			}
+			directKey, groupKeys = closureKeys(refs)
+			return directKey, groupKeys, bindings, nil
+		}
+	}
+
+	refs, directKey, groupKeys, err := a.principalClosure(ctx, principal)
+	if err != nil {
+		return "", nil, nil, projectAccessLookupFault(fmt.Errorf("%w: %v", ErrProjectAccessDenied, err))
+	}
+	bindings, err = a.store.ListRoleBindingsForPrincipals(ctx, refs, nil, nil)
+	if err != nil {
+		return "", nil, nil, projectAccessLookupFault(fmt.Errorf("%w: binding resolution failed: %v", ErrProjectAccessDenied, err))
+	}
+	return directKey, groupKeys, bindings, nil
+}
+
+// closureKeys derives principalClosure's directKey and groupKeys from a
+// closure in authorizationPrincipals' shape: the direct principal first,
+// followed by its group refs.
+func closureKeys(refs []store.PrincipalRef) (directKey string, groupKeys map[string]bool) {
+	groupKeys = map[string]bool{}
+	for i, r := range refs {
+		if i == 0 {
+			directKey = r.Type + ":" + r.ID
+			continue
+		}
+		if r.Type == "group" {
+			groupKeys["group:"+r.ID] = true
+		}
+	}
+	return directKey, groupKeys
+}
+
 func (a *AuthzService) requireActiveUser(ctx context.Context, principal PrincipalContext) error {
 	normalizedType := NormalizePrincipalType(string(principal.Kind))
 	if normalizedType != store.RoleBindingPrincipalUser {
 		return nil
 	}
 	user, err := a.store.GetUser(ctx, principal.ID)
-	if err != nil {
-		return fmt.Errorf("%w: user lookup failed: %v", ErrProjectAccessDenied, err)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return projectAccessLookupFault(fmt.Errorf("%w: user lookup failed: %v", ErrProjectAccessDenied, err))
 	}
-	if user == nil || user.Status != store.UserStatusActive {
+	// A missing user record is a policy fact (the holder no longer exists),
+	// not a store fault: deny the same way as an inactive user, untagged.
+	if err != nil || user == nil || user.Status != store.UserStatusActive {
 		return fmt.Errorf("%w: user is not active", ErrProjectAccessDenied)
 	}
 	return nil
@@ -870,6 +948,13 @@ type mintEligibilityCache struct {
 	constraintsErr    error
 }
 
+// Invariant (shared with authzInputMemo, see authz_request_inputs.go): never
+// install authzInputMemo inside CanMintSelector or its callees. The two
+// caches interact only at loadAllAccessConstraints, where the mint cache
+// always wins when both are present; getCachedDelegationEdges never
+// consults the mint cache at all. CanMintSelector defensively masks any
+// authzInputMemo at entry so that the loadAllAccessConstraints interaction
+// is never actually reached in production.
 func withMintEligibilityCache(ctx context.Context, c *mintEligibilityCache) context.Context {
 	return context.WithValue(ctx, mintEligibilityCacheKey{}, c)
 }
@@ -930,11 +1015,11 @@ func (a *AuthzService) activeSystemScopeCandidates(ctx context.Context, principa
 func (a *AuthzService) loadActiveSystemScopeCandidates(ctx context.Context, principal PrincipalContext) ([]CandidateBinding, map[string]*RolePermissions, []store.PrincipalRef, error) {
 	refs, _, _, err := a.principalClosure(ctx, principal)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("%w: %v", ErrProjectAccessDenied, err)
+		return nil, nil, nil, projectAccessLookupFault(fmt.Errorf("%w: %v", ErrProjectAccessDenied, err))
 	}
 	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, refs, nil, nil)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("%w: binding resolution failed: %v", ErrProjectAccessDenied, err)
+		return nil, nil, nil, projectAccessLookupFault(fmt.Errorf("%w: binding resolution failed: %v", ErrProjectAccessDenied, err))
 	}
 	now := time.Now()
 	var systemBindings []*store.RoleBinding
@@ -949,7 +1034,7 @@ func (a *AuthzService) loadActiveSystemScopeCandidates(ctx context.Context, prin
 	}
 	roleDefs, err := a.loadRoleDefinitions(ctx, collectRoleDefinitionIDs(systemBindings))
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("%w: role resolution failed: %v", ErrProjectAccessDenied, err)
+		return nil, nil, nil, projectAccessLookupFault(fmt.Errorf("%w: role resolution failed: %v", ErrProjectAccessDenied, err))
 	}
 	candidates := toCandidateBindings(systemBindings)
 	return candidates, roleDefs, refs, nil
@@ -1020,7 +1105,7 @@ func (a *AuthzService) SystemAuthorityProof(ctx context.Context, principal Princ
 	}
 	restrictions, err := a.accessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
 	if err != nil {
-		return false, fmt.Errorf("%w: access constraint load failed: %v", ErrProjectAccessDenied, err)
+		return false, projectAccessLookupFault(fmt.Errorf("%w: access constraint load failed: %v", ErrProjectAccessDenied, err))
 	}
 	survivors := applyRestrictions([]string{permissionID}, restrictions)
 	return len(survivors) == 1, nil
@@ -1066,7 +1151,7 @@ func (a *AuthzService) MintTimeSystemGrant(ctx context.Context, principal Princi
 	// stable-looking denial reason.
 	restrictions, err := a.accessConstraintRestrictions(ctx, closure, ResourceContext{})
 	if err != nil {
-		return false, fmt.Errorf("%w: access constraint load failed: %v", ErrProjectAccessDenied, err)
+		return false, projectAccessLookupFault(fmt.Errorf("%w: access constraint load failed: %v", ErrProjectAccessDenied, err))
 	}
 
 	resourceType := registryResourceType(permissionID)
@@ -1123,11 +1208,11 @@ func (a *AuthzService) hasAnyProjectBinding(ctx context.Context, principal Princ
 	}
 	refs, _, _, err := a.principalClosure(ctx, principal)
 	if err != nil {
-		return false, fmt.Errorf("%w: %v", ErrProjectAccessDenied, err)
+		return false, projectAccessLookupFault(fmt.Errorf("%w: %v", ErrProjectAccessDenied, err))
 	}
 	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, refs, []string{store.RoleScopeProject}, nil)
 	if err != nil {
-		return false, fmt.Errorf("%w: binding resolution failed: %v", ErrProjectAccessDenied, err)
+		return false, projectAccessLookupFault(fmt.Errorf("%w: binding resolution failed: %v", ErrProjectAccessDenied, err))
 	}
 	now := time.Now()
 	byProject := make(map[string][]*store.RoleBinding)
@@ -1150,7 +1235,7 @@ func (a *AuthzService) hasAnyProjectBinding(ctx context.Context, principal Princ
 	}
 	roleDefs, err := a.loadRoleDefinitions(ctx, collectRoleDefinitionIDs(allBindings))
 	if err != nil {
-		return false, fmt.Errorf("%w: role definition resolution failed: %v", ErrProjectAccessDenied, err)
+		return false, projectAccessLookupFault(fmt.Errorf("%w: role definition resolution failed: %v", ErrProjectAccessDenied, err))
 	}
 
 	closure := make(map[string]struct{}, len(refs))
@@ -1176,7 +1261,7 @@ func (a *AuthzService) hasAnyProjectBinding(ctx context.Context, principal Princ
 		// of masquerading as an ordinary denial.
 		restrictions, err := a.accessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
 		if err != nil {
-			return false, fmt.Errorf("%w: access constraint load failed: %v", ErrProjectAccessDenied, err)
+			return false, projectAccessLookupFault(fmt.Errorf("%w: access constraint load failed: %v", ErrProjectAccessDenied, err))
 		}
 		if survivors := applyRestrictions([]string{permissionID}, restrictions); len(survivors) == 1 {
 			return true, nil
@@ -1195,7 +1280,7 @@ func (a *AuthzService) hasAnyProjectBinding(ctx context.Context, principal Princ
 func (a *AuthzService) permissionSurvivesProjectConstraints(ctx context.Context, principal PrincipalContext, projectID, permissionID string) (bool, error) {
 	refs, _, _, err := a.principalClosure(ctx, principal)
 	if err != nil {
-		return false, fmt.Errorf("%w: %v", ErrProjectAccessDenied, err)
+		return false, projectAccessLookupFault(fmt.Errorf("%w: %v", ErrProjectAccessDenied, err))
 	}
 	closure := make(map[string]struct{}, len(refs))
 	for _, p := range refs {
@@ -1207,7 +1292,7 @@ func (a *AuthzService) permissionSurvivesProjectConstraints(ctx context.Context,
 	// it" denial.
 	restrictions, err := a.accessConstraintRestrictions(ctx, closure, ResourceContext{ProjectID: projectID})
 	if err != nil {
-		return false, fmt.Errorf("%w: access constraint load failed: %v", ErrProjectAccessDenied, err)
+		return false, projectAccessLookupFault(fmt.Errorf("%w: access constraint load failed: %v", ErrProjectAccessDenied, err))
 	}
 	survivors := applyRestrictions([]string{permissionID}, restrictions)
 	return len(survivors) == 1, nil
@@ -1227,11 +1312,11 @@ func (a *AuthzService) permissionSurvivesProjectConstraints(ctx context.Context,
 func (a *AuthzService) hasRelevantProjectAdmission(ctx context.Context, principal PrincipalContext, permissionID string) (bool, error) {
 	refs, _, _, err := a.principalClosure(ctx, principal)
 	if err != nil {
-		return false, fmt.Errorf("%w: %v", ErrProjectAccessDenied, err)
+		return false, projectAccessLookupFault(fmt.Errorf("%w: %v", ErrProjectAccessDenied, err))
 	}
 	bindings, err := a.store.ListRoleBindingsForPrincipals(ctx, refs, []string{store.RoleScopeProject}, nil)
 	if err != nil {
-		return false, fmt.Errorf("%w: binding resolution failed: %v", ErrProjectAccessDenied, err)
+		return false, projectAccessLookupFault(fmt.Errorf("%w: binding resolution failed: %v", ErrProjectAccessDenied, err))
 	}
 	now := time.Now()
 	projects := map[string]bool{}
@@ -1426,8 +1511,7 @@ func (a *AuthzService) hasProjectRoleFlatPermission(ctx context.Context, princip
 	// Uses projectScopedPermissionsStrict, not getProjectScopedPermissions:
 	// this is CanMintSelector's flat-role mint path, and a transient
 	// constraint-load failure here must surface as an error like every other
-	// CanMintSelector path, not the deny-all restriction
-	// getProjectScopedPermissions's other caller (useraccesstoken.go) keeps.
+	// CanMintSelector path, not a deny-all restriction.
 	perms, err := a.projectScopedPermissionsStrict(ctx, string(principal.Kind), principal.ID, projectID)
 	if err != nil {
 		return false, err
@@ -1494,6 +1578,13 @@ func (a *AuthzService) CanMintSelector(ctx context.Context, principal PrincipalC
 	// call evaluates below (see mintEligibilityCache) — resolving it once
 	// per CanMintSelector call rather than once per permission.
 	ctx = withMintEligibilityCache(ctx, &mintEligibilityCache{})
+
+	// Defensive: hide any authzInputMemo (and its edges slot) an outer
+	// caller may have installed, and make the mask sticky so nothing
+	// reached from here can re-enable one. No production install site is
+	// reachable from CanMintSelector today, but this keeps the two
+	// caches' semantics from ever being able to interact.
+	ctx = maskAllAuthzMemo(ctx)
 
 	var membershipOK bool
 	if boundary.Kind == BoundaryKindProject {

@@ -145,6 +145,17 @@ type QuotaSettings struct {
 	EnforceBrokerQuotas *bool `json:"enforce_broker_quotas,omitempty" koanf:"enforce_broker_quotas"`
 }
 
+// AgentSecretsSettings holds Layer-1 hub policy for secrets written by
+// agents. UserScopeOnly is nil when unset, meaning agents may write project
+// scope as they do today (default false/permissive).
+type AgentSecretsSettings struct {
+	// UserScopeOnly, when true, restricts agents to writing user (profile)
+	// scope secrets only. The hub rejects agent writes at project scope,
+	// including harness auth capture. User-originated writes are unaffected
+	// (design ptone/scion#2291 §5).
+	UserScopeOnly *bool `json:"user_scope_only,omitempty" koanf:"user_scope_only"`
+}
+
 // MessagingSettings holds Layer-1 messaging configuration.
 // DB-only (runtime state), no settings.yaml representation.
 //

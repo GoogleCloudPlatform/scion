@@ -42,9 +42,15 @@ import '../shared/role-binding-assignment-form.js';
 import {
   SYSTEM_DIRECT_USER_ONLY_ROLES,
   getLifecycleStatus,
-  formatDateTime,
   getPrincipalIcon,
 } from '../shared/role-binding-utils.js';
+import {
+  effectiveTimeZone,
+  formatInstantWithZone,
+  formatRelative,
+  parseWallClock,
+} from '../../utils/time.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -87,6 +93,17 @@ const PAGE_SIZE = 25;
 
 @customElement('scion-page-admin-role-bindings')
 export class ScionPageAdminRoleBindings extends LitElement {
+  /**
+   * Re-renders this page when the effective display zone changes (review
+   * R4-1), so the create dialog's "Times in: <zone>" label never shows a
+   * zone other than the one `createBinding`'s `parseWallClock` calls parse
+   * `formNotBefore`/`formExpiresAt` in. Both are raw typed text with no
+   * instant cached from them until submit, so there is no stale cached
+   * value to re-derive here (contrast `access-boundary-schedule-editor.ts`,
+   * which pre-populates from committed ISO props and does need that).
+   */
+  readonly _zone = new DisplayZoneController(this);
+
   @state() private loading = true;
   @state() private bindings: RoleBinding[] = [];
   @state() private roles: RoleDefinition[] = [];
@@ -625,28 +642,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
     return Math.max(1, Math.ceil(this.totalCount / PAGE_SIZE));
   }
 
-  private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) return rtf.format(-diffSeconds, 'second');
-      if (Math.abs(diffMinutes) < 60) return rtf.format(-diffMinutes, 'minute');
-      if (Math.abs(diffHours) < 24) return rtf.format(-diffHours, 'hour');
-      return rtf.format(-diffDays, 'day');
-    } catch {
-      return dateString;
-    }
-  }
-
-  // formatDateTime, getLifecycleStatus, and getPrincipalIcon are imported
+  // getLifecycleStatus and getPrincipalIcon are imported
   // from ../shared/role-binding-utils.js
 
   // ---------------------------------------------------------------------------
@@ -708,12 +704,32 @@ export class ScionPageAdminRoleBindings extends LitElement {
         scopeId: this.formScopeType === 'project' ? this.formScopeId.trim() : '',
       };
 
-      // Include lifecycle fields only when set
+      // Include lifecycle fields only when set. Interpreted as wall-clock
+      // time in the effective display zone, not the browser's zone. A
+      // parse failure must stop the request, not silently send '' (review
+      // R1-9 — mirrors scheduled-event-list.ts's handling of the same
+      // failure).
       if (this.formNotBefore) {
-        body.notBefore = new Date(this.formNotBefore).toISOString();
+        const iso = parseWallClock(this.formNotBefore, effectiveTimeZone());
+        if (!iso) {
+          this.actionFeedback = {
+            message: 'Enter a valid activation date and time',
+            variant: 'danger',
+          };
+          return;
+        }
+        body.notBefore = iso;
       }
       if (this.formExpiresAt) {
-        body.expiresAt = new Date(this.formExpiresAt).toISOString();
+        const iso = parseWallClock(this.formExpiresAt, effectiveTimeZone());
+        if (!iso) {
+          this.actionFeedback = {
+            message: 'Enter a valid expiration date and time',
+            variant: 'danger',
+          };
+          return;
+        }
+        body.expiresAt = iso;
       }
 
       const res = await apiFetch('/api/v1/admin/role-bindings', {
@@ -938,12 +954,23 @@ export class ScionPageAdminRoleBindings extends LitElement {
 
     // Validate lifecycle dates: expiresAt must be after notBefore
     if (this.formNotBefore && this.formExpiresAt) {
-      const nb = new Date(this.formNotBefore).getTime();
-      const ea = new Date(this.formExpiresAt).getTime();
+      const nb = this.wallClockMs(this.formNotBefore);
+      const ea = this.wallClockMs(this.formExpiresAt);
       if (!isNaN(nb) && !isNaN(ea) && ea <= nb) return false;
     }
 
     return true;
+  }
+
+  /**
+   * Epoch ms of a `datetime-local` lifecycle value, read as wall-clock time
+   * in the effective display zone (the zone the inputs are labelled and
+   * submitted in). `parseWallClock` returns '' for a value it cannot read;
+   * that case maps to `NaN` here, so callers skip the comparison.
+   */
+  private wallClockMs(value: string): number {
+    const iso = parseWallClock(value, effectiveTimeZone());
+    return iso ? new Date(iso).getTime() : NaN;
   }
 
   /** True when any lifecycle condition is set. */
@@ -1156,12 +1183,12 @@ export class ScionPageAdminRoleBindings extends LitElement {
                 </span>
                 ${binding.expiresAt && lifecycleStatus !== 'expired'
                   ? html`<div class="lifecycle-detail">
-                      Expires ${formatDateTime(binding.expiresAt)}
+                      Expires ${formatInstantWithZone(binding.expiresAt) || binding.expiresAt}
                     </div>`
                   : ''}
                 ${binding.notBefore && lifecycleStatus === 'pending'
                   ? html`<div class="lifecycle-detail">
-                      Activates ${formatDateTime(binding.notBefore)}
+                      Activates ${formatInstantWithZone(binding.notBefore) || binding.notBefore}
                     </div>`
                   : ''}
               `
@@ -1170,7 +1197,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
               </span>`}
         </td>
         <td class="hide-mobile">
-          <span class="meta-text">${this.formatRelativeTime(binding.createdAt)}</span>
+          <span class="meta-text">${formatRelative(binding.createdAt)}</span>
         </td>
         <td>
           <sl-icon-button
@@ -1262,6 +1289,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
         ${this.showAdvanced
           ? html`
               <div class="advanced-content">
+                <div class="lifecycle-hint">Times in: ${effectiveTimeZone()}</div>
                 <div class="form-group">
                   <sl-input
                     label="Activate After (Not Before)"
@@ -1292,7 +1320,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
                 </div>
                 ${this.formExpiresAt
                   ? (() => {
-                      const ea = new Date(this.formExpiresAt).getTime();
+                      const ea = this.wallClockMs(this.formExpiresAt);
                       if (!isNaN(ea) && ea < Date.now()) {
                         return html`
                           <div class="validation-warning">
@@ -1303,7 +1331,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
                         `;
                       }
                       if (this.formNotBefore) {
-                        const nb = new Date(this.formNotBefore).getTime();
+                        const nb = this.wallClockMs(this.formNotBefore);
                         if (!isNaN(nb) && !isNaN(ea) && ea <= nb) {
                           return html`
                             <div class="validation-warning">

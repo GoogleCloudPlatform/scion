@@ -324,9 +324,7 @@ def provision(ctx: sh.ProvisionContext) -> None:
 
     sh.apply_mcp_translated(ctx, _translate_mcp_server, _write_mcp_config)
 
-    resolved_model = str(ctx.model_resolution.get("resolved_model") or "").strip()
-    if not resolved_model:
-        resolved_model = os.environ.get("SCION_MODEL", "").strip()
+    resolved_model = sh.resolve_model(ctx)
     _write_model_config(resolved_model)
 
     _prefetch_models_catalog(ctx)

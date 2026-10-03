@@ -18,12 +18,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -543,13 +546,19 @@ func TestProvisionAgentNonGitWorkspace(t *testing.T) {
 	}
 	globalScionDir, _ := config.GetGlobalDir()
 
-	// Change into a subdirectory to act as CWD
+	// Change into an unrelated subdirectory to prove the global project's
+	// workspace does not depend on the CLI's current working directory.
 	cwd := filepath.Join(tmpDir, "some-dir")
 	_ = os.MkdirAll(cwd, 0755)
 	if err := os.Chdir(cwd); err != nil {
 		t.Fatal(err)
 	}
-	evalCWD, _ := filepath.EvalSymlinks(cwd)
+
+	wantGlobalWorkspaceRoot := filepath.Join(globalScionDir, "workspace")
+	wantGlobalWorkspace := filepath.Join(wantGlobalWorkspaceRoot, "global-agent")
+	if _, err := os.Stat(wantGlobalWorkspaceRoot); !os.IsNotExist(err) {
+		t.Fatalf("expected global project workspace directory to not exist yet, stat err = %v", err)
+	}
 
 	_, ws, cfg, err = ProvisionAgent(context.Background(), "global-agent", "default", "", "", globalScionDir, "", "", "", "")
 	if err != nil {
@@ -560,18 +569,141 @@ func TestProvisionAgentNonGitWorkspace(t *testing.T) {
 		t.Errorf("expected empty workspace path for global agent, got %q", ws)
 	}
 
+	if info, err := os.Stat(wantGlobalWorkspace); err != nil || !info.IsDir() {
+		t.Fatalf("expected global project workspace directory to be created at %q on first use: %v", wantGlobalWorkspace, err)
+	}
+	evalWantGlobalWorkspace, _ := filepath.EvalSymlinks(wantGlobalWorkspace)
+
 	found = false
 	for _, v := range cfg.Volumes {
 		if v.Target == "/workspace" {
 			found = true
 			evalSource, _ := filepath.EvalSymlinks(v.Source)
-			if evalSource != evalCWD {
-				t.Errorf("expected global agent volume source %q (CWD), got %q", evalCWD, evalSource)
+			if evalSource != evalWantGlobalWorkspace {
+				t.Errorf("expected global agent volume source %q, got %q", evalWantGlobalWorkspace, evalSource)
 			}
 		}
 	}
 	if !found {
 		t.Error("expected /workspace volume mount not found in global agent config")
+	}
+
+	// A second global agent, provisioned from a different CWD, gets its own
+	// workspace subdirectory under the same project workspace root instead
+	// of sharing the first agent's directory: two global-project agents
+	// must never read and write the same files.
+	cwd2 := filepath.Join(tmpDir, "another-dir")
+	_ = os.MkdirAll(cwd2, 0755)
+	if err := os.Chdir(cwd2); err != nil {
+		t.Fatal(err)
+	}
+
+	wantSecondGlobalWorkspace := filepath.Join(wantGlobalWorkspaceRoot, "global-agent-2")
+	_, ws2, cfg2, err := ProvisionAgent(context.Background(), "global-agent-2", "default", "", "", globalScionDir, "", "", "", "")
+	if err != nil {
+		t.Fatalf("ProvisionAgent failed for second global agent: %v", err)
+	}
+	if ws2 != "" {
+		t.Errorf("expected empty workspace path for second global agent, got %q", ws2)
+	}
+	evalWantSecondGlobalWorkspace, _ := filepath.EvalSymlinks(wantSecondGlobalWorkspace)
+
+	found = false
+	for _, v := range cfg2.Volumes {
+		if v.Target == "/workspace" {
+			found = true
+			evalSource, _ := filepath.EvalSymlinks(v.Source)
+			if evalSource != evalWantSecondGlobalWorkspace {
+				t.Errorf("expected second global agent volume source %q, got %q", evalWantSecondGlobalWorkspace, evalSource)
+			}
+			if evalSource == evalWantGlobalWorkspace {
+				t.Error("expected second global agent to get its own workspace directory, got the first agent's")
+			}
+		}
+	}
+	if !found {
+		t.Error("expected /workspace volume mount not found in second global agent config")
+	}
+}
+
+// TestProvisionAgentNonGitDirectoryNamedGlobal covers an ordinary, non-git
+// project whose own directory happens to be named "global" -- not the real
+// global project, which lives at the resolved global directory regardless
+// of name. It must be provisioned the same way any other non-git project
+// is: a plain workspace mount at the project's own directory, not the
+// global project's dedicated, agent-namespaced workspace subdirectory.
+func TestProvisionAgentNonGitDirectoryNamedGlobal(t *testing.T) {
+	mockRuntimeForTest(t)
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	// HOME is a separate directory from the project below, so the real
+	// global directory (HOME/.scion) and this project's own directory are
+	// unambiguously different paths.
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	home := filepath.Join(tmpDir, "home")
+	_ = os.Setenv("HOME", home)
+
+	if err := config.InitMachine(getTestHarnesses()); err != nil {
+		t.Fatalf("InitMachine failed: %v", err)
+	}
+
+	projectDir := filepath.Join(tmpDir, "global")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	if err := config.InitProject(projectScionDir, getTestHarnesses()); err != nil {
+		t.Fatalf("InitProject failed: %v", err)
+	}
+
+	if err := os.Chdir(projectDir); err != nil {
+		t.Fatal(err)
+	}
+
+	evalProjectDir, _ := filepath.EvalSymlinks(projectDir)
+
+	// The shape ProvisionAgent must NOT produce for this project: a
+	// dedicated, agent-namespaced workspace subdirectory, the shape
+	// reserved for the real global project alone. InitProject writes a
+	// project-id marker for a non-git project, so ProvisionAgent resolves
+	// projectScionDir to its externalized directory before anything else
+	// runs -- the wrong root must be computed from that same resolved
+	// directory, not the nominal projectScionDir, or a misclassification
+	// that produces the wrong root at the externalized path would pass this
+	// check by never matching it in the first place.
+	resolvedProjectDir, _, err := config.ResolveProjectPath(projectScionDir)
+	if err != nil {
+		t.Fatalf("ResolveProjectPath failed: %v", err)
+	}
+	wrongWorkspaceRoot := filepath.Join(resolvedProjectDir, "workspace")
+
+	_, ws, cfg, err := ProvisionAgent(context.Background(), "test-agent", "default", "", "", projectScionDir, "", "", "", "")
+	if err != nil {
+		t.Fatalf("ProvisionAgent failed: %v", err)
+	}
+
+	if ws != "" {
+		t.Errorf("expected empty workspace path for a non-git project, got %q", ws)
+	}
+
+	if info, statErr := os.Stat(wrongWorkspaceRoot); statErr == nil && info.IsDir() {
+		t.Errorf("expected no agent-namespaced workspace directory to be created at %q", wrongWorkspaceRoot)
+	}
+
+	found := false
+	for _, v := range cfg.Volumes {
+		if v.Target == "/workspace" {
+			found = true
+			evalSource, _ := filepath.EvalSymlinks(v.Source)
+			if evalSource != evalProjectDir {
+				t.Errorf("expected volume source %q (the project's own directory), got %q", evalProjectDir, evalSource)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected /workspace volume mount not found in config")
 	}
 }
 
@@ -2242,6 +2374,80 @@ func TestProvisionAgent_RequiredGHSkillWithResolver_Provisions(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "deploy") {
 		t.Errorf("resolution record should contain skill name, got: %s", string(data))
+	}
+}
+
+// TestProvisionAgent_RequiredGHSkillRateLimited_YieldsSkillResolutionError
+// exercises provision.go's SkillResolutionError construction through the
+// actual ProvisionAgent entry point with a real GitHubSkillResolver, rather
+// than injecting the error directly into a runtimebroker mock as the broker
+// tests do (#2546 O3). The test server returns a 429 with Retry-After: 120,
+// and ctx carries a 2-minute deadline. The rate-limit cooldown ends the call
+// at that first response, without retrying. A watchdog cancels ctx if it
+// does not, so a regression fails in seconds. The test also pins RetryAfter
+// end to end: cooldown -> cooldownRetryAfter -> ResolveError ->
+// SkillResolutionError.
+func TestProvisionAgent_RequiredGHSkillRateLimited_YieldsSkillResolutionError(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	globalTemplatesDir := filepath.Join(globalScionDir, "templates")
+	_ = os.MkdirAll(globalTemplatesDir, 0755)
+	seedTestHarnessConfig(t, globalScionDir, "claude", "claude")
+
+	tplDir := filepath.Join(globalTemplatesDir, "gh-skill-ratelimit-tpl")
+	_ = os.MkdirAll(tplDir, 0755)
+	tplConfig := `{
+		"default_harness_config": "claude",
+		"skills": [
+			{"uri": "gh://owner/repo/my-skill@main"}
+		]
+	}`
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplConfig), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	server, mux := newTestGitHubServer(t)
+	mux.HandleFunc("/repos/owner/repo/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "120") // starts a 120s cooldown
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	resolver := newTestGitHubResolver(server)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	watchdog := time.AfterFunc(3*time.Second, cancel)
+	defer watchdog.Stop()
+	ctx = ContextWithSkillResolver(ctx, resolver)
+	_, _, _, err := ProvisionAgent(ctx, "gh-ratelimit-agent", "gh-skill-ratelimit-tpl", "", "", projectScionDir, "", "", "", "")
+	if err == nil {
+		t.Fatal("expected provisioning to fail when the required gh:// skill is rate limited")
+	}
+
+	var skillErr *SkillResolutionError
+	if !errors.As(err, &skillErr) {
+		t.Fatalf("expected a *SkillResolutionError, got %T: %v", err, err)
+	}
+	if skillErr.Code != SkillErrCodeRateLimited {
+		t.Errorf("expected code %s, got %s", SkillErrCodeRateLimited, skillErr.Code)
+	}
+	if skillErr.URI != "gh://owner/repo/my-skill@main" {
+		t.Errorf("expected URI to name the ref, got %s", skillErr.URI)
+	}
+	// The cooldown runs on the real clock, so allow one second of slip
+	// between the 429 and cooldownRetryAfter reading the time left.
+	if skillErr.RetryAfter != "120" && skillErr.RetryAfter != "119" {
+		t.Errorf("expected RetryAfter 120 (or 119), got %q", skillErr.RetryAfter)
 	}
 }
 

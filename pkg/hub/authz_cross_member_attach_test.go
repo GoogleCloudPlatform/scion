@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -29,10 +30,11 @@ import (
 )
 
 // TestCrossMemberAttach_Matrix verifies that project owners/admins cannot
-// attach to (or reach ports of) agents owned by other project members, since
-// those agents run with their owner's user-scoped secrets (miller79/scion#88).
-// Owners keep access to their own agents and progeny through relationship
-// grants, and non-attach actions still flow through the owner/admin roles.
+// attach to agents owned by other project members, since those agents run
+// with their owner's user-scoped secrets, while they can open those agents'
+// forwarded ports through the agent.port_access their role carries. Owners
+// keep full access to their own agents and progeny through relationship
+// grants; plain members reach neither on another member's agent.
 func TestCrossMemberAttach_Matrix(t *testing.T) {
 	f := newGoldenFixture(t)
 	ctx := context.Background()
@@ -60,23 +62,24 @@ func TestCrossMemberAttach_Matrix(t *testing.T) {
 		name     string
 		identity UserIdentity
 		resource Resource
-		allowed  bool
+		attach   bool
+		port     bool // owner/admin carry agent.port_access
 	}{
-		{"owner attaches to own agent", owner, ownerAgent, true},
-		{"owner attaches to own progeny", owner, ownerProgeny, true},
-		{"owner attaches to member's agent", owner, memberAgent, false},
-		{"admin attaches to own agent", admin, adminAgent, true},
-		{"admin attaches to member's agent", admin, memberAgent, false},
-		{"admin attaches to owner's agent", admin, ownerAgent, false},
-		{"member attaches to own agent", member, memberAgent, true},
-		{"member attaches to other's agent", member, ownerAgent, false},
-		{"super-admin attaches to member's agent", superAdmin, memberAgent, true},
+		{"owner on own agent", owner, ownerAgent, true, true},
+		{"owner on own progeny", owner, ownerProgeny, true, true},
+		{"owner on member's agent", owner, memberAgent, false, true},
+		{"admin on own agent", admin, adminAgent, true, true},
+		{"admin on member's agent", admin, memberAgent, false, true},
+		{"admin on owner's agent", admin, ownerAgent, false, true},
+		{"member on own agent", member, memberAgent, true, true},
+		{"member on other's agent", member, ownerAgent, false, false},
+		{"super-admin on member's agent", superAdmin, memberAgent, true, true},
 	}
 	for _, tc := range cases {
-		for _, action := range []Action{ActionAttach, ActionPortAccess} {
+		for action, want := range map[Action]bool{ActionAttach: tc.attach, ActionPortAccess: tc.port} {
 			t.Run(tc.name+"/"+string(action), func(t *testing.T) {
 				d := f.authz.CheckAccess(ctx, tc.identity, tc.resource, action)
-				assert.Equal(t, tc.allowed, d.Allowed, "reason: %s", d.Reason)
+				assert.Equal(t, want, d.Allowed, "reason: %s", d.Reason)
 			})
 		}
 	}
@@ -103,7 +106,7 @@ func TestCrossMemberAttach_Matrix(t *testing.T) {
 		caps := f.authz.ComputeCapabilities(ctx, owner, memberAgent)
 		require.NotNil(t, caps)
 		assert.NotContains(t, caps.Actions, string(ActionAttach))
-		assert.NotContains(t, caps.Actions, string(ActionPortAccess))
+		assert.Contains(t, caps.Actions, string(ActionPortAccess))
 		assert.Contains(t, caps.Actions, string(ActionRead))
 		assert.Contains(t, caps.Actions, string(ActionDelete))
 		assert.Contains(t, caps.Actions, string(ActionLifecycle))
@@ -115,7 +118,7 @@ func TestCrossMemberAttach_Matrix(t *testing.T) {
 		batch := f.authz.ComputeCapabilitiesBatch(ctx, admin, []Resource{memberAgent, adminAgent}, "agent")
 		require.Len(t, batch, 2)
 		assert.NotContains(t, batch[0].Actions, string(ActionAttach))
-		assert.NotContains(t, batch[0].Actions, string(ActionPortAccess))
+		assert.Contains(t, batch[0].Actions, string(ActionPortAccess))
 		assert.Contains(t, batch[1].Actions, string(ActionAttach))
 		assert.Contains(t, batch[1].Actions, string(ActionPortAccess))
 	})
@@ -195,10 +198,88 @@ func TestCrossMemberAttach_UATScopes(t *testing.T) {
 		_, _, err := srv.uatService.CreateToken(rs4MintContext(ownerID), ownerID, "ci", project.ID,
 			[]string{store.UATScopeAgentManage}, nil)
 		require.NoError(t, err)
-
-		_, _, err = srv.uatService.CreateToken(rs4MintContext(ownerID), ownerID, "attach", project.ID,
-			[]string{"agent:attach"}, nil)
-		assert.ErrorIs(t, err, ErrUATScopeViolation,
-			"owner role no longer carries agent.attach, so an explicit attach token exceeds issuer authority")
 	})
+
+	// ptone/scion#2092: explicit attach selection is relationship-eligible
+	// (owner/ancestor) and requires no existing target, so a project owner
+	// can mint an explicit agent:attach token for their own agents.
+	t.Run("project owner can mint explicit attach for own agents", func(t *testing.T) {
+		srv, s := testServer(t)
+		ctx := context.Background()
+		project := &store.Project{ID: tid("uat-xattach-project-2"), Name: "UAT XAttach 2", Slug: "uat-xattach-2"}
+		require.NoError(t, s.CreateProject(ctx, project))
+		ownerID := tid("uat-xattach-owner-2")
+		createTestUserWithProjectRole(t, s, ownerID, "uat-owner-2@test.com", project.ID, store.ProjectRoleOwner)
+
+		_, _, err := srv.uatService.CreateToken(rs4MintContext(ownerID), ownerID, "attach", project.ID,
+			[]string{"agent:attach"}, nil)
+		require.NoError(t, err, "project owner should be able to select explicit attach for their own agents")
+
+		// An explicit port-access token is likewise mintable by a project
+		// owner. (Mint eligibility for this selector is governed by the
+		// relationship-based mint eligibility rules, not pinned here.)
+		_, _, err = srv.uatService.CreateToken(rs4MintContext(ownerID), ownerID, "ports", project.ID,
+			[]string{"agent:port_access"}, nil)
+		assert.NoError(t, err, "project owner should be able to select explicit port_access")
+	})
+}
+
+// TestOwnerPortAccess_OpenOnlyNotManage pins the scope of the port-access
+// grant owners and admins carry: it opens a member's
+// already-exposed ports through the proxy and nothing else. Registering,
+// removing or tunnelling ports needs hub-level port_access, and the
+// terminal-level actions stay behind agent.attach.
+func TestOwnerPortAccess_OpenOnlyNotManage(t *testing.T) {
+	srv, s, alice, _, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+
+	bob := makeProjectMemberUser(t, s, project, tid("user-bob-portscope"), "Bob", store.GroupMemberRoleOwner)
+	createTestUserWithProjectRole(t, s, bob.ID, bob.Email, project.ID, store.ProjectRoleOwner)
+	carol := makeProjectMemberUser(t, s, project, tid("user-carol-portscope"), "Carol", store.GroupMemberRoleMember)
+	createTestUserWithProjectRole(t, s, carol.ID, carol.Email, project.ID, store.ProjectRoleMember)
+
+	agent := &store.Agent{
+		ID: tid("alice-agent-portscope"), Slug: "alice-agent-portscope", Name: "Alice Agent",
+		ProjectID: project.ID, OwnerID: alice.ID, Phase: string(state.PhaseRunning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	base := "/api/v1/agents/" + agent.ID + "/ports"
+
+	// Opening a port: the owner passes authorization (404 because nothing is
+	// exposed on this test agent); a plain member is refused.
+	rec := doRequestAsUser(t, srv, bob, http.MethodGet, base+"/8080/proxy/", nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "owner must pass port authorization: %s", rec.Body.String())
+	rec = doRequestAsUser(t, srv, carol, http.MethodGet, base+"/8080/proxy/", nil)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "member must not open another member's port: %s", rec.Body.String())
+
+	// Managing ports stays out of reach for the owner.
+	for _, tc := range []struct{ method, path string }{
+		{http.MethodPost, base},
+		{http.MethodDelete, base},
+		{http.MethodDelete, base + "/8080"},
+	} {
+		rec := doRequestAsUser(t, srv, bob, tc.method, tc.path, map[string]any{"port": 8080})
+		assert.Equal(t, http.StatusForbidden, rec.Code,
+			"owner must not manage a member's ports (%s %s): %s", tc.method, tc.path, rec.Body.String())
+	}
+
+	// The tunnel checks for a WebSocket upgrade before authorizing, so send
+	// the handshake headers to reach the port-management gate.
+	token, _, _, err := srv.userTokenService.GenerateTokenPair(bob.ID, bob.Email, bob.DisplayName, bob.Role, ClientTypeWeb)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodGet, base+"/tunnel", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+	tunnel := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(tunnel, req)
+	assert.Equal(t, http.StatusForbidden, tunnel.Code, "owner must not open a member's port tunnel: %s", tunnel.Body.String())
+
+	// And port access grants nothing terminal-level.
+	for _, action := range []string{"exec", "env"} {
+		rec := doRequestAsUser(t, srv, bob, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+action, map[string]any{})
+		assert.Equal(t, http.StatusForbidden, rec.Code, "owner must not %s a member's agent: %s", action, rec.Body.String())
+	}
 }

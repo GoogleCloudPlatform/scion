@@ -110,8 +110,17 @@ func runDoctor() error {
 	hubChecks = append(hubChecks, d4)
 	printCheck(d4.Name, d4.Status, d4.Message, d4.Remediation)
 
-	// D5: NFS Mount Status
-	d5 := checkDoctorNFSMounts(hubEP, hubConnected, hubClient)
+	// D5: NFS Mount Status (local check against this host's global
+	// settings and mount table; read-only)
+	nfsSettings, _, nfsErr := config.LoadGlobalSettings()
+	d5 := scionruntime.CheckResult{
+		Name:    "nfs-mounts",
+		Status:  "warn",
+		Message: fmt.Sprintf("Could not load settings to check NFS: %v", nfsErr),
+	}
+	if nfsErr == nil {
+		d5 = checkDoctorNFSMounts(nfsSettings, defaultNFSDoctorProbe())
+	}
 	hubChecks = append(hubChecks, d5)
 	printCheck(d5.Name, d5.Status, d5.Message, d5.Remediation)
 
@@ -625,41 +634,6 @@ func checkDoctorAgentHealth(hubEP string, hubConnected bool, client hubclient.Cl
 		Name:    "agent-health",
 		Status:  "pass",
 		Message: fmt.Sprintf("All %d agent(s) healthy", len(resp.Agents)),
-	}
-}
-
-// checkDoctorNFSMounts performs D5: NFS mount status check.
-func checkDoctorNFSMounts(hubEP string, hubConnected bool, client hubclient.Client) scionruntime.CheckResult {
-	if hubEP == "" {
-		return scionruntime.CheckResult{
-			Name:        "nfs-mounts",
-			Status:      "skip",
-			Message:     "No Hub endpoint configured",
-			Remediation: "Set SCION_HUB_ENDPOINT or use --hub flag",
-		}
-	}
-	if !hubConnected {
-		return scionruntime.CheckResult{
-			Name:    "nfs-mounts",
-			Status:  "skip",
-			Message: "Skipped (Hub unreachable)",
-		}
-	}
-	if client == nil {
-		return scionruntime.CheckResult{
-			Name:    "nfs-mounts",
-			Status:  "skip",
-			Message: "Skipped (Hub client not available)",
-		}
-	}
-
-	// NFS health info would come from broker capabilities if reported.
-	// Currently the broker heartbeat protocol does not expose NFS-specific
-	// health data, so we cannot evaluate this check.
-	return scionruntime.CheckResult{
-		Name:    "nfs-mounts",
-		Status:  "skip",
-		Message: "NFS health not yet reported by broker API",
 	}
 }
 

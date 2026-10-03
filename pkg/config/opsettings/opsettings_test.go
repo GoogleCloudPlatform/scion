@@ -32,7 +32,7 @@ import (
 func TestRegistryHasAllSections(t *testing.T) {
 	expected := []string{"access", "lifecycle", "maintenance", "messaging",
 		"telemetry", "agent_defaults", "endpoints", "github_app", "notifications",
-		"project_defaults", "auto_expose_ports", "quotas", "federation", "experiments"}
+		"project_defaults", "auto_expose_ports", "quotas", "agent_secrets", "federation", "experiments"}
 	for _, name := range expected {
 		if SectionByName(name) == nil {
 			t.Errorf("section %q not found in registry", name)
@@ -117,6 +117,7 @@ func TestOwningSection(t *testing.T) {
 		{"server.notification_channels", "notifications"},
 		{"auto_expose_ports.enabled", "auto_expose_ports"},
 		{"quotas.enforce_broker_quotas", "quotas"},
+		{"agent_secrets.user_scope_only", "agent_secrets"},
 		{"server.federation.enabled", "federation"},
 		{"server.federation.trusted_issuers", "federation"},
 		{"server.federation.algorithms", "federation"},
@@ -232,6 +233,9 @@ func TestValidateValidDoc(t *testing.T) {
 		{"quotas", `{"enforce_broker_quotas":true}`},
 		{"quotas", `{"enforce_broker_quotas":false}`},
 		{"quotas", `{}`},
+		{"agent_secrets", `{"user_scope_only":true}`},
+		{"agent_secrets", `{"user_scope_only":false}`},
+		{"agent_secrets", `{}`},
 		{"federation", `{"enabled":true,"trusted_issuers":[{"issuer_url":"https://hub.example.com","issuer_type":"hub"}],"algorithms":["RS256"]}`},
 		{"federation", `{"enabled":false}`},
 		{"federation", `{}`},
@@ -263,6 +267,8 @@ func TestValidateInvalidDoc(t *testing.T) {
 		{"project_defaults", `{"unknown_field":true}`, "additional property"},
 		{"quotas", `{"enforce_broker_quotas":"yes"}`, "wrong type for boolean"},
 		{"quotas", `{"unknown_field":true}`, "additional property"},
+		{"agent_secrets", `{"user_scope_only":"yes"}`, "wrong type for boolean"},
+		{"agent_secrets", `{"unknown_field":true}`, "additional property"},
 		{"federation", `{"trusted_issuers":[{"issuer_url":""}]}`, "empty issuer_url (minLength)"},
 		{"federation", `{"algorithms":["INVALID"]}`, "invalid algorithm enum"},
 		{"federation", `{"trusted_issuers":[{"issuer_type":"unknown"}]}`, "invalid issuer_type enum"},
@@ -945,6 +951,7 @@ func TestClassifyKeys_AllLayer0Prefixes(t *testing.T) {
 		"server.secrets",
 		"server.storage",
 		"server.workspace_storage",
+		"server.workspace_storage.nfs.auto_mount",
 		"server.shared_dir_storage",
 		"server.shared_dir_storage.nfs",
 		"server.mode",
@@ -1329,6 +1336,65 @@ func TestQuotasEmptyExtract(t *testing.T) {
 	}
 }
 
+// TestAgentSecretsKoanfRoundTrip verifies that agent_secrets can be
+// extracted from koanf and loaded back without data loss.
+func TestAgentSecretsKoanfRoundTrip(t *testing.T) {
+	k := koanf.New(".")
+	err := k.Load(confmap.Provider(map[string]interface{}{
+		"agent_secrets.user_scope_only": true,
+	}, "."), nil)
+	if err != nil {
+		t.Fatalf("load koanf: %v", err)
+	}
+
+	// Extract the section.
+	raw, err := ExtractSectionFromKoanf(k, "agent_secrets")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+
+	var doc map[string]interface{}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if doc["user_scope_only"] != true {
+		t.Errorf("expected user_scope_only=true in extracted doc, got %v", doc["user_scope_only"])
+	}
+
+	// Reload into a fresh koanf.
+	sections := map[string]json.RawMessage{
+		"agent_secrets": raw,
+	}
+	reloaded, err := LoadSectionsIntoKoanf(sections)
+	if err != nil {
+		t.Fatalf("load sections: %v", err)
+	}
+
+	if !reloaded.Exists("agent_secrets.user_scope_only") {
+		t.Fatal("expected agent_secrets.user_scope_only to exist in reloaded koanf")
+	}
+	if reloaded.Bool("agent_secrets.user_scope_only") != true {
+		t.Errorf("expected agent_secrets.user_scope_only=true, got %v", reloaded.Get("agent_secrets.user_scope_only"))
+	}
+}
+
+// TestAgentSecretsEmptyExtract verifies that ExtractSectionFromKoanf returns
+// an empty doc when agent_secrets is not set.
+func TestAgentSecretsEmptyExtract(t *testing.T) {
+	k := koanf.New(".")
+	raw, err := ExtractSectionFromKoanf(k, "agent_secrets")
+	if err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	var doc map[string]interface{}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(doc) != 0 {
+		t.Errorf("expected empty doc for absent agent_secrets, got %v", doc)
+	}
+}
+
 // TestRuntimesKoanfRoundTrip verifies that runtimes can be extracted from
 // koanf and loaded back without data loss (map-of-objects section).
 func TestRuntimesKoanfRoundTrip(t *testing.T) {
@@ -1552,6 +1618,26 @@ func TestMapSectionsSchemaValidation(t *testing.T) {
 		t.Errorf("expected valid runtimes doc, got errors: %v", errs)
 	}
 
+	// Valid priority_class_name on a kubernetes runtime entry.
+	errs = Validate("runtimes", json.RawMessage(`{"k8s": {"type": "kubernetes", "priority_class_name": "scion-agent-priority"}}`))
+	if len(errs) > 0 {
+		t.Errorf("expected valid priority_class_name to pass, got errors: %v", errs)
+	}
+
+	// An empty priority_class_name means unset and must also pass — this
+	// route (the admin settings API) has no DNS-1123 check of its own
+	// before buildPod, so the schema is the only gate.
+	errs = Validate("runtimes", json.RawMessage(`{"k8s": {"type": "kubernetes", "priority_class_name": ""}}`))
+	if len(errs) > 0 {
+		t.Errorf("expected empty priority_class_name to pass, got errors: %v", errs)
+	}
+
+	// Invalid priority_class_name must fail.
+	errs = Validate("runtimes", json.RawMessage(`{"k8s": {"type": "kubernetes", "priority_class_name": "Not_A_Valid_Name"}}`))
+	if len(errs) == 0 {
+		t.Error("expected invalid priority_class_name to fail validation")
+	}
+
 	// Valid profiles doc.
 	errs = Validate("profiles", json.RawMessage(`{"default": {"runtime": "cloudrun"}}`))
 	if len(errs) > 0 {
@@ -1611,6 +1697,31 @@ func TestKoanfKeyToEnvSuffix(t *testing.T) {
 		got := koanfKeyToEnvSuffix(tt.key)
 		if got != tt.want {
 			t.Errorf("koanfKeyToEnvSuffix(%q) = %q, want %q", tt.key, got, tt.want)
+		}
+	}
+}
+
+// TestSharedDirKeysSchemaValidation verifies the runtimes and profiles
+// section schemas accept shared_dir_storage_class / shared_dir_size as
+// strings and reject a non-string shared_dir_size.
+func TestSharedDirKeysSchemaValidation(t *testing.T) {
+	valid := map[string]string{
+		"runtimes": `{"gke": {"type": "kubernetes", "shared_dir_storage_class": "standard-rwx", "shared_dir_size": "10Gi"}}`,
+		"profiles": `{"gke": {"runtime": "gke", "shared_dir_storage_class": "standard-rwx", "shared_dir_size": "10Gi"}}`,
+	}
+	for sec, doc := range valid {
+		if errs := Validate(sec, json.RawMessage(doc)); len(errs) > 0 {
+			t.Errorf("%s: expected string shared_dir_* keys to be valid, got errors: %v", sec, errs)
+		}
+	}
+
+	invalid := map[string]string{
+		"runtimes": `{"gke": {"type": "kubernetes", "shared_dir_size": 10}}`,
+		"profiles": `{"gke": {"runtime": "gke", "shared_dir_size": 10}}`,
+	}
+	for sec, doc := range invalid {
+		if errs := Validate(sec, json.RawMessage(doc)); len(errs) == 0 {
+			t.Errorf("%s: expected a numeric shared_dir_size to be rejected", sec)
 		}
 	}
 }

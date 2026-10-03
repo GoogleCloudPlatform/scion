@@ -80,6 +80,11 @@ func ProjectID(v uuid.UUID) predicate.UserAccessToken {
 	return predicate.UserAccessToken(sql.FieldEQ(FieldProjectID, v))
 }
 
+// BoundaryKind applies equality check predicate on the "boundary_kind" field. It's identical to BoundaryKindEQ.
+func BoundaryKind(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldEQ(FieldBoundaryKind, v))
+}
+
 // Scopes applies equality check predicate on the "scopes" field. It's identical to ScopesEQ.
 func Scopes(v string) predicate.UserAccessToken {
 	return predicate.UserAccessToken(sql.FieldEQ(FieldScopes, v))
@@ -398,6 +403,81 @@ func ProjectIDLT(v uuid.UUID) predicate.UserAccessToken {
 // ProjectIDLTE applies the LTE predicate on the "project_id" field.
 func ProjectIDLTE(v uuid.UUID) predicate.UserAccessToken {
 	return predicate.UserAccessToken(sql.FieldLTE(FieldProjectID, v))
+}
+
+// ProjectIDIsNil applies the IsNil predicate on the "project_id" field.
+func ProjectIDIsNil() predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldIsNull(FieldProjectID))
+}
+
+// ProjectIDNotNil applies the NotNil predicate on the "project_id" field.
+func ProjectIDNotNil() predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldNotNull(FieldProjectID))
+}
+
+// BoundaryKindEQ applies the EQ predicate on the "boundary_kind" field.
+func BoundaryKindEQ(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldEQ(FieldBoundaryKind, v))
+}
+
+// BoundaryKindNEQ applies the NEQ predicate on the "boundary_kind" field.
+func BoundaryKindNEQ(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldNEQ(FieldBoundaryKind, v))
+}
+
+// BoundaryKindIn applies the In predicate on the "boundary_kind" field.
+func BoundaryKindIn(vs ...string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldIn(FieldBoundaryKind, vs...))
+}
+
+// BoundaryKindNotIn applies the NotIn predicate on the "boundary_kind" field.
+func BoundaryKindNotIn(vs ...string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldNotIn(FieldBoundaryKind, vs...))
+}
+
+// BoundaryKindGT applies the GT predicate on the "boundary_kind" field.
+func BoundaryKindGT(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldGT(FieldBoundaryKind, v))
+}
+
+// BoundaryKindGTE applies the GTE predicate on the "boundary_kind" field.
+func BoundaryKindGTE(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldGTE(FieldBoundaryKind, v))
+}
+
+// BoundaryKindLT applies the LT predicate on the "boundary_kind" field.
+func BoundaryKindLT(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldLT(FieldBoundaryKind, v))
+}
+
+// BoundaryKindLTE applies the LTE predicate on the "boundary_kind" field.
+func BoundaryKindLTE(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldLTE(FieldBoundaryKind, v))
+}
+
+// BoundaryKindContains applies the Contains predicate on the "boundary_kind" field.
+func BoundaryKindContains(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldContains(FieldBoundaryKind, v))
+}
+
+// BoundaryKindHasPrefix applies the HasPrefix predicate on the "boundary_kind" field.
+func BoundaryKindHasPrefix(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldHasPrefix(FieldBoundaryKind, v))
+}
+
+// BoundaryKindHasSuffix applies the HasSuffix predicate on the "boundary_kind" field.
+func BoundaryKindHasSuffix(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldHasSuffix(FieldBoundaryKind, v))
+}
+
+// BoundaryKindEqualFold applies the EqualFold predicate on the "boundary_kind" field.
+func BoundaryKindEqualFold(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldEqualFold(FieldBoundaryKind, v))
+}
+
+// BoundaryKindContainsFold applies the ContainsFold predicate on the "boundary_kind" field.
+func BoundaryKindContainsFold(v string) predicate.UserAccessToken {
+	return predicate.UserAccessToken(sql.FieldContainsFold(FieldBoundaryKind, v))
 }
 
 // ScopesEQ applies the EQ predicate on the "scopes" field.

@@ -29,6 +29,11 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import type { RuntimeBroker, GCPServiceAccount } from '../../shared/types.js';
+import { formatInstantWithZone, isValidTimeZone } from '../../utils/time.js';
+import '../shared/timezone-picker.js';
+import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import './admin-experiments.js';
 
 // ── Type definitions matching the Go API response ──
 
@@ -242,12 +247,15 @@ interface ServerConfigResponse {
   default_max_agent_role?: string;
   default_agent_role?: string;
   default_runtime_broker?: string;
+  default_timezone?: string;
   default_gcp_identity_mode?: string;
   default_gcp_identity_service_account_id?: string;
 
   auto_expose_ports?: { enabled?: boolean };
 
   quotas?: { enforce_broker_quotas?: boolean };
+
+  agent_secrets?: { user_scope_only?: boolean };
 
   // Settings-DB metadata (postgres mode only; absent in file/SQLite mode)
   settings_tier?: 'db' | 'file';
@@ -371,6 +379,8 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   'auto_expose_ports.enabled': 'Auto-Expose Ports Enabled',
   // quotas section
   'quotas.enforce_broker_quotas': 'Enforce Broker Agent Quotas',
+  // agent_secrets section
+  'agent_secrets.user_scope_only': 'Agent Secrets: Profile Scope Only',
   // telemetry section
   'telemetry.enabled': 'Telemetry Enabled',
   'telemetry.cloud.enabled': 'Cloud Export Enabled',
@@ -397,6 +407,7 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   default_max_agent_role: 'Default Maximum Agent Role',
   default_agent_role: 'Default Agent Role',
   default_runtime_broker: 'Default Runtime Broker',
+  default_timezone: 'Default Timezone',
   default_gcp_identity_mode: 'Default GCP Identity Mode',
   default_gcp_identity_service_account_id: 'Default GCP Identity Service Account',
   // endpoints section
@@ -425,6 +436,9 @@ const hasOwn = (obj: Record<string, unknown>, key: string): boolean =>
 
 @customElement('scion-page-admin-server-config')
 export class ScionPageAdminServerConfig extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @state() private loading = true;
   @state() private saving = false;
   @state() private error: string | null = null;
@@ -484,6 +498,12 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private defaultAgentRole = '';
   @state() private defaultRuntimeBroker = '';
   @state() private runtimeBrokers: RuntimeBroker[] = [];
+  // Agent container timezone (agent_defaults.default_timezone). Empty means UTC.
+  @state() private defaultTimezone = '';
+
+  private get defaultTimezoneInvalid(): boolean {
+    return this.defaultTimezone !== '' && !isValidTimeZone(this.defaultTimezone);
+  }
 
   // Default GCP identity (hub-wide fallback)
   @state() private defaultGCPIdentityMode = '';
@@ -553,6 +573,9 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // Quotas
   @state() private enforceBrokerQuotas = true;
+
+  // Agent Secrets
+  @state() private agentSecretsUserScopeOnly = false;
 
   // Telemetry
   @state() private telemetryEnabled = false;
@@ -902,6 +925,18 @@ export class ScionPageAdminServerConfig extends LitElement {
       font-size: 0.875rem;
       border-color: var(--scion-border, #e2e8f0);
       background: var(--scion-surface, #ffffff);
+    }
+
+    /* This local override replaces the app-wide --sl-input-font-size-*
+       variable with a fixed value, which would otherwise defeat the
+       pointer:coarse 16px floor (see pkg/hub/web.go / web/index.html) on
+       touch — re-floor it here too, desktop unchanged. */
+    @media (pointer: coarse) {
+      sl-input::part(base),
+      sl-select::part(combobox),
+      sl-textarea::part(base) {
+        font-size: max(16px, 0.875rem);
+      }
     }
 
     sl-input::part(input),
@@ -1501,6 +1536,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.defaultMaxAgentRole = data.default_max_agent_role || '';
     this.defaultAgentRole = data.default_agent_role || '';
     this.defaultRuntimeBroker = data.default_runtime_broker || '';
+    this.defaultTimezone = data.default_timezone || '';
     this.defaultGCPIdentityMode = data.default_gcp_identity_mode || '';
     this.defaultGCPIdentitySAID = data.default_gcp_identity_service_account_id || '';
 
@@ -1612,6 +1648,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     // Quotas — absent means enforced (fail-safe default).
     const quotas = data.quotas;
     this.enforceBrokerQuotas = quotas?.enforce_broker_quotas ?? true;
+
+    // Agent Secrets — absent means permissive (agents may write project scope).
+    this.agentSecretsUserScopeOnly = data.agent_secrets?.user_scope_only ?? false;
 
     // Runtimes, profiles, harness_configs — deep-copy into editable state
     this.runtimes = data.runtimes ? JSON.parse(JSON.stringify(data.runtimes)) : {};
@@ -1816,6 +1855,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('default_runtime_broker')) {
       payload.default_runtime_broker = this.defaultRuntimeBroker || '';
     }
+    if (ok('default_timezone')) {
+      payload.default_timezone = this.defaultTimezone || '';
+    }
     if (ok('default_gcp_identity_mode')) {
       payload.default_gcp_identity_mode = this.defaultGCPIdentityMode || '';
     }
@@ -1926,6 +1968,13 @@ export class ScionPageAdminServerConfig extends LitElement {
       };
     }
 
+    // Agent Secrets — Layer-1
+    if (ok('agent_secrets.user_scope_only')) {
+      payload.agent_secrets = {
+        user_scope_only: this.agentSecretsUserScopeOnly,
+      };
+    }
+
     // Runtimes, profiles, harness_configs — always send edited state (including
     // empty objects) so the backend can distinguish "no change" from "cleared".
     if (ok('runtimes')) payload.runtimes = this.runtimes;
@@ -1939,15 +1988,17 @@ export class ScionPageAdminServerConfig extends LitElement {
     const payload: Record<string, unknown> = {};
     const ok = (key: string) => this.readOnlyReason(key) === null;
 
-    // General
-    if (ok('active_profile')) payload.active_profile = this.activeProfile || undefined;
-    if (ok('default_template')) payload.default_template = this.defaultTemplate || undefined;
+    // General — send "" (not `|| undefined`) so clearing a field reaches
+    // the backend as an explicit empty string, which deletes the key from
+    // settings.yaml. An omitted key means "no change". See ptone/scion#860
+    // and ptone/scion#2535.
+    if (ok('active_profile')) payload.active_profile = this.activeProfile || '';
+    if (ok('default_template')) payload.default_template = this.defaultTemplate || '';
     if (ok('default_harness_config'))
-      payload.default_harness_config = this.resolvedHarnessConfig || undefined;
-    if (ok('default_harness_auth'))
-      payload.default_harness_auth = this.defaultHarnessAuth || undefined;
-    if (ok('image_registry')) payload.image_registry = this.imageRegistry || undefined;
-    if (ok('workspace_path')) payload.workspace_path = this.workspacePath || undefined;
+      payload.default_harness_config = this.resolvedHarnessConfig || '';
+    if (ok('default_harness_auth')) payload.default_harness_auth = this.defaultHarnessAuth || '';
+    if (ok('image_registry')) payload.image_registry = this.imageRegistry || '';
+    if (ok('workspace_path')) payload.workspace_path = this.workspacePath || '';
 
     // Default agent limits — send zero/empty values so the backend can clear
     // the field (delete from settings.yaml). Using `|| undefined` here would
@@ -1993,13 +2044,31 @@ export class ScionPageAdminServerConfig extends LitElement {
       payload.default_thinking_level = this.defaultThinkingLevel ?? 0;
     }
     if (ok('default_max_agent_role')) {
-      payload.default_max_agent_role = this.defaultMaxAgentRole || undefined;
+      payload.default_max_agent_role = this.defaultMaxAgentRole || '';
     }
     if (ok('default_agent_role')) {
-      payload.default_agent_role = this.defaultAgentRole || undefined;
+      payload.default_agent_role = this.defaultAgentRole || '';
     }
     if (ok('default_runtime_broker')) {
-      payload.default_runtime_broker = this.defaultRuntimeBroker || undefined;
+      payload.default_runtime_broker = this.defaultRuntimeBroker || '';
+    }
+    // Sent unconditionally (not `|| undefined`): an explicit "" clears the
+    // field server-side (admin_settings.go's `DefaultTimezone *string`
+    // check), matching the default-agent-limits precedent above
+    // (ptone/scion#860). `|| undefined` would omit the key on clear and
+    // leave the stored value unchanged.
+    if (ok('default_timezone')) {
+      payload.default_timezone = this.defaultTimezone || '';
+    }
+    // GCP identity defaults: same "" = delete contract. The service account
+    // only applies in "assign" mode, so it is cleared for any other mode
+    // (mirrors buildLayer1Payload).
+    if (ok('default_gcp_identity_mode')) {
+      payload.default_gcp_identity_mode = this.defaultGCPIdentityMode || '';
+    }
+    if (ok('default_gcp_identity_service_account_id')) {
+      payload.default_gcp_identity_service_account_id =
+        this.defaultGCPIdentityMode === 'assign' ? this.defaultGCPIdentitySAID || '' : '';
     }
 
     // Server
@@ -2182,6 +2251,13 @@ export class ScionPageAdminServerConfig extends LitElement {
       };
     }
 
+    // Agent Secrets
+    if (ok('agent_secrets.user_scope_only')) {
+      payload.agent_secrets = {
+        user_scope_only: this.agentSecretsUserScopeOnly,
+      };
+    }
+
     // Runtimes, profiles, harness_configs — always send edited state (including
     // empty objects) so the backend can distinguish "no change" from "cleared".
     if (ok('runtimes')) payload.runtimes = this.runtimes;
@@ -2240,13 +2316,21 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private async handleSaveError(res: Response): Promise<void> {
-    let body: Record<string, unknown>;
+    let parsed: unknown;
     try {
-      body = (await res.json()) as Record<string, unknown>;
+      parsed = await res.json();
     } catch {
       this.error = 'Failed to save settings';
       return;
     }
+    // A JSON body that is not an object (null, a bare string/number, an
+    // array) carries no error code or message to read, so treat it like a
+    // non-JSON body rather than dereferencing it below.
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      this.error = 'Failed to save settings';
+      return;
+    }
+    const body = parsed as Record<string, unknown>;
 
     switch (body.error) {
       case 'validation_failed':
@@ -2269,12 +2353,30 @@ export class ScionPageAdminServerConfig extends LitElement {
         break;
       }
 
-      default:
+      default: {
+        // Pre-existing bug, fixed here because tz-refactor task 12's AC
+        // needs it ("an invalid name shows the server's 422 message"): the
+        // Go writeError() helper (pkg/hub/errors.go), which backs every
+        // plain field-validation 400/422 on this page — default_timezone,
+        // agent_endpoint, default_user_role — responds with
+        // {error: {code, message, details}}, not the flat {error: "<code
+        // string>", ...} shape the cases above handle. body.error is an
+        // object there, so it never matched a case above, body.message is
+        // undefined (the message is nested at body.error.message, not
+        // top-level), and typeof body.error === 'string' is false, so this
+        // fell through to the generic fallback and the real message was
+        // silently lost.
+        const nestedError =
+          typeof body.error === 'object' && body.error !== null
+            ? (body.error as Record<string, unknown>)
+            : null;
         this.error =
           (body.message as string) ||
+          (nestedError?.message as string) ||
           (typeof body.error === 'string' ? body.error : null) ||
           'An unexpected error occurred';
         break;
+      }
     }
   }
 
@@ -2384,7 +2486,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         ${meta.updated_at
           ? html`<span class="section-meta-item">
               <sl-icon name="clock"></sl-icon>
-              ${new Date(meta.updated_at).toLocaleString()}
+              ${formatInstantWithZone(meta.updated_at) || meta.updated_at}
             </span>`
           : nothing}
       </div>
@@ -2703,6 +2805,9 @@ export class ScionPageAdminServerConfig extends LitElement {
         <sl-tab slot="nav" panel="gcp-identity" ?active=${this.activeTab === 'gcp-identity'}
           >GCP Identity</sl-tab
         >
+        <sl-tab slot="nav" panel="experiments" ?active=${this.activeTab === 'experiments'}
+          >Experiments</sl-tab
+        >
 
         <sl-tab-panel name="general">${this.renderGeneralTab()}</sl-tab-panel>
         <sl-tab-panel name="hub-server">${this.renderHubServerTab()}</sl-tab-panel>
@@ -2713,34 +2818,43 @@ export class ScionPageAdminServerConfig extends LitElement {
         <sl-tab-panel name="telemetry">${this.renderTelemetryTab()}</sl-tab-panel>
         <sl-tab-panel name="github-app">${this.renderGitHubAppTab()}</sl-tab-panel>
         <sl-tab-panel name="gcp-identity">${this.renderGCPIdentityTab()}</sl-tab-panel>
+        <sl-tab-panel name="experiments">
+          <scion-admin-experiments
+            .active=${this.activeTab === 'experiments'}
+          ></scion-admin-experiments>
+        </sl-tab-panel>
       </sl-tab-group>
 
-      ${this.hasHarnessConfigErrors
-        ? html`<div class="error" style="margin-bottom:0.75rem;">
-            Cannot save: one or more harness config entries contain invalid JSON. Fix the errors on
-            the Runtimes &amp; Profiles tab before saving.
-          </div>`
+      ${this.activeTab !== 'experiments'
+        ? html`
+            ${this.hasHarnessConfigErrors
+              ? html`<div class="error" style="margin-bottom:0.75rem;">
+                  Cannot save: one or more harness config entries contain invalid JSON. Fix the
+                  errors on the Runtimes &amp; Profiles tab before saving.
+                </div>`
+              : nothing}
+            <div class="actions">
+              <sl-button
+                variant="primary"
+                ?loading=${this.saving}
+                ?disabled=${this.hasHarnessConfigErrors}
+                @click=${() => {
+                  void this.handleSave();
+                }}
+              >
+                Save & Reload
+              </sl-button>
+              <sl-button
+                variant="default"
+                @click=${() => {
+                  void this.loadConfig();
+                }}
+              >
+                Reset
+              </sl-button>
+            </div>
+          `
         : nothing}
-      <div class="actions">
-        <sl-button
-          variant="primary"
-          ?loading=${this.saving}
-          ?disabled=${this.hasHarnessConfigErrors}
-          @click=${() => {
-            void this.handleSave();
-          }}
-        >
-          Save & Reload
-        </sl-button>
-        <sl-button
-          variant="default"
-          @click=${() => {
-            void this.loadConfig();
-          }}
-        >
-          Reset
-        </sl-button>
-      </div>
     `;
   }
 
@@ -2768,7 +2882,9 @@ export class ScionPageAdminServerConfig extends LitElement {
           ${this.scionBuildTime
             ? html`<div class="version-item">
                 <span class="version-label">Build Time</span>
-                <span class="version-value">${this.scionBuildTime}</span>
+                <span class="version-value" title=${this.scionBuildTime}
+                  >${formatInstantWithZone(this.scionBuildTime) || this.scionBuildTime}</span
+                >
               </div>`
             : nothing}
           <div class="version-actions">
@@ -3269,19 +3385,47 @@ export class ScionPageAdminServerConfig extends LitElement {
                   )}
                 </div>
                 <div class="form-field">
+                  <label>Default Timezone</label>
+                  <span class="hint"
+                    >Timezone (<code>TZ</code>) for agent containers that have no pinned timezone
+                    and no <code>TZ</code> environment variable. Empty means UTC. Does not affect
+                    how times are displayed.</span
+                  >
+                  ${this.renderFieldValue(
+                    'default_timezone',
+                    this.defaultTimezone || 'UTC (default)',
+                    html`${this.renderEnvBadge('default_timezone')}<scion-timezone-picker
+                        label="Default Timezone"
+                        placeholder="Search for a timezone..."
+                        empty-label="UTC"
+                        .value=${this.defaultTimezone}
+                        @timezone-change=${(e: CustomEvent<TimezoneChangeDetail>) => {
+                          this.defaultTimezone = e.detail.timezone;
+                        }}
+                      ></scion-timezone-picker>`
+                  )}
+                  ${this.defaultTimezoneInvalid
+                    ? html`<div class="error">
+                        "${this.defaultTimezone}" is not a recognized timezone. Saving will be
+                        rejected.
+                      </div>`
+                    : nothing}
+                </div>
+                <div class="form-field">
                   <label>Default GCP Identity Mode</label>
                   <span class="hint"
                     >Hub-wide fallback GCP metadata mode for new agents, applied when neither the
                     agent create request nor the project's default GCP identity setting names one.
                     Passthrough set here applies only to agents on the hub's embedded broker; agents
-                    on any other broker get Block. Assign requires a verified hub-scoped service
-                    account and gcpIamCheckMode=enforce.</span
+                    on any other broker get Block, except on the Kubernetes runtime, which does not
+                    offer Block — those agents get Passthrough instead. Assign requires a verified
+                    hub-scoped service account and gcpIamCheckMode=enforce.</span
                   >
                   ${this.renderFieldValue(
                     'default_gcp_identity_mode',
-                    this.defaultGCPIdentityMode || 'Block (default)',
+                    this.defaultGCPIdentityMode || 'None (runtime default: Block; Passthrough on Kubernetes)',
                     html`${this.renderEnvBadge('default_gcp_identity_mode')}<sl-select
-                        placeholder="Block (default)"
+                        placeholder="None (runtime default: Block; Passthrough on Kubernetes)"
                         clearable
                         value=${this.defaultGCPIdentityMode}
                         @sl-change=${(e: Event) => {
@@ -3511,6 +3655,31 @@ export class ScionPageAdminServerConfig extends LitElement {
               >When off, agents can be started on a broker beyond its max_agents_per_broker cap.
               Usage is still counted. Manage the per-broker cap from
               <a href="/admin/quotas">Admin &gt; Quotas</a>.</span
+            >
+          </div>
+        </div>
+      </div>
+
+      <!-- Card: Agent Secrets -->
+      <div class="section">
+        <h3 class="section-title">Agent Secrets</h3>
+        <div class="form-grid">
+          <div class="form-field full-width">
+            ${this.renderFieldValue(
+              'agent_secrets.user_scope_only',
+              this.agentSecretsUserScopeOnly ? 'Enabled' : 'Disabled',
+              html`${this.renderEnvBadge('agent_secrets.user_scope_only')}<sl-switch
+                  ?checked=${this.agentSecretsUserScopeOnly}
+                  @sl-change=${(e: Event) => {
+                    this.agentSecretsUserScopeOnly = (e.target as HTMLInputElement).checked;
+                  }}
+                  >Restrict agent-written secrets to profile scope</sl-switch
+                >`
+            )}
+            <span class="hint"
+              >When on, agents (including Capture Auth) can only store secrets in the user's
+              profile. Project-scope writes from agents are rejected. Existing project secrets are
+              not removed. Users can still manage project secrets.</span
             >
           </div>
         </div>
@@ -3774,10 +3943,10 @@ export class ScionPageAdminServerConfig extends LitElement {
               >Allow agent messaging across projects</sl-switch
             >
             <span class="hint">
-              When enabled, agents in Hub mode can send direct messages to agents in other projects on
-              this Hub. The sender needs Hub mode; each destination project independently chooses
-              whether to accept external messages. Disabling takes effect for new cross-project checks
-              and delayed deliveries. Already delivered messages are not recalled.
+              When enabled, agents in Hub mode can send direct messages to agents in other projects
+              on this Hub. The sender needs Hub mode; each destination project independently chooses
+              whether to accept external messages. Disabling takes effect for new cross-project
+              checks and delayed deliveries. Already delivered messages are not recalled.
             </span>
             ${this.crossProjectMessagingError
               ? html`<div class="status-message error" style="margin-top: 0.5rem">

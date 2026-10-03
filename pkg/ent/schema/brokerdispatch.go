@@ -93,7 +93,7 @@ func (BrokerDispatch) Fields() []ent.Field {
 		field.String("initiator_principal_id").
 			Optional().
 			Nillable(),
-		// session | uat | agent | legacy_unknown — see
+		// session | uat | agent | dev_local | legacy_unknown — see
 		// store.InitiatorCredentialKind*.
 		field.String("initiator_credential_kind").
 			Optional().
@@ -114,6 +114,9 @@ func (BrokerDispatch) Indexes() []ent.Index {
 		// Drain query: WHERE broker_id=$X AND state='pending'.
 		index.Fields("broker_id", "state"),
 		index.Fields("correlation_id"),
+		// Delete start-block and engine classification (design
+		// ptone/scion#2483 §2.1): WHERE agent_id=$X AND op=$Y AND state IN (...).
+		index.Fields("agent_id", "op", "state"),
 	}
 }
 

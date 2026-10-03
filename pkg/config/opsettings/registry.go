@@ -33,6 +33,13 @@ type Section struct {
 	New        func() any
 }
 
+// dns1123SubdomainOrEmptyPattern mirrors the pattern used for
+// priority_class_name / priorityClassName in settings-v1.schema.json and
+// agent-v1.schema.json: a DNS-1123 subdomain (the Kubernetes PriorityClass
+// name format), or the empty string, which means unset to the runtime and
+// would otherwise fail the strict subdomain pattern.
+const dns1123SubdomainOrEmptyPattern = `^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
+
 // Registry is the single source of truth for Layer-0 vs Layer-1 classification.
 // Every Layer-1 section is listed here; any koanf key not owned by a section is
 // Layer-0 (bootstrap) and must not be written via the admin API.
@@ -103,6 +110,13 @@ func init() {
 				"quotas.enforce_broker_quotas",
 			},
 			New: func() any { return &QuotaSettings{} },
+		},
+		{
+			Name: "agent_secrets",
+			KoanfPaths: []string{
+				"agent_secrets.user_scope_only",
+			},
+			New: func() any { return &AgentSecretsSettings{} },
 		},
 		{
 			Name: "agent_defaults",
@@ -368,6 +382,15 @@ func compileSchemas() {
 			},
 			"additionalProperties": false,
 		},
+		// agent_secrets schema is hand-written — like quotas, it has no
+		// $defs in settings-v1.schema.json.
+		"agent_secrets": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"user_scope_only": map[string]interface{}{"type": "boolean"},
+			},
+			"additionalProperties": false,
+		},
 		// experiments schema is hand-written -- it is runtime/API-owned
 		// state with no $defs in settings-v1.schema.json (like maintenance
 		// and messaging). overrides is a map of experiment name -> bool;
@@ -447,15 +470,18 @@ func compileSchemas() {
 			"additionalProperties": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"type":                map[string]interface{}{"type": "string"},
-					"host":                map[string]interface{}{"type": "string"},
-					"context":             map[string]interface{}{"type": "string"},
-					"namespace":           map[string]interface{}{"type": "string"},
-					"env":                 map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string"}},
-					"sync":                map[string]interface{}{"type": "string"},
-					"gke":                 map[string]interface{}{"type": "boolean"},
-					"list_all_namespaces": map[string]interface{}{"type": "boolean"},
-					"cloudrun":            map[string]interface{}{"type": "object"},
+					"type":                     map[string]interface{}{"type": "string"},
+					"host":                     map[string]interface{}{"type": "string"},
+					"context":                  map[string]interface{}{"type": "string"},
+					"namespace":                map[string]interface{}{"type": "string"},
+					"env":                      map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "string"}},
+					"sync":                     map[string]interface{}{"type": "string"},
+					"gke":                      map[string]interface{}{"type": "boolean"},
+					"list_all_namespaces":      map[string]interface{}{"type": "boolean"},
+					"priority_class_name":      map[string]interface{}{"type": "string", "maxLength": 253, "pattern": dns1123SubdomainOrEmptyPattern},
+					"cloudrun":                 map[string]interface{}{"type": "object"},
+					"shared_dir_storage_class": map[string]interface{}{"type": "string"},
+					"shared_dir_size":          map[string]interface{}{"type": "string"},
 				},
 			},
 		},
@@ -488,8 +514,10 @@ func compileSchemas() {
 							},
 						},
 					},
-					"secrets":  map[string]interface{}{"type": "array"},
-					"timezone": map[string]interface{}{"type": "string"},
+					"secrets":                  map[string]interface{}{"type": "array"},
+					"timezone":                 map[string]interface{}{"type": "string"},
+					"shared_dir_storage_class": map[string]interface{}{"type": "string"},
+					"shared_dir_size":          map[string]interface{}{"type": "string"},
 				},
 			},
 		},

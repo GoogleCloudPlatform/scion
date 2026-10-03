@@ -245,6 +245,8 @@ func capabilitiesFromStrings(names []string) *store.BrokerCapabilities {
 			caps.Attach = true
 		case "reprovision":
 			caps.Reprovision = true
+		case "asynclaunch", "async_launch":
+			caps.AsyncLaunch = true
 		}
 	}
 	return caps
@@ -1102,7 +1104,7 @@ func BrokerAuthMiddleware(svc *BrokerAuthService) func(http.Handler) http.Handle
 				return
 			}
 
-			next.ServeHTTP(w, r.WithContext(ctx))
+			serveAfterAuth(w, next, r.WithContext(ctx))
 		})
 	}
 }

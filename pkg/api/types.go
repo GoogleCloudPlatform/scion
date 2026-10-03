@@ -316,10 +316,17 @@ func ValidateVolumes(volumes []VolumeMount) error {
 }
 
 type KubernetesConfig struct {
-	Context               string            `json:"context,omitempty" yaml:"context,omitempty"`
-	Namespace             string            `json:"namespace,omitempty" yaml:"namespace,omitempty"`
-	RuntimeClassName      string            `json:"runtimeClassName,omitempty" yaml:"runtimeClassName,omitempty"`
-	ServiceAccountName    string            `json:"serviceAccountName,omitempty" yaml:"serviceAccountName,omitempty"` // For Workload Identity
+	Context            string `json:"context,omitempty" yaml:"context,omitempty"`
+	Namespace          string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
+	RuntimeClassName   string `json:"runtimeClassName,omitempty" yaml:"runtimeClassName,omitempty"`
+	ServiceAccountName string `json:"serviceAccountName,omitempty" yaml:"serviceAccountName,omitempty"` // For Workload Identity
+	// PriorityClassName sets spec.priorityClassName on the agent pod. Must
+	// name a PriorityClass that already exists on the cluster — Scion does
+	// not create one. Validated as a DNS-1123 subdomain. Unset means today's
+	// behaviour (no priorityClassName, so the pod schedules at priority 0
+	// and is an ordinary preemption target). Overrides the runtime-level
+	// default set by runtimes.<name>.priority_class_name, if any.
+	PriorityClassName     string            `json:"priorityClassName,omitempty" yaml:"priorityClassName,omitempty"`
 	Resources             *K8sResources     `json:"resources,omitempty" yaml:"resources,omitempty"`
 	NodeSelector          map[string]string `json:"nodeSelector,omitempty" yaml:"nodeSelector,omitempty"`
 	Tolerations           []K8sToleration   `json:"tolerations,omitempty" yaml:"tolerations,omitempty"`
@@ -594,6 +601,11 @@ type AgentInfo struct {
 	Profile    string            `json:"profile,omitempty"`
 	Kubernetes *AgentK8sMetadata `json:"kubernetes,omitempty"`
 	Warnings   []string          `json:"warnings,omitempty"`
+	// HubOnlyEnvWarnings carries only the warnings for broker-local values
+	// of hub-only env keys (TZ) that the broker dropped for a hub-dispatched
+	// agent. They are also included in Warnings; this field lets the broker
+	// relay just these to the hub without leaking its other local warnings.
+	HubOnlyEnvWarnings []string `json:"hubOnlyEnvWarnings,omitempty"`
 
 	// ExplicitImage and ExplicitImagePullPolicy record the image /
 	// kubernetes.imagePullPolicy that the INLINE config (--config), not a
@@ -1007,7 +1019,44 @@ type StartOptions struct {
 	// time. If non-empty, the broker writes it to pre-start.d/30-project-custom
 	// before the agent container starts.
 	ProjectPreStartHookScript string
+
+	// Checkpoint, when set, is called by the runtime immediately before each
+	// resource-creating call (an async launch's pre-create gate, design
+	// t1-async-create-v11.md §3.8.3). A non-nil error stops the launch
+	// before that resource is created, and the runtime returns it (wrapped).
+	// step names the resource about to be created (e.g. "secrets",
+	// "pod_create"). Nil (the synchronous path) means no gate.
+	Checkpoint func(ctx context.Context, step string) error
+	// OnResourceCreated, when set, is called by the runtime after each true
+	// create of a launch-owned runtime resource, with the created object's
+	// identity (design §3.8.4), so an aborted launch can delete exactly what
+	// it created. Nil (the synchronous path) means nothing is recorded.
+	// Setting it also makes the caller the owner of a failed or cancelled
+	// start's cleanup: the runtime then skips its own start cleanup and
+	// leaves the reported resources to the caller. Set both hooks together.
+	OnResourceCreated func(ResourceHandle)
 }
+
+// ResourceHandle identifies one runtime resource created during a launch
+// (design t1-async-create-v11.md §3.8.4), reported by the runtime via
+// StartOptions.OnResourceCreated after each true create. UID is the
+// identity a cleanup deletes by: the Kubernetes object UID, or the
+// container ID for container runtimes. Namespace is empty for runtimes
+// that have no namespaces.
+type ResourceHandle struct {
+	Kind      string // one of the ResourceKind* constants
+	Namespace string
+	Name      string
+	UID       string
+}
+
+// ResourceHandle.Kind values.
+const (
+	ResourceKindSecret              = "secret"
+	ResourceKindSecretProviderClass = "secretproviderclass"
+	ResourceKindPod                 = "pod"
+	ResourceKindContainer           = "container"
+)
 
 type StatusEvent struct {
 	AgentID   string `json:"agent_id"`
