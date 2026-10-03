@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -297,6 +298,10 @@ func SkillResolutionFailed(w http.ResponseWriter, err *agent.SkillResolutionErro
 // 500 path while honoring others would be an arbitrary distinction, not a
 // deliberate one.
 func writeStartContextError(w http.ResponseWriter, err error) int {
+	if errors.Is(err, errSavedProfileUnresolved) {
+		writeSavedProfileUnresolved(w, err)
+		return http.StatusServiceUnavailable
+	}
 	sce, ok := err.(*startContextError)
 	if !ok {
 		RuntimeError(w, err.Error())
