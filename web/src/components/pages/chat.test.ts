@@ -1674,3 +1674,57 @@ describe('chat page — late DM peer lookups', () => {
     errorSpy.mockRestore();
   });
 });
+
+describe('conversation header More menu', () => {
+  it('folds the actions only when the full row would squeeze the title', async () => {
+    const { isCompactHeaderWidth, HEADER_ACTION_PX, HEADER_TITLE_MIN_PX } =
+      await import('./chat.js');
+    const fits = 9 * HEADER_ACTION_PX + HEADER_TITLE_MIN_PX;
+    expect(isCompactHeaderWidth(fits, 9, true)).toBe(false);
+    expect(isCompactHeaderWidth(fits - 1, 9, false)).toBe(true);
+    // Fewer actions fit in the same width.
+    expect(isCompactHeaderWidth(fits - 1, 5, false)).toBe(false);
+    // Before the header is measured, the layout decides.
+    expect(isCompactHeaderWidth(null, 9, true)).toBe(true);
+    expect(isCompactHeaderWidth(null, 9, false)).toBe(false);
+  });
+
+  it('offers every folded action of an agent DM, and runs the chosen one', () => {
+    const page = createPage();
+    page.isMobileLayout = true;
+    page.projectChimeOn = true;
+    const conv = {
+      conversationKey: 'dm:agent:a:user:u',
+      projectId: 'p1',
+      isDM: true,
+      peerKind: 'agent',
+      peerId: 'a',
+      peerName: 'Coder',
+      muted: false,
+    };
+    page.v2Conversation = conv;
+    const actions = page.headerMoreActions(conv);
+    expect(actions.map((a: { id: string }) => a.id)).toEqual([
+      'terminal',
+      'graph',
+      'promote',
+      'mute',
+      'chime',
+      'export-md',
+      'export-print',
+      'export-clipboard',
+    ]);
+    // The mobile row trades the density toggle for the back button.
+    expect(page.fullHeaderActionCount(conv)).toBe(9);
+    // Density does nothing in the mobile layout; the desktop menu offers it.
+    page.isMobileLayout = false;
+    expect(page.headerMoreActions(conv).map((a: { id: string }) => a.id)).toContain('density');
+    expect(page.fullHeaderActionCount(conv)).toBe(9);
+
+    const exportMarkdown = vi.spyOn(page, 'exportMarkdown').mockImplementation(() => {});
+    page.headerSheetOpen = true;
+    page.runHeaderMoreAction('export-md');
+    expect(exportMarkdown).toHaveBeenCalledOnce();
+    expect(page.headerSheetOpen).toBe(false);
+  });
+});
