@@ -28,10 +28,15 @@ import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vite
 import type { Agent } from '../../shared/types.js';
 import { stateManager } from '../../client/state.js';
 import type { AgentListWindow } from '../../client/agent-list-window.js';
+import { AgentDrainRunner } from '../../client/agent-drain.js';
 import {
   FakeEventSource,
   SCOPE_CAPS,
   fakeFetch,
+  holdable,
+  isGlobalAgentsList,
+  isMine,
+  isShared,
   makeAgent,
   type Fake,
 } from './__fixtures__/global-agents-endpoint.js';
@@ -66,17 +71,32 @@ async function settle(el: TestEl): Promise<void> {
   await el.updateComplete;
 }
 
-async function mount(): Promise<TestEl> {
+/** Mounts the page and returns once its first request is sent, without waiting for it. */
+async function mountUnsettled(): Promise<TestEl> {
   const el = document.createElement('scion-page-agents') as TestEl;
   (el as unknown as { pageData: unknown }).pageData = {
     path: '/agents',
     title: 'Agents',
     user: { id: 'u', email: 'u@example.com', name: 'U', role: 'member' },
   };
+  // Drain retries without a delay.
+  (el as unknown as { drainRunner: AgentDrainRunner }).drainRunner = new AgentDrainRunner({
+    retryDelayMs: 0,
+  });
   document.body.appendChild(el);
   await el.updateComplete;
+  return el;
+}
+
+async function mount(): Promise<TestEl> {
+  const el = await mountUnsettled();
   await settle(el);
   return el;
+}
+
+/** The query of a request URL. */
+function query(url: string): URLSearchParams {
+  return new URL(url, 'http://x').searchParams;
 }
 
 function unmount(el: TestEl): void {
@@ -245,6 +265,174 @@ describe('scion-page-agents — agent list window', () => {
     });
   });
 
+  describe('a legacy fallback and drain failures', () => {
+    it('a legacy server that honours phase answers a phased first request with part of the set: the whole set is drained, not marked complete from that page', async () => {
+      const agents = Array.from({ length: 1200 }, (_, i) =>
+        makeAgent(i, { phase: i % 3 === 0 ? 'stopped' : 'running' })
+      );
+      const requests: string[] = [];
+      const full: Fake = { agents, requests };
+      const stopped: Fake = { agents: agents.filter((a) => a.phase === 'stopped'), requests };
+      const legacy = (input: string | URL | Request, init?: RequestInit) => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const u = new URL(raw, 'http://localhost');
+        const phase = u.searchParams.get('phase');
+        for (const k of ['sort', 'dir', 'fit', 'stats', 'limit', 'phase']) u.searchParams.delete(k);
+        const target = phase === 'stopped' ? stopped : full;
+        return fakeFetch(target)(u.pathname + (u.search || ''), init);
+      };
+      vi.stubGlobal('fetch', vi.fn(legacy));
+      localStorage.setItem('scion-filter-agents-phase', 'stopped');
+      const el = await mount();
+      // The phased first request, then three unphased legacy pages.
+      expect(requests.length).toBe(1 + 3);
+      expect(query(requests[1]).has('cursor')).toBe(false);
+      expect(query(requests[1]).has('phase')).toBe(false);
+      expect(internals(el).agents).toHaveLength(1200);
+      expect(internals(el).agentWindow.state).toBe('held');
+      expect(internals(el).agentWindow.total).toBe(400);
+    });
+
+    it('an empty readable first drain page then a failing page is an incomplete set, not the error path', async () => {
+      const fake: Fake = {
+        agents: Array.from({ length: 1200 }, (_, i) => makeAgent(i)),
+        requests: [],
+      };
+      const inner = fakeFetch(fake);
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+          const raw =
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          const u = new URL(raw, 'http://localhost');
+          if (isGlobalAgentsList(u) && !u.searchParams.has('sort')) {
+            fake.requests.push(raw);
+            if (!u.searchParams.has('cursor')) {
+              return new Response(
+                JSON.stringify({ agents: [], nextCursor: '500', _capabilities: SCOPE_CAPS }),
+                { status: 200, headers: { 'Content-Type': 'application/json' } }
+              );
+            }
+            return new Response('{}', { status: 502 });
+          }
+          return inner(input, init);
+        })
+      );
+      localStorage.setItem('scion-filter-agents-mode', 'project');
+      const el = await mount();
+      expect(internals(el).error).toBeNull();
+      expect(internals(el).agentWindow.state).toBe('capped');
+      expect(internals(el).agentWindow.banner?.kind).toBe('failed');
+      expect(text(el)).toContain('Incomplete: loaded 0');
+    });
+  });
+
+  describe('full-view pages replace stored agents', () => {
+    it('a field missing from a later full-view page is gone from the store', async () => {
+      const fake: Fake = {
+        agents: Array.from({ length: 1200 }, (_, i) => makeAgent(i, { taskSummary: 'old task' })),
+        requests: [],
+      };
+      stubFake(fake);
+      const el = await mount();
+      expect(internals(el).agentWindow.state).toBe('paged');
+      const id = internals(el).agentWindow.items[0].id;
+      expect(stateManager.getAgent(id)?.taskSummary).toBe('old task');
+      fake.agents = fake.agents.map((a) => {
+        const { taskSummary: _dropped, ...rest } = a;
+        return rest as Agent;
+      });
+      await internals(el).agentWindow.refresh();
+      await el.updateComplete;
+      expect(stateManager.getAgent(id)).toBeDefined();
+      expect(stateManager.getAgent(id)?.taskSummary).toBeUndefined();
+    });
+  });
+
+  describe('a view change while a request is in flight', () => {
+    const phased = (n: number) =>
+      Array.from({ length: n }, (_, i) =>
+        makeAgent(i, { phase: i % 3 === 0 ? 'stopped' : 'running' })
+      );
+    const byUpdated = (dir: 'asc' | 'desc') => (a: Agent, b: Agent) =>
+      (dir === 'asc' ? 1 : -1) * (a.updated ?? '').localeCompare(b.updated ?? '');
+
+    for (const change of ['phase', 'dir'] as const) {
+      it(`a ${change} change during the first load supersedes it and loads the new view`, async () => {
+        const fake: Fake = { agents: phased(1200), requests: [] };
+        const h = holdable(fakeFetch(fake), isGlobalAgentsList);
+        h.hold();
+        vi.stubGlobal('fetch', vi.fn(h.fn));
+        const el = await mountUnsettled();
+        await vi.waitFor(() => expect(h.sent).toHaveLength(1));
+        if (change === 'phase') internals(el).setPhaseFilter('stopped');
+        else internals(el).toggleSort('updated');
+        h.release();
+        await settle(el);
+
+        expect(h.sent[0].signal?.aborted).toBe(true);
+        expect(h.sent).toHaveLength(2);
+        const q = query(h.sent[1].url);
+        if (change === 'phase') expect(q.get('phase')).toBe('stopped');
+        else expect(q.get('dir')).toBe('asc');
+        const win = internals(el).agentWindow;
+        expect(win.state).toBe('paged');
+        expect(win.planRequest('view-change', '')).toBe('none');
+        const expected = fake.agents
+          .filter((a) => change !== 'phase' || a.phase === 'stopped')
+          .sort(byUpdated(change === 'dir' ? 'asc' : 'desc'))
+          .slice(0, 25)
+          .map((a) => a.id);
+        expect(win.items.map((a) => a.id)).toEqual(expected);
+      });
+    }
+
+    it('A to B to A while paged: the B request is aborted and the A page stays, with no request', async () => {
+      const fake: Fake = { agents: phased(1200), requests: [] };
+      const h = holdable(fakeFetch(fake), isGlobalAgentsList);
+      vi.stubGlobal('fetch', vi.fn(h.fn));
+      const el = await mount();
+      const win = internals(el).agentWindow;
+      expect(win.state).toBe('paged');
+      const before = win.items.map((a) => a.id);
+      h.hold();
+      internals(el).toggleSort('updated'); // desc to asc
+      await vi.waitFor(() => expect(h.sent).toHaveLength(2));
+      internals(el).toggleSort('updated'); // back to desc
+      h.release();
+      await settle(el);
+
+      expect(h.sent[1].signal?.aborted).toBe(true);
+      expect(h.sent).toHaveLength(2);
+      expect(win.state).toBe('paged');
+      expect(win.items.map((a) => a.id)).toEqual(before);
+      expect(win.planRequest('view-change', '')).toBe('none');
+    });
+
+    it('a switch to name sort during the first load drains the set instead of dead-ending', async () => {
+      const fake: Fake = { agents: phased(1200), requests: [] };
+      const h = holdable(fakeFetch(fake), isGlobalAgentsList);
+      h.hold();
+      vi.stubGlobal('fetch', vi.fn(h.fn));
+      const el = await mountUnsettled();
+      await vi.waitFor(() => expect(h.sent).toHaveLength(1));
+      internals(el).toggleSort('name');
+      h.release();
+      await settle(el);
+
+      expect(h.sent[0].signal?.aborted).toBe(true);
+      // The aborted fit request, then the three legacy drain pages.
+      expect(h.sent).toHaveLength(4);
+      expect(query(h.sent[1].url).has('sort')).toBe(false);
+      const win = internals(el).agentWindow;
+      expect(win.state).toBe('held');
+      expect(win.items).toHaveLength(25);
+      expect(text(el)).not.toContain('Could not load every agent');
+      expect(text(el)).not.toContain('Loading agents');
+    });
+  });
+
   describe('the completeness flag and the reuse branch', () => {
     it('an unlabelled scope-all complete load sets full; revisiting /agents then issues no request', async () => {
       const fake: Fake = {
@@ -410,7 +598,7 @@ describe('scion-page-agents — agent list window', () => {
       expect(internals(el).agentWindow.total).toBe(600);
     });
 
-    it('a drained mine set does not add a live create and issues no request', async () => {
+    it('a held mine set does not add a live create, marks the set as possibly stale, and issues no request', async () => {
       const fake: Fake = {
         agents: Array.from({ length: 1200 }, (_, i) => makeAgent(i)),
         requests: [],
@@ -421,11 +609,59 @@ describe('scion-page-agents — agent list window', () => {
       const el = await mount();
       expect(internals(el).agentWindow.state).toBe('held');
       const n = fake.requests.length;
+      expect(internals(el).agentWindow.banner).toBeNull();
       handleUpdate('agent.new-1.created', { ...makeAgent(5000), id: 'new-1', agentId: 'new-1' });
       await flushLive(el);
       expect(internals(el).agents.some((a) => a.id === 'new-1')).toBe(false);
+      expect(internals(el).agentWindow.banner?.kind).toBe('stale');
+      expect(text(el)).toContain('may be stale');
       expect(fake.requests.length).toBe(n);
     });
+
+    for (const scope of ['mine', 'shared'] as const) {
+      it(`a live create during an in-flight ${scope} drain is not added and marks the set stale, with no request`, async () => {
+        const fake: Fake = {
+          agents: Array.from({ length: 1200 }, (_, i) => makeAgent(i)),
+          requests: [],
+        };
+        const inner = fakeFetch(fake);
+        let armed = false;
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+            const raw =
+              typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+            const u = new URL(raw, 'http://localhost');
+            if (armed && isGlobalAgentsList(u) && !u.searchParams.has('sort')) {
+              // The first legacy page of the drain: a create lands, and the
+              // page replies 200 ms later.
+              armed = false;
+              handleUpdate('agent.new-7.created', {
+                ...makeAgent(5001),
+                id: 'new-7',
+                agentId: 'new-7',
+              });
+              (stateManager as unknown as { flush(): void }).flush();
+              await new Promise((r) => setTimeout(r, 200));
+            }
+            return inner(input, init);
+          })
+        );
+        localStorage.setItem('scion-view-agents', 'graph');
+        const el = await mount();
+        expect(internals(el).agentWindow.state).toBe('held');
+        const before = fake.requests.length;
+        armed = true;
+        internals(el).setScope(scope);
+        await settle(el);
+        await flushLive(el);
+        const members = fake.agents.filter(scope === 'mine' ? isMine : isShared).length;
+        expect(fake.requests.length).toBe(before + Math.ceil(members / 500));
+        expect(internals(el).agents).toHaveLength(members);
+        expect(internals(el).agents.some((a) => a.id === 'new-7')).toBe(false);
+        expect(internals(el).agentWindow.banner?.kind).toBe('stale');
+      });
+    }
   });
 
   describe('live membership while paged', () => {

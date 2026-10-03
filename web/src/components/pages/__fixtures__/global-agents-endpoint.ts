@@ -195,3 +195,65 @@ export function fakeFetch(fake: Fake) {
     );
   };
 }
+
+type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+function abortError(): Error {
+  const err = new Error('aborted');
+  err.name = 'AbortError';
+  return err;
+}
+
+/** One request seen by {@link holdable}: its URL and the signal it was sent with. */
+export interface SentRequest {
+  url: string;
+  signal: AbortSignal | undefined;
+}
+
+/**
+ * Wraps `inner` so a test can hold the next matching requests until it
+ * releases them. A held request rejects with an `AbortError` when its
+ * signal aborts, as `fetch` does; a request whose signal is already
+ * aborted when released never reaches `inner`. Every matching request is
+ * recorded in `sent`, in order, held or not.
+ */
+export function holdable(inner: FetchLike, matches: (url: URL) => boolean) {
+  const sent: SentRequest[] = [];
+  const held: Array<() => void> = [];
+  let toHold = 0;
+  const fn: FetchLike = async (input, init) => {
+    const raw = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    const signal = init?.signal ?? undefined;
+    if (matches(new URL(raw, 'http://localhost'))) {
+      sent.push({ url: raw, signal });
+      if (toHold > 0) {
+        toHold--;
+        await new Promise<void>((resolve, reject) => {
+          held.push(resolve);
+          signal?.addEventListener('abort', () => reject(abortError()), { once: true });
+        });
+      }
+    }
+    if (signal?.aborted) throw abortError();
+    return inner(input, init);
+  };
+  return {
+    fn,
+    sent,
+    /** Hold the next `n` matching requests. */
+    hold(n = 1): void {
+      toHold += n;
+    },
+    /** How many requests are held right now. */
+    get heldCount(): number {
+      return held.length;
+    },
+    /** Let every held request continue. */
+    release(): void {
+      for (const resolve of held.splice(0)) resolve();
+    },
+  };
+}
+
+/** Matches the global agents list endpoint. */
+export const isGlobalAgentsList = (u: URL): boolean => u.pathname === '/api/v1/agents';

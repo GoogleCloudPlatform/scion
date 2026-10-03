@@ -1564,25 +1564,8 @@ export class ScionPageAgents extends LitElement {
   private renderAgents() {
     const win = this.agentWindow;
     if (win.stats.total === 0 && win.display.length === 0) {
-      if (this.agentScope === 'mine') {
-        return html`
-          <div class="empty-state">
-            <sl-icon name="person"></sl-icon>
-            <h2>No Agents Found</h2>
-            <p>You haven't created any agents yet.</p>
-          </div>
-        `;
-      }
-      if (this.agentScope === 'shared') {
-        return html`
-          <div class="empty-state">
-            <sl-icon name="people"></sl-icon>
-            <h2>No Shared Agents</h2>
-            <p>No agents have been shared with you yet.</p>
-          </div>
-        `;
-      }
-      return this.renderEmptyState();
+      // An incomplete or stale set still says so above the empty state.
+      return html`${this.renderWindowBanner()}${this.renderNoAgents()}`;
     }
 
     if (win.state === 'paged' && !win.isSortedEligible(this.committedLabel)) {
@@ -1634,6 +1617,29 @@ export class ScionPageAgents extends LitElement {
     return html`<div class="agent-counts">
       ${formatNumber(total)} agents · ${formatNumber(running)} running, as of last refresh
     </div>`;
+  }
+
+  /** The empty state of the current scope. */
+  private renderNoAgents() {
+    if (this.agentScope === 'mine') {
+      return html`
+        <div class="empty-state">
+          <sl-icon name="person"></sl-icon>
+          <h2>No Agents Found</h2>
+          <p>You haven't created any agents yet.</p>
+        </div>
+      `;
+    }
+    if (this.agentScope === 'shared') {
+      return html`
+        <div class="empty-state">
+          <sl-icon name="people"></sl-icon>
+          <h2>No Shared Agents</h2>
+          <p>No agents have been shared with you yet.</p>
+        </div>
+      `;
+    }
+    return this.renderEmptyState();
   }
 
   /** The window's capped, failed or stale banner, with a Refresh that is the chip trigger. */

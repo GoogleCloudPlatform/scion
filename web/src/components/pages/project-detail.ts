@@ -2785,7 +2785,7 @@ export class ScionPageProjectDetail extends LitElement {
       </div>
 
       ${this.agentStats.total === 0
-        ? this.renderEmptyAgents()
+        ? html`${this.renderAgentWindowBanner()}${this.renderEmptyAgents()}`
         : html`
             ${this.renderFilterBar()} ${this.renderAgentWindowBanner()} ${this.renderAgentRows()}
           `}
