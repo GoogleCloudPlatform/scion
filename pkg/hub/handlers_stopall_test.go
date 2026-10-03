@@ -659,6 +659,9 @@ func TestStopAllAgents_NilMembershipService_InternalError(t *testing.T) {
 		"/api/v1/projects/"+project.ID+"/agents/stop-all", nil)
 	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "membership service unavailable")
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	assert.Equal(t, ErrCodeInternalError, errResp.Error.Code)
 	assertStopAllAgentPhase(t, s, state.PhaseRunning, bob)
 }
 
