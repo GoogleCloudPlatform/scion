@@ -213,6 +213,11 @@ type AuthzRequest struct {
 	Actor   *DecisionActor
 	Purpose string
 
+	// bearerRun carries the bearer gate's request-scoped memo and outcome
+	// for EvaluateBearerCeiling. It is set only by in-package callers,
+	// grants nothing, and callers of Decide leave it nil.
+	bearerRun *bearerGateRun
+
 	// AlwaysAudit forces Decide's single audit exit to emit a decision audit
 	// record for this request regardless of the allow-sampling rate
 	// (AuthzService.DecisionAuditSampleRate). Deny decisions are always
@@ -515,15 +520,13 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 // decide is Decide's body: the AK1 kernel evaluation itself.
 // All grants are traced to either a RoleBinding or a named relationship grant.
 // All reductions are traced to a named restriction. No undocumented bypasses.
+//
+// request.bearerRun, when non-nil, supplies the request-scoped
+// project-admission memo to the bearer gate (step 1) and receives the gate's
+// outcome; nil uses no memo and records nothing. It never changes the
+// authorization result.
 func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decision {
-	return a.decideWithBearerRun(ctx, request, nil)
-}
-
-// decideWithBearerRun is decide's body. bearer, when non-nil, supplies the
-// request-scoped project-admission memo to the bearer gate (step 1) and
-// receives the gate's outcome; nil uses no memo and records nothing. It
-// never changes the authorization result. It emits no decision audit.
-func (a *AuthzService) decideWithBearerRun(ctx context.Context, request AuthzRequest, bearer *bearerGateRun) Decision {
+	bearer := request.bearerRun
 	derivedPrincipal := principalContextForIdentity(request.Principal.Identity)
 	derivedCredential := credentialContextForIdentity(request.Principal.Identity)
 
@@ -1041,6 +1044,7 @@ func (a *AuthzService) decideWithBearerRun(ctx context.Context, request AuthzReq
 				ctx = contextWithDelegationCeilingCache(ctx)
 			}
 			ceilingReq := request
+			ceilingReq.bearerRun = nil
 			ceilingReq.Principal = principal
 			ceilingReq.Permission = permissionID
 			var ceilingCause DenyCause

@@ -356,7 +356,7 @@ func (a *AuthzService) EvaluateBearerCeiling(
 
 	b := boundary
 	run := &bearerGateRun{memo: opts.Memo}
-	decision := a.decideWithBearerRun(ctx, AuthzRequest{
+	decision := a.decide(ctx, AuthzRequest{
 		Principal: user,
 		Credential: CredentialContext{
 			Kind:     CredentialKindUAT,
@@ -368,7 +368,8 @@ func (a *AuthzService) EvaluateBearerCeiling(
 		Permission:     permissionID,
 		Explain:        opts.Explain,
 		TargetEvidence: opts.Evidence,
-	}, run)
+		bearerRun:      run,
+	})
 
 	result := BearerEvaluation{
 		Decision:     decision,
