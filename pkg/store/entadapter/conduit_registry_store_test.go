@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -621,6 +622,41 @@ func TestConduitRegistry_CapabilitiesRoundTrip(t *testing.T) {
 	_, found, err = f.store.ListPrincipalSessionsBySession(f.ctx, "missing")
 	require.NoError(t, err)
 	assert.False(t, found)
+}
+
+func TestConduitRegistry_IncarnationSourceRoundTrip(t *testing.T) {
+	// Design v2.4 §3.4: incarnation_source is stored and returned verbatim,
+	// and never filtered on ("" = legacy).
+	f := newConduitFixture(t)
+	gen := f.registerRelay("relay-1")
+	for i, src := range []string{"launch_id", "generation", ""} {
+		rec := agentSession(fmt.Sprintf("s-%d", i), "relay-1", gen, "inc-A")
+		rec.PrincipalID = fmt.Sprintf("agent-%d", i)
+		rec.Capabilities.IncarnationSource = src
+		f.insert(rec)
+
+		w := registry.Want{ProjectID: rec.ProjectID, Incarnation: "inc-A"}
+		got, err := f.reg.Eligible(f.ctx, registry.PrincipalAgent, rec.PrincipalID, w, f.clock.Now())
+		require.NoError(t, err)
+		require.Len(t, got, 1, "source %q", src)
+		assert.Equal(t, src, got[0].Capabilities.IncarnationSource)
+		assert.Equal(t, rec.Capabilities, got[0].Capabilities)
+
+		// Admission (which returns only a Decision) is unaffected by it.
+		d, err := f.reg.Admission(f.ctx, rec.SessionID, w)
+		require.NoError(t, err)
+		assert.True(t, d.Admissible, "source %q: %s", src, d.Reason)
+
+		ps, found, err := f.store.ListPrincipalSessionsBySession(f.ctx, rec.SessionID)
+		require.NoError(t, err)
+		require.True(t, found)
+		assert.Equal(t, src, ps.Sessions[0].Session.Capabilities.IncarnationSource)
+	}
+
+	// Legacy JSON omits the key entirely.
+	b, err := json.Marshal(registry.Capabilities{})
+	require.NoError(t, err)
+	assert.NotContains(t, string(b), "incarnation_source")
 }
 
 func TestConduitRegistry_RegisterRelay_ConcurrentSameInstance(t *testing.T) {
