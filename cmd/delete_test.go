@@ -19,8 +19,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,6 +41,7 @@ type deleteTestState struct {
 	noHub          bool
 	autoConfirm    bool
 	deleteStopped  bool
+	deleteForce    bool
 }
 
 func saveDeleteTestState() deleteTestState {
@@ -49,6 +52,7 @@ func saveDeleteTestState() deleteTestState {
 		noHub:          noHub,
 		autoConfirm:    autoConfirm,
 		deleteStopped:  deleteStopped,
+		deleteForce:    deleteForce,
 	}
 }
 
@@ -59,6 +63,7 @@ func (s deleteTestState) restore() {
 	noHub = s.noHub
 	autoConfirm = s.autoConfirm
 	deleteStopped = s.deleteStopped
+	deleteForce = s.deleteForce
 }
 
 // createAgentDir creates a minimal agent directory at <projectDir>/agents/<name>
@@ -447,4 +452,163 @@ func TestDeleteStopped_AcceptsGlobalFlag(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, isGlobal, "should resolve as global project")
 	assert.Equal(t, globalDir, resolvedProject)
+}
+
+// newDeleteQueryRecordingHubServer creates a mock Hub server that records the
+// raw query string of every agent DELETE request, keyed by agent name. It also
+// serves the stopped-agent list used by delete --stopped.
+func newDeleteQueryRecordingHubServer(t *testing.T, projectID string, stopped []string) (*httptest.Server, map[string]url.Values) {
+	t.Helper()
+	queries := map[string]url.Values{}
+	prefix := "/api/v1/projects/" + projectID + "/agents"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.Method == http.MethodGet && r.URL.Path == prefix:
+			agents := make([]map[string]interface{}, 0, len(stopped))
+			for _, name := range stopped {
+				agents = append(agents, map[string]interface{}{"id": name, "name": name, "phase": "stopped"})
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"agents":     agents,
+				"totalCount": len(agents),
+			})
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, prefix+"/"):
+			queries[strings.TrimPrefix(r.URL.Path, prefix+"/")] = r.URL.Query()
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	return server, queries
+}
+
+func newDeleteForceHubContext(t *testing.T, serverURL, projectID string) *HubContext {
+	t.Helper()
+	client, err := hubclient.New(serverURL)
+	require.NoError(t, err)
+	return &HubContext{Client: client, Endpoint: serverURL, ProjectID: projectID}
+}
+
+func TestDeleteCmd_ForceFlagRegistered(t *testing.T) {
+	f := deleteCmd.Flags().Lookup("force")
+	require.NotNil(t, f, "delete should expose --force")
+	assert.Equal(t, "f", f.Shorthand)
+	assert.Equal(t, "false", f.DefValue)
+	assert.Contains(t, f.Usage, "broker")
+}
+
+func TestDeleteAgentsViaHub_ForceSendsForceQuery(t *testing.T) {
+	orig := saveDeleteTestState()
+	defer orig.restore()
+
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	preserveBranch = true
+	deleteForce = true
+
+	projectDir := filepath.Join(tmpHome, "project", ".scion")
+	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, "agents"), 0755))
+	projectPath = projectDir
+
+	projectID := "project-force-1"
+	server, queries := newDeleteQueryRecordingHubServer(t, projectID, nil)
+	defer server.Close()
+
+	err := deleteAgentsViaHub(newDeleteForceHubContext(t, server.URL, projectID), []string{"agent-a", "agent-b"})
+	require.NoError(t, err)
+
+	require.Len(t, queries, 2, "every named agent should be deleted")
+	for _, name := range []string{"agent-a", "agent-b"} {
+		require.Contains(t, queries, name)
+		assert.Equal(t, "true", queries[name].Get("force"), "force=true should be sent for %s", name)
+	}
+}
+
+func TestDeleteAgentsViaHub_NoForceOmitsForceQuery(t *testing.T) {
+	orig := saveDeleteTestState()
+	defer orig.restore()
+
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	preserveBranch = true
+	deleteForce = false
+
+	projectDir := filepath.Join(tmpHome, "project", ".scion")
+	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, "agents"), 0755))
+	projectPath = projectDir
+
+	projectID := "project-force-2"
+	server, queries := newDeleteQueryRecordingHubServer(t, projectID, nil)
+	defer server.Close()
+
+	err := deleteAgentsViaHub(newDeleteForceHubContext(t, server.URL, projectID), []string{"agent-a"})
+	require.NoError(t, err)
+
+	require.Contains(t, queries, "agent-a")
+	_, present := queries["agent-a"]["force"]
+	assert.False(t, present, "force must be absent when --force is not set")
+}
+
+func TestDeleteStoppedViaHub_ForcePropagates(t *testing.T) {
+	orig := saveDeleteTestState()
+	defer orig.restore()
+
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	preserveBranch = true
+	deleteForce = true
+
+	projectDir := filepath.Join(tmpHome, "project", ".scion")
+	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, "agents"), 0755))
+	projectPath = projectDir
+
+	projectID := "project-force-3"
+	server, queries := newDeleteQueryRecordingHubServer(t, projectID, []string{"stopped-one", "stopped-two"})
+	defer server.Close()
+
+	err := deleteStoppedViaHub(newDeleteForceHubContext(t, server.URL, projectID))
+	require.NoError(t, err)
+
+	require.Len(t, queries, 2)
+	for name, q := range queries {
+		assert.Equal(t, "true", q.Get("force"), "force=true should be sent for stopped agent %s", name)
+	}
+}
+
+func TestDeleteCmd_ForceInLocalModeWarnsAndDeletes(t *testing.T) {
+	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT_ID"} {
+		if val, ok := os.LookupEnv(e); ok {
+			_ = os.Unsetenv(e)
+			defer func() { _ = os.Setenv(e, val) }()
+		}
+	}
+
+	orig := saveDeleteTestState()
+	defer orig.restore()
+
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	noHub = true
+	preserveBranch = true
+	deleteStopped = false
+	deleteForce = true
+
+	projectDir := filepath.Join(tmpHome, "project", ".scion")
+	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, "agents"), 0755))
+	projectPath = projectDir
+	agentDir := createAgentDir(t, projectDir, "local-agent")
+
+	var runErr error
+	stderr := captureStderr(t, func() {
+		runErr = deleteCmd.RunE(deleteCmd, []string{"local-agent"})
+	})
+	require.NoError(t, runErr, "--force must not block a local delete")
+	assert.Contains(t, stderr, "--force has no effect without a Hub")
+
+	_, err := os.Stat(agentDir)
+	assert.True(t, os.IsNotExist(err), "agent directory should be deleted in local mode")
 }

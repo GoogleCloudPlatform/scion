@@ -323,6 +323,7 @@ Deletes an agent, removing its container, home directory, and worktree.
 - **Flags:**
     - `-b, --preserve-branch`: Preserve the git branch associated with the worktree (default: deleted).
     - `--stopped`: Delete all agents with stopped containers.
+    - `-f, --force`: Remove the agent from the Hub even when its runtime broker cannot be reached or cannot resolve it. This also skips any soft-delete retention. Runtime resources on the broker (containers, worktrees) may need separate cleanup on that broker. Applies to every named agent, and to each agent selected by `--stopped`. In local mode (no Hub), `--force` has no effect and the CLI prints a warning; the local delete already removes the container.
 
 ### `scion sync`
 
