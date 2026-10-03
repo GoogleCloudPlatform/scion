@@ -110,6 +110,8 @@ function createFetchHandler(
       body: unknown;
     };
     messagingResponse?: Record<string, unknown>;
+    checkUpdatesResponse?: Record<string, unknown>;
+    onOperationRun?: (path: string) => void;
   }
 ) {
   return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -173,6 +175,25 @@ function createFetchHandler(
           ),
           { status: 200, headers: { 'Content-Type': 'application/json' } }
         )
+      );
+    }
+
+    if (path.includes('/api/v1/admin/maintenance/check-updates')) {
+      return Promise.resolve(
+        new Response(
+          JSON.stringify(opts?.checkUpdatesResponse ?? { tier: 'source', update_available: false }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      );
+    }
+
+    if (path.includes('/api/v1/admin/maintenance/operations/') && path.endsWith('/run')) {
+      opts?.onOperationRun?.(path);
+      return Promise.resolve(
+        new Response(JSON.stringify({ runId: 'run-1', status: 'running' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
       );
     }
 
@@ -1560,6 +1581,150 @@ describe('scion-page-admin-server-config', () => {
       expect(capturedPayload!.runtimes.k8s.safe_to_evict).toBe(false);
       expect(capturedPayload!.profiles.gke.safe_to_evict).toBe(false);
       expect('safe_to_evict' in capturedPayload!.profiles.evictable).toBe(false);
+    });
+  });
+
+  // ── Tier-based maintenance dispatch (fork issue: rebuild-server always used) ──
+
+  describe('Tier-based maintenance dispatch', () => {
+    it('defaults to source tier and dispatches rebuild-server/run', async () => {
+      let ranPath: string | null = null;
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          checkUpdatesResponse: { tier: 'source', update_available: true, commits_behind: 2 },
+          onOperationRun: (path) => {
+            ranPath = path;
+          },
+        })
+      );
+
+      await (element as any).checkForUpdates();
+      await (element as any).updateComplete;
+      expect((element as any).deploymentTier).toBe('source');
+
+      await (element as any).triggerUpdate();
+      await (element as any).updateComplete;
+
+      expect(ranPath).not.toBeNull();
+      expect(ranPath).toContain('/operations/rebuild-server/run');
+    });
+
+    it('sets deploymentTier to binary and dispatches update-binary/run', async () => {
+      let ranPath: string | null = null;
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          checkUpdatesResponse: {
+            tier: 'binary',
+            update_available: true,
+            current_version: '1.0.0',
+            latest_version: '1.1.0',
+            channel: 'stable',
+          },
+          onOperationRun: (path) => {
+            ranPath = path;
+          },
+        })
+      );
+
+      await (element as any).checkForUpdates();
+      await (element as any).updateComplete;
+      expect((element as any).deploymentTier).toBe('binary');
+
+      await (element as any).triggerUpdate();
+      await (element as any).updateComplete;
+
+      expect(ranPath).not.toBeNull();
+      expect(ranPath).toContain('/operations/update-binary/run');
+    });
+
+    it('renders binary-tier version info in the update banner', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          checkUpdatesResponse: {
+            tier: 'binary',
+            update_available: true,
+            current_version: '1.0.0',
+            latest_version: '1.1.0',
+            channel: 'stable',
+            release_url: 'https://example.com/releases/1.1.0',
+          },
+        })
+      );
+
+      await (element as any).checkForUpdates();
+      await (element as any).updateComplete;
+
+      const text = shadowText(element);
+      expect(text).toContain('1.0.0');
+      expect(text).toContain('1.1.0');
+      expect(text).toContain('stable');
+    });
+
+    it('omits the commit count in the source-tier banner when commits_behind is missing', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          checkUpdatesResponse: { tier: 'source', update_available: true },
+        })
+      );
+
+      await (element as any).checkForUpdates();
+      await (element as any).updateComplete;
+
+      const text = shadowText(element);
+      expect(text).toContain('Update');
+      expect(text).not.toContain('undefined');
+      expect(text).not.toMatch(/new\s+commit/);
+    });
+
+    it('renders the commit count in the source-tier banner when commits_behind is set', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          checkUpdatesResponse: { tier: 'source', update_available: true, commits_behind: 3 },
+        })
+      );
+
+      await (element as any).checkForUpdates();
+      await (element as any).updateComplete;
+
+      expect(shadowText(element)).toMatch(/3\s+new\s+commits/);
+    });
+
+    it('shows binary-tier confirm dialog text', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          checkUpdatesResponse: {
+            tier: 'binary',
+            update_available: true,
+            current_version: '1.0.0',
+            latest_version: '1.1.0',
+            channel: 'stable',
+          },
+        })
+      );
+
+      await (element as any).checkForUpdates();
+      (element as any).showUpdateConfirm = true;
+      await (element as any).updateComplete;
+
+      const text = shadowText(element);
+      expect(text).toContain('download the latest release binary');
+      expect(text).not.toContain('pull the latest code');
+    });
+
+    it('shows source-tier confirm dialog text', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig(), {
+          checkUpdatesResponse: { tier: 'source', update_available: true, commits_behind: 3 },
+        })
+      );
+
+      await (element as any).checkForUpdates();
+      (element as any).showUpdateConfirm = true;
+      await (element as any).updateComplete;
+
+      const text = shadowText(element);
+      expect(text).toContain('pull the latest code');
+      expect(text).not.toContain('download the latest release binary');
     });
   });
 });
