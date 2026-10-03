@@ -37,3 +37,37 @@ commits were replayed. None of task 3's code was re-added.
 ## Follow-ups
 
 None.
+
+## Addendum: second rebase onto upstream main c0a69140
+
+Upstream main moved 15 commits. Among them are tz-refactor task 18
+(GoogleCloudPlatform/scion#2388, the `applied-config-tz-cleanup`
+maintenance migration) and tz-refactor task 22 (GoogleCloudPlatform/scion#2377,
+CLI time zones).
+
+- Conflicts, all in `feat(hub): add the utc-timestamp-normalize maintenance
+  migration`:
+  - `pkg/hub/admin_maintenance.go`: both executor cases are kept, with
+    `applied-config-tz-cleanup` first.
+  - `pkg/store/entadapter/maintenance_store.go`: both seed entries are
+    kept, with `applied-config-tz-cleanup` first and then
+    `utc-timestamp-normalize`.
+- The later re-runnable commit differs only in context lines. The other
+  commits are identical in `git range-diff`.
+- Interaction check: the two migrations write disjoint columns.
+  - `applied-config-tz-cleanup` rewrites `agents.applied_config` through
+    `UpdateAgent`.
+  - `utc-timestamp-normalize` rewrites time columns, `agents.exposed_ports`
+    and `access_policies.conditions` with compare-and-set updates.
+  - Neither run order matters, and they share no helper.
+  - Task 18 has no startup check.
+  - Only `utc-timestamp-normalize` is in `rerunnableMigrations`. Task 18
+    keeps upstream's guard against re-running a completed migration.
+- `hack/check-cli-time-zones.sh` from task 22 passes on the branch.
+  `pkg/clitime` only formats times for display and does not duplicate
+  `pkg/store/storedtime`.
+- Tests pass under both TZ=Asia/Tokyo and TZ=Asia/Kathmandu:
+  `pkg/store/storedtime`, `pkg/store/entadapter`, the targeted `cmd` tests,
+  and the targeted `pkg/hub` tests (adding `AppliedConfigTZCleanup` and
+  `Maintenance`, 67 passed). Build, vet, gofmt and scoped golangci-lint
+  are clean.
