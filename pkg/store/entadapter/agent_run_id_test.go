@@ -42,7 +42,9 @@ func TestSetAgentRunID(t *testing.T) {
 	stale := *got
 	v0 := got.StateVersion
 
-	require.NoError(t, s.SetAgentRunID(ctx, a.ID, "run-1"))
+	prev, err := s.SetAgentRunID(ctx, a.ID, "run-1")
+	require.NoError(t, err)
+	assert.Equal(t, "", prev, "the previous value of a new row is empty")
 	got, err = s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "run-1", got.RunID)
@@ -58,12 +60,15 @@ func TestSetAgentRunID(t *testing.T) {
 	assert.Equal(t, "run-1", got.RunID, "UpdateAgent must not write run_id")
 	assert.Equal(t, "updated", got.Message)
 
-	require.NoError(t, s.SetAgentRunID(ctx, a.ID, "run-2"))
+	prev, err = s.SetAgentRunID(ctx, a.ID, "run-2")
+	require.NoError(t, err)
+	assert.Equal(t, "run-1", prev, "SetAgentRunID returns the value it replaced")
 	got, err = s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "run-2", got.RunID)
 
-	assert.ErrorIs(t, s.SetAgentRunID(ctx, uuid.NewString(), "x"), store.ErrNotFound)
+	_, err = s.SetAgentRunID(ctx, uuid.NewString(), "x")
+	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
 // TestCompareAndSwapAgentRunID: the swap applies only while the row still
@@ -74,7 +79,8 @@ func TestCompareAndSwapAgentRunID(t *testing.T) {
 	s, projectID := newTestAgentStore(t)
 	a := makeAgent(projectID, "run-id-cas-agent")
 	require.NoError(t, s.CreateAgent(ctx, a))
-	require.NoError(t, s.SetAgentRunID(ctx, a.ID, "minted"))
+	_, err := s.SetAgentRunID(ctx, a.ID, "minted")
+	require.NoError(t, err)
 	before, err := s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
 
@@ -87,7 +93,8 @@ func TestCompareAndSwapAgentRunID(t *testing.T) {
 	assert.Equal(t, before.StateVersion, got.StateVersion, "CAS must not bump state_version")
 
 	// A newer dispatch recorded its own run; a stale swap is a no-op.
-	require.NoError(t, s.SetAgentRunID(ctx, a.ID, "newer"))
+	_, err = s.SetAgentRunID(ctx, a.ID, "newer")
+	require.NoError(t, err)
 	ok, err = s.CompareAndSwapAgentRunID(ctx, a.ID, "minted", "stale")
 	require.NoError(t, err)
 	assert.False(t, ok)

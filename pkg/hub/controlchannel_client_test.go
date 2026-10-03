@@ -244,7 +244,7 @@ func TestControlChannelBrokerClient_RestartAgentOmitsWorkspaceFieldsWhenZero(t *
 		signer:  signer,
 	}
 
-	err := client.RestartAgent(context.Background(), "broker-1", "unused", "agent-1", "project-id-1", nil, StartExtras{HubEndpoint: "https://hub.example.com"})
+	_, err := client.RestartAgent(context.Background(), "broker-1", "unused", "agent-1", "project-id-1", nil, StartExtras{HubEndpoint: "https://hub.example.com"})
 	if err != nil {
 		t.Fatalf("RestartAgent returned error: %v", err)
 	}

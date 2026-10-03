@@ -59,9 +59,9 @@ func (f *fakeHTTPClient) StopAgent(context.Context, string, string, string, stri
 	f.stopAgentCalled = true
 	return nil
 }
-func (f *fakeHTTPClient) RestartAgent(_ context.Context, _, _, _, _ string, _ map[string]string, extras StartExtras) error {
+func (f *fakeHTTPClient) RestartAgent(_ context.Context, _, _, _, _ string, _ map[string]string, extras StartExtras) (*RemoteAgentResponse, error) {
 	f.lastRestartExtras = extras
-	return nil
+	return nil, nil
 }
 func (f *fakeHTTPClient) ResetAuthAgent(context.Context, string, string, string, string, string, string) error {
 	return nil

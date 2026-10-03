@@ -87,6 +87,7 @@ type mockRuntimeBrokerClient struct {
 	returnErr            error
 	cleanupErr           error
 	startReturnResp      *RemoteAgentResponse // custom start response if set
+	restartReturnResp    *RemoteAgentResponse // custom restart response if set
 	cleanupCalls         int
 	cleanupSlugs         []string
 	createWithGatherFunc func(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error)
@@ -157,14 +158,17 @@ func (m *mockRuntimeBrokerClient) StopAgent(ctx context.Context, brokerID, broke
 	return m.returnErr
 }
 
-func (m *mockRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) error {
+func (m *mockRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) (*RemoteAgentResponse, error) {
 	m.restartCalled = true
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
 	m.lastAgentID = agentID
 	m.lastRestartResolvedEnv = resolvedEnv
 	m.lastRestartExtras = extras
-	return m.returnErr
+	if m.returnErr != nil {
+		return nil, m.returnErr
+	}
+	return m.restartReturnResp, nil
 }
 
 func (m *mockRuntimeBrokerClient) ResetAuthAgent(_ context.Context, _, _, _, _, token, transportToken string) error {

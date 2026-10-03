@@ -2232,3 +2232,56 @@ func (s *AgentStore) AggregateAgentHealth(ctx context.Context) (*store.AgentHeal
 
 	return result, nil
 }
+
+// setAgentRunIDAttempts bounds SetAgentRunID's read-then-swap loop. Each
+// retry means another writer changed run_id between the read and the
+// swap; a handful of retries absorbs any realistic contention.
+const setAgentRunIDAttempts = 8
+
+// SetAgentRunID implements store.AgentStore.SetAgentRunID. It reads the
+// current value and swaps it under a compare-and-swap, retrying if another
+// writer got in between, so the returned previous value is exactly the one
+// this write replaced. That needs no transaction or row lock, and so works
+// the same on every dialect.
+func (s *AgentStore) SetAgentRunID(ctx context.Context, agentID, runID string) (string, error) {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return "", err
+	}
+	for attempt := 0; attempt < setAgentRunIDAttempts; attempt++ {
+		row, err := s.client.Agent.Query().
+			Where(agent.IDEQ(uid)).
+			Select(agent.FieldRunID).
+			Only(ctx)
+		if err != nil {
+			return "", mapError(err)
+		}
+		n, err := s.client.Agent.Update().
+			Where(agent.IDEQ(uid), agent.RunIDEQ(row.RunID)).
+			SetRunID(runID).
+			Save(ctx)
+		if err != nil {
+			return "", mapError(err)
+		}
+		if n > 0 {
+			return row.RunID, nil
+		}
+	}
+	return "", fmt.Errorf("agent store: run_id for agent %s kept changing; giving up after %d attempts", agentID, setAgentRunIDAttempts)
+}
+
+// CompareAndSwapAgentRunID implements store.AgentStore.CompareAndSwapAgentRunID.
+func (s *AgentStore) CompareAndSwapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string) (bool, error) {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return false, err
+	}
+	n, err := s.client.Agent.Update().
+		Where(agent.IDEQ(uid), agent.RunIDEQ(expectedRunID)).
+		SetRunID(newRunID).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return n > 0, nil
+}

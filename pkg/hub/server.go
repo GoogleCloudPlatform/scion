@@ -647,7 +647,10 @@ type RuntimeBrokerClient interface {
 	// resolvedEnv carries fresh auth tokens and identity vars so the restarted
 	// container retains Hub connectivity.
 	// extras carries the dispatch metadata described on StartExtras.
-	RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) error
+	// RestartAgent returns the broker's response body when it sent one
+	// (nil when the body is empty or undecodable; the restart still
+	// succeeded), so the dispatcher can adopt the run ID it reports.
+	RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) (*RemoteAgentResponse, error)
 
 	// ResetAuthAgent injects a fresh auth token into a running agent without restarting it.
 	// brokerID is used for HMAC authentication lookup.

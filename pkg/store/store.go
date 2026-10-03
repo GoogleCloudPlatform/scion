@@ -342,6 +342,23 @@ type AgentStore interface {
 	// to find (e.g. the record was deleted).
 	ListAgentsWithStaleNonTerminalReincarnationState(ctx context.Context, olderThan time.Time) ([]*Agent, error)
 
+	// SetAgentRunID records runID as the agent's current run identity
+	// (ptone/scion#2550) and returns the run_id the row held immediately
+	// before the write, so a dispatch can later revert to exactly that
+	// value. It is a narrow single-column write: it does not check or bump
+	// state_version, so it neither conflicts with nor invalidates a
+	// concurrent UpdateAgent, and UpdateAgent never writes run_id back.
+	// Returns ErrNotFound if the agent doesn't exist.
+	SetAgentRunID(ctx context.Context, agentID, runID string) (previous string, err error)
+
+	// CompareAndSwapAgentRunID sets the agent's run_id to newRunID only if
+	// it currently equals expectedRunID, and reports whether it did. A
+	// dispatch uses it to correct (or revert) the run ID it minted without
+	// overwriting a newer run ID a later dispatch has since recorded. Like
+	// SetAgentRunID it neither checks nor bumps state_version. A missing
+	// agent reports false with no error.
+	CompareAndSwapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string) (bool, error)
+
 	// UpdateAgentStatus updates only status-related fields.
 	// This is a partial update that doesn't require version checking.
 	UpdateAgentStatus(ctx context.Context, id string, status AgentStatusUpdate) error
@@ -438,21 +455,6 @@ type AgentStore interface {
 	// from inside WithTx: the entadapter implementation cannot nest a second
 	// transaction inside the ambient one WithTx provides, and returns an
 	// error (or, for RunLaunchReaperTick, ReaperTickUnavailable) instead.
-
-	// SetAgentRunID records runID as the agent's current run identity
-	// (ptone/scion#2550). It is a narrow single-column write: it does not
-	// check or bump state_version, so it neither conflicts with nor
-	// invalidates a concurrent UpdateAgent, and UpdateAgent never writes
-	// run_id back. Returns ErrNotFound if the agent doesn't exist.
-	SetAgentRunID(ctx context.Context, agentID, runID string) error
-
-	// CompareAndSwapAgentRunID sets the agent's run_id to newRunID only if
-	// it currently equals expectedRunID, and reports whether it did. A
-	// dispatch uses it to correct (or revert) the run ID it minted without
-	// overwriting a newer run ID a later dispatch has since recorded. Like
-	// SetAgentRunID it neither checks nor bumps state_version. A missing
-	// agent reports false with no error.
-	CompareAndSwapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string) (bool, error)
 
 	// BeginLaunch starts a new launch for agentID. The caller must start its
 	// monotonic remaining-budget timer BEFORE calling this (§3.4). Any

@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -173,7 +174,7 @@ func TestRunID_GatherAndFinalizeMint(t *testing.T) {
 func TestRunID_ProvisionDoesNotMint(t *testing.T) {
 	ctx := context.Background()
 	f := newRunIDFixture(t, "runid-provision")
-	if err := f.store.SetAgentRunID(ctx, f.agent.ID, "existing-run"); err != nil {
+	if _, err := f.store.SetAgentRunID(ctx, f.agent.ID, "existing-run"); err != nil {
 		t.Fatal(err)
 	}
 	f.agent.RunID = "existing-run"
@@ -194,7 +195,7 @@ func TestRunID_ProvisionDoesNotMint(t *testing.T) {
 func TestRunID_StartOnAlreadyRunningAdoptsExistingLabel(t *testing.T) {
 	ctx := context.Background()
 	f := newRunIDFixture(t, "runid-adopt")
-	if err := f.store.SetAgentRunID(ctx, f.agent.ID, "live-run"); err != nil {
+	if _, err := f.store.SetAgentRunID(ctx, f.agent.ID, "live-run"); err != nil {
 		t.Fatal(err)
 	}
 	f.agent.RunID = "live-run"
@@ -229,7 +230,7 @@ type staleResponseClient struct {
 
 func (c *staleResponseClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool, extras StartExtras) (*RemoteAgentResponse, error) {
 	c.lastStartExtras = extras
-	if err := c.store.SetAgentRunID(ctx, c.agentID, "newer-run"); err != nil {
+	if _, err := c.store.SetAgentRunID(ctx, c.agentID, "newer-run"); err != nil {
 		return nil, err
 	}
 	return &RemoteAgentResponse{Agent: &RemoteAgentInfo{
@@ -253,30 +254,77 @@ func TestRunID_StaleBrokerResponseDoesNotOverwriteNewerRun(t *testing.T) {
 	}
 }
 
-// When the broker confirms it never acted on a start or restart, the hub
+// brokerEnvelope is a broker JSON error response, as runtimebroker's
+// writeError produces.
+func brokerEnvelope(t *testing.T, status int, code string, details map[string]interface{}) *brokerStatusError {
+	t.Helper()
+	body, err := json.Marshal(map[string]interface{}{
+		"error": map[string]interface{}{"code": code, "message": code, "details": details},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &brokerStatusError{StatusCode: status, Body: string(body)}
+}
+
+// startAttempted is the marker a broker sets on a failure from inside
+// Manager.Start.
+func startAttempted(runID string) map[string]interface{} {
+	return map[string]interface{}{api.BrokerErrorDetailStartAttempted: true, api.BrokerErrorDetailRunID: runID}
+}
+
+// When the broker rejects a start or restart before acting on it, the hub
 // restores the previous run ID: the previous entry is still the live one.
-// An ambiguous failure keeps the minted ID, since the broker may have
-// created the entry.
+// A failure from inside Manager.Start (marked startAttempted by the
+// broker) keeps the minted ID: Start may already have removed the previous
+// entry and created one labelled with the minted run. An ambiguous failure
+// keeps it too. An older broker sends no marker, so its rejections revert
+// as before. The revert restores the value the row held in the database,
+// not the caller's possibly stale in-memory one.
 func TestRunID_FailedStartRevertsOnlyWhenNotActedOn(t *testing.T) {
 	ctx := context.Background()
 	for _, tc := range []struct {
 		name       string
 		restart    bool
-		err        error
+		err        func(t *testing.T) error
 		wantRevert bool
 	}{
-		{"start rejected", false, &brokerStatusError{StatusCode: http.StatusConflict, Body: "conflict"}, true},
-		{"start ambiguous", false, errors.New("read: connection reset"), false},
-		{"restart rejected", true, &brokerStatusError{StatusCode: http.StatusBadRequest, Body: "bad"}, true},
-		{"restart ambiguous", true, errors.New("read: connection reset"), false},
+		{"start gate rejection (409, no marker)", false, func(t *testing.T) error {
+			return brokerEnvelope(t, http.StatusConflict, "conflict", nil)
+		}, true},
+		{"start validation rejection (400, no marker)", false, func(t *testing.T) error {
+			return brokerEnvelope(t, http.StatusBadRequest, "validation_error", nil)
+		}, true},
+		{"start Manager.Start failure (500 runtime_error, marker)", false, func(t *testing.T) error {
+			return brokerEnvelope(t, http.StatusInternalServerError, "runtime_error", startAttempted("r"))
+		}, false},
+		{"start name in use (409, marker)", false, func(t *testing.T) error {
+			return brokerEnvelope(t, http.StatusConflict, "conflict", startAttempted("r"))
+		}, false},
+		{"start runtime_error from an older broker (no marker)", false, func(t *testing.T) error {
+			return brokerEnvelope(t, http.StatusInternalServerError, "runtime_error", nil)
+		}, true},
+		{"start ambiguous", false, func(*testing.T) error { return errors.New("read: connection reset") }, false},
+		{"restart rejection (400, no marker)", true, func(t *testing.T) error {
+			return brokerEnvelope(t, http.StatusBadRequest, "validation_error", nil)
+		}, true},
+		{"restart Manager.Start failure (500 runtime_error, marker)", true, func(t *testing.T) error {
+			return brokerEnvelope(t, http.StatusInternalServerError, "runtime_error", startAttempted("r"))
+		}, false},
+		{"restart Manager.Start not found (404, marker)", true, func(t *testing.T) error {
+			return brokerEnvelope(t, http.StatusNotFound, "agent_not_found", startAttempted("r"))
+		}, false},
+		{"restart ambiguous", true, func(*testing.T) error { return errors.New("read: connection reset") }, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newRunIDFixture(t, "runid-revert")
-			if err := f.store.SetAgentRunID(ctx, f.agent.ID, "previous-run"); err != nil {
+			if _, err := f.store.SetAgentRunID(ctx, f.agent.ID, "previous-run"); err != nil {
 				t.Fatal(err)
 			}
-			f.agent.RunID = "previous-run"
-			f.client.returnErr = tc.err
+			// The caller's struct is stale: the revert must use the
+			// database value.
+			f.agent.RunID = "stale-struct-run"
+			f.client.returnErr = tc.err(t)
 
 			var err error
 			var minted string
@@ -305,11 +353,109 @@ func TestRunID_FailedStartRevertsOnlyWhenNotActedOn(t *testing.T) {
 	}
 }
 
+// concurrentRunClient records a newer run ID on the row while a start or
+// restart is in flight (as a concurrent dispatch would), then fails it
+// with a pre-Start rejection, which would normally revert.
+type concurrentRunClient struct {
+	*mockRuntimeBrokerClient
+	store   store.Store
+	agentID string
+	err     error
+}
+
+func (c *concurrentRunClient) StartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash string, resolvedEnv map[string]string, resolvedSecrets []ResolvedSecret, inlineConfig *api.ScionConfig, sharedDirs []api.SharedDir, sharedWorkspace, resume bool, extras StartExtras) (*RemoteAgentResponse, error) {
+	c.lastStartExtras = extras
+	if _, err := c.store.SetAgentRunID(ctx, c.agentID, "newer-run"); err != nil {
+		return nil, err
+	}
+	return nil, c.err
+}
+
+func (c *concurrentRunClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) (*RemoteAgentResponse, error) {
+	c.lastRestartExtras = extras
+	if _, err := c.store.SetAgentRunID(ctx, c.agentID, "newer-run"); err != nil {
+		return nil, err
+	}
+	return nil, c.err
+}
+
+// The revert is a compare-and-swap against the minted ID: when a newer
+// dispatch recorded its run mid-flight, a rejected start or restart leaves
+// that newer run in place instead of restoring the previous one.
+func TestRunID_RevertDoesNotOverwriteNewerRun(t *testing.T) {
+	ctx := context.Background()
+	for _, restart := range []bool{false, true} {
+		name := "start"
+		if restart {
+			name = "restart"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newRunIDFixture(t, "runid-revert-cas")
+			if _, err := f.store.SetAgentRunID(ctx, f.agent.ID, "previous-run"); err != nil {
+				t.Fatal(err)
+			}
+			client := &concurrentRunClient{
+				mockRuntimeBrokerClient: f.client, store: f.store, agentID: f.agent.ID,
+				err: brokerEnvelope(t, http.StatusConflict, "conflict", nil),
+			}
+			d := NewHTTPAgentDispatcherWithClient(f.store, client, false, slog.Default())
+			var err error
+			if restart {
+				err = d.DispatchAgentRestart(ctx, f.agent)
+			} else {
+				err = d.DispatchAgentStart(ctx, f.agent, "", false)
+			}
+			if err == nil {
+				t.Fatal("expected the dispatch to fail")
+			}
+			if got := f.storedRunID(t); got != "newer-run" {
+				t.Errorf("stored run_id = %q, want newer-run (the revert must not overwrite it)", got)
+			}
+		})
+	}
+}
+
+// A restart whose stop failed can find the entry still running and keep
+// it; the broker reports that entry's run ID in the restart response, and
+// the hub adopts it (compare-and-swap against the minted ID) so a later
+// delete targets the entry that exists. A response without a run ID keeps
+// the minted value.
+func TestRunID_RestartAdoptsBrokerRunID(t *testing.T) {
+	ctx := context.Background()
+	f := newRunIDFixture(t, "runid-restart-adopt")
+	if _, err := f.store.SetAgentRunID(ctx, f.agent.ID, "live-run"); err != nil {
+		t.Fatal(err)
+	}
+	f.client.restartReturnResp = &RemoteAgentResponse{Agent: &RemoteAgentInfo{
+		ID: f.agent.Slug, Name: f.agent.Slug, Phase: "running", RunID: "live-run",
+	}}
+	if err := f.dispatcher.DispatchAgentRestart(ctx, f.agent); err != nil {
+		t.Fatalf("DispatchAgentRestart: %v", err)
+	}
+	minted := f.client.lastRestartExtras.RunID
+	requireUUID(t, "minted run ID", minted)
+	if got := f.storedRunID(t); got != "live-run" {
+		t.Errorf("stored run_id = %q, want the adopted live-run", got)
+	}
+	if f.agent.RunID != "live-run" {
+		t.Errorf("in-memory RunID = %q, want live-run", f.agent.RunID)
+	}
+
+	// An older broker's restart response carries no run ID.
+	f.client.restartReturnResp = &RemoteAgentResponse{Agent: &RemoteAgentInfo{ID: f.agent.Slug, Phase: "running"}}
+	if err := f.dispatcher.DispatchAgentRestart(ctx, f.agent); err != nil {
+		t.Fatalf("second DispatchAgentRestart: %v", err)
+	}
+	if got, want := f.storedRunID(t), f.client.lastRestartExtras.RunID; got != want {
+		t.Errorf("stored run_id = %q, want the minted %q", got, want)
+	}
+}
+
 // failingRunIDStore fails the run ID write as a database outage would.
 type failingRunIDStore struct{ store.Store }
 
-func (failingRunIDStore) SetAgentRunID(context.Context, string, string) error {
-	return errors.New("database is unavailable")
+func (failingRunIDStore) SetAgentRunID(context.Context, string, string) (string, error) {
+	return "", errors.New("database is unavailable")
 }
 
 // A run ID the row cannot record must not be sent: the dispatch fails
@@ -417,5 +563,95 @@ func TestApplyStartExtras_RunID(t *testing.T) {
 	applyStartExtras(payload, StartExtras{})
 	if _, ok := payload["runId"]; ok {
 		t.Error("runId sent without a run ID")
+	}
+}
+
+// RestartAgent returns the broker's restart response (with the entry's
+// runId) on both transports, and treats an empty body as success with no
+// response, as an older broker might send.
+func TestHTTPRuntimeBrokerClient_RestartAgentReturnsResponse(t *testing.T) {
+	body := `{"agent":{"id":"a","runId":"run-1"},"created":false}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	client := NewHTTPRuntimeBrokerClient()
+	resp, err := client.RestartAgent(context.Background(), tid("host-1"), server.URL, "a", "", nil, StartExtras{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil || resp.Agent == nil || resp.Agent.RunID != "run-1" {
+		t.Fatalf("resp = %+v, want agent runId run-1", resp)
+	}
+
+	body = ""
+	resp, err = client.RestartAgent(context.Background(), tid("host-1"), server.URL, "a", "", nil, StartExtras{})
+	if err != nil || resp != nil {
+		t.Fatalf("empty body: resp = %+v, err = %v; want nil, nil", resp, err)
+	}
+}
+
+func TestControlChannelBrokerClient_RestartAgentReturnsResponse(t *testing.T) {
+	tunnel := &mockControlChannelTunnel{connected: true, status: http.StatusAccepted,
+		body: []byte(`{"agent":{"id":"agent-1","runId":"run-1"},"created":false}`)}
+	client := &ControlChannelBrokerClient{manager: tunnel}
+	resp, err := client.RestartAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", nil, StartExtras{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp == nil || resp.Agent == nil || resp.Agent.RunID != "run-1" {
+		t.Fatalf("resp = %+v, want agent runId run-1", resp)
+	}
+
+	tunnel.body = nil
+	resp, err = client.RestartAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", nil, StartExtras{})
+	if err != nil || resp != nil {
+		t.Fatalf("empty body: resp = %+v, err = %v; want nil, nil", resp, err)
+	}
+}
+
+// brokerStartAttempted reads the broker's marker from the error envelope.
+func TestBrokerStartAttempted(t *testing.T) {
+	if !brokerStartAttempted(brokerEnvelope(t, 500, "runtime_error", startAttempted("r"))) {
+		t.Error("marked envelope not recognized")
+	}
+	for _, err := range []error{
+		brokerEnvelope(t, 500, "runtime_error", nil),
+		brokerEnvelope(t, 500, "runtime_error", map[string]interface{}{api.BrokerErrorDetailStartAttempted: "yes"}),
+		&brokerStatusError{StatusCode: 500, Body: "not json"},
+		errors.New("plain"),
+	} {
+		if brokerStartAttempted(err) {
+			t.Errorf("%v: reported start attempted", err)
+		}
+	}
+}
+
+// reportingCreateClient answers a create with a fixed run ID for the entry,
+// as a broker that found an existing entry would.
+type reportingCreateClient struct {
+	*mockRuntimeBrokerClient
+	runID string
+}
+
+func (c *reportingCreateClient) CreateAgent(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
+	c.lastCreateReq = req
+	return &RemoteAgentResponse{Agent: &RemoteAgentInfo{ID: req.ID, Slug: req.Slug, Phase: "running", RunID: c.runID}, Created: true}, nil
+}
+
+// Create adopts the run ID the broker reports for the entry, as start does.
+func TestRunID_CreateAdoptsBrokerRunID(t *testing.T) {
+	ctx := context.Background()
+	f := newRunIDFixture(t, "runid-create-adopt")
+	client := &reportingCreateClient{mockRuntimeBrokerClient: f.client, runID: "broker-run"}
+	d := NewHTTPAgentDispatcherWithClient(f.store, client, false, slog.Default())
+	if err := d.DispatchAgentCreate(ctx, f.agent); err != nil {
+		t.Fatalf("DispatchAgentCreate: %v", err)
+	}
+	requireUUID(t, "minted run ID", f.client.lastCreateReq.RunID)
+	if got := f.storedRunID(t); got != "broker-run" {
+		t.Errorf("stored run_id = %q, want the adopted broker-run", got)
 	}
 }

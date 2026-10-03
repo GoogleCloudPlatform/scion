@@ -79,7 +79,7 @@ func (c *HTTPRuntimeBrokerClient) StopAgent(ctx context.Context, brokerID, broke
 	return c.transport.StopAgent(ctx, brokerID, brokerEndpoint, agentID, projectID)
 }
 
-func (c *HTTPRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) error {
+func (c *HTTPRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, resolvedEnv map[string]string, extras StartExtras) (*RemoteAgentResponse, error) {
 	return c.transport.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv, extras)
 }
 
@@ -1289,21 +1289,32 @@ func (d *HTTPAgentDispatcher) forgetRuntimeTarget(ctx context.Context, agent *st
 // SetAgentRunID, which neither checks nor bumps state_version, so it cannot
 // conflict with the caller's own later UpdateAgent. A failed write fails
 // the dispatch: sending a run ID the row does not record would make the
-// next delete miss the entry this dispatch creates. The exception is an
-// agent with no row (not found, or an ID that cannot name one): no hub
-// delete can target such an agent, so the dispatch proceeds with the
-// minted ID unrecorded. It returns the minted ID and the ID the row held
-// before, for revertRun.
+// next delete miss the entry this dispatch creates.
+//
+// The one exception is an agent with no row at all (ErrNotFound, or an ID
+// that cannot name a row, ErrInvalidInput). Dispatching such an agent is
+// pre-existing behaviour, used by callers and tests that hold an agent
+// struct without a stored row; no hub delete can target it, so the
+// dispatch proceeds with the minted ID unrecorded. This is not a
+// fail-open for real rows: any other store error, for an agent that does
+// have a row, still fails the dispatch.
+//
+// It returns the minted ID and the value the row held immediately before
+// the write (read from the database, not from the caller's possibly stale
+// struct), for revertRun.
 func (d *HTTPAgentDispatcher) beginRun(ctx context.Context, agent *store.Agent) (runID, previous string, err error) {
 	previous = agent.RunID
 	runID = uuid.NewString()
 	if d.store != nil && agent.ID != "" {
-		if err := d.store.SetAgentRunID(ctx, agent.ID, runID); err != nil {
-			if !errors.Is(err, store.ErrNotFound) && !errors.Is(err, store.ErrInvalidInput) {
-				return "", "", fmt.Errorf("failed to record the run ID for agent %s: %w", agent.ID, err)
-			}
+		prior, err := d.store.SetAgentRunID(ctx, agent.ID, runID)
+		switch {
+		case err == nil:
+			previous = prior
+		case errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput):
 			d.log.Warn("Dispatcher: agent has no row; run ID not recorded",
 				"agent_id", agent.ID, "agent", agent.Slug, "run_id", runID, "error", err)
+		default:
+			return "", "", fmt.Errorf("failed to record the run ID for agent %s: %w", agent.ID, err)
 		}
 	}
 	agent.RunID = runID
@@ -1342,6 +1353,38 @@ func (d *HTTPAgentDispatcher) adoptBrokerRunID(ctx context.Context, agent *store
 	}
 	d.log.Info("Dispatcher: adopted the broker's run ID",
 		"agent_id", agent.ID, "agent", agent.Slug, "minted_run_id", minted, "run_id", actual)
+}
+
+// shouldRevertRun reports whether a failed start or restart left the
+// previous runtime entry as the agent's live run, so the dispatch should
+// put the row's run ID back (ptone/scion#2550). That needs both:
+//   - isConfirmedStartNotActedOnError: the request never reached the
+//     broker, or the broker answered with its own error envelope; and
+//   - no api.BrokerErrorDetailStartAttempted marker in that envelope. The
+//     broker sets the marker on any failure from inside Manager.Start, by
+//     which point Start may already have removed the previous entry (and
+//     restart has stopped it) and may have created one labelled with the
+//     minted run, so reverting would aim the next delete at an entry that
+//     is gone and leak the new one.
+//
+// An older broker never sets the marker, so against it this falls back to
+// isConfirmedStartNotActedOnError alone, the pre-marker behaviour.
+func shouldRevertRun(err error) bool {
+	if !isConfirmedStartNotActedOnError(err) {
+		return false
+	}
+	return !brokerStartAttempted(err)
+}
+
+// brokerStartAttempted reports whether err is a broker error envelope
+// carrying the api.BrokerErrorDetailStartAttempted marker.
+func brokerStartAttempted(err error) bool {
+	var statusErr *brokerStatusError
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+	attempted, _ := statusErr.brokerErrorDetails()[api.BrokerErrorDetailStartAttempted].(bool)
+	return attempted
 }
 
 // revertRun restores the run ID the row held before beginRun, when the
@@ -3045,9 +3088,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		// what counts as confirmed-safe and what does not.
 		revokeArmed = false
 	}
-	if err != nil && isConfirmedStartNotActedOnError(err) {
-		// The broker created nothing: the previous entry, if any, is
-		// still the agent's live run.
+	if shouldRevertRun(err) {
+		// The broker rejected the start before acting on it: the previous
+		// entry, if any, is still the agent's live run.
 		d.revertRun(ctx, agent, runID, previousRunID)
 	}
 	if err != nil {
@@ -3134,19 +3177,23 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	}
 	extras.RunID = runID
 
-	err = d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv, extras)
+	resp, err := d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv, extras)
 	if errors.Is(err, ErrLifecycleDeferred) {
 		// The owning node mints and records its own run ID.
 		d.revertRun(ctx, agent, runID, previousRunID)
 		return d.deferredRestart(ctx, agent)
 	}
-	if err != nil && isConfirmedStartNotActedOnError(err) {
+	if shouldRevertRun(err) {
 		d.revertRun(ctx, agent, runID, previousRunID)
 	}
-	if err == nil {
-		d.forgetRuntimeTarget(ctx, agent)
+	if err != nil {
+		return err
 	}
-	return err
+	d.forgetRuntimeTarget(ctx, agent)
+	// A restart whose stop failed can find the entry still running and
+	// keep it, reporting that entry's (older) run ID.
+	d.adoptBrokerRunID(ctx, agent, runID, resp)
+	return nil
 }
 
 // DispatchAgentResetAuth injects a fresh auth token into a running agent without
