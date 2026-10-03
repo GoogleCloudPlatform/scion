@@ -2959,6 +2959,10 @@ func setHermeticHubEnv(t *testing.T, server *httptest.Server) {
 	t.Setenv("SCION_PROJECT", "own-project")
 	t.Setenv("SCION_PROJECT_ID", "own-project-id")
 	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
+	// Inside a Scion agent container the runtime sets SCION_HOST_UID, which
+	// makes root's agent-container guard abort before any Hub call. Clear
+	// it so a zero-hit assertion measures the command itself.
+	t.Setenv("SCION_HOST_UID", "")
 }
 
 // TestMessageCmd_RawFlag_ZeroWireCalls proves the removed --raw flag never
@@ -3018,6 +3022,51 @@ func TestMessageCmd_RawFlag_ZeroWireCalls(t *testing.T) {
 			require.ErrorIs(t, err, errRawFlagRemoved)
 			assert.Contains(t, err.Error(), "scion keys")
 			assert.EqualValues(t, 0, atomic.LoadInt32(hits), "--raw must make zero wire calls")
+		})
+	}
+}
+
+// TestMessageCmd_WithoutRawFlag_ReachesCountingServer is the positive
+// control for TestMessageCmd_RawFlag_ZeroWireCalls: the same pipeline and
+// environment without --raw does reach the counting server, so its
+// zero-hit assertion is not vacuous.
+func TestMessageCmd_WithoutRawFlag_ReachesCountingServer(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"agent", []string{"message", "target-agent", "hello"}},
+		{"at agent", []string{"message", "@target-agent", "hello"}},
+		{"msg alias", []string{"msg", "target-agent", "hello"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := saveMessageTestState()
+			defer orig.restore()
+			restore := resetMessageFlags()
+			defer restore()
+			t.Cleanup(func() {
+				messageCmd.Flags().Visit(func(f *pflag.Flag) { f.Changed = false })
+				rootCmd.PersistentFlags().Visit(func(f *pflag.Flag) { f.Changed = false })
+				rootCmd.SetArgs(nil)
+				rootCmd.SetOut(nil)
+				rootCmd.SetErr(nil)
+			})
+
+			server, hits := newCountingHubServer(t)
+			defer server.Close()
+			setHermeticHubEnv(t, server)
+			noHub = false
+
+			var out bytes.Buffer
+			rootCmd.SetOut(&out)
+			rootCmd.SetErr(&out)
+			rootCmd.SetArgs(tc.args)
+			_, err := rootCmd.ExecuteC()
+
+			assert.NotErrorIs(t, err, errRawFlagRemoved)
+			assert.Greater(t, atomic.LoadInt32(hits), int32(0),
+				"without --raw the command must reach the counting server (err=%v)", err)
 		})
 	}
 }
