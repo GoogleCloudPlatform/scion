@@ -104,6 +104,8 @@ func TestStageTransportToken_KeepsNewerFile(t *testing.T) {
 	}
 	older := makeDoctorTestJWT(time.Now().Add(-90 * time.Minute))
 	t.Setenv(transportauth.EnvTransportToken, older)
+	// stageTransportToken sets the FILE var; t.Setenv restores it afterwards.
+	t.Setenv(transportauth.EnvTransportTokenFile, "")
 
 	if !stageTransportToken(0, 0) {
 		t.Fatal("stageTransportToken returned false")
@@ -120,6 +122,7 @@ func TestStageTransportToken_KeepsNewerFile(t *testing.T) {
 func TestStageTransportToken_NoEnv(t *testing.T) {
 	t.Cleanup(hub.SetTokenHome(t.TempDir()))
 	t.Setenv(transportauth.EnvTransportToken, "")
+	t.Setenv(transportauth.EnvTransportTokenFile, "")
 	if stageTransportToken(0, 0) {
 		t.Error("stageTransportToken should be a no-op without the env var")
 	}

@@ -260,7 +260,7 @@ The `transport` entry is only present when `auth.transport` is configured on the
 
 The agent (`pkg/sciontool/hub`) selects an OIDC token source automatically:
 
-1. **Hub-provided token available** (the `~/.scion/transport-token` file, or the `SCION_TRANSPORT_TOKEN` bootstrap value) → **Injected mode**: uses the hub-provided token from dispatch, refreshed via `tokens[]` on subsequent refresh calls and shared with other processes through the file. Whichever of the file and the env value expires later is used.
+1. **`SCION_TRANSPORT_TOKEN_FILE` or `SCION_TRANSPORT_TOKEN` set** → **Injected mode**: reads the refreshed file, with the env value as bootstrap fallback. The hub-provided token from dispatch is refreshed via `tokens[]` on subsequent refresh calls and shared with other processes through the file. Whichever of the file and the env value expires later is used. The file alone does not select this mode.
 2. **Running on GCP (metadata server available)** → **Metadata mode**: fetches OIDC from the GCE metadata server using the ambient SA identity (the PR #307 pattern). Audience is set via `SCION_HUB_OIDC_AUDIENCE` or defaults to the hub URL.
 3. **Neither** → No OIDC transport (agent uses plain HTTP).
 

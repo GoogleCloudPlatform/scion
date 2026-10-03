@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -317,4 +318,41 @@ func TestFileSource_ConcurrentRefreshAndRead(t *testing.T) {
 	got, err := src.Token()
 	require.NoError(t, err)
 	assert.Equal(t, values[writes-1], got)
+}
+
+// TestReadTransportTokenFile_RefusesNonRegular verifies the default reader
+// refuses a symlink at the leaf (at open time, not via a separate check), a
+// FIFO (without blocking), and a directory, and reads a regular file.
+func TestReadTransportTokenFile_RefusesNonRegular(t *testing.T) {
+	dir := t.TempDir()
+
+	regular := filepath.Join(dir, "regular")
+	require.NoError(t, os.WriteFile(regular, []byte("header.payload.sig\n"), 0600))
+	got, err := ReadTransportTokenFile(regular)
+	require.NoError(t, err)
+	assert.Equal(t, "header.payload.sig\n", got)
+
+	link := filepath.Join(dir, "link")
+	require.NoError(t, os.Symlink(regular, link))
+	_, err = ReadTransportTokenFile(link)
+	assert.Error(t, err, "symlink must be refused")
+
+	fifo := filepath.Join(dir, "fifo")
+	require.NoError(t, syscall.Mkfifo(fifo, 0600))
+	done := make(chan error, 1)
+	go func() {
+		_, err := ReadTransportTokenFile(fifo)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		assert.Error(t, err, "FIFO must be refused")
+	case <-time.After(5 * time.Second):
+		t.Fatal("reading a FIFO blocked")
+	}
+
+	sub := filepath.Join(dir, "subdir")
+	require.NoError(t, os.Mkdir(sub, 0700))
+	_, err = ReadTransportTokenFile(sub)
+	assert.Error(t, err, "directory must be refused")
 }

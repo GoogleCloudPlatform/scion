@@ -35,12 +35,13 @@ const (
 
 // configureOIDCTransport sets up the OIDC transport layer on the client.
 // Token source selection:
-//  1. If a hub-provided transport token is available (the refreshed
-//     transport token file under the scion user's ~/.scion, or the
-//     SCION_TRANSPORT_TOKEN bootstrap value) → file-backed mode. The file is
-//     re-read when it changes, and whichever of file and env value expires
-//     last is used, so short-lived clients see the value the long-lived
-//     client in sciontool init last refreshed.
+//  1. If SCION_TRANSPORT_TOKEN_FILE or SCION_TRANSPORT_TOKEN is set (the
+//     agent was given a hub-provided transport token) → file-backed mode.
+//     The file (SCION_TRANSPORT_TOKEN_FILE, else the scion user's
+//     ~/.scion/transport-token) is re-read when it changes, with the env
+//     value as bootstrap fallback; whichever expires last is used, so
+//     short-lived clients see the value the long-lived client in sciontool
+//     init last refreshed. The file alone does not select this mode.
 //  2. Else if running on GCP → metadata server mode (ambient SA identity).
 //  3. Else → no OIDC transport (agent uses plain HTTP).
 //

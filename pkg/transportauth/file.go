@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -66,16 +67,22 @@ func DefaultTransportTokenFilePath() string {
 // Callers running with elevated privileges should supply a stricter reader
 // (sciontool uses its fd-relative, no-follow reader).
 func ReadTransportTokenFile(path string) (string, error) {
-	fi, err := os.Lstat(path)
+	// O_NOFOLLOW refuses a symlink at the leaf atomically with the open;
+	// O_NONBLOCK keeps a FIFO planted at the path from blocking the open.
+	// The regular-file check then runs on the opened descriptor, so there
+	// is no window between the check and the read.
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
+		return "", err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
 		return "", err
 	}
 	if !fi.Mode().IsRegular() {
+		_ = f.Close()
 		return "", fmt.Errorf("transport token file %s is not a regular file", path)
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
 	}
 	defer func() { _ = f.Close() }()
 	data, err := io.ReadAll(io.LimitReader(f, transportTokenFileMaxBytes+1))

@@ -420,13 +420,6 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// StatusHandler is created so it writes to the correct path.
 	agentHome := resolveAgentHome(targetUID, rootless)
 
-	// Stage secrets from the SCION_STAGED_SECRETS env var. The broker
-	// serializes file and variable secrets into this single base64 blob
-	// instead of bind-mounting them from the host filesystem. We decode and
-	// write them before anything else so they are available to hooks and
-	// the harness. This must happen before telemetry pipeline initialization
-	// because the GCP credentials file (pointed to by SCION_OTEL_GCP_CREDENTIALS)
-	// must exist on disk when the telemetry pipeline starts.
 	// Move the bootstrap transport credential out of the environment and
 	// into the transport token file before anything else can inherit it.
 	// Child processes read the file (via SCION_TRANSPORT_TOKEN_FILE), which
@@ -435,6 +428,13 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// below restarts init with the cleaned environment for both.
 	transportCleared := stageTransportToken(targetUID, targetGID)
 
+	// Stage secrets from the SCION_STAGED_SECRETS env var. The broker
+	// serializes file and variable secrets into this single base64 blob
+	// instead of bind-mounting them from the host filesystem. We decode and
+	// write them before anything else so they are available to hooks and
+	// the harness. This must happen before telemetry pipeline initialization
+	// because the GCP credentials file (pointed to by SCION_OTEL_GCP_CREDENTIALS)
+	// must exist on disk when the telemetry pipeline starts.
 	if encoded := os.Getenv(stagedsecrets.EnvVar); encoded != "" {
 		staged, err := stagedsecrets.Decode(encoded)
 		if err != nil {
