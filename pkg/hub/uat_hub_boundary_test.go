@@ -272,6 +272,12 @@ func TestHubUAT_FormerMemberRetainedAncestryDenied(t *testing.T) {
 // carrying broker:create cannot register a project with an embedded
 // broker: the request is denied with 403 and creates neither a broker nor
 // a project.
+//
+// The project.create authorization at the top of the register handler
+// denies this request first: a hub token cannot resolve the target of a
+// project resource without an ID. authorizeBrokerCreate also denies UAT
+// credentials on the embedded broker path, as a second gate. The test
+// asserts that the project.create deny is the one recorded.
 func TestProjectRegisterEmbeddedBroker_HubUATDenied(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -286,6 +292,9 @@ func TestProjectRegisterEmbeddedBroker_HubUATDenied(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	emitter := &capturingAuditEmitter{}
+	srv.authzService.SetDecisionAuditEmitter(emitter)
+
 	const brokerName = "embedded-hubuat-broker"
 	const projectName = "embedded-hubuat-new-project"
 	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/projects/register", RegisterProjectRequest{
@@ -294,6 +303,19 @@ func TestProjectRegisterEmbeddedBroker_HubUATDenied(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), "secretKey", "a denied response carries no secret")
+
+	emitter.mu.Lock()
+	var denies []*store.DecisionAuditRecord
+	for _, r := range emitter.records {
+		if r.Result == "deny" {
+			denies = append(denies, r)
+		}
+	}
+	emitter.mu.Unlock()
+	require.Len(t, denies, 1, "the project.create authorization records the only deny")
+	assert.Equal(t, "project", denies[0].ResourceType)
+	assert.Equal(t, string(ActionCreate), denies[0].Permission)
+	assert.Equal(t, bearerReasonOutsideProject, denies[0].Reason)
 
 	_, err = s.GetRuntimeBrokerByName(ctx, brokerName)
 	assert.ErrorIs(t, err, store.ErrNotFound, "a denied registration creates no broker")

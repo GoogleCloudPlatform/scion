@@ -434,7 +434,7 @@ func TestEvaluateBearerCeiling_EvidenceMustNameEvaluatedPermission(t *testing.T)
 	}{
 		{"hub evidence for another permission", hubBoundary(), Resource{}, hubCollectionEvidence("skill.list")},
 		{"project evidence for another permission", projectBoundary(f.projectA), Resource{Type: "agent", ParentType: "project", ParentID: f.projectA}, projectCollectionEvidence(f.projectA, "agent.create")},
-		{"evidence without a permission", hubBoundary(), Resource{}, hubCollectionEvidence("")},
+		{"hub boundary with project evidence for another permission", hubBoundary(), Resource{}, projectCollectionEvidence(f.projectA, "skill.list")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
