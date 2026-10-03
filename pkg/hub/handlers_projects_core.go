@@ -591,7 +591,7 @@ func (s *Server) createProjectGroup(ctx context.Context, project *store.Project)
 		ProjectID: project.ID,
 		CreatedBy: project.CreatedBy,
 		Annotations: map[string]string{
-			systemProjectAgentsGroupAnnotation: "true",
+			store.AnnotationProjectAgentsGroup: "true",
 		},
 	}
 	if err := s.store.CreateGroup(ctx, projectGroup); err != nil {
@@ -690,8 +690,6 @@ func (s *Server) createProjectOwnerRoleBinding(ctx context.Context, projectID, u
 	return nil
 }
 
-const systemProjectAgentsGroupAnnotation = "scion.io/project-agents-group"
-
 func projectMembersGroupSlug(projectSlug string) string {
 	return "project:" + projectSlug + ":members"
 }
@@ -760,7 +758,7 @@ func isSystemProjectAgentsGroup(group *store.Group, projectID string) bool {
 	return group != nil &&
 		group.ProjectID == projectID &&
 		group.Annotations != nil &&
-		group.Annotations[systemProjectAgentsGroupAnnotation] == "true"
+		group.Annotations[store.AnnotationProjectAgentsGroup] == "true"
 }
 
 // createProjectMembersGroup creates the project's collaboration

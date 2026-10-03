@@ -613,6 +613,13 @@ const (
 	LegacyAnnotationProjectMembersGroup = "scion.io/system-project-members-group"
 )
 
+// AnnotationProjectAgentsGroup marks a group as the hub-managed
+// project:<slug>:agents group. The hub (createProjectGroup) writes it and
+// checks it (isSystemProjectAgentsGroup) before adopting an existing group
+// with that slug, and the store agents group marker backfill writes it on
+// legitimate pre-upgrade groups.
+const AnnotationProjectAgentsGroup = "scion.io/project-agents-group"
+
 // Git source labels for git-anchored projects. LabelCloneURL is the URL agents
 // and shared-workspace init actually clone from (it takes precedence over
 // Project.GitRemote), LabelSourceURL records the remote as the user entered it,

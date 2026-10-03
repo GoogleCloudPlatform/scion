@@ -47,7 +47,6 @@ const projectMembersGroupMarkerBackfillSection = "backfill_project_group_markers
 // pkg/hub tests can clear it without repeating the literal.
 const LegacyProjectMembersGroupMarkerMigrationSection = "migration_legacy_project_members_group_marker_v1"
 const projectAgentsGroupMarkerBackfillSection = "migration_project_agents_group_markers_backfilled"
-const systemProjectAgentsGroupAnnotation = "scion.io/project-agents-group"
 const adoptionReviewRequiredAnnotation = "scion.io/adoption-review-required"
 const githubTokenInjectionModeMarkerSection = "migration_github_token_injection_mode_always"
 const agentIdentityKeyBackfillMarkerSection = "migration_agent_identity_keys_backfilled"
@@ -1173,7 +1172,7 @@ func (c *CompositeStore) BackfillProjectAgentsGroupMarkers(ctx context.Context) 
 				"group_owner", groupOwner, "project_owner", project.OwnerID)
 		}
 
-		if g.Annotations[systemProjectAgentsGroupAnnotation] == "true" {
+		if g.Annotations[store.AnnotationProjectAgentsGroup] == "true" {
 			// D8-fix: even if the system annotation already exists, ensure the
 			// adoption-review annotation is set on mismatch (handles interrupted
 			// backfills or later ownership changes).
@@ -1202,7 +1201,7 @@ func (c *CompositeStore) BackfillProjectAgentsGroupMarkers(ctx context.Context) 
 		for k, v := range g.Annotations {
 			annotations[k] = v
 		}
-		annotations[systemProjectAgentsGroupAnnotation] = "true"
+		annotations[store.AnnotationProjectAgentsGroup] = "true"
 		// D8-fix: when an owner mismatch is detected, add a durable annotation
 		// so operators can query for suspect groups after the fact instead of
 		// grepping startup logs. The group is still marked (not refused) because
