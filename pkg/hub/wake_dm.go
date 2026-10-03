@@ -234,10 +234,6 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 	}
 }
 
-// validateAgentDeliverable checks that the target agent is in a state that
-// can accept message delivery when wake was NOT requested. Returns nil when
-// the agent is running, or a typed error describing why delivery is not
-// possible.
 // validateGroupMemberDeliverable is validateAgentDeliverable for a group[]
 // member. Group messages never wake agents, so a suspended member gets a
 // reason that points the sender at a direct, waking message instead of the
@@ -250,6 +246,10 @@ func validateGroupMemberDeliverable(agent *store.Agent) *AgentDMError {
 	return err
 }
 
+// validateAgentDeliverable checks that the target agent is in a state that
+// can accept message delivery when wake was NOT requested. Returns nil when
+// the agent is running, or a typed error describing why delivery is not
+// possible.
 func validateAgentDeliverable(agent *store.Agent) *AgentDMError {
 	phase := state.Phase(agent.Phase)
 	switch phase {
