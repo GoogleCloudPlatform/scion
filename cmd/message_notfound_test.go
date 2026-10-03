@@ -33,10 +33,16 @@ import (
 // reaped agent (pkg/hub/handlers_projects_core.go).
 func newAgentNotFoundHub(t *testing.T) *httptest.Server {
 	t.Helper()
+	return newNotFoundHub(t, `{"error":{"code":"agent_not_found","message":"Agent \"ghost\" not found in project"}}`)
+}
+
+// newNotFoundHub returns a hub that answers every request 404 with body.
+func newNotFoundHub(t *testing.T, body string) *httptest.Server {
+	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"error":{"code":"agent_not_found","message":"Agent \"ghost\" not found in project"}}`))
+		_, _ = w.Write([]byte(body))
 	}))
 }
 
@@ -105,4 +111,43 @@ func TestSendMessageViaConversation_AgentNotFound(t *testing.T) {
 		err = sendMessageViaConversation(hubCtx, ref, "hello", false, false, nil)
 		assertAgentNotFoundRendering(t, err)
 	})
+}
+
+// TestAgentMessageSend_OtherNotFoundKeepsGenericWording pins that only the
+// hub's agent_not_found code is reported as a missing agent. A generic 404
+// (stale project ID → "Project not found", or a bare 404 from an older hub or
+// a proxy) keeps the generic wording, still without hint or Usage.
+func TestAgentMessageSend_OtherNotFoundKeepsGenericWording(t *testing.T) {
+	bodies := map[string]string{
+		"project not found": `{"error":{"code":"not_found","message":"Project not found"}}`,
+		"bare 404":          `not found`,
+	}
+	ref := &messaging.Reference{Kind: messaging.RefAgent, Value: "ghost", Raw: "@ghost"}
+	for name, body := range bodies {
+		t.Run(name, func(t *testing.T) {
+			orig := saveMessageTestState()
+			defer orig.restore()
+			t.Setenv("SCION_AGENT_ID", "")
+			t.Setenv("SCION_AGENT_NAME", "")
+
+			server := newNotFoundHub(t, body)
+			defer server.Close()
+			client, err := hubclient.New(server.URL)
+			require.NoError(t, err)
+			hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: "proj-631"}
+
+			for _, send := range []func() error{
+				func() error { return sendMessageViaHub(hubCtx, "ghost", "hello", false, false, false) },
+				func() error { return sendMessageViaConversation(hubCtx, ref, "hello", false, false, nil) },
+			} {
+				err := send()
+				require.Error(t, err)
+				msg := err.Error()
+				assert.Contains(t, msg, "failed to send message to agent 'ghost' via Hub")
+				assert.NotContains(t, msg, "agent 'ghost' not found")
+				assert.NotContains(t, msg, "scion hub disable")
+				assert.False(t, showUsageForError(messageCmd, err, true))
+			}
+		})
+	}
 }
