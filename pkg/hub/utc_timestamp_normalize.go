@@ -18,6 +18,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"slices"
@@ -91,9 +92,15 @@ const (
 // scan, so running it inline would add a cost that grows with the database
 // to every start. It only logs, and nothing at start depends on its result.
 // Each column is its own query, so on SQLite's single connection other work
-// waits at most for one column's scan.
+// waits at most for one column's scan. A panic in the check is logged and
+// does not take the hub down.
 func (s *Server) startStoredTimestampCheck(ctx context.Context) {
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("timestamp check: recovered from panic", "panic", fmt.Sprint(r))
+			}
+		}()
 		ctx, cancel := context.WithTimeout(ctx, startupTimestampCheckTimeout)
 		defer cancel()
 		storedTimestampCheck(s, ctx)

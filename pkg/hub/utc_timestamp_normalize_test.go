@@ -718,6 +718,33 @@ func TestUTCTimestampNormalize_UnreadableProbeMatchesEntReads(t *testing.T) {
 
 // TestUTCTimestampNormalize_StartupCheckRunsInBackground checks that the
 // start hook returns at once and the check still logs.
+// A panic in the background check is logged and does not crash the hub.
+func TestUTCTimestampNormalize_StartupCheckRecoversFromPanic(t *testing.T) {
+	logs := &syncBuffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	done := make(chan struct{})
+	orig := storedTimestampCheck
+	storedTimestampCheck = func(*Server, context.Context) {
+		defer close(done)
+		panic("boom")
+	}
+	t.Cleanup(func() { storedTimestampCheck = orig })
+
+	(&Server{}).startStoredTimestampCheck(context.Background())
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the check never ran")
+	}
+	require.Eventually(t, func() bool {
+		return strings.Contains(logs.String(), "timestamp check: recovered from panic")
+	}, 10*time.Second, 10*time.Millisecond)
+	assert.Contains(t, logs.String(), "panic=boom")
+}
+
 func TestUTCTimestampNormalize_StartupCheckRunsInBackground(t *testing.T) {
 	_, s, db := newEntWebChatStore(t)
 	ctx := context.Background()
