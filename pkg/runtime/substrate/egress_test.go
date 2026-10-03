@@ -113,6 +113,19 @@ func TestValidateEgressAllow_RejectsAllIPAndCIDR(t *testing.T) {
 		"1.0.0.0/1",
 		"::ffff:10.0.0.1",
 		"::ffff:10.0.0.0/104",
+		// inet_aton short, hex, octal and single-integer spellings that
+		// net/netip does not parse but resolvers and URL parsers read as
+		// IPv4. (A hostname whose LAST label is a number — "foo.123" — is
+		// refused too, by the public-suffix rule; see KnownBypasses.)
+		"127.1",
+		"10.1",
+		"0x7f000001",
+		"0X7F000001",
+		"0x7f.0.0.1",
+		"0177.0.0.1",
+		"017700000001",
+		"2130706433",
+		"127.1.",
 	}
 	for _, entry := range cases {
 		err := ValidateEgressAllow([]string{entry})
@@ -122,6 +135,51 @@ func TestValidateEgressAllow_RejectsAllIPAndCIDR(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "IP/CIDR egress rules not currently supported") {
 			t.Errorf("ValidateEgressAllow([%q]) error = %v, want it to contain the exact IP/CIDR message", entry, err)
+		}
+	}
+}
+
+// TestNormalizeEgressAllowEntry_ZonedIPv6Refused covers the zoned IPv6
+// forms on the tenant path (NormalizeEgressAllowEntry is what
+// addTenantHost in pkg/runtime calls): bracketed with a percent-encoded
+// zone, and bare with a raw zone. Both are refused, by the
+// unsupported-character check ahead of the IP test.
+func TestNormalizeEgressAllowEntry_ZonedIPv6Refused(t *testing.T) {
+	for _, entry := range []string{"[fe80::1%25eth0]", "fe80::1%eth0"} {
+		got, err := NormalizeEgressAllowEntry(entry)
+		if err == nil {
+			t.Errorf("NormalizeEgressAllowEntry(%q) = %q, nil; want a refusal", entry, got)
+			continue
+		}
+		if got != "" {
+			t.Errorf("NormalizeEgressAllowEntry(%q) returned %q alongside its error, want \"\"", entry, got)
+		}
+	}
+}
+
+// TestIsIPLiteralHost pins the IP-literal predicate the trusted hub host
+// check in pkg/runtime uses. The false rows are the positive control —
+// hostnames with digits in a non-final label, or hex-alphabet labels
+// without a "0x" prefix, are hostnames, because only the last label is
+// examined.
+func TestIsIPLiteralHost(t *testing.T) {
+	for _, host := range []string{
+		"127.0.0.1", "::1", "fe80::1%eth0",
+		"127.1", "10.1", "0x7f000001", "0X7F000001", "0x7f.0.0.1",
+		"0177.0.0.1", "017700000001", "2130706433", "127.1.",
+		"foo.123", "foo.0x7f", "foo.0x",
+	} {
+		if !IsIPLiteralHost(host) {
+			t.Errorf("IsIPLiteralHost(%q) = false, want true", host)
+		}
+	}
+	for _, host := range []string{
+		"", ".", "example.com", "example.com.", "api2.example.com",
+		"1.example.com", "10.0.0.1.example.com", "cafe.de", "dead.beef",
+		"hub.scion-system.svc.cluster.local", "0x7f.example.com",
+	} {
+		if IsIPLiteralHost(host) {
+			t.Errorf("IsIPLiteralHost(%q) = true, want false", host)
 		}
 	}
 }

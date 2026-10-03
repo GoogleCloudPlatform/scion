@@ -17,6 +17,7 @@ package runtime
 import (
 	"net/netip"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -492,6 +493,20 @@ func TestSubstrateEgressHostnames_IPLiteralTrustedHubRefused(t *testing.T) {
 		{"IPv4", "https://10.0.0.5:8443"},
 		{"IPv6", "https://[fd00::1]:8443"},
 		{"bare IPv4 no scheme", "10.0.0.5:8443"},
+		// inet_aton short, hex, octal and single-integer spellings
+		// net/netip does not parse; refused by IsIPLiteralHost's
+		// "ends in a number" test.
+		{"short form 127.1", "https://127.1:8443"},
+		{"short form 10.1", "https://10.1"},
+		{"single hex integer", "https://0x7f000001"},
+		{"single hex integer uppercase", "https://0X7F000001"},
+		{"hex first octet", "https://0x7f.0.0.1"},
+		{"octal first octet", "https://0177.0.0.1"},
+		{"single octal integer", "https://017700000001"},
+		{"single decimal integer", "https://2130706433"},
+		{"short form with trailing dot", "https://127.1."},
+		{"short form bare no scheme", "127.1:8443"},
+		{"IPv6 with percent-encoded zone", "https://[fe80::1%25eth0]:8443"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := RunConfig{TrustedHubEndpoint: tc.endpoint}
@@ -499,10 +514,85 @@ func TestSubstrateEgressHostnames_IPLiteralTrustedHubRefused(t *testing.T) {
 			if hostsErr == nil {
 				t.Fatalf("substrateEgressHostnames() error = nil, want a config error for IP-literal trusted hub endpoint %q (hosts = %v)", tc.endpoint, hosts)
 			}
-			if !strings.Contains(hostsErr.Error(), "hostname") {
-				t.Errorf("substrateEgressHostnames() error = %q, want it to explain that only hostname patterns are supported", hostsErr.Error())
+			if !strings.Contains(hostsErr.Error(), "resolves to IP address") || !strings.Contains(hostsErr.Error(), "hostname") {
+				t.Errorf("substrateEgressHostnames() error = %q, want the IP-address refusal explaining that only hostname patterns are supported", hostsErr.Error())
+			}
+			if len(hosts) != 0 {
+				t.Errorf("substrateEgressHostnames() returned hosts %v alongside its error, want none", hosts)
 			}
 		})
+	}
+}
+
+// TestSubstrateEgressHostnames_UnencodedZoneTrustedHubAddsNoHost: a
+// trusted hub endpoint with a raw (not percent-encoded) IPv6 zone is not a
+// parseable URL, so no hub host is extracted and none is added — it fails
+// closed by omission rather than reaching the policy in any form.
+func TestSubstrateEgressHostnames_UnencodedZoneTrustedHubAddsNoHost(t *testing.T) {
+	cfg := RunConfig{TrustedHubEndpoint: "https://[fe80::1%eth0]:8443"}
+	hosts, hostsErr := substrateEgressHostnames(cfg, map[string]string{}, config.V1SubstrateConfig{})
+	if hostsErr != nil {
+		t.Fatalf("substrateEgressHostnames() error = %v", hostsErr)
+	}
+	for _, h := range hosts {
+		if strings.Contains(h, "fe80") || strings.Contains(h, "eth0") {
+			t.Errorf("substrateEgressHostnames() = %v, the zoned IPv6 hub host %q reached the policy", hosts, h)
+		}
+	}
+}
+
+// TestSubstrateEgressHostnames_HostnameTrustedHubStillAdded is the
+// positive control for the IP-literal refusal: ordinary hub hostnames,
+// including ones with digits in a non-final label, are still added,
+// because only the last label decides whether a host is a number.
+func TestSubstrateEgressHostnames_HostnameTrustedHubStillAdded(t *testing.T) {
+	for endpoint, want := range map[string]string{
+		"https://api2.example.com":                       "api2.example.com",
+		"https://1.example.com:8443":                     "1.example.com",
+		"https://10.0.0.1.nip.example.com":               "10.0.0.1.nip.example.com",
+		"https://cafe.de":                                "cafe.de",
+		"hub.scion-system.svc.cluster.local:8443":        "hub.scion-system.svc.cluster.local",
+		"https://hub.scion-system.svc.cluster.local:443": "hub.scion-system.svc.cluster.local",
+	} {
+		cfg := RunConfig{TrustedHubEndpoint: endpoint}
+		hosts, hostsErr := substrateEgressHostnames(cfg, map[string]string{}, config.V1SubstrateConfig{})
+		if hostsErr != nil {
+			t.Errorf("TrustedHubEndpoint %q: error = %v, want the hostname accepted", endpoint, hostsErr)
+			continue
+		}
+		if !containsHost(hosts, want) {
+			t.Errorf("TrustedHubEndpoint %q: hosts = %v, want %q present", endpoint, hosts, want)
+		}
+	}
+}
+
+// TestSubstrateEgressHostnames_IPLiteralTenantHostsDropped covers the
+// tenant-derived hosts (ANTHROPIC_VERTEX_BASE_URL, the git clone URL, an
+// OTEL endpoint), which go through addTenantHost and so
+// substrate.NormalizeEgressAllowEntry: none of the inet_aton or zoned
+// forms reaches the policy. The validator-level refusal reason for each
+// form is pinned in pkg/runtime/substrate's TestValidateEgressAllow_RejectsAllIPAndCIDR
+// and TestNormalizeEgressAllowEntry_ZonedIPv6Refused.
+func TestSubstrateEgressHostnames_IPLiteralTenantHostsDropped(t *testing.T) {
+	for _, host := range []string{
+		"127.1", "10.1", "0x7f000001", "0x7f.0.0.1", "0177.0.0.1",
+		"017700000001", "2130706433", "[fe80::1%25eth0]",
+	} {
+		env := map[string]string{
+			"ANTHROPIC_VERTEX_BASE_URL":   "https://" + host + "/v1",
+			"SCION_GIT_CLONE_URL":         "https://" + host + "/org/repo.git",
+			"OTEL_EXPORTER_OTLP_ENDPOINT": "https://" + host + ":4317",
+		}
+		hosts, hostsErr := substrateEgressHostnames(RunConfig{}, env, config.V1SubstrateConfig{EgressAllow: []string{"api.example.com"}})
+		if hostsErr != nil {
+			t.Errorf("tenant host %q: error = %v, want it dropped, not a Run failure", host, hostsErr)
+			continue
+		}
+		for _, h := range hosts {
+			if h != "api.example.com" && !slices.Contains(hardcodedModelEgressHosts, h) {
+				t.Errorf("tenant host %q: hosts = %v, unexpected entry %q reached the policy", host, hosts, h)
+			}
+		}
 	}
 }
 

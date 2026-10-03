@@ -17,7 +17,6 @@ package runtime
 import (
 	"fmt"
 	"log/slog"
-	"net/netip"
 	"net/url"
 	"regexp"
 	"sort"
@@ -240,9 +239,11 @@ func substrateEgressHostnames(cfg RunConfig, env map[string]string, sc config.V1
 	// userinfo, path, or query.
 	trustedHubHost := hostFromURL(cfg.TrustedHubEndpoint)
 	if trustedHubHost != "" {
-		if _, err := netip.ParseAddr(trustedHubHost); err == nil {
+		if substrate.IsIPLiteralHost(trustedHubHost) {
 			// An IP-literal host, added unvalidated (see the comment above
 			// on why the trusted hub host skips NormalizeEgressAllowEntry),
+			// including the short and mixed-radix inet_aton spellings
+			// ("127.1", "0x7f000001", "2130706433") netip alone misses,
 			// would otherwise reach CreateActorEgressPolicy as a
 			// HostnameRule pattern and fail only there, with an opaque
 			// control-plane error — Substrate's HostnameRule explicitly

@@ -520,6 +520,40 @@ func isNumericOrHexToken(s string) bool {
 	return isAllDigits(s)
 }
 
+// IsIPLiteralHost reports whether host is an IP address, or would be read
+// as one by a URL parser or inet_aton-style resolver, rather than as a DNS
+// name: either net/netip parses it (IPv4, IPv6, IPv6 with a zone), or its
+// last label is a number in the WHATWG URL Standard's "ends in a number"
+// sense — all decimal digits, or "0x" followed by zero or more hex digits.
+// That second test is what catches the short and mixed-radix forms
+// netip.ParseAddr does not accept ("127.1", "0x7f000001", "0177.0.0.1",
+// "2130706433"). One trailing dot is ignored and case does not matter.
+//
+// Only the LAST label is examined, so a hostname with digits in an earlier
+// label ("api2.example.com", "1.example.com") is not an IP literal.
+// Unprefixed hex-alphabet labels are not numbers either: "cafe.de" and
+// "dead.beef" are hostnames.
+//
+// It is for hosts that skip NormalizeEgressAllowEntry — the operator's
+// trusted hub host in pkg/runtime. Tenant and egress_allow entries already
+// refuse every one of these shapes: looksLikeIPAttempt catches the
+// all-numeric forms, and the public-suffix check refuses a hostname whose
+// last label is a number, since no public suffix is numeric.
+func IsIPLiteralHost(host string) bool {
+	if _, err := netip.ParseAddr(host); err == nil {
+		return true
+	}
+	h := strings.TrimSuffix(strings.ToLower(host), ".")
+	last := h[strings.LastIndex(h, ".")+1:]
+	if last == "" {
+		return false
+	}
+	if rest, ok := strings.CutPrefix(last, "0x"); ok {
+		return isAllHexDigits(rest)
+	}
+	return isAllDigits(last)
+}
+
 func isAllDigits(s string) bool {
 	for _, r := range s {
 		if r < '0' || r > '9' {
