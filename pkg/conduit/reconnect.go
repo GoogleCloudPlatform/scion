@@ -17,6 +17,7 @@ package conduit
 import (
 	"context"
 	"math/rand/v2"
+	"slices"
 	"sync"
 	"time"
 
@@ -157,12 +158,7 @@ func (r *Reconnector) Run(ctx context.Context) error {
 			<-ls.Done()
 			mu.Lock()
 			defer mu.Unlock()
-			for i, x := range live {
-				if x == s {
-					live = append(live[:i], live[i+1:]...)
-					break
-				}
-			}
+			live = removeSession(live, s)
 		}()
 		if r.OnSession != nil {
 			go r.OnSession(ctx, s, w)
@@ -181,6 +177,15 @@ func (r *Reconnector) Run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// removeSession removes s from live. The vacated slot of the backing
+// array is cleared, so an ended session is not kept reachable by it.
+func removeSession(live []Session, s Session) []Session {
+	if i := slices.Index(live, s); i >= 0 {
+		return slices.Delete(live, i, i+1)
+	}
+	return live
 }
 
 // receivedGoAway returns the GoAway the peer sent on s, or nil, without
