@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	corev1 "k8s.io/api/core/v1"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
@@ -77,6 +79,7 @@ func TestBuildPod_PlainPodGolden(t *testing.T) {
 			if err != nil {
 				t.Fatalf("buildPod: %v", err)
 			}
+			normalizeHostIDs(pod)
 			got, err := json.MarshalIndent(pod, "", "  ")
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
@@ -97,5 +100,25 @@ func TestBuildPod_PlainPodGolden(t *testing.T) {
 				t.Errorf("pod spec for %s differs from %s:\n%s", tc.name, file, got)
 			}
 		})
+	}
+}
+
+// normalizeHostIDs replaces the values buildPod takes from the uid and gid
+// of the test process, so the testdata does not depend on the machine.
+func normalizeHostIDs(pod *corev1.Pod) {
+	hostGID := int64(os.Getgid())
+	for i := range pod.Spec.Containers {
+		for j, e := range pod.Spec.Containers[i].Env {
+			switch e.Name {
+			case "SCION_HOST_UID":
+				pod.Spec.Containers[i].Env[j].Value = "HOST_UID"
+			case "SCION_HOST_GID":
+				pod.Spec.Containers[i].Env[j].Value = "HOST_GID"
+			}
+		}
+	}
+	if sc := pod.Spec.SecurityContext; sc != nil && sc.FSGroup != nil && *sc.FSGroup == hostGID {
+		placeholder := int64(-1)
+		sc.FSGroup = &placeholder
 	}
 }

@@ -27,11 +27,11 @@
           },
           {
             "name": "SCION_HOST_UID",
-            "value": "1001"
+            "value": "HOST_UID"
           },
           {
             "name": "SCION_HOST_GID",
-            "value": "1002"
+            "value": "HOST_GID"
           },
           {
             "name": "HOME",
@@ -82,7 +82,7 @@
       "runAsUser": 1000,
       "runAsGroup": 1000,
       "runAsNonRoot": true,
-      "fsGroup": 1002,
+      "fsGroup": -1,
       "seccompProfile": {
         "type": "RuntimeDefault"
       }
