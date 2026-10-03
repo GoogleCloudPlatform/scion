@@ -32,6 +32,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -1538,6 +1539,116 @@ func TestSubstrateExec_RedactsCachedSecretFromError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "ANTHROPIC_API_KEY") {
 		t.Errorf("Exec() error = %v, want it to name the redacted key", err)
+	}
+}
+
+// straddleSecret is a cached secret value the straddle tests below place
+// across the maxEmbeddedErrorBytes cut. Its leading bytes appear nowhere
+// else in the test output, so any surviving prefix is detectable.
+const straddleSecret = "sk-STRADDLE-0123456789abcdefghijklmnopqrstuvwxyz"
+
+// cacheStraddleSecret registers straddleSecret as id's cached exec secret.
+func cacheStraddleSecret(t *testing.T, id string) {
+	t.Helper()
+	substrateAgentStateMu.Lock()
+	substrateControlTokens[id] = "tok-123"
+	substrateExecSecrets[id] = map[string]string{"ANTHROPIC_API_KEY": straddleSecret}
+	substrateAgentStateMu.Unlock()
+	t.Cleanup(func() {
+		substrateAgentStateMu.Lock()
+		delete(substrateExecSecrets, id)
+		substrateAgentStateMu.Unlock()
+	})
+}
+
+// assertNoSecretPrefix fails if msg contains any leading fragment of
+// straddleSecret long enough to be recognizable.
+func assertNoSecretPrefix(t *testing.T, msg string) {
+	t.Helper()
+	const minFragment = 4
+	for n := len(straddleSecret); n >= minFragment; n-- {
+		if strings.Contains(msg, straddleSecret[:n]) {
+			t.Fatalf("error leaks %d leading bytes of the secret (%q): %s", n, straddleSecret[:n], msg)
+		}
+	}
+}
+
+// TestSubstrateExec_SecretStraddlingStderrCutIsRedacted: a failed command's
+// stderr carries a cached secret that begins just before the
+// maxEmbeddedErrorBytes cut. Redacting after truncating would leave the
+// secret's first bytes in the error, because the cut-off remainder no
+// longer matches the secret; doExec must redact first, then truncate.
+func TestSubstrateExec_SecretStraddlingStderrCutIsRedacted(t *testing.T) {
+	rec := &callRecorder{}
+	rt, _, fa, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+
+	id := "scion-proj/agent-a"
+	cacheStraddleSecret(t, id)
+
+	stderr := strings.Repeat("x", maxEmbeddedErrorBytes-10) + straddleSecret + strings.Repeat("y", maxEmbeddedErrorBytes)
+	fa.execResp = execResponse{Stderr: stderr, ExitCode: 1}
+
+	_, err := rt.Exec(context.Background(), id, []string{"nope"})
+	if err == nil {
+		t.Fatal("Exec() expected an error for a non-zero exit code, got nil")
+	}
+	assertNoSecretPrefix(t, err.Error())
+	if !strings.Contains(err.Error(), "truncated") {
+		t.Errorf("Exec() error lacks a truncation marker, so the cut was never exercised: %s", err)
+	}
+}
+
+// TestSubstrateExec_SecretStraddlingResponseBodyCutIsRedacted is the same
+// check for a non-2xx exec response, whose body doExec embeds in its error.
+func TestSubstrateExec_SecretStraddlingResponseBodyCutIsRedacted(t *testing.T) {
+	rec := &callRecorder{}
+	rt, _, fa, closeServer := newTestSubstrateHarness(t, rec)
+	defer closeServer()
+
+	id := "scion-proj/agent-a"
+	cacheStraddleSecret(t, id)
+
+	// The fake server writes execResp as JSON, so place the secret by its
+	// offset within that encoded body.
+	resp := execResponse{Stderr: "PAD" + straddleSecret + strings.Repeat("y", maxEmbeddedErrorBytes)}
+	encoded, mErr := json.Marshal(resp)
+	if mErr != nil {
+		t.Fatal(mErr)
+	}
+	offset := strings.Index(string(encoded), straddleSecret)
+	resp.Stderr = "PAD" + strings.Repeat("x", maxEmbeddedErrorBytes-10-offset) + straddleSecret + strings.Repeat("y", maxEmbeddedErrorBytes)
+	encoded, _ = json.Marshal(resp)
+	if got := strings.Index(string(encoded), straddleSecret); got != maxEmbeddedErrorBytes-10 {
+		t.Fatalf("fixture places the secret at body offset %d, want %d", got, maxEmbeddedErrorBytes-10)
+	}
+	fa.execStatus = http.StatusInternalServerError
+	fa.execResp = resp
+
+	_, err := rt.Exec(context.Background(), id, []string{"nope"})
+	if err == nil {
+		t.Fatal("Exec() expected an error for a non-2xx response, got nil")
+	}
+	assertNoSecretPrefix(t, err.Error())
+	if !strings.Contains(err.Error(), "truncated") {
+		t.Errorf("Exec() error lacks a truncation marker, so the cut was never exercised: %s", err)
+	}
+}
+
+// TestTruncateForError_NeverSplitsARune: a multi-byte character spanning
+// the maxEmbeddedErrorBytes boundary is dropped whole rather than cut in
+// half, so the result stays valid UTF-8.
+func TestTruncateForError_NeverSplitsARune(t *testing.T) {
+	s := strings.Repeat("x", maxEmbeddedErrorBytes-1) + strings.Repeat("é", 10)
+	got := truncateForError(s)
+	if !utf8.ValidString(got) {
+		t.Fatalf("truncateForError produced invalid UTF-8: %q", got[maxEmbeddedErrorBytes-8:])
+	}
+	if !strings.HasPrefix(got, strings.Repeat("x", maxEmbeddedErrorBytes-1)+"...[truncated ") {
+		t.Errorf("truncateForError = %q..., want the cut just before the split rune", got[maxEmbeddedErrorBytes-8:])
+	}
+	if want := "[truncated 20 bytes]"; !strings.HasSuffix(got, want) {
+		t.Errorf("truncateForError suffix = %q, want %q", got[maxEmbeddedErrorBytes-1:], want)
 	}
 }
 

@@ -31,6 +31,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/substrate"
 	substrateserve "github.com/GoogleCloudPlatform/scion/pkg/sciontool/substrate"
@@ -726,24 +727,41 @@ func (e *bootstrapPathRejectedError) Error() string {
 
 // maxEmbeddedErrorBytes bounds how much of a control-server-supplied body or
 // stderr this file ever embeds directly in a returned error's message:
-// postBootstrap's own non-2xx response body (already read via this same
-// cap), and doExec's non-2xx response body and a failed command's captured
-// stderr. The control server's own output caps (substrate-runtime.md §5.1)
-// are sized for a diagnostic response body, not an error string — embedding
-// up to 4 MiB of stderr in a Go error turns one failed exec into a
-// multi-megabyte log line. truncateForError enforces this; callers that
-// already bound their own read (e.g. via io.LimitReader at this same size)
-// still go through it for the explicit "truncated" marker.
+// postBootstrap's own non-2xx response body (read via this same cap), and
+// doExec's non-2xx response body and a failed command's captured stderr.
+// The control server's own output caps (substrate-runtime.md §5.1) are
+// sized for a diagnostic response body, not an error string — embedding up
+// to 4 MiB of stderr in a Go error turns one failed exec into a
+// multi-megabyte log line. truncateForError enforces this for doExec,
+// after redaction.
 const maxEmbeddedErrorBytes = 4096
+
+// maxErrorBodyReadBytes bounds how much of a non-2xx exec response body
+// doExec reads before redacting it and truncating the result to
+// maxEmbeddedErrorBytes. Reading well past the embedded size matters for
+// redaction: a secret that straddles the final cut is redacted as a whole
+// before the cut is made, and one that straddles this read limit instead
+// begins far beyond maxEmbeddedErrorBytes, so none of it survives the
+// truncation either.
+const maxErrorBodyReadBytes = 64 * 1024
 
 // truncateForError bounds s to maxEmbeddedErrorBytes for embedding in an
 // error's message, appending a marker naming how many bytes were cut so the
-// truncation itself is never mistaken for the whole message.
+// truncation itself is never mistaken for the whole message. The cut backs
+// off to a UTF-8 rune boundary so it never splits a multi-byte character.
+//
+// Truncation must come after redaction: a secret cut in half no longer
+// matches the value a redaction pass searches for, so truncating first
+// would leave its leading bytes in the message.
 func truncateForError(s string) string {
 	if len(s) <= maxEmbeddedErrorBytes {
 		return s
 	}
-	return fmt.Sprintf("%s...[truncated %d bytes]", s[:maxEmbeddedErrorBytes], len(s)-maxEmbeddedErrorBytes)
+	cut := maxEmbeddedErrorBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return fmt.Sprintf("%s...[truncated %d bytes]", s[:cut], len(s)-cut)
 }
 
 // postBootstrap sends the bootstrap payload through the router, authorized
@@ -829,8 +847,16 @@ var errStdinUnsupported = errors.New("control server did not confirm stdin suppo
 // treated as a hard failure rather than a silent no-op: see doExec's
 // StdinSupported check below and execResponse's doc comment for why version
 // skew must fail loudly instead of running the command without its input.
-func doExec(ctx context.Context, router *substrate.RouterClient, atespace, actorName, controlToken string, argv []string, stdin []byte, user string, timeout time.Duration) (execResponse, error) {
+//
+// redact is applied to the full non-2xx response body and to a failed
+// command's full stderr before either is truncated for embedding in the
+// returned error, so a secret straddling the truncation point is still
+// recognized and removed. nil means no redaction.
+func doExec(ctx context.Context, router *substrate.RouterClient, atespace, actorName, controlToken string, argv []string, stdin []byte, user string, timeout time.Duration, redact func(string) string) (execResponse, error) {
 	var out execResponse
+	if redact == nil {
+		redact = func(s string) string { return s }
+	}
 
 	// The HTTP round trip needs longer than timeout_s itself: the control
 	// server enforces timeout_s server-side and then still has to write the
@@ -860,8 +886,8 @@ func doExec(ctx context.Context, router *substrate.RouterClient, atespace, actor
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		msg, _ := io.ReadAll(io.LimitReader(resp.Body, maxEmbeddedErrorBytes))
-		return out, fmt.Errorf("substrate: exec on %s/%s failed: status %d: %s", atespace, actorName, resp.StatusCode, string(msg))
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyReadBytes))
+		return out, fmt.Errorf("substrate: exec on %s/%s failed: status %d: %s", atespace, actorName, resp.StatusCode, truncateForError(redact(string(msg))))
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
@@ -880,7 +906,7 @@ func doExec(ctx context.Context, router *substrate.RouterClient, atespace, actor
 		return out, fmt.Errorf("substrate: exec on %s/%s: %w; refusing to treat the result as having received it", atespace, actorName, errStdinUnsupported)
 	}
 	if out.ExitCode != 0 {
-		return out, fmt.Errorf("substrate: exec on %s/%s exited %d: %s", atespace, actorName, out.ExitCode, truncateForError(out.Stderr))
+		return out, fmt.Errorf("substrate: exec on %s/%s exited %d: %s", atespace, actorName, out.ExitCode, truncateForError(redact(out.Stderr)))
 	}
 	return out, nil
 }

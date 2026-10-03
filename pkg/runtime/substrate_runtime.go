@@ -1053,7 +1053,7 @@ func (r *SubstrateRuntime) Exec(ctx context.Context, id string, cmd []string) (s
 		return "", fmt.Errorf("substrate: no control token cached for %s (only the broker process that bootstrapped it holds this in memory; lost on that process's restart, or if a different broker process bootstrapped this actor)", id)
 	}
 
-	res, err := doExec(ctx, r.router, atespace, actorName, token, cmd, nil, r.ExecUser(), defaultExecTimeout)
+	res, err := doExec(ctx, r.router, atespace, actorName, token, cmd, nil, r.ExecUser(), defaultExecTimeout, r.execRedactor(id))
 	if err != nil {
 		return "", r.redactExecErr(id, err)
 	}
@@ -1110,7 +1110,7 @@ func (r *SubstrateRuntime) ExecWithStdin(ctx context.Context, id string, cmd []s
 		return "", err
 	}
 
-	if _, err := doExec(ctx, r.router, atespace, actorName, token, execStdinProbeArgv(), []byte("x"), r.ExecUser(), defaultExecTimeout); err != nil {
+	if _, err := doExec(ctx, r.router, atespace, actorName, token, execStdinProbeArgv(), []byte("x"), r.ExecUser(), defaultExecTimeout, r.execRedactor(id)); err != nil {
 		if errors.Is(err, errStdinUnsupported) {
 			// Only this specific failure means what it says: the probe
 			// reached the control server, ran, and the server never
@@ -1123,7 +1123,7 @@ func (r *SubstrateRuntime) ExecWithStdin(ctx context.Context, id string, cmd []s
 		return "", r.redactExecErr(id, fmt.Errorf("substrate: stdin capability probe failed for %s: %w", id, err))
 	}
 
-	res, err := doExec(ctx, r.router, atespace, actorName, token, cmd, data, r.ExecUser(), defaultExecTimeout)
+	res, err := doExec(ctx, r.router, atespace, actorName, token, cmd, data, r.ExecUser(), defaultExecTimeout, r.execRedactor(id))
 	if err != nil {
 		return "", r.redactExecErr(id, err)
 	}
@@ -1226,17 +1226,38 @@ func (r *SubstrateRuntime) redact(cfg RunConfig, err error) error {
 // handles separately), err is returned unredacted rather than dropped,
 // since doExec's own error text never includes the one piece of id-less
 // secret material this path guards against going further.
+//
+// doExec already redacts the control-server output it embeds, before
+// truncating it (see execRedactor); this pass covers the rest of the
+// message.
 func (r *SubstrateRuntime) redactExecErr(id string, err error) error {
 	if err == nil {
 		return nil
 	}
-	substrateAgentStateMu.Lock()
-	secrets, ok := substrateExecSecrets[id]
-	substrateAgentStateMu.Unlock()
+	secrets, ok := substrateExecSecretsFor(id)
 	if !ok {
 		return err
 	}
 	return errors.New(redactEnvValues(err.Error(), secrets))
+}
+
+// execRedactor returns the redaction doExec applies to control-server output
+// for id before truncating it: the same substrateExecSecrets lookup
+// redactExecErr uses, or no redaction when id has no cached entry.
+func (r *SubstrateRuntime) execRedactor(id string) func(string) string {
+	secrets, ok := substrateExecSecretsFor(id)
+	if !ok {
+		return nil
+	}
+	return func(s string) string { return redactEnvValues(s, secrets) }
+}
+
+// substrateExecSecretsFor returns the secret candidates cached for id at Run.
+func substrateExecSecretsFor(id string) (map[string]string, bool) {
+	substrateAgentStateMu.Lock()
+	defer substrateAgentStateMu.Unlock()
+	secrets, ok := substrateExecSecrets[id]
+	return secrets, ok
 }
 
 // isDigestPinned reports whether image is pinned by digest
