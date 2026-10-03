@@ -350,6 +350,33 @@ describe('home agent counts and the shared completeness flag', () => {
     });
   });
 
+  describe('home seeds full objects', () => {
+    it('a field dropped by a later full-view load is gone from the store', async () => {
+      const fake = newFake(2003, 40);
+      fake.agents = fake.agents.map((a) => ({ ...a, taskSummary: 'old task' }));
+      vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
+      const el = await mountPage('scion-page-home');
+      const seeded = stateManager.getAgents();
+      expect(seeded).toHaveLength(1);
+      const id = seeded[0].id;
+      expect(stateManager.getAgent(id)?.taskSummary).toBe('old task');
+
+      fake.agents = fake.agents.map((a) => {
+        const { taskSummary: _dropped, ...rest } = a;
+        return rest as Agent;
+      });
+      handleUpdate('agent.g-00002.status', { agentId: 'g-00002', phase: 'stopped' });
+      await flushLive(el);
+      const [agents] = await cost(fake, async () => {
+        countsChip(el)!.click();
+        await settle(el);
+      });
+      expect(agents).toBe(1);
+      expect(stateManager.getAgent(id)).toBeDefined();
+      expect(stateManager.getAgent(id)?.taskSummary).toBeUndefined();
+    });
+  });
+
   describe('navigation between home, the agents page and other pages', () => {
     it('home → /agents → home: no second home fetch; /agents → home → /agents: no second agents request', async () => {
       const fake = newFake(25);
