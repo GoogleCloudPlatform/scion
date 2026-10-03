@@ -636,6 +636,18 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
     expect(q(el, '.git-remote-error')).toBeNull();
   });
 
+  it('shows an error and does not navigate when the clone response has no ID', async () => {
+    const { el } = await createForm({ templates: [GIT_TEMPLATE], cloneBody: {} });
+    element = el;
+
+    await setValue(el, '#startFrom', 'tpl-git', 'sl-change');
+    await setValue(el, '#name', 'x', 'sl-input');
+    await submit(el);
+
+    expect(text(q(el, '.error-banner'))).toContain('No project ID in response');
+    expect(window.history.pushState).not.toHaveBeenCalled();
+  });
+
   it('"Use template value" clears the override', async () => {
     const { el } = await createForm({ templates: [GIT_TEMPLATE] });
     element = el;

@@ -1168,7 +1168,10 @@ export class ScionPageProjectCreate extends LitElement {
         }
         throw new Error(info.message);
       }
-      const created = (await response.json()) as { id: string };
+      const created = (await response.json()) as { id?: string } | null;
+      if (!created?.id) {
+        throw new Error('No project ID in response');
+      }
       this.navigateToProject(created.id);
     } catch (err) {
       console.error('Failed to create project from template:', err);
