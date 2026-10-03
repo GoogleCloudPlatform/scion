@@ -25,6 +25,7 @@ import { customElement, state } from 'lit/decorators.js';
 
 import type { SkillRegistry } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { formatRelative } from '../../utils/time.js';
 import '../shared/status-badge.js';
 import '../shared/hash-display.js';
 import { showToast } from '../../utils/toast.js';
@@ -338,23 +339,10 @@ export class ScionPageAdminSkillRegistryDetail extends LitElement {
     }
   }
 
+  /** Relative age of `dateString` via `time.ts`; an em dash if unparsable. */
   private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return '—';
-      const diffMs = Date.now() - date.getTime();
-      if (diffMs < 0) return 'just now';
-      const seconds = Math.floor(diffMs / 1000);
-      if (seconds < 60) return 'just now';
-      const minutes = Math.floor(seconds / 60);
-      if (minutes < 60) return `${minutes}m ago`;
-      const hours = Math.floor(minutes / 60);
-      if (hours < 24) return `${hours}h ago`;
-      const days = Math.floor(hours / 24);
-      return `${days}d ago`;
-    } catch {
-      return dateString;
-    }
+    if (Number.isNaN(new Date(dateString).getTime())) return '—';
+    return formatRelative(dateString);
   }
 
   // -- Edit mode --

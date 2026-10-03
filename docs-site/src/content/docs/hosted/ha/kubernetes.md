@@ -38,6 +38,10 @@ profiles:
     runtime: k8s
 ```
 
+### Brokers with More Than One Runtime
+
+A Runtime Broker can serve several runtimes through its profiles, for example a Docker default plus one or more Kubernetes profiles. Besides its default runtime, the broker tracks each distinct auxiliary runtime separately: Kubernetes runtimes are told apart by context and namespace, so two profiles that target different clusters or namespaces are never merged. Every per-agent path follows the runtime the agent was dispatched to, not the broker default: the Hub endpoint rewrite, extra hosts and the worktree check at dispatch, the runtime reported in the create response (and recorded by the Hub), and start and restart, which look the agent up on the default runtime and then on each auxiliary runtime. For example, an agent on a Kubernetes profile of a Docker-default broker gets the Kubernetes defaults, such as its GCP identity mode, rather than the Docker ones.
+
 ### Agent-Level Kubernetes Configuration
 
 Per-agent or per-template Kubernetes settings in `~/.scion/settings.yaml`:
@@ -302,6 +306,8 @@ Older agent images behave in one of two ways. With an image whose `sciontool` pr
 | ResolvedAuth files | Supported | Injected via K8s Secret volumes (not hostPath) |
 
 Secrets are composable: `ResolvedAuth` and `ResolvedSecrets` are applied independently (not mutually exclusive).
+
+File-type secrets, harness auth files, and `secrets.json` whose targets are inside the agent home are not mounted there directly. Their volumes are mounted under `/run/scion/` (`secrets-store`, `agent-secrets`, `auth-files`), and after the home sync each file is copied to its target in the home as the Pod user, with mode `0600`. This keeps the home writable for non-root Pods: a direct `subPath` mount would make the container runtime create missing parent directories owned by root, and the home sync would then fail with "Permission denied". Targets outside the agent home keep their direct `subPath` mounts.
 
 ### Hub Transport Credential
 

@@ -5,6 +5,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -365,6 +366,526 @@ func TestProjectClone_GitRemoteOverride(t *testing.T) {
 	assert.NotEqual(t, src.GitRemote, clone.GitRemote)
 	// NormalizeGitRemote strips scheme and .git suffix
 	assert.Equal(t, "github.com/other-org/other-repo", clone.GitRemote)
+}
+
+// TestProjectClone_GitRemoteOverride_RederivesSourceLabels guards the OQ-1 bug
+// (ptone/scion#2702): the template's scion.dev/clone-url label takes precedence
+// over GitRemote, so a copied clone-url made a gitRemote override ineffective
+// — agents still cloned the template's repository.
+func TestProjectClone_GitRemoteOverride_RederivesSourceLabels(t *testing.T) {
+	srv, s := testServer(t)
+	src := createSourceProject(t, srv, s)
+	ctx := context.Background()
+
+	// Make the template's source labels clearly template-specific.
+	src.Labels[store.LabelSourceURL] = "git@github.com:test/repo.git"
+	src.Labels[store.LabelDefaultBranch] = "develop"
+	require.NoError(t, s.UpdateProject(ctx, src))
+
+	overrideURL := "git@github.com:other-org/other-repo.git"
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+		map[string]interface{}{"name": "Override Labels", "gitRemote": overrideURL})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var clone store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&clone))
+
+	assert.Equal(t, "github.com/other-org/other-repo", clone.GitRemote)
+	assert.Equal(t, "https://github.com/other-org/other-repo.git", clone.Labels[store.LabelCloneURL])
+	assert.Equal(t, overrideURL, clone.Labels[store.LabelSourceURL])
+	assert.Equal(t, "main", clone.Labels[store.LabelDefaultBranch])
+	// Unrelated labels are still copied.
+	assert.Equal(t, "backend", clone.Labels["team"])
+
+	// The persisted row matches the response.
+	stored, err := s.GetProject(ctx, clone.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "https://github.com/other-org/other-repo.git", stored.Labels[store.LabelCloneURL])
+
+	// Agent create resolves the overridden repository, not the template's.
+	agent := &store.Agent{ID: api.NewUUID(), AppliedConfig: &store.AgentAppliedConfig{}}
+	srv.populateAgentConfig(ctx, agent, stored, nil)
+	require.NotNil(t, agent.AppliedConfig.GitClone)
+	assert.Equal(t, "https://github.com/other-org/other-repo.git", agent.AppliedConfig.GitClone.URL)
+	assert.Equal(t, "main", agent.AppliedConfig.GitClone.Branch)
+}
+
+// TestProjectClone_GitRemoteOverride_SameRemoteKeepsLabels checks that an
+// "override" naming the template's own repository (in any URL form) is not
+// treated as a change: the template's clone-url and branch are kept.
+func TestProjectClone_GitRemoteOverride_SameRemoteKeepsLabels(t *testing.T) {
+	for _, remote := range []string{
+		"git@github.com:test/repo.git",
+		// An explicit default port names the same repository (r4).
+		"https://github.com:443/test/repo",
+		"github.com:443/test/repo",
+	} {
+		t.Run(remote, func(t *testing.T) {
+			srv, s := testServer(t)
+			src := createSourceProject(t, srv, s)
+			ctx := context.Background()
+
+			src.Labels[store.LabelDefaultBranch] = "develop"
+			require.NoError(t, s.UpdateProject(ctx, src))
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+				map[string]interface{}{"name": "Same Remote", "gitRemote": remote})
+			require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+			var clone store.Project
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&clone))
+
+			assert.Equal(t, "github.com/test/repo", clone.GitRemote)
+			assert.Equal(t, "https://github.com/test/repo.git", clone.Labels[store.LabelCloneURL])
+			assert.Equal(t, "develop", clone.Labels[store.LabelDefaultBranch])
+			_, hasSource := clone.Labels[store.LabelSourceURL]
+			assert.False(t, hasSource, "source-url must not be invented when the remote is unchanged")
+		})
+	}
+}
+
+// TestProjectClone_GitRemoteOverride_StripsCredentials checks that a token
+// embedded in the override never reaches GitRemote or the readable git
+// source labels, in the response or the persisted row.
+func TestProjectClone_GitRemoteOverride_StripsCredentials(t *testing.T) {
+	srv, s := testServer(t)
+	src := createSourceProject(t, srv, s)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+		map[string]interface{}{
+			"name":      "Token Override",
+			"gitRemote": "https://x-access-token:ghp_SECRET@github.com/other-org/other-repo.git",
+		})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "ghp_SECRET")
+	assert.NotContains(t, rec.Body.String(), "x-access-token")
+
+	var clone store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&clone))
+	assert.Equal(t, "github.com/other-org/other-repo", clone.GitRemote)
+	assert.Equal(t, "https://github.com/other-org/other-repo.git", clone.Labels[store.LabelCloneURL])
+	assert.Equal(t, "https://github.com/other-org/other-repo.git", clone.Labels[store.LabelSourceURL])
+
+	stored, err := s.GetProject(context.Background(), clone.ID)
+	require.NoError(t, err)
+	for k, v := range stored.Labels {
+		assert.NotContains(t, v, "ghp_SECRET", "label %s", k)
+	}
+	assert.NotContains(t, stored.GitRemote, "ghp_SECRET")
+}
+
+// TestProjectClone_GitRemoteOverride_RejectsNonGitURL checks that an override
+// that is not a remote git URL is a 400 and creates nothing.
+func TestProjectClone_GitRemoteOverride_RejectsNonGitURL(t *testing.T) {
+	srv, s := testServer(t)
+	src := createSourceProject(t, srv, s)
+	ctx := context.Background()
+
+	before, err := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 1000})
+	require.NoError(t, err)
+
+	for _, remote := range []string{
+		"/home/user/code/repo",
+		"./repo",
+		"../repo",
+		"~/code/repo",
+		"repo",
+		"org/repo",
+		"github.com",
+		"https://github.com",
+		"C:\\code\\repo",
+		"file:///home/user/repo",
+		"git@github.com",
+		"alice:pw@github.com:org/repo",
+		"alice@github.com:repo",
+		"alice@github.com:/abs/path",
+		"github.com:notaport/org/repo",
+		"github.com:8443/repo",
+		"localhost:8080/org/repo",
+		// SCP without a login is not supported (documented in §5.3).
+		"github.com:org/repo",
+		// Unencoded '/' in the password: net/url cannot parse a host.
+		"https://u:SECRET_P/w@github.com/org/repo",
+		"https://u:SECRET_P/w@x@github.com/org/repo.git",
+		"ssh://git:SECRET_P/w@github.com/org/repo.git",
+		// A port then '@' in the path, and passwords with '/' that look
+		// like (or almost like) a port: all ambiguous, all rejected
+		// without storing anything (GCP#2368 review).
+		"https://git.example.com:8443/org/repo@v1",
+		"https://github.com:443/org/repo@v1",
+		"https://[::1]:8443/org/repo@v1",
+		"https://u:SECRET_P@git.example.com:8443/org/repo@v1",
+		"https://u:8443/SECRET_P@github.com/org/repo",
+		"https://u:0123/SECRET_P@github.com/org/repo",
+		"https://u:/SECRET_P@github.com/org/repo",
+		// '@' in the path would make credential stripping change the host.
+		"https://github.com/org/x@evil.example/repo",
+		"https://bad_host/org/repo",
+		"https://[::1/org/repo",
+		// '@' in the path must not swap the repository (r4).
+		"https://github.com/org/repo@github.com/x",
+		"https://u:SECRET_P@github.com/org/x@github.com/repo",
+		"https://a/b@github.com/x",
+		"git@github.com:org/repo@github.com/x",
+		"github.com/org/repo@github.com/x",
+		// Whitespace and control characters, in every form.
+		"github.com/org/repo\nX",
+		"git@github.com:org/repo\nX",
+		"https://github.com/org/my repo",
+		"https://github.com/org/repo\tx",
+		"ssh://git@github.com/org/re\x00po",
+		"https://github.com/org/r\u00a0epo",
+		// Loose ports and hosts.
+		"https://u:SECRET_P@github.com:/org/repo",
+		"https://github.com:0443/org/repo",
+		"https://github.com:0/org/repo",
+		"https://github.com:65536/org/repo",
+		"git.example.com:0443/team/repo",
+		"https://-x.com/org/repo",
+		"https://x-.example.com/org/repo",
+		"git@-gitserver:org/repo",
+		"-x.example.com/org/repo",
+		// Dot and empty path segments, escaped or not, in every form (r5):
+		// git would clone a different repository than GitRemote names.
+		"https://github.com/org/../evil/repo",
+		"https://github.com/org/%2e%2e/evil/repo",
+		"https://github.com/org/%2E%2E/evil/repo",
+		"https://github.com/./org/repo",
+		"https://github.com//org/repo",
+		"https://github.com/org//repo",
+		"https://github.com/org/repo//",
+		"ssh://git@github.com/org/../evil/repo.git",
+		"git://github.com/org/./repo",
+		"github.com/org/../evil/repo",
+		"github.com/org/%2e%2e/evil/repo",
+		"github.com//org/repo",
+		"github.com/org//repo",
+		"git@github.com:org/../evil/repo",
+		"git@github.com:org/%2e%2e/evil/repo",
+		"git@github.com:org//repo",
+		"git@github.com:./org/repo",
+		// Printable ASCII only (r5): format characters, homoglyphs and
+		// non-ASCII hosts (IDN hosts must be punycode); escaped controls.
+		"https://github.com/org/\u202erepo",
+		"github.com/org/\u202erepo",
+		"git@github.com:org/\u202erepo",
+		"https://github.com/\u043erg/repo",
+		"https://b\u00fccher.example/org/repo",
+		"https://github.com/org/re%0Apo",
+		"https://github.com/org/re%00po",
+		"github.com/org/re%7Fpo",
+		"git@github.com:org/re%1Fpo",
+		// Web parity (#2713 r4 F1): %40 in the path, malformed escapes,
+		// invalid IPv6, userinfo characters net/url rejects.
+		"https://github.com/org/%40evil/repo",
+		"github.com/org/re%40po/x",
+		"git@github.com:org/%40x/repo",
+		"https://github.com/org/re%zzpo",
+		"https://github.com/org/repo%",
+		"github.com/org/re%zpo",
+		"git@github.com:org/repo%",
+		"https://u:SECRET_%zz@github.com/org/repo",
+		// %2F inside a segment, in every form (r6 R1).
+		"https://github.com/a/o%2Fr",
+		"https://github.com/org/o%2fr",
+		"github.com/a/o%2Fr",
+		"git@github.com:a/o%2Fr",
+		// Characters outside the RFC 3986 path set, in every form (r6 R2).
+		"https://github.com/org/r\\x",
+		"github.com/org/r\\x",
+		"git@github.com:org/r\\x",
+		"https://github.com/org/r%5Cx",
+		"https://github.com/org/re\"po",
+		"https://github.com/org/re|po",
+		"https://github.com/org/re^po",
+		"https://github.com/org/re`po",
+		"https://github.com/org/[repo]",
+		"git@github.com:org/re{po}",
+		"github.com/org/re<po>",
+		"https://[1:2]/org/repo",
+		"https://[:::]/org/repo",
+		"https://[v1.x]/org/repo",
+		"https://[1:2:3:4:5:6:7::8]/org/repo",
+		"https://us\"er@h.example/o/r",
+		"https://h.com\\@evil.com/o/r",
+		// Only ASCII whitespace is trimmed (#2713 r4 F2/F3).
+		"https://github.com/org/repo\u0085",
+		"\ufeffhttps://github.com/org/repo",
+		"https://github.com/org/repo\ufeff",
+		"\u00a0github.com/org/repo",
+	} {
+		t.Run(remote, func(t *testing.T) {
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+				map[string]interface{}{"name": "Bad Remote", "gitRemote": remote})
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "gitRemote")
+			assert.NotContains(t, rec.Body.String(), "SECRET_")
+		})
+	}
+
+	after, err := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 1000})
+	require.NoError(t, err)
+	assert.Equal(t, len(before.Items), len(after.Items), "a rejected override must not create a project")
+}
+
+// TestProjectClone_GitRemoteOverride_AcceptedForms checks the URL forms an
+// override may use, including the scheme-less form GitRemote is stored in.
+func TestProjectClone_GitRemoteOverride_AcceptedForms(t *testing.T) {
+	for i, remote := range []string{
+		"https://github.com/other-org/other-repo.git",
+		"git@github.com:other-org/other-repo.git",
+		"ssh://git@github.com/other-org/other-repo.git",
+		"github.com/other-org/other-repo",
+	} {
+		t.Run(remote, func(t *testing.T) {
+			srv, s := testServer(t)
+			src := createSourceProject(t, srv, s)
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+				map[string]interface{}{"name": fmt.Sprintf("Form %d", i), "gitRemote": remote})
+			require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+			var clone store.Project
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&clone))
+			assert.Equal(t, "github.com/other-org/other-repo", clone.GitRemote)
+			assert.Equal(t, "https://github.com/other-org/other-repo.git", clone.Labels[store.LabelCloneURL])
+		})
+	}
+}
+
+// TestProjectClone_GitRemoteOverride_RejectsSSHPort checks that ssh:// URLs
+// with a port get a specific 400: NormalizeGitRemote/ToHTTPSCloneURL would turn
+// the port into a path segment.
+func TestProjectClone_GitRemoteOverride_RejectsSSHPort(t *testing.T) {
+	srv, s := testServer(t)
+	src := createSourceProject(t, srv, s)
+
+	for _, remote := range []string{
+		"ssh://git@git.example.com:2222/group/repo.git",
+		"ssh://review.example.com:29418/project/repo",
+		"SSH://git:pw@git.example.com:2222/group/repo.git",
+	} {
+		t.Run(remote, func(t *testing.T) {
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+				map[string]interface{}{"name": "SSH Port", "gitRemote": remote})
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "ssh URLs with a port are not supported yet; use the https URL")
+			assert.NotContains(t, rec.Body.String(), "pw@")
+		})
+	}
+}
+
+// TestProjectClone_GitRemoteOverride_RejectsTLSPort checks that git:// with
+// any port and http:// with a port other than 80 get a specific 400:
+// ToHTTPSCloneURL keeps the port, so the clone-url would speak TLS to a
+// plain-text port (r5).
+func TestProjectClone_GitRemoteOverride_RejectsTLSPort(t *testing.T) {
+	srv, s := testServer(t)
+	src := createSourceProject(t, srv, s)
+
+	for _, remote := range []string{
+		"git://git.example.com:9418/group/repo.git",
+		"GIT://git.example.com:9419/group/repo",
+		"http://git.example.com:8080/group/repo",
+		"http://u:SECRET_P@git.example.com:443/group/repo",
+		// The scheme-less form's clone-url is https (r6 R3).
+		"git.example.com:80/group/repo",
+	} {
+		t.Run(remote, func(t *testing.T) {
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+				map[string]interface{}{"name": "TLS Port", "gitRemote": remote})
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "git:// URLs with a port, http:// URLs with a port other than 80 and host:80/... remotes are not supported; use the https URL")
+			assert.NotContains(t, rec.Body.String(), "SECRET_")
+		})
+	}
+}
+
+// TestProjectClone_GitRemoteOverride_DerivedForms checks GitRemote and the git
+// source labels for override forms beyond the github https/scp basics.
+func TestProjectClone_GitRemoteOverride_DerivedForms(t *testing.T) {
+	tests := []struct {
+		name, remote, gitRemote, cloneURL, sourceURL string
+	}{
+		{
+			name:      "scp with non-git login",
+			remote:    "alice@git.example.com:team/repo.git",
+			gitRemote: "git.example.com/team/repo",
+			cloneURL:  "https://git.example.com/team/repo.git",
+			sourceURL: "alice@git.example.com:team/repo.git",
+		},
+		{
+			name:      "scp with single-label host",
+			remote:    "git@gitserver:org/repo",
+			gitRemote: "gitserver/org/repo",
+			cloneURL:  "https://gitserver/org/repo.git",
+			sourceURL: "git@gitserver:org/repo",
+		},
+		{
+			name:      "https with single-label host",
+			remote:    "https://gitserver/org/repo.git",
+			gitRemote: "gitserver/org/repo",
+			cloneURL:  "https://gitserver/org/repo.git",
+			sourceURL: "https://gitserver/org/repo.git",
+		},
+		{
+			name:      "password containing @ is stripped",
+			remote:    "https://u:SECRET_P@ss@github.com/acme/repo.git",
+			gitRemote: "github.com/acme/repo",
+			cloneURL:  "https://github.com/acme/repo.git",
+			sourceURL: "https://github.com/acme/repo.git",
+		},
+		{
+			name:      "https default port dropped",
+			remote:    "https://github.com:443/acme/repo.git",
+			gitRemote: "github.com/acme/repo",
+			cloneURL:  "https://github.com/acme/repo.git",
+			sourceURL: "https://github.com/acme/repo.git",
+		},
+		{
+			name:      "http default port dropped",
+			remote:    "http://u:SECRET_P@git.example.com:80/team/repo",
+			gitRemote: "git.example.com/team/repo",
+			cloneURL:  "https://git.example.com/team/repo.git",
+			sourceURL: "http://git.example.com/team/repo",
+		},
+		{
+			name:      "ssh login kept in source-url",
+			remote:    "ssh://alice:SECRET_P@git.example.com/team/repo.git",
+			gitRemote: "git.example.com/team/repo",
+			cloneURL:  "https://git.example.com/team/repo.git",
+			sourceURL: "ssh://alice@git.example.com/team/repo.git",
+		},
+		{
+			name:      "scheme-less host:port",
+			remote:    "git.example.com:8443/team/repo",
+			gitRemote: "git.example.com:8443/team/repo",
+			cloneURL:  "https://git.example.com:8443/team/repo.git",
+			sourceURL: "git.example.com:8443/team/repo",
+		},
+		{
+			name:      "https with port",
+			remote:    "https://git.example.com:8443/team/repo.git",
+			gitRemote: "git.example.com:8443/team/repo",
+			cloneURL:  "https://git.example.com:8443/team/repo.git",
+			sourceURL: "https://git.example.com:8443/team/repo.git",
+		},
+		{
+			name:      "punycode host and dotted names are not dot segments",
+			remote:    "https://xn--bcher-kva.example/org/.github",
+			gitRemote: "xn--bcher-kva.example/org/.github",
+			cloneURL:  "https://xn--bcher-kva.example/org/.github.git",
+			sourceURL: "https://xn--bcher-kva.example/org/.github",
+		},
+		{
+			name:      "dots inside a segment and a trailing slash",
+			remote:    "git@git.example.com:team/my..repo/",
+			gitRemote: "git.example.com/team/my..repo",
+			cloneURL:  "https://git.example.com/team/my..repo.git",
+			sourceURL: "git@git.example.com:team/my..repo/",
+		},
+		{
+			name:      "ASCII whitespace around the remote is trimmed",
+			remote:    " \t git.example.com/team/repo \r\n",
+			gitRemote: "git.example.com/team/repo",
+			cloneURL:  "https://git.example.com/team/repo.git",
+			sourceURL: "git.example.com/team/repo",
+		},
+		{
+			name:      "scheme-less form drops :443 like https",
+			remote:    "git.example.com:443/team/repo",
+			gitRemote: "git.example.com/team/repo",
+			cloneURL:  "https://git.example.com/team/repo.git",
+			sourceURL: "git.example.com/team/repo",
+		},
+		{
+			name:      "pct-encoded space and sub-delims in the path",
+			remote:    "https://dev.azure.com/org/My%20Project/_git/repo",
+			gitRemote: "dev.azure.com/org/my%20project/_git/repo",
+			cloneURL:  "https://dev.azure.com/org/My%20Project/_git/repo",
+			sourceURL: "https://dev.azure.com/org/My%20Project/_git/repo",
+		},
+		{
+			name:      "http with the default port",
+			remote:    "http://git.example.com:80/team/repo",
+			gitRemote: "git.example.com/team/repo",
+			cloneURL:  "https://git.example.com/team/repo.git",
+			sourceURL: "http://git.example.com/team/repo",
+		},
+		{
+			name:      "query and fragment dropped",
+			remote:    "https://github.com/acme/repo.git?access_token=SECRET_Q#SECRET_F",
+			gitRemote: "github.com/acme/repo",
+			cloneURL:  "https://github.com/acme/repo.git",
+			sourceURL: "https://github.com/acme/repo.git",
+		},
+		{
+			name:      "query, fragment and userinfo dropped",
+			remote:    "https://u:SECRET_P@github.com/acme/repo?private_token=SECRET_Q",
+			gitRemote: "github.com/acme/repo",
+			cloneURL:  "https://github.com/acme/repo.git",
+			sourceURL: "https://github.com/acme/repo",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			src := createSourceProject(t, srv, s)
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+				map[string]interface{}{"name": "Derived", "gitRemote": tt.remote})
+			require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), "SECRET_")
+
+			var clone store.Project
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&clone))
+			assert.Equal(t, tt.gitRemote, clone.GitRemote)
+			assert.Equal(t, tt.cloneURL, clone.Labels[store.LabelCloneURL])
+			assert.Equal(t, tt.sourceURL, clone.Labels[store.LabelSourceURL])
+
+			stored, err := s.GetProject(context.Background(), clone.ID)
+			require.NoError(t, err)
+			for k, v := range stored.Labels {
+				assert.NotContains(t, v, "SECRET_", "label %s", k)
+			}
+		})
+	}
+}
+
+// TestProjectClone_GitRemoteOverride_NonGitTemplate checks that overriding the
+// remote of a template with no git remote and no labels derives the git
+// source labels from the override. (Workspace-mode derivation for this case
+// is owned by #2703.)
+func TestProjectClone_GitRemoteOverride_NonGitTemplate(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	src := &store.Project{
+		ID:        api.NewUUID(),
+		Name:      "Notebook Template",
+		Slug:      "notebook-template",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+	}
+	require.NoError(t, s.CreateProject(ctx, src))
+	require.Empty(t, src.GitRemote)
+	require.Nil(t, src.Labels)
+
+	overrideURL := "https://github.com/acme/notebooks.git"
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+		map[string]interface{}{"name": "Notebooks", "gitRemote": overrideURL})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var clone store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&clone))
+	assert.Equal(t, "github.com/acme/notebooks", clone.GitRemote)
+	assert.Equal(t, map[string]string{
+		store.LabelCloneURL:      "https://github.com/acme/notebooks.git",
+		store.LabelSourceURL:     overrideURL,
+		store.LabelDefaultBranch: "main",
+	}, clone.Labels)
+
+	stored, err := s.GetProject(ctx, clone.ID)
+	require.NoError(t, err)
+	assert.Equal(t, clone.Labels, stored.Labels)
 }
 
 func TestProjectClone_NoGitRemoteOverride(t *testing.T) {

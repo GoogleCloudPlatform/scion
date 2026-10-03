@@ -59,7 +59,9 @@ interface ScopeOption {
    * "flat_role" or "relationship" (ptone/scion#2122). Relationship-eligible
    * scopes (agent:attach, agent:port_access) are checked against the
    * specific target on every later request -- own agents and their
-   * descendants -- never against a target enumerated at selection time.
+   * descendants, plus (for agent:port_access) agents in projects where the
+   * holder's role grants it -- never against a target enumerated at
+   * selection time.
    */
   eligibilityKind?: string | undefined;
   /**
@@ -91,6 +93,18 @@ const ELIGIBILITY_REASON_LABELS: Record<string, string> = {
 export function formatEligibilityReason(reason?: string): string {
   if (!reason) return 'not currently selectable';
   return ELIGIBILITY_REASON_LABELS[reason] || reason;
+}
+
+/**
+ * Badge text for a relationship-eligible scope. agent:port_access also
+ * reaches agents in projects where the holder's role grants port access
+ * (the built-in project owner and admin roles do).
+ */
+export function relationshipBadgeText(scope: string): string {
+  if (scope === 'agent:port_access') {
+    return 'Own agents & descendants, or any agent in the project if your role grants port access — checked per agent';
+  }
+  return 'Own agents & descendants — checked per agent';
 }
 
 /**
@@ -1528,7 +1542,7 @@ export class ScionTokenList extends LitElement {
           <span class="scope-checkbox-label">${scope.label}</span>
           ${scope.eligibilityKind === 'relationship'
             ? html`<span class="scope-relationship-badge"
-                >Own agents &amp; descendants — checked per agent</span
+                >${relationshipBadgeText(scope.value)}</span
               >`
             : nothing}
           <br />

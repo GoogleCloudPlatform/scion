@@ -39,6 +39,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsclient"
@@ -822,7 +823,7 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		project, projectErr := hubCtx.Client.Projects().Get(ctx, projectID)
 		cancel()
 		if projectErr == nil && project != nil && project.GitRemote != "" {
-			cloneURL := project.Labels["scion.dev/clone-url"]
+			cloneURL := project.Labels[store.LabelCloneURL]
 			if cloneURL == "" {
 				cloneURL = "https://" + project.GitRemote + ".git"
 			}

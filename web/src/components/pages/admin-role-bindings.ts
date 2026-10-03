@@ -42,10 +42,14 @@ import '../shared/role-binding-assignment-form.js';
 import {
   SYSTEM_DIRECT_USER_ONLY_ROLES,
   getLifecycleStatus,
-  formatDateTime,
   getPrincipalIcon,
 } from '../shared/role-binding-utils.js';
-import { effectiveTimeZone, parseWallClock } from '../../utils/time.js';
+import {
+  effectiveTimeZone,
+  formatInstantWithZone,
+  formatRelative,
+  parseWallClock,
+} from '../../utils/time.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 // ---------------------------------------------------------------------------
 // Types
@@ -638,28 +642,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
     return Math.max(1, Math.ceil(this.totalCount / PAGE_SIZE));
   }
 
-  private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) return rtf.format(-diffSeconds, 'second');
-      if (Math.abs(diffMinutes) < 60) return rtf.format(-diffMinutes, 'minute');
-      if (Math.abs(diffHours) < 24) return rtf.format(-diffHours, 'hour');
-      return rtf.format(-diffDays, 'day');
-    } catch {
-      return dateString;
-    }
-  }
-
-  // formatDateTime, getLifecycleStatus, and getPrincipalIcon are imported
+  // getLifecycleStatus and getPrincipalIcon are imported
   // from ../shared/role-binding-utils.js
 
   // ---------------------------------------------------------------------------
@@ -729,7 +712,10 @@ export class ScionPageAdminRoleBindings extends LitElement {
       if (this.formNotBefore) {
         const iso = parseWallClock(this.formNotBefore, effectiveTimeZone());
         if (!iso) {
-          this.actionFeedback = { message: 'Enter a valid activation date and time', variant: 'danger' };
+          this.actionFeedback = {
+            message: 'Enter a valid activation date and time',
+            variant: 'danger',
+          };
           return;
         }
         body.notBefore = iso;
@@ -737,7 +723,10 @@ export class ScionPageAdminRoleBindings extends LitElement {
       if (this.formExpiresAt) {
         const iso = parseWallClock(this.formExpiresAt, effectiveTimeZone());
         if (!iso) {
-          this.actionFeedback = { message: 'Enter a valid expiration date and time', variant: 'danger' };
+          this.actionFeedback = {
+            message: 'Enter a valid expiration date and time',
+            variant: 'danger',
+          };
           return;
         }
         body.expiresAt = iso;
@@ -965,12 +954,23 @@ export class ScionPageAdminRoleBindings extends LitElement {
 
     // Validate lifecycle dates: expiresAt must be after notBefore
     if (this.formNotBefore && this.formExpiresAt) {
-      const nb = new Date(this.formNotBefore).getTime();
-      const ea = new Date(this.formExpiresAt).getTime();
+      const nb = this.wallClockMs(this.formNotBefore);
+      const ea = this.wallClockMs(this.formExpiresAt);
       if (!isNaN(nb) && !isNaN(ea) && ea <= nb) return false;
     }
 
     return true;
+  }
+
+  /**
+   * Epoch ms of a `datetime-local` lifecycle value, read as wall-clock time
+   * in the effective display zone (the zone the inputs are labelled and
+   * submitted in). `parseWallClock` returns '' for a value it cannot read;
+   * that case maps to `NaN` here, so callers skip the comparison.
+   */
+  private wallClockMs(value: string): number {
+    const iso = parseWallClock(value, effectiveTimeZone());
+    return iso ? new Date(iso).getTime() : NaN;
   }
 
   /** True when any lifecycle condition is set. */
@@ -1183,12 +1183,12 @@ export class ScionPageAdminRoleBindings extends LitElement {
                 </span>
                 ${binding.expiresAt && lifecycleStatus !== 'expired'
                   ? html`<div class="lifecycle-detail">
-                      Expires ${formatDateTime(binding.expiresAt)}
+                      Expires ${formatInstantWithZone(binding.expiresAt) || binding.expiresAt}
                     </div>`
                   : ''}
                 ${binding.notBefore && lifecycleStatus === 'pending'
                   ? html`<div class="lifecycle-detail">
-                      Activates ${formatDateTime(binding.notBefore)}
+                      Activates ${formatInstantWithZone(binding.notBefore) || binding.notBefore}
                     </div>`
                   : ''}
               `
@@ -1197,7 +1197,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
               </span>`}
         </td>
         <td class="hide-mobile">
-          <span class="meta-text">${this.formatRelativeTime(binding.createdAt)}</span>
+          <span class="meta-text">${formatRelative(binding.createdAt)}</span>
         </td>
         <td>
           <sl-icon-button
@@ -1320,7 +1320,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
                 </div>
                 ${this.formExpiresAt
                   ? (() => {
-                      const ea = new Date(this.formExpiresAt).getTime();
+                      const ea = this.wallClockMs(this.formExpiresAt);
                       if (!isNaN(ea) && ea < Date.now()) {
                         return html`
                           <div class="validation-warning">
@@ -1331,7 +1331,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
                         `;
                       }
                       if (this.formNotBefore) {
-                        const nb = new Date(this.formNotBefore).getTime();
+                        const nb = this.wallClockMs(this.formNotBefore);
                         if (!isNaN(nb) && !isNaN(ea) && ea <= nb) {
                           return html`
                             <div class="validation-warning">

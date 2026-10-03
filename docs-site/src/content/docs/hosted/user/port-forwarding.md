@@ -23,6 +23,10 @@ Port forwarding in Scion relies on a **reverse tunnel architecture**:
 4. **Local Forwarding**: The Hub sends this message over the WebSocket tunnel to the agent's in-container tunnel manager. The manager unwraps the request and makes a standard HTTP request to the local loopback address (`127.0.0.1` or `localhost`) on the specified port.
 5. **Response Delivery**: The local service's response is streamed back over the WebSocket tunnel, reconstructed by the Hub, and returned to the caller.
 
+:::note[Proxied responses are sandboxed]
+Agent port responses are served from the Hub's own origin, so the Hub treats them as untrusted content. Every proxied response carries the Hub's sandbox `Content-Security-Policy` (`sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads`) and `X-Content-Type-Options: nosniff`, which the agent's service cannot override. The Hub never relays the service's `Set-Cookie`, `Content-Security-Policy`, `X-Content-Type-Options`, `Clear-Site-Data`, or CORS response headers. A forwarded web app therefore runs in an opaque origin: it cannot set cookies or use storage on the Hub origin, and apps that rely on cookies, `localStorage`, or same-origin requests may not work through the proxy.
+:::
+
 ```d2
 direction: right
 classes: {
@@ -207,7 +211,9 @@ Access to the proxy and port registration APIs requires authentication, verified
   * A user must be authenticated and must hold the **`ActionPortAccess`** (or `ActionRead`) permission for that specific agent. Unauthorized users are blocked with an HTTP `403 Forbidden` response.
   * When authenticating with a [user access token](/scion/hosted/user/personal-access-tokens/), the
     token must have the `agent:port_access` scope selected, and the holder must currently have
-    access to that specific agent — your own agents and their descendants. Selecting the scope at
+    access to that specific agent — your own agents and their descendants, or any agent in a
+    project where your role grants `agent.port_access` (the built-in `project-owner` and
+    `project-admin` roles do). Selecting the scope at
     mint time is not by itself access to any agent; it is re-checked on every request.
 
 ---

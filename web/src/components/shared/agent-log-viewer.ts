@@ -26,6 +26,8 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../client/api.js';
 import './json-browser.js';
+import { formatInstant, formatInstantWithZone } from '../../utils/time.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 interface CloudLogEntry {
   timestamp: string;
@@ -51,6 +53,9 @@ const SEVERITY_LEVELS = ['DEFAULT', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITIC
 
 @customElement('scion-agent-log-viewer')
 export class ScionAgentLogViewer extends LitElement {
+  /** Re-renders timestamps and date dividers when the display zone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @property()
   agentId = '';
 
@@ -616,12 +621,9 @@ export class ScionAgentLogViewer extends LitElement {
     let lastDate = '';
 
     for (const entry of this.entries) {
-      const d = new Date(entry.timestamp);
-      const dateStr = d.toLocaleDateString('en', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-      });
+      // Date divider and row time in the effective display zone (24-hour);
+      // the divider names the zone.
+      const dateStr = formatInstantWithZone(entry.timestamp, 'date');
 
       if (dateStr !== lastDate) {
         lastDate = dateStr;
@@ -633,13 +635,7 @@ export class ScionAgentLogViewer extends LitElement {
       }
 
       const isExpanded = this.expandedIds.has(entry.insertId);
-      const timeStr = d.toLocaleTimeString('en', {
-        hour12: false,
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-        fractionalSecondDigits: 3,
-      } as Intl.DateTimeFormatOptions);
+      const timeStr = formatInstant(entry.timestamp, 'time-millis');
       const subsystem =
         (entry.jsonPayload?.['subsystem'] as string) || entry.labels?.['component'] || '';
 

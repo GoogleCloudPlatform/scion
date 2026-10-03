@@ -485,6 +485,37 @@ func (d *HTTPAgentDispatcher) getBrokerEndpoint(ctx context.Context, brokerID st
 	return broker.Endpoint, nil
 }
 
+// getProvisioningBrokerEndpoint is getBrokerEndpoint for dispatches that
+// (re-)provision or start an agent (create, provision, finalize-env, start,
+// restart). It additionally fails closed when the agent's project is
+// empty-per-agent and the broker does not advertise the
+// emptyPerAgentWorkspace capability (design #2703 D3), so an old broker never
+// receives the mode. A project lookup error also fails closed; only a
+// missing project skips the check. Stop, delete and other non-provisioning
+// dispatches keep using getBrokerEndpoint.
+func (d *HTTPAgentDispatcher) getProvisioningBrokerEndpoint(ctx context.Context, agent *store.Agent) (string, error) {
+	broker, err := d.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get runtime broker: %w", err)
+	}
+	if agent.ProjectID != "" {
+		project, err := d.store.GetProject(ctx, agent.ProjectID)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			// A deleted project cannot be empty-per-agent; nothing to gate.
+		case err != nil:
+			// Fail closed: a transient lookup error must not skip the gate
+			// (design #2703 D3).
+			return "", fmt.Errorf("failed to load project for capability check: %w", err)
+		default:
+			if err := checkEmptyPerAgentBrokerCapability(project, broker); err != nil {
+				return "", err
+			}
+		}
+	}
+	return broker.Endpoint, nil
+}
+
 // resolveProvisionCredentials collects project-scope secrets for use by the
 // broker's provision-time credential resolution (skill resolution, URI
 // variable substitution, credential helpers). These are never forwarded to
@@ -575,7 +606,10 @@ func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, a
 // This is shared between DispatchAgentCreate and DispatchAgentProvision.
 func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *store.Agent, callerName string) (*RemoteCreateAgentRequest, error) {
 	buildRequestStart := time.Now()
-	projectInfo := d.resolveDispatchProjectInfo(ctx, agent)
+	projectInfo, err := d.resolveDispatchProjectInfo(ctx, agent)
+	if err != nil {
+		return nil, err
+	}
 
 	// Build the remote create request
 	//
@@ -1082,26 +1116,35 @@ type projectDispatchInfo struct {
 	workspaceMode   string // resolved workspace mode label (e.g. "shared", "worktree-per-agent")
 }
 
-func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, agent *store.Agent) projectDispatchInfo {
+// resolveDispatchProjectInfo resolves the project facts a dispatch carries.
+// A project that no longer exists yields empty info (nothing to resolve); any
+// other project lookup error is returned so the dispatch fails closed rather
+// than sending an empty workspace mode — for an empty-per-agent project that
+// would let a capable broker fall back to mounting the shared project
+// directory (design #2703 D3).
+func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, agent *store.Agent) (projectDispatchInfo, error) {
 	// Look up the local path for this project on the target runtime broker.
 	// A provider LocalPath (linked project) takes precedence over hub-native
 	// slug resolution, even for projects without a git remote. Only when there
 	// is no provider path and no git remote do we fall back to projectSlug so
 	// the broker resolves the conventional ~/.scion/projects/<slug> path.
 	if agent.ProjectID == "" {
-		return projectDispatchInfo{}
+		return projectDispatchInfo{}, nil
 	}
 
 	var info projectDispatchInfo
 
 	project, err := d.store.GetProject(ctx, agent.ProjectID)
+	if errors.Is(err, store.ErrNotFound) {
+		return projectDispatchInfo{}, nil
+	}
 	if err != nil {
-		return projectDispatchInfo{}
+		return projectDispatchInfo{}, fmt.Errorf("resolve project %s for dispatch: %w", agent.ProjectID, err)
 	}
 
 	info.sharedDirs = project.SharedDirs
 	info.sharedWorkspace = project.IsSharedWorkspace()
-	info.workspaceMode = project.Labels[store.LabelWorkspaceMode]
+	info.workspaceMode = dispatchWorkspaceMode(project)
 
 	// First check if the broker has a registered local path for this project.
 	if agent.RuntimeBrokerID != "" {
@@ -1125,7 +1168,7 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	if info.projectPath == "" {
 		info.projectSlug = project.Slug
 	}
-	return info
+	return info, nil
 }
 
 // applyBrokerResponse updates agent fields from the broker's response and
@@ -1230,7 +1273,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 		return err
 	}
 
-	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
+	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return err
@@ -1305,7 +1348,7 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 		return err
 	}
 
-	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
+	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
 		return err
 	}
@@ -1473,7 +1516,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 		return nil, err
 	}
 
-	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
+	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
 		return nil, err
 	}
@@ -1597,7 +1640,7 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 		return err
 	}
 
-	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
+	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
 		return err
 	}
@@ -2354,8 +2397,9 @@ type startEnvResult struct {
 // verb of the secrets-resolution failure message, the one warning whose
 // wording differs (agent will <verb> without injected secrets) between the
 // two callers. Any other site is an error before any work is done. It
-// returns an error only for such a site or when the agent token is not
-// issued.
+// returns an error only for such a site, when the agent's project cannot be
+// loaded (checked before any token is minted), or when the agent token is
+// not issued.
 func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Agent, caller string, site mintSite) (startEnvResult, error) {
 	var startedVerb string
 	switch site {
@@ -2479,7 +2523,13 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// Resolve once so the switch below uses canonical constants —
 	// unrecognized or future wire labels safely fall back to shared-plain
 	// behavior.
-	projectInfo := d.resolveDispatchProjectInfo(ctx, agent)
+	//
+	// A project lookup error fails the start/restart here, before any agent
+	// or transport token is minted below, so there is nothing to revoke.
+	projectInfo, err := d.resolveDispatchProjectInfo(ctx, agent)
+	if err != nil {
+		return startEnvResult{}, err
+	}
 	resolvedMode := store.ResolveWorkspaceSharingMode(projectInfo.workspaceMode)
 	if projectInfo.workspaceMode != "" {
 		resolvedEnv["SCION_WORKSPACE_MODE"] = string(resolvedMode)
@@ -2490,6 +2540,10 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	case store.SharingModeClonePerAgent, store.SharingModeWorktreePerAgent:
 		resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
 		classifyEnv(&envClassifications, "SCION_WORKSPACE_GIT", api.EnvKindPlain)
+	case store.SharingModeEmptyPerAgent:
+		// Never git: a private, initially empty directory. Kept as an
+		// explicit case so it cannot fall into the shared-plain GitClone
+		// sniff below (design #2703 §2.3).
 	case store.SharingModeSharedPlain:
 		// For shared-plain, git-ness is detected from the applied GitClone config.
 		// Note: broker-local linked projects where the workspace is already a
@@ -2610,7 +2664,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		return err
 	}
 
-	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
+	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return err
@@ -2830,7 +2884,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		return err
 	}
 
-	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
+	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
 		return err
 	}
@@ -2916,8 +2970,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 	// For a linked project, tell the broker where the project lives on its
 	// filesystem so it can find a file-only agent (container gone) there.
 	// The broker checks the path's project identity before using it.
-	if pp := d.resolveDispatchProjectInfo(ctx, agent).projectPath; pp != "" {
-		ctx = withDeleteProjectPath(ctx, pp)
+	// Best-effort: delete proceeds without a project path on lookup failure.
+	if info, _ := d.resolveDispatchProjectInfo(ctx, agent); info.projectPath != "" {
+		ctx = withDeleteProjectPath(ctx, info.projectPath)
 	}
 
 	err = d.client.DeleteAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, deleteFiles, removeBranch, softDelete, deletedAt)

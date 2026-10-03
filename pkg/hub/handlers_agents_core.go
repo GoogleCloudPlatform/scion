@@ -1146,6 +1146,14 @@ func (s *Server) createAgentInProject(
 		return
 	}
 
+	// Empty-per-agent projects give every agent its own private directory
+	// (design #2703 §2.4). A relative workspace path would otherwise resolve
+	// against the shared project dir, so it is not accepted.
+	if project.IsEmptyPerAgent() && req.Workspace != "" {
+		ValidationError(w, "empty-per-agent projects do not take a workspace path", nil)
+		return
+	}
+
 	// Resolve effective agent role using the authority lattice.
 	// Computed early (before broker resolution) so that fail-loud 403 on
 	// role over-requests fires before resource-intensive operations.
@@ -1316,6 +1324,12 @@ func (s *Server) createAgentInProject(
 		if !s.checkBrokerDispatchAccess(ctx, w, runtimeBrokerID) {
 			return
 		}
+	}
+
+	// Empty-per-agent projects only dispatch to brokers that advertise the
+	// capability (design #2703 D3): 412 before anything is persisted.
+	if !s.requireEmptyPerAgentBrokerCapability(ctx, w, project, runtimeBrokerID) {
+		return
 	}
 
 	// Validate GCP passthrough mode. Two independent checks:
@@ -1928,6 +1942,18 @@ func (s *Server) createAgentInProject(
 		s.createNotifySubscription(ctx, agent.ID, projectID, notifySubscriberType, notifySubscriberID, createdBy)
 	}
 
+	// Empty-per-agent agents start in an empty private directory (design
+	// #2703), so a workspace bootstrap upload from the CLI's local directory
+	// is ignored with a warning rather than rejected: a 400 would break
+	// `scion start` run from a linked non-git directory.
+	var warnings []string
+	if project.IsEmptyPerAgent() && len(req.WorkspaceFiles) > 0 {
+		s.agentLifecycleLog.Warn("Ignoring workspace files for empty-per-agent project",
+			"agent_id", agent.ID, "project_id", project.ID, "files", len(req.WorkspaceFiles))
+		warnings = append(warnings, emptyPerAgentWorkspaceFilesIgnoredWarning)
+		req.WorkspaceFiles = nil
+	}
+
 	// Workspace bootstrap mode: if WorkspaceFiles are provided with a task,
 	// generate signed upload URLs instead of dispatching immediately.
 	// The CLI will upload files, then call finalize to trigger dispatch.
@@ -1979,7 +2005,6 @@ func (s *Server) createAgentInProject(
 			expires := time.Now().Add(SignedURLExpiry)
 			s.enrichAgent(ctx, agent, project, nil)
 
-			var warnings []string
 			if len(existingFiles) > 0 {
 				s.agentLifecycleLog.Debug("Workspace bootstrap: files already in storage", "agent_id", agent.ID, "count", len(existingFiles))
 			}
@@ -1996,8 +2021,9 @@ func (s *Server) createAgentInProject(
 
 	// Hub-native/shared-workspace project remote broker support: if the project has
 	// a managed workspace and the workspace path is set, upload it to GCS so
-	// a remote broker can download it.
-	if (project.GitRemote == "" || project.IsSharedWorkspace()) && agent.AppliedConfig != nil && agent.AppliedConfig.Workspace != "" {
+	// a remote broker can download it. Empty-per-agent projects have no
+	// project workspace to ship: each agent's directory is broker-local.
+	if syncsHubProjectWorkspace(project) && agent.AppliedConfig != nil && agent.AppliedConfig.Workspace != "" {
 		hasLocalPath := false
 		if runtimeBrokerID != "" {
 			provider, err := s.store.GetProjectProvider(ctx, project.ID, runtimeBrokerID)
@@ -2083,7 +2109,6 @@ func (s *Server) createAgentInProject(
 	}
 	s.agentLifecycleLog.Info("Hub: pre-dispatch setup complete",
 		preDispatchAttrs...)
-	var warnings []string
 	if dispatcher := s.GetDispatcher(); dispatcher != nil {
 		if !req.ProvisionOnly {
 			// Use env-gather dispatch if requested

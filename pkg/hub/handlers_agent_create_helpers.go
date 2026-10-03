@@ -249,8 +249,8 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	// Populate GitClone config for git-anchored projects (per-agent clone mode).
 	// Shared-workspace git projects skip clone — agents mount the shared workspace instead.
 	if project != nil && project.GitRemote != "" && !project.IsSharedWorkspace() {
-		cloneURL := resolveCloneURL(project.Labels["scion.dev/clone-url"], project.GitRemote)
-		defaultBranch := project.Labels["scion.dev/default-branch"]
+		cloneURL := resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
+		defaultBranch := project.Labels[store.LabelDefaultBranch]
 		if defaultBranch == "" {
 			defaultBranch = "main"
 		}
@@ -265,7 +265,9 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	// Populate workspace path for hub-managed projects and shared-workspace git projects.
 	// When the user provided a relative workspace (project subdirectory), preserve it
 	// verbatim -- the broker will resolve it against its own project root.
-	if project != nil && (project.GitRemote == "" || project.IsSharedWorkspace()) {
+	// Empty-per-agent projects are skipped: Workspace stays empty and the
+	// broker provisions a private per-agent directory (design #2703 §2.1).
+	if syncsHubProjectWorkspace(project) {
 		existingWorkspace := agent.AppliedConfig.Workspace
 		if existingWorkspace == "" {
 			workspacePath, err := s.hubManagedProjectPath(project.Slug)
@@ -278,7 +280,7 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	// For shared-workspace git projects, default the branch to the project's
 	// default branch (the workspace's current branch) instead of the agent slug.
 	if project != nil && project.IsSharedWorkspace() && agent.AppliedConfig.Branch == "" {
-		defaultBranch := project.Labels["scion.dev/default-branch"]
+		defaultBranch := project.Labels[store.LabelDefaultBranch]
 		if defaultBranch == "" {
 			defaultBranch = "main"
 		}
@@ -1097,6 +1099,8 @@ func (s *Server) handleExistingAgent(
 			switch {
 			case writeAgentTokenIssueError(w, err):
 				// Response written.
+			case writeEmptyPerAgentCapabilityError(w, err):
+				// 412 already written (design #2703 D3).
 			case isContainerNameConflict(err):
 				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 			default:
@@ -1180,6 +1184,8 @@ func (s *Server) handleExistingAgent(
 				switch {
 				case writeAgentTokenIssueError(w, err):
 					// Response written.
+				case writeEmptyPerAgentCapabilityError(w, err):
+					// 412 already written (design #2703 D3).
 				case isContainerNameConflict(err):
 					Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 				default:
@@ -1292,6 +1298,8 @@ func (s *Server) handleExistingAgent(
 			switch {
 			case writeAgentTokenIssueError(w, err):
 				// Response written.
+			case writeEmptyPerAgentCapabilityError(w, err):
+				// 412 already written (design #2703 D3).
 			case isContainerNameConflict(err):
 				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 			default:

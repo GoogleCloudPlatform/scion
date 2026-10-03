@@ -595,6 +595,16 @@ const (
 	LabelTemplate = "scion.io/template"
 )
 
+// Git source labels for git-anchored projects. LabelCloneURL is the URL agents
+// and shared-workspace init actually clone from (it takes precedence over
+// Project.GitRemote), LabelSourceURL records the remote as the user entered it,
+// and LabelDefaultBranch is the branch to clone.
+const (
+	LabelCloneURL      = "scion.dev/clone-url"
+	LabelSourceURL     = "scion.dev/source-url"
+	LabelDefaultBranch = "scion.dev/default-branch"
+)
+
 // Workspace mode constants for git projects.
 // When a git project has the workspace mode label set to "shared", it uses a
 // single shared clone mounted by all agents instead of per-agent clones.
@@ -628,6 +638,15 @@ const (
 	// on K8s are not supported and fall back to clone-per-agent).
 	// Maps from label value "worktree-per-agent".
 	SharingModeWorktreePerAgent WorkspaceSharingMode = "worktree-per-agent"
+
+	// SharingModeEmptyPerAgent: each agent gets its own private, initially
+	// empty, non-git directory. Only valid for non-git (hub-managed) projects;
+	// the hub derives it from the "per-agent" label on a project without a git
+	// remote (see ResolveProjectSharingMode). It is the canonical value sent to
+	// brokers and exported as SCION_WORKSPACE_MODE; the bare "per-agent" label
+	// is never forwarded for such projects because label-only resolution maps
+	// it to clone-per-agent.
+	SharingModeEmptyPerAgent WorkspaceSharingMode = "empty-per-agent"
 )
 
 // ResolveWorkspaceSharingMode maps a workspace mode label value (wire format) to
@@ -642,9 +661,52 @@ func ResolveWorkspaceSharingMode(label string) WorkspaceSharingMode {
 		return SharingModeClonePerAgent
 	case WorkspaceModeWorktreePerAgent:
 		return SharingModeWorktreePerAgent
+	case string(SharingModeEmptyPerAgent):
+		return SharingModeEmptyPerAgent
 	default:
 		// Empty or unrecognized: default to shared-plain.
 		return SharingModeSharedPlain
+	}
+}
+
+// ResolveProjectSharingMode is the single source of truth mapping a project's
+// workspace-mode label and git-ness to the canonical WorkspaceSharingMode.
+// For git projects it matches ResolveWorkspaceSharingMode, except that a raw
+// "empty-per-agent" label (a non-git-only mode) resolves to
+// SharingModeSharedPlain like any other unrecognized value. For non-git
+// projects, "per-agent" (or the canonical "empty-per-agent") resolves to
+// SharingModeEmptyPerAgent and everything else to SharingModeSharedPlain.
+func ResolveProjectSharingMode(label string, isGit bool) WorkspaceSharingMode {
+	if isGit {
+		if label == string(SharingModeEmptyPerAgent) {
+			return SharingModeSharedPlain
+		}
+		return ResolveWorkspaceSharingMode(label)
+	}
+	switch label {
+	case WorkspaceModePerAgent, string(SharingModeEmptyPerAgent):
+		return SharingModeEmptyPerAgent
+	default:
+		return SharingModeSharedPlain
+	}
+}
+
+// ValidateWorkspaceMode reports whether a requested workspace mode (API/label
+// value) is allowed for a project of the given git-ness. An empty mode is
+// always valid (it means "no label"). worktree-per-agent requires a git
+// remote; unknown values are rejected.
+func ValidateWorkspaceMode(mode string, isGit bool) error {
+	switch mode {
+	case "", WorkspaceModeShared, WorkspaceModePerAgent:
+		return nil
+	case WorkspaceModeWorktreePerAgent:
+		if !isGit {
+			return fmt.Errorf("workspace mode %q requires a git remote", mode)
+		}
+		return nil
+	default:
+		return fmt.Errorf("invalid workspace mode %q: must be one of %q, %q, %q",
+			mode, WorkspaceModeShared, WorkspaceModePerAgent, WorkspaceModeWorktreePerAgent)
 	}
 }
 
@@ -708,6 +770,19 @@ func (p *Project) IsSharedWorkspace() bool {
 // per-agent git worktrees over a shared base clone.
 func (p *Project) IsWorktreePerAgent() bool {
 	return p.GitRemote != "" && p.Labels[LabelWorkspaceMode] == WorkspaceModeWorktreePerAgent
+}
+
+// SharingMode returns the canonical workspace sharing mode for this project,
+// derived from its workspace-mode label and whether it has a git remote.
+func (p *Project) SharingMode() WorkspaceSharingMode {
+	return ResolveProjectSharingMode(p.Labels[LabelWorkspaceMode], p.GitRemote != "")
+}
+
+// IsEmptyPerAgent returns true if this is a non-git project configured so
+// each agent gets its own empty, private workspace directory. It is defined
+// via SharingMode so the two can never disagree.
+func (p *Project) IsEmptyPerAgent() bool {
+	return p != nil && p.SharingMode() == SharingModeEmptyPerAgent
 }
 
 // IsTemplate returns true if this project is marked as a project template.
@@ -795,6 +870,11 @@ type BrokerCapabilities struct {
 	// create path and the launch-report protocol (design t1-async-create-v11.md
 	// §3.2, §7 P1b-1).
 	AsyncLaunch bool `json:"asyncLaunch"`
+	// EmptyPerAgentWorkspace indicates the broker can provision the
+	// empty-per-agent workspace sharing mode (private empty directory per
+	// agent on non-git projects). The hub refuses to dispatch such agents to
+	// brokers without it, returning 412 (fail closed; design #2703 D3).
+	EmptyPerAgentWorkspace bool `json:"emptyPerAgentWorkspace"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
@@ -944,20 +1024,17 @@ type HarnessConfig struct {
 
 // HarnessConfigData holds the harness-specific configuration details.
 type HarnessConfigData struct {
-	Harness                 string                   `json:"harness,omitempty"`
-	Image                   string                   `json:"image,omitempty"`
-	User                    string                   `json:"user,omitempty"`
-	Model                   string                   `json:"model,omitempty"`
-	Args                    []string                 `json:"args,omitempty"`
-	Env                     map[string]string        `json:"env,omitempty"`
-	AuthSelectedType        string                   `json:"authSelectedType,omitempty"`
-	Secrets                 []api.RequiredSecret     `json:"secrets,omitempty"`
-	ModelAliases            map[string]string        `json:"modelAliases,omitempty"`
-	ThinkingBudgetMap       map[string]int           `json:"thinkingBudgetMap,omitempty"`
-	ThinkingBudgetFlag      string                   `json:"thinkingBudgetFlag,omitempty"`
-	ThinkingBudgetConfigKey string                   `json:"thinkingBudgetConfigKey,omitempty"`
-	NoAuthBehavior          string                   `json:"noAuthBehavior,omitempty"`
-	AuthMeta                *api.HarnessAuthMetadata `json:"authMeta,omitempty"`
+	Harness          string                   `json:"harness,omitempty"`
+	Image            string                   `json:"image,omitempty"`
+	User             string                   `json:"user,omitempty"`
+	Model            string                   `json:"model,omitempty"`
+	Args             []string                 `json:"args,omitempty"`
+	Env              map[string]string        `json:"env,omitempty"`
+	AuthSelectedType string                   `json:"authSelectedType,omitempty"`
+	Secrets          []api.RequiredSecret     `json:"secrets,omitempty"`
+	ModelAliases     map[string]string        `json:"modelAliases,omitempty"`
+	NoAuthBehavior   string                   `json:"noAuthBehavior,omitempty"`
+	AuthMeta         *api.HarnessAuthMetadata `json:"authMeta,omitempty"`
 }
 
 // HarnessConfigStatus constants

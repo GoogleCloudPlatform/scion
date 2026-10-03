@@ -167,20 +167,17 @@ func ModeFromEnv() HeaderMode {
 // exactly as before this change.
 //
 // Resolution order:
-//  1. SCION_TRANSPORT_TOKEN set → InjectedSource
+//  1. SCION_TRANSPORT_TOKEN_FILE or SCION_TRANSPORT_TOKEN set (inside an
+//     agent) → FileSource. It reads the refreshed transport token file and
+//     uses the injected env value only as a bootstrap fallback; whichever
+//     expires last wins.
 //  2. On GCE && SCION_METADATA_MODE not redirected (unset or "passthrough")
 //     && audience configured (SCION_TRANSPORT_AUDIENCE or
 //     SCION_HUB_OIDC_AUDIENCE) → MetadataSource
 //  3. Otherwise → nil (no transport auth)
 func FromEnv() (TokenSource, error) {
-	if tok := os.Getenv(EnvTransportToken); tok != "" {
-		source := NewInjectedSource()
-		expiry, err := ParseTokenExpiry(tok)
-		if err != nil {
-			expiry = time.Now().Add(DefaultTTL)
-		}
-		source.SetToken(tok, expiry)
-		return source, nil
+	if src := fileSourceFromEnv(); src != nil {
+		return src, nil
 	}
 
 	if !IsOnGCEFunc() {
@@ -212,7 +209,7 @@ type TransportSettings struct {
 // available (keeping the sciontool binary lean).
 //
 // Resolution order:
-//  1. SCION_TRANSPORT_TOKEN set → InjectedSource (env always wins)
+//  1. Injected transport token (file or env) → FileSource (always wins)
 //  2. On GCE && SCION_METADATA_MODE not redirected (unset or "passthrough")
 //     && audience available → MetadataSource
 //  3. Settings audience + adcNew → ADCSource

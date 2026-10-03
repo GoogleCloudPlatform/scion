@@ -163,9 +163,10 @@ When transport auth is configured, the Hub injects these environment variables i
 
 | Variable | Description |
 | :--- | :--- |
-| `SCION_TRANSPORT_TOKEN` | Initial Google OIDC ID token for the transport layer. |
+| `SCION_TRANSPORT_TOKEN` | Initial Google OIDC ID token for the transport layer. Bootstrap only: `sciontool init` moves it to `~/.scion/transport-token` and removes it from the child environment. If the file cannot be written, the value stays in the environment and is used until it expires. |
+| `SCION_TRANSPORT_TOKEN_FILE` | Set by `sciontool init` for child processes. Path of the transport token file, which every refresh rewrites. |
 | `SCION_TRANSPORT_AUDIENCE` | Audience the transport token was minted for. |
-| `SCION_TRANSPORT_TOKEN_EXPIRY` | Token expiry in RFC 3339 format. |
+| `SCION_TRANSPORT_TOKEN_EXPIRY` | Expiry of the initial token, in RFC 3339 format. Bootstrap only: removed by `sciontool init` together with `SCION_TRANSPORT_TOKEN`. |
 | `SCION_TRANSPORT_MODE` | Transport mode (`iap` or `cloudrun_invoker`). Injected alongside the other three transport vars so that in-agent clients can select the correct header placement. |
 
 #### Broker transport configuration
