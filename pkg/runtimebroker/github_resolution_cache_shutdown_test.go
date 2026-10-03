@@ -30,7 +30,9 @@ import (
 // when the server never started its HTTP listener.
 func TestShutdownFlushesGitHubResolutionCache(t *testing.T) {
 	dir := t.TempDir()
-	cache, err := agent.NewGitHubResolutionCache(dir, time.Hour)
+	// A save delay far longer than the test, so the delayed write cannot
+	// produce the file on its own.
+	cache, err := agent.NewGitHubResolutionCache(dir, time.Hour, agent.WithResolutionCacheSaveDelay(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,8 +43,8 @@ func TestShutdownFlushesGitHubResolutionCache(t *testing.T) {
 	if _, err := cache.ResolveWithFetch(context.Background(), key, "flight", "cred", "ref", true, nil, fetch); err != nil {
 		t.Fatal(err)
 	}
-	// The cache's delayed write (2s) is still pending here; Shutdown runs
-	// well within it, so the file can only exist below if Shutdown wrote it.
+	// The cache's delayed write is still pending here, so the file can only
+	// exist below if Shutdown wrote it.
 	cacheFile := filepath.Join(dir, "github-resolution-cache.json")
 
 	s := &Server{ghResolutionCache: cache}
