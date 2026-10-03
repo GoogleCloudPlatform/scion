@@ -363,6 +363,7 @@ func TestRedialDelayOrderings(t *testing.T) {
 			{"hint capped", &conduitv1.GoAway{Code: CloseRelayRestart, ReconnectAfterMs: 3600_000}, MinPlannedDrainLife, BackoffMax},
 			{"protocol error", &conduitv1.GoAway{Code: CloseProtocolError}, time.Hour, time.Second},
 			{"unauthenticated", &conduitv1.GoAway{Code: CloseUnauthenticated}, time.Hour, time.Second},
+			{"relay timeout", &conduitv1.GoAway{Code: CloseRelayTimeout}, time.Hour, time.Second},
 			{"early planned", &conduitv1.GoAway{Code: CloseRelayRestart}, time.Second, time.Second},
 			{"early planned, longer hint", &conduitv1.GoAway{Code: CloseRelayRestart, ReconnectAfterMs: 5000}, time.Second, 5 * time.Second},
 		} {

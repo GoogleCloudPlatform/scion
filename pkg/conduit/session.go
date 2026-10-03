@@ -130,7 +130,7 @@ func Dial(ctx context.Context, d transport.Dialer, cfg Config, hello *conduitv1.
 		_ = conn.Close()
 		return nil, nil, err
 	}
-	f, err := s.readDirect(ctx)
+	f, err := s.readDirect(ctx, s.cfg.HandshakeTimeout)
 	if err != nil {
 		_ = conn.Close()
 		return nil, nil, err
@@ -160,6 +160,12 @@ func Dial(ctx context.Context, d transport.Dialer, cfg Config, hello *conduitv1.
 // asks adm to admit the principal and replies with the Welcome adm
 // returns (filling ping_interval_ms and max_frame if unset). On rejection
 // the dialer receives GoAway{code} and conn is closed.
+//
+// The whole handshake, Admit included, is bounded by cfg.HandshakeTimeout
+// measured from the call: Admit runs under a context cancelled at the
+// deadline, and an Admit still running then is answered with
+// GoAway{CloseRelayTimeout} (no drain deadline, so the dialer backs off);
+// a Welcome it returns later is discarded.
 func Accept(ctx context.Context, conn transport.Conn, cfg Config, adm Admitter) (Session, error) {
 	if adm == nil {
 		_ = conn.Close()
@@ -168,7 +174,8 @@ func Accept(ctx context.Context, conn transport.Conn, cfg Config, adm Admitter) 
 	cfg = cfg.withDefaults()
 	s := newSession(cfg, conn, false)
 	s.adm = adm
-	f, err := s.readDirect(ctx)
+	start := s.clk.Now()
+	f, err := s.readDirect(ctx, cfg.HandshakeTimeout)
 	if err != nil {
 		_ = conn.Close()
 		return nil, err
@@ -182,9 +189,13 @@ func Accept(ctx context.Context, conn transport.Conn, cfg Config, adm Admitter) 
 		s.rejectHandshake(CloseProtocolError, err.Error())
 		return nil, &CloseError{Code: CloseProtocolError, Reason: err.Error()}
 	}
-	w, err := adm.Admit(ctx, hello)
+	w, err := s.admit(ctx, hello, cfg.HandshakeTimeout-s.clk.Now().Sub(start))
 	if err == nil && w == nil {
 		err = errors.New("conduit: admitter returned no welcome")
+	}
+	if errors.Is(err, errAdmitCancelled) {
+		_ = conn.Close()
+		return nil, ctx.Err()
 	}
 	if err != nil {
 		code := CodeOf(err, CloseForbidden)
@@ -205,6 +216,45 @@ func Accept(ctx context.Context, conn transport.Conn, cfg Config, adm Admitter) 
 	s.setInfo(hello, w)
 	s.start()
 	return s, nil
+}
+
+// errAdmitCancelled reports that Accept's ctx ended while Admit ran.
+var errAdmitCancelled = errors.New("conduit: accept cancelled during admission")
+
+// admit runs adm.Admit bounded by the remaining handshake time d, on the
+// session clock. At the deadline it returns a CloseRelayTimeout error even
+// if Admit ignores its context; a result Admit returns later is dropped.
+// The deadline wins a tie with a result that arrives as it fires.
+func (s *session) admit(ctx context.Context, hello *conduitv1.Hello, d time.Duration) (*conduitv1.Welcome, error) {
+	timeoutErr := &CloseError{Code: CloseRelayTimeout, Reason: "admission timed out"}
+	if d <= 0 {
+		return nil, timeoutErr
+	}
+	actx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	type result struct {
+		w   *conduitv1.Welcome
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		w, err := s.adm.Admit(actx, hello)
+		ch <- result{w, err}
+	}()
+	timeout, stop := clock.After(s.clk, d)
+	select {
+	case r := <-ch:
+		if !stop() {
+			return nil, timeoutErr
+		}
+		return r.w, r.err
+	case <-timeout:
+		cancel(timeoutErr)
+		return nil, timeoutErr
+	case <-ctx.Done():
+		stop()
+		return nil, errAdmitCancelled
+	}
 }
 
 func rejectReason(err error) string {
@@ -249,9 +299,8 @@ func (s *session) writeDirect(f *conduitv1.Frame) error {
 	return nil
 }
 
-// readDirect reads the first handshake frame, bounded by ctx and the
-// handshake timeout.
-func (s *session) readDirect(ctx context.Context) (*conduitv1.Frame, error) {
+// readDirect reads the first handshake frame, bounded by ctx and d.
+func (s *session) readDirect(ctx context.Context, d time.Duration) (*conduitv1.Frame, error) {
 	type result struct {
 		f   *conduitv1.Frame
 		err error
@@ -275,7 +324,7 @@ func (s *session) readDirect(ctx context.Context) (*conduitv1.Frame, error) {
 			}
 		}
 	}()
-	timeout, stop := clock.After(s.clk, s.cfg.HandshakeTimeout)
+	timeout, stop := clock.After(s.clk, d)
 	defer stop()
 	select {
 	case r := <-ch:
