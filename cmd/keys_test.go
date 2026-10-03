@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -463,6 +464,69 @@ func TestResolveLocalKeysTarget_NotFoundInSelectedProject(t *testing.T) {
 	_, _, err := resolveLocalKeysTarget(context.Background(), mgr, "builder")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
+}
+
+// writeUnlinkedProjectWithCreatedAgents creates an unlinked local project
+// (a .scion directory with no Hub-linked project ID) containing on-disk
+// created agents with no container, and returns the project directory to
+// pass as --project. These agents are found only by agent.List's
+// created-agent scan, never by the runtime layer.
+func writeUnlinkedProjectWithCreatedAgents(t *testing.T, root string, names ...string) string {
+	t.Helper()
+	dir := filepath.Join(root, "unlinked")
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".scion"), 0755))
+	resolved, err := config.GetResolvedProjectDir(dir)
+	require.NoError(t, err)
+	require.NotEmpty(t, resolved)
+	for _, n := range names {
+		agentDir := filepath.Join(resolved, "agents", n)
+		require.NoError(t, os.MkdirAll(filepath.Join(agentDir, "home"), 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte("{}"), 0644))
+	}
+	return dir
+}
+
+// TestResolveLocalKeysTarget_UnlinkedCreatedAgents covers name resolution
+// in an unlinked local project whose agents exist only on disk: the
+// requested name must select exactly that agent, and an unknown name must
+// be "not found" rather than "ambiguous" or the project's sole agent.
+func TestResolveLocalKeysTarget_UnlinkedCreatedAgents(t *testing.T) {
+	tests := []struct {
+		name      string
+		agents    []string
+		target    string
+		wantName  string
+		wantErrIn string
+	}{
+		{name: "valid name among two agents", agents: []string{"builder", "reviewer"}, target: "reviewer", wantName: "reviewer"},
+		{name: "unknown name among two agents", agents: []string{"builder", "reviewer"}, target: "missing", wantErrIn: "not found"},
+		{name: "unknown name with a single agent", agents: []string{"builder"}, target: "missing", wantErrIn: "not found"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			origProjectPath := projectPath
+			defer func() { projectPath = origProjectPath }()
+
+			tmp := t.TempDir()
+			t.Setenv("HOME", tmp)
+			projectPath = writeUnlinkedProjectWithCreatedAgents(t, tmp, tt.agents...)
+
+			mgr := agent.NewManager(filteringMockRuntime(nil, nil))
+			defer mgr.Close()
+
+			target, scope, err := resolveLocalKeysTarget(context.Background(), mgr, tt.target)
+			if tt.wantErrIn != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErrIn)
+				assert.NotContains(t, err.Error(), "ambiguous")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantName, target.Name)
+			assert.Empty(t, scope.hubProjectID)
+			assert.NotEmpty(t, scope.projectPath)
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------

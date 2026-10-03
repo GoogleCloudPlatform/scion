@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -51,6 +52,15 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 			projectsToScan = append(projectsToScan, gd)
 		}
 	}
+
+	// The runtime layer applies every filter key, including "scion.name",
+	// to the containers it returns. The created-agent scan below is driven
+	// only by the project path, so it must apply the name filter itself;
+	// otherwise a name-scoped lookup would return every created agent in
+	// the project. Agent directory names are slugs, the same value carried
+	// on the "scion.name" label, so this is the same exact comparison the
+	// runtime label filter uses (projectkeys.LabelValuesMatch).
+	nameFilter, hasNameFilter := filter["scion.name"]
 
 	runningNames := make(map[string]bool)
 	runtimePhases := make(map[string]string, len(agents))
@@ -195,6 +205,9 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 			}
 			for _, e := range entries {
 				if !e.IsDir() {
+					continue
+				}
+				if hasNameFilter && !projectkeys.LabelValuesMatch("scion.name", e.Name(), nameFilter) {
 					continue
 				}
 				if runningNames[e.Name()] || seenNames[e.Name()] {
