@@ -1816,6 +1816,18 @@ class TestResolveThinking(unittest.TestCase):
         self.assertIsNone(sh.resolve_thinking(ctx, "1.5"))
         self.assertEqual(warns, ["thinking_level='1.5' is not a valid integer; value=<cli default> (default)"])
 
+    def test_invalid_non_string_with_block_warns(self):
+        ctx, infos, warns = self._ctx({"thinking": _CODEX_THINKING})
+        self.assertEqual(sh.resolve_thinking(ctx, 3.5), "medium")  # type: ignore[arg-type]
+        self.assertEqual(warns, ["thinking_level='3.5' is not a valid integer; value=medium (default)"])
+        self.assertEqual(infos, [])
+
+    def test_invalid_non_string_without_block_info(self):
+        ctx, infos, warns = self._ctx({})
+        self.assertIsNone(sh.resolve_thinking(ctx, 3.5))  # type: ignore[arg-type]
+        self.assertEqual(infos, ["thinking_level='3.5' ignored (harness has no thinking map)"])
+        self.assertEqual(warns, [])
+
     def test_no_block_set_level_info(self):
         ctx, infos, warns = self._ctx({"model_aliases": {}})
         self.assertIsNone(sh.resolve_thinking(ctx, "40"))
