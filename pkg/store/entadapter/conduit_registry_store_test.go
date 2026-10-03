@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -290,9 +291,9 @@ func TestConduitRegistry_EpochNeverRegressesWhenSessionsAreReaped(t *testing.T) 
 	_, err := f.reg.DeleteSessionCAS(f.ctx, "s-1", "relay-1", gen)
 	require.NoError(t, err)
 	f.clock.Advance(2 * time.Minute)
-	res, err := f.reg.ReapStaleRelays(f.ctx, time.Minute, f.clock.Now())
+	n, err := f.reg.ReapStaleRelays(f.ctx, time.Minute, f.clock.Now())
 	require.NoError(t, err)
-	assert.Equal(t, 1, res.SessionsDeleted)
+	assert.Equal(t, 1, n)
 
 	// ...and the next connection still gets a strictly newer epoch.
 	gen = f.registerRelay("relay-1")
@@ -508,6 +509,14 @@ func TestConduitRegistry_Eligible_FiltersBeforeRanking(t *testing.T) {
 	ok, err := f.reg.IsAdmissible(f.ctx, "s-cur", registry.Want{ProjectID: "proj-1"})
 	assert.False(t, ok)
 	assert.ErrorIs(t, err, registry.ErrIncompleteWant)
+	// An agent lookup without a project fails closed loudly rather than
+	// silently mismatching.
+	noProject := registry.Want{Incarnation: "inc-A"}
+	_, err = f.reg.Eligible(f.ctx, registry.PrincipalAgent, "agent-1", noProject, f.clock.Now())
+	assert.ErrorIs(t, err, registry.ErrIncompleteWant)
+	ok, err = f.reg.IsAdmissible(f.ctx, "s-cur", noProject)
+	assert.False(t, ok)
+	assert.ErrorIs(t, err, registry.ErrIncompleteWant)
 
 	// Draining removes the session.
 	require.NoError(t, f.reg.SetSessionDraining(f.ctx, "s-cur"))
@@ -546,9 +555,9 @@ func TestConduitRegistry_ReapStaleRelays_CascadesToSessionsKeepsRelayRows(t *tes
 	require.NoError(t, f.reg.HeartbeatRelay(f.ctx, "relay-2", r2))
 	f.clock.Advance(20 * time.Second) // relay-1 last seen 65s ago, relay-2 20s ago
 
-	res, err := f.reg.ReapStaleRelays(f.ctx, 60*time.Second, f.clock.Now())
+	n, err := f.reg.ReapStaleRelays(f.ctx, 60*time.Second, f.clock.Now())
 	require.NoError(t, err)
-	assert.Equal(t, registry.ReapResult{StaleRelays: 1, SessionsDeleted: 2}, res)
+	assert.Equal(t, 2, n)
 
 	assert.ErrorIs(t, f.reg.TouchSession(f.ctx, "s-1"), registry.ErrSessionNotFound)
 	assert.ErrorIs(t, f.reg.TouchSession(f.ctx, "b-1"), registry.ErrSessionNotFound)
@@ -558,9 +567,9 @@ func TestConduitRegistry_ReapStaleRelays_CascadesToSessionsKeepsRelayRows(t *tes
 	assert.Greater(t, f.registerRelay("relay-1"), r1)
 
 	// Nothing more to reap.
-	res, err = f.reg.ReapStaleRelays(f.ctx, 60*time.Second, f.clock.Now())
+	n, err = f.reg.ReapStaleRelays(f.ctx, 60*time.Second, f.clock.Now())
 	require.NoError(t, err)
-	assert.Zero(t, res.SessionsDeleted)
+	assert.Zero(t, n)
 }
 
 func TestConduitRegistry_FailsClosedOnReadError(t *testing.T) {
@@ -609,4 +618,136 @@ func TestConduitRegistry_CapabilitiesRoundTrip(t *testing.T) {
 	_, found, err = f.store.ListPrincipalSessionsBySession(f.ctx, "missing")
 	require.NoError(t, err)
 	assert.False(t, found)
+}
+
+func TestConduitRegistry_RegisterRelay_ConcurrentSameInstance(t *testing.T) {
+	f := newConduitFixture(t)
+	const n = 8
+	gens := make([]int64, n)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			g, err := f.reg.RegisterRelay(f.ctx, registry.RelayInstance{InstanceID: "relay-1", InternalEndpoint: "http://relay-1:9811"})
+			assert.NoError(t, err)
+			gens[i] = g
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	// Every racer got a distinct generation, exactly 1..n.
+	sorted := append([]int64(nil), gens...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	for i, g := range sorted {
+		assert.Equal(t, int64(i+1), g)
+	}
+	// Only the winner (highest generation) can act; every loser is fenced.
+	for _, g := range gens {
+		hbErr := f.reg.HeartbeatRelay(f.ctx, "relay-1", g)
+		_, insErr := f.reg.InsertSessionWithNextEpoch(f.ctx, brokerSession(fmt.Sprintf("b-%d", g), "relay-1", g, "binc", ""))
+		if g == n {
+			assert.NoError(t, hbErr)
+			assert.NoError(t, insErr)
+		} else {
+			assert.ErrorIs(t, hbErr, registry.ErrRelaySuperseded)
+			assert.ErrorIs(t, insErr, registry.ErrRelaySuperseded)
+		}
+	}
+}
+
+func TestConduitRegistry_ExecScope_AnyExecScopeIsExplicitOptOut(t *testing.T) {
+	f := newConduitFixture(t)
+	r1 := f.registerRelay("relay-1")
+	r2 := f.registerRelay("relay-2")
+	r3 := f.registerRelay("relay-3")
+	f.insert(brokerSession("b-x", "relay-1", r1, "binc", "scope-x"))
+	f.insert(brokerSession("b-y", "relay-2", r2, "binc", "scope-y"))
+	f.insert(brokerSession("b-none", "relay-3", r3, "binc", ""))
+
+	stateful := func(scope string) registry.Want { return registry.Want{ExecScope: scope, Incarnation: "binc"} }
+	// Stateful lookups match their exact scope only.
+	assert.Equal(t, []string{"b-x"}, f.eligibleIDs(registry.PrincipalBroker, "broker-1", stateful("scope-x")))
+	assert.Equal(t, []string{"b-y"}, f.eligibleIDs(registry.PrincipalBroker, "broker-1", stateful("scope-y")))
+	// A caller that forgets ExecScope matches only the unscoped session,
+	// never a scoped one by accident.
+	assert.Equal(t, []string{"b-none"}, f.eligibleIDs(registry.PrincipalBroker, "broker-1", stateful("")))
+	assert.Equal(t, registry.ReasonExecScopeMismatch, f.admission("b-x", stateful("")).Reason)
+
+	// Stateless callers opt out explicitly and see every equivalent session.
+	anyScope := registry.Want{AnyExecScope: true, Incarnation: "binc"}
+	assert.ElementsMatch(t, []string{"b-x", "b-y", "b-none"}, f.eligibleIDs(registry.PrincipalBroker, "broker-1", anyScope))
+	assert.True(t, f.admission("b-y", anyScope).Admissible)
+	// Opting out does not relax the other fences.
+	assert.Empty(t, f.eligibleIDs(registry.PrincipalBroker, "broker-1", registry.Want{AnyExecScope: true, Incarnation: "other"}))
+
+	// ExecScope plus AnyExecScope is contradictory.
+	bad := registry.Want{ExecScope: "scope-x", AnyExecScope: true, Incarnation: "binc"}
+	_, err := f.reg.Eligible(f.ctx, registry.PrincipalBroker, "broker-1", bad, f.clock.Now())
+	assert.ErrorIs(t, err, registry.ErrInvalidInput)
+	ok, err := f.reg.IsAdmissible(f.ctx, "b-x", bad)
+	assert.False(t, ok)
+	assert.ErrorIs(t, err, registry.ErrInvalidInput)
+}
+
+func TestConduitRegistry_DrainingRelay_EligibleButRankedLast(t *testing.T) {
+	f := newConduitFixture(t)
+	r1 := f.registerRelay("relay-1")
+	r2 := f.registerRelay("relay-2")
+	f.insert(brokerSession("b-1", "relay-1", r1, "binc", ""))
+	f.clock.Advance(time.Second)
+	f.insert(brokerSession("b-2", "relay-2", r2, "binc", ""))
+	want := registry.Want{Incarnation: "binc"}
+	assert.Equal(t, []string{"b-2", "b-1"}, f.eligibleIDs(registry.PrincipalBroker, "broker-1", want))
+
+	// Draining relay-2 keeps b-2 usable but ranks it after b-1, even though
+	// b-2 is fresher.
+	require.NoError(t, f.reg.SetRelayDraining(f.ctx, "relay-2", r2, true))
+	assert.Equal(t, []string{"b-1", "b-2"}, f.eligibleIDs(registry.PrincipalBroker, "broker-1", want))
+	assert.True(t, f.admission("b-2", want).Admissible)
+
+	// A principal whose only session is on a draining relay stays reachable.
+	f.insert(agentSession("s-1", "relay-2", r2, "inc-A"))
+	assert.Equal(t, []string{"s-1"}, f.eligibleIDs(registry.PrincipalAgent, "agent-1", agentWant))
+
+	// Exclusion during a drain is per session: the relay marks the session
+	// draining when it sends GoAway.
+	require.NoError(t, f.reg.SetSessionDraining(f.ctx, "b-2"))
+	assert.Equal(t, []string{"b-1"}, f.eligibleIDs(registry.PrincipalBroker, "broker-1", want))
+	assert.Equal(t, registry.ReasonDraining, f.admission("b-2", want).Reason)
+}
+
+func TestConduitRegistry_PruneRelayInstances_OnlyIdleAndStale(t *testing.T) {
+	f := newConduitFixture(t)
+	idle := f.registerRelay("relay-idle")   // stale, no sessions: pruned
+	busy := f.registerRelay("relay-busy")   // stale, has a session: kept
+	fresh := f.registerRelay("relay-fresh") // no sessions, heartbeating: kept
+	f.insert(brokerSession("b-1", "relay-busy", busy, "binc", ""))
+
+	f.clock.Advance(registry.DefaultRelayPruneAfter + time.Hour)
+	require.NoError(t, f.reg.HeartbeatRelay(f.ctx, "relay-fresh", fresh))
+
+	n, err := f.reg.PruneRelayInstances(f.ctx, 0, f.clock.Now())
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+
+	// The pruned relay is fenced until it re-registers.
+	assert.ErrorIs(t, f.reg.HeartbeatRelay(f.ctx, "relay-idle", idle), registry.ErrRelaySuperseded)
+	// The busy relay's session survived (no cascade from pruning).
+	require.NoError(t, f.reg.TouchSession(f.ctx, "b-1"))
+	require.NoError(t, f.reg.HeartbeatRelay(f.ctx, "relay-busy", busy))
+
+	// Once the reaper has removed a stale relay's sessions, prune removes it.
+	f.clock.Advance(registry.DefaultRelayPruneAfter + time.Hour)
+	require.NoError(t, f.reg.HeartbeatRelay(f.ctx, "relay-fresh", fresh))
+	_, err = f.reg.ReapStaleRelays(f.ctx, 0, f.clock.Now())
+	require.NoError(t, err)
+	n, err = f.reg.PruneRelayInstances(f.ctx, 0, f.clock.Now())
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+	assert.ErrorIs(t, f.reg.TouchSession(f.ctx, "b-1"), registry.ErrSessionNotFound)
+	require.NoError(t, f.reg.HeartbeatRelay(f.ctx, "relay-fresh", fresh))
 }

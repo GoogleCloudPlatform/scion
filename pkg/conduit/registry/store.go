@@ -76,8 +76,12 @@ type Store interface {
 	// principal owning sessionID; found is false if the session is missing.
 	ListPrincipalSessionsBySession(ctx context.Context, sessionID string) (ps PrincipalSessions, found bool, err error)
 	// DeleteSessionsOfStaleRelays deletes every session whose relay's
-	// last_seen is before staleBefore. Relay rows are kept.
-	DeleteSessionsOfStaleRelays(ctx context.Context, staleBefore time.Time) (ReapResult, error)
+	// last_seen is before staleBefore, in one statement, and returns the
+	// number of sessions deleted. Relay rows are kept.
+	DeleteSessionsOfStaleRelays(ctx context.Context, staleBefore time.Time) (int, error)
+	// DeleteIdleRelays deletes relay rows with no sessions whose last_seen
+	// is before staleBefore and returns how many were deleted.
+	DeleteIdleRelays(ctx context.Context, staleBefore time.Time) (int, error)
 	// DeletePrincipalEpoch removes a principal's epoch row (agent deletion).
 	DeletePrincipalEpoch(ctx context.Context, principalKind, principalID string) error
 }

@@ -39,6 +39,9 @@ const (
 const (
 	DefaultRelayStaleAfter   = 60 * time.Second
 	DefaultSessionStaleAfter = 90 * time.Second
+	// DefaultRelayPruneAfter is how long a relay row with no sessions must
+	// have been stale before PruneRelayInstances removes it.
+	DefaultRelayPruneAfter = 7 * 24 * time.Hour
 )
 
 var (
@@ -54,9 +57,10 @@ var (
 	// ErrNotRoutable is returned by Eligible for principal kinds that are
 	// never resolved by principal (user, relay-peer).
 	ErrNotRoutable = errors.New("conduit registry: principal kind is not routable by principal")
-	// ErrIncompleteWant is returned when a Want lacks the authoritative
-	// incarnation needed to fence. Callers must treat it as "refuse".
-	ErrIncompleteWant = errors.New("conduit registry: want lacks authoritative incarnation")
+	// ErrIncompleteWant is returned when a Want lacks a field needed to fence
+	// (the authoritative incarnation, or the project for an agent). Callers
+	// must treat it as "refuse".
+	ErrIncompleteWant = errors.New("conduit registry: want is incomplete")
 	// ErrUnaddressable is returned by SelfCheck for an empty internal endpoint.
 	ErrUnaddressable = errors.New("conduit registry: relay internal endpoint is empty (unaddressable)")
 	// ErrSelfCheckMismatch is returned by SelfCheck when the endpoint is
@@ -126,13 +130,24 @@ type SessionRecord struct {
 	LastSeen            time.Time
 }
 
-// Want describes what a caller needs from a session. Matching is exact:
-// ProjectID and ExecScope compare with "" meaning NULL (so a broker lookup
-// passes ProjectID ""), and two sessions with different exec_scope are
-// never interchangeable.
+// Want describes what a caller needs from a session. Matching is exact and
+// fails closed:
+//
+//   - ProjectID compares with "" meaning NULL. Agent lookups must set it
+//     (empty returns ErrIncompleteWant); broker lookups pass "".
+//   - ExecScope compares exactly with "" meaning NULL, so two sessions with
+//     different exec_scope are never interchangeable. A caller that needs a
+//     stateless capability and genuinely does not care which runtime scope
+//     serves it sets AnyExecScope instead. That is an explicit opt-out: a
+//     stateful caller that forgets ExecScope matches only unscoped
+//     sessions, never a scoped one by accident.
 type Want struct {
 	ProjectID string
 	ExecScope string
+	// AnyExecScope disables exec_scope matching (stateless operations
+	// only). Setting it together with a non-empty ExecScope is
+	// contradictory and returns ErrInvalidInput.
+	AnyExecScope bool
 	// Incarnation is the authoritative endpoint incarnation, read by the
 	// caller from the agent/broker row. Required for agent and broker
 	// lookups; an empty value fails closed with ErrIncompleteWant.
@@ -167,10 +182,4 @@ const (
 type Decision struct {
 	Admissible bool
 	Reason     Reason
-}
-
-// ReapResult reports what a ReapStaleRelays pass removed.
-type ReapResult struct {
-	StaleRelays     int // relays found stale (rows are kept; see package doc)
-	SessionsDeleted int
 }

@@ -195,11 +195,46 @@ func (r *Registry) ForgetPrincipalEpoch(ctx context.Context, principalKind, prin
 // monotonic. The caller (1d) runs it under leader election. A relay that
 // comes back after being reaped finds TouchSession returning
 // ErrSessionNotFound for its old sessions and must close them.
-func (r *Registry) ReapStaleRelays(ctx context.Context, staleAfter time.Duration, now time.Time) (ReapResult, error) {
+func (r *Registry) ReapStaleRelays(ctx context.Context, staleAfter time.Duration, now time.Time) (int, error) {
 	if staleAfter <= 0 {
 		staleAfter = r.cfg.RelayStaleAfter
 	}
 	return r.store.DeleteSessionsOfStaleRelays(ctx, now.UTC().Add(-staleAfter))
+}
+
+// PruneRelayInstances deletes relay_instances rows that have no sessions and
+// whose last_seen is older than olderThan (DefaultRelayPruneAfter when <= 0).
+// It bounds the growth of the table when instance ids are unique per process
+// start. It is safe because a pruned relay that comes back finds
+// HeartbeatRelay/SetRelayDraining/InsertSessionWithNextEpoch fenced with
+// ErrRelaySuperseded and must re-register; the horizon is far beyond the
+// reaper's, so any session such a relay could still insert would be reaped
+// anyway. Run it from the same singleton as ReapStaleRelays.
+func (r *Registry) PruneRelayInstances(ctx context.Context, olderThan time.Duration, now time.Time) (int, error) {
+	if olderThan <= 0 {
+		olderThan = DefaultRelayPruneAfter
+	}
+	return r.store.DeleteIdleRelays(ctx, now.UTC().Add(-olderThan))
+}
+
+// checkWant validates w for a lookup of principalKind. The returned reason
+// is used by Admission when it refuses.
+func checkWant(principalKind string, w Want) (Reason, error) {
+	if w.AnyExecScope && w.ExecScope != "" {
+		return ReasonExecScopeMismatch, fmt.Errorf("%w: want sets both ExecScope and AnyExecScope", ErrInvalidInput)
+	}
+	switch principalKind {
+	case PrincipalAgent, PrincipalBroker:
+	default:
+		return ReasonOK, nil
+	}
+	if w.Incarnation == "" {
+		return ReasonIncarnationMismatch, fmt.Errorf("%w: no authoritative incarnation", ErrIncompleteWant)
+	}
+	if principalKind == PrincipalAgent && w.ProjectID == "" {
+		return ReasonProjectMismatch, fmt.Errorf("%w: agent lookup without project", ErrIncompleteWant)
+	}
+	return ReasonOK, nil
 }
 
 // Eligible returns the sessions of (principalKind, principalID) that may
@@ -208,14 +243,21 @@ func (r *Registry) ReapStaleRelays(ctx context.Context, staleAfter time.Duration
 // freshest-first (sessions on non-draining relays first, then last_seen,
 // then epoch, newest first). Only agent and broker principals are routable;
 // other kinds return ErrNotRoutable.
+//
+// A session on a draining *relay* stays eligible (and admissible) and is
+// only ranked after sessions on non-draining relays, so draining a relay
+// never makes a principal unreachable before it has reconnected elsewhere.
+// Exclusion during a drain happens at the session level: the relay marks
+// each session draining (SetSessionDraining) when it sends GoAway, and
+// draining sessions are filtered out.
 func (r *Registry) Eligible(ctx context.Context, principalKind, principalID string, w Want, now time.Time) ([]SessionRecord, error) {
 	switch principalKind {
 	case PrincipalAgent, PrincipalBroker:
 	default:
 		return nil, fmt.Errorf("%w: %q", ErrNotRoutable, principalKind)
 	}
-	if w.Incarnation == "" {
-		return nil, ErrIncompleteWant
+	if _, err := checkWant(principalKind, w); err != nil {
+		return nil, err
 	}
 	ps, err := r.store.ListPrincipalSessions(ctx, principalKind, principalID)
 	if err != nil {
@@ -281,9 +323,8 @@ func (r *Registry) Admission(ctx context.Context, sessionID string, w Want) (Dec
 	if !ok {
 		return Decision{Reason: ReasonNotFound}, nil
 	}
-	kind := v.Session.PrincipalKind
-	if (kind == PrincipalAgent || kind == PrincipalBroker) && w.Incarnation == "" {
-		return Decision{Reason: ReasonIncarnationMismatch}, ErrIncompleteWant
+	if reason, err := checkWant(v.Session.PrincipalKind, w); err != nil {
+		return Decision{Reason: reason}, err
 	}
 	reason := r.classify(ps, v, w, r.now())
 	return Decision{Admissible: reason == ReasonOK, Reason: reason}, nil
@@ -312,7 +353,7 @@ func (r *Registry) classify(ps PrincipalSessions, v SessionView, w Want, now tim
 	switch {
 	case s.ProjectID != w.ProjectID:
 		return ReasonProjectMismatch
-	case s.ExecScope != w.ExecScope:
+	case !w.AnyExecScope && s.ExecScope != w.ExecScope:
 		return ReasonExecScopeMismatch
 	case w.Incarnation == "" || s.EndpointIncarnation != w.Incarnation:
 		return ReasonIncarnationMismatch
