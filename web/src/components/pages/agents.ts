@@ -881,7 +881,9 @@ export class ScionPageAgents extends LitElement {
 
       // A server that ignored sorted mode answers with a legacy page. With
       // no phase sent, it is complete when it has no `nextCursor`, and
-      // otherwise the drain continues from it. A legacy list honours
+      // otherwise the drain continues from it when it is a full drain page
+      // (a shorter page, from a server that honoured `limit`, is discarded
+      // and the drain starts from the first page). A legacy list honours
       // `phase`, so a page fetched with one is only part of the set: the
       // whole set is drained from the start.
       const legacy = data.complete === undefined;
@@ -895,7 +897,8 @@ export class ScionPageAgents extends LitElement {
           return await this.drainGlobalAgents(label, gen, requestedScope);
         }
         // The drain takes over this epoch and closes it, so live changes
-        // since the request was sent are kept.
+        // since the request was sent are kept, whether or not it uses the
+        // page's rows.
         return await this.drainGlobalAgents(label, gen, requestedScope, {
           firstPage: {
             agents: dropTombstoned(data.agents || [], stateManager.getDeletedAgentIds()),

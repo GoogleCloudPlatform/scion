@@ -26,6 +26,7 @@ import {
   drainAgents,
   type AgentDrainFetch,
 } from './agent-drain.js';
+import { AgentSeedEpoch } from './agent-seed-epoch.js';
 
 class FakeEventSource extends EventTarget {
   readyState = 0;
@@ -290,38 +291,132 @@ describe('drainAgents', () => {
     expect(result.firstPageFailed).toBe(false);
   });
 
-  it('a short first page (the server honoured a smaller limit) does not use up a drain page', async () => {
+  it('a short carried first page is discarded: the drain starts from the first page with no cursor and sends at most four pages', async () => {
+    const rows = rowsDesc(2600);
+    const server = fakeServer({
+      rows,
+      override: (_attempt, u) =>
+        u.searchParams.has('cursor')
+          ? undefined
+          : json({
+              agents: rows.slice(0, 500),
+              nextCursor: '500',
+              _capabilities: { actions: ['read'] },
+            }),
+    });
+    const result = await drainAgents('/x', {
+      fetchFn: server.fn,
+      firstPage: {
+        agents: rows.slice(0, 25),
+        nextCursor: '25',
+        capabilities: { actions: ['create'] },
+      },
+    });
+    expect(server.urls.map((u) => u.searchParams.get('cursor'))).toEqual([
+      null,
+      '500',
+      '1000',
+      '1500',
+    ]);
+    expect(server.urls.every((u) => u.searchParams.get('limit') === '500')).toBe(true);
+    // The short answer plus four drain pages.
+    expect(result.requests).toBe(DRAIN_MAX_REQUESTS + 1);
+    expect(result.capped).toBe(true);
+    expect(result.complete).toBe(false);
+    // Exactly the newest 2,000 candidate rows, never the 25 on top of them.
+    expect(result.agents).toHaveLength(DRAIN_MAX_REQUESTS * DRAIN_PAGE_LIMIT);
+    expect(result.agents.map((a) => a.id)).toEqual(rows.slice(0, 2000).map((a) => a.id));
+    // The capabilities come from the drain's own first page, not the discarded one.
+    expect(result.capabilities).toEqual({ actions: ['read'] });
+    expect(result.firstPageFailed).toBe(false);
+  });
+
+  it('a short carried first page below the cap: the restarted drain completes the set in four pages', async () => {
     const rows = rowsDesc(1600);
     const server = fakeServer({ rows });
     const result = await drainAgents('/x', {
       fetchFn: server.fn,
       firstPage: { agents: rows.slice(0, 25), nextCursor: '25' },
     });
-    // Four pages of 500 after the 25-row page: 25 + 500 + 500 + 500 + 75.
     expect(server.urls.map((u) => u.searchParams.get('cursor'))).toEqual([
-      '25',
-      '525',
-      '1025',
-      '1525',
+      null,
+      '500',
+      '1000',
+      '1500',
     ]);
     expect(result.requests).toBe(5);
     expect(result.complete).toBe(true);
     expect(result.capped).toBe(false);
     expect(result.agents).toHaveLength(1600);
-    expect(result.firstPageFailed).toBe(false);
+    expect(new Set(result.agents.map((a) => a.id)).size).toBe(1600);
   });
 
-  it('a short first page above the cap still ends capped after four full drain pages', async () => {
+  it('a read-filtered short carried page (500 candidates returning 300 rows) never earns a fifth drain page', async () => {
     const rows = rowsDesc(2600);
-    const server = fakeServer({ rows });
+    // Two of every five candidate rows are unreadable.
+    const readable = (a: Agent): boolean => Number(a.id.slice(2)) % 5 >= 2;
+    const firstRows = rows.slice(0, 500).filter(readable);
+    expect(firstRows).toHaveLength(300);
+    const server = fakeServer({ rows, readable });
     const result = await drainAgents('/x', {
       fetchFn: server.fn,
-      firstPage: { agents: rows.slice(0, 25), nextCursor: '25' },
+      firstPage: { agents: firstRows, nextCursor: '500' },
     });
     expect(server.urls).toHaveLength(DRAIN_MAX_REQUESTS);
-    expect(result.requests).toBe(DRAIN_MAX_REQUESTS + 1);
+    expect(server.urls[0].searchParams.has('cursor')).toBe(false);
+    expect(server.urls.at(-1)?.searchParams.get('cursor')).toBe('1500');
     expect(result.capped).toBe(true);
-    expect(result.agents).toHaveLength(2025);
+    // The readable part of the newest 2,000 candidate rows only.
+    expect(result.agents).toHaveLength(1200);
+    expect(result.agents.every((a) => rows.indexOf(a) < 2000)).toBe(true);
+  });
+
+  it('a short carried first page then a failing first drain page is a first-page failure with no rows', async () => {
+    const rows = rowsDesc(1600);
+    const server = fakeServer({ rows, override: () => json({}, 503) });
+    const result = await drainAgents('/x', {
+      fetchFn: server.fn,
+      retryDelayMs: 0,
+      firstPage: { agents: rows.slice(0, 25), nextCursor: '25' },
+    });
+    expect(server.urls).toHaveLength(3);
+    expect(result.agents).toEqual([]);
+    expect(result.error?.status).toBe(503);
+    expect(result.firstPageFailed).toBe(true);
+  });
+
+  it('the first page that carries capabilities wins over a later page', async () => {
+    const rows = rowsDesc(1200);
+    const inner = fakeServer({ rows });
+    const fn: AgentDrainFetch = async (url, init) => {
+      const res = await inner.fn(url, init);
+      if (!new URL(url, 'http://localhost').searchParams.has('cursor')) return res;
+      const body = (await res.json()) as Record<string, unknown>;
+      return json({ ...body, _capabilities: { actions: ['delete'] } });
+    };
+    const result = await drainAgents('/x', { fetchFn: fn });
+    expect(inner.urls).toHaveLength(3);
+    expect(result.complete).toBe(true);
+    expect(result.capabilities).toEqual({ actions: ['create'] });
+  });
+
+  it('a 429 then a 408 then success completes; a 404 is not retried', async () => {
+    const server = fakeServer({
+      rows: rowsDesc(600),
+      override: (attempt) =>
+        attempt === 1 ? json({}, 429) : attempt === 2 ? json({}, 408) : undefined,
+    });
+    const result = await drainAgents('/x', { fetchFn: server.fn, retryDelayMs: 0 });
+    expect(server.urls).toHaveLength(4);
+    expect(result.complete).toBe(true);
+    expect(result.error).toBeNull();
+    expect(result.agents).toHaveLength(600);
+
+    const missing = fakeServer({ rows: rowsDesc(10), override: () => json({}, 404) });
+    const failed = await drainAgents('/x', { fetchFn: missing.fn, retryDelayMs: 0 });
+    expect(missing.urls).toHaveLength(1);
+    expect(failed.error?.status).toBe(404);
+    expect(failed.complete).toBe(false);
   });
 
   it('an aborted signal rejects with AbortError instead of resolving a partial result', async () => {
@@ -458,6 +553,51 @@ describe('AgentDrainRunner (seed-epoch protocol)', () => {
     const result = await runner.run({ url: '/x', view: 'compact', isMember: () => true });
     expect((sm.getAgent(full.id) as Agent & { taskSummary?: string }).taskSummary).toBe('keep me');
     expect((result?.agents[0] as Agent & { taskSummary?: string }).taskSummary).toBe('keep me');
+  });
+
+  it('a full drain seeds full objects, so a field missing from the drained row is gone from the store', async () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    connect(sm);
+    const stored = makeAgent(1, { taskSummary: 'old task' } as Partial<Agent>);
+    sm.seedAgents([stored]);
+    const row = makeAgent(1);
+    const fn: AgentDrainFetch = () => Promise.resolve(json({ agents: [row] }));
+    const runner = new AgentDrainRunner({ state: sm, fetchFn: fn });
+    const result = await runner.run({ url: '/x', view: 'full', isMember: () => true });
+    expect(result?.complete).toBe(true);
+    expect(sm.getAgent(stored.id)).toBeDefined();
+    expect((sm.getAgent(stored.id) as Agent & { taskSummary?: string }).taskSummary).toBeUndefined();
+    expect((result?.agents[0] as Agent & { taskSummary?: string }).taskSummary).toBeUndefined();
+  });
+
+  it('a discarded short carried page keeps its seed epoch: a live change since that request survives the restarted drain', async () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'dashboard' });
+    connect(sm);
+    const rows = rowsDesc(700);
+    const target = rows[3];
+    sm.seedAgents([target]);
+    // Opened by the caller before its (short) request was sent.
+    const epoch = new AgentSeedEpoch(sm);
+    emit(sm, `agent.${target.id}.status`, { phase: 'stopped' });
+    flush(sm);
+    const server = fakeServer({ rows });
+    const runner = new AgentDrainRunner({ state: sm, fetchFn: server.fn });
+    const result = await runner.run({
+      url: '/x',
+      view: 'full',
+      isMember: () => true,
+      firstPage: { agents: rows.slice(0, 25), nextCursor: '25' },
+      epoch,
+    });
+    expect(server.urls[0].searchParams.has('cursor')).toBe(false);
+    expect(server.urls).toHaveLength(2);
+    expect(result?.complete).toBe(true);
+    expect(result?.agents).toHaveLength(700);
+    // The drained row (phase running) did not overwrite the live phase.
+    expect(sm.getAgent(target.id)?.phase).toBe('stopped');
+    expect(openEpochs(sm)).toBe(0);
   });
 
   it('waits for the live connection before opening the epoch', async () => {

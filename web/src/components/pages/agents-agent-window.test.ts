@@ -282,36 +282,65 @@ describe('scion-page-agents — agent list window', () => {
       expect(stateManager.isAgentSetComplete('full')).toBe(true);
     });
 
-    it('1,600 agents at page size 25 on a legacy server that honours limit end held and complete in five requests', async () => {
-      const fake: Fake = {
-        agents: Array.from({ length: 1600 }, (_, i) => makeAgent(i)),
-        requests: [],
-      };
-      // An old server: no sorted mode, but `limit` is honoured.
-      const legacy = (input: string | URL | Request, init?: RequestInit) => {
+    /** An old server: no sorted mode, but `limit` is honoured. */
+    const limitHonouringLegacy =
+      (fake: Fake) => (input: string | URL | Request, init?: RequestInit) => {
         const raw =
           typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
         const u = new URL(raw, 'http://localhost');
         for (const k of ['sort', 'dir', 'fit', 'stats', 'phase']) u.searchParams.delete(k);
         return fakeFetch(fake)(u.pathname + (u.search || ''), init);
       };
-      vi.stubGlobal('fetch', vi.fn(legacy));
+
+    it('1,600 agents at page size 25 on a legacy server that honours limit: the short answer is discarded, and four drain pages end held and complete', async () => {
+      const fake: Fake = {
+        agents: Array.from({ length: 1600 }, (_, i) => makeAgent(i)),
+        requests: [],
+      };
+      vi.stubGlobal('fetch', vi.fn(limitHonouringLegacy(fake)));
       const el = await mount();
       expect(query(fake.requests[0]).get('limit')).toBe('25');
-      // The 25-row answer, then four drain pages of 500 from its cursor.
-      expect(fake.requests.length).toBeLessThanOrEqual(5);
+      // The 25-row answer, then four drain pages of 500 from the start.
+      expect(fake.requests).toHaveLength(5);
       expect(fake.requests.slice(1).map((r) => query(r).get('cursor'))).toEqual([
-        '25',
-        '525',
-        '1025',
-        '1525',
+        null,
+        '500',
+        '1000',
+        '1500',
       ]);
+      expect(fake.requests.slice(1).every((r) => query(r).get('limit') === '500')).toBe(true);
       const win = internals(el).agentWindow;
       expect(win.state).toBe('held');
       expect(win.banner).toBeNull();
       expect(internals(el).agents).toHaveLength(1600);
+      expect(new Set(internals(el).agents.map((a) => a.id)).size).toBe(1600);
       expect(stateManager.isAgentSetComplete('full')).toBe(true);
       expect(text(el)).not.toContain('more exist');
+    });
+
+    it('2,100 agents at page size 25 on a legacy server that honours limit end capped in five requests with exactly the newest 2,000', async () => {
+      const fake: Fake = {
+        agents: Array.from({ length: 2100 }, (_, i) => makeAgent(i)),
+        requests: [],
+      };
+      vi.stubGlobal('fetch', vi.fn(limitHonouringLegacy(fake)));
+      const el = await mount();
+      expect(fake.requests).toHaveLength(5);
+      expect(fake.requests.slice(1).map((r) => query(r).get('cursor'))).toEqual([
+        null,
+        '500',
+        '1000',
+        '1500',
+      ]);
+      const win = internals(el).agentWindow;
+      expect(win.state).toBe('capped');
+      expect(win.banner?.kind).toBe('capped');
+      expect(internals(el).agents).toHaveLength(2000);
+      expect(internals(el).agents.map((a) => a.id)).toEqual(
+        fake.agents.slice(0, 2000).map((a) => a.id)
+      );
+      expect(stateManager.isAgentSetComplete('full')).toBe(false);
+      expect(text(el)).toContain('2,000 loaded (newest 2,000 checked), more exist');
     });
   });
 
