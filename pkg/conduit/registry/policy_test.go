@@ -91,3 +91,41 @@ func TestNew_Defaults(t *testing.T) {
 	assert.Equal(t, DefaultSessionStaleAfter, r.cfg.SessionStaleAfter)
 	assert.WithinDuration(t, time.Now(), r.now(), time.Minute)
 }
+
+// viewStore serves one fixed principal snapshot; every other Store method
+// panics via the nil embedded interface (they are not used here).
+type viewStore struct {
+	Store
+	ps PrincipalSessions
+}
+
+func (v viewStore) ListPrincipalSessions(context.Context, string, string) (PrincipalSessions, error) {
+	return v.ps, nil
+}
+
+func (v viewStore) ListPrincipalSessionsBySession(context.Context, string) (PrincipalSessions, bool, error) {
+	return v.ps, true, nil
+}
+
+func TestAdmission_RelayMissingFailsClosed(t *testing.T) {
+	// The FK makes a session without its relay row unrepresentable in the
+	// real store, so the defensive branch is exercised through a stub.
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	rec := SessionRecord{
+		SessionID: "s-1", PrincipalKind: PrincipalAgent, PrincipalID: "agent-1", ProjectID: "proj-1",
+		RelayInstanceID: "relay-1", RelayGeneration: 1, EndpointIncarnation: "inc-A",
+		ConnectionEpoch: 1, LastSeen: now,
+	}
+	ps := PrincipalSessions{PrincipalKind: PrincipalAgent, PrincipalID: "agent-1", CurrentEpoch: 1,
+		Sessions: []SessionView{{Session: rec, Relay: nil}}}
+	r := New(viewStore{ps: ps}, Config{Clock: ClockFunc(func() time.Time { return now })})
+	w := Want{ProjectID: "proj-1", Incarnation: "inc-A"}
+
+	d, err := r.Admission(context.Background(), "s-1", w)
+	assert.NoError(t, err)
+	assert.False(t, d.Admissible)
+	assert.Equal(t, ReasonRelayMissing, d.Reason)
+	recs, err := r.Eligible(context.Background(), PrincipalAgent, "agent-1", w, now)
+	assert.NoError(t, err)
+	assert.Empty(t, recs)
+}

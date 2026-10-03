@@ -443,33 +443,32 @@ func toSessionView(r *ent.ConduitSession) (registry.SessionView, error) {
 	return v, nil
 }
 
-// DeleteSessionsOfStaleRelays implements registry.Store. The delete is one
-// statement whose relay-staleness condition is a subquery, so a relay
-// cannot be judged stale and then have sessions it re-touched deleted by a
-// separate later statement. Relay rows are kept (generation monotonicity).
-func (s *ConduitRegistryStore) DeleteSessionsOfStaleRelays(ctx context.Context, staleBefore time.Time) (registry.ReapResult, error) {
-	staleBefore = staleBefore.UTC()
-	t, err := s.begin(ctx, false)
-	if err != nil {
-		return registry.ReapResult{}, err
-	}
-	defer t.rollback()
-	relays, err := t.client.RelayInstance.Query().
-		Where(relayinstance.LastSeenLT(staleBefore), relayinstance.HasSessions()).
-		Count(ctx)
-	if err != nil {
-		return registry.ReapResult{}, fmt.Errorf("conduit registry store: count stale relays: %w", err)
-	}
-	n, err := t.client.ConduitSession.Delete().
-		Where(conduitsession.HasRelayWith(relayinstance.LastSeenLT(staleBefore))).
+// DeleteSessionsOfStaleRelays implements registry.Store. It is a single
+// DELETE whose relay-staleness condition is a subquery, so a relay cannot be
+// judged stale and then have sessions it re-touched deleted by a separate
+// later statement, and the operation is write-first (no read-then-upgrade
+// on SQLite). Relay rows are kept (generation monotonicity).
+func (s *ConduitRegistryStore) DeleteSessionsOfStaleRelays(ctx context.Context, staleBefore time.Time) (int, error) {
+	n, err := s.client.ConduitSession.Delete().
+		Where(conduitsession.HasRelayWith(relayinstance.LastSeenLT(staleBefore.UTC()))).
 		Exec(ctx)
 	if err != nil {
-		return registry.ReapResult{}, fmt.Errorf("conduit registry store: reap sessions of stale relays: %w", err)
+		return 0, fmt.Errorf("conduit registry store: reap sessions of stale relays: %w", err)
 	}
-	if err := t.commit(); err != nil {
-		return registry.ReapResult{}, fmt.Errorf("conduit registry store: reap commit: %w", err)
+	return n, nil
+}
+
+// DeleteIdleRelays implements registry.Store: one DELETE of relay rows that
+// are stale and have no sessions. Because the row must have no sessions,
+// the ON DELETE CASCADE never fires from here.
+func (s *ConduitRegistryStore) DeleteIdleRelays(ctx context.Context, staleBefore time.Time) (int, error) {
+	n, err := s.client.RelayInstance.Delete().
+		Where(relayinstance.LastSeenLT(staleBefore.UTC()), relayinstance.Not(relayinstance.HasSessions())).
+		Exec(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("conduit registry store: prune idle relays: %w", err)
 	}
-	return registry.ReapResult{StaleRelays: relays, SessionsDeleted: n}, nil
+	return n, nil
 }
 
 // DeletePrincipalEpoch implements registry.Store.

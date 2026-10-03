@@ -78,6 +78,7 @@ func (ConduitSession) Fields() []ent.Field {
 			Default(false),
 		field.JSON("capabilities", json.RawMessage{}).
 			Default(json.RawMessage("{}")).
+			Annotations(entsql.Default("{}")).
 			Comment("Capabilities document (contracts §3); jsonb on Postgres, TEXT on SQLite"),
 		field.Time("connected_at").
 			Immutable(),
@@ -101,7 +102,8 @@ func (ConduitSession) Edges() []ent.Edge {
 // Indexes of the ConduitSession.
 func (ConduitSession) Indexes() []ent.Index {
 	return []ent.Index{
-		index.Fields("principal_kind", "principal_id", "last_seen"),
+		index.Fields("principal_kind", "principal_id", "last_seen").
+			Annotations(entsql.DescColumns("last_seen")),
 		index.Fields("relay_instance_id", "relay_generation"),
 	}
 }

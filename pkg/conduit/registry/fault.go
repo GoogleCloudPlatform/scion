@@ -32,6 +32,7 @@ const (
 	OpListPrincipalSessions            = "ListPrincipalSessions"
 	OpListPrincipalSessionsBySession   = "ListPrincipalSessionsBySession"
 	OpDeleteSessionsOfStaleRelays      = "DeleteSessionsOfStaleRelays"
+	OpDeleteIdleRelays                 = "DeleteIdleRelays"
 	OpDeletePrincipalEpoch             = "DeletePrincipalEpoch"
 )
 
@@ -135,11 +136,19 @@ func (f *FaultStore) ListPrincipalSessionsBySession(ctx context.Context, session
 }
 
 // DeleteSessionsOfStaleRelays implements Store.
-func (f *FaultStore) DeleteSessionsOfStaleRelays(ctx context.Context, staleBefore time.Time) (ReapResult, error) {
+func (f *FaultStore) DeleteSessionsOfStaleRelays(ctx context.Context, staleBefore time.Time) (int, error) {
 	if err := f.fault(ctx, OpDeleteSessionsOfStaleRelays); err != nil {
-		return ReapResult{}, err
+		return 0, err
 	}
 	return f.Inner.DeleteSessionsOfStaleRelays(ctx, staleBefore)
+}
+
+// DeleteIdleRelays implements Store.
+func (f *FaultStore) DeleteIdleRelays(ctx context.Context, staleBefore time.Time) (int, error) {
+	if err := f.fault(ctx, OpDeleteIdleRelays); err != nil {
+		return 0, err
+	}
+	return f.Inner.DeleteIdleRelays(ctx, staleBefore)
 }
 
 // DeletePrincipalEpoch implements Store.

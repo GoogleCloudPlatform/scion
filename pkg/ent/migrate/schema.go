@@ -615,7 +615,7 @@ var (
 		{Name: "exec_scope", Type: field.TypeString, Nullable: true},
 		{Name: "connection_epoch", Type: field.TypeInt64},
 		{Name: "draining", Type: field.TypeBool, Default: false},
-		{Name: "capabilities", Type: field.TypeJSON},
+		{Name: "capabilities", Type: field.TypeJSON, Default: "{}"},
 		{Name: "connected_at", Type: field.TypeTime},
 		{Name: "last_seen", Type: field.TypeTime},
 		{Name: "relay_instance_id", Type: field.TypeString},
@@ -638,6 +638,11 @@ var (
 				Name:    "conduitsession_principal_kind_principal_id_last_seen",
 				Unique:  false,
 				Columns: []*schema.Column{ConduitSessionsColumns[1], ConduitSessionsColumns[2], ConduitSessionsColumns[12]},
+				Annotation: &entsql.IndexAnnotation{
+					DescColumns: map[string]bool{
+						ConduitSessionsColumns[12].Name: true,
+					},
+				},
 			},
 			{
 				Name:    "conduitsession_relay_instance_id_relay_generation",
