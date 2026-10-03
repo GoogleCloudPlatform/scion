@@ -2068,8 +2068,8 @@ func TestProjectCreate_ExistingID_OwnerIdempotentSucceeds(t *testing.T) {
 
 // TestCreateProjectMembersGroup_OwnerNotInStore verifies that when the project
 // owner does not yet exist in the users table (e.g. legacy proxy auth on a
-// fresh Postgres deployment), the members group is still created without an
-// OwnerID rather than failing with an FK constraint violation.
+// fresh Postgres deployment), the members group is still created. The group
+// never carries an OwnerID (ptone/scion#2599), so there is no FK to violate.
 func TestCreateProjectMembersGroup_OwnerNotInStore(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -2087,8 +2087,8 @@ func TestCreateProjectMembersGroup_OwnerNotInStore(t *testing.T) {
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
-	// createProjectMembersGroup should not return an error even though
-	// the owner user does not exist. It should retry without OwnerID.
+	// createProjectMembersGroup must succeed even though the owner user
+	// does not exist.
 	srv.createProjectMembersGroup(ctx, project)
 
 	// The members group must still have been created.
@@ -2096,8 +2096,7 @@ func TestCreateProjectMembersGroup_OwnerNotInStore(t *testing.T) {
 	group, err := s.GetGroupBySlug(ctx, membersSlug)
 	require.NoError(t, err, "members group should have been created despite missing owner")
 	assert.Equal(t, project.ID, group.ProjectID)
-	// OwnerID should be empty because the referenced user did not exist.
-	assert.Empty(t, group.OwnerID, "group OwnerID should be empty when owner user is not in store")
+	assert.Empty(t, group.OwnerID, "members group never carries an OwnerID")
 }
 
 // =============================================================================
@@ -2224,7 +2223,7 @@ func TestCreateProject_WorktreePerAgent_StampsLabel(t *testing.T) {
 	assert.False(t, project.IsSharedWorkspace(), "project should not report as shared workspace")
 }
 
-func TestCreateProject_WorktreePerAgent_NonGit_NoLabel(t *testing.T) {
+func TestCreateProject_WorktreePerAgent_NonGit_Rejected(t *testing.T) {
 	srv, _ := testServer(t)
 
 	body := CreateProjectRequest{
@@ -2232,14 +2231,11 @@ func TestCreateProject_WorktreePerAgent_NonGit_NoLabel(t *testing.T) {
 		WorkspaceMode: "worktree-per-agent",
 	}
 
+	// Design #2703 §2.4: worktree-per-agent requires a git remote (it was
+	// silently ignored before).
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body)
-	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
-
-	var project store.Project
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
-
-	assert.Empty(t, project.Labels[store.LabelWorkspaceMode],
-		"worktree-per-agent label should not be set on non-git projects")
+	require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "requires a git remote")
 }
 
 func TestPopulateAgentConfig_SharedWorkspace_SetsWorkspaceNotClone(t *testing.T) {

@@ -47,9 +47,9 @@ type LifecycleManager struct {
 	AgentHome string
 
 	// EnforcePrivilegeDrop selects privilege-drop-enforced mode (set from
-	// InitRunOptions.RequirePrivilegeDrop). false (the zero value) runs
-	// every hook script via the calling process's own credentials, for
-	// every unenforced caller.
+	// InitRunOptions.RequirePrivilegeDrop — substrate-serve only). false
+	// (the zero value) runs every hook script via the calling process's
+	// own credentials, on every other runtime.
 	//
 	// true switches executeScript to the fstat-based root/drop decision
 	// (DecideExecAsRoot): a script runs as root only if it and every
@@ -76,10 +76,15 @@ type LifecycleManager struct {
 	WorkloadUsername string
 
 	// WorkloadWorkingDir is the working directory a dropped hook script
-	// runs in, matching the harness child's own working directory when a
-	// caller sets one. Empty (the default for every current caller) leaves
-	// the dropped hook's cwd unset, inheriting init's own. Ignored when
-	// EnforcePrivilegeDrop is false.
+	// runs in, matching the harness child's own resolved cwd
+	// (InitRunOptions.WorkingDir / ResolveWorkingDir, threaded into
+	// supervisor.Config.WorkingDir). Empty leaves the dropped hook's cwd
+	// unset, inheriting init's own — RunInit sets this only after the
+	// working directory has actually been resolved, so a pre-start hook
+	// (which runs before that resolution) will see it empty even in
+	// enforced mode; every later event (post-start, pre-stop, session-end)
+	// runs after it has been set. Ignored when EnforcePrivilegeDrop is
+	// false.
 	WorkloadWorkingDir string
 }
 
@@ -282,10 +287,10 @@ func (m *LifecycleManager) skipRefusedEntry(hooksDir, scriptPath string, err err
 }
 
 // executeScript runs a hook script for eventName. When EnforcePrivilegeDrop
-// is false (the zero value), every unenforced caller runs every hook script
-// via the calling process's own credentials, with no ownership check at
-// all (eventName is unused on this path). See executeScriptEnforced for the
-// privilege-drop-enforced path.
+// is false (the zero value), every runtime other than substrate-serve runs
+// every hook script via the calling process's own credentials, with no
+// ownership check at all (eventName is unused on this path). See
+// executeScriptEnforced for the privilege-drop-enforced path.
 func (m *LifecycleManager) executeScript(path, eventName string) error {
 	if m.EnforcePrivilegeDrop {
 		return m.executeScriptEnforced(path, eventName)
@@ -424,7 +429,7 @@ func runEnforcedCmd(cmd *exec.Cmd) error {
 // branches: $0, as the shebang interpreter sees it, is
 // "/proc/self/fd/<n>" (execViaFd's own fexecve-equivalent construction), not
 // this path — a script relying on `dirname "$0"` would otherwise silently
-// break only under this enforced path.
+// break only on substrate. See §8.1 of the substrate runtime design doc.
 //
 // Returns an error only for the cases that must fail closed rather than
 // silently fall back to running as root: the harness-provision wrapper
@@ -456,8 +461,9 @@ func (m *LifecycleManager) buildEnforcedCmd(scriptFile *os.File, path, eventName
 			// the process that runs from that fd never holds root. This
 			// closes the same hole whether $HOME is freshly cloned or,
 			// under a future resume/re-bootstrap over a persisted $HOME
-			// already workload-written: the provisioner never gets root
-			// privilege to matter either way.
+			// (see .design/kubernetes/substrate-runtime.md §11), already
+			// workload-written: the provisioner never gets root privilege
+			// to matter either way.
 			return m.buildDroppedProvisionCmd(cmd, path)
 		}
 		// Every other root-eligible hook — pre-start (in practice, a
@@ -465,12 +471,14 @@ func (m *LifecycleManager) buildEnforcedCmd(scriptFile *os.File, path, eventName
 		// — gets the same hardened, allowlisted environment
 		// hardenedRootHookEnv builds: HOME=/root, never AgentHome, which is
 		// workload-writable the instant a re-bootstrap runs a pre-start hook
-		// over an already-workload-touched $HOME. A hook that genuinely needs
-		// to find what was staged under AgentHome reads SCION_AGENT_HOME
-		// instead of relying on HOME for it. Unlike the provisioner above,
-		// there is no fixed-name carve-out here: every other pre-start hook
-		// runs as root under this same hardened environment regardless of
-		// whether $HOME has ever been workload-touched.
+		// over an already-workload-touched $HOME (see
+		// .design/kubernetes/substrate-runtime.md §11). A hook that
+		// genuinely needs to find what was staged under AgentHome reads
+		// SCION_AGENT_HOME instead of relying on HOME for it. Unlike the
+		// provisioner above, there is no fixed-name carve-out here: every
+		// other pre-start hook runs as root under this same hardened
+		// environment regardless of whether $HOME has ever been
+		// workload-touched.
 		cmd.Env = m.hardenedRootHookEnv()
 		// Never inherit init's cwd. Nothing in sciontool ever chdirs, so that
 		// cwd is whatever the image sets (e.g. Dockerfile WORKDIR
@@ -590,9 +598,9 @@ func (m *LifecycleManager) droppedHookEnv() []string {
 // rootHookEnvAllowlist is the complete, closed set of variable NAMES
 // hardenedRootHookEnv keeps from the inherited process environment —
 // everything else is dropped outright, not merely overridden. init's own
-// environment carries every key an enforcing caller's bootstrap applied via
+// environment carries every key substrate-serve's bootstrap applied via
 // os.Setenv (harness env, operator template/cfg env, resolved auth and
-// secret env), any
+// secret env — pkg/runtime/substrate_bootstrap.go's buildBootstrapEnv), any
 // of which could in principle be an interpreter or loader redirector —
 // PYTHONPATH, PYTHONSTARTUP, BASH_ENV, ENV, LD_PRELOAD, LD_LIBRARY_PATH,
 // NODE_OPTIONS, PERL5LIB/PERL5OPT, RUBYLIB/RUBYOPT, XDG_CONFIG_HOME (git's

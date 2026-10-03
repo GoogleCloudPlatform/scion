@@ -489,6 +489,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	case api.AgentActionRestart:
 		newPhase = string(state.PhaseRunning)
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
+			// Refuse before the stop leg: otherwise a broker without
+			// the empty-per-agent capability would have the agent
+			// stopped and then the start refused (design #2703 D3).
+			if !s.requireEmptyPerAgentBrokerCapabilityForAgent(ctx, w, agent) {
+				return
+			}
 			// Restart is implemented as stop + start so that env vars
 			// (API keys, secrets) are re-resolved from Hub storage.
 			// Stop errors are tolerated: the container may already be
@@ -533,6 +539,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 
 	// If dispatch failed, return error
 	if dispatchErr != nil {
+		if writeEmptyPerAgentCapabilityError(w, dispatchErr) {
+			return
+		}
 		RuntimeError(w, "Failed to dispatch to runtime broker: "+dispatchErr.Error())
 		return
 	}

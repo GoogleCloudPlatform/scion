@@ -64,12 +64,9 @@ const BANNED_PATTERN =
  * them to `time.ts`: the four native-chat formatters (`chat-message.ts`,
  * `chat-date-divider.ts`, `chat-interagent-marker.ts`,
  * `chat-system-line.ts`) and `access-boundary-schedule-editor.ts` (its
- * `viewerTimeZone` getter). `admin-role-bindings.ts` stays listed: that
- * issue fixed only its `datetime-local` parsing (now `parseWallClock`), not
- * its own private relative-time formatter, which tz-refactor task 20
- * migrates.
- * `profile-settings.ts` stays listed for the "Agent timezone" section's
- * zone check, which tz-refactor task 13 removes along with the section.
+ * `viewerTimeZone` getter). `profile-settings.ts` stays listed for the
+ * "Agent timezone" section's zone check, which tz-refactor task 13 removes
+ * along with the section.
  *
  * tz-refactor task 19 removed the list pages, `components/shared/*list*`
  * files and every file with a private relative-time helper outside the
@@ -80,37 +77,21 @@ const BANNED_PATTERN =
  * `scheduled-event-list.ts`, `secret-list.ts`, `subscription-manager.ts` and
  * `token-list.ts`.
  *
+ * tz-refactor task 20 removed the admin, access-boundary and role-binding
+ * views: `admin-access-boundaries.ts`, `admin-access-boundary-detail.ts`,
+ * `admin-experiments.ts`, `admin-maintenance.ts`, `admin-quotas.ts`,
+ * `admin-role-bindings.ts`, `admin-role-detail.ts`, `admin-roles.ts`,
+ * `admin-scheduler.ts`, `admin-server-config.ts`, `admin-users.ts`,
+ * `metrics-dashboard.ts`, `access-boundary-audit-timeline.ts`,
+ * `access-boundary-definition-summary.ts`,
+ * `access-boundary-impact-summary.ts`, `access-boundary-preview.ts` and
+ * `role-binding-utils.ts`.
+ *
  * The end state (P3c, tz-refactor task 21) is an empty list and the test
  * below deletes itself along with it.
  */
 const ALLOWLIST: readonly string[] = [
-  'client/chat-palette-data.ts',
-  'components/pages/admin-access-boundaries.ts',
-  'components/pages/admin-access-boundary-detail.ts',
-  'components/pages/admin-experiments.ts',
-  'components/pages/admin-maintenance.ts',
-  'components/pages/admin-quotas.ts',
-  'components/pages/admin-role-bindings.ts',
-  'components/pages/admin-role-detail.ts',
-  'components/pages/admin-roles.ts',
-  'components/pages/admin-scheduler.ts',
-  'components/pages/admin-server-config.ts',
-  'components/pages/admin-users.ts',
-  'components/pages/metrics-dashboard.ts',
   'components/pages/profile-settings.ts',
-  'components/shared/access-boundary-audit-timeline.ts',
-  'components/shared/access-boundary-definition-summary.ts',
-  'components/shared/access-boundary-impact-summary.ts',
-  'components/shared/access-boundary-preview.ts',
-  'components/shared/agent-log-viewer.ts',
-  'components/shared/agent-message-viewer.ts',
-  'components/shared/chat/chat-members.ts',
-  'components/shared/chat/chat-search.ts',
-  'components/shared/chat/chat-space-rail.ts',
-  'components/shared/chat/chat-thread.ts',
-  'components/shared/file-browser.ts',
-  'components/shared/role-binding-utils.ts',
-  'components/shared/unified-log-viewer.ts',
 ];
 
 /** Recursively lists non-test `.ts` files under `dir`, relative to `SRC_ROOT`. */

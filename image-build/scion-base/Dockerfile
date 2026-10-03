@@ -39,6 +39,7 @@ COPY harnesses/ ./harnesses/
 COPY pkg/ ./pkg/
 COPY proto/ ./proto/
 COPY resources/ ./resources/
+COPY third_party/ ./third_party/
 COPY web/*.go ./web/
 
 # Build with version info injected via ldflags

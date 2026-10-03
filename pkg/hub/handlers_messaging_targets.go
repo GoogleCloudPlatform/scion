@@ -15,6 +15,8 @@
 package hub
 
 import (
+	"context"
+	"errors"
 	"net/http"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -92,20 +94,13 @@ func (s *Server) handleMessagingTargetsResolve(w http.ResponseWriter, r *http.Re
 	}
 
 	// Resolve the agent within the target project by ID or slug.
-	var targetAgent *store.Agent
-	agentResult, err := s.store.ListAgents(ctx, store.AgentFilter{
-		ProjectID: targetProject.ID,
-	}, store.ListOptions{})
+	targetAgent, err := s.findLiveProjectAgent(ctx, targetProject.ID, agentRef)
 	if err != nil {
-		NotFound(w, "Target")
+		// A lookup failure is not evidence that the target does not exist.
+		s.messageLog.Error("Failed to look up messaging target agent",
+			"project_id", targetProject.ID, "agent_ref", agentRef, "error", err)
+		InternalError(w)
 		return
-	}
-
-	for i := range agentResult.Items {
-		if agentResult.Items[i].ID == agentRef || agentResult.Items[i].Slug == agentRef {
-			targetAgent = &agentResult.Items[i]
-			break
-		}
 	}
 	if targetAgent == nil {
 		// Privacy-preserving: indistinguishable from nonexistent.
@@ -187,4 +182,26 @@ func (w *peerAgentIdentity) TokenID() string { return "" }
 // from a hub-persisted store.Agent record, not from a JWT.
 func (w *peerAgentIdentity) localAncestryProvenance() ancestryProvenance {
 	return ancestryProvenanceStoreAgent
+}
+
+// findLiveProjectAgent resolves ref as an agent slug, then as an agent ID,
+// within projectID. Slug matching is exact and case-sensitive. An ID is
+// parsed as a UUID, so any spelling uuid.Parse accepts (uppercase,
+// urn:uuid:, braced) resolves to the same agent. It returns
+// (nil, nil) when no live (non-soft-deleted) agent in the project matches,
+// and an error only when the lookup itself failed.
+func (s *Server) findLiveProjectAgent(ctx context.Context, projectID, ref string) (*store.Agent, error) {
+	agent, err := s.resolveProjectAgent(ctx, projectID, ref)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	// The slug lookup excludes soft-deleted agents; the ID lookup does not.
+	// A (nil, nil) result from the store is treated as not found.
+	if agent == nil || !agent.DeletedAt.IsZero() {
+		return nil, nil
+	}
+	return agent, nil
 }

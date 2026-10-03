@@ -687,7 +687,7 @@ func TestBuildEnforcedCmd_AsRootPostWorkloadEvent(t *testing.T) {
 // TestHardenedRootHookEnv_DropsInterpreterAndLoaderRedirectors proves the
 // hardened root env is built from an allowlist, not inherited wholesale:
 // even when init's own process environment carries interpreter/loader
-// redirector variables (which an enforcing caller's bootstrap can set from
+// redirector variables (which substrate-serve's bootstrap can set from
 // harness/operator/auth env via os.Setenv), none of them reach a root hook
 // at a post-pre-start event. HOME/PATH/PYTHONNOUSERSITE alone would not
 // stop a tool that reads one of these directly instead of resolving through

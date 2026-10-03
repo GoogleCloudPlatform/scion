@@ -99,7 +99,10 @@ func (s *Server) handleProjectCacheRefresh(w http.ResponseWriter, r *http.Reques
 
 	ctx := r.Context()
 
-	// Hub-managed projects don't need cache refresh — they are the source of truth
+	// Hub-managed projects don't need cache refresh — they are the source of truth.
+	// Empty-per-agent projects (design #2703) take this branch too: their
+	// agents' directories are private and broker-local, so there is no
+	// remote project workspace to cache (P5 hides the Files tab).
 	if project.GitRemote == "" && !s.isLinkedProject(ctx, project) {
 		Conflict(w, "Cache refresh is only applicable to linked projects with remote workspaces")
 		return

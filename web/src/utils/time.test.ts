@@ -432,6 +432,55 @@ describe('formatInstant', () => {
     setPreferredTimeZone('UTC');
     expect(formatInstant('2026-09-23T14:15:05Z', 'time-seconds')).toBe('14:15:05');
   });
+
+  it('time-millis style includes milliseconds, midnight as 00:00:00.000', () => {
+    setPreferredTimeZone('Asia/Tokyo');
+    // 15:00:00.000Z is midnight the next day in Tokyo (+09:00).
+    expect(formatInstant('2026-09-23T15:00:00.000Z', 'time-millis')).toBe('00:00:00.000');
+    expect(formatInstant('2026-09-23T15:04:05.007Z', 'time-millis')).toBe('00:04:05.007');
+  });
+});
+
+describe('formatInstant formatter reuse (ptone/scion#2382)', () => {
+  afterEach(() => {
+    setPreferredTimeZone('');
+    vi.restoreAllMocks();
+  });
+
+  it('builds a style/zone formatter once and reuses it on later calls', () => {
+    setPreferredTimeZone('Asia/Kathmandu');
+    // Warm this style/zone pair; it may or may not already be cached.
+    formatInstant('2026-01-15T00:00:00Z', 'datetime-full');
+    const ctorSpy = vi.spyOn(Intl, 'DateTimeFormat');
+    for (let i = 0; i < 100; i++) {
+      formatInstant('2026-01-15T00:00:00Z', 'datetime-full');
+    }
+    expect(ctorSpy).not.toHaveBeenCalled();
+  });
+
+  it('with no preference, resolves the browser zone once per synchronous task', async () => {
+    formatInstant('2026-01-15T00:00:00Z', 'time');
+    await Promise.resolve();
+    const ctorSpy = vi.spyOn(Intl, 'DateTimeFormat');
+    for (let i = 0; i < 100; i++) {
+      formatInstant('2026-01-15T00:00:00Z', 'time');
+    }
+    expect(ctorSpy).toHaveBeenCalledTimes(1);
+    // The held value is dropped once the task ends, so a later task (a later
+    // render) resolves the browser zone again.
+    await Promise.resolve();
+    formatInstant('2026-01-15T00:00:00Z', 'time');
+    expect(ctorSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('a zone change selects the new zone formatter, not the cached one', () => {
+    setPreferredTimeZone('Asia/Tokyo');
+    expect(formatInstant('2026-01-15T15:00:00Z', 'time')).toBe('00:00');
+    setPreferredTimeZone('America/New_York');
+    expect(formatInstant('2026-01-15T15:00:00Z', 'time')).toBe('10:00');
+    setPreferredTimeZone('Asia/Tokyo');
+    expect(formatInstant('2026-01-15T15:00:00Z', 'time')).toBe('00:00');
+  });
 });
 
 describe('formatInstantWithZone (review R2-4)', () => {

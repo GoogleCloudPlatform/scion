@@ -43,8 +43,8 @@ func createLoggableAgent(t *testing.T, srv *Server, projectID string) string {
 }
 
 // TestHandleAgentLogs_RuntimeLogsUnsupported_Passthrough: a broker
-// 501/runtime_logs_unsupported error (a runtime's ErrLogsNotSupported,
-// relayed as a *brokerStatusError) reaches the caller
+// 501/runtime_logs_unsupported error (the substrate runtime's
+// ErrLogsNotSupported, relayed as a *brokerStatusError) reaches the caller
 // with the same status and code and the hub's own fixed message — never the
 // broker-supplied text. The broker's body here deliberately carries a
 // hostile, namespace-like string in its message to prove the hub does not
@@ -80,7 +80,7 @@ func TestHandleAgentLogs_RuntimeLogsUnsupported_Passthrough(t *testing.T) {
 
 // TestHandleAgentLogs_SameStatusDifferentCode_UnchangedPath: a broker error
 // with the same 501 status but a different code must not be mistaken for
-// the logs-unsupported sentinel — it keeps the generic 502 path.
+// the substrate sentinel — it keeps the generic 502 path.
 func TestHandleAgentLogs_SameStatusDifferentCode_UnchangedPath(t *testing.T) {
 	disp := &createAgentDispatcher{
 		createPhase: string(state.PhaseRunning),
