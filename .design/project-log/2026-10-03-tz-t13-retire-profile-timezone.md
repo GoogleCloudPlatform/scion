@@ -81,5 +81,9 @@ Three Lows fixed: the release note and Migration bullet now say a copied
 `agent_defaults` row becomes admin-managed; the seed-sync strip of a seeded
 `profiles` row is declared as a deviation and pinned in the two-boot test;
 the file-tier warning for an empty value says it is ignored instead of
-removed. Rebased on upstream aed39948 and re-run under TZ=UTC, Asia/Tokyo
+removed. Rebased on upstream 3b38ad41 and re-run under TZ=UTC, Asia/Tokyo
 and Asia/Kathmandu (pkg/config, cmd, and targeted pkg/hub).
+
+## Review round 2
+
+Clean apart from one Low (the base named in the round 1 note), fixed here.
