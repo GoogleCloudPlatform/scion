@@ -29,6 +29,8 @@ import type { Agent, Capabilities, PageData } from '../../shared/types.js';
 import { resetHubProjectCapabilitiesCache } from '../../client/hub-capabilities.js';
 import { stateManager } from '../../client/state.js';
 import { PROJECT_AGENTS_FIT_THRESHOLD } from '../../client/agent-list-window.js';
+import { AgentDrainRunner } from '../../client/agent-drain.js';
+import { holdable } from './__fixtures__/global-agents-endpoint.js';
 
 /**
  * happy-dom has no EventSource; setScope opens one. It opens on the next
@@ -205,6 +207,10 @@ type TestEl = HTMLElement & {
 async function createComponent(projectId: string): Promise<TestEl> {
   const el = document.createElement('scion-page-project-detail') as TestEl;
   el.projectId = projectId;
+  // Drain retries without a delay.
+  (el as unknown as { drainRunner: AgentDrainRunner }).drainRunner = new AgentDrainRunner({
+    retryDelayMs: 0,
+  });
   el.pageData = {
     path: `/projects/${projectId}`,
     title: 'Project',
@@ -3210,6 +3216,257 @@ describe('project-detail — agent list window', () => {
       await new Promise((r) => setTimeout(r, 10));
       await el.updateComplete;
       expect(el.shadowRoot?.textContent).toContain('No agents match the current filter');
+    });
+  });
+
+  describe('a view change while a request is in flight', () => {
+    const isProjectAgents = (projectId: string) => (u: URL) =>
+      u.pathname === `/api/v1/projects/${projectId}/agents`;
+
+    function setup(projectId: string, count: number) {
+      localStorage.setItem('scion-view-project-agents', 'list');
+      localStorage.setItem(
+        `scion-sort-project-agents-${projectId}`,
+        JSON.stringify({ field: 'updated', dir: 'desc' })
+      );
+      const agents = Array.from({ length: count }, (_, i) =>
+        makeAgent(i, { projectId, phase: i % 3 === 0 ? 'stopped' : 'running' })
+      );
+      const requests: AgentsRequest[] = [];
+      const h = holdable(
+        createRealisticFetchHandler({
+          projectId,
+          projectCaps: { actions: ['read'] },
+          agents,
+          requests,
+        }),
+        isProjectAgents(projectId)
+      );
+      vi.stubGlobal('fetch', vi.fn(h.fn));
+      return { agents, h };
+    }
+
+    const idle = async (el: TestEl) => {
+      await vi.waitFor(() => expect(internals(el).agentsLoading).toBe(false));
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+    };
+
+    for (const change of ['phase', 'dir'] as const) {
+      it(`a ${change} change during the first load supersedes it and loads the new view`, async () => {
+        const projectId = `p-first-${change}`;
+        const { agents, h } = setup(projectId, 60);
+        h.hold();
+        const el = await createComponent(projectId);
+        expect(h.sent).toHaveLength(1);
+        if (change === 'phase') internals(el).setPhaseFilter('stopped');
+        else internals(el).toggleSort('updated');
+        h.release();
+        await idle(el);
+
+        expect(h.sent[0].signal?.aborted).toBe(true);
+        expect(h.sent).toHaveLength(2);
+        const q = new URL(h.sent[1].url, 'http://x').searchParams;
+        if (change === 'phase') expect(q.get('phase')).toBe('stopped');
+        else expect(q.get('dir')).toBe('asc');
+        const win = internals(el).agentWindow;
+        expect(win.state).toBe('paged');
+        const dir = change === 'dir' ? 1 : -1;
+        const expected = agents
+          .filter((a) => change !== 'phase' || a.phase === 'stopped')
+          .sort((a, b) => dir * (a.updated ?? '').localeCompare(b.updated ?? ''))
+          .slice(0, 25)
+          .map((a) => a.id);
+        expect(win.items.map((a) => a.id)).toEqual(expected);
+      });
+    }
+
+    it('A to B to A while paged: the B request is aborted and the A page stays, with no request', async () => {
+      const projectId = 'p-a-b-a';
+      const { h } = setup(projectId, 60);
+      const el = await createComponent(projectId);
+      const win = internals(el).agentWindow;
+      expect(win.state).toBe('paged');
+      const before = win.items.map((a) => a.id);
+      h.hold();
+      internals(el).toggleSort('updated'); // desc to asc
+      await vi.waitFor(() => expect(h.sent).toHaveLength(2));
+      internals(el).toggleSort('updated'); // back to desc
+      h.release();
+      await idle(el);
+
+      expect(h.sent[1].signal?.aborted).toBe(true);
+      expect(h.sent).toHaveLength(2);
+      expect(win.state).toBe('paged');
+      expect(win.items.map((a) => a.id)).toEqual(before);
+    });
+
+    it('a switch to name sort during the first load drains the set instead of dead-ending', async () => {
+      const projectId = 'p-first-name';
+      const { h } = setup(projectId, 60);
+      h.hold();
+      const el = await createComponent(projectId);
+      expect(h.sent).toHaveLength(1);
+      internals(el).toggleSort('name');
+      h.release();
+      await idle(el);
+
+      expect(h.sent[0].signal?.aborted).toBe(true);
+      expect(h.sent).toHaveLength(2);
+      expect(new URL(h.sent[1].url, 'http://x').searchParams.has('sort')).toBe(false);
+      expect(internals(el).agentWindow.state).toBe('small');
+      expect(internals(el).agentWindow.items).toHaveLength(25);
+      expect(el.shadowRoot?.textContent).not.toContain('Could not load every agent');
+    });
+
+    for (const change of ['dir', 'phase', 'page size'] as const) {
+      it(`a ${change} change on page 2 lands on page 0 with no cursor`, async () => {
+        const projectId = `p-reset-${change.replace(' ', '-')}`;
+        const { h } = setup(projectId, 60);
+        const el = await createComponent(projectId);
+        const win = internals(el).agentWindow;
+        expect(win.state).toBe('paged');
+        await win.next();
+        await win.next();
+        expect(win.pageIndex).toBe(2);
+        expect((win as unknown as { rangeStart: number }).rangeStart).toBe(50);
+
+        if (change === 'dir') internals(el).toggleSort('updated');
+        else if (change === 'phase') internals(el).setPhaseFilter('running');
+        else internals(el).onPagerSizeChange(50);
+        await idle(el);
+
+        expect(win.pageIndex).toBe(0);
+        expect((win as unknown as { rangeStart: number }).rangeStart).toBe(0);
+        expect(new URL(h.sent.at(-1)!.url, 'http://x').searchParams.has('cursor')).toBe(false);
+      });
+    }
+  });
+
+  describe('a scope switch during a drain', () => {
+    it('aborts the page fetch and sends no further page request', async () => {
+      const projectId = 'p-scope-drain';
+      localStorage.setItem('scion-view-project-agents', 'graph');
+      const agents = Array.from({ length: 2001 }, (_, i) => makeAgent(i, { projectId }));
+      const requests: AgentsRequest[] = [];
+      const inner = createRealisticFetchHandler({
+        projectId,
+        projectCaps: { actions: ['read'] },
+        agents,
+        requests,
+      });
+      const legacy: Array<{ url: string; signal: AbortSignal | undefined }> = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: string | URL | Request, init?: RequestInit) => {
+          const raw =
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          const u = new URL(raw, 'http://localhost');
+          if (u.pathname === `/api/v1/projects/${projectId}/agents`) {
+            legacy.push({ url: raw, signal: init?.signal ?? undefined });
+            // The page is navigated away while page 2 is in flight.
+            if (legacy.length === 2) stateManager.setScope({ type: 'brokers-list' });
+          }
+          return inner(input, init);
+        })
+      );
+      const el = await createComponent(projectId);
+      await vi.waitFor(() => expect(internals(el).agentsLoading).toBe(false));
+      await new Promise((r) => setTimeout(r, 50));
+      expect(legacy).toHaveLength(2);
+      expect(legacy[1].signal?.aborted).toBe(true);
+      expect(new URL(legacy[1].url, 'http://x').searchParams.get('cursor')).toBe('500');
+    });
+  });
+
+  describe('capped stats', () => {
+    it('a capped set marks the Agents and Running stats as incomplete', async () => {
+      const projectId = 'p-capped-stats';
+      localStorage.setItem('scion-view-project-agents', 'graph');
+      const agents = Array.from({ length: 2001 }, (_, i) =>
+        makeAgent(i, { projectId, phase: i % 2 === 0 ? 'running' : 'stopped' })
+      );
+      const requests: AgentsRequest[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+          })
+        )
+      );
+      const el = await createComponent(projectId);
+      await vi.waitFor(() => expect(internals(el).agentWindow.state).toBe('capped'));
+      await el.updateComplete;
+      const stats = Array.from(el.shadowRoot!.querySelectorAll('.stat')).map((n) =>
+        (n.textContent ?? '').replace(/\s+/g, ' ').trim()
+      );
+      expect(stats[0]).toBe('Agents 2,000loaded (newest 2,000 checked), more exist');
+      expect(stats[1]).toBe('Running 1,000among loaded (newest 2,000 checked), more exist');
+    });
+
+    it('a complete set shows plain formatted stats', async () => {
+      const projectId = 'p-plain-stats';
+      localStorage.setItem('scion-view-project-agents', 'graph');
+      const agents = Array.from({ length: 1200 }, (_, i) => makeAgent(i, { projectId }));
+      const requests: AgentsRequest[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+          })
+        )
+      );
+      const el = await createComponent(projectId);
+      await vi.waitFor(() => expect(internals(el).agentWindow.state).toBe('held'));
+      await el.updateComplete;
+      const stats = Array.from(el.shadowRoot!.querySelectorAll('.stat')).map((n) =>
+        (n.textContent ?? '').replace(/\s+/g, ' ').trim()
+      );
+      expect(stats[0]).toBe('Agents 1,200');
+      expect(stats[1]).toBe('Running 1,200');
+      expect(el.shadowRoot!.querySelector('.stat-incomplete')).toBeNull();
+    });
+  });
+
+  describe('full-view pages replace stored agents', () => {
+    it('a field missing from a later full-view page is gone from the store', async () => {
+      const projectId = 'p-replace';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      let agents = Array.from({ length: 60 }, (_, i) =>
+        makeAgent(i, { projectId, taskSummary: 'old task' })
+      );
+      const requests: AgentsRequest[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: string | URL | Request, init?: RequestInit) =>
+          createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+          })(input, init)
+        )
+      );
+      const el = await createComponent(projectId);
+      const win = internals(el).agentWindow;
+      expect(win.state).toBe('paged');
+      const id = win.items[0].id;
+      expect(stateManager.getAgent(id)?.taskSummary).toBe('old task');
+      agents = agents.map((a) => {
+        const { taskSummary: _dropped, ...rest } = a;
+        return rest as Agent;
+      });
+      await win.refresh();
+      expect(stateManager.getAgent(id)).toBeDefined();
+      expect(stateManager.getAgent(id)?.taskSummary).toBeUndefined();
     });
   });
 });
