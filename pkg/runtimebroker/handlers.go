@@ -4411,9 +4411,10 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, strict bool)
 }
 
 // writeSavedProfileUnresolved writes errSavedProfileUnresolved as a
-// retryable 503: the agent's runtime is not available on this broker until
-// its profile resolves again.
+// retryable 503 (runtime_unavailable, Retry-After: 30): the agent's runtime
+// is not available on this broker until its profile resolves again.
 func writeSavedProfileUnresolved(w http.ResponseWriter, err error) {
+	w.Header().Set("Retry-After", "30")
 	RuntimeUnavailable(w, err.Error()+"; the agent's runtime is not available on this broker, retry once its profile is configured")
 }
 

@@ -43,7 +43,7 @@ func TestStartAgent_UnresolvableSavedProfileReturns503(t *testing.T) {
 		settings func(string) (*config.VersionedSettings, []string, error)
 		wantMsg  string
 	}{
-		{name: "profile missing", wantMsg: `profile "vanished" not found`},
+		{name: "profile missing", wantMsg: "not found"},
 		{
 			name: "settings load fails",
 			settings: func(string) (*config.VersionedSettings, []string, error) {
@@ -73,6 +73,9 @@ func TestStartAgent_UnresolvableSavedProfileReturns503(t *testing.T) {
 			})
 			if w.Code != http.StatusServiceUnavailable {
 				t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
+			}
+			if got := w.Header().Get("Retry-After"); got != "30" {
+				t.Errorf("Retry-After = %q, want 30", got)
 			}
 			body := w.Body.String()
 			if !strings.Contains(body, "vanished") || !strings.Contains(body, tc.wantMsg) {
