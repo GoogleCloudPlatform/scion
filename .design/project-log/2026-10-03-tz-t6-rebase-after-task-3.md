@@ -71,3 +71,23 @@ CLI time zones).
   and the targeted `pkg/hub` tests (adding `AppliedConfigTZCleanup` and
   `Maintenance`, 67 passed). Build, vet, gofmt and scoped golangci-lint
   are clean.
+
+## Addendum: upstream review comments on GoogleCloudPlatform/scion#2403
+
+- The automated reviewer claimed that pre-creating the snapshot temp file
+  makes `VACUUM INTO` fail. Declined, because the claim is false:
+  - SQLite rejects an existing target only when it is non-empty, and the
+    file is created empty (O_EXCL, 0600).
+  - A runtime check confirmed this on modernc.org/sqlite (the hub's driver)
+    and on mattn/go-sqlite3.
+  - The suggested stat-then-chmod alternative would add a race on the
+    in-progress guard and leave the snapshot world-readable until the
+    chmod.
+  - A short code comment now records why the empty target is valid.
+- Accepted: the background stored-timestamp check now recovers from a
+  panic and logs it with `slog.Error`. A new test covers this.
+- A review nit put each startup-check test back under its own doc comment.
+- Tests pass under both TZ=Asia/Tokyo and TZ=Asia/Kathmandu: the full
+  `pkg/store/entadapter` package, the targeted `cmd` tests, and the targeted
+  `pkg/hub` tests (53 passed). Build, vet, gofmt and scoped golangci-lint
+  are clean.
