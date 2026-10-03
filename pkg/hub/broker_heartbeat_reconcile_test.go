@@ -812,3 +812,48 @@ func TestLifecycleOpTracker(t *testing.T) {
 	assert.False(t, tr.active("a"))
 	tr.begin("")() // no-op
 }
+
+// TestHeartbeat_NoListingKeepsAgentStateAndBrokerOnline: a broker whose agent
+// listing did not finish in time sends a heartbeat with no agent data and
+// every target marked incomplete. The heartbeat marks the broker online
+// again (after a control-channel loss marked it offline), changes no agent,
+// and does not let a missing-container clock that has already run out
+// conclude.
+func TestHeartbeat_NoListingKeepsAgentStateAndBrokerOnline(t *testing.T) {
+	f := newReconcileFixture(t)
+	ctx := context.Background()
+	reported := f.addAgent("reported", "running", "working")
+	omitted := f.addAgent("omitted", "running", "working")
+
+	// A complete heartbeat that omits one agent starts its clock; run the
+	// clock out so the next complete heartbeat would conclude it.
+	f.heartbeat(completeInventory(), reported.Slug)
+	require.True(t, f.hasClock(omitted.ID))
+	f.expireClock(omitted.ID)
+	before := map[string]*store.Agent{reported.ID: f.get(reported.ID), omitted.ID: f.get(omitted.ID)}
+
+	require.NoError(t, f.s.UpdateRuntimeBrokerHeartbeat(ctx, f.brokerID, store.BrokerStatusOffline))
+
+	f.send(brokerHeartbeatRequest{
+		Status: store.BrokerStatusOnline,
+		Inventory: &brokerInventory{Targets: []brokerInventoryTarget{
+			{ID: "docker", Runtime: "docker", Complete: false},
+			{ID: k8sTargetB, Runtime: "kubernetes", Complete: false},
+		}},
+	})
+
+	broker, err := f.s.GetRuntimeBroker(ctx, f.brokerID)
+	require.NoError(t, err)
+	assert.Equal(t, store.BrokerStatusOnline, broker.Status, "the heartbeat marks the broker online")
+
+	for id, prev := range before {
+		got := f.get(id)
+		assert.Equal(t, prev.Phase, got.Phase, "phase of %s", prev.Slug)
+		assert.Equal(t, prev.Activity, got.Activity, "activity of %s", prev.Slug)
+		assert.Equal(t, prev.ExitReason, got.ExitReason, "exit reason of %s", prev.Slug)
+		assert.Equal(t, prev.ContainerStatus, got.ContainerStatus, "container status of %s", prev.Slug)
+		assert.True(t, prev.LastSeen.Equal(got.LastSeen), "last seen of %s", prev.Slug)
+		assert.Equal(t, agentRuntimeTarget(prev), agentRuntimeTarget(got), "runtime target of %s", prev.Slug)
+	}
+	assert.False(t, f.hasClock(omitted.ID), "an incomplete heartbeat restarts the clocks rather than concluding")
+}
