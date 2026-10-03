@@ -36,6 +36,7 @@ import (
 	"github.com/knadh/koanf/v2"
 	yamlv3 "gopkg.in/yaml.v3"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 // ResolveHarnessConfig looks up a named harness config and merges profile-level overrides.
@@ -381,6 +382,233 @@ func ValidateSharedDirSize(size string) error {
 	}
 	if q.Sign() <= 0 {
 		return fmt.Errorf("invalid shared_dir_size %q: must be a positive Kubernetes quantity such as 10Gi or 1Ti", size)
+	}
+	return nil
+}
+
+// ResolveKubernetesServiceAccountMapping returns the Kubernetes ServiceAccount
+// (KSA) name mapped to gsaEmail for profileName's runtime, and whether a
+// mapping was found. gsaEmail is lower-cased before lookup — GCP service
+// account emails are lowercase, and ValidateKubernetesServiceAccountMappings
+// rejects any settings entry whose key is not, so both sides of the lookup
+// are guaranteed lowercase and a caller does not need to normalize first.
+//
+// A profile-level entry for gsaEmail takes precedence over a runtime-level
+// entry for the same gsaEmail — the same profile-overrides precedence
+// ResolveImageRegistry already applies, here evaluated per map key instead of
+// as a whole-value override, since this setting is a map rather than a
+// scalar. A profile with no entry for gsaEmail (including an empty-string
+// value, treated as unset) falls through to the runtime-level entry, rather
+// than that GSA having no mapping at all. profileName "" resolves to
+// vs.ActiveProfile, matching ResolveRuntime and ResolveImageRegistry. If
+// ResolveRuntime cannot resolve profileName's runtime (unknown profile or
+// runtime), this returns false, the same as no mapping being found — callers
+// that need to distinguish "no mapping" from "settings error" should call
+// ResolveRuntime themselves first.
+//
+// Scion never creates, annotates, or binds the returned KSA: it must already
+// exist and already be bound to gsaEmail via Workload Identity, out of band,
+// by the operator (see docs-site/.../ha/setup-gcp.md).
+//
+// This is the profileName-only convenience form: it resolves profileName's
+// own runtime entry name internally (via ResolveRuntime) before delegating
+// to ResolveKubernetesServiceAccountMappingForSelection. A caller that
+// already knows both the effective profile name AND the runtime entry name a
+// dispatch resolved to — e.g. the broker, which gets both from one shared
+// resolver so this lookup cannot use a different profile/runtime than the
+// rest of the dispatch did — should call
+// ResolveKubernetesServiceAccountMappingForSelection directly instead,
+// because a ForceRuntime-selected dispatch has a runtime entry but no
+// profile at all, which this form cannot express.
+func (vs *VersionedSettings) ResolveKubernetesServiceAccountMapping(profileName, gsaEmail string) (string, bool) {
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	runtimeEntryName := ""
+	if profile, ok := vs.Profiles[profileName]; ok {
+		runtimeEntryName = profile.Runtime
+	}
+	return vs.ResolveKubernetesServiceAccountMappingForSelection(profileName, runtimeEntryName, gsaEmail)
+}
+
+// ResolveKubernetesServiceAccountMappingForSelection resolves the KSA mapped
+// to gsaEmail for an explicit runtime selection: profileName (if non-empty)
+// is checked first, at the profile level; runtimeEntryName (if non-empty) is
+// checked next, at the runtime level (the `runtimes:` map key — not the
+// runtime type). Either may be empty independently: a ForceRuntime-selected
+// dispatch has a runtime entry but no profile at all, and this function
+// still resolves correctly from the runtime entry alone in that case.
+// Returns false if neither argument is non-empty, or if neither lookup finds
+// a non-empty entry for gsaEmail (which is lower-cased before matching, the
+// same as ResolveKubernetesServiceAccountMapping).
+//
+// An empty-string value at the profile level is treated as no entry and
+// falls through to the runtime level, rather than as a mapping to an empty
+// KSA name: the JSON schema (settings-v1.schema.json) already rejects an
+// empty value for any mapping written through a schema-validated path (the
+// Admin server-config API, `scion config validate`), so this fall-through
+// only matters for a hand-edited file written outside that path. Treating
+// it as "unset" there — instead of returning ("", true) and letting an
+// empty KSA name reach dispatch — keeps a stray blank entry from silently
+// becoming a different failure mode (an empty ServiceAccountName on the pod
+// spec) than the one an operator gets from every other malformed entry
+// (ValidateKubernetesServiceAccountMappings's actionable error at the point
+// of use).
+func (vs *VersionedSettings) ResolveKubernetesServiceAccountMappingForSelection(profileName, runtimeEntryName, gsaEmail string) (string, bool) {
+	gsaEmail = strings.ToLower(gsaEmail)
+	if profileName != "" {
+		if profile, ok := vs.Profiles[profileName]; ok {
+			if ksa, ok := profile.KubernetesServiceAccountMappings[gsaEmail]; ok && ksa != "" {
+				return ksa, true
+			}
+		}
+	}
+	if runtimeEntryName != "" {
+		if rtConfig, ok := vs.Runtimes[runtimeEntryName]; ok {
+			if ksa, ok := rtConfig.KubernetesServiceAccountMappings[gsaEmail]; ok && ksa != "" {
+				return ksa, true
+			}
+		}
+	}
+	return "", false
+}
+
+// ResolveKubernetesNamespace returns the namespace configured on the
+// runtimeEntryName entry of the runtimes: map, and whether one is set.
+// Profiles carry no namespace of their own: a profile that needs a
+// different namespace selects a runtime entry that sets it. When this
+// returns false, the Kubernetes runtime's own default namespace applies.
+//
+// GCP identity mode "assign" on Kubernetes resolves the Workload Identity
+// principal as the (namespace, KSA) pair, so the namespace is read from the
+// same operator settings as the KSA mapping rather than from a request- or
+// template-supplied field.
+func (vs *VersionedSettings) ResolveKubernetesNamespace(runtimeEntryName string) (string, bool) {
+	if runtimeEntryName != "" {
+		if rtConfig, ok := vs.Runtimes[runtimeEntryName]; ok && rtConfig.Namespace != "" {
+			return rtConfig.Namespace, true
+		}
+	}
+	return "", false
+}
+
+// ProjectSettingsHasKubernetesServiceAccountMappings reports whether a
+// project's OWN settings.yaml — read directly, never merged with the
+// broker's global settings the way LoadEffectiveSettings/LoadVersionedSettings
+// merge them for every other lookup — sets
+// kubernetes_service_account_mappings on the named profile or runtime entry.
+// This exists only to let a caller warn an operator that the setting there
+// has no effect: ResolveKubernetesServiceAccountMappingForSelection reads
+// this mapping only from the broker's own global settings, by design, and a
+// project-level entry for the same runtime/profile name is invisible to it —
+// not merely overridden. A plain LoadEffectiveSettings(projectPath) call
+// cannot detect this on its own: koanf layers the project file on top of the
+// already-loaded global one, so a key the project file never mentions still
+// reads back from the global layer underneath it, indistinguishable from the
+// project having set the same value itself.
+//
+// Best-effort: a missing or unreadable project settings file, or one in a
+// split-storage external location this does not resolve, returns false, not
+// an error — this exists only to produce an operator-facing warning, not to
+// change any dispatch outcome.
+func ProjectSettingsHasKubernetesServiceAccountMappings(projectPath, runtimeEntryName, profileName string) bool {
+	// projectPath may be a project root (not yet resolved to its .scion
+	// directory) — GetResolvedProjectDir is the same first step every other
+	// caller in this codebase takes before LoadEffectiveSettings/
+	// LoadVersionedSettings (e.g. resolveDispatchProfileSelection in
+	// pkg/runtimebroker). resolveEffectiveProjectPath on its own does not do
+	// this: called with a non-empty, non-"global"/"home" path, it only
+	// applies the external-split-storage redirect (GetProjectConfigDir) on
+	// top of whatever was passed in, assuming it already points at a .scion
+	// directory.
+	resolvedProjectDir, err := GetResolvedProjectDir(projectPath)
+	if err != nil || resolvedProjectDir == "" {
+		return false
+	}
+	globalDir, _ := GetGlobalDir()
+	if resolvedProjectDir == globalDir {
+		return false
+	}
+	effectiveProjectPath := resolveEffectiveProjectPath(resolvedProjectDir)
+	if effectiveProjectPath == "" || effectiveProjectPath == globalDir {
+		return false
+	}
+	settingsPath := GetSettingsPath(effectiveProjectPath)
+	if settingsPath == "" {
+		return false
+	}
+	raw, err := os.ReadFile(settingsPath)
+	if err != nil {
+		return false
+	}
+	var probe struct {
+		Profiles map[string]struct {
+			KubernetesServiceAccountMappings map[string]string `yaml:"kubernetes_service_account_mappings" json:"kubernetes_service_account_mappings"`
+		} `yaml:"profiles" json:"profiles"`
+		Runtimes map[string]struct {
+			KubernetesServiceAccountMappings map[string]string `yaml:"kubernetes_service_account_mappings" json:"kubernetes_service_account_mappings"`
+		} `yaml:"runtimes" json:"runtimes"`
+	}
+	if err := yamlv3.Unmarshal(raw, &probe); err != nil {
+		return false
+	}
+	if profileName != "" {
+		if p, ok := probe.Profiles[profileName]; ok && len(p.KubernetesServiceAccountMappings) > 0 {
+			return true
+		}
+	}
+	if runtimeEntryName != "" {
+		if rt, ok := probe.Runtimes[runtimeEntryName]; ok && len(rt.KubernetesServiceAccountMappings) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// gsaEmailPattern matches a syntactically well-formed, lowercase GCP service
+// account email: a non-empty local part and one or more non-empty
+// hyphen-delimited domain labels ending in "gserviceaccount.com". GCP issues
+// service account emails in lowercase only, so uppercase is rejected here
+// rather than silently accepted and then never matching a lookup (which
+// lower-cases gsaEmail — see ResolveKubernetesServiceAccountMapping). This
+// deliberately accepts every lowercase GSA shape GCP issues, not only
+// user-managed accounts:
+//
+//	name@project.iam.gserviceaccount.com   (user-managed)
+//	project@appspot.gserviceaccount.com    (App Engine default)
+//	number-compute@developer.gserviceaccount.com (Compute Engine default)
+var gsaEmailPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?@([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+gserviceaccount\.com$`)
+
+// ValidateKubernetesServiceAccountMappings checks that every key in mappings
+// is a well-formed, lowercase GCP service account email and every value is a
+// valid Kubernetes ServiceAccount name (a DNS-1123 subdomain, per the
+// Kubernetes ServiceAccount object's own name validation — up to 253
+// characters, dot-separated labels — not the shorter DNS-1123 label format
+// some other Kubernetes names use).
+//
+// This is called at the point each mapping is actually used, in
+// pkg/runtimebroker/gcp_identity_assign.go, on the single resolved (gsaEmail,
+// ksaName) pair for that dispatch — never on an empty-string ksaName,
+// because ResolveKubernetesServiceAccountMappingForSelection already treats
+// an empty value as no mapping before returning one. It is not called by the
+// JSON schema validator (ValidateSettings): the schema enforces the same two
+// patterns independently (see settings-v1.schema.json's
+// kubernetes_service_account_mappings propertyNames/additionalProperties),
+// so settings.yaml written through a schema-validated path (the Admin
+// server-config API, `scion config validate`) is already checked before
+// this function ever runs. This function exists as a second, narrower
+// check for settings loaded without going through that validator — e.g. a
+// hand-edited settings.yaml in file-only mode — so a malformed mapping is
+// still caught before it reaches dispatch, with an error naming the
+// specific mapping at fault rather than a whole-document schema failure.
+func ValidateKubernetesServiceAccountMappings(mappings map[string]string) error {
+	for gsaEmail, ksaName := range mappings {
+		if !gsaEmailPattern.MatchString(gsaEmail) {
+			return fmt.Errorf("kubernetes_service_account_mappings: %q is not a well-formed, lowercase GCP service account email", gsaEmail)
+		}
+		if errs := validation.IsDNS1123Subdomain(ksaName); len(errs) > 0 {
+			return fmt.Errorf("kubernetes_service_account_mappings[%s]: %q is not a valid Kubernetes ServiceAccount name: %s", gsaEmail, ksaName, strings.Join(errs, "; "))
+		}
 	}
 	return nil
 }
@@ -1704,6 +1932,18 @@ type V1RuntimeConfig struct {
 	CloudRunSandbox *V1CloudRunSandboxConfig `json:"cloudrun_sandbox,omitempty" yaml:"cloudrun_sandbox,omitempty" koanf:"cloudrun_sandbox"`
 	// Substrate holds Substrate-specific settings when Type is "substrate".
 	Substrate *V1SubstrateConfig `json:"substrate,omitempty" yaml:"substrate,omitempty" koanf:"substrate"`
+	// KubernetesServiceAccountMappings maps a GCP service account (GSA) email
+	// to the Kubernetes ServiceAccount (KSA) name it is bound to via Workload
+	// Identity, when Type is "kubernetes". Used by GCP identity mode "assign"
+	// dispatches on Kubernetes (ptone/scion#2328) to set the pod's
+	// spec.serviceAccountName. Scion never creates, annotates, or binds these
+	// KSAs — the operator must pre-provision each one (KSA exists, is
+	// annotated with iam.gke.io/gcp-service-account, and holds
+	// roles/iam.workloadIdentityUser for the named GSA) out of band. A
+	// same-keyed entry in the active profile's own
+	// KubernetesServiceAccountMappings overrides this one; see
+	// VersionedSettings.ResolveKubernetesServiceAccountMapping.
+	KubernetesServiceAccountMappings map[string]string `json:"kubernetes_service_account_mappings,omitempty" yaml:"kubernetes_service_account_mappings,omitempty" koanf:"kubernetes_service_account_mappings"`
 }
 
 // V1RuntimeDefaultsConfig holds runtime-wide behaviour that is not specific to
@@ -1919,6 +2159,12 @@ type V1ProfileConfig struct {
 	// from server.shared_dir_storage.nfs. Read from global settings only;
 	// see ResolveSharedDirStorage.
 	SharedDirStorageBackend string `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
+	// KubernetesServiceAccountMappings overrides, per GSA email, the
+	// runtime-level mapping of the same name for agents created under this
+	// profile. See V1RuntimeConfig.KubernetesServiceAccountMappings and
+	// VersionedSettings.ResolveKubernetesServiceAccountMapping for the
+	// precedence and full contract.
+	KubernetesServiceAccountMappings map[string]string `json:"kubernetes_service_account_mappings,omitempty" yaml:"kubernetes_service_account_mappings,omitempty" koanf:"kubernetes_service_account_mappings"`
 }
 
 // resolveEffectiveProjectPath resolves the effective project path for settings loading.
