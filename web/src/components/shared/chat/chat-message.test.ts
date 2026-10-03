@@ -1306,3 +1306,51 @@ describe('scion-chat-message wide tables', () => {
     expect(el.shadowRoot?.querySelectorAll('.md-table-scroll .md-table-scroll')).toHaveLength(0);
   });
 });
+
+const { imageThumbStyle, knownImageSize } = await import('./chat-message.js');
+
+describe('inline image thumbnail box', () => {
+  const ref = (id: string, extra: { width?: number; height?: number } = {}) => ({
+    id,
+    name: `${id}.png`,
+    mime: 'image/png',
+    size: 10,
+    ...extra,
+  });
+
+  it('reserves the whole thumbnail box while the size is unknown', () => {
+    expect(knownImageSize(ref('unknown'))).toBeNull();
+    expect(imageThumbStyle(null)).toEqual({
+      width: '320px',
+      aspectRatio: '320 / 240',
+    });
+  });
+
+  it('scales a large image down into the thumbnail box, keeping its ratio', () => {
+    // Width-bound: 1200x500 fits at 320 wide.
+    expect(imageThumbStyle({ width: 1200, height: 500 })).toEqual({
+      width: '320px',
+      aspectRatio: '1200 / 500',
+    });
+    // Height-bound: 600x900 fits at 240 tall, so 160 wide.
+    expect(imageThumbStyle({ width: 600, height: 900 })).toEqual({
+      width: '160px',
+      aspectRatio: '600 / 900',
+    });
+  });
+
+  it('never enlarges a small image', () => {
+    expect(imageThumbStyle({ width: 40, height: 30 })).toEqual({
+      width: '40px',
+      aspectRatio: '40 / 30',
+    });
+  });
+
+  it('takes a size only from the server, never from an earlier load', () => {
+    expect(knownImageSize(ref('sent', { width: 800, height: 600 }))).toEqual({
+      width: 800,
+      height: 600,
+    });
+    expect(knownImageSize(ref('broken', { width: 0, height: 0 }))).toBeNull();
+  });
+});
