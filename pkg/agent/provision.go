@@ -328,9 +328,10 @@ func persistedEmptyPerAgent(agentsDirs []string, externalAgentDir, agentName str
 	return false
 }
 
-// migrateLegacyAgentState moves prompt.md and scion-agent.json from the
-// legacy in-project location to the external (shared-workspace) location for
-// agents provisioned before per-agent state was relocated. The legacy
+// migrateLegacyAgentState moves prompt.md, scion-agent.json and the
+// shared-dir storage record from the legacy in-project location to the
+// external (shared-workspace) location for agents provisioned before
+// per-agent state was relocated. The legacy
 // directory is removed if it ends up empty (it shouldn't contain anything
 // else for shared-workspace agents — there is no per-agent worktree).
 //
@@ -359,6 +360,7 @@ func migrateLegacyAgentState(legacyDir, externalDir string) {
 	}
 	moveFile("prompt.md")
 	moveFile("scion-agent.json")
+	moveFile(sharedDirStorageRecordFile)
 	// Remove the legacy dir if empty (best effort; non-empty leftovers like a
 	// stale workspace/ shell are left in place to avoid surprising deletes).
 	_ = os.Remove(legacyDir)
