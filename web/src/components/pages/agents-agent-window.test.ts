@@ -124,9 +124,10 @@ function handleUpdate(subject: string, data: unknown): void {
   ).handleUpdate({ subject, data });
 }
 
-/** state.ts flushes on rAF or after 100 ms without one. */
+/** Runs state.ts's pending coalesced flush now, then lets the page re-render. */
 async function flushLive(el: TestEl): Promise<void> {
-  await new Promise((r) => setTimeout(r, 150));
+  (stateManager as unknown as { flush(): void }).flush();
+  await Promise.resolve();
   await el.updateComplete;
 }
 
@@ -234,7 +235,10 @@ describe('scion-page-agents — agent list window', () => {
       };
       vi.stubGlobal('fetch', vi.fn(legacy));
       const el = await mount();
-      expect(fake.requests.length).toBe(1 + 3);
+      // The drain continues from the legacy first page and its cursor:
+      // the first request plus pages 2 and 3, with no refetch of page 1.
+      expect(fake.requests.length).toBe(3);
+      expect(new URL(fake.requests[1], 'http://localhost').searchParams.get('cursor')).toBe('500');
       expect(internals(el).agentWindow.state).toBe('held');
       expect(internals(el).agents.length).toBe(1200);
       expect(stateManager.isAgentSetComplete('full')).toBe(true);

@@ -262,6 +262,13 @@ function pager(el: TestEl): (HTMLElement & { pageSize: number }) | null {
 }
 
 /** A deferred promise, for controlling fetch resolution order explicitly. */
+/** Runs state.ts's pending coalesced flush now, then lets the page re-render. */
+async function flushLive(el: TestEl): Promise<void> {
+  (stateManager as unknown as { flush(): void }).flush();
+  await Promise.resolve();
+  await el.updateComplete;
+}
+
 function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
   let resolve!: (v: T) => void;
   const promise = new Promise<T>((r) => {
@@ -843,8 +850,7 @@ describe('project-detail — agent list window', () => {
           messageMode: 'project',
         },
       });
-      await new Promise((r) => setTimeout(r, 150));
-      await el.updateComplete;
+      await flushLive(el);
 
       // A status delta for an already-known project agent too.
       (
@@ -853,8 +859,7 @@ describe('project-detail — agent list window', () => {
         subject: `project.${projectId}.agent.status`,
         data: { agentId: agents[0].id, phase: 'stopped' },
       });
-      await new Promise((r) => setTimeout(r, 150));
-      await el.updateComplete;
+      await flushLive(el);
 
       // `mergeAgentsChanged` (the small/held-state merge) must never run
       // while paged — the window's own `applyChanges` is the only path.
@@ -885,8 +890,7 @@ describe('project-detail — agent list window', () => {
         subject: `project.${projectId}.agent.status`,
         data: { agentId: agents[29].id, phase: 'stopped' },
       });
-      await new Promise((r) => setTimeout(r, 150));
-      await el.updateComplete;
+      await flushLive(el);
 
       // A pure phase change off-page, with no active phase filter, does not
       // change which agent belongs on which page — it only affects the
@@ -911,8 +915,7 @@ describe('project-detail — agent list window', () => {
         subject: `project.${projectId}.agent.deleted`,
         data: { agentId: agents[0].id },
       });
-      await new Promise((r) => setTimeout(r, 150));
-      await el.updateComplete;
+      await flushLive(el);
       expect(internals(el).agentStats.total).toBe(4);
 
       // A view-state change (sort direction flip) triggers a fresh
@@ -945,8 +948,7 @@ describe('project-detail — agent list window', () => {
         subject: `project.${projectId}.agent.deleted`,
         data: { agentId: agents[0].id },
       });
-      await new Promise((r) => setTimeout(r, 150));
-      await el.updateComplete;
+      await flushLive(el);
 
       // A view-state change (sort direction flip) issues a fresh
       // `loadAgentsForView` request, landing in the paged branch again
@@ -976,8 +978,7 @@ describe('project-detail — agent list window', () => {
         subject: `project.${projectId}.agent.deleted`,
         data: { agentId: agents[0].id },
       });
-      await new Promise((r) => setTimeout(r, 150));
-      await el.updateComplete;
+      await flushLive(el);
 
       // The chip-click refresh re-fetches page 0 through `fetchAgentsPage`;
       // the fixture still lists the already-deleted agent.
@@ -1006,8 +1007,7 @@ describe('project-detail — agent list window', () => {
         subject: `project.${projectId}.agent.deleted`,
         data: { agentId: agents[0].id },
       });
-      await new Promise((r) => setTimeout(r, 150));
-      await el.updateComplete;
+      await flushLive(el);
 
       stubSortedAgentsWithoutList(projectId, globalThis.fetch);
       await internals(el).agentWindow.refresh();
@@ -1040,8 +1040,7 @@ describe('project-detail — agent list window', () => {
         subject: `project.${projectId}.agent.status`,
         data: { agentId: agents[29].id, phase: 'running' },
       });
-      await new Promise((r) => setTimeout(r, 150));
-      await el.updateComplete;
+      await flushLive(el);
 
       expect(internals(el).agentWindow.updatesAvailable).toBe(true);
       expect(requests.length).toBe(before); // still zero-cost
@@ -1096,8 +1095,7 @@ describe('project-detail — agent list window', () => {
         subject: `project.${projectId}.agent.status`,
         data: { agentId: nonMember.id, phase: 'running' },
       });
-      await new Promise((r) => setTimeout(r, 150));
-      await el.updateComplete;
+      await flushLive(el);
 
       expect(internals(el).agentStats.total).toBe(30); // unchanged
       expect(internals(el).agentWindow.updatesAvailable).toBe(false); // ignored outright: no chip
@@ -1118,8 +1116,7 @@ describe('project-detail — agent list window', () => {
         subject: `project.${projectId}.agent.deleted`,
         data: { agentId: agents[0].id },
       });
-      await new Promise((r) => setTimeout(r, 150));
-      await el.updateComplete;
+      await flushLive(el);
 
       expect(internals(el).agentWindow.updatesAvailable).toBe(true);
       expect(internals(el).agentWindow.items.find((a) => a.id === agents[0].id)).toBeUndefined();
@@ -1170,8 +1167,7 @@ describe('project-detail — agent list window', () => {
         subject: `project.${projectId}.agent.status`,
         data: { agentId: 'a-4', phase: 'stopped' },
       });
-      await new Promise((r) => setTimeout(r, 150));
-      await el.updateComplete;
+      await flushLive(el);
 
       // The small-state list view must see the same live update grid/tree/
       // stats already saw via `this.agents` — no re-adoption step, and no
@@ -1202,8 +1198,7 @@ describe('project-detail — agent list window', () => {
           messageMode: 'project',
         },
       });
-      await new Promise((r) => setTimeout(r, 150));
-      await el.updateComplete;
+      await flushLive(el);
 
       expect(internals(el).agentWindow.items.some((a) => a.id === 'a-new')).toBe(true);
       expect(requests.length).toBe(1); // still no request
@@ -1248,8 +1243,7 @@ describe('project-detail — agent list window', () => {
           messageMode: 'project',
         },
       });
-      await new Promise((r) => setTimeout(r, 150));
-      await el.updateComplete;
+      await flushLive(el);
 
       const after = (el as unknown as { agents: Agent[] }).agents;
       expect(after.length).toBe(before);
@@ -1291,8 +1285,7 @@ describe('project-detail — agent list window', () => {
           // No `_capabilities` of its own, as a real SSE create carries.
         },
       });
-      await new Promise((r) => setTimeout(r, 150));
-      await el.updateComplete;
+      await flushLive(el);
 
       const afterCreate = (el as unknown as { agents: Agent[] }).agents.find(
         (a) => a.id === 'a-caps'
@@ -1307,8 +1300,7 @@ describe('project-detail — agent list window', () => {
         subject: `project.${projectId}.agent.status`,
         data: { agentId: 'a-caps', phase: 'stopped' },
       });
-      await new Promise((r) => setTimeout(r, 150));
-      await el.updateComplete;
+      await flushLive(el);
 
       const afterStatus = (el as unknown as { agents: Agent[] }).agents.find(
         (a) => a.id === 'a-caps'
@@ -1344,8 +1336,7 @@ describe('project-detail — agent list window', () => {
         subject: `project.${projectId}.agent.deleted`,
         data: { agentId: 'a-1' },
       });
-      await new Promise((r) => setTimeout(r, 150));
-      await el.updateComplete;
+      await flushLive(el);
       expect(internals(el).agentWindow.items.some((a) => a.id === 'a-1')).toBe(false);
 
       // A lifecycle refresh re-fetches, and the fixture's fetch handler still
@@ -1354,8 +1345,7 @@ describe('project-detail — agent list window', () => {
       // already in flight, or served from a stale read replica, when the
       // delete happened). The already-tombstoned ID must not reappear.
       internals(el).backgroundRefresh('lifecycle-refresh');
-      await new Promise((r) => setTimeout(r, 150));
-      await el.updateComplete;
+      await flushLive(el);
 
       expect((el as unknown as { agents: Agent[] }).agents.some((a) => a.id === 'a-1')).toBe(false);
       expect(internals(el).agentWindow.items.some((a) => a.id === 'a-1')).toBe(false);
@@ -1384,12 +1374,10 @@ describe('project-detail — agent list window', () => {
         subject: `project.${projectId}.agent.deleted`,
         data: { agentId: 'a-1' },
       });
-      await new Promise((r) => setTimeout(r, 150));
-      await el.updateComplete;
+      await flushLive(el);
 
       internals(el).backgroundRefresh('lifecycle-refresh');
-      await new Promise((r) => setTimeout(r, 150));
-      await el.updateComplete;
+      await flushLive(el);
 
       expect((el as unknown as { agents: Agent[] }).agents.some((a) => a.id === 'a-1')).toBe(false);
     });
@@ -1421,17 +1409,17 @@ describe('project-detail — agent list window', () => {
         subject: `project.${projectId}.agent.deleted`,
         data: { agentId: 'a-1' },
       });
-      await new Promise((r) => setTimeout(r, 150));
-      await el.updateComplete;
+      await flushLive(el);
 
       stubSortedAgentsWithoutList(projectId, globalThis.fetch);
       const warn = vi.spyOn(console, 'warn');
       internals(el).backgroundRefresh('lifecycle-refresh');
-      await new Promise((r) => setTimeout(r, 150));
+      await vi.waitFor(() => {
+        expect((el as unknown as { agents: Agent[] }).agents).toEqual([]);
+      });
       await el.updateComplete;
 
       expect(warn).not.toHaveBeenCalledWith('Background refresh failed:', expect.anything());
-      expect((el as unknown as { agents: Agent[] }).agents).toEqual([]);
       expect(internals(el).agentWindow.items).toEqual([]);
     });
   });
@@ -1929,8 +1917,7 @@ describe('project-detail — agent list window', () => {
     }
 
     const flushSse = async (el: TestEl) => {
-      await new Promise((r) => setTimeout(r, 150));
-      await el.updateComplete;
+      await flushLive(el);
     };
 
     it('the fit request answering complete: the create joins the small set', async () => {

@@ -55,7 +55,11 @@ import type {
   PagedPageParams,
   PagedPageResult,
 } from '../../client/agent-list-window.js';
-import { AgentDrainRunner, DRAIN_PAGE_LIMIT } from '../../client/agent-drain.js';
+import {
+  AgentDrainRunner,
+  DRAIN_PAGE_LIMIT,
+  type DrainFirstPage,
+} from '../../client/agent-drain.js';
 import { AgentSeedEpoch } from '../../client/agent-seed-epoch.js';
 import { AGENT_PAGER_PAGE_SIZES } from '../shared/agent-pager.js';
 import type { AgentPagerPageSize } from '../shared/agent-pager.js';
@@ -256,6 +260,8 @@ export class ScionPageAgents extends LitElement {
 
   private agentsAbortController: AbortController | null = null;
   private agentsLoadGen = 0;
+  /** Bumped on every view-state change, so a load can tell the view changed while it was in flight. */
+  private viewEpoch = 0;
   /** Only the latest `loadAgents` call clears `loading` or sets `error`. */
   private loadAgentsSeq = 0;
 
@@ -521,7 +527,8 @@ export class ScionPageAgents extends LitElement {
 
   /**
    * A live create while loaded for scope `mine` or `shared` is outside
-   * today's add rule: it is not added, and a paged window shows the chip.
+   * today's add rule: it is not added. A paged window shows the chip, and
+   * a held or capped set is marked as possibly stale.
    */
   private boundOnAgentCreated = () => {
     if (this.loadedScope !== 'all') this.agentWindow.markMembershipChanged();
@@ -638,8 +645,7 @@ export class ScionPageAgents extends LitElement {
     stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync as EventListener);
     stateManager.removeEventListener('agent-created', this.boundOnAgentCreated as EventListener);
     this.agentWindow.removeEventListener('change', this.boundOnWindowChange);
-    this.agentsAbortController?.abort();
-    this.drainRunner.abort();
+    this.cancelAgentsLoad();
   }
 
   /** The window's view state from the page's persisted fields and the live label. */
@@ -723,8 +729,22 @@ export class ScionPageAgents extends LitElement {
     });
   }
 
-  /** A view-state change (view, sort, phase, mode or page size): one request only if the planner says so. */
+  /**
+   * A view-state change (view, sort, phase, mode or page size): one request
+   * only if the planner says so. A sorted first request still in flight
+   * that no longer fits the view state is superseded first: a page load or
+   * label commit is sent again for the new view state.
+   */
   private onAgentViewStateChanged(): void {
+    this.viewEpoch++;
+    const superseded = this.agentWindow.supersededRequest(this.committedLabel);
+    if (superseded) {
+      this.cancelAgentsLoad();
+      if (superseded === 'page-load' || superseded === 'label-commit') {
+        void this.loadAgents(superseded);
+        return;
+      }
+    }
     this.backgroundRefresh('view-change');
   }
 
@@ -744,11 +764,20 @@ export class ScionPageAgents extends LitElement {
    * and the signal for `apiFetch`.
    */
   private beginAgentsLoad(): { gen: number; signal: AbortSignal } {
-    this.agentsAbortController?.abort();
-    this.drainRunner.abort();
+    this.cancelAgentsLoad();
     const controller = new AbortController();
     this.agentsAbortController = controller;
     return { gen: ++this.agentsLoadGen, signal: controller.signal };
+  }
+
+  /** Aborts every agents request in flight: the first request, a drain and the window's page fetch. */
+  private cancelAgentsLoad(): void {
+    this.agentsAbortController?.abort();
+    this.agentsAbortController = null;
+    this.drainRunner.abort();
+    this.agentsLoadGen++;
+    this.agentWindow.cancelPageFetch();
+    this.agentWindow.endSortedRequest();
   }
 
   private isStaleAgentsLoad(gen: number): boolean {
@@ -760,7 +789,9 @@ export class ScionPageAgents extends LitElement {
    * once, and the window's planner picks the one request it needs: a
    * sorted fit request, a drain (complete-needing view states), a paged
    * refresh (the paged chip), or nothing. Rejects when the first request
-   * fails; resolves without changes when superseded.
+   * fails; resolves without changes when superseded. When the view state
+   * changed while the request was in flight and the adopted result no
+   * longer fits it, plans again for the current view state.
    */
   private async loadAgentsForView(trigger: AgentListTrigger): Promise<void> {
     const label = this.committedLabel.trim();
@@ -770,13 +801,14 @@ export class ScionPageAgents extends LitElement {
       await this.agentWindow.refresh();
       return;
     }
+    const viewEpoch = this.viewEpoch;
+    let adopted = false;
     this.beginLoadingIndicator();
     try {
-      if (plan === 'fit') {
-        await this.loadFitAgents(label);
-      } else {
-        await this.drainGlobalAgents(label);
-      }
+      adopted =
+        plan === 'fit'
+          ? await this.loadFitAgents(label, trigger)
+          : await this.drainGlobalAgents(label);
     } catch (err) {
       // The stored cursors were minted under the previous view state.
       if (trigger === 'view-change' && this.agentWindow.state === 'paged') {
@@ -786,18 +818,28 @@ export class ScionPageAgents extends LitElement {
     } finally {
       this.endLoadingIndicator();
     }
+    if (
+      adopted &&
+      viewEpoch !== this.viewEpoch &&
+      this.agentWindow.planRequest('view-change', this.committedLabel.trim()) !== 'none'
+    ) {
+      await this.loadAgentsForView('view-change');
+    }
   }
 
   /**
    * The sorted first request: complete (small, the response is the whole
    * set) or paged. Sends the scope only when it is not `all` and the label
-   * only when it contains `=`, as the legacy request does.
+   * only when it contains `=`, as the legacy request does. Resolves `true`
+   * when a result was adopted, `false` when superseded.
    */
-  private async loadFitAgents(label: string): Promise<void> {
+  private async loadFitAgents(label: string, trigger: AgentListTrigger): Promise<boolean> {
     const { gen, signal } = this.beginAgentsLoad();
+    const ticket = this.agentWindow.beginSortedRequest(trigger, label);
     // Captured now: the scope can change while the request is in flight,
     // and `loadedScope` must be the scope this response was fetched for.
     const requestedScope = this.agentScope;
+    const phase = this.phaseFilter;
     const params = new URLSearchParams();
     params.set('sort', this.serverSortField);
     params.set('dir', this.sortDir);
@@ -806,7 +848,7 @@ export class ScionPageAgents extends LitElement {
     params.set('stats', '1');
     if (requestedScope !== 'all') params.set('scope', requestedScope);
     if (label.includes('=')) params.set('label', label);
-    if (this.phaseFilter) params.set('phase', this.phaseFilter);
+    if (phase) params.set('phase', phase);
 
     // Opened before the request is sent, so a live change that lands while
     // it is in flight survives the (older) response.
@@ -816,28 +858,43 @@ export class ScionPageAgents extends LitElement {
       try {
         response = await apiFetch(`/api/v1/agents?${params.toString()}`, { signal });
       } catch (err) {
-        if (this.isStaleAgentsLoad(gen) || this.isAbortError(err)) return;
+        if (this.isStaleAgentsLoad(gen) || this.isAbortError(err)) return false;
         throw err;
       }
-      if (this.isStaleAgentsLoad(gen)) return;
+      if (this.isStaleAgentsLoad(gen)) return false;
       if (!response.ok) {
         throw new Error(
           await extractApiError(response, `HTTP ${response.status}: ${response.statusText}`)
         );
       }
       const body = (await response.json()) as GlobalAgentsResponse | Agent[];
-      if (this.isStaleAgentsLoad(gen)) return;
+      if (this.isStaleAgentsLoad(gen)) return false;
       const data: GlobalAgentsResponse = Array.isArray(body) ? { agents: body } : body;
 
-      // A server that ignored sorted mode answers with a legacy page: it is
-      // complete when it has no `nextCursor`, and otherwise the rest is drained.
+      // A server that ignored sorted mode answers with a legacy page. With
+      // no phase sent, it is complete when it has no `nextCursor`, and
+      // otherwise the drain continues from it. A legacy list honours
+      // `phase`, so a page fetched with one is only part of the set: the
+      // whole set is drained from the start.
       const legacy = data.complete === undefined;
-      const complete = data.complete === true || (legacy && !data.nextCursor);
-      if (legacy && !complete) {
-        epoch.close(); // the drain runs its own epoch.
-        await this.drainGlobalAgents(label, gen, requestedScope);
-        return;
+      if (legacy && (phase || data.nextCursor)) {
+        this.agentWindow.endSortedRequest(ticket);
+        if (phase || !data.nextCursor) {
+          epoch.close(); // the drain runs its own epoch.
+          return await this.drainGlobalAgents(label, gen, requestedScope);
+        }
+        // The drain takes over this epoch, so live changes since the
+        // request was sent are kept.
+        return await this.drainGlobalAgents(label, gen, requestedScope, {
+          firstPage: {
+            agents: dropTombstoned(data.agents || [], stateManager.getDeletedAgentIds()),
+            nextCursor: data.nextCursor,
+            capabilities: Array.isArray(body) ? undefined : data._capabilities,
+          },
+          epoch,
+        });
       }
+      const complete = data.complete === true || legacy;
 
       this.loadedScope = requestedScope;
       this.adoptScopeCapabilities(Array.isArray(body) ? undefined : data._capabilities);
@@ -854,23 +911,28 @@ export class ScionPageAgents extends LitElement {
         // Paged: `this.agents` stays empty; stats and Stop-all read the
         // member index through the window.
         this.agents = [];
-        this.agentWindow.setPaged(this.seedPage(epoch, fresh, data), label);
+        this.agentWindow.setPaged(this.seedPage(epoch, fresh, data), label, ticket.key);
       }
+      return true;
     } finally {
       epoch.close();
+      this.agentWindow.endSortedRequest(ticket);
     }
   }
 
   /**
    * The complete-set drain of a complete-needing view state, or the held
-   * or capped chip. Its first page is today's legacy request. Ends in
-   * small (one page), held, or capped. Rejects when the first page fails.
+   * or capped chip. Its first page is today's legacy request, or `carry`'s
+   * page when an old server already answered the sorted request with it.
+   * Ends in small (one page), held, or capped. Rejects when the first page
+   * fails; resolves `true` when a result was adopted.
    */
   private async drainGlobalAgents(
     label: string,
     carriedGen?: number,
-    scope: 'all' | 'mine' | 'shared' = this.agentScope
-  ): Promise<void> {
+    scope: 'all' | 'mine' | 'shared' = this.agentScope,
+    carry?: { firstPage: DrainFirstPage; epoch: AgentSeedEpoch }
+  ): Promise<boolean> {
     const gen = carriedGen ?? this.beginAgentsLoad().gen;
     const params = new URLSearchParams();
     if (scope !== 'all') params.set('scope', scope);
@@ -885,10 +947,11 @@ export class ScionPageAgents extends LitElement {
       ...(scope === 'all'
         ? { isMember: (agent: Agent) => matchesCommittedLabel(agent, label) }
         : {}),
+      ...(carry ?? {}),
     });
-    if (!result || this.isStaleAgentsLoad(gen)) return; // superseded.
-    if (result.error && result.agents.length === 0) {
-      throw new Error(result.error.message);
+    if (!result || this.isStaleAgentsLoad(gen)) return false; // superseded.
+    if (result.firstPageFailed) {
+      throw new Error(result.error?.message ?? 'Failed to load agents');
     }
     this.loadedScope = scope;
     this.agents = result.agents;
@@ -897,6 +960,7 @@ export class ScionPageAgents extends LitElement {
     if (result.complete && !result.capped && !result.error) {
       this.markCompleteSet(scope, label);
     }
+    return true;
   }
 
   /** Today's scope capabilities handling for a first response. */
@@ -939,7 +1003,9 @@ export class ScionPageAgents extends LitElement {
 
     const epoch = new AgentSeedEpoch();
     try {
-      const response = await apiFetch(`/api/v1/agents?${qs.toString()}`);
+      const response = await apiFetch(`/api/v1/agents?${qs.toString()}`, {
+        signal: params.signal,
+      });
       if (!response.ok) {
         throw new Error(await extractApiError(response, 'Failed to load agents'));
       }
@@ -961,7 +1027,9 @@ export class ScionPageAgents extends LitElement {
     fresh: Agent[],
     data: GlobalAgentsResponse
   ): PagedPageResult {
-    const seeded = epoch.seed(fresh, { partial: true });
+    // A full-view page: each object replaces the stored one, so a field
+    // the server no longer sends does not linger.
+    const seeded = epoch.seed(fresh, { partial: false });
     let stats = data.stats;
     if (stats?.agents) {
       const agents = dropTombstonedPairs(stats.agents, stateManager.getDeletedAgentIds());

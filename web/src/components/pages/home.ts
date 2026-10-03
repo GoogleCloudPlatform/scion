@@ -229,7 +229,7 @@ export class ScionPageHome extends LitElement {
       stateManager.markAgentSetComplete('full');
       return;
     }
-    epoch.seed(agents, { partial: true, isMember: () => true });
+    epoch.seed(agents, { partial: false, isMember: () => true });
     const stats = data.stats ?? { total: 0, running: 0, agents: [] };
     const index = new AgentMemberIndex();
     if (stats.agents) {

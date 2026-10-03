@@ -56,6 +56,7 @@ import type {
   AgentListView,
   PagedPageParams,
   PagedPageResult,
+  SortedRequestTicket,
 } from '../../client/agent-list-window.js';
 import { AgentDrainRunner } from '../../client/agent-drain.js';
 import { AgentSeedEpoch } from '../../client/agent-seed-epoch.js';
@@ -271,6 +272,9 @@ export class ScionPageProjectDetail extends LitElement {
   /** Bumped at the start of every page-level agents load; checked after each `await` so an older trigger's response can never overwrite a newer one. */
   private agentsLoadGen = 0;
 
+  /** Bumped on every view-state change, so a load can tell the view changed while it was in flight. */
+  private viewEpoch = 0;
+
   /** Aborts whatever page-level agents request (not the window's own page fetches) was still in flight when a new trigger starts. */
   private agentsAbortController: AbortController | null = null;
 
@@ -367,6 +371,21 @@ export class ScionPageProjectDetail extends LitElement {
    */
   private get agentStats(): { total: number; running: number } {
     return this.agentWindow.stats;
+  }
+
+  /**
+   * The "Agents" or "Running" stat. A capped set counts only the loaded
+   * agents, so the figure says so, worded like the capped total.
+   */
+  private renderAgentStat(kind: 'total' | 'running') {
+    const stats = this.agentWindow.stats;
+    const value = formatNumber(stats[kind]);
+    if (!stats.incomplete) return value;
+    const note =
+      kind === 'total'
+        ? 'loaded (newest 2,000 checked), more exist'
+        : 'among loaded (newest 2,000 checked), more exist';
+    return html`${value}<span class="stat-incomplete">${note}</span>`;
   }
 
   /**
@@ -544,6 +563,13 @@ export class ScionPageProjectDetail extends LitElement {
       font-size: 1.5rem;
       font-weight: 700;
       color: var(--scion-text, #1e293b);
+    }
+
+    .stat-incomplete {
+      display: block;
+      font-size: 0.75rem;
+      font-weight: 400;
+      color: var(--scion-text-muted, #64748b);
     }
 
     .section-header {
@@ -1202,8 +1228,7 @@ export class ScionPageProjectDetail extends LitElement {
     stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
     stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync as EventListener);
     this.agentWindow.removeEventListener('change', this.boundOnWindowChange);
-    this.agentsAbortController?.abort();
-    this.drainRunner.abort();
+    this.cancelAgentsLoad();
     this.filesSectionObserver?.disconnect();
     this.filesSectionObserver = null;
     this.observedFilesPlaceholder = null;
@@ -1532,12 +1557,21 @@ export class ScionPageProjectDetail extends LitElement {
    * generation counter.
    */
   private beginAgentsLoad(): { gen: number; signal: AbortSignal } {
-    this.agentsAbortController?.abort();
-    this.drainRunner.abort();
+    this.cancelAgentsLoad();
     const controller = new AbortController();
     this.agentsAbortController = controller;
     const gen = ++this.agentsLoadGen;
     return { gen, signal: controller.signal };
+  }
+
+  /** Aborts every agents request in flight: the first request, a drain and the window's page fetch. */
+  private cancelAgentsLoad(): void {
+    this.agentsAbortController?.abort();
+    this.agentsAbortController = null;
+    this.drainRunner.abort();
+    this.agentsLoadGen++;
+    this.agentWindow.cancelPageFetch();
+    this.agentWindow.endSortedRequest();
   }
 
   private isStaleAgentsLoad(gen: number): boolean {
@@ -1574,7 +1608,9 @@ export class ScionPageProjectDetail extends LitElement {
    * The project page's single request-choosing function. Every trigger
    * calls it once; the window's planner picks the one request the trigger
    * needs in the current state: a fit request, a drain, a paged refresh
-   * (the paged chip), or nothing.
+   * (the paged chip), or nothing. When the view state changed while the
+   * request was in flight and the adopted result no longer fits it, plans
+   * again for the current view state.
    */
   private async loadAgentsForView(trigger: AgentsViewTrigger): Promise<void> {
     const label = this.committedLabel.trim();
@@ -1584,28 +1620,42 @@ export class ScionPageProjectDetail extends LitElement {
       await this.agentWindow.refresh();
       return;
     }
+    const viewEpoch = this.viewEpoch;
+    let adopted = false;
     this.beginLoadingIndicator();
     try {
-      if (plan === 'fit') {
-        await this.loadFitAgents(trigger, label);
-      } else {
-        await this.drainProjectAgents(trigger, label);
-      }
+      adopted =
+        plan === 'fit'
+          ? await this.loadFitAgents(trigger, label)
+          : await this.drainProjectAgents(trigger, label);
     } finally {
       this.endLoadingIndicator();
     }
+    if (
+      adopted &&
+      viewEpoch !== this.viewEpoch &&
+      this.agentWindow.planRequest('view-change', this.committedLabel.trim()) !== 'none'
+    ) {
+      await this.loadAgentsForView('view-change');
+    }
   }
 
-  /** The sorted first request of a sorted-eligible view state: complete (small), paged, or 422 (drain). */
-  private async loadFitAgents(trigger: AgentsViewTrigger, label: string): Promise<void> {
+  /**
+   * The sorted first request of a sorted-eligible view state: complete
+   * (small), paged, or 422 (drain). Resolves `true` when a result was
+   * adopted.
+   */
+  private async loadFitAgents(trigger: AgentsViewTrigger, label: string): Promise<boolean> {
     const { gen, signal } = this.beginAgentsLoad();
+    const ticket = this.agentWindow.beginSortedRequest(trigger, label);
     // Opened before the request is sent, so a live create or update that
     // lands while it is in flight survives the (older) response.
     const epoch = new AgentSeedEpoch();
     try {
-      await this.loadFitAgentsInEpoch(trigger, label, gen, signal, epoch);
+      return await this.loadFitAgentsInEpoch(trigger, label, gen, signal, epoch, ticket);
     } finally {
       epoch.close();
+      this.agentWindow.endSortedRequest(ticket);
     }
   }
 
@@ -1614,8 +1664,9 @@ export class ScionPageProjectDetail extends LitElement {
     label: string,
     gen: number,
     signal: AbortSignal,
-    epoch: AgentSeedEpoch
-  ): Promise<void> {
+    epoch: AgentSeedEpoch,
+    ticket: SortedRequestTicket
+  ): Promise<boolean> {
     const params = new URLSearchParams();
     params.set('sort', this.serverSortField);
     params.set('dir', this.sortDir);
@@ -1631,38 +1682,38 @@ export class ScionPageProjectDetail extends LitElement {
         signal,
       });
     } catch (err) {
-      if (this.isAbortError(err)) return; // superseded by a later trigger.
+      if (this.isStaleAgentsLoad(gen) || this.isAbortError(err)) return false; // superseded.
       console.warn('Failed to load agents:', err);
       this.onAgentsLoadFailed(trigger);
-      return;
+      return false;
     }
-    if (this.isStaleAgentsLoad(gen)) return;
+    if (this.isStaleAgentsLoad(gen)) return false;
 
     if (response.status === 422) {
       // Candidate ceiling: remember the refusal for this committed label
       // and drain instead.
       this.agentWindow.recordRefusal(label);
+      this.agentWindow.endSortedRequest(ticket);
       epoch.close(); // the drain runs its own epoch.
-      await this.drainProjectAgents(trigger, label, gen);
-      return;
+      return await this.drainProjectAgents(trigger, label, gen);
     }
 
     if (!response.ok) {
       this.onAgentsLoadFailed(trigger);
-      return;
+      return false;
     }
 
     let data: SortedAgentsResponse;
     try {
       data = (await response.json()) as SortedAgentsResponse;
     } catch (err) {
-      if (this.isStaleAgentsLoad(gen)) return; // stale: nothing to revert/invalidate.
-      if (this.isAbortError(err)) return;
+      if (this.isStaleAgentsLoad(gen)) return false; // stale: nothing to revert/invalidate.
+      if (this.isAbortError(err)) return false;
       console.warn('Failed to load agents:', err);
       this.onAgentsLoadFailed(trigger);
-      return;
+      return false;
     }
-    if (this.isStaleAgentsLoad(gen)) return;
+    if (this.isStaleAgentsLoad(gen)) return false;
     if (data._capabilities) {
       this.agentScopeCapabilities = data._capabilities;
     }
@@ -1687,21 +1738,23 @@ export class ScionPageProjectDetail extends LitElement {
       // Paged: `this.agents` stays empty; stats and Stop-all read the
       // member index through `agentStats` instead.
       this.agents = [];
-      this.agentWindow.setPaged(this.seedPage(epoch, freshAgents, data), label);
+      this.agentWindow.setPaged(this.seedPage(epoch, freshAgents, data), label, ticket.key);
     }
+    return true;
   }
 
   /**
    * The complete-set drain of a complete-needing view state, a 422, or the
    * held/capped chip. Its first page is today's legacy request. It ends in
    * small (one page), held, or capped. A first page that fails (for
-   * example a label 400) keeps the previous data.
+   * example a label 400) keeps the previous data. Resolves `true` when a
+   * result was adopted.
    */
   private async drainProjectAgents(
     trigger: AgentsViewTrigger,
     label: string,
     carriedGen?: number
-  ): Promise<void> {
+  ): Promise<boolean> {
     const gen = carriedGen ?? this.beginAgentsLoad().gen;
 
     const params = new URLSearchParams();
@@ -1719,23 +1772,24 @@ export class ScionPageProjectDetail extends LitElement {
         isMember: (agent) => this.isProjectMember(agent, label),
       });
     } catch (err) {
-      if (this.isStaleAgentsLoad(gen) || this.isAbortError(err)) return;
+      if (this.isStaleAgentsLoad(gen) || this.isAbortError(err)) return false;
       console.warn('Failed to load agents:', err);
       this.onAgentsLoadFailed(trigger);
-      return;
+      return false;
     }
-    if (!result || this.isStaleAgentsLoad(gen)) return; // superseded.
+    if (!result || this.isStaleAgentsLoad(gen)) return false; // superseded.
 
-    if (result.error && result.agents.length === 0) {
-      console.warn('Failed to load agents:', result.error.message);
+    if (result.firstPageFailed) {
+      console.warn('Failed to load agents:', result.error?.message);
       this.onAgentsLoadFailed(trigger);
-      return;
+      return false;
     }
 
     this.agents = result.agents;
     this.agentScopeCapabilities =
       result.capabilities ?? this.agents.find((a) => a._capabilities)?._capabilities;
     this.agentWindow.adoptDrain(result);
+    return true;
   }
 
   /** Membership of a live-created agent during a drain: this project, and the committed `k=v` label, if any. */
@@ -1751,9 +1805,23 @@ export class ScionPageProjectDetail extends LitElement {
     return this.sortField === 'created' ? 'created' : 'updated';
   }
 
-  /** A view-state change (view, sort, phase or page size): one request only if the planner says so. */
+  /**
+   * A view-state change (view, sort, phase or page size): one request only
+   * if the planner says so. A sorted first request still in flight that no
+   * longer fits the view state is superseded first: a page load or label
+   * commit is sent again for the new view state.
+   */
   private onAgentViewStateChanged(): void {
-    void this.loadAgentsForView('view-change');
+    this.viewEpoch++;
+    const superseded = this.agentWindow.supersededRequest(this.committedLabel);
+    if (superseded) {
+      this.cancelAgentsLoad();
+      if (superseded === 'page-load' || superseded === 'label-commit') {
+        this.backgroundRefresh(superseded);
+        return;
+      }
+    }
+    this.backgroundRefresh('view-change');
   }
 
   /**
@@ -1828,7 +1896,12 @@ export class ScionPageProjectDetail extends LitElement {
 
     const epoch = new AgentSeedEpoch();
     try {
-      const response = await apiFetch(`/api/v1/projects/${this.projectId}/agents?${qs.toString()}`);
+      const response = await apiFetch(
+        `/api/v1/projects/${this.projectId}/agents?${qs.toString()}`,
+        {
+          signal: params.signal,
+        }
+      );
       if (!response.ok) {
         throw new Error(await extractApiError(response, 'Failed to load agents'));
       }
@@ -1852,7 +1925,9 @@ export class ScionPageProjectDetail extends LitElement {
     fresh: Agent[],
     data: SortedAgentsResponse
   ): PagedPageResult {
-    const seeded = epoch.seed(fresh, { partial: true });
+    // A full-view page: each object replaces the stored one, so a field
+    // the server no longer sends does not linger.
+    const seeded = epoch.seed(fresh, { partial: false });
     return {
       agents: seeded.agents,
       nextCursor: data.nextCursor,
@@ -2561,11 +2636,11 @@ export class ScionPageProjectDetail extends LitElement {
       <div class="stats-row">
         <div class="stat">
           <span class="stat-label">Agents</span>
-          <span class="stat-value">${this.agentStats.total}</span>
+          <span class="stat-value">${this.renderAgentStat('total')}</span>
         </div>
         <div class="stat">
           <span class="stat-label">Running</span>
-          <span class="stat-value">${this.agentStats.running}</span>
+          <span class="stat-value">${this.renderAgentStat('running')}</span>
         </div>
         <div class="stat">
           <span class="stat-label">Created</span>

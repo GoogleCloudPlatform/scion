@@ -126,8 +126,28 @@ export interface AgentListViewState {
 export interface PagedPageParams {
   cursor?: string | undefined;
   limit: number;
-  /** `stats=1`: only on page 0, a view-state change, or a refresh (design §6.1). */
+  /** `stats=1`: only on page 0, a view-state change, or a refresh. */
   wantStats: boolean;
+  /**
+   * Aborted when the window no longer wants this page: a newer page
+   * request, a state change, {@link AgentListWindow.cancelPageFetch} (a
+   * superseding first request, a scope switch, a disconnect). The host
+   * passes it to `fetch`.
+   */
+  signal: AbortSignal;
+}
+
+/**
+ * A sorted first request in flight, from {@link AgentListWindow.beginSortedRequest}.
+ * `key` is the server-parameter key the request was built from; pass it to
+ * `setPaged` so the adopted page is recorded under the parameters it was
+ * really fetched with.
+ */
+export interface SortedRequestTicket {
+  readonly trigger: AgentListTrigger;
+  readonly key: string;
+  readonly label: string;
+  readonly eligible: boolean;
 }
 
 /** A sorted page response, as the host hands it to the window. */
@@ -154,10 +174,10 @@ export type PagedPageFetcher = (params: PagedPageParams) => Promise<PagedPageRes
 /** Construction options for {@link AgentListWindow}. */
 export interface AgentListWindowOptions {
   viewState: AgentListViewState;
-  /** The project this window belongs to, used by the paged-state off-page add rule (design §6.2). Read lazily — `project-detail.ts` constructs the window before `this.projectId` is finalized from the URL in `connectedCallback`. */
+  /** The project this window belongs to, used by the paged-state off-page add rule. Read lazily — `project-detail.ts` constructs the window before `this.projectId` is finalized from the URL in `connectedCallback`. */
   getProjectId: () => string;
   fetchPage: PagedPageFetcher;
-  /** Full `Agent` lookup for an upserted ID (design §6.2 on-page replace). Typically `stateManager.getAgent`. */
+  /** Full `Agent` lookup for an upserted ID (the on-page replace). Typically `stateManager.getAgent`. */
   getAgent: (id: string) => Agent | undefined;
   /**
    * Returns the host's current held agent array H (`this.agents`) on
@@ -191,7 +211,7 @@ export class AgentListWindow extends EventTarget {
   private _state: WindowState = 'small';
   private pageItems: Agent[] = [];
   private cursors: Array<string | undefined> = [undefined];
-  /** `pageOffsets[i]` = rows before page `i`. Pages can be short (§5.3 step 5a's race-dropped rows), so this is tracked as pages are actually fetched, not assumed to be `pageIndex * pageSize`. */
+  /** `pageOffsets[i]` = rows before page `i`. Pages can be short (rows dropped by a race with a live delete), so this is tracked as pages are actually fetched, not assumed to be `pageIndex * pageSize`. */
   private pageOffsets: number[] = [0];
   private _pageIndex = 0;
   private _totalCount = 0;
@@ -208,8 +228,12 @@ export class AgentListWindow extends EventTarget {
   private refusedLabel: string | null = null;
   /** The server parameters (sort, dir, phase, page size) the adopted paged response was requested with. */
   private pagedParams = '';
+  /** The sorted first request in flight, if any (see `beginSortedRequest`). */
+  private inFlight: SortedRequestTicket | null = null;
+  /** Aborts the window's own page fetch in flight, if any. */
+  private pageController: AbortController | null = null;
 
-  /** The label the current paged response was fetched under (design §6.2's add rule). Empty or `k=v` only — a bare-key label is never paged (design §4.3). */
+  /** The label the current paged response was fetched under (the paged add rule). Empty or `k=v` only: a bare-key label is never paged. */
   private committedLabel = '';
 
   private viewState: AgentListViewState;
@@ -318,6 +342,65 @@ export class AgentListWindow extends EventTarget {
   private serverParamsKey(): string {
     const { sortField, sortDir, phaseFilter, pageSize } = this.viewState;
     return `${sortField}|${sortDir}|${phaseFilter}|${pageSize}`;
+  }
+
+  /**
+   * Record that the host is sending a sorted first request (`fit`) for the
+   * current view state and committed label. Cancels the window's own page
+   * fetch, whose result the new response replaces. Returns the ticket to
+   * pass to `setPaged` (its `key`) and `endSortedRequest`.
+   */
+  beginSortedRequest(trigger: AgentListTrigger, committedLabel: string): SortedRequestTicket {
+    this.cancelPageFetch();
+    const ticket: SortedRequestTicket = {
+      trigger,
+      key: this.serverParamsKey(),
+      label: committedLabel.trim(),
+      eligible: this.isSortedEligible(committedLabel),
+    };
+    this.inFlight = ticket;
+    return ticket;
+  }
+
+  /** The sorted request of `ticket` has finished (adopted, failed or superseded). Pass no ticket to forget any. */
+  endSortedRequest(ticket?: SortedRequestTicket): void {
+    if (!ticket || this.inFlight === ticket) this.inFlight = null;
+  }
+
+  /**
+   * After a view-state change: the trigger of the sorted request in flight
+   * when its response no longer fits the current view state (a different
+   * sort, dir, phase or page size, a different committed label, or a view
+   * state that now needs the complete set), else `null`. The host then
+   * supersedes that request: it aborts it, calls `endSortedRequest()`, and
+   * plans again (re-sending a page-load or label-commit request, or
+   * planning the view change). A grid and list switch alone never
+   * supersedes, since both render the same response.
+   */
+  supersededRequest(committedLabel: string): AgentListTrigger | null {
+    const t = this.inFlight;
+    if (!t) return null;
+    const same =
+      t.key === this.serverParamsKey() &&
+      t.label === committedLabel.trim() &&
+      t.eligible === this.isSortedEligible(committedLabel);
+    return same ? null : t.trigger;
+  }
+
+  /**
+   * Abort the window's own page fetch in flight (next, prev or refresh), if
+   * any, and drop its result. The host calls it on a scope switch and on
+   * disconnect; `beginSortedRequest` and every state change call it too.
+   */
+  cancelPageFetch(): void {
+    if (!this.pageController) return;
+    this.pageController.abort();
+    this.pageController = null;
+    this.generation++;
+    if (this._loading) {
+      this._loading = false;
+      this.notifyChange();
+    }
   }
 
   /** 0-based index of the shown page. */
@@ -437,6 +520,7 @@ export class AgentListWindow extends EventTarget {
     reason: 'capped' | 'failed' | null,
     stale: boolean
   ): void {
+    this.cancelPageFetch();
     this.generation++;
     if (this._state === 'paged') {
       this._pageIndex = 0;
@@ -450,8 +534,17 @@ export class AgentListWindow extends EventTarget {
     this.notifyChange();
   }
 
-  /** Adopt the first paged response (a fit response with `complete: false`) fetched under `committedLabel`. Resets to page 0. */
-  setPaged(result: PagedPageResult, committedLabel: string): void {
+  /**
+   * Adopt the first paged response (a fit response with `complete: false`)
+   * fetched under `committedLabel`. Resets to page 0 with no cursor.
+   * `fetchedKey` is the ticket key of the request (see
+   * `beginSortedRequest`); the page is recorded under it, not under the
+   * current view state, so a view state that changed while the request was
+   * in flight still plans a request (`planRequest('view-change')`).
+   * Defaults to the current view state.
+   */
+  setPaged(result: PagedPageResult, committedLabel: string, fetchedKey?: string): void {
+    this.cancelPageFetch();
     this.generation++;
     this._state = 'paged';
     this.incomplete = null;
@@ -467,7 +560,7 @@ export class AgentListWindow extends EventTarget {
     this._error = null;
     this._loading = false;
     this.committedLabel = committedLabel;
-    this.pagedParams = this.serverParamsKey();
+    this.pagedParams = fetchedKey ?? this.serverParamsKey();
     this.seedStats(result.stats);
     this.replayLiveChanges(result.liveChanged);
     this.notifyChange();
@@ -521,7 +614,7 @@ export class AgentListWindow extends EventTarget {
     return result;
   }
 
-  /** The live-typed label preview filter (design §6.3), shared by the small state's full filter chain and the paged state's items-only preview. */
+  /** The live-typed label preview filter, shared by the small state's full filter chain and the paged state's items-only preview. */
   private filterByLabel(list: Agent[]): Agent[] {
     const label = this.viewState.label.trim();
     if (!label) return list;
@@ -547,13 +640,11 @@ export class AgentListWindow extends EventTarget {
   /**
    * The page slice to render: a local slice of `display` (local states), or the
    * current server page (paged). While paged, the live-typed label is still
-   * applied as a local preview with no request and no `pageIndex` change
-   * (design §6.3's "while typing, the display applies today's client label
-   * filter to what is loaded" — this previously returned `pageItems`
-   * unfiltered). `total`/`rangeStart` deliberately keep
-   * reporting the server's unfiltered count during this preview window; the
-   * design accepts that the "of N" figure may not match the filtered row
-   * count until the label is committed.
+   * applied as a local preview with no request and no `pageIndex` change:
+   * while typing, the display applies the client label filter to what is
+   * loaded. `total`/`rangeStart` deliberately keep reporting the server's
+   * unfiltered count during this preview, so the "of N" figure may not
+   * match the filtered row count until the label is committed.
    */
   get items(): Agent[] {
     if (this._state === 'paged') return this.filterByLabel(this.pageItems);
@@ -576,10 +667,10 @@ export class AgentListWindow extends EventTarget {
   }
 
   /**
-   * Rows before the current page (design §6.1's "a" in "a-b of N" is
+   * Rows before the current page (the "a" in "a-b of N" is
    * `rangeStart + 1`). In the local states this is exact
    * (`pageIndex * pageSize`, a pure local slice). In the paged state a page
-   * can be short — a race-dropped row (design §5.3 step 5a) — so this
+   * can be short (a row dropped by a race with a live delete), so this
    * is the actually-tracked running offset, not an assumption that every
    * prior page was full.
    */
@@ -658,7 +749,7 @@ export class AgentListWindow extends EventTarget {
   }
 
   /**
-   * Re-fetch the current page (the paged-state chip click, design §6.2),
+   * Re-fetch the current page (the paged-state chip click),
    * always with `stats=1` so the counts are refreshed too. A no-op in the
    * local states. If the cursor stack was invalidated, the
    * current page's cursor is still stale, so this
@@ -672,6 +763,9 @@ export class AgentListWindow extends EventTarget {
   }
 
   private async fetchPageAt(index: number, wantStats = index === 0): Promise<void> {
+    this.pageController?.abort();
+    const controller = new AbortController();
+    this.pageController = controller;
     const gen = ++this.generation;
     this._loading = true;
     this._error = null;
@@ -681,10 +775,12 @@ export class AgentListWindow extends EventTarget {
         cursor: this.cursors[index],
         limit: this.viewState.pageSize,
         wantStats,
+        signal: controller.signal,
       });
       if (gen !== this.generation) return;
+      if (this.pageController === controller) this.pageController = null;
       if (result.agents.length === 0 && index > 0) {
-        // An emptied last page (design §6.2): step back one page.
+        // An emptied last page: step back one page.
         await this.fetchPageAt(index - 1, wantStats);
         return;
       }
@@ -706,6 +802,7 @@ export class AgentListWindow extends EventTarget {
       this.replayLiveChanges(result.liveChanged);
     } catch (err) {
       if (gen !== this.generation) return;
+      if (this.pageController === controller) this.pageController = null;
       this._error = err instanceof Error ? err.message : 'Failed to load agents';
     } finally {
       if (gen === this.generation) {
@@ -727,20 +824,26 @@ export class AgentListWindow extends EventTarget {
 
   /**
    * A membership change the add rule cannot decide, for example an agent
-   * created while the global page is loaded for scope `mine` or `shared`:
-   * raises the chip while paged. Issues no request; a no-op in the local
-   * states, which keep their own add rule.
+   * created while the global page is loaded for scope `mine` or `shared`.
+   * Raises the chip while paged, and the stale banner in `held` or
+   * `capped` (a drained set that may now miss that agent). Issues no
+   * request. A no-op in `small`.
    */
   markMembershipChanged(): void {
-    if (this._state !== 'paged') return;
-    this._updatesAvailable = true;
+    if (this._state === 'paged') {
+      this._updatesAvailable = true;
+    } else if (this._state === 'held' || this._state === 'capped') {
+      this._stale = true;
+    } else {
+      return;
+    }
     this.notifyChange();
   }
 
   /**
    * Clears paged navigation after a failed view-change request: the stored
-   * cursors were minted under the previous phase/label/dir (design §4.4's
-   * cursor-binding contract) and would 400 if replayed under the new,
+   * cursors were minted under the previous phase/label/dir (a cursor is
+   * bound to its request parameters) and would 400 if replayed under the new,
    * now-current params. `hasNext`/`hasPrev` report `false` until the next
    * successful `setPaged()` mints a fresh cursor stack. A no-op in the
    * small state, which has no cursors.
@@ -755,13 +858,14 @@ export class AgentListWindow extends EventTarget {
    */
   invalidateCursors(): void {
     if (this._state !== 'paged') return;
+    this.cancelPageFetch();
     this._cursorsValid = false;
     this.generation++;
     this._loading = false;
     this.notifyChange();
   }
 
-  /** The committed label's add rule (design §6.2's "today's add rule", mirroring the server's stats population): the project match (or `isAddable`) plus the committed `k=v`, if any. */
+  /** The committed label's add rule (today's add rule, mirroring the server's stats population): the project match (or `isAddable`) plus the committed `k=v`, if any. */
   private passesCommittedLabel(agent: Agent): boolean {
     if (this.isAddable) {
       if (!this.isAddable(agent)) return false;
@@ -795,8 +899,8 @@ export class AgentListWindow extends EventTarget {
   }
 
   /**
-   * Whether an **off-page** key `k` would land on the *current* page, per
-   * design §6.2 ("on page 0: K >= first for desc, K <= first for asc"). Used
+   * Whether an **off-page** key `k` would land on the *current* page (on
+   * page 0: K >= first for desc, K <= first for asc). Used
    * only for off-page members — an on-page row uses
    * the different `onPageChipForNewKey` predicate below.
    */
@@ -810,9 +914,9 @@ export class AgentListWindow extends EventTarget {
   }
 
   /**
-   * Whether an **on-page** row's new key `k` should raise the chip (design
-   * §6.2: "the new K is outside the page's [first,last] range and the row
-   * is not at the top of page 0"). This is the
+   * Whether an **on-page** row's new key `k` should raise the chip: the new
+   * K is outside the page's [first,last] range and the row is not at the
+   * top of page 0. This is the
    * opposite direction of `withinPageKRange` — a row already on the page
    * that simply reorders to the current extreme ("the top of page 0") never
    * left the page, so no chip; only falling off the *other* end, or rising
@@ -837,10 +941,10 @@ export class AgentListWindow extends EventTarget {
   }
 
   /**
-   * Apply a coalesced `agents-changed` flush, per the design §6.2 table
-   * (implemented row-for-row, not approximated). A no-op
-   * in the small state, which is driven by `onAgentsUpdated` over
-   * `this.agents` instead (design §11).
+   * Apply a coalesced `agents-changed` flush to the current page and member
+   * index, one rule per row kind (on-page, off-page member, new agent,
+   * unknown delta). A no-op in the local states, whose host merges the
+   * change into H itself.
    */
   applyChanges(detail: AgentsChangedDetail): void {
     if (this._state !== 'paged') return;
@@ -864,7 +968,7 @@ export class AgentListWindow extends EventTarget {
       if (onPage.has(id)) {
         if (this.passesPhase(agent)) {
           // Replace this object, then re-sort the page locally (today's live reorder).
-          // Chip iff the new key would move it off this page (design §6.2).
+          // Chip iff the new key would move it off this page.
           const newK = this.kOf(agent);
           if (rangeBefore && this.onPageChipForNewKey(newK, rangeBefore)) chip = true;
           onPage.set(id, agent);
@@ -934,7 +1038,7 @@ export class AgentListWindow extends EventTarget {
   }
 
   /**
-   * An off-page upsert (design §6.2's off-page rows). A full `Agent` is
+   * An off-page upsert. A full `Agent` is
    * available, so phase, membership and K are all known precisely.
    * Returns whether the chip should show.
    */
@@ -954,39 +1058,38 @@ export class AgentListWindow extends EventTarget {
       this.memberIndex.set(id, agent.phase);
       const newlyPasses = nowPasses && !prevPassed;
       const enteredRange = this.withinPageKRange(this.kOf(agent), rangeBefore);
-      // An off-page member change affecting counts only shows no chip (design §6.2).
+      // An off-page member change affecting counts only shows no chip.
       return newlyPasses || enteredRange;
     }
 
     if (!this.passesCommittedLabel(agent)) {
       // Neither on-page nor a member, and outside the committed label: the
       // same as a delta for an ID the window has never heard of — ignored,
-      // with no chip (design §6.2). The project page
+      // with no chip. The project page
       // has no "created outside today's add rule" row; that row is for the
       // global mine/shared pages only.
       return false;
     }
 
-    // A genuinely new member under today's add rule (design §6.2) — e.g.
+    // A genuinely new member under today's add rule — e.g.
     // a `created` event, which `AgentsChangedDetail`
     // cannot distinguish from any other upsert, so the add rule itself is
-    // the gate against inflating stats for an out-of-label agent.
+    // what keeps an out-of-label agent out of the stats.
     this.memberIndex.set(id, agent.phase);
-    // A newly created agent shows only if it could land on this page
-    // (design §6.2): for a desc sort only page 0 can receive a brand-new
-    // row (inserts sort before the cursor — design §4.5); an asc sort can
-    // receive one on any page.
+    // A newly created agent shows only if it could land on this page: for
+    // a desc sort only page 0 can receive a brand-new row (inserts sort
+    // before the cursor); an asc sort can receive one on any page.
     const couldLandOnThisPage = this.viewState.sortDir === 'asc' || this._pageIndex === 0;
     return this.passesPhase(agent) && couldLandOnThisPage;
   }
 
-  /** An off-page `unknown` delta (design §6.2): only phase (and sometimes `lastActivityEvent`) is known. */
+  /** An off-page `unknown` delta: only phase (and sometimes `lastActivityEvent`) is known. */
   private applyOffPageUnknown(
     id: string,
     delta: UnknownAgentDelta,
     rangeBefore: { first: string; last: string } | null
   ): boolean {
-    if (!this.memberIndex.has(id)) return false; // neither on-page nor a member: ignored (design §6.2).
+    if (!this.memberIndex.has(id)) return false; // neither on-page nor a member: ignored.
     const prevPhase = this.memberIndex.getPhase(id);
     const prevPassed = !this.viewState.phaseFilter || prevPhase === this.viewState.phaseFilter;
     if (delta.phase) this.memberIndex.set(id, delta.phase);
@@ -995,9 +1098,8 @@ export class AgentListWindow extends EventTarget {
     const newlyPasses = nowPasses && !prevPassed;
     // K is not carried by UnknownAgentDelta's phase-only shape unless a
     // lastActivityEvent accompanies it; when absent, assume it does not
-    // enter the page (conservative: design §14 already accepts this class
-    // of drift for off-page staleness, and carrying K end-to-end is
-    // additive).
+    // enter the page (conservative: this class of off-page drift is
+    // accepted, and carrying K end-to-end would be additive).
     // An activity time moves only the `updated` key.
     const enteredRange =
       delta.lastActivityEvent && this.serverSort === 'updated'

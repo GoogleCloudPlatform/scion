@@ -221,13 +221,23 @@ describe('AgentListWindow — paged state', () => {
     expect(win.hasNext).toBe(true);
 
     await win.next();
-    expect(fetchPage).toHaveBeenLastCalledWith({ cursor: 'cursor-1', limit: 2, wantStats: false });
+    expect(fetchPage).toHaveBeenLastCalledWith({
+      cursor: 'cursor-1',
+      limit: 2,
+      wantStats: false,
+      signal: expect.any(AbortSignal),
+    });
     expect(win.items.map((a) => a.id)).toEqual(['c', 'd']);
     expect(win.pageIndex).toBe(1);
     expect(win.hasNext).toBe(false);
 
     await win.prev();
-    expect(fetchPage).toHaveBeenLastCalledWith({ cursor: undefined, limit: 2, wantStats: true });
+    expect(fetchPage).toHaveBeenLastCalledWith({
+      cursor: undefined,
+      limit: 2,
+      wantStats: true,
+      signal: expect.any(AbortSignal),
+    });
     expect(win.items.map((a) => a.id)).toEqual(['a', 'b']);
   });
 
@@ -754,7 +764,12 @@ describe('AgentListWindow — page-0 K-range chip predicate and off-page add-rul
     await win.next();
     expect(win.rangeStart).toBe(3); // rows before page 1: exactly page0's 3 rows
     await win.next(); // page 2 starts after page1's actual (short) 2 rows, not an assumed 3
-    expect(fetchPage).toHaveBeenLastCalledWith({ cursor: 'c2', limit: 3, wantStats: false });
+    expect(fetchPage).toHaveBeenLastCalledWith({
+      cursor: 'c2',
+      limit: 3,
+      wantStats: false,
+      signal: expect.any(AbortSignal),
+    });
     expect(win.rangeStart).toBe(5); // 3 + 2, not 3 + 3
   });
 
@@ -922,6 +937,7 @@ describe('AgentListWindow — refreshing a stranded page after an invalidation',
       cursor: undefined,
       limit: 2,
       wantStats: true,
+      signal: expect.any(AbortSignal),
     });
     expect(win.pageIndex).toBe(0);
     expect(win.items.map((a) => a.id)).toEqual(['e', 'f']);
@@ -936,7 +952,12 @@ describe('AgentListWindow — refreshing a stranded page after an invalidation',
     // Prove it's actually the *fresh* cursor, minted under the new params,
     // not the stale one from before the invalidation.
     await win.next();
-    expect(fetchPage).toHaveBeenLastCalledWith({ cursor: 'c1-new', limit: 2, wantStats: false });
+    expect(fetchPage).toHaveBeenLastCalledWith({
+      cursor: 'c1-new',
+      limit: 2,
+      wantStats: false,
+      signal: expect.any(AbortSignal),
+    });
     expect(win.items.map((a) => a.id)).toEqual(['g', 'h']);
   });
 });

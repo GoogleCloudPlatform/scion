@@ -109,8 +109,10 @@ function handleUpdate(subject: string, data: unknown): void {
   ).handleUpdate({ subject, data });
 }
 
+/** Runs state.ts's pending coalesced flush now, then lets the page re-render. */
 async function flushLive(el: TestEl): Promise<void> {
-  await new Promise((r) => setTimeout(r, 150));
+  (stateManager as unknown as { flush(): void }).flush();
+  await Promise.resolve();
   await el.updateComplete;
 }
 
