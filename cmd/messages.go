@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
 )
@@ -109,9 +110,9 @@ func runMessagesList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fmt.Printf("%-12s  %-14s  %-14s  %-20s  %s\n", "ID", "AGENT", "TYPE", "TIME", "MESSAGE")
-	fmt.Printf("%-12s  %-14s  %-14s  %-20s  %s\n",
-		"------------", "--------------", "--------------", "--------------------", "-------")
+	fmt.Printf("%-12s  %-14s  %-14s  %-22s  %s\n", "ID", "AGENT", "TYPE", "TIME", "MESSAGE")
+	fmt.Printf("%-12s  %-14s  %-14s  %-22s  %s\n",
+		"------------", "--------------", "--------------", "----------------------", "-------")
 	for _, m := range msgs {
 		shortID := m.ID
 		if len(shortID) > 12 {
@@ -121,7 +122,7 @@ func runMessagesList(cmd *cobra.Command, args []string) error {
 		if len(agentDisplay) > 14 {
 			agentDisplay = agentDisplay[:11] + "..."
 		}
-		timeStr := m.CreatedAt.Format("2006-01-02 15:04")
+		timeStr := clitime.Format(m.CreatedAt, clitime.Minute)
 		msgText := m.Msg
 		if len(msgText) > 60 {
 			msgText = msgText[:57] + "..."
@@ -134,7 +135,7 @@ func runMessagesList(cmd *cobra.Command, args []string) error {
 			}
 			dispatchInfo += "]"
 		}
-		fmt.Printf("%-12s  %-14s  %-14s  %-20s  %s%s\n",
+		fmt.Printf("%-12s  %-14s  %-14s  %-22s  %s%s\n",
 			shortID, agentDisplay, truncate(m.Type, 14), timeStr, msgText, dispatchInfo)
 	}
 

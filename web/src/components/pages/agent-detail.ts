@@ -1455,7 +1455,7 @@ export class ScionPageAgentDetail extends LitElement {
                     </sl-button>
                   `
                 : nothing}
-          ${agent.phase === 'created'
+          ${agent.phase === 'created' || can(agent._capabilities, 'update')
             ? html`
                 <a href="/agents/${this.agentId}/configure" style="text-decoration: none;">
                   <sl-button variant="default" size="small">

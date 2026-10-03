@@ -90,6 +90,11 @@ type BrokerCapabilities struct {
 	// BeginLaunch for a broker known to lack support; the create response's
 	// LaunchPending echo is authoritative either way.
 	AsyncLaunch bool `json:"asyncLaunch"`
+	// EmptyPerAgentWorkspace indicates this broker provisions the
+	// empty-per-agent workspace sharing mode: a private, initially empty
+	// directory at <projectDir>/agents/<slug>/workspace (design #2703). The
+	// hub refuses to dispatch such agents to a broker without it (412).
+	EmptyPerAgentWorkspace bool `json:"emptyPerAgentWorkspace"`
 }
 
 // ProjectInfo is a summary of a project registered on this broker.
@@ -509,6 +514,11 @@ type ExecRequest struct {
 // ResetAuthRequest is the request body for resetting auth on a running agent.
 type ResetAuthRequest struct {
 	Token string `json:"token"`
+	// TransportToken, when set, is a fresh hub-minted transport token
+	// (IAP / Cloud Run invoker). It is written to the agent's transport
+	// token file alongside the agent token, so a reset also recovers an
+	// agent whose transport token has expired.
+	TransportToken string `json:"transportToken,omitempty"`
 }
 
 // ResetAuthResponse is the response for auth reset.

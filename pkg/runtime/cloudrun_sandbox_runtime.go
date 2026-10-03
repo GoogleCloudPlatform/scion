@@ -31,7 +31,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
@@ -692,27 +691,19 @@ func envArgs(env map[string]string) []string {
 //	    while tmux has-session -t scion 2>/dev/null; do sleep 2; done
 func buildEntrypoint(cfg RunConfig) ([]string, error) {
 	// Build the harness command line.
-	var cmdLine string
-	if cfg.NoAuth {
-		cmdLine = buildNoAuthCmdLine(cfg.NoAuthMessage, cfg.NoAuthCommand)
-	} else if cfg.Harness != nil {
-		harnessArgs := cfg.Harness.GetCommand(cfg.Task, cfg.Resume, cfg.CommandArgs)
-		var quotedArgs []string
-		for _, a := range harnessArgs {
-			quotedArgs = append(quotedArgs, shellQuote(a))
-		}
-		cmdLine = strings.Join(quotedArgs, " ")
-	} else {
+	cmdLine, ok := harnessCmdLine(cfg)
+	if !ok {
 		return nil, fmt.Errorf("cloudrun-sandbox: no harness provided")
 	}
 
 	// Wrap the harness in a shell that records its real exit code (see
-	// common.go:469-475 for the pattern). Use absolute path for sh —
+	// tmuxAgentWindowCmd for the pattern). Use absolute path for sh —
 	// this runs as a tmux window command where PATH is available, but
 	// absolute paths are used throughout buildEntrypoint for consistency.
-	agentWindowCmd := "/bin/sh -c " + shellQuote(cmdLine+"; echo $? > "+state.HarnessExitCodeFile)
+	agentWindowCmd := tmuxAgentWindowCmd("/bin/sh", cmdLine)
 
-	// Build tmux command (common.go:479-482 pattern, adapted for sandbox).
+	// Build tmux command (buildTmuxStartCmd, adapted for sandbox via
+	// tmuxPollSession).
 	//
 	// Finding #12: `sandbox run --detach` provides no TTY. Docker allocates
 	// one with `docker run -t` (docker.go:76), but sandboxes do not.
@@ -723,15 +714,7 @@ func buildEntrypoint(cfg RunConfig) ([]string, error) {
 	// session's lifetime without needing a terminal. PID 1 exits when the
 	// session ends (all windows closed), providing the same lifecycle
 	// semantics as attach-session did in the Docker case.
-	//
-	// Note the boundary between tmux subcommands and the poll loop:
-	// `\;` is a tmux command separator (parsed by tmux), while the bare
-	// `;` after select-window ends the tmux invocation and starts the
-	// shell's while loop.
-	tmuxCmd := fmt.Sprintf(
-		"tmux new-session -d -s scion -n agent %s \\; set-option -g window-size latest \\; new-window -t scion -n shell \\; select-window -t scion:agent; while tmux has-session -t scion 2>/dev/null; do sleep 2; done",
-		agentWindowCmd,
-	)
+	tmuxCmd := buildTmuxStartCmd(agentWindowCmd, tmuxPollSession)
 
 	// CRITICAL: argv[0] must be an absolute path. The sandbox launcher resolves
 	// argv[0] BEFORE the PATH env var (set by envFor) is in effect, so bare "sh"

@@ -108,7 +108,7 @@ func DetectSettingsFormat(data []byte) (version string, isLegacy bool) {
 // V1RuntimeConfig, not on the legacy RuntimeConfig. A file using any of them
 // without schema_version is loaded as v1 so the key is not dropped by the
 // legacy loader.
-var v1RuntimeIndicatorKeys = []string{"type", "cloudrun", "gke", "list_all_namespaces", "shared_dir_storage_class", "shared_dir_size"}
+var v1RuntimeIndicatorKeys = []string{"type", "cloudrun", "gke", "list_all_namespaces", "shared_dir_storage_class", "shared_dir_size", "safe_to_evict"}
 
 // hasV1RuntimeIndicators reports whether a parsed settings map contains v1-only
 // runtime fields (v1RuntimeIndicatorKeys) that are absent from the legacy
@@ -162,6 +162,24 @@ func ValidateSettings(data []byte, schemaVersion string) ([]ValidationError, err
 		errs = append(errs, ValidateSharedDirSizes(vs.Runtimes, vs.Profiles)...)
 	}
 	return errs, nil
+}
+
+// SettingsWarnings returns non-fatal findings for a schema version "1"
+// settings file: settings that are accepted but have no effect where they
+// are set, such as safe_to_evict on a non-Kubernetes runtime entry. Data
+// that does not decode yields no warnings (ValidateSettings reports it).
+func SettingsWarnings(data []byte, schemaVersion string) []string {
+	if schemaVersion != "1" {
+		return nil
+	}
+	var vs struct {
+		Runtimes map[string]V1RuntimeConfig `yaml:"runtimes"`
+		Profiles map[string]V1ProfileConfig `yaml:"profiles"`
+	}
+	if yaml.Unmarshal(data, &vs) != nil {
+		return nil
+	}
+	return SafeToEvictIgnoredWarnings(vs.Runtimes, vs.Profiles)
 }
 
 // ValidateAgentConfig validates raw agent config data (YAML or JSON) against

@@ -1,0 +1,172 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Cluster-level NetworkPolicy prerequisites for the Substrate broker. Both
+# objects here are plain manifests: every dollar-brace placeholder is
+# resolved with `envsubst` (or equivalent) before `kubectl apply`, the same
+# convention as every other file in deploy/substrate/.
+#
+# THIS REQUIRES AN ENFORCING CNI. A GKE cluster created without GKE
+# Dataplane V2 or the Calico add-on silently accepts both objects below and
+# enforces neither of them — `kubectl apply` succeeds either way, with no
+# warning. See README.md, "Enabling NetworkPolicy enforcement", before
+# relying on either policy.
+#
+# Neither policy here creates the router->actor or bootstrap/exec allow
+# path — that traffic is permitted by NetworkPolicy objects Substrate's own
+# `atecontroller` WorkerPool controller generates per WorkerPool, not by
+# anything in this file. Both policies below are restrictions layered on
+# top of that controller-generated baseline; see each policy's own comment
+# for exactly what it restricts.
+
+# Router ingress restriction (.design/kubernetes/substrate-runtime.md §5.2
+# fallback requirement): the bootstrap nonce fallback ("first bootstrap
+# wins") is only acceptable with this in place, restricting the router to
+# broker-namespace callers.
+#
+# Verified against the upstream install manifests
+# (github.com/agent-substrate/substrate, manifests/ate-install/atenet-router.yaml
+# @ default branch, fetched 2026-09-23):
+#   - the router pod is labeled app: atenet-router in ate-system;
+#   - its Service exposes 80->8080 (http), 443->8443 (https), 8081 (connect),
+#     8444 (connect-tls), 4040 (status) — these are the client-facing ports
+#     this policy must keep open to the broker;
+#   - readiness/liveness probes hit port 9090 on the router container itself
+#     (kubelet-originated; exempt from NetworkPolicy on GKE, by design, on
+#     both enforcement backends — Calico and Dataplane V2 — but verify on
+#     your cluster; see ../README.md's "Kubelet health-check probes are
+#     exempt" note);
+#   - metrics scraping is a separate concern: atenet-router-monitoring.yaml
+#     is a Google Managed Prometheus PodMonitoring scraping the *envoy*
+#     container's admin port (9901) directly by pod IP, not through this
+#     Service — GMP's collector traffic path varies by cluster config, so if
+#     metrics disappear after applying this policy, that's the first place
+#     to look (see ../README.md);
+#   - ateapi and atelet are never *clients* of the router's inbound ports in
+#     the upstream manifests (the router calls them, egress from the
+#     router's perspective, not ingress) — nothing here should need to name
+#     them.
+# The upstream install ships no NetworkPolicy for atenet-router at all
+# (confirmed: no NetworkPolicy in manifests/ate-install/), so this is
+# additive, not a replacement of something existing.
+#
+# Rollback: kubectl delete networkpolicy atenet-router-restrict-ingress -n "${ATE_SYSTEM_NAMESPACE}"
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: atenet-router-restrict-ingress
+  namespace: ${ATE_SYSTEM_NAMESPACE}
+spec:
+  podSelector:
+    matchLabels:
+      app: atenet-router
+  policyTypes:
+    - Ingress
+  ingress:
+    # The substrate broker: bootstrap/exec calls to actor control servers via
+    # ate-target-actor, plus health/readiness checks the broker itself makes.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ${BROKER_NAMESPACE}
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 8443
+        - protocol: TCP
+          port: 8081
+        - protocol: TCP
+          port: 8444
+    # kubelet's own readiness/liveness probes (port 9090) and Google Managed
+    # Prometheus scraping (envoy admin, port 9901) are NOT namespace-scoped
+    # traffic in the same way — see the comment block above and ../README.md's
+    # "Known limitations" before assuming this policy is complete on your
+    # cluster.
+---
+# Worker-namespace default-deny ingress baseline.
+#
+# This is deliberately a bare default-deny, not a hand-written allow rule.
+# NetworkPolicy objects that select the same pods are OR'd together — a
+# pod is reachable if *any* applicable policy permits the traffic. A
+# default-deny with NO ingress rules adds no allow to that union: it only
+# turns "unselected by any policy => fully open" into "selected, but with
+# zero allows of its own" for whichever pods in this namespace the
+# controller-generated per-WorkerPool policy does NOT already cover. It
+# cannot narrow what that controller-generated policy already permits,
+# because a peer either matches one of that policy's `ingress[].from`
+# entries or it doesn't — this object never appears in that evaluation.
+#
+# A hand-written ALLOW policy here (e.g. "allow from ${ATE_SYSTEM_NAMESPACE}
+# to all pods in this namespace") would do the opposite: it would union
+# into every pod's evaluation, including pods the per-WorkerPool policy
+# already restricts more precisely (podSelector on the specific pool,
+# ingress only from atenet-router pods within ${ATE_SYSTEM_NAMESPACE}, an
+# AND of both selectors on one peer). That would WIDEN access beyond what
+# the controller-generated policy grants — the same reasoning ../README.md,
+# "Known limitations", documents for why this folder doesn't hand-write a
+# worker-side allow policy. This object is not that: it is a floor under
+# pods the controller-generated policy doesn't reach, not a wider door.
+#
+# No egress policy is included here on purpose — an egress policy in this
+# namespace risks breaking the egress gateway and DNS paths every actor
+# depends on, and validating that is out of scope for this baseline.
+#
+# Rollback: kubectl delete networkpolicy scion-worker-default-deny-ingress -n "${SUBSTRATE_WORKER_NAMESPACE}"
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: scion-worker-default-deny-ingress
+  namespace: ${SUBSTRATE_WORKER_NAMESPACE}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  # No `ingress` key: zero rules means zero allows from this policy specifically.
+---
+# Broker-namespace default-deny ingress baseline (README.md, "Should there
+# also be an ingress NetworkPolicy on the broker pod" — this is that policy,
+# at the bare default-deny level that question left open).
+#
+# The broker only ever DIALS OUT — to ateapi, the router, and the hub's own
+# control channel — and never needs another in-cluster peer to reach it: the
+# one inbound port it exposes, broker-api (9800), is called by kubelet's own
+# readiness/livenessProbe only, which (like the router's probes documented
+# above) is exempt from NetworkPolicy enforcement on GKE's supported CNIs,
+# not a peer this policy needs to name. A bare default-deny with no ingress
+# rules is therefore already complete: it does not need the
+# node-CIDR-dependent "kubelet only" allow rule the README's own
+# "Known limitations" discussion raises as unresolved, because kubelet's
+# probe traffic was never subject to this policy's denial in the first
+# place. Any other pod outside this namespace that attempts an actual
+# broker-api RPC call is denied at the network layer now, on top of the
+# HMAC auth that already refuses it at the application layer (README.md,
+# "Broker API exposure").
+#
+# Same reasoning as the worker-namespace policy above for why this is a
+# bare default-deny rather than a hand-written allow: nothing in this
+# namespace needs an allow rule to function, so there is nothing to widen
+# by getting an allow rule wrong.
+#
+# Rollback: kubectl delete networkpolicy scion-broker-default-deny-ingress -n "${BROKER_NAMESPACE}"
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: scion-broker-default-deny-ingress
+  namespace: ${BROKER_NAMESPACE}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+  # No `ingress` key: zero rules means zero allows from this policy specifically.

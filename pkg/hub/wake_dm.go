@@ -177,7 +177,9 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			}
 		}
 		agent.Phase = string(state.PhaseStarting)
-		s.events.PublishAgentStatus(ctx, agent)
+		// Publish from a re-read: a delete that claimed the row meanwhile
+		// must not be painted over (design ptone/scion#2483 note F).
+		s.publishAgentStatusFresh(ctx, agent)
 
 		// Wait for the agent to report its first activity (readiness signal).
 		if err := s.waitForAgentReady(ctx, agent.ID, 30*time.Second); err != nil {
@@ -222,7 +224,9 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			}
 		}
 		agent.Phase = string(state.PhaseRunning)
-		s.events.PublishAgentStatus(ctx, agent)
+		// Publish from a re-read: a delete that claimed the row meanwhile
+		// must not be painted over (design ptone/scion#2483 note F).
+		s.publishAgentStatusFresh(ctx, agent)
 
 		return &WakeResult{Outcome: WakeResumed}, nil
 
@@ -251,6 +255,18 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			HTTPStatus: http.StatusBadRequest,
 		}
 	}
+}
+
+// validateGroupMemberDeliverable is validateAgentDeliverable for a group[]
+// member. Group messages never wake agents, so a suspended member gets a
+// reason that points the sender at a direct, waking message instead of the
+// generic "use --wake" hint (which group sends do not accept).
+func validateGroupMemberDeliverable(agent *store.Agent) *AgentDMError {
+	err := validateAgentDeliverable(agent)
+	if err != nil && state.Phase(agent.Phase) == state.PhaseSuspended {
+		err.Message = fmt.Sprintf("agent %q is suspended; group messages do not wake agents — message it directly with --wake", agent.Slug)
+	}
+	return err
 }
 
 // validateAgentDeliverable checks that the target agent is in a state that

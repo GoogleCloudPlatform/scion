@@ -1106,6 +1106,8 @@ func (s *Server) handleExistingAgent(
 				return res
 			}
 			switch {
+			case writeAgentTokenIssueError(w, err):
+				// Response written.
 			case writeEmptyPerAgentCapabilityError(w, err):
 				// 412 already written (design #2703 D3).
 			case isContainerNameConflict(err):
@@ -1192,6 +1194,8 @@ func (s *Server) handleExistingAgent(
 					return res
 				}
 				switch {
+				case writeAgentTokenIssueError(w, err):
+					// Response written.
 				case writeEmptyPerAgentCapabilityError(w, err):
 					// 412 already written (design #2703 D3).
 				case isContainerNameConflict(err):
@@ -1307,6 +1311,8 @@ func (s *Server) handleExistingAgent(
 				return res
 			}
 			switch {
+			case writeAgentTokenIssueError(w, err):
+				// Response written.
 			case writeEmptyPerAgentCapabilityError(w, err):
 				// 412 already written (design #2703 D3).
 			case isContainerNameConflict(err):

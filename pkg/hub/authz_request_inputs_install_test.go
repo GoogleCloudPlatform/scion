@@ -132,7 +132,9 @@ func newSystemAuthoritySourceFixture(t *testing.T, s store.Store, name string) *
 // sharing-source check walks the parent's delegation chain and loads that
 // delegator's effective permissions, including the access constraint
 // table. The child's own source user is the same project member, so
-// execution-project admission passes on membership evidence.
+// execution-project admission passes on membership evidence. Both edges
+// carry recorded session provenance, which the delegation ceiling requires
+// for project.secret_read.
 type sourceAgentChainFixture struct {
 	projectID   string
 	delegatorID string
@@ -155,14 +157,14 @@ func newSourceAgentChainFixture(t *testing.T, s store.Store, name string) *sourc
 	createDCProject(t, s, projectID, name+"-proj")
 	createDCUser(t, s, delegatorID, name+"-delegator@test.com", projectID, store.ProjectRoleAdmin)
 	createDCAgent(t, s, parentID, projectID, delegatorID, AgentRoleFull)
-	createDCEdge(t, s, store.DelegationPrincipalUser, delegatorID, store.DelegationPrincipalAgent, parentID,
+	seedRecordedDelegationEdge(t, s, store.DelegationPrincipalUser, delegatorID, store.DelegationPrincipalAgent, parentID,
 		store.RoleScopeProject, projectID, string(AgentRoleFull))
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{
 		ID: childID, Slug: name + "-child", Name: name + "-child",
 		ProjectID: projectID, Phase: "running",
 		OwnerID: delegatorID, CreatedBy: parentID, Ancestry: []string{delegatorID, parentID},
 	}))
-	createDCEdge(t, s, store.DelegationPrincipalUser, delegatorID, store.DelegationPrincipalAgent, childID,
+	seedRecordedDelegationEdge(t, s, store.DelegationPrincipalUser, delegatorID, store.DelegationPrincipalAgent, childID,
 		store.RoleScopeProject, projectID, string(AgentRoleFull))
 	require.NoError(t, s.CreateSecret(ctx, &store.Secret{
 		ID: secretID, Key: name + "-secret", Scope: "user", ScopeID: delegatorID,

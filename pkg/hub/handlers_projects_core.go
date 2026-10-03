@@ -691,6 +691,19 @@ func (s *Server) createProjectOwnerRoleBinding(ctx context.Context, projectID, u
 }
 
 const systemProjectMembersGroupAnnotation = "scion.io/project-members-group"
+
+// legacyProjectMembersGroupAnnotation is the project-members-group marker
+// written by the entadapter marker backfill
+// (BackfillProjectMembersGroupMarkers). It differs from
+// systemProjectMembersGroupAnnotation, the key createProjectMembersGroup
+// writes; ptone/scion#2556 tracks that mismatch. Until it is resolved, the
+// owner-clearing backfill matches either key.
+//
+// This literal duplicates the entadapter constant
+// systemProjectMembersGroupAnnotation in pkg/store/entadapter/composite.go;
+// fold the two together under ptone/scion#2556.
+const legacyProjectMembersGroupAnnotation = "scion.io/system-project-members-group"
+
 const systemProjectAgentsGroupAnnotation = "scion.io/project-agents-group"
 
 func projectMembersGroupSlug(projectSlug string) string {

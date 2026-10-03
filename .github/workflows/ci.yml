@@ -180,6 +180,38 @@ jobs:
           esac
           exit "$rc"
 
+      - name: Check CLI Time Zones
+        run: |
+          # Invoked directly rather than via `make cli-time-zones`, for the same
+          # reason as Check Authorization Guards above: make would collapse the
+          # script's exit 1 (violations) and exit 3/4 (nothing was analysed).
+          set +e
+          ./hack/check-cli-time-zones.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=CLI time zones::A time layout in CLI code has no zone token. Format CLI times with pkg/clitime (clitime.Format); details are in the step log above." ;;
+            *) echo "::error title=CLI time zones NOT checked::check-cli-time-zones.sh could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure, not a statement about the codebase." ;;
+          esac
+          exit "$rc"
+
+      - name: Check Time Literals
+        run: |
+          # Invoked directly rather than via `make time-literals`, for the same
+          # reason as Check Authorization Guards above: make would collapse the
+          # script's exit 1 (violations) and exit 3/4 (nothing was analysed).
+          set +e
+          ./hack/check-time-literals.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=Time literals::A server-side time is formatted without .UTC() or bound in the wrong form for its column. Fix the site or add a justified entry to hack/time-literals-allowlist.txt; details are in the step log above." ;;
+            *) echo "::error title=Time literals NOT checked::check-time-literals.sh could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure, not a statement about the codebase." ;;
+          esac
+          exit "$rc"
+
       - name: Run Tests
         run: make test-fast
 

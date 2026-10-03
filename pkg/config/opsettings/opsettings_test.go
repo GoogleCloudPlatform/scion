@@ -1725,3 +1725,26 @@ func TestSharedDirKeysSchemaValidation(t *testing.T) {
 		}
 	}
 }
+
+// TestSafeToEvictSchemaValidation verifies the runtimes and profiles section
+// schemas accept safe_to_evict as a boolean and reject other types.
+func TestSafeToEvictSchemaValidation(t *testing.T) {
+	valid := map[string]string{
+		"runtimes": `{"gke": {"type": "kubernetes", "safe_to_evict": false}}`,
+		"profiles": `{"gke": {"runtime": "gke", "safe_to_evict": true}}`,
+	}
+	for sec, doc := range valid {
+		if errs := Validate(sec, json.RawMessage(doc)); len(errs) > 0 {
+			t.Errorf("%s: expected boolean safe_to_evict to be valid, got errors: %v", sec, errs)
+		}
+	}
+	invalid := map[string]string{
+		"runtimes": `{"gke": {"type": "kubernetes", "safe_to_evict": "false"}}`,
+		"profiles": `{"gke": {"runtime": "gke", "safe_to_evict": 0}}`,
+	}
+	for sec, doc := range invalid {
+		if errs := Validate(sec, json.RawMessage(doc)); len(errs) == 0 {
+			t.Errorf("%s: expected a non-boolean safe_to_evict to be rejected", sec)
+		}
+	}
+}

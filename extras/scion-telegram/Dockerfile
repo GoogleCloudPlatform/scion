@@ -26,6 +26,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 COPY pkg/ pkg/
 COPY cmd/ cmd/
+COPY third_party/ third_party/
 
 # Copy the telegram module.
 COPY extras/scion-telegram/ extras/scion-telegram/

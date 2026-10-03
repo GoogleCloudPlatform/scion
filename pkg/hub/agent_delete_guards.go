@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
@@ -268,11 +269,19 @@ func (s *Server) clearFailedDeletionAtClaim(ctx context.Context, a *store.Agent,
 func (s *Server) settleLifecycleWrite(ctx context.Context, a *store.Agent, newPhase string) {
 	a.Phase = newPhase
 	s.clearFailedDeletion(ctx, a)
-	fresh, err := s.store.GetAgent(ctx, a.ID)
-	if err != nil {
+	if err := s.reloadGuardedColumns(ctx, a); err != nil {
 		s.agentLifecycleLog.Warn("failed to re-read agent after lifecycle write",
 			"agent_id", a.ID, "error", err)
-		return
+	}
+}
+
+// reloadGuardedColumns re-reads a's row and copies the columns a concurrent
+// delete (or a guarded store write) may have changed, so a following publish
+// reports the row as stored rather than as the caller assumed it.
+func (s *Server) reloadGuardedColumns(ctx context.Context, a *store.Agent) error {
+	fresh, err := s.store.GetAgent(ctx, a.ID)
+	if err != nil {
+		return err
 	}
 	a.Phase = fresh.Phase
 	a.Activity = fresh.Activity
@@ -281,6 +290,7 @@ func (s *Server) settleLifecycleWrite(ctx context.Context, a *store.Agent, newPh
 	a.ExitReason = fresh.ExitReason
 	a.Message = fresh.Message
 	a.StateVersion = fresh.StateVersion
+	a.DeletedAt = fresh.DeletedAt
 	a.DeletionState = fresh.DeletionState
 	a.DeletionClaim = fresh.DeletionClaim
 	a.DeletionLeaseAt = fresh.DeletionLeaseAt
@@ -290,4 +300,23 @@ func (s *Server) settleLifecycleWrite(ctx context.Context, a *store.Agent, newPh
 	a.DeletionError = fresh.DeletionError
 	a.DeletionPrior = fresh.DeletionPrior
 	a.DeletionRequest = fresh.DeletionRequest
+	return nil
+}
+
+// publishAgentStatusFresh publishes a's status from a re-read of its row
+// (design note F): a status write that raced a delete must not publish the
+// phase it intended over the delete's stopping/deleted. Nothing is published
+// when the row is gone or soft-deleted.
+func (s *Server) publishAgentStatusFresh(ctx context.Context, a *store.Agent) {
+	if err := s.reloadGuardedColumns(ctx, a); err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.agentLifecycleLog.Warn("failed to re-read agent before status publish",
+				"agent_id", a.ID, "error", err)
+		}
+		return
+	}
+	if !a.DeletedAt.IsZero() {
+		return
+	}
+	s.events.PublishAgentStatus(ctx, a)
 }

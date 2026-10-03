@@ -64,6 +64,10 @@ type Agent struct {
 	StateVersion int64    `json:"stateVersion,omitempty"`
 	ExitCode     *int     `json:"exitCode,omitempty"`
 	ExitReason   string   `json:"exitReason,omitempty"`
+	// Deletion is the hub's view of an active or failed delete of this agent
+	// (design ptone/scion#2483 §2.2). It is nil when no delete is active or
+	// failed.
+	Deletion *DeletionInfo `json:"deletion,omitempty"`
 }
 
 // AgentConfig represents agent configuration.
@@ -304,6 +308,10 @@ type BrokerCapabilities struct {
 	// create path and the launch-report protocol (design t1-async-create-v11.md
 	// §3.2, §7 P1b-1).
 	AsyncLaunch bool `json:"asyncLaunch"`
+	// EmptyPerAgentWorkspace indicates the broker can provision the
+	// empty-per-agent workspace sharing mode (design #2703;
+	// store.BrokerCapabilities.EmptyPerAgentWorkspace is its counterpart).
+	EmptyPerAgentWorkspace bool `json:"emptyPerAgentWorkspace"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
