@@ -3542,8 +3542,9 @@ func (s *Server) publishBroadcastDeliveryFailed(ctx context.Context, targetAgent
 		return
 	}
 	// ptone/scion#1838: detach from the (possibly expired/cancelled)
-	// dispatch ctx, as publishDeliveryFailed does.
-	ctx, cancel := finalizationContext(ctx)
+	// dispatch ctx, as publishDeliveryFailed does, with the notice budget
+	// (deliveryNoticeTimeout) since the notice itself goes via the broker.
+	ctx, cancel := detachedContext(ctx, deliveryNoticeTimeout)
 	defer cancel()
 	senderAgent, err := s.store.GetAgent(ctx, msg.SenderID)
 	if err != nil {

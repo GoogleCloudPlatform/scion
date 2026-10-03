@@ -41,7 +41,18 @@ import (
 // transitions (MarkMessageDispatched / MarkMessageFailed) when the original
 // request context has been cancelled. This prevents silently discarding
 // known outcomes (AC-3).
+//
+// 5s is ample for a single-row CAS on the local store; anything slower
+// indicates a store problem that waiting longer would not fix.
 const finalizationTimeout = 5 * time.Second
+
+// deliveryNoticeTimeout bounds the detached budget for sending a
+// DELIVERY_FAILED notice back to the sender (ptone/scion#1838). Unlike the
+// row CAS above, a notice resolves the sender agent and then dispatches
+// through the runtime broker, which is a network round trip to a possibly
+// slow or recovering broker. 15s gives that dispatch room to complete
+// without letting a stuck broker pin the goroutine indefinitely.
+const deliveryNoticeTimeout = 15 * time.Second
 
 // checkDispatchAvailability verifies that dispatch infrastructure is
 // available for the target agent. Returns nil if dispatch can proceed,
@@ -88,7 +99,15 @@ func (s *Server) checkDispatchAvailability(input *AgentDMInput) *AgentDMError {
 // MarkMessageDispatched / MarkMessageFailed) complete even if the parent
 // request context is cancelled mid-flight.
 func finalizationContext(parent context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.WithoutCancel(parent), finalizationTimeout)
+	return detachedContext(parent, finalizationTimeout)
+}
+
+// detachedContext detaches from parent's cancellation (keeping its values)
+// and applies timeout d. finalizationContext is the row-CAS flavour; use
+// detachedContext directly when the post-dispatch work needs a different
+// budget (e.g. deliveryNoticeTimeout).
+func detachedContext(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), d)
 }
 
 // markDispatched transitions a message from pending to dispatched after

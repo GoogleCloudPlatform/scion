@@ -1119,8 +1119,10 @@ func (p *MessageBrokerProxy) publishDeliveryFailed(ctx context.Context, projectI
 	// ptone/scion#1838: this notice is a post-dispatch finalization. Callers
 	// often hold a dispatch ctx that has already expired (broker timeout) or
 	// been cancelled, so detach from it with a bounded timeout rather than
-	// silently dropping the sender's DELIVERY_FAILED.
-	ctx, cancel := finalizationContext(ctx)
+	// silently dropping the sender's DELIVERY_FAILED. The notice dispatches
+	// through the runtime broker, so it gets deliveryNoticeTimeout rather
+	// than the 5s row-CAS budget.
+	ctx, cancel := detachedContext(ctx, deliveryNoticeTimeout)
 	defer cancel()
 	senderAgent, err := p.store.GetAgent(ctx, msg.SenderID)
 	if err != nil {
