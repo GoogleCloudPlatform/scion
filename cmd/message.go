@@ -68,8 +68,8 @@ var deprecationReplacements = []struct {
 	{"notify", "use 'scion notifications subscribe' instead"},
 	{"in", "use 'scion schedule create --in' instead"},
 	{"at", "use 'scion schedule create --at' instead"},
-	{"channel", "use @<agent-name> to message an agent directly"},
-	{"thread-id", "use @<agent-name> to message an agent directly"},
+	{"channel", "address the conversation with conv:<uuid> (see 'scion conversation list'), or use @<name> to message an agent directly"},
+	{"thread-id", "address the conversation with conv:<uuid> (see 'scion conversation list'); the Hub rejects a thread ID that does not match an existing conversation"},
 	{"cc", "--cc is deprecated and will be removed"},
 }
 
@@ -1006,7 +1006,13 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 		}
 		return nil
 	}
-	fmt.Printf("Message sent to %s via Hub.\n", userRecipient)
+	// #2026: name the conversation the message landed in when the hub
+	// reports it, so a send with --channel/--thread-id shows where it went.
+	if result != nil && result.ConversationID != "" {
+		fmt.Printf("Message sent to %s via Hub (conversation %s).\n", userRecipient, result.ConversationID)
+	} else {
+		fmt.Printf("Message sent to %s via Hub.\n", userRecipient)
+	}
 	if result != nil {
 		printMentionResults(result.MentionResults)
 	}
