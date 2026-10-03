@@ -110,7 +110,10 @@ func (s *AgentStore) updateAgentDeletionOnce(ctx context.Context, uid uuid.UUID,
 	upd := tx.Agent.Update().
 		Where(agent.IDEQ(uid), agent.StateVersionEQ(row.StateVersion)).
 		SetStateVersion(row.StateVersion + 1)
-	if !set.KeepUpdated {
+	if set.KeepUpdated {
+		// The schema's UpdateDefault would stamp updated; pin the old value.
+		upd.SetUpdated(row.Updated)
+	} else {
 		upd.SetUpdated(now)
 	}
 	if set.State != nil {
