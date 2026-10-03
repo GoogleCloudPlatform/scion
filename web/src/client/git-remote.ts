@@ -34,15 +34,30 @@ export const GIT_REMOTE_INVALID =
 export const GIT_REMOTE_SSH_PORT =
   'gitRemote: ssh URLs with a port are not supported yet; use the https URL';
 
+/** Same text as the hub's errCloneRemoteTLSPort. */
+export const GIT_REMOTE_TLS_PORT =
+  'gitRemote: git:// URLs with a port and http:// URLs with a port other than 80 are not supported; use the https URL';
+
 const SCHEMES = ['https://', 'http://', 'ssh://', 'git://'];
 const SCP_LOGIN = /^[A-Za-z0-9._-]+$/;
 // DNS labels may not start or end with '-'.
 const LABEL = '[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?';
 const HOSTNAME = new RegExp(`^${LABEL}(\\.${LABEL})+$`);
 const HOST_LABELS = new RegExp(`^${LABEL}(\\.${LABEL})*$`);
-// unicode.IsSpace || unicode.IsControl.
-const SPACE_OR_CONTROL = /[\s\p{Cc}]/u;
+// Anything outside printable, non-space ASCII (0x21-0x7E): the hub's isPrintableASCII.
+const NOT_PRINTABLE_ASCII = /[^\x21-\x7e]/;
+// A '%' not followed by two hex digits (Go's url.Parse / url.PathUnescape fail).
+const BAD_ESCAPE = /%(?![0-9A-Fa-f]{2})/;
+// Characters Go's net/url accepts in userinfo (validUserinfo).
+const USERINFO = /^[A-Za-z0-9\-._:~!$&'()*+,;=%@]*$/;
+// ASCII whitespace trimmed from both ends, as the hub's trimRemote does.
+const ASCII_SPACE_EDGES = /^[ \t\n\v\f\r]+|[ \t\n\v\f\r]+$/g;
 const IPV4 = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+
+/** Trim ASCII whitespace only (not U+0085 or U+FEFF), like the hub's trimRemote. */
+export function trimRemote(remote: string): string {
+  return remote.replace(ASCII_SPACE_EDGES, '');
+}
 
 /** Drop everything from the first `?` or `#`; git remotes need neither and a query can carry tokens. */
 export function stripQueryAndFragment(remote: string): string {
@@ -123,7 +138,7 @@ export function dropDefaultPort(remote: string): string {
  * without query/fragment, credentials or a default port.
  */
 export function sanitizeGitRemote(remote: string): string {
-  return dropDefaultPort(stripGitURLCredentials(stripQueryAndFragment(remote.trim())));
+  return dropDefaultPort(stripGitURLCredentials(stripQueryAndFragment(trimRemote(remote))));
 }
 
 function splitSCP(remote: string): { login: string; host: string; path: string } | null {
@@ -142,6 +157,30 @@ function hasOrgAndRepo(path: string): boolean {
   return path.replace(/^\/+|\/+$/g, '').includes('/');
 }
 
+/**
+ * Mirror of the hub's validRemotePath: a decoded path (no leading '/') whose
+ * segments are non-empty, not "." or "..", and free of '@' and control
+ * characters. One trailing '/' is allowed.
+ */
+function validRemotePath(path: string): boolean {
+  return path
+    .replace(/\/$/, '')
+    .split('/')
+    .every((seg) => seg !== '' && seg !== '.' && seg !== '..' && !/[@\x00-\x1f\x7f]/.test(seg));
+}
+
+/** Decode %-escapes (UTF-8 or not, byte-wise like Go), or null on a malformed escape. */
+function unescapePath(path: string): string | null {
+  if (BAD_ESCAPE.test(path)) return null;
+  return path.replace(/%([0-9A-Fa-f]{2})/g, (_, h: string) => String.fromCharCode(parseInt(h, 16)));
+}
+
+/** Mirror of the hub's validEscapedRemotePath: checks the raw and the decoded path. */
+function validEscapedRemotePath(path: string): boolean {
+  const decoded = unescapePath(path);
+  return decoded !== null && validRemotePath(path) && validRemotePath(decoded);
+}
+
 function isPort(s: string): boolean {
   if (!/^[0-9]+$/.test(s) || s.startsWith('0')) return false;
   const n = Number(s);
@@ -151,24 +190,30 @@ function isPort(s: string): boolean {
 /**
  * Host, port and path of a scheme URL as Go's net/url splits them (the
  * authority ends at the first '/'; userinfo ends at its last '@'), or null
- * when Go's url.Parse would fail: an unterminated IPv6 literal or a
+ * when Go's url.Parse would fail: a malformed %-escape, a userinfo character
+ * net/url rejects (e.g. '\\' or '"'), an unterminated IPv6 literal or a
  * non-numeric port. `hasColon` is true when a ':' introduces the port.
  */
 function parseURLHost(
   remote: string
 ): { host: string; port: string; hasColon: boolean; path: string } | null {
+  if (BAD_ESCAPE.test(remote)) return null;
   const rest = remote.slice(remote.indexOf('://') + 3);
   const slash = rest.indexOf('/');
   const path = slash >= 0 ? rest.slice(slash) : '';
   let authority = slash >= 0 ? rest.slice(0, slash) : rest;
   const at = authority.lastIndexOf('@');
-  if (at >= 0) authority = authority.slice(at + 1);
+  if (at >= 0) {
+    if (!USERINFO.test(authority.slice(0, at))) return null;
+    authority = authority.slice(at + 1);
+  }
   let host: string;
   let portPart: string;
   if (authority.startsWith('[')) {
     const close = authority.indexOf(']');
     if (close < 0) return null;
     host = authority.slice(1, close);
+    if (!isIPv6(host)) return null; // brackets hold only an IPv6 literal
     portPart = authority.slice(close + 1);
     if (portPart && !portPart.startsWith(':')) return null;
   } else {
@@ -183,11 +228,36 @@ function parseURLHost(
 
 /** A DNS name (single label allowed) or an IP address, as url.Hostname() returns it. */
 function isURLHost(host: string): boolean {
-  return (
-    HOST_LABELS.test(host) ||
-    IPV4.test(host) ||
-    (host.includes(':') && /^[0-9A-Fa-f:.]+$/.test(host))
-  );
+  return HOST_LABELS.test(host) || IPV4.test(host) || isIPv6(host);
+}
+
+/** Strict IPv6 literal check, matching Go's net.ParseIP (an IPv4 tail is allowed). */
+function isIPv6(host: string): boolean {
+  if (!host.includes(':')) return false;
+  const halves = host.split('::');
+  if (halves.length > 2) return false;
+  const groups = (part: string): number | null => {
+    if (part === '') return 0;
+    const parts = part.split(':');
+    let n = 0;
+    for (let i = 0; i < parts.length; i++) {
+      if (i === parts.length - 1 && parts[i].includes('.')) {
+        if (!IPV4.test(parts[i])) return null;
+        n += 2;
+      } else if (/^[0-9A-Fa-f]{1,4}$/.test(parts[i])) {
+        n += 1;
+      } else {
+        return null;
+      }
+    }
+    return n;
+  };
+  const head = groups(halves[0]);
+  if (head === null) return false;
+  if (halves.length === 1) return head === 8;
+  if (halves[0].includes('.')) return false; // an IPv4 tail must come last
+  const tail = groups(halves[1]);
+  return tail !== null && head + tail < 8;
 }
 
 /** Validate a scheme URL override as the hub's validateCloneSchemeRemote does. */
@@ -210,8 +280,16 @@ function validateSchemeRemote(remote: string): string | null {
   if (isSSH && parsed.hasColon) return GIT_REMOTE_SSH_PORT;
   // A port must be 1-65535 without leading zeros; a bare ':' is rejected.
   if (parsed.hasColon && !isPort(parsed.port)) return GIT_REMOTE_INVALID;
-  // '@' in the path is ambiguous with userinfo.
-  if (parsed.path.includes('@')) return GIT_REMOTE_INVALID;
+  // git:// with any port or http:// with a non-80 port would become an
+  // https clone-url to a plain-text port.
+  if (
+    (scheme === 'git' && parsed.port) ||
+    (scheme === 'http' && parsed.port && parsed.port !== '80')
+  ) {
+    return GIT_REMOTE_TLS_PORT;
+  }
+  // Dot, empty and '@' segments, raw and decoded ('@' is ambiguous with userinfo).
+  if (!validEscapedRemotePath(parsed.path.replace(/^\//, ''))) return GIT_REMOTE_INVALID;
   if (!isSchemeGitURL(remote)) return GIT_REMOTE_INVALID;
   // Removing credentials must change nothing but the userinfo.
   const stripped = parseURLHost(stripGitURLCredentials(remote));
@@ -243,13 +321,15 @@ function isSchemeGitURL(remote: string): boolean {
  * (no ssh port, and credential stripping must change only the userinfo), SCP
  * user@host:org/repo with any login and any host (single-label allowed), or
  * scheme-less host[:port]/org/repo with a dotted host. SCP without a login
- * (github.com:org/repo), whitespace or control characters, '@' in the path
- * and DNS labels starting or ending with '-' are rejected. Returns null when it is acceptable,
+ * (github.com:org/repo), anything but printable ASCII, malformed %-escapes,
+ * '@' (raw or %40), "." / ".." or empty segments in the path, git:// with a
+ * port, http:// with a port other than 80, and DNS labels starting or ending
+ * with '-' are rejected. Returns null when it is acceptable,
  * otherwise the hub's 400 message. Input should be trimmed and have its query
  * and fragment removed (see {@link stripQueryAndFragment}).
  */
 export function validateGitRemote(remote: string): string | null {
-  if (SPACE_OR_CONTROL.test(remote)) return GIT_REMOTE_INVALID;
+  if (NOT_PRINTABLE_ASCII.test(remote)) return GIT_REMOTE_INVALID;
   if (remote.includes('://')) return validateSchemeRemote(remote);
 
   const scp = splitSCP(remote);
@@ -260,7 +340,8 @@ export function validateGitRemote(remote: string): string | null {
       !scp.path.includes('@') &&
       scp.path !== '' &&
       !scp.path.startsWith('/') &&
-      hasOrgAndRepo(scp.path);
+      hasOrgAndRepo(scp.path) &&
+      validEscapedRemotePath(scp.path);
     return ok ? null : GIT_REMOTE_INVALID;
   }
 
@@ -272,7 +353,9 @@ export function validateGitRemote(remote: string): string | null {
   if (!HOSTNAME.test(host) || (colon >= 0 && !isPort(hostPort.slice(colon + 1)))) {
     return GIT_REMOTE_INVALID;
   }
-  return hasOrgAndRepo(path) && !path.includes('@') ? null : GIT_REMOTE_INVALID;
+  return hasOrgAndRepo(path) && !path.includes('@') && validEscapedRemotePath(path)
+    ? null
+    : GIT_REMOTE_INVALID;
 }
 
 /**

@@ -33,6 +33,7 @@ import {
   normalizeGitRemote,
   sanitizeGitRemote,
   stripQueryAndFragment,
+  trimRemote,
   validateGitRemote,
 } from '../../client/git-remote.js';
 import { fetchHubProjectCapabilities } from '../../client/hub-capabilities.js';
@@ -874,7 +875,7 @@ export class ScionPageProjectCreate extends LitElement {
    * re-validates (a 400 on gitRemote is shown inline too).
    */
   private checkTemplateGitRemote(): boolean {
-    const remote = stripQueryAndFragment(this.templateGitRemote.trim());
+    const remote = stripQueryAndFragment(trimRemote(this.templateGitRemote));
     this.templateGitRemoteError = remote ? validateGitRemote(remote) : null;
     return this.templateGitRemoteError === null;
   }
@@ -1132,7 +1133,7 @@ export class ScionPageProjectCreate extends LitElement {
     if (this.slugManuallyEdited && slug) {
       body.slug = slug;
     }
-    const gitRemote = this.templateGitRemote.trim();
+    const gitRemote = trimRemote(this.templateGitRemote);
     if (templateWorkspaceType(template) === 'git' && gitRemote) {
       if (!this.checkTemplateGitRemote()) return;
       body.gitRemote = gitRemote;
@@ -1356,7 +1357,7 @@ export class ScionPageProjectCreate extends LitElement {
 
   /** Git remote override for a git template (the only overridable template field). */
   private renderGitRemoteOverride(t: ProjectTemplate): TemplateResult {
-    const entered = this.templateGitRemote.trim() !== '';
+    const entered = trimRemote(this.templateGitRemote) !== '';
     // "active" = the clone will really use a different repository.
     const active = effectiveGitRemoteOverride(t, this.templateGitRemote) !== '';
     const error = this.templateGitRemoteError;

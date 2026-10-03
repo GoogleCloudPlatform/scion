@@ -19,10 +19,13 @@ import { describe, it, expect } from 'vitest';
 import {
   GIT_REMOTE_INVALID,
   GIT_REMOTE_SSH_PORT,
+  GIT_REMOTE_TLS_PORT,
   displayGitRemote,
   normalizeGitRemote,
   sanitizeGitRemote,
   stripGitURLCredentials,
+  stripQueryAndFragment,
+  trimRemote,
   validateGitRemote,
 } from './git-remote.js';
 
@@ -44,6 +47,12 @@ describe('validateGitRemote', () => {
     'https://gitserver/org/repo.git',
     'https://u:p@ss@github.com/org/repo.git',
     'https://[::1]/org/repo',
+    'https://[2001:db8::1]/org/repo',
+    'https://[::ffff:192.0.2.1]/org/repo',
+    // Dotted names are not dot segments; one trailing '/' is fine; punycode.
+    'https://xn--bcher-kva.example/org/.github',
+    'git@git.example.com:team/my..repo/',
+    'http://git.example.com:80/team/repo',
   ])('accepts %s', (remote) => {
     expect(validateGitRemote(remote)).toBeNull();
   });
@@ -96,6 +105,50 @@ describe('validateGitRemote', () => {
     'https://x-.example.com/org/repo',
     'git@-gitserver:org/repo',
     '-x.example.com/org/repo',
+    // Dot and empty path segments, escaped or not, in every form (r5).
+    'https://github.com/org/../evil/repo',
+    'https://github.com/org/%2e%2e/evil/repo',
+    'https://github.com/org/%2E%2E/evil/repo',
+    'https://github.com/./org/repo',
+    'https://github.com//org/repo',
+    'https://github.com/org//repo',
+    'https://github.com/org/repo//',
+    'ssh://git@github.com/org/../evil/repo.git',
+    'git://github.com/org/./repo',
+    'github.com/org/../evil/repo',
+    'github.com/org/%2e%2e/evil/repo',
+    'github.com//org/repo',
+    'github.com/org//repo',
+    'git@github.com:org/../evil/repo',
+    'git@github.com:org/%2e%2e/evil/repo',
+    'git@github.com:org//repo',
+    'git@github.com:./org/repo',
+    // Printable ASCII only (r5); escaped controls.
+    'https://github.com/org/\u202erepo',
+    'github.com/org/\u202erepo',
+    'git@github.com:org/\u202erepo',
+    'https://github.com/\u043erg/repo',
+    'https://b\u00fccher.example/org/repo',
+    'https://github.com/org/re%0Apo',
+    'https://github.com/org/re%00po',
+    'github.com/org/re%7Fpo',
+    'git@github.com:org/re%1Fpo',
+    // Hub parity (#2713 r4 F1): %40 in the path, malformed escapes,
+    // invalid IPv6, userinfo characters net/url rejects.
+    'https://github.com/org/%40evil/repo',
+    'github.com/org/re%40po/x',
+    'git@github.com:org/%40x/repo',
+    'https://github.com/org/re%zzpo',
+    'https://github.com/org/repo%',
+    'github.com/org/re%zpo',
+    'git@github.com:org/repo%',
+    'https://u:SECRET_%zz@github.com/org/repo',
+    'https://[1:2]/org/repo',
+    'https://[:::]/org/repo',
+    'https://[v1.x]/org/repo',
+    'https://[1:2:3:4:5:6:7::8]/org/repo',
+    'https://us"er@h.example/o/r',
+    'https://h.com\\@evil.com/o/r',
   ])('rejects %s', (remote) => {
     expect(validateGitRemote(remote)).toBe(GIT_REMOTE_INVALID);
   });
@@ -106,6 +159,31 @@ describe('validateGitRemote', () => {
     'SSH://git:pw@git.example.com:2222/group/repo.git',
   ])('rejects ssh with a port: %s', (remote) => {
     expect(validateGitRemote(remote)).toBe(GIT_REMOTE_SSH_PORT);
+  });
+
+  it.each([
+    'git://git.example.com:9418/group/repo.git',
+    'GIT://git.example.com:9419/group/repo',
+    'http://git.example.com:8080/group/repo',
+    'http://u:SECRET_P@git.example.com:443/group/repo',
+  ])('rejects git:// with a port and http:// with a non-80 port: %s', (remote) => {
+    expect(validateGitRemote(remote)).toBe(GIT_REMOTE_TLS_PORT);
+  });
+
+  // The form trims ASCII whitespace only, like the hub (#2713 r4 F2/F3):
+  // U+0085 and U+FEFF are kept and then rejected as non-ASCII.
+  const prepared = (raw: string) => validateGitRemote(stripQueryAndFragment(trimRemote(raw)));
+  it('accepts a remote padded with ASCII whitespace', () => {
+    expect(trimRemote(' \t github.com/org/repo \r\n')).toBe('github.com/org/repo');
+    expect(prepared(' \t github.com/org/repo \r\n')).toBeNull();
+  });
+  it.each([
+    'https://github.com/org/repo\u0085',
+    '\ufeffhttps://github.com/org/repo',
+    'https://github.com/org/repo\ufeff',
+    '\u00a0github.com/org/repo',
+  ])('rejects a remote with Unicode space at the edge: %j', (raw) => {
+    expect(prepared(raw)).toBe(GIT_REMOTE_INVALID);
   });
 });
 
