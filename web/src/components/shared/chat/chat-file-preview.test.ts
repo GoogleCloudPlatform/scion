@@ -623,6 +623,190 @@ describe('scion-chat-file-preview', () => {
     revokeSpy.mockRestore();
   });
 
+  describe('reconnect after disconnect (e.g. a keyed repeat move)', () => {
+    function imageResponse() {
+      return {
+        ok: true,
+        status: 200,
+        blob: () => Promise.resolve(new Blob(['x'], { type: 'image/png' })),
+      };
+    }
+
+    function imgSrc(el: ScionChatFilePreview): string | null | undefined {
+      return dialog(el)?.querySelector('img.file-preview-image')?.getAttribute('src');
+    }
+
+    it('never renders a revoked object URL after the same instance is moved', async () => {
+      const revoked = new Set<string>();
+      const revokeSpy = vi
+        .spyOn(URL, 'revokeObjectURL')
+        .mockImplementation((url: string) => void revoked.add(url));
+      apiFetchMock.mockImplementation(() => Promise.resolve(imageResponse()));
+      const host = document.createElement('div');
+      const other = document.createElement('div');
+      document.body.append(host, other);
+      const el = document.createElement('scion-chat-file-preview') as ScionChatFilePreview;
+      host.appendChild(el);
+      el.target = IMAGE_ATTACHMENT;
+      await settle(el);
+      const firstUrl = imgSrc(el);
+      expect(firstUrl).toMatch(/^blob:/);
+
+      // A DOM move (what lit's keyed repeat does on reorder) is a
+      // disconnect followed by a connect of the very same instance.
+      other.appendChild(el);
+      await settle(el);
+
+      expect(revoked.has(firstUrl as string)).toBe(true);
+      const src = imgSrc(el);
+      expect(src).toMatch(/^blob:/);
+      expect(revoked.has(src as string)).toBe(false);
+      expect(apiFetchMock).toHaveBeenCalledTimes(2);
+      revokeSpy.mockRestore();
+    });
+
+    it('does not refetch while detached, and revokes the reloaded URL on final removal', async () => {
+      const revokeSpy = vi.spyOn(URL, 'revokeObjectURL');
+      apiFetchMock.mockImplementation(() => Promise.resolve(imageResponse()));
+      const el = await mount();
+      el.target = IMAGE_ATTACHMENT;
+      await settle(el);
+
+      el.remove();
+      await settle(el);
+      expect(apiFetchMock).toHaveBeenCalledTimes(1);
+      expect(dialog(el)?.querySelector('img.file-preview-image')).toBeNull();
+
+      document.body.appendChild(el);
+      await settle(el);
+      const reloaded = imgSrc(el);
+      expect(apiFetchMock).toHaveBeenCalledTimes(2);
+
+      el.remove();
+      expect(revokeSpy).toHaveBeenCalledWith(reloaded);
+      revokeSpy.mockRestore();
+    });
+
+    it('reloads, rather than spinning forever, when disconnected mid-fetch', async () => {
+      apiFetchMock
+        .mockImplementationOnce(
+          (_path: string, options?: RequestInit) =>
+            new Promise((_resolve, reject) => {
+              options?.signal?.addEventListener('abort', () =>
+                reject(new DOMException('aborted', 'AbortError'))
+              );
+            })
+        )
+        .mockImplementation(() => Promise.resolve(imageResponse()));
+      const el = await mount();
+      el.target = IMAGE_ATTACHMENT;
+      await settle(el);
+
+      el.remove();
+      document.body.appendChild(el);
+      await settle(el);
+
+      expect(apiFetchMock).toHaveBeenCalledTimes(2);
+      expect(imgSrc(el)).toMatch(/^blob:/);
+    });
+
+    it('leaves no unrevoked object URL when removed while blob() is pending', async () => {
+      const pendingBlob = deferred<Blob>();
+      apiFetchMock.mockImplementationOnce(() =>
+        Promise.resolve({ ok: true, status: 200, blob: () => pendingBlob.promise })
+      );
+      const created: string[] = [];
+      const revoked = new Set<string>();
+      const createSpy = vi.spyOn(URL, 'createObjectURL').mockImplementation(() => {
+        const url = `blob:test-${created.length}`;
+        created.push(url);
+        return url;
+      });
+      const revokeSpy = vi
+        .spyOn(URL, 'revokeObjectURL')
+        .mockImplementation((url: string) => void revoked.add(url));
+      try {
+        const el = await mount();
+        el.target = IMAGE_ATTACHMENT;
+        await settle(el);
+
+        el.remove();
+        pendingBlob.resolve(new Blob(['x'], { type: 'image/png' }));
+        await settle(el);
+
+        expect(created.filter((url) => !revoked.has(url))).toEqual([]);
+      } finally {
+        createSpy.mockRestore();
+        revokeSpy.mockRestore();
+      }
+    });
+
+    it('drops the pending reload when the target changes while detached', async () => {
+      apiFetchMock.mockImplementationOnce(() => Promise.resolve(imageResponse()));
+      apiFetchMock.mockImplementation(() =>
+        Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve('hello') })
+      );
+      const el = await mount();
+      el.target = IMAGE_ATTACHMENT;
+      await settle(el);
+
+      el.remove();
+      el.target = TEXT_ATTACHMENT;
+      await settle(el);
+      expect(apiFetchMock).toHaveBeenCalledTimes(2);
+
+      document.body.appendChild(el);
+      await settle(el);
+
+      // The target change already loaded the new target; reconnecting must
+      // not load it a second time.
+      expect(apiFetchMock).toHaveBeenCalledTimes(2);
+      const editor = dialog(el)?.querySelector('scion-code-editor');
+      expect((editor as unknown as { content: string })?.content).toBe('hello');
+    });
+
+    it('fetches once when reconnect and a target change land in one update', async () => {
+      apiFetchMock.mockImplementationOnce(() => Promise.resolve(imageResponse()));
+      apiFetchMock.mockImplementation(() =>
+        Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve('hello') })
+      );
+      const el = await mount();
+      el.target = IMAGE_ATTACHMENT;
+      await settle(el);
+      expect(apiFetchMock).toHaveBeenCalledTimes(1);
+
+      el.remove();
+      document.body.appendChild(el);
+      el.target = TEXT_ATTACHMENT;
+      await settle(el);
+
+      expect(apiFetchMock).toHaveBeenCalledTimes(2);
+      expect(apiFetchMock).toHaveBeenLastCalledWith(
+        '/api/v1/chat/attachments/att-1',
+        expect.anything()
+      );
+    });
+
+    it('does not refetch a text preview on reconnect: its content is still valid', async () => {
+      apiFetchMock.mockResolvedValue({
+        ok: true,
+        status: 200,
+        text: () => Promise.resolve('hello'),
+      });
+      const el = await mount();
+      el.target = TEXT_ATTACHMENT;
+      await settle(el);
+
+      el.remove();
+      document.body.appendChild(el);
+      await settle(el);
+
+      expect(apiFetchMock).toHaveBeenCalledTimes(1);
+      const editor = dialog(el)?.querySelector('scion-code-editor');
+      expect((editor as unknown as { content: string })?.content).toBe('hello');
+    });
+  });
+
   // -- isolated concurrency guards ------------------------------------------
   //
   // A fast-resolving mock lets every generation check downstream of the first
