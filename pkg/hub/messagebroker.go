@@ -1138,15 +1138,7 @@ func (p *MessageBrokerProxy) publishDeliveryFailed(ctx context.Context, projectI
 	} else {
 		failMsg = fmt.Sprintf("Message delivery failed: agent %q not found in project", agentSlug)
 	}
-	structuredMsg := &messages.StructuredMessage{
-		Sender:    "system",
-		Recipient: msg.Sender,
-		Msg:       failMsg,
-		Type:      messages.TypeSystem,
-		Status:    "DELIVERY_FAILED",
-		Metadata:  map[string]string{"system_category": messages.SystemCategoryDeliveryFailed},
-	}
-	structuredMsg.RecipientID = senderAgent.ID
+	structuredMsg := newDeliveryNotice(msg.Sender, senderAgent.ID, failMsg, "DELIVERY_FAILED", messages.SystemCategoryDeliveryFailed)
 
 	dispatcher := p.getDispatcher()
 	if dispatcher == nil {
@@ -1156,6 +1148,18 @@ func (p *MessageBrokerProxy) publishDeliveryFailed(ctx context.Context, projectI
 		p.log.Warn("Failed to dispatch DELIVERY_FAILED notification",
 			"senderID", msg.SenderID, "error", err)
 	}
+}
+
+// newDeliveryNotice builds the system notice sent to an agent sender about the
+// fate of its message (DELIVERY_FAILED, DELIVERY_DEFERRED). It goes through
+// messages.NewSystemMessage so every notice carries Version and an RFC3339 UTC
+// Timestamp (ptone/scion#2100); new notice sites should use it rather than a
+// StructuredMessage literal so they cannot drift.
+func newDeliveryNotice(recipient, recipientID, text, status, category string) *messages.StructuredMessage {
+	notice := messages.NewSystemMessage("system", recipient, text, category)
+	notice.RecipientID = recipientID
+	notice.Status = status
+	return notice
 }
 
 // publishDeliveryDeferred tells an agent sender that their message to
@@ -1179,15 +1183,7 @@ func (p *MessageBrokerProxy) publishDeliveryDeferred(ctx context.Context, agentS
 	}
 
 	deferredMsg := fmt.Sprintf("agent %q is reincarnating; message saved to history and will be seen on catch-up", agentSlug)
-	structuredMsg := &messages.StructuredMessage{
-		Sender:    "system",
-		Recipient: msg.Sender,
-		Msg:       deferredMsg,
-		Type:      messages.TypeSystem,
-		Status:    "DELIVERY_DEFERRED",
-		Metadata:  map[string]string{"system_category": messages.SystemCategoryDeliveryDeferred},
-	}
-	structuredMsg.RecipientID = senderAgent.ID
+	structuredMsg := newDeliveryNotice(msg.Sender, senderAgent.ID, deferredMsg, "DELIVERY_DEFERRED", messages.SystemCategoryDeliveryDeferred)
 
 	dispatcher := p.getDispatcher()
 	if dispatcher == nil {

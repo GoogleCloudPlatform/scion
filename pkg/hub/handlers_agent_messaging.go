@@ -1140,7 +1140,12 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		CreatedAt:      time.Now(),
 	}
 
+	// ptone/scion#2100: stamp Version and the row's CreatedAt (RFC3339 UTC)
+	// so observers and the legacy envelope see real values, as
+	// ExecuteAgentDM does.
 	structuredMsg := &messages.StructuredMessage{
+		Version:              messages.Version,
+		Timestamp:            storeMsg.CreatedAt.UTC().Format(time.RFC3339),
 		Sender:               storeMsg.Sender,
 		SenderID:             storeMsg.SenderID,
 		Recipient:            storeMsg.Recipient,
@@ -3552,15 +3557,7 @@ func (s *Server) publishBroadcastDeliveryFailed(ctx context.Context, targetAgent
 		reason = sanitizeFailureReason(deliveryErr.Error())
 	}
 	failMsg := fmt.Sprintf("Broadcast delivery failed to agent %q: %s", targetAgent.Slug, reason)
-	structuredMsg := &messages.StructuredMessage{
-		Sender:      "system",
-		Recipient:   msg.Sender,
-		RecipientID: senderAgent.ID,
-		Msg:         failMsg,
-		Type:        messages.TypeSystem,
-		Status:      "DELIVERY_FAILED",
-		Metadata:    map[string]string{"system_category": messages.SystemCategoryDeliveryFailed},
-	}
+	structuredMsg := newDeliveryNotice(msg.Sender, senderAgent.ID, failMsg, "DELIVERY_FAILED", messages.SystemCategoryDeliveryFailed)
 
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
