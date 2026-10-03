@@ -25,7 +25,7 @@ import (
 // "iptables" that, if ever executed, creates a marker file — then returns a
 // function that reports whether it ran. This is the attack shape a planted
 // binary first on $PATH would take: an attacker-owned directory placed
-// first on PATH, standing in for a real workload-owned "/usr/local/share/
+// first on PATH, standing in for substrate's real "/usr/local/share/
 // npm-global/bin", made hermetic by using t.Setenv instead of the real
 // npm-global directory.
 func plantFakeIPTablesOnPATH(t *testing.T) (ran func() bool) {

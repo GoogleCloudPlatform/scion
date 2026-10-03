@@ -64,6 +64,8 @@ type mockManager struct {
 	provisionErr          error
 	stopErr               error
 	listErr               error
+	deleteTargetErr       error
+	messageErr            error
 	lastStartOpts         api.StartOptions
 	lastDeleteProjectPath string
 	lastDeleteAgentID     string
@@ -164,6 +166,9 @@ func (m *mockManager) DeleteTarget(ctx context.Context, agentName, containerID s
 	m.lastDeleteContainerID = containerID
 	m.lastDeleteFiles = deleteFiles
 	m.deleteCalls++
+	if m.deleteTargetErr != nil {
+		return false, m.deleteTargetErr
+	}
 	return true, nil
 }
 
@@ -278,11 +283,11 @@ func (m *mockManager) LastListFilter() map[string]string {
 }
 
 func (m *mockManager) Message(ctx context.Context, agentID, projectID string, message string, interrupt bool) error {
-	return nil
+	return m.messageErr
 }
 
 func (m *mockManager) MessageRaw(ctx context.Context, agentID, projectID string, keys string) error {
-	return nil
+	return m.messageErr
 }
 
 func (m *mockManager) SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
@@ -1933,9 +1938,10 @@ func TestCreateAgentProvisionOnly_PlainProvision_DoesNotEchoReprovisioned(t *tes
 // plain (unwrapped, not agent.ErrReprovisionRefused) Reprovision failure: the
 // handler must return the generic 500 — not the 409 the sentinel-wrapped
 // path gets — and must not echo reprovisioned:true for a request that never
-// actually succeeded. A neutral error message (no "reprovision refused"
-// substring) keeps this test from being satisfied by accident if the 409
-// path's body text ever changed to also contain "error".
+// actually succeeded. The body must carry the fixed, identity-free
+// "Failed to provision agent" message, never Reprovision's own raw error
+// text, which could carry a runtime-specific detail this response must not
+// disclose.
 func TestCreateAgentProvisionOnly_ReprovisionError_ReturnsErrorNoEcho(t *testing.T) {
 	srv, mgr := newTestServerWithProvisionCapture()
 	mgr.reprovisionErr = errors.New("boom: transient broker failure")
@@ -1960,8 +1966,11 @@ func TestCreateAgentProvisionOnly_ReprovisionError_ReturnsErrorNoEcho(t *testing
 	if !mgr.reprovisionCalled {
 		t.Error("expected Reprovision to have been attempted")
 	}
-	if !strings.Contains(w.Body.String(), "boom: transient broker failure") {
-		t.Errorf("expected the error body to surface the Reprovision error, got: %s", w.Body.String())
+	if strings.Contains(w.Body.String(), "boom: transient broker failure") {
+		t.Errorf("the error body must never surface Reprovision's own raw error text, got: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Failed to provision agent") {
+		t.Errorf("expected the fixed, identity-free provision-failure message, got: %s", w.Body.String())
 	}
 	if strings.Contains(w.Body.String(), `"reprovisioned":true`) {
 		t.Errorf("a failed Reprovision must never echo reprovisioned:true, got: %s", w.Body.String())

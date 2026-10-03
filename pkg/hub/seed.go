@@ -846,24 +846,115 @@ func agentRolePermissionIDs(role AgentRole) []string {
 	return ids
 }
 
-// BackfillRoleBindings creates role bindings from existing User.Role values and
-// project ownership. It is idempotent (skips if binding already exists) and
-// called from the startup/migration path.
+// BackfillRoleBindings runs the startup role-binding backfills:
+//   - system role bindings from User.Role;
+//   - project-owner role bindings from Project.CreatedBy (only when the
+//     User.Role step succeeded, preserving the original ordering);
+//   - clearing the legacy Group.OwnerID on project members groups
+//     (ptone/scion#2599), which always runs regardless of earlier failures.
+//
+// Every step is idempotent. Steps do not stop at the first failure: their
+// errors are combined with errors.Join and returned together, and the
+// startup caller logs them as a warning.
 func BackfillRoleBindings(ctx context.Context, s store.Store) error {
+	var errs []error
+
 	// Backfill system role bindings from User.Role
 	if err := backfillUserRoleBindings(ctx, s); err != nil {
-		return fmt.Errorf("backfill user role bindings: %w", err)
+		errs = append(errs, fmt.Errorf("backfill user role bindings: %w", err))
+	} else if err := backfillProjectOwnerRoleBindings(ctx, s); err != nil {
+		// Backfill project-owner role bindings from Project.CreatedBy.
+		// Pre-existing projects (created before project-scoped RoleBindings were
+		// introduced) have a legacy CreatedBy/OwnerID but no project-owner
+		// RoleBinding. This causes the project members view to show "no members"
+		// and the "my projects" filter to miss RoleBinding-based membership.
+		errs = append(errs, fmt.Errorf("backfill project owner role bindings: %w", err))
 	}
 
-	// Backfill project-owner role bindings from Project.CreatedBy.
-	// Pre-existing projects (created before project-scoped RoleBindings were
-	// introduced) have a legacy CreatedBy/OwnerID but no project-owner
-	// RoleBinding. This causes the project members view to show "no members"
-	// and the "my projects" filter to miss RoleBinding-based membership.
-	if err := backfillProjectOwnerRoleBindings(ctx, s); err != nil {
-		return fmt.Errorf("backfill project owner role bindings: %w", err)
+	// Clear the legacy Group.OwnerID copied from Project.OwnerID onto
+	// project members groups (ptone/scion#2599). This is security-relevant
+	// (it removes a stale group.* grant) and independent of the steps above,
+	// so it runs even when they fail, and its error is joined with theirs
+	// rather than hiding them.
+	if err := backfillClearProjectMembersGroupOwners(ctx, s); err != nil {
+		errs = append(errs, fmt.Errorf("clear project members group owners: %w", err))
 	}
 
+	return errors.Join(errs...)
+}
+
+// legacyProjectMembersGroupAnnotation is the project-members-group marker
+// written by the entadapter marker backfill
+// (BackfillProjectMembersGroupMarkers). It differs from
+// systemProjectMembersGroupAnnotation, the key createProjectMembersGroup
+// writes; ptone/scion#2556 tracks that mismatch. Until it is resolved, the
+// owner-clearing backfill matches either key.
+//
+// This literal duplicates the entadapter constant
+// systemProjectMembersGroupAnnotation in pkg/store/entadapter/composite.go;
+// fold the two together under ptone/scion#2556.
+const legacyProjectMembersGroupAnnotation = "scion.io/system-project-members-group"
+
+// projectMembersGroupOwnerBackfillPageSize is the ListGroups page size for
+// backfillClearProjectMembersGroupOwners. It is a package variable, not a
+// const, so tests can shrink it to exercise the pagination loop.
+var projectMembersGroupOwnerBackfillPageSize = 200
+
+// backfillClearProjectMembersGroupOwners clears Group.OwnerID on every
+// project members group (ptone/scion#2599). createProjectMembersGroup used to
+// copy Project.OwnerID into Group.OwnerID, and the owner/user/group
+// relationship row grants group.* to Group.OwnerID, so a creator removed
+// from the project without an ownership transfer kept managing the members
+// group. Project.OwnerID confers no authority (ptone/scion#2586), and the
+// members group is now created without an owner.
+//
+// Groups are identified by the project-members-group marker annotation
+// (either key, see legacyProjectMembersGroupAnnotation), never by slug, so a
+// user-created group with a look-alike slug is left untouched. The pass runs
+// on every startup and is idempotent: a group whose OwnerID is already empty
+// is skipped, so a second run changes nothing. Per-group update errors are
+// logged and skipped.
+func backfillClearProjectMembersGroupOwners(ctx context.Context, s store.Store) error {
+	// All groups are scanned rather than filtering by GroupType: the scan is
+	// paginated and cheap, and a type filter could miss legacy group shapes.
+	var cursor string
+	var cleared int
+	for {
+		groups, err := s.ListGroups(ctx, store.GroupFilter{}, store.ListOptions{
+			Limit:          projectMembersGroupOwnerBackfillPageSize,
+			Cursor:         cursor,
+			SkipTotalCount: true,
+		})
+		if err != nil {
+			return fmt.Errorf("list groups for members group owner backfill: %w", err)
+		}
+
+		for i := range groups.Items {
+			g := &groups.Items[i]
+			if g.OwnerID == "" || !hasProjectMembersGroupMarker(g) {
+				continue
+			}
+			prevOwner := g.OwnerID
+			g.OwnerID = ""
+			if err := s.UpdateGroup(ctx, g); err != nil {
+				slog.Warn("failed to clear project members group owner during backfill",
+					"group_id", g.ID, "project_id", g.ProjectID, "error", err)
+				continue
+			}
+			slog.Info("cleared project members group owner",
+				"group_id", g.ID, "project_id", g.ProjectID, "previous_owner_id", prevOwner)
+			cleared++
+		}
+
+		if groups.NextCursor == "" {
+			break
+		}
+		cursor = groups.NextCursor
+	}
+
+	if cleared > 0 {
+		slog.Info("cleared project members group owners", "cleared", cleared)
+	}
 	return nil
 }
 

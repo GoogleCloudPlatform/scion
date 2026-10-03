@@ -250,7 +250,17 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 		// is re-evaluated from the transactional store.
 		reGov := svc.checkDeletionGovernanceFromStore(ctx, tx, req, isSuperAdmin)
 		if !reGov.Allowed {
-			return fmt.Errorf("governance:%d:%s", reGov.HTTPStatus, reGov.Reason)
+			// The deletion decision travels in a MembershipDecision on
+			// purpose: ProjectDeleteDecision has exactly the four fields
+			// below, and all four are copied back after WithTx. DenialCode
+			// is hard-coded to ErrCodeProjectDeleteForbidden so the response
+			// stays byte-identical to the pre-change behaviour.
+			return asGovernanceDenial(MembershipDecision{
+				Allowed:    false,
+				DenialCode: ErrCodeProjectDeleteForbidden,
+				Reason:     reGov.Reason,
+				HTTPStatus: reGov.HTTPStatus,
+			})
 		}
 
 		// 8. Cascade security-relevant state within the transaction.
@@ -290,13 +300,14 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 	})
 
 	if txErr != nil {
-		// Parse governance denial from tx error.
-		if status, code, reason, ok := parseGovernanceError(txErr); ok {
+		// Governance denial re-evaluated under lock.
+		var gdErr *governanceDenialError
+		if errors.As(txErr, &gdErr) {
 			return nil, &ProjectDeleteDecision{
 				Allowed:    false,
-				DenialCode: code,
-				Reason:     reason,
-				HTTPStatus: status,
+				DenialCode: gdErr.decision.DenialCode,
+				Reason:     gdErr.decision.Reason,
+				HTTPStatus: gdErr.decision.HTTPStatus,
 			}
 		}
 		svc.logger.Error("project deletion transaction failed",
@@ -705,35 +716,4 @@ func marshalDeletionAuditJSON(m map[string]string) string {
 		return "{}"
 	}
 	return string(b)
-}
-
-// ---------------------------------------------------------------------------
-// Governance error parsing (reuses RS1 pattern)
-// ---------------------------------------------------------------------------
-
-// parseGovernanceError extracts governance denial details from a formatted
-// transaction error. Format: "governance:<status>:<reason>"
-func parseGovernanceError(err error) (status int, code string, reason string, ok bool) {
-	msg := err.Error()
-	var s int
-	var r string
-	if n, _ := fmt.Sscanf(msg, "governance:%d:", &s); n == 1 {
-		// Extract reason after second colon.
-		idx := 0
-		colons := 0
-		for i, c := range msg {
-			if c == ':' {
-				colons++
-				if colons == 2 {
-					idx = i + 1
-					break
-				}
-			}
-		}
-		if idx > 0 && idx < len(msg) {
-			r = msg[idx:]
-		}
-		return s, ErrCodeProjectDeleteForbidden, r, true
-	}
-	return 0, "", "", false
 }

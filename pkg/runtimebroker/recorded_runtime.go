@@ -66,6 +66,7 @@ var knownRuntimeNames = map[string]bool{
 	"container":        true,
 	"cloudrun":         true,
 	"cloudrun-sandbox": true,
+	"substrate":        true,
 }
 
 // canonicalRuntimeName returns the runtime name a recorded runtime type

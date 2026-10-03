@@ -632,6 +632,7 @@ func TestKnownRuntimeNamesMatchRuntimeNames(t *testing.T) {
 		&runtime.AppleContainerRuntime{},
 		&runtime.CloudRunRuntime{},
 		&runtime.CloudRunSandboxRuntime{},
+		&runtime.SubstrateRuntime{},
 		&runtime.KubernetesRuntime{},
 	}
 	names := map[string]bool{}

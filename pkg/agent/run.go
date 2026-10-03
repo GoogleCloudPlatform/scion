@@ -88,6 +88,24 @@ func sortedEnvVarKeys(envVars map[string]string) []string {
 
 func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	startEntry := time.Now()
+	// callerHubEndpoint is opts.Env's SCION_HUB_ENDPOINT exactly as the
+	// caller passed it in — captured before anything below ever writes to
+	// opts.Env, so it can never reflect the agent-level Hub config or
+	// template env overrides applied further down, both of which a creator
+	// controls (inline req.Config.Hub, template hub.endpoint via
+	// MergeScionConfig). Outside broker mode this (falling back to project
+	// settings) is the one source Substrate's egress allowlist trusts; see
+	// the trustedHubEndpoint computation below. In BrokerMode, egress trust
+	// comes from opts.TrustedHubEndpoint instead — the runtime broker's own
+	// operator-derived resolution, set separately from opts.Env so a
+	// creator-controlled ResolvedEnv/Config.Env value can never reach it —
+	// not from this variable, which in BrokerMode still only feeds the
+	// agent's own delivered hub endpoint, never egress trust.
+	var callerHubEndpoint string
+	if opts.Env != nil {
+		callerHubEndpoint = opts.Env["SCION_HUB_ENDPOINT"]
+	}
+
 	// Resolve project name early so we can scope the container lookup below.
 	projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath)
 	if err != nil {
@@ -883,13 +901,20 @@ authDone:
 
 	// If hub endpoint not yet set from agent config or caller's opts.Env,
 	// check project settings so locally-started agents in hub-connected
-	// projects also get hub connectivity.
+	// projects also get hub connectivity. projectSettingsHubEndpoint
+	// records this specific source's own resolved value (see
+	// trustedHubEndpoint below): this branch only ever runs when neither
+	// callerHubEndpoint nor the agent-level Hub config above set it, so
+	// project settings — an operator-controlled file, not a creator input —
+	// is the only source that can land here.
+	var projectSettingsHubEndpoint string
 	if _, hubSet := opts.Env["SCION_HUB_ENDPOINT"]; !hubSet {
 		if projectSettings, err := config.LoadSettings(projectDir); err == nil {
 			if projectSettings.IsHubEnabled() {
 				if ep := projectSettings.GetHubEndpoint(); ep != "" {
 					opts.Env["SCION_HUB_ENDPOINT"] = ep
 					opts.Env["SCION_HUB_URL"] = ep
+					projectSettingsHubEndpoint = ep
 				}
 			}
 		}
@@ -901,6 +926,33 @@ authDone:
 			if token := apiclient.ResolveDevToken(); token != "" {
 				opts.Env["SCION_AUTH_TOKEN"] = token
 			}
+		}
+	}
+
+	// trustedHubEndpoint is Substrate's egress allowlist's one trusted hub
+	// source (RunConfig.TrustedHubEndpoint, see its own doc comment): in
+	// broker mode, opts.TrustedHubEndpoint ONLY — the runtime broker's own
+	// operator-derived resolution (request HubEndpoint, hub connection
+	// endpoint, or broker config HubEndpoint; never ResolvedEnv/Config.Env,
+	// which a creator can set — see
+	// api.StartOptions.TrustedHubEndpoint's own doc comment), a field set
+	// separately from opts.Env so a creator-controlled env value can never
+	// reach it even when every operator tier is empty; if empty, no hub host
+	// is trusted at all (fail closed; see substrateEgressHostnames). Outside
+	// broker mode, callerHubEndpoint (opts.Env, captured at the top of Start
+	// before any override could touch it), falling back to
+	// projectSettingsHubEndpoint (an operator-controlled file). The
+	// agent-level Hub config and template env overrides — both
+	// creator-controlled, applied above and below — never feed this value:
+	// they can still redirect the agent's own hub calls, but must never
+	// widen what the actor's egress allowlist may reach.
+	var trustedHubEndpoint string
+	if opts.BrokerMode {
+		trustedHubEndpoint = opts.TrustedHubEndpoint
+	} else {
+		trustedHubEndpoint = callerHubEndpoint
+		if trustedHubEndpoint == "" {
+			trustedHubEndpoint = projectSettingsHubEndpoint
 		}
 	}
 
@@ -1543,10 +1595,11 @@ authDone:
 			}
 			return k8sCfg
 		}(),
-		GitClone:         opts.GitClone,
-		SharedDirs:       effectiveSharedDirs,
-		SharedDirStorage: sharedDirStorage,
-		BrokerMode:       opts.BrokerMode,
+		GitClone:           opts.GitClone,
+		TrustedHubEndpoint: trustedHubEndpoint,
+		SharedDirs:         effectiveSharedDirs,
+		SharedDirStorage:   sharedDirStorage,
+		BrokerMode:         opts.BrokerMode,
 		NoAuth: opts.NoAuth && noAuthConfig != nil &&
 			(noAuthConfig.Behavior == "drop-to-shell" || noAuthConfig.Behavior == "allow"),
 		NoAuthMessage: func() string {

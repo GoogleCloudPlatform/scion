@@ -3427,8 +3427,12 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 				s.agentLifecycleLog.Error("Failed to dispatch agent delete to broker", "agent_id", agent.ID, "error", err)
 				var se *brokerStatusError
 				if errors.As(err, &se) && se.StatusCode == http.StatusConflict {
-					// The broker refused because the target is ambiguous
-					// (several agents match in the project). That is a
+					// The broker returns 409 for more than one reason now:
+					// the target is ambiguous (several agents match in the
+					// project), or — for a record-less substrate actor —
+					// its identity could not be verified
+					// (agent_identity_unknown, the fail-closed
+					// RecordlessActorProber case). Either way this is a
 					// conflict for the caller to resolve, not a gateway
 					// failure.
 					Conflict(w, "Failed to delete agent on runtime broker: "+se.brokerErrorMessage())

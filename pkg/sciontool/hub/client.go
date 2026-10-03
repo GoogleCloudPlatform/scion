@@ -1272,7 +1272,8 @@ var fchownFn = syscall.Fchown
 // enforces InitRunOptions.RequirePrivilegeDrop always has an actual,
 // less-privileged workload user to defend the token file against, and
 // calls EnforceTokenFileOwnerChecks(true) once, early, with that same
-// value (see InitRunOptions.RequirePrivilegeDrop). Gating it here, rather than
+// value; substrate is the current example (see
+// InitRunOptions.RequirePrivilegeDrop). Gating it here, rather than
 // proving byte-identical behaviour across every other token-provisioning
 // path, makes the default case provably unchanged: the check simply never
 // runs unless this is called with true.
@@ -1667,11 +1668,11 @@ func readTransportTokenFile(path string) (string, error) {
 // chown is fchown on that open fd, never a path-based chown that a symlink
 // swapped in afterwards could redirect.
 //
-// When EnforceTokenFileOwnerChecks(true) has been called, it additionally
-// requires the file's current owner to be root or the containing
-// directory's own owner before chowning it — the same rule
+// When EnforceTokenFileOwnerChecks(true) has been called (substrate only),
+// it additionally requires the file's current owner to be root or the
+// containing directory's own owner before chowning it — the same rule
 // readTokenFileGuarded applies, gated the same way and for the same
-// reason: it isn't provably safe to require on every caller's
+// reason: it isn't provably safe to require on every runtime's
 // token-provisioning path, only on the one that requires privilege drop.
 func ChownTokenFile(uid, gid int) error {
 	path := TokenFilePath()
@@ -1740,8 +1741,8 @@ func ReadTokenFile() string {
 // hardlink to some unrelated file (Nlink>1) is refused instead of read.
 // This check always applies, on every runtime.
 //
-// When EnforceTokenFileOwnerChecks(true) has been called (see its doc
-// comment), it additionally requires the owner to be root or
+// When EnforceTokenFileOwnerChecks(true) has been called (substrate only —
+// see its doc comment), it additionally requires the owner to be root or
 // the containing directory's own owner, the only two legitimate states for
 // the token file: the host-side agent manager writes it before the
 // container starts (commonly as root or whatever uid the host process runs
