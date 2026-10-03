@@ -2713,8 +2713,40 @@ func colocatedBrokerRegisters(cfg *config.GlobalConfig, s store.Store) bool {
 	return enableHub && cfg.RuntimeBroker.Enabled && !simulateRemoteBroker && s != nil
 }
 
+// refuseErrorRuntimeAtStartup reports whether rt — the broker's own default
+// runtime, as resolved once at startup by runtime.GetRuntime — is actually
+// an *runtime.ErrorRuntime, and if so returns a clear error naming the
+// underlying construction/validation failure.
+//
+// GetRuntime never returns an error or nil: a construction or validation
+// failure (e.g. an operator-configured substrate profile that fails
+// ValidateOperatorOnlySubstrateProfile) comes back as a normal-looking
+// Runtime whose every method just returns the stored error — see
+// ErrorRuntime's own doc comment. Left unchecked, the broker would start
+// and keep running looking healthy, with every Run/Exec/List against the
+// default runtime silently and permanently failing from that point on, and
+// no signal beyond one log line distinguishing it from an actually-healthy
+// broker. Refuse to start instead: a broker that cannot serve its one
+// configured runtime at all should not come up looking like it can, and a
+// restart after fixing the underlying settings problem is how an operator
+// already expects to recover a broker that failed to start.
+//
+// Named profiles other than the default are unaffected: those are resolved
+// lazily, per request, and this check only ever sees the one runtime
+// GetRuntime("", "") resolves to at startup.
+func refuseErrorRuntimeAtStartup(rt runtime.Runtime) error {
+	er, ok := rt.(*runtime.ErrorRuntime)
+	if !ok {
+		return nil
+	}
+	return fmt.Errorf("runtime broker: configured runtime failed to construct: %w", er.Err)
+}
+
 func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.GlobalConfig, hubSrv *hub.Server, webSrv *hub.WebServer, s store.Store, hubEndpoint, devAuthToken string, brokerSettings *config.Settings, globalDir string, requestLogger, messageLogger *slog.Logger, wg *sync.WaitGroup, errCh chan error) error {
 	rt := runtime.GetRuntime("", "")
+	if err := refuseErrorRuntimeAtStartup(rt); err != nil {
+		return err
+	}
 	log.Printf("Runtime broker using runtime: %s", rt.Name())
 	statelessCloudRunBroker := enableHub && !simulateRemoteBroker && rt != nil && rt.Name() == "cloudrun"
 

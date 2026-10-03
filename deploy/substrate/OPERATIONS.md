@@ -335,6 +335,25 @@ kubectl ate get actors -a <atespace>
 kubectl ate delete actor -a <atespace> <NAME> --any-state
 ```
 
+## Removing or changing the substrate runtime configuration
+
+**Delete every substrate agent before removing (or changing the type of)
+the substrate entry in operator settings.** The broker resolves its
+default runtime once at process startup, and (since the operator-only
+trust-boundary fix in this doc's own "Known limits" below) now refuses to
+start at all if that resolution fails — so if the broker's active profile
+still points at a substrate runtime definition that settings no longer
+defines, or a settings edit introduces a validation error anywhere in that
+definition, the broker will not come back up on its next restart. Removing
+the substrate entry entirely while agents still exist, or silently
+repointing the active profile at a different runtime type, both leave any
+agent substrate actually still created unreachable: there is no longer any
+registered runtime able to Stop, Exec, or Delete it, even though the actor
+itself is still running at the backend. Delete every agent on the
+substrate runtime first (ordinary `scion delete`/broker-API delete, same as
+any other agent), confirm none remain, and only then remove or repoint the
+substrate configuration.
+
 ## Known limits
 
 The runtime's behavior in areas outside this broker's control — logging,

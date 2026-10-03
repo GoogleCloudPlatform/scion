@@ -158,3 +158,29 @@ func TestResolveBrokerIDPrefersConfiguredIDOverDefault(t *testing.T) {
 
 	assert.Equal(t, "configured-broker", got)
 }
+
+// TestRefuseErrorRuntimeAtStartup_FailedRuntimeRefusesStart is the
+// regression test for A5: the broker's own default runtime is resolved
+// once at startup (startRuntimeBroker's runtime.GetRuntime("", "") call),
+// and a construction/validation failure there must not be allowed to start
+// a broker that silently can never serve a single Run/Exec/List
+// successfully against it.
+func TestRefuseErrorRuntimeAtStartup_FailedRuntimeRefusesStart(t *testing.T) {
+	failure := assert.AnError
+	err := refuseErrorRuntimeAtStartup(&scionruntime.ErrorRuntime{Err: failure})
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, failure)
+}
+
+// TestRefuseErrorRuntimeAtStartup_HealthyRuntimeStartsNormally is the
+// control for the test above: a runtime that is not an *ErrorRuntime at
+// all (the ordinary case, every healthy broker startup) must not be
+// refused.
+func TestRefuseErrorRuntimeAtStartup_HealthyRuntimeStartsNormally(t *testing.T) {
+	rt := scionruntime.GetRuntime("docker", "")
+	if _, isErrorRuntime := rt.(*scionruntime.ErrorRuntime); isErrorRuntime {
+		t.Fatalf("test setup: GetRuntime(\"docker\", \"\") unexpectedly returned an *ErrorRuntime: %v", rt)
+	}
+	err := refuseErrorRuntimeAtStartup(rt)
+	assert.NoError(t, err)
+}
