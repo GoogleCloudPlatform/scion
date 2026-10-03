@@ -585,8 +585,11 @@ func notificationIDFromContext(ctx context.Context) string {
 // to recipientID. Under G2 write-deny a DM row needs a resolved conversation,
 // and DM conversation keys only accept canonical UUIDs
 // (messages.DMConversationKey), so a federated or otherwise non-canonical
-// principal cannot be persisted there. Shared with the notifier's
-// persistsViaInbox so the two cannot drift.
+// principal cannot be persisted there. deliverToUser applies it only when
+// both principal kinds are determined (it persists undetermined-kind DMs
+// without a conversation); notifications always have determined kinds
+// (agent:<slug> to user:<id>). Shared with the notifier's persistsViaInbox
+// so the two cannot drift.
 func canPersistUserDM(recipientID string, writeDeny bool) bool {
 	if !writeDeny {
 		return true
@@ -671,15 +674,18 @@ func (p *MessageBrokerProxy) deliverToUser(ctx context.Context, projectID, topic
 				p.log.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
 			}
 		} else if msg.SenderID != "" && msg.RecipientID != "" {
-			if !canPersistUserDM(msg.RecipientID, p.writeDenyEnabled != nil && p.writeDenyEnabled()) {
-				messaging.WriteDenialMetrics.Inc("mb.user.dm")
-				p.log.Error("DM recipient is not a canonical UUID under write-deny, message not persisted",
-					"notification_id", notificationIDFromContext(ctx))
-				return
-			}
 			senderKind, sOK := messages.PrincipalKindFromAddress(msg.Sender)
 			recipientKind, rOK := messages.PrincipalKindFromAddress(msg.Recipient)
 			if sOK && rOK {
+				// Only here, where DM key derivation would fail anyway: the
+				// undetermined-kind branch below persists without a
+				// conversation, as before.
+				if !canPersistUserDM(msg.RecipientID, p.writeDenyEnabled != nil && p.writeDenyEnabled()) {
+					messaging.WriteDenialMetrics.Inc("mb.user.dm")
+					p.log.Error("DM recipient is not a canonical UUID under write-deny, message not persisted",
+						"notification_id", notificationIDFromContext(ctx))
+					return
+				}
 				var convErr error
 				convResult, convErr = messaging.ResolveOrCreateDMConversation(ctx, p.store, p.store, p.log, senderKind, msg.SenderID, recipientKind, msg.RecipientID)
 				if convErr != nil {

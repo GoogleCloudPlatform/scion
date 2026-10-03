@@ -550,3 +550,41 @@ func TestSubscribeProjectUserMessages_FastPathSkipsTopicLock(t *testing.T) {
 
 	assert.True(t, returnsWithin(t, 5*time.Second, func() bool { return p.subscribeProjectUserMessages(projectID) }))
 }
+
+// msgb-rev-3 round 2, finding 2: under write-deny the canonical-UUID check
+// only drops DMs whose principal kinds are determined (where DM key
+// derivation would fail anyway). A DM with an undetermined kind keeps its
+// previous behaviour: persisted without a conversation.
+func TestDeliverToUser_NonCanonicalRecipientDropsOnlyWithDeterminedKinds(t *testing.T) {
+	const canonical = "0f8fad5b-d9cb-469f-a165-70867728950e"
+	nonCanonical := strings.ToUpper(canonical)
+	require.NotEqual(t, canonical, nonCanonical)
+
+	cases := []struct {
+		name, sender string
+		wantRows     int
+	}{
+		{"determined kinds: dropped", "agent:nc-sender", 0},
+		{"undetermined sender kind: persisted", "plugin:nc-sender", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newBrokerTestStore(t)
+			projectID := setupBrokerTestProject(t, s)
+			p := newNoticeTestProxy(t, s, &brokerMockDispatcher{})
+			p.writeDenyEnabled = func() bool { return true }
+
+			msg := messages.NewInstruction(tc.sender, "user:"+nonCanonical, "hello")
+			msg.SenderID = "a1b2c3d4-0000-4000-8000-000000000001"
+			msg.RecipientID = nonCanonical
+			p.deliverToUser(context.Background(), projectID, eventbus.TopicAllUserMessages(projectID), msg)
+
+			res, err := s.ListMessages(context.Background(), store.MessageFilter{RecipientID: nonCanonical}, store.ListOptions{})
+			require.NoError(t, err)
+			require.Len(t, res.Items, tc.wantRows)
+			if tc.wantRows == 1 {
+				assert.Empty(t, res.Items[0].ConversationID, "undetermined kinds skip DM conversation resolution")
+			}
+		})
+	}
+}
