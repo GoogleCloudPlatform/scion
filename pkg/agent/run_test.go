@@ -4319,12 +4319,13 @@ func TestBuildAgentEnv_HubEnvVarsSurviveMerge(t *testing.T) {
 // TestBuildAgentEnv_AuthoritativeMetadataModeWinsOverConfigEnv pins the seam
 // between the broker's authoritative SCION_METADATA_MODE (opts.Env, passed
 // here as extraEnv — see AgentManager.Start, which calls
-// buildAgentEnv(finalScionCfg, opts.Env)) and RunConfig.Env, the field the
-// docker/podman/k8s runtimes treat as already-decided (see the
+// buildAgentEnv(finalScionCfg, opts.Env, opts.BrokerMode)) and RunConfig.Env,
+// the field the docker/podman/k8s runtimes treat as already-decided (see the
 // collision-skip in pkg/runtime). extraEnv must win over a conflicting
 // template/harness-level scionCfg.Env value, the same precedence every other
 // opts.Env key gets, so a template cannot re-decide the mode that reaches
-// RunConfig.Env.
+// RunConfig.Env. brokerMode is true here to match the broker-mode start this
+// seam is pinning; it is otherwise orthogonal to this test's assertion.
 func TestBuildAgentEnv_AuthoritativeMetadataModeWinsOverConfigEnv(t *testing.T) {
 	scionCfg := &api.ScionConfig{
 		Env: map[string]string{
@@ -4335,7 +4336,7 @@ func TestBuildAgentEnv_AuthoritativeMetadataModeWinsOverConfigEnv(t *testing.T) 
 		"SCION_METADATA_MODE": "block",
 	}
 
-	env, _, _ := buildAgentEnv(scionCfg, extraEnv)
+	env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, true)
 
 	envMap := make(map[string]string)
 	for _, e := range env {
