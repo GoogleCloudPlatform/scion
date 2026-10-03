@@ -41,7 +41,11 @@ import (
 const emptyAgentRoleBackfillMarkerSection = "migration_empty_agent_roles_backfilled"
 const delegationEdgeBackfillMarkerSection = "migration_delegation_edge_backfill_v1"
 const projectMembersGroupMarkerBackfillSection = "backfill_project_group_markers_done"
-const legacyProjectMembersGroupMarkerMigrationSection = "migration_legacy_project_members_group_marker_v1"
+
+// LegacyProjectMembersGroupMarkerMigrationSection is the hub setting that
+// records completion of MigrateLegacyProjectMembersGroupMarkers. Exported so
+// pkg/hub tests can clear it without repeating the literal.
+const LegacyProjectMembersGroupMarkerMigrationSection = "migration_legacy_project_members_group_marker_v1"
 const projectAgentsGroupMarkerBackfillSection = "migration_project_agents_group_markers_backfilled"
 const systemProjectAgentsGroupAnnotation = "scion.io/project-agents-group"
 const adoptionReviewRequiredAnnotation = "scion.io/adoption-review-required"
@@ -1029,8 +1033,18 @@ var legacyProjectMembersGroupMarkerPageSize = 500
 // interruption skips it. Per-group update errors are logged and skipped; the
 // completion marker (a hub_settings row) is written only when every legacy
 // group was rewritten, so a failed group is retried on the next start.
+// Groups with no ProjectID are skipped, matching hasProjectMembersGroupMarker
+// in pkg/hub: a marker on such a group is inert either way.
+//
+// Rolling upgrade: the only window in which a legacy marker can appear after
+// the completion marker is a database that has never run
+// BackfillProjectMembersGroupMarkers, booted by an old and a new binary at the
+// same time. The consequence is the pre-fix behaviour (the group is not
+// adopted and project re-ensure logs "refusing to adopt"), with no security
+// impact. To re-run the migration, an operator deletes the hub setting
+// migration_legacy_project_members_group_marker_v1 and restarts the hub.
 func (c *CompositeStore) MigrateLegacyProjectMembersGroupMarkers(ctx context.Context) error {
-	if _, err := c.GetHubSetting(ctx, legacyProjectMembersGroupMarkerMigrationSection); err == nil {
+	if _, err := c.GetHubSetting(ctx, LegacyProjectMembersGroupMarkerMigrationSection); err == nil {
 		return nil
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
@@ -1050,6 +1064,9 @@ func (c *CompositeStore) MigrateLegacyProjectMembersGroupMarkers(ctx context.Con
 			return fmt.Errorf("query groups for legacy members group marker migration: %w", err)
 		}
 		for _, g := range groups {
+			if g.ProjectID == nil {
+				continue
+			}
 			if g.Annotations[store.LegacyAnnotationProjectMembersGroup] != "true" {
 				continue
 			}
@@ -1065,6 +1082,9 @@ func (c *CompositeStore) MigrateLegacyProjectMembersGroupMarkers(ctx context.Con
 			}
 			delete(annotations, store.LegacyAnnotationProjectMembersGroup)
 			annotations[store.AnnotationProjectMembersGroup] = "true"
+			// No revision check: this runs at startup only, using the same
+			// pattern as BackfillProjectMembersGroupMarkers, and a concurrent
+			// PATCH could lose non-marker annotation edits.
 			if err := c.client.Group.UpdateOneID(g.ID).
 				SetAnnotations(annotations).
 				Exec(ctx); err != nil {
@@ -1087,7 +1107,7 @@ func (c *CompositeStore) MigrateLegacyProjectMembersGroupMarkers(ctx context.Con
 		return fmt.Errorf("legacy members group marker migration: %d group(s) failed, will retry on next start", failed)
 	}
 
-	_, err := c.UpsertHubSetting(ctx, legacyProjectMembersGroupMarkerMigrationSection,
+	_, err := c.UpsertHubSetting(ctx, LegacyProjectMembersGroupMarkerMigrationSection,
 		json.RawMessage(`{"schema_version":1,"completed":true}`), "migration", 0, "seeded")
 	if errors.Is(err, store.ErrRevisionConflict) {
 		return nil

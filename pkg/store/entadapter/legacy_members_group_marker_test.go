@@ -18,9 +18,13 @@ package entadapter
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -48,18 +52,35 @@ func TestMigrateLegacyProjectMembersGroupMarkers(t *testing.T) {
 	}
 	require.NoError(t, cs.CreateProject(ctx, project))
 
-	newGroup := func(slug string, annotations map[string]string) *store.Group {
+	// Fixed, ordered IDs make the page layout deterministic. The migration
+	// walks groups in ascending ID order, two per page:
+	//   page 1: legacy (…01), userGroup (…02)
+	//   page 2: legacy2 (…03), noAnnotations (…04)
+	//   page 3: nonMarking (…05), conflicting (…06)
+	//   page 4: noProject (…07)
+	// so the two legacy groups are on different pages and a pass that stops
+	// after the first page leaves legacy2 unrewritten.
+	var seq int
+	nextID := func() string {
+		seq++
+		return fmt.Sprintf("00000000-0000-0000-0000-%012d", seq)
+	}
+	newGroupIn := func(projectID, slug string, annotations map[string]string) *store.Group {
 		t.Helper()
 		g := &store.Group{
-			ID:          uuid.NewString(),
+			ID:          nextID(),
 			Name:        slug,
 			Slug:        slug,
 			GroupType:   store.GroupTypeExplicit,
-			ProjectID:   project.ID,
+			ProjectID:   projectID,
 			Annotations: annotations,
 		}
 		require.NoError(t, cs.CreateGroup(ctx, g))
 		return g
+	}
+	newGroup := func(slug string, annotations map[string]string) *store.Group {
+		t.Helper()
+		return newGroupIn(project.ID, slug, annotations)
 	}
 	get := func(id string) *store.Group {
 		t.Helper()
@@ -72,10 +93,10 @@ func TestMigrateLegacyProjectMembersGroupMarkers(t *testing.T) {
 		store.LegacyAnnotationProjectMembersGroup: "true",
 		"example.dev/other":                       "kept",
 	})
+	userGroup := newGroup("my-team", map[string]string{"example.dev/x": "y"})
 	legacy2 := newGroup("project:mm2:members", map[string]string{
 		store.LegacyAnnotationProjectMembersGroup: "true",
 	})
-	userGroup := newGroup("my-team", map[string]string{"example.dev/x": "y"})
 	noAnnotations := newGroup("plain", nil)
 	nonMarking := newGroup("non-marking", map[string]string{
 		store.LegacyAnnotationProjectMembersGroup: "false",
@@ -83,6 +104,11 @@ func TestMigrateLegacyProjectMembersGroupMarkers(t *testing.T) {
 	conflicting := newGroup("conflicting", map[string]string{
 		store.LegacyAnnotationProjectMembersGroup: "true",
 		store.AnnotationProjectMembersGroup:       "false",
+	})
+	// A legacy marker on a group with no ProjectID is inert (every consumer
+	// requires a ProjectID), so the migration leaves it alone.
+	noProject := newGroupIn("", "no-project", map[string]string{
+		store.LegacyAnnotationProjectMembersGroup: "true",
 	})
 
 	require.NoError(t, cs.MigrateLegacyProjectMembersGroupMarkers(ctx))
@@ -103,8 +129,10 @@ func TestMigrateLegacyProjectMembersGroupMarkers(t *testing.T) {
 		store.LegacyAnnotationProjectMembersGroup: "true",
 		store.AnnotationProjectMembersGroup:       "false",
 	}, get(conflicting.ID).Annotations, "conflicting markers are left for an operator")
+	assert.Equal(t, map[string]string{store.LegacyAnnotationProjectMembersGroup: "true"},
+		get(noProject.ID).Annotations, "a group with no ProjectID is not migrated")
 
-	_, err := cs.GetHubSetting(ctx, legacyProjectMembersGroupMarkerMigrationSection)
+	_, err := cs.GetHubSetting(ctx, LegacyProjectMembersGroupMarkerMigrationSection)
 	require.NoError(t, err, "completion marker must be written")
 
 	// Second run is a no-op: a group written with the legacy key afterwards
@@ -116,6 +144,78 @@ func TestMigrateLegacyProjectMembersGroupMarkers(t *testing.T) {
 	assert.Equal(t, map[string]string{store.LegacyAnnotationProjectMembersGroup: "true"},
 		get(late.ID).Annotations)
 	assert.Equal(t, "true", get(legacy.ID).Annotations[store.AnnotationProjectMembersGroup])
+}
+
+// TestMigrateLegacyProjectMembersGroupMarkers_MarkerOnlyOnFullSuccess pins
+// that the completion marker is written only when every legacy group was
+// rewritten: one failed group update makes the migration return an error
+// and leaves the marker unwritten, while the other groups are still
+// rewritten. A clean re-run then finishes the job and writes the marker.
+func TestMigrateLegacyProjectMembersGroupMarkers_MarkerOnlyOnFullSuccess(t *testing.T) {
+	ctx := context.Background()
+	cs := NewCompositeStore(enttest.NewClient(t))
+
+	project := &store.Project{
+		ID: uuid.NewString(), Name: "ff", Slug: "ff",
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, cs.CreateProject(ctx, project))
+
+	newLegacy := func(slug string) *store.Group {
+		t.Helper()
+		g := &store.Group{
+			ID:          uuid.NewString(),
+			Name:        slug,
+			Slug:        slug,
+			GroupType:   store.GroupTypeExplicit,
+			ProjectID:   project.ID,
+			Annotations: map[string]string{store.LegacyAnnotationProjectMembersGroup: "true"},
+		}
+		require.NoError(t, cs.CreateGroup(ctx, g))
+		return g
+	}
+	ok1 := newLegacy("project:ff1:members")
+	bad := newLegacy("project:ff2:members")
+	ok2 := newLegacy("project:ff3:members")
+	badID := uuid.MustParse(bad.ID)
+
+	// Fail the UpdateOne of one group while injection is on. The hook is on
+	// this test's own client, so it cannot affect any other test.
+	var inject atomic.Bool
+	inject.Store(true)
+	cs.client.Group.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if gm, ok := m.(*ent.GroupMutation); ok && gm.Op() == ent.OpUpdateOne && inject.Load() {
+				if id, ok := gm.ID(); ok && id == badID {
+					return nil, errors.New("injected group update failure")
+				}
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+
+	get := func(id string) *store.Group {
+		t.Helper()
+		g, err := cs.GetGroup(ctx, id)
+		require.NoError(t, err)
+		return g
+	}
+	canonical := map[string]string{store.AnnotationProjectMembersGroup: "true"}
+	legacyOnly := map[string]string{store.LegacyAnnotationProjectMembersGroup: "true"}
+
+	err := cs.MigrateLegacyProjectMembersGroupMarkers(ctx)
+	require.Error(t, err, "a failed group update must fail the migration")
+	_, err = cs.GetHubSetting(ctx, LegacyProjectMembersGroupMarkerMigrationSection)
+	require.ErrorIs(t, err, store.ErrNotFound, "the completion marker must not be written after a failure")
+	assert.Equal(t, canonical, get(ok1.ID).Annotations, "other groups are still rewritten")
+	assert.Equal(t, canonical, get(ok2.ID).Annotations, "other groups are still rewritten")
+	assert.Equal(t, legacyOnly, get(bad.ID).Annotations, "the failed group keeps the legacy key")
+
+	inject.Store(false)
+	require.NoError(t, cs.MigrateLegacyProjectMembersGroupMarkers(ctx))
+	_, err = cs.GetHubSetting(ctx, LegacyProjectMembersGroupMarkerMigrationSection)
+	require.NoError(t, err, "a clean re-run must write the completion marker")
+	assert.Equal(t, canonical, get(bad.ID).Annotations, "the re-run rewrites the previously failed group")
 }
 
 // TestMigrateRewritesLegacyProjectMembersGroupMarkers checks that the full

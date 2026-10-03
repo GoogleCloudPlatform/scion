@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -785,8 +786,9 @@ func TestBackfillRoleBindings_ClearRunsWhenEarlierStepFails(t *testing.T) {
 // ptone/scion#2556 regression: a members group marked only with the legacy
 // key (written by the store marker backfill before the fix) used to be
 // refused by project re-ensure. After the startup migration rewrites the
-// key, re-ensure must adopt it, without setting an owner and without
-// granting the creator anything.
+// key, re-ensure must adopt it. Adoption sets no Group.OwnerID and creates
+// no role binding; as for any canonical members group, the creator is
+// (re-)added as a group owner member, which carries no project authority.
 func TestProjectMembersGroup_LegacyMarkerAdoptedAfterMigration(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -813,9 +815,18 @@ func TestProjectMembersGroup_LegacyMarkerAdoptedAfterMigration(t *testing.T) {
 	require.True(t, ok, "test store must expose the legacy marker migration")
 	// The test server already ran the store migrations on its empty
 	// database, which completed the one-shot rewrite. Clear its completion
-	// marker (entadapter legacyProjectMembersGroupMarkerMigrationSection) to
-	// model a database upgraded with a legacy-marked group in place.
-	require.NoError(t, s.DeleteHubSetting(ctx, "migration_legacy_project_members_group_marker_v1"))
+	// marker to model a database upgraded with a legacy-marked group in
+	// place.
+	require.NoError(t, s.DeleteHubSetting(ctx, entadapter.LegacyProjectMembersGroupMarkerMigrationSection))
+	// The group must still carry the legacy key right before the migration
+	// runs, and the completion marker must really be gone; otherwise the
+	// rewrite below could silently be a no-op.
+	premigration, err := s.GetGroup(ctx, legacy.ID)
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{store.LegacyAnnotationProjectMembersGroup: "true"}, premigration.Annotations,
+		"the seeded group must still carry only the legacy key before the migration")
+	_, err = s.GetHubSetting(ctx, entadapter.LegacyProjectMembersGroupMarkerMigrationSection)
+	require.ErrorIs(t, err, store.ErrNotFound, "the migration completion marker must be cleared")
 	require.NoError(t, migrator.MigrateLegacyProjectMembersGroupMarkers(ctx))
 
 	migrated, err := s.GetGroup(ctx, legacy.ID)
@@ -836,4 +847,10 @@ func TestProjectMembersGroup_LegacyMarkerAdoptedAfterMigration(t *testing.T) {
 	bindingsAfter, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, creator.ID)
 	require.NoError(t, err)
 	assert.Len(t, bindingsAfter, len(bindingsBefore), "adoption must not grant the creator a role binding")
+
+	// As for any canonical members group, re-ensure re-adds the creator as a
+	// group owner member (no project authority under PM1).
+	membership, err := s.GetGroupMembership(ctx, legacy.ID, store.GroupMemberTypeUser, creator.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.GroupMemberRoleOwner, membership.Role)
 }
