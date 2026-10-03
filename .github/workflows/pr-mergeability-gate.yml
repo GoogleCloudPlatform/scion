@@ -63,8 +63,10 @@ on:
 # the invariant independent of the order in which GitHub creates runs: an
 # older-head run created late cannot cancel the newest head's run. The cost
 # is that a superseded head's run finishes instead of being cancelled; it is
-# cheap (a few seconds of API reads). If you add a trigger type whose run may
-# be skipped, or a job-level `if:`, set cancel-in-progress to false (queue
+# cheap (API reads only: usually a few seconds, at most about a minute of
+# runner time if mergeable_state stays unknown through all 15 polls, 4 s
+# apart). If you add a trigger type whose run may be skipped, or a
+# job-level `if:`, set cancel-in-progress to false (queue
 # instead of cancel), or a skipped run could leave the head with only a
 # cancelled gate result.
 concurrency:
