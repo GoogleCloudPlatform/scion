@@ -108,9 +108,21 @@ func (r *Relay) serveInternal(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "relay-peer identity required", http.StatusUnauthorized)
 		return
 	}
+	target, targetGen := req.Header.Get(HeaderPeerTarget), req.Header.Get(HeaderPeerTargetGeneration)
+	if target == "" || targetGen == "" {
+		http.Error(w, "relay-peer target required", http.StatusUnauthorized)
+		return
+	}
 	r.mu.Lock()
-	killed := r.killed
+	killed, gen := r.killed, r.gen
 	r.mu.Unlock()
+	if target != r.cfg.InstanceID || targetGen != strconv.FormatInt(gen, 10) {
+		// Signed for another relay or an earlier generation of this one:
+		// a stale route for the caller, which re-resolves.
+		w.Header().Set(HeaderStaleReason, "relay_target_mismatch")
+		http.Error(w, "request is for another relay instance or generation", http.StatusConflict)
+		return
+	}
 	if killed {
 		http.Error(w, "relay unavailable", http.StatusServiceUnavailable)
 		return

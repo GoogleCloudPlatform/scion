@@ -79,12 +79,14 @@ func (c *PeerClient) sign(req *http.Request) error {
 	return c.Auth.Sign(req)
 }
 
-// Probe implements registry.ProbeFunc: GET {endpoint}/internal/v1/conduit/self.
-func (c *PeerClient) Probe(ctx context.Context, endpoint string) (string, error) {
+// Probe is GET {endpoint}/internal/v1/conduit/self, signed for the relay
+// targetID at generation targetGen. It returns the answering instance id.
+func (c *PeerClient) Probe(ctx context.Context, endpoint, targetID string, targetGen int64) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(endpoint, "/")+internalSelfPath, nil)
 	if err != nil {
 		return "", err
 	}
+	SetPeerTarget(req, targetID, targetGen)
 	if err := c.sign(req); err != nil {
 		return "", err
 	}
@@ -93,6 +95,10 @@ func (c *PeerClient) Probe(ctx context.Context, endpoint string) (string, error)
 		return "", err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusConflict && resp.Header.Get(HeaderStaleReason) == "relay_target_mismatch" {
+		// Another relay, or another generation, answered at endpoint.
+		return "", fmt.Errorf("self probe: %w: answered by a relay other than %s generation %d", registry.ErrSelfCheckMismatch, targetID, targetGen)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("self probe: HTTP %d", resp.StatusCode)
 	}
@@ -103,9 +109,11 @@ func (c *PeerClient) Probe(ctx context.Context, endpoint string) (string, error)
 	return sr.InstanceID, nil
 }
 
-// probe is the relay's self-check probe.
+// probe is the relay's self-check probe (registry.ProbeFunc). It runs
+// before RegisterRelay, so it targets this instance at its current,
+// not yet registered, generation.
 func (r *Relay) probe(ctx context.Context, endpoint string) (string, error) {
-	return r.peerClient().Probe(ctx, endpoint)
+	return r.peerClient().Probe(ctx, endpoint, r.cfg.InstanceID, r.Generation())
 }
 
 func (r *Relay) peerClient() *PeerClient {
@@ -161,6 +169,7 @@ func (s *RemoteSession) Call(ctx context.Context, rpc *conduitv1.RpcRequest) (*c
 	req.Header.Set("Content-Type", "application/x-protobuf")
 	req.Header.Set(HeaderBodySHA256, hex.EncodeToString(sum[:]))
 	req.Header.Set(HeaderWant, encodeWant(s.want))
+	SetPeerTarget(req, s.rec.RelayInstanceID, s.rec.RelayGeneration)
 	if err := s.client.sign(req); err != nil {
 		return nil, err
 	}
@@ -233,6 +242,7 @@ func (s *RemoteSession) OpenStream(ctx context.Context, open *conduitv1.StreamOp
 			return nil, err
 		}
 		req.Header.Set(HeaderWant, encodeWant(want))
+		SetPeerTarget(req, s.rec.RelayInstanceID, s.rec.RelayGeneration)
 		if err := s.client.sign(req); err != nil {
 			return nil, err
 		}
