@@ -1371,6 +1371,31 @@ authDone:
 		}
 	}
 
+	// Kubernetes shared-dir PVC defaults from settings: the profile's value,
+	// else its runtime entry's (applied below under the template/agent
+	// kubernetes block). The profile is the one named for this start, else
+	// the one the agent was created with. When shared-dir PVCs will be
+	// needed, check the effective size here so a bad value fails with the
+	// place it is set rather than a bare parse error from the runtime.
+	var sdClass, sdSize string
+	if settings != nil && m.Runtime.Name() == "kubernetes" {
+		sdProfile := opts.Profile
+		if sdProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
+			sdProfile = finalScionCfg.Info.Profile
+		}
+		var sdSizeKey string
+		sdClass, sdSize, sdSizeKey = settings.ResolveSharedDirDefaultsWithSource(sdProfile)
+		if len(effectiveSharedDirs) > 0 {
+			size, source := sdSize, "settings "+sdSizeKey
+			if finalScionCfg != nil && finalScionCfg.Kubernetes != nil && finalScionCfg.Kubernetes.SharedDirSize != "" {
+				size, source = finalScionCfg.Kubernetes.SharedDirSize, "kubernetes.shared_dir_size in the agent or template config"
+			}
+			if err := config.ValidateSharedDirSize(size); err != nil {
+				return nil, fmt.Errorf("%s: %w", source, err)
+			}
+		}
+	}
+
 	runCfg := runtime.RunConfig{
 		Name:                 containerName(projectName, opts.Name),
 		Template:             template,
@@ -1486,15 +1511,28 @@ authDone:
 			// to empty — e.g. after an operator removes a settings or
 			// template pull-policy pin — exactly the staleness this
 			// package's Image handling was written to avoid.
-			if finalScionCfg == nil || finalScionCfg.Kubernetes == nil {
-				if resolvedPullPolicy == "" {
-					return nil
-				}
-				return &api.KubernetesConfig{ImagePullPolicy: resolvedPullPolicy}
+			//
+			// Shared-dir PVC defaults from settings (profile, then the
+			// profile's runtime entry) are filled in only where the
+			// template/agent kubernetes block leaves them empty, and only
+			// on the Kubernetes runtime. They are resolved here at start
+			// time rather than persisted by ProvisionAgent, so a settings
+			// change applies on the next start, matching ImagePullPolicy.
+			var k8sCfg *api.KubernetesConfig
+			if finalScionCfg != nil && finalScionCfg.Kubernetes != nil {
+				cpy := *finalScionCfg.Kubernetes
+				k8sCfg = &cpy
 			}
-			k8sCfg := *finalScionCfg.Kubernetes
-			k8sCfg.ImagePullPolicy = resolvedPullPolicy
-			return &k8sCfg
+			if resolvedPullPolicy != "" || k8sCfg != nil {
+				if k8sCfg == nil {
+					k8sCfg = &api.KubernetesConfig{}
+				}
+				k8sCfg.ImagePullPolicy = resolvedPullPolicy
+			}
+			if sdClass != "" || sdSize != "" {
+				k8sCfg = config.ApplySharedDirDefaults(k8sCfg, sdClass, sdSize)
+			}
+			return k8sCfg
 		}(),
 		GitClone:         opts.GitClone,
 		SharedDirs:       effectiveSharedDirs,

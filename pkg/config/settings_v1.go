@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +35,7 @@ import (
 	"github.com/knadh/koanf/providers/rawbytes"
 	"github.com/knadh/koanf/v2"
 	yamlv3 "gopkg.in/yaml.v3"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // ResolveHarnessConfig looks up a named harness config and merges profile-level overrides.
@@ -145,6 +147,118 @@ func (vs *VersionedSettings) ResolveRuntime(profileName string) (V1RuntimeConfig
 	}
 
 	return rtConfig, runtimeType, nil
+}
+
+// missingSchemaVersionWarning is emitted when a settings file is loaded as v1
+// only because its runtime entries use v1-only keys (v1RuntimeIndicatorKeys).
+var missingSchemaVersionWarning = `settings.yaml contains v1 runtime fields (` + strings.Join(v1RuntimeIndicatorKeys, ", ") + `) but is missing 'schema_version: "1"'; add it as the first line to silence this warning`
+
+// ResolveSharedDirDefaults returns the settings-level Kubernetes shared-dir
+// PVC defaults (storage class and size) for a profile. Each field is
+// resolved independently: the profile's value wins, otherwise the value on
+// the profile's runtime entry is used. Empty means "not set in settings".
+// If profileName is empty, ActiveProfile is used. An unknown profile
+// yields empty values; a profile naming a missing runtime entry yields the
+// profile's own values only.
+//
+// These are defaults only. A template's or agent's kubernetes block
+// (api.KubernetesConfig.SharedDirStorageClass / SharedDirSize) wins over
+// both; see ApplySharedDirDefaults.
+func (vs *VersionedSettings) ResolveSharedDirDefaults(profileName string) (storageClass, size string) {
+	storageClass, size, _ = vs.ResolveSharedDirDefaultsWithSource(profileName)
+	return storageClass, size
+}
+
+// ResolveSharedDirDefaultsWithSource is ResolveSharedDirDefaults that also
+// returns the settings key the size came from
+// ("profiles.NAME.shared_dir_size" or "runtimes.NAME.shared_dir_size"), so
+// an error about the value can name where it is set. sizeKey is empty when
+// size is empty.
+func (vs *VersionedSettings) ResolveSharedDirDefaultsWithSource(profileName string) (storageClass, size, sizeKey string) {
+	if vs == nil {
+		return "", "", ""
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	profile, ok := vs.Profiles[profileName]
+	if !ok {
+		return "", "", ""
+	}
+	storageClass, size = profile.SharedDirStorageClass, profile.SharedDirSize
+	if size != "" {
+		sizeKey = "profiles." + profileName + ".shared_dir_size"
+	}
+	if rt, ok := vs.Runtimes[profile.Runtime]; ok {
+		if storageClass == "" {
+			storageClass = rt.SharedDirStorageClass
+		}
+		if size == "" && rt.SharedDirSize != "" {
+			size = rt.SharedDirSize
+			sizeKey = "runtimes." + profile.Runtime + ".shared_dir_size"
+		}
+	}
+	return storageClass, size, sizeKey
+}
+
+// ValidateSharedDirSize checks that a shared_dir_size value parses as a
+// positive Kubernetes resource quantity (for example 10Gi or 1Ti). Empty is
+// valid and means "not set".
+func ValidateSharedDirSize(size string) error {
+	if size == "" {
+		return nil
+	}
+	q, err := resource.ParseQuantity(size)
+	if err != nil {
+		return fmt.Errorf("invalid shared_dir_size %q: must be a Kubernetes quantity such as 10Gi or 1Ti", size)
+	}
+	if q.Sign() <= 0 {
+		return fmt.Errorf("invalid shared_dir_size %q: must be a positive Kubernetes quantity such as 10Gi or 1Ti", size)
+	}
+	return nil
+}
+
+// ValidateSharedDirSizes checks shared_dir_size on every runtime and
+// profile entry. Each error's Path names the settings key
+// ("runtimes.NAME.shared_dir_size" / "profiles.NAME.shared_dir_size").
+// Results are sorted by path.
+func ValidateSharedDirSizes(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig) []ValidationError {
+	var errs []ValidationError
+	for name, rt := range runtimes {
+		if err := ValidateSharedDirSize(rt.SharedDirSize); err != nil {
+			errs = append(errs, ValidationError{Path: "runtimes." + name + ".shared_dir_size", Message: err.Error()})
+		}
+	}
+	for name, p := range profiles {
+		if err := ValidateSharedDirSize(p.SharedDirSize); err != nil {
+			errs = append(errs, ValidationError{Path: "profiles." + name + ".shared_dir_size", Message: err.Error()})
+		}
+	}
+	sort.Slice(errs, func(i, j int) bool { return errs[i].Path < errs[j].Path })
+	return errs
+}
+
+// ApplySharedDirDefaults returns base with SharedDirStorageClass and
+// SharedDirSize filled from the given settings defaults where base leaves
+// them empty, so a template's or agent's explicit value always wins. base
+// is never modified; a copy is returned. When both defaults are empty,
+// base is returned unchanged (including nil).
+func ApplySharedDirDefaults(base *api.KubernetesConfig, storageClass, size string) *api.KubernetesConfig {
+	if storageClass == "" && size == "" {
+		return base
+	}
+	out := &api.KubernetesConfig{}
+	if base != nil {
+		cpy := *base
+		out = &cpy
+	}
+	if out.SharedDirStorageClass == "" {
+		out.SharedDirStorageClass = storageClass
+	}
+	if out.SharedDirSize == "" {
+		out.SharedDirSize = size
+	}
+	return out
 }
 
 // GetHubEndpoint returns the Hub endpoint from settings, or empty string if not configured.
@@ -1180,6 +1294,13 @@ type V1RuntimeConfig struct {
 	// not create one. Validated as a DNS-1123 subdomain. An explicit
 	// template/agent-config kubernetes.priorityClassName outranks this.
 	PriorityClassName string `json:"priority_class_name,omitempty" yaml:"priority_class_name,omitempty" koanf:"priority_class_name"`
+	// SharedDirStorageClass and SharedDirSize are Kubernetes-only defaults
+	// for the ReadWriteMany PVCs backing project shared dirs. They are the
+	// lowest settings tier: a profile's values win over them, and a
+	// template's or agent's kubernetes block wins over both. See
+	// ResolveSharedDirDefaults.
+	SharedDirStorageClass string `json:"shared_dir_storage_class,omitempty" yaml:"shared_dir_storage_class,omitempty" koanf:"shared_dir_storage_class"`
+	SharedDirSize         string `json:"shared_dir_size,omitempty" yaml:"shared_dir_size,omitempty" koanf:"shared_dir_size"`
 	// CloudRun holds Cloud Run-specific settings when Type is "cloudrun".
 	CloudRun *CloudRunConfig `json:"cloudrun,omitempty" yaml:"cloudrun,omitempty" koanf:"cloudrun"`
 	// CloudRunInstances holds Cloud Run Instances-specific settings when Type is "cloudrun-instances".
@@ -1340,6 +1461,12 @@ type V1ProfileConfig struct {
 	// Validated with time.LoadLocation on write. Takes precedence over a raw
 	// TZ entry in the profile's env map and the hub-level default_timezone.
 	Timezone string `json:"timezone,omitempty" yaml:"timezone,omitempty" koanf:"timezone"`
+	// SharedDirStorageClass and SharedDirSize are Kubernetes-only defaults
+	// for shared-dir PVCs created by agents using this profile. They win
+	// over the same keys on the profile's runtime entry and lose to a
+	// template's or agent's kubernetes block. See ResolveSharedDirDefaults.
+	SharedDirStorageClass string `json:"shared_dir_storage_class,omitempty" yaml:"shared_dir_storage_class,omitempty" koanf:"shared_dir_storage_class"`
+	SharedDirSize         string `json:"shared_dir_size,omitempty" yaml:"shared_dir_size,omitempty" koanf:"shared_dir_size"`
 }
 
 // resolveEffectiveProjectPath resolves the effective project path for settings loading.
@@ -2720,7 +2847,7 @@ func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, er
 		}
 		var warnings []string
 		if missingSchemaVersion {
-			warnings = append(warnings, `settings.yaml contains v1 runtime fields (type, cloudrun, gke, list_all_namespaces) but is missing 'schema_version: "1"'; add it as the first line to silence this warning`)
+			warnings = append(warnings, missingSchemaVersionWarning)
 		}
 		// Apply DB-backed settings overlay (co-located hub+broker mode).
 		// DB values win over file values for runtimes, profiles, harness_configs.
@@ -2942,7 +3069,7 @@ func loadGlobalSettingsOnly(globalDir string) (*VersionedSettings, []string, err
 		}
 		var warnings []string
 		if missingSchemaVersion {
-			warnings = append(warnings, `settings.yaml contains v1 runtime fields (type, cloudrun, gke, list_all_namespaces) but is missing 'schema_version: "1"'; add it as the first line to silence this warning`)
+			warnings = append(warnings, missingSchemaVersionWarning)
 		}
 		return vs, warnings, nil
 	}

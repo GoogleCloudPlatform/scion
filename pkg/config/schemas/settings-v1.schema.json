@@ -317,6 +317,14 @@
           "maxLength": 253,
           "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
           "description": "Kubernetes-runtime-only default PriorityClass name (DNS-1123 subdomain) applied to agent pods using this runtime entry, or the empty string for unset. The PriorityClass must already exist on the cluster; Scion does not create one. An explicit template/agent-config kubernetes.priorityClassName overrides this."
+        },
+        "shared_dir_storage_class": {
+          "type": "string",
+          "description": "Kubernetes only. Default storage class for shared-dir PVCs (must support ReadWriteMany). A profile value wins over this; a template or agent kubernetes.shared_dir_storage_class wins over both."
+        },
+        "shared_dir_size": {
+          "type": "string",
+          "description": "Kubernetes only. Default size per shared-dir PVC (e.g. 10Gi). A profile value wins over this; a template or agent kubernetes.shared_dir_size wins over both."
         }
       },
       "additionalProperties": false
@@ -744,6 +752,14 @@
           "type": "array",
           "items": { "$ref": "#/$defs/requiredSecret" },
           "description": "Required secrets for agents created under this profile."
+        },
+        "shared_dir_storage_class": {
+          "type": "string",
+          "description": "Kubernetes only. Default storage class for shared-dir PVCs created under this profile (must support ReadWriteMany). Wins over the runtime entry's value; a template or agent kubernetes.shared_dir_storage_class wins over this."
+        },
+        "shared_dir_size": {
+          "type": "string",
+          "description": "Kubernetes only. Default size per shared-dir PVC under this profile (e.g. 10Gi). Wins over the runtime entry's value; a template or agent kubernetes.shared_dir_size wins over this."
         }
       },
       "additionalProperties": false
