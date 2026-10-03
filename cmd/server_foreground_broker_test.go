@@ -276,15 +276,23 @@ func writeOperatorSubstrateSettings(t *testing.T, operatorSettings string) func(
 // is an operator-defined substrate runtime with both required endpoints and
 // the given extra substrate fields (a JSON fragment, may be empty).
 func operatorSubstrateSettings(extraSubstrateFields string) string {
+	return operatorSubstrateSettingsWithBlock(`
+					"api_endpoint": "api.ate-system.svc:443",
+					"router_endpoint": "http://atenet-router.ate-system.svc:80"` + extraSubstrateFields)
+}
+
+// operatorSubstrateSettingsWithBlock returns operator settings whose default
+// profile is an operator-defined substrate runtime whose substrate block body
+// is exactly substrateFields (a JSON object body without braces), so a test
+// can omit a field operatorSubstrateSettings always supplies.
+func operatorSubstrateSettingsWithBlock(substrateFields string) string {
 	return `{
 		"schema_version": "1",
 		"active_profile": "substrate",
 		"runtimes": {
 			"substrate-prod": {
 				"type": "substrate",
-				"substrate": {
-					"api_endpoint": "api.ate-system.svc:443",
-					"router_endpoint": "http://atenet-router.ate-system.svc:80"` + extraSubstrateFields + `
+				"substrate": {` + substrateFields + `
 				}
 			}
 		},
@@ -294,33 +302,62 @@ func operatorSubstrateSettings(extraSubstrateFields string) string {
 
 // TestResolveBrokerDefaultRuntime_SubstrateConfigValidationFailureRefusesStart:
 // an operator-defined substrate default runtime that fails NewSubstrateRuntime's
-// deterministic config validation (here substrate.Validate rejecting an
-// unsupported egress_trust_bundle) is a settings problem that no retry can
-// fix, so the broker must still refuse to start. The builder is stubbed to
-// prove validation alone decides this: nothing is ever built or dialed.
+// deterministic config validation is a settings problem that no retry can
+// fix, so the broker must still refuse to start. Each row exercises one
+// tagging site: a missing required api_endpoint, a missing required
+// router_endpoint, and substrate.Validate rejecting an unsupported
+// egress_trust_bundle. The builder is stubbed to prove validation alone
+// decides this: nothing is ever built or dialed.
 func TestResolveBrokerDefaultRuntime_SubstrateConfigValidationFailureRefusesStart(t *testing.T) {
-	built := 0
-	restore := scionruntime.SetSubstrateRuntimeBuilderForTest(func(config.V1SubstrateConfig) (*scionruntime.SubstrateRuntime, error) {
-		built++
-		return nil, fmt.Errorf("builder must not be reached for an invalid config")
-	})
-	t.Cleanup(restore)
-
-	getRuntime := writeOperatorSubstrateSettings(t, operatorSubstrateSettings(`,
-					"egress_trust_bundle": "not-a-supported-bundle.example.com"`))
-
-	var logged []string
-	logf := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
-
-	rt, err := resolveBrokerDefaultRuntime(getRuntime, logf)
-	if err == nil {
-		t.Fatalf("expected startup to be refused for a substrate config validation failure, got runtime %q", rt.Name())
+	tests := []struct {
+		name         string
+		settings     string
+		wantInErrMsg string
+	}{
+		{
+			name: "missing api_endpoint",
+			settings: operatorSubstrateSettingsWithBlock(`
+					"router_endpoint": "http://atenet-router.ate-system.svc:80"`),
+			wantInErrMsg: "api_endpoint is required",
+		},
+		{
+			name: "missing router_endpoint",
+			settings: operatorSubstrateSettingsWithBlock(`
+					"api_endpoint": "api.ate-system.svc:443"`),
+			wantInErrMsg: "router_endpoint is required",
+		},
+		{
+			name: "substrate.Validate rejects egress_trust_bundle",
+			settings: operatorSubstrateSettings(`,
+					"egress_trust_bundle": "not-a-supported-bundle.example.com"`),
+			wantInErrMsg: "egress_trust_bundle",
+		},
 	}
-	assert.ErrorIs(t, err, scionruntime.ErrSubstrateProfileInvalid)
-	assert.Contains(t, err.Error(), "egress_trust_bundle")
-	assert.Nil(t, rt)
-	assert.Empty(t, logged, "a refused startup must not log a runtime as in use")
-	assert.Zero(t, built, "config validation must fail before the runtime is built")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			built := 0
+			restore := scionruntime.SetSubstrateRuntimeBuilderForTest(func(config.V1SubstrateConfig) (*scionruntime.SubstrateRuntime, error) {
+				built++
+				return nil, fmt.Errorf("builder must not be reached for an invalid config")
+			})
+			t.Cleanup(restore)
+
+			getRuntime := writeOperatorSubstrateSettings(t, tt.settings)
+
+			var logged []string
+			logf := func(format string, args ...interface{}) { logged = append(logged, fmt.Sprintf(format, args...)) }
+
+			rt, err := resolveBrokerDefaultRuntime(getRuntime, logf)
+			if err == nil {
+				t.Fatalf("expected startup to be refused for a substrate config validation failure, got runtime %q", rt.Name())
+			}
+			assert.ErrorIs(t, err, scionruntime.ErrSubstrateProfileInvalid)
+			assert.Contains(t, err.Error(), tt.wantInErrMsg)
+			assert.Nil(t, rt)
+			assert.Empty(t, logged, "a refused startup must not log a runtime as in use")
+			assert.Zero(t, built, "config validation must fail before the runtime is built")
+		})
+	}
 }
 
 // TestResolveBrokerDefaultRuntime_SubstrateBuildFailureStartsDegraded: a
