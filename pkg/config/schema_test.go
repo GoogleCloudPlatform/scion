@@ -409,6 +409,36 @@ server:
 	assert.Empty(t, errors, "valid server section should produce no errors")
 }
 
+func TestValidateSettings_WorkspaceStorageNFSAutoMount(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+server:
+  workspace_storage:
+    backend: nfs
+    nfs:
+      mount_root: /mnt/nfs
+      auto_mount: true
+      shares:
+        - id: ws1
+          server: 10.0.0.2
+          export: /scion-workspaces
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.Empty(t, errors, "workspace_storage with nfs.auto_mount should validate")
+
+	bad := []byte(`
+schema_version: "1"
+server:
+  workspace_storage:
+    nfs:
+      auto_mount: "yes"
+`)
+	errors, err = ValidateSettings(bad, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "non-boolean nfs.auto_mount should produce a validation error")
+}
+
 func TestValidateSettings_InvalidServerLogLevel(t *testing.T) {
 	data := []byte(`
 schema_version: "1"

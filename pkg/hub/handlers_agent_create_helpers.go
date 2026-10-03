@@ -537,6 +537,9 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	if hcName == "" && resolvedTemplate != nil {
 		hcName = s.getHarnessConfigFromTemplate(resolvedTemplate, "")
 	}
+	// resolvedHC is the hub harness config resolved below, if any; the
+	// timezone capture at the end of this function reads its env.
+	var resolvedHC *store.HarnessConfig
 	if hcName != "" && agent.AppliedConfig.HarnessConfigID == "" {
 		var hc *store.HarnessConfig
 		if project != nil {
@@ -554,6 +557,7 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 			}
 		}
 		if hc != nil {
+			resolvedHC = hc
 			agent.AppliedConfig.HarnessConfigID = hc.ID
 			agent.AppliedConfig.HarnessConfigHash = hc.ContentHash
 
@@ -755,6 +759,14 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	// Merge injected skills from hub/user/project scopes into InlineConfig.Skills
 	// so the provisioner's existing Step 3b handles them.
 	s.mergeInjectedSkills(ctx, agent, project)
+
+	// Writer (a) of ExplicitTimezone, run unconditionally and last so that
+	// creates with or without a template or harness config are covered: a
+	// create-time TZ (request config.env, else the hub template merged
+	// above, else the hub harness config) becomes the agent's pin, and TZ
+	// leaves the env records. Every create entry point (HTTP create,
+	// scheduled spawn and reincarnate) reaches this via deriveAgentConfig.
+	s.captureCreateTimezone(ctx, agent, resolvedHC)
 }
 
 // mergeInjectedSkills fetches injected-skills refs from hub, user, and project
@@ -1027,6 +1039,14 @@ func (s *Server) handleExistingAgent(
 		return existingAgentConflict
 	}
 
+	// Delete in progress (design ptone/scion#2483 §2.1): every branch below
+	// starts, resumes, restarts or recreates existingAgent, so the shared
+	// start gate runs first, after the lifecycle authz above.
+	if ref := s.startGate(ctx, existingAgent, startEntryCreateExisting); ref.refuses() {
+		ref.write(w)
+		return existingAgentErrored
+	}
+
 	s.agentLifecycleLog.Info("handleExistingAgent: found existing agent",
 		"slug", existingAgent.Slug,
 		"existing_agent_id", existingAgent.ID,
@@ -1101,7 +1121,8 @@ func (s *Server) handleExistingAgent(
 
 		s.enrichAgent(ctx, existingAgent, project, nil)
 		writeJSON(w, http.StatusOK, CreateAgentResponse{
-			Agent: redactedAgentCopy(ctx, s, existingAgent),
+			Agent:    redactedAgentCopy(ctx, s, existingAgent),
+			Warnings: dispatchWarningsFromContext(ctx),
 		})
 		return existingAgentStarted
 	}
@@ -1179,7 +1200,8 @@ func (s *Server) handleExistingAgent(
 
 			s.enrichAgent(ctx, existingAgent, project, nil)
 			writeJSON(w, http.StatusOK, CreateAgentResponse{
-				Agent: redactedAgentCopy(ctx, s, existingAgent),
+				Agent:    redactedAgentCopy(ctx, s, existingAgent),
+				Warnings: dispatchWarningsFromContext(ctx),
 			})
 			return existingAgentStarted
 		}
@@ -1214,14 +1236,13 @@ func (s *Server) handleExistingAgent(
 		// ptone/scion#1963 delete-path audit: this hard-deletes a
 		// provisioning-phase agent, which counts against
 		// max_agents_per_broker (isBrokerQuotaCountedPhase). Release both
-		// limits explicitly, matching the main delete handler
-		// (handlers_agents_core.go) — the stale-reservation reconcile would
-		// eventually catch a missed release once the agent record is gone,
-		// but there is no reason to wait for that here.
-		if s.quotaService != nil {
-			s.releaseBrokerQuota(ctx, existingAgent)
-			s.quotaService.Release(ctx, "max_agents_per_project", existingAgent.ID)
-		}
+		// limits via releaseAgentQuotas, matching the main delete handler
+		// (handlers_agents_core.go). releaseAgentQuotas detaches from ctx
+		// (ptone/scion#2087): the row is already gone, so a release that
+		// failed on a canceled request would strand the per-project
+		// reservation for good — the stale-reservation reconcile only
+		// reclaims max_agents_per_broker.
+		s.releaseAgentQuotas(ctx, existingAgent.ID, existingAgent.RuntimeBrokerID)
 		return existingAgentDeleted
 	}
 
@@ -1292,7 +1313,8 @@ func (s *Server) handleExistingAgent(
 		// Enrich and return the existing agent.
 		s.enrichAgent(ctx, existingAgent, project, nil)
 		writeJSON(w, http.StatusOK, CreateAgentResponse{
-			Agent: redactedAgentCopy(ctx, s, existingAgent),
+			Agent:    redactedAgentCopy(ctx, s, existingAgent),
+			Warnings: dispatchWarningsFromContext(ctx),
 		})
 		return existingAgentStarted
 	}

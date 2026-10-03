@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -595,12 +596,7 @@ func (svc *ProjectMembershipService) checkGovernance(ctx context.Context, req Me
 		if svc.actorHasHubRoleBindingAuthority(ctx, req.Actor.ID(), req.Op) {
 			return MembershipDecision{Allowed: true}
 		}
-		return MembershipDecision{
-			Allowed:    false,
-			DenialCode: ErrCodeRoleAssignmentForbidden,
-			Reason:     "actor has no project role",
-			HTTPStatus: 403,
-		}
+		return *noProjectRoleDecision()
 	}
 
 	// The governance matrix from CT1 D5:
@@ -762,7 +758,7 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 	if err != nil {
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "not_found", Reason: "role definition not found", HTTPStatus: 400}
 	}
-	if !validProjectRoles[roleDef.Name] {
+	if !store.IsBuiltInProjectMembershipRole(roleDef.Name) {
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "forbidden", Reason: "invalid project role: " + roleDef.Name, HTTPStatus: 400}
 	}
 	if roleDef.ScopeType != store.RoleScopeProject {
@@ -795,12 +791,7 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 			ScopeID:          req.ProjectID,
 		})
 		if !delDecision.Allowed {
-			return nil, &MembershipDecision{
-				Allowed:    false,
-				DenialCode: ErrCodeTargetRoleProtected,
-				Reason:     "actor cannot delegate the requested role: " + delDecision.Reason,
-				HTTPStatus: 403,
-			}
+			return nil, canDelegateRefusal(roleDef, delDecision.Reason)
 		}
 	}
 
@@ -849,7 +840,7 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 			if hasHubAuth {
 				hubOverride = true
 			} else {
-				return fmt.Errorf("governance:%d:%s", 403, "actor has no project role (re-evaluated under lock)")
+				return asGovernanceDenial(*noProjectRoleUnderLockDecision())
 			}
 		}
 		if !hubOverride {
@@ -987,6 +978,10 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 		if isLastOwnerError(txErr) {
 			return nil, lastOwnerDenial()
 		}
+		var gdErr *governanceDenialError
+		if errors.As(txErr, &gdErr) {
+			return nil, &gdErr.decision
+		}
 		if govDenial := isGovernanceError(txErr); govDenial != nil {
 			return nil, govDenial
 		}
@@ -1030,7 +1025,7 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 	if err != nil {
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "not_found", Reason: "new role definition not found", HTTPStatus: 400}
 	}
-	if !validProjectRoles[newRoleDef.Name] {
+	if !store.IsBuiltInProjectMembershipRole(newRoleDef.Name) {
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "forbidden", Reason: "invalid project role: " + newRoleDef.Name, HTTPStatus: 400}
 	}
 	if newRoleDef.ScopeType != store.RoleScopeProject {
@@ -1069,12 +1064,7 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 				ScopeID:          req.ProjectID,
 			})
 			if !delDecision.Allowed {
-				return nil, &MembershipDecision{
-					Allowed:    false,
-					DenialCode: ErrCodeTargetRoleProtected,
-					Reason:     "actor cannot delegate the new role: " + delDecision.Reason,
-					HTTPStatus: 403,
-				}
+				return nil, canDelegateRefusalFor(newRoleDef, "the new role", delDecision.Reason)
 			}
 		}
 	}
@@ -1108,7 +1098,7 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 			if hasHubAuth {
 				hubOverride = true
 			} else {
-				return fmt.Errorf("governance:%d:%s", 403, "actor has no project role (re-evaluated under lock)")
+				return asGovernanceDenial(*noProjectRoleUnderLockDecision())
 			}
 		}
 
@@ -1193,6 +1183,10 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 	if txErr != nil {
 		if isLastOwnerError(txErr) {
 			return nil, lastOwnerDenial()
+		}
+		var gdErr *governanceDenialError
+		if errors.As(txErr, &gdErr) {
+			return nil, &gdErr.decision
 		}
 		if govDenial := isGovernanceError(txErr); govDenial != nil {
 			return nil, govDenial

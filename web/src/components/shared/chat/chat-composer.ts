@@ -40,6 +40,14 @@ import type { SlashCommandDetail } from './slash-autocomplete.js';
 import './mention-autocomplete.js';
 import './slash-autocomplete.js';
 import { showToast } from '../../../utils/toast.js';
+import { LongPressController } from './long-press.js';
+import type { ActionSheetItem, ActionSheetSelectDetail } from './chat-action-sheet.js';
+import './chat-action-sheet.js';
+
+/** The touch presentation of the send button's right-click menu. */
+const SEND_SHEET_ITEMS: ActionSheetItem[] = [
+  { id: 'send-interrupt', label: 'Send with interruption', icon: 'lightning-charge' },
+];
 
 /** Maximum message length in rune count. */
 const MAX_MESSAGE_LENGTH = 2000;
@@ -207,6 +215,14 @@ export class ScionChatComposer extends LitElement {
 
   /** Whether the right-click send context menu is visible. */
   @state() private showSendContextMenu = false;
+
+  /** Whether the send menu is open as an action sheet (a long-press on Send). */
+  @state() private showSendSheet = false;
+
+  /** "Send with interruption" was chosen from the sheet; sent once it has closed. */
+  private sendInterruptOnSheetClose = false;
+
+  private readonly sendLongPress = new LongPressController(this);
 
   /** W7: Pending file uploads before send. */
   @state() private pendingFiles: UploadedAttachment[] = [];
@@ -386,6 +402,16 @@ export class ScionChatComposer extends LitElement {
 
     .send-btn {
       flex-shrink: 0;
+    }
+
+    /* Long-press on Send opens its menu; keep iOS's callout and text
+       selection from claiming the press. */
+    @media (hover: none) {
+      .send-btn {
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
     }
 
     .send-context-overlay {
@@ -853,6 +879,7 @@ export class ScionChatComposer extends LitElement {
                 variant=${sendVariant}
                 ?disabled=${!canSend}
                 @click=${this.handleSend}
+                @pointerdown=${this.handleSendPointerDown}
                 @contextmenu=${this.handleSendContextMenu}
               >
                 <sl-icon slot="prefix" name=${sendIcon}></sl-icon>
@@ -869,6 +896,13 @@ export class ScionChatComposer extends LitElement {
                     </div>
                   `
                 : nothing}
+              <scion-action-sheet
+                heading="Send options"
+                .items=${SEND_SHEET_ITEMS}
+                .open=${this.showSendSheet && !inEditMode}
+                @action-sheet-select=${this.handleSendSheetSelect}
+                @action-sheet-close=${this.handleSendSheetClose}
+              ></scion-action-sheet>
             </div>
           </div>
           <div class="footer-row">
@@ -1528,10 +1562,8 @@ export class ScionChatComposer extends LitElement {
 
   /** Send the current message with the given interrupt flag. */
   private doSend(interrupt: boolean): void {
+    if (!this.hasSendableContent()) return;
     const trimmed = this.text.trim();
-    const hasAttachments = this.pendingFiles.length > 0;
-    if ((!trimmed && !hasAttachments) || this.runeCount > MAX_MESSAGE_LENGTH || this.disabled)
-      return;
 
     // Phase-3: If in edit mode, dispatch chat-edit instead of chat-send.
     if (this.editMessage) {
@@ -1705,15 +1737,66 @@ export class ScionChatComposer extends LitElement {
     }
   }
 
-  /** Show the right-click send context menu. */
+  /** Text or attachments, within the length limit, while the composer is enabled. */
+  private hasSendableContent(): boolean {
+    const hasContent = this.text.trim() !== '' || this.pendingFiles.length > 0;
+    return hasContent && this.runeCount <= MAX_MESSAGE_LENGTH && !this.disabled;
+  }
+
+  /** Is there something sendable, so the send menu has an action to offer? */
+  private canOfferSendMenu(): boolean {
+    return this.hasSendableContent() && !this.editMessage;
+  }
+
+  /**
+   * Show the send menu: the popup for a right-click, the action sheet for
+   * the browser's own touch long-press (Android fires `contextmenu` for it).
+   */
   private handleSendContextMenu(e: MouseEvent): void {
+    const fromTouchPress = this.sendLongPress.pressing;
+    if (this.sendLongPress.contextMenu(e)) return;
     e.preventDefault();
-    const trimmed = this.text.trim();
-    const hasAttachments = this.pendingFiles.length > 0;
-    if ((!trimmed && !hasAttachments) || this.runeCount > MAX_MESSAGE_LENGTH || this.disabled)
+    if (!this.hasSendableContent()) return;
+    if (fromTouchPress) {
+      if (this.canOfferSendMenu()) this.showSendSheet = true;
       return;
+    }
     this.showSendContextMenu = true;
   }
+
+  /**
+   * A touch long-press on Send opens the send menu as an action sheet. The
+   * long-press swallows the press's own click, so it never also sends.
+   */
+  private readonly handleSendPointerDown = (e: PointerEvent): void => {
+    if (!this.canOfferSendMenu()) {
+      this.sendLongPress.cancel();
+      return;
+    }
+    this.sendLongPress.pointerDown(e, () => {
+      if (!this.canOfferSendMenu()) return;
+      this.showSendContextMenu = false;
+      this.showSendSheet = true;
+    });
+  };
+
+  private readonly handleSendSheetSelect = (e: CustomEvent<ActionSheetSelectDetail>): void => {
+    if (e.detail.id === 'send-interrupt') this.sendInterruptOnSheetClose = true;
+  };
+
+  /**
+   * The sheet has closed, by a choice, Cancel, Esc or the backdrop. The
+   * send runs only now: closing the dialog hands focus back to whatever
+   * had it before (often the textarea), and sending first would let that
+   * restore undo the send's touch blur and bring the keyboard back up.
+   * Cancel sends nothing and leaves the draft and focus as they were.
+   */
+  private readonly handleSendSheetClose = (): void => {
+    this.showSendSheet = false;
+    if (!this.sendInterruptOnSheetClose) return;
+    this.sendInterruptOnSheetClose = false;
+    this.doSend(true);
+  };
 
   /** Send the message with interruption from the context menu. */
   private handleSendWithInterrupt(): void {

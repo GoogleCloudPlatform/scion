@@ -905,6 +905,127 @@ func TestCreateAgentProvisionOnly_TemplateNotFound(t *testing.T) {
 	}
 }
 
+// TestCreateAgentFullStart_SkillResolutionRateLimited proves that a required
+// skill reference failing to resolve because of GitHub rate limiting
+// surfaces as a 429, naming the ref and the cause, instead of the generic
+// 500 the "other error" branch maps to (#2546).
+func TestCreateAgentFullStart_SkillResolutionRateLimited(t *testing.T) {
+	srv := newTestServer(t)
+	mgr := srv.manager.(*mockManager)
+	mgr.startErr = &agent.SkillResolutionError{
+		URI:     "gh://example-org/example-skills/my-skill@main",
+		Code:    agent.SkillErrCodeRateLimited,
+		Message: "GitHub API request to /repos/example-org/example-skills/commits/main rate limited",
+	}
+
+	body := `{"name": "new-agent", "config": {"template": "claude"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusTooManyRequests, w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "gh://example-org/example-skills/my-skill@main") {
+		t.Errorf("expected response to name the unresolved skill ref, got: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "rate_limited") {
+		t.Errorf("expected response to name the cause, got: %s", w.Body.String())
+	}
+}
+
+// TestCreateAgentProvisionOnly_SkillResolutionNotFound is the ProvisionOnly
+// counterpart, covering the not-found cause mapped to 404.
+func TestCreateAgentProvisionOnly_SkillResolutionNotFound(t *testing.T) {
+	srv := newTestServer(t)
+	mgr := srv.manager.(*mockManager)
+	mgr.provisionErr = &agent.SkillResolutionError{
+		URI:     "gh://example-org/example-skills/missing-skill@main",
+		Code:    agent.SkillErrCodeNotFound,
+		Message: `skill "missing-skill" not found in repo example-org/example-skills at ref main`,
+	}
+
+	body := `{"name": "new-agent", "provisionOnly": true, "config": {"template": "claude"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusNotFound, w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "gh://example-org/example-skills/missing-skill@main") {
+		t.Errorf("expected response to name the unresolved skill ref, got: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "not_found") {
+		t.Errorf("expected response to name the cause, got: %s", w.Body.String())
+	}
+}
+
+// TestCreateAgentFullStart_SkillResolutionUpstreamUnavailableBecomes502
+// proves that GitHub itself failing (5xx after retries exhausted) surfaces as
+// 502, the one 5xx code in the mapping that still names the ref and the
+// cause, instead of either the pre-fix 500 or the briefly-considered 400
+// default (#2546 R3, O1).
+func TestCreateAgentFullStart_SkillResolutionUpstreamUnavailableBecomes502(t *testing.T) {
+	srv := newTestServer(t)
+	mgr := srv.manager.(*mockManager)
+	mgr.startErr = &agent.SkillResolutionError{
+		URI:     "gh://example-org/example-skills/my-skill@main",
+		Code:    agent.SkillErrCodeUpstreamUnavailable,
+		Message: "GitHub API error (503) while resolving commit, retries exhausted",
+	}
+
+	body := `{"name": "new-agent", "config": {"template": "claude"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadGateway, w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "gh://example-org/example-skills/my-skill@main") {
+		t.Errorf("expected response to name the unresolved skill ref, got: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "upstream_unavailable") {
+		t.Errorf("expected response to name the cause, got: %s", w.Body.String())
+	}
+}
+
+// TestCreateAgentFullStart_SkillResolutionDefaultCodeStaysInternalError
+// proves that an uncategorized SkillResolutionError.Code (e.g. a Hub-side
+// PreResolvedSkills code this broker version does not recognize) stays on
+// the existing 500 path, matching the "any other error" branch, rather than
+// being guessed at as a 4xx (#2546 R3).
+func TestCreateAgentFullStart_SkillResolutionDefaultCodeStaysInternalError(t *testing.T) {
+	srv := newTestServer(t)
+	mgr := srv.manager.(*mockManager)
+	mgr.startErr = &agent.SkillResolutionError{
+		URI:     "gh://example-org/example-skills/my-skill@main",
+		Code:    "storage_error",
+		Message: "skill my-skill version abc123 has storage files missing",
+	}
+
+	body := `{"name": "new-agent", "config": {"template": "claude"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusInternalServerError, w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "gh://example-org/example-skills/my-skill@main") {
+		t.Errorf("expected response to name the unresolved skill ref, got: %s", w.Body.String())
+	}
+}
+
 func TestStopAgent(t *testing.T) {
 	srv := newTestServer(t)
 

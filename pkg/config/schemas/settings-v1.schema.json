@@ -70,6 +70,7 @@
         "auth": { "$ref": "#/$defs/serverAuth" },
         "oauth": { "$ref": "#/$defs/serverOAuth" },
         "storage": { "$ref": "#/$defs/serverStorage" },
+        "workspace_storage": { "$ref": "#/$defs/serverWorkspaceStorage" },
         "secrets": { "$ref": "#/$defs/serverSecrets" },
         "log_level": {
           "type": "string",
@@ -317,6 +318,14 @@
           "maxLength": 253,
           "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
           "description": "Kubernetes-runtime-only default PriorityClass name (DNS-1123 subdomain) applied to agent pods using this runtime entry, or the empty string for unset. The PriorityClass must already exist on the cluster; Scion does not create one. An explicit template/agent-config kubernetes.priorityClassName overrides this."
+        },
+        "shared_dir_storage_class": {
+          "type": "string",
+          "description": "Kubernetes only. Default storage class for shared-dir PVCs (must support ReadWriteMany). A profile value wins over this; a template or agent kubernetes.shared_dir_storage_class wins over both."
+        },
+        "shared_dir_size": {
+          "type": "string",
+          "description": "Kubernetes only. Default size per shared-dir PVC (e.g. 10Gi). A profile value wins over this; a template or agent kubernetes.shared_dir_size wins over both."
         }
       },
       "additionalProperties": false
@@ -744,6 +753,14 @@
           "type": "array",
           "items": { "$ref": "#/$defs/requiredSecret" },
           "description": "Required secrets for agents created under this profile."
+        },
+        "shared_dir_storage_class": {
+          "type": "string",
+          "description": "Kubernetes only. Default storage class for shared-dir PVCs created under this profile (must support ReadWriteMany). Wins over the runtime entry's value; a template or agent kubernetes.shared_dir_storage_class wins over this."
+        },
+        "shared_dir_size": {
+          "type": "string",
+          "description": "Kubernetes only. Default size per shared-dir PVC under this profile (e.g. 10Gi). Wins over the runtime entry's value; a template or agent kubernetes.shared_dir_size wins over this."
         }
       },
       "additionalProperties": false
@@ -1044,6 +1061,55 @@
         "provider": { "type": "string", "enum": ["local", "gcs"], "default": "local", "x-env-var": "SCION_SERVER_STORAGE_PROVIDER" },
         "bucket": { "type": "string", "description": "GCS bucket name.", "x-env-var": "SCION_SERVER_STORAGE_BUCKET" },
         "local_path": { "type": "string", "x-env-var": "SCION_SERVER_STORAGE_LOCALPATH" }
+      }
+    },
+    "serverWorkspaceStorage": {
+      "type": "object",
+      "description": "Workspace storage backend for agent workspaces. Global-only, Layer-0 (restart to apply).",
+      "x-since": "1",
+      "properties": {
+        "backend": { "type": "string", "enum": ["local", "nfs", "cloudrun-volume", "gke-shared-volume"], "default": "local" },
+        "nfs": { "$ref": "#/$defs/serverWorkspaceStorageNFS" },
+        "cloudrun_volume": {
+          "type": "object",
+          "properties": {
+            "volume_name": { "type": "string" },
+            "subpath_root": { "type": "string", "default": "projects" }
+          }
+        },
+        "gke_shared_volume": {
+          "type": "object",
+          "properties": {
+            "volume_name": { "type": "string" },
+            "pv_claim_name": { "type": "string" },
+            "subpath_root": { "type": "string", "default": "projects" }
+          }
+        }
+      }
+    },
+    "serverWorkspaceStorageNFS": {
+      "type": "object",
+      "description": "NFS workspace storage settings, used when workspace_storage.backend is nfs.",
+      "properties": {
+        "mount_root": { "type": "string", "description": "Host directory under which each share is mounted, at <mount_root>/<share id>." },
+        "mount_options": { "type": "string", "default": "vers=3,hard,nconnect=4,_netdev" },
+        "auto_mount": { "type": "boolean", "default": false, "description": "When true, a Runtime Broker mounts each share itself at startup and before NFS-backed dispatches (requires root). When false, the mounts are provided externally and the broker only checks them read-only.", "x-since": "1" },
+        "uid": { "type": "integer", "default": 1000 },
+        "gid": { "type": "integer", "default": 1000 },
+        "storage_class": { "type": "string" },
+        "subpath_root": { "type": "string", "default": "projects" },
+        "shares": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "server": { "type": "string" },
+              "export": { "type": "string" },
+              "pv_name": { "type": "string" }
+            }
+          }
+        }
       }
     },
     "serverSecrets": {

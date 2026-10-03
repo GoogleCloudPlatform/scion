@@ -401,7 +401,8 @@ func (c *ControlChannelBrokerClient) CreateAgentWithGather(ctx context.Context, 
 	}
 
 	if resp.StatusCode >= 400 {
-		return nil, nil, fmt.Errorf("runtime broker returned error %d: %s", resp.StatusCode, string(resp.Body))
+		// Keep the broker's status for the hub handler to relay (#2546 R2).
+		return nil, nil, &brokerStatusError{StatusCode: resp.StatusCode, Body: string(resp.Body), RetryAfter: resp.Headers["Retry-After"]}
 	}
 
 	if resp.StatusCode == http.StatusAccepted {
@@ -619,12 +620,14 @@ func (c *ControlChannelBrokerClient) doRequest(ctx context.Context, brokerID, me
 	return resp, nil
 }
 
-// brokerStatusError is returned by doRequest when the broker answers with an
-// HTTP error status, so callers can react to specific codes (e.g. 404 on an
-// idempotent delete) instead of parsing the message.
+// brokerStatusError is returned by doRequest, CreateAgentWithGather and
+// brokerHTTPError when the broker answers with an HTTP error status, so
+// callers can react to specific codes (e.g. 404 on an idempotent delete)
+// instead of parsing the message. RetryAfter is the broker's Retry-After.
 type brokerStatusError struct {
 	StatusCode int
 	Body       string
+	RetryAfter string
 }
 
 func (e *brokerStatusError) Error() string {
@@ -682,6 +685,20 @@ func (e *brokerStatusError) brokerErrorCode() string {
 		return body.Error.Code
 	}
 	return ""
+}
+
+// brokerErrorDetails returns error.details from a broker JSON error body,
+// or nil if the body has none or is not in that form.
+func (e *brokerStatusError) brokerErrorDetails() map[string]interface{} {
+	var body struct {
+		Error struct {
+			Details map[string]interface{} `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(e.Body), &body); err != nil {
+		return nil
+	}
+	return body.Error.Details
 }
 
 func (c *ControlChannelBrokerClient) buildRequestHeaders(ctx context.Context, brokerID, method, path, query string, body []byte) (map[string]string, error) {

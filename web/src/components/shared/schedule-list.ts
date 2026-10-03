@@ -26,6 +26,8 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
+import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 interface Schedule {
   id: string;
@@ -68,6 +70,9 @@ interface ListResponse {
 
 @customElement('scion-schedule-list')
 export class ScionScheduleList extends LitElement {
+  /** Re-renders next-run instants when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @property() projectId = '';
   @property({ type: Boolean }) compact = false;
 
@@ -285,54 +290,15 @@ export class ScionScheduleList extends LitElement {
 
   private formatRelativeTime(dateString: string | undefined): string {
     if (!dateString) return '-';
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
+    return formatRelative(dateString);
   }
 
+  /** Relative next-run text; an overdue instant reads "now", as before. */
   private formatFutureTime(dateString: string | undefined): string {
     if (!dateString) return '-';
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = date.getTime() - Date.now();
-      if (diffMs <= 0) return 'now';
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(diffMinutes, 'minute');
-      } else {
-        return rtf.format(diffHours, 'hour');
-      }
-    } catch {
-      return dateString ?? '-';
-    }
+    const ms = new Date(dateString).getTime();
+    if (!Number.isNaN(ms) && ms <= Date.now()) return 'now';
+    return formatRelative(dateString);
   }
 
   private getPayloadAgent(payload: string): string {
@@ -463,7 +429,7 @@ export class ScionScheduleList extends LitElement {
             <tr>
               <th>Name</th>
               <th>Type</th>
-              <th>Cron</th>
+              <th>Cron (UTC)</th>
               <th>Next Run</th>
               <th>Status</th>
               <th class="hide-mobile">Runs</th>
@@ -483,6 +449,10 @@ export class ScionScheduleList extends LitElement {
     const isPaused = sched.status === 'paused';
     const isActing = this.actionId === sched.id;
     const nextRun = isActive ? this.formatFutureTime(sched.nextRunAt) : '-';
+    // Cron expressions are UTC; the next run is shown in the display zone,
+    // labelled, so the two are never confused.
+    const nextRunAbsolute =
+      isActive && sched.nextRunAt ? formatInstantWithZone(sched.nextRunAt) : '';
 
     return html`
       <tr @click=${() => this.showDetail(sched)} style="cursor: pointer;">
@@ -496,7 +466,12 @@ export class ScionScheduleList extends LitElement {
           >
           ${this.renderZonePrefixBadge(sched)}
         </td>
-        <td><span class="meta-text">${nextRun}</span></td>
+        <td>
+          <span class="meta-text">${nextRun}</span>
+          ${nextRunAbsolute
+            ? html`<div class="meta-text next-run-absolute">${nextRunAbsolute}</div>`
+            : nothing}
+        </td>
         <td><span class="badge ${this.statusBadgeClass(sched.status)}">${sched.status}</span></td>
         <td class="hide-mobile">
           <span class="meta-text"
@@ -679,7 +654,7 @@ export class ScionScheduleList extends LitElement {
             <span class="badge ${this.statusBadgeClass(sched.status)}">${sched.status}</span>
           </div>
           <div class="detail-row">
-            <strong>Cron:</strong> ${sched.cronExpr} ${this.renderZonePrefixBadge(sched)}
+            <strong>Cron (UTC):</strong> ${sched.cronExpr} ${this.renderZonePrefixBadge(sched)}
           </div>
           <div class="detail-row"><strong>Event Type:</strong> ${sched.eventType}</div>
           <div class="detail-row"><strong>Target Agent:</strong> ${agent}</div>
@@ -698,8 +673,8 @@ export class ScionScheduleList extends LitElement {
             : nothing}
           ${sched.nextRunAt
             ? html`<div class="detail-row">
-                <strong>Next Run:</strong> ${this.formatFutureTime(sched.nextRunAt)}
-                (${new Date(sched.nextRunAt).toLocaleString()})
+                <strong>Next Run:</strong> ${this.formatFutureTime(sched.nextRunAt)} ·
+                <span class="next-run-absolute">${formatInstantWithZone(sched.nextRunAt)}</span>
               </div>`
             : nothing}
           ${sched.lastRunAt

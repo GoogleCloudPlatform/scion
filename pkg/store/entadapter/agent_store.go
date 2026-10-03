@@ -134,7 +134,16 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		LaunchSeq:           a.LaunchSeq,
 		LaunchStep:          a.LaunchStep,
 		LaunchError:         a.LaunchError,
+		DeletionState:       a.DeletionState,
+		DeletionClaim:       a.DeletionClaim,
+		DeletionCode:        a.DeletionCode,
+		DeletionError:       a.DeletionError,
+		DeletionPrior:       a.DeletionPrior,
+		DeletionRequest:     a.DeletionRequest,
 	}
+	sa.DeletionLeaseAt = copyTimePtr(a.DeletionLeaseAt)
+	sa.DeletionStartedAt = copyTimePtr(a.DeletionStartedAt)
+	sa.DeletionFailedAt = copyTimePtr(a.DeletionFailedAt)
 	if a.LaunchDeadline != nil {
 		sa.LaunchDeadline = *a.LaunchDeadline
 	}
@@ -797,7 +806,11 @@ func (s *AgentStore) DeleteAgent(ctx context.Context, id string) error {
 	return nil
 }
 
-// ListAgents returns agents matching the filter criteria.
+// ListAgents returns agents matching the filter criteria. See the
+// store.AgentStore interface doc for the legacy/sorted-mode split:
+// opts.SortBy empty is the
+// legacy path, unchanged; opts.SortBy set to "created" or "updated" is the
+// real-SQL sorted-mode path the global endpoint's sorted mode uses directly.
 func (s *AgentStore) ListAgents(ctx context.Context, filter store.AgentFilter, opts store.ListOptions) (*store.ListResult[store.Agent], error) {
 	preds, err := agentFilterPredicates(filter)
 	if err != nil {
@@ -826,17 +839,68 @@ func (s *AgentStore) ListAgents(ctx context.Context, filter store.AgentFilter, o
 		limit = maxAgentListLimit
 	}
 
-	if opts.Cursor != "" {
-		cursorCreated, cursorID, err := decodeListCursor(opts.Cursor, opts.CursorBinding)
-		if err != nil {
-			return nil, fmt.Errorf("invalid cursor: %w", err)
+	if opts.SortBy == "" {
+		// Legacy path: a request without sort is byte-identical to before
+		// sorted mode existed, untouched by it.
+		if opts.Cursor != "" {
+			cursorCreated, cursorID, err := decodeListCursor(opts.Cursor, opts.CursorBinding)
+			if err != nil {
+				return nil, fmt.Errorf("invalid cursor: %w", err)
+			}
+			query.Where(agentBeforeCursor(cursorCreated, cursorID))
 		}
-		query.Where(agentBeforeCursor(cursorCreated, cursorID))
+
+		// Fetch one extra row to detect whether a further page exists.
+		rows, err := query.
+			Order(agent.ByCreated(entsql.OrderDesc()), agent.ByID(entsql.OrderDesc())).
+			Limit(limit + 1).
+			All(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		items := make([]store.Agent, 0, len(rows))
+		for _, a := range rows {
+			items = append(items, *entAgentToStore(a))
+		}
+
+		result := &store.ListResult[store.Agent]{TotalCount: totalCount}
+		if len(items) > limit {
+			result.Items = items[:limit]
+			last := result.Items[len(result.Items)-1]
+			result.NextCursor = encodeListCursor(last.Created, last.ID, opts.CursorBinding)
+		} else {
+			result.Items = items
+		}
+		return result, nil
 	}
 
-	// Fetch one extra row to detect whether a further page exists.
+	// Sorted mode. Fail closed on an unrecognized
+	// sort or dir, matching ListAgentMembers' own contract, rather than
+	// letting agentSortOrder/agentAfterCursor silently fall back to a
+	// default. The hub validates these before calling in; this is the store
+	// API's own contract, independent of any one caller.
+	if opts.SortBy != agentsort.Created && opts.SortBy != agentsort.Updated {
+		return nil, fmt.Errorf("ListAgents: invalid sort %q: %w", opts.SortBy, store.ErrInvalidInput)
+	}
+	if opts.SortDir != agentsort.Asc && opts.SortDir != agentsort.Desc {
+		return nil, fmt.Errorf("ListAgents: invalid dir %q: %w", opts.SortDir, store.ErrInvalidInput)
+	}
+	// A legacy opaque cursor has no meaning in sorted mode. Reject it rather
+	// than ignore it, so a caller that passes one (alone or alongside
+	// SortCursor) gets an error instead of a silently different page.
+	if opts.Cursor != "" {
+		return nil, fmt.Errorf("ListAgents: legacy cursor is not valid in sorted mode: %w", store.ErrInvalidInput)
+	}
+	if opts.SortCursor != nil {
+		query.Where(agentAfterCursor(opts.SortBy, opts.SortDir, *opts.SortCursor))
+	}
+
+	// Fetch one extra row to detect whether a further page exists, exactly
+	// like the legacy path above: the store's existing limit+1
+	// probe says whether more rows exist.
 	rows, err := query.
-		Order(agent.ByCreated(entsql.OrderDesc()), agent.ByID(entsql.OrderDesc())).
+		Order(agentSortOrder(opts.SortBy, opts.SortDir)).
 		Limit(limit + 1).
 		All(ctx)
 	if err != nil {
@@ -852,18 +916,45 @@ func (s *AgentStore) ListAgents(ctx context.Context, filter store.AgentFilter, o
 	if len(items) > limit {
 		result.Items = items[:limit]
 		last := result.Items[len(result.Items)-1]
-		result.NextCursor = encodeListCursor(last.Created, last.ID, opts.CursorBinding)
+		lastRow := agentsort.KeyFor(opts.SortBy, last.ID, last.Created, last.Updated, last.LastActivityEvent)
+		result.NextCursor = store.EncodeAgentCursor(opts.SortBy, opts.SortDir, lastRow.K, lastRow.Created, last.ID, opts.CursorBinding)
 	} else {
 		result.Items = items
 	}
 	return result, nil
 }
 
+// CountAgentsByPhaseIDs returns the id and phase of every agent matching
+// filter, via a narrow SELECT id, phase with no decision made: it backs
+// the global endpoint's sorted-mode "stats"
+// population. Unlike ListAgentMembers it has no candidate ceiling: the
+// global endpoint's stats population is the same SQL scope predicate that
+// already authorizes the request, with no per-row read filter.
+func (s *AgentStore) CountAgentsByPhaseIDs(ctx context.Context, filter store.AgentFilter) ([]store.IDPhase, error) {
+	preds, err := agentFilterPredicates(filter)
+	if err != nil {
+		return nil, err
+	}
+	query := s.client.Agent.Query()
+	if len(preds) > 0 {
+		query.Where(preds...)
+	}
+	rows, err := query.Select(agent.FieldID, agent.FieldPhase).All(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]store.IDPhase, len(rows))
+	for i, a := range rows {
+		out[i] = store.IDPhase{ID: a.ID.String(), Phase: a.Phase}
+	}
+	return out, nil
+}
+
 // CountAgents returns the number of agents matching filter, using the exact
 // predicate ListAgents applies for its own total count (agentFilterPredicates),
-// with no row loaded. It backs the sorted-mode candidate ceiling pre-check
-// (design lists-graph.md 5.3 step 0): a cheap COUNT before any member row is
-// read, so a candidate pool above the ceiling costs no more than one query.
+// with no row loaded. It backs the sorted-mode candidate ceiling pre-check:
+// a cheap COUNT before any member row is read, so a candidate pool above the
+// ceiling costs no more than one query.
 func (s *AgentStore) CountAgents(ctx context.Context, filter store.AgentFilter) (int, error) {
 	preds, err := agentFilterPredicates(filter)
 	if err != nil {
@@ -881,18 +972,18 @@ func (s *AgentStore) CountAgents(ctx context.Context, filter store.AgentFilter) 
 // reads (ID, OwnerID, ProjectID, Labels, Ancestry), plus Phase, Created,
 // Updated and LastActivityEvent for positioning (pkg/store/agentsort) and
 // stats. This list, not a separately maintained one, is the projection's
-// definition (design lists-graph.md 5.1): widening agentResource's
-// inputs without adding the new field here is exactly what the non-waivable
-// equality gate is meant to catch. That gate -- a reflection-filled
-// store.Agent written and read back through the real ListAgentMembers and
-// GetAgentsByIDs, compared via reflect.DeepEqual(memberResource(m),
-// agentResource(full)) -- lives in pkg/hub (TestListProjectAgentsSorted_
-// MemberProjectionEquality, agent_sorted_project_list_reflection_test.go),
-// not in this package: agentResource and memberResource are only visible
-// from package hub. TestListAgentMembers_ProjectionEqualsFullRow in this
-// package is a narrower, store-only check that the narrow SELECT's columns
-// agree with a full-row read; it is not itself reflection-filled and cannot
-// substitute for the hub-level gate.
+// definition: widening agentResource's inputs without adding the new field
+// here is exactly what the non-waivable equality gate is meant to catch.
+// That gate -- a reflection-filled store.Agent written and read back through
+// the real ListAgentMembers and GetAgentsByIDs, compared via
+// reflect.DeepEqual(memberResource(m), agentResource(full)) -- lives in
+// pkg/hub (TestListProjectAgentsSorted_MemberProjectionEquality,
+// agent_sorted_project_list_reflection_test.go), not in this package:
+// agentResource and memberResource are only visible from package hub.
+// TestListAgentMembers_ProjectionEqualsFullRow in this package is a
+// narrower, store-only check that the narrow SELECT's columns agree with a
+// full-row read; it is not itself reflection-filled and cannot substitute
+// for the hub-level gate.
 var agentMemberSelectFields = []string{
 	agent.FieldID,
 	agent.FieldOwnerID,
@@ -930,8 +1021,8 @@ func entAgentToMember(a *ent.Agent) store.AgentMember {
 }
 
 // ListAgentMembers returns up to max agents matching filter, projected down
-// to the narrow AgentMember shape and ordered per the section-4.2 total
-// order for (sort, dir) (design lists-graph.md 5.1, 5.3).
+// to the narrow AgentMember shape and ordered per the sorted-mode total
+// order for (sort, dir).
 //
 // The SQL SELECT list is exactly agentMemberSelectFields — no wide column
 // (AppliedConfig in particular) is ever read off the wire for a candidate
@@ -946,8 +1037,8 @@ func entAgentToMember(a *ent.Agent) store.AgentMember {
 // keeps exactly one implementation of the tie-break rules instead of asking
 // each dialect to reproduce it) and sorts them in Go.
 func (s *AgentStore) ListAgentMembers(ctx context.Context, filter store.AgentFilter, sortKey, dir string, max int) ([]store.AgentMember, error) {
-	// Fail closed on an unrecognized sort or dir (design lists-graph.md 5.1:
-	// "Unknown values return ErrInvalidInput"), rather than letting
+	// Fail closed on an unrecognized sort or dir (unknown values return
+	// ErrInvalidInput), rather than letting
 	// agentsort.KeyFor/Less silently fall back to a default ordering. The
 	// hub handler already validates these before calling in; this is the
 	// store API's own contract, independent of any one caller.
@@ -1247,6 +1338,22 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	}
 
 	now := time.Now()
+
+	// Guard 0c, enforced inside the transaction (design ptone/scion#2483
+	// §2.1 Guards): while a delete holds a live lease, or once the row is
+	// soft-deleted, a status report must not move phase, activity or the
+	// exit fields — a report read before the delete claim cannot land after
+	// it. The handler applies the same guard (guardAgentPhaseTransition);
+	// this repeats it on the locked row.
+	if current.DeletedAt != nil || entAgentDeletionActive(current, now) {
+		su.Phase = ""
+		su.Activity = ""
+		su.ExitCode = nil
+		su.ExitReason = ""
+		su.Message = ""
+		su.ClearExit = false
+	}
+
 	upd := tx.Agent.UpdateOneID(uid).
 		SetUpdated(now).
 		SetLastSeen(now)
@@ -1512,6 +1619,14 @@ func (s *AgentStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID
 					agent.ReincarnationStateIn(store.ReincarnationStateNone, store.ReincarnationStateFailed),
 				),
 				agent.Or(agent.LastSeenIsNil(), agent.LastSeenLT(cutoff)),
+				// A delete in progress owns the phase (design
+				// ptone/scion#2483 §2.1 Guards); expired leases included,
+				// since teardown may already have run. A failed
+				// (rolled-back) delete does not block this write.
+				agent.Or(
+					agent.DeletionStateIsNil(),
+					agent.DeletionStateNotIn(store.DeletionStateDeleting, store.DeletionStateFinalizing),
+				),
 				reason,
 			).
 			SetPhase("error").

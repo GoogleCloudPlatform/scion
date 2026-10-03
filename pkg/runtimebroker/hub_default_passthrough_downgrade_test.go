@@ -695,32 +695,27 @@ func TestRestartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKuberne
 //
 //   - The project's active profile ("other") resolves to docker; "local"
 //     resolves to remapRuntimeName (Kubernetes).
-//   - The mock agent record's Name is agentName, but its ContainerID is
-//     urlID — a different string. The HTTP request addresses the agent by
-//     urlID.
+//   - The mock agent record's Name is agentName, but its ContainerID and
+//     scion.name label are urlID — a different string. The HTTP request
+//     addresses the agent by urlID.
 //   - A saved profile of "local" (Kubernetes) exists only under urlID, not
 //     under agentName.
 //
-// On restart, the handler's own pre-buildStartContext lookup resolves the
-// URL id to the agent's Name (agentName) via matchesAgent, and
-// buildStartContext's own early resolution reads the saved profile under
+// On restart, the handler's own pre-buildStartContext lookup finds the
+// record by its scion.name label and passes its Name (agentName) to
+// buildStartContext, whose early resolution reads the saved profile under
 // that Name — finding nothing, so it falls back to the active profile
 // (docker) and does not reject. The handler's later, authoritative
 // resolution reads the saved profile under the URL id itself
 // (agent.GetSavedProfile(id, ...), handlers.go) — urlID — and finds
 // Kubernetes.
 //
-// On start, there is no such Name/id translation (buildStartContext's Name
-// input is the URL id directly on both the early and late reads), so the
-// divergence instead comes from the project path: this fixture does not
-// chdir into the project directory, so buildStartContext's own early
-// resolution — reached with no projectPath in the request, before
-// startAgent's own project-path fallback lookup runs — resolves a saved
-// profile against an empty/unrelated path and finds nothing (docker, no
-// reject). startAgent's own fallback lookup (over the mock manager's agent
-// list, keyed on ContainerID here) then populates opts.ProjectPath for real,
-// and the later resolution finds the Kubernetes profile saved under urlID at
-// that real path.
+// On start, buildStartContext's Name input is the URL id on both reads, and
+// startAgent recovers the project path from the record before
+// buildStartContext runs, so the early resolution already finds the
+// Kubernetes profile saved under urlID and rejects there. The start test
+// therefore pins that the rejection comes before Start and before the
+// inline config is written, whichever resolution raises it.
 func newTestServerForLateCheckOrdering(t *testing.T, agentName, urlID, remapRuntimeName string) (*Server, *mockManager, *runtime.MockRuntime) {
 	t.Helper()
 	// Isolate HOME and every ambient SCION_* variable, as
@@ -781,9 +776,13 @@ func newTestServerForLateCheckOrdering(t *testing.T, agentName, urlID, remapRunt
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 
+	// The scion.name label carries urlID, as a runtime labels a container
+	// with the slug the hub addresses it by; the broker's agent lookup
+	// filters on that label.
 	mgr := &mockManager{
 		agents: []api.AgentInfo{
-			{ID: agentName, Name: agentName, ContainerID: urlID, ProjectPath: dotScion, Phase: "running"},
+			{ID: agentName, Name: agentName, ContainerID: urlID, ProjectPath: dotScion, Phase: "running",
+				Labels: map[string]string{"scion.name": urlID}},
 		},
 	}
 	rt := &runtime.MockRuntime{NameFunc: func() string { return "docker" }}

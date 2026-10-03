@@ -31,6 +31,13 @@ interrupt_key: C-c
 instructions_file: .gemini/GEMINI.md
 system_prompt_file: .gemini/system_prompt.md
 system_prompt_mode: native
+# Default model for agents started without an explicit model. The broker
+# layers this under the template config and resolves it through
+# model_aliases (pkg/agent/provision.go), so SCION_MODEL arrives as the
+# concrete medium model; provision.py falls back to it (normalized through
+# the same table) if SCION_MODEL is empty. The image's settings.json carries
+# no model pin (ptone/scion#2674).
+model: medium
 model_aliases:
   small: gemini-3.5-flash-lite
   medium: gemini-3.6-flash

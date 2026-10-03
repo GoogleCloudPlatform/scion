@@ -234,6 +234,11 @@ func (a *AuthzService) walkDelegationChainWithCause(
 	explain *[]DecisionStep,
 	cause *DenyCause,
 ) (bool, string, error) {
+	// The delegator side is evaluated for principals other than the
+	// requester, so it must never read the requester's memoized principals
+	// or access constraints. Masking here covers every caller; only
+	// delegation edges, keyed by delegate, stay shared.
+	ctx = maskAuthzInputs(ctx)
 	addStep := func(step, detail string) {
 		if explain != nil {
 			*explain = append(*explain, DecisionStep{Step: step, Detail: detail})

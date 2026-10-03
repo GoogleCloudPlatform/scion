@@ -287,6 +287,15 @@ func TestStart_BrokerMode_HubIsOnlyTZSource(t *testing.T) {
 			t.Errorf("no start warning names the %q with the value and agent ID; TZ warnings: %v", layer, tzWarnings)
 		}
 	}
+	// The same drop warnings, and only those, are carried for the hub.
+	if len(info.HubOnlyEnvWarnings) != len(tzWarnings) {
+		t.Errorf("HubOnlyEnvWarnings = %v, want the %d TZ drop warnings", info.HubOnlyEnvWarnings, len(tzWarnings))
+	}
+	for _, w := range info.HubOnlyEnvWarnings {
+		if !strings.Contains(w, "TZ=") {
+			t.Errorf("HubOnlyEnvWarnings carries a non-TZ warning %q", w)
+		}
+	}
 
 	persisted := readPersistedConfig(t, agentDir)
 	// AuthSelectedType proves Start rewrote scion-agent.json from

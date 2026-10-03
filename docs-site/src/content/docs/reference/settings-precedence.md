@@ -131,8 +131,8 @@ feature request, not a precedence bug.
 
 *(Control for that absence claim: `SCION_MODEL` **is** read by
 `harnesses/gemini-cli/provision.py`, where it resolves a `small`/`medium`/`large` alias against
-the harness `config.yaml` — so the search does find gemini-cli's environment reads when they
-exist.)*
+the harness `config.yaml`, and falls back to that file's `model` default when `SCION_MODEL` is
+empty — so the search does find gemini-cli's environment reads when they exist.)*
 
 ### `Known gap` — the gemini-cli redaction allowlist key is misspelled and inert
 
@@ -612,6 +612,13 @@ only what is still unset:
 | | the template's `scion-agent.yaml` |
 | | hub `agent_defaults` — **see [Bucket 4](#bucket-4--operatoradmin-settings), the position is not settled** |
 | Lowest | the broker's own `settings.yaml` defaults (e.g., `default_max_turns` / `default_max_model_calls` / `default_max_duration`) |
+
+For `model`, one more layer sits below the template on the broker. `ProvisionAgent`
+(`pkg/agent/provision.go`) uses the harness-config's own `model` field (`config.yaml`) as the base
+layer, so it fills in only when nothing above it sets a model. The broker then resolves that value
+through the harness-config's `model_aliases` and injects the result as `SCION_MODEL`. The codex and
+gemini-cli harness-configs both declare `model: medium` this way. The hub does not apply this
+default itself: it resolves only an explicit tier.
 
 #### `Changed in this release` — project `default-harness-config` correctly outranks template harness config
 

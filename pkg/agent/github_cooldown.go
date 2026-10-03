@@ -40,7 +40,7 @@ const (
 	// GitHubRateLimitedCode is the ResolveError / ResolveSkillError code
 	// reported for a ref that failed because its credential identity is
 	// rate limited by GitHub.
-	GitHubRateLimitedCode = "rate_limited"
+	GitHubRateLimitedCode = SkillErrCodeRateLimited
 
 	// githubAnonIdentity is the cooldown identity for unauthenticated calls.
 	// GitHub limits those per source address, so every unauthenticated

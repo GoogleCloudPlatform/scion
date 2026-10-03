@@ -47,6 +47,11 @@ type startContext struct {
 	TemplateSlug string
 	Manager      agent.Manager
 
+	// RuntimeType is the runtime type this dispatch resolved to through
+	// resolveManagerForOpts (dispatchRuntimeType), which can differ from the
+	// broker's default runtime. The create path reports it to the hub.
+	RuntimeType string
+
 	// EnvClassifications is the merged provenance map: what the hub sent,
 	// plus the broker-written keys classified in buildStartContext. Nil means
 	// the hub sent none — see api.EnvKind's three-state contract. No consumer
@@ -70,6 +75,13 @@ type startContextInputs struct {
 	ProjectPath string
 	ProjectSlug string
 	ProjectID   string
+	// ProjectPathFromContainer is set when ProjectPath was recovered from
+	// the agent's listed container rather than sent by the caller. That
+	// value is the resolved .scion directory the container recorded, not a
+	// project root, so it is used for settings and saved-profile resolution
+	// only: the hub-managed marker block and host-side worktree provisioning,
+	// which treat ProjectPath as a project root, skip it.
+	ProjectPathFromContainer bool
 
 	// Config from CreateAgentConfig (nil for startAgent/restartAgent)
 	Config *CreateAgentConfig
@@ -164,7 +176,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// This block also handles the case where the createAgent handler already
 	// resolved ProjectPath (for env-gather) before calling buildStartContext,
 	// which would skip the resolution block above.
-	if in.ProjectPath != "" && (in.ProjectSlug != "" || in.ProjectID != "") {
+	//
+	// A path recovered from the agent's container is already a .scion
+	// directory; it is not a project root to initialize, so it skips this
+	// block (see ProjectPathFromContainer).
+	if in.ProjectPath != "" && !in.ProjectPathFromContainer && (in.ProjectSlug != "" || in.ProjectID != "") {
 		scionPath := filepath.Join(in.ProjectPath, config.DotScion)
 
 		if config.IsProjectMarkerFile(scionPath) {
@@ -866,6 +882,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		Opts:               opts,
 		TemplateSlug:       templateSlug,
 		Manager:            mgr,
+		RuntimeType:        dispatchRuntimeType,
 		EnvClassifications: envCls,
 	}, nil
 }
@@ -1221,10 +1238,18 @@ func worktreeBaseIsProvisioned(in provision.ProvisionInput) bool {
 // provisioning is skipped for an agent dispatched to kubernetes even when the
 // broker's default runtime is docker.
 func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs, opts *api.StartOptions, env map[string]string, runtimeName string) (bool, error) {
+	// A path recovered from the agent's container is a .scion directory,
+	// not the project root a worktree base is created under; provisioning
+	// sees no project path for it, as it did before that path was recovered
+	// ahead of this call (see ProjectPathFromContainer).
+	worktreeProjectPath := in.ProjectPath
+	if in.ProjectPathFromContainer {
+		worktreeProjectPath = ""
+	}
 	result := resolveWorktreeProvision(worktreeProvisionInput{
 		WorkspaceMode: in.WorkspaceMode,
 		GitClone:      in.Config.GitClone,
-		ProjectPath:   in.ProjectPath,
+		ProjectPath:   worktreeProjectPath,
 		ProjectID:     in.ProjectID,
 		ProjectSlug:   in.ProjectSlug,
 		AgentID:       in.AgentID,

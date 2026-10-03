@@ -52,6 +52,7 @@ type asyncManager struct {
 	startCancelErr error         // if non-nil, returned instead of ctx.Err() when ctx ends a blocked Start
 	cleanupCalls   int
 	cleanupLast    []agent.ResourceHandle
+	cleanupCtxErr  error         // ctx.Err() at the last CleanupLaunch call
 	cleanupBlock   chan struct{} // if non-nil, CleanupLaunch waits on it (or ctx) before returning
 	lastStartCtx   context.Context
 }
@@ -108,6 +109,7 @@ func (m *asyncManager) CleanupLaunch(ctx context.Context, handles []agent.Resour
 	m.mu.Lock()
 	m.cleanupCalls++
 	m.cleanupLast = handles
+	m.cleanupCtxErr = ctx.Err()
 	block := m.cleanupBlock
 	m.mu.Unlock()
 

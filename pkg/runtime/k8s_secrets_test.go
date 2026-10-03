@@ -115,7 +115,6 @@ func TestBuildPod_FallbackSecrets_File(t *testing.T) {
 
 	// Check volume mounts for file secrets
 	foundCert := false
-	foundSSH := false
 	for _, vm := range pod.Spec.Containers[0].VolumeMounts {
 		if vm.Name == "agent-secrets" && vm.MountPath == "/etc/ssl/cert.pem" {
 			foundCert = true
@@ -126,19 +125,14 @@ func TestBuildPod_FallbackSecrets_File(t *testing.T) {
 				t.Error("expected ReadOnly mount")
 			}
 		}
-		if vm.Name == "agent-secrets" && vm.MountPath == "/home/scion/.ssh/id_rsa" {
-			foundSSH = true
-			if vm.SubPath != "SSH_KEY" {
-				t.Errorf("expected SubPath SSH_KEY, got %s", vm.SubPath)
-			}
-		}
 	}
 	if !foundCert {
 		t.Error("expected volume mount for TLS_CERT at /etc/ssl/cert.pem")
 	}
-	if !foundSSH {
-		t.Error("expected volume mount for SSH_KEY at /home/scion/.ssh/id_rsa (tilde expanded)")
-	}
+	// The tilde-expanded SSH key target is under home: staged, then placed.
+	assertNoMountsUnderHome(t, pod, "/home/scion")
+	assertStagingMount(t, pod, "agent-secrets")
+	assertPlacement(t, rt.k8sHomeFilePlacements(config), "/home/scion/.ssh/id_rsa", "/run/scion/agent-secrets/SSH_KEY")
 }
 
 func TestBuildPod_FallbackSecrets_Variable(t *testing.T) {
@@ -166,20 +160,10 @@ func TestBuildPod_FallbackSecrets_Variable(t *testing.T) {
 		t.Fatal("expected agent-secrets volume for variable secrets")
 	}
 
-	// Should have secrets.json mount
-	foundMount := false
-	for _, vm := range pod.Spec.Containers[0].VolumeMounts {
-		if vm.Name == "agent-secrets" && vm.SubPath == "secrets.json" {
-			foundMount = true
-			expectedPath := "/home/scion/.scion/secrets.json"
-			if vm.MountPath != expectedPath {
-				t.Errorf("expected MountPath %s, got %s", expectedPath, vm.MountPath)
-			}
-		}
-	}
-	if !foundMount {
-		t.Error("expected volume mount for secrets.json")
-	}
+	// secrets.json targets the home: staged, then placed.
+	assertNoMountsUnderHome(t, pod, "/home/scion")
+	assertStagingMount(t, pod, "agent-secrets")
+	assertPlacement(t, rt.k8sHomeFilePlacements(config), "/home/scion/.scion/secrets.json", "/run/scion/agent-secrets/secrets.json")
 }
 
 func TestBuildPod_GKESecrets_Environment(t *testing.T) {
@@ -237,16 +221,8 @@ func TestBuildPod_GKESecrets_Environment(t *testing.T) {
 		t.Error("expected API_KEY env var in GKE mode")
 	}
 
-	// Should have /mnt/secrets-store mount
-	foundMount := false
-	for _, vm := range pod.Spec.Containers[0].VolumeMounts {
-		if vm.Name == "secrets-store" && vm.MountPath == "/mnt/secrets-store" {
-			foundMount = true
-		}
-	}
-	if !foundMount {
-		t.Error("expected /mnt/secrets-store volume mount")
-	}
+	// The CSI volume is mounted whole under the staging root.
+	assertStagingMount(t, pod, "secrets-store")
 }
 
 func TestBuildPod_GKESecrets_File(t *testing.T) {

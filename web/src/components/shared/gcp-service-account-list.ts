@@ -60,6 +60,7 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from './confirm-dialog.js';
+import { formatRelative } from '../../utils/time.js';
 
 /** Detail payload for the `sa-list-changed` CustomEvent. */
 export interface SAListChangedDetail {
@@ -533,32 +534,6 @@ export class ScionGCPServiceAccountList extends LitElement {
     return account.verified ? 'verified' : 'unverified';
   }
 
-  private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
-  }
-
   // ── Rendering ────────────────────────────────────────────────────────
 
   override render() {
@@ -779,7 +754,7 @@ export class ScionGCPServiceAccountList extends LitElement {
         ? html`<sl-badge variant="success">
             Verified
             ${account.verifiedAt
-              ? html`<sl-tooltip content="Verified ${this.formatRelativeTime(account.verifiedAt)}"
+              ? html`<sl-tooltip content="Verified ${formatRelative(account.verifiedAt)}"
                   ><span>✓</span></sl-tooltip
                 >`
               : ''}

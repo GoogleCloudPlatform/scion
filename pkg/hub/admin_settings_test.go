@@ -881,3 +881,181 @@ func TestHandlePutServerConfig_DefaultTimezone_ValidPersisted(t *testing.T) {
 		})
 	}
 }
+
+// TestApplySettingsUpdates_ClearTopLevelStrings covers ptone/scion#2535: an
+// explicit "" for a top-level string setting must delete the key from
+// settings.yaml (not persist an empty string), and a nil pointer must leave
+// the stored value unchanged.
+func TestApplySettingsUpdates_ClearTopLevelStrings(t *testing.T) {
+	keys := []string{
+		"active_profile",
+		"default_template",
+		"default_harness_config",
+		"image_registry",
+		"workspace_path",
+		"default_max_agent_role",
+		"default_agent_role",
+		"default_runtime_broker",
+	}
+	newRaw := func() map[string]interface{} {
+		raw := map[string]interface{}{"schema_version": "1"}
+		for _, k := range keys {
+			raw[k] = "old-" + k
+		}
+		return raw
+	}
+	empty := func() *string { s := ""; return &s }
+
+	t.Run("empty string deletes", func(t *testing.T) {
+		raw := newRaw()
+		applySettingsUpdates(raw, &ServerConfigUpdateRequest{
+			ActiveProfile:        empty(),
+			DefaultTemplate:      empty(),
+			DefaultHarnessConfig: empty(),
+			ImageRegistry:        empty(),
+			WorkspacePath:        empty(),
+			DefaultMaxAgentRole:  empty(),
+			DefaultAgentRole:     empty(),
+			DefaultRuntimeBroker: empty(),
+		})
+		for _, k := range keys {
+			if v, ok := raw[k]; ok {
+				t.Errorf("expected %s to be deleted, got %q", k, v)
+			}
+		}
+	})
+
+	t.Run("nil leaves unchanged", func(t *testing.T) {
+		raw := newRaw()
+		applySettingsUpdates(raw, &ServerConfigUpdateRequest{})
+		for _, k := range keys {
+			if raw[k] != "old-"+k {
+				t.Errorf("expected %s unchanged, got %v", k, raw[k])
+			}
+		}
+	})
+
+	t.Run("non-empty sets", func(t *testing.T) {
+		raw := newRaw()
+		v := "new"
+		applySettingsUpdates(raw, &ServerConfigUpdateRequest{ActiveProfile: &v, WorkspacePath: &v})
+		if raw["active_profile"] != "new" || raw["workspace_path"] != "new" {
+			t.Errorf("expected values set, got %v / %v", raw["active_profile"], raw["workspace_path"])
+		}
+	})
+}
+
+// TestHandlePutServerConfig_ClearTopLevelStrings_RoundTrip is the
+// handler-level complement of TestApplySettingsUpdates_ClearTopLevelStrings
+// (ptone/scion#2535): a file-mode PUT that sends "" for each top-level
+// string setting must remove those keys from the written settings.yaml,
+// while a key the request omits is left as it was.
+func TestHandlePutServerConfig_ClearTopLevelStrings_RoundTrip(t *testing.T) {
+	keys := []string{
+		"active_profile",
+		"default_template",
+		"default_harness_config",
+		"image_registry",
+		"workspace_path",
+		"default_max_agent_role",
+		"default_agent_role",
+		"default_runtime_broker",
+	}
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	scionDir := filepath.Join(tmpHome, ".scion")
+	if err := os.MkdirAll(scionDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(scionDir, "settings.yaml")
+
+	seed := map[string]interface{}{
+		"schema_version": "1",
+		"default_model":  "keep-model",
+	}
+	for _, k := range keys {
+		seed[k] = "old-" + k
+	}
+	seedData, err := yamlv3.Marshal(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, seedData, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	body := map[string]string{}
+	for _, k := range keys {
+		body[k] = ""
+	}
+	bodyJSON, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{}
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", string(bodyJSON)))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatalf("settings.yaml not readable: %v", err)
+	}
+	var raw map[string]interface{}
+	if err := yamlv3.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("parse settings.yaml: %v", err)
+	}
+	for _, k := range keys {
+		if v, ok := raw[k]; ok {
+			t.Errorf("expected %s to be absent from settings.yaml after clearing, got %v", k, v)
+		}
+	}
+	if got, _ := raw["default_model"].(string); got != "keep-model" {
+		t.Errorf("default_model was not in the request and should be unchanged, got %v (settings.yaml: %s)", raw["default_model"], data)
+	}
+}
+
+// File-mode PUT rejects a shared_dir_size that is not a Kubernetes quantity,
+// naming the key, and writes nothing.
+func TestHandlePutServerConfig_SharedDirSize_InvalidRejected(t *testing.T) {
+	for body, key := range map[string]string{
+		`{"runtimes":{"gke":{"type":"kubernetes","shared_dir_size":"1TB"}}}`: "runtimes.gke.shared_dir_size",
+		`{"profiles":{"big":{"runtime":"gke","shared_dir_size":"lots"}}}`:    "profiles.big.shared_dir_size",
+	} {
+		t.Run(key, func(t *testing.T) {
+			srv := &Server{}
+			rr, settingsPath := fileModePutServerConfig(t, srv, body)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+			}
+			if !strings.Contains(rr.Body.String(), key) {
+				t.Errorf("400 body should name %s, got: %s", key, rr.Body.String())
+			}
+			if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
+				data, _ := os.ReadFile(settingsPath)
+				t.Errorf("nothing should be persisted for an invalid value, got settings.yaml: %s", data)
+			}
+		})
+	}
+}
+
+// File-mode PUT accepts a valid shared_dir_size and persists it.
+func TestHandlePutServerConfig_SharedDirSize_ValidPersisted(t *testing.T) {
+	srv := &Server{}
+	rr, settingsPath := fileModePutServerConfig(t, srv,
+		`{"runtimes":{"gke":{"type":"kubernetes","shared_dir_size":"1Ti"}}}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "shared_dir_size: 1Ti") {
+		t.Errorf("settings.yaml should carry the size, got: %s", data)
+	}
+}

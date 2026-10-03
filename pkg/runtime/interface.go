@@ -103,6 +103,18 @@ type RunConfig struct {
 	// NFSWorktreeBranch is the branch the agent's worktree is created on.
 	// Only used with NFSWorktreeName.
 	NFSWorktreeBranch string
+	// NFSAgentDirName is set to the agent's slug for clone-per-agent git
+	// projects on the NFS backend. NFSSubPath still names the project's
+	// workspace path, and the agent gets its own directory next to it at
+	// <project>/agents/<agent name> (NFSAgentDirSubPath): the provisioning
+	// init container mounts that directory and prepares its workspace/
+	// directory without cloning, and the agent container mounts
+	// <project>/agents/<agent name>/workspace at /workspace and clones the
+	// repository into it, as on the local runtimes.
+	NFSAgentDirName string
+	// NFSAgentBranch is the branch the agent's workspace is created for,
+	// recorded by the init container. Only used with NFSAgentDirName.
+	NFSAgentBranch string
 	// NFSStorageClass is the K8s StorageClass for NFS-backed PVCs.
 	// Used when creating shared-dir PVCs on NFS. Empty uses cluster default.
 	NFSStorageClass string
@@ -130,6 +142,72 @@ type RunConfig struct {
 	// wait-for-sentinel init container instead of the cloning one.
 	// Callers should not set this field.
 	nfsProvisionLockLost bool
+
+	// Checkpoint and OnResourceCreated are an async launch's runtime hooks
+	// (design t1-async-create-v11.md §3.8.3, §3.8.4), copied from
+	// api.StartOptions. Runtimes call them through launchHooks, whose
+	// checkpoint and created methods are no-ops when the hook is nil (the
+	// synchronous path).
+	//
+	// OnResourceCreated also selects who cleans up a start that fails or is
+	// cancelled. When it is set, the runtime skips its own start cleanup and
+	// leaves every created resource to the caller, which deletes the
+	// reported handles (the async launch's CleanupLaunch). When it is nil,
+	// the runtime cleans up as on the synchronous path, whether or not
+	// Checkpoint is set. Callers set both hooks together.
+	Checkpoint        func(ctx context.Context, step string) error
+	OnResourceCreated func(api.ResourceHandle)
+}
+
+// Checkpoint step names a runtime passes to RunConfig.Checkpoint (design
+// §3.9's step names; container runtimes keep the generic "launching" step).
+const (
+	CheckpointStepSecrets   = "secrets"
+	CheckpointStepPodCreate = "pod_create"
+	CheckpointStepLaunching = "launching"
+	// CheckpointStepPreClean precedes a name-based delete of a stale
+	// resource left by an earlier agent of the same name.
+	CheckpointStepPreClean = "pre_clean"
+)
+
+// launchHooks carries RunConfig's async-launch hooks into the helpers that
+// make the resource-creating calls. Its zero value (both hooks nil, the
+// synchronous path) makes every method a no-op.
+type launchHooks struct {
+	checkpointFn func(ctx context.Context, step string) error
+	createdFn    func(api.ResourceHandle)
+}
+
+// launchHooks returns config's async-launch hooks.
+func (config *RunConfig) launchHooks() launchHooks {
+	return launchHooks{checkpointFn: config.Checkpoint, createdFn: config.OnResourceCreated}
+}
+
+// checkpoint is called immediately before a resource-creating call. A
+// non-nil error means the launch is over and the resource must not be
+// created.
+func (h launchHooks) checkpoint(ctx context.Context, step string) error {
+	if h.checkpointFn == nil {
+		return nil
+	}
+	return h.checkpointFn(ctx, step)
+}
+
+// active reports whether these are an async launch's hooks (a resource
+// handle is being recorded), as opposed to the synchronous path. It is keyed
+// on OnResourceCreated alone: it selects the cleanup owner (see
+// RunConfig.OnResourceCreated), and only a caller that records handles can
+// clean up what the runtime leaves.
+func (h launchHooks) active() bool {
+	return h.createdFn != nil
+}
+
+// created is called after a true create of a launch-owned resource.
+func (h launchHooks) created(handle api.ResourceHandle) {
+	if h.createdFn == nil {
+		return
+	}
+	h.createdFn(handle)
 }
 
 // SharedDirRealization holds the plan for realizing a project's shared

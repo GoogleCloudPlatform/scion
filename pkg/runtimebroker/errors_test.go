@@ -21,6 +21,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 )
 
 // TestAgentLookupUnavailable_MessageText pins the exact response produced by
@@ -111,6 +113,64 @@ func TestWriteStartContextError_Honors4xxStatus(t *testing.T) {
 			}
 			if resp.Error.Code != tt.wantCode {
 				t.Errorf("error code = %q, want %q", resp.Error.Code, tt.wantCode)
+			}
+		})
+	}
+}
+
+// TestSkillResolutionFailed_StatusMapping pins the decided cause→status
+// mapping (#2546 R3, O1): each classified cause gets the status whose
+// semantics fit it, the rate-limited cause also carries a Retry-After header
+// when known, and every uncategorized or Hub-originated cause — including the
+// empty "resolve_failed" and the Hub's own per-URI codes for PreResolvedSkills
+// (storage_error, internal_error, federation_error) — stays on the existing
+// 500 path instead of being guessed at as a 4xx.
+func TestSkillResolutionFailed_StatusMapping(t *testing.T) {
+	tests := []struct {
+		name           string
+		code           string
+		retryAfter     string
+		wantStatus     int
+		wantRetryAfter string
+	}{
+		{"not_found maps to 404", agent.SkillErrCodeNotFound, "", http.StatusNotFound, ""},
+		{"rate_limited maps to 429 with Retry-After", agent.SkillErrCodeRateLimited, "120", http.StatusTooManyRequests, "120"},
+		{"rate_limited without a known Retry-After omits the header", agent.SkillErrCodeRateLimited, "", http.StatusTooManyRequests, ""},
+		{"timeout maps to 504", agent.SkillErrCodeTimeout, "", http.StatusGatewayTimeout, ""},
+		{"upstream_unavailable maps to 502", agent.SkillErrCodeUpstreamUnavailable, "", http.StatusBadGateway, ""},
+		{"unreachable maps to 502", agent.SkillErrCodeUnreachable, "", http.StatusBadGateway, ""},
+		{"uncategorized resolve_failed stays 500", "resolve_failed", "", http.StatusInternalServerError, ""},
+		{"empty code stays 500", "", "", http.StatusInternalServerError, ""},
+		{"hub-originated storage_error stays 500", "storage_error", "", http.StatusInternalServerError, ""},
+		{"hub-originated internal_error stays 500", "internal_error", "", http.StatusInternalServerError, ""},
+		{"hub-originated federation_error stays 500", "federation_error", "", http.StatusInternalServerError, ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			SkillResolutionFailed(w, &agent.SkillResolutionError{
+				URI: "gh://owner/repo/my-skill@main", Code: tt.code, Message: "could not resolve", RetryAfter: tt.retryAfter,
+			})
+
+			if w.Code != tt.wantStatus {
+				t.Fatalf("expected status %d, got %d: %s", tt.wantStatus, w.Code, w.Body.String())
+			}
+			if got := w.Header().Get("Retry-After"); got != tt.wantRetryAfter {
+				t.Errorf("expected Retry-After %q, got %q", tt.wantRetryAfter, got)
+			}
+			var resp ErrorResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("failed to decode error response %q: %v", w.Body.String(), err)
+			}
+			if !strings.Contains(resp.Error.Message, "gh://owner/repo/my-skill@main") {
+				t.Errorf("expected message to name the skill ref, got: %s", resp.Error.Message)
+			}
+			if resp.Error.Details["skill"] != "gh://owner/repo/my-skill@main" {
+				t.Errorf("expected details.skill to name the ref, got: %v", resp.Error.Details)
+			}
+			if resp.Error.Details["cause"] != tt.code {
+				t.Errorf("expected details.cause %q, got: %v", tt.code, resp.Error.Details)
 			}
 		})
 	}
