@@ -84,7 +84,6 @@ const BANNED_PATTERN =
  * below deletes itself along with it.
  */
 const ALLOWLIST: readonly string[] = [
-  'client/chat-palette-data.ts',
   'components/pages/admin-access-boundaries.ts',
   'components/pages/admin-access-boundary-detail.ts',
   'components/pages/admin-experiments.ts',
@@ -102,15 +101,7 @@ const ALLOWLIST: readonly string[] = [
   'components/shared/access-boundary-definition-summary.ts',
   'components/shared/access-boundary-impact-summary.ts',
   'components/shared/access-boundary-preview.ts',
-  'components/shared/agent-log-viewer.ts',
-  'components/shared/agent-message-viewer.ts',
-  'components/shared/chat/chat-members.ts',
-  'components/shared/chat/chat-search.ts',
-  'components/shared/chat/chat-space-rail.ts',
-  'components/shared/chat/chat-thread.ts',
-  'components/shared/file-browser.ts',
   'components/shared/role-binding-utils.ts',
-  'components/shared/unified-log-viewer.ts',
 ];
 
 /** Recursively lists non-test `.ts` files under `dir`, relative to `SRC_ROOT`. */

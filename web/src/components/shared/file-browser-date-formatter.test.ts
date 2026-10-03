@@ -19,13 +19,15 @@
  *
  * Each row's "Modified" column used to construct a fresh
  * Intl.DateTimeFormat on every render. CPU samples attributed roughly
- * 160-174ms of a large listing's render time to that. formatDate() now
- * reuses a single formatter built once at module load. These tests pin the
- * fix (no new construction, however many rows/renders) and confirm the
- * displayed formatting and invalid-date fallback are unchanged.
+ * 160-174ms of a large listing's render time to that. formatDate() now goes
+ * through `time.ts`'s `formatInstant`, which builds one formatter per style
+ * and display zone and reuses it. These tests pin the fix (after the first
+ * render, no new construction however many rows/renders), the display-zone
+ * formatting (tz-refactor task 21) and the invalid-date fallback.
  */
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { setPreferredTimeZone } from '../../utils/time.js';
 
 import type { FileEntry, FileListResult, FileBrowserDataSource } from './file-browser.js';
 
@@ -40,6 +42,7 @@ beforeAll(async () => {
 afterEach(() => {
   document.body.innerHTML = '';
   vi.restoreAllMocks();
+  setPreferredTimeZone('');
 });
 
 function makeEntry(path: string, modTime: string): FileEntry {
@@ -72,6 +75,15 @@ async function mountWithFiles(entries: FileEntry[]) {
   return el as InstanceType<typeof FileBrowserCtor> & { shadowRoot: ShadowRoot };
 }
 
+/**
+ * Renders one row so `formatInstant` has built its formatter for the
+ * current zone (the first render); later renders must reuse it.
+ */
+async function warmFormatterCache(): Promise<void> {
+  const el = await mountWithFiles([makeEntry('warm.txt', '2026-01-01T00:00:00Z')]);
+  el.remove();
+}
+
 function dateCellsText(el: { shadowRoot: ShadowRoot }): string[] {
   return Array.from(el.shadowRoot.querySelectorAll<HTMLElement>('.file-date')).map(
     (n) => n.textContent ?? ''
@@ -79,11 +91,13 @@ function dateCellsText(el: { shadowRoot: ShadowRoot }): string[] {
 }
 
 describe('scion-file-browser — shared date formatter', () => {
-  it('does not construct a new Intl.DateTimeFormat while rendering rows', async () => {
-    // FILE_DATE_FORMATTER is built once at module import time (already
-    // happened before this spy attaches), so any additional construction
-    // observed here would come from formatDate() — the exact regression
-    // this fix prevents.
+  it('does not construct a new Intl.DateTimeFormat per row or per render', async () => {
+    // formatInstant builds one formatter per style and zone. A first render
+    // warms it; after that, rendering any number of rows must build none —
+    // the exact regression this fix prevents. A display preference is set,
+    // so the zone itself needs no lookup (see the auto-zone test below).
+    setPreferredTimeZone('Asia/Tokyo');
+    await warmFormatterCache();
     const ctorSpy = vi.spyOn(Intl, 'DateTimeFormat');
 
     const entries = Array.from({ length: 200 }, (_, i) =>
@@ -103,26 +117,45 @@ describe('scion-file-browser — shared date formatter', () => {
     expect(ctorSpy).not.toHaveBeenCalled();
   });
 
-  it('formats a valid date exactly as the pre-fix per-row formatter did', async () => {
-    const modTime = '2026-03-14T09:41:00Z';
-    // `expected` is a second, independent Intl.DateTimeFormat instance built
-    // with the exact same locale/options formatDate() uses — not a spy or a
-    // mock of anything, just a plain reference value to compare against.
-    // Asserting exact equality against it (rather than a loose substring
-    // match) means a change to the options — dropping hour/minute, changing
-    // the locale, etc. — fails this test even if the output happened to
-    // still contain "Mar 14, 2026".
-    const expected = new Intl.DateTimeFormat('en', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    }).format(new Date(modTime));
+  it('with no preference (Auto), resolves the browser zone once per render, not per row', async () => {
+    await warmFormatterCache();
+    const ctorSpy = vi.spyOn(Intl, 'DateTimeFormat');
+    const entries = Array.from({ length: 200 }, (_, i) =>
+      makeEntry(`file-${i}.txt`, '2026-03-14T09:41:00Z')
+    );
+    const el = await mountWithFiles(entries);
+    expect(dateCellsText(el).length).toBe(200);
+    const afterMount = ctorSpy.mock.calls.length;
+    // mountWithFiles may take a couple of render passes; bounded by those,
+    // never by the 200 rows.
+    expect(afterMount).toBeLessThanOrEqual(3);
 
-    const el = await mountWithFiles([makeEntry('a.txt', modTime)]);
+    ctorSpy.mockClear();
+    el.requestUpdate();
+    await el.updateComplete;
+    expect(ctorSpy.mock.calls.length).toBeLessThanOrEqual(1);
+  });
+
+  it('formats in the display zone, 24-hour, with midnight as 00:00', async () => {
+    // vitest pins the browser zone to UTC; the preference differs from it.
+    setPreferredTimeZone('Asia/Tokyo');
+    // 15:00Z is midnight the next day in Tokyo (+09:00).
+    const el = await mountWithFiles([makeEntry('a.txt', '2026-03-14T15:00:00Z')]);
     const [text] = dateCellsText(el);
-    expect(text).toBe(expected);
+    expect(text).toBe('Mar 15, 2026, 00:00');
+    const header = el.shadowRoot.querySelector('th .zone-label');
+    expect(header?.textContent).toBe('(Asia/Tokyo)');
+  });
+
+  it('re-renders the column when the display zone changes', async () => {
+    setPreferredTimeZone('Asia/Tokyo');
+    const el = await mountWithFiles([makeEntry('a.txt', '2026-03-14T15:00:00Z')]);
+    expect(dateCellsText(el)).toEqual(['Mar 15, 2026, 00:00']);
+
+    setPreferredTimeZone('America/New_York');
+    await el.updateComplete;
+    expect(dateCellsText(el)).toEqual(['Mar 14, 2026, 11:00']);
+    expect(el.shadowRoot.querySelector('th .zone-label')?.textContent).toBe('(America/New_York)');
   });
 
   it('falls back to the raw string for an invalid date', async () => {
@@ -157,8 +190,10 @@ describe('scion-file-browser — shared date formatter', () => {
   const REPRESENTATIVE_ROW_COUNT_TIMEOUT_MS = 20_000;
 
   it(
-    'renders a representative 1000-row listing without constructing new formatters',
+    'renders a representative 1000-row listing without a formatter per row',
     async () => {
+      setPreferredTimeZone('Asia/Tokyo');
+      await warmFormatterCache();
       const ctorSpy = vi.spyOn(Intl, 'DateTimeFormat');
       const entries = Array.from({ length: 1000 }, (_, i) =>
         makeEntry(`dir/file-${i}.txt`, '2026-06-01T12:00:00Z')
@@ -166,7 +201,7 @@ describe('scion-file-browser — shared date formatter', () => {
       const el = await mountWithFiles(entries);
 
       // The table caps rendered rows at 1000, so all of them get a
-      // formatted date cell.
+      // formatted date cell, and none of them builds a formatter.
       expect(dateCellsText(el).length).toBe(1000);
       expect(ctorSpy).not.toHaveBeenCalled();
     },
