@@ -553,14 +553,18 @@ func TestDeleteAgentsViaHub_NoForceOmitsForceQuery(t *testing.T) {
 	assert.False(t, present, "force must be absent when --force is not set")
 }
 
-func TestDeleteStoppedViaHub_ForcePropagates(t *testing.T) {
+// TestDeleteCmd_ForceWithStoppedRejected runs the real command tree so that
+// cobra's Args validation is exercised before any hub work. --force with
+// --stopped would be a bulk, permanent delete, so it must be rejected and no
+// delete request may reach the hub.
+func TestDeleteCmd_ForceWithStoppedRejected(t *testing.T) {
 	orig := saveDeleteTestState()
 	defer orig.restore()
 
 	tmpHome := t.TempDir()
 	_ = os.Setenv("HOME", tmpHome)
+	noHub = false
 	preserveBranch = true
-	deleteForce = true
 
 	projectDir := filepath.Join(tmpHome, "project", ".scion")
 	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, "agents"), 0755))
@@ -569,14 +573,88 @@ func TestDeleteStoppedViaHub_ForcePropagates(t *testing.T) {
 	projectID := "project-force-3"
 	server, queries := newDeleteQueryRecordingHubServer(t, projectID, []string{"stopped-one", "stopped-two"})
 	defer server.Close()
+	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+	t.Setenv("SCION_PROJECT_ID", projectID)
+
+	rootCmd.SetArgs([]string{"delete", "--stopped", "--force"})
+	defer func() {
+		rootCmd.SetArgs(nil)
+		for _, name := range []string{"stopped", "force"} {
+			if f := deleteCmd.Flags().Lookup(name); f != nil {
+				f.Changed = false
+			}
+		}
+	}()
+
+	var err error
+	_ = captureStderr(t, func() {
+		err = rootCmd.Execute()
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--force cannot be combined with --stopped")
+	assert.Empty(t, queries, "no delete request may reach the hub")
+}
+
+func TestDeleteStoppedViaHub_NoForceOmitsForceQuery(t *testing.T) {
+	orig := saveDeleteTestState()
+	defer orig.restore()
+
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	preserveBranch = true
+	deleteForce = false
+
+	projectDir := filepath.Join(tmpHome, "project", ".scion")
+	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, "agents"), 0755))
+	projectPath = projectDir
+
+	projectID := "project-force-4"
+	server, queries := newDeleteQueryRecordingHubServer(t, projectID, []string{"stopped-one", "stopped-two"})
+	defer server.Close()
 
 	err := deleteStoppedViaHub(newDeleteForceHubContext(t, server.URL, projectID))
 	require.NoError(t, err)
 
-	require.Len(t, queries, 2)
+	require.Len(t, queries, 2, "every stopped agent should be deleted")
 	for name, q := range queries {
-		assert.Equal(t, "true", q.Get("force"), "force=true should be sent for stopped agent %s", name)
+		_, present := q["force"]
+		assert.False(t, present, "force must be absent for stopped agent %s", name)
 	}
+}
+
+// TestDeleteCmd_ForceViaHubDoesNotWarnLocalMode drives RunE down the Hub path
+// (hub-connected env) and checks that --force is sent and that the local-mode
+// warning is not printed.
+func TestDeleteCmd_ForceViaHubDoesNotWarnLocalMode(t *testing.T) {
+	orig := saveDeleteTestState()
+	defer orig.restore()
+
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	noHub = false
+	preserveBranch = true
+	deleteStopped = false
+	deleteForce = true
+
+	projectDir := filepath.Join(tmpHome, "project", ".scion")
+	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, "agents"), 0755))
+	projectPath = projectDir
+
+	projectID := "project-force-5"
+	server, queries := newDeleteQueryRecordingHubServer(t, projectID, nil)
+	defer server.Close()
+	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+	t.Setenv("SCION_PROJECT_ID", projectID)
+
+	var runErr error
+	stderr := captureStderr(t, func() {
+		runErr = deleteCmd.RunE(deleteCmd, []string{"hub-agent"})
+	})
+	require.NoError(t, runErr)
+	assert.Contains(t, stderr, "Using hub:", "delete should take the Hub path")
+	assert.NotContains(t, stderr, "--force has no effect without a Hub")
+	require.Contains(t, queries, "hub-agent")
+	assert.Equal(t, "true", queries["hub-agent"].Get("force"))
 }
 
 func TestDeleteCmd_ForceInLocalModeWarnsAndDeletes(t *testing.T) {

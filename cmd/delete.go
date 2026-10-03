@@ -46,13 +46,21 @@ var deleteCmd = &cobra.Command{
 	Long: `Stop and remove one or more agent containers and their associated files and worktrees.
 
 With a Hub, --force removes the agent from the Hub even when its runtime
-broker cannot be reached or cannot resolve the agent, and skips any
-soft-delete retention. Runtime resources left on the broker (containers,
-worktrees) may then need separate cleanup on that broker. In local mode
-(no Hub), --force has no effect: local delete already removes the container.`,
+broker cannot be reached or cannot resolve the agent. A forced delete is
+permanent: it skips soft-delete retention, so the agent cannot be
+restored. Runtime resources left on the broker (containers, worktrees)
+may then need separate cleanup on that broker. --force does not purge an
+agent that is already soft-deleted.
+
+--force cannot be combined with --stopped; name the agents to
+force-delete. In local mode (no Hub), --force has no effect: local delete
+already removes the container.`,
 	ValidArgsFunction: getMultiAgentNames,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if deleteStopped {
+			if deleteForce {
+				return fmt.Errorf("--force cannot be combined with --stopped; name the agents to force-delete")
+			}
 			if len(args) > 0 {
 				return fmt.Errorf("no arguments allowed when using --stopped")
 			}
@@ -71,7 +79,7 @@ worktrees) may then need separate cleanup on that broker. In local mode
 
 		projectDir, _ := config.GetResolvedProjectDir(projectPath)
 		if preserveBranch && !util.IsGitRepoDir(projectDir) {
-			fmt.Println("Warning: --preserve-branch used outside a git repository; this flag has no effect.")
+			statusln("Warning: --preserve-branch used outside a git repository; this flag has no effect.")
 		}
 
 		// Check if Hub should be used, excluding all target agents from sync requirements.
@@ -365,5 +373,5 @@ func init() {
 	rootCmd.AddCommand(deleteCmd)
 	deleteCmd.Flags().BoolVarP(&preserveBranch, "preserve-branch", "b", false, "Preserve the git branch associated with the worktree")
 	deleteCmd.Flags().BoolVar(&deleteStopped, "stopped", false, "Delete all agents with stopped containers")
-	deleteCmd.Flags().BoolVarP(&deleteForce, "force", "f", false, "Remove the agent from the Hub even when its broker cannot be reached or cannot resolve it; runtime resources on the broker may need separate cleanup")
+	deleteCmd.Flags().BoolVarP(&deleteForce, "force", "f", false, "Delete from the Hub even if the broker is unreachable; permanent, skips soft-delete retention")
 }
