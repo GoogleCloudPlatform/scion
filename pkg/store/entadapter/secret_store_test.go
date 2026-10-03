@@ -676,3 +676,44 @@ func TestListEnvVarsOrderedByKey(t *testing.T) {
 	require.Len(t, list, 3)
 	assert.Equal(t, []string{"ALPHA", "MIKE", "ZEBRA"}, []string{list[0].Key, list[1].Key, list[2].Key})
 }
+
+// =============================================================================
+// UpdateSecretValueIfVersion: value compare-and-swap on Version.
+// =============================================================================
+
+func TestUpdateSecretValueIfVersion(t *testing.T) {
+	ss := newTestSecretStore(t)
+	ctx := context.Background()
+	scopeID := uuid.New().String()
+	sec := &store.Secret{ID: uuid.New().String(), Key: "VAL_CAS", EncryptedValue: "v1", Scope: store.ScopeHub, ScopeID: scopeID, Description: "keep"}
+	require.NoError(t, ss.CreateSecret(ctx, sec))
+	require.Equal(t, 1, sec.Version)
+
+	// Matching version applies and bumps Version; other columns are kept.
+	applied, err := ss.UpdateSecretValueIfVersion(ctx, "VAL_CAS", store.ScopeHub, scopeID, 1, "v2")
+	require.NoError(t, err)
+	assert.True(t, applied)
+	val, err := ss.GetSecretValue(ctx, "VAL_CAS", store.ScopeHub, scopeID)
+	require.NoError(t, err)
+	assert.Equal(t, "v2", val)
+	got, err := ss.GetSecret(ctx, "VAL_CAS", store.ScopeHub, scopeID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, got.Version, "a successful CAS increments Version")
+	assert.Equal(t, "keep", got.Description, "other columns are untouched")
+
+	// A stale version does not apply and changes nothing.
+	applied, err = ss.UpdateSecretValueIfVersion(ctx, "VAL_CAS", store.ScopeHub, scopeID, 1, "stale")
+	require.NoError(t, err)
+	assert.False(t, applied, "a stale expectedVersion must not apply")
+	val, err = ss.GetSecretValue(ctx, "VAL_CAS", store.ScopeHub, scopeID)
+	require.NoError(t, err)
+	assert.Equal(t, "v2", val, "value must be untouched")
+	got, err = ss.GetSecret(ctx, "VAL_CAS", store.ScopeHub, scopeID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, got.Version, "Version must not bump on a CAS that doesn't apply")
+
+	// A missing row reports applied=false without error.
+	applied, err = ss.UpdateSecretValueIfVersion(ctx, "ghost", store.ScopeHub, scopeID, 1, "x")
+	require.NoError(t, err)
+	assert.False(t, applied)
+}
