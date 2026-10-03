@@ -79,9 +79,10 @@ func TestRejectKubernetesAssignRuntimeChange(t *testing.T) {
 // assignResolvedEnv is the env the hub sends on start/restart for an agent
 // whose GCP identity mode is "assign".
 var assignResolvedEnv = map[string]string{
-	"SCION_METADATA_MODE":       "assign",
-	"SCION_METADATA_SA_EMAIL":   "agent-worker@my-project.iam.gserviceaccount.com",
-	"SCION_METADATA_PROJECT_ID": "my-project",
+	"SCION_METADATA_MODE":        "assign",
+	"SCION_METADATA_MODE_SOURCE": "hub",
+	"SCION_METADATA_SA_EMAIL":    "agent-worker@my-project.iam.gserviceaccount.com",
+	"SCION_METADATA_PROJECT_ID":  "my-project",
 }
 
 // testLateCheckMappingGlobalSettingsYAML maps the test GSA under the

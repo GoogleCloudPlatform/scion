@@ -3224,9 +3224,10 @@ func TestBuildStartContext_KubernetesAssignResolvedEnvSAEmailSource(t *testing.T
 		Name:        "agent-k8s-assign-resolvedenv",
 		ProjectPath: projectDir,
 		ResolvedEnv: map[string]string{
-			"SCION_METADATA_MODE":       "assign",
-			"SCION_METADATA_SA_EMAIL":   "agent-worker@my-project.iam.gserviceaccount.com",
-			"SCION_METADATA_PROJECT_ID": "my-project",
+			"SCION_METADATA_MODE":        "assign",
+			"SCION_METADATA_MODE_SOURCE": "hub",
+			"SCION_METADATA_SA_EMAIL":    "agent-worker@my-project.iam.gserviceaccount.com",
+			"SCION_METADATA_PROJECT_ID":  "my-project",
 		},
 		HTTPRequest: r,
 		Operation:   opHTTPStart,
@@ -3282,9 +3283,10 @@ func TestBuildStartContext_KubernetesAssignCreateAndStartProduceSameEnv(t *testi
 		Name:        "agent-k8s-assign-start",
 		ProjectPath: projectDirStart,
 		ResolvedEnv: map[string]string{
-			"SCION_METADATA_MODE":       "assign",
-			"SCION_METADATA_SA_EMAIL":   "agent-worker@my-project.iam.gserviceaccount.com",
-			"SCION_METADATA_PROJECT_ID": "my-project",
+			"SCION_METADATA_MODE":        "assign",
+			"SCION_METADATA_MODE_SOURCE": "hub",
+			"SCION_METADATA_SA_EMAIL":    "agent-worker@my-project.iam.gserviceaccount.com",
+			"SCION_METADATA_PROJECT_ID":  "my-project",
 		},
 		HTTPRequest: r,
 		Operation:   opHTTPStart,
@@ -3343,8 +3345,9 @@ runtimes:
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
 		Name: agentName,
 		ResolvedEnv: map[string]string{
-			"SCION_METADATA_MODE":     "assign",
-			"SCION_METADATA_SA_EMAIL": "agent-worker@my-project.iam.gserviceaccount.com",
+			"SCION_METADATA_MODE":        "assign",
+			"SCION_METADATA_MODE_SOURCE": "hub",
+			"SCION_METADATA_SA_EMAIL":    "agent-worker@my-project.iam.gserviceaccount.com",
 		},
 		HTTPRequest: r,
 		Operation:   opHTTPStart,
@@ -3390,8 +3393,9 @@ runtimes:
 		Name:        "agent-k8s-assign-project-level-warning",
 		ProjectPath: projectDir,
 		ResolvedEnv: map[string]string{
-			"SCION_METADATA_MODE":     "assign",
-			"SCION_METADATA_SA_EMAIL": "agent-worker@my-project.iam.gserviceaccount.com",
+			"SCION_METADATA_MODE":        "assign",
+			"SCION_METADATA_MODE_SOURCE": "hub",
+			"SCION_METADATA_SA_EMAIL":    "agent-worker@my-project.iam.gserviceaccount.com",
 		},
 		HTTPRequest: r,
 		Operation:   opHTTPStart,
@@ -3611,7 +3615,7 @@ func TestStartAgentEndpoint_KubernetesAssignResolvedKSAReachesOpts(t *testing.T)
 	projectDir := newTestProjectSettings(t, testKubernetesProjectSettingsYAML)
 	newTestGlobalSettings(t, testKubernetesMappingGlobalSettingsYAML)
 
-	bodyJSON := `{"projectPath": ` + strconv.Quote(projectDir) + `, "resolvedEnv": {"SCION_METADATA_MODE": "assign", "SCION_METADATA_SA_EMAIL": "agent-worker@my-project.iam.gserviceaccount.com", "SCION_METADATA_PROJECT_ID": "my-project"}}`
+	bodyJSON := `{"projectPath": ` + strconv.Quote(projectDir) + `, "resolvedEnv": {"SCION_METADATA_MODE": "assign", "SCION_METADATA_MODE_SOURCE": "hub", "SCION_METADATA_SA_EMAIL": "agent-worker@my-project.iam.gserviceaccount.com", "SCION_METADATA_PROJECT_ID": "my-project"}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/agent-k8s-assign-start/start", strings.NewReader(bodyJSON))
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
@@ -3641,7 +3645,7 @@ func TestRestartAgentEndpoint_KubernetesAssignResolvedKSAReachesOpts(t *testing.
 	// same way an already-running agent would appear.
 	mgr.agents = []api.AgentInfo{{Name: "agent-k8s-assign-restart", ProjectPath: projectDir}}
 
-	bodyJSON := `{"resolvedEnv": {"SCION_METADATA_MODE": "assign", "SCION_METADATA_SA_EMAIL": "agent-worker@my-project.iam.gserviceaccount.com", "SCION_METADATA_PROJECT_ID": "my-project"}}`
+	bodyJSON := `{"resolvedEnv": {"SCION_METADATA_MODE": "assign", "SCION_METADATA_MODE_SOURCE": "hub", "SCION_METADATA_SA_EMAIL": "agent-worker@my-project.iam.gserviceaccount.com", "SCION_METADATA_PROJECT_ID": "my-project"}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/agent-k8s-assign-restart/restart", strings.NewReader(bodyJSON))
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
@@ -3670,7 +3674,7 @@ func TestStartAgentEndpoint_KubernetesAssignConflictingInlineServiceAccountNameR
 	projectDir := newTestProjectSettings(t, testKubernetesProjectSettingsYAML)
 	newTestGlobalSettings(t, testKubernetesMappingGlobalSettingsYAML)
 
-	bodyJSON := `{"projectPath": ` + strconv.Quote(projectDir) + `, "resolvedEnv": {"SCION_METADATA_MODE": "assign", "SCION_METADATA_SA_EMAIL": "agent-worker@my-project.iam.gserviceaccount.com"}, "inlineConfig": {"kubernetes": {"serviceAccountName": "some-other-ksa"}}}`
+	bodyJSON := `{"projectPath": ` + strconv.Quote(projectDir) + `, "resolvedEnv": {"SCION_METADATA_MODE": "assign", "SCION_METADATA_MODE_SOURCE": "hub", "SCION_METADATA_SA_EMAIL": "agent-worker@my-project.iam.gserviceaccount.com"}, "inlineConfig": {"kubernetes": {"serviceAccountName": "some-other-ksa"}}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/agent-k8s-assign-start-conflict/start", strings.NewReader(bodyJSON))
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
@@ -3706,7 +3710,7 @@ func TestCreateAgentEndpoint_BuildStartContext400RecordedAsAttemptStatus(t *test
 	newTestGlobalSettings(t, testKubernetesMappingGlobalSettingsYAML)
 
 	const requestID = "req-m19-attempt-status"
-	bodyJSON := `{"requestId": "` + requestID + `", "name": "agent-k8s-assign-create-conflict", "projectPath": ` + strconv.Quote(projectDir) + `, "resolvedEnv": {"SCION_METADATA_MODE": "assign", "SCION_METADATA_SA_EMAIL": "agent-worker@my-project.iam.gserviceaccount.com"}, "inlineConfig": {"kubernetes": {"serviceAccountName": "some-other-ksa"}}}`
+	bodyJSON := `{"requestId": "` + requestID + `", "name": "agent-k8s-assign-create-conflict", "projectPath": ` + strconv.Quote(projectDir) + `, "resolvedEnv": {"SCION_METADATA_MODE": "assign", "SCION_METADATA_MODE_SOURCE": "hub", "SCION_METADATA_SA_EMAIL": "agent-worker@my-project.iam.gserviceaccount.com"}, "inlineConfig": {"kubernetes": {"serviceAccountName": "some-other-ksa"}}}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(bodyJSON))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
