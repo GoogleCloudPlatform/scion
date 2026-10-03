@@ -1269,3 +1269,49 @@ func TestSyncToFinalize_BootstrapMode_EmptyPerAgentCapability412(t *testing.T) {
 		t.Errorf("body %s should carry %s", rec.Body.String(), ErrCodeUnsupportedCapability)
 	}
 }
+
+// TestSyncToFinalize_BootstrapMode_EmptyPerAgentNilOrEmptyManifest pins that
+// the empty-per-agent branch never sees a nil manifest: a missing manifest
+// is rejected with 400 before the agent is touched (nothing dispatched),
+// and a manifest with no files reaches the branch and dispatches without a
+// warning.
+func TestSyncToFinalize_BootstrapMode_EmptyPerAgentNilOrEmptyManifest(t *testing.T) {
+	t.Run("nil manifest", func(t *testing.T) {
+		srv, s, stor, disp := testBootstrapServer(t)
+		agentID := tid("agent_empty_finalize_nil")
+		setupEmptyPerAgentFinalizeAgent(t, s, stor, agentID)
+
+		rec := doBootstrapRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", agentID), SyncToFinalizeRequest{})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if len(disp.dispatchedAgents) != 0 {
+			t.Fatalf("expected no dispatch, got %d", len(disp.dispatchedAgents))
+		}
+	})
+	t.Run("manifest without files", func(t *testing.T) {
+		srv, s, stor, disp := testBootstrapServer(t)
+		agentID := tid("agent_empty_finalize_nofiles")
+		setupEmptyPerAgentFinalizeAgent(t, s, stor, agentID)
+
+		rec := doBootstrapRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", agentID), SyncToFinalizeRequest{
+			Manifest: &transfer.Manifest{Version: "1.0"},
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp SyncToFinalizeResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.Warnings) != 0 {
+			t.Errorf("Warnings = %v, want none", resp.Warnings)
+		}
+		if len(disp.dispatchedAgents) != 1 {
+			t.Fatalf("expected 1 dispatched agent, got %d", len(disp.dispatchedAgents))
+		}
+		if got := disp.dispatchedAgents[0].AppliedConfig.WorkspaceStoragePath; got != "" {
+			t.Errorf("dispatched WorkspaceStoragePath = %q, want empty", got)
+		}
+	})
+}

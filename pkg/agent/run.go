@@ -1189,14 +1189,18 @@ authDone:
 	// afterward -- a value this validator never sees, computed by that
 	// backend's own resolver rather than read back from persisted or
 	// request-supplied state.
-	roots, rootsErr := workspaceSourceRoots(explicitWorkspace, effectiveWorkspace, settings, projectDir)
+	var roots []string
 	if emptyPerAgentWorkspace != "" {
 		// Contained in itself: settings.WorkspacePath or the project's repo
-		// root, which workspaceSourceRoots derives, need not contain it.
-		roots, rootsErr = []string{emptyPerAgentWorkspace}, nil
-	}
-	if rootsErr != nil {
-		return nil, rootsErr
+		// root, which workspaceSourceRoots derives, need not contain it, so
+		// skip deriving them (and any error doing so) entirely.
+		roots = []string{emptyPerAgentWorkspace}
+	} else {
+		var rootsErr error
+		roots, rootsErr = workspaceSourceRoots(explicitWorkspace, effectiveWorkspace, settings, projectDir)
+		if rootsErr != nil {
+			return nil, rootsErr
+		}
 	}
 	resolvedWorkspace, err := runtime.ValidateWorkspaceSource(effectiveWorkspace, roots...)
 	if err != nil {

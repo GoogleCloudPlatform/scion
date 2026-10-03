@@ -321,7 +321,7 @@ func persistedEmptyPerAgent(agentsDirs []string, externalAgentDir, agentName str
 		if !config.ScionAgentConfigExists(dir) {
 			continue
 		}
-		if cfg, err := (&config.Template{Path: dir}).LoadConfig(); err == nil && cfg.EmptyPerAgentWorkspace {
+		if cfg, err := (&config.Template{Path: dir}).LoadConfig(); err == nil && cfg != nil && cfg.EmptyPerAgentWorkspace {
 			return true
 		}
 	}
@@ -2376,7 +2376,7 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	if config.ScionAgentConfigExists(agentDir) {
 		if persisted, cfgErr := (&config.Template{Path: agentDir}).LoadConfig(); cfgErr != nil {
 			util.Debugf("GetAgent: could not load persisted config to check workspace mode: %v", cfgErr)
-		} else {
+		} else if persisted != nil {
 			if persisted.EmptyPerAgentWorkspace {
 				ctx = api.ContextWithEmptyPerAgentWorkspace(ctx)
 			}
