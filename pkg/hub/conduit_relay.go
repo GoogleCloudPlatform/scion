@@ -67,6 +67,9 @@ type ConduitRelayOptions struct {
 	// InstanceID is this process's relay instance id ("" =
 	// ConduitInstanceID("")). It must be unique among live processes.
 	InstanceID string
+	// testHookAdmission, when set, runs during admission (before the
+	// session is registered). Tests only.
+	testHookAdmission func()
 	// InternalEndpoint is the advertised base URL of this process's
 	// internal listener ("" = unaddressable).
 	InternalEndpoint string
@@ -151,13 +154,21 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 	if id == "" {
 		id = ConduitInstanceID("")
 	}
+	grantKeys := relay.GrantKeySource(s.conduitWelcomeGrantKeys)
+	if h := opts.testHookAdmission; h != nil {
+		grantKeys = func(ctx context.Context) ([]*conduitv1.GrantKey, error) {
+			h()
+			return s.conduitWelcomeGrantKeys(ctx)
+		}
+	}
 	r, err := relay.New(relay.Config{
 		InstanceID:       id,
 		InternalEndpoint: opts.InternalEndpoint,
 		RequireSelfCheck: opts.RequireHA,
 		Registry:         reg,
 		Store:            st,
-		GrantKeys:        s.conduitWelcomeGrantKeys,
+		GrantKeys:        grantKeys,
+		Revalidate:       s.conduitRevalidatePrincipal,
 		PeerAuth:         opts.PeerAuth,
 		HTTPClient:       opts.HTTPClient,
 		Clock:            opts.Clock,
@@ -317,6 +328,31 @@ func (s *Server) conduitForgetAgent(ctx context.Context, agentID string) {
 	}
 }
 
+// errConduitAgentGone is the revalidation failure of a deleted agent.
+var errConduitAgentGone = errors.New("agent no longer exists")
+
+// conduitRevalidatePrincipal re-reads the agent row once a session is
+// admitted and registered: an agent deleted after handleConduit's read but
+// before registration (so the delete's forget step did not see the
+// session) is closed with 4401. A read error other than not-found keeps
+// the session; the forget step and the reapers still cover it.
+func (s *Server) conduitRevalidatePrincipal(ctx context.Context, p relay.Principal) error {
+	if p.Kind != registry.PrincipalAgent {
+		return nil
+	}
+	a, err := s.store.GetAgent(ctx, p.ID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return errConduitAgentGone
+	case err != nil:
+		slog.Warn("Conduit: re-reading the agent after admission failed; keeping the session", "agent_id", p.ID, "error", err)
+		return nil
+	case !a.DeletedAt.IsZero():
+		return errConduitAgentGone
+	}
+	return nil
+}
+
 // handleConduit serves GET /api/v1/conduit: an agent's conduit session.
 // Only agent principals (agent token with agent:port:forward) may connect;
 // users, brokers and anonymous callers are refused at the HTTP layer
@@ -376,7 +412,15 @@ func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 	}
 	// The session outlives no request deadline: it ends when the
 	// connection closes or the relay drains.
-	if err := rt.relay.Serve(context.WithoutCancel(r.Context()), conn, p); err != nil && !errors.Is(err, relay.ErrNotServing) {
+	ctx := context.WithoutCancel(r.Context())
+	if err := rt.relay.Serve(ctx, conn, p); err != nil && !errors.Is(err, relay.ErrNotServing) {
 		slog.Debug("Conduit session ended", "agent_id", agent.ID, "error", err)
+	}
+	// An agent deleted during the handshake: the session row is gone
+	// (Serve deleted it); drop the epoch row its admission recreated.
+	if errors.Is(s.conduitRevalidatePrincipal(ctx, p), errConduitAgentGone) {
+		if err := rt.registry.ForgetPrincipalEpoch(ctx, registry.PrincipalAgent, agent.ID); err != nil {
+			slog.Warn("Conduit: deleting the epoch row of a deleted agent failed", "agent_id", agent.ID, "error", err)
+		}
 	}
 }

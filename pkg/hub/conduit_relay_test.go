@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -308,6 +309,37 @@ func TestConduitForgetAgent(t *testing.T) {
 	ps, err := f.regStore.ListPrincipalSessions(ctx, registry.PrincipalAgent, f.launched.ID)
 	require.NoError(t, err)
 	assert.Empty(t, ps.Sessions, "every row of the deleted agent is gone")
+}
+
+// TestConduitAgentDeletedDuringHandshake: an agent deleted (and forgotten)
+// after handleConduit read its row but before the session registered is
+// closed with 4401 once registered, and leaves no registry rows behind.
+func TestConduitAgentDeletedDuringHandshake(t *testing.T) {
+	ctx := context.Background()
+	var f *relayFixture
+	var once sync.Once
+	f = newRelayFixture(t, func(o *ConduitRelayOptions) {
+		o.testHookAdmission = func() {
+			once.Do(func() {
+				assert.NoError(t, f.store.DeleteAgent(ctx, f.launched.ID)) // server goroutine: no FailNow
+				f.srv.conduitForgetAgent(ctx, f.launched.ID)
+			})
+		}
+	})
+	sess, _, err := f.dial(t, f.agentToken(t, f.launched), f.launched.LaunchID)
+	if err == nil {
+		select {
+		case <-sess.Done():
+		case <-time.After(10 * time.Second): // safety net
+			t.Fatal("session of a deleted agent not closed")
+		}
+		err = sess.Err()
+	}
+	assert.Equal(t, conduit.CloseUnauthenticated, conduit.CodeOf(err, 0), "session ended with %v", err)
+	require.Eventually(t, func() bool { // Serve deletes the row after the close
+		ps, err := f.regStore.ListPrincipalSessions(ctx, registry.PrincipalAgent, f.launched.ID)
+		return err == nil && len(ps.Sessions) == 0
+	}, 10*time.Second, 10*time.Millisecond, "the deleted agent's session row is removed")
 }
 
 // TestAgentTokenRefresh_ConduitGrantKeys: the agent token-refresh response
