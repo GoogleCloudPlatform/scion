@@ -954,12 +954,22 @@ export class ScionPageAdminRoleBindings extends LitElement {
 
     // Validate lifecycle dates: expiresAt must be after notBefore
     if (this.formNotBefore && this.formExpiresAt) {
-      const nb = new Date(this.formNotBefore).getTime();
-      const ea = new Date(this.formExpiresAt).getTime();
+      const nb = this.wallClockMs(this.formNotBefore);
+      const ea = this.wallClockMs(this.formExpiresAt);
       if (!isNaN(nb) && !isNaN(ea) && ea <= nb) return false;
     }
 
     return true;
+  }
+
+  /**
+   * Epoch ms of a `datetime-local` lifecycle value, read as wall-clock time
+   * in the effective display zone (the zone the inputs are labelled and
+   * submitted in), or `NaN` when it does not parse.
+   */
+  private wallClockMs(value: string): number {
+    const iso = parseWallClock(value, effectiveTimeZone());
+    return iso ? new Date(iso).getTime() : NaN;
   }
 
   /** True when any lifecycle condition is set. */
@@ -1309,7 +1319,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
                 </div>
                 ${this.formExpiresAt
                   ? (() => {
-                      const ea = new Date(this.formExpiresAt).getTime();
+                      const ea = this.wallClockMs(this.formExpiresAt);
                       if (!isNaN(ea) && ea < Date.now()) {
                         return html`
                           <div class="validation-warning">
@@ -1320,7 +1330,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
                         `;
                       }
                       if (this.formNotBefore) {
-                        const nb = new Date(this.formNotBefore).getTime();
+                        const nb = this.wallClockMs(this.formNotBefore);
                         if (!isNaN(nb) && !isNaN(ea) && ea <= nb) {
                           return html`
                             <div class="validation-warning">

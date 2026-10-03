@@ -394,3 +394,55 @@ describe('scion-page-admin-role-bindings lifecycle times (tz-refactor task 20)',
     ]);
   });
 });
+
+describe('scion-page-admin-role-bindings lifecycle warnings read the display zone (tz-refactor task 20)', () => {
+  afterEach(() => {
+    setPreferredTimeZone('');
+    vi.useRealTimers();
+  });
+
+  it('warns about an expiry that is past in the display zone but future in the browser zone', async () => {
+    const { handler } = makeFetchHandler();
+    const el = await createComponent(handler);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const comp = el as any;
+    // 05:00Z is 14:00 in Tokyo (UTC+9); the browser zone is pinned to UTC.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-01T05:00:00Z'));
+    setPreferredTimeZone('Asia/Tokyo');
+
+    comp.showCreateDialog = true;
+    comp.showAdvanced = true;
+    // 10:00 in Tokyo is 01:00Z, already past; read as UTC it would be future.
+    comp.formExpiresAt = '2026-10-01T10:00';
+    comp.requestUpdate();
+    await comp.updateComplete;
+    expect(query(el, '.validation-warning')?.textContent).toContain(
+      'This expiration date is in the past'
+    );
+
+    // 20:00 in Tokyo is 11:00Z, still in the future: no warning.
+    comp.formExpiresAt = '2026-10-01T20:00';
+    await comp.updateComplete;
+    expect(query(el, '.validation-warning')).toBeNull();
+  });
+
+  it('blocks submit when expiry is not after activation, comparing in the display zone', async () => {
+    const { handler } = makeFetchHandler();
+    const el = await createComponent(handler);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const comp = el as any;
+    setPreferredTimeZone('Asia/Tokyo');
+    comp.formPrincipalId = 'user-a';
+    comp.formRoleId = 'role-1';
+    comp.formScopeType = 'system';
+    comp.formNotBefore = '2030-01-15T00:00';
+    comp.formExpiresAt = '2030-01-15T00:00';
+    expect(comp.createFormValid).toBe(false);
+    comp.formExpiresAt = '2030-01-15T00:01';
+    expect(comp.createFormValid).toBe(true);
+    // An unparsable value does not block on ordering (submit rejects it).
+    comp.formExpiresAt = 'bogus';
+    expect(comp.createFormValid).toBe(true);
+  });
+});
