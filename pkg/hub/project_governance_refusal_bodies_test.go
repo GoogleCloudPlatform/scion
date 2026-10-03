@@ -39,9 +39,16 @@ import (
 // governanceDenialError cannot silently change what clients receive. The
 // bodies were captured from the code before that refactor.
 //
-// In-transaction refusals are reached with mmrAuthoritySwapStore, which
-// commits a concurrent change (revocation, demotion, deletion) between the
-// pre-transaction checks and the lock.
+// In-transaction refusals are reached through three seams:
+//   - mmrAuthoritySwapStore (the swap-store seam) commits a concurrent change
+//     (revocation, demotion, deletion) between the pre-transaction checks and
+//     the lock. Most in-transaction pins use it.
+//   - pinNoDirectOwnerStore (the owner-hiding seam) presents a different
+//     project-owner role-definition ID to the transaction. The five
+//     in-transaction "only direct project owners" branches cannot be reached
+//     with valid data, so their pins (*DirectOwnerUnderLock) need this seam.
+//   - pinFailingPrincipalListStore (the failing-store seam) makes the
+//     in-transaction authority lookup fail, for the deletion 500 pin.
 // =============================================================================
 
 // pinRefusal asserts the exact status and body bytes of a refusal.

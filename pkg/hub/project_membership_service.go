@@ -324,6 +324,17 @@ func (svc *ProjectMembershipService) projectEffectiveRoleFromStore(ctx context.C
 // project-owner binding using the provided (transactional) store.
 // R5 O-1: returns an error so callers can distinguish "not owner" from "store
 // failure" and surface 500 instead of a misleading 403.
+//
+// Fail-closed defence in depth: the five in-transaction "only direct project
+// owners" refusals (AddMember x2, UpdateMemberRole x2, RemoveMember x1) pair
+// this check with an actorRole of project-owner. With valid data that
+// combination cannot occur: projectEffectiveRoleFromStore takes project-owner
+// only from direct bindings, the store rejects group and agent project-owner
+// bindings, and only one project-scoped project-owner role definition can
+// exist. The branches are kept on purpose. They can still be reached when a
+// direct owner binding expires between the two independent svc.nowFunc()
+// reads, and they guard against future group or derived ownership. Their
+// pins reach them through the pinNoDirectOwnerStore test seam.
 func (svc *ProjectMembershipService) isActorDirectOwnerFromStore(ctx context.Context, s store.Store, userID, projectID string) (bool, error) {
 	now := svc.nowFunc()
 	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
@@ -851,6 +862,7 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 			if !svc.isOperationPermitted(actorRole, req.Op, roleDef.Name) {
 				return governanceDenial(403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, roleDef.Name))
 			}
+			// Fail-closed defence in depth; see isActorDirectOwnerFromStore.
 			if requiresDirectOwner(roleDef.Name) && !actorIsDirectOwner {
 				return governanceDenial(403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
 			}
@@ -906,6 +918,7 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 					}
 					return governanceDenial(403, reason)
 				}
+				// Fail-closed defence in depth; see isActorDirectOwnerFromStore.
 				if requiresDirectOwner(oldRoleDef.Name) && !actorIsDirectOwner {
 					return governanceDenial(403, "only direct project owners can manage admin and owner roles")
 				}
@@ -1127,9 +1140,11 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 					return governanceDenial(403, fmt.Sprintf("actor role %q cannot %s target role %q (re-evaluated under lock)", actorRole, req.Op, newRoleDef.Name))
 				}
 			}
+			// Fail-closed defence in depth; see isActorDirectOwnerFromStore.
 			if requiresDirectOwner(oldRoleDef.Name) && !actorIsDirectOwner {
 				return governanceDenial(403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
 			}
+			// Fail-closed defence in depth; see isActorDirectOwnerFromStore.
 			if oldRoleDef.Name != newRoleDef.Name && requiresDirectOwner(newRoleDef.Name) && !actorIsDirectOwner {
 				return governanceDenial(403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
 			}
@@ -1288,6 +1303,7 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 				if ownerErr != nil {
 					return fmt.Errorf("owner lookup failed under lock: %w", ownerErr)
 				}
+				// Fail-closed defence in depth; see isActorDirectOwnerFromStore.
 				if !actorIsDirectOwner {
 					return governanceDenial(403, "only direct project owners can manage admin and owner roles (re-evaluated under lock)")
 				}

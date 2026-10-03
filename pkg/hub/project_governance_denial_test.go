@@ -52,11 +52,11 @@ func TestGovernanceDenial_CodeMapping(t *testing.T) {
 	}
 }
 
-// TestGovernanceDenial_RoundTripsThroughDeletionTxWrapping shows that the
-// typed denial the deletion path returns from its WithTx closure survives
-// the transaction (the real store's WithTx) and any %w wrapping, and that
-// errors.As recovers the exact decision.
-func TestGovernanceDenial_RoundTripsThroughDeletionTxWrapping(t *testing.T) {
+// TestGovernanceDenial_SurvivesWithTxAndWrapping shows that a typed denial
+// returned from a WithTx closure survives the transaction (the real store's
+// WithTx) and any %w wrapping, and that errors.As recovers the exact decision.
+// The end-to-end deletion path is pinned by TestDeleteProjectRefusalBody_*.
+func TestGovernanceDenial_SurvivesWithTxAndWrapping(t *testing.T) {
 	_, s := testServer(t)
 	want := MembershipDecision{
 		Allowed:    false,

@@ -250,6 +250,11 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 		// is re-evaluated from the transactional store.
 		reGov := svc.checkDeletionGovernanceFromStore(ctx, tx, req, isSuperAdmin)
 		if !reGov.Allowed {
+			// The deletion decision travels in a MembershipDecision on
+			// purpose: ProjectDeleteDecision has exactly the four fields
+			// below, and all four are copied back after WithTx. DenialCode
+			// is hard-coded to ErrCodeProjectDeleteForbidden so the response
+			// stays byte-identical to the pre-change behaviour.
 			return asGovernanceDenial(MembershipDecision{
 				Allowed:    false,
 				DenialCode: ErrCodeProjectDeleteForbidden,
