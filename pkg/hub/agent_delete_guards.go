@@ -77,7 +77,7 @@ const (
 	startEntryReincarnate    startEntry = "reincarnate"
 	startEntryRestore        startEntry = "restore"
 	startEntryCreateExisting startEntry = "create_existing" // POST /agents on an existing agent (resume/recreate)
-	startEntryWake           startEntry = "wake"            // DM wake of a suspended agent
+	startEntryWake           startEntry = "wake"            // DM wake (any phase where a launch refusal applies, else suspended)
 )
 
 // startRefusal is the start gate's answer when it has something to say.

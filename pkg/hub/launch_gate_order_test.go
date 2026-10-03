@@ -115,8 +115,28 @@ func TestStartGate_DeleteBeforeLaunch(t *testing.T) {
 		}
 	}
 
-	// DM wake only starts a suspended agent, and suspended is not an
-	// in-flight phase, so only the incomplete create applies.
+	// DM wake runs the gate in every phase when a launch refusal applies:
+	// an in-flight create (created/provisioning) and, for a suspended agent,
+	// an incomplete create. The delete answer wins in both.
+	for di, del := range gateOrderDeletes {
+		t.Run("in flight/"+del.name+"/DM wake", func(t *testing.T) {
+			srv, s := testServer(t)
+			agent := setupBrokerAgentInPhase(t, s, "gord-wakef-"+string(rune('a'+di)), state.PhaseCreated)
+			seedLaunch(t, s, agent, seedInFlight)
+			del.seed(t, s, agent.ID)
+			agent = mustAgent(t, s, agent.ID)
+			require.True(t, agent.IsInFlight())
+			client := &mockRuntimeBrokerClient{}
+			srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default()))
+
+			res, dmErr := srv.wakeAgentForDM(context.Background(), agent)
+			assert.Nil(t, res)
+			require.NotNil(t, dmErr)
+			assert.Equal(t, ErrCodeDeleteInProgress, dmErr.Code)
+			assert.Equal(t, http.StatusConflict, dmErr.HTTPStatus)
+			assert.False(t, client.startCalled)
+		})
+	}
 	for di, del := range gateOrderDeletes {
 		t.Run("incomplete create/"+del.name+"/DM wake", func(t *testing.T) {
 			srv, s := testServer(t)
