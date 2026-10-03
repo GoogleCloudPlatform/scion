@@ -54,7 +54,7 @@ The directory is not a git repository, and no other agent can see it. It lives u
 - It is deleted together with the agent. Use [shared directories](#2-the-shared-directories-invariant) for files that agents should share or that must outlive an agent.
 - Files from your local project directory are **not** uploaded into it. When you start an agent from a local non-git directory, the CLI shows the Hub's warning that the files were ignored.
 - Reincarnate (moving the agent to another Runtime Broker) is not supported for this mode.
-- Runtime Brokers whose default runtime is Cloud Run do not support this mode (the `cloudrun-sandbox` runtime does). Once such a broker has sent its first heartbeat it reports that it lacks the `emptyPerAgentWorkspace` capability, and creating such an agent there fails with `412 Precondition Failed`. Before that first heartbeat, the Hub may still dispatch the agent, and the Cloud Run runtime then rejects it with an error.
+- Runtime Brokers whose default runtime is Cloud Run do not support this mode (the `cloudrun-sandbox` runtime does). Once such a broker has sent its first heartbeat it reports that it lacks the `emptyPerAgentWorkspace` capability, and creating such an agent there fails with `412 Precondition Failed`. Before that first heartbeat, the Hub may still dispatch the agent, and the Cloud Run runtime then rejects it with an error. The capability reflects only the broker's default runtime: an agent that uses a Cloud Run runtime profile on a broker whose default runtime is not Cloud Run gets no `412`, and fails with an error when it starts.
 
 Summary:
 

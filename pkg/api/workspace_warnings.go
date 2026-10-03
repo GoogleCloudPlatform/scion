@@ -17,6 +17,7 @@ package api
 // WarningEmptyPerAgentWorkspaceFilesIgnored is returned in the warnings of
 // the agent create response and of the workspace sync-to finalize response
 // when workspace files are sent for an empty-per-agent project: the hub
-// drops them because each agent starts in an empty directory. The CLI matches on this exact text to report that the files
-// were ignored, so the hub and CLI must share this constant.
+// drops them because each agent starts in an empty directory. The CLI
+// matches on this exact text to report that the files were ignored, so the
+// hub and CLI must share this constant.
 const WarningEmptyPerAgentWorkspaceFilesIgnored = "workspace files were ignored: this project gives each agent an empty workspace directory"
