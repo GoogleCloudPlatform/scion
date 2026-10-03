@@ -24,6 +24,7 @@ List endpoints for templates, harness configs and groups return an opaque `nextC
 #### Agents (`/api/v1/agents`)
 - `GET /`: List agents (filterable by project, user, phase). Add `sort=created` or `sort=updated` for a server-sorted, keyset-paged view with the same `dir`, `limit` (clamped to 500), `cursor`, `fit` and `stats` parameters and the same 2,000-agent ceiling as the project agent list's sorted mode below. Without `sort` the response is unchanged.
 - `POST /`: Dispatch a new agent.
+- `POST /stop-all`: Stop every running agent across all projects. Requires a user identity holding `agent.stop_all` on the hub; a user without it gets `403`. For the project-scoped variant, see `POST /api/v1/projects/:id/agents/stop-all` below.
 - `GET /:id`: Get detailed agent state (phase, activity, detail). An agent can always read its own record with its agent token.
 - `POST /:id/suspend`: Suspend a running agent, preserving its harness session for a later resume. Sets the phase to `suspended`. Requires a harness that supports session resume.
 - `POST /:id/start`, `POST /:id/restart`: Start/restart an agent. Starting a `suspended` agent resumes (continues) its harness session; starting a `stopped` or `error` agent runs a fresh session. To continue the interrupted session of an `error` agent instead, send `{"forceResume": true}` as the `start` body (best effort). `forceResume` has no effect in other phases.

@@ -127,7 +127,7 @@ logs, authorization decisions and audit records, so you can tell which automatio
 The command prints the token value **once**. Store it securely — it cannot be retrieved later.
 Each requested scope is checked against your live authority in the project before the token is
 written. If a requested scope is denied, the Hub returns `403` with error code
-`scope_violation` and `details.selector` and `details.reason` naming the scope and the reason;
+`scope_violation`, with `details.selector` and `details.reason` naming the scope and the reason;
 nothing is created. Run `scion hub token scopes --project <project>` to see the full picture
 before retrying.
 

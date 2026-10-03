@@ -307,7 +307,7 @@ Older agent images behave in one of two ways. With an image whose `sciontool` pr
 
 Secrets are composable: `ResolvedAuth` and `ResolvedSecrets` are applied independently (not mutually exclusive).
 
-File-type secrets, harness auth files and `secrets.json` whose target is inside the agent home are not mounted there directly. Their volumes are mounted under `/run/scion/` (`secrets-store`, `agent-secrets`, `auth-files`), and after the home sync each file is copied to its target in the home as the Pod user, with mode `0600`. This keeps the home writable for non-root Pods: a direct `subPath` mount would make the container runtime create missing parent directories owned by root, and the home sync would then fail with "Permission denied". Targets outside the agent home keep their direct `subPath` mounts.
+File-type secrets, harness auth files, and `secrets.json` whose targets are inside the agent home are not mounted there directly. Their volumes are mounted under `/run/scion/` (`secrets-store`, `agent-secrets`, `auth-files`), and after the home sync each file is copied to its target in the home as the Pod user, with mode `0600`. This keeps the home writable for non-root Pods: a direct `subPath` mount would make the container runtime create missing parent directories owned by root, and the home sync would then fail with "Permission denied". Targets outside the agent home keep their direct `subPath` mounts.
 
 ### Hub Transport Credential
 
