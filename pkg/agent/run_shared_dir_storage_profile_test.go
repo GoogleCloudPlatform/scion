@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -545,4 +546,45 @@ func TestStartSharedDirStorage_DamagedRecordFails(t *testing.T) {
 			assert.Equal(t, content, string(got))
 		})
 	}
+}
+
+// sdsModeAndGID returns the permission bits (including setgid) and owning
+// group of path.
+func sdsModeAndGID(t *testing.T, path string) (os.FileMode, uint32) {
+	t.Helper()
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	st, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+	return os.FileMode(st.Mode & 0o7777), st.Gid
+}
+
+// An agent whose profile resolves to nfs gets its shared-dir chain created
+// by the broker: setgid 2755 upper directories and a setgid,
+// group-writable 2775 leaf, all in the group of the setgid share
+// directory. Nothing is chowned, so on an export that does not squash
+// ids, the share directory's group and setgid bit decide the group that
+// docker agents and pods share.
+func TestStartSharedDirStorage_PerProfileNFSLeafModes(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	mountRoot := filepath.Join(f.tmpDir, "nfs")
+	hostBase := filepath.Join(mountRoot, sdsProfileShareID)
+	require.NoError(t, os.MkdirAll(hostBase, 0o775))
+	require.NoError(t, os.Chmod(hostBase, 0o2775))
+	_, baseGID := sdsModeAndGID(t, hostBase)
+	f.writeRawGlobalSettings(t, sdsProfileSettingsYAML(mountRoot, "nfs"))
+
+	var k8s sdsCapture
+	_, err := NewManager(newSDSMockRuntime("kubernetes", &k8s)).Start(context.Background(), sdsStartOpts(f, "gke-agent", "gke"))
+	require.NoError(t, err)
+	require.Equal(t, 1, k8s.ran)
+
+	for _, rel := range []string{"projects", "projects/pid-sds", "projects/pid-sds/shared-dirs"} {
+		mode, gid := sdsModeAndGID(t, filepath.Join(hostBase, rel))
+		assert.Equal(t, os.FileMode(0o2755), mode, "upper directory %s", rel)
+		assert.Equal(t, baseGID, gid, "upper directory %s inherits the share directory's group", rel)
+	}
+	mode, gid := sdsModeAndGID(t, filepath.Join(hostBase, "projects/pid-sds/shared-dirs/data"))
+	assert.Equal(t, os.FileMode(0o2775), mode, "leaf")
+	assert.Equal(t, baseGID, gid, "leaf inherits the share directory's group")
 }
