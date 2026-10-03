@@ -3833,7 +3833,7 @@ describe('project-detail — agent list window', () => {
   });
 
   describe('drain failures and the read filter at page level', () => {
-    it('a drain whose second page fails after retries shows "Incomplete: loaded N"', async () => {
+    it('a drain whose second page fails after retries shows "Incomplete: loaded N" and incomplete stats that do not claim 2,000 were checked', async () => {
       const projectId = 'p-drain-page2-fails';
       localStorage.setItem('scion-view-project-agents', 'list');
       localStorage.setItem(
@@ -3863,6 +3863,12 @@ describe('project-detail — agent list window', () => {
       expect(el.shadowRoot!.querySelector('.agent-window-banner')?.textContent).toContain(
         'Incomplete: loaded 500'
       );
+      const stats = Array.from(el.shadowRoot!.querySelectorAll('.stat')).map((n) =>
+        (n.textContent ?? '').replace(/\s+/g, ' ').trim()
+      );
+      expect(stats[0]).toBe('Agents 500loaded, incomplete');
+      expect(stats[1]).toMatch(/^Running \d+among loaded, incomplete$/);
+      expect(el.shadowRoot!.textContent).not.toContain('newest 2,000 checked');
     });
 
     it('2,001 agents of which 700 of the newest 2,000 are readable: "700 loaded (newest 2,000 checked), more exist"', async () => {

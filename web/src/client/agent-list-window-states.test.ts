@@ -22,7 +22,12 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import type { Agent } from '../shared/types.js';
-import { AgentListWindow, cappedTotalText } from './agent-list-window.js';
+import {
+  AgentListWindow,
+  cappedTotalText,
+  failedTotalText,
+  incompleteStatNote,
+} from './agent-list-window.js';
 import type {
   AgentListRequestPlan,
   AgentListTrigger,
@@ -465,6 +470,16 @@ describe('AgentListWindow states — capped', () => {
   it('formats the loaded count with thousands separators', () => {
     expect(cappedTotalText(1999)).toBe('1,999 loaded (newest 2,000 checked), more exist');
     expect(cappedTotalText(0)).toBe('0 loaded (newest 2,000 checked), more exist');
+  });
+
+  it('the incomplete stat note follows the reason: capped names the 2,000 checked, failed does not', () => {
+    expect(failedTotalText(1500)).toBe('Incomplete: loaded 1,500');
+    expect(incompleteStatNote('capped', 'total')).toBe('loaded (newest 2,000 checked), more exist');
+    expect(incompleteStatNote('capped', 'running')).toBe(
+      'among loaded (newest 2,000 checked), more exist'
+    );
+    expect(incompleteStatNote('failed', 'total')).toBe('loaded, incomplete');
+    expect(incompleteStatNote('failed', 'running')).toBe('among loaded, incomplete');
   });
 
   it('a failed drain reports "Incomplete: loaded X" and a plain number total', () => {

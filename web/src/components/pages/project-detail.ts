@@ -21,6 +21,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type {
@@ -50,7 +51,11 @@ import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
 import type { AgentsChangedDetail } from '../../client/state.js';
 import { fetchHubProjectCapabilities } from '../../client/hub-capabilities.js';
-import { AgentListWindow, projectAgentsFitFor } from '../../client/agent-list-window.js';
+import {
+  AgentListWindow,
+  incompleteStatNote,
+  projectAgentsFitFor,
+} from '../../client/agent-list-window.js';
 import type {
   AgentListTrigger,
   AgentListView,
@@ -374,17 +379,16 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   /**
-   * The "Agents" or "Running" stat. A capped set counts only the loaded
-   * agents, so the figure says so, worded like the capped total.
+   * The "Agents" or "Running" stat. An incomplete set counts only the
+   * loaded agents, so the figure says so, worded like the window banner
+   * for the same reason (capped or failed).
    */
-  private renderAgentStat(kind: 'total' | 'running') {
+  private renderAgentStat(kind: 'total' | 'running'): string | TemplateResult {
     const stats = this.agentWindow.stats;
     const value = formatNumber(stats[kind]);
-    if (!stats.incomplete) return value;
-    const note =
-      kind === 'total'
-        ? 'loaded (newest 2,000 checked), more exist'
-        : 'among loaded (newest 2,000 checked), more exist';
+    const reason = this.agentWindow.incompleteReason;
+    if (!stats.incomplete || !reason) return value;
+    const note = incompleteStatNote(reason, kind);
     return html`${value}<span class="stat-incomplete">${note}</span>`;
   }
 

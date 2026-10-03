@@ -83,7 +83,26 @@ export type AgentListView = 'grid' | 'list' | 'tree';
  * 2,000 when the server filters candidates by read access.
  */
 export function cappedTotalText(loaded: number): string {
-  return `${formatNumber(loaded)} loaded (newest 2,000 checked), more exist`;
+  return `${formatNumber(loaded)} loaded ${CAPPED_SUFFIX}`;
+}
+
+/** What a capped drain covered: the newest drain-cap rows, with more beyond them. */
+const CAPPED_SUFFIX = '(newest 2,000 checked), more exist';
+
+/** Text of a failed drain's banner: "Incomplete: loaded X". */
+export function failedTotalText(loaded: number): string {
+  return `Incomplete: loaded ${formatNumber(loaded)}`;
+}
+
+/**
+ * The note a renderer shows after an "Agents" (`total`) or "Running"
+ * (`running`) count of an incomplete set, worded like the banner for the
+ * same reason: a capped drain checked the newest 2,000 and more exist; a
+ * failed drain stopped early, so how much it checked is unknown.
+ */
+export function incompleteStatNote(reason: 'capped' | 'failed', kind: 'total' | 'running'): string {
+  const loaded = kind === 'total' ? 'loaded' : 'among loaded';
+  return reason === 'capped' ? `${loaded} ${CAPPED_SUFFIX}` : `${loaded}, incomplete`;
 }
 
 /**
@@ -454,10 +473,7 @@ export class AgentListWindow extends EventTarget {
       return { kind: 'capped', text: cappedTotalText(this.getHeldAgents().length) };
     }
     if (reason === 'failed') {
-      return {
-        kind: 'failed',
-        text: `Incomplete: loaded ${formatNumber(this.getHeldAgents().length)}`,
-      };
+      return { kind: 'failed', text: failedTotalText(this.getHeldAgents().length) };
     }
     if (this._stale && this.isLocal) return { kind: 'stale', text: 'may be stale' };
     return null;
