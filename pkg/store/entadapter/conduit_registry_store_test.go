@@ -163,7 +163,8 @@ func TestConduitRegistry_RegisterRelay_GenerationStrictlyIncreasing(t *testing.T
 		assert.Greater(t, gen, last, "restart %d", i)
 		last = gen
 	}
-	assert.Equal(t, int64(1), f.registerRelay("relay-2"), "a new instance starts at generation 1")
+	f.clock.Set(conduitT0)
+	assert.Equal(t, conduitT0.UnixMilli(), f.registerRelay("relay-2"), "a new instance is seeded from the clock (ms)")
 }
 
 func TestConduitRegistry_C3_StaleGenerationCannotDeleteFreshRow(t *testing.T) {
@@ -640,17 +641,18 @@ func TestConduitRegistry_RegisterRelay_ConcurrentSameInstance(t *testing.T) {
 	close(start)
 	wg.Wait()
 
-	// Every racer got a distinct generation, exactly 1..n.
+	// Every racer got a distinct generation: the clock seed, then seed+1..
 	sorted := append([]int64(nil), gens...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+	seed := conduitT0.UnixMilli()
 	for i, g := range sorted {
-		assert.Equal(t, int64(i+1), g)
+		assert.Equal(t, seed+int64(i), g)
 	}
 	// Only the winner (highest generation) can act; every loser is fenced.
 	for _, g := range gens {
 		hbErr := f.reg.HeartbeatRelay(f.ctx, "relay-1", g)
 		_, insErr := f.reg.InsertSessionWithNextEpoch(f.ctx, brokerSession(fmt.Sprintf("b-%d", g), "relay-1", g, "binc", ""))
-		if g == n {
+		if g == seed+n-1 {
 			assert.NoError(t, hbErr)
 			assert.NoError(t, insErr)
 		} else {
@@ -833,4 +835,30 @@ func TestConduitRegistry_ReapStaleSessions_OnlyOldRowsOnLiveRelays(t *testing.T)
 	// A horizon inside SessionStaleAfter is refused.
 	_, err = f.reg.ReapStaleSessions(f.ctx, registry.DefaultSessionStaleAfter, f.clock.Now())
 	assert.ErrorIs(t, err, registry.ErrInvalidInput)
+}
+
+func TestConduitRegistry_PruneThenReRegister_GenerationStaysMonotonic(t *testing.T) {
+	f := newConduitFixture(t)
+	g1 := f.registerRelay("relay-stable")
+	g2 := f.registerRelay("relay-stable") // stored+1
+	require.Equal(t, g1+1, g2)
+
+	f.clock.Advance(registry.DefaultRelayPruneAfter + time.Hour)
+	n, err := f.reg.PruneRelayInstances(f.ctx, 0, f.clock.Now())
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	// The same stable id re-registers: its new generation is seeded from
+	// the clock and exceeds every generation it held before the prune.
+	g3 := f.registerRelay("relay-stable")
+	assert.Greater(t, g3, g2)
+	assert.Equal(t, f.clock.Now().UnixMilli(), g3)
+
+	// Processes still holding the old generations are fenced.
+	for _, old := range []int64{g1, g2} {
+		assert.ErrorIs(t, f.reg.HeartbeatRelay(f.ctx, "relay-stable", old), registry.ErrRelaySuperseded)
+		_, err := f.reg.InsertSessionWithNextEpoch(f.ctx, brokerSession(fmt.Sprintf("b-%d", old), "relay-stable", old, "binc", ""))
+		assert.ErrorIs(t, err, registry.ErrRelaySuperseded)
+	}
+	require.NoError(t, f.reg.HeartbeatRelay(f.ctx, "relay-stable", g3))
 }
