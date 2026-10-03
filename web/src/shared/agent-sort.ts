@@ -78,8 +78,18 @@ export function sortAgents(agents: readonly Agent[], field: AgentSortField, dir:
 }
 
 /**
- * The server's total order for `sort=updated` (design §4.2): `(K dir,
- * created DESC, id DESC)`. Used to reinsert an updated row at the correct
+ * The server's sort key K for a sort: `updatedKey` for `updated`, the
+ * created time for `created`.
+ */
+export function serverSortKey(a: Agent, sort: 'updated' | 'created'): string {
+  return sort === 'created' ? createdKey(a) : updatedKey(a);
+}
+
+/**
+ * The server's total order: `(K dir, created DESC, id DESC)`, where K is
+ * `serverSortKey(a, sort)` (`updated` by default). For `created`, K is the
+ * created time, so this is `(created dir, id DESC)`. Used to reinsert an
+ * updated row at the correct
  * position within an already server-sorted page (design §6.1, §6.2),
  * where `agentCompare`'s stability over the REST order cannot be relied on
  * because the page did not arrive in that order.
@@ -90,9 +100,14 @@ export function sortAgents(agents: readonly Agent[], field: AgentSortField, dir:
  * same sub-second edge case today's client-side order already has (design
  * §14). The view is corrected on the next fetch.
  */
-export function serverOrderCompare(a: Agent, b: Agent, dir: SortDir): number {
-  const ak = updatedKey(a);
-  const bk = updatedKey(b);
+export function serverOrderCompare(
+  a: Agent,
+  b: Agent,
+  dir: SortDir,
+  sort: 'updated' | 'created' = 'updated'
+): number {
+  const ak = serverSortKey(a, sort);
+  const bk = serverSortKey(b, sort);
   if (ak !== bk) {
     const cmp = ak < bk ? -1 : 1;
     return dir === 'asc' ? cmp : -cmp;

@@ -48,6 +48,7 @@ function makeViewState(partial: Partial<AgentListViewState> = {}): AgentListView
     sortField: 'updated',
     sortDir: 'desc',
     pageSize: 2,
+    view: 'list',
     ...partial,
   };
 }
@@ -111,7 +112,7 @@ describe('AgentListWindow — small state', () => {
     // SSE flush) with no call back into the window at all.
     agents = [agent('a', { phase: 'stopped' })];
     expect(win.items[0].phase).toBe('stopped');
-    expect(win.stats).toEqual({ total: 1, running: 0 });
+    expect(win.stats).toEqual({ total: 1, running: 0, incomplete: false });
   });
 
   it('setSmall() does not reset pageIndex when already small (only setViewState does)', () => {
@@ -177,7 +178,7 @@ describe('AgentListWindow — small state', () => {
   it('stats come from the held set (isAgentRunning)', () => {
     const { setHeld, win } = createWindow({ viewState: makeViewState() });
     setHeld([agent('a', { phase: 'running' }), agent('b', { phase: 'stopped' })]);
-    expect(win.stats).toEqual({ total: 2, running: 1 });
+    expect(win.stats).toEqual({ total: 2, running: 1, incomplete: false });
   });
 
   it('a label/phase/sort change never calls fetchPage while small', () => {
@@ -285,7 +286,7 @@ describe('AgentListWindow — paged state', () => {
     expect(win.updatesAvailable).toBe(true);
     expect(win.items.map((a) => a.id)).toEqual(['a', 'b']); // on-page rows unchanged
     expect(win.memberIndex.getPhase('c')).toBe('stopped');
-    expect(win.stats).toEqual({ total: 3, running: 2 });
+    expect(win.stats).toEqual({ total: 3, running: 2, incomplete: false });
     expect(fetchPage).not.toHaveBeenCalled(); // no request (design §6.2)
   });
 
@@ -324,7 +325,7 @@ describe('AgentListWindow — paged state', () => {
     win.applyChanges({ upserted: ['c'], deleted: [], unknown: new Map(), generation: 1 });
 
     expect(win.memberIndex.getPhase('c')).toBe('stopped');
-    expect(win.stats).toEqual({ total: 2, running: 1 });
+    expect(win.stats).toEqual({ total: 2, running: 1, incomplete: false });
     expect(win.updatesAvailable).toBe(false); // counts-only: no chip (design §6.2)
   });
 

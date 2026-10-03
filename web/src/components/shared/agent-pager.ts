@@ -19,14 +19,14 @@
  *
  * "a-b of N", Prev/Next, a page size of 25/50/100 (default 25, persisted),
  * loading and error states, the paged-state "may have changed - Refresh"
- * chip, and the capped-drain banner. Used by the project page's list view
- * in the paged window state (design §11); the capped banner and
- * count-only wording are plumbed through for a later capped-drain phase
- * but are never reached while only the small and paged states exist.
+ * chip, and the capped-drain total. Used by the project page's grid and
+ * list views in every window state; a capped drain renders its total as
+ * "X loaded (newest 2,000 checked), more exist" instead of "a-b of N".
  */
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
+import { cappedTotalText } from '../../client/agent-list-window.js';
 
 export type AgentPagerTotal = number | { loaded: number; capped: true };
 
@@ -147,9 +147,7 @@ export class ScionAgentPager extends LitElement {
 
   private renderRange() {
     if (typeof this.total === 'object' && this.total.capped) {
-      return html`<span class="capped-banner"
-        >${this.total.loaded} loaded (newest 2,000 checked), more exist</span
-      >`;
+      return html`<span class="capped-banner">${cappedTotalText(this.total.loaded)}</span>`;
     }
     if (this.rowsOnPage === 0) {
       return html`<span class="range">0 of ${this.total}</span>`;

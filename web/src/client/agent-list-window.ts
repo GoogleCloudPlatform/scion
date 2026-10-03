@@ -15,34 +15,75 @@
  */
 
 /**
- * Agent list window state machine (design §4.3, §6.1, §6.2).
+ * Agent list window: the state machine behind a paginated agent list
+ * (project page grid, list and tree views).
  *
- * This module implements only the **small** and **paged** states (design
- * §11). The **held** and **capped** states (reached only by a complete-set
- * drain) land once `agent-drain.ts` exists; see the interim-costs note in
- * project-detail.ts for what happens above 500 candidates until then.
+ * States:
+ * - `small`: the host holds the complete set H (a fit response with
+ *   `complete: true`, or a one-page legacy load). Everything is local.
+ * - `paged`: server-sorted pages of a sorted-eligible view state, with a
+ *   member index for live counts.
+ * - `held`: the complete set H from a multi-page drain. Local, like small,
+ *   and kept for the page lifetime until a refresh trigger.
+ * - `capped`: an incomplete H from a drain that hit its request cap, or
+ *   whose later page failed. Local, like held, but flagged incomplete.
  *
- * The small state never copies the held agent array: it reads it fresh, by
- * reference, from `getHeldAgents()` on every access, so it always reflects
- * whatever the host's live-update path (`onAgentsUpdated`) last assigned —
- * including an SSE delta that arrived after the last trigger, with no
- * re-adoption step and no `pageIndex` reset. `setSmall()` never resets
- * `pageIndex` on a small -> small call, because an unrelated small-state
- * render (a view-state change, or a fresh `setSmall()` call from a later
- * trigger while already small) must not throw the user back to page 0 (that
- * only happens through `setViewState`, a deliberate filter/sort change,
- * exactly as a paged page-0 reset does); it resets on a paged -> small call
- * instead, since that always swaps in a different data set.
+ * The window never issues a first request itself: the host asks
+ * {@link AgentListWindow.planRequest} which request a trigger needs, sends
+ * it, and reports the outcome with `setSmall`, `setPaged` or `adoptDrain`.
+ * Only paged navigation (`next`, `prev`, `refresh`) fetches, through the
+ * host's `fetchPage`.
+ *
+ * The local states never copy H: they read it fresh, by reference, from
+ * `getHeldAgents()` on every access, so whatever the host's live-update
+ * path last assigned is visible at once, with no re-adoption step and no
+ * `pageIndex` reset. `pageIndex` resets to 0 on a `setViewState` call in a
+ * local state, and on any move out of `paged` (a different data set).
  */
 
 import type { Agent, AgentPhase } from '../shared/types.js';
 import { isAgentRunning } from '../shared/types.js';
 import type { AgentSortField, SortDir } from '../shared/agent-sort.js';
-import { sortAgents, serverOrderCompare, updatedKey } from '../shared/agent-sort.js';
+import { sortAgents, serverOrderCompare, serverSortKey } from '../shared/agent-sort.js';
 import type { AgentsChangedDetail, UnknownAgentDelta } from './state.js';
 import { AgentMemberIndex } from './agent-member-index.js';
 
-export type WindowState = 'small' | 'paged';
+/** See the module comment for what each state means. */
+export type WindowState = 'small' | 'paged' | 'held' | 'capped';
+
+/**
+ * A refresh trigger: page load, a label commit, a lifecycle-action or
+ * stop-all refresh, a view-state change (sort, phase, page size, view), or
+ * a click on the stale chip or banner.
+ */
+export type AgentListTrigger =
+  | 'page-load'
+  | 'label-commit'
+  | 'lifecycle-refresh'
+  | 'view-change'
+  | 'chip';
+
+/**
+ * The one request a trigger needs:
+ * - `fit`: a sorted first request (`sort`, `dir`, `limit`, `fit`, `stats=1`,
+ *   filters);
+ * - `drain`: a complete-set drain whose first page is the legacy request;
+ * - `page`: re-fetch the current paged page (`refresh()`);
+ * - `none`: no request at all.
+ */
+export type AgentListRequestPlan = 'fit' | 'drain' | 'page' | 'none';
+
+/** The layout an agent list renders in. Tree always needs the complete set. */
+export type AgentListView = 'grid' | 'list' | 'tree';
+
+/**
+ * Text of the capped total: "X loaded (newest 2,000 checked), more exist".
+ * X is the number of loaded (readable) agents, which can be far below
+ * 2,000 when the server filters candidates by read access.
+ */
+export function cappedTotalText(loaded: number): string {
+  return `${loaded.toLocaleString('en-US')} loaded (newest 2,000 checked), more exist`;
+}
 
 /**
  * Candidate count at or below which the project page's first sorted request
@@ -62,6 +103,7 @@ export function projectAgentsFitFor(pageSize: number): number {
   return Math.max(PROJECT_AGENTS_FIT_THRESHOLD, pageSize);
 }
 
+/** The client view state a window renders. A change resets local pagination to page 0. */
 export interface AgentListViewState {
   phaseFilter: AgentPhase | '';
   /** The live-typed label filter preview (small-state local filtering only — never the request label; see `AgentListWindow`'s own `committedLabel`). */
@@ -69,8 +111,10 @@ export interface AgentListViewState {
   sortField: AgentSortField;
   sortDir: SortDir;
   pageSize: number;
+  view: AgentListView;
 }
 
+/** Parameters of one paged-navigation request, passed to the host's `fetchPage`. */
 export interface PagedPageParams {
   cursor?: string | undefined;
   limit: number;
@@ -78,6 +122,7 @@ export interface PagedPageParams {
   wantStats: boolean;
 }
 
+/** A sorted page response, as the host hands it to the window. */
 export interface PagedPageResult {
   agents: Agent[];
   nextCursor?: string | undefined;
@@ -85,8 +130,10 @@ export interface PagedPageResult {
   stats?: { total: number; running: number; agents?: Array<[string, string]> } | undefined;
 }
 
+/** Fetches one sorted page for paged navigation. Rejecting sets the window's `error`. */
 export type PagedPageFetcher = (params: PagedPageParams) => Promise<PagedPageResult>;
 
+/** Construction options for {@link AgentListWindow}. */
 export interface AgentListWindowOptions {
   viewState: AgentListViewState;
   /** The project this window belongs to, used by the paged-state off-page add rule (design §6.2). Read lazily — `project-detail.ts` constructs the window before `this.projectId` is finalized from the URL in `connectedCallback`. */
@@ -95,7 +142,7 @@ export interface AgentListWindowOptions {
   /** Full `Agent` lookup for an upserted ID (design §6.2 on-page replace). Typically `stateManager.getAgent`. */
   getAgent: (id: string) => Agent | undefined;
   /**
-   * Returns the host's current legacy/held agent array (`this.agents`) on
+   * Returns the host's current held agent array H (`this.agents`) on
    * every call. The window never copies it — reading it
    * fresh is what lets an unrelated SSE-driven reassignment of `this.agents`
    * show up in the small-state list with no re-adoption step.
@@ -103,7 +150,17 @@ export interface AgentListWindowOptions {
   getHeldAgents: () => Agent[];
 }
 
+/**
+ * The window controller. Dispatches a plain `change` event whenever
+ * anything a renderer reads may have changed. Guarantees:
+ * - never sends a request from `setViewState`, `applyChanges`,
+ *   `applyLocalUpdate`, `markResync` or any state setter;
+ * - discards a stale paged response (generation counter);
+ * - never reports an incomplete set as complete: `capped` is left only by
+ *   a new first request.
+ */
 export class AgentListWindow extends EventTarget {
+  /** Live membership counts for the paged state. */
   readonly memberIndex = new AgentMemberIndex();
 
   private _state: WindowState = 'small';
@@ -119,7 +176,13 @@ export class AgentListWindow extends EventTarget {
   private _loading = false;
   private _error: string | null = null;
   private _updatesAvailable = false;
+  private _stale = false;
+  private incomplete: 'capped' | 'failed' | null = null;
   private generation = 0;
+  /** The committed label for which the server refused sorted mode (422), or `null`. */
+  private refusedLabel: string | null = null;
+  /** The server parameters (sort, dir, phase, page size) the adopted paged response was requested with. */
+  private pagedParams = '';
 
   /** The label the current paged response was fetched under (design §6.2's add rule). Empty or `k=v` only — a bare-key label is never paged (design §4.3). */
   private committedLabel = '';
@@ -139,69 +202,231 @@ export class AgentListWindow extends EventTarget {
     this.getHeldAgents = options.getHeldAgents;
   }
 
+  /** The current state (see the module comment). */
   get state(): WindowState {
     return this._state;
   }
 
+  /** True in `small`, `held` and `capped`: rows come from H, and every view-state change is local. */
+  get isLocal(): boolean {
+    return this._state !== 'paged';
+  }
+
+  /**
+   * Whether a view state may use sorted (server-paged) requests: grid or
+   * list, `updated` or `created` sort, and a committed label that is empty
+   * or contains `=`. Everything else needs the complete set.
+   */
+  isSortedEligible(committedLabel: string): boolean {
+    const { view, sortField } = this.viewState;
+    if (view !== 'grid' && view !== 'list') return false;
+    if (sortField !== 'updated' && sortField !== 'created') return false;
+    const label = committedLabel.trim();
+    return label === '' || label.includes('=');
+  }
+
+  /** Whether the server refused sorted mode (422) for this committed label. */
+  isSortedRefused(committedLabel: string): boolean {
+    return this.refusedLabel !== null && this.refusedLabel === committedLabel.trim();
+  }
+
+  /**
+   * Remember a 422 refusal of sorted mode for this committed label. No
+   * sorted request is planned again until a different label is committed;
+   * that label gets one sorted attempt of its own.
+   */
+  recordRefusal(committedLabel: string): void {
+    this.refusedLabel = committedLabel.trim();
+  }
+
+  /**
+   * The request a trigger needs, given the current state, view state and
+   * committed label. Table (eligible = sorted-eligible and not refused for
+   * this label):
+   *
+   * | trigger              | small  | paged            | held   | capped           |
+   * |----------------------|--------|------------------|--------|------------------|
+   * | page-load, label     | eligible ? fit : drain (every state)                  |
+   * | lifecycle-refresh    | eligible ? fit : drain   | none   | none             |
+   * | view-change          | none   | eligible ? fit* : drain | none | eligible ? fit : none |
+   * | chip                 | eligible ? fit : drain   | page   | drain  | drain            |
+   *
+   * (*) While paged, an eligible view change sends a fit request only when
+   * a server parameter (sort, dir, phase or page size) differs from the
+   * adopted page's; a grid and list switch alone sends nothing, since both
+   * render the same server page.
+   *
+   * A lifecycle refresh in held or capped sends nothing: the phase changes
+   * arrive live and merge into H. A view change in capped back to a
+   * sorted-eligible state returns to paged, unless sorted mode was refused
+   * for this label, in which case H stays capped and is sorted locally.
+   */
+  planRequest(trigger: AgentListTrigger, committedLabel: string): AgentListRequestPlan {
+    const eligible = this.isSortedEligible(committedLabel) && !this.isSortedRefused(committedLabel);
+    const first: AgentListRequestPlan = eligible ? 'fit' : 'drain';
+    const state = this._state;
+    switch (trigger) {
+      case 'page-load':
+      case 'label-commit':
+        return first;
+      case 'lifecycle-refresh':
+        return state === 'held' || state === 'capped' ? 'none' : first;
+      case 'view-change':
+        if (state === 'paged') {
+          if (!eligible) return 'drain';
+          return this.serverParamsKey() === this.pagedParams ? 'none' : 'fit';
+        }
+        if (state === 'capped') return eligible ? 'fit' : 'none';
+        return 'none';
+      case 'chip':
+        if (state === 'paged') return 'page';
+        if (state === 'held' || state === 'capped') return 'drain';
+        return first;
+    }
+  }
+
+  /** The view-state fields a sorted request depends on. The view (grid or list) is not one of them. */
+  private serverParamsKey(): string {
+    const { sortField, sortDir, phaseFilter, pageSize } = this.viewState;
+    return `${sortField}|${sortDir}|${phaseFilter}|${pageSize}`;
+  }
+
+  /** 0-based index of the shown page. */
   get pageIndex(): number {
     return this._pageIndex;
   }
 
+  /** A paged navigation request is in flight. */
   get loading(): boolean {
     return this._loading;
   }
 
+  /** The last paged navigation error, cleared by the next request or state change. */
   get error(): string | null {
     return this._error;
   }
 
-  /** The paged-state "may have changed - Refresh" chip (design §6.2). */
+  /** The paged-state "may have changed - Refresh" chip. Always false in the local states. */
   get updatesAvailable(): boolean {
     return this._updatesAvailable;
   }
 
+  /**
+   * The local states' "may be stale - Refresh" signal: set by a reconnect
+   * (`markResync`) or by adopting a drain that may have missed live
+   * changes; cleared by the next adopted first response.
+   */
+  get stale(): boolean {
+    return this._stale;
+  }
+
+  /**
+   * Why H is incomplete in the `capped` state: `capped` (the drain reached
+   * its request cap) or `failed` (a later page failed after retries).
+   * `null` in every other state.
+   */
+  get incompleteReason(): 'capped' | 'failed' | null {
+    return this._state === 'capped' ? this.incomplete : null;
+  }
+
+  /**
+   * The banner a renderer shows above the rows, or `null`:
+   * - capped: "X loaded (newest 2,000 checked), more exist"
+   * - failed: "Incomplete: loaded X"
+   * - stale (local states): "may be stale"
+   * Clicking it is the `chip` trigger.
+   */
+  get banner(): { kind: 'capped' | 'failed' | 'stale'; text: string } | null {
+    const reason = this.incompleteReason;
+    if (reason === 'capped') {
+      return { kind: 'capped', text: cappedTotalText(this.getHeldAgents().length) };
+    }
+    if (reason === 'failed') {
+      return {
+        kind: 'failed',
+        text: `Incomplete: loaded ${this.getHeldAgents().length.toLocaleString('en-US')}`,
+      };
+    }
+    if (this._stale && this.isLocal) return { kind: 'stale', text: 'may be stale' };
+    return null;
+  }
+
+  /** Whether Prev may be used (false while a stale cursor stack is invalidated). */
   get hasPrev(): boolean {
     if (this._state === 'paged' && !this._cursorsValid) return false;
     return this._pageIndex > 0;
   }
 
+  /** Whether Next may be used. */
   get hasNext(): boolean {
     if (this._state === 'paged') return this._cursorsValid && this._hasNext;
     return (this._pageIndex + 1) * this.viewState.pageSize < this.display.length;
   }
 
   /**
-   * Render from the host's current `this.agents` (small state): a fit
-   * `complete: true` response, or a legacy load, truncated or not (design
-   * §4.3). The caller is responsible for having already assigned the array
-   * `getHeldAgents()` will return.
-   *
-   * `pageIndex` is reset to 0 only when the **previous** state was `'paged'`:
-   * a paged -> small transition always swaps in a different data set (a
-   * label commit whose set now fits, a bare-key
-   * label or 422 falling back to the legacy load, a lifecycle refresh that
-   * drops the candidate count to the fit threshold), so the old paged
-   * `pageIndex` can point past the end of — or into the wrong slice of —
-   * the newly-adopted held set. A small -> small call (e.g. a later
-   * trigger while already small) leaves `pageIndex` alone, exactly as
-   * before; `setViewState` remains the only thing that resets it within an
-   * already-small session.
+   * Adopt the host's current H as the complete set (`small`): a fit
+   * response with `complete: true`, or a legacy page with no `nextCursor`.
+   * The host must already have assigned the array `getHeldAgents()`
+   * returns. Resets `pageIndex` to 0 when leaving `paged`; clears the
+   * stale and incomplete flags.
    */
   setSmall(): void {
+    this.enterLocal('small', null, false);
+  }
+
+  /**
+   * Adopt a drain outcome. The host must already have assigned the drained
+   * membership as H. Moves to:
+   * - `small` for a complete drain of one request (the legacy page had no
+   *   `nextCursor`);
+   * - `held` for a complete drain of more requests;
+   * - `capped` (reason `capped`) when the request cap was reached;
+   * - `capped` (reason `failed`) when a page failed after retries.
+   * `stale` raises the stale banner. Never marks an incomplete drain as
+   * complete.
+   */
+  adoptDrain(outcome: {
+    complete: boolean;
+    capped: boolean;
+    error: unknown;
+    requests: number;
+    stale?: boolean;
+  }): void {
+    let next: WindowState;
+    let reason: 'capped' | 'failed' | null = null;
+    if (outcome.complete && !outcome.error) {
+      next = outcome.requests <= 1 ? 'small' : 'held';
+    } else {
+      next = 'capped';
+      reason = outcome.capped && !outcome.error ? 'capped' : 'failed';
+    }
+    this.enterLocal(next, reason, outcome.stale ?? false);
+  }
+
+  private enterLocal(
+    next: 'small' | 'held' | 'capped',
+    reason: 'capped' | 'failed' | null,
+    stale: boolean
+  ): void {
     this.generation++;
     if (this._state === 'paged') {
       this._pageIndex = 0;
     }
-    this._state = 'small';
+    this._state = next;
+    this.incomplete = reason;
+    this._stale = stale;
     this._updatesAvailable = false;
     this._error = null;
     this._loading = false;
+    this.notifyChange();
   }
 
-  /** Adopt the first paged response: fit `complete: false` (design §4.3). */
+  /** Adopt the first paged response (a fit response with `complete: false`) fetched under `committedLabel`. Resets to page 0. */
   setPaged(result: PagedPageResult, committedLabel: string): void {
     this.generation++;
     this._state = 'paged';
+    this.incomplete = null;
+    this._stale = false;
     this.pageItems = result.agents;
     this._totalCount = result.totalCount;
     this._hasNext = !!result.nextCursor;
@@ -213,7 +438,9 @@ export class AgentListWindow extends EventTarget {
     this._error = null;
     this._loading = false;
     this.committedLabel = committedLabel;
+    this.pagedParams = this.serverParamsKey();
     this.seedStats(result.stats);
+    this.notifyChange();
   }
 
   private seedStats(stats: PagedPageResult['stats']): void {
@@ -227,15 +454,16 @@ export class AgentListWindow extends EventTarget {
     null;
 
   /**
-   * Unsliced, filtered + sorted local view (small state only). Grid and tree
-   * views render this directly (design §6.3). Memoized on `(H identity,
-   * view state)` per design §6.1 — `getHeldAgents()` returns the same
+   * Unsliced, filtered and sorted rows of H in the local states (the
+   * current server page while paged). The tree view renders this
+   * unsliced. Memoized on `(H identity,
+   * view state)` — `getHeldAgents()` returns the same
    * reference across renders until the host reassigns `this.agents`, and
    * `setViewState` always replaces `this.viewState` with a new object, so
    * both are cheap identity checks.
    */
   get display(): Agent[] {
-    if (this._state !== 'small') return this.pageItems;
+    if (!this.isLocal) return this.pageItems;
     const held = this.getHeldAgents();
     if (
       this.displayCache &&
@@ -272,7 +500,7 @@ export class AgentListWindow extends EventTarget {
   }
 
   /**
-   * The page slice to render: a local slice of `display` (small), or the
+   * The page slice to render: a local slice of `display` (local states), or the
    * current server page (paged). While paged, the live-typed label is still
    * applied as a local preview with no request and no `pageIndex` change
    * (design §6.3's "while typing, the display applies today's client label
@@ -289,13 +517,22 @@ export class AgentListWindow extends EventTarget {
     return display.slice(start, start + this.viewState.pageSize);
   }
 
-  get total(): number {
-    return this._state === 'paged' ? this._totalCount : this.display.length;
+  /**
+   * The pager total: the server's `totalCount` (paged), `display.length`
+   * (small, held, and a failed drain), or `{loaded: H.length, capped: true}`
+   * for a capped drain (rendered with {@link cappedTotalText}).
+   */
+  get total(): number | { loaded: number; capped: true } {
+    if (this._state === 'paged') return this._totalCount;
+    if (this.incompleteReason === 'capped') {
+      return { loaded: this.getHeldAgents().length, capped: true };
+    }
+    return this.display.length;
   }
 
   /**
    * Rows before the current page (design §6.1's "a" in "a-b of N" is
-   * `rangeStart + 1`). In the small state this is exact
+   * `rangeStart + 1`). In the local states this is exact
    * (`pageIndex * pageSize`, a pure local slice). In the paged state a page
    * can be short — a race-dropped row (design §5.3 step 5a) — so this
    * is the actually-tracked running offset, not an assumption that every
@@ -308,46 +545,46 @@ export class AgentListWindow extends EventTarget {
     return this._pageIndex * this.viewState.pageSize;
   }
 
-  get stats(): { total: number; running: number } {
-    if (this._state === 'small') {
+  /**
+   * "Agents" and "Running" counts: over H in the local states (today's
+   * counts), from the member index while paged. `incomplete` is true in
+   * `capped`, where H is not the whole set.
+   */
+  get stats(): { total: number; running: number; incomplete: boolean } {
+    if (this.isLocal) {
       const held = this.getHeldAgents();
       return {
         total: held.length,
         running: held.filter((a) => isAgentRunning(a)).length,
+        incomplete: this._state === 'capped',
       };
     }
-    return this.memberIndex.stats;
+    return { ...this.memberIndex.stats, incomplete: false };
   }
 
   /**
-   * A sort, phase, page-size or label change. Purely local — never issues a
-   * request, in either state: the project page's `syncAgentsForViewState`
-   * is the single place that decides whether a view-state change needs a
-   * fresh paged request (design §4.3's "one request per trigger", and the
-   * §11 interim-cost transitions).
+   * A sort, phase, page-size, view or label change. Purely local: it never
+   * issues a request in any state. The host asks
+   * `planRequest('view-change', label)` whether the change needs one.
    *
-   * Resets `pageIndex` to 0 only in the **small** state (design §6.3, "a
-   * change resets to page 0"). In the **paged** state, `pageIndex` and the
-   * current page/cursors are left alone here: every
-   * paged view-state change that actually needs a different page — sort,
-   * phase, page-size — is followed by `syncAgentsForViewState` calling
-   * `loadAgentsForView`, whose `setPaged` already resets to page 0 together
-   * with the items and cursors it fetched. A **label** change alone is
-   * never followed by a refetch (it only takes effect on commit), so
-   * resetting `pageIndex` here for a paged label keystroke would desync it
-   * from the rows still on screen — the pager, Prev/Next and the chip's
-   * page-0 rule would all act as if page 0 were showing.
+   * Resets `pageIndex` to 0 in the local states (a change resets to page
+   * 0). While paged, `pageIndex` and the current page and cursors are left
+   * alone: a paged change that needs a different page is followed by a
+   * host request whose `setPaged` resets to page 0 together with the rows
+   * it fetched, and a label keystroke alone (which only takes effect on
+   * commit) must not desync `pageIndex` from the rows still on screen.
    */
   setViewState(partial: Partial<AgentListViewState>): void {
     this.viewState = { ...this.viewState, ...partial };
-    if (this._state === 'small') {
+    if (this.isLocal) {
       this._pageIndex = 0;
     }
     this.notifyChange();
   }
 
+  /** Next page: local in the local states, one request while paged. */
   async next(): Promise<void> {
-    if (this._state === 'small') {
+    if (this.isLocal) {
       if (this.hasNext) {
         this._pageIndex++;
         this.notifyChange();
@@ -361,8 +598,9 @@ export class AgentListWindow extends EventTarget {
     await this.fetchPageAt(this._pageIndex + 1);
   }
 
+  /** Previous page: local in the local states, one request while paged. */
   async prev(): Promise<void> {
-    if (this._state === 'small') {
+    if (this.isLocal) {
       if (this._pageIndex > 0) {
         this._pageIndex--;
         this.notifyChange();
@@ -376,7 +614,7 @@ export class AgentListWindow extends EventTarget {
 
   /**
    * Re-fetch the current page (the paged-state chip click, design §6.2). A
-   * no-op in the small state. If the cursor stack was invalidated, the
+   * no-op in the local states. If the cursor stack was invalidated, the
    * current page's cursor is still stale, so this
    * refetches page 0 instead — its cursor is always `undefined`, so it
    * cannot mismatch, and it gives the user a way off a stranded page rather
@@ -430,9 +668,13 @@ export class AgentListWindow extends EventTarget {
     }
   }
 
-  /** `agents-resync` (design §6.2, §7): the zero-cost stale signal. Issues no request. */
+  /**
+   * A live-connection resync: raises the chip while paged, or the stale
+   * banner in the local states. Issues no request.
+   */
   markResync(): void {
-    this._updatesAvailable = true;
+    if (this.isLocal) this._stale = true;
+    else this._updatesAvailable = true;
     this.notifyChange();
   }
 
@@ -471,12 +713,21 @@ export class AgentListWindow extends EventTarget {
     return agent.labels?.[key] === value;
   }
 
-  /** The page's current [first, last] `updatedKey` bounds, before this flush's mutations (design §6.2's K-range chip rule). `null` if the page is empty. */
+  /** The server sort the paged state was fetched with: `created`, or `updated` for everything else. */
+  private get serverSort(): 'updated' | 'created' {
+    return this.viewState.sortField === 'created' ? 'created' : 'updated';
+  }
+
+  private kOf(a: Agent): string {
+    return serverSortKey(a, this.serverSort);
+  }
+
+  /** The page's current [first, last] sort-key bounds, before this flush's mutations (the K-range chip rule). `null` if the page is empty. */
   private pageKRange(): { first: string; last: string } | null {
     if (this.pageItems.length === 0) return null;
     return {
-      first: updatedKey(this.pageItems[0]),
-      last: updatedKey(this.pageItems[this.pageItems.length - 1]),
+      first: this.kOf(this.pageItems[0]),
+      last: this.kOf(this.pageItems[this.pageItems.length - 1]),
     };
   }
 
@@ -551,7 +802,7 @@ export class AgentListWindow extends EventTarget {
         if (this.passesPhase(agent)) {
           // Replace this object, then re-sort the page locally (today's live reorder).
           // Chip iff the new key would move it off this page (design §6.2).
-          const newK = updatedKey(agent);
+          const newK = this.kOf(agent);
           if (rangeBefore && this.onPageChipForNewKey(newK, rangeBefore)) chip = true;
           onPage.set(id, agent);
           resort = true;
@@ -573,12 +824,36 @@ export class AgentListWindow extends EventTarget {
 
     if (resort || onPage.size !== pageSizeBefore) {
       this.pageItems = Array.from(onPage.values()).sort((a, b) =>
-        serverOrderCompare(a, b, this.viewState.sortDir)
+        serverOrderCompare(a, b, this.viewState.sortDir, this.serverSort)
       );
     }
 
     if (chip) this._updatesAvailable = true;
     if (chip || resort) this.notifyChange();
+  }
+
+  /**
+   * Apply an optimistic local patch (for example a phase change right after
+   * a stop action) while paged: each given agent replaces its on-page row
+   * in place (the row keeps its server position), and an existing member's phase is updated
+   * in the member index. Never adds or removes a row, never adds a member,
+   * never raises the chip and never sends a request. A no-op in the local
+   * states, where the host merges the patch into H itself.
+   */
+  applyLocalUpdate(agents: readonly Agent[]): void {
+    if (this._state !== 'paged' || agents.length === 0) return;
+    const patch = new Map(agents.map((a) => [a.id, a]));
+    let changed = false;
+    this.pageItems = this.pageItems.map((row) => {
+      const next = patch.get(row.id);
+      if (!next) return row;
+      changed = true;
+      return next;
+    });
+    for (const a of agents) {
+      if (this.memberIndex.has(a.id)) this.memberIndex.set(a.id, a.phase);
+    }
+    if (changed) this.notifyChange();
   }
 
   /**
@@ -601,7 +876,7 @@ export class AgentListWindow extends EventTarget {
       const nowPasses = this.passesPhase(agent);
       this.memberIndex.set(id, agent.phase);
       const newlyPasses = nowPasses && !prevPassed;
-      const enteredRange = this.withinPageKRange(updatedKey(agent), rangeBefore);
+      const enteredRange = this.withinPageKRange(this.kOf(agent), rangeBefore);
       // An off-page member change affecting counts only shows no chip (design §6.2).
       return newlyPasses || enteredRange;
     }
@@ -646,9 +921,11 @@ export class AgentListWindow extends EventTarget {
     // enter the page (conservative: design §14 already accepts this class
     // of drift for off-page staleness, and carrying K end-to-end is
     // additive).
-    const enteredRange = delta.lastActivityEvent
-      ? this.withinPageKRange(delta.lastActivityEvent, rangeBefore)
-      : false;
+    // An activity time moves only the `updated` key.
+    const enteredRange =
+      delta.lastActivityEvent && this.serverSort === 'updated'
+        ? this.withinPageKRange(delta.lastActivityEvent, rangeBefore)
+        : false;
     return newlyPasses || enteredRange;
   }
 
