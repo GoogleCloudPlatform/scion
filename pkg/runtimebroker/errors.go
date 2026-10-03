@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
@@ -147,8 +148,14 @@ func Forbidden(w http.ResponseWriter) {
 		"Insufficient permissions", nil)
 }
 
-// MethodNotAllowed writes a 405 Method Not Allowed response.
-func MethodNotAllowed(w http.ResponseWriter) {
+// MethodNotAllowed writes a 405 Method Not Allowed response. RFC 9110
+// section 15.5.6 requires a 405 to carry an Allow header listing the methods
+// the target resource supports; pass them as allowedMethods. A call with no
+// methods is flagged by hack/check-method-not-allowed.sh.
+func MethodNotAllowed(w http.ResponseWriter, allowedMethods ...string) {
+	if len(allowedMethods) > 0 {
+		w.Header().Set("Allow", strings.Join(allowedMethods, ", "))
+	}
 	writeError(w, http.StatusMethodNotAllowed, ErrCodeMethodNotAllowed,
 		"Method not allowed", nil)
 }

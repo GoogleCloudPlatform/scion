@@ -89,7 +89,7 @@ type WorkspaceApplyResponse struct {
 // It uploads the agent's workspace directory to GCS.
 func (s *Server) handleWorkspaceUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -186,7 +186,7 @@ func (s *Server) handleWorkspaceUpload(w http.ResponseWriter, r *http.Request) {
 // It downloads files from GCS and applies them to the agent's workspace.
 func (s *Server) handleWorkspaceApply(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -500,7 +500,7 @@ type ProjectWorkspaceUploadResponse struct {
 // It uploads the project's workspace directory to GCS so the hub can cache it.
 func (s *Server) handleProjectWorkspaceUpload(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
