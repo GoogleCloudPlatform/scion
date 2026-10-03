@@ -329,7 +329,16 @@ type conduitGrantKeysResponse struct {
 // handleConduitGrantKeys serves GET /api/v1/conduit/grant-keys: the public
 // verification keys only. Targets never trust this unauthenticated-to-them
 // fetch alone; they take keys from Welcome and the token refresh.
+//
+// The experiment is checked per request (404 when off) rather than with
+// requireExperiment at route registration, the same as the gcs/object
+// route: requireExperiment panics when the server's registry lacks the
+// name, which breaks servers built over a test registry.
 func (s *Server) handleConduitGrantKeys(w http.ResponseWriter, r *http.Request) {
+	if !s.experimentEnabled(conduitExperiment) {
+		NotFound(w, "route")
+		return
+	}
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
 		return
