@@ -145,6 +145,10 @@ func TestAgentOutboundUserDM_StampsVersionAndTimestamp(t *testing.T) {
 	bus := &capturingBus{EventBus: inner}
 	proxy := NewMessageBrokerProxy(bus, s, events, func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
 	srv.SetMessageBrokerProxy(proxy)
+	// Start the proxy so the user-topic subscriber persists the row.
+	proxy.Start()
+	t.Cleanup(proxy.Stop)
+	require.NoError(t, proxy.EnsureProjectSubscriptions(context.Background(), project.ID))
 
 	rr := postOutboundNoConv(t, srv, project.ID, agent.ID, user.Email, "vt agent to user")
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
@@ -157,4 +161,51 @@ func TestAgentOutboundUserDM_StampsVersionAndTimestamp(t *testing.T) {
 	}
 	require.NotNil(t, dm, "the agent→user DM must be published through the broker")
 	assertVersionAndTimestamp(t, dm)
+
+	// Provenance, not just format: the Timestamp is the persisted row's
+	// CreatedAt.
+	// The broker persists the row asynchronously.
+	var rows []store.Message
+	require.Eventually(t, func() bool {
+		res, err := s.ListMessages(context.Background(), store.MessageFilter{RecipientID: user.ID}, store.ListOptions{})
+		if err != nil {
+			return false
+		}
+		rows = res.Items
+		return len(rows) > 0
+	}, 5*time.Second, 10*time.Millisecond)
+	require.Len(t, rows, 1)
+	assert.Equal(t, rows[0].CreatedAt.UTC().Format(time.RFC3339), dm.Timestamp)
+}
+
+// A minimal client broadcast (no Version/Timestamp/Type) is filled in
+// before fan-out, as handleAgentMessage does.
+func TestProjectBroadcast_DefaultsVersionTimestampAndType(t *testing.T) {
+	srv, s := testServer(t)
+	projectID, _ := setupGroupTest(t, s, "2100-pbcast", map[string]string{
+		"vt-pb-a": string(state.PhaseRunning),
+		"vt-pb-b": string(state.PhaseRunning),
+	})
+	dispatcher := &brokerMockDispatcher{}
+	srv.SetDispatcher(dispatcher)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+projectID+"/broadcast", map[string]interface{}{
+		"structured_message": map[string]interface{}{"msg": "hello all"},
+	})
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+
+	for _, slug := range []string{"vt-pb-a", "vt-pb-b"} {
+		got := mockDispatchesTo(dispatcher, slug)
+		require.Len(t, got, 1, slug)
+		assertVersionAndTimestamp(t, got[0].structured)
+		assert.Equal(t, messages.TypeInstruction, got[0].structured.Type, slug)
+	}
+}
+
+func TestDefaultInboundStructured_KeepsClientValues(t *testing.T) {
+	msg := &messages.StructuredMessage{Version: 7, Timestamp: "2026-01-02T03:04:05Z", Type: messages.TypeStateChange}
+	defaultInboundStructured(msg)
+	assert.Equal(t, 7, msg.Version)
+	assert.Equal(t, "2026-01-02T03:04:05Z", msg.Timestamp)
+	assert.Equal(t, messages.TypeStateChange, msg.Type)
 }

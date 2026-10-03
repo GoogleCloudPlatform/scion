@@ -1573,17 +1573,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			}
 			structuredMsg.Sender = "agent:" + senderSlug
 		}
-		// Default version, timestamp and type when the client omits them
-		// (e.g. the web UI sends a minimal structured_message).
-		if structuredMsg.Version == 0 {
-			structuredMsg.Version = messages.Version
-		}
-		if structuredMsg.Timestamp == "" {
-			structuredMsg.Timestamp = time.Now().UTC().Format(time.RFC3339)
-		}
-		if structuredMsg.Type == "" {
-			structuredMsg.Type = messages.TypeInstruction
-		}
+		defaultInboundStructured(structuredMsg)
 		messaging.RecordStep(ctx, "sender_identity_extracted")
 	} else if req.Message != "" {
 		plainMessage = req.Message
@@ -3351,6 +3341,10 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 	// running agent.
 	req.StructuredMessage.Broadcasted = true
 
+	// ptone/scion#2100: fill what a minimal client payload omits, as
+	// handleAgentMessage does.
+	defaultInboundStructured(req.StructuredMessage)
+
 	// Use authenticated identity for self-skip, not the Sender field.
 	// The Sender field is a display label; the auth identity is the
 	// security-relevant identity. A forged Sender could change which
@@ -3553,6 +3547,22 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 		}
 	}
 	return true
+}
+
+// defaultInboundStructured fills Version, Timestamp (RFC3339 UTC) and Type
+// when a client-supplied structured message omits them (e.g. the web UI
+// sends a minimal structured_message), so everything the hub publishes
+// carries them (ptone/scion#2100). Client-supplied values are kept.
+func defaultInboundStructured(msg *messages.StructuredMessage) {
+	if msg.Version == 0 {
+		msg.Version = messages.Version
+	}
+	if msg.Timestamp == "" {
+		msg.Timestamp = time.Now().UTC().Format(time.RFC3339)
+	}
+	if msg.Type == "" {
+		msg.Type = messages.TypeInstruction
+	}
 }
 
 // publishBroadcastDeliveryFailed publishes a DELIVERY_FAILED notification to the
