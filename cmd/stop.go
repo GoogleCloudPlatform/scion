@@ -396,7 +396,7 @@ func stopAllAgentsViaHub(hubCtx *HubContext) error {
 				if outcome.Confirmed() {
 					res.Removed = true
 				} else {
-					res.Pending = hubDeletePendingMessage(outcome, "removal in progress")
+					res.Pending = hubRemovalPendingMessage(outcome)
 				}
 			}
 
@@ -516,7 +516,7 @@ func stopAgentViaHub(hubCtx *HubContext, agentName string) error {
 		if !outcome.Confirmed() {
 			// Accepted but not observed: not a failure; leave the sync state
 			// alone until the removal is known to be done.
-			msg := hubDeletePendingMessage(outcome, "removal in progress")
+			msg := hubRemovalPendingMessage(outcome)
 			if isJSONOutput() {
 				return outputJSON(ActionResult{
 					Status:  "success",

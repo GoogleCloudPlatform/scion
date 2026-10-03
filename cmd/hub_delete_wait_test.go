@@ -51,7 +51,6 @@ const (
 // repeats). It records, for each poll, whether the local agent directory
 // still existed at that moment.
 type asyncDeleteHub struct {
-	t         *testing.T
 	projectID string
 	agentName string
 	agentDir  string
@@ -63,6 +62,9 @@ type asyncDeleteHub struct {
 	polls        int
 	dirAtPoll    []bool
 	deleteStatus int
+	// deleteStatusFor overrides deleteStatus per agent name, and makes the
+	// stub accept DELETE for those names too.
+	deleteStatusFor map[string]int
 }
 
 func (h *asyncDeleteHub) serve(w http.ResponseWriter, r *http.Request) {
@@ -77,9 +79,13 @@ func (h *asyncDeleteHub) serve(w http.ResponseWriter, r *http.Request) {
 		h.stops++
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{}`))
-	case r.Method == http.MethodDelete && r.URL.Path == agentPath+h.agentName:
+	case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, agentPath) &&
+		(r.URL.Path == agentPath+h.agentName || h.deleteStatusFor[strings.TrimPrefix(r.URL.Path, agentPath)] != 0):
 		h.deletes++
 		status := h.deleteStatus
+		if s, ok := h.deleteStatusFor[strings.TrimPrefix(r.URL.Path, agentPath)]; ok {
+			status = s
+		}
 		if status == 0 {
 			status = http.StatusAccepted
 		}
@@ -143,7 +149,7 @@ func setupAsyncDelete(t *testing.T, agentName string, replies ...getReply) *asyn
 	agentDir := createAgentDir(t, projectDir, agentName)
 	hubsync.AddSyncedAgent(projectDir, agentName)
 
-	hub := &asyncDeleteHub{t: t, projectID: "project-async", agentName: agentName, agentDir: agentDir, replies: replies}
+	hub := &asyncDeleteHub{projectID: "project-async", agentName: agentName, agentDir: agentDir, replies: replies}
 	srv := httptest.NewServer(http.HandlerFunc(hub.serve))
 	t.Cleanup(srv.Close)
 	client, err := hubclient.New(srv.URL)
@@ -316,10 +322,12 @@ func TestStopAllAgentsViaHub_RmWaitsOn202(t *testing.T) {
 		replies    []getReply
 		wantErr    string
 		wantSynced bool
+		wantText   string
 	}{
-		{name: "confirmed", replies: []getReply{{status: http.StatusNotFound}}, wantSynced: false},
+		{name: "confirmed", replies: []getReply{{status: http.StatusNotFound}}, wantSynced: false, wantText: "Agent 'all-agent' stopped and removed via Hub."},
 		{name: "failed", replies: []getReply{{body: replyInDoubt}}, wantErr: "(in_doubt)", wantSynced: true},
-		{name: "timeout", replies: []getReply{{body: replyDeleting}}, wantSynced: true},
+		{name: "timeout", replies: []getReply{{body: replyDeleting}}, wantSynced: true,
+			wantText: "Agent 'all-agent' stopped via Hub; removal accepted; cannot observe completion (still running when the wait ended)."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := setupAsyncDelete(t, "all-agent", tc.replies...)
@@ -346,7 +354,11 @@ func TestStopAllAgentsViaHub_RmWaitsOn202(t *testing.T) {
 			env.hubCtx.Client = client
 			env.hubCtx.Endpoint = srv.URL
 
-			err = stopAllAgentsViaHub(env.hubCtx)
+			_, stderr := captureStdIO(t, func() { err = stopAllAgentsViaHub(env.hubCtx) })
+			assert.Contains(t, stderr, "Agent 'all-agent': removal in progress...")
+			if tc.wantText != "" {
+				assert.Contains(t, stderr, tc.wantText)
+			}
 			if tc.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErr)
@@ -356,4 +368,172 @@ func TestStopAllAgentsViaHub_RmWaitsOn202(t *testing.T) {
 			assert.Equal(t, tc.wantSynced, env.stillSynced(t))
 		})
 	}
+}
+
+// plainAgentService hides DeleteWithResult: only the AgentService methods
+// are promoted, so it does not implement hubclient.AgentDeleteResulter.
+type plainAgentService struct{ hubclient.AgentService }
+
+// plainClient returns plainAgentService from ProjectAgents.
+type plainClient struct{ hubclient.Client }
+
+func (c plainClient) ProjectAgents(projectID string) hubclient.AgentService {
+	return plainAgentService{c.Client.ProjectAgents(projectID)}
+}
+
+// N1: a service that cannot report 202 versus 204 fails closed: a 2xx is not
+// treated as a confirmed delete, so the worktree and sync state are kept.
+func TestDeleteAgentsViaHub_NonResulterFailsClosed(t *testing.T) {
+	env := setupAsyncDelete(t, "plain-agent", getReply{status: http.StatusNotFound})
+	env.hubCtx.Client = plainClient{env.hubCtx.Client}
+	_, isResulter := env.hubCtx.Client.ProjectAgents(env.hub.projectID).(hubclient.AgentDeleteResulter)
+	require.False(t, isResulter, "test double must not implement AgentDeleteResulter")
+
+	_, stderr := captureStdIO(t, func() {
+		require.NoError(t, deleteAgentsViaHub(env.hubCtx, []string{"plain-agent"}))
+	})
+	assert.Equal(t, 1, env.hub.deletes)
+	assert.Equal(t, 0, env.hub.polls, "without a 202 signal there is nothing to poll")
+	assert.True(t, env.dirExists(), "worktree kept: the 2xx may have been a 202")
+	assert.True(t, env.stillSynced(t))
+	assert.Contains(t, stderr, "delete accepted; cannot observe completion; local worktree kept (this client cannot tell whether the Hub finished the delete)")
+}
+
+// setJSONOutput switches the command output to JSON for one test.
+func setJSONOutput(t *testing.T) {
+	t.Helper()
+	orig := outputFormat
+	outputFormat = "json"
+	t.Cleanup(func() { outputFormat = orig })
+}
+
+// N2/N3: the pending notice names the reason, in text and JSON.
+func TestDeleteAgentsViaHub_202PendingNotice(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		replies    []getReply
+		wantReason string
+	}{
+		{"403", []getReply{{body: replyDeleting}, {status: http.StatusForbidden}}, "(the Hub did not allow reading the agent)"},
+		{"timeout", []getReply{{body: replyDeleting}}, "(still running when the wait ended)"},
+		{"timeout after poll errors", []getReply{{status: http.StatusBadGateway}}, "(could not read the agent when the wait ended: "},
+		{"other 4xx", []getReply{{status: http.StatusGone}}, "(the Hub rejected reading the agent: "},
+	} {
+		t.Run(tc.name+"/text", func(t *testing.T) {
+			env := setupAsyncDelete(t, "slow-agent", tc.replies...)
+			_, stderr := captureStdIO(t, func() {
+				require.NoError(t, deleteAgentsViaHub(env.hubCtx, []string{"slow-agent"}))
+			})
+			assert.Contains(t, stderr, "Agent 'slow-agent': the Hub is still deleting it; waiting for the delete to finish...")
+			assert.Contains(t, stderr, "Agent 'slow-agent': delete accepted; cannot observe completion; local worktree kept "+tc.wantReason)
+		})
+		t.Run(tc.name+"/json", func(t *testing.T) {
+			env := setupAsyncDelete(t, "slow-agent", tc.replies...)
+			setJSONOutput(t)
+			stdout, _ := captureStdIO(t, func() {
+				require.NoError(t, deleteAgentsViaHub(env.hubCtx, []string{"slow-agent"}))
+			})
+			var out struct {
+				Status  string                   `json:"status"`
+				Results []map[string]interface{} `json:"results"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(stdout), &out), stdout)
+			assert.Equal(t, "success", out.Status)
+			require.Len(t, out.Results, 1)
+			assert.Equal(t, "slow-agent", out.Results[0]["agent"])
+			assert.Equal(t, "accepted", out.Results[0]["status"])
+			assert.Equal(t, true, out.Results[0]["worktreeKept"])
+			assert.Contains(t, out.Results[0]["message"], tc.wantReason)
+			assert.True(t, env.dirExists())
+		})
+	}
+}
+
+// N2: two agents, one deleted at once (204) and one whose 202 ends failed.
+// The first is cleaned up, the second is kept, and the run reports partial.
+func TestDeleteAgentsViaHub_TwoAgentsPartial(t *testing.T) {
+	setup := func(t *testing.T) (*asyncDeleteEnv, string) {
+		env := setupAsyncDelete(t, "slow-agent", getReply{body: replyDeleting}, getReply{body: replyRuntime})
+		fastDir := createAgentDir(t, env.projectDir, "fast-agent")
+		hubsync.AddSyncedAgent(env.projectDir, "fast-agent")
+		env.hub.deleteStatusFor = map[string]int{"fast-agent": http.StatusNoContent}
+		return env, fastDir
+	}
+	exists := func(p string) bool { _, err := os.Stat(p); return err == nil }
+
+	t.Run("text", func(t *testing.T) {
+		env, fastDir := setup(t)
+		var err error
+		_, stderr := captureStdIO(t, func() {
+			err = deleteAgentsViaHub(env.hubCtx, []string{"fast-agent", "slow-agent"})
+		})
+		require.Error(t, err, "a failed delete makes the command exit non-zero")
+		assert.Contains(t, err.Error(), "failed to delete some agents via Hub")
+		assert.Contains(t, err.Error(), "slow-agent: delete failed on the Hub (runtime_error)")
+		assert.NotContains(t, err.Error(), "fast-agent")
+		assert.Contains(t, stderr, "Agent 'fast-agent' deleted via Hub.")
+		assert.Equal(t, 2, env.hub.deletes)
+		assert.False(t, exists(fastDir), "the confirmed agent's worktree is removed")
+		assert.True(t, env.dirExists(), "the failed agent's worktree is kept")
+		assert.True(t, env.stillSynced(t))
+	})
+	t.Run("json", func(t *testing.T) {
+		env, fastDir := setup(t)
+		setJSONOutput(t)
+		stdout, _ := captureStdIO(t, func() {
+			// JSON mode reports per-agent errors in the body and returns nil,
+			// as it did before this change.
+			require.NoError(t, deleteAgentsViaHub(env.hubCtx, []string{"fast-agent", "slow-agent"}))
+		})
+		var out struct {
+			Status  string                   `json:"status"`
+			Results []map[string]interface{} `json:"results"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(stdout), &out), stdout)
+		assert.Equal(t, "partial", out.Status)
+		require.Len(t, out.Results, 2)
+		assert.Equal(t, "success", out.Results[0]["status"])
+		assert.Equal(t, "error", out.Results[1]["status"])
+		assert.Contains(t, out.Results[1]["error"], "(runtime_error)")
+		assert.False(t, exists(fastDir))
+		assert.True(t, env.dirExists())
+	})
+}
+
+// Nit 3: abandoned may block start; the client cannot tell, so it says "may".
+func TestDeleteAgentsViaHub_202AbandonedMayBlockStart(t *testing.T) {
+	env := setupAsyncDelete(t, "bad-agent", getReply{body: `{"id":"uuid-1","name":"%s","phase":"running","deletion":{"state":"failed","code":"abandoned","claim":1,"startedAt":"2026-10-03T10:00:00Z"}}`})
+	err := deleteAgentsViaHub(env.hubCtx, []string{"bad-agent"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "(abandoned)")
+	assert.Contains(t, err.Error(), "Starting the agent may stay blocked until a retry succeeds or force is used.")
+	assert.True(t, env.dirExists())
+}
+
+// N2/nit 6: stop --rm prints "removal in progress" on 202 and, when the
+// outcome cannot be observed, its own pending notice (text and JSON).
+func TestStopAgentViaHub_RmPendingNotice(t *testing.T) {
+	t.Run("text", func(t *testing.T) {
+		env := setupAsyncDelete(t, "stop-agent", getReply{body: replyDeleting})
+		setStopRm(t)
+		_, stderr := captureStdIO(t, func() {
+			require.NoError(t, stopAgentViaHub(env.hubCtx, "stop-agent"))
+		})
+		assert.Contains(t, stderr, "Agent 'stop-agent' stopped; removal in progress...")
+		assert.Contains(t, stderr, "Agent 'stop-agent' stopped via Hub; removal accepted; cannot observe completion (still running when the wait ended).")
+	})
+	t.Run("json", func(t *testing.T) {
+		env := setupAsyncDelete(t, "stop-agent", getReply{status: http.StatusForbidden})
+		setStopRm(t)
+		setJSONOutput(t)
+		stdout, _ := captureStdIO(t, func() {
+			require.NoError(t, stopAgentViaHub(env.hubCtx, "stop-agent"))
+		})
+		var out ActionResult
+		require.NoError(t, json.Unmarshal([]byte(stdout), &out), stdout)
+		assert.Equal(t, "success", out.Status)
+		assert.Equal(t, true, out.Details["removalPending"])
+		assert.Equal(t, false, out.Details["removed"])
+		assert.Contains(t, out.Message, "removal accepted; cannot observe completion (the Hub did not allow reading the agent)")
+	})
 }

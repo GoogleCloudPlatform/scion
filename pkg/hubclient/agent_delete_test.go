@@ -285,6 +285,34 @@ func TestWaitForAgentDeletion_Outcomes(t *testing.T) {
 			wantPolls: 1,
 		},
 		{
+			name:      "other non-retryable 4xx ends early as unobservable (400)",
+			steps:     []getStep{{err: apiErr(http.StatusBadRequest)}},
+			want:      DeletionUnobservable,
+			wantPolls: 1,
+			check: func(t *testing.T, r DeletionWaitResult) {
+				require.Error(t, r.Err)
+				assert.Contains(t, r.Err.Error(), "Bad Request")
+			},
+		},
+		{
+			name:      "other non-retryable 4xx ends early as unobservable (405)",
+			steps:     []getStep{{err: apiErr(http.StatusMethodNotAllowed)}},
+			want:      DeletionUnobservable,
+			wantPolls: 1,
+		},
+		{
+			name:      "other non-retryable 4xx ends early as unobservable (410)",
+			steps:     []getStep{{agent: deleting()}, {err: apiErr(http.StatusGone)}},
+			want:      DeletionUnobservable,
+			wantPolls: 2,
+		},
+		{
+			name:      "408 and 429 are retried",
+			steps:     []getStep{{err: apiErr(http.StatusRequestTimeout)}, {err: apiErr(http.StatusTooManyRequests)}, {err: apiErr(http.StatusNotFound)}},
+			want:      DeletionConfirmed,
+			wantPolls: 3,
+		},
+		{
 			name:      "transient errors keep polling",
 			steps:     []getStep{{err: apiErr(http.StatusBadGateway)}, {err: errors.New("connection reset")}, {err: apiErr(http.StatusNotFound)}},
 			want:      DeletionConfirmed,
@@ -348,6 +376,56 @@ func TestWaitForAgentDeletion_CanceledContextEndsAsTimeout(t *testing.T) {
 	assert.Equal(t, DeletionTimedOut, r.Outcome)
 	assert.ErrorIs(t, r.Err, context.Canceled)
 	assert.Equal(t, 1, r.Polls)
+}
+
+// stallingAgentService answers the scripted replies, then blocks every
+// later Get until its ctx ends (a hub that accepts but never answers).
+type stallingAgentService struct {
+	AgentService
+	before []*Agent
+	calls  int
+}
+
+func (s *stallingAgentService) Get(ctx context.Context, agentID string) (*Agent, error) {
+	s.calls++
+	if s.calls <= len(s.before) {
+		return s.before[s.calls-1], nil
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// N4: each GET is capped at the remaining budget, so a stalled hub cannot
+// stretch the wait past Timeout. A stall cut short by that cap does not
+// replace a good earlier read.
+func TestWaitForAgentDeletion_StalledGetStaysWithinTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		before  []*Agent
+		wantErr bool
+	}{
+		{name: "first poll stalls", wantErr: true},
+		{name: "stall after a deleting read", before: []*Agent{deleting()}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &stallingAgentService{before: tc.before}
+			start := time.Now()
+			r := WaitForAgentDeletion(context.Background(), svc, "a1", DeletionWaitOptions{
+				Interval: time.Millisecond,
+				Timeout:  50 * time.Millisecond,
+			})
+			assert.Less(t, time.Since(start), 2*time.Second, "the stalled GET must end at the budget")
+			assert.Equal(t, DeletionTimedOut, r.Outcome)
+			assert.Equal(t, len(tc.before)+1, r.Polls)
+			if tc.wantErr {
+				assert.ErrorIs(t, r.Err, context.DeadlineExceeded)
+			} else {
+				assert.NoError(t, r.Err, "the last good read stands")
+				require.NotNil(t, r.Deletion)
+				assert.Equal(t, DeletionStateDeleting, r.Deletion.State)
+			}
+		})
+	}
 }
 
 // End to end over HTTP: the poll reads the project-scoped agent path, and the

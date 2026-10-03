@@ -50,7 +50,10 @@ type DeletionInfo struct {
 type DeleteResult struct {
 	// Accepted is true when the hub answered 202: the delete is still running
 	// in the background, and its completion has to be observed (see
-	// WaitForAgentDeletion). False means the delete is done (204).
+	// WaitForAgentDeletion). False means the hub answered 204, or, from the
+	// DeleteWithResult package func's fallback, some 2xx that it cannot tell
+	// apart from a 202. Callers that remove local state must not treat the
+	// fallback as proof of completion (see AgentDeleteResulter).
 	Accepted bool
 	// AgentID is the hub's agent ID from the 202 body. Empty on 204.
 	AgentID string
@@ -61,7 +64,9 @@ type DeleteResult struct {
 // AgentDeleteResulter is implemented by AgentService values that can report
 // whether a delete finished (204) or was accepted (202). It is a separate
 // interface, not part of AgentService, so existing AgentService
-// implementations outside this package keep compiling.
+// implementations outside this package keep compiling. Callers that remove
+// local state once a delete is done should type-assert this interface and
+// fail closed when it is absent, rather than use the package func's fallback.
 type AgentDeleteResulter interface {
 	DeleteWithResult(ctx context.Context, agentID string, opts *DeleteAgentOptions) (DeleteResult, error)
 }
@@ -130,10 +135,15 @@ const (
 	// DeletionNotTaken: after the 202 the agent is live with no deletion
 	// marker, so no delete is running. The delete did not take effect.
 	DeletionNotTaken
-	// DeletionUnobservable: the caller may not read the agent (401/403), so
-	// completion cannot be observed. The delete was still accepted.
+	// DeletionUnobservable: the caller may not read the agent (401/403), or
+	// the hub rejected the read with another non-retryable 4xx (anything but
+	// 404, 408 and 429), so completion cannot be observed. Err says which.
+	// The delete was still accepted.
 	DeletionUnobservable
-	// DeletionTimedOut: the delete was still running when the wait ended.
+	// DeletionTimedOut: the wait ended before an outcome was seen: the delete
+	// was still running, or every poll since the last good read failed (Err
+	// is then the last poll error), or ctx was canceled (Err carries
+	// ctx.Err()).
 	DeletionTimedOut
 )
 
@@ -192,7 +202,9 @@ type DeletionWaitResult struct {
 // timeout passes. svc should be project-scoped (Client.ProjectAgents), so the
 // poll reads GET /projects/{pid}/agents/{agentId}.
 //
-// Transient errors (network, 5xx) keep the poll going until the timeout.
+// Transient errors (network, 5xx, 408, 429) keep the poll going until the
+// timeout. Each GET gets a deadline capped at the remaining budget, so the
+// whole wait stays within Timeout (plus scheduling slack).
 func WaitForAgentDeletion(ctx context.Context, svc AgentService, agentID string, opts DeletionWaitOptions) DeletionWaitResult {
 	if opts.Interval <= 0 {
 		opts.Interval = DefaultDeletionPollInterval
@@ -215,7 +227,26 @@ func WaitForAgentDeletion(ctx context.Context, svc AgentService, agentID string,
 	liveWithoutMarker := 0
 	for {
 		res.Polls++
-		ag, err := svc.Get(ctx, agentID)
+		// Cap this GET at the remaining budget, measured on opts.Now (so a
+		// fake clock in tests still yields a positive duration).
+		remaining := opts.Timeout - opts.Now().Sub(start)
+		if remaining <= 0 {
+			remaining = time.Millisecond
+		}
+		pollCtx, cancel := context.WithTimeout(ctx, remaining)
+		ag, err := svc.Get(pollCtx, agentID)
+		budgetSpent := err != nil && ctx.Err() == nil && errors.Is(pollCtx.Err(), context.DeadlineExceeded)
+		cancel()
+		if budgetSpent {
+			// The wait's own deadline cut this GET short. That says nothing
+			// about the hub, so keep the last observation (a good read leaves
+			// Err nil); only a first poll has nothing better to report.
+			if res.Polls == 1 {
+				res.Err = err
+			}
+			res.Outcome = DeletionTimedOut
+			return res
+		}
 		switch {
 		case err != nil:
 			var apiErr *apiclient.APIError
@@ -224,7 +255,7 @@ func WaitForAgentDeletion(ctx context.Context, svc AgentService, agentID string,
 				res.Outcome = DeletionConfirmed
 				res.Err = nil
 				return res
-			case errors.As(err, &apiErr) && (apiErr.IsForbidden() || apiErr.IsUnauthorized()):
+			case errors.As(err, &apiErr) && (apiErr.IsForbidden() || apiErr.IsUnauthorized() || nonRetryable4xx(apiErr.StatusCode)):
 				res.Outcome = DeletionUnobservable
 				res.Err = err
 				return res
@@ -270,4 +301,13 @@ func WaitForAgentDeletion(ctx context.Context, svc AgentService, agentID string,
 		case <-opts.After(opts.Interval):
 		}
 	}
+}
+
+// nonRetryable4xx reports whether a poll status means retrying cannot help.
+// 404 is handled as "gone" before this is asked; 408 and 429 are retried.
+func nonRetryable4xx(status int) bool {
+	return status >= 400 && status < 500 &&
+		status != http.StatusNotFound &&
+		status != http.StatusRequestTimeout &&
+		status != http.StatusTooManyRequests
 }

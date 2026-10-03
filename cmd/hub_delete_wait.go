@@ -16,8 +16,10 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
@@ -25,9 +27,14 @@ import (
 // take the hubclient defaults (2s interval, 180s timeout). Tests override it.
 var hubDeletionWaitOptions hubclient.DeletionWaitOptions
 
+// errDeleteResultUnknown marks an outcome where the AgentService cannot
+// report 202 versus 204 (it does not implement AgentDeleteResulter).
+var errDeleteResultUnknown = errors.New("this client cannot tell whether the Hub finished the delete")
+
 // hubDeleteOutcome is what a hub delete (and, on 202, the poll) ended in.
 type hubDeleteOutcome struct {
-	// Accepted is true when the hub answered 202 and the poll ran.
+	// Accepted is true when the hub answered 202 and the poll ran, or when
+	// the service could not say whether the delete finished (fail closed).
 	Accepted bool
 	// Wait is the poll result; meaningful only when Accepted.
 	Wait hubclient.DeletionWaitResult
@@ -44,8 +51,22 @@ func (o hubDeleteOutcome) Confirmed() bool {
 // until the delete is confirmed, fails, turns out not to be running, cannot
 // be observed, or the poll times out. A DELETE error (4xx, 502, 503, network)
 // is returned unchanged.
+//
+// It fails closed: if svc does not implement hubclient.AgentDeleteResulter,
+// a successful Delete could have been a 202, so the outcome is reported as
+// accepted but unobservable, never as confirmed.
 func deleteViaHubAndWait(ctx context.Context, svc hubclient.AgentService, agentName string, opts *hubclient.DeleteAgentOptions, onAccepted func()) (hubDeleteOutcome, error) {
-	res, err := hubclient.DeleteWithResult(ctx, svc, agentName, opts)
+	resulter, ok := svc.(hubclient.AgentDeleteResulter)
+	if !ok {
+		if err := svc.Delete(ctx, agentName, opts); err != nil {
+			return hubDeleteOutcome{}, err
+		}
+		return hubDeleteOutcome{Accepted: true, Wait: hubclient.DeletionWaitResult{
+			Outcome: hubclient.DeletionUnobservable,
+			Err:     errDeleteResultUnknown,
+		}}, nil
+	}
+	res, err := resulter.DeleteWithResult(ctx, agentName, opts)
 	if err != nil {
 		return hubDeleteOutcome{}, err
 	}
@@ -90,6 +111,10 @@ func hubDeleteFailure(agentName string, o hubDeleteOutcome, what string) error {
 			// in_doubt: a cross-node teardown is still outstanding;
 			// revoke_failed/finalize_failed: the row is stuck in finalizing.
 			blocked = " Starting the agent stays blocked until a retry succeeds or force is used."
+		case "abandoned":
+			// A lease-expired finalizing row with no stored code also reads
+			// as abandoned and blocks start; the client cannot tell.
+			blocked = " Starting the agent may stay blocked until a retry succeeds or force is used."
 		}
 		return fmt.Errorf("delete failed on the Hub (%s)%s; %s. Retry with 'scion delete %s', or force-delete it from the web UI.%s",
 			code, msg, what, agentName, blocked)
@@ -100,14 +125,37 @@ func hubDeleteFailure(agentName string, o hubDeleteOutcome, what string) error {
 	return nil
 }
 
-// hubDeletePendingMessage is the notice for an accepted delete whose
-// completion could not be observed (403 on the poll, or the poll timed
-// out). That is not a failure: the hub owns the delete and will finish or
-// fail it.
-func hubDeletePendingMessage(o hubDeleteOutcome, what string) string {
-	reason := "the Hub did not allow reading the agent"
-	if o.Wait.Outcome == hubclient.DeletionTimedOut {
-		reason = "still running when the wait ended"
+// hubDeletePendingReason explains why an accepted delete's completion could
+// not be observed. That is not a failure: the hub owns the delete and will
+// finish or fail it.
+func hubDeletePendingReason(o hubDeleteOutcome) string {
+	err := o.Wait.Err
+	switch o.Wait.Outcome {
+	case hubclient.DeletionTimedOut:
+		if err != nil {
+			return fmt.Sprintf("could not read the agent when the wait ended: %v", err)
+		}
+		return "still running when the wait ended"
+	case hubclient.DeletionUnobservable:
+		switch {
+		case errors.Is(err, errDeleteResultUnknown):
+			return err.Error()
+		case err == nil, apiclient.IsForbiddenError(err), apiclient.IsUnauthorizedError(err):
+			return "the Hub did not allow reading the agent"
+		default:
+			return fmt.Sprintf("the Hub rejected reading the agent: %v", err)
+		}
 	}
-	return fmt.Sprintf("delete accepted; cannot observe completion; %s (%s)", what, reason)
+	return "outcome unknown"
+}
+
+// hubDeletePendingMessage is scion delete's notice for an accepted delete
+// whose completion could not be observed.
+func hubDeletePendingMessage(o hubDeleteOutcome) string {
+	return fmt.Sprintf("delete accepted; cannot observe completion; local worktree kept (%s)", hubDeletePendingReason(o))
+}
+
+// hubRemovalPendingMessage is scion stop --rm's notice for the same case.
+func hubRemovalPendingMessage(o hubDeleteOutcome) string {
+	return fmt.Sprintf("removal accepted; cannot observe completion (%s)", hubDeletePendingReason(o))
 }

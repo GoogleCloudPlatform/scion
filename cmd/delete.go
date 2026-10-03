@@ -210,15 +210,13 @@ func deleteAgentsViaHub(hubCtx *HubContext, agentNames []string) error {
 			statusf("Agent '%s': the Hub is still deleting it; waiting for the delete to finish...\n", agentName)
 		})
 		cancel()
-		if err == nil {
-			err = hubDeleteFailure(agentName, outcome, "local worktree kept")
-			if err != nil {
-				errs = append(errs, fmt.Sprintf("%s: %v", agentName, err))
-			}
+		if err != nil {
+			err = wrapHubError(err)
 		} else {
-			errs = append(errs, fmt.Sprintf("%s: %v", agentName, wrapHubError(err)))
+			err = hubDeleteFailure(agentName, outcome, "local worktree kept")
 		}
 		if err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", agentName, err))
 			if isJSONOutput() {
 				results = append(results, map[string]interface{}{
 					"agent":  agentName,
@@ -235,7 +233,7 @@ func deleteAgentsViaHub(hubCtx *HubContext, agentNames []string) error {
 			// nothing local is touched: the worktree is kept, and the sync
 			// state is left alone so that a later sync sees the agent as
 			// stale once the hub finishes.
-			msg := hubDeletePendingMessage(outcome, "local worktree kept")
+			msg := hubDeletePendingMessage(outcome)
 			if isJSONOutput() {
 				results = append(results, map[string]interface{}{
 					"agent":        agentName,
