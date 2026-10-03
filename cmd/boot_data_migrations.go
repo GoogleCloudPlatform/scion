@@ -291,6 +291,12 @@ func runMessageBackfill(ctx context.Context, s store.Store) {
 			continue
 		}
 
+		// Stop at once on shutdown: every further project would fail
+		// immediately with the context error and log it.
+		if ctx.Err() != nil {
+			return
+		}
+
 		// Check budget BEFORE starting the project, so we don't begin
 		// work we can't finish within the budget. The first project
 		// attempted on each boot is exempt: otherwise a boot whose budget
