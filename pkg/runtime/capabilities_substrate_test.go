@@ -17,3 +17,14 @@ func TestHasAttachSupport_SubstrateRuntimeOptsOut(t *testing.T) {
 		t.Error("HasAttachSupport(&SubstrateRuntime{}) = true, want false: substrate has no attach primitive")
 	}
 }
+
+// The substrate runtime does not call the async launch hooks, so it must
+// opt out of async launch; a runtime without the method keeps the default.
+func TestHasAsyncLaunchSupport(t *testing.T) {
+	if HasAsyncLaunchSupport(&SubstrateRuntime{}) {
+		t.Error("HasAsyncLaunchSupport(&SubstrateRuntime{}) = true, want false: substrate does not call Checkpoint/OnResourceCreated")
+	}
+	if !HasAsyncLaunchSupport(&MockRuntime{}) {
+		t.Error("HasAsyncLaunchSupport(&MockRuntime{}) = false, want true: a runtime without the method is supported")
+	}
+}

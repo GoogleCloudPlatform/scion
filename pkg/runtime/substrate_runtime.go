@@ -344,6 +344,15 @@ func (r *SubstrateRuntime) SupportsAttach() bool { return false }
 
 var _ AttachCapableRuntime = (*SubstrateRuntime)(nil)
 
+// AsyncLaunchUnsupported implements AsyncLaunchUnsupportedRuntime. Run does
+// not implement RunConfig.Checkpoint or RunConfig.OnResourceCreated: it
+// calls neither hook, so the broker can neither cancel a substrate launch at
+// a checkpoint nor learn which resources to clean up after it. The broker
+// serves an async create request for this runtime synchronously instead.
+func (r *SubstrateRuntime) AsyncLaunchUnsupported() bool { return true }
+
+var _ AsyncLaunchUnsupportedRuntime = (*SubstrateRuntime)(nil)
+
 // ExecUser returns "scion" — the tmux session runs under the scion user
 // after sciontool init sets up the environment, same as every other
 // runtime.

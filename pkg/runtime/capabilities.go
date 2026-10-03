@@ -100,6 +100,28 @@ func HasAttachSupport(rt Runtime) bool {
 	return !ok || ac.SupportsAttach()
 }
 
+// AsyncLaunchUnsupportedRuntime is an optional capability a Runtime may
+// implement to report that it cannot serve an asynchronous launch. An async
+// launch depends on the runtime calling RunConfig.Checkpoint and
+// RunConfig.OnResourceCreated from Run, so the broker can cancel the launch
+// at a checkpoint and clean up the resources the runtime reported. A runtime
+// that does not call those hooks reports true here, and the broker falls
+// back to a synchronous create for it.
+//
+// A runtime that does not implement this interface is treated as supporting
+// async launch (missing capability ⇒ supported).
+type AsyncLaunchUnsupportedRuntime interface {
+	AsyncLaunchUnsupported() bool
+}
+
+// HasAsyncLaunchSupport reports whether rt can serve an asynchronous
+// launch: true unless rt implements AsyncLaunchUnsupportedRuntime and
+// reports true.
+func HasAsyncLaunchSupport(rt Runtime) bool {
+	au, ok := rt.(AsyncLaunchUnsupportedRuntime)
+	return !ok || !au.AsyncLaunchUnsupported()
+}
+
 // AgentResourceCleaner is an optional capability a Runtime may implement
 // when it creates per-agent objects alongside the container (for example
 // the Kubernetes runtime's per-agent Secrets and SecretProviderClass).

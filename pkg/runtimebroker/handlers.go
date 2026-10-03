@@ -1083,9 +1083,11 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	// With AsyncLaunch absent, no LaunchID to track the launch by, or a
 	// LaunchTimeoutSeconds too small to leave any budget after the broker's
 	// 20s abort margin (ctx' would already be expired when the 201 is sent),
-	// fall back to the synchronous path rather than accept a launch that
-	// cannot possibly succeed. Behavior is unchanged from here down for all
-	// of these non-conforming cases.
+	// or a resolved runtime that does not call the async launch hooks
+	// (scionrt.HasAsyncLaunchSupport, asked of this request's runtime, not
+	// the broker default), fall back to the synchronous path rather than
+	// accept a launch that cannot possibly succeed or be cancelled. Behavior
+	// is unchanged from here down for all of these non-conforming cases.
 	if req.AsyncLaunch && !req.ProvisionOnly && !req.Reprovision {
 		switch {
 		case req.LaunchID == "":
@@ -1094,6 +1096,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		case req.LaunchTimeoutSeconds <= minAsyncLaunchTimeoutSeconds:
 			s.agentLifecycleLog.Warn("async launch requested with too small a launchTimeoutSeconds; falling back to synchronous create",
 				"agent_id", req.ID, "name", req.Name, "launch_timeout_seconds", req.LaunchTimeoutSeconds)
+		case !managerSupportsAsyncLaunch(sc.Manager):
+			s.agentLifecycleLog.Warn("async launch requested for a runtime that does not support async launch; falling back to synchronous create",
+				"agent_id", req.ID, "name", req.Name, "runtime", sc.RuntimeType)
 		default:
 			s.beginAsyncLaunch(w, r, ctx, req, opts, sc.Manager, attempt, markAttemptFailed, span, createStart)
 			return
@@ -2358,6 +2363,31 @@ func (s *Server) projectScopedTargetFrom(ctx context.Context, id, projectID stri
 		return "", nil, nil
 	}
 	return id, s.resolveManagerForAgent(ctx, id, projectID), nil
+}
+
+// managerSupportsAsyncLaunch reports whether the runtime behind mgr can
+// serve an async launch (scionrt.HasAsyncLaunchSupport). A manager whose
+// runtime cannot be identified is treated as supporting it, the same
+// default the capability itself uses, so only a runtime that opts out
+// changes the create path.
+func managerSupportsAsyncLaunch(mgr agent.Manager) bool {
+	var rt scionrt.Runtime
+	switch m := mgr.(type) {
+	case *agent.AgentManager:
+		rt = m.Runtime
+	case managerRuntimeProvider:
+		rt = m.managerRuntime()
+	}
+	if rt == nil {
+		return true
+	}
+	return scionrt.HasAsyncLaunchSupport(rt)
+}
+
+// managerRuntimeProvider lets a manager other than agent.AgentManager
+// (tests) supply the runtime it runs agents on directly.
+type managerRuntimeProvider interface {
+	managerRuntime() scionrt.Runtime
 }
 
 // hasRecordlessProber reports whether the default runtime or any currently
