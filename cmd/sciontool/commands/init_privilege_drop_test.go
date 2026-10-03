@@ -167,6 +167,9 @@ func TestSubstrateServeInitOptions_RequiresPrivilegeDrop(t *testing.T) {
 	if !opts.DisablePortForwarding {
 		t.Error("substrateServeInitOptions(...).DisablePortForwarding = false, want true — Substrate's egress cannot reach the hub port-forward tunnel")
 	}
+	if !opts.DisableReExec {
+		t.Error("substrateServeInitOptions(...).DisableReExec = false, want true — a re-exec would replace substrate-serve's bootstrapped PID 1")
+	}
 	opts2 := substrateServeInitOptions(false)
 	if !opts2.DisableTermSignalForwarding {
 		t.Error("substrateServeInitOptions(false).DisableTermSignalForwarding = false, want true (passthrough)")

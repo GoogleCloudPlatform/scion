@@ -99,7 +99,13 @@ func substrateServeInitOptions(forwardTermSignal bool) InitRunOptions {
 		// DisablePortForwarding: true — Substrate's egress is HTTP(S)-only
 		// and default-deny (see InitRunOptions.DisablePortForwarding).
 		DisablePortForwarding: true,
-		ResolveWorkingDir:     substrateResolveHarnessWorkingDir,
+		// DisableReExec: true — RunInit runs embedded in substrate-serve's
+		// PID 1, which receives its secrets in-process (bootstrap body plus
+		// os.Setenv), never through its own execve environment; re-execing
+		// would replace this bootstrapped PID 1 with a fresh, unbootstrapped
+		// one (see InitRunOptions.DisableReExec).
+		DisableReExec:     true,
+		ResolveWorkingDir: substrateResolveHarnessWorkingDir,
 	}
 }
 

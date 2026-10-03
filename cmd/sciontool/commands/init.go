@@ -127,6 +127,23 @@ type InitRunOptions struct {
 	// caller whose network path can't route that traffic sets this to true.
 	DisablePortForwarding bool
 
+	// DisableReExec skips RunInit's environ-purge re-exec (see
+	// reExecWithCleanEnv). That re-exec exists only to purge
+	// /proc/1/environ, which the kernel fills from the execve(2)
+	// environment and never updates afterward. An embedding caller that
+	// receives its secrets in-process — substrate-serve gets them in the
+	// bootstrap request body and applies them with os.Setenv — never had
+	// them in the kernel's copy, so there is nothing to purge; re-execing
+	// would instead replace that caller's own PID 1 with a fresh process
+	// that has none of its in-memory state. A caller that set this after
+	// receiving secrets through its OWN execve environment would leave them
+	// readable in /proc/1/environ, so only an in-process caller may set it.
+	// Staging still runs either way: the transport token file is written,
+	// SCION_TRANSPORT_TOKEN is cleared and SCION_TRANSPORT_TOKEN_FILE is
+	// set; only the re-exec is skipped. The zero value (false) keeps
+	// `sciontool init`'s behaviour unchanged.
+	DisableReExec bool
+
 	// WorkingDir sets the harness child's working directory (threaded into
 	// supervisor.Config.WorkingDir, which sets exec.Cmd.Dir — see that
 	// field's doc comment). Empty (the zero value) leaves cmd.Dir unset, so
@@ -523,17 +540,28 @@ func RunInit(args []string, opts InitRunOptions) int {
 		// idempotent on the second pass.
 		//
 		// See: miller79/scion#7
-		if err := reExecWithCleanEnv(); err != nil {
-			log.Error("Re-exec to clear /proc environ failed: %v (secret remains in /proc)", err)
-			// Fall through — child-process inheritance is still blocked by
-			// os.Unsetenv, so this degrades to the pre-fix behavior.
+		//
+		// Skipped for an embedded caller (see InitRunOptions.DisableReExec).
+		if !opts.DisableReExec {
+			if err := reExecWithCleanEnv(); err != nil {
+				log.Error("Re-exec to clear /proc environ failed: %v (secret remains in /proc)", err)
+				// Fall through — child-process inheritance is still blocked by
+				// os.Unsetenv, so this degrades to the pre-fix behavior.
+			}
+		} else {
+			log.Info("RunInit embedded: skipping environ-purge re-exec")
 		}
 	} else if transportCleared {
 		// Restart init with the cleaned environment, as above. On the
 		// second pass the env var is absent and the file already exists,
-		// so this branch is not taken again.
-		if err := reExecWithCleanEnv(); err != nil {
-			log.Error("Re-exec with cleaned environment failed: %v", err)
+		// so this branch is not taken again. Skipped for an embedded
+		// caller (see InitRunOptions.DisableReExec).
+		if !opts.DisableReExec {
+			if err := reExecWithCleanEnv(); err != nil {
+				log.Error("Re-exec with cleaned environment failed: %v", err)
+			}
+		} else {
+			log.Info("RunInit embedded: skipping environ-purge re-exec")
 		}
 	}
 
@@ -1739,7 +1767,11 @@ func extractChildCommand(args []string) []string {
 // that magic symlink to the running inode at the moment of the execve
 // syscall itself — standard behavior on Linux >= 2.6, under any runtime that
 // runs a real Linux kernel beneath its own hypervisor/sandbox layer.
-func reExecWithCleanEnv() error {
+//
+// A package-level func var only so a test can observe whether RunInit
+// reaches it without replacing the test binary's own process image; only
+// tests reassign it (saving and restoring the original).
+var reExecWithCleanEnv = func() error {
 	log.Info("Re-execing init (pid %d) with cleaned environment", os.Getpid())
 	return syscall.Exec(rootexec.SelfExe(), os.Args, os.Environ())
 }
