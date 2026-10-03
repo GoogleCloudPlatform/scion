@@ -338,14 +338,14 @@ describe('effectiveAutoExposePorts', () => {
     });
   });
 
-  it('falls back to the hub default when AppliedConfig.Env lacks the key, ignoring the explicit record', async () => {
+  it('reports the hub default as inherited when AppliedConfig.Env lacks the key, ignoring the explicit record', async () => {
     const { effectiveAutoExposePorts } = await import('./agent-configure.js');
     expect(
       effectiveAutoExposePorts({ OTHER: 'x' }, { SCION_AUTO_EXPOSE_PORTS: 'false' }, true)
-    ).toEqual({ enabled: true, source: 'hub default' });
+    ).toEqual({ enabled: true, source: 'inherited' });
     expect(effectiveAutoExposePorts(undefined, undefined, false)).toEqual({
       enabled: false,
-      source: 'hub default',
+      source: 'inherited',
     });
   });
 });
@@ -372,10 +372,13 @@ describe('agent-configure — auto-expose effective value, source label and save
     expect(c.buildConfig()).toEqual(goldenUntouchedBody);
   });
 
-  it('shows the hub default when no tier set the key', async () => {
+  it('shows the hub default, labelled inherited, when AppliedConfig.Env lacks the key', async () => {
     const c = await mountAgentConfigureWithLoadedAgent({ model: 'golden-model' });
     expect(c.autoExposePortsEnabled).toBe(false);
-    expect((c as unknown as { autoExposeSource: string }).autoExposeSource).toBe('hub default');
+    expect((c as unknown as { autoExposeSource: string }).autoExposeSource).toBe('inherited');
+    expect(await autoExposeSourceText(c)).toBe(
+      'Source: inherited (hub default shown; template may override)'
+    );
   });
 
   it('renders the source label, switching to explicit (unsaved) once the control changes', async () => {
@@ -429,6 +432,30 @@ describe('agent-configure — auto-expose effective value, source label and save
     // Shared with the hub's TestApplyAgentUpdate_AutoExposeUntouchedSave and
     // related PATCH tests.
     expect(c.buildConfig()).toEqual(goldenRowEditBody);
+  });
+
+  it('loads the auto-expose sub-fields from AppliedConfig.Env', async () => {
+    const c = await mountAgentConfigureWithLoadedAgent({
+      model: 'golden-model',
+      env: {
+        SCION_AUTO_EXPOSE_PORTS: 'true',
+        SCION_AUTO_EXPOSE_MODE: 'denylist',
+        SCION_AUTO_EXPOSE_PORTS_LIST: '22',
+        SCION_AUTO_EXPOSE_INTERVAL: '9s',
+      },
+      inlineConfig: {},
+      createInputs: { inlineConfig: {} },
+    });
+    const fields = c as unknown as {
+      autoExposePortsMode: string;
+      autoExposePortsList: string;
+      autoExposePortsInterval: string;
+    };
+    expect([
+      fields.autoExposePortsMode,
+      fields.autoExposePortsList,
+      fields.autoExposePortsInterval,
+    ]).toEqual(['denylist', '22', '9s']);
   });
 
   it('custom rows read AppliedConfig.Env only', async () => {

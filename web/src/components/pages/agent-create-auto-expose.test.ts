@@ -124,6 +124,33 @@ describe('agent-create auto-expose', () => {
     expect(sentAutoExposeKeys(c)).toMatchObject({ SCION_AUTO_EXPOSE_PORTS: 'true' });
   });
 
+  // With the hub default true the sub-fields render untouched, so changing
+  // only one of them must still send the keys.
+  const subFields: [string, (root: ShadowRoot) => Element | null, string][] = [
+    [
+      'mode',
+      (root) => root.querySelector('sl-option[value="denylist"]')?.closest('sl-select') ?? null,
+      'sl-change',
+    ],
+    [
+      'list',
+      (root) => root.querySelector('sl-input[placeholder="e.g. 3000,5173,8080"]'),
+      'sl-input',
+    ],
+    ['interval', (root) => root.querySelector('sl-input[placeholder="3s"]'), 'sl-input'],
+  ];
+  for (const [name, find, event] of subFields) {
+    it(`sends the auto-expose keys after changing only the ${name} sub-field`, async () => {
+      const c = await mountAgentCreate(true);
+      const field = find(c.shadowRoot as ShadowRoot) as (HTMLElement & { value: string }) | null;
+      expect(field).toBeTruthy();
+      field!.value = name === 'mode' ? 'denylist' : '9';
+      field!.dispatchEvent(new Event(event));
+      await c.updateComplete;
+      expect(sentAutoExposeKeys(c)).toMatchObject({ SCION_AUTO_EXPOSE_PORTS: 'true' });
+    });
+  }
+
   it('labels the control as inherited, naming the hub default, until the user operates it', async () => {
     const c = await mountAgentCreate(false);
     expect(labelText(c)).toBe(

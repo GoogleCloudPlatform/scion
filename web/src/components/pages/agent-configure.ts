@@ -130,14 +130,25 @@ interface AgentPatchResponse {
 /**
  * Where the loaded auto-expose value comes from: the requester set it (the
  * explicit record, see explicitEnvOf), the hub derived it from the project or
- * template (AppliedConfig.Env only), or neither, so the hub default applies.
+ * a template config (AppliedConfig.Env only), or it is inherited. Inherited
+ * means AppliedConfig.Env lacks the key, so a template's scion-agent.json
+ * value, if any, applies, and otherwise the hub default.
  */
-export type AutoExposeSource = 'explicit' | 'project/template' | 'hub default';
+export type AutoExposeSource = 'explicit' | 'project/template' | 'inherited';
+
+/** The source label text for each AutoExposeSource. */
+const AUTO_EXPOSE_SOURCE_LABELS: Record<AutoExposeSource, string> = {
+  explicit: 'explicit',
+  'project/template': 'project/template',
+  inherited: 'inherited (hub default shown; template may override)',
+};
 
 /**
  * Effective SCION_AUTO_EXPOSE_PORTS for the configure page and its source.
- * AppliedConfig.Env holds the explicit or project/template-derived value; the
- * hub default is never persisted, so it applies when that map lacks the key.
+ * AppliedConfig.Env holds the explicit or project-derived value. When it
+ * lacks the key the value is inherited: the page cannot see a template's
+ * scion-agent.json value, so it shows the hub default, which the broker
+ * applies only when no template sets the key.
  */
 export function effectiveAutoExposePorts(
   appliedEnv: Record<string, string> | undefined,
@@ -146,7 +157,7 @@ export function effectiveAutoExposePorts(
 ): { enabled: boolean; source: AutoExposeSource } {
   const value = appliedEnv?.SCION_AUTO_EXPOSE_PORTS;
   if (value === undefined) {
-    return { enabled: hubDefault, source: 'hub default' };
+    return { enabled: hubDefault, source: 'inherited' };
   }
   const source: AutoExposeSource =
     explicitEnv?.SCION_AUTO_EXPOSE_PORTS !== undefined ? 'explicit' : 'project/template';
@@ -237,7 +248,7 @@ export class ScionPageAgentConfigure extends LitElement {
   private loadedAutoExposePortsList = '';
   private loadedAutoExposePortsInterval = '3s';
   // Source of the loaded auto-expose value, shown next to the control.
-  @state() private autoExposeSource: AutoExposeSource = 'hub default';
+  @state() private autoExposeSource: AutoExposeSource = 'inherited';
   // Snapshot of this.envEntries as populateForm last loaded it (shallow
   // copies, so later edits to this.envEntries can't retroactively change
   // what "loaded" means). Lets buildConfig tell whether the user edited the
@@ -1842,7 +1853,10 @@ export class ScionPageAgentConfigure extends LitElement {
           <span class="help-badge">?</span>
         </sl-tooltip>
         <span class="source-label" data-testid="auto-expose-source"
-          >Source: ${this.autoExposeChanged() ? 'explicit (unsaved)' : this.autoExposeSource}</span
+          >Source:
+          ${this.autoExposeChanged()
+            ? 'explicit (unsaved)'
+            : AUTO_EXPOSE_SOURCE_LABELS[this.autoExposeSource]}</span
         >
       </div>
 
