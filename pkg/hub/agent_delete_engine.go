@@ -239,9 +239,7 @@ func (s *Server) runAgentDeletion(reqCtx context.Context, plan *agentDeletionPla
 				s.agentLifecycleLog.Error("delete engine panicked",
 					"agent_id", plan.snapshot.ID, "claim", plan.claim, "panic", fmt.Sprint(rec))
 				e.stopRenewal()
-				e.abandon()
-				out = deletionOutcome{kind: deletionOutcomeFailed, code: store.DeletionCodeAbandoned,
-					message: "the delete engine stopped unexpectedly"}
+				out = e.abandonOutcome()
 			}
 			e.stopRenewal()
 			cancel(nil)
@@ -303,6 +301,15 @@ func (e *deletionEngine) startRenewal() {
 	e.renewDone = make(chan struct{})
 	go func() {
 		defer close(e.renewDone)
+		defer func() {
+			if rec := recover(); rec != nil {
+				// Without renewal the lease lapses; stop the engine rather
+				// than let it act on a claim it may no longer hold.
+				e.s.agentLifecycleLog.Error("delete engine: lease renewal panicked",
+					"agent_id", e.agentID(), "claim", e.plan.claim, "panic", fmt.Sprint(rec))
+				e.cancel(errDeletionLeaseLapsing)
+			}
+		}()
 		ticker := time.NewTicker(deleteLeaseRenewInterval)
 		defer ticker.Stop()
 		misses := 0
@@ -364,8 +371,9 @@ func (e *deletionEngine) publishStatus(ctx context.Context) {
 	e.s.events.PublishAgentStatus(ctx, row)
 }
 
-// abandon marks the claim abandoned at once (lease_at = now) after a panic,
-// so the row reads failed/abandoned without waiting out the lease.
+// abandon marks the claim abandoned at once (lease_at = now), so the row
+// reads failed/abandoned without waiting out the lease. Best effort: if this
+// write fails too, the lease still lapses on its own.
 func (e *deletionEngine) abandon() {
 	ctx, cancel := context.WithTimeout(e.base, deleteShortStep)
 	defer cancel()
@@ -377,6 +385,18 @@ func (e *deletionEngine) abandon() {
 		return
 	}
 	e.publishStatus(ctx)
+}
+
+// abandonOutcome abandons the claim (see abandon) and returns the outcome a
+// requester sees for it: failed{abandoned}, the code the view shows for a
+// lease-expired row with no stored code. Used after a panic and when a
+// terminal write (finalizing, rollback, in_doubt) errors, so the row does not
+// keep blocking start until the lease lapses.
+func (e *deletionEngine) abandonOutcome() deletionOutcome {
+	e.stopRenewal()
+	e.abandon()
+	return deletionOutcome{kind: deletionOutcomeFailed, code: store.DeletionCodeAbandoned,
+		message: "the delete engine stopped unexpectedly; retry the delete"}
 }
 
 // run executes the engine steps (design §2.3 table).
@@ -406,14 +426,15 @@ func (e *deletionEngine) run() deletionOutcome {
 			e.claimPred(store.DeletionStateDeleting, store.DeletionStateFinalizing),
 			store.DeletionFields{State: &finalizing})
 		cancel()
-		if err != nil || n == 0 {
-			if err != nil {
-				s.agentLifecycleLog.Error("delete engine: finalizing write failed",
-					"agent_id", agent.ID, "error", err)
-			}
-			// Without the finalizing write we cannot safely continue; an
-			// error leaves the row to lapse to abandoned, which a retry
-			// re-claims.
+		if err != nil {
+			s.agentLifecycleLog.Error("delete engine: finalizing write failed",
+				"agent_id", agent.ID, "error", err)
+			// Without the finalizing write we cannot safely continue. Mark
+			// the claim abandoned now so the row reads failed at once and a
+			// retry can re-claim it without waiting out the lease.
+			return e.abandonOutcome()
+		}
+		if n == 0 {
 			return e.lost()
 		}
 	}
@@ -621,10 +642,8 @@ func (e *deletionEngine) rollback(code, msg string) deletionOutcome {
 	n, err := e.s.store.UpdateAgentDeletion(ctx, e.agentID(), e.claimPred(store.DeletionStateDeleting), set)
 	if err != nil {
 		e.s.agentLifecycleLog.Error("delete engine: rollback write failed",
-			"agent_id", e.agentID(), "error", err)
-		// The row keeps deleting and lapses to abandoned; report the
-		// original failure to the requester.
-		return deletionOutcome{kind: deletionOutcomeFailed, code: code, message: msg}
+			"agent_id", e.agentID(), "code", code, "error", err)
+		return e.abandonOutcome()
 	}
 	if n == 0 {
 		return e.lost()
@@ -652,7 +671,7 @@ func (e *deletionEngine) failInDoubt() deletionOutcome {
 	if err != nil {
 		e.s.agentLifecycleLog.Error("delete engine: in_doubt write failed",
 			"agent_id", e.agentID(), "error", err)
-		return deletionOutcome{kind: deletionOutcomeFailed, code: code, message: msg}
+		return e.abandonOutcome()
 	}
 	if n == 0 {
 		return e.lost()
@@ -856,9 +875,12 @@ func (s *Server) joinAgentDeletion(w http.ResponseWriter, r *http.Request, agent
 	timer := time.NewTimer(time.Until(deadline))
 	defer timer.Stop()
 
-	for {
+	for first := true; ; first = false {
 		if s.resolveJoinFromRow(w, r.Context(), agentID, observedClaim) {
 			return
+		}
+		if first && joinAgentDeletionHook != nil {
+			joinAgentDeletionHook(agentID)
 		}
 		select {
 		case _, ok := <-evCh:
@@ -877,6 +899,10 @@ func (s *Server) joinAgentDeletion(w http.ResponseWriter, r *http.Request, agent
 		}
 	}
 }
+
+// joinAgentDeletionHook, when set by a test, runs once per join after the
+// joiner has subscribed and its first re-read left the outcome undecided.
+var joinAgentDeletionHook func(agentID string)
 
 // resolveJoinFromRow reads the row and, when it decides the outcome, writes
 // the response and returns true.

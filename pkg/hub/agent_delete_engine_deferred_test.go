@@ -45,6 +45,39 @@ type engineHookStore struct {
 	revokeCalls      int
 	revokeCtxErrs    []error
 	onHasOutstanding func()
+	// failDeletionWrite, when set, picks UpdateAgentDeletion writes to fail
+	// with errInjectedDeletionWrite. It is cleared after the first match, so later
+	// writes (such as abandon's) go through.
+	failDeletionWrite func(set store.DeletionFields) bool
+	// missClaims makes every claim write (BumpClaim) affect no row, as a
+	// racing write would; claimMisses counts them.
+	missClaims  bool
+	claimMisses int
+}
+
+var errInjectedDeletionWrite = errors.New("injected deletion write error")
+
+func (h *engineHookStore) UpdateAgentDeletion(ctx context.Context, id string, pred store.DeletionPredicate, set store.DeletionFields) (int, error) {
+	h.mu.Lock()
+	if h.missClaims && set.BumpClaim {
+		h.claimMisses++
+		h.mu.Unlock()
+		return 0, nil
+	}
+	match := h.failDeletionWrite
+	if match != nil && match(set) {
+		h.failDeletionWrite = nil
+		h.mu.Unlock()
+		return 0, errInjectedDeletionWrite
+	}
+	h.mu.Unlock()
+	return h.Store.UpdateAgentDeletion(ctx, id, pred, set)
+}
+
+func (h *engineHookStore) setFailDeletionWrite(fn func(set store.DeletionFields) bool) {
+	h.mu.Lock()
+	h.failDeletionWrite = fn
+	h.mu.Unlock()
 }
 
 func (h *engineHookStore) RevokeAgentCredentialsByAgent(ctx context.Context, agentID, by, reason string) (int, error) {
@@ -229,8 +262,8 @@ func TestAgentDeleteEngine_DeferredFailedIntentRollsBack(t *testing.T) {
 	f := newDeferredDeleteFixture(t, "deffail", nil)
 
 	go func() {
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
+		// Fail the intent as soon as the dispatcher has written it.
+		assert.Eventually(t, func() bool {
 			all, _ := f.store.ListPendingDispatch(context.Background(), f.agent.RuntimeBrokerID)
 			for _, d := range all {
 				if d.AgentID == f.agent.ID {
@@ -238,11 +271,11 @@ func TestAgentDeleteEngine_DeferredFailedIntentRollsBack(t *testing.T) {
 						_ = f.store.FailBrokerDispatch(context.Background(), d.ID, "owner refused")
 					}
 					f.bus.PublishDispatchDone(context.Background(), d.ID)
-					return
+					return true
 				}
 			}
-			time.Sleep(10 * time.Millisecond)
-		}
+			return false
+		}, 5*time.Second, 10*time.Millisecond, "the delete intent was never written")
 	}()
 
 	r := f.del(t, "")
@@ -409,11 +442,12 @@ func TestAgentDeleteEngine_DeletedNotifications(t *testing.T) {
 			rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
 			require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 
-			require.Eventually(t, func() bool {
+			count := func() int {
 				n, _ := s.GetNotifications(context.Background(), store.SubscriberTypeUser, "watcher-"+tc.name, false)
-				return len(n) == 1
-			}, 5*time.Second, 20*time.Millisecond)
-			time.Sleep(100 * time.Millisecond)
+				return len(n)
+			}
+			require.Eventually(t, func() bool { return count() == 1 }, 5*time.Second, 20*time.Millisecond)
+			assert.Never(t, func() bool { return count() > 1 }, 200*time.Millisecond, 20*time.Millisecond, "no second DELETED")
 			n, err := s.GetNotifications(context.Background(), store.SubscriberTypeUser, "watcher-"+tc.name, false)
 			require.NoError(t, err)
 			require.Len(t, n, 1, "exactly one")

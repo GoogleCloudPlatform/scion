@@ -22,6 +22,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -260,7 +261,18 @@ func TestAgentDeleteEngine_NoStoppedOrErrorHook(t *testing.T) {
 				disp.setFn(func(context.Context, *store.Agent) error { return errors.New("broker boom") })
 			} else {
 				disp.setFn(func(context.Context, *store.Agent) error {
-					time.Sleep(120 * time.Millisecond) // several renewals
+					// Hold the dispatch until the lease has been renewed
+					// at least twice (each renewal bumps state_version).
+					sv := func() int64 {
+						a, err := s.GetAgent(context.Background(), agent.ID)
+						if err != nil {
+							return -1
+						}
+						return a.StateVersion
+					}
+					sv0 := sv()
+					assert.Eventually(t, func() bool { return sv() >= sv0+2 },
+						5*time.Second, 5*time.Millisecond, "renewals")
 					return nil
 				})
 			}
@@ -270,9 +282,9 @@ func TestAgentDeleteEngine_NoStoppedOrErrorHook(t *testing.T) {
 			} else {
 				require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 			}
-			time.Sleep(200 * time.Millisecond) // let the evaluator drain
-			assert.Equal(t, base, exec.fired(store.LifecycleHookTriggerStopped), "no stopped hook")
-			assert.Zero(t, exec.fired(store.LifecycleHookTriggerError), "no error hook")
+			assert.Never(t, func() bool {
+				return exec.fired(store.LifecycleHookTriggerStopped) != base || exec.fired(store.LifecycleHookTriggerError) != 0
+			}, 300*time.Millisecond, 10*time.Millisecond, "no stopped or error hook")
 		})
 	}
 }
@@ -306,4 +318,106 @@ func TestAgentDeleteEngine_SoftFinishClearsFailedMarker(t *testing.T) {
 	if raw, ok := body["deletion"]; ok {
 		assert.Equal(t, "null", string(raw), "no stale banner after restore")
 	}
+}
+
+// requireAbandoned asserts the requester got failed{abandoned} and the row
+// reads failed/abandoned at once (lease_at = now): it no longer counts as a
+// live delete, so it does not wait out the lease.
+func requireAbandoned(t *testing.T, s store.Store, agentID string, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+	_, details := errorBody(t, rec)
+	assert.Equal(t, store.DeletionCodeAbandoned, details["deletionCode"])
+	got := mustGetAgent(t, s, agentID)
+	assert.False(t, got.DeletionActive(time.Now()), "not live: lease_at = now")
+	assert.Equal(t, store.DeletionCodeAbandoned, got.DeletionEffectiveCode(time.Now()))
+	view := store.ComputeAgentDeletion(got, time.Now())
+	require.NotNil(t, view)
+	assert.Equal(t, store.DeletionCodeAbandoned, view.Code)
+}
+
+// Review N2: when a terminal write (finalizing, rollback, in_doubt) errors,
+// the engine abandons the claim at once: the requester gets failed{abandoned}
+// and a retry re-claims immediately.
+func TestAgentDeleteEngine_TerminalWriteErrorAbandons(t *testing.T) {
+	isState := func(want string) func(store.DeletionFields) bool {
+		return func(set store.DeletionFields) bool { return set.State != nil && *set.State == want }
+	}
+	t.Run("finalizing", func(t *testing.T) {
+		srv, s, _, disp := engineTestServer(t)
+		hooks := &engineHookStore{Store: s}
+		srv.store = hooks
+		agent := setupBrokerAgentInPhase(t, s, "abandon-fin", state.PhaseRunning)
+		hooks.setFailDeletionWrite(isState(store.DeletionStateFinalizing))
+
+		rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+		requireAbandoned(t, s, agent.ID, rec)
+		assert.Equal(t, store.DeletionStateDeleting, mustGetAgent(t, s, agent.ID).DeletionState)
+
+		rec = doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+		require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+		assert.True(t, agentGone(t, s, agent.ID))
+		assert.Equal(t, 2, disp.callCount(), "the retry re-claims and dispatches again")
+	})
+	t.Run("rollback", func(t *testing.T) {
+		srv, s, _, disp := engineTestServer(t)
+		hooks := &engineHookStore{Store: s}
+		srv.store = hooks
+		agent := setupBrokerAgentInPhase(t, s, "abandon-rb", state.PhaseRunning)
+		disp.setFn(func(context.Context, *store.Agent) error { return errors.New("broker boom") })
+		hooks.setFailDeletionWrite(isState(store.DeletionStateFailed))
+
+		rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+		requireAbandoned(t, s, agent.ID, rec)
+
+		disp.setFn(nil)
+		rec = doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+		require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+		assert.True(t, agentGone(t, s, agent.ID))
+	})
+	t.Run("in_doubt", func(t *testing.T) {
+		setDeleteWaitTimeout(t, func(context.Context) time.Duration { return 100 * time.Millisecond })
+		f := newDeferredDeleteFixture(t, "abandon-id", nil)
+		f.hooks.setFailDeletionWrite(isState(store.DeletionStateFailed))
+
+		r := f.del(t, "")
+		requireAbandoned(t, f.store, f.agent.ID, r.rec)
+		intents := f.pendingDeleteIntents(t)
+		require.Len(t, intents, 1)
+		// Start stays blocked by the outstanding intent, whatever the code.
+		requireDeleteInProgress(t, doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.agent.ID+"/start", nil))
+
+		endIntent(t, f.store, intents[0].ID, false)
+		f.client.returnErr = nil
+		r = f.del(t, "")
+		require.Equal(t, http.StatusNoContent, r.rec.Code, r.rec.Body.String())
+		assert.True(t, agentGone(t, f.store, f.agent.ID))
+	})
+}
+
+// Review n1: repeated claim misses on a row that is not deleting do not
+// answer 502 "did not complete" from an older failed marker. After three
+// misses the request joins for a later claim, and with none it answers 202
+// at its deadline.
+func TestAgentDeleteEngine_RepeatedClaimMissDoesNotReportOldFailure(t *testing.T) {
+	srv, s, _, disp := engineTestServer(t)
+	hooks := &engineHookStore{Store: s}
+	srv.store = hooks
+	agent := setupBrokerAgentInPhase(t, s, "claimmiss", state.PhaseRunning)
+	failed, code, msg, claim := store.DeletionStateFailed, store.DeletionCodeRuntimeError, "old failure", int64(3)
+	now := time.Now()
+	n, err := s.UpdateAgentDeletion(context.Background(), agent.ID, store.DeletionPredicate{},
+		store.DeletionFields{State: &failed, Claim: &claim, Code: &code, Error: &msg, FailedAt: &now})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	hooks.mu.Lock()
+	hooks.missClaims = true
+	hooks.mu.Unlock()
+
+	rec := doRequestHeaders(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil, map[string]string{"Prefer": "wait=1"})
+	assert.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	hooks.mu.Lock()
+	assert.GreaterOrEqual(t, hooks.claimMisses, 3)
+	hooks.mu.Unlock()
+	assert.Zero(t, disp.callCount())
 }

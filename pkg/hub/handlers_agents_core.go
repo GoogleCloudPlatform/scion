@@ -3412,11 +3412,14 @@ func (s *Server) performAgentDelete(w http.ResponseWriter, r *http.Request, agen
 			return
 		}
 		agent = fresh
-		if attempt >= 1 && agent.DeletedAt.IsZero() && !deletionActive(agent) {
-			// Two claim misses on a row that is neither deleted nor deleting
-			// (a racing write each time): let the row decide rather than
-			// answering 409 to a DELETE.
-			s.joinAgentDeletion(w, r, agent.ID, agent.DeletionClaim, deadline)
+		if attempt >= 2 && agent.DeletedAt.IsZero() && !deletionActive(agent) {
+			// Three claim misses on a row that is neither deleted nor
+			// deleting (a racing write each time): let the row decide rather
+			// than answering 409 to a DELETE. Join for a claim after the one
+			// read here, so an older failed or cleared marker is not taken
+			// as this delete's outcome; with no later claim the join answers
+			// 202 at the deadline.
+			s.joinAgentDeletion(w, r, agent.ID, agent.DeletionClaim+1, deadline)
 			return
 		}
 	}

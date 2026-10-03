@@ -755,6 +755,18 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 		go func(agent *store.Agent) {
 			defer wg.Done()
 
+			// The filter above used the list snapshot; re-read so a delete
+			// that claimed the row since is skipped the same way (a stop is
+			// a no-op for it). A delete claiming after this read is still
+			// harmless: the broker stop is idempotent, and the delete's own
+			// teardown follows.
+			if fresh, err := s.store.GetAgent(ctx, agent.ID); err == nil {
+				if deleteStopNoop(fresh) || !fresh.DeletedAt.IsZero() {
+					return
+				}
+				agent = fresh
+			}
+
 			res := stopAllResult{
 				ID:   agent.ID,
 				Name: agent.Name,

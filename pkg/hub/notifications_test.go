@@ -1229,8 +1229,8 @@ func TestNotificationDispatcher_DeletedNotMatchedWithoutSubscription(t *testing.
 	env.nd.Start()
 	defer env.nd.Stop()
 	env.pub.PublishAgentDeleted(ctx, env.watched.ID, env.project.ID)
-	time.Sleep(200 * time.Millisecond)
-	assert.Empty(t, env.dispatcher.getCalls())
+	assert.Never(t, func() bool { return len(env.dispatcher.getCalls()) > 0 },
+		200*time.Millisecond, 10*time.Millisecond, "no dispatch for a bus deleted event")
 }
 
 func TestFormatNotificationMessage_Deleted(t *testing.T) {

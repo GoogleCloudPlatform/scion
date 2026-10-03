@@ -257,6 +257,11 @@ func (nd *NotificationDispatcher) DeliverDeletedNotifications(ctx context.Contex
 	ctx = context.WithoutCancel(ctx)
 	go func() {
 		defer close(done)
+		defer func() {
+			if rec := recover(); rec != nil {
+				nd.log.Error("DELETED notification delivery panicked", "panic", fmt.Sprint(rec))
+			}
+		}()
 		for i := range pending {
 			p := &pending[i]
 			evt := AgentStatusEvent{
@@ -267,6 +272,12 @@ func (nd *NotificationDispatcher) DeliverDeletedNotifications(ctx context.Contex
 				// The agent is gone: no delete view (explicit null on the wire).
 				Deletion: nil,
 			}
+			// storeAndDispatch's stale-event check is intentionally skipped.
+			// It drops re-reported statuses older than the subscription,
+			// judged by the agent's last activity. A DELETED event is never a
+			// re-report: the delete is happening now, after any subscription
+			// that exists. An idle agent's last activity can predate a newer
+			// subscription, so the check would wrongly drop the event.
 			nd.storeAndDispatchForAgent(ctx, &p.sub, evt, &p.agent)
 		}
 	}()

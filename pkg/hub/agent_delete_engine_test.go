@@ -461,6 +461,19 @@ func TestDeleteSyncWaitFor(t *testing.T) {
 
 // --- (j), (g), (q): joiners ---
 
+// watchJoin returns a channel closed when a request enters the join path
+// (subscribed, first re-read undecided). It proves the request joined and
+// lets a test release the owner only after that.
+func watchJoin(t *testing.T) <-chan struct{} {
+	t.Helper()
+	ch := make(chan struct{})
+	var once sync.Once
+	old := joinAgentDeletionHook
+	joinAgentDeletionHook = func(string) { once.Do(func() { close(ch) }) }
+	t.Cleanup(func() { joinAgentDeletionHook = old })
+	return ch
+}
+
 // Acceptance (j), (g): a second DELETE (plain or force) during a live delete
 // joins it and gets the owner's outcome, never 409.
 func TestAgentDeleteEngine_SecondDeleteJoins(t *testing.T) {
@@ -483,8 +496,9 @@ func TestAgentDeleteEngine_SecondDeleteJoins(t *testing.T) {
 
 			owner := deleteAsync(t, srv, "/api/v1/agents/"+agent.ID, nil)
 			waitClosed(t, entered, 5*time.Second, "owner dispatch")
+			joined := watchJoin(t)
 			joiner := deleteAsync(t, srv, "/api/v1/agents/"+agent.ID+tc.query, nil)
-			time.Sleep(100 * time.Millisecond) // let the joiner subscribe
+			waitClosed(t, joined, 5*time.Second, "joiner subscribed and re-read")
 			close(release)
 
 			o := waitDelete(t, owner, 5*time.Second)
@@ -537,8 +551,9 @@ func TestAgentDeleteEngine_JoinerResolvesByPollWithDroppingPublisher(t *testing.
 
 			owner := deleteAsync(t, srv, "/api/v1/agents/"+agent.ID, nil)
 			waitClosed(t, entered, 5*time.Second, "owner dispatch")
+			joined := watchJoin(t)
 			joiner := deleteAsync(t, srv, "/api/v1/agents/"+agent.ID, nil)
-			time.Sleep(50 * time.Millisecond)
+			waitClosed(t, joined, 5*time.Second, "joiner subscribed and re-read")
 			close(release)
 			assert.Equal(t, tc.want, waitDelete(t, owner, 5*time.Second).rec.Code)
 			j := waitDelete(t, joiner, 5*time.Second)
