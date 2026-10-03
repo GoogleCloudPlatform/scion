@@ -1408,7 +1408,7 @@ func GitHubTokenExpiryPath(tokenPath string) string {
 // follows the same uid/gid contract as WriteGitHubTokenFile.
 func WriteGitHubTokenExpiry(tokenPath string, expiry time.Time, uid, gid int) error {
 	expiryPath := GitHubTokenExpiryPath(tokenPath)
-	return WriteFileNoFollowChown(expiryPath, []byte(expiry.Format(time.RFC3339)), githubTokenFileMode, uid, gid)
+	return WriteFileNoFollowChown(expiryPath, []byte(expiry.UTC().Format(time.RFC3339)), githubTokenFileMode, uid, gid)
 }
 
 // ReadGitHubTokenExpiry reads the token expiry time from the companion expiry

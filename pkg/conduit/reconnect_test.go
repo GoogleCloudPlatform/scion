@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"testing"
 	"time"
 
@@ -103,7 +104,7 @@ func newReconnectHarness(t *testing.T) *reconnectHarness {
 		sessions: make(chan Session, 8),
 		done:     make(chan error, 1),
 	}
-	cfg := Config{Clock: h.clk, PingInterval: time.Hour, PongWait: 2 * time.Hour}
+	cfg := Config{Clock: h.clk, PingInterval: time.Hour, PongWait: 2 * time.Hour, WriteWait: testWriteWait}
 	dialer := transport.DialerFunc(func(ctx context.Context) (transport.Conn, error) {
 		var err error
 		select {
@@ -372,4 +373,35 @@ func TestRedialDelayOrderings(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestRemoveSessionClearsBackingArray: removing an ended session clears
+// its slot in the backing array, so the Reconnector does not keep it
+// reachable.
+func TestRemoveSessionClearsBackingArray(t *testing.T) {
+	a, b, c := &session{}, &session{}, &session{}
+	for _, tc := range []struct {
+		name string
+		rm   Session
+		want []Session
+	}{
+		{"first", a, []Session{b, c}},
+		{"middle", b, []Session{a, c}},
+		{"last", c, []Session{a, b}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			live := []Session{a, b, c}
+			got := removeSession(live, tc.rm)
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("removeSession = %v, want %v", got, tc.want)
+			}
+			if tail := got[:cap(got)][len(got)]; tail != nil {
+				t.Fatalf("vacated slot still holds %p", tail)
+			}
+		})
+	}
+	live := []Session{a}
+	if got := removeSession(live, b); len(got) != 1 || got[0] != a {
+		t.Fatalf("removing an absent session changed live: %v", got)
+	}
 }
