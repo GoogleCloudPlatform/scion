@@ -226,7 +226,7 @@ func TestStartConduit(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		var wg sync.WaitGroup
 		t.Cleanup(func() { cancel(); wg.Wait() })
-		return startConduit(ctx, cfg, srv, &wg, make(chan error, 1))
+		return startConduit(ctx, cfg, srv, "https://hub.example.com", &wg, make(chan error, 1))
 	}
 
 	t.Run("nil server", func(t *testing.T) {
@@ -258,7 +258,7 @@ func TestStartConduit(t *testing.T) {
 	t.Run("hosted HA without the shared secret for signing fails", func(t *testing.T) {
 		resetServerFlags()
 		hostedMode, enableHub = true, true
-		t.Setenv("K_SERVICE", "scion-hub")
+		t.Setenv("K_SERVICE", "") // HA via the Postgres driver, not Cloud Run
 		t.Setenv("SCION_SERVER_SESSION_SECRET", "")
 		t.Setenv("SESSION_SECRET", "")
 		// The ring is shared, so the ring check passes and the peer-auth
@@ -267,12 +267,50 @@ func TestStartConduit(t *testing.T) {
 		require.True(t, srv.ConduitGrantRingShared())
 		for _, mode := range []string{config.ConduitPeerAuthOIDC, config.ConduitPeerAuthHMAC} {
 			cfg := &config.GlobalConfig{}
+			cfg.Database.Driver = "postgres"
 			cfg.Hub.Conduit.PeerAuth = mode
 			cfg.Hub.Conduit.PeerServiceAccounts = []string{"hub@p.iam.gserviceaccount.com"}
 			err := run(t, srv, cfg)
 			require.Error(t, err, mode)
 			assert.Contains(t, err.Error(), "no shared signing secret", mode)
 			assert.Contains(t, err.Error(), "hosted HA", mode)
+		}
+	})
+
+	t.Run("hosted HA on Cloud Run refuses the in-process relay", func(t *testing.T) {
+		resetServerFlags()
+		hostedMode, enableHub = true, true
+		t.Setenv("K_SERVICE", "scion-hub")
+		t.Setenv("SCION_SERVER_SESSION_SECRET", "conduit-test-signing-secret-0123456789")
+		srv := conduitHubServerWith(t, true, hub.ServerConfig{SharedSigningSecret: "conduit-test-signing-secret-0123456789"})
+		require.True(t, srv.ConduitGrantRingShared())
+		cfg := &config.GlobalConfig{}
+		cfg.Hub.Conduit.PeerAuth = config.ConduitPeerAuthHMAC
+		// A listen address that cannot open shows the check runs before it.
+		cfg.Hub.Conduit.InternalListen = "256.0.0.1:1"
+		err := run(t, srv, cfg)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, errConduitRelayOnCloudRun)
+		assert.Contains(t, err.Error(), "hosted HA")
+		assert.Nil(t, srv.ConduitRelayFatal(), "no relay is running")
+	})
+
+	t.Run("hosted HA with a load-balanced advertise host fails", func(t *testing.T) {
+		resetServerFlags()
+		hostedMode, enableHub = true, true
+		t.Setenv("K_SERVICE", "")
+		t.Setenv("SCION_SERVER_SESSION_SECRET", "conduit-test-signing-secret-0123456789")
+		srv := conduitHubServerWith(t, true, hub.ServerConfig{SharedSigningSecret: "conduit-test-signing-secret-0123456789"})
+		for _, adv := range []string{"https://hub.example.com:9810", "https://scion-hub-abc123-uc.a.run.app"} {
+			cfg := &config.GlobalConfig{}
+			cfg.Database.Driver = "postgres"
+			cfg.Hub.Conduit.PeerAuth = config.ConduitPeerAuthHMAC
+			cfg.Hub.Conduit.InternalListen = "256.0.0.1:1"
+			cfg.Hub.Conduit.InternalAdvertise = adv
+			err := run(t, srv, cfg)
+			require.Error(t, err, adv)
+			assert.Contains(t, err.Error(), "internal_advertise", adv)
+			assert.Contains(t, err.Error(), "hosted HA", adv)
 		}
 	})
 
@@ -287,6 +325,34 @@ func TestStartConduit(t *testing.T) {
 		assert.NoError(t, run(t, srv, cfg))
 		assert.Nil(t, srv.ConduitRelayFatal(), "no relay is running")
 	})
+}
+
+func TestCheckConduitAdvertiseHost(t *testing.T) {
+	tests := []struct {
+		name, advertise, hub string
+		wantErr              string
+	}{
+		{name: "unset", hub: "https://hub.example.com"},
+		{name: "node address", advertise: "http://10.0.0.5:9810", hub: "https://hub.example.com"},
+		{name: "internal name", advertise: "https://hub-0.hub.svc.cluster.local:9810", hub: "https://hub.example.com"},
+		{name: "public hub host", advertise: "https://hub.example.com:9810", hub: "https://hub.example.com", wantErr: "public hub host"},
+		{name: "public hub host, case and trailing dot", advertise: "http://HUB.example.com.:9810", hub: "https://hub.example.com/", wantErr: "public hub host"},
+		{name: "cloud run host", advertise: "https://scion-hub-abc123-uc.a.run.app", hub: "https://hub.example.com", wantErr: "Cloud Run"},
+		{name: "cloud run host, no hub endpoint", advertise: "https://x.run.app:443", wantErr: "Cloud Run"},
+		{name: "run.app lookalike", advertise: "http://myrun.app.internal:9810", hub: "https://hub.example.com"},
+		{name: "no hub endpoint", advertise: "http://10.0.0.5:9810"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkConduitAdvertiseHost(tt.advertise, tt.hub)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
 }
 
 // TestNewCommandBus_ConduitHA (C8): a Postgres command bus that cannot

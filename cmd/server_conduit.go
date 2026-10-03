@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -176,12 +177,12 @@ func conduitPeerAuthOptions(ctx context.Context, cfg *config.GlobalConfig, selfI
 // exits non-zero (C8); elsewhere a failure is logged and the hub serves
 // without a relay. A relay that stops on its own (superseded) reports on
 // errCh so the process exits and restarts.
-func startConduit(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, wg *sync.WaitGroup, errCh chan<- error) error {
+func startConduit(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, hubEndpoint string, wg *sync.WaitGroup, errCh chan<- error) error {
 	if hubSrv == nil || !hubSrv.ConduitEnabled() {
 		return nil
 	}
 	requireHA := hostedHAGuardsRequired(cfg)
-	err := startConduitRelay(ctx, cfg, hubSrv, wg, errCh, requireHA)
+	err := startConduitRelay(ctx, cfg, hubSrv, hubEndpoint, wg, errCh, requireHA)
 	if err == nil {
 		return nil
 	}
@@ -192,11 +193,17 @@ func startConduit(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Ser
 	return nil
 }
 
-func startConduitRelay(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, wg *sync.WaitGroup, errCh chan<- error, requireHA bool) error {
+func startConduitRelay(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, hubEndpoint string, wg *sync.WaitGroup, errCh chan<- error, requireHA bool) error {
 	// C8: checked first, before any listener opens or peer auth is built,
 	// so the operator sees this cause rather than a later symptom.
 	if requireHA && !hubSrv.ConduitGrantRingShared() {
 		return hub.ErrConduitNoAtRestKey
+	}
+	if requireHA && os.Getenv("K_SERVICE") != "" {
+		return errConduitRelayOnCloudRun
+	}
+	if err := checkConduitAdvertiseHost(cfg.Hub.Conduit.InternalAdvertise, hubEndpoint); err != nil {
+		return err
 	}
 	id := conduitInstanceID()
 	auth, mode, err := hub.NewConduitPeerAuth(conduitPeerAuthOptions(ctx, cfg, id, metadata.OnGCE()))
@@ -255,6 +262,42 @@ func startConduitRelay(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hu
 			case <-ctx.Done():
 			}
 		}()
+	}
+	return nil
+}
+
+// errConduitRelayOnCloudRun refuses the in-process relay on Cloud Run in
+// hosted HA: Cloud Run instances are not individually addressable, so other
+// hub nodes cannot route a session to a specific instance. A separate relay
+// role will cover this deployment later.
+var errConduitRelayOnCloudRun = errors.New("the in-process conduit relay is not supported on Cloud Run in hosted HA " +
+	"(K_SERVICE is set): Cloud Run instances are not individually addressable; run the hub where each node has " +
+	"its own internal address, or turn hub.conduit off (a separate relay role will support this deployment later)")
+
+// checkConduitAdvertiseHost refuses an internal_advertise whose host is the
+// public hub endpoint's host or a Cloud Run (*.run.app) host: those names
+// reach an arbitrary instance behind a load balancer, not this node.
+func checkConduitAdvertiseHost(advertise, hubEndpoint string) error {
+	if advertise == "" {
+		return nil
+	}
+	au, err := url.Parse(advertise)
+	if err != nil {
+		return fmt.Errorf("server.hub.conduit.internal_advertise %q: %w", advertise, err)
+	}
+	host := strings.ToLower(strings.TrimSuffix(au.Hostname(), "."))
+	if host == "run.app" || strings.HasSuffix(host, ".run.app") {
+		return fmt.Errorf("server.hub.conduit.internal_advertise %q is a Cloud Run host; it must address this node directly, not a load-balanced service", advertise)
+	}
+	if hubEndpoint == "" {
+		return nil
+	}
+	hu, err := url.Parse(hubEndpoint)
+	if err != nil {
+		return nil
+	}
+	if hubHost := strings.ToLower(strings.TrimSuffix(hu.Hostname(), ".")); hubHost != "" && hubHost == host {
+		return fmt.Errorf("server.hub.conduit.internal_advertise %q uses the public hub host %q; it must address this node directly, not the load-balanced hub endpoint", advertise, hubHost)
 	}
 	return nil
 }
