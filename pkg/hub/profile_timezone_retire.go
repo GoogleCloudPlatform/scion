@@ -211,7 +211,9 @@ func logFileTierProfileTimezones(scan config.SettingsFileProfileTimezoneScan, lo
 	decision := decideProfileTimezones(scan.DefaultTimezone, zones)
 	for _, f := range scan.ProfileTimezones {
 		action := decision.action(f.Timezone)
-		if decision.copyZone != "" && f.Timezone != "" {
+		if f.Timezone == "" {
+			action = "empty value ignored; remove the key from the file"
+		} else if decision.copyZone != "" {
 			action = fmt.Sprintf("ignored; to keep it, add the top-level line `default_timezone: %s` to %s "+
 				"(the settings file form of agent_defaults.default_timezone) before saving server config from the admin UI, "+
 				"because that save rewrites the profiles section without this key", decision.copyZone, scan.Path)

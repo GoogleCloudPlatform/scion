@@ -107,6 +107,11 @@ func TestInitOperationalSettings_ProfileTimezoneRetire_TwoBoots(t *testing.T) {
 	if !strings.Contains(string(prof.Value), "docker") {
 		t.Errorf("boot 1: profiles row lost other keys: %s", prof.Value)
 	}
+	// A seeded profiles row is stripped by the every-boot seed sync, not by
+	// the retire step, so it carries the seed author.
+	if prof.UpdatedBy != "seed" {
+		t.Errorf("boot 1: profiles row updatedBy %q; want seed", prof.UpdatedBy)
+	}
 	ad := after1["agent_defaults"]
 	var adDoc map[string]any
 	_ = json.Unmarshal(ad.Value, &adDoc)

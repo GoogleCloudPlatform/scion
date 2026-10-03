@@ -440,7 +440,7 @@ func TestRetireProfileTimezones_FileTier_WarnsAndLeavesFile(t *testing.T) {
 	if !strings.Contains(out, "`default_timezone: Asia/Kathmandu`") || !strings.Contains(out, "agent_defaults.default_timezone") {
 		t.Errorf("warning lacks the line to add:\n%s", out)
 	}
-	if !strings.Contains(out, "empty value removed") {
+	if !strings.Contains(out, "empty value ignored; remove the key from the file") {
 		t.Errorf("empty value not reported:\n%s", out)
 	}
 	data, err := os.ReadFile(path)
