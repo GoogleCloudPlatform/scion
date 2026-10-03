@@ -62,13 +62,21 @@ function internals(el: TestEl): Internals {
   return el as unknown as Internals;
 }
 
+/**
+ * Waits until the page is idle (no page load, no agents load, no window
+ * page fetch), runs any pending live flush, re-renders, and checks the page
+ * is still idle, so a zero-request assertion never races a late request.
+ */
 async function settle(el: TestEl): Promise<void> {
-  await vi.waitFor(() => {
+  const idle = (): void => {
     expect(internals(el).loading).toBe(false);
     expect(internals(el).agentsLoading).toBe(false);
-  });
-  await new Promise((r) => setTimeout(r, 20));
+    expect(internals(el).agentWindow.loading).toBe(false);
+  };
+  await vi.waitFor(idle);
+  (stateManager as unknown as { flush(): void }).flush();
   await el.updateComplete;
+  await vi.waitFor(idle);
 }
 
 /** Mounts the page and returns once its first request is sent, without waiting for it. */
@@ -149,6 +157,16 @@ async function flushLive(el: TestEl): Promise<void> {
   (stateManager as unknown as { flush(): void }).flush();
   await Promise.resolve();
   await el.updateComplete;
+}
+
+/**
+ * Drops and reopens the live connection through the state store's own
+ * SSE client, so the resync goes through the real state path.
+ */
+function reconnect(): void {
+  const sse = stateManager.sseClientInstance;
+  sse.dispatchEvent(new CustomEvent('disconnected'));
+  sse.dispatchEvent(new CustomEvent('connected'));
 }
 
 function stubFake(fake: Fake): void {
@@ -546,9 +564,35 @@ describe('scion-page-agents — agent list window', () => {
       await settle(el);
       expect(internals(el).agentWindow.state).toBe('paged');
       await internals(el).agentWindow.next();
-      stateManager.dispatchEvent(new CustomEvent('agents-resync'));
+      await settle(el);
+      const n = fake.requests.length;
+      expect(pager(el).showChip).toBe(false);
+      reconnect();
+      await settle(el);
+      expect(pager(el).showChip).toBe(true);
       expect(stateManager.isAgentSetComplete('full')).toBe(true);
+      expect(fake.requests.length).toBe(n);
     });
+
+    it('a reconnect of the live connection in the held state shows the stale banner, keeps the flag and sends nothing', async () => {
+      const fake: Fake = {
+        agents: Array.from({ length: 1200 }, (_, i) => makeAgent(i)),
+        requests: [],
+      };
+      stubFake(fake);
+      localStorage.setItem('scion-view-agents', 'graph');
+      const el = await mount();
+      expect(internals(el).agentWindow.state).toBe('held');
+      expect(stateManager.isAgentSetComplete('full')).toBe(true);
+      expect(internals(el).agentWindow.banner).toBeNull();
+      const n = fake.requests.length;
+      reconnect();
+      await settle(el);
+      expect(internals(el).agentWindow.banner?.kind).toBe('stale');
+      expect(text(el)).toContain('may be stale');
+      expect(stateManager.isAgentSetComplete('full')).toBe(true);
+      expect(fake.requests.length).toBe(n);
+    }, 30_000);
 
     it('a paged first load does not set the flag; a drain that completes does', async () => {
       const fake: Fake = {
@@ -633,8 +677,8 @@ describe('scion-page-agents — agent list window', () => {
               typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
             const u = new URL(raw, 'http://localhost');
             if (armed && isGlobalAgentsList(u) && !u.searchParams.has('sort')) {
-              // The first legacy page of the drain: a create lands, and the
-              // page replies 200 ms later.
+              // The first legacy page of the drain: a create lands and is
+              // flushed before the page replies.
               armed = false;
               handleUpdate('agent.new-7.created', {
                 ...makeAgent(5001),
@@ -642,7 +686,6 @@ describe('scion-page-agents — agent list window', () => {
                 agentId: 'new-7',
               });
               (stateManager as unknown as { flush(): void }).flush();
-              await new Promise((r) => setTimeout(r, 200));
             }
             return inner(input, init);
           })
@@ -660,8 +703,44 @@ describe('scion-page-agents — agent list window', () => {
         expect(internals(el).agents).toHaveLength(members);
         expect(internals(el).agents.some((a) => a.id === 'new-7')).toBe(false);
         expect(internals(el).agentWindow.banner?.kind).toBe('stale');
-      });
+        expect(text(el)).toContain('may be stale');
+        expect(el.shadowRoot?.querySelector('.agent-window-banner')).not.toBeNull();
+      }, 30_000);
     }
+  });
+
+  describe('a capped global set', () => {
+    it('2,001 agents in the tree view: four requests end capped with the banner, the flag is not set, a lifecycle refresh is free and the banner Refresh drains four again', async () => {
+      const fake: Fake = {
+        agents: Array.from({ length: 2001 }, (_, i) => makeAgent(i)),
+        requests: [],
+      };
+      stubFake(fake);
+      localStorage.setItem('scion-view-agents', 'graph');
+      const el = await mount();
+      const win = internals(el).agentWindow;
+      expect(fake.requests.length).toBe(4);
+      expect(fake.requests.every((u) => !query(u).has('sort'))).toBe(true);
+      expect(win.state).toBe('capped');
+      expect(win.incompleteReason).toBe('capped');
+      expect(internals(el).agents).toHaveLength(2000);
+      const banner = () => el.shadowRoot?.querySelector('.agent-window-banner');
+      expect(banner()?.textContent).toContain('2,000 loaded (newest 2,000 checked), more exist');
+      expect(stateManager.isAgentSetComplete('full')).toBe(false);
+      expect(stateManager.isAgentSetComplete('compact')).toBe(false);
+
+      internals(el).backgroundRefresh('lifecycle-refresh');
+      await settle(el);
+      expect(fake.requests.length).toBe(4);
+      expect(win.state).toBe('capped');
+
+      (banner()?.querySelector('sl-tag') as HTMLElement).click();
+      await settle(el);
+      expect(fake.requests.length).toBe(8);
+      expect(win.state).toBe('capped');
+      expect(banner()?.textContent).toContain('2,000 loaded (newest 2,000 checked), more exist');
+      expect(stateManager.isAgentSetComplete('full')).toBe(false);
+    }, 30_000);
   });
 
   describe('live membership while paged', () => {
@@ -765,6 +844,36 @@ describe('scion-page-agents — agent list window', () => {
       expect(internals(el2).agentWindow.state).toBe('paged');
       expect(text(el2)).toContain('No Matching Agents');
     });
+
+    for (const scope of ['mine', 'shared'] as const) {
+      it(`scope ${scope}: a phase filter matching nothing shows "No Matching Agents", locally and while paged`, async () => {
+        const fake: Fake = {
+          agents: Array.from({ length: 25 }, (_, i) => makeAgent(i)),
+          requests: [],
+        };
+        stubFake(fake);
+        localStorage.setItem('scion-scope-agents', scope);
+        const el = await mount();
+        expect(internals(el).agentWindow.state).toBe('small');
+        expect(internals(el).agentWindow.stats.total).toBeGreaterThan(0);
+        internals(el).setPhaseFilter('stopped');
+        await settle(el);
+        expect(text(el)).toContain('No Matching Agents');
+        expect(text(el)).not.toContain('No Shared Agents');
+        expect(text(el)).not.toContain("You haven't created any agents yet.");
+        unmount(el);
+
+        stateManager.setScope({ type: 'brokers-list' });
+        fake.agents = Array.from({ length: 3000 }, (_, i) => makeAgent(i));
+        const el2 = await mount();
+        expect(internals(el2).agentWindow.state).toBe('paged');
+        expect(query(fake.requests.at(-1)!).get('scope')).toBe(scope);
+        expect(query(fake.requests.at(-1)!).get('phase')).toBe('stopped');
+        expect(text(el2)).toContain('No Matching Agents');
+        expect(text(el2)).not.toContain('No Shared Agents');
+        expect(text(el2)).not.toContain("You haven't created any agents yet.");
+      }, 30_000);
+    }
   });
 
   describe('count-only mode above 2,000 agents', () => {
@@ -833,19 +942,62 @@ describe('scion-page-agents — agent list window', () => {
   });
 
   describe('request counts per interaction at 25, 500 and 1,200 agents', () => {
-    type Step = [label: string, run: (el: TestEl) => void | Promise<void>];
+    /**
+     * A mixed fixture: every third agent stopped, alternating env=prod and
+     * env=dev, and every fifth agent also carries a bare `team` key, so the
+     * phase and label steps really narrow the set.
+     */
+    const mixedAgent = (i: number): Agent =>
+      makeAgent(i, {
+        phase: i % 3 === 0 ? 'stopped' : 'running',
+        labels: { env: i % 2 === 0 ? 'prod' : 'dev', ...(i % 5 === 0 ? { team: 'core' } : {}) },
+      });
+    const byUpdated = (dir: 'asc' | 'desc') => (a: Agent, b: Agent) =>
+      (dir === 'asc' ? 1 : -1) * (a.updated ?? '').localeCompare(b.updated ?? '');
+
+    /** After a step: the window's total and the rendered rows match the fixture under this filter and dir. */
+    const expectRows =
+      (keep: (a: Agent) => boolean, dir: 'asc' | 'desc') =>
+      (el: TestEl, fake: Fake): void => {
+        const expected = fake.agents.filter(keep).sort(byUpdated(dir));
+        const win = internals(el).agentWindow;
+        expect(win.total).toBe(expected.length);
+        const page = expected.slice(0, 25).map((a) => a.id);
+        expect(win.items.map((a) => a.id)).toEqual(page);
+        expect(el.shadowRoot?.querySelectorAll('tbody tr').length).toBe(page.length);
+      };
+
+    type Step = [
+      label: string,
+      run: (el: TestEl) => void | Promise<void>,
+      check?: (el: TestEl, fake: Fake) => void,
+    ];
     const steps: Step[] = [
       ['grid', (el) => setView(el, 'grid')],
       ['list', (el) => setView(el, 'list')],
       ['dir flip', (el) => internals(el).toggleSort('updated')],
-      ['phase', (el) => internals(el).setPhaseFilter('running')],
+      [
+        'phase',
+        (el) => internals(el).setPhaseFilter('running'),
+        expectRows((a) => a.phase === 'running', 'asc'),
+      ],
       ['phase clear', (el) => internals(el).setPhaseFilter('')],
       ['next page', (el) => internals(el).agentWindow.next()],
       ['prev page', (el) => internals(el).agentWindow.prev()],
       ['label typing', (el) => typeLabel(el, 'env=pr')],
-      ['label commit', (el) => commitLabel(el, 'env=prod')],
+      [
+        'label commit',
+        (el) => commitLabel(el, 'env=prod'),
+        expectRows((a) => a.labels?.env === 'prod', 'asc'),
+      ],
       ['lifecycle refresh', (el) => internals(el).backgroundRefresh('lifecycle-refresh')],
       ['label clear', (el) => commitLabel(el, '')],
+      [
+        'bare-key label commit',
+        (el) => commitLabel(el, 'team'),
+        expectRows((a) => !!a.labels && 'team' in a.labels, 'asc'),
+      ],
+      ['bare-key label clear', (el) => commitLabel(el, '')],
       ['scope mine', (el) => internals(el).setScope('mine')],
       ['scope all', (el) => internals(el).setScope('all')],
       ['tree', (el) => setView(el, 'graph')],
@@ -859,9 +1011,12 @@ describe('scion-page-agents — agent list window', () => {
       ['lifecycle refresh again', (el) => internals(el).backgroundRefresh('lifecycle-refresh')],
     ];
 
+    // A bare-key label is complete-needing: it drains (one legacy request
+    // at 500 or fewer agents, three at 1,200), and clearing it sends one
+    // fit request.
     const small = {
       // prettier-ignore
-      costs: [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+      costs: [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1],
       states: steps.map(() => 'small'),
     };
     const cases: Array<{ count: number; costs: number[]; states: string[] }> = [
@@ -870,18 +1025,18 @@ describe('scion-page-agents — agent list window', () => {
       {
         count: 1200,
         // prettier-ignore
-        costs:  [0, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 3, 0, 0, 0, 0, 0, 0, 0, 0],
+        costs:  [0, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 3, 1, 1, 1, 3, 0, 0, 0, 0, 0, 0, 0, 0],
         // prettier-ignore
         states: ['paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged',
-          'paged', 'paged', 'paged', 'paged', 'held', 'held', 'held', 'held', 'held', 'held',
-          'held', 'held', 'held'],
+          'paged', 'paged', 'held', 'paged', 'paged', 'paged', 'held', 'held', 'held', 'held',
+          'held', 'held', 'held', 'held', 'held'],
       },
     ];
 
     for (const c of cases) {
       it(`${c.count} agents: one request on page load, then the documented cost per interaction`, async () => {
         const fake: Fake = {
-          agents: Array.from({ length: c.count }, (_, i) => makeAgent(i)),
+          agents: Array.from({ length: c.count }, (_, i) => mixedAgent(i)),
           requests: [],
         };
         stubFake(fake);
@@ -891,24 +1046,34 @@ describe('scion-page-agents — agent list window', () => {
 
         const costs: number[] = [];
         const states: string[] = [];
-        for (const [, run] of steps) {
+        for (const [name, run, check] of steps) {
           const n = fake.requests.length;
           await run(el);
           await settle(el);
           costs.push(fake.requests.length - n);
           states.push(internals(el).agentWindow.state);
+          if (check) {
+            try {
+              check(el, fake);
+            } catch (err) {
+              throw new Error(`after "${name}": ${(err as Error).message}`);
+            }
+          }
         }
         const named = (xs: Array<number | string>) => steps.map(([name], i) => `${name}: ${xs[i]}`);
         expect(named(costs)).toEqual(named(c.costs));
         expect(named(states)).toEqual(named(c.states));
 
         // Client navigation back to /agents: the flag is held (small or a
-        // completed drain), so the reuse branch issues no request.
+        // completed drain), so the reuse branch issues no request. The
+        // persisted running filter still applies.
         unmount(el);
         const n = fake.requests.length;
         const el2 = await mount();
         expect(fake.requests.length - n).toBe(0);
-        expect(internals(el2).agentWindow.total).toBe(c.count);
+        expect(internals(el2).agentWindow.total).toBe(
+          fake.agents.filter((a) => a.phase === 'running').length
+        );
       }, 60_000);
     }
 

@@ -28,9 +28,13 @@ import type { Agent, Project } from '../../shared/types.js';
 import { stateManager } from '../../client/state.js';
 import { resetHubProjectCapabilitiesCache } from '../../client/hub-capabilities.js';
 import type { AgentMemberIndex } from '../../client/agent-member-index.js';
+import type { AgentListWindow } from '../../client/agent-list-window.js';
 import {
   FakeEventSource,
+  SCOPE_CAPS,
   fakeFetch,
+  holdable,
+  isGlobalAgentsList,
   makeAgent,
   type Fake,
 } from './__fixtures__/global-agents-endpoint.js';
@@ -43,6 +47,7 @@ interface PageInternals {
   countsLoading?: boolean;
   memberIndex?: AgentMemberIndex | null;
   agents: Agent[];
+  agentWindow?: AgentListWindow;
   setScope?(scope: 'all' | 'mine' | 'shared'): void;
 }
 
@@ -52,18 +57,50 @@ function internals(el: TestEl): PageInternals {
 
 const USER = { id: 'u', email: 'u@example.com', name: 'Uma Admin', role: 'admin' };
 
-async function settle(el: TestEl): Promise<void> {
-  await vi.waitFor(() => {
+/**
+ * Waits until the page has no load in flight, runs any pending live flush,
+ * re-renders, and checks it is still idle, so a zero-request assertion
+ * never races a late request.
+ */
+/** Calls to the stubbed fetch, and how many of them have not settled yet. */
+function fetchState(): { calls: number; pending: number } {
+  const mock = vi.mocked(globalThis.fetch);
+  if (!vi.isMockFunction(mock)) return { calls: 0, pending: 0 };
+  const settled = mock.mock.settledResults.filter((r) => r.type !== 'incomplete').length;
+  return { calls: mock.mock.calls.length, pending: mock.mock.calls.length - settled };
+}
+
+/**
+ * Wait until the page is idle: no loading flag set and every fetch settled
+ * (apart from `allowPending()` requests a test holds on purpose), and no new
+ * fetch was sent while the page took its responses in and re-rendered.
+ */
+async function settle(el: TestEl, allowPending: () => number = () => 0): Promise<void> {
+  const idle = (): void => {
     const i = internals(el);
     expect(i.loading ?? false).toBe(false);
     expect(i.agentsLoading ?? false).toBe(false);
     expect(i.countsLoading ?? false).toBe(false);
-  });
-  await new Promise((r) => setTimeout(r, 30));
-  await el.updateComplete;
+    expect(fetchState().pending).toBeLessThanOrEqual(allowPending());
+  };
+  for (;;) {
+    await vi.waitFor(idle);
+    const before = fetchState().calls;
+    // Yield one macrotask so response bodies are read and handled.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    (stateManager as unknown as { flush(): void }).flush();
+    await el.updateComplete;
+    if (fetchState().calls === before) {
+      idle();
+      return;
+    }
+  }
 }
 
-async function mountPage(tag: 'scion-page-home' | 'scion-page-agents'): Promise<TestEl> {
+async function mountPage(
+  tag: 'scion-page-home' | 'scion-page-agents',
+  allowPending?: () => number
+): Promise<TestEl> {
   const el = document.createElement(tag) as TestEl;
   (el as unknown as { pageData: unknown }).pageData = {
     path: tag === 'scion-page-home' ? '/' : '/agents',
@@ -72,7 +109,7 @@ async function mountPage(tag: 'scion-page-home' | 'scion-page-agents'): Promise<
   };
   document.body.appendChild(el);
   await el.updateComplete;
-  await settle(el);
+  await settle(el, allowPending);
   return el;
 }
 
@@ -81,6 +118,15 @@ async function visit(tag: 'scion-page-home' | 'scion-page-agents'): Promise<Test
   const el = await mountPage(tag);
   el.remove();
   return el;
+}
+
+/**
+ * Drops and reopens the live connection through the state store's own SSE
+ * client, so the resync goes through the real state path.
+ */
+function reconnect(): void {
+  stateManager.sseClientInstance.dispatchEvent(new CustomEvent('disconnected'));
+  stateManager.sseClientInstance.dispatchEvent(new CustomEvent('connected'));
 }
 
 /** The projects list page: dashboard scope, loads projects only. */
@@ -423,9 +469,98 @@ describe('home agent counts and the shared completeness flag', () => {
       await settle(agents);
       agents.remove();
       expect(stateManager.isAgentSetComplete('full')).toBe(true);
-      stateManager.dispatchEvent(new CustomEvent('agents-resync'));
+      const resync = vi.fn();
+      stateManager.addEventListener('agents-resync', resync);
+      reconnect();
+      stateManager.removeEventListener('agents-resync', resync);
+      expect(resync).toHaveBeenCalledTimes(1);
       expect(stateManager.isAgentSetComplete('full')).toBe(true);
+      // Home after the reconnect still reuses the complete set.
+      expect(await cost(fake, () => visit('scion-page-home'))).toEqual([0, 0]);
     });
+
+    it('home reached with no fetch shows today’s placeholders: 0 projects and -- on both invite cards', async () => {
+      const fake = newFake(30, 12);
+      vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
+      await visit('scion-page-agents');
+      let el!: TestEl;
+      expect(
+        await cost(fake, async () => {
+          el = await mountPage('scion-page-home');
+        })
+      ).toEqual([0, 0]);
+      // The projects and invite stats are not loaded on this path, as today.
+      expect(statValues(el)).toEqual(['12', '0', '--', '--']);
+    });
+
+    it('entry on /agents with server-rendered agents discards them and loads its own complete set; home then sends nothing', async () => {
+      const fake = newFake(30, 9);
+      vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
+      // The server-rendered payload: a subset of the agents plus the scope
+      // capabilities, hydrated before the page connects.
+      stateManager.setScope({ type: 'dashboard' });
+      stateManager.hydrate({ agents: fake.agents.slice(0, 5) }, SCOPE_CAPS);
+      expect(stateManager.getAgents()).toHaveLength(5);
+      expect(stateManager.isAgentSetComplete('full')).toBe(false);
+
+      const agents = await mountPage('scion-page-agents');
+      expect(fake.requests).toHaveLength(1);
+      expect(fake.requests[0]).toContain('fit=500');
+      expect(internals(agents).agentWindow!.display).toHaveLength(30);
+      expect(stateManager.getAgents()).toHaveLength(30);
+      expect(stateManager.isAgentSetComplete('full')).toBe(true);
+      agents.remove();
+
+      let home!: TestEl;
+      expect(
+        await cost(fake, async () => {
+          home = await mountPage('scion-page-home');
+        })
+      ).toEqual([0, 0]);
+      expect(activeCount(home)).toBe('9');
+      expect(internals(home).agents).toHaveLength(30);
+    });
+
+    for (const [count, running] of [
+      [25, 10],
+      [1200, 100],
+    ] as const) {
+      it(`${count} agents: home mounted while the agents page load is in flight sends its own load and never counts a partial set`, async () => {
+        const fake = newFake(count, running);
+        const h = holdable(fakeFetch(fake), isGlobalAgentsList);
+        h.hold(1);
+        vi.stubGlobal('fetch', vi.fn(h.fn));
+
+        // Open /agents and leave it while its first request is still held.
+        const agentsEl = document.createElement('scion-page-agents') as TestEl;
+        (agentsEl as unknown as { pageData: unknown }).pageData = {
+          path: '/agents',
+          title: 'Page',
+          user: USER,
+        };
+        document.body.appendChild(agentsEl);
+        await agentsEl.updateComplete;
+        await vi.waitFor(() => expect(h.heldCount).toBe(1));
+        agentsEl.remove();
+
+        // Leaving /agents aborts its load.
+        expect(h.sent[0].signal?.aborted).toBe(true);
+        const heldPending = (): number => (h.sent[0].signal?.aborted ? 0 : 1);
+        const home = await mountPage('scion-page-home', heldPending);
+        // Home's own one-request load, sent while the /agents one is held.
+        expect(fake.requests).toEqual([
+          '/api/v1/agents?sort=updated&dir=desc&limit=1&fit=500&stats=1',
+        ]);
+        expect(activeCount(home)).toBe(String(running));
+
+        h.release();
+        // The aborted /agents response is released late and changes nothing.
+        await settle(home);
+        expect(fake.requests).toHaveLength(1);
+        await flushLive(home);
+        expect(activeCount(home)).toBe(String(running));
+      });
+    }
   });
 
   describe('home request counts at 25, 500 and 1,200 agents', () => {
