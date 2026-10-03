@@ -220,16 +220,20 @@ func TestEvaluateMoveEligibility_Refusals(t *testing.T) {
 			notCalled:  []string{"dispatch", "capacity"},
 		},
 		{
-			name:   "no dispatch permission",
-			mutate: func(in *moveEligibilityInput) { in.Probes.CanDispatch = func(*store.RuntimeBroker) bool { return false } },
-			check:  moveCheckAccess, status: http.StatusForbidden, code: ErrCodeForbidden,
+			name: "no dispatch permission",
+			mutate: func(in *moveEligibilityInput) {
+				in.Probes.CanDispatch = func(*store.RuntimeBroker) bool { return false }
+			},
+			check: moveCheckAccess, status: http.StatusForbidden, code: ErrCodeForbidden,
 			msgContain: "permission to run agents",
 			notCalled:  []string{"provider", "capacity"},
 		},
 		{
-			name:   "cannot link target as provider",
-			mutate: func(in *moveEligibilityInput) { in.Probes.CanUseAsProvider = func(*store.RuntimeBroker) bool { return false } },
-			check:  moveCheckAccess, status: http.StatusForbidden, code: ErrCodeForbidden,
+			name: "cannot link target as provider",
+			mutate: func(in *moveEligibilityInput) {
+				in.Probes.CanUseAsProvider = func(*store.RuntimeBroker) bool { return false }
+			},
+			check: moveCheckAccess, status: http.StatusForbidden, code: ErrCodeForbidden,
 			msgContain: "not a provider for this project",
 		},
 		{

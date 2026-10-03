@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 //go:build !no_sqlite
 
 package cmd
@@ -70,7 +69,7 @@ func TestBrokerRegistrationWorkspaceStorage(t *testing.T) {
 
 	vs := &config.VersionedSettings{Server: &config.V1ServerConfig{WorkspaceStorage: &config.V1WorkspaceStorageConfig{
 		Backend: "nfs",
-		NFS: &config.V1NFSConfig{Shares: []config.V1NFSShare{
+		NFS: &config.V1NFSConfig{MountRoot: "/mnt/scion-nfs", Shares: []config.V1NFSShare{
 			{ID: "a", Server: "10.0.0.2", Export: "/vol-a"},
 			{ID: "b", Server: "10.0.0.9", Export: "/vol-b"},
 		}},
