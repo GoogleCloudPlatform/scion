@@ -79,3 +79,46 @@ func TestMoveVerdictFromError_NoVerdict(t *testing.T) {
 	assert.Nil(t, moveVerdictFromError(errors.New("plain")))
 	assert.Nil(t, moveVerdictFromError(nil))
 }
+
+// --broker without --dry-run is refused before any hub call, so an old hub
+// that ignores --broker can never run a real in-place reincarnation.
+func TestValidateReincarnateBrokerFlags(t *testing.T) {
+	err := validateReincarnateBrokerFlags("b2", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--broker requires --dry-run")
+	assert.NoError(t, validateReincarnateBrokerFlags("b2", true))
+	assert.NoError(t, validateReincarnateBrokerFlags("", false))
+}
+
+// TestReincarnateMove_OldHubIgnoringBroker_Fails: a hub that predates
+// --broker answers a dry run with a plain plan and no targetBrokerId. The
+// CLI must fail rather than present that plan as the move.
+func TestReincarnateMove_OldHubIgnoringBroker_Fails(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/reincarnate") {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"agentId":"agent-1","generation":2,"state":"planned","plan":{}}`))
+	}))
+	t.Cleanup(srv.Close)
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: srv.URL, ProjectID: "proj-1"}
+
+	prevBroker, prevDryRun := reincarnateBroker, reincarnateDryRun
+	t.Cleanup(func() { reincarnateBroker, reincarnateDryRun = prevBroker, prevDryRun })
+
+	reincarnateBroker, reincarnateDryRun = "b2", true
+	err = reincarnateAgentViaHub(hubCtx, "agent-1", "", false)
+	require.Error(t, err)
+	assert.Equal(t, "this hub does not support --broker; upgrade the hub", err.Error())
+	assert.Equal(t, 1, calls)
+
+	// Without --broker the same response is a normal dry-run plan.
+	reincarnateBroker = ""
+	require.NoError(t, reincarnateAgentViaHub(hubCtx, "agent-1", "", false))
+}

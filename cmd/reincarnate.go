@@ -163,6 +163,10 @@ eligibility check and changes nothing.`,
 			return err
 		}
 
+		if err := validateReincarnateBrokerFlags(reincarnateBroker, reincarnateDryRun); err != nil {
+			return err
+		}
+
 		agentName, isSelf, err := resolveReincarnateTarget(args, os.Getenv("SCION_AGENT_NAME"), reincarnateHandoffFile != "", reincarnateDryRun)
 		if err != nil {
 			return err
@@ -253,6 +257,10 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 		return wrapHubError(fmt.Errorf("failed to reincarnate agent via Hub: %w", err))
 	}
 
+	if err := checkHubSupportsMove(reincarnateBroker, resp); err != nil {
+		return err
+	}
+
 	if isJSONOutput() {
 		return outputJSON(resp)
 	}
@@ -270,6 +278,26 @@ func reincarnateAgentViaHub(hubCtx *HubContext, agentName, handoff string, isSel
 	fmt.Printf("\nAgent '%s' is reincarnating: generation %d, state=%s.\n", agentName, resp.Generation, resp.State)
 	if isSelf {
 		fmt.Println("This container will be stopped shortly as part of the migration.")
+	}
+	return nil
+}
+
+// validateReincarnateBrokerFlags refuses --broker without --dry-run before
+// any hub call: a hub that does not know --broker would ignore it and run a
+// real in-place reincarnation.
+func validateReincarnateBrokerFlags(broker string, dryRun bool) error {
+	if broker != "" && !dryRun {
+		return fmt.Errorf("--broker requires --dry-run: moving an agent between brokers is not supported yet")
+	}
+	return nil
+}
+
+// checkHubSupportsMove fails a --broker request whose response has no
+// target broker: the hub ignored --broker, so its plan is for the current
+// broker, not the requested one.
+func checkHubSupportsMove(broker string, resp *hubclient.ReincarnateAgentResponse) error {
+	if broker != "" && (resp == nil || resp.TargetBrokerID == "") {
+		return fmt.Errorf("this hub does not support --broker; upgrade the hub")
 	}
 	return nil
 }
