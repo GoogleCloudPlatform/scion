@@ -2385,6 +2385,16 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		return
 	}
 
+	for key := range req.Env {
+		if secret.IsReservedEnvTarget(key) {
+			ValidationError(w, "target is reserved for scion's own control-plane environment variables", map[string]interface{}{
+				"field": "target",
+				"value": key,
+			})
+			return
+		}
+	}
+
 	// Resolve agent
 	agent, err := s.store.GetAgentBySlug(ctx, projectID, agentID)
 	if err != nil {
