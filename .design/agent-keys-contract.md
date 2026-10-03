@@ -16,6 +16,37 @@ runtime yet — see "Go contract types: placement" below for exactly what was an
 Tested revision: this branch, based on `origin/main` at `6585a8b` ("fix(hub): honor top-level
 raw and plain flags on POST /api/v1/agents/{id}/message (#2053)").
 
+## 0. Post-removal state (Keys 4.2, ptone/scion#2201)
+
+Raw message delivery is removed. This section is normative for the current tree and overrides any
+bridge-era wording later in this document that describes the bridge or the alias as live:
+
+- **No bridge, no alias.** The Hub message-API bridge (top-level `raw` / nested
+  `structured_message.raw` routed through `ExecuteAgentKeys`) and the hidden `scion message --raw`
+  alias are deleted. `/keys` (`scion keys`) is the only way to inject keystrokes. Raw is gone from
+  the DTOs (`MessageRequest`, `StructuredMessage`), the domain model, the DM path, the broker
+  `sendMessage` path, the manager (`MessageRaw` is removed; `SendKeys` is the only injection entry
+  point), and the plugin wire (proto field 11 is `reserved`).
+- **Tombstone rejection stays.** Every raw-bearing ingress still rejects the retired field at
+  decode time with 422 `raw_input_removed` (`OutcomeRawInputRemoved`), before any side effect
+  (no persistence, no dispatch, no event, no sender synthesis, no budget charge). Both spellings
+  (top-level `raw`, nested `structured_message.raw` / `message.raw`) and every value (`true`,
+  `false`, `null`, a wrong type, malformed bytes) are rejected; the member-name match is
+  case-insensitive, matching `encoding/json`. The ingresses are: Hub
+  `POST /api/v1/agents/{id}/message` and the project-scoped equivalent, project broadcast
+  (`structured_message.raw`), broker inbound and routed/plugin inbound (`message.raw`, probed
+  before topic validation and sender synthesis), scheduled-event and recurring-schedule payloads,
+  and the runtime broker's own `/message` handler. The shared probe is
+  `messages.HasRetiredRawField`; the error message is `messages.RawInputRemovedMessage` and names
+  `scion keys`. Hub responses carry `details.operation_id`, `details.ingress`, and
+  `details.replacement`; the audit line is content-free (`route=message_raw_removed`).
+- **CLI.** `scion message --raw` (any value, any target, any mode) fails in argument validation
+  with guidance naming `scion keys`, before any client is built: it makes zero wire calls.
+- **Plain, normal, and interrupt messaging are unchanged.** Historical message rows are not
+  rewritten and no Raw column is added.
+- `OutcomeRawCombinationUnsupported` and `agentkeys.ValidateKeysJSON` existed only for the bridge
+  and are removed.
+
 ## 1. Decision record
 
 The five decisions #2184 recommended for review are **ADOPTED** as written. Restated here for
@@ -218,8 +249,7 @@ Frozen as `agentkeys.Outcome` and `agentkeys.HTTPStatus` (`pkg/agentkeys/types.g
 | 409 | `OutcomeTerminalNotReady` (`"terminal_not_ready"`) | Target running, session not ready |
 | 422 | `OutcomeCrossProjectKeysUnsupported` (`"cross_project_keys_unsupported"`) | Authenticated **agent** crosses its own project; see §3.1 — no disclosure at all on the project-scoped route, and the top-level route shares today's existing lifecycle-action disclosure (422 vs. 404 reveals foreign-vs-missing, exactly as 403 vs. 404 already does) |
 | 422 | `OutcomeKeysUnsupported` (`"keys_unsupported"`) | Managed backend, unsupported runtime, or broker lacking the route; never downgraded to messaging |
-| 422 | `OutcomeRawInputRemoved` (`"raw_input_removed"`) | Post-cutover: old raw message input rejected with `/keys` guidance |
-| 422 | `OutcomeRawCombinationUnsupported` (`"raw_combination_unsupported"`) | Bridge-only (task 2.3): a legacy field implies routing/fan-out/conversation/attachment/lifecycle semantics keys does not support (§6.1) |
+| 422 | `OutcomeRawInputRemoved` (`"raw_input_removed"`) | A message-path request carried the retired `raw` field (either spelling, any value); rejected before any side effect with `scion keys` / `/keys` guidance (§0) |
 | 429 | `OutcomeKeysRateLimited` (`"keys_rate_limited"`) | Independent budget exceeded; `Retry-After` header set; describes admission, not permission to replay |
 | 503 | `OutcomeKeysUnavailable` (`"keys_unavailable"`) | Dispatch definitively did not start (offline broker, no immediate route, expired admission) |
 | 502/504 | `OutcomeKeysOutcomeUnknown` (`"keys_outcome_unknown"`) | Dispatch may have run/partially run; never auto-retried, never reported as delivered |
@@ -235,7 +265,7 @@ carries no operation ID: the request never reaches the code that would mint one.
 and from that point appears in every subsequent response and audit record for the request:
 `OutcomeKeysDenied`, `OutcomeNotFound`, `OutcomeAgentNotRunning`, `OutcomeTerminalNotReady`,
 `OutcomeCrossProjectKeysUnsupported`, `OutcomeKeysUnsupported`, `OutcomeRawInputRemoved`,
-`OutcomeRawCombinationUnsupported`, `OutcomeKeysRateLimited`, `OutcomeKeysUnavailable`,
+`OutcomeKeysRateLimited`, `OutcomeKeysUnavailable`,
 `OutcomeKeysOutcomeUnknown`, and `OutcomeDispatched`. Only three rows carry no operation ID:
 `OutcomeUnauthorized` (never reaches a handler), `OutcomeInvalidRequest` and
 `OutcomePayloadTooLarge` (failures during validation itself, inside the handler but before an
@@ -249,6 +279,10 @@ per outcome. It does not, and cannot, extend the floor to `OutcomeUnauthorized`,
 before any handler-level state exists. This is `agentkeys.Outcome`'s doc comment verbatim
 (`pkg/agentkeys/types.go`); do not restate a different rule anywhere else in this document or its
 implementations.
+
+(`OutcomeRawCombinationUnsupported` was removed with the bridge; see §0. `OutcomeRawInputRemoved`
+on the message routes is minted after target resolution and before message authorization, so
+the tombstone is decided independently of the caller's message authority.)
 
 A local client/network error must also represent uncertainty honestly: an implementation may only
 return `agent_not_running`/`terminal_not_ready`-style "definitely no effect" outcomes when it can
@@ -278,7 +312,7 @@ impersonating a user.
 
 | Caller | Decision |
 | --- | --- |
-| Human session | `ActionAttach` on the target agent; retains owner/privacy/cross-member restrictions (same as today's `agentActionPermission` default branch, `pkg/hub/authorize.go:392`-411, function `agentActionPermission`) |
+| Human session | Ownership of the target agent, or `agent.attach` on it (`ActionAttach`); retains owner/privacy/cross-member restrictions (same as today's `agentActionPermission` default branch, `pkg/hub/authorize.go:392`-411, function `agentActionPermission`). **No project role grants `agent.attach`**: project owners/admins/members do not hold it by role (it is `ExcludeFromManageAlias` and only relationship-sourced — owner/ancestor — in `MintEligibilityRegistry`), so a project role alone never confers user keys authority |
 | User access token | Same human authority, intersected with credential scope and project/hub boundary; a token name or automation label is not an agent identity |
 | Agent credential | Valid current credential, lifecycle scope (`ScopeAgentLifecycle`), sender's current project **equal to** target project (no self/parent/ancestor shortcut), **and** live attach authority on the target via `authorizeAgentTargetAction(ctx, identity, target, ActionAttach)` — same-project equality alone is no longer sufficient (ptone/scion#2460, superseding the Phase 5 deferral for this one gate; see §10's Phase 5 note). No permissive fallback: an invalid/revoked delegation or an evaluator failure denies |
 | Broker credential | Only authenticated Hub→broker execution under the internal contract (§4); never direct public `/keys` authority |
@@ -292,6 +326,10 @@ Key points, restated because they are easy to get backwards:
   (`agent_dm_operation.go:357`) and the general project-isolation rule agent identities already
   live under (`authorizeAgentLifecycle`, `pkg/hub/authorize.go:325`). These are deliberately
   different rules for different caller kinds — do not collapse them into one.
+- **Top-level route, agent caller crossing projects:** without `ScopeAgentLifecycle` the caller
+  gets 403 `keys_denied` (the scope check runs first and does not reveal the target's project);
+  with the lifecycle scope it gets 422 `cross_project_keys_unsupported`. The project-scoped route
+  is as described in §3.1.
 - Message modes (open/closed/etc.) and message budgets **do not** grant or deny keys. Attach
   authority must not be acquired through `agent:message` or an ordinary project-manage alias:
   verified against the registry, not just asserted — `agent.attach`
@@ -591,6 +629,12 @@ frozen rule, each 1.2 adapter would classify differently. Frozen now, in `pkg/ag
   outcome mismatch, or a 2xx whose `Outcome` is not `OutcomeDispatched` — classifies as
   `OutcomeKeysOutcomeUnknown` instead, because unlike a plain 404 those shapes cannot rule out that
   a real handler began executing before producing a malformed response.
+- **Totality.** `ClassifyDispatchError` is total: every input, including `nil`, maps to a
+  non-empty allowlisted `Outcome`; it never returns an empty code. An empty `code` reaching the
+  CLI therefore cannot originate from the Hub's classifier and is a client robustness case (for
+  example a proxy returning a bodyless 502). The CLI handles it without surfacing an empty
+  outcome: an outcome-unknown status becomes `keys_outcome_unknown`, any other rejection becomes
+  `http_<status>`, and the message falls back to the HTTP status text, with a non-zero exit.
 - `agentkeys.ClassifyDispatchError(err) Outcome` is the **only** code allowed to decide what an
   error means, and it recognizes exactly two things: a `*BrokerOutcomeError` (re-validating its
   `Outcome` against `ValidBrokerOutcome` itself, trusting no adapter blindly) and `ErrNotDispatched`
@@ -841,6 +885,15 @@ the keys call path specifically (it must not blanket-disable failure logging for
 caller of these helpers, which rely on it for real diagnostics).
 
 ## 6. Acceptance matrix
+
+> **Post-removal (Keys 4.2).** The bridge and the `message --raw` alias are removed (§0). Every
+> **B** row and the **B** leg of every **All** row below (including AK-38..AK-60) and §6.1–§6.4
+> are retained as the historical bridge record only; they are no longer implemented or tested.
+> Their current behavior is a single rule: any message-path request carrying `raw` / nested
+> `raw` — whatever the value or the other fields — is 422 `raw_input_removed` with no side
+> effect, and `scion message --raw` fails locally with zero wire calls. The **T/P** rows remain
+> normative for `/keys`. The size cap of §6.4 survives as the 2 MiB pre-authorization cap on the
+> `/message` routes (413 `payload_too_large`, no operation ID).
 
 Later tasks cite these IDs in their own test names/comments. "Route" column: **T** = top-level
 `/api/v1/agents/{id}/keys`, **P** = project-scoped route, **B** = temporary raw bridge
@@ -1727,6 +1780,12 @@ each specified in full there:**
   The client task must correct this text; it is not a new limitation introduced by this work. See
   contract §2.3.
 ```
+
+**Post-removal note (Keys 4.2, ptone/scion#2201; outside the frozen block above, which is
+unchanged).** Decisions 3 and 4 are executed: the message-API bridge and the hidden
+`message --raw` alias are removed, the retired `raw` field is rejected at every message-path
+ingress with 422 `raw_input_removed` before any side effect, and historical rows are not
+rewritten. See §0 for the current state.
 
 ## 12. Checks run for this task
 
