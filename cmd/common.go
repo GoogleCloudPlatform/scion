@@ -379,23 +379,81 @@ func PrintUsingHub(endpoint string) {
 	fmt.Fprintf(os.Stderr, "Using hub: %s\n", endpoint)
 }
 
-// wrapHubError wraps a Hub error with guidance to disable Hub integration.
-// When running inside a hub-managed agent, the local-only mode hint is
-// suppressed because disabling the Hub would break orchestration connectivity.
+// localOnlyHint is appended to hub errors where switching to local-only mode
+// is a plausible remedy (the hub is unreachable or failing).
+const localOnlyHint = "\n\nTo use local-only mode, run: scion hub disable"
+
+// hubError marks an error that has been through wrapHubError. Error() is the
+// fully rendered message (including any hint); Unwrap exposes the original
+// cause so callers can still use errors.Is / errors.As on it. Execute uses the
+// marker to suppress the Usage block for hub failures, which are runtime
+// errors rather than usage errors.
+type hubError struct {
+	msg string
+	err error
+}
+
+func (e *hubError) Error() string { return e.msg }
+func (e *hubError) Unwrap() error { return e.err }
+
+// isHubFailure reports whether err came from talking to the Hub: either it
+// went through wrapHubError, or it wraps a structured *apiclient.APIError.
+func isHubFailure(err error) bool {
+	var he *hubError
+	if errors.As(err, &he) {
+		return true
+	}
+	var apiErr *apiclient.APIError
+	return errors.As(err, &apiErr)
+}
+
+// wrapHubError annotates an error from a Hub operation with user guidance.
+//
+//   - 401: replaced with a "login with scion hub auth login" hint (or, inside a
+//     hub-managed agent, a credentials-rejected message that keeps the cause).
+//   - Connectivity failures (anything that is not an *apiclient.APIError, e.g.
+//     a transport error or timeout) and 5xx responses: the "scion hub disable"
+//     local-only hint is appended, since the hub being down is the case where
+//     falling back to local mode can help.
+//   - Other API errors (4xx such as 400/403/404/409/422): returned as-is. The
+//     hub answered and the message is about the request, so suggesting that
+//     the user disable the hub would be misleading noise.
+//
+// Inside a hub-managed agent the local-only hint is never added, because
+// disabling the Hub would break orchestration connectivity.
 func wrapHubError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var already *hubError
+	if errors.As(err, &already) {
+		// Already annotated further down the call chain; don't add a
+		// second hint.
+		return err
+	}
 	if apiclient.IsUnauthorizedError(err) {
 		// `scion hub` is filtered out of the command tree in agent mode, so a
 		// hub-managed agent cannot run `scion hub auth login` and must not be
 		// told to. Keep the underlying error instead of discarding it.
 		if config.IsHubManagedAgent() {
-			return fmt.Errorf("hub rejected this agent's credentials: %w", err)
+			return &hubError{msg: "hub rejected this agent's credentials: " + err.Error(), err: err}
 		}
-		return fmt.Errorf("authentication failed, login to hub with 'scion hub auth login'")
+		return &hubError{msg: "authentication failed, login to hub with 'scion hub auth login'", err: err}
 	}
-	if config.IsHubManagedAgent() {
-		return err
+	if config.IsHubManagedAgent() || !shouldSuggestLocalOnly(err) {
+		return &hubError{msg: err.Error(), err: err}
 	}
-	return fmt.Errorf("%w\n\nTo use local-only mode, run: scion hub disable", err)
+	return &hubError{msg: err.Error() + localOnlyHint, err: err}
+}
+
+// shouldSuggestLocalOnly reports whether the local-only hint is relevant for
+// err: true for connectivity failures (no structured API response) and 5xx.
+func shouldSuggestLocalOnly(err error) bool {
+	var apiErr *apiclient.APIError
+	if !errors.As(err, &apiErr) {
+		return true
+	}
+	return apiErr.IsServerError()
 }
 
 // GetProjectID looks up the project ID from HubContext or settings.
