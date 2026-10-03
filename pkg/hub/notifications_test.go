@@ -26,7 +26,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -103,42 +102,6 @@ func (d *recordingDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agen
 func (d *recordingDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) error {
 	return nil
 }
-
-// recordingBroker is a mock MessageBroker that records Publish calls.
-type recordingBroker struct {
-	mu        sync.Mutex
-	publishes []brokerPublish
-}
-
-type brokerPublish struct {
-	topic string
-	msg   *messages.StructuredMessage
-}
-
-func (b *recordingBroker) Publish(_ context.Context, topic string, msg *messages.StructuredMessage) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.publishes = append(b.publishes, brokerPublish{topic: topic, msg: msg})
-	return nil
-}
-
-func (b *recordingBroker) Subscribe(_ string, _ eventbus.EventHandler) (eventbus.Subscription, error) {
-	return &noopSubscription{}, nil
-}
-
-func (b *recordingBroker) Close() error { return nil }
-
-func (b *recordingBroker) getPublishes() []brokerPublish {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	result := make([]brokerPublish, len(b.publishes))
-	copy(result, b.publishes)
-	return result
-}
-
-type noopSubscription struct{}
-
-func (s *noopSubscription) Unsubscribe() error { return nil }
 
 // notificationTestEnv holds all components for a notification test.
 type notificationTestEnv struct {
@@ -501,32 +464,24 @@ func TestNotificationDispatcher_UserSubscriberInboxWithBroker(t *testing.T) {
 	}
 	require.NoError(t, env.store.CreateNotificationSubscription(context.Background(), userSub))
 
-	// Set up a broker proxy — notifications are routed through the broker so
-	// external integrations (Telegram, Discord) can render state-change cards.
-	rb := &recordingBroker{}
-	proxy := NewMessageBrokerProxy(rb, env.store, env.pub, func() AgentDispatcher { return env.dispatcher }, slog.Default())
-	env.nd.SetBrokerProxy(proxy)
+	// A real, started broker proxy: its deliverToUser subscriber persists the
+	// published notification, so the notifier must not write the row too
+	// (ptone/scion#1906). A non-recording mock here masked the duplicate.
+	bus := env.startRealBrokerProxy(t)
 
 	env.nd.Start()
 	defer env.nd.Stop()
 
 	env.publishStatus("completed")
 
-	// Wait for processing
-	time.Sleep(300 * time.Millisecond)
+	// Exactly one inbox row, written by the broker path.
+	msgs := env.settledUserRows(t, "user-broker-inbox")
+	assert.Len(t, msgs, 1, "the notification must be persisted exactly once when a broker is present")
 
 	// Broker should receive the notification for external integrations.
-	publishes := rb.getPublishes()
+	publishes := bus.published()
 	require.Len(t, publishes, 1, "broker should receive notification publish")
-	assert.Equal(t, messages.TypeStateChange, publishes[0].msg.Type)
-
-	// Inbox message should also be created directly for the web UI.
-	msgs, err := env.store.ListMessages(context.Background(), store.MessageFilter{
-		RecipientID: "user-broker-inbox",
-		ProjectID:   env.project.ID,
-	}, store.ListOptions{})
-	require.NoError(t, err)
-	assert.Len(t, msgs.Items, 1, "inbox message should be created directly even when broker is present")
+	assert.Equal(t, messages.TypeStateChange, publishes[0].Type)
 }
 
 func TestNotificationDispatcher_UserSubscriberInboxWaitingForInput(t *testing.T) {
@@ -967,10 +922,8 @@ func TestNotificationDispatcher_BrokerUsedForUserNotification(t *testing.T) {
 	}
 	require.NoError(t, env.store.CreateNotificationSubscription(context.Background(), userSub))
 
-	// Set up a recording broker and wire it as the broker proxy
-	rb := &recordingBroker{}
-	proxy := NewMessageBrokerProxy(rb, env.store, env.pub, func() AgentDispatcher { return env.dispatcher }, slog.Default())
-	env.nd.SetBrokerProxy(proxy)
+	// A real, started broker proxy (see UserSubscriberInboxWithBroker).
+	bus := env.startRealBrokerProxy(t)
 
 	// Also set up a recording channel — should also receive the notification
 	// as a fallback for deployments without broker plugins.
@@ -986,22 +939,15 @@ func TestNotificationDispatcher_BrokerUsedForUserNotification(t *testing.T) {
 
 	env.publishStatus("completed")
 
-	// Wait for processing
-	time.Sleep(300 * time.Millisecond)
+	// Inbox message persisted exactly once, by the broker path.
+	msgs := env.settledUserRows(t, "user-broker")
+	assert.Len(t, msgs, 1, "the notification must be persisted exactly once")
 
 	// Broker should receive the notification for external integrations.
-	publishes := rb.getPublishes()
+	publishes := bus.published()
 	require.Len(t, publishes, 1, "broker should receive notification publish")
-	assert.Equal(t, messages.TypeStateChange, publishes[0].msg.Type)
-	assert.Equal(t, "COMPLETED", publishes[0].msg.Status)
-
-	// Inbox message should be created directly for the web UI.
-	msgs, err := env.store.ListMessages(context.Background(), store.MessageFilter{
-		RecipientID: "user-broker",
-		ProjectID:   env.project.ID,
-	}, store.ListOptions{})
-	require.NoError(t, err)
-	assert.Len(t, msgs.Items, 1, "inbox message should be created directly")
+	assert.Equal(t, messages.TypeStateChange, publishes[0].Type)
+	assert.Equal(t, "COMPLETED", publishes[0].Status)
 
 	// Channel registry should also be called as a fallback.
 	assert.Len(t, ch.getDeliveries(), 1, "channel registry should receive the notification")

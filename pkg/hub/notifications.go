@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -327,13 +329,21 @@ func (nd *NotificationDispatcher) storeAndDispatch(ctx context.Context, sub *sto
 		nd.log.Info("Notification dispatched to user via SSE",
 			"subscriberID", sub.SubscriberID, "notificationID", notif.ID)
 
-		// Persist an inbox message for the web UI.
-		nd.createInboxMessage(ctx, sub, notif, agent)
-
-		// Route through the broker so external integrations (Telegram,
-		// Discord) receive state-change messages as rich cards.
-		if nd.brokerProxy != nil {
-			nd.dispatchToBroker(ctx, sub, notif, agent.ID, agent.Slug)
+		// Persist exactly one inbox message for the web UI (ptone/scion#1906).
+		// With a broker configured, the broker's deliverToUser subscription
+		// persists the published message and emits the user.message SSE
+		// event, so writing the inbox row here as well duplicated the DM.
+		if nd.persistsViaInbox(sub) {
+			nd.createInboxMessage(ctx, sub, notif, agent)
+			if nd.brokerProxy != nil {
+				// Federated corner (see persistsViaInbox): deliverToUser
+				// will refuse to persist, but plugins still get the card.
+				nd.publishToBroker(ctx, sub, notif, agent)
+			}
+		} else if !nd.dispatchToBroker(ctx, sub, notif, agent) {
+			// Nothing reached the broker's persisting subscriber; fall back
+			// so the notification is not lost from the inbox.
+			nd.createInboxMessage(ctx, sub, notif, agent)
 		}
 
 		// Channel registry is a fallback for deployments without a broker.
@@ -461,43 +471,81 @@ func (nd *NotificationDispatcher) dispatchToChannels(ctx context.Context, sub *s
 	nd.channelRegistry.Dispatch(ctx, structuredMsg)
 }
 
-// dispatchToBroker publishes a user notification through the message broker proxy
-// so a broker plugin can render it (e.g., as a rich interactive card in a chat app).
-// This is fire-and-forget; errors are logged but do not affect the notification pipeline.
-func (nd *NotificationDispatcher) dispatchToBroker(ctx context.Context, sub *store.NotificationSubscription, notif *store.Notification, watchedAgentID, watchedSlug string) {
+// persistsViaInbox reports whether the notifier itself must write the inbox
+// row for sub. Without a broker it always does. With a broker, the broker's
+// deliverToUser persists the published message instead — except for a
+// federated (non-UUID) subscriber while G2 write-deny is ON: deliverToUser
+// cannot resolve a DM conversation for a non-UUID principal and, under
+// write-deny, drops the message, whereas createInboxMessage carries the G2
+// exemption for exactly this population. Keep this in step with the DM
+// conversation branch of MessageBrokerProxy.deliverToUser.
+func (nd *NotificationDispatcher) persistsViaInbox(sub *store.NotificationSubscription) bool {
+	if nd.brokerProxy == nil {
+		return true
+	}
+	if _, err := uuid.Parse(sub.SubscriberID); err == nil {
+		return false
+	}
+	return nd.writeDenyEnabled != nil && nd.writeDenyEnabled()
+}
+
+// notificationMessageBody picks the body for a user notification message.
+// Actionable notifications carry the agent's current message (the raw
+// question); everything else uses the formatted notification text. Shared by
+// the inbox and broker paths so whichever one persists stores the same body.
+func notificationMessageBody(notif *store.Notification, agent *store.Agent) string {
+	if agent.Message != "" && strings.EqualFold(notif.Status, "WAITING_FOR_INPUT") {
+		return agent.Message
+	}
+	return notif.Message
+}
+
+// dispatchToBroker publishes a user notification through the message broker
+// proxy, whose user-message subscription persists it and emits the SSE event.
+// The subscription is ensured first: it is otherwise only created on agent
+// lifecycle events, and a publish with no subscriber would lose the inbox row.
+// Returns false when the publish definitely did not reach that subscriber, so
+// the caller can persist directly instead.
+func (nd *NotificationDispatcher) dispatchToBroker(ctx context.Context, sub *store.NotificationSubscription, notif *store.Notification, agent *store.Agent) bool {
+	nd.brokerProxy.subscribeProjectUserMessages(sub.ProjectID)
+	err := nd.publishToBroker(ctx, sub, notif, agent)
+	// A full subscriber buffer is ambiguous (another subscriber may be the
+	// one that dropped); prefer a possibly missing row over a duplicate.
+	return err == nil || errors.Is(err, eventbus.ErrSubscriberBufferFull)
+}
+
+// publishToBroker publishes the notification on the user-message topic so a
+// broker plugin can render it (e.g., as a rich interactive card in a chat app).
+// Errors are logged and returned; they do not affect the notification pipeline.
+func (nd *NotificationDispatcher) publishToBroker(ctx context.Context, sub *store.NotificationSubscription, notif *store.Notification, agent *store.Agent) error {
 	msgType := notificationMessageType(notif.Status)
 	structuredMsg := messages.NewNotification(
-		"agent:"+watchedSlug,
+		"agent:"+agent.Slug,
 		"user:"+sub.SubscriberID,
-		notif.Message,
+		notificationMessageBody(notif, agent),
 		msgType,
 	)
-	structuredMsg.SenderID = watchedAgentID
+	structuredMsg.SenderID = agent.ID
 	structuredMsg.RecipientID = sub.SubscriberID
 	structuredMsg.Status = strings.ToUpper(notif.Status)
 
 	if err := nd.brokerProxy.PublishUserMessage(ctx, sub.ProjectID, sub.SubscriberID, structuredMsg); err != nil {
 		nd.log.Error("Failed to dispatch notification through broker",
 			"subscriberID", sub.SubscriberID, "notificationID", notif.ID, "error", err)
-	} else {
-		nd.log.Info("Notification dispatched to user via broker",
-			"subscriberID", sub.SubscriberID, "notificationID", notif.ID)
+		return err
 	}
+	nd.log.Info("Notification dispatched to user via broker",
+		"subscriberID", sub.SubscriberID, "notificationID", notif.ID)
+	return nil
 }
 
 // createInboxMessage persists an inbox Message for a user notification so
 // that it appears in the user's message feed alongside agent conversations.
-// This is the non-broker path; when a broker is present, the broker's
-// deliverToUser callback handles message persistence instead.
+// This is the non-broker path (see persistsViaInbox); when a broker is
+// present, the broker's deliverToUser callback handles persistence instead.
 func (nd *NotificationDispatcher) createInboxMessage(ctx context.Context, sub *store.NotificationSubscription, notif *store.Notification, agent *store.Agent) {
 	msgType := notificationMessageType(notif.Status)
-
-	// Use the agent's current message (the raw question/status text) for
-	// actionable notifications; fall back to the formatted notification message.
-	msgBody := notif.Message
-	if agent.Message != "" && strings.EqualFold(notif.Status, "WAITING_FOR_INPUT") {
-		msgBody = agent.Message
-	}
+	msgBody := notificationMessageBody(notif, agent)
 
 	storeMsg := &store.Message{
 		ID:          api.NewUUID(),
