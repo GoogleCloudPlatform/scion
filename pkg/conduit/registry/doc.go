@@ -36,14 +36,19 @@
 //   - Generations are derived from the database (an atomic upsert that
 //     increments the stored value), never from wall time, so they are
 //     strictly increasing per instance_id even if the clock goes backwards.
-//     The reaper therefore never deletes relay_instances rows.
+//     The reaper therefore never deletes relay_instances rows; only
+//     [Registry.PruneRelayInstances] removes rows that have had no sessions
+//     and no heartbeat for a long horizon (default 7 days).
 //   - connection_epoch comes from a durable per-principal counter
 //     (conduit_principal_epochs) bumped by upsert … RETURNING in the same
 //     transaction as the session insert. It is never derived from existing
 //     session rows and never regresses.
 //   - Routing filters before it ranks ([Registry.Eligible]): live ∧ ¬draining
 //     ∧ project ∧ exec_scope ∧ current incarnation ∧ capability ∧ current
-//     epoch; only then freshest-first.
+//     epoch; only then freshest-first. exec_scope matching is exact; only
+//     an explicit [Want.AnyExecScope] (stateless operations) disables it.
+//     Sessions on a draining relay stay eligible but rank last; draining
+//     sessions are excluded.
 //   - Admission is fenced ([Registry.Admission], [Registry.IsAdmissible]) and
 //     fails closed: if authoritative state cannot be read, the result is
 //     "not admissible" together with the error.
