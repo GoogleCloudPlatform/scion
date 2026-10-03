@@ -20,12 +20,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -181,5 +185,125 @@ func TestAgentDeleteEngine_FinalizeSeamErrorRollsBack(t *testing.T) {
 				assert.True(t, agentGone(t, s, agent.ID))
 			}
 		})
+	}
+}
+
+// hookRecordingExecutor records lifecycle hook executions.
+type hookRecordingExecutor struct {
+	mu       sync.Mutex
+	triggers []string
+}
+
+func (x *hookRecordingExecutor) Execute(_ context.Context, _ *store.LifecycleHook, _ *store.Agent, trigger string) error {
+	x.mu.Lock()
+	x.triggers = append(x.triggers, trigger)
+	x.mu.Unlock()
+	return nil
+}
+
+func (x *hookRecordingExecutor) fired(trigger string) int {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	n := 0
+	for _, tr := range x.triggers {
+		if tr == trigger {
+			n++
+		}
+	}
+	return n
+}
+
+// Acceptance (e): no hub-emitted event fires a stopped or error hook on a
+// soft or a failed delete, and lease renewals of an already-stopped agent
+// fire no hook.
+func TestAgentDeleteEngine_NoStoppedOrErrorHook(t *testing.T) {
+	setDeleteKnob(t, &deleteLeaseRenewInterval, 20*time.Millisecond)
+	for _, tc := range []struct {
+		name  string
+		phase state.Phase
+		fail  bool
+	}{
+		{"running soft", state.PhaseRunning, false},
+		{"running failed", state.PhaseRunning, true},
+		{"stopped soft with renewals", state.PhaseStopped, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, _, disp := engineTestServer(t)
+			srv.config.SoftDeleteRetention = time.Hour
+			ctx := context.Background()
+			for _, trigger := range []string{store.LifecycleHookTriggerStopped, store.LifecycleHookTriggerError} {
+				require.NoError(t, s.CreateLifecycleHook(ctx, &store.LifecycleHook{
+					ID: uuid.NewString(), Name: "hook-" + trigger, ScopeType: store.LifecycleHookScopeHub,
+					Trigger: trigger, Enabled: true, ExecutionIdentity: uuid.NewString(),
+					Action: &store.LifecycleHookAction{
+						Type: store.LifecycleHookActionHTTP, Method: http.MethodPost,
+						URL: "http://hooks.invalid/x", OnError: store.LifecycleHookOnErrorLog, TimeoutSeconds: 1,
+					},
+					Created: time.Now(), Updated: time.Now(),
+				}))
+			}
+			exec := &hookRecordingExecutor{}
+			bus := srv.events.(*deleteRecordingPublisher).EventPublisher
+			ev := NewLifecycleHookEvaluator(s, bus, exec, slog.Default())
+			ev.Start()
+			defer ev.Stop()
+
+			agent := setupBrokerAgentInPhase(t, s, "hooks-"+strings.ReplaceAll(tc.name, " ", "-"), tc.phase)
+			// The agent's own earlier transition (as in production).
+			srv.events.PublishAgentStatus(ctx, mustGetAgent(t, s, agent.ID))
+			require.Eventually(t, func() bool {
+				return tc.phase != state.PhaseStopped || exec.fired(store.LifecycleHookTriggerStopped) == 1
+			}, 3*time.Second, 10*time.Millisecond)
+			base := exec.fired(store.LifecycleHookTriggerStopped)
+
+			if tc.fail {
+				disp.setFn(func(context.Context, *store.Agent) error { return errors.New("broker boom") })
+			} else {
+				disp.setFn(func(context.Context, *store.Agent) error {
+					time.Sleep(120 * time.Millisecond) // several renewals
+					return nil
+				})
+			}
+			rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+			if tc.fail {
+				require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+			} else {
+				require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+			}
+			time.Sleep(200 * time.Millisecond) // let the evaluator drain
+			assert.Equal(t, base, exec.fired(store.LifecycleHookTriggerStopped), "no stopped hook")
+			assert.Zero(t, exec.fired(store.LifecycleHookTriggerError), "no error hook")
+		})
+	}
+}
+
+// Routed item: a failed marker from an earlier attempt does not survive a
+// soft delete, so a restored agent carries no stale banner.
+func TestAgentDeleteEngine_SoftFinishClearsFailedMarker(t *testing.T) {
+	srv, s, _, disp := engineTestServer(t)
+	srv.config.SoftDeleteRetention = time.Hour
+	agent := setupBrokerAgentInPhase(t, s, "softclear", state.PhaseRunning)
+
+	disp.setFn(func(context.Context, *store.Agent) error { return errors.New("broker boom") })
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+	require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+	require.Equal(t, store.DeletionCodeRuntimeError, mustGetAgent(t, s, agent.ID).DeletionCode)
+
+	disp.setFn(nil)
+	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	got := mustGetAgent(t, s, agent.ID)
+	assert.False(t, got.DeletedAt.IsZero())
+	assert.Equal(t, store.DeletionStateNone, got.DeletionState)
+	assert.Empty(t, got.DeletionCode)
+	assert.Empty(t, got.DeletionError)
+	assert.Nil(t, store.ComputeAgentDeletion(got, time.Now()))
+
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+agent.ProjectID+"/agents/"+agent.ID+"/restore", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var body map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	if raw, ok := body["deletion"]; ok {
+		assert.Equal(t, "null", string(raw), "no stale banner after restore")
 	}
 }
