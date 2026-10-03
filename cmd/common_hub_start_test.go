@@ -430,6 +430,11 @@ func TestCreateAgentWithBrokerResolution_NoRuntimeBroker(t *testing.T) {
 		{"usable brokers, non-interactive", []map[string]interface{}{{"id": "b1", "name": "one", "status": "online"}}, "--broker"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			// Never prompt, whatever stdin is: autoConfirm skips the
+			// interactive picker even on a TTY.
+			origAutoConfirm := autoConfirm
+			autoConfirm = true
+			t.Cleanup(func() { autoConfirm = origAutoConfirm })
 			calls := 0
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls++
