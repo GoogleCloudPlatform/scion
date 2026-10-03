@@ -531,8 +531,20 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			if dispatchErr != nil {
 				if stopErr == nil {
 					// The stop leg succeeded, so the container is down:
-					// release the slot as an explicit stop would.
+					// release the slot and record the stopped state as an
+					// explicit stop would, so the agent does not keep
+					// showing its pre-restart phase until the next
+					// heartbeat.
 					s.releaseBrokerQuota(ctx, agent)
+					zero := 0
+					if err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+						Phase:           string(state.PhaseStopped),
+						ContainerStatus: "stopped",
+						ExitCode:        &zero,
+					}); err != nil {
+						slog.Warn("Restart: failed to record stopped state after start leg failed",
+							"agent_id", id, "error", err)
+					}
 				} else {
 					// The container may still be running: keep a
 					// reservation this call did not create.

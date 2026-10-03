@@ -30,6 +30,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
@@ -344,6 +345,42 @@ func TestRecordedRuntime_BulkResetAuthMarksRuntimeUnavailable(t *testing.T) {
 		}
 	}
 	require.True(t, found, "agent missing from failed entries: %s", rec.Body.String())
+}
+
+// startErrClient is mockRuntimeBrokerClient with StartAgent failing and
+// every other call succeeding.
+type startErrClient struct {
+	*mockRuntimeBrokerClient
+	startErr error
+}
+
+func (c startErrClient) StartAgent(context.Context, string, string, string, string, string, string, string, string, string, string, map[string]string, []ResolvedSecret, *api.ScionConfig, []api.SharedDir, bool, bool, StartExtras) (*RemoteAgentResponse, error) {
+	c.startCalled = true
+	return nil, c.startErr
+}
+
+// TestRecordedRuntime_RestartStartLegFailureRecordsStopped pins that when a
+// restart's stop leg succeeds and its start leg fails, the hub records the
+// agent as stopped rather than leaving its pre-restart phase in place, and
+// still relays the start leg's runtime_unavailable answer.
+func TestRecordedRuntime_RestartStartLegFailureRecordsStopped(t *testing.T) {
+	srv, s := testServer(t)
+	agent := setupBrokerAgentInPhase(t, s, "restart-start-fails", "running")
+	agent.Runtime = "kubernetes"
+	require.NoError(t, s.UpdateAgent(context.Background(), agent))
+	mockClient := &mockRuntimeBrokerClient{}
+	d := NewHTTPAgentDispatcherWithClient(s, startErrClient{mockClient, runtimeUnavailableErr()}, false, slog.Default())
+	d.SetTokenGenerator(staticTokenGenerator{})
+	srv.SetDispatcher(d)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/restart", nil)
+
+	requireRelayed503(t, rec)
+	require.True(t, mockClient.stopCalled, "stop leg was not dispatched")
+	got, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.Equal(t, string(state.PhaseStopped), got.Phase)
+	require.Equal(t, "stopped", got.ContainerStatus)
 }
 
 // TestRecordedRuntime_ForceDeleteRemovesHubRecord pins that force=true still
