@@ -2044,6 +2044,16 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('default_timezone')) {
       payload.default_timezone = this.defaultTimezone || '';
     }
+    // GCP identity defaults: same "" = delete contract. The service account
+    // only applies in "assign" mode, so it is cleared for any other mode
+    // (mirrors buildLayer1Payload).
+    if (ok('default_gcp_identity_mode')) {
+      payload.default_gcp_identity_mode = this.defaultGCPIdentityMode || '';
+    }
+    if (ok('default_gcp_identity_service_account_id')) {
+      payload.default_gcp_identity_service_account_id =
+        this.defaultGCPIdentityMode === 'assign' ? this.defaultGCPIdentitySAID || '' : '';
+    }
 
     // Server
     const server: Record<string, unknown> = {};
