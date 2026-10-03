@@ -403,6 +403,21 @@ substrate runtime first (ordinary `scion delete`/broker-API delete, same as
 any other agent), confirm none remain, and only then remove or repoint the
 substrate configuration.
 
+A **construct-time** failure of the default substrate runtime behaves the
+opposite way from a config-validation failure: a Kubernetes-client build
+error, or a `substrate.Dial` failure (trust-bundle/CA load or API dial — for
+example an API-server blip at boot), is treated as potentially transient, so
+the broker starts **degraded** rather than refusing to start. That degraded
+state is **not** self-healing: the default runtime is resolved once at
+startup and is not rebuilt until the broker process restarts, and `/healthz`
+still returns healthy (the degraded runtime is logged as the `error` runtime
+but counts as an available runtime in the health check), so no liveness probe
+restarts the broker on its own. **Alert on the broker log line reporting the
+default runtime as `error` and restart the broker to rebuild the runtime.**
+Named (non-default) profiles are unaffected — they are resolved per request,
+so a profile whose construction fails retries on the next request rather than
+staying degraded until a restart.
+
 ## Known limits
 
 The runtime's behavior in areas outside this broker's control — logging,

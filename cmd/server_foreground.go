@@ -2735,13 +2735,22 @@ func colocatedBrokerRegisters(cfg *config.GlobalConfig, s store.Store) bool {
 // substrate runtime whose construct-time dependencies failed (building the
 // Kubernetes client, or substrate.Dial's trust-bundle/CA load and API dial,
 // e.g. on an API-server blip at boot) — refusing on those would turn a
-// transient outage into a crash loop; a pod restart is the retry. It also
+// transient outage into a boot crash loop. The broker starts degraded
+// instead, but that degraded state is not self-healing: the default runtime
+// is resolved once here and is not rebuilt until the broker process
+// restarts, and /healthz still reports healthy (the "error" runtime counts
+// as an available runtime in the health check), so nothing restarts the
+// broker automatically. Operators must alert on the logged degraded "error"
+// runtime line and restart the broker to rebuild the runtime. It also
 // includes, for example, a Kubernetes client that fails Verify at startup,
 // or a missing container CLI.
 //
 // Named profiles other than the default are unaffected: those are resolved
 // lazily, per request, and this check only ever sees the one runtime
-// GetRuntime("", "") resolves to at startup.
+// GetRuntime("", "") resolves to at startup. A per-request profile whose
+// construction fails is not memoized on the error, so it retries
+// construction on the next request rather than staying degraded until a
+// restart (see resolveManagerForOpts).
 func refuseErrorRuntimeAtStartup(rt runtime.Runtime) error {
 	er, ok := rt.(*runtime.ErrorRuntime)
 	if !ok || !errors.Is(er.Err, runtime.ErrSubstrateProfileInvalid) {
