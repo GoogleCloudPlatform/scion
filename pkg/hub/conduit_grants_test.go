@@ -781,6 +781,20 @@ func TestServer_ConduitGrantKeyActivationSetting(t *testing.T) {
 	assert.Equal(t, 2*time.Hour, srv.conduitGrantKeyActivation())
 }
 
+// nilSecretStore returns (nil, nil) from GetSecret, as a store
+// implementation may for a missing row.
+type nilSecretStore struct{ store.SecretStore }
+
+func (nilSecretStore) GetSecret(context.Context, string, string, string) (*store.Secret, error) {
+	return nil, nil
+}
+
+func TestDBConduitGrantKeyStore_NilRecordIsNotFound(t *testing.T) {
+	db := newTestDBGrantKeyStore(t, nilSecretStore{})
+	_, _, err := db.Load(context.Background())
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
 type failingGrantKeyStore struct{}
 
 func (failingGrantKeyStore) Load(context.Context) (*grant.KeyRing, int, error) {

@@ -144,7 +144,7 @@ func (d *dbConduitGrantKeyStore) Load(ctx context.Context) (*grant.KeyRing, int,
 	if err != nil {
 		return nil, 0, err
 	}
-	if rec.EncryptedValue == "" {
+	if rec == nil || rec.EncryptedValue == "" {
 		return nil, 0, store.ErrNotFound
 	}
 	plain, _, err := secret.DecryptValue(rec.EncryptedValue, d.encryptionKey)
