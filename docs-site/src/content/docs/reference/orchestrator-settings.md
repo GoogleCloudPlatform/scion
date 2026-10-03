@@ -118,6 +118,7 @@ runtimes:
 | `shared_dir_size` | string | (Kubernetes) Default size for each shared-dir PVC, as a positive Kubernetes quantity (e.g. `10Gi`, `1Ti`). Same precedence as `shared_dir_storage_class`. Default: `10Gi`. |
 | `safe_to_evict` | bool | (Kubernetes) Set to `false` to add the `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` annotation to agent pods. Only `false` has an effect; unset or `true` adds nothing. A profile's value wins over this, and a template or agent `kubernetes.safeToEvict` wins over both. Ignored, with a validation warning, on other runtime types. |
 | `shared_dir_storage_backend` | string | `local` or `nfs`. Overrides [`server.shared_dir_storage.backend`](/scion/reference/server-config/#per-profile-backend) for agents whose profile uses this runtime. A profile's value wins over this. Read from global settings only. |
+| `max_agents` | int | Hub-dispatched agents only. Caps running agents on each broker for every profile that uses this runtime entry, shared between those profiles. A profile's own value wins over this. `0` or unset means no own limit. Read from the Hub's global settings only. See [Per-profile agent limit](#per-profile-agent-limit). |
 | `env` | map | Environment variables to set for the runtime. |
 
 :::note
@@ -228,6 +229,7 @@ profiles:
 | `shared_dir_size` | string | (Kubernetes) Size for each shared-dir PVC created under this profile. Same precedence as `shared_dir_storage_class`. |
 | `safe_to_evict` | bool | (Kubernetes) Safe-to-evict setting for agent pods created under this profile. Wins over the runtime entry's value; a template or agent `kubernetes.safeToEvict` wins over this. |
 | `shared_dir_storage_backend` | string | `local` or `nfs`. Overrides [`server.shared_dir_storage.backend`](/scion/reference/server-config/#per-profile-backend) for agents using this profile. Wins over the runtime entry's value. Read from global settings only. |
+| `max_agents` | int | Hub-dispatched agents only. Caps running agents on each broker that use this profile. Wins over the runtime entry's value. `0` or unset means no own limit. Read from the Hub's global settings only. See [Per-profile agent limit](#per-profile-agent-limit). |
 
 **Shared-dir PVC class and size (Kubernetes).** Each key is resolved separately, and the first source that sets it wins: the agent's or template's `kubernetes:` block, then the profile, then the profile's runtime entry, then the built-in default (the cluster's default class and `10Gi`). On GKE Autopilot, set an RWX class such as `standard-rwx`. See [Shared Directory PVCs](/scion/hosted/ha/kubernetes/#shared-directory-pvcs).
 
@@ -241,6 +243,32 @@ profiles:
 4. Otherwise no `TZ` is sent and the container uses the image default (UTC).
 
 There is no runtime-profile step: neither the profile's `timezone` field nor a `TZ` in its `env` map is used. The Runtime Broker also ignores `TZ` from broker-local templates, broker settings (harness-config entry `env`) and the agent's persisted `scion-agent.json`, and logs a warning for each non-empty value it drops. To give every agent on a broker a timezone, set a broker-scope `TZ` environment variable on the Hub instead. Local mode (no Hub) is unaffected.
+
+### Per-profile agent limit
+
+`max_agents` on a profile or a runtime entry gives the agents that use it a capacity limit of their own on each broker, separate from the broker-wide [`max_agents_per_broker`](/scion/hosted/ha/multi-broker/) limit. Use it when one broker serves profiles with very different capacity, for example a Kubernetes profile with a large cluster behind it and a Docker profile on the broker's own host.
+
+- **Which limit applies.** The profile's `max_agents` if set, else the one on the profile's runtime entry. A runtime entry's limit is one count shared by every profile on that entry. A profile without its own value cannot opt out of its runtime entry's limit.
+- **Counting.** An agent with its own limit counts only against that limit, not toward `max_agents_per_broker`. Every other agent counts toward `max_agents_per_broker` as before.
+- **Zero means unset.** `0`, or no value, means no own limit. Negative values are rejected by settings validation.
+- **Which profile.** The Hub records the profile when the agent is created: the profile named in the request, else the broker's default profile. Later starts, stops and restarts use the recorded profile, even if the broker's default changes.
+- **Where it is read.** From the Hub's global settings (`~/.scion/settings.yaml`) and the Hub's database settings, never from a project's settings. When the Hub keeps settings in its database, the `runtimes` and `profiles` saved through the admin server configuration apply.
+- **Changing the limit.** Lowering a limit below the current count stops nothing; new starts are refused until agents stop. A request over the limit fails with `429 Too Many Requests` (`quota_exceeded`) and a message naming the profile or runtime entry and the limit. When a limit is added or removed, the Hub's periodic quota check moves running agents to the count that now applies. Agents with a launch in progress are moved on a later pass.
+
+```yaml
+runtimes:
+  k8s:
+    type: kubernetes
+    max_agents: 40      # shared by every profile on this runtime entry
+profiles:
+  gke:
+    runtime: k8s
+  gke-small:
+    runtime: k8s
+    max_agents: 5       # own limit, separate from the k8s count
+  local:
+    runtime: docker     # no own limit: counts toward max_agents_per_broker
+```
 
 ## Telemetry Configuration (`telemetry`)
 
