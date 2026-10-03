@@ -104,7 +104,7 @@ func (m *ExternalBearerSnapshotMetrics) GetSnapshot() *ExternalBearerMetricsSnap
 	defer m.mu.Unlock()
 
 	snap := &ExternalBearerMetricsSnapshot{
-		Since:                     m.since.Format(time.RFC3339),
+		Since:                     m.since.UTC().Format(time.RFC3339),
 		ExternalBearerTotal:       make(map[string]int64, len(externalBearerOutcomes())),
 		GoogleValidatorCacheTotal: make(map[string]int64, len(googleValidatorCacheResults())),
 		GEExchangeRequestsTotal:   make(map[string]int64, len(geExchangeOutcomes())),

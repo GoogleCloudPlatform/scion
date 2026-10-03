@@ -106,11 +106,34 @@ func (s *AgentStore) updateAgentDeletionOnce(ctx context.Context, uid uuid.UUID,
 		updateAgentDeletionHook(ctx, tx, uid.String())
 	}
 
+	n, err := applyAgentDeletionFields(ctx, tx, row, set)
+	if err != nil {
+		return 0, false, err
+	}
+	if n == 0 {
+		// The row changed between the read and the write (no row lock on
+		// this dialect). Re-read and re-evaluate.
+		return 0, true, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, false, err
+	}
+	return n, false, nil
+}
+
+// applyAgentDeletionFields writes set onto row inside tx, conditional on the
+// state_version it read (bumped). n == 0 means the CAS missed.
+func applyAgentDeletionFields(ctx context.Context, tx *ent.Tx, row *ent.Agent, set store.DeletionFields) (int, error) {
 	now := time.Now()
 	upd := tx.Agent.Update().
-		Where(agent.IDEQ(uid), agent.StateVersionEQ(row.StateVersion)).
-		SetStateVersion(row.StateVersion + 1).
-		SetUpdated(now)
+		Where(agent.IDEQ(row.ID), agent.StateVersionEQ(row.StateVersion)).
+		SetStateVersion(row.StateVersion + 1)
+	if set.KeepUpdated {
+		// The schema's UpdateDefault would stamp updated; pin the old value.
+		upd.SetUpdated(row.Updated)
+	} else {
+		upd.SetUpdated(now)
+	}
 	if set.State != nil {
 		upd.SetDeletionState(*set.State)
 	}
@@ -149,20 +172,15 @@ func (s *AgentStore) updateAgentDeletionOnce(ctx context.Context, uid uuid.UUID,
 	if set.Activity != nil {
 		upd.SetActivity(*set.Activity)
 	}
+	if set.DeletedAt != nil {
+		upd.SetDeletedAt(*set.DeletedAt)
+	}
 
 	n, err := upd.Save(ctx)
 	if err != nil {
-		return 0, false, mapError(err)
+		return 0, mapError(err)
 	}
-	if n == 0 {
-		// The row changed between the read and the write (no row lock on
-		// this dialect). Re-read and re-evaluate.
-		return 0, true, nil
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, false, err
-	}
-	return n, false, nil
+	return n, nil
 }
 
 // outstandingDispatchStates are the broker_dispatch states that mean an

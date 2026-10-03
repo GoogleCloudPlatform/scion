@@ -389,7 +389,7 @@ func authorizeCandidatePage[T any](ctx context.Context, identity Identity, items
 }
 
 func authorizedListCursor(created time.Time, id, binding string) string {
-	return base64.URLEncoding.EncodeToString([]byte(created.Format(time.RFC3339Nano) + "," + id + "," + binding))
+	return base64.URLEncoding.EncodeToString([]byte(created.UTC().Format(time.RFC3339Nano) + "," + id + "," + binding))
 }
 
 // scopedCursorBinding creates a cursor binding that includes the endpoint,

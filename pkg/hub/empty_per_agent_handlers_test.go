@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/stretchr/testify/require"
@@ -138,7 +139,7 @@ func TestCreateAgent_EmptyPerAgent_IgnoresWorkspaceFiles(t *testing.T) {
 
 	var resp CreateAgentResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	require.Contains(t, resp.Warnings, emptyPerAgentWorkspaceFilesIgnoredWarning)
+	require.Contains(t, resp.Warnings, api.WarningEmptyPerAgentWorkspaceFilesIgnored)
 	require.Empty(t, resp.UploadURLs, "no bootstrap upload for empty-per-agent")
 
 	agents := listProjectAgents(t, s, project.ID)

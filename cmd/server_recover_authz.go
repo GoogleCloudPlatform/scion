@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -416,7 +417,7 @@ func recoverDisplayConstraint(c *store.AccessConstraint, out io.Writer) {
 	if len(c.MaximumPermissions) > 0 && len(c.MaximumPermissions) <= 20 {
 		_, _ = fmt.Fprintf(out, "              [%s]\n", strings.Join(c.MaximumPermissions, ", "))
 	}
-	_, _ = fmt.Fprintf(out, "  Created:    %s by %s\n", c.CreatedAt.Format(time.RFC3339), c.CreatedBy)
+	_, _ = fmt.Fprintf(out, "  Created:    %s by %s\n", clitime.Format(c.CreatedAt, clitime.Full), c.CreatedBy)
 }
 
 func recoverPromptConfirmation(out io.Writer, question string) bool {

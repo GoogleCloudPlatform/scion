@@ -118,6 +118,20 @@ type Store interface {
 	// pass-through (the inner callback receives the same transactional store).
 	WithTx(ctx context.Context, fn func(tx Store) error) error
 
+	// FinalizeAgentDeletion is the delete engine's terminal write (design
+	// ptone/scion#2483 §2.3), as ONE transaction: it reads the agent
+	// (row-locked where supported), evaluates pred, and when it holds
+	// either applies set (DeletionFinalizeSoft, with UpdateAgentDeletion's
+	// semantics, Derive included) or removes the agent row and its cascade
+	// (DeletionFinalizeHard, as DeleteAgent). Then, still inside the
+	// transaction and just before commit, it calls hook (when non-nil) with
+	// a transaction-scoped Store, the agent (the post-write row for soft,
+	// the pre-delete row for hard) and the mode; a non-nil hook error rolls
+	// the whole finalize back and is returned. Returns affected=0 with a nil
+	// error when the predicate did not hold or the agent does not exist.
+	// Must not be called from inside WithTx.
+	FinalizeAgentDeletion(ctx context.Context, id string, pred DeletionPredicate, mode DeletionFinalizeMode, set DeletionFields, hook DeletionFinalizeHook) (affected int, err error)
+
 	// Agent operations
 	AgentStore
 
