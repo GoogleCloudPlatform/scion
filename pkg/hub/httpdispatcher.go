@@ -87,8 +87,8 @@ func (c *HTTPRuntimeBrokerClient) ResetAuthAgent(ctx context.Context, brokerID, 
 	return c.transport.ResetAuthAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, token, transportToken)
 }
 
-func (c *HTTPRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
-	return c.transport.DeleteAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, deleteFiles, removeBranch, softDelete, deletedAt)
+func (c *HTTPRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, opts DeleteAgentOptions) error {
+	return c.transport.DeleteAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, opts)
 }
 
 func (c *HTTPRuntimeBrokerClient) MessageAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
@@ -1281,6 +1281,94 @@ func (d *HTTPAgentDispatcher) forgetRuntimeTarget(ctx context.Context, agent *st
 	}
 }
 
+// beginRun mints a fresh run identity for a create, start or restart
+// dispatch and persists it on the agent row before the broker call
+// (ptone/scion#2550). The run ID is always a new UUID, never the launch ID.
+// Persisting first means a delete issued while the broker is still
+// creating the entry already targets the new run. The write is the narrow
+// SetAgentRunID, which neither checks nor bumps state_version, so it cannot
+// conflict with the caller's own later UpdateAgent. A failed write fails
+// the dispatch: sending a run ID the row does not record would make the
+// next delete miss the entry this dispatch creates. The exception is an
+// agent with no row (not found, or an ID that cannot name one): no hub
+// delete can target such an agent, so the dispatch proceeds with the
+// minted ID unrecorded. It returns the minted ID and the ID the row held
+// before, for revertRun.
+func (d *HTTPAgentDispatcher) beginRun(ctx context.Context, agent *store.Agent) (runID, previous string, err error) {
+	previous = agent.RunID
+	runID = uuid.NewString()
+	if d.store != nil && agent.ID != "" {
+		if err := d.store.SetAgentRunID(ctx, agent.ID, runID); err != nil {
+			if !errors.Is(err, store.ErrNotFound) && !errors.Is(err, store.ErrInvalidInput) {
+				return "", "", fmt.Errorf("failed to record the run ID for agent %s: %w", agent.ID, err)
+			}
+			d.log.Warn("Dispatcher: agent has no row; run ID not recorded",
+				"agent_id", agent.ID, "agent", agent.Slug, "run_id", runID, "error", err)
+		}
+	}
+	agent.RunID = runID
+	d.log.Debug("Dispatcher: minted run ID",
+		"agent_id", agent.ID, "agent", agent.Slug, "run_id", runID, "previous_run_id", previous)
+	return runID, previous, nil
+}
+
+// adoptBrokerRunID records the run ID the broker reports for the entry it
+// created or found, when that differs from the one this dispatch minted:
+// a start that found the agent already running keeps the existing entry
+// and reports its run (ptone/scion#2550). The write is a compare-and-swap
+// against the minted ID, so a late response cannot overwrite a newer run
+// ID that a later dispatch has recorded. A response without a run ID (an
+// older broker) keeps the minted value.
+func (d *HTTPAgentDispatcher) adoptBrokerRunID(ctx context.Context, agent *store.Agent, minted string, resp *RemoteAgentResponse) {
+	if resp == nil || resp.Agent == nil || resp.Agent.RunID == "" || resp.Agent.RunID == minted {
+		return
+	}
+	actual := resp.Agent.RunID
+	if d.store != nil && agent.ID != "" {
+		swapped, err := d.store.CompareAndSwapAgentRunID(ctx, agent.ID, minted, actual)
+		if err != nil {
+			d.log.Warn("Dispatcher: failed to record the broker's run ID",
+				"agent_id", agent.ID, "minted_run_id", minted, "broker_run_id", actual, "error", err)
+			return
+		}
+		if !swapped {
+			d.log.Debug("Dispatcher: a newer run ID is recorded; not adopting the broker's",
+				"agent_id", agent.ID, "minted_run_id", minted, "broker_run_id", actual)
+			return
+		}
+	}
+	if agent.RunID == minted {
+		agent.RunID = actual
+	}
+	d.log.Info("Dispatcher: adopted the broker's run ID",
+		"agent_id", agent.ID, "agent", agent.Slug, "minted_run_id", minted, "run_id", actual)
+}
+
+// revertRun restores the run ID the row held before beginRun, when the
+// broker never acted on the dispatch (the request was not sent, or the
+// broker rejected it) or the dispatch was handed to another node, which
+// mints its own. The previous entry is then still the live one, and a
+// delete must keep targeting it. Compare-and-swap against the minted ID,
+// so a newer run is never overwritten.
+func (d *HTTPAgentDispatcher) revertRun(ctx context.Context, agent *store.Agent, minted, previous string) {
+	if d.store != nil && agent.ID != "" {
+		swapped, err := d.store.CompareAndSwapAgentRunID(ctx, agent.ID, minted, previous)
+		if err != nil {
+			d.log.Warn("Dispatcher: failed to restore the previous run ID",
+				"agent_id", agent.ID, "minted_run_id", minted, "previous_run_id", previous, "error", err)
+			return
+		}
+		if !swapped {
+			return
+		}
+	}
+	if agent.RunID == minted {
+		agent.RunID = previous
+	}
+	d.log.Debug("Dispatcher: restored the previous run ID",
+		"agent_id", agent.ID, "minted_run_id", minted, "run_id", previous)
+}
+
 // DispatchAgentCreate creates and starts an agent on the runtime broker.
 func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) (err error) {
 	ctx, span := tracer.Start(ctx, "hub.dispatch.create")
@@ -1320,6 +1408,13 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 		}
 	}()
 
+	runID, _, err := d.beginRun(ctx, agent)
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	req.RunID = runID
+
 	resp, err := d.client.CreateAgent(ctx, agent.RuntimeBrokerID, endpoint, req)
 	if isHashMismatchError(err) {
 		if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
@@ -1332,6 +1427,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 	}
 
 	d.applyBrokerResponse(ctx, agent, resp)
+	d.adoptBrokerRunID(ctx, agent, runID, resp)
 	return nil
 }
 
@@ -1562,6 +1658,15 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 	}()
 	req.GatherEnv = true
 
+	// The first pass creates the agent when no env is missing, so it
+	// carries a run ID like any create. A cross-node hand-off re-dispatches
+	// on the owning node, which mints its own.
+	runID, _, err := d.beginRun(ctx, agent)
+	if err != nil {
+		return nil, err
+	}
+	req.RunID = runID
+
 	// Track which scope provided each key
 	req.EnvSources = d.buildEnvSources(ctx, agent, req.ResolvedEnv)
 
@@ -1589,6 +1694,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 		return nil, err
 	} else if resp != nil {
 		d.applyBrokerResponse(ctx, agent, resp)
+		d.adoptBrokerRunID(ctx, agent, runID, resp)
 	}
 
 	// Second pass: if the broker reported needed keys, check whether any can
@@ -1705,6 +1811,14 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 	}()
 	req.GatherEnv = true
 
+	// finalize_env is the pass that creates the agent after a gather, so it
+	// mints the run ID the new entry carries.
+	runID, _, err := d.beginRun(ctx, agent)
+	if err != nil {
+		return err
+	}
+	req.RunID = runID
+
 	if req.ResolvedEnv == nil {
 		req.ResolvedEnv = map[string]string{}
 	}
@@ -1761,6 +1875,7 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 			}
 			if resp2 != nil {
 				d.applyBrokerResponse(ctx, agent, resp2)
+				d.adoptBrokerRunID(ctx, agent, runID, resp2)
 			}
 			return nil
 		}
@@ -1769,6 +1884,7 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 
 	if resp != nil {
 		d.applyBrokerResponse(ctx, agent, resp)
+		d.adoptBrokerRunID(ctx, agent, runID, resp)
 	}
 	return nil
 }
@@ -2882,6 +2998,13 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
 	}
 
+	runID, previousRunID, err := d.beginRun(ctx, agent)
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	extras.RunID = runID
+
 	resp, err := d.client.StartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, task, projectPath, projectSlug, harnessConfig, harnessConfigID, harnessConfigHash, resolvedEnv, resolvedSecrets, inlineConfig, projectInfo.sharedDirs, projectInfo.sharedWorkspace, resume, extras)
 	if isHashMismatchError(err) {
 		if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
@@ -2903,6 +3026,8 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		// sent is simply left alone — not revoked, not reused — and stays
 		// valid until its own TTL expires.
 		revokeArmed = false
+		// The owning node mints and records its own run ID.
+		d.revertRun(ctx, agent, runID, previousRunID)
 		return d.deferredStart(ctx, agent, &StartDispatchArgs{
 			Task:   task,
 			Resume: resume,
@@ -2920,6 +3045,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		// what counts as confirmed-safe and what does not.
 		revokeArmed = false
 	}
+	if err != nil && isConfirmedStartNotActedOnError(err) {
+		// The broker created nothing: the previous entry, if any, is
+		// still the agent's live run.
+		d.revertRun(ctx, agent, runID, previousRunID)
+	}
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return err
@@ -2927,6 +3057,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 
 	if resp != nil {
 		d.applyBrokerResponse(ctx, agent, resp)
+		d.adoptBrokerRunID(ctx, agent, runID, resp)
 	} else {
 		// The broker accepted the start without a parseable body; the
 		// recorded target is stale all the same.
@@ -2996,9 +3127,21 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
 	}
 
+	// A restart replaces the runtime entry, so the new one gets a new run.
+	runID, previousRunID, err := d.beginRun(ctx, agent)
+	if err != nil {
+		return err
+	}
+	extras.RunID = runID
+
 	err = d.client.RestartAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, resolvedEnv, extras)
 	if errors.Is(err, ErrLifecycleDeferred) {
+		// The owning node mints and records its own run ID.
+		d.revertRun(ctx, agent, runID, previousRunID)
 		return d.deferredRestart(ctx, agent)
+	}
+	if err != nil && isConfirmedStartNotActedOnError(err) {
+		d.revertRun(ctx, agent, runID, previousRunID)
 	}
 	if err == nil {
 		d.forgetRuntimeTarget(ctx, agent)
@@ -3067,7 +3210,21 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 		ctx = withDeleteProjectPath(ctx, info.projectPath)
 	}
 
-	err = d.client.DeleteAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, deleteFiles, removeBranch, softDelete, deletedAt)
+	// Send the row's run ID so the broker deletes only that run's entry,
+	// never a newer run recreated under the same name (ptone/scion#2550).
+	// A row with no run ID (not dispatched since run IDs existed) sends
+	// none, and the broker resolves by name as before.
+	if agent.RunID != "" {
+		d.log.Debug("Dispatcher: delete carries run ID",
+			"agent_id", agent.ID, "agent", agent.Slug, "run_id", agent.RunID)
+	}
+	err = d.client.DeleteAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, DeleteAgentOptions{
+		DeleteFiles:  deleteFiles,
+		RemoveBranch: removeBranch,
+		SoftDelete:   softDelete,
+		DeletedAt:    deletedAt,
+		RunID:        agent.RunID,
+	})
 	if errors.Is(err, ErrLifecycleDeferred) {
 		return d.deferredDelete(ctx, agent, deleteFiles, removeBranch, softDelete, deletedAt)
 	}

@@ -1787,6 +1787,7 @@ authDone:
 	warnings = append(warnings, "Container started but could not be verified as running")
 	return &api.AgentInfo{
 		ID:                    id,
+		RunID:                 runID,
 		Name:                  opts.Name,
 		Phase:                 status,
 		Detached:              detached,

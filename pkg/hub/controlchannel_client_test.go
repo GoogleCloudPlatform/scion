@@ -22,7 +22,6 @@ import (
 	"net/url"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -86,7 +85,7 @@ func TestControlChannelBrokerClient_DeleteAgentSignsTunneledRequest(t *testing.T
 		signer:  signer,
 	}
 
-	err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "", true, false, false, time.Time{})
+	err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "", DeleteAgentOptions{DeleteFiles: true})
 	if err != nil {
 		t.Fatalf("DeleteAgent returned error: %v", err)
 	}
@@ -280,7 +279,7 @@ func TestControlChannelBrokerClient_DeleteAgent404IsIdempotentSuccess(t *testing
 	tunnel := &mockControlChannelTunnel{connected: true, status: http.StatusNotFound}
 	client := &ControlChannelBrokerClient{manager: tunnel}
 
-	if err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", true, false, false, time.Time{}); err != nil {
+	if err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", DeleteAgentOptions{DeleteFiles: true}); err != nil {
 		t.Fatalf("expected nil error for broker 404 on delete, got %v", err)
 	}
 }
@@ -295,7 +294,7 @@ func TestControlChannelBrokerClient_DeleteAgentOtherErrorsPropagate(t *testing.T
 		tunnel := &mockControlChannelTunnel{connected: true, status: status}
 		client := &ControlChannelBrokerClient{manager: tunnel}
 
-		err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", true, false, false, time.Time{})
+		err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", DeleteAgentOptions{DeleteFiles: true})
 		if err == nil {
 			t.Fatalf("status %d: expected error, got nil", status)
 		}
@@ -312,7 +311,7 @@ func TestControlChannelBrokerClient_DeleteAgentForwardsProjectPath(t *testing.T)
 	client := &ControlChannelBrokerClient{manager: tunnel}
 
 	ctx := withDeleteProjectPath(context.Background(), "/home/u/my repo")
-	if err := client.DeleteAgent(ctx, "broker-1", "unused", "agent-1", "proj-1", true, false, false, time.Time{}); err != nil {
+	if err := client.DeleteAgent(ctx, "broker-1", "unused", "agent-1", "proj-1", DeleteAgentOptions{DeleteFiles: true}); err != nil {
 		t.Fatal(err)
 	}
 	q, err := url.ParseQuery(tunnel.lastRequest.Query)
@@ -323,7 +322,7 @@ func TestControlChannelBrokerClient_DeleteAgentForwardsProjectPath(t *testing.T)
 		t.Errorf("projectPath = %q, want %q (query %q)", got, "/home/u/my repo", tunnel.lastRequest.Query)
 	}
 
-	if err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", true, false, false, time.Time{}); err != nil {
+	if err := client.DeleteAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", DeleteAgentOptions{DeleteFiles: true}); err != nil {
 		t.Fatal(err)
 	}
 	if q, _ := url.ParseQuery(tunnel.lastRequest.Query); q.Has("projectPath") {

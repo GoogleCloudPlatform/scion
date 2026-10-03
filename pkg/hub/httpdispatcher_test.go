@@ -80,13 +80,16 @@ type mockRuntimeBrokerClient struct {
 	lastRestartExtras          StartExtras
 	lastInlineConfig           *api.ScionConfig
 	lastCreateReq              *RemoteCreateAgentRequest
-	lastDeleteOpts             struct{ deleteFiles, removeBranch bool }
-	returnErr                  error
-	cleanupErr                 error
-	startReturnResp            *RemoteAgentResponse // custom start response if set
-	cleanupCalls               int
-	cleanupSlugs               []string
-	createWithGatherFunc       func(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error)
+	lastDeleteOpts             struct {
+		deleteFiles, removeBranch bool
+		runID                     string
+	}
+	returnErr            error
+	cleanupErr           error
+	startReturnResp      *RemoteAgentResponse // custom start response if set
+	cleanupCalls         int
+	cleanupSlugs         []string
+	createWithGatherFunc func(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error)
 	// startCallCount and failFirstStartWith let a test simulate a
 	// hash-mismatch-then-retry sequence: the first StartAgent call fails with
 	// failFirstStartWith, and the second (and later) calls succeed.
@@ -171,14 +174,15 @@ func (m *mockRuntimeBrokerClient) ResetAuthAgent(_ context.Context, _, _, _, _, 
 	return m.returnErr
 }
 
-func (m *mockRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
+func (m *mockRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, opts DeleteAgentOptions) error {
 	m.deleteCalled = true
 	m.lastDeleteProjectPathQuery = deleteProjectPathQuery(ctx)
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
 	m.lastAgentID = agentID
-	m.lastDeleteOpts.deleteFiles = deleteFiles
-	m.lastDeleteOpts.removeBranch = removeBranch
+	m.lastDeleteOpts.deleteFiles = opts.DeleteFiles
+	m.lastDeleteOpts.removeBranch = opts.RemoveBranch
+	m.lastDeleteOpts.runID = opts.RunID
 	return m.returnErr
 }
 
@@ -617,7 +621,7 @@ func TestHTTPRuntimeBrokerClient_DeleteAgent(t *testing.T) {
 
 	client := NewHTTPRuntimeBrokerClient()
 
-	err := client.DeleteAgent(context.Background(), tid("host-1"), server.URL, "test-agent", "", true, false, false, time.Time{})
+	err := client.DeleteAgent(context.Background(), tid("host-1"), server.URL, "test-agent", "", DeleteAgentOptions{DeleteFiles: true})
 	if err != nil {
 		t.Fatalf("DeleteAgent failed: %v", err)
 	}
@@ -638,7 +642,7 @@ func TestHTTPRuntimeBrokerClient_DeleteAgent503PropagatesAsError(t *testing.T) {
 
 	client := NewHTTPRuntimeBrokerClient()
 
-	err := client.DeleteAgent(context.Background(), tid("host-1"), server.URL, "test-agent", "", true, false, false, time.Time{})
+	err := client.DeleteAgent(context.Background(), tid("host-1"), server.URL, "test-agent", "", DeleteAgentOptions{DeleteFiles: true})
 	if err == nil {
 		t.Fatal("expected a 503 from the broker to propagate as an error, not be treated as an idempotent success")
 	}

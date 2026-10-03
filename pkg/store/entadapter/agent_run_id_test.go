@@ -65,3 +65,37 @@ func TestSetAgentRunID(t *testing.T) {
 
 	assert.ErrorIs(t, s.SetAgentRunID(ctx, uuid.NewString(), "x"), store.ErrNotFound)
 }
+
+// TestCompareAndSwapAgentRunID: the swap applies only while the row still
+// holds the expected run ID, so a late correction cannot overwrite a newer
+// run, and it never bumps state_version.
+func TestCompareAndSwapAgentRunID(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := makeAgent(projectID, "run-id-cas-agent")
+	require.NoError(t, s.CreateAgent(ctx, a))
+	require.NoError(t, s.SetAgentRunID(ctx, a.ID, "minted"))
+	before, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+
+	ok, err := s.CompareAndSwapAgentRunID(ctx, a.ID, "minted", "actual")
+	require.NoError(t, err)
+	assert.True(t, ok)
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "actual", got.RunID)
+	assert.Equal(t, before.StateVersion, got.StateVersion, "CAS must not bump state_version")
+
+	// A newer dispatch recorded its own run; a stale swap is a no-op.
+	require.NoError(t, s.SetAgentRunID(ctx, a.ID, "newer"))
+	ok, err = s.CompareAndSwapAgentRunID(ctx, a.ID, "minted", "stale")
+	require.NoError(t, err)
+	assert.False(t, ok)
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "newer", got.RunID)
+
+	ok, err = s.CompareAndSwapAgentRunID(ctx, uuid.NewString(), "", "x")
+	require.NoError(t, err)
+	assert.False(t, ok, "a missing agent swaps nothing")
+}

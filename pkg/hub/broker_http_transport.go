@@ -342,16 +342,9 @@ func (t *brokerHTTPTransport) ResetAuthAgent(ctx context.Context, brokerID, brok
 	return nil
 }
 
-func (t *brokerHTTPTransport) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
-	endpoint := fmt.Sprintf("%s/api/v1/agents/%s?deleteFiles=%t&removeBranch=%t",
-		strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID), deleteFiles, removeBranch)
-	if projectID != "" {
-		endpoint += "&projectId=" + url.QueryEscape(projectID)
-	}
-	endpoint += deleteProjectPathQuery(ctx)
-	if softDelete {
-		endpoint += fmt.Sprintf("&softDelete=true&deletedAt=%s", url.QueryEscape(deletedAt.UTC().Format(time.RFC3339)))
-	}
+func (t *brokerHTTPTransport) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, opts DeleteAgentOptions) error {
+	endpoint := fmt.Sprintf("%s/api/v1/agents/%s?%s",
+		strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID), deleteAgentQuery(ctx, projectID, opts))
 
 	resp, err := t.doRequest(ctx, brokerID, http.MethodDelete, endpoint, nil)
 	if err != nil {

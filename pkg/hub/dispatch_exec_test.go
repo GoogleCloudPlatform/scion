@@ -690,7 +690,7 @@ type deferredDataOpTestClient struct {
 	localBroker string
 }
 
-func (c *deferredDataOpTestClient) DeleteAgent(_ context.Context, brokerID, _, _, _ string, _, _, _ bool, _ time.Time) error {
+func (c *deferredDataOpTestClient) DeleteAgent(_ context.Context, brokerID, _, _, _ string, _ DeleteAgentOptions) error {
 	if brokerID != c.localBroker {
 		return ErrLifecycleDeferred
 	}

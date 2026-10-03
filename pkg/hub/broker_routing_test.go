@@ -66,7 +66,7 @@ func (f *fakeHTTPClient) RestartAgent(_ context.Context, _, _, _, _ string, _ ma
 func (f *fakeHTTPClient) ResetAuthAgent(context.Context, string, string, string, string, string, string) error {
 	return nil
 }
-func (f *fakeHTTPClient) DeleteAgent(context.Context, string, string, string, string, bool, bool, bool, time.Time) error {
+func (f *fakeHTTPClient) DeleteAgent(context.Context, string, string, string, string, DeleteAgentOptions) error {
 	f.deleteAgentCalled = true
 	return nil
 }
@@ -168,7 +168,7 @@ func TestHybridBrokerClient_StatelessBrokerLifecycleUsesHTTP(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, httpClient.stopAgentCalled)
 
-	err = c.DeleteAgent(ctx, brokerID, "http://localhost:9800", "agent-1", "project-1", false, false, false, time.Time{})
+	err = c.DeleteAgent(ctx, brokerID, "http://localhost:9800", "agent-1", "project-1", DeleteAgentOptions{})
 	assert.NoError(t, err)
 	assert.True(t, httpClient.deleteAgentCalled)
 }

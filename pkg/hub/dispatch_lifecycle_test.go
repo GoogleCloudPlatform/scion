@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"log/slog"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -192,13 +191,13 @@ func TestHybridBrokerClient_DeleteAgent_RouteGate(t *testing.T) {
 
 	t.Run("routeForward returns ErrLifecycleDeferred", func(t *testing.T) {
 		c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "hubA", true })
-		err := c.DeleteAgent(context.Background(), remoteBroker, "", "a1", "p1", false, false, false, time.Time{})
+		err := c.DeleteAgent(context.Background(), remoteBroker, "", "a1", "p1", DeleteAgentOptions{})
 		assert.ErrorIs(t, err, ErrLifecycleDeferred)
 	})
 
 	t.Run("routeUndeliverable returns ErrLifecycleDeferred", func(t *testing.T) {
 		c.SetAffinityLookup(func(context.Context, string) (string, bool) { return "", false })
-		err := c.DeleteAgent(context.Background(), remoteBroker, "", "a1", "p1", false, false, false, time.Time{})
+		err := c.DeleteAgent(context.Background(), remoteBroker, "", "a1", "p1", DeleteAgentOptions{})
 		assert.ErrorIs(t, err, ErrLifecycleDeferred)
 	})
 }

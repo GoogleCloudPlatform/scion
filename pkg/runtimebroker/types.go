@@ -165,6 +165,11 @@ type AgentResponse struct {
 	// them in its own create and start responses. Other broker-local start
 	// warnings are deliberately not included.
 	Warnings []string `json:"warnings,omitempty"`
+	// RunID is the run identity the runtime entry carries (its scion.run_id
+	// label). It usually echoes the runId the hub sent, but a start that
+	// found the agent already running reports the existing run's ID, so
+	// the hub can record the run that actually exists (ptone/scion#2550).
+	RunID string `json:"runId,omitempty"`
 }
 
 // AgentConfig contains agent configuration details.
@@ -596,6 +601,7 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		ID:                    info.ID,
 		Slug:                  info.Slug,
 		ContainerID:           info.ContainerID,
+		RunID:                 info.RunID,
 		Name:                  info.Name,
 		Template:              info.Template,
 		HarnessConfig:         info.HarnessConfig,

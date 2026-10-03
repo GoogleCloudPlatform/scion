@@ -256,6 +256,22 @@ func (s *AgentStore) SetAgentRunID(ctx context.Context, agentID, runID string) e
 	return nil
 }
 
+// CompareAndSwapAgentRunID implements store.AgentStore.CompareAndSwapAgentRunID.
+func (s *AgentStore) CompareAndSwapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string) (bool, error) {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return false, err
+	}
+	n, err := s.client.Agent.Update().
+		Where(agent.IDEQ(uid), agent.RunIDEQ(expectedRunID)).
+		SetRunID(newRunID).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return n > 0, nil
+}
+
 // MarkLaunchAccepted implements store.AgentStore.MarkLaunchAccepted.
 func (s *AgentStore) MarkLaunchAccepted(ctx context.Context, agentID, launchID, owner string) (store.Agent, error) {
 	uid, err := parseUUID(agentID)
