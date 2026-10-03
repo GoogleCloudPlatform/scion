@@ -1438,12 +1438,41 @@ authDone:
 	// the one the agent was created with. When shared-dir PVCs will be
 	// needed, check the effective size here so a bad value fails with the
 	// place it is set rather than a bare parse error from the runtime.
+	//
+	// safe_to_evict follows the same order: template/agent
+	// kubernetes.safeToEvict, then the profile, then its runtime entry. On
+	// other runtimes it is accepted and ignored, with a warning.
 	var sdClass, sdSize string
-	if settings != nil && m.Runtime.Name() == "kubernetes" {
-		sdProfile := opts.Profile
-		if sdProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
-			sdProfile = finalScionCfg.Info.Profile
+	var settingsSafeToEvict *bool
+	sdProfile := opts.Profile
+	if sdProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
+		sdProfile = finalScionCfg.Info.Profile
+	}
+	var tmplSafeToEvict *bool
+	if finalScionCfg != nil && finalScionCfg.Kubernetes != nil {
+		tmplSafeToEvict = finalScionCfg.Kubernetes.SafeToEvict
+	}
+	var safeToEvictSource string
+	if settings != nil {
+		settingsSafeToEvict, safeToEvictSource = settings.ResolveSafeToEvictWithSource(sdProfile)
+	}
+	if m.Runtime.Name() == "kubernetes" {
+		effective, source := settingsSafeToEvict, "settings "+safeToEvictSource
+		if tmplSafeToEvict != nil {
+			effective, source = tmplSafeToEvict, "kubernetes.safeToEvict in the agent or template config"
 		}
+		if effective != nil {
+			slog.Debug("Start: resolved safe_to_evict", "agent", opts.Name, "value", *effective, "source", source)
+		}
+	} else if tmplSafeToEvict != nil || settingsSafeToEvict != nil {
+		source := "settings " + safeToEvictSource
+		if tmplSafeToEvict != nil {
+			source = "kubernetes.safeToEvict in the agent or template config"
+		}
+		slog.Warn("Start: safe_to_evict applies only to the Kubernetes runtime; ignoring it", "agent", opts.Name, "runtime", m.Runtime.Name(), "source", source)
+		settingsSafeToEvict = nil
+	}
+	if settings != nil && m.Runtime.Name() == "kubernetes" {
 		var sdSizeKey string
 		sdClass, sdSize, sdSizeKey = settings.ResolveSharedDirDefaultsWithSource(sdProfile)
 		if len(effectiveSharedDirs) > 0 {
@@ -1593,6 +1622,10 @@ authDone:
 			if sdClass != "" || sdSize != "" {
 				k8sCfg = config.ApplySharedDirDefaults(k8sCfg, sdClass, sdSize)
 			}
+			// safe_to_evict from settings (profile, then runtime entry),
+			// only where the template/agent leaves it unset. Nil off
+			// Kubernetes (cleared above).
+			k8sCfg = config.ApplySafeToEvictDefault(k8sCfg, settingsSafeToEvict)
 			return k8sCfg
 		}(),
 		GitClone:           opts.GitClone,

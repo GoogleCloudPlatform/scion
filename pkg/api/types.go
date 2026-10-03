@@ -333,6 +333,15 @@ type KubernetesConfig struct {
 	ImagePullPolicy       string            `json:"imagePullPolicy,omitempty" yaml:"imagePullPolicy,omitempty"`                   // Always, IfNotPresent, Never
 	SharedDirStorageClass string            `json:"shared_dir_storage_class,omitempty" yaml:"shared_dir_storage_class,omitempty"` // Storage class for shared dir PVCs (must support RWX)
 	SharedDirSize         string            `json:"shared_dir_size,omitempty" yaml:"shared_dir_size,omitempty"`                   // Default size per shared dir PVC (e.g. "10Gi")
+	// SafeToEvict, when explicitly false, adds the
+	// cluster-autoscaler.kubernetes.io/safe-to-evict: "false" annotation to
+	// the agent pod. On GKE Autopilot this requests extended run duration;
+	// on other clusters it stops the cluster autoscaler from scaling the
+	// node down while the pod runs. Only false has an effect: nil and true
+	// both leave the pod unannotated. Overrides the profile's and the
+	// runtime entry's safe_to_evict, if any. Ignored on non-Kubernetes
+	// runtimes.
+	SafeToEvict *bool `json:"safeToEvict,omitempty" yaml:"safeToEvict,omitempty"`
 }
 
 // K8sToleration mirrors corev1.Toleration for use in agent configuration
