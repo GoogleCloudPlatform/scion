@@ -1058,10 +1058,11 @@ func TestRS2_TransferredOwnership(t *testing.T) {
 	t.Run("stale_legacy_owner_id_does_not_drive_classification", func(t *testing.T) {
 		// Legacy data: a project whose OwnerID still names the old owner
 		// after the bindings moved. Classification must follow bindings.
+		// SetProjectOwnerID is the only OwnerID writer (ptone/scion#2597).
+		require.NoError(t, s.SetProjectOwnerID(ctx, proj.ID, userA.ID))
 		stale, err := s.GetProject(ctx, proj.ID)
 		require.NoError(t, err)
-		stale.OwnerID = userA.ID
-		require.NoError(t, s.UpdateProject(ctx, stale))
+		require.Equal(t, userA.ID, stale.OwnerID, "precondition: OwnerID names the old owner")
 
 		projectIDs := func(u *store.User, scope string) []string {
 			rec := doRequestAsUser(t, srv, u, http.MethodGet, "/api/v1/projects?scope="+scope, nil)

@@ -750,12 +750,20 @@ type ProjectStore interface {
 	NextAvailableSlug(ctx context.Context, baseSlug string) (string, error)
 
 	// UpdateProject updates an existing project.
+	//
+	// UpdateProject never writes OwnerID: callers read, mutate and write the
+	// whole row, so writing OwnerID would let a stale read undo a concurrent
+	// ownership transfer (ptone/scion#2597). project.OwnerID is ignored on
+	// input and, on success, refreshed from the stored row. Set OwnerID at
+	// creation through CreateProject, or change it with SetProjectOwnerID.
 	// Returns ErrNotFound if the project doesn't exist.
 	UpdateProject(ctx context.Context, project *Project) error
 
 	// SetProjectOwnerID updates only the project's OwnerID column, leaving
-	// every other field untouched. Used by ownership transfer so it cannot
-	// clobber fields written by a concurrent full-row UpdateProject.
+	// every other field untouched. It is the only store method that changes
+	// OwnerID after creation; UpdateProject does not write it. Used by
+	// ownership transfer so it cannot clobber fields written by a concurrent
+	// full-row UpdateProject, nor be clobbered by one.
 	// Returns ErrNotFound if the project doesn't exist.
 	SetProjectOwnerID(ctx context.Context, projectID, ownerID string) error
 
