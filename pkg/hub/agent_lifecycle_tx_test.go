@@ -551,7 +551,7 @@ func TestReincarnateReRecordsProvenance(t *testing.T) {
 	assert.Equal(t, store.DelegationPrincipalAgent, e.SourcePrincipalKind)
 	assert.Equal(t, coordinator.ID, e.SourcePrincipalID)
 	assert.Equal(t, store.SourceCredentialAgent, e.SourceCredentialKind)
-	assert.NotEqual(t, store.EffectCeilingUnrecorded, e.EffectCeiling.Kind, "the requester's ceiling is recorded")
+	assert.NotEqual(t, store.EffectCeilingUnrecorded, e.Kind, "the requester's ceiling is recorded")
 
 	sum := auditSummary(t, s, mutationTypeAgentReincarnateClaim, agent.ID)
 	assert.Equal(t, true, sum["re_recorded"])
