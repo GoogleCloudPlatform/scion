@@ -1344,6 +1344,13 @@ func TestStripGitURLCredentials(t *testing.T) {
 		{"no credentials", "https://github.com/org/repo.git", "https://github.com/org/repo.git"},
 		{"@ in path is not userinfo", "https://github.com/org/repo@v1", "https://github.com/org/repo@v1"},
 		{"scp shorthand unchanged", "git@github.com:org/repo.git", "git@github.com:org/repo.git"},
+		{"password containing /", "https://u:p/w@github.com/org/repo", "https://github.com/org/repo"},
+		{"password containing / and @", "https://u:p/w@x@github.com/org/repo.git", "https://github.com/org/repo.git"},
+		{"ssh password containing /", "ssh://git:p/w@github.com/org/repo.git", "ssh://git@github.com/org/repo.git"},
+		{"credentials and @ in path", "https://tok@github.com/org/repo@v1", "https://github.com/org/repo@v1"},
+		{"no path", "https://u:t@github.com", "https://github.com"},
+		{"query preserved", "https://u:t@github.com/org/repo?x=1", "https://github.com/org/repo?x=1"},
+		{"@ only in query", "https://github.com/org/repo?u=a@b", "https://github.com/org/repo?u=a@b"},
 		{"empty", "", ""},
 	}
 	for _, tt := range tests {

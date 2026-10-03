@@ -19,7 +19,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"regexp"
 	"slices"
 	"strconv"
@@ -831,34 +833,27 @@ func splitSCPRemote(remote string) (login, host, path string, ok bool) {
 // validateCloneGitRemote returns "" when a clone's gitRemote override names a
 // remote repository, and otherwise the 400 message to return. Accepted forms:
 //
-//   - scheme URLs util.IsGitURL accepts (https://, http://, ssh://, git://),
-//     except ssh:// with a port, which NormalizeGitRemote/ToHTTPSCloneURL
-//     cannot yet represent (the port would become a path segment);
-//   - SCP style user@host:org/repo, with any login (not only "git");
-//   - scheme-less host[:port]/org/repo, which is how GitRemote is stored (see
-//     util.NormalizeGitRemote) and what the web create form already accepts.
+//   - scheme URLs (https://, http://, ssh://, git://) that util.IsGitURL
+//     accepts and that net/url parses to a valid host, except ssh:// with a
+//     port, which NormalizeGitRemote/ToHTTPSCloneURL cannot yet represent
+//     (the port would become a path segment). The host after
+//     util.StripGitURLCredentials must match the parsed host, so an
+//     ambiguous userinfo can never survive stripping or be mistaken for it;
+//   - SCP style user@host:org/repo, with any login (not only "git") and any
+//     host, including a single-label one such as "gitserver";
+//   - scheme-less host[:port]/org/repo with a dotted host, which is how
+//     GitRemote is stored (see util.NormalizeGitRemote) and what the web
+//     create form already accepts.
 //
-// Local paths ("/x", "./x", "~/x"), bare names, bare hosts and drive paths are
-// rejected: a scheme-less remote must start with something hostname-like.
+// Local paths ("/x", "./x", "~/x"), bare names, bare hosts, drive paths and
+// SCP without a login (host:org/repo) are rejected.
 func validateCloneGitRemote(remote string) string {
-	if scheme, rest, ok := strings.Cut(remote, "://"); ok {
-		if strings.EqualFold(scheme, "ssh") {
-			authority, _, _ := strings.Cut(rest, "/")
-			if at := strings.LastIndex(authority, "@"); at >= 0 {
-				authority = authority[at+1:]
-			}
-			if strings.Contains(authority, ":") {
-				return errCloneRemoteSSHPort
-			}
-		}
-		if util.IsGitURL(remote) {
-			return ""
-		}
-		return errCloneRemoteInvalid
+	if strings.Contains(remote, "://") {
+		return validateCloneSchemeRemote(remote)
 	}
 
 	if login, host, path, ok := splitSCPRemote(remote); ok {
-		if scpLogin.MatchString(login) && isHostname(host) &&
+		if scpLogin.MatchString(login) && isHostLabels(host) &&
 			path != "" && !strings.HasPrefix(path, "/") && strings.Contains(strings.Trim(path, "/"), "/") {
 			return ""
 		}
@@ -876,6 +871,45 @@ func validateCloneGitRemote(remote string) string {
 	return ""
 }
 
+// validateCloneSchemeRemote validates a gitRemote override with a scheme.
+func validateCloneSchemeRemote(remote string) string {
+	u, err := url.Parse(remote)
+	if err != nil {
+		// Report an ssh port even when the rest fails to parse.
+		if scheme, rest, _ := strings.Cut(remote, "://"); strings.EqualFold(scheme, "ssh") {
+			authority, _, _ := strings.Cut(rest, "/")
+			if at := strings.LastIndex(authority, "@"); at >= 0 {
+				authority = authority[at+1:]
+			}
+			if _, port, ok := strings.Cut(authority, ":"); ok && isPort(port) {
+				return errCloneRemoteSSHPort
+			}
+		}
+		return errCloneRemoteInvalid
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https", "http", "ssh", "git":
+	default:
+		return errCloneRemoteInvalid
+	}
+	host := u.Hostname()
+	if !isURLHost(host) {
+		return errCloneRemoteInvalid
+	}
+	if strings.EqualFold(u.Scheme, "ssh") && u.Port() != "" {
+		return errCloneRemoteSSHPort
+	}
+	if !util.IsGitURL(remote) {
+		return errCloneRemoteInvalid
+	}
+	stripped, err := url.Parse(util.StripGitURLCredentials(remote))
+	if err != nil || (stripped.User != nil && !strings.EqualFold(u.Scheme, "ssh")) ||
+		!strings.EqualFold(stripped.Hostname(), host) {
+		return errCloneRemoteInvalid
+	}
+	return ""
+}
+
 // isHostname reports whether s looks like a DNS hostname with a dot
 // ("github.com", "git.example.co"), which rules out local paths, "~" and
 // drive letters in scheme-less remotes.
@@ -885,6 +919,21 @@ func isHostname(s string) bool {
 
 // hostnamePattern matches two or more dot-separated DNS labels.
 var hostnamePattern = regexp.MustCompile(`^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$`)
+
+// isHostLabels reports whether s is one or more dot-separated DNS labels
+// ("gitserver", "github.com").
+func isHostLabels(s string) bool {
+	return hostLabelsPattern.MatchString(s)
+}
+
+// hostLabelsPattern matches one or more dot-separated DNS labels.
+var hostLabelsPattern = regexp.MustCompile(`^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*$`)
+
+// isURLHost reports whether s (a url.URL Hostname) is a DNS name or an IP
+// address.
+func isURLHost(s string) bool {
+	return isHostLabels(s) || net.ParseIP(s) != nil
+}
 
 // isPort reports whether s is a decimal TCP port.
 func isPort(s string) bool {

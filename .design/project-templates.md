@@ -656,10 +656,18 @@ request whose `gitRemote` override names a *different* repository: those three
 labels are then dropped and re-derived from the override (default branch
 `main`). Otherwise `resolveCloneURL`, which prefers the label, would still clone
 the template's repository. The override must be a remote git URL: `https://`,
-`http://`, `ssh://` or `git://`; SCP style `user@host:org/repo` with any login;
-or the scheme-less `host[:port]/org/repo` form that `GitRemote` is stored in.
+`http://`, `ssh://` or `git://` URLs that `net/url` parses to a valid host;
+SCP style `user@host:org/repo` with any login and any host, including a
+single-label one such as `git@gitserver:org/repo`; or the scheme-less
+`host[:port]/org/repo` form (dotted host) that `GitRemote` is stored in.
 Anything else, such as a local path, gets a 400 with `details.field =
-"gitRemote"`. `ssh://` URLs with a port (for example Gerrit's `:29418`) are
+"gitRemote"`. SCP style without a login (`github.com:org/repo`) is not
+supported, because it cannot be told apart from `host:port/…`; use
+`git@github.com:org/repo` or the https URL. A scheme URL is also rejected when
+removing its credentials would change its host, which catches a password with
+an unencoded `/` (`https://u:p/w@host/…`, which `net/url` cannot parse) and a
+`@` in the path, so an ambiguous userinfo can never reach `GitRemote` or the
+labels. `ssh://` URLs with a port (for example Gerrit's `:29418`) are
 rejected for now with a message pointing to the https URL, because
 `NormalizeGitRemote`/`ToHTTPSCloneURL` would turn the port into a path segment.
 Before anything is compared or stored, the query string and fragment are

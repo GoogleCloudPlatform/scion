@@ -492,12 +492,23 @@ func TestProjectClone_GitRemoteOverride_RejectsNonGitURL(t *testing.T) {
 		"github.com:notaport/org/repo",
 		"github.com:8443/repo",
 		"localhost:8080/org/repo",
+		// SCP without a login is not supported (documented in §5.3).
+		"github.com:org/repo",
+		// Unencoded '/' in the password: net/url cannot parse a host.
+		"https://u:SECRET_P/w@github.com/org/repo",
+		"https://u:SECRET_P/w@x@github.com/org/repo.git",
+		"ssh://git:SECRET_P/w@github.com/org/repo.git",
+		// '@' in the path would make credential stripping change the host.
+		"https://github.com/org/x@evil.example/repo",
+		"https://bad_host/org/repo",
+		"https://[::1/org/repo",
 	} {
 		t.Run(remote, func(t *testing.T) {
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
 				map[string]interface{}{"name": "Bad Remote", "gitRemote": remote})
 			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 			assert.Contains(t, rec.Body.String(), "gitRemote")
+			assert.NotContains(t, rec.Body.String(), "SECRET_")
 		})
 	}
 
@@ -564,6 +575,27 @@ func TestProjectClone_GitRemoteOverride_DerivedForms(t *testing.T) {
 			gitRemote: "git.example.com/team/repo",
 			cloneURL:  "https://git.example.com/team/repo.git",
 			sourceURL: "alice@git.example.com:team/repo.git",
+		},
+		{
+			name:      "scp with single-label host",
+			remote:    "git@gitserver:org/repo",
+			gitRemote: "gitserver/org/repo",
+			cloneURL:  "https://gitserver/org/repo.git",
+			sourceURL: "git@gitserver:org/repo",
+		},
+		{
+			name:      "https with single-label host",
+			remote:    "https://gitserver/org/repo.git",
+			gitRemote: "gitserver/org/repo",
+			cloneURL:  "https://gitserver/org/repo.git",
+			sourceURL: "https://gitserver/org/repo.git",
+		},
+		{
+			name:      "password containing @ is stripped",
+			remote:    "https://u:SECRET_P@ss@github.com/acme/repo.git",
+			gitRemote: "github.com/acme/repo",
+			cloneURL:  "https://github.com/acme/repo.git",
+			sourceURL: "https://github.com/acme/repo.git",
 		},
 		{
 			name:      "scheme-less host:port",
