@@ -87,6 +87,19 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 		return
 	}
 
+	// A gitRemote override must be a remote git URL. Anything else (a local
+	// path, a bare host) would be stored as GitRemote and turned into a bogus
+	// clone-url label by ToHTTPSCloneURL.
+	overrideRemote := strings.TrimSpace(req.GitRemote)
+	if overrideRemote != "" && !isCloneGitRemote(overrideRemote) {
+		ValidationError(w, "gitRemote must be a remote git URL (https://, ssh://, git://, git@host:org/repo or host/org/repo)",
+			map[string]interface{}{"field": "gitRemote"})
+		return
+	}
+	// Never persist credentials embedded in the override (https://user:TOKEN@…):
+	// GitRemote and the git source labels are readable by project members.
+	overrideRemote = util.StripGitURLCredentials(overrideRemote)
+
 	// ── Step 2: Resolve name/slug ────────────────────────────────────────
 
 	baseSlug := req.Slug
@@ -133,7 +146,6 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 
 	// Allow callers to override the git remote (e.g. creating from a template
 	// with a different repository).
-	overrideRemote := strings.TrimSpace(req.GitRemote)
 	remoteOverridden := false
 	if overrideRemote != "" {
 		clone.GitRemote = util.NormalizeGitRemote(overrideRemote)
@@ -769,6 +781,26 @@ func (s *Server) cloneProjectPreStartHook(ctx context.Context, srcProjectID, clo
 	}
 
 	return nil
+}
+
+// isCloneGitRemote reports whether a clone's gitRemote override names a remote
+// repository. It accepts everything util.IsGitURL does, plus the scheme-less
+// "host.tld/org/repo" form, which is how GitRemote is stored (see
+// util.NormalizeGitRemote) and what the web create form already accepts.
+// Local paths ("/x", "./x", "~/x"), bare names and drive paths are rejected:
+// the first segment of a scheme-less remote must look like a hostname.
+func isCloneGitRemote(remote string) bool {
+	if util.IsGitURL(remote) {
+		return true
+	}
+	if strings.Contains(remote, "://") || strings.HasPrefix(remote, "git@") {
+		return false // a scheme/SCP form that IsGitURL already rejected
+	}
+	host, _, _ := strings.Cut(remote, "/")
+	if !strings.Contains(host, ".") || strings.HasPrefix(host, ".") || strings.ContainsAny(host, " \\:~@") {
+		return false
+	}
+	return util.IsGitURL("https://" + remote)
 }
 
 // isGitSourceLabel reports whether k is one of the labels that describe a

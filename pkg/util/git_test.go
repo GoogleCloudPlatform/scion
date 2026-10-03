@@ -1327,3 +1327,30 @@ func TestAuthenticatedCloneURL(t *testing.T) {
 		})
 	}
 }
+
+func TestStripGitURLCredentials(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{"https token", "https://x-access-token:ghp_SECRET@github.com/org/repo.git", "https://github.com/org/repo.git"},
+		{"https user only", "https://org@dev.azure.com/org/proj/_git/repo", "https://dev.azure.com/org/proj/_git/repo"},
+		{"https password containing @", "https://u:p@ss@github.com/org/repo", "https://github.com/org/repo"},
+		{"http token", "http://u:t@gitlab.example.com/g/r.git", "http://gitlab.example.com/g/r.git"},
+		{"git scheme", "git://u:t@host.example/r.git", "git://host.example/r.git"},
+		{"uppercase scheme", "HTTPS://u:t@github.com/org/repo", "HTTPS://github.com/org/repo"},
+		{"ssh keeps login drops password", "ssh://git:pw@github.com/org/repo.git", "ssh://git@github.com/org/repo.git"},
+		{"ssh login only unchanged", "ssh://git@github.com/org/repo.git", "ssh://git@github.com/org/repo.git"},
+		{"ssh empty login", "ssh://:pw@github.com/org/repo.git", "ssh://github.com/org/repo.git"},
+		{"no credentials", "https://github.com/org/repo.git", "https://github.com/org/repo.git"},
+		{"@ in path is not userinfo", "https://github.com/org/repo@v1", "https://github.com/org/repo@v1"},
+		{"scp shorthand unchanged", "git@github.com:org/repo.git", "git@github.com:org/repo.git"},
+		{"empty", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := StripGitURLCredentials(tt.in); got != tt.want {
+				t.Errorf("StripGitURLCredentials(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}

@@ -643,7 +643,7 @@ may not have intended to share.
 | **Env vars** (scope=project, `Secret == false`) | `EnvVar` | Non-secret configuration. |
 | **Injected skills** | `SkillInjection` (scope=project) | Configuration list; `SetSkillInjections` makes this a single atomic call. |
 | **Project-scoped harness configs & templates** | `HarnessConfig`, `Template` | See §5.4 — deep-copied. |
-| **GCP service accounts** (scope=project) and the **default SA** | `GCPServiceAccount`, `scion.io/default-gcp-identity-service-account-id` annotation | Re-created on the clone with fresh IDs, preserving email, GCP project, scopes, managed state and verified state. The default-SA annotation is remapped to the cloned SA's ID. See below. |
+| **GCP service accounts** (scope=project) and the **default SA** | `GCPServiceAccount`, `scion.io/default-gcp-identity-service-account-id` annotation | Re-created on the clone with fresh IDs, preserving email, GCP project, display name, scopes, managed state and verified state. The default-SA annotation is remapped to the cloned SA's ID. See below. |
 
 **Workspace-mode label.** `scion.dev/workspace-mode` (`shared` /
 `per-agent` / `worktree-per-agent`) is copied from the source but treated as
@@ -655,7 +655,12 @@ because they describe the git remote, which is also copied. The exception is a
 request whose `gitRemote` override names a *different* repository: those three
 labels are then dropped and re-derived from the override (default branch
 `main`). Otherwise `resolveCloneURL`, which prefers the label, would still clone
-the template's repository.
+the template's repository. The override must be a remote git URL (`https://`,
+`ssh://`, `git://`, `git@host:org/repo`, or the scheme-less `host/org/repo`
+form `GitRemote` is stored in). Anything else, such as a local path, gets a 400.
+Credentials embedded in it (`https://user:TOKEN@host/…`) are stripped
+(`util.StripGitURLCredentials`) before anything is compared or stored, because
+`GitRemote` and the labels are readable by project members.
 
 **Pre-start hook.** Only the **active** hook is copied
 (`GetActiveProjectPreStartHook`). Archived revisions are history, not

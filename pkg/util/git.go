@@ -659,6 +659,46 @@ func IsGitURL(s string) bool {
 	return false
 }
 
+// StripGitURLCredentials removes credentials from a git remote URL so it can
+// be stored or displayed safely (for example in a readable project label).
+//
+//   - http(s):// and git:// URLs lose their userinfo entirely, e.g.
+//     https://user:TOKEN@github.com/org/repo.git -> https://github.com/org/repo.git
+//   - ssh:// URLs keep the login name (it selects the SSH account and is not
+//     a secret) but lose any password: ssh://git:pw@host/x -> ssh://git@host/x
+//   - SCP-style shorthand (git@host:org/repo) carries no password and is
+//     returned unchanged, as is anything without a "scheme://" prefix.
+//
+// The URL is edited textually rather than round-tripped through net/url so
+// that the rest of it is preserved byte-for-byte.
+func StripGitURLCredentials(remote string) string {
+	schemeEnd := strings.Index(remote, "://")
+	if schemeEnd < 0 {
+		return remote
+	}
+	scheme := strings.ToLower(remote[:schemeEnd])
+	authorityStart := schemeEnd + len("://")
+	rest := remote[authorityStart:]
+	authorityEnd := strings.IndexAny(rest, "/?#")
+	if authorityEnd < 0 {
+		authorityEnd = len(rest)
+	}
+	at := strings.LastIndex(rest[:authorityEnd], "@")
+	if at < 0 {
+		return remote
+	}
+	userinfo, hostAndPath := rest[:at], rest[at+1:]
+	if scheme == "ssh" {
+		if colon := strings.Index(userinfo, ":"); colon >= 0 {
+			userinfo = userinfo[:colon]
+		}
+		if userinfo != "" {
+			return remote[:authorityStart] + userinfo + "@" + hostAndPath
+		}
+	}
+	return remote[:authorityStart] + hostAndPath
+}
+
 // ToHTTPSCloneURL converts any git URL to HTTPS clone form with a .git suffix.
 // SSH shorthand and ssh:// URLs are converted; HTTPS URLs are passed through
 // (with .git appended if missing). Azure DevOps URLs (dev.azure.com,

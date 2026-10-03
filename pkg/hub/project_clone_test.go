@@ -5,6 +5,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -431,6 +432,134 @@ func TestProjectClone_GitRemoteOverride_SameRemoteKeepsLabels(t *testing.T) {
 	assert.Equal(t, "develop", clone.Labels[store.LabelDefaultBranch])
 	_, hasSource := clone.Labels[store.LabelSourceURL]
 	assert.False(t, hasSource, "source-url must not be invented when the remote is unchanged")
+}
+
+// TestProjectClone_GitRemoteOverride_StripsCredentials checks that a token
+// embedded in the override never reaches GitRemote or the readable git
+// source labels, in the response or the persisted row.
+func TestProjectClone_GitRemoteOverride_StripsCredentials(t *testing.T) {
+	srv, s := testServer(t)
+	src := createSourceProject(t, srv, s)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+		map[string]interface{}{
+			"name":      "Token Override",
+			"gitRemote": "https://x-access-token:ghp_SECRET@github.com/other-org/other-repo.git",
+		})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "ghp_SECRET")
+	assert.NotContains(t, rec.Body.String(), "x-access-token")
+
+	var clone store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&clone))
+	assert.Equal(t, "github.com/other-org/other-repo", clone.GitRemote)
+	assert.Equal(t, "https://github.com/other-org/other-repo.git", clone.Labels[store.LabelCloneURL])
+	assert.Equal(t, "https://github.com/other-org/other-repo.git", clone.Labels[store.LabelSourceURL])
+
+	stored, err := s.GetProject(context.Background(), clone.ID)
+	require.NoError(t, err)
+	for k, v := range stored.Labels {
+		assert.NotContains(t, v, "ghp_SECRET", "label %s", k)
+	}
+	assert.NotContains(t, stored.GitRemote, "ghp_SECRET")
+}
+
+// TestProjectClone_GitRemoteOverride_RejectsNonGitURL checks that an override
+// that is not a remote git URL is a 400 and creates nothing.
+func TestProjectClone_GitRemoteOverride_RejectsNonGitURL(t *testing.T) {
+	srv, s := testServer(t)
+	src := createSourceProject(t, srv, s)
+	ctx := context.Background()
+
+	before, err := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 1000})
+	require.NoError(t, err)
+
+	for _, remote := range []string{
+		"/home/user/code/repo",
+		"./repo",
+		"../repo",
+		"~/code/repo",
+		"repo",
+		"org/repo",
+		"github.com",
+		"https://github.com",
+		"C:\\code\\repo",
+		"file:///home/user/repo",
+		"git@github.com",
+	} {
+		t.Run(remote, func(t *testing.T) {
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+				map[string]interface{}{"name": "Bad Remote", "gitRemote": remote})
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "gitRemote")
+		})
+	}
+
+	after, err := s.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 1000})
+	require.NoError(t, err)
+	assert.Equal(t, len(before.Items), len(after.Items), "a rejected override must not create a project")
+}
+
+// TestProjectClone_GitRemoteOverride_AcceptedForms checks the URL forms an
+// override may use, including the scheme-less form GitRemote is stored in.
+func TestProjectClone_GitRemoteOverride_AcceptedForms(t *testing.T) {
+	for i, remote := range []string{
+		"https://github.com/other-org/other-repo.git",
+		"git@github.com:other-org/other-repo.git",
+		"ssh://git@github.com/other-org/other-repo.git",
+		"github.com/other-org/other-repo",
+	} {
+		t.Run(remote, func(t *testing.T) {
+			srv, s := testServer(t)
+			src := createSourceProject(t, srv, s)
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+				map[string]interface{}{"name": fmt.Sprintf("Form %d", i), "gitRemote": remote})
+			require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+			var clone store.Project
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&clone))
+			assert.Equal(t, "github.com/other-org/other-repo", clone.GitRemote)
+			assert.Equal(t, "https://github.com/other-org/other-repo.git", clone.Labels[store.LabelCloneURL])
+		})
+	}
+}
+
+// TestProjectClone_GitRemoteOverride_NonGitTemplate checks that overriding the
+// remote of a template with no git remote and no labels derives the git
+// source labels from the override. (Workspace-mode derivation for this case
+// is owned by #2703.)
+func TestProjectClone_GitRemoteOverride_NonGitTemplate(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	src := &store.Project{
+		ID:        api.NewUUID(),
+		Name:      "Notebook Template",
+		Slug:      "notebook-template",
+		OwnerID:   DevUserID,
+		CreatedBy: DevUserID,
+	}
+	require.NoError(t, s.CreateProject(ctx, src))
+	require.Empty(t, src.GitRemote)
+	require.Nil(t, src.Labels)
+
+	overrideURL := "https://github.com/acme/notebooks.git"
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+		map[string]interface{}{"name": "Notebooks", "gitRemote": overrideURL})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var clone store.Project
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&clone))
+	assert.Equal(t, "github.com/acme/notebooks", clone.GitRemote)
+	assert.Equal(t, map[string]string{
+		store.LabelCloneURL:      "https://github.com/acme/notebooks.git",
+		store.LabelSourceURL:     overrideURL,
+		store.LabelDefaultBranch: "main",
+	}, clone.Labels)
+
+	stored, err := s.GetProject(ctx, clone.ID)
+	require.NoError(t, err)
+	assert.Equal(t, clone.Labels, stored.Labels)
 }
 
 func TestProjectClone_NoGitRemoteOverride(t *testing.T) {
