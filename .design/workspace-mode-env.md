@@ -82,6 +82,18 @@ if env["SCION_WORKSPACE_MODE"] == "" {
 | `shared` or `""` | `shared-plain` |
 | `per-agent` | `clone-per-agent` |
 | `worktree-per-agent` | `worktree-per-agent` |
+| `per-agent` on a **non-git** project (hub sends `empty-per-agent` on the wire) | `empty-per-agent` |
+
+**Addendum (#2703, empty-per-agent):** a non-git (hub-managed) project labeled
+`per-agent` gives every agent a private, initially empty, non-git directory.
+The hub resolves (label, git-ness) with `store.ResolveProjectSharingMode` and
+never forwards the bare `per-agent` label for such projects — label-only
+resolution would read it as `clone-per-agent`. Instead the create body's
+`WorkspaceMode`, the start/restart `WorkspaceDispatchSpec`, and the injected
+`SCION_WORKSPACE_MODE` all carry the canonical `empty-per-agent`, which
+`ResolveWorkspaceSharingMode` round-trips. `SCION_WORKSPACE_GIT` is never set
+for this mode. Dispatch is gated on the broker capability
+`emptyPerAgentWorkspace` (412 otherwise).
 
 `store.ResolveWorkspaceSharingMode()` (`pkg/store/models.go:225`) already
 implements this mapping and defaults empty/unknown to `shared-plain`.

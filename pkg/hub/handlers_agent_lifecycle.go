@@ -533,6 +533,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 
 	// If dispatch failed, return error
 	if dispatchErr != nil {
+		if writeEmptyPerAgentCapabilityError(w, dispatchErr) {
+			return
+		}
 		RuntimeError(w, "Failed to dispatch to runtime broker: "+dispatchErr.Error())
 		return
 	}

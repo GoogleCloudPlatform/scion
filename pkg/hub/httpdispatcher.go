@@ -482,6 +482,28 @@ func (d *HTTPAgentDispatcher) getBrokerEndpoint(ctx context.Context, brokerID st
 	return broker.Endpoint, nil
 }
 
+// getProvisioningBrokerEndpoint is getBrokerEndpoint for dispatches that
+// (re-)provision or start an agent (create, provision, start, restart). It
+// additionally fails closed when the agent's project is empty-per-agent and
+// the broker does not advertise the emptyPerAgentWorkspace capability
+// (design #2703 D3), so an old broker never receives the mode. Stop, delete
+// and other non-provisioning dispatches keep using getBrokerEndpoint.
+func (d *HTTPAgentDispatcher) getProvisioningBrokerEndpoint(ctx context.Context, agent *store.Agent) (string, error) {
+	broker, err := d.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get runtime broker: %w", err)
+	}
+	if agent.ProjectID != "" {
+		project, err := d.store.GetProject(ctx, agent.ProjectID)
+		if err == nil {
+			if err := checkEmptyPerAgentBrokerCapability(project, broker); err != nil {
+				return "", err
+			}
+		}
+	}
+	return broker.Endpoint, nil
+}
+
 // resolveProvisionCredentials collects project-scope secrets for use by the
 // broker's provision-time credential resolution (skill resolution, URI
 // variable substitution, credential helpers). These are never forwarded to
@@ -1103,6 +1125,12 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	info.sharedDirs = project.SharedDirs
 	info.sharedWorkspace = project.IsSharedWorkspace()
 	info.workspaceMode = project.Labels[store.LabelWorkspaceMode]
+	if project.IsEmptyPerAgent() {
+		// Never forward the bare "per-agent" label for a non-git project:
+		// label-only resolution on the broker maps it to clone-per-agent.
+		// Send the canonical value instead (design #2703 §2.3).
+		info.workspaceMode = string(store.SharingModeEmptyPerAgent)
+	}
 
 	// First check if the broker has a registered local path for this project.
 	if agent.RuntimeBrokerID != "" {
@@ -1231,7 +1259,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 		return err
 	}
 
-	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
+	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return err
@@ -1305,7 +1333,7 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 		return err
 	}
 
-	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
+	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
 		return err
 	}
@@ -1473,7 +1501,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 		return nil, err
 	}
 
-	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
+	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
 		return nil, err
 	}
@@ -2477,6 +2505,10 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	case store.SharingModeClonePerAgent, store.SharingModeWorktreePerAgent:
 		resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
 		classifyEnv(&envClassifications, "SCION_WORKSPACE_GIT", api.EnvKindPlain)
+	case store.SharingModeEmptyPerAgent:
+		// Never git: a private, initially empty directory. Kept as an
+		// explicit case so it cannot fall into the shared-plain GitClone
+		// sniff below (design #2703 §2.3).
 	case store.SharingModeSharedPlain:
 		// For shared-plain, git-ness is detected from the applied GitClone config.
 		// Note: broker-local linked projects where the workspace is already a
@@ -2597,7 +2629,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		return err
 	}
 
-	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
+	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return err
@@ -2811,7 +2843,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		return err
 	}
 
-	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
+	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
 		return err
 	}
