@@ -81,6 +81,14 @@ describe('validateGitRemote', () => {
     'https://u:SECRET_P/w@github.com/org/repo',
     'https://u:SECRET_P/w@x@github.com/org/repo.git',
     'ssh://git:SECRET_P/w@github.com/org/repo.git',
+    // Port then '@' in the path, and port-like passwords (GCP#2368 review).
+    'https://git.example.com:8443/org/repo@v1',
+    'https://github.com:443/org/repo@v1',
+    'https://[::1]:8443/org/repo@v1',
+    'https://u:SECRET_P@git.example.com:8443/org/repo@v1',
+    'https://u:8443/SECRET_P@github.com/org/repo',
+    'https://u:0123/SECRET_P@github.com/org/repo',
+    'https://u:/SECRET_P@github.com/org/repo',
     'https://github.com/org/x@evil.example/repo',
     'https://bad_host/org/repo',
     'https://[::1/org/repo',
@@ -229,6 +237,18 @@ describe('stripGitURLCredentials / sanitizeGitRemote', () => {
     ['https://github.com/org/repo@github.com/x', 'https://github.com/org/repo@github.com/x'],
     ['https://u:p@github.com/org/x@github.com/repo', 'https://github.com/org/x@github.com/repo'],
     ['https://a/b@github.com/x', 'https://a/b@github.com/x'],
+    // A port then '@' in the path is not userinfo (GCP#2368 review).
+    ['https://host:8443/org/repo@v1', 'https://host:8443/org/repo@v1'],
+    ['https://github.com:443/org/repo@v1', 'https://github.com:443/org/repo@v1'],
+    ['https://[::1]:8443/org/repo@v1', 'https://[::1]:8443/org/repo@v1'],
+    ['https://u:t@host:8443/org/repo@v1', 'https://host:8443/org/repo@v1'],
+    // A password with '/' that cannot be a port is still stripped.
+    ['https://u:/pw@github.com/org/repo', 'https://github.com/org/repo'],
+    ['https://u:0123/w@github.com/org/repo', 'https://github.com/org/repo'],
+    ['https://u:65536/w@github.com/org/repo', 'https://github.com/org/repo'],
+    ['https://u:12ab/w@github.com/org/repo', 'https://github.com/org/repo'],
+    // Port-like password: read as a port; validation rejects the '@' path.
+    ['https://u:8443/w@github.com/org/repo', 'https://u:8443/w@github.com/org/repo'],
   ])('%s -> %s', (input, want) => {
     expect(stripGitURLCredentials(input)).toBe(want);
   });

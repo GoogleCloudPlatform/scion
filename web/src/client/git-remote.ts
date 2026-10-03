@@ -71,7 +71,10 @@ export function stripQueryAndFragment(remote: string): string {
  * login before it (up to the first ':') contains no '/', and the host after
  * it (up to the next '/') is non-empty and contains no '@'. Once a '/' is in
  * the login position the path has started, so no later '@' ends the userinfo.
- * Mirrors util.userinfoEnd.
+ * A '/' after the first ':' is ambiguous: when the text before it is a valid
+ * host:port ("host:8443/org/repo@v1") there is no userinfo, as in RFC 3986;
+ * otherwise ("user:pa/ss@host/repo") the '@' ends a password, which is
+ * stripped (fail closed). Mirrors util.userinfoEnd.
  */
 function userinfoEnd(s: string): number {
   for (let from = 0; ; ) {
@@ -79,6 +82,8 @@ function userinfoEnd(s: string): number {
     if (at < 0) return -1;
     const login = s.slice(0, at).split(':')[0];
     if (login.includes('/')) return -1;
+    const slash = s.indexOf('/');
+    if (slash >= 0 && slash < at && isHostAndPort(s.slice(0, slash))) return -1;
     const host = s.slice(at + 1).split('/')[0];
     if (host !== '' && !host.includes('@')) return at;
     from = at + 1;
@@ -213,6 +218,12 @@ function validEscapedRemotePath(path: string): boolean {
     validRemotePath(path) &&
     validRemotePath(decoded)
   );
+}
+
+/** A non-empty host, ':' and a port (e.g. "host:8443"). Mirrors util.isHostAndPort. */
+function isHostAndPort(s: string): boolean {
+  const colon = s.lastIndexOf(':');
+  return colon > 0 && isPort(s.slice(colon + 1));
 }
 
 function isPort(s: string): boolean {
