@@ -198,7 +198,10 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 			writeErrorFromErr(w, err, "")
 			return
 		}
-		if !found {
+		// The agent's current broker is already visible to the caller
+		// through the agent record; any other target must pass the
+		// visibility gate before anything about it is revealed.
+		if !found || (dst.ID != agent.RuntimeBrokerID && !s.moveTargetVisible(ctx, dst)) {
 			s.writeMoveTargetNotFound(ctx, w, req.TargetBroker, project)
 			return
 		}
@@ -481,7 +484,9 @@ func brokerIDIfSet(target, id string) string {
 
 // planReincarnateMove answers a dry-run move of agent to dst: it runs the
 // move eligibility checks and returns the first refusal, or 200 with the
-// reincarnation plan and the verdict. It writes nothing.
+// reincarnation plan and the verdict. It writes no agent, broker, project or
+// quota state; the passthrough re-check may record its authorization
+// decision in the audit log and call IAM, like every passthrough gate.
 func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, agent *store.Agent, project *store.Project, dst *store.RuntimeBroker, workspaceModeErr string, cloneMode bool) {
 	ctx := r.Context()
 	src, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)

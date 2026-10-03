@@ -40,7 +40,9 @@ type BrokerWorkspaceStorage struct {
 // workspaces on. Agent workspaces always live on the first configured share
 // (V1NFSConfig.Shares[0]), so that share alone is described.
 type BrokerNFSWorkspaceStorage struct {
-	// Server is the NFS server host of Shares[0].
+	// Server is the NFS server host of Shares[0]. It is compared exactly
+	// (case-sensitive, no DNS resolution): brokers sharing an export must
+	// configure the identical server string.
 	Server string `json:"server"`
 	// Export is the exported path of Shares[0].
 	Export string `json:"export"`
@@ -64,14 +66,24 @@ func SameWorkspaceExport(a, b *BrokerWorkspaceStorage) bool {
 	if a.Backend != WorkspaceStorageBackendNFS || b.Backend != WorkspaceStorageBackendNFS {
 		return false
 	}
-	return a.NFS.Server == b.NFS.Server &&
-		normalizeExportPath(a.NFS.Export) == normalizeExportPath(b.NFS.Export) &&
+	aExport, bExport := normalizeExportPath(a.NFS.Export), normalizeExportPath(b.NFS.Export)
+	// An empty identity field is malformed, never a match.
+	if a.NFS.Server == "" || b.NFS.Server == "" || aExport == "" || bExport == "" ||
+		a.NFS.SubPathRoot == "" || b.NFS.SubPathRoot == "" {
+		return false
+	}
+	return a.NFS.Server == b.NFS.Server && aExport == bExport &&
 		a.NFS.SubPathRoot == b.NFS.SubPathRoot
 }
 
+// normalizeExportPath drops trailing slashes from an export path, keeping
+// "/" itself; a path of only slashes normalises to "/".
 func normalizeExportPath(p string) string {
-	if len(p) > 1 {
-		return strings.TrimRight(p, "/")
+	if p == "" {
+		return ""
 	}
-	return p
+	if t := strings.TrimRight(p, "/"); t != "" {
+		return t
+	}
+	return "/"
 }

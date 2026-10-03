@@ -761,6 +761,13 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// WorkspaceStorage follows the same rule, so the hub sees share health
 	// changes within one heartbeat. Both are persisted in a single update,
 	// and only when something changed.
+	//
+	// Keeping an omitted descriptor means a broker downgraded to a version
+	// that does not report one keeps its last descriptor, Healthy included,
+	// indefinitely. That is safe because move eligibility never relies on
+	// the descriptor alone: the capability check reads AgentMove from the
+	// Capabilities every heartbeat refreshes (an old broker reports none),
+	// and the target health check also probes live reachability.
 	if heartbeat.Capabilities != nil || heartbeat.WorkspaceStorage != nil {
 		if broker, err := loadHeartbeatBroker(); err != nil {
 			s.agentLifecycleLog.Warn("heartbeat: failed to load broker to refresh capabilities",

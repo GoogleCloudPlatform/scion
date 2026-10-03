@@ -308,17 +308,22 @@ func sameExportMessage(src, dst *store.RuntimeBroker) string {
 }
 
 // resolveMoveTargetBroker resolves a --broker value (ID, name or slug) to a
-// broker record. It writes nothing and links nothing. found is false when
-// no broker matches.
+// runtime broker record. It writes nothing and links nothing. found is false
+// when no runtime broker matches; message-broker plugin records (label
+// scion.io/plugin) are not runtime brokers and never match.
 func (s *Server) resolveMoveTargetBroker(ctx context.Context, target string) (broker *store.RuntimeBroker, found bool, err error) {
-	if b, err := s.store.GetRuntimeBroker(ctx, target); err == nil {
+	b, err := s.store.GetRuntimeBroker(ctx, target)
+	if err == nil && !isPluginBroker(b) {
 		return b, true, nil
 	}
-	b, err := s.store.GetRuntimeBrokerByName(ctx, target)
-	if err == nil {
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, false, err
+	}
+	b, err = s.store.GetRuntimeBrokerByName(ctx, target)
+	if err == nil && !isPluginBroker(b) {
 		return b, true, nil
 	}
-	if !errors.Is(err, store.ErrNotFound) {
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return nil, false, err
 	}
 	cursor := ""
@@ -329,7 +334,7 @@ func (s *Server) resolveMoveTargetBroker(ctx context.Context, target string) (br
 			return nil, false, err
 		}
 		for i := range page.Items {
-			if page.Items[i].Slug == target {
+			if page.Items[i].Slug == target && !isPluginBroker(&page.Items[i]) {
 				return &page.Items[i], true, nil
 			}
 		}
@@ -340,8 +345,44 @@ func (s *Server) resolveMoveTargetBroker(ctx context.Context, target string) (br
 	}
 }
 
-// writeMoveTargetNotFound writes the 404 for an unknown --broker value,
-// listing the project's online brokers.
+// isPluginBroker reports whether a broker record is a message-broker plugin
+// rather than a runtime broker.
+func isPluginBroker(b *store.RuntimeBroker) bool {
+	_, ok := b.Labels["scion.io/plugin"]
+	return ok
+}
+
+// moveTargetVisible reports whether the caller may learn that dst exists and
+// see its configuration in a move verdict. A broker the caller cannot see
+// is answered exactly like an unknown one, so --broker is not an existence
+// oracle and the verdict does not leak another broker's export, profiles or
+// health. Visible means: dst auto-provides; or the caller is a user who may
+// read dst; or the caller is an agent that may dispatch to dst or whose
+// project dst already serves. Dispatch and provider-link rights are still
+// decided separately by the access check.
+func (s *Server) moveTargetVisible(ctx context.Context, dst *store.RuntimeBroker) bool {
+	if dst.AutoProvide {
+		return true
+	}
+	identity := GetIdentityFromContext(ctx)
+	if identity == nil {
+		return false
+	}
+	switch identity.Type() {
+	case "user", "dev":
+		user, ok := identity.(UserIdentity)
+		return ok && s.authzService.CheckAccess(ctx, user, brokerResource(dst), ActionRead).Allowed
+	case "agent":
+		agent, ok := identity.(AgentIdentity)
+		return ok && (s.canDispatchToBroker(ctx, dst) || s.brokerServesProject(ctx, dst.ID, agent.ProjectID()))
+	default:
+		return false
+	}
+}
+
+// writeMoveTargetNotFound writes the 404 for an unknown or not visible
+// --broker value, listing the project's online brokers. The body depends
+// only on the request and the project, never on the broker matched.
 func (s *Server) writeMoveTargetNotFound(ctx context.Context, w http.ResponseWriter, target string, project *store.Project) {
 	summaries := []RuntimeBrokerSummary{}
 	if brokers, err := s.getAvailableBrokersForProject(ctx, project.ID); err == nil {
@@ -378,6 +419,9 @@ func (s *Server) moveProbesFor(r *http.Request, project *store.Project, ac *stor
 			}
 			return s.authzService.CheckAccess(ctx, identity, projectResource(project), ActionUpdate).Allowed
 		},
+		// Capacity is advisory: it reads the current count only, and an
+		// unreadable limit or count reads as "room" (fails open). The
+		// real move enforces the limit when it reserves the slot.
 		Capacity: func(dst *store.RuntimeBroker) string {
 			limitDef := s.lookupAgentLimitDefinition(ctx)
 			if limitDef == nil {

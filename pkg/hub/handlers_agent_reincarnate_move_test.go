@@ -19,9 +19,12 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -378,4 +381,137 @@ func TestReincarnateMove_LinkedProject_RefusedAtWorkspaceMode(t *testing.T) {
 	_, msg, v := decodeMoveRefusal(t, rec)
 	assert.Contains(t, msg, "linked projects")
 	assertVerdictFailedAt(t, v, moveCheckWorkspaceMode)
+}
+
+// assertSameAsUnknownTarget checks that a request naming target returns a
+// 404 whose body is byte-identical to one naming an unknown broker, apart
+// from the echoed target string.
+func assertSameAsUnknownTarget(t *testing.T, do func(body ReincarnateAgentRequest) *httptest.ResponseRecorder, target string) {
+	t.Helper()
+	const unknown = "no-such-broker-xyz"
+	for _, dryRun := range []bool{true, false} {
+		got := do(ReincarnateAgentRequest{DryRun: dryRun, TargetBroker: target})
+		want := do(ReincarnateAgentRequest{DryRun: dryRun, TargetBroker: unknown})
+		require.Equal(t, http.StatusNotFound, got.Code, "dryRun=%v: %s", dryRun, got.Body.String())
+		require.Equal(t, http.StatusNotFound, want.Code, "dryRun=%v: %s", dryRun, want.Body.String())
+		assert.Equal(t, want.Body.String(), strings.ReplaceAll(got.Body.String(), target, unknown),
+			"dryRun=%v: a not-visible target must be indistinguishable from an unknown one", dryRun)
+	}
+}
+
+// An agent caller that cannot dispatch to the target and whose project the
+// target does not serve cannot learn that the target exists.
+func TestReincarnateMove_TargetNotVisibleToAgent_Returns404LikeUnknown(t *testing.T) {
+	f := setupMoveFixture(t, false, nil)
+	count := f.agentCount(t)
+	do := func(body ReincarnateAgentRequest) *httptest.ResponseRecorder { return f.reincarnate(t, body) }
+	for _, target := range []string{f.dst.ID, f.dst.Name, f.dst.Slug} {
+		assertSameAsUnknownTarget(t, do, target)
+	}
+	f.assertNoMoveSideEffects(t, count)
+}
+
+// A user who may manage the agent but cannot read the target broker gets
+// the unknown-broker 404; once the user can read it the request reaches
+// the eligibility checks.
+func TestReincarnateMove_TargetNotReadableByUser_Returns404LikeUnknown(t *testing.T) {
+	f := setupMoveFixture(t, false, nil)
+	ctx := context.Background()
+	user := &store.User{
+		ID: tid("move-user-" + t.Name()), Email: "move-user@example.com", DisplayName: "Move User",
+		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
+	}
+	require.NoError(t, f.s.CreateUser(ctx, user))
+	f.agent.OwnerID = user.ID
+	f.agent.CreatedBy = user.ID
+	require.NoError(t, f.s.UpdateAgent(ctx, f.agent))
+	f.agent, _ = f.s.GetAgent(ctx, f.agent.ID)
+	count := f.agentCount(t)
+
+	caller := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, string(ClientTypeWeb))
+	do := func(body ReincarnateAgentRequest) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		f.srv.handleReincarnateAgent(rec, reincarnateRequest(t, f.agent.ID, caller, body), f.agent.ID)
+		return rec
+	}
+	// The user may reincarnate the agent in place.
+	rec := do(ReincarnateAgentRequest{DryRun: true})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	assertSameAsUnknownTarget(t, do, f.dst.ID)
+	f.assertNoMoveSideEffects(t, count)
+
+	// Hub members can read brokers, so the target resolves.
+	ensureHubMembership(ctx, f.s, user.ID)
+	rec = do(ReincarnateAgentRequest{DryRun: true, TargetBroker: f.dst.ID})
+	assert.NotEqual(t, http.StatusNotFound, rec.Code, rec.Body.String())
+}
+
+// A target that is not reachable fails the target health check.
+func TestReincarnateMove_TargetOffline_Returns503(t *testing.T) {
+	f := setupMoveFixture(t, true, func(dst *store.RuntimeBroker) {
+		dst.Status = store.BrokerStatusOffline
+	})
+	count := f.agentCount(t)
+	rec := f.reincarnate(t, ReincarnateAgentRequest{DryRun: true, TargetBroker: f.dst.ID})
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	code, msg, v := decodeMoveRefusal(t, rec)
+	assert.Equal(t, ErrCodeRuntimeBrokerUnavail, code)
+	assert.Contains(t, msg, "is unavailable")
+	assertVerdictFailedAt(t, v, moveCheckTargetHealth)
+	f.assertNoMoveSideEffects(t, count)
+}
+
+// A source that is not reachable cannot clean up, so the move is refused
+// at the capability check.
+func TestReincarnateMove_SourceOffline_Returns412(t *testing.T) {
+	f := setupMoveFixture(t, true, nil)
+	ctx := context.Background()
+	f.src.Status = store.BrokerStatusOffline
+	require.NoError(t, f.s.UpdateRuntimeBroker(ctx, f.src))
+	count := f.agentCount(t)
+
+	rec := f.reincarnate(t, ReincarnateAgentRequest{DryRun: true, TargetBroker: f.dst.ID})
+	require.Equal(t, http.StatusPreconditionFailed, rec.Code, rec.Body.String())
+	code, msg, v := decodeMoveRefusal(t, rec)
+	assert.Equal(t, ErrCodeRuntimeBrokerUnavail, code)
+	assert.Contains(t, msg, "source broker")
+	assertVerdictFailedAt(t, v, moveCheckCapability)
+	f.assertNoMoveSideEffects(t, count)
+}
+
+// The target's agent limit: at the limit the move is refused at the
+// capacity check; one below it passes.
+func TestReincarnateMove_TargetCapacity(t *testing.T) {
+	const limit = 2
+	t.Run("at limit returns 429", func(t *testing.T) {
+		f := setupMoveFixture(t, true, nil)
+		setBrokerAgentCeiling(t, f.s, limit)
+		for i := 0; i < limit; i++ {
+			reserveBrokerSlot(t, f.s, f.dst, tid(fmt.Sprintf("occupant-%d", i)))
+		}
+		count := f.agentCount(t)
+		rec := f.reincarnate(t, ReincarnateAgentRequest{DryRun: true, TargetBroker: f.dst.ID})
+		require.Equal(t, http.StatusTooManyRequests, rec.Code, rec.Body.String())
+		code, msg, v := decodeMoveRefusal(t, rec)
+		assert.Equal(t, ErrCodeQuotaExceeded, code)
+		assert.Contains(t, msg, "at its agent limit (2 of 2)")
+		assertVerdictFailedAt(t, v, moveCheckCapacity)
+		assert.EqualValues(t, limit, brokerReservationCount(t, f.s, f.dst.ID), "dry run reserves nothing")
+		f.assertNoMoveSideEffects(t, count)
+	})
+	t.Run("one below limit passes", func(t *testing.T) {
+		f := setupMoveFixture(t, true, nil)
+		setBrokerAgentCeiling(t, f.s, limit)
+		for i := 0; i < limit-1; i++ {
+			reserveBrokerSlot(t, f.s, f.dst, tid(fmt.Sprintf("occupant-%d", i)))
+		}
+		rec := f.reincarnate(t, ReincarnateAgentRequest{DryRun: true, TargetBroker: f.dst.ID})
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp ReincarnateAgentResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		require.NotNil(t, resp.MoveVerdict)
+		assert.True(t, resp.MoveVerdict.Eligible)
+		assert.EqualValues(t, limit-1, brokerReservationCount(t, f.s, f.dst.ID), "dry run reserves nothing")
+	})
 }

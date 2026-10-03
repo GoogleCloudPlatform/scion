@@ -539,6 +539,8 @@ func (s *BrokerAuthService) CompleteBrokerJoin(ctx context.Context, req BrokerJo
 		broker.Capabilities = capabilitiesFromStrings(req.Capabilities)
 	}
 
+	// An omitted descriptor keeps the stored one, as on heartbeat (see the
+	// heartbeat handler for why a stale descriptor is safe).
 	if req.WorkspaceStorage != nil {
 		broker.WorkspaceStorage = req.WorkspaceStorage
 	}

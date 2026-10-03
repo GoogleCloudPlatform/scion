@@ -44,6 +44,14 @@ func TestSameWorkspaceExport(t *testing.T) {
 		{"local backend", base, &BrokerWorkspaceStorage{Backend: WorkspaceStorageBackendLocal}, false},
 		{"nfs backend without share", base, &BrokerWorkspaceStorage{Backend: WorkspaceStorageBackendNFS}, false},
 		{"non-nfs backend with nfs block", base, &BrokerWorkspaceStorage{Backend: "gke-shared-volume", NFS: base.NFS}, false},
+		{"both identities empty", nfsStorage("", "", ""), nfsStorage("", "", ""), false},
+		{"empty server on one side", base, nfsStorage("", "/vol1", "projects"), false},
+		{"empty server on both sides", nfsStorage("", "/vol1", "projects"), nfsStorage("", "/vol1", "projects"), false},
+		{"empty export on both sides", nfsStorage("10.0.0.2", "", "projects"), nfsStorage("10.0.0.2", "", "projects"), false},
+		{"empty subpath root on both sides", nfsStorage("10.0.0.2", "/vol1", ""), nfsStorage("10.0.0.2", "/vol1", ""), false},
+		{"slash-only export is the root export", nfsStorage("10.0.0.2", "//", "projects"), nfsStorage("10.0.0.2", "/", "projects"), true},
+		{"slash-only export vs empty export", nfsStorage("10.0.0.2", "//", "projects"), nfsStorage("10.0.0.2", "", "projects"), false},
+		{"server compared case-sensitively", nfsStorage("NFS.example", "/vol1", "projects"), nfsStorage("nfs.example", "/vol1", "projects"), false},
 		{"nil descriptor", base, nil, false},
 		{"both nil", nil, nil, false},
 	}
@@ -59,8 +67,10 @@ func TestSameWorkspaceExport(t *testing.T) {
 	}
 }
 
-func TestNormalizeExportPath_KeepsRoot(t *testing.T) {
-	if got := normalizeExportPath("/"); got != "/" {
-		t.Errorf("normalizeExportPath(\"/\") = %q, want \"/\"", got)
+func TestNormalizeExportPath(t *testing.T) {
+	for in, want := range map[string]string{"": "", "/": "/", "//": "/", "/vol/": "/vol", "/vol//": "/vol", "/vol": "/vol"} {
+		if got := normalizeExportPath(in); got != want {
+			t.Errorf("normalizeExportPath(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

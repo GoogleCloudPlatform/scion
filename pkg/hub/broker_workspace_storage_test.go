@@ -120,3 +120,67 @@ func TestBrokerHeartbeat_WorkspaceStorageRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, healthy, got.WorkspaceStorage, "a heartbeat without a descriptor leaves it untouched")
 }
+
+// A heartbeat that refreshes Capabilities but carries no descriptor keeps
+// the stored descriptor: an omitted field never clears it.
+func TestBrokerHeartbeat_CapabilitiesWithoutDescriptorKeepsDescriptor(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	ctx := context.Background()
+
+	stored := &api.BrokerWorkspaceStorage{
+		Backend: api.WorkspaceStorageBackendNFS,
+		NFS:     &api.BrokerNFSWorkspaceStorage{Server: "10.0.0.2", Export: "/vol1", SubPathRoot: "projects", Healthy: true},
+	}
+	broker := &store.RuntimeBroker{
+		ID:               tid("broker-ws-keep"),
+		Name:             "WS Keep Broker",
+		Slug:             "ws-keep-broker",
+		Status:           store.BrokerStatusOnline,
+		Capabilities:     &store.BrokerCapabilities{Reprovision: true, AgentMove: true},
+		WorkspaceStorage: stored,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+broker.ID+"/heartbeat", brokerHeartbeatRequest{
+		Status:       "online",
+		Capabilities: &store.BrokerCapabilities{Reprovision: true},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got, err := s.GetRuntimeBroker(ctx, broker.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.Capabilities)
+	assert.False(t, got.Capabilities.AgentMove, "capabilities are refreshed")
+	assert.Equal(t, stored, got.WorkspaceStorage, "an omitted descriptor keeps the stored one")
+}
+
+// A re-join without a descriptor (settings unreadable, or an old broker)
+// keeps the descriptor already stored for the broker.
+func TestCompleteBrokerJoin_NilDescriptorKeepsStored(t *testing.T) {
+	svc, s := setupTestBrokerAuthService(t)
+	ctx := context.Background()
+
+	reg, err := svc.CreateBrokerRegistration(ctx, CreateBrokerRegistrationRequest{Name: "ws-rejoin"}, "admin-user-id")
+	require.NoError(t, err)
+	stored := &api.BrokerWorkspaceStorage{
+		Backend: api.WorkspaceStorageBackendNFS,
+		NFS:     &api.BrokerNFSWorkspaceStorage{Server: "10.0.0.2", Export: "/vol1", SubPathRoot: "projects"},
+	}
+	b, err := s.GetRuntimeBroker(ctx, reg.BrokerID)
+	require.NoError(t, err)
+	b.WorkspaceStorage = stored
+	require.NoError(t, s.UpdateRuntimeBroker(ctx, b))
+
+	_, err = svc.CompleteBrokerJoin(ctx, BrokerJoinRequest{
+		BrokerID:     reg.BrokerID,
+		JoinToken:    reg.JoinToken,
+		Hostname:     "ws-rejoin",
+		Version:      "1.0.0",
+		Capabilities: []string{"sync"},
+	}, "http://localhost:9810")
+	require.NoError(t, err)
+
+	b, err = s.GetRuntimeBroker(ctx, reg.BrokerID)
+	require.NoError(t, err)
+	assert.Equal(t, stored, b.WorkspaceStorage, "a nil descriptor keeps the stored one")
+}
