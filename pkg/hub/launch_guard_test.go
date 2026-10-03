@@ -219,6 +219,22 @@ func TestAgentLifecycle_LaunchGuard(t *testing.T) {
 		assert.Equal(t, string(state.PhaseCreated), resp.Phase, "phase is not changed")
 	})
 
+	// A body that decodes to no inputs is not a request with inputs.
+	for name, body := range map[string]interface{}{
+		"empty-object":       map[string]bool{},
+		"force-resume-false": map[string]bool{"forceResume": false},
+	} {
+		t.Run("start with "+name+" body while launching does not warn", func(t *testing.T) {
+			srv, client, agent := setup(t, "lg-start-"+name, seedInFlight)
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", body)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			assert.False(t, client.startCalled)
+			var resp AgentWithWarnings
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			assert.Empty(t, resp.Warnings)
+		})
+	}
+
 	t.Run("start with inputs while launching warns", func(t *testing.T) {
 		srv, _, agent := setup(t, "lg-start-inputs", seedInFlight)
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", map[string]bool{"forceResume": true})
