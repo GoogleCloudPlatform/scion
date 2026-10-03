@@ -3047,14 +3047,16 @@ export class ScionPageProjectDetail extends LitElement {
    * started is in flight, or failed; the server page is not shown in
    * the wrong order meanwhile.
    */
-  private renderAgentRows() {
+  private renderAgentRows(): TemplateResult | typeof nothing {
     const win = this.agentWindow;
     if (win.state === 'paged' && !win.isSortedEligible(this.committedLabel)) {
       return this.agentsLoading
         ? html`<div class="empty-filter-state">Loading agents…</div>`
         : html`<div class="empty-filter-state">
             Could not load every agent for this view.
-            <sl-button size="small" @click=${() => this.onAgentViewStateChanged()}>Retry</sl-button>
+            <sl-button size="small" @click=${(): void => this.onAgentViewStateChanged()}
+              >Retry</sl-button
+            >
           </div>`;
     }
     if (this.viewMode === 'graph') {
@@ -3085,7 +3087,7 @@ export class ScionPageProjectDetail extends LitElement {
    * phase filter that matches nothing must not flicker to "Loading" on
    * every lifecycle refresh).
    */
-  private renderNoAgentRows() {
+  private renderNoAgentRows(): TemplateResult {
     return this.agents.length === 0 && this.agentWindow.isLocal && this.agentsLoading
       ? html`<div class="empty-filter-state">Loading agents…</div>`
       : html`<div class="empty-filter-state">No agents match the current filter.</div>`;
@@ -3097,12 +3099,12 @@ export class ScionPageProjectDetail extends LitElement {
    * list and tree), so an incomplete set is never presented as complete;
    * the grid and list pagers also carry the capped total.
    */
-  private renderAgentWindowBanner() {
+  private renderAgentWindowBanner(): TemplateResult | typeof nothing {
     const banner = this.agentWindow.banner;
     if (!banner) return nothing;
     return html`<div class="agent-window-banner">
       <span>${banner.text}</span>
-      <sl-tag variant="primary" pill @click=${() => this.onAgentWindowRefresh()}>
+      <sl-tag variant="primary" pill @click=${(): void => this.onAgentWindowRefresh()}>
         <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
         Refresh
       </sl-tag>
@@ -3167,7 +3169,7 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   /** The pager under the grid and list views. Its chip is the paged-state chip trigger. */
-  private renderAgentPager(rowsOnPage: number) {
+  private renderAgentPager(rowsOnPage: number): TemplateResult {
     return html`<scion-agent-pager
       .storageKey=${PAGER_PAGE_SIZE_STORAGE_KEY}
       .pageIndex=${this.agentWindow.pageIndex}
@@ -3181,10 +3183,10 @@ export class ScionPageProjectDetail extends LitElement {
       (this.agentWindow.state === 'paged' && this.agentsLoading)}
       .error=${this.agentWindow.error}
       .showChip=${this.agentWindow.updatesAvailable}
-      @prev=${() => this.onPagerNav(() => this.agentWindow.prev())}
-      @next=${() => this.onPagerNav(() => this.agentWindow.next())}
-      @chip-click=${() => this.onPagerNav(() => this.loadAgentsForView('chip'))}
-      @page-size-change=${(e: CustomEvent<{ pageSize: AgentPagerPageSize }>) =>
+      @prev=${(): void => this.onPagerNav(() => this.agentWindow.prev())}
+      @next=${(): void => this.onPagerNav(() => this.agentWindow.next())}
+      @chip-click=${(): void => this.onPagerNav(() => this.loadAgentsForView('chip'))}
+      @page-size-change=${(e: CustomEvent<{ pageSize: AgentPagerPageSize }>): void =>
         this.onPagerSizeChange(e.detail.pageSize)}
     ></scion-agent-pager>`;
   }

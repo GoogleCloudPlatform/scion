@@ -21,6 +21,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type {
@@ -248,11 +249,11 @@ export class ScionPageAgents extends LitElement {
    */
   private agentWindow = new AgentListWindow({
     viewState: this.windowViewState(),
-    getProjectId: () => '',
-    isAddable: () => this.loadedScope === 'all',
-    fetchPage: (params: PagedPageParams) => this.fetchAgentsPage(params),
-    getAgent: (id: string) => stateManager.getAgent(id),
-    getHeldAgents: () => this.agents,
+    getProjectId: (): string => '',
+    isAddable: (): boolean => this.loadedScope === 'all',
+    fetchPage: (params: PagedPageParams): Promise<PagedPageResult> => this.fetchAgentsPage(params),
+    getAgent: (id: string): Agent | undefined => stateManager.getAgent(id),
+    getHeldAgents: (): Agent[] => this.agents,
   });
 
   /** Runs the complete-set drains (complete-needing view states, the held or capped chip). */
@@ -521,7 +522,7 @@ export class ScionPageAgents extends LitElement {
 
   private boundOnAgentsChanged = this.onAgentsChanged.bind(this);
 
-  private boundOnAgentsResync = () => {
+  private boundOnAgentsResync = (): void => {
     this.agentWindow.markResync();
   };
 
@@ -530,11 +531,11 @@ export class ScionPageAgents extends LitElement {
    * today's add rule: it is not added. A paged window shows the chip, and
    * a held or capped set is marked as possibly stale.
    */
-  private boundOnAgentCreated = () => {
+  private boundOnAgentCreated = (): void => {
     if (this.loadedScope !== 'all') this.agentWindow.markMembershipChanged();
   };
 
-  private boundOnWindowChange = () => {
+  private boundOnWindowChange = (): void => {
     this.windowTick++;
   };
 
@@ -955,7 +956,7 @@ export class ScionPageAgents extends LitElement {
       // shared, membership cannot be decided on the client: a live create
       // is not added and the set is marked stale.
       ...(scope === 'all'
-        ? { isMember: (agent: Agent) => matchesCommittedLabel(agent, label) }
+        ? { isMember: (agent: Agent): boolean => matchesCommittedLabel(agent, label) }
         : {}),
       ...(carry ?? {}),
     });
@@ -1428,7 +1429,7 @@ export class ScionPageAgents extends LitElement {
         <h2>Failed to Load Agents</h2>
         <p>There was a problem connecting to the API.</p>
         <div class="error-details">${this.error}</div>
-        <sl-button variant="primary" @click=${() => this.loadAgents('page-load')}>
+        <sl-button variant="primary" @click=${(): Promise<void> => this.loadAgents('page-load')}>
           <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
           Retry
         </sl-button>
@@ -1481,8 +1482,8 @@ export class ScionPageAgents extends LitElement {
             this.labelFilter = (e.target as HTMLElement & { value: string }).value;
             this.agentWindow.setViewState({ label: this.labelFilter });
           }}
-          @sl-change=${() => this.commitLabel(this.labelFilter)}
-          @sl-clear=${() => this.commitLabel('')}
+          @sl-change=${(): void => this.commitLabel(this.labelFilter)}
+          @sl-clear=${(): void => this.commitLabel('')}
           style="max-width: 220px;"
         >
           <sl-icon slot="prefix" name="tag"></sl-icon>
@@ -1585,7 +1586,9 @@ export class ScionPageAgents extends LitElement {
         ? html`<div class="empty-state"><p>Loading agents…</p></div>`
         : html`<div class="empty-state">
             <p>Could not load every agent for this view.</p>
-            <sl-button size="small" @click=${() => this.onAgentViewStateChanged()}>Retry</sl-button>
+            <sl-button size="small" @click=${(): void => this.onAgentViewStateChanged()}
+              >Retry</sl-button
+            >
           </div>`;
     }
 
@@ -1620,7 +1623,7 @@ export class ScionPageAgents extends LitElement {
    * Count-only mode (more than 2,000 agents): the counts are the last
    * refresh's snapshot and are not adjusted live.
    */
-  private renderCountOnlyCounts() {
+  private renderCountOnlyCounts(): TemplateResult | typeof nothing {
     const win = this.agentWindow;
     if (win.state !== 'paged' || !win.memberIndex.countOnly) return nothing;
     const { total, running } = win.stats;
@@ -1630,7 +1633,7 @@ export class ScionPageAgents extends LitElement {
   }
 
   /** The empty state of the current scope. */
-  private renderNoAgents() {
+  private renderNoAgents(): TemplateResult {
     if (this.agentScope === 'mine') {
       return html`
         <div class="empty-state">
@@ -1653,12 +1656,12 @@ export class ScionPageAgents extends LitElement {
   }
 
   /** The window's capped, failed or stale banner, with a Refresh that is the chip trigger. */
-  private renderWindowBanner() {
+  private renderWindowBanner(): TemplateResult | typeof nothing {
     const banner = this.agentWindow.banner;
     if (!banner) return nothing;
     return html`<div class="agent-window-banner">
       <span>${banner.text}</span>
-      <sl-tag variant="primary" pill @click=${() => this.onChip()}>
+      <sl-tag variant="primary" pill @click=${(): void => this.onChip()}>
         <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
         Refresh
       </sl-tag>
@@ -1672,7 +1675,7 @@ export class ScionPageAgents extends LitElement {
   }
 
   /** The pager under the grid and list views. Its chip is the chip trigger. */
-  private renderAgentPager(rowsOnPage: number) {
+  private renderAgentPager(rowsOnPage: number): TemplateResult {
     const win = this.agentWindow;
     return html`<scion-agent-pager
       .storageKey=${PAGER_PAGE_SIZE_STORAGE_KEY}
@@ -1689,10 +1692,10 @@ export class ScionPageAgents extends LitElement {
       .chipText=${win.memberIndex.countOnly && win.state === 'paged'
         ? 'counts may have changed · Refresh'
         : 'may have changed · Refresh'}
-      @prev=${() => this.onPagerNav(() => win.prev())}
-      @next=${() => this.onPagerNav(() => win.next())}
-      @chip-click=${() => this.onPagerNav(() => this.loadAgentsForView('chip'))}
-      @page-size-change=${(e: CustomEvent<{ pageSize: AgentPagerPageSize }>) =>
+      @prev=${(): void => this.onPagerNav(() => win.prev())}
+      @next=${(): void => this.onPagerNav(() => win.next())}
+      @chip-click=${(): void => this.onPagerNav(() => this.loadAgentsForView('chip'))}
+      @page-size-change=${(e: CustomEvent<{ pageSize: AgentPagerPageSize }>): void =>
         this.onPagerSizeChange(e.detail.pageSize)}
     ></scion-agent-pager>`;
   }
@@ -1741,7 +1744,7 @@ export class ScionPageAgents extends LitElement {
     `;
   }
 
-  private renderGrid(items: Agent[]) {
+  private renderGrid(items: Agent[]): TemplateResult {
     return html`
       <div class="resource-grid">${items.map((agent) => this.renderAgentCard(agent))}</div>
     `;
@@ -1992,7 +1995,7 @@ export class ScionPageAgents extends LitElement {
     `;
   }
 
-  private renderTable(items: Agent[]) {
+  private renderTable(items: Agent[]): TemplateResult {
     return html`
       <div class="resource-table-container">
         <table>
