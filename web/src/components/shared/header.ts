@@ -48,6 +48,11 @@ import { stateManager } from '../../client/state.js';
 import { TERMINAL_SESSION_COUNT_EVENT } from '../../client/terminal-workspace-events.js';
 import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
 import { TERMINAL_PALETTE_OPEN_REQUEST_EVENT } from '../../client/terminal-palette-events.js';
+import {
+  GRAPH_PALETTE_AVAILABILITY_EVENT,
+  GRAPH_PALETTE_OPEN_REQUEST_EVENT,
+  isGraphPaletteAvailable,
+} from '../../client/graph-palette-events.js';
 import { touchMenuItemStyles } from './touch-styles.js';
 import './notification-tray.js';
 import './inbox-tray.js';
@@ -145,6 +150,10 @@ export class ScionHeader extends LitElement {
 
   @state()
   private terminalSessionCount = 0;
+
+  /** Whether a graph view on screen offers the "Jump to agent" palette. */
+  @state()
+  private graphPaletteAvailable = false;
 
   /** Unread message count from the inbox tray (best-effort sync). */
   @state()
@@ -879,9 +888,10 @@ export class ScionHeader extends LitElement {
 
   // =========================================================================
   // Palette button -- opens a quick palette from the header: the chat quick
-  // switcher on a chat route, or the terminal view's agents-only "Jump to
-  // agent" palette on /terminals. One button, one render path, shared by
-  // both hosts -- see renderPaletteButton's own doc comment.
+  // switcher on a chat route, the terminal view's agents-only "Jump to
+  // agent" palette on /terminals, or a graph view's "Jump to agent" palette
+  // while one is on screen. One button, one render path, shared by every
+  // host -- see renderPaletteButton's own doc comment.
   // =========================================================================
 
   /**
@@ -893,17 +903,23 @@ export class ScionHeader extends LitElement {
    * keeps it too, both to discover the shortcut (via the tooltip) and for a
    * pointer/trackpad user who would rather click than reach for a chord.
    *
-   * Which route owns the click is resolved once here (`isChat`) and threaded
-   * through to the click handler, rather than re-resolved there: the route
-   * could otherwise change between render and click (unlikely for a header
-   * button, but this keeps the two in sync by construction rather than by
-   * coincidence).
+   * Which host owns the click is resolved once here, as its open-request
+   * event, and threaded through to the click handler rather than re-resolved
+   * there: the route could otherwise change between render and click
+   * (unlikely for a header button, but this keeps the two in sync by
+   * construction rather than by coincidence).
    */
   private renderPaletteButton(): TemplateResult | typeof nothing {
     if (!this.user) return nothing;
     const isChat = this.isChatView();
     const isTerminal = this.isTerminalView();
-    if (!isChat && !isTerminal) return nothing;
+    const isGraph = !isChat && !isTerminal && this.graphPaletteAvailable;
+    if (!isChat && !isTerminal && !isGraph) return nothing;
+    const openRequestEvent = isChat
+      ? CHAT_PALETTE_OPEN_REQUEST_EVENT
+      : isTerminal
+        ? TERMINAL_PALETTE_OPEN_REQUEST_EVENT
+        : GRAPH_PALETTE_OPEN_REQUEST_EVENT;
 
     const isTouch = this.touchPrimary.isTouch;
     const isMac = isMacPlatform();
@@ -920,7 +936,7 @@ export class ScionHeader extends LitElement {
           aria-label=${ariaLabel}
           aria-haspopup="dialog"
           aria-keyshortcuts=${isTouch ? nothing : ariaKeyshortcuts}
-          @click=${(e: Event): void => this.handlePaletteButtonClick(e, isChat)}
+          @click=${(e: Event): void => this.handlePaletteButtonClick(e, openRequestEvent)}
         >
           <sl-icon name="compass" aria-hidden="true"></sl-icon>
         </button>
@@ -936,15 +952,10 @@ export class ScionHeader extends LitElement {
    * instant the palette closes. Focusing the button explicitly first, before
    * dispatching, makes capture reliably see this button instead.
    */
-  private handlePaletteButtonClick(e: Event, isChat: boolean): void {
+  private handlePaletteButtonClick(e: Event, openRequestEvent: string): void {
     const btn = e.currentTarget as HTMLElement;
     btn.focus({ preventScroll: true });
-    this.dispatchEvent(
-      new CustomEvent(
-        isChat ? CHAT_PALETTE_OPEN_REQUEST_EVENT : TERMINAL_PALETTE_OPEN_REQUEST_EVENT,
-        { bubbles: true, composed: true }
-      )
-    );
+    this.dispatchEvent(new CustomEvent(openRequestEvent, { bubbles: true, composed: true }));
   }
 
   // =========================================================================
@@ -1417,6 +1428,8 @@ export class ScionHeader extends LitElement {
       TERMINAL_SESSION_COUNT_EVENT,
       this.handleTerminalSessionCount as EventListener
     );
+    this.graphPaletteAvailable = isGraphPaletteAvailable();
+    window.addEventListener(GRAPH_PALETTE_AVAILABILITY_EVENT, this.handleGraphPaletteAvailability);
     this.rememberModePath();
 
     // Listen for SSE events to keep tray badge counts in sync.
@@ -1429,6 +1442,10 @@ export class ScionHeader extends LitElement {
     window.removeEventListener(
       TERMINAL_SESSION_COUNT_EVENT,
       this.handleTerminalSessionCount as EventListener
+    );
+    window.removeEventListener(
+      GRAPH_PALETTE_AVAILABILITY_EVENT,
+      this.handleGraphPaletteAvailability
     );
     stateManager.removeEventListener('user-message-created', this.handleTrayCountEvent);
     stateManager.removeEventListener('notification-created', this.handleTrayCountEvent);
@@ -1454,6 +1471,10 @@ export class ScionHeader extends LitElement {
 
   private readonly handleTerminalSessionCount = (event: CustomEvent<{ count?: number }>): void => {
     this.terminalSessionCount = Math.max(0, event.detail?.count ?? 0);
+  };
+
+  private readonly handleGraphPaletteAvailability = (): void => {
+    this.graphPaletteAvailable = isGraphPaletteAvailable();
   };
 
   private rememberModePath(): void {

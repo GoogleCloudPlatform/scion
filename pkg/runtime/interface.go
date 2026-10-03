@@ -45,6 +45,31 @@ type RunConfig struct {
 	Resources          *api.ResourceSpec
 	Kubernetes         *api.KubernetesConfig
 	GitClone           *api.GitCloneConfig
+	// TrustedHubEndpoint is the hub endpoint Substrate's egress allowlist
+	// trusts. In broker mode, this field arrives already resolved by the
+	// runtime broker from operator-controlled tiers only — the request's
+	// HubEndpoint field, the hub connection endpoint, or the broker's own
+	// configured HubEndpoint (see api.StartOptions.TrustedHubEndpoint and
+	// runtimebroker's resolveEffectiveHubEndpoint) — with project settings
+	// and the resolved env excluded from this egress-trust path, even
+	// though either may still supply the agent's own delivered hub
+	// endpoint. Outside broker mode, it is instead the caller-provided
+	// opts.Env's own SCION_HUB_ENDPOINT, captured at the top of Start
+	// before anything can override it, falling back to the project
+	// settings file when that is empty — a legitimate trusted source on
+	// this path, since there is no broker-side operator resolution to
+	// defer to. Neither the agent-level Hub config nor an agent/template
+	// config's own SCION_HUB_ENDPOINT env entry ever feeds this field
+	// (pkg/agent/run.go): both are creator-controlled and are applied only
+	// to the final agent env, after this value is captured or resolved.
+	// Every runtime except Substrate ignores this field; base
+	// env-resolution behaviour for every other runtime is unchanged.
+	// Substrate uses it as the one egress-allowlisted hub host, independent
+	// of whatever SCION_HUB_ENDPOINT/SCION_HUB_URL end up in the final
+	// agent env (see substrateEgressHostnames) — an agent/template env
+	// override can point the *agent's own* hub calls at a different value,
+	// but must never widen the egress allowlist to match it.
+	TrustedHubEndpoint string
 	SharedDirs         []api.SharedDir
 	// SharedDirStorage holds the resolved shared-dir storage plan when
 	// server.shared_dir_storage.backend is "nfs" (design
@@ -142,6 +167,72 @@ type RunConfig struct {
 	// wait-for-sentinel init container instead of the cloning one.
 	// Callers should not set this field.
 	nfsProvisionLockLost bool
+
+	// Checkpoint and OnResourceCreated are an async launch's runtime hooks
+	// (design t1-async-create-v11.md §3.8.3, §3.8.4), copied from
+	// api.StartOptions. Runtimes call them through launchHooks, whose
+	// checkpoint and created methods are no-ops when the hook is nil (the
+	// synchronous path).
+	//
+	// OnResourceCreated also selects who cleans up a start that fails or is
+	// cancelled. When it is set, the runtime skips its own start cleanup and
+	// leaves every created resource to the caller, which deletes the
+	// reported handles (the async launch's CleanupLaunch). When it is nil,
+	// the runtime cleans up as on the synchronous path, whether or not
+	// Checkpoint is set. Callers set both hooks together.
+	Checkpoint        func(ctx context.Context, step string) error
+	OnResourceCreated func(api.ResourceHandle)
+}
+
+// Checkpoint step names a runtime passes to RunConfig.Checkpoint (design
+// §3.9's step names; container runtimes keep the generic "launching" step).
+const (
+	CheckpointStepSecrets   = "secrets"
+	CheckpointStepPodCreate = "pod_create"
+	CheckpointStepLaunching = "launching"
+	// CheckpointStepPreClean precedes a name-based delete of a stale
+	// resource left by an earlier agent of the same name.
+	CheckpointStepPreClean = "pre_clean"
+)
+
+// launchHooks carries RunConfig's async-launch hooks into the helpers that
+// make the resource-creating calls. Its zero value (both hooks nil, the
+// synchronous path) makes every method a no-op.
+type launchHooks struct {
+	checkpointFn func(ctx context.Context, step string) error
+	createdFn    func(api.ResourceHandle)
+}
+
+// launchHooks returns config's async-launch hooks.
+func (config *RunConfig) launchHooks() launchHooks {
+	return launchHooks{checkpointFn: config.Checkpoint, createdFn: config.OnResourceCreated}
+}
+
+// checkpoint is called immediately before a resource-creating call. A
+// non-nil error means the launch is over and the resource must not be
+// created.
+func (h launchHooks) checkpoint(ctx context.Context, step string) error {
+	if h.checkpointFn == nil {
+		return nil
+	}
+	return h.checkpointFn(ctx, step)
+}
+
+// active reports whether these are an async launch's hooks (a resource
+// handle is being recorded), as opposed to the synchronous path. It is keyed
+// on OnResourceCreated alone: it selects the cleanup owner (see
+// RunConfig.OnResourceCreated), and only a caller that records handles can
+// clean up what the runtime leaves.
+func (h launchHooks) active() bool {
+	return h.createdFn != nil
+}
+
+// created is called after a true create of a launch-owned resource.
+func (h launchHooks) created(handle api.ResourceHandle) {
+	if h.createdFn == nil {
+		return
+	}
+	h.createdFn(handle)
 }
 
 // SharedDirRealization holds the plan for realizing a project's shared

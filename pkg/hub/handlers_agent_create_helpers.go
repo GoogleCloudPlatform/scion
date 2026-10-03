@@ -249,8 +249,8 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	// Populate GitClone config for git-anchored projects (per-agent clone mode).
 	// Shared-workspace git projects skip clone — agents mount the shared workspace instead.
 	if project != nil && project.GitRemote != "" && !project.IsSharedWorkspace() {
-		cloneURL := resolveCloneURL(project.Labels["scion.dev/clone-url"], project.GitRemote)
-		defaultBranch := project.Labels["scion.dev/default-branch"]
+		cloneURL := resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
+		defaultBranch := project.Labels[store.LabelDefaultBranch]
 		if defaultBranch == "" {
 			defaultBranch = "main"
 		}
@@ -265,7 +265,9 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	// Populate workspace path for hub-managed projects and shared-workspace git projects.
 	// When the user provided a relative workspace (project subdirectory), preserve it
 	// verbatim -- the broker will resolve it against its own project root.
-	if project != nil && (project.GitRemote == "" || project.IsSharedWorkspace()) {
+	// Empty-per-agent projects are skipped: Workspace stays empty and the
+	// broker provisions a private per-agent directory (design #2703 §2.1).
+	if syncsHubProjectWorkspace(project) {
 		existingWorkspace := agent.AppliedConfig.Workspace
 		if existingWorkspace == "" {
 			workspacePath, err := s.hubManagedProjectPath(project.Slug)
@@ -278,7 +280,7 @@ func (s *Server) populateAgentConfig(ctx context.Context, agent *store.Agent, pr
 	// For shared-workspace git projects, default the branch to the project's
 	// default branch (the workspace's current branch) instead of the agent slug.
 	if project != nil && project.IsSharedWorkspace() && agent.AppliedConfig.Branch == "" {
-		defaultBranch := project.Labels["scion.dev/default-branch"]
+		defaultBranch := project.Labels[store.LabelDefaultBranch]
 		if defaultBranch == "" {
 			defaultBranch = "main"
 		}
@@ -537,6 +539,9 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	if hcName == "" && resolvedTemplate != nil {
 		hcName = s.getHarnessConfigFromTemplate(resolvedTemplate, "")
 	}
+	// resolvedHC is the hub harness config resolved below, if any; the
+	// timezone capture at the end of this function reads its env.
+	var resolvedHC *store.HarnessConfig
 	if hcName != "" && agent.AppliedConfig.HarnessConfigID == "" {
 		var hc *store.HarnessConfig
 		if project != nil {
@@ -554,6 +559,7 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 			}
 		}
 		if hc != nil {
+			resolvedHC = hc
 			agent.AppliedConfig.HarnessConfigID = hc.ID
 			agent.AppliedConfig.HarnessConfigHash = hc.ContentHash
 
@@ -755,6 +761,14 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	// Merge injected skills from hub/user/project scopes into InlineConfig.Skills
 	// so the provisioner's existing Step 3b handles them.
 	s.mergeInjectedSkills(ctx, agent, project)
+
+	// Writer (a) of ExplicitTimezone, run unconditionally and last so that
+	// creates with or without a template or harness config are covered: a
+	// create-time TZ (request config.env, else the hub template merged
+	// above, else the hub harness config) becomes the agent's pin, and TZ
+	// leaves the env records. Every create entry point (HTTP create,
+	// scheduled spawn and reincarnate) reaches this via deriveAgentConfig.
+	s.captureCreateTimezone(ctx, agent, resolvedHC)
 }
 
 // mergeInjectedSkills fetches injected-skills refs from hub, user, and project
@@ -1027,6 +1041,14 @@ func (s *Server) handleExistingAgent(
 		return existingAgentConflict
 	}
 
+	// Delete in progress (design ptone/scion#2483 §2.1): every branch below
+	// starts, resumes, restarts or recreates existingAgent, so the shared
+	// start gate runs first, after the lifecycle authz above.
+	if ref := s.startGate(ctx, existingAgent, startEntryCreateExisting); ref.refuses() {
+		ref.write(w)
+		return existingAgentErrored
+	}
+
 	s.agentLifecycleLog.Info("handleExistingAgent: found existing agent",
 		"slug", existingAgent.Slug,
 		"existing_agent_id", existingAgent.ID,
@@ -1074,9 +1096,14 @@ func (s *Server) handleExistingAgent(
 		resume := existingAgent.Phase == string(state.PhaseSuspended)
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, resume); err != nil {
 			s.rollbackBrokerQuota(ctx, existingAgent, reserved)
-			if isContainerNameConflict(err) {
+			switch {
+			case writeAgentTokenIssueError(w, err):
+				// Response written.
+			case writeEmptyPerAgentCapabilityError(w, err):
+				// 412 already written (design #2703 D3).
+			case isContainerNameConflict(err):
 				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
-			} else {
+			default:
 				RuntimeError(w, "Failed to resume suspended agent: "+err.Error())
 			}
 			return existingAgentErrored
@@ -1101,7 +1128,8 @@ func (s *Server) handleExistingAgent(
 
 		s.enrichAgent(ctx, existingAgent, project, nil)
 		writeJSON(w, http.StatusOK, CreateAgentResponse{
-			Agent: redactedAgentCopy(ctx, s, existingAgent),
+			Agent:    redactedAgentCopy(ctx, s, existingAgent),
+			Warnings: dispatchWarningsFromContext(ctx),
 		})
 		return existingAgentStarted
 	}
@@ -1153,9 +1181,14 @@ func (s *Server) handleExistingAgent(
 			}
 			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, forcedRecovery); err != nil {
 				s.rollbackBrokerQuota(ctx, existingAgent, reserved)
-				if isContainerNameConflict(err) {
+				switch {
+				case writeAgentTokenIssueError(w, err):
+					// Response written.
+				case writeEmptyPerAgentCapabilityError(w, err):
+					// 412 already written (design #2703 D3).
+				case isContainerNameConflict(err):
 					Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
-				} else {
+				default:
 					RuntimeError(w, "Failed to resume stopped agent: "+err.Error())
 				}
 				return existingAgentErrored
@@ -1179,7 +1212,8 @@ func (s *Server) handleExistingAgent(
 
 			s.enrichAgent(ctx, existingAgent, project, nil)
 			writeJSON(w, http.StatusOK, CreateAgentResponse{
-				Agent: redactedAgentCopy(ctx, s, existingAgent),
+				Agent:    redactedAgentCopy(ctx, s, existingAgent),
+				Warnings: dispatchWarningsFromContext(ctx),
 			})
 			return existingAgentStarted
 		}
@@ -1261,9 +1295,14 @@ func (s *Server) handleExistingAgent(
 		// response (status, container info) onto existingAgent in-place.
 		// A created/provisioning agent has no prior session to resume.
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, false); err != nil {
-			if isContainerNameConflict(err) {
+			switch {
+			case writeAgentTokenIssueError(w, err):
+				// Response written.
+			case writeEmptyPerAgentCapabilityError(w, err):
+				// 412 already written (design #2703 D3).
+			case isContainerNameConflict(err):
 				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
-			} else {
+			default:
 				RuntimeError(w, "Failed to start agent: "+err.Error())
 			}
 			return existingAgentErrored
@@ -1291,7 +1330,8 @@ func (s *Server) handleExistingAgent(
 		// Enrich and return the existing agent.
 		s.enrichAgent(ctx, existingAgent, project, nil)
 		writeJSON(w, http.StatusOK, CreateAgentResponse{
-			Agent: redactedAgentCopy(ctx, s, existingAgent),
+			Agent:    redactedAgentCopy(ctx, s, existingAgent),
+			Warnings: dispatchWarningsFromContext(ctx),
 		})
 		return existingAgentStarted
 	}

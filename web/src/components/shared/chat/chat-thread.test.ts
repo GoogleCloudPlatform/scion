@@ -6366,3 +6366,61 @@ describe('scion-chat-thread /spawn slash command', () => {
     });
   });
 });
+
+describe('scion-chat-thread inter-agent markers', () => {
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockResolvedValue(emptyHistory());
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('fetches inter-agent exchanges without raising the access-denied toast', async () => {
+    // Members lack agent.attach on agents they did not create, so this
+    // optional fetch 403s for them; it must fail quietly.
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.isDM = true;
+    el.conversationKey = 'dm:agent:agent-1:user:user-1';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    await vi.waitFor(() =>
+      expect(apiFetch.mock.calls.some((c) => String(c[0]).includes('/interagent?'))).toBe(true)
+    );
+    const call = apiFetch.mock.calls.find((c) => String(c[0]).includes('/interagent?'))!;
+    expect((call[1] as { suppressAccessDeniedToast?: boolean })?.suppressAccessDeniedToast).toBe(
+      true
+    );
+  });
+});
+
+describe('export timestamps in the display zone (tz-refactor task 21)', () => {
+  afterEach(() => {
+    setPreferredTimeZone('');
+    vi.useRealTimers();
+  });
+
+  it('formats each exported message time 24-hour in the display zone, naming the zone', () => {
+    // vitest pins the browser zone to UTC; 15:00Z is midnight in Tokyo.
+    setPreferredTimeZone('Asia/Tokyo');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const el = document.createElement('scion-chat-thread') as any;
+    expect(el.formatExportTimestamp('2026-09-23T15:00:00Z')).toBe(
+      'Sep 24, 2026, 00:00 (Asia/Tokyo)'
+    );
+    expect(el.formatExportTimestamp('not-a-date')).toBe('not-a-date');
+  });
+
+  it('stamps the export filename with the display-zone date', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-23T15:30:00Z'));
+    setPreferredTimeZone('Asia/Tokyo');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const el = document.createElement('scion-chat-thread') as any;
+    expect(el.filenameDateStamp()).toBe('2026-09-24');
+    setPreferredTimeZone('America/New_York');
+    expect(el.filenameDateStamp()).toBe('2026-09-23');
+  });
+});

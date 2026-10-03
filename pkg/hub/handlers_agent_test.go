@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -4873,6 +4874,76 @@ func TestHandleAgentExec_DispatchesToRuntimeBroker(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp2))
 	assert.Equal(t, "terminal output", resp2.Output)
 	assert.Equal(t, 0, resp2.ExitCode)
+}
+
+// TestSubmitAgentEnv_ReservedTarget_Rejected verifies that POST
+// /api/v1/agents/{id}/env — the CLI's env-gather submission endpoint — is
+// also a reserved-target write site: a caller cannot use it to set a scion
+// control-plane env var, the same as create/patch on the secret and env-var
+// endpoints. A real dispatcher is wired up (rather than leaving it unset) so
+// a 400 from "no runtime broker available" can't be mistaken for this
+// rejection: the assertion checks the specific error message, not just the
+// status code.
+func TestSubmitAgentEnv_ReservedTarget_Rejected(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{
+		ID:   tid("project-submitenv-reserved"),
+		Name: "Submit Env Reserved Project",
+		Slug: "submitenv-reserved-project",
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	broker := &store.RuntimeBroker{
+		ID:     tid("broker-submitenv-reserved"),
+		Name:   "Submit Env Reserved Broker",
+		Slug:   "submitenv-reserved-broker",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		Status:     store.BrokerStatusOnline,
+	}))
+
+	agent := &store.Agent{
+		ID:              tid("agent-submitenv-reserved"),
+		Slug:            tid("agent-submitenv-reserved"),
+		Name:            "Submit Env Reserved Agent",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		Phase:           string(state.PhaseProvisioning),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	dispatchCalled := false
+	mockClient := &mockRuntimeBrokerClient{
+		createWithGatherFunc: func(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+			dispatchCalled = true
+			return &RemoteAgentResponse{
+				Agent:   &RemoteAgentInfo{ID: req.ID, Slug: req.Slug, Name: req.Name, Phase: string(state.PhaseRunning)},
+				Created: true,
+			}, nil, nil
+		},
+	}
+	srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(s, mockClient, false, slog.Default()))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/env", map[string]interface{}{
+		"env": map[string]string{
+			"SCION_METADATA_MODE": "passthrough",
+		},
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, "response body: %s", rec.Body.String())
+	checkJSONError(t, rec.Body.String())
+
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	require.Contains(t, errResp.Error.Message, "reserved", "expected the reserved-target rejection message, got: %s", errResp.Error.Message)
+
+	require.False(t, dispatchCalled, "expected rejection before any dispatch to the broker")
 }
 
 func TestHandleProjectAgentExec_DispatchesToRuntimeBroker(t *testing.T) {

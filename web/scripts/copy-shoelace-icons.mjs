@@ -112,6 +112,7 @@ const USED_ICONS = [
   'file-earmark-text',
   'file-earmark-zip',
   'file-text',
+  'files',
   'filetype-md',
   'floppy',
   'folder',

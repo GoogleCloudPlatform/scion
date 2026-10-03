@@ -99,7 +99,7 @@ func TestResourceEqual_NilVsEmptyStillNormalizes(t *testing.T) {
 // specific shape to round-trip through the real store (valid UUIDs, a real
 // MessageMode enum value, etc.) rather than an arbitrary string.
 //
-// Four fields are deliberately left at their zero value, each for a
+// The fields below are deliberately left at their zero value, each for a
 // documented, store-enforced reason rather than an oversight:
 //   - Project, RuntimeBrokerName, HarnessConfig, HarnessAuth: "Enriched
 //     fields (populated by Hub when returning data, not persisted)" per
@@ -128,6 +128,12 @@ func TestResourceEqual_NilVsEmptyStillNormalizes(t *testing.T) {
 //     store method persists or populates it; only the hub's enrichAgents
 //     (via ComputeAgentLaunch) sets it on a response copy, and agentResource
 //     never reads it.
+//   - The Deletion* marker columns (DeletionState, DeletionClaim,
+//     DeletionLeaseAt, DeletionStartedAt, DeletionFailedAt, DeletionCode,
+//     DeletionError, DeletionPrior, DeletionRequest): written only through
+//     UpdateAgentDeletion, never by CreateAgent/UpdateAgent, and json:"-".
+//     Deletion is their computed view (ComputeAgentDeletion), set only on
+//     response copies.
 //
 // Every other exported field, including Slug (which a mutation of
 // agentResource to read ScopeUserID would depend on), is filled and
@@ -152,6 +158,12 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	"LaunchLastReportAt": true, "LaunchOwner": true, "LaunchSeq": true,
 	"LaunchStep": true, "LaunchError": true,
 	"Launch": true,
+	// Deletion marker columns are written only through UpdateAgentDeletion
+	// (never by CreateAgent/UpdateAgent), and Deletion is computed.
+	"DeletionState": true, "DeletionClaim": true, "DeletionLeaseAt": true,
+	"DeletionStartedAt": true, "DeletionFailedAt": true, "DeletionCode": true,
+	"DeletionError": true, "DeletionPrior": true, "DeletionRequest": true,
+	"Deletion": true,
 }
 
 func reflectFillStoreAgent(t *testing.T, projectID string) *store.Agent {

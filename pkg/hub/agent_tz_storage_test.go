@@ -369,3 +369,37 @@ func TestResolveAgentTZ_StoreErrorsWithNilLog(t *testing.T) {
 		})
 	}
 }
+
+// TestTZDropWarnings_NilLog checks the TZ-targeted secret and caller-env TZ
+// drops skip the log, never a panic, on a dispatcher without a logger, and
+// still drop TZ and relay the dispatch warning.
+func TestTZDropWarnings_NilLog(t *testing.T) {
+	d, _ := tzTestDispatcher(t, "")
+	d.log = nil
+	agent := envScopeTestAgent()
+
+	t.Run("a secret that targets TZ is dropped", func(t *testing.T) {
+		ctx, warns := withDispatchWarnings(context.Background())
+		got := d.dropTZTargetedSecrets(ctx, agent, []ResolvedSecret{
+			{Name: "tz", Type: "environment", Target: "TZ", Value: "Asia/Tokyo", Source: "user"},
+			{Name: "keep", Type: "environment", Target: "API_KEY", Value: "x", Source: "user"},
+		})
+		if len(got) != 1 || got[0].Name != "keep" {
+			t.Fatalf("dropTZTargetedSecrets() = %+v, want only the API_KEY secret", got)
+		}
+		if len(warns.Warnings()) != 1 {
+			t.Fatalf("warnings = %q, want one", warns.Warnings())
+		}
+	})
+
+	t.Run("TZ in the caller env is dropped", func(t *testing.T) {
+		ctx, warns := withDispatchWarnings(context.Background())
+		got := d.withoutCallerTZ(ctx, agent, map[string]string{"TZ": "Asia/Tokyo", "FOO": "bar"})
+		if _, ok := got["TZ"]; ok || got["FOO"] != "bar" {
+			t.Fatalf("withoutCallerTZ() = %v, want FOO only", got)
+		}
+		if len(warns.Warnings()) != 1 {
+			t.Fatalf("warnings = %q, want one", warns.Warnings())
+		}
+	})
+}

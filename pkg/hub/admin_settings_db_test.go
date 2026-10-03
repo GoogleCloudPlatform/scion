@@ -3843,3 +3843,31 @@ func TestDropEnvOverriddenAccessFields(t *testing.T) {
 		t.Errorf("other fields must be untouched, got %+v", base)
 	}
 }
+
+// A shared_dir_size that is not a Kubernetes quantity is rejected on a
+// runtime entry and on a profile, naming the key; a valid one is accepted.
+func TestPutServerConfigDB_SharedDirSize(t *testing.T) {
+	tests := []struct {
+		name, body, wantKey string
+		wantCode            int
+	}{
+		{"runtime invalid", `{"runtimes": {"gke": {"type": "kubernetes", "shared_dir_size": "1TB"}}}`, "runtimes.gke.shared_dir_size", http.StatusUnprocessableEntity},
+		{"profile invalid", `{"profiles": {"big": {"runtime": "gke", "shared_dir_size": "lots"}}}`, "profiles.big.shared_dir_size", http.StatusUnprocessableEntity},
+		{"valid", `{"runtimes": {"gke": {"type": "kubernetes", "shared_dir_size": "1Ti", "shared_dir_storage_class": "standard-rwx"}},
+			"profiles": {"big": {"runtime": "gke", "shared_dir_size": "10Gi"}}}`, "", http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _, ops := newTestDBServer(t)
+			req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", tt.body)
+			rr := httptest.NewRecorder()
+			srv.handlePutServerConfigDB(rr, req, ops)
+			if rr.Code != tt.wantCode {
+				t.Fatalf("expected %d, got %d: %s", tt.wantCode, rr.Code, rr.Body.String())
+			}
+			if tt.wantKey != "" && !strings.Contains(rr.Body.String(), tt.wantKey) {
+				t.Errorf("error should name %s: %s", tt.wantKey, rr.Body.String())
+			}
+		})
+	}
+}

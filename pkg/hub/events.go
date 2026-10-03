@@ -163,6 +163,11 @@ type AgentStatusEvent struct {
 	ContainerStatus   string             `json:"containerStatus,omitempty"`
 	LastActivityEvent string             `json:"lastActivityEvent,omitempty"`
 	Launch            *store.AgentLaunch `json:"launch,omitempty"` // design §3.2; a snapshot taken at publish time
+	// Deletion is the delete view (design ptone/scion#2483 §2.2), a
+	// snapshot taken at publish time. Always present on the wire: an
+	// explicit null when no delete is active or failed, so the web's delta
+	// merge clears it.
+	Deletion *store.DeletionInfo `json:"deletion"`
 }
 
 // AgentCreatedEvent is published when an agent is created.
@@ -479,13 +484,15 @@ func (p *ChannelEventPublisher) Close() {
 // PublishAgentStatus publishes an agent status event to both agent-specific
 // and project-scoped subjects (dual-publish pattern).
 func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent) {
+	now := time.Now()
 	evt := AgentStatusEvent{
 		AgentID:         agent.ID,
 		ProjectID:       agent.ProjectID,
 		Phase:           agent.Phase,
 		Activity:        agent.Activity,
 		ContainerStatus: agent.ContainerStatus,
-		Launch:          store.ComputeAgentLaunch(agent, time.Now()),
+		Launch:          store.ComputeAgentLaunch(agent, now),
+		Deletion:        store.ComputeAgentDeletion(agent, now),
 	}
 	if !agent.LastActivityEvent.IsZero() {
 		evt.LastActivityEvent = agent.LastActivityEvent.UTC().Format("2006-01-02T15:04:05Z07:00")

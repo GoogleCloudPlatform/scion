@@ -357,6 +357,27 @@ const (
 	// enforceUATConstraints also sets it when the live project-access
 	// lookup for a user access token fails on a store fault.
 	DenyCauseResolutionError DenyCause = "resolution_error"
+
+	// DenyCauseCeilingUnrecorded marks a deny where the source credential's
+	// ceiling version is not one this binary interprets, or a hop whose
+	// provenance is unrecorded or of an unknown version meets a permission
+	// that requires recorded provenance. An unknown ceiling version on a
+	// bounded hop in the walk is reported as DenyCauseCeilingEffectExceeded.
+	DenyCauseCeilingUnrecorded DenyCause = "ceiling_unrecorded"
+
+	// DenyCauseCeilingEffectExceeded marks a deny where the permission or
+	// requested role lies outside a frozen effect ceiling on the chain.
+	DenyCauseCeilingEffectExceeded DenyCause = "ceiling_effect_exceeded"
+
+	// DenyCauseCeilingResourceMissing marks a deny where a resource a
+	// frozen ceiling refers to does not resolve. Reserved for the
+	// service-account parent-ceiling evaluator: no code path in this
+	// package emits it.
+	DenyCauseCeilingResourceMissing DenyCause = "ceiling_resource_missing"
+
+	// DenyCauseCeilingSourceNotAllowed marks a deny where the source
+	// credential is not accepted as an authority source on this server.
+	DenyCauseCeilingSourceNotAllowed DenyCause = "ceiling_source_not_allowed"
 )
 
 // IsIndeterminate reports whether this deny was caused by a store or
@@ -419,6 +440,13 @@ type AuthzService struct {
 	// through that wiring (e.g. a bare &AuthzService{} in a test) fails
 	// closed.
 	devLocalEnabled bool
+
+	// mintDevAuthOverride mirrors the agent-token mint's dev-auth role
+	// override: when set, mintCandidateScopes raises a role below full to
+	// full before applying the ceiling filter. Set once at server
+	// construction from ServerConfig.DevAuthToken != "". It is separate
+	// from devLocalEnabled and is read only by mintCandidateScopes.
+	mintDevAuthOverride bool
 }
 
 // NewAuthzService creates a new AuthzService.
@@ -943,8 +971,15 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// activity, and the same restrictions the kernel applied (7a/7b/7c).
 	// With Explain, candidates are also evaluated on a kernel allow so the
 	// provenance lists them.
+	//
+	// Candidates run with both memo keys masked. Their stages reach
+	// lookups made on behalf of a principal other than the requester (the
+	// progeny source user's system authority and project admission, and the
+	// source agent's delegation chain), and those must always read the
+	// store, never the requester's memoized principals, constraints or
+	// edges. The restrictions passed in were already resolved above.
 	if !kernelAdmits || request.Explain {
-		rel := a.evaluateRelationshipCandidates(ctx, principal, request.Resource, request.Action, permissionID, restrictions, !request.Explain)
+		rel := a.evaluateRelationshipCandidates(maskAllAuthzMemo(ctx), principal, request.Resource, request.Action, permissionID, restrictions, !request.Explain)
 		if !kernelAdmits {
 			if rel.accepted != nil {
 				kernelProvenance := decision.Provenance
@@ -1001,17 +1036,11 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 			// through the untouched edges key — safe because edges are keyed
 			// by delegate, not by the requesting principal.
 			//
-			// This call site is the ONLY masked entry point into the chain
-			// today, because the memo has no production install site and is
-			// dormant everywhere, including here. A second caller of
-			// walkDelegationChain exists in authz_relationship_rules.go
-			// (relationshipSourceDelegationHolds, reached from
-			// evaluateRelationshipCandidates on a kernel deny) and runs on
-			// an UNMASKED ctx; it is safe only while nothing installs the
-			// memo. Before any install site goes live, that caller must
-			// also be masked — or, more robustly, the mask should move
-			// inside the chain-walk itself so every current and future
-			// caller gets it automatically.
+			// The chain walk also applies maskAuthzInputs to its own ctx at
+			// entry, so its other caller (relationshipSourceDelegationHolds,
+			// reached from the relationship candidates in step 9, which
+			// already run with both memo keys masked) and any future caller
+			// get the same guarantee without relying on this call site.
 			ceilingAllowed, ceilingReason, ceilingErr := a.checkDelegationCeiling(maskAuthzInputs(ctx), ceilingReq, permissionID, agent.ID(), nil, &ceilingCause)
 			if ceilingErr != nil {
 				decision.Allowed = false
@@ -1063,6 +1092,9 @@ func (a *AuthzService) AuthorizeReadBatch(ctx context.Context, identity Identity
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	// The memo caches successful loads only, so a store failure still
+	// reaches the decision that observed it and fails closed.
+	ctx = withAuthzInputMemo(ctx)
 	if GetIdentityFromContext(ctx) != identity {
 		ctx = contextWithIdentity(ctx, identity)
 	}
@@ -1795,12 +1827,23 @@ func (a *AuthzService) loadAllAccessConstraints(ctx context.Context) ([]*store.A
 	}
 
 	// Within an install phase (see authz_request_inputs.go), the constraint
-	// slot is consumed only by decide's own step 7c and by
-	// ResolveListScopes: the delegation ceiling runs on a masked ctx (see
-	// checkDelegationCeiling's call site above), so getEffectivePermissions
-	// never sees this memo, and no other production consumer is reachable
-	// from the batch/handler install sites. Adding a new consumer inside a
-	// phase requires updating this comment and this package's parity test matrix.
+	// slot is consumed only by decide's own access-constraint restriction
+	// (accessConstraintRestrictions, called from decide) and by
+	// ResolveListScopes (applyListScopeConstraints). Every other consumer is
+	// reached only on a masked ctx:
+	//   - decide's relationship candidates run under maskAllAuthzMemo, which
+	//     covers executionProjectAdmission -> ProjectAdmissionForClass ->
+	//     SystemAuthorityProof and relationshipSourceDelegationHolds -> the
+	//     delegation chain walk;
+	//   - the delegation ceiling call site and the chain walk itself run
+	//     under maskAuthzInputs, which covers getEffectivePermissions and
+	//     userRelationshipAuthority;
+	//   - CanMintSelector runs under maskAllAuthzMemo.
+	// The access-constraint impact computation (computePrincipalImpact), the
+	// material runtime's SystemAuthorityProof call and the handlers that call
+	// getEffectivePermissions are outside every install site. Adding a new
+	// consumer requires updating this comment and the store-call recorder
+	// test that asserts no masked call observes a memo.
 	//
 	// On a done ctx the memo is bypassed entirely: today's uncached call
 	// is made with today's ctx and its result returned verbatim, and

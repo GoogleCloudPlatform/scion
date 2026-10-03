@@ -38,13 +38,22 @@ During the NM1 live gate the broker container ran as `uid=1002` while
 
 ## Mount Privilege
 
-The broker process requires mount privilege to auto-mount NFS shares at
-startup (see `NFSMountReconciler`). Options, in order of preference:
+The broker only mounts shares when `server.workspace_storage.nfs.auto_mount`
+is `true` (default `false`). With it off, the broker checks the mount table
+read-only and an operator (or `/etc/fstab`) mounts the exports, so the broker
+needs no mount privilege.
 
-- Configure `/etc/sudoers` to allow the broker user to run `mount`/`umount`
-  without a password, and have the reconciler invoke `sudo mount` (recommended
-  for a non-root service).
-- Run the broker as root.
+With `auto_mount: true`, the broker mounts shares in a background loop (see
+`NFSMountReconciler.Run`) by running `mount -t nfs` directly, so it must run
+as root. The reconciler has no `sudo` wrapper. A broker whose default runtime
+is Kubernetes or Cloud Run never mounts, even with `auto_mount: true`: the
+platform mounts the export into the agent, so the loop only verifies.
+
+Whether a share is mounted is decided from `/proc/mounts`, which cannot block
+on a hung mount. `mountpoint(1)` runs only immediately before a mount, as a
+guard against mounting over a mount the table did not show. Each command runs
+in its own process group, and the whole group (including the `mount.nfs`
+helper) is killed when the 90-second timeout or the dispatch request ends.
 
 ### Important (NM1b finding): `CAP_SYS_ADMIN` alone is NOT sufficient
 
@@ -52,9 +61,10 @@ The userspace `mount.nfs`/`mount.nfs4` helper **checks `uid == 0` explicitly**
 (not Linux capabilities), so granting `CAP_SYS_ADMIN` via `setcap` or a K8s
 `securityContext.capabilities` add does **not** let a non-root broker run
 `mount -t nfs`. During NM1b the service had to run as `User=root` for the
-helper to succeed. To run unprivileged, use the `sudo mount` wrapper above, or
-have the reconciler call the `mount(2)` syscall directly (which does honor
-`CAP_SYS_ADMIN`) rather than shelling out to the `mount.nfs` helper.
+helper to succeed. To run unprivileged, keep `auto_mount` off and mount the
+exports outside the broker. Alternatively, change the reconciler to call the
+`mount(2)` syscall directly (which does honor `CAP_SYS_ADMIN`) rather than
+shelling out to the `mount.nfs` helper.
 
 ## Config: `schema_version` required (NM1b finding)
 

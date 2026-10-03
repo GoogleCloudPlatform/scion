@@ -16,6 +16,7 @@ package runtimebroker
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -454,6 +455,30 @@ func TestAgentInfoToResponseProfile(t *testing.T) {
 	resp := AgentInfoToResponse(info)
 	if resp.Profile != "docker-dev" {
 		t.Errorf("Profile = %q, want %q", resp.Profile, "docker-dev")
+	}
+}
+
+// TestAgentInfoToResponseWarnings checks only the hub-only env drop
+// warnings reach the hub-facing response, and the field is omitted when
+// there are none (older hubs see no new key).
+func TestAgentInfoToResponseWarnings(t *testing.T) {
+	info := api.AgentInfo{
+		Name:               "agent-warn",
+		Phase:              "running",
+		Warnings:           []string{"some local-only warning", "Warning: TZ dropped"},
+		HubOnlyEnvWarnings: []string{"Warning: TZ dropped"},
+	}
+	resp := AgentInfoToResponse(info)
+	if len(resp.Warnings) != 1 || resp.Warnings[0] != "Warning: TZ dropped" {
+		t.Errorf("Warnings = %v, want only the hub-only env warning", resp.Warnings)
+	}
+
+	data, err := json.Marshal(AgentInfoToResponse(api.AgentInfo{Name: "quiet", Phase: "running"}))
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	if strings.Contains(string(data), `"warnings"`) {
+		t.Errorf("warnings must be omitted when empty, got %s", data)
 	}
 }
 

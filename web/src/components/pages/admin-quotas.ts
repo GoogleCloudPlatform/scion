@@ -24,6 +24,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { formatRelative } from '../../utils/time.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -841,29 +842,6 @@ export class ScionPageAdminQuotas extends LitElement {
   // Helpers
   // ---------------------------------------------------------------------------
 
-  private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = Date.now() - date.getTime();
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
-  }
-
   private resourceTypeBadgeClass(rt: string): string {
     if (rt === 'agent') return 'agent';
     if (rt === 'project') return 'project';
@@ -1025,7 +1003,7 @@ export class ScionPageAdminQuotas extends LitElement {
           </div>
         </td>
         <td class="hide-mobile">
-          <span class="meta-text">${this.formatRelativeTime(limit.updatedAt)}</span>
+          <span class="meta-text">${formatRelative(limit.updatedAt)}</span>
         </td>
         <td class="actions-cell">
           <sl-icon-button
@@ -1105,9 +1083,7 @@ export class ScionPageAdminQuotas extends LitElement {
                                 <span class="meta-text">${b.createdBy || '—'}</span>
                               </td>
                               <td class="hide-mobile">
-                                <span class="meta-text"
-                                  >${this.formatRelativeTime(b.createdAt)}</span
-                                >
+                                <span class="meta-text">${formatRelative(b.createdAt)}</span>
                               </td>
                               <td class="actions-cell">
                                 <sl-icon-button

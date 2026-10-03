@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -276,8 +277,8 @@ func runNotificationsList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fmt.Printf("%-12s  %-14s  %-20s  %-20s  %s\n", "ID", "AGENT", "STATUS", "TIME", "MESSAGE")
-	fmt.Printf("%-12s  %-14s  %-20s  %-20s  %s\n", "------------", "--------------", "--------------------", "--------------------", "-------")
+	fmt.Printf("%-12s  %-14s  %-20s  %-22s  %s\n", "ID", "AGENT", "STATUS", "TIME", "MESSAGE")
+	fmt.Printf("%-12s  %-14s  %-20s  %-22s  %s\n", "------------", "--------------", "--------------------", "----------------------", "-------")
 	for _, n := range notifs {
 		shortID := n.ID
 		if len(shortID) > 12 {
@@ -287,12 +288,12 @@ func runNotificationsList(cmd *cobra.Command, args []string) error {
 		if len(agentDisplay) > 14 {
 			agentDisplay = agentDisplay[:11] + "..."
 		}
-		timeStr := n.CreatedAt.Format("2006-01-02 15:04")
+		timeStr := clitime.Format(n.CreatedAt, clitime.Minute)
 		msg := n.Message
 		if len(msg) > 60 {
 			msg = msg[:57] + "..."
 		}
-		fmt.Printf("%-12s  %-14s  %-20s  %-20s  %s\n", shortID, agentDisplay, truncate(n.Status, 20), timeStr, msg)
+		fmt.Printf("%-12s  %-14s  %-20s  %-22s  %s\n", shortID, agentDisplay, truncate(n.Status, 20), timeStr, msg)
 	}
 
 	return nil
@@ -509,7 +510,7 @@ func runNotificationsSubscriptions(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("%-12s  %-6s  %-16s  %-16s  %-40s  %s\n", "ID", "SCOPE", "TARGET", "PROJECT", "TRIGGERS", "CREATED")
-	fmt.Printf("%-12s  %-6s  %-16s  %-16s  %-40s  %s\n", "------------", "------", "----------------", "----------------", "----------------------------------------", "----------")
+	fmt.Printf("%-12s  %-6s  %-16s  %-16s  %-40s  %s\n", "------------", "------", "----------------", "----------------", "----------------------------------------", "--------------")
 	for _, s := range subs {
 		shortID := s.ID
 		if len(shortID) > 12 {
@@ -530,7 +531,7 @@ func runNotificationsSubscriptions(cmd *cobra.Command, args []string) error {
 		if len(triggersStr) > 40 {
 			triggersStr = triggersStr[:37] + "..."
 		}
-		dateStr := s.CreatedAt.Format("2006-01-02")
+		dateStr := clitime.Format(s.CreatedAt, clitime.Date)
 		fmt.Printf("%-12s  %-6s  %-16s  %-16s  %-40s  %s\n", shortID, s.Scope, target, projectDisplay, triggersStr, dateStr)
 	}
 

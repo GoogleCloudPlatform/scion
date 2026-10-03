@@ -23,15 +23,17 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import type { RuntimeBroker, GCPServiceAccount } from '../../shared/types.js';
-import { isValidTimeZone } from '../../utils/time.js';
+import { formatInstantWithZone, isValidTimeZone } from '../../utils/time.js';
 import '../shared/timezone-picker.js';
 import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import './admin-experiments.js';
 
 // ── Type definitions matching the Go API response ──
@@ -203,6 +205,7 @@ interface V1RuntimeConfig {
   list_all_namespaces?: boolean;
   env?: Record<string, string>;
   cloudrun?: V1CloudRunConfig;
+  safe_to_evict?: boolean;
 }
 
 interface V1ProfileConfig {
@@ -212,6 +215,7 @@ interface V1ProfileConfig {
   image_registry?: string;
   env?: Record<string, string>;
   resources?: ResourceSpec;
+  safe_to_evict?: boolean;
   [key: string]: unknown;
 }
 
@@ -435,6 +439,9 @@ const hasOwn = (obj: Record<string, unknown>, key: string): boolean =>
 
 @customElement('scion-page-admin-server-config')
 export class ScionPageAdminServerConfig extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @state() private loading = true;
   @state() private saving = false;
   @state() private error: string | null = null;
@@ -1984,15 +1991,17 @@ export class ScionPageAdminServerConfig extends LitElement {
     const payload: Record<string, unknown> = {};
     const ok = (key: string) => this.readOnlyReason(key) === null;
 
-    // General
-    if (ok('active_profile')) payload.active_profile = this.activeProfile || undefined;
-    if (ok('default_template')) payload.default_template = this.defaultTemplate || undefined;
+    // General — send "" (not `|| undefined`) so clearing a field reaches
+    // the backend as an explicit empty string, which deletes the key from
+    // settings.yaml. An omitted key means "no change". See ptone/scion#860
+    // and ptone/scion#2535.
+    if (ok('active_profile')) payload.active_profile = this.activeProfile || '';
+    if (ok('default_template')) payload.default_template = this.defaultTemplate || '';
     if (ok('default_harness_config'))
-      payload.default_harness_config = this.resolvedHarnessConfig || undefined;
-    if (ok('default_harness_auth'))
-      payload.default_harness_auth = this.defaultHarnessAuth || undefined;
-    if (ok('image_registry')) payload.image_registry = this.imageRegistry || undefined;
-    if (ok('workspace_path')) payload.workspace_path = this.workspacePath || undefined;
+      payload.default_harness_config = this.resolvedHarnessConfig || '';
+    if (ok('default_harness_auth')) payload.default_harness_auth = this.defaultHarnessAuth || '';
+    if (ok('image_registry')) payload.image_registry = this.imageRegistry || '';
+    if (ok('workspace_path')) payload.workspace_path = this.workspacePath || '';
 
     // Default agent limits — send zero/empty values so the backend can clear
     // the field (delete from settings.yaml). Using `|| undefined` here would
@@ -2038,13 +2047,13 @@ export class ScionPageAdminServerConfig extends LitElement {
       payload.default_thinking_level = this.defaultThinkingLevel ?? 0;
     }
     if (ok('default_max_agent_role')) {
-      payload.default_max_agent_role = this.defaultMaxAgentRole || undefined;
+      payload.default_max_agent_role = this.defaultMaxAgentRole || '';
     }
     if (ok('default_agent_role')) {
-      payload.default_agent_role = this.defaultAgentRole || undefined;
+      payload.default_agent_role = this.defaultAgentRole || '';
     }
     if (ok('default_runtime_broker')) {
-      payload.default_runtime_broker = this.defaultRuntimeBroker || undefined;
+      payload.default_runtime_broker = this.defaultRuntimeBroker || '';
     }
     // Sent unconditionally (not `|| undefined`): an explicit "" clears the
     // field server-side (admin_settings.go's `DefaultTimezone *string`
@@ -2053,6 +2062,16 @@ export class ScionPageAdminServerConfig extends LitElement {
     // leave the stored value unchanged.
     if (ok('default_timezone')) {
       payload.default_timezone = this.defaultTimezone || '';
+    }
+    // GCP identity defaults: same "" = delete contract. The service account
+    // only applies in "assign" mode, so it is cleared for any other mode
+    // (mirrors buildLayer1Payload).
+    if (ok('default_gcp_identity_mode')) {
+      payload.default_gcp_identity_mode = this.defaultGCPIdentityMode || '';
+    }
+    if (ok('default_gcp_identity_service_account_id')) {
+      payload.default_gcp_identity_service_account_id =
+        this.defaultGCPIdentityMode === 'assign' ? this.defaultGCPIdentitySAID || '' : '';
     }
 
     // Server
@@ -2470,7 +2489,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         ${meta.updated_at
           ? html`<span class="section-meta-item">
               <sl-icon name="clock"></sl-icon>
-              ${new Date(meta.updated_at).toLocaleString()}
+              ${formatInstantWithZone(meta.updated_at) || meta.updated_at}
             </span>`
           : nothing}
       </div>
@@ -2866,7 +2885,9 @@ export class ScionPageAdminServerConfig extends LitElement {
           ${this.scionBuildTime
             ? html`<div class="version-item">
                 <span class="version-label">Build Time</span>
-                <span class="version-value">${this.scionBuildTime}</span>
+                <span class="version-value" title=${this.scionBuildTime}
+                  >${formatInstantWithZone(this.scionBuildTime) || this.scionBuildTime}</span
+                >
               </div>`
             : nothing}
           <div class="version-actions">
@@ -4116,6 +4137,17 @@ export class ScionPageAdminServerConfig extends LitElement {
                   >
                   <span class="hint">List agents across all namespaces</span>
                 </div>
+                <div class="form-field">
+                  <label>Safe to Evict</label>
+                  <span class="hint"
+                    >Kubernetes only. false adds the cluster-autoscaler safe-to-evict: "false"
+                    annotation to agent pods; true adds nothing. A profile's value wins.</span
+                  >
+                  ${this.renderSafeToEvictSelect(rt.safe_to_evict, readOnly, (v) =>
+                    this.updateRuntimeSafeToEvict(name, v)
+                  )}
+                  ${this.renderSafeToEvictIgnored(this.isKubernetesRuntime(name))}
+                </div>
               `
             : html`
                 <div class="form-field">
@@ -4172,6 +4204,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         delete rt.namespace;
         delete rt.gke;
         delete rt.list_all_namespaces;
+        delete rt.safe_to_evict;
       } else {
         // Switching away from Cloud Run — clear cloudrun sub-object
         delete rt.cloudrun;
@@ -4179,6 +4212,75 @@ export class ScionPageAdminServerConfig extends LitElement {
     }
     updated[name] = rt;
     this.runtimes = updated;
+  }
+
+  /**
+   * Tri-state select for safe_to_evict: empty (unset, inherit), "false" or
+   * "true". Unset and true add nothing to the pod; only false annotates it.
+   */
+  private renderSafeToEvictSelect(
+    value: boolean | undefined,
+    readOnly: boolean,
+    onChange: (v: boolean | undefined) => void
+  ): TemplateResult {
+    const current = value === false ? 'false' : value === true ? 'true' : '';
+    return html`<sl-select
+      class="safe-to-evict"
+      placeholder="Not set"
+      clearable
+      value=${current}
+      ?disabled=${readOnly}
+      @sl-change=${(e: Event) => {
+        const v = (e.target as HTMLSelectElement).value;
+        onChange(v === 'false' ? false : v === 'true' ? true : undefined);
+      }}
+    >
+      <sl-option value="false">false</sl-option>
+      <sl-option value="true">true</sl-option>
+    </sl-select>`;
+  }
+
+  /**
+   * Whether a runtime entry is a Kubernetes runtime, using the same rule as
+   * the settings validation: its type, or its name when no type is set, is
+   * kubernetes, k8s or remote.
+   */
+  private isKubernetesRuntime(name: string): boolean {
+    const rt = this.runtimes[name];
+    const t = rt?.type || name;
+    return t === 'kubernetes' || t === 'k8s' || t === 'remote';
+  }
+
+  /** Label shown under the safe_to_evict select when it would be ignored. */
+  private renderSafeToEvictIgnored(isKubernetes: boolean): TemplateResult | typeof nothing {
+    if (isKubernetes) return nothing;
+    return html`<span class="hint safe-to-evict-ignored"
+      >Ignored: this runtime is not Kubernetes.</span
+    >`;
+  }
+
+  private updateRuntimeSafeToEvict(name: string, value: boolean | undefined): void {
+    const updated = { ...this.runtimes };
+    const rt = { ...updated[name] };
+    if (value === undefined) {
+      delete rt.safe_to_evict;
+    } else {
+      rt.safe_to_evict = value;
+    }
+    updated[name] = rt;
+    this.runtimes = updated;
+  }
+
+  private updateProfileSafeToEvict(name: string, value: boolean | undefined): void {
+    const updated = { ...this.profiles };
+    const profile = { ...updated[name] };
+    if (value === undefined) {
+      delete profile.safe_to_evict;
+    } else {
+      profile.safe_to_evict = value;
+    }
+    updated[name] = profile;
+    this.profiles = updated;
   }
 
   private updateRuntimeBool(
@@ -4344,6 +4446,21 @@ export class ScionPageAdminServerConfig extends LitElement {
                 );
               }}
             ></sl-input>
+          </div>
+          <div class="form-field">
+            <label>Safe to Evict</label>
+            <span class="hint"
+              >Kubernetes only. false adds the cluster-autoscaler safe-to-evict: "false" annotation
+              to agent pods; true adds nothing. Empty uses the runtime's value.</span
+            >
+            ${this.renderSafeToEvictSelect(profile.safe_to_evict, readOnly, (v) =>
+              this.updateProfileSafeToEvict(name, v)
+            )}
+            ${this.renderSafeToEvictIgnored(
+              !profile.runtime ||
+                !(profile.runtime in this.runtimes) ||
+                this.isKubernetesRuntime(profile.runtime)
+            )}
           </div>
           <div class="form-field">
             <label>CPU Request</label>

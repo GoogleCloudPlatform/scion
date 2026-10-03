@@ -23,6 +23,8 @@ import type { Orientation } from '../../shared/lineage.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
+import type { ScionAgentTreeView } from '../shared/agent-tree-view.js';
+import { GraphPaletteController } from '../shared/palette/graph-palette-controller.js';
 
 /**
  * Standalone agent graph page — fetches its own data and owns a cross-project
@@ -47,6 +49,12 @@ export class AgentGraphPage extends LitElement {
   private initiallyProjectScoped = false;
   /** Agent ID to center on load (?focus=<agent-id> deep link) */
   private focusId = '';
+
+  /** "Jump to agent" over the graph, offering the agents its tree view shows. */
+  readonly graphPalette = new GraphPaletteController(this, {
+    treeView: (): ScionAgentTreeView | null =>
+      this.renderRoot.querySelector('scion-agent-tree-view'),
+  });
 
   private boundOnAgentsUpdated = () => this.onAgentsUpdated();
   private refetchTimer: number | undefined;

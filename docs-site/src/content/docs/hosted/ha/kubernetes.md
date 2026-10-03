@@ -30,11 +30,17 @@ runtimes:
     gke: false                     # enable GKE-specific features
     list_all_namespaces: false     # list agents across all namespaces
     priority_class_name: scion-agent-priority  # default PriorityClass for agent pods (optional)
+    # shared_dir_storage_class: standard-rwx  # RWX class for shared-dir PVCs (see below)
+    # shared_dir_size: 10Gi                    # size per shared-dir PVC
 
 profiles:
   default:
     runtime: k8s
 ```
+
+### Brokers with More Than One Runtime
+
+A Runtime Broker can serve several runtimes through its profiles, for example a Docker default plus one or more Kubernetes profiles. Besides its default runtime, the broker tracks each distinct auxiliary runtime separately: Kubernetes runtimes are told apart by context and namespace, so two profiles that target different clusters or namespaces are never merged. Every per-agent path follows the runtime the agent was dispatched to, not the broker default: the Hub endpoint rewrite, extra hosts and the worktree check at dispatch, the runtime reported in the create response (and recorded by the Hub), and start and restart, which look the agent up on the default runtime and then on each auxiliary runtime. For example, an agent on a Kubernetes profile of a Docker-default broker gets the Kubernetes defaults, such as its GCP identity mode, rather than the Docker ones.
 
 ### Agent-Level Kubernetes Configuration
 
@@ -47,6 +53,7 @@ kubernetes:
   serviceAccountName: agent-sa         # Workload Identity / IRSA
   runtimeClassName: gvisor             # sandboxed runtime (gVisor, Kata, etc.)
   priorityClassName: scion-agent-priority  # overrides the runtime-level default, if any
+  safeToEvict: false                   # ask the autoscaler not to evict the pod (see below)
   imagePullPolicy: IfNotPresent        # Always, IfNotPresent, or Never
   nodeSelector:
     pool: agents
@@ -62,6 +69,63 @@ kubernetes:
     limits:
       nvidia.com/gpu: "1"
 ```
+
+### Shared Directory PVCs
+
+Each project [shared directory](/scion/local/workspace/#5-project-shared-directories) gets its own `ReadWriteMany` PersistentVolumeClaim, created on first use and reused by later agents in the same project. Two keys control these claims:
+
+| Key | Default | Description |
+|---|---|---|
+| `shared_dir_storage_class` | cluster default class | StorageClass for new shared-dir PVCs. It must support `ReadWriteMany`. |
+| `shared_dir_size` | `10Gi` | Requested size for each new shared-dir PVC. |
+
+You can set them in three places. Each key is resolved separately, and the first source that sets it wins:
+
+1. The agent's or template's `kubernetes:` block.
+2. The profile entry in `settings.yaml`.
+3. The profile's runtime entry in `settings.yaml`.
+
+If none of them sets a key, the cluster's default StorageClass and `10Gi` are used.
+
+An empty value means "not set", so it does not override a lower source. Once a runtime entry or profile sets a class, a template cannot reset it to the cluster default; name the class explicitly instead.
+
+`shared_dir_size` must be a positive Kubernetes quantity such as `10Gi` or `1Ti`. Settings validation and the admin settings API reject other values, and an agent start fails with an error naming the key that holds the bad value.
+
+The settings values are read every time an agent starts. They apply only on the Kubernetes runtime.
+
+On GKE Autopilot the default class (`standard-rwo`) cannot provision `ReadWriteMany` volumes. The claim stays unbound and the agent pod stays `Pending`. To avoid this, set an RWX class such as `standard-rwx` (Filestore CSI) on the runtime or the profile:
+
+```yaml
+runtimes:
+  gke-autopilot:
+    type: kubernetes
+    context: my-autopilot-cluster
+    namespace: scion-agents
+    shared_dir_storage_class: standard-rwx
+    shared_dir_size: 1Ti
+
+profiles:
+  gke:
+    runtime: gke-autopilot
+    # Optional per-profile override; wins over the runtime entry.
+    # shared_dir_storage_class: premium-rwx
+```
+
+A template or agent can still override this for itself:
+
+```yaml
+kubernetes:
+  shared_dir_storage_class: standard-rwx
+  shared_dir_size: 10Gi
+```
+
+:::note
+Existing PVCs are reused as they are and never changed. A new class or size only applies to claims created after the change. To move an existing shared directory to a new class, delete its PVC (`scion-shared-…`, labelled `scion.shared-dir=<name>`) after copying out its data. When an agent reuses a claim whose class differs from the requested one, Scion logs a warning naming the claim and both classes.
+:::
+
+:::caution[Cost with many projects]
+Each dynamically provisioned RWX PVC can be its own backing volume. On GKE, every `standard-rwx` claim is a separate Filestore instance, with that tier's minimum capacity. With many projects or shared directories this adds up quickly. For larger fleets, use the NFS backend instead: one pre-provisioned RWX export, mounted by every pod with a `subPath` per project and directory, and no per-directory PVCs. See [`server.shared_dir_storage`](/scion/reference/server-config/#shared-directory-storage-servershared_dir_storage) (`backend: nfs`) or the NFS [`server.workspace_storage`](/scion/reference/server-config/#workspace-storage-serverworkspace_storage) backend, which serves shared directories from the workspace export.
+:::
 
 ### Resource Configuration
 
@@ -154,6 +218,107 @@ Scion also distinguishes a Kubernetes-initiated disruption from a plain stop or 
 
 This is reported as soon as either signal is observed: a pod still `Running` but already committed to termination (it has a `deletionTimestamp` and a live `DisruptionTarget` condition — most of what preemption and the Eviction API delete this way), or a pod that has actually reached a terminal state (`Failed`/`Succeeded`) while still carrying the signal. A `DisruptionTarget` condition with no `deletionTimestamp` yet is not reported — that pod is still finishing its grace period and has not stopped. It depends on the runtime observing one of these two states before the pod object is removed from the API server entirely; if the pod disappears between polls without either ever being observed, the agent may instead be reported through a different, more generic terminal path rather than as preempted/evicted. Docker and other non-Kubernetes runtimes are unaffected.
 
+### Safe-to-Evict
+
+Cluster autoscalers remove underused nodes by evicting the pods on them. Agent pods are bare pods with no controller to recreate them, so an eviction ends the agent's run. To ask the autoscaler to leave agent pods alone, set `safe_to_evict: false`. Scion then adds this annotation to the pod:
+
+```yaml
+metadata:
+  annotations:
+    cluster-autoscaler.kubernetes.io/safe-to-evict: "false"
+```
+
+The setting is opt-in, and only `false` has an effect. Leaving it unset, or setting it to `true`, adds no annotation; that is the default behaviour.
+
+You can set it on a runtime, on a profile, or on a template or agent:
+
+```yaml
+# settings.yaml — runtime default
+runtimes:
+  k8s:
+    type: kubernetes
+    safe_to_evict: false
+```
+
+```yaml
+# settings.yaml — profile value, overrides the runtime
+profiles:
+  long-running:
+    runtime: k8s
+    safe_to_evict: false
+```
+
+```yaml
+# template or agent scion-agent.yaml — overrides profile and runtime
+kubernetes:
+  safeToEvict: false
+```
+
+Scion uses the first value it finds, in this order:
+
+1. The template or agent `kubernetes.safeToEvict`
+2. The agent's profile's `safe_to_evict`: the `--profile` flag, or the profile the agent was created with, falling back to the active profile
+3. The `safe_to_evict` on that profile's runtime entry
+
+An explicit `true` at a higher level wins over a `false` lower down. For example, `safeToEvict: true` on a template turns the annotation off for that template, even when the runtime sets `false`.
+
+Other runtimes (Docker, Podman, Apple, Cloud Run) accept the setting and ignore it. `scion config validate` warns when it is set on a non-Kubernetes runtime, or on a profile that uses one, and Scion logs a warning at agent start when it is ignored.
+
+#### GKE Autopilot
+
+On GKE Autopilot, the annotation makes the pod an [extended run time pod](https://cloud.google.com/kubernetes-engine/docs/how-to/extended-duration-pods). GKE then doesn't evict the pod for scale-down or node auto-upgrades for up to seven days. After that, the node can be scaled down or upgraded as usual. Before you enable it, note these points from the GKE documentation:
+
+- **Disruptions it doesn't prevent:** priority-based preemption, system Pod evictions, kubelet out-of-memory eviction, Compute Engine VM maintenance, node auto-repair, and anything an operator starts, such as a manual upgrade or a node drain. The [Pod Priority and Preemption](#pod-priority-and-preemption) settings above still matter.
+- **Resources and cost:** extended run time pods have higher minimum resource requests than ordinary Autopilot pods. You're billed for the requests at standard rates, and GKE places each pod on its own node where it can.
+- **Workloads it can't be combined with:** Spot Pods, custom compute classes, and inter-Pod affinity.
+- **Limits:** at most 50 extended run time workloads with different CPU requests per cluster.
+- **Image pull time:** the time spent pulling the image counts toward the run time.
+
+Check the current GKE page before you rely on these values, because they can change.
+
+#### GKE Standard and other clusters
+
+With the open source cluster autoscaler, including GKE Standard, the annotation stops scale-down from evicting the pod for as long as it runs. The node the pod runs on isn't removed for being underused, which can keep idle nodes running. The annotation doesn't protect against node auto-upgrades, preemption, node failure, or a manual drain.
+
+### PodDisruptionBudgets
+
+Scion doesn't create PodDisruptionBudgets. Operators who want voluntary disruptions, such as node drains and GKE surge upgrades, to wait for agent pods can create one themselves.
+
+Agent pods are bare pods with no owning workload. For bare pods, Kubernetes supports only an integer `minAvailable`; it doesn't support `maxUnavailable` or percentages. A budget per agent works well. Each agent pod has the label `scion.name=<agent-name>`:
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: scion-agent-my-agent
+  namespace: scion-agents
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      scion.name: my-agent
+```
+
+Before you use one, consider the following:
+
+- **Drains wait:** while a budget blocks eviction, `kubectl drain` keeps retrying until it times out. Bare pods also need `kubectl drain --force`. When a drain does evict an agent pod, nothing recreates it, so the budget only delays the end of the run.
+- **GKE upgrades:** during surge upgrades, GKE respects budgets and the termination grace period for up to one hour. After that, it evicts the remaining pods.
+- **Not covered:** a budget only applies to evictions through the Eviction API. It doesn't cover preemption, kubelet node-pressure eviction, node failure, or VM maintenance.
+- **Overlapping budgets:** the Eviction API refuses to evict a pod that more than one budget selects. Don't let selectors overlap.
+- **Cleanup:** a budget whose agent is gone matches nothing and has no effect. Delete it when you delete the agent.
+
+A budget complements `safe_to_evict: false`. The annotation covers autoscaler scale-down, including Autopilot's extended run time. A budget makes drains and upgrades wait.
+
+### Maintenance Windows and Exclusions
+
+On GKE, [maintenance windows and exclusions](https://cloud.google.com/kubernetes-engine/docs/concepts/maintenance-windows-and-exclusions) control when automatic upgrades run. That makes them the main way to keep upgrades away from long agent runs:
+
+- **Maintenance window:** limits automatic upgrades to times you choose, for example off-hours, when fewer agents are running.
+- **"No upgrades" exclusion:** blocks upgrades for up to 90 days, but GKE recommends 30 or fewer. A cluster can have at most three, and they must leave at least 48 hours of maintenance availability in any rolling 92-day period.
+- **"No minor upgrades" and "no minor or node upgrades" exclusions:** these can last until the end of support for the cluster's minor version, but GKE recommends keeping them under six months. "No minor or node upgrades" also blocks node upgrades.
+
+Windows and exclusions don't stop Compute Engine maintenance, and most control plane repairs ignore them. GKE can also override them to apply critical security patches. They reduce disruptions, but agent runs still need to survive an occasional node loss.
+
 ## Architecture & Security
 
 ### Native Client & In-Cluster Authentication
@@ -244,6 +409,8 @@ Older agent images behave in one of two ways. With an image whose `sciontool` pr
 
 Secrets are composable: `ResolvedAuth` and `ResolvedSecrets` are applied independently (not mutually exclusive).
 
+File-type secrets, harness auth files, and `secrets.json` whose targets are inside the agent home are not mounted there directly. Their volumes are mounted under `/run/scion/` (`secrets-store`, `agent-secrets`, `auth-files`), and after the home sync each file is copied to its target in the home as the Pod user, with mode `0600`. This keeps the home writable for non-root Pods: a direct `subPath` mount would make the container runtime create missing parent directories owned by root, and the home sync would then fail with "Permission denied". Targets outside the agent home keep their direct `subPath` mounts.
+
 ### Hub Transport Credential
 
 When the Hub uses transport auth (see [Auth Proxy (IAP)](/scion/hosted/ha/auth-proxy-iap/)), it sends the initial transport credential as `SCION_TRANSPORT_TOKEN` with each start, resume, and restart. On Kubernetes, the runtime does not write this value into the Pod spec as a plain environment value. Instead it:
@@ -274,6 +441,7 @@ Tar sync includes retry with exponential backoff (1s, 2s, 4s — up to 3 retries
 | RuntimeClassName | Supported |
 | ServiceAccountName | Supported |
 | PriorityClassName | Supported (runtime default and per-template/agent override; the class must already exist on the cluster) |
+| Safe-to-evict annotation | Supported (opt-in `safe_to_evict: false` on a runtime or profile, or `safeToEvict: false` on a template/agent) |
 | NodeSelector | Supported |
 | Tolerations | Supported |
 | ImagePullPolicy | Supported (Always, IfNotPresent, Never) |

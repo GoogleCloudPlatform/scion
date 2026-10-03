@@ -2106,15 +2106,20 @@ func TestParseDMKeyIDs(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // newTestWebChatStoreWithMessages creates a WebChatStore backed by an in-memory
-// SQLite DB, including a minimal messages table for search testing.
+// SQLite DB, including a minimal messages table for search testing. It uses
+// the production driver (modernc) and a DATETIME created column bound with a
+// time.Time, so created holds the same time.Time.String() text the ent
+// migrated table does. TestSearchChatMessages_PagesToExhaustionOnEntSchema
+// covers paging on the real ent schema.
 func newTestWebChatStoreWithMessages(t *testing.T) (WebChatStore, *sql.DB) {
 	t.Helper()
-	db, err := sql.Open("sqlite3", ":memory:")
+	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
+	db.SetMaxOpenConns(1) // one connection, so every query sees the same in-memory database
 
-	store := NewWebChatStore(db, "sqlite3")
+	store := NewWebChatStore(db, "sqlite")
 	if err := store.Init(); err != nil {
 		t.Fatalf("init store: %v", err)
 	}
@@ -2133,7 +2138,7 @@ CREATE TABLE IF NOT EXISTS messages (
     type TEXT NOT NULL DEFAULT 'instruction',
     channel TEXT,
     thread_id TEXT,
-    created TEXT NOT NULL
+    created DATETIME NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_created ON messages (created);
 `
@@ -2148,7 +2153,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_created ON messages (created);
 func insertTestMessage(t *testing.T, db *sql.DB, id, projectID, threadID, sender, msg string, created time.Time) {
 	t.Helper()
 	const query = `INSERT INTO messages (id, project_id, thread_id, sender, msg, channel, created) VALUES (?, ?, ?, ?, ?, 'web', ?)`
-	_, err := db.Exec(query, id, projectID, threadID, sender, msg, created.UTC().Format(time.RFC3339Nano))
+	_, err := db.Exec(query, id, projectID, threadID, sender, msg, created.UTC())
 	if err != nil {
 		t.Fatalf("insert test message: %v", err)
 	}
