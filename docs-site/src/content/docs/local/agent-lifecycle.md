@@ -114,6 +114,14 @@ exit code (the authoritative path), and the Hub also derives `error` from a
 non-zero container exit reported in the broker heartbeat — which covers cases
 where the container died before `sciontool` could report.
 
+A third path covers a container that vanishes without reporting an exit (for
+example, removed outside Scion). In Hub-connected setups, a `running` agent
+that is missing from its online broker's complete runtime inventory for longer
+than `missing_agent_grace` (default **3 minutes**, see
+[server configuration](/scion/reference/server-config/)) moves to `error` with
+exit reason `container_missing`, instead of staying `running` while messages
+to it are buffered. It can then be restarted like any other `error`-phase agent.
+
 :::note
 A normal `scion stop` sends `SIGTERM`, which harnesses like Claude Code handle
 gracefully and exit cleanly (code 0). Only a *genuine* crash or a hard kill

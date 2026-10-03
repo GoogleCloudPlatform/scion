@@ -87,6 +87,11 @@ curl -H "Authorization: Bearer $SCION_HUB_TOKEN" \
      "https://scion.example.com/api/v1/auth/scopes?projectId=<project-id>"
 ```
 
+Each scope in the response reports `eligible` and, when it is not, a machine-readable
+`eligibilityReason` (for an alias such as `agent:manage`, also which member scopes are
+ineligible). The **Create Token** form in the web UI uses the same information: once you pick a
+project, scopes you cannot select are shown with the reason.
+
 This answers only "may I select this restriction" — it never lists which agents or other targets
 the resulting token could reach. If you request eligibility for a project you cannot access, or
 one that does not exist, the request is denied identically in both cases, so the response cannot
@@ -119,9 +124,12 @@ The purpose and labels are descriptive only: they grant no permissions and canno
 after the token is created. The Hub records them, along with the token's identity, in request
 logs, authorization decisions and audit records, so you can tell which automation made a call.
 
-The command prints the token value **once**. Store it securely — it cannot be retrieved later. If
-a requested scope is denied, the error names the scope and the reason; run `scion hub token
-scopes --project <project>` to see the full picture before retrying.
+The command prints the token value **once**. Store it securely — it cannot be retrieved later.
+Each requested scope is checked against your live authority in the project before the token is
+written. If a requested scope is denied, the Hub returns `403` with error code
+`scope_violation` and `details.selector` and `details.reason` naming the scope and the reason;
+nothing is created. Run `scion hub token scopes --project <project>` to see the full picture
+before retrying.
 
 ## Using a token
 
