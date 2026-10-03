@@ -412,7 +412,11 @@ func scopedCursorBinding(endpoint string, filter any, identity Identity) string 
 		// from scoped UAT (same user ID, different authority ceiling).
 		switch id := identity.(type) {
 		case *ScopedUserIdentity:
-			identityKey = fmt.Sprintf("scoped_uat:%s:%s:%s", id.ID(), id.ScopedProjectID(), id.CredentialID())
+			// Keyed on the boundary kind as well as its project, so a cursor
+			// minted under a hub-boundary token never matches one minted
+			// under a project-boundary token, or the reverse.
+			boundary := id.Boundary()
+			identityKey = fmt.Sprintf("scoped_uat:%s:%s:%s:%s", id.ID(), boundary.Kind, boundary.ProjectID, id.CredentialID())
 		case AgentIdentity:
 			identityKey = fmt.Sprintf("agent_jwt:%s:%s:%s", id.ID(), id.ProjectID(), id.TokenID())
 		default:
