@@ -365,6 +365,11 @@ export function formatRelativeTime(dateString: string): string {
   }
 }
 
+/** Options for `formatRelative`. */
+export interface FormatRelativeOptions {
+  style?: Intl.RelativeTimeFormatStyle;
+}
+
 /**
  * Formats an ISO instant as a relative time description, for both past
  * ("3 hours ago") and future ("in 3 hours") instants. Zone-independent
@@ -375,10 +380,6 @@ export function formatRelativeTime(dateString: string): string {
  * (default, "5 minutes ago"), `'short'` ("5 min. ago") or `'narrow'`
  * ("5m ago"), for compact cells such as trays and dense tables.
  */
-export interface FormatRelativeOptions {
-  style?: Intl.RelativeTimeFormatStyle;
-}
-
 export function formatRelative(iso: string, options: FormatRelativeOptions = {}): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;

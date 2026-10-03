@@ -34,9 +34,10 @@
   out reads "in 3 days" instead of "in 72 hours", times under a minute read
   "30s ago" or "now" instead of "just now", and one day reads "yesterday".
 - Absolute times use `formatInstantWithZone`, which gives the effective zone,
-  24-hour time and a zone label. Date-only cells (token expiry, template and
-  hook created dates, the home page's fallback for items older than 30 days)
-  use the `'date'` style, which keeps the label.
+  24-hour time and a zone label. Date-only cells (template and hook created
+  dates, the home page's fallback for items older than 30 days) use the
+  `'date'` style, which keeps the label. Token expiry is an exact instant, so
+  it uses `'datetime-full'`.
 - Components that render an absolute time use `DisplayZoneController`, so a
   change to the display zone re-renders them without a reload.
 - AC15: each active row in the schedule list shows its next run twice, as a
@@ -51,7 +52,8 @@
 - Admin, access-boundary and role-binding views, including
   `role-binding-utils.ts`, `admin-experiments.ts`, `admin-server-config.ts`
   and `metrics-dashboard.ts`. These belong to tz-refactor task 20, which
-  also owns the compact ladder in `admin-skill-registries.ts`. The ladders in
+  also owns the compact ladders in `admin-skill-registries.ts` and
+  `admin-skill-registry-detail.ts`. The ladders in
   `chat-members.ts` and `chat-search.ts` belong to tz-refactor task 21.
 - Log viewers, chat, `file-browser.ts` and `chat-palette-data.ts`. These
   belong to tz-refactor task 21.
