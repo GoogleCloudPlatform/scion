@@ -269,6 +269,26 @@ func TestGlobalTimeZoneFlags_ExclusiveOnSubcommand(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// The root hook fails outside a project; the --tz/--utc conflict must still
+// be the reported error, because the hook checks flag groups first.
+func TestGlobalTimeZoneFlags_ExclusiveBeforeHookErrors(t *testing.T) {
+	setupNoProjectPreRun(t)
+
+	_, err := runRootGolden(t, "list", "--utc")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not in a scion project", "control: the hook must fail here")
+
+	for _, args := range [][]string{
+		{"list", "--tz", "UTC", "--utc"},
+		{"--utc", "list", "--tz", "Asia/Tokyo"},
+	} {
+		_, err := runRootGolden(t, args...)
+		require.Error(t, err, "%v", args)
+		assert.Contains(t, err.Error(), "[tz utc] were all set", "%v", args)
+		assert.NotContains(t, err.Error(), "not in a scion project", "%v", args)
+	}
+}
+
 func TestGlobalTimeZoneFlags_Registered(t *testing.T) {
 	tz := rootCmd.PersistentFlags().Lookup("tz")
 	require.NotNil(t, tz, "--tz must be a persistent root flag")

@@ -47,6 +47,13 @@ return an error instead of blocking.`,
 	SilenceErrors: true,
 	SilenceUsage:  true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		// Cobra checks flag groups (e.g. --tz/--utc) only after this hook
+		// returns, so check them first: a later hook error, such as running
+		// outside a project, must not hide a flag conflict.
+		if err := cmd.ValidateFlagGroups(); err != nil {
+			return err
+		}
+
 		// Warn (once per process) about legacy environment variables that
 		// scion no longer reads. For real top-level invocations this has
 		// already run in Execute(), before any settings or project
