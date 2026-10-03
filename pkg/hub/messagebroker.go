@@ -76,13 +76,16 @@ type MessageBrokerProxy struct {
 	subscribedTopics    map[string]bool                    // dedup guard for project-level subscriptions
 	runningSeen         map[string]bool                    // agent IDs whose running status already ensured subscriptions
 	stopped             bool                               // set by Stop; no subscription is registered afterwards
-	// userSubMu is held across the whole subscribeProjectUserMessages call,
-	// so a caller that is told "subscribed" knows Subscribe has returned
+	// userSubLocks holds one mutex per user-message topic (guarded by mu;
+	// entries are never removed, so the map is bounded by project count).
+	// A topic's mutex is held across its first Subscribe, so a caller that
+	// is told "subscribed" knows Subscribe has returned, while first
+	// subscriptions for other projects proceed independently
 	// (ptone/scion#1906).
-	userSubMu sync.Mutex
-	stopCh    chan struct{}
-	stopOnce  sync.Once
-	wg        sync.WaitGroup
+	userSubLocks map[string]*sync.Mutex
+	stopCh       chan struct{}
+	stopOnce     sync.Once
+	wg           sync.WaitGroup
 }
 
 // NewMessageBrokerProxy creates a new MessageBrokerProxy.
@@ -103,6 +106,7 @@ func NewMessageBrokerProxy(
 		pluginSubscriptions: make(map[string]eventbus.Subscription),
 		subscribedTopics:    make(map[string]bool),
 		runningSeen:         make(map[string]bool),
+		userSubLocks:        make(map[string]*sync.Mutex),
 		stopCh:              make(chan struct{}),
 	}
 }
@@ -492,11 +496,31 @@ func (p *MessageBrokerProxy) subscribeProjectUserMessages(projectID string) bool
 		return false
 	}
 
-	// Serialize callers across Subscribe: a concurrent caller (e.g. the
-	// lifecycle goroutine and the notifier reacting to the same status
-	// event) must not see the topic as subscribed before it is.
-	p.userSubMu.Lock()
-	defer p.userSubMu.Unlock()
+	// Fast path, without the topic lock: the flag is only set after
+	// Subscribe has returned, so an already-subscribed topic never waits
+	// behind another caller's (possibly slow, plugin-backed) Subscribe.
+	p.mu.Lock()
+	if p.stopped {
+		p.mu.Unlock()
+		return false
+	}
+	if p.subscribedTopics[topic] {
+		p.mu.Unlock()
+		return true
+	}
+	topicMu := p.userSubLocks[topic]
+	if topicMu == nil {
+		topicMu = &sync.Mutex{}
+		p.userSubLocks[topic] = topicMu
+	}
+	p.mu.Unlock()
+
+	// Serialize callers for this topic across Subscribe: a concurrent
+	// caller (e.g. the lifecycle goroutine and the notifier reacting to
+	// the same status event) must not see the topic as subscribed before
+	// it is. Re-check under the lock: another caller may have finished.
+	topicMu.Lock()
+	defer topicMu.Unlock()
 
 	p.mu.Lock()
 	if p.stopped {

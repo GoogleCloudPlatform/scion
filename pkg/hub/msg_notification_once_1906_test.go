@@ -462,3 +462,91 @@ func TestCanPersistUserDM(t *testing.T) {
 	assert.False(t, canPersistUserDM(strings.ToUpper(id), true),
 		"DM keys only accept canonical UUIDs")
 }
+
+// topicGatedBus blocks Subscribe for one topic until gate is closed; other
+// topics subscribe straight through.
+type topicGatedBus struct {
+	eventbus.EventBus
+	topic   string
+	entered chan struct{}
+	gate    chan struct{}
+}
+
+func (b *topicGatedBus) Subscribe(pattern string, h eventbus.EventHandler) (eventbus.Subscription, error) {
+	if pattern == b.topic {
+		b.entered <- struct{}{}
+		<-b.gate
+	}
+	return b.EventBus.Subscribe(pattern, h)
+}
+
+// returnsWithin runs f and fails the test if it has not returned within d
+// (a failure bound, not a sleep: a correct f returns immediately).
+func returnsWithin(t *testing.T, d time.Duration, f func() bool) bool {
+	t.Helper()
+	done := make(chan bool, 1)
+	go func() { done <- f() }()
+	select {
+	case ok := <-done:
+		return ok
+	case <-time.After(d):
+		t.Fatalf("call blocked for %s (want an immediate return)", d)
+		return false
+	}
+}
+
+// msgb-rev-3 round 2, finding 1: a slow (e.g. plugin-backed) first Subscribe
+// for project A must not stall projects that are already subscribed, nor
+// first subscriptions for other projects.
+func TestSubscribeProjectUserMessages_SlowSubscribeDoesNotBlockOtherProjects(t *testing.T) {
+	const (
+		projectA = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+		projectB = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+		projectC = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+	)
+	inner := eventbus.NewInProcessEventBus(slog.Default())
+	t.Cleanup(func() { _ = inner.Close() })
+	bus := &topicGatedBus{
+		EventBus: inner,
+		topic:    eventbus.TopicAllUserMessages(projectA),
+		entered:  make(chan struct{}, 1),
+		gate:     make(chan struct{}),
+	}
+	p := newProxyOn(t, bus)
+	var gateOnce sync.Once
+	releaseA := func() { gateOnce.Do(func() { close(bus.gate) }) }
+	t.Cleanup(releaseA) // never leave A stuck if an assertion fails
+
+	require.True(t, p.subscribeProjectUserMessages(projectB), "B pre-subscribed")
+
+	aDone := make(chan bool, 1)
+	go func() { aDone <- p.subscribeProjectUserMessages(projectA) }()
+	<-bus.entered // A is stuck inside Subscribe
+
+	assert.True(t, returnsWithin(t, 5*time.Second, func() bool { return p.subscribeProjectUserMessages(projectB) }),
+		"an already-subscribed project returns at once")
+	assert.True(t, returnsWithin(t, 5*time.Second, func() bool { return p.subscribeProjectUserMessages(projectC) }),
+		"a first subscription for another project proceeds")
+
+	releaseA()
+	assert.True(t, <-aDone)
+}
+
+// The already-subscribed check runs before the topic lock is taken, so a
+// subscribed topic answers even while its lock is held.
+func TestSubscribeProjectUserMessages_FastPathSkipsTopicLock(t *testing.T) {
+	const projectID = "dddddddd-dddd-dddd-dddd-dddddddddddd"
+	inner := eventbus.NewInProcessEventBus(slog.Default())
+	t.Cleanup(func() { _ = inner.Close() })
+	p := newProxyOn(t, inner)
+	require.True(t, p.subscribeProjectUserMessages(projectID))
+
+	p.mu.Lock()
+	topicMu := p.userSubLocks[eventbus.TopicAllUserMessages(projectID)]
+	p.mu.Unlock()
+	require.NotNil(t, topicMu)
+	topicMu.Lock()
+	defer topicMu.Unlock()
+
+	assert.True(t, returnsWithin(t, 5*time.Second, func() bool { return p.subscribeProjectUserMessages(projectID) }))
+}
