@@ -94,7 +94,7 @@ the agent. With `--format json`, `details.started` is `false`,
     - `--broker <string>`: Preferred runtime broker ID or name.
     - `--label <key=value>`: Label for the agent (repeatable).
     - `--role <string>`: Agent role for Hub API access (`none`, `readonly`, `baseline`, `full`).
-    - `--message-mode <mode>`: Initial message mode (`none`, `lineage`, `branch`, `project`).
+    - `--message-mode <mode>`: Set the agent's initial message mode (`project`, `branch`, `lineage`, `none`, or `hub`). See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes).
     - `--service-account <string>`: GCP service account ID to assign (Hub mode).
     - `--upload-template`, `--no-upload`, `--template-scope <scope>`: Template upload behavior in Hub mode.
 
