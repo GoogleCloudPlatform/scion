@@ -189,3 +189,109 @@ func TestCleanupNFSSharedDirTree_LegacyFormatMentioningKey_LogsErrorAndSkips(t *
 	require.NoError(t, err, "the local project-configs tree must never be touched by NFS cleanup")
 	assert.Equal(t, "local sentinel", string(localContent))
 }
+
+// sdsOverrideSettingsYAML is a global settings file whose global backend is
+// local while the gke profile overrides it to nfs.
+func sdsOverrideSettingsYAML(mountRoot string) string {
+	return `schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+profiles:
+  gke:
+    runtime: k8s
+    shared_dir_storage_backend: nfs
+server:
+  shared_dir_storage:
+    backend: local
+    nfs:
+      mount_root: ` + mountRoot + `
+      shares:
+        - id: scion-shared
+          pv_name: pv
+`
+}
+
+// When only a profile override selects nfs, cleanup removes the project's
+// tree from the export if the export is reachable on this host.
+func TestCleanupNFSSharedDirTree_ProfileOverrideOnly_RemovesTree(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	globalScionDir := filepath.Join(tmpHome, ".scion")
+	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+	mountRoot := filepath.Join(tmpHome, "srv")
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(sdsOverrideSettingsYAML(mountRoot)), 0644))
+
+	projectID := "pid-override-only"
+	leaf := filepath.Join(mountRoot, "scion-shared", "projects", projectID, "shared-dirs", "scratchpad")
+	require.NoError(t, os.MkdirAll(leaf, 0o2775))
+	require.NoError(t, os.WriteFile(filepath.Join(leaf, "gone.txt"), []byte("x"), 0o644))
+
+	svc := newTestProjectDeletionServiceForNFSCleanup()
+	svc.cleanupNFSSharedDirTree(context.Background(), projectID)
+
+	_, err := os.Stat(filepath.Join(mountRoot, "scion-shared", "projects", projectID))
+	assert.True(t, os.IsNotExist(err), "an nfs profile override must make delete clean the project's tree")
+}
+
+// When only a profile override selects nfs and the export is not mounted
+// on this host, cleanup warns and returns; it never logs an error and
+// never creates anything.
+func TestCleanupNFSSharedDirTree_ProfileOverrideOnly_MissingExport_WarnsAndSkips(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	globalScionDir := filepath.Join(tmpHome, ".scion")
+	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+	mountRoot := filepath.Join(tmpHome, "not-mounted")
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(sdsOverrideSettingsYAML(mountRoot)), 0644))
+
+	buf := captureSlog(t)
+	svc := newTestProjectDeletionServiceForNFSCleanup()
+	svc.cleanupNFSSharedDirTree(context.Background(), "pid-missing-export")
+
+	logged := buf.String()
+	assert.Contains(t, logged, "level=WARN")
+	assert.Contains(t, logged, "not reachable on this host")
+	assert.Contains(t, logged, "pid-missing-export")
+	assert.NotContains(t, logged, "level=ERROR")
+	_, err := os.Stat(mountRoot)
+	assert.True(t, os.IsNotExist(err), "cleanup must not create the export path")
+}
+
+// An nfs override held only in the DB settings overlay (the file has
+// none) also makes delete clean the project's tree.
+func TestCleanupNFSSharedDirTree_OverlayOverride_RemovesTree(t *testing.T) {
+	old := config.GetGlobalSettingsOverlay()
+	t.Cleanup(func() { config.SetGlobalSettingsOverlay(old) })
+
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	globalScionDir := filepath.Join(tmpHome, ".scion")
+	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
+	mountRoot := filepath.Join(tmpHome, "srv")
+	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+server:
+  shared_dir_storage:
+    backend: local
+    nfs:
+      mount_root: `+mountRoot+`
+      shares:
+        - id: scion-shared
+          pv_name: pv
+`), 0644))
+
+	o := config.NewSettingsOverlay()
+	o.Update(map[string]config.V1RuntimeConfig{"k8s": {Type: "kubernetes"}},
+		map[string]config.V1ProfileConfig{"gke": {Runtime: "k8s", SharedDirStorageBackend: "nfs"}}, nil, "")
+	config.SetGlobalSettingsOverlay(o)
+
+	projectID := "pid-overlay-override"
+	leaf := filepath.Join(mountRoot, "scion-shared", "projects", projectID, "shared-dirs", "scratchpad")
+	require.NoError(t, os.MkdirAll(leaf, 0o2775))
+
+	svc := newTestProjectDeletionServiceForNFSCleanup()
+	svc.cleanupNFSSharedDirTree(context.Background(), projectID)
+
+	_, err := os.Stat(filepath.Join(mountRoot, "scion-shared", "projects", projectID))
+	assert.True(t, os.IsNotExist(err))
+}

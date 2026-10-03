@@ -343,14 +343,15 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 // but plausibly mention shared_dir_storage, it logs an ERROR and skips
 // (deletion is best-effort and never blocks or rolls back the DB deletion).
 // Settings are read via the same env-free, global-only loader used by the
-// broker (config.LoadGlobalSettings) so this can never be influenced by a
+// broker (config.LoadGlobalSettingsWithOverlay: the global file plus the
+// DB settings overlay, if installed) so this can never be influenced by a
 // project's own settings.yaml.
 func (svc *ProjectDeletionService) cleanupNFSSharedDirTree(ctx context.Context, projectID string) {
 	// Mirrors resolveNFSSharedDirPath's fail-closed rule. Deletion is
 	// best-effort by design (it never blocks or rolls back the DB deletion),
 	// so "fail closed" here means logging an ERROR instead of silently
 	// skipping cleanup, rather than refusing the request outright.
-	globalSettings, _, err := config.LoadGlobalSettings()
+	globalSettings, _, err := config.LoadGlobalSettingsWithOverlay()
 	if err != nil {
 		if config.GlobalSettingsMentions("shared_dir_storage") {
 			svc.logger.ErrorContext(ctx, "global settings unreadable and mention shared_dir_storage; skipping NFS shared-dir cleanup on project delete",
