@@ -61,6 +61,9 @@ const (
 	// broker (by ID, name or slug) that does not exist at all, as opposed to
 	// one that exists but is offline/unreachable (runtime_broker_unavailable).
 	ErrCodeRuntimeBrokerNotFound = "runtime_broker_not_found"
+	// ErrCodeNotImplemented is returned for a request the API accepts but
+	// the hub does not carry out yet. Status 501.
+	ErrCodeNotImplemented = "not_implemented"
 
 	ErrCodeMissingEnvVars = "missing_env_vars"
 	ErrCodeCloneFailed    = "clone_failed"
