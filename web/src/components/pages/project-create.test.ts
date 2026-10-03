@@ -224,6 +224,8 @@ interface FormOpts {
   cloneBody?: unknown;
   /** Paged template list: page 0 has no cursor; page i is fetched with cursor=p<i>. */
   templatePages?: { projects: unknown[]; nextCursor?: string }[];
+  /** Per-page template response (overrides templatePages); page index as above. */
+  templatePage?: (page: number) => { status?: number; body: unknown };
   /** Status for POST /api/v1/projects (201 created, 200 already exists). */
   createStatus?: number;
   validatePath?: Record<string, unknown>;
@@ -247,9 +249,13 @@ async function createForm(opts: FormOpts = {}): Promise<{
       );
     }
     if (path.includes('/api/v1/projects?isTemplate=true')) {
+      const cursor = new URL(path, 'http://x').searchParams.get('cursor');
+      const page = cursor ? Number(cursor.slice(1)) : 0;
+      if (opts.templatePage) {
+        const { status, body } = opts.templatePage(page);
+        return Promise.resolve(jsonResponse(body, status ?? 200));
+      }
       if (opts.templatePages) {
-        const cursor = new URL(path, 'http://x').searchParams.get('cursor');
-        const page = cursor ? Number(cursor.slice(1)) : 0;
         return Promise.resolve(jsonResponse(opts.templatePages[page]));
       }
       return Promise.resolve(jsonResponse({ projects: opts.templates ?? [] }));
@@ -634,6 +640,57 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
       '/api/v1/projects?isTemplate=true&cursor=p1',
     ]);
     expect(optionValues(el, '#startFrom')).toEqual(['blank', 'tpl-git', 'tpl-shared']);
+    expect(text(q(el, '.start-from-hint'))).not.toContain("Couldn't");
+  });
+
+  it('keeps the templates already loaded when a later page fails', async () => {
+    const { el } = await createForm({
+      templatePage: (page) =>
+        page === 0
+          ? { body: { projects: [GIT_TEMPLATE], nextCursor: 'p1' } }
+          : { status: 500, body: { error: { code: 'internal', message: 'boom' } } },
+    });
+    element = el;
+
+    expect(optionValues(el, '#startFrom')).toEqual(['blank', 'tpl-git']);
+    expect(text(q(el, '.start-from-hint'))).toContain("Couldn't load all project templates");
+  });
+
+  it('says the list is incomplete when the first page fails', async () => {
+    const { el } = await createForm({
+      templatePage: () => ({ status: 500, body: { error: { code: 'internal' } } }),
+    });
+    element = el;
+
+    expect(optionValues(el, '#startFrom')).toEqual(['blank']);
+    expect(text(q(el, '.start-from-hint'))).toContain("Couldn't load project templates");
+  });
+
+  it('stops at the page cap with a warning instead of truncating silently', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { el, requests } = await createForm({
+      templatePage: (page) => ({
+        body: { projects: [{ ...SHARED_TEMPLATE, id: `tpl-${page}` }], nextCursor: `p${page + 1}` },
+      }),
+    });
+    element = el;
+
+    const listCalls = requests.filter((r) => r.path.includes('isTemplate=true'));
+    expect(listCalls).toHaveLength(20);
+    expect(optionValues(el, '#startFrom')).toHaveLength(21); // Blank + 20 templates
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('incomplete'));
+    expect(text(q(el, '.start-from-hint'))).toContain("Couldn't load all project templates");
+  });
+
+  it('labels the Start from and Workspace Type selects through sl-select', async () => {
+    const { el } = await createForm();
+    element = el;
+
+    expect(q(el, '#startFrom')?.getAttribute('label')).toBe('Start from');
+    expect(q(el, '#mode')?.getAttribute('label')).toBe('Workspace Type');
+    // A <label for> cannot reach the control inside sl-select's shadow DOM.
+    expect(q(el, 'label[for="startFrom"]')).toBeNull();
+    expect(q(el, 'label[for="mode"]')).toBeNull();
   });
 });
 

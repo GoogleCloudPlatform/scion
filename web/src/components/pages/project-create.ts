@@ -490,7 +490,8 @@ export class ScionPageProjectCreate extends LitElement {
       margin-bottom: 1.25rem;
     }
 
-    .form-field label {
+    .form-field label,
+    .form-field sl-select::part(form-control-label) {
       display: block;
       font-size: 0.875rem;
       font-weight: 600;
@@ -847,30 +848,41 @@ export class ScionPageProjectCreate extends LitElement {
   private async loadTemplates(): Promise<void> {
     this.templatesLoading = true;
     this.templatesLoadFailed = false;
+    const templates: ProjectTemplate[] = [];
     try {
-      const templates: ProjectTemplate[] = [];
       let cursor = '';
-      // MAX_TEMPLATE_PAGES only guards against a server that never stops
-      // returning a cursor; at the server's default page size it is far
-      // beyond any realistic template count.
-      for (let page = 0; page < MAX_TEMPLATE_PAGES; page++) {
+      let page = 0;
+      do {
+        // MAX_TEMPLATE_PAGES only guards against a server that never stops
+        // returning a cursor; at the server's default page size it is far
+        // beyond any realistic template count. Say so rather than truncate
+        // silently.
+        if (page === MAX_TEMPLATE_PAGES) {
+          console.warn(
+            `[project-create] Stopped loading project templates after ${MAX_TEMPLATE_PAGES} pages (${templates.length} templates); the list is incomplete.`
+          );
+          this.templatesLoadFailed = true;
+          break;
+        }
         const url =
           '/api/v1/projects?isTemplate=true' +
           (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
         const res = await apiFetch(url);
         if (!res.ok) {
           this.templatesLoadFailed = true;
-          return;
+          break;
         }
         const data = (await res.json()) as { projects?: ProjectTemplate[]; nextCursor?: string };
         templates.push(...(data.projects ?? []));
         cursor = data.nextCursor ?? '';
-        if (!cursor) break;
-      }
-      this.templates = templates;
+        page++;
+      } while (cursor);
     } catch {
       this.templatesLoadFailed = true;
     } finally {
+      // Keep whatever loaded: a failure on a later page still leaves the
+      // earlier templates usable (the hint says the list is incomplete).
+      this.templates = templates;
       this.templatesLoading = false;
     }
   }
@@ -1191,9 +1203,9 @@ export class ScionPageProjectCreate extends LitElement {
   private renderStartFrom(template: ProjectTemplate | null): TemplateResult {
     return html`
       <div class="form-field start-from">
-        <label for="startFrom">Start from</label>
         <sl-select
           id="startFrom"
+          label="Start from"
           .value=${this.startFrom}
           @sl-change=${(e: Event) => this.onStartFromChange(e)}
         >
@@ -1228,11 +1240,13 @@ export class ScionPageProjectCreate extends LitElement {
                 is created.`
             : this.templatesLoading
               ? 'Blank starts with no preset configuration. Loading project templates…'
-              : this.templatesLoadFailed
-                ? "Blank starts with no preset configuration. Couldn't load project templates; reload to try again."
-                : this.templates.length === 0
-                  ? 'Blank starts with no preset configuration. No project templates yet — use “Create Template” on a project to make one.'
-                  : 'Blank starts with no preset configuration. Pick a project template to copy its settings, env vars, skills, hooks and agent templates.'}
+              : this.templatesLoadFailed && this.templates.length > 0
+                ? "Blank starts with no preset configuration. Couldn't load all project templates; reload to see the rest."
+                : this.templatesLoadFailed
+                  ? "Blank starts with no preset configuration. Couldn't load project templates; reload to try again."
+                  : this.templates.length === 0
+                    ? 'Blank starts with no preset configuration. No project templates yet — use “Create Template” on a project to make one.'
+                    : 'Blank starts with no preset configuration. Pick a project template to copy its settings, env vars, skills, hooks and agent templates.'}
         </div>
       </div>
     `;
@@ -1370,8 +1384,12 @@ export class ScionPageProjectCreate extends LitElement {
     const selectedType = workspaceTypes.find((t) => t.value === this.mode);
     return html`
       <div class="form-field">
-        <label for="mode">Workspace Type</label>
-        <sl-select id="mode" .value=${this.mode} @sl-change=${(e: Event) => this.onModeChange(e)}>
+        <sl-select
+          id="mode"
+          label="Workspace Type"
+          .value=${this.mode}
+          @sl-change=${(e: Event) => this.onModeChange(e)}
+        >
           ${workspaceTypes.map((t) => html`<sl-option value=${t.value}>${t.label}</sl-option>`)}
         </sl-select>
         <div class="hint">${selectedType?.hint ?? ''}</div>
