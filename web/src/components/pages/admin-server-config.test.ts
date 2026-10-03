@@ -1080,6 +1080,37 @@ describe('scion-page-admin-server-config', () => {
       expect(payload).toHaveProperty('default_gcp_identity_mode', 'block');
       expect(payload).toHaveProperty('default_gcp_identity_service_account_id', '');
     });
+
+    it('buildFilePayload clears the GCP service account when mode is empty', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.defaultGCPIdentityMode = '';
+      el.defaultGCPIdentitySAID = 'stale-sa';
+
+      const payload = el.buildFilePayload() as Record<string, unknown>;
+      expect(payload).toHaveProperty('default_gcp_identity_mode', '');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', '');
+    });
+
+    it('buildFilePayload omits an env-pinned default_gcp_identity_mode', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'file',
+            env_overrides: ['default_gcp_identity_mode'],
+          })
+        )
+      );
+      const el = element as any;
+      el.defaultGCPIdentityMode = 'assign';
+      el.defaultGCPIdentitySAID = 'sa-123';
+
+      const payload = el.buildFilePayload() as Record<string, unknown>;
+      expect(payload).not.toHaveProperty('default_gcp_identity_mode');
+      expect(payload).toHaveProperty('default_gcp_identity_service_account_id', 'sa-123');
+    });
   });
 
   // ── Cross-project messaging (D1) ──
