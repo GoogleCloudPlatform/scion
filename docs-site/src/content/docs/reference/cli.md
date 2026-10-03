@@ -193,8 +193,7 @@ Sends a message to a running agent or user.
     scion message --non-interactive @reviewer "PR #42 is ready for review.\n\nBranch: fix/auth-bug\nCI: all green"
     ```
 
-
-**Message body input:** for `--body-file` and stdin (`-` or `--body-file -`), trailing newlines are trimmed and everything else, including interior newlines, is sent exactly as read. An inline `<message>` is sent as given. An empty body is an error.
+**Message body input:** for `--body-file` and stdin (`-` or `--body-file -`), trailing CR/LF characters are trimmed and everything else, including interior newlines, is sent exactly as read. An inline `<message>` is sent as given. An empty body is an error.
 
 :::caution[Backticks and `$(...)` in double-quoted messages]
 Your shell expands backticks and `$(...)` inside double-quoted arguments **before** `scion` runs: it executes the command and splices its output into the message. `scion` cannot detect or undo this. To send code or shell snippets verbatim, use `--body-file`, or stdin with a quoted heredoc (`<<'EOF'`):

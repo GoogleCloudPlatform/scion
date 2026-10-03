@@ -229,9 +229,13 @@ func withStdin(t *testing.T, content string) {
 	t.Cleanup(func() { os.Stdin = origStdin })
 	r, w, err := os.Pipe()
 	require.NoError(t, err)
-	_, err = w.WriteString(content)
-	require.NoError(t, err)
-	_ = w.Close()
+	// Write from a goroutine: content larger than the OS pipe buffer
+	// (64 KiB on Linux) would otherwise block before anything reads it.
+	go func() {
+		_, _ = w.WriteString(content)
+		_ = w.Close()
+	}()
+	t.Cleanup(func() { _ = r.Close() })
 	os.Stdin = r
 }
 
@@ -3623,4 +3627,40 @@ func TestSendMessageViaHub_ReincarnatingAgent_PrintsDeferredNotice(t *testing.T)
 	assert.Contains(t, output, "msg-deferred-1", "the message ID must be shown for correlation")
 	assert.NotContains(t, output, "Message delivered to agent",
 		"the generic delivered message must not also print for a deferred outcome")
+}
+
+// TestResolveMessageBody_OversizeRejectedNotTruncated pins that an over-limit
+// body is rejected rather than cut at the read limit and sent. The input puts
+// newlines at the cut point, which trimming would otherwise remove, pulling
+// the read back under the limit and silently dropping the tail.
+func TestResolveMessageBody_OversizeRejectedNotTruncated(t *testing.T) {
+	content := strings.Repeat("a", messages.MaxMsgSize-1) + "\n\n" + "TAIL"
+
+	t.Run("--body-file path", func(t *testing.T) {
+		bodyFile := filepath.Join(t.TempDir(), "big.txt")
+		require.NoError(t, os.WriteFile(bodyFile, []byte(content), 0644))
+		_, err := resolveMessageBody(bodyFile, "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "exceeds maximum size")
+	})
+	t.Run("--body-file -", func(t *testing.T) {
+		withStdin(t, content)
+		_, err := resolveMessageBody("-", "")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "exceeds maximum size")
+	})
+	t.Run("positional -", func(t *testing.T) {
+		withStdin(t, content)
+		_, err := resolveMessageBody("", "-")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "exceeds maximum size")
+	})
+	t.Run("exactly at the limit is accepted", func(t *testing.T) {
+		atLimit := strings.Repeat("a", messages.MaxMsgSize)
+		bodyFile := filepath.Join(t.TempDir(), "limit.txt")
+		require.NoError(t, os.WriteFile(bodyFile, []byte(atLimit), 0644))
+		got, err := resolveMessageBody(bodyFile, "")
+		require.NoError(t, err)
+		assert.Len(t, got, messages.MaxMsgSize)
+	})
 }

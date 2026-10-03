@@ -168,7 +168,7 @@ git log --oneline -5 | scion message @tech-lead -
 scion message @tech-lead --body-file - < ./review-notes.md
 ```
 
-For `--body-file` and stdin, trailing newlines are trimmed; everything else is sent exactly as read.
+For `--body-file` and stdin, trailing CR/LF characters are trimmed; everything else is sent exactly as read.
 
 ### Message Formatting
 

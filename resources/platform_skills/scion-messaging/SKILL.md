@@ -105,7 +105,7 @@ To include newlines, use real newlines inside shell quoted strings or heredocs. 
 
 - `scion message <recipient> -` reads the body from stdin.
 - `scion message <recipient> --body-file <path>` reads it from a file. `--body-file -` also reads stdin.
-- For stdin and `--body-file`, trailing newlines are trimmed; everything else is sent exactly as read.
+- For stdin and `--body-file`, trailing CR/LF characters are trimmed; everything else is sent exactly as read.
 
 Correct — quoted heredoc on stdin (the `'EOF'` quotes stop all expansion; preferred for anything with markdown or code):
 ```bash

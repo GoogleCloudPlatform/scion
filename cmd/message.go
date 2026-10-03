@@ -106,7 +106,7 @@ Message body can be provided as:
   - Stdin: echo "hello" | scion message agent -
            (or: scion message agent --body-file -)
 
-For --body-file and stdin, trailing newlines are trimmed; all other text,
+For --body-file and stdin, trailing CR/LF characters are trimmed; all other text,
 including interior newlines, is sent exactly as read.
 
 The shell expands backticks and $(...) inside double-quoted arguments before
@@ -1494,9 +1494,9 @@ func sendMentionMessages(hubCtx *HubContext, sender, primaryRecipient, messageTe
 // Priority: --body-file > positional args. A positional body of exactly "-",
 // or --body-file -, reads the body from stdin.
 //
-// Newline rule (the same for every non-positional source): trailing line
-// breaks (\n or \r\n) are trimmed, so the newline that echo, a heredoc, or
-// an editor adds at end-of-file is not sent. Interior newlines and leading
+// Newline rule (the same for every non-positional source): trailing CR/LF
+// characters are trimmed, so the newline that echo, a heredoc, or an editor
+// adds at end-of-file is not sent. Interior newlines and leading
 // or trailing spaces are preserved exactly. Positional bodies are used as
 // given.
 func resolveMessageBody(bodyFile string, positionalBody string) (string, error) {
@@ -1520,16 +1520,18 @@ func resolveMessageBody(bodyFile string, positionalBody string) (string, error) 
 	return positionalBody, nil
 }
 
-// readMessageBody reads up to messages.MaxMsgSize+1 bytes from r (one byte
-// over the limit, so a later size check can still reject an oversize body)
-// and trims trailing line breaks. source names r in error messages.
+// readMessageBody reads up to messages.MaxMsgSize+1 bytes from r and rejects
+// anything over messages.MaxMsgSize before trimming, so a body that is cut
+// off at the read limit is never sent in truncated form (trimming first
+// could pull an over-limit read back under the limit). It then trims
+// trailing CR/LF characters. source names r in error messages.
 func readMessageBody(r io.Reader, source string) (string, error) {
 	data, err := io.ReadAll(io.LimitReader(r, int64(messages.MaxMsgSize)+1))
 	if err != nil {
-		if source == "stdin" {
-			return "", fmt.Errorf("failed to read message from stdin: %w", err)
-		}
-		return "", fmt.Errorf("failed to read %s: %w", source, err)
+		return "", fmt.Errorf("failed to read message from %s: %w", source, err)
+	}
+	if len(data) > messages.MaxMsgSize {
+		return "", fmt.Errorf("message body from %s exceeds maximum size of %d bytes", source, messages.MaxMsgSize)
 	}
 	return strings.TrimRight(string(data), "\r\n"), nil
 }
@@ -1539,7 +1541,7 @@ func init() {
 	messageCmd.Flags().BoolVarP(&msgInterrupt, "interrupt", "i", false, "Interrupt the harness before sending the message")
 	messageCmd.Flags().BoolVarP(&msgWake, "wake", "w", false, "Resume a suspended agent before delivering the message")
 	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable; use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace). Absolute paths outside these roots are silently dropped on delivery.")
-	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args ('-' reads stdin; trailing newlines are trimmed)")
+	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args ('-' reads stdin; trailing CR/LF characters are trimmed)")
 
 	// Deprecated flags — still functional, emit warnings when used.
 	// These flags are hidden from help output to guide users toward
