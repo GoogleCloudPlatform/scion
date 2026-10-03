@@ -45,7 +45,15 @@ needs no mount privilege.
 
 With `auto_mount: true`, the broker mounts shares in a background loop (see
 `NFSMountReconciler.Run`) by running `mount -t nfs` directly, so it must run
-as root. The reconciler has no `sudo` wrapper.
+as root. The reconciler has no `sudo` wrapper. A broker whose default runtime
+is Kubernetes or Cloud Run never mounts, even with `auto_mount: true`: the
+platform mounts the export into the agent, so the loop only verifies.
+
+Whether a share is mounted is decided from `/proc/mounts`, which cannot block
+on a hung mount. `mountpoint(1)` runs only immediately before a mount, as a
+guard against mounting over a mount the table did not show. Each command runs
+in its own process group, and the whole group (including the `mount.nfs`
+helper) is killed when the 90-second timeout or the dispatch request ends.
 
 ### Important (NM1b finding): `CAP_SYS_ADMIN` alone is NOT sufficient
 

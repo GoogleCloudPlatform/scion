@@ -42,6 +42,9 @@ func nfsSettings(autoMount bool, shares ...config.V1NFSShare) *config.VersionedS
 
 var share1 = config.V1NFSShare{ID: "ws1", Server: "10.0.0.2", Export: "/scion-workspaces"}
 
+// pvShare is share1 with a Kubernetes PV name.
+var pvShare = config.V1NFSShare{ID: "ws1", Server: "10.0.0.2", Export: "/scion-workspaces", PVName: "scion-ws1"}
+
 func TestBrokerNFSConfig(t *testing.T) {
 	t.Run("nil settings", func(t *testing.T) {
 		if cfg, warn := brokerNFSConfig(nil); cfg != nil || warn != "" {
@@ -104,6 +107,12 @@ func TestBrokerNFSConfig_RejectsInvalidShares(t *testing.T) {
 		"nested id":           func(vs *config.VersionedSettings) { vs.Server.WorkspaceStorage.NFS.Shares[0].ID = "a/b" },
 		"empty server":        func(vs *config.VersionedSettings) { vs.Server.WorkspaceStorage.NFS.Shares[0].Server = "" },
 		"relative export":     func(vs *config.VersionedSettings) { vs.Server.WorkspaceStorage.NFS.Shares[0].Export = "export" },
+		"export with space":   func(vs *config.VersionedSettings) { vs.Server.WorkspaceStorage.NFS.Shares[0].Export = "/a b" },
+		"server with space":   func(vs *config.VersionedSettings) { vs.Server.WorkspaceStorage.NFS.Shares[0].Server = "10.0.0.2 -o x" },
+		"server with tab":     func(vs *config.VersionedSettings) { vs.Server.WorkspaceStorage.NFS.Shares[0].Server = "host\tname" },
+		"server leading dash": func(vs *config.VersionedSettings) { vs.Server.WorkspaceStorage.NFS.Shares[0].Server = "-oexec" },
+		"ipv6 server":         func(vs *config.VersionedSettings) { vs.Server.WorkspaceStorage.NFS.Shares[0].Server = "fd00::2" },
+		"bracketed ipv6":      func(vs *config.VersionedSettings) { vs.Server.WorkspaceStorage.NFS.Shares[0].Server = "[fd00::2]" },
 		"duplicate id": func(vs *config.VersionedSettings) {
 			vs.Server.WorkspaceStorage.NFS.Shares = append(vs.Server.WorkspaceStorage.NFS.Shares, share1)
 		},
@@ -117,6 +126,16 @@ func TestBrokerNFSConfig_RejectsInvalidShares(t *testing.T) {
 				t.Fatalf("got %v, %q; want nil and a warning", cfg, warn)
 			}
 		})
+	}
+}
+
+func TestBrokerNFSConfig_AcceptsServerForms(t *testing.T) {
+	for _, server := range []string{"10.0.0.2", "nfs.example.internal", "filestore-1"} {
+		share := share1
+		share.Server = server
+		if cfg, warn := brokerNFSConfig(nfsSettings(false, share)); cfg == nil {
+			t.Errorf("server %q rejected: %s", server, warn)
+		}
 	}
 }
 
@@ -204,34 +223,6 @@ func TestServerForeground_WiresBrokerNFSConfig(t *testing.T) {
 	}
 }
 
-func TestFindMountSource(t *testing.T) {
-	table := strings.Join([]string{
-		"proc /proc proc rw 0 0",
-		"10.0.0.9:/old /mnt/nfs/ws1 nfs rw 0 0",
-		"10.0.0.2:/scion-workspaces /mnt/nfs/ws1 nfs rw,vers=3 0 0",
-		`10.0.0.3:/with\040space /mnt/nfs/my\040share nfs rw 0 0`,
-		"short",
-	}, "\n")
-	cases := []struct {
-		path, wantSource string
-		wantMounted      bool
-	}{
-		{"/mnt/nfs/ws1", "10.0.0.2:/scion-workspaces", true}, // last entry wins
-		{"/mnt/nfs/ws1/", "10.0.0.2:/scion-workspaces", true},
-		{"/mnt/nfs/my share", "10.0.0.3:/with space", true},
-		{"/mnt/nfs/ws2", "", false},
-	}
-	for _, tc := range cases {
-		src, mounted, err := findMountSource(strings.NewReader(table), tc.path)
-		if err != nil || src != tc.wantSource || mounted != tc.wantMounted {
-			t.Errorf("findMountSource(%q) = %q, %v, %v; want %q, %v", tc.path, src, mounted, err, tc.wantSource, tc.wantMounted)
-		}
-	}
-	if got := unescapeMountField(`a\134b\0`); got != `a\b\0` {
-		t.Errorf("unescapeMountField = %q", got)
-	}
-}
-
 type fakeNFSProbe struct {
 	mounts  map[string]string
 	mntErr  error
@@ -276,10 +267,19 @@ func TestCheckDoctorNFSMounts(t *testing.T) {
 			wantStatus: "pass", wantMessage: []string{"1 share(s) mounted and reachable: ws1", "auto_mount off"}},
 		{name: "healthy, auto_mount on", vs: nfsSettings(true, share1), probe: fakeNFSProbe{mounts: good},
 			wantStatus: "pass", wantMessage: []string{"auto_mount on"}},
-		{name: "not mounted, auto_mount off", vs: nfsSettings(false, share1),
-			wantStatus: "fail", wantMessage: []string{"ws1: not mounted at /mnt/nfs/ws1", "auto_mount off"}, wantRemedy: "Mount each export"},
-		{name: "not mounted, auto_mount on", vs: nfsSettings(true, share1),
+		{name: "not mounted, auto_mount off: warn", vs: nfsSettings(false, share1),
+			wantStatus: "warn", wantMessage: []string{"ws1: not mounted at /mnt/nfs/ws1", "auto_mount is off", "(auto_mount off)"}, wantRemedy: "Mount each export"},
+		{name: "not mounted, auto_mount on: fail", vs: nfsSettings(true, share1),
 			wantStatus: "fail", wantMessage: []string{"not mounted", "auto_mount on"}, wantRemedy: "broker.nfs-mount"},
+		{name: "not mounted, pv_name share, auto_mount on: warn", vs: nfsSettings(true, pvShare),
+			wantStatus: "warn", wantMessage: []string{"not mounted", "pv_name is set"}},
+		{name: "not mounted with auto_mount off, server unreachable: fail", vs: nfsSettings(false, share1),
+			probe:      fakeNFSProbe{dialErr: map[string]error{"10.0.0.2:2049": errors.New("refused")}},
+			wantStatus: "fail", wantMessage: []string{"not mounted", "unreachable"}},
+		{name: "wrong source, auto_mount on: fail", vs: nfsSettings(true, share1), probe: fakeNFSProbe{mounts: map[string]string{"/mnt/nfs/ws1": "10.9.9.9:/x"}},
+			wantStatus: "fail", wantMessage: []string{"mounted from 10.9.9.9:/x"}},
+		{name: "wrong source, pv_name share: fail", vs: nfsSettings(false, pvShare), probe: fakeNFSProbe{mounts: map[string]string{"/mnt/nfs/ws1": "10.9.9.9:/x"}},
+			wantStatus: "fail", wantMessage: []string{"mounted from 10.9.9.9:/x"}},
 		{name: "wrong source", vs: nfsSettings(false, share1), probe: fakeNFSProbe{mounts: map[string]string{"/mnt/nfs/ws1": "10.9.9.9:/x"}},
 			wantStatus: "fail", wantMessage: []string{"mounted from 10.9.9.9:/x, expected 10.0.0.2:/scion-workspaces"}},
 		{name: "server unreachable", vs: nfsSettings(false, share1),
@@ -308,16 +308,16 @@ func TestCheckDoctorNFSMounts(t *testing.T) {
 }
 
 func TestCheckDoctorNFSMounts_DialsEachShareServer(t *testing.T) {
-	share2 := config.V1NFSShare{ID: "ws2", Server: "fd00::2", Export: "/b"}
+	share2 := config.V1NFSShare{ID: "ws2", Server: "nfs.example.internal", Export: "/b"}
 	p := fakeNFSProbe{mounts: map[string]string{
 		"/mnt/nfs/ws1": "10.0.0.2:/scion-workspaces",
-		"/mnt/nfs/ws2": "fd00::2:/b",
+		"/mnt/nfs/ws2": "nfs.example.internal:/b",
 	}}
 	res := checkDoctorNFSMounts(nfsSettings(false, share1, share2), p.probe())
 	if res.Status != "pass" {
 		t.Fatalf("status = %s %q", res.Status, res.Message)
 	}
-	if strings.Join(p.dialed, ",") != "10.0.0.2:2049,[fd00::2]:2049" {
+	if strings.Join(p.dialed, ",") != "10.0.0.2:2049,nfs.example.internal:2049" {
 		t.Errorf("dialed %v", p.dialed)
 	}
 }

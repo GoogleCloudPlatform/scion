@@ -15,14 +15,13 @@
 package runtimebroker
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
-	"strings"
+	"syscall"
 	"time"
 )
 
@@ -33,6 +32,8 @@ import (
 //   - The broker process must have mount privilege (root, CAP_SYS_ADMIN, or
 //     sudoers entry for mount/umount). Without it, Mount/Unmount will fail.
 //   - mountpoint(1) and /proc/mounts (Linux) require no special privilege.
+//
+// Linux only: it relies on /proc/mounts and process groups.
 type ExecMountChecker struct {
 	log *slog.Logger
 	// runCommand is the function used to run external commands.
@@ -60,13 +61,32 @@ func NewExecMountChecker(log *slog.Logger) *ExecMountChecker {
 // keeps a dispatch-time check or a reconcile pass from hanging longer.
 const mountCommandTimeout = 90 * time.Second
 
+// commandWaitDelay bounds how long execRunCommand waits for the command's
+// output pipes to close after it has been killed.
+const commandWaitDelay = 3 * time.Second
+
 // execRunCommand runs a command bounded by both parent (for a dispatch,
 // the request context) and mountCommandTimeout, and returns its combined
 // output.
+//
+// The command runs in its own process group, and the whole group is killed
+// when the context is done: mount(8) runs the mount.nfs helper as a child
+// that inherits the output pipes, and killing only mount would leave the
+// helper running and the call waiting on the pipes. WaitDelay is a backstop
+// for a descendant that left the group.
 func execRunCommand(parent context.Context, name string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(parent, mountCommandTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = commandWaitDelay
+	out, err := cmd.CombinedOutput()
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		if parent.Err() != nil {
 			return out, fmt.Errorf("%s cancelled: %w", name, parent.Err())
@@ -92,6 +112,8 @@ func (e *ExecMountChecker) MountPrivilegeError() error {
 
 // IsMountpoint returns true if the given path is currently a mountpoint.
 // Uses mountpoint(1) which is available on all modern Linux distributions.
+// A timeout or cancellation is returned as an error, never as "not
+// mounted", so a hung mount is not mounted over.
 func (e *ExecMountChecker) IsMountpoint(ctx context.Context, path string) (bool, error) {
 	out, err := e.runCommand(ctx, "mountpoint", "-q", path)
 	if err != nil {
@@ -111,32 +133,9 @@ func (e *ExecMountChecker) IsMountpoint(ctx context.Context, path string) (bool,
 	return true, nil
 }
 
-// MountInfo returns the server:export for a given mountpoint by parsing
-// /proc/mounts (Linux). Returns ("", nil) if the path is not found.
-func (e *ExecMountChecker) MountInfo(path string) (string, error) {
-	f, err := os.Open("/proc/mounts")
-	if err != nil {
-		return "", fmt.Errorf("failed to read /proc/mounts: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
-	var source string
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) < 2 {
-			continue
-		}
-		// fields[0] = device (server:export for NFS), fields[1] = mountpoint
-		// The last entry for a mountpoint is the topmost (visible) mount.
-		if fields[1] == path {
-			source = fields[0]
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return "", fmt.Errorf("error reading /proc/mounts: %w", err)
-	}
-	return source, nil
+// MountSource looks path up in /proc/mounts (see ProcMountSource).
+func (e *ExecMountChecker) MountSource(path string) (string, bool, error) {
+	return ProcMountSource(path)
 }
 
 // Mount executes the NFS mount command.

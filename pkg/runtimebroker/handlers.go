@@ -123,15 +123,16 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 }
 
 // nfsHealthDegradesStatus reports whether an unhealthy NFS share should
-// mark the broker degraded. It does only when auto_mount is on, the first
-// reconcile pass has finished (a pending check is not a failure), the
-// default runtime is not Kubernetes (where the kubelet mounts the export
-// and dispatch is not gated), and a share is unhealthy. With auto_mount
-// off the broker only verifies mounts it does not manage, so a missing
-// mount is reported in nfs_mounts without changing the overall status.
+// mark the broker degraded. It does only when the broker mounts the shares
+// itself (auto_mount on, and the default runtime is not Kubernetes or Cloud
+// Run, where the platform mounts the export and dispatch is not gated), the
+// first reconcile pass has finished (a pending check is not a failure), and
+// a share is unhealthy. Otherwise the broker only verifies mounts it does
+// not manage, so a missing mount is reported in nfs_mounts without changing
+// the overall status.
 func (s *Server) nfsHealthDegradesStatus() bool {
 	r := s.nfsMountReconciler
-	if r == nil || !r.AutoMount() || r.IsHealthy() {
+	if r == nil || !r.MountsShares() || r.IsHealthy() {
 		return false
 	}
 	if s.nfsStartupReconcileDone != nil {
@@ -141,10 +142,23 @@ func (s *Server) nfsHealthDegradesStatus() bool {
 			return false // first pass still pending
 		}
 	}
-	if s.runtime != nil && isKubernetesRuntimeName(s.runtime.Name()) {
-		return false
-	}
 	return true
+}
+
+// nfsDispatchWarnOnlyRuntime reports whether name is a runtime on which the
+// platform, not the broker, mounts the NFS export into the agent: the
+// Kubernetes family (the kubelet mounts the volume) and the Cloud Run
+// family. For these the broker never mounts a share and never refuses a
+// dispatch over NFS state; it logs a warning instead.
+func nfsDispatchWarnOnlyRuntime(name string) bool {
+	if isKubernetesRuntimeName(name) {
+		return true
+	}
+	switch name {
+	case "cloudrun", "cloudrun-instances", "cloudrun-sandbox":
+		return true
+	}
+	return false
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -4984,42 +4998,57 @@ func isLocalhostEndpoint(endpoint string) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
 }
 
-// checkNFSForDispatch is the NFS pre-flight for an agent create. It returns
-// a non-nil error only when the dispatch must be refused:
-//   - NFS is configured with nfs.auto_mount on (otherwise mounts are managed
-//     externally and the broker never gates on them),
-//   - the project's effective settings select the nfs workspace backend
-//     (projects on any other backend are never affected by NFS state),
-//   - a configured share cannot be mounted, and
-//   - the dispatch targets a local-container runtime, where the workspace
-//     would otherwise silently land on local disk under the mount point.
+// checkNFSForDispatch is the NFS pre-flight for an agent create. It
+// applies only when NFS is configured with nfs.auto_mount on (otherwise
+// mounts are managed externally and the broker never gates on them) and the
+// project's effective settings select the nfs workspace backend (projects
+// on any other backend are never affected by NFS state).
 //
-// A Kubernetes dispatch is only warned about: there the kubelet can create
-// the workspace subPath itself when the broker does not have the export
-// mounted (see the Kubernetes NFS workspace docs).
+// It is decided by the dispatch's resolved runtime, which is checked before
+// anything is mounted:
+//   - Kubernetes or Cloud Run (nfsDispatchWarnOnlyRuntime): the platform
+//     mounts the export into the agent. The broker reads the share's last
+//     recorded status, logs a warning if it is unhealthy, and continues; it
+//     never mounts and never refuses the dispatch.
+//   - Any other (local-container) runtime: the share is checked and, when
+//     the broker mounts shares, mounted. If it is not mounted the dispatch
+//     is refused, since the workspace would otherwise silently land on
+//     local disk under the mount point.
 func (s *Server) checkNFSForDispatch(ctx context.Context, name, projectPath, projectSlug, profile string) error {
-	if s.nfsMountReconciler == nil || !s.nfsMountReconciler.AutoMount() {
+	r := s.nfsMountReconciler
+	if r == nil || !r.AutoMount() {
+		return nil
+	}
+	nfsCfg := s.config.NFSConfig
+	if nfsCfg == nil || len(nfsCfg.Shares) == 0 {
 		return nil
 	}
 	projectDir := resolveDispatchProjectDir(projectPath, projectSlug)
 	if !dispatchUsesNFSWorkspace(projectDir) {
 		return nil
 	}
-	err := s.ensureNFSMountsReady(ctx)
-	if err == nil {
-		return nil
-	}
+	// The nfs workspace backend places workspaces on the first share only
+	// (runtime.NFSWorkspaceBackend), so that is the share a dispatch needs.
+	shareID := nfsCfg.Shares[0].ID
+
 	_, runtimeType := s.resolveManagerForOpts(api.StartOptions{
 		Name:        name,
 		ProjectPath: projectDir,
 		Profile:     profile,
 	})
-	if isKubernetesRuntimeName(runtimeType) {
-		s.agentLifecycleLog.Warn("NFS share not mounted on the broker; continuing Kubernetes dispatch (the kubelet mounts the export in the pod)",
-			"agent", name, "runtime", runtimeType, "error", err)
+	if nfsDispatchWarnOnlyRuntime(runtimeType) {
+		if st, ok := r.ShareStatus(shareID); !ok || !st.Healthy {
+			detail := "not checked yet"
+			if ok {
+				detail = st.Message
+			}
+			s.agentLifecycleLog.Warn("NFS share not mounted on the broker; continuing dispatch, the runtime mounts the export into the agent",
+				"agent", name, "runtime", runtimeType, "share", shareID, "detail", detail)
+		}
 		return nil
 	}
-	return err
+	// ctx (the request context) bounds the wait and any mount command.
+	return r.EnsureShareMounted(ctx, shareID)
 }
 
 // resolveDispatchProjectDir mirrors buildStartContext's hub-managed project
@@ -5048,29 +5077,6 @@ func dispatchUsesNFSWorkspace(projectDir string) bool {
 	}
 	return vs.Server != nil && vs.Server.WorkspaceStorage != nil &&
 		vs.Server.WorkspaceStorage.Backend == "nfs"
-}
-
-// ensureNFSMountsReady verifies that the NFS share the nfs workspace backend
-// uses (the first configured share) is mounted before dispatching an agent,
-// mounting it if needed. The reconciler may have mounted it at startup, but
-// a transient unmount (network blip, manual intervention) should be caught
-// here. ctx (the request context) bounds the wait and any mount command.
-// Returns an error if the share cannot be mounted — the caller
-// decides whether to reject the dispatch (see checkNFSForDispatch). A no-op
-// unless NFS is configured with auto_mount on.
-func (s *Server) ensureNFSMountsReady(ctx context.Context) error {
-	if s.nfsMountReconciler == nil || !s.nfsMountReconciler.AutoMount() {
-		return nil // NFS not configured, or mounts managed externally.
-	}
-
-	nfsCfg := s.config.NFSConfig
-	if nfsCfg == nil || len(nfsCfg.Shares) == 0 {
-		return nil
-	}
-
-	// The nfs workspace backend places workspaces on the first share only
-	// (runtime.NFSWorkspaceBackend), so that is the share a dispatch needs.
-	return s.nfsMountReconciler.EnsureShareMounted(ctx, nfsCfg.Shares[0].ID)
 }
 
 // preResolvedHubEndpoint picks the Hub base URL used to absolutize the

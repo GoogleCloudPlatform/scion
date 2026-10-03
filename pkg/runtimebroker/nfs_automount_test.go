@@ -46,6 +46,8 @@ type syncMountChecker struct {
 	unmounts    int
 	block       chan struct{} // if non-nil, Mount waits for it to close
 	mountEnter  chan struct{} // if non-nil, signalled when Mount is entered
+	inFlight    int           // Mount calls currently running
+	maxInFlight int           // highest inFlight seen
 }
 
 func newSyncMountChecker() *syncMountChecker {
@@ -71,17 +73,27 @@ func (m *syncMountChecker) IsMountpoint(_ context.Context, path string) (bool, e
 	return ok, nil
 }
 
-func (m *syncMountChecker) MountInfo(path string) (string, error) {
+func (m *syncMountChecker) MountSource(path string) (string, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.mountpoints[path], nil
+	src, ok := m.mountpoints[path]
+	return src, ok, nil
 }
 
 func (m *syncMountChecker) Mount(ctx context.Context, server, export, target, options string) error {
 	m.mu.Lock()
 	m.mounts++
+	m.inFlight++
+	if m.inFlight > m.maxInFlight {
+		m.maxInFlight = m.inFlight
+	}
 	block, enter, mountErr := m.block, m.mountEnter, m.mountErr
 	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		m.inFlight--
+		m.mu.Unlock()
+	}()
 	if enter != nil {
 		select {
 		case enter <- struct{}{}:
@@ -188,15 +200,15 @@ func TestReconcile_CheckOnly_WrongSource_NoRemount(t *testing.T) {
 	}
 }
 
-func TestEnsureNFSMountsReady_AutoMountOff_NoGate(t *testing.T) {
+func TestCheckNFSForDispatch_AutoMountOff_NoGate(t *testing.T) {
 	mc := newMockMountChecker()
 	cfg := nfsCfg(false)
 	srv := &Server{
 		config:             ServerConfig{NFSConfig: cfg},
 		nfsMountReconciler: NewNFSMountReconciler(cfg, mc, nil),
 	}
-	if err := srv.ensureNFSMountsReady(context.Background()); err != nil {
-		t.Fatalf("ensureNFSMountsReady with auto_mount off = %v, want nil", err)
+	if err := srv.checkNFSForDispatch(context.Background(), "a", "", "", ""); err != nil {
+		t.Fatalf("checkNFSForDispatch with auto_mount off = %v, want nil", err)
 	}
 	if len(mc.mountCalls) != 0 {
 		t.Errorf("mountCalls = %d, want 0", len(mc.mountCalls))
@@ -428,6 +440,13 @@ server:
 // a runtime with the given name.
 func gateTestServer(t *testing.T, autoMount bool, runtimeName string) (*Server, *syncMountChecker) {
 	t.Helper()
+	return newGateServer(t, nfsCfg(autoMount), runtimeName, runtimeName)
+}
+
+// newGateServer is gateTestServer with an explicit NFS config, broker
+// default runtime and dispatch runtime.
+func newGateServer(t *testing.T, nfs *config.V1NFSConfig, brokerRuntime, dispatchRuntime string) (*Server, *syncMountChecker) {
+	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	writeSettings(t, home, globalNFSSettings)
@@ -440,30 +459,49 @@ func gateTestServer(t *testing.T, autoMount bool, runtimeName string) (*Server, 
 	mc := newSyncMountChecker()
 	mc.mountErr = errors.New("mount failed")
 	cfg := DefaultServerConfig()
-	cfg.NFSConfig = nfsCfg(autoMount)
+	cfg.NFSConfig = nfs
 	cfg.NFSMountChecker = mc
-	cfg.ForceRuntime = runtimeName
-	rt := &runtime.MockRuntime{NameFunc: func() string { return runtimeName }}
-	return New(cfg, &mockManager{}, rt), mc
+	cfg.ForceRuntime = dispatchRuntime
+	rt := &runtime.MockRuntime{NameFunc: func() string { return brokerRuntime }}
+	srv := New(cfg, &mockManager{}, rt)
+	if dispatchRuntime != brokerRuntime {
+		// ForceRuntime selects an auxiliary runtime of that type.
+		aux := &runtime.MockRuntime{NameFunc: func() string { return dispatchRuntime }}
+		srv.auxiliaryRuntimesMu.Lock()
+		srv.auxiliaryRuntimes[dispatchRuntime] = auxiliaryRuntime{Runtime: aux, Manager: &mockManager{}}
+		srv.auxiliaryRuntimesMu.Unlock()
+	}
+	return srv, mc
 }
 
 func TestCheckNFSForDispatch(t *testing.T) {
 	cases := []struct {
-		name        string
-		autoMount   bool
-		runtime     string
-		localProj   bool
-		wantRefused bool
-		wantMounts  bool
+		name          string
+		autoMount     bool
+		brokerRuntime string // broker default runtime; "" = same as runtime
+		runtime       string // the dispatch's resolved runtime
+		localProj     bool
+		wantRefused   bool
+		wantMounts    bool
 	}{
 		{name: "auto_mount off: never gated, never mounts", autoMount: false, runtime: "docker", wantRefused: false, wantMounts: false},
 		{name: "auto_mount on, nfs project, local-container runtime: refused", autoMount: true, runtime: "docker", wantRefused: true, wantMounts: true},
-		{name: "auto_mount on, nfs project, kubernetes runtime: warned only", autoMount: true, runtime: "kubernetes", wantRefused: false, wantMounts: true},
+		{name: "auto_mount on, nfs project, kubernetes runtime: warned only, no mount", autoMount: true, runtime: "kubernetes", wantRefused: false, wantMounts: false},
+		{name: "auto_mount on, nfs project, k8s runtime: warned only, no mount", autoMount: true, runtime: "k8s", wantRefused: false, wantMounts: false},
+		{name: "auto_mount on, nfs project, cloudrun runtime: warned only, no mount", autoMount: true, runtime: "cloudrun", wantRefused: false, wantMounts: false},
+		{name: "auto_mount on, nfs project, cloudrun-sandbox runtime: warned only, no mount", autoMount: true, runtime: "cloudrun-sandbox", wantRefused: false, wantMounts: false},
+		{name: "docker broker, kubernetes dispatch: warned only, no mount", autoMount: true, brokerRuntime: "docker", runtime: "kubernetes", wantRefused: false, wantMounts: false},
+		{name: "kubernetes broker, docker dispatch: verify-only, refused without mounting", autoMount: true, brokerRuntime: "kubernetes", runtime: "docker", wantRefused: true, wantMounts: false},
+		{name: "cloudrun broker, docker dispatch: verify-only, refused without mounting", autoMount: true, brokerRuntime: "cloudrun", runtime: "docker", wantRefused: true, wantMounts: false},
 		{name: "auto_mount on, project on local backend: not gated", autoMount: true, runtime: "docker", localProj: true, wantRefused: false, wantMounts: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, mc := gateTestServer(t, tc.autoMount, tc.runtime)
+			brokerRT := tc.brokerRuntime
+			if brokerRT == "" {
+				brokerRT = tc.runtime
+			}
+			srv, mc := newGateServer(t, nfsCfg(tc.autoMount), brokerRT, tc.runtime)
 			projectPath := t.TempDir()
 			if tc.localProj {
 				writeSettings(t, projectPath, projectLocalSettings)
@@ -474,11 +512,78 @@ func TestCheckNFSForDispatch(t *testing.T) {
 			if (err != nil) != tc.wantRefused {
 				t.Fatalf("checkNFSForDispatch err = %v, wantRefused %v", err, tc.wantRefused)
 			}
-			mounts, _, _ := mc.counts()
+			mounts, mkdirs, unmounts := mc.counts()
 			if (mounts > 0) != tc.wantMounts {
 				t.Errorf("mount attempts = %d, want attempts: %v", mounts, tc.wantMounts)
 			}
+			if !tc.wantMounts && (mkdirs > 0 || unmounts > 0) {
+				t.Errorf("mkdirs = %d, unmounts = %d, want none", mkdirs, unmounts)
+			}
 		})
+	}
+}
+
+// TestCheckNFSForDispatch_WarnOnlyRuntime_NeverChecksShare verifies that a
+// Kubernetes or Cloud Run dispatch only reads the recorded status: it does
+// not wait on the reconcile semaphore (held here by a stuck background
+// pass), so it neither mounts nor blocks.
+func TestCheckNFSForDispatch_WarnOnlyRuntime_NeverChecksShare(t *testing.T) {
+	for _, rt := range []string{"kubernetes", "cloudrun"} {
+		t.Run(rt, func(t *testing.T) {
+			srv, mc := newGateServer(t, nfsCfg(true), "docker", rt)
+			projectPath := writeSettings(t, t.TempDir(), "schema_version: \"1\"\n")
+			srv.nfsMountReconciler.reconcileSem <- struct{}{} // a pass in progress
+			defer func() { <-srv.nfsMountReconciler.reconcileSem }()
+
+			done := make(chan error, 1)
+			go func() {
+				done <- srv.checkNFSForDispatch(context.Background(), "agent-1", filepath.Join(projectPath, ".scion"), "", "")
+			}()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("checkNFSForDispatch = %v, want nil", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("warn-only dispatch waited on the share check")
+			}
+			if mounts, _, _ := mc.counts(); mounts != 0 {
+				t.Errorf("mounts = %d, want 0", mounts)
+			}
+		})
+	}
+}
+
+// TestCheckNFSForDispatch_MountsFirstShareOnly verifies that the gate
+// checks the first share, the one the nfs workspace backend uses.
+func TestCheckNFSForDispatch_MountsFirstShareOnly(t *testing.T) {
+	cfg := nfsCfg(true)
+	cfg.Shares = append(cfg.Shares, config.V1NFSShare{ID: "ws2", Server: "10.0.0.3", Export: "/export-b"})
+	srv, mc := newGateServer(t, cfg, "docker", "docker")
+	mc.mountErr = nil
+	projectPath := writeSettings(t, t.TempDir(), "schema_version: \"1\"\n")
+	if err := srv.checkNFSForDispatch(context.Background(), "agent-1", filepath.Join(projectPath, ".scion"), "", ""); err != nil {
+		t.Fatalf("checkNFSForDispatch = %v, want nil", err)
+	}
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	if mc.mounts != 1 || mc.mountpoints["/mnt/nfs/ws1"] == "" || mc.mountpoints["/mnt/nfs/ws2"] != "" {
+		t.Errorf("mounts = %d, table = %v; want only /mnt/nfs/ws1 mounted", mc.mounts, mc.mountpoints)
+	}
+}
+
+// TestCheckNFSForDispatch_InvalidProjectSettings_StillGated verifies that
+// a project whose settings cannot be loaded is treated as using the
+// broker's nfs backend, so the gate still applies.
+func TestCheckNFSForDispatch_InvalidProjectSettings_StillGated(t *testing.T) {
+	srv, mc := gateTestServer(t, true, "docker")
+	projectPath := writeSettings(t, t.TempDir(), "schema_version: \"1\"\nserver: [not, a, map\n")
+	err := srv.checkNFSForDispatch(context.Background(), "agent-1", filepath.Join(projectPath, ".scion"), "", "")
+	if err == nil {
+		t.Fatal("checkNFSForDispatch = nil, want the dispatch refused")
+	}
+	if mounts, _, _ := mc.counts(); mounts == 0 {
+		t.Error("no mount attempted, want the share checked")
 	}
 }
 
@@ -520,6 +625,7 @@ func TestHealth_NFSDegradesOnlyWhenBrokerOwnsMounts(t *testing.T) {
 		{name: "auto_mount off", autoMount: false, runtime: "docker", wantStatus: "healthy"},
 		{name: "auto_mount on, first pass pending", autoMount: true, pending: true, runtime: "docker", wantStatus: "healthy"},
 		{name: "auto_mount on, kubernetes runtime", autoMount: true, runtime: "kubernetes", wantStatus: "healthy"},
+		{name: "auto_mount on, cloudrun runtime", autoMount: true, runtime: "cloudrun", wantStatus: "healthy"},
 		{name: "auto_mount on, local-container runtime", autoMount: true, runtime: "docker", wantStatus: "degraded"},
 	}
 	for _, tc := range cases {
@@ -623,6 +729,212 @@ func TestExecRunCommand_ParentCtxCancels(t *testing.T) {
 	}
 }
 
+// TestExecRunCommand_DescendantHoldsPipe verifies that a cancelled command
+// returns near the deadline even when a child process (as mount.nfs is for
+// mount) holds the output pipe open: the whole process group is killed.
+func TestExecRunCommand_DescendantHoldsPipe(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	// sh forks sleep (not exec'd, because of the trailing command), and
+	// sleep inherits the output pipe.
+	_, err := execRunCommand(ctx, "sh", "-c", "sleep 30; true")
+	elapsed := time.Since(start)
+	if err == nil || !strings.Contains(err.Error(), "cancelled") {
+		t.Fatalf("execRunCommand = %v, want a cancellation error", err)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("execRunCommand returned %s after start, want near the 200ms deadline", elapsed)
+	}
+}
+
+// TestEnsureShareMounted_SerializesMounts verifies that concurrent
+// dispatch-time checks never run Mount for the share at the same time.
+func TestEnsureShareMounted_SerializesMounts(t *testing.T) {
+	mc := newSyncMountChecker()
+	mc.block = make(chan struct{})
+	mc.mountEnter = make(chan struct{}, 4)
+	mc.mountErr = errors.New("mount failed") // every caller retries the mount
+	r := NewNFSMountReconciler(nfsCfg(true), mc, nil)
+
+	const callers = 3
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = r.EnsureShareMounted(context.Background(), "ws1")
+		}()
+	}
+	<-mc.mountEnter
+	// Give the other callers time to reach Mount if nothing stops them.
+	time.Sleep(200 * time.Millisecond)
+	close(mc.block)
+	wg.Wait()
+
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	if mc.mounts != callers {
+		t.Errorf("mounts = %d, want %d", mc.mounts, callers)
+	}
+	if mc.maxInFlight != 1 {
+		t.Errorf("max concurrent Mount calls = %d, want 1", mc.maxInFlight)
+	}
+}
+
+// TestEnsureShareMounted_CancelledRequestKeepsStatus verifies that a
+// dispatch whose request ends during the mount does not record the share
+// as unhealthy: only a real mount result or the exec timeout counts.
+func TestEnsureShareMounted_CancelledRequestKeepsStatus(t *testing.T) {
+	for _, prior := range []string{"none", "healthy"} {
+		t.Run(prior, func(t *testing.T) {
+			mc := newSyncMountChecker()
+			r := NewNFSMountReconciler(nfsCfg(true), mc, nil)
+			if prior == "healthy" {
+				_ = r.Reconcile(context.Background()) // mounts; healthy
+				mc.mu.Lock()
+				delete(mc.mountpoints, "/mnt/nfs/ws1") // dropped since
+				mc.mu.Unlock()
+			}
+			before, hadBefore := r.ShareStatus("ws1")
+			mc.mu.Lock()
+			mc.block = make(chan struct{}) // only ctx ends the mount
+			mc.mu.Unlock()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+			if err := r.EnsureShareMounted(ctx, "ws1"); err == nil {
+				t.Fatal("EnsureShareMounted = nil, want the cancellation")
+			}
+			after, hadAfter := r.ShareStatus("ws1")
+			if hadAfter != hadBefore || after != before {
+				t.Errorf("status after a cancelled request = %+v (%v), want unchanged %+v (%v)", after, hadAfter, before, hadBefore)
+			}
+		})
+	}
+}
+
+// TestReconcile_ExecTimeoutRecorded verifies that a command that hits the
+// exec timeout (not the caller's ctx) is recorded as unhealthy.
+func TestReconcile_ExecTimeoutRecorded(t *testing.T) {
+	mc := newMockMountChecker()
+	mc.mountErr = fmt.Errorf("mount timed out after 1m30s: %w", context.DeadlineExceeded)
+	r := NewNFSMountReconciler(nfsCfg(true), mc, nil)
+	_ = r.Reconcile(context.Background())
+	st, ok := r.ShareStatus("ws1")
+	if !ok || st.Healthy || !strings.Contains(st.Message, "timed out") {
+		t.Errorf("status = %+v (%v), want unhealthy with the timeout", st, ok)
+	}
+}
+
+// TestExecMountChecker_IsMountpoint_TimeoutIsError verifies that a
+// timed-out mountpoint(1) is an error, not "not mounted", and that the
+// reconciler then records it and does not mount over the path.
+func TestExecMountChecker_IsMountpoint_TimeoutIsError(t *testing.T) {
+	for _, ctxErr := range []error{context.DeadlineExceeded, context.Canceled} {
+		t.Run(ctxErr.Error(), func(t *testing.T) {
+			checker := NewExecMountChecker(nil)
+			checker.geteuid = func() int { return 0 }
+			var ran []string
+			checker.runCommand = func(_ context.Context, name string, args ...string) ([]byte, error) {
+				ran = append(ran, name)
+				if name == "mountpoint" {
+					return nil, fmt.Errorf("mountpoint timed out: %w", ctxErr)
+				}
+				return nil, nil
+			}
+			mounted, err := checker.IsMountpoint(context.Background(), "/mnt/nfs/ws1")
+			if mounted || !errors.Is(err, ctxErr) {
+				t.Fatalf("IsMountpoint = %v, %v; want false and %v", mounted, err, ctxErr)
+			}
+
+			root := t.TempDir()
+			cfg := nfsCfg(true)
+			cfg.MountRoot = root
+			r := NewNFSMountReconciler(cfg, checker, nil)
+			ran = nil
+			_ = r.Reconcile(context.Background())
+			if strings.Join(ran, ",") != "mountpoint" {
+				t.Errorf("commands run = %v, want only mountpoint", ran)
+			}
+			if st, _ := r.ShareStatus("ws1"); st.Healthy || !strings.Contains(st.Message, "failed to check mountpoint") {
+				t.Errorf("status = %+v, want failed to check mountpoint", st)
+			}
+		})
+	}
+}
+
+// TestReconcile_MountpointGuard verifies that a path mountpoint(1) reports
+// as mounted, although the mount table does not list it, is not mounted
+// over.
+func TestReconcile_MountpointGuard(t *testing.T) {
+	mc := newMockMountChecker()
+	mc.kernelOnlyMounts["/mnt/nfs/ws1"] = true
+	r := NewNFSMountReconciler(nfsCfg(true), mc, nil)
+	_ = r.Reconcile(context.Background())
+	if len(mc.mountCalls) != 0 || len(mc.mkdirCalls) != 0 {
+		t.Errorf("mounts = %d, mkdirs = %d, want none", len(mc.mountCalls), len(mc.mkdirCalls))
+	}
+	if st, _ := r.ShareStatus("ws1"); st.Healthy || !strings.Contains(st.Message, "not listed in the mount table") {
+		t.Errorf("status = %+v, want the guard reason", st)
+	}
+}
+
+// TestReconcile_DecidesFromMountTable verifies that the mounted state comes
+// from the mount table: mountpoint(1), which can block on a hung mount, is
+// not called when checking, only right before a mount.
+func TestReconcile_DecidesFromMountTable(t *testing.T) {
+	cases := []struct {
+		name      string
+		autoMount bool
+		mounted   bool
+		wantCalls int
+	}{
+		{name: "check-only, not mounted", autoMount: false, mounted: false, wantCalls: 0},
+		{name: "check-only, mounted", autoMount: false, mounted: true, wantCalls: 0},
+		{name: "auto_mount, mounted", autoMount: true, mounted: true, wantCalls: 0},
+		{name: "auto_mount, not mounted", autoMount: true, mounted: false, wantCalls: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := newMockMountChecker()
+			if tc.mounted {
+				mc.mountpoints["/mnt/nfs/ws1"] = "10.0.0.2:/scion-workspaces"
+			}
+			r := NewNFSMountReconciler(nfsCfg(tc.autoMount), mc, nil)
+			_ = r.Reconcile(context.Background())
+			if mc.isMountpointCalls != tc.wantCalls {
+				t.Errorf("IsMountpoint calls = %d, want %d", mc.isMountpointCalls, tc.wantCalls)
+			}
+		})
+	}
+}
+
+// TestServer_VerifyOnlyOnPlatformMountedRuntimes verifies that with
+// auto_mount on, a broker whose default runtime is Kubernetes or Cloud Run
+// never mounts in its background loop; it only verifies.
+func TestServer_VerifyOnlyOnPlatformMountedRuntimes(t *testing.T) {
+	for _, rtName := range []string{"kubernetes", "k8s", "remote", "cloudrun", "cloudrun-instances", "cloudrun-sandbox", "docker"} {
+		t.Run(rtName, func(t *testing.T) {
+			mc := newSyncMountChecker()
+			name := rtName
+			srv := New(ServerConfig{Host: "127.0.0.1", NFSConfig: nfsCfg(true), NFSMountChecker: mc},
+				nil, &runtime.MockRuntime{NameFunc: func() string { return name }})
+			_ = srv.nfsMountReconciler.Reconcile(context.Background())
+			mounts, mkdirs, _ := mc.counts()
+			wantMount := rtName == "docker"
+			if (mounts > 0) != wantMount || (mkdirs > 0) != wantMount {
+				t.Fatalf("mounts = %d, mkdirs = %d, want mounting: %v", mounts, mkdirs, wantMount)
+			}
+			if !wantMount {
+				if hc := srv.nfsMountReconciler.HealthCheckString(); !strings.Contains(hc, "does not mount it") {
+					t.Errorf("HealthCheckString = %q, want the verify-only reason", hc)
+				}
+			}
+		})
+	}
+}
+
 // --- Non-root brokers ---
 
 func TestExecMountChecker_NonRoot_NoShellOut(t *testing.T) {
@@ -644,15 +956,16 @@ func TestExecMountChecker_NonRoot_NoShellOut(t *testing.T) {
 		t.Fatalf("ran %v as non-root, want nothing", ran)
 	}
 
-	// Through the reconciler: only the read-only mountpoint check runs, no
-	// mount directory is created, and the share reports why.
+	// Through the reconciler: no command runs (the mount state comes from
+	// the mount table), no mount directory is created, and the share
+	// reports why.
 	root := t.TempDir()
 	cfg := nfsCfg(true)
 	cfg.MountRoot = root
 	r := NewNFSMountReconciler(cfg, checker, nil)
 	_ = r.Reconcile(context.Background())
-	if strings.Join(ran, ",") != "mountpoint" {
-		t.Errorf("commands run = %v, want only mountpoint", ran)
+	if len(ran) != 0 {
+		t.Errorf("commands run = %v, want none", ran)
 	}
 	if _, err := os.Stat(filepath.Join(root, "ws1")); !os.IsNotExist(err) {
 		t.Errorf("mount directory created as non-root (stat err %v)", err)

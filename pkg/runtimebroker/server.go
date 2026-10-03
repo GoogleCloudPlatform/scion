@@ -389,13 +389,20 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 			checker = NewExecMountChecker(nfsLog)
 		}
 		srv.nfsMountReconciler = NewNFSMountReconciler(cfg.NFSConfig, checker, nfsLog)
+		// On Kubernetes and Cloud Run the platform mounts the export into
+		// the agent, so the broker never mounts it; it only verifies.
+		if rt != nil && nfsDispatchWarnOnlyRuntime(rt.Name()) {
+			srv.nfsMountReconciler.SetVerifyOnly(fmt.Sprintf(
+				"the broker's default runtime is %s, so the broker does not mount it", rt.Name()))
+		}
 		srv.nfsStartupReconcileDone = make(chan struct{})
 		srv.nfsReconcileStopped = make(chan struct{})
 		slog.Info("NFS mount reconciler initialized",
 			"shares", len(cfg.NFSConfig.Shares),
 			"mountRoot", cfg.NFSConfig.MountRoot,
-			"autoMount", cfg.NFSConfig.AutoMount)
-		if cfg.NFSConfig.AutoMount {
+			"autoMount", cfg.NFSConfig.AutoMount,
+			"brokerMounts", srv.nfsMountReconciler.MountsShares())
+		if srv.nfsMountReconciler.MountsShares() {
 			if err := srv.nfsMountReconciler.mountPrivilegeError(); err != nil {
 				slog.Warn("server.workspace_storage.nfs.auto_mount is on but the broker cannot mount; shares are checked only",
 					"reason", err)

@@ -15,18 +15,16 @@
 package cmd
 
 import (
-	"bufio"
 	"fmt"
-	"io"
 	"net"
-	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 )
 
 // brokerNFSConfig returns the NFS settings for the runtime broker's
@@ -77,8 +75,12 @@ func validateBrokerNFS(nfs *config.V1NFSConfig) error {
 			return fmt.Errorf("server.workspace_storage.nfs.shares[%d].id %q is duplicated", i, share.ID)
 		case share.Server == "":
 			return fmt.Errorf("server.workspace_storage.nfs.shares[%d].server is empty", i)
-		case !strings.HasPrefix(share.Export, "/"):
-			return fmt.Errorf("server.workspace_storage.nfs.shares[%d].export must be an absolute path (got %q)", i, share.Export)
+		case strings.IndexFunc(share.Server, unicode.IsSpace) >= 0 || strings.HasPrefix(share.Server, "-"):
+			return fmt.Errorf("server.workspace_storage.nfs.shares[%d].server must be a hostname or IPv4 address (got %q)", i, share.Server)
+		case strings.ContainsAny(share.Server, ":[]"):
+			return fmt.Errorf("server.workspace_storage.nfs.shares[%d].server %q looks like an IPv6 literal, which is not supported; use a hostname or IPv4 address", i, share.Server)
+		case !strings.HasPrefix(share.Export, "/") || strings.IndexFunc(share.Export, unicode.IsSpace) >= 0:
+			return fmt.Errorf("server.workspace_storage.nfs.shares[%d].export must be an absolute path without whitespace (got %q)", i, share.Export)
 		}
 		seen[share.ID] = true
 	}
@@ -100,7 +102,7 @@ const nfsServerPort = "2049"
 
 func defaultNFSDoctorProbe() nfsDoctorProbe {
 	return nfsDoctorProbe{
-		mountSource: procMountSource,
+		mountSource: runtimebroker.ProcMountSource,
 		dial: func(addr string) error {
 			conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
 			if err != nil {
@@ -109,60 +111,6 @@ func defaultNFSDoctorProbe() nfsDoctorProbe {
 			return conn.Close()
 		},
 	}
-}
-
-// procMountSource looks path up in /proc/mounts (Linux). It reads the mount
-// table only; it never stats the mountpoint, so a hung NFS mount cannot
-// block it.
-func procMountSource(path string) (string, bool, error) {
-	f, err := os.Open("/proc/mounts")
-	if err != nil {
-		return "", false, fmt.Errorf("reading mount table: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-	return findMountSource(f, path)
-}
-
-// findMountSource scans a /proc/mounts-format table for path. When path is
-// mounted more than once, the last (topmost) entry wins.
-func findMountSource(r io.Reader, path string) (string, bool, error) {
-	clean := filepath.Clean(path)
-	var source string
-	var found bool
-	scanner := bufio.NewScanner(r)
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		if len(fields) < 2 {
-			continue
-		}
-		if filepath.Clean(unescapeMountField(fields[1])) == clean {
-			source, found = unescapeMountField(fields[0]), true
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return "", false, fmt.Errorf("reading mount table: %w", err)
-	}
-	return source, found, nil
-}
-
-// unescapeMountField decodes the octal escapes (\040 for space, etc.) the
-// kernel uses in /proc/mounts fields.
-func unescapeMountField(s string) string {
-	if !strings.Contains(s, `\`) {
-		return s
-	}
-	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		if s[i] == '\\' && i+3 < len(s) {
-			if v, err := strconv.ParseUint(s[i+1:i+4], 8, 8); err == nil {
-				b.WriteByte(byte(v))
-				i += 3
-				continue
-			}
-		}
-		b.WriteByte(s[i])
-	}
-	return b.String()
 }
 
 // checkDoctorNFSMounts performs D5: NFS mount status, checked locally from
@@ -201,7 +149,14 @@ func checkDoctorNFSMounts(vs *config.VersionedSettings, probe nfsDoctorProbe) sc
 		remediation = "The broker mounts the shares itself: check the broker log (broker.nfs-mount) and that the broker runs as root"
 	}
 
+	// A missing mount is a failure only where the broker host is expected
+	// to have it: with auto_mount on and no pv_name. With auto_mount off
+	// the operator may mount it elsewhere, and a pv_name share is mounted
+	// into pods by the kubelet, so the host normally has no mount; those
+	// are warnings. A wrong source, an unreachable server, or an unusable
+	// block are failures.
 	var ok, problems []string
+	failed := false
 	for _, share := range nfsCfg.Shares {
 		target := filepath.Join(nfsCfg.MountRoot, share.ID)
 		want := share.Server + ":" + share.Export
@@ -211,16 +166,22 @@ func checkDoctorNFSMounts(vs *config.VersionedSettings, probe nfsDoctorProbe) sc
 		switch {
 		case err != nil:
 			issues = append(issues, fmt.Sprintf("mount state unknown (%v)", err))
+			failed = true
+		case !mounted && share.PVName != "":
+			issues = append(issues, fmt.Sprintf("not mounted at %s (pv_name is set, so the export is mounted into pods and this host need not mount it)", target))
+		case !mounted && !nfsCfg.AutoMount:
+			issues = append(issues, fmt.Sprintf("not mounted at %s (auto_mount is off, so the broker does not mount it)", target))
 		case !mounted:
 			issues = append(issues, fmt.Sprintf("not mounted at %s", target))
+			failed = true
 		case source != want:
 			issues = append(issues, fmt.Sprintf("%s is mounted from %s, expected %s", target, source, want))
+			failed = true
 		}
 
-		if share.Server == "" {
-			issues = append(issues, "no server configured")
-		} else if err := probe.dial(net.JoinHostPort(share.Server, nfsServerPort)); err != nil {
+		if err := probe.dial(net.JoinHostPort(share.Server, nfsServerPort)); err != nil {
 			issues = append(issues, fmt.Sprintf("server %s unreachable on port %s", share.Server, nfsServerPort))
+			failed = true
 		}
 
 		if len(issues) == 0 {
@@ -237,9 +198,13 @@ func checkDoctorNFSMounts(vs *config.VersionedSettings, probe nfsDoctorProbe) sc
 			Message: fmt.Sprintf("%d share(s) mounted and reachable: %s (%s)", len(ok), strings.Join(ok, ", "), mode),
 		}
 	}
+	status := "warn"
+	if failed {
+		status = "fail"
+	}
 	return scionruntime.CheckResult{
 		Name:        name,
-		Status:      "fail",
+		Status:      status,
 		Message:     fmt.Sprintf("%s (%s)", strings.Join(problems, "; "), mode),
 		Remediation: remediation,
 	}

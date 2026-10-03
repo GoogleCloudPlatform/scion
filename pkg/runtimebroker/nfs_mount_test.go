@@ -39,10 +39,15 @@ type mockMountChecker struct {
 
 	// Inject errors for specific operations.
 	isMountpointErr map[string]error
-	mountInfoErr    map[string]error
-	mountErr        error
-	unmountErr      error
-	mkdirErr        error
+	mountSourceErr  map[string]error
+	// kernelOnlyMounts are paths mountpoint(1) reports as mounted although
+	// the mount table does not list them.
+	kernelOnlyMounts map[string]bool
+	// isMountpointCalls counts IsMountpoint calls.
+	isMountpointCalls int
+	mountErr          error
+	unmountErr        error
+	mkdirErr          error
 }
 
 type mountCall struct {
@@ -51,29 +56,28 @@ type mountCall struct {
 
 func newMockMountChecker() *mockMountChecker {
 	return &mockMountChecker{
-		mountpoints:     make(map[string]string),
-		isMountpointErr: make(map[string]error),
-		mountInfoErr:    make(map[string]error),
+		mountpoints:      make(map[string]string),
+		isMountpointErr:  make(map[string]error),
+		mountSourceErr:   make(map[string]error),
+		kernelOnlyMounts: make(map[string]bool),
 	}
 }
 
 func (m *mockMountChecker) IsMountpoint(_ context.Context, path string) (bool, error) {
+	m.isMountpointCalls++
 	if err, ok := m.isMountpointErr[path]; ok {
 		return false, err
 	}
 	_, ok := m.mountpoints[path]
-	return ok, nil
+	return ok || m.kernelOnlyMounts[path], nil
 }
 
-func (m *mockMountChecker) MountInfo(path string) (string, error) {
-	if err, ok := m.mountInfoErr[path]; ok {
-		return "", err
+func (m *mockMountChecker) MountSource(path string) (string, bool, error) {
+	if err, ok := m.mountSourceErr[path]; ok {
+		return "", false, err
 	}
 	se, ok := m.mountpoints[path]
-	if !ok {
-		return "", nil
-	}
-	return se, nil
+	return se, ok, nil
 }
 
 func (m *mockMountChecker) Mount(_ context.Context, server, export, target, options string) error {

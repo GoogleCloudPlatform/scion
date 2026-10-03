@@ -31,13 +31,17 @@ import (
 // This allows unit tests to assert reconciliation logic (mountpoint check,
 // server:export verify, idempotency) without real NFS.
 type MountChecker interface {
-	// IsMountpoint returns true if the given path is currently a mountpoint.
-	// ctx bounds the check (a hung NFS mount can block it).
-	IsMountpoint(ctx context.Context, path string) (bool, error)
+	// MountSource reports whether path is a mountpoint and, if so, the
+	// source mounted there (server:export for NFS), from the mount table
+	// (/proc/mounts) only. It does not stat path, so a hung NFS mount
+	// cannot block it. This is what decides whether a share is mounted.
+	MountSource(path string) (source string, mounted bool, err error)
 
-	// MountInfo returns the server:export (e.g. "10.0.0.2:/scion-workspaces")
-	// for a given mountpoint. Returns ("", nil) if the path is not mounted.
-	MountInfo(path string) (serverExport string, err error)
+	// IsMountpoint asks the kernel whether path is a mountpoint
+	// (mountpoint(1)). It can block on a hung mount, so ctx bounds it. The
+	// reconciler calls it only immediately before mounting, as a guard
+	// against mounting over a mount the mount table did not show.
+	IsMountpoint(ctx context.Context, path string) (bool, error)
 
 	// Mount executes the NFS mount command.
 	// Requires mount privilege (mount.nfs requires root). ctx bounds the
@@ -54,13 +58,18 @@ type MountChecker interface {
 // NFSMountReconciler checks that configured NFS shares are mounted at the
 // expected paths and reports health status. It is safe for concurrent use.
 //
-// It has two modes, selected by cfg.AutoMount:
-//   - AutoMount false (the default): check-only. Each share is checked
-//     read-only (is <MountRoot>/<ID> a mountpoint of the expected
-//     server:export); nothing is created, mounted or unmounted. The mounts
-//     are provided by the operator, or by the kubelet on Kubernetes.
-//   - AutoMount true: a share that is not mounted is mounted, and one
-//     mounted from the wrong source is remounted.
+// Whether a share is mounted, and from where, is decided from the mount
+// table (/proc/mounts) only, the same lookup scion doctor uses.
+//
+// It has two modes:
+//   - Check-only: AutoMount false (the default), or verify-only set with
+//     SetVerifyOnly. Each share is checked read-only (is <MountRoot>/<ID>
+//     mounted from the expected server:export); nothing is created,
+//     mounted or unmounted. The mounts are provided by the operator, or by
+//     the platform on Kubernetes and Cloud Run.
+//   - Mounting: AutoMount true and not verify-only. A share that is not
+//     mounted is mounted, and one mounted from the wrong source is
+//     remounted.
 //
 // Deploy note: auto-mount requires the broker process to run as root: the
 // mount.nfs helper checks uid 0, so CAP_SYS_ADMIN alone is not enough (see
@@ -77,14 +86,42 @@ type NFSMountReconciler struct {
 	// request context is done.
 	reconcileSem chan struct{}
 
+	// verifyOnlyReason, when set, keeps the reconciler from mounting even
+	// with AutoMount on (for example, the broker's default runtime is
+	// Kubernetes or Cloud Run, where the platform mounts the export). It is
+	// set before the reconciler is used and not changed afterwards.
+	verifyOnlyReason string
+
 	mu       sync.RWMutex
 	statuses map[string]ShareMountStatus // keyed by share ID
 }
 
-// AutoMount reports whether the reconciler mounts shares itself (true) or
-// only checks them (false).
+// AutoMount reports whether auto_mount is set in the configuration. See
+// MountsShares for whether the reconciler actually mounts.
 func (r *NFSMountReconciler) AutoMount() bool {
 	return r.cfg != nil && r.cfg.AutoMount
+}
+
+// SetVerifyOnly makes the reconciler check shares without mounting,
+// unmounting or remounting them, even with AutoMount on. reason is shown in
+// share status messages. Call it before Run or any other method.
+func (r *NFSMountReconciler) SetVerifyOnly(reason string) {
+	r.verifyOnlyReason = reason
+}
+
+// MountsShares reports whether the reconciler mounts shares itself:
+// AutoMount is on and the reconciler is not verify-only.
+func (r *NFSMountReconciler) MountsShares() bool {
+	return r.AutoMount() && r.verifyOnlyReason == ""
+}
+
+// noMountReason explains why a share that needs mounting is not mounted
+// by the broker.
+func (r *NFSMountReconciler) noMountReason() string {
+	if !r.AutoMount() {
+		return "auto_mount is off, so the export must be mounted externally"
+	}
+	return r.verifyOnlyReason
 }
 
 // mountPrivilegeChecker is implemented by MountCheckers that can tell in
@@ -117,19 +154,19 @@ func NewNFSMountReconciler(cfg *config.V1NFSConfig, checker MountChecker, log *s
 	}
 }
 
-// Reconcile checks every configured NFS share and, when AutoMount is set,
-// mounts or remounts it as needed. It is idempotent: a broker restart calls Reconcile again without
-// double-mounting or erroring on an already-correct state.
+// Reconcile checks every configured NFS share and, when MountsShares is
+// true, mounts or remounts it as needed. It is idempotent: a broker restart
+// calls Reconcile again without double-mounting or erroring on an
+// already-correct state.
 //
-// For each configured share:
-//   - target = <MountRoot>/<share.ID>
-//   - if target is not a mountpoint → mkdir -p target → mount NFS
-//   - if already a mountpoint → verify it points at the expected server:export;
-//     if wrong → log + remount
+// For each configured share (target = <MountRoot>/<share.ID>):
+//   - mounted from the expected server:export → healthy
+//   - not mounted → mountpoint(1) guard → mkdir -p target → mount
+//   - mounted from another source → unmount → mount
 //
-// Returns an error only if no shares are configured. Individual share failures
-// are tracked in per-share status (unhealthy) and logged, but do not block
-// other shares from mounting.
+// Returns an error if no shares are configured or ctx is done. Individual
+// share failures are tracked in per-share status (unhealthy) and logged,
+// but do not block other shares.
 func (r *NFSMountReconciler) Reconcile(ctx context.Context) error {
 	if r.cfg == nil {
 		return fmt.Errorf("NFS config is nil")
@@ -153,8 +190,8 @@ func (r *NFSMountReconciler) Reconcile(ctx context.Context) error {
 }
 
 // reconcileShare handles a single share's mount reconciliation. It returns
-// an error only when ctx is done before the share could be checked; mount
-// problems are recorded in the share's status.
+// an error only when ctx is done before or while the share is checked;
+// mount problems are recorded in the share's status.
 func (r *NFSMountReconciler) reconcileShare(ctx context.Context, share config.V1NFSShare, mountOpts string) error {
 	select {
 	case r.reconcileSem <- struct{}{}:
@@ -163,96 +200,101 @@ func (r *NFSMountReconciler) reconcileShare(ctx context.Context, share config.V1
 	}
 	defer func() { <-r.reconcileSem }()
 	r.reconcileShareLocked(ctx, share, mountOpts)
-	return nil
+	return ctx.Err()
 }
 
 func (r *NFSMountReconciler) reconcileShareLocked(ctx context.Context, share config.V1NFSShare, mountOpts string) {
 	target := filepath.Join(r.cfg.MountRoot, share.ID)
 	wantServerExport := fmt.Sprintf("%s:%s", share.Server, share.Export)
+	mounts := r.MountsShares()
+
+	// fail records the share as unhealthy, unless ctx (a dispatch request,
+	// or the loop at shutdown) is done: a step cut short by the caller says
+	// nothing about the share, so the previous status is kept. The exec
+	// timeout does not cancel ctx, so a timed-out command is recorded.
+	fail := func(msg string) {
+		if ctx.Err() != nil {
+			r.log.Debug("NFS share check interrupted; status unchanged",
+				"shareID", share.ID, "target", target, "reason", msg)
+			return
+		}
+		r.setStatus(share.ID, target, false, msg)
+	}
 
 	r.log.Debug("Reconciling NFS share",
 		"shareID", share.ID, "target", target,
 		"server", share.Server, "export", share.Export,
-		"autoMount", r.cfg.AutoMount)
+		"mountsShares", mounts)
 
-	mounted, err := r.checker.IsMountpoint(ctx, target)
+	currentServerExport, mounted, err := r.checker.MountSource(target)
 	if err != nil {
-		r.setStatus(share.ID, target, false,
-			fmt.Sprintf("failed to check mountpoint: %v", err))
+		fail(fmt.Sprintf("failed to read mount table: %v", err))
 		return
 	}
 
-	if !mounted && !r.cfg.AutoMount {
-		r.setStatus(share.ID, target, false,
-			fmt.Sprintf("not mounted (expected %s; auto_mount is off, so the export must be mounted externally)", wantServerExport))
+	if mounted && currentServerExport == wantServerExport {
+		r.setStatus(share.ID, target, true, "already mounted correctly")
 		return
 	}
 
 	if !mounted {
+		if !mounts {
+			fail(fmt.Sprintf("not mounted (expected %s; %s)", wantServerExport, r.noMountReason()))
+			return
+		}
 		if err := r.mountPrivilegeError(); err != nil {
-			r.setStatus(share.ID, target, false,
-				fmt.Sprintf("not mounted (expected %s) and auto_mount cannot mount it: %v", wantServerExport, err))
+			fail(fmt.Sprintf("not mounted (expected %s) and auto_mount cannot mount it: %v", wantServerExport, err))
 			return
 		}
-		// Not mounted — create directory and mount.
+		// Guard: the mount table says not mounted; confirm with the kernel
+		// before mounting, so a mount the table did not show is never
+		// mounted over. A timeout here usually means a hung mount.
+		isMP, err := r.checker.IsMountpoint(ctx, target)
+		if err != nil {
+			fail(fmt.Sprintf("failed to check mountpoint: %v", err))
+			return
+		}
+		if isMP {
+			fail(fmt.Sprintf("%s is a mountpoint not listed in the mount table; not mounting over it", target))
+			return
+		}
 		if err := r.checker.MkdirAll(target, 0755); err != nil {
-			r.setStatus(share.ID, target, false,
-				fmt.Sprintf("failed to create mount directory: %v", err))
+			fail(fmt.Sprintf("failed to create mount directory: %v", err))
 			return
 		}
-
 		if err := r.checker.Mount(ctx, share.Server, share.Export, target, mountOpts); err != nil {
-			r.setStatus(share.ID, target, false,
-				fmt.Sprintf("mount failed: %v", err))
+			fail(fmt.Sprintf("mount failed: %v", err))
 			return
 		}
-
 		r.setStatus(share.ID, target, true, "mounted successfully")
 		r.log.Info("NFS share mounted", "shareID", share.ID, "target", target)
 		return
 	}
 
-	// Already mounted — verify it points at the expected server:export.
-	currentServerExport, err := r.checker.MountInfo(target)
-	if err != nil {
-		r.setStatus(share.ID, target, false,
-			fmt.Sprintf("failed to read mount info: %v", err))
+	// Mounted from the wrong source.
+	if !mounts {
+		reason := "auto_mount is off, so it is not remounted"
+		if r.AutoMount() {
+			reason = r.verifyOnlyReason
+		}
+		fail(fmt.Sprintf("mounted from %s, expected %s (%s)", currentServerExport, wantServerExport, reason))
 		return
 	}
-
-	if currentServerExport == wantServerExport {
-		// Correct mount — no action needed.
-		r.setStatus(share.ID, target, true, "already mounted correctly")
-		r.log.Debug("NFS share already mounted correctly",
-			"shareID", share.ID, "target", target)
-		return
-	}
-
-	if !r.cfg.AutoMount {
-		r.setStatus(share.ID, target, false,
-			fmt.Sprintf("mounted from %s, expected %s (auto_mount is off, so it is not remounted)", currentServerExport, wantServerExport))
-		return
-	}
-
 	if err := r.mountPrivilegeError(); err != nil {
-		r.setStatus(share.ID, target, false,
-			fmt.Sprintf("mounted from %s, expected %s, and auto_mount cannot remount it: %v", currentServerExport, wantServerExport, err))
+		fail(fmt.Sprintf("mounted from %s, expected %s, and auto_mount cannot remount it: %v", currentServerExport, wantServerExport, err))
 		return
 	}
 
-	// Wrong server:export — remount.
 	r.log.Warn("NFS share mounted with wrong source, remounting",
 		"shareID", share.ID, "target", target,
 		"current", currentServerExport, "expected", wantServerExport)
 
 	if err := r.checker.Unmount(ctx, target); err != nil {
-		r.setStatus(share.ID, target, false,
-			fmt.Sprintf("failed to unmount for remount: %v", err))
+		fail(fmt.Sprintf("failed to unmount for remount: %v", err))
 		return
 	}
 	if err := r.checker.Mount(ctx, share.Server, share.Export, target, mountOpts); err != nil {
-		r.setStatus(share.ID, target, false,
-			fmt.Sprintf("remount failed: %v", err))
+		fail(fmt.Sprintf("remount failed: %v", err))
 		return
 	}
 
@@ -363,6 +405,15 @@ func (r *NFSMountReconciler) ShareStatuses() []ShareMountStatus {
 	return result
 }
 
+// ShareStatus returns the last recorded status of a share, and false if it
+// has not been checked yet. It never checks or mounts.
+func (r *NFSMountReconciler) ShareStatus(shareID string) (ShareMountStatus, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	st, ok := r.statuses[shareID]
+	return st, ok
+}
+
 // HealthCheckString returns a summary string for health reporting.
 // Returns "healthy" if all shares are mounted, or "unhealthy: <details>"
 // listing failed shares.
@@ -386,8 +437,9 @@ func (r *NFSMountReconciler) HealthCheckString() string {
 	return "unhealthy: " + strings.Join(unhealthy, "; ")
 }
 
-// EnsureShareMounted is called before each NFS-backed dispatch to verify
-// the share for a given share ID is still mounted. It re-reconciles if needed.
+// EnsureShareMounted is called before each NFS-backed dispatch to a
+// local-container runtime to verify the share for a given share ID is still
+// mounted. It re-reconciles the share, mounting it when MountsShares is true.
 // Returns an error if the share cannot be verified or mounted, or if ctx
 // (the dispatch request's context) is done first; ctx also bounds any mount
 // command it runs.
