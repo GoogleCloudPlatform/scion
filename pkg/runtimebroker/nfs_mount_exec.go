@@ -58,8 +58,9 @@ func NewExecMountChecker(log *slog.Logger) *ExecMountChecker {
 
 // mountCommandTimeout bounds every mount-related command. mount.nfs retries
 // an unreachable server for about two minutes in the foreground; the bound
-// keeps a dispatch-time check or a reconcile pass from hanging longer.
-const mountCommandTimeout = 90 * time.Second
+// keeps a dispatch-time check or a reconcile pass from hanging longer. A
+// variable so tests can shorten it.
+var mountCommandTimeout = 90 * time.Second
 
 // commandWaitDelay bounds how long execRunCommand waits for the command's
 // output pipes to close after it has been killed.
@@ -75,7 +76,8 @@ const commandWaitDelay = 3 * time.Second
 // helper running and the call waiting on the pipes. WaitDelay is a backstop
 // for a descendant that left the group.
 func execRunCommand(parent context.Context, name string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(parent, mountCommandTimeout)
+	timeout := mountCommandTimeout
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -87,13 +89,24 @@ func execRunCommand(parent context.Context, name string, args ...string) ([]byte
 	}
 	cmd.WaitDelay = commandWaitDelay
 	out, err := cmd.CombinedOutput()
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		if parent.Err() != nil {
-			return out, fmt.Errorf("%s cancelled: %w", name, parent.Err())
-		}
-		return out, fmt.Errorf("%s timed out after %s: %w", name, mountCommandTimeout, ctxErr)
+	return out, classifyCommandError(name, timeout, err, ctx, parent)
+}
+
+// classifyCommandError attributes a failed command to its context: a
+// cancelled parent, then the timeout. A command that succeeded is a
+// success even if the context ended as it finished, and a failure while
+// the context is live is returned unchanged.
+func classifyCommandError(name string, timeout time.Duration, err error, ctx, parent context.Context) error {
+	if err == nil {
+		return nil
 	}
-	return out, err
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if parentErr := parent.Err(); parentErr != nil {
+			return fmt.Errorf("%s cancelled: %w", name, parentErr)
+		}
+		return fmt.Errorf("%s timed out after %s: %w", name, timeout, ctxErr)
+	}
+	return err
 }
 
 // MountPrivilegeError reports that mounting is not possible because the

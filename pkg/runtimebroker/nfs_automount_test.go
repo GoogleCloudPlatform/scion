@@ -732,6 +732,67 @@ func TestExecRunCommand_ParentCtxCancels(t *testing.T) {
 	}
 }
 
+// TestExecRunCommand_TimesOut verifies that a command that outlives
+// mountCommandTimeout under a live parent is reported as timed out, not as
+// cancelled.
+func TestExecRunCommand_TimesOut(t *testing.T) {
+	old := mountCommandTimeout
+	mountCommandTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { mountCommandTimeout = old })
+
+	start := time.Now()
+	_, err := execRunCommand(context.Background(), "sleep", "30")
+	if err == nil || !strings.Contains(err.Error(), "timed out after 200ms") || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("execRunCommand = %v, want a timeout error wrapping context.DeadlineExceeded", err)
+	}
+	if strings.Contains(err.Error(), "cancelled") {
+		t.Fatalf("execRunCommand = %v, want timed out, not cancelled", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("command ran for %s, want near the 200ms timeout", elapsed)
+	}
+}
+
+// TestClassifyCommandError covers how a command's result is attributed to
+// its contexts.
+func TestClassifyCommandError(t *testing.T) {
+	cmdErr := errors.New("exit status 32")
+	live := context.Background()
+	cancelledParent, cancel := context.WithCancel(context.Background())
+	cancel()
+	timedOut, cancelT := context.WithTimeout(context.Background(), 0)
+	defer cancelT()
+
+	tests := []struct {
+		name        string
+		err         error
+		ctx, parent context.Context
+		want        string // "" means nil
+		wantIs      error
+	}{
+		{"success with live ctx", nil, live, live, "", nil},
+		{"success as the parent ends", nil, cancelledParent, cancelledParent, "", nil},
+		{"success as the timeout fires", nil, timedOut, live, "", nil},
+		{"failure with live ctx", cmdErr, live, live, "exit status 32", cmdErr},
+		{"failure after parent cancel", cmdErr, cancelledParent, cancelledParent, "mount cancelled", context.Canceled},
+		{"failure after timeout", cmdErr, timedOut, live, "mount timed out after 1s", context.DeadlineExceeded},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := classifyCommandError("mount", time.Second, tt.err, tt.ctx, tt.parent)
+			if tt.want == "" {
+				if got != nil {
+					t.Fatalf("got %v, want nil", got)
+				}
+				return
+			}
+			if got == nil || !strings.Contains(got.Error(), tt.want) || !errors.Is(got, tt.wantIs) {
+				t.Fatalf("got %v, want %q wrapping %v", got, tt.want, tt.wantIs)
+			}
+		})
+	}
+}
+
 // TestExecRunCommand_DescendantHoldsPipe verifies that a cancelled command
 // returns near the deadline even when a child process (as mount.nfs is for
 // mount) holds the output pipe open: the whole process group is killed.
