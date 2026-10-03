@@ -11,6 +11,9 @@ The admin pages, the access-boundary views and the role-binding views now format
 - `role-binding-utils.formatDateTime` was removed, along with its `shared/index.ts` re-export. Its three callers (`admin-role-bindings.ts`, `admin-role-detail.ts`, `effective-role-provenance.ts`) call `formatInstantWithZone` directly.
 - `admin-scheduler.ts` (tick count) and `metrics-dashboard.ts` (small counts) use `formatNumber`.
 - 17 files were removed from the format-scan allowlist.
+- Review round 1 fixes:
+  - The role-binding create form's lifecycle checks (the past-expiry warning, the ordering warning and the `createFormValid` ordering check) now read the `datetime-local` values in the display zone through `parseWallClock`, as the submit path already did. This bug predates this change.
+  - The boundary list's schedule column shows the year (`'datetime-full'`) and adds the zone label only when a bound was actually converted.
 
 ## Why
 
@@ -19,7 +22,7 @@ AC17: one formatter, the user's display zone, 24-hour time everywhere. Before th
 ## Test evidence
 
 - New `admin-time-format.test.ts`, plus render tests in `admin-experiments.test.ts`, `admin-role-bindings.test.ts` and `admin-role-detail.test.ts`. They set an Asia/Tokyo display preference while vitest pins the browser zone to UTC, and check that midnight renders as `00:00`. Two of them also check a live re-render after a zone change.
-- `vitest run` over all touched admin, access-boundary and role-binding test files, `format-scan.test.ts` and `time.test.ts`: 19 files and 404 tests pass. The same run under host `TZ=Asia/Tokyo` and `TZ=Asia/Kathmandu` also passes; vitest pins `TZ=UTC` regardless of the host zone.
+- `vitest run` over all touched admin, access-boundary and role-binding test files, `format-scan.test.ts` and `time.test.ts`: 20 files and 409 tests pass after review round 1. They include a test that an expiry which is past in Tokyo but future in UTC shows the warning; it fails without the fix. The same run under host `TZ=Asia/Tokyo` and `TZ=Asia/Kathmandu` also passes; vitest pins `TZ=UTC` regardless of the host zone.
 - `tsc --noEmit` is clean. ESLint on the changed source files adds no new errors compared with upstream main.
 
 ## Follow-ups (not done here)
