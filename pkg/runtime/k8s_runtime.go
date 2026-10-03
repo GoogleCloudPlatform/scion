@@ -475,6 +475,9 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	startID := uuid.NewString()
 	labels := make(map[string]string, len(config.Labels)+1)
 	for k, v := range config.Labels {
+		if !legalKubernetesLabelValue(v) {
+			continue
+		}
 		labels[k] = v
 	}
 	labels[labelStartID] = startID
@@ -939,11 +942,7 @@ func (r *KubernetesRuntime) createAgentSecretWithHooks(ctx context.Context, name
 	secretLabels := map[string]string{
 		"scion.agent": agentName,
 	}
-	for k, v := range labels {
-		if strings.HasPrefix(k, "scion.") {
-			secretLabels[k] = v
-		}
-	}
+	copyLegalScionLabels(secretLabels, labels)
 
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1035,6 +1034,25 @@ func divertTransportCredential(env []string, secrets []api.ResolvedSecret) ([]st
 	return outEnv, outSecrets
 }
 
+// legalKubernetesLabelValue reports whether v can be a Kubernetes label
+// value. A content-hash cache directory (sha256:<64 hex>) contains a colon
+// and is longer than 63 characters, so the API server rejects the object.
+func legalKubernetesLabelValue(v string) bool {
+	return len(v) <= 63 && !strings.Contains(v, ":")
+}
+
+// copyLegalScionLabels copies scion.* labels whose values Kubernetes will
+// accept. Illegal values stay off the object; the hash remains on the
+// template record and in the cache directory.
+func copyLegalScionLabels(dst, src map[string]string) {
+	for k, v := range src {
+		if !strings.HasPrefix(k, "scion.") || !legalKubernetesLabelValue(v) {
+			continue
+		}
+		dst[k] = v
+	}
+}
+
 // createSecretProviderClass creates a SecretProviderClass CRD for GKE
 // Secrets Store CSI driver integration. It maps GCP Secret Manager
 // references to K8s-synced secrets for environment variable injection.
@@ -1123,11 +1141,7 @@ func (r *KubernetesRuntime) createSecretProviderClassWithHooks(ctx context.Conte
 	spcLabels := map[string]string{
 		"scion.agent": agentName,
 	}
-	for k, v := range labels {
-		if strings.HasPrefix(k, "scion.") {
-			spcLabels[k] = v
-		}
-	}
+	copyLegalScionLabels(spcLabels, labels)
 
 	// GKE's managed Secret Manager add-on registers its provider as "gke",
 	// whereas the upstream open-source CSI driver uses "gcp".
@@ -1477,11 +1491,7 @@ func (r *KubernetesRuntime) createAuthFileSecretWithHooks(ctx context.Context, n
 	secretLabels := map[string]string{
 		"scion.agent": agentName,
 	}
-	for k, v := range labels {
-		if strings.HasPrefix(k, "scion.") {
-			secretLabels[k] = v
-		}
-	}
+	copyLegalScionLabels(secretLabels, labels)
 
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{

@@ -1865,6 +1865,27 @@ func TestFriendlyTemplateName(t *testing.T) {
 	}
 }
 
+func TestFindTemplateContentHashDirIsNotTheName(t *testing.T) {
+	hash := "sha256:" + strings.Repeat("a", 64)
+	dir := filepath.Join(t.TempDir(), hash)
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tpl, err := FindTemplate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tpl.Name == hash || strings.Contains(tpl.Name, "sha256:") {
+		t.Fatalf("FindTemplate name = %q, want a name that is not the content hash", tpl.Name)
+	}
+	if tpl.Path != dir {
+		t.Fatalf("FindTemplate path = %q, want %q", tpl.Path, dir)
+	}
+	if got := FriendlyTemplateName(dir); got == hash || strings.Contains(got, "sha256:") {
+		t.Fatalf("FriendlyTemplateName(%q) = %q, want a name that is not the content hash", dir, got)
+	}
+}
+
 func TestResolveModelAlias(t *testing.T) {
 	aliases := map[string]string{
 		"small":       "haiku",

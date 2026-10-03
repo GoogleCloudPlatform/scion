@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -37,6 +38,44 @@ import (
 // unresolvable name as a client-facing 4xx naming the resource, instead of
 // folding it into a generic 5xx (ptone/scion#1316 fault 3).
 var ErrTemplateNotFound = errors.New("template not found")
+
+// contentHashNamePattern matches a content-addressed cache directory name:
+// the transfer package's "sha256:" prefix plus 64 hex characters. That string
+// is a legal cache key and an illegal Kubernetes label value.
+var contentHashNamePattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// IsContentHashName reports whether name is a content-addressed template
+// cache directory name (sha256: and 64 hex characters).
+func IsContentHashName(name string) bool {
+	return contentHashNamePattern.MatchString(name)
+}
+
+// templateDisplayName is the short name stored for a template reference.
+// A content-hash cache directory is not a name: callers keep the slug they
+// already have instead of filepath.Base of that directory.
+func templateDisplayName(ref string) string {
+	if ref == "" {
+		return ""
+	}
+	if IsRemoteURI(ref) {
+		name := DeriveTemplateName(ref)
+		if IsContentHashName(name) {
+			return ""
+		}
+		return name
+	}
+	if filepath.IsAbs(ref) {
+		base := filepath.Base(ref)
+		if IsContentHashName(base) {
+			return ""
+		}
+		return base
+	}
+	if IsContentHashName(ref) {
+		return ""
+	}
+	return ref
+}
 
 type Template struct {
 	Name  string
@@ -218,7 +257,7 @@ func FindTemplateWithContext(ctx context.Context, name string) (*Template, error
 	// 1. Check if name is an absolute path
 	if filepath.IsAbs(name) {
 		if info, err := os.Stat(name); err == nil && info.IsDir() {
-			return &Template{Name: filepath.Base(name), Path: name}, nil
+			return &Template{Name: templateDisplayName(name), Path: name}, nil
 		}
 		return nil, fmt.Errorf("template path %s not found or not a directory", name)
 	}
@@ -281,16 +320,7 @@ func FindTemplateInScope(name, scope string) *Template {
 // Simple names pass through unchanged; absolute paths return filepath.Base;
 // remote URIs are handled by DeriveTemplateName.
 func FriendlyTemplateName(ref string) string {
-	if ref == "" {
-		return ref
-	}
-	if IsRemoteURI(ref) {
-		return DeriveTemplateName(ref)
-	}
-	if filepath.IsAbs(ref) {
-		return filepath.Base(ref)
-	}
-	return ref
+	return templateDisplayName(ref)
 }
 
 // DeriveTemplateName extracts a short template name from a URI for display purposes.
@@ -377,7 +407,7 @@ func FindTemplateInProjectPath(name, projectPath string) (*Template, error) {
 	}
 	if filepath.IsAbs(name) {
 		if info, err := os.Stat(name); err == nil && info.IsDir() {
-			return &Template{Name: filepath.Base(name), Path: name}, nil
+			return &Template{Name: templateDisplayName(name), Path: name}, nil
 		}
 		return nil, fmt.Errorf("template path %s not found or not a directory: %w", name, ErrTemplateNotFound)
 	}

@@ -575,6 +575,9 @@ type StartExtras struct {
 	ProvisionCredentials map[string]string
 	PreResolvedSkills    *ResolveSkillsResponse
 	Workspace            WorkspaceDispatchSpec
+	// Template is the human template slug. Start and restart send it the
+	// same way create's RemoteAgentConfig.Template does.
+	Template string
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -603,6 +606,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.Workspace.WorkspaceMode != "" {
 		payload["workspaceMode"] = extras.Workspace.WorkspaceMode
+	}
+	if extras.Template != "" && !config.IsContentHashName(extras.Template) {
+		payload["template"] = extras.Template
 	}
 }
 
