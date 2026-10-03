@@ -765,6 +765,9 @@ func (e *deletionEngine) finish() (deletionOutcome, bool) {
 		e.stopRenewal()
 		n, err := s.finalizeAgentDeletion(ctx, agent.ID, pred, store.DeletionFinalizeSoft, set)
 		if err != nil {
+			if e.isLost() {
+				return e.lost(), false
+			}
 			s.agentLifecycleLog.Error("delete engine: soft finish failed", "agent_id", agent.ID, "error", err)
 			return e.failFinalizing(store.DeletionCodeFinalizeFailed, "Failed to finalize agent delete: "+err.Error()), false
 		}
