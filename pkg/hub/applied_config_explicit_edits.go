@@ -267,7 +267,9 @@ func diffExplicitEnvKeys(oldEnv, explicitEnv, newEnv map[string]string) (added m
 // applyPatchAutoExposeEnv resolves the autoExposeEnvKeys for a PATCH that
 // carries an env map (patchEnv, the request's cfg.Env, which becomes the new
 // InlineConfig.Env). ac is the live config whose Env has just been set to a
-// copy of patchEnv; old is the pre-PATCH snapshot; project may be nil.
+// copy of patchEnv; old is the pre-PATCH snapshot (a shallow copy, so its
+// CreateInputs is the record recordExplicitEdits has already updated);
+// project may be nil.
 //
 // A key in patchEnv is the user's explicit value (tier 1) and is left as is.
 // A key absent from patchEnv was untouched, so:
@@ -284,6 +286,10 @@ func diffExplicitEnvKeys(oldEnv, explicitEnv, newEnv map[string]string) (added m
 // carry, plus, when the request did not send the key, the previous explicit
 // value from explicitEnvOf(old). That is CreateInputs when the agent has it,
 // since InlineConfig.Env can still hold a hub-stamped value on older agents.
+// Reading the already-updated CreateInputs is equivalent to reading the
+// pre-PATCH one here: this read happens only when the request did not send
+// SCION_AUTO_EXPOSE_PORTS, and an unsent auto-expose key is never added to
+// or removed from CreateInputs.
 // The project tier therefore overwrites a kept or carried non-explicit value,
 // and never an explicit one. The hub default is never written; the broker
 // applies it.

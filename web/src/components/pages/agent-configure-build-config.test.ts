@@ -482,6 +482,26 @@ describe('agent-configure — auto-expose effective value, source label and save
     expect(c.buildConfig().env).toEqual({
       SCION_AUTO_EXPOSE_PORTS: 'true',
       SCION_AUTO_EXPOSE_MODE: 'denylist',
+      SCION_AUTO_EXPOSE_PORTS_LIST: '',
+      SCION_AUTO_EXPOSE_INTERVAL: '3s',
+    });
+  });
+
+  it("clearing the list sends LIST='' so it replaces the previous list", async () => {
+    const c = await mountAgentConfigureWithLoadedAgent({
+      model: 'golden-model',
+      env: {
+        SCION_AUTO_EXPOSE_PORTS: 'true',
+        SCION_AUTO_EXPOSE_MODE: 'denylist',
+        SCION_AUTO_EXPOSE_PORTS_LIST: '22',
+      },
+      inlineConfig: {},
+    });
+    (c as unknown as { autoExposePortsList: string }).autoExposePortsList = '';
+    expect(c.buildConfig().env).toEqual({
+      SCION_AUTO_EXPOSE_PORTS: 'true',
+      SCION_AUTO_EXPOSE_MODE: 'denylist',
+      SCION_AUTO_EXPOSE_PORTS_LIST: '',
       SCION_AUTO_EXPOSE_INTERVAL: '3s',
     });
   });

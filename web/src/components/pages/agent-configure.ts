@@ -1102,9 +1102,9 @@ export class ScionPageAgentConfigure extends LitElement {
       env.SCION_AUTO_EXPOSE_PORTS = this.autoExposePortsEnabled ? 'true' : 'false';
       if (this.autoExposePortsEnabled) {
         env.SCION_AUTO_EXPOSE_MODE = this.autoExposePortsMode;
-        if (this.autoExposePortsList) {
-          env.SCION_AUTO_EXPOSE_PORTS_LIST = this.autoExposePortsList;
-        }
+        // Always sent, so clearing the list replaces the previous one; an
+        // empty list means unset, like an absent key.
+        env.SCION_AUTO_EXPOSE_PORTS_LIST = this.autoExposePortsList;
         env.SCION_AUTO_EXPOSE_INTERVAL = this.autoExposePortsInterval || '3s';
       }
     }

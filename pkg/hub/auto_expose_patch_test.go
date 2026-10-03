@@ -331,6 +331,40 @@ func TestApplyAgentUpdate_AutoExposeProjectLookupFailure(t *testing.T) {
 	assert.Equal(t, map[string]string{"FOO": "bar"}, createInputsEnv(updated))
 }
 
+// TestApplyAgentUpdate_AutoExposeClearedListReplacesPrevious pins that an
+// empty SCION_AUTO_EXPOSE_PORTS_LIST, sent when the user clears the list,
+// replaces the previous list in all three maps rather than reading as
+// untouched.
+func TestApplyAgentUpdate_AutoExposeClearedListReplacesPrevious(t *testing.T) {
+	const list = "SCION_AUTO_EXPOSE_PORTS_LIST"
+	prev := map[string]string{aePorts: "true", "SCION_AUTO_EXPOSE_MODE": "denylist", list: "22"}
+	applied := map[string]string{"TEMPLATE_KEY": "x"}
+	for k, v := range prev {
+		applied[k] = v
+	}
+	srv, s, _, agent := setupAutoExposePatchAgent(t, autoExposePatchAgent{
+		appliedEnv:   applied,
+		inlineEnv:    prev,
+		createInputs: ciWithEnv(prev),
+	})
+	updated := patchAndReload(t, srv, s, agent.ID, rowEditBody(t, map[string]interface{}{
+		"TEMPLATE_KEY":               "x",
+		aePorts:                      "true",
+		"SCION_AUTO_EXPOSE_MODE":     "denylist",
+		list:                         "",
+		"SCION_AUTO_EXPOSE_INTERVAL": "3s",
+	}))
+
+	for name, env := range map[string]map[string]string{
+		"applied":      updated.AppliedConfig.Env,
+		"inline":       inlineEnv(updated),
+		"CreateInputs": createInputsEnv(updated),
+	} {
+		v, ok := env[list]
+		assert.True(t, ok && v == "", "%s list must be cleared to \"\", got %q (present=%v)", name, v, ok)
+	}
+}
+
 // TestApplyAgentUpdate_PatchEnvDoesNotAliasInline pins the copy: the
 // project-derived value written into the live env must not appear in the
 // new InlineConfig.Env built from the same request map.
