@@ -603,6 +603,50 @@ func TestUpdateGroup_ProjectMembersGroupMarkerNotAddable(t *testing.T) {
 	})
 }
 
+// TestCreateGroup_RejectsProjectMembersGroupMarker pins that the marker keys
+// are system-written only on POST too: createGroup rejects a request carrying
+// either key, while an ordinary create with annotations still succeeds
+// (ptone/scion#2599, review r4 L1).
+func TestCreateGroup_RejectsProjectMembersGroupMarker(t *testing.T) {
+	f, _, _ := setupStaleOwnerMembersGroup(t)
+	ctx := context.Background()
+	admin := newSuperAdminUser(t, f.s, "mg-marker-create-hub-admin")
+
+	post := func(body map[string]interface{}) *httptest.ResponseRecorder {
+		return doRequestAsUser(t, f.srv, admin, http.MethodPost, "/api/v1/groups", body)
+	}
+	const addMsg = "project members group marker annotations are system-written and cannot be added"
+
+	for _, key := range []string{systemProjectMembersGroupAnnotation, legacyProjectMembersGroupAnnotation} {
+		t.Run("creating with "+key, func(t *testing.T) {
+			slug := "mg-create-" + strings.ReplaceAll(strings.TrimPrefix(key, "scion.io/"), "/", "-")
+			rec := post(map[string]interface{}{
+				"name":        "Group " + slug,
+				"slug":        slug,
+				"annotations": map[string]string{"a": "b", key: "true"},
+			})
+			assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), ErrCodeValidationError)
+			assert.Contains(t, rec.Body.String(), addMsg)
+			_, err := f.s.GetGroupBySlug(ctx, slug)
+			assert.ErrorIs(t, err, store.ErrNotFound, "rejected POST must not create the group")
+		})
+	}
+
+	t.Run("ordinary create with annotations still succeeds", func(t *testing.T) {
+		rec := post(map[string]interface{}{
+			"name":        "Group mg-create-ordinary",
+			"slug":        "mg-create-ordinary",
+			"annotations": map[string]string{"c": "d"},
+		})
+		assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		stored, err := f.s.GetGroupBySlug(ctx, "mg-create-ordinary")
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"c": "d"}, stored.Annotations)
+		assert.False(t, hasProjectMembersGroupMarker(stored))
+	})
+}
+
 // TestBackfillClearProjectMembersGroupOwners_Paginates pins the NextCursor
 // loop: with a small page size, a marked group on a later page is cleared.
 func TestBackfillClearProjectMembersGroupOwners_Paginates(t *testing.T) {

@@ -250,6 +250,16 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The project members group marker keys are system-written only
+	// (ptone/scion#2599): createProjectMembersGroup and the entadapter set
+	// them directly through the store, never through this handler. Reject
+	// them here as updateGroup does on PATCH, so an API-created group cannot
+	// carry a marker that the PATCH immutability guard would then lock in.
+	if setsProjectMembersGroupMarkerKey(nil, req.Annotations) {
+		ValidationError(w, "project members group marker annotations are system-written and cannot be added", nil)
+		return
+	}
+
 	ownerID := req.OwnerID
 	createdBy := ""
 	if identity := GetIdentityFromContext(ctx); identity != nil {
@@ -408,8 +418,9 @@ func (s *Server) updateGroup(w http.ResponseWriter, r *http.Request, id string) 
 	// A project members group carries no owner (ptone/scion#2599): the
 	// owner relationship would grant group.* outside the project's role
 	// bindings. Reject setting one, even by a hub admin. Both the stored
-	// group and the patched annotations are checked so that a PATCH cannot
-	// add the marker and an owner together.
+	// group and the patched annotations are checked. A PATCH that adds the
+	// marker and an owner together is also rejected by the add-marker guard
+	// below; checking the patched annotations here is defence in depth.
 	if req.OwnerID != "" {
 		patched := *group
 		if req.Annotations != nil {
@@ -429,10 +440,11 @@ func (s *Server) updateGroup(w http.ResponseWriter, r *http.Request, id string) 
 	// marker key on a marked group (ptone/scion#2599).
 	//
 	// The markers are system-written only: createProjectMembersGroup and the
-	// entadapter set them directly through the store, never through this
-	// handler. So a PATCH may not add either marker key to an unmarked group
-	// either; otherwise a mistaken PATCH would become irreversible through
-	// the API once the immutability check above applied to it.
+	// entadapter set them directly through the store, never through the
+	// group API. createGroup rejects them on POST, and a PATCH may not add
+	// either marker key to an unmarked group either; otherwise a mistaken
+	// request would become irreversible through the API once the
+	// immutability check above applied to it.
 	if req.Annotations != nil && changesProjectMembersGroupMarker(group.Annotations, req.Annotations) {
 		if hasProjectMembersGroupMarker(group) {
 			ValidationError(w, "project members group marker annotations cannot be removed or changed", nil)
