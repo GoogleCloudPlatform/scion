@@ -44,10 +44,15 @@ const enforcedHooksDirModeBits = 0o022
 // trust — DecideExecAsRoot fails closed on whatever it actually observes at
 // hook-execution time, regardless of whether this fixup ran or succeeded.
 //
-// Never follows a symlink: an ancestor that is a symlink is left untouched
-// and logged, exactly like fixupRootfsForScion's own treatment of "/" (which
-// only Stats, never Lstats through, a component it doesn't expect to ever
-// legitimately be one).
+// Symlinks: each entry's open uses O_NOFOLLOW, which refuses a symlinked
+// FINAL component only (the kernel fails such an O_DIRECTORY|O_NOFOLLOW open
+// with ENOTDIR). Every ancestor is fixed up in its OWN iteration, so a
+// symlinked ancestor is refused — logged and left untouched — when it is the
+// entry being opened. A deeper entry's open still traverses a symlinked
+// ancestor by name; that is acceptable because this fixup only ever tightens
+// ownership and mode bits, and the authoritative enforcement is
+// DecideExecAsRoot at hook-execution time, which fails closed on whatever it
+// actually observes.
 func fixupEnforcedHooksDirChain() {
 	for _, dir := range enforcedHooksDirAncestors() {
 		fixupEnforcedHooksDirEntry(dir)
@@ -69,8 +74,9 @@ func enforcedHooksDirAncestors() []string {
 // group/other-write bits. A missing entry is not an error — bootstrap
 // creates the hooks dir itself fresh, root-owned, 0755 (see
 // pkg/sciontool/substrate's writeBootstrapFile), so there is nothing to fix
-// until at least one bootstrap has run. A symlink or non-directory is refused
-// (logged, left alone), never chmod/chowned through.
+// until at least one bootstrap has run. An entry that is itself a symlink or
+// a non-directory is refused (logged, left alone), never chmod/chowned
+// through; O_NOFOLLOW guards only this final component, not its parents.
 //
 // The entry is opened ONCE with O_NOFOLLOW|O_DIRECTORY and the fstat and the
 // fchown/fchmod all act on that fd, so they operate on the exact inode we
@@ -88,10 +94,10 @@ func fixupEnforcedHooksDirEntry(path string) {
 			// Missing entry: nothing to fix until bootstrap has created it.
 			return
 		case errors.Is(err, syscall.ELOOP):
-			log.Error("fixupEnforcedHooksDirChain: %s is a symlink; refusing to touch it", path)
+			log.Error("fixupEnforcedHooksDirChain: %s: symlink loop or too many links; refusing to touch it", path)
 			return
 		case errors.Is(err, syscall.ENOTDIR):
-			log.Error("fixupEnforcedHooksDirChain: %s is not a directory; refusing to touch it", path)
+			log.Error("fixupEnforcedHooksDirChain: %s is a symlink or not a directory; refusing to touch it", path)
 			return
 		default:
 			log.Error("fixupEnforcedHooksDirChain: failed to open %s without following symlinks: %v", path, err)

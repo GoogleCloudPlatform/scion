@@ -2996,13 +2996,15 @@ func TestWaitForHealthz_ContextCancellationReturnsPromptly(t *testing.T) {
 
 	t.Run("cancelled during the wait between attempts", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 		sleeps := 0
-		// Model the production sleepWithContext: the wait observes the
-		// cancellation (here triggered on the first wait) and reports ctx.Err().
-		sleep := func(c context.Context, _ time.Duration) error {
+		// The wait reports context.Canceled WITHOUT cancelling ctx itself, so
+		// the only way waitForHealthz can return a cancellation error is the
+		// backoff site's sleep-error return — not the top-of-loop ctx.Err()
+		// check, which stays nil here. This pins that return specifically.
+		sleep := func(context.Context, time.Duration) error {
 			sleeps++
-			cancel()
-			return c.Err()
+			return context.Canceled
 		}
 
 		err := waitForHealthz(ctx, router, "atespace", "actor", healthzAwaitingBootstrap, 2*time.Second, sleep)
@@ -3089,9 +3091,15 @@ func TestSleepWithContext(t *testing.T) {
 	})
 
 	t.Run("live context sleeps the duration and returns nil", func(t *testing.T) {
-		err := sleepWithContext(context.Background(), 5*time.Millisecond)
+		const d = 5 * time.Millisecond
+		start := time.Now()
+		err := sleepWithContext(context.Background(), d)
+		elapsed := time.Since(start)
 		if err != nil {
 			t.Fatalf("sleepWithContext returned %v, want nil for a live context", err)
+		}
+		if elapsed < d {
+			t.Fatalf("sleepWithContext returned after %s, want it to wait at least the requested %s", elapsed, d)
 		}
 	})
 }

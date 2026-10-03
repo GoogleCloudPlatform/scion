@@ -368,6 +368,12 @@ never bootstrapped itself, the cache has no entry for the agent, so an exec
 failure's error text (including the truncated control-server stderr it
 embeds) is written to the **broker's own log** without that redaction.
 
+The list holds only values the broker itself placed in the bootstrap
+environment. Credentials the agent obtains afterwards, such as the refreshed
+hub transport credential it keeps in its own token file, are never known to
+the broker and are not on it; the broker-log guidance below applies to them
+too.
+
 The exposure is narrow:
 
 - **Client responses are unaffected.** A failed exec returns an opaque

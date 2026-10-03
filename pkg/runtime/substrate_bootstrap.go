@@ -245,12 +245,17 @@ func buildBootstrapEnv(cfg RunConfig) map[string]string {
 //     prefixes ("substrate: ..."). Feeding that into redactEnvValues (a
 //     blunt substring replace over the whole error text) would rewrite
 //     "substrate" everywhere it appears, corrupting unrelated error
-//     messages. This function must mirror every *external* source itself,
-//     rather than importing another function's whole output — importing
-//     buildBootstrapEnv's output, or any future function that gains its own
-//     synthesised constant, reaches only whatever that function happens to
-//     cover, and secret values from any source it doesn't mirror reach
-//     error text unredacted.
+//     messages. This function must mirror every broker-placed secret source
+//     in cfg itself, rather than importing another function's whole output —
+//     importing buildBootstrapEnv's output, or any future function that
+//     gains its own synthesised constant, reaches only whatever that function
+//     happens to cover, and a broker-placed secret from any source it doesn't
+//     mirror reaches error text unredacted.
+//
+// Scope is limited to secret values the broker placed in cfg. Credentials the
+// agent mints or obtains after bootstrap — for example a refreshed transport
+// credential it keeps in its own token file — are never in cfg and are out of
+// scope by design; they are not known to the broker.
 func substrateSecretCandidates(cfg RunConfig) map[string]string {
 	secrets := make(map[string]string)
 	// add keys by "<source>:<name>" rather than bare name. Two different
@@ -587,8 +592,8 @@ func generateControlToken() (string, error) {
 // cancellable wait between attempts (sleepWithContext in production, a
 // counting/no-op variant in tests); it reports ctx.Err() if the context ends
 // during the wait so a cancelled ctx returns promptly instead of blocking out
-// a full backoff. The error wraps ctx.Err() on cancellation, so callers can
-// test errors.Is(err, context.Canceled) / context.DeadlineExceeded.
+// a full backoff. The returned error wraps ctx.Err() (via %w) when the
+// context is cancelled or its deadline passes.
 func waitForHealthz(ctx context.Context, router *substrate.RouterClient, atespace, actorName, wantState string, timeout time.Duration, sleep func(context.Context, time.Duration) error) error {
 	deadline := time.Now().Add(timeout)
 	backoff := 500 * time.Millisecond
@@ -600,7 +605,7 @@ func waitForHealthz(ctx context.Context, router *substrate.RouterClient, atespac
 			return nil
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return fmt.Errorf("substrate: %s/%s wait for healthz state %q cancelled: %w", atespace, actorName, wantState, ctxErr)
+			return fmt.Errorf("substrate: %s/%s wait for healthz state %q aborted: %w", atespace, actorName, wantState, ctxErr)
 		}
 		if time.Now().After(deadline) {
 			if err != nil {
@@ -609,7 +614,7 @@ func waitForHealthz(ctx context.Context, router *substrate.RouterClient, atespac
 			return fmt.Errorf("substrate: %s/%s did not reach healthz state %q within %s (last state: %q)", atespace, actorName, wantState, timeout, state)
 		}
 		if err := sleep(ctx, backoff); err != nil {
-			return fmt.Errorf("substrate: %s/%s wait for healthz state %q cancelled: %w", atespace, actorName, wantState, err)
+			return fmt.Errorf("substrate: %s/%s wait for healthz state %q aborted: %w", atespace, actorName, wantState, err)
 		}
 		if backoff < maxBackoff {
 			backoff *= 2
