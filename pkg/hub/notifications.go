@@ -251,6 +251,8 @@ func (nd *NotificationDispatcher) handleDeletedEvent(evt Event) {
 			ProjectID: deletedEvt.ProjectID,
 			Phase:     "stopped",
 			Activity:  "DELETED",
+			// The agent is gone: no delete view (explicit null on the wire).
+			Deletion: nil,
 		}
 		nd.storeAndDispatch(ctx, sub, statusEvt)
 	}

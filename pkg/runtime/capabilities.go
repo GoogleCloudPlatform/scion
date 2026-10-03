@@ -15,6 +15,7 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 )
 
@@ -69,4 +70,27 @@ type AttachCapableRuntime interface {
 func HasAttachSupport(rt Runtime) bool {
 	ac, ok := rt.(AttachCapableRuntime)
 	return !ok || ac.SupportsAttach()
+}
+
+// AgentResourceCleaner is an optional capability a Runtime may implement
+// when it creates per-agent objects alongside the container (for example
+// the Kubernetes runtime's per-agent Secrets and SecretProviderClass).
+// Delete removes those objects together with the container, but a delete
+// only reaches Delete when the container is still listed. When the container
+// was already removed outside scion (a preempted or evicted pod, for
+// example), the agent delete calls CleanupAgentResources instead so those
+// objects do not stay behind.
+//
+// agentName is the agent slug (the scion.name label) and projectID the
+// agent's project ID (the scion.project_id label). Implementations must
+// select objects by both, never by name alone, and must leave alone the
+// objects of an agent whose container still exists. A projectID of ""
+// is a no-op: without a project there is no safe scope.
+//
+// Known limitation: there is no incarnation check. A start of the same
+// agent still in progress (its objects created, its container not yet)
+// could lose its objects; the worst case is that start failing. The broker
+// cancels local launches of the agent before a delete resolves.
+type AgentResourceCleaner interface {
+	CleanupAgentResources(ctx context.Context, agentName, projectID string) error
 }

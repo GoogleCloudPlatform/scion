@@ -42,6 +42,8 @@ var hubEnvVars = []string{
 	"SCION_AUTH_TOKEN",
 	"SCION_AGENT_ID",
 	"SCION_AGENT_MODE",
+	"SCION_TRANSPORT_TOKEN",
+	"SCION_TRANSPORT_TOKEN_FILE",
 }
 
 // scrubHubEnv clears all Hub-related environment variables for the
@@ -3229,6 +3231,11 @@ func TestConfigureSharedWorkspaceGit_RunsUnderActiveReaperWithoutECHILD(t *testi
 		runInReaperChild(t)
 		return
 	}
+	// Keep the marker out of the environment of every process the child
+	// body starts (git, etc.).
+	if err := os.Unsetenv(reaperChildEnv); err != nil {
+		t.Fatalf("os.Unsetenv(%s): %v", reaperChildEnv, err)
+	}
 	procreap.StartReaper()
 
 	// log.Init() runs first because the logger's lazy initialization is not concurrency-safe.
@@ -3631,13 +3638,26 @@ const reaperChildEnv = "SCION_TEST_REAPER_CHILD"
 // child process.
 func runInReaperChild(t *testing.T) {
 	t.Helper()
-	cmd := exec.Command(os.Args[0], "-test.run", "^"+regexp.QuoteMeta(t.Name())+"$", "-test.count=1", "-test.v")
+	quotedName := regexp.QuoteMeta(t.Name())
+	args := []string{"-test.run=^" + quotedName + "$", "-test.count=1", "-test.v"}
+	// Propagate the parent's deadline so a hung child cannot outlive the
+	// parent: CommandContext does not kill the child if the parent panics
+	// on its own -timeout.
+	if d, ok := t.Deadline(); ok {
+		if remaining := time.Until(d); remaining > 0 {
+			args = append(args, "-test.timeout="+remaining.String())
+		}
+	}
+	cmd := exec.CommandContext(t.Context(), os.Args[0], args...)
 	cmd.Env = append(os.Environ(), reaperChildEnv+"=1")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("%s in a child test process: %v\n%s", t.Name(), err, out)
 	}
-	if !strings.Contains(string(out), "--- PASS: "+t.Name()) {
+	// Guard against a vacuous pass: match the whole result line so a test
+	// like <name>_Longer or <name>/sub cannot satisfy it.
+	passLine := regexp.MustCompile(`(?m)^--- PASS: ` + quotedName + ` \(`)
+	if !passLine.Match(out) {
 		t.Fatalf("%s did not run in the child test process:\n%s", t.Name(), out)
 	}
 }

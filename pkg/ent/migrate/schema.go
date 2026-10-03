@@ -204,6 +204,15 @@ var (
 		{Name: "launch_seq", Type: field.TypeInt64, Default: 0},
 		{Name: "launch_step", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "launch_error", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "deletion_state", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "deletion_claim", Type: field.TypeInt64, Default: 0},
+		{Name: "deletion_lease_at", Type: field.TypeTime, Nullable: true},
+		{Name: "deletion_started_at", Type: field.TypeTime, Nullable: true},
+		{Name: "deletion_failed_at", Type: field.TypeTime, Nullable: true},
+		{Name: "deletion_code", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "deletion_error", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "deletion_prior", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "deletion_request", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "project_id", Type: field.TypeUUID},
 	}
 	// AgentsTable holds the schema information for the "agents" table.
@@ -214,7 +223,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[54]},
+				Columns:    []*schema.Column{AgentsColumns[63]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -223,7 +232,7 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[54]},
+				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[63]},
 			},
 			{
 				Name:    "agent_launch_deadline",
@@ -476,6 +485,11 @@ var (
 				Name:    "brokerdispatch_correlation_id",
 				Unique:  false,
 				Columns: []*schema.Column{BrokerDispatchColumns[19]},
+			},
+			{
+				Name:    "brokerdispatch_agent_id_op_state",
+				Unique:  false,
+				Columns: []*schema.Column{BrokerDispatchColumns[2], BrokerDispatchColumns[5], BrokerDispatchColumns[7]},
 			},
 		},
 	}

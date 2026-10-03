@@ -143,14 +143,14 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.ProjectRoleOwner,
 			Description: "Project owner with full project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    4, // R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    5, // R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectOwnerPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleAdmin,
 			Description: "Project admin with most project permissions (no delete, no set_message_mode)",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    4, // R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    5, // R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectAdminPermissionIDs(),
 		},
 		{
@@ -284,18 +284,25 @@ func projectOwnerPermissionIDs() []string {
 		// token_refresh, identity_token, port_forward, notify) are excluded:
 		// those are intended for agent identities, not human project admins.
 		//
-		// agent.attach and agent.port_access are excluded (R3,
-		// miller79/scion#88): agents run with their creator's user-scoped
-		// secrets, so terminal/port access to another member's agent would
-		// expose that member's credentials. Owners reach their own agents
-		// and progeny via the resource-owner and ancestor relationship grants.
-		// agent.lifecycle (start/stop/suspend/restart/restore) is retained so
-		// owners keep management oversight of members' agents.
+		// agent.attach is excluded (R3): agents run with
+		// their creator's user-scoped secrets, so a terminal on another
+		// member's agent would expose that member's credentials. Owners reach
+		// their own agents and progeny via the resource-owner and ancestor
+		// relationship grants. agent.lifecycle (start/stop/suspend/restart/
+		// restore) is retained so owners keep management oversight of
+		// members' agents.
+		//
+		// agent.port_access is included (R5) so owners and admins can open
+		// members' already-exposed ports for oversight. It does not grant
+		// terminal, exec or env access (agent.attach), or port registration
+		// (hub-level). project-member still does not carry it; grant it to
+		// members through a custom role.
 		"agent.create",
 		"agent.delete",
 		"agent.lifecycle",
 		"agent.list",
 		"agent.message",
+		"agent.port_access",
 		"agent.read",
 		"agent.set_message_mode",
 		"agent.stop_all",
@@ -361,12 +368,13 @@ func projectOwnerPermissionIDs() []string {
 func projectAdminPermissionIDs() []string {
 	return []string{
 		// Agent lifecycle and operations (no delete, no set_message_mode,
-		// no agent-self credential permissions, no attach/port_access — see
-		// projectOwnerPermissionIDs for the miller79/scion#88 rationale)
+		// no agent-self credential permissions, no attach — see
+		// projectOwnerPermissionIDs for the rationale)
 		"agent.create",
 		"agent.lifecycle",
 		"agent.list",
 		"agent.message",
+		"agent.port_access",
 		"agent.read",
 		"agent.stop_all",
 		"agent.update",

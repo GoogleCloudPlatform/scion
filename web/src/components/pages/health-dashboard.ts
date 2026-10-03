@@ -33,6 +33,7 @@ import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { showToast } from '../../utils/toast.js';
+import { formatRelative } from '../../utils/time.js';
 
 interface HealthSummary {
   status: string;
@@ -842,22 +843,10 @@ export class ScionPageHealthDashboard extends LitElement {
 
   private timeAgo(isoDate: string): string {
     if (!isoDate) return 'never';
-    try {
-      const d = new Date(isoDate);
-      if (isNaN(d.getTime())) return 'unknown';
-      const now = Date.now();
-      const diffMs = now - d.getTime();
-      if (diffMs < 0) return 'just now';
-      const seconds = Math.floor(diffMs / 1000);
-      if (seconds < 60) return `${seconds}s ago`;
-      const minutes = Math.floor(seconds / 60);
-      if (minutes < 60) return `${minutes}m ago`;
-      const hours = Math.floor(minutes / 60);
-      if (hours < 24) return `${hours}h ago`;
-      const days = Math.floor(hours / 24);
-      return `${days}d ago`;
-    } catch {
-      return 'unknown';
-    }
+    const ms = new Date(isoDate).getTime();
+    if (Number.isNaN(ms)) return 'unknown';
+    // A future instant is clock skew between hub and browser.
+    if (ms > Date.now()) return 'just now';
+    return formatRelative(isoDate, { style: 'narrow' });
   }
 }

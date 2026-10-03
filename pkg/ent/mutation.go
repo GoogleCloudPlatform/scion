@@ -4571,6 +4571,16 @@ type AgentMutation struct {
 	addlaunch_seq            *int64
 	launch_step              *string
 	launch_error             *string
+	deletion_state           *string
+	deletion_claim           *int64
+	adddeletion_claim        *int64
+	deletion_lease_at        *time.Time
+	deletion_started_at      *time.Time
+	deletion_failed_at       *time.Time
+	deletion_code            *string
+	deletion_error           *string
+	deletion_prior           *string
+	deletion_request         *string
 	clearedFields            map[string]struct{}
 	project                  *uuid.UUID
 	clearedproject           bool
@@ -7280,6 +7290,454 @@ func (m *AgentMutation) ResetLaunchError() {
 	delete(m.clearedFields, agent.FieldLaunchError)
 }
 
+// SetDeletionState sets the "deletion_state" field.
+func (m *AgentMutation) SetDeletionState(s string) {
+	m.deletion_state = &s
+}
+
+// DeletionState returns the value of the "deletion_state" field in the mutation.
+func (m *AgentMutation) DeletionState() (r string, exists bool) {
+	v := m.deletion_state
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeletionState returns the old "deletion_state" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldDeletionState(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeletionState is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeletionState requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeletionState: %w", err)
+	}
+	return oldValue.DeletionState, nil
+}
+
+// ClearDeletionState clears the value of the "deletion_state" field.
+func (m *AgentMutation) ClearDeletionState() {
+	m.deletion_state = nil
+	m.clearedFields[agent.FieldDeletionState] = struct{}{}
+}
+
+// DeletionStateCleared returns if the "deletion_state" field was cleared in this mutation.
+func (m *AgentMutation) DeletionStateCleared() bool {
+	_, ok := m.clearedFields[agent.FieldDeletionState]
+	return ok
+}
+
+// ResetDeletionState resets all changes to the "deletion_state" field.
+func (m *AgentMutation) ResetDeletionState() {
+	m.deletion_state = nil
+	delete(m.clearedFields, agent.FieldDeletionState)
+}
+
+// SetDeletionClaim sets the "deletion_claim" field.
+func (m *AgentMutation) SetDeletionClaim(i int64) {
+	m.deletion_claim = &i
+	m.adddeletion_claim = nil
+}
+
+// DeletionClaim returns the value of the "deletion_claim" field in the mutation.
+func (m *AgentMutation) DeletionClaim() (r int64, exists bool) {
+	v := m.deletion_claim
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeletionClaim returns the old "deletion_claim" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldDeletionClaim(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeletionClaim is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeletionClaim requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeletionClaim: %w", err)
+	}
+	return oldValue.DeletionClaim, nil
+}
+
+// AddDeletionClaim adds i to the "deletion_claim" field.
+func (m *AgentMutation) AddDeletionClaim(i int64) {
+	if m.adddeletion_claim != nil {
+		*m.adddeletion_claim += i
+	} else {
+		m.adddeletion_claim = &i
+	}
+}
+
+// AddedDeletionClaim returns the value that was added to the "deletion_claim" field in this mutation.
+func (m *AgentMutation) AddedDeletionClaim() (r int64, exists bool) {
+	v := m.adddeletion_claim
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetDeletionClaim resets all changes to the "deletion_claim" field.
+func (m *AgentMutation) ResetDeletionClaim() {
+	m.deletion_claim = nil
+	m.adddeletion_claim = nil
+}
+
+// SetDeletionLeaseAt sets the "deletion_lease_at" field.
+func (m *AgentMutation) SetDeletionLeaseAt(t time.Time) {
+	m.deletion_lease_at = &t
+}
+
+// DeletionLeaseAt returns the value of the "deletion_lease_at" field in the mutation.
+func (m *AgentMutation) DeletionLeaseAt() (r time.Time, exists bool) {
+	v := m.deletion_lease_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeletionLeaseAt returns the old "deletion_lease_at" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldDeletionLeaseAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeletionLeaseAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeletionLeaseAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeletionLeaseAt: %w", err)
+	}
+	return oldValue.DeletionLeaseAt, nil
+}
+
+// ClearDeletionLeaseAt clears the value of the "deletion_lease_at" field.
+func (m *AgentMutation) ClearDeletionLeaseAt() {
+	m.deletion_lease_at = nil
+	m.clearedFields[agent.FieldDeletionLeaseAt] = struct{}{}
+}
+
+// DeletionLeaseAtCleared returns if the "deletion_lease_at" field was cleared in this mutation.
+func (m *AgentMutation) DeletionLeaseAtCleared() bool {
+	_, ok := m.clearedFields[agent.FieldDeletionLeaseAt]
+	return ok
+}
+
+// ResetDeletionLeaseAt resets all changes to the "deletion_lease_at" field.
+func (m *AgentMutation) ResetDeletionLeaseAt() {
+	m.deletion_lease_at = nil
+	delete(m.clearedFields, agent.FieldDeletionLeaseAt)
+}
+
+// SetDeletionStartedAt sets the "deletion_started_at" field.
+func (m *AgentMutation) SetDeletionStartedAt(t time.Time) {
+	m.deletion_started_at = &t
+}
+
+// DeletionStartedAt returns the value of the "deletion_started_at" field in the mutation.
+func (m *AgentMutation) DeletionStartedAt() (r time.Time, exists bool) {
+	v := m.deletion_started_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeletionStartedAt returns the old "deletion_started_at" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldDeletionStartedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeletionStartedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeletionStartedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeletionStartedAt: %w", err)
+	}
+	return oldValue.DeletionStartedAt, nil
+}
+
+// ClearDeletionStartedAt clears the value of the "deletion_started_at" field.
+func (m *AgentMutation) ClearDeletionStartedAt() {
+	m.deletion_started_at = nil
+	m.clearedFields[agent.FieldDeletionStartedAt] = struct{}{}
+}
+
+// DeletionStartedAtCleared returns if the "deletion_started_at" field was cleared in this mutation.
+func (m *AgentMutation) DeletionStartedAtCleared() bool {
+	_, ok := m.clearedFields[agent.FieldDeletionStartedAt]
+	return ok
+}
+
+// ResetDeletionStartedAt resets all changes to the "deletion_started_at" field.
+func (m *AgentMutation) ResetDeletionStartedAt() {
+	m.deletion_started_at = nil
+	delete(m.clearedFields, agent.FieldDeletionStartedAt)
+}
+
+// SetDeletionFailedAt sets the "deletion_failed_at" field.
+func (m *AgentMutation) SetDeletionFailedAt(t time.Time) {
+	m.deletion_failed_at = &t
+}
+
+// DeletionFailedAt returns the value of the "deletion_failed_at" field in the mutation.
+func (m *AgentMutation) DeletionFailedAt() (r time.Time, exists bool) {
+	v := m.deletion_failed_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeletionFailedAt returns the old "deletion_failed_at" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldDeletionFailedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeletionFailedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeletionFailedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeletionFailedAt: %w", err)
+	}
+	return oldValue.DeletionFailedAt, nil
+}
+
+// ClearDeletionFailedAt clears the value of the "deletion_failed_at" field.
+func (m *AgentMutation) ClearDeletionFailedAt() {
+	m.deletion_failed_at = nil
+	m.clearedFields[agent.FieldDeletionFailedAt] = struct{}{}
+}
+
+// DeletionFailedAtCleared returns if the "deletion_failed_at" field was cleared in this mutation.
+func (m *AgentMutation) DeletionFailedAtCleared() bool {
+	_, ok := m.clearedFields[agent.FieldDeletionFailedAt]
+	return ok
+}
+
+// ResetDeletionFailedAt resets all changes to the "deletion_failed_at" field.
+func (m *AgentMutation) ResetDeletionFailedAt() {
+	m.deletion_failed_at = nil
+	delete(m.clearedFields, agent.FieldDeletionFailedAt)
+}
+
+// SetDeletionCode sets the "deletion_code" field.
+func (m *AgentMutation) SetDeletionCode(s string) {
+	m.deletion_code = &s
+}
+
+// DeletionCode returns the value of the "deletion_code" field in the mutation.
+func (m *AgentMutation) DeletionCode() (r string, exists bool) {
+	v := m.deletion_code
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeletionCode returns the old "deletion_code" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldDeletionCode(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeletionCode is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeletionCode requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeletionCode: %w", err)
+	}
+	return oldValue.DeletionCode, nil
+}
+
+// ClearDeletionCode clears the value of the "deletion_code" field.
+func (m *AgentMutation) ClearDeletionCode() {
+	m.deletion_code = nil
+	m.clearedFields[agent.FieldDeletionCode] = struct{}{}
+}
+
+// DeletionCodeCleared returns if the "deletion_code" field was cleared in this mutation.
+func (m *AgentMutation) DeletionCodeCleared() bool {
+	_, ok := m.clearedFields[agent.FieldDeletionCode]
+	return ok
+}
+
+// ResetDeletionCode resets all changes to the "deletion_code" field.
+func (m *AgentMutation) ResetDeletionCode() {
+	m.deletion_code = nil
+	delete(m.clearedFields, agent.FieldDeletionCode)
+}
+
+// SetDeletionError sets the "deletion_error" field.
+func (m *AgentMutation) SetDeletionError(s string) {
+	m.deletion_error = &s
+}
+
+// DeletionError returns the value of the "deletion_error" field in the mutation.
+func (m *AgentMutation) DeletionError() (r string, exists bool) {
+	v := m.deletion_error
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeletionError returns the old "deletion_error" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldDeletionError(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeletionError is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeletionError requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeletionError: %w", err)
+	}
+	return oldValue.DeletionError, nil
+}
+
+// ClearDeletionError clears the value of the "deletion_error" field.
+func (m *AgentMutation) ClearDeletionError() {
+	m.deletion_error = nil
+	m.clearedFields[agent.FieldDeletionError] = struct{}{}
+}
+
+// DeletionErrorCleared returns if the "deletion_error" field was cleared in this mutation.
+func (m *AgentMutation) DeletionErrorCleared() bool {
+	_, ok := m.clearedFields[agent.FieldDeletionError]
+	return ok
+}
+
+// ResetDeletionError resets all changes to the "deletion_error" field.
+func (m *AgentMutation) ResetDeletionError() {
+	m.deletion_error = nil
+	delete(m.clearedFields, agent.FieldDeletionError)
+}
+
+// SetDeletionPrior sets the "deletion_prior" field.
+func (m *AgentMutation) SetDeletionPrior(s string) {
+	m.deletion_prior = &s
+}
+
+// DeletionPrior returns the value of the "deletion_prior" field in the mutation.
+func (m *AgentMutation) DeletionPrior() (r string, exists bool) {
+	v := m.deletion_prior
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeletionPrior returns the old "deletion_prior" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldDeletionPrior(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeletionPrior is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeletionPrior requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeletionPrior: %w", err)
+	}
+	return oldValue.DeletionPrior, nil
+}
+
+// ClearDeletionPrior clears the value of the "deletion_prior" field.
+func (m *AgentMutation) ClearDeletionPrior() {
+	m.deletion_prior = nil
+	m.clearedFields[agent.FieldDeletionPrior] = struct{}{}
+}
+
+// DeletionPriorCleared returns if the "deletion_prior" field was cleared in this mutation.
+func (m *AgentMutation) DeletionPriorCleared() bool {
+	_, ok := m.clearedFields[agent.FieldDeletionPrior]
+	return ok
+}
+
+// ResetDeletionPrior resets all changes to the "deletion_prior" field.
+func (m *AgentMutation) ResetDeletionPrior() {
+	m.deletion_prior = nil
+	delete(m.clearedFields, agent.FieldDeletionPrior)
+}
+
+// SetDeletionRequest sets the "deletion_request" field.
+func (m *AgentMutation) SetDeletionRequest(s string) {
+	m.deletion_request = &s
+}
+
+// DeletionRequest returns the value of the "deletion_request" field in the mutation.
+func (m *AgentMutation) DeletionRequest() (r string, exists bool) {
+	v := m.deletion_request
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeletionRequest returns the old "deletion_request" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldDeletionRequest(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeletionRequest is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeletionRequest requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeletionRequest: %w", err)
+	}
+	return oldValue.DeletionRequest, nil
+}
+
+// ClearDeletionRequest clears the value of the "deletion_request" field.
+func (m *AgentMutation) ClearDeletionRequest() {
+	m.deletion_request = nil
+	m.clearedFields[agent.FieldDeletionRequest] = struct{}{}
+}
+
+// DeletionRequestCleared returns if the "deletion_request" field was cleared in this mutation.
+func (m *AgentMutation) DeletionRequestCleared() bool {
+	_, ok := m.clearedFields[agent.FieldDeletionRequest]
+	return ok
+}
+
+// ResetDeletionRequest resets all changes to the "deletion_request" field.
+func (m *AgentMutation) ResetDeletionRequest() {
+	m.deletion_request = nil
+	delete(m.clearedFields, agent.FieldDeletionRequest)
+}
+
 // ClearProject clears the "project" edge to the Project entity.
 func (m *AgentMutation) ClearProject() {
 	m.clearedproject = true
@@ -7449,7 +7907,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 54)
+	fields := make([]string, 0, 63)
 	if m.slug != nil {
 		fields = append(fields, agent.FieldSlug)
 	}
@@ -7612,6 +8070,33 @@ func (m *AgentMutation) Fields() []string {
 	if m.launch_error != nil {
 		fields = append(fields, agent.FieldLaunchError)
 	}
+	if m.deletion_state != nil {
+		fields = append(fields, agent.FieldDeletionState)
+	}
+	if m.deletion_claim != nil {
+		fields = append(fields, agent.FieldDeletionClaim)
+	}
+	if m.deletion_lease_at != nil {
+		fields = append(fields, agent.FieldDeletionLeaseAt)
+	}
+	if m.deletion_started_at != nil {
+		fields = append(fields, agent.FieldDeletionStartedAt)
+	}
+	if m.deletion_failed_at != nil {
+		fields = append(fields, agent.FieldDeletionFailedAt)
+	}
+	if m.deletion_code != nil {
+		fields = append(fields, agent.FieldDeletionCode)
+	}
+	if m.deletion_error != nil {
+		fields = append(fields, agent.FieldDeletionError)
+	}
+	if m.deletion_prior != nil {
+		fields = append(fields, agent.FieldDeletionPrior)
+	}
+	if m.deletion_request != nil {
+		fields = append(fields, agent.FieldDeletionRequest)
+	}
 	return fields
 }
 
@@ -7728,6 +8213,24 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.LaunchStep()
 	case agent.FieldLaunchError:
 		return m.LaunchError()
+	case agent.FieldDeletionState:
+		return m.DeletionState()
+	case agent.FieldDeletionClaim:
+		return m.DeletionClaim()
+	case agent.FieldDeletionLeaseAt:
+		return m.DeletionLeaseAt()
+	case agent.FieldDeletionStartedAt:
+		return m.DeletionStartedAt()
+	case agent.FieldDeletionFailedAt:
+		return m.DeletionFailedAt()
+	case agent.FieldDeletionCode:
+		return m.DeletionCode()
+	case agent.FieldDeletionError:
+		return m.DeletionError()
+	case agent.FieldDeletionPrior:
+		return m.DeletionPrior()
+	case agent.FieldDeletionRequest:
+		return m.DeletionRequest()
 	}
 	return nil, false
 }
@@ -7845,6 +8348,24 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldLaunchStep(ctx)
 	case agent.FieldLaunchError:
 		return m.OldLaunchError(ctx)
+	case agent.FieldDeletionState:
+		return m.OldDeletionState(ctx)
+	case agent.FieldDeletionClaim:
+		return m.OldDeletionClaim(ctx)
+	case agent.FieldDeletionLeaseAt:
+		return m.OldDeletionLeaseAt(ctx)
+	case agent.FieldDeletionStartedAt:
+		return m.OldDeletionStartedAt(ctx)
+	case agent.FieldDeletionFailedAt:
+		return m.OldDeletionFailedAt(ctx)
+	case agent.FieldDeletionCode:
+		return m.OldDeletionCode(ctx)
+	case agent.FieldDeletionError:
+		return m.OldDeletionError(ctx)
+	case agent.FieldDeletionPrior:
+		return m.OldDeletionPrior(ctx)
+	case agent.FieldDeletionRequest:
+		return m.OldDeletionRequest(ctx)
 	}
 	return nil, fmt.Errorf("unknown Agent field %s", name)
 }
@@ -8232,6 +8753,69 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetLaunchError(v)
 		return nil
+	case agent.FieldDeletionState:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeletionState(v)
+		return nil
+	case agent.FieldDeletionClaim:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeletionClaim(v)
+		return nil
+	case agent.FieldDeletionLeaseAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeletionLeaseAt(v)
+		return nil
+	case agent.FieldDeletionStartedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeletionStartedAt(v)
+		return nil
+	case agent.FieldDeletionFailedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeletionFailedAt(v)
+		return nil
+	case agent.FieldDeletionCode:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeletionCode(v)
+		return nil
+	case agent.FieldDeletionError:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeletionError(v)
+		return nil
+	case agent.FieldDeletionPrior:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeletionPrior(v)
+		return nil
+	case agent.FieldDeletionRequest:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeletionRequest(v)
+		return nil
 	}
 	return fmt.Errorf("unknown Agent field %s", name)
 }
@@ -8258,6 +8842,9 @@ func (m *AgentMutation) AddedFields() []string {
 	if m.addlaunch_seq != nil {
 		fields = append(fields, agent.FieldLaunchSeq)
 	}
+	if m.adddeletion_claim != nil {
+		fields = append(fields, agent.FieldDeletionClaim)
+	}
 	return fields
 }
 
@@ -8278,6 +8865,8 @@ func (m *AgentMutation) AddedField(name string) (ent.Value, bool) {
 		return m.AddedGeneration()
 	case agent.FieldLaunchSeq:
 		return m.AddedLaunchSeq()
+	case agent.FieldDeletionClaim:
+		return m.AddedDeletionClaim()
 	}
 	return nil, false
 }
@@ -8328,6 +8917,13 @@ func (m *AgentMutation) AddField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.AddLaunchSeq(v)
+		return nil
+	case agent.FieldDeletionClaim:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddDeletionClaim(v)
 		return nil
 	}
 	return fmt.Errorf("unknown Agent numeric field %s", name)
@@ -8450,6 +9046,30 @@ func (m *AgentMutation) ClearedFields() []string {
 	}
 	if m.FieldCleared(agent.FieldLaunchError) {
 		fields = append(fields, agent.FieldLaunchError)
+	}
+	if m.FieldCleared(agent.FieldDeletionState) {
+		fields = append(fields, agent.FieldDeletionState)
+	}
+	if m.FieldCleared(agent.FieldDeletionLeaseAt) {
+		fields = append(fields, agent.FieldDeletionLeaseAt)
+	}
+	if m.FieldCleared(agent.FieldDeletionStartedAt) {
+		fields = append(fields, agent.FieldDeletionStartedAt)
+	}
+	if m.FieldCleared(agent.FieldDeletionFailedAt) {
+		fields = append(fields, agent.FieldDeletionFailedAt)
+	}
+	if m.FieldCleared(agent.FieldDeletionCode) {
+		fields = append(fields, agent.FieldDeletionCode)
+	}
+	if m.FieldCleared(agent.FieldDeletionError) {
+		fields = append(fields, agent.FieldDeletionError)
+	}
+	if m.FieldCleared(agent.FieldDeletionPrior) {
+		fields = append(fields, agent.FieldDeletionPrior)
+	}
+	if m.FieldCleared(agent.FieldDeletionRequest) {
+		fields = append(fields, agent.FieldDeletionRequest)
 	}
 	return fields
 }
@@ -8578,6 +9198,30 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldLaunchError:
 		m.ClearLaunchError()
+		return nil
+	case agent.FieldDeletionState:
+		m.ClearDeletionState()
+		return nil
+	case agent.FieldDeletionLeaseAt:
+		m.ClearDeletionLeaseAt()
+		return nil
+	case agent.FieldDeletionStartedAt:
+		m.ClearDeletionStartedAt()
+		return nil
+	case agent.FieldDeletionFailedAt:
+		m.ClearDeletionFailedAt()
+		return nil
+	case agent.FieldDeletionCode:
+		m.ClearDeletionCode()
+		return nil
+	case agent.FieldDeletionError:
+		m.ClearDeletionError()
+		return nil
+	case agent.FieldDeletionPrior:
+		m.ClearDeletionPrior()
+		return nil
+	case agent.FieldDeletionRequest:
+		m.ClearDeletionRequest()
 		return nil
 	}
 	return fmt.Errorf("unknown Agent nullable field %s", name)
@@ -8748,6 +9392,33 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldLaunchError:
 		m.ResetLaunchError()
+		return nil
+	case agent.FieldDeletionState:
+		m.ResetDeletionState()
+		return nil
+	case agent.FieldDeletionClaim:
+		m.ResetDeletionClaim()
+		return nil
+	case agent.FieldDeletionLeaseAt:
+		m.ResetDeletionLeaseAt()
+		return nil
+	case agent.FieldDeletionStartedAt:
+		m.ResetDeletionStartedAt()
+		return nil
+	case agent.FieldDeletionFailedAt:
+		m.ResetDeletionFailedAt()
+		return nil
+	case agent.FieldDeletionCode:
+		m.ResetDeletionCode()
+		return nil
+	case agent.FieldDeletionError:
+		m.ResetDeletionError()
+		return nil
+	case agent.FieldDeletionPrior:
+		m.ResetDeletionPrior()
+		return nil
+	case agent.FieldDeletionRequest:
+		m.ResetDeletionRequest()
 		return nil
 	}
 	return fmt.Errorf("unknown Agent field %s", name)

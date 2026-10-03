@@ -71,6 +71,13 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 
 	switch phase {
 	case state.PhaseSuspended:
+		// Delete in progress (design ptone/scion#2483 §2.1): refuse before
+		// any quota reservation or start dispatch, so the message is not
+		// delivered either (AC-4). The sender's DM authz already ran.
+		if ref := s.startGate(ctx, agent, startEntryWake); ref.refuses() {
+			return nil, ref.dmError()
+		}
+
 		// Managed runtimes do not support the suspend/resume lifecycle.
 		// Return an explicit error rather than silently pretending to resume.
 		if isManagedAgentRuntime(agent.Runtime) {
@@ -124,6 +131,14 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		// restore its prior session rather than starting fresh.
 		if err := dispatcher.DispatchAgentStart(ctx, agent, "", true); err != nil {
 			s.rollbackBrokerQuota(ctx, agent, reserved)
+			if errors.Is(err, errBrokerLacksEmptyPerAgent) {
+				// Fail closed like the other dispatch sites (design #2703 D3).
+				return nil, &AgentDMError{
+					Code:       ErrCodeUnsupportedCapability,
+					Message:    "Failed to wake agent: " + err.Error(),
+					HTTPStatus: http.StatusPreconditionFailed,
+				}
+			}
 			return nil, &AgentDMError{
 				Code:       ErrCodeRuntimeError,
 				Message:    "Failed to wake agent: " + err.Error(),

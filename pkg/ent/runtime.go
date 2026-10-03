@@ -249,6 +249,30 @@ func init() {
 	agentDescLaunchError := agentFields[54].Descriptor()
 	// agent.DefaultLaunchError holds the default value on creation for the launch_error field.
 	agent.DefaultLaunchError = agentDescLaunchError.Default.(string)
+	// agentDescDeletionState is the schema descriptor for deletion_state field.
+	agentDescDeletionState := agentFields[55].Descriptor()
+	// agent.DefaultDeletionState holds the default value on creation for the deletion_state field.
+	agent.DefaultDeletionState = agentDescDeletionState.Default.(string)
+	// agentDescDeletionClaim is the schema descriptor for deletion_claim field.
+	agentDescDeletionClaim := agentFields[56].Descriptor()
+	// agent.DefaultDeletionClaim holds the default value on creation for the deletion_claim field.
+	agent.DefaultDeletionClaim = agentDescDeletionClaim.Default.(int64)
+	// agentDescDeletionCode is the schema descriptor for deletion_code field.
+	agentDescDeletionCode := agentFields[60].Descriptor()
+	// agent.DefaultDeletionCode holds the default value on creation for the deletion_code field.
+	agent.DefaultDeletionCode = agentDescDeletionCode.Default.(string)
+	// agentDescDeletionError is the schema descriptor for deletion_error field.
+	agentDescDeletionError := agentFields[61].Descriptor()
+	// agent.DefaultDeletionError holds the default value on creation for the deletion_error field.
+	agent.DefaultDeletionError = agentDescDeletionError.Default.(string)
+	// agentDescDeletionPrior is the schema descriptor for deletion_prior field.
+	agentDescDeletionPrior := agentFields[62].Descriptor()
+	// agent.DefaultDeletionPrior holds the default value on creation for the deletion_prior field.
+	agent.DefaultDeletionPrior = agentDescDeletionPrior.Default.(string)
+	// agentDescDeletionRequest is the schema descriptor for deletion_request field.
+	agentDescDeletionRequest := agentFields[63].Descriptor()
+	// agent.DefaultDeletionRequest holds the default value on creation for the deletion_request field.
+	agent.DefaultDeletionRequest = agentDescDeletionRequest.Default.(string)
 	// agentDescID is the schema descriptor for id field.
 	agentDescID := agentFields[0].Descriptor()
 	// agent.DefaultID holds the default value on creation for the id field.

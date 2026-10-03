@@ -29,9 +29,10 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import type { RuntimeBroker, GCPServiceAccount } from '../../shared/types.js';
-import { isValidTimeZone } from '../../utils/time.js';
+import { formatInstantWithZone, isValidTimeZone } from '../../utils/time.js';
 import '../shared/timezone-picker.js';
 import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import './admin-experiments.js';
 
 // ── Type definitions matching the Go API response ──
@@ -435,6 +436,9 @@ const hasOwn = (obj: Record<string, unknown>, key: string): boolean =>
 
 @customElement('scion-page-admin-server-config')
 export class ScionPageAdminServerConfig extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @state() private loading = true;
   @state() private saving = false;
   @state() private error: string | null = null;
@@ -1984,15 +1988,17 @@ export class ScionPageAdminServerConfig extends LitElement {
     const payload: Record<string, unknown> = {};
     const ok = (key: string) => this.readOnlyReason(key) === null;
 
-    // General
-    if (ok('active_profile')) payload.active_profile = this.activeProfile || undefined;
-    if (ok('default_template')) payload.default_template = this.defaultTemplate || undefined;
+    // General — send "" (not `|| undefined`) so clearing a field reaches
+    // the backend as an explicit empty string, which deletes the key from
+    // settings.yaml. An omitted key means "no change". See ptone/scion#860
+    // and ptone/scion#2535.
+    if (ok('active_profile')) payload.active_profile = this.activeProfile || '';
+    if (ok('default_template')) payload.default_template = this.defaultTemplate || '';
     if (ok('default_harness_config'))
-      payload.default_harness_config = this.resolvedHarnessConfig || undefined;
-    if (ok('default_harness_auth'))
-      payload.default_harness_auth = this.defaultHarnessAuth || undefined;
-    if (ok('image_registry')) payload.image_registry = this.imageRegistry || undefined;
-    if (ok('workspace_path')) payload.workspace_path = this.workspacePath || undefined;
+      payload.default_harness_config = this.resolvedHarnessConfig || '';
+    if (ok('default_harness_auth')) payload.default_harness_auth = this.defaultHarnessAuth || '';
+    if (ok('image_registry')) payload.image_registry = this.imageRegistry || '';
+    if (ok('workspace_path')) payload.workspace_path = this.workspacePath || '';
 
     // Default agent limits — send zero/empty values so the backend can clear
     // the field (delete from settings.yaml). Using `|| undefined` here would
@@ -2038,13 +2044,13 @@ export class ScionPageAdminServerConfig extends LitElement {
       payload.default_thinking_level = this.defaultThinkingLevel ?? 0;
     }
     if (ok('default_max_agent_role')) {
-      payload.default_max_agent_role = this.defaultMaxAgentRole || undefined;
+      payload.default_max_agent_role = this.defaultMaxAgentRole || '';
     }
     if (ok('default_agent_role')) {
-      payload.default_agent_role = this.defaultAgentRole || undefined;
+      payload.default_agent_role = this.defaultAgentRole || '';
     }
     if (ok('default_runtime_broker')) {
-      payload.default_runtime_broker = this.defaultRuntimeBroker || undefined;
+      payload.default_runtime_broker = this.defaultRuntimeBroker || '';
     }
     // Sent unconditionally (not `|| undefined`): an explicit "" clears the
     // field server-side (admin_settings.go's `DefaultTimezone *string`
@@ -2053,6 +2059,16 @@ export class ScionPageAdminServerConfig extends LitElement {
     // leave the stored value unchanged.
     if (ok('default_timezone')) {
       payload.default_timezone = this.defaultTimezone || '';
+    }
+    // GCP identity defaults: same "" = delete contract. The service account
+    // only applies in "assign" mode, so it is cleared for any other mode
+    // (mirrors buildLayer1Payload).
+    if (ok('default_gcp_identity_mode')) {
+      payload.default_gcp_identity_mode = this.defaultGCPIdentityMode || '';
+    }
+    if (ok('default_gcp_identity_service_account_id')) {
+      payload.default_gcp_identity_service_account_id =
+        this.defaultGCPIdentityMode === 'assign' ? this.defaultGCPIdentitySAID || '' : '';
     }
 
     // Server
@@ -2470,7 +2486,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         ${meta.updated_at
           ? html`<span class="section-meta-item">
               <sl-icon name="clock"></sl-icon>
-              ${new Date(meta.updated_at).toLocaleString()}
+              ${formatInstantWithZone(meta.updated_at) || meta.updated_at}
             </span>`
           : nothing}
       </div>
@@ -2866,7 +2882,9 @@ export class ScionPageAdminServerConfig extends LitElement {
           ${this.scionBuildTime
             ? html`<div class="version-item">
                 <span class="version-label">Build Time</span>
-                <span class="version-value">${this.scionBuildTime}</span>
+                <span class="version-value" title=${this.scionBuildTime}
+                  >${formatInstantWithZone(this.scionBuildTime) || this.scionBuildTime}</span
+                >
               </div>`
             : nothing}
           <div class="version-actions">

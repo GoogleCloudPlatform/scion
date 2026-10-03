@@ -5185,7 +5185,7 @@ func TestSharedDirStorageConfig_IgnoredNFSFields(t *testing.T) {
 		assert.Nil(t, s.IgnoredNFSFields())
 	})
 
-	t.Run("nfs backend with all four ignored fields set", func(t *testing.T) {
+	t.Run("nfs backend with all ignored fields set", func(t *testing.T) {
 		s := &V1SharedDirStorageConfig{
 			Backend: "nfs",
 			NFS: &V1NFSConfig{
@@ -5195,9 +5195,10 @@ func TestSharedDirStorageConfig_IgnoredNFSFields(t *testing.T) {
 				GID:          1000,
 				MountOptions: "vers=3",
 				StorageClass: "standard",
+				AutoMount:    true,
 			},
 		}
-		assert.ElementsMatch(t, []string{"uid", "gid", "mount_options", "storage_class"}, s.IgnoredNFSFields())
+		assert.ElementsMatch(t, []string{"uid", "gid", "mount_options", "storage_class", "auto_mount"}, s.IgnoredNFSFields())
 	})
 
 	t.Run("nfs backend with only one ignored field set", func(t *testing.T) {

@@ -19,6 +19,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { Chart, registerables } from 'chart.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { formatNumber } from '../../utils/format-number.js';
 
 Chart.register(...registerables);
 
@@ -329,10 +330,10 @@ export class ScionPageMetrics extends LitElement {
     void this.loadView(this.activeTab === 'model-calls' ? 'model-calls' : this.activeTab);
   }
 
-  private formatNumber(n: number): string {
+  private formatCompactNumber(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
     if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-    return n.toLocaleString();
+    return formatNumber(n);
   }
 
   private static readonly CHART_PROPERTIES = new Set([
@@ -567,19 +568,19 @@ export class ScionPageMetrics extends LitElement {
       <div class="stats-row">
         <div class="stat-card">
           <span class="stat-label">Total Sessions</span>
-          <span class="stat-value">${this.formatNumber(s.totalSessions)}</span>
+          <span class="stat-value">${this.formatCompactNumber(s.totalSessions)}</span>
         </div>
         <div class="stat-card">
           <span class="stat-label">API Calls</span>
-          <span class="stat-value">${this.formatNumber(s.totalApiCalls)}</span>
+          <span class="stat-value">${this.formatCompactNumber(s.totalApiCalls)}</span>
         </div>
         <div class="stat-card">
           <span class="stat-label">Total Tokens</span>
-          <span class="stat-value">${this.formatNumber(s.totalTokens)}</span>
+          <span class="stat-value">${this.formatCompactNumber(s.totalTokens)}</span>
         </div>
         <div class="stat-card">
           <span class="stat-label">Unique Agents</span>
-          <span class="stat-value">${this.formatNumber(s.uniqueAgents)}</span>
+          <span class="stat-value">${this.formatCompactNumber(s.uniqueAgents)}</span>
         </div>
       </div>
     `;

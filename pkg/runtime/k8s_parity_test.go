@@ -223,19 +223,10 @@ func TestBuildPod_ResolvedAuth_NoHostPath(t *testing.T) {
 		t.Error("expected auth-files volume")
 	}
 
-	// Should have volume mount at expanded target path
-	foundMount := false
-	for _, vm := range pod.Spec.Containers[0].VolumeMounts {
-		if vm.Name == "auth-files" && vm.MountPath == "/home/scion/.config/gcloud/adc.json" {
-			foundMount = true
-			if vm.SubPath != "auth-file-0" {
-				t.Errorf("expected SubPath auth-file-0, got %s", vm.SubPath)
-			}
-		}
-	}
-	if !foundMount {
-		t.Error("expected auth-files volume mount at /home/scion/.config/gcloud/adc.json")
-	}
+	// The auth file target is under home: it is staged, not mounted there.
+	assertNoMountsUnderHome(t, pod, "/home/scion")
+	assertStagingMount(t, pod, "auth-files")
+	assertPlacement(t, rt.k8sHomeFilePlacements(config), "/home/scion/.config/gcloud/adc.json", "/run/scion/auth-files/auth-file-0")
 }
 
 // --- Stage 1.2: Non-GCS volume handling ---

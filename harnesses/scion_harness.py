@@ -39,8 +39,8 @@ from typing import Any, Collection
 # Version contract (§3.3)
 # ---------------------------------------------------------------------------
 
-INTERFACE_VERSION = 2
-LIB_VERSION = "2026-09-30"
+INTERFACE_VERSION = 3
+LIB_VERSION = "2026-10-02"
 
 # ---------------------------------------------------------------------------
 # Exit codes
@@ -818,6 +818,135 @@ def resolve_model(ctx: "ProvisionContext") -> str:
     if not raw:
         return ""
     return normalize_model_alias(raw, ctx.harness_config)
+
+
+# ---------------------------------------------------------------------------
+# Thinking level resolution (config.yaml `thinking:` block)
+# ---------------------------------------------------------------------------
+
+THINKING_LEVEL_ENV = "SCION_THINKING_LEVEL"
+
+
+def parse_thinking_level(raw: str | None) -> tuple[int | None, bool]:
+    """Parse a raw SCION_THINKING_LEVEL value into ``(level, invalid)``.
+
+    This is the single parse-and-clamp rule for the canonical 0-100 thinking
+    level:
+
+      - ``None``, ``""`` or whitespace only -> ``(None, False)`` (unset).
+      - Not parseable by ``int()`` after stripping (``"abc"``, ``"1.5"``)
+        -> ``(None, True)`` (invalid; callers should warn).
+      - Otherwise the integer clamped to 0..100 -> ``(n, False)``. ``int()``
+        accepts signs, so ``"-5"`` -> 0 and ``"+7"`` -> 7.
+    """
+    if raw is None:
+        return None, False
+    text = str(raw).strip()
+    if not text:
+        return None, False
+    try:
+        level = int(text)
+    except ValueError:
+        return None, True
+    return max(0, min(100, level)), False
+
+
+def _thinking_table(thinking_cfg: Any) -> tuple[list[tuple[int, str]], str | None] | None:
+    """Validate a harness_config ``thinking`` block.
+
+    Returns ``(levels sorted by max, default or None)``, or ``None`` when the
+    block is malformed: not a dict, ``levels`` not a non-empty list, an entry
+    that is not a dict with an int ``max`` (bools rejected; the manifest is
+    JSON) and a non-empty str ``value``, or a ``default`` that is present but
+    not a non-empty str.
+    """
+    if not isinstance(thinking_cfg, dict):
+        return None
+    levels = thinking_cfg.get("levels")
+    if not isinstance(levels, list) or not levels:
+        return None
+    table: list[tuple[int, str]] = []
+    for entry in levels:
+        if not isinstance(entry, dict):
+            return None
+        max_level = entry.get("max")
+        value = entry.get("value")
+        if not isinstance(max_level, int) or isinstance(max_level, bool):
+            return None
+        if not isinstance(value, str) or not value:
+            return None
+        table.append((max_level, value))
+    default = thinking_cfg.get("default")
+    if default is not None and (not isinstance(default, str) or not default):
+        return None
+    table.sort(key=lambda item: item[0])
+    return table, default
+
+
+def map_thinking_level(level: int, thinking_cfg: dict[str, Any] | None) -> str | None:
+    """Map a clamped thinking *level* through a ``thinking`` block.
+
+    Pure lookup: returns the ``value`` of the first entry (sorted by ``max``)
+    whose ``max`` >= *level*. Returns ``None`` when *thinking_cfg* is missing
+    or malformed. A level above the last ``max`` returns the last value
+    (defensive; the Go load-time check requires the last ``max`` to be 100).
+    """
+    parsed = _thinking_table(thinking_cfg)
+    if parsed is None:
+        return None
+    table, _ = parsed
+    for max_level, value in table:
+        if level <= max_level:
+            return value
+    return table[-1][1]
+
+
+def resolve_thinking(ctx: "ProvisionContext", raw: str | None = None) -> str | None:
+    """Resolve SCION_THINKING_LEVEL (or *raw*) to this harness's native value.
+
+    The mapping comes from ``ctx.harness_config["thinking"]`` (the config.yaml
+    ``thinking:`` block carried in the provision manifest):
+
+      - No block: returns ``None``; logs an info line if a level was set.
+      - Malformed block: warns, then behaves as if there were no block.
+      - Invalid level (not an integer): warns and returns ``default``.
+      - Unset/blank level: returns ``default``.
+      - Valid level: clamps to 0..100 and returns the mapped value.
+
+    ``default`` is the block's optional ``default``; when absent the result
+    is ``None``, meaning the provisioner should emit nothing so the harness
+    CLI's own default applies. Writing the value to the native knob stays in
+    each provision.py.
+    """
+    if raw is None:
+        raw = os.environ.get(THINKING_LEVEL_ENV)
+    level, invalid = parse_thinking_level(raw)
+
+    harness_config = ctx.harness_config if isinstance(ctx.harness_config, dict) else {}
+    thinking_cfg = harness_config.get("thinking")
+    parsed = None
+    if thinking_cfg is not None:
+        parsed = _thinking_table(thinking_cfg)
+        if parsed is None:
+            ctx.warn("harness_config thinking block is malformed; ignoring it")
+    if parsed is None:
+        if level is not None:
+            ctx.info(f"thinking_level={level} ignored (harness has no thinking map)")
+        elif invalid:
+            ctx.info(f"thinking_level={str(raw).strip()!r} ignored (harness has no thinking map)")
+        return None
+
+    _, default = parsed
+    default_label = default or "<cli default>"
+    if invalid:
+        ctx.warn(f"thinking_level={str(raw).strip()!r} is not a valid integer; value={default_label} (default)")
+        return default
+    if level is None:
+        ctx.info(f"thinking_level=<unset>, value={default_label} (default)")
+        return default
+    value = map_thinking_level(level, thinking_cfg)
+    ctx.info(f"thinking_level={level} value={value}")
+    return value
 
 
 # ---------------------------------------------------------------------------

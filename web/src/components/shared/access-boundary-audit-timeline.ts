@@ -31,6 +31,8 @@ import type {
   PageToken,
   MutationClassification,
 } from '../../shared/access-boundaries.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { formatInstantWithZone } from '../../utils/time.js';
 
 /** Event detail for requesting a new page of audit events. */
 export interface AuditPageRequestDetail {
@@ -39,6 +41,9 @@ export interface AuditPageRequestDetail {
 
 @customElement('scion-access-boundary-audit-timeline')
 export class ScionAccessBoundaryAuditTimeline extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @property({ type: Array }) events: AccessBoundaryAuditEvent[] = [];
   @property() nextPageToken: PageToken | undefined;
   @property({ type: Number }) totalCount = 0;
@@ -306,16 +311,7 @@ export class ScionAccessBoundaryAuditTimeline extends LitElement {
   }
 
   private formatDatetime(iso: string): string {
-    try {
-      const date = new Date(iso);
-      if (isNaN(date.getTime())) return iso;
-      return date.toLocaleString(undefined, {
-        dateStyle: 'medium',
-        timeStyle: 'short',
-      });
-    } catch {
-      return iso;
-    }
+    return formatInstantWithZone(iso) || iso;
   }
 
   private actorDisplay(event: AccessBoundaryAuditEvent): string {

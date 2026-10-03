@@ -46,11 +46,19 @@ type ListProjectsResponse struct {
 }
 
 type CreateProjectRequest struct {
-	ID            string            `json:"id,omitempty"`
-	Slug          string            `json:"slug,omitempty"`
-	Name          string            `json:"name"`
-	GitRemote     string            `json:"gitRemote,omitempty"`
-	WorkspaceMode string            `json:"workspaceMode,omitempty"` // "shared", "worktree-per-agent", or "per-agent" (default); only meaningful when gitRemote is set
+	ID        string `json:"id,omitempty"`
+	Slug      string `json:"slug,omitempty"`
+	Name      string `json:"name"`
+	GitRemote string `json:"gitRemote,omitempty"`
+	// WorkspaceMode is the create-only workspace sharing mode, stored as the
+	// server-owned scion.dev/workspace-mode label. Git projects accept
+	// "shared", "per-agent" (own git clone per agent) or "worktree-per-agent";
+	// non-git (hub-managed) projects accept "shared" or "per-agent" (empty
+	// private directory per agent). Absent means no label (non-git: shared).
+	// Unknown values and worktree-per-agent without a git remote are 400s; a
+	// raw Labels entry for the key must match this field (or is stripped when
+	// this field is empty).
+	WorkspaceMode string            `json:"workspaceMode,omitempty"`
 	Labels        map[string]string `json:"labels,omitempty"`
 	GitHubToken   string            `json:"githubToken,omitempty"`
 }
@@ -308,6 +316,16 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 
 	normalizedRemote := util.NormalizeGitRemote(req.GitRemote)
 
+	// Workspace mode is create-only and server-owned: validate the requested
+	// mode against the project's git-ness and set the label only from the
+	// validated field (design #2703 §2.4).
+	labels, err := resolveCreateWorkspaceModeLabels(req.WorkspaceMode, req.Labels, normalizedRemote != "")
+	if err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
+	req.Labels = labels
+
 	// Idempotency: if we have a client-provided ID, check for existing project
 	if req.ID != "" {
 		existing, err := s.store.GetProject(ctx, req.ID)
@@ -358,17 +376,6 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	displayName := req.Name
 	if slug != baseSlug {
 		displayName = api.DisplayNameWithSerial(req.Name, slug, baseSlug)
-	}
-
-	// Apply workspace mode label for git projects with explicit workspace mode.
-	if normalizedRemote != "" {
-		switch req.WorkspaceMode {
-		case store.WorkspaceModeShared, store.WorkspaceModePerAgent, store.WorkspaceModeWorktreePerAgent:
-			if req.Labels == nil {
-				req.Labels = make(map[string]string)
-			}
-			req.Labels[store.LabelWorkspaceMode] = req.WorkspaceMode
-		}
 	}
 
 	project := &store.Project{
@@ -1001,9 +1008,9 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 	// Build clone URL from the project's git remote.
 	// The clone-url label may be an explicit override (e.g. local path for testing).
 	// Only convert to HTTPS if the URL looks like a remote git URL.
-	cloneURL := resolveCloneURL(project.Labels["scion.dev/clone-url"], project.GitRemote)
+	cloneURL := resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
 
-	defaultBranch := project.Labels["scion.dev/default-branch"]
+	defaultBranch := project.Labels[store.LabelDefaultBranch]
 	if defaultBranch == "" {
 		defaultBranch = "main"
 	}
@@ -1134,8 +1141,12 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 	}
 
 	project, err := s.store.GetProject(ctx, agent.ProjectID)
-	if err != nil || (project.GitRemote != "" && !project.IsSharedWorkspace()) {
-		return // Not hub-native/shared-workspace or project not found
+	if err != nil || !syncsHubProjectWorkspace(project) {
+		// Project not found, not hub-native/shared-workspace, or
+		// empty-per-agent: an empty-per-agent agent's directory is private
+		// and broker-local, and syncing it would overwrite the project's
+		// hub workspace (design #2703).
+		return
 	}
 
 	// Check if broker is co-located (embedded or has local path)
@@ -1213,6 +1224,13 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	normalizedRemote := util.NormalizeGitRemote(req.GitRemote)
+
+	// The workspace-mode label is server-owned (design #2703 §2.4): reject
+	// values register cannot honour before any lookup or mutation.
+	if err := resolveRegisterWorkspaceModeLabels(req.Labels, normalizedRemote != ""); err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
 
 	// Try to find existing project
 	var project *store.Project
@@ -2746,7 +2764,15 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		}
 	}
 	if updates.Labels != nil {
-		project.Labels = updates.Labels
+		// PATCH replaces the labels map wholesale; keep the server-owned
+		// workspace-mode label and refuse attempts to change it (design
+		// #2703 §2.4 / D6).
+		merged, err := mergePatchWorkspaceModeLabel(project.Labels, updates.Labels)
+		if err != nil {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+		project.Labels = merged
 	}
 	if updates.DefaultRuntimeBrokerID != "" {
 		project.DefaultRuntimeBrokerID = updates.DefaultRuntimeBrokerID

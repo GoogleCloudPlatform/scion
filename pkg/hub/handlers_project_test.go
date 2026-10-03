@@ -2224,7 +2224,7 @@ func TestCreateProject_WorktreePerAgent_StampsLabel(t *testing.T) {
 	assert.False(t, project.IsSharedWorkspace(), "project should not report as shared workspace")
 }
 
-func TestCreateProject_WorktreePerAgent_NonGit_NoLabel(t *testing.T) {
+func TestCreateProject_WorktreePerAgent_NonGit_Rejected(t *testing.T) {
 	srv, _ := testServer(t)
 
 	body := CreateProjectRequest{
@@ -2232,14 +2232,11 @@ func TestCreateProject_WorktreePerAgent_NonGit_NoLabel(t *testing.T) {
 		WorkspaceMode: "worktree-per-agent",
 	}
 
+	// Design #2703 §2.4: worktree-per-agent requires a git remote (it was
+	// silently ignored before).
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", body)
-	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
-
-	var project store.Project
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
-
-	assert.Empty(t, project.Labels[store.LabelWorkspaceMode],
-		"worktree-per-agent label should not be set on non-git projects")
+	require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "requires a git remote")
 }
 
 func TestPopulateAgentConfig_SharedWorkspace_SetsWorkspaceNotClone(t *testing.T) {

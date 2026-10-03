@@ -140,7 +140,15 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 					return &a, nil
 				}
 			}
-			// If it exists but not running (or we have a new task), we delete it so we can recreate it
+			// If it exists but not running (or we have a new task), we delete it so we can recreate it.
+			// The delete is by name/ID found by name, so an async launch
+			// checkpoints first: a launch the hub has already ended must
+			// not remove a newer launch's agent.
+			if opts.Checkpoint != nil {
+				if err := opts.Checkpoint(ctx, runtime.CheckpointStepPreClean); err != nil {
+					return nil, err
+				}
+			}
 			if err := m.Runtime.Delete(ctx, a.ContainerID); err != nil {
 				return nil, fmt.Errorf("failed to cleanup existing container: %w", err)
 			}
@@ -1579,6 +1587,10 @@ authDone:
 			return l
 		}(),
 		Annotations: projectkeys.ProjectPathLabels(projectDir),
+		// Async-launch hooks (design t1-async-create-v11.md §3.8.3,
+		// §3.8.4); nil on the synchronous path.
+		Checkpoint:        opts.Checkpoint,
+		OnResourceCreated: opts.OnResourceCreated,
 	}
 	slog.Info("agent start: pre-runtime provisioning complete", "agent", opts.Name,
 		"elapsed_ms", time.Since(startEntry).Milliseconds())

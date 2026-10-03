@@ -22,6 +22,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,6 +50,7 @@ func overrideGCPDetection(val bool) func() {
 // --- configureOIDCTransport tests ---
 
 func TestConfigureOIDCTransport_InjectedMode(t *testing.T) {
+	t.Cleanup(SetTokenHome(t.TempDir()))
 	token := makeTestJWT(time.Now().Add(1 * time.Hour))
 	_ = os.Setenv(transportauth.EnvTransportToken, token)
 	defer func() { _ = os.Unsetenv(transportauth.EnvTransportToken) }()
@@ -60,16 +63,18 @@ func TestConfigureOIDCTransport_InjectedMode(t *testing.T) {
 	c.configureOIDCTransport()
 
 	require.NotNil(t, c.oidcSource)
-	_, ok := c.oidcSource.(*transportauth.InjectedSource)
-	assert.True(t, ok, "should use InjectedSource")
+	_, ok := c.oidcSource.(*transportauth.FileSource)
+	assert.True(t, ok, "should use the file-backed source")
 	require.NotNil(t, c.client.Transport)
 }
 
 func TestConfigureOIDCTransport_MetadataMode(t *testing.T) {
+	t.Cleanup(SetTokenHome(t.TempDir()))
 	cleanup := overrideGCPDetection(true)
 	defer cleanup()
 
 	_ = os.Unsetenv(transportauth.EnvTransportToken)
+	_ = os.Unsetenv(transportauth.EnvTransportTokenFile)
 	_ = os.Unsetenv(transportauth.EnvMetadataMode)
 
 	c := &Client{
@@ -86,10 +91,12 @@ func TestConfigureOIDCTransport_MetadataMode(t *testing.T) {
 }
 
 func TestConfigureOIDCTransport_MetadataMode_AudienceOverride(t *testing.T) {
+	t.Cleanup(SetTokenHome(t.TempDir()))
 	cleanup := overrideGCPDetection(true)
 	defer cleanup()
 
 	_ = os.Unsetenv(transportauth.EnvTransportToken)
+	_ = os.Unsetenv(transportauth.EnvTransportTokenFile)
 	_ = os.Unsetenv(transportauth.EnvMetadataMode)
 	_ = os.Setenv(transportauth.EnvHubOIDCAudience, "https://custom-audience.example.com")
 	defer func() { _ = os.Unsetenv(transportauth.EnvHubOIDCAudience) }()
@@ -108,10 +115,12 @@ func TestConfigureOIDCTransport_MetadataMode_AudienceOverride(t *testing.T) {
 }
 
 func TestConfigureOIDCTransport_NotOnGCP(t *testing.T) {
+	t.Cleanup(SetTokenHome(t.TempDir()))
 	cleanup := overrideGCPDetection(false)
 	defer cleanup()
 
 	_ = os.Unsetenv(transportauth.EnvTransportToken)
+	_ = os.Unsetenv(transportauth.EnvTransportTokenFile)
 
 	c := &Client{
 		hubURL: "https://hub.example.com",
@@ -125,10 +134,12 @@ func TestConfigureOIDCTransport_NotOnGCP(t *testing.T) {
 }
 
 func TestConfigureOIDCTransport_SkipsMetadataWhenScionMetadataActive(t *testing.T) {
+	t.Cleanup(SetTokenHome(t.TempDir()))
 	cleanup := overrideGCPDetection(true)
 	defer cleanup()
 
 	t.Setenv(transportauth.EnvTransportToken, "")
+	t.Setenv(transportauth.EnvTransportTokenFile, "")
 	t.Setenv(transportauth.EnvMetadataMode, "assign")
 
 	c := &Client{
@@ -146,10 +157,12 @@ func TestConfigureOIDCTransport_SkipsMetadataWhenScionMetadataActive(t *testing.
 // redirect the real GCE metadata server (unlike assign/block), so ambient-SA
 // OIDC via MetadataSource must still be configured for it.
 func TestConfigureOIDCTransport_PassthroughStillUsesMetadata(t *testing.T) {
+	t.Cleanup(SetTokenHome(t.TempDir()))
 	cleanup := overrideGCPDetection(true)
 	defer cleanup()
 
 	t.Setenv(transportauth.EnvTransportToken, "")
+	t.Setenv(transportauth.EnvTransportTokenFile, "")
 	t.Setenv(transportauth.EnvMetadataMode, "passthrough")
 
 	c := &Client{
@@ -165,6 +178,7 @@ func TestConfigureOIDCTransport_PassthroughStillUsesMetadata(t *testing.T) {
 }
 
 func TestConfigureOIDCTransport_InjectedPriority(t *testing.T) {
+	t.Cleanup(SetTokenHome(t.TempDir()))
 	cleanup := overrideGCPDetection(true)
 	defer cleanup()
 
@@ -180,13 +194,15 @@ func TestConfigureOIDCTransport_InjectedPriority(t *testing.T) {
 	c.configureOIDCTransport()
 
 	require.NotNil(t, c.oidcSource)
-	_, ok := c.oidcSource.(*transportauth.InjectedSource)
+	_, ok := c.oidcSource.(*transportauth.FileSource)
 	assert.True(t, ok, "injected should take priority over metadata")
 }
 
 // --- E2E: both agent + OIDC headers ---
 
 func TestOIDC_EndToEnd_BothHeaders(t *testing.T) {
+	t.Cleanup(SetTokenHome(t.TempDir()))
+	t.Setenv(transportauth.EnvTransportMode, "")
 	cleanup := overrideGCPDetection(false)
 	defer cleanup()
 
@@ -228,6 +244,7 @@ func TestOIDC_EndToEnd_BothHeaders(t *testing.T) {
 // --- applyRefreshTokens tests ---
 
 func TestApplyRefreshTokens_TransportToken(t *testing.T) {
+	t.Cleanup(SetTokenHome(t.TempDir()))
 	source := transportauth.NewInjectedSource()
 	c := &Client{oidcSource: source}
 
@@ -237,7 +254,7 @@ func TestApplyRefreshTokens_TransportToken(t *testing.T) {
 		{Layer: "transport", Type: "google_oidc", Value: newToken, ExpiresIn: 3600, Audience: "https://hub.example.com"},
 	}
 
-	c.applyRefreshTokens(tokens)
+	c.applyRefreshTokens(tokens, 0, 0)
 
 	got, err := source.Token()
 	require.NoError(t, err)
@@ -245,6 +262,7 @@ func TestApplyRefreshTokens_TransportToken(t *testing.T) {
 }
 
 func TestApplyRefreshTokens_NoOIDCSource(t *testing.T) {
+	t.Cleanup(SetTokenHome(t.TempDir()))
 	c := &Client{} // no oidcSource
 
 	tokens := []RefreshTokenEntry{
@@ -252,7 +270,7 @@ func TestApplyRefreshTokens_NoOIDCSource(t *testing.T) {
 	}
 
 	// Should not panic
-	c.applyRefreshTokens(tokens)
+	c.applyRefreshTokens(tokens, 0, 0)
 }
 
 // --- adjustRefreshForTransportTokens tests ---
@@ -304,4 +322,160 @@ func TestAdjustRefreshForTransportTokens_MetadataSourceNoAdjust(t *testing.T) {
 
 	assert.WithinDuration(t, appRefresh, adjusted, 1*time.Second,
 		"metadata source self-refreshes; should not adjust app refresh time")
+}
+
+// --- refreshed transport credential shared through the file ---
+
+// TestRefreshToken_PersistsTransportTokenForNewClients drives a real
+// refresh: the hub returns a new transport credential in tokens[], the
+// long-lived client persists it (mode 0600), and a client built afterwards
+// (as hooks, sciontool subcommands and the scion CLI do) sends it even
+// though the bootstrap env value has expired.
+func TestRefreshToken_PersistsTransportTokenForNewClients(t *testing.T) {
+	home := t.TempDir()
+	t.Cleanup(SetTokenHome(home))
+	cleanup := overrideGCPDetection(false)
+	defer cleanup()
+
+	expired := makeTestJWT(time.Now().Add(-10 * time.Minute))
+	refreshed := makeTestJWT(time.Now().Add(55 * time.Minute))
+	t.Setenv(transportauth.EnvTransportToken, expired)
+	t.Setenv(transportauth.EnvTransportTokenFile, "")
+	t.Setenv(transportauth.EnvTransportMode, "")
+
+	var lastAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lastAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/token/refresh") {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"token":      "app-credential-2",
+				"expires_at": time.Now().Add(10 * time.Hour).UTC().Format(time.RFC3339),
+				"tokens": []map[string]interface{}{
+					{"layer": "transport", "type": "google_oidc", "value": refreshed, "expiresIn": 3300},
+				},
+			})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}))
+	defer srv.Close()
+
+	pid1 := NewClientWithConfig(srv.URL, "app-credential", "agent-1")
+	pid1.configureOIDCTransport()
+	_, _, err := pid1.RefreshToken(context.Background())
+	require.NoError(t, err)
+
+	path := filepath.Join(home, ".scion", transportauth.TransportTokenFileName)
+	fi, err := os.Stat(path)
+	require.NoError(t, err, "refreshed transport credential must be persisted")
+	assert.Equal(t, os.FileMode(0600), fi.Mode().Perm())
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, refreshed, string(data))
+
+	// A freshly built client (still seeing the expired env value) uses the
+	// refreshed file value.
+	fresh := NewClientWithConfig(srv.URL, "app-credential-2", "agent-1")
+	fresh.configureOIDCTransport()
+	require.NoError(t, fresh.UpdateStatus(context.Background(), StatusUpdate{Status: "running"}))
+	assert.Equal(t, "Bearer "+refreshed, lastAuth)
+
+	st, ok := fresh.TransportSourceStatus()
+	require.True(t, ok)
+	assert.Equal(t, transportauth.SourceLabelFile, st.InUse)
+
+	// transportauth.FromEnv (hubclient, the in-agent scion CLI) agrees.
+	t.Setenv(transportauth.EnvTransportTokenFile, path)
+	src, err := transportauth.FromEnv()
+	require.NoError(t, err)
+	got, err := src.Token()
+	require.NoError(t, err)
+	assert.Equal(t, refreshed, got)
+}
+
+// TestConfigureOIDCTransport_FileWithoutEnv covers child processes after
+// sciontool init removed the bootstrap env value: the file alone is enough.
+func TestConfigureOIDCTransport_FileWithoutEnv(t *testing.T) {
+	t.Cleanup(SetTokenHome(t.TempDir()))
+	t.Setenv(transportauth.EnvTransportToken, "")
+	tok := makeTestJWT(time.Now().Add(time.Hour))
+	require.NoError(t, WriteTransportTokenFile(tok, 0, 0))
+	t.Setenv(transportauth.EnvTransportTokenFile, TransportTokenFilePath())
+
+	c := NewClientWithConfig("https://hub.example.com", "app", "agent-1")
+	c.configureOIDCTransport()
+	require.NotNil(t, c.oidcSource)
+	got, err := c.oidcSource.Token()
+	require.NoError(t, err)
+	assert.Equal(t, tok, got)
+}
+
+// TestConfigureOIDCTransport_FileIgnoredWithoutEnv verifies a transport
+// token file is not used unless the agent was given a transport token
+// (SCION_TRANSPORT_TOKEN or SCION_TRANSPORT_TOKEN_FILE), matching
+// transportauth.FromEnv.
+func TestConfigureOIDCTransport_FileIgnoredWithoutEnv(t *testing.T) {
+	t.Cleanup(SetTokenHome(t.TempDir()))
+	cleanup := overrideGCPDetection(false)
+	defer cleanup()
+	t.Setenv(transportauth.EnvTransportToken, "")
+	t.Setenv(transportauth.EnvTransportTokenFile, "")
+	require.NoError(t, WriteTransportTokenFile(makeTestJWT(time.Now().Add(time.Hour)), 0, 0))
+
+	assert.Nil(t, newTransportFileSource())
+	c := NewClientWithConfig("https://hub.example.com", "app", "agent-1")
+	c.configureOIDCTransport()
+	if fs, ok := c.oidcSource.(*transportauth.FileSource); ok && fs != nil {
+		t.Error("client uses the transport token file without a transport env var")
+	}
+}
+
+// TestReadTransportTokenFile_TestGuard verifies tests cannot read the real
+// default transport token file without SetTokenHome.
+func TestReadTransportTokenFile_TestGuard(t *testing.T) {
+	if tokenHomeOverridden {
+		t.Skip("token home already overridden")
+	}
+	_, err := readTransportTokenFile(TransportTokenFilePath())
+	require.Error(t, err)
+}
+
+// TestConfigureOIDCTransport_HonoursTransportMode verifies the sciontool
+// client uses the same header as hubclient for SCION_TRANSPORT_MODE=iap.
+func TestConfigureOIDCTransport_HonoursTransportMode(t *testing.T) {
+	t.Cleanup(SetTokenHome(t.TempDir()))
+	cleanup := overrideGCPDetection(false)
+	defer cleanup()
+	tok := makeTestJWT(time.Now().Add(time.Hour))
+	t.Setenv(transportauth.EnvTransportToken, tok)
+	t.Setenv(transportauth.EnvTransportMode, "iap")
+
+	var gotProxy, gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotProxy = r.Header.Get("Proxy-Authorization")
+		gotAuth = r.Header.Get("Authorization")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}))
+	defer srv.Close()
+
+	c := NewClientWithConfig(srv.URL, "app", "agent-1")
+	c.configureOIDCTransport()
+	require.NoError(t, c.UpdateStatus(context.Background(), StatusUpdate{Status: "running"}))
+	assert.Equal(t, "Bearer "+tok, gotProxy)
+	assert.Empty(t, gotAuth)
+
+	h := http.Header{}
+	require.NoError(t, c.ApplyTransportHeaders(h))
+	assert.Equal(t, "Bearer "+tok, h.Get("Proxy-Authorization"))
+}
+
+func TestAdjustRefreshForTransportTokens_FileSource(t *testing.T) {
+	src := transportauth.NewFileSource(filepath.Join(t.TempDir(), "missing"), nil)
+	transportExpiry := time.Now().Add(50 * time.Minute)
+	src.SetToken("tok", transportExpiry)
+	c := &Client{oidcSource: src}
+
+	adjusted := c.adjustRefreshForTransportTokens(time.Now().Add(8 * time.Hour))
+	assert.WithinDuration(t, transportExpiry.Add(-transportauth.RefreshMargin), adjusted, time.Second)
 }

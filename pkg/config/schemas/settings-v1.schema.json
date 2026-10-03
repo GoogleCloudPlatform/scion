@@ -70,6 +70,7 @@
         "auth": { "$ref": "#/$defs/serverAuth" },
         "oauth": { "$ref": "#/$defs/serverOAuth" },
         "storage": { "$ref": "#/$defs/serverStorage" },
+        "workspace_storage": { "$ref": "#/$defs/serverWorkspaceStorage" },
         "secrets": { "$ref": "#/$defs/serverSecrets" },
         "log_level": {
           "type": "string",
@@ -456,23 +457,49 @@
           "$ref": "#/$defs/harnessNoAuthConfig",
           "description": "Behavior when an agent starts without credentials (NoAuth mode)."
         },
-        "thinking_budget_map": {
-          "type": "object",
-          "additionalProperties": { "type": "integer" },
-          "description": "Maps model identifiers to their thinking-budget token limits."
-        },
-        "thinking_budget_flag": {
-          "type": "string",
-          "description": "CLI flag name used to pass the thinking budget to the harness (e.g., '--thinking-budget')."
-        },
-        "thinking_budget_config_key": {
-          "type": "string",
-          "description": "Harness-native config key used to set the thinking budget in a config file."
+        "thinking": {
+          "$ref": "#/$defs/harnessThinking",
+          "description": "Maps the canonical 0-100 thinking level (SCION_THINKING_LEVEL) to harness-native values. Applied in-container by scion_harness.resolve_thinking."
         },
         "dialect": {
           "type": "object",
           "description": "Optional hook dialect metadata.",
           "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "harnessThinking": {
+      "type": "object",
+      "required": ["levels"],
+      "properties": {
+        "levels": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Ordered by strictly ascending max. A level L (0-100) maps to the value of the first entry whose max >= L. The last entry must have max: 100.",
+          "items": {
+            "type": "object",
+            "required": ["max", "value"],
+            "properties": {
+              "max": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Inclusive upper bound of the thinking level range mapped to value."
+              },
+              "value": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Harness-native thinking value (e.g. low, medium, high)."
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "default": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Value emitted when SCION_THINKING_LEVEL is unset, blank or not an integer. Omit to emit nothing so the CLI's own default applies."
         }
       },
       "additionalProperties": false
@@ -1060,6 +1087,55 @@
         "provider": { "type": "string", "enum": ["local", "gcs"], "default": "local", "x-env-var": "SCION_SERVER_STORAGE_PROVIDER" },
         "bucket": { "type": "string", "description": "GCS bucket name.", "x-env-var": "SCION_SERVER_STORAGE_BUCKET" },
         "local_path": { "type": "string", "x-env-var": "SCION_SERVER_STORAGE_LOCALPATH" }
+      }
+    },
+    "serverWorkspaceStorage": {
+      "type": "object",
+      "description": "Workspace storage backend for agent workspaces. Global-only, Layer-0 (restart to apply).",
+      "x-since": "1",
+      "properties": {
+        "backend": { "type": "string", "enum": ["local", "nfs", "cloudrun-volume", "gke-shared-volume"], "default": "local" },
+        "nfs": { "$ref": "#/$defs/serverWorkspaceStorageNFS" },
+        "cloudrun_volume": {
+          "type": "object",
+          "properties": {
+            "volume_name": { "type": "string" },
+            "subpath_root": { "type": "string", "default": "projects" }
+          }
+        },
+        "gke_shared_volume": {
+          "type": "object",
+          "properties": {
+            "volume_name": { "type": "string" },
+            "pv_claim_name": { "type": "string" },
+            "subpath_root": { "type": "string", "default": "projects" }
+          }
+        }
+      }
+    },
+    "serverWorkspaceStorageNFS": {
+      "type": "object",
+      "description": "NFS workspace storage settings, used when workspace_storage.backend is nfs.",
+      "properties": {
+        "mount_root": { "type": "string", "description": "Host directory under which each share is mounted, at <mount_root>/<share id>." },
+        "mount_options": { "type": "string", "default": "vers=3,hard,nconnect=4,_netdev" },
+        "auto_mount": { "type": "boolean", "default": false, "description": "When true, a Runtime Broker mounts each share itself at startup and before NFS-backed dispatches (requires root). When false, the mounts are provided externally and the broker only checks them read-only.", "x-since": "1" },
+        "uid": { "type": "integer", "default": 1000 },
+        "gid": { "type": "integer", "default": 1000 },
+        "storage_class": { "type": "string" },
+        "subpath_root": { "type": "string", "default": "projects" },
+        "shares": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "server": { "type": "string" },
+              "export": { "type": "string" },
+              "pv_name": { "type": "string" }
+            }
+          }
+        }
       }
     },
     "serverSecrets": {
