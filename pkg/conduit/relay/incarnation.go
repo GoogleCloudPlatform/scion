@@ -15,10 +15,12 @@
 package relay
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
@@ -94,7 +96,9 @@ func generationIncarnation(f AgentIncarnationFacts) Incarnation {
 //     launch id cannot vouch for any presented value, so that is refused
 //     too.
 //   - presented empty: interim fallback "gen-<Generation>", source
-//     "generation".
+//     "generation". Admission must then also run
+//     CheckFallbackAgainstLaunchID (it needs the registry), which refuses
+//     the fallback while the current launch is connected.
 func AdmitAgentIncarnation(f AgentIncarnationFacts, presented string) (Incarnation, error) {
 	if presented == "" {
 		return generationIncarnation(f), nil
@@ -168,4 +172,47 @@ func admitIncarnation(p Principal, presented string) (Incarnation, error) {
 func IsSupersededIncarnation(err error) bool {
 	var ce *conduit.CloseError
 	return errors.As(err, &ce) && ce.Code == CloseSupersededIncarnation
+}
+
+// LogReasonLegacyHelloSuperseded is the structured log field value
+// (reason=...) recorded when CheckFallbackAgainstLaunchID refuses a Hello,
+// so mixed-version incidents can be diagnosed.
+const LogReasonLegacyHelloSuperseded = "legacy_hello_superseded"
+
+// CheckFallbackAgainstLaunchID enforces the mixed-version fence on an
+// agent Hello that presented no launch id (inc.Source ==
+// IncarnationSourceGeneration). While a live, non-draining, current-epoch
+// session admitted with the agent's CURRENT launch_id (source launch_id)
+// exists, a launch-id-less Hello can only come from a container that
+// predates launch ids for this agent (a superseded launch, i.e. a zombie);
+// it is refused with ErrSupersededIncarnation (4409) so it cannot bump the
+// epoch and take routing over. Callers run this before
+// InsertSessionWithNextEpoch, so a refusal writes no row and burns no
+// epoch. A registry read error is returned as is (callers fail closed).
+//
+// Remaining window (interim, until every target presents a launch id, 1e):
+// a launch-id-less Hello that arrives while no such session is live (the
+// current launch is disconnected, draining or stale, or has not connected
+// yet) is admitted as gen-N and takes over routing until the current
+// launch reconnects with its launch id. The current launch then wins
+// again: its Hello passes AdmitAgentIncarnation and bumps the epoch.
+func CheckFallbackAgainstLaunchID(ctx context.Context, reg *registry.Registry, now time.Time, agentID, projectID string, f AgentIncarnationFacts, inc Incarnation) error {
+	if inc.Source != IncarnationSourceGeneration {
+		return nil
+	}
+	cur, ok := launchIncarnation(f)
+	if !ok {
+		return nil // pure legacy: no launch id to protect
+	}
+	recs, err := reg.Eligible(ctx, registry.PrincipalAgent, agentID,
+		registry.Want{ProjectID: projectID, AnyExecScope: true, Incarnation: cur.Value}, now)
+	if err != nil {
+		return err
+	}
+	for _, rec := range recs {
+		if rec.Capabilities.IncarnationSource == IncarnationSourceLaunchID {
+			return ErrSupersededIncarnation
+		}
+	}
+	return nil
 }

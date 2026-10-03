@@ -73,6 +73,19 @@ func (a *admitter) Admit(ctx context.Context, hello *conduitv1.Hello) (*conduitv
 		}
 		return nil, err
 	}
+	if p.Kind == registry.PrincipalAgent {
+		err := CheckFallbackAgainstLaunchID(ctx, r.cfg.Registry, r.cfg.RegistryNow(), p.ID, p.ProjectID, p.Agent, inc)
+		switch {
+		case IsSupersededIncarnation(err):
+			r.log.Warn("Conduit admission refused: hello without launch id while the current launch is connected",
+				"reason", LogReasonLegacyHelloSuperseded, "principal_id", p.ID, "project_id", p.ProjectID,
+				"current_launch_id", p.Agent.LaunchID, "generation", p.Agent.Generation)
+			return nil, err
+		case err != nil:
+			r.log.Warn("Conduit admission refused: registry unavailable", "principal_id", p.ID, "error", err)
+			return nil, conduit.Reject(conduit.CloseRelayRestart, "registry unavailable")
+		}
+	}
 	if s := caps.GetExecScope(); s != "" && s != p.ExecScope {
 		return nil, conduit.Reject(conduit.CloseForbidden, "hello exec_scope does not match the authoritative exec scope")
 	}

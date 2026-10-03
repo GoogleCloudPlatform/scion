@@ -170,6 +170,7 @@ func (w *World) NewNode(id string, mod func(*relay.Config)) (*Node, error) {
 		InstanceID:       id,
 		InternalEndpoint: n.Internal.URL,
 		RequireSelfCheck: true,
+		RegistryNow:      w.Now,
 		Registry:         w.Registry,
 		Session:          conduit.Config{Clock: clock.Real()},
 		GrantKeys: func(context.Context) ([]*conduitv1.GrantKey, error) {

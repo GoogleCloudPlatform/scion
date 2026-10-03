@@ -134,6 +134,10 @@ type Config struct {
 	// Clock drives the relay's timers (default: Session.Clock, else real).
 	// The registry keeps its own clock (registry.Config.Clock).
 	Clock clock.Clock
+	// RegistryNow is the time used for registry eligibility reads made
+	// during admission; it should agree with the registry's clock
+	// (default time.Now).
+	RegistryNow func() time.Time
 	// NewSessionID generates session ids (default uuid v4).
 	NewSessionID func() string
 	// Logger defaults to slog.Default().
@@ -222,6 +226,9 @@ func New(cfg Config) (*Relay, error) {
 	}
 	if cfg.NewSessionID == nil {
 		cfg.NewSessionID = uuid.NewString
+	}
+	if cfg.RegistryNow == nil {
+		cfg.RegistryNow = time.Now
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()

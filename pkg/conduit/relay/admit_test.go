@@ -19,6 +19,9 @@ package relay_test
 import (
 	"context"
 	"errors"
+	"log/slog"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
@@ -225,42 +228,197 @@ func TestZombieLaunchRefusedSuccessorKeepsRouting(t *testing.T) {
 
 // TestRouterPrefersLaunchIDSession: with a gen-N session and a launch-id
 // session of the same agent both present, routing picks the launch-id
-// session. (For agents only the current-epoch session is ever eligible;
-// the reverse order, a fallback session connecting after the launch-id
-// one, is the documented interim gap and routes to the fallback session.)
+// session. (For agents only the current-epoch session is ever eligible,
+// so the launch-id session wins by lookup order while it holds the
+// current epoch; a fallback Hello cannot take that over while the current
+// launch is connected, see TestFallbackRefusedWhileLaunchIDLive.)
 func TestRouterPrefersLaunchIDSession(t *testing.T) {
+	w := relaytest.NewWorld(t)
+	a := w.StartNode("relay-a", nil)
+	b := w.StartNode("relay-b", nil)
+	w.SetPrincipal("a", agentPrincipal("L2", 3))
+	_, legacy := a.MustDial("a", relaytest.AgentHello(agentID, "", "", "pty"), conduit.Config{})
+	_, current := b.MustDial("a", relaytest.AgentHello(agentID, "L2", "", "pty"), conduit.Config{})
+	if n := len(w.Sessions(registry.PrincipalAgent, agentID).Sessions); n != 2 {
+		t.Fatalf("rows = %d, want both sessions present", n)
+	}
+	res, err := resolveAgent(t, w, a, relay.AgentIncarnationFacts{LaunchID: "L2", Generation: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Record.SessionID != current.GetSessionId() || res.Want.Incarnation != "L2" {
+		t.Fatalf("resolved %s (incarnation %s), want the launch-id session %s, not the gen-N session %s",
+			res.Record.SessionID, res.Want.Incarnation, current.GetSessionId(), legacy.GetSessionId())
+	}
+}
+
+func resolveAgent(t *testing.T, w *relaytest.World, n *relaytest.Node, f relay.AgentIncarnationFacts) (router.Resolved, error) {
+	t.Helper()
+	rt, err := router.New(router.Config{Relay: n.Relay, Registry: w.Registry, Store: w.Store, Peers: n.Peers, Now: w.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rt.Resolve(context.Background(), router.Request{Op: router.OpStream, Kind: registry.PrincipalAgent, ID: agentID,
+		Want: registry.Want{ProjectID: project}, Agent: f}, nil)
+}
+
+// TestFallbackRefusedWhileLaunchIDLive (conduit-em hardening of the
+// interim gap): a Hello without a launch id is refused with 4409 while a
+// live, non-draining session admitted with the CURRENT launch id exists,
+// before any row or epoch is written; otherwise the fallback is admitted
+// as gen-N.
+func TestFallbackRefusedWhileLaunchIDLive(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		order    []string // launch ids presented, in connection order ("" = old sciontool)
-		wantInc  string
-		wantFrom int // index into order of the session expected
+		name string
+		// setup connects whatever exists before the fallback Hello.
+		setup     func(t *testing.T, w *relaytest.World, a *relaytest.Node)
+		fault     string // store op that fails during the fallback Hello
+		wantCode  uint32 // 0 = admitted as gen-3
+		wantRows  int    // rows after the fallback attempt
+		l2Routing bool   // L2 must keep routing afterwards
 	}{
-		{name: "launch id connected last wins", order: []string{"", "L2"}, wantInc: "L2", wantFrom: 1},
-		{name: "interim gap: fallback connected last", order: []string{"L2", ""}, wantInc: "gen-3", wantFrom: 1},
+		{name: "mixed version: L2 connected, pre-launch-id zombie refused", setup: func(t *testing.T, w *relaytest.World, a *relaytest.Node) {
+			a.MustDial("a", relaytest.AgentHello(agentID, "L2", "", "pty"), conduit.Config{})
+		}, wantCode: relay.CloseSupersededIncarnation, wantRows: 1, l2Routing: true},
+		{name: "legacy only: no launch-id session, fallback admitted", setup: func(*testing.T, *relaytest.World, *relaytest.Node) {},
+			wantRows: 1},
+		{name: "current launch draining: fallback admitted (window)", setup: func(t *testing.T, w *relaytest.World, a *relaytest.Node) {
+			_, wel := a.MustDial("a", relaytest.AgentHello(agentID, "L2", "", "pty"), conduit.Config{})
+			if err := w.Inner.SetSessionDraining(context.Background(), wel.GetSessionId()); err != nil {
+				t.Fatal(err)
+			}
+		}, wantRows: 2},
+		{name: "live session of a superseded launch does not block", setup: func(t *testing.T, w *relaytest.World, a *relaytest.Node) {
+			w.SetPrincipal("old", agentPrincipal("L1", 2))
+			a.MustDial("old", relaytest.AgentHello(agentID, "L1", "", "pty"), conduit.Config{})
+		}, wantRows: 2},
+		{name: "registry read error fails closed", setup: func(t *testing.T, w *relaytest.World, a *relaytest.Node) {
+			a.MustDial("a", relaytest.AgentHello(agentID, "L2", "", "pty"), conduit.Config{})
+		}, fault: registry.OpListPrincipalSessions, wantCode: conduit.CloseRelayRestart, wantRows: 1, l2Routing: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := relaytest.NewWorld(t)
 			a := w.StartNode("relay-a", nil)
-			b := w.StartNode("relay-b", nil)
+			logs := &captureHandler{}
+			b := w.StartNode("relay-b", func(c *relay.Config) { c.Logger = slog.New(logs) })
 			w.SetPrincipal("a", agentPrincipal("L2", 3))
-			nodes := []*relaytest.Node{a, b}
-			var ids []string
-			for i, li := range tc.order {
-				_, wel := nodes[i].MustDial("a", relaytest.AgentHello(agentID, li, "", "pty"), conduit.Config{})
-				ids = append(ids, wel.GetSessionId())
+			tc.setup(t, w, a)
+			before := len(w.Sessions(registry.PrincipalAgent, agentID).Sessions)
+
+			var inserts atomic.Int32
+			w.SetFault(func(op string) error {
+				if op == registry.OpInsertSessionWithNextEpoch {
+					inserts.Add(1)
+				}
+				if op == tc.fault {
+					return errors.New("injected read error")
+				}
+				return nil
+			})
+			// The zombie dials a different relay than L2's.
+			_, wel, err := b.Dial(context.Background(), "a", relaytest.AgentHello(agentID, "", "", "pty"), conduit.Config{})
+			w.SetFault(nil)
+			if got, want := logs.count("reason", relay.LogReasonLegacyHelloSuperseded), btoi(tc.wantCode == relay.CloseSupersededIncarnation); got != want {
+				t.Fatalf("reason=%s logged %d times, want %d", relay.LogReasonLegacyHelloSuperseded, got, want)
 			}
-			if n := len(w.Sessions(registry.PrincipalAgent, agentID).Sessions); n != 2 {
-				t.Fatalf("rows = %d, want both sessions present", n)
+			if tc.wantCode != 0 {
+				if code := conduit.CodeOf(err, 0); code != tc.wantCode {
+					t.Fatalf("fallback Hello = %v, want close %d", err, tc.wantCode)
+				}
+				if inserts.Load() != 0 {
+					t.Fatal("refusal reached InsertSessionWithNextEpoch")
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("fallback Hello refused: %v", err)
+				}
+				rows := w.Sessions(registry.PrincipalAgent, agentID).Sessions
+				var got registry.SessionRecord
+				for _, v := range rows {
+					if v.Session.SessionID == wel.GetSessionId() {
+						got = v.Session
+					}
+				}
+				if got.EndpointIncarnation != "gen-3" || got.Capabilities.IncarnationSource != relay.IncarnationSourceGeneration {
+					t.Fatalf("fallback row incarnation %q source %q", got.EndpointIncarnation, got.Capabilities.IncarnationSource)
+				}
 			}
-			rt, _ := router.New(router.Config{Relay: a.Relay, Registry: w.Registry, Store: w.Store, Peers: a.Peers, Now: w.Now})
-			res, err := rt.Resolve(context.Background(), router.Request{Op: router.OpStream, Kind: registry.PrincipalAgent, ID: agentID,
-				Want: registry.Want{ProjectID: project}, Agent: relay.AgentIncarnationFacts{LaunchID: "L2", Generation: 3}}, nil)
-			if err != nil {
-				t.Fatal(err)
+			if n := len(w.Sessions(registry.PrincipalAgent, agentID).Sessions); n != tc.wantRows {
+				t.Fatalf("rows = %d (before %d), want %d", n, before, tc.wantRows)
 			}
-			if res.Record.SessionID != ids[tc.wantFrom] || res.Want.Incarnation != tc.wantInc {
-				t.Fatalf("resolved %s (incarnation %s), want %s (%s)", res.Record.SessionID, res.Want.Incarnation, ids[tc.wantFrom], tc.wantInc)
+			if !tc.l2Routing {
+				return
+			}
+			res, err := resolveAgent(t, w, b, relay.AgentIncarnationFacts{LaunchID: "L2", Generation: 3})
+			if err != nil || res.Want.Incarnation != "L2" || res.Record.ConnectionEpoch != 1 {
+				t.Fatalf("after refusal: resolved %+v (want L2 at epoch 1, no epoch burned), %v", res.Record, err)
 			}
 		})
 	}
+}
+
+// TestFallbackWindowWhileLaunchDisconnected documents the remaining
+// window: with the current launch disconnected, a fallback Hello is
+// admitted as gen-N and routes; when the current launch reconnects with
+// its launch id it takes routing back.
+func TestFallbackWindowWhileLaunchDisconnected(t *testing.T) {
+	w := relaytest.NewWorld(t)
+	a := w.StartNode("relay-a", nil)
+	w.SetPrincipal("a", agentPrincipal("L2", 3))
+	f := relay.AgentIncarnationFacts{LaunchID: "L2", Generation: 3}
+
+	l2, _ := a.MustDial("a", relaytest.AgentHello(agentID, "L2", "", "pty"), conduit.Config{})
+	_ = l2.Close()
+	_ = relaytest.Wait(t, a.Served, "L2 session to end")
+
+	_, fb := a.MustDial("a", relaytest.AgentHello(agentID, "", "", "pty"), conduit.Config{})
+	res, err := resolveAgent(t, w, a, f)
+	if err != nil || res.Record.SessionID != fb.GetSessionId() || res.Want.Incarnation != "gen-3" {
+		t.Fatalf("during the window: resolved %+v, %v; want the gen-3 fallback", res.Record, err)
+	}
+
+	_, back := a.MustDial("a", relaytest.AgentHello(agentID, "L2", "", "pty"), conduit.Config{})
+	res, err = resolveAgent(t, w, a, f)
+	if err != nil || res.Record.SessionID != back.GetSessionId() || res.Want.Incarnation != "L2" {
+		t.Fatalf("after L2 reconnects: resolved %+v, %v; want L2", res.Record, err)
+	}
+}
+
+func btoi(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// captureHandler records log records for assertions on structured fields.
+type captureHandler struct {
+	mu   sync.Mutex
+	recs []slog.Record
+}
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *captureHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	h.recs = append(h.recs, r.Clone())
+	h.mu.Unlock()
+	return nil
+}
+func (h *captureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler      { return h }
+
+// count returns how many records carry the attribute key=value.
+func (h *captureHandler) count(key, value string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for _, r := range h.recs {
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == key && a.Value.String() == value {
+				n++
+			}
+			return true
+		})
+	}
+	return n
 }
