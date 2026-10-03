@@ -54,7 +54,9 @@ type session struct {
 	lastPeerID   uint32
 	draining     bool
 	goAwaySent   bool
-	closing      bool // a close-after-flush sentinel is queued
+	goAwayCode   uint32 // code of the GoAway we sent
+	closing      bool   // a close-after-flush sentinel is queued
+	peerStreams  int    // peer-opened streams in the table
 	remoteGoAway *conduitv1.GoAway
 	goAwayRecv   chan struct{}
 	pendingRPC   map[string]chan *conduitv1.RpcResponse
@@ -62,6 +64,8 @@ type session struct {
 	pingTimer    clock.Timer
 	watchdog     clock.Timer
 	drainTimer   clock.Timer
+	refreshing   bool                   // an AuthRefresh is being validated
+	refreshNext  *conduitv1.AuthRefresh // latest refresh queued behind it
 
 	rpcSeq   atomic.Uint64
 	pingSeq  atomic.Uint64
@@ -72,7 +76,9 @@ type session struct {
 	fcCond        *sync.Cond
 	sendSession   int64 // credit the peer granted us
 	recvSession   int64 // credit we granted the peer, not yet used
-	pendingSess   int64 // consumed bytes not yet returned to the peer
+	pendingSess   int64 // credit due to the peer, batched
+	recvBufFC     int64 // received stream data not yet read or discarded
+	owedSess      int64 // credit withheld for buffered data (RecvBufferLimit)
 	recvBuffered  atomic.Int64
 	peakRecvBufrd atomic.Int64
 }
@@ -329,8 +335,29 @@ func (s *session) Close() error {
 	return nil
 }
 
-// fail ends the session once: the transport is closed, every stream and
-// pending call fails, every handler context is cancelled.
+// CloseWithCode implements LocalSession.
+func (s *session) CloseWithCode(code uint32, reason string) error {
+	if s.isDone() {
+		return ErrSessionClosed
+	}
+	s.closeWithCode(code, reason)
+	return nil
+}
+
+// endErr is the error streams and pending calls see once the session
+// ended: ErrSessionClosed, carrying the session's reason so CodeOf sees
+// e.g. the 4503 of a drained session.
+func (s *session) endErr() error {
+	err := s.Err()
+	if err == nil || err == ErrSessionClosed {
+		return ErrSessionClosed
+	}
+	return fmt.Errorf("%w: %w", ErrSessionClosed, err)
+}
+
+// fail ends the session once: every stream and pending call fails, every
+// handler context is cancelled, and then the transport is closed (closing
+// may block briefly on a stuck writer, so it comes last).
 func (s *session) fail(err error) {
 	s.failOnce.Do(func() {
 		s.errMu.Lock()
@@ -339,7 +366,6 @@ func (s *session) fail(err error) {
 		close(s.done)
 		s.cancel()
 		s.sched.close()
-		_ = s.conn.Close()
 
 		s.mu.Lock()
 		streams := make([]*stream, 0, len(s.streams))
@@ -355,16 +381,12 @@ func (s *session) fail(err error) {
 				t.Stop()
 			}
 		}
-		// Streams fail with ErrSessionClosed, carrying the session's
-		// reason so CodeOf sees e.g. the 4503 of a drained session.
-		streamErr := ErrSessionClosed
-		if err != ErrSessionClosed {
-			streamErr = fmt.Errorf("%w: %w", ErrSessionClosed, err)
-		}
+		streamErr := s.endErr()
 		for _, st := range streams {
 			st.sessionFailed(streamErr)
 		}
 		s.wakeCreditWaiters()
+		_ = s.conn.Close()
 		if err != ErrSessionClosed {
 			s.cfg.Logger.Debug("conduit session ended", "session_id", sessionID, "error", err)
 		}
@@ -556,9 +578,9 @@ func (s *session) dispatch(f *conduitv1.Frame) {
 			st.remoteClose(b.StreamClose.GetCode(), b.StreamClose.GetReason())
 		}
 	case *conduitv1.Frame_StreamResize:
-		// Resize is meaningful to targets that own a pty; they observe it
-		// through the stream handler in a later phase. Nothing to do at the
-		// session layer.
+		if st := s.lookup(b.StreamResize.GetStreamId()); st != nil {
+			st.deliverResize(b.StreamResize.GetCols(), b.StreamResize.GetRows())
+		}
 	case *conduitv1.Frame_RpcRequest:
 		s.handleRPCRequest(b.RpcRequest)
 	case *conduitv1.Frame_RpcResponse:
@@ -593,11 +615,29 @@ func (s *session) removeStream(st *stream) {
 	s.mu.Lock()
 	if cur, ok := s.streams[st.id]; ok && cur == st {
 		delete(s.streams, st.id)
+		if !st.opener {
+			s.peerStreams--
+		}
 	}
-	drained := s.goAwaySent && len(s.streams) == 0
+	s.mu.Unlock()
+	s.closeIfDrained()
+}
+
+// drainedLocked reports whether a drain we started (GoAway) has nothing
+// left to wait for: no stream and no RPC in flight in either direction.
+func (s *session) drainedLocked() bool {
+	return s.goAwaySent && len(s.streams) == 0 && len(s.pendingRPC) == 0 && len(s.inboundRPC) == 0
+}
+
+// closeIfDrained ends a draining session once it has drained. It is
+// called whenever a stream or an RPC finishes.
+func (s *session) closeIfDrained() {
+	s.mu.Lock()
+	drained := s.drainedLocked()
+	code := s.goAwayCode
 	s.mu.Unlock()
 	if drained {
-		s.closeAfterFlush(&CloseError{Code: CloseRelayRestart, Reason: "drained"})
+		s.closeAfterFlush(&CloseError{Code: code, Reason: "drained"})
 	}
 }
 
@@ -665,24 +705,56 @@ func (s *session) consumed(n int64) {
 		return
 	}
 	s.recvBuffered.Add(-n)
-	s.returnSessionCredit(n)
+	s.adjustBuffered(-n)
 }
 
-// returnSessionCredit batches session window updates (a quarter of the
-// window at a time).
+// adjustBuffered tracks buffered stream data (delta > 0 on receipt,
+// < 0 when read or discarded) and returns session credit for it: on
+// receipt while the buffered data whose credit was already returned stays
+// within RecvBufferLimit, otherwise as it is consumed.
+func (s *session) adjustBuffered(delta int64) {
+	s.fcMu.Lock()
+	s.recvBufFC += delta
+	if delta > 0 {
+		s.owedSess += delta
+	}
+	var inc int64
+	if room := s.cfg.RecvBufferLimit - (s.recvBufFC - s.owedSess); room > 0 && s.owedSess > 0 {
+		r := min(room, s.owedSess)
+		s.owedSess -= r
+		inc = s.creditLocked(r)
+	}
+	s.fcMu.Unlock()
+	s.sendSessionWindow(inc)
+}
+
+// returnSessionCredit returns credit for bytes that were not buffered
+// (discarded, or for an unknown stream).
 func (s *session) returnSessionCredit(n int64) {
 	if n <= 0 {
 		return
 	}
 	s.fcMu.Lock()
-	s.pendingSess += n
-	var inc int64
-	if s.pendingSess >= int64(s.cfg.SessionWindow)/4 {
-		inc = s.pendingSess
-		s.pendingSess = 0
-		s.recvSession += inc
-	}
+	inc := s.creditLocked(n)
 	s.fcMu.Unlock()
+	s.sendSessionWindow(inc)
+}
+
+// creditLocked adds n bytes of credit due to the peer and returns the
+// increment to send now: updates are batched a quarter of the window at a
+// time.
+func (s *session) creditLocked(n int64) int64 {
+	s.pendingSess += n
+	if s.pendingSess < int64(s.cfg.SessionWindow)/4 {
+		return 0
+	}
+	inc := s.pendingSess
+	s.pendingSess = 0
+	s.recvSession += inc
+	return inc
+}
+
+func (s *session) sendSessionWindow(inc int64) {
 	if inc > 0 {
 		s.sendInternal(&conduitv1.Frame{Body: &conduitv1.Frame_StreamWindow{StreamWindow: &conduitv1.StreamWindow{StreamId: 0, Increment: uint32(inc)}}})
 	}
@@ -703,13 +775,19 @@ func (s *session) handleData(d *conduitv1.StreamData) {
 	s.recvSession -= n
 	s.fcMu.Unlock()
 
+	// Buffered bytes are credited by adjustBuffered (on receipt, within
+	// RecvBufferLimit, so a stalled reader holds only its own stream
+	// window); bytes not buffered are credited back at once.
 	st := s.lookup(d.GetStreamId())
 	if st == nil {
 		s.returnSessionCredit(n)
 		return
 	}
-	if !st.deliver(d) {
+	ok, buffered := st.deliver(d)
+	if !buffered {
 		s.returnSessionCredit(n)
+	}
+	if !ok {
 		st.abort(CloseProtocolError, "stream flow control: data exceeds credit", true)
 	}
 }
@@ -841,30 +919,32 @@ func (s *session) handleOpen(o *conduitv1.StreamOpen) {
 		return
 	}
 	s.lastPeerID = id
-	draining := s.draining
-	s.mu.Unlock()
-
-	if draining {
-		s.sendClose(id, CloseRelayRestart, "session draining")
-		return
-	}
-	if _, err := StreamKindFromProto(o.GetKind()); err != nil {
-		s.sendClose(id, CloseProtocolError, err.Error())
-		return
-	}
+	// Admission and insertion happen in one critical section with the
+	// draining check, so a concurrent GoAway either refuses this stream
+	// or sees it in the table and waits for it.
+	code, reason := uint32(0), ""
 	h := s.cfg.StreamHandler
-	if h == nil {
-		s.sendClose(id, CloseProtocolError, "streams not supported")
+	switch _, kindErr := StreamKindFromProto(o.GetKind()); {
+	case s.draining:
+		code, reason = CloseRelayRestart, "session draining"
+	case kindErr != nil:
+		code, reason = CloseProtocolError, kindErr.Error()
+	case h == nil:
+		code, reason = CloseProtocolError, "streams not supported"
+	case o.GetInitialWindow() > MaxWindow:
+		code, reason = CloseProtocolError, "initial window overflow"
+	case s.peerStreams >= s.cfg.MaxConcurrentStreams:
+		code, reason = CloseProtocolError, "too many concurrent streams"
+	}
+	if code != 0 {
+		s.mu.Unlock()
+		s.sendClose(id, code, reason)
 		return
 	}
 	st := newStream(s, id, false, s.cfg.StreamWindow)
 	st.sendCredit = int64(o.GetInitialWindow())
-	if st.sendCredit > MaxWindow {
-		s.sendClose(id, CloseProtocolError, "initial window overflow")
-		return
-	}
-	s.mu.Lock()
 	s.streams[id] = st
+	s.peerStreams++
 	s.mu.Unlock()
 
 	st.mu.Lock()
@@ -926,10 +1006,11 @@ func (s *session) GoAway(opts GoAwayOptions) error {
 		return nil
 	}
 	s.goAwaySent = true
+	s.goAwayCode = opts.Code
 	s.draining = true
 	last := s.lastPeerID
 	streams := s.snapshotLocked()
-	empty := len(s.streams) == 0
+	drained := s.drainedLocked()
 	s.mu.Unlock()
 
 	for _, st := range streams {
@@ -946,7 +1027,7 @@ func (s *session) GoAway(opts GoAwayOptions) error {
 		ReconnectAfterMs: uint32(opts.ReconnectAfter / time.Millisecond),
 		DrainDeadlineMs:  uint32(opts.DrainDeadline / time.Millisecond),
 	}}})
-	if empty {
+	if drained {
 		s.closeAfterFlush(&CloseError{Code: opts.Code, Reason: "drained"})
 		return nil
 	}
@@ -963,14 +1044,22 @@ func (s *session) snapshotLocked() []*stream {
 	return out
 }
 
-// drainDeadline closes every remaining stream with code (4503) and ends
-// the session.
+// drainDeadline closes every remaining stream with code (4503), cancels
+// the inbound RPC handlers still running and ends the session; calls
+// still waiting for the peer fail with the session's code.
 func (s *session) drainDeadline(code uint32, reason string) {
 	s.mu.Lock()
 	streams := s.snapshotLocked()
+	cancels := make([]context.CancelFunc, 0, len(s.inboundRPC))
+	for _, c := range s.inboundRPC {
+		cancels = append(cancels, c)
+	}
 	s.mu.Unlock()
 	if reason == "" {
 		reason = "drain deadline"
+	}
+	for _, c := range cancels {
+		c()
 	}
 	for _, st := range streams {
 		st.abort(code, reason, true)
@@ -1034,13 +1123,36 @@ func (s *session) RefreshAuth(credential []byte, streamID uint32) error {
 	return s.sendControl(s.ctx, &conduitv1.Frame{Body: &conduitv1.Frame_AuthRefresh{AuthRefresh: &conduitv1.AuthRefresh{Credential: credential, StreamId: streamID}}})
 }
 
+// handleAuthRefresh validates refreshes one at a time, in arrival order;
+// refreshes arriving while one is in flight collapse to the latest (a
+// newer credential supersedes older ones). A failed validation closes the
+// session.
 func (s *session) handleAuthRefresh(ar *conduitv1.AuthRefresh) {
 	if s.adm == nil {
 		return // only the relay side validates credentials
 	}
+	s.mu.Lock()
+	if s.refreshing {
+		s.refreshNext = ar
+		s.mu.Unlock()
+		return
+	}
+	s.refreshing = true
+	s.mu.Unlock()
 	go func() {
-		if err := s.adm.Refresh(s.ctx, ar); err != nil && !s.isDone() {
-			s.closeWithCode(CodeOf(err, CloseUnauthenticated), rejectReason(err))
+		for ar != nil {
+			if err := s.adm.Refresh(s.ctx, ar); err != nil {
+				if !s.isDone() {
+					s.closeWithCode(CodeOf(err, CloseUnauthenticated), rejectReason(err))
+				}
+				return // the session is ending; refreshing stays set
+			}
+			s.mu.Lock()
+			ar, s.refreshNext = s.refreshNext, nil
+			if ar == nil {
+				s.refreshing = false
+			}
+			s.mu.Unlock()
 		}
 	}()
 }
@@ -1048,6 +1160,11 @@ func (s *session) handleAuthRefresh(ar *conduitv1.AuthRefresh) {
 // ---------------------------------------------------------------- RPC
 
 // Call implements Session.
+//
+// Requests whose body exceeds MaxRPCBody, or whose encoded frame exceeds
+// Config.MaxRPCFrame, are answered with 413 locally. On a draining
+// session (GoAway sent or received) Call returns ErrDraining: new work
+// belongs on the replacement session.
 func (s *session) Call(ctx context.Context, req *conduitv1.RpcRequest) (*conduitv1.RpcResponse, error) {
 	if len(req.GetBody()) > MaxRPCBody {
 		return &conduitv1.RpcResponse{RequestId: req.GetRequestId(), Status: 413}, nil
@@ -1060,8 +1177,20 @@ func (s *session) Call(ctx context.Context, req *conduitv1.RpcRequest) (*conduit
 		req.RequestId = "c" + strconv.FormatUint(s.rpcSeq.Add(1), 10)
 	}
 	id := req.RequestId
+	frame := &conduitv1.Frame{Body: &conduitv1.Frame_RpcRequest{RpcRequest: req}}
+	if proto.Size(frame) > s.cfg.MaxRPCFrame {
+		return &conduitv1.RpcResponse{RequestId: id, Status: 413}, nil
+	}
 	ch := make(chan *conduitv1.RpcResponse, 1)
 	s.mu.Lock()
+	if s.isDone() {
+		s.mu.Unlock()
+		return nil, s.endErr()
+	}
+	if s.draining {
+		s.mu.Unlock()
+		return nil, ErrDraining
+	}
 	if _, dup := s.pendingRPC[id]; dup {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("conduit: duplicate request id %q", id)
@@ -1072,9 +1201,13 @@ func (s *session) Call(ctx context.Context, req *conduitv1.RpcRequest) (*conduit
 		s.mu.Lock()
 		delete(s.pendingRPC, id)
 		s.mu.Unlock()
+		s.closeIfDrained()
 	}()
 
-	if err := s.sendControl(ctx, &conduitv1.Frame{Body: &conduitv1.Frame_RpcRequest{RpcRequest: req}}); err != nil {
+	if err := s.sendControl(ctx, frame); err != nil {
+		if err == ErrSessionClosed {
+			err = s.endErr()
+		}
 		return nil, err
 	}
 	select {
@@ -1084,41 +1217,74 @@ func (s *session) Call(ctx context.Context, req *conduitv1.RpcRequest) (*conduit
 		s.sendInternal(&conduitv1.Frame{Body: &conduitv1.Frame_RpcCancel{RpcCancel: &conduitv1.RpcCancel{RequestId: id}}})
 		return nil, ctx.Err()
 	case <-s.done:
-		return nil, ErrSessionClosed
+		select {
+		case resp := <-ch: // answered just before a drained close
+			return resp, nil
+		default:
+		}
+		return nil, s.endErr()
 	}
 }
 
 func (s *session) handleRPCResponse(r *conduitv1.RpcResponse) {
 	s.mu.Lock()
 	ch := s.pendingRPC[r.GetRequestId()]
-	delete(s.pendingRPC, r.GetRequestId())
 	s.mu.Unlock()
 	if ch != nil {
-		ch <- r
+		// Call removes the entry (and re-checks the drain) when it
+		// returns; the channel has room for exactly one response.
+		select {
+		case ch <- r:
+		default: // duplicate response
+		}
 	}
 }
 
+// RetryAfterHeader is set (to "0") on the 503 answering an RPC that
+// reached a draining session: the caller should retry on the replacement
+// session.
+const RetryAfterHeader = "Retry-After"
+
 func (s *session) handleRPCRequest(req *conduitv1.RpcRequest) {
 	id := req.GetRequestId()
-	reply := func(resp *conduitv1.RpcResponse) {
-		resp.RequestId = id
-		_ = s.sendControl(s.ctx, &conduitv1.Frame{Body: &conduitv1.Frame_RpcResponse{RpcResponse: resp}})
+	// refuse answers from the read loop without blocking: status-only
+	// responses are tiny and use the internal control reserve, and they
+	// are queued ahead of any close-after-flush that follows.
+	refuse := func(status int32, reason string) {
+		resp := &conduitv1.RpcResponse{RequestId: id, Status: status}
+		if reason != "" {
+			resp.Body = []byte(reason)
+		}
+		if status == 503 {
+			resp.Headers = map[string]string{RetryAfterHeader: "0"}
+		}
+		s.sendInternal(&conduitv1.Frame{Body: &conduitv1.Frame_RpcResponse{RpcResponse: resp}})
 	}
-	if len(req.GetBody()) > MaxRPCBody {
-		go reply(&conduitv1.RpcResponse{Status: 413})
+	if len(req.GetBody()) > MaxRPCBody || proto.Size(&conduitv1.Frame{Body: &conduitv1.Frame_RpcRequest{RpcRequest: req}}) > s.cfg.MaxRPCFrame {
+		refuse(413, "")
 		return
 	}
 	h := s.cfg.RPCHandler
 	if h == nil {
-		go reply(&conduitv1.RpcResponse{Status: 501})
+		refuse(501, "")
 		return
 	}
 	ctx, cancel := context.WithCancel(s.ctx)
 	s.mu.Lock()
-	if _, dup := s.inboundRPC[id]; dup {
+	var status int32
+	var reason string
+	switch _, dup := s.inboundRPC[id]; {
+	case s.draining:
+		status, reason = 503, "conduit: session draining"
+	case dup:
+		status = 409
+	case len(s.inboundRPC) >= s.cfg.MaxConcurrentRPCs:
+		status, reason = 429, "conduit: too many concurrent rpcs"
+	}
+	if status != 0 {
 		s.mu.Unlock()
 		cancel()
-		go reply(&conduitv1.RpcResponse{Status: 409})
+		refuse(status, reason)
 		return
 	}
 	s.inboundRPC[id] = cancel
@@ -1129,6 +1295,7 @@ func (s *session) handleRPCRequest(req *conduitv1.RpcRequest) {
 			delete(s.inboundRPC, id)
 			s.mu.Unlock()
 			cancel()
+			s.closeIfDrained() // after the reply was queued
 		}()
 		resp := h.HandleRPC(ctx, req)
 		if ctx.Err() != nil {
@@ -1137,10 +1304,13 @@ func (s *session) handleRPCRequest(req *conduitv1.RpcRequest) {
 		if resp == nil {
 			resp = &conduitv1.RpcResponse{Status: 500}
 		}
-		if len(resp.GetBody()) > MaxRPCBody {
-			resp = &conduitv1.RpcResponse{Status: 413}
+		resp = proto.Clone(resp).(*conduitv1.RpcResponse)
+		resp.RequestId = id
+		frame := &conduitv1.Frame{Body: &conduitv1.Frame_RpcResponse{RpcResponse: resp}}
+		if len(resp.GetBody()) > MaxRPCBody || proto.Size(frame) > s.cfg.MaxRPCFrame {
+			frame = &conduitv1.Frame{Body: &conduitv1.Frame_RpcResponse{RpcResponse: &conduitv1.RpcResponse{RequestId: id, Status: 413}}}
 		}
-		reply(resp)
+		_ = s.sendControl(s.ctx, frame)
 	}()
 }
 

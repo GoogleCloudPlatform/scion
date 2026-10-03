@@ -51,9 +51,26 @@ const (
 	// set open_timeout_ms; MaxOpenTimeout caps any requested value.
 	DefaultOpenTimeout = 15 * time.Second
 	MaxOpenTimeout     = 60 * time.Second
-	// DefaultDrainDeadline bounds how long accepted streams may continue
-	// after GoAway.
+	// DefaultDrainDeadline bounds how long accepted streams and in-flight
+	// RPCs may continue after GoAway.
 	DefaultDrainDeadline = 30 * time.Second
+	// DefaultMaxConcurrentStreams bounds the streams the peer may have
+	// open (or opening) on a session at once; excess StreamOpens are
+	// refused with 4400. Together with the per-stream window it bounds
+	// the receive memory of a session (see Config.MaxConcurrentStreams).
+	DefaultMaxConcurrentStreams = 128
+	// DefaultMaxConcurrentRPCs bounds the peer's in-flight RPCs on a
+	// session; excess requests are answered with status 429.
+	DefaultMaxConcurrentRPCs = 128
+	// DefaultMaxRPCFrame bounds an encoded RpcRequest/RpcResponse frame
+	// (body, headers, path and query together). It stays below the 1 MiB
+	// message limit of the ws transport so an oversized RPC is answered
+	// with 413 instead of failing the transport.
+	DefaultMaxRPCFrame = 1000 * 1024
+	// DefaultRecvBufferLimit is how much received-but-unread stream data
+	// a session credits back to the peer on receipt (64 full default
+	// stream windows); see Config.RecvBufferLimit.
+	DefaultRecvBufferLimit = 16 * 1024 * 1024
 )
 
 // Config tunes a session. The zero value is valid and uses the defaults.
@@ -79,6 +96,24 @@ type Config struct {
 	HandshakeTimeout time.Duration
 	// DrainDeadline is the default GoAway drain deadline.
 	DrainDeadline time.Duration
+	// RecvBufferLimit (default 16 MiB) decides when session credit goes
+	// back to the peer. While the stream data received but not yet read
+	// stays within RecvBufferLimit, session credit is returned on
+	// receipt, so a stalled reader holds only its own stream window and
+	// never the session window: slow readers stall only their own
+	// streams, however many there are, up to RecvBufferLimit/StreamWindow
+	// fully stalled streams. Beyond it, credit returns as the application
+	// reads (classic HTTP/2 behaviour), which bounds the receive memory of
+	// a session at RecvBufferLimit + SessionWindow.
+	RecvBufferLimit int64
+	// MaxConcurrentStreams bounds peer-opened streams (default 128).
+	MaxConcurrentStreams int
+	// MaxConcurrentRPCs bounds the peer's in-flight RPCs (default 128).
+	MaxConcurrentRPCs int
+	// MaxRPCFrame bounds an encoded RPC frame (default 1000 KiB, below
+	// the transport message limit). Larger requests and handler
+	// responses are answered with 413 locally.
+	MaxRPCFrame int
 
 	// StreamHandler serves inbound streams. Nil refuses them with 4400.
 	StreamHandler StreamHandler
@@ -122,6 +157,18 @@ func (c Config) withDefaults() Config {
 	}
 	if c.DrainDeadline <= 0 {
 		c.DrainDeadline = DefaultDrainDeadline
+	}
+	if c.RecvBufferLimit <= 0 {
+		c.RecvBufferLimit = DefaultRecvBufferLimit
+	}
+	if c.MaxConcurrentStreams <= 0 {
+		c.MaxConcurrentStreams = DefaultMaxConcurrentStreams
+	}
+	if c.MaxConcurrentRPCs <= 0 {
+		c.MaxConcurrentRPCs = DefaultMaxConcurrentRPCs
+	}
+	if c.MaxRPCFrame <= 0 {
+		c.MaxRPCFrame = DefaultMaxRPCFrame
 	}
 	if c.Logger == nil {
 		c.Logger = slog.Default()

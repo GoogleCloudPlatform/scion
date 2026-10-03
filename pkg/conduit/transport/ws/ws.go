@@ -98,6 +98,9 @@ func (c *Conn) WriteFrame(b []byte) error {
 	return c.c.WriteMessage(websocket.BinaryMessage, b)
 }
 
+// closeMessageWait bounds sending the close message in CloseWithCode.
+const closeMessageWait = time.Second
+
 // Close implements transport.Conn. It sends a best-effort close message
 // (gorilla allows WriteControl concurrently with WriteMessage) and closes
 // the socket, which unblocks a pending read or write.
@@ -109,9 +112,12 @@ func (c *Conn) Close() error {
 // code, which lies in the application range 4000-4999).
 func (c *Conn) CloseWithCode(code int, reason string) error {
 	c.closeOnce.Do(func() {
+		// The close message is best effort: WriteControl waits for a
+		// writer stuck in WriteMessage, so bound it tightly (the session
+		// has already failed its streams; closing must not linger).
 		_ = c.c.WriteControl(websocket.CloseMessage,
 			websocket.FormatCloseMessage(code, wsprotocol.TruncateCloseReason(reason)),
-			time.Now().Add(c.opts.WriteWait))
+			time.Now().Add(min(c.opts.WriteWait, closeMessageWait)))
 		c.closeErr = c.c.Close()
 	})
 	return c.closeErr
