@@ -361,8 +361,10 @@ func (c startErrClient) StartAgent(context.Context, string, string, string, stri
 
 // TestRecordedRuntime_RestartStartLegFailureRecordsStopped pins that when a
 // restart's stop leg succeeds and its start leg fails, the hub records the
-// agent as stopped rather than leaving its pre-restart phase in place, and
-// still relays the start leg's runtime_unavailable answer.
+// agent as stopped the way an explicit stop does (phase, container status,
+// exposed ports cleared, status event published) rather than leaving its
+// pre-restart state in place, and still relays the start leg's
+// runtime_unavailable answer.
 func TestRecordedRuntime_RestartStartLegFailureRecordsStopped(t *testing.T) {
 	srv, s := testServer(t)
 	agent := setupBrokerAgentInPhase(t, s, "restart-start-fails", "running")
@@ -372,6 +374,10 @@ func TestRecordedRuntime_RestartStartLegFailureRecordsStopped(t *testing.T) {
 	d := NewHTTPAgentDispatcherWithClient(s, startErrClient{mockClient, runtimeUnavailableErr()}, false, slog.Default())
 	d.SetTokenGenerator(staticTokenGenerator{})
 	srv.SetDispatcher(d)
+	require.NoError(t, s.UpdateAgentExposedPorts(context.Background(), agent.ID,
+		[]store.ExposedPort{{Port: 4000, Label: "web", ExposedAt: time.Now()}}))
+	ep := &trackingEventPublisher{}
+	srv.events = ep
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/restart", nil)
 
@@ -381,6 +387,14 @@ func TestRecordedRuntime_RestartStartLegFailureRecordsStopped(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, string(state.PhaseStopped), got.Phase)
 	require.Equal(t, "stopped", got.ContainerStatus)
+	require.Empty(t, got.ExposedPorts, "exposed ports must be cleared as an explicit stop does")
+	var published bool
+	for _, a := range ep.publishedAgents() {
+		if a.ID == agent.ID && a.Phase == string(state.PhaseStopped) {
+			published = true
+		}
+	}
+	require.True(t, published, "no stopped status event was published")
 }
 
 // TestRecordedRuntime_ForceDeleteRemovesHubRecord pins that force=true still

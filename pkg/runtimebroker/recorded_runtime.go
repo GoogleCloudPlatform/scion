@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -172,6 +173,11 @@ func (s *Server) applyRecordedRuntime(r *http.Request, id, projectID string) (co
 			"agent_id", id, "runtime", recorded)
 		return ctx, recorded, nil
 	}
+	// Selection rule. "Lists the agent" means a runtime's List returned it;
+	// a List that fails counts as not listing it. So a recorded-type runtime
+	// whose List errors does not hand the request to another runtime, and
+	// the request stays in the recorded type unless another runtime
+	// positively lists the agent.
 	restricted := withRecordedRuntime(ctx, canonical)
 	registered := s.defaultRuntimeAllowed(restricted) || len(s.sortedAuxiliaryRuntimesFor(restricted)) > 0
 	if registered {
@@ -181,8 +187,7 @@ func (s *Server) applyRecordedRuntime(r *http.Request, id, projectID string) (co
 	}
 	if _, rt, found := s.findAgentRuntimeTarget(ctx, id, projectID); found && rt != nil {
 		actual := runtimeMatchName(rt.Name())
-		s.agentLifecycleLog.Warn("Agent found in a runtime other than its recorded type; using that runtime",
-			"agent_id", id, "recorded_runtime", recorded, "runtime", actual)
+		s.logRecordedRuntimeMismatch(id, projectID, recorded, actual)
 		return withRecordedRuntime(ctx, actual), recorded, nil
 	}
 	if registered {
@@ -191,6 +196,25 @@ func (s *Server) applyRecordedRuntime(r *http.Request, id, projectID string) (co
 	s.agentLifecycleLog.Warn("Recorded runtime has no registered manager on this broker and no runtime lists the agent",
 		"agent_id", id, "runtime", recorded)
 	return ctx, recorded, fmt.Errorf("%w: %s", errRuntimeNotRegistered, recorded)
+}
+
+// recordedRuntimeMismatchLogged holds the agent/recorded/actual combinations
+// whose mismatch has already been logged at warn level in this process. One
+// entry per agent whose recorded type is wrong, so it stays small.
+var recordedRuntimeMismatchLogged sync.Map
+
+// logRecordedRuntimeMismatch logs that an agent was found in a runtime other
+// than its recorded type: at warn level the first time for that agent and
+// pair of types in this process, at debug level after that, since every
+// gated request for the agent repeats the same finding.
+func (s *Server) logRecordedRuntimeMismatch(id, projectID, recorded, actual string) {
+	key := projectID + "\x00" + id + "\x00" + recorded + "\x00" + actual
+	log := s.agentLifecycleLog.Debug
+	if _, seen := recordedRuntimeMismatchLogged.LoadOrStore(key, struct{}{}); !seen {
+		log = s.agentLifecycleLog.Warn
+	}
+	log("Agent found in a runtime other than its recorded type; using that runtime",
+		"agent_id", id, "project_id", projectID, "recorded_runtime", recorded, "runtime", actual)
 }
 
 // runtimeNotRegisteredMessage is the client-facing text for
@@ -209,14 +233,17 @@ func writeRuntimeNotRegistered(w http.ResponseWriter, recorded string) {
 // isExistingAgentRequest reports whether handleAgentByID must apply the
 // recorded-runtime check to action before dispatching it: the bare GET and
 // DELETE (action ""), and every handleAgentAction action except start (which
-// resolves its runtime from settings, ptone/scion#2709) and keys (which
-// applies the check itself so it can answer in its own result shape).
+// resolves its runtime from settings, ptone/scion#2709), keys (which applies
+// the check itself so it can answer in its own result shape) and stats (a
+// placeholder that reads no runtime).
 // Unknown actions are left to handleAgentAction's 404.
 func isExistingAgentRequest(action string) bool {
 	if action == "" {
 		return true
 	}
-	if action == api.AgentActionStart || action == api.AgentActionKeys {
+	// Stats is a placeholder that reads no runtime, so the check would only
+	// add List calls.
+	if action == api.AgentActionStart || action == api.AgentActionKeys || action == api.AgentActionStats {
 		return false
 	}
 	_, ok := api.RuntimeBrokerAgentActionMethod(action)

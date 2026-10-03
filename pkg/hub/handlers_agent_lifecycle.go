@@ -542,15 +542,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 					// showing its pre-restart phase until the next
 					// heartbeat.
 					s.releaseBrokerQuota(ctx, agent)
-					zero := 0
-					if err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
-						Phase:           string(state.PhaseStopped),
-						ContainerStatus: "stopped",
-						ExitCode:        &zero,
-					}); err != nil {
-						slog.Warn("Restart: failed to record stopped state after start leg failed",
-							"agent_id", id, "error", err)
-					}
+					s.recordRestartStopped(ctx, agent.ID)
 				} else {
 					// The container may still be running: keep a
 					// reservation this call did not create.
@@ -627,6 +619,33 @@ type stopAllResult struct {
 	Name   string `json:"name"`
 	Status string `json:"status"`
 	Error  string `json:"error,omitempty"`
+}
+
+// recordRestartStopped records a restart whose stop leg succeeded but whose
+// start leg failed the way an explicit stop is recorded: phase and container
+// status stopped, exposed ports cleared, and a status event published, so
+// clients do not keep showing the pre-restart state until the next
+// heartbeat. Failures are logged; the caller still reports the start error.
+func (s *Server) recordRestartStopped(ctx context.Context, id string) {
+	s.clearExposedPortsForAgent(ctx, id)
+	zero := 0
+	if err := s.store.UpdateAgentStatus(ctx, id, store.AgentStatusUpdate{
+		Phase:           string(state.PhaseStopped),
+		ContainerStatus: "stopped",
+		ExitCode:        &zero,
+	}); err != nil {
+		slog.Warn("Restart: failed to record stopped state after start leg failed",
+			"agent_id", id, "error", err)
+		return
+	}
+	stored, err := s.store.GetAgent(ctx, id)
+	if err != nil {
+		slog.Warn("Restart: failed to fetch agent for status event", "agent_id", id, "error", err)
+		return
+	}
+	if stored.DeletedAt.IsZero() {
+		s.events.PublishAgentStatus(ctx, stored)
+	}
 }
 
 // StopAllAgentsResponse is the response from the stop-all endpoint.

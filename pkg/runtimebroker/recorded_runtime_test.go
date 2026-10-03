@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -690,5 +691,112 @@ func TestRecordedRuntime_AliasNamedRuntimeMatches(t *testing.T) {
 	}
 	if auxMgr.acted() == 0 {
 		t.Error("the k8s-named runtime holding the agent did not act")
+	}
+}
+
+// TestRecordedRuntime_RecordlessStopProbeFollowsRecordedType pins the stop
+// path's record-less-actor probe under the recorded-type rule. A
+// pre-restart substrate agent is listed by no runtime (it has no record),
+// so the request is kept in its recorded type:
+//   - recorded "substrate": the probe runs over the substrate runtime and
+//     stop answers 409 identity-unknown, as it does without a recorded type;
+//   - recorded "docker", with a docker runtime registered that does not hold
+//     the agent: the probe sees only docker, finds no record-less actor, and
+//     stop answers the idempotent 202 without touching substrate.
+func TestRecordedRuntime_RecordlessStopProbeFollowsRecordedType(t *testing.T) {
+	for _, tc := range []struct {
+		recorded string
+		want     int
+	}{
+		{"substrate", http.StatusConflict},
+		{"docker", http.StatusAccepted},
+	} {
+		t.Run(tc.recorded, func(t *testing.T) {
+			srv, fc := newTestSubstrateBrokerServer(t)
+			runSubstrateAgentForProject(t, srv.manager, "dev", "projb", gapProjBID, testProjectScionDir(t, "projb"))
+			simulateBrokerRestart(t)
+			dockerMgr := &rrManager{}
+			srv.auxiliaryRuntimesMu.Lock()
+			srv.auxiliaryRuntimes["docker"] = auxiliaryRuntime{Runtime: newRRRuntime("docker", dockerMgr), Manager: dockerMgr}
+			srv.auxiliaryRuntimesMu.Unlock()
+
+			w := serveRR(srv, http.MethodPost, "/api/v1/agents/dev/stop?projectId="+gapProjBID+"&"+api.RecordedRuntimeQueryParam+"="+tc.recorded, "")
+
+			if w.Code != tc.want {
+				t.Fatalf("status = %d, want %d; body = %s", w.Code, tc.want, w.Body.String())
+			}
+			if tc.want == http.StatusConflict && decodeBrokerAPIError(t, w) != ErrCodeAgentIdentityUnknown {
+				t.Errorf("body = %s, want %s", w.Body.String(), ErrCodeAgentIdentityUnknown)
+			}
+			if dockerMgr.acted() != 0 {
+				t.Error("the docker runtime acted on an agent it does not hold")
+			}
+			fc.mu.Lock()
+			defer fc.mu.Unlock()
+			if n := len(fc.deleteActorCalls); n != 0 {
+				t.Errorf("DeleteActor called %d time(s), want 0", n)
+			}
+		})
+	}
+}
+
+// countingHandler counts log records by level.
+type countingHandler struct {
+	mu     sync.Mutex
+	counts map[slog.Level]int
+}
+
+func (h *countingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *countingHandler) Handle(_ context.Context, r slog.Record) error {
+	if !strings.Contains(r.Message, "other than its recorded type") {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.counts[r.Level]++
+	return nil
+}
+func (h *countingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *countingHandler) WithGroup(string) slog.Handler      { return h }
+
+// TestRecordedRuntime_MismatchLoggedOncePerAgent pins that an agent found in
+// a runtime other than its recorded type is logged at warn level once per
+// agent in the process, and at debug level on later requests.
+func TestRecordedRuntime_MismatchLoggedOncePerAgent(t *testing.T) {
+	srv, _, _ := newRecordedRuntimeServer(t, false)
+	h := &countingHandler{counts: map[slog.Level]int{}}
+	srv.agentLifecycleLog = slog.New(h)
+	// Clear the process-wide record so earlier tests do not affect the count.
+	q := "?projectId=" + rrProject + "&" + api.RecordedRuntimeQueryParam + "=kubernetes"
+	recordedRuntimeMismatchLogged.Range(func(k, _ any) bool {
+		recordedRuntimeMismatchLogged.Delete(k)
+		return true
+	})
+
+	for i := 0; i < 3; i++ {
+		if w := serveRR(srv, http.MethodGet, "/api/v1/agents/"+rrAgent+q, ""); w.Code != http.StatusOK {
+			t.Fatalf("request %d: status = %d; body = %s", i, w.Code, w.Body.String())
+		}
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.counts[slog.LevelWarn] != 1 || h.counts[slog.LevelDebug] != 2 {
+		t.Errorf("mismatch log counts = %v, want 1 warn and 2 debug", h.counts)
+	}
+}
+
+// TestRecordedRuntime_StatsNotGated pins that the placeholder stats route,
+// which reads no runtime, does not run the recorded-runtime lookups.
+func TestRecordedRuntime_StatsNotGated(t *testing.T) {
+	srv, defaultMgr, auxMgr := newRecordedRuntimeServer(t, true)
+
+	w := serveRR(srv, http.MethodGet, "/api/v1/agents/"+rrAgent+"/stats"+rrQuery("kubernetes"), "")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d; body = %s", w.Code, w.Body.String())
+	}
+	if n := defaultMgr.lists.Load() + auxMgr.lists.Load(); n != 0 {
+		t.Errorf("stats made %d List calls, want 0", n)
 	}
 }
