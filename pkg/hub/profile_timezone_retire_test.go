@@ -497,17 +497,10 @@ func TestPutServerConfig_RemovedProfileTimezone422(t *testing.T) {
 		})
 
 		t.Run("file "+tz, func(t *testing.T) {
-			srv, _, settingsPath := fileModeGCPIdentityServer(t)
-			before, err := os.ReadFile(settingsPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			rr := httptest.NewRecorder()
-			srv.handlePutServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body))
+			rr, settingsPath := fileModePutServerConfig(t, &Server{}, body)
 			assertRemovedProfileTimezone422(t, rr, "team.west")
-			after, _ := os.ReadFile(settingsPath)
-			if string(after) != string(before) {
-				t.Errorf("rejected PUT changed settings.yaml:\n%s", after)
+			if data, err := os.ReadFile(settingsPath); !os.IsNotExist(err) {
+				t.Errorf("rejected PUT wrote settings.yaml (err %v):\n%s", err, data)
 			}
 		})
 	}
