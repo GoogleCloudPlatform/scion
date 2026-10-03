@@ -389,6 +389,78 @@ func TestConvMessages_AgentCaller_ProvenanceScopedToDMParties(t *testing.T) {
 	})
 }
 
+// User callers are not scoped: a user party to the DM key sees both
+// provenance fields even on a row whose parties are outside the key.
+func TestConvMessages_UserCaller_ProvenanceUnscoped(t *testing.T) {
+	srv, s, _, agentA, _, agentZ := routeAuthzSetup(t)
+	ctx := context.Background()
+
+	userID := tid("provenance-user")
+	key, err := messages.DMConversationKey("agent", agentA.ID, "user", userID)
+	require.NoError(t, err)
+	conv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
+		Kind: "direct", Surface: "native", ExternalRef: key, DriftState: "active",
+	})
+	require.NoError(t, err)
+	nonKeyRow := createStampedRow(t, s, conv, "provenance-user-a-to-z", agentA, agentZ)
+
+	user := NewAuthenticatedUser(userID, "prov-user@example.com", "Prov User", "member", "cli")
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages/"+nonKeyRow.ID, nil)
+	req = req.WithContext(contextWithIdentity(ctx, user))
+	rr := httptest.NewRecorder()
+	srv.handleGetConversationMessage(rr, req, conv.ID, nonKeyRow.ID)
+
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	var got store.Message
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
+	require.NotNil(t, got.SenderProjectID)
+	require.NotNil(t, got.RecipientProjectID)
+	assert.Equal(t, agentA.ProjectID, *got.SenderProjectID)
+	assert.Equal(t, agentZ.ProjectID, *got.RecipientProjectID)
+}
+
+// Group conversations have no DM key, so an agent caller never sees the
+// provenance fields there, on either read endpoint.
+func TestConvMessages_AgentCaller_GroupConversationOmitsProvenance(t *testing.T) {
+	srv, s := testServer(t)
+	project, agent, conv := setupConvTestData(t, s)
+	addConvParticipant(t, s, conv.ID, "agent", agent.ID)
+	grantAgentProjectAccess(t, s, agent.ID, project.ID)
+
+	sp, rp := project.ID, project.ID
+	msg := &store.Message{
+		ID: tid("provenance-group-row"), ProjectID: project.ID, AgentID: agent.ID,
+		Sender: "agent:" + agent.Slug, SenderID: agent.ID, SenderProjectID: &sp,
+		Recipient: "user:test@example.com", RecipientID: tid("provenance-group-user"), RecipientProjectID: &rp,
+		Msg: "hello", Type: messages.TypeInstruction, ConversationID: conv.ID,
+	}
+	require.NoError(t, s.CreateMessage(context.Background(), msg))
+	scopes := []AgentTokenScope{ScopeProjectRead}
+
+	t.Run("get", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages/"+msg.ID, nil)
+		req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, scopes))
+		rr := httptest.NewRecorder()
+		srv.handleGetConversationMessage(rr, req, conv.ID, msg.ID)
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+		assert.NotContains(t, rr.Body.String(), "senderProjectId")
+		assert.NotContains(t, rr.Body.String(), "recipientProjectId")
+	})
+
+	t.Run("list", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages", nil)
+		req = req.WithContext(agentContextWithScopes(agent.ID, project.ID, scopes))
+		rr := httptest.NewRecorder()
+		srv.handleConvListMessages(rr, req, conv.ID)
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+		var got store.ListResult[store.Message]
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
+		require.Len(t, got.Items, 1)
+		assert.Nil(t, got.Items[0].SenderProjectID)
+		assert.Nil(t, got.Items[0].RecipientProjectID)
+	})
+}
+
 func TestScopeProvenanceToDMParties(t *testing.T) {
 	aID, uID, zID := tid("scope-prov-a"), tid("scope-prov-u"), tid("scope-prov-z")
 	key, err := messages.DMConversationKey("agent", aID, "user", uID)
@@ -413,6 +485,17 @@ func TestScopeProvenanceToDMParties(t *testing.T) {
 	m = row("agent:u", uID, "agent:a", aID) // right ID, wrong kind
 	scopeProvenanceToDMParties(direct, m)
 	assert.Nil(t, m.SenderProjectID)
+	assert.Nil(t, m.RecipientProjectID)
+
+	m = row("agent:a", aID, "user:u@example.com", uID)
+	scopeProvenanceToDMParties(nil, m)
+	assert.Nil(t, m.SenderProjectID, "nil conversation has no DM key")
+	assert.Nil(t, m.RecipientProjectID)
+
+	m = row("agent:a", aID, "user:u@example.com", uID)
+	scopeProvenanceToDMParties(&store.Conversation{Kind: "direct", ExternalRef: "not-a-dm-key"}, m)
+	assert.Nil(t, m.SenderProjectID, "unparseable DM key")
+	assert.Nil(t, m.RecipientProjectID)
 
 	m = row("agent:a", aID, "user:u@example.com", uID)
 	scopeProvenanceToDMParties(&store.Conversation{Kind: "group"}, m)
