@@ -19,6 +19,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -426,8 +428,10 @@ func (m *blockingHookedManager) Start(ctx context.Context, opts api.StartOptions
 }
 
 // A local stop or delete (launchRecord.CancelLocal) ending Start: no
-// terminal is sent, and the resources recorded so far are cleaned up,
-// unless the launch already completed (claim or checkpoint answer).
+// terminal is sent, and the resources recorded so far are cleaned up on a
+// live context, unless the launch already completed (claim or checkpoint
+// answer). The agent files stay, even with the launch's marker in place:
+// they belong to the local stop or delete handler.
 func TestRunLaunch_LocalCancelDuringStart_CleansUpRecordedHandles(t *testing.T) {
 	completedAnswer := &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultCompleted}
 	for _, tc := range []struct {
@@ -458,7 +462,15 @@ func TestRunLaunch_LocalCancelDuringStart_CleansUpRecordedHandles(t *testing.T) 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			rec := newLaunchRecord("L-lc", "agent-lc", store.LaunchKindCreate, "", time.Now().Add(time.Hour), cancel)
-			lc := launchCtx{opts: api.StartOptions{Name: "agent-lc"}, mgr: mgr, key: launchKey{Slug: "agent-lc"}}
+			projectDir := t.TempDir()
+			agentDir := filepath.Join(projectDir, "agents", "agent-lc")
+			if err := os.MkdirAll(agentDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(agentDir, "prompt.md"), nil, 0644); err != nil {
+				t.Fatal(err)
+			}
+			lc := launchCtx{opts: api.StartOptions{Name: "agent-lc", ProjectPath: projectDir}, mgr: mgr, key: launchKey{Slug: "agent-lc"}}
 
 			done := make(chan struct{})
 			go func() {
@@ -469,6 +481,11 @@ func TestRunLaunch_LocalCancelDuringStart_CleansUpRecordedHandles(t *testing.T) 
 			case <-mgr.started:
 			case <-time.After(10 * time.Second):
 				t.Fatal("Start did not reach its blocking point")
+			}
+			// The marker holds this launch until runLaunch returns, so a
+			// file cleanup in the cancel branch would delete the files.
+			if !launchMarkerMatches(projectDir, false, "agent-lc", "L-lc") {
+				t.Fatal("the launch marker does not hold this launch; the file check would prove nothing")
 			}
 			rec.CancelLocal()
 			select {
@@ -484,6 +501,15 @@ func TestRunLaunch_LocalCancelDuringStart_CleansUpRecordedHandles(t *testing.T) 
 				if got := (&hookedManager{mgr.asyncManager}).cleanupHandles(); len(got) != 1 || got[0] != hookSecret {
 					t.Fatalf("cleanup handles = %+v, want the recorded secret", got)
 				}
+				mgr.mu.Lock()
+				ctxErr := mgr.cleanupCtxErr
+				mgr.mu.Unlock()
+				if ctxErr != nil {
+					t.Fatalf("cleanup ran on a done context: %v", ctxErr)
+				}
+			}
+			if _, err := os.Stat(agentDir); err != nil {
+				t.Fatalf("agent files removed after a local cancel: %v", err)
 			}
 			if terms := terminalReports(rtb); len(terms) != 0 {
 				t.Fatalf("terminal sent after a local cancel: %+v", terms)
