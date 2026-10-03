@@ -30,11 +30,12 @@ import (
 // (database-derived, clock-immune); a new row (first registration or after
 // a prune) is seeded with the registry clock's Unix milliseconds, so
 // generations stay monotonic across a prune provided clocks are not wrong
-// by more than the prune horizon. Session rows reference it with ON DELETE CASCADE.
+// by more than the prune horizon. Session rows reference it with ON DELETE
+// CASCADE.
 //
 // Rows are NOT deleted by the stale-relay reaper (it deletes the relay's
-// sessions only): keeping the row is what keeps generation monotonic for a
-// reused instance_id. See pkg/conduit/registry and
+// sessions only): keeping the row keeps re-registration stored+1
+// (clock-immune); see the seed rule above. See pkg/conduit/registry and
 // pkg/store/entadapter/conduit_registry_store.go.
 type RelayInstance struct {
 	ent.Schema
