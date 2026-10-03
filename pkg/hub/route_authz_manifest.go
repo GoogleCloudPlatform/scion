@@ -142,6 +142,9 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/users/me/templates":        "authenticated", // User-scoped templates
 	"/api/v1/users/me/templates/":       "authenticated", // User-scoped template by ID
 
+	// ── User-scoped terminal workspace ─────────────────────────────────
+	"/api/v1/users/me/terminal-workspace": "authenticated", // GET/PUT: caller's own list; session/dev credential only (requireSessionCredential)
+
 	// ── Hub-scoped injected skills ─────────────────────────────────────
 	"/api/v1/hub/settings/injected-skills": "authenticated", // GET: authenticated (any user), PUT: admin (role check in handler)
 
@@ -207,6 +210,9 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/admin/access-constraint-previews/":  "admin", // Admin access constraint preview by ID
 	"/api/v1/admin/effective-access":             "admin", // Admin effective access
 
+	// ── Access constraint audit (method-scoped) ────────────────────────
+	"GET /api/v1/admin/access-constraints/{id}/audit": "admin", // Constraint audit history — hub.audit.read (super-admin) via Decide in handler; denials return 404
+
 	// ── Metrics dashboard (intentionally not admin-only) ───────────────
 	"/api/v1/metrics/":                "authenticated", // Metrics dashboard — any session
 	"/api/v1/admin/metrics-dashboard": "authenticated", // Legacy metrics dashboard alias — any session
@@ -229,8 +235,6 @@ var routeAuthzManifest = map[string]string{
 
 	// ── Native chat (conditionally registered) ─────────────────────────
 	"/api/v1/chat/prefs":          "authenticated", // Chat preferences
-	"/api/v1/chat/threads":        "authenticated", // Chat threads
-	"/api/v1/chat/threads/":       "authenticated", // Chat thread routes
 	"/api/v1/chat/spaces":         "authenticated", // Chat spaces
 	"/api/v1/chat/spaces/":        "authenticated", // Chat space routes
 	"/api/v1/chat/conversations/": "authenticated", // Chat conversation routes
@@ -241,6 +245,9 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/chat/search":         "authenticated", // Chat search
 	"/api/v1/chat/attachments":    "authenticated", // Chat attachments
 	"/api/v1/chat/attachments/":   "authenticated", // Chat attachment by ID
+
+	// ── gs:// link fetch (native chat) ─────────────────────────────────
+	"/api/v1/gcs/object": "authenticated", // GET: user identity only (handler); access derived from message readability, never client-supplied SA
 
 	// ── Agent GCP identity ─────────────────────────────────────────────
 	"/api/v1/agent/gcp-token":          "agent-token", // Agent GCP access token
