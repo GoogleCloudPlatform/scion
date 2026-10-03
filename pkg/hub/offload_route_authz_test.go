@@ -405,18 +405,43 @@ func TestConvMessages_UserCaller_ProvenanceUnscoped(t *testing.T) {
 	nonKeyRow := createStampedRow(t, s, conv, "provenance-user-a-to-z", agentA, agentZ)
 
 	user := NewAuthenticatedUser(userID, "prov-user@example.com", "Prov User", "member", "cli")
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages/"+nonKeyRow.ID, nil)
-	req = req.WithContext(contextWithIdentity(ctx, user))
-	rr := httptest.NewRecorder()
-	srv.handleGetConversationMessage(rr, req, conv.ID, nonKeyRow.ID)
 
-	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
-	var got store.Message
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
-	require.NotNil(t, got.SenderProjectID)
-	require.NotNil(t, got.RecipientProjectID)
-	assert.Equal(t, agentA.ProjectID, *got.SenderProjectID)
-	assert.Equal(t, agentZ.ProjectID, *got.RecipientProjectID)
+	t.Run("get", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages/"+nonKeyRow.ID, nil)
+		req = req.WithContext(contextWithIdentity(ctx, user))
+		rr := httptest.NewRecorder()
+		srv.handleGetConversationMessage(rr, req, conv.ID, nonKeyRow.ID)
+
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+		var got store.Message
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
+		require.NotNil(t, got.SenderProjectID)
+		require.NotNil(t, got.RecipientProjectID)
+		assert.Equal(t, agentA.ProjectID, *got.SenderProjectID)
+		assert.Equal(t, agentZ.ProjectID, *got.RecipientProjectID)
+	})
+
+	t.Run("list", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/"+conv.ID+"/messages", nil)
+		req = req.WithContext(contextWithIdentity(ctx, user))
+		rr := httptest.NewRecorder()
+		srv.handleConvListMessages(rr, req, conv.ID)
+
+		require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+		var got store.ListResult[store.Message]
+		require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &got))
+		var row *store.Message
+		for i := range got.Items {
+			if got.Items[i].ID == nonKeyRow.ID {
+				row = &got.Items[i]
+			}
+		}
+		require.NotNil(t, row, "non-key row must be listed")
+		require.NotNil(t, row.SenderProjectID)
+		require.NotNil(t, row.RecipientProjectID)
+		assert.Equal(t, agentA.ProjectID, *row.SenderProjectID)
+		assert.Equal(t, agentZ.ProjectID, *row.RecipientProjectID)
+	})
 }
 
 // Group conversations have no DM key, so an agent caller never sees the

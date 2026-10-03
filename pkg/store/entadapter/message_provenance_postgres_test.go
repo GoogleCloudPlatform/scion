@@ -33,8 +33,8 @@ import (
 // (ptone/scion#2282): on a messages table that predates the
 // sender_project_id / recipient_project_id columns, AutoMigrate adds them as
 // nullable uuid columns, legacy rows read back with NULL provenance, and new
-// stamps round-trip. Skips unless built with -tags integration and
-// SCION_TEST_POSTGRES_URL is set:
+// stamps round-trip. Always compiled; skips unless the enttest Postgres
+// backend is built (-tags integration) and SCION_TEST_POSTGRES_URL is set:
 //
 //	SCION_TEST_POSTGRES_URL='postgres://user:pass@host:5432/postgres?sslmode=disable' \
 //	  go test -tags integration -run TestMessageProvenanceColumns_AdditiveUpgrade_Postgres ./pkg/store/entadapter/
