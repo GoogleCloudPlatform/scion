@@ -277,17 +277,24 @@ func (r *Registry) ReapStaleSessions(ctx context.Context, olderThan time.Duratio
 // anyway. A pruned id that later re-registers is seeded with a clock-based
 // generation (see RegisterRelay), so it never reuses a generation an old
 // process might still hold, provided clocks are not wrong by more than
-// the prune horizon. An explicit olderThan below Config.RelayStaleAfter
-// returns ErrInvalidInput, so live idle relays are never pruned; callers
-// should keep it far larger than the expected clock skew (the default 7d).
+// the prune horizon. An explicit olderThan below MinRelayPruneAfter (1h),
+// or below Config.RelayStaleAfter if that is larger, returns
+// ErrInvalidInput without touching the store, so live idle relays are
+// never pruned; callers should keep it far larger than the expected clock
+// skew (the default 7d).
+//
+// On Postgres a session inserted concurrently into a relay being pruned can
+// be cascade-deleted (see entadapter DeleteIdleRelays). It fails closed: the
+// session is already relay_stale, and the relay is superseded on its next
+// heartbeat. The floor keeps this to relays idle for at least an hour.
 // Run it from the same singleton as ReapStaleRelays.
 func (r *Registry) PruneRelayInstances(ctx context.Context, olderThan time.Duration, now time.Time) (int, error) {
 	if olderThan <= 0 {
 		olderThan = DefaultRelayPruneAfter
 	}
-	if olderThan < r.cfg.RelayStaleAfter {
-		return 0, fmt.Errorf("%w: relay prune horizon %s is below RelayStaleAfter %s",
-			ErrInvalidInput, olderThan, r.cfg.RelayStaleAfter)
+	if floor := max(MinRelayPruneAfter, r.cfg.RelayStaleAfter); olderThan < floor {
+		return 0, fmt.Errorf("%w: relay prune horizon %s is below the minimum %s",
+			ErrInvalidInput, olderThan, floor)
 	}
 	return r.store.DeleteIdleRelays(ctx, now.UTC().Add(-olderThan))
 }

@@ -476,8 +476,16 @@ func (s *ConduitRegistryStore) DeleteStaleSessions(ctx context.Context, staleBef
 }
 
 // DeleteIdleRelays implements registry.Store: one DELETE of relay rows that
-// are stale and have no sessions. Because the row must have no sessions,
-// the ON DELETE CASCADE never fires from here.
+// are stale and have no sessions. On SQLite the writers are serialised, so
+// the ON DELETE CASCADE never fires from here. On Postgres (READ COMMITTED)
+// it can: if InsertSessionWithNextEpoch holds the relay row FOR SHARE and
+// commits a session while this DELETE waits on that lock, the DELETE is not
+// re-evaluated and the FK cascade removes the just-inserted session. That
+// fails closed: the session is already relay_stale (never eligible or
+// admissible), the relay gets ErrRelaySuperseded on its next heartbeat and
+// ErrSessionNotFound on TouchSession, and closes it. The registry's
+// MinRelayPruneAfter floor (1h) limits this to relays idle for an hour or
+// more that still insert.
 func (s *ConduitRegistryStore) DeleteIdleRelays(ctx context.Context, staleBefore time.Time) (int, error) {
 	n, err := s.client.RelayInstance.Delete().
 		Where(relayinstance.LastSeenLT(staleBefore.UTC()), relayinstance.Not(relayinstance.HasSessions())).

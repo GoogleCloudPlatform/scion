@@ -45,6 +45,11 @@ const (
 	// DefaultRelayPruneAfter is how long a relay row with no sessions must
 	// have been stale before PruneRelayInstances removes it.
 	DefaultRelayPruneAfter = 7 * 24 * time.Hour
+	// MinRelayPruneAfter is the smallest explicit horizon PruneRelayInstances
+	// accepts. It keeps the Postgres prune/insert cascade window (see
+	// PruneRelayInstances) to relays that have missed heartbeats for at
+	// least an hour, and keeps the generation seed's clock assumption weak.
+	MinRelayPruneAfter = time.Hour
 )
 
 var (
