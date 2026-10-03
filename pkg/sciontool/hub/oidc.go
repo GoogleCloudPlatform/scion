@@ -84,15 +84,21 @@ func (c *Client) configureOIDCTransport() {
 }
 
 // newTransportFileSource returns a file-backed transport source when this
-// agent was given a hub-provided transport token: the bootstrap env value
-// is set, or the transport token file exists. Returns nil otherwise.
+// agent was given a hub-provided transport token, signalled the same way
+// transportauth.FromEnv detects it: SCION_TRANSPORT_TOKEN_FILE (set by
+// sciontool init for itself and its children) or the bootstrap
+// SCION_TRANSPORT_TOKEN value. The file path is SCION_TRANSPORT_TOKEN_FILE
+// when set, else the default under the agent home. Returns nil otherwise,
+// so a transport token file left over from an earlier configuration is
+// not used once the hub stops providing one.
 func newTransportFileSource() *transportauth.FileSource {
 	envTok := os.Getenv(transportauth.EnvTransportToken)
-	path := TransportTokenFilePath()
-	if envTok == "" {
-		if _, err := os.Lstat(path); err != nil {
-			return nil
-		}
+	path := os.Getenv(transportauth.EnvTransportTokenFile)
+	if envTok == "" && path == "" {
+		return nil
+	}
+	if path == "" {
+		path = TransportTokenFilePath()
 	}
 	src := transportauth.NewFileSource(path, readTransportTokenFile)
 	src.SetBootstrap(envTok)

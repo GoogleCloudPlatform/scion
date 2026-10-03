@@ -401,6 +401,7 @@ func TestConfigureOIDCTransport_FileWithoutEnv(t *testing.T) {
 	t.Setenv(transportauth.EnvTransportToken, "")
 	tok := makeTestJWT(time.Now().Add(time.Hour))
 	require.NoError(t, WriteTransportTokenFile(tok, 0, 0))
+	t.Setenv(transportauth.EnvTransportTokenFile, TransportTokenFilePath())
 
 	c := NewClientWithConfig("https://hub.example.com", "app", "agent-1")
 	c.configureOIDCTransport()
@@ -408,6 +409,36 @@ func TestConfigureOIDCTransport_FileWithoutEnv(t *testing.T) {
 	got, err := c.oidcSource.Token()
 	require.NoError(t, err)
 	assert.Equal(t, tok, got)
+}
+
+// TestConfigureOIDCTransport_FileIgnoredWithoutEnv verifies a transport
+// token file is not used unless the agent was given a transport token
+// (SCION_TRANSPORT_TOKEN or SCION_TRANSPORT_TOKEN_FILE), matching
+// transportauth.FromEnv.
+func TestConfigureOIDCTransport_FileIgnoredWithoutEnv(t *testing.T) {
+	t.Cleanup(SetTokenHome(t.TempDir()))
+	cleanup := overrideGCPDetection(false)
+	defer cleanup()
+	t.Setenv(transportauth.EnvTransportToken, "")
+	t.Setenv(transportauth.EnvTransportTokenFile, "")
+	require.NoError(t, WriteTransportTokenFile(makeTestJWT(time.Now().Add(time.Hour)), 0, 0))
+
+	assert.Nil(t, newTransportFileSource())
+	c := NewClientWithConfig("https://hub.example.com", "app", "agent-1")
+	c.configureOIDCTransport()
+	if fs, ok := c.oidcSource.(*transportauth.FileSource); ok && fs != nil {
+		t.Error("client uses the transport token file without a transport env var")
+	}
+}
+
+// TestReadTransportTokenFile_TestGuard verifies tests cannot read the real
+// default transport token file without SetTokenHome.
+func TestReadTransportTokenFile_TestGuard(t *testing.T) {
+	if tokenHomeOverridden {
+		t.Skip("token home already overridden")
+	}
+	_, err := readTransportTokenFile(TransportTokenFilePath())
+	require.Error(t, err)
 }
 
 // TestConfigureOIDCTransport_HonoursTransportMode verifies the sciontool

@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/user"
@@ -802,9 +803,15 @@ func (c *Client) applyRefreshTokens(tokens []RefreshTokenEntry, uid, gid int) {
 				continue
 			}
 			entryExpiry := time.Now().Add(time.Duration(entry.ExpiresIn) * time.Second)
-			// Update the OIDC transport's token source
+			// Update the OIDC transport's token source and, when that
+			// source is hub-provided, share the value through the file.
+			// Clients without a hub-provided source (none, or the
+			// metadata server) leave the file alone.
 			if c.oidcSource != nil {
 				c.oidcSource.SetToken(entry.Value, entryExpiry)
+			}
+			if !c.hasHubProvidedTransport() {
+				continue
 			}
 			if err := WriteTransportTokenFile(entry.Value, uid, gid); err != nil {
 				log.Error("Failed to persist refreshed transport token: %v", err)
@@ -812,6 +819,17 @@ func (c *Client) applyRefreshTokens(tokens []RefreshTokenEntry, uid, gid int) {
 			// app/scion_access is already handled via the legacy token field above
 		}
 	}
+}
+
+// hasHubProvidedTransport reports whether the client's transport source is
+// a hub-provided token (injected or file-backed), as opposed to none or a
+// self-refreshing metadata source.
+func (c *Client) hasHubProvidedTransport() bool {
+	switch c.oidcSource.(type) {
+	case *transportauth.InjectedSource, *transportauth.FileSource:
+		return true
+	}
+	return false
 }
 
 // adjustRefreshForTransportTokens checks if the OIDC source has a shorter
@@ -1596,10 +1614,41 @@ func SeedTransportTokenFile(token string, uid, gid int) (string, error) {
 	return path, WriteTransportTokenFile(token, uid, gid)
 }
 
+// RemoveTransportTokenFile removes the transport token file, resolving its
+// parent directories without following symlinks. A missing file is not an
+// error. It returns true if a file was removed.
+func RemoveTransportTokenFile() (bool, error) {
+	if testing.Testing() && !tokenHomeOverridden {
+		panic("scion/hub: RemoveTransportTokenFile called during a test without SetTokenHome()")
+	}
+	dirFd, leaf, err := dirfd.OpenParentNoFollow(TransportTokenFilePath())
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	defer func() { _ = syscall.Close(dirFd) }()
+	if err := dirfd.UnlinkAt(dirFd, leaf); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
 // readTransportTokenFile reads the transport token file through the same
 // symlink-safe, single-link-regular-file guard ReadTokenFile uses, since
 // sciontool init (root) reads it from a directory the workload owns.
+//
+// Under go test without SetTokenHome it refuses to read the default path,
+// because the token home resolves to the real agent user's home (not
+// $HOME) and tests must never pick up a live transport token.
 func readTransportTokenFile(path string) (string, error) {
+	if testing.Testing() && !tokenHomeOverridden && path == TransportTokenFilePath() {
+		return "", fmt.Errorf("scion/hub: refusing to read %s during a test without SetTokenHome()", path)
+	}
 	return readTokenFileGuarded(path)
 }
 

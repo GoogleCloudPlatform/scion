@@ -15,10 +15,13 @@
 package transportauth
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -107,12 +110,15 @@ func TestFileSource_PicksUpRewrittenFile(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, first, got)
 
+	fi1, err := os.Stat(path)
+	require.NoError(t, err)
+
 	second := makeTestJWT(time.Now().Add(60 * time.Minute))
+	require.Equal(t, len(first), len(second), "test needs same-length values")
 	writeTokenFile(t, path, second)
-	// Make sure the change is visible even on filesystems with coarse
-	// timestamps.
-	future := time.Now().Add(time.Second)
-	require.NoError(t, os.Chtimes(path, future, future))
+	// Same size and same mtime (as on a filesystem with coarse
+	// timestamps): the rename's new inode alone must trigger a re-read.
+	require.NoError(t, os.Chtimes(path, fi1.ModTime(), fi1.ModTime()))
 
 	got, err = src.Token()
 	require.NoError(t, err)
@@ -178,4 +184,137 @@ func TestFromEnv_HubclientStyleUsesFile(t *testing.T) {
 	require.NoError(t, err)
 	_ = resp.Body.Close()
 	assert.Equal(t, "Bearer "+fresh, gotProxy)
+}
+
+// N1: a file value that is not a JWT has no known expiry and must not beat
+// a valid env value.
+func TestFileSource_MalformedFileLosesToValidEnv(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tt")
+	writeTokenFile(t, path, "not-a-jwt")
+	env := makeTestJWT(time.Now().Add(30 * time.Minute))
+
+	src := NewFileSource(path, nil)
+	src.SetBootstrap(env)
+	got, err := src.Token()
+	require.NoError(t, err)
+	assert.Equal(t, env, got)
+	st := src.Status()
+	assert.Equal(t, SourceLabelEnv, st.InUse)
+	assert.True(t, st.FilePresent)
+	assert.True(t, st.FileExpiry.IsZero())
+}
+
+// A malformed file is still used when it is the only candidate.
+func TestFileSource_MalformedFileOnlyCandidate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tt")
+	writeTokenFile(t, path, "opaque-value")
+	src := NewFileSource(path, nil)
+	got, err := src.Token()
+	require.NoError(t, err)
+	assert.Equal(t, "opaque-value", got)
+	assert.True(t, src.Expiry().IsZero())
+}
+
+func TestFileSource_OversizedFileIgnored(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tt")
+	writeTokenFile(t, path, strings.Repeat("a", transportTokenFileMaxBytes+10))
+	env := makeTestJWT(time.Now().Add(30 * time.Minute))
+
+	src := NewFileSource(path, nil)
+	src.SetBootstrap(env)
+	got, err := src.Token()
+	require.NoError(t, err)
+	assert.Equal(t, env, got)
+	st := src.Status()
+	assert.False(t, st.FilePresent)
+	assert.Error(t, st.FileError)
+}
+
+func TestFileSource_EnvExpiringLaterWins(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tt")
+	writeTokenFile(t, path, makeTestJWT(time.Now().Add(10*time.Minute)))
+	env := makeTestJWT(time.Now().Add(50 * time.Minute))
+
+	src := NewFileSource(path, nil)
+	src.SetBootstrap(env)
+	got, err := src.Token()
+	require.NoError(t, err)
+	assert.Equal(t, env, got)
+	assert.Equal(t, SourceLabelEnv, src.Status().InUse)
+}
+
+func TestFileSource_FileDeletedFallsBackToEnv(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tt")
+	fileTok := makeTestJWT(time.Now().Add(50 * time.Minute))
+	writeTokenFile(t, path, fileTok)
+	env := makeTestJWT(time.Now().Add(20 * time.Minute))
+
+	src := NewFileSource(path, nil)
+	src.SetBootstrap(env)
+	got, err := src.Token()
+	require.NoError(t, err)
+	assert.Equal(t, fileTok, got)
+
+	require.NoError(t, os.Remove(path))
+	got, err = src.Token()
+	require.NoError(t, err)
+	assert.Equal(t, env, got)
+	assert.False(t, src.Status().FilePresent)
+}
+
+// One writer replacing the file (atomic renames) while readers call Token
+// and Status: readers never see an empty or partial value, and the final
+// value is the last one written. Run with -race.
+func TestFileSource_ConcurrentRefreshAndRead(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tt")
+	writeTokenFile(t, path, makeTestJWT(time.Now().Add(time.Minute)))
+
+	src := NewFileSource(path, nil)
+	const writes = 50
+	values := make([]string, writes)
+	for i := range values {
+		values[i] = makeTestJWT(time.Now().Add(time.Duration(i+2) * time.Minute))
+	}
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make(chan error, 4)
+	for r := 0; r < 4; r++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				tok, err := src.Token()
+				if err != nil || tok == "" {
+					errs <- fmt.Errorf("Token() = %q, %v", tok, err)
+					return
+				}
+				if _, perr := ParseTokenExpiry(tok); perr != nil {
+					errs <- fmt.Errorf("partial or malformed value read: %v", perr)
+					return
+				}
+				_ = src.Status()
+			}
+		}()
+	}
+	for i, v := range values {
+		tmp := filepath.Join(dir, fmt.Sprintf("tt.tmp%d", i))
+		require.NoError(t, os.WriteFile(tmp, []byte(v), 0o600))
+		require.NoError(t, os.Rename(tmp, path))
+	}
+	close(done)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+
+	got, err := src.Token()
+	require.NoError(t, err)
+	assert.Equal(t, values[writes-1], got)
 }

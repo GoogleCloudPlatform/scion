@@ -124,3 +124,79 @@ func TestStageTransportToken_NoEnv(t *testing.T) {
 		t.Error("stageTransportToken should be a no-op without the env var")
 	}
 }
+
+// TestStageTransportToken_UnsetsBootstrapExpiry verifies the bootstrap-only
+// expiry is removed from the environment along with the bootstrap value.
+func TestStageTransportToken_UnsetsBootstrapExpiry(t *testing.T) {
+	t.Cleanup(hub.SetTokenHome(t.TempDir()))
+	t.Setenv(transportauth.EnvTransportToken, makeDoctorTestJWT(time.Now().Add(time.Hour)))
+	t.Setenv(transportauth.EnvTransportTokenFile, "")
+	t.Setenv(transportauth.EnvTransportTokenExpiry, time.Now().Add(time.Hour).Format(time.RFC3339))
+
+	if !stageTransportToken(0, 0) {
+		t.Fatal("stageTransportToken returned false")
+	}
+	if _, ok := os.LookupEnv(transportauth.EnvTransportTokenExpiry); ok {
+		t.Errorf("%s still set after staging", transportauth.EnvTransportTokenExpiry)
+	}
+}
+
+// TestStageTransportToken_RemovesStaleFile verifies a transport token file
+// left in a persisted home is removed when this start provides no transport
+// token, so it cannot be used.
+func TestStageTransportToken_RemovesStaleFile(t *testing.T) {
+	t.Cleanup(hub.SetTokenHome(t.TempDir()))
+	if err := hub.WriteTransportTokenFile(makeDoctorTestJWT(time.Now().Add(time.Hour)), 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(transportauth.EnvTransportToken, "")
+	t.Setenv(transportauth.EnvTransportTokenFile, "")
+
+	if stageTransportToken(0, 0) {
+		t.Error("stageTransportToken should return false without the env var")
+	}
+	if _, err := os.Lstat(hub.TransportTokenFilePath()); !os.IsNotExist(err) {
+		t.Errorf("stale transport token file still present (err=%v)", err)
+	}
+}
+
+// TestStageTransportToken_KeepsFileAfterReExec verifies the file staged
+// before the re-exec (SCION_TRANSPORT_TOKEN_FILE set, bootstrap value gone)
+// is not removed.
+func TestStageTransportToken_KeepsFileAfterReExec(t *testing.T) {
+	t.Cleanup(hub.SetTokenHome(t.TempDir()))
+	if err := hub.WriteTransportTokenFile(makeDoctorTestJWT(time.Now().Add(time.Hour)), 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(transportauth.EnvTransportToken, "")
+	t.Setenv(transportauth.EnvTransportTokenFile, hub.TransportTokenFilePath())
+
+	stageTransportToken(0, 0)
+	if _, err := os.Lstat(hub.TransportTokenFilePath()); err != nil {
+		t.Errorf("staged transport token file removed: %v", err)
+	}
+}
+
+// TestStageTransportToken_StaleSymlinkNotFollowed verifies removal unlinks a
+// symlink planted at the file path rather than its target.
+func TestStageTransportToken_StaleSymlinkNotFollowed(t *testing.T) {
+	home := t.TempDir()
+	t.Cleanup(hub.SetTokenHome(home))
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.WriteFile(target, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".scion"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, hub.TransportTokenFilePath()); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(transportauth.EnvTransportToken, "")
+	t.Setenv(transportauth.EnvTransportTokenFile, "")
+
+	stageTransportToken(0, 0)
+	if _, err := os.Stat(target); err != nil {
+		t.Errorf("symlink target affected: %v", err)
+	}
+}

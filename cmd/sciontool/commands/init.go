@@ -1661,6 +1661,17 @@ func reExecWithCleanEnv() error {
 func stageTransportToken(uid, gid int) bool {
 	tok := os.Getenv(transportauth.EnvTransportToken)
 	if tok == "" {
+		// No hub-provided transport token this start. If none was staged
+		// earlier in this process either (SCION_TRANSPORT_TOKEN_FILE survives
+		// the re-exec), remove a file left in a persisted home by an earlier
+		// configuration so it is never used.
+		if os.Getenv(transportauth.EnvTransportTokenFile) == "" {
+			if removed, err := hub.RemoveTransportTokenFile(); err != nil {
+				log.Error("Failed to remove stale transport token file: %v", err)
+			} else if removed {
+				log.Info("Removed stale transport token file (no transport token provided)")
+			}
+		}
 		return false
 	}
 	path, err := hub.SeedTransportTokenFile(tok, uid, gid)
@@ -1670,6 +1681,9 @@ func stageTransportToken(uid, gid int) bool {
 	}
 	_ = os.Setenv(transportauth.EnvTransportTokenFile, path)
 	_ = os.Unsetenv(transportauth.EnvTransportToken)
+	// The injected expiry describes only the bootstrap value and goes stale
+	// after the first refresh; nothing in the agent reads it.
+	_ = os.Unsetenv(transportauth.EnvTransportTokenExpiry)
 	log.Info("Transport credential moved to %s", path)
 	return true
 }

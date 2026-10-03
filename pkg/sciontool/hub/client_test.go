@@ -64,6 +64,8 @@ func scrubHubEnv(t *testing.T) {
 		EnvHubToken,
 		EnvAgentID,
 		EnvAgentMode,
+		transportauth.EnvTransportToken,
+		transportauth.EnvTransportTokenFile,
 	} {
 		t.Setenv(key, "")
 	}

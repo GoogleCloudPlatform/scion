@@ -93,9 +93,13 @@ func ReadTransportTokenFile(path string) (string, error) {
 // environment value only bootstraps: whichever candidate (file, a value
 // pushed in via SetToken, or the bootstrap value) expires last is used.
 //
-// The file is re-read whenever its modification time or size changes, so
-// short-lived processes and long-lived ones alike pick up refreshed values
-// without restarting.
+// The file is re-read whenever it is replaced (each write is a rename, so a
+// new inode) or its modification time or size changes, so short-lived
+// processes and long-lived ones alike pick up refreshed values without
+// restarting.
+//
+// A file value whose expiry cannot be parsed is given a zero expiry, so it
+// loses to any candidate whose expiry is known.
 type FileSource struct {
 	// WarnLog, if non-nil, is called when the token in use is near expiry.
 	WarnLog LogFunc
@@ -115,7 +119,7 @@ type FileSource struct {
 	fileExpiry  time.Time
 	fileModTime time.Time
 	fileSize    int64
-	fileStatted bool
+	fileInfo    os.FileInfo // identity of the last file read (inode on Unix)
 	fileErr     error
 }
 
@@ -225,8 +229,8 @@ func (s *FileSource) Status() FileSourceStatus {
 	return st
 }
 
-// reloadLocked re-reads the file when its modification time or size has
-// changed since the last read.
+// reloadLocked re-reads the file when it has been replaced or its
+// modification time or size has changed since the last read.
 func (s *FileSource) reloadLocked() {
 	if s.path == "" {
 		return
@@ -234,14 +238,15 @@ func (s *FileSource) reloadLocked() {
 	fi, err := os.Lstat(s.path)
 	if err != nil {
 		s.fileToken, s.fileExpiry = "", time.Time{}
-		s.fileModTime, s.fileSize, s.fileStatted = time.Time{}, 0, false
+		s.fileModTime, s.fileSize, s.fileInfo = time.Time{}, 0, nil
 		s.fileErr = err
 		return
 	}
-	if s.fileStatted && fi.ModTime().Equal(s.fileModTime) && fi.Size() == s.fileSize {
+	if s.fileInfo != nil && os.SameFile(s.fileInfo, fi) &&
+		fi.ModTime().Equal(s.fileModTime) && fi.Size() == s.fileSize {
 		return
 	}
-	s.fileStatted = true
+	s.fileInfo = fi
 	s.fileModTime = fi.ModTime()
 	s.fileSize = fi.Size()
 
@@ -256,10 +261,10 @@ func (s *FileSource) reloadLocked() {
 	if s.fileToken == "" {
 		return
 	}
+	// An unparseable value keeps a zero expiry: it is used only when no
+	// candidate with a known expiry exists.
 	if exp, err := ParseTokenExpiry(s.fileToken); err == nil {
 		s.fileExpiry = exp
-	} else {
-		s.fileExpiry = fi.ModTime().Add(DefaultTTL)
 	}
 }
 
