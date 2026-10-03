@@ -1387,6 +1387,45 @@ func brokerStartAttempted(err error) bool {
 	return attempted
 }
 
+// brokerCurrentRunID returns the api.BrokerErrorDetailCurrentRunID a broker
+// reports on a failed start or restart: the run its runtime holds for the
+// agent after the failure ("" for none, unlabelled or ambiguous). ok is
+// false when err is not a broker error envelope or carries no such detail
+// (an older broker, or a re-list that failed).
+func brokerCurrentRunID(err error) (current string, ok bool) {
+	var statusErr *brokerStatusError
+	if !errors.As(err, &statusErr) {
+		return "", false
+	}
+	current, ok = statusErr.brokerErrorDetails()[api.BrokerErrorDetailCurrentRunID].(string)
+	return current, ok
+}
+
+// settleFailedRun fixes the row's run ID after a start or restart that
+// failed with err (ptone/scion#2550). When the broker reports the run its
+// runtime now holds, that is recorded (compare-and-swap from the minted
+// ID): Manager.Start can fail before removing the previous entry, after
+// creating the new one, or with nothing left, and only the runtime knows
+// which. Otherwise (an older broker, a failed re-list, a transport error,
+// or a rejection before Manager.Start) shouldRevertRun decides whether to
+// put the previous value back.
+func (d *HTTPAgentDispatcher) settleFailedRun(ctx context.Context, agent *store.Agent, minted, previous string, err error) {
+	if err == nil {
+		return
+	}
+	if current, ok := brokerCurrentRunID(err); ok {
+		if current != minted {
+			d.swapRunID(ctx, agent, minted, current, "recorded the broker's current run ID after a failed start")
+		}
+		return
+	}
+	if shouldRevertRun(err) {
+		// The broker rejected the start before acting on it: the previous
+		// entry, if any, is still the agent's live run.
+		d.revertRun(ctx, agent, minted, previous)
+	}
+}
+
 // revertRun restores the run ID the row held before beginRun, when the
 // broker never acted on the dispatch (the request was not sent, or the
 // broker rejected it) or the dispatch was handed to another node, which
@@ -1394,22 +1433,31 @@ func brokerStartAttempted(err error) bool {
 // delete must keep targeting it. Compare-and-swap against the minted ID,
 // so a newer run is never overwritten.
 func (d *HTTPAgentDispatcher) revertRun(ctx context.Context, agent *store.Agent, minted, previous string) {
+	d.swapRunID(ctx, agent, minted, previous, "restored the previous run ID")
+}
+
+// swapRunID replaces the minted run ID with to, in the row (compare-and-swap
+// against minted, so a newer run recorded by a later dispatch is never
+// overwritten) and in the caller's struct.
+func (d *HTTPAgentDispatcher) swapRunID(ctx context.Context, agent *store.Agent, minted, to, what string) {
 	if d.store != nil && agent.ID != "" {
-		swapped, err := d.store.CompareAndSwapAgentRunID(ctx, agent.ID, minted, previous)
+		swapped, err := d.store.CompareAndSwapAgentRunID(ctx, agent.ID, minted, to)
 		if err != nil {
-			d.log.Warn("Dispatcher: failed to restore the previous run ID",
-				"agent_id", agent.ID, "minted_run_id", minted, "previous_run_id", previous, "error", err)
+			d.log.Warn("Dispatcher: failed to update the run ID",
+				"agent_id", agent.ID, "minted_run_id", minted, "run_id", to, "error", err)
 			return
 		}
 		if !swapped {
+			d.log.Debug("Dispatcher: a newer run ID is recorded; leaving it",
+				"agent_id", agent.ID, "minted_run_id", minted, "run_id", to)
 			return
 		}
 	}
 	if agent.RunID == minted {
-		agent.RunID = previous
+		agent.RunID = to
 	}
-	d.log.Debug("Dispatcher: restored the previous run ID",
-		"agent_id", agent.ID, "minted_run_id", minted, "run_id", previous)
+	d.log.Debug("Dispatcher: "+what,
+		"agent_id", agent.ID, "minted_run_id", minted, "run_id", to)
 }
 
 // DispatchAgentCreate creates and starts an agent on the runtime broker.
@@ -3088,11 +3136,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		// what counts as confirmed-safe and what does not.
 		revokeArmed = false
 	}
-	if shouldRevertRun(err) {
-		// The broker rejected the start before acting on it: the previous
-		// entry, if any, is still the agent's live run.
-		d.revertRun(ctx, agent, runID, previousRunID)
-	}
+	d.settleFailedRun(ctx, agent, runID, previousRunID, err)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return err
@@ -3183,9 +3227,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		d.revertRun(ctx, agent, runID, previousRunID)
 		return d.deferredRestart(ctx, agent)
 	}
-	if shouldRevertRun(err) {
-		d.revertRun(ctx, agent, runID, previousRunID)
-	}
+	d.settleFailedRun(ctx, agent, runID, previousRunID, err)
 	if err != nil {
 		return err
 	}

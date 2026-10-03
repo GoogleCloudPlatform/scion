@@ -273,52 +273,87 @@ func startAttempted(runID string) map[string]interface{} {
 	return map[string]interface{}{api.BrokerErrorDetailStartAttempted: true, api.BrokerErrorDetailRunID: runID}
 }
 
-// When the broker rejects a start or restart before acting on it, the hub
-// restores the previous run ID: the previous entry is still the live one.
-// A failure from inside Manager.Start (marked startAttempted by the
-// broker) keeps the minted ID: Start may already have removed the previous
-// entry and created one labelled with the minted run. An ambiguous failure
-// keeps it too. An older broker sends no marker, so its rejections revert
-// as before. The revert restores the value the row held in the database,
-// not the caller's possibly stale in-memory one.
+// startAttemptedAt is the marker plus the run the broker's runtime holds
+// after the failure (api.BrokerErrorDetailCurrentRunID).
+func startAttemptedAt(runID, current string) map[string]interface{} {
+	d := startAttempted(runID)
+	d[api.BrokerErrorDetailCurrentRunID] = current
+	return d
+}
+
+// After a failed start or restart, the hub fixes the row's run ID:
+//   - When the broker reports the run its runtime holds now
+//     (currentRunId, DN1), the hub records it: Manager.Start can fail
+//     before removing the previous entry (its run is reported, and the
+//     hub adopts it), after creating the new one (the minted run), or with
+//     nothing left ("", so the next delete resolves by name).
+//   - Otherwise, a rejection before Manager.Start (no startAttempted
+//     marker) restores the previous run ID, since the previous entry is
+//     still the live one; a marked failure without currentRunId (the
+//     broker's re-list failed) keeps the minted ID; an ambiguous transport
+//     failure keeps it too; an older broker sends no marker, so its
+//     rejections revert as before.
+//   - A hand-off to another node (ErrLifecycleDeferred) restores the
+//     previous run ID: the owning node mints its own (N2, round 2).
+//
+// The revert restores the value the row held in the database, not the
+// caller's possibly stale in-memory one.
 func TestRunID_FailedStartRevertsOnlyWhenNotActedOn(t *testing.T) {
 	ctx := context.Background()
+	const minted, previous = "<minted>", "previous-run"
 	for _, tc := range []struct {
-		name       string
-		restart    bool
-		err        func(t *testing.T) error
-		wantRevert bool
+		name    string
+		restart bool
+		err     func(t *testing.T) error
+		want    string
 	}{
 		{"start gate rejection (409, no marker)", false, func(t *testing.T) error {
 			return brokerEnvelope(t, http.StatusConflict, "conflict", nil)
-		}, true},
+		}, previous},
 		{"start validation rejection (400, no marker)", false, func(t *testing.T) error {
 			return brokerEnvelope(t, http.StatusBadRequest, "validation_error", nil)
-		}, true},
-		{"start Manager.Start failure (500 runtime_error, marker)", false, func(t *testing.T) error {
+		}, previous},
+		{"start Manager.Start failure, re-list failed (500, marker only)", false, func(t *testing.T) error {
 			return brokerEnvelope(t, http.StatusInternalServerError, "runtime_error", startAttempted("r"))
-		}, false},
-		{"start name in use (409, marker)", false, func(t *testing.T) error {
+		}, minted},
+		{"start name in use, re-list failed (409, marker only)", false, func(t *testing.T) error {
 			return brokerEnvelope(t, http.StatusConflict, "conflict", startAttempted("r"))
-		}, false},
+		}, minted},
+		{"start failed before removing the previous entry (current = previous)", false, func(t *testing.T) error {
+			return brokerEnvelope(t, http.StatusInternalServerError, "runtime_error", startAttemptedAt("r", previous))
+		}, previous},
+		{"start failed leaving no entry (current = \"\")", false, func(t *testing.T) error {
+			return brokerEnvelope(t, http.StatusInternalServerError, "runtime_error", startAttemptedAt("r", ""))
+		}, ""},
+		{"start name in use by another run (409, current = other)", false, func(t *testing.T) error {
+			return brokerEnvelope(t, http.StatusConflict, "conflict", startAttemptedAt("r", "other-run"))
+		}, "other-run"},
 		{"start runtime_error from an older broker (no marker)", false, func(t *testing.T) error {
 			return brokerEnvelope(t, http.StatusInternalServerError, "runtime_error", nil)
-		}, true},
-		{"start ambiguous", false, func(*testing.T) error { return errors.New("read: connection reset") }, false},
+		}, previous},
+		{"start ambiguous", false, func(*testing.T) error { return errors.New("read: connection reset") }, minted},
+		{"start handed off to another node", false, func(*testing.T) error { return ErrLifecycleDeferred }, previous},
 		{"restart rejection (400, no marker)", true, func(t *testing.T) error {
 			return brokerEnvelope(t, http.StatusBadRequest, "validation_error", nil)
-		}, true},
-		{"restart Manager.Start failure (500 runtime_error, marker)", true, func(t *testing.T) error {
+		}, previous},
+		{"restart Manager.Start failure, re-list failed (500, marker only)", true, func(t *testing.T) error {
 			return brokerEnvelope(t, http.StatusInternalServerError, "runtime_error", startAttempted("r"))
-		}, false},
-		{"restart Manager.Start not found (404, marker)", true, func(t *testing.T) error {
+		}, minted},
+		{"restart Manager.Start not found, re-list failed (404, marker only)", true, func(t *testing.T) error {
 			return brokerEnvelope(t, http.StatusNotFound, "agent_not_found", startAttempted("r"))
-		}, false},
-		{"restart ambiguous", true, func(*testing.T) error { return errors.New("read: connection reset") }, false},
+		}, minted},
+		{"restart failed before removing the previous entry (current = previous)", true, func(t *testing.T) error {
+			return brokerEnvelope(t, http.StatusInternalServerError, "runtime_error", startAttemptedAt("r", previous))
+		}, previous},
+		{"restart failed leaving no entry (current = \"\")", true, func(t *testing.T) error {
+			return brokerEnvelope(t, http.StatusNotFound, "agent_not_found", startAttemptedAt("r", ""))
+		}, ""},
+		{"restart ambiguous", true, func(*testing.T) error { return errors.New("read: connection reset") }, minted},
+		{"restart handed off to another node", true, func(*testing.T) error { return ErrLifecycleDeferred }, previous},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newRunIDFixture(t, "runid-revert")
-			if _, err := f.store.SetAgentRunID(ctx, f.agent.ID, "previous-run"); err != nil {
+			if _, err := f.store.SetAgentRunID(ctx, f.agent.ID, previous); err != nil {
 				t.Fatal(err)
 			}
 			// The caller's struct is stale: the revert must use the
@@ -327,21 +362,21 @@ func TestRunID_FailedStartRevertsOnlyWhenNotActedOn(t *testing.T) {
 			f.client.returnErr = tc.err(t)
 
 			var err error
-			var minted string
+			var mintedID string
 			if tc.restart {
 				err = f.dispatcher.DispatchAgentRestart(ctx, f.agent)
-				minted = f.client.lastRestartExtras.RunID
+				mintedID = f.client.lastRestartExtras.RunID
 			} else {
 				err = f.dispatcher.DispatchAgentStart(ctx, f.agent, "", false)
-				minted = f.client.lastStartExtras.RunID
+				mintedID = f.client.lastStartExtras.RunID
 			}
 			if err == nil {
 				t.Fatal("expected the dispatch to fail")
 			}
-			requireUUID(t, "minted run ID", minted)
-			want := minted
-			if tc.wantRevert {
-				want = "previous-run"
+			requireUUID(t, "minted run ID", mintedID)
+			want := tc.want
+			if want == minted {
+				want = mintedID
 			}
 			if got := f.storedRunID(t); got != want {
 				t.Errorf("stored run_id = %q, want %q", got, want)
@@ -384,10 +419,21 @@ func (c *concurrentRunClient) RestartAgent(ctx context.Context, brokerID, broker
 // that newer run in place instead of restoring the previous one.
 func TestRunID_RevertDoesNotOverwriteNewerRun(t *testing.T) {
 	ctx := context.Background()
-	for _, restart := range []bool{false, true} {
+	for _, c := range []struct {
+		restart bool
+		current bool // the failure reports currentRunId (DN1 adopt path)
+	}{{false, false}, {true, false}, {false, true}, {true, true}} {
+		restart := c.restart
 		name := "start"
 		if restart {
 			name = "restart"
+		}
+		failure := func(t *testing.T) error { return brokerEnvelope(t, http.StatusConflict, "conflict", nil) }
+		if c.current {
+			name += " adopting currentRunId"
+			failure = func(t *testing.T) error {
+				return brokerEnvelope(t, http.StatusInternalServerError, "runtime_error", startAttemptedAt("r", "previous-run"))
+			}
 		}
 		t.Run(name, func(t *testing.T) {
 			f := newRunIDFixture(t, "runid-revert-cas")
@@ -396,7 +442,7 @@ func TestRunID_RevertDoesNotOverwriteNewerRun(t *testing.T) {
 			}
 			client := &concurrentRunClient{
 				mockRuntimeBrokerClient: f.client, store: f.store, agentID: f.agent.ID,
-				err: brokerEnvelope(t, http.StatusConflict, "conflict", nil),
+				err: failure(t),
 			}
 			d := NewHTTPAgentDispatcherWithClient(f.store, client, false, slog.Default())
 			var err error
@@ -626,6 +672,29 @@ func TestBrokerStartAttempted(t *testing.T) {
 		if brokerStartAttempted(err) {
 			t.Errorf("%v: reported start attempted", err)
 		}
+	}
+}
+
+func TestBrokerCurrentRunID(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		err    error
+		want   string
+		wantOK bool
+	}{
+		{"run reported", brokerEnvelope(t, 500, "runtime_error", startAttemptedAt("r", "run-old")), "run-old", true},
+		{"empty run reported", brokerEnvelope(t, 500, "runtime_error", startAttemptedAt("r", "")), "", true},
+		{"marker only", brokerEnvelope(t, 500, "runtime_error", startAttempted("r")), "", false},
+		{"wrong type", brokerEnvelope(t, 500, "runtime_error", map[string]interface{}{api.BrokerErrorDetailCurrentRunID: 7}), "", false},
+		{"not json", &brokerStatusError{StatusCode: 500, Body: "not json"}, "", false},
+		{"plain", errors.New("plain"), "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := brokerCurrentRunID(tc.err)
+			if got != tc.want || ok != tc.wantOK {
+				t.Errorf("got (%q, %v), want (%q, %v)", got, ok, tc.want, tc.wantOK)
+			}
+		})
 	}
 }
 

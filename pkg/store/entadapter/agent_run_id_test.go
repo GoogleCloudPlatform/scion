@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -105,4 +106,54 @@ func TestCompareAndSwapAgentRunID(t *testing.T) {
 	ok, err = s.CompareAndSwapAgentRunID(ctx, uuid.NewString(), "", "x")
 	require.NoError(t, err)
 	assert.False(t, ok, "a missing agent swaps nothing")
+}
+
+// SetAgentRunID's retry: a writer that changes run_id between the read and
+// the swap makes the swap miss, and the loop re-reads. One interference
+// still succeeds and returns the value actually replaced (the interferer's);
+// interference on every attempt gives up with an error and leaves the
+// interferer's value in place. Not parallel: it sets a package hook.
+func TestSetAgentRunID_RetriesOnConcurrentWrite(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := makeAgent(projectID, "run-id-retry-agent")
+	require.NoError(t, s.CreateAgent(ctx, a))
+	_, err := s.SetAgentRunID(ctx, a.ID, "run-0")
+	require.NoError(t, err)
+
+	interfere := func(times int) *int {
+		calls := 0
+		setAgentRunIDAfterRead = func(id string) {
+			calls++
+			if calls <= times {
+				_, err := s.client.Agent.UpdateOneID(uuid.MustParse(id)).
+					SetRunID(fmt.Sprintf("other-%d", calls)).Save(ctx)
+				require.NoError(t, err)
+			}
+		}
+		return &calls
+	}
+	t.Cleanup(func() { setAgentRunIDAfterRead = nil })
+
+	t.Run("one concurrent write", func(t *testing.T) {
+		calls := interfere(1)
+		prev, err := s.SetAgentRunID(ctx, a.ID, "run-1")
+		require.NoError(t, err)
+		assert.Equal(t, "other-1", prev, "the previous value is the one the swap replaced")
+		assert.Equal(t, 2, *calls)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "run-1", got.RunID)
+	})
+
+	t.Run("a concurrent write on every attempt", func(t *testing.T) {
+		calls := interfere(setAgentRunIDAttempts)
+		_, err := s.SetAgentRunID(ctx, a.ID, "run-2")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "kept changing")
+		assert.Equal(t, setAgentRunIDAttempts, *calls)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, fmt.Sprintf("other-%d", setAgentRunIDAttempts), got.RunID, "a failed set writes nothing")
+	})
 }

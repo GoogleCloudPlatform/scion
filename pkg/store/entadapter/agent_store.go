@@ -2238,6 +2238,10 @@ func (s *AgentStore) AggregateAgentHealth(ctx context.Context) (*store.AgentHeal
 // swap; a handful of retries absorbs any realistic contention.
 const setAgentRunIDAttempts = 8
 
+// setAgentRunIDAfterRead, when set (tests only), runs between
+// SetAgentRunID's read and its swap, to simulate a concurrent writer.
+var setAgentRunIDAfterRead func(agentID string)
+
 // SetAgentRunID implements store.AgentStore.SetAgentRunID. It reads the
 // current value and swaps it under a compare-and-swap, retrying if another
 // writer got in between, so the returned previous value is exactly the one
@@ -2255,6 +2259,9 @@ func (s *AgentStore) SetAgentRunID(ctx context.Context, agentID, runID string) (
 			Only(ctx)
 		if err != nil {
 			return "", mapError(err)
+		}
+		if setAgentRunIDAfterRead != nil {
+			setAgentRunIDAfterRead(agentID)
 		}
 		n, err := s.client.Agent.Update().
 			Where(agent.IDEQ(uid), agent.RunIDEQ(row.RunID)).
