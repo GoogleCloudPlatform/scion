@@ -27,11 +27,25 @@ describe('activityLabel', () => {
     expect(activityLabel('thinking')).toBeUndefined();
   });
 
-  it('returns undefined for unknown, empty and prototype keys', () => {
+  it('returns undefined for unknown and empty keys', () => {
     expect(activityLabel('not-a-real-activity')).toBeUndefined();
     expect(activityLabel('')).toBeUndefined();
     expect(activityLabel(undefined)).toBeUndefined();
-    expect(activityLabel('toString')).toBeUndefined();
+  });
+
+  it('ignores inherited prototype keys', () => {
+    // A non-enumerable `label` on Object.prototype is reachable through
+    // `constructor` and `__proto__`; only an own-property check skips them.
+    Object.defineProperty(Object.prototype, 'label', {
+      value: 'inherited',
+      configurable: true,
+    });
+    try {
+      expect(activityLabel('constructor')).toBeUndefined();
+      expect(activityLabel('__proto__')).toBeUndefined();
+    } finally {
+      delete (Object.prototype as { label?: string }).label;
+    }
   });
 
   it('matches case-insensitively', () => {
