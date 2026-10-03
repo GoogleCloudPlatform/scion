@@ -2251,8 +2251,11 @@ func (s *Server) applyInlineConfigUpdate(agentName, projectPath string, inlineCo
 		return
 	}
 
-	// Merge inline config over existing
+	// Merge inline config over existing. MergeScionConfig appends skills, and
+	// the Hub sends the agent's full skill list on every start and restart,
+	// so collapse references that name the same skill and destination.
 	merged := config.MergeScionConfig(&existing, inlineConfig)
+	merged.Skills = dedupeSkillReferences(merged.Skills)
 
 	// Write back
 	updated, err := json.MarshalIndent(merged, "", "  ")
@@ -2268,6 +2271,30 @@ func (s *Server) applyInlineConfigUpdate(agentName, projectPath string, inlineCo
 		s.agentLifecycleLog.Debug("applyInlineConfigUpdate: applied inline config update",
 			"agent", agentName, "maxTurns", inlineConfig.MaxTurns, "maxModelCalls", inlineConfig.MaxModelCalls)
 	}
+}
+
+// dedupeSkillReferences collapses skill references that share both URI and
+// As (the install name). The surviving entry keeps the position of the first
+// occurrence and takes the field values of the last one, so a later reference
+// (the Hub's current view) updates Optional and Scope in place. References
+// with the same URI but different As are distinct installs and are kept.
+func dedupeSkillReferences(refs []api.SkillReference) []api.SkillReference {
+	if len(refs) < 2 {
+		return refs
+	}
+	type key struct{ uri, as string }
+	index := make(map[key]int, len(refs))
+	out := make([]api.SkillReference, 0, len(refs))
+	for _, ref := range refs {
+		k := key{ref.URI, ref.As}
+		if i, ok := index[k]; ok {
+			out[i] = ref
+			continue
+		}
+		index[k] = len(out)
+		out = append(out, ref)
+	}
+	return out
 }
 
 // isContainerStopTolerable returns true if the error from stopping a container
