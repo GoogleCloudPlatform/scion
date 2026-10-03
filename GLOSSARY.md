@@ -90,7 +90,7 @@ The working directory mounted into a single agent's container at `/workspace`. H
 _Avoid_: project, repo, mount
 
 **Workspace sharing mode**:
-How a project's workspace is provisioned across its agents — one universal set of modes intended for both local and Hub-managed projects: **Shared-plain**, **Worktree-per-agent**, and **Clone-per-agent**.
+How a project's workspace is provisioned across its agents. There are four canonical modes: **Shared-plain**, **Worktree-per-agent** and **Clone-per-agent**, plus **Empty-per-agent** for Hub-managed projects without git. The mode is chosen when the project is created (API/CLI value `shared`, `per-agent` or `worktree-per-agent`; `per-agent` resolves to Clone-per-agent for git projects and to Empty-per-agent otherwise) and cannot be changed afterwards. "Workspace mode" is used only as the name of the API field (`workspaceMode`) and CLI flag (`--workspace-mode`) whose values select the sharing mode; in prose, say "workspace sharing mode".
 _Avoid_: workspace mode, isolation mode
 
 **Shared-plain**:
@@ -98,12 +98,17 @@ A workspace sharing mode where one workspace directory is mounted into every age
 _Avoid_: shared mount, plain workspace
 
 **Worktree-per-agent**:
-A workspace sharing mode where each agent gets its own git worktree over a shared checkout, isolating working trees while sharing one clone's history. Supported in local mode today; not yet on Hub-managed projects.
+A workspace sharing mode where each agent gets its own git worktree over a shared checkout, isolating working trees while sharing one clone's history. Supported in local mode and on Hub-managed git projects; on Kubernetes it requires NFS workspace storage.
 _Avoid_: worktree mode, shared checkout
 
 **Clone-per-agent**:
 A workspace sharing mode where each agent gets its own full git clone of the repository.
 _Avoid_: clone mode, per-agent clone
+
+**Empty-per-agent**:
+A workspace sharing mode for Hub-managed projects without git, where each agent gets its own private directory that starts empty and is not a git repository. It is kept across suspend/resume where storage allows and deleted with the agent. Selected with workspace mode `per-agent` on a project without a git remote.
+_Avoid_: plain-per-agent, private workspace
+_See also_: Shared directory
 
 **Shared directory**:
 A persistent, mutable volume shared by the agents within one project.

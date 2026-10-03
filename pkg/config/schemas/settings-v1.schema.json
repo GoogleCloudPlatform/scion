@@ -72,6 +72,7 @@
         "storage": { "$ref": "#/$defs/serverStorage" },
         "workspace_storage": { "$ref": "#/$defs/serverWorkspaceStorage" },
         "secrets": { "$ref": "#/$defs/serverSecrets" },
+        "shared_dir_storage": { "$ref": "#/$defs/serverSharedDirStorage" },
         "log_level": {
           "type": "string",
           "enum": ["debug", "info", "warn", "error"],
@@ -361,6 +362,11 @@
         "safe_to_evict": {
           "type": "boolean",
           "description": "Kubernetes only. Set to false to add the cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\" annotation to agent pods using this runtime entry (on GKE Autopilot this requests extended run duration). true is accepted and adds nothing. A profile value wins over this; a template or agent kubernetes.safeToEvict wins over both. Ignored, with a warning, on other runtimes."
+        },
+        "shared_dir_storage_backend": {
+          "type": "string",
+          "enum": ["", "local", "nfs"],
+          "description": "Shared-dir storage backend for agents whose profile uses this runtime entry. Overrides server.shared_dir_storage.backend; a profile value wins over this. nfs uses the server.shared_dir_storage.nfs block. Read from the global settings file only."
         }
       },
       "additionalProperties": false
@@ -826,6 +832,11 @@
         "safe_to_evict": {
           "type": "boolean",
           "description": "Kubernetes only. Set to false to add the cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\" annotation to agent pods under this profile (on GKE Autopilot this requests extended run duration). true is accepted and adds nothing. Wins over the runtime entry's value; a template or agent kubernetes.safeToEvict wins over this. Ignored, with a warning, on other runtimes."
+        },
+        "shared_dir_storage_backend": {
+          "type": "string",
+          "enum": ["", "local", "nfs"],
+          "description": "Shared-dir storage backend for agents using this profile. Wins over the runtime entry's value and server.shared_dir_storage.backend. nfs uses the server.shared_dir_storage.nfs block. Read from the global settings file only."
         }
       },
       "additionalProperties": false
@@ -1184,6 +1195,41 @@
         "gcp_project_id": { "type": "string", "x-env-var": "SCION_SERVER_SECRETS_GCPPROJECTID" },
         "gcp_credentials": { "type": "string", "x-env-var": "SCION_SERVER_SECRETS_GCPCREDENTIALS" }
       }
+    },
+    "serverSharedDirStorage": {
+      "type": "object",
+      "description": "Storage backend for project shared directories. Global-only, Layer-0 (restart to apply). A runtime entry or profile can override the backend with shared_dir_storage_backend.",
+      "x-since": "1",
+      "properties": {
+        "backend": { "type": "string", "enum": ["", "local", "nfs"], "default": "local" },
+        "nfs": {
+          "type": "object",
+          "description": "NFS export used when the resolved backend is nfs. Shared dirs live at <mount_root>/<shares[0].id>/<subpath_root>/<project id>/shared-dirs/<name>.",
+          "properties": {
+            "mount_root": { "type": "string", "description": "Host directory under which each share is mounted, at <mount_root>/<share id>." },
+            "mount_options": { "type": "string" },
+            "uid": { "type": "integer" },
+            "gid": { "type": "integer" },
+            "storage_class": { "type": "string" },
+            "subpath_root": { "type": "string", "default": "projects" },
+            "shares": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": { "type": "string" },
+                  "server": { "type": "string" },
+                  "export": { "type": "string" },
+                  "pv_name": { "type": "string", "description": "Kubernetes claim mounted by subPath for shared dirs." }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     },
     "serverScheduler": {
       "type": "object",

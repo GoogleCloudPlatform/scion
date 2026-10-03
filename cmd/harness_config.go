@@ -201,6 +201,15 @@ var harnessConfigUpgradeCmd = &cobra.Command{
 	Long: `Adds missing embedded support files and merges missing declarative metadata into
 local harness-config config.yaml files without clobbering existing user values.
 
+For a bundled harness-config (directory name matches the harness, e.g. "claude"),
+the provisioner scripts (provision.py, scion_harness.py, capture_auth.py) are
+replaced with the bundled copy when they differ; each replaced script is backed
+up as <file>.bak.<timestamp> first. Custom-named harness-configs keep their
+scripts, and symlinked scripts are treated as user-managed and left alone.
+These protections apply without --force only: "upgrade --force", "reset" and
+workstation-mode server start still replace the whole config, writing through
+symlinks.
+
 By default this does not activate container-script provisioning. Use
 --activate-script with a named harness-config after reviewing the staged files.`,
 	Args: cobra.MaximumNArgs(1),
