@@ -50,13 +50,11 @@ const goldenUntouchedBody: Record<string, unknown> = JSON.parse(
   readFileSync(GOLDEN_UNTOUCHED_BODY_PATH, 'utf-8')
 );
 
-// Shared golden fixture (ptone/scion#2493 R5-1): the body buildConfig emits
-// when the user edits (adds) one custom env row on an agent whose
-// AppliedConfig.Env has an unrelated template key and whose
-// InlineConfig.Env-only auto-expose stamp must be re-sent verbatim
-// alongside it. Also loaded by the matching Go test
-// (TestApplyAgentUpdate_EnvDiffIgnoresUnchangedInlineOnlyStamp), so the two
-// cannot drift apart.
+// Shared golden fixture: the body buildConfig emits when the user adds one
+// custom env row on an agent whose AppliedConfig.Env has an unrelated template
+// key and whose auto-expose control is untouched, so no auto-expose key is
+// sent. Also loaded by the hub's PATCH tests (pkg/hub/auto_expose_patch_test.go),
+// so the two cannot drift apart.
 const GOLDEN_ROW_EDIT_BODY_PATH = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
   '../../../../pkg/hub/testdata/configure-row-edit-body.json'
@@ -290,72 +288,8 @@ describe('agent-configure buildConfig — R1-1: untouched telemetry/auto-expose 
     const config = c.buildConfig();
     expect(config).not.toHaveProperty('telemetry');
     // Nothing about env changed either (no custom row edited, auto-expose
-    // untouched), so the whole `env` key is omitted -- not just the
-    // synthesized auto-expose keys -- exactly matching an untouched save
-    // leaving CreateInputs' env alone (see TestApplyAgentUpdate_
-    // EchoPatchLeavesCreateInputsByteIdentical on the hub side).
+    // untouched), so the whole `env` key is omitted.
     expect(config).not.toHaveProperty('env');
-  });
-
-  it('R2-1 facet (a): does not synthesize auto-expose keys when the live env never had them, even after editing an unrelated row', async () => {
-    const c = await mountAgentConfigureWithLoadedAgent();
-    const withEnvEntries = c as unknown as {
-      envEntries: { key: string; value: string }[];
-    };
-    // Sanity check: the live config (EXPLICIT_KEY only) never had any
-    // auto-expose keys, so the control is showing the global default, not a
-    // real live value.
-    expect(c.autoExposePortsEnabled).toBe(false);
-
-    // Edit the one real explicit key the live config had.
-    withEnvEntries.envEntries = [{ key: 'EXPLICIT_KEY', value: 'changed-value' }];
-
-    const config = c.buildConfig();
-    expect(config.env).toHaveProperty('EXPLICIT_KEY', 'changed-value');
-    // Before the R2-1 fix, this synthesized SCION_AUTO_EXPOSE_PORTS:"false"
-    // here even though the agent's live env never set it -- freezing a
-    // global default into CreateInputs as an "edit" nobody made.
-    expect(config.env).not.toHaveProperty('SCION_AUTO_EXPOSE_PORTS');
-    expect(config.env).not.toHaveProperty('SCION_AUTO_EXPOSE_MODE');
-  });
-
-  it('R2-1 facet (b): the auto-expose control loads its real live value from ac.env even when ic.env has none, and re-sends that exact value after an unrelated row edit', async () => {
-    const c = await mountAgentConfigureWithLoadedAgent({
-      model: 'claude-opus',
-      // ic.env empty while ac.env has everything (the custom key AND the
-      // auto-expose key) is the shape an untouched Save/Start used to leave
-      // behind before the hub's R4-1 carve-out (applyAgentUpdate) started
-      // copying InlineConfig.Env forward -- and could still arise from an
-      // agent that went through that window before R4-1 shipped, or from
-      // any other future bug that leaves the two maps out of sync. Before
-      // R2-1, populateForm read auto-expose from ic.env ONLY, so this shape
-      // misread the control as the global default (false) instead of the
-      // agent's real, still-live value (true); populateForm must keep
-      // getting this right regardless of why the two maps ever diverge.
-      env: { EXPLICIT_KEY: 'explicit-value', SCION_AUTO_EXPOSE_PORTS: 'true' },
-      inlineConfig: {},
-    });
-    // The control must reflect the LIVE value, not the global default
-    // (stubbed false in stubFetchWithLoadedAgent's settings response).
-    expect(c.autoExposePortsEnabled).toBe(true);
-
-    const withEnvEntries = c as unknown as {
-      envEntries: { key: string; value: string }[];
-    };
-    // The custom row must have actually loaded from ac.env (not been lost
-    // along with everything else in InlineConfig.Env) before "editing" it
-    // means anything.
-    expect(withEnvEntries.envEntries).toContainEqual({
-      key: 'EXPLICIT_KEY',
-      value: 'explicit-value',
-    });
-    withEnvEntries.envEntries = [{ key: 'EXPLICIT_KEY', value: 'changed-value' }];
-
-    const config = c.buildConfig();
-    expect(config.env).toHaveProperty('EXPLICIT_KEY', 'changed-value');
-    // Must re-send the REAL loaded value (true), never the global default
-    // (false) -- silently flipping live auto-expose off was R2-1 facet (b).
-    expect(config.env).toHaveProperty('SCION_AUTO_EXPOSE_PORTS', 'true');
   });
 
   it('sends telemetry only after the user actually toggles it', async () => {
@@ -365,14 +299,6 @@ describe('agent-configure buildConfig — R1-1: untouched telemetry/auto-expose 
     const config = c.buildConfig();
     expect(config).toHaveProperty('telemetry');
     expect(config.telemetry?.enabled).toBe(false);
-  });
-
-  it('sends the auto-expose env keys only after the user actually toggles the control', async () => {
-    const c = await mountAgentConfigureWithLoadedAgent();
-    expect(c.autoExposePortsEnabled).toBe(false);
-    c.autoExposePortsEnabled = true;
-    const config = c.buildConfig();
-    expect(config.env).toHaveProperty('SCION_AUTO_EXPOSE_PORTS', 'true');
   });
 });
 
@@ -392,88 +318,125 @@ describe('agent-configure buildConfig — R2-2: untouched-form body matches the 
   });
 });
 
-describe('agent-configure buildConfig — R4-2: auto-expose control reads the per-key merged env, ic.env taking precedence', () => {
-  it('reads the auto-expose stamp from InlineConfig.Env even when AppliedConfig.Env is non-empty for an unrelated (e.g. template) key, and an untouched buildConfig() still equals the golden body', async () => {
-    // resolveDerivedConfig (pkg/hub/handlers_agent_create_helpers.go) writes
-    // a hub/project auto-expose stamp into InlineConfig.Env only -- it is
-    // never aliased into AppliedConfig.Env when the create request had no
-    // explicit env of its own. A template's own env can separately make
-    // ac.env non-empty (TEMPLATE_KEY here), which must not hide the stamp
-    // under the old all-or-nothing `ac.env || ic.env` read.
-    const c = await mountAgentConfigureWithLoadedAgent({
-      model: 'golden-model',
-      env: { TEMPLATE_KEY: 'x' },
-      inlineConfig: { env: { SCION_AUTO_EXPOSE_PORTS: 'true' } },
-    });
-    // The control must read the InlineConfig.Env stamp (true), not fall
-    // back to the global default (false, stubbed in stubFetchWithLoadedAgent)
-    // just because ac.env happens to be non-empty for an unrelated reason.
-    expect(c.autoExposePortsEnabled).toBe(true);
-
-    const config = c.buildConfig();
-    // Nothing was actually edited (TEMPLATE_KEY is an unrelated custom row,
-    // and the auto-expose control itself wasn't touched), so buildConfig
-    // must still omit `env` entirely and match the untouched golden body
-    // exactly -- reading the correct live value must not, by itself, cause
-    // it to be echoed.
-    expect(config).toEqual(goldenUntouchedBody);
+describe('effectiveAutoExposePorts', () => {
+  it('labels a value in InlineConfig.Env as explicit', async () => {
+    const { effectiveAutoExposePorts } = await import('./agent-configure.js');
+    expect(
+      effectiveAutoExposePorts(
+        { SCION_AUTO_EXPOSE_PORTS: 'false' },
+        { SCION_AUTO_EXPOSE_PORTS: 'false' },
+        true
+      )
+    ).toEqual({ enabled: false, source: 'explicit' });
   });
 
-  it('R5-1: re-sends the InlineConfig.Env-only auto-expose stamp verbatim when the user edits an unrelated custom row', async () => {
-    // Same live shape as the display test above -- a template key in
-    // AppliedConfig.Env, and the auto-expose stamp living only in
-    // InlineConfig.Env (exactly as resolveDerivedConfig's project/hub
-    // default leaves it) -- but this time the user actually edits a custom
-    // row. The hub's recordExplicitEdits (R5-1) depends on the stamp being
-    // re-sent at its unchanged value so it is not misread as an edit; this
-    // pins the web side of that contract: buildConfig must not drop or
-    // alter the stamp just because some other row changed.
+  it('labels a value only in AppliedConfig.Env as project/template', async () => {
+    const { effectiveAutoExposePorts } = await import('./agent-configure.js');
+    expect(effectiveAutoExposePorts({ SCION_AUTO_EXPOSE_PORTS: 'true' }, {}, false)).toEqual({
+      enabled: true,
+      source: 'project/template',
+    });
+  });
+
+  it('falls back to the hub default when AppliedConfig.Env lacks the key, ignoring InlineConfig.Env', async () => {
+    const { effectiveAutoExposePorts } = await import('./agent-configure.js');
+    expect(
+      effectiveAutoExposePorts({ OTHER: 'x' }, { SCION_AUTO_EXPOSE_PORTS: 'false' }, true)
+    ).toEqual({ enabled: true, source: 'hub default' });
+    expect(effectiveAutoExposePorts(undefined, undefined, false)).toEqual({
+      enabled: false,
+      source: 'hub default',
+    });
+  });
+});
+
+/** Text of the rendered auto-expose source label. */
+async function autoExposeSourceText(c: ConfigurePrivate): Promise<string> {
+  const el = c as unknown as HTMLElement & { updateComplete: Promise<unknown> };
+  await el.updateComplete;
+  const label = el.shadowRoot?.querySelector('[data-testid="auto-expose-source"]');
+  return (label?.textContent ?? '').replace(/\s+/g, ' ').trim();
+}
+
+describe('agent-configure — auto-expose effective value, source label and save (ptone/scion#2562 AC7)', () => {
+  it('shows a project/template-derived value with its source, and an untouched save sends no env', async () => {
     const c = await mountAgentConfigureWithLoadedAgent({
       model: 'golden-model',
-      env: { TEMPLATE_KEY: 'x' },
-      inlineConfig: { env: { SCION_AUTO_EXPOSE_PORTS: 'true' } },
+      env: { SCION_AUTO_EXPOSE_PORTS: 'true' },
+      inlineConfig: {},
     });
     expect(c.autoExposePortsEnabled).toBe(true);
+    expect((c as unknown as { autoExposeSource: string }).autoExposeSource).toBe(
+      'project/template'
+    );
+    expect(c.buildConfig()).toEqual(goldenUntouchedBody);
+  });
 
+  it('shows the hub default when no tier set the key', async () => {
+    const c = await mountAgentConfigureWithLoadedAgent({ model: 'golden-model' });
+    expect(c.autoExposePortsEnabled).toBe(false);
+    expect((c as unknown as { autoExposeSource: string }).autoExposeSource).toBe('hub default');
+  });
+
+  it('renders the source label, switching to explicit (unsaved) once the control changes', async () => {
+    const c = await mountAgentConfigureWithLoadedAgent({
+      model: 'golden-model',
+      env: { SCION_AUTO_EXPOSE_PORTS: 'false' },
+      inlineConfig: { env: { SCION_AUTO_EXPOSE_PORTS: 'false' } },
+    });
+    expect(await autoExposeSourceText(c)).toBe('Source: explicit');
+    c.autoExposePortsEnabled = true;
+    expect(await autoExposeSourceText(c)).toBe('Source: explicit (unsaved)');
+  });
+
+  it('a custom-row edit sends the rows only, never the untouched auto-expose keys', async () => {
+    const c = await mountAgentConfigureWithLoadedAgent({
+      model: 'golden-model',
+      env: {
+        TEMPLATE_KEY: 'x',
+        SCION_AUTO_EXPOSE_PORTS: 'true',
+        SCION_AUTO_EXPOSE_MODE: 'denylist',
+      },
+      inlineConfig: { env: { SCION_AUTO_EXPOSE_PORTS: 'true' } },
+    });
     const withEnvEntries = c as unknown as {
       envEntries: { key: string; value: string }[];
     };
-    // The template row is still there (untouched), plus a genuinely new one.
+    expect(withEnvEntries.envEntries).toEqual([{ key: 'TEMPLATE_KEY', value: 'x' }]);
     withEnvEntries.envEntries = [
       { key: 'TEMPLATE_KEY', value: 'x' },
       { key: 'FOO', value: 'bar' },
     ];
-
-    const config = c.buildConfig();
-    expect(config).toEqual(goldenRowEditBody);
+    // Shared with the hub's TestApplyAgentUpdate_AutoExposeUntouchedSave and
+    // related PATCH tests.
+    expect(c.buildConfig()).toEqual(goldenRowEditBody);
   });
 
-  it('R6-1: still re-sends the page-visible (InlineConfig) auto-expose value, even when AppliedConfig.Env holds a different value for the same key', async () => {
-    // Both maps hold SCION_AUTO_EXPOSE_PORTS, with DIFFERENT values: a
-    // template's own env sets it in AppliedConfig.Env (merged there by
-    // resolveDerivedConfig), while a project/hub default stamps a different
-    // value into InlineConfig.Env only. The control reads the InlineConfig
-    // value (R4-2's per-key, ic-wins merge), and that is also what buildConfig
-    // must re-send on an unrelated row edit -- the hub's diff (R6-1) depends
-    // on seeing exactly the value the page displayed, not AppliedConfig.Env's.
+  it('custom rows read AppliedConfig.Env only', async () => {
     const c = await mountAgentConfigureWithLoadedAgent({
       model: 'golden-model',
-      env: { TEMPLATE_KEY: 'x', SCION_AUTO_EXPOSE_PORTS: 'false' },
-      inlineConfig: { env: { SCION_AUTO_EXPOSE_PORTS: 'true' } },
+      env: { LIVE_KEY: 'v' },
+      inlineConfig: { env: { INLINE_ONLY: 'w' } },
     });
-    expect(c.autoExposePortsEnabled).toBe(true);
+    const rows = (c as unknown as { envEntries: { key: string; value: string }[] }).envEntries;
+    expect(rows).toEqual([{ key: 'LIVE_KEY', value: 'v' }]);
+  });
 
-    const withEnvEntries = c as unknown as {
-      envEntries: { key: string; value: string }[];
-    };
-    withEnvEntries.envEntries = [
-      { key: 'TEMPLATE_KEY', value: 'x' },
-      { key: 'FOO', value: 'bar' },
-    ];
+  it('toggling the control sends the auto-expose keys as explicit values', async () => {
+    const c = await mountAgentConfigureWithLoadedAgent({
+      model: 'golden-model',
+      env: { SCION_AUTO_EXPOSE_PORTS: 'true' },
+      inlineConfig: {},
+    });
+    c.autoExposePortsEnabled = false;
+    expect(c.buildConfig().env).toEqual({ SCION_AUTO_EXPOSE_PORTS: 'false' });
 
-    const config = c.buildConfig();
-    // Byte-identical to the R5-1 case: the page shows and re-sends "true"
-    // (InlineConfig.Env), never "false" (AppliedConfig.Env).
-    expect(config).toEqual(goldenRowEditBody);
+    c.autoExposePortsEnabled = true;
+    (c as unknown as { autoExposePortsMode: string }).autoExposePortsMode = 'denylist';
+    expect(c.buildConfig().env).toEqual({
+      SCION_AUTO_EXPOSE_PORTS: 'true',
+      SCION_AUTO_EXPOSE_MODE: 'denylist',
+      SCION_AUTO_EXPOSE_INTERVAL: '3s',
+    });
   });
 });
