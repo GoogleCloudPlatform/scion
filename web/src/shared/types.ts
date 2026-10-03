@@ -364,7 +364,7 @@ export function isTerminalAvailable(agent: {
  * When the agent is running, shows the activity (e.g. 'thinking');
  * otherwise shows the lifecycle phase.
  */
-export function getAgentDisplayStatus(agent: Agent): string {
+export function getAgentDisplayStatus(agent: Agent): AgentPhase | AgentActivity {
   if (agent.phase === 'running' && agent.activity) {
     return agent.activity;
   }
