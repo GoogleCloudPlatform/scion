@@ -732,7 +732,8 @@ func TestSeedHarnessConfigFromDir(t *testing.T) {
 
 // TestSeedHarnessConfigFromDir_RefreshesProvisionerScriptsWithoutForce
 // verifies that non-force seeding over an existing harness-config refreshes
-// the provisioner-owned scripts (provision.py, scion_harness.py) and
+// the provisioner-owned scripts (provision.py, scion_harness.py,
+// capture_auth.py) and
 // config.yaml from the bundled copy, while preserving unrelated user files.
 func TestSeedHarnessConfigFromDir_RefreshesProvisionerScriptsWithoutForce(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -741,6 +742,7 @@ func TestSeedHarnessConfigFromDir_RefreshesProvisionerScriptsWithoutForce(t *tes
 		bundledConfig    = "harness: h\nimage: img:new\nuser: scion\n"
 		bundledProvision = "# bundled provision v2"
 		bundledLib       = "# bundled scion_harness v2"
+		bundledCapture   = "# bundled capture_auth v2"
 		bundledDialect   = "# bundled dialect"
 		bundledBashrc    = "# bundled bashrc"
 	)
@@ -748,6 +750,7 @@ func TestSeedHarnessConfigFromDir_RefreshesProvisionerScriptsWithoutForce(t *tes
 		"h/config.yaml":      &fstest.MapFile{Data: []byte(bundledConfig)},
 		"h/provision.py":     &fstest.MapFile{Data: []byte(bundledProvision)},
 		"h/scion_harness.py": &fstest.MapFile{Data: []byte(bundledLib)},
+		"h/capture_auth.py":  &fstest.MapFile{Data: []byte(bundledCapture)},
 		"h/dialect.yaml":     &fstest.MapFile{Data: []byte(bundledDialect)},
 		"h/home/.bashrc":     &fstest.MapFile{Data: []byte(bundledBashrc)},
 	}
@@ -757,6 +760,7 @@ func TestSeedHarnessConfigFromDir_RefreshesProvisionerScriptsWithoutForce(t *tes
 		"config.yaml":      "harness: h\nimage: img:old\nuser: scion\n",
 		"provision.py":     "# stale provision v1",
 		"scion_harness.py": "# stale scion_harness v1",
+		"capture_auth.py":  "# stale capture_auth v1",
 		"dialect.yaml":     "# user dialect",
 		"home/.bashrc":     "# user bashrc",
 		"notes.txt":        "user notes",
@@ -780,6 +784,7 @@ func TestSeedHarnessConfigFromDir_RefreshesProvisionerScriptsWithoutForce(t *tes
 		"config.yaml":      bundledConfig,
 		"provision.py":     bundledProvision,
 		"scion_harness.py": bundledLib,
+		"capture_auth.py":  bundledCapture,
 		// User files: preserved.
 		"dialect.yaml": "# user dialect",
 		"home/.bashrc": "# user bashrc",

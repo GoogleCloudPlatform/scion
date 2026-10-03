@@ -391,7 +391,7 @@ func activateContainerScriptProvisioner(configData []byte) ([]byte, bool, error)
 
 // syncHarnessConfigSupportFiles adds bundled support files that are missing
 // from targetDir and refreshes provisioner-owned scripts (provision.py,
-// scion_harness.py) whose content differs from the bundled copy. Other
+// scion_harness.py, capture_auth.py) whose content differs from the bundled copy. Other
 // existing files are preserved. It returns the added and refreshed paths
 // relative to targetDir.
 func syncHarnessConfigSupportFiles(targetDir string, embedsFS fs.FS, basePath, configDir string, dryRun bool) ([]string, []string, error) {

@@ -129,7 +129,7 @@ adds newly-required support files and merges missing metadata without clobbering
 `--dry-run` to preview, `--activate-script` to switch a config to container-script provisioning,
 `--force` to override). With no name, `upgrade` processes every config in the global directory.
 
-The provisioner scripts `provision.py` and `scion_harness.py` belong to the harness bundle, not to
+The provisioner scripts `provision.py`, `scion_harness.py`, and `capture_auth.py` belong to the harness bundle, not to
 you. `upgrade` replaces them with the bundled copy whenever they differ, and reports each one as a
 `refresh_file` action. Non-force seeding (`scion init --machine`, hosted-mode `scion server`
 start, and Hub system-init) replaces them on every run, the same way it treats `config.yaml`.

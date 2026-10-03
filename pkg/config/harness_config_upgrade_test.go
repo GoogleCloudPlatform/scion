@@ -76,12 +76,14 @@ func TestUpgradeHarnessConfig_RefreshesProvisionerScriptsWithoutForce(t *testing
 		"myh/config.yaml":      &fstest.MapFile{Data: []byte(configYAML)},
 		"myh/provision.py":     &fstest.MapFile{Data: []byte("# bundled provision v2")},
 		"myh/scion_harness.py": &fstest.MapFile{Data: []byte("# bundled lib v2")},
+		"myh/capture_auth.py":  &fstest.MapFile{Data: []byte("# bundled capture v2")},
 		"myh/dialect.yaml":     &fstest.MapFile{Data: []byte("# bundled dialect")},
 	}
 	existing := map[string]string{
 		"config.yaml":      configYAML,
 		"provision.py":     "# stale provision v1",
 		"scion_harness.py": "# stale lib v1",
+		"capture_auth.py":  "# stale capture v1",
 		"dialect.yaml":     "# user dialect",
 	}
 	if err := os.MkdirAll(hcDir, 0755); err != nil {
@@ -113,8 +115,8 @@ func TestUpgradeHarnessConfig_RefreshesProvisionerScriptsWithoutForce(t *testing
 			refreshed[a.Path] = true
 		}
 	}
-	if !refreshed["provision.py"] || !refreshed["scion_harness.py"] || len(refreshed) != 2 {
-		t.Errorf("refresh_file actions = %v, want provision.py and scion_harness.py", refreshed)
+	if !refreshed["provision.py"] || !refreshed["scion_harness.py"] || !refreshed["capture_auth.py"] || len(refreshed) != 3 {
+		t.Errorf("refresh_file actions = %v, want provision.py, scion_harness.py and capture_auth.py", refreshed)
 	}
 	if data, _ := os.ReadFile(filepath.Join(hcDir, "provision.py")); string(data) != "# stale provision v1" {
 		t.Errorf("dry run wrote provision.py: %q", string(data))
@@ -129,6 +131,7 @@ func TestUpgradeHarnessConfig_RefreshesProvisionerScriptsWithoutForce(t *testing
 	want := map[string]string{
 		"provision.py":     "# bundled provision v2",
 		"scion_harness.py": "# bundled lib v2",
+		"capture_auth.py":  "# bundled capture v2",
 		"dialect.yaml":     "# user dialect",
 	}
 	for rel, wantContent := range want {
