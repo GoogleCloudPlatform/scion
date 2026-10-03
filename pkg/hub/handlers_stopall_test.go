@@ -645,6 +645,23 @@ func TestStopAllAgents_MembershipStoreError_InternalError(t *testing.T) {
 	assertStopAllAgentPhase(t, s, state.PhaseRunning, bob)
 }
 
+func TestStopAllAgents_NilMembershipService_InternalError(t *testing.T) {
+	srv, s, alice, bob, project := setupDemoPolicyTest(t)
+
+	addProjectMemberViaAPI(t, srv, s, alice, project.ID, store.RoleBindingPrincipalUser, bob.ID, store.ProjectRoleMember)
+	seedStopAllAgents(t, s, project.ID, bob)
+
+	// New always wires the membership service; a nil one is a wiring fault
+	// and must be a 500, not a misleading "not a member" 403.
+	srv.membershipService = nil
+
+	rec := doRequestAsUser(t, srv, bob, http.MethodPost,
+		"/api/v1/projects/"+project.ID+"/agents/stop-all", nil)
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "membership service unavailable")
+	assertStopAllAgentPhase(t, s, state.PhaseRunning, bob)
+}
+
 func TestStopAllAgents_MemberWithScopedToken(t *testing.T) {
 	ctx := context.Background()
 

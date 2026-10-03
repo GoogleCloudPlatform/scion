@@ -578,17 +578,22 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 		// includes a binding whose role definition is missing: the store
 		// refuses to delete a role definition that still has bindings, so
 		// that is a data integrity fault, and failing closed is correct.
-		role := ""
-		if s.membershipService != nil {
-			var err error
-			role, err = s.membershipService.projectEffectiveRoleFromStore(ctx, s.store, userIdent.ID(), projectID)
-			if err != nil {
-				s.agentLifecycleLog.Error("stop-all: failed to resolve project membership",
-					"project_id", projectID, "user_id", userIdent.ID(), "error", err)
-				writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-					"failed to resolve project membership", nil)
-				return
-			}
+		// A nil membership service is a wiring fault, also a 500, matching
+		// the other membership handlers.
+		if s.membershipService == nil {
+			s.agentLifecycleLog.Error("stop-all: membership service unavailable",
+				"project_id", projectID, "user_id", userIdent.ID())
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"membership service unavailable", nil)
+			return
+		}
+		role, err := s.membershipService.projectEffectiveRoleFromStore(ctx, s.store, userIdent.ID(), projectID)
+		if err != nil {
+			s.agentLifecycleLog.Error("stop-all: failed to resolve project membership",
+				"project_id", projectID, "user_id", userIdent.ID(), "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"failed to resolve project membership", nil)
+			return
 		}
 		if role == "" {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
