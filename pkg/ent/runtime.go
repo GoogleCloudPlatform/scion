@@ -591,8 +591,83 @@ func init() {
 	decisionauditDescID := decisionauditFields[0].Descriptor()
 	// decisionaudit.DefaultID holds the default value on creation for the id field.
 	decisionaudit.DefaultID = decisionauditDescID.Default.(func() uuid.UUID)
+	delegationedgeMixin := schema.DelegationEdge{}.Mixin()
+	delegationedgeMixinFields0 := delegationedgeMixin[0].Fields()
+	_ = delegationedgeMixinFields0
+	delegationedgeMixinFields1 := delegationedgeMixin[1].Fields()
+	_ = delegationedgeMixinFields1
+	delegationedgeMixinFields2 := delegationedgeMixin[2].Fields()
+	_ = delegationedgeMixinFields2
 	delegationedgeFields := schema.DelegationEdge{}.Fields()
 	_ = delegationedgeFields
+	// delegationedgeDescProvenanceVersion is the schema descriptor for provenance_version field.
+	delegationedgeDescProvenanceVersion := delegationedgeMixinFields0[0].Descriptor()
+	// delegationedge.DefaultProvenanceVersion holds the default value on creation for the provenance_version field.
+	delegationedge.DefaultProvenanceVersion = delegationedgeDescProvenanceVersion.Default.(int)
+	// delegationedgeDescSourcePrincipalKind is the schema descriptor for source_principal_kind field.
+	delegationedgeDescSourcePrincipalKind := delegationedgeMixinFields0[1].Descriptor()
+	// delegationedge.DefaultSourcePrincipalKind holds the default value on creation for the source_principal_kind field.
+	delegationedge.DefaultSourcePrincipalKind = delegationedgeDescSourcePrincipalKind.Default.(string)
+	// delegationedgeDescSourcePrincipalID is the schema descriptor for source_principal_id field.
+	delegationedgeDescSourcePrincipalID := delegationedgeMixinFields0[2].Descriptor()
+	// delegationedge.DefaultSourcePrincipalID holds the default value on creation for the source_principal_id field.
+	delegationedge.DefaultSourcePrincipalID = delegationedgeDescSourcePrincipalID.Default.(string)
+	// delegationedgeDescSourceCredentialKind is the schema descriptor for source_credential_kind field.
+	delegationedgeDescSourceCredentialKind := delegationedgeMixinFields0[3].Descriptor()
+	// delegationedge.DefaultSourceCredentialKind holds the default value on creation for the source_credential_kind field.
+	delegationedge.DefaultSourceCredentialKind = delegationedgeDescSourceCredentialKind.Default.(string)
+	// delegationedgeDescSourceCredentialID is the schema descriptor for source_credential_id field.
+	delegationedgeDescSourceCredentialID := delegationedgeMixinFields0[4].Descriptor()
+	// delegationedge.DefaultSourceCredentialID holds the default value on creation for the source_credential_id field.
+	delegationedge.DefaultSourceCredentialID = delegationedgeDescSourceCredentialID.Default.(string)
+	// delegationedgeDescSourceEventID is the schema descriptor for source_event_id field.
+	delegationedgeDescSourceEventID := delegationedgeMixinFields0[5].Descriptor()
+	// delegationedge.DefaultSourceEventID holds the default value on creation for the source_event_id field.
+	delegationedge.DefaultSourceEventID = delegationedgeDescSourceEventID.Default.(string)
+	// delegationedgeDescSourceAuthorizationRevision is the schema descriptor for source_authorization_revision field.
+	delegationedgeDescSourceAuthorizationRevision := delegationedgeMixinFields0[7].Descriptor()
+	// delegationedge.DefaultSourceAuthorizationRevision holds the default value on creation for the source_authorization_revision field.
+	delegationedge.DefaultSourceAuthorizationRevision = delegationedgeDescSourceAuthorizationRevision.Default.(int)
+	// delegationedgeDescInitiatorPrincipalKind is the schema descriptor for initiator_principal_kind field.
+	delegationedgeDescInitiatorPrincipalKind := delegationedgeMixinFields0[8].Descriptor()
+	// delegationedge.DefaultInitiatorPrincipalKind holds the default value on creation for the initiator_principal_kind field.
+	delegationedge.DefaultInitiatorPrincipalKind = delegationedgeDescInitiatorPrincipalKind.Default.(string)
+	// delegationedgeDescInitiatorPrincipalID is the schema descriptor for initiator_principal_id field.
+	delegationedgeDescInitiatorPrincipalID := delegationedgeMixinFields0[9].Descriptor()
+	// delegationedge.DefaultInitiatorPrincipalID holds the default value on creation for the initiator_principal_id field.
+	delegationedge.DefaultInitiatorPrincipalID = delegationedgeDescInitiatorPrincipalID.Default.(string)
+	// delegationedgeDescInitiatorCredentialKind is the schema descriptor for initiator_credential_kind field.
+	delegationedgeDescInitiatorCredentialKind := delegationedgeMixinFields0[10].Descriptor()
+	// delegationedge.DefaultInitiatorCredentialKind holds the default value on creation for the initiator_credential_kind field.
+	delegationedge.DefaultInitiatorCredentialKind = delegationedgeDescInitiatorCredentialKind.Default.(string)
+	// delegationedgeDescInitiatorCredentialID is the schema descriptor for initiator_credential_id field.
+	delegationedgeDescInitiatorCredentialID := delegationedgeMixinFields0[11].Descriptor()
+	// delegationedge.DefaultInitiatorCredentialID holds the default value on creation for the initiator_credential_id field.
+	delegationedge.DefaultInitiatorCredentialID = delegationedgeDescInitiatorCredentialID.Default.(string)
+	// delegationedgeDescCeilingKind is the schema descriptor for ceiling_kind field.
+	delegationedgeDescCeilingKind := delegationedgeMixinFields1[0].Descriptor()
+	// delegationedge.DefaultCeilingKind holds the default value on creation for the ceiling_kind field.
+	delegationedge.DefaultCeilingKind = delegationedgeDescCeilingKind.Default.(string)
+	// delegationedgeDescCeilingVersion is the schema descriptor for ceiling_version field.
+	delegationedgeDescCeilingVersion := delegationedgeMixinFields1[1].Descriptor()
+	// delegationedge.DefaultCeilingVersion holds the default value on creation for the ceiling_version field.
+	delegationedge.DefaultCeilingVersion = delegationedgeDescCeilingVersion.Default.(int32)
+	// delegationedgeDescCeilingBoundaryKind is the schema descriptor for ceiling_boundary_kind field.
+	delegationedgeDescCeilingBoundaryKind := delegationedgeMixinFields1[3].Descriptor()
+	// delegationedge.DefaultCeilingBoundaryKind holds the default value on creation for the ceiling_boundary_kind field.
+	delegationedge.DefaultCeilingBoundaryKind = delegationedgeDescCeilingBoundaryKind.Default.(string)
+	// delegationedgeDescCeilingBoundaryProjectID is the schema descriptor for ceiling_boundary_project_id field.
+	delegationedgeDescCeilingBoundaryProjectID := delegationedgeMixinFields1[4].Descriptor()
+	// delegationedge.DefaultCeilingBoundaryProjectID holds the default value on creation for the ceiling_boundary_project_id field.
+	delegationedge.DefaultCeilingBoundaryProjectID = delegationedgeDescCeilingBoundaryProjectID.Default.(string)
+	// delegationedgeDescDeactivationCause is the schema descriptor for deactivation_cause field.
+	delegationedgeDescDeactivationCause := delegationedgeMixinFields2[0].Descriptor()
+	// delegationedge.DefaultDeactivationCause holds the default value on creation for the deactivation_cause field.
+	delegationedge.DefaultDeactivationCause = delegationedgeDescDeactivationCause.Default.(string)
+	// delegationedgeDescDeactivationOpID is the schema descriptor for deactivation_op_id field.
+	delegationedgeDescDeactivationOpID := delegationedgeMixinFields2[2].Descriptor()
+	// delegationedge.DefaultDeactivationOpID holds the default value on creation for the deactivation_op_id field.
+	delegationedge.DefaultDeactivationOpID = delegationedgeDescDeactivationOpID.Default.(string)
 	// delegationedgeDescDelegatorID is the schema descriptor for delegator_id field.
 	delegationedgeDescDelegatorID := delegationedgeFields[2].Descriptor()
 	// delegationedge.DelegatorIDValidator is a validator for the "delegator_id" field. It is called by the builders before save.
@@ -1198,7 +1273,7 @@ func init() {
 	// message.ThreadIDValidator is a validator for the "thread_id" field. It is called by the builders before save.
 	message.ThreadIDValidator = messageDescThreadID.Validators[0].(func(string) error)
 	// messageDescCreated is the schema descriptor for created field.
-	messageDescCreated := messageFields[19].Descriptor()
+	messageDescCreated := messageFields[21].Descriptor()
 	// message.DefaultCreated holds the default value on creation for the created field.
 	message.DefaultCreated = messageDescCreated.Default.(func() time.Time)
 	// messageDescID is the schema descriptor for id field.

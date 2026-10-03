@@ -155,8 +155,19 @@ func (t *brokerHTTPTransport) decodeResponseWithSnippet(resp *http.Response, out
 	return nil
 }
 
+// maxBrokerErrorBodyBytes caps how much of a broker's error response body is
+// read into a brokerStatusError (ptone/scion#1841). Broker error bodies are
+// small JSON envelopes ({"error":{"code","message","details"}}) that
+// isBrokerAgentNotFound / brokerErrorMessage / brokerErrorDetails decode, so
+// 64KiB leaves two orders of magnitude of headroom for legitimate bodies
+// while bounding what a misbehaving or compromised broker can make the hub
+// buffer (and then carry in error text) per failed request. A body over the
+// cap is truncated; JSON decoding of it then fails and callers fall back to
+// the status code, which is the safe behaviour for an oversized error.
+const maxBrokerErrorBodyBytes = 64 << 10
+
 func brokerHTTPError(resp *http.Response) error {
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, maxBrokerErrorBodyBytes))
 	return &brokerStatusError{StatusCode: resp.StatusCode, Body: string(respBody), RetryAfter: resp.Header.Get("Retry-After")}
 }
 
@@ -303,13 +314,23 @@ func (t *brokerHTTPTransport) RestartAgent(ctx context.Context, brokerID, broker
 	return nil
 }
 
-func (t *brokerHTTPTransport) ResetAuthAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, token string) error {
+// resetAuthBody builds the broker reset-auth request body. The transport
+// token is included only when the hub minted one.
+func resetAuthBody(token, transportToken string) map[string]string {
+	body := map[string]string{"token": token}
+	if transportToken != "" {
+		body["transportToken"] = transportToken
+	}
+	return body
+}
+
+func (t *brokerHTTPTransport) ResetAuthAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, token, transportToken string) error {
 	endpoint := fmt.Sprintf("%s/api/v1/agents/%s/reset-auth", strings.TrimSuffix(brokerEndpoint, "/"), url.PathEscape(agentID))
 	if projectID != "" {
 		endpoint += "?projectId=" + url.QueryEscape(projectID)
 	}
 	endpoint = withRecordedRuntimeURL(ctx, endpoint)
-	body, err := json.Marshal(map[string]string{"token": token})
+	body, err := json.Marshal(resetAuthBody(token, transportToken))
 	if err != nil {
 		return fmt.Errorf("failed to marshal reset-auth request: %w", err)
 	}

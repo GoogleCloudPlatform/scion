@@ -15,6 +15,8 @@
 package runtime
 
 import (
+	"errors"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -149,6 +151,12 @@ type MountDescriptor struct {
 //   - localBackend otherwise — including ClonePerAgent even when Backend is a shared type
 //     (the deliberate node-local escape hatch).
 //   - Backend empty or "local" always yields localBackend.
+//   - EmptyPerAgent yields localBackend for every backend, including nfs,
+//     gke-shared-volume and cloudrun-volume: its private per-agent directory
+//     is node-local (or pod-local EmptyDir on K8s). Callers must first reject
+//     it on NFS storage with CheckWorkspaceBackendMode (fail closed until
+//     design #2703 P3); gke-shared-volume and cloudrun-volume are not gated
+//     here (Cloud Run rejects the mode at the runtime).
 func SelectWorkspaceBackend(cfg *config.V1WorkspaceStorageConfig, mode store.WorkspaceSharingMode) WorkspaceBackend {
 	if cfg != nil {
 		switch cfg.Backend {
@@ -171,4 +179,22 @@ func SelectWorkspaceBackend(cfg *config.V1WorkspaceStorageConfig, mode store.Wor
 	}
 	// Backend empty, "local", nil config, or ClonePerAgent → local.
 	return NewLocalBackend()
+}
+
+// ErrEmptyPerAgentNFSUnsupported is returned by CheckWorkspaceBackendMode
+// for an empty-per-agent agent on a broker whose workspace storage is NFS.
+var ErrEmptyPerAgentNFSUnsupported = errors.New("empty-per-agent workspaces are not yet supported on NFS workspace storage " +
+	"(server.workspace_storage.backend=nfs); use a broker with local workspace storage " +
+	"until NFS per-agent support lands (design #2703 P3)")
+
+// CheckWorkspaceBackendMode reports whether mode can be provisioned with the
+// configured workspace storage. It fails closed for EmptyPerAgent on NFS:
+// SelectWorkspaceBackend would route it to localBackend, so the agent would
+// silently get a node-local directory instead of the NFS-backed per-agent
+// directory the operator configured (design #2703 P2).
+func CheckWorkspaceBackendMode(cfg *config.V1WorkspaceStorageConfig, mode store.WorkspaceSharingMode) error {
+	if mode == store.SharingModeEmptyPerAgent && cfg != nil && cfg.Backend == "nfs" {
+		return ErrEmptyPerAgentNFSUnsupported
+	}
+	return nil
 }

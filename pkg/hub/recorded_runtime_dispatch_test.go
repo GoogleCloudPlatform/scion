@@ -43,12 +43,6 @@ import (
 // signed request, on both transports; and a broker's retryable 503 for an
 // unavailable runtime reaches the caller as a 503 with Retry-After.
 
-type staticTokenGenerator struct{}
-
-func (staticTokenGenerator) GenerateAgentToken(string, string, []string, AgentRole, []AgentTokenScope) (string, error) {
-	return "test-token", nil
-}
-
 // rrRecordingBroker is an httptest broker behind the real broker HMAC
 // verifier. It records, per route, the recorded runtime parameter of every
 // request that passed signature verification.
@@ -121,7 +115,7 @@ func TestRecordedRuntime_DispatchSendsSignedParamOverHTTP(t *testing.T) {
 			}))
 
 			d := NewHTTPAgentDispatcherWithClient(s, NewAuthenticatedBrokerClient(s, false), false, slog.Default())
-			d.SetTokenGenerator(staticTokenGenerator{})
+			d.SetTokenGenerator(staticTokenGenerator{token: "test-token"})
 			agent := &store.Agent{ID: tid("rr-agent"), Name: "w", Slug: "w", ProjectID: project.ID, RuntimeBrokerID: broker.ID, Runtime: tc.runtime}
 
 			require.NoError(t, d.DispatchAgentStop(ctx, agent))
@@ -170,7 +164,7 @@ func TestRecordedRuntime_ControlChannelSendsSignedParam(t *testing.T) {
 			_ = c.RestartAgent(ctx, "b", "", "w", "p", nil, StartExtras{})
 		},
 		"reset-auth": func(ctx context.Context, c *ControlChannelBrokerClient) {
-			_ = c.ResetAuthAgent(ctx, "b", "", "w", "p", "tok")
+			_ = c.ResetAuthAgent(ctx, "b", "", "w", "p", "tok", "")
 		},
 		"delete": func(ctx context.Context, c *ControlChannelBrokerClient) {
 			_ = c.DeleteAgent(ctx, "b", "", "w", "p", true, false, false, time.Time{})
@@ -262,7 +256,7 @@ func setupRuntimeUnavailableAgent(t *testing.T, suffix string, brokerErr error) 
 	require.NoError(t, s.UpdateAgent(context.Background(), agent))
 	mockClient := &mockRuntimeBrokerClient{returnErr: brokerErr}
 	d := NewHTTPAgentDispatcherWithClient(s, logsErrClient{mockClient}, false, slog.Default())
-	d.SetTokenGenerator(staticTokenGenerator{})
+	d.SetTokenGenerator(staticTokenGenerator{token: "test-token"})
 	srv.SetDispatcher(d)
 	return srv, s, agent, mockClient
 }
@@ -372,7 +366,7 @@ func TestRecordedRuntime_RestartStartLegFailureRecordsStopped(t *testing.T) {
 	require.NoError(t, s.UpdateAgent(context.Background(), agent))
 	mockClient := &mockRuntimeBrokerClient{}
 	d := NewHTTPAgentDispatcherWithClient(s, startErrClient{mockClient, runtimeUnavailableErr()}, false, slog.Default())
-	d.SetTokenGenerator(staticTokenGenerator{})
+	d.SetTokenGenerator(staticTokenGenerator{token: "test-token"})
 	srv.SetDispatcher(d)
 	require.NoError(t, s.UpdateAgentExposedPorts(context.Background(), agent.ID,
 		[]store.ExposedPort{{Port: 4000, Label: "web", ExposedAt: time.Now()}}))

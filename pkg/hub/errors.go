@@ -557,10 +557,16 @@ func writeBrokerRuntimeUnavailable(w http.ResponseWriter, err error, runtime str
 		}
 	}
 	w.Header().Set("Retry-After", retryAfter)
-	message := "The agent's runtime is not available on its runtime broker; retry later or check the broker's runtime configuration"
-	if rt := dispatchRecordedRuntime(runtime); rt != "" {
-		message = fmt.Sprintf("Runtime %q is not available on the agent's runtime broker; retry later or check the broker's runtime configuration", rt)
-	}
-	writeError(w, http.StatusServiceUnavailable, brokerCodeRuntimeUnavailable, message, nil)
+	writeError(w, http.StatusServiceUnavailable, brokerCodeRuntimeUnavailable, brokerRuntimeUnavailableMessage(runtime), nil)
 	return true
+}
+
+// brokerRuntimeUnavailableMessage is the hub's client-facing text for a
+// broker's runtime_unavailable answer; runtime is the agent's recorded
+// runtime type.
+func brokerRuntimeUnavailableMessage(runtime string) string {
+	if rt := dispatchRecordedRuntime(runtime); rt != "" {
+		return fmt.Sprintf("Runtime %q is not available on the agent's runtime broker; retry later or check the broker's runtime configuration", rt)
+	}
+	return "The agent's runtime is not available on its runtime broker; retry later or check the broker's runtime configuration"
 }

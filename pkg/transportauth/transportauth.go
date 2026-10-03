@@ -85,6 +85,20 @@ const (
 	HeaderServerlessAuthorization
 )
 
+// HeaderName returns the HTTP header that carries the transport token in
+// this mode. For HeaderAuthorization the header is only set when the
+// request has no Authorization header already.
+func (m HeaderMode) HeaderName() string {
+	switch m {
+	case HeaderProxyAuthorization:
+		return "Proxy-Authorization"
+	case HeaderServerlessAuthorization:
+		return "X-Serverless-Authorization"
+	default:
+		return "Authorization"
+	}
+}
+
 // TokenSource yields transport-layer Google OIDC ID tokens. Thread-safe.
 type TokenSource interface {
 	// Token returns a valid OIDC token, refreshing if necessary.

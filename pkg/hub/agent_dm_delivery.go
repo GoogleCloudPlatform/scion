@@ -41,7 +41,18 @@ import (
 // transitions (MarkMessageDispatched / MarkMessageFailed) when the original
 // request context has been cancelled. This prevents silently discarding
 // known outcomes (AC-3).
+//
+// 5s is ample for a single-row CAS on the local store; anything slower
+// indicates a store problem that waiting longer would not fix.
 const finalizationTimeout = 5 * time.Second
+
+// deliveryNoticeTimeout bounds the detached budget for sending a
+// DELIVERY_FAILED notice back to the sender (ptone/scion#1838). Unlike the
+// row CAS above, a notice resolves the sender agent and then dispatches
+// through the runtime broker, which is a network round trip to a possibly
+// slow or recovering broker. 15s gives that dispatch room to complete
+// without letting a stuck broker pin the goroutine indefinitely.
+const deliveryNoticeTimeout = 15 * time.Second
 
 // checkDispatchAvailability verifies that dispatch infrastructure is
 // available for the target agent. Returns nil if dispatch can proceed,
@@ -88,7 +99,15 @@ func (s *Server) checkDispatchAvailability(input *AgentDMInput) *AgentDMError {
 // MarkMessageDispatched / MarkMessageFailed) complete even if the parent
 // request context is cancelled mid-flight.
 func finalizationContext(parent context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.WithoutCancel(parent), finalizationTimeout)
+	return detachedContext(parent, finalizationTimeout)
+}
+
+// detachedContext detaches from parent's cancellation (keeping its values)
+// and applies timeout d. finalizationContext is the row-CAS flavour; use
+// detachedContext directly when the post-dispatch work needs a different
+// budget (e.g. deliveryNoticeTimeout).
+func detachedContext(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), d)
 }
 
 // markDispatched transitions a message from pending to dispatched after
@@ -107,9 +126,33 @@ func (s *Server) markDispatched(ctx context.Context, msgID string) (bool, error)
 // markFailed records a definite dispatch failure on the message row.
 // Uses a bounded finalization context for request cancellation resilience.
 func (s *Server) markFailed(ctx context.Context, msgID string, reason string) error {
+	return markMessageFailed(ctx, s.store, msgID, reason)
+}
+
+// messageFailureMarker is the slice of the store needed to record a dispatch
+// failure. Narrow so MessageBrokerProxy (which has no *Server) can share
+// markMessageFailed.
+type messageFailureMarker interface {
+	MarkMessageFailed(ctx context.Context, id string, reason string) error
+}
+
+// markMessageFailed records a definite dispatch failure on a message row on a
+// finalizationContext derived from ctx (ptone/scion#1838). The dispatch ctx is
+// frequently already expired by the time a failure is known —
+// dispatchWithBrokerRetry returns ErrBrokerTimeout exactly when it fires — and
+// a mark on that ctx would fail, leaving the row "dispatched" forever (the
+// broker message sweep only reprocesses "pending" rows). Every
+// MarkMessageFailed call site in pkg/hub should go through this helper (or
+// Server.markFailed) rather than calling the store directly.
+//
+// The reason is passed through sanitizeFailureReason before it is persisted
+// as dispatch_failure_reason (ptone/scion#1841): on the synchronous paths it
+// is a raw dispatch error that can embed an arbitrary broker response body.
+// Sanitizing is idempotent, so already-sanitized reasons are unaffected.
+func markMessageFailed(ctx context.Context, st messageFailureMarker, msgID string, reason string) error {
 	finCtx, finCancel := finalizationContext(ctx)
 	defer finCancel()
-	return s.store.MarkMessageFailed(finCtx, msgID, reason)
+	return st.MarkMessageFailed(finCtx, msgID, sanitizeFailureReason(reason))
 }
 
 // dispatchFailedError constructs an AgentDMError for a definite dispatch

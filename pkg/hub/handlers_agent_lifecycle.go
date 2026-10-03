@@ -357,8 +357,10 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			ref.write(w)
 			return
 		}
-	case api.AgentActionStop:
-		// The agent is already going down: stop is a no-op success.
+	case api.AgentActionStop, api.AgentActionSuspend:
+		// The agent is already going down: stop (and suspend, which would
+		// otherwise race the delete's teardown on the broker) is a no-op
+		// success.
 		if deleteStopNoop(agent) {
 			respAgent := *agent
 			respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
@@ -555,6 +557,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	// If dispatch failed, return error
 	if dispatchErr != nil {
 		if writeBrokerRuntimeUnavailable(w, dispatchErr, agent.Runtime) {
+			return
+		}
+		if writeAgentTokenIssueError(w, dispatchErr) {
 			return
 		}
 		if writeEmptyPerAgentCapabilityError(w, dispatchErr) {
@@ -765,6 +770,17 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 		}
 		agents = allowed
 	}
+
+	// Skip agents a delete is taking down: their stop would race the
+	// delete's teardown on the broker, and a stop is a no-op for them
+	// anyway (design ptone/scion#2483 §2.1).
+	live := make([]store.Agent, 0, len(agents))
+	for i := range agents {
+		if !deleteStopNoop(&agents[i]) {
+			live = append(live, agents[i])
+		}
+	}
+	agents = live
 	if len(agents) == 0 {
 		writeJSON(w, http.StatusOK, StopAllAgentsResponse{
 			Scope:   scope,
@@ -786,6 +802,18 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 		wg.Add(1)
 		go func(agent *store.Agent) {
 			defer wg.Done()
+
+			// The filter above used the list snapshot; re-read so a delete
+			// that claimed the row since is skipped the same way (a stop is
+			// a no-op for it). A delete claiming after this read is still
+			// harmless: the broker stop is idempotent, and the delete's own
+			// teardown follows.
+			if fresh, err := s.store.GetAgent(ctx, agent.ID); err == nil {
+				if deleteStopNoop(fresh) || !fresh.DeletedAt.IsZero() {
+					return
+				}
+				agent = fresh
+			}
 
 			res := stopAllResult{
 				ID:   agent.ID,
@@ -820,11 +848,17 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 					res.Error = updateErr.Error()
 				} else {
 					res.Status = "stopped"
-					agent.Phase = string(state.PhaseStopped)
+					// Clear a failed delete marker, as a single stop does,
+					// and publish the row as stored.
+					s.settleLifecycleWrite(ctx, agent, string(state.PhaseStopped))
 					// Release the per-broker reservation, same as a single
 					// explicit stop (ptone/scion#1963).
 					s.releaseBrokerQuota(ctx, agent)
-					s.events.PublishAgentStatus(ctx, agent)
+					// settleLifecycleWrite reloaded DeletedAt: a delete that
+					// soft-finished meanwhile gets no stale stopped status.
+					if agent.DeletedAt.IsZero() {
+						s.events.PublishAgentStatus(ctx, agent)
+					}
 				}
 			}
 

@@ -350,6 +350,36 @@ func TestAgentLaunchReport_MessageIsTruncated(t *testing.T) {
 	assert.NotEqual(t, longMessage, after.Message)
 }
 
+// TestAgentLaunchReport_MessageStripsDisplayUnsafeRunes verifies the
+// launch-report reuse of sanitizeFailureReason also removes format
+// characters (here a bidi override and a zero-width space) and controls
+// from the stored Message.
+func TestAgentLaunchReport_MessageStripsDisplayUnsafeRunes(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	project := &store.Project{ID: tid("lr-cf-project"), Slug: "lr-cf-project", Name: "LR Cf Project", Created: time.Now(), Updated: time.Now()}
+	require.NoError(t, s.CreateProject(ctx, project))
+	agent := &store.Agent{
+		ID: tid("lr-cf-agent"), Slug: "lr-cf-agent", Name: "LR Cf Agent", ProjectID: project.ID,
+		Phase: string(state.PhaseCreated), RuntimeBrokerID: "broker-1", StateVersion: 1,
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	launchID, err := s.BeginLaunch(ctx, agent.ID, store.LaunchKindCreate, 5*time.Minute)
+	require.NoError(t, err)
+
+	rec := postLaunchReport(t, srv, "broker-1", agent.ID, "broker-1", AgentLaunchReport{
+		LaunchID: launchID, InstanceID: "i1", Seq: 1, State: "progress", Step: "cloning",
+		Message: "clone\u202edone\u200b \x1b[2Jok",
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	after, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "clonedone [2Jok", after.Message)
+}
+
 // TestAgentLaunchReport_StepAndErrorCodeAreTruncated verifies the same
 // 512-byte cap applies to Step and ErrorCode, not just Message: a `failed`
 // report's Step becomes the stored LaunchStep-derived Message
