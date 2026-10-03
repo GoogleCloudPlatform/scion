@@ -192,6 +192,12 @@ func TestSubstrateEgressHostnames_InvalidVertexRegionRefused(t *testing.T) {
 		{name: "wildcard", region: "*"},
 		{name: "embedded dot", region: "a.b"},
 		{name: "uppercase", region: "US-EAST1"},
+		{name: "leading hyphen", region: "-us"},
+		{name: "trailing hyphen", region: "us-"},
+		{name: "empty trailing label", region: "us."},
+		{name: "empty leading label", region: ".us"},
+		{name: "empty inner label", region: "us..east1"},
+		{name: "label over 63 chars", region: strings.Repeat("a", 64)},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
