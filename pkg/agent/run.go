@@ -1263,7 +1263,9 @@ authDone:
 		effectiveSharedDirs = opts.SharedDirs
 	}
 	// server.shared_dir_storage is global-only (design §3.2.1, AC5): read it
-	// via config.LoadGlobalSettings(), never from the project-merged
+	// via config.LoadGlobalSettingsWithOverlay() (the global file plus the
+	// co-located hub's DB overlay for runtimes and profiles, which can
+	// override the backend per profile), never from the project-merged
 	// `settings` above and never via LoadEffectiveSettings("") — an empty
 	// path is NOT global-only, since it resolves a project from the
 	// process's current working directory and merges that project's
@@ -1274,8 +1276,12 @@ authDone:
 	// and keeps its existing (pre-existing, out of scope) project-level
 	// exposure — see design §3.2.6.
 	var sharedDirStorageCfg *config.V1SharedDirStorageConfig
+	recordedSharedDirBackend := ""
+	if finalScionCfg != nil && finalScionCfg.Info != nil {
+		recordedSharedDirBackend = finalScionCfg.Info.SharedDirStorageBackend
+	}
 	if len(effectiveSharedDirs) > 0 {
-		globalSettings, _, gErr := config.LoadGlobalSettings()
+		globalSettings, _, gErr := config.LoadGlobalSettingsWithOverlay()
 		if gErr != nil {
 			// A broken global settings file must fail closed (design G5)
 			// ONLY when the operator plausibly intended to configure
@@ -1292,9 +1298,8 @@ authDone:
 			}
 			slog.Warn("Start: failed to load global settings; server.shared_dir_storage was not found in the raw file, proceeding with the local shared-dir layout",
 				"error", gErr)
-		} else if globalSettings != nil && globalSettings.Server != nil && globalSettings.Server.SharedDirStorage != nil {
-			sharedDirStorageCfg = globalSettings.Server.SharedDirStorage
-		} else if config.GlobalSettingsIsLegacyFormat() && config.GlobalSettingsMentions("shared_dir_storage") {
+		} else if globalSettings != nil && (globalSettings.Server == nil || globalSettings.Server.SharedDirStorage == nil) &&
+			config.GlobalSettingsIsLegacyFormat() && config.GlobalSettingsMentions("shared_dir_storage") {
 			// Round 4 review finding S-L1: a global settings.yaml with no
 			// "schema_version: \"1\"" takes the LEGACY loader path, which
 			// silently drops the entire server block — LoadGlobalSettings
@@ -1320,6 +1325,20 @@ authDone:
 			// always accurate when this branch fires.
 			return nil, fmt.Errorf(
 				"global settings mention server.shared_dir_storage but it was not loaded (missing schema_version: \"1\"?)")
+		} else if globalSettings != nil {
+			// The backend can be overridden per profile or runtime entry.
+			// The profile is the one named for this start, else the one
+			// the agent was created with (as for the shared-dir PVC
+			// defaults below); an agent that recorded its backend keeps it.
+			sdStorageProfile := opts.Profile
+			if sdStorageProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
+				sdStorageProfile = finalScionCfg.Info.Profile
+			}
+			cfg, err := selectSharedDirStorage(globalSettings, sdStorageProfile, recordedSharedDirBackend, opts.Name)
+			if err != nil {
+				return nil, err
+			}
+			sharedDirStorageCfg = cfg
 		}
 	}
 	// nfs shared_dir_storage keys its layout on hubDispatchedProjectID,
@@ -1350,6 +1369,18 @@ authDone:
 		sharedDirStorageCfg, projectDir, hubDispatchedProjectID, m.Runtime.Name(), effectiveSharedDirs, containerWorkspace, nfsWorkspaceBackend)
 	if err != nil {
 		return nil, err
+	}
+	if len(effectiveSharedDirs) > 0 && recordedSharedDirBackend == "" {
+		// Record the backend the agent's shared dirs were set up with, so
+		// later starts keep using it even if settings change.
+		backend := sharedDirStorageBackendName(sharedDirStorageCfg)
+		if err := updateSavedAgentInfo(opts.Name, opts.ProjectPath, func(info *api.AgentInfo) {
+			if info.SharedDirStorageBackend == "" {
+				info.SharedDirStorageBackend = backend
+			}
+		}); err != nil {
+			slog.Warn("Start: could not record the agent's shared-dir storage backend", "agent", opts.Name, "error", err)
+		}
 	}
 	if len(sharedDirVolumes) > 0 {
 		// Add SCION_VOLUMES env var for discoverability

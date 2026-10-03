@@ -447,6 +447,30 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// shared_dir_storage_backend on runtime and profile entries must be
+	// "local" or "nfs", and "nfs" needs a complete
+	// server.shared_dir_storage.nfs block (from this request, else the
+	// current global settings). Configuration only; no mount is checked.
+	if len(req.Runtimes) > 0 || len(req.Profiles) > 0 {
+		var sdGlobal *config.V1SharedDirStorageConfig
+		sdKnown := true
+		if req.Server != nil && req.Server.SharedDirStorage != nil {
+			sdGlobal = req.Server.SharedDirStorage
+		} else if gs, _, gErr := config.LoadGlobalSettings(); gErr == nil {
+			if gs != nil && gs.Server != nil {
+				sdGlobal = gs.Server.SharedDirStorage
+			}
+		} else {
+			sdKnown = false
+		}
+		if sdKnown {
+			if errs := config.ValidateSharedDirStorageBackends(req.Runtimes, req.Profiles, sdGlobal); len(errs) > 0 {
+				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
+				return
+			}
+		}
+	}
+
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to resolve settings directory", nil)

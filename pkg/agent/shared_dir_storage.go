@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -306,4 +307,59 @@ func isLocalContainerRuntime(name string) bool {
 // RunConfig.SharedDirStorage / buildPod's PVC-by-subPath branch).
 func isKubernetesRuntime(name string) bool {
 	return name == "kubernetes"
+}
+
+// sharedDirStorageBackendName returns the backend a resolved shared-dir
+// storage config selects: "nfs", or "local" for nil, "" and "local".
+func sharedDirStorageBackendName(cfg *config.V1SharedDirStorageConfig) string {
+	if cfg != nil && cfg.Backend == "nfs" {
+		return "nfs"
+	}
+	return "local"
+}
+
+// selectSharedDirStorage returns the shared-dir storage config for one
+// agent start. gs must come from config.LoadGlobalSettingsWithOverlay, so a
+// project's own settings never choose the backend.
+//
+// Without a recorded backend (a first start, or an agent created before
+// the backend was recorded) it is the per-profile resolution: the
+// profile's shared_dir_storage_backend, else its runtime entry's, else
+// server.shared_dir_storage.backend. With a recorded backend that backend
+// is kept, so a settings change never moves an existing agent's shared
+// dirs; a mismatch with the current resolution is logged. A recorded nfs
+// backend whose server.shared_dir_storage.nfs block is no longer complete
+// is an error, returned before anything touches the filesystem.
+func selectSharedDirStorage(gs *config.VersionedSettings, profile, recorded, agentName string) (*config.V1SharedDirStorageConfig, error) {
+	current, source := gs.ResolveSharedDirStorage(profile)
+	if current != nil && source != config.SharedDirStorageGlobalSource {
+		// An override names its own key, so a bad value or an nfs
+		// override without an nfs block points at where it is set.
+		if err := current.Validate(); err != nil {
+			return nil, fmt.Errorf("%s: %w", source, err)
+		}
+	}
+	if recorded == "" {
+		return current, nil
+	}
+	if recorded == sharedDirStorageBackendName(current) {
+		return current, nil
+	}
+	slog.Warn("Start: settings now select a different shared-dir storage backend than the agent was created with; keeping the agent's backend",
+		"agent", agentName, "recorded", recorded, "current", sharedDirStorageBackendName(current), "source", source)
+	switch recorded {
+	case "local":
+		return &config.V1SharedDirStorageConfig{Backend: "local"}, nil
+	case "nfs":
+		out := &config.V1SharedDirStorageConfig{Backend: "nfs"}
+		if gs.Server != nil && gs.Server.SharedDirStorage != nil {
+			out.NFS = gs.Server.SharedDirStorage.NFS
+		}
+		if err := out.Validate(); err != nil {
+			return nil, fmt.Errorf("agent %q was created with the nfs shared-dir storage backend, but server.shared_dir_storage.nfs is no longer complete: %w", agentName, err)
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("agent %q records an unknown shared-dir storage backend %q", agentName, recorded)
+	}
 }

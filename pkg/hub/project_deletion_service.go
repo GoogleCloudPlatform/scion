@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -335,7 +336,8 @@ func (svc *ProjectDeletionService) Delete(ctx context.Context, req ProjectDelete
 
 // cleanupNFSSharedDirTree removes projectID's shared-dir tree from the NFS
 // export when the hub's own global settings have server.shared_dir_storage
-// configured with backend "nfs" (ptone/scion#1802). It skips cleanup as a
+// configured with backend "nfs" (ptone/scion#1802), or when any runtime or
+// profile entry overrides the backend to "nfs". It skips cleanup as a
 // silent no-op when the backend is unset/"local" (out of scope for this
 // issue). When the global settings are unreadable or in the legacy format
 // but plausibly mention shared_dir_storage, it logs an ERROR and skips
@@ -356,15 +358,17 @@ func (svc *ProjectDeletionService) cleanupNFSSharedDirTree(ctx context.Context, 
 		}
 		return
 	}
-	if globalSettings.Server == nil || globalSettings.Server.SharedDirStorage == nil {
-		if config.GlobalSettingsIsLegacyFormat() && config.GlobalSettingsMentions("shared_dir_storage") {
-			svc.logger.ErrorContext(ctx, "global settings mention shared_dir_storage but it was not loaded (legacy format); skipping NFS shared-dir cleanup on project delete",
-				"project_id", projectID)
-		}
+	if (globalSettings.Server == nil || globalSettings.Server.SharedDirStorage == nil) &&
+		config.GlobalSettingsIsLegacyFormat() && config.GlobalSettingsMentions("shared_dir_storage") {
+		svc.logger.ErrorContext(ctx, "global settings mention shared_dir_storage but it was not loaded (legacy format); skipping NFS shared-dir cleanup on project delete",
+			"project_id", projectID)
 		return
 	}
-	sdCfg := globalSettings.Server.SharedDirStorage
-	if sdCfg.Backend != "nfs" {
+	// The tree is project-scoped, so clean it when any setting can put a
+	// project's shared dirs on nfs: the global backend or a runtime or
+	// profile shared_dir_storage_backend override.
+	sdCfg, onlyOverrides := globalSettings.SharedDirStorageNFSAnywhere()
+	if sdCfg == nil {
 		return
 	}
 	if err := sdCfg.Validate(); err != nil {
@@ -390,6 +394,18 @@ func (svc *ProjectDeletionService) cleanupNFSSharedDirTree(ctx context.Context, 
 		svc.logger.ErrorContext(ctx, "failed to resolve NFS shared-dir host base for cleanup on project delete",
 			"project_id", projectID, "error", err)
 		return
+	}
+
+	// When only a runtime or profile override selects nfs, this host may
+	// legitimately not have the export mounted (for example, a hub whose
+	// own agents all use the local backend). A missing or unreadable host
+	// base then warns and skips; it never fails the delete.
+	if onlyOverrides {
+		if _, statErr := os.Stat(res.HostBase); statErr != nil {
+			svc.logger.WarnContext(ctx, "NFS shared-dir export not reachable on this host; skipping shared-dir cleanup on project delete",
+				"project_id", projectID, "host_base", res.HostBase, "error", statErr)
+			return
+		}
 	}
 
 	if err := shareddirs.DeleteProjectTree(res.HostBase, subPathRoot, projectID); err != nil {
