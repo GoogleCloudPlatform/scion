@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -511,7 +512,7 @@ print('agy-wrapper: marked enterprise onboarding complete', file=sys.stderr)
 fi
 
 # Exec AGY with all arguments passed through
-exec agy --dangerously-skip-permissions{f' --effort {thinking_tier}' if thinking_tier else ''} "$@"
+exec agy --dangerously-skip-permissions{f' --effort {shlex.quote(thinking_tier)}' if thinking_tier else ''} "$@"
 """
 
     wrapper_path = os.path.join(home, ".scion", "harness", "agy-wrapper.sh")

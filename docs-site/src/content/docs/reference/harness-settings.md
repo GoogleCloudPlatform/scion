@@ -193,8 +193,10 @@ to the harness's native setting is up to each `provision.py`: for example, codex
 A harness with no `thinking:` block ignores the thinking level. Currently only `codex` and
 `antigravity` declare one; see [Supported Harnesses](/scion/supported-harnesses/) for their
 tables. If you maintain a customized `config.yaml` for one of these harnesses, copy the
-`thinking:` block from the bundled file. Without it, the provisioner writes no thinking setting,
-so the CLI's own default applies, and codex logs a warning.
+`thinking:` block from the bundled file, or run `scion harness-config upgrade <name>`, which
+merges missing top-level keys such as `thinking:` without overwriting your values. Without the
+block, the provisioner writes no thinking setting, so the CLI's own default applies, and codex
+logs a warning.
 
 ### Command Execution (`command`)
 

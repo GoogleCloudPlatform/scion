@@ -51,6 +51,7 @@ model_aliases:
   medium: gpt-6.1-sol
   large: gpt-6.1-sol
   extra-large: gpt-6-astra
+
 # SCION_THINKING_LEVEL (0-100) -> model_reasoning_effort in ~/.codex/config.toml.
 # Applied by scion_harness.resolve_thinking in provision.py. Each level maps
 # to the value of the first entry whose max (inclusive) is >= the level.

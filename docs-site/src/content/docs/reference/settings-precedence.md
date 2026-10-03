@@ -127,9 +127,10 @@ Repo-wide, `SCION_THINKING_LEVEL` is honoured by exactly two harnesses, codex an
 Each declares a `thinking:` block in its `config.yaml` that maps the level to a native tier, and
 its `provision.py` resolves it with `scion_harness.resolve_thinking` (see [Thinking Level
 Map](/scion/reference/harness-settings/#thinking-level-map-thinking)). The gemini-cli
-`config.yaml` has no `thinking:` block, and no gemini-cli harness file reads the variable. So even with correct end-to-end delivery from the hub, **setting a
-thinking level for a gemini-cli agent has no effect inside the container.** This is a harness
-feature request, not a precedence bug.
+`config.yaml` has no `thinking:` block, and no gemini-cli harness file reads the variable. So
+even with correct end-to-end delivery from the hub, **setting a thinking level for a gemini-cli
+agent has no effect inside the container.** This is a harness feature request, not a precedence
+bug.
 
 *(Control for that absence claim: `SCION_MODEL` **is** read by
 `harnesses/gemini-cli/provision.py`, where it resolves a `small`/`medium`/`large` alias against

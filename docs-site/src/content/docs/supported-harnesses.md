@@ -132,7 +132,7 @@ Values outside the 0–100 range are clamped to the nearest boundary.
 
 When `SCION_THINKING_LEVEL` is unset, blank, or not a valid integer, the provisioner writes `model_reasoning_effort = "medium"` (the block's `default`) rather than leaving the key unwritten. This keeps Codex's own per-model catalog default (which can be `low` for some models) from silently taking over when no one has expressed an explicit preference. A non-integer value also logs a warning.
 
-If a customized Codex `config.yaml` has no `thinking:` block, the provisioner logs a warning and writes no `model_reasoning_effort`, so Codex's own default applies. Copy the block from the bundled `config.yaml` to restore the mapping.
+If a customized Codex `config.yaml` has no `thinking:` block, the provisioner logs a warning and writes no `model_reasoning_effort`, so Codex's own default applies. Copy the block from the bundled `config.yaml`, or run `scion harness-config upgrade codex`, which merges missing top-level keys such as `thinking:` into a customized `config.yaml` without overwriting your values.
 
 ### Known Limitations
 - **Auth File Copy**: The `auth.json` file is only copied when the agent is **created**.

@@ -574,7 +574,9 @@ class ProvisionThinkingWiringTest(unittest.TestCase):
     (quartile cut points 25 low / 50 medium / 100 high). Drives the real
     provision() entry point and reads the generated agy-wrapper.sh."""
 
-    def _wrapper(self, raw: str | None) -> tuple[str, list[str]]:
+    def _wrapper(
+        self, raw: str | None, thinking: dict[str, Any] | None = None
+    ) -> tuple[str, list[str]]:
         warnings: list[str] = []
         real_warn = scion_harness.ProvisionContext.warn
 
@@ -591,7 +593,7 @@ class ProvisionThinkingWiringTest(unittest.TestCase):
                     explicit_type="none",
                     harness_config={
                         "model_aliases": dict(ANTIGRAVITY_MODEL_ALIASES),
-                        "thinking": ANTIGRAVITY_THINKING,
+                        "thinking": thinking or ANTIGRAVITY_THINKING,
                     },
                 )
             wrapper_path = os.path.join(tmp, ".scion", "harness", "agy-wrapper.sh")
@@ -617,6 +619,15 @@ class ProvisionThinkingWiringTest(unittest.TestCase):
                 self.assertIn(f"--effort {tier} ", wrapper)
                 self.assertEqual(wrapper.count("--effort"), 1)
                 self.assertEqual(warnings, [])
+
+    def test_effort_tier_is_shell_quoted(self) -> None:
+        """Tier values come from config.yaml (any non-empty string), so a
+        typo like "high max" must reach agy as one quoted argument rather
+        than splitting the wrapper's command line."""
+        thinking = {"levels": [{"max": 100, "value": "high max"}]}
+        wrapper, _ = self._wrapper("60", thinking)
+        self.assertIn("--effort 'high max' ", wrapper)
+        self.assertNotIn("--effort high max", wrapper)
 
     def test_unset_level_passes_no_effort_flag(self) -> None:
         for raw in (None, "", "   "):
