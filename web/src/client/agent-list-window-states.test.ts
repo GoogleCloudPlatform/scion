@@ -333,6 +333,57 @@ describe('AgentListWindow states — transitions', () => {
     }
   }
 
+  /** Puts a fresh window into `state` on page 1 (page size 1, two rows). */
+  async function enterAtPage1(
+    win: AgentListWindow,
+    setHeld: (a: Agent[]) => void,
+    fetchPage: ReturnType<typeof vi.fn>,
+    state: WindowState
+  ): Promise<void> {
+    if (state === 'paged') {
+      fetchPage.mockResolvedValue(pagedResult([agent('b')], { nextCursor: 'c2', totalCount: 60 }));
+      win.setPaged(pagedResult([agent('a')], { nextCursor: 'c1', totalCount: 60 }), '');
+    } else {
+      setHeld([agent('a'), agent('b')]);
+      if (state === 'small') win.setSmall();
+      else if (state === 'held') {
+        win.adoptDrain({ complete: true, capped: false, error: null, requests: 2 });
+      } else {
+        win.adoptDrain({ complete: false, capped: true, error: null, requests: 4 });
+      }
+    }
+    await win.next();
+    expect(win.state).toBe(state);
+    expect(win.pageIndex).toBe(1);
+  }
+
+  for (const from of STATES) {
+    for (const entry of ENTRIES) {
+      // Leaving paged, or entering it, swaps in a different data set and
+      // lands on page 0. A local-to-local adoption keeps the page (a later
+      // trigger while already local must not throw the user back to page 0;
+      // only a view-state change does).
+      const resets = from === 'paged' || entry.state === 'paged';
+      it(`${from} on page 1 -> ${entry.name} -> ${entry.state} on page ${resets ? 0 : 1}`, async () => {
+        const { win, setHeld, fetchPage } = setup({ pageSize: 1 });
+        await enterAtPage1(win, setHeld, fetchPage, from);
+        entry.apply(win, setHeld);
+        if (entry.state === 'small' || entry.state === 'held' || entry.state === 'capped') {
+          // Two rows at page size 1, so page 1 exists in the adopted set too.
+          setHeld([agent('a'), agent('b')]);
+        }
+        expect(win.state).toBe(entry.state);
+        expect(win.pageIndex).toBe(resets ? 0 : 1);
+        expect(win.rangeStart).toBe(resets ? 0 : 1);
+        if (entry.state === 'paged') {
+          // The adopted page is page 0, with no cursor behind it.
+          expect(win.hasPrev).toBe(false);
+          expect(win.items.map((a) => a.id)).toEqual(['a']);
+        }
+      });
+    }
+  }
+
   it('the local states keep pageIndex across live updates of H (no re-adoption)', async () => {
     const { win, setHeld } = setup({ pageSize: 1 });
     setHeld([agent('a'), agent('b'), agent('c')]);
@@ -515,23 +566,49 @@ describe('AgentListWindow states — held', () => {
 });
 
 describe('AgentListWindow states — lifecycle refresh', () => {
-  const cases: Array<{ state: WindowState; requests: number }> = [
-    { state: 'small', requests: 1 },
-    { state: 'paged', requests: 1 },
-    { state: 'held', requests: 0 },
-    { state: 'capped', requests: 0 },
+  /**
+   * Requests each plan really sends: a fit request or a page refetch is one
+   * request; a drain is its legacy first page plus up to three continuation
+   * pages (the four-request cap); none is zero.
+   */
+  const REQUESTS: Record<AgentListRequestPlan, { min: number; max: number }> = {
+    fit: { min: 1, max: 1 },
+    page: { min: 1, max: 1 },
+    drain: { min: 1, max: 4 },
+    none: { min: 0, max: 0 },
+  };
+  const cases: Array<{
+    state: WindowState;
+    eligible: AgentListRequestPlan;
+    ineligible: AgentListRequestPlan;
+  }> = [
+    { state: 'small', eligible: 'fit', ineligible: 'drain' },
+    { state: 'paged', eligible: 'fit', ineligible: 'drain' },
+    { state: 'held', eligible: 'none', ineligible: 'none' },
+    { state: 'capped', eligible: 'none', ineligible: 'none' },
   ];
   for (const c of cases) {
-    it(`${c.state}: ${c.requests} request(s), for eligible and ineligible view states`, () => {
+    const describeCost = (plan: AgentListRequestPlan) => {
+      const { min, max } = REQUESTS[plan];
+      return min === max ? `${min}` : `${min} to ${max}`;
+    };
+    it(`${c.state}: updated sort plans ${c.eligible} (${describeCost(c.eligible)} requests), name sort plans ${c.ineligible} (${describeCost(c.ineligible)} requests)`, () => {
       const { win, setHeld } = setup();
       enter(win, setHeld, c.state);
-      for (const sortField of ['updated', 'name'] as const) {
-        win.setViewState({ sortField });
-        const plan = win.planRequest('lifecycle-refresh', '');
-        expect(plan === 'none' ? 0 : 1).toBe(c.requests);
-      }
+      win.setViewState({ sortField: 'updated' });
+      expect(win.planRequest('lifecycle-refresh', '')).toBe(c.eligible);
+      win.setViewState({ sortField: 'name' });
+      expect(win.planRequest('lifecycle-refresh', '')).toBe(c.ineligible);
     });
   }
+
+  it('the request cost of each plan matches the requests the hosts send for it', () => {
+    expect(REQUESTS.none).toEqual({ min: 0, max: 0 });
+    expect(REQUESTS.fit).toEqual({ min: 1, max: 1 });
+    expect(REQUESTS.page).toEqual({ min: 1, max: 1 });
+    // The drain cap: a legacy first page plus three continuation pages.
+    expect(REQUESTS.drain).toEqual({ min: 1, max: 4 });
+  });
 });
 
 describe('AgentListWindow states — resync signal', () => {
@@ -611,6 +688,136 @@ describe('AgentListWindow states — created sort while paged', () => {
       generation: 1,
     });
     expect(win.updatesAvailable).toBe(false);
+  });
+});
+
+describe('AgentListWindow states — off-page activity from an unknown delta', () => {
+  /** Paged under the updated sort with members a, b on the page and c, d off it. */
+  function pagedWithOffPageMembers(sortDir: 'asc' | 'desc' = 'desc') {
+    const rows =
+      sortDir === 'desc'
+        ? [
+            agent('a', { updated: '2026-01-04T00:00:00Z' }),
+            agent('b', { updated: '2026-01-03T00:00:00Z' }),
+          ]
+        : [
+            agent('a', { updated: '2026-01-01T00:00:00Z' }),
+            agent('b', { updated: '2026-01-02T00:00:00Z' }),
+          ];
+    const fetchPage = vi.fn(async () => pagedResult([]));
+    const win = new AgentListWindow({
+      viewState: viewState({ sortDir }),
+      fetchPage,
+      getAgent: () => undefined,
+      getProjectId: () => 'p-1',
+      getHeldAgents: () => [],
+    });
+    win.setPaged(
+      pagedResult(rows, {
+        totalCount: 4,
+        nextCursor: 'c',
+        stats: {
+          total: 4,
+          running: 4,
+          agents: [
+            ['a', 'running'],
+            ['b', 'running'],
+            ['c', 'running'],
+            ['d', 'running'],
+          ],
+        },
+      }),
+      ''
+    );
+    return { win, fetchPage };
+  }
+
+  const activity = (id: string, lastActivityEvent: string) => ({
+    upserted: [],
+    deleted: [],
+    unknown: new Map([[id, { lastActivityEvent }]]),
+    generation: 1,
+  });
+
+  it('an off-page activity bump from an unknown delta raises the chip on page 0', () => {
+    const { win, fetchPage } = pagedWithOffPageMembers();
+    const onChange = vi.fn();
+    win.addEventListener('change', onChange);
+    win.applyChanges(activity('c', '2026-01-05T00:00:00Z'));
+    expect(win.updatesAvailable).toBe(true);
+    expect(onChange).toHaveBeenCalled();
+    // The page itself is untouched until the chip is clicked.
+    expect(win.items.map((a) => a.id)).toEqual(['a', 'b']);
+    expect(fetchPage).not.toHaveBeenCalled();
+  });
+
+  it('an ascending sort raises the chip for an off-page activity time at or before the first row', () => {
+    const { win, fetchPage } = pagedWithOffPageMembers('asc');
+    win.applyChanges(activity('c', '2025-12-31T00:00:00Z'));
+    expect(win.updatesAvailable).toBe(true);
+    expect(fetchPage).not.toHaveBeenCalled();
+  });
+
+  it('an off-page activity time that stays below the first row of page 0 raises no chip', () => {
+    const { win, fetchPage } = pagedWithOffPageMembers();
+    win.applyChanges(activity('c', '2026-01-02T00:00:00Z'));
+    expect(win.updatesAvailable).toBe(false);
+    expect(fetchPage).not.toHaveBeenCalled();
+  });
+
+  it('an activity delta for an agent that is neither on the page nor a member is ignored', () => {
+    const { win } = pagedWithOffPageMembers();
+    win.applyChanges(activity('stranger', '2026-01-05T00:00:00Z'));
+    expect(win.updatesAvailable).toBe(false);
+    expect(win.stats.total).toBe(4);
+  });
+});
+
+describe('AgentListWindow states — small-state live reorder across a local page boundary', () => {
+  it('a row bumped from page 2 to page 1 moves pages with no page reset and no request', async () => {
+    const { win, setHeld, fetchPage } = setup({ pageSize: 2 });
+    const rows = [
+      agent('a', { updated: '2026-01-05T00:00:00Z' }),
+      agent('b', { updated: '2026-01-04T00:00:00Z' }),
+      agent('c', { updated: '2026-01-03T00:00:00Z' }),
+      agent('d', { updated: '2026-01-02T00:00:00Z' }),
+    ];
+    setHeld(rows);
+    win.setSmall();
+    await win.next();
+    expect(win.pageIndex).toBe(1);
+    expect(win.items.map((a) => a.id)).toEqual(['c', 'd']);
+
+    // A live update makes d the most recently active agent: the host
+    // replaces H, and the window reads it fresh.
+    setHeld([...rows.slice(0, 3), agent('d', { updated: '2026-01-09T00:00:00Z' })]);
+    expect(win.pageIndex).toBe(1);
+    expect(win.items.map((a) => a.id)).toEqual(['b', 'c']);
+    await win.prev();
+    expect(win.items.map((a) => a.id)).toEqual(['d', 'a']);
+    expect(fetchPage).not.toHaveBeenCalled();
+  });
+
+  it('a row that falls from page 1 to page 2 leaves page 1 and appears on page 2', async () => {
+    const { win, setHeld, fetchPage } = setup({ pageSize: 2 });
+    const rows = [
+      agent('a', { updated: '2026-01-05T00:00:00Z' }),
+      agent('b', { updated: '2026-01-04T00:00:00Z' }),
+      agent('c', { updated: '2026-01-03T00:00:00Z' }),
+      agent('d', { updated: '2026-01-02T00:00:00Z' }),
+    ];
+    setHeld(rows);
+    win.setSmall();
+    expect(win.items.map((a) => a.id)).toEqual(['a', 'b']);
+    // Ascending by updated time instead: a, now the oldest, sorts last.
+    win.setViewState({ sortDir: 'asc' });
+    expect(win.items.map((a) => a.id)).toEqual(['d', 'c']);
+    setHeld([agent('d', { updated: '2026-01-08T00:00:00Z' }), ...rows.slice(0, 3)]);
+    expect(win.pageIndex).toBe(0);
+    expect(win.items.map((a) => a.id)).toEqual(['c', 'b']);
+    await win.next();
+    expect(win.items.map((a) => a.id)).toEqual(['a', 'd']);
+    expect(fetchPage).not.toHaveBeenCalled();
   });
 });
 
