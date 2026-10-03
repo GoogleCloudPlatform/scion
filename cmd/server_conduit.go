@@ -47,8 +47,8 @@ var (
 
 // registerConduitServerFlags registers the conduit flags of `server start`.
 func registerConduitServerFlags(f *pflag.FlagSet) {
-	f.StringVar(&conduitInternalListen, "internal-listen", "", "host:port of the internal conduit relay API listener (hub.conduit; multi-node hubs). Must be reachable only inside the cluster/VPC")
-	f.StringVar(&conduitInternalAdvertise, "internal-advertise", "", "Base URL other hub nodes use to reach the internal listener (default: POD_IP or the listen host)")
+	f.StringVar(&conduitInternalListen, "internal-listen", "", "host:port of the internal conduit relay API listener (hub.conduit; multi-node hubs). Must be reachable only inside the cluster/VPC. TLS on this hop is recommended (e.g. a service mesh or TLS-terminating proxy, advertised as https://); plain http:// is accepted")
+	f.StringVar(&conduitInternalAdvertise, "internal-advertise", "", "Base URL other hub nodes use to reach the internal listener (default: POD_IP or the listen host). Prefer https:// (TLS on the internal hop); http:// is accepted")
 	f.StringVar(&conduitGrantKeyActivation, "conduit-grant-key-activation", "", "Publish-before-sign delay of a new conduit grant key (default 15m, minimum 1m)")
 	f.StringVar(&conduitReconnectWindow, "conduit-reconnect-window", "", "Jitter window targets redial in after a planned conduit close (default 5s, 0s-5m)")
 	f.IntSliceVar(&conduitTCPAllowedPorts, "conduit-tcp-allowed-ports", nil, "Additional agent-local ports a conduit TCP stream may target besides the agent's exposed ports (comma-separated; reserved ports are always refused; default: exposed ports only)")

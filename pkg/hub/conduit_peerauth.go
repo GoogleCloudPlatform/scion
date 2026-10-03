@@ -18,8 +18,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -144,6 +146,16 @@ func (a *signedOIDCPeerAuth) Verify(req *http.Request) (string, error) {
 	return peer, nil
 }
 
+// conduitDefaultSAWarnOnce limits the default compute service-account
+// warning to once per process.
+var conduitDefaultSAWarnOnce sync.Once
+
+// isDefaultComputeServiceAccount reports whether email is a Compute Engine
+// default service account (PROJECT_NUMBER-compute@developer.gserviceaccount.com).
+func isDefaultComputeServiceAccount(email string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(email)), "-compute@developer.gserviceaccount.com")
+}
+
 // oidcPeerAuth authenticates relay peers with Google-signed ID tokens.
 type oidcPeerAuth struct {
 	audience string
@@ -160,6 +172,13 @@ func newOIDCPeerAuth(o ConduitPeerAuthOptions) (*oidcPeerAuth, error) {
 	accounts := o.ServiceAccounts
 	if len(accounts) == 0 && o.OwnServiceAccount != "" {
 		accounts = []string{o.OwnServiceAccount}
+		if isDefaultComputeServiceAccount(o.OwnServiceAccount) {
+			conduitDefaultSAWarnOnce.Do(func() {
+				slog.Warn("Conduit relay-peer OIDC allow-list defaults to this node's service account, which is a Compute Engine default service account; "+
+					"run the hub as a dedicated service account or set server.hub.conduit.peer_service_accounts explicitly",
+					"service_account", o.OwnServiceAccount)
+			})
+		}
 	}
 	if len(accounts) == 0 {
 		return nil, errors.New("conduit peer auth (oidc): no allowed service accounts; this node's service account is unknown, so set server.hub.conduit.peer_service_accounts")

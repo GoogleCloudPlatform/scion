@@ -15,10 +15,14 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -267,6 +271,45 @@ func TestConduitPeerAuth_OIDC(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, "hub-a", id)
+		})
+	}
+}
+
+// TestConduitPeerAuth_DefaultComputeSAWarning: an OIDC allow-list that
+// falls back to a Compute Engine default service account logs one WARN per
+// process; an explicit list or a dedicated account logs none.
+func TestConduitPeerAuth_DefaultComputeSAWarning(t *testing.T) {
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(orig); conduitDefaultSAWarnOnce = sync.Once{} })
+
+	const computeSA = "123456789-compute@developer.gserviceaccount.com"
+	tests := []struct {
+		name      string
+		own       string
+		explicit  []string
+		wantWarns int
+	}{
+		{name: "dedicated own SA", own: "hub@p.iam.gserviceaccount.com"},
+		{name: "explicit list with a compute own SA", own: computeSA, explicit: []string{"hub@p.iam.gserviceaccount.com"}},
+		{name: "fallback to a compute SA", own: computeSA, wantWarns: 1},
+		{name: "fallback to a compute SA, upper case", own: strings.ToUpper(computeSA), wantWarns: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf.Reset()
+			conduitDefaultSAWarnOnce = sync.Once{}
+			for range 2 { // the second build in the same process is silent
+				newOIDCModeAuth(t, "hub-a", "own", nil, func(o *ConduitPeerAuthOptions) {
+					o.OwnServiceAccount, o.ServiceAccounts = tt.own, tt.explicit
+				})
+			}
+			got := strings.Count(buf.String(), "Compute Engine default service account")
+			assert.Equal(t, tt.wantWarns, got, buf.String())
+			if tt.wantWarns > 0 {
+				assert.Contains(t, buf.String(), "peer_service_accounts")
+			}
 		})
 	}
 }

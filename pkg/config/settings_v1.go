@@ -862,7 +862,9 @@ type V1ServerHubConduitConfig struct {
 	// ports (9810, 18380) are always refused. Empty: exposed ports only.
 	TCPAllowedPorts []int `json:"tcp_allowed_ports,omitempty" yaml:"tcp_allowed_ports,omitempty" koanf:"tcp_allowed_ports"`
 	// InternalListen is the host:port of the internal relay API listener.
-	// It must be reachable only inside the cluster/VPC.
+	// It must be reachable only inside the cluster/VPC. TLS on the
+	// internal hop is recommended (a service mesh or TLS-terminating proxy,
+	// advertised as https://); plain http:// is accepted.
 	InternalListen string `json:"internal_listen,omitempty" yaml:"internal_listen,omitempty" koanf:"internal_listen"`
 	// InternalAdvertise is the base URL other hub nodes use to reach this
 	// node's internal listener (default: derived from POD_IP or the listen

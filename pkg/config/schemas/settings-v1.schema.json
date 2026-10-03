@@ -998,13 +998,13 @@
             },
             "internal_listen": {
               "type": "string",
-              "description": "host:port of the internal relay API listener (multi-node deployments). It serves only the internal relay API and must be reachable only inside the cluster/VPC, never publicly.",
+              "description": "host:port of the internal relay API listener (multi-node deployments). It serves only the internal relay API and must be reachable only inside the cluster/VPC, never publicly. TLS on the internal hop is recommended (e.g. a service mesh or TLS-terminating proxy, advertised as https://); plain http:// is accepted.",
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_INTERNALLISTEN",
               "x-since": "1"
             },
             "internal_advertise": {
               "type": "string",
-              "description": "Base URL (http(s)://host:port) other hub nodes use to reach this node's internal listener. Default: POD_IP with the listen port, else the listen host if it is not a wildcard.",
+              "description": "Base URL (http(s)://host:port) other hub nodes use to reach this node's internal listener. Default: POD_IP with the listen port, else the listen host if it is not a wildcard. Prefer https:// (TLS on the internal hop); http:// is accepted.",
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_INTERNALADVERTISE",
               "x-since": "1"
             },
