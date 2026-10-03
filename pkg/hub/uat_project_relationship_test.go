@@ -292,6 +292,103 @@ func TestProjectUAT_AttachDeniedForOtherMembersAgents(t *testing.T) {
 	}
 }
 
+// TestProjectUAT_OwnerAdminPortAccessOnMembersAgent pins use-time behaviour
+// of owner and admin user access tokens on another member's agent. The
+// project-owner and project-admin roles carry agent.port_access, so an
+// agent:port_access token opens the member's already-exposed ports. The same
+// token cannot attach, manage ports, open the tunnel, exec or read env; an
+// agent:attach token stays denied on the member's agent; a token without
+// agent:port_access (agent:manage excludes it) cannot open ports; and
+// another member's port_access token is refused.
+func TestProjectUAT_OwnerAdminPortAccessOnMembersAgent(t *testing.T) {
+	srv, s := testServer(t)
+	projectID := tid("uatp-oversight-project")
+	ownerID := tid("uatp-oversight-owner")
+	adminID := tid("uatp-oversight-admin")
+	memberID := tid("uatp-oversight-member")
+	otherID := tid("uatp-oversight-other")
+	createRS1Project(t, s, projectID, ownerID)
+	createTestUserWithProjectRole(t, s, adminID, adminID+"@test.com", projectID, store.ProjectRoleAdmin)
+	ensureHubMembership(context.Background(), s, adminID)
+	uatpMember(t, s, projectID, memberID)
+	uatpMember(t, s, projectID, otherID)
+
+	agent := uatpAgent(t, s, projectID, memberID, t.Name(), memberID)
+	uatpExposePort(t, s, agent, 8080)
+	base := "/api/v1/agents/" + agent.ID
+
+	for _, tc := range []struct{ name, userID string }{
+		{"project-owner", ownerID},
+		{"project-admin", adminID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			portKey, _, err := srv.uatService.CreateToken(rs4MintContext(tc.userID), tc.userID, "oversight-ports",
+				projectID, []string{"agent:port_access"}, nil)
+			require.NoError(t, err)
+
+			rec := doRequestWithUAT(t, srv, portKey, http.MethodGet, base+"/ports/8080/proxy/", nil)
+			assertAuthorizedPortProxy(t, rec, "%s port_access token should open a member's exposed port: %s", tc.name, rec.Body.String())
+
+			rec = doRequestWithUAT(t, srv, portKey, http.MethodGet, base+"/pty", nil)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s port_access token must not attach: %s", tc.name, rec.Body.String())
+
+			for _, m := range []struct{ method, path string }{
+				{http.MethodPost, base + "/ports"},
+				{http.MethodDelete, base + "/ports"},
+				{http.MethodDelete, base + "/ports/8080"},
+			} {
+				rec := doRequestWithUAT(t, srv, portKey, m.method, m.path, map[string]any{"port": 8080})
+				assert.Equal(t, http.StatusForbidden, rec.Code,
+					"%s port_access token must not manage a member's ports (%s %s): %s", tc.name, m.method, m.path, rec.Body.String())
+			}
+
+			req := httptest.NewRequest(http.MethodGet, base+"/ports/tunnel", nil)
+			req.Header.Set("Authorization", "Bearer "+portKey)
+			req.Header.Set("Connection", "Upgrade")
+			req.Header.Set("Upgrade", "websocket")
+			req.Header.Set("Sec-WebSocket-Version", "13")
+			req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+			tunnel := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(tunnel, req)
+			assert.Equal(t, http.StatusForbidden, tunnel.Code, "%s port_access token must not open a member's port tunnel: %s", tc.name, tunnel.Body.String())
+
+			for _, action := range []string{"exec", "env"} {
+				rec := doRequestWithUAT(t, srv, portKey, http.MethodPost, base+"/"+action, map[string]any{})
+				assert.Equal(t, http.StatusForbidden, rec.Code, "%s port_access token must not %s a member's agent: %s", tc.name, action, rec.Body.String())
+			}
+
+			attachKey, _, err := srv.uatService.CreateToken(rs4MintContext(tc.userID), tc.userID, "oversight-attach",
+				projectID, []string{"agent:attach"}, nil)
+			require.NoError(t, err, "agent:attach is relationship-eligible and mints")
+			rec = doRequestWithUAT(t, srv, attachKey, http.MethodGet, base+"/pty", nil)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s attach token must not attach to a member's agent: %s", tc.name, rec.Body.String())
+			for _, action := range []string{"exec", "env"} {
+				rec := doRequestWithUAT(t, srv, attachKey, http.MethodPost, base+"/"+action, map[string]any{})
+				assert.Equal(t, http.StatusForbidden, rec.Code, "%s attach token must not %s a member's agent: %s", tc.name, action, rec.Body.String())
+			}
+
+			// agent:manage excludes port access. project-admin lacks
+			// agent.delete and so cannot mint agent:manage; it uses the
+			// agent scopes it does carry instead.
+			otherScopes := []string{store.UATScopeAgentManage}
+			if tc.userID == adminID {
+				otherScopes = []string{"agent:read", "agent:lifecycle", "agent:message"}
+			}
+			otherKey := mintScopedUAT(t, srv, tc.userID, projectID, otherScopes)
+			rec = doRequestWithUAT(t, srv, otherKey, http.MethodGet, base+"/ports/8080/proxy/", nil)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s token without agent:port_access must not open ports: %s", tc.name, rec.Body.String())
+		})
+	}
+
+	t.Run("other member", func(t *testing.T) {
+		portKey, _, err := srv.uatService.CreateToken(rs4MintContext(otherID), otherID, "other-ports",
+			projectID, []string{"agent:port_access"}, nil)
+		require.NoError(t, err, "agent:port_access is relationship-eligible and mints")
+		rec := doRequestWithUAT(t, srv, portKey, http.MethodGet, base+"/ports/8080/proxy/", nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "a member must not open another member's port: %s", rec.Body.String())
+	})
+}
+
 func TestProjectUAT_AttachConfinedToTokenProject(t *testing.T) {
 	srv, s := testServer(t)
 	projectP := tid("uatp-confine-p")
@@ -912,15 +1009,15 @@ func TestProjectUAT_AttachRecheckedOnEachHandshake(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Acceptance: no stock project role gains attach; no dependency on B.
+// Acceptance: stock project role attach/port_access lock-in; no dependency on B.
 // ---------------------------------------------------------------------------
 
-// TestProjectRoles_DoNotGrantAttachOrPortAccess locks in the stock project
+// TestProjectRoles_AttachAndPortAccessLockIn locks in the stock project
 // role permission lists so a future edit cannot silently change cross-member
 // attach/port_access. No stock role grants agent.attach. project-owner and
 // project-admin grant agent.port_access (opening a member's already-exposed
 // ports); project-member does not.
-func TestProjectRoles_DoNotGrantAttachOrPortAccess(t *testing.T) {
+func TestProjectRoles_AttachAndPortAccessLockIn(t *testing.T) {
 	revisions := map[string]int{
 		store.ProjectRoleOwner:  5,
 		store.ProjectRoleAdmin:  5,
