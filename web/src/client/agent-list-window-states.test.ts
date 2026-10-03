@@ -643,6 +643,31 @@ describe('AgentListWindow states — resync signal', () => {
   }
 });
 
+describe('AgentListWindow states — undecidable membership change', () => {
+  const EXPECTED: Record<WindowState, { chip: boolean; stale: boolean; banner: string | null }> = {
+    small: { chip: false, stale: false, banner: null },
+    paged: { chip: true, stale: false, banner: null },
+    held: { chip: false, stale: true, banner: 'stale' },
+    // The capped banner still wins over the stale one.
+    capped: { chip: false, stale: true, banner: 'capped' },
+  };
+  for (const state of STATES) {
+    const e = EXPECTED[state];
+    it(`${state}: markMembershipChanged ${e.chip ? 'raises the chip' : e.stale ? 'raises the stale flag' : 'changes nothing'} and sends nothing`, () => {
+      const { win, setHeld, fetchPage } = setup();
+      enter(win, setHeld, state);
+      const changes = vi.fn();
+      win.addEventListener('change', changes);
+      win.markMembershipChanged();
+      expect(win.updatesAvailable).toBe(e.chip);
+      expect(win.stale).toBe(e.stale);
+      expect(win.banner?.kind ?? null).toBe(e.banner);
+      expect(changes).toHaveBeenCalledTimes(state === 'small' ? 0 : 1);
+      expect(fetchPage).not.toHaveBeenCalled();
+    });
+  }
+});
+
 describe('AgentListWindow states — created sort while paged', () => {
   it('re-sorts an on-page update by created time, not by updated time', () => {
     const rows = [

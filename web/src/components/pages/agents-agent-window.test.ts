@@ -25,6 +25,9 @@
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
+// Stop All asks for confirmation first; the tests confirm it.
+vi.mock('../shared/confirm-dialog.js', () => ({ showConfirm: vi.fn(async () => true) }));
+
 import type { Agent } from '../../shared/types.js';
 import { stateManager } from '../../client/state.js';
 import type { AgentListWindow } from '../../client/agent-list-window.js';
@@ -53,6 +56,7 @@ interface Internals {
   setModeFilter(mode: string): void;
   setScope(scope: 'all' | 'mine' | 'shared'): void;
   backgroundRefresh(trigger: string): void;
+  handleStopAll(): Promise<void>;
   handleAgentAction(id: string, action: string, event?: MouseEvent): Promise<void>;
 }
 
@@ -371,6 +375,44 @@ describe('scion-page-agents — agent list window', () => {
       expect(internals(el).agents).toHaveLength(1200);
       expect(internals(el).agentWindow.state).toBe('held');
       expect(internals(el).agentWindow.total).toBe(400);
+    });
+
+    it('a full phased legacy first page with a nextCursor is not carried: the whole set is drained from the start without the phase', async () => {
+      // 600 of 1,800 stopped, so the phased first page is a full 500-row page.
+      const agents = Array.from({ length: 1800 }, (_, i) =>
+        makeAgent(i, { phase: i % 3 === 0 ? 'stopped' : 'running' })
+      );
+      const requests: string[] = [];
+      const full: Fake = { agents, requests };
+      const stopped: Fake = { agents: agents.filter((a) => a.phase === 'stopped'), requests };
+      const sentPhases: Array<string | null> = [];
+      // An old server: no sorted mode, `phase` honoured, `limit` ignored.
+      const legacy = (input: string | URL | Request, init?: RequestInit) => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const u = new URL(raw, 'http://localhost');
+        sentPhases.push(u.searchParams.get('phase'));
+        const phase = u.searchParams.get('phase');
+        for (const k of ['sort', 'dir', 'fit', 'stats', 'limit', 'phase']) u.searchParams.delete(k);
+        const target = phase === 'stopped' ? stopped : full;
+        return fakeFetch(target)(u.pathname + (u.search || ''), init);
+      };
+      vi.stubGlobal('fetch', vi.fn(legacy));
+      localStorage.setItem('scion-filter-agents-phase', 'stopped');
+      const el = await mount();
+      // The phased first request, then four unphased drain pages from the start.
+      expect(sentPhases).toEqual(['stopped', null, null, null, null]);
+      expect(requests).toHaveLength(1 + 4);
+      expect(requests.slice(1).map((r) => query(r).get('cursor'))).toEqual([
+        null,
+        '500',
+        '1000',
+        '1500',
+      ]);
+      expect(internals(el).agents).toHaveLength(1800);
+      expect(internals(el).agentWindow.state).toBe('held');
+      expect(internals(el).agentWindow.total).toBe(600);
+      expect(stateManager.isAgentSetComplete('full')).toBe(true);
     });
 
     it('an empty readable first drain page then a failing page is an incomplete set, not the error path', async () => {
@@ -876,6 +918,100 @@ describe('scion-page-agents — agent list window', () => {
     }
   });
 
+  describe('leaving the page during a drain', () => {
+    it('leaving the page during a drain aborts its page fetch and sends no further drain page', async () => {
+      const fake: Fake = {
+        agents: Array.from({ length: 1200 }, (_, i) => makeAgent(i)),
+        requests: [],
+      };
+      const h = holdable(fakeFetch(fake), isGlobalAgentsList);
+      h.hold();
+      vi.stubGlobal('fetch', vi.fn(h.fn));
+      localStorage.setItem('scion-view-agents', 'graph');
+      const el = await mountUnsettled();
+      // The tree view drains from the first request.
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      expect(h.sent).toHaveLength(1);
+      expect(query(h.sent[0].url).has('sort')).toBe(false);
+      expect(h.sent[0].signal?.aborted).toBe(false);
+
+      // Leaving /agents for another dashboard page keeps the store's scope,
+      // so only the page itself can stop the drain.
+      unmount(el);
+      expect(h.sent[0].signal?.aborted).toBe(true);
+      h.release();
+      for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+      expect(h.sent).toHaveLength(1);
+      expect(stateManager.getAgents()).toHaveLength(0);
+      expect(stateManager.isAgentSetComplete('full')).toBe(false);
+    });
+  });
+
+  describe('live creates under a committed label', () => {
+    it('a live create during a labelled scope-all fit request joins only if it matches the label', async () => {
+      const fake: Fake = {
+        agents: Array.from({ length: 30 }, (_, i) => makeAgent(i)),
+        requests: [],
+      };
+      const h = holdable(fakeFetch(fake), isGlobalAgentsList);
+      vi.stubGlobal('fetch', vi.fn(h.fn));
+      const el = await mount();
+      expect(internals(el).agentWindow.state).toBe('small');
+      h.hold();
+      commitLabel(el, 'env=prod');
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      expect(query(h.sent.at(-1)!.url).get('label')).toBe('env=prod');
+      expect(query(h.sent.at(-1)!.url).get('fit')).toBe('500');
+      handleUpdate('agent.new-prod.created', {
+        ...makeAgent(6000),
+        id: 'new-prod',
+        agentId: 'new-prod',
+      });
+      handleUpdate('agent.new-dev.created', {
+        ...makeAgent(6001, { labels: { env: 'dev' } }),
+        id: 'new-dev',
+        agentId: 'new-dev',
+      });
+      (stateManager as unknown as { flush(): void }).flush();
+      h.release();
+      await settle(el);
+      const ids = new Set(internals(el).agents.map((a) => a.id));
+      expect(ids.has('new-prod')).toBe(true);
+      expect(ids.has('new-dev')).toBe(false);
+      expect(internals(el).agentWindow.state).toBe('small');
+      expect(internals(el).agentWindow.stats.total).toBe(31);
+      expect(internals(el).agentWindow.display.every((a) => a.labels?.env === 'prod')).toBe(true);
+    });
+  });
+
+  describe('a capped mine set', () => {
+    it('a live create in a capped mine set raises the stale flag under the capped banner, with no request', async () => {
+      // 2,001 of 4,002 agents are in the fake mine scope.
+      const fake: Fake = {
+        agents: Array.from({ length: 4002 }, (_, i) => makeAgent(i)),
+        requests: [],
+      };
+      stubFake(fake);
+      localStorage.setItem('scion-scope-agents', 'mine');
+      localStorage.setItem('scion-view-agents', 'graph');
+      const el = await mount();
+      const win = internals(el).agentWindow;
+      expect(win.state).toBe('capped');
+      expect(fake.requests.every((r) => query(r).get('scope') === 'mine')).toBe(true);
+      expect(win.stale).toBe(false);
+      const n = fake.requests.length;
+      handleUpdate('agent.new-3.created', { ...makeAgent(9000), id: 'new-3', agentId: 'new-3' });
+      await flushLive(el);
+      expect(internals(el).agents.some((a) => a.id === 'new-3')).toBe(false);
+      expect(win.stale).toBe(true);
+      expect(win.banner?.kind).toBe('capped');
+      expect(el.shadowRoot?.querySelector('.agent-window-banner')?.textContent).toContain(
+        'more exist'
+      );
+      expect(fake.requests.length).toBe(n);
+    }, 30_000);
+  });
+
   describe('a capped global set', () => {
     it('2,001 agents in the tree view: four requests end capped with the banner, the flag is not set, a lifecycle refresh is free and the banner Refresh drains four again', async () => {
       const fake: Fake = {
@@ -1184,43 +1320,72 @@ describe('scion-page-agents — agent list window', () => {
       run: (el: TestEl) => void | Promise<void>,
       check?: (el: TestEl, fake: Fake) => void,
     ];
+    /** After a reconnect: the chip while paged, the stale flag in the local states (the capped banner still wins). */
+    const signalsReconnect = (el: TestEl): void => {
+      const win = internals(el).agentWindow;
+      if (win.state === 'paged') {
+        expect(win.updatesAvailable).toBe(true);
+        expect(pager(el).showChip).toBe(true);
+      } else {
+        expect(win.stale).toBe(true);
+        if (win.state !== 'capped') expect(text(el)).toContain('may be stale');
+      }
+    };
+    const stopAll = async (el: TestEl): Promise<void> => {
+      await internals(el).handleStopAll();
+    };
+
     const steps: Step[] = [
-      ['grid', (el) => setView(el, 'grid')],
-      ['list', (el) => setView(el, 'list')],
-      ['dir flip', (el) => internals(el).toggleSort('updated')],
+      ['switch to grid view', (el) => setView(el, 'grid')],
+      ['switch to list view', (el) => setView(el, 'list')],
+      ['flip the updated sort direction', (el) => internals(el).toggleSort('updated')],
       [
-        'phase',
+        'filter phase running',
         (el) => internals(el).setPhaseFilter('running'),
         expectRows((a) => a.phase === 'running', 'asc'),
       ],
-      ['phase clear', (el) => internals(el).setPhaseFilter('')],
+      ['clear the phase filter', (el) => internals(el).setPhaseFilter('')],
       ['next page', (el) => internals(el).agentWindow.next()],
-      ['prev page', (el) => internals(el).agentWindow.prev()],
-      ['label typing', (el) => typeLabel(el, 'env=pr')],
+      ['previous page', (el) => internals(el).agentWindow.prev()],
+      ['type a label without committing it', (el) => typeLabel(el, 'env=pr')],
       [
-        'label commit',
+        'commit label env=prod',
         (el) => commitLabel(el, 'env=prod'),
         expectRows((a) => a.labels?.env === 'prod', 'asc'),
       ],
       ['lifecycle refresh', (el) => internals(el).backgroundRefresh('lifecycle-refresh')],
-      ['label clear', (el) => commitLabel(el, '')],
       [
-        'bare-key label commit',
+        'stop-all refresh',
+        stopAll,
+        expectRows((a) => a.labels?.env === 'prod', 'asc'),
+      ],
+      ['live connection reconnect', () => reconnect(), signalsReconnect],
+      ['clear label env=prod', (el) => commitLabel(el, '')],
+      [
+        'commit bare-key label team',
         (el) => commitLabel(el, 'team'),
         expectRows((a) => !!a.labels && 'team' in a.labels, 'asc'),
       ],
-      ['bare-key label clear', (el) => commitLabel(el, '')],
-      ['scope mine', (el) => internals(el).setScope('mine')],
-      ['scope all', (el) => internals(el).setScope('all')],
-      ['tree', (el) => setView(el, 'graph')],
-      ['list again', (el) => setView(el, 'list')],
-      ['mode filter', (el) => internals(el).setModeFilter('branch')],
-      ['mode clear', (el) => internals(el).setModeFilter('')],
-      ['name sort', (el) => internals(el).toggleSort('name')],
-      ['updated sort', (el) => internals(el).toggleSort('updated')],
-      ['phase again', (el) => internals(el).setPhaseFilter('running')],
-      ['next page again', (el) => internals(el).agentWindow.next()],
-      ['lifecycle refresh again', (el) => internals(el).backgroundRefresh('lifecycle-refresh')],
+      ['clear bare-key label team', (el) => commitLabel(el, '')],
+      ['switch scope to mine', (el) => internals(el).setScope('mine')],
+      ['switch scope back to all', (el) => internals(el).setScope('all')],
+      ['switch to tree view', (el) => setView(el, 'graph')],
+      ['switch from tree back to list view', (el) => setView(el, 'list')],
+      ['filter mode branch', (el) => internals(el).setModeFilter('branch')],
+      ['clear the mode filter', (el) => internals(el).setModeFilter('')],
+      ['sort by name', (el) => internals(el).toggleSort('name')],
+      ['sort by updated after the name sort', (el) => internals(el).toggleSort('updated')],
+      [
+        'filter phase running after the tree',
+        (el) => internals(el).setPhaseFilter('running'),
+      ],
+      ['next page after the tree', (el) => internals(el).agentWindow.next()],
+      [
+        'lifecycle refresh after the tree',
+        (el) => internals(el).backgroundRefresh('lifecycle-refresh'),
+      ],
+      ['stop-all refresh after the tree', stopAll],
+      ['live connection reconnect after the tree', () => reconnect(), signalsReconnect],
     ];
 
     // A bare-key label is complete-needing: it drains (one legacy request
@@ -1228,7 +1393,7 @@ describe('scion-page-agents — agent list window', () => {
     // fit request.
     const small = {
       // prettier-ignore
-      costs: [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+      costs: [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0],
       states: steps.map(() => 'small'),
     };
     const cases: Array<{ count: number; costs: number[]; states: string[] }> = [
@@ -1237,11 +1402,11 @@ describe('scion-page-agents — agent list window', () => {
       {
         count: 1200,
         // prettier-ignore
-        costs:  [0, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 3, 1, 1, 1, 3, 0, 0, 0, 0, 0, 0, 0, 0],
+        costs:  [0, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 3, 1, 1, 1, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         // prettier-ignore
         states: ['paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged',
-          'paged', 'paged', 'held', 'paged', 'paged', 'paged', 'held', 'held', 'held', 'held',
-          'held', 'held', 'held', 'held', 'held'],
+          'paged', 'paged', 'paged', 'paged', 'held', 'paged', 'paged', 'paged', 'held', 'held',
+          'held', 'held', 'held', 'held', 'held', 'held', 'held', 'held', 'held'],
       },
     ];
 
