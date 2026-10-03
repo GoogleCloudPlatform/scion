@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -547,5 +548,144 @@ func TestNewGitHubSkillResolverWithCredentials_UsesSingletonOnly(t *testing.T) {
 	}
 	if bytes.Equal(before, after) {
 		t.Fatal("control: default cache file was not rewritten on load")
+	}
+}
+
+// newStaleCacheForClose returns a cache in dir whose entries are stale as
+// soon as they are written (negative TTL), holding a branch-ref entry for
+// key with Version "v1", so the next ResolveWithFetch for key serves it and
+// starts a background refresh.
+func newStaleCacheForClose(t *testing.T, dir, key string) *GitHubResolutionCache {
+	t.Helper()
+	cache, err := newTestResolutionCache(dir, -time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache.putEntry(key, ResolvedSkill{Name: "s", URI: key, Version: "v1"}, true)
+	return cache
+}
+
+// TestGitHubResolutionCache_CloseWaitsForRefresh checks that Close waits
+// for a background refresh that is still running and then writes its
+// result to disk.
+func TestGitHubResolutionCache_CloseWaitsForRefresh(t *testing.T) {
+	const key = "gh://o/r/s@main"
+	dir := t.TempDir()
+	cache := newStaleCacheForClose(t, dir, key)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fetch := func(context.Context) (ResolvedSkill, error) {
+		close(started)
+		<-release
+		return ResolvedSkill{Name: "s", URI: key, Version: "v2"}, nil
+	}
+	got, err := cache.ResolveWithFetch(context.Background(), key, "flight", "cred", "ref", true, nil, fetch)
+	if err != nil || got.Version != "v1" {
+		t.Fatalf("ResolveWithFetch = %+v, %v; want the stale v1 entry", got, err)
+	}
+	<-started
+
+	closed := make(chan error, 1)
+	go func() { closed <- cache.Close(context.Background()) }()
+	// Close must still be waiting while the refresh is held. The short wait
+	// gives a Close that does not wait time to return and fail the test; a
+	// correct Close passes however long it is.
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned (%v) while a refresh was still running", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("Close did not return after the refresh finished")
+	}
+
+	f := readCacheFile(t, dir)
+	entry, ok := f.Entries[key]
+	if !ok || entry.Skill.Version != "v2" {
+		t.Fatalf("file entry = %+v, want the refreshed v2 entry", entry)
+	}
+}
+
+// TestGitHubResolutionCache_CloseStopsWaitingOnContext checks that Close
+// returns ctx.Err() once ctx is done, with a refresh still running, and
+// still writes the pending entries.
+func TestGitHubResolutionCache_CloseStopsWaitingOnContext(t *testing.T) {
+	const key = "gh://o/r/s@main"
+	dir := t.TempDir()
+	cache := newStaleCacheForClose(t, dir, key)
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer close(release)
+	fetch := func(context.Context) (ResolvedSkill, error) {
+		close(started)
+		<-release
+		return ResolvedSkill{}, errors.New("not reached by the assertions")
+	}
+	if _, err := cache.ResolveWithFetch(context.Background(), key, "flight", "cred", "ref", true, nil, fetch); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := cache.Close(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Close = %v, want context.Canceled", err)
+	}
+	f := readCacheFile(t, dir)
+	if entry, ok := f.Entries[key]; !ok || entry.Skill.Version != "v1" {
+		t.Fatalf("file entry = %+v, want the pending v1 entry", entry)
+	}
+}
+
+// TestGitHubResolutionCache_NoRefreshAfterClose checks that after Close a
+// stale entry is still served but no background refresh is started, and
+// that a synchronous resolution still works.
+func TestGitHubResolutionCache_NoRefreshAfterClose(t *testing.T) {
+	const key = "gh://o/r/s@main"
+	cache := newStaleCacheForClose(t, t.TempDir(), key)
+	if err := cache.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	var refreshStarted atomic.Int32
+	hook := func(_ string, started bool) {
+		if started {
+			refreshStarted.Add(1)
+		}
+	}
+	staleServeHook.Store(&hook)
+	t.Cleanup(func() { staleServeHook.Store(nil) })
+
+	var fetches atomic.Int32
+	fetch := func(context.Context) (ResolvedSkill, error) {
+		fetches.Add(1)
+		return ResolvedSkill{Name: "s", URI: key, Version: "v2"}, nil
+	}
+	got, err := cache.ResolveWithFetch(context.Background(), key, "flight", "cred", "ref", true, nil, fetch)
+	if err != nil || got.Version != "v1" {
+		t.Fatalf("ResolveWithFetch = %+v, %v; want the stale v1 entry", got, err)
+	}
+	if n := refreshStarted.Load(); n != 0 {
+		t.Fatalf("%d refreshes started after Close, want 0", n)
+	}
+	if n := fetches.Load(); n != 0 {
+		t.Fatalf("fetch ran %d times after Close, want 0", n)
+	}
+
+	// A commit-SHA ref is never served stale, so it resolves synchronously.
+	const shaKey = "gh://o/r/s@0123456789abcdef0123456789abcdef01234567"
+	if _, err := cache.ResolveWithFetch(context.Background(), shaKey, "flight-sha", "cred", "ref", false, nil, fetch); err != nil {
+		t.Fatalf("synchronous resolution after Close: %v", err)
+	}
+	if n := fetches.Load(); n != 1 {
+		t.Fatalf("fetch ran %d times for the synchronous resolution, want 1", n)
 	}
 }

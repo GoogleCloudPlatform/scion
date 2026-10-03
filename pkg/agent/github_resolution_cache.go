@@ -165,6 +165,15 @@ type GitHubResolutionCache struct {
 	refreshMu          sync.Mutex
 	lastRefreshFailure map[string]time.Time
 
+	// lifecycleMu guards closing and the Add side of refreshWG, so Close
+	// never waits on refreshWG while a new refresh is being added to it.
+	// refreshWG counts background stale-refresh goroutines (see
+	// resolveWithFetchAccept); closing, once set by Close, stops new ones
+	// from starting.
+	lifecycleMu sync.Mutex
+	closing     bool
+	refreshWG   sync.WaitGroup
+
 	// saveDelay is how long a Put waits before the file is rewritten (see
 	// WithResolutionCacheSaveDelay and scheduleSave).
 	saveDelay time.Duration
@@ -363,6 +372,55 @@ func (c *GitHubResolutionCache) Flush() {
 	if c.onFlush != nil {
 		c.onFlush()
 	}
+}
+
+// Close prepares the cache for process exit. It stops new background
+// refreshes of stale entries, waits for the ones already running to finish
+// or for ctx to be done, whichever comes first, and then writes any pending
+// entries to disk (see Flush), so a refresh that completed during the wait
+// is persisted. The write happens even when ctx is done first; Close then
+// returns ctx.Err(), and a refresh still running may finish after the write
+// without being persisted.
+//
+// The cache stays usable after Close: lookups and synchronous resolutions
+// work as before, a stale entry is served without starting a refresh, and a
+// later Put schedules a delayed write as usual. Safe for concurrent use and
+// for calling more than once.
+func (c *GitHubResolutionCache) Close(ctx context.Context) error {
+	c.lifecycleMu.Lock()
+	c.closing = true
+	c.lifecycleMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		c.refreshWG.Wait()
+		close(done)
+	}()
+	var err error
+	select {
+	case <-done:
+	case <-ctx.Done():
+		err = ctx.Err()
+	}
+	c.Flush()
+	return err
+}
+
+// startRefresh runs refresh in a background goroutine tracked by refreshWG
+// and reports true, or reports false without running it once Close has been
+// called.
+func (c *GitHubResolutionCache) startRefresh(refresh func()) bool {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.closing {
+		return false
+	}
+	c.refreshWG.Add(1)
+	go func() {
+		defer c.refreshWG.Done()
+		refresh()
+	}()
+	return true
 }
 
 // snapshot returns a copy of the live entries map for writing to disk.
@@ -782,7 +840,8 @@ func (c *GitHubResolutionCache) coalesceFetchAccept(
 //     value is served without starting another one. The same applies when
 //     refreshAllowed is non-nil and returns false (the credential is in a
 //     GitHub rate-limit cooldown, see GitHubCooldown): the stale value is
-//     served and no refresh is started.
+//     served and no refresh is started, and likewise once Close has been
+//     called.
 //   - Otherwise, fetch runs synchronously, coalesced via flightKey and capped
 //     per credentialID (see coalesceFetch).
 //
@@ -841,18 +900,20 @@ func (c *GitHubResolutionCache) resolveWithFetchAccept(
 			} else if c.recentRefreshFailure(flightKey) {
 				fmt.Fprintf(os.Stderr, "github: WARNING: serving stale entry for %s; skipping refresh after a recent failure\n", logRef)
 			} else {
-				refreshStarted = true
 				// A panic in fetch is recovered inside coalesceFetch's DoChan
 				// closure (see its comment), so this goroutine itself cannot
 				// panic from that; no recover needed at this level.
-				go func() {
+				refreshStarted = c.startRefresh(func() {
 					_, ferr := c.coalesceFetchAccept(context.Background(), flightKey, credentialID, cacheKey, logRef, isBranchRef, accept, fetch)
 					if ferr != nil {
 						c.recordRefreshFailure(flightKey)
 					} else {
 						c.clearRefreshFailure(flightKey)
 					}
-				}()
+				})
+				if !refreshStarted {
+					util.Debugf("github: serving stale entry for %s; not refreshing after Close", logRef)
+				}
 			}
 			injectStaleServe(flightKey, refreshStarted)
 			return skill, nil
