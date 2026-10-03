@@ -203,11 +203,6 @@ type HTTPAgentDispatcher struct {
 	// accessor reads under its lock. Nil = no hub defaults (local dispatcher,
 	// tests) and the wire field is omitted.
 	hubAgentDefaultsProvider func() opsettings.AgentDefaultsSettings
-
-	// profileTimezoneProvider returns the IANA timezone string for the named
-	// profile, or "" if the profile does not exist or has no timezone set.
-	// Used by buildCreateRequest to inject TZ into agent containers.
-	profileTimezoneProvider func(profileName string) string
 }
 
 // NewHTTPAgentDispatcher creates a new HTTP-based agent dispatcher.
@@ -357,12 +352,6 @@ func (d *HTTPAgentDispatcher) SetHarnessConfigRepairer(fn func(ctx context.Conte
 // without a restart. Mirrors SetHarnessConfigRepairer.
 func (d *HTTPAgentDispatcher) SetHubAgentDefaultsProvider(fn func() opsettings.AgentDefaultsSettings) {
 	d.hubAgentDefaultsProvider = fn
-}
-
-// SetProfileTimezoneProvider registers the accessor for looking up a profile's
-// timezone by name. The callback reads the profile map under the server lock.
-func (d *HTTPAgentDispatcher) SetProfileTimezoneProvider(fn func(profileName string) string) {
-	d.profileTimezoneProvider = fn
 }
 
 // SetImageRegistry sets the image registry prefix for rewriting bare image
