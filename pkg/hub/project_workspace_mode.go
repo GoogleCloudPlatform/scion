@@ -172,10 +172,6 @@ func syncsHubProjectWorkspace(project *store.Project) bool {
 	return project.GitRemote == "" || project.IsSharedWorkspace()
 }
 
-// emptyPerAgentWorkspaceFilesIgnoredWarning is returned in the agent create
-// response when workspaceFiles are sent for an empty-per-agent project.
-const emptyPerAgentWorkspaceFilesIgnoredWarning = "workspace files were ignored: this project gives each agent an empty workspace directory"
-
 // errBrokerLacksEmptyPerAgent is returned when an empty-per-agent agent would
 // be dispatched to a runtime broker that does not advertise the
 // emptyPerAgentWorkspace capability. Handlers map it to 412.
