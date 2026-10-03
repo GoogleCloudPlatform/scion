@@ -1604,11 +1604,13 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		primaryInterrupt := interrupt && state.Phase(primaryAgent.Phase) == state.PhaseRunning
 		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, primaryAgent, agentContent, primaryInterrupt, msg); err != nil {
 			s.messageLog.Error("Failed to dispatch to agent", "agent", primaryAgent.Slug, "error", err)
-			_ = s.store.MarkMessageFailed(ctx, storeMsg.ID, err.Error())
-			// Keep storeMsg's in-memory state in sync with the store update
-			// above so the response below reports the real outcome instead
-			// of the optimistic "dispatched" state set at persist time.
-			errText := err.Error()
+			_ = s.markFailed(ctx, storeMsg.ID, err.Error())
+			// Mirror the store update above in storeMsg so the response
+			// below reports the real outcome instead of the optimistic
+			// "dispatched" state set at persist time. markFailed persists
+			// the sanitized reason (ptone/scion#1841), so sanitize here too:
+			// the response must carry exactly what the store holds.
+			errText := sanitizeFailureReason(err.Error())
 			storeMsg.DispatchState = store.MessageDispatchFailed
 			storeMsg.DispatchFailureReason = &errText
 			dispatchFailureCode = dispatchFailureCodeDispatchError
@@ -1785,7 +1787,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 					// "delivered".
 					errText := err.Error()
 					if mentionPersisted {
-						_ = s.store.MarkMessageFailed(ctx, mentionStoreMsg.ID, errText)
+						_ = s.markFailed(ctx, mentionStoreMsg.ID, errText)
 					}
 					for i, mr := range mentionResults {
 						if strings.EqualFold(mr.Slug, mentionAgent.Slug) {
@@ -3667,6 +3669,12 @@ func (s *Server) handleChatDMs(w http.ResponseWriter, r *http.Request) {
 // Members Endpoint
 // ---------------------------------------------------------------------------
 
+// spaceMembersMaxAgents bounds how many agents the members endpoint will
+// collect. It is a safety net against a runaway walk, set far above any
+// realistic project; hitting it logs a warning and returns the agents
+// collected so far.
+var spaceMembersMaxAgents = 10000
+
 // handleSpaceMembers handles GET /api/v1/chat/spaces/{projectId}/members.
 func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodGet {
@@ -3699,67 +3707,103 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 	// --- Humans: list project members via role bindings (PM1) ---
 	var humans []chatMemberEntry
 	projectMembers, err := s.store.ListProjectMembers(ctx, project.ID)
-	if err == nil {
-		seen := make(map[string]bool)
-		for _, m := range projectMembers {
-			if seen[m.UserID] {
-				continue
-			}
-			seen[m.UserID] = true
-			u, err := s.store.GetUser(ctx, m.UserID)
-			if err != nil {
-				continue
-			}
-			entry := chatMemberEntry{
-				ID:          u.ID,
-				Kind:        "user",
-				DisplayName: u.DisplayName,
-				Email:       u.Email,
-				AvatarURL:   u.AvatarURL,
-				Role:        m.Role,
-			}
-			if pm != nil {
-				entry.PresenceState = string(pm.GetState(u.ID))
-			}
-			humans = append(humans, entry)
+	if err != nil {
+		slog.Error("chat members: failed to list project members", "project", project.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list project members", nil)
+		return
+	}
+	seen := make(map[string]bool)
+	for _, m := range projectMembers {
+		if seen[m.UserID] {
+			continue
 		}
+		seen[m.UserID] = true
+		u, err := s.store.GetUser(ctx, m.UserID)
+		if err != nil {
+			continue
+		}
+		entry := chatMemberEntry{
+			ID:          u.ID,
+			Kind:        "user",
+			DisplayName: u.DisplayName,
+			Email:       u.Email,
+			AvatarURL:   u.AvatarURL,
+			Role:        m.Role,
+		}
+		if pm != nil {
+			entry.PresenceState = string(pm.GetState(u.ID))
+		}
+		humans = append(humans, entry)
 	}
 	if humans == nil {
 		humans = []chatMemberEntry{}
 	}
 
 	// --- Agents: list agents for the project ---
+	// Agent rows are gated on agent.list exactly as GET /api/v1/agents
+	// gates them: project read alone shows the humans section only.
+	agentsVisible, err := s.spaceMembersAgentsVisible(ctx, user, project.ID)
+	if err != nil {
+		slog.Error("chat members: failed to resolve agent list scope", "project", project.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to resolve agent list scope", nil)
+		return
+	}
+	if !agentsVisible {
+		writeJSON(w, http.StatusOK, chatMembersResponse{
+			Humans: humans,
+			Agents: []chatMemberEntry{},
+		})
+		return
+	}
+
 	var agents []chatMemberEntry
-	agentList, err := s.store.ListAgents(ctx, store.AgentFilter{ProjectID: projectID}, store.ListOptions{Limit: 200})
-	if err == nil {
-		for _, a := range agentList.Items {
-			entry := chatMemberEntry{
-				ID:          a.ID,
-				Kind:        "agent",
-				DisplayName: a.Name,
-				Slug:        a.Slug,
-				Phase:       a.Phase,
-				Activity:    a.Activity,
-				ProjectID:   a.ProjectID,
-				Message:     a.Message,
-			}
-			// Whether this viewer may open a terminal on this agent. The PTY
-			// route gates on authorizeAgentLifecycle, which decides
-			// ActionAttach for a user identity, so ask the same question here
-			// rather than offering a control the server will refuse.
-			entry.CanAttach = s.authzService.CheckAccess(
-				ctx, user, agentResource(&a), ActionAttach).Allowed
-			if !a.LastSeen.IsZero() {
-				entry.LastSeen = a.LastSeen.UTC().Format(time.RFC3339)
-			}
-			switch {
-			case !a.LastActivityEvent.IsZero():
-				entry.LastActivityEvent = a.LastActivityEvent.UTC().Format(time.RFC3339)
-			case !a.Updated.IsZero():
-				entry.LastActivityEvent = a.Updated.UTC().Format(time.RFC3339)
-			}
-			agents = append(agents, entry)
+	projectAgents, truncated, err := walkProjectAgentPages(ctx, s.store, project.ID, spaceMembersMaxAgents)
+	if err != nil {
+		// A client that has gone away is not a server failure, and nothing
+		// can receive a response; stop quietly as the attach loop does.
+		if errors.Is(err, context.Canceled) {
+			return
 		}
+		slog.Error("chat members: failed to list project agents", "project", project.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list project agents", nil)
+		return
+	}
+	if truncated {
+		slog.Warn("chat members: agent list truncated at safety cap",
+			"project", project.ID, "cap", spaceMembersMaxAgents)
+	}
+	for _, a := range projectAgents {
+		// Each attach check reads the store and may write an audit record,
+		// so stop once the client has gone rather than finishing the list.
+		if ctx.Err() != nil {
+			return
+		}
+		entry := chatMemberEntry{
+			ID:          a.ID,
+			Kind:        "agent",
+			DisplayName: a.Name,
+			Slug:        a.Slug,
+			Phase:       a.Phase,
+			Activity:    a.Activity,
+			ProjectID:   a.ProjectID,
+			Message:     a.Message,
+		}
+		// Whether this viewer may open a terminal on this agent. The PTY
+		// route gates on authorizeAgentLifecycle, which decides
+		// ActionAttach for a user identity, so ask the same question here
+		// rather than offering a control the server will refuse.
+		entry.CanAttach = s.authzService.CheckAccess(
+			ctx, user, agentResource(&a), ActionAttach).Allowed
+		if !a.LastSeen.IsZero() {
+			entry.LastSeen = a.LastSeen.UTC().Format(time.RFC3339)
+		}
+		switch {
+		case !a.LastActivityEvent.IsZero():
+			entry.LastActivityEvent = a.LastActivityEvent.UTC().Format(time.RFC3339)
+		case !a.Updated.IsZero():
+			entry.LastActivityEvent = a.Updated.UTC().Format(time.RFC3339)
+		}
+		agents = append(agents, entry)
 	}
 	if agents == nil {
 		agents = []chatMemberEntry{}
@@ -3769,6 +3813,26 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 		Humans: humans,
 		Agents: agents,
 	})
+}
+
+// spaceMembersAgentsVisible reports whether identity may see the agent rows
+// of projectID in the space members list. It applies the same agent.list
+// decision as GET /api/v1/agents: the project must be inside the resolved
+// scope and must not be excluded by a project-scoped access constraint.
+func (s *Server) spaceMembersAgentsVisible(ctx context.Context, identity Identity, projectID string) (bool, error) {
+	scope, err := s.authzService.ResolveListScopes(ctx, identity, "agent.list")
+	if err != nil {
+		return false, err
+	}
+	if scope.Scopes.IsNone() || !scope.Scopes.Contains(projectID) {
+		return false, nil
+	}
+	for _, excluded := range scope.ExcludedProjectIDs {
+		if excluded == projectID {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // ---------------------------------------------------------------------------

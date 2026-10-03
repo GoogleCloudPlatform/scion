@@ -324,18 +324,17 @@ func TestBuildStartContext_HubDefaultPassthroughDowngradedOnUnresolvableRuntime(
 // TestBuildStartContext_HubDefaultPassthroughDowngradedFromEnvFlag covers the
 // start/restart shape directly: no Config struct at all (Config is nil on
 // these paths), the flag and mode arrive as resolvedEnv values instead — the
-// same struct-or-env precedence SCION_METADATA_MODE itself already has.
-//
-// srv.resolveAuxiliaryRuntime is pinned to a fictitious "other" runtime, as
-// in TestBuildStartContext_HubDefaultPassthroughDowngradedOnRuntimeRemap.
-// Left to the real resolver, a "kubernetes" profile resolves to whatever
-// the ambient KUBECONFIG/ADC can reach: an ErrorRuntime where no cluster is
-// reachable (downgrade), but a verified Kubernetes runtime where one is,
-// which takes the Kubernetes carve-out and keeps passthrough
-// (ptone/scion#2680). The Kubernetes branch is covered explicitly by
+// same struct-or-env precedence SCION_METADATA_MODE itself already has. The
+// Kubernetes branch is covered by
 // TestBuildStartContext_HubDefaultPassthroughKeptOnKubernetesFromEnvFlag.
 func TestBuildStartContext_HubDefaultPassthroughDowngradedFromEnvFlag(t *testing.T) {
 	srv, _ := newTestServerForRuntimeRemap(t)
+	// Remap to a fictitious non-local, non-Kubernetes runtime with a mock
+	// resolver, as TestBuildStartContext_HubDefaultPassthroughDowngradedOnRuntimeRemap
+	// does. "kubernetes" no longer exercises the downgrade (block is not
+	// offered on Kubernetes, ptone/scion#2328), and without the override the
+	// resolver builds a real cluster client: where one is reachable the
+	// dispatch resolves to Kubernetes and keeps passthrough.
 	projectPath := writeRemapSettings(t, "other")
 	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
 		return &runtime.MockRuntime{NameFunc: func() string { return "other" }}
