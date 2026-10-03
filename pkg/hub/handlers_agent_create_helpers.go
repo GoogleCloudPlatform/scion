@@ -726,15 +726,17 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	// Explicit keys come from the CreateInputs snapshot every create path
 	// takes before derivation; a config without one falls back to
 	// InlineConfig.Env, which nothing on these paths writes derived keys to.
-	var explicitEnv map[string]string
-	if ci := agent.AppliedConfig.CreateInputs; ci != nil {
-		if ci.InlineConfig != nil {
-			explicitEnv = ci.InlineConfig.Env
+	if agent.AppliedConfig != nil {
+		var explicitEnv map[string]string
+		if ci := agent.AppliedConfig.CreateInputs; ci != nil {
+			if ci.InlineConfig != nil {
+				explicitEnv = ci.InlineConfig.Env
+			}
+		} else if agent.AppliedConfig.InlineConfig != nil {
+			explicitEnv = agent.AppliedConfig.InlineConfig.Env
 		}
-	} else if agent.AppliedConfig.InlineConfig != nil {
-		explicitEnv = agent.AppliedConfig.InlineConfig.Env
+		resolveAutoExposeEnv(agent.AppliedConfig, project, explicitEnv)
 	}
-	resolveAutoExposeEnv(agent.AppliedConfig, project, explicitEnv)
 
 	// Merge injected skills from hub/user/project scopes into InlineConfig.Skills
 	// so the provisioner's existing Step 3b handles them.
