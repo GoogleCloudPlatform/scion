@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Package agentsort is the single reference implementation of the
-// server-sorted agent list total order (design lists-graph.md 4.2). Both the
+// server-sorted agent list total order. Both the
 // project-endpoint positioning (pkg/hub) and the test suites that assert
 // pages concatenate to "the agentsort reference" use it, so there is exactly
 // one place that can get a tie-break wrong.
@@ -103,8 +103,7 @@ func Compare(dir string, a, b Row) int {
 // SortRows sorts rows in place into the section-4.2 total order for dir
 // (rows must come from KeyFor with a single sort key). It is used by the
 // project endpoint, which reads its candidate set unordered (bounded by the
-// candidate ceiling) and positions it in Go rather than in SQL (design
-// lists-graph.md 5.3).
+// candidate ceiling) and positions it in Go rather than in SQL.
 func SortRows(dir string, rows []Row) {
 	stdsort.Slice(rows, func(i, j int) bool { return Less(dir, rows[i], rows[j]) })
 }

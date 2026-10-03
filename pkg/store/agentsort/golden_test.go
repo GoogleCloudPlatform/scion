@@ -21,9 +21,8 @@ import (
 	"time"
 )
 
-// goldenFixture mirrors testdata/order_golden.json (design lists-graph.md
-// 4.2: "A golden fixture ... asserts the server order, and lists the
-// sub-second cases explicitly").
+// goldenFixture mirrors testdata/order_golden.json, which asserts the
+// server order and lists the sub-second cases explicitly.
 type goldenFixture struct {
 	Description         string             `json:"description"`
 	Rows                []goldenFixtureRow `json:"rows"`
@@ -102,7 +101,7 @@ func assertIDOrder(t *testing.T, label string, want, got []string) {
 	}
 }
 
-// TestGoldenOrder pins the design lists-graph.md 4.2 total order against the
+// TestGoldenOrder pins the sorted-mode total order against the
 // committed golden fixture, including the sub-second trailing-zero-fraction
 // pair (t1/t2) where true-time order differs from what a naive string
 // (localeCompare) comparison would produce.

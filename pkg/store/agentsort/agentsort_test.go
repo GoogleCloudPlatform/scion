@@ -28,8 +28,8 @@ func mustParse(t *testing.T, s string) time.Time {
 	return ts
 }
 
-// TestKeyFor_UpdatedUsesLastActivityWhenSet asserts the COALESCE rule (design
-// lists-graph.md 4.2): K = LastActivityEvent when non-zero, else Updated.
+// TestKeyFor_UpdatedUsesLastActivityWhenSet asserts the COALESCE rule:
+// K = LastActivityEvent when non-zero, else Updated.
 func TestKeyFor_UpdatedUsesLastActivityWhenSet(t *testing.T) {
 	created := mustParse(t, "2026-01-01T00:00:00Z")
 	updated := mustParse(t, "2026-01-02T00:00:00Z")

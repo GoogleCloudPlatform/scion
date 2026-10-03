@@ -93,12 +93,11 @@ func TestResourceEqual_NilVsEmptyStillNormalizes(t *testing.T) {
 // --- the member/full equality gate, reflection-filled, real round trip ---
 
 // reflectFillStoreAgent returns a *store.Agent with every exported field set
-// to a distinguishable non-zero value (design lists-graph.md 9: "the
-// fixture full is filled by reflection so that every exported store.Agent
-// field is non-zero"), via generic reflection plus a short list of
-// special-cased fields that must hold a specific shape to round-trip
-// through the real store (valid UUIDs, a real MessageMode enum value, etc.)
-// rather than an arbitrary string.
+// to a distinguishable non-zero value (the fixture is filled by reflection
+// so that every exported store.Agent field is non-zero), via generic
+// reflection plus a short list of special-cased fields that must hold a
+// specific shape to round-trip through the real store (valid UUIDs, a real
+// MessageMode enum value, etc.) rather than an arbitrary string.
 //
 // Four fields are deliberately left at their zero value, each for a
 // documented, store-enforced reason rather than an oversight:

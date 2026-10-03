@@ -32,7 +32,7 @@ import (
 )
 
 // TestCountAgents_MatchesListAgentsTotal pins that CountAgents applies the
-// exact predicate ListAgents' own COUNT does (design lists-graph.md 5.1).
+// exact predicate ListAgents' own COUNT does.
 func TestCountAgents_MatchesListAgentsTotal(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
