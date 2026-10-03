@@ -241,6 +241,7 @@ func TestOpenTimeout(t *testing.T) {
 		errc <- err
 	}()
 	eventually(t, "target preparing", func() bool { return prep.live.Load() == 1 })
+	settle(t, p.clk, 6) // ping+watchdog per side, opener and target open timers
 	p.clk.Advance(DefaultOpenTimeout)
 	if err := <-errc; !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("OpenStream err = %v, want deadline exceeded", err)
@@ -275,6 +276,7 @@ func TestOpenTimeoutBounded(t *testing.T) {
 	})}, transport.MemoryOptions{Buffer: 64})
 	raw.send(&conduitv1.Frame{Body: &conduitv1.Frame_StreamOpen{StreamOpen: &conduitv1.StreamOpen{StreamId: 1, Kind: conduitv1.StreamKind_STREAM_KIND_PTY, InitialWindow: 1024, OpenTimeoutMs: 3_600_000}}})
 	hctx := <-entered
+	settle(t, clk, 3) // ping, watchdog, open timer
 	clk.Advance(MaxOpenTimeout - time.Millisecond)
 	if hctx.Err() != nil {
 		t.Fatal("handler ctx cancelled before the 60s bound")

@@ -301,3 +301,13 @@ func recvStream(t *testing.T, ch <-chan Stream) Stream {
 		return nil
 	}
 }
+
+// settle waits until exactly want timers are armed on clk. Call it before
+// Advance so a write timer of a write that has already completed (but not
+// yet stopped its timer) cannot fire as a false write timeout.
+func settle(t *testing.T, clk *clock.Fake, want int) {
+	t.Helper()
+	if !clk.WaitFor(waitTimeout, func(n int) bool { return n == want }) {
+		t.Fatalf("timers did not settle at %d (have %d)", want, clk.Pending())
+	}
+}

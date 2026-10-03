@@ -356,8 +356,14 @@ func (s *session) fail(err error) {
 				t.Stop()
 			}
 		}
+		// Streams fail with ErrSessionClosed, carrying the session's
+		// reason so CodeOf sees e.g. the 4503 of a drained session.
+		streamErr := ErrSessionClosed
+		if err != ErrSessionClosed {
+			streamErr = fmt.Errorf("%w: %w", ErrSessionClosed, err)
+		}
 		for _, st := range streams {
-			st.sessionFailed(ErrSessionClosed)
+			st.sessionFailed(streamErr)
 		}
 		s.wakeCreditWaiters()
 		if err != ErrSessionClosed {
@@ -482,7 +488,7 @@ func (s *session) writeLoop() {
 				err = s.conn.WriteFrame(b)
 				t.Stop()
 				if err != nil {
-					s.fail(fmt.Errorf("conduit: transport write: %w", err))
+					s.fail(s.transportErr("write", err))
 					return
 				}
 				if of.class == classData && f.GetStreamData() != nil {
@@ -498,20 +504,26 @@ func (s *session) writeLoop() {
 	}
 }
 
+// transportErr is the session error for a failed transport read or write.
+// If the peer announced why it is going away (handshake reject, protocol
+// error, end of a drain), that reason wins over the bare transport error.
+func (s *session) transportErr(op string, err error) error {
+	s.mu.Lock()
+	ga := s.remoteGoAway
+	s.mu.Unlock()
+	if ga != nil && ga.GetCode() != 0 {
+		return &CloseError{Code: ga.GetCode(), Reason: ga.GetReason()}
+	}
+	return fmt.Errorf("conduit: transport %s: %w", op, err)
+}
+
 // ---------------------------------------------------------------- reader
 
 func (s *session) readLoop() {
 	for {
 		b, err := s.conn.ReadFrame()
 		if err != nil {
-			s.mu.Lock()
-			ga := s.remoteGoAway
-			s.mu.Unlock()
-			if ga != nil && ga.GetCode() != 0 && ga.GetDrainDeadlineMs() == 0 {
-				s.fail(&CloseError{Code: ga.GetCode(), Reason: ga.GetReason()})
-			} else {
-				s.fail(fmt.Errorf("conduit: transport read: %w", err))
-			}
+			s.fail(s.transportErr("read", err))
 			return
 		}
 		s.lastRecv.Store(s.clk.Now().UnixNano())
