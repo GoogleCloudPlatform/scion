@@ -42,7 +42,7 @@ permissions). Available scopes:
 | `agent:delete` | Delete agents |
 | `agent:message` | Send messages to agents |
 | `agent:attach` | Attach to agent sessions (terminal, exec, env, reset-auth) — your own agents and their descendants |
-| `agent:port_access` | Access agent forwarded ports — your own agents and their descendants |
+| `agent:port_access` | Access agent forwarded ports — your own agents and their descendants, plus agents in projects where your role grants `agent.port_access` (project owners and admins) |
 | `agent:manage` | All agent scopes except `agent:attach` and `agent:port_access` (convenience alias) |
 
 In addition to project and agent scopes, Scion supports UAT scopes for 7 other resource types: `skill`, `template`, `harness_config`, `group`, `user`, `broker`, and `gcp_service_account`. Each resource type provides a `*:manage` convenience alias (e.g., `skill:manage`, `template:manage`) that grants all available actions for that resource.
@@ -67,8 +67,10 @@ authority on the specific target, every time the token is used.
 
 This matters most for `agent:attach` and `agent:port_access`: you may select either scope for a
 project before you have created a single agent in it. The token gains no access from selection
-alone — each later attach or port request is independently checked against the specific agent,
-and succeeds only for your own agents and their descendants. Losing project access (for example,
+alone — each later attach or port request is independently checked against the specific agent.
+An attach request succeeds only for your own agents and their descendants. A port request also
+succeeds for any agent in a project where your role grants `agent.port_access`, which the
+built-in `project-owner` and `project-admin` roles do. Losing project access (for example,
 being removed from the project) makes every request against that project fail immediately, even
 though the token itself is still otherwise valid.
 

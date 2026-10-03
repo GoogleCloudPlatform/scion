@@ -1888,11 +1888,17 @@ type AuthScopesResponse struct {
 // relationship-kind entry, eligible or not: eligibility here answers only
 // "may you select this restriction," and a relationship-eligible selector
 // is re-checked against the actual target on every later request.
-func scopeEligibilityNote(kind permissions.MintEligibilityKind) string {
-	if kind == permissions.MintEligibilityRelationship {
-		return "checked on each target: your own agents and their descendants"
+// agent.port_access also reaches agents in projects where the holder's role
+// grants it (the built-in project-owner and project-admin roles do), so its
+// note says so.
+func scopeEligibilityNote(permissionID string, kind permissions.MintEligibilityKind) string {
+	if kind != permissions.MintEligibilityRelationship {
+		return ""
 	}
-	return ""
+	if permissionID == "agent.port_access" {
+		return "checked on each target: your own agents and their descendants, plus agents in projects where your role grants agent.port_access (project owners and admins)"
+	}
+	return "checked on each target: your own agents and their descendants"
 }
 
 // dedupStrings returns ss with duplicates removed, order preserved.
@@ -2093,7 +2099,7 @@ func (s *Server) handleAuthScopes(w http.ResponseWriter, r *http.Request) {
 				if !res.OK {
 					elig.Reason = string(res.Reason)
 				}
-				elig.Note = scopeEligibilityNote(permissions.MintEligibilityKind(entry.EligibilityKind))
+				elig.Note = scopeEligibilityNote(entry.PermissionID, permissions.MintEligibilityKind(entry.EligibilityKind))
 				entry.Eligibility = elig
 			}
 		}

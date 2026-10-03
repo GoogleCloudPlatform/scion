@@ -29,6 +29,7 @@ import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let ScionTokenList: any;
 let formatEligibilityReason: (reason?: string) => string;
+let relationshipBadgeText: (scope: string) => string;
 
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void;
@@ -173,6 +174,7 @@ describe('scion-token-list — project eligibility (ptone/scion#2122)', () => {
     const mod = await import('./token-list.js');
     ScionTokenList = mod.ScionTokenList;
     formatEligibilityReason = mod.formatEligibilityReason;
+    relationshipBadgeText = mod.relationshipBadgeText;
   });
 
   afterEach(() => {
@@ -220,6 +222,15 @@ describe('scion-token-list — project eligibility (ptone/scion#2122)', () => {
     );
     expect(formatEligibilityReason('some_future_reason_code')).toBe('some_future_reason_code');
     expect(formatEligibilityReason(undefined)).toBe('not currently selectable');
+  });
+
+  it('describes port_access reach through roles that grant it in its relationship badge', () => {
+    expect(relationshipBadgeText('agent:attach')).toBe(
+      'Own agents & descendants — checked per agent'
+    );
+    expect(relationshipBadgeText('agent:port_access')).toBe(
+      'Own agents & descendants, or any agent in the project if your role grants port access — checked per agent'
+    );
   });
 
   it('refuses to select an ineligible scope even if toggled directly', async () => {

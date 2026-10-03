@@ -200,8 +200,10 @@ For headless environments (CI/CD, automation), Scion supports **user access toke
   time.
 - `agent:attach` and `agent:port_access` are resource-relative: they may be selected for a project
   before the holder has created a single agent in it, but each later request against a specific
-  agent is authorized separately, and succeeds only for the holder's own agents and their
-  descendants. Losing project access denies every subsequent request against that project's
+  agent is authorized separately. An `agent:attach` request succeeds only for the holder's own
+  agents and their descendants. An `agent:port_access` request also succeeds for any agent in a
+  project where the holder's role grants `agent.port_access` (the built-in `project-owner` and
+  `project-admin` roles do). Losing project access denies every subsequent request against that project's
   targets immediately, independent of the token's remaining validity period.
 
 ### 4.5 Credentials Propagation
