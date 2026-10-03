@@ -555,5 +555,86 @@ class ProvisionModelWiringTest(unittest.TestCase):
         self.assertEqual(settings["model"], "Gemini 3.1 Pro (Low)")
 
 
+
+# Mirrors harnesses/antigravity/config.yaml's `thinking:` block exactly. The
+# Go test TestEmbeddedHarnessThinkingBlocks pins the yaml side to the same
+# literal table, so the two cannot drift.
+ANTIGRAVITY_THINKING = {
+    "levels": [
+        {"max": 25, "value": "low"},
+        {"max": 50, "value": "medium"},
+        {"max": 100, "value": "high"},
+    ],
+}
+
+
+class ProvisionThinkingWiringTest(unittest.TestCase):
+    """ptone/scion#2673: the level -> `agy --effort` tier table moved from a
+    hard-coded _resolve_thinking_tier into config.yaml's `thinking:` block
+    (quartile cut points 25 low / 50 medium / 100 high). Drives the real
+    provision() entry point and reads the generated agy-wrapper.sh."""
+
+    def _wrapper(self, raw: str | None) -> tuple[str, list[str]]:
+        warnings: list[str] = []
+        real_warn = scion_harness.ProvisionContext.warn
+
+        def capture(ctx: Any, message: str) -> None:
+            warnings.append(message)
+            real_warn(ctx, message)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with env_vars(SCION_THINKING_LEVEL=raw, SCION_MODEL=None, AGY_MODEL=None), \
+                    unittest.mock.patch.object(scion_harness.ProvisionContext, "warn", capture):
+                _invoke(
+                    tmp,
+                    env_vars=[],
+                    explicit_type="none",
+                    harness_config={
+                        "model_aliases": dict(ANTIGRAVITY_MODEL_ALIASES),
+                        "thinking": ANTIGRAVITY_THINKING,
+                    },
+                )
+            wrapper_path = os.path.join(tmp, ".scion", "harness", "agy-wrapper.sh")
+            with open(wrapper_path, "r", encoding="utf-8") as f:
+                return f.read(), warnings
+
+    def test_effort_tier_follows_quartile_table(self) -> None:
+        cases = (
+            ("0", "low"),
+            ("25", "low"),
+            ("26", "medium"),
+            ("30", "medium"),  # low under the old 50/75 cut points
+            ("50", "medium"),
+            ("51", "high"),
+            ("60", "high"),  # medium under the old 50/75 cut points
+            ("100", "high"),
+            ("150", "high"),
+            ("-5", "low"),  # silently dropped by the old .isdigit() check
+        )
+        for raw, tier in cases:
+            with self.subTest(raw=raw):
+                wrapper, warnings = self._wrapper(raw)
+                self.assertIn(f"--effort {tier} ", wrapper)
+                self.assertEqual(wrapper.count("--effort"), 1)
+                self.assertEqual(warnings, [])
+
+    def test_unset_level_passes_no_effort_flag(self) -> None:
+        for raw in (None, "", "   "):
+            with self.subTest(raw=raw):
+                wrapper, warnings = self._wrapper(raw)
+                self.assertNotIn("--effort", wrapper)
+                self.assertEqual(warnings, [])
+
+    def test_invalid_level_passes_no_effort_flag_and_warns(self) -> None:
+        for raw in ("abc", "1.5"):
+            with self.subTest(raw=raw):
+                wrapper, warnings = self._wrapper(raw)
+                self.assertNotIn("--effort", wrapper)
+                self.assertTrue(
+                    any("not a valid integer" in w for w in warnings),
+                    f"expected an invalid-level warning, got: {warnings}",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
