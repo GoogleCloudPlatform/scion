@@ -312,6 +312,7 @@ type nfsRenameExchangeRace struct {
 	pid           string // hostBase/projects/<pid>: real directory, holds the actual leaf
 	alt           string // hostBase/projects/alt: symlink to victim
 	victim        string
+	dirName       string // the shared dir declared on the project; its leaf is <pid>/shared-dirs/<dirName>
 	filesURL      string
 	sharedDirsURL string
 }
@@ -347,6 +348,7 @@ func setupNFSRenameExchangeRace(t *testing.T, dirName string) *nfsRenameExchange
 		pid:           pid,
 		alt:           alt,
 		victim:        victim,
+		dirName:       dirName,
 		filesURL:      fmt.Sprintf("/api/v1/projects/%s/shared-dirs/%s/files", project.ID, dirName),
 		sharedDirsURL: fmt.Sprintf("/api/v1/projects/%s/shared-dirs", project.ID),
 	}
@@ -450,7 +452,7 @@ func TestRenameExchangeRaceNFS_Put_NeverWritesVictim(t *testing.T) {
 	race.requirePutReachesRealLeaf(t, "written after the race")
 
 	victimTree.assertIntact(t, before)
-	_, err := os.Lstat(filepath.Join(race.victim, "shared-dirs", "scratch", "planted.txt"))
+	_, err := os.Lstat(filepath.Join(race.victim, "shared-dirs", race.dirName, "planted.txt"))
 	assert.True(t, os.IsNotExist(err), "the victim must never receive the planted file")
 }
 
@@ -478,7 +480,7 @@ func (r *nfsRenameExchangeRace) requirePutReachesRealLeaf(t *testing.T, content 
 	assertNotLeaked(t, rec)
 	require.Equal(t, http.StatusOK, rec.Code,
 		"a PUT with no swap in flight must reach the real leaf, or this test proves nothing; body: %s", rec.Body.String())
-	got, err := os.ReadFile(filepath.Join(r.pid, "shared-dirs", "scratch", "planted.txt"))
+	got, err := os.ReadFile(filepath.Join(r.pid, "shared-dirs", r.dirName, "planted.txt"))
 	require.NoError(t, err, "the PUT must have written into the real leaf")
 	require.Equal(t, content, string(got))
 }
