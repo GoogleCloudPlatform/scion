@@ -96,6 +96,10 @@ func mergePatchWorkspaceModeLabel(stored, updates map[string]string) (map[string
 		return updates, nil
 	}
 	out := maps.Clone(updates)
+	if out == nil {
+		// maps.Clone(nil) is nil; a nil updates map still keeps the label.
+		out = make(map[string]string, 1)
+	}
 	out[store.LabelWorkspaceMode] = storedMode
 	return out, nil
 }
@@ -135,7 +139,15 @@ func deriveCloneWorkspaceMode(srcLabel string, srcIsGit, cloneIsGit bool) string
 //     non-git one) is dropped, so the broker sees an unlabelled project,
 //     matching the hub's shared-plain resolution;
 //   - any other label is forwarded unchanged, as before.
+//
+// A nil project yields "": there is no mode to assert. This matches the
+// dispatcher's own no-project path (resolveDispatchProjectInfo returns empty
+// info, with no project slug), and inventing a mode would be wrong; an
+// empty-per-agent project is never nil, so nothing is opened up by it.
 func dispatchWorkspaceMode(project *store.Project) string {
+	if project == nil {
+		return ""
+	}
 	mode := project.SharingMode()
 	if mode == store.SharingModeEmptyPerAgent {
 		return string(store.SharingModeEmptyPerAgent)

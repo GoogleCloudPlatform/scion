@@ -274,6 +274,20 @@ func TestMergePatchWorkspaceModeLabel_DoesNotMutateInput(t *testing.T) {
 	assert.False(t, has, "caller's map must not be mutated")
 }
 
+// TestMergePatchWorkspaceModeLabel_NilUpdates pins that a nil updates map
+// keeps the stored label rather than panicking on a nil-map write.
+func TestMergePatchWorkspaceModeLabel_NilUpdates(t *testing.T) {
+	out, err := mergePatchWorkspaceModeLabel(map[string]string{store.LabelWorkspaceMode: "per-agent"}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{store.LabelWorkspaceMode: "per-agent"}, out)
+}
+
+// TestDispatchWorkspaceMode_NilProject pins that a nil project sends no mode
+// rather than panicking.
+func TestDispatchWorkspaceMode_NilProject(t *testing.T) {
+	assert.Equal(t, "", dispatchWorkspaceMode(nil))
+}
+
 func TestCheckEmptyPerAgentBrokerCapability(t *testing.T) {
 	empty := &store.Project{Labels: map[string]string{store.LabelWorkspaceMode: "per-agent"}}
 	gitPerAgent := &store.Project{GitRemote: "github.com/a/b", Labels: map[string]string{store.LabelWorkspaceMode: "per-agent"}}
