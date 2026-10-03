@@ -195,3 +195,33 @@ func TestKeyHolder(t *testing.T) {
 		t.Fatal("key survived replacement")
 	}
 }
+
+// TestFallbackAdmittedTargetVerifiesGenGrant: a target that presented no
+// launch id is admitted as "gen-<N>" and its grants are minted against
+// that value. Its identity must come from the Welcome (the admitted
+// value); the presented "" is an incomplete expectation and refuses every
+// grant.
+func TestFallbackAdmittedTargetVerifiesGenGrant(t *testing.T) {
+	welcome := &conduitv1.Welcome{SessionId: "sess-a", ConnectionEpoch: 5, EndpointIncarnation: "gen-7"}
+	claims := agentClaims(5)
+	claims.Target.EndpointIncarnation = "gen-7"
+	tcp := map[string]string{grant.ParamPort: "8080", grant.ParamHost: "127.0.0.1"}
+	for _, tc := range []struct {
+		name  string
+		ident Identity
+		want  error
+	}{
+		{name: "identity from welcome", ident: IdentityFromWelcome(grant.TargetKindAgent, agentID, project, welcome)},
+		{name: "presented value (empty)", ident: Identity{Kind: grant.TargetKindAgent, ID: agentID, ProjectID: project, Incarnation: ""}, want: grant.ErrExpectation},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			replay := grant.NewMemoryReplayCache(func() time.Time { return t0 }, 0)
+			v := &Verifier{Identity: tc.ident, Keys: f.keys, Replay: replay, Issuer: "scion-hub", Now: func() time.Time { return t0 }}
+			_, err := v.VerifyStreamOpen(context.Background(), BindingFromWelcome(welcome), f.open(t, claims, conduitv1.StreamKind_STREAM_KIND_TCP, tcp), Acting{})
+			if !errors.Is(err, tc.want) || (tc.want == nil) != (err == nil) {
+				t.Fatalf("VerifyStreamOpen = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}

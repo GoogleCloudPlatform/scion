@@ -98,11 +98,23 @@ func (h *KeyHolder) Lookup(kid string) (grant.PublicKey, bool) {
 }
 
 // Identity is what the target knows about itself.
+//
+// Incarnation MUST be Welcome.endpoint_incarnation, the value the hub
+// admitted the session with (design v2.5 §3.2), never the value the target
+// presented in its Hello nor local configuration: a target that presented
+// no launch id is admitted as "gen-<N>" and every grant for it is minted
+// against "gen-<N>". Build it with IdentityFromWelcome.
 type Identity struct {
 	Kind        string // grant.TargetKindAgent | grant.TargetKindBroker
 	ID          string
 	ProjectID   string // agents: the agent's project; brokers: unused (see Acting)
-	Incarnation string // the endpoint_incarnation the target presented
+	Incarnation string // Welcome.endpoint_incarnation (the admitted value)
+}
+
+// IdentityFromWelcome builds the verification identity of a target from
+// its own kind, id and project and the Welcome of its session.
+func IdentityFromWelcome(kind, id, projectID string, w *conduitv1.Welcome) Identity {
+	return Identity{Kind: kind, ID: id, ProjectID: projectID, Incarnation: w.GetEndpointIncarnation()}
 }
 
 // Acting names the agent a broker target is about to act on, as the broker
