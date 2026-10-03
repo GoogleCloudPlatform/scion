@@ -15,10 +15,15 @@
 package agent
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/stretchr/testify/require"
 )
 
 func boolPtr(b bool) *bool { return &b }
@@ -149,5 +154,63 @@ func TestHubAgentDefaults_DefaultEnv(t *testing.T) {
 	}
 	if (&api.HubAgentDefaults{AutoExposePorts: boolPtr(false)}).IsEmpty() {
 		t.Error("a defaults value carrying only AutoExposePorts must not be empty")
+	}
+}
+
+// TestStart_AppliesHubAutoExposeDefaultFromContext pins the join between the
+// start context and buildAgentEnv: Manager.Start reads the hub default from
+// api.HubAgentDefaults on ctx (put there by the broker's start, restart and
+// create handlers) and applies it below the scion-agent.json layer.
+func TestStart_AppliesHubAutoExposeDefaultFromContext(t *testing.T) {
+	cases := []struct {
+		name     string
+		agentEnv string // scion-agent.json env block
+		hubAE    bool
+		want     string
+	}{
+		{"hub default applies when nothing sets the key", `{"GOOD_KEY": "v"}`, true, "true"},
+		{"scion-agent.json value beats hub default", `{"` + api.EnvAutoExposePorts + `": "true"}`, false, "true"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(api.EnvAutoExposePorts, "")
+			tmpDir := t.TempDir()
+			t.Chdir(tmpDir)
+			t.Setenv("HOME", tmpDir)
+
+			globalScionDir := filepath.Join(tmpDir, ".scion")
+			hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+			require.NoError(t, os.MkdirAll(hcDir, 0755))
+			require.NoError(t, os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644))
+			tplDir := filepath.Join(globalScionDir, "templates", "default")
+			require.NoError(t, os.MkdirAll(tplDir, 0755))
+			require.NoError(t, os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644))
+			require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte("schema_version: \"1\"\nactive_profile: local\nprofiles:\n  local:\n    runtime: docker\n"), 0644))
+
+			projectScionDir := filepath.Join(tmpDir, "project", ".scion")
+			agentDir := filepath.Join(projectScionDir, "agents", "ae-test")
+			require.NoError(t, os.MkdirAll(filepath.Join(agentDir, "home"), 0755))
+			require.NoError(t, os.WriteFile(filepath.Join(agentDir, "scion-agent.json"),
+				[]byte(`{"harness": "generic", "env": `+tc.agentEnv+`}`), 0644))
+
+			var capturedEnv []string
+			mockRT := &runtime.MockRuntime{
+				ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) { return nil, nil },
+				RunFunc: func(_ context.Context, config runtime.RunConfig) (string, error) {
+					capturedEnv = config.Env
+					return "mock-id", nil
+				},
+			}
+			ctx := api.ContextWithHubAgentDefaults(context.Background(), &api.HubAgentDefaults{AutoExposePorts: boolPtr(tc.hubAE)})
+			_, err := NewManager(mockRT).Start(ctx, api.StartOptions{
+				Name: "ae-test", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true,
+				Env: map[string]string{"FROM_HUB": "x"},
+			})
+			require.NoError(t, err)
+			got, _ := envValue(capturedEnv, api.EnvAutoExposePorts)
+			if got != tc.want {
+				t.Errorf("%s = %q, want %q", api.EnvAutoExposePorts, got, tc.want)
+			}
+		})
 	}
 }
