@@ -464,6 +464,38 @@ func TestResolveRuntimeBroker_NoRuntimeBroker_ListsOnlyUsableBrokers(t *testing.
 		assert.Contains(t, resp.Error.Message, "permission to use")
 	})
 
+	t.Run("single provider online, not dispatchable", func(t *testing.T) {
+		resp := resolve422(t, newProject("single-private", privateA))
+		assert.Empty(t, listedIDs(t, resp))
+		assert.Contains(t, resp.Error.Message, "permission to use")
+	})
+
+	t.Run("single provider offline", func(t *testing.T) {
+		offline := &store.RuntimeBroker{ID: tid("nrb-broker-offline-a"), Name: "NRB offline a", Slug: "nrb-offline-a",
+			Status: store.BrokerStatusOffline, AutoProvide: true}
+		require.NoError(t, s.CreateRuntimeBroker(ctx, offline))
+		resp := resolve422(t, newProject("single-offline", offline))
+		assert.Empty(t, listedIDs(t, resp))
+		assert.Contains(t, resp.Error.Message, "only runtime broker is offline")
+		assert.NotContains(t, resp.Error.Message, "permission")
+	})
+
+	t.Run("several providers all offline", func(t *testing.T) {
+		offB := &store.RuntimeBroker{ID: tid("nrb-broker-offline-b"), Name: "NRB offline b", Slug: "nrb-offline-b", Status: store.BrokerStatusOffline}
+		offC := &store.RuntimeBroker{ID: tid("nrb-broker-offline-c"), Name: "NRB offline c", Slug: "nrb-offline-c", Status: store.BrokerStatusOffline}
+		require.NoError(t, s.CreateRuntimeBroker(ctx, offB))
+		require.NoError(t, s.CreateRuntimeBroker(ctx, offC))
+		resp := resolve422(t, newProject("all-offline", offB, offC))
+		assert.Empty(t, listedIDs(t, resp))
+		assert.Contains(t, resp.Error.Message, "None of this project's runtime brokers are online")
+	})
+
+	t.Run("no providers", func(t *testing.T) {
+		resp := resolve422(t, newProject("empty"))
+		assert.Empty(t, listedIDs(t, resp))
+		assert.Contains(t, resp.Error.Message, "register a runtime broker first")
+	})
+
 	t.Run("default not usable and no alternatives", func(t *testing.T) {
 		project := newProject("default-none", privateA, privateB)
 		project.DefaultRuntimeBrokerID = privateA.ID

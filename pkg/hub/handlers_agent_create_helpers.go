@@ -1641,7 +1641,11 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		if brokerErr == nil && broker.Status == store.BrokerStatusOnline && s.canDispatchToBroker(ctx, broker) {
 			return allProviders[0].BrokerID, nil
 		}
-		NoRuntimeBroker(w, "No runtime brokers available for this project that you have permission to use", usableBrokers())
+		if brokerErr == nil && broker.Status == store.BrokerStatusOnline {
+			NoRuntimeBroker(w, "No runtime brokers available for this project that you have permission to use", usableBrokers())
+		} else {
+			NoRuntimeBroker(w, "This project's only runtime broker is offline", usableBrokers())
+		}
 		return "", store.ErrNotFound
 	}
 
@@ -1658,8 +1662,10 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		if len(availableBrokers) > 0 {
 			// Online brokers exist, but none the caller may use.
 			NoRuntimeBroker(w, "No runtime brokers available for this project that you have permission to use", usableBrokers())
-		} else {
+		} else if len(allProviders) == 0 {
 			NoRuntimeBroker(w, "No runtime brokers available for this project; register a runtime broker first", usableBrokers())
+		} else {
+			NoRuntimeBroker(w, "None of this project's runtime brokers are online", usableBrokers())
 		}
 		return "", store.ErrNotFound
 	case 1:
