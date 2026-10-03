@@ -43,12 +43,12 @@ import (
 
 // World is a registry plus any number of relay nodes sharing it.
 type World struct {
-	T        *testing.T
-	Inner    registry.Store       // the SQLite store
-	Store    *registry.FaultStore // what every node uses
-	Registry *registry.Registry
-	PeerKey  []byte // shared HMAC peer key (HKDF-derived)
-	GrantKey *conduitv1.GrantKey
+	T          *testing.T
+	Inner      registry.Store       // the SQLite store
+	Store      *registry.FaultStore // what every node uses
+	Registry   *registry.Registry
+	PeerSecret []byte // shared relay-peer secret (the MAC key is HKDF-derived from it)
+	GrantKey   *conduitv1.GrantKey
 
 	now   atomic.Int64 // registry clock, unix nanos
 	fault atomic.Pointer[func(op string) error]
@@ -73,11 +73,7 @@ func NewWorld(t *testing.T) *World {
 	w.Registry = registry.New(w.Store, registry.Config{Clock: registry.ClockFunc(w.Now)})
 	secret := make([]byte, 32)
 	_, _ = rand.Read(secret)
-	key, err := relay.DeriveHMACPeerKey(secret)
-	if err != nil {
-		t.Fatal(err)
-	}
-	w.PeerKey = key
+	w.PeerSecret = secret
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
 	w.GrantKey = &conduitv1.GrantKey{Kid: "k1", PublicKey: pub}
 	return w
@@ -115,7 +111,7 @@ func (w *World) principal(key string) (relay.Principal, bool) {
 
 // PeerAuth returns an HMAC peer authenticator for selfID.
 func (w *World) PeerAuth(selfID string) relay.PeerAuth {
-	a, err := relay.NewHMACPeerAuth(relay.HMACPeerAuthConfig{Key: w.PeerKey, SelfID: selfID})
+	a, err := relay.NewHMACPeerAuthFromSecret(relay.HMACPeerAuthConfig{Secret: w.PeerSecret, SelfID: selfID})
 	if err != nil {
 		w.T.Fatal(err)
 	}
@@ -177,6 +173,7 @@ func (w *World) NewNode(id string, mod func(*relay.Config)) (*Node, error) {
 			return []*conduitv1.GrantKey{w.GrantKey}, nil
 		},
 		PeerAuth:   auth,
+		Store:      w.Store,
 		HTTPClient: n.Internal.Client(),
 		Clock:      n.Clock,
 	}

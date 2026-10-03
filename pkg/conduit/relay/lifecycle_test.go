@@ -203,6 +203,128 @@ func TestShutdownDrains(t *testing.T) {
 	}
 }
 
+// TestShutdownWaitsAndIsBounded (F5): Shutdown returns only after Serve's
+// row delete and in-flight touches have finished. The delete case blocks
+// the delete, cancels ctx while it is blocked and expects context.Canceled
+// (Shutdown would return nil if it did not wait); the touch case releases
+// the touch and expects it to have finished when Shutdown returns.
+func TestShutdownWaitsAndIsBounded(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// block is the store op held until the test ends ("" = none).
+		block string
+		touch bool // start a touch before Shutdown
+	}{
+		{name: "row delete in flight", block: registry.OpDeleteSessionCAS},
+		{name: "touch in flight", block: registry.OpTouchSession, touch: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := relaytest.NewWorld(t)
+			n := w.StartNode("relay-a", nil)
+			w.SetPrincipal("a", agentPrincipal("L1", 1))
+			sess, wel := n.MustDial("a", relaytest.AgentHello(agentID, "L1", "", "pty"), conduit.Config{})
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			t.Cleanup(unblock) // runs before the world's cleanups
+			entered := make(chan struct{}, 1)
+			var finished atomic.Bool // the blocked op has returned
+			if tc.block != "" {
+				w.SetFault(func(op string) error {
+					if op == tc.block {
+						select {
+						case entered <- struct{}{}:
+						default:
+						}
+						<-release
+						finished.Store(true)
+					}
+					return nil
+				})
+			}
+			if tc.touch {
+				n.Relay.TouchInterceptorForTest(wel.GetSessionId(), nil)(conduit.Inbound, relay.PongFrame)
+				relaytest.Wait(t, entered, "touch to reach the store")
+			}
+			go func() { <-sess.GoAwayReceived(); _ = sess.Close() }()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			result := make(chan error, 1)
+			go func() { result <- n.Relay.Shutdown(ctx) }()
+			switch {
+			case tc.touch:
+				// Serve has returned (row deleted); only the touch is
+				// left. Shutdown returns once the touch has finished.
+				_ = relaytest.Wait(t, n.Served, "Serve to return")
+				unblock()
+				if err := relaytest.Wait(t, result, "Shutdown to return"); err != nil {
+					t.Fatalf("Shutdown = %v", err)
+				}
+				if !finished.Load() {
+					t.Fatal("Shutdown returned while a touch was in flight")
+				}
+				return
+			default:
+				relaytest.Wait(t, entered, tc.block+" to reach the store")
+			}
+			cancel()
+			if err := relaytest.Wait(t, result, "Shutdown to return"); !errors.Is(err, context.Canceled) {
+				t.Fatalf("Shutdown = %v, want context.Canceled (it did not wait)", err)
+			}
+		})
+	}
+}
+
+// TestShutdownDeadlineClosesLateSessions (F5): a session that outlives
+// GoAway (it has an open stream) is closed with 4503 at the Shutdown
+// deadline, and Shutdown returns ctx.Err().
+func TestShutdownDeadlineClosesLateSessions(t *testing.T) {
+	p := newPair(t, echoConfig())
+	octx, ocancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer ocancel()
+	st, err := p.remote().OpenStream(octx, &conduitv1.StreamOpen{Kind: conduitv1.StreamKind_STREAM_KIND_PTY})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- p.a.Relay.Shutdown(ctx) }()
+	relaytest.WaitClosed(t, p.target.GoAwayReceived(), "GoAway")
+	cancel()
+	if err := relaytest.Wait(t, result, "Shutdown to return"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Shutdown = %v, want context.Canceled", err)
+	}
+	relaytest.WaitClosed(t, p.target.Done(), "late session close")
+	if code := conduit.CodeOf(p.target.Err(), 0); code != conduit.CloseRelayRestart {
+		t.Fatalf("late session ended with %v, want 4503", p.target.Err())
+	}
+}
+
+// TestTouchAfterShutdownIsNoop (F5): a pong delivered after Shutdown
+// schedules no touch.
+func TestTouchAfterShutdownIsNoop(t *testing.T) {
+	w := relaytest.NewWorld(t)
+	n := w.StartNode("relay-a", nil)
+	w.SetPrincipal("a", agentPrincipal("L1", 1))
+	sess, wel := n.MustDial("a", relaytest.AgentHello(agentID, "L1", "", "pty"), conduit.Config{})
+	ic := n.Relay.TouchInterceptorForTest(wel.GetSessionId(), nil)
+	go func() { <-sess.GoAwayReceived(); _ = sess.Close() }()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := n.Relay.Shutdown(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var log opLog
+	w.SetFault(func(op string) error { log.record(op); return nil })
+	ic(conduit.Inbound, relay.PongFrame)
+	n.Relay.WaitTouchesForTest()
+	if i := log.index(registry.OpTouchSession); i >= 0 {
+		t.Fatalf("ops %v: a touch ran after Shutdown", log.ops)
+	}
+}
+
 func TestAbandonAdmissionDeletesRow(t *testing.T) {
 	w := relaytest.NewWorld(t)
 	n := w.StartNode("relay-a", nil)
@@ -372,7 +494,8 @@ func TestTouchNeverBlocksReadLoop(t *testing.T) {
 }
 
 // TestTouchSessionNotFoundCloses: a touch that finds the row gone (reaped
-// or replaced) closes the session with 4503 so the target reconnects.
+// or replaced) sends GoAway 4503 relay_restart (with a jittered reconnect
+// hint) so the target reconnects.
 func TestTouchSessionNotFoundCloses(t *testing.T) {
 	w := relaytest.NewWorld(t)
 	n := w.StartNode("relay-a", nil)
@@ -382,6 +505,7 @@ func TestTouchSessionNotFoundCloses(t *testing.T) {
 		t.Fatal(err)
 	}
 	n.Relay.TouchInterceptorForTest(wel.GetSessionId(), nil)(conduit.Inbound, relay.PongFrame)
+	relaytest.WaitClosed(t, sess.GoAwayReceived(), "GoAway")
 	relaytest.WaitClosed(t, sess.Done(), "session close")
 	if code := conduit.CodeOf(sess.Err(), 0); code != conduit.CloseRelayRestart {
 		t.Fatalf("session ended with %v, want 4503", sess.Err())

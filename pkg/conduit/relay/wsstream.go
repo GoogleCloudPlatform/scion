@@ -32,7 +32,7 @@ import (
 const hopStreamID = 1
 
 // errLinkLost closes a hop stream whose internal WS failed.
-var errLinkLost = &conduit.CloseError{Code: conduit.CloseRelayRestart, Reason: "relay link lost"}
+var errLinkLost = closeErr(conduit.CloseRelayTimeout, ReasonUpstreamUnreachable, "relay link lost")
 
 // wsStream is one conduit stream carried over one internal WebSocket
 // between two relays (design §3.5). It speaks conduit frames only
@@ -127,7 +127,7 @@ func (s *wsStream) readLoop() {
 		}
 		f := &conduitv1.Frame{}
 		if err := proto.Unmarshal(b, f); err != nil {
-			s.fail(conduit.CloseProtocolError, "malformed frame")
+			s.fail(conduit.CloseProtocolError, reason(ReasonBadFrame, "malformed frame"))
 			return
 		}
 		switch body := f.GetBody().(type) {
@@ -136,7 +136,7 @@ func (s *wsStream) readLoop() {
 			s.mu.Lock()
 			if s.rfin || int64(len(d.GetData())) > s.recvAvail {
 				s.mu.Unlock()
-				s.fail(conduit.CloseProtocolError, "flow-control violation")
+				s.fail(conduit.CloseProtocolError, reason(ReasonBadFrame, "flow-control violation"))
 				return
 			}
 			s.recvAvail -= int64(len(d.GetData()))
@@ -172,7 +172,7 @@ func (s *wsStream) readLoop() {
 			s.end(e, false)
 			return
 		default:
-			s.fail(conduit.CloseProtocolError, "unexpected frame on a stream hop")
+			s.fail(conduit.CloseProtocolError, reason(ReasonBadFrame, "unexpected frame on a stream hop"))
 			return
 		}
 	}
@@ -344,7 +344,7 @@ func splice(a, b conduit.Stream) {
 			n, rerr := src.Read(buf)
 			if n > 0 {
 				if _, werr := dst.Write(buf[:n]); werr != nil {
-					abort(conduit.CodeOf(werr, conduit.CloseRelayRestart), "peer leg closed")
+					abort(codeAndReason(werr, "peer leg closed"))
 					return
 				}
 			}
@@ -358,7 +358,7 @@ func splice(a, b conduit.Stream) {
 				abort(conduit.CloseNormal, "")
 				return
 			default:
-				abort(conduit.CodeOf(rerr, conduit.CloseRelayRestart), closeReason(rerr))
+				abort(codeAndReason(rerr, "stream failed"))
 				return
 			}
 		}
@@ -386,10 +386,13 @@ func splice(a, b conduit.Stream) {
 	fwds.Wait()
 }
 
-func closeReason(err error) string {
+// codeAndReason maps a hop or target error to a §3.3.1 close: the code and
+// reason of a *conduit.CloseError as is, otherwise 4504
+// upstream_unreachable with detail.
+func codeAndReason(err error, detail string) (uint32, string) {
 	var ce *conduit.CloseError
-	if errors.As(err, &ce) {
-		return ce.Reason
+	if errors.As(err, &ce) && ce.Code != conduit.CloseNormal {
+		return ce.Code, ce.Reason
 	}
-	return "stream failed"
+	return conduit.CloseRelayTimeout, reason(ReasonUpstreamUnreachable, detail)
 }

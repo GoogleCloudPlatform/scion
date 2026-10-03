@@ -20,9 +20,11 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
@@ -101,7 +103,7 @@ func TestAdmitLaunchIDMatchAdmitted(t *testing.T) {
 	n := w.StartNode("relay-a", nil)
 	w.SetPrincipal("a", agentPrincipal("L2", 3))
 	_, wel := n.MustDial("a", relaytest.AgentHello(agentID, "L2", "", "pty"), conduit.Config{})
-	if wel.GetConnectionEpoch() != 1 || wel.GetRelayInstanceId() != "relay-a" || len(wel.GetGrantKeys()) != 1 {
+	if wel.GetConnectionEpoch() != 1 || wel.GetRelayInstanceId() != "relay-a" || len(wel.GetGrantKeys()) != 1 || wel.GetEndpointIncarnation() != "L2" {
 		t.Fatalf("welcome = %v", wel)
 	}
 	ps := w.Sessions(registry.PrincipalAgent, agentID)
@@ -128,34 +130,90 @@ func TestAdmitMissingLaunchIDFallsBackToGeneration(t *testing.T) {
 	}
 }
 
-// TestAdmissionRefusals: every refusal that does not need the registry
-// happens before InsertSessionWithNextEpoch, so no row is written and no
-// epoch is consumed.
+// TestAdmissionRefusals maps every admission refusal path to its design
+// v2.5 §3.3.1 close code and reason token. Every refusal leaves no row and,
+// except where noted, consumes no epoch: the refusals that do not need the
+// registry happen before InsertSessionWithNextEpoch.
 func TestAdmissionRefusals(t *testing.T) {
+	agent := agentPrincipal("L2", 3)
+	l2 := relaytest.AgentHello(agentID, "L2", "", "pty")
+	userHelloWithIncarnation := relaytest.UserHello("user-1")
+	userHelloWithIncarnation.Capabilities.EndpointIncarnation = "x"
+	noProject := agent
+	noProject.ProjectID = ""
 	for _, tc := range []struct {
 		name      string
 		principal relay.Principal
 		hello     *conduitv1.Hello
 		fault     string // store op that fails
 		keysErr   bool
+		notStart  bool // relay built but never started
+		direct    bool // Admit called directly (the dialer refuses to send the Hello)
+		supersede bool // relay instance re-registered before the Hello
+		setup     func(t *testing.T, w *relaytest.World, n *relaytest.Node)
 		wantCode  uint32
+		wantToken string
 	}{
-		{name: "superseded launch id", principal: agentPrincipal("L2", 3), hello: relaytest.AgentHello(agentID, "L1", "", "pty"), wantCode: relay.CloseSupersededIncarnation},
-		{name: "hello id differs from authenticated id", principal: agentPrincipal("L2", 3), hello: relaytest.AgentHello("agent-2", "L2", ""), wantCode: conduit.CloseForbidden},
-		{name: "hello kind differs", principal: agentPrincipal("L2", 3), hello: relaytest.BrokerHello(agentID, "b1"), wantCode: conduit.CloseForbidden},
-		{name: "exec scope claim differs", principal: agentPrincipal("L2", 3), hello: relaytest.AgentHello(agentID, "L2", "scope-x"), wantCode: conduit.CloseForbidden},
+		{name: "superseded launch id", principal: agent, hello: relaytest.AgentHello(agentID, "L1", "", "pty"),
+			wantCode: relay.CloseSupersededIncarnation, wantToken: relay.ReasonSupersededIncarnation},
+		{name: "legacy hello while the current launch is connected", principal: agent, hello: relaytest.AgentHello(agentID, "", "", "pty"),
+			setup: func(t *testing.T, w *relaytest.World, n *relaytest.Node) {
+				w.SetPrincipal("l2", agent)
+				n.MustDial("l2", l2, conduit.Config{})
+			}, wantCode: relay.CloseSupersededIncarnation, wantToken: relay.ReasonLegacyHelloSuperseded},
+		{name: "hello id differs from authenticated id", principal: agent, hello: relaytest.AgentHello("agent-2", "L2", ""),
+			wantCode: conduit.CloseForbidden, wantToken: relay.ReasonForbidden},
+		{name: "hello kind differs", principal: agent, hello: relaytest.BrokerHello(agentID, "b1"),
+			wantCode: conduit.CloseForbidden, wantToken: relay.ReasonForbidden},
+		{name: "exec scope claim differs", principal: agent, hello: relaytest.AgentHello(agentID, "L2", "scope-x"),
+			wantCode: conduit.CloseForbidden, wantToken: relay.ReasonForbidden},
 		{name: "relay-peer may not hold a session", principal: relay.Principal{Kind: registry.PrincipalRelayPeer, ID: "relay-z"},
-			hello: &conduitv1.Hello{PrincipalKind: conduitv1.PrincipalKind_PRINCIPAL_KIND_RELAY_PEER, PrincipalId: "relay-z"}, wantCode: conduit.CloseForbidden},
-		{name: "grant keys unavailable", principal: agentPrincipal("L2", 3), hello: relaytest.AgentHello(agentID, "L2", ""), keysErr: true, wantCode: conduit.CloseRelayRestart},
-		{name: "registry insert fails closed", principal: agentPrincipal("L2", 3), hello: relaytest.AgentHello(agentID, "L2", ""), fault: registry.OpInsertSessionWithNextEpoch, wantCode: conduit.CloseRelayRestart},
+			hello:    &conduitv1.Hello{PrincipalKind: conduitv1.PrincipalKind_PRINCIPAL_KIND_RELAY_PEER, PrincipalId: "relay-z"},
+			wantCode: conduit.CloseForbidden, wantToken: relay.ReasonForbidden},
+		{name: "session not admissible (no project)", principal: noProject, hello: l2,
+			wantCode: conduit.CloseForbidden, wantToken: relay.ReasonForbidden},
+		{name: "unknown principal kind", principal: agent, hello: &conduitv1.Hello{PrincipalId: agentID}, direct: true,
+			wantCode: conduit.CloseProtocolError, wantToken: relay.ReasonBadHello},
+		{name: "broker without incarnation", principal: relay.Principal{Kind: registry.PrincipalBroker, ID: "broker-1"}, hello: relaytest.BrokerHello("broker-1", ""),
+			wantCode: conduit.CloseProtocolError, wantToken: relay.ReasonBadHello},
+		{name: "user presenting an incarnation", principal: relay.Principal{Kind: registry.PrincipalUser, ID: "user-1"}, hello: userHelloWithIncarnation,
+			wantCode: conduit.CloseProtocolError, wantToken: relay.ReasonBadHello},
+		{name: "grant keys unavailable", principal: agent, hello: l2, keysErr: true,
+			wantCode: conduit.CloseRelayTimeout, wantToken: relay.ReasonGrantKeysUnavailable},
+		{name: "registry insert fault", principal: agent, hello: l2, fault: registry.OpInsertSessionWithNextEpoch,
+			wantCode: conduit.CloseRelayTimeout, wantToken: relay.ReasonRegistryUnavailable},
+		{name: "fallback fence read fault", principal: agent, hello: relaytest.AgentHello(agentID, "", "", "pty"), fault: registry.OpListPrincipalSessions,
+			wantCode: conduit.CloseRelayTimeout, wantToken: relay.ReasonRegistryUnavailable},
+		{name: "relay not started", principal: agent, hello: l2, notStart: true,
+			wantCode: conduit.CloseRelayRestart, wantToken: relay.ReasonNotServing},
+		{name: "relay superseded at insert", principal: agent, hello: l2, supersede: true,
+			wantCode: conduit.CloseRelayRestart, wantToken: relay.ReasonRelayRestart},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := relaytest.NewWorld(t)
-			n := w.StartNode("relay-a", func(c *relay.Config) {
+			mod := func(c *relay.Config) {
 				if tc.keysErr {
 					c.GrantKeys = func(context.Context) ([]*conduitv1.GrantKey, error) { return nil, errors.New("key store down") }
 				}
-			})
+			}
+			var n *relaytest.Node
+			if tc.notStart {
+				var err error
+				if n, err = w.NewNode("relay-a", mod); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				n = w.StartNode("relay-a", mod)
+			}
+			if tc.setup != nil {
+				tc.setup(t, w, n)
+			}
+			before := w.Sessions(tc.principal.Kind, tc.principal.ID)
+			if tc.supersede {
+				if _, err := w.Registry.RegisterRelay(context.Background(), registry.RelayInstance{InstanceID: "relay-a", InternalEndpoint: n.Internal.URL}); err != nil {
+					t.Fatal(err)
+				}
+			}
 			w.SetPrincipal("p", tc.principal)
 			if tc.fault != "" {
 				w.SetFault(func(op string) error {
@@ -165,16 +223,38 @@ func TestAdmissionRefusals(t *testing.T) {
 					return nil
 				})
 			}
-			_, _, err := n.Dial(context.Background(), "p", tc.hello, conduit.Config{})
-			if got := conduit.CodeOf(err, 0); got != tc.wantCode {
-				t.Fatalf("dial err = %v (code %d), want code %d", err, got, tc.wantCode)
+			var err error
+			if tc.direct {
+				adm, _ := n.Relay.NewAdmitterForTest(tc.principal, registry.TransportWS)
+				_, err = adm.Admit(context.Background(), tc.hello)
+			} else {
+				_, _, err = n.Dial(context.Background(), "p", tc.hello, conduit.Config{})
 			}
 			w.SetFault(nil)
+			assertClose(t, err, tc.wantCode, tc.wantToken)
 			ps := w.Sessions(tc.principal.Kind, tc.principal.ID)
-			if len(ps.Sessions) != 0 || ps.CurrentEpoch != 0 {
-				t.Fatalf("refusal left %d rows, epoch %d; want none", len(ps.Sessions), ps.CurrentEpoch)
+			if len(ps.Sessions) != len(before.Sessions) || ps.CurrentEpoch != before.CurrentEpoch {
+				t.Fatalf("refusal changed the rows (%d -> %d) or the epoch (%d -> %d)",
+					len(before.Sessions), len(ps.Sessions), before.CurrentEpoch, ps.CurrentEpoch)
 			}
 		})
+	}
+}
+
+// assertClose checks a close error's code and reason token (the part of
+// the reason before ": "), and the reason bound.
+func assertClose(t *testing.T, err error, code uint32, token string) {
+	t.Helper()
+	var ce *conduit.CloseError
+	if !errors.As(err, &ce) {
+		t.Fatalf("err = %v, want close %d %s", err, code, token)
+	}
+	got, _, _ := strings.Cut(ce.Reason, ":")
+	if ce.Code != code || got != token {
+		t.Fatalf("close = %d %q, want %d %s", ce.Code, ce.Reason, code, token)
+	}
+	if len(ce.Reason) > relay.MaxReasonBytes {
+		t.Fatalf("reason is %d bytes, max %d", len(ce.Reason), relay.MaxReasonBytes)
 	}
 }
 
@@ -292,9 +372,15 @@ func TestFallbackRefusedWhileLaunchIDLive(t *testing.T) {
 			w.SetPrincipal("old", agentPrincipal("L1", 2))
 			a.MustDial("old", relaytest.AgentHello(agentID, "L1", "", "pty"), conduit.Config{})
 		}, wantRows: 2},
-		{name: "registry read error fails closed", setup: func(t *testing.T, w *relaytest.World, a *relaytest.Node) {
+		{name: "L2 row on a stale relay still blocks", setup: func(t *testing.T, w *relaytest.World, a *relaytest.Node) {
 			a.MustDial("a", relaytest.AgentHello(agentID, "L2", "", "pty"), conduit.Config{})
-		}, fault: registry.OpListPrincipalSessions, wantCode: conduit.CloseRelayRestart, wantRows: 1, l2Routing: true},
+			// relay-a stops heartbeating: the row is no longer live, but
+			// liveness is ignored by the fence.
+			w.Advance(2 * time.Minute)
+		}, wantCode: relay.CloseSupersededIncarnation, wantRows: 1},
+		{name: "registry read error fails closed (4504, never 4409)", setup: func(t *testing.T, w *relaytest.World, a *relaytest.Node) {
+			a.MustDial("a", relaytest.AgentHello(agentID, "L2", "", "pty"), conduit.Config{})
+		}, fault: registry.OpListPrincipalSessions, wantCode: conduit.CloseRelayTimeout, wantRows: 1, l2Routing: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := relaytest.NewWorld(t)
@@ -303,6 +389,7 @@ func TestFallbackRefusedWhileLaunchIDLive(t *testing.T) {
 			b := w.StartNode("relay-b", func(c *relay.Config) { c.Logger = slog.New(logs) })
 			w.SetPrincipal("a", agentPrincipal("L2", 3))
 			tc.setup(t, w, a)
+			b.Relay.HeartbeatForTest() // relay-b stays live across w.Advance
 			before := len(w.Sessions(registry.PrincipalAgent, agentID).Sessions)
 
 			var inserts atomic.Int32
@@ -318,12 +405,17 @@ func TestFallbackRefusedWhileLaunchIDLive(t *testing.T) {
 			// The zombie dials a different relay than L2's.
 			_, wel, err := b.Dial(context.Background(), "a", relaytest.AgentHello(agentID, "", "", "pty"), conduit.Config{})
 			w.SetFault(nil)
-			if got, want := logs.count("reason", relay.LogReasonLegacyHelloSuperseded), btoi(tc.wantCode == relay.CloseSupersededIncarnation); got != want {
-				t.Fatalf("reason=%s logged %d times, want %d", relay.LogReasonLegacyHelloSuperseded, got, want)
+			if got, want := logs.count("reason", relay.ReasonLegacyHelloSuperseded), btoi(tc.wantCode == relay.CloseSupersededIncarnation); got != want {
+				t.Fatalf("reason=%s logged %d times, want %d", relay.ReasonLegacyHelloSuperseded, got, want)
 			}
 			if tc.wantCode != 0 {
-				if code := conduit.CodeOf(err, 0); code != tc.wantCode {
-					t.Fatalf("fallback Hello = %v, want close %d", err, tc.wantCode)
+				token := relay.ReasonRegistryUnavailable
+				if tc.wantCode == relay.CloseSupersededIncarnation {
+					token = relay.ReasonLegacyHelloSuperseded
+				}
+				assertClose(t, err, tc.wantCode, token)
+				if !relay.IsSupersededIncarnation(err) != (tc.wantCode != relay.CloseSupersededIncarnation) {
+					t.Fatalf("IsSupersededIncarnation(%v) disagrees with the code", err)
 				}
 				if inserts.Load() != 0 {
 					t.Fatal("refusal reached InsertSessionWithNextEpoch")
@@ -331,6 +423,9 @@ func TestFallbackRefusedWhileLaunchIDLive(t *testing.T) {
 			} else {
 				if err != nil {
 					t.Fatalf("fallback Hello refused: %v", err)
+				}
+				if wel.GetEndpointIncarnation() != "gen-3" {
+					t.Fatalf("welcome endpoint_incarnation = %q, want the admitted gen-3", wel.GetEndpointIncarnation())
 				}
 				rows := w.Sessions(registry.PrincipalAgent, agentID).Sessions
 				var got registry.SessionRecord

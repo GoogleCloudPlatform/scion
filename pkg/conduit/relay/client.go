@@ -170,7 +170,7 @@ func (s *RemoteSession) Call(ctx context.Context, rpc *conduitv1.RpcRequest) (*c
 			return nil, ctx.Err()
 		}
 		// The owner is unreachable: treat like a lost link.
-		return nil, &conduit.CloseError{Code: conduit.CloseRelayRestart, Reason: "owner relay unreachable"}
+		return nil, closeErr(conduit.CloseRelayTimeout, ReasonUpstreamUnreachable, "owner relay unreachable")
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if err := statusErr(resp); err != nil {
@@ -178,7 +178,7 @@ func (s *RemoteSession) Call(ctx context.Context, rpc *conduitv1.RpcRequest) (*c
 	}
 	out, err := io.ReadAll(io.LimitReader(resp.Body, conduit.MaxRPCBody+rpcEnvelopeSlack+1))
 	if err != nil {
-		return nil, &conduit.CloseError{Code: conduit.CloseRelayRestart, Reason: "owner relay response truncated"}
+		return nil, closeErr(conduit.CloseRelayTimeout, ReasonUpstreamUnreachable, "owner relay response truncated")
 	}
 	rr := &conduitv1.RpcResponse{}
 	if err := proto.Unmarshal(out, rr); err != nil {
@@ -197,13 +197,16 @@ func statusErr(resp *http.Response) error {
 	case http.StatusUnauthorized:
 		return errors.New("conduit relay: owner refused relay-peer identity (401)")
 	case http.StatusServiceUnavailable:
-		return &conduit.CloseError{Code: conduit.CloseRelayRestart, Reason: "owner relay unavailable"}
+		return closeErr(conduit.CloseRelayTimeout, ReasonUpstreamUnreachable, "owner relay unavailable")
 	case http.StatusBadGateway:
-		code := conduit.CloseRelayRestart
+		code, why := conduit.CloseRelayTimeout, reason(ReasonUpstreamUnreachable, "target session call failed")
 		if v, err := strconv.ParseUint(resp.Header.Get(HeaderCloseCode), 10, 32); err == nil && v != 0 {
-			code = uint32(v)
+			code, why = uint32(v), ""
+			if hr := resp.Header.Get(HeaderCloseReason); hr != "" {
+				why = reason(hr, "")
+			}
 		}
-		return &conduit.CloseError{Code: code, Reason: "target session call failed"}
+		return &conduit.CloseError{Code: code, Reason: why}
 	default:
 		return fmt.Errorf("conduit relay: internal API: HTTP %d", resp.StatusCode)
 	}
@@ -215,6 +218,13 @@ func statusErr(resp *http.Response) error {
 // sends StreamClose{4499} and drops the WS, so the owner cancels its leg
 // (4499 to the target) — both legs see 4499.
 func (s *RemoteSession) OpenStream(ctx context.Context, open *conduitv1.StreamOpen) (conduit.Stream, error) {
+	kind, err := conduit.StreamKindFromProto(open.GetKind())
+	if err != nil {
+		return nil, closeErr(conduit.CloseProtocolError, ReasonBadFrame, err.Error())
+	}
+	// The owner opens only the kind it re-checked admission for.
+	want := s.want
+	want.Capability = string(kind)
 	u := s.sessionURL("stream")
 	wsURL := "ws" + strings.TrimPrefix(u, "http")
 	sign := func(ctx context.Context) (http.Header, error) {
@@ -222,7 +232,7 @@ func (s *RemoteSession) OpenStream(ctx context.Context, open *conduitv1.StreamOp
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Set(HeaderWant, encodeWant(s.want))
+		req.Header.Set(HeaderWant, encodeWant(want))
 		if err := s.client.sign(req); err != nil {
 			return nil, err
 		}
@@ -244,7 +254,7 @@ func (s *RemoteSession) OpenStream(ctx context.Context, open *conduitv1.StreamOp
 			case http.StatusNotFound, http.StatusConflict:
 				return nil, &StaleRouteError{Reason: fmt.Sprintf("HTTP %d", de.StatusCode)}
 			case http.StatusServiceUnavailable:
-				return nil, &conduit.CloseError{Code: conduit.CloseRelayRestart, Reason: "owner relay unavailable"}
+				return nil, closeErr(conduit.CloseRelayTimeout, ReasonUpstreamUnreachable, "owner relay unavailable")
 			}
 		}
 		if ctx.Err() != nil {
@@ -270,7 +280,7 @@ func (s *RemoteSession) OpenStream(ctx context.Context, open *conduitv1.StreamOp
 	}
 	if err != nil {
 		_ = conn.Close()
-		return nil, &conduit.CloseError{Code: conduit.CloseRelayRestart, Reason: "owner relay link failed"}
+		return nil, closeErr(conduit.CloseRelayTimeout, ReasonUpstreamUnreachable, "owner relay link failed")
 	}
 
 	type result struct {
@@ -301,12 +311,12 @@ func (s *RemoteSession) OpenStream(ctx context.Context, open *conduitv1.StreamOp
 			return nil, &conduit.CloseError{Code: body.StreamClose.GetCode(), Reason: body.StreamClose.GetReason()}
 		default:
 			_ = conn.Close()
-			return nil, &conduit.CloseError{Code: conduit.CloseProtocolError, Reason: "unexpected frame while opening"}
+			return nil, closeErr(conduit.CloseProtocolError, ReasonBadFrame, "unexpected frame while opening")
 		}
 	case <-octx.Done():
 		// Cancel during opening: tell the owner, then drop the link. The
 		// reader goroutine ends when the conn closes.
-		if b, err := proto.Marshal(closeFrame(conduit.CloseCancelled, "cancelled")); err == nil {
+		if b, err := proto.Marshal(closeFrame(conduit.CloseCancelled, ReasonCancelled)); err == nil {
 			_ = conn.WriteFrame(b)
 		}
 		_ = conn.Close()

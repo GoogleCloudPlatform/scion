@@ -46,6 +46,10 @@ func (r *Relay) SetAfterOpenHookForTest(h func(hopDone <-chan struct{})) {
 	r.testHookAfterOpen = func(hop *wsStream) { h(hop.Done()) }
 }
 
+// SetBeforeReadyHookForTest installs the pipelined-StreamOpen race seam:
+// h runs in Serve after Accept returned, before the session is ready.
+func (r *Relay) SetBeforeReadyHookForTest(h func()) { r.testHookBeforeReady = h }
+
 // HeartbeatForTest runs one heartbeat now.
 func (r *Relay) HeartbeatForTest() { r.heartbeat() }
 

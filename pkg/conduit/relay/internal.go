@@ -30,6 +30,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
@@ -47,6 +48,8 @@ const (
 	// HeaderCloseCode carries a conduit close code when the owner could
 	// not complete an RPC on the target session (502).
 	HeaderCloseCode = "X-Conduit-Close-Code"
+	// HeaderCloseReason carries the matching §3.3.1 close reason.
+	HeaderCloseReason = "X-Conduit-Close-Reason"
 	// HeaderStaleReason names why the owner refused a stale route
 	// (404/409): a registry.Reason or "not_local".
 	HeaderStaleReason = "X-Conduit-Stale-Reason"
@@ -146,48 +149,53 @@ func (r *Relay) serveInternal(w http.ResponseWriter, req *http.Request) {
 
 // admitInternal re-checks, on the owner, that the session is local and
 // admissible for the caller's Want (end-to-end fencing: the caller's
-// resolution may be stale). It writes the refusal and returns false.
-func (r *Relay) admitInternal(w http.ResponseWriter, req *http.Request, sessionID string) (conduit.LocalSession, bool) {
+// resolution may be stale). Stream requests must name the stream kind as
+// Want.Capability. It writes the refusal and returns false.
+func (r *Relay) admitInternal(w http.ResponseWriter, req *http.Request, sessionID string, stream bool) (conduit.LocalSession, registry.Want, bool) {
 	want, err := decodeWant(req.Header.Get(HeaderWant))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
-		return nil, false
+		return nil, want, false
+	}
+	if stream && want.Capability == "" {
+		http.Error(w, "stream requests must name the stream kind as the capability", http.StatusBadRequest)
+		return nil, want, false
 	}
 	if !r.serving() {
 		w.Header().Set(HeaderStaleReason, "relay_not_serving")
 		http.Error(w, "relay not serving", http.StatusConflict)
-		return nil, false
+		return nil, want, false
 	}
 	ls, rec, ok := r.Local(sessionID)
 	if !ok {
 		w.Header().Set(HeaderStaleReason, "not_local")
 		http.Error(w, "session not held by this relay", http.StatusNotFound)
-		return nil, false
+		return nil, want, false
 	}
 	if rec.PrincipalKind == registry.PrincipalUser {
 		// User sessions are never a routing target (design §3.10).
 		http.Error(w, "user sessions are not routable", http.StatusForbidden)
-		return nil, false
+		return nil, want, false
 	}
 	d, err := r.cfg.Registry.Admission(req.Context(), sessionID, want)
 	switch {
 	case err != nil && d.Reason == registry.ReasonReadError:
 		// Fail closed.
 		http.Error(w, "registry unavailable", http.StatusServiceUnavailable)
-		return nil, false
+		return nil, want, false
 	case err != nil:
 		http.Error(w, err.Error(), http.StatusBadRequest)
-		return nil, false
+		return nil, want, false
 	case !d.Admissible:
 		w.Header().Set(HeaderStaleReason, string(d.Reason))
 		http.Error(w, "session not admissible: "+string(d.Reason), http.StatusConflict)
-		return nil, false
+		return nil, want, false
 	}
-	return ls, true
+	return ls, want, true
 }
 
 func (r *Relay) serveRPC(w http.ResponseWriter, req *http.Request, peer, sessionID string) {
-	ls, ok := r.admitInternal(w, req, sessionID)
+	ls, _, ok := r.admitInternal(w, req, sessionID, false)
 	if !ok {
 		return
 	}
@@ -216,12 +224,13 @@ func (r *Relay) serveRPC(w http.ResponseWriter, req *http.Request, peer, session
 	defer cancel()
 	resp, err := ls.Call(ctx, rpc)
 	if err != nil {
-		code := conduit.CodeOf(err, conduit.CloseRelayRestart)
+		code, why := codeAndReason(err, "target session call failed")
 		if errors.Is(err, context.DeadlineExceeded) {
-			code = conduit.CloseRelayTimeout
+			code, why = conduit.CloseRelayTimeout, reason(ReasonOpenTimeout, "rpc timeout")
 		}
 		r.log.Debug("Conduit internal RPC failed", "peer", peer, "session_id", sessionID, "error", err)
 		w.Header().Set(HeaderCloseCode, strconv.FormatUint(uint64(code), 10))
+		w.Header().Set(HeaderCloseReason, why)
 		http.Error(w, "rpc failed", http.StatusBadGateway)
 		return
 	}
@@ -239,8 +248,13 @@ func (r *Relay) serveRPC(w http.ResponseWriter, req *http.Request, peer, session
 // and splices the two framed legs. Cancellation during opening (the caller
 // sends StreamClose or drops the WS) cancels the local OpenStream, which
 // sends 4499 to the target; an accept that loses the race is closed 4499.
+//
+// The Want must name the stream kind as its Capability (RemoteSession sets
+// it from the kind), and the opening frame's kind must equal it: the owner
+// opens only what it re-checked admission for. Otherwise the hop is closed
+// 4400 bad_frame.
 func (r *Relay) serveStream(w http.ResponseWriter, req *http.Request, peer, sessionID string) {
-	ls, ok := r.admitInternal(w, req, sessionID)
+	ls, want, ok := r.admitInternal(w, req, sessionID, true)
 	if !ok {
 		return
 	}
@@ -254,7 +268,7 @@ func (r *Relay) serveStream(w http.ResponseWriter, req *http.Request, peer, sess
 		r.activeBridges.Add(-1)
 		r.bridges.Done()
 	}()
-	open, err := readStreamOpen(conn, r.cfg.Session.HandshakeTimeout)
+	open, err := readStreamOpen(r.clk, conn, r.cfg.Session.HandshakeTimeout)
 	if err != nil {
 		r.log.Debug("Conduit internal stream: bad opening frame", "peer", peer, "error", err)
 		_ = conn.Close()
@@ -265,6 +279,11 @@ func (r *Relay) serveStream(w http.ResponseWriter, req *http.Request, peer, sess
 		callerWin = conduit.DefaultStreamWindow
 	}
 	hop := newWSStream(conn, callerWin, 0)
+	if kind, err := conduit.StreamKindFromProto(open.GetKind()); err != nil || string(kind) != want.Capability {
+		r.log.Debug("Conduit internal stream: kind does not match the admitted capability", "peer", peer, "kind", open.GetKind().String(), "capability", want.Capability)
+		_ = hop.CloseWithCode(conduit.CloseProtocolError, reason(ReasonBadFrame, "stream kind does not match the admitted capability"))
+		return
+	}
 
 	octx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -283,14 +302,14 @@ func (r *Relay) serveStream(w http.ResponseWriter, req *http.Request, peer, sess
 	}
 	st, err := ls.OpenStream(octx, fwd)
 	if err != nil {
-		code := conduit.CodeOf(err, conduit.CloseRelayRestart)
+		code, why := codeAndReason(err, "opening the target stream failed")
 		switch {
 		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded), errors.Is(err, conduit.ErrStreamCancelled):
-			code = conduit.CloseCancelled
+			code, why = conduit.CloseCancelled, ReasonCancelled
 		case errors.Is(err, conduit.ErrDraining):
-			code = conduit.CloseRelayRestart
+			code, why = conduit.CloseRelayRestart, ReasonDraining
 		}
-		_ = hop.CloseWithCode(code, closeReason(err))
+		_ = hop.CloseWithCode(code, why)
 		return
 	}
 	if h := r.testHookAfterOpen; h != nil {
@@ -298,11 +317,11 @@ func (r *Relay) serveStream(w http.ResponseWriter, req *http.Request, peer, sess
 	}
 	if ended, _ := hop.endedErr(); ended {
 		// Late accept: the caller is gone. Do not leak the target leg.
-		_ = st.CloseWithCode(conduit.CloseCancelled, "cancelled")
+		_ = st.CloseWithCode(conduit.CloseCancelled, ReasonCancelled)
 		return
 	}
 	if err := hop.grant(conduit.DefaultStreamWindow); err != nil {
-		_ = st.CloseWithCode(conduit.CloseCancelled, "cancelled")
+		_ = st.CloseWithCode(conduit.CloseCancelled, ReasonCancelled)
 		hop.end(errLinkLost, false)
 		return
 	}
@@ -311,15 +330,15 @@ func (r *Relay) serveStream(w http.ResponseWriter, req *http.Request, peer, sess
 }
 
 // readStreamOpen reads the first frame of an internal stream WS, bounded by
-// timeout (0 = conduit default handshake timeout).
-func readStreamOpen(conn interface {
+// timeout on clk (0 = conduit default handshake timeout).
+func readStreamOpen(clk clock.Clock, conn interface {
 	ReadFrame() ([]byte, error)
 	Close() error
 }, timeout time.Duration) (*conduitv1.StreamOpen, error) {
 	if timeout <= 0 {
 		timeout = conduit.DefaultHandshakeTimeout
 	}
-	t := time.AfterFunc(timeout, func() { _ = conn.Close() })
+	t := clk.AfterFunc(timeout, func() { _ = conn.Close() })
 	b, err := conn.ReadFrame()
 	if !t.Stop() {
 		return nil, errors.New("timed out waiting for StreamOpen")

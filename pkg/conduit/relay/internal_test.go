@@ -24,6 +24,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay/relaytest"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
+	"github.com/gorilla/websocket"
 )
 
 // pair is an owner relay A holding an agent session and a peer relay B.
@@ -185,7 +187,9 @@ func TestOwnerRefusesStaleRoute(t *testing.T) {
 }
 
 // TestOwnerAdmissionReadErrorFailsClosed: a registry read error at the
-// owner is 503 (unavailable), not a stale route and not served.
+// owner is 503 (unavailable) at the HTTP layer, which the caller maps to
+// 4504 upstream_unreachable (a transient failure, design v2.5 §3.3.1): not
+// a stale route, not served and never a planned 4503.
 func TestOwnerAdmissionReadErrorFailsClosed(t *testing.T) {
 	p := newPair(t, echoConfig())
 	p.w.SetFault(func(op string) error {
@@ -197,9 +201,10 @@ func TestOwnerAdmissionReadErrorFailsClosed(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_, err := p.remote().Call(ctx, &conduitv1.RpcRequest{RequestId: "r1"})
-	if errors.Is(err, relay.ErrStaleRoute) || conduit.CodeOf(err, 0) != conduit.CloseRelayRestart {
-		t.Fatalf("Call = %v, want 4503 (fail closed)", err)
+	if errors.Is(err, relay.ErrStaleRoute) {
+		t.Fatalf("Call = %v, want 4504, not a stale route", err)
 	}
+	assertClose(t, err, conduit.CloseRelayTimeout, relay.ReasonUpstreamUnreachable)
 }
 
 // --- C7: relay-peer identity and user sessions ---
@@ -243,8 +248,8 @@ func TestInternalAPIRejectsUnauthenticatedPeer(t *testing.T) {
 	base := p.a.Internal.URL + relay.InternalPathPrefix
 	want := `{"project_id":"` + project + `","incarnation":"L1"}`
 	rpcBody, _ := proto.Marshal(&conduitv1.RpcRequest{RequestId: "r1"})
-	wrongKey, _ := relay.NewHMACPeerAuth(relay.HMACPeerAuthConfig{Key: bytes.Repeat([]byte{9}, 32), SelfID: "relay-b"})
-	stale, _ := relay.NewHMACPeerAuth(relay.HMACPeerAuthConfig{Key: p.w.PeerKey, SelfID: "relay-b",
+	wrongKey, _ := relay.NewHMACPeerAuthFromSecret(relay.HMACPeerAuthConfig{Secret: bytes.Repeat([]byte{9}, 32), SelfID: "relay-b"})
+	stale, _ := relay.NewHMACPeerAuthFromSecret(relay.HMACPeerAuthConfig{Secret: p.w.PeerSecret, SelfID: "relay-b",
 		Now: func() time.Time { return time.Now().Add(-10 * time.Minute) }})
 	routes := []struct {
 		name, method, url string
@@ -298,6 +303,59 @@ func TestInternalAPIRejectsUnauthenticatedPeer(t *testing.T) {
 		if got := do(t, req); got != http.StatusBadRequest {
 			t.Fatalf("status %d, want 400 (digest mismatch)", got)
 		}
+	})
+}
+
+// TestInternalStreamCapabilityChecks (F9): a stream request must name its
+// stream kind as the capability (400 otherwise, before any upgrade), and a
+// StreamOpen whose kind differs from the admitted capability is closed with
+// 4400 bad_frame without reaching the target.
+func TestInternalStreamCapabilityChecks(t *testing.T) {
+	p := newPair(t, echoConfig())
+	url := p.a.Internal.URL + relay.InternalPathPrefix + "sessions/" + p.rec.SessionID + "/stream"
+	t.Run("missing capability", func(t *testing.T) {
+		want := `{"project_id":"` + project + `","incarnation":"L1"}`
+		if got := do(t, signed(t, p.w.PeerAuth("relay-b"), http.MethodGet, url, nil, want)); got != http.StatusBadRequest {
+			t.Fatalf("status %d, want 400", got)
+		}
+	})
+	t.Run("kind differs from the capability", func(t *testing.T) {
+		want := `{"project_id":"` + project + `","incarnation":"L1","capability":"pty"}`
+		req := signed(t, p.w.PeerAuth("relay-b"), http.MethodGet, url, nil, want)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		c, resp, err := websocket.DefaultDialer.DialContext(ctx, "ws"+strings.TrimPrefix(url, "http"), req.Header)
+		if err != nil {
+			t.Fatalf("dial: %v (%v)", err, resp)
+		}
+		defer func() { _ = c.Close() }()
+		open, _ := proto.Marshal(&conduitv1.Frame{Body: &conduitv1.Frame_StreamOpen{StreamOpen: &conduitv1.StreamOpen{
+			Kind: conduitv1.StreamKind_STREAM_KIND_LOGS}}})
+		if err := c.WriteMessage(websocket.BinaryMessage, open); err != nil {
+			t.Fatal(err)
+		}
+		_, b, err := c.ReadMessage()
+		if err != nil {
+			t.Fatal(err)
+		}
+		f := &conduitv1.Frame{}
+		if err := proto.Unmarshal(b, f); err != nil {
+			t.Fatal(err)
+		}
+		sc := f.GetStreamClose()
+		if sc == nil {
+			t.Fatalf("first frame %v, want stream_close", f)
+		}
+		assertClose(t, &conduit.CloseError{Code: sc.GetCode(), Reason: sc.GetReason()}, conduit.CloseProtocolError, relay.ReasonBadFrame)
+		if n := p.target.Stats().OpenStreams; n != 0 {
+			t.Fatalf("target has %d open streams", n)
+		}
+	})
+	t.Run("caller rejects an unknown kind", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, err := p.remote().OpenStream(ctx, &conduitv1.StreamOpen{})
+		assertClose(t, err, conduit.CloseProtocolError, relay.ReasonBadFrame)
 	})
 }
 
@@ -431,37 +489,95 @@ func TestBridgeLateAcceptCleanedUp(t *testing.T) {
 	}
 }
 
-// TestBridgeNoLeakAfterManyStreams: streams that end normally, by caller
-// abort and by target abort leave no bridge and no target stream behind.
+// TestBridgeNoLeakAfterManyStreams (T8): streams that end normally, by
+// caller abort, by caller close and by target abort leave no bridge, no
+// target stream and no goroutine behind (owner handler, caller-side hop
+// read loops, splice copiers and resize forwarders included).
 func TestBridgeNoLeakAfterManyStreams(t *testing.T) {
-	p := newPair(t, echoConfig())
+	const modeParam = "test_mode"
+	ended := make(chan struct{}, 16)
+	cfg := conduit.Config{StreamHandler: conduit.StreamHandlerFunc(func(_ context.Context, open *conduitv1.StreamOpen, ps conduit.PendingStream) error {
+		st, err := ps.Accept()
+		if err != nil {
+			return err
+		}
+		go func() {
+			defer func() { ended <- struct{}{} }()
+			if open.GetParams()[modeParam] == "target_abort" {
+				_ = st.CloseWithCode(conduit.CloseForbidden, "forbidden: test target abort")
+			} else {
+				_, _ = io.Copy(st, st)
+				_ = st.(interface{ CloseWrite() error }).CloseWrite()
+			}
+			// Resizes is closed once the stream has ended both ways.
+			for range st.(conduit.Resizable).Resizes() {
+			}
+		}()
+		return nil
+	})}
+	p := newPair(t, cfg)
 	rs := p.remote()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	for i := range 6 {
-		st, err := rs.OpenStream(ctx, &conduitv1.StreamOpen{Kind: conduitv1.StreamKind_STREAM_KIND_PTY})
+	// Warm up one stream so lazily started goroutines (HTTP transport
+	// connection pools) are part of the baseline.
+	warm, err := rs.OpenStream(ctx, &conduitv1.StreamOpen{Kind: conduitv1.StreamKind_STREAM_KIND_PTY})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = warm.(interface{ CloseWrite() error }).CloseWrite()
+	_, _ = io.ReadAll(warm)
+	relaytest.Wait(t, ended, "warm-up target stream to end")
+	p.a.Relay.WaitBridgesForTest()
+	settle(t, "warm-up target stream removal", func() bool { return p.target.Stats().OpenStreams == 0 })
+	baseline := runtime.NumGoroutine()
+
+	modes := []string{"normal", "caller_abort", "caller_close", "target_abort"}
+	for i := range 2 * len(modes) {
+		mode := modes[i%len(modes)]
+		st, err := rs.OpenStream(ctx, &conduitv1.StreamOpen{Kind: conduitv1.StreamKind_STREAM_KIND_PTY, Params: map[string]string{modeParam: mode}})
 		if err != nil {
 			t.Fatal(err)
 		}
-		switch i % 3 {
-		case 0: // normal half-close round trip
+		switch mode {
+		case "normal": // half-close round trip
 			_ = st.(interface{ CloseWrite() error }).CloseWrite()
-			_, _ = io.ReadAll(st)
-		case 1: // caller aborts
-			_ = st.CloseWithCode(conduit.CloseCancelled, "bye")
-		case 2: // caller closes without reading
+			if _, err := io.ReadAll(st); err != nil {
+				t.Fatalf("normal stream: %v", err)
+			}
+		case "caller_abort":
+			_ = st.CloseWithCode(conduit.CloseCancelled, relay.ReasonCancelled)
+		case "caller_close": // closes without reading
+			_ = st.Close()
+		case "target_abort":
+			_, err := io.ReadAll(st)
+			if code := conduit.CodeOf(err, 0); code != conduit.CloseForbidden {
+				t.Fatalf("target abort reached the caller as %v, want 4403", err)
+			}
 			_ = st.Close()
 		}
+		relaytest.Wait(t, ended, mode+" target stream to end")
 	}
 	p.a.Relay.WaitBridgesForTest()
 	if n := p.a.Relay.ActiveBridges(); n != 0 {
 		t.Fatalf("%d active bridges", n)
 	}
+	// The target's stream table and the goroutine count have no
+	// completion signal; settle is bounded and only checks for leaks.
+	settle(t, "target stream table to empty", func() bool { return p.target.Stats().OpenStreams == 0 })
+	settle(t, "goroutines to return to the baseline", func() bool { return runtime.NumGoroutine() <= baseline })
+}
+
+// settle re-checks cond until it holds, failing after 10s. It is a leak
+// check for counters without a completion signal, never synchronisation.
+func settle(t *testing.T, what string, cond func() bool) {
+	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
-	for p.target.Stats().OpenStreams != 0 {
+	for !cond() {
 		if time.Now().After(deadline) {
-			t.Fatalf("target has %d open streams", p.target.Stats().OpenStreams)
+			t.Fatalf("timed out waiting for %s", what)
 		}
-		time.Sleep(10 * time.Millisecond) // polling a counter with a deadline, not ordering
+		runtime.Gosched()
+		<-time.After(time.Millisecond)
 	}
 }

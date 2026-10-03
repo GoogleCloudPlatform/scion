@@ -48,21 +48,25 @@ var (
 
 func (a *admitter) Admit(ctx context.Context, hello *conduitv1.Hello) (*conduitv1.Welcome, error) {
 	r, p := a.r, a.p
-	gen, serving := r.generation()
-	if !serving {
-		return nil, conduit.Reject(conduit.CloseRelayRestart, "relay not serving")
+	gen, state := r.admissionState()
+	switch state {
+	case stateServing:
+	case stateDraining:
+		return nil, reject(conduit.CloseRelayRestart, ReasonDraining, "")
+	default:
+		return nil, reject(conduit.CloseRelayRestart, ReasonNotServing, "")
 	}
 	kind, err := conduit.PrincipalKindFromProto(hello.GetPrincipalKind())
 	if err != nil {
-		return nil, conduit.Reject(conduit.CloseProtocolError, "unknown principal kind")
+		return nil, reject(conduit.CloseProtocolError, ReasonBadHello, "unknown principal kind")
 	}
 	switch {
 	case string(kind) == registry.PrincipalRelayPeer || p.Kind == registry.PrincipalRelayPeer:
 		// relay-peer is an internal-API identity only; it never holds a
 		// target session (design §3.10).
-		return nil, conduit.Reject(conduit.CloseForbidden, "relay-peer principals may not open target sessions")
+		return nil, reject(conduit.CloseForbidden, ReasonForbidden, "relay-peer principals may not open target sessions")
 	case string(kind) != p.Kind || hello.GetPrincipalId() != p.ID:
-		return nil, conduit.Reject(conduit.CloseForbidden, "hello principal does not match the authenticated principal")
+		return nil, reject(conduit.CloseForbidden, ReasonForbidden, "hello principal does not match the authenticated principal")
 	}
 	caps := hello.GetCapabilities()
 	inc, err := admitIncarnation(p, caps.GetEndpointIncarnation())
@@ -73,32 +77,25 @@ func (a *admitter) Admit(ctx context.Context, hello *conduitv1.Hello) (*conduitv
 		}
 		return nil, err
 	}
-	if p.Kind == registry.PrincipalAgent {
-		err := CheckFallbackAgainstLaunchID(ctx, r.cfg.Registry, r.cfg.RegistryNow(), p.ID, p.ProjectID, p.Agent, inc)
-		switch {
-		case IsSupersededIncarnation(err):
-			r.log.Warn("Conduit admission refused: hello without launch id while the current launch is connected",
-				"reason", LogReasonLegacyHelloSuperseded, "principal_id", p.ID, "project_id", p.ProjectID,
-				"current_launch_id", p.Agent.LaunchID, "generation", p.Agent.Generation)
-			return nil, err
-		case err != nil:
-			r.log.Warn("Conduit admission refused: registry unavailable", "principal_id", p.ID, "error", err)
-			return nil, conduit.Reject(conduit.CloseRelayRestart, "registry unavailable")
+	fallback := p.Kind == registry.PrincipalAgent && inc.Source == IncarnationSourceGeneration
+	if fallback {
+		if err := CheckFallbackAgainstLaunchID(ctx, r.cfg.Store, p.ID, p.Agent, inc, ""); err != nil {
+			return nil, a.fallbackRefused(err)
 		}
 	}
 	if s := caps.GetExecScope(); s != "" && s != p.ExecScope {
-		return nil, conduit.Reject(conduit.CloseForbidden, "hello exec_scope does not match the authoritative exec scope")
+		return nil, reject(conduit.CloseForbidden, ReasonForbidden, "hello exec_scope does not match the authoritative exec scope")
 	}
 	transport, err := registryTransport(a.transport)
 	if err != nil {
-		return nil, conduit.Reject(conduit.CloseForbidden, err.Error())
+		return nil, reject(conduit.CloseForbidden, ReasonForbidden, err.Error())
 	}
 	// Keys before the insert: a target that cannot verify grants is
 	// useless, and failing here consumes no epoch.
 	keys, err := r.cfg.GrantKeys(ctx)
 	if err != nil {
 		r.log.Warn("Conduit admission refused: grant keys unavailable", "error", err)
-		return nil, conduit.Reject(conduit.CloseRelayRestart, "grant keys unavailable")
+		return nil, reject(conduit.CloseRelayTimeout, ReasonGrantKeysUnavailable, "")
 	}
 
 	rec := registry.SessionRecord{
@@ -117,14 +114,19 @@ func (a *admitter) Admit(ctx context.Context, hello *conduitv1.Hello) (*conduitv
 	switch {
 	case errors.Is(err, registry.ErrRelaySuperseded):
 		r.supersede()
-		return nil, conduit.Reject(conduit.CloseRelayRestart, "relay superseded")
+		return nil, reject(conduit.CloseRelayRestart, ReasonRelayRestart, "relay superseded")
 	case errors.Is(err, registry.ErrInvalidInput):
-		return nil, conduit.Reject(conduit.CloseForbidden, "session not admissible")
+		return nil, reject(conduit.CloseForbidden, ReasonForbidden, "session not admissible")
 	case err != nil:
 		r.log.Warn("Conduit admission failed: registry insert", "error", err)
-		return nil, conduit.Reject(conduit.CloseRelayRestart, "registry unavailable")
+		return nil, reject(conduit.CloseRelayTimeout, ReasonRegistryUnavailable, "")
 	}
 	rec.ConnectionEpoch = epoch
+	if fallback {
+		if err := a.recheckFallback(ctx, rec, inc); err != nil {
+			return nil, err
+		}
+	}
 	a.mu.Lock()
 	a.rec, a.source, a.ok = rec, inc.Source, true
 	a.mu.Unlock()
@@ -133,11 +135,15 @@ func (a *admitter) Admit(ctx context.Context, hello *conduitv1.Hello) (*conduitv
 			"principal_id", p.ID, "connection_epoch", epoch, "incarnation_source", inc.Source)
 	}
 
+	// endpoint_incarnation is the ADMITTED value (a launch id, or gen-N
+	// under the interim fallback), never the presented one: grants are
+	// minted against it, so the target must verify against it (§3.2).
 	w := &conduitv1.Welcome{
-		SessionId:       rec.SessionID,
-		RelayInstanceId: r.cfg.InstanceID,
-		ConnectionEpoch: epoch,
-		GrantKeys:       keys,
+		SessionId:           rec.SessionID,
+		RelayInstanceId:     r.cfg.InstanceID,
+		ConnectionEpoch:     epoch,
+		GrantKeys:           keys,
+		EndpointIncarnation: inc.Value,
 	}
 	if r.cfg.LifetimeHint > 0 {
 		w.LifetimeHintS = uint32(r.cfg.LifetimeHint.Seconds())
@@ -145,20 +151,62 @@ func (a *admitter) Admit(ctx context.Context, hello *conduitv1.Hello) (*conduitv
 	return w, nil
 }
 
+// fallbackRefused logs and maps a CheckFallbackAgainstLaunchID error: the
+// 4409 refusal as is, a store read error as 4504 (fail closed; an
+// infrastructure fault is never 4409).
+func (a *admitter) fallbackRefused(err error) error {
+	r, p := a.r, a.p
+	if IsSupersededIncarnation(err) {
+		r.log.Warn("Conduit admission refused: hello without launch id while a session of the current launch exists",
+			"reason", ReasonLegacyHelloSuperseded, "principal_id", p.ID, "project_id", p.ProjectID,
+			"current_launch_id", p.Agent.LaunchID, "generation", p.Agent.Generation)
+		return err
+	}
+	r.log.Warn("Conduit admission refused: registry unavailable", "principal_id", p.ID, "error", err)
+	return reject(conduit.CloseRelayTimeout, ReasonRegistryUnavailable, "")
+}
+
+// recheckFallback closes the check-then-insert race of the fallback fence:
+// a launch-id Hello admitted concurrently may have inserted its row after
+// our pre-check. If a launch_id row now exists (or the re-check cannot be
+// read), our row is deleted and the Hello refused (4409, or 4504 on a read
+// error).
+//
+// Our insert bumped the agent's epoch. A launch session that inserted
+// before us is therefore no longer epoch-current, and once our row is gone
+// nothing would be routable while that session stays connected (it gets
+// no signal). Its row is deleted as well, so its relay's next touch finds
+// the row gone and sends GoAway 4503 with a jittered reconnect hint; the
+// launch container redials, bumps the epoch and is routable again within
+// about one ping interval. A launch session that inserted after us is
+// already current and is left alone.
+func (a *admitter) recheckFallback(ctx context.Context, rec registry.SessionRecord, inc Incarnation) error {
+	r, p := a.r, a.p
+	err := CheckFallbackAgainstLaunchID(ctx, r.cfg.Store, p.ID, p.Agent, inc, rec.SessionID)
+	if err == nil {
+		return nil
+	}
+	r.deleteRow(ctx, rec.SessionID, rec.RelayGeneration)
+	if IsSupersededIncarnation(err) {
+		r.evictObsoleteLaunchRows(ctx, p)
+	}
+	return a.fallbackRefused(err)
+}
+
 // AbandonAdmission undoes an admission whose Welcome was discarded.
-func (a *admitter) AbandonAdmission(_ context.Context, _ *conduitv1.Hello, w *conduitv1.Welcome) {
+func (a *admitter) AbandonAdmission(ctx context.Context, _ *conduitv1.Hello, w *conduitv1.Welcome) {
 	a.mu.Lock()
 	rec, ok := a.rec, a.ok && a.rec.SessionID == w.GetSessionId()
 	a.ok = false
 	a.mu.Unlock()
 	if ok {
-		a.r.deleteRow(rec.SessionID, rec.RelayGeneration)
+		a.r.deleteRow(ctx, rec.SessionID, rec.RelayGeneration)
 	}
 }
 
 func (a *admitter) Refresh(ctx context.Context, ar *conduitv1.AuthRefresh) error {
 	if a.r.cfg.Refresh == nil {
-		return conduit.Reject(conduit.CloseUnauthenticated, "auth refresh not supported")
+		return reject(conduit.CloseUnauthenticated, ReasonUnauthenticated, "auth refresh not supported")
 	}
 	return a.r.cfg.Refresh(ctx, a.p, ar)
 }

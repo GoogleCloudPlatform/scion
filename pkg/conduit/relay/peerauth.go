@@ -65,12 +65,14 @@ const (
 // separates this key from every other use of the input secret.
 const hmacPeerKeyInfo = "scion conduit relay-peer hmac v1"
 
-// DeriveHMACPeerKey derives the relay-peer HMAC key from a secret every
+// deriveHMACPeerKey derives the relay-peer HMAC key from a secret every
 // hub node shares (the hub's shared signing secret in HA deployments) with
 // HKDF-SHA256 under a dedicated info label. The raw secret is never used as
 // the MAC key, so a relay-peer signature can never be confused with, or
 // help forge, a token signed with the same secret for another purpose.
-func DeriveHMACPeerKey(secret []byte) ([]byte, error) {
+// It is unexported on purpose: callers hand NewHMACPeerAuthFromSecret the
+// shared secret and the derivation cannot be skipped.
+func deriveHMACPeerKey(secret []byte) ([]byte, error) {
 	if len(secret) < 16 {
 		return nil, errors.New("conduit relay: shared secret too short to derive a relay-peer key")
 	}
@@ -79,8 +81,10 @@ func DeriveHMACPeerKey(secret []byte) ([]byte, error) {
 
 // HMACPeerAuthConfig configures HMACPeerAuth.
 type HMACPeerAuthConfig struct {
-	// Key is the MAC key (see DeriveHMACPeerKey); at least 32 bytes.
-	Key []byte
+	// Secret is the secret every hub node shares (at least 16 bytes). The
+	// MAC key is derived from it with HKDF (deriveHMACPeerKey); the raw
+	// secret is never used as the key.
+	Secret []byte
 	// SelfID is this relay's instance id, sent as the caller identity.
 	SelfID string
 	// MaxSkew bounds |now - timestamp| (default 60s).
@@ -97,14 +101,27 @@ type HMACPeerAuthConfig struct {
 // the non-GCP relay-peer mechanism (on GCP the hub uses OIDC ID tokens).
 type HMACPeerAuth struct {
 	cfg HMACPeerAuthConfig
+	key []byte // derived MAC key
 
 	mu     sync.Mutex
 	nonces map[string]time.Time
 }
 
-// NewHMACPeerAuth returns an HMACPeerAuth.
-func NewHMACPeerAuth(cfg HMACPeerAuthConfig) (*HMACPeerAuth, error) {
-	if len(cfg.Key) < 32 {
+// NewHMACPeerAuthFromSecret returns an HMACPeerAuth keyed with the HKDF
+// derivation of cfg.Secret.
+func NewHMACPeerAuthFromSecret(cfg HMACPeerAuthConfig) (*HMACPeerAuth, error) {
+	key, err := deriveHMACPeerKey(cfg.Secret)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Secret = nil // keep only the derived key
+	return newHMACPeerAuthWithKey(cfg, key)
+}
+
+// newHMACPeerAuthWithKey uses key as the MAC key as is (internal and
+// tests only; production goes through NewHMACPeerAuthFromSecret).
+func newHMACPeerAuthWithKey(cfg HMACPeerAuthConfig, key []byte) (*HMACPeerAuth, error) {
+	if len(key) < 32 {
 		return nil, errors.New("conduit relay: relay-peer HMAC key must be at least 32 bytes")
 	}
 	if cfg.SelfID == "" {
@@ -119,11 +136,11 @@ func NewHMACPeerAuth(cfg HMACPeerAuthConfig) (*HMACPeerAuth, error) {
 	if cfg.MaxNonces <= 0 {
 		cfg.MaxNonces = 1 << 16
 	}
-	return &HMACPeerAuth{cfg: cfg, nonces: make(map[string]time.Time)}, nil
+	return &HMACPeerAuth{cfg: cfg, key: key, nonces: make(map[string]time.Time)}, nil
 }
 
 func (a *HMACPeerAuth) mac(req *http.Request, peer, ts, nonce string) []byte {
-	m := hmac.New(sha256.New, a.cfg.Key)
+	m := hmac.New(sha256.New, a.key)
 	for _, part := range []string{
 		req.Method, req.URL.RequestURI(), ts, nonce, peer,
 		req.Header.Get(HeaderBodySHA256), req.Header.Get(HeaderWant),

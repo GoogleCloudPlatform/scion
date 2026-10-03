@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
@@ -73,8 +72,17 @@ type Incarnation struct {
 	Source string
 }
 
-// ErrSupersededIncarnation is the 4409 refusal (a *conduit.CloseError).
+// ReasonLegacyHelloSuperseded is the close reason sent with 4409 when
+// CheckFallbackAgainstLaunchID refuses a Hello without a launch id.
+const ReasonLegacyHelloSuperseded = "legacy_hello_superseded"
+
+// ErrSupersededIncarnation is the 4409 refusal of a launch-id mismatch (a
+// *conduit.CloseError).
 var ErrSupersededIncarnation error = &conduit.CloseError{Code: CloseSupersededIncarnation, Reason: ReasonSupersededIncarnation}
+
+// ErrLegacyHelloSuperseded is the 4409 refusal of a Hello without a launch
+// id while a session admitted with the agent's current launch id exists.
+var ErrLegacyHelloSuperseded error = &conduit.CloseError{Code: CloseSupersededIncarnation, Reason: ReasonLegacyHelloSuperseded}
 
 func launchIncarnation(f AgentIncarnationFacts) (Incarnation, bool) {
 	if f.LaunchID == "" || strings.HasPrefix(f.LaunchID, generationPrefix) {
@@ -133,7 +141,7 @@ func AdmitBrokerIncarnation(authoritative, presented string) (Incarnation, error
 	case authoritative != "":
 		return Incarnation{}, ErrSupersededIncarnation
 	case presented == "":
-		return Incarnation{}, conduit.Reject(conduit.CloseForbidden, "broker Hello must carry capabilities.endpoint_incarnation")
+		return Incarnation{}, reject(conduit.CloseProtocolError, ReasonBadHello, "broker Hello must carry capabilities.endpoint_incarnation")
 	default:
 		return Incarnation{Value: presented}, nil
 	}
@@ -160,43 +168,50 @@ func admitIncarnation(p Principal, presented string) (Incarnation, error) {
 		return AdmitBrokerIncarnation(p.Incarnation, presented)
 	case registry.PrincipalUser:
 		if presented != "" {
-			return Incarnation{}, conduit.Reject(conduit.CloseForbidden, "user sessions carry no endpoint incarnation")
+			return Incarnation{}, reject(conduit.CloseProtocolError, ReasonBadHello, "user sessions carry no endpoint incarnation")
 		}
 		return Incarnation{}, nil
 	default:
-		return Incarnation{}, conduit.Reject(conduit.CloseForbidden, fmt.Sprintf("principal kind %q may not open a session", p.Kind))
+		return Incarnation{}, reject(conduit.CloseForbidden, ReasonForbidden, fmt.Sprintf("principal kind %q may not open a session", p.Kind))
 	}
 }
 
-// IsSupersededIncarnation reports whether err is the 4409 refusal.
+// IsSupersededIncarnation reports whether err is a 4409 refusal (either
+// reason; the check is code-based).
 func IsSupersededIncarnation(err error) bool {
 	var ce *conduit.CloseError
 	return errors.As(err, &ce) && ce.Code == CloseSupersededIncarnation
 }
 
-// LogReasonLegacyHelloSuperseded is the structured log field value
-// (reason=...) recorded when CheckFallbackAgainstLaunchID refuses a Hello,
-// so mixed-version incidents can be diagnosed.
-const LogReasonLegacyHelloSuperseded = "legacy_hello_superseded"
-
 // CheckFallbackAgainstLaunchID enforces the mixed-version fence on an
 // agent Hello that presented no launch id (inc.Source ==
-// IncarnationSourceGeneration). While a live, non-draining, current-epoch
-// session admitted with the agent's CURRENT launch_id (source launch_id)
-// exists, a launch-id-less Hello can only come from a container that
-// predates launch ids for this agent (a superseded launch, i.e. a zombie);
-// it is refused with ErrSupersededIncarnation (4409) so it cannot bump the
-// epoch and take routing over. Callers run this before
-// InsertSessionWithNextEpoch, so a refusal writes no row and burns no
-// epoch. A registry read error is returned as is (callers fail closed).
+// IncarnationSourceGeneration). While the agent holds ANY non-draining
+// session row admitted with its CURRENT launch_id (source launch_id),
+// whatever that row's relay liveness or epoch currency, a launch-id-less
+// Hello can only come from a container that predates launch ids for this
+// agent (a superseded launch, i.e. a zombie): it is refused with
+// ErrLegacyHelloSuperseded (4409 legacy_hello_superseded). Liveness and
+// epoch currency are deliberately ignored: a launch session that is still
+// connected but briefly ineligible (its relay missed heartbeats, or a
+// racing insert made it epoch-obsolete) gets no signal to reconnect, so a
+// fallback admitted in that gap would keep routing indefinitely. Dead rows
+// are bounded by the reapers (sessions on a stale relay go with the relay,
+// stale sessions after registry.DefaultSessionReapAfter).
 //
-// Remaining window (interim, until every target presents a launch id, 1e):
-// a launch-id-less Hello that arrives while no such session is live (the
-// current launch is disconnected, draining or stale, or has not connected
-// yet) is admitted as gen-N and takes over routing until the current
-// launch reconnects with its launch id. The current launch then wins
-// again: its Hello passes AdmitAgentIncarnation and bumps the epoch.
-func CheckFallbackAgainstLaunchID(ctx context.Context, reg *registry.Registry, now time.Time, agentID, projectID string, f AgentIncarnationFacts, inc Incarnation) error {
+// Admission calls it twice: before InsertSessionWithNextEpoch with
+// ownSessionID "" (a refusal writes no row and burns no epoch), and again
+// after inserting a fallback row with that row's id, closing the
+// check-then-insert race with a concurrent launch-id Hello (see
+// admitter.recheckFallback). A store read error is returned as is
+// (callers fail closed with 4504).
+//
+// Remaining interim window (until every target presents a launch id, 1e):
+// a launch-id-less Hello that arrives while the agent holds no
+// non-draining launch_id row (the current launch has not connected yet, is
+// between sessions, or is draining) is admitted as gen-N and owns routing
+// until the current launch connects with its launch id; that Hello passes
+// AdmitAgentIncarnation, bumps the epoch and fences the fallback session.
+func CheckFallbackAgainstLaunchID(ctx context.Context, store registry.Store, agentID string, f AgentIncarnationFacts, inc Incarnation, ownSessionID string) error {
 	if inc.Source != IncarnationSourceGeneration {
 		return nil
 	}
@@ -204,15 +219,20 @@ func CheckFallbackAgainstLaunchID(ctx context.Context, reg *registry.Registry, n
 	if !ok {
 		return nil // pure legacy: no launch id to protect
 	}
-	recs, err := reg.Eligible(ctx, registry.PrincipalAgent, agentID,
-		registry.Want{ProjectID: projectID, AnyExecScope: true, Incarnation: cur.Value}, now)
+	ps, err := store.ListPrincipalSessions(ctx, registry.PrincipalAgent, agentID)
 	if err != nil {
 		return err
 	}
-	for _, rec := range recs {
-		if rec.Capabilities.IncarnationSource == IncarnationSourceLaunchID {
-			return ErrSupersededIncarnation
+	for _, v := range ps.Sessions {
+		if v.Session.SessionID != ownSessionID && isLaunchRow(v.Session, cur.Value) {
+			return ErrLegacyHelloSuperseded
 		}
 	}
 	return nil
+}
+
+// isLaunchRow reports whether s is a non-draining row admitted with the
+// launch id launchID.
+func isLaunchRow(s registry.SessionRecord, launchID string) bool {
+	return !s.Draining && s.Capabilities.IncarnationSource == IncarnationSourceLaunchID && s.EndpointIncarnation == launchID
 }
