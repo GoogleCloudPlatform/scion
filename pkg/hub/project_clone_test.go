@@ -486,6 +486,12 @@ func TestProjectClone_GitRemoteOverride_RejectsNonGitURL(t *testing.T) {
 		"C:\\code\\repo",
 		"file:///home/user/repo",
 		"git@github.com",
+		"alice:pw@github.com:org/repo",
+		"alice@github.com:repo",
+		"alice@github.com:/abs/path",
+		"github.com:notaport/org/repo",
+		"github.com:8443/repo",
+		"localhost:8080/org/repo",
 	} {
 		t.Run(remote, func(t *testing.T) {
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
@@ -520,6 +526,94 @@ func TestProjectClone_GitRemoteOverride_AcceptedForms(t *testing.T) {
 			require.NoError(t, json.NewDecoder(rec.Body).Decode(&clone))
 			assert.Equal(t, "github.com/other-org/other-repo", clone.GitRemote)
 			assert.Equal(t, "https://github.com/other-org/other-repo.git", clone.Labels[store.LabelCloneURL])
+		})
+	}
+}
+
+// TestProjectClone_GitRemoteOverride_RejectsSSHPort checks that ssh:// URLs
+// with a port get a specific 400: NormalizeGitRemote/ToHTTPSCloneURL would turn
+// the port into a path segment.
+func TestProjectClone_GitRemoteOverride_RejectsSSHPort(t *testing.T) {
+	srv, s := testServer(t)
+	src := createSourceProject(t, srv, s)
+
+	for _, remote := range []string{
+		"ssh://git@git.example.com:2222/group/repo.git",
+		"ssh://review.example.com:29418/project/repo",
+		"SSH://git:pw@git.example.com:2222/group/repo.git",
+	} {
+		t.Run(remote, func(t *testing.T) {
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+				map[string]interface{}{"name": "SSH Port", "gitRemote": remote})
+			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "ssh URLs with a port are not supported yet; use the https URL")
+			assert.NotContains(t, rec.Body.String(), "pw@")
+		})
+	}
+}
+
+// TestProjectClone_GitRemoteOverride_DerivedForms checks GitRemote and the git
+// source labels for override forms beyond the github https/scp basics.
+func TestProjectClone_GitRemoteOverride_DerivedForms(t *testing.T) {
+	tests := []struct {
+		name, remote, gitRemote, cloneURL, sourceURL string
+	}{
+		{
+			name:      "scp with non-git login",
+			remote:    "alice@git.example.com:team/repo.git",
+			gitRemote: "git.example.com/team/repo",
+			cloneURL:  "https://git.example.com/team/repo.git",
+			sourceURL: "alice@git.example.com:team/repo.git",
+		},
+		{
+			name:      "scheme-less host:port",
+			remote:    "git.example.com:8443/team/repo",
+			gitRemote: "git.example.com:8443/team/repo",
+			cloneURL:  "https://git.example.com:8443/team/repo.git",
+			sourceURL: "git.example.com:8443/team/repo",
+		},
+		{
+			name:      "https with port",
+			remote:    "https://git.example.com:8443/team/repo.git",
+			gitRemote: "git.example.com:8443/team/repo",
+			cloneURL:  "https://git.example.com:8443/team/repo.git",
+			sourceURL: "https://git.example.com:8443/team/repo.git",
+		},
+		{
+			name:      "query and fragment dropped",
+			remote:    "https://github.com/acme/repo.git?access_token=SECRET_Q#SECRET_F",
+			gitRemote: "github.com/acme/repo",
+			cloneURL:  "https://github.com/acme/repo.git",
+			sourceURL: "https://github.com/acme/repo.git",
+		},
+		{
+			name:      "query, fragment and userinfo dropped",
+			remote:    "https://u:SECRET_P@github.com/acme/repo?private_token=SECRET_Q",
+			gitRemote: "github.com/acme/repo",
+			cloneURL:  "https://github.com/acme/repo.git",
+			sourceURL: "https://github.com/acme/repo",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			src := createSourceProject(t, srv, s)
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
+				map[string]interface{}{"name": "Derived", "gitRemote": tt.remote})
+			require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), "SECRET_")
+
+			var clone store.Project
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&clone))
+			assert.Equal(t, tt.gitRemote, clone.GitRemote)
+			assert.Equal(t, tt.cloneURL, clone.Labels[store.LabelCloneURL])
+			assert.Equal(t, tt.sourceURL, clone.Labels[store.LabelSourceURL])
+
+			stored, err := s.GetProject(context.Background(), clone.ID)
+			require.NoError(t, err)
+			for k, v := range stored.Labels {
+				assert.NotContains(t, v, "SECRET_", "label %s", k)
+			}
 		})
 	}
 }

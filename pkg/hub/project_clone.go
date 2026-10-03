@@ -20,7 +20,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -89,16 +91,22 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 
 	// A gitRemote override must be a remote git URL. Anything else (a local
 	// path, a bare host) would be stored as GitRemote and turned into a bogus
-	// clone-url label by ToHTTPSCloneURL.
-	overrideRemote := strings.TrimSpace(req.GitRemote)
-	if overrideRemote != "" && !isCloneGitRemote(overrideRemote) {
-		ValidationError(w, "gitRemote must be a remote git URL (https://, ssh://, git://, git@host:org/repo or host/org/repo)",
-			map[string]interface{}{"field": "gitRemote"})
-		return
+	// clone-url label by ToHTTPSCloneURL. The query string and fragment are
+	// dropped first: git remotes never need them and they can carry tokens
+	// (?access_token=…).
+	overrideRemote := stripQueryAndFragment(strings.TrimSpace(req.GitRemote))
+	if overrideRemote != "" {
+		if msg := validateCloneGitRemote(overrideRemote); msg != "" {
+			ValidationError(w, msg, map[string]interface{}{"field": "gitRemote"})
+			return
+		}
 	}
 	// Never persist credentials embedded in the override (https://user:TOKEN@…):
 	// GitRemote and the git source labels are readable by project members.
 	overrideRemote = util.StripGitURLCredentials(overrideRemote)
+	// overrideCanonical is the form fed to NormalizeGitRemote/ToHTTPSCloneURL,
+	// which only understand the "git@" SCP login (see canonicalCloneRemote).
+	overrideCanonical := canonicalCloneRemote(overrideRemote)
 
 	// ── Step 2: Resolve name/slug ────────────────────────────────────────
 
@@ -148,7 +156,7 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 	// with a different repository).
 	remoteOverridden := false
 	if overrideRemote != "" {
-		clone.GitRemote = util.NormalizeGitRemote(overrideRemote)
+		clone.GitRemote = util.NormalizeGitRemote(overrideCanonical)
 		remoteOverridden = clone.GitRemote != util.NormalizeGitRemote(src.GitRemote)
 	}
 
@@ -198,7 +206,7 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 		if clone.Labels == nil {
 			clone.Labels = make(map[string]string)
 		}
-		clone.Labels[store.LabelCloneURL] = util.ToHTTPSCloneURL(overrideRemote)
+		clone.Labels[store.LabelCloneURL] = util.ToHTTPSCloneURL(overrideCanonical)
 		clone.Labels[store.LabelSourceURL] = overrideRemote
 		clone.Labels[store.LabelDefaultBranch] = "main"
 	}
@@ -783,24 +791,117 @@ func (s *Server) cloneProjectPreStartHook(ctx context.Context, srcProjectID, clo
 	return nil
 }
 
-// isCloneGitRemote reports whether a clone's gitRemote override names a remote
-// repository. It accepts everything util.IsGitURL does, plus the scheme-less
-// "host.tld/org/repo" form, which is how GitRemote is stored (see
-// util.NormalizeGitRemote) and what the web create form already accepts.
-// Local paths ("/x", "./x", "~/x"), bare names and drive paths are rejected:
-// the first segment of a scheme-less remote must look like a hostname.
-func isCloneGitRemote(remote string) bool {
-	if util.IsGitURL(remote) {
-		return true
+// Error messages for a rejected clone gitRemote override.
+const (
+	errCloneRemoteInvalid = "gitRemote must be a remote git URL (https://, ssh://, git://, " +
+		"user@host:org/repo or host[:port]/org/repo)"
+	errCloneRemoteSSHPort = "gitRemote: ssh URLs with a port are not supported yet; use the https URL"
+)
+
+// stripQueryAndFragment drops everything from the first '?' or '#'. Git remote
+// URLs never need either, and a query can carry credentials.
+func stripQueryAndFragment(remote string) string {
+	if i := strings.IndexAny(remote, "?#"); i >= 0 {
+		return remote[:i]
 	}
-	if strings.Contains(remote, "://") || strings.HasPrefix(remote, "git@") {
-		return false // a scheme/SCP form that IsGitURL already rejected
+	return remote
+}
+
+// scpLogin matches the login of an SCP-style remote (user@host:path).
+var scpLogin = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// splitSCPRemote splits an SCP-style remote "user@host:path" into its parts.
+// ok is false when remote is not in that form (it has a scheme, no login, no
+// ':' after the host, or a host containing '/').
+func splitSCPRemote(remote string) (login, host, path string, ok bool) {
+	if strings.Contains(remote, "://") {
+		return "", "", "", false
 	}
-	host, _, _ := strings.Cut(remote, "/")
-	if !strings.Contains(host, ".") || strings.HasPrefix(host, ".") || strings.ContainsAny(host, " \\:~@") {
-		return false
+	login, rest, found := strings.Cut(remote, "@")
+	if !found {
+		return "", "", "", false
 	}
-	return util.IsGitURL("https://" + remote)
+	host, path, found = strings.Cut(rest, ":")
+	if !found || strings.Contains(host, "/") {
+		return "", "", "", false
+	}
+	return login, host, path, true
+}
+
+// validateCloneGitRemote returns "" when a clone's gitRemote override names a
+// remote repository, and otherwise the 400 message to return. Accepted forms:
+//
+//   - scheme URLs util.IsGitURL accepts (https://, http://, ssh://, git://),
+//     except ssh:// with a port, which NormalizeGitRemote/ToHTTPSCloneURL
+//     cannot yet represent (the port would become a path segment);
+//   - SCP style user@host:org/repo, with any login (not only "git");
+//   - scheme-less host[:port]/org/repo, which is how GitRemote is stored (see
+//     util.NormalizeGitRemote) and what the web create form already accepts.
+//
+// Local paths ("/x", "./x", "~/x"), bare names, bare hosts and drive paths are
+// rejected: a scheme-less remote must start with something hostname-like.
+func validateCloneGitRemote(remote string) string {
+	if scheme, rest, ok := strings.Cut(remote, "://"); ok {
+		if strings.EqualFold(scheme, "ssh") {
+			authority, _, _ := strings.Cut(rest, "/")
+			if at := strings.LastIndex(authority, "@"); at >= 0 {
+				authority = authority[at+1:]
+			}
+			if strings.Contains(authority, ":") {
+				return errCloneRemoteSSHPort
+			}
+		}
+		if util.IsGitURL(remote) {
+			return ""
+		}
+		return errCloneRemoteInvalid
+	}
+
+	if login, host, path, ok := splitSCPRemote(remote); ok {
+		if scpLogin.MatchString(login) && isHostname(host) &&
+			path != "" && !strings.HasPrefix(path, "/") && strings.Contains(strings.Trim(path, "/"), "/") {
+			return ""
+		}
+		return errCloneRemoteInvalid
+	}
+
+	hostPort, path, _ := strings.Cut(remote, "/")
+	host, port, hasPort := strings.Cut(hostPort, ":")
+	if !isHostname(host) || (hasPort && !isPort(port)) {
+		return errCloneRemoteInvalid
+	}
+	if !strings.Contains(strings.Trim(path, "/"), "/") {
+		return errCloneRemoteInvalid // need at least org/repo
+	}
+	return ""
+}
+
+// isHostname reports whether s looks like a DNS hostname with a dot
+// ("github.com", "git.example.co"), which rules out local paths, "~" and
+// drive letters in scheme-less remotes.
+func isHostname(s string) bool {
+	return hostnamePattern.MatchString(s)
+}
+
+// hostnamePattern matches two or more dot-separated DNS labels.
+var hostnamePattern = regexp.MustCompile(`^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$`)
+
+// isPort reports whether s is a decimal TCP port.
+func isPort(s string) bool {
+	n, err := strconv.Atoi(s)
+	return err == nil && n > 0 && n <= 65535 && strconv.Itoa(n) == s
+}
+
+// canonicalCloneRemote rewrites an SCP remote with a non-"git" login
+// (alice@host:org/repo) to the "git@host:org/repo" form, because
+// util.NormalizeGitRemote and util.ToHTTPSCloneURL only treat the "git@"
+// login as SCP syntax. The login does not affect either result (GitRemote is
+// login-free and clone-url is https). Other forms are returned unchanged.
+func canonicalCloneRemote(remote string) string {
+	if login, host, path, ok := splitSCPRemote(remote); ok && login != "git" {
+		return "git@" + host + ":" + path
+	}
+	return remote
 }
 
 // isGitSourceLabel reports whether k is one of the labels that describe a

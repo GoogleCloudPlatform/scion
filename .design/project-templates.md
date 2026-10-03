@@ -655,12 +655,18 @@ because they describe the git remote, which is also copied. The exception is a
 request whose `gitRemote` override names a *different* repository: those three
 labels are then dropped and re-derived from the override (default branch
 `main`). Otherwise `resolveCloneURL`, which prefers the label, would still clone
-the template's repository. The override must be a remote git URL (`https://`,
-`ssh://`, `git://`, `git@host:org/repo`, or the scheme-less `host/org/repo`
-form `GitRemote` is stored in). Anything else, such as a local path, gets a 400.
-Credentials embedded in it (`https://user:TOKEN@host/…`) are stripped
-(`util.StripGitURLCredentials`) before anything is compared or stored, because
-`GitRemote` and the labels are readable by project members.
+the template's repository. The override must be a remote git URL: `https://`,
+`http://`, `ssh://` or `git://`; SCP style `user@host:org/repo` with any login;
+or the scheme-less `host[:port]/org/repo` form that `GitRemote` is stored in.
+Anything else, such as a local path, gets a 400 with `details.field =
+"gitRemote"`. `ssh://` URLs with a port (for example Gerrit's `:29418`) are
+rejected for now with a message pointing to the https URL, because
+`NormalizeGitRemote`/`ToHTTPSCloneURL` would turn the port into a path segment.
+Before anything is compared or stored, the query string and fragment are
+dropped and embedded credentials (`https://user:TOKEN@host/…`) are stripped
+(`util.StripGitURLCredentials`), because `GitRemote` and the labels are
+readable by project members. A non-`git` SCP login is rewritten to `git@` only
+when deriving `GitRemote` and `clone-url`; `source-url` keeps it.
 
 **Pre-start hook.** Only the **active** hook is copied
 (`GetActiveProjectPreStartHook`). Archived revisions are history, not
