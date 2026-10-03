@@ -839,6 +839,9 @@ func SnapshotSQLite(ctx context.Context, db *sql.DB, label string, now time.Time
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
+	// VACUUM INTO accepts an existing target only if it is empty (SQLite
+	// rejects a non-empty one with "output file already exists"), so the
+	// empty file created above is a valid target.
 	if err == nil {
 		_, err = db.ExecContext(ctx, "VACUUM INTO ?", tmp)
 	}
