@@ -100,12 +100,20 @@ func TestSpaceMembers_ReaderWithoutAgentListGetsNoAgents(t *testing.T) {
 	srv, s, owner, member, projectID := msgAuthzSetup(t)
 	createSpaceMembersAgents(t, s, projectID, owner.ID, "authz-hidden", 3)
 	reader := createSpaceMembersReader(t, s, projectID)
+	audits := &recordingDecisionAuditEmitter{}
+	srv.authzService.SetDecisionAuditEmitter(audits)
+	srv.authzService.DecisionAuditSampleRate = 1.0
 
-	// Control: a project member holds agent.list and sees the agents.
+	// Control: a project member holds agent.list and sees the agents, and
+	// one attach decision is recorded per agent.
 	rec := doRequestAsUser(t, srv, member, http.MethodGet, "/api/v1/chat/spaces/"+projectID+"/members", nil)
 	if resp := decodeSpaceMembers(t, rec.Code, rec.Body.Bytes()); len(resp.Agents) != 3 {
 		t.Fatalf("fixture: member sees %d agents, want 3", len(resp.Agents))
 	}
+	if n := countSpaceMembersAttachChecks(audits); n != 3 {
+		t.Fatalf("fixture: member attach checks = %d, want 3", n)
+	}
+	audits.records = nil
 
 	counting := &spaceMembersStore{Store: s}
 	srv.store = counting
@@ -115,6 +123,82 @@ func TestSpaceMembers_ReaderWithoutAgentListGetsNoAgents(t *testing.T) {
 	if counting.listAgentsCalls != 0 {
 		t.Fatalf("ListAgents calls = %d, want 0 when agents are hidden", counting.listAgentsCalls)
 	}
+	if n := countSpaceMembersAttachChecks(audits); n != 0 {
+		t.Fatalf("attach checks = %d, want 0 when agents are hidden", n)
+	}
+}
+
+// countSpaceMembersAttachChecks counts the agent attach decisions recorded
+// by the decision audit emitter.
+func countSpaceMembersAttachChecks(audits *recordingDecisionAuditEmitter) int {
+	n := 0
+	for _, r := range audits.records {
+		if r.ResourceType == "agent" && r.Permission == string(ActionAttach) {
+			n++
+		}
+	}
+	return n
+}
+
+// A caller with agent.list on another project only (an Explicit scope that
+// does not contain this project) and project read here sees the humans
+// section and no agent rows, matching GET /api/v1/agents for this project.
+func TestSpaceMembers_AgentListOnOtherProjectGetsNoAgents(t *testing.T) {
+	ctx := context.Background()
+	srv, s, owner, _, projectID := msgAuthzSetup(t)
+	createSpaceMembersAgents(t, s, projectID, owner.ID, "authz-explicit-a", 3)
+	reader := createSpaceMembersReader(t, s, projectID)
+	other := createSpaceMembersProject(t, s, "members-authz-explicit-b")
+	createSpaceMembersAgents(t, s, other.ID, owner.ID, "authz-explicit-b", 2)
+	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "members-other-agent-lister",
+		Description: "agent list on another project",
+		ScopeType:   store.RoleScopeProject,
+		Permissions: []string{"agent.list", "project.read"},
+	})
+	require_NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      reader.ID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          other.ID,
+		CreatedBy:        "test",
+	})
+	require_NoError(t, err)
+
+	// Fixture guard: the scope must be Explicit, contain the other project
+	// and not contain this one, which is the case this test covers.
+	scope, err := srv.authzService.ResolveListScopes(ctx,
+		NewAuthenticatedUser(reader.ID, reader.Email, reader.DisplayName, "member", "api"), "agent.list")
+	require_NoError(t, err)
+	if scope.Scopes.IsNone() || scope.Scopes.IsAll() ||
+		scope.Scopes.Contains(projectID) || !scope.Scopes.Contains(other.ID) {
+		t.Fatalf("fixture: scope projects=%v, want explicit with %s and without %s",
+			scope.Scopes.ProjectIDs(), other.ID, projectID)
+	}
+
+	// Reference: GET /api/v1/agents for this project returns no rows.
+	rec := doRequestAsUser(t, srv, reader, http.MethodGet, "/api/v1/agents?projectId="+projectID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reference: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var ref struct {
+		Agents []json.RawMessage `json:"agents"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &ref); err != nil {
+		t.Fatalf("reference: decode: %v: %s", err, rec.Body.String())
+	}
+	if len(ref.Agents) != 0 {
+		t.Fatalf("reference: agents = %d, want 0", len(ref.Agents))
+	}
+
+	rec = doRequestAsUser(t, srv, reader, http.MethodGet, "/api/v1/chat/spaces/"+projectID+"/members", nil)
+	resp := decodeSpaceMembers(t, rec.Code, rec.Body.Bytes())
+	if len(resp.Agents) != len(ref.Agents) {
+		t.Fatalf("members agents = %d, want %d to match GET /api/v1/agents", len(resp.Agents), len(ref.Agents))
+	}
+	assertSpaceMembersAgentsHidden(t, resp)
 }
 
 // A caller whose agent.list scope is All but whose access to this project
