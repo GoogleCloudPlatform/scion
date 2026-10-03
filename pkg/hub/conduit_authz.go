@@ -118,10 +118,53 @@ func (s *Server) authorizeConduitAction(ctx context.Context, identity Identity, 
 	return nil
 }
 
+// conduitStreamParams builds the params signed into a grant: the caller's
+// params, restricted to the stream kind's allow-list, plus the params the hub
+// sets itself. tcp allows exactly host and port from the caller; pty, ssh,
+// logs and events allow none until their targets define params. For a broker
+// target the hub binds the grant to the authorized agent with
+// grant.ParamAgentID; a caller may repeat that value but not change it.
+// Hub-set params are added here.
+func conduitStreamParams(req conduitGrantRequest) (map[string]string, error) {
+	var allowed []string
+	if req.Stream.Kind == grant.StreamKindTCP {
+		allowed = []string{grant.ParamHost, grant.ParamPort}
+	}
+	broker := req.Target.Kind == grant.TargetKindBroker
+	params := make(map[string]string, len(req.Stream.Params)+1)
+	for k, v := range req.Stream.Params {
+		switch {
+		case k == grant.ParamAgentID:
+			if !broker || v != req.Agent.ID {
+				return nil, fmt.Errorf("%w: param %q does not match the authorized target", errConduitInvalid, k)
+			}
+		case slices.Contains(allowed, k):
+			params[k] = v
+		default:
+			return nil, fmt.Errorf("%w: param %q is not allowed for %s streams", errConduitInvalid, k, req.Stream.Kind)
+		}
+	}
+	if broker {
+		params[grant.ParamAgentID] = req.Agent.ID
+	}
+	if len(params) == 0 {
+		return nil, nil
+	}
+	return params, nil
+}
+
 // conduitTCPTarget validates tcp stream params and returns the port. The
-// params must be exactly {host: "127.0.0.1", port: <canonical decimal>}.
-func conduitTCPTarget(params map[string]string) (int, error) {
-	if len(params) != 2 || params[grant.ParamHost] != "127.0.0.1" {
+// params must be exactly {host: "127.0.0.1", port: <canonical decimal>},
+// plus agent_id for a broker target.
+func conduitTCPTarget(params map[string]string, broker bool) (int, error) {
+	want := 2
+	if broker {
+		want = 3
+		if params[grant.ParamAgentID] == "" {
+			return 0, fmt.Errorf("%w: broker tcp target must name the agent", errConduitInvalid)
+		}
+	}
+	if len(params) != want || params[grant.ParamHost] != "127.0.0.1" {
 		return 0, fmt.Errorf("%w: tcp target must be exactly {host:127.0.0.1, port}", errConduitInvalid)
 	}
 	raw := params[grant.ParamPort]
@@ -200,20 +243,27 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 		return nil, nil, fmt.Errorf("%w: identity may not open streams", errConduitForbidden)
 	}
 
-	if req.Stream.Kind == grant.StreamKindTCP {
-		port, err := conduitTCPTarget(req.Stream.Params)
-		if err != nil {
-			return nil, nil, err
-		}
-		if err := s.authorizeConduitTCPTarget(agent, port); err != nil {
-			return nil, nil, err
-		}
-	}
+	// Permission first, so a caller without it learns nothing about the
+	// target (for example which ports are exposed).
 	if err := s.authorizeConduitAction(ctx, req.Identity, agent, action); err != nil {
 		return nil, nil, err
 	}
 	if req.ViaTunnel {
 		if err := s.authorizeConduitAction(ctx, req.Identity, agent, ActionTunnel); err != nil {
+			return nil, nil, err
+		}
+	}
+
+	params, err := conduitStreamParams(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	if req.Stream.Kind == grant.StreamKindTCP {
+		port, err := conduitTCPTarget(params, req.Target.Kind == grant.TargetKindBroker)
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := s.authorizeConduitTCPTarget(agent, port); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -229,7 +279,7 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 		Subject:   subject,
 		ProjectID: agent.ProjectID,
 		Target:    req.Target,
-		Stream:    grant.StreamHeader{Kind: req.Stream.Kind, Params: req.Stream.Params},
+		Stream:    grant.StreamHeader{Kind: req.Stream.Kind, Params: params},
 		NotBefore: now,
 		Expiry:    now.Add(conduitGrantTTL),
 	}

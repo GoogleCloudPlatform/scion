@@ -79,10 +79,14 @@ const (
 	TargetKindAgent  = "agent"
 )
 
-// TCP stream params. A tcp grant names exactly one agent-local target.
+// Stream params. A tcp grant names exactly one agent-local target with
+// ParamHost and ParamPort. ParamAgentID is reserved: the hub sets it on every
+// grant for a broker target to the agent the stream was authorized for, and
+// the broker must route the stream only to that agent.
 const (
-	ParamHost = "host"
-	ParamPort = "port"
+	ParamHost    = "host"
+	ParamPort    = "port"
+	ParamAgentID = "agent_id"
 )
 
 // IsStreamKind reports whether kind is one of the canonical stream kinds.
