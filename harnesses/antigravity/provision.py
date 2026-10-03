@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -25,8 +26,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import scion_harness
 
-assert scion_harness.INTERFACE_VERSION >= 2, (
-    f"scion_harness INTERFACE_VERSION {scion_harness.INTERFACE_VERSION} < 2"
+assert scion_harness.INTERFACE_VERSION >= 3, (
+    f"scion_harness INTERFACE_VERSION {scion_harness.INTERFACE_VERSION} < 3"
 )
 
 PROVISION_VERSION = "2026-07-09T01:00:00Z"
@@ -34,15 +35,6 @@ PROVISION_VERSION = "2026-07-09T01:00:00Z"
 FLASH_MODEL = "Gemini 3.8 Flash (Medium)"
 PRO_MODEL = "Gemini 3.1 Pro (Low)"
 
-
-def _resolve_thinking_tier(level: int) -> str:
-    """Map a thinking level (0-100) to one of AGY's 3 CLI tiers."""
-    level = max(0, min(100, level))
-    if level >= 75:
-        return "high"
-    if level >= 50:
-        return "medium"
-    return "low"
 
 AGY_MCP_MAPPING: dict[str, Any] = {
     "global_config_file": ".gemini/config/mcp_config.json",
@@ -266,14 +258,20 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
 
     instructions_file = ctx.harness_config.get("instructions_file") or "GEMINI.md"
     model = _resolve_model(ctx)
-    thinking_raw = os.environ.get("SCION_THINKING_LEVEL", "").strip()
-    thinking_tier: str | None = None
-    if thinking_raw.isdigit():
-        thinking_level = int(thinking_raw)
-        thinking_tier = _resolve_thinking_tier(thinking_level)
-        ctx.info(f"model={model} thinking_level={thinking_level} tier={thinking_tier}")
-    else:
-        ctx.info(f"model={model} thinking_level=unset (using AGY default)")
+    # The level -> --effort tier table lives in config.yaml's `thinking:`
+    # block; resolve_thinking owns the parse, clamp and logging. None means
+    # no --effort flag, so AGY's own default applies.
+    harness_cfg = ctx.harness_config if isinstance(ctx.harness_config, dict) else {}
+    thinking_requested = bool(os.environ.get(scion_harness.THINKING_LEVEL_ENV, "").strip())
+    if thinking_requested and not harness_cfg.get("thinking"):
+        # Only when a level was asked for: with no level, no --effort is the
+        # intended outcome, so a missing block changes nothing worth a warning.
+        ctx.warn(
+            "config.yaml has no thinking block; --effort not passed "
+            "(update the harness-config)"
+        )
+    thinking_tier = scion_harness.resolve_thinking(ctx)
+    ctx.info(f"model={model} tier={thinking_tier or '<agy default>'}")
 
     _generate_wrapper_script(ctx.home, has_token, is_enterprise, is_adc=is_adc, thinking_tier=thinking_tier)
     ctx.write_outputs(resolved, env=env_overlay)
@@ -523,7 +521,7 @@ print('agy-wrapper: marked enterprise onboarding complete', file=sys.stderr)
 fi
 
 # Exec AGY with all arguments passed through
-exec agy --dangerously-skip-permissions{f' --effort {thinking_tier}' if thinking_tier else ''} "$@"
+exec agy --dangerously-skip-permissions{f' --effort {shlex.quote(thinking_tier)}' if thinking_tier else ''} "$@"
 """
 
     wrapper_path = os.path.join(home, ".scion", "harness", "agy-wrapper.sh")

@@ -152,6 +152,52 @@ Hub setting, which in turn outranks this file's own default. See [Settings
 Precedence](/scion/reference/settings-precedence/#container-image-and-kubernetes-image-pull-policy--a-separate-chain-from-b1)
 for the full chain.
 
+### Thinking Level Map (`thinking`)
+
+Scion carries the thinking level as a harness-agnostic integer from 0 to 100 (`--thinking-level` on
+`scion start`, Hub agent defaults, templates). Inside the container it arrives as
+`SCION_THINKING_LEVEL`. A harness that honours it declares a `thinking:` block in its
+`config.yaml`, next to `model_aliases`. The block maps level ranges to the harness's native tier
+strings:
+
+```yaml
+thinking:
+  # Ordered by ascending `max`. A level L (0-100, after clamping) maps to the
+  # `value` of the first entry whose `max` >= L. `max` is an inclusive upper
+  # bound. The last entry must have max: 100.
+  levels:
+    - {max: 25,  value: low}
+    - {max: 50,  value: medium}
+    - {max: 75,  value: high}
+    - {max: 100, value: xhigh}
+  # Optional. Used when SCION_THINKING_LEVEL is unset, blank or not an integer.
+  # Omit it to emit nothing, so the harness CLI's own default applies.
+  default: medium
+```
+
+Rules (checked when the harness-config is loaded; a violation fails the load):
+
+- `levels` is required and must have at least one entry.
+- Each entry has exactly `max` (an integer from 0 to 100) and `value` (a non-empty string).
+- `max` must be strictly ascending, and the last `max` must be `100`.
+- `default`, if present, is a non-empty string. It does not have to be one of the `value`s.
+- No other keys are allowed.
+
+The block travels to the container in the provision manifest. The bundle's `provision.py`
+resolves it with `scion_harness.resolve_thinking(ctx)`, which owns the only parse rule: the level
+is stripped, signs are accepted (`-5`, `+7`), and the result is clamped to 0-100. A value that is
+not an integer (`abc`, `1.5`) logs a warning and is treated as unset. Writing the resolved value
+to the harness's native setting is up to each `provision.py`: for example, codex writes
+`model_reasoning_effort` in `~/.codex/config.toml`, and antigravity passes `agy --effort`.
+
+A harness with no `thinking:` block ignores the thinking level. Currently only `codex` and
+`antigravity` declare one; see [Supported Harnesses](/scion/supported-harnesses/) for their
+tables. If you maintain a customized `config.yaml` for one of these harnesses, copy the
+`thinking:` block from the bundled file, or run `scion harness-config upgrade <name>`, which
+merges missing top-level keys such as `thinking:` without overwriting your values. Without the
+block, the provisioner writes no thinking setting, so the CLI's own default applies. codex logs
+a warning on every start; antigravity logs one when a thinking level was requested.
+
 ### Command Execution (`command`)
 
 The `command` block defines how the agent's primary LLM tool is invoked.

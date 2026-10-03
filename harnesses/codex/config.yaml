@@ -51,6 +51,17 @@ model_aliases:
   medium: gpt-6.1-sol
   large: gpt-6.1-sol
   extra-large: gpt-6-astra
+
+# SCION_THINKING_LEVEL (0-100) -> model_reasoning_effort in ~/.codex/config.toml.
+# Applied by scion_harness.resolve_thinking in provision.py. Each level maps
+# to the value of the first entry whose max (inclusive) is >= the level.
+thinking:
+  levels:
+    - {max: 25,  value: low}
+    - {max: 50,  value: medium}
+    - {max: 75,  value: high}
+    - {max: 100, value: xhigh}
+  default: medium   # ptone/scion#2479: unset must not fall back to codex's own default
 command:
   base: ["codex", "--sandbox", "danger-full-access", "--dangerously-bypass-approvals-and-sandbox", "--dangerously-bypass-hook-trust"]
   # resume_flag is split on whitespace, so "resume --last" emits two argv tokens
