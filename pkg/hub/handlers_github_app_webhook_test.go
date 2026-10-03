@@ -133,16 +133,29 @@ func TestHandleGitHubWebhook_Ping(t *testing.T) {
 }
 
 func TestHandleGitHubWebhook_NoSecretConfigured_UnsignedRejected(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-
+	// The capture must run before testServer: testServer's New() call binds
+	// the Server's subsystem loggers (logging.Subsystem) to whatever
+	// slog.Default() is at that moment, and that binding does not follow a
+	// later slog.SetDefault swap. Capturing afterward could leave the
+	// "secret lookup failed" check below unable to observe a log line
+	// written through a subsystem logger, making the absence check vacuous.
+	//
 	// A "not configured" secret lookup (store.ErrNotFound) must not be treated
 	// as a backend error: only the once-per-process "not configured" WARN
 	// should fire, not the per-request "secret lookup failed" WARN.
 	var logBuf bytes.Buffer
 	prevLogger := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+
+	srv, s := testServer(t)
+	ctx := context.Background()
+
+	// Positive control: New() unconditionally logs an Info line during
+	// construction, so the capture must have observed something. This
+	// guards against a misrouted capture making the absence check below
+	// pass vacuously.
+	requireLogCaptureLive(t, &logBuf, serverConstructionLogLine)
 
 	payload := mustJSON(t, map[string]interface{}{
 		"action": "created",

@@ -24,6 +24,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -398,6 +400,91 @@ func TestHTTPAgentDispatcher_DispatchAgentMessage(t *testing.T) {
 	}
 	if !mockClient.lastInterrupt {
 		t.Error("expected interrupt to be true")
+	}
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentMessage_RefusesRaw proves the
+// contract's §6.1 "(a) Dispatch-layer backstop" directly against the one
+// production AgentDispatcher.DispatchAgentMessage implementation: from task
+// 2.3 onward, a structuredMsg carrying Raw == true is refused
+// unconditionally, before requireRuntimeBrokerAssigned or any broker
+// endpoint lookup runs, and the underlying RuntimeBrokerClient is never
+// called at all. No broker or agent setup is required for this case
+// precisely because the refusal happens before anything broker-specific is
+// touched.
+func TestHTTPAgentDispatcher_DispatchAgentMessage_RefusesRaw(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	agent := &store.Agent{
+		ID:   tid("agent-raw-backstop"),
+		Name: "test-agent-raw",
+		Slug: "test-agent-raw",
+		// Deliberately no RuntimeBrokerID: if the backstop did not run
+		// first, requireRuntimeBrokerAssigned would fail for an unrelated
+		// reason and this test would not actually prove the backstop ran.
+	}
+
+	err := dispatcher.DispatchAgentMessage(ctx, agent, "C-c", false, &messages.StructuredMessage{Raw: true})
+	if !errors.Is(err, ErrRawDispatchRefused) {
+		t.Fatalf("DispatchAgentMessage error = %v, want ErrRawDispatchRefused", err)
+	}
+	if mockClient.messageCalled {
+		t.Error("expected MessageAgent to never be called for a Raw==true structuredMsg")
+	}
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentMessage_NilAgentRaw verifies a nil
+// agent is rejected with errNoRuntimeBrokerAssigned (not a panic in the raw
+// backstop log) and that no broker call is made.
+func TestHTTPAgentDispatcher_DispatchAgentMessage_NilAgentRaw(t *testing.T) {
+	memStore := createTestStore(t)
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	err := dispatcher.DispatchAgentMessage(context.Background(), nil, "C-c", false, &messages.StructuredMessage{Raw: true})
+	if !errors.Is(err, errNoRuntimeBrokerAssigned) {
+		t.Fatalf("DispatchAgentMessage error = %v, want errNoRuntimeBrokerAssigned", err)
+	}
+	if mockClient.messageCalled {
+		t.Error("expected MessageAgent to never be called for a nil agent")
+	}
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentMessage_PlainStillDelivers is the
+// backstop's negative control: Plain (and ordinary, non-raw) messages are
+// completely unaffected, proving the Raw check above is not accidentally
+// over-broad.
+func TestHTTPAgentDispatcher_DispatchAgentMessage_PlainStillDelivers(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("host-raw-backstop-plain"),
+		Name:     "test-host-plain",
+		Slug:     "test-host-plain",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	require.NoError(t, memStore.CreateRuntimeBroker(ctx, broker))
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+
+	agent := &store.Agent{
+		ID:              tid("agent-raw-backstop-plain"),
+		Name:            "test-agent-plain",
+		Slug:            "test-agent-plain",
+		RuntimeBrokerID: broker.ID,
+	}
+
+	err := dispatcher.DispatchAgentMessage(ctx, agent, "hello", false, &messages.StructuredMessage{Plain: true})
+	require.NoError(t, err)
+	if !mockClient.messageCalled {
+		t.Error("expected MessageAgent to be called for a Plain (non-raw) structuredMsg")
 	}
 }
 
@@ -5781,61 +5868,6 @@ func TestDispatchAgentCreate_IncludesHubName(t *testing.T) {
 
 func intPtr(i int) *int { return &i }
 
-// TestHTTPAgentDispatcher_TZInjection_ProfileTimezone verifies that the
-// profile's first-class timezone field is injected as TZ into the agent's
-// resolved env, taking precedence over existing TZ values from config env.
-func TestHTTPAgentDispatcher_TZInjection_ProfileTimezone(t *testing.T) {
-	ctx := context.Background()
-	memStore := createTestStore(t)
-
-	broker := &store.RuntimeBroker{
-		ID:       tid("tz-broker-1"),
-		Name:     "tz-host",
-		Slug:     "tz-host",
-		Endpoint: "http://localhost:9800",
-		Status:   store.BrokerStatusOnline,
-	}
-	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
-		t.Fatalf("create broker: %v", err)
-	}
-
-	mockClient := &mockRuntimeBrokerClient{}
-	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
-
-	// Profile timezone provider returns "America/Los_Angeles" for profile "pacific".
-	dispatcher.SetProfileTimezoneProvider(func(name string) string {
-		if name == "pacific" {
-			return "America/Los_Angeles"
-		}
-		return ""
-	})
-
-	agent := &store.Agent{
-		ID:              tid("tz-agent-1"),
-		Name:            "tz-agent",
-		Slug:            "tz-agent",
-		ProjectID:       tid("project-1"),
-		RuntimeBrokerID: tid("tz-broker-1"),
-		AppliedConfig: &store.AgentAppliedConfig{
-			HarnessConfig: "claude",
-			Task:          "test timezone",
-			Profile:       "pacific",
-			// Pre-existing TZ from config env should be overridden.
-			Env: map[string]string{"TZ": "UTC"},
-		},
-	}
-
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
-	if err != nil {
-		t.Fatalf("DispatchAgentCreate failed: %v", err)
-	}
-
-	env := mockClient.lastCreateReq.ResolvedEnv
-	if got := env["TZ"]; got != "America/Los_Angeles" {
-		t.Errorf("TZ = %q, want America/Los_Angeles (profile timezone should win)", got)
-	}
-}
-
 // TestHTTPAgentDispatcher_TZInjection_HubDefault verifies that the hub's
 // default_timezone is used as a fallback when neither the profile timezone
 // nor config env TZ is set.
@@ -5886,6 +5918,122 @@ func TestHTTPAgentDispatcher_TZInjection_HubDefault(t *testing.T) {
 	env := mockClient.lastCreateReq.ResolvedEnv
 	if got := env["TZ"]; got != "America/New_York" {
 		t.Errorf("TZ = %q, want America/New_York (hub default should apply)", got)
+	}
+}
+
+// TestHTTPAgentDispatcher_TZInjection_HubDefault_FileMode is the end-to-end
+// regression test guarding against a default_timezone saved through a
+// file-mode admin PUT never reaching agent create, because
+// BuildLayer1SnapshotFromFile did not populate Layer1Snapshot.DefaultTimezone
+// from GlobalConfig. Unlike
+// TestHTTPAgentDispatcher_TZInjection_HubDefault above (which hands the
+// dispatcher an arbitrary closure as the hub-agent-defaults provider), this
+// wires the dispatcher to the real (*Server).hubAgentDefaults method — the
+// same accessor server.go's NewServer wiring uses
+// (dispatcher.SetHubAgentDefaultsProvider(s.hubAgentDefaults)) — and drives
+// it through an actual file-mode PUT, so it proves the fix end to end rather
+// than just the dispatcher's own injection logic in isolation.
+func TestHTTPAgentDispatcher_TZInjection_HubDefault_FileMode(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("tz-broker-filemode"),
+		Name:     "tz-host-filemode",
+		Slug:     "tz-host-filemode",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("create broker: %v", err)
+	}
+
+	// A bare &Server{} (no OperationalSettings/postgres) takes the file-mode
+	// path in handleAdminServerConfig. HOME is pointed at one temp dir for
+	// the whole test, set up directly (not via fileModePutServerConfig,
+	// which repoints HOME at a fresh temp dir on every call) so the clear-it
+	// PUT below lands in the same settings.yaml as the set-it PUT above it.
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	if err := os.MkdirAll(filepath.Join(tmpHome, ".scion"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	putServerConfig := func(srv *Server, body string) *httptest.ResponseRecorder {
+		rr := httptest.NewRecorder()
+		srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body))
+		return rr
+	}
+
+	srv := &Server{}
+	rr := putServerConfig(srv, `{"server":{"hub":{"port":9810}},"default_timezone":"Asia/Tokyo"}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("file-mode PUT default_timezone: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if got := srv.hubAgentDefaults().DefaultTimezone; got != "Asia/Tokyo" {
+		t.Fatalf("hubAgentDefaults().DefaultTimezone = %q after file-mode PUT, want Asia/Tokyo", got)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	dispatcher.SetProfileTimezoneProvider(func(name string) string { return "" })
+	// The real accessor, not a test closure — this is what makes the test
+	// prove the GlobalConfig/BuildLayer1SnapshotFromFile fix, not just the
+	// dispatcher's pre-existing injection logic.
+	dispatcher.SetHubAgentDefaultsProvider(srv.hubAgentDefaults)
+
+	agent := &store.Agent{
+		ID:              tid("tz-agent-filemode"),
+		Name:            "tz-agent-filemode",
+		Slug:            "tz-agent-filemode",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("tz-broker-filemode"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+			Task:          "test file-mode hub default tz",
+			Profile:       "no-tz",
+		},
+	}
+
+	if err := dispatcher.DispatchAgentCreate(ctx, agent); err != nil {
+		t.Fatalf("DispatchAgentCreate failed: %v", err)
+	}
+
+	env := mockClient.lastCreateReq.ResolvedEnv
+	if got := env["TZ"]; got != "Asia/Tokyo" {
+		t.Errorf("TZ = %q, want Asia/Tokyo (file-mode hub default should reach dispatch)", got)
+	}
+
+	// Clearing it (PUT "") must clear hubAgentDefaults() too, not just leave
+	// the old value cached.
+	rr = putServerConfig(srv, `{"server":{"hub":{"port":9810}},"default_timezone":""}`)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("file-mode PUT to clear default_timezone: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if got := srv.hubAgentDefaults().DefaultTimezone; got != "" {
+		t.Errorf("hubAgentDefaults().DefaultTimezone = %q after clearing, want \"\"", got)
+	}
+
+	// Re-dispatch: the handler test above already covers hubAgentDefaults()
+	// going back to "" after a clear, but that alone doesn't show dispatch
+	// itself stops injecting TZ.
+	agent2 := &store.Agent{
+		ID:              tid("tz-agent-filemode-cleared"),
+		Name:            "tz-agent-filemode-cleared",
+		Slug:            "tz-agent-filemode-cleared",
+		ProjectID:       tid("project-1"),
+		RuntimeBrokerID: tid("tz-broker-filemode"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+			Task:          "test file-mode hub default tz after clear",
+			Profile:       "no-tz",
+		},
+	}
+	if err := dispatcher.DispatchAgentCreate(ctx, agent2); err != nil {
+		t.Fatalf("DispatchAgentCreate (after clear) failed: %v", err)
+	}
+	if _, ok := mockClient.lastCreateReq.ResolvedEnv["TZ"]; ok {
+		t.Errorf("TZ present in ResolvedEnv after clearing default_timezone, want absent: %q",
+			mockClient.lastCreateReq.ResolvedEnv["TZ"])
 	}
 }
 
@@ -5972,4 +6120,130 @@ func TestHTTPAgentDispatcher_DispatchAgentDelete_ForwardsLinkedProjectPath(t *te
 	if want := "&projectPath=" + url.QueryEscape("/home/user/linked/.scion"); mockClient.lastDeleteProjectPathQuery != want {
 		t.Errorf("projectPath query = %q, want %q", mockClient.lastDeleteProjectPathQuery, want)
 	}
+}
+
+// TestHTTPAgentDispatcher_BuildStartEnv_StartAndRestartProduceIdenticalEnv is
+// the P2a-0 golden comparison test (tz task #14): DispatchAgentStart and
+// DispatchAgentRestart now both call the shared buildStartEnv, so for the
+// same agent they must resolve to byte-identical env maps. The fixture
+// agent covers config env, storage env at project and user scope (with an
+// as_needed storage var that must NOT be injected on either path, since
+// buildStartEnv only merges InjectionModeAlways vars), and a type-aware
+// environment secret (plus a non-environment secret that must not leak into
+// the env map on either path).
+func TestHTTPAgentDispatcher_BuildStartEnv_StartAndRestartProduceIdenticalEnv(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	project := &store.Project{
+		ID:   tid("project-golden"),
+		Name: "golden-project",
+		Slug: "golden-project",
+	}
+	if err := memStore.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+
+	broker := &store.RuntimeBroker{
+		ID:       tid("broker-golden"),
+		Name:     "golden-broker",
+		Slug:     "golden-broker",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+
+	// Project-scope storage var, always injected.
+	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
+		ID:            tid("ev-golden-project"),
+		Key:           "PROJECT_VAR",
+		Value:         "project-value",
+		Scope:         "project",
+		ScopeID:       tid("project-golden"),
+		InjectionMode: store.InjectionModeAlways,
+	}); err != nil {
+		t.Fatalf("failed to set project env var: %v", err)
+	}
+
+	// User-scope storage var, always injected.
+	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
+		ID:            tid("ev-golden-user"),
+		Key:           "USER_VAR",
+		Value:         "user-value",
+		Scope:         "user",
+		ScopeID:       "golden-owner",
+		InjectionMode: store.InjectionModeAlways,
+	}); err != nil {
+		t.Fatalf("failed to set user env var: %v", err)
+	}
+
+	// Project-scope storage var marked as_needed: must not be injected by
+	// buildStartEnv on either path (it is only resolved via env-gather).
+	if err := memStore.CreateEnvVar(ctx, &store.EnvVar{
+		ID:            tid("ev-golden-asneeded"),
+		Key:           "AS_NEEDED_VAR",
+		Value:         "should-not-appear",
+		Scope:         "project",
+		ScopeID:       tid("project-golden"),
+		InjectionMode: store.InjectionModeAsNeeded,
+	}); err != nil {
+		t.Fatalf("failed to set as_needed env var: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	dispatcher.SetSecretBackend(&mockSecretBackend{
+		secrets: []secret.SecretWithValue{
+			{SecretMeta: secret.SecretMeta{Name: "CLAUDE_AUTH", SecretType: "file", Target: "~/.claude/.credentials.json"}, Value: "file-secret-data"},
+			{SecretMeta: secret.SecretMeta{Name: "SECRET_API_KEY", SecretType: "environment", Target: "SECRET_API_KEY"}, Value: "secret-value"},
+		},
+	})
+
+	agent := &store.Agent{
+		ID:              tid("agent-golden"),
+		Name:            "golden-agent",
+		Slug:            "golden-agent",
+		ProjectID:       tid("project-golden"),
+		OwnerID:         "golden-owner",
+		RuntimeBrokerID: tid("broker-golden"),
+		AppliedConfig: &store.AgentAppliedConfig{
+			HarnessConfig: "claude",
+			Env:           map[string]string{"CONFIG_VAR": "config-value"},
+		},
+	}
+
+	if err := dispatcher.DispatchAgentStart(ctx, agent, "", false); err != nil {
+		t.Fatalf("DispatchAgentStart failed: %v", err)
+	}
+	if !mockClient.startCalled {
+		t.Fatal("expected StartAgent to be called")
+	}
+	startEnv := mockClient.lastResolvedEnv
+
+	if err := dispatcher.DispatchAgentRestart(ctx, agent); err != nil {
+		t.Fatalf("DispatchAgentRestart failed: %v", err)
+	}
+	if !mockClient.restartCalled {
+		t.Fatal("expected RestartAgent to be called")
+	}
+	restartEnv := mockClient.lastRestartResolvedEnv
+
+	// Sanity: the fixture actually exercises config, storage, secret and
+	// as_needed vars, on both paths.
+	for _, env := range []map[string]string{startEnv, restartEnv} {
+		assert.Equal(t, "config-value", env["CONFIG_VAR"])
+		assert.Equal(t, "project-value", env["PROJECT_VAR"])
+		assert.Equal(t, "user-value", env["USER_VAR"])
+		assert.Equal(t, "secret-value", env["SECRET_API_KEY"])
+		_, hasAsNeeded := env["AS_NEEDED_VAR"]
+		assert.False(t, hasAsNeeded, "as_needed var must not be injected")
+		_, hasFileSecret := env["CLAUDE_AUTH"]
+		assert.False(t, hasFileSecret, "non-environment secret must not be injected into env")
+	}
+
+	// The golden assertion: start and restart assemble byte-identical env,
+	// because both now go through the single shared buildStartEnv.
+	assert.Equal(t, startEnv, restartEnv, "DispatchAgentStart and DispatchAgentRestart must resolve identical env for the same agent")
 }

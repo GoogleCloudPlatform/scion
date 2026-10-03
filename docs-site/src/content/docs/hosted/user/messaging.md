@@ -36,7 +36,10 @@ Scion features an interactive, top-level **Native Web Chat** interface in the We
 - **Markdown & Rich Rendering**: Chat messages support fully-featured real-time **Markdown rendering** inside chat bubbles (including syntax-highlighted code fences, tables, and nested lists) for highly readable development chats.
 - **GitHub References**: `owner/repo#N` references in a message automatically link to the corresponding GitHub issue or pull request.
 - **Clickable File Paths**: File paths starting with `/workspace/...` or `/scion-volumes/...` render as interactive links. Clicking them immediately opens an on-demand file viewer dialog, fetching the current file content directly from the existing workspace and shared-directory APIs without leaving the chat context.
-- **iOS & Platform Tailoring**: The layout incorporates specific styling adjustments for iOS devices, delivering polished rendering and input behavior under Safari and other mobile browsers.
+- **Clickable `gs://` Links**: A `gs://bucket/object` reference posted by an agent likewise opens the same on-demand viewer, fetching the object through the sending agent's own assigned GCP identity. See [gs:// links in chat](/scion/hosted/single-node/hub-server/#gs-links-in-chat) for what links, which identity is used, size limits, and error behavior.
+- **iOS & Platform Tailoring**: The layout incorporates specific styling adjustments for iOS devices, delivering polished rendering and input behavior under Safari and other mobile browsers. Inputs use a 16px font so iOS does not zoom in on focus, and buttons and rail entries have 44px touch targets.
+- **Touch Menus & Bottom Action Sheets**: On touch screens, a long-press (about half a second) on a message, thread, space or member opens the same menu that right-click opens on desktop; iOS never sends a right-click for a long-press. At 768px wide or narrower, every chat menu opens as a bottom action sheet instead of a popup.
+- **Install as an App**: The web UI ships an app logo, PWA icons and a web app manifest, so it can be added to a phone's home screen with its own icon.
 - **Config Toggle**: Top-level native chat can be turned on or off globally by administrators using a single configuration key (`web.native_chat` feature flag) or via the Admin interface.
 
 ---
@@ -47,20 +50,23 @@ The native web chat includes a complete suite of collaboration and developer pro
 
 #### 1. Message Context Menu
 Right-clicking a message (on desktop) or tapping it (on touch devices without hover) opens a contextual **context menu** providing several per-message actions. On touch devices, taps on links, buttons, mentions, and reply previews keep their normal behavior:
-- **Reply / Quote**: Quote a previous message with full backend support for reply-threading, maintaining clear context in fast-moving development discussions.
+- **Reply / Quote**: Quote a previous message with full backend support for reply-threading, maintaining clear context in fast-moving development discussions. Choosing **Reply** moves focus to the composer so you can start typing immediately.
 - **Edit / Delete**: Edit or delete your own messages.
 - **Copy Permalink**: Generate a direct link to any message in the thread.
+- **Open terminal / Open in graph**: On a message from an agent, open that agent's terminal or jump to it in the lineage graph. These act on the message's author, not the thread's default agent. **Open terminal** appears only when you can attach to that agent.
 
 #### 2. Advanced Organization
 - **Thread Pinning**: Pin critical threads to the top of the thread rail for easy access.
+- **Mark Unread**: Right-click a thread in the thread rail, or a member in the members sidebar (for an existing DM with messages), and choose **Mark unread** to restore its unread marker. The change syncs to your other open tabs.
 - **Conversation Muting**: Mute busy threads or spaces to suppress notifications while keeping the discussion active.
 - **Thread Drag-and-Drop Reorder**: Reorder threads within the rail by dragging and dropping them (native HTML5 drag API). Organize related threads into named **collapsible groups** that you can expand or collapse to manage long thread lists. Group membership, ordering and each group's collapsed or expanded state are persisted server-side via your user preferences.
+- **Rail Sort**: The thread rail's **Sort** menu offers **Recent activity**, **Alphabetical**, and **Custom**. **Recent activity** and **Alphabetical** order both the spaces and the threads within each space, and choosing either discards any custom thread order. **Custom** applies to space order. Dragging a space switches the rail to **Custom**, and dragging a thread saves a custom thread order for that space only.
+- **Unread Filter**: Switch the rail to **Unread** to show only spaces with unread messages or mentions, and, inside those spaces, only unread threads. Muted threads never count as unread. The conversation you have open stays visible, together with its space, even after you have read it.
 - **Space Emoji Icons**: Assign optional emoji icons to spaces, stored in project annotations, for quick visual identification in the thread rail.
 - **Layout Density**: Choose between **Dense** and **Comfortable** layout modes via the density toggle. Dense mode reduces whitespace for maximum information density; Comfortable mode provides more breathing room for extended reading.
 
 #### 3. High-Density Developer Utilities
-- **Cmd/Ctrl-K Conversation Switcher**: Trigger a keyboard-driven switcher to jump between spaces, threads, and DMs instantly without leaving your keyboard.
-- **Quick Command Palette** *(rollout)*: When the `web.native_chat_palette` feature flag is enabled (it is off by default and requires native chat v2), Cmd/Ctrl-K opens a grouped, fuzzy-matched palette in place of the flat switcher. Results are grouped into **Agents**, **Threads**, **People** and **Recent Files**. Choosing an agent opens your DM with it, including peers you have not messaged before; choosing a recent file opens it in the file viewer. Use **Tab** / **Shift+Tab** to jump between groups, the arrow keys to move within the results, **Enter** to open and **Esc** to close. To try it in your own browser, set the `localStorage` key `scion:feature:web.native_chat_palette` to `true`.
+- **Quick Command Palette**: On the chat page, press Cmd/Ctrl-K to open a grouped, fuzzy-matched palette for jumping to any thread or DM, or opening a recent file, without leaving your keyboard. Results are grouped into **Agents**, **Threads**, **People** and **Documents**; threads also match their space's name, and **Documents** lists the files (attachments and detected file paths) that have most recently appeared in your chats. Choosing an agent opens your DM with it, including peers you have not messaged before; choosing a document opens it in a preview dialog over the current conversation, which is left as it was (files that cannot be shown offer a **Download** button instead). Use **Tab** / **Shift+Tab** to jump between groups, the arrow keys to move within the results, **Enter** to open and **Esc** to close. A button in the chat header also opens the same palette by tap or click, which is especially useful on touch screens, where the keyboard shortcut isn't available.
 - **Jump-to-Message from Search**: Clicking a search result automatically scrolls to the target message, even when it falls outside the currently loaded message buffer. The target message receives a highlight-flash animation, and a "Jump to latest" button appears to return to the live message stream.
 - **Unread Divider with Watermark**: An unread indicator bar automatically segments new messages since your last visit, including a watermark to ensure you never miss a transition. A thread with unread messages opens scrolled to the **New messages** divider rather than to the bottom.
 - **Day Separators**: Messages, including inter-agent messages, are split by day with the same date separator used throughout the thread.
@@ -71,7 +77,7 @@ Right-clicking a message (on desktop) or tapping it (on touch devices without ho
   - **Print / Save as PDF** for offline review.
   - **Copy to Clipboard** (HTML + plain text) for quick pasting into other tools.
   All exported content is HTML-escaped for safe rendering.
-- **Send-to-Agent Context & Slash Commands**: Fast-track your workflow with slash commands (e.g. `/start`, `/help`) and easily forward snippets or whole discussions directly to your agents as contextual guidance.
+- **Send-to-Agent Context & Slash Commands**: Fast-track your workflow with slash commands and easily forward snippets or whole discussions directly to your agents as contextual guidance. The built-in commands are `/status` (list the project's agents and their state), `/spawn <template> [name]` (create an agent), `/stop <agent>` (stop a running agent; it is not deleted), `/default <agent|clear>`, `/clear` and `/help`. In a DM with an agent, `/status`, `/spawn` and `/stop` act on that agent's project.
 
 ---
 
@@ -192,7 +198,7 @@ scion message --non-interactive @reviewer "PR #42 is ready for review.\n\nBranch
 ### Related Commands
 
 - **`scion broadcast`**: Send a message to all agents in the current project, or use `--all` for a global broadcast. The `--broadcast` and `--all` flags on `scion message` have been removed; use this command instead.
-- **`scion keys`**: Send raw keystrokes to an agent's tmux terminal (e.g., `scion keys editor "ENTER"`), with no envelope and no automatic Enter. Useful for unblocking interactive prompts. Works for Hub-managed agents as well as local ones. When run by an agent, it can only target agents in the agent's own project — cross-project targets are refused; a human operator using `--project` can still target other projects. This replaces the old `--raw` flag on `scion message`.
+- **`scion keys`**: Send literal terminal input to an agent's tmux session (e.g., `scion keys editor "Enter"`, as a separate call from `scion keys editor "Escape"`), with no envelope and no automatic Enter. Useful for unblocking interactive prompts. Works for container-backed agents in Hub and local mode; not supported for managed-runtime agents (see [Managed Agents](/scion/hosted/single-node/managed-agents/#limitations)). When run by an agent, it can only target agents in the agent's own project — cross-project targets are refused, by the CLI and the Hub alike; a human operator using `--project` can target other projects, in Hub mode with the same authority as `scion attach` on the target. Local mode has no Hub authorization. In Hub mode it is authorized like terminal attach rather than messaging — message mode does not gate it — and requires, for an agent caller, a live attach relationship on the target in addition to shared project membership (see [CLI Reference](/scion/reference/cli/#scion-keys)). There is no key-sequence syntax: issue one `scion keys` call per key press. This replaces the deprecated `--raw` flag on `scion message`, kept only as a migration alias.
 
 ### Conversation Management
 
@@ -375,6 +381,7 @@ Scion maintains different limits depending on the recipient type:
   `validation_error: message exceeds 2000 character limit`
   * *Tip*: If you have a long message or log to send to a user, split it into multiple messages under 1,800 characters, or write the full content to a shared scratchpad file and send the filepath.
 * **Agent-to-Agent Messages**: **No enforced length cap in code**. You can send larger payloads safely between agents.
+* **Large-DM offload (opt-in)**: A Hub administrator can set `offload_threshold_runes` in the Hub messaging settings (`PUT /api/v1/admin/messaging`). When an agent-recipient DM body is longer than the threshold, the agent's terminal receives a short stub instead: the body size, a preview, and one command to fetch the full body (for example, `scion conversation get-message conv:<conversation-id> <message-id> --body`). The stored message, the Web Dashboard, and other observers always keep the full body. Raw and plain messages are never offloaded. The default threshold is `0` (disabled); leave it there until your agent images include a `scion` CLI with that fetch command.
 
 ### 2. Inbound Message Type Discrimination
 

@@ -70,6 +70,7 @@
         "auth": { "$ref": "#/$defs/serverAuth" },
         "oauth": { "$ref": "#/$defs/serverOAuth" },
         "storage": { "$ref": "#/$defs/serverStorage" },
+        "workspace_storage": { "$ref": "#/$defs/serverWorkspaceStorage" },
         "secrets": { "$ref": "#/$defs/serverSecrets" },
         "log_level": {
           "type": "string",
@@ -274,6 +275,19 @@
         }
       },
       "additionalProperties": false
+    },
+    "agent_secrets": {
+      "type": "object",
+      "description": "Hub-level policy for secrets written by agents. Global-only.",
+      "x-scope": "global",
+      "x-since": "1",
+      "properties": {
+        "user_scope_only": {
+          "type": "boolean",
+          "description": "When true, agents may only write user (profile) scope secrets. The hub rejects agent writes at project scope, including harness auth capture. User-originated writes are unaffected. Default false."
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false,
@@ -298,6 +312,20 @@
           "type": "boolean",
           "default": false,
           "description": "Enable GKE-specific features (e.g., Workload Identity)."
+        },
+        "priority_class_name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+          "description": "Kubernetes-runtime-only default PriorityClass name (DNS-1123 subdomain) applied to agent pods using this runtime entry, or the empty string for unset. The PriorityClass must already exist on the cluster; Scion does not create one. An explicit template/agent-config kubernetes.priorityClassName overrides this."
+        },
+        "shared_dir_storage_class": {
+          "type": "string",
+          "description": "Kubernetes only. Default storage class for shared-dir PVCs (must support ReadWriteMany). A profile value wins over this; a template or agent kubernetes.shared_dir_storage_class wins over both."
+        },
+        "shared_dir_size": {
+          "type": "string",
+          "description": "Kubernetes only. Default size per shared-dir PVC (e.g. 10Gi). A profile value wins over this; a template or agent kubernetes.shared_dir_size wins over both."
         }
       },
       "additionalProperties": false
@@ -429,23 +457,49 @@
           "$ref": "#/$defs/harnessNoAuthConfig",
           "description": "Behavior when an agent starts without credentials (NoAuth mode)."
         },
-        "thinking_budget_map": {
-          "type": "object",
-          "additionalProperties": { "type": "integer" },
-          "description": "Maps model identifiers to their thinking-budget token limits."
-        },
-        "thinking_budget_flag": {
-          "type": "string",
-          "description": "CLI flag name used to pass the thinking budget to the harness (e.g., '--thinking-budget')."
-        },
-        "thinking_budget_config_key": {
-          "type": "string",
-          "description": "Harness-native config key used to set the thinking budget in a config file."
+        "thinking": {
+          "$ref": "#/$defs/harnessThinking",
+          "description": "Maps the canonical 0-100 thinking level (SCION_THINKING_LEVEL) to harness-native values. Applied in-container by scion_harness.resolve_thinking."
         },
         "dialect": {
           "type": "object",
           "description": "Optional hook dialect metadata.",
           "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "harnessThinking": {
+      "type": "object",
+      "required": ["levels"],
+      "properties": {
+        "levels": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Ordered by strictly ascending max. A level L (0-100) maps to the value of the first entry whose max >= L. The last entry must have max: 100.",
+          "items": {
+            "type": "object",
+            "required": ["max", "value"],
+            "properties": {
+              "max": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100,
+                "description": "Inclusive upper bound of the thinking level range mapped to value."
+              },
+              "value": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Harness-native thinking value (e.g. low, medium, high)."
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "default": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Value emitted when SCION_THINKING_LEVEL is unset, blank or not an integer. Omit to emit nothing so the CLI's own default applies."
         }
       },
       "additionalProperties": false
@@ -725,6 +779,14 @@
           "type": "array",
           "items": { "$ref": "#/$defs/requiredSecret" },
           "description": "Required secrets for agents created under this profile."
+        },
+        "shared_dir_storage_class": {
+          "type": "string",
+          "description": "Kubernetes only. Default storage class for shared-dir PVCs created under this profile (must support ReadWriteMany). Wins over the runtime entry's value; a template or agent kubernetes.shared_dir_storage_class wins over this."
+        },
+        "shared_dir_size": {
+          "type": "string",
+          "description": "Kubernetes only. Default size per shared-dir PVC under this profile (e.g. 10Gi). Wins over the runtime entry's value; a template or agent kubernetes.shared_dir_size wins over this."
         }
       },
       "additionalProperties": false
@@ -851,6 +913,30 @@
           "type": "string",
           "description": "Duration before marking agents as stalled (e.g. '5m', '10m', '30m').",
           "x-env-var": "SCION_SERVER_HUB_STALLED_THRESHOLD",
+          "x-since": "1"
+        },
+        "async_agent_launch": {
+          "type": "boolean",
+          "description": "Reserved: no create path reads this yet, so setting it has no effect until the async dispatch path lands. Once live: the non-blocking agent create kill switch, off by default; a launch is non-blocking only when this is on AND the client request also opts in (acceptAsyncLaunch). Restart required to change.",
+          "x-env-var": "SCION_SERVER_HUB_ASYNCAGENTLAUNCH",
+          "x-since": "1"
+        },
+        "launch_timeout": {
+          "type": "string",
+          "description": "Reserved: not yet read by any create path. Once live: the whole-launch budget for an opted-in launch, from acceptance to a terminal Hub state (e.g. '5m'). Below 30s is rejected and the default is used, since the broker's fixed 20s abort margin would leave no time for a launch to run. Restart required to change.",
+          "x-env-var": "SCION_SERVER_HUB_LAUNCHTIMEOUT",
+          "x-since": "1"
+        },
+        "launch_keepalive_seconds": {
+          "type": "integer",
+          "description": "Broker keepalive interval, in seconds. Today it sets only the reaper's staleness window (8x this value); it will also be sent to the broker once the async dispatch path lands. Restart required to change.",
+          "x-env-var": "SCION_SERVER_HUB_LAUNCHKEEPALIVESECONDS",
+          "x-since": "1"
+        },
+        "missing_agent_grace": {
+          "type": "string",
+          "description": "How long a running agent must be absent from its runtime broker's complete heartbeat inventory before the Hub marks it phase 'error' with exit reason 'container_missing' (an existing preempted or evicted exit reason is kept) (e.g. '3m'; default '3m', minimum '1m').",
+          "x-env-var": "SCION_SERVER_HUB_MISSINGAGENTGRACE",
           "x-since": "1"
         }
       }
@@ -1001,6 +1087,55 @@
         "provider": { "type": "string", "enum": ["local", "gcs"], "default": "local", "x-env-var": "SCION_SERVER_STORAGE_PROVIDER" },
         "bucket": { "type": "string", "description": "GCS bucket name.", "x-env-var": "SCION_SERVER_STORAGE_BUCKET" },
         "local_path": { "type": "string", "x-env-var": "SCION_SERVER_STORAGE_LOCALPATH" }
+      }
+    },
+    "serverWorkspaceStorage": {
+      "type": "object",
+      "description": "Workspace storage backend for agent workspaces. Global-only, Layer-0 (restart to apply).",
+      "x-since": "1",
+      "properties": {
+        "backend": { "type": "string", "enum": ["local", "nfs", "cloudrun-volume", "gke-shared-volume"], "default": "local" },
+        "nfs": { "$ref": "#/$defs/serverWorkspaceStorageNFS" },
+        "cloudrun_volume": {
+          "type": "object",
+          "properties": {
+            "volume_name": { "type": "string" },
+            "subpath_root": { "type": "string", "default": "projects" }
+          }
+        },
+        "gke_shared_volume": {
+          "type": "object",
+          "properties": {
+            "volume_name": { "type": "string" },
+            "pv_claim_name": { "type": "string" },
+            "subpath_root": { "type": "string", "default": "projects" }
+          }
+        }
+      }
+    },
+    "serverWorkspaceStorageNFS": {
+      "type": "object",
+      "description": "NFS workspace storage settings, used when workspace_storage.backend is nfs.",
+      "properties": {
+        "mount_root": { "type": "string", "description": "Host directory under which each share is mounted, at <mount_root>/<share id>." },
+        "mount_options": { "type": "string", "default": "vers=3,hard,nconnect=4,_netdev" },
+        "auto_mount": { "type": "boolean", "default": false, "description": "When true, a Runtime Broker mounts each share itself at startup and before NFS-backed dispatches (requires root). When false, the mounts are provided externally and the broker only checks them read-only.", "x-since": "1" },
+        "uid": { "type": "integer", "default": 1000 },
+        "gid": { "type": "integer", "default": 1000 },
+        "storage_class": { "type": "string" },
+        "subpath_root": { "type": "string", "default": "projects" },
+        "shares": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "server": { "type": "string" },
+              "export": { "type": "string" },
+              "pv_name": { "type": "string" }
+            }
+          }
+        }
       }
     },
     "serverSecrets": {

@@ -19,6 +19,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +35,7 @@ import (
 	"github.com/knadh/koanf/providers/rawbytes"
 	"github.com/knadh/koanf/v2"
 	yamlv3 "gopkg.in/yaml.v3"
+	"k8s.io/apimachinery/pkg/api/resource"
 )
 
 // ResolveHarnessConfig looks up a named harness config and merges profile-level overrides.
@@ -143,6 +147,118 @@ func (vs *VersionedSettings) ResolveRuntime(profileName string) (V1RuntimeConfig
 	}
 
 	return rtConfig, runtimeType, nil
+}
+
+// missingSchemaVersionWarning is emitted when a settings file is loaded as v1
+// only because its runtime entries use v1-only keys (v1RuntimeIndicatorKeys).
+var missingSchemaVersionWarning = `settings.yaml contains v1 runtime fields (` + strings.Join(v1RuntimeIndicatorKeys, ", ") + `) but is missing 'schema_version: "1"'; add it as the first line to silence this warning`
+
+// ResolveSharedDirDefaults returns the settings-level Kubernetes shared-dir
+// PVC defaults (storage class and size) for a profile. Each field is
+// resolved independently: the profile's value wins, otherwise the value on
+// the profile's runtime entry is used. Empty means "not set in settings".
+// If profileName is empty, ActiveProfile is used. An unknown profile
+// yields empty values; a profile naming a missing runtime entry yields the
+// profile's own values only.
+//
+// These are defaults only. A template's or agent's kubernetes block
+// (api.KubernetesConfig.SharedDirStorageClass / SharedDirSize) wins over
+// both; see ApplySharedDirDefaults.
+func (vs *VersionedSettings) ResolveSharedDirDefaults(profileName string) (storageClass, size string) {
+	storageClass, size, _ = vs.ResolveSharedDirDefaultsWithSource(profileName)
+	return storageClass, size
+}
+
+// ResolveSharedDirDefaultsWithSource is ResolveSharedDirDefaults that also
+// returns the settings key the size came from
+// ("profiles.NAME.shared_dir_size" or "runtimes.NAME.shared_dir_size"), so
+// an error about the value can name where it is set. sizeKey is empty when
+// size is empty.
+func (vs *VersionedSettings) ResolveSharedDirDefaultsWithSource(profileName string) (storageClass, size, sizeKey string) {
+	if vs == nil {
+		return "", "", ""
+	}
+	if profileName == "" {
+		profileName = vs.ActiveProfile
+	}
+	profile, ok := vs.Profiles[profileName]
+	if !ok {
+		return "", "", ""
+	}
+	storageClass, size = profile.SharedDirStorageClass, profile.SharedDirSize
+	if size != "" {
+		sizeKey = "profiles." + profileName + ".shared_dir_size"
+	}
+	if rt, ok := vs.Runtimes[profile.Runtime]; ok {
+		if storageClass == "" {
+			storageClass = rt.SharedDirStorageClass
+		}
+		if size == "" && rt.SharedDirSize != "" {
+			size = rt.SharedDirSize
+			sizeKey = "runtimes." + profile.Runtime + ".shared_dir_size"
+		}
+	}
+	return storageClass, size, sizeKey
+}
+
+// ValidateSharedDirSize checks that a shared_dir_size value parses as a
+// positive Kubernetes resource quantity (for example 10Gi or 1Ti). Empty is
+// valid and means "not set".
+func ValidateSharedDirSize(size string) error {
+	if size == "" {
+		return nil
+	}
+	q, err := resource.ParseQuantity(size)
+	if err != nil {
+		return fmt.Errorf("invalid shared_dir_size %q: must be a Kubernetes quantity such as 10Gi or 1Ti", size)
+	}
+	if q.Sign() <= 0 {
+		return fmt.Errorf("invalid shared_dir_size %q: must be a positive Kubernetes quantity such as 10Gi or 1Ti", size)
+	}
+	return nil
+}
+
+// ValidateSharedDirSizes checks shared_dir_size on every runtime and
+// profile entry. Each error's Path names the settings key
+// ("runtimes.NAME.shared_dir_size" / "profiles.NAME.shared_dir_size").
+// Results are sorted by path.
+func ValidateSharedDirSizes(runtimes map[string]V1RuntimeConfig, profiles map[string]V1ProfileConfig) []ValidationError {
+	var errs []ValidationError
+	for name, rt := range runtimes {
+		if err := ValidateSharedDirSize(rt.SharedDirSize); err != nil {
+			errs = append(errs, ValidationError{Path: "runtimes." + name + ".shared_dir_size", Message: err.Error()})
+		}
+	}
+	for name, p := range profiles {
+		if err := ValidateSharedDirSize(p.SharedDirSize); err != nil {
+			errs = append(errs, ValidationError{Path: "profiles." + name + ".shared_dir_size", Message: err.Error()})
+		}
+	}
+	sort.Slice(errs, func(i, j int) bool { return errs[i].Path < errs[j].Path })
+	return errs
+}
+
+// ApplySharedDirDefaults returns base with SharedDirStorageClass and
+// SharedDirSize filled from the given settings defaults where base leaves
+// them empty, so a template's or agent's explicit value always wins. base
+// is never modified; a copy is returned. When both defaults are empty,
+// base is returned unchanged (including nil).
+func ApplySharedDirDefaults(base *api.KubernetesConfig, storageClass, size string) *api.KubernetesConfig {
+	if storageClass == "" && size == "" {
+		return base
+	}
+	out := &api.KubernetesConfig{}
+	if base != nil {
+		cpy := *base
+		out = &cpy
+	}
+	if out.SharedDirStorageClass == "" {
+		out.SharedDirStorageClass = storageClass
+	}
+	if out.SharedDirSize == "" {
+		out.SharedDirSize = size
+	}
+	return out
 }
 
 // GetHubEndpoint returns the Hub endpoint from settings, or empty string if not configured.
@@ -322,6 +438,9 @@ type VersionedSettings struct {
 
 	// Quotas controls hub-level quota enforcement toggles.
 	Quotas *QuotaSettings `json:"quotas,omitempty" yaml:"quotas,omitempty" koanf:"quotas"`
+
+	// AgentSecrets controls hub-level policy for secrets written by agents.
+	AgentSecrets *AgentSecretsSettings `json:"agent_secrets,omitempty" yaml:"agent_secrets,omitempty" koanf:"agent_secrets"`
 }
 
 // AutoExposePortsSettings holds the auto-expose ports configuration.
@@ -334,6 +453,15 @@ type QuotaSettings struct {
 	// EnforceBrokerQuotas controls whether max_agents_per_broker is enforced
 	// on create. Default true (fail-safe) when absent.
 	EnforceBrokerQuotas *bool `json:"enforce_broker_quotas,omitempty" yaml:"enforce_broker_quotas,omitempty" koanf:"enforce_broker_quotas"`
+}
+
+// AgentSecretsSettings holds the hub-level policy for secrets written by
+// agents in settings.yaml.
+type AgentSecretsSettings struct {
+	// UserScopeOnly, when true, restricts agents to writing user (profile)
+	// scope secrets only. Default false (nil is false): agents may write
+	// project scope as they do today.
+	UserScopeOnly *bool `json:"user_scope_only,omitempty" yaml:"user_scope_only,omitempty" koanf:"user_scope_only"`
 }
 
 // ProjectDefaultsSettings holds project creation defaults in settings.yaml.
@@ -605,8 +733,20 @@ type V1ServerHubConfig struct {
 	AutoSuspendStalled *bool `json:"auto_suspend_stalled,omitempty" yaml:"auto_suspend_stalled,omitempty" koanf:"auto_suspend_stalled"`
 	// StalledThreshold is how long before an agent is marked stalled (e.g., "5m", "10m").
 	StalledThreshold string `json:"stalled_threshold,omitempty" yaml:"stalled_threshold,omitempty" koanf:"stalled_threshold"`
+	// MissingAgentGrace is how long a running agent must be absent from its
+	// runtime broker's complete heartbeat inventory before the Hub marks it
+	// as having no container (e.g., "3m"; minimum "1m").
+	MissingAgentGrace string `json:"missing_agent_grace,omitempty" yaml:"missing_agent_grace,omitempty" koanf:"missing_agent_grace"`
 	// DisableLegacyStorageFallback disables legacy un-namespaced storage path fallback.
 	DisableLegacyStorageFallback *bool `json:"disable_legacy_storage_fallback,omitempty" yaml:"disable_legacy_storage_fallback,omitempty" koanf:"disable_legacy_storage_fallback"`
+	// AsyncAgentLaunch is the non-blocking agent create kill switch.
+	AsyncAgentLaunch *bool `json:"async_agent_launch,omitempty" yaml:"async_agent_launch,omitempty" koanf:"async_agent_launch"`
+	// LaunchTimeout is the whole-launch budget for an opted-in launch (e.g., "5m").
+	LaunchTimeout string `json:"launch_timeout,omitempty" yaml:"launch_timeout,omitempty" koanf:"launch_timeout"`
+	// LaunchKeepaliveSeconds is the broker keepalive interval, in seconds.
+	// Today it only sets the reaper's staleness window (8x this value); it
+	// will also be sent to the broker once the async dispatch path lands.
+	LaunchKeepaliveSeconds *int `json:"launch_keepalive_seconds,omitempty" yaml:"launch_keepalive_seconds,omitempty" koanf:"launch_keepalive_seconds"`
 }
 
 // V1BrokerConfig holds Runtime Broker configuration.
@@ -760,6 +900,18 @@ type V1NFSConfig struct {
 	// flock, so v3 is fine for correctness.
 	MountOptions string       `json:"mount_options,omitempty" yaml:"mount_options,omitempty" koanf:"mount_options"`
 	Shares       []V1NFSShare `json:"shares,omitempty" yaml:"shares,omitempty" koanf:"shares"`
+
+	// AutoMount lets a Runtime Broker mount each share itself, at
+	// <MountRoot>/<share.ID>, in the background at startup and again before
+	// each NFS-backed dispatch to a local-container runtime (dispatches to
+	// Kubernetes or Cloud Run never mount). A broker whose default runtime
+	// is Kubernetes or Cloud Run never mounts, even with AutoMount on; it
+	// only verifies. Default false: the operator (or the kubelet, on
+	// Kubernetes) provides the mounts, and the broker only checks them
+	// read-only for /healthz and scion doctor. Mounting requires the broker
+	// to run as root (mount.nfs checks uid 0). Only server.workspace_storage
+	// reads this field; shared_dir_storage ignores it.
+	AutoMount bool `json:"auto_mount,omitempty" yaml:"auto_mount,omitempty" koanf:"auto_mount"`
 
 	// Stable, node-independent ownership for NFS-backed trees.
 	// Default 1000:1000 to converge with the K8s pod UID/GID.
@@ -951,10 +1103,11 @@ var sharedDirStorageIgnoredNFSFields = []struct {
 	{"gid", func(nfs *V1NFSConfig) bool { return nfs.GID != 0 }},
 	{"mount_options", func(nfs *V1NFSConfig) bool { return nfs.MountOptions != "" }},
 	{"storage_class", func(nfs *V1NFSConfig) bool { return nfs.StorageClass != "" }},
+	{"auto_mount", func(nfs *V1NFSConfig) bool { return nfs.AutoMount }},
 }
 
 // IgnoredNFSFields returns the names of the workspace-storage-only NFS
-// fields (uid, gid, mount_options, storage_class) that are set on s but
+// fields (uid, gid, mount_options, storage_class, auto_mount) that are set on s but
 // never used by shared_dir_storage, for a one-time startup warning (Phase 2
 // item 5, design §7 Phase 2: "startup validation warns about ignored
 // fields"). Returns nil if s is nil, s.NFS is nil, or backend isn't "nfs" —
@@ -1136,6 +1289,9 @@ type V1CloudRunSandboxConfig struct {
 }
 
 // V1RuntimeConfig extends RuntimeConfig with a Type field.
+//
+// Env is parsed and round-tripped but not applied to agent containers; no
+// code reads it.
 type V1RuntimeConfig struct {
 	Type              string            `json:"type,omitempty" yaml:"type,omitempty" koanf:"type"`
 	Host              string            `json:"host,omitempty" yaml:"host,omitempty" koanf:"host"`
@@ -1145,6 +1301,19 @@ type V1RuntimeConfig struct {
 	Sync              string            `json:"sync,omitempty" yaml:"sync,omitempty" koanf:"sync"`
 	GKE               bool              `json:"gke,omitempty" yaml:"gke,omitempty" koanf:"gke"`
 	ListAllNamespaces bool              `json:"list_all_namespaces,omitempty" yaml:"list_all_namespaces,omitempty" koanf:"list_all_namespaces"`
+	// PriorityClassName is the Kubernetes-runtime-only default
+	// spec.priorityClassName for agent pods using this runtime entry. Must
+	// name a PriorityClass that already exists on the cluster — Scion does
+	// not create one. Validated as a DNS-1123 subdomain. An explicit
+	// template/agent-config kubernetes.priorityClassName outranks this.
+	PriorityClassName string `json:"priority_class_name,omitempty" yaml:"priority_class_name,omitempty" koanf:"priority_class_name"`
+	// SharedDirStorageClass and SharedDirSize are Kubernetes-only defaults
+	// for the ReadWriteMany PVCs backing project shared dirs. They are the
+	// lowest settings tier: a profile's values win over them, and a
+	// template's or agent's kubernetes block wins over both. See
+	// ResolveSharedDirDefaults.
+	SharedDirStorageClass string `json:"shared_dir_storage_class,omitempty" yaml:"shared_dir_storage_class,omitempty" koanf:"shared_dir_storage_class"`
+	SharedDirSize         string `json:"shared_dir_size,omitempty" yaml:"shared_dir_size,omitempty" koanf:"shared_dir_size"`
 	// CloudRun holds Cloud Run-specific settings when Type is "cloudrun".
 	CloudRun *CloudRunConfig `json:"cloudrun,omitempty" yaml:"cloudrun,omitempty" koanf:"cloudrun"`
 	// CloudRunInstances holds Cloud Run Instances-specific settings when Type is "cloudrun-instances".
@@ -1194,6 +1363,10 @@ type HarnessConfigEntry struct {
 	// model field; the alias is resolved to the concrete name at provision time.
 	ModelAliases map[string]string `json:"model_aliases,omitempty" yaml:"model_aliases,omitempty" koanf:"model_aliases"`
 
+	// Thinking maps the canonical 0-100 thinking level to harness-native values.
+	// Applied in-container by scion_harness.resolve_thinking.
+	Thinking *HarnessThinkingConfig `json:"thinking,omitempty" yaml:"thinking,omitempty" koanf:"thinking"`
+
 	Provisioner       *HarnessProvisionerConfig        `json:"provisioner,omitempty" yaml:"provisioner,omitempty" koanf:"provisioner"`
 	ConfigDir         string                           `json:"config_dir,omitempty" yaml:"config_dir,omitempty" koanf:"config_dir"`
 	SkillsDir         string                           `json:"skills_dir,omitempty" yaml:"skills_dir,omitempty" koanf:"skills_dir"`
@@ -1210,6 +1383,51 @@ type HarnessConfigEntry struct {
 	NoAuthConfig      *HarnessNoAuthConfig             `json:"no_auth,omitempty" yaml:"no_auth,omitempty" koanf:"no_auth"`
 	MCP               *HarnessMCPConfig                `json:"mcp,omitempty" yaml:"mcp,omitempty" koanf:"mcp"`
 	Dialect           map[string]interface{}           `json:"dialect,omitempty" yaml:"dialect,omitempty" koanf:"dialect"`
+}
+
+// HarnessThinkingConfig maps the canonical 0-100 thinking level
+// (SCION_THINKING_LEVEL) to harness-native values. A level L maps to the Value
+// of the first entry in Levels whose Max >= L. Default is emitted when the
+// level is unset or invalid; when empty, nothing is emitted and the harness
+// CLI's own default applies. The mapping is resolved in-container by
+// scion_harness.resolve_thinking; Go only carries and validates it.
+type HarnessThinkingConfig struct {
+	Levels  []HarnessThinkingLevel `json:"levels" yaml:"levels" koanf:"levels"`
+	Default string                 `json:"default,omitempty" yaml:"default,omitempty" koanf:"default"`
+}
+
+// HarnessThinkingLevel is one entry of a HarnessThinkingConfig: Max is the
+// inclusive upper bound (0-100) of the level range that maps to Value.
+type HarnessThinkingLevel struct {
+	Max   int    `json:"max" yaml:"max" koanf:"max"` // no omitempty: 0 is meaningful
+	Value string `json:"value" yaml:"value" koanf:"value"`
+}
+
+// Validate checks the ordering rules the JSON schema cannot express: Levels
+// must be non-empty, each Max must be strictly greater than the previous one,
+// and the last Max must be 100 so every clamped level maps to a value.
+func (t *HarnessThinkingConfig) Validate() error {
+	if t == nil {
+		return nil
+	}
+	if len(t.Levels) == 0 {
+		return fmt.Errorf("thinking.levels must not be empty")
+	}
+	for i, lvl := range t.Levels {
+		if lvl.Max < 0 || lvl.Max > 100 {
+			return fmt.Errorf("thinking.levels[%d].max must be between 0 and 100, got %d", i, lvl.Max)
+		}
+		if lvl.Value == "" {
+			return fmt.Errorf("thinking.levels[%d].value must not be empty", i)
+		}
+		if i > 0 && lvl.Max <= t.Levels[i-1].Max {
+			return fmt.Errorf("thinking.levels[%d].max (%d) must be greater than thinking.levels[%d].max (%d)", i, lvl.Max, i-1, t.Levels[i-1].Max)
+		}
+	}
+	if last := t.Levels[len(t.Levels)-1].Max; last != 100 {
+		return fmt.Errorf("thinking.levels last max must be 100, got %d", last)
+	}
+	return nil
 }
 
 // HarnessProvisionerConfig declares how a harness-config is provisioned.
@@ -1305,6 +1523,12 @@ type V1ProfileConfig struct {
 	// Validated with time.LoadLocation on write. Takes precedence over a raw
 	// TZ entry in the profile's env map and the hub-level default_timezone.
 	Timezone string `json:"timezone,omitempty" yaml:"timezone,omitempty" koanf:"timezone"`
+	// SharedDirStorageClass and SharedDirSize are Kubernetes-only defaults
+	// for shared-dir PVCs created by agents using this profile. They win
+	// over the same keys on the profile's runtime entry and lose to a
+	// template's or agent's kubernetes block. See ResolveSharedDirDefaults.
+	SharedDirStorageClass string `json:"shared_dir_storage_class,omitempty" yaml:"shared_dir_storage_class,omitempty" koanf:"shared_dir_storage_class"`
+	SharedDirSize         string `json:"shared_dir_size,omitempty" yaml:"shared_dir_size,omitempty" koanf:"shared_dir_size"`
 }
 
 // resolveEffectiveProjectPath resolves the effective project path for settings loading.
@@ -1440,11 +1664,45 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 	return settings, nil
 }
 
+// settingsExcludedEnvVars lists SCION_* variables that are never settings
+// overrides: they are consumed directly by another subsystem, and their
+// generic mapped key happens to collide with a struct-typed settings field.
+// Both the versioned and legacy env key mappers drop them via this list so
+// that koanf's Unmarshal never fails just because one of them is present in
+// the process environment.
+var settingsExcludedEnvVars = []string{
+	"SCION_AUTO_EXPOSE_PORTS",
+	"SCION_AUTO_EXPOSE_PORTS_LIST",
+}
+
+// isSettingsExcludedEnv reports whether name is in settingsExcludedEnvVars.
+func isSettingsExcludedEnv(name string) bool {
+	for _, e := range settingsExcludedEnvVars {
+		if e == name {
+			return true
+		}
+	}
+	return false
+}
+
 // versionedEnvKeyMapper maps SCION_* environment variables to versioned settings keys.
 // All keys are snake_case so no camelCase conversion is needed.
 func versionedEnvKeyMapper(s string) string {
 	if mapped, ok := projectkeys.EnvProjectIDConfigKey(s, false); ok {
 		return mapped
+	}
+	if isSettingsExcludedEnv(s) {
+		// SCION_AUTO_EXPOSE_PORTS and SCION_AUTO_EXPOSE_PORTS_LIST are
+		// consumed directly by sciontool's auto-expose scanner
+		// (pkg/sciontool/autoexpose), not read as settings overrides. Left
+		// mapped, the bare key "auto_expose_ports" collides with the
+		// struct-typed AutoExposePorts field and makes koanf's Unmarshal
+		// fail outright whenever the process happens to have that variable
+		// set (e.g. a broker started inside an agent container, which the
+		// hub sets it in). Returning "" makes the env provider drop the
+		// variable entirely, the same idiom used below for a removed
+		// legacy env var and for SCION_OTEL_INSECURE's empty-value case.
+		return ""
 	}
 	if isRemovedLegacyEnv(s) {
 		// SCION_HUB_GROVE_ID is no longer read, not even via the generic
@@ -1490,6 +1748,7 @@ var knownCompoundFields = []string{
 	"require_trusted_proxy_ip",
 	"soft_delete_retain_files",
 	"soft_delete_retention",
+	"missing_agent_grace",
 	"stalled_threshold",
 	"authorized_domains",
 	"platform_auth_sa",
@@ -1784,6 +2043,22 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		if v1.Hub.StalledThreshold != "" {
 			if d, err := time.ParseDuration(v1.Hub.StalledThreshold); err == nil {
 				gc.Hub.StalledThreshold = d
+			}
+		}
+		if v1.Hub.AsyncAgentLaunch != nil {
+			gc.Hub.AsyncAgentLaunch = *v1.Hub.AsyncAgentLaunch
+		}
+		if v1.Hub.LaunchTimeout != "" {
+			if d, err := time.ParseDuration(v1.Hub.LaunchTimeout); err == nil {
+				gc.Hub.LaunchTimeout = d
+			}
+		}
+		if v1.Hub.LaunchKeepaliveSeconds != nil {
+			gc.Hub.LaunchKeepaliveSeconds = *v1.Hub.LaunchKeepaliveSeconds
+		}
+		if v1.Hub.MissingAgentGrace != "" {
+			if d, err := time.ParseDuration(v1.Hub.MissingAgentGrace); err == nil {
+				gc.Hub.MissingAgentGrace = d
 			}
 		}
 		if v1.Hub.DisableLegacyStorageFallback != nil {
@@ -2108,6 +2383,9 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if gc.Hub.StalledThreshold > 0 {
 		v1Hub.StalledThreshold = gc.Hub.StalledThreshold.String()
 	}
+	if gc.Hub.MissingAgentGrace > 0 {
+		v1Hub.MissingAgentGrace = gc.Hub.MissingAgentGrace.String()
+	}
 	if gc.Hub.SoftDeleteRetainFiles {
 		retainFiles := true
 		v1Hub.SoftDeleteRetainFiles = &retainFiles
@@ -2115,6 +2393,17 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if gc.Hub.DisableLegacyStorageFallback {
 		disableLegacy := true
 		v1Hub.DisableLegacyStorageFallback = &disableLegacy
+	}
+	if gc.Hub.AsyncAgentLaunch {
+		asyncLaunch := true
+		v1Hub.AsyncAgentLaunch = &asyncLaunch
+	}
+	if gc.Hub.LaunchTimeout > 0 {
+		v1Hub.LaunchTimeout = gc.Hub.LaunchTimeout.String()
+	}
+	if gc.Hub.LaunchKeepaliveSeconds > 0 {
+		keepalive := gc.Hub.LaunchKeepaliveSeconds
+		v1Hub.LaunchKeepaliveSeconds = &keepalive
 	}
 	v1.Hub = v1Hub
 
@@ -2620,7 +2909,7 @@ func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, er
 		}
 		var warnings []string
 		if missingSchemaVersion {
-			warnings = append(warnings, `settings.yaml contains v1 runtime fields (type, cloudrun, gke, list_all_namespaces) but is missing 'schema_version: "1"'; add it as the first line to silence this warning`)
+			warnings = append(warnings, missingSchemaVersionWarning)
 		}
 		// Apply DB-backed settings overlay (co-located hub+broker mode).
 		// DB values win over file values for runtimes, profiles, harness_configs.
@@ -2842,7 +3131,7 @@ func loadGlobalSettingsOnly(globalDir string) (*VersionedSettings, []string, err
 		}
 		var warnings []string
 		if missingSchemaVersion {
-			warnings = append(warnings, `settings.yaml contains v1 runtime fields (type, cloudrun, gke, list_all_namespaces) but is missing 'schema_version: "1"'; add it as the first line to silence this warning`)
+			warnings = append(warnings, missingSchemaVersionWarning)
 		}
 		return vs, warnings, nil
 	}
@@ -3133,7 +3422,252 @@ func GetVersionedSettingValue(vs *VersionedSettings, key string) (string, error)
 		return "", nil
 	}
 
+	if val, err, handled := getNestedMapSettingValue(vs, key); handled {
+		return val, err
+	}
+
 	return "", fmt.Errorf("unknown or complex setting key: %s", key)
+}
+
+// getNestedMapSettingValue resolves dotted config-get keys of the form
+// "<category>.<name>.<field>" that address a scalar field of a named entry
+// inside the profiles or runtimes maps — e.g. "profiles.local.runtime" or
+// "runtimes.kubernetes.namespace". handled is false when key does not match
+// one of these known-category forms, in which case the caller falls back to
+// its own "unknown key" error.
+//
+// harness_configs is deliberately not supported here even though
+// VersionedSettings has a HarnessConfigs map of the same shape: harness
+// configs are normally resolved from on-disk harness-config directories
+// (LoadHarnessConfigDir / FindHarnessConfigDir, with template/project/global
+// precedence), not merged into this map, so a settings.yaml-only lookup
+// would silently miss the harness configs "scion harness-config" reports.
+// Wiring config get through the same directory-aware resolution is a
+// separate change; use "scion harness-config" to inspect harness configs.
+//
+// A nil vs returns handled=false rather than panicking on vs.Profiles or
+// vs.Runtimes, so the caller's own "unknown key" error fires instead.
+func getNestedMapSettingValue(vs *VersionedSettings, key string) (value string, err error, handled bool) {
+	if vs == nil {
+		return "", nil, false
+	}
+	parts := strings.SplitN(key, ".", 3)
+	if len(parts) != 3 {
+		return "", nil, false
+	}
+	name, field := parts[1], parts[2]
+
+	switch parts[0] {
+	case "profiles":
+		return lookupMapEntryField(vs.Profiles, name, field, key, "profile")
+	case "runtimes":
+		return lookupMapEntryField(vs.Runtimes, name, field, key, "runtime")
+	default:
+		return "", nil, false
+	}
+}
+
+// lookupMapEntryField looks up name in m and, if found, resolves field on
+// the entry via lookupScalarField. label is the human-readable singular name
+// of the map (e.g. "profile") used in error messages; key is the original
+// dotted key, quoted back to the caller so error messages are unambiguous
+// about which lookup failed.
+func lookupMapEntryField[T any](m map[string]T, name, field, key, label string) (value string, err error, handled bool) {
+	entry, ok := m[name]
+	if !ok {
+		return "", fmt.Errorf("unknown or complex setting key: %s (no %s named %q)", key, label, name), true
+	}
+	val, lookupErr := lookupScalarField(entry, field, key, label, name)
+	return val, lookupErr, true
+}
+
+// credentialLikeFieldPattern matches koanf/yaml tag names that look like
+// they hold credential material. lookupScalarField refuses any field whose
+// tag matches, regardless of its Go kind, so that a future scalar field
+// named e.g. "api_key" or "token" on V1ProfileConfig or V1RuntimeConfig is
+// refused by name rather than rendered — see
+// TestLookupScalarFieldRefusesCredentialLikeNames, which proves the refusal
+// fires, and TestScalarFieldsExcludeCredentialLikeNames, a tripwire that
+// fails if a matching scalar field is ever added, forcing a conscious
+// decision about it rather than a silent pass-through.
+//
+// This is name-based coverage only: it protects fields whose tag matches
+// the pattern, not the general case. A scalar field holding credential
+// material under an unmatched name — e.g. "passphrase", "client_cert", or
+// "signing_blob" — would still render in plaintext; nothing here can detect
+// that.
+var credentialLikeFieldPattern = regexp.MustCompile(`(?i)(token|secret|password|passwd|api_?key|credential|_pat$|^pat$|private_?key|ssh_?key|bearer|auth_?header)`)
+
+// lookupScalarField finds the field on struct value v whose koanf (or yaml,
+// as fallback) tag equals the first dot-separated segment of field, and
+// renders it as a config-get string value.
+//
+// Only scalar fields (string, bool, integer, and pointers to those) are
+// supported; structured fields (maps, slices, nested structs) return an
+// error naming the key rather than being silently rendered or partially
+// serialized, since config get has no established rendering for them. A
+// field name matching credentialLikeFieldPattern is refused outright, even
+// if it happens to be a plain scalar. A field parameter containing further
+// dots (e.g. "cloudrun.region") means the caller asked for a path nested
+// below what this lookup supports; that is reported as a "nested paths are
+// not supported" error naming the first segment: as a missing field if it
+// does not resolve, otherwise as a field that has no sub-fields or is not a
+// scalar value.
+func lookupScalarField(v interface{}, field, key, label, name string) (string, error) {
+	head, nested := field, false
+	if idx := strings.IndexByte(field, '.'); idx >= 0 {
+		head, nested = field[:idx], true
+	}
+
+	fv, ok := findFieldByConfigTag(reflect.ValueOf(v), head)
+	if !ok {
+		if nested {
+			return "", fmt.Errorf("unknown or complex setting key: %s (%s %q has no field %q; nested paths are not supported)", key, label, name, head)
+		}
+		return "", fmt.Errorf("unknown or complex setting key: %s (%s %q has no field %q)", key, label, name, head)
+	}
+	if credentialLikeFieldPattern.MatchString(head) {
+		return "", fmt.Errorf("unknown or complex setting key: %s (field %q of %s %q looks like a credential and is not readable via config get)", key, head, label, name)
+	}
+	str, ok := scalarValueString(fv)
+	if nested {
+		if ok {
+			return "", fmt.Errorf("unknown or complex setting key: %s (field %q of %s %q is a scalar value and has no sub-fields; nested paths are not supported)", key, head, label, name)
+		}
+		return "", fmt.Errorf("unknown or complex setting key: %s (field %q of %s %q is not a scalar value; nested paths are not supported)", key, head, label, name)
+	}
+	if !ok {
+		return "", fmt.Errorf("unknown or complex setting key: %s (field %q of %s %q is not a scalar value)", key, field, label, name)
+	}
+	return str, nil
+}
+
+// configTagName returns the config-get field name for struct field f: its
+// koanf tag, falling back to its yaml tag, with any trailing tag options
+// (e.g. ",omitempty") stripped. It returns "" for a field with no koanf or
+// yaml tag, and for one explicitly marked "-" (skip) in either tag — both of
+// which are never valid config-get field names, since findFieldByConfigTag
+// only matches a non-empty name.
+//
+// This is the single source of truth for how a struct field's tag maps to
+// the field name config get resolves: findFieldByConfigTag uses it to find
+// a field by name, and TestScalarFieldsExcludeCredentialLikeNames' tripwire
+// uses it to enumerate the same names, so the two cannot silently diverge —
+// e.g. if this function is later changed to also honor a "json" tag or an
+// ",inline" option, both callers pick that up together.
+// TestConfigTagName exercises the yaml fallback and the "-" skip directly,
+// against a local struct, since no production field takes either path
+// today.
+func configTagName(f reflect.StructField) string {
+	tag := f.Tag.Get("koanf")
+	if tag == "" {
+		tag = f.Tag.Get("yaml")
+	}
+	tag = strings.SplitN(tag, ",", 2)[0]
+	if tag == "-" {
+		return ""
+	}
+	return tag
+}
+
+// findFieldByConfigTag returns the value of the field in struct v whose
+// configTagName (koanf tag, falling back to yaml) matches name exactly. v
+// may be a struct or a (possibly nested) pointer to one; a nil pointer or a
+// non-struct kind returns false rather than panicking, since
+// reflect.Type.NumField panics for non-struct kinds.
+//
+// It does not recurse into anonymous (embedded) struct fields. Neither
+// V1ProfileConfig nor V1RuntimeConfig — the only structs this is used
+// against — embeds another struct today; if one of them gains an
+// inline/squashed embedded field, that field's own fields become
+// unreachable here and lookupScalarField reports "has no field" for them
+// rather than resolving through the embed.
+func findFieldByConfigTag(v reflect.Value, name string) (reflect.Value, bool) {
+	for v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return reflect.Value{}, false
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return reflect.Value{}, false
+	}
+	t := v.Type()
+	for i := 0; i < t.NumField(); i++ {
+		if tag := configTagName(t.Field(i)); tag != "" && tag == name {
+			return v.Field(i), true
+		}
+	}
+	return reflect.Value{}, false
+}
+
+// isScalarKind is the single source of truth for which Go kinds
+// scalarValueString can render: string, bool, or an integer kind. Both
+// branches of scalarValueString — the nil-pointer path and the concrete
+// (non-nil) value path — gate on this function rather than each keeping its
+// own kind list, and the test-only isScalarFieldType (classifying a static
+// struct field type without a value to inspect) also calls it, so all three
+// are provably in agreement: changing what counts as scalar means changing
+// this one function. TestScalarKindAgreesWithScalarValueString checks that
+// agreement for every reflect.Kind from Bool through UnsafePointer (except
+// Pointer itself, which is exercised separately via pointer indirection),
+// not just the ones currently in use, and asserts the expected scalar-ness
+// of each kind independently rather than deriving it from this function.
+func isScalarKind(k reflect.Kind) bool {
+	switch k {
+	case reflect.String, reflect.Bool,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return true
+	default:
+		return false
+	}
+}
+
+// underlyingKind unwraps t through any levels of pointer indirection and
+// returns the final (pointee) kind. Used to classify a nil pointer by its
+// static type — via reflect.Type, which does not require a value to
+// dereference — rather than by a reflect.Value, which cannot be dereferenced
+// once nil.
+func underlyingKind(t reflect.Type) reflect.Kind {
+	for t.Kind() == reflect.Pointer {
+		t = t.Elem()
+	}
+	return t.Kind()
+}
+
+// scalarValueString renders v as a config-get string if it is a scalar kind
+// (string, bool, or integer) or a pointer to one; a nil pointer renders as
+// an empty string only if it points to a scalar kind (e.g. a nil *bool).
+// Maps, slices, and structs — including a nil pointer to a struct, such as
+// an unset V1RuntimeConfig.CloudRun — are reported as not scalar via
+// ok=false; classifying by the pointee's static type (rather than treating
+// every nil pointer as scalar) means a field's scalar-ness does not depend
+// on whether it happens to be set.
+func scalarValueString(v reflect.Value) (s string, ok bool) {
+	for v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return "", isScalarKind(underlyingKind(v.Type()))
+		}
+		v = v.Elem()
+	}
+	if !isScalarKind(v.Kind()) {
+		return "", false
+	}
+	switch v.Kind() {
+	case reflect.String:
+		return v.String(), true
+	case reflect.Bool:
+		return strconv.FormatBool(v.Bool()), true
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		return strconv.FormatInt(v.Int(), 10), true
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return strconv.FormatUint(v.Uint(), 10), true
+	default:
+		// Unreachable: isScalarKind above already rejected every kind not
+		// handled here.
+		return "", false
+	}
 }
 
 // SaveVersionedSettings writes a VersionedSettings struct as YAML to settings.yaml in dir.

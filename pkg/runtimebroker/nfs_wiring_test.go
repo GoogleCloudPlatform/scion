@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
 // TestServer_NFSReconcilerWired_WhenNFSConfigured verifies that the
@@ -96,7 +97,7 @@ func TestServer_HealthIncludesNFS(t *testing.T) {
 		},
 	}
 
-	srv := New(cfg, nil, nil)
+	srv := New(cfg, nil, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
 
 	// Before reconciliation: shares are unreconciled → unhealthy
 	health := srv.GetHealthInfo(context.Background())
@@ -109,8 +110,9 @@ func TestServer_HealthIncludesNFS(t *testing.T) {
 	if nfsCheck == "healthy" {
 		t.Error("expected unhealthy before reconciliation")
 	}
-	if health.Status != "degraded" {
-		t.Errorf("overall status = %q, want degraded (NFS unhealthy before reconciliation)", health.Status)
+	// Pending, and auto_mount off: reported per share only.
+	if health.Status != "healthy" {
+		t.Errorf("overall status = %q, want healthy (NFS state is reported per share only)", health.Status)
 	}
 }
 
@@ -127,47 +129,5 @@ func TestServer_HealthExcludesNFS_WhenLocal(t *testing.T) {
 
 	if _, ok := health.Checks["nfs_mounts"]; ok {
 		t.Error("did not expect nfs_mounts in health checks when NFS is not configured")
-	}
-}
-
-// TestServer_EnsureNFSMountsReady_NilReconciler verifies that the dispatch
-// guard is a no-op when NFS is not configured.
-func TestServer_EnsureNFSMountsReady_NilReconciler(t *testing.T) {
-	srv := New(ServerConfig{Port: 0, Host: "127.0.0.1"}, nil, nil)
-
-	if err := srv.ensureNFSMountsReady(); err != nil {
-		t.Fatalf("ensureNFSMountsReady with no NFS should return nil, got: %v", err)
-	}
-}
-
-// TestServer_EnsureNFSMountsReady_WithReconciler verifies that the dispatch
-// guard calls EnsureShareMounted for each configured share.
-func TestServer_EnsureNFSMountsReady_WithReconciler(t *testing.T) {
-	nfsCfg := &config.V1NFSConfig{
-		MountRoot:    "/mnt/nfs",
-		MountOptions: "vers=3,hard",
-		Shares: []config.V1NFSShare{
-			{ID: "ws1", Server: "10.0.0.2", Export: "/export-a"},
-			{ID: "ws2", Server: "10.0.0.3", Export: "/export-b"},
-		},
-	}
-
-	mc := newMockMountChecker()
-	srv := &Server{
-		config: ServerConfig{
-			Port:      0,
-			Host:      "127.0.0.1",
-			NFSConfig: nfsCfg,
-		},
-		nfsMountReconciler: NewNFSMountReconciler(nfsCfg, mc, nil),
-	}
-
-	if err := srv.ensureNFSMountsReady(); err != nil {
-		t.Fatalf("ensureNFSMountsReady: %v", err)
-	}
-
-	// Both shares should have been mounted
-	if len(mc.mountCalls) != 2 {
-		t.Errorf("mountCalls = %d, want 2 (one per share)", len(mc.mountCalls))
 	}
 }

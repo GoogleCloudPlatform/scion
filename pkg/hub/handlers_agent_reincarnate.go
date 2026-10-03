@@ -103,65 +103,22 @@ type ReincarnationPlan struct {
 //     built-in roles grant agent.update and agent.lifecycle together, so
 //     this does not widen access for any existing role.
 //   - An agent reincarnating ANOTHER agent needs project:agent:lifecycle
-//     within its own project, same as stop/start (authorizeAgentLifecycle).
+//     within its own project and agent.lifecycle on the target, same as
+//     stop/start (authorizeAgentLifecycle).
 //   - An agent reincarnating ITSELF is allowed for any role, with no scope
 //     check. Phase 1 accepts no request overrides, so the "no override"
 //     condition D2 attaches to the self exemption always holds; a Phase 3
 //     override on a self-reincarnation will need its own, stricter check
 //     (design §3.6a) added at that handler, not here.
 func (s *Server) authorizeAgentReincarnate(w http.ResponseWriter, r *http.Request, agent *store.Agent) bool {
-	ctx := r.Context()
-	identity := GetIdentityFromContext(ctx)
-	if identity == nil {
-		Unauthorized(w)
-		return false
-	}
-	resource := agentResource(agent)
-
-	switch identity.Type() {
-	case "agent":
-		agentIdent, ok := identity.(AgentIdentity)
-		if !ok {
-			logAuthzDenial(r, identity, resource, ActionLifecycle, "invalid agent identity")
-			writeForbidden(w, "")
-			return false
-		}
-		if agentIdent.ID() == agent.ID {
+	identity := GetIdentityFromContext(r.Context())
+	if identity != nil && identity.Type() == "agent" {
+		if agentIdent, ok := identity.(AgentIdentity); ok && agent != nil && agentIdent.ID() == agent.ID {
 			// Self-reincarnation: any role, no scope required (D2).
 			return true
 		}
-		if !agentIdent.HasScope(ScopeAgentLifecycle) {
-			logAuthzDenial(r, identity, resource, ActionLifecycle, "missing scope "+string(ScopeAgentLifecycle))
-			writeForbidden(w, "Missing required scope: "+string(ScopeAgentLifecycle))
-			return false
-		}
-		if agentIdent.ProjectID() != agent.ProjectID {
-			logAuthzDenial(r, identity, resource, ActionLifecycle, "agent project mismatch")
-			writeForbidden(w, "Agents can only manage agents within their own project")
-			return false
-		}
-		return true
-
-	case "user", "dev":
-		userIdent, ok := identity.(UserIdentity)
-		if !ok {
-			logAuthzDenial(r, identity, resource, ActionLifecycle, "invalid user identity")
-			writeForbidden(w, "")
-			return false
-		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, resource, ActionLifecycle)
-		if !decision.Allowed {
-			logAuthzDenial(r, identity, resource, ActionLifecycle, decision.Reason)
-			writeForbidden(w, "")
-			return false
-		}
-		return true
-
-	default:
-		logAuthzDenial(r, identity, resource, ActionLifecycle, "identity type may not reincarnate agents")
-		writeForbidden(w, "")
-		return false
 	}
+	return s.authorizeAgentLifecycle(w, r, agent, ActionLifecycle)
 }
 
 // handleReincarnateAgent implements POST .../agents/{id}/reincarnate (design
@@ -183,6 +140,16 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	if !s.authorizeAgentReincarnate(w, r, agent) {
 		return
 	}
+
+	// Delete in progress (design ptone/scion#2483 §2.1).
+	if ref := s.startGate(ctx, agent, startEntryReincarnate); ref.refuses() {
+		ref.write(w)
+		return
+	}
+	// The delete claim the gate admitted; the worker pins its completion
+	// failed-marker clear to it (see clearFailedDeletion), so a delete that
+	// claims after this point keeps its marker.
+	admittedDeletionClaim := agent.DeletionClaim
 
 	var req ReincarnateAgentRequest
 	if err := readJSON(r, &req); err != nil {
@@ -251,6 +218,15 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// touch a workspace it did not find already on disk): this is what
 	// makes --dry-run report the restriction too, instead of a dry run
 	// showing a plan that a real request could not safely execute.
+	// Empty-per-agent workspaces are broker-local, unsynced state: the only
+	// possible reincarnation would be a fresh empty directory, silently
+	// discarding work. Refused explicitly in v1 (design #2703 D4).
+	if project.IsEmptyPerAgent() {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"reincarnate does not yet support empty-per-agent workspaces", nil)
+		return
+	}
+
 	hasGitClone := agent.AppliedConfig != nil && agent.AppliedConfig.GitClone != nil
 	var effectiveWorkspace string
 	var linkedProjectPath string
@@ -428,7 +404,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// this exact claim instant, not rec.RequestedAt — the store stamps that
 	// a few ms later inside CreateAgentReincarnation, after the gate in the
 	// three delivery paths could already have started deferring messages.
-	go s.runReincarnationWorker(context.Background(), agent.ID, rec.ID, rec.PreviousAppliedConfig, fresh, req.Handoff, claimedAt)
+	go s.runReincarnationWorker(context.Background(), agent.ID, rec.ID, rec.PreviousAppliedConfig, fresh, req.Handoff, claimedAt, requestedBy, &plan, targetGeneration, admittedDeletionClaim)
 
 	writeJSON(w, http.StatusAccepted, ReincarnateAgentResponse{
 		AgentID:    agent.ID,

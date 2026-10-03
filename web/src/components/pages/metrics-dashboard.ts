@@ -19,6 +19,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { Chart, registerables } from 'chart.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { formatNumber } from '../../utils/format-number.js';
 
 Chart.register(...registerables);
 
@@ -70,6 +71,14 @@ const CHART_COLORS = [
   '#f97316',
   '#6366f1',
 ];
+
+/**
+ * The hub buckets every dashboard time series by UTC calendar day
+ * (pkg/hub/metrics_dashboard.go), so each x-axis tick is a UTC date. The axis
+ * title and the chart headings say so, because a viewer in another zone would
+ * otherwise read the dates as local days.
+ */
+export const DAY_BUCKET_AXIS_TITLE = 'Day (UTC)';
 
 @customElement('scion-page-metrics')
 export class ScionPageMetrics extends LitElement {
@@ -321,10 +330,10 @@ export class ScionPageMetrics extends LitElement {
     void this.loadView(this.activeTab === 'model-calls' ? 'model-calls' : this.activeTab);
   }
 
-  private formatNumber(n: number): string {
+  private formatCompactNumber(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
     if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-    return n.toLocaleString();
+    return formatNumber(n);
   }
 
   private static readonly CHART_PROPERTIES = new Set([
@@ -482,6 +491,7 @@ export class ScionPageMetrics extends LitElement {
             x: {
               grid: { display: false },
               ticks: { font: { size: 11 } },
+              title: { display: true, text: DAY_BUCKET_AXIS_TITLE, font: { size: 11 } },
             },
             y: {
               beginAtZero: true,
@@ -558,19 +568,19 @@ export class ScionPageMetrics extends LitElement {
       <div class="stats-row">
         <div class="stat-card">
           <span class="stat-label">Total Sessions</span>
-          <span class="stat-value">${this.formatNumber(s.totalSessions)}</span>
+          <span class="stat-value">${this.formatCompactNumber(s.totalSessions)}</span>
         </div>
         <div class="stat-card">
           <span class="stat-label">API Calls</span>
-          <span class="stat-value">${this.formatNumber(s.totalApiCalls)}</span>
+          <span class="stat-value">${this.formatCompactNumber(s.totalApiCalls)}</span>
         </div>
         <div class="stat-card">
           <span class="stat-label">Total Tokens</span>
-          <span class="stat-value">${this.formatNumber(s.totalTokens)}</span>
+          <span class="stat-value">${this.formatCompactNumber(s.totalTokens)}</span>
         </div>
         <div class="stat-card">
           <span class="stat-label">Unique Agents</span>
-          <span class="stat-value">${this.formatNumber(s.uniqueAgents)}</span>
+          <span class="stat-value">${this.formatCompactNumber(s.uniqueAgents)}</span>
         </div>
       </div>
     `;
@@ -583,13 +593,13 @@ export class ScionPageMetrics extends LitElement {
     return html`
       <div class="chart-row">
         <div class="section">
-          <h3 class="chart-section-title">Daily Sessions</h3>
+          <h3 class="chart-section-title">Daily Sessions (UTC)</h3>
           <div class="chart-container">
             <canvas id="chart-sessions"></canvas>
           </div>
         </div>
         <div class="section">
-          <h3 class="chart-section-title">Active Agents per Day</h3>
+          <h3 class="chart-section-title">Active Agents per Day (UTC)</h3>
           <div class="chart-container">
             <canvas id="chart-agents"></canvas>
           </div>
@@ -605,13 +615,13 @@ export class ScionPageMetrics extends LitElement {
     return html`
       <div class="chart-row">
         <div class="section">
-          <h3 class="chart-section-title">API Calls by Model</h3>
+          <h3 class="chart-section-title">Daily API Calls by Model (UTC)</h3>
           <div class="chart-container">
             <canvas id="chart-model-calls"></canvas>
           </div>
         </div>
         <div class="section">
-          <h3 class="chart-section-title">API Calls by Harness</h3>
+          <h3 class="chart-section-title">Daily API Calls by Harness (UTC)</h3>
           <div class="chart-container">
             <canvas id="chart-harness-calls"></canvas>
           </div>
@@ -627,13 +637,13 @@ export class ScionPageMetrics extends LitElement {
     return html`
       <div class="chart-row">
         <div class="section">
-          <h3 class="chart-section-title">Input Tokens by Model</h3>
+          <h3 class="chart-section-title">Daily Input Tokens by Model (UTC)</h3>
           <div class="chart-container">
             <canvas id="chart-tokens-input"></canvas>
           </div>
         </div>
         <div class="section">
-          <h3 class="chart-section-title">Output Tokens by Model</h3>
+          <h3 class="chart-section-title">Daily Output Tokens by Model (UTC)</h3>
           <div class="chart-container">
             <canvas id="chart-tokens-output"></canvas>
           </div>

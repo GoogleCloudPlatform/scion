@@ -116,6 +116,14 @@ export class ScionTerminalPane extends LitElement {
   @state()
   private reconnectFailed = false;
 
+  /**
+   * True while the underlying session's connection is 'idle': restored but
+   * not yet connected. No Reconnect button and no error styling — just a
+   * neutral "select to connect" prompt.
+   */
+  @state()
+  private idle = false;
+
   /** Whether the failed attempt above was manually triggered. */
   @state()
   private reconnectFailedManual = false;
@@ -147,6 +155,19 @@ export class ScionTerminalPane extends LitElement {
   /** Remembers the scope chosen in the scope dialog so force-update reuses it. */
   @state()
   private captureAuthSelectedScope: 'project' | 'user' = 'project';
+
+  /**
+   * Hub admin policy (agent_secrets.user_scope_only), fetched fresh from
+   * /api/v1/settings/public each time the capture scope dialog opens
+   * (design ptone/scion#2291 §7). When true, Project is disabled and
+   * Profile is preselected. Fails open (false) if the fetch fails.
+   */
+  @state()
+  private agentSecretsUserScopeOnly = false;
+
+  /** True while the settings/public fetch that gates the scope dialog is in flight. */
+  @state()
+  private captureAuthSettingsLoading = false;
 
   // --- Drag-and-drop file upload state ---
   @state() private uploadEnabled = false;
@@ -350,6 +371,12 @@ export class ScionTerminalPane extends LitElement {
       margin-bottom: 0.5rem;
     }
 
+    .capture-scope-restricted-hint {
+      font-size: 0.75rem;
+      color: var(--scion-text-secondary, #64748b);
+      margin: -0.25rem 0 0.5rem 1.5rem;
+    }
+
     /* Window switcher toggle group: two rectangular icon buttons */
     .toggle-group {
       display: inline-flex;
@@ -481,6 +508,36 @@ export class ScionTerminalPane extends LitElement {
     .disconnected-overlay .overlay-reconnect:disabled {
       opacity: 0.5;
       cursor: default;
+    }
+
+    .idle-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.4);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      z-index: 10;
+      pointer-events: none;
+    }
+
+    .idle-overlay .overlay-title {
+      color: #94a3b8;
+      font-size: 1rem;
+      font-weight: 600;
+    }
+
+    .idle-overlay .overlay-detail {
+      color: #94a3b8;
+      font-size: 0.875rem;
+      max-width: 400px;
+      text-align: center;
+      line-height: 1.5;
     }
 
     .drop-overlay {
@@ -781,7 +838,11 @@ export class ScionTerminalPane extends LitElement {
    * The workspace must retain this element by session key: an existing session
    * cannot acquire a second renderer, and a pane cannot switch agent or registry.
    */
-  open(registry: TerminalSessionRegistry, agentId: string): TerminalSession {
+  open(
+    registry: TerminalSessionRegistry,
+    agentId: string,
+    options?: { deferConnect?: boolean }
+  ): TerminalSession {
     if (this.disposed) throw new Error('Terminal pane is disposed.');
     if (this.session) {
       if (this.registry === registry && this.agentId === agentId.toLowerCase()) return this.session;
@@ -791,18 +852,22 @@ export class ScionTerminalPane extends LitElement {
       throw new Error('Terminal session already has a pane; reuse its original element.');
     }
     this.registry = registry;
-    this.ownedSession = registry.open(agentId, async (_agent, signal) => {
-      this.loading = false;
-      await this.updateComplete;
-      signal.throwIfAborted();
-      try {
-        return await this.initTerminal(signal);
-      } catch (error) {
-        // Covers partial allocation before a failed/aborted layout continuation.
-        this.disposeTerminal();
-        throw error;
-      }
-    });
+    this.ownedSession = registry.open(
+      agentId,
+      async (_agent, signal) => {
+        this.loading = false;
+        await this.updateComplete;
+        signal.throwIfAborted();
+        try {
+          return await this.initTerminal(signal);
+        } catch (error) {
+          // Covers partial allocation before a failed/aborted layout continuation.
+          this.disposeTerminal();
+          throw error;
+        }
+      },
+      options
+    );
     this.metadataUnsubscribe = registry.metadata.subscribe(this.agentId, (value) =>
       this.applyMetadata(value)
     );
@@ -814,6 +879,20 @@ export class ScionTerminalPane extends LitElement {
     // of waiting for the next visibility change.
     this.updateFrontmost();
     return this.session!;
+  }
+
+  /**
+   * Moves focus into this pane: the terminal when it exists, otherwise the
+   * pane itself, so the terminal takes focus once it connects (see
+   * `shouldAutoFocusTerminal`).
+   */
+  focusTerminal(): void {
+    if (this.terminal) {
+      this.terminal.focus();
+      return;
+    }
+    if (!this.hasAttribute('tabindex')) this.tabIndex = -1;
+    this.focus();
   }
 
   /** Presentation only. Output continues to be parsed by the same xterm. */
@@ -896,6 +975,7 @@ export class ScionTerminalPane extends LitElement {
     this.disconnectReason = state.disconnectReason;
     this.reconnectInProgress = this.ownedSession?.reconnecting ?? false;
     this.attempting = state.connection === 'loading' || state.connection === 'connecting';
+    this.idle = state.connection === 'idle';
     this.reconnectFailed = state.reconnectFailed;
     this.reconnectFailedManual = state.reconnectFailedManual;
     if (state.connection !== 'loading') this.loading = false;
@@ -1630,6 +1710,53 @@ export class ScionTerminalPane extends LitElement {
 
   private static readonly SECRET_CONFLICT_RE = /secret "([^"]+)" already exists/g;
 
+  /** Matches the 403 error code the hub returns when agent_secrets.user_scope_only
+   * blocks a project-scope write (pkg/hub/errors.go ErrCodeSecretScopeRestricted). */
+  private static readonly SECRET_SCOPE_RESTRICTED_RE = /secret_scope_restricted/;
+
+  /**
+   * Monotonically increasing token for the settings/public fetch below.
+   * If the dialog is closed and reopened before a fetch resolves, a stale
+   * response (or the stale fetch's `finally`) must not clear loading or
+   * overwrite a newer result (round-1 review N2).
+   */
+  private captureAuthSettingsRequestSeq = 0;
+
+  /**
+   * Opens the capture scope dialog and fetches /api/v1/settings/public fresh
+   * (design ptone/scion#2291 §7), so an admin toggling the policy while the
+   * terminal is open takes effect the next time the dialog opens — this is
+   * also how the "retry after a rejection" flow picks up a since-changed
+   * policy. Fails open (today's dialog, unrestricted) if the fetch fails.
+   */
+  private async openCaptureAuthScopeDialog(): Promise<void> {
+    this.captureAuthScopeDialogOpen = true;
+    this.captureAuthSettingsLoading = true;
+    const requestSeq = ++this.captureAuthSettingsRequestSeq;
+    let agentSecretsUserScopeOnly = false;
+    try {
+      const response = await fetch('/api/v1/settings/public', { credentials: 'include' });
+      if (response.ok) {
+        const data = (await response.json()) as { agentSecretsUserScopeOnly?: boolean };
+        agentSecretsUserScopeOnly = data.agentSecretsUserScopeOnly ?? false;
+      }
+    } catch (err) {
+      console.error('Failed to fetch public settings for capture auth dialog:', err);
+    }
+    // A newer open has since started its own fetch; let that one own the
+    // final state instead of overwriting it with this stale result.
+    if (requestSeq !== this.captureAuthSettingsRequestSeq) return;
+    this.agentSecretsUserScopeOnly = agentSecretsUserScopeOnly;
+    // The setting forces the profile scope whatever was previously
+    // selected — it must win even if the dialog was already open with
+    // "project" chosen when an admin flipped it (§7: "forced to 'user'
+    // when the dialog opens, whatever the previous selection was").
+    if (agentSecretsUserScopeOnly) {
+      this.captureAuthSelectedScope = 'user';
+    }
+    this.captureAuthSettingsLoading = false;
+  }
+
   private async handleCaptureAuth(
     force = false,
     scope: 'project' | 'user' = 'project'
@@ -1661,6 +1788,15 @@ export class ScionTerminalPane extends LitElement {
         await this.refreshAgentData();
       } else if (result.exitCode === 2) {
         showToast('No credentials found yet. Authenticate first, then try again.', 'neutral');
+        if (result.output) console.log('Capture auth output:', result.output);
+      } else if (ScionTerminalPane.SECRET_SCOPE_RESTRICTED_RE.test(result.output)) {
+        // Checked before the conflict regex (design §7): a policy rejection
+        // is not a conflict, and must not open the conflict/force-update
+        // dialog. Covers the race where an admin turns the setting on while
+        // this dialog was already open with "project" selected.
+        showToast(
+          'Your hub administrator only allows capturing credentials to your profile. Choose Profile and try again.'
+        );
         if (result.output) console.log('Capture auth output:', result.output);
       } else {
         const conflicts: string[] = [];
@@ -1965,9 +2101,7 @@ export class ScionTerminalPane extends LitElement {
               <button
                 class="capture-auth-btn"
                 ?disabled=${this.captureAuthLoading}
-                @click=${() => {
-                  this.captureAuthScopeDialogOpen = true;
-                }}
+                @click=${() => void this.openCaptureAuthScopeDialog()}
                 title="Capture credentials from inside the container"
               >
                 ${this.captureAuthLoading ? 'Capturing...' : 'Capture Auth'}
@@ -1980,9 +2114,9 @@ export class ScionTerminalPane extends LitElement {
         ></scion-status-badge>
         <div class="status-indicator">
           <span class="status-dot ${this.connected ? 'connected' : ''}"></span>
-          ${this.connected ? 'Connected' : 'Disconnected'}
+          ${this.connected ? 'Connected' : this.idle ? 'Not connected' : 'Disconnected'}
         </div>
-        ${!this.connected
+        ${!this.connected && !this.idle
           ? html`
               <button
                 class="reconnect-btn"
@@ -2014,6 +2148,12 @@ export class ScionTerminalPane extends LitElement {
         @drop=${(e: DragEvent) => this._onDrop(e)}
       >
         <div class="terminal-container"></div>
+        ${this.idle
+          ? html`<div class="idle-overlay">
+              <span class="overlay-title">Not connected.</span>
+              <span class="overlay-detail">Select this terminal to connect.</span>
+            </div>`
+          : ''}
         ${!this.connected && this.wasConnected
           ? html`<div
               class="disconnected-overlay ${this.isUnavailableState ? 'unavailable' : ''} ${this
@@ -2073,8 +2213,20 @@ export class ScionTerminalPane extends LitElement {
             this.captureAuthSelectedScope = e.target.value;
           }}
         >
-          <sl-radio value="project">Project secret (all project agents)</sl-radio>
-          <sl-radio value="user">Profile secret (your personal credential)</sl-radio>
+          <sl-radio
+            value="project"
+            ?disabled=${this.captureAuthSettingsLoading || this.agentSecretsUserScopeOnly}
+            >Project secret (all project agents)</sl-radio
+          >
+          ${this.agentSecretsUserScopeOnly
+            ? html`<div class="capture-scope-restricted-hint">
+                Disabled by your hub administrator: captured credentials can only be stored in your
+                profile.
+              </div>`
+            : nothing}
+          <sl-radio value="user" ?disabled=${this.captureAuthSettingsLoading}
+            >Profile secret (your personal credential)</sl-radio
+          >
         </sl-radio-group>
         <sl-button
           slot="footer"
@@ -2087,6 +2239,7 @@ export class ScionTerminalPane extends LitElement {
         <sl-button
           slot="footer"
           variant="primary"
+          ?disabled=${this.captureAuthSettingsLoading}
           @click=${() => {
             this.captureAuthScopeDialogOpen = false;
             void this.handleCaptureAuth(false, this.captureAuthSelectedScope);

@@ -46,6 +46,8 @@ type SortDir = 'asc' | 'desc';
 import type { StatusType } from '../shared/status-badge.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
+import type { AgentsChangedDetail } from '../../client/state.js';
+import { mergeChanged, dropTombstoned } from '../../client/agent-merge.js';
 import { listPageStyles } from '../shared/resource-styles.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
@@ -53,6 +55,8 @@ import '../shared/message-mode-badge.js';
 import '../shared/messageability-indicator.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
+import type { ScionAgentTreeView } from '../shared/agent-tree-view.js';
+import { GraphPaletteController } from '../shared/palette/graph-palette-controller.js';
 import '../shared/quick-message-dialog.js';
 import {
   getDenialMessage,
@@ -63,6 +67,7 @@ import type { MessageMode } from '../../shared/types.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { terminalHref } from '../../client/open-terminal.js';
+import { formatRelative } from '../../utils/time.js';
 
 @customElement('scion-page-agents')
 export class ScionPageAgents extends LitElement {
@@ -114,11 +119,27 @@ export class ScionPageAgents extends LitElement {
   @state()
   private viewMode: ViewMode = 'grid';
 
+  /** "Jump to agent" over the graph, offering the agents its tree view shows. */
+  readonly graphPalette = new GraphPaletteController(this, {
+    treeView: (): ScionAgentTreeView | null =>
+      this.renderRoot.querySelector('scion-agent-tree-view'),
+  });
+
   /**
    * Filter scope: 'all' (no filter), 'mine' (created by me), 'shared' (in shared projects)
    */
   @state()
   private agentScope: 'all' | 'mine' | 'shared' = 'all';
+
+  /**
+   * The scope `this.agents` was actually fetched for — set alongside
+   * `this.agents` itself (never alongside `agentScope`, which changes
+   * synchronously on click while the new list is still in flight). The graph
+   * view's filterKey reads this, not `agentScope`, so a scope switch isn't
+   * mistaken for a delete before the new list lands.
+   */
+  @state()
+  private loadedScope: 'all' | 'mine' | 'shared' = 'all';
 
   @state()
   private phaseFilter: AgentPhase | '' = '';
@@ -379,7 +400,7 @@ export class ScionPageAgents extends LitElement {
     `,
   ];
 
-  private boundOnAgentsUpdated = this.onAgentsUpdated.bind(this);
+  private boundOnAgentsChanged = this.onAgentsChanged.bind(this);
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -451,6 +472,7 @@ export class ScionPageAgents extends LitElement {
     const hydratedCaps = stateManager.getScopeCapabilities('agent');
     if (hydratedAgents.length > 0 && hydratedCaps && this.agentScope === 'all') {
       this.agents = hydratedAgents;
+      this.loadedScope = 'all';
       this.scopeCapabilities = hydratedCaps;
       this.loading = false;
       stateManager.seedAgents(this.agents);
@@ -459,44 +481,35 @@ export class ScionPageAgents extends LitElement {
     }
 
     // Listen for real-time agent updates
-    stateManager.addEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
+    stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    stateManager.removeEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
+    stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
   }
 
-  private onAgentsUpdated(): void {
-    const updatedAgents = stateManager.getAgents();
-    // Merge SSE agent deltas into local agent list
-    const agentMap = new Map(this.agents.map((a) => [a.id, a]));
-    for (const agent of updatedAgents) {
-      const existing = agentMap.get(agent.id);
-      // When a scope filter is active, only update agents already in the
-      // filtered list — don't add new agents that weren't in the REST response.
-      // The server-side filter is the source of truth for ownership/membership.
-      if (!existing && this.agentScope !== 'all') {
-        continue;
-      }
-      const merged = { ...existing, ...agent } as Agent;
-      // Preserve _capabilities from existing state when the delta lacks them.
-      // For brand-new agents from SSE, inherit scope-level capabilities.
-      if (!merged._capabilities) {
-        if (existing?._capabilities) {
-          merged._capabilities = existing._capabilities;
-        } else if (this.scopeCapabilities) {
-          merged._capabilities = this.scopeCapabilities;
-        }
-      }
-      agentMap.set(agent.id, merged);
+  /**
+   * Live updates (design §7, §11): one `agents-changed` flush merged
+   * through `mergeChanged`, replacing the old `onAgentsUpdated` per-event
+   * full rebuild over `stateManager.getAgents()`.
+   */
+  private onAgentsChanged(e: Event): void {
+    // `notifyWithData` wraps the payload as `{state, data}` (state.ts); the
+    // `AgentsChangedDetail` itself is `detail.data`.
+    const detail = (e as CustomEvent<{ data: AgentsChangedDetail }>).detail.data;
+    const merged = mergeChanged(this.agents, detail, {
+      getAgent: (id) => stateManager.getAgent(id),
+      // Today's add rule (design §6.2): global page, scope `all` only — a
+      // scope filter's server-side response is the source of truth for
+      // membership, so a brand-new SSE agent is not added under a filter.
+      // An ID already held keeps getting its updates regardless.
+      shouldAdd: () => this.agentScope === 'all',
+      scopeCapabilities: this.scopeCapabilities,
+    });
+    if (merged !== this.agents) {
+      this.agents = merged;
     }
-    // Remove agents that were explicitly deleted via SSE
-    const deletedIds = stateManager.getDeletedAgentIds();
-    for (const id of deletedIds) {
-      agentMap.delete(id);
-    }
-    this.agents = Array.from(agentMap.values());
   }
 
   private async loadAgents(): Promise<void> {
@@ -520,9 +533,13 @@ export class ScionPageAgents extends LitElement {
   }
 
   private async fetchAndMergeAgents(): Promise<void> {
+    // Captured now, not read again after the await: agentScope can change
+    // (another click) while this request is in flight, and loadedScope must
+    // reflect the scope *this response* was fetched for.
+    const requestedScope = this.agentScope;
     const params = new URLSearchParams();
-    if (this.agentScope !== 'all') {
-      params.set('scope', this.agentScope);
+    if (requestedScope !== 'all') {
+      params.set('scope', requestedScope);
     }
     if (this.labelFilter.trim() && this.labelFilter.includes('=')) {
       params.append('label', this.labelFilter.trim());
@@ -541,6 +558,7 @@ export class ScionPageAgents extends LitElement {
     const data = (await response.json()) as
       | { agents?: Agent[]; _capabilities?: Capabilities }
       | Agent[];
+    this.loadedScope = requestedScope;
     if (Array.isArray(data)) {
       this.agents = data;
       this.scopeCapabilities = undefined;
@@ -548,6 +566,11 @@ export class ScionPageAgents extends LitElement {
       this.agents = data.agents || [];
       this.scopeCapabilities = data._capabilities;
     }
+    // A REST response can race an SSE `deleted` already processed in an
+    // earlier flush; drop any such ID before it enters `this.agents`
+    // (`stateManager.seedAgents` already drops it from its own map, but
+    // this page's own array is a separate copy).
+    this.agents = dropTombstoned(this.agents, stateManager.getDeletedAgentIds());
     stateManager.seedAgents(this.agents);
     if (this.scopeCapabilities) {
       stateManager.seedScopeCapabilities('agent', this.scopeCapabilities);
@@ -763,19 +786,11 @@ export class ScionPageAgents extends LitElement {
   }
 
   private formatRelativeTime(isoString: string): string {
-    const date = new Date(isoString);
-    if (isNaN(date.getTime())) return '—';
-    const now = Date.now();
-    const diffMs = now - date.getTime();
-    if (diffMs < 0) return 'just now';
-    const seconds = Math.floor(diffMs / 1000);
-    if (seconds < 60) return 'just now';
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return `${minutes}m ago`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return `${hours}h ago`;
-    const days = Math.floor(hours / 24);
-    return `${days}d ago`;
+    const ms = new Date(isoString).getTime();
+    if (Number.isNaN(ms)) return '—';
+    // A future instant is clock skew between hub and browser.
+    if (ms > Date.now()) return 'just now';
+    return formatRelative(isoString, { style: 'narrow' });
   }
 
   private setPhaseFilter(phase: AgentPhase | ''): void {
@@ -1108,7 +1123,12 @@ export class ScionPageAgents extends LitElement {
     }
 
     if (this.viewMode === 'graph') {
-      return html`<scion-agent-tree-view .agents=${filtered}></scion-agent-tree-view>`;
+      // Everything that can narrow/widen `filtered` independent of a delete.
+      const filterKey = `${this.loadedScope}|${this.phaseFilter}|${this.modeFilter}|${this.labelFilter}`;
+      return html`<scion-agent-tree-view
+        .agents=${filtered}
+        filterKey=${filterKey}
+      ></scion-agent-tree-view>`;
     }
     return this.viewMode === 'grid' ? this.renderGrid() : this.renderTable();
   }

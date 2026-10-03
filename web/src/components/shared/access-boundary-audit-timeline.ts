@@ -31,6 +31,8 @@ import type {
   PageToken,
   MutationClassification,
 } from '../../shared/access-boundaries.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { formatInstantWithZone } from '../../utils/time.js';
 
 /** Event detail for requesting a new page of audit events. */
 export interface AuditPageRequestDetail {
@@ -39,10 +41,14 @@ export interface AuditPageRequestDetail {
 
 @customElement('scion-access-boundary-audit-timeline')
 export class ScionAccessBoundaryAuditTimeline extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @property({ type: Array }) events: AccessBoundaryAuditEvent[] = [];
   @property() nextPageToken: PageToken | undefined;
   @property({ type: Number }) totalCount = 0;
   @property({ type: Boolean }) loading = false;
+  @property() errorMessage = '';
 
   static override styles = [
     srOnlyStyles,
@@ -99,14 +105,6 @@ export class ScionAccessBoundaryAuditTimeline extends LitElement {
         background: var(--sl-color-danger-500, #ef4444);
       }
 
-      .timeline-dot.rejected {
-        background: var(--sl-color-warning-500, #f59e0b);
-      }
-
-      .timeline-dot.recovery_disabled {
-        background: var(--sl-color-danger-700, #b91c1c);
-      }
-
       .event-header {
         display: flex;
         align-items: center;
@@ -145,18 +143,6 @@ export class ScionAccessBoundaryAuditTimeline extends LitElement {
         background: var(--sl-color-warning-50, #fffbeb);
         color: var(--sl-color-warning-700, #b45309);
         border: 1px solid var(--sl-color-warning-200, #fde68a);
-      }
-
-      .event-outcome-rejected {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.25rem;
-        padding: 0.0625rem 0.375rem;
-        border-radius: 9999px;
-        font-size: 0.6875rem;
-        font-weight: 500;
-        background: var(--sl-color-danger-50, #fef2f2);
-        color: var(--sl-color-danger-700, #b91c1c);
       }
 
       .event-time {
@@ -203,14 +189,6 @@ export class ScionAccessBoundaryAuditTimeline extends LitElement {
         font-size: 0.75rem;
       }
 
-      .count-loses {
-        color: var(--sl-color-danger-600, #dc2626);
-      }
-
-      .count-regains {
-        color: var(--sl-color-success-600, #16a34a);
-      }
-
       .count-affected {
         color: var(--scion-text-muted, #64748b);
       }
@@ -219,15 +197,6 @@ export class ScionAccessBoundaryAuditTimeline extends LitElement {
         font-family: var(--sl-font-mono, monospace);
         font-size: 0.6875rem;
         color: var(--scion-text-muted, #64748b);
-      }
-
-      .rejection-info {
-        margin-top: 0.25rem;
-        padding: 0.375rem 0.5rem;
-        background: var(--sl-color-danger-50, #fef2f2);
-        border-radius: var(--scion-radius, 0.5rem);
-        font-size: 0.75rem;
-        color: var(--sl-color-danger-700, #b91c1c);
       }
 
       .pagination {
@@ -295,47 +264,34 @@ export class ScionAccessBoundaryAuditTimeline extends LitElement {
           border-bottom-color: ButtonText;
         }
 
-        .event-classification,
-        .event-outcome-rejected {
-          border: 1px solid ButtonText;
-        }
-
-        .rejection-info {
+        .event-classification {
           border: 1px solid ButtonText;
         }
       }
     `,
   ];
 
-  private eventTypeLabel(eventType: string): string {
-    switch (eventType) {
-      case 'boundary.created':
+  private operationLabel(operation: string): string {
+    switch (operation) {
+      case 'create':
         return 'Created';
-      case 'boundary.updated':
+      case 'update':
         return 'Updated';
-      case 'boundary.deleted':
+      case 'delete':
         return 'Deleted';
-      case 'boundary.commit_rejected':
-        return 'Commit rejected';
-      case 'boundary.recovery_disabled':
-        return 'Recovery disabled';
       default:
-        return eventType;
+        return operation;
     }
   }
 
-  private eventDotClass(eventType: string): string {
-    switch (eventType) {
-      case 'boundary.created':
+  private eventDotClass(operation: string): string {
+    switch (operation) {
+      case 'create':
         return 'created';
-      case 'boundary.updated':
+      case 'update':
         return 'updated';
-      case 'boundary.deleted':
+      case 'delete':
         return 'deleted';
-      case 'boundary.commit_rejected':
-        return 'rejected';
-      case 'boundary.recovery_disabled':
-        return 'recovery_disabled';
       default:
         return 'updated';
     }
@@ -355,23 +311,14 @@ export class ScionAccessBoundaryAuditTimeline extends LitElement {
   }
 
   private formatDatetime(iso: string): string {
-    try {
-      const date = new Date(iso);
-      if (isNaN(date.getTime())) return iso;
-      return date.toLocaleString(undefined, {
-        dateStyle: 'medium',
-        timeStyle: 'short',
-      });
-    } catch {
-      return iso;
-    }
+    return formatInstantWithZone(iso) || iso;
   }
 
-  private actorDisplay(actor: AccessBoundaryAuditEvent['actor']): string {
-    if (!actor.principal) return '(unknown actor)';
-    const name = actor.principal.displayName ?? actor.principal.id;
-    const type = actor.principal.type === 'agent' ? 'Agent' : 'User';
-    return `${type}: ${name}`;
+  private actorDisplay(event: AccessBoundaryAuditEvent): string {
+    if (!event.actorId) return 'Unknown actor';
+    const kind =
+      event.actorKind === 'agent' ? 'Agent' : event.actorKind === 'user' ? 'User' : 'Actor';
+    return `${kind}: ${event.actorId}`;
   }
 
   private requestPage(token: PageToken): void {
@@ -386,11 +333,11 @@ export class ScionAccessBoundaryAuditTimeline extends LitElement {
 
   private renderEvent(event: AccessBoundaryAuditEvent) {
     return html`
-      <div class="timeline-event" role="listitem">
-        <div class="timeline-dot ${this.eventDotClass(event.eventType)}"></div>
+      <div class="timeline-event" role="listitem" data-event-id=${event.id}>
+        <div class="timeline-dot ${this.eventDotClass(event.operation)}"></div>
 
         <div class="event-header">
-          <span class="event-type">${this.eventTypeLabel(event.eventType)}</span>
+          <span class="event-type">${this.operationLabel(event.operation)}</span>
           ${event.classification
             ? html`
                 <span class="event-classification ${event.classification}">
@@ -398,54 +345,31 @@ export class ScionAccessBoundaryAuditTimeline extends LitElement {
                 </span>
               `
             : nothing}
-          ${event.outcome === 'rejected'
-            ? html`<span class="event-outcome-rejected">Rejected</span>`
-            : nothing}
-          <time class="event-time" datetime="${event.occurredAt}"
-            >${this.formatDatetime(event.occurredAt)}</time
+          <time class="event-time" datetime="${event.timestamp}"
+            >${this.formatDatetime(event.timestamp)}</time
           >
         </div>
 
         <div class="event-body">
-          <div class="event-actor">
-            ${this.actorDisplay(event.actor)}
-            ${event.actor.credentialType ? ` (${event.actor.credentialType})` : ''}
-          </div>
+          <div class="event-actor">${this.actorDisplay(event)}</div>
 
-          ${event.changeSummary
+          ${event.impactCounts
             ? html`
                 <div class="event-counts">
-                  <span class="count-affected">
-                    ${event.changeSummary.affectedPrincipalCount} affected
-                  </span>
-                  ${event.changeSummary.losingPrincipalCount > 0
-                    ? html`<span class="count-loses">
-                        − ${event.changeSummary.losingPrincipalCount} losing
-                      </span>`
-                    : nothing}
-                  ${event.changeSummary.regainingPrincipalCount > 0
-                    ? html`<span class="count-regains">
-                        + ${event.changeSummary.regainingPrincipalCount} regaining
-                      </span>`
-                    : nothing}
-                </div>
-              `
-            : nothing}
-          ${event.outcome === 'rejected' && event.rejectionCode
-            ? html`
-                <div class="rejection-info">
-                  ${event.rejectionCode}${event.reason ? `: ${event.reason}` : ''}
+                  <span class="count-affected">${event.impactCounts.agents} agents</span>
+                  <span class="count-affected">${event.impactCounts.users} users</span>
+                  <span class="count-affected">${event.impactCounts.projects} projects</span>
                 </div>
               `
             : nothing}
 
           <div class="event-meta">
-            ${event.revisionBefore !== null || event.revisionAfter !== null
+            ${event.beforeRevision !== null || event.afterRevision !== null
               ? html`
                   <span class="meta-item">
                     <span class="meta-label">Revision:</span>
                     <span class="revision-change">
-                      ${event.revisionBefore ?? '—'} → ${event.revisionAfter ?? '—'}
+                      ${event.beforeRevision ?? '—'} → ${event.afterRevision ?? '—'}
                     </span>
                   </span>
                 `
@@ -462,10 +386,12 @@ export class ScionAccessBoundaryAuditTimeline extends LitElement {
               <span class="meta-label">Audit:</span>
               <span class="meta-value">${event.id}</span>
             </span>
-            <span class="meta-item">
-              <span class="meta-label">Correlation:</span>
-              <span class="meta-value">${event.correlationId}</span>
-            </span>
+            ${event.correlationId
+              ? html`<span class="meta-item">
+                  <span class="meta-label">Correlation:</span>
+                  <span class="meta-value">${event.correlationId}</span>
+                </span>`
+              : nothing}
           </div>
         </div>
       </div>
@@ -473,6 +399,10 @@ export class ScionAccessBoundaryAuditTimeline extends LitElement {
   }
 
   override render() {
+    if (this.errorMessage) {
+      return html`<div class="empty-state" role="alert">${this.errorMessage}</div>`;
+    }
+
     if (this.loading && this.events.length === 0) {
       return html`
         <div class="loading-overlay" role="status" aria-live="polite">
@@ -483,7 +413,7 @@ export class ScionAccessBoundaryAuditTimeline extends LitElement {
     }
 
     if (this.events.length === 0) {
-      return html`<div class="empty-state">No audit events</div>`;
+      return html`<div class="empty-state">No retained audit history</div>`;
     }
 
     return html`

@@ -160,7 +160,7 @@ func (c *ControlChannelBrokerClient) StartAgent(ctx context.Context, brokerID, b
 		var err error
 		body, err = json.Marshal(payload)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal request: %w", err)
+			return nil, fmt.Errorf("failed to marshal request: %w (%w)", err, errStartRequestNotSent)
 		}
 	}
 
@@ -334,9 +334,10 @@ func (c *ControlChannelBrokerClient) ExecuteKeys(ctx context.Context, brokerID, 
 	if err := checkBodySize(agentkeys.BrokerRouteMethod, path, body); err != nil {
 		// Too large to tunnel safely: a Hub-side, pre-send capability limit,
 		// not a broker decision, and keys has no HTTP-fallback path to retry
-		// through (unlike MessageAgent/HybridBrokerClient). err is a
-		// *ErrPayloadTooLarge; wrap with %w (not %v) so a caller can still
-		// errors.As it out from underneath the ErrNotDispatched wrap.
+		// through (unlike MessageAgent/HybridBrokerClient). err wraps a
+		// *ErrPayloadTooLarge (and errStartRequestNotSent); wrap with %w (not
+		// %v) so a caller can still errors.As it out from underneath the
+		// ErrNotDispatched wrap.
 		return agentkeys.BrokerResult{}, fmt.Errorf("%w: %w", agentkeys.ErrNotDispatched, err)
 	}
 
@@ -400,7 +401,8 @@ func (c *ControlChannelBrokerClient) CreateAgentWithGather(ctx context.Context, 
 	}
 
 	if resp.StatusCode >= 400 {
-		return nil, nil, fmt.Errorf("runtime broker returned error %d: %s", resp.StatusCode, string(resp.Body))
+		// Keep the broker's status for the hub handler to relay (#2546 R2).
+		return nil, nil, &brokerStatusError{StatusCode: resp.StatusCode, Body: string(resp.Body), RetryAfter: resp.Headers["Retry-After"]}
 	}
 
 	if resp.StatusCode == http.StatusAccepted {
@@ -541,20 +543,25 @@ func (c *ControlChannelBrokerClient) DeleteImage(ctx context.Context, brokerID, 
 	return err
 }
 
-// checkBodySize returns an *ErrPayloadTooLarge if the body is too large to
-// tunnel safely through the control channel WebSocket without exceeding the
+// checkBodySize returns an error wrapping *ErrPayloadTooLarge (and
+// errStartRequestNotSent, see below) if the body is too large to tunnel
+// safely through the control channel WebSocket without exceeding the
 // broker's read limit. The Body field is base64-encoded in the RequestEnvelope
 // JSON, so the actual wire size is roughly len(body)*4/3 plus envelope
 // metadata. Callers should use errors.As(err, &ErrPayloadTooLarge{}) to detect
 // this condition and fall back to direct HTTP.
 func checkBodySize(method, path string, body []byte) error {
 	if len(body) > maxControlChannelBodySize {
-		return &ErrPayloadTooLarge{
+		// Wrapped with errStartRequestNotSent: this check runs before the
+		// request is ever written to the connection, so a start that trips
+		// it never reached the broker either. errors.As(err, &ErrPayloadTooLarge{})
+		// still works through the wrap.
+		return fmt.Errorf("%w (%w)", &ErrPayloadTooLarge{
 			Method: method,
 			Path:   path,
 			Size:   len(body),
 			Limit:  maxControlChannelBodySize,
-		}
+		}, errStartRequestNotSent)
 	}
 	return nil
 }
@@ -564,7 +571,7 @@ func checkBodySize(method, path string, body []byte) error {
 // inspecting resp.StatusCode themselves.
 func (c *ControlChannelBrokerClient) doRequestRaw(ctx context.Context, brokerID, method, path, query string, body []byte) (*wsprotocol.ResponseEnvelope, error) {
 	if !c.manager.IsConnected(brokerID) {
-		return nil, fmt.Errorf("broker %s not connected via control channel", brokerID)
+		return nil, fmt.Errorf("broker %s not connected via control channel: %w", brokerID, errStartBrokerNotConnected)
 	}
 
 	if err := checkBodySize(method, path, body); err != nil {
@@ -588,7 +595,7 @@ func (c *ControlChannelBrokerClient) doRequestRaw(ctx context.Context, brokerID,
 // doRequest tunnels an HTTP request through the control channel.
 func (c *ControlChannelBrokerClient) doRequest(ctx context.Context, brokerID, method, path, query string, body []byte) (*wsprotocol.ResponseEnvelope, error) {
 	if !c.manager.IsConnected(brokerID) {
-		return nil, fmt.Errorf("broker %s not connected via control channel", brokerID)
+		return nil, fmt.Errorf("broker %s not connected via control channel: %w", brokerID, errStartBrokerNotConnected)
 	}
 
 	if err := checkBodySize(method, path, body); err != nil {
@@ -613,12 +620,14 @@ func (c *ControlChannelBrokerClient) doRequest(ctx context.Context, brokerID, me
 	return resp, nil
 }
 
-// brokerStatusError is returned by doRequest when the broker answers with an
-// HTTP error status, so callers can react to specific codes (e.g. 404 on an
-// idempotent delete) instead of parsing the message.
+// brokerStatusError is returned by doRequest, CreateAgentWithGather and
+// brokerHTTPError when the broker answers with an HTTP error status, so
+// callers can react to specific codes (e.g. 404 on an idempotent delete)
+// instead of parsing the message. RetryAfter is the broker's Retry-After.
 type brokerStatusError struct {
 	StatusCode int
 	Body       string
+	RetryAfter string
 }
 
 func (e *brokerStatusError) Error() string {
@@ -629,6 +638,22 @@ func (e *brokerStatusError) Error() string {
 func isBrokerStatus(err error, code int) bool {
 	var se *brokerStatusError
 	return errors.As(err, &se) && se.StatusCode == code
+}
+
+// isBrokerAgentNotFound reports whether err is the broker's 404 answer with
+// error code agent_not_found. For a message dispatch this means the broker
+// found no running container for the agent.
+func isBrokerAgentNotFound(err error) bool {
+	var se *brokerStatusError
+	if !errors.As(err, &se) || se.StatusCode != http.StatusNotFound {
+		return false
+	}
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	return json.Unmarshal([]byte(se.Body), &body) == nil && body.Error.Code == ErrCodeAgentNotFound
 }
 
 // brokerErrorMessage returns the message from a broker JSON error body
@@ -643,6 +668,37 @@ func (e *brokerStatusError) brokerErrorMessage() string {
 		return body.Error.Message
 	}
 	return strings.TrimSpace(e.Body)
+}
+
+// brokerErrorCode returns the machine-readable code from a broker JSON error
+// body ({"error":{"code":...}}), or "" if the body is not in that form.
+// Used by isConfirmedBrokerRejection to tell the broker's own JSON error
+// envelope (runtimebroker's writeError) apart from a generic error page a
+// proxy or load balancer in front of the broker might return instead.
+func (e *brokerStatusError) brokerErrorCode() string {
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(e.Body), &body); err == nil {
+		return body.Error.Code
+	}
+	return ""
+}
+
+// brokerErrorDetails returns error.details from a broker JSON error body,
+// or nil if the body has none or is not in that form.
+func (e *brokerStatusError) brokerErrorDetails() map[string]interface{} {
+	var body struct {
+		Error struct {
+			Details map[string]interface{} `json:"details"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(e.Body), &body); err != nil {
+		return nil
+	}
+	return body.Error.Details
 }
 
 func (c *ControlChannelBrokerClient) buildRequestHeaders(ctx context.Context, brokerID, method, path, query string, body []byte) (map[string]string, error) {
@@ -666,12 +722,12 @@ func (c *ControlChannelBrokerClient) buildRequestHeaders(ctx context.Context, br
 
 	httpReq, err := http.NewRequestWithContext(ctx, method, tunnelURL, requestBody)
 	if err != nil {
-		return nil, fmt.Errorf("failed to build control channel request for signing: %w", err)
+		return nil, fmt.Errorf("failed to build control channel request for signing: %w (%w)", err, errStartRequestNotSent)
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
 	if err := c.signer.Sign(ctx, httpReq, brokerID); err != nil {
-		return nil, fmt.Errorf("failed to sign control channel request: %w", err)
+		return nil, fmt.Errorf("failed to sign control channel request: %w (%w)", err, errStartRequestNotSent)
 	}
 
 	for key := range httpReq.Header {

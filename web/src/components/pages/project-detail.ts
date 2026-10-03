@@ -47,13 +47,24 @@ import type { StatusType } from '../shared/status-badge.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
+import type { AgentsChangedDetail } from '../../client/state.js';
 import { fetchHubProjectCapabilities } from '../../client/hub-capabilities.js';
+import { AgentListWindow, projectAgentsFitFor } from '../../client/agent-list-window.js';
+import type { PagedPageParams, PagedPageResult } from '../../client/agent-list-window.js';
+import { mergeChanged, dropTombstoned, dropTombstonedPairs } from '../../client/agent-merge.js';
+import { sortAgents } from '../../shared/agent-sort.js';
+import type { AgentSortField, SortDir } from '../../shared/agent-sort.js';
 import '../shared/git-remote-display.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
+import type { ScionAgentTreeView } from '../shared/agent-tree-view.js';
+import { GraphPaletteController } from '../shared/palette/graph-palette-controller.js';
 import '../shared/agent-message-viewer.js';
+import '../shared/agent-pager.js';
+import { AGENT_PAGER_PAGE_SIZES } from '../shared/agent-pager.js';
+import type { AgentPagerPageSize } from '../shared/agent-pager.js';
 import '../shared/file-browser.js';
 import '../shared/file-editor.js';
 import {
@@ -69,15 +80,34 @@ import type { FileEditorDataSource } from '../shared/file-editor.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { terminalHref } from '../../client/open-terminal.js';
+import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { formatNumber } from '../../utils/format-number.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
-type AgentSortField = 'name' | 'status' | 'created' | 'updated';
-type SortDir = 'asc' | 'desc';
+/** A request/refresh trigger, per design §4.3; `loadData`/`fetchAndMergeAgents` both funnel into `loadAgentsForView` (design §11). */
+type AgentsViewTrigger = 'page-load' | 'label-commit' | 'lifecycle-refresh' | 'view-change';
+
+/** The project endpoint's sorted-mode response shape (design §4.6). */
+interface SortedAgentsResponse {
+  agents: Agent[];
+  nextCursor?: string;
+  totalCount: number;
+  complete?: boolean;
+  sort?: string;
+  dir?: string;
+  stats?: { total: number; running: number; agents?: Array<[string, string]> };
+  _capabilities?: Capabilities;
+}
 
 // User-level (not per-project) sticky preference for the agents section height.
 const AGENTS_EXPANDED_STORAGE_KEY = 'scion-project-agents-expanded';
+const PAGER_PAGE_SIZE_STORAGE_KEY = 'scion-pagesize-project-agents';
 
 @customElement('scion-page-project-detail')
 export class ScionPageProjectDetail extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   /**
    * Page data from SSR
    */
@@ -146,6 +176,35 @@ export class ScionPageProjectDetail extends LitElement {
   private fileBrowserDataSources: Record<string, FileBrowserDataSource> = {};
 
   /**
+   * Whether the (possibly below-the-fold) Files section has become visible
+   * or was otherwise explicitly triggered. Until then, only a lightweight
+   * placeholder is rendered — no `<scion-file-browser>` is mounted, so no
+   * listing request is issued. See observeFilesSection().
+   */
+  @state()
+  private filesSectionVisible = false;
+
+  /**
+   * Tab keys ('workspace' or shared-dir name) whose file browser has been
+   * mounted at least once. A `<scion-file-browser>` is only instantiated for
+   * tabs in this set, so switching to an unvisited tab is what triggers its
+   * one initial listing request. Visited tabs stay mounted (not torn down on
+   * tab switch) so filter/sort/scroll state and loaded files survive
+   * switching between tabs. That state is still lost whenever the file
+   * editor is opened and closed, because the tab group itself is unmounted
+   * and remounted then (see renderFilesSection()) — unchanged from before
+   * this lazy-mounting change.
+   */
+  @state()
+  private visitedFileTabs: Set<string> = new Set();
+
+  /** Observes the Files-section placeholder to lazily reveal it once it nears the viewport. */
+  private filesSectionObserver: IntersectionObserver | null = null;
+
+  /** The placeholder element currently registered with filesSectionObserver, if any. */
+  private observedFilesPlaceholder: Element | null = null;
+
+  /**
    * Loading state for stop-all action
    */
   @state()
@@ -156,6 +215,12 @@ export class ScionPageProjectDetail extends LitElement {
    */
   @state()
   private viewMode: ViewMode = 'grid';
+
+  /** "Jump to agent" over the graph, offering the agents its tree view shows. */
+  readonly graphPalette = new GraphPaletteController(this, {
+    treeView: (): ScionAgentTreeView | null =>
+      this.renderRoot.querySelector('scion-agent-tree-view'),
+  });
 
   /**
    * Whether the agents section is expanded to full height. Collapsed (the
@@ -176,6 +241,151 @@ export class ScionPageProjectDetail extends LitElement {
 
   @state()
   private sortDir: SortDir = 'desc';
+
+  /**
+   * The label filter as of the last commit (`sl-change`/`sl-clear`), as
+   * opposed to `labelFilter`, which also tracks every keystroke for local
+   * preview (design §6.3). Used to decide eligibility for the sorted/paged
+   * request path and request parameters, and to key the per-label 422
+   * refusal memory below.
+   */
+  private committedLabel = '';
+
+  /**
+   * The committed label for which the server last refused sorted mode
+   * (422 `sorted_view_unavailable`, design §4.3). `null` until a refusal
+   * happens. A later commit of a *different* label retries sorted mode once.
+   */
+  private sortedRefusedForLabel: string | null = null;
+
+  /** `committedLabel`'s value just before a label commit, so a failed request can restore it instead of leaving every later request re-sending a rejected label. */
+  private labelBeforeCommit = '';
+
+  /** Bumped at the start of every page-level agents load; checked after each `await` so an older trigger's response can never overwrite a newer one. */
+  private agentsLoadGen = 0;
+
+  /** Aborts whatever page-level agents request (not the window's own page fetches) was still in flight when a new trigger starts. */
+  private agentsAbortController: AbortController | null = null;
+
+  /**
+   * Whether a page-level agents load (`loadAgentsForView`/`loadLegacyAgents`)
+   * is in flight. Ref-counted, so a single plain boolean cannot be cleared
+   * early by an older trigger while a newer one is still in flight:
+   * `beginLoadingIndicator`/`endLoadingIndicator` increment/decrement
+   * `agentsLoadingCount`, so it stays `true` for as long as *any*
+   * page-level load (including a nested 422-or-truncated-legacy fallback)
+   * is in flight, regardless of how many overlapping triggers are racing.
+   * Used for two things: the "Loading agents…" indicator, and, combined
+   * with `agentWindow.loading`, disabling pager navigation and the chip
+   * while either kind of request is in flight.
+   */
+  @state()
+  private agentsLoading = false;
+
+  private agentsLoadingCount = 0;
+
+  private beginLoadingIndicator(): void {
+    this.agentsLoadingCount++;
+    this.agentsLoading = true;
+  }
+
+  private endLoadingIndicator(): void {
+    this.agentsLoadingCount = Math.max(0, this.agentsLoadingCount - 1);
+    this.agentsLoading = this.agentsLoadingCount > 0;
+  }
+
+  /**
+   * Page size for the list view's window, persisted under
+   * `scion-pagesize-project-agents`. Read once in `connectedCallback` —
+   * `<scion-agent-pager>` is a controlled component
+   * and does not read storage itself, so this is the single source of
+   * truth both for the first request's `limit` and for the pager's
+   * rendered value.
+   */
+  @state()
+  private pagerPageSize: AgentPagerPageSize = 25;
+
+  /**
+   * Whether the list view currently has valid window data (small or paged)
+   * for the current view state, and so should render from `agentWindow`
+   * with a pager instead of the legacy unsliced `displayAgents` (design
+   * §11). False right after a legacy load that was truncated
+   * (`nextCursor` present, > 500 candidates) — see `loadLegacyAgents`.
+   */
+  @state()
+  private listViewUsesWindow = false;
+
+  /** Forces a re-render when `agentWindow` changes outside of a `@state` setter (pagination, live updates, resync). */
+  @state()
+  private windowTick = 0;
+
+  /**
+   * The list view's window (design §4.3, §6.1). Only the small and paged
+   * states exist today (design §11); held and capped land once
+   * `agent-drain.ts` exists. The small state reads `this.agents` live
+   * through `getHeldAgents` rather than a copy, so an SSE update applied by
+   * `mergeAgentsChanged` is visible immediately with no re-adoption step.
+   */
+  private agentWindow = new AgentListWindow({
+    viewState: {
+      phaseFilter: this.phaseFilter,
+      label: this.labelFilter,
+      sortField: this.sortField,
+      sortDir: this.sortDir,
+      pageSize: this.pagerPageSize,
+    },
+    getProjectId: () => this.projectId,
+    fetchPage: (params: PagedPageParams) => this.fetchAgentsPage(params),
+    getAgent: (id: string) => stateManager.getAgent(id),
+    getHeldAgents: () => this.agents,
+  });
+
+  private boundOnWindowChange = () => {
+    this.windowTick++;
+  };
+
+  private boundOnAgentsChanged = (e: Event) => {
+    // `notifyWithData` wraps the payload as `{state, data}` (state.ts); the
+    // `AgentsChangedDetail` itself is `detail.data`. The paged state merges
+    // through the window (design §6.2); the small/held state merges
+    // through `mergeChanged` instead of a per-event full rebuild (design
+    // §7, §11 — this replaces the old `onAgentsUpdated`).
+    const detail = (e as CustomEvent<{ data: AgentsChangedDetail }>).detail.data;
+    this.agentWindow.applyChanges(detail);
+    if (this.agentWindow.state !== 'paged') {
+      this.mergeAgentsChanged(detail);
+    }
+  };
+
+  private boundOnAgentsResync = () => {
+    this.agentWindow.markResync();
+  };
+
+  /**
+   * "Agents"/"Running" stats and Stop-all visibility: the member index
+   * while genuinely paged, or `this.agents` otherwise (design §6.2, §11).
+   * Gated on `state !== 'paged'`, not on any particular non-paged
+   * value — `this.agents` is correct for `'small'`
+   * whether it holds a complete fit/legacy set or a truncated legacy one,
+   * exactly as grid/tree already render it.
+   */
+  private get agentStats(): { total: number; running: number } {
+    if (this.agentWindow.state === 'paged') {
+      return this.agentWindow.stats;
+    }
+    return {
+      total: this.agents.length,
+      running: this.agents.filter((a) => isAgentRunning(a)).length,
+    };
+  }
+
+  /** P1-eligible view state (design §11): list view, `updated` sort, and a label that is empty or contains `=`. */
+  private isP1Eligible(): boolean {
+    if (this.viewMode !== 'list') return false;
+    if (this.sortField !== 'updated') return false;
+    const label = this.committedLabel.trim();
+    return label === '' || label.includes('=');
+  }
 
   /**
    * Whether a git pull is in progress
@@ -895,7 +1105,6 @@ export class ScionPageProjectDetail extends LitElement {
     }
   `;
 
-  private boundOnAgentsUpdated = this.onAgentsUpdated.bind(this);
   private boundOnProjectsUpdated = this.onProjectsUpdated.bind(this);
 
   override connectedCallback(): void {
@@ -950,6 +1159,26 @@ export class ScionPageProjectDetail extends LitElement {
       }
     }
 
+    // Read the persisted page size before the window's
+    // view state is synced and the first request is sent, so both the
+    // request's `limit` and the pager's rendered size start out correct —
+    // `<scion-agent-pager>` is a controlled component and no longer reads
+    // storage itself.
+    const storedPageSize = Number(localStorage.getItem(PAGER_PAGE_SIZE_STORAGE_KEY));
+    if (AGENT_PAGER_PAGE_SIZES.includes(storedPageSize as AgentPagerPageSize)) {
+      this.pagerPageSize = storedPageSize as AgentPagerPageSize;
+    }
+
+    // Sync the window's view state with the persisted values read above,
+    // before the initial load (design §6.3).
+    this.agentWindow.setViewState({
+      phaseFilter: this.phaseFilter,
+      label: this.labelFilter,
+      sortField: this.sortField,
+      sortDir: this.sortDir,
+      pageSize: this.pagerPageSize,
+    });
+
     void this.loadData();
     void this.loadHubProjectCapabilities();
 
@@ -959,54 +1188,211 @@ export class ScionPageProjectDetail extends LitElement {
     }
 
     // Listen for real-time updates
-    stateManager.addEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
     stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated as EventListener);
+    stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
+    stateManager.addEventListener('agents-resync', this.boundOnAgentsResync as EventListener);
+    this.agentWindow.addEventListener('change', this.boundOnWindowChange);
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    stateManager.removeEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
     stateManager.removeEventListener(
       'projects-updated',
       this.boundOnProjectsUpdated as EventListener
     );
+    stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
+    stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync as EventListener);
+    this.agentWindow.removeEventListener('change', this.boundOnWindowChange);
+    this.filesSectionObserver?.disconnect();
+    this.filesSectionObserver = null;
+    this.observedFilesPlaceholder = null;
   }
 
-  private onAgentsUpdated(): void {
-    const updatedAgents = stateManager.getAgents();
-    // Merge SSE agent deltas into local agent list
-    const agentMap = new Map(this.agents.map((a) => [a.id, a]));
-    // Lazily derive scope capabilities from existing agents if not yet set.
+  override willUpdate(changed: Map<string, unknown>): void {
+    super.willUpdate(changed);
+    // Must run before render: if the tab list changed (a shared dir arrived
+    // or disappeared via an SSE project update) and left activeFileTab
+    // pointing at a tab that no longer exists, rendering against a stale
+    // activeFileTab would mount nothing for it — Shoelace silently falls
+    // back to displaying tabs[0] without firing sl-tab-show, so nothing
+    // else would notice or mount it. Doing this in willUpdate (before
+    // render), rather than updated() (after), sets
+    // activeFileTab/visitedFileTabs before Lit renders instead of
+    // scheduling a second render to fix up a frame that already rendered
+    // wrong.
+    //
+    // Also re-checked on an editingFilePath change: normalizeActiveFileTab()
+    // itself skips entirely while the editor is open (see its doc comment),
+    // so a correction that a project update would otherwise have triggered
+    // while editing is deferred — this is what catches it up on the very
+    // next update after the editor closes, rather than leaving it stale
+    // indefinitely.
+    if (changed.has('project') || changed.has('editingFilePath')) {
+      this.normalizeActiveFileTab();
+    }
+  }
+
+  override updated(changed: Map<string, unknown>): void {
+    super.updated(changed);
+    this.observeFilesSection();
+  }
+
+  /**
+   * Keep activeFileTab pointing at a tab that actually exists, and drop
+   * visitedFileTabs entries for tabs that no longer exist.
+   *
+   * activeFileTab defaults to 'workspace' and is otherwise only assigned in
+   * loadData() (initial load) and onFileTabChange() (user click). Neither
+   * one runs when the tab list itself changes later — e.g. a live project
+   * update adds or removes a shared dir (onProjectsUpdated() merges new
+   * project fields, including sharedDirs, straight into `this.project`).
+   * Left uncorrected, activeFileTab can name a tab that no longer renders,
+   * and Shoelace's tab-group falls back to displaying tabs[0] internally
+   * without emitting sl-tab-show — so the panel shown has no
+   * scion-file-browser mounted for it and stays empty with no way for the
+   * user to recover by clicking (setActiveTab no-ops when asked to
+   * activate the tab it already considers active).
+   *
+   * Skipped entirely while the file editor is open: the editor's data
+   * source is derived from activeFileTab (see renderFilesSection()), and
+   * retargeting it out from under an open edit would silently redirect a
+   * Save to a different shared dir, or — for an existing file — discard
+   * unsaved edits by reloading a different tab's content. Leaving
+   * activeFileTab stale while editing matches what happens today if its
+   * shared dir is removed server-side: the save targets a directory that no
+   * longer exists and fails, which is safer than silently retargeting.
+   */
+  private normalizeActiveFileTab(): void {
+    if (this.editingFilePath !== null) return;
+    if (!this.project) return;
+    const tabs = this.getFileTabs();
+    const tabKeys = new Set(tabs.map((t) => t.key));
+
+    if (tabs.length > 0 && !tabKeys.has(this.activeFileTab)) {
+      this.activeFileTab = tabs[0].key;
+    }
+    // If the Files section is already open, the (possibly just-corrected)
+    // active tab must actually be mounted — see the note above on why
+    // nothing else would notice it needs to be.
+    if (tabs.length > 0 && this.filesSectionVisible) {
+      this.markFileTabVisited(this.activeFileTab);
+    }
+
+    // Drop visited-tab entries for tabs that no longer exist, so a shared
+    // dir removed and later re-added under the same name starts fresh
+    // (unvisited) instead of mounting hidden and issuing a listing request
+    // for a tab the user never actually opened this time around.
+    if ([...this.visitedFileTabs].some((key) => !tabKeys.has(key))) {
+      this.visitedFileTabs = new Set([...this.visitedFileTabs].filter((key) => tabKeys.has(key)));
+    }
+  }
+
+  /**
+   * Lazily reveal the Files section once its placeholder nears the
+   * viewport, so a project page that never scrolls that far mounts zero
+   * file browsers and issues zero listing requests. Without
+   * IntersectionObserver support (older engines, tests) the section is
+   * revealed immediately — equivalent to "explicitly opened".
+   *
+   * Viewport visibility is the only reveal trigger; there is no separate
+   * click-to-open affordance on the placeholder itself. A section already
+   * in the initial viewport still reveals promptly, on its first
+   * intersection check.
+   */
+  private observeFilesSection(): void {
+    if (this.filesSectionVisible) return;
+    const placeholder = this.shadowRoot?.querySelector('.files-section-placeholder');
+    if (!placeholder) {
+      // shouldShowFilesSection() flipped to false before reveal (e.g. the
+      // last shared dir was removed via a live project update), so Lit tore
+      // down the placeholder without replacing it. Stop watching the
+      // detached element now, instead of holding it until the section
+      // reappears (the "replaced" branch below) or the element is disconnected.
+      if (this.observedFilesPlaceholder) {
+        this.filesSectionObserver?.unobserve(this.observedFilesPlaceholder);
+        this.observedFilesPlaceholder = null;
+      }
+      return;
+    }
+
+    if (typeof IntersectionObserver !== 'function') {
+      this.revealFilesSection();
+      return;
+    }
+
+    if (!this.filesSectionObserver) {
+      this.filesSectionObserver = new IntersectionObserver(
+        (entries) => {
+          for (const entry of entries) {
+            if (entry.isIntersecting) {
+              this.revealFilesSection();
+              break;
+            }
+          }
+        },
+        { rootMargin: '200px' }
+      );
+    }
+    if (this.observedFilesPlaceholder && this.observedFilesPlaceholder !== placeholder) {
+      // The previous placeholder was replaced (e.g. shouldShowFilesSection()
+      // flipped false then true before reveal, so Lit tore down and
+      // recreated the placeholder element) — stop watching the detached one.
+      this.filesSectionObserver.unobserve(this.observedFilesPlaceholder);
+    }
+    if (this.observedFilesPlaceholder !== placeholder) {
+      this.filesSectionObserver.observe(placeholder);
+      this.observedFilesPlaceholder = placeholder;
+    }
+  }
+
+  private revealFilesSection(): void {
+    if (this.filesSectionVisible) return;
+    this.filesSectionObserver?.disconnect();
+    this.observedFilesPlaceholder = null;
+    this.filesSectionVisible = true;
+    // The active tab (default, or the first shared dir for git-based
+    // projects — see loadData()) is the one the user actually sees, so
+    // mount its browser now rather than waiting for a tab click.
+    this.markFileTabVisited(this.activeFileTab);
+  }
+
+  private markFileTabVisited(tab: string): void {
+    if (this.visitedFileTabs.has(tab)) return;
+    this.visitedFileTabs = new Set(this.visitedFileTabs).add(tab);
+  }
+
+  /**
+   * Live updates for the small/held state (design §7, §11): one
+   * `agents-changed` flush merged through `mergeChanged`, replacing the old
+   * `onAgentsUpdated` per-event full rebuild over `stateManager.getAgents()`.
+   * Never called while the window is paged — `boundOnAgentsChanged` gates
+   * the call to this method on `agentWindow.state !== 'paged'`, since
+   * `this.agents` is intentionally empty then and the list view's live
+   * updates go through `agentWindow.applyChanges` instead (design §6.2),
+   * called unconditionally before that gate.
+   */
+  private mergeAgentsChanged(detail: AgentsChangedDetail): void {
+    // Lazily derive scope capabilities from existing agents if not yet set
+    // (e.g. a delta arrives before the page's own load has set it).
     if (!this.agentScopeCapabilities) {
-      for (const a of agentMap.values()) {
+      for (const a of this.agents) {
         if (a._capabilities) {
           this.agentScopeCapabilities = a._capabilities;
           break;
         }
       }
     }
-    for (const agent of updatedAgents) {
-      if (agent.projectId === this.projectId || agentMap.has(agent.id)) {
-        const existing = agentMap.get(agent.id);
-        const merged = { ...existing, ...agent } as Agent;
-        // New agents from SSE don't carry per-resource _capabilities.
-        // Inherit scope-level capabilities so action buttons render.
-        if (!merged._capabilities) {
-          if (existing?._capabilities) {
-            merged._capabilities = existing._capabilities;
-          } else if (this.agentScopeCapabilities) {
-            merged._capabilities = this.agentScopeCapabilities;
-          }
-        }
-        agentMap.set(agent.id, merged);
-      }
+    const merged = mergeChanged(this.agents, detail, {
+      getAgent: (id) => stateManager.getAgent(id),
+      // Today's add rule (design §6.2): any agent in this project, or an ID
+      // already held (e.g. one whose projectId changed underneath it keeps
+      // getting its updates until an explicit `deleted` removes it).
+      shouldAdd: (agent) => agent.projectId === this.projectId,
+      scopeCapabilities: this.agentScopeCapabilities,
+    });
+    if (merged !== this.agents) {
+      this.agents = merged;
     }
-    // Remove agents that were explicitly deleted via SSE
-    const deletedIds = stateManager.getDeletedAgentIds();
-    for (const id of deletedIds) {
-      agentMap.delete(id);
-    }
-    this.agents = Array.from(agentMap.values());
   }
 
   private onProjectsUpdated(): void {
@@ -1027,10 +1413,12 @@ export class ScionPageProjectDetail extends LitElement {
     this.error = null;
 
     try {
-      // Load project and agents in parallel
-      const [projectResponse, agentsResponse] = await Promise.all([
+      // Load the project and the agents window's one first request in
+      // parallel (design §11: `loadData` and `fetchAndMergeAgents` both
+      // funnel into `loadAgentsForView`).
+      const [projectResponse] = await Promise.all([
         apiFetch(`/api/v1/projects/${this.projectId}`),
-        apiFetch(`/api/v1/projects/${this.projectId}/agents`),
+        this.loadAgentsForView('page-load'),
       ]);
 
       if (!projectResponse.ok) {
@@ -1045,30 +1433,6 @@ export class ScionPageProjectDetail extends LitElement {
       this.project = (await projectResponse.json()) as Project;
       dispatchPageTitle(this, this.project.name || this.projectId, 'Projects');
 
-      if (agentsResponse.ok) {
-        const agentsData = (await agentsResponse.json()) as
-          | { agents?: Agent[]; _capabilities?: Capabilities }
-          | Agent[];
-        if (Array.isArray(agentsData)) {
-          this.agents = agentsData;
-          this.agentScopeCapabilities = undefined;
-        } else {
-          this.agents = agentsData.agents || [];
-          this.agentScopeCapabilities = agentsData._capabilities;
-        }
-        // Derive scope capabilities from per-agent capabilities when the
-        // response doesn't include a top-level _capabilities field.
-        if (!this.agentScopeCapabilities) {
-          this.agentScopeCapabilities = this.agents.find((a) => a._capabilities)?._capabilities;
-        }
-      } else {
-        // Fallback: if project-scoped agents endpoint fails, try filtering from all agents
-        this.agents = [];
-        this.agentScopeCapabilities = undefined;
-      }
-
-      // Seed stateManager so SSE delta merging has full baseline data
-      stateManager.seedAgents(this.agents);
       if (this.project) {
         stateManager.seedProjects([this.project]);
       }
@@ -1145,41 +1509,359 @@ export class ScionPageProjectDetail extends LitElement {
     if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
     if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-    return n.toLocaleString();
+    return formatNumber(n);
   }
 
-  private backgroundRefresh(): void {
-    this.fetchAndMergeAgents().catch((err) => {
+  private backgroundRefresh(trigger: AgentsViewTrigger = 'lifecycle-refresh'): void {
+    this.fetchAndMergeAgents(trigger).catch((err) => {
       console.warn('Background refresh failed:', err);
     });
   }
 
-  private async fetchAndMergeAgents(): Promise<void> {
+  /** Label commit and lifecycle/stop-all refresh both land here, same as `loadData` (design §11). */
+  private async fetchAndMergeAgents(
+    trigger: AgentsViewTrigger = 'lifecycle-refresh'
+  ): Promise<void> {
+    await this.loadAgentsForView(trigger);
+  }
+
+  /**
+   * Starts a new page-level agents load: bumps the stale-response guard
+   * (two overlapping triggers, e.g. a label commit
+   * racing a lifecycle refresh, must not let the older response win) and
+   * aborts whatever page-level request was still in flight. Returns the
+   * generation to check after every `await` and the signal to pass to
+   * `apiFetch`. Does not apply to the window's own page fetches
+   * (`fetchAgentsPage`), which already guard themselves with their own
+   * generation counter.
+   */
+  private beginAgentsLoad(): { gen: number; signal: AbortSignal } {
+    this.agentsAbortController?.abort();
+    const controller = new AbortController();
+    this.agentsAbortController = controller;
+    const gen = ++this.agentsLoadGen;
+    return { gen, signal: controller.signal };
+  }
+
+  private isStaleAgentsLoad(gen: number): boolean {
+    return gen !== this.agentsLoadGen;
+  }
+
+  /**
+   * A single place to react to any failed agents-load request, regardless
+   * of *how* it failed (a network error or a non-OK response) or which of
+   * the two request paths (sorted/fit or legacy) hit it. A label commit
+   * reverts `committedLabel` to its pre-commit value, so a rejected label
+   * is not kept re-sent on the next request. A view-change clears the
+   * paged window's navigation, since the stored cursors were minted under
+   * the previous phase/dir/label and would 400 if replayed under the new,
+   * now-current params (design §4.4) — this also covers a fallback legacy
+   * request that itself fails after a 422. Called from every failure exit
+   * of `loadAgentsForViewImpl` and `loadLegacyAgentsImpl`. A page-load or
+   * lifecycle-refresh trigger has nothing to revert or invalidate here.
+   */
+  private onAgentsLoadFailed(trigger: AgentsViewTrigger): void {
+    if (trigger === 'label-commit') {
+      this.committedLabel = this.labelBeforeCommit;
+    }
+    if (trigger === 'view-change' && this.agentWindow.state === 'paged') {
+      this.agentWindow.invalidateCursors();
+    }
+  }
+
+  /**
+   * The project page's single request-choosing function (design §4.3,
+   * §11). Called exactly once per trigger by `loadData` and
+   * `fetchAndMergeAgents`, and by `syncAgentsForViewState` for a view-state
+   * change that needs a fresh paged request.
+   */
+  private async loadAgentsForView(trigger: AgentsViewTrigger): Promise<void> {
+    this.beginLoadingIndicator();
+    try {
+      await this.loadAgentsForViewImpl(trigger);
+    } finally {
+      this.endLoadingIndicator();
+    }
+  }
+
+  private async loadAgentsForViewImpl(trigger: AgentsViewTrigger): Promise<void> {
+    const label = this.committedLabel.trim();
+    if (!this.isP1Eligible() || this.sortedRefusedForLabel === label) {
+      await this.loadLegacyAgents(trigger);
+      return;
+    }
+
+    const { gen, signal } = this.beginAgentsLoad();
+
     const params = new URLSearchParams();
-    if (this.labelFilter.trim() && this.labelFilter.includes('=')) {
-      params.append('label', this.labelFilter.trim());
+    params.set('sort', 'updated');
+    params.set('dir', this.sortDir);
+    params.set('limit', String(this.pagerPageSize));
+    params.set('fit', String(projectAgentsFitFor(this.pagerPageSize)));
+    params.set('stats', '1');
+    if (label) params.set('label', label);
+    if (this.phaseFilter) params.set('phase', this.phaseFilter);
+
+    let response: Response;
+    try {
+      response = await apiFetch(`/api/v1/projects/${this.projectId}/agents?${params.toString()}`, {
+        signal,
+      });
+    } catch (err) {
+      if (this.isAbortError(err)) return; // superseded by a later trigger.
+      console.warn('Failed to load agents:', err);
+      this.onAgentsLoadFailed(trigger);
+      return;
+    }
+    if (this.isStaleAgentsLoad(gen)) return;
+
+    if (response.status === 422) {
+      // Candidate ceiling (design §4.3, §5.3 step 0): remember the refusal
+      // for this committed label and fall back to a drain (today's legacy
+      // load, until agent-drain.ts exists).
+      this.sortedRefusedForLabel = label;
+      await this.loadLegacyAgents(trigger, { gen, signal });
+      return;
+    }
+
+    if (!response.ok) {
+      if (trigger === 'page-load') {
+        this.agents = [];
+        this.agentScopeCapabilities = undefined;
+        this.listViewUsesWindow = false;
+      }
+      this.onAgentsLoadFailed(trigger);
+      // Other triggers keep the previous data (design §6.3).
+      return;
+    }
+
+    let data: SortedAgentsResponse;
+    try {
+      data = (await response.json()) as SortedAgentsResponse;
+    } catch (err) {
+      if (this.isStaleAgentsLoad(gen)) return; // stale: nothing to revert/invalidate.
+      if (this.isAbortError(err)) return;
+      console.warn('Failed to load agents:', err);
+      this.onAgentsLoadFailed(trigger);
+      return;
+    }
+    if (this.isStaleAgentsLoad(gen)) return;
+    if (data._capabilities) {
+      this.agentScopeCapabilities = data._capabilities;
+    }
+
+    // A REST response can race an SSE `deleted` already processed in an
+    // earlier flush; drop any such ID before it enters page-level state
+    // (`stateManager.seedAgents` already drops it from its own map, but
+    // `this.agents`/the window are this page's own copies).
+    const freshAgents = dropTombstoned(data.agents || [], stateManager.getDeletedAgentIds());
+
+    if (data.complete) {
+      this.agents = freshAgents;
+      if (!this.agentScopeCapabilities) {
+        this.agentScopeCapabilities = this.agents.find((a) => a._capabilities)?._capabilities;
+      }
+      stateManager.seedAgents(this.agents);
+      this.agentWindow.setSmall();
+      this.listViewUsesWindow = true;
+    } else {
+      // Paged: `this.agents` stays empty, and grid/tree/stats/Stop-all read
+      // the member index through `agentStats` instead (design §11).
+      this.agents = [];
+      stateManager.seedAgents(freshAgents, { partial: true });
+      this.agentWindow.setPaged(
+        {
+          agents: freshAgents,
+          nextCursor: data.nextCursor,
+          totalCount: data.totalCount,
+          stats: this.freshStats(data.stats),
+        },
+        label
+      );
+      this.listViewUsesWindow = true;
+    }
+  }
+
+  /**
+   * `stats` with any already-tombstoned ID dropped from `stats.agents`
+   * (design §6.2): a paged response's member-index seed can race an SSE
+   * `deleted` the same way the page's own agent rows can (`dropTombstoned`
+   * above) — without this, a deleted agent's count would re-enter the
+   * member index via `stats.agents` and nothing would ever remove it
+   * again, inflating the paged total/running counts and Stop-all
+   * visibility. Returns `stats` itself when there is nothing to drop.
+   */
+  private freshStats(stats: SortedAgentsResponse['stats']): SortedAgentsResponse['stats'] {
+    if (!stats?.agents) return stats;
+    const agents = dropTombstonedPairs(stats.agents, stateManager.getDeletedAgentIds());
+    if (agents === stats.agents) return stats;
+    return { ...stats, agents };
+  }
+
+  /** Today's unsorted request (design §4.3's "legacy mode"), used when the view state is not P1-eligible, or sorted mode was refused for this label. */
+  private async loadLegacyAgents(
+    trigger: AgentsViewTrigger,
+    carried?: { gen: number; signal: AbortSignal }
+  ): Promise<void> {
+    this.beginLoadingIndicator();
+    try {
+      await this.loadLegacyAgentsImpl(trigger, carried);
+    } finally {
+      this.endLoadingIndicator();
+    }
+  }
+
+  private async loadLegacyAgentsImpl(
+    trigger: AgentsViewTrigger,
+    carried?: { gen: number; signal: AbortSignal }
+  ): Promise<void> {
+    const { gen, signal } = carried ?? this.beginAgentsLoad();
+
+    const params = new URLSearchParams();
+    const label = this.committedLabel.trim();
+    if (label && label.includes('=')) {
+      params.append('label', label);
     }
     const qs = params.toString();
     const url = qs
       ? `/api/v1/projects/${this.projectId}/agents?${qs}`
       : `/api/v1/projects/${this.projectId}/agents`;
-    const response = await apiFetch(url);
-    if (!response.ok) return;
 
-    const data = (await response.json()) as
-      | { agents?: Agent[]; _capabilities?: Capabilities }
+    let response: Response;
+    try {
+      response = await apiFetch(url, { signal });
+    } catch (err) {
+      if (this.isAbortError(err)) return;
+      if (trigger === 'page-load') {
+        this.agents = [];
+        this.agentScopeCapabilities = undefined;
+        this.listViewUsesWindow = false;
+      }
+      console.warn('Failed to load agents:', err);
+      this.onAgentsLoadFailed(trigger);
+      return;
+    }
+    if (this.isStaleAgentsLoad(gen)) return;
+
+    if (!response.ok) {
+      if (trigger === 'page-load') {
+        this.agents = [];
+        this.agentScopeCapabilities = undefined;
+        this.listViewUsesWindow = false;
+      }
+      this.onAgentsLoadFailed(trigger);
+      // Other triggers keep the previous data, with today's client label
+      // filter applied to it (design §6.3).
+      return;
+    }
+
+    type LegacyAgentsResponse =
+      | { agents?: Agent[]; _capabilities?: Capabilities; nextCursor?: string }
       | Agent[];
+    let data: LegacyAgentsResponse;
+    try {
+      data = (await response.json()) as LegacyAgentsResponse;
+    } catch (err) {
+      if (this.isStaleAgentsLoad(gen)) return; // stale: nothing to revert/invalidate.
+      if (this.isAbortError(err)) return;
+      if (trigger === 'page-load') {
+        this.agents = [];
+        this.agentScopeCapabilities = undefined;
+        this.listViewUsesWindow = false;
+      }
+      console.warn('Failed to load agents:', err);
+      this.onAgentsLoadFailed(trigger);
+      return;
+    }
+    if (this.isStaleAgentsLoad(gen)) return;
+
+    let nextCursor: string | undefined;
     if (Array.isArray(data)) {
       this.agents = data;
       this.agentScopeCapabilities = undefined;
     } else {
       this.agents = data.agents || [];
       this.agentScopeCapabilities = data._capabilities;
+      nextCursor = data.nextCursor;
     }
+    // A REST response can race an SSE `deleted` already processed in an
+    // earlier flush; drop any such ID before it enters `this.agents`.
+    this.agents = dropTombstoned(this.agents, stateManager.getDeletedAgentIds());
     if (!this.agentScopeCapabilities) {
       this.agentScopeCapabilities = this.agents.find((a) => a._capabilities)?._capabilities;
     }
+
     stateManager.seedAgents(this.agents);
+
+    // Exit the window out of `'paged'` unconditionally: a truncated legacy
+    // set is still rendered through `this.agents` directly (grid/tree,
+    // exactly as before the window existed), and leaving the window
+    // `'paged'` here is what caused `mergeAgentsChanged` to keep skipping
+    // and `agentStats` to keep reading a member index seeded for a now-stale
+    // request. `listViewUsesWindow` alone still gates whether the *list
+    // view* may render from the window.
+    this.agentWindow.setSmall();
+    this.listViewUsesWindow = !nextCursor;
+  }
+
+  /** `true` iff `err` is the `AbortError` from an intentionally superseded request. */
+  private isAbortError(err: unknown): boolean {
+    return err instanceof Error && err.name === 'AbortError';
+  }
+
+  /** The window's own page-navigation (and, while paged, sort/phase/page-size-change) fetches (design §6.1). */
+  private async fetchAgentsPage(params: PagedPageParams): Promise<PagedPageResult> {
+    const label = this.committedLabel.trim();
+    const qs = new URLSearchParams();
+    qs.set('sort', 'updated');
+    qs.set('dir', this.sortDir);
+    qs.set('limit', String(params.limit));
+    if (params.cursor) qs.set('cursor', params.cursor);
+    if (params.wantStats) qs.set('stats', '1');
+    if (label) qs.set('label', label);
+    if (this.phaseFilter) qs.set('phase', this.phaseFilter);
+
+    const response = await apiFetch(`/api/v1/projects/${this.projectId}/agents?${qs.toString()}`);
+    if (!response.ok) {
+      throw new Error(await extractApiError(response, 'Failed to load agents'));
+    }
+    const data = (await response.json()) as SortedAgentsResponse;
+    return {
+      // Same race as the page-load paths above: a server page can still
+      // list an ID whose SSE `deleted` this client already processed.
+      agents: dropTombstoned(data.agents || [], stateManager.getDeletedAgentIds()),
+      nextCursor: data.nextCursor,
+      totalCount: data.totalCount,
+      stats: this.freshStats(data.stats),
+    };
+  }
+
+  /**
+   * The single place that decides whether a phase, sort, page-size or view
+   * change needs a request (the window's own
+   * `setViewState` never fetches). Covers both directions of the §11
+   * interim-cost transitions: becoming P1-eligible with no adopted data
+   * yet, or a paged view state whose server-side sort/phase just changed
+   * (one fresh request either way); and leaving P1-eligible while the
+   * window is still paged (one legacy load, then free once `this.agents`
+   * is populated — §11 "then 0 while it is held").
+   */
+  private async syncAgentsForViewState(): Promise<void> {
+    if (this.isP1Eligible()) {
+      if (
+        this.agentWindow.state === 'paged' ||
+        (!this.listViewUsesWindow && this.sortedRefusedForLabel !== this.committedLabel.trim())
+      ) {
+        await this.loadAgentsForView('view-change');
+      }
+      return;
+    }
+    if (this.agentWindow.state === 'paged') {
+      await this.loadLegacyAgents('view-change');
+    }
+    // Otherwise `this.agents` already holds whatever legacy/small data is
+    // available (possibly truncated above 500) and needs no further
+    // request (held, per §11 interim costs).
   }
 
   private async autoDiscoverGitHubApp(): Promise<void> {
@@ -1222,18 +1904,7 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   private formatDate(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      return new Intl.DateTimeFormat('en', {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      }).format(date);
-    } catch {
-      return dateString;
-    }
+    return formatInstantWithZone(dateString) || dateString;
   }
 
   private getTabDataSource(tabName: string): FileBrowserDataSource {
@@ -1307,7 +1978,14 @@ export class ScionPageProjectDetail extends LitElement {
     }
 
     if (action === 'delete') {
-      const agentName = this.agents.find((a) => a.id === agentId)?.name ?? 'this agent';
+      // `this.agents` is empty while paged: fall back to
+      // the window's current page, then to state (an off-page agent, e.g.
+      // acted on right after a chip click elsewhere).
+      const agentName =
+        this.agents.find((a) => a.id === agentId)?.name ??
+        this.agentWindow.items.find((a) => a.id === agentId)?.name ??
+        stateManager.getAgent(agentId)?.name ??
+        'this agent';
       if (
         !event?.altKey &&
         !(await showConfirm(`Are you sure you want to delete agent "${agentName}"?`))
@@ -1379,6 +2057,7 @@ export class ScionPageProjectDetail extends LitElement {
 
   private onViewChange(e: CustomEvent<{ view: ViewMode }>): void {
     this.viewMode = e.detail.view;
+    void this.syncAgentsForViewState();
   }
 
   private toggleAgentsExpanded(): void {
@@ -1401,34 +2080,7 @@ export class ScionPageProjectDetail extends LitElement {
         return filterKey in a.labels;
       });
     }
-    const sorted = [...list];
-    sorted.sort((a, b) => {
-      let cmp = 0;
-      switch (this.sortField) {
-        case 'name':
-          cmp = (a.name || '').localeCompare(b.name || '');
-          break;
-        case 'status':
-          cmp = getAgentDisplayStatus(a).localeCompare(getAgentDisplayStatus(b));
-          break;
-        case 'created':
-          cmp = (a.created || a.createdAt || '').localeCompare(b.created || b.createdAt || '');
-          break;
-        case 'updated':
-          cmp = (
-            a.lastActivityEvent && !a.lastActivityEvent.startsWith('0001')
-              ? a.lastActivityEvent
-              : a.updated || a.updatedAt || ''
-          ).localeCompare(
-            b.lastActivityEvent && !b.lastActivityEvent.startsWith('0001')
-              ? b.lastActivityEvent
-              : b.updated || b.updatedAt || ''
-          );
-          break;
-      }
-      return this.sortDir === 'asc' ? cmp : -cmp;
-    });
-    return sorted;
+    return sortAgents(list, this.sortField, this.sortDir);
   }
 
   private setPhaseFilter(phase: AgentPhase | ''): void {
@@ -1439,6 +2091,8 @@ export class ScionPageProjectDetail extends LitElement {
     } else {
       localStorage.removeItem(`scion-filter-project-agents-phase-${this.projectId}`);
     }
+    this.agentWindow.setViewState({ phaseFilter: phase });
+    void this.syncAgentsForViewState();
   }
 
   private toggleSort(field: AgentSortField): void {
@@ -1452,6 +2106,8 @@ export class ScionPageProjectDetail extends LitElement {
       `scion-sort-project-agents-${this.projectId}`,
       JSON.stringify({ field: this.sortField, dir: this.sortDir })
     );
+    this.agentWindow.setViewState({ sortField: this.sortField, sortDir: this.sortDir });
+    void this.syncAgentsForViewState();
   }
 
   private sortIndicator(field: AgentSortField): string {
@@ -1459,19 +2115,11 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   private formatRelativeTime(isoString: string): string {
-    const date = new Date(isoString);
-    if (isNaN(date.getTime())) return '—';
-    const now = Date.now();
-    const diffMs = now - date.getTime();
-    if (diffMs < 0) return 'just now';
-    const seconds = Math.floor(diffMs / 1000);
-    if (seconds < 60) return 'just now';
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return `${minutes}m ago`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return `${hours}h ago`;
-    const days = Math.floor(hours / 24);
-    return `${days}d ago`;
+    const ms = new Date(isoString).getTime();
+    if (Number.isNaN(ms)) return '—';
+    // A future instant is clock skew between hub and browser.
+    if (ms > Date.now()) return 'just now';
+    return formatRelative(isoString, { style: 'narrow' });
   }
 
   private renderFilterBar() {
@@ -1517,11 +2165,22 @@ export class ScionPageProjectDetail extends LitElement {
           .value=${this.labelFilter}
           @sl-input=${(e: Event) => {
             this.labelFilter = (e.target as HTMLElement & { value: string }).value;
+            // Live preview only — no request per keystroke (design §4.3, §6.4
+            // row 8). `setViewState` never fetches, so
+            // this is always free regardless of window state.
+            this.agentWindow.setViewState({ label: this.labelFilter });
           }}
-          @sl-change=${() => void this.backgroundRefresh()}
+          @sl-change=${() => {
+            this.labelBeforeCommit = this.committedLabel;
+            this.committedLabel = this.labelFilter;
+            this.backgroundRefresh('label-commit');
+          }}
           @sl-clear=${() => {
+            this.labelBeforeCommit = this.committedLabel;
             this.labelFilter = '';
-            void this.backgroundRefresh();
+            this.committedLabel = '';
+            this.agentWindow.setViewState({ label: '' });
+            this.backgroundRefresh('label-commit');
           }}
           style="max-width: 220px;"
         >
@@ -1562,7 +2221,7 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   private hasRunningAgents(): boolean {
-    return this.agents.some((a) => isAgentRunning(a));
+    return this.agentStats.running > 0;
   }
 
   private async handleStopAll(): Promise<void> {
@@ -1926,11 +2585,11 @@ export class ScionPageProjectDetail extends LitElement {
       <div class="stats-row">
         <div class="stat">
           <span class="stat-label">Agents</span>
-          <span class="stat-value">${this.agents.length}</span>
+          <span class="stat-value">${this.agentStats.total}</span>
         </div>
         <div class="stat">
           <span class="stat-label">Running</span>
-          <span class="stat-value">${this.agents.filter((a) => isAgentRunning(a)).length}</span>
+          <span class="stat-value">${this.agentStats.running}</span>
         </div>
         <div class="stat">
           <span class="stat-label">Created</span>
@@ -2058,7 +2717,7 @@ export class ScionPageProjectDetail extends LitElement {
                 </sl-button>
               `
             : nothing}
-          ${this.agents.length > 0 && this.viewMode !== 'graph'
+          ${this.agentStats.total > 0 && this.viewMode !== 'graph'
             ? html`
                 <sl-tooltip content=${this.agentsExpanded ? 'Collapse' : 'Expand'}>
                   <sl-icon-button
@@ -2074,23 +2733,37 @@ export class ScionPageProjectDetail extends LitElement {
         </div>
       </div>
 
-      ${this.agents.length === 0
+      ${this.agentStats.total === 0
         ? this.renderEmptyAgents()
         : html`
             ${this.renderFilterBar()}
-            ${this.displayAgents.length === 0
-              ? html`<div class="empty-filter-state">No agents match the current filter.</div>`
-              : this.viewMode === 'graph'
-                ? html`<scion-agent-tree-view
-                    .agents=${this.displayAgents}
-                  ></scion-agent-tree-view>`
-                : this.viewMode === 'grid'
-                  ? this.renderAgentGrid()
-                  : this.renderAgentTable()}
+            ${this.viewMode === 'list' && this.listViewUsesWindow
+              ? this.renderAgentWindowList()
+              : this.displayAgents.length === 0
+                ? // "Loading…" only for the paged -> grid/tree gap, where
+                  // `this.agents` itself is still empty — gating on
+                  // `displayAgents` alone flickered on every lifecycle
+                  // refresh whenever the phase filter simply matched
+                  // nothing, since `this.agents` already had data then.
+                  this.agents.length === 0 && this.agentsLoading
+                  ? html`<div class="empty-filter-state">Loading agents…</div>`
+                  : html`<div class="empty-filter-state">No agents match the current filter.</div>`
+                : this.viewMode === 'graph'
+                  ? html`<scion-agent-tree-view
+                      .agents=${this.displayAgents}
+                      filterKey=${`${this.phaseFilter}|${this.labelFilter}`}
+                    ></scion-agent-tree-view>`
+                  : this.viewMode === 'grid'
+                    ? this.renderAgentGrid()
+                    : this.renderAgentTable()}
           `}
       ${this.project?.cloudLogging ? this.renderMessagesSection() : nothing}
-      ${this.shouldShowFilesSection() ? this.renderFilesSection() : ''} ${this.renderCloneDialog()}
-      ${this.renderTemplateDialog()}
+      ${this.shouldShowFilesSection()
+        ? this.filesSectionVisible
+          ? this.renderFilesSection()
+          : this.renderFilesSectionPlaceholder()
+        : ''}
+      ${this.renderCloneDialog()} ${this.renderTemplateDialog()}
     `;
   }
 
@@ -2170,6 +2843,25 @@ export class ScionPageProjectDetail extends LitElement {
     const panel = e.detail.name;
     if (!panel) return;
     this.activeFileTab = panel;
+    // Mount that tab's file browser now — this is what triggers its one
+    // initial listing request. Already-visited tabs stay mounted, so
+    // switching back to one does not refetch or lose local state.
+    this.markFileTabVisited(panel);
+  }
+
+  private renderFilesSectionPlaceholder() {
+    return html`
+      <div class="workspace-section files-section-placeholder">
+        <div class="workspace-header">
+          <div class="workspace-header-left">
+            <h2>Files</h2>
+          </div>
+        </div>
+        <div class="loading-state">
+          <sl-spinner></sl-spinner>
+        </div>
+      </div>
+    `;
   }
 
   private refreshActiveFileBrowser(): void {
@@ -2224,15 +2916,19 @@ export class ScionPageProjectDetail extends LitElement {
                   ${tabs.map(
                     (tab) => html`
                       <sl-tab-panel name=${tab.key}>
-                        <scion-file-browser
-                          data-tab=${tab.key}
-                          .dataSource=${this.getTabDataSource(tab.key)}
-                          ?editable=${isEditable}
-                          ?showArchive=${true}
-                          @file-edit-requested=${this.handleFileEditRequested}
-                          @file-preview-requested=${this.handleFilePreviewRequested}
-                          @file-create-requested=${this.handleFileCreateRequested}
-                        ></scion-file-browser>
+                        ${this.visitedFileTabs.has(tab.key)
+                          ? html`
+                              <scion-file-browser
+                                data-tab=${tab.key}
+                                .dataSource=${this.getTabDataSource(tab.key)}
+                                ?editable=${isEditable}
+                                ?showArchive=${true}
+                                @file-edit-requested=${this.handleFileEditRequested}
+                                @file-preview-requested=${this.handleFilePreviewRequested}
+                                @file-create-requested=${this.handleFileCreateRequested}
+                              ></scion-file-browser>
+                            `
+                          : nothing}
                       </sl-tab-panel>
                     `
                   )}
@@ -2306,41 +3002,122 @@ export class ScionPageProjectDetail extends LitElement {
   }
 
   private renderAgentTable() {
+    return this.renderAgentTableFor(this.displayAgents);
+  }
+
+  private renderAgentTableHead() {
+    return html`
+      <thead>
+        <tr>
+          <th
+            class="sortable ${this.sortField === 'name' ? 'sorted' : ''}"
+            @click=${() => this.toggleSort('name')}
+          >
+            Name <span class="sort-indicator">${this.sortIndicator('name')}</span>
+          </th>
+          <th class="hide-mobile">Template</th>
+          <th class="hide-mobile">Broker</th>
+          <th
+            class="status-col sortable ${this.sortField === 'status' ? 'sorted' : ''}"
+            @click=${() => this.toggleSort('status')}
+          >
+            Status <span class="sort-indicator">${this.sortIndicator('status')}</span>
+          </th>
+          <th
+            class="hide-mobile sortable ${this.sortField === 'updated' ? 'sorted' : ''}"
+            @click=${() => this.toggleSort('updated')}
+          >
+            Updated <span class="sort-indicator">${this.sortIndicator('updated')}</span>
+          </th>
+          <th class="hide-mobile">Task</th>
+          <th style="text-align: right">Actions</th>
+        </tr>
+      </thead>
+    `;
+  }
+
+  private renderAgentTableFor(agents: Agent[]) {
     return html`
       <div class="agent-table-container ${this.agentsExpanded ? '' : 'agents-collapsed'}">
         <table>
-          <thead>
-            <tr>
-              <th
-                class="sortable ${this.sortField === 'name' ? 'sorted' : ''}"
-                @click=${() => this.toggleSort('name')}
-              >
-                Name <span class="sort-indicator">${this.sortIndicator('name')}</span>
-              </th>
-              <th class="hide-mobile">Template</th>
-              <th class="hide-mobile">Broker</th>
-              <th
-                class="status-col sortable ${this.sortField === 'status' ? 'sorted' : ''}"
-                @click=${() => this.toggleSort('status')}
-              >
-                Status <span class="sort-indicator">${this.sortIndicator('status')}</span>
-              </th>
-              <th
-                class="hide-mobile sortable ${this.sortField === 'updated' ? 'sorted' : ''}"
-                @click=${() => this.toggleSort('updated')}
-              >
-                Updated <span class="sort-indicator">${this.sortIndicator('updated')}</span>
-              </th>
-              <th class="hide-mobile">Task</th>
-              <th style="text-align: right">Actions</th>
-            </tr>
-          </thead>
+          ${this.renderAgentTableHead()}
           <tbody>
-            ${this.displayAgents.map((agent) => this.renderAgentRow(agent))}
+            ${agents.map((agent) => this.renderAgentRow(agent))}
           </tbody>
         </table>
       </div>
     `;
+  }
+
+  /**
+   * The list view's windowed rendering (design §4.3, §6.1, §11): the
+   * server page (paged) or a local slice of today's `displayAgents` (small),
+   * plus the pager. Used whenever `listViewUsesWindow` is true, in both the
+   * small and paged states.
+   */
+  private renderAgentWindowList() {
+    const items = this.agentWindow.items;
+    return html`
+      <div class="agent-table-container ${this.agentsExpanded ? '' : 'agents-collapsed'}">
+        ${items.length === 0
+          ? html`<div class="empty-filter-state">No agents match the current filter.</div>`
+          : html`
+              <table>
+                ${this.renderAgentTableHead()}
+                <tbody>
+                  ${items.map((agent) => this.renderAgentRow(agent))}
+                </tbody>
+              </table>
+            `}
+        <scion-agent-pager
+          .storageKey=${PAGER_PAGE_SIZE_STORAGE_KEY}
+          .pageIndex=${this.agentWindow.pageIndex}
+          .rangeStart=${this.agentWindow.rangeStart}
+          .rowsOnPage=${items.length}
+          .total=${this.agentWindow.total}
+          .pageSize=${this.pagerPageSize}
+          .hasNext=${this.agentWindow.hasNext}
+          .hasPrev=${this.agentWindow.hasPrev}
+          .loading=${this.agentWindow.loading ||
+          (this.agentWindow.state === 'paged' && this.agentsLoading)}
+          .error=${this.agentWindow.error}
+          .showChip=${this.agentWindow.updatesAvailable}
+          @prev=${() => this.onPagerNav(() => this.agentWindow.prev())}
+          @next=${() => this.onPagerNav(() => this.agentWindow.next())}
+          @chip-click=${() => this.onPagerNav(() => this.agentWindow.refresh())}
+          @page-size-change=${(e: CustomEvent<{ pageSize: AgentPagerPageSize }>) =>
+            this.onPagerSizeChange(e.detail.pageSize)}
+        ></scion-agent-pager>
+      </div>
+    `;
+  }
+
+  /**
+   * A second, defense-in-depth guard for Prev/Next/chip-click, on top of
+   * the `.loading=` binding that disables the pager's own button/chip. This
+   * specifically protects against anything that fires the pager's
+   * `prev`/`next`/`chip-click` events without going through its own
+   * guarded `onPrev`/`onNext`/`onChipClick` methods (the pager's own guard
+   * covers a real click; this one covers an event dispatched directly on
+   * the host). This never bumps `agentsLoadGen` — it simply refuses to
+   * navigate while either the window's own fetch or, while paged, a
+   * page-level load is in flight, so the mismatched-cursor race (design
+   * §4.4) can never start in the first place. A page-level load alone
+   * never gates small-state navigation: small-state Prev/Next is a purely
+   * local slice of `display` and sends no request, so a held refresh or
+   * lifecycle load has nothing to race.
+   */
+  private onPagerNav(action: () => Promise<void>): void {
+    if (this.agentWindow.loading || (this.agentWindow.state === 'paged' && this.agentsLoading)) {
+      return;
+    }
+    void action();
+  }
+
+  private onPagerSizeChange(size: AgentPagerPageSize): void {
+    this.pagerPageSize = size;
+    this.agentWindow.setViewState({ pageSize: size });
+    void this.syncAgentsForViewState();
   }
 
   private renderAgentRow(agent: Agent) {

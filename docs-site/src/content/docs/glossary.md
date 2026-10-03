@@ -174,6 +174,10 @@ _Avoid_: rate limits, usage caps
 ### LimitDefinition
 A seeded system or custom limit configuration that defines a quota boundary within the Quota System.
 
+### Runtime Broker Settings
+A settings document on the Hub for one Runtime Broker (`/api/v1/runtime-brokers/{id}/settings`). Its first key, `maxAgents`, overrides the `max_agents_per_broker` limit for that Runtime Broker. The effective cap resolves from the Runtime Broker's setting, then an entitlement binding, then the hub default.
+_Avoid_: Broker Settings (bare "broker"); an entitlement binding scoped to a Runtime Broker (the retired way to set a cap for one Runtime Broker)
+
 ## Messaging
 
 ### Conversation
@@ -310,9 +314,6 @@ A named authority tier (one of `none`, `readonly`, `baseline`, or `full`) assign
 
 ### Group
 A named collection of Hub users (and nested groups) used by the Hub permissions system to assign access. This is the primary meaning of "group" in Scion.
-
-### User Access Token (UAT)
-A scoped, revocable bearer token (prefixed with `scion_pat_`) linked to a user account and used for non-interactive Hub authentication (e.g., CLI, CI/CD pipelines, desktop app integration). Every UAT is scoped to a single project and carries a specific list of action permissions (scopes).
 
 ### Owner-Based Access Control
 An authorization model where certain resources (such as scheduled events, recurring schedules, and individual agents) are strictly restricted so they can only be viewed, updated, deleted, or managed by their respective creator (the "owner") or system-wide administrators. Enforced via owner-ID validation at the API layer.

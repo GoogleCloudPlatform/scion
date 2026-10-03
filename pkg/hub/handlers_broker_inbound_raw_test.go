@@ -160,7 +160,7 @@ func TestHandleBrokerInbound_RawRejectedWithResolvableSender(t *testing.T) {
 		Updated:   time.Now(),
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
-	srv.createProjectMembersGroup(ctx, project)
+	srv.seedProjectCreatorMembership(ctx, project)
 	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
 
 	agent := &store.Agent{
@@ -282,9 +282,20 @@ func TestHandleBrokerInbound_RawRejectedBeforeTopicParsing(t *testing.T) {
 // rejected before any log line is emitted, this pins the invariant that no
 // code path between decode and rejection writes the raw body to any log.
 func TestHandleBrokerInbound_LogCapture_NoRawContentExposed(t *testing.T) {
+	// captureSlog must run before testServer: testServer's New() call binds
+	// the Server's subsystem loggers (logging.Subsystem) to whatever
+	// slog.Default() is at that moment. That binding does not follow a
+	// later slog.SetDefault swap, so capturing afterward could leave logs
+	// written through a subsystem logger unobserved by buf.
+	buf := captureSlog(t)
 	srv, s := testServer(t)
 	ctx := context.Background()
-	buf := captureSlog(t)
+
+	// Positive control: New() unconditionally logs during construction, so
+	// a capture installed before it must already have observed something.
+	// This is the part that a capture-after-construct ordering bug (the
+	// regression this test guards against) would silently defeat.
+	requireLogCaptureLive(t, buf, serverConstructionLogLine)
 
 	const secret = "BROKER-INBOUND-RAW-SECRET-7Q3ZK9"
 
@@ -334,6 +345,11 @@ func TestHandleBrokerInbound_LogCapture_NoRawContentExposed(t *testing.T) {
 	srv.mux.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusUnprocessableEntity, rec.Code)
 
+	// This control confirms the rejection path's own log line (writeError
+	// logs 4xx responses at Debug) reached buf. It does not guard against
+	// the capture-ordering regression; the construction control above does.
+	requireLogCaptureLive(t, buf, "API client error")
+
 	assert.NotContains(t, rec.Body.String(), secret, "raw content must not appear in the error response")
 	assert.NotContains(t, buf.String(), secret, "raw content must not appear in captured logs")
 }
@@ -343,8 +359,20 @@ func TestHandleBrokerInbound_LogCapture_NoRawContentExposed(t *testing.T) {
 // user: prefix" validation — a raw message with a malformed sender still
 // gets the raw-specific 422, not the generic 400 prefix error.
 func TestHandleBrokerInboundRouted_RawRejectedBeforeSenderPrefixCheck(t *testing.T) {
+	// captureSlog must run before testServer: testServer's New() call binds
+	// the Server's subsystem loggers (logging.Subsystem) to whatever
+	// slog.Default() is at that moment. That binding does not follow a
+	// later slog.SetDefault swap, so capturing afterward could leave logs
+	// written through a subsystem logger unobserved by buf.
+	buf := captureSlog(t)
 	srv, s := testServer(t)
 	ctx := context.Background()
+
+	// Positive control: New() unconditionally logs during construction, so
+	// a capture installed before it must already have observed something.
+	// This is the part that a capture-after-construct ordering bug (the
+	// regression this test guards against) would silently defeat.
+	requireLogCaptureLive(t, buf, serverConstructionLogLine)
 
 	project := &store.Project{
 		ID:      tid("proj-routed-raw"),
@@ -357,7 +385,6 @@ func TestHandleBrokerInboundRouted_RawRejectedBeforeSenderPrefixCheck(t *testing
 
 	dispatcher := &recordingDispatcher{}
 	srv.SetDispatcher(dispatcher)
-	buf := captureSlog(t)
 
 	// Assert unchanged message/conversation counts (before/after) instead
 	// of looping over persisted rows checking body text — a stronger proof
@@ -402,6 +429,11 @@ func TestHandleBrokerInboundRouted_RawRejectedBeforeSenderPrefixCheck(t *testing
 	assert.Equal(t, convCountBefore, countStoreConversations(t, s, ctx),
 		"rejected routed raw message must not create a conversation")
 
+	// This control confirms the rejection path's own log line (writeError
+	// logs 4xx responses at Debug) reached buf. It does not guard against
+	// the capture-ordering regression; the construction control above does.
+	requireLogCaptureLive(t, buf, "API client error")
+
 	// Rejected-case log/error-body secret capture for the routed inbound
 	// route.
 	assert.NotContains(t, rec.Body.String(), secret, "rejected routed raw content must not appear in the error response")
@@ -431,4 +463,89 @@ func TestHandleBrokerInboundRouted_RawRejected(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
 	assert.Equal(t, string(MessageDenialRawBrokerIngressUnsupported), errResp.Error.Details["reason"])
 	assert.Empty(t, env.dispatcher.getCalls())
+}
+
+// TestHandleBrokerInbound_RawCaseVariant_Rejected covers a gap:
+// req.Message.Raw is an ordinary typed bool field
+// (messages.StructuredMessage.Raw, tag "raw"), and encoding/json's field
+// matching is case-insensitive, so "RAW"/"Raw" spellings already populate it
+// — this locks that in with a hand-built body (a struct-marshaled request
+// can only ever produce the lowercase tag).
+func TestHandleBrokerInbound_RawCaseVariant_Rejected(t *testing.T) {
+	for _, key := range []string{"RAW", "Raw"} {
+		t.Run(key, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+
+			project := &store.Project{
+				ID: tid("proj-broker-raw-case-" + key), Slug: "broker-raw-case-" + key,
+				Name: "Broker Raw Case Test", Created: time.Now(), Updated: time.Now(),
+			}
+			require.NoError(t, s.CreateProject(ctx, project))
+
+			agent := &store.Agent{
+				ID: tid("agent-broker-raw-case-" + key), Slug: "broker-raw-case-agent-" + key,
+				Name: "Broker Raw Case Agent", ProjectID: project.ID, Phase: "running",
+				MessageMode: store.MessageModeProject, StateVersion: 1,
+				Created: time.Now(), Updated: time.Now(),
+			}
+			require.NoError(t, s.CreateAgent(ctx, agent))
+
+			dispatcher := &recordingDispatcher{}
+			srv.SetDispatcher(dispatcher)
+
+			topic := "scion.project." + project.ID + ".agent." + agent.Slug + ".messages"
+			body := []byte(`{"topic":"` + topic + `","message":{"version":1,"timestamp":"2026-01-01T00:00:00Z","sender":"user:does-not-exist@example.com","recipient":"agent:` + agent.Slug + `","msg":"hi","type":"instruction","` + key + `":true}}`)
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/broker/inbound", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("test-broker")))
+
+			rec := httptest.NewRecorder()
+			srv.mux.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "body: %s", rec.Body.String())
+			var errResp ErrorResponse
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+			assert.Equal(t, string(MessageDenialRawBrokerIngressUnsupported), errResp.Error.Details["reason"])
+			assert.Empty(t, dispatcher.getCalls())
+		})
+	}
+}
+
+// TestHandleBrokerInboundRouted_RawCaseVariant_Rejected is
+// TestHandleBrokerInbound_RawCaseVariant_Rejected for the routed endpoint,
+// with the zero-side-effects spy
+// (recordingDispatcher) asserted too.
+func TestHandleBrokerInboundRouted_RawCaseVariant_Rejected(t *testing.T) {
+	for _, key := range []string{"RAW", "Raw"} {
+		t.Run(key, func(t *testing.T) {
+			srv, s := testServer(t)
+			ctx := context.Background()
+
+			project := &store.Project{
+				ID: tid("proj-routed-raw-case-" + key), Slug: "routed-raw-case-" + key,
+				Name: "Routed Raw Case Test", Created: time.Now(), Updated: time.Now(),
+			}
+			require.NoError(t, s.CreateProject(ctx, project))
+
+			dispatcher := &recordingDispatcher{}
+			srv.SetDispatcher(dispatcher)
+
+			body := []byte(`{"project_id":"` + project.ID + `","message":{"version":1,"sender":"user:nobody@example.com","msg":"hi","type":"instruction","` + key + `":true}}`)
+
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/broker/inbound/routed", bytes.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			req = req.WithContext(contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("test-broker")))
+
+			rec := httptest.NewRecorder()
+			srv.mux.ServeHTTP(rec, req)
+
+			require.Equal(t, http.StatusUnprocessableEntity, rec.Code, "body: %s", rec.Body.String())
+			var errResp ErrorResponse
+			require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+			assert.Equal(t, string(MessageDenialRawBrokerIngressUnsupported), errResp.Error.Details["reason"])
+			assert.Empty(t, dispatcher.getCalls())
+		})
+	}
 }

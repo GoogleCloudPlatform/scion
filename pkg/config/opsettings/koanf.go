@@ -68,6 +68,13 @@ var layer0Prefixes = []string{
 	"server.plugins",
 	// Native chat — routes are registered at startup, so toggling it needs a restart.
 	"server.native_chat",
+	// Async agent create (design §3.7) — the reaper's dedicated scheduler
+	// ticker and the clamp on LaunchTimeout are both established at startup.
+	"server.hub.async_agent_launch",
+	"server.hub.launch_timeout",
+	"server.hub.launch_keepalive_seconds",
+	// Missing-container reconcile grace — read into ServerConfig at startup.
+	"server.hub.missing_agent_grace",
 }
 
 // isLayer0Key reports whether the given koanf key belongs to the Layer-0
@@ -115,6 +122,9 @@ var koanfPathToJSONField = map[string]map[string]string{
 	"quotas": {
 		"quotas.enforce_broker_quotas": "enforce_broker_quotas",
 	},
+	"agent_secrets": {
+		"agent_secrets.user_scope_only": "user_scope_only",
+	},
 	"project_defaults": {
 		"project_defaults.default_scratchpad": "default_scratchpad",
 	},
@@ -158,6 +168,9 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 	},
 	"quotas": {
 		"enforce_broker_quotas": "quotas.enforce_broker_quotas",
+	},
+	"agent_secrets": {
+		"user_scope_only": "agent_secrets.user_scope_only",
 	},
 	"project_defaults": {
 		"default_scratchpad": "project_defaults.default_scratchpad",

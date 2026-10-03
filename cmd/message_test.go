@@ -22,8 +22,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
@@ -2994,6 +2996,266 @@ func TestMessageCmd_RunE_CrossProjectWithoutRaw_ReachesHub(t *testing.T) {
 	require.Len(t, *sent, 1, "the cross-project send must reach the mock hub")
 	assert.Equal(t, targetAgentID, (*sent)[0].AgentName)
 	assert.Equal(t, "hello", (*sent)[0].Message)
+}
+
+// TestMessageCmd_RunE_Raw_PostsToKeysRoute proves `scion message --raw`
+// (same-project, Hub mode) is a thin alias of the keys client: the request
+// reaches the dedicated /keys route with the identical body `scion keys`
+// itself sends, never /message and never a Raw StructuredMessage. Hermetic:
+// HOME/cwd are redirected to scratch dirs and SCION_HUB_ENDPOINT points at
+// the mock server.
+func TestMessageCmd_RunE_Raw_PostsToKeysRoute(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+	restore := resetMessageFlags()
+	defer restore()
+	clearHubContextEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	projectID := "own-project-id"
+	resp := agentkeys.Response{Status: agentkeys.StatusDispatched, OperationID: "op-msg-raw", AgentID: "agent-id-1"}
+	server, captured := newKeysMockHubServer(t, projectID, resp, http.StatusOK)
+	defer server.Close()
+
+	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+	t.Setenv("SCION_PROJECT", "own-project")
+	t.Setenv("SCION_PROJECT_ID", projectID)
+	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
+
+	cmd := newProjectFlagCommand(t)
+	msgRaw = true
+
+	err := messageCmd.RunE(cmd, []string{"target-agent", "Escape"})
+	require.NoError(t, err)
+
+	require.Len(t, *captured, 1)
+	got := (*captured)[0]
+	assert.Equal(t, "/api/v1/projects/"+projectID+"/agents/target-agent/keys", got.Path,
+		"message --raw must reach the dedicated /keys route, never /message")
+	assert.Equal(t, "Escape", got.Keys)
+}
+
+// TestMessageCmd_RunE_RawNotify_Refused proves --raw and --notify are
+// rejected together before any send: keys has no notification-subscription
+// concept (.design/agent-keys-contract.md), so this combination must fail
+// the same way --raw+--wake already does.
+func TestMessageCmd_RunE_RawNotify_Refused(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+	restore := resetMessageFlags()
+	defer restore()
+
+	server, hits := newCountingHubServer(t)
+	defer server.Close()
+	setHermeticHubEnv(t, server)
+
+	cmd := newProjectFlagCommand(t)
+	msgRaw = true
+	msgNotify = true
+
+	err := messageCmd.RunE(cmd, []string{"target-agent", "Escape"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--raw cannot be combined with --notify")
+	assert.EqualValues(t, 0, atomic.LoadInt32(hits), "the refusal must fire before any Hub request")
+}
+
+// TestMessageCmd_RunE_RawAtAgent_PostsToKeysRoute proves a same-project
+// `@agent` reference with --raw reaches the dedicated /keys route exactly
+// once, never /message.
+func TestMessageCmd_RunE_RawAtAgent_PostsToKeysRoute(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+	restore := resetMessageFlags()
+	defer restore()
+	clearHubContextEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+
+	projectID := "own-project-id"
+	resp := agentkeys.Response{Status: agentkeys.StatusDispatched, OperationID: "op-at-agent", AgentID: "agent-id-1"}
+	server, captured := newKeysMockHubServer(t, projectID, resp, http.StatusOK)
+	defer server.Close()
+
+	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+	t.Setenv("SCION_PROJECT", "own-project")
+	t.Setenv("SCION_PROJECT_ID", projectID)
+	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
+
+	cmd := newProjectFlagCommand(t)
+	msgRaw = true
+
+	err := messageCmd.RunE(cmd, []string{"@target-agent", "Escape"})
+	require.NoError(t, err)
+
+	require.Len(t, *captured, 1, "exactly one request total: proves no separate /message request was also made")
+	got := (*captured)[0]
+	assert.Equal(t, "/api/v1/projects/"+projectID+"/agents/target-agent/keys", got.Path,
+		"@agent --raw must reach the dedicated /keys route, never /message")
+	assert.Equal(t, "Escape", got.Keys)
+}
+
+// newCountingHubServer answers /healthz and any other route successfully
+// (so a regression that reaches the Hub does not itself crash the test),
+// while counting every request received. Used to prove a --raw refusal
+// returns before any Hub call is attempted at all: a test can then assert
+// zero requests, rather than only matching the error text.
+func newCountingHubServer(t *testing.T) (*httptest.Server, *int32) {
+	t.Helper()
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/healthz" {
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(agentkeys.Response{Status: agentkeys.StatusDispatched})
+	}))
+	return server, &hits
+}
+
+// setHermeticHubEnv points every hub-resolution env var at server and
+// isolates HOME/cwd, so resolving a project/sender never reaches outside
+// this test (the ambient container otherwise sets a real SCION_HUB_ENDPOINT
+// and credentials).
+func setHermeticHubEnv(t *testing.T, server *httptest.Server) {
+	t.Helper()
+	clearHubContextEnv(t)
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+	t.Setenv("SCION_AGENT_NAME", "sender-agent")
+	t.Setenv("SCION_PROJECT", "own-project")
+	t.Setenv("SCION_PROJECT_ID", "own-project-id")
+	t.Setenv("SCION_AUTH_TOKEN", "test-agent-token")
+}
+
+// TestMessageCmd_RunE_RawConvRef_Refused proves conv:<uuid> and #<thread> —
+// the reference kinds with no single-agent-keys equivalent — are refused
+// with --raw before any request is made, never silently sent as a Raw
+// StructuredMessage via sendMessageViaConversation.
+func TestMessageCmd_RunE_RawConvRef_Refused(t *testing.T) {
+	cases := []struct {
+		name      string
+		recipient string
+	}{
+		{"conversation", "conv:11111111-1111-1111-1111-111111111111"},
+		{"thread", "#general"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := saveMessageTestState()
+			defer orig.restore()
+			restore := resetMessageFlags()
+			defer restore()
+
+			server, hits := newCountingHubServer(t)
+			defer server.Close()
+			setHermeticHubEnv(t, server)
+
+			cmd := newProjectFlagCommand(t)
+			msgRaw = true
+			err := messageCmd.RunE(cmd, []string{tc.recipient, "Escape"})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "--raw cannot be used with")
+			assert.EqualValues(t, 0, atomic.LoadInt32(hits), "the refusal must fire before any Hub request")
+		})
+	}
+}
+
+// TestMessageCmd_RunE_RawIncompatibleFlags_Refused proves --raw rejects
+// --interrupt, --channel and --thread-id, each before any request is made.
+func TestMessageCmd_RunE_RawIncompatibleFlags_Refused(t *testing.T) {
+	t.Run("interrupt", func(t *testing.T) {
+		orig := saveMessageTestState()
+		defer orig.restore()
+		restore := resetMessageFlags()
+		defer restore()
+
+		server, hits := newCountingHubServer(t)
+		defer server.Close()
+		setHermeticHubEnv(t, server)
+
+		cmd := newProjectFlagCommand(t)
+		msgRaw = true
+		msgInterrupt = true
+		err := messageCmd.RunE(cmd, []string{"target-agent", "Escape"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--raw cannot be combined with --interrupt")
+		assert.EqualValues(t, 0, atomic.LoadInt32(hits), "the refusal must fire before any Hub request")
+	})
+
+	t.Run("channel", func(t *testing.T) {
+		orig := saveMessageTestState()
+		defer orig.restore()
+		restore := resetMessageFlags()
+		defer restore()
+
+		server, hits := newCountingHubServer(t)
+		defer server.Close()
+		setHermeticHubEnv(t, server)
+
+		cmd := newProjectFlagCommand(t)
+		msgRaw = true
+		msgChannel = "general"
+		err := messageCmd.RunE(cmd, []string{"target-agent", "Escape"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--raw cannot be combined with --channel")
+		assert.EqualValues(t, 0, atomic.LoadInt32(hits), "the refusal must fire before any Hub request")
+	})
+
+	t.Run("thread_id", func(t *testing.T) {
+		orig := saveMessageTestState()
+		defer orig.restore()
+		restore := resetMessageFlags()
+		defer restore()
+
+		server, hits := newCountingHubServer(t)
+		defer server.Close()
+		setHermeticHubEnv(t, server)
+
+		cmd := newProjectFlagCommand(t)
+		msgRaw = true
+		msgChannel = "general" // --thread-id requires --channel to reach the --raw check
+		msgThreadID = "abc"
+		err := messageCmd.RunE(cmd, []string{"target-agent", "Escape"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--raw cannot be combined with --thread-id")
+		assert.EqualValues(t, 0, atomic.LoadInt32(hits), "the refusal must fire before any Hub request")
+	})
+}
+
+// TestMessageCmd_RunE_Raw_LocalMode_UsesSendKeysLocal proves local-mode
+// `message --raw` is wired to sendKeysLocal, never the legacy mgr.MessageRaw
+// primitive: with every hub-context env var cleared (this test process's own
+// ambient container otherwise sets SCION_HUB_ENDPOINT/SCION_PROJECT_ID,
+// which config.IsHubContext would treat as enough to resolve a project
+// anyway), resolveLocalKeysTarget's own "could not resolve a project"
+// refusal fires before any runtime call — a precondition mgr.MessageRaw does
+// not share, so reaching this wording is positive proof of the routing.
+func TestMessageCmd_RunE_Raw_LocalMode_UsesSendKeysLocal(t *testing.T) {
+	orig := saveMessageTestState()
+	defer orig.restore()
+	restore := resetMessageFlags()
+	defer restore()
+	t.Setenv("SCION_AGENT_NAME", "")
+	t.Setenv("HOME", "")
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+	t.Setenv("SCION_HUB_URL", "")
+	t.Setenv("SCION_PROJECT_ID", "")
+	t.Chdir(t.TempDir())
+
+	noHub = true
+	msgRaw = true
+
+	cmd := newProjectFlagCommand(t)
+	err := messageCmd.RunE(cmd, []string{"target-agent", "Escape"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "could not resolve a project",
+		"local --raw must go through sendKeysLocal's own project-scoped resolution, never mgr.MessageRaw")
 }
 
 // TestMessageCmd_RunE_ConvRefCrossProjectMismatch pins the conv: + --project

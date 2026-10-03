@@ -13,6 +13,7 @@ import (
 	"entgo.io/ent/dialect/sql"
 	"entgo.io/ent/dialect/sql/sqlgraph"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstraint"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstrainthistory"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accesspolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentcredential"
@@ -75,6 +76,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/usagereservation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/user"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/useraccesstoken"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/userterminalworkspace"
 )
 
 // ent aliases to avoid import conflicts in user's code.
@@ -136,6 +138,7 @@ func checkColumn(t, c string) error {
 	initCheck.Do(func() {
 		columnCheck = sql.NewColumnCheck(map[string]func(string) bool{
 			accessconstraint.Table:         accessconstraint.ValidColumn,
+			accessconstrainthistory.Table:  accessconstrainthistory.ValidColumn,
 			accesspolicy.Table:             accesspolicy.ValidColumn,
 			agent.Table:                    agent.ValidColumn,
 			agentcredential.Table:          agentcredential.ValidColumn,
@@ -198,6 +201,7 @@ func checkColumn(t, c string) error {
 			usagereservation.Table:         usagereservation.ValidColumn,
 			user.Table:                     user.ValidColumn,
 			useraccesstoken.Table:          useraccesstoken.ValidColumn,
+			userterminalworkspace.Table:    userterminalworkspace.ValidColumn,
 		})
 	})
 	return columnCheck(t, c)

@@ -127,6 +127,7 @@ var identityInventoryExpectation = map[string]bool{
 	"FederatedUserIdentity":    false,
 	"FederatedAgentIdentity":   false,
 	"FederatedServiceIdentity": false,
+	"hubDeliveryIdentity":      false,
 }
 
 // identitySourceInventory is a structural (AST-level) description of the
@@ -381,6 +382,18 @@ func TestIdentityClassification_EveryTypeHasExplicitOutcome(t *testing.T) {
 				wantAttested:       true,
 			},
 			{
+				name: "hubDeliveryIdentity",
+				identity: &hubDeliveryIdentity{
+					agentID: tid("classify-hd-agent"), projectID: tid("classify-project"),
+					boundAgentID: tid("classify-hd-agent"), ancestry: []string{tid("classify-user")},
+					evidence: &storedAgentIdentity{agent: &store.Agent{ID: tid("classify-hd-agent"),
+						ProjectID: tid("classify-project"), Ancestry: []string{tid("classify-user")}}},
+				},
+				wantPrincipalKind:  PrincipalKindAgent,
+				wantCredentialKind: CredentialKindHubDelivery,
+				wantAttested:       false, // even though evidence alone is attested
+			},
+			{
 				name:               "brokerIdentityImpl",
 				identity:           NewBrokerIdentity(tid("classify-broker")),
 				wantPrincipalKind:  PrincipalKindBroker,
@@ -475,6 +488,17 @@ type countingAuditEmitter struct {
 
 func (e *countingAuditEmitter) EmitDecisionAudit(context.Context, *store.DecisionAuditRecord) {
 	e.calls++
+}
+
+// recordingAuditEmitter records every DecisionAuditRecord passed to it,
+// without touching a store, so a test can assert on record fields (not just
+// the call count) for Decide's fail-closed entry paths.
+type recordingAuditEmitter struct {
+	records []*store.DecisionAuditRecord
+}
+
+func (e *recordingAuditEmitter) EmitDecisionAudit(_ context.Context, record *store.DecisionAuditRecord) {
+	e.records = append(e.records, record)
 }
 
 // TestDecide_UnrecognizedDerivedPrincipalKindDenied: Decide denies a nil
@@ -649,6 +673,18 @@ func TestDecide_SuppliedKindCannotReclassifyIdentity(t *testing.T) {
 				Action:    ActionRead,
 			},
 			wantDeny: "principal id does not match identity",
+		},
+		{
+			// Both the supplied Kind and the supplied ID mismatch the
+			// identity's own derivation. The kind check must run before the
+			// ID check, so this denies for the kind reason, not the ID one.
+			name: "interactive user with both a supplied principal kind and ID that do not match",
+			request: AuthzRequest{
+				Principal: PrincipalContext{Kind: PrincipalKindAgent, ID: "some-other-id", Identity: interactiveUser},
+				Resource:  Resource{Type: "agent", ID: tid("mismatch-target")},
+				Action:    ActionRead,
+			},
+			wantDeny: "principal kind does not match identity",
 		},
 	}
 
@@ -840,7 +876,7 @@ func TestSuppliedCredentialCompatible_PairMatrix(t *testing.T) {
 	suppliedKinds := []CredentialKind{
 		CredentialKindInteractive, CredentialKindUAT, CredentialKindAgentJWT,
 		CredentialKindFederation, CredentialKindBroker, CredentialKindDev,
-		CredentialKind("bogus"),
+		CredentialKindHubDelivery, CredentialKind("bogus"),
 	}
 
 	rows := []struct {
@@ -856,6 +892,7 @@ func TestSuppliedCredentialCompatible_PairMatrix(t *testing.T) {
 		{"user/uat (ScopedUserIdentity): a real UAT follows equality only, not the exception", PrincipalKindUser, CredentialKindUAT, nil},
 		{"dev/dev (DevUser): dev is deliberately excluded from the UAT exception", PrincipalKindDev, CredentialKindDev, nil},
 		{"agent/agent_jwt", PrincipalKindAgent, CredentialKindAgentJWT, nil},
+		{"agent/hub_delivery", PrincipalKindAgent, CredentialKindHubDelivery, nil},
 		{"federated_user/federation", PrincipalKindFederatedUser, CredentialKindFederation, nil},
 		{"federated_agent/federation", PrincipalKindFederatedAgent, CredentialKindFederation, nil},
 		{"federated_service/federation", PrincipalKindFederatedService, CredentialKindFederation, nil},
@@ -889,6 +926,7 @@ func TestSessionGates_DenyNonSessionCredentials(t *testing.T) {
 	devUser := NewDevUser(DevUserConfig{Username: "dev", DisplayName: "Dev", Email: "dev@localhost"})
 	scopedUAT := NewScopedUserIdentityWithCredentialID(interactiveUser, tid("session-gate-project"), []string{"agent:read"}, tid("session-gate-cred"))
 	agentJWT := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: "agent-1"}}}
+	hubDelivery := &hubDeliveryIdentity{agentID: "session-gate-hub-delivery-agent", boundAgentID: "session-gate-hub-delivery-agent"}
 	unknown := &unclassifiedMockIdentity{id: tid("session-gate-unknown")}
 
 	svc := &UserAccessTokenService{}
@@ -908,6 +946,7 @@ func TestSessionGates_DenyNonSessionCredentials(t *testing.T) {
 		{"dev session", devUser, DevUserID, false},
 		{"UAT credential", scopedUAT, userID, true},
 		{"agent JWT credential", agentJWT, "agent-1", true},
+		{"hub_delivery credential", hubDelivery, "session-gate-hub-delivery-agent", true},
 		{"unrecognized identity", unknown, tid("session-gate-unknown"), true},
 		{"nil identity", nil, tid("session-gate-nonexistent"), true},
 	}
@@ -1099,4 +1138,108 @@ func TestDecide_UnmarkedAgentMockDeniesBeforeRelationshipOrDelegationChecks(t *t
 		assert.False(t, decision.Allowed)
 		assert.Equal(t, "unrecognized principal kind", decision.Reason)
 	})
+}
+
+// =============================================================================
+// Typed-nil identity fail-closed classification
+// =============================================================================
+
+// TestIdentityClassification_TypedNilTreatedAsMissing covers, for every
+// concrete type in identityInventoryExpectation, an Identity interface value
+// that is not == nil but holds a nil pointer of that type (e.g. an Identity
+// holding (*ScopedUserIdentity)(nil)). A type assertion or type switch
+// against such a value still succeeds with a nil concrete result, so a
+// classifier that reads a field or calls a method on it before checking for
+// this case panics instead of classifying (see isNilIdentity). Every case
+// here must: not panic in principalContextForIdentity,
+// credentialContextForIdentity, AncestryIsHubAttested or Decide; classify as
+// the empty principal context; return false from AncestryIsHubAttested; and
+// deny in Decide with reason "missing principal", the same path a nil
+// interface takes, emitting exactly one audit record with an empty derived
+// PrincipalID.
+//
+// credentialContextForIdentity returns CredentialContext{Kind:
+// CredentialKindUAT} (zero Ceiling) for a typed-nil *ScopedUserIdentity
+// rather than the empty context (ptone/scion#2143; see authz.go). Decide
+// still denies it with "missing principal", since the Principal check runs
+// first.
+func TestIdentityClassification_TypedNilTreatedAsMissing(t *testing.T) {
+	for name := range identityInventoryExpectation {
+		t.Run(name, func(t *testing.T) {
+			var identity Identity
+			switch name {
+			case "AuthenticatedUser":
+				identity = (*AuthenticatedUser)(nil)
+			case "ScopedUserIdentity":
+				identity = (*ScopedUserIdentity)(nil)
+			case "DevUser":
+				identity = (*DevUser)(nil)
+			case "agentIdentityWrapper":
+				identity = (*agentIdentityWrapper)(nil)
+			case "storedAgentIdentity":
+				identity = (*storedAgentIdentity)(nil)
+			case "peerAgentIdentity":
+				identity = (*peerAgentIdentity)(nil)
+			case "explainAgentIdentity":
+				identity = (*explainAgentIdentity)(nil)
+			case "hubDeliveryIdentity":
+				identity = (*hubDeliveryIdentity)(nil)
+			case "brokerIdentityImpl":
+				identity = (*brokerIdentityImpl)(nil)
+			case "FederatedUserIdentity":
+				identity = (*FederatedUserIdentity)(nil)
+			case "FederatedAgentIdentity":
+				identity = (*FederatedAgentIdentity)(nil)
+			case "FederatedServiceIdentity":
+				identity = (*FederatedServiceIdentity)(nil)
+			default:
+				t.Fatalf("no typed-nil case constructed for inventory type %q; add one here", name)
+			}
+			// identity != nil (a plain Go interface comparison, not
+			// require.NotNil/assert.NotNil) is the correct check here:
+			// testify's NotNil uses reflection to unwrap pointer kinds and
+			// reports a typed-nil pointer as nil, which is exactly the
+			// distinction this table is built to exercise. A plain interface
+			// comparison is true for every case constructed above, since
+			// each carries a concrete type word even though the pointer
+			// value is nil.
+			require.True(t, identity != nil, "the interface value under test must be typed-nil, not a nil interface")
+
+			require.NotPanics(t, func() {
+				principal := principalContextForIdentity(identity)
+				assert.Equal(t, PrincipalContext{}, principal, "typed-nil identity must classify as the empty principal context")
+			}, "principalContextForIdentity must not panic on a typed-nil %s", name)
+
+			wantCredential := CredentialContext{}
+			if name == "ScopedUserIdentity" {
+				// Typed-nil *ScopedUserIdentity keeps a UAT credential with
+				// a zero ceiling; see above.
+				wantCredential = CredentialContext{Kind: CredentialKindUAT}
+			}
+			require.NotPanics(t, func() {
+				credential := credentialContextForIdentity(identity)
+				assert.Equal(t, wantCredential, credential, "typed-nil identity must classify into the expected credential context")
+			}, "credentialContextForIdentity must not panic on a typed-nil %s", name)
+
+			require.NotPanics(t, func() {
+				assert.False(t, AncestryIsHubAttested(identity), "typed-nil identity must not be hub-attested")
+			}, "AncestryIsHubAttested must not panic on a typed-nil %s", name)
+
+			emitter := &recordingAuditEmitter{}
+			authz := &AuthzService{decisionAuditEmitter: emitter}
+			var decision Decision
+			require.NotPanics(t, func() {
+				decision = authz.Decide(context.Background(), AuthzRequest{
+					Principal: PrincipalContext{Identity: identity},
+					Resource:  Resource{Type: "agent", ID: tid("typed-nil-target-" + name)},
+					Action:    ActionRead,
+				})
+			}, "Decide must not panic on a typed-nil %s", name)
+
+			assert.False(t, decision.Allowed)
+			assert.Equal(t, "missing principal", decision.Reason, "a typed-nil identity must take the same path as a nil interface")
+			require.Len(t, emitter.records, 1, "exactly one audit record must be emitted")
+			assert.Equal(t, "", emitter.records[0].PrincipalID, "the audit record's derived principal ID must be empty")
+		})
+	}
 }

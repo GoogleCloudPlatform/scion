@@ -300,6 +300,10 @@ type BrokerCapabilities struct {
 	// reprovision primitive (design §3.4; store.BrokerCapabilities.Reprovision
 	// and runtimebroker.BrokerCapabilities.Reprovision are its counterparts).
 	Reprovision bool `json:"reprovision"`
+	// AsyncLaunch indicates the broker understands the non-blocking agent
+	// create path and the launch-report protocol (design t1-async-create-v11.md
+	// §3.2, §7 P1b-1).
+	AsyncLaunch bool `json:"asyncLaunch"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
@@ -309,6 +313,11 @@ type BrokerProfile struct {
 	Available bool   `json:"available"`
 	Context   string `json:"context,omitempty"`
 	Namespace string `json:"namespace,omitempty"`
+	// Attach reports whether this profile's runtime supports interactive
+	// attach, mirroring store.BrokerProfile.Attach. A pointer: nil means
+	// the field was never reported (an older broker or profile record),
+	// which must be read as supported, not as an explicit false.
+	Attach *bool `json:"attach,omitempty"`
 }
 
 // BrokerProjectInfo describes a project from a broker's perspective.
@@ -398,6 +407,7 @@ type UserPreferences struct {
 	DefaultTemplate string `json:"defaultTemplate,omitempty"`
 	DefaultProfile  string `json:"defaultProfile,omitempty"`
 	Theme           string `json:"theme,omitempty"`
+	Timezone        string `json:"timezone,omitempty"`
 }
 
 // EnvVar represents an environment variable from the Hub API.
@@ -483,16 +493,13 @@ type CloneProjectRequest struct {
 
 // HarnessConfigData holds harness-specific configuration.
 type HarnessConfigData struct {
-	Harness                 string            `json:"harness,omitempty"`
-	Image                   string            `json:"image,omitempty"`
-	User                    string            `json:"user,omitempty"`
-	Model                   string            `json:"model,omitempty"`
-	Args                    []string          `json:"args,omitempty"`
-	Env                     map[string]string `json:"env,omitempty"`
-	AuthSelectedType        string            `json:"authSelectedType,omitempty"`
-	ModelAliases            map[string]string `json:"modelAliases,omitempty"`
-	ThinkingBudgetMap       map[string]int    `json:"thinkingBudgetMap,omitempty"`
-	ThinkingBudgetFlag      string            `json:"thinkingBudgetFlag,omitempty"`
-	ThinkingBudgetConfigKey string            `json:"thinkingBudgetConfigKey,omitempty"`
-	NoAuthBehavior          string            `json:"noAuthBehavior,omitempty"`
+	Harness          string            `json:"harness,omitempty"`
+	Image            string            `json:"image,omitempty"`
+	User             string            `json:"user,omitempty"`
+	Model            string            `json:"model,omitempty"`
+	Args             []string          `json:"args,omitempty"`
+	Env              map[string]string `json:"env,omitempty"`
+	AuthSelectedType string            `json:"authSelectedType,omitempty"`
+	ModelAliases     map[string]string `json:"modelAliases,omitempty"`
+	NoAuthBehavior   string            `json:"noAuthBehavior,omitempty"`
 }

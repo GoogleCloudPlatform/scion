@@ -30,6 +30,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -462,6 +463,123 @@ func TestSendKeys_HTTP_NoLeakOfDistinctiveSecret(t *testing.T) {
 	})
 }
 
+// spyLogHandler is a minimal slog.Handler that only counts Handle calls, so
+// tests can prove a specific *slog.Logger was never written to — swapping it
+// in for Server.messageLog/dedicatedMessageLog directly, rather than relying
+// on global log capture, isolates the assertion to that one logger.
+type spyLogHandler struct {
+	records int
+}
+
+func (h *spyLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *spyLogHandler) Handle(context.Context, slog.Record) error {
+	h.records++
+	return nil
+}
+func (h *spyLogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *spyLogHandler) WithGroup(string) slog.Handler      { return h }
+
+// TestSendKeys_HTTP_NeverWritesMessageLog covers
+// C§1: "removes the message logger from the keys path entirely": unlike
+// sendMessage, the keys handler must never write to the broker.messages
+// subsystem logger (messageLog) or its dedicated-log override
+// (dedicatedMessageLog), for every outcome shape — success, every sentinel,
+// keys_unsupported, and an ambiguous failure.
+func TestSendKeys_HTTP_NeverWritesMessageLog(t *testing.T) {
+	outcomes := []error{
+		nil,
+		agentkeys.ErrTargetNotFound,
+		agentkeys.ErrAgentNotRunning,
+		agentkeys.ErrTerminalNotReady,
+		agent.ErrKeysUnsupported,
+		fmt.Errorf("%w: %v", agent.ErrKeysNotStarted, context.DeadlineExceeded),
+		errors.New("tmux: some ambiguous failure"),
+	}
+
+	for i, sendErr := range outcomes {
+		t.Run(fmt.Sprintf("outcome_%d", i), func(t *testing.T) {
+			mgr := &mockManager{
+				sendKeysFunc: func(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
+					return sendErr
+				},
+			}
+			srv := newTestServerWithManager(t, mgr)
+
+			messageLogSpy := &spyLogHandler{}
+			srv.messageLog = slog.New(messageLogSpy)
+			dedicatedLogSpy := &spyLogHandler{}
+			srv.dedicatedMessageLog = slog.New(dedicatedLogSpy)
+
+			postKeys(t, srv, "test-agent", "proj-1", agentkeys.BrokerRequest{
+				ProjectID:     "proj-1",
+				AgentID:       "agent-abc",
+				OperationID:   "op-1",
+				ExecuteBefore: time.Now().UTC().Add(10 * time.Second),
+				Keys:          "Enter",
+			})
+
+			if messageLogSpy.records != 0 {
+				t.Errorf("messageLog received %d record(s); the keys path must never write to it", messageLogSpy.records)
+			}
+			if dedicatedLogSpy.records != 0 {
+				t.Errorf("dedicatedMessageLog received %d record(s); the keys path must never write to it", dedicatedLogSpy.records)
+			}
+		})
+	}
+
+	// Also cover the pre-admission validation-rejection path (never reaches
+	// Manager.SendKeys at all), and the oversize-body 413 path.
+	t.Run("validation_rejection", func(t *testing.T) {
+		srv := newTestServerWithManager(t, &mockManager{})
+		messageLogSpy := &spyLogHandler{}
+		srv.messageLog = slog.New(messageLogSpy)
+		dedicatedLogSpy := &spyLogHandler{}
+		srv.dedicatedMessageLog = slog.New(dedicatedLogSpy)
+
+		postKeys(t, srv, "test-agent", "proj-1", agentkeys.BrokerRequest{
+			ProjectID:     "proj-1",
+			AgentID:       "agent-abc",
+			OperationID:   "op-1",
+			ExecuteBefore: time.Now().UTC().Add(10 * time.Second),
+			Keys:          "abc\x00def",
+		})
+
+		if messageLogSpy.records != 0 {
+			t.Errorf("messageLog received %d record(s) on a validation rejection; must never write to it", messageLogSpy.records)
+		}
+		if dedicatedLogSpy.records != 0 {
+			t.Errorf("dedicatedMessageLog received %d record(s) on a validation rejection; must never write to it", dedicatedLogSpy.records)
+		}
+	})
+
+	// Positive control. None of the
+	// zero-record assertions above prove the spy logger is actually capable
+	// of capturing anything -- a broken swap (e.g. the spy installed on the
+	// wrong field) would silently report zero records regardless. Sending
+	// an ordinary message through the same server's /message route (which
+	// does write to messageLog, unlike keys) confirms the spy is live.
+	t.Run("positive_control_message_path_writes", func(t *testing.T) {
+		srv := newTestServerWithManager(t, &mockManager{})
+		messageLogSpy := &spyLogHandler{}
+		srv.messageLog = slog.New(messageLogSpy)
+
+		body, err := json.Marshal(MessageRequest{Message: "hello"})
+		if err != nil {
+			t.Fatalf("marshal message request: %v", err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/test-agent/message", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200; body: %s", w.Code, w.Body.String())
+		}
+		if messageLogSpy.records == 0 {
+			t.Fatal("positive control failed: expected the ordinary message path to write to messageLog, got zero records -- the spy swap itself may be broken")
+		}
+	})
+}
+
 // TestSendKeys_HTTP_UnsupportedBackend covers the case where a manager
 // whose SendKeys reports the backend does not support keys delivery must
 // produce 422 keys_unsupported, with the response message stating only that
@@ -778,5 +896,114 @@ func TestSendKeys_HTTP_ExecuteBeforeCappedAtAdmissionWindow(t *testing.T) {
 	}
 	if !gotDeadline.Before(before.Add(time.Hour)) {
 		t.Errorf("ctx deadline %v was not capped below the Hub-supplied execute_before (%v)", gotDeadline, before.Add(time.Hour))
+	}
+}
+
+// TestSendKeys_ViaControlChannelDispatch covers: the keys
+// handler reached through the actual control-channel dispatch path
+// (ControlChannelClient.dispatchRequest, with X-Scion-Hub-Connection set —
+// the header the Hub's tunneled requests carry so the server can route to
+// the correct hydrator), end to end in-process, for three outcome shapes:
+// success, a broker-decided outcome (agent not running), and an
+// already-expired admission deadline. This is deliberately not a saturated-
+// semaphore scenario (that is covered in controlchannel_keys_test.go) —
+// here the dispatch path itself (envelope in, response envelope out) is what
+// is under test.
+func TestSendKeys_ViaControlChannelDispatch(t *testing.T) {
+	cases := []struct {
+		name          string
+		sendErr       error
+		executeBefore time.Time
+		wantStatus    int
+		wantOutcome   agentkeys.Outcome
+	}{
+		{
+			name:          "success",
+			sendErr:       nil,
+			executeBefore: time.Now().UTC().Add(10 * time.Second),
+			wantStatus:    http.StatusOK,
+			wantOutcome:   agentkeys.OutcomeDispatched,
+		},
+		{
+			name:          "broker_decided_outcome",
+			sendErr:       agentkeys.ErrAgentNotRunning,
+			executeBefore: time.Now().UTC().Add(10 * time.Second),
+			wantStatus:    http.StatusConflict,
+			wantOutcome:   agentkeys.OutcomeAgentNotRunning,
+		},
+		{
+			name:          "expiry",
+			sendErr:       nil,
+			executeBefore: time.Now().UTC().Add(-1 * time.Second),
+			wantStatus:    http.StatusServiceUnavailable,
+			wantOutcome:   agentkeys.OutcomeKeysUnavailable,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			mgr := &mockManager{
+				sendKeysFunc: func(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
+					called = true
+					return tc.sendErr
+				},
+			}
+			srv := newTestServerWithManager(t, mgr)
+
+			brokerConn, hubConn, cleanup := newWSPair(t)
+			defer cleanup()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			client := &ControlChannelClient{
+				config:         ControlChannelConfig{},
+				conn:           brokerConn,
+				handlers:       srv.Handler(),
+				connectionName: "hub-conn-1",
+				log:            slog.Default(),
+				streams:        make(map[string]*StreamHandler),
+				dispatchSem:    make(chan struct{}, defaultMaxConcurrentDispatches),
+				cancels:        make(map[string]context.CancelFunc),
+				ctx:            ctx,
+				cancel:         cancel,
+			}
+
+			req := keysRequestEnvelope(t, "keys-req-"+tc.name, "test-agent", "proj-1", agentkeys.BrokerRequest{
+				ProjectID:     "proj-1",
+				AgentID:       "agent-abc",
+				OperationID:   "op-1",
+				ExecuteBefore: tc.executeBefore,
+				Keys:          "C-c",
+			})
+
+			client.wg.Add(1)
+			go client.dispatchRequest(brokerConn, req)
+			client.wg.Wait()
+
+			var resp wsprotocol.ResponseEnvelope
+			if err := hubConn.ReadJSON(&resp); err != nil {
+				t.Fatalf("reading response envelope: %v", err)
+			}
+
+			if resp.StatusCode != tc.wantStatus {
+				t.Fatalf("status = %d, want %d; body = %s", resp.StatusCode, tc.wantStatus, resp.Body)
+			}
+			var result agentkeys.BrokerResult
+			if err := json.Unmarshal(resp.Body, &result); err != nil {
+				t.Fatalf("decoding BrokerResult: %v; body = %s", err, resp.Body)
+			}
+			if result.Outcome != tc.wantOutcome {
+				t.Errorf("Outcome = %q, want %q", result.Outcome, tc.wantOutcome)
+			}
+
+			if tc.name == "expiry" && called {
+				t.Error("Manager.SendKeys must not be called once the admission deadline has already passed")
+			}
+			if tc.name != "expiry" && !called {
+				t.Error("expected Manager.SendKeys to be called")
+			}
+		})
 	}
 }

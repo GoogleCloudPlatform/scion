@@ -58,6 +58,19 @@ jobs:
         working-directory: ./web
         run: npm run typecheck
 
+      # The eslint override and lint:e2e-perf script cover the e2e-perf
+      # harness sources; wired into CI so they actually run on every change.
+      - name: Lint browser perf benchmark (e2e-perf)
+        working-directory: ./web
+        run: npm run lint:e2e-perf
+
+      # lib.mjs's pure functions (network-outcome classification, stats,
+      # burst-target selection) have node:test coverage; wire it in so it
+      # actually runs on every change.
+      - name: Test browser perf benchmark (e2e-perf)
+        working-directory: ./web
+        run: npm run test:e2e-perf
+
       - name: Run Web Tests
         working-directory: ./web
         run: npm test
@@ -76,6 +89,9 @@ jobs:
 
       - name: Vet Integration-Tagged Code
         run: make vet-integration
+
+      - name: Vet Integration-Tagged Code (extras)
+        run: make vet-integration-extras
 
       - name: Install ripgrep
         run: |
@@ -174,21 +190,25 @@ jobs:
       # they carry a `//go:build !no_sqlite` constraint because they need a
       # real SQLite-backed store. This job runs that excluded set, untagged,
       # so it is actually compiled and run somewhere that can fail a PR.
+      # perf/bench/seed's own SQLite-backed tests carry the same constraint,
+      # for the same reason (ptone/scion#2393), and are included here too --
+      # see make test-hub-sqlite.
       #
-      # It is scoped to pkg/hub (not the whole module) and runs as its own
-      # parallel job so it doesn't add to the wall-clock time of Build & Test.
-      # Runtime is currently ~12-15 minutes (738-868s measured locally;
-      # GoogleCloudPlatform/scion#2031 hit the old 15m go test timeout at
-      # ~900s). The 25m go test timeout / 30m job timeout give headroom
-      # above that, with the job limit kept above the go test timeout so a
-      # real hang still produces go's goroutine dump instead of a bare job
-      # kill. The longer-term fix is splitting pkg/hub into smaller suites.
+      # It is scoped to pkg/hub and perf/bench/seed (not the whole module)
+      # and runs as its own parallel job so it doesn't add to the
+      # wall-clock time of Build & Test. Runtime is currently ~12-15
+      # minutes (738-868s measured locally; GoogleCloudPlatform/scion#2031
+      # hit the old 15m go test timeout at ~900s). The 25m go test timeout /
+      # 30m job timeout give headroom above that, with the job limit kept
+      # above the go test timeout so a real hang still produces go's
+      # goroutine dump instead of a bare job kill. The longer-term fix is
+      # splitting pkg/hub into smaller suites.
       #
       # Four tests are skipped: they have known, pre-existing failures
       # unrelated to this job (ptone/scion#1847) that already reproduce on
       # main today under `go test ./pkg/hub/...`. They are not new failures
       # caused by newly-compiled tests. Remove the -skip once #1847 is fixed.
-      - name: Run pkg/hub tests (SQLite-enabled)
+      - name: Run pkg/hub + perf/bench/seed tests (SQLite-enabled)
         run: make test-hub-sqlite
 
   launch-store-postgres-tests:
@@ -223,12 +243,14 @@ jobs:
 
       # design t1-async-create-v11.md §6, "Postgres in CI": runs
       # pkg/store/integrationtest (the existing Postgres-only harness) plus
-      # the new T1 launch store/reaper tests in pkg/store/entadapter, which
-      # run unchanged against SQLite (the default `go test` build) and
-      # Postgres (here, via -tags integration) to prove dialect parity. This
-      # job owns every Postgres-specific assertion in P1a: the transaction-
-      # scoped advisory lock, SKIP LOCKED, lock_timeout/idle-in-transaction
-      # SET LOCAL, and the per-row savepoints.
+      # the entadapter tests selected by test-launch-store-postgres's -run
+      # regex (see that Makefile target's comment for the current list, the
+      # source of truth), which run unchanged against SQLite (the default
+      # `go test` build) and Postgres (here, via -tags integration) to prove
+      # dialect parity. This job owns every Postgres-specific assertion in
+      # P1a: the transaction-scoped advisory lock, SKIP LOCKED,
+      # lock_timeout/idle-in-transaction SET LOCAL, and the per-row
+      # savepoints.
       - name: Run launch store tests (Postgres-enabled)
         env:
           SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable

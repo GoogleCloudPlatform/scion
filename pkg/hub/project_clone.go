@@ -171,19 +171,12 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 		}
 	}
 
-	// Re-derive workspace mode from the source (like createProject does).
-	if src.GitRemote != "" {
-		srcMode := ""
-		if src.Labels != nil {
-			srcMode = src.Labels[store.LabelWorkspaceMode]
+	// Re-derive workspace mode from the source (design #2703 §2.4).
+	if mode := deriveCloneWorkspaceMode(src.Labels[store.LabelWorkspaceMode], src.GitRemote != "", clone.GitRemote != ""); mode != "" {
+		if clone.Labels == nil {
+			clone.Labels = make(map[string]string)
 		}
-		switch srcMode {
-		case store.WorkspaceModeShared, store.WorkspaceModePerAgent, store.WorkspaceModeWorktreePerAgent:
-			if clone.Labels == nil {
-				clone.Labels = make(map[string]string)
-			}
-			clone.Labels[store.LabelWorkspaceMode] = srcMode
-		}
+		clone.Labels[store.LabelWorkspaceMode] = mode
 	}
 
 	// ── asTemplate: mark clone as a project template ─────────────────────

@@ -81,6 +81,12 @@ func LoadHarnessConfigDir(dirPath string) (*HarnessConfigDir, error) {
 		return nil, fmt.Errorf("failed to parse config.yaml: %w", err)
 	}
 
+	// The schema cannot express ordering; enforce it here so a bad thinking
+	// map fails at load like any other schema error.
+	if err := entry.Thinking.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid config.yaml: %w", err)
+	}
+
 	name := filepath.Base(absPath)
 	if entry.Name != "" {
 		if entry.Name == "." || entry.Name == ".." || strings.ContainsAny(entry.Name, "/\\") {

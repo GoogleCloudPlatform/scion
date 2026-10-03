@@ -19,6 +19,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
+	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 )
 
 // APIError represents a standardized error response.
@@ -49,6 +53,29 @@ const (
 	ErrCodeRuntimeUnavailable = "runtime_unavailable"
 	ErrCodeHubUnreachable     = "hub_unreachable"
 	ErrCodeTemplateError      = "template_error"
+	ErrCodeSkillResolution    = "skill_resolution_failed"
+
+	// ErrCodeRuntimeLogsUnsupported marks a logs request that a runtime
+	// declines to serve at all, rather than one that failed. The broker uses
+	// this for pkg/runtime.ErrLogsNotSupported (pkg/runtime/capabilities.go),
+	// which a runtime returns when serving logs at all would be unsafe or
+	// impossible (for example, when reading them would expose another
+	// tenant's output), so the runtime never makes the underlying call and
+	// this code is the client-visible signal that the feature, not the
+	// request, is the reason.
+	ErrCodeRuntimeLogsUnsupported = "runtime_logs_unsupported"
+
+	// ErrCodeRuntimeAttachUnsupported marks an attach request rejected
+	// before the WebSocket upgrade because the target runtime declines
+	// interactive attach outright (pkg/runtime.AttachCapableRuntime,
+	// pkg/runtime/capabilities.go), rather than one that failed. Rejecting
+	// here — instead of upgrading and only failing once the runtime's own
+	// PTY dial rejects the stream — gives the caller a clean, pre-upgrade
+	// error instead of an abnormal WebSocket close. Shares its wire value
+	// with wsprotocol.ErrCodeRuntimeAttachUnsupported, which pkg/wsclient
+	// reads back to map this to the same fixed message the post-upgrade
+	// 4501 close code produces.
+	ErrCodeRuntimeAttachUnsupported = wsprotocol.ErrCodeRuntimeAttachUnsupported
 )
 
 // writeError writes a JSON error response.
@@ -107,6 +134,25 @@ func MethodNotAllowed(w http.ResponseWriter) {
 // Conflict writes a 409 Conflict response.
 func Conflict(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusConflict, ErrCodeConflict, message, nil)
+}
+
+// RuntimeLogsUnsupported writes a 501 Not Implemented response with the
+// stable ErrCodeRuntimeLogsUnsupported code for a runtime that declines to
+// serve logs at all (pkg/runtime.ErrLogsNotSupported). message must not
+// name any runtime-specific scope, worker, pod, namespace, actor or
+// agent — see pkg/runtime.ErrLogsNotSupported for the fixed text this is
+// meant to carry.
+func RuntimeLogsUnsupported(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusNotImplemented, ErrCodeRuntimeLogsUnsupported, message, nil)
+}
+
+// RuntimeAttachUnsupported writes a 501 Not Implemented response with the
+// stable ErrCodeRuntimeAttachUnsupported code for a runtime that declines
+// interactive attach at all (pkg/runtime.AttachCapableRuntime). message must
+// not name any runtime-specific scope, worker, pod, namespace, actor or
+// agent, mirroring RuntimeLogsUnsupported.
+func RuntimeAttachUnsupported(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusNotImplemented, ErrCodeRuntimeAttachUnsupported, message, nil)
 }
 
 // InternalError writes a 500 Internal Server Error response.
@@ -184,4 +230,90 @@ func TemplateError(w http.ResponseWriter, message string) {
 // Unprocessable writes a 422 Unprocessable Entity response.
 func Unprocessable(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, message, nil)
+}
+
+// skillResolutionHTTPStatus maps a SkillResolutionError.Code to an HTTP
+// status. Each cause gets the status whose standard semantics best fit it:
+//   - not_found: 404, a skill genuinely absent at the given ref.
+//   - rate_limited: 429, with a Retry-After header when the server sent one
+//     (see SkillResolutionFailed).
+//   - timeout: 504, no response from GitHub within the request deadline.
+//   - upstream_unavailable: 502, GitHub itself returned repeated 5xx.
+//   - unreachable: 502, a network-level failure (DNS, connection refused,
+//     TLS) rather than a response GitHub chose to send.
+//   - anything else — including an uncategorized local failure and the Hub's
+//     own per-URI codes for PreResolvedSkills (storage_error, internal_error,
+//     federation_error) — keeps the existing 500, not a client error: the
+//     caller did nothing wrong, so a 5xx is a more honest signal than a
+//     guessed 4xx (#2546 R3, O1).
+func skillResolutionHTTPStatus(code string) int {
+	switch code {
+	case agent.SkillErrCodeNotFound:
+		return http.StatusNotFound
+	case agent.SkillErrCodeRateLimited:
+		return http.StatusTooManyRequests
+	case agent.SkillErrCodeTimeout:
+		return http.StatusGatewayTimeout
+	case agent.SkillErrCodeUpstreamUnavailable, agent.SkillErrCodeUnreachable:
+		return http.StatusBadGateway
+	default:
+		return http.StatusInternalServerError
+	}
+}
+
+// SkillResolutionFailed writes a response for a required skill reference that
+// could not be resolved within the create deadline, naming the ref and the
+// cause instead of folding the failure into a generic 500/502 (#2546). Every
+// mapped status gets the same {skill, cause} detail payload so the response
+// is actionable without broker logs, including the uncategorized/5xx default.
+func SkillResolutionFailed(w http.ResponseWriter, err *agent.SkillResolutionError) {
+	if err.Code == agent.SkillErrCodeRateLimited && err.RetryAfter != "" {
+		w.Header().Set("Retry-After", err.RetryAfter)
+	}
+	writeError(w, skillResolutionHTTPStatus(err.Code), ErrCodeSkillResolution,
+		"Failed to provision agent: "+err.Error(),
+		map[string]interface{}{"skill": err.URI, "cause": err.Code})
+}
+
+// writeStartContextError writes the HTTP response for an error returned by
+// buildStartContext, honoring startContextError.Status (e.g. the 400 the
+// Kubernetes/"block" rejection sets, ptone/scion#2328) instead of collapsing
+// every failure into a generic 500. Returns the status code actually
+// written, so a caller that also tracks the dispatch attempt's status (e.g.
+// createAgent's markAttemptFailed) can record the same value instead of
+// hardcoding one.
+//
+// A Hub-connectivity failure (IsHubError) keeps its existing, more specific
+// handling — a retryable 503 hub_unreachable, or a 500 template_error for
+// any other hydration failure — ahead of the generic Status check; neither
+// of those was the 500-collapsing bug this helper fixes. err need not be a
+// *startContextError at all (any error buildStartContext could return,
+// including ones from other call sites in this package): a plain error
+// still gets the pre-existing generic 500 behavior.
+//
+// Any 4xx Status — not just exactly 400 — is treated as a client-caused
+// validation failure: buildStartContext only ever sets Status to a value it
+// means as a client error, so collapsing just one 4xx (400) into the generic
+// 500 path while honoring others would be an arbitrary distinction, not a
+// deliberate one.
+func writeStartContextError(w http.ResponseWriter, err error) int {
+	sce, ok := err.(*startContextError)
+	if !ok {
+		RuntimeError(w, err.Error())
+		return http.StatusInternalServerError
+	}
+	if sce.IsHubError {
+		if templatecache.IsHubConnectivityError(sce.OriginalErr) {
+			HubUnreachableError(w, sce.OriginalErr.Error())
+			return http.StatusServiceUnavailable
+		}
+		TemplateError(w, err.Error())
+		return http.StatusInternalServerError
+	}
+	if sce.Status >= 400 && sce.Status < 500 {
+		writeError(w, sce.Status, ErrCodeValidationError, sce.Message, nil)
+		return sce.Status
+	}
+	RuntimeError(w, err.Error())
+	return http.StatusInternalServerError
 }

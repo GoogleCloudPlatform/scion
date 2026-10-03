@@ -63,6 +63,10 @@ Controls the central Hub API server.
 | `admin_emails` | list | `[]` | List of emails granted super-admin access. Listed users are always admins: they are promoted on sign-in. When the list is non-empty, an admin whose email is removed from it is demoted to [`default_user_role`](#authentication-serverauth) at the next hub restart or their next sign-in, whichever comes first. At restart, both `admin_emails` and the default role come from `settings.yaml` or the environment, so a change made only in the Admin UI (Postgres mode) takes effect at the user's next sign-in. If the default role was set only in the Admin UI, a user demoted at restart becomes Member. Two exceptions: admins promoted from **Admin > Users** (or the users API) stay admins, and nobody is demoted if the startup safety check failed (for example, no existing user matched the list at startup and there were no UI-promoted admins); demotions resume only after the configuration is fixed and the hub is restarted. Roles set from the admin UI for users who were never config admins (`member`, `viewer`) are not changed by this list. |
 | `soft_delete_retention` | duration | | Duration to retain soft-deleted agents (e.g., `"72h"`). |
 | `soft_delete_retain_files` | bool | `false` | Preserve workspace files during the soft-delete period. |
+| `async_agent_launch` | bool | `false` | **Reserved.** No create path reads this yet, so setting it has no effect until the async dispatch path lands. Once live: the non-blocking agent create kill switch — a launch is non-blocking only when this is on **and** the client request also opts in (`acceptAsyncLaunch`); clients that never opt in stay synchronous permanently. Restart required to change. |
+| `launch_timeout` | duration | `"5m"` | **Reserved.** Not yet read by any create path. Once live: the whole-launch budget for an opted-in launch, from acceptance to a terminal Hub state. Values below `30s` are rejected (the broker's fixed 20s abort margin would leave no time for a launch to run) and the default is used instead. Restart required to change. |
+| `launch_keepalive_seconds` | int | `15` | Broker keepalive interval, in seconds. Today it sets only the reaper's staleness window (when a launch is presumed lost, 8x this value); it will also be sent to the broker once the async dispatch path lands. Restart required to change. |
+| `missing_agent_grace` | duration | `"3m"` | How long a `running` agent may be absent from its Runtime Broker's heartbeat before the Hub marks it `error` with exit reason `container_missing` (an existing `preempted` or `evicted` exit reason and its message are kept). Applies only when the broker is online, reported a complete runtime inventory, and sent a recent previous heartbeat; agents with a lifecycle operation in progress are skipped. Values below `"1m"` fall back to the default. Env: `SCION_SERVER_HUB_MISSINGAGENTGRACE`. |
 | `cors` | object | | CORS configuration (see below). |
 
 #### CORS (`server.hub.cors`)
@@ -159,9 +163,10 @@ When transport auth is configured, the Hub injects these environment variables i
 
 | Variable | Description |
 | :--- | :--- |
-| `SCION_TRANSPORT_TOKEN` | Initial Google OIDC ID token for the transport layer. |
+| `SCION_TRANSPORT_TOKEN` | Initial Google OIDC ID token for the transport layer. Bootstrap only: `sciontool init` moves it to `~/.scion/transport-token` and removes it from the child environment. If the file cannot be written, the value stays in the environment and is used until it expires. |
+| `SCION_TRANSPORT_TOKEN_FILE` | Set by `sciontool init` for child processes. Path of the transport token file, which every refresh rewrites. |
 | `SCION_TRANSPORT_AUDIENCE` | Audience the transport token was minted for. |
-| `SCION_TRANSPORT_TOKEN_EXPIRY` | Token expiry in RFC 3339 format. |
+| `SCION_TRANSPORT_TOKEN_EXPIRY` | Expiry of the initial token, in RFC 3339 format. Bootstrap only: removed by `sciontool init` together with `SCION_TRANSPORT_TOKEN`. |
 | `SCION_TRANSPORT_MODE` | Transport mode (`iap` or `cloudrun_invoker`). Injected alongside the other three transport vars so that in-agent clients can select the correct header placement. |
 
 #### Broker transport configuration
@@ -228,7 +233,8 @@ Configures the backend and mount settings for storing and managing agent workspa
 | `backend` | string | `"local"` | Storage backend pivot: `"local"` (node-local directories), `"nfs"` (Network File System mounts), `"cloudrun-volume"` (Cloud Run platform-managed volume mounts), or `"gke-shared-volume"` (GKE shared CSI-backed PVC mounts). |
 | `nfs.mount_root` | string | | The host base directory under which NFS exports are mounted. |
 | `nfs.mount_options` | string | `"vers=3,hard,nconnect=4,_netdev"` | Standard mount options passed to the `mount.nfs` utility. |
-| `nfs.uid` | integer | `1000` | Node-independent owner UID for NFS-backed workspace trees to ensure consistent container write permissions. |
+| `nfs.auto_mount` | boolean | `false` | Whether the Runtime Broker mounts the shares itself. See [NFS Mounts on the Runtime Broker](#nfs-mounts-on-the-runtime-broker). Requires the broker to run as root. |
+| `nfs.uid` | integer | `1000` | Node-independent owner UID for NFS-backed workspace trees to ensure consistent container write permissions (not yet applied on Kubernetes; ptone/scion#2608). |
 | `nfs.gid` | integer | `1000` | Node-independent owner GID for NFS-backed workspace trees. |
 | `nfs.storage_class` | string | | The Kubernetes StorageClass name used to dynamically allocate volumes on GKE. |
 | `nfs.subpath_root` | string | `"projects"` | The default base folder name within the share for project workspaces. |
@@ -239,9 +245,23 @@ Configures the backend and mount settings for storing and managing agent workspa
 | `gke_shared_volume.pv_claim_name` | string | | The name of the GKE-managed PVC bound to the shared storage backend (e.g. Filestore). |
 | `gke_shared_volume.subpath_root` | string | `"projects"` | Sub-directory prefix within the GKE volume. |
 
+#### NFS Mounts on the Runtime Broker
+
+When `backend` is `nfs`, the Runtime Broker reads this block from its global `settings.yaml` (never from project settings) and checks each share at `<mount_root>/<share id>`. The block must have an absolute `mount_root`, and every share needs a unique single-segment `id`, a `server` (a hostname or IPv4 address, without whitespace or a leading `-`; IPv6 literals are not supported), and an absolute `export`. If the block is incomplete, the broker logs a warning and skips NFS handling. With any other backend, the broker does no NFS handling at all.
+
+- **`auto_mount: false` (default)**: The broker only checks. It reads the host mount table (`/proc/mounts`) to confirm each share is mounted from the expected `server:export`, at startup and then every minute. It never mounts or unmounts anything and never refuses agent creation. Mount each export on the host yourself, for example with `/etc/fstab`.
+- **`auto_mount: true`**: The broker mounts missing shares in the background, and remounts a share that is mounted from the wrong source. The broker must run as root: if it does not, it logs a warning at startup and only checks, without running `mount`. If the broker's default runtime is Kubernetes or Cloud Run, it also only checks, because the platform mounts the export into the agent. Each mount command times out after 90 seconds, or sooner if the agent-create request ends.
+
+With `auto_mount: true`, agent creation for a project on the `nfs` backend is decided by the runtime the agent is dispatched to. This check runs before anything is mounted. Only agent creation is checked; starting or restarting an existing agent is not.
+
+- **Docker, Podman, or Apple**: The broker first makes sure the first share is mounted, because that share holds the workspaces. If it is not mounted, the broker returns `503` with error code `nfs_unavailable`.
+- **Kubernetes or Cloud Run**: The broker never mounts and never refuses the request. If the share's last check found a problem, it logs a warning and continues.
+
+In both modes, NFS problems are logged and reported per share in the `nfs_mounts` check of `GET /healthz`. The overall status becomes `degraded` only if all of these hold: `auto_mount` is on, the default runtime is not Kubernetes or Cloud Run, the first check has finished, and a share is unhealthy. NFS problems never affect `GET /readyz`, and the broker keeps serving projects that do not use NFS. `scion doctor` runs the same check locally, using the same mount-table lookup. It reports whether NFS is configured, whether each share is mounted from the expected source, and whether each server is reachable on TCP port 2049. A share that is not mounted is a warning when `auto_mount` is off, the share has a `pv_name`, or the default runtime is Kubernetes or Cloud Run (so the broker does not mount it, as in `/healthz`), and a failure otherwise.
+
 #### NFS Workspaces on Kubernetes
 
-With the `nfs` backend and a bound PV claim (`nfs.shares[].pv_name`), each Kubernetes agent pod gets a `workspace-provision` init container. It runs for both git and non-git agents. It creates the per-project subPath (or, if another pod is already provisioning it, waits for that pod to finish) and chowns it to `nfs.uid`/`nfs.gid` so the agent can write `/workspace`. For git agents, it also clones the repository. The init container runs as root with only the `CHOWN`, `FOWNER`, and `DAC_OVERRIDE` capabilities and does not follow symlinks. If the chown fails, the agent start fails and the error names the failed init container, so the agent never runs with an unwritable workspace.
+With the `nfs` backend and a bound PV claim (`nfs.shares[].pv_name`), each Kubernetes agent pod gets a `workspace-provision` init container. It runs for both git and non-git agents. It creates the per-project subPath (or, if another pod is already provisioning it, waits for that pod to finish) and chowns it to the agent runtime uid (`1000`) and `nfs.gid` so the agent can write `/workspace`; `nfs.uid` is not yet applied on Kubernetes (ptone/scion#2608). For git agents, it also clones the repository. The init container runs as root with only the `CHOWN`, `FOWNER`, and `DAC_OVERRIDE` capabilities and does not follow symlinks. If the chown fails, the agent start fails and the error names the failed init container, so the agent never runs with an unwritable workspace.
 
 #### Ephemeral Storage & 503 Safety Gate
 
@@ -265,7 +285,7 @@ This setting is **global-only**: each broker process reads it from its own globa
 
 Shared directories resolve to `<mount_root>/<share id>/<subpath_root>/<project id>/shared-dirs/<name>`. On Kubernetes, pods mount the `pv_name` claim with the matching `subPath` instead of creating a per-directory PVC.
 
-The `nfs` backend fails closed. Agent start is refused when the block is incomplete, the host base directory does not exist, the runtime is not a local-container or Kubernetes runtime (for example, Cloud Run), or a shared-directory path resolves through a symlink. The NFS export itself must be provisioned and mounted before agents start. The `uid`, `gid`, `mount_options`, and `storage_class` fields of the `nfs` block are ignored here.
+The `nfs` backend fails closed. Agent start is refused when the block is incomplete, the host base directory does not exist, the runtime is not a local-container or Kubernetes runtime (for example, Cloud Run), or a shared-directory path resolves through a symlink. The NFS export itself must be provisioned and mounted before agents start. The `uid`, `gid`, `mount_options`, `storage_class`, and `auto_mount` fields of the `nfs` block are ignored here.
 
 With the `nfs` backend, the Hub and brokers also apply the following:
 
@@ -652,6 +672,8 @@ Settings required before the database connection exists, or that are restart-bou
 | Logging | `log_level`, `log_format` |
 | CORS | `hub.cors.*`, `broker.cors` |
 | Messaging/plugins | `message_broker.*`, `plugins.*` |
+| Async agent create | `hub.async_agent_launch`, `hub.launch_timeout`, `hub.launch_keepalive_seconds` |
+| Heartbeat reconcile | `hub.missing_agent_grace` |
 
 ### Layer 1 — Operational (Postgres `hub_settings` table)
 

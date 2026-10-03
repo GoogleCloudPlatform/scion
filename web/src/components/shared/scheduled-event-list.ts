@@ -26,6 +26,13 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { resourceStyles } from './resource-styles.js';
+import {
+  effectiveTimeZone,
+  formatInstantWithZone,
+  formatRelative,
+  parseWallClock,
+} from '../../utils/time.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 interface ScheduledEvent {
   id: string;
@@ -48,6 +55,17 @@ interface ListResponse {
 
 @customElement('scion-scheduled-event-list')
 export class ScionScheduledEventList extends LitElement {
+  /**
+   * Re-renders this list when the effective display zone changes (review
+   * R4-1), so the create dialog's "Times in: <zone>" label never shows a
+   * zone other than the one `handleCreate`'s `parseWallClock` call parses
+   * `dialogDatetime` in. Unlike `access-boundary-schedule-editor.ts`,
+   * `dialogDatetime` is raw typed text with no instant cached from it
+   * until submit, so there is no stale cached value to re-derive here —
+   * keeping the label in sync with the live parse zone is the whole fix.
+   */
+  readonly _zone = new DisplayZoneController(this);
+
   @property() projectId = '';
   @property({ type: Boolean }) compact = false;
 
@@ -134,9 +152,15 @@ export class ScionScheduledEventList extends LitElement {
       if (this.dialogTimingMode === 'in') {
         body.fireIn = this.dialogDuration;
       } else {
-        // Convert local datetime to ISO 8601 UTC
-        const dt = new Date(this.dialogDatetime);
-        body.fireAt = dt.toISOString();
+        // Interpret the datetime-local value as wall-clock time in the
+        // effective display zone (not the browser's zone, which is what
+        // `new Date(value).toISOString()` would use).
+        const iso = parseWallClock(this.dialogDatetime, effectiveTimeZone());
+        if (!iso) {
+          this.dialogError = 'Enter a valid date and time';
+          return;
+        }
+        body.fireAt = iso;
       }
 
       const response = await apiFetch(
@@ -183,54 +207,11 @@ export class ScionScheduledEventList extends LitElement {
     }
   }
 
-  private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
-  }
-
+  /** Relative fire time; an overdue pending instant reads "now", as before. */
   private formatFutureTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return dateString;
-      const diffMs = date.getTime() - Date.now();
-      if (diffMs <= 0) return 'now';
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(diffMinutes, 'minute');
-      } else {
-        return rtf.format(diffHours, 'hour');
-      }
-    } catch {
-      return dateString;
-    }
+    const ms = new Date(dateString).getTime();
+    if (!Number.isNaN(ms) && ms <= Date.now()) return 'now';
+    return formatRelative(dateString);
   }
 
   private getPayloadAgent(payload: string): string {
@@ -359,9 +340,10 @@ export class ScionScheduledEventList extends LitElement {
 
   private renderEventRow(evt: ScheduledEvent) {
     const isPending = evt.status === 'pending';
+    const fireInstant = isPending ? evt.fireAt : (evt.firedAt ?? evt.fireAt);
     const fireTimeDisplay = isPending
       ? this.formatFutureTime(evt.fireAt)
-      : this.formatRelativeTime(evt.firedAt ?? evt.fireAt);
+      : formatRelative(fireInstant);
     const agent = this.getPayloadAgent(evt.payload);
     const isCancelling = this.cancellingId === evt.id;
 
@@ -369,10 +351,14 @@ export class ScionScheduledEventList extends LitElement {
       <tr>
         <td><span class="type-badge environment">${evt.eventType}</span></td>
         <td><span class="badge ${this.statusBadgeClass(evt.status)}">${evt.status}</span></td>
-        <td><span class="meta-text">${fireTimeDisplay}</span></td>
+        <td>
+          <span class="meta-text" title=${formatInstantWithZone(fireInstant)}
+            >${fireTimeDisplay}</span
+          >
+        </td>
         <td class="hide-mobile"><span class="meta-text">${agent}</span></td>
         <td class="hide-mobile">
-          <span class="meta-text">${this.formatRelativeTime(evt.createdAt)}</span>
+          <span class="meta-text">${formatRelative(evt.createdAt)}</span>
         </td>
         <td class="actions-cell">
           ${isPending
@@ -458,6 +444,7 @@ export class ScionScheduledEventList extends LitElement {
             : html`
                 <sl-input
                   label="Date & Time"
+                  help-text="Times in: ${effectiveTimeZone()}"
                   type="datetime-local"
                   .value=${this.dialogDatetime}
                   @sl-input=${(e: Event) =>

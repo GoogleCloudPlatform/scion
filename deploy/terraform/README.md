@@ -62,7 +62,12 @@ reads it, by naming convention, through the `shared-lookup` module (no
 4. The hub image, built and pushed to the Artifact Registry repo that
    `shared-infra` creates. There is no single-apply bootstrap trick here (the
    two-root split already separates "create the repo" from "use the image"):
-   apply `shared-infra` first, build/push, then apply `hub`.
+   apply `shared-infra` first, build/push, then apply `hub`. **This module
+   version requires a hub image that includes ptone/scion#2152 or later** —
+   on an older image, a fresh hub can't read or create its hub-scope OIDC
+   secret and fails to boot. See
+   [`docs/deploy/agent-runbook-terraform-ha.md`](../../docs/deploy/agent-runbook-terraform-ha.md)
+   for the upgrade note if you're applying this against an existing hub.
 
 ## Bootstrap sequence
 
@@ -549,7 +554,7 @@ applying.
 
 ## Troubleshooting
 
-**A 403 on a secret named `scion-hub-<h12>-...` shortly after the first
+**A 403 on a secret named `scion-<h12>-...` shortly after the first
 `hub` apply** means IAM propagation, not a wrong condition: the hub SA's
 conditioned `secretmanager.admin` grant (hub-identity) can take longer than
 the built-in 120s guard (`time_sleep.hub_iam_propagation`) to become
@@ -566,6 +571,11 @@ prevent (see hub-identity's IAM scope rule comment).
 - **Agent create returns a 503 even though the agent goes on to start** —
   likely a cold Autopilot node exceeding the hub's upstream client timeout,
   not a real failure. See "Cold start" above.
+- **A hub apply fails with `persistentvolumes "<hub_name>-nfs" already
+  exists`** after an NFS server or share path change. This is a manual
+  migration; see the agent runbook's [Operational
+  Traps](../../docs/deploy/agent-runbook-terraform-ha.md#11-operational-traps)
+  ("Changing a hub's NFS endpoint is a manual migration").
 - **Creating a user or project secret fails with** "the Hub service account
   lacks the required Secret Manager permission. Grant
   `roles/secretmanager.admin` to the Hub Runner service account" — this
@@ -582,11 +592,11 @@ prevent (see hub-identity's IAM scope rule comment).
 
 - `shared_overrides` for hand-built (non-shared) infra to plug into the hub
   layer instead of `shared-lookup`'s naming-convention data sources.
-- User- and project-scope secret creation needs a hub image built with
-  ptone/scion#2152 (hub-prefixed secret names). The IAM grant for it already
-  exists (`hub-identity`'s `hub_secretmanager_admin_hub_prefixed`); until a
-  hub runs that image, it still looks up hub-scope secrets under the legacy
-  pre-#2152 name, which only the separate legacy grant covers, and has no
-  prefix to create user/project-scope secrets under at all.
+- User- and project-scope secret creation also needs that same #2152+ hub
+  image (hub-prefixed secret names) — see "Prerequisites" above for why a
+  pre-#2152 image can't boot at all, let alone create these. The IAM grant
+  for user/project scope already exists (`hub-identity`'s
+  `hub_secretmanager_admin_hub_prefixed`); until a hub runs that image, it
+  has no prefix to create user/project-scope secrets under at all.
 - Typed `validation` blocks on every remaining variable, and a
   per-module README generated with `terraform-docs`.

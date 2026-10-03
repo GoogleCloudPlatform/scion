@@ -1436,6 +1436,14 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 
+	// Delete in progress (design ptone/scion#2483 §2.1): a soft-deleted row
+	// must not come back while deleteBlocksStart holds. Authz already ran in
+	// the caller.
+	if ref := s.startGate(ctx, agent, startEntryRestore); ref.refuses() {
+		ref.write(w)
+		return
+	}
+
 	agent.DeletedAt = time.Time{}
 	agent.Updated = time.Now()
 
@@ -1703,15 +1711,22 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 
 	// Phase 0.2 (ptone/scion#2192): reject cross-project agent-sender raw
 	// here, before conversation resolution starts further down
-	// (storeMsg/conversation build begins later in this function).
-	// agent_dm_operation.go step 4b applies the same check again inside
-	// ExecuteAgentDM as a second check, so a rejected cross-project raw
-	// send is refused here — before any conversation is created — and
-	// again there.
+	// (storeMsg/conversation build begins later in this function). As of
+	// task 2.3 (ptone/scion#2197), this branch and its managed-runtime
+	// sibling above are vestigial for production traffic on the single-
+	// agent route: the message-raw bridge (agent_keys_message_bridge.go)
+	// classifies and fully handles every raw request in the routers,
+	// before authorizeAgentMessage runs, which is strictly before
+	// handleAgentMessage -- where this function lives -- is ever reached.
+	// The former second check inside ExecuteAgentDM (agent_dm_operation.go
+	// step 4b) was removed for the same reason; it cannot drift from this
+	// one because there is no longer a second copy. Left in place as a
+	// harmless, unreachable-in-practice defense until Phase 4 removes raw
+	// delivery entirely (contract §8).
 	//
 	// Compares the stored sender record (not the token claim) with the same
-	// crossProjectRawUnsupported predicate as ExecuteAgentDM step 4b, so
-	// this early check is never weaker than that backstop.
+	// crossProjectRawUnsupported predicate agent_dm_operation.go used to
+	// call before its own copy was removed.
 	if structuredMsg != nil && structuredMsg.Raw {
 		if senderAgent := GetAgentIdentityFromContext(ctx); senderAgent != nil {
 			senderAgentRecord, senderErr := s.store.GetAgent(ctx, senderAgent.ID())
@@ -2590,6 +2605,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				}
 				if errors.Is(err, ErrBrokerTimeout) {
 					GatewayTimeout(w, "Broker unreachable after 30s deadline")
+				} else if isBrokerAgentNotFound(err) {
+					// The broker answered that the agent has no running
+					// container: a state conflict, not a broker failure.
+					writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
+						"Agent has no running container; the message was not delivered", nil)
 				} else if req.Wake {
 					RuntimeError(w, "Agent resumed successfully but message delivery failed: "+err.Error())
 				} else {
@@ -3533,18 +3553,29 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 	// function's behaviour does not depend on caller discipline.
 	originalMsg.Metadata = messaging.StripReservedMetadata(originalMsg.Metadata)
 
-	// List project agents for resolution.
-	agentList, err := s.store.ListAgents(ctx, store.AgentFilter{ProjectID: primaryAgent.ProjectID}, store.ListOptions{Limit: 200})
+	// List every project agent for resolution, walking all pages so a
+	// mention of an agent beyond the first page still resolves.
+	projectAgents, err := listAllProjectAgents(ctx, s.store, primaryAgent.ProjectID)
 	if err != nil {
-		s.messageLog.Error("Failed to list project agents for mention resolution", "error", err)
-		return nil
+		// Report every mention as failed rather than dropping them: the
+		// caller must be able to tell "lookup failed" from "no such agent".
+		s.messageLog.Error("Failed to list project agents for mention resolution",
+			"project_id", primaryAgent.ProjectID, "error", err)
+		// With no known agents, ResolveMentions applies its usual
+		// de-duplication and primary-recipient skip and reports every
+		// remaining mention as not_found; relabel those as errors.
+		failed := messages.ResolveMentions(mentionSlugs, nil, primaryAgent.Slug)
+		for i := range failed {
+			failed[i].Status, failed[i].Error = "error", "mention resolution unavailable"
+		}
+		return failed
 	}
 
 	// Build the AgentInfo slice and a slug-to-agent map for dispatch.
-	agentInfos := make([]messages.AgentInfo, 0, len(agentList.Items))
-	agentBySlug := make(map[string]*store.Agent, len(agentList.Items))
-	for i := range agentList.Items {
-		a := &agentList.Items[i]
+	agentInfos := make([]messages.AgentInfo, 0, len(projectAgents))
+	agentBySlug := make(map[string]*store.Agent, len(projectAgents))
+	for i := range projectAgents {
+		a := &projectAgents[i]
 		agentInfos = append(agentInfos, messages.AgentInfo{Slug: a.Slug, Name: a.Name})
 		agentBySlug[strings.ToLower(a.Slug)] = a
 	}

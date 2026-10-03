@@ -1487,3 +1487,118 @@ func TestContainerScriptHarness_ResolveAuth_SelectedTypeFiltersFiles(t *testing.
 		}
 	})
 }
+
+// TestContainerScriptHarness_NoAuthSentinelNeverForwarded: the no-auth
+// sentinel "none" must never reach the provisioner as
+// SCION_HARNESS_SELECTED_AUTH or explicit_type (ptone/scion#2561).
+func TestContainerScriptHarness_NoAuthSentinelNeverForwarded(t *testing.T) {
+	readExplicitType := func(t *testing.T, agentHome string) interface{} {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(agentHome, ".scion", "harness", "inputs", "auth-candidates.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal(data, &payload); err != nil {
+			t.Fatalf("invalid JSON: %v", err)
+		}
+		return payload["explicit_type"]
+	}
+
+	t.Run("ResolveAuth", func(t *testing.T) {
+		h, _ := newTestContainerScriptHarness(t)
+		resolved, err := h.ResolveAuth(api.AuthConfig{SelectedType: "none"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := resolved.EnvVars["SCION_HARNESS_SELECTED_AUTH"]; ok {
+			t.Errorf("SCION_HARNESS_SELECTED_AUTH = %q, want unset", got)
+		}
+	})
+
+	t.Run("ApplyAuthSettingsResolvedNoneFallsBackToEntry", func(t *testing.T) {
+		h, _ := newTestContainerScriptHarness(t)
+		h.entry.AuthSelectedType = "vertex-ai"
+		agentHome := t.TempDir()
+		resolved := &api.ResolvedAuth{
+			Method:  "container-script",
+			EnvVars: map[string]string{"SCION_HARNESS_SELECTED_AUTH": "none"},
+		}
+		if err := h.ApplyAuthSettings(agentHome, resolved); err != nil {
+			t.Fatal(err)
+		}
+		if got := readExplicitType(t, agentHome); got != "vertex-ai" {
+			t.Errorf("explicit_type = %v, want vertex-ai", got)
+		}
+	})
+
+	t.Run("ApplyAuthSettingsEntryNone", func(t *testing.T) {
+		h, _ := newTestContainerScriptHarness(t)
+		h.entry.AuthSelectedType = "none"
+		agentHome := t.TempDir()
+		resolved := &api.ResolvedAuth{Method: "container-script", EnvVars: map[string]string{}}
+		if err := h.ApplyAuthSettings(agentHome, resolved); err != nil {
+			t.Fatal(err)
+		}
+		if got := readExplicitType(t, agentHome); got != "" {
+			t.Errorf("explicit_type = %v, want empty", got)
+		}
+	})
+}
+
+// The config.yaml thinking block must reach the provision manifest under
+// harness_config.thinking with the exact JSON keys scion_harness.resolve_thinking
+// reads (levels[*].max/value, default). A max of 0 must survive serialization.
+func TestContainerScriptHarness_ManifestCarriesThinkingBlock(t *testing.T) {
+	h, _ := newTestContainerScriptHarness(t)
+	h.entry.Thinking = &config.HarnessThinkingConfig{
+		Levels: []config.HarnessThinkingLevel{
+			{Max: 0, Value: "none"},
+			{Max: 50, Value: "medium"},
+			{Max: 100, Value: "high"},
+		},
+		Default: "medium",
+	}
+	agentHome := t.TempDir()
+	if err := h.Provision(context.Background(), "a", agentHome, agentHome, "/workspace"); err != nil {
+		t.Fatal(err)
+	}
+	manifestData, err := os.ReadFile(filepath.Join(agentHome, ".scion", "harness", "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw struct {
+		HarnessConfig struct {
+			Thinking *struct {
+				Levels  []map[string]any `json:"levels"`
+				Default string           `json:"default"`
+			} `json:"thinking"`
+		} `json:"harness_config"`
+	}
+	if err := json.Unmarshal(manifestData, &raw); err != nil {
+		t.Fatal(err)
+	}
+	thinking := raw.HarnessConfig.Thinking
+	if thinking == nil {
+		t.Fatalf("manifest harness_config has no thinking block: %s", manifestData)
+	}
+	if thinking.Default != "medium" {
+		t.Errorf("thinking.default = %q, want medium", thinking.Default)
+	}
+	want := []struct {
+		max   float64
+		value string
+	}{{0, "none"}, {50, "medium"}, {100, "high"}}
+	if len(thinking.Levels) != len(want) {
+		t.Fatalf("thinking.levels = %v, want %d entries", thinking.Levels, len(want))
+	}
+	for i, w := range want {
+		gotMax, ok := thinking.Levels[i]["max"].(float64)
+		if !ok || gotMax != w.max {
+			t.Errorf("levels[%d].max = %v (present=%v), want %v", i, thinking.Levels[i]["max"], ok, w.max)
+		}
+		if got := thinking.Levels[i]["value"]; got != w.value {
+			t.Errorf("levels[%d].value = %v, want %q", i, got, w.value)
+		}
+	}
+}

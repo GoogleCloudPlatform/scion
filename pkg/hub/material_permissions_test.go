@@ -81,6 +81,9 @@ func TestMaterialPermissions_Registered(t *testing.T) {
 			t.Errorf("%s: ProjectTargetApplicability = (applies=%v, reviewed=%v), want (true, true)", id, applies, reviewed)
 		}
 	}
+	if _, ok := byID[permissions.PermissionGCPServiceAccountUse]; !ok {
+		t.Errorf("no Registry row has ID %q (permissions.PermissionGCPServiceAccountUse)", permissions.PermissionGCPServiceAccountUse)
+	}
 }
 
 // TestMaterialPermissions_AgentScopeMappingExplicit pins the explicit
@@ -145,17 +148,47 @@ func TestSecretUse_AgentScopeDoesNotGrantUserMaterial(t *testing.T) {
 	ctx := context.Background()
 
 	ident := newFullAgentIdentity(f.AgentID, f.ProjectID, []string{f.UserID}, []AgentTokenScope{ScopeProjectSecretRead})
-	d := f.Server.authzService.Decide(ctx, AuthzRequest{
-		Principal:  principalContextForIdentity(ident),
-		Credential: credentialContextForIdentity(ident),
-		Resource:   Resource{Type: "secret", ID: tid("some-user-secret"), OwnerID: f.UserID, ParentType: "user", ParentID: f.UserID},
-		Action:     ActionUse,
-		Permission: "secret.use",
-	})
-	wantReason := `no active binding grants permission "secret.use"`
-	if d.Allowed || d.Reason != wantReason {
-		t.Fatalf("expected deny with reason %q: a full-role agent's project:secret:read scope must not grant a user-scope secret with no progeny relationship, got allowed=%v reason=%q", wantReason, d.Allowed, d.Reason)
+	decide := func(secretID string) Decision {
+		return f.Server.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(ident),
+			Credential: credentialContextForIdentity(ident),
+			Resource:   Resource{Type: "secret", ID: tid(secretID), OwnerID: f.UserID, ParentType: "user", ParentID: f.UserID},
+			Action:     ActionUse,
+			Permission: "secret.use",
+		})
 	}
+
+	t.Run("kernel denies with no candidate binding", func(t *testing.T) {
+		// f.AgentID (newMaterialFixture) has no recorded delegation edge, so
+		// Stage 2b (execution-project admission) would otherwise deny first
+		// ("relationship grant restricted by execution_project") and mask
+		// the kernel-only denial this subtest pins -- see the sibling
+		// subtest below for that case on its own. The stub gives Stage 2b a
+		// live, admitted source (f.UserID, the fixture's project owner)
+		// without recording an edge, so the request reaches the kernel path.
+		owner, err := f.Store.GetUser(ctx, f.UserID)
+		require.NoError(t, err)
+		prevResolver := f.Server.authzService.sourceResolver
+		f.Server.authzService.sourceResolver = stubSourceResolver{user: owner}
+		t.Cleanup(func() { f.Server.authzService.sourceResolver = prevResolver })
+
+		d := decide("some-user-secret")
+		wantReason := `no active binding grants permission "secret.use"`
+		if d.Allowed || d.Reason != wantReason {
+			t.Fatalf("expected deny with reason %q: a full-role agent's project:secret:read scope must not grant a user-scope secret with no progeny relationship, got allowed=%v reason=%q", wantReason, d.Allowed, d.Reason)
+		}
+	})
+
+	t.Run("unseeded agent is denied at stage 2b instead", func(t *testing.T) {
+		// Without the stub above, f.AgentID's missing delegation edge fails
+		// Stage 2b's source resolution before the kernel-only path this
+		// test's sibling subtest pins is ever reached.
+		d := decide("some-user-secret-2")
+		wantReason := "relationship grant restricted by execution_project"
+		if d.Allowed || d.Reason != wantReason {
+			t.Fatalf("expected deny with reason %q (Stage 2b, no recorded delegation edge for this fixture's agent): got allowed=%v reason=%q", wantReason, d.Allowed, d.Reason)
+		}
+	})
 }
 
 // TestSecretUse_ProjectSecretRequiresProjectSecretRead pins the raw-Decide
@@ -391,7 +424,7 @@ func TestMaterialPermissions_SuperAdminHoldsDeliverButGateDenies(t *testing.T) {
 func TestAgentToken_CannotSatisfyDeliveryPermission(t *testing.T) {
 	agent := newFullAgentIdentity(tid("deliver-scope-agent"), tid("deliver-scope-project"),
 		[]string{tid("deliver-scope-user")}, allRegisteredAgentScopes())
-	restriction := agentScopeRestriction(agent)
+	restriction := agentScopeRestriction(agent, Resource{})
 	for _, id := range []string{"secret.deliver", "env_var.deliver", "skill_injection.deliver"} {
 		if restriction.Check(id) {
 			t.Errorf("agent JWT scope restriction unexpectedly allows %q even with every registered scope present", id)

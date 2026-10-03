@@ -22,6 +22,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 )
 
@@ -226,7 +227,14 @@ func checkTransportAuth() transportauth.TokenSource {
 		return nil
 	}
 
-	switch src.(type) {
+	switch s := src.(type) {
+	case *transportauth.FileSource:
+		st := s.Status()
+		if st.Expiry.IsZero() {
+			fmt.Printf("[ OK ] Transport Auth: injected (source: %s)\n", st.InUse)
+		} else {
+			fmt.Printf("[ OK ] Transport Auth: injected (source: %s, expires %s)\n", st.InUse, st.Expiry.Format(time.RFC3339))
+		}
 	case *transportauth.InjectedSource:
 		expiry := src.Expiry()
 		if expiry.IsZero() {
@@ -542,9 +550,30 @@ func checkWorkspaceGit(failures *int) {
 
 	fmt.Println("\n--- Workspace/Git State ---")
 
+	if os.Geteuid() == 0 {
+		// This check passes HOME through so `git status` picks up the
+		// invoking user's own gitconfig (needed for a normal, non-root
+		// doctor run against a shared workspace with a different owning
+		// uid — see safe.directory below). Doing that as root would let a
+		// workload-writable ~/.gitconfig ("safe.directory=*") or
+		// /workspace/.git/config ("core.fsmonitor=<cmd>") run arbitrary
+		// code as root; no shipped path runs doctor as root, so this is a
+		// belt-and-suspenders refusal for a human invoking it that way
+		// directly, not a case this binary needs to actually support.
+		fmt.Println("[INFO] Running as root — skipping git workspace check (would trust a workload-controlled gitconfig)")
+		return
+	}
+
 	gitCtx, gitCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer gitCancel()
-	cmd := exec.CommandContext(gitCtx, "git", "-C", "/workspace", "status", "--porcelain")
+	gitPath, err := rootexec.Resolve("git")
+	if err != nil {
+		fmt.Printf("[FAIL] could not resolve a trusted git binary: %v\n", err)
+		*failures++
+		return
+	}
+	cmd := exec.CommandContext(gitCtx, gitPath, "-C", "/workspace", "status", "--porcelain")
+	cmd.Env = rootexec.Env("HOME=" + os.Getenv("HOME"))
 	if err := cmd.Run(); err != nil {
 		fmt.Printf("[FAIL] Git workspace corrupted: %v\n", err)
 		*failures++
@@ -580,7 +609,13 @@ func checkHarnessProcess(failures *int) {
 	}
 
 	// Fallback: search for known harness process names.
-	cmd := exec.Command("pgrep", "-f", "claude|gemini|codex")
+	pgrepPath, err := rootexec.Resolve("pgrep")
+	if err != nil {
+		fmt.Println("[INFO] Cannot determine harness process status")
+		return
+	}
+	cmd := exec.Command(pgrepPath, "-f", "claude|gemini|codex")
+	cmd.Env = rootexec.Env()
 	output, err := cmd.Output()
 	if err != nil {
 		fmt.Println("[INFO] Cannot determine harness process status")

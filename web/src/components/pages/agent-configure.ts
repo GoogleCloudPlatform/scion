@@ -21,7 +21,7 @@
  * that is in the 'created' phase (provisioned but not yet started).
  */
 
-import { LitElement, html, css, nothing } from 'lit';
+import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
@@ -34,7 +34,9 @@ import type {
   GCPServiceAccount,
   HarnessAdvancedCapabilities,
   MessageMode,
+  RuntimeBroker,
 } from '../../shared/types.js';
+import { isTargetKubernetesOnly } from '../../shared/runtime-kind.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { MESSAGE_MODE_DISPLAY } from '../../shared/message-mode.js';
 import type { EnvEntry } from '../shared/env-editor.js';
@@ -63,6 +65,28 @@ interface ScionConfigPayload {
   telemetry?: { enabled?: boolean };
 }
 
+/**
+ * Env var names the dedicated auto-expose UI controls own, rather than the
+ * generic env-row editor. Shared between populateForm (which filters them
+ * out of envEntries and snapshots their loaded values) and buildConfig
+ * (which re-synthesizes or re-sends them).
+ */
+const AUTO_EXPOSE_ENV_KEYS = [
+  'SCION_AUTO_EXPOSE_PORTS',
+  'SCION_AUTO_EXPOSE_MODE',
+  'SCION_AUTO_EXPOSE_PORTS_LIST',
+  'SCION_AUTO_EXPOSE_INTERVAL',
+] as const;
+const AUTO_EXPOSE_ENV_KEYS_SET: ReadonlySet<string> = new Set(AUTO_EXPOSE_ENV_KEYS);
+
+/** True when both env-keyed maps have exactly the same keys and values. */
+function envMapsEqual(a: Record<string, string>, b: Record<string, string>): boolean {
+  const aKeys = Object.keys(a);
+  const bKeys = Object.keys(b);
+  if (aKeys.length !== bKeys.length) return false;
+  return aKeys.every((k) => a[k] === b[k]);
+}
+
 interface AppliedConfig {
   image?: string;
   model?: string;
@@ -76,6 +100,8 @@ interface AppliedConfig {
     harness_config?: string;
   };
   agentRole?: string;
+  /** The runtime profile this agent was dispatched with, if any (api/types.go RunConfig.Profile). */
+  profile?: string;
 }
 
 interface AgentWithConfig extends Omit<Agent, 'appliedConfig'> {
@@ -108,6 +134,30 @@ export class ScionPageAgentConfigure extends LitElement {
   @state() private autoExposePortsList = '';
   @state() private autoExposePortsInterval = '3s';
 
+  // Snapshots of the values above as populateForm last loaded them (from the
+  // live, derived config), so buildConfig can tell "the user changed this
+  // control" from "this is just what was already there". Both telemetryEnabled
+  // and the auto-expose fields are synthesized from global defaults when the
+  // live config doesn't set them (see populateForm), so they are almost never
+  // literally absent -- sending them unconditionally on every Save/Start
+  // would record an edit that never happened (ptone/scion#2493 R1-1).
+  private loadedTelemetryEnabled = false;
+  private loadedAutoExposePortsEnabled = false;
+  private loadedAutoExposePortsMode = 'allowlist';
+  private loadedAutoExposePortsList = '';
+  private loadedAutoExposePortsInterval = '3s';
+  // Exactly which SCION_AUTO_EXPOSE_* keys were present in the loaded env,
+  // and their raw values -- see populateForm. Lets buildConfig re-send only
+  // what was really there (ptone/scion#2493 R2-1 facet (a)) instead of
+  // synthesizing a key that was never live just because some OTHER env row
+  // changed.
+  private loadedAutoExposeEnvKeys: Record<string, string> = {};
+  // Snapshot of this.envEntries as populateForm last loaded it (shallow
+  // copies, so later edits to this.envEntries can't retroactively change
+  // what "loaded" means). Lets buildConfig tell whether the user edited the
+  // custom env rows at all -- see the Env section of buildConfig.
+  private loadedEnvEntries: EnvEntry[] = [];
+
   // Form fields — Task & Prompts
   @state() private task = '';
   @state() private systemPrompt = '';
@@ -134,11 +184,94 @@ export class ScionPageAgentConfigure extends LitElement {
   @state() private gcpMetadataMode: 'block' | 'passthrough' | 'assign' = 'block';
   @state() private gcpServiceAccountId = '';
   @state() private gcpServiceAccounts: GCPServiceAccount[] = [];
+  /**
+   * Whether gcpMetadataMode came from a real stored decision
+   * (appliedConfig.gcpIdentity.metadataMode) rather than this page's own
+   * "nothing configured" placeholder default. A stored "block" must display
+   * exactly as stored and must never be auto-corrected away — stored values
+   * are not migrated, the same as a project default (ptone/scion#2328
+   * Phase 2).
+   */
+  @state() private gcpMetadataModeFromStorage = false;
+  /**
+   * True once the user has explicitly interacted with the GCP Identity
+   * picker (either select) this session. Gates whether gcp_identity is sent
+   * at all on Save/Start: unless the user changed something, the request
+   * omits gcp_identity entirely. For PATCH this is a true no-op — a nil
+   * gcp_identity never touches the agent's stored config
+   * (handlers_agents_core.go applyAgentUpdate) — which is exactly what must
+   * happen both for a resave of an unrelated field and for a known-Kubernetes
+   * target with nothing explicitly chosen (which would otherwise route an
+   * explicit "passthrough" through the Hub's passthrough ownership gate).
+   */
+  @state() private gcpIdentityUserSet = false;
+
+  /** Explanation text shared by the help-text slot and the disabled option's tooltip. */
+  private static readonly gcpIdentityK8sHintText =
+    'Block is not supported on the Kubernetes runtime: this agent targets a Kubernetes ' +
+    'broker/profile. Choose Passthrough or Assign Service Account instead.';
+
+  /** The agent's own runtime broker, loaded to determine its runtime kind for the GCP Identity picker. */
+  @state() private targetBroker: RuntimeBroker | null = null;
 
   private agentId = '';
 
   private get verifiedGCPServiceAccounts(): GCPServiceAccount[] {
     return this.gcpServiceAccounts.filter((sa) => sa.verified);
+  }
+
+  /**
+   * Whether this agent's runtime broker/profile is reliably known to be
+   * Kubernetes. A NEW selection of Block is disabled in that case
+   * (ptone/scion#2328 Phase 2) — an already-stored Block stays selectable as
+   * the displayed value, see render(). Unknown until targetBroker has loaded,
+   * which reads as false — the same "do not guess" default as
+   * agent-create.ts.
+   */
+  private get targetRuntimeIsKubernetesOnly(): boolean {
+    return isTargetKubernetesOnly(
+      this.targetBroker ?? undefined,
+      this.agent?.appliedConfig?.profile ?? ''
+    );
+  }
+
+  /**
+   * Short explanation rendered into the GCP identity select's `help-text`
+   * slot when this agent's target is reliably known to be Kubernetes: block
+   * is disabled for a NEW selection in that case.
+   *
+   * Rendered as a slotted child of the `<sl-select>` (not a sibling
+   * `aria-describedby` reference) because the element that receives focus is
+   * the `role="combobox"` input inside Shoelace's shadow root, which an
+   * attribute on the host cannot reach across the shadow boundary. Shoelace
+   * wires its own `help-text` slot to that combobox's `aria-describedby`
+   * internally (mirrors project-settings.ts's renderKubernetesBlockHint).
+   */
+  private renderKubernetesBlockHint(): TemplateResult | typeof nothing {
+    if (!this.targetRuntimeIsKubernetesOnly) return nothing;
+    if (this.gcpIdentityUserSet) {
+      return html`<div slot="help-text">${ScionPageAgentConfigure.gcpIdentityK8sHintText}</div>`;
+    }
+    // Untouched: name the actual effective identity rather than overclaiming
+    // the broker's own default applies — that is only true when this agent
+    // genuinely has nothing configured.
+    if (this.gcpMetadataModeFromStorage) {
+      const modeLabel =
+        this.gcpMetadataMode === 'assign'
+          ? 'Assign Service Account'
+          : this.gcpMetadataMode === 'passthrough'
+            ? 'Passthrough'
+            : 'Block';
+      return html`<div slot="help-text">
+        ${ScionPageAgentConfigure.gcpIdentityK8sHintText} This agent's current identity is
+        "${modeLabel}", as previously configured; it stays in effect until you change it here.
+      </div>`;
+    }
+    return html`<div slot="help-text">
+      ${ScionPageAgentConfigure.gcpIdentityK8sHintText} No explicit identity is configured for this
+      agent, so the broker's own Kubernetes default applies automatically; choosing Passthrough or
+      Assign here sends that choice explicitly instead.
+    </div>`;
   }
 
   private async loadGCPServiceAccounts(projectId: string): Promise<void> {
@@ -153,6 +286,19 @@ export class ScionPageAgentConfigure extends LitElement {
       }
     } catch {
       // Non-critical — just won't show assign option
+    }
+  }
+
+  /** Loads this agent's own runtime broker, to classify its runtime kind for the GCP Identity picker. */
+  private async loadTargetBroker(brokerId: string): Promise<void> {
+    try {
+      const res = await apiFetch(`/api/v1/runtime-brokers/${brokerId}`);
+      if (res.ok) {
+        this.targetBroker = (await res.json()) as RuntimeBroker;
+      }
+    } catch {
+      // Non-critical — an unknown broker just leaves the target unknown,
+      // which is the same "do not guess" default as no broker at all.
     }
   }
 
@@ -386,10 +532,53 @@ export class ScionPageAgentConfigure extends LitElement {
     }
   `;
 
+  override willUpdate(changedProperties: Map<string, unknown>): void {
+    super.willUpdate(changedProperties);
+    // Re-check whenever the target broker (loaded asynchronously, after
+    // populateForm has already read the agent's stored mode) or the mode
+    // itself changes. Unlike agent-create.ts, this does NOT correct away a
+    // value that came from storage (gcpMetadataModeFromStorage) — a stored
+    // "block" is not migrated, same as a project default. The Block option is
+    // always rendered here (merely disabled on a known-Kubernetes target, see
+    // render()), so there is no blank-select case to fix for a stored value;
+    // normalisation exists only to stop this page's own "nothing configured"
+    // placeholder default from looking and acting like an explicit choice.
+    if (changedProperties.has('targetBroker') || changedProperties.has('gcpMetadataMode')) {
+      this.normalizeGcpModeForTarget();
+    }
+  }
+
   override updated(changedProperties: Map<string, unknown>): void {
     super.updated(changedProperties);
     if (changedProperties.has('error') && this.error) {
       this.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  }
+
+  /**
+   * Corrects the *displayed* gcpMetadataMode away from "block" when this
+   * agent's target is reliably known to be Kubernetes (see
+   * targetRuntimeIsKubernetesOnly) — but only when "block" is this page's own
+   * placeholder default (gcpMetadataModeFromStorage is false), never when it
+   * reflects a real stored decision.
+   *
+   * Also clears gcpIdentityUserSet when it rewrites the mode, for the same
+   * reason as agent-create.ts's normalizeGcpModeForTarget: the target broker
+   * loads asynchronously, so a user could explicitly pick "Block" while it is
+   * still unknown (Block is enabled until targetRuntimeIsKubernetesOnly is
+   * confirmed true) and then have the broker resolve as Kubernetes-only out
+   * from under that choice. Without clearing the flag, Save/Start would send
+   * the auto-substituted "passthrough" as if the user had picked it for this
+   * target, through the Hub's passthrough ownership gate.
+   */
+  private normalizeGcpModeForTarget(): void {
+    if (
+      this.gcpMetadataMode === 'block' &&
+      !this.gcpMetadataModeFromStorage &&
+      this.targetRuntimeIsKubernetesOnly
+    ) {
+      this.gcpMetadataMode = 'passthrough';
+      this.gcpIdentityUserSet = false;
     }
   }
 
@@ -439,6 +628,9 @@ export class ScionPageAgentConfigure extends LitElement {
       }
 
       void this.loadGCPServiceAccounts(this.agent.projectId);
+      if (this.agent.runtimeBrokerId) {
+        void this.loadTargetBroker(this.agent.runtimeBrokerId);
+      }
       this.populateForm();
     } catch (err) {
       this.error = err instanceof Error ? err.message : 'Failed to load agent';
@@ -467,6 +659,26 @@ export class ScionPageAgentConfigure extends LitElement {
     const ac = this.agent.appliedConfig;
     const ic = ac?.inlineConfig;
 
+    // The live env for the custom env rows: ac.env wins outright when it is
+    // non-empty, matching how the hub treats AppliedConfig.Env as the
+    // authoritative live map.
+    const env = ac?.env || ic?.env || {};
+
+    // The auto-expose controls need a DIFFERENT merge: per-key, with ic.env
+    // taking precedence over ac.env for each of the four keys individually
+    // (ptone/scion#2493 R4-2), not an all-or-nothing choice between the two
+    // maps. resolveDerivedConfig's hub/project auto-expose stamp
+    // (handlers_agent_create_helpers.go) writes only into
+    // InlineConfig.Env -- it is never aliased into AppliedConfig.Env when
+    // the create request had no explicit env of its own, and a template's
+    // own env (merged into AppliedConfig.Env separately) can otherwise make
+    // `ac.env` non-empty and win outright under the plain `||` merge above,
+    // hiding the stamp the control is supposed to show. The hub's R4-1
+    // carve-out (applyAgentUpdate) keeps InlineConfig.Env populated with the
+    // live auto-expose keys after an untouched Save/Start specifically so
+    // this per-key read keeps seeing them.
+    const autoExposeEnv: Record<string, string> = { ...(ac?.env ?? {}), ...(ic?.env ?? {}) };
+
     // General
     this.model = ac?.model || ic?.model || '';
     const derived = this.deriveModelSelection(this.model);
@@ -480,14 +692,35 @@ export class ScionPageAgentConfigure extends LitElement {
     this.harnessConfig = ac?.harnessConfig || ic?.harness_config || '';
     this.telemetryEnabled = ic?.telemetry?.enabled ?? this.globalTelemetryDefault;
     this.autoExposePortsEnabled =
-      ic?.env?.SCION_AUTO_EXPOSE_PORTS === 'true'
+      autoExposeEnv.SCION_AUTO_EXPOSE_PORTS === 'true'
         ? true
-        : ic?.env?.SCION_AUTO_EXPOSE_PORTS === 'false'
+        : autoExposeEnv.SCION_AUTO_EXPOSE_PORTS === 'false'
           ? false
           : this.globalAutoExposePortsDefault;
-    this.autoExposePortsMode = ic?.env?.SCION_AUTO_EXPOSE_MODE || 'allowlist';
-    this.autoExposePortsList = ic?.env?.SCION_AUTO_EXPOSE_PORTS_LIST || '';
-    this.autoExposePortsInterval = ic?.env?.SCION_AUTO_EXPOSE_INTERVAL || '3s';
+    this.autoExposePortsMode = autoExposeEnv.SCION_AUTO_EXPOSE_MODE || 'allowlist';
+    this.autoExposePortsList = autoExposeEnv.SCION_AUTO_EXPOSE_PORTS_LIST || '';
+    this.autoExposePortsInterval = autoExposeEnv.SCION_AUTO_EXPOSE_INTERVAL || '3s';
+
+    // Snapshot what was just loaded, so buildConfig can later tell an actual
+    // edit to these controls apart from their synthesized starting value
+    // (ptone/scion#2493 R1-1). loadedAutoExposeEnvKeys additionally records
+    // exactly which of these keys were PRESENT in the loaded (per-key
+    // merged) env and their raw values (as opposed to the derived
+    // booleans/strings above, which can't tell "present and false" from
+    // "absent, defaulted to false") -- buildConfig needs that to re-send
+    // only what was really there when the auto-expose controls themselves
+    // weren't touched (R2-1 facet (a)).
+    this.loadedTelemetryEnabled = this.telemetryEnabled;
+    this.loadedAutoExposePortsEnabled = this.autoExposePortsEnabled;
+    this.loadedAutoExposePortsMode = this.autoExposePortsMode;
+    this.loadedAutoExposePortsList = this.autoExposePortsList;
+    this.loadedAutoExposePortsInterval = this.autoExposePortsInterval;
+    this.loadedAutoExposeEnvKeys = {};
+    for (const key of AUTO_EXPOSE_ENV_KEYS) {
+      if (autoExposeEnv[key] !== undefined) {
+        this.loadedAutoExposeEnvKeys[key] = autoExposeEnv[key];
+      }
+    }
 
     // Task & Prompts
     this.task = ac?.task || ic?.task || '';
@@ -505,16 +738,10 @@ export class ScionPageAgentConfigure extends LitElement {
     this.disk = ic?.resources?.disk || '';
 
     // Environment — filter out auto-expose env vars managed by dedicated UI controls
-    const autoExposeEnvKeys = new Set([
-      'SCION_AUTO_EXPOSE_PORTS',
-      'SCION_AUTO_EXPOSE_MODE',
-      'SCION_AUTO_EXPOSE_PORTS_LIST',
-      'SCION_AUTO_EXPOSE_INTERVAL',
-    ]);
-    const env = ac?.env || ic?.env || {};
     this.envEntries = Object.entries(env)
-      .filter(([key]) => !autoExposeEnvKeys.has(key))
+      .filter(([key]) => !AUTO_EXPOSE_ENV_KEYS_SET.has(key))
       .map(([key, value]) => ({ key, value }));
+    this.loadedEnvEntries = this.envEntries.map((e) => ({ ...e }));
 
     // Detect required keys that are empty (from env gathering)
     this.requiredEnvKeys = this.envEntries.filter((e) => e.key && !e.value).map((e) => e.key);
@@ -524,32 +751,49 @@ export class ScionPageAgentConfigure extends LitElement {
 
     // GCP Identity
     const gcpId = ac?.gcpIdentity;
+    this.gcpMetadataModeFromStorage = gcpId?.metadataMode != null;
     this.gcpMetadataMode = (gcpId?.metadataMode as 'block' | 'passthrough' | 'assign') || 'block';
     this.gcpServiceAccountId = gcpId?.serviceAccountId || '';
+    // Fresh load: nothing has been touched yet, regardless of what the
+    // stored/placeholder mode displays.
+    this.gcpIdentityUserSet = false;
   }
 
   private buildConfig(): ScionConfigPayload {
     const config: ScionConfigPayload = {};
     const caps = this.harnessCapabilities;
 
+    // Fields below are either dual-purpose on the hub side (empty means
+    // "unchanged", not "clear" — model, image, auth_selectedType, task: see
+    // applyAgentUpdate) or not rendered by this page at all (e.g. volumes,
+    // skills, mcp_servers), so an omitted key is always the right way to say
+    // "I didn't touch this". They keep the truthy-only guard below.
     const model = this.modelSelection === 'other' ? this.customModelId : this.modelSelection;
     if (model) config.model = model;
     config.thinking_level = this.thinkingLevel;
     if (this.image) config.image = this.image;
-    if (this.branch) config.branch = this.branch;
-    if (this.containerUser) config.user = this.containerUser;
     if (this.authMethod && this.authMethodSupported(this.authMethod))
       config.auth_selectedType = this.authMethod;
     if (this.task) config.task = this.task;
-    if (this.systemPrompt && !this.isUnsupported(caps?.prompts.system_prompt))
-      config.system_prompt = this.systemPrompt;
-    if (this.agentInstructions) config.agent_instructions = this.agentInstructions;
-    if (this.maxTurns && !this.isUnsupported(caps?.limits.max_turns))
-      config.max_turns = this.maxTurns;
-    if (this.maxModelCalls && !this.isUnsupported(caps?.limits.max_model_calls))
+
+    // Fields below are plain, single-value fields this page owns outright
+    // (it is the only place that edits them, once a harness supports them)
+    // and clearing one back to empty is a meaningful, intentional edit — not
+    // "I never looked at this field". They must be sent even when empty, so
+    // the hub's recordExplicitEdits (ptone/scion#2493) can tell "present and
+    // cleared" apart from "absent", and record the clear as an explicit
+    // CreateInputs edit instead of silently leaving a stale value in place
+    // for `scion reincarnate` to restore. A harness-unsupported field is
+    // still omitted entirely, since this page gives the user no way to view
+    // or edit it in that case.
+    config.branch = this.branch;
+    config.user = this.containerUser;
+    config.agent_instructions = this.agentInstructions;
+    if (!this.isUnsupported(caps?.prompts.system_prompt)) config.system_prompt = this.systemPrompt;
+    if (!this.isUnsupported(caps?.limits.max_turns)) config.max_turns = this.maxTurns;
+    if (!this.isUnsupported(caps?.limits.max_model_calls))
       config.max_model_calls = this.maxModelCalls;
-    if (this.maxDuration && !this.isUnsupported(caps?.limits.max_duration))
-      config.max_duration = this.maxDuration;
+    if (!this.isUnsupported(caps?.limits.max_duration)) config.max_duration = this.maxDuration;
 
     // Resources
     const hasResources =
@@ -569,30 +813,82 @@ export class ScionPageAgentConfigure extends LitElement {
       if (this.disk) config.resources.disk = this.disk;
     }
 
-    // Env
+    // Env. Built in two parts: the user-editable rows (env), and the
+    // auto-expose controls, which are written as plain env vars (matching
+    // agent-create) but owned by dedicated UI controls rather than the
+    // generic env-row editor.
     const env: Record<string, string> = {};
     for (const entry of this.envEntries) {
       if (entry.key) {
         env[entry.key] = entry.value;
       }
     }
+    const loadedEnvMap: Record<string, string> = {};
+    for (const entry of this.loadedEnvEntries) {
+      if (entry.key) loadedEnvMap[entry.key] = entry.value;
+    }
+    const customEnvChanged = !envMapsEqual(env, loadedEnvMap);
 
-    // Auto-expose ports (written as env vars, matching agent-create)
-    env.SCION_AUTO_EXPOSE_PORTS = this.autoExposePortsEnabled ? 'true' : 'false';
-    if (this.autoExposePortsEnabled) {
-      env.SCION_AUTO_EXPOSE_MODE = this.autoExposePortsMode;
-      if (this.autoExposePortsList) {
-        env.SCION_AUTO_EXPOSE_PORTS_LIST = this.autoExposePortsList;
+    // Both the auto-expose toggle and its sub-fields are synthesized from a
+    // global default whenever the live config doesn't set them explicitly,
+    // so whether to send `config.env` AT ALL is gated on whether the user
+    // changed a custom row OR one of these controls (ptone/scion#2493
+    // R1-1) -- sending it unconditionally would record a change that never
+    // happened: it would both freeze the auto-expose defaults into
+    // CreateInputs as if the user had typed them, and -- because
+    // InlineConfig.Env is replaced wholesale -- reach the live Env too on a
+    // mere Start, without a Save ever happening.
+    const autoExposeChanged =
+      this.autoExposePortsEnabled !== this.loadedAutoExposePortsEnabled ||
+      (this.autoExposePortsEnabled &&
+        (this.autoExposePortsMode !== this.loadedAutoExposePortsMode ||
+          this.autoExposePortsList !== this.loadedAutoExposePortsList ||
+          this.autoExposePortsInterval !== this.loadedAutoExposePortsInterval));
+
+    if (autoExposeChanged) {
+      // The user actually touched one of these controls: synthesize the
+      // full new set from their current values.
+      env.SCION_AUTO_EXPOSE_PORTS = this.autoExposePortsEnabled ? 'true' : 'false';
+      if (this.autoExposePortsEnabled) {
+        env.SCION_AUTO_EXPOSE_MODE = this.autoExposePortsMode;
+        if (this.autoExposePortsList) {
+          env.SCION_AUTO_EXPOSE_PORTS_LIST = this.autoExposePortsList;
+        }
+        env.SCION_AUTO_EXPOSE_INTERVAL = this.autoExposePortsInterval || '3s';
       }
-      env.SCION_AUTO_EXPOSE_INTERVAL = this.autoExposePortsInterval || '3s';
+    } else if (customEnvChanged) {
+      // Only a custom row changed, not these controls. `env` is still going
+      // to be sent because of that row, and the hub's per-key env diff
+      // (recordExplicitEdits) treats a key present in the live env but
+      // absent from the request as the user having removed it -- so any
+      // auto-expose key that really is live must still be re-sent verbatim,
+      // or it would be wiped from CreateInputs as an unintended side effect
+      // of the unrelated row edit. The critical difference from the
+      // (reverted) earlier fix: re-send ONLY the keys loadedAutoExposeEnvKeys
+      // says were actually present live -- never synthesize a key that
+      // wasn't there just because the toggle's current (possibly
+      // global-default) value happens to be computable. Synthesizing here
+      // was ptone/scion#2493 R2-1 facet (a): an agent with no live
+      // auto-expose keys at all (created via CLI/API, or a template that
+      // never set them) would otherwise gain them the first time ANY
+      // unrelated env row was edited.
+      Object.assign(env, this.loadedAutoExposeEnvKeys);
     }
 
-    if (Object.keys(env).length > 0) {
+    if (customEnvChanged || autoExposeChanged) {
       config.env = env;
     }
 
-    // Telemetry
-    if (!this.isUnsupported(caps?.telemetry.enabled)) {
+    // Telemetry — same reasoning as auto-expose above: telemetryEnabled is
+    // synthesized from a global default when the live config has no
+    // explicit telemetry, so only send it when the user actually toggled
+    // it. Sending {enabled: X} unconditionally would overwrite the live
+    // hub-stamped telemetry config (Cloud/Hub/filters) with a bare
+    // {enabled} object at reincarnate time.
+    if (
+      !this.isUnsupported(caps?.telemetry.enabled) &&
+      this.telemetryEnabled !== this.loadedTelemetryEnabled
+    ) {
       config.telemetry = { enabled: this.telemetryEnabled };
     }
 
@@ -606,7 +902,28 @@ export class ScionPageAgentConfigure extends LitElement {
     });
   }
 
+  /**
+   * Returns null when nothing should be sent at all: the caller then omits
+   * gcp_identity from the PATCH body, which is a true no-op on the server
+   * (handlers_agents_core.go applyAgentUpdate only touches
+   * AppliedConfig.GCPIdentity when the field is present) — so the agent's
+   * stored identity, whatever it is, is left exactly as it was.
+   *
+   * This omission is scoped to a known-Kubernetes target with no explicit
+   * user choice — the same scope as agent-create.ts, not every runtime.
+   * Sending an explicit "passthrough" there would hit the Hub's passthrough
+   * ownership gate for a request that never asked for passthrough, and a
+   * resave of an untouched stored value must not rewrite it — Kubernetes is
+   * also where the Block option is disabled for a NEW selection, so an
+   * untouched value there is reliably either "nothing configured" or
+   * "stored", never a fresh pick. On every other runtime this method keeps
+   * the pre-existing behavior of always sending the current mode/service
+   * account explicitly: there is no passthrough-gate or block-migration
+   * concern to avoid there, and the request shape for non-Kubernetes agents
+   * must not change.
+   */
   private buildGCPIdentityPayload(): Record<string, unknown> | null {
+    if (this.targetRuntimeIsKubernetesOnly && !this.gcpIdentityUserSet) return null;
     if (this.gcpMetadataMode === 'assign') {
       if (!this.gcpServiceAccountId) return null;
       return { metadata_mode: 'assign', service_account_id: this.gcpServiceAccountId };
@@ -624,6 +941,22 @@ export class ScionPageAgentConfigure extends LitElement {
 
     if (this.gcpMetadataMode === 'assign' && !this.gcpServiceAccountId) {
       this.error = 'Please select a service account for GCP identity assignment.';
+      this.saving = false;
+      return;
+    }
+
+    // Transition-only: a resave of an already-stored "block" (gcpIdentityUserSet
+    // false) must succeed — it is refused only when the user actively set
+    // "block" themselves, which the UI itself already prevents (the Block
+    // option is disabled for new selection on a known-Kubernetes target, see
+    // render()). This guard is defense-in-depth, not the primary control.
+    if (
+      this.gcpIdentityUserSet &&
+      this.gcpMetadataMode === 'block' &&
+      this.targetRuntimeIsKubernetesOnly
+    ) {
+      this.error =
+        'Block is not available for a Kubernetes runtime target. Choose Passthrough or Assign Service Account.';
       this.saving = false;
       return;
     }
@@ -675,6 +1008,18 @@ export class ScionPageAgentConfigure extends LitElement {
 
     if (this.gcpMetadataMode === 'assign' && !this.gcpServiceAccountId) {
       this.error = 'Please select a service account for GCP identity assignment.';
+      this.starting = false;
+      return;
+    }
+
+    // Transition-only — see the identical guard in handleSave for why.
+    if (
+      this.gcpIdentityUserSet &&
+      this.gcpMetadataMode === 'block' &&
+      this.targetRuntimeIsKubernetesOnly
+    ) {
+      this.error =
+        'Block is not available for a Kubernetes runtime target. Choose Passthrough or Assign Service Account.';
       this.starting = false;
       return;
     }
@@ -1121,16 +1466,25 @@ export class ScionPageAgentConfigure extends LitElement {
               | 'block'
               | 'passthrough'
               | 'assign';
+            this.gcpIdentityUserSet = true;
             if (this.gcpMetadataMode !== 'assign') {
               this.gcpServiceAccountId = '';
             }
           }}
         >
-          <sl-option value="block">Block</sl-option>
+          <sl-option
+            value="block"
+            ?disabled=${this.targetRuntimeIsKubernetesOnly}
+            title=${this.targetRuntimeIsKubernetesOnly
+              ? ScionPageAgentConfigure.gcpIdentityK8sHintText
+              : nothing}
+            >Block</sl-option
+          >
           ${this.gcpServiceAccounts.length > 0
             ? html`<sl-option value="assign">Assign Service Account</sl-option>`
             : nothing}
           <sl-option value="passthrough">Passthrough</sl-option>
+          ${this.renderKubernetesBlockHint()}
         </sl-select>
         <div class="hint">
           ${this.gcpMetadataMode === 'block'
@@ -1155,6 +1509,7 @@ export class ScionPageAgentConfigure extends LitElement {
                         this.gcpServiceAccountId = (
                           e.target as HTMLElement & { value: string }
                         ).value;
+                        this.gcpIdentityUserSet = true;
                       }}
                     >
                       ${this.verifiedGCPServiceAccounts.map(

@@ -41,10 +41,19 @@ import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type { User } from '../../shared/types.js';
-import { isFeatureEnabled } from '../../utils/feature-flags.js';
+import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../../utils/feature-flags.js';
+import { TouchPrimaryController } from '../../utils/input-modality.js';
 import { apiFetch } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
 import { TERMINAL_SESSION_COUNT_EVENT } from '../../client/terminal-workspace-events.js';
+import { CHAT_PALETTE_OPEN_REQUEST_EVENT } from '../../client/chat-palette-events.js';
+import { TERMINAL_PALETTE_OPEN_REQUEST_EVENT } from '../../client/terminal-palette-events.js';
+import {
+  GRAPH_PALETTE_AVAILABILITY_EVENT,
+  GRAPH_PALETTE_OPEN_REQUEST_EVENT,
+  isGraphPaletteAvailable,
+} from '../../client/graph-palette-events.js';
+import { touchMenuItemStyles } from './touch-styles.js';
 import './notification-tray.js';
 import './inbox-tray.js';
 
@@ -80,12 +89,28 @@ export function slugFromChatPath(path: string): string | null {
   return m ? m[1] : null;
 }
 
+/**
+ * Detect whether the current device is a Mac (including iPhone/iPad/iPod),
+ * for the palette button's shortcut label and `aria-keyshortcuts`. Prefers
+ * the User-Agent Client Hints API (`navigator.userAgentData`), which is not
+ * subject to User-Agent string reduction, and falls back to the deprecated
+ * `navigator.platform` where Client Hints is unavailable -- notably Safari,
+ * which never implemented it. Guarded for environments with no `navigator`
+ * at all.
+ */
+export function isMacPlatform(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const uaDataPlatform = (navigator as Navigator & { userAgentData?: { platform?: string } })
+    .userAgentData?.platform;
+  if (uaDataPlatform) return /mac/i.test(uaDataPlatform);
+  return /Mac|iPhone|iPad|iPod/.test(navigator.platform);
+}
+
 /** URL for the Scion documentation site, opened by the Help button. */
 const DOCS_URL = 'https://googlecloudplatform.github.io/scion/overview/';
 
 /** Feature flag gating the chat mode (and therefore the mode switch). */
 const NATIVE_CHAT_FLAG = 'web.native_chat';
-const TERMINAL_WORKSPACE_FLAG = 'web.terminal_workspace';
 
 // Header instances in the app shell and retained terminal workspace share one
 // document-level mode memory so switching views restores the same last paths.
@@ -126,6 +151,10 @@ export class ScionHeader extends LitElement {
   @state()
   private terminalSessionCount = 0;
 
+  /** Whether a graph view on screen offers the "Jump to agent" palette. */
+  @state()
+  private graphPaletteAvailable = false;
+
   /** Unread message count from the inbox tray (best-effort sync). */
   @state()
   private inboxCount = 0;
@@ -134,7 +163,12 @@ export class ScionHeader extends LitElement {
   @state()
   private notificationCount = 0;
 
+  /** Whether the device's primary pointer is touch — hides keyboard-shortcut affordances on the palette button. */
+  private touchPrimary = new TouchPrimaryController(this);
+
   static override styles = css`
+    ${touchMenuItemStyles}
+
     /* ------------------------------------------------------------------ */
     /* Grid: three-tier responsive                                         */
     /*   Wide  (>1100px):  3-col -- title | mode-switch | actions+user      */
@@ -205,6 +239,11 @@ export class ScionHeader extends LitElement {
       display: flex;
       align-items: center;
       gap: 0.5rem;
+      /* Lets the title truncate instead of forcing .header-left (and, past
+         it, the palette button and both dropdowns) wider than the
+         viewport at narrow widths — same reasoning as .header-left's own
+         min-width: 0 above. */
+      min-width: 0;
     }
 
     .logo-icon {
@@ -212,11 +251,22 @@ export class ScionHeader extends LitElement {
       line-height: 1;
     }
 
+    .logo-text {
+      min-width: 0;
+    }
+
     .logo-text h1 {
       margin: 0;
       font-size: 1.125rem;
       font-weight: 700;
       color: var(--scion-text, #1e293b);
+      /* Truncates with an ellipsis rather than wrapping onto a second line
+         (which grows the header's height) once the palette button and both
+         dropdowns leave it less room than its own text needs. */
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
 
     /* ------------------------------------------------------------------ */
@@ -290,6 +340,59 @@ export class ScionHeader extends LitElement {
       justify-self: end;
       grid-column: 3;
       position: relative;
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* Palette button -- first child of .header-right, visible at every tier */
+    /* ------------------------------------------------------------------ */
+    /*
+     * A plain native <button>, not <sl-icon-button>: Shoelace's icon button
+     * does not forward host-level ARIA attributes (aria-haspopup,
+     * aria-keyshortcuts) to the inner <button part="base"> that actually
+     * takes focus and carries the accessible role, so they never reach the
+     * accessibility tree. A real <button> carries its own attributes
+     * directly. Sized/styled like .mode-trigger below, minus its border.
+     */
+    .palette-button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 2rem;
+      height: 2rem;
+      padding: 0;
+      border: none;
+      border-radius: 0.375rem;
+      background: transparent;
+      color: var(--scion-text-muted, #64748b);
+      cursor: pointer;
+      transition:
+        background 0.15s ease,
+        color 0.15s ease;
+    }
+
+    /* Scoped to hover-capable devices, the same as .palette-option:hover in
+       quick-palette.ts and for the same reason: on touch, :hover sticks
+       after a tap until the next tap lands elsewhere — it would still be
+       showing when the palette closes and focus returns to this button. */
+    @media (hover: hover) {
+      .palette-button:hover {
+        background: var(--scion-bg-subtle, #f1f5f9);
+        color: var(--scion-text, #1e293b);
+      }
+    }
+
+    .palette-button sl-icon {
+      font-size: 1.125rem;
+    }
+
+    /* A tap target of at least 44x44 on touch, where the compact 2rem
+       (32px) desktop sizing above does not meet the minimum. Desktop keeps
+       the compact sizing to match the other header icon buttons. */
+    @media (hover: none) and (pointer: coarse) {
+      .palette-button {
+        min-width: 44px;
+        min-height: 44px;
+      }
     }
 
     /* ------------------------------------------------------------------ */
@@ -684,6 +787,7 @@ export class ScionHeader extends LitElement {
       <div class="wide-center">${this.renderModeSwitch()}</div>
 
       <div class="header-right">
+        ${this.renderPaletteButton()}
         <!-- Wide layout (>1100px): inline actions + user section -->
         <div class="wide-right">
           ${this.user
@@ -723,10 +827,7 @@ export class ScionHeader extends LitElement {
                     ></sl-icon-button>
                   </sl-tooltip>
                   <div class="theme-switch">
-                    <sl-icon
-                      name="sun"
-                      class=${this.isDark ? '' : 'active-icon'}
-                    ></sl-icon>
+                    <sl-icon name="sun" class=${this.isDark ? '' : 'active-icon'}></sl-icon>
                     <button
                       class="toggle-track ${this.isDark ? 'dark' : ''}"
                       @click=${(): void => this.toggleTheme()}
@@ -734,10 +835,7 @@ export class ScionHeader extends LitElement {
                     >
                       <span class="toggle-knob"></span>
                     </button>
-                    <sl-icon
-                      name="moon"
-                      class=${this.isDark ? 'active-icon' : ''}
-                    ></sl-icon>
+                    <sl-icon name="moon" class=${this.isDark ? 'active-icon' : ''}></sl-icon>
                   </div>
                 </div>
                 <div class="user-section">
@@ -750,10 +848,7 @@ export class ScionHeader extends LitElement {
                       <sl-icon name="person"></sl-icon>
                       Profile
                     </a>
-                    <button
-                      class="sign-out-button"
-                      @click=${(): void => this.handleLogout()}
-                    >
+                    <button class="sign-out-button" @click=${(): void => this.handleLogout()}>
                       <sl-icon name="box-arrow-right"></sl-icon>
                       Sign out
                     </button>
@@ -789,6 +884,78 @@ export class ScionHeader extends LitElement {
         </div>
       </div>
     `;
+  }
+
+  // =========================================================================
+  // Palette button -- opens a quick palette from the header: the chat quick
+  // switcher on a chat route, the terminal view's agents-only "Jump to
+  // agent" palette on /terminals, or a graph view's "Jump to agent" palette
+  // while one is on screen. One button, one render path, shared by every
+  // host -- see renderPaletteButton's own doc comment.
+  // =========================================================================
+
+  /**
+   * The header's palette button. Renders as a single element shared by every
+   * responsive tier (positioned via `.header-right`'s own flex layout, see
+   * the render() call site) rather than duplicated per tier. Visible on
+   * every width when signed in on a route with a palette to open: narrow
+   * screens need it most since they have no keyboard shortcut, but desktop
+   * keeps it too, both to discover the shortcut (via the tooltip) and for a
+   * pointer/trackpad user who would rather click than reach for a chord.
+   *
+   * Which host owns the click is resolved once here, as its open-request
+   * event, and threaded through to the click handler rather than re-resolved
+   * there: the route could otherwise change between render and click
+   * (unlikely for a header button, but this keeps the two in sync by
+   * construction rather than by coincidence).
+   */
+  private renderPaletteButton(): TemplateResult | typeof nothing {
+    if (!this.user) return nothing;
+    const isChat = this.isChatView();
+    const isTerminal = this.isTerminalView();
+    const isGraph = !isChat && !isTerminal && this.graphPaletteAvailable;
+    if (!isChat && !isTerminal && !isGraph) return nothing;
+    const openRequestEvent = isChat
+      ? CHAT_PALETTE_OPEN_REQUEST_EVENT
+      : isTerminal
+        ? TERMINAL_PALETTE_OPEN_REQUEST_EVENT
+        : GRAPH_PALETTE_OPEN_REQUEST_EVENT;
+
+    const isTouch = this.touchPrimary.isTouch;
+    const isMac = isMacPlatform();
+    const shortcutLabel = isMac ? '⌘K' : 'Ctrl+K';
+    const ariaKeyshortcuts = isMac ? 'Meta+K' : 'Control+K';
+    const label = isChat ? 'Quick switcher' : 'Jump to agent';
+    const ariaLabel = isChat ? 'Open quick switcher' : 'Open Jump to agent';
+
+    return html`
+      <sl-tooltip content=${`${label} (${shortcutLabel})`} ?disabled=${isTouch}>
+        <button
+          type="button"
+          class="palette-button"
+          aria-label=${ariaLabel}
+          aria-haspopup="dialog"
+          aria-keyshortcuts=${isTouch ? nothing : ariaKeyshortcuts}
+          @click=${(e: Event): void => this.handlePaletteButtonClick(e, openRequestEvent)}
+        >
+          <sl-icon name="compass" aria-hidden="true"></sl-icon>
+        </button>
+      </sl-tooltip>
+    `;
+  }
+
+  /**
+   * iOS and macOS Safari do not focus a `<button>` on click, so without this
+   * the deep active element the owning host captures as "what to restore
+   * focus to" would be whatever was focused before the click — which could
+   * be the chat composer, popping the on-screen keyboard back open the
+   * instant the palette closes. Focusing the button explicitly first, before
+   * dispatching, makes capture reliably see this button instead.
+   */
+  private handlePaletteButtonClick(e: Event, openRequestEvent: string): void {
+    const btn = e.currentTarget as HTMLElement;
+    btn.focus({ preventScroll: true });
+    this.dispatchEvent(new CustomEvent(openRequestEvent, { bubbles: true, composed: true }));
   }
 
   // =========================================================================
@@ -1082,16 +1249,17 @@ export class ScionHeader extends LitElement {
   }
 
   /**
-   * Apply visually-hidden styles to the tray trigger buttons so they are
-   * invisible but remain functional for programmatic clicks. The panels
-   * (siblings of the buttons in the tray's shadow DOM) are unaffected.
+   * Hide the tray trigger buttons from layout, focus and the accessibility
+   * tree, while leaving them functional for programmatic clicks (a
+   * synthetic `.click()` still fires on a `display: none` element). The
+   * panels (siblings of the buttons in the tray's shadow DOM) are
+   * unaffected — the header's own icon buttons are the only visible,
+   * properly-sized trigger for these actions.
    */
   private hideTrayTriggers(): void {
     const hide = (el: HTMLElement | null): void => {
       if (!el) return;
-      el.style.cssText =
-        'position:absolute;width:1px;height:1px;overflow:hidden;' +
-        'clip:rect(0,0,0,0);white-space:nowrap;border:0;padding:0;margin:-1px;';
+      el.style.display = 'none';
     };
 
     const inboxTray = this.shadowRoot?.querySelector('scion-inbox-tray');
@@ -1146,7 +1314,11 @@ export class ScionHeader extends LitElement {
   }
 
   private isTerminalView(): boolean {
-    const path = this.currentPath || window.location.pathname;
+    // Strip the query string first: `currentPath` is the router's raw path
+    // argument, which — for the multi-pane URL form (`/terminals?lv=1&...`)
+    // — still carries it, and `=== '/terminals'` would otherwise never
+    // match a bare multi-pane URL at all.
+    const path = (this.currentPath || window.location.pathname).split('?')[0];
     return path === '/terminals' || path.startsWith('/terminals/');
   }
 
@@ -1256,6 +1428,8 @@ export class ScionHeader extends LitElement {
       TERMINAL_SESSION_COUNT_EVENT,
       this.handleTerminalSessionCount as EventListener
     );
+    this.graphPaletteAvailable = isGraphPaletteAvailable();
+    window.addEventListener(GRAPH_PALETTE_AVAILABILITY_EVENT, this.handleGraphPaletteAvailability);
     this.rememberModePath();
 
     // Listen for SSE events to keep tray badge counts in sync.
@@ -1268,6 +1442,10 @@ export class ScionHeader extends LitElement {
     window.removeEventListener(
       TERMINAL_SESSION_COUNT_EVENT,
       this.handleTerminalSessionCount as EventListener
+    );
+    window.removeEventListener(
+      GRAPH_PALETTE_AVAILABILITY_EVENT,
+      this.handleGraphPaletteAvailability
     );
     stateManager.removeEventListener('user-message-created', this.handleTrayCountEvent);
     stateManager.removeEventListener('notification-created', this.handleTrayCountEvent);
@@ -1293,6 +1471,10 @@ export class ScionHeader extends LitElement {
 
   private readonly handleTerminalSessionCount = (event: CustomEvent<{ count?: number }>): void => {
     this.terminalSessionCount = Math.max(0, event.detail?.count ?? 0);
+  };
+
+  private readonly handleGraphPaletteAvailability = (): void => {
+    this.graphPaletteAvailable = isGraphPaletteAvailable();
   };
 
   private rememberModePath(): void {

@@ -129,6 +129,24 @@ type Agent struct {
 	LaunchStep string `json:"launch_step,omitempty"`
 	// LaunchError holds the value of the "launch_error" field.
 	LaunchError string `json:"launch_error,omitempty"`
+	// DeletionState holds the value of the "deletion_state" field.
+	DeletionState string `json:"deletion_state,omitempty"`
+	// DeletionClaim holds the value of the "deletion_claim" field.
+	DeletionClaim int64 `json:"deletion_claim,omitempty"`
+	// DeletionLeaseAt holds the value of the "deletion_lease_at" field.
+	DeletionLeaseAt *time.Time `json:"deletion_lease_at,omitempty"`
+	// DeletionStartedAt holds the value of the "deletion_started_at" field.
+	DeletionStartedAt *time.Time `json:"deletion_started_at,omitempty"`
+	// DeletionFailedAt holds the value of the "deletion_failed_at" field.
+	DeletionFailedAt *time.Time `json:"deletion_failed_at,omitempty"`
+	// DeletionCode holds the value of the "deletion_code" field.
+	DeletionCode string `json:"deletion_code,omitempty"`
+	// DeletionError holds the value of the "deletion_error" field.
+	DeletionError string `json:"deletion_error,omitempty"`
+	// DeletionPrior holds the value of the "deletion_prior" field.
+	DeletionPrior string `json:"deletion_prior,omitempty"`
+	// DeletionRequest holds the value of the "deletion_request" field.
+	DeletionRequest string `json:"deletion_request,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the AgentQuery when eager-loading is set.
 	Edges        AgentEdges `json:"edges"`
@@ -188,11 +206,11 @@ func (*Agent) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case agent.FieldDelegationEnabled, agent.FieldDetached, agent.FieldWebPtyEnabled, agent.FieldLaunchAsyncOptIn:
 			values[i] = new(sql.NullBool)
-		case agent.FieldExitCode, agent.FieldCurrentTurns, agent.FieldCurrentModelCalls, agent.FieldStateVersion, agent.FieldGeneration, agent.FieldLaunchSeq:
+		case agent.FieldExitCode, agent.FieldCurrentTurns, agent.FieldCurrentModelCalls, agent.FieldStateVersion, agent.FieldGeneration, agent.FieldLaunchSeq, agent.FieldDeletionClaim:
 			values[i] = new(sql.NullInt64)
-		case agent.FieldSlug, agent.FieldName, agent.FieldTemplate, agent.FieldStatus, agent.FieldMessageMode, agent.FieldPhase, agent.FieldActivity, agent.FieldToolName, agent.FieldConnectionState, agent.FieldContainerStatus, agent.FieldExitReason, agent.FieldRuntimeState, agent.FieldStalledFromActivity, agent.FieldImage, agent.FieldRuntime, agent.FieldRuntimeBrokerID, agent.FieldTaskSummary, agent.FieldMessage, agent.FieldAppliedConfig, agent.FieldHarnessConfig, agent.FieldReincarnationState, agent.FieldLaunchID, agent.FieldLaunchState, agent.FieldLaunchEndReason, agent.FieldLaunchKind, agent.FieldLaunchOwner, agent.FieldLaunchStep, agent.FieldLaunchError:
+		case agent.FieldSlug, agent.FieldName, agent.FieldTemplate, agent.FieldStatus, agent.FieldMessageMode, agent.FieldPhase, agent.FieldActivity, agent.FieldToolName, agent.FieldConnectionState, agent.FieldContainerStatus, agent.FieldExitReason, agent.FieldRuntimeState, agent.FieldStalledFromActivity, agent.FieldImage, agent.FieldRuntime, agent.FieldRuntimeBrokerID, agent.FieldTaskSummary, agent.FieldMessage, agent.FieldAppliedConfig, agent.FieldHarnessConfig, agent.FieldReincarnationState, agent.FieldLaunchID, agent.FieldLaunchState, agent.FieldLaunchEndReason, agent.FieldLaunchKind, agent.FieldLaunchOwner, agent.FieldLaunchStep, agent.FieldLaunchError, agent.FieldDeletionState, agent.FieldDeletionCode, agent.FieldDeletionError, agent.FieldDeletionPrior, agent.FieldDeletionRequest:
 			values[i] = new(sql.NullString)
-		case agent.FieldCreated, agent.FieldUpdated, agent.FieldLastSeen, agent.FieldLastActivityEvent, agent.FieldStartedAt, agent.FieldDeletedAt, agent.FieldReincarnationUpdatedAt, agent.FieldLaunchDeadline, agent.FieldLaunchLastReportAt:
+		case agent.FieldCreated, agent.FieldUpdated, agent.FieldLastSeen, agent.FieldLastActivityEvent, agent.FieldStartedAt, agent.FieldDeletedAt, agent.FieldReincarnationUpdatedAt, agent.FieldLaunchDeadline, agent.FieldLaunchLastReportAt, agent.FieldDeletionLeaseAt, agent.FieldDeletionStartedAt, agent.FieldDeletionFailedAt:
 			values[i] = new(sql.NullTime)
 		case agent.FieldID, agent.FieldProjectID:
 			values[i] = new(uuid.UUID)
@@ -559,6 +577,63 @@ func (_m *Agent) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.LaunchError = value.String
 			}
+		case agent.FieldDeletionState:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field deletion_state", values[i])
+			} else if value.Valid {
+				_m.DeletionState = value.String
+			}
+		case agent.FieldDeletionClaim:
+			if value, ok := values[i].(*sql.NullInt64); !ok {
+				return fmt.Errorf("unexpected type %T for field deletion_claim", values[i])
+			} else if value.Valid {
+				_m.DeletionClaim = value.Int64
+			}
+		case agent.FieldDeletionLeaseAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field deletion_lease_at", values[i])
+			} else if value.Valid {
+				_m.DeletionLeaseAt = new(time.Time)
+				*_m.DeletionLeaseAt = value.Time
+			}
+		case agent.FieldDeletionStartedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field deletion_started_at", values[i])
+			} else if value.Valid {
+				_m.DeletionStartedAt = new(time.Time)
+				*_m.DeletionStartedAt = value.Time
+			}
+		case agent.FieldDeletionFailedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field deletion_failed_at", values[i])
+			} else if value.Valid {
+				_m.DeletionFailedAt = new(time.Time)
+				*_m.DeletionFailedAt = value.Time
+			}
+		case agent.FieldDeletionCode:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field deletion_code", values[i])
+			} else if value.Valid {
+				_m.DeletionCode = value.String
+			}
+		case agent.FieldDeletionError:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field deletion_error", values[i])
+			} else if value.Valid {
+				_m.DeletionError = value.String
+			}
+		case agent.FieldDeletionPrior:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field deletion_prior", values[i])
+			} else if value.Valid {
+				_m.DeletionPrior = value.String
+			}
+		case agent.FieldDeletionRequest:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field deletion_request", values[i])
+			} else if value.Valid {
+				_m.DeletionRequest = value.String
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -791,6 +866,39 @@ func (_m *Agent) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("launch_error=")
 	builder.WriteString(_m.LaunchError)
+	builder.WriteString(", ")
+	builder.WriteString("deletion_state=")
+	builder.WriteString(_m.DeletionState)
+	builder.WriteString(", ")
+	builder.WriteString("deletion_claim=")
+	builder.WriteString(fmt.Sprintf("%v", _m.DeletionClaim))
+	builder.WriteString(", ")
+	if v := _m.DeletionLeaseAt; v != nil {
+		builder.WriteString("deletion_lease_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.DeletionStartedAt; v != nil {
+		builder.WriteString("deletion_started_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	if v := _m.DeletionFailedAt; v != nil {
+		builder.WriteString("deletion_failed_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
+	builder.WriteString(", ")
+	builder.WriteString("deletion_code=")
+	builder.WriteString(_m.DeletionCode)
+	builder.WriteString(", ")
+	builder.WriteString("deletion_error=")
+	builder.WriteString(_m.DeletionError)
+	builder.WriteString(", ")
+	builder.WriteString("deletion_prior=")
+	builder.WriteString(_m.DeletionPrior)
+	builder.WriteString(", ")
+	builder.WriteString("deletion_request=")
+	builder.WriteString(_m.DeletionRequest)
 	builder.WriteByte(')')
 	return builder.String()
 }

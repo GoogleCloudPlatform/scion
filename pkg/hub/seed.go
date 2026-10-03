@@ -143,14 +143,14 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.ProjectRoleOwner,
 			Description: "Project owner with full project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    4, // R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    5, // R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectOwnerPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleAdmin,
 			Description: "Project admin with most project permissions (no delete, no set_message_mode)",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    4, // R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    5, // R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectAdminPermissionIDs(),
 		},
 		{
@@ -284,18 +284,25 @@ func projectOwnerPermissionIDs() []string {
 		// token_refresh, identity_token, port_forward, notify) are excluded:
 		// those are intended for agent identities, not human project admins.
 		//
-		// agent.attach and agent.port_access are excluded (R3,
-		// miller79/scion#88): agents run with their creator's user-scoped
-		// secrets, so terminal/port access to another member's agent would
-		// expose that member's credentials. Owners reach their own agents
-		// and progeny via the resource-owner and ancestor relationship grants.
-		// agent.lifecycle (start/stop/suspend/restart/restore) is retained so
-		// owners keep management oversight of members' agents.
+		// agent.attach is excluded (R3): agents run with
+		// their creator's user-scoped secrets, so a terminal on another
+		// member's agent would expose that member's credentials. Owners reach
+		// their own agents and progeny via the resource-owner and ancestor
+		// relationship grants. agent.lifecycle (start/stop/suspend/restart/
+		// restore) is retained so owners keep management oversight of
+		// members' agents.
+		//
+		// agent.port_access is included (R5) so owners and admins can open
+		// members' already-exposed ports for oversight. It does not grant
+		// terminal, exec or env access (agent.attach), or port registration
+		// (hub-level). project-member still does not carry it; grant it to
+		// members through a custom role.
 		"agent.create",
 		"agent.delete",
 		"agent.lifecycle",
 		"agent.list",
 		"agent.message",
+		"agent.port_access",
 		"agent.read",
 		"agent.set_message_mode",
 		"agent.stop_all",
@@ -361,12 +368,13 @@ func projectOwnerPermissionIDs() []string {
 func projectAdminPermissionIDs() []string {
 	return []string{
 		// Agent lifecycle and operations (no delete, no set_message_mode,
-		// no agent-self credential permissions, no attach/port_access — see
-		// projectOwnerPermissionIDs for the miller79/scion#88 rationale)
+		// no agent-self credential permissions, no attach — see
+		// projectOwnerPermissionIDs for the rationale)
 		"agent.create",
 		"agent.lifecycle",
 		"agent.list",
 		"agent.message",
+		"agent.port_access",
 		"agent.read",
 		"agent.stop_all",
 		"agent.update",
@@ -968,6 +976,13 @@ func reconcileSyncHubRoleGrants(ctx context.Context, s store.Store, u *store.Use
 // user but no corresponding project-owner RoleBinding, which causes the
 // project members view to show "no members". This function is idempotent:
 // it skips projects that already have the binding.
+//
+// The backfill only runs for a project that has ZERO project-owner bindings
+// (for any principal). It runs on every startup, so without that gate a
+// creator who was later removed, or who transferred ownership and was then
+// removed, would be re-made owner on each restart (ptone/scion#2554). A
+// project that has an owner is never a legacy pre-RoleBinding project, so
+// skipping it loses nothing.
 func backfillProjectOwnerRoleBindings(ctx context.Context, s store.Store) error {
 	ownerRoleDef, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
 	if err != nil {
@@ -989,11 +1004,22 @@ func backfillProjectOwnerRoleBindings(ctx context.Context, s store.Store) error 
 
 		for i := range projects.Items {
 			p := &projects.Items[i]
+			warnOwnerOnlyLegacyProject(ctx, s, p, ownerRoleDef.ID)
 			if p.CreatedBy == "" {
 				continue
 			}
 
-			_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+			hasOwner, err := projectHasOwnerBinding(ctx, s, p.ID, ownerRoleDef.ID)
+			if err != nil {
+				slog.Warn("failed to check project owner bindings during backfill; skipping",
+					"project_id", p.ID, "error", err)
+				continue
+			}
+			if hasOwner {
+				continue
+			}
+
+			_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
 				RoleDefinitionID: ownerRoleDef.ID,
 				PrincipalType:    store.RoleBindingPrincipalUser,
 				PrincipalID:      p.CreatedBy,
@@ -1022,6 +1048,70 @@ func backfillProjectOwnerRoleBindings(ctx context.Context, s store.Store) error 
 		slog.Info("backfilled project-owner role bindings", "created", created)
 	}
 	return nil
+}
+
+// projectHasOwnerBinding reports whether any principal holds a project-owner
+// role binding on the given project.
+func projectHasOwnerBinding(ctx context.Context, s store.Store, projectID, ownerRoleDefID string) (bool, error) {
+	bindings, err := s.ListRoleBindingsForScope(ctx, store.RoleScopeProject, projectID)
+	if err != nil {
+		return false, err
+	}
+	for _, b := range bindings {
+		if b != nil && b.RoleDefinitionID == ownerRoleDefID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// warnOwnerOnlyLegacyProject logs, once per project per startup, a project
+// whose OwnerID is not backed by a project-owner binding. Project.OwnerID is
+// not an authorization source (ptone/scion#2586), so it grants nothing; this
+// only logs and never grants. Two shapes warn:
+//   - OwnerID set, CreatedBy empty, and no project-owner binding at all: the
+//     project has no owner until an admin grants one.
+//   - OwnerID set, CreatedBy set but different, and OwnerID itself holds no
+//     project-owner binding: the named owner has no access through OwnerID.
+//
+// A project where OwnerID equals CreatedBy never warns; the backfill grants
+// CreatedBy.
+func warnOwnerOnlyLegacyProject(ctx context.Context, s store.Store, p *store.Project, ownerRoleDefID string) {
+	if p.OwnerID == "" || p.OwnerID == p.CreatedBy {
+		return
+	}
+	if p.CreatedBy == "" {
+		hasOwner, err := projectHasOwnerBinding(ctx, s, p.ID, ownerRoleDefID)
+		if err != nil {
+			slog.Warn("failed to check project owner bindings for owner-only legacy project; skipping",
+				"project_id", p.ID, "error", err)
+			return
+		}
+		if hasOwner {
+			return // any owner binding: the project has an owner
+		}
+		slog.Warn("project has OwnerID but no CreatedBy and no project-owner binding; OwnerID grants no access, an admin must add an owner",
+			"project_id", p.ID, "owner_id", p.OwnerID)
+		return
+	}
+	// OwnerID differs from a non-empty CreatedBy. projectHasOwnerBinding
+	// answers "does anyone own the project", which is not this question:
+	// the backfill grants CreatedBy, so check that OwnerID itself holds a
+	// project-owner binding.
+	bindings, err := s.ListRoleBindingsForScope(ctx, store.RoleScopeProject, p.ID)
+	if err != nil {
+		slog.Warn("failed to check project owner bindings for owner-only legacy project; skipping",
+			"project_id", p.ID, "error", err)
+		return
+	}
+	for _, b := range bindings {
+		if b != nil && b.RoleDefinitionID == ownerRoleDefID &&
+			b.PrincipalType == store.RoleBindingPrincipalUser && b.PrincipalID == p.OwnerID {
+			return
+		}
+	}
+	slog.Warn("project OwnerID differs from CreatedBy and holds no project-owner binding; OwnerID grants no access",
+		"project_id", p.ID, "owner_id", p.OwnerID, "created_by", p.CreatedBy)
 }
 
 // ReconcileSuperAdminBindings ensures bidirectional consistency between

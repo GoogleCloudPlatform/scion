@@ -22,6 +22,7 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import type {
@@ -80,6 +81,9 @@ import '../shared/effective-access-boundary-notice.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { terminalHref } from '../../client/open-terminal.js';
+import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { formatNumber } from '../../utils/format-number.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 /**
  * Parse a Go-style duration string (e.g. "2h30m", "1h", "45m", "90s") into
@@ -108,6 +112,14 @@ function parseDuration(s: string): number {
 }
 
 /**
+ * How long to show the client-side "deleted" state before SPA-navigating
+ * away, after a successful delete (or an SSE `deleted` event for this
+ * agent). Exported (rather than a magic number) so tests can reason about
+ * it and use fake timers.
+ */
+export const DELETE_REDIRECT_DELAY_MS = 1000;
+
+/**
  * Format seconds as "Xh Ym Zs".
  */
 function formatDurationHMS(totalSeconds: number): string {
@@ -124,6 +136,9 @@ function formatDurationHMS(totalSeconds: number): string {
 
 @customElement('scion-page-agent-detail')
 export class ScionPageAgentDetail extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @property({ type: Object })
   pageData: PageData | null = null;
 
@@ -144,6 +159,14 @@ export class ScionPageAgentDetail extends LitElement {
 
   @state()
   private actionLoading: Record<string, boolean> = {};
+
+  /**
+   * True once this agent has been deleted (either by this page or by an
+   * SSE `deleted` event). Shows a brief client-side-only "deleted" view
+   * before the SPA redirect fires.
+   */
+  @state()
+  private deleted = false;
 
   @state()
   private userNotifications: Notification[] = [];
@@ -609,6 +632,14 @@ export class ScionPageAgentDetail extends LitElement {
   private boundOnAgentsUpdated = this.onAgentsUpdated.bind(this);
   private boundOnProjectsUpdated = this.onProjectsUpdated.bind(this);
   private relativeTimeInterval: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Pending SPA-redirect timer for the deleted state; cancellable on
+   * disconnect. `@state()` so `renderDeletedState` re-renders (dropping
+   * "Redirecting…") the moment the timer fires or is cleared, not just when
+   * `deleted` changes.
+   */
+  @state()
+  private deleteRedirectTimer: ReturnType<typeof setTimeout> | null = null;
 
   override connectedCallback(): void {
     super.connectedCallback();
@@ -637,13 +668,91 @@ export class ScionPageAgentDetail extends LitElement {
       clearInterval(this.relativeTimeInterval);
       this.relativeTimeInterval = null;
     }
+    if (this.deleteRedirectTimer) {
+      clearTimeout(this.deleteRedirectTimer);
+      this.deleteRedirectTimer = null;
+    }
   }
 
   private onAgentsUpdated(): void {
     const updatedAgent = stateManager.getAgent(this.agentId);
     if (updatedAgent && this.agent) {
       this.agent = { ...this.agent, ...updatedAgent };
+      return;
     }
+    // The agent is missing from stateManager's map. That alone does not
+    // mean it was deleted: setScope() clears the map before this page's
+    // own reseed lands at the end of loadData (which awaits the project,
+    // auth/me, notification and subscription fetches first), and
+    // removeAgent() prunes stale rows without a tombstone. Either way, an
+    // unrelated `agents-updated` flush during that window would otherwise
+    // be read as "this agent was deleted". Key on the authoritative
+    // tombstone instead of absence. (No `!this.deleted` guard here:
+    // `showDeletedStateThenRedirect` already no-ops once `deleted` is true.)
+    if (!updatedAgent && this.agent && stateManager.getDeletedAgentIds().has(this.agentId)) {
+      this.showDeletedStateThenRedirect();
+    }
+  }
+
+  /** Dispatch SPA navigation via the document-level nav-click listener. */
+  private navigateViaSpa(path: string): void {
+    this.dispatchEvent(
+      new CustomEvent('nav-click', { detail: { path }, bubbles: true, composed: true })
+    );
+  }
+
+  /**
+   * True while this element is still attached AND the app's current route
+   * is still this agent's detail page. Guards the deferred SPA-redirect in
+   * {@link showDeletedStateThenRedirect}: `renderRoute` (main.ts) keeps the
+   * previous page connected-but-hidden behind `/terminals`, so
+   * `isConnected` alone cannot distinguish "visible" from "hidden behind
+   * another route". An `endsWith` check (rather than importing
+   * `stripBasePath` from main.ts, which is out of scope for this fix)
+   * tolerates a reverse-proxy base path. Trailing slashes are stripped
+   * first so `/agents/<id>/` still counts as this agent's route.
+   */
+  private isOnThisAgentRoute(): boolean {
+    if (!this.isConnected || typeof window === 'undefined') return false;
+    const pathname = window.location.pathname.replace(/\/+$/, '');
+    return pathname.endsWith(`/agents/${this.agentId}`);
+  }
+
+  /**
+   * Where the deleted-state redirect (and its link/back-link fallbacks) go:
+   * the agent's project page if known, otherwise the agents list. Shared by
+   * the deferred redirect timer, `renderDeletedState` and `renderError` so
+   * they cannot disagree about the destination computed from the same
+   * `this.project`. Deliberately *not* captured at schedule time: the timer
+   * re-reads this getter when it fires, so a project that finishes loading
+   * after the delete but before the 1s redirect still wins. The two can only
+   * differ in that window, and both destinations are valid.
+   */
+  private get redirectTarget(): string {
+    return this.project ? `/projects/${this.project.id}` : '/agents';
+  }
+
+  /**
+   * Show a brief client-side-only "deleted" state, then SPA-navigate to the
+   * project page (or /agents if there is no project). Used both for a
+   * delete/force-delete initiated from this page and for an SSE `deleted`
+   * event removing this agent elsewhere. The timer is cancellable so a
+   * disconnect (or a test using fake timers) does not leak it. The redirect
+   * itself only fires while this page is still the active route — see
+   * `isOnThisAgentRoute` — so it never pulls the user out of `/terminals`.
+   * When the redirect is skipped (or the element is disconnected and
+   * reconnected with no timer left to fire), `renderDeletedState` still
+   * offers a link out instead of leaving the page on "Redirecting…" forever.
+   */
+  private showDeletedStateThenRedirect(): void {
+    if (this.deleted) return;
+    this.deleted = true;
+    this.deleteRedirectTimer = setTimeout(() => {
+      this.deleteRedirectTimer = null;
+      if (this.isOnThisAgentRoute()) {
+        this.navigateViaSpa(this.redirectTarget);
+      }
+    }, DELETE_REDIRECT_DELAY_MS);
   }
 
   private onProjectsUpdated(): void {
@@ -795,19 +904,8 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   private formatDate(dateString: string): string {
-    try {
-      if (this.isZeroDate(dateString)) return '—';
-      const date = new Date(dateString);
-      return new Intl.DateTimeFormat('en', {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      }).format(date);
-    } catch {
-      return dateString;
-    }
+    if (this.isZeroDate(dateString)) return '—';
+    return formatInstantWithZone(dateString) || dateString;
   }
 
   private isZeroDate(dateString: string): boolean {
@@ -817,29 +915,8 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   private formatRelativeTime(dateString: string): string {
-    try {
-      if (this.isZeroDate(dateString)) return '—';
-      const date = new Date(dateString);
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
+    if (this.isZeroDate(dateString)) return '—';
+    return formatRelative(dateString);
   }
 
   private async handleAction(action: AgentLifecycleAction, event?: MouseEvent): Promise<void> {
@@ -887,14 +964,14 @@ export class ScionPageAgentDetail extends LitElement {
                   await extractApiError(forceResponse, 'Failed to force delete agent')
                 );
               }
-              window.location.href = this.project ? `/projects/${this.project.id}` : '/agents';
+              this.showDeletedStateThenRedirect();
               return;
             }
           }
           throw new Error(await extractApiError(response, 'Failed to delete agent'));
         }
 
-        window.location.href = this.project ? `/projects/${this.project.id}` : '/agents';
+        this.showDeletedStateThenRedirect();
       } catch (err) {
         console.error('Failed to delete agent:', err);
         showToast(err instanceof Error ? err.message : 'Failed to delete agent');
@@ -1038,6 +1115,10 @@ export class ScionPageAgentDetail extends LitElement {
   // ---------------------------------------------------------------------------
 
   override render() {
+    if (this.deleted) {
+      return this.renderDeletedState();
+    }
+
     if (this.loading) {
       return this.renderLoading();
     }
@@ -1243,6 +1324,18 @@ export class ScionPageAgentDetail extends LitElement {
           </div>
         </div>
         <div class="header-actions">
+          <sl-tooltip content="See this agent in graph">
+            <a
+              href="/agents/graph?project=${encodeURIComponent(
+                agent.projectId
+              )}&focus=${encodeURIComponent(this.agentId)}"
+              style="text-decoration: none;"
+            >
+              <sl-button variant="default" size="small">
+                <sl-icon slot="prefix" name="diagram-3"></sl-icon>
+              </sl-button>
+            </a>
+          </sl-tooltip>
           ${agent.messageMode === 'none'
             ? nothing
             : agent._messageability?.canMessage === false
@@ -1372,16 +1465,6 @@ export class ScionPageAgentDetail extends LitElement {
                 </a>
               `
             : nothing}
-          <sl-tooltip content="See this agent in graph">
-            <a
-              href="/agents/graph?project=${agent.projectId}&focus=${this.agentId}"
-              style="text-decoration: none;"
-            >
-              <sl-button variant="default" size="small">
-                <sl-icon slot="prefix" name="diagram-3"></sl-icon>
-              </sl-button>
-            </a>
-          </sl-tooltip>
           ${can(agent._capabilities, 'delete')
             ? html`
                 <sl-button
@@ -1662,27 +1745,27 @@ export class ScionPageAgentDetail extends LitElement {
         <div class="info-grid">
           <div class="info-item">
             <span class="info-label">TOTAL SESSIONS</span>
-            <span class="info-value">${m.totalSessions.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.totalSessions)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">INPUT TOKENS</span>
-            <span class="info-value">${m.totalTokensInput.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.totalTokensInput)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">OUTPUT TOKENS</span>
-            <span class="info-value">${m.totalTokensOutput.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.totalTokensOutput)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">CACHED TOKENS</span>
-            <span class="info-value">${m.totalTokensCached.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.totalTokensCached)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">REASONING TOKENS</span>
-            <span class="info-value">${m.totalTokensReasoning.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.totalTokensReasoning)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">AVG TOKENS / SESSION</span>
-            <span class="info-value">${m.avgTokensPerSession.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.avgTokensPerSession)}</span>
           </div>
         </div>
       </div>
@@ -1692,7 +1775,7 @@ export class ScionPageAgentDetail extends LitElement {
         <div class="info-grid">
           <div class="info-item">
             <span class="info-label">TOTAL TOOL CALLS</span>
-            <span class="info-value">${m.totalToolCalls.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.totalToolCalls)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">AVG DURATION</span>
@@ -2553,9 +2636,35 @@ export class ScionPageAgentDetail extends LitElement {
     `;
   }
 
+  /**
+   * Brief client-side-only state shown after a successful delete (or an
+   * SSE `deleted` event for this agent), before the SPA redirect fires.
+   * Action buttons are not rendered here, so there is nothing left to
+   * click on the way out. "Redirecting…" is shown only while
+   * `deleteRedirectTimer` is still pending; once it has fired (or was
+   * skipped — hidden behind `/terminals`, see `isOnThisAgentRoute` — or
+   * never re-armed after a disconnect/reconnect while deleted), the copy
+   * drops back to a plain statement so the page never claims a redirect
+   * that is not actually coming. The link covers all of those cases, so
+   * the user always has a way out.
+   */
+  private renderDeletedState(): TemplateResult {
+    const targetLabel = this.project ? `Go to ${this.project.name}` : 'Go to Agents';
+    return html`
+      <div class="loading-state" data-testid="agent-deleted-state">
+        <sl-icon name="trash"></sl-icon>
+        <p>Agent deleted.${this.deleteRedirectTimer ? ' Redirecting…' : ''}</p>
+        <a href="${this.redirectTarget}" class="back-link" data-testid="agent-deleted-link">
+          <sl-icon name="arrow-left"></sl-icon>
+          ${targetLabel}
+        </a>
+      </div>
+    `;
+  }
+
   private renderError() {
     return html`
-      <a href="${this.project ? `/projects/${this.project.id}` : '/agents'}" class="back-link">
+      <a href="${this.redirectTarget}" class="back-link">
         <sl-icon name="arrow-left"></sl-icon>
         ${this.project ? `To ${this.project.name}` : 'Back to Agents'}
       </a>

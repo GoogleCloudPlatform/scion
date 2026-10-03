@@ -44,12 +44,12 @@ locals {
   image_registry = coalesce(var.image_registry, module.shared_lookup.shared.artifact_registry.repo_url)
 
   # Single source of truth for this hub's identity, fed to hub-identity (whose
-  # hub_name input drives hub_scope_secret_hash, the OIDC signing key's secret
-  # ID) and to hub-cloudrun (whose hub_name input drives settings.yaml's
+  # hub_name input drives the hub-prefixed Secret Manager naming, ptone/
+  # scion#2152) and to hub-cloudrun (whose hub_name input drives settings.yaml's
   # hub_id and the SCION_SERVER_HUB_HUBID env var). ResolveHubID() in
   # pkg/config/hub_config.go prefers settings hub_id over the env var, so the
   # env var alone doesn't drive secret naming — but the two must never
-  # diverge, or GCPBackend.Get computes a different scion-hub-<hash>-* secret
+  # diverge, or GCPBackend.Get computes a different scion-<hash>-* secret
   # name than the one actually provisioned here (split-brain secret lookup).
   # Routing both module calls through this one local, instead of each
   # referencing var.hub_name independently, is what keeps them in lockstep.
@@ -107,9 +107,7 @@ module "hub_cloudrun" {
   hub_sa_email                          = module.hub_identity.hub_sa_email
   transport_sa_email                    = module.hub_identity.transport_sa_email
   hub_iam_grants                        = module.hub_identity.hub_iam_grants
-  hub_iam_condition_expression          = module.hub_identity.hub_iam_condition_expression
   hub_iam_condition_expression_prefixed = module.hub_identity.hub_iam_condition_expression_prefixed
-  hub_scope_secret_hash                 = module.hub_identity.hub_scope_secret_hash
 
   # Real resource attributes only, never a module reference or a
   # computed-string output. This map is what forces Cloud Run to wait for the

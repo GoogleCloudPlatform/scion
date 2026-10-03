@@ -116,6 +116,16 @@ func bypassAgentsServer(t *testing.T) (*Server, store.Store) {
 	return srv, s
 }
 
+// bindFixtureOwner gives f.owner the project-owner binding on f.proj, for
+// tests whose intent is project-owner access. Project.OwnerID alone grants
+// nothing (ptone/scion#2586). It is not part of bypassAgentsSetup because
+// many tests bind f.owner to a narrower project role themselves, and a
+// principal holds at most one built-in membership per project.
+func bindFixtureOwner(t *testing.T, f *bypassAgentsFixture) {
+	t.Helper()
+	require.NoError(t, f.srv.createProjectOwnerRoleBinding(context.Background(), f.proj.ID, f.owner.ID))
+}
+
 func bypassAgentsSetup(t *testing.T) *bypassAgentsFixture {
 	t.Helper()
 	srv, s := bypassAgentsServer(t)
@@ -784,6 +794,7 @@ func TestBypassAgents_LegitimateFlowsStillWork(t *testing.T) {
 	t.Run("project owner retains full access", func(t *testing.T) {
 		// The conversion must not change the user path at all.
 		f := bypassAgentsSetup(t)
+		bindFixtureOwner(t, f)
 		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPatch,
 			"/api/v1/projects/"+f.proj.ID, map[string]interface{}{"name": "Renamed By Owner"})
 		assert.Equal(t, http.StatusOK, rec.Code,

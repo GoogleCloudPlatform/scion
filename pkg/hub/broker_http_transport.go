@@ -99,7 +99,7 @@ func newBrokerHTTPTransport(debug bool, signer brokerRequestSigner) *brokerHTTPT
 
 func (t *brokerHTTPTransport) doRequest(ctx context.Context, brokerID, method, endpoint string, body []byte) (*http.Response, error) {
 	if endpoint == "" || !strings.Contains(endpoint, "://") {
-		return nil, fmt.Errorf("runtime broker %q has no HTTP endpoint configured (control channel may be required)", brokerID)
+		return nil, fmt.Errorf("runtime broker %q has no HTTP endpoint configured (control channel may be required): %w", brokerID, errStartRequestNotSent)
 	}
 
 	var reader io.Reader
@@ -109,7 +109,7 @@ func (t *brokerHTTPTransport) doRequest(ctx context.Context, brokerID, method, e
 
 	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, fmt.Errorf("failed to create request: %w (%w)", err, errStartRequestNotSent)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -120,7 +120,7 @@ func (t *brokerHTTPTransport) doRequest(ctx context.Context, brokerID, method, e
 			if t.debug {
 				slog.Warn("Failed to sign request", "brokerID", brokerID, "error", err)
 			}
-			return nil, fmt.Errorf("failed to sign request: %w", err)
+			return nil, fmt.Errorf("failed to sign request: %w (%w)", err, errStartRequestNotSent)
 		}
 	}
 
@@ -157,7 +157,7 @@ func (t *brokerHTTPTransport) decodeResponseWithSnippet(resp *http.Response, out
 
 func brokerHTTPError(resp *http.Response) error {
 	respBody, _ := io.ReadAll(resp.Body)
-	return &brokerStatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
+	return &brokerStatusError{StatusCode: resp.StatusCode, Body: string(respBody), RetryAfter: resp.Header.Get("Retry-After")}
 }
 
 func (t *brokerHTTPTransport) CreateAgent(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
@@ -233,7 +233,7 @@ func (t *brokerHTTPTransport) StartAgent(ctx context.Context, brokerID, brokerEn
 		var err error
 		body, err = json.Marshal(payload)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal request: %w", err)
+			return nil, fmt.Errorf("failed to marshal request: %w (%w)", err, errStartRequestNotSent)
 		}
 	}
 

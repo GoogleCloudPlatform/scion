@@ -84,6 +84,7 @@ const USED_ICONS = [
   'cloud-download',
   'cloud-upload',
   'clock-history',
+  'compass',
   'code',
   'code-slash',
   'code-square',

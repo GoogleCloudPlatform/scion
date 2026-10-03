@@ -30,6 +30,9 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { showConfirm } from './confirm-dialog.js';
+import { formatNumber } from '../../utils/format-number.js';
+import { formatInstant, zoneLabel } from '../../utils/time.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 // ────────────────────────────────────────────────────────────
 // Types
@@ -539,6 +542,9 @@ function formatFileSize(bytes: number): string {
 
 @customElement('scion-file-browser')
 export class ScionFileBrowser extends LitElement {
+  /** Re-renders the "Modified" column when the display zone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   /** Data source adapter — must be set by the parent. */
   @property({ attribute: false })
   dataSource: FileBrowserDataSource | null = null;
@@ -575,6 +581,41 @@ export class ScionFileBrowser extends LitElement {
   private readonly initialLimit = 500;
   private _searchAbortController: AbortController | null = null;
   private _searchDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * The data source instance an initial load has already been requested for.
+   * Reset on disconnect (and when dataSource is cleared) so reconnecting, or
+   * a later reassignment, triggers a fresh load.
+   */
+  private _requestedSource: FileBrowserDataSource | null = null;
+
+  /**
+   * Monotonically increasing token identifying the most recently started
+   * load. Incremented whenever a load is started or invalidated, so a
+   * superseded in-flight request can recognize it is stale and avoid
+   * overwriting newer results.
+   */
+  private _loadToken = 0;
+
+  /**
+   * The data source a loadFiles() call is currently in flight for, if any.
+   * Lets _requestInitialLoad() coalesce into that request instead of firing
+   * a duplicate one — e.g. disconnecting and immediately reconnecting while
+   * the initial request for the same source hasn't resolved yet.
+   *
+   * Keyed together with _inFlightToken (below), not on source identity
+   * alone: a source can be reassigned the same instance after being
+   * cleared to null (A -> null -> A) while the original A request is still
+   * in flight. Source identity alone would coalesce into that now-stale
+   * request, which _loadToken has already invalidated, and the browser
+   * would never load. Comparing _inFlightToken against the current
+   * _loadToken is what tells "in flight for the source we want" apart from
+   * "in flight for a source we've since moved past".
+   */
+  private _inFlightSource: FileBrowserDataSource | null = null;
+
+  /** The load token (see _loadToken) of the currently in-flight request, if any. */
+  private _inFlightToken: number | null = null;
 
   static override styles = css`
     :host {
@@ -717,6 +758,11 @@ export class ScionFileBrowser extends LitElement {
       flex-shrink: 0;
     }
 
+    .zone-label {
+      font-weight: normal;
+      color: var(--scion-text-muted, #64748b);
+    }
+
     .file-size,
     .file-date {
       font-size: 0.8125rem;
@@ -799,30 +845,96 @@ export class ScionFileBrowser extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    if (this.dataSource) {
-      void this.loadFiles();
-    }
+    this._requestInitialLoad();
   }
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     this._cancelSearch();
+    // Reset so a future reconnect (e.g. tab hidden/shown while cached) issues
+    // exactly one fresh load rather than being treated as already-requested.
+    this._requestedSource = null;
   }
 
   override updated(changed: Map<string, unknown>): void {
-    if (changed.has('dataSource') && this.dataSource) {
-      void this.loadFiles();
+    if (changed.has('dataSource')) {
+      this._requestInitialLoad();
     }
+  }
+
+  /**
+   * Issue the single initial listing request for the current data source.
+   *
+   * Both connectedCallback() and the first updated() pass observe the same
+   * property assignment (Lit applies `dataSource` before the element is
+   * connected, then reports it as changed on the first post-connect update).
+   * Tracking the source we've already requested collapses that pair into
+   * one request while still reloading when the data source genuinely
+   * changes (e.g. switching tabs) or the component reconnects.
+   */
+  private _requestInitialLoad(): void {
+    if (!this.dataSource) {
+      // The data source was cleared. Reset dedup state so a future
+      // reassignment reloads — including reassigning the very same
+      // instance, which _requestedSource would otherwise still remember as
+      // "already requested" — and invalidate any request still in flight
+      // (for the old source, or for any source at all, including while
+      // disconnected: disconnectedCallback() already nulls _requestedSource,
+      // so checking only that field here would silently skip this reset,
+      // and a subsequent A -> null while an A request is still in flight
+      // would let that stale request land after the source was cleared).
+      //
+      // Also reset when there's settled state to clear even with nothing
+      // requested or in flight: disconnect (which nulls _requestedSource)
+      // followed by clearing dataSource to null, after the previous load
+      // had already completed, would otherwise leave `files` populated
+      // with the old source's stale rows indefinitely.
+      if (
+        this._requestedSource !== null ||
+        this._inFlightSource !== null ||
+        this.files.length > 0 ||
+        this.loading ||
+        this.error !== null
+      ) {
+        this._requestedSource = null;
+        this._loadToken++;
+        this.files = [];
+        this.totalSize = 0;
+        this.totalCount = 0;
+        this.initialHasMore = false;
+        this.providerCount = 0;
+        this.loading = false;
+        this.error = null;
+      }
+      return;
+    }
+    if (this._requestedSource === this.dataSource) return;
+    this._requestedSource = this.dataSource;
+    if (this._inFlightSource === this.dataSource && this._inFlightToken === this._loadToken) {
+      // A load for this exact source is already in flight *and* is still
+      // the current one (not one _loadToken has since invalidated, e.g. by
+      // an intervening clear-to-null) — let it finish rather than firing a
+      // duplicate request for the same data.
+      return;
+    }
+    void this.loadFiles();
   }
 
   /** Public method to trigger a file list reload. */
   async loadFiles(): Promise<void> {
     if (!this.dataSource) return;
+    const source = this.dataSource;
+    const token = ++this._loadToken;
+    this._inFlightSource = source;
+    this._inFlightToken = token;
     this.loading = true;
     this.error = null;
 
     try {
-      const result = await this.dataSource.listFiles({ limit: this.initialLimit });
+      const result = await source.listFiles({ limit: this.initialLimit });
+      // A newer load (data-source change or explicit refresh) superseded
+      // this one while it was in flight — discard these stale results.
+      if (token !== this._loadToken) return;
       this.files = result.files || [];
       this.totalSize = result.totalSize || 0;
       this.totalCount = result.totalCount || 0;
@@ -833,10 +945,21 @@ export class ScionFileBrowser extends LitElement {
       this.backendError = false;
       this.backendHasMore = false;
     } catch (err) {
+      if (token !== this._loadToken) return;
       console.error('Failed to load files:', err);
       this.error = err instanceof Error ? err.message : 'Failed to load files';
     } finally {
-      this.loading = false;
+      // Only this exact call's token owns the in-flight bookkeeping — a
+      // newer request for the same source (explicit refresh while the
+      // initial load was still in flight) may have already replaced it,
+      // and clearing here would incorrectly report nothing in flight.
+      if (this._inFlightToken === token) {
+        this._inFlightSource = null;
+        this._inFlightToken = null;
+      }
+      if (token === this._loadToken) {
+        this.loading = false;
+      }
     }
   }
 
@@ -1073,19 +1196,14 @@ export class ScionFileBrowser extends LitElement {
     this.dispatchEvent(new CustomEvent('file-create-requested', { bubbles: true, composed: true }));
   }
 
+  /**
+   * Formats the "Modified" column in the effective display zone, 24-hour
+   * (`time.ts`). `formatInstant` reuses one formatter per style and zone, so
+   * no formatter is built per row (ptone/scion#2382), and it returns `''`
+   * for an invalid date without throwing; the raw string is shown then.
+   */
   private formatDate(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      return new Intl.DateTimeFormat('en', {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      }).format(date);
-    } catch {
-      return dateString;
-    }
+    return formatInstant(dateString, 'datetime-full') || dateString;
   }
 
   // ── Render ──
@@ -1118,7 +1236,7 @@ export class ScionFileBrowser extends LitElement {
       }
     } else if (this.initialHasMore && this.totalCount > this.files.length) {
       const sizeStr = this.totalSize > 0 ? ` (${formatFileSize(this.totalSize)})` : '';
-      countLabel = `${this.files.length.toLocaleString()} of ${this.totalCount.toLocaleString()} files${sizeStr} · most recent`;
+      countLabel = `${formatNumber(this.files.length)} of ${formatNumber(this.totalCount)} files${sizeStr} · most recent`;
     } else {
       const n = base.length;
       const visibleSize = base.reduce((sum, f) => sum + (f.size ?? 0), 0);
@@ -1287,7 +1405,7 @@ export class ScionFileBrowser extends LitElement {
                       @click=${() => this.toggleSort('modified')}
                     >
                       <span class="sort-indicator">${this.sortIndicator('modified')}</span>
-                      Modified
+                      Modified <span class="zone-label">(${zoneLabel()})</span>
                     </th>
                     <th></th>
                   </tr>
@@ -1354,7 +1472,7 @@ export class ScionFileBrowser extends LitElement {
               </table>
               ${displayFiles.length > 1000
                 ? html`<div class="file-list-truncated">
-                    File list truncated — showing 1,000 of ${displayFiles.length.toLocaleString()}
+                    File list truncated — showing 1,000 of ${formatNumber(displayFiles.length)}
                     files
                   </div>`
                 : nothing}

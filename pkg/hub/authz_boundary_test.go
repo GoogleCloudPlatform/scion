@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"testing"
@@ -50,6 +51,59 @@ func TestTokenBoundary_Valid(t *testing.T) {
 				t.Errorf("TokenBoundary(%+v).Valid() = %v, want %v", c.b, got, c.want)
 			}
 		})
+	}
+}
+
+// TestUATBoundary_StoreAndHubValidityAgree pins that pkg/hub's
+// TokenBoundary.Valid() and pkg/store's UserAccessToken.ValidateBoundary
+// agree on the shared kind/project-id-presence rule (permissions.
+// ValidBoundary) they both call. pkg/store cannot import pkg/hub, so this
+// test, which imports both, compares the two validators over the full
+// cross-product of kinds and project IDs. store's ValidateBoundary
+// additionally requires a "project" boundary's ID to parse as a non-nil
+// UUID, since pkg/store owns that ID's wire representation. That is a strict
+// narrowing, never a disagreement: whenever store accepts, hub accepts, and
+// hub accepts while store rejects only for a project ID that is not a
+// non-nil UUID.
+func TestUATBoundary_StoreAndHubValidityAgree(t *testing.T) {
+	const (
+		validUUID = "3f8e2b0a-6c1d-4a2f-9e77-9d3b1c5a2e10"
+		nonUUID   = "not-a-uuid"
+		nilUUID   = "00000000-0000-0000-0000-000000000000"
+	)
+	kinds := []string{"project", "hub", "", "bogus"}
+	ids := []string{"", validUUID, nonUUID, nilUUID}
+
+	for _, kind := range kinds {
+		for _, projectID := range ids {
+			// Expected results, stated from the rule rather than from
+			// either implementation.
+			wantHubValid := (kind == "project" && projectID != "") || (kind == "hub" && projectID == "")
+			wantStoreOK := (kind == "project" && projectID == validUUID) || (kind == "hub" && projectID == "")
+
+			t.Run(fmt.Sprintf("kind=%q/project_id=%q", kind, projectID), func(t *testing.T) {
+				hubValid := TokenBoundary{Kind: BoundaryKind(kind), ProjectID: projectID}.Valid()
+				if hubValid != wantHubValid {
+					t.Errorf("TokenBoundary.Valid() = %v, want %v", hubValid, wantHubValid)
+				}
+
+				storeErr := (&store.UserAccessToken{BoundaryKind: kind, ProjectID: projectID}).ValidateBoundary()
+				storeOK := storeErr == nil
+				if storeOK != wantStoreOK {
+					t.Errorf("store.ValidateBoundary() ok = %v (err=%v), want %v", storeOK, storeErr, wantStoreOK)
+				}
+				if !storeOK && !errors.Is(storeErr, store.ErrInvalidUATBoundary) {
+					t.Errorf("store.ValidateBoundary() error %v does not wrap ErrInvalidUATBoundary", storeErr)
+				}
+
+				if storeOK && !hubValid {
+					t.Errorf("store accepted but hub rejected: validators disagree")
+				}
+				if hubValid && !storeOK && (kind != "project" || (projectID != nonUUID && projectID != nilUUID)) {
+					t.Errorf("hub accepted but store rejected for a reason other than the project ID's UUID form")
+				}
+			})
+		}
 	}
 }
 

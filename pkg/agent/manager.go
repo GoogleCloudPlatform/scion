@@ -21,7 +21,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -49,6 +51,19 @@ type Manager interface {
 	// request), preserving its home directory and clone-per-agent workspace.
 	// See AgentManager.Reprovision for the full contract.
 	Reprovision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error)
+
+	// Preflight resolves opts' template and harness config without
+	// provisioning, cloning, writing files or calling the runtime (design
+	// t1-async-create-v11.md §3.1 "Admission", §7 P1b-1). It returns
+	// config.ErrTemplateNotFound or config.ErrHarnessConfigNotFound exactly
+	// as Provision/Start would, so an async create's admission phase can
+	// surface those synchronously before accepting the launch.
+	Preflight(ctx context.Context, opts api.StartOptions) error
+
+	// CleanupLaunch deletes the runtime resources an aborted launch created
+	// (design §3.8.4). See AgentManager.CleanupLaunch for the UID-precondition
+	// and fresh-context contract.
+	CleanupLaunch(ctx context.Context, handles []ResourceHandle) error
 
 	// Start launches a new agent with the given configuration
 	Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error)
@@ -108,6 +123,12 @@ type Manager interface {
 	// error), a plain error that must never be mistaken for one of the
 	// above.
 	SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error
+
+	// SendKeysLocal is SendKeys's additive local-scope sibling for a project
+	// never linked to a Hub project ID (ptone/scion#2198/#2468 finding 3):
+	// same delivery core, scoped by the resolved local project-config
+	// directory path instead. See AgentManager.SendKeysLocal's doc comment.
+	SendKeysLocal(ctx context.Context, projectPath, agentSlug, expectedAgentID, keys string) error
 
 	// Watch returns a channel of status updates for an agent
 	Watch(ctx context.Context, agentID string) (<-chan api.StatusEvent, error)
@@ -278,7 +299,7 @@ func selectAgentTarget(agents []api.AgentInfo, agentID, projectName string) (tar
 	if len(candidates) == 0 {
 		candidates = unlabeled
 	}
-	candidates = dedupeByContainerID(candidates)
+	candidates = DedupeByContainerID(candidates)
 	switch len(candidates) {
 	case 0:
 		return api.AgentInfo{}, false, nil
@@ -297,7 +318,16 @@ func agentMatchesName(a api.AgentInfo, agentID string) bool {
 		strings.EqualFold(a.Name, agentID)
 }
 
-func dedupeByContainerID(agents []api.AgentInfo) []api.AgentInfo {
+// DedupeByContainerID collapses duplicate listings of the same container
+// (some runtime backends can report an entry more than once for a single
+// container) down to one entry per container identity, keyed by
+// ContainerID when present, falling back to a composite of name/project
+// fields for an entry with no container (e.g. a "created" but not yet
+// started agent). Exported so callers outside this package (e.g. CLI
+// target-resolution code) that need the exact same de-duplication rule
+// selectAgentTarget and resolveKeysTarget already apply internally do not
+// need to keep a second copy of it.
+func DedupeByContainerID(agents []api.AgentInfo) []api.AgentInfo {
 	if len(agents) < 2 {
 		return agents
 	}
@@ -399,6 +429,18 @@ func (m *AgentManager) deleteResolved(ctx context.Context, agentName, targetID s
 	return false, nil
 }
 
+// CleanupAgentResources removes runtime objects that an agent's start
+// created beside its container (for example Kubernetes Secrets) when the
+// container itself is already gone, so deleteResolved never reaches
+// Runtime.Delete. It is a no-op for a runtime that does not implement
+// runtime.AgentResourceCleaner. See that interface for the scoping rules.
+func (m *AgentManager) CleanupAgentResources(ctx context.Context, agentName, projectID string) error {
+	if c, ok := m.Runtime.(runtime.AgentResourceCleaner); ok {
+		return c.CleanupAgentResources(ctx, agentName, projectID)
+	}
+	return nil
+}
+
 func (m *AgentManager) Watch(ctx context.Context, agentID string) (<-chan api.StatusEvent, error) {
 	return nil, fmt.Errorf("Watch not implemented")
 }
@@ -411,6 +453,17 @@ func (m *AgentManager) Message(ctx context.Context, agentID, projectID string, m
 		return m.deliverImmediate(ctx, agentID, projectID, message, interrupt)
 	}
 
+	// Before buffering, make sure the target has a running container. A
+	// buffered message is reported as accepted at once and only fails later,
+	// asynchronously, so without this check a message to an agent whose
+	// container is gone (for example a Kubernetes pod removed by a node
+	// drain) would look delivered to the sender. Only a definite answer from
+	// the runtime fails the send; a lookup error falls back to the buffered
+	// path so a transient runtime or API error never blocks delivery.
+	if err := m.checkDeliveryTarget(ctx, agentID, projectID); err != nil {
+		return err
+	}
+
 	// Non-interrupt messages go through the debounce buffer. This ensures
 	// that a rapid burst of messages (e.g. from multiple senders or broadcast
 	// fan-out) is coalesced into a single delivery, avoiding contention on
@@ -420,6 +473,63 @@ func (m *AgentManager) Message(ctx context.Context, agentID, projectID string, m
 	// rather than leave it "dispatched" (#1820).
 	m.msgBuffer.SendWithFailureHandler(agentID, projectID, message, DeliveryFailureHandlerFromContext(ctx))
 	return nil
+}
+
+// errNoRunningContainer formats the error returned when a message target
+// has no running container. It contains "not found" so the runtime broker
+// maps it to 404, matching deliverImmediate's own lookup failure.
+func errNoRunningContainer(agentID string) error {
+	return fmt.Errorf("agent '%s' not found or not running", agentID)
+}
+
+// checkDeliveryTarget performs one scoped runtime lookup (the same name and
+// project label filter deliverImmediate uses, so on Kubernetes a single
+// label-selected pod list, on Docker a single filtered container list) and
+// returns errNoRunningContainer only when the runtime answers definitively
+// that the agent has no container, or that its container is stopped or
+// errored. A lookup error, or a container whose state the runtime does not
+// report, returns nil so the caller keeps the normal buffered path.
+//
+// It queries the runtime directly rather than m.List: the runtime's Phase is
+// derived from the container state, while m.List merges the agent's
+// self-reported agent-info.json phase on top of it.
+func (m *AgentManager) checkDeliveryTarget(ctx context.Context, agentID, projectID string) error {
+	if m.Runtime == nil {
+		return nil
+	}
+	filter := map[string]string{"scion.name": strings.ToLower(agentID)}
+	if projectID != "" {
+		filter["scion.project_id"] = projectID
+	}
+	agents, err := m.Runtime.List(ctx, filter)
+	if err != nil {
+		slog.Warn("message target lookup failed; using buffered delivery",
+			"agent", agentID, "project_id", projectID, "error", err)
+		return nil
+	}
+	for _, a := range agents {
+		if !matchesAgentID(a, agentID) {
+			continue
+		}
+		switch state.Phase(a.Phase) {
+		case state.PhaseStopped, state.PhaseError:
+			// Keep looking: another matching container may be running.
+		default:
+			return nil
+		}
+	}
+	// No matching container, or every matching container is stopped/errored.
+	return errNoRunningContainer(agentID)
+}
+
+// RuntimeName returns the name of the runtime this manager lists, or "" when
+// it has none. The broker heartbeat uses it to report which runtimes its
+// agent inventory covers.
+func (m *AgentManager) RuntimeName() string {
+	if m.Runtime == nil {
+		return ""
+	}
+	return m.Runtime.Name()
 }
 
 // MessageRaw sends literal bytes to an agent's tmux session via send-keys
@@ -445,7 +555,7 @@ func (m *AgentManager) MessageRaw(ctx context.Context, agentID, projectID string
 	}
 
 	if agent == nil {
-		return fmt.Errorf("agent '%s' not found or not running", agentID)
+		return errNoRunningContainer(agentID)
 	}
 
 	// Serialize against a concurrent SendKeys call (or a concurrent
@@ -761,6 +871,33 @@ func (m *AgentManager) checkTmuxVersionSupported(ctx context.Context, target api
 	return nil
 }
 
+// keysScope pins a SendKeys/SendKeysLocal call to exactly one identity
+// dimension — Hub-linked project ID or local project-config directory path
+// (never a project name) — matching whichever entry point built it.
+// resolveKeysTarget uses whichever field is set as the List filter; see
+// .design/agent-keys-contract.md §4.3 for the full invariant, including why
+// the path dimension compares through projectkeys.ResolvedPathEqual.
+type keysScope struct {
+	projectID   string
+	projectPath string
+}
+
+// filter returns the single label key/value this scope resolves containers
+// by, for use as one entry in resolveKeysTarget's List filter.
+func (s keysScope) filter() (key, value string) {
+	if s.projectPath != "" {
+		return projectkeys.LabelProjectPath, s.projectPath
+	}
+	return projectkeys.LabelProjectID, s.projectID
+}
+
+// empty reports whether neither identity dimension is set — the one case
+// resolveKeysTarget's callers (SendKeys, SendKeysLocal) must reject before
+// ever reaching List, rather than resolving against an unscoped filter.
+func (s keysScope) empty() bool {
+	return s.projectID == "" && s.projectPath == ""
+}
+
 // SendKeys sends the exact byte-for-byte keys string to an agent's tmux
 // session, with no trailing Enter, no paste buffer and no debounce — the
 // frozen primitive for the dedicated broker /keys route
@@ -828,6 +965,9 @@ func (m *AgentManager) checkTmuxVersionSupported(ctx context.Context, target api
 // inspecting its wrapped errors — see ErrKeysNotStarted's doc comment,
 // agentkeys.BrokerRequest's doc comment, and
 // .design/agent-keys-contract.md §4.3.
+//
+// See SendKeysLocal for the additive local-scope sibling that shares this
+// entire delivery core (sendKeysCore) under a different identity dimension.
 func (m *AgentManager) SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
 	// Reject malformed/oversized/empty keys before any resolution or Exec
 	// attempt — contract §2.3 ("an empty string is rejected before
@@ -841,11 +981,54 @@ func (m *AgentManager) SendKeys(ctx context.Context, projectID, agentSlug, expec
 	if runtimeNamesWithoutKeysSupport[m.Runtime.Name()] {
 		return ErrKeysUnsupported
 	}
-	if projectID == "" || expectedAgentID == "" {
+	scope := keysScope{projectID: projectID}
+	if scope.empty() || expectedAgentID == "" {
 		return agentkeys.ErrTargetNotFound
 	}
+	return m.sendKeysCore(ctx, scope, agentSlug, expectedAgentID, keys)
+}
 
-	target, err := m.resolveKeysTarget(ctx, projectID, agentSlug, expectedAgentID)
+// SendKeysLocal is SendKeys's additive local-scope sibling (agent-raw design
+// ruling, ptone/scion#2198/#2468 finding 3; see .design/agent-keys-contract.md
+// §3/§4.3 for the full rationale and invariants): it serves a purely local
+// project that was never linked to a Hub project, so its containers carry no
+// "scion.project_id" label at all. It shares SendKeys's entire delivery core
+// (sendKeysCore) unchanged — same atomic binding, lock, version/readiness
+// checks, re-verification, deadline enforcement, no-replay, error
+// classification — differing only in the scope dimension.
+//
+// projectPath must be the non-empty, already-resolved project-config
+// directory from config.GetResolvedProjectDir (never a project name: two
+// directories can share one). The caller resolves that scope and selects
+// the single target agent within it before calling, exactly as for
+// SendKeys; SendKeysLocal never falls back to an unlabeled or
+// name-only match the way selectAgentTarget (Stop/Delete) does, and an
+// empty projectPath or expectedAgentID fails closed to
+// agentkeys.ErrTargetNotFound, the same as SendKeys. The two entry points'
+// scopes are never mixed or retried into one another.
+func (m *AgentManager) SendKeysLocal(ctx context.Context, projectPath, agentSlug, expectedAgentID, keys string) error {
+	if err := agentkeys.ValidateKeys(keys); err != nil {
+		return err
+	}
+	if runtimeNamesWithoutKeysSupport[m.Runtime.Name()] {
+		return ErrKeysUnsupported
+	}
+	scope := keysScope{projectPath: projectPath}
+	if scope.empty() || expectedAgentID == "" {
+		return agentkeys.ErrTargetNotFound
+	}
+	return m.sendKeysCore(ctx, scope, agentSlug, expectedAgentID, keys)
+}
+
+// sendKeysCore is the shared delivery core behind both SendKeys and
+// SendKeysLocal, identical in every step except which keysScope resolution
+// is pinned to. See SendKeys's doc comment for the full set of guarantees
+// (atomic identity binding, injection lock, version gate, readiness probe,
+// pre-delivery re-verification, deadline enforcement at each checkpoint,
+// sensitive-exec transport, and error classification) — all of it applies
+// here unchanged, parameterized only by scope.
+func (m *AgentManager) sendKeysCore(ctx context.Context, scope keysScope, agentSlug, expectedAgentID, keys string) error {
+	target, err := m.resolveKeysTarget(ctx, scope, agentSlug, expectedAgentID)
 	if err != nil {
 		return err
 	}
@@ -896,14 +1079,14 @@ func (m *AgentManager) SendKeys(ctx context.Context, projectID, agentSlug, expec
 	}
 
 	// Re-verify target identity (a correctness hardening): re-resolve with
-	// the same (projectID, agentSlug, expectedAgentID) and require the
-	// result still identifies the same target as the original resolution
+	// the same scope/agentSlug/expectedAgentID and require the result still
+	// identifies the same target as the original resolution
 	// (sameTargetInstance). Nothing here ever delivers to a target other
 	// than the one originally resolved: a second resolveKeysTarget failure
 	// returns its own sentinel or error unchanged (never reclassified), and
 	// only an identity mismatch between the two resolutions itself produces
 	// ErrTargetNotFound.
-	revalidated, err := m.resolveKeysTarget(ctx, projectID, agentSlug, expectedAgentID)
+	revalidated, err := m.resolveKeysTarget(ctx, scope, agentSlug, expectedAgentID)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			// Nothing has been sent at this point: an expiry discovered via
@@ -935,30 +1118,60 @@ func (m *AgentManager) SendKeys(ctx context.Context, projectID, agentSlug, expec
 	script := sendKeysScript(keysTarget, keys)
 	cmd := []string{"tmux", "source-file", "-"}
 	if _, err := m.Runtime.ExecWithStdin(sendCtx, target.ContainerID, cmd, strings.NewReader(script)); err != nil {
-		// %v, not %w: once this call has been made, a failure is ambiguous
-		// (the tmux command may have partially run), never "proven not to
-		// have started" — see ErrKeysNotStarted's doc comment for why
-		// nothing this error wraps may be reachable via errors.Is from this
-		// return value, however the underlying backend built it.
-		return fmt.Errorf("failed to send keys to agent '%s': %v", target.Name, err)
+		// Not %w, and not %v of err itself: once this call has been made, a
+		// failure is ambiguous (the tmux command may have partially run),
+		// never "proven not to have started" — see ErrKeysNotStarted's doc
+		// comment for why nothing this error wraps may be reachable via
+		// errors.Is from this return value, however the underlying backend
+		// built it. Separately, err.Error() is never embedded here either:
+		// today's backends only wrap a process's exit status into it, but
+		// SendKeys must not rely on that — a backend whose error text ever
+		// carried caller-supplied content (the keys payload, contract §5)
+		// must not have it surface through this return value, which a
+		// local-mode caller (cmd/keys.go) prints to the user. Only a fixed
+		// message plus a sanitized, content-free error class is reported.
+		return fmt.Errorf("failed to send keys to agent '%s': delivery failed (%s)", target.Name, sendKeysDeliveryErrorClass(err))
 	}
 
 	return nil
 }
 
-// resolveKeysTarget resolves the single container SendKeys must act on and
-// proves, before returning it, that: (a) it is the one and only container
-// matching (projectID, agentSlug); and (b) its "agent_id" label equals
-// expectedAgentID. Callers must pass non-empty projectID/expectedAgentID;
-// resolveKeysTarget does not itself guard against an unscoped lookup (that
-// is enforced once, in SendKeys). Any failure to prove one of these returns
-// the matching agentkeys sentinel (never a slug-only fallback) — see
-// SendKeys's doc comment for why no caller may split this resolution across
-// two separate List calls.
-func (m *AgentManager) resolveKeysTarget(ctx context.Context, projectID, agentSlug, expectedAgentID string) (api.AgentInfo, error) {
+// sendKeysDeliveryErrorClass classifies a keys delivery failure into a
+// fixed, content-free label for sendKeysCore's error message — never the
+// error's own text, which may carry caller-supplied content. It
+// distinguishes only the shapes useful for diagnostics without risking a
+// leak: a context cancellation or deadline (the admission window elapsing
+// mid-call), an *exec.ExitError's exit code (a process that ran and exited
+// non-zero — the status only, never its output), or a generic fallback for
+// anything else.
+func sendKeysDeliveryErrorClass(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "context_canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "context_deadline_exceeded"
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return fmt.Sprintf("exit_status_%d", exitErr.ExitCode())
+	}
+	return "delivery_failed"
+}
+
+// resolveKeysTarget resolves the single container sendKeysCore must act on
+// and proves, before returning it, that: (a) it is the one and only
+// container matching (scope, agentSlug); and (b) its "agent_id" label
+// equals expectedAgentID. Callers must pass a non-empty scope (SendKeys and
+// SendKeysLocal both guard this before calling in); resolveKeysTarget does
+// not itself guard against an unscoped lookup. Any failure to prove one of
+// these returns the matching agentkeys sentinel (never a slug-only or
+// project-name-only fallback) — see SendKeys's doc comment for why no
+// caller may split this resolution across two separate List calls.
+func (m *AgentManager) resolveKeysTarget(ctx context.Context, scope keysScope, agentSlug, expectedAgentID string) (api.AgentInfo, error) {
+	filterKey, filterValue := scope.filter()
 	filter := map[string]string{
-		"scion.name":       strings.ToLower(agentSlug),
-		"scion.project_id": projectID,
+		"scion.name": strings.ToLower(agentSlug),
+		filterKey:    filterValue,
 	}
 	agents, err := m.List(ctx, filter)
 	if err != nil {
@@ -971,7 +1184,7 @@ func (m *AgentManager) resolveKeysTarget(ctx context.Context, projectID, agentSl
 			matches = append(matches, a)
 		}
 	}
-	matches = dedupeByContainerID(matches)
+	matches = DedupeByContainerID(matches)
 
 	if len(matches) != 1 {
 		// Zero matches, or more than one distinct container matching the
@@ -1078,7 +1291,7 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	}
 
 	if agent == nil {
-		return fmt.Errorf("agent '%s' not found or not running", agentID)
+		return errNoRunningContainer(agentID)
 	}
 
 	// Serialize against a concurrent SendKeys call (or another concurrent

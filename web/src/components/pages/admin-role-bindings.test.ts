@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { setPreferredTimeZone } from '../../utils/time.js';
 
 // ── Mock API responses ──
 
@@ -329,5 +330,145 @@ describe('scion-page-admin-role-bindings create dialog', () => {
       expect(body.scopeId).toBe('proj-uuid-from-picker');
       expect(body.scopeType).toBe('project');
     }
+  });
+});
+
+describe('scion-page-admin-role-bindings lifecycle zone label (review R4-1)', () => {
+  afterEach(() => {
+    setPreferredTimeZone('');
+  });
+
+  it('updates the "Times in" label when the effective zone changes after mount', async () => {
+    const { handler } = makeFetchHandler();
+    const el = await createComponent(handler);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const comp = el as any;
+
+    comp.showCreateDialog = true;
+    comp.showAdvanced = true;
+    comp.requestUpdate();
+    await comp.updateComplete;
+
+    expect(query(el, '.lifecycle-hint')?.textContent).toContain('UTC');
+
+    setPreferredTimeZone('Asia/Tokyo');
+    await comp.updateComplete;
+
+    expect(query(el, '.lifecycle-hint')?.textContent).toContain('Asia/Tokyo');
+    expect(query(el, '.lifecycle-hint')?.textContent).not.toContain('UTC');
+  });
+});
+
+describe('scion-page-admin-role-bindings lifecycle times (tz-refactor task 20)', () => {
+  afterEach(() => {
+    setPreferredTimeZone('');
+  });
+
+  it('renders expiry and activation in the display zone, 24-hour, and re-renders on a zone change', async () => {
+    const { handler } = makeFetchHandler();
+    const el = await createComponent(handler);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const comp = el as any;
+    setPreferredTimeZone('Asia/Tokyo');
+    comp.bindings = [
+      {
+        ...makeBindings(1).items[0],
+        // Midnight in Tokyo (UTC+9); the browser zone is pinned to UTC.
+        notBefore: '2030-01-14T15:00:00Z',
+        expiresAt: '2030-02-14T15:00:00Z',
+      },
+    ];
+    await comp.updateComplete;
+
+    const details = () => queryAll(el, '.lifecycle-detail').map((d) => d.textContent?.trim());
+    expect(details()).toEqual([
+      'Expires Feb 15, 2030, 00:00 (Asia/Tokyo)',
+      'Activates Jan 15, 2030, 00:00 (Asia/Tokyo)',
+    ]);
+
+    setPreferredTimeZone('UTC');
+    await comp.updateComplete;
+    expect(details()).toEqual([
+      'Expires Feb 14, 2030, 15:00 (UTC)',
+      'Activates Jan 14, 2030, 15:00 (UTC)',
+    ]);
+  });
+});
+
+describe('scion-page-admin-role-bindings lifecycle warnings read the display zone (tz-refactor task 20)', () => {
+  afterEach(() => {
+    setPreferredTimeZone('');
+    vi.useRealTimers();
+  });
+
+  it('warns about an expiry that is past in the display zone but future in the browser zone', async () => {
+    const { handler } = makeFetchHandler();
+    const el = await createComponent(handler);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const comp = el as any;
+    // 05:00Z is 14:00 in Tokyo (UTC+9); the browser zone is pinned to UTC.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-01T05:00:00Z'));
+    setPreferredTimeZone('Asia/Tokyo');
+
+    comp.showCreateDialog = true;
+    comp.showAdvanced = true;
+    // 10:00 in Tokyo is 01:00Z, already past; read as UTC it would be future.
+    comp.formExpiresAt = '2026-10-01T10:00';
+    comp.requestUpdate();
+    await comp.updateComplete;
+    expect(query(el, '.validation-warning')?.textContent).toContain(
+      'This expiration date is in the past'
+    );
+
+    // 20:00 in Tokyo is 11:00Z, still in the future: no warning.
+    comp.formExpiresAt = '2026-10-01T20:00';
+    await comp.updateComplete;
+    expect(query(el, '.validation-warning')).toBeNull();
+  });
+
+  it('blocks submit when expiry is not after activation, comparing in the display zone', async () => {
+    const { handler } = makeFetchHandler();
+    const el = await createComponent(handler);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const comp = el as any;
+    setPreferredTimeZone('Asia/Tokyo');
+    comp.formPrincipalId = 'user-a';
+    comp.formRoleId = 'role-1';
+    comp.formScopeType = 'system';
+    comp.formNotBefore = '2030-01-15T00:00';
+    comp.formExpiresAt = '2030-01-15T00:00';
+    expect(comp.createFormValid).toBe(false);
+    comp.formExpiresAt = '2030-01-15T00:01';
+    expect(comp.createFormValid).toBe(true);
+    // An unparsable value does not block on ordering (submit rejects it).
+    comp.formExpiresAt = 'bogus';
+    expect(comp.createFormValid).toBe(true);
+  });
+
+  it('compares lifecycle ordering in the display zone across a DST gap', async () => {
+    const { handler } = makeFetchHandler();
+    const el = await createComponent(handler);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const comp = el as any;
+    setPreferredTimeZone('America/New_York');
+    comp.formPrincipalId = 'user-a';
+    comp.formRoleId = 'role-1';
+    comp.formScopeType = 'system';
+    // 02:30 falls in the New York spring-forward gap and resolves to 07:30Z.
+    // 03:15 is 07:15Z, so expiry comes before activation. Read in the
+    // browser zone (UTC), the two values would compare the other way round.
+    comp.formNotBefore = '2030-03-10T02:30';
+    comp.formExpiresAt = '2030-03-10T03:15';
+    expect(comp.createFormValid).toBe(false);
+
+    // The rendered ordering warning reads the same display-zone values.
+    comp.showCreateDialog = true;
+    comp.showAdvanced = true;
+    comp.requestUpdate();
+    await comp.updateComplete;
+    expect(query(el, '.validation-warning')?.textContent).toContain(
+      'Expiration must be after the activation date'
+    );
   });
 });

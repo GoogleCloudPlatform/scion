@@ -37,6 +37,19 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../../client/api.js';
 import { showConfirm } from '../confirm-dialog.js';
 import { showToast } from '../../../utils/toast.js';
+import { formatInstantWithZone } from '../../../utils/time.js';
+import { touchMenuItemStyles } from '../touch-styles.js';
+import { TouchPrimaryController } from '../../../utils/input-modality.js';
+import { LongPressController, type LongPressPoint } from './long-press.js';
+import {
+  placeMenuInViewport,
+  renderMenuRows,
+  runMenuAction,
+  shouldUseMenuSheet,
+  type MenuAction,
+} from './context-menu.js';
+import type { ActionSheetSelectDetail } from './chat-action-sheet.js';
+import './chat-action-sheet.js';
 import './chat-avatar.js';
 
 /** A space (project) in the rail. */
@@ -73,10 +86,26 @@ interface ThreadGroup {
   threadIds: string[];
 }
 
-/** User preferences for rail display. */
+/**
+ * A top-level rail entry for a space: either an ungrouped, non-general
+ * thread, or a thread group (rendered as one row, with its members nested
+ * underneath). Shared between `renderThreadList` and the order-computing
+ * helpers (`currentTopLevelOrder` and friends) so a drag/nudge snapshot is
+ * built from exactly the same items the user is looking at.
+ */
+type RailItem =
+  | { kind: 'thread'; id: string; thread: ChatSpaceThread }
+  | { kind: 'group'; id: string; group: ThreadGroup };
+
+/**
+ * User preferences for rail display. `threadSortMode` is only ever the
+ * user's alpha/recent choice for threads — a space counts as explicitly
+ * ordered when and only when `threadOrder[projectId]` is non-empty; there is
+ * no separate "custom" thread mode.
+ */
 interface RailPrefs {
   spaceSortMode: 'activity' | 'alpha' | 'custom';
-  threadSortMode: 'activity' | 'alpha' | 'custom';
+  threadSortMode: 'activity' | 'alpha';
   spaceOrder: string[] | undefined;
   threadOrder: Record<string, string[]> | undefined;
   threadGroups: Record<string, ThreadGroup[]> | undefined;
@@ -166,6 +195,7 @@ function saveCollapsedGroupIds(userId: string, ids: Set<string>): void {
   }
 }
 
+/** Parse a user-prefs payload. */
 function parseRailPrefs(payload: unknown): RailPrefs {
   const data = (payload ?? {}) as {
     spaceSortMode?: string;
@@ -234,11 +264,24 @@ function parseRailPrefs(payload: unknown): RailPrefs {
 
   const spaceSortMode = data.spaceSortMode;
   const threadSortMode = data.threadSortMode;
+  const resolvedSpaceSortMode: RailPrefs['spaceSortMode'] =
+    spaceSortMode === 'alpha' || spaceSortMode === 'custom' ? spaceSortMode : 'activity';
+
+  // A stored 'custom' thread mode maps to alpha when spaces sort alpha,
+  // otherwise activity; threadOrder is kept. A stored 'activity' mode also
+  // maps to alpha when spaces sort alpha. This build always writes the two
+  // together, so only data from other clients takes this path.
+  let resolvedThreadSortMode: RailPrefs['threadSortMode'];
+  if (threadSortMode === 'custom') {
+    resolvedThreadSortMode = resolvedSpaceSortMode === 'alpha' ? 'alpha' : 'activity';
+  } else {
+    resolvedThreadSortMode =
+      threadSortMode === 'alpha' || resolvedSpaceSortMode === 'alpha' ? 'alpha' : 'activity';
+  }
+
   return {
-    spaceSortMode:
-      spaceSortMode === 'alpha' || spaceSortMode === 'custom' ? spaceSortMode : 'activity',
-    threadSortMode:
-      threadSortMode === 'alpha' || threadSortMode === 'custom' ? threadSortMode : 'activity',
+    spaceSortMode: resolvedSpaceSortMode,
+    threadSortMode: resolvedThreadSortMode,
     spaceOrder,
     threadOrder,
     threadGroups,
@@ -291,6 +334,11 @@ export class ScionChatSpaceRail extends LitElement {
     projectId: string;
   } | null = null;
   @state() private contextMenuPos = { x: 0, y: 0 };
+  /** The open thread or group menu is the mobile bottom sheet, not the popup. */
+  @state() private menuAsSheet = false;
+  private readonly longPress = new LongPressController(this);
+  /** Rows are draggable only for a mouse or trackpad: on touch, a long-press opens the menu. */
+  private readonly touchPrimary = new TouchPrimaryController(this);
   @state() private renamingThread: string | null = null;
   @state() private renameValue = '';
   /** Space filter: 'all' shows everything, 'unread' shows only spaces with unread. */
@@ -365,6 +413,8 @@ export class ScionChatSpaceRail extends LitElement {
   private _createThreadGroupId: string | null = null;
 
   static override styles = css`
+    ${touchMenuItemStyles}
+
     :host {
       display: flex;
       flex-direction: column;
@@ -391,6 +441,7 @@ export class ScionChatSpaceRail extends LitElement {
     .rail-body {
       flex: 1;
       overflow-y: auto;
+      overscroll-behavior: contain;
       padding: 0.25rem 0;
     }
 
@@ -675,8 +726,9 @@ export class ScionChatSpaceRail extends LitElement {
       border-color: var(--scion-border, #e2e8f0);
     }
 
-    /* Context menu */
+    /* Context menu. It renders hidden and is shown once placed in the viewport. */
     .context-menu {
+      visibility: hidden;
       position: fixed;
       z-index: 1000;
       background: var(--scion-surface, #ffffff);
@@ -819,6 +871,85 @@ export class ScionChatSpaceRail extends LitElement {
       background: var(--scion-bg-subtle, #f1f5f9);
       border-color: var(--scion-border, #e2e8f0);
     }
+
+    /* Stop iOS/Android focus-zoom on the rail's Shoelace inputs, whose
+       local ::part(base) font-size overrides bypass the app-wide
+       --sl-input-font-size-* variable, independent of layout density (an
+       iPad is coarse-pointer but wider than the mobile breakpoint, so it
+       still needs this). */
+    @media (pointer: coarse) {
+      .group-name-input sl-input::part(base),
+      .create-thread sl-input::part(base),
+      .rename-input::part(base) {
+        font-size: max(16px, var(--chat-fs-md));
+      }
+    }
+
+    /* Long-press opens the row menu on touch: keep iOS's callout and text
+       selection from taking the press first. */
+    @media (hover: none) {
+      .thread-item,
+      .thread-group-header {
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+    }
+
+    @media (max-width: 768px) {
+      /* Beyond comfy: real-device feedback asked for rail text bigger than
+         the comfy token set gives, not just comfy-forced-on-mobile. */
+      .rail-header {
+        font-size: 18px;
+      }
+
+      .thread-item {
+        font-size: 17px;
+        min-height: 48px;
+      }
+
+      .thread-item .unread-dot,
+      .thread-item .mention-dot {
+        width: 8px;
+        height: 8px;
+      }
+
+      .space-header {
+        font-size: 14px;
+        min-height: 44px;
+      }
+
+      .space-header .unread-badge,
+      .space-header .mention-badge {
+        font-size: 12px;
+        min-width: 1.25rem;
+        padding: 0.125rem 0.375rem;
+      }
+
+      /* A real 44px-tall button, not a ::before-expanded hit area: the
+         rounded segmented border on .filter-toggle needs overflow: hidden,
+         which clips any pseudo-element that tries to extend past the
+         container's own edge — an invisible hit area here would never
+         actually be reachable. */
+      .filter-toggle button {
+        font-size: 15px;
+        min-height: 44px;
+      }
+
+      .sort-btn::part(base) {
+        width: 44px;
+        height: 44px;
+      }
+
+      .space-actions sl-icon-button::part(base) {
+        width: 44px;
+        height: 44px;
+      }
+
+      .space-actions sl-menu-item::part(base) {
+        font-size: 16px;
+      }
+    }
   `;
 
   override connectedCallback(): void {
@@ -854,6 +985,12 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   override updated(changedProperties: Map<string, unknown>): void {
+    if ((this.contextMenuTarget || this.groupContextMenuTarget) && !this.menuAsSheet) {
+      placeMenuInViewport(
+        this.renderRoot.querySelector<HTMLElement>('.context-menu'),
+        this.contextMenuPos
+      );
+    }
     if (changedProperties.has('selectedKey')) {
       if (this.selectedKey) {
         // Auto-expand the space and group containing the selected thread
@@ -1262,16 +1399,207 @@ export class ScionChatSpaceRail extends LitElement {
     return this.spaceFilter === 'all';
   }
 
-  /** The current thread display order (excluding #general) for a space. */
-  private currentThreadOrder(projectId: string): string[] {
-    return this.getSortedThreads(projectId)
-      .filter((t) => !t.isGeneral)
-      .map((t) => t.id);
+  /**
+   * A space is explicitly ordered iff it has a non-empty `threadOrder`
+   * snapshot — independent of `threadSortMode`, which only ever holds the
+   * alpha/recent choice.
+   */
+  private hasExplicitOrder(projectId: string): boolean {
+    return !!this.prefs.threadOrder?.[projectId]?.length;
   }
 
-  private async applyThreadOrder(projectId: string, order: string[]): Promise<void> {
-    const threadOrder = { ...(this.prefs.threadOrder ?? {}), [projectId]: order };
-    await this.savePrefs({ threadSortMode: 'custom', threadOrder });
+  /**
+   * Case-insensitive, locale-aware name comparison with an id tiebreak —
+   * shared by every alpha-sort call site (threads, groups, and the mixed
+   * top-level item list) so "Alphabetical" collates identically everywhere.
+   */
+  private compareByName(aName: string, bName: string, aId: string, bId: string): number {
+    const byName = aName.localeCompare(bName, undefined, { sensitivity: 'base' });
+    return byName !== 0 ? byName : aId.localeCompare(bId);
+  }
+
+  /**
+   * Newest-first activity comparison with an id tiebreak — shared by every
+   * activity-sort call site.
+   */
+  private compareByActivity(aTime: number, bTime: number, aId: string, bId: string): number {
+    return aTime !== bTime ? bTime - aTime : aId.localeCompare(bId);
+  }
+
+  /**
+   * Comparator for an explicit per-space snapshot: items present in `order`
+   * sort by position; items missing from it sort after, keeping their
+   * relative order. Shared by `sortTopLevelItems` and `getSortedThreads`.
+   */
+  private compareByExplicitOrder(
+    order: string[]
+  ): (a: { id: string }, b: { id: string }) => number {
+    const orderMap = new Map(order.map((id, i) => [id, i]));
+    return (a, b) => {
+      const ai = orderMap.get(a.id);
+      const bi = orderMap.get(b.id);
+      if (ai === undefined && bi === undefined) return 0;
+      if (ai === undefined) return 1;
+      if (bi === undefined) return -1;
+      return ai - bi;
+    };
+  }
+
+  /**
+   * A group's members resolved against known threads, sorted under the
+   * active mode unless this space has an explicit snapshot (see
+   * `hasExplicitOrder`). Shared by `currentGroupThreadOrder` and
+   * `renderThreadList`; `threadMap` is scoped to whichever thread set the
+   * caller needs (full space, or unread-filtered for display).
+   */
+  private orderGroupMembers(
+    projectId: string,
+    group: ThreadGroup,
+    threadMap: Map<string, ChatSpaceThread>
+  ): ChatSpaceThread[] {
+    const members = group.threadIds
+      .map((id) => threadMap.get(id))
+      .filter((t): t is ChatSpaceThread => t !== undefined);
+    if (!this.hasExplicitOrder(projectId)) {
+      const mode = this.prefs.threadSortMode;
+      members.sort((a, b) => this.compareThreadsForSort(a, b, mode));
+    }
+    return members;
+  }
+
+  /**
+   * A group's member ids in display order: resolved known members first
+   * (see `orderGroupMembers`), then any raw ids that didn't resolve to a
+   * known thread, appended unchanged rather than pruned. Shared by
+   * `currentGroupThreadOrder` and `freezeOtherGroupOrders`.
+   */
+  private displayedGroupIds(
+    projectId: string,
+    group: ThreadGroup,
+    threadMap: Map<string, ChatSpaceThread>
+  ): string[] {
+    const known = this.orderGroupMembers(projectId, group, threadMap).map((t) => t.id);
+    const knownSet = new Set(known);
+    const unknown = group.threadIds.filter((id) => !knownSet.has(id));
+    return [...known, ...unknown];
+  }
+
+  /** A group's members in the order currently on screen, as ids — see `displayedGroupIds`. */
+  private currentGroupThreadOrder(projectId: string, groupId: string): string[] {
+    const group = this.getGroups(projectId).find((g) => g.id === groupId);
+    if (!group) return [];
+    const threadMap = new Map((this.threadsBySpace.get(projectId) ?? []).map((t) => [t.id, t]));
+    return this.displayedGroupIds(projectId, group, threadMap);
+  }
+
+  /**
+   * Every group in a space snapshotted to its displayed order, except
+   * `exceptIds` (the group(s) the caller is about to write its own order
+   * for). Called whenever a drag/nudge gives a space its first explicit
+   * top-level snapshot, so every other group's raw `threadIds` matches what
+   * it was displaying rather than resurfacing later.
+   */
+  private freezeOtherGroupOrders(
+    projectId: string,
+    groups: ThreadGroup[],
+    exceptIds: ReadonlySet<string>
+  ): ThreadGroup[] {
+    const threadMap = new Map((this.threadsBySpace.get(projectId) ?? []).map((t) => [t.id, t]));
+    return groups.map((g) =>
+      exceptIds.has(g.id) ? g : { ...g, threadIds: this.displayedGroupIds(projectId, g, threadMap) }
+    );
+  }
+
+  /** The unordered top-level entries for a space: non-general, ungrouped
+   * threads, plus each group as a single entry. */
+  private topLevelRailItems(projectId: string, threads: ChatSpaceThread[]): RailItem[] {
+    const groups = this.getGroups(projectId);
+    const groupedThreadIds = new Set(groups.flatMap((g) => g.threadIds));
+    const items: RailItem[] = [];
+    for (const t of threads) {
+      if (t.isGeneral || groupedThreadIds.has(t.id)) continue;
+      items.push({ kind: 'thread', id: t.id, thread: t });
+    }
+    for (const g of groups) {
+      items.push({ kind: 'group', id: g.id, group: g });
+    }
+    return items;
+  }
+
+  /** The name to sort a top-level rail item by, under alpha. */
+  private railItemName(item: RailItem): string {
+    return item.kind === 'thread' ? item.thread.name : item.group.name;
+  }
+
+  /**
+   * Sort a space's top-level items: by the explicit snapshot when present
+   * (see `hasExplicitOrder`), otherwise pinned threads first, then the
+   * active alpha/activity mode. A group has no activity of its own, so under
+   * Recent it sorts by its most-recently-active member.
+   */
+  private sortTopLevelItems(
+    projectId: string,
+    items: RailItem[],
+    threadMap: Map<string, ChatSpaceThread>
+  ): RailItem[] {
+    const sorted = [...items];
+    if (this.hasExplicitOrder(projectId)) {
+      const order = this.prefs.threadOrder?.[projectId] ?? [];
+      sorted.sort(this.compareByExplicitOrder(order));
+      return sorted;
+    }
+
+    const mode = this.prefs.threadSortMode;
+    sorted.sort((a, b) => {
+      const aPinned = a.kind === 'thread' && a.thread.pinned ? 0 : 1;
+      const bPinned = b.kind === 'thread' && b.thread.pinned ? 0 : 1;
+      if (aPinned !== bPinned) return aPinned - bPinned;
+
+      if (mode === 'alpha') {
+        return this.compareByName(this.railItemName(a), this.railItemName(b), a.id, b.id);
+      }
+      const aTime = this.getItemLastActivity(a, threadMap);
+      const bTime = this.getItemLastActivity(b, threadMap);
+      return this.compareByActivity(aTime, bTime, a.id, b.id);
+    });
+    return sorted;
+  }
+
+  /** A space's top-level display order, as ids (ungrouped threads plus groups, each counted once). */
+  private currentTopLevelOrder(projectId: string): string[] {
+    const threads = this.threadsBySpace.get(projectId) ?? [];
+    const threadMap = new Map(threads.map((t) => [t.id, t]));
+    const items = this.topLevelRailItems(projectId, threads);
+    return this.sortTopLevelItems(projectId, items, threadMap).map((i) => i.id);
+  }
+
+  /** `order` with `id` moved to sit immediately before `anchorId`, or at the end if absent. */
+  private insertAdjacent(order: string[], id: string, anchorId: string): string[] {
+    const result = order.filter((x) => x !== id);
+    const idx = result.indexOf(anchorId);
+    result.splice(idx === -1 ? result.length : idx, 0, id);
+    return result;
+  }
+
+  /**
+   * Writes a space's top-level order and every group's member order in one
+   * save, always freezing groups (see `freezeOtherGroupOrders`) so an
+   * untouched group's raw order can't resurface later. Leaves
+   * `threadSortMode` untouched — only `threadOrder`'s presence makes a space
+   * explicit (see `hasExplicitOrder`).
+   */
+  private async saveThreadOrder(
+    projectId: string,
+    topLevelOrder?: string[],
+    updatedGroups?: ThreadGroup[]
+  ): Promise<void> {
+    const order = topLevelOrder ?? this.currentTopLevelOrder(projectId);
+    const groups =
+      updatedGroups ?? this.freezeOtherGroupOrders(projectId, this.getGroups(projectId), new Set());
+    await this.savePrefs({
+      threadOrder: { ...(this.prefs.threadOrder ?? {}), [projectId]: order },
+      threadGroups: { ...(this.prefs.threadGroups ?? {}), [projectId]: groups },
+    });
   }
 
   private handleThreadDragStart(e: DragEvent, threadId: string): void {
@@ -1304,59 +1632,58 @@ export class ScionChatSpaceRail extends LitElement {
     this.dragOverGroupId = null;
     if (!sourceId || sourceId === targetThreadId) return;
 
-    const order = this.currentThreadOrder(projectId);
-    const from = order.indexOf(sourceId);
-    const to = order.indexOf(targetThreadId);
-    if (from === -1 || to === -1) return;
-    const next = [...order];
-    const [moved] = next.splice(from, 1);
-    next.splice(to, 0, moved);
-
-    // If dropping on a thread inside a group, move the dragged thread into that group
     const groups = this.prefs.threadGroups?.[projectId];
-    if (groups) {
-      const targetGroup = groups.find((g) => g.threadIds.includes(targetThreadId));
-      const sourceGroup = groups.find((g) => g.threadIds.includes(sourceId));
-      if (targetGroup !== sourceGroup) {
-        const updatedGroups = groups.map((g) => {
-          // Remove from source group
-          const filtered = g.threadIds.filter((id) => id !== sourceId);
-          if (g === targetGroup) {
-            // Add to target group at the right position relative to the target
-            const targetIdx = filtered.indexOf(targetThreadId);
-            const inserted = [...filtered];
-            inserted.splice(targetIdx, 0, sourceId);
-            return { ...g, threadIds: inserted };
-          }
-          return { ...g, threadIds: filtered };
-        });
-        const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: updatedGroups };
-        await this.savePrefs({
-          threadSortMode: 'custom',
-          threadOrder: { ...(this.prefs.threadOrder ?? {}), [projectId]: next },
-          threadGroups,
-        });
-        return;
-      } else if (targetGroup) {
-        // Same group — reorder within it
-        const updatedGroups = groups.map((g) => {
-          if (g !== targetGroup) return g;
-          const ids = g.threadIds.filter((id) => id !== sourceId);
-          const idx = ids.indexOf(targetThreadId);
-          ids.splice(idx, 0, sourceId);
-          return { ...g, threadIds: ids };
-        });
-        const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: updatedGroups };
-        await this.savePrefs({
-          threadSortMode: 'custom',
-          threadOrder: { ...(this.prefs.threadOrder ?? {}), [projectId]: next },
-          threadGroups,
-        });
-        return;
-      }
+    const targetGroup = groups?.find((g) => g.threadIds.includes(targetThreadId));
+    const sourceGroup = groups?.find((g) => g.threadIds.includes(sourceId));
+
+    if (groups && (targetGroup || sourceGroup) && targetGroup !== sourceGroup) {
+      // Crossing a group boundary: into a group, out of one onto an
+      // ungrouped thread, or between two groups. Insertion uses each
+      // group's *displayed* order, not the raw `threadIds`, so the thread
+      // lands where it was dropped rather than wherever raw-index math
+      // happens to put it.
+      const touched = new Set(
+        [sourceGroup?.id, targetGroup?.id].filter((id): id is string => id !== undefined)
+      );
+      const updatedGroups = this.freezeOtherGroupOrders(projectId, groups, touched).map((g) => {
+        if (g.id === sourceGroup?.id && g.id !== targetGroup?.id) {
+          // Rebuild the source group from its displayed order too, same as the target branch below.
+          const displayed = this.currentGroupThreadOrder(projectId, g.id);
+          return { ...g, threadIds: displayed.filter((id) => id !== sourceId) };
+        }
+        if (g.id === targetGroup?.id) {
+          const displayed = this.currentGroupThreadOrder(projectId, g.id);
+          return { ...g, threadIds: this.insertAdjacent(displayed, sourceId, targetThreadId) };
+        }
+        return g;
+      });
+      const baseTopLevel = this.currentTopLevelOrder(projectId).filter((id) => id !== sourceId);
+      const topLevelOrder = targetGroup
+        ? baseTopLevel
+        : this.insertAdjacent(baseTopLevel, sourceId, targetThreadId);
+      await this.saveThreadOrder(projectId, topLevelOrder, updatedGroups);
+      return;
     }
 
-    await this.applyThreadOrder(projectId, next);
+    if (targetGroup) {
+      // Same group — reorder within its displayed order.
+      const frozen = this.freezeOtherGroupOrders(projectId, groups!, new Set([targetGroup.id]));
+      const updatedGroups = frozen.map((g) => {
+        if (g.id !== targetGroup.id) return g;
+        const displayed = this.currentGroupThreadOrder(projectId, g.id);
+        return { ...g, threadIds: this.insertAdjacent(displayed, sourceId, targetThreadId) };
+      });
+      await this.saveThreadOrder(projectId, undefined, updatedGroups);
+      return;
+    }
+
+    // Top-level reorder: neither thread is in a group.
+    const order = this.insertAdjacent(
+      this.currentTopLevelOrder(projectId).filter((id) => id !== sourceId),
+      sourceId,
+      targetThreadId
+    );
+    await this.saveThreadOrder(projectId, order);
   }
 
   private handleThreadDragEnd(): void {
@@ -1373,42 +1700,32 @@ export class ScionChatSpaceRail extends LitElement {
     const containingGroup = groups.find((g) => g.threadIds.includes(threadId));
 
     if (containingGroup) {
-      // Reorder within the group's threadIds
-      const ids = [...containingGroup.threadIds];
+      // Reorder within the group's currently-displayed order (see
+      // currentGroupThreadOrder) and save it as this space's explicit
+      // snapshot; otherwise the very next render would re-sort the group and
+      // silently undo the move.
+      const ids = this.currentGroupThreadOrder(projectId, containingGroup.id);
       const idx = ids.indexOf(threadId);
       const swapIdx = idx + delta;
-      if (swapIdx < 0 || swapIdx >= ids.length) return;
+      if (idx < 0 || swapIdx < 0 || swapIdx >= ids.length) return;
       [ids[idx], ids[swapIdx]] = [ids[swapIdx], ids[idx]];
 
-      const updatedGroups = groups.map((g) =>
+      const frozen = this.freezeOtherGroupOrders(projectId, groups, new Set([containingGroup.id]));
+      const updatedGroups = frozen.map((g) =>
         g.id === containingGroup.id ? { ...g, threadIds: ids } : g
       );
-      await this.savePrefs({
-        threadGroups: { ...(this.prefs.threadGroups ?? {}), [projectId]: updatedGroups },
-      });
+      // Snapshot the unchanged top-level order alongside the frozen groups so both are pinned.
+      await this.saveThreadOrder(projectId, this.currentTopLevelOrder(projectId), updatedGroups);
     } else {
-      // Reorder among ungrouped threads only (exclude grouped thread IDs)
-      const groupedIds = new Set(groups.flatMap((g) => g.threadIds));
-      const currentOrder = [...this.currentThreadOrder(projectId)];
-      const ungroupedOrder = currentOrder.filter((id) => !groupedIds.has(id));
-
-      const idx = ungroupedOrder.indexOf(threadId);
+      // Reorder among top-level items (ungrouped threads, and groups as
+      // single units) in their currently-displayed order.
+      const order = [...this.currentTopLevelOrder(projectId)];
+      const idx = order.indexOf(threadId);
       const swapIdx = idx + delta;
-      if (idx < 0 || swapIdx < 0 || swapIdx >= ungroupedOrder.length) return;
+      if (idx < 0 || swapIdx < 0 || swapIdx >= order.length) return;
+      [order[idx], order[swapIdx]] = [order[swapIdx], order[idx]];
 
-      // Identify swap target in the ungrouped list
-      const swapTarget = ungroupedOrder[swapIdx];
-
-      // Apply swap in the FULL order (find actual positions)
-      const fullIdx = currentOrder.indexOf(threadId);
-      const fullSwapIdx = currentOrder.indexOf(swapTarget);
-      if (fullIdx < 0 || fullSwapIdx < 0) return;
-      [currentOrder[fullIdx], currentOrder[fullSwapIdx]] = [
-        currentOrder[fullSwapIdx],
-        currentOrder[fullIdx],
-      ];
-
-      await this.applyThreadOrder(projectId, currentOrder);
+      await this.saveThreadOrder(projectId, order);
     }
   }
 
@@ -1419,18 +1736,17 @@ export class ScionChatSpaceRail extends LitElement {
     const containingGroup = groups.find((g) => g.threadIds.includes(threadId));
 
     if (containingGroup) {
-      // Check edges within the group
-      const ids = containingGroup.threadIds;
+      // Check edges within the group's currently-displayed order.
+      const ids = this.currentGroupThreadOrder(projectId, containingGroup.id);
       return edge === 'first' ? ids[0] === threadId : ids[ids.length - 1] === threadId;
     }
 
-    // Check edges among ungrouped threads only (exclude grouped thread IDs)
-    const groupedIds = new Set(groups.flatMap((g) => g.threadIds));
-    const ungroupedOrder = this.currentThreadOrder(projectId).filter((id) => !groupedIds.has(id));
-    if (ungroupedOrder.length === 0) return true;
-    const index = ungroupedOrder.indexOf(threadId);
+    // Check edges among top-level items (ungrouped threads, groups as units).
+    const order = this.currentTopLevelOrder(projectId);
+    if (order.length === 0) return true;
+    const index = order.indexOf(threadId);
     if (index === -1) return true;
-    return edge === 'first' ? index === 0 : index === ungroupedOrder.length - 1;
+    return edge === 'first' ? index === 0 : index === order.length - 1;
   }
 
   // ---------------------------------------------------------------------------
@@ -1515,6 +1831,15 @@ export class ScionChatSpaceRail extends LitElement {
           newGroup,
         ]
       : [...currentGroups, newGroup];
+    const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: groups };
+
+    // Only touch threadOrder for a space that already has its own snapshot
+    // (see `hasExplicitOrder`) — writing a first, membership-only entry here
+    // would itself become the explicit-order signal.
+    if (!this.hasExplicitOrder(projectId)) {
+      await this.savePrefs({ threadGroups });
+      return;
+    }
 
     // Insert the group ID into threadOrder so it co-mingles with threads.
     const currentOrder = [...(this.prefs.threadOrder?.[projectId] ?? [])];
@@ -1529,8 +1854,6 @@ export class ScionChatSpaceRail extends LitElement {
     } else {
       currentOrder.push(newGroup.id);
     }
-
-    const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: groups };
     const threadOrder = { ...(this.prefs.threadOrder ?? {}), [projectId]: currentOrder };
     await this.savePrefs({ threadGroups, threadOrder });
   }
@@ -1575,6 +1898,14 @@ export class ScionChatSpaceRail extends LitElement {
     const deletedGroup = this.getGroups(projectId).find((g) => g.id === groupId);
     const groups = this.getGroups(projectId).filter((g) => g.id !== groupId);
     const threadGroups = { ...(this.prefs.threadGroups ?? {}), [projectId]: groups };
+
+    // Without this space's own explicit snapshot (see `hasExplicitOrder`),
+    // there is no threadOrder entry to replace, and writing a partial one
+    // here would itself become the explicit-order signal.
+    if (!this.hasExplicitOrder(projectId)) {
+      await this.savePrefs({ threadGroups });
+      return;
+    }
 
     // Replace the group ID in threadOrder with its former thread IDs,
     // filtering out any that already exist elsewhere to avoid duplicates.
@@ -1662,43 +1993,46 @@ export class ScionChatSpaceRail extends LitElement {
     return maxTime;
   }
 
+  /**
+   * Compare two threads under the alpha or activity sort mode, via the
+   * `compareByName`/`compareByActivity` primitives every alpha/activity sort
+   * call site shares, so "Alphabetical"/"Recent" collate identically
+   * everywhere.
+   */
+  private compareThreadsForSort(
+    a: ChatSpaceThread,
+    b: ChatSpaceThread,
+    mode: 'alpha' | 'activity'
+  ): number {
+    if (mode === 'alpha') {
+      return this.compareByName(a.name, b.name, a.id, b.id);
+    }
+    const aTime = a.lastActivityAt ? new Date(a.lastActivityAt).getTime() : 0;
+    const bTime = b.lastActivityAt ? new Date(b.lastActivityAt).getTime() : 0;
+    return this.compareByActivity(aTime, bTime, a.id, b.id);
+  }
+
   private getSortedThreads(projectId: string): ChatSpaceThread[] {
     const threads = [...(this.threadsBySpace.get(projectId) || [])];
 
-    // In custom sort mode, the user's explicit order takes control.
-    // #general is always first regardless.
-    if (this.prefs.threadSortMode === 'custom') {
-      const order = this.prefs.threadOrder?.[projectId];
-      if (order && order.length > 0) {
-        const general = threads.filter((t) => t.isGeneral);
-        const rest = threads.filter((t) => !t.isGeneral);
-        const orderMap = new Map(order.map((id, i) => [id, i]));
-        rest.sort((a, b) => {
-          const ai = orderMap.get(a.id);
-          const bi = orderMap.get(b.id);
-          if (ai === undefined && bi === undefined) return 0;
-          if (ai === undefined) return 1;
-          if (bi === undefined) return -1;
-          return ai - bi;
-        });
-        return [...general, ...rest];
-      }
+    // With an explicit snapshot, the user's order takes control. #general is
+    // always first regardless.
+    if (this.hasExplicitOrder(projectId)) {
+      const order = this.prefs.threadOrder?.[projectId] ?? [];
+      const general = threads.filter((t) => t.isGeneral);
+      const rest = threads.filter((t) => !t.isGeneral);
+      rest.sort(this.compareByExplicitOrder(order));
+      return [...general, ...rest];
     }
 
-    // Separate #general, pinned, and regular
+    // Separate #general, pinned, and regular.
     const general = threads.filter((t) => t.isGeneral);
     const pinned = threads.filter((t) => !t.isGeneral && t.pinned);
     const regular = threads.filter((t) => !t.isGeneral && !t.pinned);
 
-    // Sort pinned and regular
-    const sortFn =
-      this.prefs.threadSortMode === 'alpha'
-        ? (a: ChatSpaceThread, b: ChatSpaceThread) => a.name.localeCompare(b.name)
-        : (a: ChatSpaceThread, b: ChatSpaceThread) => {
-            const aTime = a.lastActivityAt ? new Date(a.lastActivityAt).getTime() : 0;
-            const bTime = b.lastActivityAt ? new Date(b.lastActivityAt).getTime() : 0;
-            return bTime - aTime;
-          };
+    const mode = this.prefs.threadSortMode;
+    const sortFn = (a: ChatSpaceThread, b: ChatSpaceThread) =>
+      this.compareThreadsForSort(a, b, mode);
 
     pinned.sort(sortFn);
     regular.sort(sortFn);
@@ -1771,10 +2105,24 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   private handleContextMenu(e: MouseEvent, thread: ChatSpaceThread, projectId: string): void {
+    if (this.longPress.contextMenu(e)) return;
     e.preventDefault();
     e.stopPropagation();
+    this.openThreadMenu(thread, projectId, { x: e.clientX, y: e.clientY });
+  }
+
+  /** Open a thread row's menu: the popup at `at`, or the sheet on mobile. */
+  private openThreadMenu(thread: ChatSpaceThread, projectId: string, at: LongPressPoint): void {
+    this.groupContextMenuTarget = null;
     this.contextMenuTarget = { type: 'thread', thread, projectId };
-    this.contextMenuPos = { x: e.clientX, y: e.clientY };
+    this.contextMenuPos = at;
+    this.menuAsSheet = shouldUseMenuSheet();
+  }
+
+  /** Close whichever row menu is open, popup or sheet. */
+  private closeRowMenus(): void {
+    this.contextMenuTarget = null;
+    this.groupContextMenuTarget = null;
   }
 
   // _projectId is kept for the call site's symmetry with the other context-menu
@@ -2019,7 +2367,7 @@ export class ScionChatSpaceRail extends LitElement {
   ): string {
     const lines: string[] = [];
     lines.push(`# Thread: ${thread.name}`);
-    lines.push(`Exported: ${new Date().toLocaleString()}`);
+    lines.push(`Exported: ${formatInstantWithZone(new Date().toISOString())}`);
     lines.push('');
     lines.push('---');
 
@@ -2028,7 +2376,7 @@ export class ScionChatSpaceRail extends LitElement {
       const sender = rawSender.replace(/^(user|agent):/, '');
       const ts = msg.createdAt ?? '';
       const content = msg.msg ?? '';
-      const formattedTs = ts ? new Date(ts).toLocaleString() : '';
+      const formattedTs = ts ? formatInstantWithZone(ts) || ts : '';
 
       lines.push('');
       lines.push(`**${sender}** (${formattedTs}):`);
@@ -2147,9 +2495,44 @@ export class ScionChatSpaceRail extends LitElement {
     }
   }
 
-  private startCreateThread(projectId: string): void {
-    this.creatingThread = projectId;
-    this.newThreadName = '';
+  /**
+   * Open the new-thread name entry for a space. `groupId` is the group the
+   * thread is filed into once created; every request sets it, so a target
+   * left by an earlier group-menu request cannot carry over.
+   */
+  private startCreateThread(projectId: string, groupId: string | null = null): void {
+    this._createThreadGroupId = groupId;
+    // The name-entry row renders inside the space's thread list, so a
+    // collapsed space must open for the row to be visible.
+    this.expandSpace(projectId);
+    // Asking again for the space whose row is already open keeps the typed
+    // name; only a fresh entry starts empty.
+    if (this.creatingThread !== projectId) {
+      this.creatingThread = projectId;
+      this.newThreadName = '';
+    }
+    // Focus on every request, not only when the row first opens, so a repeat
+    // New thread brings focus back from the menu that issued it.
+    void this.updateComplete.then(() => this.focusCreateThreadInput());
+  }
+
+  /**
+   * Focus the new-thread name input. Native focus also scrolls the input
+   * into view, so no separate scroll is needed.
+   */
+  private async focusCreateThreadInput(): Promise<void> {
+    const input = this.shadowRoot?.querySelector<
+      HTMLElement & { updateComplete?: Promise<unknown> }
+    >('.create-thread sl-input');
+    if (!input) return;
+    await input.updateComplete;
+    input.focus();
+  }
+
+  /** Close the new-thread name entry without creating a thread. */
+  private cancelCreateThread(): void {
+    this.creatingThread = '';
+    this._createThreadGroupId = null;
   }
 
   /** IDs of topics created by this client — suppresses SSE-triggered reloads. */
@@ -2315,9 +2698,9 @@ export class ScionChatSpaceRail extends LitElement {
               <div class="rail-body" @click=${this.handleRailBodyClick}>${this.renderSpaces()}</div>
             `
       }
-      ${this.contextMenuTarget ? this.renderContextMenu() : nothing}
-      ${this.groupContextMenuTarget ? this.renderGroupContextMenu() : nothing}
-      ${this.emojiPickerSpaceId ? this.renderEmojiPicker() : nothing}
+      ${this.contextMenuTarget && !this.menuAsSheet ? this.renderContextMenu() : nothing}
+      ${this.groupContextMenuTarget && !this.menuAsSheet ? this.renderGroupContextMenu() : nothing}
+      ${this.renderMenuSheet()} ${this.emojiPickerSpaceId ? this.renderEmojiPicker() : nothing}
     `;
   }
 
@@ -2345,10 +2728,10 @@ export class ScionChatSpaceRail extends LitElement {
             slot="trigger"
             name="sort-down"
             class="sort-btn"
-            label="Sort spaces"
+            label="Sort"
           ></sl-icon-button>
           <sl-menu @sl-select=${this.handleSortSelect}>
-            <sl-menu-label>Sort spaces</sl-menu-label>
+            <sl-menu-label>Sort</sl-menu-label>
             <sl-menu-item
               type="checkbox"
               value="activity"
@@ -2387,15 +2770,23 @@ export class ScionChatSpaceRail extends LitElement {
     }
   }
 
-  /** Handle sort mode selection from the dropdown. */
+  /**
+   * Alphabetical/Recent is a single, rail-wide choice: it sets
+   * `spaceSortMode` and `threadSortMode` together, and clears every space's
+   * `threadOrder` snapshot so the choice actually discards custom thread
+   * arrangements (see `hasExplicitOrder`) instead of leaving them to
+   * resurface on a later drag. Custom applies to space order only —
+   * per-space thread order has its own trigger: dragging or nudging a
+   * thread.
+   */
   private handleSortSelect(e: Event): void {
     const detail = (e as CustomEvent<{ item?: HTMLElement }>).detail;
     const item = detail?.item;
     const value = item?.getAttribute('value');
 
-    // Space sort modes
+    // Space + thread sort modes
     if (value === 'activity' || value === 'alpha') {
-      void this.savePrefs({ spaceSortMode: value });
+      void this.savePrefs({ spaceSortMode: value, threadSortMode: value, threadOrder: {} });
       return;
     }
     if (value === 'custom') {
@@ -2412,9 +2803,45 @@ export class ScionChatSpaceRail extends LitElement {
   private getFilteredSpaces(): ChatSpace[] {
     const sorted = this.getSortedSpaces();
     if (this.spaceFilter === 'unread') {
-      return sorted.filter((s) => s.unreadCount > 0 || s.hasUnreadMention);
+      // The space holding the open conversation stays even at zero unread —
+      // otherwise reading the last unread thread in a space (including via
+      // auto-advance) would make the whole space, open thread and all,
+      // vanish out from under the user.
+      const openProjectId = this.findProjectIdForSelectedThread();
+      return sorted.filter(
+        (s) => s.unreadCount > 0 || s.hasUnreadMention || s.projectId === openProjectId
+      );
     }
     return sorted;
+  }
+
+  /** The space containing the currently selected thread, if any. */
+  private findProjectIdForSelectedThread(): string | null {
+    if (!this.selectedKey) return null;
+    for (const [projectId, threads] of this.threadsBySpace) {
+      if (threads.some((t) => t.id === this.selectedKey)) return projectId;
+    }
+    return null;
+  }
+
+  /**
+   * Whether a thread counts as unread for the rail's filter — the same
+   * definition the dots and space rollup use: a muted thread never counts,
+   * mention or not.
+   */
+  private isThreadUnreadForFilter(thread: ChatSpaceThread): boolean {
+    return !thread.muted && (thread.hasUnread || thread.hasUnreadMention);
+  }
+
+  /**
+   * Threads to show within a shown space under the current filter. The
+   * open conversation is always kept, even once read, so the user reading
+   * it (or auto-advance marking it read) does not pull it out from under
+   * them; every other thread is held to the unread definition above.
+   */
+  private getVisibleThreads(threads: ChatSpaceThread[]): ChatSpaceThread[] {
+    if (this.spaceFilter !== 'unread') return threads;
+    return threads.filter((t) => t.id === this.selectedKey || this.isThreadUnreadForFilter(t));
   }
 
   private renderSpaces() {
@@ -2444,7 +2871,7 @@ export class ScionChatSpaceRail extends LitElement {
               ? 'drag-over'
               : ''
           }"
-          draggable="true"
+          draggable=${this.touchPrimary.isTouch ? nothing : 'true'}
           @dragstart=${(e: DragEvent): void => this.handleSpaceDragStart(e, space.projectId)}
           @dragover=${(e: DragEvent): void => this.handleSpaceDragOver(e, space.projectId)}
           @drop=${(e: DragEvent): void => void this.handleSpaceDrop(e, space.projectId)}
@@ -2524,12 +2951,12 @@ export class ScionChatSpaceRail extends LitElement {
           !isCollapsed
             ? html`
                 <div class="thread-list">
-                  ${this.renderThreadList(threads, space.projectId)}
                   ${
                     this.creatingThread === space.projectId
                       ? this.renderCreateThread(space.projectId)
                       : nothing
                   }
+                  ${this.renderThreadList(threads, space.projectId)}
                 </div>
               `
             : nothing
@@ -2543,66 +2970,32 @@ export class ScionChatSpaceRail extends LitElement {
    * co-mingled in a single ordered list — no separate "THREADS" heading.
    */
   private renderThreadList(threads: ChatSpaceThread[], projectId: string) {
+    const visibleThreads = this.getVisibleThreads(threads);
     const groups = this.getGroups(projectId);
     if (groups.length === 0) {
       // No groups — render flat list, but still show group-name input if active
       return html`
-        ${threads.map((t) => this.renderThread(t, projectId))}
+        ${visibleThreads.map((t) => this.renderThread(t, projectId))}
         ${this.groupNameInput?.projectId === projectId ? this.renderGroupNameInput() : nothing}
       `;
     }
 
-    // Build lookups
-    const threadMap = new Map(threads.map((t) => [t.id, t]));
-    const groupedThreadIds = new Set(groups.flatMap((g) => g.threadIds));
+    // Build lookups. threadMap is built from the filtered list, so a group
+    // whose threads are all filtered out resolves to zero members below —
+    // that is what lets the unread filter hide it without a separate check.
+    const threadMap = new Map(visibleThreads.map((t) => [t.id, t]));
 
     // #general threads always come first
-    const generalThreads = threads.filter((t) => t.isGeneral);
+    const generalThreads = visibleThreads.filter((t) => t.isGeneral);
 
-    // Build unified item list: ungrouped non-general threads + groups
-    type RailItem =
-      | { kind: 'thread'; id: string; thread: ChatSpaceThread }
-      | { kind: 'group'; id: string; group: ThreadGroup };
-
-    const items: RailItem[] = [];
-    for (const t of threads) {
-      if (t.isGeneral || groupedThreadIds.has(t.id)) continue;
-      items.push({ kind: 'thread', id: t.id, thread: t });
-    }
-    for (const g of groups) {
-      items.push({ kind: 'group', id: g.id, group: g });
-    }
-
-    // Sort items based on current mode
-    if (this.prefs.threadSortMode === 'custom') {
-      const order = this.prefs.threadOrder?.[projectId] ?? [];
-      const orderMap = new Map(order.map((id, i) => [id, i]));
-      items.sort((a, b) => {
-        const ai = orderMap.get(a.id);
-        const bi = orderMap.get(b.id);
-        if (ai === undefined && bi === undefined) return 0;
-        if (ai === undefined) return 1;
-        if (bi === undefined) return -1;
-        return ai - bi;
-      });
-    } else {
-      // Activity or alpha — pinned ungrouped threads surface first.
-      items.sort((a, b) => {
-        const aPinned = a.kind === 'thread' && a.thread.pinned ? 0 : 1;
-        const bPinned = b.kind === 'thread' && b.thread.pinned ? 0 : 1;
-        if (aPinned !== bPinned) return aPinned - bPinned;
-
-        if (this.prefs.threadSortMode === 'alpha') {
-          const aName = a.kind === 'thread' ? a.thread.name : a.group.name;
-          const bName = b.kind === 'thread' ? b.thread.name : b.group.name;
-          return aName.localeCompare(bName);
-        }
-        // activity (default)
-        const aTime = this.getItemLastActivity(a, threadMap);
-        const bTime = this.getItemLastActivity(b, threadMap);
-        return bTime - aTime;
-      });
-    }
+    // Build and sort the unified item list: ungrouped non-general threads,
+    // plus each group as a single entry — see `topLevelRailItems` and
+    // `sortTopLevelItems`.
+    const items = this.sortTopLevelItems(
+      projectId,
+      this.topLevelRailItems(projectId, visibleThreads),
+      threadMap
+    );
 
     return html`
       ${generalThreads.map((t) => this.renderThread(t, projectId))}
@@ -2611,9 +3004,15 @@ export class ScionChatSpaceRail extends LitElement {
           return this.renderThread(item.thread, projectId);
         }
         const group = item.group;
-        const groupThreads = group.threadIds
-          .map((id) => threadMap.get(id))
-          .filter((t): t is ChatSpaceThread => t !== undefined);
+        // Alpha/activity apply within group membership too, unless this
+        // space has an explicit snapshot (see `hasExplicitOrder`).
+        const groupThreads = this.orderGroupMembers(projectId, group, threadMap);
+        // Under the unread filter, a group left with no visible threads
+        // (empty, or every member read) is noise — hide it entirely rather
+        // than showing a bare "(0)" header.
+        if (this.spaceFilter === 'unread' && groupThreads.length === 0) {
+          return nothing;
+        }
         const collapsed =
           this.collapsedGroups.has(group.id) && group.id !== this.autoExpandedGroupId;
         return html`
@@ -2622,11 +3021,13 @@ export class ScionChatSpaceRail extends LitElement {
             @click=${() => this.toggleGroupCollapse(group.id)}
             @dragover=${(e: DragEvent) => this.handleGroupDragOver(e, group.id)}
             @drop=${(e: DragEvent) => void this.handleGroupDrop(e, group.id, projectId)}
-            @contextmenu=${(e: MouseEvent) => {
+            @pointerdown=${(e: PointerEvent): void =>
+              this.longPress.pointerDown(e, (at) => this.openGroupMenu(group, projectId, at))}
+            @contextmenu=${(e: MouseEvent): void => {
+              if (this.longPress.contextMenu(e)) return;
               e.preventDefault();
               e.stopPropagation();
-              this.contextMenuTarget = null;
-              this.showGroupContextMenu(e, group, projectId);
+              this.openGroupMenu(group, projectId, { x: e.clientX, y: e.clientY });
             }}
           >
             <sl-icon name="chevron-down" class="chevron ${collapsed ? 'collapsed' : ''}"></sl-icon>
@@ -2684,9 +3085,11 @@ export class ScionChatSpaceRail extends LitElement {
     projectId: string;
   } | null = null;
 
-  private showGroupContextMenu(e: MouseEvent, group: ThreadGroup, projectId: string): void {
+  private openGroupMenu(group: ThreadGroup, projectId: string, at: LongPressPoint): void {
+    this.contextMenuTarget = null;
     this.groupContextMenuTarget = { group, projectId };
-    this.contextMenuPos = { x: e.clientX, y: e.clientY };
+    this.contextMenuPos = at;
+    this.menuAsSheet = shouldUseMenuSheet();
   }
 
   /**
@@ -2723,9 +3126,10 @@ export class ScionChatSpaceRail extends LitElement {
       `;
     }
 
-    // Thread is draggable when in custom sort mode (or any mode, since dragging
-    // auto-switches to custom), but not for the #general thread.
-    const isDraggable = !thread.isGeneral;
+    // Every thread is draggable except #general; dragging gives its space an
+    // explicit order regardless of the active sort mode. Not on a touch
+    // device, where a press-and-hold opens the thread's menu instead.
+    const isDraggable = !thread.isGeneral && !this.touchPrimary.isTouch;
     const isDragging = this.draggingThreadId === thread.id;
     const isDragOver = this.dragOverThreadId === thread.id && this.draggingThreadId !== thread.id;
 
@@ -2748,6 +3152,8 @@ export class ScionChatSpaceRail extends LitElement {
         }
         @dragend=${isDraggable ? () => this.handleThreadDragEnd() : nothing}
         @click=${() => this.handleThreadClick(thread, projectId)}
+        @pointerdown=${(e: PointerEvent): void =>
+          this.longPress.pointerDown(e, (at) => this.openThreadMenu(thread, projectId, at))}
         @contextmenu=${(e: MouseEvent) => this.handleContextMenu(e, thread, projectId)}
       >
         <span class="hash">#</span>
@@ -2785,11 +3191,11 @@ export class ScionChatSpaceRail extends LitElement {
               void this.submitCreateThread(projectId);
             }
             if (e.key === 'Escape') {
-              this.creatingThread = '';
+              this.cancelCreateThread();
             }
           }}
           @sl-blur=${() => {
-            if (!this.newThreadName.trim()) this.creatingThread = '';
+            if (!this.newThreadName.trim()) this.cancelCreateThread();
           }}
           style="flex: 1"
         ></sl-input>
@@ -2876,142 +3282,177 @@ export class ScionChatSpaceRail extends LitElement {
     `;
   }
 
+  /** The actions of a thread row's menu, shared by the popup and the sheet. */
+  private threadMenuActions(thread: ChatSpaceThread, projectId: string): MenuAction[] {
+    const actions: MenuAction[] = [
+      {
+        id: 'mark-read',
+        label: 'Mark as read',
+        icon: 'check-circle',
+        run: () => void this.handleMarkRead(thread, projectId),
+      },
+    ];
+    if (!thread.hasUnread && thread.lastMessageId) {
+      actions.push({
+        id: 'mark-unread',
+        label: 'Mark unread',
+        icon: 'envelope',
+        run: () => void this.handleMarkUnread(thread, projectId),
+      });
+    }
+    actions.push(
+      {
+        id: 'mark-space-read',
+        label: 'Mark space read',
+        icon: 'check-lg',
+        run: () => void this.handleMarkSpaceRead(projectId),
+      },
+      {
+        id: 'pin',
+        // The glyph reports the current state, the label offers the action —
+        // the filled star means pinned everywhere else in this rail, and a
+        // menu that used it for "will be pinned" would make the row indicator
+        // ambiguous.
+        label: thread.pinned ? 'Unpin' : 'Pin to top',
+        icon: thread.pinned ? 'star-fill' : 'star',
+        className: 'pin-toggle',
+        run: () => void this.handleTogglePin(thread, projectId),
+      },
+      {
+        id: 'mute',
+        label: thread.muted ? 'Unmute' : 'Mute',
+        icon: thread.muted ? 'bell-slash' : 'bell',
+        className: 'mute-toggle',
+        run: () => void this.handleToggleMute(thread, projectId),
+      }
+    );
+    if (!thread.isGeneral) {
+      actions.push(
+        {
+          id: 'move-up',
+          label: 'Move up',
+          icon: 'arrow-up',
+          disabled: this.isThreadAtEdge(thread.id, projectId, 'first'),
+          run: () => void this.moveThread(thread.id, projectId, -1),
+        },
+        {
+          id: 'move-down',
+          label: 'Move down',
+          icon: 'arrow-down',
+          disabled: this.isThreadAtEdge(thread.id, projectId, 'last'),
+          run: () => void this.moveThread(thread.id, projectId, 1),
+        }
+      );
+      const groups = this.getGroups(projectId);
+      for (const group of groups.filter((g) => !g.threadIds.includes(thread.id))) {
+        actions.push({
+          id: `move-to-group:${group.id}`,
+          label: `Move to ${group.name}`,
+          icon: 'folder',
+          run: () => {
+            this.contextMenuTarget = null;
+            void this.moveThreadToGroup(thread.id, group.id, projectId);
+          },
+        });
+      }
+      if (groups.some((g) => g.threadIds.includes(thread.id))) {
+        actions.push({
+          id: 'remove-from-group',
+          label: 'Remove from group',
+          icon: 'folder-minus',
+          run: () => {
+            this.contextMenuTarget = null;
+            void this.removeThreadFromGroup(thread.id, projectId);
+          },
+        });
+      }
+    }
+    actions.push(
+      {
+        id: 'copy-markdown',
+        label: 'Copy as Markdown',
+        icon: 'file-earmark-text',
+        run: () => void this.handleExportThread(thread),
+      },
+      {
+        id: 'download-markdown',
+        label: 'Download as Markdown',
+        icon: 'download',
+        run: () => void this.handleDownloadThread(thread),
+      },
+      {
+        id: 'rename',
+        label: 'Rename',
+        icon: 'pencil',
+        run: () => this.startRename(thread),
+      },
+      {
+        id: 'delete',
+        label: 'Delete',
+        icon: 'trash',
+        destructive: true,
+        run: () => void this.handleDeleteThread(thread, projectId),
+      }
+    );
+    return actions;
+  }
+
+  /** The actions of a group header's menu, shared by the popup and the sheet. */
+  private groupMenuActions(group: ThreadGroup, projectId: string): MenuAction[] {
+    return [
+      {
+        id: 'new-thread',
+        label: 'New thread',
+        icon: 'plus-lg',
+        run: () => {
+          this.groupContextMenuTarget = null;
+          this.startCreateThread(projectId, group.id);
+        },
+      },
+      {
+        id: 'rename-group',
+        label: 'Rename group',
+        icon: 'pencil',
+        run: () => {
+          this.groupContextMenuTarget = null;
+          this.startGroupNameInput(projectId, {
+            renamingGroupId: group.id,
+            initialValue: group.name,
+          });
+        },
+      },
+      {
+        id: 'delete-group',
+        label: 'Delete group',
+        icon: 'trash',
+        destructive: true,
+        run: () => {
+          this.groupContextMenuTarget = null;
+          void this.deleteGroup(group.id, projectId);
+        },
+      },
+    ];
+  }
+
+  /** The open row menu's heading and actions, or null when none is open. */
+  private openMenu(): { heading: string; actions: MenuAction[] } | null {
+    if (this.contextMenuTarget) {
+      const { thread, projectId } = this.contextMenuTarget;
+      return { heading: `#${thread.name}`, actions: this.threadMenuActions(thread, projectId) };
+    }
+    if (this.groupContextMenuTarget) {
+      const { group, projectId } = this.groupContextMenuTarget;
+      return { heading: group.name, actions: this.groupMenuActions(group, projectId) };
+    }
+    return null;
+  }
+
   private renderContextMenu() {
     if (!this.contextMenuTarget) return nothing;
     const { thread, projectId } = this.contextMenuTarget;
-
     return html`
-      <div
-        class="context-menu"
-        style="left: ${this.contextMenuPos.x}px; top: ${this.contextMenuPos.y}px"
-        @click=${(e: Event) => e.stopPropagation()}
-      >
-        <div class="context-menu-item" @click=${() => this.handleMarkRead(thread, projectId)}>
-          <sl-icon name="check-circle"></sl-icon>
-          Mark as read
-        </div>
-        ${
-          !thread.hasUnread && thread.lastMessageId
-            ? html`
-                <div
-                  class="context-menu-item"
-                  @click=${() => void this.handleMarkUnread(thread, projectId)}
-                >
-                  <sl-icon name="envelope"></sl-icon>
-                  Mark unread
-                </div>
-              `
-            : nothing
-        }
-        <div class="context-menu-item" @click=${() => this.handleMarkSpaceRead(projectId)}>
-          <sl-icon name="check-lg"></sl-icon>
-          Mark space read
-        </div>
-        <div
-          class="context-menu-item pin-toggle"
-          @click=${(): void => void this.handleTogglePin(thread, projectId)}
-        >
-          <!-- The glyph reports the current state, the label offers the
-               action — the filled star means pinned everywhere else in this
-               rail, and a menu that used it for "will be pinned" would make
-               the row indicator ambiguous. -->
-          <sl-icon name=${thread.pinned ? 'star-fill' : 'star'}></sl-icon>
-          ${thread.pinned ? 'Unpin' : 'Pin to top'}
-        </div>
-        <div
-          class="context-menu-item mute-toggle"
-          @click=${(): void => void this.handleToggleMute(thread, projectId)}
-        >
-          <sl-icon name=${thread.muted ? 'bell-slash' : 'bell'}></sl-icon>
-          ${thread.muted ? 'Unmute' : 'Mute'}
-        </div>
-        ${
-          !thread.isGeneral
-            ? html`
-                <div
-                  class="context-menu-item"
-                  @click=${() => void this.moveThread(thread.id, projectId, -1)}
-                  style="${
-                    this.isThreadAtEdge(thread.id, projectId, 'first')
-                      ? 'opacity: 0.4; pointer-events: none;'
-                      : ''
-                  }"
-                >
-                  <sl-icon name="arrow-up"></sl-icon>
-                  Move up
-                </div>
-                <div
-                  class="context-menu-item"
-                  @click=${() => void this.moveThread(thread.id, projectId, 1)}
-                  style="${
-                    this.isThreadAtEdge(thread.id, projectId, 'last')
-                      ? 'opacity: 0.4; pointer-events: none;'
-                      : ''
-                  }"
-                >
-                  <sl-icon name="arrow-down"></sl-icon>
-                  Move down
-                </div>
-              `
-            : nothing
-        }
-        ${
-          !thread.isGeneral
-            ? html`
-                ${this.getGroups(projectId)
-                  .filter((g) => !g.threadIds.includes(thread.id))
-                  .map(
-                    (group) => html`
-                      <div
-                        class="context-menu-item"
-                        @click=${() => {
-                          this.contextMenuTarget = null;
-                          void this.moveThreadToGroup(thread.id, group.id, projectId);
-                        }}
-                      >
-                        <sl-icon name="folder"></sl-icon>
-                        Move to ${group.name}
-                      </div>
-                    `
-                  )}
-                ${
-                  this.getGroups(projectId).some((g) => g.threadIds.includes(thread.id))
-                    ? html`
-                        <div
-                          class="context-menu-item"
-                          @click=${() => {
-                            this.contextMenuTarget = null;
-                            void this.removeThreadFromGroup(thread.id, projectId);
-                          }}
-                        >
-                          <sl-icon name="folder-minus"></sl-icon>
-                          Remove from group
-                        </div>
-                      `
-                    : nothing
-                }
-              `
-            : nothing
-        }
-        <div class="context-menu-item" @click=${() => this.handleExportThread(thread)}>
-          <sl-icon name="file-earmark-text"></sl-icon>
-          Copy as Markdown
-        </div>
-        <div class="context-menu-item" @click=${() => this.handleDownloadThread(thread)}>
-          <sl-icon name="download"></sl-icon>
-          Download as Markdown
-        </div>
-        <div class="context-menu-item" @click=${() => this.startRename(thread)}>
-          <sl-icon name="pencil"></sl-icon>
-          Rename
-        </div>
-        <div
-          class="context-menu-item danger"
-          @click=${() => this.handleDeleteThread(thread, projectId)}
-        >
-          <sl-icon name="trash"></sl-icon>
-          Delete
-        </div>
+      <div class="context-menu" @click=${(e: Event) => e.stopPropagation()}>
+        ${renderMenuRows(this.threadMenuActions(thread, projectId))}
       </div>
     `;
   }
@@ -3020,48 +3461,27 @@ export class ScionChatSpaceRail extends LitElement {
   private renderGroupContextMenu() {
     if (!this.groupContextMenuTarget) return nothing;
     const { group, projectId } = this.groupContextMenuTarget;
-
     return html`
-      <div
-        class="context-menu"
-        style="left: ${this.contextMenuPos.x}px; top: ${this.contextMenuPos.y}px"
-        @click=${(e: Event) => e.stopPropagation()}
-      >
-        <div
-          class="context-menu-item"
-          @click=${() => {
-            this.groupContextMenuTarget = null;
-            this._createThreadGroupId = group.id;
-            this.startCreateThread(projectId);
-          }}
-        >
-          <sl-icon name="plus-lg"></sl-icon>
-          New thread
-        </div>
-        <div
-          class="context-menu-item"
-          @click=${() => {
-            this.groupContextMenuTarget = null;
-            this.startGroupNameInput(projectId, {
-              renamingGroupId: group.id,
-              initialValue: group.name,
-            });
-          }}
-        >
-          <sl-icon name="pencil"></sl-icon>
-          Rename group
-        </div>
-        <div
-          class="context-menu-item danger"
-          @click=${() => {
-            this.groupContextMenuTarget = null;
-            void this.deleteGroup(group.id, projectId);
-          }}
-        >
-          <sl-icon name="trash"></sl-icon>
-          Delete group
-        </div>
+      <div class="context-menu" @click=${(e: Event) => e.stopPropagation()}>
+        ${renderMenuRows(this.groupMenuActions(group, projectId))}
       </div>
+    `;
+  }
+
+  /** The mobile presentation of the thread and group menus. */
+  private renderMenuSheet() {
+    const menu = this.menuAsSheet ? this.openMenu() : null;
+    return html`
+      <scion-action-sheet
+        .items=${menu?.actions ?? []}
+        heading=${menu?.heading ?? ''}
+        .open=${menu !== null}
+        @action-sheet-select=${(e: CustomEvent<ActionSheetSelectDetail>): void => {
+          const current = this.openMenu();
+          if (current) runMenuAction(current.actions, e.detail.id);
+        }}
+        @action-sheet-close=${(): void => this.closeRowMenus()}
+      ></scion-action-sheet>
     `;
   }
 }
