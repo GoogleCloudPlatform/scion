@@ -222,6 +222,12 @@ interface FormOpts {
   systemStatus?: Record<string, unknown>;
   cloneStatus?: number;
   cloneBody?: unknown;
+  /** Paged template list: page 0 has no cursor; page i is fetched with cursor=p<i>. */
+  templatePages?: { projects: unknown[]; nextCursor?: string }[];
+  /** Status for POST /api/v1/projects (201 created, 200 already exists). */
+  createStatus?: number;
+  validatePath?: Record<string, unknown>;
+  providersStatus?: number;
 }
 
 async function createForm(opts: FormOpts = {}): Promise<{
@@ -241,7 +247,18 @@ async function createForm(opts: FormOpts = {}): Promise<{
       );
     }
     if (path.includes('/api/v1/projects?isTemplate=true')) {
+      if (opts.templatePages) {
+        const cursor = new URL(path, 'http://x').searchParams.get('cursor');
+        const page = cursor ? Number(cursor.slice(1)) : 0;
+        return Promise.resolve(jsonResponse(opts.templatePages[page]));
+      }
       return Promise.resolve(jsonResponse({ projects: opts.templates ?? [] }));
+    }
+    if (method === 'POST' && path.endsWith('/api/v1/system/fs/validate-path')) {
+      return Promise.resolve(jsonResponse(opts.validatePath ?? {}));
+    }
+    if (method === 'POST' && /\/api\/v1\/projects\/[^/]+\/providers$/.test(path)) {
+      return Promise.resolve(jsonResponse({}, opts.providersStatus ?? 201));
     }
     if (path.includes('/api/v1/system/status')) {
       return Promise.resolve(jsonResponse(opts.systemStatus ?? {}));
@@ -255,7 +272,9 @@ async function createForm(opts: FormOpts = {}): Promise<{
       );
     }
     if (method === 'POST' && path.endsWith('/api/v1/projects')) {
-      return Promise.resolve(jsonResponse({ project: { id: 'new-blank' } }, 201));
+      return Promise.resolve(
+        jsonResponse({ project: { id: 'new-blank' } }, opts.createStatus ?? 201)
+      );
     }
     return Promise.resolve(jsonResponse({}));
   };
@@ -569,6 +588,180 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
 
     expect(text(q(el, '.slug-error'))).toContain('already exists');
     expect(q(el, '.error-banner')).toBeNull();
+    expect(window.history.pushState).not.toHaveBeenCalled();
+
+    // a11y: the input is marked invalid and the error is its help text, which
+    // sl-input wires to the native input via aria-describedby.
+    expect(q(el, '#slug')?.getAttribute('aria-invalid')).toBe('true');
+    expect(q(el, '#slug > .slug-error')?.getAttribute('slot')).toBe('help-text');
+
+    await setValue(el, '#slug', 'taken-2', 'sl-input');
+    expect(q(el, '.slug-error')).toBeNull();
+    expect(q(el, '#slug')?.getAttribute('aria-invalid')).toBe('false');
+  });
+
+  it('shows a clone 409 in the banner, not on Slug, when no slug was sent', async () => {
+    const { el, requests } = await createForm({
+      templates: [SHARED_TEMPLATE],
+      cloneStatus: 409,
+      cloneBody: { error: { code: 'conflict', message: 'Template is being modified' } },
+    });
+    element = el;
+
+    await setValue(el, '#startFrom', 'tpl-shared', 'sl-change');
+    await setValue(el, '#name', 'Fresh', 'sl-input');
+    await submit(el);
+
+    expect(posts(requests)[0].body).toEqual({ name: 'Fresh' });
+    expect(q(el, '.slug-error')).toBeNull();
+    expect(q(el, '#slug')?.getAttribute('aria-invalid')).toBe('false');
+    expect(text(q(el, '.error-banner'))).toContain('Template is being modified');
+    expect(window.history.pushState).not.toHaveBeenCalled();
+  });
+
+  it('follows nextCursor so the template list is not truncated', async () => {
+    const { el, requests } = await createForm({
+      templatePages: [
+        { projects: [GIT_TEMPLATE], nextCursor: 'p1' },
+        { projects: [SHARED_TEMPLATE] },
+      ],
+    });
+    element = el;
+
+    const listCalls = requests.filter((r) => r.path.includes('isTemplate=true'));
+    expect(listCalls.map((r) => r.path)).toEqual([
+      '/api/v1/projects?isTemplate=true',
+      '/api/v1/projects?isTemplate=true&cursor=p1',
+    ]);
+    expect(optionValues(el, '#startFrom')).toEqual(['blank', 'tpl-git', 'tpl-shared']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Blank + Local Directory (linked): two-step create, and the 200 "exists" path.
+// ---------------------------------------------------------------------------
+
+describe('scion-page-project-create — linked create and existing projects', () => {
+  let element: (HTMLElement & { updateComplete: Promise<boolean> }) | null = null;
+
+  const WORKSTATION = { workstation: true, embeddedBrokerID: 'broker-1' };
+  const VALID_DIR = {
+    resolved: '/home/u/code/notes',
+    exists: true,
+    isDir: true,
+    isGit: false,
+    isManaged: false,
+    alreadyLinked: false,
+  };
+
+  beforeAll(async () => {
+    await import('./project-create.js');
+  }, 60_000);
+
+  beforeEach(() => {
+    resetHubProjectCapabilitiesCache();
+    vi.spyOn(window.history, 'pushState').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  /** Pick Linked, enter a path, and wait out the validate-path debounce. */
+  async function fillLinked(el: HTMLElement & { updateComplete: Promise<boolean> }) {
+    await setValue(el, '#mode', 'linked', 'sl-change');
+    await setValue(el, '#name', 'Notes', 'sl-input');
+    await setValue(el, '#localPath', '~/code/notes', 'sl-input');
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    await settle(el);
+  }
+
+  it('validates the path, creates the project, then links the directory', async () => {
+    const { el, requests } = await createForm({
+      systemStatus: WORKSTATION,
+      validatePath: VALID_DIR,
+    });
+    element = el;
+
+    await fillLinked(el);
+    await submit(el);
+
+    expect(posts(requests)).toEqual([
+      {
+        path: '/api/v1/system/fs/validate-path',
+        method: 'POST',
+        body: { path: '~/code/notes' },
+      },
+      { path: '/api/v1/projects', method: 'POST', body: { name: 'Notes', slug: 'notes' } },
+      {
+        path: '/api/v1/projects/new-blank/providers',
+        method: 'POST',
+        body: { brokerId: 'broker-1', localPath: '/home/u/code/notes' },
+      },
+    ]);
+    expect(window.history.pushState).toHaveBeenCalledWith({}, '', '/projects/new-blank');
+  });
+
+  it('still links the directory when the project already exists (200)', async () => {
+    const { el, requests } = await createForm({
+      systemStatus: WORKSTATION,
+      validatePath: VALID_DIR,
+      createStatus: 200,
+    });
+    element = el;
+
+    await fillLinked(el);
+    await submit(el);
+
+    expect(posts(requests).map((r) => r.path)).toEqual([
+      '/api/v1/system/fs/validate-path',
+      '/api/v1/projects',
+      '/api/v1/projects/new-blank/providers',
+    ]);
+    expect(q(el, 'sl-dialog[label="Project Already Exists"]')?.hasAttribute('open')).toBe(false);
+    expect(window.history.pushState).toHaveBeenCalledWith({}, '', '/projects/new-blank');
+  });
+
+  it('keeps the user on the form with an error when linking fails', async () => {
+    const { el } = await createForm({
+      systemStatus: WORKSTATION,
+      validatePath: VALID_DIR,
+      providersStatus: 500,
+    });
+    element = el;
+
+    await fillLinked(el);
+    await submit(el);
+
+    expect(q(el, '.error-banner')).not.toBeNull();
+    expect(window.history.pushState).not.toHaveBeenCalled();
+  });
+
+  it('does not create when the path is not a valid directory', async () => {
+    const { el, requests } = await createForm({
+      systemStatus: WORKSTATION,
+      validatePath: { ...VALID_DIR, exists: false },
+    });
+    element = el;
+
+    await fillLinked(el);
+    await submit(el);
+
+    expect(posts(requests).map((r) => r.path)).toEqual(['/api/v1/system/fs/validate-path']);
+    expect(text(q(el, '.error-banner'))).toContain('valid directory');
+  });
+
+  it('a non-linked 200 offers the existing project instead of navigating', async () => {
+    const { el } = await createForm({ createStatus: 200 });
+    element = el;
+
+    await setValue(el, '#name', 'Existing', 'sl-input');
+    await submit(el);
+
+    expect(q(el, 'sl-dialog[label="Project Already Exists"]')?.hasAttribute('open')).toBe(true);
     expect(window.history.pushState).not.toHaveBeenCalled();
   });
 });

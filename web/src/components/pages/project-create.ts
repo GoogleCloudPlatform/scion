@@ -40,6 +40,9 @@ type GitWorkspaceMode = 'per-agent' | 'worktree-per-agent' | 'shared';
 /** "Start from" value meaning no template. Template options use the project ID. */
 const START_BLANK = 'blank';
 
+/** Safety cap on template-list pages followed (see loadTemplates). */
+const MAX_TEMPLATE_PAGES = 20;
+
 /** A project template as returned by GET /api/v1/projects?isTemplate=true. */
 interface ProjectTemplate {
   id: string;
@@ -382,6 +385,14 @@ export class ScionPageProjectCreate extends LitElement {
     super.updated(changedProperties);
     if (changedProperties.has('error') && this.error) {
       this.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    if (changedProperties.has('slugError')) {
+      // Mark the inner native input invalid too, so assistive tech reports it
+      // (the host's aria-invalid does not reach into sl-input's shadow DOM).
+      const slugInput = this.shadowRoot?.querySelector('#slug') as
+        | (HTMLElement & { setCustomValidity?: (message: string) => void })
+        | null;
+      slugInput?.setCustomValidity?.(this.slugError ?? '');
     }
   }
 
@@ -829,20 +840,34 @@ export class ScionPageProjectCreate extends LitElement {
   }
 
   /**
-   * Load the project templates for "Start from". Failure is non-fatal: Blank
-   * still works, and the hint says templates could not be loaded.
+   * Load the project templates for "Start from", following `nextCursor` so the
+   * list is never silently truncated. Failure is non-fatal: Blank still works,
+   * and the hint says templates could not be loaded.
    */
   private async loadTemplates(): Promise<void> {
     this.templatesLoading = true;
     this.templatesLoadFailed = false;
     try {
-      const res = await apiFetch('/api/v1/projects?isTemplate=true&limit=100');
-      if (res.ok) {
-        const data = (await res.json()) as { projects?: ProjectTemplate[] };
-        this.templates = data.projects ?? [];
-      } else {
-        this.templatesLoadFailed = true;
+      const templates: ProjectTemplate[] = [];
+      let cursor = '';
+      // MAX_TEMPLATE_PAGES only guards against a server that never stops
+      // returning a cursor; at the server's default page size it is far
+      // beyond any realistic template count.
+      for (let page = 0; page < MAX_TEMPLATE_PAGES; page++) {
+        const url =
+          '/api/v1/projects?isTemplate=true' +
+          (cursor ? `&cursor=${encodeURIComponent(cursor)}` : '');
+        const res = await apiFetch(url);
+        if (!res.ok) {
+          this.templatesLoadFailed = true;
+          return;
+        }
+        const data = (await res.json()) as { projects?: ProjectTemplate[]; nextCursor?: string };
+        templates.push(...(data.projects ?? []));
+        cursor = data.nextCursor ?? '';
+        if (!cursor) break;
       }
+      this.templates = templates;
     } catch {
       this.templatesLoadFailed = true;
     } finally {
@@ -1070,7 +1095,10 @@ export class ScionPageProjectCreate extends LitElement {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      if (response.status === 409) {
+      // A 409 is a slug collision only when we sent an explicit slug; without
+      // one the server picks a free slug, so any other conflict goes to the
+      // banner like every other error.
+      if (response.status === 409 && body.slug !== undefined) {
         this.slugError = await extractApiError(
           response,
           'A project with this slug already exists.'
@@ -1323,11 +1351,15 @@ export class ScionPageProjectCreate extends LitElement {
           id="slug"
           placeholder="my-project"
           .value=${this.slug}
+          aria-invalid=${this.slugError ? 'true' : 'false'}
           @sl-input=${(e: Event) => this.onSlugInput(e)}
-        ></sl-input>
-        ${this.slugError
-          ? html`<div class="field-error slug-error" role="alert">${this.slugError}</div>`
-          : nothing}
+        >
+          ${this.slugError
+            ? html`<div slot="help-text" class="field-error slug-error" role="alert">
+                ${this.slugError}
+              </div>`
+            : nothing}
+        </sl-input>
         <div class="hint">URL-safe identifier. Auto-derived from name if left unchanged.</div>
       </div>
     `;
