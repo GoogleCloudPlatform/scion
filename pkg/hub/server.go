@@ -1003,6 +1003,10 @@ type Server struct {
 	ctx         context.Context    // Server-lifetime context; cancelled on Shutdown
 	ctxCancel   context.CancelFunc // Cancels ctx
 
+	// decisionAuditWriter is the buffered decision audit writer wired into
+	// authzService; CleanupResources drains it.
+	decisionAuditWriter *StoreDecisionAuditEmitter
+
 	// githubWebhookNoSecretWarnOnce ensures the "no webhook secret configured"
 	// rejection is logged at most once per process, so a hub being repeatedly
 	// probed on the GitHub webhook endpoint does not fill its log.
@@ -1687,6 +1691,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Wire decision audit emitter
 	auditEmitter := NewStoreDecisionAuditEmitter(s, logging.Subsystem("hub.decision-audit"))
+	srv.decisionAuditWriter = auditEmitter
 	srv.authzService.SetDecisionAuditEmitter(auditEmitter)
 
 	// Initialize B3-B6 boundary services (preview, governance, capabilities).
@@ -3062,6 +3067,13 @@ func (s *Server) SetGCPTokenMetrics(m GCPTokenMetricsRecorder) {
 // never allocates the box), this allocates one rather than panicking; the
 // new box is only ever observed by later callers of this method, since
 // UnifiedAuthMiddleware never runs on such a Server.
+// SetDecisionAuditMetrics wires metrics into the decision audit writer.
+func (s *Server) SetDecisionAuditMetrics(m DecisionAuditMetricsRecorder) {
+	if s.decisionAuditWriter != nil {
+		s.decisionAuditWriter.SetMetrics(m)
+	}
+}
+
 func (s *Server) SetExternalBearerMetrics(m ExternalBearerMetricsRecorder) {
 	if s.authConfig.ExternalBearerMetrics == nil {
 		s.authConfig.ExternalBearerMetrics = &atomic.Pointer[ExternalBearerMetricsRecorder]{}
@@ -4935,6 +4947,12 @@ func (s *Server) CleanupResources(ctx context.Context) error {
 			if err := s.metricsDashboard.Close(); err != nil {
 				slog.Warn("Failed to close metrics dashboard", "error", err)
 			}
+		}
+		// Drain pending decision audit records last, so records from the
+		// teardown above are included. Bounded by the writer's drain
+		// timeout (or ctx, if sooner).
+		if s.decisionAuditWriter != nil {
+			s.decisionAuditWriter.Close(ctx)
 		}
 	})
 	return nil

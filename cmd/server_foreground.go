@@ -1930,6 +1930,13 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetReaperMetrics(reaperRec)
 	}
 
+	auditRec, auditErr := hub.NewOTelDecisionAuditMetrics(mp)
+	if auditErr != nil {
+		log.Printf("WARNING: hub decision audit metrics disabled: %v", auditErr)
+	} else {
+		hubSrv.SetDecisionAuditMetrics(auditRec)
+	}
+
 	return hubDBRec
 }
 

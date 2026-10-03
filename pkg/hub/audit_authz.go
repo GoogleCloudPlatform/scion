@@ -33,38 +33,13 @@ import (
 // Decision Audit Emitter
 // =============================================================================
 
-// auditWriteTimeout is the maximum time an async audit INSERT may take before
-// the goroutine abandons the attempt and releases its store reference.
+// auditWriteTimeout is the maximum time an async mutation audit INSERT may
+// take before the goroutine abandons the attempt and releases its store
+// reference.
 const auditWriteTimeout = 1 * time.Second
 
-// StoreDecisionAuditEmitter implements DecisionAuditEmitter using the store.
-type StoreDecisionAuditEmitter struct {
-	store  store.Store
-	logger *slog.Logger
-}
-
-// NewStoreDecisionAuditEmitter creates a new store-backed decision audit emitter.
-func NewStoreDecisionAuditEmitter(s store.Store, logger *slog.Logger) *StoreDecisionAuditEmitter {
-	return &StoreDecisionAuditEmitter{store: s, logger: logger}
-}
-
-// EmitDecisionAudit stores a decision audit record asynchronously.
-func (e *StoreDecisionAuditEmitter) EmitDecisionAudit(ctx context.Context, record *store.DecisionAuditRecord) {
-	// Fire-and-forget in a goroutine to avoid blocking the authorization hot path.
-	// Uses a short timeout context to prevent goroutine/memory leaks on shutdown.
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				e.logger.Warn("recovered panic in decision audit emit", "panic", r)
-			}
-		}()
-		writeCtx, cancel := context.WithTimeout(context.Background(), auditWriteTimeout)
-		defer cancel()
-		if err := e.store.CreateDecisionAudit(writeCtx, record); err != nil {
-			e.logger.Warn("failed to emit decision audit record", "error", err)
-		}
-	}()
-}
+// StoreDecisionAuditEmitter, the store-backed DecisionAuditEmitter, lives in
+// decision_audit_writer.go.
 
 // emitDecisionAudit builds and emits a decision audit record from a Decide call.
 func (a *AuthzService) emitDecisionAudit(ctx context.Context, request AuthzRequest, decision Decision) {
