@@ -206,6 +206,12 @@ func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (
 	// A stop queued while the broker was offline applies only while the
 	// stop intent it was queued for is still the current one; a start or
 	// stop recorded since then supersedes it.
+	//
+	// This is a check, not a lock: a start recorded after this check but
+	// before the broker applies the stop below can still be overtaken by
+	// the stop, which leaves the agent stopped with intent running. The
+	// check only narrows that window to the stop dispatch itself; nothing
+	// in this change acts on a running intent whose agent is stopped.
 	if intentAt != nil && !agent.RunIntentMatches(store.RunIntentStopped, *intentAt) {
 		s.agentLifecycleLog.Info("reconcile: queued stop superseded by a newer run intent; not applied",
 			"id", d.ID, "agent_id", agent.ID, "run_intent", agent.RunIntent)

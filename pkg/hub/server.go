@@ -3644,7 +3644,7 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 				continue
 			}
 		}
-		intentAt, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped)
+		priorIntent, intentAt, err := s.swapRunIntent(ctx, agent, store.RunIntentStopped)
 		if err != nil {
 			slog.Error("Scheduler: auto-suspend intent write failed",
 				"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
@@ -3656,12 +3656,15 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 			if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
 				slog.Error("Scheduler: auto-suspend dispatch failed",
 					"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
-				// This stop was the system's, not the user's: put the
-				// intent back to running unless something newer replaced
-				// it.
-				if _, rerr := s.store.RevertRunIntent(ctx, agent.ID, store.RunIntentStopped, intentAt, store.RunIntentRunning); rerr != nil {
-					slog.Error("Scheduler: auto-suspend intent revert failed",
-						"agent_id", agent.ID, "agent_name", agent.Name, "error", rerr)
+				// This stop was the system's, not the user's: if it
+				// replaced a running intent, put that back unless something
+				// newer replaced it. A prior stopped intent (for example a
+				// user stop whose dispatch also failed) stays stopped.
+				if priorIntent == store.RunIntentRunning {
+					if _, rerr := s.store.RevertRunIntent(ctx, agent.ID, store.RunIntentStopped, intentAt, store.RunIntentRunning); rerr != nil {
+						slog.Error("Scheduler: auto-suspend intent revert failed",
+							"agent_id", agent.ID, "agent_name", agent.Name, "error", rerr)
+					}
 				}
 				endLifecycleOp()
 				continue

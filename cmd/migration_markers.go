@@ -207,7 +207,8 @@ func isKnownMigration(name MigrationName) bool {
 	switch name {
 	case MigrationDMKey, MigrationBackfill, MigrationGroupRefRepair, MigrationWorkspaceModeLabel,
 		MigrationBrokerOwnershipBackfill, MigrationNonAgentDispatchStateBackfill,
-		MigrationBrokerQuotaBindingsToSettings, MigrationEmptyPerAgentLegacyReport:
+		MigrationBrokerQuotaBindingsToSettings, MigrationEmptyPerAgentLegacyReport,
+		MigrationRunIntentBackfill:
 		return true
 	default:
 		return false

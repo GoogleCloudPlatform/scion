@@ -216,10 +216,14 @@ type StopAllResult struct {
 
 // StopAllResponse is the response from the stop-all endpoint.
 type StopAllResponse struct {
-	Stopped int             `json:"stopped"`
-	Failed  int             `json:"failed"`
-	Total   int             `json:"total"`
-	Results []StopAllResult `json:"results"`
+	Stopped int `json:"stopped"`
+	Failed  int `json:"failed"`
+	// StopRecorded counts agents whose start was in flight: the stop intent
+	// is recorded but the start is not interrupted (result status
+	// "stop_recorded").
+	StopRecorded int             `json:"stopRecorded,omitempty"`
+	Total        int             `json:"total"`
+	Results      []StopAllResult `json:"results"`
 }
 
 // CreateAgentRequest is the request body for creating an agent.

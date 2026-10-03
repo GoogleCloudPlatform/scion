@@ -508,6 +508,10 @@ type AgentStore interface {
 	// doesn't exist and ErrInvalidInput for an unknown intent.
 	SetRunIntent(ctx context.Context, agentID string, intent RunIntent) (time.Time, error)
 
+	// SwapRunIntent is SetRunIntent that also returns the intent the row
+	// held before the write ("" for none), read under the same row lock.
+	SwapRunIntent(ctx context.Context, agentID string, intent RunIntent) (prior RunIntent, at time.Time, err error)
+
 	// RevertRunIntent sets run_intent to `to` only if the row still holds
 	// `from` written at exactly fromAt (the value SetRunIntent returned);
 	// run_intent_at is left unchanged. It reports whether the row changed.

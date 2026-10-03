@@ -161,6 +161,29 @@ func TestRunIntent_UpdateAgentStatusNeverTouchesIntent(t *testing.T) {
 	assert.True(t, got.RunIntentMatches(store.RunIntentRunning, at))
 }
 
+func TestRunIntent_SwapReturnsPriorIntent(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := makeAgent(projectID, "ri-swap")
+	require.NoError(t, s.CreateAgent(ctx, a))
+
+	prior, at1, err := s.SwapRunIntent(ctx, a.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+	assert.Equal(t, store.RunIntent(""), prior, "no intent before the first write")
+
+	prior, at2, err := s.SwapRunIntent(ctx, a.ID, store.RunIntentStopped)
+	require.NoError(t, err)
+	assert.Equal(t, store.RunIntentRunning, prior)
+	assert.True(t, at2.After(at1))
+
+	prior, _, err = s.SwapRunIntent(ctx, a.ID, store.RunIntentStopped)
+	require.NoError(t, err)
+	assert.Equal(t, store.RunIntentStopped, prior)
+
+	_, _, err = s.SwapRunIntent(ctx, a.ID, store.RunIntent("paused"))
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+}
+
 func TestRunIntent_RevertIsACompareAndSet(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)

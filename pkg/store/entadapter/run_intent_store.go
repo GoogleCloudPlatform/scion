@@ -34,17 +34,23 @@ import (
 
 // SetRunIntent implements store.AgentStore.SetRunIntent.
 func (s *AgentStore) SetRunIntent(ctx context.Context, agentID string, intent store.RunIntent) (time.Time, error) {
+	_, at, err := s.SwapRunIntent(ctx, agentID, intent)
+	return at, err
+}
+
+// SwapRunIntent implements store.AgentStore.SwapRunIntent.
+func (s *AgentStore) SwapRunIntent(ctx context.Context, agentID string, intent store.RunIntent) (store.RunIntent, time.Time, error) {
 	if !intent.Valid() {
-		return time.Time{}, fmt.Errorf("%w: unknown run intent %q", store.ErrInvalidInput, intent)
+		return "", time.Time{}, fmt.Errorf("%w: unknown run intent %q", store.ErrInvalidInput, intent)
 	}
 	uid, err := parseUUID(agentID)
 	if err != nil {
-		return time.Time{}, err
+		return "", time.Time{}, err
 	}
 
 	ltx, err := s.beginLaunchTx(ctx)
 	if err != nil {
-		return time.Time{}, err
+		return "", time.Time{}, err
 	}
 	defer ltx.cleanup()
 	isPG := s.dialect(ctx) == dialect.Postgres
@@ -62,14 +68,18 @@ func (s *AgentStore) SetRunIntent(ctx context.Context, agentID string, intent st
 	if isPG {
 		q = q.ForUpdate()
 	}
-	current, err := q.Select(agent.FieldRunIntentAt).Only(ctx)
+	current, err := q.Select(agent.FieldRunIntent, agent.FieldRunIntentAt).Only(ctx)
 	if err != nil {
-		return time.Time{}, mapError(err)
+		return "", time.Time{}, mapError(err)
+	}
+	var prior store.RunIntent
+	if current.RunIntent != nil {
+		prior = store.RunIntent(*current.RunIntent)
 	}
 
 	now, err := storeNow(ctx, ltx.tx, isPG)
 	if err != nil {
-		return time.Time{}, err
+		return "", time.Time{}, err
 	}
 	at := nextRunIntentAt(now, current.RunIntentAt)
 
@@ -77,13 +87,13 @@ func (s *AgentStore) SetRunIntent(ctx context.Context, agentID string, intent st
 		SetRunIntent(string(intent)).
 		SetRunIntentAt(at).
 		Save(ctx); err != nil {
-		return time.Time{}, mapError(err)
+		return "", time.Time{}, mapError(err)
 	}
 	if err := ltx.tx.Commit(); err != nil {
-		return time.Time{}, fmt.Errorf("run intent: commit SetRunIntent: %w", err)
+		return "", time.Time{}, fmt.Errorf("run intent: commit SwapRunIntent: %w", err)
 	}
 	committed = true
-	return at, nil
+	return prior, at, nil
 }
 
 // nextRunIntentAt returns max(now, stored + resolution), normalised to the

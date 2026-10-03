@@ -39,7 +39,8 @@ var lifecycleDispatchMethods = map[string]bool{
 // How a function that calls a lifecycle dispatch method keeps the agent's
 // run intent correct.
 const (
-	// intentRecorded: the function itself calls recordRunIntent.
+	// intentRecorded: the function itself calls recordRunIntent (or
+	// swapRunIntent).
 	intentRecorded = "records"
 	// intentExecutor: the function replays a dispatch whose intent was
 	// recorded when it was queued, and writes none itself.
@@ -186,7 +187,7 @@ func TestLifecycleDispatchCallsRecordRunIntent(t *testing.T) {
 		if rule.recordedBy != "" {
 			recorder = rule.recordedBy
 		}
-		if funcs[recorder]["recordRunIntent"] == 0 {
+		if funcs[recorder]["recordRunIntent"]+funcs[recorder]["swapRunIntent"] == 0 {
 			t.Errorf("%s dispatches a lifecycle operation but %s does not call recordRunIntent", name, recorder)
 		}
 	}

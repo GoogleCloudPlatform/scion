@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -117,12 +118,15 @@ func TestRunIntent_OfflineStopIsQueued(t *testing.T) {
 	srv, s := testServer(t)
 	disp := &runIntentDispatcher{}
 	srv.SetDispatcher(disp)
+	bus := &recordingCommandBus{}
+	srv.commandBus = bus
 	_, broker, agent := setupOfflineBrokerAgent(t, s, "ri-q")
 	_, err := s.SetRunIntent(ctx, agent.ID, store.RunIntentRunning)
 	require.NoError(t, err)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/stop", nil)
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	assert.Equal(t, []string{broker.ID}, bus.signaled(), "the queued stop wakes the broker's drain")
 	var resp struct {
 		Phase           string   `json:"phase"`
 		ContainerStatus string   `json:"containerStatus"`
@@ -230,6 +234,19 @@ func TestRunIntent_StopAllCoversIntentOnlyAgents(t *testing.T) {
 	_, err = s.SetRunIntent(ctx, errored.ID, store.RunIntentRunning)
 	require.NoError(t, err)
 
+	// An agent whose start is in flight, intent running.
+	starting := &store.Agent{
+		ID:              tid("agent-ri-sa-starting"),
+		Slug:            "agent-ri-sa-starting",
+		Name:            "agent-ri-sa-starting",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: broker.ID,
+		Phase:           string(state.PhaseStarting),
+	}
+	require.NoError(t, s.CreateAgent(ctx, starting))
+	_, err = s.SetRunIntent(ctx, starting.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+
 	// A stopped agent whose intent is stopped is not selected.
 	idle := &store.Agent{
 		ID:              tid("agent-ri-sa-idle"),
@@ -247,13 +264,24 @@ func TestRunIntent_StopAllCoversIntentOnlyAgents(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var resp StopAllAgentsResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, 2, resp.Total)
+	assert.Equal(t, 3, resp.Total)
 	assert.Equal(t, 2, resp.Stopped)
+	assert.Equal(t, 1, resp.StopRecorded)
+	assert.Zero(t, resp.Failed)
+	statusByID := map[string]string{}
+	for _, r := range resp.Results {
+		statusByID[r.ID] = r.Status
+	}
+	assert.Equal(t, "stopped", statusByID[running.ID])
+	assert.Equal(t, "stopped", statusByID[errored.ID])
+	assert.Equal(t, stopAllStatusStopRecorded, statusByID[starting.ID], "an in-flight start is reported as stop_recorded")
 
 	assert.Equal(t, int32(1), disp.stops.Load(), "only the running agent is dispatched a stop")
 	requireRunIntent(t, s, running.ID, store.RunIntentStopped)
 	got := requireRunIntent(t, s, errored.ID, store.RunIntentStopped)
 	assert.Equal(t, string(state.PhaseError), got.Phase, "an intent-only stop leaves the phase alone")
+	gotStarting := requireRunIntent(t, s, starting.ID, store.RunIntentStopped)
+	assert.Equal(t, string(state.PhaseStarting), gotStarting.Phase, "the in-flight start is not interrupted")
 	gotIdle := requireRunIntent(t, s, idle.ID, store.RunIntentStopped)
 	assert.True(t, gotIdle.RunIntentMatches(store.RunIntentStopped, idleAt), "an unselected agent is not written")
 }
@@ -277,6 +305,28 @@ func TestRunIntent_AutoSuspendRevertsIntentOnDispatchFailure(t *testing.T) {
 	assert.Equal(t, string(state.PhaseRunning), got.Phase)
 }
 
+// A user stop whose dispatch failed leaves phase running and intent stopped.
+// If auto-suspend then also fails to stop the agent, the intent it puts back
+// is the prior stopped one, not running.
+func TestRunIntent_AutoSuspendKeepsPriorStoppedIntentOnDispatchFailure(t *testing.T) {
+	ctx := context.Background()
+	srv, s := testServer(t)
+	disp := &runIntentDispatcher{stopErr: errors.New("broker refused")}
+	srv.SetDispatcher(disp)
+	_, _, agent := setupOnlineBrokerAgent(t, s, "ri-as-prior")
+	userStopAt, err := s.SetRunIntent(ctx, agent.ID, store.RunIntentStopped)
+	require.NoError(t, err)
+	loaded, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	require.Equal(t, string(state.PhaseRunning), loaded.Phase)
+
+	srv.autoSuspendStalledAgents(ctx, []store.Agent{*loaded})
+
+	assert.Equal(t, int32(1), disp.stops.Load())
+	got := requireRunIntent(t, s, agent.ID, store.RunIntentStopped)
+	assert.True(t, got.RunIntentAt.After(userStopAt), "auto-suspend wrote its own stop")
+}
+
 func TestRunIntent_AutoSuspendRecordsStopped(t *testing.T) {
 	ctx := context.Background()
 	srv, s := testServer(t)
@@ -292,4 +342,24 @@ func TestRunIntent_AutoSuspendRecordsStopped(t *testing.T) {
 
 	got := requireRunIntent(t, s, agent.ID, store.RunIntentStopped)
 	assert.Equal(t, string(state.PhaseSuspended), got.Phase)
+}
+
+// recordingCommandBus records the brokers SignalBrokerCmd was called for.
+type recordingCommandBus struct {
+	NoopCommandBus
+	mu      sync.Mutex
+	signals []string
+}
+
+func (b *recordingCommandBus) SignalBrokerCmd(_ context.Context, brokerID string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.signals = append(b.signals, brokerID)
+	return nil
+}
+
+func (b *recordingCommandBus) signaled() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]string(nil), b.signals...)
 }
