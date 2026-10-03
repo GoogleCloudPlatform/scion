@@ -310,6 +310,45 @@ server:
           pv_name: scion-shared-pvc
 ```
 
+#### Per-profile backend
+
+A runtime entry or a profile can override the backend with `shared_dir_storage_backend` (`local` or `nfs`). This lets one broker keep its Docker profile on `local` while a Kubernetes profile uses `nfs`. The backend for an agent is resolved when it starts, in this order:
+
+1. `profiles.<name>.shared_dir_storage_backend` for the agent's profile.
+2. `runtimes.<name>.shared_dir_storage_backend` for that profile's runtime entry.
+3. `server.shared_dir_storage.backend`.
+
+The `nfs` details always come from `server.shared_dir_storage.nfs`, so an `nfs` override needs a complete `nfs` block there. Settings validation rejects an `nfs` override without one. Validation checks configuration only and never looks at the mount.
+
+```yaml
+runtimes:
+  docker:
+    type: docker
+  gke:
+    type: kubernetes
+    shared_dir_storage_backend: nfs
+profiles:
+  local:
+    runtime: docker
+  gke:
+    runtime: gke
+server:
+  shared_dir_storage:
+    backend: local
+    nfs:
+      mount_root: /mnt/scion-nfs
+      shares:
+        - id: shared
+          pv_name: scion-shared-pvc
+```
+
+- **Global-only**: like `server.shared_dir_storage`, the overrides are read from the broker's global settings, never from project settings. On a co-located Hub and broker whose runtimes and profiles are stored in the database, the stored values apply.
+- **No restart**: overrides are read again at every agent start, so a change made in `settings.yaml` or through the Hub settings API applies to the next agent start.
+- **Recorded per agent**: an agent records the backend its shared directories were set up with and keeps it on later starts, even if the settings change. If an agent recorded `nfs` and the `nfs` block was later removed, its start fails with an error that says so, before any host path is touched. Agents created before the backend was recorded use the current resolution.
+- **Host mount**: a broker that starts an `nfs`-resolved agent needs the export mounted at `<mount_root>/<share id>`, as with the global `nfs` backend. A missing mount fails only agents that resolve to `nfs`. Agents on the `local` backend, server startup, and health checks are not affected. The startup log has one line per profile whose backend comes from an override.
+- **Hub file browser and attachments**: the Hub's file browser, archive downloads and attachment staging use `server.shared_dir_storage.backend` only, not the per-profile override.
+- **Cleanup on delete**: deleting a project also removes its tree from the export when only an override selects `nfs`. If the export is not mounted on the Hub's host, cleanup logs a warning and the delete still succeeds.
+
 ### Scheduler (`server.scheduler`)
 
 Controls the background task scheduler in the Hub. This regulates the tick interval and concurrency of recurring maintenance tasks (such as telemetry aggregation, session cleanups, and heartbeats) to match database capacity.
