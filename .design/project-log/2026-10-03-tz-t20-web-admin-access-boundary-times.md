@@ -14,7 +14,7 @@ The admin pages, the access-boundary views and the role-binding views now format
 - Review round 1 fixes:
   - The role-binding create form's lifecycle checks (the past-expiry warning, the ordering warning and the `createFormValid` ordering check) now read the `datetime-local` values in the display zone through `parseWallClock`, as the submit path already did. This bug predates this change.
   - The boundary list's schedule column shows the year (`'datetime-full'`) and adds the zone label only when a bound was actually converted.
-  - The server-config Build Time is formatted in the display zone, with the raw value as its `title`. It used to show the raw server string. A sweep of all migrated files for other raw server timestamps found none.
+- Review round 4 fix: the server-config Build Time is formatted in the display zone, with the raw value as its `title`. It used to show the raw server string. A sweep of all migrated files for other raw server timestamps found none.
 
 ## Why
 
