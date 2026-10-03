@@ -425,6 +425,29 @@ func TestUnreachableNC_DispatchErrorBranch_ResponseMatchesRow(t *testing.T) {
 	}
 }
 
+// ptone/scion#1841: markFailed persists the sanitized reason, so the
+// response mirror must carry the same sanitized text, not the raw error.
+func TestUnreachableNC_DispatchErrorBranch_ResponseReasonSanitizedLikeRow(t *testing.T) {
+	raw := "broker \x1b[31mcrashed\r\nFAKE: ok"
+	d := &errorDispatcher{err: errors.New(raw)}
+	srv, s, topic, _ := unreachableTestSetup(t, "running", false, d)
+
+	_, resp, m := unreachableSend(t, srv, s, topic, "hello")
+	if m == nil || m.DispatchFailureReason == nil {
+		t.Fatalf("expected a persisted failure reason, got %+v", m)
+	}
+	want := sanitizeFailureReason(raw)
+	if want == raw {
+		t.Fatal("test input must contain characters the sanitizer changes")
+	}
+	if *m.DispatchFailureReason != want {
+		t.Fatalf("persisted reason = %q, want %q", *m.DispatchFailureReason, want)
+	}
+	if resp["dispatchFailureReason"] != want {
+		t.Fatalf("response reason = %q, want the persisted %q", resp["dispatchFailureReason"], want)
+	}
+}
+
 // transientAgentLookupStore wraps a store and injects a non-ErrNotFound error
 // from GetAgentBySlug for a specific slug, to exercise the nit-1 fix: a
 // transient store error resolving a topic's default agent must not be
