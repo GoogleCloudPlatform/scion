@@ -212,17 +212,26 @@ func TestAgentLifecycle_StartCallerDenialStays404(t *testing.T) {
 // TestAgentLifecycle_StartOtherErrorStays502 pins that non-skill start
 // failures keep the generic 502.
 func TestAgentLifecycle_StartOtherErrorStays502(t *testing.T) {
-	for _, err := range []error{
-		errors.New("connection refused"),
-		&brokerStatusError{StatusCode: http.StatusNotFound, Body: `{"error":{"code":"not_found","message":"agent not found"}}`},
-	} {
-		disp := &skillFailDispatcher{startErr: err}
-		srv, s, project := setupCreateAgentServer(t, disp)
-		agent := createLifecycleTestAgent(t, s, project, "lc-other", state.PhaseStopped)
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "plain error", err: errors.New("connection refused")},
+		{name: "broker 404 not_found", err: &brokerStatusError{
+			StatusCode: http.StatusNotFound,
+			Body:       `{"error":{"code":"not_found","message":"agent not found"}}`,
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := &skillFailDispatcher{startErr: tc.err}
+			srv, s, project := setupCreateAgentServer(t, disp)
+			agent := createLifecycleTestAgent(t, s, project, "lc-other", state.PhaseStopped)
 
-		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
 
-		require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+			require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+		})
 	}
 }
 
