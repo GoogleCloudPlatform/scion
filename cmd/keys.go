@@ -248,16 +248,22 @@ func classifyHubKeysError(err error) keysResult {
 		isDefiniteRejection = true
 	}
 	// The Hub's dispatch-error classifier never returns an empty code, but a
-	// proxy or load balancer between the CLI and the Hub can produce an
-	// error with none (e.g. a bodyless 502). Never surface an empty code:
-	// fall back to a code that states what is known.
+	// proxy or load balancer between the CLI and the Hub can answer on its
+	// behalf (e.g. a bodyless 502). apiclient.ParseErrorResponse then fills
+	// in a generic status-derived code such as internal_error. Never surface
+	// an empty or generic code for an ambiguous outcome: a non-definite
+	// status whose code is not a keys outcome and that carries no
+	// operation_id (so it never came from the keys handler) is reported as
+	// keys_outcome_unknown.
 	code := apiErr.Code
 	message := apiErr.Message
 	if message == "" {
 		message = fmt.Sprintf("HTTP %d %s with no error body", apiErr.StatusCode, http.StatusText(apiErr.StatusCode))
 	}
 	if !isDefiniteRejection {
-		if code == "" {
+		_, isKeysOutcome := agentkeys.HTTPStatus(agentkeys.Outcome(code))
+		if code == "" || (!isKeysOutcome && opID == "") {
+			message = notFromKeysHandlerMessage(apiErr)
 			code = string(agentkeys.OutcomeKeysOutcomeUnknown)
 		}
 		return keysResult{Outcome: keysOutcomeUnknown, Code: code, OperationID: opID, Message: message, RetryAfterSeconds: apiErr.RetryAfterSeconds}
@@ -266,6 +272,20 @@ func classifyHubKeysError(err error) keysResult {
 		code = fmt.Sprintf("http_%d", apiErr.StatusCode)
 	}
 	return keysResult{Outcome: keysOutcomeRejected, Code: code, OperationID: opID, Message: message, RetryAfterSeconds: apiErr.RetryAfterSeconds}
+}
+
+// notFromKeysHandlerMessage describes an ambiguous error response that did
+// not come from the Hub's keys handler (no keys outcome code, no
+// operation_id): typically a proxy or gateway answering for the Hub. The
+// response's own message is kept only when it says more than the status
+// text.
+func notFromKeysHandlerMessage(apiErr *apiclient.APIError) string {
+	statusText := http.StatusText(apiErr.StatusCode)
+	msg := fmt.Sprintf("HTTP %d %s with no keys outcome from the Hub (possibly a proxy or gateway response)", apiErr.StatusCode, statusText)
+	if detail := strings.TrimSpace(apiErr.Message); detail != "" && detail != statusText {
+		msg += ": " + detail
+	}
+	return msg
 }
 
 // classifyLocalKeysError turns an agent.Manager.SendKeys/SendKeysLocal error

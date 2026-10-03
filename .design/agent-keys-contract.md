@@ -312,7 +312,7 @@ impersonating a user.
 
 | Caller | Decision |
 | --- | --- |
-| Human session | Ownership of the target agent, or `agent.attach` on it (`ActionAttach`); retains owner/privacy/cross-member restrictions (same as today's `agentActionPermission` default branch, `pkg/hub/authorize.go:392`-411, function `agentActionPermission`). **No project role grants `agent.attach`**: project owners/admins/members do not hold it by role (it is `ExcludeFromManageAlias` and only relationship-sourced — owner/ancestor — in `MintEligibilityRegistry`), so a project role alone never confers user keys authority |
+| Human session | Ownership of the target agent, or `agent.attach` on it (`ActionAttach`); retains owner/privacy/cross-member restrictions (same as today's `agentActionPermission` default branch, `pkg/hub/authorize.go:392`-411, function `agentActionPermission`). **No built-in project role grants `agent.attach`**: the built-in project owner/admin/member roles do not hold it (`projectOwnerPermissionIDs` in the seed excludes it, it is `ExcludeFromManageAlias`, and its mint eligibility is relationship-sourced — owner/ancestor — in `MintEligibilityRegistry`), so a built-in project role alone never confers user keys authority. `agent.attach` is project-applicable (`pkg/hub/permissions/project_applicability.go`), so a custom project role that explicitly includes it is evaluated like any other grant of it — the same as for terminal attach |
 | User access token | Same human authority, intersected with credential scope and project/hub boundary; a token name or automation label is not an agent identity |
 | Agent credential | Valid current credential, lifecycle scope (`ScopeAgentLifecycle`), sender's current project **equal to** target project (no self/parent/ancestor shortcut), **and** live attach authority on the target via `authorizeAgentTargetAction(ctx, identity, target, ActionAttach)` — same-project equality alone is no longer sufficient (ptone/scion#2460, superseding the Phase 5 deferral for this one gate; see §10's Phase 5 note). No permissive fallback: an invalid/revoked delegation or an evaluator failure denies |
 | Broker credential | Only authenticated Hub→broker execution under the internal contract (§4); never direct public `/keys` authority |
@@ -630,11 +630,15 @@ frozen rule, each 1.2 adapter would classify differently. Frozen now, in `pkg/ag
   `OutcomeKeysOutcomeUnknown` instead, because unlike a plain 404 those shapes cannot rule out that
   a real handler began executing before producing a malformed response.
 - **Totality.** `ClassifyDispatchError` is total: every input, including `nil`, maps to a
-  non-empty allowlisted `Outcome`; it never returns an empty code. An empty `code` reaching the
-  CLI therefore cannot originate from the Hub's classifier and is a client robustness case (for
-  example a proxy returning a bodyless 502). The CLI handles it without surfacing an empty
-  outcome: an outcome-unknown status becomes `keys_outcome_unknown`, any other rejection becomes
-  `http_<status>`, and the message falls back to the HTTP status text, with a non-zero exit.
+  non-empty allowlisted `Outcome`; it never returns an empty code. An empty or non-keys `code`
+  reaching the CLI therefore cannot originate from the Hub's classifier and is a client robustness
+  case (for example a proxy returning a bodyless 502, which `apiclient.ParseErrorResponse` fills
+  with the generic status-derived `internal_error`). The CLI never surfaces such a code for an
+  ambiguous outcome: a status that is not a definite rejection, whose code is empty or not an
+  `agentkeys.Outcome`, and that carries no `operation_id` (so it never came from the keys
+  handler) is reported as `keys_outcome_unknown`, with a message naming the HTTP status and
+  stating that the Hub returned no keys outcome. A definite rejection with an empty code becomes
+  `http_<status>`. Either way the command exits non-zero.
 - `agentkeys.ClassifyDispatchError(err) Outcome` is the **only** code allowed to decide what an
   error means, and it recognizes exactly two things: a `*BrokerOutcomeError` (re-validating its
   `Outcome` against `ValidBrokerOutcome` itself, trusting no adapter blindly) and `ErrNotDispatched`

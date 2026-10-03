@@ -816,15 +816,18 @@ func TestSendKeysViaHub_Bodyless502_ClearErrorNeverEmptyCode(t *testing.T) {
 			assert.Contains(t, cmdErr.Error(), "502")
 			assert.Contains(t, cmdErr.Error(), "check before resending")
 			assert.NotContains(t, cmdErr.Error(), ": :", "no empty fields in the error text")
+			// apiclient fills a bodyless 502 with the generic internal_error
+			// code; the CLI must replace it with the keys outcome.
+			assert.Contains(t, cmdErr.Error(), "no keys outcome from the Hub")
 
 			if format == "json" {
 				var result ActionResult
 				require.NoError(t, json.Unmarshal([]byte(stdout), &result))
 				assert.Equal(t, "error", result.Status)
 				assert.Equal(t, "unknown", result.Details["outcome"])
-				code, _ := result.Details["code"].(string)
-				assert.NotEmpty(t, code, "JSON details must never carry an empty outcome code")
-				assert.NotEmpty(t, result.Message)
+				assert.Equal(t, string(agentkeys.OutcomeKeysOutcomeUnknown), result.Details["code"],
+					"a bodyless 502 must report keys_outcome_unknown, not the client's generic internal_error")
+				assert.Contains(t, result.Message, "HTTP 502 Bad Gateway")
 			}
 		})
 	}
@@ -847,6 +850,36 @@ func TestClassifyHubKeysError_EmptyCodeNeverSurfaces(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(http.StatusText(tc.status), func(t *testing.T) {
 			res := classifyHubKeysError(&apiclient.APIError{StatusCode: tc.status})
+			assert.Equal(t, tc.wantOutcome, res.Outcome)
+			assert.Equal(t, tc.wantCode, res.Code)
+			assert.NotEmpty(t, res.Message)
+		})
+	}
+}
+
+// TestClassifyHubKeysError_GenericCodeWithoutOperationID covers the shapes
+// apiclient.ParseErrorResponse really produces for a response that did not
+// come from the keys handler: a generic status-derived or proxy code and no
+// operation_id. An ambiguous status maps to keys_outcome_unknown; a keys
+// outcome code, or a response carrying an operation_id, keeps its code.
+func TestClassifyHubKeysError_GenericCodeWithoutOperationID(t *testing.T) {
+	withOp := map[string]interface{}{"operation_id": "op-1"}
+	cases := []struct {
+		name        string
+		err         *apiclient.APIError
+		wantOutcome keysOutcomeStatus
+		wantCode    string
+	}{
+		{"bodyless 502", &apiclient.APIError{StatusCode: 502, Code: "internal_error", Message: "Bad Gateway"}, keysOutcomeUnknown, "keys_outcome_unknown"},
+		{"bodyless 504", &apiclient.APIError{StatusCode: 504, Code: "internal_error", Message: "Gateway Timeout"}, keysOutcomeUnknown, "keys_outcome_unknown"},
+		{"proxy 503", &apiclient.APIError{StatusCode: 503, Code: "service_unavailable", Message: "upstream unhealthy"}, keysOutcomeUnknown, "keys_outcome_unknown"},
+		{"hub 500 with operation_id", &apiclient.APIError{StatusCode: 500, Code: "internal_error", Message: "unexpected", Details: withOp}, keysOutcomeUnknown, "internal_error"},
+		{"hub keys_outcome_unknown", &apiclient.APIError{StatusCode: 502, Code: "keys_outcome_unknown", Message: "broker failed", Details: withOp}, keysOutcomeUnknown, "keys_outcome_unknown"},
+		{"definite 400 keeps generic code", &apiclient.APIError{StatusCode: 400, Code: "invalid_request", Message: "Bad Request"}, keysOutcomeRejected, "invalid_request"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := classifyHubKeysError(tc.err)
 			assert.Equal(t, tc.wantOutcome, res.Outcome)
 			assert.Equal(t, tc.wantCode, res.Code)
 			assert.NotEmpty(t, res.Message)
