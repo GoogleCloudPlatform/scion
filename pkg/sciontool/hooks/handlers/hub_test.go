@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -663,6 +664,7 @@ type fakeHub struct {
 	outboundCalls  int                      // all outbound-message requests, including rejected ones
 	rejected400    int
 	statusCalls    int
+	selfCalls      int
 	outboundScript []fakeResponse
 }
 
@@ -681,6 +683,7 @@ func (f *fakeHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/agents/test-agent-id":
+		f.selfCalls++
 		if f.selfFail {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
@@ -738,6 +741,12 @@ func (f *fakeHub) start() *HubHandler {
 		f.t.Fatal("Expected handler to be created")
 	}
 	return handler
+}
+
+func (f *fakeHub) counts() (selfCalls, outboundCalls, accepted int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.selfCalls, f.outboundCalls, len(f.outbound)
 }
 
 // lastOutbound returns the single accepted outbound payload, failing the
@@ -1082,4 +1091,157 @@ func TestTruncateMessage(t *testing.T) {
 			t.Errorf("truncateMessage(%q, %d) = %q, want %q", tt.input, tt.maxLen, result, tt.expected)
 		}
 	}
+}
+
+// TestHubHandler_AssistantReplyAddresseeCache pins that the resolved
+// addressee (or the decision to skip) is cached in the agent home after the
+// first successful lookup, while lookup failures are not cached.
+func TestHubHandler_AssistantReplyAddresseeCache(t *testing.T) {
+	cachePath := func() string { return filepath.Join(os.Getenv("HOME"), addresseeCacheFile) }
+
+	t.Run("resolved addressee is cached and reused", func(t *testing.T) {
+		fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
+		handler := fh.start()
+
+		for i := 0; i < 3; i++ {
+			if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+				t.Fatalf("Handle returned error: %v", err)
+			}
+		}
+		self, outbound, accepted := fh.counts()
+		if self != 1 {
+			t.Errorf("Expected 1 agent lookup across 3 Stop events, got %d", self)
+		}
+		if outbound != 3 || accepted != 3 {
+			t.Errorf("Expected 3 delivered replies, got %d requests / %d accepted", outbound, accepted)
+		}
+		c, ok := readAddresseeCache(cachePath(), "test-agent-id")
+		if !ok || c.RecipientID != testCreatorUserID {
+			t.Errorf("Expected cache to hold %q, got %+v ok=%v", testCreatorUserID, c, ok)
+		}
+		info, err := os.Stat(cachePath())
+		if err != nil {
+			t.Fatalf("stat cache: %v", err)
+		}
+		if perm := info.Mode().Perm(); perm != 0600 {
+			t.Errorf("Expected cache mode 0600, got %o", perm)
+		}
+	})
+
+	t.Run("skip decision is cached", func(t *testing.T) {
+		fh := newFakeHub(t, "parent-agent-id", testCreatorUserID, "parent-agent-id")
+		handler := fh.start()
+
+		for i := 0; i < 2; i++ {
+			if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+				t.Fatalf("Handle returned error: %v", err)
+			}
+		}
+		self, outbound, _ := fh.counts()
+		if self != 1 {
+			t.Errorf("Expected 1 agent lookup, got %d", self)
+		}
+		if outbound != 0 {
+			t.Errorf("Expected no outbound requests, got %d", outbound)
+		}
+		c, ok := readAddresseeCache(cachePath(), "test-agent-id")
+		if !ok || c.RecipientID != "" {
+			t.Errorf("Expected a cached skip, got %+v ok=%v", c, ok)
+		}
+	})
+
+	t.Run("lookup failure is not cached", func(t *testing.T) {
+		fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
+		fh.selfFail = true
+		handler := fh.start()
+
+		if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+		if _, err := os.Stat(cachePath()); !os.IsNotExist(err) {
+			t.Fatalf("Expected no cache file after a failed lookup, stat err=%v", err)
+		}
+
+		fh.mu.Lock()
+		fh.selfFail = false
+		fh.mu.Unlock()
+		if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+		self, _, accepted := fh.counts()
+		if self != 2 {
+			t.Errorf("Expected the lookup to be retried on the next Stop (2 lookups), got %d", self)
+		}
+		if accepted != 1 {
+			t.Errorf("Expected 1 delivered reply after recovery, got %d", accepted)
+		}
+	})
+
+	t.Run("pre-existing cache is used without a lookup", func(t *testing.T) {
+		fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
+		handler := fh.start()
+		const cachedID = "22222222-2222-2222-2222-222222222222"
+		writeAddresseeCache(cachePath(), addresseeCache{AgentID: "test-agent-id", RecipientID: cachedID})
+
+		if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+		if self, _, _ := fh.counts(); self != 0 {
+			t.Errorf("Expected no agent lookup, got %d", self)
+		}
+		if got := fh.lastOutbound()["recipient_id"]; got != cachedID {
+			t.Errorf("Expected recipient_id from cache %q, got %v", cachedID, got)
+		}
+	})
+
+	for name, content := range map[string]string{
+		"corrupt cache is ignored and rewritten": "{not json",
+		"empty cache is ignored and rewritten":   "",
+		"other agent's cache is ignored":         `{"agentId":"someone-else","recipientId":"33333333-3333-3333-3333-333333333333"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
+			handler := fh.start()
+			if err := os.WriteFile(cachePath(), []byte(content), 0600); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+				t.Fatalf("Handle returned error: %v", err)
+			}
+			if self, _, _ := fh.counts(); self != 1 {
+				t.Errorf("Expected a fresh lookup, got %d", self)
+			}
+			if got := fh.lastOutbound()["recipient_id"]; got != testCreatorUserID {
+				t.Errorf("Expected recipient_id %q, got %v", testCreatorUserID, got)
+			}
+			c, ok := readAddresseeCache(cachePath(), "test-agent-id")
+			if !ok || c.RecipientID != testCreatorUserID {
+				t.Errorf("Expected cache rewritten with %q, got %+v ok=%v", testCreatorUserID, c, ok)
+			}
+		})
+	}
+
+	t.Run("symlinked cache is not followed", func(t *testing.T) {
+		fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
+		handler := fh.start()
+		target := filepath.Join(t.TempDir(), "elsewhere.json")
+		if err := os.WriteFile(target, []byte(`{"agentId":"test-agent-id","recipientId":"44444444-4444-4444-4444-444444444444"}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, cachePath()); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+		if got := fh.lastOutbound()["recipient_id"]; got != testCreatorUserID {
+			t.Errorf("Expected the symlinked cache to be ignored, got recipient_id %v", got)
+		}
+		data, _ := os.ReadFile(target)
+		if !strings.Contains(string(data), "4444") {
+			t.Error("Expected the symlink target to be left untouched")
+		}
+	})
 }

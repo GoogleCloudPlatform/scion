@@ -18,6 +18,7 @@ import (
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
@@ -26,6 +27,10 @@ import (
 // HubHandler sends status updates to the Scion Hub.
 type HubHandler struct {
 	client *hub.Client
+
+	// addresseeCachePath caches the assistant-reply addressee resolved by
+	// creatorUserID; see readAddresseeCache.
+	addresseeCachePath string
 }
 
 // NewHubHandler creates a new hub handler.
@@ -35,8 +40,13 @@ func NewHubHandler() *HubHandler {
 	if client == nil || !client.IsConfigured() {
 		return nil
 	}
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/home/scion"
+	}
 	return &HubHandler{
-		client: client,
+		client:             client,
+		addresseeCachePath: filepath.Join(home, addresseeCacheFile),
 	}
 }
 
@@ -93,16 +103,71 @@ func (h *HubHandler) forwardAssistantReply(ctx context.Context, text string, met
 // creator is unknown or is not a user. A user-created agent has
 // CreatedBy == the user's ID and ancestry exactly [that user]; an agent
 // created by another agent has the parent agent as CreatedBy and a longer
-// ancestry chain.
+// ancestry chain. The first successful lookup is cached in the agent home
+// and reused on later calls; lookup errors are returned uncached.
 func (h *HubHandler) creatorUserID(ctx context.Context) (string, error) {
+	agentID := h.client.AgentID()
+	if cached, ok := readAddresseeCache(h.addresseeCachePath, agentID); ok {
+		return cached.RecipientID, nil
+	}
 	self, err := h.client.GetSelf(ctx)
 	if err != nil {
+		// Not cached: a transient failure is retried on the next Stop.
 		return "", err
 	}
-	if self.CreatedBy == "" || len(self.Ancestry) != 1 || self.Ancestry[0] != self.CreatedBy {
-		return "", nil
+	recipientID := ""
+	if self.CreatedBy != "" && len(self.Ancestry) == 1 && self.Ancestry[0] == self.CreatedBy {
+		recipientID = self.CreatedBy
 	}
-	return self.CreatedBy, nil
+	// createdBy and ancestry are immutable, so the decision (including a
+	// skip) holds for the agent's lifetime.
+	writeAddresseeCache(h.addresseeCachePath, addresseeCache{AgentID: agentID, RecipientID: recipientID})
+	return recipientID, nil
+}
+
+// addresseeCacheFile is the agent-home file caching the assistant-reply
+// addressee. An empty RecipientID records a decision to skip.
+const addresseeCacheFile = ".scion-reply-addressee.json"
+
+// addresseeCacheMaxBytes bounds the cache read.
+const addresseeCacheMaxBytes = 4096
+
+type addresseeCache struct {
+	AgentID     string `json:"agentId"`
+	RecipientID string `json:"recipientId"`
+}
+
+// readAddresseeCache returns the cached addressee for agentID. A missing,
+// unreadable, corrupt or foreign-agent file reports ok=false so the caller
+// resolves afresh.
+func readAddresseeCache(path, agentID string) (addresseeCache, bool) {
+	if path == "" || agentID == "" {
+		return addresseeCache{}, false
+	}
+	data, err := dirfd.ReadFileNoFollow(path, addresseeCacheMaxBytes)
+	if err != nil {
+		return addresseeCache{}, false
+	}
+	var c addresseeCache
+	if err := json.Unmarshal(data, &c); err != nil || c.AgentID != agentID {
+		return addresseeCache{}, false
+	}
+	return c, true
+}
+
+// writeAddresseeCache atomically replaces the cache file. Failure only costs
+// a lookup on the next Stop, so it is logged and otherwise ignored.
+func writeAddresseeCache(path string, c addresseeCache) {
+	if path == "" || c.AgentID == "" {
+		return
+	}
+	data, err := json.Marshal(c)
+	if err != nil {
+		return
+	}
+	if err := dirfd.WriteFileNoFollow(path, data, 0600, 0, 0, dirfd.ReplaceLeaf); err != nil {
+		log.Debug("Failed to cache assistant-reply addressee: %v", err)
+	}
 }
 
 // retryAfterWithinBudget reports whether err is a 429 carrying a Retry-After
