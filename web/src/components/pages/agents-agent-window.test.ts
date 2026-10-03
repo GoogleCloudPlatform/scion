@@ -910,6 +910,51 @@ describe('scion-page-agents — agent list window', () => {
     }, 30_000);
   });
 
+  describe('the window banner above an empty filter result', () => {
+    it('a capped set whose phase filter matches nothing keeps the capped banner above "No Matching Agents"', async () => {
+      const fake: Fake = {
+        agents: Array.from({ length: 2001 }, (_, i) => makeAgent(i)),
+        requests: [],
+      };
+      stubFake(fake);
+      // A mode filter is complete-needing: the set is a capped drain.
+      localStorage.setItem('scion-filter-agents-mode', 'project');
+      const el = await mount();
+      expect(internals(el).agentWindow.state).toBe('capped');
+      const n = fake.requests.length;
+      // Every agent is running, so a stopped filter matches nothing loaded.
+      internals(el).setPhaseFilter('stopped');
+      await settle(el);
+      expect(fake.requests.length).toBe(n);
+      expect(internals(el).agentWindow.state).toBe('capped');
+      expect(text(el)).toContain('No Matching Agents');
+      expect(el.shadowRoot?.querySelector('.agent-window-banner')?.textContent).toContain(
+        '2,000 loaded (newest 2,000 checked), more exist'
+      );
+    });
+
+    it('a held set marked stale whose phase filter matches nothing keeps the stale banner', async () => {
+      const fake: Fake = {
+        agents: Array.from({ length: 1200 }, (_, i) => makeAgent(i)),
+        requests: [],
+      };
+      stubFake(fake);
+      localStorage.setItem('scion-view-agents', 'graph');
+      const el = await mount();
+      expect(internals(el).agentWindow.state).toBe('held');
+      reconnect();
+      await settle(el);
+      setView(el, 'list');
+      internals(el).setPhaseFilter('stopped');
+      await settle(el);
+      expect(internals(el).agentWindow.state).toBe('held');
+      expect(text(el)).toContain('No Matching Agents');
+      expect(el.shadowRoot?.querySelector('.agent-window-banner')?.textContent).toContain(
+        'may be stale'
+      );
+    });
+  });
+
   describe('live membership while paged', () => {
     it('mine paged: a live create raises the chip and issues no request', async () => {
       const fake: Fake = {

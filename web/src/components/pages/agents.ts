@@ -1597,7 +1597,10 @@ export class ScionPageAgents extends LitElement {
 
     const filtered = win.display;
     if (filtered.length === 0 && this.phaseFilter) {
+      // A capped, failed or stale set still says so above the empty state:
+      // agents beyond what was loaded may match the filter.
       return html`
+        ${this.renderWindowBanner()}
         <div class="empty-state">
           <sl-icon name="funnel"></sl-icon>
           <h2>No Matching Agents</h2>
