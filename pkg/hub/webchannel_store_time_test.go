@@ -28,6 +28,7 @@ import (
 	_ "time/tzdata"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/storedtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -407,7 +408,7 @@ func TestWebChatTime_ConversationInsertsBindTime(t *testing.T) {
 		last, created := convTimes(topicConv(topicID))
 		assert.True(t, strings.HasSuffix(last, " +0000 UTC"), "last_activity_at %q", last)
 		assert.Equal(t, last, created)
-		stored, err := parseGoTimeString(last)
+		stored, err := storedtime.ParseGoString(last)
 		require.NoError(t, err)
 		assert.False(t, stored.Before(before.Truncate(time.Second)), "stored %v before %v", stored, before)
 		// The webchat_topic row carries the same instant in its own canonical form.

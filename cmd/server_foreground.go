@@ -178,7 +178,8 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		// In hosted mode, materialize any missing harness configs from the
 		// binary's embedded catalog. This ensures newly added harness configs
 		// from binary updates are available on disk without a full InitGlobal.
-		// Force=false preserves any operator-customized configs.
+		// Force=false refreshes bundle-owned files (config.yaml and the
+		// provisioner scripts) but preserves other operator files.
 		if err := config.MaterializeBundledHarnessConfigs(globalDir, config.MaterializeOptions{Force: false}); err != nil {
 			log.Printf("Warning: failed to materialize missing harness configs: %v", err)
 		}
@@ -1348,12 +1349,20 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 
 	s := entadapter.NewCompositeStore(entClient)
 
+	// Repair SQLite tables whose timestamps the driver cannot scan BEFORE
+	// migrateStore: Migrate reads tables through ent and fails, fatally, on
+	// such rows, so this cannot move into runBootDataMigrations. It uses raw
+	// SQL only, snapshots the database before writing, and is a no-op on
+	// Postgres and on a store with nothing to repair.
+	tsRepair := repairUnreadableTimestamps(ctx, s)
+
 	// Migrate runs Ent's schema migration and seeds built-in maintenance
 	// operations (parity with the former raw-SQL store).
 	if err := migrateStore(ctx, cfg, s); err != nil {
 		_ = s.Close()
 		return nil, nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
+	markUTCTimestampRepairComplete(ctx, s, tsRepair)
 
 	runBootDataMigrations(ctx, s)
 
