@@ -106,13 +106,16 @@ const (
 // that a future system marker is not silently propagated into clones.
 //
 // One scion.dev/ label is excluded: store.LabelWorkspaceMode
-// ("scion.dev/workspace-mode") is NOT copied. It is derived for the new project
-// from the clone request and the new project's git remote, by the same
-// validation the create path applies (handlers_projects_core.go), which sets it
-// only when there is a git remote and the mode is one of the two valid values.
-// Copying it raw would bypass that check and let a clone carry a workspace mode
-// inconsistent with its own remote, which IsSharedWorkspace() and
-// IsWorktreePerAgent() would then evaluate against mismatched state.
+// ("scion.dev/workspace-mode") is NOT copied raw. deriveCloneWorkspaceMode
+// (project_workspace_mode.go) re-derives it from the source's label: the mode
+// is kept only when store.ValidateWorkspaceMode accepts it for the clone's
+// git-ness (after any gitRemote override) and dropped otherwise, so a non-git
+// per-agent template stays empty-per-agent and becomes clone-per-agent with a
+// git remote, while e.g. worktree-per-agent on a non-git clone is dropped. A
+// legacy raw "empty-per-agent" label is normalised to "per-agent" only on a
+// non-git source. Copying it raw would let a clone carry a workspace mode
+// inconsistent with its own remote, which SharingMode() and its callers would
+// then evaluate against mismatched state.
 //
 // Finally, do not try to "complete" this list from hubclient.ProjectSettings.
 // That struct also carries Bucket, Runtimes, Harnesses and Profiles, which the

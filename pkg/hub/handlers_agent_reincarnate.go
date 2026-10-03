@@ -218,6 +218,15 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// touch a workspace it did not find already on disk): this is what
 	// makes --dry-run report the restriction too, instead of a dry run
 	// showing a plan that a real request could not safely execute.
+	// Empty-per-agent workspaces are broker-local, unsynced state: the only
+	// possible reincarnation would be a fresh empty directory, silently
+	// discarding work. Refused explicitly in v1 (design #2703 D4).
+	if project.IsEmptyPerAgent() {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			"reincarnate does not yet support empty-per-agent workspaces", nil)
+		return
+	}
+
 	hasGitClone := agent.AppliedConfig != nil && agent.AppliedConfig.GitClone != nil
 	var effectiveWorkspace string
 	var linkedProjectPath string
