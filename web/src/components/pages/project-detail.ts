@@ -59,6 +59,8 @@ import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
+import type { ScionAgentTreeView } from '../shared/agent-tree-view.js';
+import { GraphPaletteController } from '../shared/palette/graph-palette-controller.js';
 import '../shared/agent-message-viewer.js';
 import '../shared/agent-pager.js';
 import { AGENT_PAGER_PAGE_SIZES } from '../shared/agent-pager.js';
@@ -207,6 +209,12 @@ export class ScionPageProjectDetail extends LitElement {
    */
   @state()
   private viewMode: ViewMode = 'grid';
+
+  /** "Jump to agent" over the graph, offering the agents its tree view shows. */
+  readonly graphPalette = new GraphPaletteController(this, {
+    treeView: (): ScionAgentTreeView | null =>
+      this.renderRoot.querySelector('scion-agent-tree-view'),
+  });
 
   /**
    * Whether the agents section is expanded to full height. Collapsed (the
