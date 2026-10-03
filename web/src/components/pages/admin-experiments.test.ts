@@ -16,6 +16,7 @@
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import type { ScionAdminExperiments } from './admin-experiments.js';
+import { setPreferredTimeZone } from '../../utils/time.js';
 
 // ── Fixtures ──
 
@@ -245,6 +246,33 @@ describe('scion-admin-experiments', () => {
     // with its nanosecond-precision fractional seconds.
     expect(timeSpan?.textContent).not.toBe('2026-09-01T00:00:00Z');
     expect(timeSpan?.textContent?.length).toBeGreaterThan(0);
+  });
+
+  it('tab-level attribution: renders in the display zone, 24-hour, and follows a zone change', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          jsonResponse(
+            // Midnight in Tokyo (UTC+9); the browser zone is pinned to UTC.
+            makeResponse({ updated_at: '2026-09-01T15:00:00Z', updated_by: 'admin@x.com' })
+          )
+        )
+      )
+    );
+    setPreferredTimeZone('Asia/Tokyo');
+    try {
+      element = await createElement();
+      await activate(element);
+      const timeSpan = () => query(element!, '.attribution span');
+      expect(timeSpan()?.textContent).toBe('Sep 2, 2026, 00:00 (Asia/Tokyo)');
+
+      setPreferredTimeZone('America/New_York');
+      await element.updateComplete;
+      expect(timeSpan()?.textContent).toBe('Sep 1, 2026, 11:00 (America/New_York)');
+    } finally {
+      setPreferredTimeZone('');
+    }
   });
 
   it('falls back to the raw string if updated_at does not parse as a date', async () => {
