@@ -1726,15 +1726,22 @@ func TestSubstrateExecWithStdin_ProbeStopsBeforeRealCommandOnOldServer(t *testin
 // stub in place that's true for any caller targeting "scion" (which is all
 // of these tests, matching SubstrateRuntime.ExecUser()'s hard-coded value),
 // so this runs for real on any user rather than needing real root/CAP_SETUID
-// or a genuine "scion" account on the test machine. Restores the seam in
-// t.Cleanup.
+// or a genuine "scion" account on the test machine. The stand-in's home is
+// a fresh temporary directory, since runExec runs the child there and
+// refuses a missing one; the test user's own home need not exist. Exec
+// refuses a target that resolves to uid 0, so this skips when run as root.
+// Restores the seam in t.Cleanup.
 func fakeScionUserIsCurrentIdentity(t *testing.T) {
 	t.Helper()
-	me, err := user.Current()
-	if err != nil {
-		t.Fatalf("resolve current user: %v", err)
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: exec refuses a target user that resolves to uid 0")
 	}
-	fakeUser := &user.User{Uid: me.Uid, Gid: me.Gid, Username: "scion", HomeDir: me.HomeDir}
+	fakeUser := &user.User{
+		Uid:      strconv.Itoa(os.Geteuid()),
+		Gid:      strconv.Itoa(os.Getegid()),
+		Username: "scion",
+		HomeDir:  t.TempDir(),
+	}
 	restore := sciontoolsubstrate.SetExecUserLookupForTest(func(username string) (*user.User, error) {
 		return fakeUser, nil
 	})

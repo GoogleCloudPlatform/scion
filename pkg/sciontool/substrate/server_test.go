@@ -1481,6 +1481,7 @@ func TestExec_WrongTokenRejected(t *testing.T) {
 }
 
 func TestExec_SucceedsWithCorrectToken(t *testing.T) {
+	withExecUserAsCurrent(t)
 	srv := NewServer(
 		WithChownOwner(-1, -1),
 		WithInitRunner(func(argv []string, forwardTermSignal bool) int { return 0 }),
@@ -1584,6 +1585,7 @@ func TestClampExecTimeout_OverflowClampsRatherThanRemovingCap(t *testing.T) {
 }
 
 func TestExec_NonZeroExitCodePropagated(t *testing.T) {
+	withExecUserAsCurrent(t)
 	srv := NewServer(
 		WithChownOwner(-1, -1),
 		WithInitRunner(func(argv []string, forwardTermSignal bool) int { return 0 }),
@@ -1611,6 +1613,7 @@ func TestExec_NonZeroExitCodePropagated(t *testing.T) {
 
 func TestExec_StdinRoundTripsThroughRealCommand(t *testing.T) {
 	const secret = "S3CR3T-1894-EXEC-STDIN"
+	withExecUserAsCurrent(t)
 
 	srv := NewServer(
 		WithChownOwner(-1, -1),
@@ -1641,6 +1644,7 @@ func TestExec_StdinRoundTripsThroughRealCommand(t *testing.T) {
 }
 
 func TestExec_StdinSupportedSetEvenWithoutStdin(t *testing.T) {
+	withExecUserAsCurrent(t)
 	srv := NewServer(
 		WithChownOwner(-1, -1),
 		WithInitRunner(func(argv []string, forwardTermSignal bool) int { return 0 }),
@@ -1660,15 +1664,14 @@ func TestExec_StdinSupportedSetEvenWithoutStdin(t *testing.T) {
 }
 
 // TestExec_StdinNeverReachesSpawnedArgv spies on the real
-// execCommandContext seam (already used by this package's other tests to
-// avoid depending on a real su/scion user) to inspect exactly what argv the
-// server hands to the OS exec call, while still exercising the real
-// handleExec -> runExec path end to end. The secret is sent only via
-// ExecRequest.Stdin; Argv is fixed and secret-free by construction, and this
-// pins that nothing in runExec's command construction ever folds Stdin into
-// the command line.
+// execCommandContext seam to inspect exactly what argv the server hands to
+// the OS exec call, while still exercising the real handleExec -> runExec
+// path end to end. The secret is sent only via ExecRequest.Stdin; Argv is
+// fixed and secret-free by construction, and this pins that nothing in
+// runExec's command construction ever folds Stdin into the command line.
 func TestExec_StdinNeverReachesSpawnedArgv(t *testing.T) {
 	const secret = "S3CR3T-MUST-NOT-BE-IN-ARGV"
+	withExecUserAsCurrent(t)
 
 	var captured [][]string
 	orig := execCommandContext

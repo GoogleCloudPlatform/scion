@@ -17,8 +17,9 @@ package substrate
 import (
 	"context"
 	"os"
-	"os/user"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -93,11 +94,13 @@ func TestRunExec_OutputCapsAndFlags(t *testing.T) {
 		t.Skip("spawns real subprocesses producing several MB of output")
 	}
 
+	withExecUserAsCurrent(t)
+
 	// head -c is fast and available on any Linux test runner; /dev/zero
 	// bytes decode fine as a string for length-only assertions.
 	over := maxOutputBytes + 1024
 	resp := runExec(context.Background(), "scion",
-		[]string{"sh", "-c", "head -c " + itoa(over) + " /dev/zero"}, nil, 10*time.Second)
+		[]string{"sh", "-c", "head -c " + strconv.Itoa(over) + " /dev/zero"}, nil, 10*time.Second)
 
 	if resp.ExitCode != 0 {
 		t.Fatalf("exit_code = %d, want 0 (stderr=%q)", resp.ExitCode, resp.Stderr)
@@ -115,9 +118,11 @@ func TestRunExec_StderrCappedIndependently(t *testing.T) {
 		t.Skip("spawns real subprocesses producing several MB of output")
 	}
 
+	withExecUserAsCurrent(t)
+
 	over := maxOutputBytes + 1024
 	resp := runExec(context.Background(), "scion",
-		[]string{"sh", "-c", "head -c " + itoa(over) + " /dev/zero 1>&2"}, nil, 10*time.Second)
+		[]string{"sh", "-c", "head -c " + strconv.Itoa(over) + " /dev/zero 1>&2"}, nil, 10*time.Second)
 
 	if !resp.Truncated {
 		t.Error("truncated = false, want true when stderr alone exceeds the cap")
@@ -149,12 +154,8 @@ func TestRunExec_NeverConsultsPATHForSh(t *testing.T) {
 	}
 	t.Setenv("PATH", dir)
 
-	// Passing this process's own real user name takes the "already this
-	// identity, no credential drop" branch (see execUserCredential) — the
-	// same real user substrate's own broker-exec tests already rely on
-	// running as.
-	me := currentUsername(t)
-	resp := runExec(context.Background(), me, []string{"true"}, nil, 5*time.Second)
+	withExecUserAsCurrent(t)
+	resp := runExec(context.Background(), "scion", []string{"true"}, nil, 5*time.Second)
 
 	if _, err := os.Stat(marker); err == nil {
 		t.Fatal("runExec executed a planted sh from $PATH")
@@ -162,17 +163,6 @@ func TestRunExec_NeverConsultsPATHForSh(t *testing.T) {
 	if resp.ExitCode != 0 {
 		t.Errorf("exit_code = %d, want 0 (the real, resolved sh must still have run the command)", resp.ExitCode)
 	}
-}
-
-// currentUsername resolves this test process's own username, the same way
-// execUserCredential's own user.Lookup call will see it.
-func currentUsername(t *testing.T) string {
-	t.Helper()
-	u, err := user.Current()
-	if err != nil {
-		t.Skipf("could not resolve current username: %v", err)
-	}
-	return u.Username
 }
 
 // TestRunExec_ChildEnvNeverContainsScionAgentVars pins that runExec's child
@@ -189,8 +179,8 @@ func TestRunExec_ChildEnvNeverContainsScionAgentVars(t *testing.T) {
 	t.Setenv("SCION_AGENT_SLUG", "should-not-leak-slug")
 	t.Setenv("SCION_UNRELATED_VAR", "should-not-leak-either")
 
-	me := currentUsername(t)
-	resp := runExec(context.Background(), me, []string{"env"}, nil, 5*time.Second)
+	withExecUserAsCurrent(t)
+	resp := runExec(context.Background(), "scion", []string{"env"}, nil, 5*time.Second)
 
 	if resp.ExitCode != 0 {
 		t.Fatalf("exit_code = %d, want 0 (stderr=%q)", resp.ExitCode, resp.Stderr)
@@ -206,15 +196,15 @@ func TestRunExec_ChildEnvNeverContainsScionAgentVars(t *testing.T) {
 // does not set on its own the way `su -`'s login-shell semantics used to
 // (see execUserCredential's own doc comment) — asked for directly rather
 // than only at execUserCredential's own unit-test level, since PATH comes
-// from rootexec.Env, not from execUserCredential's own return value.
+// from rootexec.Env, not from execUserCredential's own return value. The
+// "scion" passwd entry is the host-independent one withExecUserAsCurrent
+// installs, so this runs (rather than skips) on hosts with no real "scion"
+// account, and HOME is checked against that entry's temporary home.
 func TestRunExec_SetsHomeUserPathShellForScion(t *testing.T) {
 	if testing.Short() {
 		t.Skip("spawns a real subprocess")
 	}
-	u, err := user.Lookup("scion")
-	if err != nil {
-		t.Skipf("no real \"scion\" user on this machine: %v", err)
-	}
+	home := withExecUserAsCurrent(t)
 	shPath, err := rootexec.Resolve("sh")
 	if err != nil {
 		t.Fatalf("resolve sh: %v", err)
@@ -232,7 +222,7 @@ func TestRunExec_SetsHomeUserPathShellForScion(t *testing.T) {
 		}
 	}
 	want := map[string]string{
-		"HOME":    u.HomeDir,
+		"HOME":    home,
 		"USER":    "scion",
 		"LOGNAME": "scion",
 		"SHELL":   shPath,
@@ -249,6 +239,7 @@ func TestRunExec_TimeoutKillsProcess(t *testing.T) {
 	if testing.Short() {
 		t.Skip("waits on a real subprocess timeout")
 	}
+	withExecUserAsCurrent(t)
 	start := time.Now()
 	resp := runExec(context.Background(), "scion", []string{"sh", "-c", "echo started; sleep 30"}, nil, 300*time.Millisecond)
 	elapsed := time.Since(start)
@@ -281,6 +272,7 @@ func TestRunExec_SucceedsUnderActiveReaper(t *testing.T) {
 	if testing.Short() {
 		t.Skip("spawns a real subprocess and a real signal-handling goroutine")
 	}
+	withExecUserAsCurrent(t)
 	procreap.StartReaper()
 
 	resp := runExec(context.Background(), "scion", []string{"true"}, nil, 5*time.Second)
@@ -290,16 +282,50 @@ func TestRunExec_SucceedsUnderActiveReaper(t *testing.T) {
 	}
 }
 
-// itoa avoids pulling in strconv just for a couple of formatted numbers in
-// shell commands built above.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
+// TestRunExec_RunsInUserHomeDir pins that the child's working directory is
+// the exec user's home directory, never the control server's own.
+func TestRunExec_RunsInUserHomeDir(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns a real subprocess")
 	}
-	var digits []byte
-	for n > 0 {
-		digits = append([]byte{byte('0' + n%10)}, digits...)
-		n /= 10
+	home := withExecUserAsCurrent(t)
+
+	resp := runExec(context.Background(), "scion", []string{"pwd", "-P"}, nil, 5*time.Second)
+	if resp.ExitCode != 0 {
+		t.Fatalf("exit_code = %d, want 0 (stderr=%q)", resp.ExitCode, resp.Stderr)
 	}
-	return string(digits)
+	want, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(resp.Stdout); got != want {
+		t.Errorf("child working directory = %q, want the user's home %q", got, want)
+	}
+}
+
+// TestRunExec_MissingHomeDirRefusesWithoutExec pins the failure path: when
+// the exec user's home directory does not exist, runExec reports a clear
+// error and starts no process at all.
+func TestRunExec_MissingHomeDirRefusesWithoutExec(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "no-such-home")
+	withExecUserHome(t, missing)
+
+	called := false
+	orig := execCommandContext
+	execCommandContext = func(ctx context.Context, name string, arg ...string) *exec.Cmd {
+		called = true
+		return orig(ctx, name, arg...)
+	}
+	t.Cleanup(func() { execCommandContext = orig })
+
+	resp := runExec(context.Background(), "scion", []string{"true"}, nil, 5*time.Second)
+	if called {
+		t.Error("runExec built a command although the user's home directory is missing")
+	}
+	if resp.ExitCode != -1 {
+		t.Errorf("exit_code = %d, want -1", resp.ExitCode)
+	}
+	if !strings.Contains(resp.Stderr, missing) || !strings.Contains(resp.Stderr, "not available") {
+		t.Errorf("stderr = %q, want it to name the missing home %q and say it is not available", resp.Stderr, missing)
+	}
 }

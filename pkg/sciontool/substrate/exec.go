@@ -49,8 +49,8 @@ const (
 	execWaitDelay = 5 * time.Second
 )
 
-// execCommandContext is overridden in tests so they don't depend on a real
-// "scion"/"root" user or su being present in the test environment.
+// execCommandContext is overridden in tests that need to observe or intercept
+// the command runExec builds.
 var execCommandContext = exec.CommandContext
 
 // runExec runs argv as user via a direct privilege drop (SysProcAttr.
@@ -83,9 +83,12 @@ func runExec(ctx context.Context, user string, argv []string, stdin []byte, time
 		// line.
 		return ExecResponse{ExitCode: -1}
 	}
-	envPairs, cred, err := execUserCredential(user, shPath)
+	envPairs, homeDir, cred, err := execUserCredential(user, shPath)
 	if err != nil {
-		return ExecResponse{ExitCode: -1}
+		return execSetupFailure(err)
+	}
+	if err := checkExecHomeDir(user, homeDir); err != nil {
+		return execSetupFailure(err)
 	}
 
 	quoted := make([]string, len(argv))
@@ -102,6 +105,9 @@ func runExec(ctx context.Context, user string, argv []string, stdin []byte, time
 	}
 
 	cmd := execCommandContext(runCtx, shPath, "-c", cmdString)
+	// Run in the target user's home directory (checked above), never in
+	// whatever directory this root control server happens to run from.
+	cmd.Dir = homeDir
 	// Built from scratch (rootexec.Env), not inherited from this process's
 	// own environment: PID 1's PATH includes a workload-owned directory
 	// (see the rootexec package doc comment), and this handler runs an
@@ -168,6 +174,15 @@ func runExec(ctx context.Context, user string, argv []string, stdin []byte, time
 		ExitCode:  exitCode,
 		Truncated: stdout.truncated || stderr.truncated,
 	}
+}
+
+// execSetupFailure reports an exec that was refused before any process was
+// started (the target user could not be resolved, resolves to root, or has
+// no usable home directory): exit code -1, like a process that could not be
+// started, with the reason on stderr so the caller sees why. The reason
+// names only the target user and its passwd fields, never argv or stdin.
+func execSetupFailure(err error) ExecResponse {
+	return ExecResponse{ExitCode: -1, Stderr: err.Error() + "\n"}
 }
 
 // shellQuote single-quotes s for safe inclusion in a `sh -c` command line,

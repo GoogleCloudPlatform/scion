@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os"
 	"os/user"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -107,9 +108,12 @@ func TestExecUserCredential_SetsHomeUserLognameShellForScion(t *testing.T) {
 	defer restore()
 
 	const shPath = "/bin/sh"
-	envPairs, cred, err := execUserCredential("scion", shPath)
+	envPairs, homeDir, cred, err := execUserCredential("scion", shPath)
 	if err != nil {
 		t.Fatalf("execUserCredential: %v", err)
+	}
+	if homeDir != "/home/scion" {
+		t.Errorf("homeDir = %q, want the passwd home %q", homeDir, "/home/scion")
 	}
 
 	want := map[string]string{
@@ -152,6 +156,9 @@ func TestExecUserCredential_SetsHomeUserLognameShellForScion(t *testing.T) {
 // unprivileged test process asking to "become" the user it already is does
 // not have and must not need.
 func TestExecUserCredential_SameIdentitySkipsCredential(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: uid 0 is refused before the same-identity shortcut applies")
+	}
 	me, err := user.Current()
 	if err != nil {
 		t.Skipf("could not resolve current user: %v", err)
@@ -161,7 +168,7 @@ func TestExecUserCredential_SameIdentitySkipsCredential(t *testing.T) {
 	})
 	defer restore()
 
-	_, cred, err := execUserCredential(me.Username, "/bin/sh")
+	_, _, cred, err := execUserCredential(me.Username, "/bin/sh")
 	if err != nil {
 		t.Fatalf("execUserCredential: %v", err)
 	}
@@ -179,8 +186,61 @@ func TestExecUserCredential_LookupFailureIsRefused(t *testing.T) {
 	})
 	defer restore()
 
-	if _, _, err := execUserCredential("scion", "/bin/sh"); err == nil {
+	if _, _, _, err := execUserCredential("scion", "/bin/sh"); err == nil {
 		t.Fatal("expected execUserCredential to fail when execUserLookup fails, got nil error")
+	}
+}
+
+// TestExecUserCredential_RootUIDIsRefused: a target name that resolves to
+// uid 0 must be refused with a clear error and no credential or
+// environment, even when this process itself runs as root (where the
+// same-identity shortcut would otherwise apply). The non-zero positive
+// control is TestExecUserCredential_SetsHomeUserLognameShellForScion,
+// which resolves the same name to a non-zero uid and gets a credential
+// back.
+func TestExecUserCredential_RootUIDIsRefused(t *testing.T) {
+	restore := SetExecUserLookupForTest(func(username string) (*user.User, error) {
+		return &user.User{Uid: "0", Gid: "0", Username: username, HomeDir: "/root"}, nil
+	})
+	defer restore()
+
+	envPairs, homeDir, cred, err := execUserCredential("scion", "/bin/sh")
+	if err == nil {
+		t.Fatal("expected execUserCredential to refuse a user resolving to uid 0, got nil error")
+	}
+	if !strings.Contains(err.Error(), "resolves to uid 0; refusing to exec as root") {
+		t.Errorf("error = %q, want it to say the user resolves to uid 0 and is refused", err)
+	}
+	if envPairs != nil || homeDir != "" || cred != nil {
+		t.Errorf("got envPairs=%v homeDir=%q cred=%+v, want nothing returned alongside the refusal", envPairs, homeDir, cred)
+	}
+}
+
+// TestCheckExecHomeDir covers the working-directory precondition runExec
+// applies: an existing directory passes; an empty, missing, or non-directory
+// home is refused with an error naming the user.
+func TestCheckExecHomeDir(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "a-file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkExecHomeDir("scion", dir); err != nil {
+		t.Errorf("existing directory: got %v, want nil", err)
+	}
+	for name, home := range map[string]string{
+		"empty":     "",
+		"missing":   filepath.Join(dir, "missing"),
+		"not a dir": file,
+	} {
+		err := checkExecHomeDir("scion", home)
+		if err == nil {
+			t.Errorf("%s home %q: got nil, want an error", name, home)
+			continue
+		}
+		if !strings.Contains(err.Error(), `"scion"`) {
+			t.Errorf("%s home %q: error %q does not name the user", name, home, err)
+		}
 	}
 }
 
@@ -191,10 +251,14 @@ func TestExecUserCredential_LookupFailureIsRefused(t *testing.T) {
 // closing the gap between "the fake passwd entry behaves as expected" and
 // "a real os/user.Lookup call does too."
 func TestExecUserCredential_RealScionUser(t *testing.T) {
-	if _, err := user.Lookup("scion"); err != nil {
+	u, err := execUserLookup("scion")
+	if err != nil {
 		t.Skipf("no real \"scion\" user on this machine: %v", err)
 	}
-	envPairs, _, err := execUserCredential("scion", "/bin/sh")
+	if u.Uid == "0" {
+		t.Skip("the \"scion\" user on this machine is uid 0, which execUserCredential refuses")
+	}
+	envPairs, _, _, err := execUserCredential("scion", "/bin/sh")
 	if err != nil {
 		t.Fatalf("execUserCredential: %v", err)
 	}

@@ -101,6 +101,15 @@ func SetExecUserLookupForTest(lookup func(username string) (*user.User, error)) 
 // actually in use rather than guessing (or hardcoding) the passwd-configured
 // one.
 //
+// homeDir is the user's passwd home directory, which runExec also uses as
+// the child's working directory (see checkExecHomeDir).
+//
+// A user that resolves to uid 0 is refused outright: /exec only ever runs
+// the agent workload as an unprivileged user, so a passwd entry (or a
+// test/image misconfiguration) mapping the target name to root must never
+// yield a root child, whether through a credential or through the
+// same-identity shortcut below.
+//
 // cred is nil when user resolves to this process's own current identity
 // (euid/egid already match) — the shape a test that asks to run as its own
 // real user takes, and also a defensive no-op in case this handler is ever
@@ -112,18 +121,21 @@ func SetExecUserLookupForTest(lookup func(username string) (*user.User, error)) 
 // CAP_SETGID even to set an unchanged group list — a real privilege an
 // unprivileged test process (asking to "become" the user it already is)
 // does not have and must not need.
-func execUserCredential(username, shPath string) (envPairs []string, cred *syscall.Credential, err error) {
+func execUserCredential(username, shPath string) (envPairs []string, homeDir string, cred *syscall.Credential, err error) {
 	u, err := execUserLookup(username)
 	if err != nil {
-		return nil, nil, fmt.Errorf("substrate: resolve user %q: %w", username, err)
+		return nil, "", nil, fmt.Errorf("substrate: resolve user %q: %w", username, err)
 	}
 	uid64, err := strconv.ParseUint(u.Uid, 10, 32)
 	if err != nil {
-		return nil, nil, fmt.Errorf("substrate: user %q has an unparseable uid %q: %w", username, u.Uid, err)
+		return nil, "", nil, fmt.Errorf("substrate: user %q has an unparseable uid %q: %w", username, u.Uid, err)
+	}
+	if uid64 == 0 {
+		return nil, "", nil, fmt.Errorf("substrate: user %q resolves to uid 0; refusing to exec as root", username)
 	}
 	gid64, err := strconv.ParseUint(u.Gid, 10, 32)
 	if err != nil {
-		return nil, nil, fmt.Errorf("substrate: user %q has an unparseable gid %q: %w", username, u.Gid, err)
+		return nil, "", nil, fmt.Errorf("substrate: user %q has an unparseable gid %q: %w", username, u.Gid, err)
 	}
 	uid, gid := uint32(uid64), uint32(gid64)
 
@@ -135,9 +147,28 @@ func execUserCredential(username, shPath string) (envPairs []string, cred *sysca
 	}
 
 	if uid == uint32(os.Geteuid()) && gid == uint32(os.Getegid()) {
-		return envPairs, nil, nil
+		return envPairs, u.HomeDir, nil, nil
 	}
-	return envPairs, &syscall.Credential{Uid: uid, Gid: gid}, nil
+	return envPairs, u.HomeDir, &syscall.Credential{Uid: uid, Gid: gid}, nil
+}
+
+// checkExecHomeDir verifies that homeDir, the exec user's passwd home
+// directory, names an existing directory. runExec runs the child there
+// (cmd.Dir) and fails the exec when it is missing rather than falling back
+// to the control server's own working directory, which belongs to a root
+// process and is no place to run a workload command.
+func checkExecHomeDir(username, homeDir string) error {
+	if homeDir == "" {
+		return fmt.Errorf("substrate: user %q has no home directory; refusing to exec", username)
+	}
+	info, err := os.Stat(homeDir)
+	if err != nil {
+		return fmt.Errorf("substrate: home directory %q of user %q is not available: %w", homeDir, username, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("substrate: home directory %q of user %q is not a directory", homeDir, username)
+	}
+	return nil
 }
 
 // trustBundleEnvPairs returns "NAME=value" for each CA-bundle candidate
