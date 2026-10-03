@@ -19,6 +19,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { Chart, registerables } from 'chart.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { formatNumber } from '../../utils/format-number.js';
 
 Chart.register(...registerables);
 
@@ -332,7 +333,7 @@ export class ScionPageMetrics extends LitElement {
   private formatNumber(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
     if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-    return n.toLocaleString();
+    return formatNumber(n);
   }
 
   private static readonly CHART_PROPERTIES = new Set([
