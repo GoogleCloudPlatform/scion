@@ -75,16 +75,14 @@ func ReadTransportTokenFile(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	defer func() { _ = f.Close() }()
 	fi, err := f.Stat()
 	if err != nil {
-		_ = f.Close()
 		return "", err
 	}
 	if !fi.Mode().IsRegular() {
-		_ = f.Close()
 		return "", fmt.Errorf("transport token file %s is not a regular file", path)
 	}
-	defer func() { _ = f.Close() }()
 	data, err := io.ReadAll(io.LimitReader(f, transportTokenFileMaxBytes+1))
 	if err != nil {
 		return "", err
