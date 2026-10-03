@@ -255,7 +255,16 @@ func TestBuildStartContext_UnflaggedPassthroughUnaffectedByRuntimeRemap(t *testi
 // same struct-or-env precedence SCION_METADATA_MODE itself already has.
 func TestBuildStartContext_HubDefaultPassthroughDowngradedFromEnvFlag(t *testing.T) {
 	srv, _ := newTestServerForRuntimeRemap(t)
-	projectPath := writeRemapSettings(t, "kubernetes")
+	// Remap to a fictitious non-local, non-Kubernetes runtime with a mock
+	// resolver, as TestBuildStartContext_HubDefaultPassthroughDowngradedOnRuntimeRemap
+	// does. "kubernetes" no longer exercises the downgrade (block is not
+	// offered on Kubernetes, ptone/scion#2328), and without the override the
+	// resolver builds a real cluster client: where one is reachable the
+	// dispatch resolves to Kubernetes and keeps passthrough.
+	projectPath := writeRemapSettings(t, "other")
+	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+		return &runtime.MockRuntime{NameFunc: func() string { return "other" }}
+	}
 
 	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
