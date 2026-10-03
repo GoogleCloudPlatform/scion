@@ -575,6 +575,9 @@ func TestDeleteCmd_ForceWithStoppedRejected(t *testing.T) {
 	defer server.Close()
 	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
 	t.Setenv("SCION_PROJECT_ID", projectID)
+	// Clear SCION_HOST_UID so the root agent-container check does not intercept
+	// the command; otherwise the zero-DELETE assertion is vacuous in containers.
+	t.Setenv("SCION_HOST_UID", "")
 
 	rootCmd.SetArgs([]string{"delete", "--stopped", "--force"})
 	defer func() {
@@ -590,9 +593,11 @@ func TestDeleteCmd_ForceWithStoppedRejected(t *testing.T) {
 	_ = captureStderr(t, func() {
 		err = rootCmd.Execute()
 	})
+	// Check the zero-DELETE invariant first so it is evaluated even when the
+	// error assertion below fails.
+	assert.Empty(t, queries, "no delete request may reach the hub")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--force cannot be combined with --stopped")
-	assert.Empty(t, queries, "no delete request may reach the hub")
 }
 
 func TestDeleteStoppedViaHub_NoForceOmitsForceQuery(t *testing.T) {
