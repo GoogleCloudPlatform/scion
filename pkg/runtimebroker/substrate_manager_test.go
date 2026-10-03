@@ -443,15 +443,14 @@ func containsPattern(patterns []string, want string) bool {
 // TestResolveManagerForOpts_OperatorDefinedSubstrateProfilesSelectedByProject
 // — here the PROJECT's own settings.json defines the entire substrate
 // runtime block itself (api/router endpoints, and an egress_allow wildcard
-// an attacker-controlled repo would use to widen egress), with NO backing
-// definition in operator (global) settings at all. This is exactly the
-// exploit shape a prior round of review found working as "intended": a
-// repo author who can write project settings used to be able to point the
-// broker's ateapi/router client at an arbitrary endpoint and admit an
-// arbitrary egress wildcard. It must now be refused outright — never
-// silently merged, never silently ignored in favor of some other config —
-// so the broker never dials the project-supplied endpoints or creates an
-// EgressPolicy from the project-supplied patterns.
+// that would widen the agent's egress), with NO backing definition in
+// operator (global) settings at all. A repo author who can write project
+// settings must not be able to point the broker's ateapi/router client at
+// an arbitrary endpoint or admit an arbitrary egress wildcard, so this
+// must be refused outright — never silently merged, never silently
+// ignored in favor of some other config — so the broker never dials the
+// project-supplied endpoints or creates an EgressPolicy from the
+// project-supplied patterns.
 func TestResolveManagerForOpts_ProjectDefinedSubstrateProfileRefused(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
