@@ -170,11 +170,21 @@ func writeBrokerRegistrationError(w http.ResponseWriter, err error) {
 // (handlers_projects_core.go). Both call this exact helper rather than
 // reproducing the check, so a future caller (e.g. ptone/scion#2107's
 // join-token mint) inherits the same gate instead of adding a parallel one.
-// It wraps the standard fail-closed authorize() helper (authorize.go): 401
-// for no identity, 403 when the identity lacks broker.create, true when
-// allowed.
+// Bearer credentials are not admitted for broker creation: a request
+// authenticated by a user access token, of any boundary or ceiling, is
+// denied with 403 before the permission check. Otherwise it wraps the
+// standard fail-closed authorize() helper (authorize.go): 401 for no
+// identity, 403 when the identity lacks broker.create, true when allowed.
 func (s *Server) authorizeBrokerCreate(w http.ResponseWriter, r *http.Request) bool {
-	return s.authorize(w, r, Resource{Type: "broker"}, ActionCreate)
+	resource := Resource{Type: "broker"}
+	ctx := r.Context()
+	identity := GetIdentityFromContext(ctx)
+	if IsScopedUserIdentity(identity) || GetCredentialContextFromContext(ctx).Kind == CredentialKindUAT {
+		logAuthzDenial(r, identity, resource, ActionCreate, "bearer credentials are not admitted for broker creation")
+		Forbidden(w)
+		return false
+	}
+	return s.authorize(w, r, resource, ActionCreate)
 }
 
 // authorizedForBrokerOwnerAction reports whether the caller may perform an
@@ -194,10 +204,8 @@ func (s *Server) authorizeBrokerCreate(w http.ResponseWriter, r *http.Request) b
 // Scoped credentials (UATs) never satisfy the super-admin or creator-match
 // shortcut, regardless of whose underlying user they belong to: authorization
 // here comes from the credential actually presented, not from the underlying
-// user's standing. This is a hub-level operation and today's UATs are
-// project-bound; ptone/scion#2123 introduces the hub-bound UAT boundary this
-// operation would need before a UAT could satisfy either shortcut on its own
-// terms.
+// user's standing. This is a hub-level operation, and bearer credentials
+// are not admitted for it.
 //
 // fetchBroker is only invoked when the first two checks do not already
 // grant access, so callers that already have the broker record on hand can
