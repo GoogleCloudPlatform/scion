@@ -71,6 +71,41 @@ def expand_path(path: str) -> str:
     return os.path.expanduser(os.path.expandvars(path))
 
 
+# Env vars that move the harness bundle's outputs/ and secrets/ directories
+# out of the agent home. Unset or empty: the bundle's own directories.
+HARNESS_OUTPUTS_DIR_ENV = "SCION_HARNESS_OUTPUTS_DIR"
+HARNESS_SECRETS_DIR_ENV = "SCION_HARNESS_SECRETS_DIR"
+
+
+def harness_dir_override(name: str) -> str | None:
+    """Return the directory set by env var name, or None when unset or empty.
+
+    A value that is not an absolute path raises ProvisionError.
+    """
+    value = os.environ.get(name, "")
+    if not value:
+        return None
+    if not os.path.isabs(value):
+        raise ProvisionError(f"{name} must be an absolute path, got {value!r}")
+    return os.path.normpath(value)
+
+
+def remap_under(path: str, src_dir: str, dst_dir: str) -> str:
+    """Map path from under src_dir to the same name under dst_dir.
+
+    Paths not under src_dir are returned unchanged.
+    """
+    if not path:
+        return path
+    clean = os.path.normpath(path)
+    src = os.path.normpath(src_dir)
+    if clean == src:
+        return dst_dir
+    if clean.startswith(src + os.sep):
+        return os.path.join(dst_dir, clean[len(src) + 1:])
+    return path
+
+
 def load_json(path: str) -> Any:
     """Read JSON from path. Raises OSError or json.JSONDecodeError on failure."""
     with open(path, "r", encoding="utf-8") as f:
@@ -432,6 +467,28 @@ class ProvisionContext:
         return os.path.join(self.bundle_dir, "inputs")
 
     @property
+    def outputs_dir(self) -> str:
+        """SCION_HARNESS_OUTPUTS_DIR when set, else bundle_dir/outputs."""
+        return harness_dir_override(HARNESS_OUTPUTS_DIR_ENV) or os.path.join(self.bundle_dir, "outputs")
+
+    @property
+    def secrets_dir(self) -> str:
+        """SCION_HARNESS_SECRETS_DIR when set, else bundle_dir/secrets."""
+        return harness_dir_override(HARNESS_SECRETS_DIR_ENV) or os.path.join(self.bundle_dir, "secrets")
+
+    def _staged_secret_path(self, path: str) -> str:
+        """Point a recorded bundle secrets/ path at secrets_dir.
+
+        Unchanged when SCION_HARNESS_SECRETS_DIR is unset.
+        """
+        override = harness_dir_override(HARNESS_SECRETS_DIR_ENV)
+        if override is None:
+            return path
+        expanded = expand_path(path)
+        mapped = remap_under(expanded, os.path.join(self.bundle_dir, "secrets"), override)
+        return path if mapped == expanded else mapped
+
+    @property
     def workspace(self) -> str:
         return str(self.manifest.get("agent_workspace") or "/workspace")
 
@@ -483,14 +540,20 @@ class ProvisionContext:
         raw = self.candidates.get("env_secret_files") or {}
         if not isinstance(raw, dict):
             return {}
-        return {str(k): str(v) for k, v in raw.items() if isinstance(k, str) and isinstance(v, str) and v}
+        return {
+            str(k): self._staged_secret_path(str(v))
+            for k, v in raw.items() if isinstance(k, str) and isinstance(v, str) and v
+        }
 
     @property
     def file_secret_files(self) -> dict[str, str]:
         raw = self.candidates.get("file_secret_files") or {}
         if not isinstance(raw, dict):
             return {}
-        return {str(k): str(v) for k, v in raw.items() if isinstance(k, str) and isinstance(v, str) and v}
+        return {
+            str(k): self._staged_secret_path(str(v))
+            for k, v in raw.items() if isinstance(k, str) and isinstance(v, str) and v
+        }
 
     @property
     def telemetry(self) -> dict[str, Any]:
@@ -543,8 +606,8 @@ class ProvisionContext:
             return ""
 
     def output_paths(self) -> tuple[str, str]:
-        """Return (resolved_auth_path, env_json_path)."""
-        outputs_dir = os.path.join(self.bundle_dir, "outputs")
+        """Return (resolved_auth_path, env_json_path), under outputs_dir."""
+        outputs_dir = self.outputs_dir
         return (
             os.path.join(outputs_dir, "resolved-auth.json"),
             os.path.join(outputs_dir, "env.json"),

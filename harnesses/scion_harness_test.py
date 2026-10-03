@@ -359,6 +359,88 @@ class TestWriteOutputs(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+class TestHarnessDirEnv(unittest.TestCase):
+    """SCION_HARNESS_OUTPUTS_DIR and SCION_HARNESS_SECRETS_DIR."""
+
+    _UNSET = {sh.HARNESS_OUTPUTS_DIR_ENV: "", sh.HARNESS_SECRETS_DIR_ENV: ""}
+
+    @staticmethod
+    def _set_candidates(ctx, candidates):
+        # Candidates are read on first use, so rewriting the file is enough.
+        with open(os.path.join(ctx.inputs_dir, "auth-candidates.json"), "w") as f:
+            json.dump(candidates, f)
+
+    def test_unset_keeps_bundle_dirs(self):
+        with mock.patch.dict(os.environ, self._UNSET):
+            ctx = _make_ctx()
+            self.assertEqual(ctx.outputs_dir, os.path.join(ctx.bundle_dir, "outputs"))
+            self.assertEqual(ctx.secrets_dir, os.path.join(ctx.bundle_dir, "secrets"))
+            self.assertEqual(ctx.output_paths(), (
+                os.path.join(ctx.bundle_dir, "outputs", "resolved-auth.json"),
+                os.path.join(ctx.bundle_dir, "outputs", "env.json"),
+            ))
+
+    def test_outputs_dir_env_moves_outputs(self):
+        outdir = tempfile.mkdtemp()
+        with mock.patch.dict(os.environ, {**self._UNSET, sh.HARNESS_OUTPUTS_DIR_ENV: outdir}):
+            ctx = _make_ctx()
+            self.assertEqual(ctx.outputs_dir, outdir)
+            ctx.write_outputs(sh.ResolvedAuth(method="none"), env={"FOO": "bar"})
+            self.assertEqual(ctx.output_paths(), (
+                os.path.join(outdir, "resolved-auth.json"),
+                os.path.join(outdir, "env.json"),
+            ))
+            self.assertEqual(json.load(open(os.path.join(outdir, "env.json")))["FOO"], "bar")
+            self.assertFalse(os.path.exists(os.path.join(ctx.bundle_dir, "outputs", "env.json")))
+
+    def test_secret_paths_unchanged_when_unset(self):
+        with mock.patch.dict(os.environ, self._UNSET):
+            ctx = _make_ctx()
+            staged = os.path.join(ctx.bundle_dir, "secrets", "MY_KEY")
+            self._set_candidates(ctx, {
+                "env_secret_files": {"MY_KEY": staged},
+                "file_secret_files": {"cred": "~/.scion/harness/secrets/cred"},
+            })
+            self.assertEqual(ctx.env_secret_files, {"MY_KEY": staged})
+            self.assertEqual(ctx.file_secret_files, {"cred": "~/.scion/harness/secrets/cred"})
+
+    def test_secrets_dir_env_moves_staged_secrets(self):
+        secdir = tempfile.mkdtemp()
+        with open(os.path.join(secdir, "MY_KEY"), "w") as f:
+            f.write("value-from-mem\n")
+        with mock.patch.dict(os.environ, {**self._UNSET, sh.HARNESS_SECRETS_DIR_ENV: secdir}):
+            ctx = _make_ctx()
+            other = "/etc/other/OTHER"
+            self._set_candidates(ctx, {
+                "env_secret_files": {
+                    "MY_KEY": os.path.join(ctx.bundle_dir, "secrets", "MY_KEY"),
+                    "OTHER": other,
+                },
+                "file_secret_files": {"cred": os.path.join(ctx.bundle_dir, "secrets", "sub", "cred")},
+            })
+            self.assertEqual(ctx.secrets_dir, secdir)
+            self.assertEqual(ctx.env_secret_files, {
+                "MY_KEY": os.path.join(secdir, "MY_KEY"),
+                "OTHER": other,
+            })
+            self.assertEqual(ctx.file_secret_files, {"cred": os.path.join(secdir, "sub", "cred")})
+            self.assertEqual(ctx.read_secret("MY_KEY"), "value-from-mem")
+
+    def test_relative_value_rejected(self):
+        for name in (sh.HARNESS_OUTPUTS_DIR_ENV, sh.HARNESS_SECRETS_DIR_ENV):
+            with self.subTest(name=name):
+                with mock.patch.dict(os.environ, {**self._UNSET, name: "relative/dir"}):
+                    with self.assertRaises(sh.ProvisionError) as cm:
+                        sh.harness_dir_override(name)
+                    self.assertIn(name, str(cm.exception))
+
+    def test_remap_under(self):
+        self.assertEqual(sh.remap_under("/b/secrets/K", "/b/secrets", "/m"), "/m/K")
+        self.assertEqual(sh.remap_under("/b/secrets", "/b/secrets", "/m"), "/m")
+        self.assertEqual(sh.remap_under("/b/secrets2/K", "/b/secrets", "/m"), "/b/secrets2/K")
+        self.assertEqual(sh.remap_under("", "/b/secrets", "/m"), "")
+
+
 class TestSecretWhitespace(unittest.TestCase):
     def test_rstrip_cr_lf_only(self):
         ctx = _make_ctx()

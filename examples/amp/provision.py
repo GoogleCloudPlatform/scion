@@ -96,6 +96,35 @@ def _present_env_keys(candidates: dict[str, Any]) -> set[str]:
     return {str(k) for k in raw if isinstance(k, str)}
 
 
+# Env vars that move the harness bundle's outputs/ and secrets/ directories
+# out of the agent home. Unset or empty: the bundle's own directories.
+HARNESS_OUTPUTS_DIR_ENV = "SCION_HARNESS_OUTPUTS_DIR"
+HARNESS_SECRETS_DIR_ENV = "SCION_HARNESS_SECRETS_DIR"
+
+
+def _dir_override(name: str) -> str | None:
+    """Directory set by env var name; None when unset. Must be absolute."""
+    value = os.environ.get(name, "")
+    if not value:
+        return None
+    if not os.path.isabs(value):
+        raise ValueError(f"amp provision: {name} must be an absolute path, got {value!r}")
+    return os.path.normpath(value)
+
+
+def _remap_under(path: str, src_dir: str, dst_dir: str | None) -> str:
+    """Map path from under src_dir to dst_dir; unchanged when dst_dir is None."""
+    if dst_dir is None or not path:
+        return path
+    clean = os.path.normpath(_expand(path))
+    src = os.path.normpath(src_dir)
+    if clean == src:
+        return dst_dir
+    if clean.startswith(src + os.sep):
+        return os.path.join(dst_dir, clean[len(src) + 1:])
+    return path
+
+
 def _env_secret_files(candidates: dict[str, Any]) -> dict[str, str]:
     """Map of env-var name -> container path of its 0600 secret value file."""
     raw = candidates.get("env_secret_files") or {}
@@ -198,9 +227,19 @@ def _provision(manifest: dict[str, Any]) -> int:
             print(f"amp provision: invalid auth-candidates.json: {exc}", file=sys.stderr)
             return EXIT_ERROR
 
+    try:
+        outputs_override = _dir_override(HARNESS_OUTPUTS_DIR_ENV)
+        secrets_override = _dir_override(HARNESS_SECRETS_DIR_ENV)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return EXIT_ERROR
+
     explicit = str(candidates.get("explicit_type") or "").strip()
     env_keys = _present_env_keys(candidates)
-    secret_files = _env_secret_files(candidates)
+    secret_files = {
+        k: _remap_under(v, os.path.join(bundle, "secrets"), secrets_override)
+        for k, v in _env_secret_files(candidates).items()
+    }
 
     # No-auth mode: when no auth candidates were staged and the harness config
     # declares a no_auth behavior, skip auth setup entirely.
@@ -245,6 +284,8 @@ def _provision(manifest: dict[str, Any]) -> int:
     auth_out = _expand(
         outputs.get("resolved_auth") or os.path.join(bundle, "outputs", "resolved-auth.json")
     )
+    env_out = _remap_under(env_out, os.path.join(bundle, "outputs"), outputs_override)
+    auth_out = _remap_under(auth_out, os.path.join(bundle, "outputs"), outputs_override)
 
     resolved_payload: dict[str, Any] = {
         "schema_version": 1,

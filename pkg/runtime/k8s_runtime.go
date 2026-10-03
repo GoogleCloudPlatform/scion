@@ -2921,7 +2921,7 @@ func syncArchiveCreateArgs(sourcePath string, excludes ...string) []string {
 	return append(args, "-C", sourcePath, ".")
 }
 
-// tarLiteralPattern escapes the tar wildcard characters in p so that an
+// tarLiteralPattern quotes the tar wildcard characters in p with a backslash so that an
 // exclude pattern matches p only.
 func tarLiteralPattern(p string) string {
 	var b strings.Builder
