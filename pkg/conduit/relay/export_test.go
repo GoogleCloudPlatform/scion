@@ -15,6 +15,10 @@
 package relay
 
 import (
+	"context"
+	"testing"
+	"time"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
@@ -22,16 +26,33 @@ import (
 
 // Test-only access to internals for the external test package.
 
-// TouchInterceptor returns the touch-on-pong interceptor of the live local
-// session sessionID, chained with next exactly as Serve chains it.
-func (r *Relay) TouchInterceptorForTest(sessionID string, next conduit.Interceptor) conduit.Interceptor {
-	r.mu.Lock()
-	e := r.sessions[sessionID]
-	r.mu.Unlock()
-	if e == nil {
-		return nil
+// localEntryForTest waits (bounded) for sessionID to be registered, as
+// Local does for a pending session, and returns its entry. MustDial returns
+// on the Welcome, before Serve registers the session (r3-F1), so helpers
+// that look a session up right after a dial must wait. It fails the test
+// if the session never becomes live.
+func (r *Relay) localEntryForTest(t testing.TB, sessionID string) *entry {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, _, ok := r.Local(ctx, sessionID); !ok {
+		t.Fatalf("session %s is not live on %s", sessionID, r.cfg.InstanceID)
 	}
-	return chainInterceptor(r.touchOnPong(e), next)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e := r.sessions[sessionID]
+	if e == nil {
+		t.Fatalf("session %s left %s before the lookup", sessionID, r.cfg.InstanceID)
+	}
+	return e
+}
+
+// TouchInterceptorForTest returns the touch-on-pong interceptor of the live
+// local session sessionID, chained with next exactly as Serve chains it. It
+// waits for a just-admitted session to be registered.
+func (r *Relay) TouchInterceptorForTest(t testing.TB, sessionID string, next conduit.Interceptor) conduit.Interceptor {
+	t.Helper()
+	return chainInterceptor(r.touchOnPong(r.localEntryForTest(t, sessionID)), next)
 }
 
 // WaitTouchesForTest waits for in-flight touch goroutines.
@@ -57,14 +78,11 @@ func (r *Relay) SetPendingWaitHookForTest(h func()) { r.testHookPendingWait = h 
 // HeartbeatForTest runs one heartbeat now.
 func (r *Relay) HeartbeatForTest() { r.heartbeat() }
 
-// SourceForTest returns the incarnation source of a local session.
-func (r *Relay) SourceForTest(sessionID string) string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if e := r.sessions[sessionID]; e != nil {
-		return e.source
-	}
-	return ""
+// SourceForTest returns the incarnation source of a live local session,
+// waiting for a just-admitted session to be registered.
+func (r *Relay) SourceForTest(t testing.TB, sessionID string) string {
+	t.Helper()
+	return r.localEntryForTest(t, sessionID).source
 }
 
 // NewAdmitterForTest exposes the per-connection admitter.
@@ -72,6 +90,10 @@ func (r *Relay) NewAdmitterForTest(p Principal, transport string) (conduit.Admit
 	a := &admitter{r: r, p: p, transport: transport}
 	return a, func() (registry.SessionRecord, bool) { rec, _, ok := a.admitted(); return rec, ok }
 }
+
+// DrainWriteConcurrency is the bound on Shutdown's in-flight session
+// draining writes.
+const DrainWriteConcurrency = drainWriteConcurrency
 
 // PongFrame is an inbound Pong.
 var PongFrame = &conduitv1.Frame{Body: &conduitv1.Frame_Pong{Pong: &conduitv1.Pong{}}}

@@ -114,7 +114,7 @@ func TestAdmitLaunchIDMatchAdmitted(t *testing.T) {
 	if rec.EndpointIncarnation != "L2" || rec.Capabilities.IncarnationSource != relay.IncarnationSourceLaunchID || rec.Capabilities.EndpointIncarnation != "L2" {
 		t.Fatalf("row incarnation = %q source %q", rec.EndpointIncarnation, rec.Capabilities.IncarnationSource)
 	}
-	if got := n.Relay.SourceForTest(rec.SessionID); got != relay.IncarnationSourceLaunchID {
+	if got := n.Relay.SourceForTest(t, rec.SessionID); got != relay.IncarnationSourceLaunchID {
 		t.Fatalf("entry source = %q", got)
 	}
 }

@@ -267,3 +267,106 @@ func TestGoAwayCarriesReconnectWindow(t *testing.T) {
 		})
 	}
 }
+
+// TestTestHelpersWaitForRegistration (r3-F1): the session lookup test
+// helpers wait for a session whose Welcome is out but which Serve has not
+// registered yet, instead of returning a nil interceptor or an empty
+// source.
+func TestTestHelpersWaitForRegistration(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		call func(t *testing.T, r *relay.Relay, id string) bool
+	}{
+		{name: "touch interceptor", call: func(t *testing.T, r *relay.Relay, id string) bool {
+			return r.TouchInterceptorForTest(t, id, nil) != nil
+		}},
+		{name: "source", call: func(t *testing.T, r *relay.Relay, id string) bool {
+			return r.SourceForTest(t, id) == relay.IncarnationSourceLaunchID
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := relaytest.NewWorld(t)
+			n := w.StartNode("relay-a", nil)
+			w.SetPrincipal("a", agentPrincipal("L1", 1))
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			unblock := func() { releaseOnce.Do(func() { close(release) }) }
+			t.Cleanup(unblock)
+			n.Relay.SetBeforeReadyHookForTest(func() { <-release })
+			waiting := make(chan struct{}, 1)
+			n.Relay.SetPendingWaitHookForTest(func() {
+				select {
+				case waiting <- struct{}{}:
+				default:
+				}
+			})
+			_, wel := n.MustDial("a", relaytest.AgentHello(agentID, "L1", "", "pty"), conduit.Config{})
+			result := make(chan bool, 1)
+			go func() { result <- tc.call(t, n.Relay, wel.GetSessionId()) }()
+			relaytest.Wait(t, waiting, "the helper to wait for the pending session")
+			select {
+			case <-result:
+				t.Fatal("helper returned while the session was still pending")
+			default:
+			}
+			unblock()
+			if !relaytest.Wait(t, result, "helper") {
+				t.Fatal("helper did not see the registered session")
+			}
+		})
+	}
+}
+
+// TestShutdownBoundsDrainWriteConcurrency (r3-F2): Shutdown never has more
+// than DrainWriteConcurrency session draining writes in flight, however
+// many sessions the relay holds, and still sends GoAway to every session.
+// Every write hangs until the shared drain deadline (a registry outage), so
+// all writes the relay would issue at once are in flight together: with
+// the bound exactly DrainWriteConcurrency, without it every session.
+func TestShutdownBoundsDrainWriteConcurrency(t *testing.T) {
+	const sessions = 3 * relay.DrainWriteConcurrency
+	w := relaytest.NewWorld(t)
+	var (
+		armed    atomic.Bool
+		inflight atomic.Int32
+		maxSeen  atomic.Int32
+	)
+	w.Store.Fault = func(ctx context.Context, op string) error {
+		if !armed.Load() || op != registry.OpSetSessionDraining {
+			return nil
+		}
+		cur := inflight.Add(1)
+		defer inflight.Add(-1)
+		for {
+			m := maxSeen.Load()
+			if cur <= m || maxSeen.CompareAndSwap(m, cur) {
+				break
+			}
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	n := w.StartNode("relay-a", nil)
+	var dialed []conduit.LocalSession
+	for i := range sessions {
+		key := fmt.Sprintf("u%d", i)
+		id := fmt.Sprintf("user-%d", i)
+		w.SetPrincipal(key, relay.Principal{Kind: registry.PrincipalUser, ID: id})
+		s, wel := n.MustDial(key, relaytest.UserHello(id), conduit.Config{})
+		// Shutdown drains registered sessions only.
+		_ = n.Relay.SourceForTest(t, wel.GetSessionId())
+		dialed = append(dialed, s)
+	}
+	armed.Store(true)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() { result <- n.Relay.Shutdown(ctx) }()
+	for i, s := range dialed {
+		relaytest.WaitClosed(t, s.GoAwayReceived(), fmt.Sprintf("GoAway to session %d", i))
+	}
+	_ = relaytest.Wait(t, result, "Shutdown")
+	if got := maxSeen.Load(); got != relay.DrainWriteConcurrency {
+		t.Fatalf("in-flight draining writes peaked at %d, want exactly the bound %d", got, relay.DrainWriteConcurrency)
+	}
+}

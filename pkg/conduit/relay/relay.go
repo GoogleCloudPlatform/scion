@@ -53,6 +53,11 @@ const (
 	// admission, which runs detached from the (possibly expired)
 	// handshake ctx.
 	cleanupTimeout = 15 * time.Second
+	// drainWriteConcurrency bounds the SetSessionDraining writes Shutdown
+	// has in flight at once, so a relay with thousands of sessions does
+	// not queue them all on the store's connection pool (r3-F2). A batched
+	// per-relay write is the follow-up.
+	drainWriteConcurrency = 16
 	// DefaultReconnectWindow is the GoAway.reconnect_after_ms the relay
 	// sends with a planned close (supersede, drain, row reaped). It is the
 	// jitter WINDOW (design v2.6 §3.3): the dialer draws its delay
@@ -687,15 +692,20 @@ func (r *Relay) GoAway(sessionID string, opts conduit.GoAwayOptions) error {
 
 func (r *Relay) goAway(e *entry, opts conduit.GoAwayOptions) {
 	ctx, cancel := context.WithTimeout(context.Background(), deleteTimeout)
-	r.markSessionDraining(ctx, e)
+	if err := r.markSessionDraining(ctx, e); err != nil {
+		r.log.Warn("Conduit: marking session draining failed", "session_id", e.rec.SessionID, "error", err)
+	}
 	cancel()
 	_ = e.sess.GoAway(opts)
 }
 
-func (r *Relay) markSessionDraining(ctx context.Context, e *entry) {
+// markSessionDraining marks e's row draining; a row that is already gone
+// is not an error.
+func (r *Relay) markSessionDraining(ctx context.Context, e *entry) error {
 	if err := r.cfg.Registry.SetSessionDraining(ctx, e.rec.SessionID); err != nil && !errors.Is(err, registry.ErrSessionNotFound) {
-		r.log.Warn("Conduit: marking session draining failed", "session_id", e.rec.SessionID, "error", err)
+		return err
 	}
+	return nil
 }
 
 // Local returns the live local session with sessionID, if this relay holds
@@ -823,7 +833,8 @@ func (r *Relay) Shutdown(ctx context.Context) error {
 // draining (so routing stops choosing them), GoAway to every session, then
 // wait for the sessions to end (bounded by ctx). The store writes share one
 // deadline, so a registry outage delays the GoAways by at most one store
-// timeout, not one per session.
+// timeout, not one per session. At most drainWriteConcurrency session
+// writes are in flight at once; failures are logged as one summary line.
 func (r *Relay) drain(ctx context.Context, gen int64, entries []*entry) {
 	dctx, cancel := context.WithTimeout(ctx, deleteTimeout)
 	var writes sync.WaitGroup
@@ -834,15 +845,48 @@ func (r *Relay) drain(ctx context.Context, gen int64, entries []*entry) {
 			r.log.Warn("Conduit relay: marking relay draining failed", "error", err)
 		}
 	}()
-	for _, e := range entries {
+	var (
+		failMu   sync.Mutex
+		failed   int
+		firstErr error
+	)
+	fail := func(n int, err error) {
+		failMu.Lock()
+		defer failMu.Unlock()
+		failed += n
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
+	work := make(chan *entry)
+	for range min(drainWriteConcurrency, len(entries)) {
 		writes.Add(1)
 		go func() {
 			defer writes.Done()
-			r.markSessionDraining(dctx, e)
+			for e := range work {
+				if err := r.markSessionDraining(dctx, e); err != nil {
+					fail(1, err)
+				}
+			}
 		}()
 	}
+feed:
+	for i, e := range entries {
+		select {
+		case work <- e:
+		case <-dctx.Done():
+			// Out of time: the rest stay non-draining until their GoAway
+			// closes them.
+			fail(len(entries)-i, dctx.Err())
+			break feed
+		}
+	}
+	close(work)
 	writes.Wait()
 	cancel()
+	if failed > 0 {
+		r.log.Warn("Conduit relay: marking sessions draining failed", "failed", failed, "sessions", len(entries), "error", firstErr)
+	}
 	for _, e := range entries {
 		_ = e.sess.GoAway(conduit.GoAwayOptions{Reason: ReasonDraining, ReconnectAfter: r.reconnectAfter()})
 	}

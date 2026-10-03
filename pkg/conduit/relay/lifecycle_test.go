@@ -245,7 +245,7 @@ func TestShutdownWaitsAndIsBounded(t *testing.T) {
 				})
 			}
 			if tc.touch {
-				n.Relay.TouchInterceptorForTest(wel.GetSessionId(), nil)(conduit.Inbound, relay.PongFrame)
+				n.Relay.TouchInterceptorForTest(t, wel.GetSessionId(), nil)(conduit.Inbound, relay.PongFrame)
 				relaytest.Wait(t, entered, "touch to reach the store")
 			}
 			go func() { <-sess.GoAwayReceived(); _ = sess.Close() }()
@@ -311,7 +311,7 @@ func TestTouchAfterShutdownIsNoop(t *testing.T) {
 	n := w.StartNode("relay-a", nil)
 	w.SetPrincipal("a", agentPrincipal("L1", 1))
 	sess, wel := n.MustDial("a", relaytest.AgentHello(agentID, "L1", "", "pty"), conduit.Config{})
-	ic := n.Relay.TouchInterceptorForTest(wel.GetSessionId(), nil)
+	ic := n.Relay.TouchInterceptorForTest(t, wel.GetSessionId(), nil)
 	go func() { <-sess.GoAwayReceived(); _ = sess.Close() }()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -428,7 +428,7 @@ func TestTouchInterceptorChains(t *testing.T) {
 	}
 	before := w.Sessions(registry.PrincipalAgent, agentID).Sessions[0].Session.LastSeen
 	w.Advance(5 * time.Second)
-	out := n.Relay.TouchInterceptorForTest(wel.GetSessionId(), next)(conduit.Inbound, relay.PongFrame)
+	out := n.Relay.TouchInterceptorForTest(t, wel.GetSessionId(), next)(conduit.Inbound, relay.PongFrame)
 	n.Relay.WaitTouchesForTest()
 	if len(seen) != 1 || len(out) != 2 {
 		t.Fatalf("next saw %d frames, chain returned %d; want 1 and 2", len(seen), len(out))
@@ -467,7 +467,7 @@ func TestTouchNeverBlocksReadLoop(t *testing.T) {
 		inflight.Add(-1)
 		return nil
 	})
-	ic := n.Relay.TouchInterceptorForTest(wel.GetSessionId(), nil)
+	ic := n.Relay.TouchInterceptorForTest(t, wel.GetSessionId(), nil)
 	ic(conduit.Inbound, relay.PongFrame)
 	relaytest.Wait(t, entered, "first touch")
 	returned := make(chan struct{})
@@ -506,7 +506,7 @@ func TestTouchSessionNotFoundCloses(t *testing.T) {
 	if _, err := w.Inner.DeleteSessionCAS(context.Background(), wel.GetSessionId(), "relay-a", n.Relay.Generation()); err != nil {
 		t.Fatal(err)
 	}
-	n.Relay.TouchInterceptorForTest(wel.GetSessionId(), nil)(conduit.Inbound, relay.PongFrame)
+	n.Relay.TouchInterceptorForTest(t, wel.GetSessionId(), nil)(conduit.Inbound, relay.PongFrame)
 	relaytest.WaitClosed(t, sess.GoAwayReceived(), "GoAway")
 	relaytest.WaitClosed(t, sess.Done(), "session close")
 	if code := conduit.CodeOf(sess.Err(), 0); code != conduit.CloseRelayRestart {

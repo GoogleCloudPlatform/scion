@@ -81,7 +81,7 @@ func TestFallbackPostInsertRecheck(t *testing.T) {
 
 	// L's relay touches on the next pong, finds the row gone and asks the
 	// launch container to reconnect.
-	a.Relay.TouchInterceptorForTest(lWel.GetSessionId(), nil)(conduit.Inbound, relay.PongFrame)
+	a.Relay.TouchInterceptorForTest(t, lWel.GetSessionId(), nil)(conduit.Inbound, relay.PongFrame)
 	a.Relay.WaitTouchesForTest()
 	relaytest.WaitClosed(t, l.GoAwayReceived(), "GoAway to the evicted launch session")
 	relaytest.WaitClosed(t, l.Done(), "evicted launch session close")
