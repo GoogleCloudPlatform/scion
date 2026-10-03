@@ -335,6 +335,11 @@ func TestSanitizeFailureReason(t *testing.T) {
 	assert.True(t, utf8.ValidString(got))
 	assert.True(t, strings.HasPrefix(got, "xé"))
 
+	// Dropped runes ahead of the real text do not push it out of the
+	// scanned window (msgb-rev-3 round 2, finding 4).
+	padded := strings.Repeat("\u200b", 1000) + "real broker reason"
+	assert.Equal(t, "real broker reason", sanitizeFailureReason(padded))
+
 	long := strings.Repeat("é", maxFailureReasonBytes) // 2 bytes per rune
 	got = sanitizeFailureReason(long)
 	assert.LessOrEqual(t, len(got), maxFailureReasonBytes)

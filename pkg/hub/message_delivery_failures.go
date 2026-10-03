@@ -220,6 +220,13 @@ func (s *Server) applyBrokerMessageFailure(ctx context.Context, brokerID string,
 // stored on the message row and echoed to the sender.
 const maxFailureReasonBytes = 512
 
+// maxFailureReasonScanBytes bounds how much input sanitizeFailureReason
+// scans. It matches the 64KiB cap already applied to broker error bodies,
+// so dropped runes ahead of the real text (e.g. a long run of zero-width
+// characters) cannot push that text out of the scanned window; the scan
+// stops early once the output is full, so typical inputs cost no more.
+const maxFailureReasonScanBytes = 64 << 10
+
 // sanitizeFailureReason makes a broker-supplied reason safe to store and to
 // deliver into another agent's terminal: invalid UTF-8 is dropped, and of
 // the display-unsafe runes (isDisplayUnsafeRune: Cc, Cf, Zl, Zp) the line
@@ -228,16 +235,19 @@ const maxFailureReasonBytes = 512
 // isolates, zero-width characters, BOM, ...) are removed. The result is
 // truncated to maxFailureReasonBytes on a rune boundary.
 func sanitizeFailureReason(reason string) string {
-	// Bound the work on arbitrarily large input before any allocation. 4x
-	// leaves room for dropped control/invalid bytes ahead of the rune-aware
-	// truncation below; a rune split by this cut is dropped as invalid UTF-8.
-	if len(reason) > maxFailureReasonBytes*4 {
-		reason = reason[:maxFailureReasonBytes*4]
+	// Bound the work on arbitrarily large input. A rune split by this cut
+	// decodes as invalid UTF-8 and is dropped below.
+	if len(reason) > maxFailureReasonScanBytes {
+		reason = reason[:maxFailureReasonScanBytes]
 	}
-	reason = strings.ToValidUTF8(reason, "")
 	var b strings.Builder
 	b.Grow(min(len(reason), maxFailureReasonBytes))
-	for _, r := range reason {
+	for i := 0; i < len(reason); {
+		r, size := utf8.DecodeRuneInString(reason[i:])
+		i += size
+		if r == utf8.RuneError && size == 1 {
+			continue // invalid UTF-8
+		}
 		if isDisplayUnsafeRune(r) {
 			if !unicode.IsSpace(r) {
 				continue
