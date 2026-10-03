@@ -12,7 +12,7 @@ Conventions for scripts in `hack/check-*.sh`. Reference implementations:
 | 1 | Analysed, violations found (list on stderr). |
 | 2 | **RESERVED.** GNU make flattens all non-zero recipe exits to 2, so this code can never be owned by a script. Read it as "ask the log." |
 | 3 | COULD NOT ANALYSE: required tool missing (e.g. `rg` not installed). |
-| 4 | COULD NOT ANALYSE: no candidate files matched (wrong cwd, empty checkout). |
+| 4 | COULD NOT ANALYSE: no candidate files matched (wrong cwd, empty checkout), or a declared scan root directory is missing (e.g. `check-method-not-allowed.sh` tests its roots before scanning, so a renamed root cannot silently shrink the scan). |
 
 Exit 3 is unconditional: every check, at every severity level, exits 3 when a
 required tool is missing. A run that examined nothing must not look like a

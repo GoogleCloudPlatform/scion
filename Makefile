@@ -390,9 +390,11 @@ proto:
 # with -mod=mod, so a codegen dependency missing from go.sum shows up as a
 # go.mod/go.sum diff, which is a real failure. Run on a clean pkg/ent tree:
 # uncommitted pkg/ent edits read as drift (ptone/scion#2746).
+# Exit codes: 1 = drift; 3 = go generate itself failed (not drift), shown by
+# make as "Error 3".
 ent-check:
 	@echo "Checking ent generated code is up to date..."
-	@go generate ./pkg/ent
+	@go generate ./pkg/ent || { echo "go generate ./pkg/ent failed (not drift)"; exit 3; }
 	@untracked="$$(git status --porcelain --untracked-files=all -- pkg/ent | grep '^??' || true)"; \
 	if ! git diff --exit-code --stat -- pkg/ent go.mod go.sum || [ -n "$$untracked" ]; then \
 		[ -z "$$untracked" ] || { echo "Untracked generated files:"; echo "$$untracked"; }; \

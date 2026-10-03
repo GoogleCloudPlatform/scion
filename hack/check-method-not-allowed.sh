@@ -14,6 +14,9 @@
 # correctness check, not a security one, but it is blocking in CI, so an
 # empty scan must not read as clean.
 #   Missing tool:      exit 3 (nothing analysed; see hack/lib/require-tool.sh)
+#   Missing scan root: exit 4 (a root directory does not exist, e.g. it was
+#                      renamed; checked before scanning so a partial scan
+#                      cannot read as clean)
 #   No candidates:     exit 4 (no MethodNotAllowed call found at all, which
 #                      means the scan roots are wrong, not that the tree is
 #                      clean)
@@ -114,6 +117,15 @@ if [[ "$sha" != "unknown" ]] && [[ -n "$(git status --porcelain 2>/dev/null)" ]]
   sha="${sha}-dirty"
 fi
 
+# grep -r below swallows "No such file or directory", so a renamed root would
+# silently shrink the scan. Refuse to scan at all if any root is missing.
+for r in "${roots[@]}"; do
+  if [[ ! -d "$r" ]]; then
+    echo "$name: analysed ${sha}, scan root $r missing — NOTHING WAS ANALYSED (root renamed or moved? update roots in $0)" >&2
+    exit 4
+  fi
+done
+
 violations="$(scan "${roots[@]}")" && rc=0 || rc=$?
 if [[ "$rc" -eq 4 ]]; then
   echo "$name: analysed ${sha}, no MethodNotAllowed calls under ${roots[*]} — NOTHING WAS ANALYSED (wrong cwd or empty checkout?)" >&2
@@ -122,7 +134,7 @@ fi
 
 count="$(count_lines "$violations")"
 if [[ "$count" -gt 0 ]]; then
-  echo "$name: analysed ${sha}, ${count} bare MethodNotAllowed(w) call(s) without allowed methods:" >&2
+  echo "$name: analysed ${sha}, ${count} line(s) with a bare MethodNotAllowed(w) call (no allowed methods):" >&2
   echo "$violations" >&2
   echo >&2
   echo "Pass the methods the handler accepts so the 405 carries an Allow header:" >&2
