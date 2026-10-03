@@ -169,3 +169,33 @@ func TestNowFollowsSetNow(t *testing.T) {
 		t.Fatalf("Now() still returns the fixed clock after restore")
 	}
 }
+
+func TestAgo(t *testing.T) {
+	base := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	restore := SetNow(func() time.Time { return base })
+	defer restore()
+
+	tests := []struct {
+		name string
+		t    time.Time
+		want string
+	}{
+		{"zero", time.Time{}, "never"},
+		{"now", base, "just now"},
+		{"past under a minute", base.Add(-30 * time.Second), "just now"},
+		{"past minutes", base.Add(-5 * time.Minute), "5m ago"},
+		{"past hours", base.Add(-2 * time.Hour), "2h ago"},
+		{"past days", base.Add(-72 * time.Hour), "3d ago"},
+		// Clock skew: a past-only instant slightly ahead of the local clock.
+		{"future by 5s", base.Add(5 * time.Second), "just now"},
+		{"future by 5m", base.Add(5 * time.Minute), "just now"},
+	}
+	for _, tc := range tests {
+		if got := Ago(tc.t); got != tc.want {
+			t.Errorf("%s: Ago = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	if got := Relative(base.Add(5 * time.Second)); got != "in <1m" {
+		t.Errorf("Relative(now+5s) = %q, want in <1m (only Ago clamps)", got)
+	}
+}

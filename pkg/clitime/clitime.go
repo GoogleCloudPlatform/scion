@@ -156,6 +156,18 @@ func Relative(t time.Time) string {
 	return amount + " ago"
 }
 
+// Ago is Relative for instants that are always in the past, such as a last
+// heartbeat or a creation time. Clock skew between the hub and this machine
+// can put such an instant slightly ahead of the local clock; Ago renders any
+// future t as "just now" instead of "in 5m". The zero time renders as
+// "never".
+func Ago(t time.Time) string {
+	if !t.IsZero() && t.After(Now()) {
+		return "just now"
+	}
+	return Relative(t)
+}
+
 // Now returns the current time from the clock Relative measures against, so
 // callers that compare against "now" agree with Relative under SetNow.
 func Now() time.Time {

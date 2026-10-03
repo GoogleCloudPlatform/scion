@@ -66,6 +66,8 @@ func TestFormatLastActivity(t *testing.T) {
 		{"empty status with time", "", now.Add(-5 * time.Minute), "5m ago"},
 		{"WORKING status with time", "WORKING", now.Add(-5 * time.Minute), "5m ago"},
 		{"working status with time", "working", now.Add(-5 * time.Minute), "5m ago"},
+		{"clock skew: activity a few seconds ahead", "thinking", now.Add(5 * time.Second), "thinking, just now"},
+		{"clock skew: activity minutes ahead", "", now.Add(5 * time.Minute), "just now"},
 		{"activity with zero time", "running", time.Time{}, "running"},
 		{"empty status with zero time", "", time.Time{}, "-"},
 	}

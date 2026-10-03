@@ -984,7 +984,7 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 func formatLastActivity(status string, t time.Time) string {
 	timePart := "-"
 	if !t.IsZero() {
-		timePart = clitime.Relative(t)
+		timePart = clitime.Ago(t)
 	}
 	if status == "" || status == "WORKING" || status == "working" {
 		return timePart

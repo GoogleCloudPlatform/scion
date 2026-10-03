@@ -1534,7 +1534,7 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 				fmt.Printf("  Status:      %s\n", status.BrokerStatus)
 			}
 			if !status.LastHeartbeat.IsZero() {
-				fmt.Printf("  Last seen:   %s\n", clitime.Relative(status.LastHeartbeat))
+				fmt.Printf("  Last seen:   %s\n", clitime.Ago(status.LastHeartbeat))
 			}
 		} else if status.Registered {
 			fmt.Printf("\n  Connected:   no (Hub unreachable)\n")
@@ -1557,7 +1557,7 @@ func runBrokerStatus(cmd *cobra.Command, args []string) error {
 				fmt.Printf("  Status:      %s\n", status.BrokerStatus)
 			}
 			if !status.LastHeartbeat.IsZero() {
-				fmt.Printf("  Last seen:   %s\n", clitime.Relative(status.LastHeartbeat))
+				fmt.Printf("  Last seen:   %s\n", clitime.Ago(status.LastHeartbeat))
 			}
 		} else {
 			fmt.Printf("  Connected:   no (Hub unreachable)\n")
@@ -1727,7 +1727,7 @@ func runRemoteBrokerStatus(brokerID string) error {
 	}
 	fmt.Printf("  Status:      %s\n", status.BrokerStatus)
 	if !status.LastHeartbeat.IsZero() {
-		fmt.Printf("  Last seen:   %s\n", clitime.Relative(status.LastHeartbeat))
+		fmt.Printf("  Last seen:   %s\n", clitime.Ago(status.LastHeartbeat))
 	}
 	fmt.Printf("  Hub:         %s\n", status.HubEndpoint)
 	fmt.Println()

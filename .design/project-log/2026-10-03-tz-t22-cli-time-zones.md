@@ -18,6 +18,11 @@ not place them. Some relative helpers showed future times as "just now".
   - The styles `Full`, `Minute`, `Clock` and `Date` all use 24-hour layouts
     that end in `MST`.
   - `Relative` handles both directions ("5m ago", "in 5m").
+  - `Ago` is `Relative` for past-only instants (heartbeats, activity,
+    created/joined/fired). A future value caused by hub/laptop clock skew
+    reads "just now", as the removed helpers did, instead of "in 5m".
+  - Token expiry prints `(in 23h)` / `(EXPIRED 2h ago)` through the same
+    helpers instead of raw Go durations.
 - Global persistent flags `--tz <IANA>` and `--utc`, resolved in root
   `PersistentPreRunE` through `clitime.ResolveZone`.
   - The two flags are mutually exclusive, and an invalid zone is an error.
@@ -61,6 +66,5 @@ not place them. Some relative helpers showed future times as "just now".
 
 - `hub secret list` ignores the global `--format json`; only its own
   `--json` flag works.
-- `printTokenExpiry` still prints Go durations ("in 59m0s").
 - `cmd/sciontool` prints RFC3339 in whatever zone the process uses. It is a
   separate binary and outside this scope.

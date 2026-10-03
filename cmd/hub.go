@@ -393,14 +393,12 @@ func parseJWTExpiry(tokenString string) *time.Time {
 
 // printTokenExpiry prints the token expiry in a human-friendly format.
 func printTokenExpiry(expiry time.Time) {
-	now := time.Now()
-	if now.After(expiry) {
-		ago := now.Sub(expiry).Truncate(time.Minute)
-		fmt.Printf("Expires:    %s (EXPIRED %s ago)\n", clitime.Format(expiry, clitime.Full), ago)
-	} else {
-		remaining := expiry.Sub(now).Truncate(time.Minute)
-		fmt.Printf("Expires:    %s (in %s)\n", clitime.Format(expiry, clitime.Full), remaining)
+	when := clitime.Format(expiry, clitime.Full)
+	if !expiry.After(clitime.Now()) {
+		fmt.Printf("Expires:    %s (EXPIRED %s)\n", when, clitime.Ago(expiry))
+		return
 	}
+	fmt.Printf("Expires:    %s (%s)\n", when, clitime.Relative(expiry))
 }
 
 func isLocalhostEndpoint(endpoint string) bool {
@@ -1764,7 +1762,7 @@ func runHubBrokers(cmd *cobra.Command, args []string) error {
 	for _, h := range resp.Brokers {
 		lastSeen := "-"
 		if !h.LastHeartbeat.IsZero() {
-			lastSeen = clitime.Relative(h.LastHeartbeat)
+			lastSeen = clitime.Ago(h.LastHeartbeat)
 		}
 		autoProvide := "no"
 		if h.AutoProvide {
@@ -1874,7 +1872,7 @@ func runHubBrokersInfo(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Version:     %s\n", broker.Version)
 	}
 	if !broker.LastHeartbeat.IsZero() {
-		fmt.Printf("Last Seen:   %s (%s)\n", clitime.Relative(broker.LastHeartbeat), clitime.Format(broker.LastHeartbeat, clitime.Full))
+		fmt.Printf("Last Seen:   %s (%s)\n", clitime.Ago(broker.LastHeartbeat), clitime.Format(broker.LastHeartbeat, clitime.Full))
 	}
 	if broker.Endpoint != "" {
 		fmt.Printf("Endpoint:    %s\n", broker.Endpoint)

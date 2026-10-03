@@ -272,7 +272,7 @@ func runScheduleList(cmd *cobra.Command, args []string) error {
 					id = id[:8]
 				}
 				fireAt := scheduleWhen(evt.FireAt, evt.Status)
-				created := clitime.Relative(evt.CreatedAt)
+				created := clitime.Ago(evt.CreatedAt)
 				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", id, evt.EventType, evt.Status, fireAt, created)
 			}
 			_ = w.Flush()
@@ -729,7 +729,7 @@ func runScheduleHistory(cmd *cobra.Command, args []string) error {
 		}
 		firedAt := "-"
 		if evt.FiredAt != nil {
-			firedAt = clitime.Relative(*evt.FiredAt)
+			firedAt = clitime.Ago(*evt.FiredAt)
 		}
 		errStr := "-"
 		if evt.Error != "" {
