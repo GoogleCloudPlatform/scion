@@ -1056,7 +1056,8 @@ authDone:
 
 	agentEnv, envWarnings, missingEnvKeys, droppedConfigEnv := buildAgentEnv(finalScionCfg, opts.Env, opts.BrokerMode)
 	droppedBrokerEnvVars = append(droppedBrokerEnvVars, droppedConfigEnv...)
-	warnings = append(warnings, warnDroppedBrokerEnv(agentID, opts.Env, droppedBrokerEnvVars)...)
+	hubOnlyEnvWarnings := warnDroppedBrokerEnv(agentID, opts.Env, droppedBrokerEnvVars)
+	warnings = append(warnings, hubOnlyEnvWarnings...)
 	if len(missingEnvKeys) > 0 {
 		sort.Strings(missingEnvKeys)
 		if opts.BrokerMode {
@@ -1620,6 +1621,7 @@ authDone:
 				}
 				a.Detached = detached
 				a.Warnings = warnings
+				a.HubOnlyEnvWarnings = hubOnlyEnvWarnings
 				a.Phase = status
 				a.HarnessConfig = harnessConfigName
 				a.HarnessConfigRevision = harnessConfigRevision
@@ -1638,6 +1640,7 @@ authDone:
 		Phase:                 status,
 		Detached:              detached,
 		Warnings:              warnings,
+		HubOnlyEnvWarnings:    hubOnlyEnvWarnings,
 		HarnessConfig:         harnessConfigName,
 		HarnessConfigRevision: harnessConfigRevision,
 		HarnessAuth:           opts.HarnessAuth,

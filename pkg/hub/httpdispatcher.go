@@ -641,6 +641,10 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		d.log.Debug("No token generator configured - agent will not have Hub credentials")
 	}
 
+	// An agent written before ExplicitTimezone existed may still carry TZ in
+	// its env records; adopt it as a pin before the env is copied below.
+	adoptLegacyTZ(agent.AppliedConfig)
+
 	// Add configuration if available
 	if agent.AppliedConfig != nil {
 		// effectiveDispatchWorkspace applies the "a linked local provider
@@ -736,25 +740,10 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		classifyEnv(&req.EnvClassifications, "SCION_THINKING_LEVEL", api.EnvKindPlain)
 	}
 
-	// Inject TZ from the profile's first-class timezone field. Precedence:
-	//   1. Profile timezone  (first-class field — wins over everything)
-	//   2. Profile env TZ     (already in ResolvedEnv from config merge)
-	//   3. Hub default_timezone (fallback when neither profile source sets TZ)
-	//   4. UTC                (container default — no injection needed)
-	if d.profileTimezoneProvider != nil && agent.AppliedConfig != nil && agent.AppliedConfig.Profile != "" {
-		if tz := d.profileTimezoneProvider(agent.AppliedConfig.Profile); tz != "" {
-			req.ResolvedEnv["TZ"] = tz
-			classifyEnv(&req.EnvClassifications, "TZ", api.EnvKindPlain)
-		}
-	}
-	if _, hasTZ := req.ResolvedEnv["TZ"]; !hasTZ {
-		if d.hubAgentDefaultsProvider != nil {
-			if hubTZ := d.hubAgentDefaultsProvider().DefaultTimezone; hubTZ != "" {
-				req.ResolvedEnv["TZ"] = hubTZ
-				classifyEnv(&req.EnvClassifications, "TZ", api.EnvKindPlain)
-			}
-		}
-	}
+	// TZ comes only from the agent TZ resolver (pin > storage env > hub
+	// default > none). Any other TZ in the env built so far is dropped; the
+	// writers below (storage merge, env secrets) skip the key.
+	setResolvedAgentTZ(req.ResolvedEnv, &req.EnvClassifications, d.resolveAgentTZ(ctx, agent, false))
 
 	// Inject hub name so agents can label their Cloud Logging entries with the
 	// hub identity, matching the hub-scoped log query filter (labels.hub).
@@ -777,6 +766,9 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			req.ResolvedEnv = make(map[string]string)
 		}
 		for k, v := range envFromStorage {
+			if k == agentTZEnvKey {
+				continue // the resolver owns TZ
+			}
 			if existing, exists := req.ResolvedEnv[k]; !exists || existing == "" {
 				req.ResolvedEnv[k] = v
 				if envFromStoragePlain[k] {
@@ -871,6 +863,8 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 	// Resolve type-aware secrets from all applicable scopes
 	if !noAuth {
 		resolvedSecrets, asNeededKeys, err := d.resolveSecrets(ctx, agent)
+		resolvedSecrets = d.dropTZTargetedSecrets(ctx, agent, resolvedSecrets)
+		asNeededKeys = withoutTZKey(asNeededKeys)
 		if err != nil {
 			d.log.ErrorContext(ctx, "Failed to resolve secrets; agent will start without injected secrets",
 				"agent_id", agent.ID, "error", err)
@@ -1135,10 +1129,16 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	return info
 }
 
-// applyBrokerResponse updates agent fields from the broker's response.
+// applyBrokerResponse updates agent fields from the broker's response and
+// relays the broker's hub-only env warnings to the dispatch warnings
+// collector on ctx, if the caller attached one.
 func (d *HTTPAgentDispatcher) applyBrokerResponse(ctx context.Context, agent *store.Agent, resp *RemoteAgentResponse) {
 	d.forgetRuntimeTarget(ctx, agent)
+	if resp == nil {
+		return
+	}
 	if resp.Agent != nil {
+		addDispatchWarnings(ctx, resp.Agent.Warnings...)
 		if d.debug {
 			d.log.Debug("applyBrokerResponse: applying broker phase",
 				"agentName", agent.Name,
@@ -1357,14 +1357,23 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	// be satisfied by as_needed env vars or secrets — mirroring the pattern in
 	// DispatchAgentCreateWithGather. We inline this instead of calling
 	// DispatchFinalizeEnv because the finalize path does not set ProvisionOnly.
-	if envReqs != nil && len(envReqs.Needs) > 0 {
-		asNeededEnv := d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs, envReqs.Alternatives)
-		if len(asNeededEnv) > 0 {
+	// TZ is never a gathered key: drop it from the needs and, if an older
+	// broker asked for it, answer it with the resolver in the replay.
+	tzNeeded := takeTZGatherNeed(envReqs)
+	if envReqs != nil && (len(envReqs.Needs) > 0 || tzNeeded) {
+		var asNeededEnv map[string]string
+		if len(envReqs.Needs) > 0 {
+			asNeededEnv = d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs, envReqs.Alternatives)
+		}
+		if len(asNeededEnv) > 0 || tzNeeded {
 			if req.ResolvedEnv == nil {
 				req.ResolvedEnv = make(map[string]string)
 			}
 			for k, v := range asNeededEnv {
 				req.ResolvedEnv[k] = v
+			}
+			if tzNeeded {
+				setResolvedAgentTZ(req.ResolvedEnv, &req.EnvClassifications, d.resolveAgentTZ(ctx, agent, true))
 			}
 			req.EnvSources = d.buildEnvSources(ctx, agent, req.ResolvedEnv)
 			// Design §3.4 Amendment A2.3: a fresh RequestID for the replay. Reusing the first
@@ -1383,6 +1392,7 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 			if err2 != nil {
 				return err2
 			}
+			takeTZGatherNeed(envReqs2)
 			if envReqs2 != nil && len(envReqs2.Needs) > 0 {
 				d.log.Warn(callerName+": env vars still missing after second pass",
 					"agent", agent.Name, "needs", envReqs2.Needs)
@@ -1518,11 +1528,17 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 
 	// Second pass: if the broker reported needed keys, check whether any can
 	// be satisfied by as_needed env vars or secrets. If so, finalize them
-	// transparently without requiring CLI intervention.
-	if envReqs != nil && len(envReqs.Needs) > 0 {
-		asNeededEnv := d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs, envReqs.Alternatives)
-		if len(asNeededEnv) > 0 {
-			err := d.DispatchFinalizeEnv(ctx, agent, asNeededEnv)
+	// transparently without requiring CLI intervention. TZ is never a
+	// gathered key: it is removed from the needs here and, if an older
+	// broker asked for it, answered by the resolver in the finalize pass.
+	tzNeeded := takeTZGatherNeed(envReqs)
+	if envReqs != nil && (len(envReqs.Needs) > 0 || tzNeeded) {
+		var asNeededEnv map[string]string
+		if len(envReqs.Needs) > 0 {
+			asNeededEnv = d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs, envReqs.Alternatives)
+		}
+		if len(asNeededEnv) > 0 || tzNeeded {
+			err := d.finalizeEnv(ctx, agent, asNeededEnv, tzNeeded)
 			if err == nil {
 				return nil, nil // All needs satisfied by as_needed entries
 			}
@@ -1567,7 +1583,16 @@ func (e *ErrEnvStillMissing) Error() string {
 // at highest precedence, instead of calling the broker's stateful finalize-env
 // action. This makes the finalize HA-safe: the replay can land on any broker
 // replica because it carries the complete request state.
-func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) (err error) {
+func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) error {
+	return d.finalizeEnv(ctx, agent, env, false)
+}
+
+// finalizeEnv implements DispatchFinalizeEnv. TZ in the caller env is
+// dropped: only the resolver writes TZ. answerTZ sends the resolver's
+// gather answer for TZ (UTC rather than no TZ) because the broker listed TZ
+// as needed; a TZ need reported by this replay is answered the same way.
+func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string, answerTZ bool) (err error) {
+	env = d.withoutCallerTZ(ctx, agent, env)
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
@@ -1602,6 +1627,9 @@ func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *st
 	}
 	// Classify the caller-provided env as plain config vars.
 	classifyEnvKeys(&req.EnvClassifications, env, api.EnvKindPlain)
+	if answerTZ {
+		setResolvedAgentTZ(req.ResolvedEnv, &req.EnvClassifications, d.resolveAgentTZ(ctx, agent, true))
+	}
 
 	req.EnvSources = d.buildEnvSources(ctx, agent, req.ResolvedEnv)
 
@@ -1618,22 +1646,30 @@ func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *st
 		return err
 	}
 
-	if envReqs != nil && len(envReqs.Needs) > 0 {
+	tzNeeded := takeTZGatherNeed(envReqs) && !answerTZ
+	if envReqs != nil && (len(envReqs.Needs) > 0 || tzNeeded) {
 		// Second pass: try to satisfy remaining needs with as_needed entries,
 		// mirroring the pattern in DispatchAgentCreateWithGather.
-		asNeededEnv := d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs, envReqs.Alternatives)
-		if len(asNeededEnv) > 0 {
+		var asNeededEnv map[string]string
+		if len(envReqs.Needs) > 0 {
+			asNeededEnv = d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs, envReqs.Alternatives)
+		}
+		if len(asNeededEnv) > 0 || tzNeeded {
 			for k, v := range asNeededEnv {
 				req.ResolvedEnv[k] = v
 			}
 			// as_needed env comes from storage — classify as secret-fetchable.
 			classifyEnvKeys(&req.EnvClassifications, asNeededEnv, api.EnvKindSecretFetchable)
+			if tzNeeded {
+				setResolvedAgentTZ(req.ResolvedEnv, &req.EnvClassifications, d.resolveAgentTZ(ctx, agent, true))
+			}
 			resp2, envReqs2, err2 := d.client.CreateAgentWithGather(
 				ctx, agent.RuntimeBrokerID, endpoint, req,
 			)
 			if err2 != nil {
 				return err2
 			}
+			takeTZGatherNeed(envReqs2)
 			if envReqs2 != nil && len(envReqs2.Needs) > 0 {
 				return &ErrEnvStillMissing{Requirements: envReqs2}
 			}
@@ -2031,6 +2067,9 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 		}
 	}
 
+	// TZ is never an as_needed key: only the agent TZ resolver supplies it.
+	delete(keySet, agentTZEnvKey)
+
 	// 1. Check env_vars table (all scopes, in precedence order so last-wins).
 	for _, filter := range d.envScopesInPrecedenceOrder(agent) {
 		vars, err := d.store.ListEnvVars(ctx, filter)
@@ -2162,6 +2201,7 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 			"count", len(result), "keys", resolvedKeys)
 	}
 
+	delete(result, agentTZEnvKey)
 	return result
 }
 
@@ -2203,6 +2243,13 @@ func (d *HTTPAgentDispatcher) buildEnvSources(ctx context.Context, agent *store.
 				sources[k] = "config"
 			}
 		}
+	}
+
+	// TZ is labelled with the rung of the agent TZ chain that supplied it,
+	// whatever storage or config entries share the key.
+	delete(sources, agentTZEnvKey)
+	if _, inResolved := resolvedEnv[agentTZEnvKey]; inResolved {
+		sources[agentTZEnvKey] = d.resolveAgentTZ(ctx, agent, false).Source
 	}
 
 	return sources
@@ -2309,6 +2356,10 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	resolvedEnv := make(map[string]string)
 	var envClassifications map[string]api.EnvKind
 
+	// An agent written before ExplicitTimezone existed may still carry TZ in
+	// its env records; adopt it as a pin before the env is copied below.
+	adoptLegacyTZ(agent.AppliedConfig)
+
 	// Start with agent's applied config env (template/config-level vars).
 	if agent.AppliedConfig != nil {
 		for k, v := range agent.AppliedConfig.Env {
@@ -2338,6 +2389,9 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 		}
 	} else if len(envFromStorage) > 0 {
 		for k, v := range envFromStorage {
+			if k == agentTZEnvKey {
+				continue // the resolver owns TZ
+			}
 			if existing, exists := resolvedEnv[k]; !exists || existing == "" {
 				resolvedEnv[k] = v
 				if envFromStoragePlain[k] {
@@ -2351,6 +2405,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 
 	// Resolve type-aware secrets and inject environment-type secrets.
 	resolvedSecrets, _, err := d.resolveSecrets(ctx, agent)
+	resolvedSecrets = d.dropTZTargetedSecrets(ctx, agent, resolvedSecrets)
 	if err != nil {
 		d.log.ErrorContext(ctx, caller+": failed to resolve secrets; agent will "+startedVerb+" without injected secrets",
 			"agent_id", agent.ID, "error", err)
@@ -2364,6 +2419,10 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 			}
 		}
 	}
+
+	// TZ comes only from the agent TZ resolver, read live on every start
+	// and restart so a storage or hub-default edit reaches unpinned agents.
+	setResolvedAgentTZ(resolvedEnv, &envClassifications, d.resolveAgentTZ(ctx, agent, false))
 
 	// Include agent identity and hub connectivity so the container can
 	// report status to the Hub. The createAgent path sets these via the
@@ -3410,6 +3469,12 @@ func classifyEnvKeys(m *map[string]api.EnvKind, keys map[string]string, kind api
 // backwards for this call site).
 func shouldPersistResolvedEnvKey(key string, classifications map[string]api.EnvKind) bool {
 	if key == "GITHUB_TOKEN" {
+		return false
+	}
+	// TZ is resolved on every dispatch and recorded only as
+	// ExplicitTimezone; persisting it into AppliedConfig.Env would turn a
+	// resolved value into a stale env record.
+	if key == agentTZEnvKey {
 		return false
 	}
 	if strings.HasPrefix(key, "SCION_") {
