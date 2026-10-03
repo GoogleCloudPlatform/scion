@@ -1288,7 +1288,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 	// Build the structured message for the primary agent.
 	msg := &messages.StructuredMessage{
 		Version:     messages.Version,
-		Timestamp:   now.Format(time.RFC3339),
+		Timestamp:   now.UTC().Format(time.RFC3339),
 		Sender:      "user:" + senderLabel,
 		SenderID:    user.ID(),
 		Recipient:   "agent:" + primaryAgent.Slug,

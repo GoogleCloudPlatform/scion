@@ -21,6 +21,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/spf13/cobra"
@@ -346,7 +347,7 @@ func runSAVerify(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  ID:          %s\n", sa.ID)
 	fmt.Printf("  Project:     %s\n", sa.ProjectID)
 	fmt.Printf("  Verified:    %v\n", sa.Verified)
-	fmt.Printf("  Verified At: %s\n", sa.VerifiedAt.Format(time.RFC3339))
+	fmt.Printf("  Verified At: %s\n", clitime.Format(sa.VerifiedAt, clitime.Full))
 
 	return nil
 }

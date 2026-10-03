@@ -456,6 +456,15 @@ func (s *agentService) Update(ctx context.Context, agentID string, req *UpdateAg
 
 // Delete removes an agent.
 func (s *agentService) Delete(ctx context.Context, agentID string, opts *DeleteAgentOptions) error {
+	resp, err := s.c.delete(ctx, s.deletePath(agentID, opts), nil)
+	if err != nil {
+		return err
+	}
+	return apiclient.CheckResponse(resp)
+}
+
+// deletePath builds the DELETE URL, with the query parameters for opts.
+func (s *agentService) deletePath(agentID string, opts *DeleteAgentOptions) string {
 	path := s.agentPath(agentID)
 	if opts != nil {
 		query := url.Values{}
@@ -474,12 +483,7 @@ func (s *agentService) Delete(ctx context.Context, agentID string, opts *DeleteA
 			path += "?" + query.Encode()
 		}
 	}
-
-	resp, err := s.c.delete(ctx, path, nil)
-	if err != nil {
-		return err
-	}
-	return apiclient.CheckResponse(resp)
+	return path
 }
 
 // Start starts a stopped agent.

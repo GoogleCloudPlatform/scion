@@ -127,7 +127,11 @@ const RESOURCE_TYPE_LABELS: Record<string, string> = {
  * fails. This is a static, best-effort snapshot for that offline case only:
  * it never carries eligibility (every entry is selectable), so it must not
  * be used to answer "may I select this restriction" -- only the live
- * /api/v1/auth/scopes response does that.
+ * /api/v1/auth/scopes response does that. The list mirrors every registry
+ * selector, including boundary-restricted ones such as broker:create
+ * (hub-boundary tokens only): the live response marks those
+ * boundary_not_allowed for a project-scoped token, and the server rejects
+ * them on submit.
  */
 const FALLBACK_SCOPES: ScopeOption[] = [
   {
@@ -199,6 +203,13 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     label: 'agent:read',
     description: 'Read agent status/metadata',
     resource: 'agent',
+    isAlias: false,
+  },
+  {
+    value: 'broker:create',
+    label: 'broker:create',
+    description: 'Create brokers',
+    resource: 'broker',
     isAlias: false,
   },
   {

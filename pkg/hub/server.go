@@ -3735,7 +3735,7 @@ func (s *Server) messageEventHandler() EventHandler {
 				"eventID", evt.ID,
 				"agentName", payload.AgentName,
 				"agent_id", payload.AgentID,
-				"scheduledFor", evt.FireAt.Format(time.RFC3339),
+				"scheduledFor", evt.FireAt.UTC().Format(time.RFC3339),
 				"staleness", staleness.Truncate(time.Second).String())
 		}
 
@@ -4182,7 +4182,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			slog.Warn("Scheduler: firing stale dispatch_agent event",
 				"eventID", evt.ID,
 				"agentName", payload.AgentName,
-				"scheduledFor", evt.FireAt.Format(time.RFC3339),
+				"scheduledFor", evt.FireAt.UTC().Format(time.RFC3339),
 				"staleness", staleness.Truncate(time.Second).String())
 		}
 
@@ -4734,6 +4734,11 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	}
 	s.scheduler = NewScheduler(s.store, logging.Subsystem("hub.scheduler"), schedOpts...)
 	s.registerSchedulerHandlers()
+
+	// Report non-canonical stored timestamps (SQLite). It runs in the
+	// background: on a large store the check is a full scan per time column,
+	// and nothing at start depends on its result.
+	s.startStoredTimestampCheck(ctx)
 
 	// Pause schedules whose cron expression carries an unsupported zone
 	// prefix before the evaluator's first tick, so it never runs them.
