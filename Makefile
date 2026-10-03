@@ -159,6 +159,24 @@ test-launch-store-postgres:
 		exit 1; \
 	fi
 
+## test-tz-contract: Run the real-binary timestamp contract test (SQLite; Postgres too when SCION_TEST_POSTGRES_URL is set)
+# It builds cmd/scion, starts `scion server start --foreground` under non-UTC TZ values
+# and checks every timestamp on the wire is the written instant in UTC ("Z").
+# SQLite always runs; Postgres runs when SCION_TEST_POSTGRES_URL is set, and
+# the target then fails if the Postgres cases did not pass.
+test-tz-contract:
+	@echo "Running the timestamp contract test..."
+	@go test -tags tzcontract -count=1 -timeout 15m -v \
+		./pkg/hub/tzcontract/... > /tmp/test-tz-contract.log 2>&1; \
+	status=$$?; \
+	cat /tmp/test-tz-contract.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if [ -n "$$SCION_TEST_POSTGRES_URL" ] && \
+		! grep -qE '^[[:space:]]*--- PASS: TestTimestampContract/postgres ' /tmp/test-tz-contract.log; then \
+		echo "ERROR: SCION_TEST_POSTGRES_URL is set but the Postgres contract cases did not run." >&2; \
+		exit 1; \
+	fi
+
 ## vet: Run go vet
 vet:
 	@go vet ./...
@@ -167,11 +185,11 @@ vet:
 lint:
 	@go vet -tags no_sqlite ./...
 
-## vet-integration: Compile-check integration-tagged code (go vet -tags 'integration volume_test')
+## vet-integration: Compile-check integration-tagged code (go vet -tags 'integration volume_test tzcontract')
 # Catches build breaks in integration-tagged files that other vet/lint
 # targets skip (ptone/scion#2348).
 vet-integration:
-	@go vet -tags 'integration volume_test' ./...
+	@go vet -tags 'integration volume_test tzcontract' ./...
 
 ## vet-integration-extras: Compile-check integration-tagged code in every extras/ module that has it
 # vet-integration only covers the root module's ./... tree; extras/*
