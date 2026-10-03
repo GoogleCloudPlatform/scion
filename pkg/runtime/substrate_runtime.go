@@ -623,7 +623,10 @@ func (r *SubstrateRuntime) bootstrapNonce(ctx context.Context, atespace, actorNa
 // Delete implements substrate-runtime.md §9: DeleteActorEgressPolicy
 // (ignoring NotFound), then DeleteActor(any_state=true), then drop the
 // in-memory control token (and label record, best effort).
-func (r *SubstrateRuntime) Delete(ctx context.Context, id string) error {
+// P4: enforce ref.RunID (ptone/scion#2550). Today the actor name is reused
+// across runs, so this still targets whatever actor holds the name.
+func (r *SubstrateRuntime) Delete(ctx context.Context, ref RunRef) error {
+	id := ref.ID
 	atespace, actorName, err := splitSubstrateID(id)
 	if err != nil {
 		return err
@@ -677,7 +680,7 @@ func (r *SubstrateRuntime) Delete(ctx context.Context, id string) error {
 // suspend and the $HOME durableDir layout (substrate-runtime.md §11) land, so Stop
 // keeps the workspace and frees the worker rather than deleting the actor.
 func (r *SubstrateRuntime) Stop(ctx context.Context, id string) error {
-	return r.Delete(ctx, id)
+	return r.Delete(ctx, RunRef{ID: id})
 }
 
 // substrateAtespacePrefix is the naming convention substrateAtespaceName
@@ -879,6 +882,7 @@ func (r *SubstrateRuntime) List(ctx context.Context, labelFilter map[string]stri
 			ProjectID:     projectID,
 			ProjectPath:   projectPath,
 			Image:         image,
+			RunID:         labels[api.LabelRunID],
 		})
 	}
 	return agents, nil
