@@ -2149,50 +2149,79 @@ func TestServerNow_WriteErrorStillRemovesProbe(t *testing.T) {
 // exactly like a crashed holder and gets reclaimed — letting a second
 // provisioner run concurrently, the corruption this whole mechanism exists
 // to prevent. With the heartbeat, the marker's mtime keeps refreshing for as
-// long as the holder is alive, so a waiter must not be able to reclaim it
-// even after waiting past the (test-scale) stale threshold.
+// long as the holder is alive, so a waiter must not be able to reclaim it.
+//
+// The test is deliberately free of wall-clock races. An earlier version
+// shrank the stale window to 180ms and the heartbeat interval to 30ms and
+// then slept past the window, relying on a real ticker firing and the
+// heartbeat write landing within 180ms of the previous one. On a loaded CI
+// runner a single goroutine/I/O stall longer than that is ordinary, at which
+// point the waiter (correctly, per lockLooksAbandoned) reclaimed the "live"
+// lock and the test flaked. Instead, this version:
+//
+//   - keeps the production stale window, so nothing goes stale by itself
+//     during the test no matter how slowly it runs;
+//   - simulates "the holder has been running for 2x the stale window" by
+//     back-dating the lock's timestamps, and checks that this alone makes
+//     the lock look abandoned (the control: without a further beat, a
+//     waiter WOULD reclaim it);
+//   - delivers exactly one beat through the injected newHeartbeatTicker and
+//     waits, by observing the marker, for it to land — an event, not a sleep;
+//   - then confirms a waiter, retrying for many ticks, cannot acquire it.
+//
+// Remove the heartbeat goroutine's beat and the marker is never refreshed,
+// so the test fails.
 func TestAcquireFileLock_HeartbeatPreventsReclaimOfLiveHolder(t *testing.T) {
-	// Shrink both the stale threshold and the heartbeat interval (keeping
-	// the same ~1:6 ratio the production defaults use) so this test can
-	// actually wait PAST the stale threshold without a multi-minute sleep,
-	// while still proving the heartbeat keeps refreshing often enough
-	// relative to it that a live holder never looks abandoned.
-	origStale, origHeartbeat, origDelay := provisionLockStaleAfter, provisionLockHeartbeatInterval, fileLockRetryDelay
-	provisionLockStaleAfter = 180 * time.Millisecond
-	provisionLockHeartbeatInterval = 30 * time.Millisecond
-	fileLockRetryDelay = 20 * time.Millisecond
-	t.Cleanup(func() {
-		provisionLockStaleAfter, provisionLockHeartbeatInterval, fileLockRetryDelay = origStale, origHeartbeat, origDelay
-	})
+	origTicker, origDelay := newHeartbeatTicker, fileLockRetryDelay
+	ticks := make(chan time.Time) // unbuffered: a completed send means the heartbeat goroutine took the beat
+	newHeartbeatTicker = func(time.Duration) (<-chan time.Time, func()) { return ticks, func() {} }
+	fileLockRetryDelay = 10 * time.Millisecond
+	t.Cleanup(func() { newHeartbeatTicker, fileLockRetryDelay = origTicker, origDelay })
 
 	dir := t.TempDir()
+	lockPath := filepath.Join(dir, provisionFileLockName)
+	heartbeatPath := filepath.Join(lockPath, provisionLockHeartbeatFile)
 
 	held, err := acquireFileLock(context.Background(), dir)
 	require.NoError(t, err)
-	defer func() { _ = held.release() }()
+	// Registered after the restore above, so it runs first: the heartbeat
+	// goroutine has exited before the package vars are put back.
+	t.Cleanup(func() { _ = held.release() })
 
-	heartbeatPath := filepath.Join(dir, provisionFileLockName, provisionLockHeartbeatFile)
+	// acquireFileLock's synchronous first beat lands the marker before it
+	// returns.
+	_, err = os.Stat(heartbeatPath)
+	require.NoError(t, err, "the synchronous first beat should have written the heartbeat marker")
+
+	// Make the lock look as though its last beat was 2x the stale window
+	// ago, i.e. as though the holder had been provisioning that long.
+	now, err := serverNow(dir)
+	require.NoError(t, err)
+	stale := now.Add(-2 * provisionLockStaleAfter)
+	require.NoError(t, os.Chtimes(heartbeatPath, stale, stale))
+	require.NoError(t, os.Chtimes(lockPath, stale, stale))
+	require.True(t, lockLooksAbandoned(dir, lockPath),
+		"control: a lock whose last beat is 2x the stale window old must look abandoned without a further beat")
+
+	// One heartbeat beat from the live holder.
+	select {
+	case ticks <- time.Now():
+	case <-time.After(10 * time.Second):
+		t.Fatal("heartbeat goroutine never took the beat")
+	}
 	require.Eventually(t, func() bool {
-		_, err := os.Stat(heartbeatPath)
-		return err == nil
-	}, time.Second, 5*time.Millisecond, "heartbeat marker should appear after the first beat")
+		info, err := os.Stat(heartbeatPath)
+		return err == nil && info.ModTime().After(stale)
+	}, 10*time.Second, 5*time.Millisecond, "heartbeat should have refreshed its marker's mtime while held")
+	require.False(t, lockLooksAbandoned(dir, lockPath), "a freshly beaten lock must not look abandoned")
 
-	initial, err := os.Stat(heartbeatPath)
-	require.NoError(t, err)
-	time.Sleep(provisionLockHeartbeatInterval*2 + 50*time.Millisecond)
-	refreshed, err := os.Stat(heartbeatPath)
-	require.NoError(t, err)
-	assert.True(t, refreshed.ModTime().After(initial.ModTime()),
-		"heartbeat should have refreshed its marker's mtime while held")
-
-	// Wait well past the (shrunk) stale threshold — long enough that,
-	// without a heartbeat, this lock would now look abandoned — then confirm
-	// a waiter still cannot acquire it: it looks fresh, not stale.
-	time.Sleep(provisionLockStaleAfter * 2)
+	// A waiter retrying for many ticks must not be able to reclaim it.
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-	_, err = acquireFileLock(ctx, dir)
+	_, err = acquireFileLockWithin(ctx, dir, 300*time.Millisecond)
 	require.Error(t, err, "a live, heartbeating holder must never be reclaimed")
+	assert.True(t, held.stillOwned(), "the original holder must still own the lock")
+	assert.NoError(t, held.ctx.Err(), "the original holder's lock ctx must not have been cancelled")
 }
 
 // TestAcquireFileLock_HeartbeatDetectsLossAndCancelsCtx is the regression

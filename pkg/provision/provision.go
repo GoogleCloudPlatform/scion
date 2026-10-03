@@ -952,6 +952,20 @@ var lchownFile = os.Lchown
 // suspend/resume does not advance Go's monotonic clock on Linux either.
 var timeNow = time.Now
 
+// newHeartbeatTicker supplies startLockHeartbeat's beat schedule: a channel
+// that delivers one value per beat, plus a func that stops it. It is a
+// time.Ticker in production, indirected so a test can deliver beats itself,
+// one at a time, instead of depending on a real ticker firing on schedule
+// under an arbitrarily loaded scheduler (see
+// TestAcquireFileLock_HeartbeatPreventsReclaimOfLiveHolder). Like
+// provisionLockHeartbeatInterval, startLockHeartbeat reads it synchronously
+// before spawning its goroutine, never from inside it. Production code never
+// reassigns it.
+var newHeartbeatTicker = func(interval time.Duration) (<-chan time.Time, func()) {
+	t := time.NewTicker(interval)
+	return t.C, t.Stop
+}
+
 // acquireFileLock acquires a mutual-exclusion lock backed by the shared
 // filesystem itself, for use when no store.AdvisoryLocker is available —
 // which today is every caller: RunConfig.Locker is never populated by any
@@ -1670,18 +1684,18 @@ func startLockHeartbeat(lockPath, token string, cancelLoss context.CancelFunc) (
 	// see the stop() doc below for why the goroutine must never read a
 	// package-level var directly once running.
 	interval := provisionLockHeartbeatInterval
+	ticks, stopTicker := newHeartbeatTicker(interval)
 	done := make(chan struct{})
 	exited := make(chan struct{})
 	go func() {
 		defer close(exited)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
+		defer stopTicker()
 		misses := 0
 		for {
 			select {
 			case <-done:
 				return
-			case <-ticker.C:
+			case <-ticks:
 				switch beatOnce(lockPath, token) {
 				case beatOK:
 					misses = 0
