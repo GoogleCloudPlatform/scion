@@ -20,7 +20,6 @@ import {
   TERMINAL_PALETTE_NEW_AGENT_EVENT,
   type TerminalPaletteNewAgentDetail,
 } from './terminal-workspace-events.js';
-import { TERMINAL_PALETTE_OPEN_REQUEST_EVENT } from './terminal-palette-events.js';
 import type { ScionQuickPalette } from '../components/shared/palette/quick-palette.js';
 import type { ScionTerminalPane } from '../components/terminal/terminal-pane.js';
 import type { TerminalPaletteAgentsLoadOptions } from './terminal-palette-data.js';
@@ -1174,10 +1173,17 @@ async function waitForPalette(root: TerminalWorkspaceRoot): Promise<ScionQuickPa
   return palette;
 }
 
-function requestPaletteOpen(root: TerminalWorkspaceRoot): void {
-  root.element.dispatchEvent(
-    new CustomEvent(TERMINAL_PALETTE_OPEN_REQUEST_EVENT, { bubbles: true, composed: true })
+/** The "Jump to agent" button in the rail's pinned footer. */
+function jumpButton(root: TerminalWorkspaceRoot): HTMLButtonElement {
+  const btn = root.element.querySelector<HTMLButtonElement>(
+    '.terminal-rail > .terminal-rail-footer > .terminal-jump-btn'
   );
+  if (!btn) throw new Error('Jump to agent footer button not found');
+  return btn;
+}
+
+function requestPaletteOpen(root: TerminalWorkspaceRoot): void {
+  jumpButton(root).click();
 }
 
 /** Opens the palette and waits until it is open with its Agents group loaded. */
@@ -1416,6 +1422,66 @@ describe('"Jump to agent" palette: multi-pane placement via create()', () => {
   });
 });
 
+describe('"Jump to agent" footer in the Open terminals column', () => {
+  let root: TerminalWorkspaceRoot;
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    stubWebSocketAndEventSource();
+    stubFetchForPalette([{ id: AGENT_A, name: 'Alice-bot' }]);
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('pins the footer below the list, outside the scrolling list itself', () => {
+    const rail = root.element.querySelector('.terminal-rail')!;
+    const list = rail.querySelector('.terminal-rail-list')!;
+    const footer = rail.querySelector('.terminal-rail-footer')!;
+    expect(footer).not.toBeNull();
+    expect(rail.lastElementChild).toBe(footer);
+    expect(list.contains(footer)).toBe(false);
+    expect(footer.previousElementSibling).toBe(list);
+  });
+
+  it('renders a labelled "Jump to agent" button with the compass icon', () => {
+    const btn = jumpButton(root);
+    expect(btn.type).toBe('button');
+    expect(btn.querySelector('.terminal-jump-label')?.textContent).toBe('Jump to agent');
+    expect(btn.querySelector('sl-icon')?.getAttribute('name')).toBe('compass');
+    expect(btn.getAttribute('aria-haspopup')).toBe('dialog');
+    expect(btn.title).toMatch(/^Jump to agent \((⌘K|Ctrl\+K)\)$/);
+    expect(btn.querySelector('.terminal-jump-shortcut')?.textContent).toMatch(/^(⌘K|Ctrl\+K)$/);
+  });
+
+  it('clicking it focuses the button, then opens the agents palette', async () => {
+    const btn = jumpButton(root);
+    const focusSpy = vi.spyOn(btn, 'focus');
+    btn.click();
+    expect(focusSpy).toHaveBeenCalledWith({ preventScroll: true });
+    const palette = await waitForPalette(root);
+    await vi.waitFor(() => expect(palette.open).toBe(true));
+    expect(palette.label).toBe('Jump to agent');
+  });
+
+  it('the header renders no palette button on /terminals', async () => {
+    const header = root.element.querySelector('scion-header')!;
+    header.user = { id: 'u1', email: 'u@example.com', displayName: 'U' } as never;
+    await header.updateComplete;
+    expect(header.shadowRoot?.querySelector('.palette-button')).toBeNull();
+  });
+});
+
 describe('"Jump to agent" palette: open, select, and events', () => {
   let root: TerminalWorkspaceRoot;
   let reg: TerminalSessionRegistry;
@@ -1448,7 +1514,7 @@ describe('"Jump to agent" palette: open, select, and events', () => {
     expect(root.element.querySelector('scion-quick-palette')).toBeNull();
   });
 
-  it("the header's open-request event opens the palette and loads the Agents group", async () => {
+  it('the footer button opens the palette and loads the Agents group', async () => {
     stubFetchForPalette([{ id: AGENT_A, name: 'Alice-bot' }]);
     root = new WorkspaceRoot();
     document.body.append(root.element);
@@ -1555,9 +1621,9 @@ describe('"Jump to agent" palette: open, select, and events', () => {
     stubFetchForPalette([{ id: AGENT_A }]);
     root = new WorkspaceRoot();
     document.body.append(root.element);
-    const invoker = document.createElement('button');
-    document.body.appendChild(invoker);
-    invoker.focus();
+    root.show(true);
+    // The footer button focuses itself on click, so it is the invoker.
+    const invoker = jumpButton(root);
 
     const palette = await openLoadedPalette(root);
     invoker.blur();
@@ -1565,7 +1631,6 @@ describe('"Jump to agent" palette: open, select, and events', () => {
     fireFromDialog(palette, 'sl-after-hide');
 
     expect(document.activeElement).toBe(invoker);
-    invoker.remove();
   });
 
   it('selecting an already-open agent in a multi-pane layout places it directly (addOrReplaceFocused), with no new-agent event or navigation', async () => {
@@ -1607,11 +1672,10 @@ describe('"Jump to agent" palette: open, select, and events', () => {
     expect(palette.open).toBe(false);
   });
 
-  it('still replaces the pane focused before opening, even though the header button itself steals real focus before the open-request event ever fires', async () => {
-    // The header button's own click handler calls
-    // btn.focus({preventScroll: true}) BEFORE dispatching
-    // TERMINAL_PALETTE_OPEN_REQUEST_EVENT (see header.ts's
-    // handlePaletteButtonClick) — a point-in-time focus read taken inside
+  it('still replaces the pane focused before opening, even though the footer button itself steals real focus before the palette opens', async () => {
+    // The footer button's own click handler calls
+    // btn.focus({preventScroll: true}) BEFORE opening the palette (see
+    // handleJumpButtonClick) — a point-in-time focus read taken inside
     // openPalette (rather than tracked continuously as focus actually
     // moves) would already see the button, not the pane, by the time it
     // runs.
@@ -1625,7 +1689,7 @@ describe('"Jump to agent" palette: open, select, and events', () => {
     await flush();
     markPaneFocused(root, AGENT_B);
 
-    // Simulate the header button's own pre-dispatch focus-stealing.
+    // Simulate the footer button's own pre-open focus-stealing.
     const btn = document.createElement('button');
     document.body.appendChild(btn);
     btn.focus();

@@ -25,13 +25,13 @@ import {
   type TerminalPaletteNewAgentDetail,
 } from './terminal-workspace-events.js';
 import { enterAppFrame, exitAppFrame } from '../components/shared/app-frame.js';
-import { TERMINAL_PALETTE_OPEN_REQUEST_EVENT } from './terminal-palette-events.js';
 import type { PaletteCandidate } from './chat-palette-types.js';
 import {
   QuickPaletteHost,
   isQuickPaletteShortcut,
 } from '../components/shared/palette/quick-palette-host.js';
-import '../components/shared/header.js';
+import { isMacPlatform } from '../components/shared/header.js';
+import { TOUCH_PRIMARY_QUERY } from '../utils/input-modality.js';
 import '../components/terminal/terminal-pane.js';
 
 interface RailEntry {
@@ -94,6 +94,7 @@ export class TerminalWorkspaceRoot {
   private readonly shell = document.createElement('div');
   private readonly rail = document.createElement('aside');
   private readonly railList = document.createElement('div');
+  private readonly railFooter = document.createElement('div');
   private readonly count = document.createElement('span');
   private readonly empty = document.createElement('div');
   private readonly layoutBar = document.createElement('div');
@@ -219,7 +220,8 @@ export class TerminalWorkspaceRoot {
     this.railList.addEventListener('keydown', (event) => this.handleRailKeydown(event));
     this.empty.className = 'terminal-empty';
     this.empty.textContent = 'No terminals are open.';
-    this.rail.append(railHeader, this.railList);
+    this.buildRailFooter();
+    this.rail.append(railHeader, this.railList, this.railFooter);
 
     // Layout toolbar
     this.layoutBar.className = 'terminal-layout-bar';
@@ -251,8 +253,8 @@ export class TerminalWorkspaceRoot {
     });
 
     // "Jump to agent" palette: agents-only, no DMs/Threads/People. Created
-    // lazily on first open — see mountPalette().
-    this.element.addEventListener(TERMINAL_PALETTE_OPEN_REQUEST_EVENT, () => this.openPalette());
+    // lazily on first open; opened by the rail footer button (see
+    // buildRailFooter) or the keyboard shortcut (handleGlobalKeydown).
     document.addEventListener('keydown', this.handleGlobalKeydown);
     document.addEventListener('focusin', this.handleGlobalFocusIn);
 
@@ -314,6 +316,52 @@ export class TerminalWorkspaceRoot {
       this.layoutManager.unzoom();
     });
     this.layoutBar.append(restoreBtn);
+  }
+
+  /**
+   * Builds the footer pinned below the rail list: a labelled "Jump to agent"
+   * button that opens the agents palette. The rail is a flex column whose
+   * list alone scrolls, so the footer stays visible however long the list
+   * grows. The shortcut hint is shown inline on pointer devices and hidden
+   * on touch-primary ones (CSS), where there is no keyboard to press it.
+   */
+  private buildRailFooter(): void {
+    this.railFooter.className = 'terminal-rail-footer';
+    const isMac = isMacPlatform();
+    const shortcutLabel = isMac ? '⌘K' : 'Ctrl+K';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'terminal-jump-btn';
+    btn.title = `Jump to agent (${shortcutLabel})`;
+    btn.setAttribute('aria-haspopup', 'dialog');
+    if (!window.matchMedia?.(TOUCH_PRIMARY_QUERY).matches) {
+      btn.setAttribute('aria-keyshortcuts', isMac ? 'Meta+K' : 'Control+K');
+    }
+    const icon = document.createElement('sl-icon');
+    icon.setAttribute('name', 'compass');
+    icon.setAttribute('aria-hidden', 'true');
+    const label = document.createElement('span');
+    label.className = 'terminal-jump-label';
+    label.textContent = 'Jump to agent';
+    const shortcut = document.createElement('kbd');
+    shortcut.className = 'terminal-jump-shortcut';
+    shortcut.setAttribute('aria-hidden', 'true');
+    shortcut.textContent = shortcutLabel;
+    btn.append(icon, label, shortcut);
+    btn.addEventListener('click', () => this.handleJumpButtonClick(btn));
+    this.railFooter.append(btn);
+  }
+
+  /**
+   * iOS and macOS Safari do not focus a `<button>` on click, so the palette
+   * would otherwise restore focus on close to whatever was focused before
+   * (possibly a terminal pane). Focusing the button first makes it the
+   * palette's invoker. {@link handleGlobalFocusIn} has already recorded
+   * the last focused pane, so this does not lose the placement target.
+   */
+  private handleJumpButtonClick(btn: HTMLButtonElement): void {
+    btn.focus({ preventScroll: true });
+    this.openPalette();
   }
 
   /** Build the sort dropdown widget for the rail header. */
@@ -506,11 +554,10 @@ export class TerminalWorkspaceRoot {
    * moves, rather than reading it reactively at open or select time. Both
    * of those points are too late: opening the palette moves real focus into
    * its own query input (a correct focus trap, firing a real `focusout` on
-   * whatever pane was focused), and *opening the palette via the header
-   * button* moves it there even earlier — `handlePaletteButtonClick` in
-   * header.ts focuses the button itself, for its own invoker-tracking
-   * purposes, before ever dispatching the open-request event this host
-   * reacts to. By either point, a point-in-time "what pane has focus right
+   * whatever pane was focused), and *opening the palette via the rail
+   * footer button* moves it there even earlier —
+   * {@link handleJumpButtonClick} focuses the button itself, for its own
+   * invoker-tracking purposes, before ever opening the palette. By either point, a point-in-time "what pane has focus right
    * now" read already sees nothing. Recording it continuously instead,
    * every time focus actually lands in a pane, sidesteps both races — it
    * holds whatever pane was *last* focused regardless of what (if anything)
@@ -1464,9 +1511,12 @@ export class TerminalWorkspaceRoot {
         min-height: 0;
         display: grid;
         grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
+        grid-template-rows: minmax(0, 1fr);
       }
       .terminal-rail {
         min-width: 0;
+        min-height: 0;
+        overflow: hidden;
         border-right: 1px solid var(--scion-border, #e2e8f0);
         background: var(--scion-surface, #fff);
         display: flex;
@@ -1505,6 +1555,68 @@ export class TerminalWorkspaceRoot {
         min-height: 0;
         overflow: auto;
         padding: 0.375rem;
+      }
+      /* Pinned below the list: only .terminal-rail-list scrolls. */
+      .terminal-rail-footer {
+        flex: 0 0 auto;
+        padding: 0.375rem;
+        border-top: 1px solid var(--scion-border, #e2e8f0);
+        background: var(--scion-surface, #fff);
+      }
+      .terminal-jump-btn {
+        width: 100%;
+        min-height: 2.5rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0 0.625rem;
+        border: 0;
+        border-radius: 6px;
+        background: transparent;
+        color: var(--scion-text, #1e293b);
+        font: inherit;
+        font-size: 0.875rem;
+        font-weight: 550;
+        text-align: left;
+        cursor: pointer;
+      }
+      .terminal-jump-btn sl-icon {
+        flex: 0 0 auto;
+        font-size: 1.25rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+      .terminal-jump-label {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .terminal-jump-shortcut {
+        flex: 0 0 auto;
+        font-family: inherit;
+        font-size: 0.75rem;
+        color: var(--scion-text-muted, #64748b);
+      }
+      .terminal-jump-btn:focus-visible {
+        background: var(--scion-bg-subtle, #f1f5f9);
+        outline: 2px solid var(--scion-primary, #3b82f6);
+        outline-offset: -2px;
+      }
+      /* Hover only where it does not stick after a tap. */
+      @media (hover: hover) {
+        .terminal-jump-btn:hover {
+          background: var(--scion-bg-subtle, #f1f5f9);
+        }
+      }
+      /* Touch: a 44px tap target, and no keyboard-shortcut hint. */
+      @media ${TOUCH_PRIMARY_QUERY} {
+        .terminal-jump-btn {
+          min-height: 44px;
+        }
+        .terminal-jump-shortcut {
+          display: none;
+        }
       }
       .terminal-rail-item {
         display: grid;
@@ -1780,7 +1892,9 @@ export class TerminalWorkspaceRoot {
       @media (max-width: 760px) {
         .terminal-workspace-shell {
           grid-template-columns: 1fr;
-          grid-template-rows: minmax(9rem, 35vh) minmax(0, 1fr);
+          /* 11rem min keeps at least one list row visible between the
+             rail header and its pinned Jump to agent footer. */
+          grid-template-rows: minmax(11rem, 35vh) minmax(0, 1fr);
         }
         .terminal-rail {
           border-right: 0;
