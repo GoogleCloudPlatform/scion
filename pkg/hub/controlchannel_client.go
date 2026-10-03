@@ -246,7 +246,7 @@ func (c *ControlChannelBrokerClient) DeleteAgent(ctx context.Context, brokerID, 
 	}
 	query += deleteProjectPathQuery(ctx)
 	if softDelete {
-		query += fmt.Sprintf("&softDelete=true&deletedAt=%s", url.QueryEscape(deletedAt.Format(time.RFC3339)))
+		query += fmt.Sprintf("&softDelete=true&deletedAt=%s", url.QueryEscape(deletedAt.UTC().Format(time.RFC3339)))
 	}
 	query = withRecordedRuntimeQuery(ctx, query)
 	_, err := c.doRequest(ctx, brokerID, "DELETE", path, query, nil)

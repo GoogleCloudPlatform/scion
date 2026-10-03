@@ -1040,12 +1040,17 @@ func (r *CommandRouter) executeDelete(ctx context.Context, event *ChatEvent, age
 		return updateMessageResponse(event, "Authentication required. Use `/scionAdmin register` first."), nil
 	}
 
-	if err := client.ProjectAgents(link.ProjectID).Delete(ctx, agentID, nil); err != nil {
+	res, err := hubclient.DeleteWithResult(ctx, client.ProjectAgents(link.ProjectID), agentID, nil)
+	if err != nil {
 		return updateMessageResponse(event, fmt.Sprintf("Failed to delete agent: %v", err)), nil
 	}
 	deletedName := agentSlug
 	if deletedName == "" {
 		deletedName = agentID
+	}
+	if res.Accepted {
+		// 202: the hub is still deleting the agent in the background.
+		return updateMessageResponse(event, fmt.Sprintf("Deleting agent `%s`… the Hub is finishing the delete in the background.", deletedName)), nil
 	}
 	return updateMessageResponse(event, fmt.Sprintf("Agent `%s` deleted.", deletedName)), nil
 }
