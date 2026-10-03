@@ -71,6 +71,10 @@ Endpoints an agent calls on its own behalf. They authenticate with the agent tok
 The legacy `/api/v1/groves` aliases have been removed. Requests to `/api/v1/groves` or any path under it now return `404 Not Found`; use `/api/v1/projects`.
 
 - `GET /`: List projects you have access to.
+- `POST /`: Create a project without a Runtime Broker. Body: `name` (required), optional `slug`, `gitRemote` and `labels`, and `workspaceMode`. Omit `gitRemote` for a Hub-managed project without git.
+  - `workspaceMode` is the [workspace sharing mode](/scion/local/workspaces-and-sharing/#setting-the-mode-on-a-hub-project): `shared`, `per-agent` or `worktree-per-agent`. With a `gitRemote`, `per-agent` means clone-per-agent. Without one, it means empty-per-agent: each agent gets a private directory that starts empty. Omitted means the existing default (shared for a project without git).
+  - The mode can only be set at create time. Unknown values, and `worktree-per-agent` without a `gitRemote`, are rejected with `400`. It is stored in the server-owned `scion.dev/workspace-mode` label. A `labels` entry for that key must match `workspaceMode` (else `400`), and is dropped when `workspaceMode` is omitted. A later update that tries to change the label is rejected with `400`.
+  - For an empty-per-agent project, creating or starting an agent on a Runtime Broker that does not advertise the `emptyPerAgentWorkspace` capability fails with `412 Precondition Failed`. An agent create that names a `workspace` path is rejected with `400`, and workspace files sent with it are ignored with a warning in the response's `warnings`. Reincarnating such an agent is rejected with `400`.
 - `POST /register`: Register or link a project repository. If the request resolves to an existing project, the caller needs update access to that project; without it, the request is rejected before anything changes. The same check applies to creating a project that resolves to an existing one and to linking a provider.
 - `GET /:id`: Get project metadata and statistics.
 - `GET /:id/secrets`: Manage environment secrets for the project.
