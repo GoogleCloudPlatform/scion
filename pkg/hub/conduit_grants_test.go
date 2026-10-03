@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -447,6 +448,82 @@ func TestMintConduitGrant_AgentCaller(t *testing.T) {
 	assert.ErrorIs(t, err, errConduitForbidden, "cross-project agent")
 	_, _, err = f.mint(other, grant.StreamHeader{Kind: grant.StreamKindPTY})
 	assert.ErrorIs(t, err, errConduitForbidden, "agent without lifecycle scope cannot attach")
+}
+
+// decideSpy counts AuthzService.Decide calls through the decision audit
+// hook (every decision is audited at sample rate 1).
+type decideSpy struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (d *decideSpy) EmitDecisionAudit(context.Context, *store.DecisionAuditRecord) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.calls++
+}
+
+func (d *decideSpy) count() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.calls
+}
+
+// TestMintConduitGrant_AgentReadAndPortSkipKernel: with a real agent token
+// identity, the agent rules alone decide read and port streams; neither
+// path reaches Decide. Reads are denied, as on the agent logs and events
+// routes, where no agent scope grants agent.read.
+func TestMintConduitGrant_AgentReadAndPortSkipKernel(t *testing.T) {
+	f := newConduitFixture(t)
+	spy := &decideSpy{}
+	f.srv.authzService.DecisionAuditSampleRate = 1.0
+	f.srv.authzService.SetDecisionAuditEmitter(spy)
+	agentToken := func(id, projectID string, scopes ...AgentTokenScope) AgentIdentity {
+		return &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:      jwt.Claims{Subject: id},
+			ProjectID:   projectID,
+			Scopes:      scopes,
+			Ancestry:    f.agent.Ancestry,
+			ScopeSchema: CurrentAgentScopeSchema,
+		}}
+	}
+	self := agentToken(f.agent.ID, f.agent.ProjectID, ScopeProjectRead)
+	peer := agentToken(tid("peer-agent"), f.agent.ProjectID, ScopeProjectRead)
+	foreign := agentToken(tid("foreign-agent"), "other-project", ScopeProjectRead)
+	noScope := agentToken(f.agent.ID, f.agent.ProjectID)
+
+	// The kernel denies the equivalent logs-route read for the same token.
+	require.False(t, f.srv.authzService.CheckAccess(context.Background(), self, agentResource(f.agent), ActionRead).Allowed)
+	require.Equal(t, 1, spy.count(), "spy observes Decide")
+
+	tests := []struct {
+		name    string
+		ident   AgentIdentity
+		header  grant.StreamHeader
+		allowed bool
+	}{
+		{"self logs", self, grant.StreamHeader{Kind: grant.StreamKindLogs}, false},
+		{"self events", self, grant.StreamHeader{Kind: grant.StreamKindEvents}, false},
+		{"peer logs", peer, grant.StreamHeader{Kind: grant.StreamKindLogs}, false},
+		{"peer events", peer, grant.StreamHeader{Kind: grant.StreamKindEvents}, false},
+		{"logs without project:read", noScope, grant.StreamHeader{Kind: grant.StreamKindLogs}, false},
+		{"foreign logs", foreign, grant.StreamHeader{Kind: grant.StreamKindLogs}, false},
+		{"self tcp", self, tcpHeader("3000"), true},
+		{"peer tcp", peer, tcpHeader("3000"), false},
+		{"foreign tcp", foreign, tcpHeader("3000"), false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			before := spy.count()
+			_, _, err := f.mint(tc.ident, tc.header)
+			if tc.allowed {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, errConduitForbidden)
+			}
+			assert.Equal(t, before, spy.count(), "agent read/port streams must not reach Decide")
+		})
+	}
 }
 
 var testGrantEncryptionKey = secret.DeriveLocalEncryptionKey("test-shared-secret")

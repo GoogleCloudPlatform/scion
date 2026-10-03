@@ -95,11 +95,21 @@ func (s *Server) authorizeConduitAction(ctx context.Context, identity Identity, 
 		if authzAction == ActionPortAccess && ident.ID() != agent.ID {
 			return fmt.Errorf("%w: agents can only reach their own ports", errConduitForbidden)
 		}
-		if authzAction == ActionRead && !ident.HasScope(ScopeProjectRead) {
-			return fmt.Errorf("%w: missing scope %s", errConduitForbidden, ScopeProjectRead)
-		}
-		if authzAction == ActionPortAccess {
+		switch authzAction {
+		case ActionRead:
+			if !ident.HasScope(ScopeProjectRead) {
+				return fmt.Errorf("%w: missing scope %s", errConduitForbidden, ScopeProjectRead)
+			}
+			// The agent logs and events routes deny agent tokens too: no
+			// agent token scope maps to agent.read in the permission
+			// registry, so the kernel never grants it to an agent. Deny
+			// here rather than relying on that, and revisit if a scope
+			// ever grants agent.read.
+			return fmt.Errorf("%w: agents cannot read agent streams", errConduitForbidden)
+		case ActionPortAccess:
 			return nil
+		default:
+			return fmt.Errorf("%w: no agent rule for action %q", errConduitForbidden, authzAction)
 		}
 	case UserIdentity:
 	default:
