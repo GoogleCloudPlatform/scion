@@ -652,7 +652,24 @@ func TestUTCTimestampNormalize_StartupCheckUnparseableOnly(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(out, "level=WARN"))
 	assert.Contains(t, out, "run log")
 	assert.Contains(t, out, "tables=[messages]")
+	assert.Contains(t, out, "tables_unreadable=[]")
 	assert.NotContains(t, out, "garbage-startup-51d0")
+
+	// An unparseable value in the four-digit shape (the date does not
+	// exist) leaves the table unreadable: an error that names the table
+	// in tables_unreadable, still pointing at the run log.
+	mk("feb30", "2026-02-30 14:45:00 +0545 +0545")
+	rep, _ = runNormalize(t, db, entadapter.TimestampNormalizeOptions{})
+	require.Equal(t, 2, rep.Unparseable)
+	require.Zero(t, rep.Rewritten)
+	logs.Reset()
+	srv.checkStoredTimestamps(ctx)
+	out = logs.String()
+	assert.Equal(t, 1, strings.Count(out, "level=ERROR"), out)
+	assert.NotContains(t, out, "level=WARN")
+	assert.Contains(t, out, "run log")
+	assert.Contains(t, out, "tables_unreadable=[messages]")
+	assert.NotContains(t, out, "2026-02-30")
 
 	// A parseable leftover in the same table means the operation has work.
 	mk("jst", "2026-10-01 13:00:00 +0900 JST")
@@ -661,6 +678,7 @@ func TestUTCTimestampNormalize_StartupCheckUnparseableOnly(t *testing.T) {
 	out = logs.String()
 	assert.Equal(t, 1, strings.Count(out, "level=ERROR"))
 	assert.NotContains(t, out, "level=WARN")
+	assert.Contains(t, out, "tables_unreadable=[messages]")
 }
 
 // TestUTCTimestampNormalize_UnreadableProbeMatchesEntReads checks that the
@@ -717,7 +735,36 @@ func TestUTCTimestampNormalize_StartupCheckRunsInBackground(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(prev) })
 
-	srv.startStoredTimestampCheck(ctx)
+	// Hold the check until startStoredTimestampCheck has returned: a
+	// synchronous call would block here and fail the test.
+	release, started := make(chan struct{}), make(chan struct{})
+	orig := storedTimestampCheck
+	storedTimestampCheck = func(s *Server, ctx context.Context) {
+		close(started)
+		<-release
+		_, hasDeadline := ctx.Deadline()
+		assert.True(t, hasDeadline, "the background check must have a bounded context")
+		orig(s, ctx)
+	}
+	t.Cleanup(func() { storedTimestampCheck = orig })
+
+	returned := make(chan struct{})
+	go func() {
+		srv.startStoredTimestampCheck(ctx)
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(10 * time.Second):
+		t.Fatal("startStoredTimestampCheck did not return while the check was blocked")
+	}
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the check never started")
+	}
+	assert.NotContains(t, logs.String(), "tables_unreadable", "the check ran before it was released")
+	close(release)
 	require.Eventually(t, func() bool {
 		return strings.Contains(logs.String(), "tables_unreadable=[messages]")
 	}, 10*time.Second, 10*time.Millisecond)

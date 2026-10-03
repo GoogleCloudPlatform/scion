@@ -20,6 +20,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
@@ -82,7 +83,7 @@ const (
 		"Until it runs, ordering and paging over the listed tables can be wrong"
 	msgTimestampsUnparseable = "stored timestamps that the " + entadapter.UTCTimestampNormalizeKey +
 		" operation cannot parse remain; its run log (Admin -> Maintenance) lists them by table, column and rowid; " +
-		"correct or clear those values"
+		"correct or clear those values. Every read of a table listed in tables_unreadable fails until then"
 )
 
 // startStoredTimestampCheck runs checkStoredTimestamps in the background with
@@ -95,9 +96,13 @@ func (s *Server) startStoredTimestampCheck(ctx context.Context) {
 	go func() {
 		ctx, cancel := context.WithTimeout(ctx, startupTimestampCheckTimeout)
 		defer cancel()
-		s.checkStoredTimestamps(ctx)
+		storedTimestampCheck(s, ctx)
 	}()
 }
+
+// storedTimestampCheck is the check startStoredTimestampCheck runs. A
+// variable so tests can observe that it runs in the background.
+var storedTimestampCheck = (*Server).checkStoredTimestamps
 
 // checkStoredTimestamps logs at most one error and one warning when a SQLite
 // store holds ent time values that are not canonical UTC text. Such rows
@@ -116,9 +121,28 @@ func (s *Server) checkStoredTimestamps(ctx context.Context) {
 		return
 	}
 	if len(chk.NeedsRun) > 0 {
-		slog.Error(msgTimestampsNeedNormalize, "tables", chk.NeedsRun, "tables_unreadable", chk.Unreadable)
+		slog.Error(msgTimestampsNeedNormalize, "tables", chk.NeedsRun,
+			"tables_unreadable", intersectTables(chk.Unreadable, chk.NeedsRun))
 	}
 	if len(chk.UnparseableOnly) > 0 {
-		slog.Warn(msgTimestampsUnparseable, "tables", chk.UnparseableOnly)
+		// A table whose only leftovers do not parse can still be unreadable;
+		// then no read of it succeeds, which is an error, not a warning.
+		unreadable := intersectTables(chk.Unreadable, chk.UnparseableOnly)
+		level := slog.LevelWarn
+		if len(unreadable) > 0 {
+			level = slog.LevelError
+		}
+		slog.Log(ctx, level, msgTimestampsUnparseable, "tables", chk.UnparseableOnly, "tables_unreadable", unreadable)
 	}
+}
+
+// intersectTables returns the names in a that are also in b, in a's order.
+func intersectTables(a, b []string) []string {
+	out := []string{}
+	for _, x := range a {
+		if slices.Contains(b, x) {
+			out = append(out, x)
+		}
+	}
+	return out
 }
