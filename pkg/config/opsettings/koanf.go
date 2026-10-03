@@ -75,6 +75,9 @@ var layer0Prefixes = []string{
 	"server.hub.launch_keepalive_seconds",
 	// Missing-container reconcile grace — read into ServerConfig at startup.
 	"server.hub.missing_agent_grace",
+	// Conduit relay and grant settings — the relay, its internal listener and
+	// peer auth are built at startup.
+	"server.hub.conduit",
 }
 
 // isLayer0Key reports whether the given koanf key belongs to the Layer-0

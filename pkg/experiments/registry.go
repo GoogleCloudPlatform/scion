@@ -145,7 +145,7 @@ var compiled = []Experiment{
 	{
 		Name:        "hub.conduit",
 		Title:       "Conduit connection layer",
-		Description: "Enables the hub surfaces of Conduit, the unified agent/broker connection layer: Ed25519 stream grants and the GET /api/v1/conduit/grant-keys endpoint. Phase 1 is library-only; no existing connection path changes.",
+		Description: "Enables the hub surfaces of Conduit, the unified agent/broker connection layer: Ed25519 stream grants, the GET /api/v1/conduit/grant-keys endpoint, the agent conduit session endpoint GET /api/v1/conduit and the in-process relay (read at startup; turning it on or off for the relay needs a restart). No existing connection path changes.",
 		Default:     false,
 		Layers:      []Layer{LayerServer},
 		Stage:       StageAlpha,

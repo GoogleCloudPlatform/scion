@@ -1,0 +1,270 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package cmd
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"cloud.google.com/go/compute/metadata"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub"
+	"github.com/google/uuid"
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
+)
+
+// Conduit flags of `server start`. Each overrides its server.hub.conduit
+// setting when set explicitly.
+var (
+	conduitInternalListen     string
+	conduitInternalAdvertise  string
+	conduitGrantKeyActivation string
+	conduitReconnectWindow    string
+	conduitTCPAllowedPorts    []int
+)
+
+// registerConduitServerFlags registers the conduit flags of `server start`.
+func registerConduitServerFlags(f *pflag.FlagSet) {
+	f.StringVar(&conduitInternalListen, "internal-listen", "", "host:port of the internal conduit relay API listener (hub.conduit; multi-node hubs). Must be reachable only inside the cluster/VPC")
+	f.StringVar(&conduitInternalAdvertise, "internal-advertise", "", "Base URL other hub nodes use to reach the internal listener (default: POD_IP or the listen host)")
+	f.StringVar(&conduitGrantKeyActivation, "conduit-grant-key-activation", "", "Publish-before-sign delay of a new conduit grant key (default 15m, minimum 1m)")
+	f.StringVar(&conduitReconnectWindow, "conduit-reconnect-window", "", "Jitter window targets redial in after a planned conduit close (default 5s, 0s-5m)")
+	f.IntSliceVar(&conduitTCPAllowedPorts, "conduit-tcp-allowed-ports", nil, "Agent ports a conduit TCP stream may target (comma-separated; default: all outside the hub deny-list)")
+}
+
+// applyConduitFlagOverrides copies the explicitly set conduit flags into
+// cfg. validateServerPreflight checks the result.
+func applyConduitFlagOverrides(cmd *cobra.Command, cfg *config.GlobalConfig) {
+	f := cmd.Flags()
+	if f.Changed("internal-listen") {
+		cfg.Hub.Conduit.InternalListen = conduitInternalListen
+	}
+	if f.Changed("internal-advertise") {
+		cfg.Hub.Conduit.InternalAdvertise = conduitInternalAdvertise
+	}
+	if f.Changed("conduit-grant-key-activation") {
+		cfg.Hub.Conduit.GrantKeyActivation = conduitGrantKeyActivation
+	}
+	if f.Changed("conduit-reconnect-window") {
+		cfg.Hub.Conduit.ReconnectWindow = conduitReconnectWindow
+	}
+	if f.Changed("conduit-tcp-allowed-ports") {
+		cfg.Hub.Conduit.TCPAllowedPorts = append([]int(nil), conduitTCPAllowedPorts...)
+	}
+}
+
+// appendConduitDaemonArgs forwards the explicitly set conduit flags to the
+// --foreground daemon child.
+func appendConduitDaemonArgs(cmd *cobra.Command, args []string) []string {
+	f := cmd.Flags()
+	for _, name := range []string{"internal-listen", "internal-advertise", "conduit-grant-key-activation", "conduit-reconnect-window"} {
+		if f.Changed(name) {
+			args = append(args, fmt.Sprintf("--%s=%s", name, f.Lookup(name).Value.String()))
+		}
+	}
+	if f.Changed("conduit-tcp-allowed-ports") {
+		ports := make([]string, len(conduitTCPAllowedPorts))
+		for i, p := range conduitTCPAllowedPorts {
+			ports[i] = strconv.Itoa(p)
+		}
+		args = append(args, "--conduit-tcp-allowed-ports="+strings.Join(ports, ","))
+	}
+	return args
+}
+
+// conduitGrantKeyActivationSetting returns the configured grant key activation
+// (0 = hub default). validateServerPreflight has already rejected a
+// malformed value.
+func conduitGrantKeyActivationSetting(cfg *config.GlobalConfig) time.Duration {
+	d, err := cfg.Hub.Conduit.GrantKeyActivationDuration()
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
+// conduitReconnectWindowSetting returns the configured GoAway jitter window (0 =
+// relay default). validateServerPreflight has already rejected a malformed
+// value.
+func conduitReconnectWindowSetting(cfg *config.GlobalConfig) time.Duration {
+	d, err := cfg.Hub.Conduit.ReconnectWindowDuration()
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
+// conduitInstanceID is this process's relay instance id: the host name (a
+// restarted pod with the same name supersedes its predecessor at once), or
+// a random id when there is none.
+func conduitInstanceID() string {
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
+	}
+	return uuid.NewString()
+}
+
+// conduitAdvertiseEndpoint derives the internal endpoint other hub nodes
+// use to reach this node: the configured internal_advertise, else
+// http://<host>:<port> where host is the listen host when it is a specific
+// address, else POD_IP. It returns "" (unaddressable) when no address is
+// known.
+func conduitAdvertiseEndpoint(advertise string, bound net.Addr, podIP string) string {
+	if advertise != "" {
+		return advertise
+	}
+	if bound == nil {
+		return ""
+	}
+	host, port, err := net.SplitHostPort(bound.String())
+	if err != nil {
+		return ""
+	}
+	if ip := net.ParseIP(host); host == "" || (ip != nil && ip.IsUnspecified()) {
+		host = podIP
+	}
+	if host == "" {
+		return ""
+	}
+	return "http://" + net.JoinHostPort(host, port)
+}
+
+// conduitPeerAuthOptions builds the relay-peer auth options from config
+// and the environment.
+func conduitPeerAuthOptions(ctx context.Context, cfg *config.GlobalConfig, selfID string, onGCP bool) hub.ConduitPeerAuthOptions {
+	o := hub.ConduitPeerAuthOptions{
+		Mode:            cfg.Hub.Conduit.PeerAuthMode(),
+		OnGCP:           onGCP,
+		SelfID:          selfID,
+		SharedSecret:    resolveSessionSecret(),
+		Audience:        cfg.Hub.Conduit.PeerAudience,
+		ServiceAccounts: cfg.Hub.Conduit.PeerServiceAccounts,
+	}
+	if onGCP {
+		if email, err := metadata.EmailWithContext(ctx, "default"); err == nil {
+			o.OwnServiceAccount = email
+		}
+	}
+	return o
+}
+
+// startConduit opens the internal listener (if configured) and starts the
+// hub's conduit relay when hub.conduit is on. With the flag off it does
+// nothing. In hosted-HA mode every failure is returned and the server
+// exits non-zero (C8); elsewhere a failure is logged and the hub serves
+// without a relay. A relay that stops on its own (superseded) reports on
+// errCh so the process exits and restarts.
+func startConduit(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, wg *sync.WaitGroup, errCh chan<- error) error {
+	if hubSrv == nil || !hubSrv.ConduitEnabled() {
+		return nil
+	}
+	requireHA := hostedHAGuardsRequired(cfg)
+	err := startConduitRelay(ctx, cfg, hubSrv, wg, errCh, requireHA)
+	if err == nil {
+		return nil
+	}
+	if requireHA {
+		return fmt.Errorf("conduit relay startup failed (hosted HA): %w", err)
+	}
+	slog.Error("Conduit relay not started; agent conduit sessions are unavailable on this node", "error", err)
+	return nil
+}
+
+func startConduitRelay(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, wg *sync.WaitGroup, errCh chan<- error, requireHA bool) error {
+	// C8: checked first, before any listener opens or peer auth is built,
+	// so the operator sees this cause rather than a later symptom.
+	if requireHA && !hubSrv.ConduitGrantRingShared() {
+		return hub.ErrConduitNoAtRestKey
+	}
+	id := conduitInstanceID()
+	auth, mode, err := hub.NewConduitPeerAuth(conduitPeerAuthOptions(ctx, cfg, id, metadata.OnGCE()))
+	if err != nil {
+		return err
+	}
+
+	var endpoint string
+	if listen := cfg.Hub.Conduit.InternalListen; listen != "" {
+		ln, err := net.Listen("tcp", listen)
+		if err != nil {
+			return fmt.Errorf("conduit internal listener %s: %w", listen, err)
+		}
+		srv := &http.Server{Handler: hubSrv.ConduitInternalHandler(), ReadHeaderTimeout: 10 * time.Second}
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				sendConduitErr(errCh, fmt.Errorf("conduit internal listener: %w", err))
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			<-ctx.Done()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_ = srv.Shutdown(shutdownCtx)
+		}()
+		endpoint = conduitAdvertiseEndpoint(cfg.Hub.Conduit.InternalAdvertise, ln.Addr(), os.Getenv("POD_IP"))
+		slog.Info("Conduit internal listener started", "addr", ln.Addr().String(), "advertise", endpoint)
+	} else if cfg.Hub.Conduit.InternalAdvertise != "" {
+		return errors.New("server.hub.conduit.internal_advertise is set but internal_listen is not")
+	}
+
+	if err := hubSrv.StartConduitRelay(ctx, hub.ConduitRelayOptions{
+		InstanceID:       id,
+		InternalEndpoint: endpoint,
+		RequireHA:        requireHA,
+		PeerAuth:         auth,
+		ReconnectWindow:  conduitReconnectWindowSetting(cfg),
+	}); err != nil {
+		return err
+	}
+	slog.Info("Conduit relay started", "instance_id", id, "peer_auth", mode, "internal_endpoint", endpoint, "hosted_ha", strconv.FormatBool(requireHA))
+
+	if fatal := hubSrv.ConduitRelayFatal(); fatal != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case err, ok := <-fatal:
+				if !ok || err == nil {
+					err = errors.New("relay stopped serving")
+				}
+				sendConduitErr(errCh, fmt.Errorf("conduit relay: %w", err))
+			case <-ctx.Done():
+			}
+		}()
+	}
+	return nil
+}
+
+// sendConduitErr reports a fatal conduit error without blocking: any error
+// already queued ends the server just the same.
+func sendConduitErr(errCh chan<- error, err error) {
+	select {
+	case errCh <- err:
+	default:
+		slog.Error("Conduit fatal error (server already stopping)", "error", err)
+	}
+}

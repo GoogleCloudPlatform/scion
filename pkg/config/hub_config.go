@@ -154,6 +154,10 @@ type HubServerConfig struct {
 	// launchKeepaliveSeconds in the create request once the async dispatch
 	// path lands. Default 15.
 	LaunchKeepaliveSeconds int `json:"launchKeepaliveSeconds" yaml:"launchKeepaliveSeconds" koanf:"launchKeepaliveSeconds"`
+
+	// Conduit holds the conduit relay and grant settings (validated by
+	// HubConduitConfig.Validate at startup).
+	Conduit HubConduitConfig `json:"conduit" yaml:"conduit" koanf:"conduit"`
 }
 
 // DefaultHubID generates a deterministic hub instance ID from the machine hostname.
@@ -1345,6 +1349,14 @@ var snakeCaseFields = map[string]string{
 	"installationurl":       "installation_url",
 	"maxsize":               "max_size",
 	"missingagentgrace":     "missing_agent_grace",
+	"grantkeyactivation":    "grant_key_activation",
+	"tcpallowedports":       "tcp_allowed_ports",
+	"internallisten":        "internal_listen",
+	"internaladvertise":     "internal_advertise",
+	"peerauth":              "peer_auth",
+	"peerserviceaccounts":   "peer_service_accounts",
+	"peeraudience":          "peer_audience",
+	"reconnectwindow":       "reconnect_window",
 	"notificationchannels":  "notification_channels",
 	"privatekeypath":        "private_key_path",
 	"publicurl":             "public_url",
@@ -1423,6 +1435,14 @@ var camelCaseFields = map[string]string{
 	"loglevel":                      "logLevel",
 	"maintenancemessage":            "maintenanceMessage",
 	"missingagentgrace":             "missingAgentGrace",
+	"grantkeyactivation":            "grantKeyActivation",
+	"tcpallowedports":               "tcpAllowedPorts",
+	"internallisten":                "internalListen",
+	"internaladvertise":             "internalAdvertise",
+	"peerauth":                      "peerAuth",
+	"peerserviceaccounts":           "peerServiceAccounts",
+	"peeraudience":                  "peerAudience",
+	"reconnectwindow":               "reconnectWindow",
 	"oidcaudience":                  "oidcAudience",
 	"platformauthsa":                "platformAuthSA",
 	"privatekey":                    "privateKey",
