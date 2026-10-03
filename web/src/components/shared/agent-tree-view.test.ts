@@ -287,12 +287,12 @@ describe('scion-agent-tree-view layout cache (#2388)', () => {
     expect(viaCache).toEqual(viaFreshRecompute);
   });
 
-  /** The status-badge `label` for the node whose card links to /agents/<id>. */
+  /** The status-badge `status` for the node whose card links to /agents/<id>. */
   function statusLabel(agentId: string): string | null {
     return (
       el
         .shadowRoot!.querySelector(`a.node[href="/agents/${agentId}"] scion-status-badge`)
-        ?.getAttribute('label') ?? null
+        ?.getAttribute('status') ?? null
     );
   }
 
