@@ -400,14 +400,14 @@ func TestInternalAPIBindsTargetRelay(t *testing.T) {
 		if restarted.Relay.Generation() <= gen {
 			t.Fatalf("restarted generation %d, want > %d", restarted.Relay.Generation(), gen)
 		}
-		replay := captured.Clone(context.Background())
+		resent := captured.Clone(context.Background())
 		u, err := url.Parse(restarted.Internal.URL)
 		if err != nil {
 			t.Fatal(err)
 		}
-		replay.URL.Scheme, replay.URL.Host, replay.Host = u.Scheme, u.Host, u.Host
-		if got := do(t, replay); got != http.StatusConflict {
-			t.Fatalf("replayed request %d, want 409", got)
+		resent.URL.Scheme, resent.URL.Host, resent.Host = u.Scheme, u.Host, u.Host
+		if got := do(t, resent); got != http.StatusConflict {
+			t.Fatalf("request signed for the old generation %d, want 409", got)
 		}
 		fresh := signed(t, restarted.Relay, p.w.PeerAuth("relay-b"), http.MethodGet, restarted.Internal.URL+relay.InternalPathPrefix+"self", nil, "")
 		if got := do(t, fresh); got != http.StatusOK {
