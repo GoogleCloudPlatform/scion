@@ -349,6 +349,26 @@ func TestWorkspaceSyncTo_BadRequest(t *testing.T) {
 	}
 }
 
+// TestWorkspaceSyncToFinalize_Warnings checks that hub warnings on the
+// finalize response (e.g. workspace files ignored for empty-per-agent) are
+// decoded from the raw wire JSON.
+func TestWorkspaceSyncToFinalize_Warnings(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"applied":true,"filesApplied":0,"warnings":["files ignored","other"]}`))
+	}))
+	defer server.Close()
+
+	client, _ := New(server.URL)
+	resp, err := client.Workspace().FinalizeSyncTo(context.Background(), "agent-1", &transfer.Manifest{Version: "1.0"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resp.Warnings) != 2 || resp.Warnings[0] != "files ignored" || resp.Warnings[1] != "other" {
+		t.Errorf("warnings = %q, want [files ignored other]", resp.Warnings)
+	}
+}
+
 func TestWorkspaceSyncToFinalize_Unauthorized(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

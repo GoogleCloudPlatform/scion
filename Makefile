@@ -117,6 +117,11 @@ test-hub-sqlite:
 # TestListActiveZonePrefixedSchedules: its prefix match compiles to LIKE, whose
 # case sensitivity differs between the two backends.
 #
+# It also includes the utc-timestamp-normalize JSON tests
+# (TestUTCTimestampNormalizeJSON_*, ptone/scion#2499): the JSON-embedded
+# timestamp rewrite is the part of that operation that runs on Postgres, with
+# its own SQL (jsonb casts, id keyset).
+#
 # It also includes the Conduit registry suite (TestConduitRegistry_*,
 # ptone/scion#2778): design conduit v2.1 §3.4 requires relay_instances,
 # conduit_sessions and conduit_principal_epochs to behave identically on
@@ -155,7 +160,7 @@ test-launch-store-postgres:
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
-		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestConduitRegistry_)' \
+		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUTCTimestampNormalizeJSON_|TestConduitRegistry_)' \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \
@@ -377,7 +382,7 @@ proto:
 		--proto_path=proto \
 		--go_out=. --go_opt=module=github.com/GoogleCloudPlatform/scion \
 		--go-grpc_out=. --go-grpc_opt=module=github.com/GoogleCloudPlatform/scion \
-		proto/broker/v1/broker.proto
+		proto/broker/v1/broker.proto proto/conduit/v1/conduit.proto
 	@echo "Proto generation done."
 
 ## proto-check: Verify generated protobuf code is up to date
@@ -388,9 +393,10 @@ proto-check:
 		--proto_path=proto \
 		--go_out=$$TMP --go_opt=module=github.com/GoogleCloudPlatform/scion \
 		--go-grpc_out=$$TMP --go-grpc_opt=module=github.com/GoogleCloudPlatform/scion \
-		proto/broker/v1/broker.proto && \
+		proto/broker/v1/broker.proto proto/conduit/v1/conduit.proto && \
 	diff $$TMP/proto/broker/v1/broker.pb.go proto/broker/v1/broker.pb.go && \
 	diff $$TMP/proto/broker/v1/broker_grpc.pb.go proto/broker/v1/broker_grpc.pb.go && \
+	diff $$TMP/proto/conduit/v1/conduit.pb.go proto/conduit/v1/conduit.pb.go && \
 	rm -rf $$TMP && \
 	echo "Proto generated code is up to date." || \
 	(rm -rf $$TMP; echo "Proto generated code is out of date. Run 'make proto' to regenerate."; exit 1)

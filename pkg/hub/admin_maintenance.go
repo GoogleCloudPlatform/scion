@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 )
 
@@ -141,10 +142,10 @@ func (s *Server) executeMigration(w http.ResponseWriter, r *http.Request, key st
 		return
 	}
 
-	// Prevent re-running completed migrations. There is no CLI flag that
-	// re-runs a completed migration through this endpoint; the message must
-	// not claim one exists.
-	if op.Status == store.MaintenanceStatusCompleted {
+	// Prevent re-running completed migrations, except the idempotent ones in
+	// rerunnableMigrations. There is no CLI flag that re-runs a completed
+	// migration through this endpoint; the message must not claim one exists.
+	if op.Status == store.MaintenanceStatusCompleted && !rerunnableMigrations[key] {
 		writeError(w, http.StatusConflict, ErrCodeConflict, "Migration already completed", nil)
 		return
 	}
@@ -267,6 +268,9 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 		}, nil
 	case "applied-config-tz-cleanup":
 		return &AppliedConfigTZCleanupExecutor{Store: s.store}, nil
+	case entadapter.UTCTimestampNormalizeKey:
+		db, dbDialect := s.storeDB()
+		return &UTCTimestampNormalizeExecutor{DB: db, Dialect: dbDialect}, nil
 	case "pull-images":
 		log.Debug("Resolved pull-images executor",
 			"runtime_bin", mc.RuntimeBin, "registry", mc.ImageRegistry,
