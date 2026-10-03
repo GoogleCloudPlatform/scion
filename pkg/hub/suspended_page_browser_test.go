@@ -49,6 +49,13 @@ func TestSuspendedPage_HeadlessBrowser_ZeroFanOut(t *testing.T) {
 			t.Skip("headless browser test requires chromium or google-chrome")
 		}
 	}
+	// Agent sandboxes cap virtual memory (ulimit -v) to contain runaway test
+	// binaries. Chromium cannot launch under any such cap, so the test would
+	// fail with "chrome failed to start" for a reason unrelated to the page.
+	// CI runners set no cap, so the test still runs there.
+	if limit, ok := addressSpaceLimit(); ok {
+		t.Skipf("headless Chromium cannot start under an address-space limit (RLIMIT_AS = %s, e.g. from ulimit -v)", limit)
+	}
 
 	// Set up suspended user.
 	st := newProxyAuthStore()
