@@ -391,7 +391,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 		srv.nfsMountReconciler = NewNFSMountReconciler(cfg.NFSConfig, checker, nfsLog)
 		// On Kubernetes and Cloud Run the platform mounts the export into
 		// the agent, so the broker never mounts it; it only verifies.
-		if rt != nil && nfsDispatchWarnOnlyRuntime(rt.Name()) {
+		if rt != nil && NFSWarnOnlyRuntime(rt.Name()) {
 			srv.nfsMountReconciler.SetVerifyOnly(fmt.Sprintf(
 				"the broker's default runtime is %s, so the broker does not mount it", rt.Name()))
 		}
@@ -1132,8 +1132,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		close(credWatcherStop)
 	}
 
-	// Stop the NFS reconcile loop. Not waited for: a pass may be inside a
-	// mount command, which is bounded by its own timeout.
+	// Stop the NFS reconcile loop. Cancelling its context kills a mount
+	// command in progress (its whole process group), so the loop ends
+	// promptly; it is not waited for.
 	s.mu.RLock()
 	nfsCancel := s.nfsReconcileCancel
 	s.mu.RUnlock()

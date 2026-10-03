@@ -145,12 +145,14 @@ func (s *Server) nfsHealthDegradesStatus() bool {
 	return true
 }
 
-// nfsDispatchWarnOnlyRuntime reports whether name is a runtime on which the
+// NFSWarnOnlyRuntime reports whether name is a runtime type on which the
 // platform, not the broker, mounts the NFS export into the agent: the
 // Kubernetes family (the kubelet mounts the volume) and the Cloud Run
 // family. For these the broker never mounts a share and never refuses a
-// dispatch over NFS state; it logs a warning instead.
-func nfsDispatchWarnOnlyRuntime(name string) bool {
+// dispatch over NFS state; it logs a warning instead. When it is the
+// broker's default runtime the broker only verifies its shares, and
+// scion doctor reports an unmounted share as a warning.
+func NFSWarnOnlyRuntime(name string) bool {
 	if isKubernetesRuntimeName(name) {
 		return true
 	}
@@ -5006,7 +5008,7 @@ func isLocalhostEndpoint(endpoint string) bool {
 //
 // It is decided by the dispatch's resolved runtime, which is checked before
 // anything is mounted:
-//   - Kubernetes or Cloud Run (nfsDispatchWarnOnlyRuntime): the platform
+//   - Kubernetes or Cloud Run (NFSWarnOnlyRuntime): the platform
 //     mounts the export into the agent. The broker reads the share's last
 //     recorded status, logs a warning if it is unhealthy, and continues; it
 //     never mounts and never refuses the dispatch.
@@ -5036,7 +5038,7 @@ func (s *Server) checkNFSForDispatch(ctx context.Context, name, projectPath, pro
 		ProjectPath: projectDir,
 		Profile:     profile,
 	})
-	if nfsDispatchWarnOnlyRuntime(runtimeType) {
+	if NFSWarnOnlyRuntime(runtimeType) {
 		if st, ok := r.ShareStatus(shareID); !ok || !st.Healthy {
 			detail := "not checked yet"
 			if ok {

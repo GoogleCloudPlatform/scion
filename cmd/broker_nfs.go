@@ -142,19 +142,33 @@ func checkDoctorNFSMounts(vs *config.VersionedSettings, probe nfsDoctorProbe) sc
 		}
 	}
 
+	// The broker never mounts when its default runtime is Kubernetes or
+	// Cloud Run (the platform mounts the export into the agent); it only
+	// verifies. Resolved from settings without constructing a runtime; an
+	// unresolvable profile is treated as a local-container runtime.
+	verifyOnlyRuntime := ""
+	if _, rtType, err := vs.ResolveRuntime(""); err == nil && runtimebroker.NFSWarnOnlyRuntime(rtType) {
+		verifyOnlyRuntime = rtType
+	}
+
 	mode := "auto_mount off"
 	remediation := "Mount each export at <mount_root>/<share id> on this host, or set server.workspace_storage.nfs.auto_mount: true on a broker that runs as root"
-	if nfsCfg.AutoMount {
+	switch {
+	case nfsCfg.AutoMount && verifyOnlyRuntime != "":
+		mode = "auto_mount on, verify only"
+		remediation = "The default runtime mounts the export into each agent; mount it on this host only if host-side tools need it"
+	case nfsCfg.AutoMount:
 		mode = "auto_mount on"
 		remediation = "The broker mounts the shares itself: check the broker log (broker.nfs-mount) and that the broker runs as root"
 	}
 
-	// A missing mount is a failure only where the broker host is expected
-	// to have it: with auto_mount on and no pv_name. With auto_mount off
-	// the operator may mount it elsewhere, and a pv_name share is mounted
-	// into pods by the kubelet, so the host normally has no mount; those
-	// are warnings. A wrong source, an unreachable server, or an unusable
-	// block are failures.
+	// A missing mount is a failure only where the broker is expected to
+	// mount it: with auto_mount on, no pv_name, and a local-container
+	// default runtime. With auto_mount off the operator may mount it
+	// elsewhere; a pv_name share is mounted into pods by the kubelet; and
+	// on a Kubernetes or Cloud Run default runtime the broker does not
+	// mount. Those are warnings, as in the broker's health. A wrong source,
+	// an unreachable server, or an unusable block are failures.
 	var ok, problems []string
 	failed := false
 	for _, share := range nfsCfg.Shares {
@@ -171,6 +185,8 @@ func checkDoctorNFSMounts(vs *config.VersionedSettings, probe nfsDoctorProbe) sc
 			issues = append(issues, fmt.Sprintf("not mounted at %s (pv_name is set, so the export is mounted into pods and this host need not mount it)", target))
 		case !mounted && !nfsCfg.AutoMount:
 			issues = append(issues, fmt.Sprintf("not mounted at %s (auto_mount is off, so the broker does not mount it)", target))
+		case !mounted && verifyOnlyRuntime != "":
+			issues = append(issues, fmt.Sprintf("not mounted at %s (the default runtime is %s, so the broker does not mount it)", target, verifyOnlyRuntime))
 		case !mounted:
 			issues = append(issues, fmt.Sprintf("not mounted at %s", target))
 			failed = true

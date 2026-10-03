@@ -41,6 +41,15 @@ func nfsSettings(autoMount bool, shares ...config.V1NFSShare) *config.VersionedS
 	}
 }
 
+// withDefaultRuntime sets the active profile's runtime, as the global
+// settings name it (key) and its type ("" leaves the type to the key).
+func withDefaultRuntime(vs *config.VersionedSettings, key, rtType string) *config.VersionedSettings {
+	vs.ActiveProfile = "default"
+	vs.Profiles = map[string]config.V1ProfileConfig{"default": {Runtime: key}}
+	vs.Runtimes = map[string]config.V1RuntimeConfig{key: {Type: rtType}}
+	return vs
+}
+
 var share1 = config.V1NFSShare{ID: "ws1", Server: "10.0.0.2", Export: "/scion-workspaces"}
 
 // pvShare is share1 with a Kubernetes PV name.
@@ -273,6 +282,19 @@ func TestCheckDoctorNFSMounts(t *testing.T) {
 			wantStatus: "warn", wantMessage: []string{"ws1: not mounted at /mnt/nfs/ws1", "auto_mount is off", "(auto_mount off)"}, wantRemedy: "Mount each export"},
 		{name: "not mounted, auto_mount on: fail", vs: nfsSettings(true, share1),
 			wantStatus: "fail", wantMessage: []string{"not mounted", "auto_mount on"}, wantRemedy: "broker.nfs-mount"},
+		{name: "not mounted, auto_mount on, kubernetes default runtime: warn", vs: withDefaultRuntime(nfsSettings(true, share1), "gke", "kubernetes"),
+			wantStatus: "warn", wantMessage: []string{"not mounted at /mnt/nfs/ws1", "default runtime is kubernetes", "verify only"}, wantRemedy: "mounts the export into each agent"},
+		{name: "not mounted, auto_mount on, cloudrun default runtime: warn", vs: withDefaultRuntime(nfsSettings(true, share1), "cloudrun", ""),
+			wantStatus: "warn", wantMessage: []string{"default runtime is cloudrun"}},
+		{name: "not mounted, auto_mount on, docker default runtime: fail", vs: withDefaultRuntime(nfsSettings(true, share1), "docker", ""),
+			wantStatus: "fail", wantMessage: []string{"not mounted", "(auto_mount on)"}, wantRemedy: "broker.nfs-mount"},
+		{name: "not mounted, auto_mount on, unresolvable profile: fail", vs: func() *config.VersionedSettings {
+			vs := withDefaultRuntime(nfsSettings(true, share1), "gke", "kubernetes")
+			vs.ActiveProfile = "missing"
+			return vs
+		}(), wantStatus: "fail", wantMessage: []string{"not mounted"}},
+		{name: "wrong source, auto_mount on, kubernetes default runtime: fail", vs: withDefaultRuntime(nfsSettings(true, share1), "gke", "kubernetes"),
+			probe: fakeNFSProbe{mounts: map[string]string{"/mnt/nfs/ws1": "10.9.9.9:/x"}}, wantStatus: "fail", wantMessage: []string{"mounted from 10.9.9.9:/x"}},
 		{name: "not mounted, pv_name share, auto_mount on: warn", vs: nfsSettings(true, pvShare),
 			wantStatus: "warn", wantMessage: []string{"not mounted", "pv_name is set"}},
 		{name: "not mounted with auto_mount off, server unreachable: fail", vs: nfsSettings(false, share1),

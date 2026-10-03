@@ -57,7 +57,8 @@ new 503 on upgrade would change their behaviour, so mounting is opt-in:
 - NFS state never affects `readyz` and never stops the broker.
 - `scion doctor` checks locally: configured, mounted from the expected
   `server:export`, server reachable on TCP 2049. Not mounted is a warning
-  with auto_mount off or for `pv_name` shares, a failure otherwise.
+  with auto_mount off, for `pv_name` shares, or when the default runtime is
+  Kubernetes or Cloud Run (verify only, matching health); a failure otherwise.
 
 ## Follow-ups noticed
 

@@ -903,8 +903,11 @@ type V1NFSConfig struct {
 
 	// AutoMount lets a Runtime Broker mount each share itself, at
 	// <MountRoot>/<share.ID>, in the background at startup and again before
-	// each NFS-backed dispatch. Default false: the operator (or the kubelet,
-	// on Kubernetes) provides the mounts, and the broker only checks them
+	// each NFS-backed dispatch to a local-container runtime (dispatches to
+	// Kubernetes or Cloud Run never mount). A broker whose default runtime
+	// is Kubernetes or Cloud Run never mounts, even with AutoMount on; it
+	// only verifies. Default false: the operator (or the kubelet, on
+	// Kubernetes) provides the mounts, and the broker only checks them
 	// read-only for /healthz and scion doctor. Mounting requires the broker
 	// to run as root (mount.nfs checks uid 0). Only server.workspace_storage
 	// reads this field; shared_dir_storage ignores it.
