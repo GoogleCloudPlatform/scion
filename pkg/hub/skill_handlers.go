@@ -408,20 +408,32 @@ func isAgentIdentity(identity Identity) bool {
 // readSkillWriteBody decodes a create or update skill request body into v.
 // Skills no longer carry a visibility setting (access follows the skill's
 // scope), so a body that still sends one is rejected with 400 rather than
-// having the field silently dropped. On failure it writes the error response
-// and returns false.
+// having the field silently dropped. The body must be a single JSON value:
+// trailing data is rejected, so the visibility check always covers exactly
+// the value decoded into v. The body is limited by readRawBody (413 when
+// exceeded). On failure it writes the error response and returns false.
 func readSkillWriteBody(w http.ResponseWriter, r *http.Request, v interface{}) bool {
-	if r.Body == nil {
-		BadRequest(w, "Invalid request body: empty request body")
-		return false
-	}
-	body, err := io.ReadAll(r.Body)
+	body, err := readRawBody(w, r)
 	if err != nil {
+		if isMaxBytesError(err) {
+			writeError(w, http.StatusRequestEntityTooLarge, ErrCodeInvalidRequest, "Request body too large", nil)
+			return false
+		}
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return false
 	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	var value json.RawMessage
+	if err := dec.Decode(&value); err != nil {
+		BadRequest(w, "Invalid request body: "+err.Error())
+		return false
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		BadRequest(w, "Invalid request body: unexpected data after the JSON value")
+		return false
+	}
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(body, &fields) == nil {
+	if json.Unmarshal(value, &fields) == nil {
 		for name := range fields {
 			// encoding/json matches struct fields case-insensitively, so
 			// treat the key the same way.
@@ -432,8 +444,7 @@ func readSkillWriteBody(w http.ResponseWriter, r *http.Request, v interface{}) b
 			}
 		}
 	}
-	// Decode the same way readJSON does so other body handling is unchanged.
-	if err := json.NewDecoder(bytes.NewReader(body)).Decode(v); err != nil {
+	if err := json.Unmarshal(value, v); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return false
 	}

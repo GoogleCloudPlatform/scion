@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -109,4 +111,72 @@ func TestUpdateSkill_RejectsVisibilityField(t *testing.T) {
 	got, err = s.GetSkill(ctx, skill.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "changed", got.Description)
+}
+
+// doRawJSONRequestAsUser sends body verbatim (no JSON marshalling) as user.
+func doRawJSONRequestAsUser(t *testing.T, srv *Server, user *store.User, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	token, _, _, err := srv.userTokenService.GenerateTokenPair(
+		user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb,
+	)
+	require.NoError(t, err)
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestSkillWriteBody_RejectsTrailingData verifies that a body with data after
+// the first JSON value is rejected, so a visibility field cannot be dropped
+// silently by appending trailing bytes, and that nothing is stored or
+// changed.
+func TestSkillWriteBody_RejectsTrailingData(t *testing.T) {
+	srv, s, alice, _, project := setupSkillAuthzTest(t)
+	ctx := context.Background()
+
+	createBody := func(name string, extra string) string {
+		return `{"name":"` + name + `","scope":"project","scopeId":"` + project.ID + `"` + extra + `}`
+	}
+
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"visibility then junk", createBody("trail-vis", `,"visibility":"public"`) + ` junk`},
+		{"junk without visibility", createBody("trail-junk", "") + ` junk`},
+		{"second object", createBody("trail-obj", "") + ` {"visibility":"public"}`},
+	}
+	for _, tc := range cases {
+		t.Run("create "+tc.name, func(t *testing.T) {
+			rec := doRawJSONRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills", tc.body)
+			require.Equal(t, http.StatusBadRequest, rec.Code, "got: %s", rec.Body.String())
+		})
+	}
+	list, err := s.ListSkills(ctx, store.SkillFilter{ScopeID: project.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, list.Items, "rejected creates must not store a skill")
+
+	// Trailing whitespace is not data and stays accepted.
+	rec := doRawJSONRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills", createBody("trail-ws", "")+" \n\t ")
+	require.Equal(t, http.StatusCreated, rec.Code, "got: %s", rec.Body.String())
+
+	skill := createTestSkill(t, s, "trail-update", store.SkillScopeProject, project.ID, alice.ID)
+	rec = doRawJSONRequestAsUser(t, srv, alice, http.MethodPatch, "/api/v1/skills/"+skill.ID,
+		`{"description":"changed","visibility":"public"} junk`)
+	require.Equal(t, http.StatusBadRequest, rec.Code, "got: %s", rec.Body.String())
+	got, err := s.GetSkill(ctx, skill.ID)
+	require.NoError(t, err)
+	assert.Equal(t, skill.Description, got.Description, "a rejected update must not modify the skill")
+}
+
+// TestSkillWriteBody_BodyTooLarge verifies the create body is size-limited.
+func TestSkillWriteBody_BodyTooLarge(t *testing.T) {
+	srv, _, alice, _, project := setupSkillAuthzTest(t)
+
+	big := `{"name":"too-big","scope":"project","scopeId":"` + project.ID +
+		`","description":"` + strings.Repeat("x", maxSettingsBodySize) + `"}`
+	rec := doRawJSONRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills", big)
+	require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code, "got: %s", rec.Body.String())
 }
