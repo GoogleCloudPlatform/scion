@@ -15,7 +15,7 @@
  */
 
 /**
- * Covers the small and paged window states (design §9): off-page upsert,
+ * Covers the small and paged window states: off-page upsert,
  * reconnect chip with no request, label typing/commit, a label 400 keeping
  * previous data, lifecycle refresh issuing exactly one request, and the 422
  * fallback with its per-label memory. Small-state display being identical
@@ -30,7 +30,10 @@ import { resetHubProjectCapabilitiesCache } from '../../client/hub-capabilities.
 import { stateManager } from '../../client/state.js';
 import { PROJECT_AGENTS_FIT_THRESHOLD } from '../../client/agent-list-window.js';
 
-/** happy-dom has no EventSource; setScope opens one. */
+/**
+ * happy-dom has no EventSource; setScope opens one. It opens on the next
+ * tick, so a drain's wait for the live connection resolves at once.
+ */
 class FakeEventSource extends EventTarget {
   static readonly CONNECTING = 0;
   static readonly OPEN = 1;
@@ -40,6 +43,11 @@ class FakeEventSource extends EventTarget {
   onerror: ((ev: Event) => void) | null = null;
   constructor(readonly url: string) {
     super();
+    setTimeout(() => {
+      if (this.readyState === FakeEventSource.CLOSED) return;
+      this.readyState = FakeEventSource.OPEN;
+      this.onopen?.(new Event('open'));
+    }, 0);
   }
   close(): void {
     this.readyState = FakeEventSource.CLOSED;
@@ -91,7 +99,7 @@ interface AgentsRequest {
   url: string;
 }
 
-/** A minimal fake project-agents endpoint implementing enough of the design §4 contract for these tests. */
+/** A minimal fake project-agents endpoint implementing enough of the project agents endpoint contract for these tests. */
 function createFetchHandler(opts: {
   projectId: string;
   projectCaps: Capabilities;
@@ -232,14 +240,15 @@ interface Internals {
     next(): Promise<void>;
     prev(): Promise<void>;
     refresh(): Promise<void>;
-    state: 'small' | 'paged';
+    state: 'small' | 'paged' | 'held' | 'capped';
     items: Agent[];
+    display: Agent[];
     pageIndex: number;
     updatesAvailable: boolean;
     error: string | null;
   };
   agentStats: { total: number; running: number };
-  listViewUsesWindow: boolean;
+  agentsLoading: boolean;
 }
 
 function internals(el: TestEl): Internals {
@@ -333,7 +342,7 @@ function createRealisticFetchHandler(opts: {
         });
 
         // Paged (incomplete) responses are phase-filtered server-side; a
-        // complete response is always the whole unphased set (design §4.3).
+        // complete response is always the whole unphased set.
         const phased = phase ? sorted.filter((a) => a.phase === phase) : sorted;
 
         if (cursor !== null) {
@@ -377,17 +386,19 @@ function createRealisticFetchHandler(opts: {
         );
       }
 
-      // Legacy mode.
-      if (opts.legacyTruncated) {
-        return Promise.resolve(
-          jsonResponse({
-            agents: list.slice(0, 20),
-            nextCursor: 'truncated',
-            _capabilities: opts.projectCaps,
-          })
-        );
-      }
-      return Promise.resolve(jsonResponse({ agents: list, _capabilities: opts.projectCaps }));
+      // Legacy mode: cursor pages of the unsorted list. `legacyTruncated`
+      // shrinks a legacy page to 20 items, so a 100-agent drain needs five
+      // pages and is capped at four.
+      const legacyLimit = opts.legacyTruncated ? 20 : Number(u.searchParams.get('limit') ?? '500');
+      const start = Number(u.searchParams.get('cursor') ?? '0');
+      const end = start + legacyLimit;
+      return Promise.resolve(
+        jsonResponse({
+          agents: list.slice(start, end),
+          nextCursor: end < list.length ? String(end) : undefined,
+          _capabilities: opts.projectCaps,
+        })
+      );
     }
 
     return Promise.resolve(jsonResponse({}, 404));
@@ -494,9 +505,8 @@ describe('project-detail — agent list window', () => {
       expect(requests.length).toBe(3);
     }, 20_000);
 
-    it('the same page opened in grid view issues exactly one legacy agents request, and grid -> list issues zero', async () => {
-      // Grid always uses the legacy load, which returns the complete set at
-      // any size up to 500, so this holds above the fit threshold too.
+    it('the same page opened in grid view issues exactly one agents request (the fit request), and grid -> list issues zero', async () => {
+      // Grid with the updated sort is sorted-eligible, the same as list.
       const projectId = 'p-w10-grid';
       localStorage.setItem('scion-view-project-agents', 'grid');
       const agents = Array.from({ length: 100 }, (_, i) => makeAgent(i, { projectId }));
@@ -510,7 +520,7 @@ describe('project-detail — agent list window', () => {
 
       const el = await createComponent(projectId);
       expect(requests.length).toBe(1);
-      expect(requests[0].url).not.toContain('sort=');
+      expect(requests[0].url).toContain('sort=updated');
 
       const toggle = viewToggle(el)!;
       toggle.dispatchEvent(new CustomEvent('view-change', { detail: { view: 'list' } }));
@@ -558,7 +568,7 @@ describe('project-detail — agent list window', () => {
       expect(internals(el).agentWindow.state).toBe('paged');
     });
 
-    it('100 agents: one request on load; each paged interaction costs exactly one; list -> grid is one legacy load that completes the set, after which toggles are free', async () => {
+    it('100 agents: one request on load; each paged interaction costs exactly one; list <-> grid is free while paged; tree drains once, after which toggles are free', async () => {
       const { el, requests } = await mountList('p-fit-100', 100);
       expect(requests.length).toBe(1);
       expect(requests[0].url).toContain(`fit=${PROJECT_AGENTS_FIT_THRESHOLD}`);
@@ -622,15 +632,29 @@ describe('project-detail — agent list window', () => {
       expect(requests.length - n).toBe(1);
       expect(internals(el).agentWindow.state).toBe('paged');
 
+      // list <-> grid while paged: both render the same server page.
       const toggle = viewToggle(el)!;
       n = requests.length;
-      toggle.dispatchEvent(new CustomEvent('view-change', { detail: { view: 'grid' } }));
+      for (const v of ['grid', 'list', 'grid']) {
+        toggle.dispatchEvent(new CustomEvent('view-change', { detail: { view: v } }));
+        await settle();
+      }
+      expect(requests.length - n).toBe(0);
+      expect(internals(el).agentWindow.state).toBe('paged');
+      await el.updateComplete;
+      expect(el.shadowRoot!.querySelectorAll('.agent-grid > *').length).toBe(25);
+
+      // grid -> tree: one drain (a single legacy page at 100 agents), then
+      // every toggle is free.
+      n = requests.length;
+      toggle.dispatchEvent(new CustomEvent('view-change', { detail: { view: 'graph' } }));
       await settle();
       expect(requests.length - n).toBe(1);
       expect(requests[requests.length - 1].url).not.toContain('sort=');
+      expect(internals(el).agentWindow.state).toBe('small');
 
       n = requests.length;
-      for (const v of ['list', 'grid', 'list']) {
+      for (const v of ['list', 'grid', 'graph', 'list']) {
         toggle.dispatchEvent(new CustomEvent('view-change', { detail: { view: v } }));
         await settle();
       }
@@ -716,7 +740,13 @@ describe('project-detail — agent list window', () => {
   describe('label 400 keeps previous data', () => {
     it('a non-OK label-commit response keeps the previously loaded agents', async () => {
       const projectId = 'p-label-400';
-      localStorage.setItem('scion-view-project-agents', 'grid'); // not sorted-eligible: exercises the legacy path directly
+      // Name sort is complete-needing: the label commit drains, and the
+      // drain's first (legacy) page is the one that fails.
+      localStorage.setItem('scion-view-project-agents', 'grid');
+      localStorage.setItem(
+        `scion-sort-project-agents-${projectId}`,
+        JSON.stringify({ field: 'name', dir: 'asc' })
+      );
       const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
       let failNext = false;
@@ -751,10 +781,13 @@ describe('project-detail — agent list window', () => {
 
       const after = (el as unknown as { agents: Agent[] }).agents;
       expect(after.length).toBe(5); // previous data kept, not cleared to []
+      expect(requests.filter((r) => r.url.includes('label=')).length).toBe(1); // a 400 is not retried
+      expect(internals(el).committedLabel).toBe('');
+      expect(internals(el).agentWindow.state).toBe('small');
     });
   });
 
-  describe('paged state: live updates (design §6.2 table), and reconnect', () => {
+  describe('paged state: live updates, and reconnect', () => {
     /** 30 agents, forced paged (via `legacyTruncated` plus a `fit` below the count — see individual tests), 25/page: page 0 holds the 25 highest `updated`, page 1 holds the rest. */
     function mountForcedPaged(
       projectId: string,
@@ -857,7 +890,7 @@ describe('project-detail — agent list window', () => {
 
       // A pure phase change off-page, with no active phase filter, does not
       // change which agent belongs on which page — it only affects the
-      // live "Running" count, which the design table says shows no chip for.
+      // live "Running" count, which shows no chip.
       expect(internals(el).agentStats.running).toBe(29);
       expect(internals(el).agentWindow.updatesAvailable).toBe(false);
       expect(requests.length).toBe(before);
@@ -1011,7 +1044,7 @@ describe('project-detail — agent list window', () => {
       await el.updateComplete;
 
       expect(internals(el).agentWindow.updatesAvailable).toBe(true);
-      expect(requests.length).toBe(before); // still zero-cost (design §6.2)
+      expect(requests.length).toBe(before); // still zero-cost
     });
 
     it('an off-page status change for a non-member under a different committed label never inflates stats.total and never raises the chip', async () => {
@@ -1055,7 +1088,7 @@ describe('project-detail — agent list window', () => {
       const before = requests.length;
       // The non-member (env=dev, a different project-scope agent) sends a
       // status update. It is not on any page and was never a member, so the
-      // off-page add rule (design §6.2's add rule, mirroring the server's
+      // off-page add rule (the add rule, mirroring the server's
       // stats population) must not add it.
       (
         stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
@@ -1147,7 +1180,7 @@ describe('project-detail — agent list window', () => {
       expect(afterAgents.find((a) => a.id === 'a-4')?.phase).toBe('stopped');
       expect(internals(el).agentWindow.items.find((a) => a.id === 'a-4')?.phase).toBe('stopped');
       expect(requests.length).toBe(1);
-      // mergeChanged (design §7): the array identity changed (a-4 changed),
+      // mergeChanged: the array identity changed (a-4 changed),
       // but every untouched agent is carried over by reference.
       expect(afterAgents).not.toBe(beforeAgents);
       expect(afterAgents.find((a) => a.id === 'a-3')).toBe(untouched);
@@ -1403,113 +1436,8 @@ describe('project-detail — agent list window', () => {
     });
   });
 
-  describe('paged -> legacy transitions issue exactly one request each', () => {
-    it('sort -> name (legacy) and name -> updated (paged again) each issue exactly one request; a phase change while paged issues exactly one', async () => {
-      const projectId = 'p-b2b3';
-      localStorage.setItem('scion-view-project-agents', 'list');
-      const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i, { projectId }));
-      const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: string | URL | Request, init?: RequestInit) => {
-          const rawUrl =
-            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-          const u = new URL(rawUrl, 'http://localhost');
-          if (u.pathname === `/api/v1/projects/${projectId}/agents` && u.searchParams.get('sort')) {
-            u.searchParams.set('fit', '0'); // always paged for every sorted request in this test
-          }
-          return createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-            legacyTruncated: true, // the legacy fallback is also "large" (truncated)
-          })(u.toString(), init);
-        })
-      );
-
-      const el = await createComponent(projectId);
-      expect(internals(el).agentWindow.state).toBe('paged');
-
-      let n = requests.length;
-      internals(el).toggleSort('name');
-      await new Promise((r) => setTimeout(r, 10));
-      expect(requests.length - n).toBe(1); // exactly one legacy load, not two
-      expect(requests[requests.length - 1].url).not.toContain('sort=');
-      expect(internals(el).agentWindow.state).toBe('small'); // out of 'paged' even though truncated
-
-      n = requests.length;
-      internals(el).toggleSort('updated');
-      await new Promise((r) => setTimeout(r, 10));
-      expect(requests.length - n).toBe(1); // exactly one fit request, not two
-      expect(requests[requests.length - 1].url).toContain('sort=updated');
-      expect(internals(el).agentWindow.state).toBe('paged'); // forced paged again (fit=0)
-
-      n = requests.length;
-      internals(el).setPhaseFilter('running');
-      await new Promise((r) => setTimeout(r, 10));
-      expect(requests.length - n).toBe(1); // phase change while paged: exactly one (design row 6)
-    });
-
-    it('grid<->list toggles cost exactly the documented interim requests, then zero, once the set is complete and promoted to small (not the always-paged case — see below)', async () => {
-      const projectId = 'p-b3-toggles';
-      localStorage.setItem('scion-view-project-agents', 'list');
-      // 30 agents; the sorted endpoint reports complete once asked again
-      // with the real fit threshold, so after one legacy load and one
-      // fit retry the window settles into 'small' and further toggles are free.
-      const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i, { projectId }));
-      const requests: AgentsRequest[] = [];
-      vi.stubGlobal(
-        'fetch',
-        vi.fn((input: string | URL | Request, init?: RequestInit) => {
-          const rawUrl =
-            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-          const u = new URL(rawUrl, 'http://localhost');
-          // Force only the FIRST sorted request (the initial page load) to be
-          // paged, by capping `fit` there; subsequent requests use the real
-          // threshold and come back complete.
-          return createRealisticFetchHandler({
-            projectId,
-            projectCaps: { actions: ['read'] },
-            agents,
-            requests,
-            legacyTruncated: true,
-          })(input, init);
-        })
-      );
-      // The mount's own first request uses the real fit threshold, and 30
-      // is below it, so it is actually complete — use a dedicated
-      // paged-first-load harness instead: start already paged via a forced
-      // page-1 navigation isn't meaningful here, so this test instead
-      // begins in list+paged by making the window ineligible at mount
-      // (grid).
-      localStorage.setItem('scion-view-project-agents', 'grid');
-      const el = await createComponent(projectId);
-      // Grid load is legacy (not P1-eligible); truncated per legacyTruncated.
-      expect(requests.length).toBe(1);
-      expect(internals(el).listViewUsesWindow).toBe(false);
-
-      const toggle = viewToggle(el)!;
-      let n = requests.length;
-      toggle.dispatchEvent(new CustomEvent('view-change', { detail: { view: 'list' } }));
-      await new Promise((r) => setTimeout(r, 10));
-      // grid(truncated) -> list(updated sort): one fit request (design §11 interim cost).
-      expect(requests.length - n).toBe(1);
-      expect(internals(el).listViewUsesWindow).toBe(true); // 30 is below the fit threshold: complete this time
-
-      n = requests.length;
-      for (const v of ['grid', 'list', 'grid', 'list', 'grid']) {
-        toggle.dispatchEvent(new CustomEvent('view-change', { detail: { view: v } }));
-        await new Promise((r) => setTimeout(r, 10));
-      }
-      expect(requests.length - n).toBe(0); // held: this.agents already has the complete set
-    }, 20_000);
-
-    it('always-paged (fit=0): a dir flip costs one request, and list<->grid toggles cost exactly one each, alternating legacy and fit', async () => {
-      const projectId = 'p-b3-always-paged';
-      localStorage.setItem('scion-view-project-agents', 'list');
-      const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i, { projectId }));
-      const requests: AgentsRequest[] = [];
+  describe('view changes that need the complete set drain it once, then cost nothing', () => {
+    function stubAlwaysPaged(projectId: string, agents: Agent[], requests: AgentsRequest[]) {
       vi.stubGlobal(
         'fetch',
         vi.fn((input: string | URL | Request, init?: RequestInit) => {
@@ -1524,10 +1452,45 @@ describe('project-detail — agent list window', () => {
             projectCaps: { actions: ['read'] },
             agents,
             requests,
-            legacyTruncated: true, // the legacy fallback is also "large" (truncated), so it never promotes to small either
           })(u.toString(), init);
         })
       );
+    }
+
+    it('sort -> name while paged drains once into the local set; later sort, dir and phase changes cost zero', async () => {
+      const projectId = 'p-name-drain';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i, { projectId }));
+      const requests: AgentsRequest[] = [];
+      stubAlwaysPaged(projectId, agents, requests);
+
+      const el = await createComponent(projectId);
+      expect(internals(el).agentWindow.state).toBe('paged');
+
+      let n = requests.length;
+      internals(el).toggleSort('name');
+      await new Promise((r) => setTimeout(r, 50));
+      expect(requests.length - n).toBe(1);
+      expect(requests[requests.length - 1].url).not.toContain('sort=');
+      expect(internals(el).agentWindow.state).toBe('small');
+      expect(internals(el).agents.length).toBe(30);
+
+      n = requests.length;
+      internals(el).toggleSort('updated');
+      internals(el).toggleSort('updated'); // dir flip
+      internals(el).toggleSort('created');
+      internals(el).setPhaseFilter('running');
+      await new Promise((r) => setTimeout(r, 50));
+      expect(requests.length - n).toBe(0);
+      expect(internals(el).agentWindow.state).toBe('small');
+    });
+
+    it('always paged: a dir flip and a created sort cost one request each, and list <-> grid toggles cost zero', async () => {
+      const projectId = 'p-always-paged';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i, { projectId }));
+      const requests: AgentsRequest[] = [];
+      stubAlwaysPaged(projectId, agents, requests);
 
       const el = await createComponent(projectId);
       expect(internals(el).agentWindow.state).toBe('paged');
@@ -1536,35 +1499,294 @@ describe('project-detail — agent list window', () => {
       internals(el).toggleSort('updated'); // same field: flips dir only
       await new Promise((r) => setTimeout(r, 10));
       expect(requests.length - n).toBe(1);
-      // Assert the actual dir, not just the count.
       expect(requests[requests.length - 1].url).toContain('sort=updated');
       expect(requests[requests.length - 1].url).toContain('dir=asc');
 
+      n = requests.length;
+      internals(el).toggleSort('created');
+      await new Promise((r) => setTimeout(r, 10));
+      expect(requests.length - n).toBe(1);
+      expect(requests[requests.length - 1].url).toContain('sort=created');
+      expect(internals(el).agentWindow.state).toBe('paged');
+
       const toggle = viewToggle(el)!;
       const perToggleCosts: number[] = [];
-      const perToggleKinds: Array<'legacy' | 'fit'> = [];
       for (const v of ['grid', 'list', 'grid', 'list', 'grid', 'list']) {
         n = requests.length;
         toggle.dispatchEvent(new CustomEvent('view-change', { detail: { view: v } }));
         await new Promise((r) => setTimeout(r, 10));
         perToggleCosts.push(requests.length - n);
-        const issued = requests.slice(n);
-        perToggleKinds.push(issued.every((r) => !r.url.includes('sort=')) ? 'legacy' : 'fit');
       }
-      // Every toggle costs exactly one request: ->grid is the legacy load
-      // (exiting 'paged'), ->list is the fit request (re-entering 'paged',
-      // since this fixture never reports complete) — design §11's two
-      // interim-cost bullets, paid on every toggle while the project stays
-      // above the fit threshold.
-      expect(perToggleCosts).toEqual([1, 1, 1, 1, 1, 1]);
-      // Assert the actual alternation the title claims.
-      expect(perToggleKinds).toEqual(['legacy', 'fit', 'legacy', 'fit', 'legacy', 'fit']);
-    }, 20_000);
+      expect(perToggleCosts).toEqual([0, 0, 0, 0, 0, 0]);
+      expect(internals(el).agentWindow.state).toBe('paged');
+    });
+  });
+
+  describe('costs of the earlier sorted-list cut are gone', () => {
+    const mountPaged = async (projectId: string, view: 'list' | 'grid') => {
+      localStorage.setItem('scion-view-project-agents', view);
+      const agents = Array.from({ length: 100 }, (_, i) => makeAgent(i, { projectId }));
+      const requests: AgentsRequest[] = [];
+      const posts: Array<{ resolve: (v: Response) => void }> = [];
+      const inner = createRealisticFetchHandler({
+        projectId,
+        projectCaps: { actions: ['read'] },
+        agents,
+        requests,
+      });
+      const fetchSpy = vi.fn((input: string | URL | Request, init?: RequestInit) => {
+        if ((init?.method ?? 'GET').toUpperCase() === 'POST') {
+          // Lifecycle actions hang, so only the optimistic update can change a row.
+          const d = deferred<Response>();
+          posts.push(d);
+          return d.promise;
+        }
+        return inner(input, init);
+      });
+      vi.stubGlobal('fetch', fetchSpy);
+      const el = await createComponent(projectId);
+      const agentGets = () =>
+        fetchSpy.mock.calls.filter(([input]) =>
+          String(input).includes(`/api/v1/projects/${projectId}/agents`)
+        ).length;
+      return { el, requests, agentGets, posts };
+    };
+
+    it('paged -> grid issues no request and renders the server page; paged -> tree and paged -> name sort each start one drain', async () => {
+      const a = await mountPaged('p-gone-grid', 'list');
+      expect(internals(a.el).agentWindow.state).toBe('paged');
+      let n = a.agentGets();
+      viewToggle(a.el)!.dispatchEvent(new CustomEvent('view-change', { detail: { view: 'grid' } }));
+      await new Promise((r) => setTimeout(r, 10));
+      await a.el.updateComplete;
+      expect(a.agentGets() - n).toBe(0);
+      expect(internals(a.el).agentWindow.state).toBe('paged');
+      expect(a.el.shadowRoot!.querySelectorAll('.agent-grid > *').length).toBe(25);
+
+      n = a.agentGets();
+      viewToggle(a.el)!.dispatchEvent(
+        new CustomEvent('view-change', { detail: { view: 'graph' } })
+      );
+      await new Promise((r) => setTimeout(r, 50));
+      expect(a.agentGets() - n).toBe(1);
+      expect(a.requests[a.requests.length - 1].url).toContain('limit=500');
+      expect(a.requests[a.requests.length - 1].url).not.toContain('sort=');
+      expect(internals(a.el).agentWindow.state).toBe('small');
+      a.el.remove();
+      localStorage.clear();
+
+      const b = await mountPaged('p-gone-name', 'grid');
+      expect(internals(b.el).agentWindow.state).toBe('paged');
+      n = b.agentGets();
+      internals(b.el).toggleSort('name');
+      await new Promise((r) => setTimeout(r, 50));
+      expect(b.agentGets() - n).toBe(1);
+      expect(b.requests[b.requests.length - 1].url).not.toContain('sort=');
+      expect(internals(b.el).agentWindow.state).toBe('small');
+    });
+
+    it('a grid page load followed by a switch to list issues no extra request', async () => {
+      const { el, requests, agentGets } = await mountPaged('p-gone-fit', 'grid');
+      expect(agentGets()).toBe(1);
+      expect(requests[0].url).toContain('sort=updated');
+      expect(internals(el).agentWindow.state).toBe('paged');
+
+      viewToggle(el)!.dispatchEvent(new CustomEvent('view-change', { detail: { view: 'list' } }));
+      await new Promise((r) => setTimeout(r, 10));
+      expect(agentGets()).toBe(1);
+      expect(internals(el).agentWindow.state).toBe('paged');
+    });
+
+    it('an optimistic lifecycle update applies to the paged row before the server answers, with no agents request', async () => {
+      const { el, agentGets, posts } = await mountPaged('p-gone-optimistic', 'list');
+      expect(internals(el).agentWindow.state).toBe('paged');
+      const target = internals(el).agentWindow.items[3];
+      expect(target.phase).toBe('running');
+
+      const n = agentGets();
+      void internals(el).handleAgentAction(target.id, 'stop');
+      await new Promise((r) => setTimeout(r, 10));
+      expect(posts.length).toBe(1); // still in flight
+      expect(agentGets() - n).toBe(0);
+      const row = internals(el).agentWindow.items.find((a) => a.id === target.id);
+      expect(row?.phase).toBe('stopping');
+      expect(internals(el).agentWindow.items[3].id).toBe(target.id); // stays in place
+      expect(internals(el).agents).toEqual([]); // the page-level set stays empty while paged
+    });
+  });
+
+  describe('request counts per interaction at 25, 500 and 1,200 agents', () => {
+    type Step = [label: string, run: (el: TestEl) => void | Promise<void>];
+    const commitLabel = (el: TestEl, value: string) => {
+      const input = labelInput(el)!;
+      input.value = value;
+      input.dispatchEvent(new Event('sl-input'));
+      input.dispatchEvent(new Event('sl-change'));
+    };
+    const setView = (el: TestEl, view: string) =>
+      viewToggle(el)!.dispatchEvent(new CustomEvent('view-change', { detail: { view } }));
+    const steps: Step[] = [
+      ['grid', (el) => setView(el, 'grid')],
+      ['list', (el) => setView(el, 'list')],
+      ['dir flip', (el) => internals(el).toggleSort('updated')],
+      ['phase', (el) => internals(el).setPhaseFilter('running')],
+      ['phase clear', (el) => internals(el).setPhaseFilter('')],
+      ['next page', (el) => internals(el).agentWindow.next()],
+      ['prev page', (el) => internals(el).agentWindow.prev()],
+      [
+        'label typing',
+        (el) => {
+          const input = labelInput(el)!;
+          input.value = 'env=pr';
+          input.dispatchEvent(new Event('sl-input'));
+        },
+      ],
+      ['label commit', (el) => commitLabel(el, 'env=prod')],
+      ['lifecycle refresh', (el) => internals(el).backgroundRefresh('lifecycle-refresh')],
+      ['tree', (el) => setView(el, 'graph')],
+      ['list again', (el) => setView(el, 'list')],
+      ['name sort', (el) => internals(el).toggleSort('name')],
+      ['updated sort', (el) => internals(el).toggleSort('updated')],
+      ['dir flip again', (el) => internals(el).toggleSort('updated')],
+      ['phase again', (el) => internals(el).setPhaseFilter('running')],
+      ['next page again', (el) => internals(el).agentWindow.next()],
+      ['lifecycle refresh again', (el) => internals(el).backgroundRefresh('lifecycle-refresh')],
+      ['chip', (el) => internals(el).backgroundRefresh('chip')],
+    ];
+
+    const cases: Array<{ count: number; costs: number[]; states: string[] }> = [
+      {
+        count: 25,
+        // prettier-ignore
+        costs:  [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1],
+        // prettier-ignore
+        states: ['small', 'small', 'small', 'small', 'small', 'small', 'small', 'small', 'small',
+          'small', 'small', 'small', 'small', 'small', 'small', 'small', 'small', 'small', 'small'],
+      },
+      {
+        count: 500,
+        // prettier-ignore
+        costs:  [0, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1],
+        // prettier-ignore
+        states: ['paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged',
+          'paged', 'small', 'small', 'small', 'small', 'small', 'small', 'small', 'paged', 'paged'],
+      },
+      {
+        count: 1200,
+        // prettier-ignore
+        costs:  [0, 0, 1, 1, 1, 1, 1, 0, 1, 1, 3, 0, 0, 0, 0, 0, 0, 0, 3],
+        // prettier-ignore
+        states: ['paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged', 'paged',
+          'paged', 'held', 'held', 'held', 'held', 'held', 'held', 'held', 'held', 'held'],
+      },
+    ];
+
+    for (const c of cases) {
+      it(`${c.count} agents: one request on page load, then the documented cost per interaction`, async () => {
+        const projectId = `p-counts-${c.count}`;
+        localStorage.setItem('scion-view-project-agents', 'list');
+        const agents = Array.from({ length: c.count }, (_, i) =>
+          makeAgent(i, { projectId, labels: { env: 'prod' } })
+        );
+        const requests: AgentsRequest[] = [];
+        vi.stubGlobal(
+          'fetch',
+          vi.fn(
+            createRealisticFetchHandler({
+              projectId,
+              projectCaps: { actions: ['read'] },
+              agents,
+              requests,
+            })
+          )
+        );
+        const el = await createComponent(projectId);
+        expect(requests.length).toBe(1);
+        expect(requests[0].url).toContain('sort=updated');
+        expect(internals(el).agentWindow.state).toBe(c.count > 50 ? 'paged' : 'small');
+
+        const costs: number[] = [];
+        const states: string[] = [];
+        for (const [, run] of steps) {
+          const n = requests.length;
+          await run(el);
+          await vi.waitFor(() => expect(internals(el).agentsLoading).toBe(false));
+          await new Promise((r) => setTimeout(r, 20));
+          costs.push(requests.length - n);
+          states.push(internals(el).agentWindow.state);
+        }
+        const named = (xs: Array<number | string>) => steps.map(([name], i) => `${name}: ${xs[i]}`);
+        expect(named(costs)).toEqual(named(c.costs));
+        expect(named(states)).toEqual(named(c.states));
+        if (c.count === 1200) {
+          expect(internals(el).agents.length).toBe(1200);
+        }
+      }, 60_000);
+    }
+  });
+
+  describe('a drain that hits its request cap', () => {
+    it('is capped: the tree shows the banner, the list pager shows the capped total, lifecycle refresh is free and Refresh drains again', async () => {
+      const projectId = 'p-capped';
+      localStorage.setItem('scion-view-project-agents', 'graph');
+      localStorage.setItem(
+        `scion-sort-project-agents-${projectId}`,
+        JSON.stringify({ field: 'name', dir: 'asc' })
+      );
+      const agents = Array.from({ length: 100 }, (_, i) => makeAgent(i, { projectId }));
+      const requests: AgentsRequest[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests,
+            legacyTruncated: true, // 20 per page: four pages leave more behind
+          })
+        )
+      );
+      const el = await createComponent(projectId);
+      await vi.waitFor(() => expect(internals(el).agentWindow.state).toBe('capped'));
+      await el.updateComplete;
+      expect(requests.length).toBe(4);
+      expect(requests.every((r) => !r.url.includes('sort='))).toBe(true);
+      expect(internals(el).agents.length).toBe(80);
+      const banner = el.shadowRoot!.querySelector('.agent-window-banner');
+      expect(banner?.textContent).toContain('80 loaded (newest 2,000 checked), more exist');
+
+      let n = requests.length;
+      internals(el).backgroundRefresh('lifecycle-refresh');
+      await new Promise((r) => setTimeout(r, 20));
+      expect(requests.length - n).toBe(0);
+
+      // Name sort is not sorted-eligible, so the list view stays capped.
+      viewToggle(el)!.dispatchEvent(new CustomEvent('view-change', { detail: { view: 'list' } }));
+      await new Promise((r) => setTimeout(r, 20));
+      await el.updateComplete;
+      expect(requests.length - n).toBe(0);
+      expect(internals(el).agentWindow.state).toBe('capped');
+      expect(el.shadowRoot!.querySelector('.agent-window-banner')).toBeNull();
+      const pg = pager(el)!;
+      await (pg as unknown as { updateComplete: Promise<boolean> }).updateComplete;
+      expect(pg.shadowRoot?.textContent).toContain('80 loaded (newest 2,000 checked), more exist');
+
+      viewToggle(el)!.dispatchEvent(new CustomEvent('view-change', { detail: { view: 'graph' } }));
+      await el.updateComplete;
+      n = requests.length;
+      const refresh = el.shadowRoot!.querySelector('.agent-window-banner sl-tag') as HTMLElement;
+      refresh.click();
+      await vi.waitFor(() => expect(internals(el).agentsLoading).toBe(false));
+      await new Promise((r) => setTimeout(r, 20));
+      expect(requests.length - n).toBe(4);
+      expect(internals(el).agentWindow.state).toBe('capped');
+    });
   });
 
   describe('label typing while paged', () => {
-    it('does not reset pageIndex or issue a request, and DOES apply the live preview filter to the page (design §6.3)', async () => {
-      const projectId = 'p-b1-typing';
+    it('does not reset pageIndex or issue a request, and DOES apply the live preview filter to the page', async () => {
+      const projectId = 'p-typing';
       localStorage.setItem('scion-view-project-agents', 'list');
       // Every 5th agent carries the env=prod label, so the current page has
       // a predictable, non-trivial filtered subset.
@@ -1693,7 +1915,7 @@ describe('project-detail — agent list window', () => {
       expect(internals(el).agentWindow.pageIndex).toBe(2);
 
       const input = labelInput(el)!;
-      input.value = 'env'; // bare key: not P1-eligible, goes through the legacy path
+      input.value = 'env'; // bare key: not sorted-eligible, goes through the legacy path
       input.dispatchEvent(new Event('sl-input'));
       input.dispatchEvent(new Event('sl-change'));
       await new Promise((r) => setTimeout(r, 20));
@@ -1706,7 +1928,7 @@ describe('project-detail — agent list window', () => {
 
   describe('persisted page size', () => {
     it('is read once in connectedCallback, used for the first request, and matches the rendered pager', async () => {
-      const projectId = 'p-b4';
+      const projectId = 'p-window-1';
       localStorage.setItem('scion-view-project-agents', 'list');
       localStorage.setItem('scion-pagesize-project-agents', '50');
       const agents = Array.from({ length: 80 }, (_, i) => makeAgent(i, { projectId }));
@@ -1732,7 +1954,7 @@ describe('project-detail — agent list window', () => {
     });
 
     it('ignores an invalid stored value and falls back to the default', async () => {
-      const projectId = 'p-b4-invalid';
+      const projectId = 'p-invalid';
       localStorage.setItem('scion-view-project-agents', 'list');
       localStorage.setItem('scion-pagesize-project-agents', '17');
       const agents = Array.from({ length: 10 }, (_, i) => makeAgent(i, { projectId }));
@@ -1756,7 +1978,7 @@ describe('project-detail — agent list window', () => {
 
   describe('stale-response guard', () => {
     it('an older trigger whose response resolves later never overwrites a newer one', async () => {
-      const projectId = 'p-b5';
+      const projectId = 'p-window-2';
       localStorage.setItem('scion-view-project-agents', 'list');
       const mountAgents = [makeAgent(0, { projectId, name: 'mount' })];
       const firstTriggerAgents = [makeAgent(1, { projectId, name: 'first-trigger' })];
@@ -1844,8 +2066,7 @@ describe('project-detail — agent list window', () => {
      * A Next/Prev/chip click must not race a page-level view-state request:
      * if it did, the window's own cursor stack would still belong to the
      * *old* phase/dir/label, so the resulting request would bind a stale
-     * cursor to new params and the server would legitimately 400 it (design
-     * §4.4). The fix is to disable navigation (and the chip) outright while
+     * cursor to new params and the server would legitimately 400 it. The fix is to disable navigation (and the chip) outright while
      * either the window's own fetch or, while paged, a page-level load is
      * in flight, via `.loading=${agentWindow.loading || (agentWindow.state
      * === 'paged' && agentsLoading)}` — the page-level half only applies in
@@ -1866,7 +2087,7 @@ describe('project-detail — agent list window', () => {
     }
 
     it('a Next click while a lifecycle refresh is in flight is a no-op; the refresh then lands on page 0 as intended', async () => {
-      const projectId = 'p-n1-prime';
+      const projectId = 'p-window-3';
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
@@ -1913,7 +2134,7 @@ describe('project-detail — agent list window', () => {
       await new Promise((r) => setTimeout(r, 10));
       await el.updateComplete;
       expect(internals(el).agentWindow.pageIndex).toBe(0); // never navigated
-      expect(requests.length).toBe(requestsBeforeClick); // no mismatched-cursor request (design §4.4)
+      expect(requests.length).toBe(requestsBeforeClick); // no mismatched-cursor request
 
       // Now let the refresh finally resolve.
       heldResolve!(
@@ -1941,13 +2162,12 @@ describe('project-detail — agent list window', () => {
       expect(internals(el).agentWindow.pageIndex).toBe(1);
     });
 
-    it('small-state local Next/Prev stay enabled, and work, during a held lifecycle refresh', async () => {
-      // Small-state pagination is a pure local slice of `display` (design
-      // §6.3) and sends no request, so it has nothing to race with a
+    it('small-state local Next/Prev stay enabled, and work, during an in-flight lifecycle refresh', async () => {
+      // Small-state pagination is a pure local slice of `display` and sends no request, so it has nothing to race with a
       // page-level load — the `.loading` gate (and `onPagerNav`'s guard)
       // only apply the page-level half in the paged state, so this isn't
       // disabled for the duration of every agent action.
-      const projectId = 'p-n2-prime-small';
+      const projectId = 'p-prime-small';
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
@@ -2108,7 +2328,7 @@ describe('project-detail — agent list window', () => {
 
   describe("a failed view-change request while paged invalidates cursors, so Next can't replay a stale one", () => {
     it('a phase change that 500s leaves the window paged with no error; Next then no-ops instead of sending a mismatched cursor', async () => {
-      const projectId = 'p-n1-triple-prime';
+      const projectId = 'p-triple-prime';
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = Array.from({ length: 60 }, (_, i) =>
         makeAgent(i, { projectId, phase: i % 2 ? 'stopped' : 'running' })
@@ -2147,10 +2367,10 @@ describe('project-detail — agent list window', () => {
       await new Promise((r) => setTimeout(r, 20));
       await el.updateComplete;
 
-      // The failed view-change request keeps the previous page (design §6.3)
+      // The failed view-change request keeps the previous page
       // but must no longer claim Next is possible: the stored cursor was
       // minted under the old (unfiltered) phase, and a Next now would bind
-      // it to `phase=stopped` and get a 400 (design §4.4).
+      // it to `phase=stopped` and get a 400.
       expect(internals(el).agentWindow.error).toBeNull(); // the failure itself is silent (previous data kept)
       expect(internals(el).agentWindow.hasNext).toBe(false); // invalidated
 
@@ -2178,7 +2398,7 @@ describe('project-detail — agent list window', () => {
     });
 
     it('a phase change that fails with a NETWORK error also invalidates cursors', async () => {
-      const projectId = 'p-n1-quad-prime-net';
+      const projectId = 'p-quad-prime-net';
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = Array.from({ length: 60 }, (_, i) =>
         makeAgent(i, { projectId, phase: i % 2 ? 'stopped' : 'running' })
@@ -2236,7 +2456,7 @@ describe('project-detail — agent list window', () => {
     });
 
     it('a phase change whose response is ok but json() rejects also invalidates cursors, with no unhandled rejection', async () => {
-      const projectId = 'p-n1-sorted-parse-error';
+      const projectId = 'p-sorted-parse-error';
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = Array.from({ length: 60 }, (_, i) =>
         makeAgent(i, { projectId, phase: i % 2 ? 'stopped' : 'running' })
@@ -2309,15 +2529,15 @@ describe('project-detail — agent list window', () => {
       expect(internals(el).agentWindow.hasNext).toBe(true);
     });
 
-    it('a view-change that 422s, whose legacy fallback also fails, invalidates cursors', async () => {
-      const projectId = 'p-n1-quad-prime-legacy';
+    it('a view-change that 422s, whose drain fallback also fails, invalidates cursors', async () => {
+      const projectId = 'p-quad-prime-legacy';
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = Array.from({ length: 60 }, (_, i) =>
         makeAgent(i, { projectId, phase: i % 2 ? 'stopped' : 'running' })
       );
       const requests: AgentsRequest[] = [];
       let fail422NextSorted = false;
-      let failNextLegacy = false;
+      let failLegacy = false;
       vi.stubGlobal(
         'fetch',
         vi.fn((input: string | URL | Request, init?: RequestInit) => {
@@ -2334,8 +2554,7 @@ describe('project-detail — agent list window', () => {
                   jsonResponse({ error: { code: 'sorted_view_unavailable' } }, 422)
                 );
               }
-            } else if (failNextLegacy) {
-              failNextLegacy = false;
+            } else if (failLegacy) {
               requests.push({ url: rawUrl });
               return Promise.resolve(jsonResponse({ error: { message: 'boom' } }, 500));
             }
@@ -2354,16 +2573,19 @@ describe('project-detail — agent list window', () => {
       expect(internals(el).agentWindow.hasNext).toBe(true);
 
       // A phase change (trigger 'view-change') whose sorted request 422s;
-      // the legacy fallback it triggers then itself fails (500) — the
+      // the drain fallback it triggers then itself fails (500) — the
       // window must still be left with invalidated navigation, not a stale
       // cursor armed under the old (pre-change) params.
       fail422NextSorted = true;
-      failNextLegacy = true;
+      failLegacy = true; // every attempt, retries included
+      const before = requests.length;
       internals(el).setPhaseFilter('stopped');
-      await new Promise((r) => setTimeout(r, 30));
+      // The drain retries a failed page twice (250 ms, then 500 ms).
+      await vi.waitFor(() => expect(internals(el).agentsLoading).toBe(false), { timeout: 3000 });
       await el.updateComplete;
+      expect(requests.length - before).toBe(1 + 3); // the 422, then three drain attempts
 
-      expect(internals(el).agentWindow.state).toBe('paged'); // the legacy failure doesn't change window state
+      expect(internals(el).agentWindow.state).toBe('paged'); // the drain failure doesn't change window state
       expect(internals(el).agentWindow.hasNext).toBe(false);
       expect(internals(el).agentWindow.hasPrev).toBe(false);
 
@@ -2378,7 +2600,7 @@ describe('project-detail — agent list window', () => {
       expect(internals(el).agentWindow.error).toBeNull();
     });
 
-    it('a view-change that 422s, whose legacy fallback rejects with a NETWORK error, also invalidates cursors', async () => {
+    it('a view-change that 422s, whose drain fallback rejects with a NETWORK error, also invalidates cursors', async () => {
       const projectId = 'p-legacy-network-error';
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = Array.from({ length: 60 }, (_, i) =>
@@ -2386,7 +2608,7 @@ describe('project-detail — agent list window', () => {
       );
       const requests: AgentsRequest[] = [];
       let fail422NextSorted = false;
-      let failNextLegacy = false;
+      let failLegacy = false;
       vi.stubGlobal(
         'fetch',
         vi.fn((input: string | URL | Request, init?: RequestInit) => {
@@ -2403,8 +2625,7 @@ describe('project-detail — agent list window', () => {
                   jsonResponse({ error: { code: 'sorted_view_unavailable' } }, 422)
                 );
               }
-            } else if (failNextLegacy) {
-              failNextLegacy = false;
+            } else if (failLegacy) {
               requests.push({ url: rawUrl });
               return Promise.reject(new TypeError('Failed to fetch'));
             }
@@ -2422,15 +2643,16 @@ describe('project-detail — agent list window', () => {
       expect(internals(el).agentWindow.state).toBe('paged');
       expect(internals(el).agentWindow.hasNext).toBe(true);
 
-      // Same as the 500 case above, but the legacy fallback's fetch itself
-      // rejects rather than resolving with a non-OK response — this
-      // exercises the legacy path's catch branch specifically, which a
-      // non-OK response never reaches.
+      // Same as the 500 case above, but the drain's fetch itself rejects
+      // rather than resolving with a non-OK response.
       fail422NextSorted = true;
-      failNextLegacy = true;
+      failLegacy = true; // every attempt, retries included
+      const before = requests.length;
       internals(el).setPhaseFilter('stopped');
-      await new Promise((r) => setTimeout(r, 30));
+      // The drain retries a failed page twice (250 ms, then 500 ms).
+      await vi.waitFor(() => expect(internals(el).agentsLoading).toBe(false), { timeout: 3000 });
       await el.updateComplete;
+      expect(requests.length - before).toBe(1 + 3); // the 422, then three drain attempts
 
       expect(internals(el).agentWindow.state).toBe('paged');
       expect(internals(el).agentWindow.hasNext).toBe(false);
@@ -2488,7 +2710,7 @@ describe('project-detail — agent list window', () => {
       // Commit a label; its request rejects with a network error. Without
       // reverting committedLabel here (the gap this test closes), the next
       // change would resend the new label bound to the cursor minted under
-      // the OLD (pre-commit) label and get a 400 (design §4.4).
+      // the OLD (pre-commit) label and get a 400.
       failNextSorted = true;
       const input = labelInput(el)!;
       input.value = 'env=dev';
@@ -2521,14 +2743,14 @@ describe('project-detail — agent list window', () => {
       expect(internals(el).agentWindow.pageIndex).toBe(1);
     });
 
-    it('a label commit routed to the legacy path whose response is ok but json() rejects reverts committedLabel, with no unhandled rejection', async () => {
+    it('a bare-key label commit whose drain response is ok but json() rejects reverts committedLabel, with no unhandled rejection', async () => {
       const projectId = 'p-legacy-parse-error-label-commit';
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = Array.from({ length: 5 }, (_, i) =>
         makeAgent(i, { projectId, labels: { env: 'dev' } })
       );
       const requests: AgentsRequest[] = [];
-      let failNextLegacy = false;
+      let failLegacy = false;
       vi.stubGlobal(
         'fetch',
         vi.fn((input: string | URL | Request, init?: RequestInit) => {
@@ -2536,11 +2758,10 @@ describe('project-detail — agent list window', () => {
             typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
           const u = new URL(rawUrl, 'http://localhost');
           if (
-            failNextLegacy &&
+            failLegacy &&
             u.pathname === `/api/v1/projects/${projectId}/agents` &&
             !u.searchParams.get('sort')
           ) {
-            failNextLegacy = false;
             requests.push({ url: rawUrl });
             // ok: true, but the body is not valid JSON — response.json()
             // rejects even though the request itself succeeded (the bug
@@ -2558,10 +2779,10 @@ describe('project-detail — agent list window', () => {
       );
 
       const el = await createComponent(projectId);
-      expect(internals(el).agentWindow.state).toBe('small'); // P1-eligible, complete (5 is below the fit threshold)
+      expect(internals(el).agentWindow.state).toBe('small'); // sorted-eligible, complete (5 is below the fit threshold)
       expect(internals(el).committedLabel).toBe('');
 
-      // First, a successful commit on the sorted (P1-eligible) path, so the
+      // First, a successful commit on the sorted path, so the
       // revert below has a non-trivial value to land back on rather than
       // coincidentally landing on the initial empty label.
       const input = labelInput(el)!;
@@ -2573,18 +2794,17 @@ describe('project-detail — agent list window', () => {
       expect(internals(el).committedLabel).toBe('env=dev');
       const agentsAfterFirstCommit = internals(el).agents;
 
-      // A label with no "=" is not P1-eligible (design §11), so this commit
-      // is routed to the legacy path — the second of the two call sites
-      // this test suite covers.
-      failNextLegacy = true;
+      // A label with no "=" is not sorted-eligible, so this commit drains;
+      // every attempt (the drain retries an unparseable body twice) fails.
+      failLegacy = true;
       const requestsBeforeFailingCommit = requests.length;
       input.value = 'badlabel';
       input.dispatchEvent(new Event('sl-input'));
       input.dispatchEvent(new Event('sl-change'));
-      await new Promise((r) => setTimeout(r, 10));
+      await vi.waitFor(() => expect(internals(el).agentsLoading).toBe(false), { timeout: 3000 });
       await el.updateComplete;
 
-      expect(requests.length).toBe(requestsBeforeFailingCommit + 1); // exactly one request for the failing commit
+      expect(requests.length).toBe(requestsBeforeFailingCommit + 3); // one drain page, retried twice
       expect(internals(el).committedLabel).toBe('env=dev'); // reverted to the prior commit, not left at 'badlabel'
       expect(internals(el).agents).toBe(agentsAfterFirstCommit); // previous rows kept
     });
@@ -2592,7 +2812,7 @@ describe('project-detail — agent list window', () => {
 
   describe('fit-path label 400 restores the previous committedLabel', () => {
     it('a 400 on the sorted (fit) path keeps the previous data and reverts committedLabel', async () => {
-      const projectId = 'p-n3-fit-400';
+      const projectId = 'p-fit-400';
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = Array.from({ length: 5 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
@@ -2622,7 +2842,7 @@ describe('project-detail — agent list window', () => {
       );
 
       const el = await createComponent(projectId);
-      expect(internals(el).agentWindow.state).toBe('small'); // P1-eligible, complete (5 is below the fit threshold)
+      expect(internals(el).agentWindow.state).toBe('small'); // sorted-eligible, complete (5 is below the fit threshold)
       const before = (el as unknown as { agents: Agent[] }).agents;
       expect(before.length).toBe(5);
       expect(internals(el).committedLabel).toBe('');
@@ -2639,14 +2859,14 @@ describe('project-detail — agent list window', () => {
         true
       );
       const after = (el as unknown as { agents: Agent[] }).agents;
-      expect(after.length).toBe(5); // previous data kept (design §6.3)
+      expect(after.length).toBe(5); // previous data kept
       expect(internals(el).committedLabel).toBe(''); // reverted, not left at the rejected label
     });
   });
 
-  describe('a loading indicator replaces the empty-filter message during the paged -> grid gap', () => {
-    it('shows "Loading agents…" while the legacy fallback is in flight, then the grid once it lands', async () => {
-      const projectId = 'p-n5-loading';
+  describe('a loading indicator replaces the empty-filter message while a drain is in flight', () => {
+    it('paged -> name sort shows "Loading agents…" instead of the server page while the drain is in flight, then the sorted list', async () => {
+      const projectId = 'p-loading';
       localStorage.setItem('scion-view-project-agents', 'list');
       const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i, { projectId }));
       const requests: AgentsRequest[] = [];
@@ -2684,8 +2904,7 @@ describe('project-detail — agent list window', () => {
       expect(internals(el).agentWindow.state).toBe('paged');
 
       holdLegacy = true;
-      const toggle = viewToggle(el)!;
-      toggle.dispatchEvent(new CustomEvent('view-change', { detail: { view: 'grid' } }));
+      internals(el).toggleSort('name');
       await new Promise((r) => setTimeout(r, 10));
       await el.updateComplete;
 
@@ -2697,11 +2916,18 @@ describe('project-detail — agent list window', () => {
       await el.updateComplete;
 
       expect(el.shadowRoot?.textContent).not.toContain('Loading agents');
+      expect(internals(el).agentWindow.state).toBe('small');
+      expect(el.shadowRoot?.textContent).toContain('agent-0');
     });
 
     it('a lifecycle refresh in grid with a phase filter matching nothing shows the filter-empty message, not a loading flicker', async () => {
-      const projectId = 'p-n2-prime';
-      localStorage.setItem('scion-view-project-agents', 'grid'); // not P1-eligible: this.agents is populated via the legacy path
+      const projectId = 'p-window-4';
+      // Name sort is complete-needing: this.agents is populated by a drain.
+      localStorage.setItem('scion-view-project-agents', 'grid');
+      localStorage.setItem(
+        `scion-sort-project-agents-${projectId}`,
+        JSON.stringify({ field: 'name', dir: 'asc' })
+      );
       const agents = Array.from({ length: 5 }, (_, i) =>
         makeAgent(i, { projectId, phase: 'running' })
       );
