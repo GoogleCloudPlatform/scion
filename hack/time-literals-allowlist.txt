@@ -14,4 +14,5 @@
 # time.Time) over adding an entry. An entry that matches nothing fails the
 # gate, so delete entries together with the code they cover.
 #
-# There are currently no exceptions.
+
+pkg/hub/metrics_dashboard.go | dayKey | t.In(loc).Format("2006-01-02") | dashboard day buckets are calendar days in the viewer's IANA zone by design (tz parameter); UTC when no zone is given

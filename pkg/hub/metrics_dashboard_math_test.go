@@ -179,7 +179,7 @@ func TestQueryDailyTimeSeriesBucketsByEndDay(t *testing.T) {
 		},
 	}}
 
-	points, err := svc.queryDailyTimeSeries(context.Background(), telemetrycontract.MetricAPICalls, day1.Add(-2*time.Hour), day2.Add(time.Hour), nil)
+	points, err := svc.queryDailyTimeSeries(context.Background(), telemetrycontract.MetricAPICalls, day1.Add(-2*time.Hour), day2.Add(time.Hour), nil, nil)
 	require.NoError(t, err)
 	byDay := map[string]int64{}
 	for _, p := range points {
@@ -215,7 +215,7 @@ func TestDailyBucketsAreUTCDays(t *testing.T) {
 			name:   "queryDailyTimeSeries",
 			metric: telemetrycontract.MetricAPICalls,
 			query: func(svc *MetricsDashboardService, metric string) (map[string]int64, error) {
-				points, err := svc.queryDailyTimeSeries(ctx, metric, queryStart, queryEnd, nil)
+				points, err := svc.queryDailyTimeSeries(ctx, metric, queryStart, queryEnd, nil, nil)
 				return pointsByDay(points), err
 			},
 		},
@@ -224,7 +224,7 @@ func TestDailyBucketsAreUTCDays(t *testing.T) {
 			metric: telemetrycontract.MetricAPICalls,
 			labels: map[string]string{telemetrycontract.ModelLabel: "m1"},
 			query: func(svc *MetricsDashboardService, metric string) (map[string]int64, error) {
-				series, err := svc.queryGroupedTimeSeries(ctx, metric, "metric.labels."+telemetrycontract.ModelLabel, queryStart, queryEnd, nil)
+				series, err := svc.queryGroupedTimeSeries(ctx, metric, "metric.labels."+telemetrycontract.ModelLabel, queryStart, queryEnd, nil, nil)
 				if err != nil {
 					return nil, err
 				}
@@ -239,7 +239,7 @@ func TestDailyBucketsAreUTCDays(t *testing.T) {
 			metric: telemetrycontract.MetricSessionCount,
 			labels: map[string]string{telemetrycontract.AgentLabel: "agent-1"},
 			query: func(svc *MetricsDashboardService, metric string) (map[string]int64, error) {
-				points, err := svc.queryDailyUniqueCount(ctx, metric, "metric.labels."+telemetrycontract.AgentLabel, queryStart, queryEnd, nil)
+				points, err := svc.queryDailyUniqueCount(ctx, metric, "metric.labels."+telemetrycontract.AgentLabel, queryStart, queryEnd, nil, nil)
 				return pointsByDay(points), err
 			},
 		},

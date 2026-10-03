@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	_ "time/tzdata" // day buckets use the viewer's time zone; don't depend on the image's zoneinfo
 
 	monitoring "cloud.google.com/go/monitoring/apiv3/v2"
 	"cloud.google.com/go/monitoring/apiv3/v2/monitoringpb"
@@ -180,11 +181,27 @@ type QueryOption func(*queryConfig)
 
 type queryConfig struct {
 	ProjectID string
+	// Location is the time zone daily figures are bucketed in; nil means UTC.
+	Location *time.Location
 }
 
 // WithProjectID filters metrics to a specific project.
 func WithProjectID(id string) QueryOption {
 	return func(c *queryConfig) { c.ProjectID = id }
+}
+
+// WithLocation buckets daily figures by calendar day in loc rather than UTC,
+// so a viewer west of UTC doesn't see the evening's usage under tomorrow's date.
+func WithLocation(loc *time.Location) QueryOption {
+	return func(c *queryConfig) { c.Location = loc }
+}
+
+// location returns the configured bucketing time zone, defaulting to UTC.
+func (c *queryConfig) location() *time.Location {
+	if c.Location == nil {
+		return time.UTC
+	}
+	return c.Location
 }
 
 func applyQueryOptions(opts []QueryOption) *queryConfig {
@@ -195,19 +212,25 @@ func applyQueryOptions(opts []QueryOption) *queryConfig {
 	return cfg
 }
 
-// cacheKeySuffix returns a cache key suffix for the query config.
-// Returns empty string for global queries, ":projectID" for project-scoped.
+// cacheKeySuffix returns a cache key suffix for the query config:
+// ":projectID" for project-scoped queries, plus "@zone" when days are
+// bucketed in a zone other than UTC. Global UTC queries return "".
 func (c *queryConfig) cacheKeySuffix() string {
+	suffix := ""
 	if c.ProjectID != "" {
-		return ":" + c.ProjectID
+		suffix = ":" + c.ProjectID
 	}
-	return ""
+	if loc := c.location(); loc != time.UTC {
+		suffix += "@" + loc.String()
+	}
+	return suffix
 }
 
 type metricsQueryWindow struct {
 	start       time.Time
 	end         time.Time
 	extraFilter []string
+	loc         *time.Location // time zone for daily buckets
 }
 
 func metricsQueryWindowFor(now time.Time, periodDays int, cfg *queryConfig) metricsQueryWindow {
@@ -215,6 +238,7 @@ func metricsQueryWindowFor(now time.Time, periodDays int, cfg *queryConfig) metr
 	window := metricsQueryWindow{
 		start: now.AddDate(0, 0, -periodDays),
 		end:   now,
+		loc:   cfg.location(),
 	}
 	if cfg.ProjectID != "" {
 		window.extraFilter = []string{projectFilter(cfg.ProjectID)}
@@ -273,7 +297,7 @@ func queryGroupedMetricsView[T any](
 		combined[i].extraFilter = append(append([]string{}, window.extraFilter...), q.extraFilter...)
 	}
 	series, err := queryGroupedTimeSeriesSet(combined, func(metricName, groupBy string, extraFilter []string) ([]LabeledTimeSeries, error) {
-		return s.queryGroupedTimeSeries(ctx, metricName, groupBy, window.start, window.end, extraFilter)
+		return s.queryGroupedTimeSeries(ctx, metricName, groupBy, window.start, window.end, extraFilter, window.loc)
 	})
 	view := build(series)
 	if err != nil {
@@ -371,14 +395,14 @@ func (s *MetricsDashboardService) QuerySessions(ctx context.Context, periodDays 
 	// queryDailyTimeSeries -> seriesIncreases, the cumulative-math fix
 	// (design §3.6). ActiveAgents below is presence, not a sum, so it stays
 	// on queryDailyUniqueCount instead (see that function's comment).
-	dailyCounts, err := s.queryDailyTimeSeries(ctx, telemetrycontract.MetricSessionCount, window.start, window.end, window.extraFilter)
+	dailyCounts, err := s.queryDailyTimeSeries(ctx, telemetrycontract.MetricSessionCount, window.start, window.end, window.extraFilter, window.loc)
 	if err != nil {
 		queryErrors = append(queryErrors, fmt.Sprintf("daily sessions: %v", err))
 	} else {
 		view.DailyCounts = dailyCounts
 	}
 
-	activeAgents, err := s.queryDailyUniqueCount(ctx, telemetrycontract.MetricSessionCount, "metric.labels."+telemetrycontract.AgentLabel, window.start, window.end, window.extraFilter)
+	activeAgents, err := s.queryDailyUniqueCount(ctx, telemetrycontract.MetricSessionCount, "metric.labels."+telemetrycontract.AgentLabel, window.start, window.end, window.extraFilter, window.loc)
 	if err != nil {
 		queryErrors = append(queryErrors, fmt.Sprintf("active agents: %v", err))
 	} else {
@@ -577,8 +601,9 @@ func (s *MetricsDashboardService) querySum(ctx context.Context, metricName strin
 	return total, nil
 }
 
-// queryDailyTimeSeries returns daily, cumulative-corrected totals for a metric.
-func (s *MetricsDashboardService) queryDailyTimeSeries(ctx context.Context, metricName string, start, end time.Time, extraFilter []string) ([]TimeSeriesPoint, error) {
+// queryDailyTimeSeries returns daily, cumulative-corrected totals for a
+// metric, bucketed by calendar day in loc.
+func (s *MetricsDashboardService) queryDailyTimeSeries(ctx context.Context, metricName string, start, end time.Time, extraFilter []string, loc *time.Location) ([]TimeSeriesPoint, error) {
 	fetchStart := start.Add(-cumulativeLookback)
 	series, err := s.fetchTimeSeries(ctx, metricName, fetchStart, end, extraFilter)
 	if err != nil {
@@ -591,7 +616,7 @@ func (s *MetricsDashboardService) queryDailyTimeSeries(ctx context.Context, metr
 			if increment.End.Before(start) || increment.End.After(end) {
 				continue
 			}
-			dayTotals[increment.End.UTC().Format("2006-01-02")] += increment.Value
+			dayTotals[dayKey(increment.End, loc)] += increment.Value
 		}
 	}
 
@@ -605,6 +630,14 @@ func (s *MetricsDashboardService) queryDailyTimeSeries(ctx context.Context, metr
 	return points, nil
 }
 
+// dayKey is the YYYY-MM-DD calendar day of t in loc (UTC when loc is nil).
+func dayKey(t time.Time, loc *time.Location) string {
+	if loc == nil {
+		loc = time.UTC
+	}
+	return t.In(loc).Format("2006-01-02")
+}
+
 // labelKeyFromGroupBy extracts the short label key from a Cloud Monitoring
 // groupByLabel like "metric.labels.model" → "model".
 func labelKeyFromGroupBy(groupByLabel string) string {
@@ -613,8 +646,8 @@ func labelKeyFromGroupBy(groupByLabel string) string {
 }
 
 // queryGroupedTimeSeries returns daily, cumulative-corrected totals grouped
-// by a label.
-func (s *MetricsDashboardService) queryGroupedTimeSeries(ctx context.Context, metricName, groupByLabel string, start, end time.Time, extraFilter []string) ([]LabeledTimeSeries, error) {
+// by a label, bucketed by calendar day in loc.
+func (s *MetricsDashboardService) queryGroupedTimeSeries(ctx context.Context, metricName, groupByLabel string, start, end time.Time, extraFilter []string, loc *time.Location) ([]LabeledTimeSeries, error) {
 	fetchStart := start.Add(-cumulativeLookback)
 	series, err := s.fetchTimeSeries(ctx, metricName, fetchStart, end, extraFilter)
 	if err != nil {
@@ -638,7 +671,7 @@ func (s *MetricsDashboardService) queryGroupedTimeSeries(ctx context.Context, me
 			if increment.End.Before(start) || increment.End.After(end) {
 				continue
 			}
-			seriesDayTotals[label][increment.End.UTC().Format("2006-01-02")] += increment.Value
+			seriesDayTotals[label][dayKey(increment.End, loc)] += increment.Value
 		}
 	}
 
@@ -689,7 +722,7 @@ func (s *MetricsDashboardService) queryUniqueLabels(ctx context.Context, metricN
 // (metric_streams.go), so presence already approximates "had activity" as
 // well as a delta would, without needing a baseline point before the
 // window.
-func (s *MetricsDashboardService) queryDailyUniqueCount(ctx context.Context, metricName, groupByLabel string, start, end time.Time, extraFilter []string) ([]TimeSeriesPoint, error) {
+func (s *MetricsDashboardService) queryDailyUniqueCount(ctx context.Context, metricName, groupByLabel string, start, end time.Time, extraFilter []string, loc *time.Location) ([]TimeSeriesPoint, error) {
 	series, err := s.fetchTimeSeries(ctx, metricName, start, end, extraFilter)
 	if err != nil {
 		return nil, err
@@ -706,7 +739,7 @@ func (s *MetricsDashboardService) queryDailyUniqueCount(ctx context.Context, met
 			}
 		}
 		for _, p := range ts.GetPoints() {
-			day := p.GetInterval().GetEndTime().AsTime().Format("2006-01-02")
+			day := dayKey(p.GetInterval().GetEndTime().AsTime(), loc)
 			if dayAgents[day] == nil {
 				dayAgents[day] = make(map[string]bool)
 			}
@@ -927,6 +960,21 @@ func (s *Server) handleProjectMetricsDashboard(w http.ResponseWriter, r *http.Re
 	s.serveMetricsDashboard(w, r, WithProjectID(projectID))
 }
 
+// dashboardLocation returns the time zone named by the request's "tz" query
+// parameter (an IANA name such as "America/Chicago", as the browser reports
+// it), or nil when it is absent or unknown, in which case days stay in UTC.
+func dashboardLocation(r *http.Request) *time.Location {
+	name := r.URL.Query().Get("tz")
+	if name == "" || len(name) > 64 || name == "Local" {
+		return nil
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return nil
+	}
+	return loc
+}
+
 // serveMetricsDashboard contains the shared metrics dashboard logic.
 func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, opts ...QueryOption) {
 	if r.Method != http.MethodGet {
@@ -951,6 +999,10 @@ func (s *Server) serveMetricsDashboard(w http.ResponseWriter, r *http.Request, o
 		if p, err := strconv.Atoi(periodStr); err == nil && p > 0 && p <= maxPeriodDays {
 			periodDays = p
 		}
+	}
+
+	if loc := dashboardLocation(r); loc != nil {
+		opts = append(opts, WithLocation(loc))
 	}
 
 	ctx := r.Context()

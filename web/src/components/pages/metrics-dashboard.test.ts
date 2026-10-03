@@ -21,7 +21,16 @@
  * day-bucketed tab (sessions, model-calls, tokens).
  */
 
-import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
+import { setPreferredTimeZone } from '../../utils/time.js';
+
+// The labels follow the browser's time zone; pin it to UTC so these
+// assertions don't depend on the machine running the tests.
+function pinBrowserTimeZone(timeZone: string): void {
+  vi.spyOn(Intl.DateTimeFormat.prototype, 'resolvedOptions').mockReturnValue({
+    timeZone,
+  } as Intl.ResolvedDateTimeFormatOptions);
+}
 
 interface ChartConfig {
   type: string;
@@ -125,6 +134,8 @@ async function mountOnTab(tab: string): Promise<MetricsPage> {
 }
 
 describe('scion-page-metrics — UTC day-bucket labels', () => {
+  beforeEach(() => pinBrowserTimeZone('UTC'));
+
   let element: MetricsPage | null = null;
   let mod: typeof import('./metrics-dashboard.js');
 
@@ -172,4 +183,93 @@ describe('scion-page-metrics — UTC day-bucket labels', () => {
       }
     }
   );
+});
+
+describe('scion-page-metrics — viewer time zone', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    setPreferredTimeZone('');
+  });
+
+  it('labels day buckets with the zone they are in', async () => {
+    const mod = await import('./metrics-dashboard.js');
+    expect(mod.dayZoneLabel(undefined)).toBe('UTC');
+    expect(mod.dayZoneLabel('Etc/UTC')).toBe('UTC');
+    expect(mod.dayZoneLabel('America/Chicago')).toBe('America/Chicago');
+    expect(mod.dayAxisTitle('America/Chicago')).toBe('Day (America/Chicago)');
+  });
+
+  it('asks the hub to bucket days in the browser time zone when no preference is set', async () => {
+    const mod = await import('./metrics-dashboard.js');
+    pinBrowserTimeZone('America/Chicago');
+    expect(mod.displayTimeZone()).toBe('America/Chicago');
+
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify(SUMMARY), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const element = document.createElement('scion-page-metrics');
+    document.body.appendChild(element);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const urls = fetchMock.mock.calls.map((call) => String((call as unknown[])[0]));
+    const dashboard = urls.find((u) => u.includes('view=summary'));
+    expect(dashboard).toBeDefined();
+    const params = new URL(dashboard!, 'http://localhost').searchParams;
+    expect(params.get('tz')).toBe('America/Chicago');
+    expect(params.get('period')).toBe('7');
+  });
+
+  async function dashboardRequests(): Promise<{ urls: () => string[] }> {
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify(SUMMARY), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const element = document.createElement('scion-page-metrics');
+    document.body.appendChild(element);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return {
+      urls: () =>
+        fetchMock.mock.calls
+          .map((call) => String((call as unknown[])[0]))
+          .filter((u) => u.includes('view=summary')),
+    };
+  }
+
+  it('uses the Display timezone preference over the browser zone', async () => {
+    const mod = await import('./metrics-dashboard.js');
+    pinBrowserTimeZone('America/Chicago');
+    setPreferredTimeZone('Asia/Tokyo');
+    expect(mod.displayTimeZone()).toBe('Asia/Tokyo');
+
+    const { urls } = await dashboardRequests();
+    const params = new URL(urls()[0], 'http://localhost').searchParams;
+    expect(params.get('tz')).toBe('Asia/Tokyo');
+  });
+
+  it('reloads the days when the Display timezone changes', async () => {
+    pinBrowserTimeZone('America/Chicago');
+    const { urls } = await dashboardRequests();
+    expect(urls()).toHaveLength(1);
+
+    setPreferredTimeZone('Europe/London');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const all = urls();
+    expect(all).toHaveLength(2);
+    expect(new URL(all[1], 'http://localhost').searchParams.get('tz')).toBe('Europe/London');
+  });
 });
