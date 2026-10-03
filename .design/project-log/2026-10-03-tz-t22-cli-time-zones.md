@@ -40,7 +40,11 @@ not place them. Some relative helpers showed future times as "just now".
   depends on the zone. This also means the gate needs no allowlist.
 - Relative wording is now compact everywhere. For example, the agent list
   shows "5m ago" instead of "5 minutes ago".
-- An overdue pending schedule shows "Xm ago" instead of "now".
+- A pending schedule time that is already due still reads "now", as before
+  and as in the web scheduler views. Every other schedule time uses
+  `clitime.Relative`, so a future next run reads "in X" instead of the old,
+  incorrect "just now". `clitime.Now()` exposes the injected clock so this
+  rule and `Relative` agree in tests.
 
 ## Tests
 

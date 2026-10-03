@@ -16,7 +16,9 @@ package cmd
 
 import (
 	"testing"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -108,4 +110,32 @@ func TestScheduleCommandStructure(t *testing.T) {
 	assert.Contains(t, names, "get <id>")
 	assert.Contains(t, names, "cancel <id>")
 	assert.Contains(t, names, "create")
+}
+
+func TestScheduleWhen(t *testing.T) {
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	t.Cleanup(clitime.SetNow(func() time.Time { return now }))
+
+	tests := []struct {
+		name   string
+		t      time.Time
+		status string
+		want   string
+	}{
+		{"pending overdue reads now", now.Add(-5 * time.Minute), "pending", "now"},
+		{"pending long overdue reads now", now.Add(-3 * 24 * time.Hour), "pending", "now"},
+		{"pending due exactly now", now, "pending", "now"},
+		{"pending future", now.Add(5 * time.Minute), "pending", "in 5m"},
+		{"pending future under a minute", now.Add(30 * time.Second), "pending", "in <1m"},
+		{"fired past", now.Add(-2 * time.Hour), "fired", "2h ago"},
+		{"cancelled past", now.Add(-5 * time.Minute), "cancelled", "5m ago"},
+		{"active future next run", now.Add(3 * time.Hour), "active", "in 3h"},
+		{"paused future next run", now.Add(25 * time.Hour), "paused", "in 1d"},
+		{"pending zero time", time.Time{}, "pending", "never"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, scheduleWhen(tc.t, tc.status))
+		})
+	}
 }

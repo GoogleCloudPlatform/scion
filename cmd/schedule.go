@@ -271,7 +271,7 @@ func runScheduleList(cmd *cobra.Command, args []string) error {
 				if len(id) > 8 {
 					id = id[:8]
 				}
-				fireAt := clitime.Relative(evt.FireAt)
+				fireAt := scheduleWhen(evt.FireAt, evt.Status)
 				created := clitime.Relative(evt.CreatedAt)
 				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", id, evt.EventType, evt.Status, fireAt, created)
 			}
@@ -297,7 +297,7 @@ func runScheduleList(cmd *cobra.Command, args []string) error {
 				}
 				nextRun := "-"
 				if sched.NextRunAt != nil {
-					nextRun = clitime.Relative(*sched.NextRunAt)
+					nextRun = scheduleWhen(*sched.NextRunAt, sched.Status)
 				}
 				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", id, sched.Name, sched.CronExpr, nextRun, sched.Status)
 			}
@@ -380,7 +380,7 @@ func printEventDetail(evt *hubclient.ScheduledEvent) {
 	fmt.Printf("Scheduled Event: %s\n", evt.ID)
 	fmt.Printf("  Type:       %s\n", evt.EventType)
 	fmt.Printf("  Status:     %s\n", evt.Status)
-	fmt.Printf("  Fire At:    %s (%s)\n", clitime.Format(evt.FireAt, clitime.Full), clitime.Relative(evt.FireAt))
+	fmt.Printf("  Fire At:    %s (%s)\n", clitime.Format(evt.FireAt, clitime.Full), scheduleWhen(evt.FireAt, evt.Status))
 	fmt.Printf("  Project:      %s\n", evt.ProjectID)
 	fmt.Printf("  Created:    %s\n", clitime.Format(evt.CreatedAt, clitime.Full))
 	if evt.CreatedBy != "" {
@@ -416,7 +416,7 @@ func printScheduleDetail(sched *hubclient.Schedule) {
 	fmt.Printf("  Status:     %s\n", sched.Status)
 	fmt.Printf("  Cron:       %s\n", sched.CronExpr)
 	if sched.NextRunAt != nil {
-		fmt.Printf("  Next Run:   %s (%s)\n", clitime.Format(*sched.NextRunAt, clitime.Full), clitime.Relative(*sched.NextRunAt))
+		fmt.Printf("  Next Run:   %s (%s)\n", clitime.Format(*sched.NextRunAt, clitime.Full), scheduleWhen(*sched.NextRunAt, sched.Status))
 	}
 	if sched.LastRunAt != nil {
 		lastRunInfo := clitime.Format(*sched.LastRunAt, clitime.Full)
@@ -778,4 +778,14 @@ func init() {
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleAgent, "agent", "", "Target agent name")
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleMessage, "message", "", "Message body")
 	scheduleCreateRecurringCmd.Flags().BoolVar(&scheduleInterrupt, "interrupt", false, "Interrupt the agent")
+}
+
+// scheduleWhen renders a scheduled time relative to now. A pending time that
+// is already due reads "now", as in the web scheduler views, rather than
+// "Xm ago"; every other time uses clitime.Relative.
+func scheduleWhen(t time.Time, status string) string {
+	if status == "pending" && !t.IsZero() && !t.After(clitime.Now()) {
+		return "now"
+	}
+	return clitime.Relative(t)
 }

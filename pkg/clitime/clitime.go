@@ -130,10 +130,7 @@ func Relative(t time.Time) string {
 	if t.IsZero() {
 		return "never"
 	}
-	mu.RLock()
-	clock := now
-	mu.RUnlock()
-	d := clock().Sub(t)
+	d := Now().Sub(t)
 	future := d < 0
 	if future {
 		d = -d
@@ -157,6 +154,15 @@ func Relative(t time.Time) string {
 		return "in " + amount
 	}
 	return amount + " ago"
+}
+
+// Now returns the current time from the clock Relative measures against, so
+// callers that compare against "now" agree with Relative under SetNow.
+func Now() time.Time {
+	mu.RLock()
+	clock := now
+	mu.RUnlock()
+	return clock()
 }
 
 // SetNow replaces the clock Relative measures against and returns a function
