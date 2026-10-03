@@ -259,6 +259,15 @@ func TestSpaceMembers_AgentListScopeErrorReturns500(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &errResp); err != nil {
 		t.Fatalf("decode error body: %v: %s", err, rec.Body.String())
 	}
+	// ErrorResponse ignores unknown keys, so check the raw body separately:
+	// an agents payload on the error path would be a leak.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode raw body: %v: %s", err, rec.Body.String())
+	}
+	if _, ok := raw["agents"]; ok {
+		t.Fatalf("error body has an agents key: %s", rec.Body.String())
+	}
 	const want = "failed to resolve agent list scope"
 	if errResp.Error.Code != "INTERNAL" || errResp.Error.Message != want {
 		t.Fatalf("error = {%q, %q}, want {%q, %q}", errResp.Error.Code, errResp.Error.Message, "INTERNAL", want)

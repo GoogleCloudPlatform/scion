@@ -3755,20 +3755,20 @@ func (s *Server) handleSpaceMembers(w http.ResponseWriter, r *http.Request, proj
 	}
 
 	var agents []chatMemberEntry
-	projectAgents, truncated, err := walkProjectAgentPages(ctx, s.store, projectID, spaceMembersMaxAgents)
+	projectAgents, truncated, err := walkProjectAgentPages(ctx, s.store, project.ID, spaceMembersMaxAgents)
 	if err != nil {
 		// A client that has gone away is not a server failure, and nothing
 		// can receive a response; stop quietly as the attach loop does.
 		if errors.Is(err, context.Canceled) {
 			return
 		}
-		slog.Error("chat members: failed to list project agents", "project", projectID, "error", err)
+		slog.Error("chat members: failed to list project agents", "project", project.ID, "error", err)
 		writeError(w, http.StatusInternalServerError, "INTERNAL", "failed to list project agents", nil)
 		return
 	}
 	if truncated {
 		slog.Warn("chat members: agent list truncated at safety cap",
-			"project", projectID, "cap", spaceMembersMaxAgents)
+			"project", project.ID, "cap", spaceMembersMaxAgents)
 	}
 	for _, a := range projectAgents {
 		// Each attach check reads the store and may write an audit record,
