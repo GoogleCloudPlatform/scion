@@ -15,12 +15,12 @@
 package entadapter
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"entgo.io/ent/dialect"
@@ -76,15 +76,12 @@ func (s *ConduitRegistryStore) ph(n int) string {
 type conduitTx struct {
 	tx     *sql.Tx
 	client *ent.Client
-	conn   *sql.Conn
 	done   bool
 }
 
 func (t *conduitTx) commit() error {
 	t.done = true
-	err := t.tx.Commit()
-	_ = t.conn.Close()
-	return err
+	return t.tx.Commit()
 }
 
 func (t *conduitTx) rollback() {
@@ -93,10 +90,10 @@ func (t *conduitTx) rollback() {
 	}
 	t.done = true
 	_ = t.tx.Rollback()
-	_ = t.conn.Close()
 }
 
-// begin opens a dedicated connection and transaction. readOnly selects a
+// begin opens a transaction (database/sql pins one pooled connection to it
+// until commit or rollback; nothing here needs per-connection state). readOnly selects a
 // read-only REPEATABLE READ snapshot on Postgres (so a multi-query read is
 // one consistent view); SQLite transactions are already serializable.
 func (s *ConduitRegistryStore) begin(ctx context.Context, readOnly bool) (*conduitTx, error) {
@@ -105,20 +102,15 @@ func (s *ConduitRegistryStore) begin(ctx context.Context, readOnly bool) (*condu
 		return nil, errors.New("conduit registry store: not backed by a *sql.DB")
 	}
 	dialectName := drv.Dialect()
-	conn, err := drv.DB().Conn(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("conduit registry store: acquiring connection: %w", err)
-	}
 	var opts *sql.TxOptions
 	if readOnly && dialectName == dialect.Postgres {
 		opts = &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}
 	}
-	tx, err := conn.BeginTx(ctx, opts)
+	tx, err := drv.DB().BeginTx(ctx, opts)
 	if err != nil {
-		_ = conn.Close()
 		return nil, fmt.Errorf("conduit registry store: begin transaction: %w", err)
 	}
-	return &conduitTx{tx: tx, client: newTxClient(dialectName, tx), conn: conn}, nil
+	return &conduitTx{tx: tx, client: newTxClient(dialectName, tx)}, nil
 }
 
 func nullIfEmpty(v string) any {
@@ -405,7 +397,7 @@ func loadPrincipal(ctx context.Context, c *ent.Client, kind, id string) (registr
 
 func toSessionView(r *ent.ConduitSession) (registry.SessionView, error) {
 	var caps registry.Capabilities
-	if len(r.Capabilities) > 0 && strings.TrimSpace(string(r.Capabilities)) != "null" {
+	if len(r.Capabilities) > 0 && !bytes.Equal(bytes.TrimSpace(r.Capabilities), []byte("null")) {
 		if err := json.Unmarshal(r.Capabilities, &caps); err != nil {
 			return registry.SessionView{}, fmt.Errorf("conduit registry store: session %q capabilities: %w", r.ID, err)
 		}
