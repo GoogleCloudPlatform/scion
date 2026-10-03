@@ -344,7 +344,7 @@ func splice(a, b conduit.Stream) {
 			n, rerr := src.Read(buf)
 			if n > 0 {
 				if _, werr := dst.Write(buf[:n]); werr != nil {
-					abort(codeAndReason(werr, "peer leg closed"))
+					abort(spliceClose(werr, "peer leg closed"))
 					return
 				}
 			}
@@ -358,7 +358,7 @@ func splice(a, b conduit.Stream) {
 				abort(conduit.CloseNormal, "")
 				return
 			default:
-				abort(codeAndReason(rerr, "stream failed"))
+				abort(spliceClose(rerr, "stream failed"))
 				return
 			}
 		}
@@ -384,6 +384,18 @@ func splice(a, b conduit.Stream) {
 	// both streams, which also ends the resize forwarders.
 	abort(conduit.CloseNormal, "")
 	fwds.Wait()
+}
+
+// spliceClose maps a splice read/write error to the close sent to both
+// legs: a leg that ended with a normal close (1000) ends the other one
+// normally too (design §3.3.1: 1000 is a normal end, never 4504);
+// anything else as codeAndReason.
+func spliceClose(err error, detail string) (uint32, string) {
+	var ce *conduit.CloseError
+	if errors.As(err, &ce) && ce.Code == conduit.CloseNormal {
+		return conduit.CloseNormal, ""
+	}
+	return codeAndReason(err, detail)
 }
 
 // codeAndReason maps a hop or target error to a §3.3.1 close: the code and

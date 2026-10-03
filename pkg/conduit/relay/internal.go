@@ -166,7 +166,7 @@ func (r *Relay) admitInternal(w http.ResponseWriter, req *http.Request, sessionI
 		http.Error(w, "relay not serving", http.StatusConflict)
 		return nil, want, false
 	}
-	ls, rec, ok := r.Local(sessionID)
+	ls, rec, ok := r.Local(req.Context(), sessionID)
 	if !ok {
 		w.Header().Set(HeaderStaleReason, "not_local")
 		http.Error(w, "session not held by this relay", http.StatusNotFound)

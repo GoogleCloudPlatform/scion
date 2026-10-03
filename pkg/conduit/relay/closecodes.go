@@ -28,8 +28,8 @@ import (
 // Classification rule: an admission infrastructure fault (registry read or
 // insert error, grant keys unavailable) is 4504, never 4403/4409, so a
 // database blip cannot become a terminal client error. 4503 is reserved
-// for deliberate, planned closes and is sent with a jittered reconnect
-// hint (Config.ReconnectJitter).
+// for deliberate, planned closes and is sent with the reconnect window
+// (Config.ReconnectWindow; the dialer draws its delay from it).
 const (
 	// CloseTargetNotFound (4404, stream scope): the target is unknown or
 	// deleted.

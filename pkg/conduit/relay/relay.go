@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -50,11 +49,17 @@ const (
 	maxDeleteBackoff     = 5 * time.Second
 	// deleteTimeout bounds one DeleteSessionCAS attempt.
 	deleteTimeout = 10 * time.Second
-	// DefaultReconnectJitter bounds the uniform random
-	// GoAway.reconnect_after_ms the relay sends when it ends many sessions
-	// at once (supersede, drain, rows reaped), so their targets do not
-	// redial in one synchronized wave.
-	DefaultReconnectJitter = 5 * time.Second
+	// cleanupTimeout bounds the row cleanup of a refused or abandoned
+	// admission, which runs detached from the (possibly expired)
+	// handshake ctx.
+	cleanupTimeout = 15 * time.Second
+	// DefaultReconnectWindow is the GoAway.reconnect_after_ms the relay
+	// sends with a planned close (supersede, drain, row reaped). It is the
+	// jitter WINDOW (design v2.6 §3.3): the dialer draws its delay
+	// uniformly from [0, reconnect_after_ms], so targets the relay ends
+	// together do not redial in one synchronized wave. The relay does not
+	// pre-jitter it (no double jitter).
+	DefaultReconnectWindow = 5 * time.Second
 )
 
 // Errors.
@@ -144,15 +149,12 @@ type Config struct {
 	// Clock drives the relay's timers (default: Session.Clock, else real).
 	// The registry keeps its own clock (registry.Config.Clock).
 	Clock clock.Clock
-	// RegistryNow is the time used for registry eligibility reads made
-	// during admission; it should agree with the registry's clock
-	// (default time.Now).
-	RegistryNow func() time.Time
 	// NewSessionID generates session ids (default uuid v4).
 	NewSessionID func() string
-	// ReconnectJitter bounds the random reconnect hint sent with relay
-	// initiated GoAways (default DefaultReconnectJitter; negative: none).
-	ReconnectJitter time.Duration
+	// ReconnectWindow is GoAway.reconnect_after_ms on relay-initiated
+	// planned closes: the window the dialer draws its redial delay from
+	// (default DefaultReconnectWindow; negative: 0).
+	ReconnectWindow time.Duration
 	// Logger defaults to slog.Default().
 	Logger *slog.Logger
 }
@@ -177,8 +179,15 @@ type Relay struct {
 	gen      int64
 	endpoint string // registered internal endpoint ("" if unaddressable)
 	sessions map[string]*entry
-	hbTimer  clock.Timer
-	killed   bool
+	// pending holds admitted sessions whose Welcome may already be out but
+	// that Serve has not registered yet (r2-F1): Local waits for them
+	// instead of reporting them unknown.
+	pending map[string]*entry
+	hbTimer clock.Timer
+	killed  bool
+	// stopped is closed when the state becomes stateStopped.
+	stopped     chan struct{}
+	stoppedOnce sync.Once
 
 	fatal     chan error
 	fatalOnce sync.Once
@@ -199,6 +208,9 @@ type Relay struct {
 	// testHookBeforeReady runs in Serve after Accept returned and before
 	// the session is marked ready (the pipelined-StreamOpen race seam).
 	testHookBeforeReady func()
+	// testHookPendingWait runs in Local when it starts waiting for a
+	// pending session (r2-F1 seam).
+	testHookPendingWait func()
 }
 
 // ActiveBridges returns the number of owner-side stream bridges running.
@@ -211,9 +223,15 @@ type entry struct {
 	principal Principal
 	sess      conduit.LocalSession
 
-	ready    atomic.Bool // sess is set
-	touching atomic.Bool // a TouchSession is in flight
-	again    atomic.Bool // a pong arrived while touching (coalesced)
+	ready atomic.Bool // sess is set
+	// readyCh is closed when the admission resolves: after sess is set
+	// and the entry is registered, or when the session failed to start
+	// (sess stays nil). pendingID is the session id under r.pending.
+	readyCh   chan struct{}
+	readyOnce sync.Once
+	pendingID string
+	touching  atomic.Bool // a TouchSession is in flight
+	again     atomic.Bool // a pong arrived while touching (coalesced)
 	// closeForbidden records that a user StreamOpen was refused before
 	// sess was set; Serve closes the session with 4403 once it is.
 	closeForbidden atomic.Bool
@@ -251,11 +269,8 @@ func New(cfg Config) (*Relay, error) {
 	if cfg.NewSessionID == nil {
 		cfg.NewSessionID = uuid.NewString
 	}
-	if cfg.ReconnectJitter == 0 {
-		cfg.ReconnectJitter = DefaultReconnectJitter
-	}
-	if cfg.RegistryNow == nil {
-		cfg.RegistryNow = time.Now
+	if cfg.ReconnectWindow == 0 {
+		cfg.ReconnectWindow = DefaultReconnectWindow
 	}
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
@@ -268,6 +283,8 @@ func New(cfg Config) (*Relay, error) {
 		log:      cfg.Logger.With("component", "conduit-relay", "relay_instance_id", cfg.InstanceID),
 		clk:      cfg.Clock,
 		sessions: make(map[string]*entry),
+		pending:  make(map[string]*entry),
+		stopped:  make(chan struct{}),
 		fatal:    make(chan error, 1),
 	}, nil
 }
@@ -381,10 +398,7 @@ func (r *Relay) supersede() {
 		r.mu.Unlock()
 		return
 	}
-	r.state = stateStopped
-	if r.hbTimer != nil {
-		r.hbTimer.Stop()
-	}
+	r.markStoppedLocked()
 	entries := r.snapshotLocked()
 	r.mu.Unlock()
 	r.log.Error("Conduit relay superseded by a newer generation of this instance; stopped serving")
@@ -394,14 +408,20 @@ func (r *Relay) supersede() {
 	r.fatalOnce.Do(func() { r.fatal <- ErrSuperseded })
 }
 
-// reconnectAfter is a uniform random reconnect hint in [0,
-// ReconnectJitter], spreading the redials of sessions the relay ends
-// together.
+// reconnectAfter is the reconnect hint of a relay-initiated planned close:
+// the jitter window itself (design v2.6 §3.3; the dialer draws the delay).
 func (r *Relay) reconnectAfter() time.Duration {
-	if r.cfg.ReconnectJitter <= 0 {
-		return 0
+	return max(r.cfg.ReconnectWindow, 0)
+}
+
+// markStoppedLocked moves to stateStopped (no Serve or touch is registered
+// from now on, so serves and wg may be waited on). Caller holds mu.
+func (r *Relay) markStoppedLocked() {
+	r.state = stateStopped
+	if r.hbTimer != nil {
+		r.hbTimer.Stop()
 	}
-	return time.Duration(rand.Int64N(int64(r.cfg.ReconnectJitter) + 1))
+	r.stoppedOnce.Do(func() { close(r.stopped) })
 }
 
 func (r *Relay) snapshotLocked() []*entry {
@@ -420,8 +440,11 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 	if r.trackServe() {
 		defer r.serves.Done()
 	}
-	adm := &admitter{r: r, p: p, transport: conn.Transport()}
-	e := &entry{principal: p}
+	e := &entry{principal: p, readyCh: make(chan struct{})}
+	adm := &admitter{r: r, p: p, transport: conn.Transport(), e: e}
+	// Whatever happens below, a pending entry never outlives Serve's
+	// startup: resolvePending is a no-op once the entry is registered.
+	defer r.failPending(e)
 	cfg := r.cfg.Session
 	cfg.Interceptor = chainInterceptor(r.touchOnPong(e), r.cfg.Session.Interceptor)
 	cfg.StreamHandler = conduit.StreamHandlerFunc(func(_ context.Context, _ *conduitv1.StreamOpen, ps conduit.PendingStream) error {
@@ -451,10 +474,16 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 	e.ready.Store(true)
 
 	r.mu.Lock()
+	if r.pending[rec.SessionID] == e {
+		delete(r.pending, rec.SessionID)
+	}
 	r.sessions[rec.SessionID] = e
-	state := r.state
+	state, killed := r.state, r.killed
 	r.mu.Unlock()
+	e.readyOnce.Do(func() { close(e.readyCh) })
 	switch {
+	case killed:
+		_ = ls.Close()
 	case e.closeForbidden.Load():
 		// A user StreamOpen arrived before sess was set (pipelined
 		// after the Hello); refuseDialerStream could not close it.
@@ -470,7 +499,7 @@ func (r *Relay) Serve(ctx context.Context, conn transport.Conn, p Principal) err
 	if r.sessions[rec.SessionID] == e {
 		delete(r.sessions, rec.SessionID)
 	}
-	killed := r.killed
+	killed = r.killed
 	r.mu.Unlock()
 	if !killed {
 		r.deleteRow(context.Background(), rec.SessionID, rec.RelayGeneration)
@@ -488,6 +517,34 @@ func (r *Relay) trackServe() bool {
 	}
 	r.serves.Add(1)
 	return true
+}
+
+// addPending records an admitted session (its row is inserted and its
+// Welcome is about to be sent) until Serve registers it.
+func (r *Relay) addPending(sessionID string, e *entry) {
+	if e == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e.pendingID = sessionID
+	r.pending[sessionID] = e
+}
+
+// failPending resolves a pending entry whose session will not start
+// (refused after the insert, Welcome discarded, Accept failed). Waiters in
+// Local then see the session as unknown. A no-op once the entry is
+// registered.
+func (r *Relay) failPending(e *entry) {
+	if e == nil {
+		return
+	}
+	r.mu.Lock()
+	if e.pendingID != "" && r.pending[e.pendingID] == e {
+		delete(r.pending, e.pendingID)
+	}
+	r.mu.Unlock()
+	e.readyOnce.Do(func() { close(e.readyCh) })
 }
 
 var userStreamRefused = reason(ReasonForbidden, "user sessions may not open streams")
@@ -517,9 +574,9 @@ func (r *Relay) refuseDialerStream(e *entry, ps conduit.PendingStream) error {
 // blocks the read loop: the touch runs in a goroutine, at most one per
 // session is in flight, and pongs arriving meanwhile are coalesced into one
 // follow-up touch. registry.ErrSessionNotFound (row reaped or replaced)
-// sends GoAway 4503 with a jittered reconnect hint so the target
-// reconnects (rows reaped together, e.g. after a long registry outage, do
-// not redial together).
+// sends GoAway 4503 with the reconnect window so the target reconnects
+// (the dialer jitters within it, so rows reaped together, e.g. after a long
+// registry outage, do not redial together).
 func (r *Relay) touchOnPong(e *entry) conduit.Interceptor {
 	return func(dir conduit.Direction, f *conduitv1.Frame) []*conduitv1.Frame {
 		if dir == conduit.Inbound && f.GetPong() != nil && e.ready.Load() {
@@ -630,20 +687,56 @@ func (r *Relay) GoAway(sessionID string, opts conduit.GoAwayOptions) error {
 
 func (r *Relay) goAway(e *entry, opts conduit.GoAwayOptions) {
 	ctx, cancel := context.WithTimeout(context.Background(), deleteTimeout)
-	if err := r.cfg.Registry.SetSessionDraining(ctx, e.rec.SessionID); err != nil && !errors.Is(err, registry.ErrSessionNotFound) {
-		r.log.Warn("Conduit: marking session draining failed", "session_id", e.rec.SessionID, "error", err)
-	}
+	r.markSessionDraining(ctx, e)
 	cancel()
 	_ = e.sess.GoAway(opts)
 }
 
+func (r *Relay) markSessionDraining(ctx context.Context, e *entry) {
+	if err := r.cfg.Registry.SetSessionDraining(ctx, e.rec.SessionID); err != nil && !errors.Is(err, registry.ErrSessionNotFound) {
+		r.log.Warn("Conduit: marking session draining failed", "session_id", e.rec.SessionID, "error", err)
+	}
+}
+
 // Local returns the live local session with sessionID, if this relay holds
-// it, together with its registry record.
-func (r *Relay) Local(sessionID string) (conduit.LocalSession, registry.SessionRecord, bool) {
+// it, together with its registry record. A session that was admitted but
+// is not registered yet (its Welcome may already have reached the target,
+// so the registry already routes to it) is waited for, bounded by ctx and
+// the handshake timeout, instead of being reported unknown.
+func (r *Relay) Local(ctx context.Context, sessionID string) (conduit.LocalSession, registry.SessionRecord, bool) {
+	r.mu.Lock()
+	if r.killed {
+		r.mu.Unlock()
+		return nil, registry.SessionRecord{}, false
+	}
+	if e := r.sessions[sessionID]; e != nil {
+		r.mu.Unlock()
+		return e.sess, e.rec, true
+	}
+	e := r.pending[sessionID]
+	r.mu.Unlock()
+	if e == nil {
+		return nil, registry.SessionRecord{}, false
+	}
+	wait := r.cfg.Session.HandshakeTimeout
+	if wait <= 0 {
+		wait = conduit.DefaultHandshakeTimeout
+	}
+	timeout, stop := clock.After(r.clk, wait)
+	defer stop()
+	if h := r.testHookPendingWait; h != nil {
+		h()
+	}
+	select {
+	case <-e.readyCh:
+	case <-ctx.Done():
+		return nil, registry.SessionRecord{}, false
+	case <-timeout:
+		return nil, registry.SessionRecord{}, false
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	e := r.sessions[sessionID]
-	if e == nil || r.killed {
+	if r.killed || r.sessions[sessionID] != e {
 		return nil, registry.SessionRecord{}, false
 	}
 	return e.sess, e.rec, true
@@ -674,45 +767,44 @@ func (r *Relay) Sessions() int {
 }
 
 // Shutdown drains the relay: it refuses new sessions, marks its relay row
-// draining, sends GoAway (jittered reconnect hint) to every session
-// (marking each row draining first) and waits, until ctx is done, for
-// every session to end and every Serve call to finish deleting its row,
-// so the caller may close the registry store once Shutdown returns nil.
-// Sessions still live at the deadline, including ones admitted while the
-// drain began, are closed with 4503 and ctx's error is returned; their row
-// deletes continue in the background (the reaper is the backstop).
+// draining, marks every session row draining (concurrently, bounded by
+// ctx and one store timeout), sends GoAway with the reconnect window to
+// every session and waits, until ctx is done, for every session to end and
+// every Serve call to finish deleting its row, so the caller may close the
+// registry store once Shutdown returns nil. Sessions still live at the
+// deadline, including ones admitted while the drain began, are closed with
+// 4503 and ctx's error is returned; their row deletes continue in the
+// background (the reaper is the backstop).
+//
+// Shutdown also waits when the relay already stopped serving on its own
+// (superseded) or another Shutdown is draining it, so "returned nil" always
+// means no relay goroutine still uses the store.
 func (r *Relay) Shutdown(ctx context.Context) error {
 	r.mu.Lock()
-	if r.state != stateServing {
+	switch r.state {
+	case stateServing:
+		r.state = stateDraining
+		gen := r.gen
+		entries := r.snapshotLocked()
 		r.mu.Unlock()
-		return nil
+		r.drain(ctx, gen, entries)
+		r.mu.Lock()
+		r.markStoppedLocked()
+		r.mu.Unlock()
+	case stateNew:
+		r.markStoppedLocked()
+		r.mu.Unlock()
+	default:
+		// Stopped already, or a concurrent Shutdown is draining (it marks
+		// the relay stopped when its drain ends).
+		r.mu.Unlock()
 	}
-	r.state = stateDraining
-	gen := r.gen
-	entries := r.snapshotLocked()
-	r.mu.Unlock()
-
-	dctx, cancel := context.WithTimeout(ctx, deleteTimeout)
-	if err := r.cfg.Registry.SetRelayDraining(dctx, r.cfg.InstanceID, gen, true); err != nil {
-		r.log.Warn("Conduit relay: marking relay draining failed", "error", err)
-	}
-	cancel()
-	for _, e := range entries {
-		r.goAway(e, conduit.GoAwayOptions{Reason: ReasonDraining, ReconnectAfter: r.reconnectAfter()})
-	}
-	for _, e := range entries {
-		select {
-		case <-e.sess.Done():
-		case <-ctx.Done():
-		}
+	select {
+	case <-r.stopped:
+	case <-ctx.Done():
+		return r.closeLate(ctx)
 	}
 	// No Serve or touch is registered once stopped, so waiting is safe.
-	r.mu.Lock()
-	r.state = stateStopped
-	if r.hbTimer != nil {
-		r.hbTimer.Stop()
-	}
-	r.mu.Unlock()
 	done := make(chan struct{})
 	go func() {
 		r.serves.Wait()
@@ -723,14 +815,57 @@ func (r *Relay) Shutdown(ctx context.Context) error {
 	case <-done:
 		return nil
 	case <-ctx.Done():
+		return r.closeLate(ctx)
 	}
+}
+
+// drain is Shutdown's planned part: relay row draining, every session row
+// draining (so routing stops choosing them), GoAway to every session, then
+// wait for the sessions to end (bounded by ctx). The store writes share one
+// deadline, so a registry outage delays the GoAways by at most one store
+// timeout, not one per session.
+func (r *Relay) drain(ctx context.Context, gen int64, entries []*entry) {
+	dctx, cancel := context.WithTimeout(ctx, deleteTimeout)
+	var writes sync.WaitGroup
+	writes.Add(1)
+	go func() {
+		defer writes.Done()
+		if err := r.cfg.Registry.SetRelayDraining(dctx, r.cfg.InstanceID, gen, true); err != nil {
+			r.log.Warn("Conduit relay: marking relay draining failed", "error", err)
+		}
+	}()
+	for _, e := range entries {
+		writes.Add(1)
+		go func() {
+			defer writes.Done()
+			r.markSessionDraining(dctx, e)
+		}()
+	}
+	writes.Wait()
+	cancel()
+	for _, e := range entries {
+		_ = e.sess.GoAway(conduit.GoAwayOptions{Reason: ReasonDraining, ReconnectAfter: r.reconnectAfter()})
+	}
+	for _, e := range entries {
+		select {
+		case <-e.sess.Done():
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// closeLate closes the sessions still live at Shutdown's deadline.
+func (r *Relay) closeLate(ctx context.Context) error {
 	r.mu.Lock()
 	late := r.snapshotLocked()
 	r.mu.Unlock()
 	for _, e := range late {
 		_ = e.sess.CloseWithCode(conduit.CloseRelayRestart, reason(ReasonRelayRestart, "drain deadline"))
 	}
-	r.log.Warn("Conduit relay: drain deadline reached; closed the remaining sessions", "sessions", len(late))
+	if len(late) > 0 {
+		r.log.Warn("Conduit relay: drain deadline reached; closed the remaining sessions", "sessions", len(late))
+	}
 	return ctx.Err()
 }
 
@@ -740,10 +875,7 @@ func (r *Relay) Shutdown(ctx context.Context) error {
 func (r *Relay) Kill() {
 	r.mu.Lock()
 	r.killed = true
-	r.state = stateStopped
-	if r.hbTimer != nil {
-		r.hbTimer.Stop()
-	}
+	r.markStoppedLocked()
 	entries := r.snapshotLocked()
 	r.mu.Unlock()
 	for _, e := range entries {

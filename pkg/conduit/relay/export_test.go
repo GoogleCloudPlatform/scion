@@ -50,6 +50,10 @@ func (r *Relay) SetAfterOpenHookForTest(h func(hopDone <-chan struct{})) {
 // h runs in Serve after Accept returned, before the session is ready.
 func (r *Relay) SetBeforeReadyHookForTest(h func()) { r.testHookBeforeReady = h }
 
+// SetPendingWaitHookForTest installs the r2-F1 seam: h runs in Local when
+// it starts waiting for an admitted, not yet registered session.
+func (r *Relay) SetPendingWaitHookForTest(h func()) { r.testHookPendingWait = h }
+
 // HeartbeatForTest runs one heartbeat now.
 func (r *Relay) HeartbeatForTest() { r.heartbeat() }
 

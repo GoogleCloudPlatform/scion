@@ -183,7 +183,7 @@ func (r *Router) Resolve(ctx context.Context, req Request, exclude map[string]bo
 				continue
 			}
 			if rec.RelayInstanceID == self {
-				ls, lrec, ok := r.cfg.Relay.Local(rec.SessionID)
+				ls, lrec, ok := r.cfg.Relay.Local(ctx, rec.SessionID)
 				if !ok || lrec.RelayGeneration != rec.RelayGeneration {
 					continue // ending, or a previous generation's row
 				}

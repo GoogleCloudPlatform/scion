@@ -34,6 +34,7 @@ type admitter struct {
 	r         *Relay
 	p         Principal
 	transport string
+	e         *entry // Serve's entry (nil in admitter-only tests)
 
 	mu     sync.Mutex
 	rec    registry.SessionRecord
@@ -130,6 +131,10 @@ func (a *admitter) Admit(ctx context.Context, hello *conduitv1.Hello) (*conduitv
 	a.mu.Lock()
 	a.rec, a.source, a.ok = rec, inc.Source, true
 	a.mu.Unlock()
+	// The row is routable from here on and the Welcome goes out before
+	// Serve registers the session: record it as pending so the owner's
+	// Local waits for it rather than answering not_local (r2-F1).
+	r.addPending(rec.SessionID, a.e)
 	if p.Kind != registry.PrincipalUser {
 		r.log.Info("Conduit session admitted", "session_id", rec.SessionID, "principal_kind", p.Kind,
 			"principal_id", p.ID, "connection_epoch", epoch, "incarnation_source", inc.Source)
@@ -176,19 +181,33 @@ func (a *admitter) fallbackRefused(err error) error {
 // before us is therefore no longer epoch-current, and once our row is gone
 // nothing would be routable while that session stays connected (it gets
 // no signal). Its row is deleted as well, so its relay's next touch finds
-// the row gone and sends GoAway 4503 with a jittered reconnect hint; the
+// the row gone and sends GoAway 4503 with the reconnect window; the
 // launch container redials, bumps the epoch and is routable again within
 // about one ping interval. A launch session that inserted after us is
 // already current and is left alone.
+//
+// Residual gap (bounded, self-heals): between the eviction and the launch
+// container's reconnect (about one ping interval, plus the reconnect
+// window, plus the redial) the agent has no launch_id row, so a redial of
+// the refused launch-id-less dialer passes the pre-check and is admitted
+// as gen-N until the launch session reconnects and fences it again. The
+// lasting fix is to make the fence part of the insert transaction
+// (follow-up).
+//
+// The cleanup deletes run detached from the admission ctx (bounded by
+// cleanupTimeout): admission may be ending at the handshake deadline, and
+// an abandoned delete would leave an epoch-current row with no session.
 func (a *admitter) recheckFallback(ctx context.Context, rec registry.SessionRecord, inc Incarnation) error {
 	r, p := a.r, a.p
 	err := CheckFallbackAgainstLaunchID(ctx, r.cfg.Store, p.ID, p.Agent, inc, rec.SessionID)
 	if err == nil {
 		return nil
 	}
-	r.deleteRow(ctx, rec.SessionID, rec.RelayGeneration)
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+	defer cancel()
+	r.deleteRow(cctx, rec.SessionID, rec.RelayGeneration)
 	if IsSupersededIncarnation(err) {
-		r.evictObsoleteLaunchRows(ctx, p)
+		r.evictObsoleteLaunchRows(cctx, p)
 	}
 	return a.fallbackRefused(err)
 }
@@ -199,8 +218,13 @@ func (a *admitter) AbandonAdmission(ctx context.Context, _ *conduitv1.Hello, w *
 	rec, ok := a.rec, a.ok && a.rec.SessionID == w.GetSessionId()
 	a.ok = false
 	a.mu.Unlock()
+	a.r.failPending(a.e)
 	if ok {
-		a.r.deleteRow(ctx, rec.SessionID, rec.RelayGeneration)
+		// Detached and bounded, like recheckFallback's cleanup: the
+		// handshake ctx may already be done.
+		cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+		defer cancel()
+		a.r.deleteRow(cctx, rec.SessionID, rec.RelayGeneration)
 	}
 }
 
