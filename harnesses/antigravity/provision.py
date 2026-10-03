@@ -261,6 +261,15 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     # The level -> --effort tier table lives in config.yaml's `thinking:`
     # block; resolve_thinking owns the parse, clamp and logging. None means
     # no --effort flag, so AGY's own default applies.
+    harness_cfg = ctx.harness_config if isinstance(ctx.harness_config, dict) else {}
+    thinking_requested = bool(os.environ.get(scion_harness.THINKING_LEVEL_ENV, "").strip())
+    if thinking_requested and not harness_cfg.get("thinking"):
+        # Only when a level was asked for: with no level, no --effort is the
+        # intended outcome, so a missing block changes nothing worth a warning.
+        ctx.warn(
+            "config.yaml has no thinking block; --effort not passed "
+            "(update the harness-config)"
+        )
     thinking_tier = scion_harness.resolve_thinking(ctx)
     ctx.info(f"model={model} tier={thinking_tier or '<agy default>'}")
 

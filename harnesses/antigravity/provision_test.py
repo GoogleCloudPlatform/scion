@@ -575,8 +575,18 @@ class ProvisionThinkingWiringTest(unittest.TestCase):
     provision() entry point and reads the generated agy-wrapper.sh."""
 
     def _wrapper(
-        self, raw: str | None, thinking: dict[str, Any] | None = None
+        self,
+        raw: str | None,
+        thinking: dict[str, Any] | None = None,
+        *,
+        omit_thinking: bool = False,
     ) -> tuple[str, list[str]]:
+        """Provision and return (agy-wrapper.sh, warnings). `thinking`
+        None means config.yaml's table; any other value, including {}, is
+        passed through as-is. omit_thinking drops the key entirely."""
+        harness_config: dict[str, Any] = {"model_aliases": dict(ANTIGRAVITY_MODEL_ALIASES)}
+        if not omit_thinking:
+            harness_config["thinking"] = ANTIGRAVITY_THINKING if thinking is None else thinking
         warnings: list[str] = []
         real_warn = scion_harness.ProvisionContext.warn
 
@@ -591,10 +601,7 @@ class ProvisionThinkingWiringTest(unittest.TestCase):
                     tmp,
                     env_vars=[],
                     explicit_type="none",
-                    harness_config={
-                        "model_aliases": dict(ANTIGRAVITY_MODEL_ALIASES),
-                        "thinking": thinking or ANTIGRAVITY_THINKING,
-                    },
+                    harness_config=harness_config,
                 )
             wrapper_path = os.path.join(tmp, ".scion", "harness", "agy-wrapper.sh")
             with open(wrapper_path, "r", encoding="utf-8") as f:
@@ -628,6 +635,32 @@ class ProvisionThinkingWiringTest(unittest.TestCase):
         wrapper, _ = self._wrapper("60", thinking)
         self.assertIn("--effort 'high max' ", wrapper)
         self.assertNotIn("--effort high max", wrapper)
+
+    def test_missing_thinking_block_warns_when_level_requested(self) -> None:
+        """Gemini review G1: a stale/customized config.yaml without the
+        thinking block silently drops a requested level, so warn."""
+        for label, kwargs in (("omitted", {"omit_thinking": True}), ("empty", {"thinking": {}})):
+            with self.subTest(block=label):
+                wrapper, warnings = self._wrapper("60", **kwargs)
+                self.assertNotIn("--effort", wrapper)
+                self.assertTrue(
+                    any("no thinking block" in w for w in warnings),
+                    f"expected a missing-thinking-block warning, got: {warnings}",
+                )
+
+    def test_missing_thinking_block_silent_without_level(self) -> None:
+        """No level requested -> no --effort is the intended outcome, so a
+        missing block must not warn on every start."""
+        for raw in (None, "   "):
+            with self.subTest(raw=raw):
+                wrapper, warnings = self._wrapper(raw, omit_thinking=True)
+                self.assertNotIn("--effort", wrapper)
+                self.assertEqual(warnings, [])
+                _, warnings = self._wrapper(raw, thinking={})
+                self.assertFalse(
+                    any("no thinking block" in w for w in warnings),
+                    f"unexpected missing-thinking-block warning: {warnings}",
+                )
 
     def test_unset_level_passes_no_effort_flag(self) -> None:
         for raw in (None, "", "   "):

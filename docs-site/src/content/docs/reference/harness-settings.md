@@ -195,8 +195,8 @@ A harness with no `thinking:` block ignores the thinking level. Currently only `
 tables. If you maintain a customized `config.yaml` for one of these harnesses, copy the
 `thinking:` block from the bundled file, or run `scion harness-config upgrade <name>`, which
 merges missing top-level keys such as `thinking:` without overwriting your values. Without the
-block, the provisioner writes no thinking setting, so the CLI's own default applies, and codex
-logs a warning.
+block, the provisioner writes no thinking setting, so the CLI's own default applies. codex logs
+a warning on every start; antigravity logs one when a thinking level was requested.
 
 ### Command Execution (`command`)
 
