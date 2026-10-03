@@ -27,6 +27,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -198,6 +199,12 @@ func (r *CloudRunRuntime) client(ctx context.Context) (cloudrun.InstancesAPI, er
 }
 
 func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
+	// Checked before anything is resolved or provisioned: this runtime
+	// always mounts the project's shared NFS workspace (see
+	// provisionCloudRunNFS), which would break empty-per-agent isolation.
+	if err := rejectEmptyPerAgentOnCloudRun(cfg); err != nil {
+		return "", err
+	}
 	if err := r.resolveConfig(ctx); err != nil {
 		return "", fmt.Errorf("failed to resolve Cloud Run config: %w", err)
 	}
@@ -927,4 +934,21 @@ func sanitizeGCPLabelValue(value string) string {
 		value = value[:63]
 	}
 	return value
+}
+
+// errEmptyPerAgentCloudRun is returned by CloudRunRuntime.Run for an
+// empty-per-agent agent (design #2703).
+var errEmptyPerAgentCloudRun = errors.New("cloudrun: empty-per-agent workspaces are not supported on the Cloud Run runtime, " +
+	"which always mounts the project's shared workspace; use a Docker, Podman, Apple or Kubernetes broker for this project")
+
+// rejectEmptyPerAgentOnCloudRun fails when cfg starts an empty-per-agent
+// agent, identified by SCION_WORKSPACE_MODE in its env.
+func rejectEmptyPerAgentOnCloudRun(cfg RunConfig) error {
+	for _, kv := range cfg.Env {
+		k, v, ok := strings.Cut(kv, "=")
+		if ok && k == "SCION_WORKSPACE_MODE" && store.ResolveWorkspaceSharingMode(v) == store.SharingModeEmptyPerAgent {
+			return errEmptyPerAgentCloudRun
+		}
+	}
+	return nil
 }

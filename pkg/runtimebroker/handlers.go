@@ -225,10 +225,11 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			// (scionrt.HasAttachSupport) rather than a blanket true, so a
 			// runtime that opts out via the optional AttachCapableRuntime
 			// interface is reported accurately here too.
-			Attach:      scionrt.HasAttachSupport(s.runtime),
-			Exec:        true,
-			Reprovision: true,
-			AsyncLaunch: true,
+			Attach:                 scionrt.HasAttachSupport(s.runtime),
+			Exec:                   true,
+			Reprovision:            true,
+			AsyncLaunch:            true,
+			EmptyPerAgentWorkspace: true,
 		},
 		Profiles: s.buildInfoProfiles(runtimeType),
 	}

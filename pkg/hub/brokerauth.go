@@ -247,6 +247,8 @@ func capabilitiesFromStrings(names []string) *store.BrokerCapabilities {
 			caps.Reprovision = true
 		case "asynclaunch", "async_launch":
 			caps.AsyncLaunch = true
+		case "emptyperagentworkspace", "empty_per_agent_workspace":
+			caps.EmptyPerAgentWorkspace = true
 		}
 	}
 	return caps

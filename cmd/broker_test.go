@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -104,4 +105,13 @@ func TestBuildBrokerDaemonArgsForwardsAllFlags(t *testing.T) {
 		[]string{"server", "start", "--foreground", "--hosted", "--enable-runtime-broker", "--runtime-broker-port=9801", "--auto-provide", "--debug"},
 		buildBrokerDaemonArgs(9801, true, true),
 	)
+}
+
+// TestBrokerRegistrationCapabilities_IncludesEmptyPerAgentWorkspace pins
+// that the broker CLI reports emptyPerAgentWorkspace at join (design #2703
+// P2); the hub's capabilitiesFromStrings parses it.
+func TestBrokerRegistrationCapabilities_IncludesEmptyPerAgentWorkspace(t *testing.T) {
+	if !slices.Contains(brokerRegistrationCapabilities(), "emptyPerAgentWorkspace") {
+		t.Errorf("brokerRegistrationCapabilities() = %v, want it to include emptyPerAgentWorkspace", brokerRegistrationCapabilities())
+	}
 }

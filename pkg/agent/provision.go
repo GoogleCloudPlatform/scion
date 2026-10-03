@@ -387,6 +387,9 @@ func buildProvisionContext(ctx context.Context, opts api.StartOptions) (context.
 	if opts.SharedWorkspace {
 		ctx = api.ContextWithSharedWorkspace(ctx)
 	}
+	if opts.EmptyPerAgentWorkspace {
+		ctx = api.ContextWithEmptyPerAgentWorkspace(ctx)
+	}
 	if opts.HarnessConfigPath != "" {
 		ctx = api.ContextWithHarnessConfigPath(ctx, opts.HarnessConfigPath)
 	}
@@ -954,6 +957,21 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 	sharedWorkspace := api.IsSharedWorkspaceFromContext(ctx)
+	emptyPerAgent := api.IsEmptyPerAgentWorkspaceFromContext(ctx)
+	if emptyPerAgent {
+		// Empty-per-agent (design #2703) always means the private
+		// agents/<slug>/workspace directory below; a request that also names
+		// another workspace source is contradictory, so refuse it rather than
+		// guess which one wins.
+		switch {
+		case workspace != "":
+			return "", "", nil, fmt.Errorf("empty-per-agent workspace does not take a workspace path (got %q)", workspace)
+		case sharedWorkspace:
+			return "", "", nil, fmt.Errorf("empty-per-agent workspace cannot be combined with a shared workspace")
+		case api.GitCloneFromContext(ctx) != nil:
+			return "", "", nil, fmt.Errorf("empty-per-agent workspace cannot be combined with a git clone")
+		}
+	}
 	agentDir, err := checkAgentDirContained(projectDir, agentName, sharedWorkspace)
 	if err != nil {
 		return "", "", nil, err
@@ -1006,7 +1024,17 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	}
 
 	// Workspace Resolution Logic
-	if gitClone != nil {
+	if emptyPerAgent {
+		// Empty-per-agent (design #2703): a private, initially empty, non-git
+		// directory at <projectDir>/agents/<slug>/workspace. Checked first so
+		// that neither settings.WorkspacePath, the global-project directory,
+		// a surrounding git repository nor the filepath.Dir(projectDir)
+		// fallback of Case 3 can hand the agent a shared directory. Existing
+		// content is kept: a restart must not wipe the agent's work.
+		if err := os.MkdirAll(agentWorkspace, 0755); err != nil {
+			return "", "", nil, fmt.Errorf("failed to create workspace directory: %w", err)
+		}
+	} else if gitClone != nil {
 		// Git clone mode: ensure the workspace directory exists and is ready
 		// for sciontool to clone into at container startup.
 		//
@@ -2319,7 +2347,15 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	// share the project-wide checkout and have no per-agent worktree.
 	if agentWorkspace != "" && config.GetScionAgentConfigPath(agentDir) != "" {
 		if _, err := os.Stat(agentWorkspace); os.IsNotExist(err) {
-			if util.IsGitRepoDir(projectDir) {
+			if api.IsEmptyPerAgentWorkspaceFromContext(ctx) {
+				// Empty-per-agent (design #2703): recreate the private
+				// directory empty. Never a worktree, even when projectDir
+				// sits in a git repository, and never cleared so the agent
+				// falls back to another mount.
+				if err := os.MkdirAll(agentWorkspace, 0755); err != nil {
+					return "", "", "", nil, fmt.Errorf("failed to recreate workspace directory: %w", err)
+				}
+			} else if util.IsGitRepoDir(projectDir) {
 				// Recreate the worktree for git-backed workspaces.
 				targetBranch := branch
 				if targetBranch == "" {

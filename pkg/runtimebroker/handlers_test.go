@@ -475,7 +475,10 @@ func TestHostInfo(t *testing.T) {
 	}
 
 	if resp.Capabilities == nil {
-		t.Error("expected capabilities to be present")
+		t.Fatal("expected capabilities to be present")
+	}
+	if !resp.Capabilities.EmptyPerAgentWorkspace {
+		t.Error("expected capabilities.emptyPerAgentWorkspace to be true (design #2703 P2)")
 	}
 }
 
@@ -2676,7 +2679,7 @@ func TestCreateAgentHubManagedProjectSettingsEndpoint(t *testing.T) {
 		"name": "hub-managed-agent",
 		"projectSlug": "settings-test-project",
 		"hubEndpoint": "http://localhost:9810",
-		"config": {"template": "claude"}
+		"config": {"template": "claude", "workspace": "` + projectPath + `"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -3914,7 +3917,7 @@ func TestCreateAgentProjectSlugResolvesProjectPath(t *testing.T) {
 		"projectId": "project-abc",
 		"projectSlug": "my-hub-project",
 		"provisionOnly": true,
-		"config": {"template": "claude"}
+		"config": {"template": "claude", "workspace": "/hub/projects/my-hub-project"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

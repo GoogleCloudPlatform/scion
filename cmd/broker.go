@@ -1929,7 +1929,7 @@ func getLocalBrokerID() string {
 // and registers/heartbeats with a live instance in hand (see
 // buildStoreBrokerProfiles and HeartbeatService.buildHeartbeat).
 func brokerRegistrationCapabilities() []string {
-	return []string{"sync", "attach", "reprovision"}
+	return []string{"sync", "attach", "reprovision", "emptyPerAgentWorkspace"}
 }
 
 // buildBrokerProfiles builds BrokerProfile objects from settings.Profiles.

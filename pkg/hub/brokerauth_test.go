@@ -229,6 +229,20 @@ func TestCapabilitiesFromStrings_AsyncLaunchAliases(t *testing.T) {
 	}
 }
 
+// TestCapabilitiesFromStrings_EmptyPerAgentWorkspace covers the
+// "emptyPerAgentWorkspace" capability string a remote broker reports at
+// join (design #2703 P2), including the case-folded and snake_case forms.
+func TestCapabilitiesFromStrings_EmptyPerAgentWorkspace(t *testing.T) {
+	for _, name := range []string{"emptyPerAgentWorkspace", "emptyperagentworkspace", "empty_per_agent_workspace", " EMPTY_PER_AGENT_WORKSPACE "} {
+		if !capabilitiesFromStrings([]string{name}).EmptyPerAgentWorkspace {
+			t.Errorf("capabilitiesFromStrings([%q]).EmptyPerAgentWorkspace = false, want true", name)
+		}
+	}
+	if capabilitiesFromStrings([]string{"sync", "attach", "reprovision"}).EmptyPerAgentWorkspace {
+		t.Error("expected EmptyPerAgentWorkspace false when not reported")
+	}
+}
+
 // TestCompleteBrokerJoin_NoCapabilitiesLeavesExisting verifies an empty
 // capabilities list on join (e.g. an old CLI that predates the field) does
 // not wipe out a capability set recorded by a previous join.

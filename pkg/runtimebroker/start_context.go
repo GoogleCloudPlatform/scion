@@ -802,6 +802,24 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// --- Empty-per-agent mode (design #2703) ---
+	// The hub sends the canonical "empty-per-agent" on create and start (or
+	// pre-resolves it into resolvedEnv, already merged into env above). The
+	// agent gets a private, initially empty, non-git directory at
+	// <projectDir>/agents/<slug>/workspace; any other workspace source in the
+	// same request is contradictory and refused rather than guessed at.
+	emptyPerAgent := store.SharingModeEmptyPerAgent == store.WorkspaceSharingMode(env["SCION_WORKSPACE_MODE"])
+	if emptyPerAgent {
+		if msg := emptyPerAgentConflict(in.Config); msg != "" {
+			span.SetStatus(codes.Error, msg)
+			return nil, &startContextError{Status: http.StatusBadRequest, Message: msg}
+		}
+		opts.EmptyPerAgentWorkspace = true
+	} else if msg := ambiguousNonGitWorkspace(in, worktreeProvisioned); msg != "" {
+		span.SetStatus(codes.Error, msg)
+		return nil, &startContextError{Status: http.StatusBadRequest, Message: msg}
+	}
+
 	// --- SCION_WORKSPACE_GIT ---
 	// Emit when the workspace is (or will be) a git repository. Mode alone is
 	// insufficient because shared-plain may or may not be git-backed.
@@ -818,6 +836,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 	if !isGitWorkspace {
 		isGitWorkspace = in.ResolvedEnv["SCION_WORKSPACE_GIT"] == "true"
+	}
+	if emptyPerAgent {
+		// Never git, whatever a stale resolvedEnv claims.
+		isGitWorkspace = false
+		delete(env, "SCION_WORKSPACE_GIT")
+		delete(envCls, "SCION_WORKSPACE_GIT")
 	}
 	if isGitWorkspace {
 		env["SCION_WORKSPACE_GIT"] = "true"
@@ -1629,4 +1653,51 @@ func withHubAgentDefaults(ctx context.Context, cfg *CreateAgentConfig) context.C
 		return ctx
 	}
 	return api.ContextWithHubAgentDefaults(ctx, cfg.HubAgentDefaults)
+}
+
+// emptyPerAgentConflict returns a client-facing message when an
+// empty-per-agent request (design #2703) also names another workspace
+// source, or "" when it does not. The hub never sends these together; a
+// request that does is refused rather than resolved in favour of either.
+func emptyPerAgentConflict(cfg *CreateAgentConfig) string {
+	if cfg == nil {
+		return ""
+	}
+	switch {
+	case cfg.Workspace != "":
+		return "empty-per-agent workspaces do not take a workspace path"
+	case cfg.GitClone != nil:
+		return "empty-per-agent workspaces cannot be combined with a git clone"
+	case cfg.SharedWorkspace:
+		return "empty-per-agent workspaces cannot be combined with a shared workspace"
+	}
+	return ""
+}
+
+// ambiguousNonGitWorkspace returns a client-facing message when a create for
+// a hub-managed project (ProjectPath is ~/.scion/projects/<slug>) names no workspace source at all:
+// no workspace mode, no workspace path, no git clone, no shared workspace and
+// no worktree. A current hub always sends one of them (the hub-managed
+// project path for a shared non-git project, the empty-per-agent mode
+// otherwise), so such a request means the mode was lost on the way.
+// Provisioning would then fall back to the shared project directory, which
+// for an empty-per-agent agent breaks isolation, so it is refused (design
+// #2703 P2). Start and restart are not checked: they legitimately omit the
+// config, and the hub re-sends the mode on them.
+func ambiguousNonGitWorkspace(in startContextInputs, worktreeProvisioned bool) string {
+	if in.Operation != opCreate || in.ProjectSlug == "" || in.WorkspaceMode != "" || worktreeProvisioned {
+		return ""
+	}
+	// Only the conventional hub-managed path (which createAgent resolves
+	// from the slug before buildStartContext) is checked; a linked
+	// project's own ProjectPath keeps its existing resolution.
+	globalDir, err := config.GetGlobalDir()
+	if err != nil || filepath.Clean(in.ProjectPath) != filepath.Join(globalDir, "projects", in.ProjectSlug) {
+		return ""
+	}
+	if in.Config != nil && (in.Config.Workspace != "" || in.Config.GitClone != nil || in.Config.SharedWorkspace) {
+		return ""
+	}
+	return "ambiguous workspace for hub-managed project " + in.ProjectSlug +
+		": the request has no workspace mode, workspace path or git clone; refusing to fall back to the shared project directory"
 }

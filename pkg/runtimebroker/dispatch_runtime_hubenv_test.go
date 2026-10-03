@@ -241,3 +241,46 @@ func TestBuildStartContext_CloudrunSandboxEndpointFollowsDispatchRuntime(t *test
 		})
 	}
 }
+
+// TestBuildStartContext_EmptyPerAgentFollowsNoDispatchRuntime: the
+// empty-per-agent mode (design #2703) is runtime-independent in the start
+// context: whichever runtime the dispatch resolves to (docker, or kubernetes
+// with local storage), the agent gets the mode, no SCION_WORKSPACE_GIT, no
+// host worktree, no in-container clone, and the private-workspace flag for
+// ProvisionAgent.
+func TestBuildStartContext_EmptyPerAgentFollowsNoDispatchRuntime(t *testing.T) {
+	clearSCIONEnv(t)
+	for _, tc := range dispatchRuntimeCases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, dotScion := newDispatchRuntimeServer(t, tc, "")
+			sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+				Name:          "agent-a",
+				AgentID:       "agent-a",
+				ProjectID:     "p1",
+				ProjectSlug:   "proj",
+				ProjectPath:   dotScion,
+				WorkspaceMode: "empty-per-agent",
+				Config:        &CreateAgentConfig{Profile: tc.profile()},
+				HTTPRequest:   httptest.NewRequest("POST", "/api/v1/agents", nil),
+				Operation:     opCreate,
+			})
+			if err != nil {
+				t.Fatalf("buildStartContext: %v", err)
+			}
+			if got := sc.Opts.Env["SCION_WORKSPACE_MODE"]; got != string(store.SharingModeEmptyPerAgent) {
+				t.Errorf("SCION_WORKSPACE_MODE = %q, want %q", got, store.SharingModeEmptyPerAgent)
+			}
+			for _, k := range []string{"SCION_WORKSPACE_GIT", "SCION_GIT_CLONE_URL"} {
+				if got, ok := sc.Opts.Env[k]; ok {
+					t.Errorf("%s = %q, want unset", k, got)
+				}
+			}
+			if sc.Opts.Workspace != "" {
+				t.Errorf("Workspace = %q, want empty (ProvisionAgent picks agents/<slug>/workspace)", sc.Opts.Workspace)
+			}
+			if !sc.Opts.EmptyPerAgentWorkspace {
+				t.Error("EmptyPerAgentWorkspace = false, want true")
+			}
+		})
+	}
+}

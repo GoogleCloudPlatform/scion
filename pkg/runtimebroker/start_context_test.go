@@ -1793,13 +1793,18 @@ func TestBuildStartContext_HubManagedProjectSlugResolution(t *testing.T) {
 
 	// Simulate: ProjectSlug set, ProjectPath empty (buildStartContext resolves it),
 	// ProjectID from hub. This is the path when the handler doesn't pre-resolve.
-	t.Setenv("HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
 		Name:        "agent-1",
 		ProjectSlug: "my-project",
 		ProjectID:   "aabbccdd-1234-5678-9012-abcdef123456",
 		Operation:   opCreate,
+		// A current hub sends the hub-managed project path as the
+		// workspace for a shared non-git project (see
+		// ambiguousNonGitWorkspace).
+		Config: &CreateAgentConfig{Workspace: filepath.Join(home, ".scion", "projects", "my-project")},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1848,6 +1853,7 @@ func TestBuildStartContext_NeverFallsBackToLegacyGrovesDir(t *testing.T) {
 		ProjectSlug: slug,
 		ProjectID:   "aabbccdd-1234-5678-9012-abcdef123456",
 		Operation:   opCreate,
+		Config:      &CreateAgentConfig{Workspace: projectsDir},
 	})
 	if err != nil {
 		t.Fatal(err)

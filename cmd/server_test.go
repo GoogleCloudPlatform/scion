@@ -478,6 +478,8 @@ func TestRegisterGlobalProjectAndBroker_UpdateSetsReprovisionCapability(t *testi
 	require.NotNil(t, updated.Capabilities)
 	assert.True(t, updated.Capabilities.Reprovision,
 		"re-registering an existing broker must refresh Capabilities.Reprovision to true")
+	assert.True(t, updated.Capabilities.EmptyPerAgentWorkspace,
+		"re-registering an existing broker must refresh Capabilities.EmptyPerAgentWorkspace to true")
 	assert.True(t, updated.Capabilities.Sync)
 	assert.True(t, updated.Capabilities.Attach)
 }

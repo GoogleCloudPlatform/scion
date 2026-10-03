@@ -17,6 +17,9 @@ operations. Continue inspection without changing repository state.
   `shared-plain` rules to that checkout.
 - **`clone-per-agent`:** Files and local Git state are private. Remote branches
   and named shared mounts may still be shared.
+- **`empty-per-agent`:** Private, initially empty, and not Git. Kept across
+  suspend/resume where storage allows; deleted with the agent. Use named shared
+  mounts to share or keep files.
 
 Inspect other revisions with `git show` or `git diff`. Use task-owned temporary
 storage for extracted snapshots. Preserve others' changes. Missing host paths in
