@@ -614,3 +614,19 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
     expect(navClicks).toEqual([]);
   });
 });
+
+describe('scion-page-agent-detail activity badge', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('uses the activity display label instead of the raw activity', async () => {
+    const el = await mount(makeAgent({ activity: 'blocked' }));
+    const badges = Array.from(el.shadowRoot?.querySelectorAll('scion-status-badge') ?? []).filter(
+      (b) => (b as unknown as { status: string }).status === 'blocked'
+    ) as Array<HTMLElement & { label: string }>;
+    // Header badge and the Activity info badge.
+    expect(badges).toHaveLength(2);
+    for (const badge of badges) expect(badge.label).toBe('');
+  });
+});
