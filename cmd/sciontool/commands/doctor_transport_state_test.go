@@ -96,7 +96,7 @@ func TestCheckTransportAuth_ValidFileInUse(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Mode: iap (header: Proxy-Authorization)",
-		"Audience: test-audience.example (from SCION_TRANSPORT_AUDIENCE)",
+		"Audience: test-a...xample (from SCION_TRANSPORT_AUDIENCE; shortened)",
 		"[ OK ] Transport credential in use: refreshed file " + path,
 		"env  (SCION_TRANSPORT_TOKEN): expired",
 		"file (" + path + "): expires",
@@ -107,6 +107,9 @@ func TestCheckTransportAuth_ValidFileInUse(t *testing.T) {
 		}
 	}
 	assertNoTokenValues(t, out, envTok, fileTok)
+	if strings.Contains(out, "test-audience.example") {
+		t.Errorf("doctor output should not contain the full audience:\n%s", out)
+	}
 }
 
 // Expired: only the expired bootstrap value is available. Doctor FAILs.
@@ -157,6 +160,7 @@ func TestCheckTransportAuth_ReportsLastRefreshOutcome(t *testing.T) {
 		{hub.TransportRefreshStatus{At: time.Now(), Outcome: hub.TransportRefreshOutcomeRefreshed}, "[ OK ] Last refresh: new transport token received", false},
 		{hub.TransportRefreshStatus{At: time.Now(), Outcome: hub.TransportRefreshOutcomeFailed, Error: "mint failed for test"}, "hub did not issue a transport token: mint failed for test", true},
 		{hub.TransportRefreshStatus{At: time.Now(), Outcome: hub.TransportRefreshOutcomeAbsent}, "the hub returned no transport token", true},
+		{hub.TransportRefreshStatus{At: time.Now(), Outcome: hub.TransportRefreshOutcomeReset}, "[ OK ] Last update: fresh transport token installed by reset-auth", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.status.Outcome, func(t *testing.T) {
@@ -302,6 +306,119 @@ func TestPrintRemediation_ExpiredTransport(t *testing.T) {
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("remediation missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// Malformed: the file in use cannot be parsed (the bootstrap value is gone,
+// as in agent children). Its expiry is unknown, so doctor FAILs.
+func TestCheckTransportAuth_MalformedFileFails(t *testing.T) {
+	home := isolateDoctorTransport(t)
+	path := writeDoctorTransportFile(t, home, "not-a-jwt")
+	t.Setenv(transportauth.EnvTransportTokenFile, path)
+
+	out, diag := runCheckTransportAuth(t)
+
+	if !diag.transportUnparseable || !diag.transportFailed() {
+		t.Fatalf("expected an unparseable transport credential, diag=%+v\n%s", diag, out)
+	}
+	if !strings.Contains(out, "[FAIL] Transport credential in use: refreshed file "+path+" could not be parsed; expiry unknown") {
+		t.Errorf("expected FAIL for malformed credential:\n%s", out)
+	}
+	if strings.Contains(out, "[ OK ] Transport credential") {
+		t.Errorf("malformed credential must not be reported OK:\n%s", out)
+	}
+	rem := captureStdout(t, func() { printRemediation(time.Now().Add(time.Hour), "agent", true, diag) })
+	for _, want := range []string{"could not be parsed", "scion agent reset-auth"} {
+		if !strings.Contains(rem, want) {
+			t.Errorf("remediation missing %q:\n%s", want, rem)
+		}
+	}
+	assertNoTokenValues(t, out, "not-a-jwt")
+}
+
+// Near expiry: within the refresh margin the credential is WARN, never OK.
+func TestCheckTransportAuth_NearExpiryWarns(t *testing.T) {
+	home := isolateDoctorTransport(t)
+	tok := makeDoctorTestJWT(time.Now().Add(2 * time.Minute))
+	path := writeDoctorTransportFile(t, home, tok)
+	t.Setenv(transportauth.EnvTransportTokenFile, path)
+
+	out, diag := runCheckTransportAuth(t)
+
+	if diag.transportFailed() {
+		t.Fatalf("near expiry is not a failure, diag=%+v\n%s", diag, out)
+	}
+	if !strings.Contains(out, "[WARN] Transport credential in use: refreshed file "+path) ||
+		!strings.Contains(out, "within refresh margin") {
+		t.Errorf("expected WARN within refresh margin:\n%s", out)
+	}
+	if strings.Contains(out, "[ OK ] Transport credential") {
+		t.Errorf("near-expiry credential must not be reported OK:\n%s", out)
+	}
+	assertNoTokenValues(t, out, tok)
+}
+
+// A redirect that is not a proxy sign-in page is never reported as a
+// successful authentication, and only scheme://host is printed.
+func TestCheckAuthentication_RedirectNotOK(t *testing.T) {
+	home := isolateDoctorTransport(t)
+	if err := os.MkdirAll(filepath.Join(home, ".scion"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".scion", "scion-token"), []byte("test-app-value"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SCION_AGENT_ID", "test-agent")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://other.example/login?state=opaque-test-state", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	var diag doctorDiag
+	failures := 0
+	out := captureStdout(t, func() {
+		if checkAuthentication(srv.URL, &failures, nil, &diag) {
+			t.Error("a redirect must not count as authenticated")
+		}
+		if !checkHubConnectivity(srv.URL, nil) {
+			t.Error("a redirect still means the endpoint answered")
+		}
+		printRemediation(time.Now().Add(time.Hour), "agent", false, diag)
+	})
+	if diag.authRedirectedTo != "https://other.example" {
+		t.Errorf("authRedirectedTo=%q", diag.authRedirectedTo)
+	}
+	if strings.Contains(out, "[ OK ]") {
+		t.Errorf("redirect reported as OK:\n%s", out)
+	}
+	for _, want := range []string{
+		"Heartbeat not confirmed: hub answered 302, redirected to https://other.example",
+		"Agent lookup not confirmed: hub answered 302, redirected to https://other.example",
+		"/healthz: redirected to https://other.example",
+		"authentication could not be confirmed",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	for _, avoid := range []string{"opaque-test-state", "signing key"} {
+		if strings.Contains(out, avoid) {
+			t.Errorf("output should not contain %q:\n%s", avoid, out)
+		}
+	}
+}
+
+func TestShortenAudience(t *testing.T) {
+	cases := map[string]string{
+		"":           "",
+		"abc":        "***",
+		"abcdefghij": "abc...hij",
+		"123456789012-abcdefghijklmnop.apps.googleusercontent.com": "123456...nt.com",
+	}
+	for in, want := range cases {
+		if got := shortenAudience(in); got != want {
+			t.Errorf("shortenAudience(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

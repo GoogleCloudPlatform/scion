@@ -42,16 +42,49 @@ type doctorDiag struct {
 	transportMissing bool
 	// transportExpired is true when the credential in use has expired.
 	transportExpired bool
+	// transportUnparseable is true when the hub-provided credential in use
+	// could not be parsed, so its expiry is unknown.
+	transportUnparseable bool
 	// transportRefreshProblem describes the last refresh's transport
 	// outcome when it was not a fresh token ("" when fine or unknown).
 	transportRefreshProblem string
 	// authRejectedBy records who rejected the authentication probes.
 	authRejectedBy string
+	// authRedirectedTo is the scheme://host an authentication probe was
+	// redirected to, when the redirect was not a proxy sign-in page.
+	authRedirectedTo string
 }
 
 // transportFailed reports whether the transport section found a failure.
 func (d *doctorDiag) transportFailed() bool {
-	return d.transportMissing || d.transportExpired
+	return d.transportMissing || d.transportExpired || d.transportUnparseable
+}
+
+// redirectTarget reports whether resp is a redirect and returns its target
+// reduced to scheme://host, so query parameters are never printed.
+func redirectTarget(resp *http.Response) (string, bool) {
+	if resp == nil || resp.StatusCode < 300 || resp.StatusCode >= 400 {
+		return "", false
+	}
+	loc, err := resp.Location()
+	if err != nil || loc.Host == "" {
+		return "an unknown location", true
+	}
+	return loc.Scheme + "://" + loc.Host, true
+}
+
+// shortenAudience returns a form of aud that is enough to spot a mismatch
+// without reproducing the full deployment identifier: the first and last
+// few characters, with the middle elided.
+func shortenAudience(aud string) string {
+	const keep = 6
+	if len(aud) <= 2*keep+3 {
+		if len(aud) <= keep {
+			return strings.Repeat("*", len(aud))
+		}
+		return aud[:3] + "..." + aud[len(aud)-3:]
+	}
+	return aud[:keep] + "..." + aud[len(aud)-keep:]
 }
 
 // fmtWhen formats t with a relative suffix, e.g. "2026-01-02T03:04:05Z (in 41m)".
@@ -96,18 +129,20 @@ func printTransportModeAndAudience() {
 	fmt.Printf("[INFO] Mode: %s (header: %s)\n", modeName, header)
 
 	if aud, from := transportAudience(); aud != "" {
-		fmt.Printf("[INFO] Audience: %s (from %s)\n", aud, from)
+		fmt.Printf("[INFO] Audience: %s (from %s; shortened)\n", shortenAudience(aud), from)
 	} else {
 		fmt.Println("[INFO] Audience: not set in the environment")
 	}
 }
 
-// printExpiryLine prints the status line for the credential in use and
-// updates diag. label describes where it came from.
+// printExpiryLine prints the status line for the hub-provided credential
+// in use and updates diag. label describes where it came from. The hub
+// only issues JWTs, so a value whose expiry cannot be parsed is a failure.
 func printExpiryLine(label string, expiry time.Time, diag *doctorDiag) {
 	switch {
 	case expiry.IsZero():
-		fmt.Printf("[ OK ] Transport credential in use: %s (expiry unknown)\n", label)
+		diag.transportUnparseable = true
+		fmt.Printf("[FAIL] Transport credential in use: %s could not be parsed; expiry unknown\n", label)
 	case time.Now().After(expiry):
 		diag.transportExpired = true
 		fmt.Printf("[FAIL] Transport credential in use: %s, EXPIRED at %s\n", label, fmtWhen(expiry))
@@ -166,6 +201,8 @@ func reportTransportRefreshStatus(diag *doctorDiag) {
 	switch rs.Outcome {
 	case hub.TransportRefreshOutcomeRefreshed:
 		fmt.Printf("[ OK ] Last refresh: new transport token received at %s\n", fmtWhen(rs.At))
+	case hub.TransportRefreshOutcomeReset:
+		fmt.Printf("[ OK ] Last update: fresh transport token installed by reset-auth at %s\n", fmtWhen(rs.At))
 	case hub.TransportRefreshOutcomeFailed:
 		diag.transportRefreshProblem = rs.Error
 		fmt.Printf("[WARN] Last refresh at %s: hub did not issue a transport token: %s\n", fmtWhen(rs.At), rs.Error)
@@ -229,6 +266,8 @@ func printTransportRemediation(diag doctorDiag) bool {
 		fmt.Println("[!] The transport credential in use has expired, so requests are stopped by the platform proxy before reaching the hub.")
 	case diag.transportMissing:
 		fmt.Println("[!] Transport auth is configured but no transport credential is available.")
+	case diag.transportUnparseable:
+		fmt.Println("[!] The transport credential in use could not be parsed, so it is not known to be valid.")
 	default:
 		fmt.Println("[!] The platform proxy (IAP / Cloud Run invoker) rejected the transport credential; the agent token was not checked.")
 	}

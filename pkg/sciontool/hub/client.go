@@ -838,19 +838,20 @@ func (c *Client) hasHubProvidedTransport() bool {
 
 // recordTransportRefreshOutcome records whether this refresh delivered a
 // transport token, so a hub-side mint failure is visible inside the agent
-// (agent log and sciontool doctor) instead of only in hub logs. It only
-// records for agents that use a hub-provided transport token, or when the
-// response mentions transport at all.
+// (agent log and sciontool doctor) instead of only in hub logs. It records
+// only for agents that use a hub-provided transport token: other agents
+// (metadata mode, or no transport) ignore transport entries, so neither a
+// status nor an error would be meaningful for them.
 func (c *Client) recordTransportRefreshOutcome(result RefreshTokenResponse, uid, gid int) {
+	if !c.hasHubProvidedTransport() {
+		return
+	}
 	hasEntry := false
 	for _, e := range result.Tokens {
 		if e.Layer == "transport" && e.Type == "google_oidc" && e.Value != "" {
 			hasEntry = true
 			break
 		}
-	}
-	if !hasEntry && result.TransportError == "" && !c.hasHubProvidedTransport() {
-		return
 	}
 
 	st := TransportRefreshStatus{At: time.Now().UTC()}
@@ -1679,22 +1680,45 @@ func (c *Client) AdoptTransportTokenFile(uid, gid int) (bool, error) {
 	if err := WriteTransportTokenFile(tok, uid, gid); err != nil {
 		return false, err
 	}
+	// An unparseable value keeps a zero expiry, so it never beats a
+	// candidate whose expiry is known (the same rule FileSource applies).
 	expiry, err := transportauth.ParseTokenExpiry(tok)
 	if err != nil {
-		expiry = time.Now().Add(transportauth.DefaultTTL)
+		expiry = time.Time{}
 	}
 	c.oidcSource.SetToken(tok, expiry)
+	// Record the reset so doctor does not keep showing an earlier failed
+	// refresh next to the freshly installed credential.
+	st := TransportRefreshStatus{At: time.Now().UTC(), Outcome: TransportRefreshOutcomeReset}
+	if err := WriteTransportRefreshStatus(st, uid, gid); err != nil {
+		log.Error("Failed to record transport refresh status: %v", err)
+	}
 	return true, nil
 }
 
-// RemoveTransportTokenFile removes the transport token file, resolving its
-// parent directories without following symlinks. A missing file is not an
-// error. It returns true if a file was removed.
+// RemoveTransportTokenFile removes the transport token file and its refresh
+// status file, resolving parent directories without following symlinks. A
+// missing file is not an error. It returns true if the token file was
+// removed.
 func RemoveTransportTokenFile() (bool, error) {
 	if testing.Testing() && !tokenHomeOverridden {
 		panic("scion/hub: RemoveTransportTokenFile called during a test without SetTokenHome()")
 	}
-	dirFd, leaf, err := dirfd.OpenParentNoFollow(TransportTokenFilePath())
+	removed, err := removeFileNoFollow(TransportTokenFilePath())
+	if err != nil {
+		return removed, err
+	}
+	if _, err := removeFileNoFollow(TransportRefreshStatusPath()); err != nil {
+		return removed, fmt.Errorf("failed to remove transport refresh status: %w", err)
+	}
+	return removed, nil
+}
+
+// removeFileNoFollow unlinks the leaf of path (never a symlink target),
+// resolving parent directories without following symlinks. A missing file
+// is not an error; it returns true if a file was removed.
+func removeFileNoFollow(path string) (bool, error) {
+	dirFd, leaf, err := dirfd.OpenParentNoFollow(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil
@@ -1720,6 +1744,9 @@ const (
 	// TransportRefreshOutcomeAbsent: no transport token and no reason given
 	// (for example the hub has no transport minter configured).
 	TransportRefreshOutcomeAbsent = "absent"
+	// TransportRefreshOutcomeReset: reset-auth installed a fresh transport
+	// token (recorded by init when it adopts the file).
+	TransportRefreshOutcomeReset = "reset"
 )
 
 // transportRefreshStatusFileName is written next to the transport token

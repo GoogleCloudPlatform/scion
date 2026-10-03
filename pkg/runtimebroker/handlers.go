@@ -3163,21 +3163,40 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, project
 	})
 }
 
-// resetAuth writes a fresh token into a running agent's container and signals
-// sciontool init (PID 1) to restart its token refresh loop via SIGUSR2.
+// scionTokenDirScript sets TOKEN_DIR to the scion user's ~/.scion inside
+// the agent container, falling back to /home/scion when getent is missing
+// or has no entry. (A `getent … | cut … || echo …` pipeline never takes the
+// fallback: its status is cut's, which succeeds on empty input.)
+const scionTokenDirScript = `d="$(getent passwd scion 2>/dev/null | cut -d: -f6)"; ` +
+	`[ -n "$d" ] || d=/home/scion; ` +
+	`TOKEN_DIR="$d/.scion"`
+
+// scionTokenWriteCmd returns the in-container command that writes the agent
+// token (read from stdin) to the scion user's token file via temp+rename.
+func scionTokenWriteCmd() []string {
+	return []string{"sh", "-c",
+		scionTokenDirScript + " && " +
+			"mkdir -p \"$TOKEN_DIR\" && " +
+			"cat > \"$TOKEN_DIR/scion-token.tmp\" && " +
+			"mv \"$TOKEN_DIR/scion-token.tmp\" \"$TOKEN_DIR/scion-token\"",
+	}
+}
+
 // transportTokenWriteCmd returns the in-container command that writes the
 // transport token (read from stdin) to the scion user's transport token
 // file via temp+rename, created mode 0600.
 func transportTokenWriteCmd() []string {
 	return []string{"sh", "-c",
 		"umask 077 && " +
-			"TOKEN_DIR=\"$(getent passwd scion 2>/dev/null | cut -d: -f6 || echo /home/scion)/.scion\" && " +
+			scionTokenDirScript + " && " +
 			"mkdir -p \"$TOKEN_DIR\" && " +
 			"cat > \"$TOKEN_DIR/transport-token.tmp\" && " +
 			"mv \"$TOKEN_DIR/transport-token.tmp\" \"$TOKEN_DIR/transport-token\"",
 	}
 }
 
+// resetAuth writes a fresh token into a running agent's container and signals
+// sciontool init (PID 1) to restart its token refresh loop via SIGUSR2.
 func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 
@@ -3232,12 +3251,7 @@ func (s *Server) resetAuth(w http.ResponseWriter, r *http.Request, id, projectID
 	// becomes part of the outer host process's command line and is readable
 	// via /proc/<pid>/cmdline for the lifetime of the exec, while stdin is
 	// not. See #1355.
-	writeCmd := []string{"sh", "-c",
-		"TOKEN_DIR=\"$(getent passwd scion 2>/dev/null | cut -d: -f6 || echo /home/scion)/.scion\" && " +
-			"mkdir -p \"$TOKEN_DIR\" && " +
-			"cat > \"$TOKEN_DIR/scion-token.tmp\" && " +
-			"mv \"$TOKEN_DIR/scion-token.tmp\" \"$TOKEN_DIR/scion-token\"",
-	}
+	writeCmd := scionTokenWriteCmd()
 
 	if _, err := rt.ExecWithStdin(ctx, target, writeCmd, strings.NewReader(req.Token)); err != nil {
 		s.writeRuntimeOpError(w, ctx, "write token file on agent", err, "agent_id", id)

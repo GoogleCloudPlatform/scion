@@ -20,6 +20,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -140,5 +143,53 @@ func TestResetAuth_TransportWriteFailureDoesNotFailReset(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "transport token write failed") {
 		t.Errorf("response should report the failed transport write: %s", w.Body.String())
+	}
+}
+
+// TestScionTokenDirScript runs the shared TOKEN_DIR prelude used by both
+// reset-auth writes: it uses the scion user's home from getent, and falls
+// back to /home/scion when getent is missing or returns nothing.
+func TestScionTokenDirScript(t *testing.T) {
+	shPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh not available")
+	}
+	cutPath, err := exec.LookPath("cut")
+	if err != nil {
+		t.Skip("cut not available")
+	}
+	run := func(t *testing.T, getent string) string {
+		t.Helper()
+		bin := t.TempDir()
+		if err := os.Symlink(cutPath, filepath.Join(bin, "cut")); err != nil {
+			t.Fatal(err)
+		}
+		if getent != "" {
+			if err := os.WriteFile(filepath.Join(bin, "getent"), []byte("#!"+shPath+"\n"+getent+"\n"), 0755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		cmd := exec.Command(shPath, "-c", scionTokenDirScript+` && printf %s "$TOKEN_DIR"`)
+		cmd.Env = []string{"PATH=" + bin}
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("script failed: %v", err)
+		}
+		return string(out)
+	}
+
+	if got := run(t, ""); got != "/home/scion/.scion" {
+		t.Errorf("without getent: TOKEN_DIR=%q, want /home/scion/.scion", got)
+	}
+	if got := run(t, "exit 2"); got != "/home/scion/.scion" {
+		t.Errorf("no getent entry: TOKEN_DIR=%q, want /home/scion/.scion", got)
+	}
+	if got := run(t, "echo 'scion:x:1000:1000::/srv/scion-home:/bin/sh'"); got != "/srv/scion-home/.scion" {
+		t.Errorf("with getent: TOKEN_DIR=%q, want /srv/scion-home/.scion", got)
+	}
+	for _, c := range [][]string{scionTokenWriteCmd(), transportTokenWriteCmd()} {
+		if !strings.Contains(c[2], scionTokenDirScript) {
+			t.Errorf("write command does not use the shared TOKEN_DIR prelude: %q", c[2])
+		}
 	}
 }

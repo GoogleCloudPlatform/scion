@@ -290,6 +290,11 @@ func checkHubConnectivity(hubURL string, transportSrc transportauth.TokenSource)
 		fmt.Printf("[WARN] Hub endpoint answered %d at %s: %s\n", resp.StatusCode, healthURL, describeRejection(by))
 		return true
 	}
+	if target, ok := redirectTarget(resp); ok {
+		fmt.Printf("[WARN] Hub endpoint answered %d at %s: redirected to %s (redirects are not followed)\n",
+			resp.StatusCode, healthURL, target)
+		return true
+	}
 
 	if resp.StatusCode < 400 {
 		fmt.Printf("[ OK ] Hub reachable at %s\n", hubURL)
@@ -356,6 +361,9 @@ func checkAuthentication(hubURL string, failures *int, transportSrc transportaut
 		diag.authRejectedBy = by
 		fmt.Printf("[FAIL] Heartbeat rejected (%d): %s: %s\n", resp.StatusCode, describeRejection(by), doctorTruncate(string(respBody), 120))
 		*failures++
+	} else if target, ok := redirectTarget(resp); ok {
+		diag.authRedirectedTo = target
+		fmt.Printf("[WARN] Heartbeat not confirmed: hub answered %d, redirected to %s\n", resp.StatusCode, target)
 	} else if resp.StatusCode < 400 {
 		fmt.Println("[ OK ] Authenticated successfully (heartbeat accepted)")
 	} else {
@@ -393,11 +401,16 @@ func checkAuthentication(hubURL string, failures *int, transportSrc transportaut
 	_ = resp.Body.Close()
 
 	by := classifyRejection(resp, respBody)
+	target, redirected := redirectTarget(resp)
 	switch {
 	case by != rejectedByNone:
 		diag.authRejectedBy = by
 		fmt.Printf("[FAIL] Agent lookup rejected (%d): %s: %s\n", resp.StatusCode, describeRejection(by), doctorTruncate(string(respBody), 120))
 		*failures++
+		return false
+	case redirected:
+		diag.authRedirectedTo = target
+		fmt.Printf("[WARN] Agent lookup not confirmed: hub answered %d, redirected to %s\n", resp.StatusCode, target)
 		return false
 	case resp.StatusCode < 400:
 		fmt.Println("[ OK ] Agent record accessible (read-only check; credentials untouched)")
@@ -667,11 +680,21 @@ func printRemediation(tokenExpiry time.Time, tokenSubject string, tokenValid boo
 	// Only print remediation if there's a problem
 	expired := !tokenExpiry.IsZero() && now.After(tokenExpiry)
 	transportProblem := diag.transportFailed() || diag.authRejectedBy == rejectedByProxy
-	if !expired && tokenValid && !transportProblem {
+	if !expired && tokenValid && !transportProblem && diag.authRedirectedTo == "" {
 		return
 	}
 
 	fmt.Println("\n--- Remediation ---")
+
+	// A redirect means the probes never reached an endpoint that answered
+	// them, so neither credential was checked.
+	if diag.authRedirectedTo != "" && diag.authRejectedBy == rejectedByNone && !transportProblem {
+		fmt.Printf("[!] The hub endpoint redirected authenticated requests to %s, so authentication could not be confirmed.\n",
+			diag.authRedirectedTo)
+		fmt.Println("[!] Check that SCION_HUB_ENDPOINT uses the hub's final URL (scheme and host), " +
+			"and that nothing between the agent and the hub redirects API requests.")
+		return
+	}
 
 	// A platform proxy rejection means the agent token never reached the
 	// hub, so hub-side advice (signing keys) would be misleading.
