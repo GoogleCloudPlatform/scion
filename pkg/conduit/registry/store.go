@@ -79,6 +79,10 @@ type Store interface {
 	// last_seen is before staleBefore, in one statement, and returns the
 	// number of sessions deleted. Relay rows are kept.
 	DeleteSessionsOfStaleRelays(ctx context.Context, staleBefore time.Time) (int, error)
+	// DeleteStaleSessions deletes, in one statement, every session whose
+	// own last_seen is before staleBefore, regardless of its relay, and
+	// returns the number deleted. It never touches epoch rows.
+	DeleteStaleSessions(ctx context.Context, staleBefore time.Time) (int, error)
 	// DeleteIdleRelays deletes relay rows with no sessions whose last_seen
 	// is before staleBefore and returns how many were deleted.
 	DeleteIdleRelays(ctx context.Context, staleBefore time.Time) (int, error)

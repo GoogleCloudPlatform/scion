@@ -773,3 +773,64 @@ VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)`,
 	require.Len(t, ps.Sessions, 1)
 	assert.Equal(t, registry.Capabilities{}, ps.Sessions[0].Session.Capabilities)
 }
+
+func TestConduitRegistry_ProjectRuleRejectedWithoutConsumingEpoch(t *testing.T) {
+	f := newConduitFixture(t)
+	gen := f.registerRelay("relay-1")
+	noProject := agentSession("s-1", "relay-1", gen, "inc-A")
+	noProject.ProjectID = ""
+	_, err := f.reg.InsertSessionWithNextEpoch(f.ctx, noProject)
+	assert.ErrorIs(t, err, registry.ErrInvalidInput)
+	withProject := brokerSession("b-1", "relay-1", gen, "binc", "")
+	withProject.ProjectID = "proj-1"
+	_, err = f.reg.InsertSessionWithNextEpoch(f.ctx, withProject)
+	assert.ErrorIs(t, err, registry.ErrInvalidInput)
+
+	for _, k := range []struct{ kind, id string }{{registry.PrincipalAgent, "agent-1"}, {registry.PrincipalBroker, "broker-1"}} {
+		ps, err := f.store.ListPrincipalSessions(f.ctx, k.kind, k.id)
+		require.NoError(t, err)
+		assert.Empty(t, ps.Sessions)
+		assert.Zero(t, ps.CurrentEpoch, "%s: a rejected insert must not consume an epoch", k.kind)
+	}
+	// The first valid insert still gets epoch 1.
+	assert.Equal(t, int64(1), f.insert(agentSession("s-2", "relay-1", gen, "inc-A")))
+}
+
+func TestConduitRegistry_ReapStaleSessions_OnlyOldRowsOnLiveRelays(t *testing.T) {
+	f := newConduitFixture(t)
+	r1 := f.registerRelay("relay-1")
+	f.insert(agentSession("s-leaked", "relay-1", r1, "inc-A")) // its delete "failed"
+	f.insert(brokerSession("b-live", "relay-1", r1, "binc", ""))
+	f.insert(brokerSession("b-hiccup", "relay-1", r1, "binc2", ""))
+
+	// 11 minutes pass. The relay heartbeats throughout; b-live pongs
+	// normally; b-hiccup's last pong was 2 minutes ago (stale for
+	// routing, but well inside the reap horizon).
+	f.clock.Advance(9 * time.Minute)
+	require.NoError(t, f.reg.TouchSession(f.ctx, "b-hiccup"))
+	f.clock.Advance(2 * time.Minute)
+	require.NoError(t, f.reg.HeartbeatRelay(f.ctx, "relay-1", r1))
+	require.NoError(t, f.reg.TouchSession(f.ctx, "b-live"))
+
+	// The relay reaper does nothing: the relay is alive.
+	n, err := f.reg.ReapStaleRelays(f.ctx, 0, f.clock.Now())
+	require.NoError(t, err)
+	assert.Zero(t, n)
+
+	n, err = f.reg.ReapStaleSessions(f.ctx, 0, f.clock.Now())
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+	assert.ErrorIs(t, f.reg.TouchSession(f.ctx, "s-leaked"), registry.ErrSessionNotFound)
+	require.NoError(t, f.reg.TouchSession(f.ctx, "b-live"))
+	require.NoError(t, f.reg.TouchSession(f.ctx, "b-hiccup"))
+
+	// The epoch table is untouched: the agent's next session is epoch 2.
+	ps, err := f.store.ListPrincipalSessions(f.ctx, registry.PrincipalAgent, "agent-1")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), ps.CurrentEpoch)
+	assert.Equal(t, int64(2), f.insert(agentSession("s-next", "relay-1", r1, "inc-A")))
+
+	// A horizon inside SessionStaleAfter is refused.
+	_, err = f.reg.ReapStaleSessions(f.ctx, registry.DefaultSessionStaleAfter, f.clock.Now())
+	assert.ErrorIs(t, err, registry.ErrInvalidInput)
+}

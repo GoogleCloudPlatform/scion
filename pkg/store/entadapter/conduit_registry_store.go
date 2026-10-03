@@ -458,6 +458,18 @@ func (s *ConduitRegistryStore) DeleteSessionsOfStaleRelays(ctx context.Context, 
 	return n, nil
 }
 
+// DeleteStaleSessions implements registry.Store: one write-first DELETE on
+// the session's own last_seen. Epoch rows are untouched.
+func (s *ConduitRegistryStore) DeleteStaleSessions(ctx context.Context, staleBefore time.Time) (int, error) {
+	n, err := s.client.ConduitSession.Delete().
+		Where(conduitsession.LastSeenLT(staleBefore.UTC())).
+		Exec(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("conduit registry store: reap stale sessions: %w", err)
+	}
+	return n, nil
+}
+
 // DeleteIdleRelays implements registry.Store: one DELETE of relay rows that
 // are stale and have no sessions. Because the row must have no sessions,
 // the ON DELETE CASCADE never fires from here.
