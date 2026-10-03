@@ -103,11 +103,11 @@ The Hub rejects unknown values with `400`. The mode is stored in the server-owne
 
 ## Runtime environment variables
 
-Agents can discover their workspace provisioning at startup through two environment variables emitted by the broker into every container.
+Agents can discover their workspace provisioning at startup through two environment variables. The Runtime Broker sets them when it starts an agent (Hub-dispatched agents, including Workstation mode). Agents started in local mode without a Runtime Broker do not get them.
 
 ### `SCION_WORKSPACE_MODE`
 
-The canonical workspace sharing mode for the project. Always present; defaults to `shared-plain` when no mode label is set.
+The canonical workspace sharing mode for the project. The broker sets it on every agent it starts. When the project has no workspace mode, its value is `shared-plain`. That includes Hub git projects created without `--workspace-mode`, even though each of their agents gets its own clone; for those, `SCION_WORKSPACE_GIT=true` tells the agent the workspace is a git checkout.
 
 | Value | Description |
 |---|---|
@@ -116,7 +116,7 @@ The canonical workspace sharing mode for the project. Always present; defaults t
 | `worktree-per-agent` | Each agent has its own git worktree over a shared checkout. |
 | `empty-per-agent` | Each agent has its own private directory that started empty (no git). |
 
-**Example:** An agent in a Hub-managed git project reads `SCION_WORKSPACE_MODE=clone-per-agent` to know it has a private checkout and can safely commit without affecting other agents.
+**Example:** An agent in a Hub-managed git project created with workspace mode `per-agent` reads `SCION_WORKSPACE_MODE=clone-per-agent` to know it has a private checkout and can safely commit without affecting other agents.
 
 ### `SCION_WORKSPACE_GIT`
 
