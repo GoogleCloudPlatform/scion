@@ -87,6 +87,26 @@ export interface AgentDrainResult {
   capabilities?: Capabilities | undefined;
   /** Number of requests that returned a usable page (retried attempts are not counted). */
   requests: number;
+  /**
+   * The drain stopped with `error` before any page arrived: there is no
+   * result to show, and a host keeps its previous data. False whenever at
+   * least one page arrived, even one with zero readable items, so a later
+   * page failure is an incomplete result, not a first-page failure.
+   */
+  firstPageFailed: boolean;
+}
+
+/**
+ * A legacy page the caller already fetched (for example an old server's
+ * answer to a sorted request), from which the drain continues instead of
+ * requesting the first page again. It must come from the same filters as
+ * the drain's own URL.
+ */
+export interface DrainFirstPage {
+  agents: Agent[];
+  /** The cursor the drain continues from. */
+  nextCursor: string;
+  capabilities?: Capabilities | undefined;
 }
 
 /** The `fetch`-shaped function a drain uses. Defaults to `apiFetch`. */
@@ -104,6 +124,12 @@ export interface DrainAgentsOptions {
   /** Delay before retry attempt `n` is `n * retryDelayMs`. Defaults to 250. */
   retryDelayMs?: number;
   fetchFn?: AgentDrainFetch;
+  /**
+   * Continue from this already-fetched page: its agents come first, it
+   * counts as one of the `maxRequests` pages, and the rest are requested
+   * from its cursor.
+   */
+  firstPage?: DrainFirstPage;
 }
 
 type LegacyListBody =
@@ -216,6 +242,7 @@ export async function drainAgents(
     retries = DRAIN_PAGE_RETRIES,
     retryDelayMs = 250,
     fetchFn = apiFetch,
+    firstPage,
   } = options;
 
   const byId = new Map<string, Agent>();
@@ -223,12 +250,22 @@ export async function drainAgents(
   let cursor: string | undefined;
   let requests = 0;
 
+  if (firstPage) {
+    for (const a of firstPage.agents) {
+      if (!byId.has(a.id)) byId.set(a.id, a);
+    }
+    capabilities = firstPage.capabilities;
+    cursor = firstPage.nextCursor;
+    requests = 1;
+  }
+
   const result = (
     extra: Pick<AgentDrainResult, 'complete' | 'capped' | 'error'>
   ): AgentDrainResult => ({
     agents: Array.from(byId.values()),
     capabilities,
     requests,
+    firstPageFailed: extra.error !== null && requests === 0,
     ...extra,
   });
 
@@ -311,6 +348,14 @@ export interface AgentDrainRunOptions {
    * the create is not added, and the result is marked `stale` instead.
    */
   isMember?: (agent: Agent) => boolean;
+  /** Continue from a page the caller already fetched (see {@link DrainFirstPage}). */
+  firstPage?: DrainFirstPage;
+  /**
+   * The seed epoch the caller opened before fetching `firstPage`, so live
+   * changes since that request are kept. The run takes it over and closes
+   * it on every path. Without it the run opens its own epoch.
+   */
+  epoch?: AgentSeedEpoch;
 }
 
 /**
@@ -349,7 +394,9 @@ export interface AgentDrainRunnerDeps {
  *
  * A run resolves `null` when it was superseded, aborted, or the state
  * store's scope changed while it was in flight; nothing is seeded then.
- * The epoch is always closed, on success, failure and abort. The runner
+ * Superseding, `abort()` and a scope change all abort the in-flight page
+ * fetch, so no further page is requested. The epoch is always closed, on
+ * success, failure and abort. The runner
  * never changes the SSE scope, never marks the agent set complete in the
  * state store, and never issues a request after `abort()`.
  */
@@ -393,11 +440,18 @@ export class AgentDrainRunner {
     const { signal } = controller;
 
     const scopeGen = this.state.scopeGeneration;
-    const lateConnect = await this.waitForConnection(signal);
-    if (gen !== this.generation || scopeGen !== this.state.scopeGeneration) return null;
-
-    const epoch = new AgentSeedEpoch(this.state);
+    // A scope change makes anything still to come belong to a scope the
+    // store no longer holds: stop fetching at once.
+    const onScopeChanged = (): void => {
+      if (this.state.scopeGeneration !== scopeGen) controller.abort();
+    };
+    this.state.addEventListener('scope-changed', onScopeChanged);
+    let epoch: AgentSeedEpoch | undefined = options.epoch;
     try {
+      const lateConnect = await this.waitForConnection(signal);
+      if (gen !== this.generation || scopeGen !== this.state.scopeGeneration) return null;
+
+      epoch ??= new AgentSeedEpoch(this.state);
       let drained: AgentDrainResult;
       try {
         drained = await drainAgents(options.url, {
@@ -405,6 +459,7 @@ export class AgentDrainRunner {
           view: options.view,
           fetchFn: this.fetchFn,
           ...(this.retryDelayMs !== undefined ? { retryDelayMs: this.retryDelayMs } : {}),
+          ...(options.firstPage ? { firstPage: options.firstPage } : {}),
         });
       } catch (err) {
         if (gen !== this.generation || isAbort(err, signal)) return null;
@@ -421,7 +476,8 @@ export class AgentDrainRunner {
       });
       return { ...drained, agents: seeded.agents, stale: lateConnect || seeded.undecided };
     } finally {
-      epoch.close();
+      this.state.removeEventListener('scope-changed', onScopeChanged);
+      epoch?.close();
       if (this.controller === controller) this.controller = null;
     }
   }
@@ -432,9 +488,12 @@ export class AgentDrainRunner {
     const timeout = new Promise<boolean>((resolve) => {
       timer = setTimeout(() => resolve(true), this.connectTimeoutMs);
     });
+    const onAbort = (): void => resolveAborted(true);
+    let resolveAborted: (value: boolean) => void = () => {};
     const aborted = new Promise<boolean>((resolve) => {
-      signal.addEventListener('abort', () => resolve(true), { once: true });
+      resolveAborted = resolve;
     });
+    signal.addEventListener('abort', onAbort, { once: true });
     const connected = this.state.sseConnected(this.state.scopeGeneration).then(
       () => false,
       () => true
@@ -443,6 +502,7 @@ export class AgentDrainRunner {
       return await Promise.race([connected, timeout, aborted]);
     } finally {
       clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
     }
   }
 }

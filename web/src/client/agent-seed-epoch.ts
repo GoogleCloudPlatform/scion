@@ -110,6 +110,8 @@ export class AgentSeedEpoch {
    * Seed `agents` under this epoch (a no-op for the store if the epoch was
    * invalidated by a scope change) and build the membership. Seeding ends
    * the store epoch; live IDs are still recorded until {@link close}.
+   * Callers still call {@link close} after seeding; it is idempotent, so a
+   * close on every exit path is safe whether or not a seed happened.
    */
   seed(agents: Agent[], options: AgentSeedOptions): AgentSeedResult {
     this.state.seedAgents(agents, { token: this.token, partial: options.partial });
