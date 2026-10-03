@@ -867,3 +867,81 @@ describe('scion-page-project-detail — lazy file tabs', () => {
     expect(fileBrowserFor(el, SHARED_DIR_A)).toBeNull();
   });
 });
+
+describe('scion-page-project-detail — empty directory per agent (#2703)', () => {
+  let element: TestElement | null = null;
+  const EMPTY_PER_AGENT = { labels: { 'scion.dev/workspace-mode': 'per-agent' } };
+
+  beforeAll(async () => {
+    await import('./project-detail.js');
+  }, 60_000);
+
+  beforeEach(() => {
+    vi.stubGlobal('EventSource', FakeEventSource);
+    resetHubProjectCapabilitiesCache();
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it('hides the Files section and never observes or lists it when there are no shared dirs', async () => {
+    const fakeIO = makeFakeIntersectionObserver();
+    vi.stubGlobal('IntersectionObserver', fakeIO.Ctor);
+
+    const { el, listingCalls } = await createComponent('member', {
+      ...EMPTY_PER_AGENT,
+      sharedDirs: [],
+    });
+    element = el;
+
+    expect(el.shadowRoot?.querySelector('.files-section-placeholder')).toBeNull();
+    expect(el.shadowRoot?.querySelector('sl-tab-group')).toBeNull();
+    expect(fakeIO.observedTargets.length).toBe(0);
+    expect(fileBrowsers(el).length).toBe(0);
+    expect(listingCalls.workspace).toBe(0);
+  });
+
+  it('shows only shared-dir tabs (no workspace tab) when shared dirs exist', async () => {
+    vi.stubGlobal('IntersectionObserver', undefined);
+
+    const { el, listingCalls } = await createComponent('member', EMPTY_PER_AGENT);
+    element = el;
+
+    const tabs = [...el.shadowRoot!.querySelectorAll('sl-tab')].map((t) => t.getAttribute('panel'));
+    expect(tabs).toEqual([SHARED_DIR_A, SHARED_DIR_B]);
+    expect(fileBrowserFor(el, 'workspace')).toBeNull();
+    expect(fileBrowserFor(el, SHARED_DIR_A)).not.toBeNull();
+    expect(listingCalls.workspace).toBe(0);
+    expect(listingCalls[SHARED_DIR_A]).toBe(1);
+  });
+
+  it('still shows the workspace tab for a linked project', async () => {
+    vi.stubGlobal('IntersectionObserver', undefined);
+
+    const { el, listingCalls } = await createComponent('member', {
+      projectType: 'linked',
+      sharedDirs: [],
+    });
+    element = el;
+
+    expect(fileBrowserFor(el, 'workspace')).not.toBeNull();
+    expect(listingCalls.workspace).toBe(1);
+  });
+
+  it('still shows the workspace tab for a shared workspace directory project', async () => {
+    vi.stubGlobal('IntersectionObserver', undefined);
+
+    const { el, listingCalls } = await createComponent('member', {
+      labels: { 'scion.dev/workspace-mode': 'shared' },
+      sharedDirs: [],
+    });
+    element = el;
+
+    expect(fileBrowserFor(el, 'workspace')).not.toBeNull();
+    expect(listingCalls.workspace).toBe(1);
+  });
+});
