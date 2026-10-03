@@ -260,7 +260,7 @@ If the Hub is configured to mint transport tokens but cannot mint one (for examp
 
 ### Recovering with `reset-auth`
 
-`scion agent reset-auth <agent>` also pushes a fresh transport token when the Hub mints them. The broker writes it to `~/.scion/transport-token` next to the agent token, and `sciontool init` reloads it straight away and records the outcome `reset`, so doctor no longer shows an earlier failed refresh as the latest event. This recovers an agent whose transport token has already expired, since that agent's own refresh can no longer get through the platform guard. If the Hub cannot mint a transport token, the reset still replaces the agent token.
+`scion agent reset-auth <agent>` also pushes a fresh transport token when the Hub mints them. The broker writes it to `~/.scion/transport-token` next to the agent token, and `sciontool init` reloads it straight away and records the outcome `reset`, so doctor no longer shows an earlier failed refresh as the latest event. A value that cannot be parsed is not adopted: the agent keeps its current credential, restores the file from it, and records the reset as failed. This recovers an agent whose transport token has already expired, since that agent's own refresh can no longer get through the platform guard. If the Hub cannot mint a transport token, the reset still replaces the agent token.
 
 ### Diagnosing with `sciontool doctor`
 
@@ -271,7 +271,7 @@ Inside the agent, `sciontool doctor` has a **Transport Auth** section that shows
 - the expiry of the bootstrap value and of the file side by side, and when the file was last written;
 - the transport outcome of the last refresh, or of the last `reset-auth`.
 
-Doctor never prints token values. Its authentication checks tell a rejection by the platform proxy (a non-JSON 401/403, or a redirect to Google sign-in) apart from a rejection by the Hub (a JSON error), and the remediation differs: for a proxy rejection, run `reset-auth` and check the transport mode and audience; for a Hub rejection, the agent token itself is invalid. Doctor does not follow redirects. A redirect to any other host is reported as a warning showing only its scheme and host, never as a successful check; it usually means `SCION_HUB_ENDPOINT` is not the hub's final URL. A 404 on `/healthz` can come from the platform rather than the Hub, since some platforms (for example Cloud Run) reserve that path.
+Doctor never prints token values. Its authentication checks tell a rejection by the platform proxy (a non-JSON 401/403, or a redirect to Google sign-in) apart from a rejection by the Hub (a JSON error), and the remediation differs: for a proxy rejection, run `reset-auth` and check the transport mode and audience; for a Hub rejection, the agent token itself is invalid. Doctor does not follow redirects. Redirects are shown only as their scheme and host, never with their query string. A redirect to any other host means authentication could not be confirmed, and it counts as a failed check; it usually means `SCION_HUB_ENDPOINT` is not the hub's final URL. A 404 on `/healthz` can come from the platform rather than the Hub, since some platforms (for example Cloud Run) reserve that path.
 
 ### Agent-side token source selection
 

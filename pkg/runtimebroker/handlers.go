@@ -3166,10 +3166,11 @@ func (s *Server) execCommand(w http.ResponseWriter, r *http.Request, id, project
 // scionTokenDirScript sets TOKEN_DIR to the scion user's ~/.scion inside
 // the agent container, falling back to /home/scion when getent is missing
 // or has no entry. (A `getent … | cut … || echo …` pipeline never takes the
-// fallback: its status is cut's, which succeeds on empty input.)
-const scionTokenDirScript = `d="$(getent passwd scion 2>/dev/null | cut -d: -f6)"; ` +
+// fallback: its status is cut's, which succeeds on empty input.) It is a
+// brace group, so callers can chain it with && like a single command.
+const scionTokenDirScript = `{ d="$(getent passwd scion 2>/dev/null | cut -d: -f6)"; ` +
 	`[ -n "$d" ] || d=/home/scion; ` +
-	`TOKEN_DIR="$d/.scion"`
+	`TOKEN_DIR="$d/.scion"; }`
 
 // scionTokenWriteCmd returns the in-container command that writes the agent
 // token (read from stdin) to the scion user's token file via temp+rename.

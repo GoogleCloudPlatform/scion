@@ -650,28 +650,45 @@ func TestAdoptTransportTokenFile(t *testing.T) {
 	assert.Equal(t, TransportRefreshOutcomeReset, st.Outcome)
 }
 
-// TestAdoptTransportTokenFile_UnparseableLoses verifies an adopted value
-// whose expiry cannot be parsed does not displace a valid credential.
-func TestAdoptTransportTokenFile_UnparseableLoses(t *testing.T) {
+// TestAdoptTransportTokenFile_UnparseableKeepsRefreshed models the
+// reset-auth case: hours after dispatch the bootstrap value has expired and
+// the valid credential is the in-memory refreshed one. An unparseable value
+// from reset-auth must not replace it, the file is restored from it, and
+// the reset is recorded as failed.
+func TestAdoptTransportTokenFile_UnparseableKeepsRefreshed(t *testing.T) {
 	t.Cleanup(SetTokenHome(t.TempDir()))
 	cleanup := overrideGCPDetection(false)
 	defer cleanup()
-	valid := makeTestJWT(time.Now().Add(30 * time.Minute))
 	t.Setenv(transportauth.EnvTransportTokenFile, "")
-	t.Setenv(transportauth.EnvTransportToken, valid)
+	t.Setenv(transportauth.EnvTransportToken, makeTestJWT(time.Now().Add(-2*time.Hour)))
 
 	c := NewClientWithConfig("https://hub.example.com", "app", "agent-1")
 	c.configureOIDCTransport()
 	require.NotNil(t, c.oidcSource)
 
+	refreshed := makeTestJWT(time.Now().Add(40 * time.Minute))
+	exp, err := transportauth.ParseTokenExpiry(refreshed)
+	require.NoError(t, err)
+	c.oidcSource.SetToken(refreshed, exp)
+
+	// The broker overwrites the file with a value that does not parse.
 	require.NoError(t, WriteTransportTokenFile("not-a-jwt", 0, 0))
 	adopted, err := c.AdoptTransportTokenFile(0, 0)
-	require.NoError(t, err)
-	assert.True(t, adopted)
+	require.Error(t, err)
+	assert.False(t, adopted)
 
 	got, err := c.oidcSource.Token()
 	require.NoError(t, err)
-	assert.Equal(t, valid, got, "unparseable adopted value displaced a valid credential")
+	assert.Equal(t, refreshed, got, "unparseable reset-auth value replaced the valid refreshed credential")
+
+	data, err := os.ReadFile(TransportTokenFilePath())
+	require.NoError(t, err)
+	assert.Equal(t, refreshed, strings.TrimSpace(string(data)), "file not restored from the current credential")
+
+	st, ok := ReadTransportRefreshStatus()
+	require.True(t, ok)
+	assert.Equal(t, TransportRefreshOutcomeFailed, st.Outcome)
+	assert.NotContains(t, st.Error, "not-a-jwt")
 }
 
 // TestRemoveTransportTokenFile_RemovesStatus verifies the refresh status

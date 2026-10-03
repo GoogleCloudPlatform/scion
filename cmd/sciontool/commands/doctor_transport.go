@@ -73,6 +73,29 @@ func redirectTarget(resp *http.Response) (string, bool) {
 	return loc.Scheme + "://" + loc.Host, true
 }
 
+// rejectionDetail describes a rejected response for a doctor line. A
+// redirect is shown as its scheme://host only: its body and Location carry
+// query parameters (for a sign-in page, the client ID and state).
+func rejectionDetail(resp *http.Response, body []byte) string {
+	if target, ok := redirectTarget(resp); ok {
+		return "redirected to " + target
+	}
+	return doctorTruncate(string(body), 120)
+}
+
+// describeRequestError formats a request error for a doctor line. An
+// unparseable Location header is replaced by a fixed message, because Go's
+// error quotes the raw header, query string included.
+func describeRequestError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if strings.Contains(err.Error(), "failed to parse Location header") {
+		return "the hub answered with a redirect whose Location header could not be parsed"
+	}
+	return err.Error()
+}
+
 // shortenAudience returns a form of aud that is enough to spot a mismatch
 // without reproducing the full deployment identifier: the first and last
 // few characters, with the middle elided.
@@ -205,7 +228,7 @@ func reportTransportRefreshStatus(diag *doctorDiag) {
 		fmt.Printf("[ OK ] Last update: fresh transport token installed by reset-auth at %s\n", fmtWhen(rs.At))
 	case hub.TransportRefreshOutcomeFailed:
 		diag.transportRefreshProblem = rs.Error
-		fmt.Printf("[WARN] Last refresh at %s: hub did not issue a transport token: %s\n", fmtWhen(rs.At), rs.Error)
+		fmt.Printf("[WARN] Last update at %s: transport token not renewed: %s\n", fmtWhen(rs.At), rs.Error)
 	case hub.TransportRefreshOutcomeAbsent:
 		diag.transportRefreshProblem = "the hub returned no transport token"
 		fmt.Printf("[WARN] Last refresh at %s: the hub returned no transport token (is a transport minter configured on the hub?)\n", fmtWhen(rs.At))

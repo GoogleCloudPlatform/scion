@@ -1661,7 +1661,8 @@ func SeedTransportTokenFile(token string, uid, gid int) (string, error) {
 // (uid <= 0 skips the chown), and hands the value to this client's
 // transport source. It returns false, with no error, when there is no
 // transport token file or the client does not use a hub-provided transport
-// token.
+// token. A value whose expiry cannot be parsed is not adopted: the current
+// credential is kept, and an error is returned.
 func (c *Client) AdoptTransportTokenFile(uid, gid int) (bool, error) {
 	if !c.hasHubProvidedTransport() {
 		return false, nil
@@ -1677,14 +1678,25 @@ func (c *Client) AdoptTransportTokenFile(uid, gid int) (bool, error) {
 	if tok == "" {
 		return false, nil
 	}
-	if err := WriteTransportTokenFile(tok, uid, gid); err != nil {
-		return false, err
-	}
-	// An unparseable value keeps a zero expiry, so it never beats a
-	// candidate whose expiry is known (the same rule FileSource applies).
 	expiry, err := transportauth.ParseTokenExpiry(tok)
 	if err != nil {
-		expiry = time.Time{}
+		// Not a usable credential: keep the current one in memory, restore
+		// the file from it so other processes keep using it, and record the
+		// reset as failed rather than successful.
+		c.restoreTransportTokenFile(uid, gid)
+		st := TransportRefreshStatus{
+			At:      time.Now().UTC(),
+			Outcome: TransportRefreshOutcomeFailed,
+			Error:   transportResetUnparseableMessage,
+		}
+		if werr := WriteTransportRefreshStatus(st, uid, gid); werr != nil {
+			log.Error("Failed to record transport refresh status: %v", werr)
+		}
+		// Fixed message: the parse error can quote parts of the value.
+		return false, errors.New(transportResetUnparseableMessage)
+	}
+	if err := WriteTransportTokenFile(tok, uid, gid); err != nil {
+		return false, err
 	}
 	c.oidcSource.SetToken(tok, expiry)
 	// Record the reset so doctor does not keep showing an earlier failed
@@ -1694,6 +1706,27 @@ func (c *Client) AdoptTransportTokenFile(uid, gid int) (bool, error) {
 		log.Error("Failed to record transport refresh status: %v", err)
 	}
 	return true, nil
+}
+
+// transportResetUnparseableMessage is recorded when reset-auth delivers a
+// transport token whose expiry cannot be parsed.
+const transportResetUnparseableMessage = "reset-auth delivered a transport token that could not be parsed; kept the current one"
+
+// restoreTransportTokenFile rewrites the transport token file with the
+// credential this client currently uses, when that credential parses. The
+// source gives an unparseable file value zero expiry, so a valid in-memory
+// or bootstrap value is what Token returns here.
+func (c *Client) restoreTransportTokenFile(uid, gid int) {
+	cur, err := c.oidcSource.Token()
+	if err != nil || cur == "" {
+		return
+	}
+	if _, err := transportauth.ParseTokenExpiry(cur); err != nil {
+		return
+	}
+	if err := WriteTransportTokenFile(cur, uid, gid); err != nil {
+		log.Error("Failed to restore transport token file: %v", err)
+	}
 }
 
 // RemoveTransportTokenFile removes the transport token file and its refresh

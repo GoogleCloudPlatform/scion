@@ -158,7 +158,7 @@ func TestCheckTransportAuth_ReportsLastRefreshOutcome(t *testing.T) {
 		wantProblem bool
 	}{
 		{hub.TransportRefreshStatus{At: time.Now(), Outcome: hub.TransportRefreshOutcomeRefreshed}, "[ OK ] Last refresh: new transport token received", false},
-		{hub.TransportRefreshStatus{At: time.Now(), Outcome: hub.TransportRefreshOutcomeFailed, Error: "mint failed for test"}, "hub did not issue a transport token: mint failed for test", true},
+		{hub.TransportRefreshStatus{At: time.Now(), Outcome: hub.TransportRefreshOutcomeFailed, Error: "mint failed for test"}, "transport token not renewed: mint failed for test", true},
 		{hub.TransportRefreshStatus{At: time.Now(), Outcome: hub.TransportRefreshOutcomeAbsent}, "the hub returned no transport token", true},
 		{hub.TransportRefreshStatus{At: time.Now(), Outcome: hub.TransportRefreshOutcomeReset}, "[ OK ] Last update: fresh transport token installed by reset-auth", false},
 	}
@@ -389,12 +389,17 @@ func TestCheckAuthentication_RedirectNotOK(t *testing.T) {
 	if diag.authRedirectedTo != "https://other.example" {
 		t.Errorf("authRedirectedTo=%q", diag.authRedirectedTo)
 	}
+	// Unconfirmed authentication counts as failed, so the run cannot end
+	// with "All checks passed".
+	if failures != 2 {
+		t.Errorf("failures=%d, want 2 (heartbeat and agent lookup unconfirmed)", failures)
+	}
 	if strings.Contains(out, "[ OK ]") {
 		t.Errorf("redirect reported as OK:\n%s", out)
 	}
 	for _, want := range []string{
-		"Heartbeat not confirmed: hub answered 302, redirected to https://other.example",
-		"Agent lookup not confirmed: hub answered 302, redirected to https://other.example",
+		"[FAIL] Heartbeat not confirmed: hub answered 302, redirected to https://other.example",
+		"[FAIL] Agent lookup not confirmed: hub answered 302, redirected to https://other.example",
 		"/healthz: redirected to https://other.example",
 		"authentication could not be confirmed",
 	} {
@@ -420,5 +425,76 @@ func TestShortenAudience(t *testing.T) {
 		if got := shortenAudience(in); got != want {
 			t.Errorf("shortenAudience(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// setupDoctorAuth writes an agent token and agent ID for checkAuthentication.
+func setupDoctorAuth(t *testing.T) {
+	t.Helper()
+	home := isolateDoctorTransport(t)
+	if err := os.MkdirAll(filepath.Join(home, ".scion"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".scion", "scion-token"), []byte("test-app-value"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SCION_AGENT_ID", "test-agent")
+}
+
+// A proxy sign-in redirect is reported as a proxy rejection showing only
+// scheme://host: neither its body nor its Location query (client ID,
+// state) is printed.
+func TestCheckAuthentication_ProxyRedirectHidesQuery(t *testing.T) {
+	setupDoctorAuth(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "https://accounts.google.com/o/oauth2/v2/auth?client_id=opaque-client-id&state=opaque-state", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	var diag doctorDiag
+	failures := 0
+	out := captureStdout(t, func() {
+		if checkAuthentication(srv.URL, &failures, nil, &diag) {
+			t.Error("a sign-in redirect must not count as authenticated")
+		}
+	})
+	if diag.authRejectedBy != rejectedByProxy {
+		t.Errorf("authRejectedBy=%q, want proxy", diag.authRejectedBy)
+	}
+	if !strings.Contains(out, "redirected to https://accounts.google.com") {
+		t.Errorf("expected scheme://host of the redirect:\n%s", out)
+	}
+	for _, avoid := range []string{"opaque-client-id", "opaque-state", "client_id", "<a href"} {
+		if strings.Contains(out, avoid) {
+			t.Errorf("output should not contain %q:\n%s", avoid, out)
+		}
+	}
+}
+
+// A Location header that cannot be parsed is reported with a fixed
+// message, not Go's error (which quotes the raw header).
+func TestCheckAuthentication_UnparseableLocationFixedMessage(t *testing.T) {
+	setupDoctorAuth(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "https://other.example/%zz?client_id=opaque-client-id")
+		w.WriteHeader(http.StatusFound)
+	}))
+	defer srv.Close()
+
+	var diag doctorDiag
+	failures := 0
+	out := captureStdout(t, func() {
+		if checkAuthentication(srv.URL, &failures, nil, &diag) {
+			t.Error("expected authentication to fail")
+		}
+	})
+	if failures == 0 {
+		t.Error("expected a failure")
+	}
+	if !strings.Contains(out, "Location header could not be parsed") {
+		t.Errorf("expected the fixed message:\n%s", out)
+	}
+	if strings.Contains(out, "opaque-client-id") || strings.Contains(out, "%zz") {
+		t.Errorf("raw Location printed:\n%s", out)
 	}
 }

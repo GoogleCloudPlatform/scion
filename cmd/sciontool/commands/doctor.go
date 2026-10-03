@@ -280,7 +280,7 @@ func checkHubConnectivity(hubURL string, transportSrc transportauth.TokenSource)
 
 	resp, err := client.Get(healthURL)
 	if err != nil {
-		fmt.Printf("[FAIL] Hub unreachable at %s: %v\n", hubURL, err)
+		fmt.Printf("[FAIL] Hub unreachable at %s: %s\n", hubURL, describeRequestError(err))
 		return false
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
@@ -350,7 +350,7 @@ func checkAuthentication(hubURL string, failures *int, transportSrc transportaut
 
 	resp, err := client.Do(req)
 	if err != nil {
-		fmt.Printf("[FAIL] Auth check failed: %v\n", err)
+		fmt.Printf("[FAIL] Auth check failed: %s\n", describeRequestError(err))
 		*failures++
 		return false
 	}
@@ -359,11 +359,12 @@ func checkAuthentication(hubURL string, failures *int, transportSrc transportaut
 
 	if by := classifyRejection(resp, respBody); by != rejectedByNone {
 		diag.authRejectedBy = by
-		fmt.Printf("[FAIL] Heartbeat rejected (%d): %s: %s\n", resp.StatusCode, describeRejection(by), doctorTruncate(string(respBody), 120))
+		fmt.Printf("[FAIL] Heartbeat rejected (%d): %s: %s\n", resp.StatusCode, describeRejection(by), rejectionDetail(resp, respBody))
 		*failures++
 	} else if target, ok := redirectTarget(resp); ok {
 		diag.authRedirectedTo = target
-		fmt.Printf("[WARN] Heartbeat not confirmed: hub answered %d, redirected to %s\n", resp.StatusCode, target)
+		fmt.Printf("[FAIL] Heartbeat not confirmed: hub answered %d, redirected to %s\n", resp.StatusCode, target)
+		*failures++
 	} else if resp.StatusCode < 400 {
 		fmt.Println("[ OK ] Authenticated successfully (heartbeat accepted)")
 	} else {
@@ -393,7 +394,7 @@ func checkAuthentication(hubURL string, failures *int, transportSrc transportaut
 
 	resp, err = client.Do(req)
 	if err != nil {
-		fmt.Printf("[FAIL] Agent lookup check failed: %v\n", err)
+		fmt.Printf("[FAIL] Agent lookup check failed: %s\n", describeRequestError(err))
 		*failures++
 		return false
 	}
@@ -405,12 +406,13 @@ func checkAuthentication(hubURL string, failures *int, transportSrc transportaut
 	switch {
 	case by != rejectedByNone:
 		diag.authRejectedBy = by
-		fmt.Printf("[FAIL] Agent lookup rejected (%d): %s: %s\n", resp.StatusCode, describeRejection(by), doctorTruncate(string(respBody), 120))
+		fmt.Printf("[FAIL] Agent lookup rejected (%d): %s: %s\n", resp.StatusCode, describeRejection(by), rejectionDetail(resp, respBody))
 		*failures++
 		return false
 	case redirected:
 		diag.authRedirectedTo = target
-		fmt.Printf("[WARN] Agent lookup not confirmed: hub answered %d, redirected to %s\n", resp.StatusCode, target)
+		fmt.Printf("[FAIL] Agent lookup not confirmed: hub answered %d, redirected to %s\n", resp.StatusCode, target)
+		*failures++
 		return false
 	case resp.StatusCode < 400:
 		fmt.Println("[ OK ] Agent record accessible (read-only check; credentials untouched)")
@@ -693,6 +695,9 @@ func printRemediation(tokenExpiry time.Time, tokenSubject string, tokenValid boo
 			diag.authRedirectedTo)
 		fmt.Println("[!] Check that SCION_HUB_ENDPOINT uses the hub's final URL (scheme and host), " +
 			"and that nothing between the agent and the hub redirects API requests.")
+		if expired {
+			fmt.Println("[!] The agent token has also expired. Run from the host:  scion agent reset-auth <agent-name>")
+		}
 		return
 	}
 
