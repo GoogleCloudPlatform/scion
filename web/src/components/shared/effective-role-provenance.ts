@@ -37,10 +37,12 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { showConfirm } from './confirm-dialog.js';
-import { getLifecycleStatus, formatDateTime } from './role-binding-utils.js';
+import { getLifecycleStatus } from './role-binding-utils.js';
 
 import type { AssignmentFormValues } from './role-binding-assignment-form.js';
+import { formatInstantWithZone } from '../../utils/time.js';
 import './role-binding-assignment-form.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -78,6 +80,9 @@ interface RoleDefinitionSummary {
 
 @customElement('scion-effective-role-provenance')
 export class ScionEffectiveRoleProvenance extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   /** The principal type: 'user' or 'agent'. */
   @property() principalType: 'user' | 'agent' = 'user';
 
@@ -808,12 +813,12 @@ export class ScionEffectiveRoleProvenance extends LitElement {
           </span>
           ${binding.expiresAt && status !== 'expired'
             ? html`<span class="lifecycle-info">
-                Expires ${formatDateTime(binding.expiresAt)}
+                Expires ${formatInstantWithZone(binding.expiresAt) || binding.expiresAt}
               </span>`
             : ''}
           ${binding.notBefore && status === 'pending'
             ? html`<span class="lifecycle-info">
-                Activates ${formatDateTime(binding.notBefore)}
+                Activates ${formatInstantWithZone(binding.notBefore) || binding.notBefore}
               </span>`
             : ''}
         </div>

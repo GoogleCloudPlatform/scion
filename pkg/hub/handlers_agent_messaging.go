@@ -1436,6 +1436,14 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 		return
 	}
 
+	// Delete in progress (design ptone/scion#2483 §2.1): a soft-deleted row
+	// must not come back while deleteBlocksStart holds. Authz already ran in
+	// the caller.
+	if ref := s.startGate(ctx, agent, startEntryRestore); ref.refuses() {
+		ref.write(w)
+		return
+	}
+
 	agent.DeletedAt = time.Time{}
 	agent.Updated = time.Now()
 
@@ -3545,18 +3553,29 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 	// function's behaviour does not depend on caller discipline.
 	originalMsg.Metadata = messaging.StripReservedMetadata(originalMsg.Metadata)
 
-	// List project agents for resolution.
-	agentList, err := s.store.ListAgents(ctx, store.AgentFilter{ProjectID: primaryAgent.ProjectID}, store.ListOptions{Limit: 200})
+	// List every project agent for resolution, walking all pages so a
+	// mention of an agent beyond the first page still resolves.
+	projectAgents, err := listAllProjectAgents(ctx, s.store, primaryAgent.ProjectID)
 	if err != nil {
-		s.messageLog.Error("Failed to list project agents for mention resolution", "error", err)
-		return nil
+		// Report every mention as failed rather than dropping them: the
+		// caller must be able to tell "lookup failed" from "no such agent".
+		s.messageLog.Error("Failed to list project agents for mention resolution",
+			"project_id", primaryAgent.ProjectID, "error", err)
+		// With no known agents, ResolveMentions applies its usual
+		// de-duplication and primary-recipient skip and reports every
+		// remaining mention as not_found; relabel those as errors.
+		failed := messages.ResolveMentions(mentionSlugs, nil, primaryAgent.Slug)
+		for i := range failed {
+			failed[i].Status, failed[i].Error = "error", "mention resolution unavailable"
+		}
+		return failed
 	}
 
 	// Build the AgentInfo slice and a slug-to-agent map for dispatch.
-	agentInfos := make([]messages.AgentInfo, 0, len(agentList.Items))
-	agentBySlug := make(map[string]*store.Agent, len(agentList.Items))
-	for i := range agentList.Items {
-		a := &agentList.Items[i]
+	agentInfos := make([]messages.AgentInfo, 0, len(projectAgents))
+	agentBySlug := make(map[string]*store.Agent, len(projectAgents))
+	for i := range projectAgents {
+		a := &projectAgents[i]
 		agentInfos = append(agentInfos, messages.AgentInfo{Slug: a.Slug, Name: a.Name})
 		agentBySlug[strings.ToLower(a.Slug)] = a
 	}

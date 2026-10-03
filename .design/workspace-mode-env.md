@@ -82,6 +82,34 @@ if env["SCION_WORKSPACE_MODE"] == "" {
 | `shared` or `""` | `shared-plain` |
 | `per-agent` | `clone-per-agent` |
 | `worktree-per-agent` | `worktree-per-agent` |
+| `per-agent` on a **non-git** project (hub sends `empty-per-agent` on the wire) | `empty-per-agent` |
+
+**Addendum (#2703, empty-per-agent):** a non-git (hub-managed) project labeled
+`per-agent` gives every agent a private, initially empty, non-git directory.
+The hub resolves (label, git-ness) with `store.ResolveProjectSharingMode` and
+never forwards the bare `per-agent` label for such projects — label-only
+resolution would read it as `clone-per-agent`. Instead the create body's
+`WorkspaceMode`, the start `WorkspaceDispatchSpec`, and the injected
+`SCION_WORKSPACE_MODE` (start and restart) all carry the canonical
+`empty-per-agent`, which `ResolveWorkspaceSharingMode` round-trips.
+`SCION_WORKSPACE_GIT` is never set for this mode. Dispatch is gated on the
+broker capability `emptyPerAgentWorkspace` (412 otherwise).
+
+More generally, the hub sends a workspace-mode value only if the broker's
+label-only resolution of it matches the hub's `Project.SharingMode()`
+(`dispatchWorkspaceMode` in `pkg/hub/project_workspace_mode.go`). A stored
+label that does not fit the project's git-ness is dropped, so the broker sees
+an unlabelled (shared-plain) project, as the hub does. Examples are a legacy
+raw `empty-per-agent` on a git project, or `worktree-per-agent` on a non-git
+project.
+
+Known P1 limitation: the hub's project workspace surfaces still resolve to
+the hub project directory for empty-per-agent projects, although their
+agents never mount it. Those surfaces are WebDAV
+(`resolveProjectWebDAVPath`), the project workspace file API
+(`handleProjectWorkspace`) and cache refresh (`handleProjectCacheRefresh`).
+This is deliberately unguarded in P1; the web UI hides the Files tab for this
+mode (P5).
 
 `store.ResolveWorkspaceSharingMode()` (`pkg/store/models.go:225`) already
 implements this mapping and defaults empty/unknown to `shared-plain`.

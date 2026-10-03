@@ -315,6 +315,7 @@ type nfsRenameExchangeRace struct {
 	pid           string // hostBase/projects/<pid>: real directory, holds the actual leaf
 	alt           string // hostBase/projects/alt: symlink to victim
 	victim        string
+	dirName       string // the shared dir declared on the project; its leaf is <pid>/shared-dirs/<dirName>
 	filesURL      string
 	sharedDirsURL string
 }
@@ -350,6 +351,7 @@ func setupNFSRenameExchangeRace(t *testing.T, dirName string) *nfsRenameExchange
 		pid:           pid,
 		alt:           alt,
 		victim:        victim,
+		dirName:       dirName,
 		filesURL:      fmt.Sprintf("/api/v1/projects/%s/shared-dirs/%s/files", project.ID, dirName),
 		sharedDirsURL: fmt.Sprintf("/api/v1/projects/%s/shared-dirs", project.ID),
 	}
@@ -478,7 +480,7 @@ func TestRenameExchangeRaceNFS_Put_NeverWritesVictim(t *testing.T) {
 	race.requirePutReachesRealLeaf(t, "written after the race")
 
 	victimTree.assertIntact(t, before)
-	_, err := os.Lstat(filepath.Join(race.victim, "shared-dirs", "scratch", "planted.txt"))
+	_, err := os.Lstat(filepath.Join(race.victim, "shared-dirs", race.dirName, "planted.txt"))
 	assert.True(t, os.IsNotExist(err), "the victim must never receive the planted file")
 }
 
@@ -486,10 +488,10 @@ func TestRenameExchangeRaceNFS_Put_NeverWritesVictim(t *testing.T) {
 // symlink back at r.alt) after a swapper has stopped in either orientation.
 func (r *nfsRenameExchangeRace) restoreRealOrientation(t *testing.T) {
 	t.Helper()
-	if !realLeafContentAt(r.pid) {
+	if !realLeafContentAt(r.pid, r.dirName) {
 		require.NoError(t, r.trySwap(), "swap back to the original orientation")
 	}
-	require.True(t, realLeafContentAt(r.pid), "the real leaf must be at the project path")
+	require.True(t, realLeafContentAt(r.pid, r.dirName), "the real leaf must be at the project path")
 	info, err := os.Lstat(r.alt)
 	require.NoError(t, err)
 	require.NotZero(t, info.Mode()&os.ModeSymlink, "the victim symlink must be at the alt path")
@@ -506,21 +508,21 @@ func (r *nfsRenameExchangeRace) requirePutReachesRealLeaf(t *testing.T, content 
 	assertNotLeaked(t, rec)
 	require.Equal(t, http.StatusOK, rec.Code,
 		"a PUT with no swap in flight must reach the real leaf, or this test proves nothing; body: %s", rec.Body.String())
-	got, err := os.ReadFile(filepath.Join(r.pid, "shared-dirs", "scratch", "planted.txt"))
+	got, err := os.ReadFile(filepath.Join(r.pid, "shared-dirs", r.dirName, "planted.txt"))
 	require.NoError(t, err, "the PUT must have written into the real leaf")
 	require.Equal(t, content, string(got))
 }
 
 // realLeafContentAt reports whether path is currently a REAL directory (not
-// a symlink) whose shared-dirs/scratch/keep.txt holds the known-good "real"
+// a symlink) whose shared-dirs/<dirName>/keep.txt holds the known-good "real"
 // content -- checked with an Lstat first, so a path that has been swapped to
 // a symlink is never followed.
-func realLeafContentAt(path string) bool {
+func realLeafContentAt(path, dirName string) bool {
 	info, err := os.Lstat(path)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 {
 		return false
 	}
-	content, err := os.ReadFile(filepath.Join(path, "shared-dirs", "scratch", "keep.txt"))
+	content, err := os.ReadFile(filepath.Join(path, "shared-dirs", dirName, "keep.txt"))
 	return err == nil && string(content) == "real"
 }
 
@@ -543,9 +545,9 @@ func TestRenameExchangeRaceNFS_ConfigDelete_NeverRemovesVictim(t *testing.T) {
 	race := setupNFSRenameExchangeRace(t, "scratch")
 	race.skipIfRenameExchangeUnsupported(t)
 
-	realLeaf := filepath.Join(race.pid, "shared-dirs", "scratch")
-	victimKeep := filepath.Join(race.victim, "shared-dirs", "scratch", "keep.txt")
-	deleteURL := race.sharedDirsURL + "/scratch"
+	realLeaf := filepath.Join(race.pid, "shared-dirs", race.dirName)
+	victimKeep := filepath.Join(race.victim, "shared-dirs", race.dirName, "keep.txt")
+	deleteURL := race.sharedDirsURL + "/" + race.dirName
 
 	// reset puts the real leaf at race.pid and a symlink to the victim at
 	// race.alt -- both known-good before a round starts -- and re-declares
@@ -559,7 +561,7 @@ func TestRenameExchangeRaceNFS_ConfigDelete_NeverRemovesVictim(t *testing.T) {
 		require.NoError(t, os.MkdirAll(realLeaf, 0o2775))
 		require.NoError(t, os.WriteFile(filepath.Join(realLeaf, "keep.txt"), []byte("real"), 0o644))
 		require.NoError(t, os.Symlink(race.victim, race.alt))
-		doRequest(t, race.srv, http.MethodPost, race.sharedDirsURL, map[string]interface{}{"name": "scratch"})
+		doRequest(t, race.srv, http.MethodPost, race.sharedDirsURL, map[string]interface{}{"name": race.dirName})
 	}
 
 	requireVictimIntact := func() {
@@ -576,9 +578,9 @@ func TestRenameExchangeRaceNFS_ConfigDelete_NeverRemovesVictim(t *testing.T) {
 	requireDeleteReachesRealLeaf := func(when string) {
 		t.Helper()
 		reset()
-		require.True(t, realLeafContentAt(race.pid), "the real leaf must be at the project path before the DELETE")
+		require.True(t, realLeafContentAt(race.pid, race.dirName), "the real leaf must be at the project path before the DELETE")
 		doRequest(t, race.srv, http.MethodDelete, deleteURL, nil)
-		require.False(t, realLeafContentAt(race.pid),
+		require.False(t, realLeafContentAt(race.pid, race.dirName),
 			"a DELETE with no swap in flight (%s) must remove the real leaf, or this test proves nothing about reaching the real delete path", when)
 		requireVictimIntact()
 	}
@@ -594,7 +596,7 @@ func TestRenameExchangeRaceNFS_ConfigDelete_NeverRemovesVictim(t *testing.T) {
 		doRequest(t, race.srv, http.MethodDelete, deleteURL, nil)
 		stop()
 
-		if !realLeafContentAt(race.pid) && !realLeafContentAt(race.alt) {
+		if !realLeafContentAt(race.pid, race.dirName) && !realLeafContentAt(race.alt, race.dirName) {
 			realRemovals++
 		}
 

@@ -951,6 +951,7 @@ func TestClassifyKeys_AllLayer0Prefixes(t *testing.T) {
 		"server.secrets",
 		"server.storage",
 		"server.workspace_storage",
+		"server.workspace_storage.nfs.auto_mount",
 		"server.shared_dir_storage",
 		"server.shared_dir_storage.nfs",
 		"server.mode",

@@ -6395,3 +6395,32 @@ describe('scion-chat-thread inter-agent markers', () => {
     );
   });
 });
+
+describe('export timestamps in the display zone (tz-refactor task 21)', () => {
+  afterEach(() => {
+    setPreferredTimeZone('');
+    vi.useRealTimers();
+  });
+
+  it('formats each exported message time 24-hour in the display zone, naming the zone', () => {
+    // vitest pins the browser zone to UTC; 15:00Z is midnight in Tokyo.
+    setPreferredTimeZone('Asia/Tokyo');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const el = document.createElement('scion-chat-thread') as any;
+    expect(el.formatExportTimestamp('2026-09-23T15:00:00Z')).toBe(
+      'Sep 24, 2026, 00:00 (Asia/Tokyo)'
+    );
+    expect(el.formatExportTimestamp('not-a-date')).toBe('not-a-date');
+  });
+
+  it('stamps the export filename with the display-zone date', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-23T15:30:00Z'));
+    setPreferredTimeZone('Asia/Tokyo');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const el = document.createElement('scion-chat-thread') as any;
+    expect(el.filenameDateStamp()).toBe('2026-09-24');
+    setPreferredTimeZone('America/New_York');
+    expect(el.filenameDateStamp()).toBe('2026-09-23');
+  });
+});

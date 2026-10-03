@@ -226,7 +226,28 @@ export function getPreferredTimeZone(): string {
  * that renders an absolute time uses this.
  */
 export function effectiveTimeZone(): string {
-  return preferredTimeZone || browserTimeZone();
+  return preferredTimeZone || currentBrowserTimeZone();
+}
+
+/** `browserTimeZone()`, held until the current synchronous task finishes. */
+let browserTimeZoneMemo: string | null = null;
+
+/**
+ * `browserTimeZone()` constructs an `Intl.DateTimeFormat` on every call, so
+ * a render that formats a value per row (the file browser, ptone/scion#2382)
+ * would build one per row whenever no preference is set. This holds the
+ * value for the rest of the current synchronous task and drops it in a
+ * microtask, so one render resolves the zone once while a later render still
+ * sees a mid-session change of the operating-system zone.
+ */
+function currentBrowserTimeZone(): string {
+  if (browserTimeZoneMemo === null) {
+    browserTimeZoneMemo = browserTimeZone();
+    queueMicrotask(() => {
+      browserTimeZoneMemo = null;
+    });
+  }
+  return browserTimeZoneMemo;
 }
 
 /** Label for "Times in: <zone>" affordances next to clocks and date inputs. */
@@ -242,6 +263,8 @@ export function zoneLabel(): string {
  * `formatInstant` rendering styles:
  * - `'time'`: `18:00` (hour and minute only).
  * - `'time-seconds'`: `18:00:05` (log viewers, task 21).
+ * - `'time-millis'`: `18:00:05.123` (log viewers that show milliseconds,
+ *   tz-refactor task 21).
  * - `'date'`: `Sep 23, 2026` (no time).
  * - `'datetime'`: `Sep 23, 18:00` (no year — for compact UI like the
  *   inter-agent message marker).
@@ -252,9 +275,35 @@ export function zoneLabel(): string {
  * but must not change what an existing style renders, since that would
  * silently reformat every current caller.
  */
-export type InstantStyle = 'time' | 'time-seconds' | 'date' | 'datetime' | 'datetime-full';
+export type InstantStyle =
+  | 'time'
+  | 'time-seconds'
+  | 'time-millis'
+  | 'date'
+  | 'datetime'
+  | 'datetime-full';
+
+/**
+ * Formatters already built, keyed by style and zone. Constructing an
+ * `Intl.DateTimeFormat` is comparatively expensive (locale data lookup), and
+ * callers such as the file browser format a value per row on every render
+ * (ptone/scion#2382), so each style/zone pair is built once and reused.
+ * `FORMAT_LOCALE` is constant, so it is not part of the key; a zone change
+ * simply selects (or builds) the new zone's formatter.
+ */
+const instantFormatterCache = new Map<string, Intl.DateTimeFormat>();
 
 function instantFormatter(style: InstantStyle, zone: string): Intl.DateTimeFormat {
+  const key = `${style}|${zone}`;
+  let formatter = instantFormatterCache.get(key);
+  if (!formatter) {
+    formatter = buildInstantFormatter(style, zone);
+    instantFormatterCache.set(key, formatter);
+  }
+  return formatter;
+}
+
+function buildInstantFormatter(style: InstantStyle, zone: string): Intl.DateTimeFormat {
   switch (style) {
     case 'time':
       return new Intl.DateTimeFormat(FORMAT_LOCALE, {
@@ -270,6 +319,15 @@ function instantFormatter(style: InstantStyle, zone: string): Intl.DateTimeForma
         hour: '2-digit',
         minute: '2-digit',
         second: '2-digit',
+      });
+    case 'time-millis':
+      return new Intl.DateTimeFormat(FORMAT_LOCALE, {
+        timeZone: zone,
+        hourCycle: 'h23',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        fractionalSecondDigits: 3,
       });
     case 'date':
       return new Intl.DateTimeFormat(FORMAT_LOCALE, {
@@ -365,13 +423,22 @@ export function formatRelativeTime(dateString: string): string {
   }
 }
 
+/** Options for `formatRelative`. */
+export interface FormatRelativeOptions {
+  style?: Intl.RelativeTimeFormatStyle;
+}
+
 /**
  * Formats an ISO instant as a relative time description, for both past
  * ("3 hours ago") and future ("in 3 hours") instants. Zone-independent
  * (a duration, not a wall-clock time), so it uses only `FORMAT_LOCALE`.
  * Returns the original string on parse failure.
+ *
+ * `options.style` selects the `Intl.RelativeTimeFormat` style: `'long'`
+ * (default, "5 minutes ago"), `'short'` ("5 min. ago") or `'narrow'`
+ * ("5m ago"), for compact cells such as trays and dense tables.
  */
-export function formatRelative(iso: string): string {
+export function formatRelative(iso: string, options: FormatRelativeOptions = {}): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;
 
@@ -381,7 +448,10 @@ export function formatRelative(iso: string): string {
   const diffHours = Math.round(diffMs / (1000 * 60 * 60));
   const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
 
-  const rtf = new Intl.RelativeTimeFormat(FORMAT_LOCALE, { numeric: 'auto' });
+  const rtf = new Intl.RelativeTimeFormat(FORMAT_LOCALE, {
+    numeric: 'auto',
+    style: options.style ?? 'long',
+  });
 
   if (Math.abs(diffSeconds) < 60) return rtf.format(diffSeconds, 'second');
   if (Math.abs(diffMinutes) < 60) return rtf.format(diffMinutes, 'minute');

@@ -54,6 +54,7 @@ import './chat-composer.js';
 import './chat-interagent-marker.js';
 import { formatChatDate, renderDateDivider, chatDateDividerStyles } from './chat-date-divider.js';
 import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
+import { effectiveTimeZone, formatInstantWithZone, toWallClockInput } from '../../../utils/time.js';
 import '../code-editor.js';
 import '../markdown-preview.js';
 import './chat-file-preview.js';
@@ -4575,19 +4576,18 @@ export class ScionChatThread extends LitElement {
     return div.innerHTML;
   }
 
-  /** Format an ISO timestamp for export display. */
+  /**
+   * Format an ISO timestamp for export display: 24-hour, in the effective
+   * display zone, with the zone named so the exported text stands alone.
+   * Falls back to the raw string when it does not parse.
+   */
   private formatExportTimestamp(iso: string): string {
-    try {
-      return new Date(iso).toLocaleString();
-    } catch {
-      return iso;
-    }
+    return formatInstantWithZone(iso, 'datetime-full') || iso;
   }
 
-  /** Generate a filename-safe date string (YYYY-MM-DD). */
+  /** Generate a filename-safe date string (YYYY-MM-DD) in the effective display zone. */
   private filenameDateStamp(): string {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return toWallClockInput(new Date().toISOString(), effectiveTimeZone()).slice(0, 10);
   }
 
   /**

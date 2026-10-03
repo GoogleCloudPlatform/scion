@@ -901,6 +901,18 @@ type V1NFSConfig struct {
 	MountOptions string       `json:"mount_options,omitempty" yaml:"mount_options,omitempty" koanf:"mount_options"`
 	Shares       []V1NFSShare `json:"shares,omitempty" yaml:"shares,omitempty" koanf:"shares"`
 
+	// AutoMount lets a Runtime Broker mount each share itself, at
+	// <MountRoot>/<share.ID>, in the background at startup and again before
+	// each NFS-backed dispatch to a local-container runtime (dispatches to
+	// Kubernetes or Cloud Run never mount). A broker whose default runtime
+	// is Kubernetes or Cloud Run never mounts, even with AutoMount on; it
+	// only verifies. Default false: the operator (or the kubelet, on
+	// Kubernetes) provides the mounts, and the broker only checks them
+	// read-only for /healthz and scion doctor. Mounting requires the broker
+	// to run as root (mount.nfs checks uid 0). Only server.workspace_storage
+	// reads this field; shared_dir_storage ignores it.
+	AutoMount bool `json:"auto_mount,omitempty" yaml:"auto_mount,omitempty" koanf:"auto_mount"`
+
 	// Stable, node-independent ownership for NFS-backed trees.
 	// Default 1000:1000 to converge with the K8s pod UID/GID.
 	UID int `json:"uid,omitempty" yaml:"uid,omitempty" koanf:"uid"` // default 1000
@@ -1091,10 +1103,11 @@ var sharedDirStorageIgnoredNFSFields = []struct {
 	{"gid", func(nfs *V1NFSConfig) bool { return nfs.GID != 0 }},
 	{"mount_options", func(nfs *V1NFSConfig) bool { return nfs.MountOptions != "" }},
 	{"storage_class", func(nfs *V1NFSConfig) bool { return nfs.StorageClass != "" }},
+	{"auto_mount", func(nfs *V1NFSConfig) bool { return nfs.AutoMount }},
 }
 
 // IgnoredNFSFields returns the names of the workspace-storage-only NFS
-// fields (uid, gid, mount_options, storage_class) that are set on s but
+// fields (uid, gid, mount_options, storage_class, auto_mount) that are set on s but
 // never used by shared_dir_storage, for a one-time startup warning (Phase 2
 // item 5, design §7 Phase 2: "startup validation warns about ignored
 // fields"). Returns nil if s is nil, s.NFS is nil, or backend isn't "nfs" —
@@ -1350,6 +1363,10 @@ type HarnessConfigEntry struct {
 	// model field; the alias is resolved to the concrete name at provision time.
 	ModelAliases map[string]string `json:"model_aliases,omitempty" yaml:"model_aliases,omitempty" koanf:"model_aliases"`
 
+	// Thinking maps the canonical 0-100 thinking level to harness-native values.
+	// Applied in-container by scion_harness.resolve_thinking.
+	Thinking *HarnessThinkingConfig `json:"thinking,omitempty" yaml:"thinking,omitempty" koanf:"thinking"`
+
 	Provisioner       *HarnessProvisionerConfig        `json:"provisioner,omitempty" yaml:"provisioner,omitempty" koanf:"provisioner"`
 	ConfigDir         string                           `json:"config_dir,omitempty" yaml:"config_dir,omitempty" koanf:"config_dir"`
 	SkillsDir         string                           `json:"skills_dir,omitempty" yaml:"skills_dir,omitempty" koanf:"skills_dir"`
@@ -1366,6 +1383,51 @@ type HarnessConfigEntry struct {
 	NoAuthConfig      *HarnessNoAuthConfig             `json:"no_auth,omitempty" yaml:"no_auth,omitempty" koanf:"no_auth"`
 	MCP               *HarnessMCPConfig                `json:"mcp,omitempty" yaml:"mcp,omitempty" koanf:"mcp"`
 	Dialect           map[string]interface{}           `json:"dialect,omitempty" yaml:"dialect,omitempty" koanf:"dialect"`
+}
+
+// HarnessThinkingConfig maps the canonical 0-100 thinking level
+// (SCION_THINKING_LEVEL) to harness-native values. A level L maps to the Value
+// of the first entry in Levels whose Max >= L. Default is emitted when the
+// level is unset or invalid; when empty, nothing is emitted and the harness
+// CLI's own default applies. The mapping is resolved in-container by
+// scion_harness.resolve_thinking; Go only carries and validates it.
+type HarnessThinkingConfig struct {
+	Levels  []HarnessThinkingLevel `json:"levels" yaml:"levels" koanf:"levels"`
+	Default string                 `json:"default,omitempty" yaml:"default,omitempty" koanf:"default"`
+}
+
+// HarnessThinkingLevel is one entry of a HarnessThinkingConfig: Max is the
+// inclusive upper bound (0-100) of the level range that maps to Value.
+type HarnessThinkingLevel struct {
+	Max   int    `json:"max" yaml:"max" koanf:"max"` // no omitempty: 0 is meaningful
+	Value string `json:"value" yaml:"value" koanf:"value"`
+}
+
+// Validate checks the ordering rules the JSON schema cannot express: Levels
+// must be non-empty, each Max must be strictly greater than the previous one,
+// and the last Max must be 100 so every clamped level maps to a value.
+func (t *HarnessThinkingConfig) Validate() error {
+	if t == nil {
+		return nil
+	}
+	if len(t.Levels) == 0 {
+		return fmt.Errorf("thinking.levels must not be empty")
+	}
+	for i, lvl := range t.Levels {
+		if lvl.Max < 0 || lvl.Max > 100 {
+			return fmt.Errorf("thinking.levels[%d].max must be between 0 and 100, got %d", i, lvl.Max)
+		}
+		if lvl.Value == "" {
+			return fmt.Errorf("thinking.levels[%d].value must not be empty", i)
+		}
+		if i > 0 && lvl.Max <= t.Levels[i-1].Max {
+			return fmt.Errorf("thinking.levels[%d].max (%d) must be greater than thinking.levels[%d].max (%d)", i, lvl.Max, i-1, t.Levels[i-1].Max)
+		}
+	}
+	if last := t.Levels[len(t.Levels)-1].Max; last != 100 {
+		return fmt.Errorf("thinking.levels last max must be 100, got %d", last)
+	}
+	return nil
 }
 
 // HarnessProvisionerConfig declares how a harness-config is provisioned.

@@ -77,9 +77,26 @@ func revokeAgentCredentialsBestEffort(ctx context.Context, credStore store.Agent
 	}
 	revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), agentCredentialRevokeTimeout)
 	defer cancel()
-	if _, err := credStore.RevokeAgentCredentialsByAgent(revokeCtx, agentID, "system", reason); err != nil {
+	if err := revokeAgentCredentials(revokeCtx, credStore, agentID, reason); err != nil {
 		slog.Warn("Failed to revoke agent credentials", "agent_id", agentID, "reason", reason, "error", err)
 	}
+}
+
+// errNoAgentCredentialStore is returned by revokeAgentCredentials when no
+// credential store is configured.
+var errNoAgentCredentialStore = errors.New("no agent credential store configured")
+
+// revokeAgentCredentials revokes every active credential for agentID and
+// returns the store's error. It uses ctx as given — no detach, no timeout —
+// so a caller that must know whether the revoke landed (the delete engine's
+// finalize step, design ptone/scion#2483 §2.3) can act on the error.
+// revokeAgentCredentialsBestEffort is the log-and-continue wrapper.
+func revokeAgentCredentials(ctx context.Context, credStore store.AgentCredentialStore, agentID, reason string) error {
+	if credStore == nil {
+		return errNoAgentCredentialStore
+	}
+	_, err := credStore.RevokeAgentCredentialsByAgent(ctx, agentID, "system", reason)
+	return err
 }
 
 // isUnconfirmedLaunchError reports whether launchError marks a launch that

@@ -163,9 +163,10 @@ When transport auth is configured, the Hub injects these environment variables i
 
 | Variable | Description |
 | :--- | :--- |
-| `SCION_TRANSPORT_TOKEN` | Initial Google OIDC ID token for the transport layer. |
+| `SCION_TRANSPORT_TOKEN` | Initial Google OIDC ID token for the transport layer. Bootstrap only: `sciontool init` moves it to `~/.scion/transport-token` and removes it from the child environment. If the file cannot be written, the value stays in the environment and is used until it expires. |
+| `SCION_TRANSPORT_TOKEN_FILE` | Set by `sciontool init` for child processes. Path of the transport token file, which every refresh rewrites. |
 | `SCION_TRANSPORT_AUDIENCE` | Audience the transport token was minted for. |
-| `SCION_TRANSPORT_TOKEN_EXPIRY` | Token expiry in RFC 3339 format. |
+| `SCION_TRANSPORT_TOKEN_EXPIRY` | Expiry of the initial token, in RFC 3339 format. Bootstrap only: removed by `sciontool init` together with `SCION_TRANSPORT_TOKEN`. |
 | `SCION_TRANSPORT_MODE` | Transport mode (`iap` or `cloudrun_invoker`). Injected alongside the other three transport vars so that in-agent clients can select the correct header placement. |
 
 #### Broker transport configuration
@@ -232,6 +233,7 @@ Configures the backend and mount settings for storing and managing agent workspa
 | `backend` | string | `"local"` | Storage backend pivot: `"local"` (node-local directories), `"nfs"` (Network File System mounts), `"cloudrun-volume"` (Cloud Run platform-managed volume mounts), or `"gke-shared-volume"` (GKE shared CSI-backed PVC mounts). |
 | `nfs.mount_root` | string | | The host base directory under which NFS exports are mounted. |
 | `nfs.mount_options` | string | `"vers=3,hard,nconnect=4,_netdev"` | Standard mount options passed to the `mount.nfs` utility. |
+| `nfs.auto_mount` | boolean | `false` | Whether the Runtime Broker mounts the shares itself. See [NFS Mounts on the Runtime Broker](#nfs-mounts-on-the-runtime-broker). Requires the broker to run as root. |
 | `nfs.uid` | integer | `1000` | Node-independent owner UID for NFS-backed workspace trees to ensure consistent container write permissions (not yet applied on Kubernetes; ptone/scion#2608). |
 | `nfs.gid` | integer | `1000` | Node-independent owner GID for NFS-backed workspace trees. |
 | `nfs.storage_class` | string | | The Kubernetes StorageClass name used to dynamically allocate volumes on GKE. |
@@ -242,6 +244,20 @@ Configures the backend and mount settings for storing and managing agent workspa
 | `gke_shared_volume.volume_name` | string | | The K8s volume name referencing the persistent volume claim (PVC). **The pod spec must mount that volume at `/mnt/<volume_name>`**: the Hub derives every workspace path from it, and a pod that mounts the PVC elsewhere fails readiness (`GET /readyz` returns `503`) rather than writing workspaces to ephemeral container storage. |
 | `gke_shared_volume.pv_claim_name` | string | | The name of the GKE-managed PVC bound to the shared storage backend (e.g. Filestore). |
 | `gke_shared_volume.subpath_root` | string | `"projects"` | Sub-directory prefix within the GKE volume. |
+
+#### NFS Mounts on the Runtime Broker
+
+When `backend` is `nfs`, the Runtime Broker reads this block from its global `settings.yaml` (never from project settings) and checks each share at `<mount_root>/<share id>`. The block must have an absolute `mount_root`, and every share needs a unique single-segment `id`, a `server` (a hostname or IPv4 address, without whitespace or a leading `-`; IPv6 literals are not supported), and an absolute `export`. If the block is incomplete, the broker logs a warning and skips NFS handling. With any other backend, the broker does no NFS handling at all.
+
+- **`auto_mount: false` (default)**: The broker only checks. It reads the host mount table (`/proc/mounts`) to confirm each share is mounted from the expected `server:export`, at startup and then every minute. It never mounts or unmounts anything and never refuses agent creation. Mount each export on the host yourself, for example with `/etc/fstab`.
+- **`auto_mount: true`**: The broker mounts missing shares in the background, and remounts a share that is mounted from the wrong source. The broker must run as root: if it does not, it logs a warning at startup and only checks, without running `mount`. If the broker's default runtime is Kubernetes or Cloud Run, it also only checks, because the platform mounts the export into the agent. Each mount command times out after 90 seconds, or sooner if the agent-create request ends.
+
+With `auto_mount: true`, agent creation for a project on the `nfs` backend is decided by the runtime the agent is dispatched to. This check runs before anything is mounted. Only agent creation is checked; starting or restarting an existing agent is not.
+
+- **Docker, Podman, or Apple**: The broker first makes sure the first share is mounted, because that share holds the workspaces. If it is not mounted, the broker returns `503` with error code `nfs_unavailable`.
+- **Kubernetes or Cloud Run**: The broker never mounts and never refuses the request. If the share's last check found a problem, it logs a warning and continues.
+
+In both modes, NFS problems are logged and reported per share in the `nfs_mounts` check of `GET /healthz`. The overall status becomes `degraded` only if all of these hold: `auto_mount` is on, the default runtime is not Kubernetes or Cloud Run, the first check has finished, and a share is unhealthy. NFS problems never affect `GET /readyz`, and the broker keeps serving projects that do not use NFS. `scion doctor` runs the same check locally, using the same mount-table lookup. It reports whether NFS is configured, whether each share is mounted from the expected source, and whether each server is reachable on TCP port 2049. A share that is not mounted is a warning when `auto_mount` is off, the share has a `pv_name`, or the default runtime is Kubernetes or Cloud Run (so the broker does not mount it, as in `/healthz`), and a failure otherwise.
 
 #### NFS Workspaces on Kubernetes
 
@@ -269,7 +285,7 @@ This setting is **global-only**: each broker process reads it from its own globa
 
 Shared directories resolve to `<mount_root>/<share id>/<subpath_root>/<project id>/shared-dirs/<name>`. On Kubernetes, pods mount the `pv_name` claim with the matching `subPath` instead of creating a per-directory PVC.
 
-The `nfs` backend fails closed. Agent start is refused when the block is incomplete, the host base directory does not exist, the runtime is not a local-container or Kubernetes runtime (for example, Cloud Run), or a shared-directory path resolves through a symlink. The NFS export itself must be provisioned and mounted before agents start. The `uid`, `gid`, `mount_options`, and `storage_class` fields of the `nfs` block are ignored here.
+The `nfs` backend fails closed. Agent start is refused when the block is incomplete, the host base directory does not exist, the runtime is not a local-container or Kubernetes runtime (for example, Cloud Run), or a shared-directory path resolves through a symlink. The NFS export itself must be provisioned and mounted before agents start. The `uid`, `gid`, `mount_options`, `storage_class`, and `auto_mount` fields of the `nfs` block are ignored here.
 
 With the `nfs` backend, the Hub and brokers also apply the following:
 

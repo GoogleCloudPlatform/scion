@@ -163,7 +163,7 @@ is staged in the container:
 
 ### INTERFACE_VERSION contract
 
-- `scion_harness.py` declares `INTERFACE_VERSION` (currently `2`).
+- `scion_harness.py` declares `INTERFACE_VERSION` (currently `3`).
 - Within a version: additive-only changes (new functions, new keyword args
   with defaults). Breaking changes bump the version.
 - `config.yaml` declares `provisioner.interface_version` so the Go host can
