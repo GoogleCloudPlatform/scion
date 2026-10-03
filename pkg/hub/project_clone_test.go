@@ -418,6 +418,7 @@ func TestProjectClone_GitRemoteOverride_SameRemoteKeepsLabels(t *testing.T) {
 		"git@github.com:test/repo.git",
 		// An explicit default port names the same repository (r4).
 		"https://github.com:443/test/repo",
+		"github.com:443/test/repo",
 	} {
 		t.Run(remote, func(t *testing.T) {
 			srv, s := testServer(t)
@@ -574,6 +575,23 @@ func TestProjectClone_GitRemoteOverride_RejectsNonGitURL(t *testing.T) {
 		"github.com/org/re%zpo",
 		"git@github.com:org/repo%",
 		"https://u:SECRET_%zz@github.com/org/repo",
+		// %2F inside a segment, in every form (r6 R1).
+		"https://github.com/a/o%2Fr",
+		"https://github.com/org/o%2fr",
+		"github.com/a/o%2Fr",
+		"git@github.com:a/o%2Fr",
+		// Characters outside the RFC 3986 path set, in every form (r6 R2).
+		"https://github.com/org/r\\x",
+		"github.com/org/r\\x",
+		"git@github.com:org/r\\x",
+		"https://github.com/org/r%5Cx",
+		"https://github.com/org/re\"po",
+		"https://github.com/org/re|po",
+		"https://github.com/org/re^po",
+		"https://github.com/org/re`po",
+		"https://github.com/org/[repo]",
+		"git@github.com:org/re{po}",
+		"github.com/org/re<po>",
 		"https://[1:2]/org/repo",
 		"https://[:::]/org/repo",
 		"https://[v1.x]/org/repo",
@@ -659,12 +677,14 @@ func TestProjectClone_GitRemoteOverride_RejectsTLSPort(t *testing.T) {
 		"GIT://git.example.com:9419/group/repo",
 		"http://git.example.com:8080/group/repo",
 		"http://u:SECRET_P@git.example.com:443/group/repo",
+		// The scheme-less form's clone-url is https (r6 R3).
+		"git.example.com:80/group/repo",
 	} {
 		t.Run(remote, func(t *testing.T) {
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+src.ID+"/clone",
 				map[string]interface{}{"name": "TLS Port", "gitRemote": remote})
 			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-			assert.Contains(t, rec.Body.String(), "git:// URLs with a port and http:// URLs with a port other than 80 are not supported; use the https URL")
+			assert.Contains(t, rec.Body.String(), "git:// URLs with a port, http:// URLs with a port other than 80 and host:80/... remotes are not supported; use the https URL")
 			assert.NotContains(t, rec.Body.String(), "SECRET_")
 		})
 	}
@@ -759,6 +779,20 @@ func TestProjectClone_GitRemoteOverride_DerivedForms(t *testing.T) {
 			gitRemote: "git.example.com/team/repo",
 			cloneURL:  "https://git.example.com/team/repo.git",
 			sourceURL: "git.example.com/team/repo",
+		},
+		{
+			name:      "scheme-less form drops :443 like https",
+			remote:    "git.example.com:443/team/repo",
+			gitRemote: "git.example.com/team/repo",
+			cloneURL:  "https://git.example.com/team/repo.git",
+			sourceURL: "git.example.com/team/repo",
+		},
+		{
+			name:      "pct-encoded space and sub-delims in the path",
+			remote:    "https://dev.azure.com/org/My%20Project/_git/repo",
+			gitRemote: "dev.azure.com/org/my%20project/_git/repo",
+			cloneURL:  "https://dev.azure.com/org/My%20Project/_git/repo",
+			sourceURL: "https://dev.azure.com/org/My%20Project/_git/repo",
 		},
 		{
 			name:      "http with the default port",

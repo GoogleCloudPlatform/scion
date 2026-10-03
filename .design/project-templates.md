@@ -673,8 +673,12 @@ IDN host must be given in punycode (`xn--…`). A `@` in the path, raw or as
 are `.` and `..` path segments, raw or percent-encoded (git's https transport
 removes them, so `github.com/org/../evil/repo` would clone `github.com/evil/repo`
 while `GitRemote` names something else), empty segments (`org//repo`; one
-trailing `/` is allowed), malformed `%` escapes, and escaped control
-characters such as `%0A`. Ports must be 1-65535 without leading zeros (no bare `:`), and
+trailing `/` is allowed), malformed `%` escapes, escaped control
+characters such as `%0A`, and `%2F` inside a segment (some servers decode it
+to `/`). Path characters are limited to the RFC 3986 set: unreserved,
+sub-delims, `:` and percent-escapes, so `\`, quotes, `|`, `^`, brackets and
+braces are rejected (a server that treats `\` as `/` would otherwise resolve
+`..` again). Ports must be 1-65535 without leading zeros (no bare `:`), and
 DNS labels may not start or end with `-`. A scheme URL is also rejected when
 removing its credentials would change anything but the userinfo (host, port or
 path), which catches a password with an unencoded `/` (`https://u:p/w@host/…`,
@@ -688,8 +692,9 @@ For the same reason, `git://` URLs with any port and `http://` URLs with a
 port other than 80 are rejected with a message pointing to the https URL:
 `ToHTTPSCloneURL` keeps the port, so `clone-url` would speak TLS to a
 plain-text port. The scheme-less `host:port/org/repo` form keeps its port in an
-https `clone-url`, so the port must serve https (`host:22/…` does not work);
-use `git@host:org/repo` for ssh.
+https `clone-url`, so the port must serve https (`host:22/…` does not work;
+use `git@host:org/repo` for ssh). In that form `:80` is rejected with the same
+message, and `:443` is dropped as the https default.
 Before anything is compared or stored, the query string and fragment are
 dropped and embedded credentials (`https://user:TOKEN@host/…`) are stripped
 (`util.StripGitURLCredentials`), because `GitRemote` and the labels are

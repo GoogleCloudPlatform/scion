@@ -801,7 +801,7 @@ const (
 	// errCloneRemoteTLSPort is returned for git:// with any port and http://
 	// with a port other than 80: ToHTTPSCloneURL keeps the port, so the
 	// clone-url would speak TLS to a plain-text port.
-	errCloneRemoteTLSPort = "gitRemote: git:// URLs with a port and http:// URLs with a port other than 80 are not supported; use the https URL"
+	errCloneRemoteTLSPort = "gitRemote: git:// URLs with a port, http:// URLs with a port other than 80 and host:80/... remotes are not supported; use the https URL"
 )
 
 // trimRemote trims ASCII whitespace only. Unicode spaces such as U+0085 or
@@ -826,12 +826,12 @@ func isPrintableASCII(s string) bool {
 
 // validRemotePath reports whether a decoded remote path (without the leading
 // '/' of a scheme URL) has only non-empty segments that are neither "." nor
-// "..", and no '@' (ambiguous with userinfo) or control characters. A single trailing '/' is allowed. Dot
+// "..", and no '@' (ambiguous with userinfo), '\\' or control characters. A single trailing '/' is allowed. Dot
 // segments would make GitRemote name a different repository than the one
 // git clones (libcurl removes them); empty segments ("org//repo") are junk.
 func validRemotePath(path string) bool {
 	for _, seg := range strings.Split(strings.TrimSuffix(path, "/"), "/") {
-		if seg == "" || seg == "." || seg == ".." || strings.Contains(seg, "@") {
+		if seg == "" || seg == "." || seg == ".." || strings.ContainsAny(seg, "@\\") {
 			return false
 		}
 		for i := 0; i < len(seg); i++ {
@@ -843,12 +843,35 @@ func validRemotePath(path string) bool {
 	return true
 }
 
+// isRemotePathChar reports whether c may appear in a raw remote path: RFC 3986
+// unreserved and sub-delims, ':', '/' and '%' (escapes are checked
+// separately). '@', '\\', quotes, brackets and the like are rejected.
+func isRemotePathChar(c byte) bool {
+	switch {
+	case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9':
+		return true
+	}
+	return strings.IndexByte("-._~!$&'()*+,;=:/%", c) >= 0
+}
+
+// validRawRemotePath reports whether a raw (still escaped) remote path uses
+// only isRemotePathChar characters and no %2F, which some servers decode to
+// '/' so that GitRemote and the cloned repository would differ.
+func validRawRemotePath(path string) bool {
+	for i := 0; i < len(path); i++ {
+		if !isRemotePathChar(path[i]) {
+			return false
+		}
+	}
+	return !strings.Contains(strings.ToUpper(path), "%2F")
+}
+
 // validEscapedRemotePath is validRemotePath for a path that may still hold
 // percent-escapes (SCP and scheme-less forms). The raw path is checked too,
 // so neither "org/%2e%2e/repo" nor a literal "org/../repo" is accepted.
 func validEscapedRemotePath(path string) bool {
 	decoded, err := url.PathUnescape(path)
-	return err == nil && validRemotePath(path) && validRemotePath(decoded)
+	return err == nil && validRawRemotePath(path) && validRemotePath(path) && validRemotePath(decoded)
 }
 
 // stripQueryAndFragment drops everything from the first '?' or '#'. Git remote
@@ -923,6 +946,9 @@ func validateCloneGitRemote(remote string) string {
 	if !isHostname(host) || (hasPort && !isPort(port)) {
 		return errCloneRemoteInvalid
 	}
+	if port == "80" {
+		return errCloneRemoteTLSPort // the clone-url is https, so :80 would be TLS to plain text
+	}
 	if !strings.Contains(strings.Trim(path, "/"), "/") || strings.Contains(path, "@") ||
 		!validEscapedRemotePath(path) {
 		return errCloneRemoteInvalid // need at least org/repo, no '@', no dot or empty segments
@@ -972,8 +998,14 @@ func validateCloneSchemeRemote(remote string) string {
 			return errCloneRemoteTLSPort
 		}
 	}
-	// Dot and empty segments, checked both escaped and decoded (u.Path).
-	if !validRemotePath(strings.TrimPrefix(u.EscapedPath(), "/")) ||
+	// Path characters, %2F, dot and empty segments, checked on the raw path
+	// as written (net/url's EscapedPath may re-escape it) and decoded (u.Path).
+	_, rest, _ := strings.Cut(remote, "://")
+	rawPath := ""
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		rawPath = rest[i+1:]
+	}
+	if !validRawRemotePath(rawPath) || !validRemotePath(rawPath) ||
 		!validRemotePath(strings.TrimPrefix(u.Path, "/")) {
 		return errCloneRemoteInvalid
 	}
@@ -1002,13 +1034,21 @@ func validateCloneSchemeRemote(remote string) string {
 	return ""
 }
 
-// dropDefaultPort removes an explicit default port (:443 for https, :80 for
-// http) from a validated, credential-free scheme URL, so that
+// dropDefaultPort removes an explicit default port (:443 for https and for
+// the scheme-less form, :80 for http) from a validated, credential-free remote, so that
 // https://github.com:443/org/repo names the same repository as
 // https://github.com/org/repo. Other inputs are returned unchanged.
 func dropDefaultPort(remote string) string {
 	scheme, rest, ok := strings.Cut(remote, "://")
 	if !ok {
+		// Scheme-less host:443/org/repo: the clone-url is https, so :443 is
+		// the default port. SCP remotes have no port.
+		if _, _, _, scp := splitSCPRemote(remote); scp {
+			return remote
+		}
+		if hostPort, path, found := strings.Cut(remote, "/"); found && strings.HasSuffix(hostPort, ":443") {
+			return strings.TrimSuffix(hostPort, ":443") + "/" + path
+		}
 		return remote
 	}
 	var port string
