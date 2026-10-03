@@ -51,6 +51,12 @@ func (f *fakeDispatchStore) FailBrokerDispatch(_ context.Context, _, _ string) e
 func (f *fakeDispatchStore) ListPendingDispatch(_ context.Context, _ string) ([]store.BrokerDispatch, error) {
 	return nil, nil
 }
+func (f *fakeDispatchStore) HasOutstandingBrokerDispatch(_ context.Context, _, _ string) (bool, error) {
+	return false, nil
+}
+func (f *fakeDispatchStore) HasCompletedBrokerDispatchSince(_ context.Context, _, _ string, _ time.Time) (bool, error) {
+	return false, nil
+}
 func (f *fakeDispatchStore) MarkMessageDispatched(_ context.Context, _ string) (bool, error) {
 	return false, nil
 }

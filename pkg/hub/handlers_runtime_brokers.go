@@ -832,8 +832,21 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				statusUpdate.Message = ""
 			}
 
+			// A delete in progress is sticky the same way (design
+			// ptone/scion#2483 §2.1): the delete engine owns the status
+			// fields while its lease is live. ContainerStatus and the
+			// Heartbeat/LastSeen bump still apply. UpdateAgentStatus repeats
+			// this check inside its transaction, but suppressing the phase
+			// here is what keeps reconcileBrokerQuotaOnPhaseChange below from
+			// acting on the reported phase. (Soft-deleted rows never get here:
+			// GetAgentBySlug skips them.)
+			agentDeleting := deletionActive(agent)
+			if agentDeleting {
+				statusUpdate.Message = ""
+			}
+
 			if agentHB.Phase != "" {
-				if agentSuspended || agentReincarnating {
+				if agentSuspended || agentReincarnating || agentDeleting {
 					// Do not let the heartbeat change the phase or propagate
 					// terminal activities while suspended or reincarnating; leave
 					// statusUpdate.Phase unset so the hub's authoritative phase is
@@ -1006,7 +1019,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 						}
 					}
 				}
-			} else if !agentInTerminalPhase && !agentSuspended && !agentReincarnating {
+			} else if !agentInTerminalPhase && !agentSuspended && !agentReincarnating && !agentDeleting {
 				// Legacy path: no structured fields, derive from ContainerStatus
 				// Derive phase from container status to ensure agents
 				// registered via sync (not started via hub) get proper state.
@@ -1154,8 +1167,10 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					"project_id", project.ProjectID,
 					"error", err)
 			} else {
-				// Publish SSE event so the frontend receives activity updates
-				if updated, err := s.store.GetAgent(ctx, agent.ID); err == nil {
+				// Publish SSE event so the frontend receives activity updates.
+				// A row soft-deleted between the slug lookup and this re-read
+				// (a delete finishing concurrently) publishes nothing.
+				if updated, err := s.store.GetAgent(ctx, agent.ID); err == nil && updated.DeletedAt.IsZero() {
 					s.events.PublishAgentStatus(ctx, updated)
 				}
 			}

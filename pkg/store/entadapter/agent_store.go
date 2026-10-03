@@ -134,7 +134,16 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		LaunchSeq:           a.LaunchSeq,
 		LaunchStep:          a.LaunchStep,
 		LaunchError:         a.LaunchError,
+		DeletionState:       a.DeletionState,
+		DeletionClaim:       a.DeletionClaim,
+		DeletionCode:        a.DeletionCode,
+		DeletionError:       a.DeletionError,
+		DeletionPrior:       a.DeletionPrior,
+		DeletionRequest:     a.DeletionRequest,
 	}
+	sa.DeletionLeaseAt = copyTimePtr(a.DeletionLeaseAt)
+	sa.DeletionStartedAt = copyTimePtr(a.DeletionStartedAt)
+	sa.DeletionFailedAt = copyTimePtr(a.DeletionFailedAt)
 	if a.LaunchDeadline != nil {
 		sa.LaunchDeadline = *a.LaunchDeadline
 	}
@@ -1329,6 +1338,22 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	}
 
 	now := time.Now()
+
+	// Guard 0c, enforced inside the transaction (design ptone/scion#2483
+	// §2.1 Guards): while a delete holds a live lease, or once the row is
+	// soft-deleted, a status report must not move phase, activity or the
+	// exit fields — a report read before the delete claim cannot land after
+	// it. The handler applies the same guard (guardAgentPhaseTransition);
+	// this repeats it on the locked row.
+	if current.DeletedAt != nil || entAgentDeletionActive(current, now) {
+		su.Phase = ""
+		su.Activity = ""
+		su.ExitCode = nil
+		su.ExitReason = ""
+		su.Message = ""
+		su.ClearExit = false
+	}
+
 	upd := tx.Agent.UpdateOneID(uid).
 		SetUpdated(now).
 		SetLastSeen(now)
@@ -1594,6 +1619,14 @@ func (s *AgentStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID
 					agent.ReincarnationStateIn(store.ReincarnationStateNone, store.ReincarnationStateFailed),
 				),
 				agent.Or(agent.LastSeenIsNil(), agent.LastSeenLT(cutoff)),
+				// A delete in progress owns the phase (design
+				// ptone/scion#2483 §2.1 Guards); expired leases included,
+				// since teardown may already have run. A failed
+				// (rolled-back) delete does not block this write.
+				agent.Or(
+					agent.DeletionStateIsNil(),
+					agent.DeletionStateNotIn(store.DeletionStateDeleting, store.DeletionStateFinalizing),
+				),
 				reason,
 			).
 			SetPhase("error").
