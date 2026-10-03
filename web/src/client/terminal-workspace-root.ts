@@ -156,6 +156,12 @@ export class TerminalWorkspaceRoot {
   private currentPath = '/terminals';
   private refreshQueued = false;
   private narrowQuery: MediaQueryList | null = null;
+  /** {@link TOUCH_PRIMARY_QUERY}, kept live for the jump button's hints. */
+  private touchQuery: MediaQueryList | null = null;
+  private jumpButton: HTMLButtonElement | null = null;
+  private jumpShortcutLabel = '';
+  private jumpKeyShortcuts = '';
+  private readonly handleTouchQueryChange = (): void => this.syncJumpButtonHints();
   /** Monotonic counter for stable chronological rail ordering. */
   private entryCounter = 0;
   /** Current rail sort mode. */
@@ -324,6 +330,8 @@ export class TerminalWorkspaceRoot {
    * list alone scrolls, so the footer stays visible however long the list
    * grows. The shortcut hint is shown inline on pointer devices and hidden
    * on touch-primary ones (CSS), where there is no keyboard to press it.
+   * The title and aria-keyshortcuts follow the same rule, see
+   * {@link syncJumpButtonHints}.
    */
   private buildRailFooter(): void {
     this.railFooter.className = 'terminal-rail-footer';
@@ -332,11 +340,13 @@ export class TerminalWorkspaceRoot {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'terminal-jump-btn';
-    btn.title = `Jump to agent (${shortcutLabel})`;
     btn.setAttribute('aria-haspopup', 'dialog');
-    if (!window.matchMedia?.(TOUCH_PRIMARY_QUERY).matches) {
-      btn.setAttribute('aria-keyshortcuts', isMac ? 'Meta+K' : 'Control+K');
-    }
+    this.jumpButton = btn;
+    this.jumpShortcutLabel = shortcutLabel;
+    this.jumpKeyShortcuts = isMac ? 'Meta+K' : 'Control+K';
+    this.touchQuery = window.matchMedia?.(TOUCH_PRIMARY_QUERY) ?? null;
+    this.touchQuery?.addEventListener?.('change', this.handleTouchQueryChange);
+    this.syncJumpButtonHints();
     const icon = document.createElement('sl-icon');
     icon.setAttribute('name', 'compass');
     icon.setAttribute('aria-hidden', 'true');
@@ -350,6 +360,24 @@ export class TerminalWorkspaceRoot {
     btn.append(icon, label, shortcut);
     btn.addEventListener('click', () => this.handleJumpButtonClick(btn));
     this.railFooter.append(btn);
+  }
+
+  /**
+   * Sets the jump button's title and aria-keyshortcuts only when the
+   * primary pointer is not touch: a touch user cannot press the shortcut,
+   * and the visible label already gives the accessible name. Re-run on
+   * every change of {@link TOUCH_PRIMARY_QUERY}, like the CSS kbd hint.
+   */
+  private syncJumpButtonHints(): void {
+    const btn = this.jumpButton;
+    if (!btn) return;
+    if (this.touchQuery?.matches) {
+      btn.removeAttribute('title');
+      btn.removeAttribute('aria-keyshortcuts');
+    } else {
+      btn.title = `Jump to agent (${this.jumpShortcutLabel})`;
+      btn.setAttribute('aria-keyshortcuts', this.jumpKeyShortcuts);
+    }
   }
 
   /**
@@ -546,6 +574,7 @@ export class TerminalWorkspaceRoot {
   dispose(): void {
     document.removeEventListener('keydown', this.handleGlobalKeydown);
     document.removeEventListener('focusin', this.handleGlobalFocusIn);
+    this.touchQuery?.removeEventListener?.('change', this.handleTouchQueryChange);
     this.paletteHost.dispose();
   }
 
@@ -557,8 +586,9 @@ export class TerminalWorkspaceRoot {
    * whatever pane was focused), and *opening the palette via the rail
    * footer button* moves it there even earlier —
    * {@link handleJumpButtonClick} focuses the button itself, for its own
-   * invoker-tracking purposes, before ever opening the palette. By either point, a point-in-time "what pane has focus right
-   * now" read already sees nothing. Recording it continuously instead,
+   * invoker-tracking purposes, before ever opening the palette. By either
+   * point, a point-in-time "what pane has focus right now" read already
+   * sees nothing. Recording it continuously instead,
    * every time focus actually lands in a pane, sidesteps both races — it
    * holds whatever pane was *last* focused regardless of what (if anything)
    * has stolen focus since.
@@ -1893,8 +1923,9 @@ export class TerminalWorkspaceRoot {
         .terminal-workspace-shell {
           grid-template-columns: 1fr;
           /* 11rem min keeps at least one list row visible between the
-             rail header and its pinned Jump to agent footer. */
-          grid-template-rows: minmax(11rem, 35vh) minmax(0, 1fr);
+             rail header and its pinned Jump to agent footer, capped at
+             45% of the shell so short landscape phones keep pane room. */
+          grid-template-rows: minmax(min(11rem, 45%), 35vh) minmax(0, 1fr);
         }
         .terminal-rail {
           border-right: 0;

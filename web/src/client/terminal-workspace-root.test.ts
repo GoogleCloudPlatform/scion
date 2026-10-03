@@ -24,6 +24,7 @@ import type { ScionQuickPalette } from '../components/shared/palette/quick-palet
 import type { ScionTerminalPane } from '../components/terminal/terminal-pane.js';
 import type { TerminalPaletteAgentsLoadOptions } from './terminal-palette-data.js';
 import type { PaletteCandidate } from './chat-palette-types.js';
+import { TOUCH_PRIMARY_QUERY } from '../utils/input-modality.js';
 
 // Mock terminal-pane custom element before importing workspace root
 vi.mock('@xterm/xterm', () => ({
@@ -1464,6 +1465,66 @@ describe('"Jump to agent" footer in the Open terminals column', () => {
     expect(btn.querySelector('.terminal-jump-shortcut')?.textContent).toMatch(/^(⌘K|Ctrl\+K)$/);
   });
 
+  /**
+   * Recreates the root with a matchMedia stub whose touch-primary query
+   * reports `touch`, and a platform of `platform`. Returns a function that
+   * flips the touch query and fires its `change` listeners.
+   */
+  function recreateWithModality(touch: boolean, platform: string): (next: boolean) => void {
+    vi.spyOn(navigator, 'platform', 'get').mockReturnValue(platform);
+    const listeners = new Set<() => void>();
+    const touchQuery = {
+      matches: touch,
+      addEventListener: (_type: string, cb: () => void): void => void listeners.add(cb),
+      removeEventListener: (_type: string, cb: () => void): void => void listeners.delete(cb),
+    };
+    const otherQuery = { matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() };
+    vi.spyOn(window, 'matchMedia').mockImplementation(
+      (query: string) =>
+        (query === TOUCH_PRIMARY_QUERY ? touchQuery : otherQuery) as unknown as MediaQueryList
+    );
+    root.dispose();
+    root.element.remove();
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    return (next: boolean): void => {
+      touchQuery.matches = next;
+      for (const cb of listeners) cb();
+    };
+  }
+
+  it('sets title and aria-keyshortcuts (Control+K) on a non-Mac pointer device', () => {
+    recreateWithModality(false, 'Linux x86_64');
+    const btn = jumpButton(root);
+    expect(btn.getAttribute('aria-keyshortcuts')).toBe('Control+K');
+    expect(btn.title).toBe('Jump to agent (Ctrl+K)');
+  });
+
+  it('sets title and aria-keyshortcuts (Meta+K) on a Mac pointer device', () => {
+    recreateWithModality(false, 'MacIntel');
+    const btn = jumpButton(root);
+    expect(btn.getAttribute('aria-keyshortcuts')).toBe('Meta+K');
+    expect(btn.title).toBe('Jump to agent (⌘K)');
+  });
+
+  it('omits title and aria-keyshortcuts on a touch-primary device', () => {
+    recreateWithModality(true, 'Linux x86_64');
+    const btn = jumpButton(root);
+    expect(btn.hasAttribute('aria-keyshortcuts')).toBe(false);
+    expect(btn.hasAttribute('title')).toBe(false);
+  });
+
+  it('follows touch-primary changes after construction', () => {
+    const setTouch = recreateWithModality(true, 'Linux x86_64');
+    const btn = jumpButton(root);
+    setTouch(false);
+    expect(btn.getAttribute('aria-keyshortcuts')).toBe('Control+K');
+    expect(btn.title).toBe('Jump to agent (Ctrl+K)');
+    setTouch(true);
+    expect(btn.hasAttribute('aria-keyshortcuts')).toBe(false);
+    expect(btn.hasAttribute('title')).toBe(false);
+  });
+
   it('clicking it focuses the button, then opens the agents palette', async () => {
     const btn = jumpButton(root);
     const focusSpy = vi.spyOn(btn, 'focus');
@@ -1689,20 +1750,22 @@ describe('"Jump to agent" palette: open, select, and events', () => {
     await flush();
     markPaneFocused(root, AGENT_B);
 
-    // Simulate the footer button's own pre-open focus-stealing.
-    const btn = document.createElement('button');
-    document.body.appendChild(btn);
-    btn.focus();
+    // The real footer button: its click handler focuses it, then opens.
+    const btn = jumpButton(root);
+    btn.click();
     expect(document.activeElement).toBe(btn);
-
-    await pickFromPalette(root, AGENT_NEW);
+    const palette = await waitForPalette(root);
+    await vi.waitFor(() => {
+      expect(palette.open).toBe(true);
+      expect(palette.groups.agents?.status).toBe('ready');
+    });
+    selectAgent(palette, AGENT_NEW);
     root.create(reg, AGENT_NEW);
 
     expect(root.layoutManager.getState().twoColumns).toEqual([
       root.findSessionKeyByAgentId(AGENT_A),
       root.findSessionKeyByAgentId(AGENT_NEW),
     ]);
-    btn.remove();
   });
 
   it('selecting a brand-new agent in a multi-pane layout dispatches TERMINAL_PALETTE_NEW_AGENT_EVENT and does not navigate', async () => {
