@@ -195,6 +195,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if opts.SharedWorkspace {
 		ctx = api.ContextWithSharedWorkspace(ctx)
 	}
+	if isEmptyPerAgentStart(opts) {
+		ctx = api.ContextWithEmptyPerAgentWorkspace(ctx)
+	}
 	if opts.HarnessConfigPath != "" {
 		ctx = api.ContextWithHarnessConfigPath(ctx, opts.HarnessConfigPath)
 	}
@@ -219,6 +222,20 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	agentDir, agentHome, agentWorkspace, finalScionCfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "", opts.Branch, opts.Workspace, startInlineConfig)
 	if err != nil {
 		return nil, err
+	}
+	// Empty-per-agent (design #2703): the request's mode, or the mode
+	// persisted at provision, so a start that lost it (e.g. a dropped or
+	// undecodable request body) still gets the private workspace, no repo
+	// root and the right container env rather than legacy resolution.
+	emptyPerAgent := isEmptyPerAgentStart(opts) || (finalScionCfg != nil && finalScionCfg.EmptyPerAgentWorkspace)
+	if emptyPerAgent {
+		env := make(map[string]string, len(opts.Env)+1)
+		for k, v := range opts.Env {
+			env[k] = v
+		}
+		env["SCION_WORKSPACE_MODE"] = string(store.SharingModeEmptyPerAgent)
+		delete(env, "SCION_WORKSPACE_GIT")
+		opts.Env = env
 	}
 	if finalScionCfg != nil {
 		util.Debugf("Start: GetAgent returned config: harness=%q harnessConfig=%q defaultHarnessConfig=%q image=%q",
@@ -1144,6 +1161,18 @@ authDone:
 	// from the persisted config to keep the explicit workspace plain-mounted.
 	explicitWorkspace := opts.Workspace != "" || (finalScionCfg != nil && finalScionCfg.ExplicitWorkspace)
 	repoRoot := detectRepoRoot(explicitWorkspace, effectiveWorkspace, projectDir)
+	// Empty-per-agent (design #2703): the workspace is exactly the private
+	// agents/<slug>/workspace directory, never a git checkout, so no repo
+	// root is mounted even when projectDir sits in a git repository, and any
+	// other source (e.g. a persisted /workspace volume) is refused.
+	emptyPerAgentWorkspace := ""
+	if emptyPerAgent {
+		emptyPerAgentWorkspace = filepath.Join(agentDir, "workspace")
+		if explicitWorkspace || filepath.Clean(effectiveWorkspace) != emptyPerAgentWorkspace {
+			return nil, fmt.Errorf("empty-per-agent agent %q must use its private workspace %s, not %q", opts.Name, emptyPerAgentWorkspace, effectiveWorkspace)
+		}
+		repoRoot = ""
+	}
 
 	// Reject a workspace source that is not an allowed workspace path before
 	// anything derived from it is used to set up a mount. This also catches
@@ -1160,9 +1189,18 @@ authDone:
 	// afterward -- a value this validator never sees, computed by that
 	// backend's own resolver rather than read back from persisted or
 	// request-supplied state.
-	roots, rootsErr := workspaceSourceRoots(explicitWorkspace, effectiveWorkspace, settings, projectDir)
-	if rootsErr != nil {
-		return nil, rootsErr
+	var roots []string
+	if emptyPerAgentWorkspace != "" {
+		// Contained in itself: settings.WorkspacePath or the project's repo
+		// root, which workspaceSourceRoots derives, need not contain it, so
+		// skip deriving them (and any error doing so) entirely.
+		roots = []string{emptyPerAgentWorkspace}
+	} else {
+		var rootsErr error
+		roots, rootsErr = workspaceSourceRoots(explicitWorkspace, effectiveWorkspace, settings, projectDir)
+		if rootsErr != nil {
+			return nil, rootsErr
+		}
 	}
 	resolvedWorkspace, err := runtime.ValidateWorkspaceSource(effectiveWorkspace, roots...)
 	if err != nil {
@@ -1335,6 +1373,15 @@ authDone:
 		if opts.SharedWorkspace || opts.GitClone != nil {
 			sharingMode = store.SharingModeSharedPlain
 		}
+		// Empty-per-agent never takes the WorktreePerAgent default above: it
+		// has no shared checkout. It is node-local or pod-local (EmptyDir), and NFS storage fails
+		// closed until NFS per-agent support lands (design #2703 P3).
+		if emptyPerAgent {
+			sharingMode = store.SharingModeEmptyPerAgent
+			if err := runtime.CheckWorkspaceBackendMode(settings.Server.WorkspaceStorage, sharingMode); err != nil {
+				return nil, err
+			}
+		}
 		// On Kubernetes, a git project dispatched in worktree-per-agent mode
 		// gets its own worktree under the shared checkout. Shared-plain and
 		// every other runtime keep the layout above.
@@ -1343,7 +1390,7 @@ authDone:
 		// with a workspace the agent container clones into. Paths are
 		// still resolved from the project's workspace path (shared-plain).
 		var worktreeName, worktreeBranch, agentDirName, agentBranch string
-		if isKubernetesRuntime(m.Runtime.Name()) {
+		if isKubernetesRuntime(m.Runtime.Name()) && !emptyPerAgent {
 			worktreeName, worktreeBranch = nfsWorktreeSelection(opts.Env, opts.GitClone, opts.Name)
 			if settings.Server.WorkspaceStorage.Backend == "nfs" {
 				var selErr error
@@ -2402,4 +2449,12 @@ func reResolveModelAlias(envModel string, cfg *api.ScionConfig, harnessName stri
 		}
 	}
 	return "", false
+}
+
+// isEmptyPerAgentStart reports whether opts start an empty-per-agent agent
+// (design #2703): set by the broker from the hub's WorkspaceMode, or carried
+// as SCION_WORKSPACE_MODE in the agent env.
+func isEmptyPerAgentStart(opts api.StartOptions) bool {
+	return opts.EmptyPerAgentWorkspace ||
+		store.ResolveWorkspaceSharingMode(opts.Env["SCION_WORKSPACE_MODE"]) == store.SharingModeEmptyPerAgent
 }

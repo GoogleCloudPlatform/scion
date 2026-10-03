@@ -229,6 +229,9 @@ func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 			Exec:        true,
 			Reprovision: true,
 			AsyncLaunch: true,
+			// EmptyPerAgentWorkspace, like Attach, reflects the default
+			// runtime (false for Cloud Run, which rejects the mode).
+			EmptyPerAgentWorkspace: scionrt.HasEmptyPerAgentSupport(s.runtime),
 		},
 		Profiles: s.buildInfoProfiles(runtimeType),
 	}
@@ -1046,6 +1049,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		WorkspaceMode:      req.WorkspaceMode,
 		HTTPRequest:        r,
 		Operation:          opCreate,
+		// Threaded only for the workspace-source checks; the download
+		// itself runs after buildStartContext (below, or in runLaunch).
+		WorkspaceStoragePath: req.WorkspaceStoragePath,
 	})
 	if err != nil {
 		span.SetStatus(codes.Error, startContextSpanText(err))

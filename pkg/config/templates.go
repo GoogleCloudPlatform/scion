@@ -891,6 +891,9 @@ func MergeScionConfig(base, override *api.ScionConfig) *api.ScionConfig {
 	if override.ExplicitWorkspace {
 		result.ExplicitWorkspace = true
 	}
+	if override.EmptyPerAgentWorkspace {
+		result.EmptyPerAgentWorkspace = true
+	}
 	if override.Branch != "" {
 		result.Branch = override.Branch
 	}
