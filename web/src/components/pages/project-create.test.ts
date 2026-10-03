@@ -525,6 +525,118 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
     ]);
   });
 
+  it('treats an override naming the template repository (any form) as not overridden', async () => {
+    const { el, requests } = await createForm({ templates: [GIT_TEMPLATE] });
+    element = el;
+
+    await setValue(el, '#startFrom', 'tpl-git', 'sl-change');
+    await setValue(el, '#name', 'same-repo', 'sl-input');
+    // Template remote is github.com/acme/go-service-template.
+    await setValue(
+      el,
+      '#templateGitRemote',
+      'git@github.com:Acme/go-service-template.git',
+      'sl-input'
+    );
+
+    expect(text(q(el, '.badge-override'))).toBe('Override');
+    expect(q(el, '.override-field.active')).toBeNull();
+    expect(text(q(el, '.summary-repository'))).toBe('github.com/acme/go-service-template');
+    expect(text(q(el, '.summary-repository'))).not.toContain('(override)');
+    expect(text(q(el, '.summary-branch'))).toBe('develop');
+    expect(text(q(el, '.override-hint'))).toContain('Same repository as the template');
+    expect(text(q(el, '.override-hint'))).not.toContain('main branch');
+    expect(q(el, '.warn-note')).toBeNull();
+    // The reset link still clears what was typed.
+    expect(q(el, '.reset-link')).not.toBeNull();
+
+    await submit(el);
+    expect(posts(requests)).toHaveLength(1);
+  });
+
+  it('never displays credentials, query or fragment from a pasted override', async () => {
+    const { el } = await createForm({ templates: [GIT_TEMPLATE] });
+    element = el;
+
+    await setValue(el, '#startFrom', 'tpl-git', 'sl-change');
+    await setValue(
+      el,
+      '#templateGitRemote',
+      'https://x-access-token:ghp_SECRET@github.com/acme/payments.git?access_token=SECRET_Q#SECRET_F',
+      'sl-input'
+    );
+
+    expect(text(q(el, '.summary-repository'))).toBe('github.com/acme/payments (override)');
+    expect(el.shadowRoot?.textContent ?? '').not.toMatch(/SECRET|x-access-token/);
+  });
+
+  it.each([
+    ['/home/user/code/repo', 'must be a remote git URL'],
+    ['ssh://git@git.example.com:2222/group/repo.git', 'ssh URLs with a port are not supported yet'],
+  ])('flags an invalid override (%s) inline before submitting', async (remote, message) => {
+    const { el, requests } = await createForm({ templates: [GIT_TEMPLATE] });
+    element = el;
+
+    await setValue(el, '#startFrom', 'tpl-git', 'sl-change');
+    await setValue(el, '#name', 'bad-remote', 'sl-input');
+    await setValue(el, '#templateGitRemote', remote, 'sl-input');
+    q(el, '#templateGitRemote')!.dispatchEvent(new Event('sl-blur'));
+    await el.updateComplete;
+
+    expect(text(q(el, '.git-remote-error'))).toContain(message);
+    expect(q(el, '#templateGitRemote > .git-remote-error')?.getAttribute('slot')).toBe('help-text');
+    expect(q(el, '#templateGitRemote')?.getAttribute('aria-invalid')).toBe('true');
+
+    await submit(el);
+    expect(posts(requests)).toEqual([]);
+    expect(q(el, '.error-banner')).toBeNull();
+
+    // Typing clears the error.
+    await setValue(el, '#templateGitRemote', 'github.com/acme/other', 'sl-input');
+    expect(q(el, '.git-remote-error')).toBeNull();
+    expect(q(el, '#templateGitRemote')?.getAttribute('aria-invalid')).toBe('false');
+  });
+
+  it('shows a hub 400 on gitRemote inline on the override field', async () => {
+    const { el } = await createForm({
+      templates: [GIT_TEMPLATE],
+      cloneStatus: 400,
+      cloneBody: {
+        error: {
+          code: 'validation_error',
+          message: 'gitRemote must be a remote git URL',
+          details: { field: 'gitRemote' },
+        },
+      },
+    });
+    element = el;
+
+    await setValue(el, '#startFrom', 'tpl-git', 'sl-change');
+    await setValue(el, '#name', 'hub-says-no', 'sl-input');
+    await setValue(el, '#templateGitRemote', 'github.com/acme/other', 'sl-input');
+    await submit(el);
+
+    expect(text(q(el, '.git-remote-error'))).toContain('gitRemote must be a remote git URL');
+    expect(q(el, '.error-banner')).toBeNull();
+    expect(window.history.pushState).not.toHaveBeenCalled();
+  });
+
+  it('shows other clone 400s in the banner', async () => {
+    const { el } = await createForm({
+      templates: [GIT_TEMPLATE],
+      cloneStatus: 400,
+      cloneBody: { error: { code: 'validation_error', message: 'name is required' } },
+    });
+    element = el;
+
+    await setValue(el, '#startFrom', 'tpl-git', 'sl-change');
+    await setValue(el, '#name', 'x', 'sl-input');
+    await submit(el);
+
+    expect(text(q(el, '.error-banner'))).toContain('name is required');
+    expect(q(el, '.git-remote-error')).toBeNull();
+  });
+
   it('"Use template value" clears the override', async () => {
     const { el } = await createForm({ templates: [GIT_TEMPLATE] });
     element = el;

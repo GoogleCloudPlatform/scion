@@ -27,7 +27,14 @@
 import { LitElement, html, css, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
-import { apiFetch, extractApiError } from '../../client/api.js';
+import { apiFetch, extractApiError, parseApiError } from '../../client/api.js';
+import {
+  displayGitRemote,
+  normalizeGitRemote,
+  sanitizeGitRemote,
+  stripQueryAndFragment,
+  validateGitRemote,
+} from '../../client/git-remote.js';
 import { fetchHubProjectCapabilities } from '../../client/hub-capabilities.js';
 import type { PageData } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
@@ -131,13 +138,17 @@ function templateCloneUrl(t: ProjectTemplate): string {
   return t.gitRemote ? `https://${t.gitRemote}.git` : '';
 }
 
-/** Display form of a git remote: no scheme, no .git suffix (like the hub's normalized form). */
-function displayGitRemote(url: string): string {
-  return url
-    .trim()
-    .replace(/^(https?:\/\/|ssh:\/\/|git:\/\/)/, '')
-    .replace(/^git@([^:]+):/, '$1/')
-    .replace(/\.git$/, '');
+/**
+ * The repository a git remote override actually switches to, in its safe
+ * (credential-, query- and fragment-free) form — or '' when there is no
+ * override or it names the template's own repository. The hub treats a
+ * same-repository override as no override and keeps the template's git source
+ * labels (branch included), so the UI must not claim otherwise.
+ */
+function effectiveGitRemoteOverride(t: ProjectTemplate, override: string): string {
+  const safe = sanitizeGitRemote(override);
+  if (!safe) return '';
+  return normalizeGitRemote(safe) === normalizeGitRemote(t.gitRemote ?? '') ? '' : safe;
 }
 
 interface ValidatePathResponse {
@@ -256,6 +267,10 @@ export class ScionPageProjectCreate extends LitElement {
   /** Git remote override for a git template; empty means use the template's. */
   @state()
   private templateGitRemote = '';
+
+  /** Inline error on the git remote override (client check or a hub 400 on gitRemote). */
+  @state()
+  private templateGitRemoteError: string | null = null;
 
   /** Inline error on the Slug field (clone 409 for a colliding explicit slug). */
   @state()
@@ -386,14 +401,21 @@ export class ScionPageProjectCreate extends LitElement {
     if (changedProperties.has('error') && this.error) {
       this.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
+    // Mark the inner native input invalid too, so assistive tech reports it
+    // (the host's aria-invalid does not reach into sl-input's shadow DOM).
     if (changedProperties.has('slugError')) {
-      // Mark the inner native input invalid too, so assistive tech reports it
-      // (the host's aria-invalid does not reach into sl-input's shadow DOM).
-      const slugInput = this.shadowRoot?.querySelector('#slug') as
-        | (HTMLElement & { setCustomValidity?: (message: string) => void })
-        | null;
-      slugInput?.setCustomValidity?.(this.slugError ?? '');
+      this.setInputValidity('#slug', this.slugError);
     }
+    if (changedProperties.has('templateGitRemoteError')) {
+      this.setInputValidity('#templateGitRemote', this.templateGitRemoteError);
+    }
+  }
+
+  private setInputValidity(selector: string, message: string | null): void {
+    const input = this.shadowRoot?.querySelector(selector) as
+      | (HTMLElement & { setCustomValidity?: (message: string) => void })
+      | null;
+    input?.setCustomValidity?.(message ?? '');
   }
 
   static override styles = css`
@@ -836,8 +858,25 @@ export class ScionPageProjectCreate extends LitElement {
   private onStartFromChange(e: Event): void {
     this.startFrom = (e.target as HTMLElement & { value: string }).value || START_BLANK;
     this.templateGitRemote = '';
+    this.templateGitRemoteError = null;
     this.slugError = null;
     this.error = null;
+  }
+
+  private onTemplateGitRemoteInput(e: Event): void {
+    this.templateGitRemote = (e.target as HTMLElement & { value: string }).value;
+    this.templateGitRemoteError = null;
+  }
+
+  /**
+   * Client-side check of the override, mirroring the hub's rules; returns
+   * whether it is acceptable and sets the inline error when not. The hub
+   * re-validates (a 400 on gitRemote is shown inline too).
+   */
+  private checkTemplateGitRemote(): boolean {
+    const remote = stripQueryAndFragment(this.templateGitRemote.trim());
+    this.templateGitRemoteError = remote ? validateGitRemote(remote) : null;
+    return this.templateGitRemoteError === null;
   }
 
   /**
@@ -1095,12 +1134,14 @@ export class ScionPageProjectCreate extends LitElement {
     }
     const gitRemote = this.templateGitRemote.trim();
     if (templateWorkspaceType(template) === 'git' && gitRemote) {
+      if (!this.checkTemplateGitRemote()) return;
       body.gitRemote = gitRemote;
     }
 
     this.submitting = true;
     this.error = null;
     this.slugError = null;
+    this.templateGitRemoteError = null;
     try {
       const response = await apiFetch(`/api/v1/projects/${template.id}/clone`, {
         method: 'POST',
@@ -1118,7 +1159,13 @@ export class ScionPageProjectCreate extends LitElement {
         return;
       }
       if (!response.ok) {
-        throw new Error(await extractApiError(response, 'Failed to create project from template'));
+        const info = await parseApiError(response, 'Failed to create project from template');
+        // A 400 about the override belongs on its field, like a slug 409.
+        if (response.status === 400 && info.details?.field === 'gitRemote') {
+          this.templateGitRemoteError = info.message;
+          return;
+        }
+        throw new Error(info.message);
       }
       const created = (await response.json()) as { id: string };
       this.navigateToProject(created.id);
@@ -1255,7 +1302,7 @@ export class ScionPageProjectCreate extends LitElement {
   /** Read-only "From template" card: what the clone takes from the template. */
   private renderTemplateSummary(t: ProjectTemplate): TemplateResult {
     const type = templateWorkspaceType(t);
-    const override = this.templateGitRemote.trim();
+    const override = effectiveGitRemoteOverride(t, this.templateGitRemote);
     const harnessConfig = t.annotations?.[ANNOTATION_DEFAULT_HARNESS_CONFIG];
     const lock = html`<sl-icon name="lock"></sl-icon>`;
     return html`
@@ -1309,7 +1356,10 @@ export class ScionPageProjectCreate extends LitElement {
 
   /** Git remote override for a git template (the only overridable template field). */
   private renderGitRemoteOverride(t: ProjectTemplate): TemplateResult {
-    const active = this.templateGitRemote.trim() !== '';
+    const entered = this.templateGitRemote.trim() !== '';
+    // "active" = the clone will really use a different repository.
+    const active = effectiveGitRemoteOverride(t, this.templateGitRemote) !== '';
+    const error = this.templateGitRemoteError;
     return html`
       <div class="form-field override-field ${active ? 'active' : ''}">
         <div class="label-row">
@@ -1317,12 +1367,13 @@ export class ScionPageProjectCreate extends LitElement {
           <span class="badge-override ${active ? 'active' : ''}"
             ><sl-icon name="pencil"></sl-icon>${active ? 'Overridden' : 'Override'}</span
           >
-          ${active
+          ${entered
             ? html`<button
                 type="button"
                 class="reset-link"
                 @click=${() => {
                   this.templateGitRemote = '';
+                  this.templateGitRemoteError = null;
                 }}
               >
                 <sl-icon name="arrow-counterclockwise"></sl-icon>Use template value
@@ -1333,15 +1384,27 @@ export class ScionPageProjectCreate extends LitElement {
           id="templateGitRemote"
           placeholder=${templateCloneUrl(t)}
           .value=${this.templateGitRemote}
-          @sl-input=${(e: Event) => {
-            this.templateGitRemote = (e.target as HTMLElement & { value: string }).value;
+          aria-invalid=${error ? 'true' : 'false'}
+          @sl-input=${(e: Event) => this.onTemplateGitRemoteInput(e)}
+          @sl-blur=${() => this.checkTemplateGitRemote()}
+          @sl-clear=${() => {
+            this.templateGitRemote = '';
+            this.templateGitRemoteError = null;
           }}
           clearable
-        ></sl-input>
-        <div class="hint">
+        >
+          ${error
+            ? html`<div slot="help-text" class="field-error git-remote-error" role="alert">
+                ${error}
+              </div>`
+            : nothing}
+        </sl-input>
+        <div class="hint override-hint">
           ${active
             ? 'Agents will clone this repository instead of the template’s, from its main branch. Workspace mode still comes from the template.'
-            : 'Optional. Leave blank to use the template’s repository (shown as placeholder).'}
+            : entered && !error
+              ? 'Same repository as the template — nothing is overridden; the template’s branch is kept.'
+              : 'Optional. Leave blank to use the template’s repository (shown as placeholder).'}
         </div>
         ${active
           ? html`<div class="warn-note">
