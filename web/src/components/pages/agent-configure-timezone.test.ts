@@ -476,6 +476,24 @@ function formAction(el: ConfigureEl, label: string): Element {
   return button!;
 }
 
+const FORM_ACTIONS = ['Back', 'Save', 'Start', 'Delete'];
+
+function expectFormActionsDisabled(el: ConfigureEl, disabled: boolean): void {
+  for (const label of FORM_ACTIONS) {
+    expect(isDisabled(formAction(el, label)), `${label} disabled`).toBe(disabled);
+  }
+}
+
+/** A PATCH reply that stays in flight until the returned release() is called. */
+function gatedReply(reply: Omit<PatchReply, 'gate'>): () => void {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  patchReplies.push({ ...reply, gate });
+  return release;
+}
+
 describe('agent-configure Timezone row and the main form never overlap', () => {
   it.each(['saving', 'starting'] as const)(
     'disables Pin…, Unpin, the picker and its actions while the form is %s',
@@ -512,20 +530,14 @@ describe('agent-configure Timezone row and the main form never overlap', () => {
   );
 
   it.each(['pin', 'unpin'] as const)(
-    'disables Save and Start while a timezone %s is in flight',
+    'disables Save, Start, Back and Delete while a timezone %s is in flight',
     async (action) => {
       const el = (await mount(
         makeAgent('created', { explicitTimezone: 'Europe/Paris' })
       )) as BusyEl;
-      expect(isDisabled(formAction(el, 'Save'))).toBe(false);
-      expect(isDisabled(formAction(el, 'Start'))).toBe(false);
+      expectFormActionsDisabled(el, false);
 
-      let release!: () => void;
-      const gate = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      patchReplies.push({
-        gate,
+      const release = gatedReply({
         body:
           action === 'pin'
             ? {
@@ -544,19 +556,76 @@ describe('agent-configure Timezone row and the main form never overlap', () => {
       }
       expect(patchCalls).toHaveLength(1);
 
-      expect(isDisabled(formAction(el, 'Save'))).toBe(true);
-      expect(isDisabled(formAction(el, 'Start'))).toBe(true);
+      expectFormActionsDisabled(el, true);
       await el.handleSave();
       await el.handleStart();
       expect(patchCalls).toHaveLength(1);
 
       release();
       await settle(el);
-      expect(isDisabled(formAction(el, 'Save'))).toBe(false);
-      expect(isDisabled(formAction(el, 'Start'))).toBe(false);
+      expectFormActionsDisabled(el, false);
       expect(text(el, 'timezone-value')).toBe(action === 'pin' ? 'Asia/Tokyo' : 'UTC');
     }
   );
+});
+
+describe('agent-configure no stuck-disabled state after a failed PATCH', () => {
+  it.each(['pin', 'unpin'] as const)(
+    'a failed timezone %s re-enables the row and the form actions',
+    async (action) => {
+      const el = (await mount(
+        makeAgent('created', { explicitTimezone: 'Europe/Paris' })
+      )) as BusyEl;
+      const release = gatedReply({ status: 500, body: { error: 'boom' } });
+      if (action === 'pin') {
+        await click(el, 'timezone-pin-open');
+        el.tzDraft = 'Asia/Tokyo';
+        await click(el, 'timezone-pin-confirm');
+        expect(isDisabled(q(el, 'timezone-pin-confirm'))).toBe(true);
+      } else {
+        await click(el, 'timezone-unpin');
+        expect(isDisabled(q(el, 'timezone-unpin'))).toBe(true);
+      }
+      expectFormActionsDisabled(el, true);
+
+      release();
+      await settle(el);
+      expect(patchCalls).toHaveLength(1);
+      expect(text(el, 'timezone-error')).toContain('boom');
+      expectFormActionsDisabled(el, false);
+      if (action === 'pin') {
+        // The picker stays open for a retry, with its actions enabled.
+        expect(isDisabled(q(el, 'timezone-pin-confirm'))).toBe(false);
+        expect(isDisabled(q(el, 'timezone-pin-cancel'))).toBe(false);
+        expect(isDisabled(el.shadowRoot!.querySelector('scion-timezone-picker'))).toBe(false);
+      } else {
+        expect(isDisabled(q(el, 'timezone-unpin'))).toBe(false);
+        expect(isDisabled(q(el, 'timezone-pin-open'))).toBe(false);
+      }
+      // The pin is unchanged.
+      expect(text(el, 'timezone-value')).toBe('Europe/Paris');
+    }
+  );
+
+  it('a failed Save re-enables Pin… and Unpin', async () => {
+    const el = (await mount(makeAgent('created', { explicitTimezone: 'Europe/Paris' }))) as BusyEl;
+    el.envEntries = [{ key: 'FOO', value: 'changed' }];
+    const release = gatedReply({ status: 500, body: { error: 'save boom' } });
+    const saving = el.handleSave();
+    await settle(el);
+    expect(patchCalls).toHaveLength(1);
+    expect(patchCalls[0].body).not.toHaveProperty('explicitTimezone');
+    expect(isDisabled(q(el, 'timezone-pin-open'))).toBe(true);
+    expect(isDisabled(q(el, 'timezone-unpin'))).toBe(true);
+
+    release();
+    await saving;
+    await settle(el);
+    expect(el.shadowRoot!.querySelector('.error-banner')?.textContent).toContain('save boom');
+    expect(isDisabled(q(el, 'timezone-pin-open'))).toBe(false);
+    expect(isDisabled(q(el, 'timezone-unpin'))).toBe(false);
+    expectFormActionsDisabled(el, false);
+  });
 });
 
 describe('agent-configure env table never owns TZ', () => {
