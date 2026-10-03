@@ -1031,6 +1031,9 @@ type StartOptions struct {
 	// create of a launch-owned runtime resource, with the created object's
 	// identity (design §3.8.4), so an aborted launch can delete exactly what
 	// it created. Nil (the synchronous path) means nothing is recorded.
+	// Setting it also makes the caller the owner of a failed or cancelled
+	// start's cleanup: the runtime then skips its own start cleanup and
+	// leaves the reported resources to the caller. Set both hooks together.
 	OnResourceCreated func(ResourceHandle)
 }
 

@@ -333,6 +333,17 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			// exec-based runtimes (docker, podman, apple) return the killed
 			// CLI's *exec.ExitError, not context.Canceled, when ctx' is
 			// cancelled under them.
+			//
+			// The runtime leaves what it created to this launch's cleanup
+			// (it skips its own start cleanup when OnResourceCreated is
+			// set), so the recorded resources are removed here unless the
+			// launch already completed. The local stop/delete handler owns
+			// the agent files, so only the resources are removed. Every
+			// delete is conditional on the identity recorded at create
+			// time, so a newer launch's same-named resources are untouched.
+			if !alreadyCompleted && !sender.IsCompleted() {
+				s.cleanupLaunchResources(lc.mgr, rec)
+			}
 			return
 		}
 		code, message := classifyStartError(ctx, sr.err)
@@ -445,13 +456,7 @@ func (s *Server) failLaunch(ctx context.Context, sender *launchSender, rec *laun
 // create launch whose marker still holds this launch's ID, its agent files
 // (design §3.8.4).
 func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc launchCtx) {
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	if err := mgr.CleanupLaunch(cleanupCtx, rec.HandlesSnapshot()); err != nil {
-		s.agentLifecycleLog.Warn("runLaunch: failed to clean up launch resources",
-			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
-	}
+	s.cleanupLaunchResources(mgr, rec)
 
 	if rec.Kind != store.LaunchKindCreate || lc.opts.ProjectPath == "" {
 		return
@@ -463,6 +468,17 @@ func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc l
 	}
 	if _, err := agent.DeleteAgentFiles(lc.opts.Name, lc.opts.ProjectPath, true); err != nil {
 		s.agentLifecycleLog.Warn("runLaunch: failed to clean up agent files",
+			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
+	}
+}
+
+// cleanupLaunchResources deletes the runtime resources the launch recorded
+// (design §3.8.4), on a fresh context: ctx' may already be done.
+func (s *Server) cleanupLaunchResources(mgr agent.Manager, rec *launchRecord) {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := mgr.CleanupLaunch(cleanupCtx, rec.HandlesSnapshot()); err != nil {
+		s.agentLifecycleLog.Warn("runLaunch: failed to clean up launch resources",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
 	}
 }

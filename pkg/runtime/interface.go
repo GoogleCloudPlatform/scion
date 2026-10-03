@@ -148,6 +148,13 @@ type RunConfig struct {
 	// api.StartOptions. Runtimes call them through launchHooks, whose
 	// checkpoint and created methods are no-ops when the hook is nil (the
 	// synchronous path).
+	//
+	// OnResourceCreated also selects who cleans up a start that fails or is
+	// cancelled. When it is set, the runtime skips its own start cleanup and
+	// leaves every created resource to the caller, which deletes the
+	// reported handles (the async launch's CleanupLaunch). When it is nil,
+	// the runtime cleans up as on the synchronous path, whether or not
+	// Checkpoint is set. Callers set both hooks together.
 	Checkpoint        func(ctx context.Context, step string) error
 	OnResourceCreated func(api.ResourceHandle)
 }
@@ -187,7 +194,10 @@ func (h launchHooks) checkpoint(ctx context.Context, step string) error {
 }
 
 // active reports whether these are an async launch's hooks (a resource
-// handle is being recorded), as opposed to the synchronous path.
+// handle is being recorded), as opposed to the synchronous path. It is keyed
+// on OnResourceCreated alone: it selects the cleanup owner (see
+// RunConfig.OnResourceCreated), and only a caller that records handles can
+// clean up what the runtime leaves.
 func (h launchHooks) active() bool {
 	return h.createdFn != nil
 }

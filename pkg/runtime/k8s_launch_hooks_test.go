@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -778,5 +779,74 @@ func TestRun_NFSWorktreeLockLost_AsyncPath(t *testing.T) {
 	}
 	if podHandles != 1 {
 		t.Fatalf("handles = %+v, want one pod handle", handles)
+	}
+}
+
+// recordingLocker records each provisioning-lock attempt into the hook
+// recorder's event log and wins the lock.
+type recordingLocker struct{ rec *hookRecorder }
+
+func (l *recordingLocker) TryAdvisoryLock(context.Context, store.AdvisoryLockKey) (bool, func() error, error) {
+	return true, func() error { return nil }, nil
+}
+
+func (l *recordingLocker) TryAdvisoryLockObject(context.Context, store.AdvisoryLockKey, int32) (bool, func() error, error) {
+	l.rec.mu.Lock()
+	l.rec.events = append(l.rec.events, "lock:provision")
+	l.rec.mu.Unlock()
+	return true, func() error { return nil }, nil
+}
+
+// TestK8sRun_PodCreateCheckpointBeforeNFSProvisionLock: the pod_create
+// checkpoint, which can block while the Hub is unreachable, runs before the
+// NFS provisioning lock is taken; a checkpoint error means the lock is never
+// taken and no pod is created.
+func TestK8sRun_PodCreateCheckpointBeforeNFSProvisionLock(t *testing.T) {
+	errEnded := errors.New("launch ended at the hub")
+	for _, fail := range []bool{false, true} {
+		t.Run(fmt.Sprintf("checkpoint_fails=%v", fail), func(t *testing.T) {
+			r := newNFSTestK8sRuntime()
+			cfg := nfsWorktreeConfig("scion-wt-cp-lock")
+			rec := &hookRecorder{}
+			if fail {
+				rec.failAt, rec.failErr = 2, errEnded // after pre_clean
+			}
+			cfg.Locker = &recordingLocker{rec: rec}
+			rec.apply(&cfg)
+			failPodReadiness(r.Client.Clientset.(*k8sfake.Clientset))
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			err := func() error { _, err := r.Run(ctx, cfg); return err }()
+
+			events, _ := rec.snapshot()
+			cp, lock := -1, -1
+			for i, e := range events {
+				switch e {
+				case "checkpoint:pod_create":
+					cp = i
+				case "lock:provision":
+					lock = i
+				}
+			}
+			if cp < 0 {
+				t.Fatalf("no pod_create checkpoint: %q", events)
+			}
+			pods, _ := r.Client.Clientset.CoreV1().Pods("default").List(context.Background(), metav1.ListOptions{})
+			if fail {
+				if !errors.Is(err, errEnded) {
+					t.Fatalf("Run error = %v, want the checkpoint error", err)
+				}
+				if lock >= 0 || len(pods.Items) != 0 {
+					t.Fatalf("lock taken or pod created after a failed checkpoint: %q, %d pods", events, len(pods.Items))
+				}
+				return
+			}
+			if lock < 0 || cp > lock {
+				t.Fatalf("events = %q, want the pod_create checkpoint before the provisioning lock", events)
+			}
+			if len(pods.Items) != 1 {
+				t.Fatalf("pods = %d, want 1", len(pods.Items))
+			}
+		})
 	}
 }

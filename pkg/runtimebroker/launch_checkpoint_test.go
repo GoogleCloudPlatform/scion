@@ -406,3 +406,88 @@ func TestLaunchRecord_HandlesConcurrentAddAndSnapshot(t *testing.T) {
 		}
 	}
 }
+
+// blockingHookedManager's Start records a Secret handle after its checkpoint
+// and then blocks until ctx' is cancelled, like a Kubernetes start waiting
+// for its pod when a local stop or delete arrives.
+type blockingHookedManager struct {
+	*asyncManager
+	started chan struct{}
+}
+
+func (m *blockingHookedManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+	if err := opts.Checkpoint(ctx, "secrets"); err != nil {
+		return nil, err
+	}
+	opts.OnResourceCreated(hookSecret)
+	close(m.started)
+	<-ctx.Done()
+	return nil, fmt.Errorf("wait for pod: %w", ctx.Err())
+}
+
+// A local stop or delete (launchRecord.CancelLocal) ending Start: no
+// terminal is sent, and the resources recorded so far are cleaned up,
+// unless the launch already completed (claim or checkpoint answer).
+func TestRunLaunch_LocalCancelDuringStart_CleansUpRecordedHandles(t *testing.T) {
+	completedAnswer := &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultCompleted}
+	for _, tc := range []struct {
+		name        string
+		answer      func(req *hubclient.AgentLaunchReport) *hubclient.AgentLaunchReportResult
+		wantCleanup int
+	}{
+		{"applied", func(*hubclient.AgentLaunchReport) *hubclient.AgentLaunchReportResult { return appliedAnswer }, 1},
+		{"completed at the checkpoint", func(req *hubclient.AgentLaunchReport) *hubclient.AgentLaunchReportResult {
+			if req.State == hubclient.AgentLaunchReportStateCheckpoint {
+				return completedAnswer
+			}
+			return appliedAnswer
+		}, 0},
+		{"completed at the claim", func(req *hubclient.AgentLaunchReport) *hubclient.AgentLaunchReportResult {
+			if claimState(req) {
+				return completedAnswer
+			}
+			return appliedAnswer
+		}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr := &blockingHookedManager{asyncManager: newAsyncManager(), started: make(chan struct{})}
+			srv, rtb := newAsyncTestServer(t, mgr)
+			rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+				return tc.answer(req), nil
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			rec := newLaunchRecord("L-lc", "agent-lc", store.LaunchKindCreate, "", time.Now().Add(time.Hour), cancel)
+			lc := launchCtx{opts: api.StartOptions{Name: "agent-lc"}, mgr: mgr, key: launchKey{Slug: "agent-lc"}}
+
+			done := make(chan struct{})
+			go func() {
+				srv.runLaunch(ctx, rec, lc)
+				close(done)
+			}()
+			select {
+			case <-mgr.started:
+			case <-time.After(10 * time.Second):
+				t.Fatal("Start did not reach its blocking point")
+			}
+			rec.CancelLocal()
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				t.Fatal("runLaunch did not return after the local cancel")
+			}
+
+			if n := mgr.CleanupCallCount(); n != tc.wantCleanup {
+				t.Fatalf("cleanup calls = %d, want %d", n, tc.wantCleanup)
+			}
+			if tc.wantCleanup == 1 {
+				if got := (&hookedManager{mgr.asyncManager}).cleanupHandles(); len(got) != 1 || got[0] != hookSecret {
+					t.Fatalf("cleanup handles = %+v, want the recorded secret", got)
+				}
+			}
+			if terms := terminalReports(rtb); len(terms) != 0 {
+				t.Fatalf("terminal sent after a local cancel: %+v", terms)
+			}
+		})
+	}
+}

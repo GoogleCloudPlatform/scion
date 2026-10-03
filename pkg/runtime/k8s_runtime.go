@@ -651,6 +651,17 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	runtimeLog.Info("Pre-create setup complete", "agent", config.Name, "namespace", namespace,
 		"phase", "pre-create", "elapsed_ms", time.Since(preCreateStart).Milliseconds())
 
+	// The pod create's checkpoint comes before the NFS provisioning lock
+	// below, not inside it: it can block for as long as the launch deadline
+	// while the Hub is unreachable, and other agents of the project would
+	// wait on the lock meanwhile. Between here and the pod create there is
+	// only local work (the lock and the pod spec), no API object creates.
+	if err := hooks.checkpoint(ctx, CheckpointStepPodCreate); err != nil {
+		// The launch is over: create nothing further. The secrets this
+		// launch created are removed by its cleanup, by UID.
+		return "", err
+	}
+
 	// --- N2-2b: Per-project advisory lock for NFS init-container provisioning ---
 	//
 	// When backend=nfs with a bound PV claim, acquire the per-project lock
@@ -712,11 +723,6 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	runtimeLog.Info("Creating pod", "agent", config.Name, "namespace", namespace, "image", config.Image, "phase", "pod-create")
 	fmt.Printf("  Provisioning pod '%s' in namespace '%s'...\n", config.Name, namespace)
 	podCreateStart := time.Now()
-	if err := hooks.checkpoint(ctx, CheckpointStepPodCreate); err != nil {
-		// The launch is over: create nothing further. The secrets this
-		// launch created are removed by its cleanup, by UID.
-		return "", err
-	}
 	createdPod, err := r.Client.Clientset.CoreV1().Pods(namespace).Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
 		// The deferred cleanup removes this start's Secrets (an async
