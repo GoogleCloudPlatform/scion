@@ -531,9 +531,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		}
 	}
 
-	// If dispatch failed, return error
+	// If dispatch failed, return error. A required-skill resolution failure
+	// keeps the broker's status and code; anything else is a 502.
 	if dispatchErr != nil {
-		RuntimeError(w, "Failed to dispatch to runtime broker: "+dispatchErr.Error())
+		if !relaySkillResolutionError(w, dispatchErr) {
+			RuntimeError(w, "Failed to dispatch to runtime broker: "+dispatchErr.Error())
+		}
 		return
 	}
 

@@ -232,6 +232,12 @@ func Unprocessable(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, message, nil)
 }
 
+// skillErrCodeForbidden is the per-URI code the Hub's batch skill resolve
+// returns for a gh:// ref when the caller may not resolve GitHub skills for
+// the project. It reaches the broker as a SkillResolutionError.Code through
+// PreResolvedSkills.
+const skillErrCodeForbidden = "forbidden"
+
 // skillResolutionHTTPStatus maps a SkillResolutionError.Code to an HTTP
 // status. Each cause gets the status whose standard semantics best fit it:
 //   - not_found: 404, a skill genuinely absent at the given ref.
@@ -241,6 +247,8 @@ func Unprocessable(w http.ResponseWriter, message string) {
 //   - upstream_unavailable: 502, GitHub itself returned repeated 5xx.
 //   - unreachable: 502, a network-level failure (DNS, connection refused,
 //     TLS) rather than a response GitHub chose to send.
+//   - forbidden: 403, the Hub's per-URI code for a gh:// ref the caller may
+//     not resolve GitHub skills for in this project.
 //   - anything else — including an uncategorized local failure and the Hub's
 //     own per-URI codes for PreResolvedSkills (storage_error, internal_error,
 //     federation_error) — keeps the existing 500, not a client error: the
@@ -250,6 +258,8 @@ func skillResolutionHTTPStatus(code string) int {
 	switch code {
 	case agent.SkillErrCodeNotFound:
 		return http.StatusNotFound
+	case skillErrCodeForbidden:
+		return http.StatusForbidden
 	case agent.SkillErrCodeRateLimited:
 		return http.StatusTooManyRequests
 	case agent.SkillErrCodeTimeout:

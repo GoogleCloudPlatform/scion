@@ -370,3 +370,35 @@ func TestControlChannelBrokerClient_CreateAgentWithGather_ErrorCarriesStatus(t *
 		t.Errorf("expected broker error message to name the ref, got: %s", se.brokerErrorMessage())
 	}
 }
+
+// TestControlChannelBrokerClient_StartAgent_ErrorCarriesRetryAfter checks
+// that a broker error on start keeps its status and Retry-After header, so
+// the hub can relay a rate-limited skill resolution failure unchanged.
+func TestControlChannelBrokerClient_StartAgent_ErrorCarriesRetryAfter(t *testing.T) {
+	body := []byte(`{"error":{"code":"skill_resolution_failed","message":"required skill \"gh://owner/repo/my-skill@main\" could not be resolved: rate limited","details":{"skill":"gh://owner/repo/my-skill@main","cause":"rate_limited"}}}`)
+	tunnel := &mockControlChannelTunnel{
+		connected: true,
+		status:    http.StatusTooManyRequests,
+		body:      body,
+		headers:   map[string]string{"Retry-After": "90"},
+	}
+	client := &ControlChannelBrokerClient{manager: tunnel}
+
+	_, err := client.StartAgent(context.Background(), "broker-1", "unused", "agent-1", "proj-1", "", "", "", "", "", "", nil, nil, nil, nil, false, false, StartExtras{})
+	if err == nil {
+		t.Fatal("expected an error for the broker's 429 response")
+	}
+	var se *brokerStatusError
+	if !errors.As(err, &se) {
+		t.Fatalf("expected a *brokerStatusError, got %T: %v", err, err)
+	}
+	if se.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("expected status %d, got %d", http.StatusTooManyRequests, se.StatusCode)
+	}
+	if se.RetryAfter != "90" {
+		t.Errorf("expected RetryAfter %q, got %q", "90", se.RetryAfter)
+	}
+	if se.brokerErrorCode() != skillResolutionErrorCode {
+		t.Errorf("expected broker error code %q, got %q", skillResolutionErrorCode, se.brokerErrorCode())
+	}
+}

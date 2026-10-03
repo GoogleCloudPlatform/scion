@@ -95,6 +95,8 @@ scion start my-review --type code-reviewer --harness-config gemini
 
 # Provision without starting (writes the agent dir + prompt.md for later)
 scion create my-review my task... --type code-reviewer
+# ...then start it
+scion start my-review
 ```
 
 `--type` also accepts an **absolute path** or a **remote URI**, so you can run a template straight from a repository without importing it first:

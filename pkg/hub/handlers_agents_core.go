@@ -2062,7 +2062,21 @@ func (s *Server) createAgentInProject(
 		} else {
 			// Provision-only: set up agent filesystem without starting
 			if err := dispatcher.DispatchAgentProvision(ctx, agent); err != nil {
-				warnings = append(warnings, "Failed to provision on runtime broker: "+err.Error())
+				if isSkillResolutionDispatchError(err) {
+					// A required skill could not be resolved, so the agent
+					// can never start from this provision. Fail the create the
+					// same way a full create does: remove the broker files and
+					// the agent row, and relay the broker's status. No revoke
+					// here: DispatchAgentProvision already revoked any
+					// credential it minted on this error return. Other
+					// provision failures stay warnings.
+					s.agentLifecycleLog.Warn("Provision-only create failed: required skill could not be resolved",
+						"agent_id", agent.ID, "agent", agent.Name, "broker", agent.RuntimeBrokerID, "error", err)
+					s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, dispatchDeleteFailedCreate(dispatcher, agent))
+					dispatchCreateErrorResponse(w, err)
+					return
+				}
+				warnings = append(warnings, api.ProvisionFailedWarningPrefix+err.Error())
 			} else {
 				agent.Phase = string(state.PhaseCreated)
 				if err := s.updateAgentAfterDispatch(ctx, agent); err != nil {
@@ -4058,19 +4072,14 @@ const skillResolutionErrorCode = "skill_resolution_failed"
 // A required-skill resolution failure is relayed verbatim: the broker's
 // status, message, details and Retry-After, with no hub prefix (#2546 R2).
 func dispatchCreateErrorResponse(w http.ResponseWriter, err error) {
-	var se *brokerStatusError
-	isSkillResolution := errors.As(err, &se) && se.brokerErrorCode() == skillResolutionErrorCode
-
 	switch {
 	case isContainerNameConflict(err):
 		Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
-	case isSkillResolution:
-		if se.RetryAfter != "" {
-			w.Header().Set("Retry-After", se.RetryAfter)
-		}
-		writeError(w, se.StatusCode, skillResolutionErrorCode, se.brokerErrorMessage(), se.brokerErrorDetails())
+	case relaySkillResolutionError(w, err):
+		// Response already written.
 	case isBrokerStatus(err, http.StatusNotFound):
 		message := err.Error()
+		var se *brokerStatusError
 		if errors.As(err, &se) {
 			message = se.brokerErrorMessage()
 		}
@@ -4078,6 +4087,33 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error) {
 	default:
 		RuntimeError(w, "Failed to dispatch to runtime broker: "+err.Error())
 	}
+}
+
+// isSkillResolutionDispatchError reports whether err is the broker's typed
+// required-skill resolution failure (error code skill_resolution_failed).
+func isSkillResolutionDispatchError(err error) bool {
+	var se *brokerStatusError
+	return errors.As(err, &se) && se.brokerErrorCode() == skillResolutionErrorCode
+}
+
+// relaySkillResolutionError writes the broker's required-skill resolution
+// failure verbatim -- its status, code, message, details and Retry-After,
+// with no hub prefix -- and reports whether it did. For any other error it
+// writes nothing and returns false, so the caller keeps its own handling.
+//
+// The broker reports a skill the caller cannot read as not_found (404), the
+// same as a skill that does not exist, so relaying the status unchanged
+// keeps the two indistinguishable.
+func relaySkillResolutionError(w http.ResponseWriter, err error) bool {
+	var se *brokerStatusError
+	if !errors.As(err, &se) || se.brokerErrorCode() != skillResolutionErrorCode {
+		return false
+	}
+	if se.RetryAfter != "" {
+		w.Header().Set("Retry-After", se.RetryAfter)
+	}
+	writeError(w, se.StatusCode, skillResolutionErrorCode, se.brokerErrorMessage(), se.brokerErrorDetails())
+	return true
 }
 
 // recordDelegationEdge creates a delegation edge from the creator to the new

@@ -1096,7 +1096,7 @@ func (s *Server) handleExistingAgent(
 			s.rollbackBrokerQuota(ctx, existingAgent, reserved)
 			if isContainerNameConflict(err) {
 				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
-			} else {
+			} else if !relaySkillResolutionError(w, err) {
 				RuntimeError(w, "Failed to resume suspended agent: "+err.Error())
 			}
 			return existingAgentErrored
@@ -1176,7 +1176,7 @@ func (s *Server) handleExistingAgent(
 				s.rollbackBrokerQuota(ctx, existingAgent, reserved)
 				if isContainerNameConflict(err) {
 					Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
-				} else {
+				} else if !relaySkillResolutionError(w, err) {
 					RuntimeError(w, "Failed to resume stopped agent: "+err.Error())
 				}
 				return existingAgentErrored
@@ -1285,7 +1285,7 @@ func (s *Server) handleExistingAgent(
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, false); err != nil {
 			if isContainerNameConflict(err) {
 				Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
-			} else {
+			} else if !relaySkillResolutionError(w, err) {
 				RuntimeError(w, "Failed to start agent: "+err.Error())
 			}
 			return existingAgentErrored
