@@ -543,7 +543,8 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 
 	// Collect local files
 	fmt.Printf("Scanning harness-config files in %s...\n", localPath)
-	files, err := hubclient.CollectFiles(localPath, nil)
+	// Backups and atomic-write temp files are local-only and never uploaded.
+	files, err := hubclient.CollectFiles(localPath, config.HarnessConfigTransientPatterns)
 	if err != nil {
 		return fmt.Errorf("failed to scan harness-config files: %w", err)
 	}
@@ -617,14 +618,30 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 				}
 			}
 
-			if len(filesToUpload) == 0 {
+			// Backups and temp files uploaded before they were excluded
+			// stay in the Hub manifest until a Finalize replaces it, so
+			// their presence counts as a change even when no real file
+			// changed. Other remote-only paths are left alone.
+			staleTransient := 0
+			for remotePath := range remoteHashes {
+				if _, local := localFileMap[remotePath]; !local && config.IsHarnessConfigTransientFile(remotePath) {
+					staleTransient++
+				}
+			}
+
+			if len(filesToUpload) == 0 && staleTransient == 0 {
 				fmt.Printf("Harness-config '%s' is already up to date.\n", name)
 				fmt.Printf("  ID: %s\n", hcID)
 				fmt.Printf("  Content Hash: %s\n", truncateHash(existing.ContentHash))
 				return nil
 			}
 
-			fmt.Printf("Found %d changed file(s), updating...\n", len(filesToUpload))
+			if staleTransient > 0 {
+				fmt.Printf("Removing %d backup/temp file(s) from the Hub manifest...\n", staleTransient)
+			}
+			if len(filesToUpload) > 0 {
+				fmt.Printf("Found %d changed file(s), updating...\n", len(filesToUpload))
+			}
 		}
 	} else {
 		fmt.Printf("Creating harness-config '%s' in Hub...\n", name)
@@ -645,17 +662,20 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 		filesToUpload = fileReqs
 	}
 
-	// Request upload URLs
-	fmt.Printf("Requesting upload URLs for %d file(s)...\n", len(filesToUpload))
-	uploadResp, err := hubCtx.Client.HarnessConfigs().RequestUploadURLs(ctx, hcID, filesToUpload)
-	if err != nil {
-		return fmt.Errorf("failed to get upload URLs: %w", err)
-	}
+	// Request upload URLs and upload. Skipped when only stale backup/temp
+	// entries are being dropped from the manifest: every file it lists is
+	// already stored, so Finalize alone replaces the manifest.
+	if len(filesToUpload) > 0 {
+		fmt.Printf("Requesting upload URLs for %d file(s)...\n", len(filesToUpload))
+		uploadResp, err := hubCtx.Client.HarnessConfigs().RequestUploadURLs(ctx, hcID, filesToUpload)
+		if err != nil {
+			return fmt.Errorf("failed to get upload URLs: %w", err)
+		}
 
-	// Upload files
-	fmt.Printf("Uploading %d file(s)...\n", len(uploadResp.UploadURLs))
-	if err := uploadHarnessConfigFiles(ctx, hubCtx.Client.HarnessConfigs(), hcID, localFileMap, filesToUpload, uploadResp.UploadURLs); err != nil {
-		return err
+		fmt.Printf("Uploading %d file(s)...\n", len(uploadResp.UploadURLs))
+		if err := uploadHarnessConfigFiles(ctx, hubCtx.Client.HarnessConfigs(), hcID, localFileMap, filesToUpload, uploadResp.UploadURLs); err != nil {
+			return err
+		}
 	}
 
 	// Build manifest
