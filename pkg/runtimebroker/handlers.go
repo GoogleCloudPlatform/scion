@@ -1802,9 +1802,27 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 	// projectID before using it.
 	// The project path is needed both to delete files and to mark
 	// agent-info.json deleted on a soft delete.
-	target, err := s.resolveDeleteTarget(ctx, id, projectID, query.Get("projectPath"), deleteFiles || softDelete)
+	// runId, when the hub sends it, names the run the delete is for
+	// (ptone/scion#2550): resolveDeleteTarget then never targets an entry
+	// labelled with a different run, so a stale delete cannot remove an
+	// agent recreated under the same name.
+	runID := query.Get("runId")
+	span.SetAttributes(attribute.String("scion.agent.run_id", runID))
+	s.agentLifecycleLog.Debug("Agent delete: resolving target",
+		"agent_id", id, "project_id", projectID, "run_id", runID)
+	target, err := s.resolveDeleteTarget(ctx, id, projectID, runID, query.Get("projectPath"), deleteFiles || softDelete)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
+		if errors.Is(err, errDeleteTargetRunMismatch) {
+			// Only entries of a different run hold this name: the run the
+			// hub meant is already gone. Touch nothing -- not even leftover
+			// per-agent objects, which belong to the live run -- and answer
+			// 404, which the hub treats as an idempotent success.
+			s.agentLifecycleLog.Info("Agent delete: no entry for the requested run; leaving the other run untouched",
+				"agent_id", id, "project_id", projectID, "run_id", runID)
+			NotFound(w, "Agent")
+			return
+		}
 		if errors.Is(err, errDeleteTargetNotFound) {
 			// No container and no files, but per-agent runtime objects
 			// may remain when the container was removed outside scion.
@@ -1897,7 +1915,10 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 		}
 	}
 
-	_, err = target.mgr.DeleteTarget(ctx, target.name, target.containerID, filesToDelete, projectPath, removeBranch)
+	s.agentLifecycleLog.Debug("Agent delete: resolved target",
+		"agent_id", id, "project_id", agentProjectID, "run_id", runID,
+		"container_id", target.containerID, "target_run_id", target.runID)
+	_, err = target.mgr.DeleteTarget(ctx, target.name, scionrt.RunRef{ID: target.containerID, RunID: target.runID}, filesToDelete, projectPath, removeBranch)
 	if err != nil {
 		s.writeRuntimeOpError(w, ctx, "delete agent", err, "agent_id", id, "project_id", projectID)
 		return
@@ -1926,11 +1947,11 @@ func (s *Server) deleteAgent(w http.ResponseWriter, r *http.Request, id, project
 
 	if softDelete {
 		s.agentLifecycleLog.Info("Agent soft-deleted",
-			"agent_id", id, "project_id", agentProjectID,
+			"agent_id", id, "project_id", agentProjectID, "run_id", runID,
 			"delete_files", deleteFiles, "remove_branch", removeBranch)
 	} else {
 		s.agentLifecycleLog.Info("Agent deleted",
-			"agent_id", id, "project_id", agentProjectID,
+			"agent_id", id, "project_id", agentProjectID, "run_id", runID,
 			"delete_files", deleteFiles, "remove_branch", removeBranch)
 	}
 
@@ -4761,6 +4782,12 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, slug stri
 // project's hub-managed directory.
 var errDeleteTargetNotFound = errors.New("agent not found in project")
 
+// errDeleteTargetRunMismatch means a delete carried a run ID and every entry
+// holding the name belongs to a different run (ptone/scion#2550). The broker
+// answers 404 like errDeleteTargetNotFound but, unlike it, performs no
+// cleanup at all: whatever remains belongs to the live, newer run.
+var errDeleteTargetRunMismatch = errors.New("no entry for the requested run")
+
 // errDeleteTargetUnknown means the agent could not be resolved because a
 // runtime listing failed.
 var errDeleteTargetUnknown = errors.New("could not list agents to resolve delete target")
@@ -4878,6 +4905,7 @@ type deleteTarget struct {
 	mgr         agent.Manager
 	name        string // agent directory / slug name used for file cleanup
 	containerID string // empty for a file-only (never started / container gone) agent
+	runID       string // the entry's scion.run_id label; empty for legacy or file-only entries
 	projectPath string
 	projectID   string
 }
@@ -4924,8 +4952,21 @@ func agentHasNoProjectIdentity(a api.AgentInfo) bool {
 // Without a projectID (solo/CLI), any same-named entry matches, and the
 // hub-managed directory scan must find exactly one project.
 //
+// With a runID (ptone/scion#2550), the entries found above are further
+// filtered by their scion.run_id label (see filterDeleteCandidatesByRun):
+//   - an entry labelled runID is a target;
+//   - an entry labelled with a different, non-empty run ID is never a target;
+//   - a legacy container with no run ID label (created before run IDs
+//     existed) still matches by name, as before;
+//   - a file-only entry (no container) matches only if no entry of another
+//     run holds the name, since such files belong to that live run;
+//   - if entries of another run were dropped and nothing is left, the result
+//     is errDeleteTargetRunMismatch, and no file-only lookup is attempted.
+//
+// Without a runID, behaviour is exactly as before.
+//
 // More than one distinct match is an error (fail closed) rather than a guess.
-func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, projectPathHint string, needProjectPath bool) (*deleteTarget, error) {
+func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, runID, projectPathHint string, needProjectPath bool) (*deleteTarget, error) {
 	type candidate struct {
 		mgr   agent.Manager
 		entry api.AgentInfo
@@ -4984,6 +5025,14 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, project
 		matches = collect(map[string]string{"scion.agent": "true"}, func(api.AgentInfo) bool { return true })
 	}
 
+	if runID != "" {
+		var otherRun bool
+		matches, otherRun = filterDeleteCandidatesByRun(matches, runID, func(c candidate) api.AgentInfo { return c.entry })
+		if len(matches) == 0 && otherRun {
+			return nil, errDeleteTargetRunMismatch
+		}
+	}
+
 	switch {
 	case len(matches) > 1:
 		return nil, fmt.Errorf("agent '%s' is ambiguous: %d agents match in project %q", id, len(matches), projectID)
@@ -4993,6 +5042,7 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, project
 			mgr:         m.mgr,
 			name:        id,
 			containerID: m.entry.ContainerID,
+			runID:       m.entry.RunID,
 			projectPath: m.entry.ProjectPath,
 			projectID:   m.entry.ProjectID,
 		}
@@ -5078,6 +5128,43 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, project
 		projectPath: resolved,
 		projectID:   projectID,
 	}, nil
+}
+
+// filterDeleteCandidatesByRun keeps the delete candidates that may belong to
+// run runID (see resolveDeleteTarget) and reports whether any candidate was
+// dropped because it is labelled with a different run.
+//
+// A legacy container with no run ID label is kept so that deleting an agent
+// started before run IDs existed works as before; it cannot be told apart
+// from the requested run, and an agent started since then always carries a
+// label. A file-only entry (no container) carries no label either, but when
+// another run's entry holds the name those files are that run's, so it is
+// dropped then.
+func filterDeleteCandidatesByRun[T any](cands []T, runID string, entry func(T) api.AgentInfo) ([]T, bool) {
+	var otherRun bool
+	for _, c := range cands {
+		if r := entry(c).RunID; r != "" && r != runID {
+			otherRun = true
+			break
+		}
+	}
+	var out []T
+	for _, c := range cands {
+		e := entry(c)
+		switch {
+		case e.RunID == runID:
+			out = append(out, c)
+		case e.RunID != "":
+			// Another run's entry: never a target.
+		case e.ContainerID != "":
+			// Legacy unlabelled container: matches by name.
+			out = append(out, c)
+		case !otherRun:
+			// File-only entry with no live entry of another run.
+			out = append(out, c)
+		}
+	}
+	return out, otherRun
 }
 
 // agentResourceCleaner is implemented by managers whose runtime can remove

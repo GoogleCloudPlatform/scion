@@ -77,9 +77,10 @@ type Manager interface {
 	Delete(ctx context.Context, agentID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error)
 
 	// DeleteTarget terminates and removes an agent the caller has already
-	// resolved to a specific runtime entry (containerID, may be empty for a
-	// file-only agent) and project path. It never re-resolves by slug.
-	DeleteTarget(ctx context.Context, agentName, containerID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error)
+	// resolved to a specific runtime entry (ref.ID, may be empty for a
+	// file-only agent; ref.RunID is that entry's run ID) and project path.
+	// It never re-resolves by slug.
+	DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error)
 
 	// List returns active agents
 	List(ctx context.Context, filter map[string]string) ([]api.AgentInfo, error)
@@ -375,32 +376,33 @@ func (m *AgentManager) Delete(ctx context.Context, agentID string, deleteFiles b
 	slug := api.Slugify(agentID)
 	agents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
 	util.Debugf("delete: mgr.Delete container list completed in %v", time.Since(listStart))
-	var targetID string
+	var target runtime.RunRef
 	if err == nil {
 		// Resolve project name from projectPath (if provided) to scope the
 		// container lookup; refuse ambiguous matches rather than picking one.
-		target, found, selErr := selectAgentTarget(agents, agentID, resolveProjectName(projectPath))
+		entry, found, selErr := selectAgentTarget(agents, agentID, resolveProjectName(projectPath))
 		if selErr != nil {
 			return false, selErr
 		}
 		if found {
-			targetID = target.ContainerID
+			target = runtime.RunRef{ID: entry.ContainerID, RunID: entry.RunID}
 		}
 	}
-	return m.deleteResolved(ctx, agentID, targetID, deleteFiles, projectPath, removeBranch)
+	return m.deleteResolved(ctx, agentID, target, deleteFiles, projectPath, removeBranch)
 }
 
 // DeleteTarget deletes an agent that the caller has already resolved to a
 // specific runtime entry. Unlike Delete it performs no slug re-resolution, so
-// it cannot drift to a same-slug agent in another project. containerID may be
-// empty for an agent that has files but no backing container; projectPath is
-// used verbatim for file deletion.
-func (m *AgentManager) DeleteTarget(ctx context.Context, agentName, containerID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
-	return m.deleteResolved(ctx, agentName, containerID, deleteFiles, projectPath, removeBranch)
+// it cannot drift to a same-slug agent in another project. ref.ID may be
+// empty for an agent that has files but no backing container; ref.RunID is
+// the resolved entry's run ID and is passed through to Runtime.Delete.
+// projectPath is used verbatim for file deletion.
+func (m *AgentManager) DeleteTarget(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	return m.deleteResolved(ctx, agentName, ref, deleteFiles, projectPath, removeBranch)
 }
 
-func (m *AgentManager) deleteResolved(ctx context.Context, agentName, targetID string, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
-	if targetID != "" {
+func (m *AgentManager) deleteResolved(ctx context.Context, agentName string, ref runtime.RunRef, deleteFiles bool, projectPath string, removeBranch bool) (bool, error) {
+	if targetID := ref.ID; targetID != "" {
 		// Stop the container gracefully before force-removing it. This ensures
 		// bind mounts (e.g. shared-dir volumes) are properly released before
 		// filesystem cleanup. Without this, docker rm -f / container kill sends
@@ -413,8 +415,8 @@ func (m *AgentManager) deleteResolved(ctx context.Context, agentName, targetID s
 			util.Debugf("delete: stop returned error (continuing): %v", err)
 		}
 
-		util.Debugf("delete: starting runtime delete for container %s", targetID)
-		if err := m.Runtime.Delete(ctx, targetID); err != nil {
+		util.Debugf("delete: starting runtime delete for container %s (run_id=%q)", targetID, ref.RunID)
+		if err := m.Runtime.Delete(ctx, ref); err != nil {
 			return false, fmt.Errorf("failed to delete container: %w", err)
 		}
 		util.Debugf("delete: runtime delete completed for container %s", targetID)
