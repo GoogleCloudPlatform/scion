@@ -483,6 +483,31 @@ describe('formatRelative (past and future)', () => {
   it('returns the original string on parse failure', () => {
     expect(formatRelative('not-a-date')).toBe('not-a-date');
   });
+
+  it('formats seconds, and "now" for the current instant', () => {
+    vi.setSystemTime(new Date('2026-01-15T00:00:30Z'));
+    expect(formatRelative('2026-01-15T00:00:00Z')).toBe('30 seconds ago');
+    expect(formatRelative('2026-01-15T00:01:00Z')).toBe('in 30 seconds');
+    expect(formatRelative('2026-01-15T00:00:30Z')).toBe('now');
+  });
+
+  it('formats days past and future (no hours cap)', () => {
+    vi.setSystemTime(new Date('2026-01-15T00:00:00Z'));
+    expect(formatRelative('2026-01-12T00:00:00Z')).toBe('3 days ago');
+    expect(formatRelative('2026-01-18T00:00:00Z')).toBe('in 3 days');
+    expect(formatRelative('2026-01-14T00:00:00Z')).toBe('yesterday');
+    expect(formatRelative('2026-01-16T00:00:00Z')).toBe('tomorrow');
+  });
+
+  it('accepts a style option for compact cells', () => {
+    vi.setSystemTime(new Date('2026-01-15T03:00:00Z'));
+    expect(formatRelative('2026-01-15T00:00:00Z', { style: 'long' })).toBe('3 hours ago');
+    expect(formatRelative('2026-01-15T00:00:00Z', { style: 'short' })).toBe('3 hr. ago');
+    expect(formatRelative('2026-01-15T00:00:00Z', { style: 'narrow' })).toBe('3h ago');
+    expect(formatRelative('2026-01-15T02:55:00Z', { style: 'narrow' })).toBe('5m ago');
+    expect(formatRelative('2026-01-13T03:00:00Z', { style: 'narrow' })).toBe('2d ago');
+    expect(formatRelative('2026-01-18T03:00:00Z', { style: 'narrow' })).toBe('in 3d');
+  });
 });
 
 describe('parseWallClock / toWallClockInput', () => {

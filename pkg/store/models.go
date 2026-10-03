@@ -146,6 +146,29 @@ type Agent struct {
 	// populate it themselves, so a snapshot always reflects the fields
 	// present at the moment it was computed, not at load time.
 	Launch *AgentLaunch `json:"launch,omitempty"`
+
+	// --- Backend-driven agent delete (design ptone/scion#2483 §2.1) ---
+	// The persisted deletion_* columns: a leased, sticky delete marker.
+	// Internal bookkeeping, untagged (json:"-") like the launch_* columns.
+	// UpdateAgent never writes them (they are absent from its Ent builder
+	// chain); the only writer is UpdateAgentDeletion. See deletion_view.go
+	// for the client-facing Deletion view and the predicates.
+	DeletionState     string     `json:"-"` // "" | "deleting" | "finalizing" | "failed"
+	DeletionClaim     int64      `json:"-"` // claim epoch, bumped on every successful claim
+	DeletionLeaseAt   *time.Time `json:"-"` // lease expiry; renewed by the live engine
+	DeletionStartedAt *time.Time `json:"-"`
+	DeletionFailedAt  *time.Time `json:"-"`
+	DeletionCode      string     `json:"-"`
+	DeletionError     string     `json:"-"`
+	DeletionPrior     string     `json:"-"` // JSON DeletionPriorState
+	DeletionRequest   string     `json:"-"` // JSON DeletionRequestInfo
+
+	// Deletion is the computed, client-facing view of the deletion_* columns
+	// (design §2.2; see ComputeAgentDeletion). Like Launch it is populated
+	// only by the hub at response time. Unlike Launch it is always present
+	// on the wire: an explicit null when no delete is active or failed, so
+	// web delta merges clear it.
+	Deletion *DeletionInfo `json:"deletion"`
 }
 
 // InFlightPhases are the agent phases considered "in flight" for a launch

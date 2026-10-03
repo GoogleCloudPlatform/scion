@@ -2,7 +2,9 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: '.',
-  testMatch: 'entrypoints.pw.ts',
+  // Besides the terminal entry points, this suite covers the graph views'
+  // "Jump to agent" palette, which shares their fixtures.
+  testMatch: ['entrypoints.pw.ts', 'graph-palette.pw.ts'],
   workers: 1,
   timeout: 30000,
   use: {

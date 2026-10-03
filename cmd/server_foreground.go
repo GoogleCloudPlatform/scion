@@ -2889,6 +2889,22 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		}
 	}
 
+	// NFS workspace storage: lets the broker check (and, with
+	// server.workspace_storage.nfs.auto_mount, mount) the configured shares.
+	// Nil when the backend is not nfs. Read from the broker's global
+	// settings only, like shared_dir_storage: a project picked up from the
+	// working directory does not decide what the broker mounts.
+	var brokerNFS *config.V1NFSConfig
+	if globalVS, _, gErr := config.LoadGlobalSettings(); gErr != nil {
+		log.Printf("WARNING: NFS mount checks disabled: loading global settings: %v", gErr)
+	} else {
+		var nfsWarning string
+		brokerNFS, nfsWarning = brokerNFSConfig(globalVS)
+		if nfsWarning != "" {
+			log.Printf("WARNING: %s", nfsWarning)
+		}
+	}
+
 	// Create Runtime Broker server configuration
 	rhCfg := runtimebroker.ServerConfig{
 		Port:                          cfg.RuntimeBroker.Port,
@@ -2906,6 +2922,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		CORSAllowedHeaders:            cfg.RuntimeBroker.CORSAllowedHeaders,
 		CORSMaxAge:                    cfg.RuntimeBroker.CORSMaxAge,
 		AllowContainerScriptHarnesses: cfg.RuntimeBroker.AllowContainerScriptHarnesses,
+		NFSConfig:                     brokerNFS,
 		Debug:                         enableDebug,
 		SlowRequestThreshold:          cfg.SlowRequestThreshold,
 

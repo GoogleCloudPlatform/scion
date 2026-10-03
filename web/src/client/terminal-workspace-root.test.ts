@@ -1154,6 +1154,13 @@ function stubWebSocketAndEventSource(): void {
 }
 
 /** Waits for the lazily created palette element and its first render. */
+/** Fires `type` from the palette's own dialog, composed, as Shoelace does. */
+function fireFromDialog(palette: ScionQuickPalette, type: 'sl-hide' | 'sl-after-hide'): void {
+  palette
+    .shadowRoot!.querySelector('sl-dialog')!
+    .dispatchEvent(new Event(type, { bubbles: true, composed: true }));
+}
+
 async function waitForPalette(root: TerminalWorkspaceRoot): Promise<ScionQuickPalette> {
   const palette = await vi.waitFor(
     () => {
@@ -1496,7 +1503,7 @@ describe('"Jump to agent" palette: open, select, and events', () => {
     invoker.blur();
 
     root.show(false);
-    palette.dispatchEvent(new Event('sl-after-hide'));
+    fireFromDialog(palette, 'sl-after-hide');
 
     expect(palette.open).toBe(false);
     expect(signals[0].aborted).toBe(true);
@@ -1555,7 +1562,7 @@ describe('"Jump to agent" palette: open, select, and events', () => {
     const palette = await openLoadedPalette(root);
     invoker.blur();
     palette.dispatchEvent(new CustomEvent('palette-dismiss', { detail: { reason: 'escape' } }));
-    palette.dispatchEvent(new Event('sl-after-hide'));
+    fireFromDialog(palette, 'sl-after-hide');
 
     expect(document.activeElement).toBe(invoker);
     invoker.remove();
@@ -1718,7 +1725,7 @@ describe('"Jump to agent" palette: open, select, and events', () => {
     await flush();
     expect(focusB).not.toHaveBeenCalled();
 
-    palette.dispatchEvent(new Event('sl-after-hide'));
+    fireFromDialog(palette, 'sl-after-hide');
     expect(focusB).not.toHaveBeenCalled();
     await nextTask();
 
@@ -1735,7 +1742,7 @@ describe('"Jump to agent" palette: open, select, and events', () => {
     await flush();
 
     const palette = await pickFromPalette(root, AGENT_NEW);
-    palette.dispatchEvent(new Event('sl-after-hide'));
+    fireFromDialog(palette, 'sl-after-hide');
     await nextTask();
     root.create(reg, AGENT_NEW);
     const focusNew = vi.spyOn(paneFor(root, AGENT_NEW), 'focusTerminal');
@@ -1814,7 +1821,7 @@ describe('"Jump to agent" palette: palette and focus lifecycle', () => {
   /** Picks `agentId` and waits until the palette's close has settled. */
   async function pickAndSettle(agentId: string): Promise<ScionQuickPalette> {
     const palette = await pickFromPalette(root, agentId);
-    palette.dispatchEvent(new Event('sl-after-hide'));
+    fireFromDialog(palette, 'sl-after-hide');
     await nextTask();
     return palette;
   }
@@ -1849,7 +1856,7 @@ describe('"Jump to agent" palette: palette and focus lifecycle', () => {
 
     const palette = await openLoadedPalette(root);
     palette.dispatchEvent(new CustomEvent('palette-dismiss', { detail: { reason: 'escape' } }));
-    palette.dispatchEvent(new Event('sl-after-hide'));
+    fireFromDialog(palette, 'sl-after-hide');
     root.create(reg, AGENT_NEW);
     const focusNew = vi.spyOn(paneFor(root, AGENT_NEW), 'focusTerminal');
     await flush();
@@ -1902,7 +1909,7 @@ describe('"Jump to agent" palette: palette and focus lifecycle', () => {
     root.create(reg, AGENT_NEW);
     root.cancelPalettePlacement(AGENT_NEW);
     const focusNew = vi.spyOn(paneFor(root, AGENT_NEW), 'focusTerminal');
-    palette.dispatchEvent(new Event('sl-after-hide'));
+    fireFromDialog(palette, 'sl-after-hide');
     await nextTask();
 
     expect(focusNew).toHaveBeenCalledTimes(1);
@@ -1934,7 +1941,7 @@ describe('"Jump to agent" palette: palette and focus lifecycle', () => {
     const palette = await pickFromPalette(root, AGENT_NEW);
     // Shoelace's focus restore lands back in the pane that opened the palette.
     markPaneFocused(root, AGENT_A);
-    palette.dispatchEvent(new Event('sl-after-hide'));
+    fireFromDialog(palette, 'sl-after-hide');
     await nextTask();
     root.create(reg, AGENT_NEW);
     const focusNew = vi.spyOn(paneFor(root, AGENT_NEW), 'focusTerminal');
@@ -2295,6 +2302,16 @@ describe('"Jump to agent" palette: keyboard shortcut', () => {
     await nextTask();
 
     expect(palette.open).toBe(false);
+  });
+
+  it('dispose() closes an open palette and removes its element', async () => {
+    press({ key: 'k', metaKey: true });
+    const palette = await expectOpened();
+
+    root.dispose();
+
+    expect(palette.open).toBe(false);
+    expect(palette.isConnected).toBe(false);
   });
 
   it('dispose() removes the document-level shortcut listener', async () => {

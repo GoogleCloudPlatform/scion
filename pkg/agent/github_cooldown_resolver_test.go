@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -240,7 +241,10 @@ func TestGitHubSkillResolver_ProvisionBatchWithRateLimitedRef(t *testing.T) {
 
 // TestGitHubSkillResolver_SharedIdentityRateLimitFailsRestFast: when the
 // rate-limited ref shares its credential with the rest of the batch, the
-// refs after it that have no cached entry fail fast without requests.
+// refs started after it that have no cached entry fail fast without
+// requests. Refs are resolved one at a time here so that ref c starts only
+// after ref b's rate limit; the parallel case is covered by
+// TestGitHubSkillResolver_SharedIdentityRateLimitHoldsBackParallelRefs.
 func TestGitHubSkillResolver_SharedIdentityRateLimitFailsRestFast(t *testing.T) {
 	var calls, limitedCalls atomic.Int64
 	mux := http.NewServeMux()
@@ -253,6 +257,7 @@ func TestGitHubSkillResolver_SharedIdentityRateLimitFailsRestFast(t *testing.T) 
 	})
 	clock := newFakeClock()
 	r := newCooldownTestResolver(t, mux, clock)
+	r.maxConcurrent = 1
 
 	res, err := r.Resolve(context.Background(), []api.SkillReference{
 		{URI: "gh://org/skills/a@main"},
@@ -279,6 +284,77 @@ func TestGitHubSkillResolver_SharedIdentityRateLimitFailsRestFast(t *testing.T) 
 	// Only ref a's three requests went out: c was held back.
 	if calls.Load() != 3 {
 		t.Errorf("expected 3 requests for ref a only, got %d", calls.Load())
+	}
+}
+
+// TestGitHubSkillResolver_SharedIdentityRateLimitHoldsBackParallelRefs:
+// with refs resolved in parallel, a rate limit on one ref still holds back
+// the rest of the batch that shares its credential. A ref already in flight
+// when the cooldown starts sends no further request, and refs started
+// after it send none at all.
+func TestGitHubSkillResolver_SharedIdentityRateLimitHoldsBackParallelRefs(t *testing.T) {
+	var calls, limitedCalls atomic.Int64
+	mux := http.NewServeMux()
+	clock := newFakeClock()
+	r := newCooldownTestResolver(t, mux, clock)
+	r.maxConcurrent = 2
+	identity := GitHubCooldownIdentity(r.token)
+
+	// Ref b's rate limit is answered only once ref c's commit lookup has
+	// arrived, and c's lookup is answered only once that rate limit has
+	// started the cooldown, so c is in flight across that moment.
+	cArrived := make(chan struct{})
+	var cArrivedOnce sync.Once
+	mux.HandleFunc("/repos/org/skills/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		cArrivedOnce.Do(func() { close(cArrived) })
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, active := r.cooldownTracker().Active(identity); active {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		_, _ = w.Write([]byte(testCommitSHA))
+	})
+	for _, name := range []string{"c", "d", "e"} {
+		serveTestSkill(mux, "org", "skills", name, &calls)
+	}
+	mux.HandleFunc("/repos/org/limited/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		limitedCalls.Add(1)
+		select {
+		case <-cArrived:
+		case <-time.After(5 * time.Second):
+		}
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+
+	res, err := r.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://org/limited/b@main"},
+		{URI: "gh://org/skills/c@main"},
+		{URI: "gh://org/skills/d@main"},
+		{URI: "gh://org/skills/e@main"},
+	}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(res.Resolved) != 0 {
+		t.Errorf("expected no ref to resolve, got %+v", res.Resolved)
+	}
+	if len(res.Errors) != 4 {
+		t.Fatalf("expected 4 errors, got %+v", res.Errors)
+	}
+	for _, e := range res.Errors {
+		if e.Code != GitHubRateLimitedCode {
+			t.Errorf("%s: code %q, want %q", e.URI, e.Code, GitHubRateLimitedCode)
+		}
+	}
+	if limitedCalls.Load() != 1 {
+		t.Errorf("expected one request for the limited ref, got %d", limitedCalls.Load())
+	}
+	// Only ref c's commit lookup went out.
+	if calls.Load() != 1 {
+		t.Errorf("expected 1 request (ref c's commit lookup), got %d", calls.Load())
 	}
 }
 

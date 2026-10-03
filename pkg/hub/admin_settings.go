@@ -576,26 +576,31 @@ func (s *Server) reloadSettings() map[string]interface{} {
 	return results
 }
 
+// setOrDeleteString applies an optional string update to the raw settings
+// map: nil leaves the key untouched, "" deletes it, anything else sets it.
+func setOrDeleteString(raw map[string]interface{}, key string, v *string) {
+	if v == nil {
+		return
+	}
+	if *v == "" {
+		delete(raw, key)
+		return
+	}
+	raw[key] = *v
+}
+
 // applySettingsUpdates merges the update request into the raw settings map.
 func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateRequest) {
 	if req.SchemaVersion != nil {
 		raw["schema_version"] = *req.SchemaVersion
 	}
-	if req.ActiveProfile != nil {
-		raw["active_profile"] = *req.ActiveProfile
-	}
-	if req.DefaultTemplate != nil {
-		raw["default_template"] = *req.DefaultTemplate
-	}
-	if req.DefaultHarnessConfig != nil {
-		raw["default_harness_config"] = *req.DefaultHarnessConfig
-	}
-	if req.ImageRegistry != nil {
-		raw["image_registry"] = *req.ImageRegistry
-	}
-	if req.WorkspacePath != nil {
-		raw["workspace_path"] = *req.WorkspacePath
-	}
+	// Top-level string settings: an explicit "" deletes the key from
+	// settings.yaml; a nil pointer (key omitted) means "no change".
+	setOrDeleteString(raw, "active_profile", req.ActiveProfile)
+	setOrDeleteString(raw, "default_template", req.DefaultTemplate)
+	setOrDeleteString(raw, "default_harness_config", req.DefaultHarnessConfig)
+	setOrDeleteString(raw, "image_registry", req.ImageRegistry)
+	setOrDeleteString(raw, "workspace_path", req.WorkspacePath)
 
 	if req.Server != nil {
 		newServer := marshalToMap(req.Server)
@@ -664,27 +669,9 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 			delete(raw, "default_thinking_level")
 		}
 	}
-	if req.DefaultMaxAgentRole != nil {
-		if *req.DefaultMaxAgentRole != "" {
-			raw["default_max_agent_role"] = *req.DefaultMaxAgentRole
-		} else {
-			delete(raw, "default_max_agent_role")
-		}
-	}
-	if req.DefaultAgentRole != nil {
-		if *req.DefaultAgentRole != "" {
-			raw["default_agent_role"] = *req.DefaultAgentRole
-		} else {
-			delete(raw, "default_agent_role")
-		}
-	}
-	if req.DefaultRuntimeBroker != nil {
-		if *req.DefaultRuntimeBroker != "" {
-			raw["default_runtime_broker"] = *req.DefaultRuntimeBroker
-		} else {
-			delete(raw, "default_runtime_broker")
-		}
-	}
+	setOrDeleteString(raw, "default_max_agent_role", req.DefaultMaxAgentRole)
+	setOrDeleteString(raw, "default_agent_role", req.DefaultAgentRole)
+	setOrDeleteString(raw, "default_runtime_broker", req.DefaultRuntimeBroker)
 	if req.DefaultTimezone != nil {
 		if *req.DefaultTimezone != "" {
 			raw["default_timezone"] = *req.DefaultTimezone
