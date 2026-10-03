@@ -207,7 +207,9 @@ Access to the proxy and port registration APIs requires authentication, verified
   * A user must be authenticated and must hold the **`ActionPortAccess`** (or `ActionRead`) permission for that specific agent. Unauthorized users are blocked with an HTTP `403 Forbidden` response.
   * When authenticating with a [user access token](/scion/hosted/user/personal-access-tokens/), the
     token must have the `agent:port_access` scope selected, and the holder must currently have
-    access to that specific agent — your own agents and their descendants. Selecting the scope at
+    access to that specific agent — your own agents and their descendants, or any agent in a
+    project where your role grants `agent.port_access` (the built-in `project-owner` and
+    `project-admin` roles do). Selecting the scope at
     mint time is not by itself access to any agent; it is re-checked on every request.
 
 ---
