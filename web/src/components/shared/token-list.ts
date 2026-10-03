@@ -100,7 +100,7 @@ export function formatEligibilityReason(reason?: string): string {
  */
 export function relationshipBadgeText(scope: string): string {
   if (scope === 'agent:port_access') {
-    return 'Own agents & descendants, or any agent if your project role grants port access — checked per agent';
+    return 'Own agents & descendants, or any agent in the project if your role grants port access — checked per agent';
   }
   return 'Own agents & descendants — checked per agent';
 }

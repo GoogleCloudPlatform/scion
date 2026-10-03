@@ -229,7 +229,7 @@ describe('scion-token-list — project eligibility (ptone/scion#2122)', () => {
       'Own agents & descendants — checked per agent'
     );
     expect(relationshipBadgeText('agent:port_access')).toBe(
-      'Own agents & descendants, or any agent if your project role grants port access — checked per agent'
+      'Own agents & descendants, or any agent in the project if your role grants port access — checked per agent'
     );
   });
 
