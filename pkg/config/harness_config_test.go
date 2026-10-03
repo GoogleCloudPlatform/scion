@@ -730,37 +730,69 @@ func TestSeedHarnessConfigFromDir(t *testing.T) {
 	}
 }
 
-func TestSeedHarnessConfigFromDir_NoOverwriteWithoutForce(t *testing.T) {
+// TestSeedHarnessConfigFromDir_RefreshesProvisionerScriptsWithoutForce
+// verifies that non-force seeding over an existing harness-config refreshes
+// the provisioner-owned scripts (provision.py, scion_harness.py) and
+// config.yaml from the bundled copy, while preserving unrelated user files.
+func TestSeedHarnessConfigFromDir_RefreshesProvisionerScriptsWithoutForce(t *testing.T) {
 	tmpDir := t.TempDir()
 
+	const (
+		bundledConfig    = "harness: h\nimage: img:new\nuser: scion\n"
+		bundledProvision = "# bundled provision v2"
+		bundledLib       = "# bundled scion_harness v2"
+		bundledDialect   = "# bundled dialect"
+		bundledBashrc    = "# bundled bashrc"
+	)
 	sourceFS := fstest.MapFS{
-		"h/config.yaml": &fstest.MapFile{
-			Data: []byte("harness: h\nimage: img:latest\nuser: scion\n"),
-		},
-		"h/provision.py": &fstest.MapFile{
-			Data: []byte("# new provision"),
-		},
+		"h/config.yaml":      &fstest.MapFile{Data: []byte(bundledConfig)},
+		"h/provision.py":     &fstest.MapFile{Data: []byte(bundledProvision)},
+		"h/scion_harness.py": &fstest.MapFile{Data: []byte(bundledLib)},
+		"h/dialect.yaml":     &fstest.MapFile{Data: []byte(bundledDialect)},
+		"h/home/.bashrc":     &fstest.MapFile{Data: []byte(bundledBashrc)},
 	}
 
 	targetDir := filepath.Join(tmpDir, "h")
-	if err := os.MkdirAll(targetDir, 0755); err != nil {
-		t.Fatal(err)
+	existing := map[string]string{
+		"config.yaml":      "harness: h\nimage: img:old\nuser: scion\n",
+		"provision.py":     "# stale provision v1",
+		"scion_harness.py": "# stale scion_harness v1",
+		"dialect.yaml":     "# user dialect",
+		"home/.bashrc":     "# user bashrc",
+		"notes.txt":        "user notes",
 	}
-	existingContent := "# custom provision"
-	if err := os.WriteFile(filepath.Join(targetDir, "provision.py"), []byte(existingContent), 0644); err != nil {
-		t.Fatal(err)
+	for rel, content := range existing {
+		p := filepath.Join(targetDir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	if err := SeedHarnessConfigFromDir(targetDir, sourceFS, "h", false); err != nil {
 		t.Fatalf("SeedHarnessConfigFromDir failed: %v", err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(targetDir, "provision.py"))
-	if err != nil {
-		t.Fatal(err)
+	want := map[string]string{
+		// Bundle-owned: refreshed from the bundled copy.
+		"config.yaml":      bundledConfig,
+		"provision.py":     bundledProvision,
+		"scion_harness.py": bundledLib,
+		// User files: preserved.
+		"dialect.yaml": "# user dialect",
+		"home/.bashrc": "# user bashrc",
+		"notes.txt":    "user notes",
 	}
-	if string(data) != existingContent {
-		t.Errorf("provision.py was overwritten without force; got %q, want %q", string(data), existingContent)
+	for rel, wantContent := range want {
+		data, err := os.ReadFile(filepath.Join(targetDir, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		if string(data) != wantContent {
+			t.Errorf("%s = %q, want %q", rel, string(data), wantContent)
+		}
 	}
 }
 

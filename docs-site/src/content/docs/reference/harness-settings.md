@@ -121,13 +121,21 @@ hash before writing.
 scion harness-config list                 # local configs (add --hub to merge in Hub configs)
 scion harness-config show <name>          # details (local path/image, or Hub ID/status/source URL)
 scion harness-config reset <name>         # restore the global dir to embedded defaults
-scion harness-config upgrade [name]       # add missing support files / metadata
+scion harness-config upgrade [name]       # add missing support files / metadata, refresh provisioner scripts
 ```
 
 `reset` overwrites a config with the binary's embedded defaults. `upgrade` is non-destructive: it
 adds newly-required support files and merges missing metadata without clobbering your values (use
 `--dry-run` to preview, `--activate-script` to switch a config to container-script provisioning,
 `--force` to override). With no name, `upgrade` processes every config in the global directory.
+
+The provisioner scripts `provision.py` and `scion_harness.py` belong to the harness bundle, not to
+you. `upgrade` replaces them with the bundled copy whenever they differ, and reports each one as a
+`refresh_file` action. Non-force seeding (`scion init --machine`, hosted-mode `scion server`
+start, and Hub system-init) replaces them on every run, the same way it treats `config.yaml`.
+This means provisioner fixes reach nodes that already have the config. Your other files in the
+directory are kept. If you need to change what a provisioner does, publish it as your own
+harness-config under a different name. Do not edit the bundled scripts in place.
 
 ### Deleting
 

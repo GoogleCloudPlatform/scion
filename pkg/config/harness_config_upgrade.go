@@ -15,6 +15,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
@@ -156,7 +157,7 @@ func UpgradeHarnessConfig(targetDir string, h api.Harness, opts HarnessConfigUpg
 		}
 	}
 
-	addedFiles, err := addMissingHarnessConfigFiles(absTarget, embedsFS, basePath, configDir, opts.DryRun)
+	addedFiles, refreshedFiles, err := syncHarnessConfigSupportFiles(absTarget, embedsFS, basePath, configDir, opts.DryRun)
 	if err != nil {
 		return plan, err
 	}
@@ -165,6 +166,14 @@ func UpgradeHarnessConfig(targetDir string, h api.Harness, opts HarnessConfigUpg
 		plan.Actions = append(plan.Actions, HarnessConfigUpgradeAction{
 			Type: "add_file",
 			Path: relPath,
+		})
+	}
+	for _, relPath := range refreshedFiles {
+		plan.Changed = true
+		plan.Actions = append(plan.Actions, HarnessConfigUpgradeAction{
+			Type:   "refresh_file",
+			Path:   relPath,
+			Detail: "replaced provisioner script with bundled copy",
 		})
 	}
 
@@ -251,7 +260,7 @@ func upgradeFromHarnessesFS(absTarget string, plan *HarnessConfigUpgradePlan, ha
 	if err != nil {
 		return plan, err
 	}
-	addedFiles, err := addMissingHarnessConfigFiles(absTarget, subFS, ".", configDir, opts.DryRun)
+	addedFiles, refreshedFiles, err := syncHarnessConfigSupportFiles(absTarget, subFS, ".", configDir, opts.DryRun)
 	if err != nil {
 		return plan, err
 	}
@@ -260,6 +269,14 @@ func upgradeFromHarnessesFS(absTarget string, plan *HarnessConfigUpgradePlan, ha
 		plan.Actions = append(plan.Actions, HarnessConfigUpgradeAction{
 			Type: "add_file",
 			Path: relPath,
+		})
+	}
+	for _, relPath := range refreshedFiles {
+		plan.Changed = true
+		plan.Actions = append(plan.Actions, HarnessConfigUpgradeAction{
+			Type:   "refresh_file",
+			Path:   relPath,
+			Detail: "replaced provisioner script with bundled copy",
 		})
 	}
 
@@ -372,9 +389,14 @@ func activateContainerScriptProvisioner(configData []byte) ([]byte, bool, error)
 	return data, true, nil
 }
 
-func addMissingHarnessConfigFiles(targetDir string, embedsFS fs.FS, basePath, configDir string, dryRun bool) ([]string, error) {
+// syncHarnessConfigSupportFiles adds bundled support files that are missing
+// from targetDir and refreshes provisioner-owned scripts (provision.py,
+// scion_harness.py) whose content differs from the bundled copy. Other
+// existing files are preserved. It returns the added and refreshed paths
+// relative to targetDir.
+func syncHarnessConfigSupportFiles(targetDir string, embedsFS fs.FS, basePath, configDir string, dryRun bool) ([]string, []string, error) {
 	homeDir := filepath.Join(targetDir, "home")
-	var added []string
+	var added, refreshed []string
 	err := fs.WalkDir(embedsFS, basePath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -390,28 +412,43 @@ func addMissingHarnessConfigFiles(targetDir string, embedsFS fs.FS, basePath, co
 			return nil
 		}
 		targetPath := mapEmbedFileToHarnessConfigPath(targetDir, homeDir, configDir, relPath)
-		if targetPath == "" || fileExists(targetPath) {
+		if targetPath == "" {
 			return nil
 		}
 		targetRel, err := filepath.Rel(targetDir, targetPath)
 		if err != nil {
 			return err
 		}
-		added = append(added, filepath.ToSlash(targetRel))
+		data, err := fs.ReadFile(embedsFS, path)
+		if err != nil {
+			return err
+		}
+		if fileExists(targetPath) {
+			if !isProvisionerOwnedFile(targetRel) {
+				return nil
+			}
+			current, err := os.ReadFile(targetPath)
+			if err != nil {
+				return fmt.Errorf("read %s: %w", targetPath, err)
+			}
+			if bytes.Equal(current, data) {
+				return nil
+			}
+			refreshed = append(refreshed, filepath.ToSlash(targetRel))
+		} else {
+			added = append(added, filepath.ToSlash(targetRel))
+		}
 		if dryRun {
 			return nil
 		}
 		if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
 			return err
 		}
-		data, err := fs.ReadFile(embedsFS, path)
-		if err != nil {
-			return err
-		}
 		return os.WriteFile(targetPath, data, 0644)
 	})
 	sort.Strings(added)
-	return added, err
+	sort.Strings(refreshed)
+	return added, refreshed, err
 }
 
 func backupFile(path string, now time.Time) (string, error) {
