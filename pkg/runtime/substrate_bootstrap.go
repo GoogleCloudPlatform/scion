@@ -583,9 +583,13 @@ func generateControlToken() (string, error) {
 }
 
 // waitForHealthz polls GET /scion/v1/healthz through the router until it
-// reports wantState, or timeout elapses. clock is time.Sleep in
-// production, replaced in tests.
-func waitForHealthz(ctx context.Context, router *substrate.RouterClient, atespace, actorName, wantState string, timeout time.Duration, sleep func(time.Duration)) error {
+// reports wantState, or timeout elapses, or ctx is cancelled. sleep is the
+// cancellable wait between attempts (sleepWithContext in production, a
+// counting/no-op variant in tests); it reports ctx.Err() if the context ends
+// during the wait so a cancelled ctx returns promptly instead of blocking out
+// a full backoff. The error wraps ctx.Err() on cancellation, so callers can
+// test errors.Is(err, context.Canceled) / context.DeadlineExceeded.
+func waitForHealthz(ctx context.Context, router *substrate.RouterClient, atespace, actorName, wantState string, timeout time.Duration, sleep func(context.Context, time.Duration) error) error {
 	deadline := time.Now().Add(timeout)
 	backoff := 500 * time.Millisecond
 	const maxBackoff = 5 * time.Second
@@ -595,19 +599,40 @@ func waitForHealthz(ctx context.Context, router *substrate.RouterClient, atespac
 		if err == nil && state == wantState {
 			return nil
 		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("substrate: %s/%s wait for healthz state %q cancelled: %w", atespace, actorName, wantState, ctxErr)
+		}
 		if time.Now().After(deadline) {
 			if err != nil {
 				return fmt.Errorf("substrate: %s/%s did not reach healthz state %q within %s: %w", atespace, actorName, wantState, timeout, err)
 			}
 			return fmt.Errorf("substrate: %s/%s did not reach healthz state %q within %s (last state: %q)", atespace, actorName, wantState, timeout, state)
 		}
-		sleep(backoff)
+		if err := sleep(ctx, backoff); err != nil {
+			return fmt.Errorf("substrate: %s/%s wait for healthz state %q cancelled: %w", atespace, actorName, wantState, err)
+		}
 		if backoff < maxBackoff {
 			backoff *= 2
 			if backoff > maxBackoff {
 				backoff = maxBackoff
 			}
 		}
+	}
+}
+
+// sleepWithContext waits for d, or until ctx is done, whichever comes first.
+// It returns ctx.Err() if the context is cancelled or its deadline passes
+// during the wait, and nil if the full duration elapsed. It is the production
+// value of waitForHealthz's sleep seam, so a cancelled poll returns promptly
+// rather than blocking out the remaining backoff.
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 

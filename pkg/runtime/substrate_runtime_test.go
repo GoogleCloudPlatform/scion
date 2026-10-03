@@ -2962,3 +2962,87 @@ func TestGetRuntime_Substrate_SettingsBased_Memoized(t *testing.T) {
 		t.Errorf("substrateRuntimeBuilder called %d times via GetRuntime, want 1 (memoized)", built)
 	}
 }
+
+// TestWaitForHealthz_ContextCancellationReturnsPromptly proves waitForHealthz
+// stops polling as soon as the context is cancelled — before the call and
+// mid-loop — instead of sleeping and retrying until the timeout deadline. The
+// returned error must satisfy errors.Is(context.Canceled), and the injected
+// wait (the production-cancellable sleepWithContext seam) must run at most
+// once.
+func TestWaitForHealthz_ContextCancellationReturnsPromptly(t *testing.T) {
+	rec := &callRecorder{}
+	fa := newFakeActorServer(rec)
+	// Never reports the wanted state, so only cancellation (not success) can
+	// end the loop.
+	fa.healthzState = healthzRunning
+	server := httptest.NewServer(fa.handler())
+	defer server.Close()
+	router := substrate.NewRouterClient(server.URL)
+
+	t.Run("cancelled before the first attempt", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		sleeps := 0
+		sleep := func(context.Context, time.Duration) error { sleeps++; return nil }
+
+		err := waitForHealthz(ctx, router, "atespace", "actor", healthzAwaitingBootstrap, 2*time.Second, sleep)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want errors.Is(err, context.Canceled)", err)
+		}
+		if sleeps > 1 {
+			t.Fatalf("sleep ran %d times, want at most once on an already-cancelled context", sleeps)
+		}
+	})
+
+	t.Run("cancelled during the wait between attempts", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		sleeps := 0
+		// Model the production sleepWithContext: the wait observes the
+		// cancellation (here triggered on the first wait) and reports ctx.Err().
+		sleep := func(c context.Context, _ time.Duration) error {
+			sleeps++
+			cancel()
+			return c.Err()
+		}
+
+		err := waitForHealthz(ctx, router, "atespace", "actor", healthzAwaitingBootstrap, 2*time.Second, sleep)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want errors.Is(err, context.Canceled)", err)
+		}
+		if sleeps != 1 {
+			t.Fatalf("sleep ran %d times, want exactly once (return immediately once the wait is cancelled)", sleeps)
+		}
+	})
+}
+
+// TestWaitForHealthz_SucceedsAfterRetries is the positive control: with a live
+// context, waitForHealthz keeps polling across waits and returns nil once the
+// server reports the wanted state, so the cancellation guard above has not
+// made the normal retry path give up early.
+func TestWaitForHealthz_SucceedsAfterRetries(t *testing.T) {
+	rec := &callRecorder{}
+	fa := newFakeActorServer(rec)
+	fa.healthzState = healthzRunning // not yet the wanted state
+	server := httptest.NewServer(fa.handler())
+	defer server.Close()
+	router := substrate.NewRouterClient(server.URL)
+
+	sleeps := 0
+	sleep := func(context.Context, time.Duration) error {
+		sleeps++
+		if sleeps == 2 {
+			fa.mu.Lock()
+			fa.healthzState = healthzAwaitingBootstrap
+			fa.mu.Unlock()
+		}
+		return nil
+	}
+
+	err := waitForHealthz(context.Background(), router, "atespace", "actor", healthzAwaitingBootstrap, time.Minute, sleep)
+	if err != nil {
+		t.Fatalf("waitForHealthz returned %v, want nil once the state is reached after retries", err)
+	}
+	if sleeps < 2 {
+		t.Fatalf("sleep ran %d times, want >=2 (success is reached only after retries)", sleeps)
+	}
+}

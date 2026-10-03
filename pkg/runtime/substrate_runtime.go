@@ -83,6 +83,12 @@ type SubstrateRuntime struct {
 	now   func() time.Time
 	sleep func(time.Duration)
 
+	// sleepCtx is the cancellable wait waitForHealthz uses between polls, so a
+	// cancelled Run context returns promptly instead of blocking out a full
+	// backoff. Separate from sleep (which the uncancellable template/poll
+	// waits still use) so this change stays scoped to the healthz loop.
+	sleepCtx func(context.Context, time.Duration) error
+
 	// healthzTimeout bounds how long Run waits for the control server to
 	// report awaiting-bootstrap. A struct field (rather than always using
 	// defaultHealthzTimeout directly) so tests can shrink it and exercise
@@ -309,6 +315,7 @@ func newSubstrateRuntimeFromConfig(sc config.V1SubstrateConfig) (*SubstrateRunti
 		k8sClient:      k8sClient.Clientset,
 		now:            time.Now,
 		sleep:          time.Sleep,
+		sleepCtx:       sleepWithContext,
 		healthzTimeout: defaultHealthzTimeout,
 	}, nil
 }
@@ -327,6 +334,7 @@ func NewSubstrateRuntimeForTest(client ateapipb.ControlClient, router *substrate
 		k8sClient:      k8sClient,
 		now:            time.Now,
 		sleep:          func(time.Duration) {},
+		sleepCtx:       func(context.Context, time.Duration) error { return nil },
 		healthzTimeout: defaultHealthzTimeout,
 	}
 }
@@ -472,7 +480,7 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 	}
 
 	// Step 7: wait for the control server to be awaiting bootstrap.
-	if err := waitForHealthz(ctx, r.router, atespace, actorName, healthzAwaitingBootstrap, r.healthzTimeout, r.sleep); err != nil {
+	if err := waitForHealthz(ctx, r.router, atespace, actorName, healthzAwaitingBootstrap, r.healthzTimeout, r.sleepCtx); err != nil {
 		cleanup()
 		return "", r.redact(cfg, err)
 	}
