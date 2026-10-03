@@ -19,6 +19,9 @@ Issue: ptone/scion#2511 (part of ptone/scion#2457).
   agents follow the resolver. Values that match InlineConfig or a storage var
   are kept and adopted.
 
+- `.design/server-routine-maintenance.md` §3.3 now lists both applied-config
+  cleanup migrations and describes the Go-side seeding.
+
 ## Why
 Lazy adoption already happens on every TZ read or write. The migration
 classifies everything in one pass and makes adopted pins countable (design
@@ -34,5 +37,3 @@ Asia/Kathmandu. Scoped golangci-lint reports 0 issues.
 ## Follow-ups (not done)
 - Reincarnation snapshots are not swept. Reincarnate already adopts on the
   old config before it builds the new one.
-- `.design/server-routine-maintenance.md` §3.3 lists only the original seeded
-  migration (the env cleanup is missing too).

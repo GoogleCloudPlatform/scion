@@ -121,11 +121,13 @@ CREATE INDEX idx_maintenance_runs_started ON maintenance_operation_runs(started_
 
 ### 3.3 Seeded Migrations
 
-The following migrations are seeded into `maintenance_operations` when the table is first created (via the DB schema migration that adds the table). Additional migrations are added via future schema migrations as new one-time tasks are introduced.
+The following migrations are seeded into `maintenance_operations` by `SeedMaintenanceOperations` (`pkg/store/entadapter/maintenance_store.go`, list `defaultSeedOperations`). It runs at hub start and inserts any built-in entry that is missing, so a migration added in a later release appears as pending on existing hubs. Migrations run only when an admin starts them.
 
 | Key | Title | Description |
 |-----|-------|-------------|
 | `secret-hub-id-migration` | Secret Hub ID Namespace Migration | Migrates hub-scoped secrets from the legacy fixed "hub" scope ID to the per-instance hub ID. Required when upgrading a hub that was created before the hub ID namespacing feature. Only needed for GCP Secret Manager backend. |
+| `applied-config-env-cleanup` | Applied Config Env Cleanup | Removes entries from `agent.appliedConfig.env` that a since-fixed merge-back could have written for agents created before the fix: `GITHUB_TOKEN` unconditionally, plus any other key that matches a secret-flagged entry in the agent's reachable env-var or secret scopes. Safe to re-run. |
+| `applied-config-tz-cleanup` | Applied Config TZ Cleanup | Optional. Converts the `TZ` that older hubs saved in `agent.appliedConfig.env` into an explicit timezone pin (source `legacy`) in one pass and reports how many agents it converted. The hub already does this lazily on each timezone read. Safe to re-run; a second run converts 0. Both orders with `applied-config-env-cleanup` are safe: run this first to keep every saved `TZ` as a pin; if the env cleanup runs first, saved `TZ` values that match no live plain source are removed and those agents follow the timezone settings instead. |
 
 ### 3.4 Seeded Operations
 
