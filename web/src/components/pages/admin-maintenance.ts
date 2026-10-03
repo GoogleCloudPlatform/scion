@@ -747,11 +747,14 @@ export class ScionPageAdminMaintenance extends LitElement {
   private async applyUpdate(): Promise<void> {
     this.applyUpdateLoading = true;
     try {
-      const response = await apiFetch('/api/v1/admin/maintenance/operations/update-binary/run', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ params: {} }),
-      });
+      const response = await apiFetch(
+        '/api/v1/admin/maintenance/operations/update-binary/run',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ params: {} }),
+        }
+      );
 
       if (!response.ok) {
         const errMsg = await extractApiError(response, `HTTP ${response.status}`);
@@ -1458,7 +1461,11 @@ export class ScionPageAdminMaintenance extends LitElement {
         </p>
         ${ops.length === 0
           ? html`<div class="empty-inline">No operations registered.</div>`
-          : html` <div class="card-list">${ops.map((op) => this.renderOperationCard(op))}</div> `}
+          : html`
+              <div class="card-list">
+                ${ops.map((op) => this.renderOperationCard(op))}
+              </div>
+            `}
       </div>
     `;
   }

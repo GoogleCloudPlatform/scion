@@ -687,9 +687,7 @@ export class ScionPageAdminScheduler extends LitElement {
                           <td><strong>${sched.name}</strong></td>
                           <td><span class="type-badge">${sched.eventType}</span></td>
                           <td><span class="mono">${sched.cronExpr}</span></td>
-                          <td>
-                            <span class="status-badge ${sched.status}">${sched.status}</span>
-                          </td>
+                          <td><span class="status-badge ${sched.status}">${sched.status}</span></td>
                           <td>
                             <span class="meta-text">
                               ${sched.status === 'active' && sched.nextRunAt

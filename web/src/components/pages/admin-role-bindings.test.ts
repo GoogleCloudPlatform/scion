@@ -358,3 +358,39 @@ describe('scion-page-admin-role-bindings lifecycle zone label (review R4-1)', ()
     expect(query(el, '.lifecycle-hint')?.textContent).not.toContain('UTC');
   });
 });
+
+describe('scion-page-admin-role-bindings lifecycle times (tz-refactor task 20)', () => {
+  afterEach(() => {
+    setPreferredTimeZone('');
+  });
+
+  it('renders expiry and activation in the display zone, 24-hour, and re-renders on a zone change', async () => {
+    const { handler } = makeFetchHandler();
+    const el = await createComponent(handler);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const comp = el as any;
+    setPreferredTimeZone('Asia/Tokyo');
+    comp.bindings = [
+      {
+        ...makeBindings(1).items[0],
+        // Midnight in Tokyo (UTC+9); the browser zone is pinned to UTC.
+        notBefore: '2030-01-14T15:00:00Z',
+        expiresAt: '2030-02-14T15:00:00Z',
+      },
+    ];
+    await comp.updateComplete;
+
+    const details = () => queryAll(el, '.lifecycle-detail').map((d) => d.textContent?.trim());
+    expect(details()).toEqual([
+      'Expires Feb 15, 2030, 00:00 (Asia/Tokyo)',
+      'Activates Jan 15, 2030, 00:00 (Asia/Tokyo)',
+    ]);
+
+    setPreferredTimeZone('UTC');
+    await comp.updateComplete;
+    expect(details()).toEqual([
+      'Expires Feb 14, 2030, 15:00 (UTC)',
+      'Activates Jan 14, 2030, 15:00 (UTC)',
+    ]);
+  });
+});
