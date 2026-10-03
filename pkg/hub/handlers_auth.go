@@ -149,16 +149,39 @@ type CLIAuthTokenResponse struct {
 }
 
 // TokenCreateRequest is the request body for creating a user access token.
+//
+// The token boundary is named by exactly one of two forms:
+//   - Boundary, the explicit form: {"kind":"project","projectId":...} or
+//     {"kind":"hub"}.
+//   - ProjectID, the project-boundary shorthand.
+//
+// A request that names neither is rejected; it is never read as a hub
+// boundary. A request that uses both forms must name the same project
+// boundary in each. A hub boundary with any project ID is rejected.
 type TokenCreateRequest struct {
-	Name      string     `json:"name"`
-	ProjectID string     `json:"projectId"`
-	Scopes    []string   `json:"scopes"`
-	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+	Name      string                `json:"name"`
+	ProjectID string                `json:"projectId"`
+	Boundary  *TokenBoundaryRequest `json:"boundary,omitempty"`
+	Scopes    []string              `json:"scopes"`
+	ExpiresAt *time.Time            `json:"expiresAt,omitempty"`
 
 	// E.1 descriptive credential metadata: optional, bounded, immutable
 	// after issuance (there is no update endpoint).
 	Purpose string            `json:"purpose,omitempty"`
 	Labels  map[string]string `json:"labels,omitempty"`
+}
+
+// TokenBoundaryRequest is the explicit boundary form of a token create
+// request.
+type TokenBoundaryRequest struct {
+	Kind      string `json:"kind"`
+	ProjectID string `json:"projectId,omitempty"`
+}
+
+// TokenBoundaryResponse is the boundary a token was issued under.
+type TokenBoundaryResponse struct {
+	Kind      string `json:"kind"`
+	ProjectID string `json:"projectId,omitempty"`
 }
 
 // TokenCreateResponse is the response for creating a user access token.
@@ -168,16 +191,21 @@ type TokenCreateResponse struct {
 }
 
 // TokenResponse is the access token info (without the actual token value).
+//
+// Boundary is the authoritative boundary. ProjectID is set for project
+// tokens and omitted for hub tokens; clients read Boundary.Kind to tell
+// the two apart.
 type TokenResponse struct {
-	ID        string     `json:"id"`
-	Name      string     `json:"name"`
-	Prefix    string     `json:"prefix"`
-	ProjectID string     `json:"projectId"`
-	Scopes    []string   `json:"scopes"`
-	Revoked   bool       `json:"revoked"`
-	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
-	LastUsed  *time.Time `json:"lastUsed,omitempty"`
-	Created   time.Time  `json:"created"`
+	ID        string                `json:"id"`
+	Name      string                `json:"name"`
+	Prefix    string                `json:"prefix"`
+	Boundary  TokenBoundaryResponse `json:"boundary"`
+	ProjectID string                `json:"projectId,omitempty"`
+	Scopes    []string              `json:"scopes"`
+	Revoked   bool                  `json:"revoked"`
+	ExpiresAt *time.Time            `json:"expiresAt,omitempty"`
+	LastUsed  *time.Time            `json:"lastUsed,omitempty"`
+	Created   time.Time             `json:"created"`
 
 	// E.1 descriptive credential metadata: empty for tokens created before
 	// E.1 or without metadata supplied at issuance.
@@ -807,8 +835,14 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	boundary, err := tokenCreateBoundary(req)
+	if err != nil {
+		writeTokenBoundaryError(w, err)
+		return
+	}
+
 	key, token, err := s.uatService.CreateTokenWithParams(r.Context(), CreateTokenParams{
-		UserID: user.ID(), Name: req.Name, ProjectID: req.ProjectID, Scopes: req.Scopes, ExpiresAt: req.ExpiresAt,
+		UserID: user.ID(), Name: req.Name, Boundary: boundary, ProjectID: req.ProjectID, Scopes: req.Scopes, ExpiresAt: req.ExpiresAt,
 		Metadata: TokenMetadata{Purpose: req.Purpose, Labels: req.Labels},
 	})
 	if err != nil {
@@ -824,8 +858,8 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 			ValidationError(w, err.Error(), nil)
 		case errors.Is(err, ErrUATNameRequired):
 			ValidationError(w, err.Error(), nil)
-		case errors.Is(err, ErrUATProjectIDEmpty):
-			ValidationError(w, err.Error(), nil)
+		case errors.Is(err, ErrUATBoundaryRequired), errors.Is(err, ErrUATBoundaryInvalid):
+			writeTokenBoundaryError(w, err)
 		case errors.Is(err, ErrUATScopeEmpty):
 			ValidationError(w, err.Error(), nil)
 		case errors.Is(err, ErrUATScopeViolation):
@@ -932,6 +966,7 @@ func tokenToResponse(t store.UserAccessToken) TokenResponse {
 		ID:        t.ID,
 		Name:      t.Name,
 		Prefix:    t.Prefix,
+		Boundary:  TokenBoundaryResponse{Kind: t.BoundaryKind, ProjectID: t.ProjectID},
 		ProjectID: t.ProjectID,
 		Scopes:    t.Scopes,
 		Revoked:   t.Revoked,
@@ -947,6 +982,31 @@ func tokenToResponse(t store.UserAccessToken) TokenResponse {
 		resp.Labels = t.Labels
 	}
 	return resp
+}
+
+// tokenCreateBoundary returns the explicit boundary named by req, or the
+// zero boundary when req uses only the project ID shorthand. A boundary
+// object without a kind is rejected. CreateTokenWithParams applies the
+// remaining rules (a request naming no boundary, a blank project ID in
+// either form, disagreeing forms, invalid boundaries).
+func tokenCreateBoundary(req TokenCreateRequest) (TokenBoundary, error) {
+	if req.Boundary == nil {
+		return TokenBoundary{}, nil
+	}
+	if req.Boundary.Kind == "" {
+		return TokenBoundary{}, ErrUATBoundaryInvalid
+	}
+	return TokenBoundary{Kind: BoundaryKind(req.Boundary.Kind), ProjectID: req.Boundary.ProjectID}, nil
+}
+
+// writeTokenBoundaryError writes the 400 response for a token request
+// whose boundary is missing or invalid.
+func writeTokenBoundaryError(w http.ResponseWriter, err error) {
+	reason := "boundary_invalid"
+	if errors.Is(err, ErrUATBoundaryRequired) {
+		reason = "boundary_required"
+	}
+	ValidationError(w, err.Error(), map[string]interface{}{"field": "boundary", "reason": reason})
 }
 
 func tokenResponsePtr(t *store.UserAccessToken) *TokenResponse {

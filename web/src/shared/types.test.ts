@@ -23,7 +23,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { lifecycleActionRequestInit, RESUME_BEST_EFFORT_CONFIRM_MESSAGE } from './types.js';
+import {
+  isEmptyPerAgentWorkspace,
+  lifecycleActionRequestInit,
+  RESUME_BEST_EFFORT_CONFIRM_MESSAGE,
+} from './types.js';
 
 describe('lifecycleActionRequestInit', () => {
   it('sends forceResume:true in a JSON body for force-resume', () => {
@@ -46,5 +50,26 @@ describe('RESUME_BEST_EFFORT_CONFIRM_MESSAGE', () => {
   it('warns that resume is best-effort and mentions the fresh-start alternative', () => {
     expect(RESUME_BEST_EFFORT_CONFIRM_MESSAGE).toContain('Resume');
     expect(RESUME_BEST_EFFORT_CONFIRM_MESSAGE).toContain('Start');
+  });
+});
+
+describe('isEmptyPerAgentWorkspace', () => {
+  const label = (mode: string) => ({ 'scion.dev/workspace-mode': mode });
+
+  it('accepts a non-git project labelled per-agent or the raw empty-per-agent value', () => {
+    expect(isEmptyPerAgentWorkspace({ labels: label('per-agent') })).toBe(true);
+    expect(isEmptyPerAgentWorkspace({ labels: label('empty-per-agent') })).toBe(true);
+  });
+
+  it('rejects git projects and other non-git modes', () => {
+    expect(
+      isEmptyPerAgentWorkspace({ gitRemote: 'github.com/a/b', labels: label('per-agent') })
+    ).toBe(false);
+    expect(
+      isEmptyPerAgentWorkspace({ gitRemote: 'github.com/a/b', labels: label('empty-per-agent') })
+    ).toBe(false);
+    expect(isEmptyPerAgentWorkspace({ labels: label('shared') })).toBe(false);
+    expect(isEmptyPerAgentWorkspace({})).toBe(false);
+    expect(isEmptyPerAgentWorkspace(undefined)).toBe(false);
   });
 });
