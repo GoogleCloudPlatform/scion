@@ -279,12 +279,14 @@ func diffExplicitEnvKeys(oldEnv, explicitEnv, newEnv map[string]string) (added m
 //   - patchEnv keeps the previous InlineConfig.Env value, if any, so an
 //     explicit value survives into the new InlineConfig.Env.
 //
-// SCION_AUTO_EXPOSE_PORTS is then resolved by resolveAutoExposeEnv, with
-// explicit = patchEnv plus, when the request did not send the key, the
-// previous explicit value (explicitEnvOf(old): CreateInputs, which can hold
-// an explicit value InlineConfig.Env lacks). The project tier overwrites a
-// kept non-explicit value, and never an explicit one. The hub default is
-// never written; the broker applies it.
+// SCION_AUTO_EXPOSE_PORTS is then resolved by resolveAutoExposeEnv. Its
+// explicit tier is the request's own env, taken before the InlineConfig.Env
+// carry, plus, when the request did not send the key, the previous explicit
+// value from explicitEnvOf(old). That is CreateInputs when the agent has it,
+// since InlineConfig.Env can still hold a hub-stamped value on older agents.
+// The project tier therefore overwrites a kept or carried non-explicit value,
+// and never an explicit one. The hub default is never written; the broker
+// applies it.
 func applyPatchAutoExposeEnv(ac, old *store.AgentAppliedConfig, project *store.Project, patchEnv map[string]string) {
 	if ac == nil || old == nil || patchEnv == nil {
 		return
@@ -296,7 +298,12 @@ func applyPatchAutoExposeEnv(ac, old *store.AgentAppliedConfig, project *store.P
 	if ac.Env == nil {
 		ac.Env = make(map[string]string)
 	}
-	_, sentPorts := patchEnv[api.EnvAutoExposePorts]
+	explicit := maps.Clone(patchEnv)
+	if _, sentPorts := patchEnv[api.EnvAutoExposePorts]; !sentPorts {
+		if v, ok := explicitEnvOf(old)[api.EnvAutoExposePorts]; ok {
+			explicit[api.EnvAutoExposePorts] = v
+		}
+	}
 	for k := range autoExposeEnvKeys {
 		if _, sent := patchEnv[k]; sent {
 			continue
@@ -306,13 +313,6 @@ func applyPatchAutoExposeEnv(ac, old *store.AgentAppliedConfig, project *store.P
 		}
 		if v, ok := oldInlineEnv[k]; ok {
 			patchEnv[k] = v
-		}
-	}
-	explicit := patchEnv
-	if !sentPorts {
-		if v, ok := explicitEnvOf(old)[api.EnvAutoExposePorts]; ok {
-			explicit = maps.Clone(patchEnv)
-			explicit[api.EnvAutoExposePorts] = v
 		}
 	}
 	resolveAutoExposeEnv(ac, project, explicit)

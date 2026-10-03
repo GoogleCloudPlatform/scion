@@ -286,6 +286,33 @@ func TestApplyAgentUpdate_AutoExposeToggleOverHubStampIsExplicit(t *testing.T) {
 	}
 }
 
+// TestApplyAgentUpdate_AutoExposeHubStampIsNotExplicitOnRowEdit pins that an
+// InlineConfig.Env hub stamp carried through a row-edit save is not treated as
+// explicit when CreateInputs lacks it: the project tier is re-derived over it.
+func TestApplyAgentUpdate_AutoExposeHubStampIsNotExplicitOnRowEdit(t *testing.T) {
+	cases := []struct {
+		name       string
+		appliedEnv map[string]string
+	}{
+		{"stamp in both maps", map[string]string{"TEMPLATE_KEY": "x", aePorts: "true"}},
+		{"stamp in InlineConfig.Env only", map[string]string{"TEMPLATE_KEY": "x"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, _, agent := setupAutoExposePatchAgent(t, autoExposePatchAgent{
+				projectAnno:  "false",
+				appliedEnv:   tc.appliedEnv,
+				inlineEnv:    map[string]string{aePorts: "true"},
+				createInputs: ciWithEnv(nil),
+			})
+			updated := patchAndReload(t, srv, s, agent.ID, configureRowEditBody(t))
+
+			assert.Equal(t, "false", updated.AppliedConfig.Env[aePorts], "the project tier must win over a hub stamp")
+			assert.Equal(t, map[string]string{"FOO": "bar"}, createInputsEnv(updated))
+		})
+	}
+}
+
 // TestApplyAgentUpdate_AutoExposeProjectLookupFailure pins that a failed
 // project lookup skips only the project tier: the PATCH still succeeds,
 // writes the request's env and keeps the old non-explicit value.
