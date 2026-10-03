@@ -324,10 +324,25 @@ func TestAgentStore_MarkAgentContainerMissing_DeletionGuard(t *testing.T) {
 		return a
 	}
 
-	for _, st := range []string{store.DeletionStateDeleting, store.DeletionStateFinalizing} {
-		t.Run(st+" is left alone", func(t *testing.T) {
-			a := create("dd-" + st)
-			seedDeletion(t, s, a.ID, st, time.Now().Add(time.Minute), "")
+	// The clause is state-based, so a lease-expired deleting/finalizing row
+	// is left alone too (only retry, force or the engine moves it on).
+	for _, tc := range []struct {
+		state   string
+		leaseIn time.Duration
+	}{
+		{store.DeletionStateDeleting, time.Minute},
+		{store.DeletionStateFinalizing, time.Minute},
+		{store.DeletionStateDeleting, -time.Minute},
+		{store.DeletionStateFinalizing, -time.Minute},
+	} {
+		st := tc.state
+		label := st + "-live"
+		if tc.leaseIn < 0 {
+			label = st + "-expired"
+		}
+		t.Run(label+" is left alone", func(t *testing.T) {
+			a := create("dd-" + label)
+			seedDeletion(t, s, a.ID, st, time.Now().Add(tc.leaseIn), "")
 			got, err := s.MarkAgentContainerMissing(ctx, a.ID, "broker-1", cutoff, "gone")
 			require.NoError(t, err)
 			assert.Nil(t, got, "0 rows affected")

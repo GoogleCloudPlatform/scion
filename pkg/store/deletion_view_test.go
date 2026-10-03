@@ -120,6 +120,22 @@ func TestComputeAgentDeletion(t *testing.T) {
 		}
 	})
 
+	// Review N5: with neither failedAt nor leaseAt, startedAt is the base.
+	t.Run("failed with only startedAt uses startedAt+15m", func(t *testing.T) {
+		a := &Agent{DeletionState: DeletionStateFailed, DeletionCode: DeletionCodeRuntimeError, DeletionStartedAt: tp(started)}
+		got := ComputeAgentDeletion(a, now)
+		if got == nil || got.ExpiresAt == nil || !got.ExpiresAt.Equal(started.Add(DeletionDisplayTTL)) {
+			t.Fatalf("got %+v, want expiresAt = startedAt+15m", got)
+		}
+	})
+
+	t.Run("failed with no timestamps has no expiresAt", func(t *testing.T) {
+		a := &Agent{DeletionState: DeletionStateFailed, DeletionCode: DeletionCodeRuntimeError}
+		if got := ComputeAgentDeletion(a, now); got == nil || got.ExpiresAt != nil {
+			t.Fatalf("got %+v", got)
+		}
+	})
+
 	t.Run("failed past expiresAt drops out of view", func(t *testing.T) {
 		a := &Agent{DeletionState: DeletionStateFailed, DeletionCode: DeletionCodeRuntimeError, DeletionFailedAt: tp(now.Add(-DeletionDisplayTTL))}
 		if got := ComputeAgentDeletion(a, now); got != nil {

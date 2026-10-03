@@ -473,6 +473,9 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		s.failReincarnation(ctx, agentID, reincarnationID, store.AgentReincarnationStateStopping, "failed to record stopping state: "+err.Error(), previous)
 		return
 	}
+	// The delete claim as of this first read; the completion step's
+	// failed-marker clear is pinned to it (see clearFailedDeletion).
+	admittedDeletionClaim := agent.DeletionClaim
 
 	// A stop failure is fatal, checked BEFORE any config write. The broker
 	// itself already treats "already stopped" and "not found" as success
@@ -649,7 +652,7 @@ func (s *Server) runReincarnationWorker(ctx context.Context, agentID, reincarnat
 		// A successful reincarnate clears a failed delete marker (design
 		// ptone/scion#2483 §2.1). After the completion write: it bumps
 		// state_version.
-		s.clearFailedDeletion(ctx, completed)
+		s.clearFailedDeletionAtClaim(ctx, completed, admittedDeletionClaim)
 	}
 
 	s.agentLifecycleLog.Info("reincarnation completed",

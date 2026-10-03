@@ -248,10 +248,10 @@ func (s *Server) handleManagedAgentLifecycle(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	agent.Phase = newPhase
 	// A successful start/stop/restart clears a failed delete marker
-	// (design ptone/scion#2483 §2.1).
-	s.clearFailedDeletion(ctx, agent)
+	// (design ptone/scion#2483 §2.1); publish and respond from the stored
+	// row, which a racing delete claim may have kept off newPhase.
+	s.settleLifecycleWrite(ctx, agent, newPhase)
 	s.events.PublishAgentStatus(ctx, agent)
 
 	respAgent := *agent

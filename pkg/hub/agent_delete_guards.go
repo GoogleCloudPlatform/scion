@@ -153,13 +153,27 @@ func (s *Server) startGate(ctx context.Context, a *store.Agent, entry startEntry
 
 // clearFailedDeletion clears a failed delete marker after a successful
 // start, stop, restart or reincarnate (design §2.1). A row that reads as
-// failed counts: state=failed, or a deleting row whose lease has expired. Only the failed-marker columns are cleared; the claim epoch is
-// kept so it stays monotonic. On success the in-memory agent is updated to
-// match, so a following publish carries deletion:null. Best-effort: errors
-// are logged.
+// failed counts: state=failed, or a deleting row whose lease has expired.
+// Only the failed-marker columns are cleared; the claim epoch is kept so it
+// stays monotonic. On success the in-memory agent is updated to match, so a
+// following publish carries deletion:null. Best-effort: errors are logged.
+//
+// a must be the agent as loaded before the action: both predicates pin the
+// claim observed then, so a newer delete that claimed (and failed) while the
+// action ran keeps its marker and banner.
 //
 // Call it after the action's own writes: it bumps state_version.
 func (s *Server) clearFailedDeletion(ctx context.Context, a *store.Agent) {
+	if a == nil {
+		return
+	}
+	s.clearFailedDeletionAtClaim(ctx, a, a.DeletionClaim)
+}
+
+// clearFailedDeletionAtClaim is clearFailedDeletion with the claim pinned
+// explicitly, for callers (the reincarnate worker) whose a was re-read after
+// the action and so may already carry a newer claim.
+func (s *Server) clearFailedDeletionAtClaim(ctx context.Context, a *store.Agent, claim int64) {
 	if a == nil || a.DeletionState == store.DeletionStateNone {
 		return
 	}
@@ -187,10 +201,10 @@ func (s *Server) clearFailedDeletion(ctx context.Context, a *store.Agent) {
 		ClearFailedAt:  true,
 	}
 	preds := []store.DeletionPredicate{
-		{States: []string{store.DeletionStateFailed}},
+		{Claim: &claim, States: []string{store.DeletionStateFailed}},
 		// An abandoned deleting row reads as failed. A finalizing row is
 		// never cleared here: teardown has run, only retry or force lifts it.
-		{States: []string{store.DeletionStateDeleting}, LeaseExpiredBefore: &now},
+		{Claim: &claim, States: []string{store.DeletionStateDeleting}, LeaseExpiredBefore: &now},
 	}
 	for _, pred := range preds {
 		n, err := s.store.UpdateAgentDeletion(ctx, a.ID, pred, set)
@@ -212,4 +226,42 @@ func (s *Server) clearFailedDeletion(ctx context.Context, a *store.Agent) {
 			return
 		}
 	}
+}
+
+// settleLifecycleWrite runs after a start/stop/restart's UpdateAgentStatus
+// succeeds. It clears a failed delete marker (pinned to the claim observed
+// at load, see clearFailedDeletion) and then re-reads the row so the publish
+// and the response reflect what was actually stored. A delete that claimed
+// the row while the action dispatched makes the in-tx guard drop the phase
+// write; without the re-read the handler would publish and return the
+// requested phase with deletion:null while the row is deleting.
+//
+// Only the columns the in-tx guard and the clear can change are carried over
+// from the re-read; in-memory fields the dispatch set are kept. If the re-read
+// fails, a falls back to the requested phase (the pre-guard behaviour).
+func (s *Server) settleLifecycleWrite(ctx context.Context, a *store.Agent, newPhase string) {
+	a.Phase = newPhase
+	s.clearFailedDeletion(ctx, a)
+	fresh, err := s.store.GetAgent(ctx, a.ID)
+	if err != nil {
+		s.agentLifecycleLog.Warn("failed to re-read agent after lifecycle write",
+			"agent_id", a.ID, "error", err)
+		return
+	}
+	a.Phase = fresh.Phase
+	a.Activity = fresh.Activity
+	a.ContainerStatus = fresh.ContainerStatus
+	a.ExitCode = fresh.ExitCode
+	a.ExitReason = fresh.ExitReason
+	a.Message = fresh.Message
+	a.StateVersion = fresh.StateVersion
+	a.DeletionState = fresh.DeletionState
+	a.DeletionClaim = fresh.DeletionClaim
+	a.DeletionLeaseAt = fresh.DeletionLeaseAt
+	a.DeletionStartedAt = fresh.DeletionStartedAt
+	a.DeletionFailedAt = fresh.DeletionFailedAt
+	a.DeletionCode = fresh.DeletionCode
+	a.DeletionError = fresh.DeletionError
+	a.DeletionPrior = fresh.DeletionPrior
+	a.DeletionRequest = fresh.DeletionRequest
 }

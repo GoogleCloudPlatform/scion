@@ -1437,9 +1437,8 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 	}
 
 	// Delete in progress (design ptone/scion#2483 §2.1): a soft-deleted row
-	// whose delete still holds a live lease, or still has an outstanding
-	// broker delete intent, must not come back. Authz already ran in the
-	// caller.
+	// must not come back while deleteBlocksStart holds. Authz already ran in
+	// the caller.
 	if ref := s.startGate(ctx, agent, startEntryRestore); ref.refuses() {
 		ref.write(w)
 		return

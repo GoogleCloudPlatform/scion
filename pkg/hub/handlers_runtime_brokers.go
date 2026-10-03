@@ -834,11 +834,13 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 
 			// A delete in progress is sticky the same way (design
 			// ptone/scion#2483 §2.1): the delete engine owns the status
-			// fields while its lease is live, and a soft-deleted row is
-			// finished. ContainerStatus and the Heartbeat/LastSeen bump still
-			// apply. UpdateAgentStatus repeats this check inside its
-			// transaction.
-			agentDeleting := deletionActive(agent) || !agent.DeletedAt.IsZero()
+			// fields while its lease is live. ContainerStatus and the
+			// Heartbeat/LastSeen bump still apply. UpdateAgentStatus repeats
+			// this check inside its transaction, but suppressing the phase
+			// here is what keeps reconcileBrokerQuotaOnPhaseChange below from
+			// acting on the reported phase. (Soft-deleted rows never get here:
+			// GetAgentBySlug skips them.)
+			agentDeleting := deletionActive(agent)
 			if agentDeleting {
 				statusUpdate.Message = ""
 			}
@@ -1165,8 +1167,9 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 					"project_id", project.ProjectID,
 					"error", err)
 			} else {
-				// Publish SSE event so the frontend receives activity updates
-				// A soft-deleted row publishes nothing.
+				// Publish SSE event so the frontend receives activity updates.
+				// A row soft-deleted between the slug lookup and this re-read
+				// (a delete finishing concurrently) publishes nothing.
 				if updated, err := s.store.GetAgent(ctx, agent.ID); err == nil && updated.DeletedAt.IsZero() {
 					s.events.PublishAgentStatus(ctx, updated)
 				}

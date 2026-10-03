@@ -145,7 +145,11 @@ func (a *Agent) DeletionEffectiveCode(now time.Time) string {
 //   - a lease-expired deleting/finalizing row reads "failed", with its stored
 //     code or else "abandoned";
 //   - expiresAt = (failedAt ?? leaseAt) + 15m for failed rows and
-//     lease-expired deleting rows; past it the view is nil (no banner);
+//     lease-expired deleting rows; past it the view is nil (no banner). If
+//     both are nil it falls back to startedAt + 15m, so a malformed row
+//     still ages out (the engine always sets failedAt on a failed row and
+//     leaseAt on a claim, so this fallback is defensive). A row with none of
+//     the three has no expiresAt;
 //   - lease-expired finalizing rows and in_doubt rows have no expiresAt and
 //     never expire from view.
 //

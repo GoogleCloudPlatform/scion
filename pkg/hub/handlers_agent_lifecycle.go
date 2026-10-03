@@ -180,6 +180,9 @@ func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpda
 		status.ExitCode = nil
 		status.ExitReason = ""
 		status.Message = ""
+		// The store copy of this guard also drops ClearExit; mirror it so the
+		// two stay the same predicate (reports never set it: json:"-").
+		status.ClearExit = false
 		return
 	}
 
@@ -563,10 +566,10 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	agent.Phase = newPhase
 	// A successful start/stop/restart clears a failed delete marker
-	// (design ptone/scion#2483 §2.1).
-	s.clearFailedDeletion(ctx, agent)
+	// (design ptone/scion#2483 §2.1); publish and respond from the stored
+	// row, which a racing delete claim may have kept off newPhase.
+	s.settleLifecycleWrite(ctx, agent, newPhase)
 	s.events.PublishAgentStatus(ctx, agent)
 
 	respAgent := *agent

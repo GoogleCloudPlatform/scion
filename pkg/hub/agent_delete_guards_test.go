@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -427,7 +428,9 @@ func TestDeleteGuard_StatusReport(t *testing.T) {
 
 	t.Run("deleting: nothing changes", func(t *testing.T) {
 		srv, s := testServer(t)
-		agent := setupBrokerAgentInPhase(t, s, "dg-status-del", state.PhaseRunning)
+		broker, project := newQuotaTestBrokerAndProject(t, s, "dg-status")
+		agent := newQuotaTestAgent(t, s, broker, project, "dg-status-del", state.PhaseRunning)
+		reserveBrokerSlot(t, s, broker, agent.ID)
 		seedAgentDeletion(t, s, agent.ID, seedLiveDeleting)
 		before, err := s.GetAgent(context.Background(), agent.ID)
 		require.NoError(t, err)
@@ -441,6 +444,8 @@ func TestDeleteGuard_StatusReport(t *testing.T) {
 		assert.Equal(t, before.Message, got.Message)
 		assert.Nil(t, got.ExitCode)
 		assert.Empty(t, got.ExitReason)
+		// Guard 0c also keeps the quota reconcile from seeing "error".
+		assert.EqualValues(t, 1, brokerReservationCount(t, s, broker.ID), "a report during a delete must not release the quota slot")
 	})
 
 	t.Run("soft-deleted: no publish", func(t *testing.T) {
@@ -471,41 +476,57 @@ func TestDeleteGuard_StatusReport(t *testing.T) {
 }
 
 // Acceptance (c): a heartbeat during a delete does not change phase or
-// activity, and a soft-deleted row's heartbeat publishes nothing.
+// activity. The broker quota reservation is the hub-level half: it is
+// reconciled from the heartbeat's phase before the store write, so only the
+// heartbeat's own suppression (not the in-tx store guard) keeps a "stopped"
+// report from releasing the slot mid-delete.
 func TestDeleteGuard_Heartbeat(t *testing.T) {
 	t.Run("deleting", func(t *testing.T) {
-		srv, s, brokerID, projectID, slug := setupHeartbeatExitCodeTest(t)
-		agent := getAgentState(t, s, slug, projectID)
+		srv, s := testServer(t)
+		grantDevUserRuntimeBrokerAccess(t, s)
+		broker, project := newQuotaTestBrokerAndProject(t, s, "dg-hb")
+		agent := newQuotaTestAgent(t, s, broker, project, "dg-hb-agent", state.PhaseRunning)
+		reserveBrokerSlot(t, s, broker, agent.ID)
 		seedAgentDeletion(t, s, agent.ID, seedLiveDeleting)
+		before := getAgentState(t, s, agent.Slug, project.ID)
 
 		ec := 137
-		code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
-			Slug: slug, Phase: "stopped", Activity: "crashed", ExitCode: &ec, ExitReason: "crashed", Message: "dead",
+		code := sendHeartbeat(t, srv, broker.ID, project.ID, brokerAgentHeartbeat{
+			Slug: agent.Slug, Phase: "stopped", Activity: "crashed", ExitCode: &ec, ExitReason: "crashed", Message: "dead",
 		})
-		assert.Equal(t, http.StatusOK, code)
-		got := getAgentState(t, s, slug, projectID)
-		assert.Equal(t, "running", got.Phase)
-		assert.Equal(t, "working", got.Activity)
+		require.Equal(t, http.StatusOK, code)
+		got := getAgentState(t, s, agent.Slug, project.ID)
+		assert.Equal(t, string(state.PhaseRunning), got.Phase)
+		assert.Equal(t, before.Activity, got.Activity)
 		assert.Nil(t, got.ExitCode)
 		assert.Empty(t, got.Message)
+		assert.EqualValues(t, 1, brokerReservationCount(t, s, broker.ID), "a heartbeat during a delete must not release the quota slot")
 
 		// Legacy (no structured phase) path is suppressed too.
-		code = sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{Slug: slug, ContainerStatus: "Exited (1) 3 seconds ago"})
-		assert.Equal(t, http.StatusOK, code)
-		got = getAgentState(t, s, slug, projectID)
-		assert.Equal(t, "running", got.Phase)
+		code = sendHeartbeat(t, srv, broker.ID, project.ID, brokerAgentHeartbeat{Slug: agent.Slug, ContainerStatus: "Exited (1) 3 seconds ago"})
+		require.Equal(t, http.StatusOK, code)
+		got = getAgentState(t, s, agent.Slug, project.ID)
+		assert.Equal(t, string(state.PhaseRunning), got.Phase)
+		assert.EqualValues(t, 1, brokerReservationCount(t, s, broker.ID), "legacy heartbeat during a delete must not release the quota slot")
 	})
 
-	t.Run("soft-deleted: no publish", func(t *testing.T) {
+	// A soft-deleted row is never resolved by the heartbeat (GetAgentBySlug
+	// skips deleted rows), so its report changes and publishes nothing.
+	t.Run("soft-deleted: slug unresolved", func(t *testing.T) {
 		srv, s, brokerID, projectID, slug := setupHeartbeatExitCodeTest(t)
 		pub := &trackingEventPublisher{}
 		srv.SetEventPublisher(pub)
 		agent := getAgentState(t, s, slug, projectID)
 		agent.DeletedAt = time.Now()
 		require.NoError(t, s.UpdateAgent(context.Background(), agent))
+		_, err := s.GetAgentBySlug(context.Background(), projectID, slug)
+		require.ErrorIs(t, err, store.ErrNotFound, "precondition: the heartbeat cannot resolve a soft-deleted slug")
 
 		code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{Slug: slug, Phase: "stopped", Activity: "crashed"})
 		assert.Equal(t, http.StatusOK, code)
+		got, err := s.GetAgent(context.Background(), agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, agent.Phase, got.Phase)
 		for _, a := range pub.publishedAgents() {
 			assert.NotEqual(t, agent.ID, a.ID, "a soft-deleted row publishes nothing")
 		}
@@ -593,4 +614,224 @@ type revokeErrCredStore struct {
 func (r *revokeErrCredStore) RevokeAgentCredentialsByAgent(_ context.Context, _ string, _ string, reason string) (int, error) {
 	r.reason = reason
 	return 0, r.err
+}
+
+// Review N1: the clear is pinned to the claim observed at load, so a newer
+// delete that claimed and failed while the action ran keeps its marker.
+func TestClearFailedDeletion_PinsObservedClaim(t *testing.T) {
+	for i, first := range []deleteSeed{
+		{name: "failed", state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeConflict},
+		{name: "abandoned deleting", state: store.DeletionStateDeleting, leaseIn: -time.Minute},
+	} {
+		t.Run(first.name, func(t *testing.T) {
+			srv, s := testServer(t)
+			agent := setupBrokerAgentInPhase(t, s, "dg-pin-"+string(rune('a'+i)), state.PhaseStopped)
+			seedAgentDeletion(t, s, agent.ID, first)
+			loaded, err := s.GetAgent(context.Background(), agent.ID)
+			require.NoError(t, err)
+			require.Equal(t, int64(1), loaded.DeletionClaim)
+
+			// A newer delete claims (claim 2) and fails while the action runs.
+			seedAgentDeletion(t, s, agent.ID, deleteSeed{state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeRuntimeError})
+
+			srv.clearFailedDeletion(context.Background(), loaded)
+			got, err := s.GetAgent(context.Background(), agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, store.DeletionStateFailed, got.DeletionState, "the newer failure survives")
+			assert.Equal(t, store.DeletionCodeRuntimeError, got.DeletionCode)
+			assert.Equal(t, int64(2), got.DeletionClaim)
+			assert.Equal(t, first.state, loaded.DeletionState, "in-memory agent untouched")
+		})
+	}
+}
+
+// raceClaimDispatcher seeds a delete marker from inside DispatchAgentStart,
+// as a delete that claims the row while the start is dispatching would.
+type raceClaimDispatcher struct {
+	deleteGuardDispatcher
+	t    *testing.T
+	s    store.Store
+	seed deleteSeed
+}
+
+func (d *raceClaimDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
+	if err := d.deleteGuardDispatcher.DispatchAgentStart(ctx, agent, task, resume); err != nil {
+		return err
+	}
+	seedAgentDeletion(d.t, d.s, agent.ID, d.seed)
+	return nil
+}
+
+// Review N4 (and N1 over HTTP): a start that loses the race to a delete
+// claim publishes and returns the stored row (phase unchanged, deletion
+// populated), not the requested phase with deletion:null.
+func TestDeleteGate_StartLosesRaceToDeleteClaim(t *testing.T) {
+	for i, initial := range []*deleteSeed{
+		nil,
+		{name: "failed", state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeConflict},
+	} {
+		name := "no marker"
+		if initial != nil {
+			name = initial.name
+		}
+		t.Run(name, func(t *testing.T) {
+			srv, s := testServer(t)
+			disp := &raceClaimDispatcher{t: t, s: s, seed: seedLiveDeleting}
+			srv.SetDispatcher(disp)
+			pub := &trackingEventPublisher{}
+			srv.SetEventPublisher(pub)
+			agent := setupBrokerAgentInPhase(t, s, "dg-race-"+string(rune('a'+i)), state.PhaseStopped)
+			if initial != nil {
+				seedAgentDeletion(t, s, agent.ID, *initial)
+			}
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			require.Equal(t, 1, disp.starts)
+
+			var body map[string]interface{}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			assert.Equal(t, string(state.PhaseStopped), body["phase"], "response carries the stored phase")
+			d, ok := body["deletion"].(map[string]interface{})
+			require.True(t, ok, "response carries the racing delete: %s", rec.Body.String())
+			assert.Equal(t, store.DeletionStateDeleting, d["state"])
+
+			published := pub.publishedAgents()
+			require.NotEmpty(t, published)
+			last := published[len(published)-1]
+			assert.Equal(t, string(state.PhaseStopped), last.Phase, "event carries the stored phase")
+			require.NotNil(t, store.ComputeAgentDeletion(last, time.Now()))
+
+			got, err := s.GetAgent(context.Background(), agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseStopped), got.Phase)
+			assert.Equal(t, store.DeletionStateDeleting, got.DeletionState, "the racing claim's marker is kept")
+		})
+	}
+}
+
+// Review N3: a successful managed start/restart clears a failed marker.
+func TestDeleteGate_ManagedStartClearsFailedMarker(t *testing.T) {
+	for i, action := range []string{api.AgentActionStart, api.AgentActionRestart} {
+		t.Run(action, func(t *testing.T) {
+			srv, s := testServer(t)
+			agent := setupBrokerAgentInPhase(t, s, "dg-managed-clear-"+string(rune('a'+i)), state.PhaseStopped)
+			agent.Runtime = ManagedRuntimePrefix + "test"
+			require.NoError(t, s.UpdateAgent(context.Background(), agent))
+			seedAgentDeletion(t, s, agent.ID, deleteSeed{state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeConflict})
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+action, nil)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var body map[string]interface{}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			v, ok := body["deletion"]
+			assert.True(t, ok && v == nil, "deletion must be an explicit null after the clear: %s", rec.Body.String())
+
+			got, err := s.GetAgent(context.Background(), agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseRunning), got.Phase)
+			assert.Equal(t, store.DeletionStateNone, got.DeletionState)
+			assert.Equal(t, int64(1), got.DeletionClaim, "the claim epoch is kept")
+		})
+	}
+}
+
+// reincarnateClaimDispatcher seeds a newer delete failure from inside the
+// worker's start dispatch.
+type reincarnateClaimDispatcher struct {
+	*reincarnateTestDispatcher
+	t *testing.T
+	s store.Store
+}
+
+func (d *reincarnateClaimDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
+	if err := d.reincarnateTestDispatcher.DispatchAgentStart(ctx, agent, task, resume); err != nil {
+		return err
+	}
+	seedAgentDeletion(d.t, d.s, agent.ID, deleteSeed{state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeRuntimeError})
+	return nil
+}
+
+// completionFailStore fails the reincarnate worker's completion write (the
+// only UpdateAgent that returns reincarnation_state to "" with a generation
+// past the original) and signals when it did.
+type completionFailStore struct {
+	store.Store
+	fromGeneration int
+	once           sync.Once
+	failed         chan struct{}
+}
+
+func (c *completionFailStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
+	if a.ReincarnationState == store.ReincarnationStateNone && a.Generation > c.fromGeneration {
+		c.once.Do(func() { close(c.failed) })
+		return errors.New("completion write failed")
+	}
+	return c.Store.UpdateAgent(ctx, a)
+}
+
+// Review N3: reincarnate clears a failed marker at worker completion, pinned
+// to the claim observed at the worker's first read, and only when the
+// completion write lands (interpretation 7).
+func TestDeleteGate_ReincarnateCompletionClearsFailedMarker(t *testing.T) {
+	failedSeed := deleteSeed{state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeConflict}
+	reincarnate := func(t *testing.T, srv *Server, agent *store.Agent, projectID string) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, agentIdentityFor(agent.ID, projectID), ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	}
+
+	t.Run("completion clears", func(t *testing.T) {
+		srv, s, project, broker := setupReincarnateTestServer(t, newReincarnateTestDispatcher())
+		agent := newReincarnateTestAgent(t, s, project, broker, nil)
+		seedAgentDeletion(t, s, agent.ID, failedSeed)
+
+		reincarnate(t, srv, agent, project.ID)
+		rec := waitForReincarnationSettled(t, s, agent.ID)
+		require.Equal(t, store.AgentReincarnationStateCompleted, rec.State)
+		got, err := s.GetAgent(context.Background(), agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.DeletionStateNone, got.DeletionState)
+		assert.Equal(t, int64(1), got.DeletionClaim, "the claim epoch is kept")
+	})
+
+	t.Run("newer claim during the worker survives", func(t *testing.T) {
+		disp := &reincarnateClaimDispatcher{reincarnateTestDispatcher: newReincarnateTestDispatcher(), t: t}
+		srv, s, project, broker := setupReincarnateTestServer(t, disp)
+		disp.s = s
+		agent := newReincarnateTestAgent(t, s, project, broker, nil)
+		seedAgentDeletion(t, s, agent.ID, failedSeed)
+
+		reincarnate(t, srv, agent, project.ID)
+		rec := waitForReincarnationSettled(t, s, agent.ID)
+		require.Equal(t, store.AgentReincarnationStateCompleted, rec.State)
+		got, err := s.GetAgent(context.Background(), agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.DeletionStateFailed, got.DeletionState)
+		assert.Equal(t, store.DeletionCodeRuntimeError, got.DeletionCode)
+		assert.Equal(t, int64(2), got.DeletionClaim)
+	})
+
+	t.Run("completion write fails: marker kept", func(t *testing.T) {
+		srv, s, project, broker := setupReincarnateTestServer(t, newReincarnateTestDispatcher())
+		agent := newReincarnateTestAgent(t, s, project, broker, nil)
+		seedAgentDeletion(t, s, agent.ID, failedSeed)
+		fs := &completionFailStore{Store: s, fromGeneration: agent.Generation, failed: make(chan struct{})}
+		srv.store = fs
+
+		reincarnate(t, srv, agent, project.ID)
+		select {
+		case <-fs.failed:
+		case <-time.After(5 * time.Second):
+			t.Fatal("worker never reached its completion write")
+		}
+		// The clear would run synchronously right after a landed write; give
+		// the worker time to finish, then check nothing cleared the marker.
+		time.Sleep(200 * time.Millisecond)
+		got, err := s.GetAgent(context.Background(), agent.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.DeletionStateFailed, got.DeletionState)
+		assert.Equal(t, store.DeletionCodeConflict, got.DeletionCode)
+	})
 }
