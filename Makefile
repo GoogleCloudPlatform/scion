@@ -126,6 +126,12 @@ test-hub-sqlite:
 # timestamp rewrite is the part of that operation that runs on Postgres, with
 # its own SQL (jsonb casts, id keyset).
 #
+# It also includes the Conduit registry suite (TestConduitRegistry_*,
+# ptone/scion#2778): design conduit v2.1 §3.4 requires relay_instances,
+# conduit_sessions and conduit_principal_epochs to behave identically on
+# Postgres and SQLite (generation/epoch upsert ... RETURNING, generation-CAS
+# deletes, concurrent epoch allocation), so the same suite runs on both.
+#
 # Fail loudly, not green, if a Postgres-only case in this job's own suite
 # skips instead of running. SCION_TEST_POSTGRES_URL is checked explicitly
 # first; on -v test output, any "--- SKIP" line (including an indented
@@ -158,7 +164,7 @@ test-launch-store-postgres:
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
-		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUTCTimestampNormalizeJSON_|TestUpdateSecretValueIfVersion)' \
+		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUTCTimestampNormalizeJSON_|TestConduitRegistry_|TestUpdateSecretValueIfVersion)' \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \
