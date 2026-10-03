@@ -199,8 +199,10 @@ type AuthzRequest struct {
 	// gate (step 1) uses to resolve the target scope of a request that
 	// names no existing resource instance. Trusted server-side operation
 	// code constructs it; it is never taken from a client-supplied field.
-	// The zero value classifies the request from Resource alone. It is read
-	// only by the bearer gate and grants nothing by itself.
+	// The zero value classifies the request from Resource alone. Evidence
+	// with IsCollectionLevel set must name the permission this request
+	// evaluates; the gate denies evidence that names any other permission.
+	// It is read only by the bearer gate and grants nothing by itself.
 	TargetEvidence TargetScopeEvidence
 
 	// Actor and Purpose describe who initiated the operation and why, when

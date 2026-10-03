@@ -53,7 +53,7 @@ type bearerGateTrace struct {
 	// boundary is valid.
 	TargetScope TargetScope
 	// AccessSource is the evidence that admitted a project target. It is
-	// set only when the project-access stage admitted the request.
+	// set only when the project access stage admitted the request.
 	AccessSource ProjectAccessSource
 }
 
@@ -104,7 +104,9 @@ func bearerGateInputsFor(principal PrincipalContext, credential CredentialContex
 //  1. The boundary is valid (TokenBoundary.Valid).
 //  2. The target resolves to a known scope (ResolveTargetScope with the
 //     request's evidence), and the boundary allows it (BoundaryAllows). An
-//     unresolvable target denies for every boundary kind.
+//     unresolvable target denies for every boundary kind. Collection-level
+//     evidence must name permissionID; evidence for any other permission
+//     denies as an unresolvable target.
 //  3. The ceiling allows the exact permission Decide resolved for the
 //     request.
 //  4. For a project target, the principal currently has access to that
@@ -141,6 +143,13 @@ func (a *AuthzService) evaluateBearerGate(ctx context.Context, principal Princip
 	}
 
 	// Stage 2: the boundary must allow the resolved target scope.
+	// Collection-level evidence classifies the request only for the exact
+	// permission being evaluated. Evidence that names any other permission
+	// does not describe this request, so the target scope is unknown.
+	if evidence.IsCollectionLevel && evidence.PermissionID != permissionID {
+		trace.Stage = bearerStageTargetUnknown
+		return &Decision{Allowed: false, Reason: bearerReasonTargetUnknown}
+	}
 	scope := ResolveTargetScope(target, evidence)
 	trace.TargetScope = scope
 	if scope.Kind == TargetScopeUnknown || !scope.Valid() {
@@ -219,10 +228,19 @@ func (r *bearerGateRun) traceOrNil() *bearerGateTrace {
 // five name the bearer gate stage that denied. BearerStageAuthority means
 // the gate passed and the principal's live authority (role bindings,
 // groups, relationship grants, access constraints and the ceiling as a
-// kernel restriction) denied. BearerStageError means the request was
-// rejected before the gate (for example an unsupported principal, a
-// missing permission ID) or a store or resolution fault denied it at any
-// stage. An allowed evaluation has an empty Stage.
+// kernel restriction) denied. An allowed evaluation has an empty Stage.
+//
+// BearerStageError covers every deny that is not attributed to a gate
+// stage or to live authority:
+//   - inputs rejected before evaluation (an unsupported principal, an empty
+//     or unknown permission ID);
+//   - a policy deny decide applies before the gate, such as the delivery
+//     credential gate for a deliver permission;
+//   - a store or resolution fault at any stage.
+//
+// BearerStageError therefore does not by itself mean the evaluation was
+// indeterminate or is worth retrying. Decision.IsIndeterminate reports
+// whether a fault, rather than a policy fact, denied the request.
 const (
 	BearerStageBoundaryInvalid = bearerStageBoundaryInvalid
 	BearerStageTargetUnknown   = bearerStageTargetUnknown
@@ -238,7 +256,9 @@ const (
 type BearerOptions struct {
 	// Evidence is the server-constructed collection-level classification
 	// of the target. The zero value classifies the target from the
-	// Resource alone.
+	// Resource alone. Collection-level evidence must name the evaluated
+	// permissionID; evidence naming another permission denies with
+	// BearerStageTargetUnknown.
 	Evidence TargetScopeEvidence
 	// Explain requests decision provenance, as AuthzRequest.Explain does.
 	Explain bool
@@ -253,13 +273,14 @@ type BearerEvaluation struct {
 	// provenance when requested. It is not audited.
 	Decision Decision
 	// Stage names the stage that denied; empty when allowed. See the
-	// BearerStage constants.
+	// BearerStage constants. Use Decision.IsIndeterminate, not Stage, to
+	// tell a fault from a policy deny.
 	Stage string
 	// TargetScope is the resolved target scope, set once the boundary was
 	// found valid.
 	TargetScope TargetScope
 	// AccessSource is the evidence that admitted a project target, set
-	// when the project-access stage admitted the request.
+	// when the project access stage admitted the request.
 	AccessSource ProjectAccessSource
 }
 
@@ -296,6 +317,13 @@ const (
 //     permission's registry row. An empty or unknown ID denies with
 //     BearerStageError.
 //   - target is the actual target of the request, never an invented one.
+//
+// Account status: for a project target, the project access stage
+// (ProjectTargetAdmission) denies a user whose account is not active. For a
+// hub target nothing in this evaluation checks account status, so the
+// caller must establish that user is an active account before calling, as
+// ValidateToken does for a user access token by rejecting a suspended
+// user's token.
 //
 // The evaluation reads only its arguments: it never reads an identity,
 // credential, or scopes from ctx. Every store or evaluation error denies.

@@ -354,3 +354,142 @@ func TestUATGate_UnresolvableTargetDenied(t *testing.T) {
 		assert.False(t, decision.Allowed, "boundary %s", boundary.Kind)
 	}
 }
+
+// gateStages are the bearer stages a request denied by the bearer gate
+// reports. A request that passed the gate reports none of them.
+var gateStages = []string{BearerStageBoundaryInvalid, BearerStageTargetUnknown, BearerStageOutsideBoundary, BearerStageCeiling, BearerStageProjectAccess}
+
+func hubCollectionEvidence(permissionID string) TargetScopeEvidence {
+	return TargetScopeEvidence{IsCollectionLevel: true, CollectionScope: TargetScopeHub, PermissionID: permissionID}
+}
+
+func projectCollectionEvidence(projectID, permissionID string) TargetScopeEvidence {
+	return TargetScopeEvidence{IsCollectionLevel: true, CollectionScope: TargetScopeProject, CollectionProjectID: projectID, PermissionID: permissionID}
+}
+
+// TestEvaluateBearerCeiling_TargetEvidenceClassifiesCollectionRequests pins
+// how collection-level evidence classifies a request that names no
+// existing resource: hub evidence resolves a hub scope that a hub boundary
+// allows and a project boundary does not; project evidence resolves that
+// project; a project resource without an ID and without evidence is
+// unresolvable.
+func TestEvaluateBearerCeiling_TargetEvidenceClassifiesCollectionRequests(t *testing.T) {
+	f := newBearerFixture(t, "evidence")
+	ctx := context.Background()
+	user := PrincipalContext{Identity: bearerUser(f.ownerA)}
+	hubScope := TargetScope{Kind: TargetScopeHub}
+	projectScopeA := TargetScope{Kind: TargetScopeProject, ProjectID: f.projectA}
+
+	t.Run("hub evidence passes the boundary stage of a hub boundary", func(t *testing.T) {
+		// project.create carries no token selector, so the ceiling stage
+		// decides after the boundary stage has allowed the hub scope.
+		eval := f.srv.authzService.EvaluateBearerCeiling(ctx, user, hubBoundary(), bearerCeiling(t, "agent:read"), "project.create", Resource{}, BearerOptions{Evidence: hubCollectionEvidence("project.create")})
+		assert.False(t, eval.Decision.Allowed)
+		assert.Equal(t, BearerStageCeiling, eval.Stage, eval.Decision.Reason)
+		assert.Equal(t, hubScope, eval.TargetScope)
+	})
+
+	t.Run("hub evidence with the permission in the ceiling passes the gate", func(t *testing.T) {
+		eval := f.srv.authzService.EvaluateBearerCeiling(ctx, user, hubBoundary(), bearerCeiling(t, "skill:list"), "skill.list", Resource{}, BearerOptions{Evidence: hubCollectionEvidence("skill.list")})
+		assert.NotContains(t, gateStages, eval.Stage, eval.Decision.Reason)
+		assert.Equal(t, hubScope, eval.TargetScope)
+	})
+
+	t.Run("project resource without an ID and without evidence is unresolvable", func(t *testing.T) {
+		eval := f.srv.authzService.EvaluateBearerCeiling(ctx, user, hubBoundary(), bearerCeiling(t, "project:read"), "project.read", Resource{Type: "project"}, BearerOptions{})
+		assert.False(t, eval.Decision.Allowed)
+		assert.Equal(t, BearerStageTargetUnknown, eval.Stage, eval.Decision.Reason)
+	})
+
+	t.Run("project evidence for the token project passes the gate", func(t *testing.T) {
+		target := Resource{Type: "agent", ParentType: "project", ParentID: f.projectA}
+		eval := f.srv.authzService.EvaluateBearerCeiling(ctx, user, projectBoundary(f.projectA), bearerCeiling(t, "agent:list"), "agent.list", target, BearerOptions{Evidence: projectCollectionEvidence(f.projectA, "agent.list")})
+		assert.NotContains(t, gateStages, eval.Stage, eval.Decision.Reason)
+		assert.Equal(t, projectScopeA, eval.TargetScope)
+	})
+
+	t.Run("hub evidence under a project boundary is outside the boundary", func(t *testing.T) {
+		eval := f.srv.authzService.EvaluateBearerCeiling(ctx, user, projectBoundary(f.projectA), bearerCeiling(t, "skill:list"), "skill.list", Resource{}, BearerOptions{Evidence: hubCollectionEvidence("skill.list")})
+		assert.False(t, eval.Decision.Allowed)
+		assert.Equal(t, BearerStageOutsideBoundary, eval.Stage, eval.Decision.Reason)
+		assert.Equal(t, hubScope, eval.TargetScope)
+	})
+}
+
+// TestEvaluateBearerCeiling_EvidenceMustNameEvaluatedPermission pins that
+// collection-level evidence classifies a request only for the permission
+// it names: evidence for any other permission denies at the target stage,
+// so it can never resolve a scope for the evaluated permission.
+func TestEvaluateBearerCeiling_EvidenceMustNameEvaluatedPermission(t *testing.T) {
+	f := newBearerFixture(t, "evidence-perm")
+	ctx := context.Background()
+	user := PrincipalContext{Identity: bearerUser(f.ownerA)}
+	ceiling := bearerCeiling(t, "agent:list", "skill:list")
+
+	cases := []struct {
+		name     string
+		boundary TokenBoundary
+		target   Resource
+		evidence TargetScopeEvidence
+	}{
+		{"hub evidence for another permission", hubBoundary(), Resource{}, hubCollectionEvidence("skill.list")},
+		{"project evidence for another permission", projectBoundary(f.projectA), Resource{Type: "agent", ParentType: "project", ParentID: f.projectA}, projectCollectionEvidence(f.projectA, "agent.create")},
+		{"evidence without a permission", hubBoundary(), Resource{}, hubCollectionEvidence("")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			eval := f.srv.authzService.EvaluateBearerCeiling(ctx, user, tc.boundary, ceiling, "agent.list", tc.target, BearerOptions{Evidence: tc.evidence})
+			assert.False(t, eval.Decision.Allowed)
+			assert.Equal(t, BearerStageTargetUnknown, eval.Stage, eval.Decision.Reason)
+			assert.Equal(t, bearerReasonTargetUnknown, eval.Decision.Reason)
+		})
+	}
+}
+
+// TestUATGate_RequestTargetEvidence pins that AuthzRequest.TargetEvidence
+// reaches the bearer gate of a UAT request: evidence naming the evaluated
+// permission classifies the target, and evidence naming another
+// permission denies.
+func TestUATGate_RequestTargetEvidence(t *testing.T) {
+	f := newBearerFixture(t, "gate-evidence")
+	ctx := context.Background()
+	selectors := []string{"agent:list", "skill:list"}
+	ceiling := bearerCeiling(t, selectors...)
+
+	decide := func(boundary TokenBoundary, permID string, target Resource, evidence TargetScopeEvidence) Decision {
+		scoped := NewScopedUserIdentityWithBoundaryAndDecoration(bearerUser(f.ownerA), boundary, selectors, tid("bearer-gate-evidence-cred-"+string(boundary.Kind)), ceiling, nil)
+		action, ok := registryActionFor(permID)
+		require.True(t, ok)
+		return f.srv.authzService.Decide(ctx, AuthzRequest{
+			Principal:      PrincipalContext{Identity: scoped},
+			Resource:       target,
+			Action:         action,
+			Permission:     permID,
+			TargetEvidence: evidence,
+		})
+	}
+
+	outside := decide(projectBoundary(f.projectA), "skill.list", Resource{}, hubCollectionEvidence("skill.list"))
+	assert.False(t, outside.Allowed)
+	assert.Equal(t, bearerReasonHubLevelResource, outside.Reason)
+
+	mismatched := decide(hubBoundary(), "agent.list", Resource{}, hubCollectionEvidence("skill.list"))
+	assert.False(t, mismatched.Allowed)
+	assert.Equal(t, bearerReasonTargetUnknown, mismatched.Reason)
+
+	project := decide(projectBoundary(f.projectA), "agent.list", Resource{Type: "agent", ParentType: "project", ParentID: f.projectA}, projectCollectionEvidence(f.projectA, "agent.list"))
+	assert.True(t, project.Allowed, project.Reason)
+}
+
+// TestEvaluateBearerCeiling_PreGatePolicyDenyIsNotIndeterminate pins that a
+// policy deny decide applies before the bearer gate reports
+// BearerStageError without being indeterminate: the delivery credential
+// gate denies a deliver permission for a bearer credential.
+func TestEvaluateBearerCeiling_PreGatePolicyDenyIsNotIndeterminate(t *testing.T) {
+	f := newBearerFixture(t, "pregate")
+	eval := f.srv.authzService.EvaluateBearerCeiling(context.Background(), PrincipalContext{Identity: bearerUser(f.ownerA)}, hubBoundary(), bearerCeiling(t, "agent:read"), "secret.deliver", agentResource(f.agentA), BearerOptions{})
+	assert.False(t, eval.Decision.Allowed)
+	assert.Equal(t, BearerStageError, eval.Stage)
+	assert.Equal(t, deliveryGateReason, eval.Decision.Reason)
+	assert.False(t, eval.Decision.IsIndeterminate(), "a policy deny is not indeterminate")
+}
