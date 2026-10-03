@@ -75,19 +75,44 @@ def expand_path(path: str) -> str:
 # out of the agent home. Unset or empty: the bundle's own directories.
 HARNESS_OUTPUTS_DIR_ENV = "SCION_HARNESS_OUTPUTS_DIR"
 HARNESS_SECRETS_DIR_ENV = "SCION_HARNESS_SECRETS_DIR"
+# The directory overrides must name a directory below this in-memory
+# directory.
+HARNESS_DIRS_ROOT = "/run/scion/mem"
+
+
+def _symlink_component(path: str) -> str | None:
+    """Return the first existing component of absolute path that is a
+    symbolic link, or None. Components that do not exist end the walk."""
+    cur = os.sep
+    for part in path.strip(os.sep).split(os.sep):
+        cur = os.path.join(cur, part)
+        if os.path.islink(cur):
+            return cur
+        if not os.path.lexists(cur):
+            return None
+    return None
 
 
 def harness_dir_override(name: str) -> str | None:
     """Return the directory set by env var name, or None when unset or empty.
 
-    A value that is not an absolute path raises ProvisionError.
+    The value must be an absolute path below HARNESS_DIRS_ROOT, and no
+    existing component of it may be a symbolic link; otherwise
+    ProvisionError is raised.
     """
     value = os.environ.get(name, "")
     if not value:
         return None
     if not os.path.isabs(value):
         raise ProvisionError(f"{name} must be an absolute path, got {value!r}")
-    return os.path.normpath(value)
+    clean = os.path.normpath(value)
+    root = os.path.normpath(HARNESS_DIRS_ROOT)
+    if not clean.startswith(root + os.sep):
+        raise ProvisionError(f"{name} must be a directory below {root}, got {value!r}")
+    link = _symlink_component(clean)
+    if link is not None:
+        raise ProvisionError(f"{name}: {link} is a symbolic link")
+    return clean
 
 
 def remap_under(path: str, src_dir: str, dst_dir: str) -> str:

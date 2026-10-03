@@ -381,8 +381,11 @@ class TestHarnessDirEnv(unittest.TestCase):
             ))
 
     def test_outputs_dir_env_moves_outputs(self):
-        outdir = tempfile.mkdtemp()
-        with mock.patch.dict(os.environ, {**self._UNSET, sh.HARNESS_OUTPUTS_DIR_ENV: outdir}):
+        root = tempfile.mkdtemp()
+        outdir = os.path.join(root, "outputs")
+        os.makedirs(outdir)
+        with mock.patch.object(sh, "HARNESS_DIRS_ROOT", root), \
+                mock.patch.dict(os.environ, {**self._UNSET, sh.HARNESS_OUTPUTS_DIR_ENV: outdir}):
             ctx = _make_ctx()
             self.assertEqual(ctx.outputs_dir, outdir)
             ctx.write_outputs(sh.ResolvedAuth(method="none"), env={"FOO": "bar"})
@@ -405,10 +408,13 @@ class TestHarnessDirEnv(unittest.TestCase):
             self.assertEqual(ctx.file_secret_files, {"cred": "~/.scion/harness/secrets/cred"})
 
     def test_secrets_dir_env_moves_staged_secrets(self):
-        secdir = tempfile.mkdtemp()
+        root = tempfile.mkdtemp()
+        secdir = os.path.join(root, "harness-secrets")
+        os.makedirs(secdir)
         with open(os.path.join(secdir, "MY_KEY"), "w") as f:
             f.write("value-from-mem\n")
-        with mock.patch.dict(os.environ, {**self._UNSET, sh.HARNESS_SECRETS_DIR_ENV: secdir}):
+        with mock.patch.object(sh, "HARNESS_DIRS_ROOT", root), \
+                mock.patch.dict(os.environ, {**self._UNSET, sh.HARNESS_SECRETS_DIR_ENV: secdir}):
             ctx = _make_ctx()
             other = "/etc/other/OTHER"
             self._set_candidates(ctx, {
@@ -433,6 +439,55 @@ class TestHarnessDirEnv(unittest.TestCase):
                     with self.assertRaises(sh.ProvisionError) as cm:
                         sh.harness_dir_override(name)
                     self.assertIn(name, str(cm.exception))
+
+    def test_value_outside_mem_dir_rejected(self):
+        values = [
+            "/",
+            "/etc",
+            "/run/scion/agent-secrets",
+            "/run/scion/mem/../agent-secrets",
+            "/run/scion/memx",
+            "/run/scion/memx/outputs",
+            "/run/scion/mem",
+            "/run/scion/mem/",
+        ]
+        for name in (sh.HARNESS_OUTPUTS_DIR_ENV, sh.HARNESS_SECRETS_DIR_ENV):
+            for value in values:
+                with self.subTest(name=name, value=value):
+                    with mock.patch.dict(os.environ, {**self._UNSET, name: value}):
+                        with self.assertRaises(sh.ProvisionError) as cm:
+                            sh.harness_dir_override(name)
+                        self.assertIn(name, str(cm.exception))
+                        self.assertIn("below /run/scion/mem", str(cm.exception))
+
+    def test_default_root_accepts_dirs_below_it(self):
+        for value in ("/run/scion/mem/outputs", "/run/scion/mem/harness-secrets/"):
+            with self.subTest(value=value):
+                with mock.patch.dict(os.environ, {**self._UNSET, sh.HARNESS_OUTPUTS_DIR_ENV: value}):
+                    self.assertEqual(sh.harness_dir_override(sh.HARNESS_OUTPUTS_DIR_ENV), value.rstrip("/"))
+
+    def test_symlink_component_rejected(self):
+        tmp = tempfile.mkdtemp()
+        root = os.path.join(tmp, "mem")
+        os.makedirs(os.path.join(root, "real"))
+        os.makedirs(os.path.join(tmp, "other"))
+        os.symlink(os.path.join(tmp, "other"), os.path.join(root, "link"))
+        cases = [
+            (os.path.join(root, "real"), True),
+            (os.path.join(root, "real", "not-yet"), True),
+            (os.path.join(root, "link"), False),
+            (os.path.join(root, "link", "outputs"), False),
+        ]
+        with mock.patch.object(sh, "HARNESS_DIRS_ROOT", root):
+            for value, ok in cases:
+                with self.subTest(value=value):
+                    with mock.patch.dict(os.environ, {**self._UNSET, sh.HARNESS_OUTPUTS_DIR_ENV: value}):
+                        if ok:
+                            self.assertEqual(sh.harness_dir_override(sh.HARNESS_OUTPUTS_DIR_ENV), value)
+                        else:
+                            with self.assertRaises(sh.ProvisionError) as cm:
+                                sh.harness_dir_override(sh.HARNESS_OUTPUTS_DIR_ENV)
+                            self.assertIn("symbolic link", str(cm.exception))
 
     def test_remap_under(self):
         self.assertEqual(sh.remap_under("/b/secrets/K", "/b/secrets", "/m"), "/m/K")

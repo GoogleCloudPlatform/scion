@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -458,11 +459,11 @@ echo "agy-wrapper: keyring initialized (DBUS=$DBUS_SESSION_BUS_ADDRESS)" >&2
 echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" > ~/.scion/harness/.dbus-env
 
 # Inject OAuth token into keyring (staging file, target path, env var fallback)
-if [ -f "{secret_path}" ]; then
+if [ -f {shlex.quote(secret_path)} ]; then
     secret-tool store \\
         --label="Password for antigravity on gemini" \\
         service gemini username antigravity \\
-        < "{secret_path}" 2>/dev/null \\
+        < {shlex.quote(secret_path)} 2>/dev/null \\
         && echo "agy-wrapper: token injected into keyring (from staging file)" >&2 \\
         || echo "agy-wrapper: WARNING: failed to inject token" >&2
 elif [ -f "{oauth_token_path}" ]; then

@@ -100,16 +100,33 @@ def _present_env_keys(candidates: dict[str, Any]) -> set[str]:
 # out of the agent home. Unset or empty: the bundle's own directories.
 HARNESS_OUTPUTS_DIR_ENV = "SCION_HARNESS_OUTPUTS_DIR"
 HARNESS_SECRETS_DIR_ENV = "SCION_HARNESS_SECRETS_DIR"
+# The overrides must name a directory below this in-memory directory.
+HARNESS_DIRS_ROOT = "/run/scion/mem"
 
 
 def _dir_override(name: str) -> str | None:
-    """Directory set by env var name; None when unset. Must be absolute."""
+    """Directory set by env var name; None when unset.
+
+    It must be an absolute path below HARNESS_DIRS_ROOT with no existing
+    component that is a symbolic link.
+    """
     value = os.environ.get(name, "")
     if not value:
         return None
     if not os.path.isabs(value):
         raise ValueError(f"amp provision: {name} must be an absolute path, got {value!r}")
-    return os.path.normpath(value)
+    clean = os.path.normpath(value)
+    root = os.path.normpath(HARNESS_DIRS_ROOT)
+    if not clean.startswith(root + os.sep):
+        raise ValueError(f"amp provision: {name} must be a directory below {root}, got {value!r}")
+    cur = os.sep
+    for part in clean.strip(os.sep).split(os.sep):
+        cur = os.path.join(cur, part)
+        if os.path.islink(cur):
+            raise ValueError(f"amp provision: {name}: {cur} is a symbolic link")
+        if not os.path.lexists(cur):
+            break
+    return clean
 
 
 def _remap_under(path: str, src_dir: str, dst_dir: str | None) -> str:

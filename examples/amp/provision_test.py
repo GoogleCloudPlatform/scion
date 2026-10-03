@@ -46,6 +46,7 @@ class HarnessDirEnvTest(unittest.TestCase):
             }, f)
         env = {"SCION_HARNESS_OUTPUTS_DIR": outputs_dir, "SCION_HARNESS_SECRETS_DIR": secrets_dir}
         with unittest.mock.patch.dict(os.environ, env), \
+                unittest.mock.patch.object(provision, "HARNESS_DIRS_ROOT", os.path.join(tmp, "mem")), \
                 unittest.mock.patch.object(provision, "AMP_SETTINGS_FILE", os.path.join(tmp, "settings.json")):
             rc = provision._provision({"harness_bundle_dir": bundle})
         return rc, bundle
@@ -72,6 +73,25 @@ class HarnessDirEnvTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             rc, _ = self._run(tmp, "relative/outputs", "")
             self.assertEqual(rc, provision.EXIT_ERROR)
+
+    def test_value_outside_mem_dir_rejected(self) -> None:
+        for case in ("/", "/etc", "{mem}", "{mem}/../outside", "{mem}x/outputs"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as tmp:
+                outputs_dir = case.format(mem=os.path.join(tmp, "mem"))
+                rc, bundle = self._run(tmp, outputs_dir, "")
+                self.assertEqual(rc, provision.EXIT_ERROR)
+                self.assertFalse(os.path.exists(os.path.join(bundle, "outputs")))
+                self.assertFalse(os.path.exists(os.path.join(tmp, "outside")))
+
+    def test_symlink_component_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mem = os.path.join(tmp, "mem")
+            os.makedirs(os.path.join(tmp, "other"))
+            os.makedirs(mem)
+            os.symlink(os.path.join(tmp, "other"), os.path.join(mem, "link"))
+            rc, _ = self._run(tmp, os.path.join(mem, "link", "outputs"), "")
+            self.assertEqual(rc, provision.EXIT_ERROR)
+            self.assertFalse(os.path.exists(os.path.join(tmp, "other", "outputs")))
 
 
 if __name__ == "__main__":

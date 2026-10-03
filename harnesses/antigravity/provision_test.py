@@ -18,6 +18,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shlex
+import subprocess
 import tempfile
 import unittest
 import unittest.mock
@@ -577,6 +579,26 @@ class WrapperSecretsDirTest(unittest.TestCase):
             script = self._wrapper(home, "/run/scion/mem/harness-secrets")
         self.assertIn("/run/scion/mem/harness-secrets/AGY_TOKEN", script)
         self.assertNotIn(os.path.join(home, ".scion", "harness", "secrets", "AGY_TOKEN"), script)
+
+    def test_secrets_dir_is_shell_quoted(self) -> None:
+        secrets_dir = "/run/scion/mem/harness secrets/it's"
+        with tempfile.TemporaryDirectory() as home:
+            script = self._wrapper(home, secrets_dir)
+            wrapper = os.path.join(home, ".scion", "harness", "agy-wrapper.sh")
+            check = subprocess.run(["bash", "-n", wrapper], capture_output=True, text=True)
+        quoted = shlex.quote(secrets_dir + "/AGY_TOKEN")
+        self.assertIn(f"if [ -f {quoted} ]; then", script)
+        self.assertIn(f"< {quoted} 2>/dev/null", script)
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_secrets_dir_outside_mem_dir_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, \
+                unittest.mock.patch.dict(os.environ, {
+                    "SCION_HARNESS_SECRETS_DIR": "/etc",
+                    "SCION_HARNESS_OUTPUTS_DIR": "",
+                }):
+            with self.assertRaises(scion_harness.ProvisionError):
+                _invoke(tmp, env_vars=[], explicit_type="none")
 
     def test_provision_passes_env_value(self) -> None:
         seen: dict[str, Any] = {}
