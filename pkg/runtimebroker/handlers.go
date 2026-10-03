@@ -110,7 +110,7 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 	if s.nfsMountReconciler != nil {
 		checks["nfs_mounts"] = s.nfsMountReconciler.HealthCheckString()
 		if s.nfsHealthDegradesStatus() {
-			status = "degraded"
+			status = degradeHealthStatus(status)
 		}
 	}
 
@@ -120,6 +120,16 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 		Uptime:  time.Since(s.startTime).Round(time.Second).String(),
 		Checks:  checks,
 	}
+}
+
+// degradeHealthStatus lowers a healthy status to degraded. Any other
+// status (already degraded, or worse) is returned unchanged, so a
+// degrading check never raises a worse status back to degraded.
+func degradeHealthStatus(status string) string {
+	if status == "healthy" {
+		return "degraded"
+	}
+	return status
 }
 
 // nfsHealthDegradesStatus reports whether an unhealthy NFS share should

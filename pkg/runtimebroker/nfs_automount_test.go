@@ -653,6 +653,43 @@ func TestHealth_NFSDegradesOnlyWhenBrokerOwnsMounts(t *testing.T) {
 	}
 }
 
+// TestDegradeHealthStatus verifies that NFS only lowers a healthy status:
+// a status that is already unhealthy (or degraded) is kept.
+func TestDegradeHealthStatus(t *testing.T) {
+	for in, want := range map[string]string{
+		"healthy":   "degraded",
+		"degraded":  "degraded",
+		"unhealthy": "unhealthy",
+	} {
+		if got := degradeHealthStatus(in); got != want {
+			t.Errorf("degradeHealthStatus(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestHealth_NFSDegradedWithAnotherFailingCheck verifies that when another
+// check has already lowered the status and NFS also degrades it, the
+// status reflects the other check rather than being reset by NFS.
+func TestHealth_NFSDegradedWithAnotherFailingCheck(t *testing.T) {
+	mc := newSyncMountChecker()
+	mc.mountErr = errors.New("mount failed")
+	// No runtime: the runtime check reports "unavailable".
+	srv := New(ServerConfig{Host: "127.0.0.1", NFSConfig: nfsCfg(true), NFSMountChecker: mc}, nil, nil)
+	_ = srv.nfsMountReconciler.Reconcile(context.Background())
+	close(srv.nfsStartupReconcileDone)
+	if !srv.nfsHealthDegradesStatus() {
+		t.Fatal("expected NFS to degrade the status in this setup")
+	}
+
+	health := srv.GetHealthInfo(context.Background())
+	if health.Checks["runtime"] != "unavailable" {
+		t.Fatalf("runtime check = %q, want unavailable", health.Checks["runtime"])
+	}
+	if health.Status != "degraded" {
+		t.Errorf("status = %q, want degraded (checks %v)", health.Status, health.Checks)
+	}
+}
+
 // --- Request-context bounds on dispatch-time mounts ---
 
 // TestEnsureShareMounted_RequestCtxCancelsMount verifies that a mount run
