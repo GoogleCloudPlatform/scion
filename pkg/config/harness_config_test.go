@@ -732,9 +732,9 @@ func TestSeedHarnessConfigFromDir(t *testing.T) {
 
 // TestSeedHarnessConfigFromDir_RefreshesProvisionerScriptsWithoutForce
 // verifies that non-force seeding over an existing harness-config refreshes
-// the provisioner-owned scripts (provision.py, scion_harness.py,
-// capture_auth.py) and
-// config.yaml from the bundled copy, while preserving unrelated user files.
+// config.yaml and the provisioner-owned scripts (provision.py,
+// scion_harness.py, capture_auth.py) from the bundled copy, keeps the
+// existing file mode, and preserves unrelated user files.
 func TestSeedHarnessConfigFromDir_RefreshesProvisionerScriptsWithoutForce(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -775,8 +775,18 @@ func TestSeedHarnessConfigFromDir_RefreshesProvisionerScriptsWithoutForce(t *tes
 		}
 	}
 
+	if err := os.Chmod(filepath.Join(targetDir, "provision.py"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
 	if err := SeedHarnessConfigFromDir(targetDir, sourceFS, "h", false); err != nil {
 		t.Fatalf("SeedHarnessConfigFromDir failed: %v", err)
+	}
+
+	if info, err := os.Stat(filepath.Join(targetDir, "provision.py")); err != nil {
+		t.Fatal(err)
+	} else if info.Mode().Perm() != 0755 {
+		t.Errorf("provision.py mode = %v, want 0755 preserved", info.Mode().Perm())
 	}
 
 	want := map[string]string{
@@ -798,6 +808,50 @@ func TestSeedHarnessConfigFromDir_RefreshesProvisionerScriptsWithoutForce(t *tes
 		if string(data) != wantContent {
 			t.Errorf("%s = %q, want %q", rel, string(data), wantContent)
 		}
+	}
+}
+
+// TestSeedHarnessConfigFromDir_SkipsSymlinkedProvisionerScript verifies that
+// non-force seeding neither writes through nor replaces a symlinked
+// provisioner script; it is treated as user-managed.
+func TestSeedHarnessConfigFromDir_SkipsSymlinkedProvisionerScript(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	sourceFS := fstest.MapFS{
+		"h/config.yaml":  &fstest.MapFile{Data: []byte("harness: h\nimage: img:new\nuser: scion\n")},
+		"h/provision.py": &fstest.MapFile{Data: []byte("# bundled provision")},
+	}
+
+	targetDir := filepath.Join(tmpDir, "h")
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	linkTarget := filepath.Join(tmpDir, "my-provision.py")
+	if err := os.WriteFile(linkTarget, []byte("# my linked provision"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(targetDir, "provision.py")
+	if err := os.Symlink(linkTarget, linkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SeedHarnessConfigFromDir(targetDir, sourceFS, "h", false); err != nil {
+		t.Fatalf("SeedHarnessConfigFromDir failed: %v", err)
+	}
+
+	info, err := os.Lstat(linkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Error("provision.py symlink was replaced")
+	}
+	data, err := os.ReadFile(linkTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "# my linked provision" {
+		t.Errorf("seeding wrote through the symlink: target = %q", string(data))
 	}
 }
 

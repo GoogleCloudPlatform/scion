@@ -15,7 +15,6 @@
 package config
 
 import (
-	"bytes"
 	"fmt"
 	"io/fs"
 	"os"
@@ -92,10 +91,18 @@ func UpgradeHarnessConfig(targetDir string, h api.Harness, opts HarnessConfigUpg
 		return plan, nil
 	}
 
+	// Provisioner scripts are refreshed only when the target is the bundled
+	// harness-config itself (its directory name matches the bundled harness).
+	// A custom-named config that reuses a bundled harness type (for example
+	// "install --name my-claude" with harness: claude) may carry its own
+	// provisioner, so its scripts are left alone and only missing files are
+	// added.
+	refreshScripts := filepath.Base(absTarget) == h.Name()
+
 	embedsFS, basePath := h.GetHarnessEmbedsFS()
 	if basePath == "" {
 		if opts.HarnessesFS != nil {
-			return upgradeFromHarnessesFS(absTarget, plan, h.Name(), opts)
+			return upgradeFromHarnessesFS(absTarget, plan, h.Name(), refreshScripts, opts)
 		}
 		return plan, nil
 	}
@@ -157,24 +164,8 @@ func UpgradeHarnessConfig(targetDir string, h api.Harness, opts HarnessConfigUpg
 		}
 	}
 
-	addedFiles, refreshedFiles, err := syncHarnessConfigSupportFiles(absTarget, embedsFS, basePath, configDir, opts.DryRun)
-	if err != nil {
+	if err := syncHarnessConfigSupportFiles(plan, absTarget, embedsFS, basePath, configDir, refreshScripts, opts); err != nil {
 		return plan, err
-	}
-	for _, relPath := range addedFiles {
-		plan.Changed = true
-		plan.Actions = append(plan.Actions, HarnessConfigUpgradeAction{
-			Type: "add_file",
-			Path: relPath,
-		})
-	}
-	for _, relPath := range refreshedFiles {
-		plan.Changed = true
-		plan.Actions = append(plan.Actions, HarnessConfigUpgradeAction{
-			Type:   "refresh_file",
-			Path:   relPath,
-			Detail: "replaced provisioner script with bundled copy",
-		})
 	}
 
 	sort.SliceStable(plan.Actions, func(i, j int) bool {
@@ -190,7 +181,7 @@ func UpgradeHarnessConfig(targetDir string, h api.Harness, opts HarnessConfigUpg
 // upgradeFromHarnessesFS handles upgrade using the embedded harnesses/ FS as
 // the source of truth. Reads config.yaml from the harnesses/ FS to get the
 // default configuration, merges missing fields, and adds missing support files.
-func upgradeFromHarnessesFS(absTarget string, plan *HarnessConfigUpgradePlan, harnessName string, opts HarnessConfigUpgradeOptions) (*HarnessConfigUpgradePlan, error) {
+func upgradeFromHarnessesFS(absTarget string, plan *HarnessConfigUpgradePlan, harnessName string, refreshScripts bool, opts HarnessConfigUpgradeOptions) (*HarnessConfigUpgradePlan, error) {
 	sourcePath := harnessName
 	configPath := filepath.Join(absTarget, "config.yaml")
 
@@ -260,24 +251,8 @@ func upgradeFromHarnessesFS(absTarget string, plan *HarnessConfigUpgradePlan, ha
 	if err != nil {
 		return plan, err
 	}
-	addedFiles, refreshedFiles, err := syncHarnessConfigSupportFiles(absTarget, subFS, ".", configDir, opts.DryRun)
-	if err != nil {
+	if err := syncHarnessConfigSupportFiles(plan, absTarget, subFS, ".", configDir, refreshScripts, opts); err != nil {
 		return plan, err
-	}
-	for _, relPath := range addedFiles {
-		plan.Changed = true
-		plan.Actions = append(plan.Actions, HarnessConfigUpgradeAction{
-			Type: "add_file",
-			Path: relPath,
-		})
-	}
-	for _, relPath := range refreshedFiles {
-		plan.Changed = true
-		plan.Actions = append(plan.Actions, HarnessConfigUpgradeAction{
-			Type:   "refresh_file",
-			Path:   relPath,
-			Detail: "replaced provisioner script with bundled copy",
-		})
 	}
 
 	sort.SliceStable(plan.Actions, func(i, j int) bool {
@@ -390,14 +365,14 @@ func activateContainerScriptProvisioner(configData []byte) ([]byte, bool, error)
 }
 
 // syncHarnessConfigSupportFiles adds bundled support files that are missing
-// from targetDir and refreshes provisioner-owned scripts (provision.py,
-// scion_harness.py, capture_auth.py) whose content differs from the bundled copy. Other
-// existing files are preserved. It returns the added and refreshed paths
-// relative to targetDir.
-func syncHarnessConfigSupportFiles(targetDir string, embedsFS fs.FS, basePath, configDir string, dryRun bool) ([]string, []string, error) {
+// from targetDir and records them in plan. When refreshScripts is set, it also
+// refreshes provisioner-owned scripts (provision.py, scion_harness.py,
+// capture_auth.py) whose content differs from the bundled copy, backing up
+// each one first. A symlinked or non-regular script is treated as
+// user-managed and skipped. Other existing files are preserved.
+func syncHarnessConfigSupportFiles(plan *HarnessConfigUpgradePlan, targetDir string, embedsFS fs.FS, basePath, configDir string, refreshScripts bool, opts HarnessConfigUpgradeOptions) error {
 	homeDir := filepath.Join(targetDir, "home")
-	var added, refreshed []string
-	err := fs.WalkDir(embedsFS, basePath, func(path string, d fs.DirEntry, err error) error {
+	return fs.WalkDir(embedsFS, basePath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -419,36 +394,90 @@ func syncHarnessConfigSupportFiles(targetDir string, embedsFS fs.FS, basePath, c
 		if err != nil {
 			return err
 		}
+		targetRel = filepath.ToSlash(targetRel)
+
+		if refreshScripts && isProvisionerOwnedFile(targetRel) {
+			data, err := fs.ReadFile(embedsFS, path)
+			if err != nil {
+				return err
+			}
+			return refreshUpgradeProvisionerScript(plan, targetPath, targetRel, data, opts)
+		}
+
+		if _, err := os.Lstat(targetPath); err == nil {
+			return nil
+		}
+		plan.Changed = true
+		plan.Actions = append(plan.Actions, HarnessConfigUpgradeAction{
+			Type: "add_file",
+			Path: targetRel,
+		})
+		if opts.DryRun {
+			return nil
+		}
 		data, err := fs.ReadFile(embedsFS, path)
 		if err != nil {
 			return err
-		}
-		if fileExists(targetPath) {
-			if !isProvisionerOwnedFile(targetRel) {
-				return nil
-			}
-			current, err := os.ReadFile(targetPath)
-			if err != nil {
-				return fmt.Errorf("read %s: %w", targetPath, err)
-			}
-			if bytes.Equal(current, data) {
-				return nil
-			}
-			refreshed = append(refreshed, filepath.ToSlash(targetRel))
-		} else {
-			added = append(added, filepath.ToSlash(targetRel))
-		}
-		if dryRun {
-			return nil
 		}
 		if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
 			return err
 		}
 		return os.WriteFile(targetPath, data, 0644)
 	})
-	sort.Strings(added)
-	sort.Strings(refreshed)
-	return added, refreshed, err
+}
+
+// refreshUpgradeProvisionerScript brings one provisioner-owned script in line
+// with the bundled data during a non-force upgrade and records the outcome in
+// plan.
+func refreshUpgradeProvisionerScript(plan *HarnessConfigUpgradePlan, targetPath, targetRel string, data []byte, opts HarnessConfigUpgradeOptions) error {
+	result, err := inspectProvisionerScript(targetPath, data)
+	if err != nil {
+		return err
+	}
+	switch result {
+	case provisionerScriptUnchanged:
+		return nil
+	case provisionerScriptUserManaged:
+		plan.Actions = append(plan.Actions, HarnessConfigUpgradeAction{
+			Type:   "skip_file",
+			Path:   targetRel,
+			Detail: "provisioner script is a symlink or non-regular file; treated as user-managed",
+		})
+		return nil
+	case provisionerScriptCreated:
+		plan.Changed = true
+		plan.Actions = append(plan.Actions, HarnessConfigUpgradeAction{
+			Type: "add_file",
+			Path: targetRel,
+		})
+		if opts.DryRun {
+			return nil
+		}
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+			return err
+		}
+		return writeFileAtomic(targetPath, data)
+	}
+
+	// provisionerScriptReplaced
+	plan.Changed = true
+	action := HarnessConfigUpgradeAction{
+		Type:   "refresh_file",
+		Path:   targetRel,
+		Detail: "replace provisioner script with bundled copy",
+	}
+	if opts.DryRun {
+		plan.Actions = append(plan.Actions, action)
+		return nil
+	}
+	backupPath, err := backupFile(targetPath, opts.Now())
+	if err != nil {
+		return err
+	}
+	plan.Backups = append(plan.Backups, backupPath)
+	action.Detail += "; backup " + filepath.Base(backupPath)
+	plan.Actions = append(plan.Actions, action)
+	return writeFileAtomic(targetPath, data)
 }
 
 func backupFile(path string, now time.Time) (string, error) {

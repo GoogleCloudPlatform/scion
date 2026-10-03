@@ -280,7 +280,7 @@ func SeedHarnessConfig(targetDir string, h api.Harness, force bool) error {
 			return err
 		}
 
-		return SeedFileFromFS(embedsFS, basePath, relPath, targetPath, force, isProvisionerOwnedFile(relPath))
+		return seedHarnessConfigFile(embedsFS, basePath, relPath, targetPath, force)
 	})
 	if err != nil {
 		return fmt.Errorf("failed to seed harness-config files: %w", err)
@@ -307,25 +307,6 @@ func mapEmbedFileToHarnessConfigPath(targetDir, homeDir, configDir, fileName str
 	}
 
 	return mapEmbedFileToHomePath(homeDir, configDir, cleanName)
-}
-
-// provisionerOwnedFiles are bundled provisioner scripts (including
-// capture_auth.py, which calls into the vendored scion_harness.py and must
-// stay in step with it) that are owned by the
-// harness bundle rather than the operator. Like config.yaml, they are always
-// refreshed from the bundled copy during non-force seeding so that provisioner
-// behaviour changes reach existing nodes. Other user files are preserved.
-var provisionerOwnedFiles = map[string]bool{
-	"provision.py":     true,
-	"scion_harness.py": true,
-	"capture_auth.py":  true,
-}
-
-// isProvisionerOwnedFile reports whether relPath (relative to the
-// harness-config root) is a bundled provisioner script that non-force seeding
-// always overwrites.
-func isProvisionerOwnedFile(relPath string) bool {
-	return provisionerOwnedFiles[filepath.ToSlash(filepath.Clean(relPath))]
 }
 
 func isHarnessConfigRootSupportFile(relPath string) bool {
@@ -491,10 +472,10 @@ func SeedHarnessConfigFromDir(targetDir string, sourceFS fs.FS, sourcePath strin
 		}
 	}
 
-	// Seed config.yaml (always overwrite to keep in sync with embedded defaults).
-	// Provisioner-owned scripts (provision.py, scion_harness.py,
-	// capture_auth.py) are likewise
-	// always overwritten in the walk below; other files are preserved unless force.
+	// Seed config.yaml (always overwrite to keep in sync with embedded
+	// defaults). Provisioner-owned scripts (provision.py, scion_harness.py,
+	// capture_auth.py) are likewise refreshed in the walk below. Other files
+	// are preserved unless force is set.
 	if err := seedFileFromGenericFS(sourceFS, sourcePath, "config.yaml", filepath.Join(targetDir, "config.yaml"), force, true); err != nil {
 		return fmt.Errorf("failed to seed config.yaml: %w", err)
 	}
@@ -530,7 +511,7 @@ func SeedHarnessConfigFromDir(targetDir string, sourceFS fs.FS, sourcePath strin
 			return err
 		}
 
-		return seedFileFromGenericFS(sourceFS, sourcePath, relPath, targetPath, force, isProvisionerOwnedFile(relPath))
+		return seedHarnessConfigFile(sourceFS, sourcePath, relPath, targetPath, force)
 	})
 }
 
@@ -629,6 +610,6 @@ func SeedHarnessConfigFromFS(targetDir string, embedsFS embed.FS, basePath, conf
 			return err
 		}
 
-		return SeedFileFromFS(embedsFS, basePath, relPath, targetPath, force, isProvisionerOwnedFile(relPath))
+		return seedHarnessConfigFile(embedsFS, basePath, relPath, targetPath, force)
 	})
 }
