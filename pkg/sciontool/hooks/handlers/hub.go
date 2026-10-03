@@ -104,6 +104,8 @@ func (h *HubHandler) forwardAssistantReply(ctx context.Context, text string, met
 		// The creator no longer resolves (e.g. the user was deleted). That
 		// will not change for this agent, so cache a skip instead of
 		// sending a request the hub rejects on every later Stop.
+		// Permanent because user IDs are never reused; a user restore or
+		// undelete feature would need to invalidate this cache.
 		log.Warn("Hub: assistant reply addressee %s is unknown to the hub; disabling the mirror for this agent", creatorID)
 		writeAddresseeCache(h.addresseeCachePath, addresseeCache{AgentID: h.client.AgentID()})
 		return
