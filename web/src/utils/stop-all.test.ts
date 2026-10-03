@@ -32,12 +32,12 @@ describe('stopAllNotices', () => {
     const notices = stopAllNotices({ stopped: 1, failed: 0, stopRecorded: 2 });
     expect(notices).toHaveLength(1);
     expect(notices[0].variant).toBe('neutral');
-    expect(notices[0].message).toContain('2 agents still starting');
+    expect(notices[0].message).toContain('Stop recorded for 2 agents still starting');
   });
 
   it('shows both notices in order', () => {
     const notices = stopAllNotices({ stopped: 0, failed: 1, stopRecorded: 1 });
     expect(notices.map((n) => n.variant)).toEqual(['warning', 'neutral']);
-    expect(notices[1].message).toContain('1 agent still starting');
+    expect(notices[1].message).toContain('Stop recorded for 1 agent still starting');
   });
 });

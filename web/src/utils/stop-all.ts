@@ -43,7 +43,7 @@ export function stopAllNotices(result: StopAllResult): StopAllNotice[] {
   if (recorded > 0) {
     const agents = recorded === 1 ? '1 agent' : `${recorded} agents`;
     notices.push({
-      message: `Stop queued for ${agents} still starting. The start was not interrupted; stop again if it comes up running.`,
+      message: `Stop recorded for ${agents} still starting. The start was not interrupted; stop again if it comes up running.`,
       variant: 'neutral',
     });
   }

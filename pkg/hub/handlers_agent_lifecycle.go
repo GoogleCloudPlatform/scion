@@ -740,7 +740,9 @@ func (s *Server) wakeBrokerDrain(ctx context.Context, brokerID string) {
 }
 
 // brokerDrainWakeTimeout bounds the local drain wakeBrokerDrain starts. A
-// drain cut short leaves its rows queued for the next drain.
+// drain cut short leaves its unclaimed rows queued for the next drain; the
+// row in flight at the deadline stays in progress until ReapStuckDispatch
+// requeues it.
 const brokerDrainWakeTimeout = 5 * time.Minute
 
 // agentLifecycleResponse is the lifecycle action response: the agent, plus
