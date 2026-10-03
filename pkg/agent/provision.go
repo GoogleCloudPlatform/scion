@@ -330,9 +330,11 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 		// decision and destroy it anyway, since it has no notion of a
 		// worktree being nested inside the directory it's asked to remove.
 		// If workspace/ is still a live worktree at this point, clean up
-		// everything else in agentDir but leave it in place.
+		// everything else in agentDir but leave it in place. An
+		// empty-per-agent workspace owns no worktree and is removed with
+		// agentDir even when it contains a .git.
 		workspaceStillLive := false
-		if _, err := os.Stat(filepath.Join(agentDir, "workspace", ".git")); err == nil {
+		if _, err := os.Stat(filepath.Join(agentDir, "workspace", ".git")); err == nil && !emptyPerAgent {
 			workspaceStillLive = true
 		}
 		if workspaceStillLive {
