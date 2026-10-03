@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -587,6 +588,19 @@ func buildStructuredMessage(sender, recipient, message string, attachments []str
 	return msg
 }
 
+// agentMessageSendError renders a failed agent-message send. A 404 from the
+// hub means the recipient does not exist (deleted, reaped, or misspelled), so
+// the error states that plainly and names the agent; the hub's own message is
+// kept as the cause. Other failures keep the generic wording. Both go through
+// wrapHubError, which (for a 404) adds no local-only hint, and Execute prints
+// no Usage block for hub failures; the command exits 1.
+func agentMessageSendError(agentName string, err error) error {
+	if apiclient.IsNotFoundError(err) {
+		return wrapHubError(fmt.Errorf("agent '%s' not found; message not sent: %w", agentName, err))
+	}
+	return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", agentName, err))
+}
+
 func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, interrupt bool, notify bool, wake bool) error {
 	if !isJSONOutput() {
 		PrintUsingHub(hubCtx.Endpoint)
@@ -639,7 +653,7 @@ func sendMessageViaHub(hubCtx *HubContext, agentName string, message string, int
 		Mentions:  mentions,
 	})
 	if err != nil {
-		return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", agentName, err))
+		return agentMessageSendError(agentName, err)
 	}
 
 	if isJSONOutput() {
@@ -781,7 +795,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 				Mentions: mentions,
 			})
 			if err != nil {
-				return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", ref.Value, err))
+				return agentMessageSendError(ref.Value, err)
 			}
 			if isJSONOutput() {
 				if resp != nil {
@@ -888,7 +902,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 	}
 
 	if _, err := agentSvc.SendStructuredMessage(ctx, ref.Value, agentMsg, interrupt, false, wake); err != nil {
-		return wrapHubError(fmt.Errorf("failed to send message to agent '%s' via Hub: %w", ref.Value, err))
+		return agentMessageSendError(ref.Value, err)
 	}
 	if !isJSONOutput() {
 		fmt.Printf("Message delivered to agent '%s'.\n", ref.Value)
