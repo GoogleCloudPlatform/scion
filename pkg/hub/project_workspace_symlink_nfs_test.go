@@ -301,11 +301,14 @@ func TestSymlinkNFS_Delete(t *testing.T) {
 // Because the victim side is a fully-formed, real leaf, a successful open
 // (a 200, or a removed victim file) is possible in principle -- only the
 // intended protection (the dev/ino check, or DeleteSharedDir's fd walk)
-// prevents it. Each test also asserts the real leaf was actually reached at
-// least once (the PUT test does so deterministically, with no swap in
-// flight; see its doc comment), so a protection that accidentally refused EVERYTHING
-// (which would trivially "pass" by never touching the victim either)
-// couldn't hide behind these assertions.
+// prevents it. Each test also proves the real leaf is actually reachable,
+// so a protection that accidentally refused EVERYTHING (which would
+// trivially "pass" by never touching the victim either) couldn't hide
+// behind these assertions. That proof is taken deterministically, with no
+// swap in flight, before and/or after the race (see each test's doc
+// comment): how many racing requests land between two swaps depends on
+// scheduler timing and can legitimately be zero, so racing success counts
+// are logged only.
 
 type nfsRenameExchangeRace struct {
 	srv           *Server
@@ -389,12 +392,22 @@ func (r *nfsRenameExchangeRace) startSwapper() (stop func(), swaps *atomic.Int64
 	return func() { stopFlag.Store(true); <-done }, swaps
 }
 
+// TestRenameExchangeRaceNFS_Get_NeverLeaksVictim: the fraction of racing
+// GETs that land between two swaps depends on scheduler timing and can
+// legitimately be zero, so the proof that a GET reaches the real leaf is
+// taken deterministically, with no swap in flight, both before the race and
+// after it (once the real leaf is back at race.pid). The racing loop in
+// between is what exercises the never-leaks-the-victim property; every
+// racing response is checked for a leak, and its success count is logged
+// only.
 func TestRenameExchangeRaceNFS_Get_NeverLeaksVictim(t *testing.T) {
 	race := setupNFSRenameExchangeRace(t, "scratch")
 	race.skipIfRenameExchangeUnsupported(t)
 
 	victimTree := &outsideTree{dir: race.victim}
 	before := victimTree.snapshot(t)
+
+	race.requireGetReachesRealLeaf(t)
 
 	stop, swaps := race.startSwapper()
 	const iterations = 3000
@@ -408,11 +421,26 @@ func TestRenameExchangeRaceNFS_Get_NeverLeaksVictim(t *testing.T) {
 		}
 	}
 	stop()
-
-	t.Logf("swaps=%d realOK=%d leaks=%d", swaps.Load(), realOK, leaks)
+	t.Logf("swaps=%d realOK=%d leaks=%d (racing GET successes are timing-dependent and not asserted)", swaps.Load(), realOK, leaks)
 	assert.Zero(t, leaks, "the victim's content must never be served, regardless of race timing")
-	assert.Positive(t, realOK, "the race must actually have reached the real leaf at least once, or this test proves nothing")
+
+	race.restoreRealOrientation(t)
+	race.requireGetReachesRealLeaf(t)
+
 	victimTree.assertIntact(t, before)
+}
+
+// requireGetReachesRealLeaf issues one GET of keep.txt with no swap in
+// flight and requires that it succeeds with the real leaf's content. This
+// is the deterministic proof that the protection does not refuse every GET
+// (which would trivially never leak the victim).
+func (r *nfsRenameExchangeRace) requireGetReachesRealLeaf(t *testing.T) {
+	t.Helper()
+	rec := doRequest(t, r.srv, http.MethodGet, r.filesURL+"/keep.txt", nil)
+	assertNotLeaked(t, rec)
+	require.Equal(t, http.StatusOK, rec.Code,
+		"a GET with no swap in flight must reach the real leaf, or this test proves nothing; body: %s", rec.Body.String())
+	require.Equal(t, "real", rec.Body.String(), "the GET must serve the real leaf's keep.txt")
 }
 
 // TestRenameExchangeRaceNFS_Put_NeverWritesVictim: a racing PUT holds the
@@ -500,10 +528,17 @@ func realLeafContentAt(path string) bool {
 // a config DELETE always returns 204 regardless of whether the host-side
 // cleanup actually reached anything (it is best-effort), so the response
 // code alone can't distinguish "reached the real leaf" from "raced a
-// symlink and did nothing". Each round below resets a fresh real leaf,
-// races a single DELETE against the swapper, and checks the ACTUAL
-// filesystem state afterward -- at whichever of race.pid/race.alt now
-// holds the real content -- to count genuine removals directly.
+// symlink and did nothing". Each round below resets a fresh real leaf
+// and checks the ACTUAL filesystem state after the DELETE.
+//
+// The proof that a DELETE reaches the real leaf is taken deterministically:
+// one round before the race and one after it run with NO swapper, and the
+// DELETE must remove the real leaf's content at race.pid while the victim's
+// file stays intact. The racing rounds in between each race a single DELETE
+// against the swapper and exercise the never-removes-the-victim property;
+// how many of them land between two swaps depends on scheduler timing and
+// can legitimately be zero, so their removal count (taken at whichever of
+// race.pid/race.alt now holds the real content) is logged only.
 func TestRenameExchangeRaceNFS_ConfigDelete_NeverRemovesVictim(t *testing.T) {
 	race := setupNFSRenameExchangeRace(t, "scratch")
 	race.skipIfRenameExchangeUnsupported(t)
@@ -512,20 +547,48 @@ func TestRenameExchangeRaceNFS_ConfigDelete_NeverRemovesVictim(t *testing.T) {
 	victimKeep := filepath.Join(race.victim, "shared-dirs", "scratch", "keep.txt")
 	deleteURL := race.sharedDirsURL + "/scratch"
 
-	const rounds = 300
-	var realRemovals int
-	for i := 0; i < rounds; i++ {
-		// Reset: the real leaf lives at race.pid, a symlink to the victim
-		// at race.alt -- both known-good before this round's race starts.
-		// RemoveAll handles either path being a symlink (unlinked directly,
-		// never followed) or a real directory (recursively removed) left
-		// over from a previous round's swap.
+	// reset puts the real leaf at race.pid and a symlink to the victim at
+	// race.alt -- both known-good before a round starts -- and re-declares
+	// the shared dir. RemoveAll handles either path being a symlink
+	// (unlinked directly, never followed) or a real directory (recursively
+	// removed) left over from a previous round's swap.
+	reset := func() {
+		t.Helper()
 		require.NoError(t, os.RemoveAll(race.pid))
 		require.NoError(t, os.RemoveAll(race.alt))
 		require.NoError(t, os.MkdirAll(realLeaf, 0o2775))
 		require.NoError(t, os.WriteFile(filepath.Join(realLeaf, "keep.txt"), []byte("real"), 0o644))
 		require.NoError(t, os.Symlink(race.victim, race.alt))
 		doRequest(t, race.srv, http.MethodPost, race.sharedDirsURL, map[string]interface{}{"name": "scratch"})
+	}
+
+	requireVictimIntact := func() {
+		t.Helper()
+		content, err := os.ReadFile(victimKeep)
+		require.NoError(t, err, "the victim's own tree must never lose its file")
+		require.Equal(t, outsideSecret, string(content), "the victim's file content must never be touched")
+	}
+
+	// requireDeleteReachesRealLeaf runs one round with no swapper: the
+	// DELETE must remove the real leaf's content at race.pid. This is the
+	// deterministic proof that the protection does not refuse every DELETE
+	// (which would trivially never remove the victim).
+	requireDeleteReachesRealLeaf := func(when string) {
+		t.Helper()
+		reset()
+		require.True(t, realLeafContentAt(race.pid), "the real leaf must be at the project path before the DELETE")
+		doRequest(t, race.srv, http.MethodDelete, deleteURL, nil)
+		require.False(t, realLeafContentAt(race.pid),
+			"a DELETE with no swap in flight (%s) must remove the real leaf, or this test proves nothing about reaching the real delete path", when)
+		requireVictimIntact()
+	}
+
+	requireDeleteReachesRealLeaf("before the race")
+
+	const rounds = 300
+	var realRemovals int
+	for i := 0; i < rounds; i++ {
+		reset()
 
 		stop, _ := race.startSwapper()
 		doRequest(t, race.srv, http.MethodDelete, deleteURL, nil)
@@ -535,11 +598,9 @@ func TestRenameExchangeRaceNFS_ConfigDelete_NeverRemovesVictim(t *testing.T) {
 			realRemovals++
 		}
 
-		content, err := os.ReadFile(victimKeep)
-		require.NoError(t, err, "the victim's own tree must never lose its file")
-		require.Equal(t, outsideSecret, string(content), "the victim's file content must never be touched")
+		requireVictimIntact()
 	}
+	t.Logf("rounds=%d realRemovals=%d (racing removals are timing-dependent and not asserted)", rounds, realRemovals)
 
-	t.Logf("rounds=%d realRemovals=%d", rounds, realRemovals)
-	assert.Positive(t, realRemovals, "the race must actually have removed the real leaf at least once, or this test proves nothing about reaching the real delete path")
+	requireDeleteReachesRealLeaf("after the race")
 }
