@@ -582,8 +582,10 @@ func harnessConfigScopeLabel(scope, scopeID string) string {
 }
 
 // findHubHarnessConfig returns the active harness config named name in
-// exactly the given scope, or nil if there is none. It uses the same lookup
-// as syncHarnessConfigToHub, so "exists" means "sync would update it".
+// exactly the given scope, or nil if there is none. It is the single
+// existence lookup shared by syncHarnessConfigToHub (create vs update) and
+// installToHub (--force guard), so "exists" always means "sync would update
+// it".
 func findHubHarnessConfig(ctx context.Context, hubCtx *HubContext, name, scope, scopeID string) (*hubclient.HarnessConfig, error) {
 	resp, err := hubCtx.Client.HarnessConfigs().List(ctx, &hubclient.ListHarnessConfigsOptions{
 		Name:    name,
@@ -627,24 +629,12 @@ func syncHarnessConfigToHub(hubCtx *HubContext, name, localPath, scope, scopeID,
 		}
 	}
 
-	// Check if it already exists
+	// Check if it already exists (the same lookup installToHub's --force
+	// guard uses, so the two cannot disagree).
 	var hcID string
-	existingResp, err := hubCtx.Client.HarnessConfigs().List(ctx, &hubclient.ListHarnessConfigsOptions{
-		Name:    name,
-		Scope:   scope,
-		ScopeID: scopeID,
-		Status:  "active",
-	})
+	existing, err := findHubHarnessConfig(ctx, hubCtx, name, scope, scopeID)
 	if err != nil {
 		return fmt.Errorf("failed to check for existing harness-config: %w", err)
-	}
-
-	var existing *hubclient.HarnessConfig
-	for i := range existingResp.HarnessConfigs {
-		if existingResp.HarnessConfigs[i].Name == name {
-			existing = &existingResp.HarnessConfigs[i]
-			break
-		}
 	}
 
 	localFileMap := make(map[string]*hubclient.FileInfo)
