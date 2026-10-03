@@ -418,18 +418,27 @@ func scrubSecrets(s string, m *containerProvisionManifest) string {
 }
 
 // loadStagedSecretValues reads the per-secret files written by the host-side
-// ApplyAuthSettings into agent_home/.scion/harness/secrets/, or into
-// SCION_HARNESS_SECRETS_DIR when set. The directory is optional; missing dir
-// means "no env-secret values were staged" and is fine.
+// ApplyAuthSettings into agent_home/.scion/harness/secrets/, and also those
+// in SCION_HARNESS_SECRETS_DIR when it is set. The directories are optional;
+// a missing dir means "no env-secret values were staged" and is fine.
 func loadStagedSecretValues(m *containerProvisionManifest) []string {
 	if m.HarnessBundleDir == "" {
 		return nil
 	}
-	dirs, err := hooks.ResolveHarnessDirs(expandHomePrefix(m.HarnessBundleDir))
-	if err != nil {
-		return nil
+	bundle := expandHomePrefix(m.HarnessBundleDir)
+	dirs := []string{filepath.Join(bundle, "secrets")}
+	if d, err := hooks.ResolveHarnessDirs(bundle); err == nil && d.Secrets != dirs[0] {
+		dirs = append(dirs, d.Secrets)
 	}
-	dir := dirs.Secrets
+	var out []string
+	for _, dir := range dirs {
+		out = append(out, readStagedSecretDir(dir)...)
+	}
+	return out
+}
+
+// readStagedSecretDir returns the non-empty values of the files in dir.
+func readStagedSecretDir(dir string) []string {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
