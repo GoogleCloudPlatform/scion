@@ -1456,21 +1456,17 @@ authDone:
 	if settings != nil {
 		settingsSafeToEvict, safeToEvictSource = settings.ResolveSafeToEvictWithSource(sdProfile)
 	}
-	if m.Runtime.Name() == "kubernetes" {
-		effective, source := settingsSafeToEvict, "settings "+safeToEvictSource
-		if tmplSafeToEvict != nil {
-			effective, source = tmplSafeToEvict, "kubernetes.safeToEvict in the agent or template config"
+	effectiveSafeToEvict, safeToEvictFrom := settingsSafeToEvict, "settings "+safeToEvictSource
+	if tmplSafeToEvict != nil {
+		effectiveSafeToEvict, safeToEvictFrom = tmplSafeToEvict, "kubernetes.safeToEvict in the agent or template config"
+	}
+	if effectiveSafeToEvict != nil {
+		if m.Runtime.Name() == "kubernetes" {
+			slog.Debug("Start: resolved safe_to_evict", "agent", opts.Name, "value", *effectiveSafeToEvict, "source", safeToEvictFrom)
+		} else {
+			slog.Warn("Start: safe_to_evict applies only to the Kubernetes runtime; ignoring it", "agent", opts.Name, "runtime", m.Runtime.Name(), "source", safeToEvictFrom)
+			settingsSafeToEvict = nil
 		}
-		if effective != nil {
-			slog.Debug("Start: resolved safe_to_evict", "agent", opts.Name, "value", *effective, "source", source)
-		}
-	} else if tmplSafeToEvict != nil || settingsSafeToEvict != nil {
-		source := "settings " + safeToEvictSource
-		if tmplSafeToEvict != nil {
-			source = "kubernetes.safeToEvict in the agent or template config"
-		}
-		slog.Warn("Start: safe_to_evict applies only to the Kubernetes runtime; ignoring it", "agent", opts.Name, "runtime", m.Runtime.Name(), "source", source)
-		settingsSafeToEvict = nil
 	}
 	if settings != nil && m.Runtime.Name() == "kubernetes" {
 		var sdSizeKey string
