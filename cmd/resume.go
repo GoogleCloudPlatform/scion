@@ -50,7 +50,7 @@ func init() {
 	resumeCmd.Flags().BoolVarP(&attach, "attach", "a", false, "Attach to the agent TTY after starting")
 	resumeCmd.Flags().BoolVar(&forceResume, "force", false, "Resume an agent in the error phase (e.g. after a host crash), continuing its previous session")
 
-	resumeCmd.Flags().StringVar(&runtimeBrokerID, "broker", "", "Preferred runtime broker ID or name")
+	resumeCmd.Flags().StringVar(&runtimeBrokerID, "broker", "", "Preferred runtime broker ID, name, or slug")
 
 	// Template resolution flags for Hub mode (Section 9.4)
 	resumeCmd.Flags().BoolVar(&uploadTemplate, "upload-template", false, "Automatically upload local template to Hub if not found")

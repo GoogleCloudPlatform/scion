@@ -918,9 +918,25 @@ func workspaceFinalizeNotice(filesApplied int, warnings []string) []string {
 	return lines
 }
 
-// startAgentViaHub creates/starts (or resumes/restarts in place) an agent via
-// the Hub. cmd is used only to detect which flags the user explicitly set (for
-// the "not applied to an existing agent" warning); it may be nil.
+// printHubWorkspaceSource prints where the hub gets the agent workspace from
+// for a git-based project. It mirrors the hub's provisioning decision
+// (pkg/hub/handlers_agent_create_helpers.go): shared-workspace projects mount
+// the shared workspace and are not cloned; every other git project is cloned
+// from the URL the hub resolves (same normalization, ptone/scion#1915).
+func printHubWorkspaceSource(project *hubclient.Project) {
+	if project.GitRemote == "" {
+		return
+	}
+	if project.Labels[store.LabelWorkspaceMode] == store.WorkspaceModeShared {
+		fmt.Fprintf(os.Stderr, "Using hub, shared workspace for repo %s\n", project.GitRemote)
+		fmt.Fprintf(os.Stderr, "  (agents mount the project's shared workspace on the runtime broker; no per-agent clone)\n")
+		return
+	}
+	cloneURL := util.ResolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
+	fmt.Fprintf(os.Stderr, "Using hub, cloning repo %s\n", cloneURL)
+	fmt.Fprintf(os.Stderr, "  (%s; local worktrees are not used)\n", hubCloneTransportNote(cloneURL))
+}
+
 // hubCloneTransportNote describes how the hub clones cloneURL (as resolved by
 // util.ResolveCloneURL), for the "Using hub, cloning repo" log line. The
 // broker's git credential helper supplies GITHUB_TOKEN for HTTP(S) clones
@@ -996,7 +1012,7 @@ var configFlagsNotAppliedToExistingAgent = []string{
 	"type", "harness-config", "harness", "harness-auth", "image", "model",
 	"thinking-level", "config", "broker", "label", "role", "message-mode",
 	"branch", "workspace", "service-account", "enable-telemetry",
-	"disable-telemetry", "no-auth",
+	"disable-telemetry", "no-auth", "profile",
 }
 
 // warnFlagsIgnoredForExistingAgent prints one stderr warning naming the
@@ -1009,7 +1025,8 @@ func warnFlagsIgnoredForExistingAgent(cmd *cobra.Command, agentName, phase strin
 	var ignored []string
 	noAuthIgnored := false
 	for _, name := range configFlagsNotAppliedToExistingAgent {
-		f := cmd.Flags().Lookup(name)
+		// cmd.Flag also finds inherited persistent flags (--profile).
+		f := cmd.Flag(name)
 		if f == nil || !f.Changed {
 			continue
 		}
@@ -1028,6 +1045,9 @@ func warnFlagsIgnoredForExistingAgent(cmd *cobra.Command, agentName, phase strin
 	}
 }
 
+// startAgentViaHub creates/starts (or resumes/restarts in place) an agent via
+// the Hub. cmd is used only to detect which flags the user explicitly set (for
+// the "not applied to an existing agent" warning); it may be nil.
 func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task string, resume bool, inlineCfg *api.ScionConfig) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
@@ -1044,12 +1064,8 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		project, projectErr := hubCtx.Client.Projects().Get(ctx, projectID)
 		cancel()
-		if projectErr == nil && project != nil && project.GitRemote != "" {
-			// Report the URL the hub will actually clone from (same
-			// normalization as the hub, ptone/scion#1915).
-			cloneURL := util.ResolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
-			fmt.Fprintf(os.Stderr, "Using hub, cloning repo %s\n", cloneURL)
-			fmt.Fprintf(os.Stderr, "  (%s; local worktrees are not used)\n", hubCloneTransportNote(cloneURL))
+		if projectErr == nil && project != nil {
+			printHubWorkspaceSource(project)
 		}
 	}
 
@@ -1220,9 +1236,10 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		resume = true
 		req.Resume = true
 	}
-	if hubCreateReusesExistingAgent(existingPhase, req.Resume, req.ForceResume) {
-		warnFlagsIgnoredForExistingAgent(cmd, agentName, existingPhase)
-	}
+	// Warn about flags the hub will not apply, but only once the hub has
+	// accepted the request: a refused start must not claim the agent was
+	// reused.
+	reusesExisting := hubCreateReusesExistingAgent(existingPhase, req.Resume, req.ForceResume)
 
 	if !isJSONOutput() {
 		action := hubStartActionWord(existingPhase, resume, req.ForceResume)
@@ -1235,6 +1252,9 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 			util.Debugf("[env-gather] startAgentViaHub: create request failed: %v", err)
 		}
 		return wrapHubError(fmt.Errorf("failed to start agent via Hub: %w", err))
+	}
+	if reusesExisting {
+		warnFlagsIgnoredForExistingAgent(cmd, agentName, existingPhase)
 	}
 
 	// Debug: log the response from Hub

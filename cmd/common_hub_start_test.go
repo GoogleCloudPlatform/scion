@@ -37,6 +37,7 @@ type hubStartStub struct {
 	createCalls   int
 	existingPhase string // "" → existing-agent GET returns 404
 	project       map[string]interface{}
+	createStatus  int // non-zero → the create POST fails with this status
 }
 
 func newHubStartStub(t *testing.T, projectID, agentName, existingPhase string) *hubStartStub {
@@ -65,6 +66,13 @@ func newHubStartStub(t *testing.T, projectID, agentName, existingPhase string) *
 			})
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/"+projectID+"/agents":
 			stub.createCalls++
+			if stub.createStatus != 0 {
+				w.WriteHeader(stub.createStatus)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{"code": "conflict", "message": "refused by hub"},
+				})
+				return
+			}
 			raw, err := io.ReadAll(r.Body)
 			require.NoError(t, err)
 			require.NoError(t, json.Unmarshal(raw, &stub.createBody))
@@ -257,6 +265,45 @@ func TestStartAgentViaHub_WarnsIgnoredFlagsForExistingAgent(t *testing.T) {
 		assert.NotContains(t, stderr, "not applied to an existing agent")
 	})
 
+	t.Run("refused create gets no warning", func(t *testing.T) {
+		resetHubStartGlobals(t)
+		stub := newHubStartStub(t, projectID, agentName, "stopped")
+		stub.createStatus = http.StatusConflict
+		noAuth = true
+		cmd := newFlagCmd(t, map[string]string{"image": "img:1", "no-auth": "true"})
+		var err error
+		_, stderr := captureStdIO(t, func() {
+			err = startAgentViaHub(cmd, stub.hubCtx(t, projectID), agentName, "", false, nil)
+		})
+		require.Error(t, err)
+		assert.Equal(t, 1, stub.createCalls)
+		assert.NotContains(t, stderr, "not applied to an existing agent")
+		assert.NotContains(t, stderr, "ptone/scion#1855")
+	})
+
+	t.Run("real start command flags", func(t *testing.T) {
+		resetHubStartGlobals(t)
+		stub := newHubStartStub(t, projectID, agentName, "stopped")
+		imageFlag := startCmd.Flags().Lookup("image")
+		profileFlag := startCmd.Flag("profile") // inherited persistent flag
+		require.NotNil(t, imageFlag)
+		require.NotNil(t, profileFlag)
+		origImageValue, origImageChanged, origProfileChanged := imageFlag.Value.String(), imageFlag.Changed, profileFlag.Changed
+		t.Cleanup(func() {
+			_ = imageFlag.Value.Set(origImageValue)
+			imageFlag.Changed, profileFlag.Changed = origImageChanged, origProfileChanged
+		})
+		require.NoError(t, startCmd.Flags().Set("image", "img:2"))
+		profileFlag.Changed = true // mark explicit without changing the active profile
+
+		var err error
+		_, stderr := captureStdIO(t, func() {
+			err = startAgentViaHub(startCmd, stub.hubCtx(t, projectID), agentName, "", false, nil)
+		})
+		require.NoError(t, err)
+		assert.Contains(t, stderr, "these flags are not applied to an existing agent: --image, --profile\n")
+	})
+
 	t.Run("no explicit flags gets no warning", func(t *testing.T) {
 		resetHubStartGlobals(t)
 		stub := newHubStartStub(t, projectID, agentName, "stopped")
@@ -267,6 +314,15 @@ func TestStartAgentViaHub_WarnsIgnoredFlagsForExistingAgent(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotContains(t, stderr, "not applied to an existing agent")
 	})
+}
+
+// Every flag the warning inspects must exist on start or resume (directly or
+// inherited), so a renamed or removed flag cannot silently drop out of it.
+func TestConfigFlagsNotAppliedToExistingAgent_AreDefined(t *testing.T) {
+	for _, name := range configFlagsNotAppliedToExistingAgent {
+		assert.True(t, startCmd.Flag(name) != nil || resumeCmd.Flag(name) != nil,
+			"--%s is not defined on start or resume", name)
+	}
 }
 
 func TestHubCreateReusesExistingAgent(t *testing.T) {
@@ -327,6 +383,26 @@ func TestStartAgentViaHub_CloneLogLine(t *testing.T) {
 			assert.NotContains(t, stderr, "https://https://")
 		})
 	}
+}
+
+// Shared-workspace projects are not cloned by the hub (agents mount the
+// shared workspace), so the CLI must not claim a clone.
+func TestStartAgentViaHub_SharedWorkspaceLogLine(t *testing.T) {
+	const projectID, agentName = "proj-shared", "shared-agent"
+	resetHubStartGlobals(t)
+	stub := newHubStartStub(t, projectID, agentName, "")
+	stub.project = map[string]interface{}{
+		"id": projectID, "name": "p", "gitRemote": "github.com/org/repo",
+		"labels": map[string]string{"scion.dev/workspace-mode": "shared"},
+	}
+	var err error
+	_, stderr := captureStdIO(t, func() {
+		err = startAgentViaHub(nil, stub.hubCtx(t, projectID), agentName, "", false, nil)
+	})
+	require.NoError(t, err)
+	assert.Contains(t, stderr, "Using hub, shared workspace for repo github.com/org/repo\n")
+	assert.NotContains(t, stderr, "cloning repo")
+	assert.NotContains(t, stderr, "GITHUB_TOKEN")
 }
 
 func TestHubCloneTransportNote(t *testing.T) {
