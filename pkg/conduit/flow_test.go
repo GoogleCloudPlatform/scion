@@ -285,7 +285,15 @@ func TestSchedulerControlFirstAndRoundRobin(t *testing.T) {
 
 func TestAggregateBufferBudgetEnforced(t *testing.T) {
 	const budget = 200 * 1024
-	s, raw := dialAgainstRaw(t, Config{BufferBudget: budget}, transport.MemoryOptions{Buffer: 0})
+	// The writer calls the interceptor as it dequeues a frame to write.
+	var rpcDequeued atomic.Bool
+	icpt := func(dir Direction, f *conduitv1.Frame) []*conduitv1.Frame {
+		if dir == Outbound && f.GetRpcRequest() != nil {
+			rpcDequeued.Store(true)
+		}
+		return []*conduitv1.Frame{f}
+	}
+	s, raw := dialAgainstRaw(t, Config{BufferBudget: budget, Interceptor: icpt}, transport.MemoryOptions{Buffer: 0})
 	_ = raw
 
 	// Two streams with plenty of credit (1 MiB each); together they would
@@ -325,7 +333,12 @@ func TestAggregateBufferBudgetEnforced(t *testing.T) {
 		defer close(callDone)
 		_, _ = s.Call(callCtx, &conduitv1.RpcRequest{Body: make([]byte, 64*1024)})
 	}()
-	eventually(t, "call queued behind no data", func() bool { return s.Stats().QueuedControlBytes >= 64*1024 })
+	// It is either still queued (the writer is stuck on a data frame) or
+	// was already dequeued ahead of the queued data (the writer had not
+	// yet taken the first data frame when the Call arrived).
+	eventually(t, "call queued behind no data", func() bool {
+		return s.Stats().QueuedControlBytes >= 64*1024 || rpcDequeued.Load()
+	})
 	if q := s.Stats().QueuedDataBytes; q > dataLimit {
 		t.Fatalf("data queued %d beyond the data share %d", q, dataLimit)
 	}

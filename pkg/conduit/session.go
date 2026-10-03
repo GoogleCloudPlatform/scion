@@ -165,7 +165,8 @@ func Dial(ctx context.Context, d transport.Dialer, cfg Config, hello *conduitv1.
 // measured from the call: Admit runs under a context cancelled at the
 // deadline, and an Admit still running then is answered with
 // GoAway{CloseRelayTimeout} (no drain deadline, so the dialer backs off);
-// a Welcome it returns later is discarded.
+// a Welcome it returns later is discarded. Discarded Welcomes are
+// reported to adm if it implements AdmitAbandoner.
 func Accept(ctx context.Context, conn transport.Conn, cfg Config, adm Admitter) (Session, error) {
 	if adm == nil {
 		_ = conn.Close()
@@ -253,7 +254,7 @@ func (s *session) admit(ctx context.Context, hello *conduitv1.Hello, d time.Dura
 			s.abandonAdmission(ctx, hello, r.w)
 		}
 	}
-	dropLate := func() { go func() { drop(<-ch) }() }
+	dropLate := func() { s.goAdmit(func() { drop(<-ch) }) }
 	select {
 	case r := <-ch:
 		if !stop() {
@@ -285,12 +286,26 @@ func (s *session) abandonAdmission(ctx context.Context, hello *conduitv1.Hello, 
 	if !ok {
 		return
 	}
-	go func() {
+	s.goAdmit(func() {
 		actx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 		defer cancel()
 		t := s.clk.AfterFunc(s.cfg.HandshakeTimeout, cancel)
 		defer t.Stop()
 		ab.AbandonAdmission(actx, hello, w)
+	})
+}
+
+// goAdmit runs f in a goroutine tracked by cfg.admitWG, if set.
+func (s *session) goAdmit(f func()) {
+	wg := s.cfg.admitWG
+	if wg == nil {
+		go f()
+		return
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		f()
 	}()
 }
 

@@ -16,6 +16,7 @@ package conduit
 
 import (
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
@@ -125,6 +126,12 @@ type Config struct {
 	Interceptor Interceptor
 	// Logger receives diagnostics (default slog.Default()).
 	Logger *slog.Logger
+
+	// admitWG, if set, tracks the goroutines Accept leaves behind for
+	// discarded admissions (waiting for a late Admit result, calling
+	// AdmitAbandoner), so that tests can wait for them instead of
+	// sleeping.
+	admitWG *sync.WaitGroup
 }
 
 func (c Config) withDefaults() Config {
