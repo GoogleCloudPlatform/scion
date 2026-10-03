@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build unix
+//go:build unix && !openbsd
 
 package hub
 
@@ -30,8 +30,11 @@ func addressSpaceLimit() (string, bool) {
 	if err := syscall.Getrlimit(syscall.RLIMIT_AS, &rl); err != nil {
 		return "", false
 	}
-	// RLIM_INFINITY differs by platform (all ones on Linux, 1<<63-1 on
-	// darwin); no real cap comes anywhere near 1<<62 bytes.
+	// Not compared against syscall.RLIM_INFINITY on purpose: it is an
+	// untyped negative constant on linux (-1) and solaris (-3), so
+	// uint64(syscall.RLIM_INFINITY) does not compile there, and Rlimit.Cur
+	// is int64 on freebsd. "No limit" is all ones on linux and 1<<63-1 on
+	// darwin and freebsd; no real cap comes anywhere near 1<<62 bytes.
 	if rl.Cur >= 1<<62 {
 		return "", false
 	}
