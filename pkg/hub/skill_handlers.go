@@ -1760,14 +1760,6 @@ const hubGitHubRefreshTimeout = 2 * time.Minute
 // serve the stale value regardless.
 const ghRefreshFailureBackoff = 1 * time.Minute
 
-// rememberGHNotFound remembers err for cacheKey (see ghFailureCache) when
-// it is GitHub reporting the ref or skill path as not found.
-func (s *Server) rememberGHNotFound(cacheKey string, err error) {
-	if isGHNotFound(err) {
-		s.ghFailures.record(cacheKey, err)
-	}
-}
-
 // recentGHRefreshFailure reports whether a background refresh for cacheKey
 // failed within the last ghRefreshFailureBackoff.
 func (s *Server) recentGHRefreshFailure(cacheKey string) bool {
@@ -2058,6 +2050,7 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 			}
 		}
 		if ferr := s.ghFailures.recent(cacheKey); ferr != nil {
+			slog.DebugContext(ctx, "github_resolution_cache: returning remembered not found", "uri", rawURI)
 			return nil, ferr
 		}
 

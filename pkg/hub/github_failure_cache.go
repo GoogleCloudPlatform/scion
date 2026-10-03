@@ -57,6 +57,29 @@ func isGHNotFound(err error) bool {
 	return errors.As(err, &se) && se.status == http.StatusNotFound
 }
 
+// rememberGHNotFound remembers err for cacheKey (see ghFailureCache) when
+// it is GitHub reporting the ref or skill path as not found.
+func (s *Server) rememberGHNotFound(cacheKey string, err error) {
+	if isGHNotFound(err) {
+		s.ghFailures.record(cacheKey, err)
+	}
+}
+
+// maxGHErrorBody is how many bytes of a GitHub error response body a
+// ghStatusError message keeps. It bounds the size of each remembered
+// failure (and of the per-URI message returned to clients) when a server
+// answers with a large error page.
+const maxGHErrorBody = 512
+
+// ghErrorBody returns body for use in a ghStatusError message, cut to
+// maxGHErrorBody bytes with "..." appended when it is longer.
+func ghErrorBody(body []byte) string {
+	if len(body) <= maxGHErrorBody {
+		return string(body)
+	}
+	return string(body[:maxGHErrorBody]) + "..."
+}
+
 // ghFailureCache remembers recent not-found resolutions by cache key, in
 // memory only (per hub process; never written to the store). The zero
 // value is ready to use and safe for concurrent use.

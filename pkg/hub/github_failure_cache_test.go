@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -263,4 +264,200 @@ func TestIsGHNotFound(t *testing.T) {
 	assert.False(t, isGHNotFound(errors.New("GitHub API error 404")))
 	assert.False(t, isGHNotFound(&agent.GitHubRateLimitError{}))
 	assert.False(t, isGHNotFound(nil))
+}
+
+// A caller that passed the pre-check before a concurrent flight recorded a
+// 404 must get the remembered failure from the re-check inside its own
+// flight, not ask GitHub again.
+func TestResolveGitHubSkill_FlightRecheckServesRememberedFailure(t *testing.T) {
+	const (
+		owner     = "acme"
+		repo      = "race-repo"
+		skillPath = "skills/gone"
+		uri       = "gh://" + owner + "/" + repo + "/gone@no-such-branch"
+		commitSHA = "3434343434343434343434343434343434343434"
+	)
+
+	srv, _, _, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+	gh := newStatusGitHub(t, owner, repo, skillPath, commitSHA)
+	gh.commitStatus.Store(http.StatusNotFound)
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+
+	// The first caller to reach the join point (B) is held there; it has
+	// already passed the pre-check. Later callers pass straight through.
+	held := make(chan struct{})
+	release := make(chan struct{})
+	var joins atomic.Int64
+	hook := func(string) {
+		if joins.Add(1) == 1 {
+			close(held)
+			<-release
+		}
+	}
+	ghFlightJoinHook.Store(&hook)
+	t.Cleanup(func() { ghFlightJoinHook.Store(nil) })
+
+	doneB := make(chan error, 1)
+	go func() {
+		_, err := srv.resolveGitHubSkill(context.Background(), uri, project.ID, nil)
+		doneB <- err
+	}()
+	select {
+	case <-held:
+	case <-time.After(5 * time.Second):
+		t.Fatal("caller B never reached the join point")
+	}
+
+	// A's flight gets the 404, records it and finishes.
+	_, errA := srv.resolveGitHubSkill(context.Background(), uri, project.ID, nil)
+	require.Error(t, errA)
+	require.Equal(t, int64(1), gh.commitCalls.Load())
+
+	close(release)
+	var errB error
+	select {
+	case errB = <-doneB:
+	case <-time.After(5 * time.Second):
+		t.Fatal("caller B did not return")
+	}
+	require.Error(t, errB)
+	assert.Equal(t, errA.Error(), errB.Error())
+	assert.Equal(t, int64(1), gh.commitCalls.Load(), "B's flight must not ask GitHub again")
+}
+
+// A stale entry is served ahead of a remembered failure for the same key:
+// a background refresh that gets a 404 records it while the stale row is
+// still in the store.
+func TestResolveGitHubSkill_StaleEntryWinsOverRememberedFailure(t *testing.T) {
+	const (
+		owner     = "acme"
+		repo      = "stale-fail-repo"
+		skillPath = "skills/widget"
+		uri       = "gh://" + owner + "/" + repo + "/widget@main"
+		staleSHA  = "5656565656565656565656565656565656565656"
+	)
+
+	srv, _, _, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+	gh := newStatusGitHub(t, owner, repo, skillPath, staleSHA)
+	gh.commitStatus.Store(http.StatusNotFound)
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+
+	ghRef, err := agent.ParseGitHubSkillURI(uri)
+	require.NoError(t, err)
+	cacheKey := computeCacheKey(ghRef.Owner, ghRef.Repo, ghRef.SkillPath, ghRef.Ref, "public")
+
+	ctx := context.Background()
+	require.NoError(t, srv.ghResolutionStore.Put(ctx, cacheKey, GitHubCacheEntry{
+		CommitSHA:   staleSHA,
+		FileEntries: []GitHubFileEntry{{Path: "SKILL.md", URL: "http://example.invalid/SKILL.md", Hash: "x", Size: 1}},
+		BundleHash:  "sha256:stale",
+		TokenScope:  "public",
+		ExpiresAt:   time.Now().Add(-time.Minute),
+		OriginalURI: uri,
+	}))
+	srv.ghFailures.record(cacheKey, errors.New("remembered not found"))
+
+	resp, err := srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
+	require.NoError(t, err, "the stale entry must be served, not the remembered failure")
+	assert.Equal(t, safeShortSHA(staleSHA), resp.ResolvedVersion)
+
+	// Let the background refresh finish before the test returns.
+	_, _, _ = srv.ghResolveFlight.Do(cacheKey, func() (interface{}, error) { return nil, nil })
+}
+
+// A 404 remembered for a project with no GitHub App installation (the
+// "public" scope) is not served to the same project once it is backed by an
+// installation: that is another cache key, so GitHub is asked again.
+func TestResolveGitHubSkill_PublicNotFoundNotServedToInstallation(t *testing.T) {
+	const (
+		instID = int64(515151)
+		uri    = "gh://acme/private/s@main"
+	)
+	srv, s, _, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+	srv.ghCooldown = agent.NewGitHubCooldown(time.Now)
+
+	var repoCalls atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app/installations/", func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/access_tokens") {
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"token":      "ghs_test_value",
+			"expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+		})
+	})
+	mux.HandleFunc("/repos/", func(w http.ResponseWriter, r *http.Request) {
+		repoCalls.Add(1)
+		http.NotFound(w, r)
+	})
+	gh := httptest.NewServer(mux)
+	t.Cleanup(gh.Close)
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+	srv.config.GitHubAppConfig.AppID = 1
+	srv.config.GitHubAppConfig.PrivateKey = generateTestGitHubAppKey(t)
+
+	ctx := context.Background()
+	_, err := srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
+	require.Error(t, err)
+	require.Equal(t, int64(1), repoCalls.Load())
+	_, err = srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
+	require.Error(t, err)
+	require.Equal(t, int64(1), repoCalls.Load(), "the public 404 is remembered")
+
+	require.NoError(t, s.CreateGitHubInstallation(ctx, &store.GitHubInstallation{
+		InstallationID: instID,
+		AccountLogin:   "acme",
+		AccountType:    "Organization",
+		AppID:          1,
+		Status:         store.GitHubInstallationStatusActive,
+	}))
+	id := instID
+	project.GitHubInstallationID = &id
+	require.NoError(t, s.UpdateProject(ctx, project))
+
+	_, err = srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
+	require.Error(t, err)
+	assert.Equal(t, int64(2), repoCalls.Load(),
+		"an installation-backed resolution must not be served the public scope's remembered 404")
+}
+
+// A large 404 body is cut, so each remembered failure stays small.
+func TestResolveGitHubSkill_RememberedErrorBodyIsBounded(t *testing.T) {
+	const uri = "gh://acme/big-page/s@main"
+	srv, _, _, _, project := setupSkillAuthzTest(t)
+	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+
+	page := strings.Repeat("<p>not found</p>", 64*1024) // about 1 MiB
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(page))
+	}))
+	t.Cleanup(gh.Close)
+	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+
+	_, err := srv.resolveGitHubSkill(context.Background(), uri, project.ID, nil)
+	require.Error(t, err)
+	require.Len(t, srv.ghFailures.failures, 1)
+	for _, f := range srv.ghFailures.failures {
+		assert.LessOrEqual(t, len(f.err.Error()), maxGHErrorBody+256,
+			"a remembered error must not carry the whole response body")
+		assert.Contains(t, f.err.Error(), "...")
+	}
+}
+
+func TestGHErrorBody(t *testing.T) {
+	assert.Equal(t, "short", ghErrorBody([]byte("short")))
+	exact := strings.Repeat("a", maxGHErrorBody)
+	assert.Equal(t, exact, ghErrorBody([]byte(exact)))
+	assert.Equal(t, exact+"...", ghErrorBody([]byte(exact+"b")))
 }
