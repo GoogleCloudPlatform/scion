@@ -19,6 +19,9 @@
  *
  * Renders a git remote URL with trailing decorator icons:
  * - Workspace mode: folder (shared), diagram-3 (worktree per agent), or robot (clone per agent)
+ *
+ * Projects without a git remote render a plain-text mode: linked, empty
+ * directory per agent, or hub-managed (shared) workspace.
  * - GitHub App status badge
  *
  * Used in both project detail and project list views.
@@ -28,7 +31,11 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 
 import type { Project } from '../../shared/types.js';
-import { isSharedWorkspace, isWorktreeWorkspace } from '../../shared/types.js';
+import {
+  isEmptyPerAgentWorkspace,
+  isSharedWorkspace,
+  isWorktreeWorkspace,
+} from '../../shared/types.js';
 
 @customElement('scion-git-remote-display')
 export class ScionGitRemoteDisplay extends LitElement {
@@ -91,7 +98,10 @@ export class ScionGitRemoteDisplay extends LitElement {
     const project = this.project;
 
     if (!project.gitRemote) {
-      return html`${project.projectType === 'linked' ? 'Linked project' : 'Hub-managed workspace'}`;
+      if (project.projectType === 'linked') return html`Linked project`;
+      return html`${isEmptyPerAgentWorkspace(project)
+        ? 'Empty directory per agent'
+        : 'Hub-managed workspace'}`;
     }
 
     const ghLink = ScionGitRemoteDisplay.gitHubLink(project.gitRemote);
