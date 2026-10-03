@@ -321,16 +321,17 @@ export class ScionPageAgents extends LitElement {
         color: var(--scion-primary-600, #2563eb);
       }
 
-      /* On the narrowest phones the status group is wider than the page;
-         it scrolls sideways rather than clipping its last buttons. */
+      /* On a narrow phone the buttons wrap onto a second row rather than
+         run past the screen edge. overflow: hidden only clips the active
+         button's background to the rounded corners; the buttons wrap, so
+         none is cut off. */
       .scope-toggle {
         display: inline-flex;
+        flex-wrap: wrap;
         max-width: 100%;
         border: 1px solid var(--scion-border, #e2e8f0);
         border-radius: var(--scion-radius, 0.5rem);
-        overflow-x: auto;
-        overflow-y: hidden;
-        scrollbar-width: none;
+        overflow: hidden;
       }
 
       .scope-toggle button {
@@ -364,6 +365,14 @@ export class ScionPageAgents extends LitElement {
 
       .scope-toggle button sl-icon {
         font-size: 0.875rem;
+      }
+
+      /* Tighter buttons first, so the status filter still fits one row on
+         a 320px screen. */
+      @media (max-width: 400px) {
+        .scope-toggle button {
+          padding: 0 0.4375rem;
+        }
       }
 
       .project-link {

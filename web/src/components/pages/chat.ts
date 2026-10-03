@@ -907,16 +907,21 @@ export class ScionPageChat extends LitElement {
      * Landscape phones wide enough for the side-by-side layout (the page
      * uses viewport-fit=cover): the edge columns carry the notch and
      * rounded-corner insets inside their own surface, so the surface still
-     * runs to the screen edge and only the content moves in. The columns
-     * are content-box, so the padding adds to their width rather than
-     * taking from it. All 0 on devices without side insets; below the
-     * mobile breakpoint every panel carries both insets instead.
+     * runs to the screen edge and only the content moves in. Only the
+     * outermost columns take them, and they are border-box, so each
+     * absorbs its inset within its own width: were the padding added on
+     * top, the conversation between them would lose both insets' worth of
+     * width, which in a landscape phone is a quarter of the column. All 0
+     * on devices without side insets; below the mobile breakpoint every
+     * panel carries both insets instead.
      */
     .v2-rail {
+      box-sizing: border-box;
       padding-left: env(safe-area-inset-left, 0px);
     }
 
     .v2-members {
+      box-sizing: border-box;
       padding-right: env(safe-area-inset-right, 0px);
     }
 

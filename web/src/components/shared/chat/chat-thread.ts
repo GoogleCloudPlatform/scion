@@ -886,11 +886,22 @@ export class ScionChatThread extends LitElement {
         display: flex;
         flex-direction: column;
         align-items: center;
-        justify-content: center;
         padding: 3rem 2rem;
         color: var(--scion-text-muted, #64748b);
         gap: 0.75rem;
         flex: 1;
+        /* Give way to the composer: in a short frame (a landscape phone) a
+           tall draft would otherwise push the composer and Send below the
+           frame, since the empty state has no list to shrink. */
+        min-height: 0;
+        overflow-y: auto;
+        justify-content: safe center;
+      }
+
+      @media (max-height: 480px) {
+        .state-msg {
+          padding: 1rem 2rem;
+        }
       }
 
       .state-msg sl-spinner {
