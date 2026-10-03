@@ -510,8 +510,10 @@ type VersionedSettings struct {
 	DefaultRuntimeBroker string `json:"default_runtime_broker,omitempty" yaml:"default_runtime_broker,omitempty" koanf:"default_runtime_broker"`
 
 	// DefaultTimezone is the hub-level IANA timezone fallback (e.g.
-	// "America/Los_Angeles"). Applied as TZ when neither the profile's
-	// first-class timezone field nor a raw TZ in the profile env is set.
+	// "America/Los_Angeles") for agent containers: applied as TZ when the
+	// agent has no pinned timezone and no storage-scope TZ environment
+	// variable applies. This is the settings.yaml form of
+	// agent_defaults.default_timezone.
 	DefaultTimezone string `json:"default_timezone,omitempty" yaml:"default_timezone,omitempty" koanf:"default_timezone"`
 
 	// DefaultGCPIdentityMode is the hub-level default GCP metadata mode
@@ -1727,11 +1729,6 @@ type V1ProfileConfig struct {
 	Resources            *api.ResourceSpec            `json:"resources,omitempty" yaml:"resources,omitempty" koanf:"resources"`
 	HarnessOverrides     map[string]V1HarnessOverride `json:"harness_overrides,omitempty" yaml:"harness_overrides,omitempty" koanf:"harness_overrides"`
 	Secrets              []api.RequiredSecret         `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
-	// Timezone is an IANA timezone name (e.g. "America/Los_Angeles") injected
-	// as the TZ environment variable into agent containers using this profile.
-	// Validated with time.LoadLocation on write. Takes precedence over a raw
-	// TZ entry in the profile's env map and the hub-level default_timezone.
-	Timezone string `json:"timezone,omitempty" yaml:"timezone,omitempty" koanf:"timezone"`
 	// SharedDirStorageClass and SharedDirSize are Kubernetes-only defaults
 	// for shared-dir PVCs created by agents using this profile. They win
 	// over the same keys on the profile's runtime entry and lose to a

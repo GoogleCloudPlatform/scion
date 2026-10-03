@@ -168,7 +168,6 @@ func TestProvisionMergeBackSkipsNonPlainEnv(t *testing.T) {
 
 	mockClient := &mockRuntimeBrokerClient{}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
-	dispatcher.SetProfileTimezoneProvider(func(name string) string { return "" })
 	dispatcher.SetHubAgentDefaultsProvider(func() opsettings.AgentDefaultsSettings {
 		return opsettings.AgentDefaultsSettings{DefaultTimezone: "America/New_York"}
 	})
@@ -251,7 +250,6 @@ func TestBuildCreateRequestClassifiesEveryResolvedEnvKey(t *testing.T) {
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 	dispatcher.SetHubName("test-hub")
 	dispatcher.SetDevAuthToken("dev-token-value")
-	dispatcher.SetProfileTimezoneProvider(func(name string) string { return "" })
 	dispatcher.SetHubAgentDefaultsProvider(func() opsettings.AgentDefaultsSettings {
 		return opsettings.AgentDefaultsSettings{DefaultTimezone: "America/New_York"}
 	})

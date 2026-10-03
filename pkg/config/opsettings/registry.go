@@ -516,7 +516,6 @@ func compileSchemas() {
 						},
 					},
 					"secrets":                  map[string]interface{}{"type": "array"},
-					"timezone":                 map[string]interface{}{"type": "string"},
 					"shared_dir_storage_class": map[string]interface{}{"type": "string"},
 					"shared_dir_size":          map[string]interface{}{"type": "string"},
 					"safe_to_evict":            map[string]interface{}{"type": "boolean"},

@@ -483,6 +483,11 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
 		return
 	}
+	// The typed decode above silently drops a removed profiles.<name>.timezone
+	// key, so check the raw body before anything is written.
+	if rejectRemovedProfileTimezone(w, rawBody) {
+		return
+	}
 
 	caller := GetUserIdentityFromContext(r.Context())
 	updatedBy := ""
@@ -603,21 +608,6 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	// Validate profile timezones (beyond JSON schema — IANA name check).
-	if doc, ok := sectionDocs["profiles"]; ok {
-		var profiles opsettings.ProfilesSettings
-		if err := json.Unmarshal(doc, &profiles); err == nil {
-			for name, profile := range profiles {
-				if profile.Timezone != "" {
-					if _, err := time.LoadLocation(profile.Timezone); err != nil {
-						writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-							fmt.Sprintf("profile %q: invalid timezone %q: %v", name, profile.Timezone, err), nil)
-						return
-					}
-				}
-			}
-		}
-	}
 	// Validate shared_dir_size on runtime and profile entries (beyond JSON
 	// schema — Kubernetes quantity check), naming the offending key so a bad
 	// value is rejected here instead of failing every agent start later.

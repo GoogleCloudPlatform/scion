@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -403,9 +404,19 @@ func validateDefaultTimezone(tz string) error {
 
 // handlePutServerConfig updates the global settings.yaml.
 func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
-	var req ServerConfigUpdateRequest
-	if err := readJSON(r, &req); err != nil {
+	rawBody, err := readRawBody(w, r)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
+		return
+	}
+	var req ServerConfigUpdateRequest
+	if err := json.NewDecoder(bytes.NewReader(rawBody)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
+		return
+	}
+	// The typed decode above silently drops a removed profiles.<name>.timezone
+	// key, so check the raw body before settings.yaml is touched.
+	if rejectRemovedProfileTimezone(w, rawBody) {
 		return
 	}
 
