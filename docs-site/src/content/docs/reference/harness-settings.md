@@ -124,18 +124,32 @@ scion harness-config reset <name>         # restore the global dir to embedded d
 scion harness-config upgrade [name]       # add missing support files / metadata, refresh provisioner scripts
 ```
 
-`reset` overwrites a config with the binary's embedded defaults. `upgrade` is non-destructive: it
-adds newly-required support files and merges missing metadata without clobbering your values (use
-`--dry-run` to preview, `--activate-script` to switch a config to container-script provisioning,
-`--force` to override). With no name, `upgrade` processes every config in the global directory.
+`reset` overwrites a config with the binary's embedded defaults. `upgrade` does not clobber your
+config values: it adds newly-required support files and merges missing metadata into
+`config.yaml` (use `--dry-run` to preview, `--activate-script` to switch a config to
+container-script provisioning, `--force` to override). It does refresh provisioner scripts, as
+described below. With no name, `upgrade` processes every config in the global directory.
 
-The provisioner scripts `provision.py`, `scion_harness.py`, and `capture_auth.py` belong to the harness bundle, not to
-you. `upgrade` replaces them with the bundled copy whenever they differ, and reports each one as a
-`refresh_file` action. Non-force seeding (`scion init --machine`, hosted-mode `scion server`
-start, and Hub system-init) replaces them on every run, the same way it treats `config.yaml`.
-This means provisioner fixes reach nodes that already have the config. Your other files in the
-directory are kept. If you need to change what a provisioner does, publish it as your own
-harness-config under a different name. Do not edit the bundled scripts in place.
+The provisioner scripts `provision.py`, `scion_harness.py`, and `capture_auth.py` belong to the
+harness bundle, not to you:
+
+- **Non-force seeding** (`scion init --machine`, hosted-mode `scion server` start, and Hub
+  system-init) writes only to the bundled config directories, such as `harness-configs/claude`.
+  It replaces these scripts on every run, the same way it treats `config.yaml`.
+- **`upgrade`** replaces them with the bundled copy when they differ, but only in a bundled
+  config: one whose directory name matches its harness. It backs up each script as
+  `<file>.bak.<timestamp>` first and reports it as a `refresh_file` action.
+
+Either way, provisioner fixes reach nodes that already have the config, and your other files
+are kept. Two kinds of script are never touched:
+
+- Scripts in a **custom-named** config, such as one installed with
+  `harness-config install --name my-claude`.
+- Scripts that are **symlinks**. These are treated as user-managed and skipped (`upgrade`
+  reports a `skip_file` action).
+
+To customize a provisioner, publish it as your own harness-config under a different name. Do
+not edit the bundled scripts in place.
 
 ### Deleting
 
