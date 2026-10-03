@@ -27,8 +27,8 @@ import (
 const metadataIP = "169.254.169.254"
 
 // iptablesCmd resolves "iptables" through rootexec.Resolve — never the
-// ambient PATH, which under some runtimes includes a directory the workload
-// owns outright — and builds its environment from scratch: this runs as root,
+// ambient PATH, which on substrate includes a directory the workload owns
+// outright — and builds its environment from scratch: this runs as root,
 // in-process in PID 1, and needs nothing beyond a fixed PATH to invoke a
 // system binary with fixed arguments. A resolution failure is returned as
 // the exec error every caller here already handles.

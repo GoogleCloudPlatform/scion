@@ -1238,3 +1238,69 @@ services:
 	require.NoError(t, err)
 	assert.Empty(t, errors, "service with delay ready_check should pass validation")
 }
+
+// --- Substrate runtime schema tests ---
+
+func TestValidateSettings_SubstrateEgressTrustBundleValid(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  substrate-prod:
+    type: substrate
+    substrate:
+      api_endpoint: "api.ate-system.svc:443"
+      router_endpoint: "http://atenet-router.ate-system.svc:80"
+      egress_trust_bundle: egress-mitm.ate.dev
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.Empty(t, errors, "documented egress_trust_bundle value should pass validation")
+}
+
+func TestValidateSettings_SubstrateEgressTrustBundleEmpty(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  substrate-prod:
+    type: substrate
+    substrate:
+      api_endpoint: "api.ate-system.svc:443"
+      router_endpoint: "http://atenet-router.ate-system.svc:80"
+      egress_trust_bundle: ""
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.Empty(t, errors, "empty egress_trust_bundle (off) should pass validation")
+}
+
+func TestValidateSettings_SubstrateEgressTrustBundleInvalidValue(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  substrate-prod:
+    type: substrate
+    substrate:
+      api_endpoint: "api.ate-system.svc:443"
+      router_endpoint: "http://atenet-router.ate-system.svc:80"
+      egress_trust_bundle: some-other-bundle
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "unsupported egress_trust_bundle value should fail validation")
+}
+
+func TestValidateSettings_SubstrateBogusKey(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  substrate-prod:
+    type: substrate
+    substrate:
+      api_endpoint: "api.ate-system.svc:443"
+      router_endpoint: "http://atenet-router.ate-system.svc:80"
+      bogus_field: "nope"
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "unknown key in the substrate object should fail validation")
+}

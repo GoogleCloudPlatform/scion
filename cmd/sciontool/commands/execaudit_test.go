@@ -96,10 +96,12 @@ var execAuditFileAllowlist = map[string]string{
 var execAuditSymbolAllowlist = map[string]map[string]bool{
 	// init.go's only uses of pkg/util: NormalizeGitRemote/ClassifyGitError
 	// are pure string/error-classification functions, and GitErrAuth is an
-	// error-kind constant compared against — none call exec.Cmd. The
+	// error-kind constant compared against — none call exec.Cmd. GetHomeDir
+	// (used by pkg/sciontool/substrate for the agent-home convention) is a
+	// pure string/path join with no exec.Cmd involved either. The
 	// package's actual exec.Command call sites (pkg/util/git.go) are listed
 	// in execAuditFileAllowlist above.
-	"pkg/util": {"NormalizeGitRemote": true, "ClassifyGitError": true, "GitErrAuth": true},
+	"pkg/util": {"NormalizeGitRemote": true, "ClassifyGitError": true, "GitErrAuth": true, "GetHomeDir": true},
 }
 
 // execAuditTrustedDir is excluded from scanning outright rather than via

@@ -996,13 +996,24 @@ type StartOptions struct {
 	Env               map[string]string
 	ResolvedSecrets   []ResolvedSecret
 	BrokerMode        bool // When true, auth gathering skips local sources (broker env + filesystem)
-	Detached          *bool
-	Resume            bool
-	NoAuth            bool
-	Branch            string
-	Workspace         string
-	GitClone          *GitCloneConfig // When set, skip workspace creation; sciontool clones inside container
-	SharedWorkspace   bool            // When true, workspace is a shared git clone (git-workspace hybrid); skip worktree, configure credential helper
+	// TrustedHubEndpoint is the broker's own operator-derived resolution of
+	// the hub endpoint — set only in BrokerMode, only from the request
+	// HubEndpoint, the hub connection endpoint, or this broker's configured
+	// HubEndpoint (never from ResolvedEnv/Config.Env, which a project or
+	// template creator controls). It is empty when none
+	// of those operator tiers produced a value, even if Env's own
+	// SCION_HUB_ENDPOINT is non-empty. Runtime.Run's substrate egress
+	// allowlist is the one consumer that must read this field instead of
+	// Env["SCION_HUB_ENDPOINT"] — see pkg/agent/run.go and
+	// pkg/runtime/substrate_egress.go.
+	TrustedHubEndpoint string
+	Detached           *bool
+	Resume             bool
+	NoAuth             bool
+	Branch             string
+	Workspace          string
+	GitClone           *GitCloneConfig // When set, skip workspace creation; sciontool clones inside container
+	SharedWorkspace    bool            // When true, workspace is a shared git clone (git-workspace hybrid); skip worktree, configure credential helper
 	// FreshProvision marks this dispatch as a create, not a start or restart:
 	// GetAgent wipes and re-clones an existing populated workspace only when
 	// this is set, so a same-named leftover agent directory is not confused

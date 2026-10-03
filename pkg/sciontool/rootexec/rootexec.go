@@ -5,9 +5,8 @@ Copyright 2026 The Scion Authors.
 // Package rootexec is the one place every root-context subprocess in
 // sciontool resolves a bare command name and builds its environment.
 //
-// Under an enforced privilege-drop runtime, root is a security boundary,
-// but PID 1's own inherited PATH includes a directory the workload owns
-// outright:
+// On substrate, root is a security boundary, but PID 1's own inherited PATH
+// includes a directory the workload owns outright:
 // "/usr/local/share/npm-global/bin" is chowned to the workload uid so the
 // harness's own npm-installed tools can be found on PATH — and it sits
 // ahead of "/usr/bin" on that PATH. A root process that execs a bare name
@@ -68,8 +67,28 @@ import (
 // merge "/bin" into "/usr/bin" (Resolve's verification tolerates that; see
 // VerifyRootOwnedExecutable — the directories named here are what a caller
 // may point PATH-free tooling at, not a claim that each is a distinct
-// inode).
+// inode). This is also the list the sudo-hardening precondition
+// (cmd/sciontool/commands' findSetuidRootSudo) scans, via SudoCheckDirs
+// below, so the two can never drift apart.
 var SearchPath = []string{"/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"}
+
+// SudoCheckDirs returns SearchPath's entries as directories relative to a
+// filesystem root rather than absolute paths, for callers (the sudo
+// bootstrap fixup and its bootstrap precondition) that need to join it
+// against a root other than "/" (a test fixture) or that already work in
+// terms of relative directory names. A function, not a precomputed slice,
+// so it always reflects SearchPath's current value rather than whatever it
+// was at package-init time. Sharing this, rather than each caller
+// hardcoding its own copy of the same directory names, is what keeps the
+// fixup's own strip and the precondition's own check from silently
+// drifting onto two different lists.
+func SudoCheckDirs() []string {
+	dirs := make([]string, len(SearchPath))
+	for i, d := range SearchPath {
+		dirs[i] = strings.TrimPrefix(d, "/")
+	}
+	return dirs
+}
 
 // errNotBareName is returned by Resolve when name is empty or already
 // contains a path separator — Resolve exists to turn a bare name into a

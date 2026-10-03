@@ -73,17 +73,25 @@ type Config struct {
 	// change mergeEnvOverlay's precedence rule — it is correct for its own
 	// case. See the override reasoning in the P2d PR description.
 	SecretOverrides map[string]string
+	// WorkingDir sets the child process's working directory (exec.Cmd.Dir).
+	// Empty (the zero value) leaves cmd.Dir unset, so the child inherits
+	// this process's own current working directory — exactly today's
+	// behaviour for every caller that does not set this field. Supervisor
+	// never inspects the environment or filesystem to decide this itself;
+	// the caller resolves it (see commands.InitRunOptions.WorkingDir, set
+	// only by substrate-serve's InitRunner wiring).
+	WorkingDir string
 	// RequirePrivilegeDrop is the caller's own
-	// commands.InitRunOptions.RequirePrivilegeDrop. It gates
-	// chownRecursive's hard-link guard: a regular file with more than one
-	// hard link is skipped rather than chowned only when this is true,
-	// since the guard is new, security-motivated behaviour — a legitimately
-	// hard-linked file under an unenforced container's home directory would
-	// otherwise be silently left unowned by the target user and break
-	// writes, with no privilege boundary at stake to justify that when this
-	// is unset. The fd-relative, no-follow walk itself (see chownRecursive's
-	// doc comment) is unconditional — it is behaviour-preserving and has no
-	// legitimate dependent case.
+	// commands.InitRunOptions.RequirePrivilegeDrop (true only for
+	// substrate). It gates chownRecursive's hard-link guard: a regular file
+	// with more than one hard link is skipped rather than chowned only when
+	// this is true, since the guard is new, security-motivated behaviour —
+	// a legitimately hard-linked file under a non-substrate container's home
+	// directory would otherwise be silently left unowned by the target user
+	// and break writes, with no privilege boundary at stake to justify that
+	// on runtimes other than substrate. The fd-relative, no-follow walk
+	// itself (see chownRecursive's doc comment) is unconditional — it is
+	// behaviour-preserving and has no legitimate dependent case.
 	RequirePrivilegeDrop bool
 }
 
@@ -138,6 +146,14 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 	s.cmd.Stdin = os.Stdin
 	s.cmd.Stdout = os.Stdout
 	s.cmd.Stderr = os.Stderr
+
+	// Leave cmd.Dir unset (today's behaviour: the child inherits this
+	// process's own cwd) unless the caller explicitly resolved one. See
+	// Config.WorkingDir's doc comment.
+	if s.config.WorkingDir != "" {
+		s.cmd.Dir = s.config.WorkingDir
+		log.Debug("Child working directory: %s", s.config.WorkingDir)
+	}
 
 	// Start in a new process group so we can signal the whole group
 	s.cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -235,6 +251,19 @@ func (s *Supervisor) Run(ctx context.Context, args []string) (int, error) {
 	}
 	if s.config.NativeTelemetryPolicy != "" {
 		s.cmd.Env = removeEnvVar(s.cmd.Env, hooks.NativeTelemetryPolicyKey)
+	}
+
+	// Tell the child its logical cwd explicitly. exec.Cmd setting Dir does
+	// not itself add PWD to the environment, so without this the child
+	// would inherit this process's own PWD. sh, tmux and Node's
+	// process.cwd() all prefer PWD over getcwd() when the two agree, so
+	// this keeps a symlinked WorkingDir's logical path visible instead of
+	// its resolved physical one — the same PWD behaviour Docker/Podman/
+	// Kubernetes already get from the shell that applies the image's
+	// WORKDIR. Scoped to WorkingDir != "" so every other caller, which
+	// never sets it, is unaffected.
+	if s.config.WorkingDir != "" {
+		s.cmd.Env = setEnvVar(s.cmd.Env, "PWD", s.config.WorkingDir)
 	}
 
 	// Start and register the child's PID as a single gated step so
@@ -486,7 +515,7 @@ func indexByte(s string, c byte) int {
 //
 // requirePrivilegeDrop gates the walk's hard-link guard only — see
 // Config.RequirePrivilegeDrop's doc comment for why that one part of this
-// is new behaviour that must not change a caller that leaves it unset.
+// is new behaviour that must not change non-substrate runtimes.
 //
 // Per-entry chown failures and hard-link-guard skips are logged (entry name
 // only) rather than silently discarded.

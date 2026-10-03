@@ -19,7 +19,8 @@ import (
 // EnforcedHooksDir is the dedicated, root-owned directory a
 // privilege-drop-enforcing caller's bootstrap handler redirects
 // broker-delivered $HOME/.scion/hooks/ content into, instead of chowning it
-// to the workload. Kept as a single named identifier — not derived from
+// to the workload (see pkg/sciontool/substrate's writeBootstrapFile for the
+// current example). Kept as a single named identifier — not derived from
 // anything else — so switching it later is a one-line change shared by
 // both the writer and the reader (this package's LifecycleManager
 // registration in cmd/sciontool/commands/init.go).
@@ -32,7 +33,10 @@ import (
 // A package var, not a const, purely so a test can point it at a throwaway
 // directory (e.g. to exercise skipRefusedEntry's EnforcedHooksDir exception
 // without writing to the real, root-owned "/run/scion/hooks"). Production
-// code never reassigns it.
+// code never reassigns it. See pkg/sciontool/substrate's own private
+// root-tmp-dir constant for the sibling directory kept under /run/scion for
+// the same reason and with the same lifecycle: substrate-serve creates and
+// clears both at every bootstrap.
 var EnforcedHooksDir = "/run/scion/hooks"
 
 // ErrScriptRefused is wrapped into the error openScriptNoFollow returns when

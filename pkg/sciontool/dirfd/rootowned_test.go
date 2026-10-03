@@ -158,6 +158,46 @@ func TestOpenParentNoFollowRootOwned_RefusesSymlinkedAncestor(t *testing.T) {
 	}
 }
 
+// TestOpenNoFollowRootOwnedFile_RejectsSymlinkChainThroughUntrustedDir
+// proves OpenNoFollowRootOwnedFile still refuses a destination reached
+// through a directory that is not root- or self-owned and free of
+// group/other write, even given a fully symlink-resolved path.
+func TestOpenNoFollowRootOwnedFile_RejectsSymlinkChainThroughUntrustedDir(t *testing.T) {
+	base := selfOwnedTrustedDir(t)
+	untrusted := filepath.Join(base, "untrusted")
+	if err := os.Mkdir(untrusted, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(untrusted, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(untrusted, "binary")
+	if err := os.WriteFile(target, []byte("#!/bin/sh\necho planted\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := OpenNoFollowRootOwnedFile(target); err == nil {
+		t.Fatal("expected OpenNoFollowRootOwnedFile to refuse a file reached through a group/other-writable directory, got nil error")
+	}
+}
+
+// TestOpenNoFollowRootOwnedFile_AcceptsTrustedRegularFile is the happy path:
+// a regular, executable file under an entirely trusted chain is accepted
+// and returned open.
+func TestOpenNoFollowRootOwnedFile_AcceptsTrustedRegularFile(t *testing.T) {
+	base := selfOwnedTrustedDir(t)
+	target := filepath.Join(base, "binary")
+	if err := os.WriteFile(target, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	f, err := OpenNoFollowRootOwnedFile(target)
+	if err != nil {
+		t.Fatalf("OpenNoFollowRootOwnedFile: %v", err)
+	}
+	_ = f.Close()
+}
+
 // mustWriteExecutable creates an executable regular file at path with the
 // given content, for VerifyRootOwnedExecutable's fixtures.
 func mustWriteExecutable(t *testing.T, path, content string) {

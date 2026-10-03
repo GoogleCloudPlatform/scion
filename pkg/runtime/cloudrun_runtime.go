@@ -38,7 +38,6 @@ import (
 
 	"cloud.google.com/go/compute/metadata"
 	"cloud.google.com/go/run/apiv2/runpb"
-	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun"
@@ -374,30 +373,16 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 		VolumeMounts: volumeMounts,
 	}
 
-	if cfg.NoAuth {
-		cmdLine := buildNoAuthCmdLine(cfg.NoAuthMessage, cfg.NoAuthCommand)
-		agentWindowCmd := "/bin/sh -c " + shellQuote(cmdLine+"; echo $? > "+state.HarnessExitCodeFile)
-		tmuxCmd := fmt.Sprintf(
-			"tmux new-session -d -s scion -n agent %s \\; set-option -g window-size latest \\; new-window -t scion -n shell \\; select-window -t scion:agent; while tmux has-session -t scion 2>/dev/null; do sleep 2; done",
-			agentWindowCmd,
-		)
-		container.Args = []string{"/bin/sh", "-c", tmuxCmd}
-	} else if cfg.Harness != nil {
-		harnessArgs := cfg.Harness.GetCommand(cfg.Task, cfg.Resume, cfg.CommandArgs)
-		var quotedArgs []string
-		for _, a := range harnessArgs {
-			quotedArgs = append(quotedArgs, shellQuote(a))
-		}
-		cmdLine := strings.Join(quotedArgs, " ")
-		agentWindowCmd := "/bin/sh -c " + shellQuote(cmdLine+"; echo $? > "+state.HarnessExitCodeFile)
+	if cfg.NoAuth || cfg.Harness != nil {
+		// harnessCmdLine covers both branches (NoAuth checked first,
+		// matching the priority order above); ok is always true here.
+		cmdLine, _ := harnessCmdLine(cfg)
+		agentWindowCmd := tmuxAgentWindowCmd("/bin/sh", cmdLine)
 		// Use poll loop instead of attach-session: CRI has no TTY for PID 1,
 		// so tmux attach-session would fail with "not a terminal". The poll
 		// loop tracks the tmux session's lifetime without needing a terminal,
 		// matching the cloudrun-sandbox pattern.
-		tmuxCmd := fmt.Sprintf(
-			"tmux new-session -d -s scion -n agent %s \\; set-option -g window-size latest \\; new-window -t scion -n shell \\; select-window -t scion:agent; while tmux has-session -t scion 2>/dev/null; do sleep 2; done",
-			agentWindowCmd,
-		)
+		tmuxCmd := buildTmuxStartCmd(agentWindowCmd, tmuxPollSession)
 		container.Args = []string{"/bin/sh", "-c", tmuxCmd}
 	} else if len(cfg.CommandArgs) > 0 {
 		// Fallback: no harness, pass raw command args as CMD override.

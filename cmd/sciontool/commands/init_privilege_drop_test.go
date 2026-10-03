@@ -5,11 +5,14 @@ Copyright 2026 The Scion Authors.
 package commands
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -18,6 +21,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -30,8 +34,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// TestParseCapBit covers parseCapBit generically (useful to any caller
-// checking a capability bit other than
+// TestParseCapBit covers parseCapBit generically (the function hasCapBit,
+// substrate_privilege_drop.go, uses to check any capability in
+// substratecaps.Required, not just
 // SETUID) — bit 6 (CAP_SETGID), bit 1 (CAP_DAC_OVERRIDE) and bit 0
 // (CAP_CHOWN) alongside a few edge cases, complementing TestParseCapSetUID's
 // bit-7-specific coverage.
@@ -110,6 +115,105 @@ func TestDefaultScionUserLookup_RefusesUnderTest(t *testing.T) {
 func TestDefaultLookupUserByID_RefusesUnderTest(t *testing.T) {
 	if _, err := defaultLookupUserByID("0"); !errors.Is(err, errRealUserLookupDisabledUnderTest) {
 		t.Errorf("defaultLookupUserByID(%q) error = %v, want errRealUserLookupDisabledUnderTest", "0", err)
+	}
+}
+
+// -----------------------------------------------------------------------
+// substrate-serve's wiring, exercised directly so a test can catch a
+// regression in it.
+// -----------------------------------------------------------------------
+
+// doSubstrateServeJSON drives an HTTP request through a *substrate.Server's
+// Handler() the same way pkg/sciontool/substrate's own tests do, without
+// this package importing that type by name (Go infers it from
+// newSubstrateServeServer's return value).
+func doSubstrateServeJSON(t *testing.T, srv interface{ Handler() http.Handler }, method, path, bearer string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	b, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+	req := httptest.NewRequest(method, path, bytes.NewReader(b))
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// TestSubstrateServeInitOptions_RequiresPrivilegeDrop asserts that
+// substrate-serve's InitRunner passes RequirePrivilegeDrop: true to RunInit:
+// substrate must never start the harness as root. A regression that flips
+// this function's literal to RequirePrivilegeDrop: false fails this test.
+func TestSubstrateServeInitOptions_RequiresPrivilegeDrop(t *testing.T) {
+	withScionUserLookup(t, func(username string) (*user.User, error) {
+		return &user.User{Username: username, Uid: strconv.Itoa(os.Getuid()), Gid: strconv.Itoa(os.Getgid()), HomeDir: t.TempDir()}, nil
+	})
+
+	opts := substrateServeInitOptions(true)
+	if !opts.RequirePrivilegeDrop {
+		t.Error("substrateServeInitOptions(...).RequirePrivilegeDrop = false, want true — substrate must never start the harness as root")
+	}
+	if opts.DisableTermSignalForwarding {
+		t.Error("substrateServeInitOptions(true).DisableTermSignalForwarding = true, want false (passthrough)")
+	}
+	if opts.ResolveWorkingDir == nil {
+		t.Error("substrateServeInitOptions(true).ResolveWorkingDir = nil, want a resolver — RunInit calls it after preparing the workspace")
+	}
+	if opts.WorkingDir != "" {
+		t.Errorf("substrateServeInitOptions(true).WorkingDir = %q, want \"\" — resolution is deferred to ResolveWorkingDir", opts.WorkingDir)
+	}
+	if !opts.DisablePortForwarding {
+		t.Error("substrateServeInitOptions(...).DisablePortForwarding = false, want true — Substrate's egress cannot reach the hub port-forward tunnel")
+	}
+	if !opts.DisableReExec {
+		t.Error("substrateServeInitOptions(...).DisableReExec = false, want true — a re-exec would replace substrate-serve's bootstrapped PID 1")
+	}
+	opts2 := substrateServeInitOptions(false)
+	if !opts2.DisableTermSignalForwarding {
+		t.Error("substrateServeInitOptions(false).DisableTermSignalForwarding = false, want true (passthrough)")
+	}
+}
+
+// TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap
+// drives the exact server construction runSubstrateServe uses (real
+// PrivilegeDropChecker; a stubbed init runner — see newSubstrateServeServer's
+// doc comment for why it's never the real RunInit in a test) and proves the
+// wiring itself: with SCION_HOST_UID/GID absent from the process
+// environment, the deterministic branch of checkPrivilegeDropFeasible, the
+// bootstrap must be rejected without ever invoking the init runner. If
+// WithPrivilegeDropChecker were ever dropped from newSubstrateServeServer,
+// this test would instead see 200 and its own assertions would fail —
+// cleanly, as a normal test failure, not by driving a real RunInit.
+func TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	t.Setenv("SCION_HOST_GID", "")
+	scrubHubEnv(t)
+
+	var initCalled bool
+	stubRunInit := func(argv []string, opts InitRunOptions) int {
+		initCalled = true
+		return 0
+	}
+
+	srv := newSubstrateServeServer(stubRunInit)
+	rec := doSubstrateServeJSON(t, srv, "POST", "/scion/v1/bootstrap", "any-token", map[string]any{
+		"env":           map[string]string{},
+		"files":         []any{},
+		"start_cmd":     "true",
+		"control_token": "tok",
+	})
+
+	if rec.Code == 200 || rec.Code < 400 {
+		t.Errorf("status = %d, want a non-2xx rejection (SCION_HOST_UID/GID are unset)", rec.Code)
+	}
+	// Give any wrongly-started goroutine a moment to flip the flag before
+	// asserting it never did (the real init runner call happens
+	// asynchronously — see handleBootstrap).
+	time.Sleep(20 * time.Millisecond)
+	if initCalled {
+		t.Error("the init runner was invoked despite the privilege-drop precondition failing; the harness must never start")
 	}
 }
 

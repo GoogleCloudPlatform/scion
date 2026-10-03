@@ -2713,9 +2713,72 @@ func colocatedBrokerRegisters(cfg *config.GlobalConfig, s store.Store) bool {
 	return enableHub && cfg.RuntimeBroker.Enabled && !simulateRemoteBroker && s != nil
 }
 
+// refuseErrorRuntimeAtStartup returns a non-nil error when rt — the broker's
+// own default runtime, as resolved once at startup by runtime.GetRuntime — is
+// an *runtime.ErrorRuntime for a substrate default runtime that failed
+// deterministic config validation, i.e. its error matches
+// runtime.ErrSubstrateProfileInvalid. The scope is substrate only.
+//
+// GetRuntime never returns an error or nil: a construction or validation
+// failure comes back as a Runtime whose every method returns the stored
+// error. For a substrate profile, a config validation failure is a settings
+// problem — a profile that fails ValidateOperatorOnlySubstrateProfile, or an
+// operator-defined runtime block that fails NewSubstrateRuntime's config
+// checks (required endpoints, substrate.Validate) — that a running broker
+// can never recover from, and that also governs where the bootstrap payload
+// and the actor's egress are sent. Refuse to start instead of coming up
+// looking healthy; the operator fixes the settings and restarts.
+//
+// Every other *ErrorRuntime does not block startup: the broker starts
+// degraded exactly as it always has, logging the "error" runtime name,
+// because those failures can be transient or environmental. That includes a
+// substrate runtime whose construct-time dependencies failed (building the
+// Kubernetes client, or substrate.Dial's trust-bundle/CA load and API dial,
+// e.g. on an API-server blip at boot) — refusing on those would turn a
+// transient outage into a boot crash loop. The broker starts degraded
+// instead, but that degraded state is not self-healing: the default runtime
+// is resolved once here and is not rebuilt until the broker process
+// restarts, and /healthz still reports healthy (the "error" runtime counts
+// as an available runtime in the health check), so nothing restarts the
+// broker automatically. Operators must alert on the logged degraded "error"
+// runtime line and restart the broker to rebuild the runtime. It also
+// includes, for example, a Kubernetes client that fails Verify at startup,
+// or a missing container CLI.
+//
+// Named profiles other than the default are unaffected: those are resolved
+// lazily, per request, and this check only ever sees the one runtime
+// GetRuntime("", "") resolves to at startup. A per-request profile whose
+// construction fails is not memoized on the error, so it retries
+// construction on the next request rather than staying degraded until a
+// restart (see resolveManagerForOpts).
+func refuseErrorRuntimeAtStartup(rt runtime.Runtime) error {
+	er, ok := rt.(*runtime.ErrorRuntime)
+	if !ok || !errors.Is(er.Err, runtime.ErrSubstrateProfileInvalid) {
+		return nil
+	}
+	return fmt.Errorf("runtime broker: configured substrate runtime failed config validation: %w", er.Err)
+}
+
+// resolveBrokerDefaultRuntime resolves the broker's default runtime with
+// getRuntime (runtime.GetRuntime in production), applies
+// refuseErrorRuntimeAtStartup, and logs the runtime the broker will use. It
+// is the first step of startRuntimeBroker; the returned runtime is the one
+// the broker's manager is built on, so the refusal cannot be skipped without
+// also losing the runtime itself.
+func resolveBrokerDefaultRuntime(getRuntime func(projectPath, profileName string) runtime.Runtime, logf func(format string, args ...interface{})) (runtime.Runtime, error) {
+	rt := getRuntime("", "")
+	if err := refuseErrorRuntimeAtStartup(rt); err != nil {
+		return nil, err
+	}
+	logf("Runtime broker using runtime: %s", rt.Name())
+	return rt, nil
+}
+
 func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.GlobalConfig, hubSrv *hub.Server, webSrv *hub.WebServer, s store.Store, hubEndpoint, devAuthToken string, brokerSettings *config.Settings, globalDir string, requestLogger, messageLogger *slog.Logger, wg *sync.WaitGroup, errCh chan error) error {
-	rt := runtime.GetRuntime("", "")
-	log.Printf("Runtime broker using runtime: %s", rt.Name())
+	rt, err := resolveBrokerDefaultRuntime(runtime.GetRuntime, log.Printf)
+	if err != nil {
+		return err
+	}
 	statelessCloudRunBroker := enableHub && !simulateRemoteBroker && rt != nil && rt.Name() == "cloudrun"
 
 	mgr := agent.NewManager(rt)
