@@ -63,10 +63,9 @@ type session struct {
 	watchdog     clock.Timer
 	drainTimer   clock.Timer
 
-	rpcSeq    atomic.Uint64
-	pingSeq   atomic.Uint64
-	lastRecv  atomic.Int64 // clock UnixNano of the last inbound frame
-	keepalive time.Duration
+	rpcSeq   atomic.Uint64
+	pingSeq  atomic.Uint64
+	lastRecv atomic.Int64 // clock UnixNano of the last inbound frame
 
 	// Flow control (session level).
 	fcMu          sync.Mutex

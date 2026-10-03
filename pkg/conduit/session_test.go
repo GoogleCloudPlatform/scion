@@ -57,7 +57,7 @@ func TestHandshakeWelcomeDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	if w.GetPingIntervalMs() != 20000 || w.GetMaxFrame() != MaxDataFrame {
 		t.Fatalf("welcome defaults: %v", w)
 	}
@@ -375,7 +375,7 @@ func TestSessionCloseFailsStreamsAndCalls(t *testing.T) {
 	if _, err := rs.Read(make([]byte, 1)); !errors.Is(err, ErrSessionClosed) {
 		t.Fatalf("relay stream read err = %v", err)
 	}
-	waitDone(t, p.dialer)
+	_ = waitDone(t, p.dialer)
 	if _, err := st.Write([]byte("x")); !errors.Is(err, ErrSessionClosed) {
 		t.Fatalf("dialer stream write err = %v", err)
 	}
