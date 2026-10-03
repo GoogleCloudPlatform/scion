@@ -3046,3 +3046,52 @@ func TestWaitForHealthz_SucceedsAfterRetries(t *testing.T) {
 		t.Fatalf("sleep ran %d times, want >=2 (success is reached only after retries)", sleeps)
 	}
 }
+
+// TestSleepWithContext exercises the production sleep seam directly (the
+// waitForHealthz tests above inject a fake sleep, so they never run this code).
+// A cancelled context must abort a long wait promptly rather than sleep out the
+// full duration, and a live context must sleep the (short) duration and return
+// nil.
+func TestSleepWithContext(t *testing.T) {
+	t.Run("cancelled context returns promptly", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // already cancelled before the call
+
+		start := time.Now()
+		err := sleepWithContext(ctx, time.Hour)
+		elapsed := time.Since(start)
+
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("sleepWithContext returned %v, want errors.Is(context.Canceled)", err)
+		}
+		if elapsed > time.Second {
+			t.Fatalf("sleepWithContext took %s, want it to abort within 1s rather than wait the full hour", elapsed)
+		}
+	})
+
+	t.Run("cancelled mid-wait returns promptly", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			time.Sleep(10 * time.Millisecond)
+			cancel()
+		}()
+
+		start := time.Now()
+		err := sleepWithContext(ctx, time.Hour)
+		elapsed := time.Since(start)
+
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("sleepWithContext returned %v, want errors.Is(context.Canceled)", err)
+		}
+		if elapsed > time.Second {
+			t.Fatalf("sleepWithContext took %s, want it to abort within 1s of cancellation", elapsed)
+		}
+	})
+
+	t.Run("live context sleeps the duration and returns nil", func(t *testing.T) {
+		err := sleepWithContext(context.Background(), 5*time.Millisecond)
+		if err != nil {
+			t.Fatalf("sleepWithContext returned %v, want nil for a live context", err)
+		}
+	})
+}

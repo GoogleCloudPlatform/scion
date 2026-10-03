@@ -55,6 +55,32 @@ func TestFixupEnforcedHooksDirEntry_StripsGroupAndOtherWrite(t *testing.T) {
 	}
 }
 
+// TestFixupEnforcedHooksDirEntry_NonDirectoryRefused proves the non-directory
+// branch: a regular file at the path (opened with O_DIRECTORY, which fails
+// ENOTDIR) is refused and left untouched, never chmod'd. The fixture file is
+// 0666 so that a regression to a by-name chmod would strip it to 0644; the
+// assertion that it stays 0666 catches that. Runs without root.
+func TestFixupEnforcedHooksDirEntry_NonDirectoryRefused(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "regular-file")
+	if err := os.WriteFile(path, []byte("not a directory"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	// WriteFile's mode is subject to umask; set it explicitly.
+	if err := os.Chmod(path, 0o666); err != nil {
+		t.Fatal(err)
+	}
+
+	fixupEnforcedHooksDirEntry(path)
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o666 {
+		t.Errorf("mode = %o, want unchanged 0666 (a non-directory must be refused, not chmod'd)", got)
+	}
+}
+
 // TestFixupEnforcedHooksDirEntry_AlreadyCorrectIsNoop proves a directory
 // that is already root-owned (when running as root) with mode 0755 is left
 // completely untouched — no error, no unexpected chmod/chown side effect.
