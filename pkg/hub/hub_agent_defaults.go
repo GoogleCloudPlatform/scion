@@ -55,6 +55,15 @@ func (s *Server) hubAgentDefaults() opsettings.AgentDefaultsSettings {
 	return d
 }
 
+// autoExposePortsDefault returns a copy of the hub's auto-expose-ports
+// default under s.mu, or nil when unset. The settings propagation goroutine
+// rewrites the pointer while the hub runs (ApplySnapshot).
+func (s *Server) autoExposePortsDefault() *bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return copyBoolPtr(s.config.AutoExposePortsDefault)
+}
+
 // agentDefaultsEqual reports whether two agent_defaults sections carry the same
 // values, comparing DefaultResources by pointee rather than by pointer. Used by
 // ApplySnapshot to decide whether "agent_defaults" belongs in the applied-fields

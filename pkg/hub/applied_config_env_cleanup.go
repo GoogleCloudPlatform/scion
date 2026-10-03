@@ -31,10 +31,10 @@ import (
 // migration (see resolveMaintenanceExecutor, key
 // "applied-config-env-cleanup") run once per hub; the write-path fix stops
 // new rows from acquiring these entries, this cleans up rows written before
-// the fix shipped. InlineConfig.Env is affected on any row where the create
-// path's `ac.Env = req.Config.Env; ac.InlineConfig = req.Config` aliasing
-// (handlers_agent_create_helpers.go) meant a later Env-only merge-back wrote
-// into the same underlying map InlineConfig.Env pointed at; the DB round
+// the fix shipped. InlineConfig.Env is affected on any row written while the
+// create path aliased AppliedConfig.Env to req.Config.Env (buildAppliedConfig
+// now clones it), so a later Env-only merge-back wrote into the same
+// underlying map InlineConfig.Env pointed at; the DB round
 // trip does not preserve that aliasing, so both fields must be swept
 // independently once a row is loaded back.
 //
