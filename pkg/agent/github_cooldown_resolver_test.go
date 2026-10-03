@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -303,9 +304,10 @@ func TestGitHubSkillResolver_SharedIdentityRateLimitHoldsBackParallelRefs(t *tes
 	// arrived, and c's lookup is answered only once that rate limit has
 	// started the cooldown, so c is in flight across that moment.
 	cArrived := make(chan struct{})
+	var cArrivedOnce sync.Once
 	mux.HandleFunc("/repos/org/skills/commits/main", func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
-		close(cArrived)
+		cArrivedOnce.Do(func() { close(cArrived) })
 		deadline := time.Now().Add(5 * time.Second)
 		for time.Now().Before(deadline) {
 			if _, active := r.cooldownTracker().Active(identity); active {

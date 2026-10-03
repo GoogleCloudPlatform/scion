@@ -167,13 +167,27 @@ func TestGitHubSkillResolver_Parallel_PreservesOrder(t *testing.T) {
 func TestGitHubSkillResolver_Parallel_RespectsBound(t *testing.T) {
 	for _, bound := range []int{0, 1, 2, 4} {
 		t.Run(fmt.Sprintf("bound=%d", bound), func(t *testing.T) {
-			ft := &fakeSkillTransport{delay: func(string) time.Duration { return 20 * time.Millisecond }}
-			r := newFakeTransportResolver(ft)
-			r.maxConcurrent = bound
 			want := bound
 			if want == 0 {
 				want = githubResolveConcurrency
 			}
+			ft := &fakeSkillTransport{delay: func(string) time.Duration { return 20 * time.Millisecond }}
+			// Hold each listing until the bound has been reached once (or
+			// a timeout passes), so reaching it does not depend on timing.
+			ft.onList = func(string) {
+				deadline := time.Now().Add(5 * time.Second)
+				for time.Now().Before(deadline) {
+					ft.mu.Lock()
+					reached := ft.maxInFlight >= want
+					ft.mu.Unlock()
+					if reached {
+						return
+					}
+					time.Sleep(time.Millisecond)
+				}
+			}
+			r := newFakeTransportResolver(ft)
+			r.maxConcurrent = bound
 
 			var refs []api.SkillReference
 			for i := 0; i < 12; i++ {
@@ -220,16 +234,17 @@ func TestGitHubSkillResolver_Parallel_WallTime(t *testing.T) {
 		t.Fatalf("resolved %d of %d refs; errors: %+v", len(res.Resolved), n, res.Errors)
 	}
 	// With a bound of 4, 8 refs take about 2 rounds of latency; resolving
-	// them one after another would take 8.
-	if serial := n * latency; elapsed >= serial/2 {
+	// them one after another would take 8. The margin is wide on purpose:
+	// RespectsBound pins the bound itself without relying on the clock.
+	if serial := n * latency; elapsed >= serial*3/4 {
 		t.Errorf("Resolve took %v, want well under the serial %v", elapsed, serial)
 	}
 }
 
-// TestGitHubSkillResolver_Parallel_ErrorsMatchSerial checks that each ref's
-// error is reported with the same code and message, in the same order, as
-// when the refs are resolved one at a time.
-func TestGitHubSkillResolver_Parallel_ErrorsMatchSerial(t *testing.T) {
+// TestGitHubSkillResolver_Parallel_ErrorsMatchBoundOne checks that with a
+// bound of 4 each ref's error is reported with the same code and message,
+// in the same order, as with a bound of 1, and pins the expected codes.
+func TestGitHubSkillResolver_Parallel_ErrorsMatchBoundOne(t *testing.T) {
 	refs := []api.SkillReference{
 		skillRef("missing-a"),
 		skillRef("skill-1"),
@@ -253,14 +268,14 @@ func TestGitHubSkillResolver_Parallel_ErrorsMatchSerial(t *testing.T) {
 		}
 		return res
 	}
-	serial := run(1)
+	one := run(1)
 	parallel := run(4)
 
-	if !reflect.DeepEqual(parallel.Errors, serial.Errors) {
-		t.Errorf("parallel errors = %+v\nserial errors   = %+v", parallel.Errors, serial.Errors)
+	if !reflect.DeepEqual(parallel.Errors, one.Errors) {
+		t.Errorf("bound 4 errors = %+v\nbound 1 errors = %+v", parallel.Errors, one.Errors)
 	}
-	if got, want := resolvedNames(parallel), resolvedNames(serial); !reflect.DeepEqual(got, want) {
-		t.Errorf("parallel resolved = %v, serial resolved = %v", got, want)
+	if got, want := resolvedNames(parallel), resolvedNames(one); !reflect.DeepEqual(got, want) {
+		t.Errorf("bound 4 resolved = %v, bound 1 resolved = %v", got, want)
 	}
 
 	wantCodes := []string{SkillErrCodeNotFound, "invalid_uri", SkillErrCodeNotFound, "resolve_failed"}
@@ -277,11 +292,11 @@ func TestGitHubSkillResolver_Parallel_ErrorsMatchSerial(t *testing.T) {
 	}
 }
 
-// TestGitHubSkillResolver_Parallel_CancelStopsLaunches cancels the ctx while
-// the first ref is in flight and checks that no further ref is started, each
-// ref not started is reported, and Resolve returns only after the started
-// ref has finished.
-func TestGitHubSkillResolver_Parallel_CancelStopsLaunches(t *testing.T) {
+// TestGitHubSkillResolver_Parallel_CancelFailsQueuedRefsFast cancels the
+// ctx while the first ref is in flight. The refs queued behind it still
+// run, as they would one at a time, but fail at once with the cancellation,
+// and Resolve returns only after all of them have finished.
+func TestGitHubSkillResolver_Parallel_CancelFailsQueuedRefsFast(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -307,12 +322,8 @@ func TestGitHubSkillResolver_Parallel_CancelStopsLaunches(t *testing.T) {
 	}
 
 	ft.mu.Lock()
-	listed := append([]string(nil), ft.listed...)
 	inFlight := ft.inFlight
 	ft.mu.Unlock()
-	if !reflect.DeepEqual(listed, []string{"skill-0"}) {
-		t.Errorf("started listings = %v, want only skill-0", listed)
-	}
 	if inFlight != 0 {
 		t.Errorf("Resolve returned with %d requests still in flight", inFlight)
 	}
@@ -326,12 +337,107 @@ func TestGitHubSkillResolver_Parallel_CancelStopsLaunches(t *testing.T) {
 		if e.URI != refs[i].URI {
 			t.Errorf("error %d URI = %q, want %q", i, e.URI, refs[i].URI)
 		}
-		if i == 0 {
-			continue
+		if e.Code != "resolve_failed" || !strings.Contains(e.Message, context.Canceled.Error()) {
+			t.Errorf("error %d = %+v, want a resolve_failed error carrying %q", i, e, context.Canceled)
 		}
-		if e.Code != "resolve_failed" || !strings.Contains(e.Message, "not started") || !strings.Contains(e.Message, context.Canceled.Error()) {
-			t.Errorf("error %d = %+v, want a resolve_failed not-started error carrying %q", i, e, context.Canceled)
+	}
+}
+
+// TestGitHubSkillResolver_Parallel_DeadlineKeepsSerialOutcomes: when the
+// deadline passes while refs are still queued behind a slow one, each
+// queued ref gets the outcome it would get one at a time. A ref that needs
+// GitHub fails as a timeout, and a ref with a fresh cache entry is still
+// served.
+func TestGitHubSkillResolver_Parallel_DeadlineKeepsSerialOutcomes(t *testing.T) {
+	cache, err := NewGitHubResolutionCache(t.TempDir(), time.Hour)
+	if err != nil {
+		t.Fatalf("NewGitHubResolutionCache: %v", err)
+	}
+	ft := &fakeSkillTransport{delay: func(name string) time.Duration {
+		if name == "slow" {
+			return time.Minute
 		}
+		return 0
+	}}
+	r := newFakeTransportResolver(ft)
+	r.resolutionCache = cache
+	r.maxConcurrent = 1
+
+	// Warm the cache for the "warm" ref.
+	warm, err := r.Resolve(context.Background(), []api.SkillReference{skillRef("warm")}, ResolveOpts{})
+	if err != nil || len(warm.Resolved) != 1 {
+		t.Fatalf("warming the cache: err=%v result=%+v", err, warm)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	// The slow ref holds the only slot until the deadline. cold-a queues
+	// before it passes; warm and cold-b are reached only after it.
+	res, err := r.Resolve(ctx, []api.SkillReference{
+		skillRef("slow"), skillRef("cold-a"), skillRef("warm"), skillRef("cold-b"),
+	}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+
+	if got := resolvedNames(res); !reflect.DeepEqual(got, []string{"warm"}) {
+		t.Errorf("resolved = %v, want [warm] served from the cache", got)
+	}
+	wantErrs := []string{"slow", "cold-a", "cold-b"}
+	if len(res.Errors) != len(wantErrs) {
+		t.Fatalf("got %d errors, want %d: %+v", len(res.Errors), len(wantErrs), res.Errors)
+	}
+	for i, name := range wantErrs {
+		e := res.Errors[i]
+		if e.URI != skillRef(name).URI {
+			t.Errorf("error %d URI = %q, want the %s ref", i, e.URI, name)
+		}
+		if e.Code != SkillErrCodeTimeout {
+			t.Errorf("%s ref: code = %q (%s), want %q", name, e.Code, e.Message, SkillErrCodeTimeout)
+		}
+	}
+}
+
+// panicSkillTransport panics on the listing of the skill named "boom" and
+// otherwise serves like fakeSkillTransport.
+type panicSkillTransport struct{ fakeSkillTransport }
+
+func (p *panicSkillTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if strings.HasSuffix(req.URL.Path, "/contents/skills/boom") {
+		panic("credential-value-must-not-leak")
+	}
+	return p.fakeSkillTransport.RoundTrip(req)
+}
+
+// TestGitHubSkillResolver_Parallel_RecoversPanic checks that a panic while
+// resolving one ref is reported as that ref's error, with a generic message
+// that carries nothing from the panic value, and the other refs resolve.
+func TestGitHubSkillResolver_Parallel_RecoversPanic(t *testing.T) {
+	pt := &panicSkillTransport{}
+	r := &GitHubSkillResolver{
+		httpClient: &http.Client{Transport: pt},
+		token:      "test-token",
+		apiBase:    "http://github.invalid",
+		rawBase:    "http://github.invalid/raw",
+	}
+
+	refs := []api.SkillReference{skillRef("skill-0"), skillRef("boom"), skillRef("skill-2")}
+	res, err := r.Resolve(context.Background(), refs, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if got, want := resolvedNames(res), []string{"skill-0", "skill-2"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("resolved = %v, want %v", got, want)
+	}
+	if len(res.Errors) != 1 {
+		t.Fatalf("got %d errors, want 1: %+v", len(res.Errors), res.Errors)
+	}
+	e := res.Errors[0]
+	if e.URI != refs[1].URI || e.Code != "resolve_failed" {
+		t.Errorf("error = %+v, want resolve_failed for %s", e, refs[1].URI)
+	}
+	if strings.Contains(e.Message, "credential-value") || strings.Contains(e.Message, "test-token") {
+		t.Errorf("error message carries panic or credential material: %q", e.Message)
 	}
 }
 
