@@ -31,6 +31,13 @@ type sharerMarker struct {
 	Branch       string   `json:"branch"`
 	WorktreePath string   `json:"worktreePath"`
 	Sharers      []string `json:"sharers"`
+
+	// unmatchedWorktreePath holds the recorded WorktreePath when readMarker
+	// blanked it because it matches no scion-created worktree shape. It is
+	// never written back to disk. ListSharersForJoin reports it so that
+	// ensureWorktree validates, and refuses, the recorded value instead of
+	// treating the entry as absent.
+	unmatchedWorktreePath string
 }
 
 const sharerDir = "scion-sharers"
@@ -148,7 +155,10 @@ func isProvisionAgentWorkspaceShape(projectDir, candidate string) bool {
 //     previously caused a real data-loss regression — a live sharer's
 //     worktree removed out from under it because its refcount registration
 //     was silently dropped). Callers observe this as worktreePath=="" and
-//     must not use "" as a target to mount or remove.
+//     must not use "" as a target to mount or remove. ensureWorktree's JOIN
+//     check is the exception: it reads the recorded value through
+//     ListSharersForJoin and refuses a registry entry that is not a valid
+//     worktree.
 //   - It is not already in canonical textual form, or crosses a symlink on
 //     its way from base to the leaf: the read fails outright with an error,
 //     instead of being silently discarded or degraded, so the caller cannot
@@ -177,6 +187,7 @@ func readMarker(base, projectDir, path string) (*sharerMarker, error) {
 	}
 	slog.Warn("sharer marker worktreePath does not match a scion-created worktree shape; keeping sharer refcount, discarding only the path",
 		"path", path, "worktreePath", m.WorktreePath)
+	m.unmatchedWorktreePath = m.WorktreePath
 	m.WorktreePath = ""
 	return &m, nil
 }
@@ -371,6 +382,27 @@ func ListSharers(base, projectDir, branch string) ([]string, string, error) {
 	}
 	if m == nil {
 		return nil, "", nil
+	}
+	return m.Sharers, m.WorktreePath, nil
+}
+
+// ListSharersForJoin is ListSharers as ensureWorktree's JOIN check reads it,
+// in the base/worktrees/<name> shape (no projectDir). It differs from
+// ListSharers in one case: when readMarker blanked a recorded WorktreePath
+// that matches no scion-created worktree shape, it returns the recorded
+// value instead of "", so the caller validates that value and refuses a
+// registry entry that is not a valid worktree rather than treating the
+// branch as having no registered worktree.
+func ListSharersForJoin(base, branch string) ([]string, string, error) {
+	m, err := readMarker(base, "", sharerPath(base, branch))
+	if err != nil {
+		return nil, "", err
+	}
+	if m == nil {
+		return nil, "", nil
+	}
+	if m.WorktreePath == "" && m.unmatchedWorktreePath != "" {
+		return m.Sharers, m.unmatchedWorktreePath, nil
 	}
 	return m.Sharers, m.WorktreePath, nil
 }

@@ -1421,7 +1421,11 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 		}
 	}
 	if !preExisted {
-		_, regPath, listErr := provision.ListSharers(result.ProjectRoot, "", branch)
+		// ListSharersForJoin reports the registered path exactly as
+		// ensureWorktree's JOIN check sees it, including a recorded path
+		// that matches no scion-created worktree shape, so an existing entry
+		// at that path is never treated as absent here.
+		_, regPath, listErr := provision.ListSharersForJoin(result.ProjectRoot, branch)
 		if listErr != nil {
 			// The registry read boundary refused this branch's marker outright
 			// (a non-canonical or symlink-crossing form, not merely a stale
