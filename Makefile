@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-fixture-coverage vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates cli-time-zones check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-fixture-coverage vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates cli-time-zones check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -382,6 +382,24 @@ proto:
 		--go-grpc_out=. --go-grpc_opt=module=github.com/GoogleCloudPlatform/scion \
 		proto/broker/v1/broker.proto
 	@echo "Proto generation done."
+
+## ent-check: Verify generated ent code (pkg/ent) matches pkg/ent/schema
+# Regenerates in place, then fails if anything under pkg/ent (tracked diff
+# or new untracked files -- a new schema adds new directories, which
+# git diff alone does not see) or go.mod/go.sum changed. The generator runs
+# with -mod=mod, so a codegen dependency missing from go.sum shows up as a
+# go.mod/go.sum diff, which is a real failure. Run on a clean pkg/ent tree:
+# uncommitted pkg/ent edits read as drift (ptone/scion#2746).
+ent-check:
+	@echo "Checking ent generated code is up to date..."
+	@go generate ./pkg/ent
+	@untracked="$$(git status --porcelain --untracked-files=all -- pkg/ent | grep '^??' || true)"; \
+	if ! git diff --exit-code --stat -- pkg/ent go.mod go.sum || [ -n "$$untracked" ]; then \
+		[ -z "$$untracked" ] || { echo "Untracked generated files:"; echo "$$untracked"; }; \
+		echo "ent generated code is out of date. Run 'go generate ./pkg/ent' and commit the result."; \
+		exit 1; \
+	fi; \
+	echo "ent generated code is up to date."
 
 ## proto-check: Verify generated protobuf code is up to date
 proto-check:
