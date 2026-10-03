@@ -12,129 +12,144 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// This file's own user/credential resolution is independent of
+// pkg/runtime.ExecAsUserCmd's equivalent for other scion runtimes
+// (pkg/runtime/exec_user.go) rather than importing it: pkg/runtime
+// transitively imports pkg/config, and sciontool must never import
+// pkg/config (project path resolution has no business inside an agent
+// container — see TestInitProjectDataIsolation in
+// cmd/sciontool/commands/init_test.go, which fails the build if that
+// boundary is crossed). Only the CA-bundle var names
+// (substrateenv.TrustBundleVarNames) are actually shared, via a small
+// dependency-free package both sides can import (see that package's doc
+// comment).
 package substrate
 
 import (
 	"fmt"
 	"os"
+	"os/user"
+	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 	"github.com/GoogleCloudPlatform/scion/pkg/substrateenv"
 )
 
-// execCandidateEnv is execAsUserCmd's source of the pre-su environment, as
-// a package var so a test can supply a synthetic environment without
-// mutating the real process environment via os.Setenv.
+// execCandidateEnv is runExec's source of the pre-exec environment this
+// process itself was started with, as a package var so a test can supply a
+// synthetic environment without mutating the real process environment via
+// os.Setenv. Used only to read the CA-bundle candidate values (see
+// trustBundleEnvPairs) — runExec's own child environment is otherwise built
+// from scratch (rootexec.Env), never from this.
 var execCandidateEnv = os.Environ
 
-// execResolve is execAsUserCmd's own source of a bare command name's
-// verified, absolute path — a package var (rather than calling
-// rootexec.Resolve directly) so a test can substitute a deterministic
-// stand-in for "su" without needing a real recorder binary to sit under one
-// of rootexec.SearchPath's fixed, non-test-injectable directories.
-// Production code never reassigns it.
+// execResolve is runExec's own source of a bare command name's verified,
+// absolute path — a package var (rather than calling rootexec.Resolve
+// directly) so a test can substitute a deterministic stand-in for "sh"
+// without needing a real recorder binary to sit under one of
+// rootexec.SearchPath's fixed, non-test-injectable directories. Production
+// code never reassigns it.
 var execResolve = rootexec.Resolve
 
-// SetExecResolveForTest overrides execAsUserCmd's own means of resolving
-// "sh", "su", and "whoami" to absolute paths, for the duration of a test —
-// including a test in another package that drives a real exec through this
-// package's Server via NewServer (e.g. pkg/runtime's own real-control-server
-// tests), which has no other way to reach this package's unexported
-// execResolve var. Mirrors SetPrivateRootTmpDirForTest's shape exactly.
-// Production code never calls this. Returns a cleanup function that
-// restores the previous value.
+// SetExecResolveForTest overrides runExec's own means of resolving "sh" to
+// an absolute path, for the duration of a test — including a test in
+// another package that drives a real exec through this package's Server via
+// NewServer (e.g. pkg/runtime's own real-control-server tests), which has
+// no other way to reach this package's unexported execResolve var. Mirrors
+// SetPrivateRootTmpDirForTest's shape exactly. Production code never calls
+// this. Returns a cleanup function that restores the previous value.
 func SetExecResolveForTest(resolve func(name string) (string, error)) func() {
 	orig := execResolve
 	execResolve = resolve
 	return func() { execResolve = orig }
 }
 
-// execAsUserCmd is a deliberate, near-verbatim copy of
-// pkg/runtime.ExecAsUserCmd's wrapper script (see that file's doc comment
-// for the full PAM/su rationale — the reasoning is identical here), with
-// one intentional divergence: it conditionally passes `su -w <list>`.
+// execUserLookup is runExec's own source of a target user's passwd entry —
+// a package var (rather than calling user.Lookup directly) so a test can
+// substitute a synthetic user without depending on a real system account
+// existing on whatever machine runs the test. Production code never
+// reassigns it.
+var execUserLookup = user.Lookup
+
+// SetExecUserLookupForTest overrides runExec's own means of resolving a
+// target username to a *user.User, for the duration of a test. Mirrors
+// SetExecResolveForTest's shape exactly. Production code never calls this.
+// Returns a cleanup function that restores the previous value.
+func SetExecUserLookupForTest(lookup func(username string) (*user.User, error)) func() {
+	orig := execUserLookup
+	execUserLookup = lookup
+	return func() { execUserLookup = orig }
+}
+
+// execUserCredential resolves user's passwd entry and returns the
+// environment pairs (HOME, USER, LOGNAME, SHELL) and the *syscall.Credential
+// runExec's child process needs to run as that user directly — a credential
+// drop via SysProcAttr.Credential, never `su`: su's own login-shell
+// environment reset is exactly the kind of PAM/login-shell dependency this
+// mechanism is replacing, and the workload's own main process (RunInit,
+// via pkg/sciontool/supervisor.Supervisor.Run) already runs under the same
+// kind of direct Credential drop with no PAM involved at all — matching
+// that is the requirement, not re-deriving su's own behavior.
 //
-// It is duplicated rather than imported: pkg/runtime transitively imports
-// pkg/config, and sciontool must never import pkg/config (project path
-// resolution has no business inside an agent container — see
-// TestInitProjectDataIsolation in cmd/sciontool/commands/init_test.go,
-// which fails the build if that boundary is crossed). That import boundary
-// rules out a shared leaf package for the whole function; only the
-// CA-bundle var names (substrateenv.TrustBundleVarNames) are actually
-// shared, via a small dependency-free package both sides can import (see
-// that package's doc comment).
+// shPath is runExec's own resolved "sh" binary, used here as SHELL's value:
+// os/user.User carries no shell field (the standard library does not parse
+// it out of the passwd entry), and the command this credential ultimately
+// runs is always invoked directly via "sh -c" regardless of the target
+// user's own configured login shell, so SHELL names the interpreter
+// actually in use rather than guessing (or hardcoding) the passwd-configured
+// one.
 //
-// "sh", "su", and "whoami" are all resolved via execResolve (production:
-// rootexec.Resolve) rather than left as bare names for the eventual shell to
-// look up on its own PATH: this whole wrapper runs as root before any
-// privilege drop, and a bare name here would otherwise be resolved against
-// root's own inherited PATH, which on substrate includes a directory the
-// workload owns outright (see the rootexec package doc comment). Resolving
-// all three up front, and embedding the resulting absolute paths directly
-// in the generated script, means the script's own behavior no longer
-// depends on whatever PATH the resulting *exec.Cmd happens to run with —
-// runExec still gives it rootexec.Env's fixed, from-scratch PATH as well,
-// but only as defense in depth.
-//
-// The divergence: whenever the target user differs from the caller,
-// execAsUserCmd runs `su - <user> -c <cmd>`, a login shell — and `su -`
-// discards the entire inherited environment, including the CA-bundle env
-// vars buildActorTemplate (pkg/runtime/substrate_template.go) sets on the
-// container when egress_trust_bundle is configured. Without this, any
-// exec-invoked command (the broker exec endpoint, `scion look`, or
-// `/scion/v1/exec` directly) that makes a TLS request loses the gateway CA
-// even though the harness itself trusts it fine.
-//
-// The mechanism is util-linux `su`'s `-w`/`--whitelist-environment` flag: a
-// comma-separated list of variable names to copy from the pre-su
-// environment into the post-su one, on top of `su -`'s own minimal login
-// set. `-w <list>` is passed ONLY when at least one of the candidate names
-// is actually set (to a non-empty value) in the pre-su environment — never
-// unconditionally — so a plain (non-sdsmint) install, where none of them
-// is ever set, gets the exact `su - "$1" -c "$2"` this wrapper has always
-// run: byte-identical script, byte-identical argv. `<list>` names only the
-// candidates that ARE set, in substrateenv.TrustBundleVarNames's fixed
-// order — the same slice pkg/runtime's buildActorTemplate builds the
-// container's Env from — so the two lists cannot drift apart (see
-// TestExecAsUserCmd_CandidateNamesMatchTemplateEnvNames).
-//
-// pkg/runtime.ExecAsUserCmd (used by every other runtime) is deliberately
-// left untouched: only Substrate actors run under sdsmint, `-w` is a
-// util-linux-specific flag (>= 2.35; scion's images are Debian trixie,
-// which satisfies this) not guaranteed present on every other runtime's
-// image, and this whole mechanism only exists to counter Substrate's own
-// env-propagation shape.
-func execAsUserCmd(user, cmd string) ([]string, error) {
-	suFlag := "-"
-	if list := trustBundleWhitelist(execCandidateEnv()); list != "" {
-		suFlag = "-w " + list + " -"
-	}
-	shPath, err := execResolve("sh")
+// cred is nil when user resolves to this process's own current identity
+// (euid/egid already match) — the shape a test that asks to run as its own
+// real user takes, and also a defensive no-op in case this handler is ever
+// reached while already running as the target (it is not, in production:
+// substrate-serve is root until RunInit's own later drop, and runExec's
+// caller already refuses any user other than "scion" — see server.go). This
+// is not merely an optimization: Go's exec implementation calls setgroups()
+// whenever Credential is non-nil UNLESS NoSetGroups is set, which requires
+// CAP_SETGID even to set an unchanged group list — a real privilege an
+// unprivileged test process (asking to "become" the user it already is)
+// does not have and must not need.
+func execUserCredential(username, shPath string) (envPairs []string, cred *syscall.Credential, err error) {
+	u, err := execUserLookup(username)
 	if err != nil {
-		return nil, fmt.Errorf("substrate: resolve sh: %w", err)
+		return nil, nil, fmt.Errorf("substrate: resolve user %q: %w", username, err)
 	}
-	suPath, err := execResolve("su")
+	uid64, err := strconv.ParseUint(u.Uid, 10, 32)
 	if err != nil {
-		return nil, fmt.Errorf("substrate: resolve su: %w", err)
+		return nil, nil, fmt.Errorf("substrate: user %q has an unparseable uid %q: %w", username, u.Uid, err)
 	}
-	whoamiPath, err := execResolve("whoami")
+	gid64, err := strconv.ParseUint(u.Gid, 10, 32)
 	if err != nil {
-		return nil, fmt.Errorf("substrate: resolve whoami: %w", err)
+		return nil, nil, fmt.Errorf("substrate: user %q has an unparseable gid %q: %w", username, u.Gid, err)
 	}
-	script := fmt.Sprintf(`if [ "$(%s)" = "$1" ]; then exec %s -c "$2"; else exec %s %s "$1" -c "$2"; fi`,
-		whoamiPath, shPath, suPath, suFlag)
-	return []string{shPath, "-c", script, "exec-as-user", user, cmd}, nil
+	uid, gid := uint32(uid64), uint32(gid64)
+
+	envPairs = []string{
+		"HOME=" + u.HomeDir,
+		"USER=" + u.Username,
+		"LOGNAME=" + u.Username,
+		"SHELL=" + shPath,
+	}
+
+	if uid == uint32(os.Geteuid()) && gid == uint32(os.Getegid()) {
+		return envPairs, nil, nil
+	}
+	return envPairs, &syscall.Credential{Uid: uid, Gid: gid}, nil
 }
 
 // trustBundleEnvPairs returns "NAME=value" for each CA-bundle candidate
 // present with a non-empty value in env, in substrateenv.TrustBundleVarNames's
 // fixed order — the actual values a from-scratch child environment
 // (rootexec.Env, which carries nothing over from the ambient environment by
-// design) must be given explicitly for `su -w` to have anything to copy
-// across the login shell's own environment reset. Shares its "present with
-// a non-empty value" rule with trustBundleWhitelist, driven off the same
-// env argument.
+// design) must be given explicitly: buildActorTemplate
+// (pkg/runtime/substrate_template.go) sets these on the container when
+// egress_trust_bundle is configured, and without passing them through here
+// explicitly, a direct credential drop's child would simply never see them
+// (unlike a bare cmd.Run() that happened to inherit this process's own
+// environment, which runExec deliberately does not do either).
 func trustBundleEnvPairs(env []string) []string {
 	set := make(map[string]string, len(env))
 	for _, kv := range env {
@@ -149,27 +164,4 @@ func trustBundleEnvPairs(env []string) []string {
 		}
 	}
 	return pairs
-}
-
-// trustBundleWhitelist returns the comma-separated names, in
-// substrateenv.TrustBundleVarNames's fixed order, of every candidate
-// CA-bundle var with a non-empty value in env (KEY=VALUE strings, as from
-// os.Environ()). Returns "" when none are set (the plain-install case, and
-// the signal execAsUserCmd uses to omit `-w` entirely). An empty-string
-// value counts as unset, matching `su -w`'s own behavior: there is nothing
-// useful to copy for a key present but empty.
-func trustBundleWhitelist(env []string) string {
-	set := make(map[string]string, len(env))
-	for _, kv := range env {
-		if i := strings.IndexByte(kv, '='); i > 0 {
-			set[kv[:i]] = kv[i+1:]
-		}
-	}
-	var names []string
-	for _, name := range substrateenv.TrustBundleVarNames {
-		if set[name] != "" {
-			names = append(names, name)
-		}
-	}
-	return strings.Join(names, ",")
 }

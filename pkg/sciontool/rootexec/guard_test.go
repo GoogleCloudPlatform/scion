@@ -120,12 +120,12 @@ var execSiteAllowlist = map[string]string{
 	// Go-level drop-before-exec model as supervisor.Run.
 	"pkg/sciontool/services/manager.go:392": "runs as the workload uid via Credential whenever UID/GID>0, or fails closed under RequirePrivilegeDrop",
 
-	// runExec's outer sh: suCmd is built by execAsUserCmd, which resolves
-	// "sh"/"su"/"whoami" via rootexec.Resolve (execResolve in tests) before
-	// ever returning — see execAsUserCmd's own doc comment. The call site
-	// here indexes into that already-resolved slice, which this guard's
-	// static check cannot itself follow across the function-call boundary.
-	"pkg/sciontool/substrate/exec.go:85": "suCmd[0]/suCmd[1:] come from execAsUserCmd, which resolves via rootexec.Resolve",
+	// runExec's shPath is assigned a few lines above from execResolve("sh")
+	// (production: rootexec.Resolve) and used here as both the exec target
+	// and the "-c" interpreter, never a bare name — this guard's static
+	// check cannot itself follow that value across the intervening
+	// execUserCredential call to confirm it never changes.
+	"pkg/sciontool/substrate/exec.go:104": "shPath comes from execResolve (rootexec.Resolve) a few lines above",
 }
 
 // aliasKind records what kind of exec constructor a package-level var

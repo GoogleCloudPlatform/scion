@@ -1481,7 +1481,6 @@ func TestExec_WrongTokenRejected(t *testing.T) {
 }
 
 func TestExec_SucceedsWithCorrectToken(t *testing.T) {
-	fakeWhoamiAsScion(t)
 	srv := NewServer(
 		WithChownOwner(-1, -1),
 		WithInitRunner(func(argv []string, forwardTermSignal bool) int { return 0 }),
@@ -1585,7 +1584,6 @@ func TestClampExecTimeout_OverflowClampsRatherThanRemovingCap(t *testing.T) {
 }
 
 func TestExec_NonZeroExitCodePropagated(t *testing.T) {
-	fakeWhoamiAsScion(t)
 	srv := NewServer(
 		WithChownOwner(-1, -1),
 		WithInitRunner(func(argv []string, forwardTermSignal bool) int { return 0 }),
@@ -1612,7 +1610,6 @@ func TestExec_NonZeroExitCodePropagated(t *testing.T) {
 // -----------------------------------------------------------------------
 
 func TestExec_StdinRoundTripsThroughRealCommand(t *testing.T) {
-	fakeWhoamiAsScion(t)
 	const secret = "S3CR3T-1894-EXEC-STDIN"
 
 	srv := NewServer(
@@ -1644,7 +1641,6 @@ func TestExec_StdinRoundTripsThroughRealCommand(t *testing.T) {
 }
 
 func TestExec_StdinSupportedSetEvenWithoutStdin(t *testing.T) {
-	fakeWhoamiAsScion(t)
 	srv := NewServer(
 		WithChownOwner(-1, -1),
 		WithInitRunner(func(argv []string, forwardTermSignal bool) int { return 0 }),
@@ -1672,7 +1668,6 @@ func TestExec_StdinSupportedSetEvenWithoutStdin(t *testing.T) {
 // pins that nothing in runExec's command construction ever folds Stdin into
 // the command line.
 func TestExec_StdinNeverReachesSpawnedArgv(t *testing.T) {
-	fakeWhoamiAsScion(t)
 	const secret = "S3CR3T-MUST-NOT-BE-IN-ARGV"
 
 	var captured [][]string

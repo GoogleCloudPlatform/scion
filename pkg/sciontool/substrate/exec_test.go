@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/rootexec"
 )
 
 func TestCappedWriter_UnderLimitNotTruncated(t *testing.T) {
@@ -91,7 +92,6 @@ func TestRunExec_OutputCapsAndFlags(t *testing.T) {
 	if testing.Short() {
 		t.Skip("spawns real subprocesses producing several MB of output")
 	}
-	fakeWhoamiAsScion(t)
 
 	// head -c is fast and available on any Linux test runner; /dev/zero
 	// bytes decode fine as a string for length-only assertions.
@@ -114,7 +114,6 @@ func TestRunExec_StderrCappedIndependently(t *testing.T) {
 	if testing.Short() {
 		t.Skip("spawns real subprocesses producing several MB of output")
 	}
-	fakeWhoamiAsScion(t)
 
 	over := maxOutputBytes + 1024
 	resp := runExec(context.Background(), "scion",
@@ -131,81 +130,42 @@ func TestRunExec_StderrCappedIndependently(t *testing.T) {
 	}
 }
 
-// TestRunExec_NeverConsultsPATHForShOrSu is the required regression test
-// for runExec's own wrapper: with $PATH pointed at a directory containing
-// planted "sh" and "su" scripts (the attack shape a planted binary first on
-// PATH would take) that each leave a
-// marker file if ever run, the real system sh/su must still be what
-// actually executes — rootexec.Resolve's fixed search list, embedded
-// directly into the generated script by execAsUserCmd, is what decides,
-// never $PATH — so the command still runs normally and the marker is never
-// created.
-func TestRunExec_NeverConsultsPATHForShOrSu(t *testing.T) {
+// TestRunExec_NeverConsultsPATHForSh is the required regression test for
+// runExec's own "sh" resolution: with $PATH pointed at a directory
+// containing a planted "sh" script (the attack shape a planted binary
+// first on PATH would take) that leaves a marker file if ever run, the
+// real system sh must still be what actually executes — rootexec.Resolve's
+// fixed search list is what decides, never $PATH — so the command still
+// runs normally and the marker is never created.
+func TestRunExec_NeverConsultsPATHForSh(t *testing.T) {
 	if testing.Short() {
 		t.Skip("spawns a real subprocess")
 	}
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "planted-ran")
 	script := "#!/bin/sh\ntouch " + marker + "\nexit 1\n"
-	for _, name := range []string{"sh", "su"} {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.WriteFile(filepath.Join(dir, "sh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir)
 
-	// Passing this process's own real user name takes the wrapper's
-	// "already this user, exec sh -c directly" branch (see
-	// execAsUserCmd's own script) — the same real user substrate's own
-	// broker-exec tests already rely on running as.
+	// Passing this process's own real user name takes the "already this
+	// identity, no credential drop" branch (see execUserCredential) — the
+	// same real user substrate's own broker-exec tests already rely on
+	// running as.
 	me := currentUsername(t)
 	resp := runExec(context.Background(), me, []string{"true"}, nil, 5*time.Second)
 
 	if _, err := os.Stat(marker); err == nil {
-		t.Fatal("runExec executed a planted sh/su from $PATH")
+		t.Fatal("runExec executed a planted sh from $PATH")
 	}
 	if resp.ExitCode != 0 {
 		t.Errorf("exit_code = %d, want 0 (the real, resolved sh must still have run the command)", resp.ExitCode)
 	}
 }
 
-// fakeWhoamiAsScion stubs execResolve so "whoami" resolves to a stand-in
-// script that always prints "scion", regardless of this test process's own
-// real identity. execAsUserCmd's wrapper embeds whatever execResolve
-// returns directly into the generated script (see execAsUserCmd's own doc
-// comment for why it's a package var rather than a direct rootexec.Resolve
-// call), so with this stub in place the wrapper's own "$(whoami) = $1"
-// check reads "scion" and, for a caller also targeting "scion", takes the
-// direct "exec sh -c" branch — exactly the branch that already runs when
-// the process genuinely is "scion" — without ever invoking su. "sh" and
-// "su" still resolve through the real rootexec.Resolve unchanged, so this
-// substitutes only the identity check's own answer, not the shell that
-// runs the command or su's own resolution; a test needing su itself
-// actually invoked (e.g. TestExecAsUserCmd_RealShellInvokesSuWithExpectedArgv)
-// targets a user "scion" can't be, not this stub. Shared by every test in
-// this package that needs a real exec to run as "scion" no matter which
-// user is actually running the test — restores execResolve in t.Cleanup.
-func fakeWhoamiAsScion(t *testing.T) {
-	t.Helper()
-	dir := t.TempDir()
-	whoamiPath := filepath.Join(dir, "whoami")
-	if err := os.WriteFile(whoamiPath, []byte("#!/bin/sh\necho scion\n"), 0o755); err != nil {
-		t.Fatalf("write whoami stand-in: %v", err)
-	}
-
-	orig := execResolve
-	execResolve = func(name string) (string, error) {
-		if name == "whoami" {
-			return whoamiPath, nil
-		}
-		return orig(name)
-	}
-	t.Cleanup(func() { execResolve = orig })
-}
-
-// currentUsername resolves this test process's own username the same way
-// the wrapper script's "$(whoami)" check will see it (whoami reports the
-// real/effective uid's passwd entry, exactly what user.Current() reads).
+// currentUsername resolves this test process's own username, the same way
+// execUserCredential's own user.Lookup call will see it.
 func currentUsername(t *testing.T) string {
 	t.Helper()
 	u, err := user.Current()
@@ -215,18 +175,12 @@ func currentUsername(t *testing.T) string {
 	return u.Username
 }
 
-// TestRunExec_ChildEnvNeverContainsScionAgentVars pins "safe today" for the
-// widened SearchPath's side effect: on some images, "whoami" is a shim that
-// (when SCION_AGENT_NAME or SCION_AGENT_SLUG is set) prints that value
-// instead of the real effective user, which — IF this process's own
-// SCION_AGENT_NAME ever matched the target user's name AND that env
-// somehow reached the child — would make execAsUserCmd's own
-// "$(whoami)" == "$1" comparison pass as root, skipping the su drop
-// entirely. This is not reachable because runExec builds the child's
-// environment from scratch (rootexec.Env plus only the CA-bundle pairs),
-// never from this process's own os.Environ() — pinned here directly:
-// nothing under a "SCION_" prefix ever reaches the child, checked by
-// asking the real child to print its own environment.
+// TestRunExec_ChildEnvNeverContainsScionAgentVars pins that runExec's child
+// environment is genuinely built from scratch (rootexec.Env plus only the
+// HOME/USER/LOGNAME/SHELL and CA-bundle pairs execUserCredential/
+// trustBundleEnvPairs add), never from this process's own os.Environ():
+// nothing under a "SCION_" prefix ever reaches the child, checked by asking
+// the real child to print its own environment.
 func TestRunExec_ChildEnvNeverContainsScionAgentVars(t *testing.T) {
 	if testing.Short() {
 		t.Skip("spawns a real subprocess")
@@ -246,22 +200,64 @@ func TestRunExec_ChildEnvNeverContainsScionAgentVars(t *testing.T) {
 	}
 }
 
+// TestRunExec_SetsHomeUserPathShellForScion is the end-to-end regression
+// test for A2: a real exec'd child for user "scion" must see HOME, USER,
+// PATH, and SHELL all set explicitly — the four a direct credential drop
+// does not set on its own the way `su -`'s login-shell semantics used to
+// (see execUserCredential's own doc comment) — asked for directly rather
+// than only at execUserCredential's own unit-test level, since PATH comes
+// from rootexec.Env, not from execUserCredential's own return value.
+func TestRunExec_SetsHomeUserPathShellForScion(t *testing.T) {
+	if testing.Short() {
+		t.Skip("spawns a real subprocess")
+	}
+	u, err := user.Lookup("scion")
+	if err != nil {
+		t.Skipf("no real \"scion\" user on this machine: %v", err)
+	}
+	shPath, err := rootexec.Resolve("sh")
+	if err != nil {
+		t.Fatalf("resolve sh: %v", err)
+	}
+
+	resp := runExec(context.Background(), "scion", []string{"env"}, nil, 5*time.Second)
+	if resp.ExitCode != 0 {
+		t.Fatalf("exit_code = %d, want 0 (stderr=%q)", resp.ExitCode, resp.Stderr)
+	}
+
+	env := make(map[string]string)
+	for _, line := range strings.Split(resp.Stdout, "\n") {
+		if k, v, ok := strings.Cut(line, "="); ok {
+			env[k] = v
+		}
+	}
+	want := map[string]string{
+		"HOME":    u.HomeDir,
+		"USER":    "scion",
+		"LOGNAME": "scion",
+		"SHELL":   shPath,
+		"PATH":    strings.Join(rootexec.SearchPath, ":"),
+	}
+	for k, v := range want {
+		if env[k] != v {
+			t.Errorf("child env %s = %q, want %q (full env:\n%s)", k, env[k], v, resp.Stdout)
+		}
+	}
+}
+
 func TestRunExec_TimeoutKillsProcess(t *testing.T) {
 	if testing.Short() {
 		t.Skip("waits on a real subprocess timeout")
 	}
-	fakeWhoamiAsScion(t)
 	start := time.Now()
 	resp := runExec(context.Background(), "scion", []string{"sh", "-c", "echo started; sleep 30"}, nil, 300*time.Millisecond)
 	elapsed := time.Since(start)
 
-	// The marker distinguishes a real timeout kill from a killed, blocked
-	// "su" prompt: with the stand-in, the wrapper's direct branch actually
-	// runs this shell, so "started" prints before the timeout kills the
-	// sleep. Without the stand-in, an unauthenticated "su" never gets past
-	// its own password prompt to reach the shell at all, so nothing ever
-	// prints — the same elapsed time and exit code would otherwise make
-	// that indistinguishable from a genuine timeout kill.
+	// The marker confirms the command actually ran before the timeout
+	// killed it ("started" must reach stdout), distinguishing a real
+	// timeout kill from the command never having run at all — the same
+	// elapsed time and exit code would otherwise make the two
+	// indistinguishable.
 	if !strings.Contains(resp.Stdout, "started") {
 		t.Errorf("subprocess never ran (stdout=%q stderr=%q) — timeout killed something other than the command", resp.Stdout, resp.Stderr)
 	}
@@ -285,7 +281,6 @@ func TestRunExec_SucceedsUnderActiveReaper(t *testing.T) {
 	if testing.Short() {
 		t.Skip("spawns a real subprocess and a real signal-handling goroutine")
 	}
-	fakeWhoamiAsScion(t)
 	procreap.StartReaper()
 
 	resp := runExec(context.Background(), "scion", []string{"true"}, nil, 5*time.Second)

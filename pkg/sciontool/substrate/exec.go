@@ -39,17 +39,24 @@ const (
 	// maxExecTimeout bounds an operator-supplied timeout_s so a single exec
 	// call cannot pin the control server indefinitely.
 	maxExecTimeout = 10 * time.Minute
+
+	// execWaitDelay bounds how long cmd.Wait() keeps copying output after
+	// the child itself has exited or been killed: without it, a
+	// grandchild that inherited the pipe's write end (the exact shape a
+	// timeout's process-group kill is meant to clean up) could keep
+	// Wait() blocked indefinitely waiting for that pipe to close, even
+	// though the command we actually care about is long gone.
+	execWaitDelay = 5 * time.Second
 )
 
 // execCommandContext is overridden in tests so they don't depend on a real
 // "scion"/"root" user or su being present in the test environment.
 var execCommandContext = exec.CommandContext
 
-// runExec runs argv as user, using the same su/exec-user semantics other
-// scion runtimes use for exec (execAsUserCmd — see k8s_runtime.go's Exec for
-// the reference call site pkg/runtime.ExecAsUserCmd this mirrors). Output is
-// captured with a hard cap per stream; exceeding it sets Truncated rather
-// than growing the response without bound.
+// runExec runs argv as user via a direct privilege drop (SysProcAttr.
+// Credential — see execUserCredential), never `su`. Output is captured with
+// a hard cap per stream; exceeding it sets Truncated rather than growing the
+// response without bound.
 //
 // stdin, when non-empty, is piped to the command's standard input instead of
 // being embedded in argv, so a caller delivering a secret (e.g. a
@@ -58,22 +65,34 @@ var execCommandContext = exec.CommandContext
 // echoed into the response, and never written to disk — it flows only from
 // the caller's bytes into the child's stdin fd.
 func runExec(ctx context.Context, user string, argv []string, stdin []byte, timeout time.Duration) ExecResponse {
+	// Resolved via execResolve (production: rootexec.Resolve) rather than
+	// left as a bare name for the eventual shell to look up on its own
+	// PATH: this handler runs as root before any privilege drop, and a
+	// bare name here would otherwise be resolved against root's own
+	// inherited PATH, which on substrate includes a directory the workload
+	// owns outright (see the rootexec package doc comment).
+	shPath, err := execResolve("sh")
+	if err != nil {
+		// This should never happen on a real image ("sh" is the same
+		// binary every other root exec in this codebase depends on
+		// existing), but fail closed rather than falling back to a bare
+		// name. Reported the same way a process that could not even be
+		// started is reported elsewhere in this function: no separate
+		// error field exists on ExecResponse, and the underlying error
+		// carries no operator-controlled content worth leaking into a log
+		// line.
+		return ExecResponse{ExitCode: -1}
+	}
+	envPairs, cred, err := execUserCredential(user, shPath)
+	if err != nil {
+		return ExecResponse{ExitCode: -1}
+	}
+
 	quoted := make([]string, len(argv))
 	for i, a := range argv {
 		quoted[i] = shellQuote(a)
 	}
-	suCmd, err := execAsUserCmd(user, strings.Join(quoted, " "))
-	if err != nil {
-		// sh/su/whoami could not be resolved as trusted, root-owned
-		// executables — this should never happen on a real image (they are
-		// the same binaries every other root exec in this codebase depends
-		// on existing), but fail closed rather than falling back to a bare
-		// name. Reported the same way a process that could not even be
-		// started is reported elsewhere in this function: no separate error
-		// field exists on ExecResponse, and the underlying error carries no
-		// operator-controlled content worth leaking into a log line.
-		return ExecResponse{ExitCode: -1}
-	}
+	cmdString := strings.Join(quoted, " ")
 
 	runCtx := ctx
 	var cancel context.CancelFunc
@@ -82,17 +101,17 @@ func runExec(ctx context.Context, user string, argv []string, stdin []byte, time
 		defer cancel()
 	}
 
-	cmd := execCommandContext(runCtx, suCmd[0], suCmd[1:]...)
+	cmd := execCommandContext(runCtx, shPath, "-c", cmdString)
 	// Built from scratch (rootexec.Env), not inherited from this process's
 	// own environment: PID 1's PATH includes a workload-owned directory
 	// (see the rootexec package doc comment), and this handler runs an
-	// operator-supplied command as root before any privilege drop. The
-	// CA-bundle vars are the one exception, passed through explicitly:
-	// execAsUserCmd's generated script may ask su to copy them across the
-	// login shell's own environment reset (its -w flag), and with a
-	// from-scratch environment su has nothing to copy unless this process
-	// hands the values over here itself.
-	cmd.Env = rootexec.Env(trustBundleEnvPairs(execCandidateEnv())...)
+	// operator-supplied command as root before any privilege drop.
+	// envPairs (HOME/USER/LOGNAME/SHELL, resolved for the target user —
+	// see execUserCredential) and the CA-bundle vars are added explicitly
+	// on top: a direct credential drop does not reset the environment the
+	// way `su -` would have, but it also does not SET any of these on its
+	// own, so both sets have to be supplied here regardless.
+	cmd.Env = rootexec.Env(append(envPairs, trustBundleEnvPairs(execCandidateEnv())...)...)
 	stdout := newCappedWriter(maxOutputBytes)
 	stderr := newCappedWriter(maxOutputBytes)
 	cmd.Stdout = stdout
@@ -101,15 +120,14 @@ func runExec(ctx context.Context, user string, argv []string, stdin []byte, time
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
 
-	// runtime.ExecAsUserCmd's wrapper script re-execs into a fresh `sh -c`
-	// (see its doc comment), and that shell does not itself exec-replace
-	// its way down to argv[0] — dash forks a real child for a simple
-	// command like `sleep 30` rather than tail-call-execing it. Left alone,
-	// exec.CommandContext's default Cancel only signals the top wrapper
-	// process, orphaning that grandchild to run past the timeout. Put the
-	// whole tree in its own process group and kill the group on cancel so
-	// a timeout (or the request context ending) actually stops the work.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Put the whole tree in its own process group and kill the group on
+	// cancel, so a timeout (or the request context ending) stops not just
+	// the direct child but anything it forked too — a plain signal to the
+	// top process alone would leave a grandchild running past the
+	// timeout. WaitDelay bounds how long Wait() then keeps copying output
+	// from a pipe a killed grandchild may still be holding open.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Credential: cred}
+	cmd.WaitDelay = execWaitDelay
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
@@ -154,8 +172,8 @@ func runExec(ctx context.Context, user string, argv []string, stdin []byte, time
 
 // shellQuote single-quotes s for safe inclusion in a `sh -c` command line,
 // escaping embedded single quotes. Mirrors the quoting KubernetesRuntime.Exec
-// uses before handing a command to pkg/runtime.ExecAsUserCmd (execAsUserCmd
-// here is the same wrapper; see its doc comment).
+// uses before handing a command to pkg/runtime.ExecAsUserCmd, the equivalent
+// mechanism other scion runtimes use for exec.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
