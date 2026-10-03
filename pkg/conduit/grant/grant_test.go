@@ -504,7 +504,7 @@ func TestSecretsRedacted(t *testing.T) {
 		fmt.Sprintf("%v %+v %#v", ring, ring, ring),
 		fmt.Sprintf("%v %+v %#v", *s, *s, *s),
 	} {
-		if strings.Contains(out, seedHex) || strings.Contains(out, fmt.Sprint(k.Seed)) || strings.Contains(out, fmt.Sprintf("%x", []byte(s.Key))) {
+		if strings.Contains(out, seedHex) || strings.Contains(out, fmt.Sprintf("%d", k.Seed)) || strings.Contains(out, fmt.Sprintf("%x", []byte(s.Key))) {
 			t.Fatalf("secret material in formatted output: %s", out)
 		}
 	}
