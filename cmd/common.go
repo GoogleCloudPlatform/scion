@@ -921,6 +921,26 @@ func workspaceFinalizeNotice(filesApplied int, warnings []string) []string {
 // startAgentViaHub creates/starts (or resumes/restarts in place) an agent via
 // the Hub. cmd is used only to detect which flags the user explicitly set (for
 // the "not applied to an existing agent" warning); it may be nil.
+// hubCloneTransportNote describes how the hub clones cloneURL (as resolved by
+// util.ResolveCloneURL), for the "Using hub, cloning repo" log line. The
+// broker's git credential helper supplies GITHUB_TOKEN for HTTP(S) clones
+// only.
+func hubCloneTransportNote(cloneURL string) string {
+	lower := strings.ToLower(cloneURL)
+	switch {
+	case strings.HasPrefix(lower, "https://"):
+		return "Hub mode uses HTTPS clone with GITHUB_TOKEN"
+	case strings.HasPrefix(lower, "http://"):
+		return "Hub mode uses plain HTTP clone with GITHUB_TOKEN"
+	case strings.HasPrefix(lower, "ssh://"), strings.HasPrefix(cloneURL, "git@"):
+		return "Hub mode uses SSH clone; GITHUB_TOKEN is not used"
+	case strings.HasPrefix(lower, "git://"):
+		return "Hub mode uses unauthenticated git:// clone; GITHUB_TOKEN is not used"
+	default:
+		return "Hub mode clones this path on the runtime broker"
+	}
+}
+
 // hubStartImpliesResume reports whether `scion start` on an existing hub agent
 // in the given phase should be sent as a resume request. Suspended agents
 // resume their session; stopped agents restart in place with a fresh session
@@ -1025,12 +1045,11 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		project, projectErr := hubCtx.Client.Projects().Get(ctx, projectID)
 		cancel()
 		if projectErr == nil && project != nil && project.GitRemote != "" {
-			cloneURL := project.Labels[store.LabelCloneURL]
-			if cloneURL == "" {
-				cloneURL = "https://" + project.GitRemote + ".git"
-			}
+			// Report the URL the hub will actually clone from (same
+			// normalization as the hub, ptone/scion#1915).
+			cloneURL := util.ResolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
 			fmt.Fprintf(os.Stderr, "Using hub, cloning repo %s\n", cloneURL)
-			fmt.Fprintf(os.Stderr, "  (Hub mode uses HTTPS clone with GITHUB_TOKEN; local worktrees are not used)\n")
+			fmt.Fprintf(os.Stderr, "  (%s; local worktrees are not used)\n", hubCloneTransportNote(cloneURL))
 		}
 	}
 

@@ -36,6 +36,7 @@ type hubStartStub struct {
 	createBody    map[string]interface{}
 	createCalls   int
 	existingPhase string // "" → existing-agent GET returns 404
+	project       map[string]interface{}
 }
 
 func newHubStartStub(t *testing.T, projectID, agentName, existingPhase string) *hubStartStub {
@@ -45,6 +46,10 @@ func newHubStartStub(t *testing.T, projectID, agentName, existingPhase string) *
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+projectID:
+			if stub.project != nil {
+				_ = json.NewEncoder(w).Encode(stub.project)
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": projectID, "name": "p"})
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+projectID+"/agents/"+agentName:
 			if stub.existingPhase == "" {
@@ -291,4 +296,44 @@ func TestHubStartActionWord(t *testing.T) {
 	assert.Equal(t, "Resuming", hubStartActionWord("suspended", true, false))
 	assert.Equal(t, "Force-resuming", hubStartActionWord("error", true, true))
 	assert.Equal(t, "Resuming", hubStartActionWord("", true, false))
+}
+
+// ptone/scion#1915: the clone log line prints the URL the hub will use (no
+// doubled scheme) and describes the transport accurately.
+func TestStartAgentViaHub_CloneLogLine(t *testing.T) {
+	const projectID, agentName = "proj-clone", "clone-agent"
+	for _, tc := range []struct {
+		name, remote, label, wantURL, wantNote string
+	}{
+		{"https remote", "https://github.com/org/repo", "", "https://github.com/org/repo", "HTTPS clone with GITHUB_TOKEN"},
+		{"schemeless remote", "github.com/org/repo", "", "https://github.com/org/repo.git", "HTTPS clone with GITHUB_TOKEN"},
+		{"git label", "github.com/org/repo", "git://172.17.0.1:9418/org/repo", "git://172.17.0.1:9418/org/repo", "unauthenticated git:// clone"},
+		{"ssh label", "github.com/org/repo", "git@github.com:org/repo.git", "git@github.com:org/repo.git", "SSH clone; GITHUB_TOKEN is not used"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resetHubStartGlobals(t)
+			stub := newHubStartStub(t, projectID, agentName, "")
+			stub.project = map[string]interface{}{"id": projectID, "name": "p", "gitRemote": tc.remote}
+			if tc.label != "" {
+				stub.project["labels"] = map[string]string{"scion.dev/clone-url": tc.label}
+			}
+			var err error
+			_, stderr := captureStdIO(t, func() {
+				err = startAgentViaHub(nil, stub.hubCtx(t, projectID), agentName, "", false, nil)
+			})
+			require.NoError(t, err)
+			assert.Contains(t, stderr, "Using hub, cloning repo "+tc.wantURL+"\n")
+			assert.Contains(t, stderr, tc.wantNote)
+			assert.NotContains(t, stderr, "https://https://")
+		})
+	}
+}
+
+func TestHubCloneTransportNote(t *testing.T) {
+	assert.Contains(t, hubCloneTransportNote("https://h/r.git"), "HTTPS clone with GITHUB_TOKEN")
+	assert.Contains(t, hubCloneTransportNote("http://h/r.git"), "HTTP clone")
+	assert.Contains(t, hubCloneTransportNote("ssh://git@h/r.git"), "SSH clone")
+	assert.Contains(t, hubCloneTransportNote("git@h:r.git"), "SSH clone")
+	assert.Contains(t, hubCloneTransportNote("git://h/r"), "git:// clone")
+	assert.Contains(t, hubCloneTransportNote("/srv/repo"), "path")
 }
