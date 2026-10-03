@@ -80,7 +80,6 @@ func runBootDataMigrations(ctx context.Context, s store.Store) {
 
 	// Split the residual report into reachable/unreachable (M6, §4.6).
 	reportResidualUnattributed(ctx, s)
-
 }
 
 // runMigrationSafe calls fn inside a deferred recover. A panic is logged at

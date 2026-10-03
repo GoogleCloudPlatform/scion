@@ -603,7 +603,10 @@ func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, a
 // This is shared between DispatchAgentCreate and DispatchAgentProvision.
 func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *store.Agent, callerName string) (*RemoteCreateAgentRequest, error) {
 	buildRequestStart := time.Now()
-	projectInfo := d.resolveDispatchProjectInfo(ctx, agent)
+	projectInfo, err := d.resolveDispatchProjectInfo(ctx, agent)
+	if err != nil {
+		return nil, err
+	}
 
 	// Build the remote create request
 	//
@@ -1114,21 +1117,30 @@ type projectDispatchInfo struct {
 	workspaceMode   string // resolved workspace mode label (e.g. "shared", "worktree-per-agent")
 }
 
-func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, agent *store.Agent) projectDispatchInfo {
+// resolveDispatchProjectInfo resolves the project facts a dispatch carries.
+// A project that no longer exists yields empty info (nothing to resolve); any
+// other project lookup error is returned so the dispatch fails closed rather
+// than sending an empty workspace mode — for an empty-per-agent project that
+// would let a capable broker fall back to mounting the shared project
+// directory (design #2703 D3).
+func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, agent *store.Agent) (projectDispatchInfo, error) {
 	// Look up the local path for this project on the target runtime broker.
 	// A provider LocalPath (linked project) takes precedence over hub-native
 	// slug resolution, even for projects without a git remote. Only when there
 	// is no provider path and no git remote do we fall back to projectSlug so
 	// the broker resolves the conventional ~/.scion/projects/<slug> path.
 	if agent.ProjectID == "" {
-		return projectDispatchInfo{}
+		return projectDispatchInfo{}, nil
 	}
 
 	var info projectDispatchInfo
 
 	project, err := d.store.GetProject(ctx, agent.ProjectID)
+	if errors.Is(err, store.ErrNotFound) {
+		return projectDispatchInfo{}, nil
+	}
 	if err != nil {
-		return projectDispatchInfo{}
+		return projectDispatchInfo{}, fmt.Errorf("resolve project %s for dispatch: %w", agent.ProjectID, err)
 	}
 
 	info.sharedDirs = project.SharedDirs
@@ -1157,7 +1169,7 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	if info.projectPath == "" {
 		info.projectSlug = project.Slug
 	}
-	return info
+	return info, nil
 }
 
 // applyBrokerResponse updates agent fields from the broker's response and
@@ -2383,7 +2395,7 @@ type startEnvResult struct {
 // the secrets-resolution failure message, the one warning whose wording
 // differs (agent will <verb> without injected secrets) between the two
 // callers.
-func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Agent, caller, startedVerb string) startEnvResult {
+func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Agent, caller, startedVerb string) (startEnvResult, error) {
 	resolvedEnv := make(map[string]string)
 	var envClassifications map[string]api.EnvKind
 
@@ -2497,7 +2509,13 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// Resolve once so the switch below uses canonical constants —
 	// unrecognized or future wire labels safely fall back to shared-plain
 	// behavior.
-	projectInfo := d.resolveDispatchProjectInfo(ctx, agent)
+	//
+	// A project lookup error fails the start/restart here, before any agent
+	// or transport token is minted below, so there is nothing to revoke.
+	projectInfo, err := d.resolveDispatchProjectInfo(ctx, agent)
+	if err != nil {
+		return startEnvResult{}, err
+	}
 	resolvedMode := store.ResolveWorkspaceSharingMode(projectInfo.workspaceMode)
 	if projectInfo.workspaceMode != "" {
 		resolvedEnv["SCION_WORKSPACE_MODE"] = string(resolvedMode)
@@ -2611,7 +2629,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 		projectInfo:     projectInfo,
 		workspace:       wsSpec,
 		tokenIssued:     tokenIssued,
-	}
+	}, nil
 }
 
 // DispatchAgentStart starts an agent on the runtime broker. When resume is
@@ -2661,7 +2679,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 
 	// Assemble the resolved env (shared with DispatchAgentRestart; see
 	// buildStartEnv).
-	startEnv := d.buildStartEnv(ctx, agent, "DispatchAgentStart", "start")
+	startEnv, err := d.buildStartEnv(ctx, agent, "DispatchAgentStart", "start")
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
 	resolvedEnv := startEnv.env
 	envClassifications := startEnv.classifications
 	resolvedSecrets := startEnv.secrets
@@ -2855,7 +2877,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// so the restarted container has full credentials and Hub connectivity.
 	// This mirrors the resolution in DispatchAgentStart — without it, env vars
 	// like GOOGLE_CLOUD_PROJECT are missing and auth provisioning fails.
-	startEnv := d.buildStartEnv(ctx, agent, "DispatchAgentRestart", "restart")
+	startEnv, err := d.buildStartEnv(ctx, agent, "DispatchAgentRestart", "restart")
+	if err != nil {
+		return err
+	}
 	resolvedEnv := startEnv.env
 	envClassifications := startEnv.classifications
 
@@ -2930,8 +2955,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 	// For a linked project, tell the broker where the project lives on its
 	// filesystem so it can find a file-only agent (container gone) there.
 	// The broker checks the path's project identity before using it.
-	if pp := d.resolveDispatchProjectInfo(ctx, agent).projectPath; pp != "" {
-		ctx = withDeleteProjectPath(ctx, pp)
+	// Best-effort: delete proceeds without a project path on lookup failure.
+	if info, _ := d.resolveDispatchProjectInfo(ctx, agent); info.projectPath != "" {
+		ctx = withDeleteProjectPath(ctx, info.projectPath)
 	}
 
 	err = d.client.DeleteAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, deleteFiles, removeBranch, softDelete, deletedAt)

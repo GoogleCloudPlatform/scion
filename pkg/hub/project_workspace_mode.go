@@ -105,11 +105,16 @@ func mergePatchWorkspaceModeLabel(stored, updates map[string]string) (map[string
 // valid for the CLONE's git-ness (i.e. after any gitRemote override), and
 // dropped ("") otherwise. A non-git per-agent (empty-per-agent) template
 // stays per-agent; with a git-remote override it becomes git per-agent
-// (clone-per-agent). A legacy raw canonical "empty-per-agent" label (which
-// Project.IsEmptyPerAgent honours) is normalised to "per-agent". Unknown
-// values are dropped defensively.
-func deriveCloneWorkspaceMode(srcLabel string, cloneIsGit bool) string {
+// (clone-per-agent). A legacy raw canonical "empty-per-agent" label is
+// normalised to "per-agent" only on a non-git source, where
+// Project.IsEmptyPerAgent honours it; on a git source it resolved to
+// shared-plain, so it is dropped rather than promoted to clone-per-agent.
+// Unknown values are dropped defensively.
+func deriveCloneWorkspaceMode(srcLabel string, srcIsGit, cloneIsGit bool) string {
 	if srcLabel == string(store.SharingModeEmptyPerAgent) {
+		if srcIsGit {
+			return ""
+		}
 		srcLabel = store.WorkspaceModePerAgent
 	}
 	if srcLabel == "" || store.ValidateWorkspaceMode(srcLabel, cloneIsGit) != nil {

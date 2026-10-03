@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -224,6 +225,79 @@ func TestEmptyPerAgent_GateFailsClosedOnProjectLookupError(t *testing.T) {
 		}
 		if endpoint == "" {
 			t.Error("expected the broker endpoint")
+		}
+	})
+}
+
+// flakyProjectStore lets the first okCalls GetProject calls through (so the
+// capability gate passes) and fails every later one with err.
+type flakyProjectStore struct {
+	store.Store
+	okCalls int
+	calls   int
+	err     error
+}
+
+func (s *flakyProjectStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
+	s.calls++
+	if s.calls <= s.okCalls {
+		return s.Store.GetProject(ctx, id)
+	}
+	return nil, s.err
+}
+
+// TestEmptyPerAgent_DispatchInfoFailsClosedOnProjectLookupError: a project
+// lookup error after the capability gate must fail the dispatch instead of
+// sending an empty workspace mode to a capable broker (review #2717 r3 N1).
+// A deleted project still dispatches with empty info, and delete stays
+// best-effort.
+func TestEmptyPerAgent_DispatchInfoFailsClosedOnProjectLookupError(t *testing.T) {
+	ops := []struct {
+		name string
+		run  func(d *HTTPAgentDispatcher, a *store.Agent) error
+	}{
+		{"create", func(d *HTTPAgentDispatcher, a *store.Agent) error {
+			return d.DispatchAgentCreate(context.Background(), a)
+		}},
+		{"start", func(d *HTTPAgentDispatcher, a *store.Agent) error {
+			return d.DispatchAgentStart(context.Background(), a, "", false)
+		}},
+		{"restart", func(d *HTTPAgentDispatcher, a *store.Agent) error {
+			return d.DispatchAgentRestart(context.Background(), a)
+		}},
+	}
+	for _, op := range ops {
+		t.Run(op.name+" transient error fails closed", func(t *testing.T) {
+			f := newEmptyPerAgentFixture(t, "info-err-"+op.name, true)
+			flaky := &flakyProjectStore{Store: f.store, okCalls: 1, err: errors.New("db unavailable")}
+			d := NewHTTPAgentDispatcherWithClient(flaky, f.client, false, slog.Default())
+			err := op.run(d, f.agent)
+			if err == nil || !strings.Contains(err.Error(), "resolve project") {
+				t.Fatalf("err = %v, want project resolve failure", err)
+			}
+			if f.client.createCalled || f.client.startCalled || f.client.restartCalled {
+				t.Error("broker must not be called when the project lookup fails")
+			}
+		})
+	}
+
+	t.Run("resolve: not found yields empty info", func(t *testing.T) {
+		f := newEmptyPerAgentFixture(t, "info-nf", true)
+		d := NewHTTPAgentDispatcherWithClient(&projectLookupErrorStore{Store: f.store, err: store.ErrNotFound}, f.client, false, slog.Default())
+		info, err := d.resolveDispatchProjectInfo(context.Background(), f.agent)
+		if err != nil {
+			t.Fatalf("err = %v, want nil for a deleted project", err)
+		}
+		if info.workspaceMode != "" || info.projectSlug != "" {
+			t.Errorf("info = %+v, want empty", info)
+		}
+	})
+
+	t.Run("delete stays best-effort", func(t *testing.T) {
+		f := newEmptyPerAgentFixture(t, "info-del", true)
+		d := NewHTTPAgentDispatcherWithClient(&projectLookupErrorStore{Store: f.store, err: errors.New("db unavailable")}, f.client, false, slog.Default())
+		if err := d.DispatchAgentDelete(context.Background(), f.agent, false, false, false, time.Time{}); err != nil {
+			t.Fatalf("DispatchAgentDelete: %v", err)
 		}
 	})
 }

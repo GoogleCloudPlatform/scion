@@ -172,7 +172,7 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 	}
 
 	// Re-derive workspace mode from the source (design #2703 §2.4).
-	if mode := deriveCloneWorkspaceMode(src.Labels[store.LabelWorkspaceMode], clone.GitRemote != ""); mode != "" {
+	if mode := deriveCloneWorkspaceMode(src.Labels[store.LabelWorkspaceMode], src.GitRemote != "", clone.GitRemote != ""); mode != "" {
 		if clone.Labels == nil {
 			clone.Labels = make(map[string]string)
 		}
