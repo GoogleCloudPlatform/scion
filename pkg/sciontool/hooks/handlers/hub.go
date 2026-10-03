@@ -7,8 +7,10 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -36,6 +38,85 @@ func NewHubHandler() *HubHandler {
 	return &HubHandler{
 		client: client,
 	}
+}
+
+// retryReserve is the part of the hook's budget a rate-limit retry must
+// leave unspent: time for the retried send itself and for the status update
+// that follows the mirror in Handle.
+const retryReserve = time.Second
+
+// forwardAssistantReply mirrors an assistant reply to the agent's creator as
+// an outbound "assistant-reply" message. The hub requires an explicit
+// addressee, so the reply is addressed to the creator by user ID; when the
+// creator is unknown or is not a user (an agent created by another agent),
+// the mirror is skipped. ctx is the hook's own budget (see Handle); a 429 is
+// retried once if its Retry-After, plus retryReserve, fits in what remains.
+// Best-effort: failures are logged, never returned.
+func (h *HubHandler) forwardAssistantReply(ctx context.Context, text string, metadata map[string]string, thinkingFiltered bool) {
+	creatorID, err := h.creatorUserID(ctx)
+	if err != nil {
+		log.Error("Hub: outbound assistant reply skipped, agent lookup failed: %v", err)
+		return
+	}
+	if creatorID == "" {
+		log.Debug("Hub: outbound assistant reply skipped: creator is unknown or not a user")
+		return
+	}
+
+	msg := hub.OutboundMessage{
+		RecipientID: creatorID,
+		Msg:         text,
+		Type:        "assistant-reply",
+		Metadata:    metadata,
+	}
+	err = h.client.SendOutboundMessage(ctx, msg)
+	if wait, ok := retryAfterWithinBudget(ctx, err); ok {
+		log.Debug("Hub: outbound assistant reply rate limited, retrying in %s", wait)
+		timer := time.NewTimer(wait)
+		select {
+		case <-timer.C:
+			err = h.client.SendOutboundMessage(ctx, msg)
+		case <-ctx.Done():
+			timer.Stop()
+			err = ctx.Err()
+		}
+	}
+	if err != nil {
+		log.Error("Hub: outbound assistant reply failed: %v", err)
+		return
+	}
+	log.Debug("Hub: Forwarded assistant reply to message store (%d bytes, thinking_filtered=%v)",
+		len(text), thinkingFiltered)
+}
+
+// creatorUserID returns the user ID of the agent's creator, or "" when the
+// creator is unknown or is not a user. A user-created agent has
+// CreatedBy == the user's ID and ancestry exactly [that user]; an agent
+// created by another agent has the parent agent as CreatedBy and a longer
+// ancestry chain.
+func (h *HubHandler) creatorUserID(ctx context.Context) (string, error) {
+	self, err := h.client.GetSelf(ctx)
+	if err != nil {
+		return "", err
+	}
+	if self.CreatedBy == "" || len(self.Ancestry) != 1 || self.Ancestry[0] != self.CreatedBy {
+		return "", nil
+	}
+	return self.CreatedBy, nil
+}
+
+// retryAfterWithinBudget reports whether err is a 429 carrying a Retry-After
+// that, plus retryReserve, elapses before ctx's deadline, and returns the
+// wait.
+func retryAfterWithinBudget(ctx context.Context, err error) (time.Duration, bool) {
+	var statusErr *hub.HTTPStatusError
+	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusTooManyRequests || !statusErr.HasRetryAfter {
+		return 0, false
+	}
+	if deadline, ok := ctx.Deadline(); ok && statusErr.RetryAfter+retryReserve > time.Until(deadline) {
+		return 0, false
+	}
+	return statusErr.RetryAfter, true
 }
 
 // Handle processes an event and sends a status update to the Hub.
@@ -152,18 +233,8 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 				metadata["has_thinking"] = "true"
 			}
 
-			msgCtx, msgCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer msgCancel()
-			if msgErr := h.client.SendOutboundMessage(msgCtx, hub.OutboundMessage{
-				Msg:      text,
-				Type:     "assistant-reply",
-				Metadata: metadata,
-			}); msgErr != nil {
-				log.Error("Hub: outbound assistant reply failed: %v", msgErr)
-			} else {
-				log.Debug("Hub: Forwarded assistant reply to message store (%d bytes, thinking_filtered=%v)",
-					len(text), event.Data.AssistantContent != nil && event.Data.AssistantContent.HasThinking())
-			}
+			h.forwardAssistantReply(ctx, text, metadata,
+				event.Data.AssistantContent != nil && event.Data.AssistantContent.HasThinking())
 		}
 
 		// Check if local activity is sticky before sending working

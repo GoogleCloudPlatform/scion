@@ -947,8 +947,9 @@ func (s *Server) checkDirectThreadIDMatchesDMKey(w http.ResponseWriter, conversa
 
 // handleAgentOutboundMessage handles POST /api/v1/agents/{id}/outbound-message.
 // Agents use this to send messages to human inboxes. Authenticated via agent
-// token (self-access only). The recipient defaults to the agent's creator when
-// not explicitly specified.
+// token (self-access only). An explicit addressee is required — a recipient,
+// recipient_id, or conversation_ref; there is no default recipient, and a
+// request naming none is rejected with 400 (see resolveOutboundRouting).
 func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
