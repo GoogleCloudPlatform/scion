@@ -2199,9 +2199,15 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		span.SetStatus(codes.Error, err.Error())
 		s.agentLifecycleLog.Error("Agent start failed",
 			"agent_id", id, "error", err)
-		if errors.Is(err, agent.ErrContainerNameInUse) {
+		// Start can re-provision the agent, so a required skill reference
+		// that cannot be resolved gets the same typed response as on create.
+		var skillErr *agent.SkillResolutionError
+		switch {
+		case errors.Is(err, agent.ErrContainerNameInUse):
 			Conflict(w, err.Error())
-		} else {
+		case errors.As(err, &skillErr):
+			SkillResolutionFailed(w, skillErr)
+		default:
 			RuntimeError(w, "Failed to start agent: "+err.Error())
 		}
 		return
