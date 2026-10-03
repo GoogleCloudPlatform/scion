@@ -2558,7 +2558,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		if isManagedAgentRuntime(agent.Runtime) {
 			if err := s.managedAgentMessage(ctx, agent, plainMessage, req.Interrupt); err != nil {
 				if persistedMsgID != "" {
-					if markErr := s.store.MarkMessageFailed(ctx, persistedMsgID, err.Error()); markErr != nil {
+					if markErr := s.markFailed(ctx, persistedMsgID, err.Error()); markErr != nil {
 						s.messageLog.Error("Failed to mark message as failed", "id", persistedMsgID, "error", markErr)
 					}
 				}
@@ -2599,7 +2599,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 
 			if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, dispatchMsg.Msg, req.Interrupt, dispatchMsg); err != nil {
 				if persistedMsgID != "" {
-					if markErr := s.store.MarkMessageFailed(ctx, persistedMsgID, err.Error()); markErr != nil {
+					if markErr := s.markFailed(ctx, persistedMsgID, err.Error()); markErr != nil {
 						s.messageLog.Error("Failed to mark message as failed", "id", persistedMsgID, "error", markErr)
 					}
 				}
@@ -2984,7 +2984,7 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
 			if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, plainMessage, interrupt, &agentMsg); err != nil {
 				retryCancel()
-				if markErr := s.store.MarkMessageFailed(ctx, storeMsg.ID, err.Error()); markErr != nil {
+				if markErr := s.markFailed(ctx, storeMsg.ID, err.Error()); markErr != nil {
 					s.messageLog.Error("Failed to mark set message as failed", "id", storeMsg.ID, "error", markErr)
 				}
 				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
@@ -3475,7 +3475,7 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 			s.messageLog.Error("Failed to deliver broadcast message to agent",
 				"agent_id", agent.ID,
 				"agentSlug", agent.Slug, "error", dispatchErr)
-			if markErr := s.store.MarkMessageFailed(ctx, storeMsg.ID, dispatchErr.Error()); markErr != nil {
+			if markErr := s.markFailed(ctx, storeMsg.ID, dispatchErr.Error()); markErr != nil {
 				s.messageLog.Error("Failed to mark broadcast message as failed", "id", storeMsg.ID, "error", markErr)
 			}
 			s.publishBroadcastDeliveryFailed(ctx, &agent, &agentMsg, dispatchErr)
@@ -3490,6 +3490,10 @@ func (s *Server) publishBroadcastDeliveryFailed(ctx context.Context, targetAgent
 	if !strings.HasPrefix(msg.Sender, "agent:") || msg.SenderID == "" {
 		return
 	}
+	// ptone/scion#1838: detach from the (possibly expired/cancelled)
+	// dispatch ctx, as publishDeliveryFailed does.
+	ctx, cancel := finalizationContext(ctx)
+	defer cancel()
 	senderAgent, err := s.store.GetAgent(ctx, msg.SenderID)
 	if err != nil {
 		return
@@ -3768,7 +3772,7 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 				results[i].Error = "dispatch failed: " + dispatchErr.Error()
 			}
 			if persisted {
-				if markErr := s.store.MarkMessageFailed(ctx, storeMsg.ID, dispatchErr.Error()); markErr != nil {
+				if markErr := s.markFailed(ctx, storeMsg.ID, dispatchErr.Error()); markErr != nil {
 					s.messageLog.Error("Failed to mark mention message as failed", "id", storeMsg.ID, "error", markErr)
 				}
 			}

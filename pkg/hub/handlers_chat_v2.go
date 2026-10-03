@@ -1604,7 +1604,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 		primaryInterrupt := interrupt && state.Phase(primaryAgent.Phase) == state.PhaseRunning
 		if err := dispatchWithBrokerRetry(retryCtx, dispatcher, primaryAgent, agentContent, primaryInterrupt, msg); err != nil {
 			s.messageLog.Error("Failed to dispatch to agent", "agent", primaryAgent.Slug, "error", err)
-			_ = s.store.MarkMessageFailed(ctx, storeMsg.ID, err.Error())
+			_ = s.markFailed(ctx, storeMsg.ID, err.Error())
 			// Keep storeMsg's in-memory state in sync with the store update
 			// above so the response below reports the real outcome instead
 			// of the optimistic "dispatched" state set at persist time.
@@ -1785,7 +1785,7 @@ func (s *Server) sendAgentRouted(w http.ResponseWriter, r *http.Request, key, pr
 					// "delivered".
 					errText := err.Error()
 					if mentionPersisted {
-						_ = s.store.MarkMessageFailed(ctx, mentionStoreMsg.ID, errText)
+						_ = s.markFailed(ctx, mentionStoreMsg.ID, errText)
 					}
 					for i, mr := range mentionResults {
 						if strings.EqualFold(mr.Slug, mentionAgent.Slug) {

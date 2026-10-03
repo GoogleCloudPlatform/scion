@@ -107,9 +107,28 @@ func (s *Server) markDispatched(ctx context.Context, msgID string) (bool, error)
 // markFailed records a definite dispatch failure on the message row.
 // Uses a bounded finalization context for request cancellation resilience.
 func (s *Server) markFailed(ctx context.Context, msgID string, reason string) error {
+	return markMessageFailed(ctx, s.store, msgID, reason)
+}
+
+// messageFailureMarker is the slice of the store needed to record a dispatch
+// failure. Narrow so MessageBrokerProxy (which has no *Server) can share
+// markMessageFailed.
+type messageFailureMarker interface {
+	MarkMessageFailed(ctx context.Context, id string, reason string) error
+}
+
+// markMessageFailed records a definite dispatch failure on a message row on a
+// finalizationContext derived from ctx (ptone/scion#1838). The dispatch ctx is
+// frequently already expired by the time a failure is known —
+// dispatchWithBrokerRetry returns ErrBrokerTimeout exactly when it fires — and
+// a mark on that ctx would fail, leaving the row "dispatched" forever (the
+// broker message sweep only reprocesses "pending" rows). Every
+// MarkMessageFailed call site in pkg/hub should go through this helper (or
+// Server.markFailed) rather than calling the store directly.
+func markMessageFailed(ctx context.Context, st messageFailureMarker, msgID string, reason string) error {
 	finCtx, finCancel := finalizationContext(ctx)
 	defer finCancel()
-	return s.store.MarkMessageFailed(finCtx, msgID, reason)
+	return st.MarkMessageFailed(finCtx, msgID, reason)
 }
 
 // dispatchFailedError constructs an AgentDMError for a definite dispatch

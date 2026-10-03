@@ -993,7 +993,7 @@ func (p *MessageBrokerProxy) deliverToAgent(ctx context.Context, projectID, agen
 	if err := dispatchWithBrokerRetry(withDispatchMessageID(ctx, storeMsg.ID), dispatcher, agent, msg.Msg, msg.Urgent, msg); err != nil {
 		p.log.Error("Failed to dispatch broker message to agent",
 			"agentSlug", agentSlug, "error", err)
-		if markErr := p.store.MarkMessageFailed(ctx, storeMsg.ID, err.Error()); markErr != nil {
+		if markErr := markMessageFailed(ctx, p.store, storeMsg.ID, err.Error()); markErr != nil {
 			p.log.Error("Failed to mark broker message as failed", "id", storeMsg.ID, "error", markErr)
 		}
 		p.publishDeliveryFailed(ctx, projectID, agentSlug, msg, err)
@@ -1116,6 +1116,12 @@ func (p *MessageBrokerProxy) publishDeliveryFailed(ctx context.Context, projectI
 	if !strings.HasPrefix(msg.Sender, "agent:") || msg.SenderID == "" {
 		return
 	}
+	// ptone/scion#1838: this notice is a post-dispatch finalization. Callers
+	// often hold a dispatch ctx that has already expired (broker timeout) or
+	// been cancelled, so detach from it with a bounded timeout rather than
+	// silently dropping the sender's DELIVERY_FAILED.
+	ctx, cancel := finalizationContext(ctx)
+	defer cancel()
 	senderAgent, err := p.store.GetAgent(ctx, msg.SenderID)
 	if err != nil {
 		p.log.Warn("Could not resolve sender agent for DELIVERY_FAILED notification",
