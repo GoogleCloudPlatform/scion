@@ -158,11 +158,7 @@ func recordExplicitEdits(ci *store.AgentCreateInputs, old *store.AgentAppliedCon
 	// redaction artifact, not deletions. Additions are unaffected by this
 	// gate: they can only come from someone typing a new key/value.
 	if cfg.Env != nil {
-		var oldInlineEnv map[string]string
-		if old.InlineConfig != nil {
-			oldInlineEnv = old.InlineConfig.Env
-		}
-		added, removed := diffExplicitEnvKeys(old.Env, oldInlineEnv, cfg.Env)
+		added, removed := diffExplicitEnvKeys(old.Env, explicitEnvOf(old), cfg.Env)
 		if !canAttachEnv {
 			removed = nil
 		}
@@ -220,9 +216,11 @@ var autoExposeEnvKeys = map[string]bool{
 //
 //   - added holds every key in newEnv whose value is missing from, or
 //     differs from, its baseline. For the autoExposeEnvKeys the baseline is
-//     oldInlineEnv (the explicit value), so sending the auto-expose control
-//     records it as explicit unless it already was, with that value, even
-//     when it equals a project-derived AppliedConfig.Env value. For every
+//     explicitEnv (the CreateInputs record, explicitEnvOf), not
+//     InlineConfig.Env, which can still hold a hub-stamped value on older
+//     agents. Sending the auto-expose control records it as explicit unless
+//     it already was, with that value, even when it equals a
+//     project-derived or hub-stamped value. For every
 //     other key the baseline is oldEnv (AppliedConfig.Env), the map the
 //     custom env rows load from, so an unedited row echoed back is never
 //     recorded.
@@ -241,11 +239,11 @@ var autoExposeEnvKeys = map[string]bool{
 // and env values may be secrets) and returns a different shape (KeyDiff).
 // This one needs values, to tell an unchanged echoed key apart from an
 // edited one.
-func diffExplicitEnvKeys(oldEnv, oldInlineEnv, newEnv map[string]string) (added map[string]string, removed []string) {
+func diffExplicitEnvKeys(oldEnv, explicitEnv, newEnv map[string]string) (added map[string]string, removed []string) {
 	for k, v := range newEnv {
 		baseline := oldEnv
 		if autoExposeEnvKeys[k] {
-			baseline = oldInlineEnv
+			baseline = explicitEnv
 		}
 		if b, ok := baseline[k]; ok && b == v {
 			continue

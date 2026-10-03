@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 
@@ -207,7 +208,7 @@ func TestApplyAgentUpdate_AutoExposeCreateInputsIsTheExplicitRecord(t *testing.T
 // AE as explicit, and the value survives reincarnate": the sent value beats
 // the project tier live, lands in all three maps, and is what a fresh
 // generation gets. Sending the same value as the project-derived one still
-// records it, because the explicit baseline is InlineConfig.Env.
+// records it, because the explicit baseline is CreateInputs.
 func TestApplyAgentUpdate_AutoExposeToggleIsExplicit(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -253,6 +254,56 @@ func TestApplyAgentUpdate_AutoExposeToggleIsExplicit(t *testing.T) {
 	}
 }
 
+// TestApplyAgentUpdate_AutoExposeToggleOverHubStampIsExplicit covers agents
+// whose InlineConfig.Env still holds a hub-stamped auto-expose value that
+// CreateInputs lacks: sending the control with the stamped value is a user
+// choice and must be recorded in CreateInputs, whether the stamp is in
+// InlineConfig.Env only or in both maps.
+func TestApplyAgentUpdate_AutoExposeToggleOverHubStampIsExplicit(t *testing.T) {
+	cases := []struct {
+		name       string
+		appliedEnv map[string]string
+	}{
+		{"stamp in InlineConfig.Env only", map[string]string{"TEMPLATE_KEY": "x"}},
+		{"stamp in both maps", map[string]string{"TEMPLATE_KEY": "x", aePorts: "true"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, _, agent := setupAutoExposePatchAgent(t, autoExposePatchAgent{
+				appliedEnv:   tc.appliedEnv,
+				inlineEnv:    map[string]string{aePorts: "true"},
+				createInputs: ciWithEnv(nil),
+			})
+			updated := patchAndReload(t, srv, s, agent.ID, rowEditBody(t, map[string]interface{}{
+				"TEMPLATE_KEY": "x",
+				aePorts:        "true",
+			}))
+
+			assert.Equal(t, "true", updated.AppliedConfig.Env[aePorts])
+			assert.Equal(t, map[string]string{aePorts: "true"}, createInputsEnv(updated),
+				"a value equal to the hub stamp is still the user's explicit choice")
+		})
+	}
+}
+
+// TestApplyAgentUpdate_AutoExposeProjectLookupFailure pins that a failed
+// project lookup skips only the project tier: the PATCH still succeeds,
+// writes the request's env and keeps the old non-explicit value.
+func TestApplyAgentUpdate_AutoExposeProjectLookupFailure(t *testing.T) {
+	srv, s, project, agent := setupAutoExposePatchAgent(t, autoExposePatchAgent{
+		projectAnno:  "false",
+		appliedEnv:   map[string]string{"TEMPLATE_KEY": "x", aePorts: "true"},
+		createInputs: ciWithEnv(nil),
+	})
+	srv.store = &getProjectErrStore{Store: srv.store, projectID: project.ID, err: errors.New("lookup failed")}
+
+	updated := patchAndReload(t, srv, s, agent.ID, configureRowEditBody(t))
+
+	assert.Equal(t, "true", updated.AppliedConfig.Env[aePorts], "the old value is kept, not re-derived from the project")
+	assert.Equal(t, "bar", updated.AppliedConfig.Env["FOO"])
+	assert.Equal(t, map[string]string{"FOO": "bar"}, createInputsEnv(updated))
+}
+
 // TestApplyAgentUpdate_PatchEnvDoesNotAliasInline pins the copy: the
 // project-derived value written into the live env must not appear in the
 // new InlineConfig.Env built from the same request map.
@@ -277,7 +328,7 @@ func TestDiffExplicitEnvKeys(t *testing.T) {
 		assert.Equal(t, map[string]string{"B": "2"}, added)
 		assert.Empty(t, removed)
 	})
-	t.Run("auto-expose key compares against InlineConfig.Env only", func(t *testing.T) {
+	t.Run("auto-expose key compares against the explicit record only", func(t *testing.T) {
 		added, _ := diffExplicitEnvKeys(
 			map[string]string{aePorts: "true"},
 			map[string]string{"SCION_AUTO_EXPOSE_MODE": "denylist"},
