@@ -1450,25 +1450,50 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 
 	// Case 1: Explicit runtime broker specified
 	if requestedBrokerID != "" {
-		// Check if the requested broker is a provider to this project (by ID, Name, or Slug)
+		// Every error response in this case lists only the brokers the caller
+		// may use for this project (online providers that pass
+		// canDispatchToBroker), default first.
+		usableBrokers := s.usableBrokerSummaries(ctx, brokerSummaries, availableBrokers)
+
+		// Check if the requested broker is a provider to this project. Match
+		// the ID exactly and the name/slug case-insensitively, the same way
+		// findBrokerByIDOrSlug does, so a case variant of an existing
+		// provider never falls through to the auto-link path below (which
+		// would rewrite the provider row).
+		matchedID := ""
 		for _, p := range allProviders {
-			broker, err := s.store.GetRuntimeBroker(ctx, p.BrokerID)
-			matched := p.BrokerID == requestedBrokerID || p.BrokerName == requestedBrokerID ||
-				(err == nil && broker.Slug == requestedBrokerID)
-			if !matched {
-				continue
+			if p.BrokerID == requestedBrokerID || strings.EqualFold(p.BrokerName, requestedBrokerID) {
+				matchedID = p.BrokerID
+				break
 			}
+		}
+		var matched *store.RuntimeBroker
+		var matchedErr error
+		if matchedID != "" {
+			matched, matchedErr = s.store.GetRuntimeBroker(ctx, matchedID)
+		} else {
+			// Slug lives on the broker record, so fetch per provider only
+			// when ID and name did not match.
+			for _, p := range allProviders {
+				b, err := s.store.GetRuntimeBroker(ctx, p.BrokerID)
+				if err == nil && b.Slug != "" && strings.EqualFold(b.Slug, requestedBrokerID) {
+					matchedID, matched = b.ID, b
+					break
+				}
+			}
+		}
+		if matchedID != "" {
 			// The broker exists but is offline: refuse at resolution, before
 			// any agent row is created (ptone/scion#2715). If the broker
 			// record cannot be read, let it through, as brokerReachable does.
-			if err == nil && !s.brokerRecordReachable(broker) {
+			if matchedErr == nil && matched != nil && !s.brokerRecordReachable(matched) {
 				slog.Warn("Requested broker is offline during agent creation",
-					"requestedBrokerID", requestedBrokerID, "brokerID", broker.ID,
-					"status", broker.Status, "project_id", project.ID)
-				RuntimeBrokerUnavailable(w, requestedBrokerID, brokerSummaries)
+					"requestedBrokerID", requestedBrokerID, "brokerID", matched.ID,
+					"status", matched.Status, "project_id", project.ID)
+				RuntimeBrokerUnavailable(w, requestedBrokerID, usableBrokers)
 				return "", store.ErrNotFound
 			}
-			return p.BrokerID, nil
+			return matchedID, nil
 		}
 
 		// Broker is not yet a provider — try to auto-link it.
@@ -1502,7 +1527,7 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 				slog.Warn("Requested broker is offline during agent creation",
 					"requestedBrokerID", requestedBrokerID, "brokerID", broker.ID,
 					"status", broker.Status, "project_id", project.ID)
-				RuntimeBrokerUnavailable(w, requestedBrokerID, brokerSummaries)
+				RuntimeBrokerUnavailable(w, requestedBrokerID, usableBrokers)
 				return "", store.ErrNotFound
 			}
 
@@ -1516,7 +1541,7 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 			if addErr := s.store.AddProjectProvider(ctx, provider); addErr != nil {
 				slog.Warn("Failed to auto-link broker during agent creation",
 					"broker", broker.Name, "project_id", project.ID, "error", addErr)
-				RuntimeBrokerUnavailable(w, requestedBrokerID, brokerSummaries)
+				RuntimeBrokerUnavailable(w, requestedBrokerID, usableBrokers)
 				return "", store.ErrNotFound
 			}
 			slog.Info("Auto-linked broker as project provider",
@@ -1540,17 +1565,7 @@ func (s *Server) resolveRuntimeBroker(ctx context.Context, w http.ResponseWriter
 		slog.Warn("Requested broker not found during agent creation",
 			"requestedBrokerID", requestedBrokerID, "project_id", project.ID,
 			"providerCount", len(allProviders))
-		// brokerSummaries is already default-first; keep that order.
-		usable := make([]RuntimeBrokerSummary, 0, len(brokerSummaries))
-		for _, summary := range brokerSummaries {
-			for i := range availableBrokers {
-				if availableBrokers[i].ID == summary.ID && s.canDispatchToBroker(ctx, &availableBrokers[i]) {
-					usable = append(usable, summary)
-					break
-				}
-			}
-		}
-		RuntimeBrokerNotFound(w, requestedBrokerID, usable)
+		RuntimeBrokerNotFound(w, requestedBrokerID, usableBrokers)
 		return "", store.ErrNotFound
 	}
 
@@ -1719,6 +1734,22 @@ func (s *Server) getAvailableBrokersForProject(ctx context.Context, projectID st
 	}
 
 	return availableBrokers, nil
+}
+
+// usableBrokerSummaries filters summaries (already default-first) down to the
+// brokers the caller may dispatch to, preserving order. available is the
+// project's online providers that summaries was built from.
+func (s *Server) usableBrokerSummaries(ctx context.Context, summaries []RuntimeBrokerSummary, available []store.RuntimeBroker) []RuntimeBrokerSummary {
+	usable := make([]RuntimeBrokerSummary, 0, len(summaries))
+	for _, summary := range summaries {
+		for i := range available {
+			if available[i].ID == summary.ID && s.canDispatchToBroker(ctx, &available[i]) {
+				usable = append(usable, summary)
+				break
+			}
+		}
+	}
+	return usable
 }
 
 // findBrokerByIDOrSlug looks up a runtime broker by ID, slug, or name.
