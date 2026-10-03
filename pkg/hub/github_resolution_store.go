@@ -237,7 +237,7 @@ func ghResolveCommitSHA(ctx context.Context, cooldown *agent.GitHubCooldown, ide
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
-		return "", fmt.Errorf("GitHub API error %d resolving %s@%s: %s", resp.StatusCode, repo, ref, string(body))
+		return "", &ghStatusError{status: resp.StatusCode, msg: fmt.Sprintf("GitHub API error %d resolving %s@%s: %s", resp.StatusCode, repo, ref, string(body))}
 	}
 
 	shaBytes, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
@@ -286,7 +286,7 @@ func ghListContents(ctx context.Context, cooldown *agent.GitHubCooldown, identit
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024*1024))
-		return nil, fmt.Errorf("GitHub API error %d listing %s/%s at %s: %s", resp.StatusCode, owner, repo, path, string(body))
+		return nil, &ghStatusError{status: resp.StatusCode, msg: fmt.Sprintf("GitHub API error %d listing %s/%s at %s: %s", resp.StatusCode, owner, repo, path, string(body))}
 	}
 
 	var apiResponse []struct {
