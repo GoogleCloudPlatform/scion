@@ -41,6 +41,7 @@
 import { test, expect, type Page } from '@playwright/test';
 import { openChatRail, openGeneralThread, currentPanel } from './fixture.js';
 import { touchSwipe, deepActiveElementTagName } from './helpers.js';
+import { setupChatMobileMocks, PROJECT_A, GENERAL_THREAD_ID, HUMAN_MEMBER_ID } from './mock-api.js';
 
 /**
  * Upper bound for `simulateChatMessageEcho`'s wait on the rail's debounced
@@ -101,6 +102,16 @@ async function simulateChatMessageEcho(page: Page): Promise<void> {
       );
     });
   }, RAIL_RELOAD_WAIT_TIMEOUT_MS);
+}
+
+/** Type into the composer and tap Send, the way a user ends a message. */
+async function sendFromComposer(page: Page): Promise<void> {
+  await page
+    .locator('sl-textarea')
+    .first()
+    .evaluate((el) => (el as unknown as HTMLElement).focus());
+  await page.keyboard.type('hello from the test');
+  await page.locator('.send-btn').first().click();
 }
 
 async function swipeRightToRail(page: Page): Promise<void> {
@@ -178,4 +189,243 @@ test('swipe-back to the rail after the send resolves is not reverted when the ra
     await deepActiveElementTagName(page),
     'focus must not land in the (inert, off-screen) conversation panel'
   ).not.toBe('textarea');
+});
+
+test('a DM opened from a peer-ID link is not reverted when the rail reloads after Send', async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name === 'desktop-1440', 'the mobile panel track is mobile-only');
+  await setupChatMobileMocks(page);
+  await mockSuccessfulSend(page);
+  // /chat/dm/<peerId> is the URL form a reload, a shared link or Back lands
+  // on. The open conversation is keyed by the full DM key, so the URL
+  // segment never equals it.
+  await page.goto(`/chat/dm/${HUMAN_MEMBER_ID}`, { waitUntil: 'domcontentloaded' });
+  await expect.poll(() => currentPanel(page), { timeout: 15_000 }).toBe('center');
+  // The rail's first load has to be over, so the reload below is a re-parse
+  // of a route that is already open rather than the first parse.
+  await expect(page.locator('.space-header', { hasText: PROJECT_A.name })).toBeAttached({
+    timeout: 15_000,
+  });
+  await page.waitForTimeout(400);
+
+  await sendFromComposer(page);
+  await page.waitForTimeout(300);
+  await swipeRightToRail(page);
+  expect(await currentPanel(page)).toBe('left');
+
+  await simulateChatMessageEcho(page);
+
+  expect(
+    await currentPanel(page),
+    'the rail reload must not revert a manual swipe back to the rail'
+  ).toBe('left');
+});
+
+test('a thread opened from a legacy link is not reverted or rebuilt when the rail first loads', async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name === 'desktop-1440', 'the mobile panel track is mobile-only');
+  await setupChatMobileMocks(page);
+  await mockSuccessfulSend(page);
+  // Hold the space list so the slug for the legacy URL stays unknown until
+  // after the user has sent and swiped away, as on a slow network.
+  let releaseSpaces: () => void = () => {};
+  const spacesHeld = new Promise<void>((resolve) => {
+    releaseSpaces = resolve;
+  });
+  await page.route(/\/api\/v1\/chat\/spaces$/, async (route) => {
+    await spacesHeld;
+    await route.fallback();
+  });
+
+  // Notification clicks and the terminal pane link to threads in this form.
+  await page.goto(`/chat/space/${PROJECT_A.id}/thread/${GENERAL_THREAD_ID}`, {
+    waitUntil: 'domcontentloaded',
+  });
+  await expect(page.locator('.v2-thread-header')).toBeVisible({ timeout: 15_000 });
+  expect(await currentPanel(page)).toBe('center');
+  await page.waitForTimeout(400);
+  await page.evaluate(() => {
+    (window as unknown as { __chatPageBefore: Element | null }).__chatPageBefore =
+      document.querySelector('scion-page-chat');
+  });
+  const historyBefore = await page.evaluate(() => history.length);
+
+  await sendFromComposer(page);
+  await page.waitForTimeout(300);
+  await swipeRightToRail(page);
+  expect(await currentPanel(page)).toBe('left');
+
+  releaseSpaces();
+  await page.waitForURL(new RegExp(`/chat/${PROJECT_A.slug}/${GENERAL_THREAD_ID}$`), {
+    timeout: 15_000,
+  });
+  // Give a rebuilt page, if there were one, time to load its own rail and
+  // re-open the thread.
+  await page.waitForTimeout(1_500);
+
+  expect(
+    await page.evaluate(
+      () =>
+        document.querySelector('scion-page-chat') ===
+        (window as unknown as { __chatPageBefore: Element | null }).__chatPageBefore
+    ),
+    'rewriting the legacy URL must not rebuild the page'
+  ).toBe(true);
+  expect(
+    await page.evaluate(() => history.length),
+    'rewriting the legacy URL must not add a history entry Back would land on'
+  ).toBe(historyBefore);
+  expect(
+    await currentPanel(page),
+    'rewriting the legacy URL must not revert a manual swipe back to the rail'
+  ).toBe('left');
+});
+
+test('a reloaded thread is not reverted when its slow slug lookup resolves after Send', async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name === 'desktop-1440', 'the mobile panel track is mobile-only');
+  await setupChatMobileMocks(page);
+  await mockSuccessfulSend(page);
+  // A cold load of a readable thread URL (a reload, or a shared link) looks
+  // the slug up while the rail loads. Hold that lookup until after the user
+  // has sent and swiped away; the rail opens the thread in the meantime.
+  let releaseLookup: () => void = () => {};
+  const lookupHeld = new Promise<void>((resolve) => {
+    releaseLookup = resolve;
+  });
+  await page.route(/\/api\/v1\/projects\?slug=/, async (route) => {
+    await lookupHeld;
+    await route.fulfill({
+      json: { items: [{ id: PROJECT_A.id, slug: PROJECT_A.slug, name: PROJECT_A.name }] },
+    });
+  });
+
+  await page.goto(`/chat/${PROJECT_A.slug}/${GENERAL_THREAD_ID}`, {
+    waitUntil: 'domcontentloaded',
+  });
+  await expect(page.locator('.v2-thread-header')).toBeVisible({ timeout: 15_000 });
+  expect(await currentPanel(page)).toBe('center');
+  await page.waitForTimeout(400);
+
+  await sendFromComposer(page);
+  await page.waitForTimeout(300);
+  await swipeRightToRail(page);
+  expect(await currentPanel(page)).toBe('left');
+
+  const lookupDone = page.waitForResponse(/\/api\/v1\/projects\?slug=/);
+  releaseLookup();
+  await lookupDone;
+  await page.waitForTimeout(500);
+
+  expect(
+    await currentPanel(page),
+    'a late slug lookup must not revert a manual swipe back to the rail'
+  ).toBe('left');
+});
+
+test('rewriting a legacy thread link in place keeps the router and the open thread in step', async ({
+  page,
+}) => {
+  await setupChatMobileMocks(page);
+  let releaseSpaces: () => void = () => {};
+  const spacesHeld = new Promise<void>((resolve) => {
+    releaseSpaces = resolve;
+  });
+  await page.route(/\/api\/v1\/chat\/spaces$/, async (route) => {
+    await spacesHeld;
+    await route.fallback();
+  });
+
+  // A query and a hash must survive the rewrite, and the router records the
+  // query with the path the way a render does.
+  const query = '?x=1';
+  const hash = '#msg-abc';
+  await page.goto(`/chat/space/${PROJECT_A.id}/thread/${GENERAL_THREAD_ID}${query}${hash}`, {
+    waitUntil: 'domcontentloaded',
+  });
+  await expect(page.locator('.v2-thread-header')).toBeVisible({ timeout: 15_000 });
+  await expect.poll(() => page.title(), { timeout: 5_000 }).toMatch(/^Thread\b/);
+  const titleBefore = await page.title();
+
+  releaseSpaces();
+  const readable = `/chat/${PROJECT_A.slug}/${GENERAL_THREAD_ID}`;
+  await page.waitForURL((url) => url.pathname === readable, { timeout: 15_000 });
+  expect(new URL(page.url()).search, 'the rewrite must keep the query').toBe(query);
+  expect(new URL(page.url()).hash, 'the rewrite must keep the hash').toBe(hash);
+  await page.waitForTimeout(500);
+
+  const state = await page.evaluate(() => {
+    const shell = document.querySelector('scion-chat-shell') as unknown as {
+      currentPath: string;
+    } | null;
+    const pageEl = document.querySelector('scion-page-chat') as unknown as {
+      v2Conversation: { projectSlug: string } | null;
+    } | null;
+    return {
+      currentPath: shell?.currentPath ?? null,
+      projectSlug: pageEl?.v2Conversation?.projectSlug ?? null,
+    };
+  });
+  expect(state.currentPath, "the router's rendered path must follow the rewrite").toBe(
+    `${readable}${query}`
+  );
+  expect(state.projectSlug, 'the open thread must carry the slug the URL now names').toBe(
+    PROJECT_A.slug
+  );
+  expect(await page.title(), 'the rewrite must not replace the thread title').toBe(titleBefore);
+});
+
+test('a thread opened from a reloaded space link is not left when the slow slug lookup resolves', async ({
+  page,
+}, testInfo) => {
+  const mobile = testInfo.project.name !== 'desktop-1440';
+  await setupChatMobileMocks(page);
+  // A cold load of a space URL (a reload while on the rail, or a shared
+  // link) looks the slug up while the rail loads. Hold that lookup until the
+  // user has opened a thread from the rail.
+  let releaseLookup: () => void = () => {};
+  const lookupHeld = new Promise<void>((resolve) => {
+    releaseLookup = resolve;
+  });
+  await page.route(/\/api\/v1\/projects\?slug=/, async (route) => {
+    await lookupHeld;
+    await route.fulfill({
+      json: { items: [{ id: PROJECT_A.id, slug: PROJECT_A.slug, name: PROJECT_A.name }] },
+    });
+  });
+
+  await page.goto(`/chat/${PROJECT_A.slug}`, { waitUntil: 'domcontentloaded' });
+  if (!mobile) {
+    // Desktop opens the space's #general on its own once the rail loads.
+    await page.waitForURL(new RegExp(`/chat/${PROJECT_A.slug}/${GENERAL_THREAD_ID}$`), {
+      timeout: 15_000,
+    });
+  }
+  const chosen = 'thread-04';
+  const row = page.locator('.thread-item', { hasText: `${chosen} discussion` }).first();
+  await expect(row).toBeVisible({ timeout: 15_000 });
+  await row.click();
+  await page.waitForURL(new RegExp(`/chat/${PROJECT_A.slug}/${chosen}$`), { timeout: 10_000 });
+  await expect(page.locator('.v2-thread-header')).toBeVisible({ timeout: 10_000 });
+  await page.waitForTimeout(400);
+  if (mobile) expect(await currentPanel(page)).toBe('center');
+
+  const lookupDone = page.waitForResponse(/\/api\/v1\/projects\?slug=/);
+  releaseLookup();
+  await lookupDone;
+  await page.waitForTimeout(1_000);
+
+  expect(
+    new URL(page.url()).pathname,
+    'a late slug lookup must not navigate away from the thread the user opened'
+  ).toBe(`/chat/${PROJECT_A.slug}/${chosen}`);
+  if (mobile) {
+    expect(
+      await currentPanel(page),
+      'a late slug lookup must not send the user back to the rail'
+    ).toBe('center');
+  }
 });
