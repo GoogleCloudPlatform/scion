@@ -338,7 +338,7 @@ func (nd *NotificationDispatcher) storeAndDispatch(ctx context.Context, sub *sto
 			if nd.brokerProxy != nil {
 				// Federated corner (see persistsViaInbox): deliverToUser
 				// will refuse to persist, but plugins still get the card.
-				nd.publishToBroker(ctx, sub, notif, agent)
+				_ = nd.publishToBroker(ctx, sub, notif, agent)
 			}
 		} else if !nd.dispatchToBroker(ctx, sub, notif, agent) {
 			// Nothing reached the broker's persisting subscriber; fall back

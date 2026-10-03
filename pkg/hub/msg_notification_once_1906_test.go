@@ -201,7 +201,7 @@ func TestNotificationDispatcher_BrokerPublishFailureFallsBackToInbox(t *testing.
 	userID := api.NewUUID()
 	env.useUserSubscription(t, userID, "COMPLETED")
 	bus := env.startRealBrokerProxy(t)
-	require.NoError(t, bus.EventBus.Close()) // every publish now fails
+	require.NoError(t, bus.Close()) // every publish now fails
 	sse := env.countUserMessageSSE(t, userID)
 
 	env.nd.Start()
