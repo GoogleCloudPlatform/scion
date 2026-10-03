@@ -461,5 +461,14 @@ describe('scion-page-admin-role-bindings lifecycle warnings read the display zon
     comp.formNotBefore = '2030-03-10T02:30';
     comp.formExpiresAt = '2030-03-10T03:15';
     expect(comp.createFormValid).toBe(false);
+
+    // The rendered ordering warning reads the same display-zone values.
+    comp.showCreateDialog = true;
+    comp.showAdvanced = true;
+    comp.requestUpdate();
+    await comp.updateComplete;
+    expect(query(el, '.validation-warning')?.textContent).toContain(
+      'Expiration must be after the activation date'
+    );
   });
 });
