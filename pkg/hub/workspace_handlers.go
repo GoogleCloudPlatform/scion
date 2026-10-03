@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -528,7 +529,7 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 		if emptyPerAgent {
 			resp := SyncToFinalizeResponse{ContentHash: contentHash}
 			if len(req.Manifest.Files) > 0 {
-				resp.Warnings = []string{emptyPerAgentWorkspaceFilesIgnoredWarning}
+				resp.Warnings = []string{api.WarningEmptyPerAgentWorkspaceFilesIgnored}
 			}
 			writeJSON(w, http.StatusOK, resp)
 			return

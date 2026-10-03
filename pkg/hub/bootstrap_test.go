@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1232,8 +1233,8 @@ func TestSyncToFinalize_BootstrapMode_EmptyPerAgentIgnoresFiles(t *testing.T) {
 	if resp.Applied || resp.FilesApplied != 0 {
 		t.Errorf("Applied=%v FilesApplied=%d, want false/0 (files are ignored)", resp.Applied, resp.FilesApplied)
 	}
-	if len(resp.Warnings) != 1 || resp.Warnings[0] != emptyPerAgentWorkspaceFilesIgnoredWarning {
-		t.Errorf("Warnings = %v, want [%q]", resp.Warnings, emptyPerAgentWorkspaceFilesIgnoredWarning)
+	if len(resp.Warnings) != 1 || resp.Warnings[0] != api.WarningEmptyPerAgentWorkspaceFilesIgnored {
+		t.Errorf("Warnings = %v, want [%q]", resp.Warnings, api.WarningEmptyPerAgentWorkspaceFilesIgnored)
 	}
 	if len(disp.dispatchedAgents) != 1 {
 		t.Fatalf("expected 1 dispatched agent, got %d", len(disp.dispatchedAgents))
