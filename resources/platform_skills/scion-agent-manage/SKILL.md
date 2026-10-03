@@ -109,8 +109,11 @@ not report one.
 - Pass `--no-wait` to return as soon as the Hub accepts the launch; check
   progress later with `scion look <name>` or `scion list`.
 - If the error says the create did not complete, the agent cannot be
-  restarted: recreate it with `scion delete <name>` and `scion start` with the
-  same template and task (both are shown in the error).
+  restarted: delete it with `scion delete <name>` and create it again with
+  `scion start` using the same template and task (both are shown in the
+  error). If soft-delete retention is enabled on the Hub, the name stays
+  reserved until the agent is deleted with force=true or purged; until then,
+  use a new name.
 
 For shell-escaping rules when passing prompts, see the `scion-cli-operations` skill —
 do not improvise quoting.

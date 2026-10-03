@@ -75,8 +75,12 @@ the wait stops: the launch continues on the Hub, and re-running
 `scion start <agent-name>` resumes waiting. Ctrl-C exits with status 130 and
 SIGTERM with 143; a failed launch or a timeout exits 1. If the agent's create did not
 complete (for example the image could not be pulled), the error shows the
-stored template and task; recreate the agent with `scion delete <agent-name>`
-followed by `scion start`.
+stored template and task. Delete the agent and create it again
+(`scion delete <agent-name>`, then `scion start` with the same template and
+task). If soft-delete retention is enabled on the Hub, the name stays reserved
+until the agent is deleted with force=true or purged; until then, use a new
+name. With `--format json`, `--attach` after a workspace upload attaches
+without printing the JSON result.
 
 ### `scion stop`
 

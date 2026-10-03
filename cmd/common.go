@@ -1186,8 +1186,7 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume bool
 		}
 		// Ctrl-C (or SIGTERM) stops waiting only; the launch continues on
 		// the Hub.
-		waitCtx, stopSignals := signalWaitContext()
-		waited, err := waitForAgentLaunch(waitCtx, launchWaitOptions{
+		waited, err := waitForAgentLaunchWithSignals(launchWaitOptions{
 			AgentName:  agentName,
 			BudgetFrom: budgetFrom,
 			Get: func(ctx context.Context) (*hubclient.Agent, error) {
@@ -1196,7 +1195,6 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume bool
 			Timeout:  startWaitTimeout,
 			Progress: progress,
 		})
-		stopSignals()
 		if err != nil {
 			for _, w := range resp.Warnings {
 				fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
@@ -1233,7 +1231,9 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume bool
 		message = fmt.Sprintf("Agent '%s' accepted by Hub and launching.", agentName)
 	}
 
-	if isJSONOutput() {
+	// With --attach after a workspace upload, the session is attached
+	// without a JSON document, as before.
+	if isJSONOutput() && (!attach || !workspaceFinalized) {
 		result := ActionResult{
 			Status:   "success",
 			Command:  "start",
