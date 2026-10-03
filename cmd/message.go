@@ -103,6 +103,18 @@ Message body can be provided as:
   - Positional arguments: scion message agent "hello world"
   - File: scion message agent --body-file msg.txt
   - Stdin: echo "hello" | scion message agent -
+           (or: scion message agent --body-file -)
+
+For --body-file and stdin, trailing newlines are trimmed; all other text,
+including interior newlines, is sent exactly as read.
+
+The shell expands backticks and $(...) inside double-quoted arguments before
+scion runs, executing them and splicing in their output. To send code or
+shell snippets verbatim, use --body-file or stdin with a quoted heredoc:
+
+  scion message my-agent - <<'EOF'
+  Run ` + "`make test`" + ` and check $(pwd)
+  EOF
 
 Examples:
   scion message my-agent "Please review the PR"
@@ -1475,31 +1487,47 @@ func sendMentionMessages(hubCtx *HubContext, sender, primaryRecipient, messageTe
 }
 
 // resolveMessageBody determines the message body from flags or positional args.
-// Priority: --body-file > positional args. If body is "-", read from stdin.
+// Priority: --body-file > positional args. A positional body of exactly "-",
+// or --body-file -, reads the body from stdin.
+//
+// Newline rule (the same for every non-positional source): trailing line
+// breaks (\n or \r\n) are trimmed, so the newline that echo, a heredoc, or
+// an editor adds at end-of-file is not sent. Interior newlines and leading
+// or trailing spaces are preserved exactly. Positional bodies are used as
+// given.
 func resolveMessageBody(bodyFile string, positionalBody string) (string, error) {
 	if bodyFile != "" {
 		if positionalBody != "" {
 			return "", fmt.Errorf("--body-file and positional message arguments are mutually exclusive")
+		}
+		if bodyFile == "-" {
+			return readMessageBody(os.Stdin, "stdin")
 		}
 		file, err := os.Open(bodyFile)
 		if err != nil {
 			return "", fmt.Errorf("failed to open body file: %w", err)
 		}
 		defer func() { _ = file.Close() }()
-		data, err := io.ReadAll(io.LimitReader(file, int64(messages.MaxMsgSize)+1))
-		if err != nil {
-			return "", fmt.Errorf("failed to read body file: %w", err)
-		}
-		return string(data), nil
+		return readMessageBody(file, "body file")
 	}
 	if positionalBody == "-" {
-		data, err := io.ReadAll(io.LimitReader(os.Stdin, int64(messages.MaxMsgSize)+1))
-		if err != nil {
-			return "", fmt.Errorf("failed to read message from stdin: %w", err)
-		}
-		return strings.TrimRight(string(data), "\n"), nil
+		return readMessageBody(os.Stdin, "stdin")
 	}
 	return positionalBody, nil
+}
+
+// readMessageBody reads up to messages.MaxMsgSize+1 bytes from r (one byte
+// over the limit, so a later size check can still reject an oversize body)
+// and trims trailing line breaks. source names r in error messages.
+func readMessageBody(r io.Reader, source string) (string, error) {
+	data, err := io.ReadAll(io.LimitReader(r, int64(messages.MaxMsgSize)+1))
+	if err != nil {
+		if source == "stdin" {
+			return "", fmt.Errorf("failed to read message from stdin: %w", err)
+		}
+		return "", fmt.Errorf("failed to read %s: %w", source, err)
+	}
+	return strings.TrimRight(string(data), "\r\n"), nil
 }
 
 func init() {
@@ -1507,7 +1535,7 @@ func init() {
 	messageCmd.Flags().BoolVarP(&msgInterrupt, "interrupt", "i", false, "Interrupt the harness before sending the message")
 	messageCmd.Flags().BoolVarP(&msgWake, "wake", "w", false, "Resume a suspended agent before delivering the message")
 	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable; use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace). Absolute paths outside these roots are silently dropped on delivery.")
-	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args")
+	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args ('-' reads stdin; trailing newlines are trimmed)")
 
 	// Deprecated flags — still functional, emit warnings when used.
 	// These flags are hidden from help output to guide users toward

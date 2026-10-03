@@ -211,13 +211,74 @@ func TestResolveMessageBody_BodyFile(t *testing.T) {
 func TestResolveMessageBody_BodyFilePreservesNewlines(t *testing.T) {
 	tmpDir := t.TempDir()
 	bodyFile := filepath.Join(tmpDir, "msg.txt")
-	content := "line1\nline2\nline3\n"
+	content := "  line1\n\nline2\nline3  \n\n"
 	err := os.WriteFile(bodyFile, []byte(content), 0644)
 	require.NoError(t, err)
 
 	got, err := resolveMessageBody(bodyFile, "")
 	require.NoError(t, err)
-	assert.Equal(t, content, got, "body-file content should be preserved exactly")
+	// Same rule as stdin: trailing newlines are trimmed, everything else
+	// (interior blank lines, leading/trailing spaces) is preserved exactly.
+	assert.Equal(t, "  line1\n\nline2\nline3  ", got)
+}
+
+// withStdin replaces os.Stdin with a pipe carrying content for the test.
+func withStdin(t *testing.T, content string) {
+	t.Helper()
+	origStdin := os.Stdin
+	t.Cleanup(func() { os.Stdin = origStdin })
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	_, err = w.WriteString(content)
+	require.NoError(t, err)
+	_ = w.Close()
+	os.Stdin = r
+}
+
+func TestResolveMessageBody_BodyFileDashReadsStdin(t *testing.T) {
+	withStdin(t, "from `stdin` via --body-file - $(not expanded)\n")
+	got, err := resolveMessageBody("-", "")
+	require.NoError(t, err)
+	assert.Equal(t, "from `stdin` via --body-file - $(not expanded)", got)
+}
+
+func TestResolveMessageBody_BodyFileDashConflict(t *testing.T) {
+	_, err := resolveMessageBody("-", "positional content")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mutually exclusive")
+}
+
+// TestResolveMessageBody_NewlineRuleConsistent pins that --body-file <path>,
+// --body-file -, and positional "-" apply the same newline rule.
+func TestResolveMessageBody_NewlineRuleConsistent(t *testing.T) {
+	cases := map[string]string{
+		"single trailing LF":    "a\nb\n",
+		"multiple trailing LF":  "a\nb\n\n\n",
+		"trailing CRLF":         "a\r\nb\r\n",
+		"no trailing newline":   "a\nb",
+		"only newlines → empty": "\n\n",
+		"trailing spaces kept":  "a\nb  \n",
+	}
+	for name, content := range cases {
+		t.Run(name, func(t *testing.T) {
+			bodyFile := filepath.Join(t.TempDir(), "msg.txt")
+			require.NoError(t, os.WriteFile(bodyFile, []byte(content), 0644))
+			fromFile, err := resolveMessageBody(bodyFile, "")
+			require.NoError(t, err)
+
+			withStdin(t, content)
+			fromDashFlag, err := resolveMessageBody("-", "")
+			require.NoError(t, err)
+
+			withStdin(t, content)
+			fromDashArg, err := resolveMessageBody("", "-")
+			require.NoError(t, err)
+
+			assert.Equal(t, fromFile, fromDashFlag)
+			assert.Equal(t, fromFile, fromDashArg)
+			assert.NotRegexp(t, `[\r\n]$`, fromFile, "trailing line breaks should be trimmed")
+		})
+	}
 }
 
 func TestResolveMessageBody_BodyFileNotFound(t *testing.T) {
