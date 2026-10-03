@@ -160,10 +160,10 @@ func TestListProjectAgentsSorted_PagedWalk_PageSizeBound_AllReadableReturnedOnce
 // is the page-size bound's raced variant: at n=501, limit=500 (so
 // P_eff=499, per effectivePagedPageSize), racing every single page item
 // still costs exactly 4,498 decisions (5+n+8*P_eff: every raced item costs
-// 8, not 7, because step 5a re-decides all 8 actions including read, not
-// just the 7 remaining ones) -- inside the documented raced exception
-// to the decision ceiling (4,505), even though the unraced variant above is
-// already at 4,005.
+// 8, not 7, because the race re-decision redoes all 8 actions including
+// read, not just the 7 remaining ones) -- inside the documented raced
+// exception to the decision ceiling (4,505), even though the unraced
+// variant above is already at 4,005.
 //
 // pEff (and therefore the expected decision count) is hard-coded here, not
 // derived by calling effectivePagedPageSize -- see

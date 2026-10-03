@@ -336,8 +336,8 @@ func (a *AuthzService) ComputeCapabilitiesForActions(ctx context.Context, identi
 // ComputeCapabilitiesBatch produces, which is what the non-waivable
 // deep-equality gate requires and what the
 // decision-count accounting depends on: an item whose read decision came
-// from step 3 and whose remaining
-// actions came from step 6 must look identical to one where every action was
+// from the read pass and whose remaining actions came from the
+// remaining-actions pass must look identical to one where every action was
 // decided by a single ComputeCapabilitiesBatch call.
 func mergeCapabilities(order []Action, readCap, restCap *Capabilities) *Capabilities {
 	allowed := make([]string, 0, len(order))

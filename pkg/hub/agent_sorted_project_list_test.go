@@ -390,7 +390,7 @@ func TestListProjectAgentsSorted_CandidateCeiling_Race(t *testing.T) {
 	// pre-check; then fake ListAgentMembers to report a grown pool. We
 	// achieve this by giving CountAgents a fixed "just under" answer and
 	// ListAgentMembers a fixed "over" answer independently.
-	counting.fakeCandidateSize = 0 // use real CountAgents (0 agents) so step 0 passes
+	counting.fakeCandidateSize = 0 // use real CountAgents (0 agents) so the ceiling pre-check passes
 	// Override ListAgentMembers behavior via a second wrapper layer that
 	// always returns an over-ceiling slice regardless of what CountAgents saw.
 	raceStore := &raceMembersStore{countingAgentStore: counting, memberCount: authorizedListMaxCandidates + 1}
@@ -727,14 +727,14 @@ func TestMergeCapabilities_EquivalentToSingleBatchPass(t *testing.T) {
 }
 
 // TestListProjectAgentsSorted_NilVsEmptyLabelsNoRedecision proves:
-// nil vs empty Labels/Ancestry must never trigger a step-5a re-decision.
+// nil vs empty Labels/Ancestry must never trigger a race re-decision.
 func TestListProjectAgentsSorted_NilVsEmptyLabelsNoRedecision(t *testing.T) {
 	a := &Resource{Type: "agent", ID: "x", Labels: nil, Ancestry: nil}
 	b := &Resource{Type: "agent", ID: "x", Labels: map[string]string{}, Ancestry: []string{}}
 	assert.True(t, resourceEqual(*a, *b), "nil and empty Labels/Ancestry must compare equal")
 }
 
-// --- Step 5a race behavior -------------------------------------------------
+// --- Race behavior (member read vs full-row read) --------------------------
 
 // mutatingAfterMembersStore mutates an agent's labels (via the real store,
 // bypassing the read path) the first time ListAgentMembers is called,
@@ -766,8 +766,8 @@ func (m *mutatingAfterMembersStore) ListAgentMembers(ctx context.Context, filter
 // TestListProjectAgentsSorted_Race_LabelChange_StillMatchesFilter is the
 // decision-count gate's race sub-case: a page item's labels change between
 // the two reads but it still matches the request's label filter, so it is
-// kept and re-decided (9 decisions total: 1 in step 3, 8 in step 5a, 0 in
-// step 6).
+// kept and re-decided (9 decisions total: 1 in the read pass, 8 in the race
+// re-decision, 0 in the remaining-actions pass).
 func TestListProjectAgentsSorted_Race_LabelChange_StillMatchesFilter(t *testing.T) {
 	f := sortedListSetup(t)
 	a := f.createAgent(t, "race-match", string(state.PhaseStopped), map[string]string{"team": "a", "extra": "1"})
@@ -783,7 +783,7 @@ func TestListProjectAgentsSorted_Race_LabelChange_StillMatchesFilter(t *testing.
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
 	require.Len(t, resp.Agents, 1, "the raced item still matches label=team=a and must be kept")
 
-	// n=1 candidate: 5 (gate+caps) + 1 (step3 read) + 8 (step5a re-decision) + 0 (step6 skip) = 14.
+	// n=1 candidate: 5 (gate+caps) + 1 (read pass) + 8 (race re-decision) + 0 (remaining-actions skip) = 14.
 	assert.Len(t, emitter.records, 14)
 }
 
@@ -805,7 +805,7 @@ func TestListProjectAgentsSorted_Race_LabelChange_NoLongerMatchesFilter(t *testi
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
 	assert.Empty(t, resp.Agents, "the raced item no longer matches label=team=a and must be dropped")
 
-	// n=1 candidate: 5 (gate+caps) + 1 (step3 read) + 0 (filter-mismatch
+	// n=1 candidate: 5 (gate+caps) + 1 (read pass) + 0 (filter-mismatch
 	// drop, no additional decision) = 6.
 	assert.Len(t, emitter.records, 6)
 }

@@ -146,7 +146,7 @@ func TestListProjectAgentsSorted_DecisionCounts_PartialRead_Paged(t *testing.T) 
 	assert.Equal(t, r, resp.TotalCount, "totalCount is the readable (phase-filtered) count, independent of page size")
 	assertStatsWithinReadable(t, resp, agents[:r])
 
-	// 5 (gate+scope caps) + n (step-3 read pass over every candidate) +
+	// 5 (gate+scope caps) + n (read pass over every candidate) +
 	// 7*limit (remaining-action pass for the page only) = 5 + 1200 + 175 = 1380.
 	assert.Len(t, emitter.records, 1380)
 }
@@ -185,7 +185,7 @@ func TestListProjectAgentsSorted_DecisionCounts_PartialRead_Complete(t *testing.
 	assert.Equal(t, r, resp.TotalCount)
 	assertStatsWithinReadable(t, resp, agents[:r])
 
-	// 5 (gate+scope caps) + n (step-3 read pass over every candidate) +
+	// 5 (gate+scope caps) + n (read pass over every candidate) +
 	// 7*r (remaining-action pass over every readable item) = 5 + 500 + 1400 = 1905.
 	assert.Len(t, emitter.records, 1905)
 }
