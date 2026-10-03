@@ -530,8 +530,9 @@ type AgentFilter struct {
 
 	// OrRunIntent, when non-empty, widens Phase: an agent matches when its
 	// phase equals Phase OR its run_intent equals OrRunIntent. When Phase is
-	// empty it filters on run_intent alone.
-	OrRunIntent string
+	// empty it filters on run_intent alone. omitempty keeps list cursor
+	// bindings (a hash of the encoded filter) unchanged when it is unset.
+	OrRunIntent string `json:",omitempty"`
 
 	// MemberOrOwnerProjectIDs, when non-empty, restricts results to agents
 	// whose project_id is in this set OR whose owner_id matches OwnerID.
