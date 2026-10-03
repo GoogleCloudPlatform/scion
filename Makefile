@@ -80,10 +80,10 @@ test-fast:
 # Skips four pkg/hub tests with known pre-existing, tracked failures
 # (ptone/scion#1847) so this target can be used as a CI merge gate.
 test-hub-sqlite:
-	@echo "Running pkg/hub + perf/bench/seed tests (SQLite-enabled)..."
+	@echo "Running pkg/hub + perf/bench/seed + pkg/conduit tests (SQLite-enabled)..."
 	@go test -count=1 -timeout 25m \
 		-skip '^(TestDEF164_AtAgentSlug_DeliversToAgent|TestDEF164_AtAgentSlug_DMConversationCreated|TestDEF152_AgentToAgentDM_DeliversViaOutbound|TestCreateTemplateV2_ScopeIDInjectionBlocked)$$' \
-		./pkg/hub/... ./perf/bench/seed/...
+		./pkg/hub/... ./perf/bench/seed/... ./pkg/conduit/...
 
 ## test-launch-store-postgres: Run the T1 async-create launch store/reaper
 # suite against a real Postgres server (design t1-async-create-v11.md §6,
