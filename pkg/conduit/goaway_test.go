@@ -83,8 +83,8 @@ func TestGoAwayReceivedByDialer(t *testing.T) {
 	if !p.dialer.Info().Draining {
 		t.Fatal("dialer Info().Draining = false")
 	}
-	if got := reconnectAfter(p.dialer); got != 2*time.Second {
-		t.Fatalf("reconnectAfter = %v", got)
+	if got := receivedGoAway(p.dialer).GetReconnectAfterMs(); got != 2000 {
+		t.Fatalf("reconnect_after_ms = %v", got)
 	}
 }
 

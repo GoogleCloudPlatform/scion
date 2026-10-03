@@ -31,6 +31,11 @@ const (
 	BackoffBase      = time.Second
 	BackoffMax       = 60 * time.Second
 	BackoffResetLive = 60 * time.Second
+	// MinPlannedDrainLife is how long a session must have lived for a
+	// planned GoAway to skip backoff. A relay that drains fresh sessions
+	// straight away is backed off like a failure, so it cannot cause a
+	// tight reconnect loop.
+	MinPlannedDrainLife = 10 * time.Second
 )
 
 // Backoff computes full-jitter exponential delays. It is not safe for
@@ -75,8 +80,11 @@ func (b *Backoff) Reset() { b.attempt = 0 }
 
 // Reconnector keeps one dialer-side session alive (all principals): it
 // dials, hands each session to OnSession, and redials with Backoff when the
-// session ends. When the relay sends GoAway the replacement is dialed at
-// once while the old session drains.
+// session ends. When the relay announces a planned drain (GoAway 4503, or
+// any GoAway with a drain deadline) the replacement is dialed at once
+// (after the relay's reconnect hint) while the old session drains. Any
+// other GoAway (4400 protocol error, 4401/4403 auth) is a failure and
+// backs off.
 type Reconnector struct {
 	Dialer transport.Dialer
 	Config Config
@@ -159,44 +167,61 @@ func (r *Reconnector) Run(ctx context.Context) error {
 		if r.OnSession != nil {
 			go r.OnSession(ctx, s, w)
 		}
-		goAway := false
 		select {
 		case <-ls.Done():
 		case <-ls.GoAwayReceived():
-			goAway = true
 		case <-ctx.Done():
 			return ctx.Err()
 		}
-		if clk.Now().Sub(started) >= BackoffResetLive {
-			bo.Reset()
-		}
-		if goAway {
-			// Planned drain: replace at once (honouring the relay's
-			// reconnect hint), the old session finishes on its own.
-			if d := reconnectAfter(s); d > 0 {
-				if err := wait(d); err != nil {
-					return err
-				}
+		// Whichever case fired, decide from the session's state: a GoAway
+		// is followed by the transport close, so both may be ready.
+		if d := redialDelay(receivedGoAway(ls), clk.Now().Sub(started), bo); d > 0 {
+			if err := wait(d); err != nil {
+				return err
 			}
-			continue
-		}
-		if err := wait(bo.Next()); err != nil {
-			return err
 		}
 	}
 }
 
-// reconnectAfter returns the GoAway reconnect hint of s, capped at
-// BackoffMax.
-func reconnectAfter(s Session) time.Duration {
-	ss, ok := s.(*session)
+// receivedGoAway returns the GoAway the peer sent on s, or nil, without
+// blocking.
+func receivedGoAway(ls LocalSession) *conduitv1.GoAway {
+	select {
+	case <-ls.GoAwayReceived():
+	default:
+		return nil
+	}
+	ss, ok := ls.(*session)
 	if !ok {
-		return 0
+		return &conduitv1.GoAway{Code: CloseRelayRestart}
 	}
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
-	if ss.remoteGoAway == nil {
-		return 0
+	return ss.remoteGoAway
+}
+
+// plannedDrain reports whether ga announces a planned drain rather than a
+// failure.
+func plannedDrain(ga *conduitv1.GoAway) bool {
+	return ga != nil && (ga.GetCode() == CloseRelayRestart || ga.GetDrainDeadlineMs() > 0)
+}
+
+// redialDelay is the wait before replacing a session that lived for lived
+// and ended (or was told to go away) with ga (nil: no GoAway). A session
+// that lived BackoffResetLive resets the backoff. A planned drain of a
+// session that lived MinPlannedDrainLife waits only for the relay's
+// reconnect hint (capped at BackoffMax); everything else backs off, never
+// shorter than the hint.
+func redialDelay(ga *conduitv1.GoAway, lived time.Duration, bo *Backoff) time.Duration {
+	if lived >= BackoffResetLive {
+		bo.Reset()
 	}
-	return min(time.Duration(ss.remoteGoAway.GetReconnectAfterMs())*time.Millisecond, BackoffMax)
+	var hint time.Duration
+	if plannedDrain(ga) {
+		hint = min(time.Duration(ga.GetReconnectAfterMs())*time.Millisecond, BackoffMax)
+		if lived >= MinPlannedDrainLife {
+			return hint
+		}
+	}
+	return max(bo.Next(), hint)
 }

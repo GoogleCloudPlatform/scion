@@ -17,6 +17,7 @@ package conduit
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -211,11 +212,19 @@ func TestReconnectorBackoffAndReset(t *testing.T) {
 	h.expectCeiling(2 * time.Second)
 }
 
-// TestReconnectorReplacesOnGoAway: a GoAway triggers an immediate redial,
-// with no backoff, while the old session keeps draining.
+// age lets the current session live for d on the fake clock.
+func (h *reconnectHarness) age(d time.Duration) {
+	h.t.Helper()
+	settle(h.t, h.clk, 4) // ping + watchdog on each side
+	h.clk.Advance(d)
+}
+
+// TestReconnectorReplacesOnGoAway: a planned GoAway triggers an immediate
+// redial, with no backoff, while the old session keeps draining.
 func TestReconnectorReplacesOnGoAway(t *testing.T) {
 	h := newReconnectHarness(t)
 	old, relay := h.connect()
+	h.age(MinPlannedDrainLife)
 	// Keep a stream open so the old session drains instead of closing.
 	if _, err := old.OpenStream(context.Background(), tcpOpen()); err != nil {
 		t.Fatal(err)
@@ -241,11 +250,13 @@ func TestReconnectorReplacesOnGoAway(t *testing.T) {
 func TestReconnectorHonoursReconnectAfter(t *testing.T) {
 	h := newReconnectHarness(t)
 	_, relay := h.connect()
+	h.age(MinPlannedDrainLife)
 	if err := relay.GoAway(GoAwayOptions{ReconnectAfter: 5 * time.Second}); err != nil {
 		t.Fatal(err)
 	}
 	// The GoAway with no streams closes both sessions; only the hint
-	// timer remains.
+	// timer remains. Whether the Reconnector saw Done or GoAwayReceived
+	// first, it classifies the end from the session state.
 	settle(t, h.clk, 1)
 	select {
 	case h.plan <- nil:
@@ -255,4 +266,109 @@ func TestReconnectorHonoursReconnectAfter(t *testing.T) {
 	h.clk.Advance(5 * time.Second)
 	h.connect()
 	h.noCeiling()
+}
+
+// TestReconnectorBacksOffOnFailureGoAway: a GoAway that is not a planned
+// drain (4400 protocol error, 4401 auth) backs off like a failure, even on
+// a long-lived session (1a-r1-F2).
+func TestReconnectorBacksOffOnFailureGoAway(t *testing.T) {
+	for _, code := range []uint32{CloseProtocolError, CloseUnauthenticated} {
+		t.Run(fmt.Sprint(code), func(t *testing.T) {
+			h := newReconnectHarness(t)
+			_, relay := h.connect()
+			h.age(MinPlannedDrainLife)
+			if err := relay.CloseWithCode(code, "failure"); err != nil {
+				t.Fatal(err)
+			}
+			h.expectCeiling(time.Second)
+			settle(t, h.clk, 1)
+			h.clk.Advance(time.Second)
+			// The next failure keeps growing the backoff.
+			_, relay = h.connect()
+			if err := relay.CloseWithCode(code, "failure"); err != nil {
+				t.Fatal(err)
+			}
+			h.expectCeiling(2 * time.Second)
+		})
+	}
+}
+
+// TestReconnectorBacksOffOnEarlyPlannedDrain: a relay that drains fresh
+// sessions straight away cannot cause a tight reconnect loop.
+func TestReconnectorBacksOffOnEarlyPlannedDrain(t *testing.T) {
+	h := newReconnectHarness(t)
+	_, relay := h.connect()
+	if err := relay.GoAway(GoAwayOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	h.expectCeiling(time.Second)
+}
+
+// TestRedialDelayOrderings: the end of a session is classified the same
+// whether its GoAway is seen while the session lingers or after it has
+// already closed, so the Reconnector's select order cannot change it.
+func TestRedialDelayOrderings(t *testing.T) {
+	noRand := func(t *testing.T) *Backoff {
+		return &Backoff{Rand: func(int64) int64 { t.Fatal("unexpected backoff"); return 0 }}
+	}
+	t.Run("GoAway then Done", func(t *testing.T) {
+		accepted := make(chan Stream, 1)
+		p := newPair(t, Config{}, Config{StreamHandler: acceptAll(accepted)})
+		if _, err := p.dialer.OpenStream(context.Background(), tcpOpen()); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.relay.GoAway(GoAwayOptions{ReconnectAfter: 3 * time.Second}); err != nil {
+			t.Fatal(err)
+		}
+		<-p.dialer.GoAwayReceived()
+		if p.dialer.isDone() {
+			t.Fatal("dialer ended; want it still draining")
+		}
+		if d := redialDelay(receivedGoAway(p.dialer), MinPlannedDrainLife, noRand(t)); d != 3*time.Second {
+			t.Fatalf("delay %v, want the 3s hint", d)
+		}
+	})
+	t.Run("Done already closed", func(t *testing.T) {
+		p := newPair(t, Config{}, Config{})
+		if err := p.relay.GoAway(GoAwayOptions{ReconnectAfter: 3 * time.Second}); err != nil {
+			t.Fatal(err)
+		}
+		_ = waitDone(t, p.dialer)
+		if d := redialDelay(receivedGoAway(p.dialer), MinPlannedDrainLife, noRand(t)); d != 3*time.Second {
+			t.Fatalf("delay %v, want the 3s hint", d)
+		}
+	})
+	t.Run("Done without GoAway", func(t *testing.T) {
+		p := newPair(t, Config{}, Config{})
+		_ = p.relay.Close()
+		_ = waitDone(t, p.dialer)
+		if ga := receivedGoAway(p.dialer); ga != nil {
+			t.Fatalf("GoAway %v on a dropped session", ga)
+		}
+		bo := &Backoff{Rand: func(n int64) int64 { return n - 1 }}
+		if d := redialDelay(nil, MinPlannedDrainLife, bo); d != time.Second {
+			t.Fatalf("delay %v, want the 1s backoff ceiling", d)
+		}
+	})
+	t.Run("classification", func(t *testing.T) {
+		ceil := func(n int64) int64 { return n - 1 }
+		for _, tc := range []struct {
+			name  string
+			ga    *conduitv1.GoAway
+			lived time.Duration
+			want  time.Duration
+		}{
+			{"planned 4503", &conduitv1.GoAway{Code: CloseRelayRestart, ReconnectAfterMs: 500}, MinPlannedDrainLife, 500 * time.Millisecond},
+			{"planned by deadline", &conduitv1.GoAway{Code: CloseForbidden, DrainDeadlineMs: 1000}, MinPlannedDrainLife, 0},
+			{"hint capped", &conduitv1.GoAway{Code: CloseRelayRestart, ReconnectAfterMs: 3600_000}, MinPlannedDrainLife, BackoffMax},
+			{"protocol error", &conduitv1.GoAway{Code: CloseProtocolError}, time.Hour, time.Second},
+			{"unauthenticated", &conduitv1.GoAway{Code: CloseUnauthenticated}, time.Hour, time.Second},
+			{"early planned", &conduitv1.GoAway{Code: CloseRelayRestart}, time.Second, time.Second},
+			{"early planned, longer hint", &conduitv1.GoAway{Code: CloseRelayRestart, ReconnectAfterMs: 5000}, time.Second, 5 * time.Second},
+		} {
+			if d := redialDelay(tc.ga, tc.lived, &Backoff{Rand: ceil}); d != tc.want {
+				t.Errorf("%s: delay %v, want %v", tc.name, d, tc.want)
+			}
+		}
+	})
 }
