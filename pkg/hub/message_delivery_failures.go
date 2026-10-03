@@ -221,9 +221,11 @@ func (s *Server) applyBrokerMessageFailure(ctx context.Context, brokerID string,
 const maxFailureReasonBytes = 512
 
 // sanitizeFailureReason makes a broker-supplied reason safe to store and to
-// deliver into another agent's terminal: invalid UTF-8 is dropped, whitespace
-// control characters (LF, CR, TAB, ...) become spaces, all other control
-// characters (ESC, BEL, NUL, C1 controls, ...) are removed, and the result is
+// deliver into another agent's terminal: invalid UTF-8 is dropped, and of
+// the display-unsafe runes (isDisplayUnsafeRune: Cc, Cf, Zl, Zp) the line
+// breaking and whitespace ones (LF, CR, TAB, NEL, U+2028, U+2029) become
+// spaces while all others (ESC, BEL, NUL, C1 controls, bidi overrides and
+// isolates, zero-width characters, BOM, ...) are removed. The result is
 // truncated to maxFailureReasonBytes on a rune boundary.
 func sanitizeFailureReason(reason string) string {
 	// Bound the work on arbitrarily large input before any allocation. 4x
@@ -236,7 +238,7 @@ func sanitizeFailureReason(reason string) string {
 	var b strings.Builder
 	b.Grow(min(len(reason), maxFailureReasonBytes))
 	for _, r := range reason {
-		if unicode.IsControl(r) {
+		if isDisplayUnsafeRune(r) {
 			if !unicode.IsSpace(r) {
 				continue
 			}

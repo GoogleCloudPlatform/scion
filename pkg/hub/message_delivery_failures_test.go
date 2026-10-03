@@ -313,6 +313,16 @@ func TestSanitizeFailureReason(t *testing.T) {
 		"line1\r\nline2\ttab":    "line1  line2 tab",
 		"  \n trimmed \r ":       "trimmed",
 		"bad\xffutf8":            "badutf8",
+		// Format characters (Cf) are removed.
+		"evil\u202etxt.exe":           "eviltxt.exe", // RLO
+		"a\u202ab\u202cc":             "abc",         // RLE ... PDF
+		"iso\u2066late\u2069d":        "isolated",    // LRI ... PDI
+		"zero\u200bwidth\u200d\u2060": "zerowidth",   // ZWSP, ZWJ, WJ
+		"\ufeffbom":                   "bom",         // BOM
+		"soft\u00adhyphen":            "softhyphen",
+		// Line and paragraph separators (Zl, Zp) break lines like LF does.
+		"line\u2028sep\u2029para": "line sep para",
+		"nel\u0085line":           "nel line",
 	}
 	for in, want := range cases {
 		assert.Equal(t, want, sanitizeFailureReason(in), "input %q", in)
