@@ -1294,7 +1294,9 @@ func writeLastProjectOwnerDeleteError(w http.ResponseWriter, e *lastProjectOwner
 // delete; if its role definition, principal or scope no longer matches the
 // listed one (an in-place change under the same ID), the function returns
 // errUserRoleBindingsChanged instead of deleting a binding the guard never
-// checked. On PostgreSQL an in-place change that commits between that re-read
+// checked; the validity window (NotBefore/ExpiresAt) is deliberately not
+// compared: it does not affect the guard, since the target's own bindings are
+// never counted and are all deleted. On PostgreSQL an in-place change that commits between that re-read
 // and the delete is still not detected, so the immutability invariant remains
 // the primary guarantee.
 //
