@@ -31,8 +31,14 @@
  * - records the merged delta of every ID changed live while not in the
  *   store, so a page whose counts or member index come from the response
  *   can replay it (see {@link AgentSeedEpoch.unknownChanges});
+ * - records the IDs deleted live, so a page whose member index or counts
+ *   come from the response can replay those deletes (see
+ *   {@link AgentSeedEpoch.deletedChanges});
  * - records whether any live change landed at all, for a page that holds
- *   counts it cannot adjust (see {@link AgentSeedEpoch.sawChanges}).
+ *   counts it cannot adjust (see {@link AgentSeedEpoch.sawChanges});
+ * - records whether the live connection resynced (`agents-resync`), after
+ *   which the response may predate changes the connection missed (see
+ *   {@link AgentSeedEpoch.sawResync}).
  */
 import type { Agent } from '../shared/types.js';
 import type {
@@ -77,6 +83,12 @@ export interface AgentSeedResult {
   agents: Agent[];
   /** Live creates the response did not contain, as state objects (a subset of `agents`). */
   liveCreated: Agent[];
+  /**
+   * IDs of response rows left out because the agent was deleted live
+   * (before or while the request was in flight). A page that renders the
+   * response as one server page is short by this many rows.
+   */
+  dropped: string[];
   /** A live create could not be decided (no `isMember` rule). */
   undecided: boolean;
 }
@@ -89,7 +101,12 @@ export class AgentSeedEpoch {
   private readonly upsertedIds = new Set<string>();
   private readonly deletedIds = new Set<string>();
   private readonly unknownDeltas = new Map<string, UnknownAgentDelta>();
+  private resynced = false;
   private closed = false;
+
+  private readonly onResync = (): void => {
+    this.resynced = true;
+  };
 
   private readonly onCreated = (e: Event): void => {
     const id = (e as CustomEvent<{ data?: { agentId?: string } }>).detail?.data?.agentId;
@@ -120,6 +137,7 @@ export class AgentSeedEpoch {
     this.state = state;
     this.state.addEventListener('agent-created', this.onCreated);
     this.state.addEventListener('agents-changed', this.onChanged);
+    this.state.addEventListener('agents-resync', this.onResync);
     this.token = this.state.beginSeedEpoch();
   }
 
@@ -150,6 +168,25 @@ export class AgentSeedEpoch {
   }
 
   /**
+   * IDs deleted live since the epoch opened, in the shape of
+   * {@link AgentsChangedDetail.deleted}. Replaying them is always safe: a
+   * delete is idempotent. Recording stops at {@link close}.
+   */
+  get deletedChanges(): string[] {
+    return Array.from(this.deletedIds);
+  }
+
+  /**
+   * Whether the live connection resynced since the epoch opened. Changes
+   * the connection missed may postdate the response, so a page adopting
+   * it shows its stale banner or refresh chip. Recording stops at
+   * {@link close}.
+   */
+  get sawResync(): boolean {
+    return this.resynced;
+  }
+
+  /**
    * Whether any live change landed since the epoch opened: an upsert, a
    * create, a delete or an unknown-ID delta. A page holding counts it
    * cannot adjust (a count-only snapshot) uses it to offer a refresh.
@@ -176,8 +213,12 @@ export class AgentSeedEpoch {
 
     const tombstones = this.state.getDeletedAgentIds();
     const members = new Map<string, Agent>();
+    const dropped: string[] = [];
     for (const a of agents) {
-      if (tombstones.has(a.id)) continue;
+      if (tombstones.has(a.id)) {
+        dropped.push(a.id);
+        continue;
+      }
       members.set(a.id, this.state.getAgent(a.id) ?? a);
     }
     const liveCreated: Agent[] = [];
@@ -195,7 +236,7 @@ export class AgentSeedEpoch {
         liveCreated.push(agent);
       }
     }
-    return { agents: Array.from(members.values()), liveCreated, undecided };
+    return { agents: Array.from(members.values()), liveCreated, dropped, undecided };
   }
 
   /** Stop recording and close the store epoch. Idempotent. */
@@ -204,6 +245,7 @@ export class AgentSeedEpoch {
     this.closed = true;
     this.state.removeEventListener('agent-created', this.onCreated);
     this.state.removeEventListener('agents-changed', this.onChanged);
+    this.state.removeEventListener('agents-resync', this.onResync);
     this.state.endSeedEpoch(this.token);
   }
 }

@@ -180,6 +180,55 @@ describe('AgentSeedEpoch', () => {
     expect(epoch.sawChanges).toBe(false);
   });
 
+  it('deletedChanges lists the IDs deleted live, known or not, until close', () => {
+    const sm = newState();
+    sm.seedAgents([makeAgent('a'), makeAgent('b')]);
+    const epoch = new AgentSeedEpoch(sm);
+    expect(epoch.deletedChanges).toEqual([]);
+    emit(sm, 'agent.a.deleted', { agentId: 'a' });
+    emit(sm, 'agent.x.deleted', { agentId: 'x' });
+    emit(sm, 'agent.b.status', { phase: 'stopped' });
+    expect(epoch.deletedChanges.sort()).toEqual(['a', 'x']);
+    epoch.close();
+    emit(sm, 'agent.b.deleted', { agentId: 'b' });
+    expect(epoch.deletedChanges.sort()).toEqual(['a', 'x']);
+  });
+
+  it('seed reports the response rows it left out as deleted, before or during the request', () => {
+    const sm = newState();
+    sm.seedAgents([makeAgent('a'), makeAgent('b'), makeAgent('c')]);
+    emit(sm, 'agent.a.deleted', { agentId: 'a' });
+    const epoch = new AgentSeedEpoch(sm);
+    emit(sm, 'agent.b.deleted', { agentId: 'b' });
+    const result = epoch.seed([makeAgent('a'), makeAgent('b'), makeAgent('c')], {
+      partial: false,
+    });
+    epoch.close();
+    expect(result.agents.map((a) => a.id)).toEqual(['c']);
+    expect(result.dropped).toEqual(['a', 'b']);
+  });
+
+  it('sawResync is set by a live-connection resync while open, and only then', () => {
+    const resync = (sm: StateManager): void => {
+      sm.sseClientInstance.dispatchEvent(new CustomEvent('disconnected'));
+      sm.sseClientInstance.dispatchEvent(new CustomEvent('connected'));
+    };
+    const sm = newState();
+    const epoch = new AgentSeedEpoch(sm);
+    expect(epoch.sawResync).toBe(false);
+    // A first connect is not a resync.
+    sm.sseClientInstance.dispatchEvent(new CustomEvent('connected'));
+    expect(epoch.sawResync).toBe(false);
+    resync(sm);
+    expect(epoch.sawResync).toBe(true);
+    epoch.close();
+
+    const later = new AgentSeedEpoch(sm);
+    later.close();
+    resync(sm);
+    expect(later.sawResync).toBe(false);
+  });
+
   it('close without seeding still ends the store epoch and stops recording', () => {
     const sm = newState();
     const epoch = new AgentSeedEpoch(sm);
