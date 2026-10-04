@@ -1419,6 +1419,26 @@ func (_u *AgentUpdate) ClearStartClaimHoldUntil() *AgentUpdate {
 	return _u
 }
 
+// SetStartClaimLaunchID sets the "start_claim_launch_id" field.
+func (_u *AgentUpdate) SetStartClaimLaunchID(v string) *AgentUpdate {
+	_u.mutation.SetStartClaimLaunchID(v)
+	return _u
+}
+
+// SetNillableStartClaimLaunchID sets the "start_claim_launch_id" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableStartClaimLaunchID(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetStartClaimLaunchID(*v)
+	}
+	return _u
+}
+
+// ClearStartClaimLaunchID clears the value of the "start_claim_launch_id" field.
+func (_u *AgentUpdate) ClearStartClaimLaunchID() *AgentUpdate {
+	_u.mutation.ClearStartClaimLaunchID()
+	return _u
+}
+
 // SetProject sets the "project" edge to the Project entity.
 func (_u *AgentUpdate) SetProject(v *Project) *AgentUpdate {
 	return _u.SetProjectID(v.ID)
@@ -2000,6 +2020,12 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.StartClaimHoldUntilCleared() {
 		_spec.ClearField(agent.FieldStartClaimHoldUntil, field.TypeTime)
+	}
+	if value, ok := _u.mutation.StartClaimLaunchID(); ok {
+		_spec.SetField(agent.FieldStartClaimLaunchID, field.TypeString, value)
+	}
+	if _u.mutation.StartClaimLaunchIDCleared() {
+		_spec.ClearField(agent.FieldStartClaimLaunchID, field.TypeString)
 	}
 	if _u.mutation.ProjectCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -3525,6 +3551,26 @@ func (_u *AgentUpdateOne) ClearStartClaimHoldUntil() *AgentUpdateOne {
 	return _u
 }
 
+// SetStartClaimLaunchID sets the "start_claim_launch_id" field.
+func (_u *AgentUpdateOne) SetStartClaimLaunchID(v string) *AgentUpdateOne {
+	_u.mutation.SetStartClaimLaunchID(v)
+	return _u
+}
+
+// SetNillableStartClaimLaunchID sets the "start_claim_launch_id" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableStartClaimLaunchID(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetStartClaimLaunchID(*v)
+	}
+	return _u
+}
+
+// ClearStartClaimLaunchID clears the value of the "start_claim_launch_id" field.
+func (_u *AgentUpdateOne) ClearStartClaimLaunchID() *AgentUpdateOne {
+	_u.mutation.ClearStartClaimLaunchID()
+	return _u
+}
+
 // SetProject sets the "project" edge to the Project entity.
 func (_u *AgentUpdateOne) SetProject(v *Project) *AgentUpdateOne {
 	return _u.SetProjectID(v.ID)
@@ -4136,6 +4182,12 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.StartClaimHoldUntilCleared() {
 		_spec.ClearField(agent.FieldStartClaimHoldUntil, field.TypeTime)
+	}
+	if value, ok := _u.mutation.StartClaimLaunchID(); ok {
+		_spec.SetField(agent.FieldStartClaimLaunchID, field.TypeString, value)
+	}
+	if _u.mutation.StartClaimLaunchIDCleared() {
+		_spec.ClearField(agent.FieldStartClaimLaunchID, field.TypeString)
 	}
 	if _u.mutation.ProjectCleared() {
 		edge := &sqlgraph.EdgeSpec{

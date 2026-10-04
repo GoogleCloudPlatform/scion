@@ -570,6 +570,25 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		accessBaseRev = rev
 	}
 
+	// Lifecycle section: keep the start-claim keys a PUT leaves out (the
+	// admin form has no fields for them), and validate them.
+	if doc, ok := sectionDocs["lifecycle"]; ok {
+		merged, err := carryForwardStartClaimSettings(r.Context(), ops, doc)
+		if err != nil {
+			slog.Error("PUT server-config: failed to build lifecycle document", "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to build section documents", nil)
+			return
+		}
+		var lc opsettings.LifecycleSettings
+		if err := json.Unmarshal(merged, &lc); err == nil {
+			if err := validateStartClaimSettingStrings(lc); err != nil {
+				writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, err.Error(), nil)
+				return
+			}
+		}
+		sectionDocs["lifecycle"] = merged
+	}
+
 	// Validate federation semantics (beyond JSON schema).
 	if doc, ok := sectionDocs["federation"]; ok {
 		var fedSettings opsettings.FederationSettings

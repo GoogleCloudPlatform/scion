@@ -164,6 +164,8 @@ const (
 	FieldStartClaimUnconfirmedAt = "start_claim_unconfirmed_at"
 	// FieldStartClaimHoldUntil holds the string denoting the start_claim_hold_until field in the database.
 	FieldStartClaimHoldUntil = "start_claim_hold_until"
+	// FieldStartClaimLaunchID holds the string denoting the start_claim_launch_id field in the database.
+	FieldStartClaimLaunchID = "start_claim_launch_id"
 	// EdgeProject holds the string denoting the project edge name in mutations.
 	EdgeProject = "project"
 	// EdgeMemberships holds the string denoting the memberships edge name in mutations.
@@ -272,6 +274,7 @@ var Columns = []string{
 	FieldStartClaimLeaseUntil,
 	FieldStartClaimUnconfirmedAt,
 	FieldStartClaimHoldUntil,
+	FieldStartClaimLaunchID,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -349,6 +352,8 @@ var (
 	DefaultStartClaimOwner string
 	// DefaultStartClaimTarget holds the default value on creation for the "start_claim_target" field.
 	DefaultStartClaimTarget string
+	// DefaultStartClaimLaunchID holds the default value on creation for the "start_claim_launch_id" field.
+	DefaultStartClaimLaunchID string
 	// DefaultID holds the default value on creation for the "id" field.
 	DefaultID func() uuid.UUID
 )
@@ -771,6 +776,11 @@ func ByStartClaimUnconfirmedAt(opts ...sql.OrderTermOption) OrderOption {
 // ByStartClaimHoldUntil orders the results by the start_claim_hold_until field.
 func ByStartClaimHoldUntil(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldStartClaimHoldUntil, opts...).ToFunc()
+}
+
+// ByStartClaimLaunchID orders the results by the start_claim_launch_id field.
+func ByStartClaimLaunchID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldStartClaimLaunchID, opts...).ToFunc()
 }
 
 // ByProjectField orders the results by project field.

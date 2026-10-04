@@ -172,7 +172,7 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	"StartClaimID": true, "StartClaimKind": true, "StartClaimState": true,
 	"StartClaimOwner": true, "StartClaimTarget": true, "StartClaimAt": true,
 	"StartClaimLeaseUntil": true, "StartClaimUnconfirmedAt": true,
-	"StartClaimHoldUntil": true,
+	"StartClaimHoldUntil": true, "StartClaimLaunchID": true,
 }
 
 func reflectFillStoreAgent(t *testing.T, projectID string) *store.Agent {

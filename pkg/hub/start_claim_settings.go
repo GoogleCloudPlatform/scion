@@ -15,10 +15,14 @@
 package hub
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -139,4 +143,70 @@ func (s *Server) setStartClaimSettings(c StartClaimSettings) bool {
 	}
 	old := s.startClaimCfg.Swap(&n)
 	return old == nil || *old != n
+}
+
+// carryForwardStartClaimSettings returns the lifecycle section document doc
+// with every start-claim key it leaves empty taken from the current
+// lifecycle row, so a lifecycle PUT that does not mention them (the admin
+// form has no fields for them) keeps them instead of wiping them. The other
+// lifecycle keys keep replace semantics.
+func carryForwardStartClaimSettings(ctx context.Context, ops *OperationalSettings, doc json.RawMessage) (json.RawMessage, error) {
+	var next opsettings.LifecycleSettings
+	if err := json.Unmarshal(doc, &next); err != nil {
+		return nil, fmt.Errorf("decoding lifecycle doc: %w", err)
+	}
+	row, err := ops.store.GetHubSetting(ctx, "lifecycle")
+	if errors.Is(err, store.ErrNotFound) {
+		return doc, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading current lifecycle row: %w", err)
+	}
+	var cur opsettings.LifecycleSettings
+	if len(row.Value) > 0 {
+		if err := json.Unmarshal(row.Value, &cur); err != nil {
+			return nil, fmt.Errorf("decoding current lifecycle row: %w", err)
+		}
+	}
+	for _, f := range []struct{ dst, src *string }{
+		{&next.StartClaimLeaseTTL, &cur.StartClaimLeaseTTL},
+		{&next.StartMaxDuration, &cur.StartMaxDuration},
+		{&next.StartUnconfirmedHold, &cur.StartUnconfirmedHold},
+		{&next.StartCreateUnconfirmedHold, &cur.StartCreateUnconfirmedHold},
+	} {
+		if *f.dst == "" {
+			*f.dst = *f.src
+		}
+	}
+	return json.Marshal(next)
+}
+
+// validateStartClaimSettingStrings checks the start-claim keys of a
+// lifecycle document: each set value must parse as a duration and be within
+// its range (the create hold is compared with the effective hold).
+func validateStartClaimSettingStrings(d opsettings.LifecycleSettings) error {
+	var c StartClaimSettings
+	for _, f := range []struct {
+		name string
+		v    string
+		dst  *time.Duration
+	}{
+		{"start_claim_lease_ttl", d.StartClaimLeaseTTL, &c.LeaseTTL},
+		{"start_max_duration", d.StartMaxDuration, &c.MaxDuration},
+		{"start_unconfirmed_hold", d.StartUnconfirmedHold, &c.UnconfirmedHold},
+		{"start_create_unconfirmed_hold", d.StartCreateUnconfirmedHold, &c.CreateUnconfirmedHold},
+	} {
+		if f.v == "" {
+			continue
+		}
+		v, err := time.ParseDuration(f.v)
+		if err != nil {
+			return fmt.Errorf("invalid %s %q: %v", f.name, f.v, err)
+		}
+		*f.dst = v
+	}
+	if _, warns := c.normalized(); len(warns) > 0 {
+		return errors.New(warns[0])
+	}
+	return nil
 }

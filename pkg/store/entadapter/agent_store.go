@@ -168,6 +168,7 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 	sa.StartClaimLeaseUntil = copyTimePtr(a.StartClaimLeaseUntil)
 	sa.StartClaimUnconfirmedAt = copyTimePtr(a.StartClaimUnconfirmedAt)
 	sa.StartClaimHoldUntil = copyTimePtr(a.StartClaimHoldUntil)
+	sa.StartClaimLaunchID = a.StartClaimLaunchID
 	if a.ReincarnationUpdatedAt != nil {
 		t := *a.ReincarnationUpdatedAt
 		sa.ReincarnationUpdatedAt = &t

@@ -91,6 +91,13 @@ func (s *AgentStore) withLockedAgent(ctx context.Context, agentID string, fn loc
 	return nil
 }
 
+// claimUpdate starts an update of row that keeps agents.updated unchanged:
+// claim bookkeeping is not an agent change, and updated feeds sorting and
+// activity displays.
+func claimUpdate(c *ent.Client, row *ent.Agent) *ent.AgentUpdateOne {
+	return c.Agent.UpdateOneID(row.ID).SetUpdated(row.Updated)
+}
+
 // heldClaimError returns the claim row holds as a ClaimHeldError, or nil.
 func heldClaimError(row *ent.Agent) *store.ClaimHeldError {
 	if row.StartClaimID == nil {
@@ -128,7 +135,8 @@ func clearStartClaim(u *ent.AgentUpdateOne) *ent.AgentUpdateOne {
 		ClearStartClaimAt().
 		ClearStartClaimLeaseUntil().
 		ClearStartClaimUnconfirmedAt().
-		ClearStartClaimHoldUntil()
+		ClearStartClaimHoldUntil().
+		SetStartClaimLaunchID("")
 }
 
 // demoteStartClaim adds the setters that move a claim to unconfirmed at now.
@@ -189,7 +197,7 @@ func (s *AgentStore) ClaimAgentStart(ctx context.Context, agentID, owner string,
 			LeaseUntil:  now.Add(ttl),
 			RunIntentAt: intentAt,
 		}
-		if _, err := c.Agent.UpdateOneID(row.ID).
+		if _, err := claimUpdate(c, row).
 			SetStartClaimID(claim.ID).
 			SetStartClaimKind(string(kind)).
 			SetStartClaimState(string(store.StartClaimLive)).
@@ -199,6 +207,7 @@ func (s *AgentStore) ClaimAgentStart(ctx context.Context, agentID, owner string,
 			SetStartClaimLeaseUntil(claim.LeaseUntil).
 			ClearStartClaimUnconfirmedAt().
 			ClearStartClaimHoldUntil().
+			SetStartClaimLaunchID("").
 			SetRunIntent(string(store.RunIntentRunning)).
 			SetRunIntentAt(intentAt).
 			Save(ctx); err != nil {
@@ -236,7 +245,7 @@ func (s *AgentStore) ClaimAgentStop(ctx context.Context, agentID, owner string, 
 			LeaseUntil:  now.Add(ttl),
 			RunIntentAt: store.NormalizeRunIntentTime(intentAt),
 		}
-		if _, err := c.Agent.UpdateOneID(row.ID).
+		if _, err := claimUpdate(c, row).
 			SetStartClaimID(claim.ID).
 			SetStartClaimKind(string(store.StartClaimStop)).
 			SetStartClaimState(string(store.StartClaimLive)).
@@ -246,6 +255,7 @@ func (s *AgentStore) ClaimAgentStop(ctx context.Context, agentID, owner string, 
 			SetStartClaimLeaseUntil(claim.LeaseUntil).
 			ClearStartClaimUnconfirmedAt().
 			ClearStartClaimHoldUntil().
+			SetStartClaimLaunchID("").
 			Save(ctx); err != nil {
 			return false, mapError(err)
 		}
@@ -267,7 +277,7 @@ func (s *AgentStore) RenewAgentStart(ctx context.Context, agentID, claimID, owne
 		if !holdsLiveClaim(row, claimID, owner, now) {
 			return false, nil
 		}
-		if _, err := c.Agent.UpdateOneID(row.ID).SetStartClaimLeaseUntil(now.Add(ttl)).Save(ctx); err != nil {
+		if _, err := claimUpdate(c, row).SetStartClaimLeaseUntil(now.Add(ttl)).Save(ctx); err != nil {
 			return false, mapError(err)
 		}
 		held = true
@@ -286,7 +296,7 @@ func (s *AgentStore) MarkStartUnconfirmed(ctx context.Context, agentID, claimID,
 		if !holdsLiveClaim(row, claimID, owner, now) {
 			return false, nil
 		}
-		if _, err := demoteStartClaim(c.Agent.UpdateOneID(row.ID), now, hold).Save(ctx); err != nil {
+		if _, err := demoteStartClaim(claimUpdate(c, row), now, hold).Save(ctx); err != nil {
 			return false, mapError(err)
 		}
 		held = true
@@ -302,7 +312,7 @@ func (s *AgentStore) ReleaseAgentStart(ctx context.Context, agentID, claimID, ow
 		if !holdsLiveClaim(row, claimID, owner, now) {
 			return false, nil
 		}
-		if _, err := clearStartClaim(c.Agent.UpdateOneID(row.ID)).Save(ctx); err != nil {
+		if _, err := clearStartClaim(claimUpdate(c, row)).Save(ctx); err != nil {
 			return false, mapError(err)
 		}
 		held = true
@@ -318,7 +328,12 @@ func (s *AgentStore) ReleaseSupersededStart(ctx context.Context, agentID, claimI
 		if !holdsClaim(row, claimID) || !entAgentToStore(row).RunIntentMatches(store.RunIntentStopped, stopIntentAt) {
 			return false, nil
 		}
-		if _, err := clearStartClaim(c.Agent.UpdateOneID(row.ID)).Save(ctx); err != nil {
+		// A stop-kind claim belongs to a queued stop being applied; another
+		// stop does not supersede it.
+		if row.StartClaimKind == string(store.StartClaimStop) {
+			return false, nil
+		}
+		if _, err := clearStartClaim(claimUpdate(c, row)).Save(ctx); err != nil {
 			return false, mapError(err)
 		}
 		released = true
@@ -337,7 +352,7 @@ func (s *AgentStore) DemoteExpiredStartClaim(ctx context.Context, agentID, claim
 			return false, nil
 		}
 		hold := holds.For(store.StartClaimKind(row.StartClaimKind))
-		if _, err := demoteStartClaim(c.Agent.UpdateOneID(row.ID), now, hold).Save(ctx); err != nil {
+		if _, err := demoteStartClaim(claimUpdate(c, row), now, hold).Save(ctx); err != nil {
 			return false, mapError(err)
 		}
 		demoted = true
@@ -347,7 +362,7 @@ func (s *AgentStore) DemoteExpiredStartClaim(ctx context.Context, agentID, claim
 }
 
 // DemoteOwnerStartClaims implements store.AgentStore.DemoteOwnerStartClaims.
-func (s *AgentStore) DemoteOwnerStartClaims(ctx context.Context, ownerPrefix string, holds store.StartClaimHolds) (int, error) {
+func (s *AgentStore) DemoteOwnerStartClaims(ctx context.Context, ownerPrefix, excludeOwner string, holds store.StartClaimHolds) (int, error) {
 	if ownerPrefix == "" {
 		return 0, fmt.Errorf("%w: owner prefix must not be empty", store.ErrInvalidInput)
 	}
@@ -356,6 +371,7 @@ func (s *AgentStore) DemoteOwnerStartClaims(ctx context.Context, ownerPrefix str
 			agent.StartClaimIDNotNil(),
 			agent.StartClaimStateEQ(string(store.StartClaimLive)),
 			agent.StartClaimOwnerHasPrefix(ownerPrefix),
+			agent.StartClaimOwnerNEQ(excludeOwner),
 		).
 		IDs(ctx)
 	if err != nil {
@@ -366,11 +382,12 @@ func (s *AgentStore) DemoteOwnerStartClaims(ctx context.Context, ownerPrefix str
 		err := s.withLockedAgent(ctx, id.String(), func(ctx context.Context, c *ent.Client, row *ent.Agent, now time.Time) (bool, error) {
 			if row.StartClaimID == nil || launchActive(row) ||
 				row.StartClaimState != string(store.StartClaimLive) ||
-				!strings.HasPrefix(row.StartClaimOwner, ownerPrefix) {
+				!strings.HasPrefix(row.StartClaimOwner, ownerPrefix) ||
+				row.StartClaimOwner == excludeOwner {
 				return false, nil
 			}
 			hold := holds.For(store.StartClaimKind(row.StartClaimKind))
-			if _, err := demoteStartClaim(c.Agent.UpdateOneID(row.ID), now, hold).Save(ctx); err != nil {
+			if _, err := demoteStartClaim(claimUpdate(c, row), now, hold).Save(ctx); err != nil {
 				return false, mapError(err)
 			}
 			n++
@@ -391,7 +408,7 @@ func (s *AgentStore) ReleaseUnconfirmedStart(ctx context.Context, agentID, claim
 			row.StartClaimState != string(store.StartClaimUnconfirmed) {
 			return false, nil
 		}
-		if _, err := clearStartClaim(c.Agent.UpdateOneID(row.ID)).Save(ctx); err != nil {
+		if _, err := clearStartClaim(claimUpdate(c, row)).Save(ctx); err != nil {
 			return false, mapError(err)
 		}
 		released = true
@@ -407,7 +424,7 @@ func (s *AgentStore) SettleEndedLaunchClaim(ctx context.Context, agentID, claimI
 		if !holdsClaim(row, claimID) || launchActive(row) || row.LaunchState == "" {
 			return false, nil
 		}
-		u := settleLaunchClaim(c.Agent.UpdateOneID(row.ID), row, row.LaunchEndReason, now)
+		u := settleLaunchClaim(claimUpdate(c, row), row, row.LaunchEndReason, now)
 		if u == nil {
 			return false, nil
 		}
@@ -421,15 +438,17 @@ func (s *AgentStore) SettleEndedLaunchClaim(ctx context.Context, agentID, claimI
 }
 
 // settleLaunchClaim adds to u the change a launch ending with endReason
-// makes to row's create claim: release, or demote a live claim to
-// unconfirmed (hold_until left unset; the reaper applies the kind's hold
+// makes to row's create claim, when the claim is linked to that launch
+// (the row's current launch; see linkLaunchClaim): release, or demote a
+// live claim to unconfirmed (hold_until left unset; the reaper applies the kind's hold
 // from unconfirmed_at). It returns nil when there is nothing to settle: no
 // create claim, or the end reason settles nothing, or the claim is already
 // unconfirmed and would only be demoted. Callers writing a launch's terminal
 // transition call it on the same update so the claim settles in the same
 // transaction.
 func settleLaunchClaim(u *ent.AgentUpdateOne, row *ent.Agent, endReason string, now time.Time) *ent.AgentUpdateOne {
-	if row.StartClaimID == nil || row.StartClaimKind != string(store.StartClaimCreate) {
+	if row.StartClaimID == nil || row.StartClaimKind != string(store.StartClaimCreate) ||
+		row.StartClaimLaunchID == "" || row.StartClaimLaunchID != row.LaunchID {
 		return nil
 	}
 	release, demote := store.LaunchEndClaimSettlement(endReason)
@@ -454,7 +473,7 @@ func withLaunchEndSettlement(u *ent.AgentUpdateOne, row *ent.Agent, endReason st
 
 // ListAgentsWithStartClaim implements store.AgentStore.ListAgentsWithStartClaim.
 func (s *AgentStore) ListAgentsWithStartClaim(ctx context.Context) ([]*store.Agent, error) {
-	rows, err := s.client.Agent.Query().Where(agent.StartClaimIDNotNil()).All(ctx)
+	rows, err := s.client.Agent.Query().Where(agent.StartClaimIDNotNil(), agent.DeletedAtIsNil()).All(ctx)
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -481,7 +500,7 @@ func (s *AgentStore) ClaimAgentReincarnation(ctx context.Context, agentID string
 			return false, store.ErrClaimPredicate
 		}
 		newVersion = row.StateVersion + 1
-		if _, err := c.Agent.UpdateOneID(row.ID).
+		if _, err := claimUpdate(c, row).
 			SetReincarnationState(store.ReincarnationStatePending).
 			SetReincarnationUpdatedAt(at).
 			SetStateVersion(newVersion).
@@ -504,4 +523,37 @@ func notFoundAsLost(err error) error {
 		return nil
 	}
 	return err
+}
+
+// linkLaunchClaim adds to u, a BeginLaunch write of launch launchID on row,
+// the link from row's create claim to that launch, so only that launch's
+// end settles the claim. A live create claim already linked to an earlier
+// launch saw that launch superseded: it is demoted, as a superseded end
+// would. Nothing is added when row holds no create claim.
+func linkLaunchClaim(u *ent.AgentUpdateOne, row *ent.Agent, launchID string, now time.Time) *ent.AgentUpdateOne {
+	if row.StartClaimID == nil || row.StartClaimKind != string(store.StartClaimCreate) {
+		return u
+	}
+	switch {
+	case row.StartClaimLaunchID == "":
+		u.SetStartClaimLaunchID(launchID)
+	case row.StartClaimLaunchID != launchID && row.StartClaimState == string(store.StartClaimLive):
+		demoteStartClaim(u, claimTime(now), 0)
+	}
+	return u
+}
+
+// StoreClock implements store.AgentStore.StoreClock.
+func (s *AgentStore) StoreClock(ctx context.Context) (time.Time, error) {
+	ltx, err := s.beginLaunchTx(ctx)
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer ltx.cleanup()
+	defer func() { _ = ltx.tx.Rollback() }()
+	now, err := storeNow(ctx, ltx.tx, s.dialect(ctx) == dialect.Postgres)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return claimTime(now), nil
 }

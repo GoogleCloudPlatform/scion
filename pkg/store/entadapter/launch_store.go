@@ -216,7 +216,7 @@ func (s *AgentStore) BeginLaunch(ctx context.Context, agentID, kind string, time
 	// A previous active launch on this row becomes implicitly superseded:
 	// its ID no longer matches the new launch_id (design §3.3). No explicit
 	// write of its end state is needed or made here.
-	if _, err := ltx.client.Agent.UpdateOneID(uid).
+	upd := ltx.client.Agent.UpdateOneID(uid).
 		SetLaunchID(newID).
 		SetLaunchState(store.LaunchStateActive).
 		SetLaunchKind(kind).
@@ -225,8 +225,10 @@ func (s *AgentStore) BeginLaunch(ctx context.Context, agentID, kind string, time
 		SetLaunchOwner("").
 		SetLaunchSeq(0).
 		SetLaunchStep("").
-		SetLaunchError("").
-		Save(ctx); err != nil {
+		SetLaunchError("")
+	// Link a create start claim to this launch, so only this launch's end
+	// settles it.
+	if _, err := linkLaunchClaim(upd, current, newID, now).Save(ctx); err != nil {
 		return "", mapError(err)
 	}
 

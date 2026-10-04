@@ -4602,6 +4602,7 @@ type AgentMutation struct {
 	start_claim_lease_until    *time.Time
 	start_claim_unconfirmed_at *time.Time
 	start_claim_hold_until     *time.Time
+	start_claim_launch_id      *string
 	clearedFields              map[string]struct{}
 	project                    *uuid.UUID
 	clearedproject             bool
@@ -8298,6 +8299,55 @@ func (m *AgentMutation) ResetStartClaimHoldUntil() {
 	delete(m.clearedFields, agent.FieldStartClaimHoldUntil)
 }
 
+// SetStartClaimLaunchID sets the "start_claim_launch_id" field.
+func (m *AgentMutation) SetStartClaimLaunchID(s string) {
+	m.start_claim_launch_id = &s
+}
+
+// StartClaimLaunchID returns the value of the "start_claim_launch_id" field in the mutation.
+func (m *AgentMutation) StartClaimLaunchID() (r string, exists bool) {
+	v := m.start_claim_launch_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStartClaimLaunchID returns the old "start_claim_launch_id" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldStartClaimLaunchID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStartClaimLaunchID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStartClaimLaunchID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStartClaimLaunchID: %w", err)
+	}
+	return oldValue.StartClaimLaunchID, nil
+}
+
+// ClearStartClaimLaunchID clears the value of the "start_claim_launch_id" field.
+func (m *AgentMutation) ClearStartClaimLaunchID() {
+	m.start_claim_launch_id = nil
+	m.clearedFields[agent.FieldStartClaimLaunchID] = struct{}{}
+}
+
+// StartClaimLaunchIDCleared returns if the "start_claim_launch_id" field was cleared in this mutation.
+func (m *AgentMutation) StartClaimLaunchIDCleared() bool {
+	_, ok := m.clearedFields[agent.FieldStartClaimLaunchID]
+	return ok
+}
+
+// ResetStartClaimLaunchID resets all changes to the "start_claim_launch_id" field.
+func (m *AgentMutation) ResetStartClaimLaunchID() {
+	m.start_claim_launch_id = nil
+	delete(m.clearedFields, agent.FieldStartClaimLaunchID)
+}
+
 // ClearProject clears the "project" edge to the Project entity.
 func (m *AgentMutation) ClearProject() {
 	m.clearedproject = true
@@ -8467,7 +8517,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 74)
+	fields := make([]string, 0, 75)
 	if m.slug != nil {
 		fields = append(fields, agent.FieldSlug)
 	}
@@ -8690,6 +8740,9 @@ func (m *AgentMutation) Fields() []string {
 	if m.start_claim_hold_until != nil {
 		fields = append(fields, agent.FieldStartClaimHoldUntil)
 	}
+	if m.start_claim_launch_id != nil {
+		fields = append(fields, agent.FieldStartClaimLaunchID)
+	}
 	return fields
 }
 
@@ -8846,6 +8899,8 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.StartClaimUnconfirmedAt()
 	case agent.FieldStartClaimHoldUntil:
 		return m.StartClaimHoldUntil()
+	case agent.FieldStartClaimLaunchID:
+		return m.StartClaimLaunchID()
 	}
 	return nil, false
 }
@@ -9003,6 +9058,8 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldStartClaimUnconfirmedAt(ctx)
 	case agent.FieldStartClaimHoldUntil:
 		return m.OldStartClaimHoldUntil(ctx)
+	case agent.FieldStartClaimLaunchID:
+		return m.OldStartClaimLaunchID(ctx)
 	}
 	return nil, fmt.Errorf("unknown Agent field %s", name)
 }
@@ -9530,6 +9587,13 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetStartClaimHoldUntil(v)
 		return nil
+	case agent.FieldStartClaimLaunchID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStartClaimLaunchID(v)
+		return nil
 	}
 	return fmt.Errorf("unknown Agent field %s", name)
 }
@@ -9818,6 +9882,9 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldStartClaimHoldUntil) {
 		fields = append(fields, agent.FieldStartClaimHoldUntil)
 	}
+	if m.FieldCleared(agent.FieldStartClaimLaunchID) {
+		fields = append(fields, agent.FieldStartClaimLaunchID)
+	}
 	return fields
 }
 
@@ -10002,6 +10069,9 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldStartClaimHoldUntil:
 		m.ClearStartClaimHoldUntil()
+		return nil
+	case agent.FieldStartClaimLaunchID:
+		m.ClearStartClaimLaunchID()
 		return nil
 	}
 	return fmt.Errorf("unknown Agent nullable field %s", name)
@@ -10232,6 +10302,9 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldStartClaimHoldUntil:
 		m.ResetStartClaimHoldUntil()
+		return nil
+	case agent.FieldStartClaimLaunchID:
+		m.ResetStartClaimLaunchID()
 		return nil
 	}
 	return fmt.Errorf("unknown Agent field %s", name)

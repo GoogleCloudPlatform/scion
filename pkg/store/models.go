@@ -160,6 +160,9 @@ type Agent struct {
 	StartClaimLeaseUntil    *time.Time      `json:"-"`
 	StartClaimUnconfirmedAt *time.Time      `json:"-"`
 	StartClaimHoldUntil     *time.Time      `json:"-"`
+	// StartClaimLaunchID is the launch a create claim is linked to ("" when
+	// none): only that launch's end settles the claim.
+	StartClaimLaunchID string `json:"-"`
 
 	// Launch is the computed, client-facing view of the launch_* columns
 	// above (design §3.2; see launch_view.go). It is nil unless a

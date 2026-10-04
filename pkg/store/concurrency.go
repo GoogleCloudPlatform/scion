@@ -112,8 +112,7 @@ const (
 
 	// LockStartClaimReaper guards the periodic start-claim reaper, which
 	// demotes start claims whose lease expired and releases unconfirmed
-	// claims once the runtime shows the start's outcome. 0x5C100023 is in use
-	// on other branches, so this takes 0x5C100024.
+	// claims once the runtime shows the start's outcome.
 	LockStartClaimReaper AdvisoryLockKey = 0x5C100024
 
 	// LockInlineSecretsMigration guards the one-shot migration of inline

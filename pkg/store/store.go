@@ -439,7 +439,8 @@ type AgentStore interface {
 	// transaction inside the ambient one WithTx provides, and returns an
 	// error (or, for RunLaunchReaperTick, ReaperTickUnavailable) instead.
 
-	// BeginLaunch starts a new launch for agentID. The caller must start its
+	// BeginLaunch starts a new launch for agentID. A create start claim on the
+	// row is linked to the new launch (see SettleEndedLaunchClaim). The caller must start its
 	// monotonic remaining-budget timer BEFORE calling this (§3.4). Any
 	// previous active launch on the row becomes implicitly superseded (its ID
 	// no longer matches launch_id). kind must be LaunchKindCreate in P1a;
@@ -577,20 +578,29 @@ type AgentStore interface {
 	// ownerPrefix to unconfirmed, whatever its lease, except on agents with
 	// an active launch. Used when a hub replica restarts under the same pod
 	// name: claims owned by its previous process can no longer be renewed.
-	DemoteOwnerStartClaims(ctx context.Context, ownerPrefix string, holds StartClaimHolds) (int, error)
+	// excludeOwner (this process's own owner value) is never demoted.
+	DemoteOwnerStartClaims(ctx context.Context, ownerPrefix, excludeOwner string, holds StartClaimHolds) (int, error)
 
 	// ReleaseUnconfirmedStart clears claimID when it is unconfirmed and the
 	// agent has no active launch.
 	ReleaseUnconfirmedStart(ctx context.Context, agentID, claimID string) (released bool, err error)
 
 	// SettleEndedLaunchClaim applies LaunchEndClaimSettlement to a create
-	// claim (claimID) on an agent whose launch has ended without settling
-	// it. No-op when the launch is active, the claim changed, or the end
-	// reason settles nothing.
+	// claim (claimID) linked to the agent's launch (the launch the claim was
+	// linked to at BeginLaunch), when that launch has ended without settling
+	// it. No-op when the launch is active, the claim changed, the claim is
+	// not linked to the agent's current launch, or the end reason settles
+	// nothing. A claim taken after a launch ended is never linked to it.
 	SettleEndedLaunchClaim(ctx context.Context, agentID, claimID string) (changed bool, err error)
 
-	// ListAgentsWithStartClaim returns every agent that holds a start claim.
+	// ListAgentsWithStartClaim returns every non-deleted agent that holds a
+	// start claim.
 	ListAgentsWithStartClaim(ctx context.Context) ([]*Agent, error)
+
+	// StoreClock reads the store clock: Postgres now(), or the single SQLite
+	// process's clock. Comparisons against stored claim and inventory times
+	// (hold expiry, observation freshness) use it.
+	StoreClock(ctx context.Context) (time.Time, error)
 
 	// ClaimAgentReincarnation records a reincarnation as pending (state
 	// pending, reincarnation_updated_at=at) and bumps state_version, when the

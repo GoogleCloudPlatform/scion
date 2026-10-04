@@ -398,6 +398,11 @@ func (Agent) Fields() []ent.Field {
 		field.Time("start_claim_hold_until").
 			Optional().
 			Nillable(),
+		// start_claim_launch_id is the launch a create claim was linked to
+		// when that launch began, so only that launch's end settles it.
+		field.String("start_claim_launch_id").
+			Optional().
+			Default(""),
 	}
 }
 

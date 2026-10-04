@@ -148,3 +148,21 @@ func TestRecoveryObs_UpdateRuntimeBrokerLeavesInventoryAndDeletesCascade(t *test
 	require.NoError(t, err)
 	assert.Empty(t, inv, "deleting the broker deletes its inventory times")
 }
+
+func TestRecoveryObs_UpsertsOverConcurrentInsert(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := newClaimAgent(t, ctx, s, projectID, "obs-upsert")
+	// A row inserted by another writer before this heartbeat's write.
+	_, err := s.client.AgentRecovery.Create().SetID(a.ID).SetBrokerID("other").SetObservedState(string(store.ObservedPresentRunning)).Save(ctx)
+	require.NoError(t, err)
+	_, err = s.RecordRecoveryObservations(ctx, "broker-1", []string{"A"}, []store.RecoveryObservation{
+		{AgentID: a.ID, Target: "A", State: store.ObservedAbsent},
+	})
+	require.NoError(t, err)
+	got, err := s.GetRecoveryObservations(ctx, []string{a.ID})
+	require.NoError(t, err)
+	assert.Equal(t, store.ObservedAbsent, got[a.ID].State)
+	assert.Equal(t, "broker-1", got[a.ID].BrokerID)
+	require.NotNil(t, got[a.ID].FirstAbsentAt)
+}

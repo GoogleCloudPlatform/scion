@@ -295,6 +295,10 @@ func init() {
 	agentDescStartClaimTarget := agentFields[70].Descriptor()
 	// agent.DefaultStartClaimTarget holds the default value on creation for the start_claim_target field.
 	agent.DefaultStartClaimTarget = agentDescStartClaimTarget.Default.(string)
+	// agentDescStartClaimLaunchID is the schema descriptor for start_claim_launch_id field.
+	agentDescStartClaimLaunchID := agentFields[75].Descriptor()
+	// agent.DefaultStartClaimLaunchID holds the default value on creation for the start_claim_launch_id field.
+	agent.DefaultStartClaimLaunchID = agentDescStartClaimLaunchID.Default.(string)
 	// agentDescID is the schema descriptor for id field.
 	agentDescID := agentFields[0].Descriptor()
 	// agent.DefaultID holds the default value on creation for the id field.

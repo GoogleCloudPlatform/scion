@@ -22,6 +22,7 @@ import (
 	"entgo.io/ent/dialect"
 	"entgo.io/ent/dialect/sql"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/agentrecovery"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokertargetinventory"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -73,15 +74,15 @@ func (s *AgentStore) RecordRecoveryObservations(ctx context.Context, brokerID st
 	}
 	now := claimTime(raw)
 
-	existing := map[string]*time.Time{} // agent ID -> stored first_absent_at, for rows that are absent
-	present := map[string]bool{}
+	// Stored first_absent_at of agents currently observed absent, so a run
+	// of absent observations keeps its first time.
+	existing := map[string]*time.Time{}
 	if len(ids) > 0 {
 		rows, err := ltx.client.AgentRecovery.Query().Where(agentrecovery.IDIn(ids...)).All(ctx)
 		if err != nil {
 			return time.Time{}, mapError(err)
 		}
 		for _, r := range rows {
-			present[r.ID] = true
 			if r.ObservedState == string(store.ObservedAbsent) {
 				existing[r.ID] = r.FirstAbsentAt
 			}
@@ -97,32 +98,32 @@ func (s *AgentStore) RecordRecoveryObservations(ctx context.Context, brokerID st
 			}
 			firstAbsent = &t
 		}
-		if present[o.AgentID] {
-			u := ltx.client.AgentRecovery.UpdateOneID(o.AgentID).
-				SetBrokerID(brokerID).
-				SetObservedState(string(o.State)).
-				SetObservedTarget(o.Target).
-				SetObservedAt(now).
-				SetObservedInFlight(o.InFlight)
-			if firstAbsent != nil {
-				u.SetFirstAbsentAt(*firstAbsent)
-			} else {
-				u.ClearFirstAbsentAt()
-			}
-			if _, err := u.Save(ctx); err != nil {
-				return time.Time{}, mapError(err)
-			}
-			continue
-		}
-		c := ltx.client.AgentRecovery.Create().
+		// An upsert, so a row first inserted by a concurrent heartbeat
+		// between the read above and this write does not fail the
+		// transaction.
+		err := ltx.client.AgentRecovery.Create().
 			SetID(o.AgentID).
 			SetBrokerID(brokerID).
 			SetObservedState(string(o.State)).
 			SetObservedTarget(o.Target).
 			SetObservedAt(now).
 			SetObservedInFlight(o.InFlight).
-			SetNillableFirstAbsentAt(firstAbsent)
-		if _, err := c.Save(ctx); err != nil {
+			SetNillableFirstAbsentAt(firstAbsent).
+			OnConflictColumns(agentrecovery.FieldID).
+			Update(func(u *ent.AgentRecoveryUpsert) {
+				u.SetBrokerID(brokerID).
+					SetObservedState(string(o.State)).
+					SetObservedTarget(o.Target).
+					SetObservedAt(now).
+					SetObservedInFlight(o.InFlight)
+				if firstAbsent != nil {
+					u.SetFirstAbsentAt(*firstAbsent)
+				} else {
+					u.ClearFirstAbsentAt()
+				}
+			}).
+			Exec(ctx)
+		if err != nil {
 			return time.Time{}, mapError(err)
 		}
 	}

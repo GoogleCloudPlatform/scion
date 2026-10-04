@@ -350,12 +350,24 @@ func TestStartClaim_LaunchActiveBlocksReaperWrites(t *testing.T) {
 	demoted, err := s.DemoteExpiredStartClaim(ctx, a.ID, c.ID, testHolds)
 	require.NoError(t, err)
 	assert.False(t, demoted, "an active launch owns liveness: no demotion")
-	n, err := s.DemoteOwnerStartClaims(ctx, "hub-", testHolds)
+	n, err := s.DemoteOwnerStartClaims(ctx, "hub-", "", testHolds)
 	require.NoError(t, err)
 	assert.Equal(t, 0, n)
 	changed, err := s.SettleEndedLaunchClaim(ctx, a.ID, c.ID)
 	require.NoError(t, err)
 	assert.False(t, changed)
+
+	// Even an unconfirmed claim is not released while the launch is active.
+	held, err := s.MarkStartUnconfirmed(ctx, a.ID, c.ID, "hub-1", time.Minute)
+	require.NoError(t, err)
+	assert.False(t, held, "the expired lease cannot be marked by its holder")
+	uid, err := parseUUID(a.ID)
+	require.NoError(t, err)
+	_, err = s.client.Agent.UpdateOneID(uid).SetStartClaimState(string(store.StartClaimUnconfirmed)).Save(ctx)
+	require.NoError(t, err)
+	released, err := s.ReleaseUnconfirmedStart(ctx, a.ID, c.ID)
+	require.NoError(t, err)
+	assert.False(t, released, "an active launch owns liveness: no release")
 }
 
 func TestStartClaim_ReleaseSuperseded(t *testing.T) {
@@ -454,16 +466,23 @@ func TestStartClaim_DemoteOwnerPrefix(t *testing.T) {
 	_, err = s.ClaimAgentStart(ctx, other.ID, "hub-pod-b-5678", store.StartClaimUser, "", testClaimTTL)
 	require.NoError(t, err)
 
-	n, err := s.DemoteOwnerStartClaims(ctx, "hub-pod-a-", testHolds)
+	self := newClaimAgent(t, ctx, s, projectID, "sc-owner-self")
+	_, err = s.ClaimAgentStart(ctx, self.ID, "hub-pod-a-9999", store.StartClaimUser, "", testClaimTTL)
+	require.NoError(t, err)
+
+	n, err := s.DemoteOwnerStartClaims(ctx, "hub-pod-a-", "hub-pod-a-9999", testHolds)
 	require.NoError(t, err)
 	assert.Equal(t, 1, n)
+	got0, err := s.GetAgent(ctx, self.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.StartClaimLive, got0.StartClaimState, "this process's own claims are not demoted")
 	got, err := s.GetAgent(ctx, mine.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.StartClaimUnconfirmed, got.StartClaimState)
 	got, err = s.GetAgent(ctx, other.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.StartClaimLive, got.StartClaimState)
-	_, err = s.DemoteOwnerStartClaims(ctx, "", testHolds)
+	_, err = s.DemoteOwnerStartClaims(ctx, "", "", testHolds)
 	require.ErrorIs(t, err, store.ErrInvalidInput)
 }
 
@@ -584,8 +603,29 @@ func TestStartClaim_LaunchEndSettlement(t *testing.T) {
 		assert.Empty(t, got.StartClaimID)
 	})
 
-	t.Run("backstop settles a launch that ended without settling", func(t *testing.T) {
+	t.Run("backstop settles a linked launch that ended without settling", func(t *testing.T) {
 		a := createLaunchableAgent(t, ctx, s, projectID, "sc-settle-backstop")
+		c, err := s.ClaimAgentStart(ctx, a.ID, "hub-1", store.StartClaimCreate, "", testClaimTTL)
+		require.NoError(t, err)
+		_, err = s.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, time.Hour)
+		require.NoError(t, err)
+		// A running status write ends the launch as running_observed
+		// without settling the claim; the backstop does.
+		require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running"}))
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		require.Equal(t, store.LaunchEndReasonRunningObserved, got.LaunchEndReason)
+		require.Equal(t, c.ID, got.StartClaimID)
+		changed, err := s.SettleEndedLaunchClaim(ctx, a.ID, c.ID)
+		require.NoError(t, err)
+		assert.True(t, changed)
+		got, err = s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Empty(t, got.StartClaimID)
+	})
+
+	t.Run("claim taken after the launch ended is untouched", func(t *testing.T) {
+		a := createLaunchableAgent(t, ctx, s, projectID, "sc-settle-after")
 		launchID, err := s.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, time.Hour)
 		require.NoError(t, err)
 		require.NoError(t, s.EndLaunch(ctx, a.ID, launchID, store.LaunchEndReasonLost))
@@ -593,13 +633,27 @@ func TestStartClaim_LaunchEndSettlement(t *testing.T) {
 		require.NoError(t, err)
 		changed, err := s.SettleEndedLaunchClaim(ctx, a.ID, c.ID)
 		require.NoError(t, err)
-		assert.True(t, changed)
+		assert.False(t, changed, "a claim not linked to the ended launch is not settled")
 		got, err := s.GetAgent(ctx, a.ID)
 		require.NoError(t, err)
-		assert.Equal(t, store.StartClaimUnconfirmed, got.StartClaimState)
-		changed, err = s.SettleEndedLaunchClaim(ctx, a.ID, c.ID)
+		assert.Equal(t, store.StartClaimLive, got.StartClaimState)
+	})
+
+	t.Run("a newer launch supersedes the linked one", func(t *testing.T) {
+		a := createLaunchableAgent(t, ctx, s, projectID, "sc-settle-super")
+		c, err := s.ClaimAgentStart(ctx, a.ID, "hub-1", store.StartClaimCreate, "", testClaimTTL)
 		require.NoError(t, err)
-		assert.False(t, changed, "an unconfirmed claim is not demoted twice")
+		first, err := s.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, time.Hour)
+		require.NoError(t, err)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		require.Equal(t, first, got.StartClaimLaunchID)
+		_, err = s.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, time.Hour)
+		require.NoError(t, err)
+		got, err = s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, c.ID, got.StartClaimID)
+		assert.Equal(t, store.StartClaimUnconfirmed, got.StartClaimState, "a superseded launch demotes its claim")
 	})
 }
 
@@ -662,4 +716,52 @@ func TestStartClaim_IntentStrictlyIncreasesWhenClockBehind(t *testing.T) {
 	got, err := s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
 	assert.True(t, got.RunIntentMatches(store.RunIntentRunning, c.RunIntentAt))
+}
+
+func TestStartClaim_SupersededStopDoesNotReleaseStopClaim(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := newClaimAgent(t, ctx, s, projectID, "sc-sup-stopkind")
+	stopAt, err := s.SetRunIntent(ctx, a.ID, store.RunIntentStopped)
+	require.NoError(t, err)
+	c, err := s.ClaimAgentStop(ctx, a.ID, "hub-1", stopAt, testClaimTTL)
+	require.NoError(t, err)
+	released, err := s.ReleaseSupersededStart(ctx, a.ID, c.ID, stopAt)
+	require.NoError(t, err)
+	assert.False(t, released, "a stop does not release a queued stop's own claim")
+}
+
+func TestStartClaim_WritesKeepUpdatedAndListSkipsDeleted(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := newClaimAgent(t, ctx, s, projectID, "sc-updated")
+	before, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	time.Sleep(5 * time.Millisecond)
+	c, err := s.ClaimAgentStart(ctx, a.ID, "hub-1", store.StartClaimUser, "", testClaimTTL)
+	require.NoError(t, err)
+	_, err = s.RenewAgentStart(ctx, a.ID, c.ID, "hub-1", testClaimTTL)
+	require.NoError(t, err)
+	_, err = s.MarkStartUnconfirmed(ctx, a.ID, c.ID, "hub-1", time.Minute)
+	require.NoError(t, err)
+	_, err = s.ReleaseUnconfirmedStart(ctx, a.ID, c.ID)
+	require.NoError(t, err)
+	after, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.True(t, after.Updated.Equal(before.Updated), "claim writes leave agents.updated unchanged (%v -> %v)", before.Updated, after.Updated)
+
+	gone := newClaimAgent(t, ctx, s, projectID, "sc-updated-deleted")
+	_, err = s.ClaimAgentStart(ctx, gone.ID, "hub-1", store.StartClaimUser, "", testClaimTTL)
+	require.NoError(t, err)
+	cur, err := s.GetAgent(ctx, gone.ID)
+	require.NoError(t, err)
+	cur.DeletedAt = time.Now()
+	require.NoError(t, s.UpdateAgent(ctx, cur))
+	list, err := s.ListAgentsWithStartClaim(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, list, "soft-deleted agents are not listed")
+
+	now, err := s.StoreClock(ctx)
+	require.NoError(t, err)
+	assert.WithinDuration(t, time.Now(), now, time.Minute)
 }
