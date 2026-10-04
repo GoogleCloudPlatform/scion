@@ -442,22 +442,36 @@ server:
 }
 
 func TestValidateSettings_WorkspaceStorageVolumeNameRequired(t *testing.T) {
-	for _, block := range []string{"cloudrun_volume", "gke_shared_volume"} {
+	// The requirement is conditional on backend, like ValidateWorkspaceStorage:
+	// only the selected volume block must name its volume.
+	for backend, block := range map[string]string{"cloudrun-volume": "cloudrun_volume", "gke-shared-volume": "gke_shared_volume"} {
 		t.Run(block, func(t *testing.T) {
-			good := []byte("schema_version: \"1\"\nserver:\n  workspace_storage:\n    " + block + ":\n      volume_name: workspaces\n")
-			errors, err := ValidateSettings(good, "1")
-			require.NoError(t, err)
-			assert.Empty(t, errors)
+			doc := func(backend, body string) []byte {
+				return []byte("schema_version: \"1\"\nserver:\n  workspace_storage:\n    backend: " + backend + "\n" + body)
+			}
+			blockWith := func(field string) string { return "    " + block + ":\n      " + field + "\n" }
 
-			missing := []byte("schema_version: \"1\"\nserver:\n  workspace_storage:\n    " + block + ":\n      subpath_root: projects\n")
-			errors, err = ValidateSettings(missing, "1")
-			require.NoError(t, err)
-			assert.NotEmpty(t, errors, "missing volume_name should produce a validation error")
+			valid := map[string][]byte{
+				"selected block with volume_name": doc(backend, blockWith("volume_name: workspaces")),
+				"unselected leftover block":       doc("nfs", blockWith("subpath_root: projects")),
+				"unselected empty volume_name":    doc("local", blockWith(`volume_name: ""`)),
+			}
+			for name, data := range valid {
+				errors, err := ValidateSettings(data, "1")
+				require.NoError(t, err)
+				assert.Empty(t, errors, name)
+			}
 
-			empty := []byte("schema_version: \"1\"\nserver:\n  workspace_storage:\n    " + block + ":\n      volume_name: \"\"\n")
-			errors, err = ValidateSettings(empty, "1")
-			require.NoError(t, err)
-			assert.NotEmpty(t, errors, "empty volume_name should produce a validation error")
+			invalid := map[string][]byte{
+				"missing volume_name": doc(backend, blockWith("subpath_root: projects")),
+				"empty volume_name":   doc(backend, blockWith(`volume_name: ""`)),
+				"missing block":       doc(backend, ""),
+			}
+			for name, data := range invalid {
+				errors, err := ValidateSettings(data, "1")
+				require.NoError(t, err)
+				assert.NotEmpty(t, errors, name)
+			}
 		})
 	}
 }

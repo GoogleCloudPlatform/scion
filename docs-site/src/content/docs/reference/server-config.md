@@ -239,7 +239,7 @@ Configures the backend and mount settings for storing and managing agent workspa
 | `nfs.storage_class` | string | | The Kubernetes StorageClass name used to dynamically allocate volumes on GKE. |
 | `nfs.subpath_root` | string | `"projects"` | The base folder within the share for project workspaces. See [subpath_root](#subpath_root). |
 | `nfs.shares` | list of objects | `[]` | List of NFS share objects. Each share requires: `id` (stable ID), `server` (IP address or hostname), `export` (exported path, e.g., `/scion-workspaces`), and optional `pv_name` (for GKE). |
-| `cloudrun_volume.volume_name` | string | | **Required** when `backend` is `"cloudrun-volume"`. The name of the platform volume declared in the Cloud Run service specification. The Hub resolves workspaces under `/mnt/<volume_name>`, which is where Cloud Run mounts a declared volume. If it is missing or empty, the Hub refuses to start. |
+| `cloudrun_volume.volume_name` | string | | **Required** when `backend` is `"cloudrun-volume"` (the settings schema checks this only for the selected backend). The name of the platform volume declared in the Cloud Run service specification. The Hub resolves workspaces under `/mnt/<volume_name>`, which is where Cloud Run mounts a declared volume. If it is missing or empty, the Hub refuses to start. |
 | `cloudrun_volume.subpath_root` | string | `"projects"` | Sub-directory prefix within the Cloud Run volume. See [subpath_root](#subpath_root). |
 | `gke_shared_volume.volume_name` | string | | **Required** when `backend` is `"gke-shared-volume"`; if it is missing or empty, the Hub refuses to start. The K8s volume name referencing the persistent volume claim (PVC). **The pod spec must mount that volume at `/mnt/<volume_name>`**: the Hub derives every workspace path from it, and a pod that mounts the PVC elsewhere fails readiness (`GET /readyz` returns `503`) rather than writing workspaces to ephemeral container storage. |
 | `gke_shared_volume.pv_claim_name` | string | | The name of the GKE-managed PVC bound to the shared storage backend (e.g. Filestore). |
@@ -254,11 +254,16 @@ The Hub checks `workspace_storage` when it starts, and refuses to start with an 
 - `backend` is `"cloudrun-volume"` or `"gke-shared-volume"` and the matching `volume_name` is missing or empty;
 - the selected backend's `subpath_root` is invalid (see below).
 
-A Runtime Broker that runs without the Hub keeps its own NFS handling: it logs a warning and skips the NFS checks instead of failing (see [NFS Mounts on the Runtime Broker](#nfs-mounts-on-the-runtime-broker)).
+A Runtime Broker that runs without the Hub does not refuse to start. It only logs warnings:
+
+- If the `nfs` block is incomplete, the broker warns and skips its NFS mount checks (see [NFS Mounts on the Runtime Broker](#nfs-mounts-on-the-runtime-broker)).
+- If the selected backend's `subpath_root` is invalid, the broker warns at startup. Its NFS mount checks still run, because they do not use `subpath_root`. However, every agent start that uses that backend fails with a `subpath_root` error until the value is fixed. This includes values such as `projects/` or `./projects`, which earlier versions accepted and normalized.
+
+The Hub's readiness check (`GET /readyz`) and its Cloud Run write guard still apply as further safeguards. A volume backend without a mount point fails readiness, and blocks workspace writes on Cloud Run.
 
 #### subpath_root
 
-`subpath_root` is the directory inside the share or volume that holds project trees, at `<subpath_root>/<project-id>/...`. It defaults to `"projects"` for every backend, and for `shared_dir_storage.nfs`. It must be a clean relative path: no leading `/`, no `.` or `..` components, no empty components and no trailing `/`. It may have several components, for example `team/projects`. The Cloud Run runtime's NFS export paths use the same `nfs.subpath_root`.
+`subpath_root` is the directory inside the share or volume that holds project trees, at `<subpath_root>/<project-id>/...`. It defaults to `"projects"` for every backend, and for `shared_dir_storage.nfs`. It must be a clean relative path: no leading `/`, no `.` or `..` components, no empty components and no trailing `/`. If a value is not clean, the error names the clean value to use instead (for example `projects` for `projects/`). It may have several components, for example `team/projects`. The Cloud Run runtime's NFS export paths use the same `nfs.subpath_root`.
 
 #### NFS Mounts on the Runtime Broker
 

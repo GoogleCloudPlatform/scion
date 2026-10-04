@@ -59,6 +59,23 @@ func brokerNFSConfig(vs *config.VersionedSettings) (*config.V1NFSConfig, string)
 	return ws.NFS, ""
 }
 
+// brokerWorkspaceStorageWarning returns a startup warning when the
+// subpath_root of the selected server.workspace_storage backend is invalid,
+// or "" when it is fine. The broker does not refuse to start, and NFS mount
+// checks (brokerNFSConfig) do not depend on subpath_root, but the runtime
+// workspace backends reject the value, so every agent start on this backend
+// would fail; this says so once, at startup, instead of only per agent.
+func brokerWorkspaceStorageWarning(vs *config.VersionedSettings) string {
+	if vs == nil || vs.Server == nil {
+		return ""
+	}
+	if err := vs.Server.WorkspaceStorage.ValidateSelectedSubPathRoot(); err != nil {
+		return fmt.Sprintf("invalid server.%v; agent starts that use the %q workspace backend will fail until it is fixed",
+			err, vs.Server.WorkspaceStorage.Backend)
+	}
+	return ""
+}
+
 // validateBrokerNFS checks the fields the broker uses to build each mount:
 // an absolute mount_root, and per share a unique id that is a single path
 // element, a server, and an absolute export.

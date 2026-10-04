@@ -16,6 +16,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -4973,6 +4974,13 @@ func TestWorkspaceStorageConfig_NFSDefaults(t *testing.T) {
 		assert.Nil(t, ws.NFS)
 	})
 
+	t.Run("backend name is case-sensitive", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{Backend: "NFS"}
+		ws.ApplyNFSDefaults()
+		assert.Nil(t, ws.NFS, "only the exact name \"nfs\" selects the NFS backend")
+		assert.NoError(t, ws.ValidateNFS(), "ValidateNFS ignores non-nfs backends; ValidateWorkspaceStorage rejects the name")
+	})
+
 	t.Run("nil receiver is safe", func(t *testing.T) {
 		var ws *V1WorkspaceStorageConfig
 		ws.ApplyNFSDefaults() // should not panic
@@ -5047,7 +5055,7 @@ func TestWorkspaceStorageConfig_ApplyWorkspaceStorageDefaults(t *testing.T) {
 	})
 
 	t.Run("local, unknown and nil are left alone", func(t *testing.T) {
-		for _, backend := range []string{"", "local", "s3"} {
+		for _, backend := range []string{"", "local", "s3", "NFS"} {
 			ws := &V1WorkspaceStorageConfig{Backend: backend}
 			ws.ApplyWorkspaceStorageDefaults()
 			assert.Equal(t, &V1WorkspaceStorageConfig{Backend: backend}, ws)
@@ -5113,6 +5121,42 @@ func TestWorkspaceStorageConfig_ValidateWorkspaceStorage(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantErr)
 		})
+	}
+}
+
+// TestValidateSubPathRoot_SuggestsCleanValue pins the clean-path check: it
+// runs before the component checks so an unclean value names the value to
+// use instead, and gives no suggestion for ".." or for a value that cleans
+// to ".".
+func TestValidateSubPathRoot_SuggestsCleanValue(t *testing.T) {
+	suggest := map[string]string{
+		"projects/":        "projects",
+		"./projects":       "projects",
+		"projects/.":       "projects",
+		"a//b":             "a/b",
+		"team/./projects/": "team/projects",
+	}
+	for in, want := range suggest {
+		err := ValidateSubPathRoot(in)
+		require.Error(t, err, in)
+		assert.Contains(t, err.Error(), fmt.Sprintf("must be a clean path (got %q, use %q)", in, want))
+	}
+
+	noSuggestion := map[string]string{
+		"projects/../escape": `".." path component`,
+		"../projects":        `".." path component`,
+		"a/..":               `".." path component`,
+		".":                  `"." path component`,
+	}
+	for in, want := range noSuggestion {
+		err := ValidateSubPathRoot(in)
+		require.Error(t, err, in)
+		assert.NotContains(t, err.Error(), "use ", in)
+		assert.Contains(t, err.Error(), want, in)
+	}
+
+	for _, valid := range []string{"projects", "team/projects", "a.b/c-d"} {
+		assert.NoError(t, ValidateSubPathRoot(valid), valid)
 	}
 }
 
@@ -5232,9 +5276,9 @@ func TestSharedDirStorageConfig_Validate(t *testing.T) {
 		want  string
 	}{
 		{"absolute", "/projects", "must be relative"},
-		{"empty component", "projects//nested", "empty path component"},
+		{"empty component", "projects//nested", `must be a clean path (got "projects//nested", use "projects/nested")`},
 		{"leading slash empty component", "/", "must be relative"},
-		{"dot component", "projects/./nested", "\".\" path component"},
+		{"dot component", "projects/./nested", `use "projects/nested"`},
 		{"dotdot component", "projects/../escape", "\"..\" path component"},
 		{"bare dotdot", "..", "\"..\" path component"},
 	}

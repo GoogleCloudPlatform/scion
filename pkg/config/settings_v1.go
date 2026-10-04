@@ -18,9 +18,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1479,7 +1481,7 @@ func ResolveSubPathRoot(subPathRoot string) (string, error) {
 // When Backend is empty or "local", the NFS block is left as-is (no materialization).
 // This is idempotent and safe to call multiple times.
 func (ws *V1WorkspaceStorageConfig) ApplyNFSDefaults() {
-	if ws == nil || strings.ToLower(ws.Backend) != "nfs" {
+	if ws == nil || ws.Backend != WorkspaceStorageBackendNFS {
 		return
 	}
 	if ws.NFS == nil {
@@ -1502,7 +1504,7 @@ func (ws *V1WorkspaceStorageConfig) ApplyNFSDefaults() {
 // ValidateNFS returns an error if Backend is "nfs" but the NFS block is
 // misconfigured (e.g. no shares defined). Call after ApplyNFSDefaults.
 func (ws *V1WorkspaceStorageConfig) ValidateNFS() error {
-	if ws == nil || strings.ToLower(ws.Backend) != "nfs" {
+	if ws == nil || ws.Backend != WorkspaceStorageBackendNFS {
 		return nil
 	}
 	if ws.NFS == nil || len(ws.NFS.Shares) == 0 {
@@ -1551,14 +1553,14 @@ func (ws *V1WorkspaceStorageConfig) ApplyWorkspaceStorageDefaults() {
 // config, an empty backend and "local" are valid. Call after
 // ApplyWorkspaceStorageDefaults.
 //
-// Backend names are matched exactly (case-sensitive), as everywhere else
-// they are consumed: a backend like "NFS" was previously treated as local.
+// Backend names are matched exactly (case-sensitive), as in every consumer
+// (ApplyNFSDefaults and ValidateNFS included): a backend like "NFS" was
+// previously treated as local by the hub and the runtimes.
 func (ws *V1WorkspaceStorageConfig) ValidateWorkspaceStorage() error {
 	if ws == nil {
 		return nil
 	}
 
-	var subPathRoot, block string
 	switch ws.Backend {
 	case "", WorkspaceStorageBackendLocal:
 		return nil
@@ -1566,25 +1568,47 @@ func (ws *V1WorkspaceStorageConfig) ValidateWorkspaceStorage() error {
 		if err := ws.ValidateNFS(); err != nil {
 			return err
 		}
-		subPathRoot, block = ws.NFS.SubPathRoot, "nfs"
 	case WorkspaceStorageBackendCloudRunVolume:
 		if ws.CloudRunVolume == nil || ws.CloudRunVolume.VolumeName == "" {
 			return fmt.Errorf("workspace_storage.backend is %q but workspace_storage.cloudrun_volume.volume_name is not set; "+
 				"set it to the name of the volume declared in the Cloud Run service", ws.Backend)
 		}
-		subPathRoot, block = ws.CloudRunVolume.SubPathRoot, "cloudrun_volume"
 	case WorkspaceStorageBackendGKESharedVolume:
 		if ws.GKESharedVolume == nil || ws.GKESharedVolume.VolumeName == "" {
 			return fmt.Errorf("workspace_storage.backend is %q but workspace_storage.gke_shared_volume.volume_name is not set; "+
 				"set it to the pod volume that mounts the shared PVC at /mnt/<volume_name>", ws.Backend)
 		}
-		subPathRoot, block = ws.GKESharedVolume.SubPathRoot, "gke_shared_volume"
 	default:
 		return fmt.Errorf("workspace_storage.backend %q is not supported; use one of %q, %q, %q or %q",
 			ws.Backend, WorkspaceStorageBackendLocal, WorkspaceStorageBackendNFS,
 			WorkspaceStorageBackendCloudRunVolume, WorkspaceStorageBackendGKESharedVolume)
 	}
 
+	return ws.ValidateSelectedSubPathRoot()
+}
+
+// ValidateSelectedSubPathRoot checks, with ValidateSubPathRoot, the
+// subpath_root of the block Backend selects (an empty value is the default
+// and valid). It returns nil for a backend without a subpath_root, an
+// unknown backend, or a missing block; ValidateWorkspaceStorage reports
+// those. It is the part of ValidateWorkspaceStorage a Runtime Broker also
+// runs at startup: the runtime workspace backends reject an invalid
+// subpath_root on every agent start, so the broker warns about it early.
+func (ws *V1WorkspaceStorageConfig) ValidateSelectedSubPathRoot() error {
+	if ws == nil {
+		return nil
+	}
+	var subPathRoot, block string
+	switch {
+	case ws.Backend == WorkspaceStorageBackendNFS && ws.NFS != nil:
+		subPathRoot, block = ws.NFS.SubPathRoot, "nfs"
+	case ws.Backend == WorkspaceStorageBackendCloudRunVolume && ws.CloudRunVolume != nil:
+		subPathRoot, block = ws.CloudRunVolume.SubPathRoot, "cloudrun_volume"
+	case ws.Backend == WorkspaceStorageBackendGKESharedVolume && ws.GKESharedVolume != nil:
+		subPathRoot, block = ws.GKESharedVolume.SubPathRoot, "gke_shared_volume"
+	default:
+		return nil
+	}
 	if err := ValidateSubPathRoot(SubPathRootOrDefault(subPathRoot)); err != nil {
 		return fmt.Errorf("workspace_storage.%s.subpath_root %w", block, err)
 	}
@@ -1680,14 +1704,27 @@ func (s *V1SharedDirStorageConfig) Validate() error {
 //
 // It is the one subpath_root validator shared by every storage backend and
 // by the runtimes that build paths from the value (see ResolveSubPathRoot).
-// Beyond the component checks, the value must already be clean
-// (filepath.Clean(v) == v), so the configured string is exactly the path
-// segment chain that gets joined.
+// The value must already be clean (path.Clean of its slash form leaves it
+// unchanged), so the configured string is exactly the path segment chain
+// that gets joined; an unclean value is reported with its clean form.
 func ValidateSubPathRoot(subPathRoot string) error {
-	if filepath.IsAbs(subPathRoot) || strings.HasPrefix(filepath.ToSlash(subPathRoot), "/") {
+	slashed := filepath.ToSlash(subPathRoot)
+	if filepath.IsAbs(subPathRoot) || strings.HasPrefix(slashed, "/") {
 		return fmt.Errorf("must be relative, not absolute (got %q)", subPathRoot)
 	}
-	for _, comp := range strings.Split(filepath.ToSlash(subPathRoot), "/") {
+	// Compared in slash form with path.Clean, not filepath.Clean: on Windows
+	// filepath.Clean("team/projects") is `team\projects`, which would reject
+	// every valid multi-segment root. Checked before the component loop so
+	// that an unclean value ("projects/", "./projects", "a//b") reports the
+	// clean value to use instead. A value with a ".." component gets no
+	// suggestion (cleaning "projects/../escape" to "escape" is not what the
+	// operator meant), nor one that cleans to "."; the component loop below
+	// reports those.
+	comps := strings.Split(slashed, "/")
+	if cleaned := path.Clean(slashed); cleaned != slashed && cleaned != "." && !slices.Contains(comps, "..") {
+		return fmt.Errorf("must be a clean path (got %q, use %q)", subPathRoot, cleaned)
+	}
+	for _, comp := range comps {
 		switch comp {
 		case "":
 			return fmt.Errorf("must not contain an empty path component (got %q)", subPathRoot)
@@ -1696,9 +1733,6 @@ func ValidateSubPathRoot(subPathRoot string) error {
 		case "..":
 			return fmt.Errorf("must not contain a \"..\" path component (got %q)", subPathRoot)
 		}
-	}
-	if filepath.Clean(subPathRoot) != subPathRoot {
-		return fmt.Errorf("must be a clean path (got %q, want %q)", subPathRoot, filepath.Clean(subPathRoot))
 	}
 	return nil
 }

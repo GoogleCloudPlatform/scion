@@ -951,14 +951,12 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 	return cleanups, requestLogger, messageLogger, nil
 }
 
-// loadAndReconcileConfig loads the server configuration file and reconciles
-// it with command-line flags and workstation defaults.
 // validateHubWorkspaceStorage fails hub startup when server.workspace_storage
 // cannot be used: an unknown backend, nfs without shares, a volume backend
 // without volume_name, or an invalid subpath_root. Without it the hub would
 // quietly fall back to ephemeral local project paths and only readiness
-// would notice. Broker-only processes keep their own handling (the broker
-// warns and skips NFS checks; see brokerNFSConfig).
+// would notice. A broker-only process never calls this: it only logs
+// startup warnings (brokerNFSConfig, brokerWorkspaceStorageWarning).
 func validateHubWorkspaceStorage(cfg *config.GlobalConfig) error {
 	if cfg == nil {
 		return nil
@@ -972,6 +970,8 @@ func validateHubWorkspaceStorage(cfg *config.GlobalConfig) error {
 	return nil
 }
 
+// loadAndReconcileConfig loads the server configuration file and reconciles
+// it with command-line flags and workstation defaults.
 func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 	cfg, err := config.LoadGlobalConfig(serverConfigPath)
 	if err != nil {
@@ -3074,6 +3074,9 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		brokerNFS, nfsWarning = brokerNFSConfig(globalVS)
 		if nfsWarning != "" {
 			log.Printf("WARNING: %s", nfsWarning)
+		}
+		if warning := brokerWorkspaceStorageWarning(globalVS); warning != "" {
+			log.Printf("WARNING: %s", warning)
 		}
 	}
 

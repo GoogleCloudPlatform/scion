@@ -162,3 +162,86 @@ func TestServerForeground_WiresHubWorkspaceStorageValidation(t *testing.T) {
 		t.Fatalf("runServerStart calls validateHubWorkspaceStorage %d time(s), %d under `if enableHub`; want exactly one, gated", calls, gated)
 	}
 }
+
+// TestBrokerWorkspaceStorageWarning covers the broker-side startup warning
+// for an invalid subpath_root: the broker keeps starting, but warns that
+// agent starts on that backend will fail.
+func TestBrokerWorkspaceStorageWarning(t *testing.T) {
+	settings := func(ws *config.V1WorkspaceStorageConfig) *config.VersionedSettings {
+		return &config.VersionedSettings{Server: &config.V1ServerConfig{WorkspaceStorage: ws}}
+	}
+	nfs := func(root string) *config.V1WorkspaceStorageConfig {
+		return &config.V1WorkspaceStorageConfig{Backend: "nfs", NFS: &config.V1NFSConfig{
+			MountRoot:   "/mnt/nfs",
+			Shares:      []config.V1NFSShare{{ID: "ws1", Server: "10.0.0.2", Export: "/scion"}},
+			SubPathRoot: root,
+		}}
+	}
+
+	quiet := map[string]*config.VersionedSettings{
+		"nil settings":           nil,
+		"no server":              {},
+		"no workspace_storage":   settings(nil),
+		"local":                  settings(&config.V1WorkspaceStorageConfig{Backend: "local"}),
+		"nfs default root":       settings(nfs("")),
+		"nfs multi-segment root": settings(nfs("team/trees")),
+		// Not this warning's job: the broker logs nfs problems through
+		// brokerNFSConfig, and the hub rejects these at startup.
+		"nfs without block":       settings(&config.V1WorkspaceStorageConfig{Backend: "nfs"}),
+		"volume without block":    settings(&config.V1WorkspaceStorageConfig{Backend: "gke-shared-volume"}),
+		"unselected invalid root": settings(&config.V1WorkspaceStorageConfig{Backend: "local", CloudRunVolume: &config.V1CloudRunVolumeConfig{SubPathRoot: "/x"}}),
+	}
+	for name, vs := range quiet {
+		if got := brokerWorkspaceStorageWarning(vs); got != "" {
+			t.Errorf("%s: unexpected warning %q", name, got)
+		}
+	}
+
+	loud := map[string]struct {
+		vs   *config.VersionedSettings
+		want string
+	}{
+		"nfs unclean root": {settings(nfs("projects/")), `server.workspace_storage.nfs.subpath_root must be a clean path (got "projects/", use "projects")`},
+		"cloudrun-volume traversal": {
+			settings(&config.V1WorkspaceStorageConfig{Backend: "cloudrun-volume", CloudRunVolume: &config.V1CloudRunVolumeConfig{VolumeName: "v", SubPathRoot: "../x"}}),
+			"server.workspace_storage.cloudrun_volume.subpath_root",
+		},
+		"gke-shared-volume absolute": {
+			settings(&config.V1WorkspaceStorageConfig{Backend: "gke-shared-volume", GKESharedVolume: &config.V1GKESharedVolumeConfig{VolumeName: "v", SubPathRoot: "/x"}}),
+			"server.workspace_storage.gke_shared_volume.subpath_root must be relative",
+		},
+	}
+	for name, tc := range loud {
+		got := brokerWorkspaceStorageWarning(tc.vs)
+		if !strings.Contains(got, tc.want) || !strings.Contains(got, "agent starts") {
+			t.Errorf("%s: warning = %q, want it to contain %q and mention agent starts", name, got, tc.want)
+		}
+	}
+
+	// An invalid subpath_root does not disable NFS mount checks: they do not
+	// use it.
+	if cfg, warn := brokerNFSConfig(settings(nfs("projects/"))); cfg == nil || warn != "" {
+		t.Errorf("brokerNFSConfig with an unclean subpath_root = %v, %q; want config and no warning", cfg, warn)
+	}
+}
+
+// TestServerForeground_WiresBrokerWorkspaceStorageWarning pins the call that
+// logs the warning above at broker startup.
+func TestServerForeground_WiresBrokerWorkspaceStorageWarning(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "server_foreground.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	calls := 0
+	ast.Inspect(file, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "brokerWorkspaceStorageWarning" {
+				calls++
+			}
+		}
+		return true
+	})
+	if calls != 1 {
+		t.Fatalf("server_foreground.go calls brokerWorkspaceStorageWarning %d time(s), want 1", calls)
+	}
+}
