@@ -172,17 +172,27 @@ func syncsHubProjectWorkspace(project *store.Project) bool {
 	return project.GitRemote == "" || project.IsSharedWorkspace()
 }
 
+// brokerLacksEmptyPerAgentDetail is the user-facing tail of the 412 the web
+// and CLI show verbatim. Upgrading does not help a Cloud Run or Substrate
+// broker, so it names the cause and the brokers that can run the project.
+const brokerLacksEmptyPerAgentDetail = `cannot run "Empty directory per agent" (empty-per-agent) workspaces ` +
+	"(Cloud Run and Substrate brokers, and brokers older than this release, lack support); " +
+	"pick a Docker, Podman, Apple or Kubernetes broker"
+
 // errBrokerLacksEmptyPerAgent is returned when an empty-per-agent agent would
 // be dispatched to a runtime broker that does not advertise the
 // emptyPerAgentWorkspace capability. Handlers map it to 412.
-var errBrokerLacksEmptyPerAgent = errors.New("runtime broker does not support empty-per-agent workspaces; upgrade the broker")
+var errBrokerLacksEmptyPerAgent = errors.New("runtime broker " + brokerLacksEmptyPerAgentDetail)
 
 // brokerLacksEmptyPerAgentError wraps errBrokerLacksEmptyPerAgent with the
 // broker's display name.
 type brokerLacksEmptyPerAgentError struct{ broker string }
 
 func (e *brokerLacksEmptyPerAgentError) Error() string {
-	return fmt.Sprintf("broker %s does not support empty-per-agent workspaces; upgrade the broker", e.broker)
+	if e.broker == "" {
+		return errBrokerLacksEmptyPerAgent.Error()
+	}
+	return fmt.Sprintf("broker %s %s", e.broker, brokerLacksEmptyPerAgentDetail)
 }
 
 func (e *brokerLacksEmptyPerAgentError) Unwrap() error { return errBrokerLacksEmptyPerAgent }
