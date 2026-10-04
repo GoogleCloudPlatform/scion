@@ -57,7 +57,7 @@ Scion enforces strict role-binding-based authorization for all agent operations:
 
 ### Membership-Based Project Access (Visibility Eradication)
 
-The legacy, non-functional project `Visibility` field (e.g., `private`, `team`, or `public`) has been completely eradicated. Instead, access control is governed entirely by membership-based policies. The same applies to agents, templates, harness configs, and skills: their `visibility` field has been removed from the API (including the agent SSE payload), and access depends only on scope and grants. User- and project-scoped templates, harness configs, and skills are readable only by their owner, project members, and Hub admins; Hub-wide member and viewer grants cover only hub- and global-scoped records (see [Security](/scion/reference/security/#34-fail-closed-api-authorization-and-resource-isolation)).
+The legacy, non-functional project `Visibility` field (e.g., `private`, `team`, or `public`) has been completely eradicated. Instead, access control is governed entirely by membership-based policies. The same applies to agents, templates, harness configs, and skills: their `visibility` field has been removed from the API (including the agent SSE payload), and access depends only on scope and grants. Skill create and update requests that still include `visibility` are rejected with `400 validation_error`. User- and project-scoped templates, harness configs, and skills are readable only by their owner, project members, and Hub admins; Hub-wide member and viewer grants cover only hub- and global-scoped records (see [Security](/scion/reference/security/#34-fail-closed-api-authorization-and-resource-isolation)).
 - **Project Scope Governance**: Access to a project and its associated resources is restricted to principals belonging to the project's member group (i.e. `project:<slug>:members`). This group is bound to per-project read and access roles using Project-scoped RoleBindings (such as `project:<slug>:member-read-project` and `project:<slug>:member-read-agent` mappings).
 - **Fail-Closed Retrieval (404 Gate)**: Project read access is verified via a `CheckAccess` gate on retrieval. If a caller is not authorized to read the project, the API responds with a standard `404 Not Found` (rather than a `403 Forbidden`) to prevent callers from probing the existence of private projects.
 
@@ -106,6 +106,8 @@ On any authorization request (evaluated via the Hub's `Decide` endpoint):
 ## Capability-Based Access Control
 
 The Hub API and Web UI utilize a capability gating system. Resource responses from the API include `_capabilities` annotations. These annotations explicitly state the actions the authenticated user is permitted to perform on that specific resource. This ensures granular UI controls (e.g., disabling the "Delete" button if the user lacks permission) and provides a secondary layer of API-level enforcement.
+
+The skills list (`GET /api/v1/skills`) also returns a list-level `_capabilities` object. It includes `create` when the caller can create a skill in at least one scope the request covers: any scope when no `scope` filter is given (every signed-in user can create in their own user scope), otherwise only the filtered scope and `scopeId`. Listing itself is not reported as a capability, because a successful response already means the caller may list.
 
 ## GCP Service Account Assignment Gates
 

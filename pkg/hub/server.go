@@ -61,6 +61,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
+	"github.com/GoogleCloudPlatform/scion/resources"
 	"github.com/google/uuid"
 )
 
@@ -1843,7 +1844,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 
 	// Seed platform skills into hub_settings["injected_skills"].system (idempotent).
 	// Runs on every startup so that the system list is always in sync with the binary.
-	if err := srv.seedPlatformSkillInsertions(ctx); err != nil {
+	if err := srv.seedPlatformSkillInsertions(ctx, resources.PlatformSkillsFS()); err != nil {
 		slog.Warn("Failed to seed platform skill insertions", "error", err)
 	}
 
