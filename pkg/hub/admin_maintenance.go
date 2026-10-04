@@ -172,6 +172,14 @@ func (s *Server) executeMigration(w http.ResponseWriter, r *http.Request, key st
 		return
 	}
 
+	// Keep the record of a completed run, so that a dry run of a completed
+	// (rerunnable) migration can put it back instead of erasing it.
+	prevStatus := op.Status
+	prevCompletedAt := op.CompletedAt
+	prevResult := op.Result
+	prevStartedAt := op.StartedAt
+	prevStartedBy := op.StartedBy
+
 	// Mark the migration as running.
 	now := time.Now()
 	op.Status = store.MaintenanceStatusRunning
@@ -233,6 +241,17 @@ func (s *Server) executeMigration(w http.ResponseWriter, r *http.Request, key st
 			}
 			resultJSON, _ := json.Marshal(result)
 			op.Result = string(resultJSON)
+			if params["dryRun"] == "true" && prevStatus == store.MaintenanceStatusCompleted {
+				// A dry run changes nothing, so the completed run stays the
+				// record. The dry-run output goes to the hub log only.
+				op.Status = prevStatus
+				op.CompletedAt = prevCompletedAt
+				op.Result = prevResult
+				op.StartedAt = prevStartedAt
+				op.StartedBy = prevStartedBy
+				log.Info("Dry run of a completed migration; previous result kept",
+					maintenanceLogAttrs(key, "log", buf.String())...)
+			}
 			log.Info("Migration completed", maintenanceLogAttrs(key, "status", op.Status)...)
 		}
 
@@ -266,7 +285,7 @@ func (s *Server) resolveMaintenanceExecutor(key string) (MaintenanceExecutor, er
 			Store:         s.store,
 			SecretBackend: s.GetSecretBackend(),
 		}, nil
-	case "applied-config-tz-cleanup":
+	case entadapter.AppliedConfigTZCleanupKey:
 		return &AppliedConfigTZCleanupExecutor{Store: s.store}, nil
 	case entadapter.UTCTimestampNormalizeKey:
 		db, dbDialect := s.storeDB()

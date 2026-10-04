@@ -40,3 +40,26 @@ completed migration whose key is not in `rerunnableMigrations`.
 The Admin → Maintenance page offers **Run** only for pending or failed
 migrations, so a completed rerunnable migration is re-run through
 `POST /api/v1/admin/maintenance/migrations/<key>/run`.
+
+## Review round 1 fixes
+
+- **Dry run of a completed migration.** `executeMigration` used to reset a
+  successful dry run to `pending`, so a dry run of a completed rerunnable
+  migration erased its completion. It now captures the status, completion
+  time, result, start time and user before the run. When the migration was
+  completed, it restores them after a successful dry run and writes the
+  dry-run output to the hub log. A dry run of a pending migration is
+  unchanged. This also covers `utc-timestamp-normalize`. New test:
+  `TestExecuteMigrationDryRunKeepsCompletedRecord` (fails without the
+  restore).
+- **Re-run replaces the result.** §2, §3.3 and §3.5 of
+  `.design/server-routine-maintenance.md`, and the seeded operation
+  description, say that a re-run replaces the stored result, including the
+  `ADOPT` lines. Adopted pins stay identifiable by timezone source `legacy`.
+- **Key constant.** `entadapter.AppliedConfigTZCleanupKey` replaces the
+  string literal in the seed, `resolveMaintenanceExecutor`,
+  `rerunnableMigrations` and the tests.
+
+Not changed: a failed dry run of a completed migration, or an executor
+panic during one, still marks it `failed`. That is the pre-existing failure
+path.

@@ -27,6 +27,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -280,15 +281,34 @@ func TestAppliedConfigEnvCleanupThenTZCleanup(t *testing.T) {
 func TestAppliedConfigTZCleanupRegistered(t *testing.T) {
 	srv, s := newTestServerWithStore(t)
 
-	op, err := s.GetMaintenanceOperation(context.Background(), "applied-config-tz-cleanup")
+	op, err := s.GetMaintenanceOperation(context.Background(), entadapter.AppliedConfigTZCleanupKey)
 	require.NoError(t, err)
 	assert.Equal(t, store.MaintenanceCategoryMigration, op.Category, "optional migration, run only on request")
 	assert.Equal(t, store.MaintenanceStatusPending, op.Status)
 	assert.Contains(t, op.Description, "applied-config-env-cleanup", "the description states the order interaction")
 
-	exec, err := srv.resolveMaintenanceExecutor("applied-config-tz-cleanup")
+	exec, err := srv.resolveMaintenanceExecutor(entadapter.AppliedConfigTZCleanupKey)
 	require.NoError(t, err)
 	assert.IsType(t, &AppliedConfigTZCleanupExecutor{}, exec)
+}
+
+// runMigrationViaHandler POSTs body to the migration run endpoint, expects
+// 200, and waits until the migration is no longer running.
+func runMigrationViaHandler(t *testing.T, srv *Server, s store.Store, key, body string) *store.MaintenanceOperation {
+	t.Helper()
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/migrations/"+key+"/run", strings.NewReader(body))
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminMaintenanceMigrations(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	var got *store.MaintenanceOperation
+	require.Eventually(t, func() bool {
+		var err error
+		got, err = s.GetMaintenanceOperation(context.Background(), key)
+		return err == nil && got.Status != store.MaintenanceStatusRunning
+	}, 10*time.Second, 20*time.Millisecond)
+	return got
 }
 
 // TestAppliedConfigTZCleanupRerunsThroughExecuteMigration runs the migration
@@ -296,30 +316,13 @@ func TestAppliedConfigTZCleanupRegistered(t *testing.T) {
 // because the key is in rerunnableMigrations), completes, converts 0 and
 // writes no agent row.
 func TestAppliedConfigTZCleanupRerunsThroughExecuteMigration(t *testing.T) {
-	const key = "applied-config-tz-cleanup"
+	key := entadapter.AppliedConfigTZCleanupKey
 	ctx := context.Background()
 	srv, s := newTestServerWithStore(t)
 	f := newTZCleanupFixture(t, s)
 	require.True(t, rerunnableMigrations[key], "the description promises a safe re-run")
 
-	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
-	run := func() *store.MaintenanceOperation {
-		t.Helper()
-		req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/migrations/"+key+"/run", strings.NewReader(`{}`))
-		req = req.WithContext(contextWithIdentity(req.Context(), admin))
-		rr := httptest.NewRecorder()
-		srv.handleAdminMaintenanceMigrations(rr, req)
-		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
-		var got *store.MaintenanceOperation
-		require.Eventually(t, func() bool {
-			var err error
-			got, err = s.GetMaintenanceOperation(ctx, key)
-			return err == nil && got.Status != store.MaintenanceStatusRunning
-		}, 10*time.Second, 20*time.Millisecond)
-		return got
-	}
-
-	first := run()
+	first := runMigrationViaHandler(t, srv, s, key, `{}`)
 	require.Equal(t, store.MaintenanceStatusCompleted, first.Status, first.Result)
 	assert.Contains(t, first.Result, "Adopted 5 agent TZ value(s)")
 
@@ -330,7 +333,7 @@ func TestAppliedConfigTZCleanupRerunsThroughExecuteMigration(t *testing.T) {
 		versions[id] = a.StateVersion
 	}
 
-	second := run()
+	second := runMigrationViaHandler(t, srv, s, key, `{}`)
 	require.Equal(t, store.MaintenanceStatusCompleted, second.Status, second.Result)
 	assert.Contains(t, second.Result, "Adopted 0 agent TZ value(s) as legacy pins; stripped TZ from 0 agent(s)")
 	for id, v := range versions {
@@ -339,4 +342,32 @@ func TestAppliedConfigTZCleanupRerunsThroughExecuteMigration(t *testing.T) {
 		assert.Equal(t, v, a.StateVersion, "agent %s must not be written by the second run", id)
 	}
 	assertLegacyPin(t, s, f.envOnly, "Asia/Kathmandu")
+}
+
+// TestExecuteMigrationDryRunKeepsCompletedRecord checks that a dry run of a
+// completed rerunnable migration leaves its completion record in place,
+// while a dry run of a pending migration still leaves it pending.
+func TestExecuteMigrationDryRunKeepsCompletedRecord(t *testing.T) {
+	key := entadapter.AppliedConfigTZCleanupKey
+	srv, s := newTestServerWithStore(t)
+	newTZCleanupFixture(t, s)
+
+	pendingDry := runMigrationViaHandler(t, srv, s, key, `{"params":{"dryRun":true}}`)
+	assert.Equal(t, store.MaintenanceStatusPending, pendingDry.Status, pendingDry.Result)
+	assert.Nil(t, pendingDry.CompletedAt)
+	assert.Contains(t, pendingDry.Result, `"dryRun":true`)
+
+	done := runMigrationViaHandler(t, srv, s, key, `{}`)
+	require.Equal(t, store.MaintenanceStatusCompleted, done.Status, done.Result)
+	require.NotNil(t, done.CompletedAt)
+	require.NotNil(t, done.StartedAt)
+
+	dry := runMigrationViaHandler(t, srv, s, key, `{"params":{"dryRun":true}}`)
+	assert.Equal(t, store.MaintenanceStatusCompleted, dry.Status, dry.Result)
+	require.NotNil(t, dry.CompletedAt)
+	assert.True(t, done.CompletedAt.Equal(*dry.CompletedAt), "completed time must not change: %v vs %v", done.CompletedAt, dry.CompletedAt)
+	require.NotNil(t, dry.StartedAt)
+	assert.True(t, done.StartedAt.Equal(*dry.StartedAt), "started time must not change")
+	assert.Equal(t, done.StartedBy, dry.StartedBy)
+	assert.Equal(t, done.Result, dry.Result, "the completed run's result stays the record")
 }
