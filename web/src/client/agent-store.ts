@@ -1044,7 +1044,8 @@ export class AgentStore {
         entry
       );
     }
-    if (entry.walk || this.entries.get(entry.key) !== entry) return;
+    // A listener may have reset the store during the merge.
+    if (this.entries.get(entry.key) !== entry) return;
     if (!caughtUp) {
       // Churn faster than the probe reads would otherwise walk every time.
       if (backingOff) return;
@@ -1052,7 +1053,7 @@ export class AgentStore {
         ? Math.min(2 * entry.overflowBackoffMs, AGENT_PROBE_OVERFLOW_BACKOFF_MAX_MS)
         : AGENT_PROBE_OVERFLOW_BACKOFF_MS;
       entry.overflowWalkAt = this.now();
-      this.walkFromProbe(entry);
+      this.startWalk(entry);
       return;
     }
     entry.overflowWalkAt = undefined;
@@ -1066,7 +1067,7 @@ export class AgentStore {
     // already made a walk does not make another until it changes.
     if (entry.countWalkTotal === total) return;
     entry.countWalkTotal = total;
-    this.walkFromProbe(entry);
+    this.startWalk(entry);
   }
 
   /**
@@ -1079,11 +1080,6 @@ export class AgentStore {
     if (entry.probeRefusalLogged) return;
     entry.probeRefusalLogged = true;
     console.info(`[agent-store] ${entry.key}: sorted agent list unavailable; probing paused`);
-  }
-
-  private walkFromProbe(entry: Entry): void {
-    entry.stale = true;
-    this.startWalk(entry);
   }
 
   private listenForVisibility(): () => void {

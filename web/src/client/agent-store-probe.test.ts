@@ -599,6 +599,34 @@ describe('AgentStore delta probe', () => {
     expect(h.server.walks()).toBe(1);
   });
 
+  it('does not walk on overflow when its own merge started a walk', async () => {
+    const h = await loaded([row('a1', 1)]);
+    // More new rows without capabilities than are read one by one: the
+    // merge revalidates instead of reading them.
+    h.server.agents.push(
+      ...Array.from({ length: 6 * AGENT_PROBE_LIMIT }, (_, i) =>
+        agent(`n${i}`, { updated: t(10 + i) })
+      )
+    );
+    await tick();
+    expect(h.server.probes()).toBe(5);
+    expect(h.server.agentFetches()).toBe(0);
+    expect(h.server.walks()).toBe(2);
+    expect(h.store.peek(HUB)?.agents).toHaveLength(1 + 6 * AGENT_PROBE_LIMIT);
+  });
+
+  it('does not walk for a list a reset dropped during its merge', async () => {
+    const h = await loaded([row('a1', 1)]);
+    h.store.retain(HUB, (snapshot) => {
+      if (ids(snapshot).includes('a2')) h.store.reset('test');
+    });
+    h.server.agents.push(row('a2', 5));
+    h.server.totalCount = 3;
+    await tick();
+    expect(h.feeds).toHaveLength(1);
+    expect(h.server.walks()).toBe(1);
+  });
+
   it('keeps an SSE delta that lands while the probe is in flight', async () => {
     const h = await loaded([row('a1', 1)]);
     const release = h.server.pause();
@@ -692,6 +720,23 @@ describe('AgentStore delta probe', () => {
     await tick();
     expect(h.server.probes('/api/v1/projects/')).toBe(4);
     expect(refusals()).toBe(1);
+  });
+
+  it('schedules the next probe from the end of one in flight when another retainer joins', async () => {
+    const h = await loaded([row('a1', 1)]);
+    const release = h.server.pause();
+    await tick();
+    expect(h.server.probes()).toBe(1);
+    await tick(1_000);
+    h.store.retain(HUB, () => {});
+    await tick(19_000);
+    release();
+    await settle();
+    // The probe ended 50s in: the next is due at 80s, not 30s after the join.
+    await tick(25_000);
+    expect(h.server.probes()).toBe(1);
+    await tick(5_000);
+    expect(h.server.probes()).toBe(2);
   });
 
   it('abandons a probe that hangs and probes again on the next tick', async () => {
