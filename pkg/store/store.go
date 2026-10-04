@@ -546,7 +546,9 @@ type AgentStore interface {
 	// RevertRunIntent sets run_intent to `to` only if the row still holds
 	// `from` written at exactly fromAt (the value SetRunIntent returned);
 	// run_intent_at is left unchanged. It reports whether the row changed.
-	// Used by system-initiated stops whose dispatch failed.
+	// Used by system-initiated stops whose dispatch failed. A revert to
+	// RunIntentRunning on a row a delete holds (DeletionHoldsRow) or a
+	// soft-deleted row writes nothing and reports false (ptone/scion#2550).
 	RevertRunIntent(ctx context.Context, agentID string, from RunIntent, fromAt time.Time, to RunIntent) (bool, error)
 
 	// BackfillRunIntent sets run_intent for every agent whose run_intent is

@@ -148,9 +148,16 @@ func (s *AgentStore) RevertRunIntent(ctx context.Context, agentID string, from s
 	if isPG {
 		q = q.ForUpdate()
 	}
-	current, err := q.Select(agent.FieldRunIntent, agent.FieldRunIntentAt).Only(ctx)
+	current, err := q.Select(agent.FieldRunIntent, agent.FieldRunIntentAt,
+		agent.FieldDeletedAt, agent.FieldDeletionState, agent.FieldDeletionLeaseAt).Only(ctx)
 	if err != nil {
 		return false, mapError(err)
+	}
+	// As in SwapRunIntent, a revert to running does not apply to a row a
+	// delete holds or a soft-deleted row (ptone/scion#2550).
+	if to == store.RunIntentRunning &&
+		(current.DeletedAt != nil || store.DeletionHoldsRow(current.DeletionState, current.DeletionLeaseAt, time.Now())) {
+		return false, nil
 	}
 	// Compare in Go rather than with a SQL time equality, which depends on
 	// each backend's timestamp encoding.

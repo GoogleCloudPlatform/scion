@@ -382,3 +382,59 @@ func TestRunIntent_RunningRefusedWhileDeleteHoldsRow(t *testing.T) {
 		})
 	}
 }
+
+// A revert to running does not apply to a row a delete holds or a
+// soft-deleted row; a revert to stopped always applies (ptone/scion#2550).
+func TestRunIntent_RevertToRunningSkippedWhileDeleteHoldsRow(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now()
+	live, expired := now.Add(time.Minute), now.Add(-time.Minute)
+	for _, tc := range []struct {
+		name      string
+		state     string
+		leaseAt   *time.Time
+		deletedAt *time.Time
+		skipped   bool
+	}{
+		{"no delete", "", nil, nil, false},
+		{"deleting, live lease", store.DeletionStateDeleting, &live, nil, true},
+		{"deleting, lease expired", store.DeletionStateDeleting, &expired, nil, false},
+		{"finalizing", store.DeletionStateFinalizing, &expired, nil, true},
+		{"failed", store.DeletionStateFailed, nil, nil, false},
+		{"soft-deleted", "", nil, &now, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, projectID := newTestAgentStore(t)
+			a := makeAgent(projectID, "revert-delete-agent")
+			require.NoError(t, s.CreateAgent(ctx, a))
+			_, err := s.SetRunIntent(ctx, a.ID, store.RunIntentRunning)
+			require.NoError(t, err)
+			stoppedAt, err := s.SetRunIntent(ctx, a.ID, store.RunIntentStopped)
+			require.NoError(t, err)
+			set := store.DeletionFields{DeletedAt: tc.deletedAt, LeaseAt: tc.leaseAt}
+			if tc.state != "" {
+				st := tc.state
+				set.State = &st
+			}
+			n, err := s.UpdateAgentDeletion(ctx, a.ID, store.DeletionPredicate{}, set)
+			require.NoError(t, err)
+			require.Equal(t, 1, n)
+
+			changed, err := s.RevertRunIntent(ctx, a.ID, store.RunIntentStopped, stoppedAt, store.RunIntentRunning)
+			require.NoError(t, err)
+			got, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			if tc.skipped {
+				assert.False(t, changed)
+				assert.Equal(t, store.RunIntentStopped, got.RunIntent, "a skipped revert writes nothing")
+				return
+			}
+			assert.True(t, changed)
+			assert.Equal(t, store.RunIntentRunning, got.RunIntent)
+			// The reverse revert to stopped applies whatever the delete state.
+			changed, err = s.RevertRunIntent(ctx, a.ID, store.RunIntentRunning, stoppedAt, store.RunIntentStopped)
+			require.NoError(t, err)
+			assert.True(t, changed)
+		})
+	}
+}
