@@ -1328,6 +1328,9 @@ func guardAndCascadeUserRoleBindingsTx(ctx context.Context, tx store.Store, user
 		if err != nil {
 			return fmt.Errorf("resolve project-owner role definition: %w", err)
 		}
+		if ownerRD == nil {
+			return fmt.Errorf("resolve project-owner role definition: not found")
+		}
 		seen := make(map[string]bool)
 		for _, b := range bindings {
 			if b.ScopeType != store.RoleScopeProject || b.RoleDefinitionID != ownerRD.ID || seen[b.ScopeID] {

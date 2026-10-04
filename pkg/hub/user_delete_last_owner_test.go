@@ -669,19 +669,30 @@ func TestDeleteUser_ConcurrentBindingRevokeStillDeletes(t *testing.T) {
 }
 
 // missingOwnerRoleTxStore makes the guard's project-owner role lookup return
-// store.ErrNotFound inside the delete transaction.
-type missingOwnerRoleTxStore struct{ store.Store }
+// store.ErrNotFound inside the delete transaction, or (nilNil) a nil role
+// definition with a nil error, which the store interface does not rule out
+// (GoogleCloudPlatform/scion#2414 review).
+type missingOwnerRoleTxStore struct {
+	store.Store
+	nilNil bool
+}
 
 func (m *missingOwnerRoleTxStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
 	return m.Store.WithTx(ctx, func(tx store.Store) error {
-		return fn(&missingOwnerRoleTx{Store: tx})
+		return fn(&missingOwnerRoleTx{Store: tx, nilNil: m.nilNil})
 	})
 }
 
-type missingOwnerRoleTx struct{ store.Store }
+type missingOwnerRoleTx struct {
+	store.Store
+	nilNil bool
+}
 
 func (m *missingOwnerRoleTx) GetRoleDefinitionByName(ctx context.Context, name, scope string) (*store.RoleDefinition, error) {
 	if name == store.ProjectRoleOwner {
+		if m.nilNil {
+			return nil, nil
+		}
 		return nil, store.ErrNotFound
 	}
 	return m.Store.GetRoleDefinitionByName(ctx, name, scope)
@@ -689,24 +700,37 @@ func (m *missingOwnerRoleTx) GetRoleDefinitionByName(ctx context.Context, name, 
 
 // Only a not-found from DeleteUser maps to 404 on the allow-list delete; a
 // not-found inside the guard is a server error (ptone/scion#2770 review L3).
+// A nil, nil role lookup must also fail closed rather than dereference nil
+// (GoogleCloudPlatform/scion#2414 review).
 func TestDeprecatedAllowListDelete_GuardNotFoundIsInternalError(t *testing.T) {
-	srv, s, alice, _, project := setupDemoPolicyTest(t)
-	ctx := context.Background()
-	carol := newInvitedUser(t, s, "user-carol", "carol@test.com")
-	memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: memberRD.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: carol.ID,
-		ScopeType: store.RoleScopeProject, ScopeID: project.ID, CreatedBy: alice.ID,
-	})
-	require.NoError(t, err)
+	for _, tc := range []struct {
+		name   string
+		nilNil bool
+	}{{"err-not-found", false}, {"nil-nil", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s, alice, _, project := setupDemoPolicyTest(t)
+			ctx := context.Background()
+			carol := newInvitedUser(t, s, "user-carol", "carol@test.com")
+			memberRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+			require.NoError(t, err)
+			_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+				RoleDefinitionID: memberRD.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: carol.ID,
+				ScopeType: store.RoleScopeProject, ScopeID: project.ID, CreatedBy: alice.ID,
+			})
+			require.NoError(t, err)
 
-	srv.store = &missingOwnerRoleTxStore{Store: s}
-	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/allow-list/"+carol.Email, nil)
-	srv.store = s
-	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+			srv.store = &missingOwnerRoleTxStore{Store: s, nilNil: tc.nilNil}
+			logs := captureSpaceMembersLogs(t)
+			rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/allow-list/"+carol.Email, nil)
+			srv.store = s
+			require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+			// The panic-recovery middleware also answers 500, so check the
+			// guard failed closed instead of dereferencing a nil role.
+			assert.NotContains(t, logs.String(), "Panic recovered")
 
-	_, err = s.GetUser(ctx, carol.ID)
-	require.NoError(t, err, "failed delete must keep the invited user")
-	assert.NotEmpty(t, allBindingsFor(t, s, carol.ID))
+			_, err = s.GetUser(ctx, carol.ID)
+			require.NoError(t, err, "failed delete must keep the invited user")
+			assert.NotEmpty(t, allBindingsFor(t, s, carol.ID))
+		})
+	}
 }
