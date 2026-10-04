@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	"github.com/stretchr/testify/assert"
@@ -182,11 +183,26 @@ func TestRemoveNFSWorktree_StateDirNotWritableUsesLegacyLock(t *testing.T) {
 	require.NoError(t, os.Chmod(stateDir, 0o555))
 	t.Cleanup(func() { _ = os.Chmod(stateDir, 0o755) })
 
+	// The legacy lock is still taken: while a live holder (fresh owner and
+	// heartbeat) has it, the removal waits nfsWorktreeLockWait, gives up and
+	// leaves the worktree in place.
+	legacyLock := filepath.Join(ws, ".scion-provision.lock")
+	require.NoError(t, os.Mkdir(legacyLock, 0o770))
+	require.NoError(t, os.WriteFile(filepath.Join(legacyLock, "owner"), []byte("0123456789abcdef0123456789abcdef"), 0o660))
+	require.NoError(t, os.WriteFile(filepath.Join(legacyLock, "heartbeat"), []byte("0123456789abcdef0123456789abcdef"), 0o660))
+	origWait := nfsWorktreeLockWait
+	nfsWorktreeLockWait = 1500 * time.Millisecond
+	t.Cleanup(func() { nfsWorktreeLockWait = origWait })
+	_, err := kubernetesTestManager("kubernetes").RemoveNFSWorktree(context.Background(), f.projectScionDir, testNFSWorkspaceProjectID, "test-agent")
+	require.Error(t, err, "the removal must wait for the legacy lock")
+	assert.True(t, provision.IsRealWorktreeDir(provision.WorktreePath(ws, "test-agent"), ws), "left in place")
+
+	require.NoError(t, os.RemoveAll(legacyLock))
 	path, err := kubernetesTestManager("kubernetes").RemoveNFSWorktree(context.Background(), f.projectScionDir, testNFSWorkspaceProjectID, "test-agent")
 	require.NoError(t, err)
 	assert.NoDirExists(t, path)
 	assert.NoDirExists(t, filepath.Join(stateDir, ".scion-provision.lock"))
-	assert.NoDirExists(t, filepath.Join(ws, ".scion-provision.lock"))
+	assert.NoDirExists(t, legacyLock)
 }
 
 // N1: the same when the broker may not create the state directory at all.

@@ -174,11 +174,11 @@ func ensureNFSWorktreeLeaf(runtimeName string, resolved runtime.ResolvedWorkspac
 // directory existed, in the workspace itself. Lstat is used, so a symlink
 // named like the sentinel also counts, as before.
 //
-// A permission error on the state directory does not end the check: the
-// legacy location is checked next, and the permission error is returned
+// A permission error on either location does not end the check: the other
+// location is still checked, and the first permission error is returned
 // (wrapped, so isNFSLeafPermissionError matches it) only when the sentinel
-// is not found there either. Any other error than "does not exist" is
-// returned straight away.
+// is found in neither. Any other error than "does not exist" is returned
+// straight away.
 func nfsSharedCheckoutProvisioned(hostBase, rel string) (bool, error) {
 	var permErr error
 	for _, dir := range []string{provision.ProjectStateDir(rel), rel} {
