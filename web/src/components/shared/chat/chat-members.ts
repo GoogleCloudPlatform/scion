@@ -49,6 +49,8 @@ import type { ActionSheetSelectDetail } from './chat-action-sheet.js';
 import './chat-action-sheet.js';
 import './chat-avatar.js';
 import '../status-badge.js';
+import { formatInstantWithZone } from '../../../utils/time.js';
+import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
 
 /** Popup window geometry for a terminal. Roughly 80x24 at a comfortable size. */
 const TERMINAL_POPOUT_WIDTH = 1024;
@@ -185,6 +187,9 @@ export interface MemberClickDetail {
 
 @customElement('scion-chat-members')
 export class ScionChatMembers extends LitElement {
+  /** Re-renders absolute activity dates when the display zone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   /** Human members of the space. */
   @property({ type: Array })
   humans: ChatHumanMember[] = [];
@@ -1076,7 +1081,8 @@ export class ScionChatMembers extends LitElement {
     if (diffHrs < 24) return `${diffHrs} hr ago`;
     const diffDays = Math.floor(diffHrs / 24);
     if (diffDays < 7) return `${diffDays}d ago`;
-    return d.toLocaleDateString('en', { month: 'short', day: 'numeric' });
+    // Older than a week: an absolute date in the display zone, zone named.
+    return formatInstantWithZone(iso, 'date');
   }
 
   private handleMemberClick(id: string, kind: 'user' | 'agent', displayName: string) {

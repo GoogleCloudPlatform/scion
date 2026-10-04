@@ -40,6 +40,8 @@ import { brokerTypeBadgeStyles } from '../shared/resource-styles.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { showToast } from '../../utils/toast.js';
 import '../shared/status-badge.js';
+import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 interface BrokerProjectInfo {
   projectId: string;
@@ -51,6 +53,9 @@ interface BrokerProjectInfo {
 
 @customElement('scion-page-broker-detail')
 export class ScionPageBrokerDetail extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @property({ type: Object })
   pageData: PageData | null = null;
 
@@ -606,43 +611,7 @@ export class ScionPageBrokerDetail extends LitElement {
   }
 
   private formatDate(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      return new Intl.DateTimeFormat('en', {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      }).format(date);
-    } catch {
-      return dateString;
-    }
-  }
-
-  private formatRelativeTime(dateString: string): string {
-    try {
-      const date = new Date(dateString);
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
+    return formatInstantWithZone(dateString) || dateString;
   }
 
   private get isAdmin(): boolean {
@@ -765,7 +734,7 @@ export class ScionPageBrokerDetail extends LitElement {
         </div>
         <div class="stat">
           <span class="stat-label">Last Heartbeat</span>
-          <span class="stat-value-sm">${this.formatRelativeTime(this.broker.lastHeartbeat)}</span>
+          <span class="stat-value-sm">${formatRelative(this.broker.lastHeartbeat)}</span>
         </div>
         ${this.broker.createdBy
           ? html`

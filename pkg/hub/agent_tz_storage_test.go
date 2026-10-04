@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -228,18 +229,38 @@ func TestExplicitTimezone_StoreRoundTrip(t *testing.T) {
 	}
 }
 
-// TestResolveAgentTZ_ProfileIsNotARung checks a runtime-profile timezone
-// never reaches the resolver, even with a profile provider set on the
-// dispatcher. Task 13 (profile retirement) deletes this case together with
-// SetProfileTimezoneProvider.
-func TestResolveAgentTZ_ProfileIsNotARung(t *testing.T) {
-	d, _ := tzTestDispatcher(t, "")
-	d.SetProfileTimezoneProvider(func(string) string { return "Europe/Rome" })
-	agent := envScopeTestAgent()
-	agent.AppliedConfig = &store.AgentAppliedConfig{Profile: "default"}
+// TestResolveAgentTZ_ProfileSettingsAreNotARung checks the agent's runtime
+// profile never supplies a timezone: a TZ in the profile's harness-override
+// env is not a rung, with or without a hub default behind it.
+func TestResolveAgentTZ_ProfileSettingsAreNotARung(t *testing.T) {
+	overlay := config.NewSettingsOverlay()
+	overlay.Update(nil, map[string]config.V1ProfileConfig{
+		"default": {
+			Runtime: "docker",
+			HarnessOverrides: map[string]config.V1HarnessOverride{
+				"claude": {Env: map[string]string{"TZ": "Europe/Rome"}},
+			},
+		},
+	}, nil, "")
+	config.SetGlobalSettingsOverlay(overlay)
+	defer config.SetGlobalSettingsOverlay(nil)
 
-	if got, want := d.resolveAgentTZ(context.Background(), agent, false), (agentTZ{TZ: "", Source: TZSourceNone}); got != want {
-		t.Fatalf("resolveAgentTZ() = %+v, want %+v", got, want)
+	tests := []struct {
+		hubDefault string
+		want       agentTZ
+	}{
+		{hubDefault: "", want: agentTZ{TZ: "", Source: TZSourceNone}},
+		{hubDefault: "Asia/Kathmandu", want: agentTZ{TZ: "Asia/Kathmandu", Source: TZSourceHubDefault}},
+	}
+	for _, tt := range tests {
+		t.Run("hub default "+tt.hubDefault, func(t *testing.T) {
+			d, _ := tzTestDispatcher(t, tt.hubDefault)
+			agent := envScopeTestAgent()
+			agent.AppliedConfig = &store.AgentAppliedConfig{Profile: "default", HarnessConfig: "claude"}
+			if got := d.resolveAgentTZ(context.Background(), agent, false); got != tt.want {
+				t.Fatalf("resolveAgentTZ() = %+v, want %+v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -368,4 +389,38 @@ func TestResolveAgentTZ_StoreErrorsWithNilLog(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestTZDropWarnings_NilLog checks the TZ-targeted secret and caller-env TZ
+// drops skip the log, never a panic, on a dispatcher without a logger, and
+// still drop TZ and relay the dispatch warning.
+func TestTZDropWarnings_NilLog(t *testing.T) {
+	d, _ := tzTestDispatcher(t, "")
+	d.log = nil
+	agent := envScopeTestAgent()
+
+	t.Run("a secret that targets TZ is dropped", func(t *testing.T) {
+		ctx, warns := withDispatchWarnings(context.Background())
+		got := d.dropTZTargetedSecrets(ctx, agent, []ResolvedSecret{
+			{Name: "tz", Type: "environment", Target: "TZ", Value: "Asia/Tokyo", Source: "user"},
+			{Name: "keep", Type: "environment", Target: "API_KEY", Value: "x", Source: "user"},
+		})
+		if len(got) != 1 || got[0].Name != "keep" {
+			t.Fatalf("dropTZTargetedSecrets() = %+v, want only the API_KEY secret", got)
+		}
+		if len(warns.Warnings()) != 1 {
+			t.Fatalf("warnings = %q, want one", warns.Warnings())
+		}
+	})
+
+	t.Run("TZ in the caller env is dropped", func(t *testing.T) {
+		ctx, warns := withDispatchWarnings(context.Background())
+		got := d.withoutCallerTZ(ctx, agent, map[string]string{"TZ": "Asia/Tokyo", "FOO": "bar"})
+		if _, ok := got["TZ"]; ok || got["FOO"] != "bar" {
+			t.Fatalf("withoutCallerTZ() = %v, want FOO only", got)
+		}
+		if len(warns.Warnings()) != 1 {
+			t.Fatalf("warnings = %q, want one", warns.Warnings())
+		}
+	})
 }

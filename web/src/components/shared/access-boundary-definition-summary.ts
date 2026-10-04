@@ -33,6 +33,8 @@ import type {
   Iso8601,
   SubjectSelection,
 } from '../../shared/access-boundaries.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import { formatInstantWithZone } from '../../utils/time.js';
 
 export interface DefinitionSummaryData {
   name: string;
@@ -50,6 +52,9 @@ export interface DefinitionSummaryData {
 
 @customElement('scion-access-boundary-definition-summary')
 export class ScionAccessBoundaryDefinitionSummary extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @property({ type: Object }) data: DefinitionSummaryData = {
     name: '',
     purpose: '',
@@ -299,16 +304,7 @@ export class ScionAccessBoundaryDefinitionSummary extends LitElement {
 
   private formatDatetime(iso: Iso8601 | undefined): string {
     if (!iso) return 'Not set';
-    try {
-      const date = new Date(iso);
-      if (isNaN(date.getTime())) return iso;
-      return date.toLocaleString(undefined, {
-        dateStyle: 'medium',
-        timeStyle: 'short',
-      });
-    } catch {
-      return iso;
-    }
+    return formatInstantWithZone(iso) || iso;
   }
 
   override render() {

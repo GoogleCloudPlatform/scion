@@ -204,6 +204,9 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		return
 	case gateCompleted:
 		alreadyCompleted = true
+		// "completed" skips every remaining checkpoint (design §3.8.2's
+		// table), including the runtime's pre-create checkpoints.
+		sender.recordKeepaliveCompleted()
 	}
 	if sender.IsAborted() {
 		s.handleKeepaliveAbort(sender, rec, lc)
@@ -268,6 +271,11 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		return
 	}
 	lc.opts = opts
+	// Runtime hooks (design §3.8.3, §3.8.4): a Hub-answered checkpoint
+	// immediately before each resource-creating call, and each created
+	// resource recorded for CleanupLaunch.
+	lc.opts.Checkpoint = sender.Checkpoint
+	lc.opts.OnResourceCreated = rec.AddHandle
 	if sender.IsAborted() {
 		s.handleKeepaliveAbort(sender, rec, lc)
 		return
@@ -325,9 +333,25 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			// exec-based runtimes (docker, podman, apple) return the killed
 			// CLI's *exec.ExitError, not context.Canceled, when ctx' is
 			// cancelled under them.
+			//
+			// The runtime leaves what it created to this launch's cleanup
+			// (it skips its own start cleanup when OnResourceCreated is
+			// set), so the recorded resources are removed here unless the
+			// launch already completed. The local stop/delete handler owns
+			// the agent files, so only the resources are removed. Every
+			// delete is conditional on the identity recorded at create
+			// time, so a newer launch's same-named resources are untouched.
+			if !alreadyCompleted && !sender.IsCompleted() {
+				s.cleanupLaunchResources(lc.mgr, rec)
+			}
 			return
 		}
 		code, message := classifyStartError(ctx, sr.err)
+		if sender.CheckpointUnreachable() {
+			// A pre-create checkpoint blocked until ctx' expired with no
+			// definitive Hub answer (design §3.8.2: failed{hub_unreachable}).
+			code, message = "hub_unreachable", "checkpoint: hub unreachable"
+		}
 		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, code, message)
 		return
 	}
@@ -432,13 +456,7 @@ func (s *Server) failLaunch(ctx context.Context, sender *launchSender, rec *laun
 // create launch whose marker still holds this launch's ID, its agent files
 // (design §3.8.4).
 func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc launchCtx) {
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	if err := mgr.CleanupLaunch(cleanupCtx, rec.Handles); err != nil {
-		s.agentLifecycleLog.Warn("runLaunch: failed to clean up launch resources",
-			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
-	}
+	s.cleanupLaunchResources(mgr, rec)
 
 	if rec.Kind != store.LaunchKindCreate || lc.opts.ProjectPath == "" {
 		return
@@ -450,6 +468,17 @@ func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc l
 	}
 	if _, err := agent.DeleteAgentFiles(lc.opts.Name, lc.opts.ProjectPath, true); err != nil {
 		s.agentLifecycleLog.Warn("runLaunch: failed to clean up agent files",
+			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
+	}
+}
+
+// cleanupLaunchResources deletes the runtime resources the launch recorded
+// (design §3.8.4), on a fresh context: ctx' may already be done.
+func (s *Server) cleanupLaunchResources(mgr agent.Manager, rec *launchRecord) {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := mgr.CleanupLaunch(cleanupCtx, rec.HandlesSnapshot()); err != nil {
+		s.agentLifecycleLog.Warn("runLaunch: failed to clean up launch resources",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
 	}
 }

@@ -20,11 +20,19 @@ import (
 )
 
 var (
-	logPath     string
-	debug       bool
+	logPath string
+	// debug and initialized are atomic so the hot paths (Debug, write,
+	// slogHandler.Enabled) can read them without taking mu. Writers still
+	// hold mu where they also touch logPath/logFile, so that Init and the
+	// lazy init in write() stay mutually exclusive.
+	debug       atomic.Bool
 	quiet       atomic.Bool
 	mu          sync.Mutex
-	initialized bool
+	initialized atomic.Bool
+	// initRuns counts executions of initLocked. It is test-only, with no
+	// production purpose: tests use it to check that concurrent first log
+	// calls run the lazy init exactly once.
+	initRuns atomic.Int64
 	// logFile is the cached, already-opened handle for logPath, guarded by
 	// mu, and reused for every log line for the life of the process:
 	// reopening logPath from scratch on each line would give a workload a
@@ -56,13 +64,33 @@ func SetQuiet(enabled bool) {
 	quiet.Store(enabled)
 }
 
-// Init initializes the logging system.
+// Init initializes the logging system. It may be called more than once
+// (each call re-installs the slog default handler), so lazy init in write()
+// uses a double-checked lock rather than sync.Once.
 func Init() {
 	mu.Lock()
 	defer mu.Unlock()
+	initLocked()
+}
 
-	// If already initialized, we might still want to re-init slog if logPath changed
-	// but for now let's just allow re-setting slog default to our handler
+// ensureInit runs the init logic (initLocked) once if nothing has initialized the package yet.
+// Concurrent first callers serialize on mu; only the first one runs
+// initLocked, the rest see initialized set and return.
+func ensureInit() {
+	if initialized.Load() {
+		return
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if initialized.Load() {
+		return
+	}
+	initLocked()
+}
+
+// initLocked does the work of Init. Callers must hold mu.
+func initLocked() {
+	initRuns.Add(1)
 
 	if logPath == "" {
 		// Priority 1: Check if /home/scion exists (standard agent home)
@@ -79,20 +107,18 @@ func Init() {
 	}
 
 	if os.Getenv("SCION_DEBUG") != "" {
-		debug = true
+		debug.Store(true)
 	}
 
 	// Set as default slog handler to capture all debug lines from shared packages
 	slog.SetDefault(slog.New(newHandler()))
 
-	initialized = true
+	initialized.Store(true)
 }
 
 // SetDebug enables or disables debug logging.
 func SetDebug(enabled bool) {
-	mu.Lock()
-	defer mu.Unlock()
-	debug = enabled
+	debug.Store(enabled)
 }
 
 // Chown changes the ownership of the log file. It chowns the already-open
@@ -121,7 +147,7 @@ func SetLogPath(path string) {
 		logFile = nil
 	}
 	logPath = path
-	initialized = true // Consider it initialized if path is explicitly set
+	initialized.Store(true) // Consider it initialized if path is explicitly set
 }
 
 // Info logs an informational message.
@@ -150,16 +176,14 @@ func Warn(format string, args ...interface{}) {
 
 // Debug logs a debug message if SCION_DEBUG is set.
 func Debug(format string, args ...interface{}) {
-	if !debug {
+	if !debug.Load() {
 		return
 	}
 	write("DEBUG", "", format, args...)
 }
 
 func write(level, tag, format string, args ...interface{}) {
-	if !initialized {
-		Init()
-	}
+	ensureInit()
 
 	timestamp := Timestamp(time.Now())
 	message := fmt.Sprintf(format, args...)
@@ -213,7 +237,7 @@ func getLogFileLocked() (*os.File, error) {
 		return nil, err
 	}
 
-	debug = true
+	debug.Store(true)
 	oldPath := logPath
 	logPath = "/tmp/agent.log"
 
@@ -258,8 +282,9 @@ func getLogFileLocked() (*os.File, error) {
 //     bare "is this a regular file" check, since a hardlink IS a regular
 //     file) is refused instead of silently appended to.
 //
-// Some runtimes run this process as root for its whole lifetime, and
-// logPath normally lives under $HOME, which the scion user can write to. A symlink,
+// This process runs as root for its whole lifetime on Substrate (see
+// fixupRootfsForScion's doc comment in cmd/sciontool/commands), and logPath
+// normally lives under $HOME, which the scion user can write to. A symlink,
 // hardlink, FIFO, or other non-regular entry here now surfaces as an
 // open/stat error instead, which callers already treat the same way a
 // missing/unwritable log path has always been treated: fall back to
@@ -306,10 +331,7 @@ func (h *slogHandler) Enabled(_ context.Context, level slog.Level) bool {
 		return true
 	}
 	if level >= slog.LevelDebug {
-		mu.Lock()
-		d := debug
-		mu.Unlock()
-		return d
+		return debug.Load()
 	}
 	return false
 }

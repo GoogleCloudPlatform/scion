@@ -63,6 +63,7 @@ import { paginateAll, PaginationStoppedError } from '../../client/paginate-all.j
 import { isProjectChimeEnabled, setProjectChimeEnabled } from '../../utils/audio.js';
 import { openTerminal, terminalHref, agentGraphHref } from '../../client/open-terminal.js';
 import { hasOpenModalDescendant, isOpenModalElement } from '../shared/open-modal.js';
+import { deepActiveElement } from '../shared/deep-active-element.js';
 import '../shared/chat/chat-thread.js';
 import '../shared/chat/chat-file-preview.js';
 import type { PreviewTarget } from '../shared/chat/chat-file-preview.js';
@@ -3154,11 +3155,8 @@ export class ScionPageChat extends LitElement {
    * outermost host, so descend to the real focused element before blurring.
    */
   private dismissKeyboard(): void {
-    let el = document.activeElement as HTMLElement | null;
-    while (el?.shadowRoot?.activeElement) {
-      el = el.shadowRoot.activeElement as HTMLElement;
-    }
-    el?.blur?.();
+    const el = deepActiveElement();
+    if (el instanceof HTMLElement || el instanceof SVGElement) el.blur();
   }
 
   /** Swiping right reveals the panel to the left of the current one. */
@@ -4337,17 +4335,8 @@ export class ScionPageChat extends LitElement {
     closeButton?.focus();
   }
 
-  /** Find the real focused element, descending through shadow roots (mirrors `dismissKeyboard`'s walk). */
-  private _deepActiveElement(): Element | null {
-    let el: Element | null = document.activeElement;
-    while (el && (el as HTMLElement).shadowRoot?.activeElement) {
-      el = (el as HTMLElement).shadowRoot!.activeElement;
-    }
-    return el;
-  }
-
   private _capturePaletteInvokerFocus(): void {
-    const el = this._deepActiveElement();
+    const el = deepActiveElement();
     this._paletteInvoker = el instanceof HTMLElement ? el : null;
     this._paletteInvokerSelection =
       el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement

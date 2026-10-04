@@ -91,13 +91,12 @@ var explicitEditExcludedFields = map[string]bool{
 // (legacyCreateInputsFromAppliedConfig) already reads the live config
 // directly in that case, so there is nothing here for it to seed.
 //
-// SEAM for ptone/scion#2457 task #16 (I2): that task adds a PATCH-time strip
-// of config.env["TZ"] (so an ignored TZ key is never treated as a request
-// value). That strip MUST run between the `old` snapshot and this call in
-// applyAgentUpdate, never after it -- otherwise an ignored TZ would still
-// land in CreateInputs.InlineConfig.Env here (via the per-key Env diff
-// below) and be replayed by task #16's I1(a) as a pin the request never
-// asked for. See the call site in applyAgentUpdate for the marked seam.
+// Ordering with the TZ strip: applyAgentUpdate strips config.env["TZ"] (the
+// env editor never sets the agent timezone; explicitTimezone does) between
+// the `old` snapshot and this call, never after it. Otherwise an ignored TZ
+// would land in CreateInputs.InlineConfig.Env here (via the per-key Env diff
+// below) and be replayed by reincarnate's create-time timezone capture as a
+// pin the request never asked for.
 func recordExplicitEdits(ci *store.AgentCreateInputs, old *store.AgentAppliedConfig, cfg *api.ScionConfig, present map[string]bool, imageRegistry string, canAttachEnv bool) {
 	if ci == nil {
 		return
@@ -242,11 +241,9 @@ var autoExposeEnvKeys = map[string]bool{
 // Two different precedence orders apply, because the page itself reads env
 // two different ways:
 //   - The four autoExposeEnvKeys are read per key by the dedicated
-//     auto-expose controls, with InlineConfig.Env winning (R4-2) --
-//     resolveDerivedConfig's project/hub auto-expose default is stamped
-//     into InlineConfig.Env only, and the controls must show it even when
-//     AppliedConfig.Env happens to hold a different value for the same key
-//     (e.g. a template's own env, merged into AppliedConfig.Env only).
+//     auto-expose controls: InlineConfig.Env (the requester's explicit
+//     value) first, then AppliedConfig.Env (the project- or
+//     template-derived value resolveDerivedConfig writes there).
 //   - Every other key is read by the custom env-row editor as a whole map,
 //     ac.env || ic.env: AppliedConfig.Env wins outright whenever it is
 //     non-empty, and InlineConfig.Env is consulted per key only as a

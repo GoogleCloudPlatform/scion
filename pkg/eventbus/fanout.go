@@ -101,7 +101,7 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 			go func() {
 				defer wg.Done()
 				if err := inproc.Bus.Publish(ctx, topic, msg); err != nil {
-					errs[0] = fmt.Errorf("inprocess bus publish failed: %w", err)
+					errs[0] = fmt.Errorf("%w: %w", ErrInProcessPublish, err)
 				}
 			}()
 		}
@@ -137,6 +137,9 @@ func (f *FanOutEventBus) Publish(ctx context.Context, topic string, msg *message
 				f.log.Error("fan-out publish failed",
 					"bus", b.Name, "topic", topic, "error", err)
 				if !b.Observer {
+					if b.Name == InProcessBusName {
+						err = fmt.Errorf("%w: %w", ErrInProcessPublish, err)
+					}
 					errs[idx] = err
 				}
 			}

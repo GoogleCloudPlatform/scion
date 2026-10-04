@@ -195,6 +195,16 @@ type AuthzRequest struct {
 	Permission string // Canonical permission ID (e.g., "hub.settings.read"); when set, role binding evaluation uses this instead of Resource+Action.
 	Explain    bool   // When true, collect step-by-step trace in Decision
 
+	// TargetEvidence is the collection-level classification the bearer
+	// gate (step 1) uses to resolve the target scope of a request that
+	// names no existing resource instance. Trusted server-side operation
+	// code constructs it; it is never taken from a client-supplied field.
+	// The zero value classifies the request from Resource alone. Evidence
+	// with IsCollectionLevel set must name the permission this request
+	// evaluates; the gate denies evidence that names any other permission.
+	// It is read only by the bearer gate and grants nothing by itself.
+	TargetEvidence TargetScopeEvidence
+
 	// Actor and Purpose describe who initiated the operation and why, when
 	// that differs from Principal (for example a delivery performed for a
 	// target agent). They are recorded on every decision (and in its
@@ -202,6 +212,11 @@ type AuthzRequest struct {
 	// decision.
 	Actor   *DecisionActor
 	Purpose string
+
+	// bearerRun carries the bearer gate's request-scoped memo and outcome
+	// for EvaluateBearerCeiling. It is set only by in-package callers,
+	// grants nothing, and callers of Decide leave it nil.
+	bearerRun *bearerGateRun
 
 	// AlwaysAudit forces Decide's single audit exit to emit a decision audit
 	// record for this request regardless of the allow-sampling rate
@@ -354,16 +369,37 @@ const (
 	// role-definition resolution (Step 4), and access-constraint load
 	// failure (Step 7c, detected after Step 9 because the failure there
 	// is folded into a deny-all restriction rather than an early return).
-	// enforceUATConstraints also sets it when the live project-access
-	// lookup for a user access token fails on a store fault.
+	// The bearer gate (evaluateBearerGate) also sets it when the live
+	// project access lookup for a user access token fails on a store fault.
 	DenyCauseResolutionError DenyCause = "resolution_error"
+
+	// DenyCauseCeilingUnrecorded marks a deny where the source credential's
+	// ceiling version is not one this binary interprets, or a hop whose
+	// provenance is unrecorded or of an unknown version meets a permission
+	// that requires recorded provenance. An unknown ceiling version on a
+	// bounded hop in the walk is reported as DenyCauseCeilingEffectExceeded.
+	DenyCauseCeilingUnrecorded DenyCause = "ceiling_unrecorded"
+
+	// DenyCauseCeilingEffectExceeded marks a deny where the permission or
+	// requested role lies outside a frozen effect ceiling on the chain.
+	DenyCauseCeilingEffectExceeded DenyCause = "ceiling_effect_exceeded"
+
+	// DenyCauseCeilingResourceMissing marks a deny where a resource a
+	// frozen ceiling refers to does not resolve. Reserved for the
+	// service-account parent-ceiling evaluator: no code path in this
+	// package emits it.
+	DenyCauseCeilingResourceMissing DenyCause = "ceiling_resource_missing"
+
+	// DenyCauseCeilingSourceNotAllowed marks a deny where the source
+	// credential is not accepted as an authority source on this server.
+	DenyCauseCeilingSourceNotAllowed DenyCause = "ceiling_source_not_allowed"
 )
 
 // IsIndeterminate reports whether this deny was caused by a store or
 // resolution fault on the tagged paths, rather than a policy fact — the
 // access check could not be decided. Tagged: principal, role-binding,
 // role-definition and access-constraint resolution in decide(), the
-// user-access-token live project-access lookup (enforceUATConstraints), and
+// user-access-token live project access lookup (evaluateBearerGate), and
 // the delegation-ceiling error. Not yet tagged: relationship-fact and
 // source-active lookup failures (isCurrentHubMember, relationshipSourceActive,
 // progenySourceFor). A false result for those candidates does not prove a
@@ -419,6 +455,13 @@ type AuthzService struct {
 	// through that wiring (e.g. a bare &AuthzService{} in a test) fails
 	// closed.
 	devLocalEnabled bool
+
+	// mintDevAuthOverride mirrors the agent-token mint's dev-auth role
+	// override: when set, mintCandidateScopes raises a role below full to
+	// full before applying the ceiling filter. Set once at server
+	// construction from ServerConfig.DevAuthToken != "". It is separate
+	// from devLocalEnabled and is read only by mintCandidateScopes.
+	mintDevAuthOverride bool
 }
 
 // NewAuthzService creates a new AuthzService.
@@ -477,7 +520,13 @@ func (a *AuthzService) Decide(ctx context.Context, request AuthzRequest) Decisio
 // decide is Decide's body: the AK1 kernel evaluation itself.
 // All grants are traced to either a RoleBinding or a named relationship grant.
 // All reductions are traced to a named restriction. No undocumented bypasses.
+//
+// request.bearerRun, when non-nil, supplies the request-scoped
+// project-admission memo to the bearer gate (step 1) and receives the gate's
+// outcome; nil uses no memo and records nothing. It never changes the
+// authorization result.
 func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decision {
+	bearer := request.bearerRun
 	derivedPrincipal := principalContextForIdentity(request.Principal.Identity)
 	derivedCredential := credentialContextForIdentity(request.Principal.Identity)
 
@@ -661,16 +710,18 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 		}
 	}
 
-	// ── Step 1: UAT project constraint (pre-kernel gate) ──────────────
-	// UAT tokens are project-scoped. Resources outside the token's project
-	// are denied before kernel evaluation. This is a credential constraint,
-	// not a bypass — it can only narrow, never widen.
+	// ── Step 1: Bearer credential gate (pre-kernel) ───────────────────
+	// A UAT-kind credential is confined to its boundary and permission
+	// ceiling, and a project target additionally requires the holder's
+	// current access to that project (evaluateBearerGate,
+	// authz_bearer.go). This is a credential constraint, not an allow path: it
+	// can only narrow, never widen. It runs before the kernel and before
+	// relationship grants, so neither can reach a target outside the
+	// boundary or a project the holder cannot currently access.
 	if credential.Kind == CredentialKindUAT {
-		if user, ok := principal.Identity.(UserIdentity); ok {
-			if scoped, ok := user.(*ScopedUserIdentity); ok {
-				if denied := a.enforceUATConstraints(ctx, principal, scoped, request.Resource, request.Action, permissionID); denied != nil {
-					return decorateDecision(*denied, request, principal, credential, auditPermissionID(request))
-				}
+		if in, ok := bearerGateInputsFor(principal, credential); ok {
+			if denied := a.evaluateBearerGate(ctx, principal, in, request.Resource, request.TargetEvidence, request.Action, permissionID, bearer.memoOrNil(), bearer.traceOrNil()); denied != nil {
+				return decorateDecision(*denied, request, principal, credential, auditPermissionID(request))
 			}
 		}
 	}
@@ -943,8 +994,15 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	// activity, and the same restrictions the kernel applied (7a/7b/7c).
 	// With Explain, candidates are also evaluated on a kernel allow so the
 	// provenance lists them.
+	//
+	// Candidates run with both memo keys masked. Their stages reach
+	// lookups made on behalf of a principal other than the requester (the
+	// progeny source user's system authority and project admission, and the
+	// source agent's delegation chain), and those must always read the
+	// store, never the requester's memoized principals, constraints or
+	// edges. The restrictions passed in were already resolved above.
 	if !kernelAdmits || request.Explain {
-		rel := a.evaluateRelationshipCandidates(ctx, principal, request.Resource, request.Action, permissionID, restrictions, !request.Explain)
+		rel := a.evaluateRelationshipCandidates(maskAllAuthzMemo(ctx), principal, request.Resource, request.Action, permissionID, restrictions, !request.Explain)
 		if !kernelAdmits {
 			if rel.accepted != nil {
 				kernelProvenance := decision.Provenance
@@ -986,6 +1044,7 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 				ctx = contextWithDelegationCeilingCache(ctx)
 			}
 			ceilingReq := request
+			ceilingReq.bearerRun = nil
 			ceilingReq.Principal = principal
 			ceilingReq.Permission = permissionID
 			var ceilingCause DenyCause
@@ -1001,17 +1060,11 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 			// through the untouched edges key — safe because edges are keyed
 			// by delegate, not by the requesting principal.
 			//
-			// This call site is the ONLY masked entry point into the chain
-			// today, because the memo has no production install site and is
-			// dormant everywhere, including here. A second caller of
-			// walkDelegationChain exists in authz_relationship_rules.go
-			// (relationshipSourceDelegationHolds, reached from
-			// evaluateRelationshipCandidates on a kernel deny) and runs on
-			// an UNMASKED ctx; it is safe only while nothing installs the
-			// memo. Before any install site goes live, that caller must
-			// also be masked — or, more robustly, the mask should move
-			// inside the chain-walk itself so every current and future
-			// caller gets it automatically.
+			// The chain walk also applies maskAuthzInputs to its own ctx at
+			// entry, so its other caller (relationshipSourceDelegationHolds,
+			// reached from the relationship candidates in step 9, which
+			// already run with both memo keys masked) and any future caller
+			// get the same guarantee without relying on this call site.
 			ceilingAllowed, ceilingReason, ceilingErr := a.checkDelegationCeiling(maskAuthzInputs(ctx), ceilingReq, permissionID, agent.ID(), nil, &ceilingCause)
 			if ceilingErr != nil {
 				decision.Allowed = false
@@ -1063,6 +1116,9 @@ func (a *AuthzService) AuthorizeReadBatch(ctx context.Context, identity Identity
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	// The memo caches successful loads only, so a store failure still
+	// reaches the decision that observed it and fails closed.
+	ctx = withAuthzInputMemo(ctx)
 	if GetIdentityFromContext(ctx) != identity {
 		ctx = contextWithIdentity(ctx, identity)
 	}
@@ -1795,12 +1851,23 @@ func (a *AuthzService) loadAllAccessConstraints(ctx context.Context) ([]*store.A
 	}
 
 	// Within an install phase (see authz_request_inputs.go), the constraint
-	// slot is consumed only by decide's own step 7c and by
-	// ResolveListScopes: the delegation ceiling runs on a masked ctx (see
-	// checkDelegationCeiling's call site above), so getEffectivePermissions
-	// never sees this memo, and no other production consumer is reachable
-	// from the batch/handler install sites. Adding a new consumer inside a
-	// phase requires updating this comment and this package's parity test matrix.
+	// slot is consumed only by decide's own access-constraint restriction
+	// (accessConstraintRestrictions, called from decide) and by
+	// ResolveListScopes (applyListScopeConstraints). Every other consumer is
+	// reached only on a masked ctx:
+	//   - decide's relationship candidates run under maskAllAuthzMemo, which
+	//     covers executionProjectAdmission -> ProjectAdmissionForClass ->
+	//     SystemAuthorityProof and relationshipSourceDelegationHolds -> the
+	//     delegation chain walk;
+	//   - the delegation ceiling call site and the chain walk itself run
+	//     under maskAuthzInputs, which covers getEffectivePermissions and
+	//     userRelationshipAuthority;
+	//   - CanMintSelector runs under maskAllAuthzMemo.
+	// The access-constraint impact computation (computePrincipalImpact), the
+	// material runtime's SystemAuthorityProof call and the handlers that call
+	// getEffectivePermissions are outside every install site. Adding a new
+	// consumer requires updating this comment and the store-call recorder
+	// test that asserts no masked call observes a memo.
 	//
 	// On a done ctx the memo is bypassed entirely: today's uncached call
 	// is made with today's ctx and its result returned verbatim, and
@@ -2171,77 +2238,18 @@ func auditPermissionID(request AuthzRequest) string {
 	return ""
 }
 
-// enforceUATConstraints checks the project and scope restrictions carried by a
-// ScopedUserIdentity (produced from a UAT). Returns a deny Decision if the
-// request falls outside the token's allowed project or scopes, nil otherwise.
-//
-// This adds a third check (ptone/scion#2092) after the two pre-existing
-// ones, in this fixed order: project match, then the token's permission
-// ceiling, then live project access (permissionID is the already-resolved
-// canonical permission Decide computed for this request, so the admission
-// check evaluates the exact permission the kernel will evaluate, not a
-// re-derived one). It runs last so only in-scope requests pay the extra
-// store lookup.
+// enforceUATConstraints applies the bearer gate (evaluateBearerGate) to a
+// request presented with a ScopedUserIdentity, using the identity's own
+// boundary and ceiling and no collection-level evidence. It returns a deny
+// Decision when the request falls outside the token's boundary, ceiling, or
+// the holder's current project access, and nil otherwise. permissionID is
+// the canonical permission Decide resolved for the request.
 func (a *AuthzService) enforceUATConstraints(ctx context.Context, principal PrincipalContext, scoped *ScopedUserIdentity, resource Resource, action Action, permissionID string) *Decision {
-	// A typed-nil *ScopedUserIdentity carries no project, ceiling, or scopes
-	// to evaluate. Deny with the same reason as the live-project-access
-	// check below rather than dereferencing a nil receiver or treating a
-	// missing credential as an unconstrained one.
-	if scoped == nil {
-		return &Decision{Allowed: false, Reason: "token holder lacks active access to the target project"}
+	in := bearerGateInputs{missing: true}
+	if scoped != nil {
+		in = bearerGateInputs{boundary: scoped.Boundary(), ceiling: scoped.Ceiling()}
 	}
-
-	// Enforce project constraint: the resource must belong to the token's project.
-	projectID := scoped.ScopedProjectID()
-	if resource.Type == "project" {
-		if resource.ID != projectID {
-			return &Decision{Allowed: false, Reason: "token not scoped for this project"}
-		}
-	} else if resource.ParentType == "project" && resource.ParentID != projectID {
-		return &Decision{Allowed: false, Reason: "token not scoped for this project"}
-	} else if resource.Type != "" && resource.Type != "project" && resource.ParentType != "project" {
-		// Resource has no project association (hub-level).
-		// UATs are project-scoped and must not access hub-level resources.
-		return &Decision{Allowed: false, Reason: "token not scoped for hub-level resources"}
-	}
-
-	// Enforce scope constraint: the token's frozen permission ceiling must
-	// allow the exact permission Decide resolved for this request. This is
-	// the same ceiling later steps (e.g. CanDelegate) consult, so this gate
-	// and the rest of the credential's authority share one source of truth
-	// instead of two independently-derived views of the same scopes.
-	if !scoped.Ceiling().Allows(permissionID) {
-		return &Decision{Allowed: false, Reason: "token does not have scope: " + resource.Type + ":" + string(action)}
-	}
-
-	// Live project access is required at use time, not just at mint time
-	// (ptone/scion#2092): retained creation ancestry or ownership never
-	// substitutes for current project access. ProjectTargetAdmission relies
-	// on ResolveTargetScope to reject any resource that isn't really a
-	// matching project target (ErrProjectMismatch), so this call is the
-	// actual authority for that classification, not the two checks above.
-	// It fails closed on any error (including
-	// ErrUnsupportedPrincipalKind for a non-local-user principal, which
-	// cannot occur for a ScopedUserIdentity today but is handled the same
-	// as any other denial rather than panicking or special-cased here).
-	// A store or resolution fault during the lookup still denies, but is
-	// tagged DenyCauseResolutionError (so Decision.IsIndeterminate reports
-	// true), matching the other store-error denies in decide(). Policy-fact
-	// errors (inactive user, project mismatch, unsupported principal kind,
-	// class mismatch) stay plain denies.
-	admission, err := a.ProjectTargetAdmission(ctx, principal, projectID, permissionID, resource, nil)
-	if err != nil {
-		d := &Decision{Allowed: false, Reason: "token holder lacks active access to the target project"}
-		if isProjectAccessLookupFault(err) {
-			d.DenyCause = DenyCauseResolutionError
-		}
-		return d
-	}
-	if !admission.Admitted {
-		return &Decision{Allowed: false, Reason: "token holder lacks active access to the target project"}
-	}
-
-	return nil
+	return a.evaluateBearerGate(ctx, principal, in, resource, TargetScopeEvidence{}, action, permissionID, nil, nil)
 }
 
 // canAccessAsAncestor checks if the principal appears in the resource's ancestry chain.

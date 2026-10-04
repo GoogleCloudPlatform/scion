@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
@@ -73,9 +74,11 @@ The token value is displayed only once on creation. Store it securely.
 
 Scopes are restrictions, not grants: selecting a scope limits what the
 token may ever do, but access to any specific target is still checked on
-every request against your current authority there. For agent:attach and
-agent:port_access, that means your own agents and their descendants --
-checked per agent, not enumerated when you select the scope. Run
+every request against your current authority there. For agent:attach,
+that means your own agents and their descendants. For agent:port_access,
+it also includes agents in projects where your role grants
+agent.port_access (project owners and admins). Either is checked per
+agent, not enumerated when you select the scope. Run
 "scion hub token scopes --project <project>" to see which scopes you may
 currently select and why.
 
@@ -261,7 +264,7 @@ func runTokenCreate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Project:   %s (%s)\n", project.Name, project.ID)
 	fmt.Printf("  Scopes:  %s\n", strings.Join(resp.AccessToken.Scopes, ", "))
 	if resp.AccessToken.ExpiresAt != nil {
-		fmt.Printf("  Expires: %s\n", resp.AccessToken.ExpiresAt.Format(time.RFC3339))
+		fmt.Printf("  Expires: %s\n", clitime.Format(*resp.AccessToken.ExpiresAt, clitime.Full))
 	}
 	if resp.AccessToken.Purpose != "" {
 		fmt.Printf("  Purpose: %s\n", resp.AccessToken.Purpose)
@@ -323,9 +326,9 @@ func runTokenList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fmt.Printf("%-20s  %-36s  %-16s  %-10s  %-19s  %s\n", "NAME", "ID", "PREFIX", "STATUS", "EXPIRES", "SCOPES")
-	fmt.Printf("%-20s  %-36s  %-16s  %-10s  %-19s  %s\n",
-		"--------------------", "------------------------------------", "----------------", "----------", "-------------------", "------")
+	fmt.Printf("%-20s  %-36s  %-16s  %-10s  %-25s  %s\n", "NAME", "ID", "PREFIX", "STATUS", "EXPIRES", "SCOPES")
+	fmt.Printf("%-20s  %-36s  %-16s  %-10s  %-25s  %s\n",
+		"--------------------", "------------------------------------", "----------------", "----------", "-------------------------", "------")
 	for _, t := range items {
 		status := "active"
 		if t.Revoked {
@@ -336,10 +339,10 @@ func runTokenList(cmd *cobra.Command, args []string) error {
 
 		expires := "never"
 		if t.ExpiresAt != nil {
-			expires = t.ExpiresAt.Format("2006-01-02 15:04:05")
+			expires = clitime.Format(*t.ExpiresAt, clitime.Full)
 		}
 
-		fmt.Printf("%-20s  %-36s  %-16s  %-10s  %-19s  %s\n",
+		fmt.Printf("%-20s  %-36s  %-16s  %-10s  %-25s  %s\n",
 			truncate(t.Name, 20),
 			t.ID,
 			t.Prefix,

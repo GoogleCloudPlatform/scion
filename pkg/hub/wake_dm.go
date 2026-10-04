@@ -69,8 +69,29 @@ type WakeResult struct {
 func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeResult, *AgentDMError) {
 	phase := state.Phase(agent.Phase)
 
+	// A create launch in flight or left incomplete skips the wake in any
+	// phase. The answer comes from the start gate, so a delete in progress
+	// still wins over the launch refusal.
+	if launchStartRefusal(agent, time.Now()).refuses() {
+		if ref := s.startGate(ctx, agent, startEntryWake); ref.refuses() {
+			s.messageLog.Info("wake: skipped by the start gate",
+				"agent_id", agent.ID, "code", ref.Code)
+			return nil, ref.dmError()
+		}
+	}
+
 	switch phase {
 	case state.PhaseSuspended:
+		// Start gate (design ptone/scion#2483 §2.1): a delete in progress,
+		// an incomplete create or an in-flight launch skips the wake before
+		// any quota reservation or start dispatch, so the message is not
+		// delivered either (AC-4). The sender's DM authz already ran.
+		if ref := s.startGate(ctx, agent, startEntryWake); ref.refuses() {
+			s.messageLog.Info("wake: skipped by the start gate",
+				"agent_id", agent.ID, "code", ref.Code)
+			return nil, ref.dmError()
+		}
+
 		// Managed runtimes do not support the suspend/resume lifecycle.
 		// Return an explicit error rather than silently pretending to resume.
 		if isManagedAgentRuntime(agent.Runtime) {
@@ -120,10 +141,31 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			}
 		}
 
+		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
+			s.rollbackBrokerQuota(ctx, agent, reserved)
+			return nil, &AgentDMError{
+				Code:       ErrCodeRuntimeError,
+				Message:    "Failed to wake agent: " + err.Error(),
+				HTTPStatus: http.StatusInternalServerError,
+			}
+		}
 		// Resume the suspended agent. continue=true tells the harness to
 		// restore its prior session rather than starting fresh.
 		if err := dispatcher.DispatchAgentStart(ctx, agent, "", true); err != nil {
 			s.rollbackBrokerQuota(ctx, agent, reserved)
+			if refusal := s.launchRefusalFromError(ctx, agent.ID, err); refusal != nil {
+				s.messageLog.Info("wake: skipped, agent create is launching or incomplete",
+					"agent_id", agent.ID, "code", refusal.Code)
+				return nil, refusal.dmError()
+			}
+			if errors.Is(err, errBrokerLacksEmptyPerAgent) {
+				// Fail closed like the other dispatch sites (design #2703 D3).
+				return nil, &AgentDMError{
+					Code:       ErrCodeUnsupportedCapability,
+					Message:    "Failed to wake agent: " + err.Error(),
+					HTTPStatus: http.StatusPreconditionFailed,
+				}
+			}
 			return nil, &AgentDMError{
 				Code:       ErrCodeRuntimeError,
 				Message:    "Failed to wake agent: " + err.Error(),
@@ -143,7 +185,9 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			}
 		}
 		agent.Phase = string(state.PhaseStarting)
-		s.events.PublishAgentStatus(ctx, agent)
+		// Publish from a re-read: a delete that claimed the row meanwhile
+		// must not be painted over (design ptone/scion#2483 note F).
+		s.publishAgentStatusFresh(ctx, agent)
 
 		// Wait for the agent to report its first activity (readiness signal).
 		if err := s.waitForAgentReady(ctx, agent.ID, 30*time.Second); err != nil {
@@ -188,7 +232,9 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			}
 		}
 		agent.Phase = string(state.PhaseRunning)
-		s.events.PublishAgentStatus(ctx, agent)
+		// Publish from a re-read: a delete that claimed the row meanwhile
+		// must not be painted over (design ptone/scion#2483 note F).
+		s.publishAgentStatusFresh(ctx, agent)
 
 		return &WakeResult{Outcome: WakeResumed}, nil
 
@@ -217,6 +263,18 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			HTTPStatus: http.StatusBadRequest,
 		}
 	}
+}
+
+// validateGroupMemberDeliverable is validateAgentDeliverable for a group[]
+// member. Group messages never wake agents, so a suspended member gets a
+// reason that points the sender at a direct, waking message instead of the
+// generic "use --wake" hint (which group sends do not accept).
+func validateGroupMemberDeliverable(agent *store.Agent) *AgentDMError {
+	err := validateAgentDeliverable(agent)
+	if err != nil && state.Phase(agent.Phase) == state.PhaseSuspended {
+		err.Message = fmt.Sprintf("agent %q is suspended; group messages do not wake agents — message it directly with --wake", agent.Slug)
+	}
+	return err
 }
 
 // validateAgentDeliverable checks that the target agent is in a state that

@@ -159,7 +159,7 @@ func TestBuildAgentEnv(t *testing.T) {
 		"EMPTY_EXTRA_KEY": "", // Should be omitted
 	}
 
-	env, warnings, missingKeys, _ := buildAgentEnv(scionCfg, extraEnv, false)
+	env, warnings, missingKeys, _ := buildAgentEnv(scionCfg, extraEnv, nil, false)
 
 	expected := map[string]string{
 		"NORMAL_KEY":    "normal-value",
@@ -213,7 +213,7 @@ func TestBuildAgentEnv_MissingKeysReturned(t *testing.T) {
 		},
 	}
 
-	env, _, missingKeys, _ := buildAgentEnv(scionCfg, nil, false)
+	env, _, missingKeys, _ := buildAgentEnv(scionCfg, nil, nil, false)
 
 	if len(env) != 1 {
 		t.Errorf("expected 1 env var, got %d: %v", len(env), env)
@@ -2566,7 +2566,7 @@ func TestBuildAgentEnv_EmptyValuePassthrough(t *testing.T) {
 		},
 	}
 
-	env, warnings, missingKeys, _ := buildAgentEnv(scionCfg, nil, false)
+	env, warnings, missingKeys, _ := buildAgentEnv(scionCfg, nil, nil, false)
 
 	envMap := make(map[string]string)
 	for _, e := range env {
@@ -2605,7 +2605,7 @@ func TestBuildAgentEnv_ScionExtraPath(t *testing.T) {
 		},
 	}
 
-	env, warnings, _, _ := buildAgentEnv(scionCfg, nil, false)
+	env, warnings, _, _ := buildAgentEnv(scionCfg, nil, nil, false)
 
 	envMap := make(map[string]string)
 	for _, e := range env {
@@ -2650,7 +2650,7 @@ func TestBuildAgentEnv_HubEndpointOverride(t *testing.T) {
 			extraEnv["SCION_HUB_URL"] = scionCfg.Hub.Endpoint
 		}
 
-		env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, false)
+		env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, nil, false)
 
 		envMap := make(map[string]string)
 		for _, e := range env {
@@ -2675,7 +2675,7 @@ func TestBuildAgentEnv_HubEndpointOverride(t *testing.T) {
 			"SCION_HUB_URL":      "https://hub.example.com",
 		}
 
-		env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, false)
+		env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, nil, false)
 
 		envMap := make(map[string]string)
 		for _, e := range env {
@@ -3519,7 +3519,7 @@ func TestBuildAgentEnv_TelemetryInjection(t *testing.T) {
 		}
 	}
 
-	env, _, _, _ := buildAgentEnv(scionCfg, opts, false)
+	env, _, _, _ := buildAgentEnv(scionCfg, opts, nil, false)
 
 	envMap := make(map[string]string)
 	for _, e := range env {
@@ -4255,7 +4255,7 @@ func TestBuildAgentEnv_TelemetryNoOverrideExplicit(t *testing.T) {
 		}
 	}
 
-	env, _, _, _ := buildAgentEnv(scionCfg, opts, false)
+	env, _, _, _ := buildAgentEnv(scionCfg, opts, nil, false)
 
 	envMap := make(map[string]string)
 	for _, e := range env {
@@ -4288,7 +4288,7 @@ func TestBuildAgentEnv_HubEnvVarsSurviveMerge(t *testing.T) {
 		"SCION_AGENT_NAME":   "test-agent",
 	}
 
-	env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, false)
+	env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, nil, false)
 
 	envMap := make(map[string]string)
 	for _, e := range env {
@@ -4313,6 +4313,41 @@ func TestBuildAgentEnv_HubEnvVarsSurviveMerge(t *testing.T) {
 		if got != want {
 			t.Errorf("%s = %q, want %q", k, got, want)
 		}
+	}
+}
+
+// TestBuildAgentEnv_AuthoritativeMetadataModeWinsOverConfigEnv pins the seam
+// between the broker's authoritative SCION_METADATA_MODE (opts.Env, passed
+// here as extraEnv — see AgentManager.Start, which calls
+// buildAgentEnv(finalScionCfg, opts.Env, opts.BrokerMode)) and RunConfig.Env,
+// the field the docker/podman/k8s runtimes treat as already-decided (see the
+// collision-skip in pkg/runtime). extraEnv must win over a conflicting
+// template/harness-level scionCfg.Env value, the same precedence every other
+// opts.Env key gets, so a template cannot re-decide the mode that reaches
+// RunConfig.Env. brokerMode is true here to match the broker-mode start this
+// seam is pinning; it is otherwise orthogonal to this test's assertion.
+func TestBuildAgentEnv_AuthoritativeMetadataModeWinsOverConfigEnv(t *testing.T) {
+	scionCfg := &api.ScionConfig{
+		Env: map[string]string{
+			"SCION_METADATA_MODE": "passthrough",
+		},
+	}
+	extraEnv := map[string]string{
+		"SCION_METADATA_MODE": "block",
+	}
+
+	env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, true)
+
+	envMap := make(map[string]string)
+	for _, e := range env {
+		parts := strings.SplitN(e, "=", 2)
+		if len(parts) == 2 {
+			envMap[parts[0]] = parts[1]
+		}
+	}
+
+	if got, want := envMap["SCION_METADATA_MODE"], "block"; got != want {
+		t.Errorf("SCION_METADATA_MODE = %q, want %q (opts.Env must win over scionCfg.Env)", got, want)
 	}
 }
 
@@ -4752,7 +4787,7 @@ func TestBuildAgentEnv_EnvKeyScionHubEndpointOverride(t *testing.T) {
 			}
 		}
 
-		env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, false)
+		env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, nil, false)
 
 		envMap := make(map[string]string)
 		for _, e := range env {
@@ -4800,7 +4835,7 @@ func TestBuildAgentEnv_EnvKeyScionHubEndpointOverride(t *testing.T) {
 			}
 		}
 
-		env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, false)
+		env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, nil, false)
 
 		envMap := make(map[string]string)
 		for _, e := range env {
@@ -5110,6 +5145,299 @@ profiles:
 	if got := envMap["SCION_HUB_URL"]; got != "http://host.docker.internal:8080" {
 		t.Errorf("SCION_HUB_URL = %q, want %q (env section should override all)", got, "http://host.docker.internal:8080")
 	}
+}
+
+// setupTrustedHubEndpointTestProject writes the project/template/harness-config
+// fixture TestStartTrustedHubEndpoint's cases share: a project with
+// projectSettingsHubEndpoint configured (used only by the non-broker-mode
+// case), and an agent whose scion-agent.json sets both hub.endpoint and
+// env.SCION_HUB_ENDPOINT to creator-controlled values distinct from the
+// caller-provided one, so a test can assert neither ever reaches
+// TrustedHubEndpoint.
+func setupTrustedHubEndpointTestProject(t *testing.T, agentName, agentLevelHubEndpoint, templateEnvHubEndpoint string) (projectScionDir string) {
+	t.Helper()
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	t.Cleanup(func() { _ = os.Chdir(oldWd) })
+	t.Setenv("HOME", tmpDir)
+	for _, k := range []string{"SCION_DEV_TOKEN", "SCION_AUTH_TOKEN", "SCION_DEV_TOKEN_FILE", "SCION_HUB_ENDPOINT", "SCION_HUB_URL"} {
+		t.Setenv(k, "")
+		_ = os.Unsetenv(k)
+	}
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: gemini\nuser: scion\nimage: test-image:latest\n"), 0644)
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte("schema_version: \"1\"\nactive_profile: local\nprofiles:\n  local:\n    runtime: docker\n"), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir = filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+	_ = os.WriteFile(filepath.Join(projectScionDir, "settings.yaml"), []byte("hub:\n  enabled: true\n  endpoint: \"http://project-settings:9810\"\n"), 0644)
+
+	agentDir := filepath.Join(projectScionDir, "agents", agentName)
+	_ = os.MkdirAll(filepath.Join(agentDir, "home"), 0755)
+	agentJSON := fmt.Sprintf(`{"harness": "gemini", "hub": {"endpoint": %q}, "env": {"SCION_HUB_ENDPOINT": %q}}`,
+		agentLevelHubEndpoint, templateEnvHubEndpoint)
+	_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), []byte(agentJSON), 0644)
+
+	return projectScionDir
+}
+
+// TestStartTrustedHubEndpoint pins the Start->RunConfig.TrustedHubEndpoint
+// path directly (not just substrateEgressHostnames), so that capturing
+// callerHubEndpoint anywhere other than the top of Start — in particular,
+// after the agent-level Hub-config override applies — fails one of these
+// cases.
+func TestStartTrustedHubEndpoint(t *testing.T) {
+	const (
+		brokerHubEndpoint      = "http://broker-hub:9810"
+		agentLevelHubEndpoint  = "http://169.254.169.254"
+		templateEnvHubEndpoint = "http://host.docker.internal:8080"
+	)
+
+	t.Run("broker opts.Env hub is trusted", func(t *testing.T) {
+		projectScionDir := setupTrustedHubEndpointTestProject(t, "agent-1", agentLevelHubEndpoint, templateEnvHubEndpoint)
+		var capturedConfig runtime.RunConfig
+		mockRT := &runtime.MockRuntime{
+			ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+				return []api.AgentInfo{}, nil
+			},
+			RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+				capturedConfig = cfg
+				return "mock-id", nil
+			},
+		}
+		mgr := NewManager(mockRT)
+		_, err := mgr.Start(context.Background(), api.StartOptions{
+			Name:               "agent-1",
+			ProjectPath:        projectScionDir,
+			BrokerMode:         true,
+			NoAuth:             true,
+			Env:                map[string]string{"SCION_HUB_ENDPOINT": brokerHubEndpoint},
+			TrustedHubEndpoint: brokerHubEndpoint,
+		})
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		if capturedConfig.TrustedHubEndpoint != brokerHubEndpoint {
+			t.Errorf("TrustedHubEndpoint = %q, want %q (the broker-supplied opts.TrustedHubEndpoint value)", capturedConfig.TrustedHubEndpoint, brokerHubEndpoint)
+		}
+	})
+
+	t.Run("agent-level hub.endpoint never trusted, broker host still is", func(t *testing.T) {
+		projectScionDir := setupTrustedHubEndpointTestProject(t, "agent-2", agentLevelHubEndpoint, "")
+		var capturedConfig runtime.RunConfig
+		mockRT := &runtime.MockRuntime{
+			ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+				return []api.AgentInfo{}, nil
+			},
+			RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+				capturedConfig = cfg
+				return "mock-id", nil
+			},
+		}
+		mgr := NewManager(mockRT)
+		_, err := mgr.Start(context.Background(), api.StartOptions{
+			Name:               "agent-2",
+			ProjectPath:        projectScionDir,
+			BrokerMode:         true,
+			NoAuth:             true,
+			Env:                map[string]string{"SCION_HUB_ENDPOINT": brokerHubEndpoint},
+			TrustedHubEndpoint: brokerHubEndpoint,
+		})
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		if capturedConfig.TrustedHubEndpoint != brokerHubEndpoint {
+			t.Errorf("TrustedHubEndpoint = %q, want %q (agent-level hub.endpoint %q must never win)", capturedConfig.TrustedHubEndpoint, brokerHubEndpoint, agentLevelHubEndpoint)
+		}
+	})
+
+	t.Run("template env SCION_HUB_ENDPOINT override never trusted", func(t *testing.T) {
+		projectScionDir := setupTrustedHubEndpointTestProject(t, "agent-3", "", templateEnvHubEndpoint)
+		var capturedConfig runtime.RunConfig
+		mockRT := &runtime.MockRuntime{
+			ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+				return []api.AgentInfo{}, nil
+			},
+			RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+				capturedConfig = cfg
+				return "mock-id", nil
+			},
+		}
+		mgr := NewManager(mockRT)
+		_, err := mgr.Start(context.Background(), api.StartOptions{
+			Name:               "agent-3",
+			ProjectPath:        projectScionDir,
+			BrokerMode:         true,
+			NoAuth:             true,
+			Env:                map[string]string{"SCION_HUB_ENDPOINT": brokerHubEndpoint},
+			TrustedHubEndpoint: brokerHubEndpoint,
+		})
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		if capturedConfig.TrustedHubEndpoint != brokerHubEndpoint {
+			t.Errorf("TrustedHubEndpoint = %q, want %q (template env override %q must never win)", capturedConfig.TrustedHubEndpoint, brokerHubEndpoint, templateEnvHubEndpoint)
+		}
+		// Confirm the override DOES still reach the final container env,
+		// proving this case actually exercises the override path rather
+		// than a no-op.
+		envMap := make(map[string]string)
+		for _, e := range capturedConfig.Env {
+			parts := strings.SplitN(e, "=", 2)
+			if len(parts) == 2 {
+				envMap[parts[0]] = parts[1]
+			}
+		}
+		if got := envMap["SCION_HUB_ENDPOINT"]; got != templateEnvHubEndpoint {
+			t.Fatalf("existence control failed: final env SCION_HUB_ENDPOINT = %q, want %q — the override was not applied", got, templateEnvHubEndpoint)
+		}
+	})
+
+	t.Run("empty caller hub in broker mode adds no hub host", func(t *testing.T) {
+		projectScionDir := setupTrustedHubEndpointTestProject(t, "agent-4", agentLevelHubEndpoint, "")
+		var capturedConfig runtime.RunConfig
+		mockRT := &runtime.MockRuntime{
+			ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+				return []api.AgentInfo{}, nil
+			},
+			RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+				capturedConfig = cfg
+				return "mock-id", nil
+			},
+		}
+		mgr := NewManager(mockRT)
+		_, err := mgr.Start(context.Background(), api.StartOptions{
+			Name:        "agent-4",
+			ProjectPath: projectScionDir,
+			BrokerMode:  true,
+			NoAuth:      true,
+			// No SCION_HUB_ENDPOINT in opts.Env at all.
+		})
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		if capturedConfig.TrustedHubEndpoint != "" {
+			t.Errorf("TrustedHubEndpoint = %q, want \"\" (broker mode with no caller-supplied hub endpoint must not fall back to agent-level config or project settings)", capturedConfig.TrustedHubEndpoint)
+		}
+	})
+
+	// A tenant-controllable value (ResolvedEnv/Config.Env, mirrored here by
+	// setting opts.Env directly without opts.TrustedHubEndpoint) must never
+	// feed egress trust, even though it still reaches opts.Env and is
+	// delivered to the agent as SCION_HUB_ENDPOINT: BrokerMode must read
+	// opts.TrustedHubEndpoint only, never fall back to
+	// opts.Env["SCION_HUB_ENDPOINT"].
+	t.Run("tenant env hub endpoint present but TrustedHubEndpoint empty: not trusted", func(t *testing.T) {
+		projectScionDir := setupTrustedHubEndpointTestProject(t, "agent-5", agentLevelHubEndpoint, "")
+		var capturedConfig runtime.RunConfig
+		mockRT := &runtime.MockRuntime{
+			ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+				return []api.AgentInfo{}, nil
+			},
+			RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+				capturedConfig = cfg
+				return "mock-id", nil
+			},
+		}
+		mgr := NewManager(mockRT)
+		_, err := mgr.Start(context.Background(), api.StartOptions{
+			Name:        "agent-5",
+			ProjectPath: projectScionDir,
+			BrokerMode:  true,
+			NoAuth:      true,
+			// A tenant-controllable value present in opts.Env, exactly as
+			// resolveHubEndpointForCreate's ResolvedEnv tier would leave it
+			// when every operator tier is empty — but TrustedHubEndpoint
+			// itself is left unset, as buildStartContext now does in that
+			// case.
+			Env: map[string]string{"SCION_HUB_ENDPOINT": "http://169.254.169.254"},
+		})
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		if capturedConfig.TrustedHubEndpoint != "" {
+			t.Errorf("TrustedHubEndpoint = %q, want \"\" — a tenant-controllable opts.Env value must never feed egress trust", capturedConfig.TrustedHubEndpoint)
+		}
+	})
+
+	// Non-broker mode (BrokerMode: false — a local CLI start, not a
+	// broker-dispatched one): trustedHubEndpoint falls back to
+	// callerHubEndpoint (opts.Env, captured before any override),
+	// then projectSettingsHubEndpoint (the project's own settings.yaml
+	// hub.endpoint — an operator-controlled file). Neither of these two
+	// non-broker cases was exercised anywhere before this test: every
+	// other case above sets BrokerMode: true.
+	t.Run("non-broker mode: caller-supplied env hub endpoint is trusted", func(t *testing.T) {
+		projectScionDir := setupTrustedHubEndpointTestProject(t, "agent-6", agentLevelHubEndpoint, templateEnvHubEndpoint)
+		const callerHubEndpoint = "http://caller-hub:9810"
+		var capturedConfig runtime.RunConfig
+		mockRT := &runtime.MockRuntime{
+			ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+				return []api.AgentInfo{}, nil
+			},
+			RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+				capturedConfig = cfg
+				return "mock-id", nil
+			},
+		}
+		mgr := NewManager(mockRT)
+		_, err := mgr.Start(context.Background(), api.StartOptions{
+			Name:        "agent-6",
+			ProjectPath: projectScionDir,
+			BrokerMode:  false,
+			NoAuth:      true,
+			Env:         map[string]string{"SCION_HUB_ENDPOINT": callerHubEndpoint},
+		})
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		if capturedConfig.TrustedHubEndpoint != callerHubEndpoint {
+			t.Errorf("TrustedHubEndpoint = %q, want %q (the caller-supplied opts.Env value, agent-level config and template env must never win)", capturedConfig.TrustedHubEndpoint, callerHubEndpoint)
+		}
+	})
+
+	t.Run("non-broker mode: falls back to project settings hub endpoint when the caller supplies none", func(t *testing.T) {
+		// Neither an agent-level hub.endpoint nor a template env override:
+		// either would set opts.Env["SCION_HUB_ENDPOINT"] itself (run.go's
+		// earlier agent-level-hub-config branch), which would skip the
+		// project-settings branch entirely (its own guard is "only if
+		// opts.Env[\"SCION_HUB_ENDPOINT\"] isn't already set") before
+		// trustedHubEndpoint's fallback is ever reached.
+		projectScionDir := setupTrustedHubEndpointTestProject(t, "agent-7", "", "")
+		const projectSettingsHubEndpoint = "http://project-settings:9810" // set by setupTrustedHubEndpointTestProject's settings.yaml fixture.
+		var capturedConfig runtime.RunConfig
+		mockRT := &runtime.MockRuntime{
+			ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+				return []api.AgentInfo{}, nil
+			},
+			RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+				capturedConfig = cfg
+				return "mock-id", nil
+			},
+		}
+		mgr := NewManager(mockRT)
+		_, err := mgr.Start(context.Background(), api.StartOptions{
+			Name:        "agent-7",
+			ProjectPath: projectScionDir,
+			BrokerMode:  false,
+			NoAuth:      true,
+		})
+		if err != nil {
+			t.Fatalf("Start failed: %v", err)
+		}
+		if capturedConfig.TrustedHubEndpoint != projectSettingsHubEndpoint {
+			t.Errorf("TrustedHubEndpoint = %q, want %q (project settings' own hub.endpoint, with no caller-supplied value present)", capturedConfig.TrustedHubEndpoint, projectSettingsHubEndpoint)
+		}
+	})
 }
 
 func TestProfileEnvVisibleInAuthOverlay(t *testing.T) {
@@ -5649,6 +5977,104 @@ harness_configs:
 	}
 }
 
+// TestStart_RestartOfExistingAgent_ResolvedKubernetesServiceAccountNameOverridesPersistedValue
+// is the exact regression case a dedicated StartOptions field exists to fix:
+// GetAgent, for an EXISTING agent, builds its config from the template chain
+// plus the PERSISTED scion-agent.json — never from InlineConfig. A fresh
+// single-Start test cannot exercise this (ProvisionAgent's own template
+// merge already gets a first provision right); only a genuine second Start
+// against an already-provisioned agent, whose scion-agent.json now holds a
+// ServiceAccountName from that first provision, distinguishes "the override
+// still applies against a persisted value" from "it only ever applied
+// against a live template".
+func TestStart_RestartOfExistingAgent_ResolvedKubernetesServiceAccountNameOverridesPersistedValue(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: generic\nuser: scion\nimage: file-default:latest\n"), 0644)
+
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness", "kubernetes": {"serviceAccountName": "template-ksa"}}`), 0644)
+
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: k8s
+profiles:
+  k8s:
+    runtime: kubernetes
+runtimes:
+  kubernetes:
+    type: kubernetes
+`), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+			capturedConfig = cfg
+			return "mock-id", nil
+		},
+	}
+
+	mgr := NewManager(mockRT)
+
+	// First Start (fresh provision): no resolved KSA yet, so the agent's
+	// persisted scion-agent.json ends up with the template's ServiceAccountName.
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "test-agent",
+		ProjectPath: projectScionDir,
+		BrokerMode:  true,
+		NoAuth:      true,
+	}); err != nil {
+		t.Fatalf("first Start failed: %v", err)
+	}
+	if capturedConfig.Kubernetes == nil || capturedConfig.Kubernetes.ServiceAccountName != "template-ksa" {
+		got := ""
+		if capturedConfig.Kubernetes != nil {
+			got = capturedConfig.Kubernetes.ServiceAccountName
+		}
+		t.Fatalf("precondition failed: first-provision ServiceAccountName = %q, want the template's 'template-ksa'", got)
+	}
+
+	// Second Start (restart of the now-existing agent), with the broker
+	// having resolved a KSA mapping for this dispatch. It must win over the
+	// value now persisted in scion-agent.json from the first provision, not
+	// be silently ignored the way an InlineConfig-only value would be.
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:                                 "test-agent",
+		ProjectPath:                          projectScionDir,
+		BrokerMode:                           true,
+		NoAuth:                               true,
+		ResolvedKubernetesServiceAccountName: "resolved-ksa",
+	}); err != nil {
+		t.Fatalf("restart Start failed: %v", err)
+	}
+	if capturedConfig.Kubernetes == nil || capturedConfig.Kubernetes.ServiceAccountName != "resolved-ksa" {
+		got := ""
+		if capturedConfig.Kubernetes != nil {
+			got = capturedConfig.Kubernetes.ServiceAccountName
+		}
+		t.Errorf("restart ServiceAccountName = %q, want the resolved KSA %q (not the stale persisted template value)", got, "resolved-ksa")
+	}
+}
+
 // TestStart_RestartAfterSettingsPullPolicyRemoved_ClearsStalePersistedValue
 // pins ptone/scion#2156: image_pull_policy must behave exactly like image on
 // a restart — removing a Hub settings harness_configs.<h>.image_pull_policy
@@ -5930,6 +6356,131 @@ runtimes:
 			}
 			if gotPolicy != tt.wantPullPolicy {
 				t.Errorf("RunConfig.Kubernetes.ImagePullPolicy = %q, want %q", gotPolicy, tt.wantPullPolicy)
+			}
+		})
+	}
+}
+
+// TestStart_ResolvedKubernetesServiceAccountNameOverridesTemplate covers the
+// three cases for opts.ResolvedKubernetesServiceAccountName (the broker's
+// GCP-identity-mapped KSA for Kubernetes assign): it applies whether or not
+// the template chain sets a Kubernetes config at all, always wins over a
+// template-set ServiceAccountName when non-empty, and leaves an existing
+// template value untouched when empty (not just "does nothing" — the
+// template's own value must survive, exactly as before this field existed).
+func TestStart_ResolvedKubernetesServiceAccountNameOverridesTemplate(t *testing.T) {
+	tests := []struct {
+		name                       string
+		templateExtra              string
+		resolvedServiceAccountName string
+		wantServiceAccountName     string
+		wantKubernetesConfigAtAll  bool
+	}{
+		{
+			name:                       "no template Kubernetes config at all, only the resolved KSA",
+			resolvedServiceAccountName: "resolved-ksa",
+			wantServiceAccountName:     "resolved-ksa",
+			wantKubernetesConfigAtAll:  true,
+		},
+		{
+			// MB: no template Kubernetes config, no resolved KSA (e.g. a
+			// dispatch that never resolved a GCP identity mode "assign"
+			// mapping), and no other resolved Kubernetes field (pull
+			// policy) either — RunConfig.Kubernetes must stay nil, exactly
+			// the pre-existing behavior for an agent with no Kubernetes
+			// configuration at all. A missing nil-return guard here would
+			// instead produce an all-zero-value *api.KubernetesConfig.
+			name:                      "no template Kubernetes config and no resolved KSA stays nil",
+			wantKubernetesConfigAtAll: false,
+		},
+		{
+			name:                       "template ServiceAccountName is overridden by the resolved KSA",
+			templateExtra:              `, "kubernetes": {"serviceAccountName": "template-ksa"}`,
+			resolvedServiceAccountName: "resolved-ksa",
+			wantServiceAccountName:     "resolved-ksa",
+			wantKubernetesConfigAtAll:  true,
+		},
+		{
+			name:                      "empty resolved value leaves the template ServiceAccountName untouched",
+			templateExtra:             `, "kubernetes": {"serviceAccountName": "template-ksa"}`,
+			wantServiceAccountName:    "template-ksa",
+			wantKubernetesConfigAtAll: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+
+			oldWd, _ := os.Getwd()
+			_ = os.Chdir(tmpDir)
+			defer func() { _ = os.Chdir(oldWd) }()
+
+			originalHome := os.Getenv("HOME")
+			defer func() { _ = os.Setenv("HOME", originalHome) }()
+			_ = os.Setenv("HOME", tmpDir)
+
+			globalScionDir := filepath.Join(tmpDir, ".scion")
+
+			hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+			_ = os.MkdirAll(hcDir, 0755)
+			_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: generic\nuser: scion\nimage: file-default:latest\n"), 0644)
+
+			tplDir := filepath.Join(globalScionDir, "templates", "default")
+			_ = os.MkdirAll(tplDir, 0755)
+			tplJSON := `{"default_harness_config": "test-harness"` + tt.templateExtra + `}`
+			_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplJSON), 0644)
+
+			_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: k8s
+profiles:
+  k8s:
+    runtime: kubernetes
+runtimes:
+  kubernetes:
+    type: kubernetes
+`), 0644)
+
+			projectDir := filepath.Join(tmpDir, "project")
+			projectScionDir := filepath.Join(projectDir, ".scion")
+			_ = os.MkdirAll(projectScionDir, 0755)
+
+			var capturedConfig runtime.RunConfig
+			mockRT := &runtime.MockRuntime{
+				ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+					return []api.AgentInfo{}, nil
+				},
+				RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+					capturedConfig = cfg
+					return "mock-id", nil
+				},
+			}
+
+			mgr := NewManager(mockRT)
+
+			_, err := mgr.Start(context.Background(), api.StartOptions{
+				Name:                                 "test-agent",
+				ProjectPath:                          projectScionDir,
+				BrokerMode:                           true,
+				NoAuth:                               true,
+				ResolvedKubernetesServiceAccountName: tt.resolvedServiceAccountName,
+			})
+			if err != nil {
+				t.Fatalf("Start failed: %v", err)
+			}
+
+			if tt.wantKubernetesConfigAtAll && capturedConfig.Kubernetes == nil {
+				t.Fatal("expected RunConfig.Kubernetes to be set, got nil")
+			}
+			if !tt.wantKubernetesConfigAtAll && capturedConfig.Kubernetes != nil {
+				t.Fatalf("expected RunConfig.Kubernetes to be nil, got %+v", capturedConfig.Kubernetes)
+			}
+			gotServiceAccountName := ""
+			if capturedConfig.Kubernetes != nil {
+				gotServiceAccountName = capturedConfig.Kubernetes.ServiceAccountName
+			}
+			if gotServiceAccountName != tt.wantServiceAccountName {
+				t.Errorf("RunConfig.Kubernetes.ServiceAccountName = %q, want %q", gotServiceAccountName, tt.wantServiceAccountName)
 			}
 		})
 	}

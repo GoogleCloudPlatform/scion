@@ -288,6 +288,7 @@ against the schema — they use the pre-versioned format.`,
 				r.Version = version
 
 				validationErrors, err := config.ValidateSettings(data, version)
+				r.Warnings = append(r.Warnings, config.SettingsWarnings(data, version)...)
 				if err != nil {
 					r.Valid = false
 					r.Errors = []string{err.Error()}

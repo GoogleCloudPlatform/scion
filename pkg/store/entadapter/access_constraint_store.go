@@ -534,11 +534,11 @@ func (s *AccessConstraintStore) ListAccessConstraintsFiltered(ctx context.Contex
 		var cursorVal string
 		switch sortField {
 		case accessconstraint.FieldUpdated:
-			cursorVal = last.Updated.Format(time.RFC3339Nano)
+			cursorVal = last.Updated.UTC().Format(time.RFC3339Nano)
 		case accessconstraint.FieldName:
 			cursorVal = last.Name
 		default:
-			cursorVal = last.Created.Format(time.RFC3339Nano)
+			cursorVal = last.Created.UTC().Format(time.RFC3339Nano)
 		}
 		nextPageToken = encodeConstraintCursor(cursorVal, last.ID.String())
 	}

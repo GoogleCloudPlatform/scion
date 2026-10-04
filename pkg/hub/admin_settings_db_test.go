@@ -3291,43 +3291,6 @@ func TestPutThenGetServerConfigDB_RuntimesRoundTrip(t *testing.T) {
 	}
 }
 
-// TestPutServerConfigDB_ProfileTimezone_Valid accepts a valid IANA timezone.
-func TestPutServerConfigDB_ProfileTimezone_Valid(t *testing.T) {
-	srv, _, ops := newTestDBServer(t)
-
-	body := `{
-		"profiles": {"pacific": {"runtime": "docker", "timezone": "America/Los_Angeles"}}
-	}`
-
-	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
-	rr := httptest.NewRecorder()
-	srv.handlePutServerConfigDB(rr, req, ops)
-
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200 for valid timezone, got %d: %s", rr.Code, rr.Body.String())
-	}
-}
-
-// TestPutServerConfigDB_ProfileTimezone_Invalid rejects an invalid timezone.
-func TestPutServerConfigDB_ProfileTimezone_Invalid(t *testing.T) {
-	srv, _, ops := newTestDBServer(t)
-
-	body := `{
-		"profiles": {"broken": {"runtime": "docker", "timezone": "Foo/Bar"}}
-	}`
-
-	req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", body)
-	rr := httptest.NewRecorder()
-	srv.handlePutServerConfigDB(rr, req, ops)
-
-	if rr.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("expected 422 for invalid timezone, got %d: %s", rr.Code, rr.Body.String())
-	}
-	if !strings.Contains(rr.Body.String(), "Foo/Bar") {
-		t.Errorf("error message should mention the invalid timezone: %s", rr.Body.String())
-	}
-}
-
 // TestPutServerConfigDB_DefaultTimezone_Valid accepts a valid hub default timezone.
 func TestPutServerConfigDB_DefaultTimezone_Valid(t *testing.T) {
 	srv, _, ops := newTestDBServer(t)
@@ -3842,4 +3805,161 @@ func TestDropEnvOverriddenAccessFields(t *testing.T) {
 	if len(base.AdminEmails) != 1 || base.UserAccessMode != "open" {
 		t.Errorf("other fields must be untouched, got %+v", base)
 	}
+}
+
+// A shared_dir_size that is not a Kubernetes quantity is rejected on a
+// runtime entry and on a profile, naming the key; a valid one is accepted.
+func TestPutServerConfigDB_SharedDirSize(t *testing.T) {
+	tests := []struct {
+		name, body, wantKey string
+		wantCode            int
+	}{
+		{"runtime invalid", `{"runtimes": {"gke": {"type": "kubernetes", "shared_dir_size": "1TB"}}}`, "runtimes.gke.shared_dir_size", http.StatusUnprocessableEntity},
+		{"profile invalid", `{"profiles": {"big": {"runtime": "gke", "shared_dir_size": "lots"}}}`, "profiles.big.shared_dir_size", http.StatusUnprocessableEntity},
+		{"valid", `{"runtimes": {"gke": {"type": "kubernetes", "shared_dir_size": "1Ti", "shared_dir_storage_class": "standard-rwx"}},
+			"profiles": {"big": {"runtime": "gke", "shared_dir_size": "10Gi"}}}`, "", http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, _, ops := newTestDBServer(t)
+			req := adminRequest(http.MethodPut, "/api/v1/admin/server-config", tt.body)
+			rr := httptest.NewRecorder()
+			srv.handlePutServerConfigDB(rr, req, ops)
+			if rr.Code != tt.wantCode {
+				t.Fatalf("expected %d, got %d: %s", tt.wantCode, rr.Code, rr.Body.String())
+			}
+			if tt.wantKey != "" && !strings.Contains(rr.Body.String(), tt.wantKey) {
+				t.Errorf("error should name %s: %s", tt.wantKey, rr.Body.String())
+			}
+		})
+	}
+}
+
+// sdsWriteGlobalNFSBlock writes a global settings file whose
+// server.shared_dir_storage carries a complete nfs block (backend local).
+func sdsWriteGlobalNFSBlock(t *testing.T) {
+	t.Helper()
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	dir := filepath.Join(tmpHome, ".scion")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "settings.yaml"), []byte(`schema_version: "1"
+server:
+  shared_dir_storage:
+    backend: local
+    nfs:
+      mount_root: /srv/nfs
+      shares:
+        - id: share-1
+          pv_name: pv-1
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func sdsGetProfilesDB(t *testing.T, srv *Server, ops *OperationalSettings) map[string]config.V1ProfileConfig {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	srv.handleGetServerConfigDB(rr, adminRequest(http.MethodGet, "/api/v1/admin/server-config", ""), ops)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET: expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var resp ServerConfigDBResponse
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	return resp.Profiles
+}
+
+// shared_dir_storage_backend round-trips through the DB settings: it is
+// stored, returned by GET, kept when another profile field is edited and
+// written back, kept when another section is written, and reaches the
+// settings overlay that the co-located broker reads per dispatch.
+func TestPutServerConfigDB_SharedDirStorageBackend_RoundTrip(t *testing.T) {
+	sdsWriteGlobalNFSBlock(t)
+	old := config.GetGlobalSettingsOverlay()
+	t.Cleanup(func() { config.SetGlobalSettingsOverlay(old) })
+	config.SetGlobalSettingsOverlay(config.NewSettingsOverlay())
+
+	srv, _, ops := newTestDBServer(t)
+	put := func(body string) {
+		t.Helper()
+		rr := httptest.NewRecorder()
+		srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body), ops)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("PUT %s: expected 200, got %d: %s", body, rr.Code, rr.Body.String())
+		}
+	}
+
+	put(`{"runtimes": {"k8s": {"type": "kubernetes"}}, "profiles": {"gke": {"runtime": "k8s", "shared_dir_storage_backend": "nfs"}}}`)
+	profiles := sdsGetProfilesDB(t, srv, ops)
+	if got := profiles["gke"].SharedDirStorageBackend; got != "nfs" {
+		t.Fatalf("GET after PUT: shared_dir_storage_backend = %q, want nfs", got)
+	}
+
+	// Edit another field of the same profile the way the admin form does:
+	// send back what GET returned with one field changed.
+	gke := profiles["gke"]
+	gke.DefaultTemplate = "edited-template"
+	profiles["gke"] = gke
+	body, err := json.Marshal(map[string]interface{}{"profiles": profiles})
+	if err != nil {
+		t.Fatal(err)
+	}
+	put(string(body))
+
+	// Write a different section.
+	put(`{"server": {"hub": {"admin_mode": false}}}`)
+
+	profiles = sdsGetProfilesDB(t, srv, ops)
+	if got := profiles["gke"].SharedDirStorageBackend; got != "nfs" {
+		t.Errorf("after editing another field: shared_dir_storage_backend = %q, want nfs", got)
+	}
+	if got := profiles["gke"].DefaultTemplate; got != "edited-template" {
+		t.Errorf("default_template = %q, want edited-template", got)
+	}
+
+	// The overlay the co-located broker reads now resolves gke to nfs.
+	ApplySnapshot(srv, ops.Snapshot())
+	gs, _, err := config.LoadGlobalSettingsWithOverlay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, source := gs.ResolveSharedDirStorage("gke")
+	if cfg == nil || cfg.Backend != "nfs" {
+		t.Fatalf("overlay resolution for gke = %+v (%s), want nfs", cfg, source)
+	}
+}
+
+// shared_dir_storage_backend is checked on a DB-mode write: an unknown
+// value is rejected by the schema, and "nfs" without a complete
+// server.shared_dir_storage.nfs block in the global settings is rejected
+// naming the key.
+func TestPutServerConfigDB_SharedDirStorageBackend_Invalid(t *testing.T) {
+	t.Run("unknown value", func(t *testing.T) {
+		sdsWriteGlobalNFSBlock(t)
+		srv, _, ops := newTestDBServer(t)
+		rr := httptest.NewRecorder()
+		srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+			`{"profiles": {"gke": {"runtime": "k8s", "shared_dir_storage_backend": "ceph"}}}`), ops)
+		if rr.Code < 400 {
+			t.Fatalf("expected a 4xx, got %d: %s", rr.Code, rr.Body.String())
+		}
+	})
+	t.Run("nfs without an nfs block", func(t *testing.T) {
+		tmpHome := t.TempDir()
+		t.Setenv("HOME", tmpHome)
+		srv, _, ops := newTestDBServer(t)
+		rr := httptest.NewRecorder()
+		srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+			`{"runtimes": {"k8s": {"type": "kubernetes", "shared_dir_storage_backend": "nfs"}}}`), ops)
+		if rr.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("expected 422, got %d: %s", rr.Code, rr.Body.String())
+		}
+		if !strings.Contains(rr.Body.String(), "runtimes.k8s.shared_dir_storage_backend") {
+			t.Errorf("error should name the key: %s", rr.Body.String())
+		}
+	})
 }

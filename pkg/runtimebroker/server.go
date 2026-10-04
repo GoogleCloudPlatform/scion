@@ -160,11 +160,18 @@ type ServerConfig struct {
 	// projected secrets. Defaults to true; set false to block such dispatches.
 	AllowContainerScriptHarnesses bool
 
-	// NFSConfig holds NFS workspace storage settings for this broker.
-	// When non-nil with shares configured, the broker can provision and
-	// clean up NFS-backed workspace subtrees. Used by deleteProject (N1-6)
-	// to also remove the NFS project subtree on project deletion.
+	// NFSConfig holds NFS workspace storage settings for this broker. The
+	// server command sets it from server.workspace_storage when the backend
+	// is "nfs" (see brokerNFSConfig in cmd). When non-nil with shares
+	// configured, the broker constructs an NFSMountReconciler that mounts
+	// each share at <MountRoot>/<share.ID> in the background at startup,
+	// reports per-share state in /healthz, and re-checks the shares before
+	// NFS-backed agent dispatches. Nil leaves all NFS handling off.
 	NFSConfig *config.V1NFSConfig
+
+	// NFSMountChecker overrides the mount layer the NFS reconciler uses.
+	// Nil selects ExecMountChecker (mount(8)/umount(8)); tests set a fake.
+	NFSMountChecker MountChecker
 
 	// ColocatedStorage is the storage backend of a Hub running co-located in the
 	// same process. When set and backed by the local filesystem, the broker
@@ -279,6 +286,15 @@ type Server struct {
 
 	// NFS mount reconciler (nil when backend != "nfs")
 	nfsMountReconciler *NFSMountReconciler
+	// NFS reconcile loop state (all unused when nfsMountReconciler is nil).
+	// nfsStartupReconcileDone is closed once the loop's first pass has
+	// finished; nfsReconcileStopped is closed when the loop exits.
+	nfsStartupReconcileDone chan struct{}
+	nfsReconcileStopped     chan struct{}
+	nfsReconcileOnce        sync.Once
+	nfsReconcileCancel      context.CancelFunc
+	// nfsReconcileInterval overrides DefaultNFSReconcileInterval (tests).
+	nfsReconcileInterval time.Duration
 
 	// Dedicated request logger (nil = disabled)
 	requestLogger *slog.Logger
@@ -365,14 +381,33 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 	}
 
 	// Initialize NFS mount reconciler when NFS storage is configured.
-	// This only constructs the reconciler; Reconcile() is called in Start().
+	// This only constructs the reconciler; its loop is started in Start().
 	if cfg.NFSConfig != nil && len(cfg.NFSConfig.Shares) > 0 {
 		nfsLog := logging.Subsystem("broker.nfs-mount")
-		checker := NewExecMountChecker(nfsLog)
+		checker := cfg.NFSMountChecker
+		if checker == nil {
+			checker = NewExecMountChecker(nfsLog)
+		}
 		srv.nfsMountReconciler = NewNFSMountReconciler(cfg.NFSConfig, checker, nfsLog)
+		// On Kubernetes and Cloud Run the platform mounts the export into
+		// the agent, so the broker never mounts it; it only verifies.
+		if rt != nil && NFSWarnOnlyRuntime(rt.Name()) {
+			srv.nfsMountReconciler.SetVerifyOnly(fmt.Sprintf(
+				"the broker's default runtime is %s, so the broker does not mount it", rt.Name()))
+		}
+		srv.nfsStartupReconcileDone = make(chan struct{})
+		srv.nfsReconcileStopped = make(chan struct{})
 		slog.Info("NFS mount reconciler initialized",
 			"shares", len(cfg.NFSConfig.Shares),
-			"mountRoot", cfg.NFSConfig.MountRoot)
+			"mountRoot", cfg.NFSConfig.MountRoot,
+			"autoMount", cfg.NFSConfig.AutoMount,
+			"brokerMounts", srv.nfsMountReconciler.MountsShares())
+		if srv.nfsMountReconciler.MountsShares() {
+			if err := srv.nfsMountReconciler.mountPrivilegeError(); err != nil {
+				slog.Warn("server.workspace_storage.nfs.auto_mount is on but the broker cannot mount; shares are checked only",
+					"reason", err)
+			}
+		}
 	}
 
 	// Initialize Hub integration if enabled
@@ -997,19 +1032,13 @@ func (s *Server) Start(ctx context.Context) error {
 	// a broker restart.
 	s.discoverAuxiliaryRuntimes()
 
-	// Reconcile NFS mounts at startup (ensure configured shares are mounted).
-	if s.nfsMountReconciler != nil {
-		if err := s.nfsMountReconciler.Reconcile(); err != nil {
-			slog.Warn("NFS mount reconciliation returned error at startup", "error", err)
-		}
-		if !s.nfsMountReconciler.IsHealthy() {
-			slog.Error("NFS mounts unhealthy at startup",
-				"detail", s.nfsMountReconciler.HealthCheckString())
-		} else {
-			slog.Info("NFS mounts reconciled at startup",
-				"status", s.nfsMountReconciler.HealthCheckString())
-		}
-	}
+	// Check (and, with nfs.auto_mount, mount) the configured NFS shares.
+	// This runs in the background: an NFS mount or mountpoint check against
+	// an unreachable server can block for minutes, and a failed mount must
+	// not delay or stop the broker from serving projects that do not use
+	// NFS. Until the first pass finishes, /healthz reports the shares as not
+	// reconciled.
+	s.startNFSReconcileLoop(ctx)
 
 	// Start all hub connections' services
 	s.hubMu.RLock()
@@ -1044,6 +1073,43 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 }
 
+// startNFSReconcileLoop starts the NFS reconciler's background loop (see
+// NFSMountReconciler.Run). It is a no-op when NFS is not configured, and
+// starts at most one loop per Server. The loop stops when ctx is cancelled
+// or Shutdown is called.
+func (s *Server) startNFSReconcileLoop(ctx context.Context) {
+	if s.nfsMountReconciler == nil {
+		return
+	}
+	s.nfsReconcileOnce.Do(func() {
+		loopCtx, cancel := context.WithCancel(ctx)
+		s.mu.Lock()
+		s.nfsReconcileCancel = cancel
+		s.mu.Unlock()
+		go func() {
+			defer close(s.nfsReconcileStopped)
+			s.nfsMountReconciler.Run(loopCtx, s.nfsReconcileInterval, func() {
+				s.logNFSStartupResult()
+				close(s.nfsStartupReconcileDone)
+			})
+		}()
+	})
+}
+
+// logNFSStartupResult logs the outcome of the first reconcile pass. Failures
+// are recorded per share (surfaced in /healthz and by scion doctor) and
+// never stop the broker.
+func (s *Server) logNFSStartupResult() {
+	r := s.nfsMountReconciler
+	if r.IsHealthy() {
+		slog.Info("NFS mounts checked at startup",
+			"status", r.HealthCheckString(), "autoMount", r.AutoMount())
+		return
+	}
+	slog.Error("NFS mounts unhealthy at startup; the broker keeps serving",
+		"detail", r.HealthCheckString(), "autoMount", r.AutoMount())
+}
+
 // Shutdown gracefully shuts down the server.
 func (s *Server) Shutdown(ctx context.Context) error {
 	// Write any resolution cache entries still waiting for their delayed
@@ -1064,6 +1130,16 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	if credWatcherStop != nil {
 		slog.Info("Stopping credential watcher...")
 		close(credWatcherStop)
+	}
+
+	// Stop the NFS reconcile loop. Cancelling its context kills a mount
+	// command in progress (its whole process group), so the loop ends
+	// promptly; it is not waited for.
+	s.mu.RLock()
+	nfsCancel := s.nfsReconcileCancel
+	s.mu.RUnlock()
+	if nfsCancel != nil {
+		nfsCancel()
 	}
 
 	// Stop all hub connections
@@ -1476,11 +1552,18 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 	slug = strings.ToLower(slug)
 
 	filter := scopedNameFilter(slug, projectID)
-	agents, err := s.manager.List(ctx, filter)
-	if err != nil {
-		return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+	// A recorded runtime type (ptone/scion#2748) can exclude the default
+	// runtime; auxListAgentsSorted applies the same restriction.
+	useDefault := s.defaultRuntimeAllowed(ctx)
+	var agents []api.AgentInfo
+	var err error
+	if useDefault {
+		agents, err = s.manager.List(ctx, filter)
+		if err != nil {
+			return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+		}
+		agents = agentsForProject(agents, projectID)
 	}
-	agents = agentsForProject(agents, projectID)
 	matchManager := s.manager
 	matchRuntime := s.runtime
 
@@ -1501,11 +1584,13 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 	// project-scoped request, or same-slug agents across projects would collide.
 	if len(agents) == 0 && projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
-		agents, err = s.manager.List(ctx, fallbackFilter)
-		if err != nil {
-			return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+		if useDefault {
+			agents, err = s.manager.List(ctx, fallbackFilter)
+			if err != nil {
+				return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+			}
+			agents = agentsWithoutProjectLabel(agents)
 		}
-		agents = agentsWithoutProjectLabel(agents)
 		matchManager = s.manager
 		matchRuntime = s.runtime
 		if len(agents) == 0 {
@@ -1569,19 +1654,10 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 // other: they are paired at the moment the match is found, not looked up
 // again afterward.
 func (s *Server) auxListAgentsSorted(ctx context.Context, slug string, fallback bool, filter map[string]string, filterAgents func([]api.AgentInfo) []api.AgentInfo) ([]api.AgentInfo, agent.Manager, scionrt.Runtime, error) {
-	s.auxiliaryRuntimesMu.RLock()
-	auxNames := make([]string, 0, len(s.auxiliaryRuntimes))
-	auxRuntimes := make(map[string]auxiliaryRuntime, len(s.auxiliaryRuntimes))
-	for name, aux := range s.auxiliaryRuntimes {
-		auxNames = append(auxNames, name)
-		auxRuntimes[name] = aux
-	}
-	s.auxiliaryRuntimesMu.RUnlock()
-	sort.Strings(auxNames)
-
 	var listErr error
-	for _, rtName := range auxNames {
-		auxAgents, auxErr := auxRuntimes[rtName].Manager.List(ctx, filter)
+	for _, aux := range s.sortedAuxiliaryRuntimesFor(ctx) {
+		rtName := aux.identity
+		auxAgents, auxErr := aux.Manager.List(ctx, filter)
 		if auxErr != nil {
 			if listErr == nil {
 				listErr = fmt.Errorf("%w %q: %v", errAuxiliaryRuntimeList, rtName, auxErr)
@@ -1594,7 +1670,7 @@ func (s *Server) auxListAgentsSorted(ctx context.Context, slug string, fallback 
 				msg += " (fallback)"
 			}
 			slog.Debug(msg, "slug", slug, "runtime", rtName)
-			return matched, auxRuntimes[rtName].Manager, auxRuntimes[rtName].Runtime, nil
+			return matched, aux.Manager, aux.Runtime, nil
 		}
 	}
 	if listErr != nil {
