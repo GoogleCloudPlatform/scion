@@ -7,7 +7,7 @@
 # variable is never noticed.
 #
 # Severity: FORMATTING-GRADE
-#   Missing rg:      exit 0 (silent skip)
+#   Missing rg:      exit 3 (nothing analysed; see hack/lib/require-tool.sh)
 #   No candidates:   exit 0
 #   Violations found: exit 1
 #   Clean:           exit 0
@@ -23,11 +23,10 @@ if [[ "$sha" != "unknown" ]] && [[ -n "$(git status --porcelain 2>/dev/null)" ]]
   sha="${sha}-dirty"
 fi
 
-# Dependency check — formatting-grade: exit 0 if rg is missing.
-if ! command -v rg >/dev/null 2>&1; then
-  echo "Warning: ripgrep (rg) not found — skipping setenv-guard check" >&2
-  exit 0
-fi
+# Dependency check: a missing rg exits 3 at every severity level.
+# shellcheck source=SCRIPTDIR/lib/require-tool.sh
+source hack/lib/require-tool.sh
+require_tool rg check-setenv-guard "ripgrep (rg)"
 
 # Pre-filter: find non-test Go files with _ = os.Setenv(.
 tmp="$(mktemp)"
