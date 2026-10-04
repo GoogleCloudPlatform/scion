@@ -71,3 +71,7 @@ Each fix was checked against the code at upstream 92c805cf:
 
 - **Local mode precedence.** A harness-config `TZ` reaches the container through `opts.Env` as `extraEnv`, which `buildAgentEnv` applies over the merged template and inline config env. A value there therefore beats both. An empty one cancels a template or inline `TZ`, and the container gets UTC.
 - **Maintenance button.** A failed migration's button reads **Retry** (`admin-maintenance.ts`), not **Run**.
+
+## Upstream merge
+
+- Merged upstream main b0ac40a0 as merge commit 3eaf5e54. There were no conflicts and the remerge-diff is empty. The only change main made to `api.md` is the user `DELETE` line, which has nothing to do with timezones; the agent TZ chain link still points at this page. Main's other docs changes do not mention timezones. With the task 18b fix now on main, `applied-config-tz-cleanup` is re-runnable as the page says. The docs build passes: 95 pages, and all internal links are valid.
