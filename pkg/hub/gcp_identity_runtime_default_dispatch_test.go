@@ -23,12 +23,14 @@ import (
 	"flag"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -87,23 +89,23 @@ func metadataEnvSlice(env map[string]string) map[string]string {
 func TestDispatch_GCPIdentityRuntimeDefault_MatchesBrokerFixture(t *testing.T) {
 	cases := []struct {
 		name  string
-		setup func(t *testing.T, f *bypassAgentsFixture) CreateAgentRequest
+		setup func(t *testing.T, f *gcpDispatchFixture) CreateAgentRequest
 	}{
-		{"no_identity", func(t *testing.T, f *bypassAgentsFixture) CreateAgentRequest {
+		{"no_identity", func(t *testing.T, f *gcpDispatchFixture) CreateAgentRequest {
 			return CreateAgentRequest{}
 		}},
-		{"agent_block", func(t *testing.T, f *bypassAgentsFixture) CreateAgentRequest {
+		{"agent_block", func(t *testing.T, f *gcpDispatchFixture) CreateAgentRequest {
 			return CreateAgentRequest{GCPIdentity: &GCPIdentityAssignment{MetadataMode: store.GCPMetadataModeBlock}}
 		}},
-		{"project_default_block", func(t *testing.T, f *bypassAgentsFixture) CreateAgentRequest {
+		{"project_default_block", func(t *testing.T, f *gcpDispatchFixture) CreateAgentRequest {
 			setProjectGCPIdentityDefault(t, f, store.GCPMetadataModeBlock)
 			return CreateAgentRequest{}
 		}},
-		{"hub_default_block", func(t *testing.T, f *bypassAgentsFixture) CreateAgentRequest {
+		{"hub_default_block", func(t *testing.T, f *gcpDispatchFixture) CreateAgentRequest {
 			setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{DefaultGCPIdentityMode: store.GCPMetadataModeBlock})
 			return CreateAgentRequest{}
 		}},
-		{"project_default_assign_without_sa", func(t *testing.T, f *bypassAgentsFixture) CreateAgentRequest {
+		{"project_default_assign_without_sa", func(t *testing.T, f *gcpDispatchFixture) CreateAgentRequest {
 			setProjectGCPIdentityDefault(t, f, store.GCPMetadataModeAssign)
 			return CreateAgentRequest{}
 		}},
@@ -113,11 +115,11 @@ func TestDispatch_GCPIdentityRuntimeDefault_MatchesBrokerFixture(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			f := bypassAgentsSetup(t)
+			f := newGCPDispatchFixture(t)
 			req := tc.setup(t, f)
 			req.Name = strings.ReplaceAll(tc.name, "_", "-")
 
-			rec := createAgentAsOwner(t, f, req)
+			rec := f.create(t, req)
 			require.Equal(t, http.StatusCreated, rec.Code, "create: %s", rec.Body.String())
 			var resp CreateAgentResponse
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
@@ -166,14 +168,35 @@ func TestDispatch_GCPIdentityRuntimeDefault_MatchesBrokerFixture(t *testing.T) {
 	}
 }
 
+// gcpDispatchFixture is a hub with one project and broker, a stub dispatcher
+// for the create handler, and the store the real HTTP dispatcher reads.
+type gcpDispatchFixture struct {
+	srv     *Server
+	store   store.Store
+	project *store.Project
+}
+
+func newGCPDispatchFixture(t *testing.T) *gcpDispatchFixture {
+	t.Helper()
+	srv, s, project := setupCreateAgentServer(t, &createAgentDispatcher{createPhase: string(state.PhaseRunning)})
+	return &gcpDispatchFixture{srv: srv, store: s, project: project}
+}
+
+func (f *gcpDispatchFixture) create(t *testing.T, req CreateAgentRequest) *httptest.ResponseRecorder {
+	t.Helper()
+	req.ProjectID = f.project.ID
+	req.Task = "do something"
+	return doRequest(t, f.srv, http.MethodPost, "/api/v1/agents", req)
+}
+
 // setProjectGCPIdentityDefault writes a project default GCP identity mode
 // straight to the project's annotations, with no service account. This
 // stands in for stored data: the settings endpoint itself rejects "assign"
 // without a service account.
-func setProjectGCPIdentityDefault(t *testing.T, f *bypassAgentsFixture, mode string) {
+func setProjectGCPIdentityDefault(t *testing.T, f *gcpDispatchFixture, mode string) {
 	t.Helper()
 	ctx := context.Background()
-	p, err := f.store.GetProject(ctx, f.proj.ID)
+	p, err := f.store.GetProject(ctx, f.project.ID)
 	require.NoError(t, err)
 	if p.Annotations == nil {
 		p.Annotations = map[string]string{}
@@ -191,9 +214,9 @@ func setProjectGCPIdentityDefault(t *testing.T, f *bypassAgentsFixture, mode str
 // secrets with these names are already dropped as reserved targets.)
 func TestDispatch_NoGCPIdentity_DropsConfigMetadataEnvOnCreateAndStart(t *testing.T) {
 	ctx := context.Background()
-	f := bypassAgentsSetup(t)
+	f := newGCPDispatchFixture(t)
 
-	rec := createAgentAsOwner(t, f, CreateAgentRequest{Name: "no-identity-config-env"})
+	rec := f.create(t, CreateAgentRequest{Name: "no-identity-config-env"})
 	require.Equal(t, http.StatusCreated, rec.Code, "create: %s", rec.Body.String())
 	var resp CreateAgentResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
