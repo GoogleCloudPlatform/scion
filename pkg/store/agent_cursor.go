@@ -23,9 +23,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// AgentCursor is the decoded form of a v2 sorted-mode agent list cursor
-// (design lists-graph.md 4.4): the position key K, the tie-break Created
-// timestamp, and the id of the last examined item.
+// AgentCursor is the decoded form of a v2 sorted-mode agent list cursor:
+// the position key K, the tie-break Created timestamp, and the id of the
+// last examined item.
 type AgentCursor struct {
 	K       time.Time
 	Created time.Time
@@ -39,7 +39,7 @@ type AgentCursor struct {
 const agentCursorV2Prefix = "v2"
 
 // EncodeAgentCursor produces the opaque v2 cursor for a sorted-mode agent
-// list page (design lists-graph.md 4.4):
+// list page:
 //
 //	base64url( "v2," sort "," dir "," RFC3339Nano(K) "," RFC3339Nano(created) "," uuid "," binding )
 //
@@ -52,8 +52,8 @@ func EncodeAgentCursor(sort, dir string, k, created time.Time, id, binding strin
 		agentCursorV2Prefix,
 		sort,
 		dir,
-		k.Format(time.RFC3339Nano),
-		created.Format(time.RFC3339Nano),
+		k.UTC().Format(time.RFC3339Nano),
+		created.UTC().Format(time.RFC3339Nano),
 		id,
 		binding,
 	}, ",")

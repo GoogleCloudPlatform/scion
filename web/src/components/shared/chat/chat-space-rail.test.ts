@@ -33,6 +33,7 @@
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { apiFetch } from '../../../client/api.js';
+import { setPreferredTimeZone } from '../../../utils/time.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -325,5 +326,25 @@ describe('space rail — new thread name entry', () => {
       expect(el.shadowRoot.querySelector('.create-thread')).toBeNull();
       expect(el._createThreadGroupId).toBeNull();
     });
+  });
+});
+
+describe('thread markdown export in the display zone (tz-refactor task 21)', () => {
+  afterEach(() => {
+    setPreferredTimeZone('');
+    vi.useRealTimers();
+  });
+
+  it('formats the export and message times 24-hour in the display zone, naming the zone', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-23T15:00:00Z'));
+    // vitest pins the browser zone to UTC; 15:00Z is midnight in Tokyo.
+    setPreferredTimeZone('Asia/Tokyo');
+    const el = document.createElement('scion-chat-space-rail') as any;
+    const md: string = el.formatThreadAsMarkdown({ name: 'general' }, [
+      { sender: 'user:alice', msg: 'hi', createdAt: '2026-09-23T15:05:00Z' },
+    ]);
+    expect(md).toContain('Exported: Sep 24, 2026, 00:00 (Asia/Tokyo)');
+    expect(md).toContain('**alice** (Sep 24, 2026, 00:05 (Asia/Tokyo)):');
   });
 });

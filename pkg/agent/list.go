@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	scionruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime"
@@ -279,7 +280,7 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 				// Warn about stale soft-deleted agents
 				if !info.DeletedAt.IsZero() {
 					agentEntry.Warnings = append(agentEntry.Warnings,
-						fmt.Sprintf("soft-deleted at %s", info.DeletedAt.Format("2006-01-02 15:04")))
+						fmt.Sprintf("soft-deleted at %s", clitime.Format(info.DeletedAt, clitime.Minute)))
 				}
 
 				agents = append(agents, agentEntry)

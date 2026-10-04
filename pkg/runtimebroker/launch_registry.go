@@ -32,10 +32,12 @@ type launchKey struct {
 
 // launchRecord is one launch's local bookkeeping (design §3.8.1). It is an
 // optimisation only: correctness comes from the Hub's answers to claim,
-// checkpoint and keepalive reports, never from this record. Seq and Handles
-// are written only by the launch's own runLaunch goroutine (and the sender
-// it owns), so they need no lock of their own; OwnerHub can be read and
-// written from the sender's fan-out routing and is guarded by mu.
+// checkpoint and keepalive reports, never from this record. Seq is written
+// only by the launch's own runLaunch goroutine (and the sender it owns), so
+// it needs no lock of its own. Handles is appended from the runtime's
+// OnResourceCreated hook, which runs on Manager.Start's goroutine, so it is
+// guarded by mu (AddHandle, HandlesSnapshot); OwnerHub can be read and
+// written from the sender's fan-out routing and is also guarded by mu.
 type launchRecord struct {
 	ID       string
 	AgentID  string
@@ -45,8 +47,9 @@ type launchRecord struct {
 	// Seq is the last report sequence number sent for this launch.
 	Seq int64
 	// Handles accumulates every runtime resource created during the launch
-	// (design §3.8.4), for CleanupLaunch on an abort. Always empty in P1b-1,
-	// since no runtime yet calls OnResourceCreated (P1b-2 adds that).
+	// (design §3.8.4), reported by the runtime's OnResourceCreated hook, for
+	// CleanupLaunch on an abort. Guarded by mu: use AddHandle and
+	// HandlesSnapshot rather than the field once the launch has started.
 	Handles []agent.ResourceHandle
 	// HubName is the hub connection resolved at admission time (routing
 	// rules 1-3, design §3.8.5); "" means the sender fans out and pins
@@ -79,6 +82,24 @@ func (rec *launchRecord) SetOwnerHub(connName string) {
 	if rec.ownerHub == "" {
 		rec.ownerHub = connName
 	}
+}
+
+// AddHandle records one runtime resource the launch created (the runtime's
+// OnResourceCreated hook, design §3.8.4).
+func (rec *launchRecord) AddHandle(h agent.ResourceHandle) {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	rec.Handles = append(rec.Handles, h)
+}
+
+// HandlesSnapshot returns a copy of the handles recorded so far.
+func (rec *launchRecord) HandlesSnapshot() []agent.ResourceHandle {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.Handles) == 0 {
+		return nil
+	}
+	return append([]agent.ResourceHandle(nil), rec.Handles...)
 }
 
 // CancelLocal wakes any local wait on this launch (e.g. a blocked

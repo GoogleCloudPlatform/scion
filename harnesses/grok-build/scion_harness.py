@@ -29,6 +29,7 @@ import itertools
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -40,8 +41,8 @@ from typing import Any, Collection
 # Version contract (§3.3)
 # ---------------------------------------------------------------------------
 
-INTERFACE_VERSION = 2
-LIB_VERSION = "2026-09-30"
+INTERFACE_VERSION = 3
+LIB_VERSION = "2026-10-02"
 
 # ---------------------------------------------------------------------------
 # Exit codes
@@ -69,6 +70,75 @@ class ProvisionError(Exception):
 def expand_path(path: str) -> str:
     """Expand ~ and $HOME-style variables in a container path."""
     return os.path.expanduser(os.path.expandvars(path))
+
+
+# Env vars that move the harness bundle's outputs/ and secrets/ directories
+# out of the agent home. Unset or empty: the bundle's own directories.
+HARNESS_OUTPUTS_DIR_ENV = "SCION_HARNESS_OUTPUTS_DIR"
+HARNESS_SECRETS_DIR_ENV = "SCION_HARNESS_SECRETS_DIR"
+# The directory overrides must name a directory below this in-memory
+# directory.
+HARNESS_DIRS_ROOT = "/run/scion/mem"
+
+
+def _check_dir_components(name: str, path: str) -> None:
+    """Raise ProvisionError if any existing component of absolute path is a
+    symbolic link, or cannot be checked. A missing component ends the walk."""
+    cur = os.sep
+    for part in path.strip(os.sep).split(os.sep):
+        cur = os.path.join(cur, part)
+        try:
+            st = os.lstat(cur)
+        except FileNotFoundError:
+            return
+        except OSError as e:
+            raise ProvisionError(f"{name}: {cur}: {e.strerror or e}") from e
+        if stat.S_ISLNK(st.st_mode):
+            raise ProvisionError(f"{name}: {cur} is a symbolic link")
+
+
+def _clean_abs(value: str) -> str:
+    """normpath, also folding the leading // that POSIX normpath keeps."""
+    clean = os.path.normpath(value)
+    if clean.startswith("//"):
+        clean = os.sep + clean.lstrip(os.sep)
+    return clean
+
+
+def harness_dir_override(name: str) -> str | None:
+    """Return the directory set by env var name, or None when unset or empty.
+
+    The value must be an absolute path below HARNESS_DIRS_ROOT, and no
+    existing component of it may be a symbolic link; otherwise
+    ProvisionError is raised.
+    """
+    value = os.environ.get(name, "")
+    if not value:
+        return None
+    if not os.path.isabs(value):
+        raise ProvisionError(f"{name} must be an absolute path, got {value!r}")
+    clean = _clean_abs(value)
+    root = _clean_abs(HARNESS_DIRS_ROOT)
+    if not clean.startswith(root + os.sep):
+        raise ProvisionError(f"{name} must be a directory below {root}, got {value!r}")
+    _check_dir_components(name, clean)
+    return clean
+
+
+def remap_under(path: str, src_dir: str, dst_dir: str) -> str:
+    """Map path from under src_dir to the same name under dst_dir.
+
+    Paths not under src_dir are returned unchanged.
+    """
+    if not path:
+        return path
+    clean = os.path.normpath(path)
+    src = os.path.normpath(src_dir)
+    if clean == src:
+        return dst_dir
+    if clean.startswith(src + os.sep):
+        return os.path.join(dst_dir, clean[len(src) + 1:])
+    return path
 
 
 def load_json(path: str) -> Any:
@@ -432,6 +502,28 @@ class ProvisionContext:
         return os.path.join(self.bundle_dir, "inputs")
 
     @property
+    def outputs_dir(self) -> str:
+        """SCION_HARNESS_OUTPUTS_DIR when set, else bundle_dir/outputs."""
+        return harness_dir_override(HARNESS_OUTPUTS_DIR_ENV) or os.path.join(self.bundle_dir, "outputs")
+
+    @property
+    def secrets_dir(self) -> str:
+        """SCION_HARNESS_SECRETS_DIR when set, else bundle_dir/secrets."""
+        return harness_dir_override(HARNESS_SECRETS_DIR_ENV) or os.path.join(self.bundle_dir, "secrets")
+
+    def _staged_secret_path(self, path: str) -> str:
+        """Point a recorded bundle secrets/ path at secrets_dir.
+
+        Unchanged when SCION_HARNESS_SECRETS_DIR is unset.
+        """
+        override = harness_dir_override(HARNESS_SECRETS_DIR_ENV)
+        if override is None:
+            return path
+        expanded = expand_path(path)
+        mapped = remap_under(expanded, os.path.join(self.bundle_dir, "secrets"), override)
+        return path if mapped == expanded else mapped
+
+    @property
     def workspace(self) -> str:
         return str(self.manifest.get("agent_workspace") or "/workspace")
 
@@ -483,14 +575,20 @@ class ProvisionContext:
         raw = self.candidates.get("env_secret_files") or {}
         if not isinstance(raw, dict):
             return {}
-        return {str(k): str(v) for k, v in raw.items() if isinstance(k, str) and isinstance(v, str) and v}
+        return {
+            str(k): self._staged_secret_path(str(v))
+            for k, v in raw.items() if isinstance(k, str) and isinstance(v, str) and v
+        }
 
     @property
     def file_secret_files(self) -> dict[str, str]:
         raw = self.candidates.get("file_secret_files") or {}
         if not isinstance(raw, dict):
             return {}
-        return {str(k): str(v) for k, v in raw.items() if isinstance(k, str) and isinstance(v, str) and v}
+        return {
+            str(k): self._staged_secret_path(str(v))
+            for k, v in raw.items() if isinstance(k, str) and isinstance(v, str) and v
+        }
 
     @property
     def telemetry(self) -> dict[str, Any]:
@@ -543,8 +641,8 @@ class ProvisionContext:
             return ""
 
     def output_paths(self) -> tuple[str, str]:
-        """Return (resolved_auth_path, env_json_path)."""
-        outputs_dir = os.path.join(self.bundle_dir, "outputs")
+        """Return (resolved_auth_path, env_json_path), under outputs_dir."""
+        outputs_dir = self.outputs_dir
         return (
             os.path.join(outputs_dir, "resolved-auth.json"),
             os.path.join(outputs_dir, "env.json"),
@@ -819,6 +917,135 @@ def resolve_model(ctx: "ProvisionContext") -> str:
     if not raw:
         return ""
     return normalize_model_alias(raw, ctx.harness_config)
+
+
+# ---------------------------------------------------------------------------
+# Thinking level resolution (config.yaml `thinking:` block)
+# ---------------------------------------------------------------------------
+
+THINKING_LEVEL_ENV = "SCION_THINKING_LEVEL"
+
+
+def parse_thinking_level(raw: str | None) -> tuple[int | None, bool]:
+    """Parse a raw SCION_THINKING_LEVEL value into ``(level, invalid)``.
+
+    This is the single parse-and-clamp rule for the canonical 0-100 thinking
+    level:
+
+      - ``None``, ``""`` or whitespace only -> ``(None, False)`` (unset).
+      - Not parseable by ``int()`` after stripping (``"abc"``, ``"1.5"``)
+        -> ``(None, True)`` (invalid; callers should warn).
+      - Otherwise the integer clamped to 0..100 -> ``(n, False)``. ``int()``
+        accepts signs, so ``"-5"`` -> 0 and ``"+7"`` -> 7.
+    """
+    if raw is None:
+        return None, False
+    text = str(raw).strip()
+    if not text:
+        return None, False
+    try:
+        level = int(text)
+    except ValueError:
+        return None, True
+    return max(0, min(100, level)), False
+
+
+def _thinking_table(thinking_cfg: Any) -> tuple[list[tuple[int, str]], str | None] | None:
+    """Validate a harness_config ``thinking`` block.
+
+    Returns ``(levels sorted by max, default or None)``, or ``None`` when the
+    block is malformed: not a dict, ``levels`` not a non-empty list, an entry
+    that is not a dict with an int ``max`` (bools rejected; the manifest is
+    JSON) and a non-empty str ``value``, or a ``default`` that is present but
+    not a non-empty str.
+    """
+    if not isinstance(thinking_cfg, dict):
+        return None
+    levels = thinking_cfg.get("levels")
+    if not isinstance(levels, list) or not levels:
+        return None
+    table: list[tuple[int, str]] = []
+    for entry in levels:
+        if not isinstance(entry, dict):
+            return None
+        max_level = entry.get("max")
+        value = entry.get("value")
+        if not isinstance(max_level, int) or isinstance(max_level, bool):
+            return None
+        if not isinstance(value, str) or not value:
+            return None
+        table.append((max_level, value))
+    default = thinking_cfg.get("default")
+    if default is not None and (not isinstance(default, str) or not default):
+        return None
+    table.sort(key=lambda item: item[0])
+    return table, default
+
+
+def map_thinking_level(level: int, thinking_cfg: dict[str, Any] | None) -> str | None:
+    """Map a clamped thinking *level* through a ``thinking`` block.
+
+    Pure lookup: returns the ``value`` of the first entry (sorted by ``max``)
+    whose ``max`` >= *level*. Returns ``None`` when *thinking_cfg* is missing
+    or malformed. A level above the last ``max`` returns the last value
+    (defensive; the Go load-time check requires the last ``max`` to be 100).
+    """
+    parsed = _thinking_table(thinking_cfg)
+    if parsed is None:
+        return None
+    table, _ = parsed
+    for max_level, value in table:
+        if level <= max_level:
+            return value
+    return table[-1][1]
+
+
+def resolve_thinking(ctx: "ProvisionContext", raw: str | None = None) -> str | None:
+    """Resolve SCION_THINKING_LEVEL (or *raw*) to this harness's native value.
+
+    The mapping comes from ``ctx.harness_config["thinking"]`` (the config.yaml
+    ``thinking:`` block carried in the provision manifest):
+
+      - No block: returns ``None``; logs an info line if a level was set.
+      - Malformed block: warns, then behaves as if there were no block.
+      - Invalid level (not an integer): warns and returns ``default``.
+      - Unset/blank level: returns ``default``.
+      - Valid level: clamps to 0..100 and returns the mapped value.
+
+    ``default`` is the block's optional ``default``; when absent the result
+    is ``None``, meaning the provisioner should emit nothing so the harness
+    CLI's own default applies. Writing the value to the native knob stays in
+    each provision.py.
+    """
+    if raw is None:
+        raw = os.environ.get(THINKING_LEVEL_ENV)
+    level, invalid = parse_thinking_level(raw)
+
+    harness_config = ctx.harness_config if isinstance(ctx.harness_config, dict) else {}
+    thinking_cfg = harness_config.get("thinking")
+    parsed = None
+    if thinking_cfg is not None:
+        parsed = _thinking_table(thinking_cfg)
+        if parsed is None:
+            ctx.warn("harness_config thinking block is malformed; ignoring it")
+    if parsed is None:
+        if level is not None:
+            ctx.info(f"thinking_level={level} ignored (harness has no thinking map)")
+        elif invalid:
+            ctx.info(f"thinking_level={str(raw).strip()!r} ignored (harness has no thinking map)")
+        return None
+
+    _, default = parsed
+    default_label = default or "<cli default>"
+    if invalid:
+        ctx.warn(f"thinking_level={str(raw).strip()!r} is not a valid integer; value={default_label} (default)")
+        return default
+    if level is None:
+        ctx.info(f"thinking_level=<unset>, value={default_label} (default)")
+        return default
+    value = map_thinking_level(level, thinking_cfg)
+    ctx.info(f"thinking_level={level} value={value}")
+    return value
 
 
 # ---------------------------------------------------------------------------

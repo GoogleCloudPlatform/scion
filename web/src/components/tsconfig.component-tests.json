@@ -9,8 +9,13 @@
     "shared/palette/quick-palette.test.ts",
     "shared/palette/quick-palette-groups.test.ts",
     "shared/palette/quick-palette-ranking-memo.test.ts",
+    "shared/palette/quick-palette-host.test.ts",
+    "shared/palette/graph-palette-controller.test.ts",
     "shared/open-modal.test.ts",
+    "shared/agent-tree-view.test.ts",
+    "shared/deep-active-element.test.ts",
     "pages/chat-palette-shortcut.test.ts",
+    "pages/graph-palette-hosts.test.ts",
     "terminal/terminal-pane.test.ts",
     "shared/header.test.ts"
   ],

@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -39,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/labels"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsclient"
@@ -521,6 +523,10 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		return fmt.Errorf("--enable-telemetry and --disable-telemetry are mutually exclusive")
 	}
 
+	if err := validateLaunchWaitFlags(); err != nil {
+		return err
+	}
+
 	// Validate --harness-auth value
 	if harnessAuthFlag != "" {
 		switch harnessAuthFlag {
@@ -805,6 +811,59 @@ func applyServiceAccountFlag(req *hubclient.CreateAgentRequest, saFlag string) {
 	}
 }
 
+// splitFilesIgnoredWarning reports whether warnings contain the Hub's
+// api.WarningEmptyPerAgentWorkspaceFilesIgnored and returns the other
+// warnings unchanged.
+func splitFilesIgnoredWarning(warnings []string) (ignored bool, rest []string) {
+	if !slices.Contains(warnings, api.WarningEmptyPerAgentWorkspaceFilesIgnored) {
+		return false, warnings
+	}
+	// rest stays nil when the warning was the only entry, as before.
+	for _, w := range warnings {
+		if w != api.WarningEmptyPerAgentWorkspaceFilesIgnored {
+			rest = append(rest, w)
+		}
+	}
+	return true, rest
+}
+
+// workspaceBootstrapNotice returns the status lines to show after an agent
+// create that collected non-git workspace files (sentFiles > 0), and the Hub
+// warnings still to be printed in the usual place. When the Hub returned no
+// upload URLs it either uses the broker's local workspace ("Using local
+// workspace on broker.") or, for an empty-per-agent project, ignored the
+// files and said so with api.WarningEmptyPerAgentWorkspaceFilesIgnored. That
+// warning replaces the local-workspace line, which would be misleading; all
+// other warnings are returned unchanged.
+func workspaceBootstrapNotice(sentFiles, uploadURLs int, warnings []string) (lines, remaining []string) {
+	if sentFiles == 0 || uploadURLs > 0 {
+		return nil, warnings
+	}
+	ignored, rest := splitFilesIgnoredWarning(warnings)
+	if ignored {
+		return []string{"Warning: " + api.WarningEmptyPerAgentWorkspaceFilesIgnored}, rest
+	}
+	return []string{"Using local workspace on broker."}, warnings
+}
+
+// workspaceFinalizeNotice returns the status lines to show after a
+// workspace bootstrap finalize (sync-to/finalize). If the Hub ignored the
+// uploaded files (empty-per-agent), its warning replaces "Workspace uploaded:
+// N files"; any other warnings follow as "Warning: ..." lines.
+func workspaceFinalizeNotice(filesApplied int, warnings []string) []string {
+	ignored, rest := splitFilesIgnoredWarning(warnings)
+	var lines []string
+	if ignored {
+		lines = append(lines, "Warning: "+api.WarningEmptyPerAgentWorkspaceFilesIgnored)
+	} else {
+		lines = append(lines, fmt.Sprintf("Workspace uploaded: %d files", filesApplied))
+	}
+	for _, w := range rest {
+		lines = append(lines, "Warning: "+w)
+	}
+	return lines
+}
+
 func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, inlineCfg *api.ScionConfig) error {
 	PrintUsingHub(hubCtx.Endpoint)
 
@@ -822,7 +881,7 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		project, projectErr := hubCtx.Client.Projects().Get(ctx, projectID)
 		cancel()
 		if projectErr == nil && project != nil && project.GitRemote != "" {
-			cloneURL := project.Labels["scion.dev/clone-url"]
+			cloneURL := project.Labels[store.LabelCloneURL]
 			if cloneURL == "" {
 				cloneURL = "https://" + project.GitRemote + ".git"
 			}
@@ -885,6 +944,9 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		Notify:          !startNoNotify,
 		AgentRole:       agentRoleFlag,
 		MessageMode:     messageModeFlag,
+		// Opt in to a non-blocking launch; the CLI waits for it below. A
+		// Hub without async launch ignores this and answers synchronously.
+		AcceptAsyncLaunch: true,
 	}
 
 	// Wire --service-account flag into the GCP identity assignment.
@@ -1011,6 +1073,9 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		if debugMode {
 			util.Debugf("[env-gather] startAgentViaHub: create request failed: %v", err)
 		}
+		if apiErr, ok := asIncompleteCreate(err); ok {
+			return incompleteCreateError(agentName, apiErr)
+		}
 		return wrapHubError(fmt.Errorf("failed to start agent via Hub: %w", err))
 	}
 
@@ -1107,8 +1172,10 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 	}
 
 	// Workspace bootstrap: upload files and finalize
-	if len(workspaceFiles) > 0 && len(resp.UploadURLs) == 0 {
-		statusln("Using local workspace on broker.")
+	workspaceFinalized := false
+	bootstrapLines, remainingWarnings := workspaceBootstrapNotice(len(workspaceFiles), len(resp.UploadURLs), resp.Warnings)
+	for _, line := range bootstrapLines {
+		statusln(line)
 	}
 	if len(resp.UploadURLs) > 0 && len(workspaceFiles) > 0 {
 		statusf("Uploading workspace (%d files)...\n", len(workspaceFiles))
@@ -1132,55 +1199,81 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 
 		finalizeResp, err := hubCtx.Client.Workspace().FinalizeSyncTo(ctx, agentSlug, manifest)
 		if err != nil {
+			if apiErr, ok := asIncompleteCreate(err); ok {
+				return incompleteCreateError(agentName, apiErr)
+			}
 			return fmt.Errorf("failed to finalize workspace bootstrap: %w", err)
 		}
-		statusf("Workspace uploaded: %d files\n", finalizeResp.FilesApplied)
+		for _, line := range workspaceFinalizeNotice(finalizeResp.FilesApplied, finalizeResp.Warnings) {
+			statusln(line)
+		}
+		workspaceFinalized = true
+	}
 
-		// Poll until agent is running
+	return finishHubStart(hubCtx, projectID, agentName, resume, resp, remainingWarnings, workspaceFinalized)
+}
+
+// finishHubStart completes a Hub start after the create (and any workspace
+// finalize): it waits for the launch when needed, reports the result, and
+// attaches with --attach. textWarnings are the create warnings still to
+// print in text output (those not already shown as workspace notices); JSON
+// output carries all of resp.Warnings.
+func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume bool, resp *hubclient.CreateAgentResponse, textWarnings []string, workspaceFinalized bool) error {
+	// Decide whether to wait for the agent to reach running:
+	//   - after a workspace finalize, which dispatches the start;
+	//   - when the Hub accepted the create for an asynchronous launch;
+	//   - with --attach, which needs a running agent.
+	// A synchronous answer from a Hub without async launch needs no wait,
+	// exactly as before. --no-wait returns once the Hub has accepted.
+	needWait := workspaceFinalized || launchActive(resp.Agent) || (attach && !isJSONOutput())
+	if startNoWait && !attach {
+		needWait = false
+	}
+
+	finalAgent := resp.Agent
+	if needWait {
 		statusf("Waiting for agent '%s' to start...\n", agentName)
-		pollCtx, pollCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		defer pollCancel()
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-pollCtx.Done():
-				return fmt.Errorf("timed out waiting for agent '%s' to start", agentName)
-			case <-ticker.C:
-				agent, err := hubCtx.Client.ProjectAgents(projectID).Get(pollCtx, agentName)
-				if err != nil {
-					continue
-				}
-				agentPhase, _ := hubAgentPhaseActivity(agent.Phase, agent.Activity, agent.Status)
-				if agentPhase == string(state.PhaseRunning) {
-					statusf("Agent '%s' started via Hub.\n", agentName)
-					if !attach {
-						return nil
-					}
-					if err := attachUnsupportedErr(pollCtx, hubCtx, agent.Runtime, agent.RuntimeBrokerID, agentProfileName(agent)); err != nil {
-						return err
-					}
-					// Fall through to attach logic below
-					agentID := agent.ID
-					if agentID == "" {
-						agentID = agentName
-					}
-					attachOpts, transportSrc, err := resolveAttachOptions()
-					if err != nil {
-						return err
-					}
-					token := getHubAccessToken(hubCtx.Endpoint)
-					if token == "" && transportSrc == nil {
-						return fmt.Errorf("no access token found for Hub\n\nPlease login first: scion hub auth login")
-					}
-					statusf("Attaching to agent '%s' via Hub...\n", agentName)
-					return wsclient.AttachToAgent(context.Background(), hubCtx.Endpoint, token, agentID, attachOpts...)
-				}
-				if agentPhase == string(state.PhaseError) || agentPhase == string(state.PhaseStopped) {
-					return fmt.Errorf("agent '%s' failed to start (phase: %s)", agentName, agentPhase)
-				}
+		var progress io.Writer
+		if !isJSONOutput() {
+			progress = os.Stderr
+		}
+		// The create response's agent seeds the wait budget unless it was
+		// superseded by a workspace finalize.
+		budgetFrom := resp.Agent
+		if workspaceFinalized {
+			budgetFrom = nil
+		}
+		// Ctrl-C (or SIGTERM) stops waiting only; the launch continues on
+		// the Hub.
+		waited, err := waitForAgentLaunchWithSignals(launchWaitOptions{
+			AgentName:  agentName,
+			BudgetFrom: budgetFrom,
+			Get: func(ctx context.Context) (*hubclient.Agent, error) {
+				return hubCtx.Client.ProjectAgents(projectID).Get(ctx, agentName)
+			},
+			Timeout:  startWaitTimeout,
+			Progress: progress,
+		})
+		if err != nil {
+			for _, w := range textWarnings {
+				fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
 			}
+			return err
+		}
+		finalAgent = waited
+	}
+
+	// After a finalize without waiting, the create answer predates the
+	// dispatched start; report the agent's current state instead.
+	phaseKnown := true
+	if workspaceFinalized && !needWait {
+		getCtx, getCancel := context.WithTimeout(context.Background(), launchFetchTimeout)
+		current, getErr := hubCtx.Client.ProjectAgents(projectID).Get(getCtx, agentName)
+		getCancel()
+		if getErr == nil && current != nil {
+			finalAgent = current
+		} else {
+			phaseKnown = false
 		}
 	}
 
@@ -1188,37 +1281,60 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 	if resume {
 		displayStatus = "resumed"
 	}
+	launching := !needWait && launchActive(finalAgent)
+	if workspaceFinalized && !needWait && !agentIsRunning(finalAgent, phaseKnown) {
+		launching = true
+	}
+	message := fmt.Sprintf("Agent '%s' %s via Hub.", agentName, displayStatus)
+	if launching {
+		message = fmt.Sprintf("Agent '%s' accepted by Hub and launching.", agentName)
+	}
 
-	if isJSONOutput() {
+	// With --attach after a workspace upload, the session is attached
+	// without a JSON document, as before.
+	if isJSONOutput() && (!attach || !workspaceFinalized) {
 		result := ActionResult{
 			Status:   "success",
 			Command:  "start",
 			Agent:    agentName,
-			Message:  fmt.Sprintf("Agent '%s' %s via Hub.", agentName, displayStatus),
+			Message:  message,
 			Warnings: resp.Warnings,
 			Details:  map[string]interface{}{},
 		}
-		if resp.Agent != nil {
-			result.Details["slug"] = resp.Agent.Slug
-			phase, activity := hubAgentPhaseActivity(resp.Agent.Phase, resp.Agent.Activity, resp.Agent.Status)
-			result.Details["phase"] = phase
-			if activity != "" {
-				result.Details["activity"] = activity
+		if finalAgent != nil {
+			result.Details["slug"] = finalAgent.Slug
+			phase, activity := hubAgentPhaseActivity(finalAgent.Phase, finalAgent.Activity, finalAgent.Status)
+			if phaseKnown {
+				result.Details["phase"] = phase
+				if activity != "" {
+					result.Details["activity"] = activity
+				}
 			}
-			if resp.Agent.RuntimeBrokerID != "" {
-				result.Details["runtimeBrokerId"] = resp.Agent.RuntimeBrokerID
+			if finalAgent.RuntimeBrokerID != "" {
+				result.Details["runtimeBrokerId"] = finalAgent.RuntimeBrokerID
+			}
+			if launching && finalAgent.Launch != nil {
+				result.Details["launchId"] = finalAgent.Launch.ID
+				if finalAgent.Launch.Deadline != nil {
+					result.Details["launchDeadline"] = finalAgent.Launch.Deadline.UTC().Format(time.RFC3339)
+				}
 			}
 		}
 		return outputJSON(result)
 	}
 
-	statusf("Agent '%s' %s via Hub.\n", agentName, displayStatus)
-	if resp.Agent != nil {
-		statusf("Agent Slug: %s\n", resp.Agent.Slug)
-		phase, _ := hubAgentPhaseActivity(resp.Agent.Phase, resp.Agent.Activity, resp.Agent.Status)
-		statusf("Phase: %s\n", phase)
+	statusf("%s\n", message)
+	if finalAgent != nil {
+		statusf("Agent Slug: %s\n", finalAgent.Slug)
+		if phaseKnown {
+			phase, _ := hubAgentPhaseActivity(finalAgent.Phase, finalAgent.Activity, finalAgent.Status)
+			statusf("Phase: %s\n", phase)
+		}
 	}
-	for _, w := range resp.Warnings {
+	if launching {
+		statusf("Follow the launch with: scion start %s (waits until it is running)\n", agentName)
+	}
+	for _, w := range textWarnings {
 		fmt.Fprintf(os.Stderr, "Warning: %s\n", w)
 	}
 
@@ -1226,65 +1342,31 @@ func startAgentViaHub(hubCtx *HubContext, agentName, task string, resume bool, i
 		return nil
 	}
 
-	// Attach mode: wait for agent to be running, then attach via WebSocket
+	// Attach mode: the wait above returned a running agent.
 	agentID := ""
-	agentRuntime := ""
-	agentBrokerID := ""
-	agentProfile := ""
 	if resp.Agent != nil {
 		agentID = resp.Agent.ID
+	}
+	// agentID keeps the create response's ID unless the fetch returned a
+	// non-empty one. Runtime, broker and profile always take the fetched
+	// value, even if empty: "" is itself a meaningful attach-is-supported
+	// value to attachUnsupportedErr.
+	var agentRuntime, agentBrokerID, agentProfile string
+	if finalAgent != nil {
+		if finalAgent.ID != "" {
+			agentID = finalAgent.ID
+		}
+		agentRuntime = finalAgent.Runtime
+		agentBrokerID = finalAgent.RuntimeBrokerID
+		agentProfile = agentProfileName(finalAgent)
 	}
 	if agentID == "" {
 		agentID = agentName
 	}
 
-	// Poll until the agent is running
-	statusf("Waiting for agent '%s' to be ready...\n", agentName)
-	pollCtx, pollCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer pollCancel()
-
-	ticker := time.NewTicker(2 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-pollCtx.Done():
-			return fmt.Errorf("timed out waiting for agent '%s' to become ready", agentName)
-		case <-ticker.C:
-			agent, err := hubCtx.Client.ProjectAgents(projectID).Get(pollCtx, agentName)
-			if err != nil {
-				continue // Retry on transient errors
-			}
-			agentPhase, _ := hubAgentPhaseActivity(agent.Phase, agent.Activity, agent.Status)
-			if agentPhase == string(state.PhaseRunning) {
-				// agentID keeps its prior value (the create response's ID, or
-				// agentName) unless this fetch returned a non-empty one, since
-				// an empty ID here would be a regression, not new information.
-				if agent.ID != "" {
-					agentID = agent.ID
-				}
-				// agentRuntime, agentBrokerID and agentProfile always take
-				// this fetch's value, even if empty: unlike agentID there is
-				// no better fallback to protect, and "" is itself a
-				// meaningful attach-is-supported value to
-				// attachUnsupportedErr below.
-				agentRuntime = agent.Runtime
-				agentBrokerID = agent.RuntimeBrokerID
-				agentProfile = agentProfileName(agent)
-				goto ready
-			}
-			if agentPhase == string(state.PhaseError) || agentPhase == string(state.PhaseStopped) {
-				statusInfo := agent.Status
-				if agent.ContainerStatus != "" {
-					statusInfo += fmt.Sprintf(", container: %s", agent.ContainerStatus)
-				}
-				return fmt.Errorf("agent '%s' failed to start (phase: %s)", agentName, statusInfo)
-			}
-		}
-	}
-
-ready:
-	if err := attachUnsupportedErr(pollCtx, hubCtx, agentRuntime, agentBrokerID, agentProfile); err != nil {
+	attachCtx, attachCancel := context.WithTimeout(context.Background(), launchFetchTimeout)
+	defer attachCancel()
+	if err := attachUnsupportedErr(attachCtx, hubCtx, agentRuntime, agentBrokerID, agentProfile); err != nil {
 		return err
 	}
 
@@ -1655,4 +1737,13 @@ func splitCommaList(values []string) []string {
 		}
 	}
 	return out
+}
+
+// agentIsRunning reports whether a is known to be in the running phase.
+func agentIsRunning(a *hubclient.Agent, phaseKnown bool) bool {
+	if a == nil || !phaseKnown {
+		return false
+	}
+	phase, _ := hubAgentPhaseActivity(a.Phase, a.Activity, a.Status)
+	return phase == string(state.PhaseRunning)
 }

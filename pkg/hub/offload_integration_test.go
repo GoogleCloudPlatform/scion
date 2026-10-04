@@ -628,22 +628,16 @@ func TestOffload_I9_AgentMention_VerifiedGroupConversation_GetsOwnStub(t *testin
 // ---------------------------------------------------------------------------
 // I10: sender deleted.
 //
-// KNOWN LIMITATION (ptone/scion#2282, not part of P1+P2's scope):
 // pkg/store.Message.SenderProjectID/RecipientProjectID — the row stamp
-// peerProjectFromRow depends on — are set by StampProvenance in memory but
-// are never wired into pkg/store/entadapter's CreateMessage/GetMessage, so
-// GetMessage always returns them nil, and peerProjectFromRow always falls
-// back to a live GetAgent lookup in practice today. msg-attach-arch's
-// refinement (design auto-offload-large-dm §4.3/§8.5) keeps the gate exact
-// under the current policy despite the missing stamp: when
-// crossProjectMessagingEnabled() is on, every possible peer project would be
-// allowed anyway, so a deleted peer with no stamp allows; when the flag is
-// off, allowing would risk a flag-off bypass for a genuinely cross-project
-// deleted sender, so it denies (403, never 500). Once #2282 lands, the
-// flag-off case also becomes fetchable for a same-project deleted sender —
-// see TestOffload_I10_StampSurvivesDeletion_WhenStorePersistsIt below, which
-// proves the stamp-based path itself is correct today, independent of the
-// store gap.
+// peerProjectFromRow depends on — are set by StampProvenance and persisted by
+// pkg/store/entadapter (ptone/scion#2282), so a row written after #2282
+// carries its peer's project even once the peer agent is hard-deleted, and
+// enforceCrossProjectReadGate decides from the stamp with no live GetAgent
+// call. Rows written before #2282 have a NULL stamp; for those,
+// crossProjectPeerAllowed falls back to the live lookup, and a deleted peer
+// is allowed only when crossProjectMessagingEnabled() is on (every possible
+// peer project would be allowed anyway) and otherwise denied (403, never
+// 500) — see TestOffload_I10_LegacyUnstampedRow_SenderDeleted_FlagOff_403NeverA500.
 // ---------------------------------------------------------------------------
 
 func offloadSendAndDeleteSender(t *testing.T, srv *Server, s store.Store, sender, target *store.Agent, dmConvID string, dispatcher *recordingDispatcher, body string) (msgID, wantSHA string) {
@@ -689,21 +683,65 @@ func TestOffload_I10_SenderDeleted_CrossProjectFlagOn_Fetchable(t *testing.T) {
 	assert.Equal(t, wantSHA, offloadSHA256Hex(fetched.Msg))
 }
 
-func TestOffload_I10_SenderDeleted_CrossProjectFlagOff_403NeverA500(t *testing.T) {
+// With cross-project messaging off, a same-project deleted sender's row is
+// still fetchable: the persisted SenderProjectID stamp (ptone/scion#2282)
+// proves the peer was same-project, so no live lookup is needed.
+func TestOffload_I10_SenderDeleted_CrossProjectFlagOff_FetchableViaPersistedStamp(t *testing.T) {
 	srv, s, _, sender, target, dmConvID, dispatcher, _ := paritySetup(t)
 	enableOffload(t, srv, 4000, true) // cross_project_messaging_enabled stays at its compiled default (off)
 
 	body := strings.Repeat("t", 12000)
-	msgID, _ := offloadSendAndDeleteSender(t, srv, s, sender, target, dmConvID, dispatcher, body)
+	msgID, wantSHA := offloadSendAndDeleteSender(t, srv, s, sender, target, dmConvID, dispatcher, body)
+
+	stored, err := s.GetMessage(context.Background(), msgID)
+	require.NoError(t, err)
+	require.NotNil(t, stored.SenderProjectID, "the sender's project stamp must be persisted (ptone/scion#2282)")
+	assert.Equal(t, sender.ProjectID, *stored.SenderProjectID)
+	require.NotNil(t, stored.RecipientProjectID)
+	assert.Equal(t, target.ProjectID, *stored.RecipientProjectID)
 
 	req := httptest.NewRequest(http.MethodGet,
 		"/api/v1/conversations/"+dmConvID+"/messages/"+msgID, nil)
 	req = req.WithContext(agentContext(target.ID, target.ProjectID))
 	rr2 := httptest.NewRecorder()
 	srv.handleGetConversationMessage(rr2, req, dmConvID, msgID)
-	require.Equal(t, http.StatusForbidden, rr2.Code,
-		"deleted peer must be 403, never 500, when cross-project messaging is off; body: %s", rr2.Body.String())
-	assert.Contains(t, rr2.Body.String(), "peer agent not found")
+	require.Equal(t, http.StatusOK, rr2.Code,
+		"a same-project deleted peer's stamped row must stay fetchable with the flag off; body: %s", rr2.Body.String())
+
+	var fetched store.Message
+	require.NoError(t, json.Unmarshal(rr2.Body.Bytes(), &fetched))
+	assert.Equal(t, wantSHA, offloadSHA256Hex(fetched.Msg))
+}
+
+// A legacy row written before ptone/scion#2282 has no stamp. With the sender
+// hard-deleted and cross-project messaging off, its project can't be told
+// apart from a cross-project one, so the read is denied — 403, never a 500.
+func TestOffload_I10_LegacyUnstampedRow_SenderDeleted_FlagOff_403NeverA500(t *testing.T) {
+	srv, s, _, sender, target, dmConvID, _, _ := paritySetup(t)
+	enableOffload(t, srv, 4000, true) // cross_project_messaging_enabled stays at its compiled default (off)
+	ctx := context.Background()
+
+	legacy := &store.Message{
+		ID: tid("offload-i10-legacy-row"), ProjectID: target.ProjectID,
+		Sender: "agent:" + sender.Slug, SenderID: sender.ID, // no SenderProjectID: pre-#2282 row
+		Recipient: "agent:" + target.Slug, RecipientID: target.ID,
+		Msg: "legacy body", Type: messages.TypeInstruction, ConversationID: dmConvID,
+	}
+	require.NoError(t, s.CreateMessage(ctx, legacy))
+	stored, err := s.GetMessage(ctx, legacy.ID)
+	require.NoError(t, err)
+	require.Nil(t, stored.SenderProjectID, "precondition: legacy row has no stamp")
+
+	require.NoError(t, s.DeleteAgent(ctx, sender.ID)) // hard delete
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/conversations/"+dmConvID+"/messages/"+legacy.ID, nil)
+	req = req.WithContext(agentContext(target.ID, target.ProjectID))
+	rr := httptest.NewRecorder()
+	srv.handleGetConversationMessage(rr, req, dmConvID, legacy.ID)
+	require.Equal(t, http.StatusForbidden, rr.Code,
+		"deleted peer with no stamp must be 403, never 500, when cross-project messaging is off; body: %s", rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "peer agent not found")
 }
 
 // enableOffloadAndCPM sets both offload_threshold_runes and
@@ -726,11 +764,11 @@ func enableOffloadAndCPM(t *testing.T, srv *Server, threshold int) {
 
 // TestOffload_I10_StampSurvivesDeletion_WhenStorePersistsIt isolates
 // enforceCrossProjectReadGate (message-aware form)/peerProjectFromRow from
-// the pre-existing store-layer gap above by constructing the *store.Message
-// directly (as if the stamp HAD round-tripped through the database). It
-// proves the row's stamp, once actually persisted, authorizes the recipient
-// even though the sender agent has been hard-deleted (design
-// auto-offload-large-dm §4.3, I10).
+// the store by constructing the *store.Message directly. It proves the row's
+// stamp authorizes the recipient even though the sender agent has been
+// hard-deleted (design auto-offload-large-dm §4.3, I10). The end-to-end
+// variant through the persisted stamp is
+// TestOffload_I10_SenderDeleted_CrossProjectFlagOff_FetchableViaPersistedStamp.
 func TestOffload_I10_StampSurvivesDeletion_WhenStorePersistsIt(t *testing.T) {
 	// Same-project sender and recipient (paritySetup), with cross-project
 	// messaging left at its compiled-default OFF — this isolates the

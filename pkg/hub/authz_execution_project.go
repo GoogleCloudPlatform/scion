@@ -146,6 +146,10 @@ func executionProjectClass(permissionID string) ProjectTargetClass {
 // to the project-scoped class). Any lookup failure, mismatch or ambiguity
 // denies.
 func (a *AuthzService) executionProjectAdmission(ctx context.Context, principal PrincipalContext, permissionID string) (bool, string) {
+	// Admission is evaluated for the agent's source user, not the
+	// requester, so it must never read the requester's memoized principals
+	// or access constraints.
+	ctx = maskAuthzInputs(ctx)
 	agentIdent, ok := principal.Identity.(AgentIdentity)
 	if !ok || agentIdent.ID() == "" {
 		return false, "principal is not a local agent"

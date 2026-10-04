@@ -70,6 +70,8 @@ func entMessageToStore(e *ent.Message) *store.Message {
 	if e.ConversationID != nil {
 		conversationID = e.ConversationID.String()
 	}
+	senderProjectID := uuidPtrToStringPtr(e.SenderProjectID)
+	recipientProjectID := uuidPtrToStringPtr(e.RecipientProjectID)
 
 	return &store.Message{
 		ID:                    e.ID.String(),
@@ -89,10 +91,22 @@ func entMessageToStore(e *ent.Message) *store.Message {
 		ThreadID:              e.ThreadID,
 		ConversationID:        conversationID,
 		CreatedAt:             e.Created,
+		SenderProjectID:       senderProjectID,
+		RecipientProjectID:    recipientProjectID,
 		DispatchState:         e.DispatchState,
 		DispatchedAt:          e.DispatchedAt,
 		DispatchFailureReason: e.DispatchFailureReason,
 	}
+}
+
+// uuidPtrToStringPtr converts a nullable UUID column to the nullable string
+// form used by store models.
+func uuidPtrToStringPtr(u *uuid.UUID) *string {
+	if u == nil {
+		return nil
+	}
+	v := u.String()
+	return &v
 }
 
 // CreateMessage persists a new message and announces it via the publisher.
@@ -137,6 +151,22 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 		}
 		create.SetConversationID(cid)
 	}
+	// Cross-project provenance (ptone/scion#2282). An absent or empty stamp
+	// persists as NULL; a malformed one is rejected like any other bad ID.
+	if msg.SenderProjectID != nil && *msg.SenderProjectID != "" {
+		spid, err := parseUUID(*msg.SenderProjectID)
+		if err != nil {
+			return err
+		}
+		create.SetSenderProjectID(spid)
+	}
+	if msg.RecipientProjectID != nil && *msg.RecipientProjectID != "" {
+		rpid, err := parseUUID(*msg.RecipientProjectID)
+		if err != nil {
+			return err
+		}
+		create.SetRecipientProjectID(rpid)
+	}
 	if msg.Type == "" {
 		create.SetType("instruction")
 	}
@@ -145,6 +175,11 @@ func (s *MessageStore) CreateMessage(ctx context.Context, msg *store.Message) er
 	}
 	if msg.DispatchedAt != nil {
 		create.SetDispatchedAt(*msg.DispatchedAt)
+	}
+	// A row may be born failed (e.g. a group member that is not
+	// deliverable), so its reason must persist with the same write.
+	if msg.DispatchFailureReason != nil {
+		create.SetDispatchFailureReason(*msg.DispatchFailureReason)
 	}
 	if !msg.CreatedAt.IsZero() {
 		create.SetCreated(msg.CreatedAt)
@@ -219,7 +254,7 @@ func (s *MessageStore) GetMessagesByIDs(ctx context.Context, ids []string) (map[
 // both the created timestamp and the message ID. Format: base64(RFC3339Nano + "," + uuid).
 // This avoids a DB round-trip on decode and makes pagination resilient to message deletion.
 func encodeCursor(created time.Time, id string) string {
-	raw := created.Format(time.RFC3339Nano) + "," + id
+	raw := created.UTC().Format(time.RFC3339Nano) + "," + id
 	return base64.URLEncoding.EncodeToString([]byte(raw))
 }
 
@@ -249,7 +284,7 @@ func decodeCursor(cursor string) (time.Time, uuid.UUID, error) {
 // A binding is supplied by endpoint callers that must reject cursors reused
 // across different resources or filters.
 func encodeListCursor(created time.Time, id, binding string) string {
-	raw := created.Format(time.RFC3339Nano) + "," + id
+	raw := created.UTC().Format(time.RFC3339Nano) + "," + id
 	if binding != "" {
 		raw += "," + binding
 	}

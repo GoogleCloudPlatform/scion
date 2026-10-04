@@ -83,8 +83,8 @@ func newReincarnateTestDispatcher() *reincarnateTestDispatcher {
 	return &reincarnateTestDispatcher{}
 }
 
-func (d *reincarnateTestDispatcher) DispatchAgentCreate(context.Context, *store.Agent) error {
-	return nil
+func (d *reincarnateTestDispatcher) DispatchAgentCreate(context.Context, *store.Agent) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 func (d *reincarnateTestDispatcher) DispatchAgentProvision(context.Context, *store.Agent) error {
 	return nil
@@ -141,11 +141,11 @@ func (d *reincarnateTestDispatcher) DispatchAgentExec(context.Context, *store.Ag
 func (d *reincarnateTestDispatcher) DispatchCheckAgentPrompt(context.Context, *store.Agent) (bool, error) {
 	return false, nil
 }
-func (d *reincarnateTestDispatcher) DispatchAgentCreateWithGather(context.Context, *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (d *reincarnateTestDispatcher) DispatchAgentCreateWithGather(context.Context, *store.Agent) (*CreateDispatchResult, error) {
 	return nil, nil
 }
-func (d *reincarnateTestDispatcher) DispatchFinalizeEnv(context.Context, *store.Agent, map[string]string) error {
-	return nil
+func (d *reincarnateTestDispatcher) DispatchFinalizeEnv(context.Context, *store.Agent, map[string]string) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 
 // waitForReincarnationSettled polls the store until the agent's most recent
@@ -588,6 +588,7 @@ func TestReincarnateAgent_WorktreePerAgentOrNeitherWorkspace_Returns400(t *testi
 		name           string
 		workspaceMode  string // "" = clone-per-agent (the default for a git-remote project)
 		clearWorkspace bool   // force the "neither GitClone nor Workspace" edge case
+		nonGit         bool   // project has no git remote
 		wantRejected   bool
 		wantBodyText   string // O1 (review p1b-r1): pin the exact 400 message
 	}{
@@ -609,6 +610,14 @@ func TestReincarnateAgent_WorktreePerAgentOrNeitherWorkspace_Returns400(t *testi
 			workspaceMode: "",
 			wantRejected:  false,
 		},
+		{
+			// Design #2703 D4: explicit refusal, not the generic message.
+			name:          "empty-per-agent (non-git per-agent): unsupported",
+			workspaceMode: store.WorkspaceModePerAgent,
+			nonGit:        true,
+			wantRejected:  true,
+			wantBodyText:  `reincarnate does not yet support \"Empty directory per agent\" (empty-per-agent) workspaces`,
+		},
 	}
 
 	for _, tc := range cases {
@@ -617,7 +626,9 @@ func TestReincarnateAgent_WorktreePerAgentOrNeitherWorkspace_Returns400(t *testi
 			srv, s, project, broker := setupReincarnateTestServer(t, disp)
 			ctx := context.Background()
 
-			project.GitRemote = "https://example.com/repo.git"
+			if !tc.nonGit {
+				project.GitRemote = "https://example.com/repo.git"
+			}
 			if tc.workspaceMode != "" {
 				project.Labels = map[string]string{store.LabelWorkspaceMode: tc.workspaceMode}
 			}

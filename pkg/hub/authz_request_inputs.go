@@ -29,6 +29,9 @@ package hub
 // checkAgentHoldsPermission, IsSystemAdmin, migrationSentinelCeiling) is
 // untouched and runs on a masked ctx that this memo is invisible to, except
 // for delegation edges, which are the one ceiling input shared per phase.
+// decide's relationship candidates run with both keys masked, so lookups
+// made there for a progeny source user or a source agent's delegation chain
+// never see the requester's memo.
 
 import (
 	"context"
@@ -163,21 +166,21 @@ func delegationEdgesMemoFromContext(ctx context.Context) *authzInputMemo {
 
 // maskAuthzInputs hides the principal/constraint memo (inputsKey) from
 // everything reached from the returned ctx, without touching the edges key.
-// decide calls this exactly once, wrapping the ctx passed into
-// checkDelegationCeiling (authz.go, the step-10 call site — match by name,
-// not line number, since it moves as unrelated code lands above it in
-// decide), so the whole delegation-ceiling subtree — including both
-// getEffectivePermissions calls and their constraint loads, IsSystemAdmin,
-// GetUser, resolveUserDelegatorAuthority/evaluateUserDelegatorAuthority/
-// userRelationshipAuthority and migrationSentinelCeiling — sees no input
-// memo. Only delegation edges remain shared for that subtree. A second,
-// UNMASKED caller of the chain-walk exists (authz_relationship_rules.go's
-// relationshipSourceDelegationHolds, reached from decide's step 9 on a
-// kernel deny); it is safe only because this memo has no production
-// install site anywhere, so nothing ever puts a real memo on its ctx.
-// Before any install site goes live, that caller must also be masked —
-// or, more robustly, the mask should move inside the chain-walk itself so
-// every current and future caller gets it automatically.
+// It is applied in three places: decide wraps the ctx passed into
+// checkDelegationCeiling (the step-10 call site), and the chain walk
+// (walkDelegationChainWithCause) and the execution-project stage
+// (executionProjectAdmission) apply it to their own ctx at entry, so every
+// current and future caller of either gets it. The delegator side of the
+// ceiling — both getEffectivePermissions calls and their constraint loads,
+// IsSystemAdmin, GetUser, resolveUserDelegatorAuthority/
+// evaluateUserDelegatorAuthority/userRelationshipAuthority and
+// migrationSentinelCeiling — and the execution source user's project
+// admission therefore see no input memo. Only delegation edges remain
+// shared under this mask.
+//
+// decide's relationship-candidate step (step 9) runs under the stronger
+// maskAllAuthzMemo instead, so nothing reached from it — including the
+// chain walk via relationshipSourceDelegationHolds — observes either key.
 func maskAuthzInputs(ctx context.Context) context.Context {
 	return context.WithValue(ctx, authzInputsContextKey{}, &authzMemoHolder{masked: true})
 }

@@ -483,6 +483,11 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
 		return
 	}
+	// The typed decode above silently drops a removed profiles.<name>.timezone
+	// key, so check the raw body before anything is written.
+	if rejectRemovedProfileTimezone(w, rawBody) {
+		return
+	}
 
 	caller := GetUserIdentityFromContext(r.Context())
 	updatedBy := ""
@@ -603,19 +608,52 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	// Validate profile timezones (beyond JSON schema — IANA name check).
-	if doc, ok := sectionDocs["profiles"]; ok {
+	// Validate shared_dir_size on runtime and profile entries (beyond JSON
+	// schema — Kubernetes quantity check), naming the offending key so a bad
+	// value is rejected here instead of failing every agent start later.
+	var saveWarnings []string
+	{
+		var runtimes opsettings.RuntimesSettings
 		var profiles opsettings.ProfilesSettings
-		if err := json.Unmarshal(doc, &profiles); err == nil {
-			for name, profile := range profiles {
-				if profile.Timezone != "" {
-					if _, err := time.LoadLocation(profile.Timezone); err != nil {
-						writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError,
-							fmt.Sprintf("profile %q: invalid timezone %q: %v", name, profile.Timezone, err), nil)
-						return
-					}
+		if doc, ok := sectionDocs["runtimes"]; ok {
+			_ = json.Unmarshal(doc, &runtimes)
+		}
+		if doc, ok := sectionDocs["profiles"]; ok {
+			_ = json.Unmarshal(doc, &profiles)
+		}
+		if errs := config.ValidateSharedDirSizes(runtimes, profiles); len(errs) > 0 {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
+			return
+		}
+		// shared_dir_storage_backend "nfs" needs a complete
+		// server.shared_dir_storage.nfs block, which lives only in the
+		// global settings file. Configuration only; no mount is checked.
+		if len(runtimes) > 0 || len(profiles) > 0 {
+			if gs, _, gErr := config.LoadGlobalSettings(); gErr == nil {
+				var sdGlobal *config.V1SharedDirStorageConfig
+				if gs != nil && gs.Server != nil {
+					sdGlobal = gs.Server.SharedDirStorage
+				}
+				if errs := config.ValidateSharedDirStorageBackends(runtimes, profiles, sdGlobal); len(errs) > 0 {
+					writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
+					return
 				}
 			}
+		}
+		// safe_to_evict on a non-Kubernetes runtime is accepted and ignored,
+		// with the same warning as config validate. A section missing from
+		// this request is checked against its current value.
+		_, hasRuntimes := sectionDocs["runtimes"]
+		_, hasProfiles := sectionDocs["profiles"]
+		if hasRuntimes || hasProfiles {
+			snap := ops.Snapshot()
+			if !hasRuntimes {
+				runtimes = snap.Runtimes
+			}
+			if !hasProfiles {
+				profiles = snap.Profiles
+			}
+			saveWarnings = safeToEvictSaveWarnings(runtimes, profiles)
 		}
 	}
 	// Validate hub-level default_timezone (IANA name check; rejects "Local",
@@ -717,6 +755,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			"applied":          appliedKeys,
 			"requires_restart": []string{},
 		},
+	}
+	if len(saveWarnings) > 0 {
+		resp["warnings"] = saveWarnings
 	}
 
 	writeJSON(w, http.StatusOK, resp)

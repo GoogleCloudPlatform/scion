@@ -99,6 +99,12 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 
 	WriteRuntimeDebugFile(config, r.Command, newArgs)
 
+	// Async-launch gate immediately before the container create (design
+	// t1-async-create-v11.md §3.8.3); a no-op on the synchronous path.
+	hooks := config.launchHooks()
+	if err := hooks.checkpoint(ctx, CheckpointStepLaunching); err != nil {
+		return "", err
+	}
 	out, err := runSimpleCommand(ctx, r.Command, newArgs...)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -112,7 +118,9 @@ func (r *AppleContainerRuntime) Run(ctx context.Context, config RunConfig) (stri
 	}
 
 	// The output of 'container run -d' is the container ID
-	return strings.TrimSpace(out), nil
+	id := strings.TrimSpace(out)
+	reportAppleContainerCreated(hooks, config.Name, id)
+	return id, nil
 }
 
 func (r *AppleContainerRuntime) Stop(ctx context.Context, id string) error {

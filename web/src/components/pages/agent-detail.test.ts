@@ -118,6 +118,7 @@ vi.mock('../../utils/toast.js', () => ({
 await import('./agent-detail.js');
 import { DELETE_REDIRECT_DELAY_MS } from './agent-detail.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
+import { setPreferredTimeZone } from '../../utils/time.js';
 type ScionPageAgentDetail = import('./agent-detail.js').ScionPageAgentDetail;
 type Agent = import('../../shared/types.js').Agent;
 
@@ -612,5 +613,26 @@ describe('scion-page-agent-detail delete navigation (ptone/scion#2480)', () => {
     vi.advanceTimersByTime(DELETE_REDIRECT_DELAY_MS * 10);
     await Promise.resolve();
     expect(navClicks).toEqual([]);
+  });
+});
+
+describe('scion-page-agent-detail times in the display zone (tz-refactor task 19)', () => {
+  afterEach(() => {
+    setPreferredTimeZone('');
+  });
+
+  it('formats absolute times in the preferred zone, 24-hour, with a zone label', () => {
+    // Browser zone is pinned to UTC; 15:00Z is midnight in Asia/Tokyo.
+    setPreferredTimeZone('Asia/Tokyo');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const el = document.createElement('scion-page-agent-detail') as any;
+    expect(el.formatDate('2026-10-01T15:00:00Z')).toBe('Oct 2, 2026, 00:00 (Asia/Tokyo)');
+  });
+
+  it('keeps its em dash for a zero time', () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const el = document.createElement('scion-page-agent-detail') as any;
+    expect(el.formatDate('0001-01-01T00:00:00Z')).toBe('—');
+    expect(el.formatRelativeTime('0001-01-01T00:00:00Z')).toBe('—');
   });
 });

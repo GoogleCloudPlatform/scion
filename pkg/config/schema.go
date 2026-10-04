@@ -56,7 +56,7 @@ func (e ValidationError) Error() string {
 //
 // Returns:
 //   - version: the schema_version value if present (e.g., "1"), or "1" if v1-only
-//     runtime fields are detected (type, cloudrun, gke, list_all_namespaces), or ""
+//     runtime fields are detected (see v1RuntimeIndicatorKeys), or ""
 //     for legacy/empty files.
 //   - isLegacy: true if the file uses the legacy format (has "harnesses" key but no schema_version)
 //
@@ -93,8 +93,7 @@ func DetectSettingsFormat(data []byte) (version string, isLegacy bool) {
 	}
 
 	// Check for v1-only structural indicators in runtime entries.
-	// A runtimes map containing type, cloudrun, gke, or list_all_namespaces
-	// keys indicates a v1-format file that is missing the schema_version marker.
+	// A runtimes map containing any v1RuntimeIndicatorKeys key indicates a v1-format file that is missing the schema_version marker.
 	// Treat as versioned v1 to prevent silent data loss via the legacy loading path.
 	if hasV1RuntimeIndicators(raw) {
 		return "1", false
@@ -105,9 +104,15 @@ func DetectSettingsFormat(data []byte) (version string, isLegacy bool) {
 	return "", false
 }
 
+// v1RuntimeIndicatorKeys are runtime-entry keys that exist only on
+// V1RuntimeConfig, not on the legacy RuntimeConfig. A file using any of them
+// without schema_version is loaded as v1 so the key is not dropped by the
+// legacy loader.
+var v1RuntimeIndicatorKeys = []string{"type", "cloudrun", "gke", "list_all_namespaces", "shared_dir_storage_class", "shared_dir_size", "safe_to_evict", "shared_dir_storage_backend"}
+
 // hasV1RuntimeIndicators reports whether a parsed settings map contains v1-only
-// runtime fields (type, cloudrun, gke, list_all_namespaces) that are absent from
-// the legacy RuntimeConfig struct. Used to detect v1-shaped files missing schema_version.
+// runtime fields (v1RuntimeIndicatorKeys) that are absent from the legacy
+// RuntimeConfig struct. Used to detect v1-shaped files missing schema_version.
 func hasV1RuntimeIndicators(raw map[string]interface{}) bool {
 	runtimes, ok := raw["runtimes"]
 	if !ok {
@@ -122,7 +127,7 @@ func hasV1RuntimeIndicators(raw map[string]interface{}) bool {
 		if !ok {
 			continue
 		}
-		for _, key := range []string{"type", "cloudrun", "gke", "list_all_namespaces"} {
+		for _, key := range v1RuntimeIndicatorKeys {
 			if _, has := entry[key]; has {
 				return true
 			}
@@ -139,8 +144,48 @@ func hasV1RuntimeIndicators(raw map[string]interface{}) bool {
 //
 // Returns an error (not ValidationError) if the schema version is unsupported
 // or if the data cannot be parsed.
+//
+// For schema version "1" it also checks value formats the schema cannot
+// express, such as shared_dir_size being a Kubernetes quantity, and that a
+// shared_dir_storage_backend of "nfs" has a complete
+// server.shared_dir_storage.nfs block.
 func ValidateSettings(data []byte, schemaVersion string) ([]ValidationError, error) {
-	return validateAgainstSchema(data, schemaVersion, settingsSchemaFiles)
+	errs, err := validateAgainstSchema(data, schemaVersion, settingsSchemaFiles)
+	if err != nil || schemaVersion != "1" {
+		return errs, err
+	}
+	var vs struct {
+		Runtimes map[string]V1RuntimeConfig `yaml:"runtimes"`
+		Profiles map[string]V1ProfileConfig `yaml:"profiles"`
+		Server   struct {
+			SharedDirStorage *V1SharedDirStorageConfig `yaml:"shared_dir_storage"`
+		} `yaml:"server"`
+	}
+	// A decode failure here (e.g. a wrongly typed field) is already
+	// reported by the schema pass above.
+	if yaml.Unmarshal(data, &vs) == nil {
+		errs = append(errs, ValidateSharedDirSizes(vs.Runtimes, vs.Profiles)...)
+		errs = append(errs, ValidateSharedDirStorageBackends(vs.Runtimes, vs.Profiles, vs.Server.SharedDirStorage)...)
+	}
+	return errs, nil
+}
+
+// SettingsWarnings returns non-fatal findings for a schema version "1"
+// settings file: settings that are accepted but have no effect where they
+// are set, such as safe_to_evict on a non-Kubernetes runtime entry. Data
+// that does not decode yields no warnings (ValidateSettings reports it).
+func SettingsWarnings(data []byte, schemaVersion string) []string {
+	if schemaVersion != "1" {
+		return nil
+	}
+	var vs struct {
+		Runtimes map[string]V1RuntimeConfig `yaml:"runtimes"`
+		Profiles map[string]V1ProfileConfig `yaml:"profiles"`
+	}
+	if yaml.Unmarshal(data, &vs) != nil {
+		return nil
+	}
+	return SafeToEvictIgnoredWarnings(vs.Runtimes, vs.Profiles)
 }
 
 // ValidateAgentConfig validates raw agent config data (YAML or JSON) against

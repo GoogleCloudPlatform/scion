@@ -48,6 +48,19 @@ const (
 	// P2-D4, ptone/scion#2063 items 2 and 3). See
 	// cmd/boot_broker_quota_bindings_to_settings.go.
 	MigrationBrokerQuotaBindingsToSettings MigrationName = "broker_quota_bindings_to_settings"
+	// MigrationEmptyPerAgentLegacyReport is the one-shot, read-only report
+	// of pre-#2703 non-git projects whose workspace-mode label now resolves
+	// to empty-per-agent. See cmd/boot_empty_per_agent_report.go.
+	MigrationEmptyPerAgentLegacyReport MigrationName = "empty_per_agent_legacy_report"
+	// MigrationUTCTimestampRepair records that the boot-time repair of
+	// unreadable SQLite timestamps completed. It only records completion:
+	// the probe runs on every boot regardless. See
+	// cmd/boot_utc_timestamp_repair.go.
+	MigrationUTCTimestampRepair MigrationName = "utc_timestamp_repair"
+	// MigrationRunIntentBackfill is the one-shot migration that sets
+	// agents.run_intent for rows that predate the column. See
+	// cmd/boot_run_intent_backfill.go.
+	MigrationRunIntentBackfill MigrationName = "run_intent_backfill"
 )
 
 // migrationMarker records the completion state of a single migration.
@@ -199,7 +212,8 @@ func isKnownMigration(name MigrationName) bool {
 	switch name {
 	case MigrationDMKey, MigrationBackfill, MigrationGroupRefRepair, MigrationWorkspaceModeLabel,
 		MigrationBrokerOwnershipBackfill, MigrationNonAgentDispatchStateBackfill,
-		MigrationBrokerQuotaBindingsToSettings:
+		MigrationBrokerQuotaBindingsToSettings, MigrationEmptyPerAgentLegacyReport,
+		MigrationUTCTimestampRepair, MigrationRunIntentBackfill:
 		return true
 	default:
 		return false

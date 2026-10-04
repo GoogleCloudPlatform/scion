@@ -52,6 +52,7 @@ type asyncManager struct {
 	startCancelErr error         // if non-nil, returned instead of ctx.Err() when ctx ends a blocked Start
 	cleanupCalls   int
 	cleanupLast    []agent.ResourceHandle
+	cleanupCtxErr  error         // ctx.Err() at the last CleanupLaunch call
 	cleanupBlock   chan struct{} // if non-nil, CleanupLaunch waits on it (or ctx) before returning
 	lastStartCtx   context.Context
 }
@@ -108,6 +109,7 @@ func (m *asyncManager) CleanupLaunch(ctx context.Context, handles []agent.Resour
 	m.mu.Lock()
 	m.cleanupCalls++
 	m.cleanupLast = handles
+	m.cleanupCtxErr = ctx.Err()
 	block := m.cleanupBlock
 	m.mu.Unlock()
 
@@ -1627,5 +1629,71 @@ func TestAsyncCreate_MarkerWriteFailureFailsLaunch(t *testing.T) {
 	}
 	if n := mgr.StartCallCount(); n != 0 {
 		t.Fatalf("Start must never be called when the marker write fails, got %d calls", n)
+	}
+}
+
+// TestCreateAgent_HubManagedGCSBootstrap_NotAmbiguous is the #2760 r1 B1
+// regression: for a shared non-git hub-managed project dispatched to a
+// remote broker with hub storage, the hub clears the workspace and sends
+// only projectSlug + workspaceStoragePath. That upload is the explicit
+// workspace source, so the create must reach the GCS download (here: the
+// unconfigured storage bucket) rather than be refused as ambiguous.
+func TestCreateAgent_HubManagedGCSBootstrap_NotAmbiguous(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	mgr := newAsyncManager()
+	srv, _ := newAsyncTestServer(t, mgr)
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-hub-gcs", "id": "agent-hub-gcs-id", "projectId": "proj-1",
+		"projectSlug": "notes", "workspaceStoragePath": "workspaces/proj-1/agent-hub-gcs-id",
+		"config": map[string]any{"template": "claude", "task": "go"},
+	})
+	if strings.Contains(w.Body.String(), "ambiguous workspace") {
+		t.Fatalf("GCS-bootstrap create refused as ambiguous: %d %s", w.Code, w.Body.String())
+	}
+	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "Storage bucket not configured") {
+		t.Fatalf("status = %d, body = %s; want the GCS download's storage-bucket failure", w.Code, w.Body.String())
+	}
+}
+
+// TestAsyncCreate_HubManagedGCSBootstrap_NotAmbiguous is B1's async
+// counterpart: admission accepts (201) and runLaunch's own download is what
+// fails, not buildStartContext's workspace-source check.
+func TestAsyncCreate_HubManagedGCSBootstrap_NotAmbiguous(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	mgr := newAsyncManager()
+	srv, rtb := newAsyncTestServer(t, mgr)
+
+	var mu sync.Mutex
+	var failedMessage string
+	rtb.launchReportFunc = func(req *hubclient.AgentLaunchReport) (*hubclient.AgentLaunchReportResult, error) {
+		if req.State == hubclient.AgentLaunchReportStateFailed {
+			mu.Lock()
+			failedMessage = req.Message
+			mu.Unlock()
+		}
+		return &hubclient.AgentLaunchReportResult{Result: hubclient.AgentLaunchReportResultApplied}, nil
+	}
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "agent-hub-gcs-async", "id": "agent-hub-gcs-async-id", "projectId": "proj-1",
+		"projectSlug": "notes", "workspaceStoragePath": "workspaces/proj-1/agent-hub-gcs-async-id",
+		"asyncLaunch": true, "launchId": "L-hub-gcs", "launchTimeoutSeconds": 300,
+		"config": map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s; want the launch accepted", w.Code, w.Body.String())
+	}
+	if !waitUntil(t, 2*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return failedMessage != ""
+	}) {
+		t.Fatal("expected a failed report once runLaunch's download attempt failed")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !strings.Contains(failedMessage, "storage bucket not configured") {
+		t.Fatalf("failed message = %q, want runLaunch's GCS download failure", failedMessage)
 	}
 }

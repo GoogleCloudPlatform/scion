@@ -90,6 +90,11 @@ type BrokerCapabilities struct {
 	// BeginLaunch for a broker known to lack support; the create response's
 	// LaunchPending echo is authoritative either way.
 	AsyncLaunch bool `json:"asyncLaunch"`
+	// EmptyPerAgentWorkspace indicates this broker provisions the
+	// empty-per-agent workspace sharing mode: a private, initially empty
+	// directory at <projectDir>/agents/<slug>/workspace (design #2703). The
+	// hub refuses to dispatch such agents to a broker without it (412).
+	EmptyPerAgentWorkspace bool `json:"emptyPerAgentWorkspace"`
 }
 
 // ProjectInfo is a summary of a project registered on this broker.
@@ -155,6 +160,11 @@ type AgentResponse struct {
 	Labels                map[string]string `json:"labels,omitempty"`
 	CreatedAt             time.Time         `json:"createdAt,omitempty"`
 	UpdatedAt             time.Time         `json:"updatedAt,omitempty"`
+	// Warnings carries only the hub-only env drop warnings (a broker-local
+	// TZ value ignored for a hub-dispatched agent), so the hub can relay
+	// them in its own create and start responses. Other broker-local start
+	// warnings are deliberately not included.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // AgentConfig contains agent configuration details.
@@ -504,6 +514,11 @@ type ExecRequest struct {
 // ResetAuthRequest is the request body for resetting auth on a running agent.
 type ResetAuthRequest struct {
 	Token string `json:"token"`
+	// TransportToken, when set, is a fresh hub-minted transport token
+	// (IAP / Cloud Run invoker). It is written to the agent's transport
+	// token file alongside the agent token, so a reset also recovers an
+	// agent whose transport token has expired.
+	TransportToken string `json:"transportToken,omitempty"`
 }
 
 // ResetAuthResponse is the response for auth reset.
@@ -591,6 +606,9 @@ func AgentInfoToResponse(info api.AgentInfo) AgentResponse {
 		Labels:                info.Labels,
 		CreatedAt:             info.Created,
 		Ready:                 phase == string(state.PhaseRunning),
+	}
+	if len(info.HubOnlyEnvWarnings) > 0 {
+		resp.Warnings = append([]string(nil), info.HubOnlyEnvWarnings...)
 	}
 
 	if info.Template != "" || info.Image != "" {

@@ -30,7 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// This file covers includeDeleted semantics and the step 5a re-decision
+// This file covers includeDeleted semantics and the race re-decision
 // protocol's exact-decision-count and short-page-continuation behavior for
 // rows that change, disappear, or move between the member read and the
 // full-row read.
@@ -138,8 +138,9 @@ func (o *ownerChangingAfterMembersStore) ListAgentMembers(ctx context.Context, f
 // candidate owned by the caller (readable only via the owner relationship
 // grant, not via any role permission) whose OwnerID changes away from the
 // caller between the two reads must be re-decided on the full row and
-// dropped, in exactly 9 decisions for that item (1 step-3 read + 8 step-5a
-// full re-decision + 0 step-6, since it was re-decided).
+// dropped, in exactly 9 decisions for that item (1 read-pass decision + 8
+// for the full-row race re-decision + 0 remaining-actions, since it was
+// re-decided).
 func TestListProjectAgentsSorted_Race_OwnerChange_BecomesUnreadable(t *testing.T) {
 	f := sortedListSetup(t)
 	ctx := context.Background()
@@ -170,18 +171,18 @@ func TestListProjectAgentsSorted_Race_OwnerChange_BecomesUnreadable(t *testing.T
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
 	assert.Empty(t, resp.Agents, "an item whose owner changed away from the caller mid-request must be dropped")
 
-	// 1 (gate) + 1 (step-3 read, still owned by caller at that snapshot) +
-	// 8 (step-5a full re-decision, now unreadable) + 0 (step-6 skip) +
-	// 4 (scope caps) = 14.
+	// 1 (gate) + 1 (read pass, still owned by caller at that snapshot) +
+	// 8 (full-row race re-decision, now unreadable) + 0 (remaining-actions
+	// skip) + 4 (scope caps) = 14.
 	assert.Len(t, emitter.records, 14)
 }
 
 // --- exact decision counts for missing-row / project-drop ---------
 
 // TestListProjectAgentsSorted_Race_MissingRow_ExactDecisionCount extends the
-// existing missing-row race test with the exact decision count the design
-// requires ("no additional decision"): 1 (gate) + 1 (step-3 read) + 0 (step
-// 5a drop) + 4 (scope caps) = 6.
+// existing missing-row race test with the exact decision count required
+// (a dropped row costs no additional decision): 1 (gate) + 1 (read pass)
+// + 0 (race-check drop) + 4 (scope caps) = 6.
 func TestListProjectAgentsSorted_Race_MissingRow_ExactDecisionCount(t *testing.T) {
 	f := sortedListSetup(t)
 	a := f.createAgent(t, "race-missing-count", string(state.PhaseStopped), nil)
@@ -196,12 +197,12 @@ func TestListProjectAgentsSorted_Race_MissingRow_ExactDecisionCount(t *testing.T
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
 	assert.Empty(t, resp.Agents)
-	assert.Len(t, emitter.records, 6, "a missing row must cost exactly the step-3 read, no more")
+	assert.Len(t, emitter.records, 6, "a missing row must cost exactly the read-pass decision, no more")
 }
 
 // TestListProjectAgentsSorted_Race_ProjectMismatch_ExactDecisionCount is the
-// project-mismatch analogue of the above: 1 (gate) + 1 (step-3 read) + 0
-// (step 5a drop, ProjectID check) + 4 (scope caps) = 6.
+// project-mismatch analogue of the above: 1 (gate) + 1 (read pass) + 0
+// (race-check drop, ProjectID check) + 4 (scope caps) = 6.
 func TestListProjectAgentsSorted_Race_ProjectMismatch_ExactDecisionCount(t *testing.T) {
 	f := sortedListSetup(t)
 	a := f.createAgent(t, "race-project-count", string(state.PhaseStopped), nil)
@@ -216,7 +217,7 @@ func TestListProjectAgentsSorted_Race_ProjectMismatch_ExactDecisionCount(t *test
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
 	assert.Empty(t, resp.Agents)
-	assert.Len(t, emitter.records, 6, "a project-mismatched row must cost exactly the step-3 read, no more")
+	assert.Len(t, emitter.records, 6, "a project-mismatched row must cost exactly the read-pass decision, no more")
 }
 
 // --- missing-row drop in paged mode must leave a valid short page ---
@@ -233,8 +234,8 @@ func TestListProjectAgentsSorted_Race_MissingRow_PagedShortPageContinues(t *test
 	c1 := f.createAgent(t, "short-c1", string(state.PhaseStopped), nil)
 	c2 := f.createAgent(t, "short-c2", string(state.PhaseStopped), nil)
 
-	// limit=2: page 0 is [c2, c1]. Drop c1 (the last item of page 0) at the
-	// step-5a boundary.
+	// limit=2: page 0 is [c2, c1]. Drop c1 (the last item of page 0)
+	// between the member read and the full-row read.
 	raced := &deletingAfterMembersStore{Store: f.store, agentID: c1.ID}
 	f.srv.store = raced
 

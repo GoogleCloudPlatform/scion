@@ -1018,6 +1018,227 @@ func (_u *AgentUpdate) ClearLaunchError() *AgentUpdate {
 	return _u
 }
 
+// SetDeletionState sets the "deletion_state" field.
+func (_u *AgentUpdate) SetDeletionState(v string) *AgentUpdate {
+	_u.mutation.SetDeletionState(v)
+	return _u
+}
+
+// SetNillableDeletionState sets the "deletion_state" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableDeletionState(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetDeletionState(*v)
+	}
+	return _u
+}
+
+// ClearDeletionState clears the value of the "deletion_state" field.
+func (_u *AgentUpdate) ClearDeletionState() *AgentUpdate {
+	_u.mutation.ClearDeletionState()
+	return _u
+}
+
+// SetDeletionClaim sets the "deletion_claim" field.
+func (_u *AgentUpdate) SetDeletionClaim(v int64) *AgentUpdate {
+	_u.mutation.ResetDeletionClaim()
+	_u.mutation.SetDeletionClaim(v)
+	return _u
+}
+
+// SetNillableDeletionClaim sets the "deletion_claim" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableDeletionClaim(v *int64) *AgentUpdate {
+	if v != nil {
+		_u.SetDeletionClaim(*v)
+	}
+	return _u
+}
+
+// AddDeletionClaim adds value to the "deletion_claim" field.
+func (_u *AgentUpdate) AddDeletionClaim(v int64) *AgentUpdate {
+	_u.mutation.AddDeletionClaim(v)
+	return _u
+}
+
+// SetDeletionLeaseAt sets the "deletion_lease_at" field.
+func (_u *AgentUpdate) SetDeletionLeaseAt(v time.Time) *AgentUpdate {
+	_u.mutation.SetDeletionLeaseAt(v)
+	return _u
+}
+
+// SetNillableDeletionLeaseAt sets the "deletion_lease_at" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableDeletionLeaseAt(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetDeletionLeaseAt(*v)
+	}
+	return _u
+}
+
+// ClearDeletionLeaseAt clears the value of the "deletion_lease_at" field.
+func (_u *AgentUpdate) ClearDeletionLeaseAt() *AgentUpdate {
+	_u.mutation.ClearDeletionLeaseAt()
+	return _u
+}
+
+// SetDeletionStartedAt sets the "deletion_started_at" field.
+func (_u *AgentUpdate) SetDeletionStartedAt(v time.Time) *AgentUpdate {
+	_u.mutation.SetDeletionStartedAt(v)
+	return _u
+}
+
+// SetNillableDeletionStartedAt sets the "deletion_started_at" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableDeletionStartedAt(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetDeletionStartedAt(*v)
+	}
+	return _u
+}
+
+// ClearDeletionStartedAt clears the value of the "deletion_started_at" field.
+func (_u *AgentUpdate) ClearDeletionStartedAt() *AgentUpdate {
+	_u.mutation.ClearDeletionStartedAt()
+	return _u
+}
+
+// SetDeletionFailedAt sets the "deletion_failed_at" field.
+func (_u *AgentUpdate) SetDeletionFailedAt(v time.Time) *AgentUpdate {
+	_u.mutation.SetDeletionFailedAt(v)
+	return _u
+}
+
+// SetNillableDeletionFailedAt sets the "deletion_failed_at" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableDeletionFailedAt(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetDeletionFailedAt(*v)
+	}
+	return _u
+}
+
+// ClearDeletionFailedAt clears the value of the "deletion_failed_at" field.
+func (_u *AgentUpdate) ClearDeletionFailedAt() *AgentUpdate {
+	_u.mutation.ClearDeletionFailedAt()
+	return _u
+}
+
+// SetDeletionCode sets the "deletion_code" field.
+func (_u *AgentUpdate) SetDeletionCode(v string) *AgentUpdate {
+	_u.mutation.SetDeletionCode(v)
+	return _u
+}
+
+// SetNillableDeletionCode sets the "deletion_code" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableDeletionCode(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetDeletionCode(*v)
+	}
+	return _u
+}
+
+// ClearDeletionCode clears the value of the "deletion_code" field.
+func (_u *AgentUpdate) ClearDeletionCode() *AgentUpdate {
+	_u.mutation.ClearDeletionCode()
+	return _u
+}
+
+// SetDeletionError sets the "deletion_error" field.
+func (_u *AgentUpdate) SetDeletionError(v string) *AgentUpdate {
+	_u.mutation.SetDeletionError(v)
+	return _u
+}
+
+// SetNillableDeletionError sets the "deletion_error" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableDeletionError(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetDeletionError(*v)
+	}
+	return _u
+}
+
+// ClearDeletionError clears the value of the "deletion_error" field.
+func (_u *AgentUpdate) ClearDeletionError() *AgentUpdate {
+	_u.mutation.ClearDeletionError()
+	return _u
+}
+
+// SetDeletionPrior sets the "deletion_prior" field.
+func (_u *AgentUpdate) SetDeletionPrior(v string) *AgentUpdate {
+	_u.mutation.SetDeletionPrior(v)
+	return _u
+}
+
+// SetNillableDeletionPrior sets the "deletion_prior" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableDeletionPrior(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetDeletionPrior(*v)
+	}
+	return _u
+}
+
+// ClearDeletionPrior clears the value of the "deletion_prior" field.
+func (_u *AgentUpdate) ClearDeletionPrior() *AgentUpdate {
+	_u.mutation.ClearDeletionPrior()
+	return _u
+}
+
+// SetDeletionRequest sets the "deletion_request" field.
+func (_u *AgentUpdate) SetDeletionRequest(v string) *AgentUpdate {
+	_u.mutation.SetDeletionRequest(v)
+	return _u
+}
+
+// SetNillableDeletionRequest sets the "deletion_request" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableDeletionRequest(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetDeletionRequest(*v)
+	}
+	return _u
+}
+
+// ClearDeletionRequest clears the value of the "deletion_request" field.
+func (_u *AgentUpdate) ClearDeletionRequest() *AgentUpdate {
+	_u.mutation.ClearDeletionRequest()
+	return _u
+}
+
+// SetRunIntent sets the "run_intent" field.
+func (_u *AgentUpdate) SetRunIntent(v string) *AgentUpdate {
+	_u.mutation.SetRunIntent(v)
+	return _u
+}
+
+// SetNillableRunIntent sets the "run_intent" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableRunIntent(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetRunIntent(*v)
+	}
+	return _u
+}
+
+// ClearRunIntent clears the value of the "run_intent" field.
+func (_u *AgentUpdate) ClearRunIntent() *AgentUpdate {
+	_u.mutation.ClearRunIntent()
+	return _u
+}
+
+// SetRunIntentAt sets the "run_intent_at" field.
+func (_u *AgentUpdate) SetRunIntentAt(v time.Time) *AgentUpdate {
+	_u.mutation.SetRunIntentAt(v)
+	return _u
+}
+
+// SetNillableRunIntentAt sets the "run_intent_at" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableRunIntentAt(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetRunIntentAt(*v)
+	}
+	return _u
+}
+
+// ClearRunIntentAt clears the value of the "run_intent_at" field.
+func (_u *AgentUpdate) ClearRunIntentAt() *AgentUpdate {
+	_u.mutation.ClearRunIntentAt()
+	return _u
+}
+
 // SetProject sets the "project" edge to the Project entity.
 func (_u *AgentUpdate) SetProject(v *Project) *AgentUpdate {
 	return _u.SetProjectID(v.ID)
@@ -1479,6 +1700,72 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.LaunchErrorCleared() {
 		_spec.ClearField(agent.FieldLaunchError, field.TypeString)
+	}
+	if value, ok := _u.mutation.DeletionState(); ok {
+		_spec.SetField(agent.FieldDeletionState, field.TypeString, value)
+	}
+	if _u.mutation.DeletionStateCleared() {
+		_spec.ClearField(agent.FieldDeletionState, field.TypeString)
+	}
+	if value, ok := _u.mutation.DeletionClaim(); ok {
+		_spec.SetField(agent.FieldDeletionClaim, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedDeletionClaim(); ok {
+		_spec.AddField(agent.FieldDeletionClaim, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.DeletionLeaseAt(); ok {
+		_spec.SetField(agent.FieldDeletionLeaseAt, field.TypeTime, value)
+	}
+	if _u.mutation.DeletionLeaseAtCleared() {
+		_spec.ClearField(agent.FieldDeletionLeaseAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.DeletionStartedAt(); ok {
+		_spec.SetField(agent.FieldDeletionStartedAt, field.TypeTime, value)
+	}
+	if _u.mutation.DeletionStartedAtCleared() {
+		_spec.ClearField(agent.FieldDeletionStartedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.DeletionFailedAt(); ok {
+		_spec.SetField(agent.FieldDeletionFailedAt, field.TypeTime, value)
+	}
+	if _u.mutation.DeletionFailedAtCleared() {
+		_spec.ClearField(agent.FieldDeletionFailedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.DeletionCode(); ok {
+		_spec.SetField(agent.FieldDeletionCode, field.TypeString, value)
+	}
+	if _u.mutation.DeletionCodeCleared() {
+		_spec.ClearField(agent.FieldDeletionCode, field.TypeString)
+	}
+	if value, ok := _u.mutation.DeletionError(); ok {
+		_spec.SetField(agent.FieldDeletionError, field.TypeString, value)
+	}
+	if _u.mutation.DeletionErrorCleared() {
+		_spec.ClearField(agent.FieldDeletionError, field.TypeString)
+	}
+	if value, ok := _u.mutation.DeletionPrior(); ok {
+		_spec.SetField(agent.FieldDeletionPrior, field.TypeString, value)
+	}
+	if _u.mutation.DeletionPriorCleared() {
+		_spec.ClearField(agent.FieldDeletionPrior, field.TypeString)
+	}
+	if value, ok := _u.mutation.DeletionRequest(); ok {
+		_spec.SetField(agent.FieldDeletionRequest, field.TypeString, value)
+	}
+	if _u.mutation.DeletionRequestCleared() {
+		_spec.ClearField(agent.FieldDeletionRequest, field.TypeString)
+	}
+	if value, ok := _u.mutation.RunIntent(); ok {
+		_spec.SetField(agent.FieldRunIntent, field.TypeString, value)
+	}
+	if _u.mutation.RunIntentCleared() {
+		_spec.ClearField(agent.FieldRunIntent, field.TypeString)
+	}
+	if value, ok := _u.mutation.RunIntentAt(); ok {
+		_spec.SetField(agent.FieldRunIntentAt, field.TypeTime, value)
+	}
+	if _u.mutation.RunIntentAtCleared() {
+		_spec.ClearField(agent.FieldRunIntentAt, field.TypeTime)
 	}
 	if _u.mutation.ProjectCleared() {
 		edge := &sqlgraph.EdgeSpec{
@@ -2603,6 +2890,227 @@ func (_u *AgentUpdateOne) ClearLaunchError() *AgentUpdateOne {
 	return _u
 }
 
+// SetDeletionState sets the "deletion_state" field.
+func (_u *AgentUpdateOne) SetDeletionState(v string) *AgentUpdateOne {
+	_u.mutation.SetDeletionState(v)
+	return _u
+}
+
+// SetNillableDeletionState sets the "deletion_state" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableDeletionState(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetDeletionState(*v)
+	}
+	return _u
+}
+
+// ClearDeletionState clears the value of the "deletion_state" field.
+func (_u *AgentUpdateOne) ClearDeletionState() *AgentUpdateOne {
+	_u.mutation.ClearDeletionState()
+	return _u
+}
+
+// SetDeletionClaim sets the "deletion_claim" field.
+func (_u *AgentUpdateOne) SetDeletionClaim(v int64) *AgentUpdateOne {
+	_u.mutation.ResetDeletionClaim()
+	_u.mutation.SetDeletionClaim(v)
+	return _u
+}
+
+// SetNillableDeletionClaim sets the "deletion_claim" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableDeletionClaim(v *int64) *AgentUpdateOne {
+	if v != nil {
+		_u.SetDeletionClaim(*v)
+	}
+	return _u
+}
+
+// AddDeletionClaim adds value to the "deletion_claim" field.
+func (_u *AgentUpdateOne) AddDeletionClaim(v int64) *AgentUpdateOne {
+	_u.mutation.AddDeletionClaim(v)
+	return _u
+}
+
+// SetDeletionLeaseAt sets the "deletion_lease_at" field.
+func (_u *AgentUpdateOne) SetDeletionLeaseAt(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetDeletionLeaseAt(v)
+	return _u
+}
+
+// SetNillableDeletionLeaseAt sets the "deletion_lease_at" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableDeletionLeaseAt(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetDeletionLeaseAt(*v)
+	}
+	return _u
+}
+
+// ClearDeletionLeaseAt clears the value of the "deletion_lease_at" field.
+func (_u *AgentUpdateOne) ClearDeletionLeaseAt() *AgentUpdateOne {
+	_u.mutation.ClearDeletionLeaseAt()
+	return _u
+}
+
+// SetDeletionStartedAt sets the "deletion_started_at" field.
+func (_u *AgentUpdateOne) SetDeletionStartedAt(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetDeletionStartedAt(v)
+	return _u
+}
+
+// SetNillableDeletionStartedAt sets the "deletion_started_at" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableDeletionStartedAt(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetDeletionStartedAt(*v)
+	}
+	return _u
+}
+
+// ClearDeletionStartedAt clears the value of the "deletion_started_at" field.
+func (_u *AgentUpdateOne) ClearDeletionStartedAt() *AgentUpdateOne {
+	_u.mutation.ClearDeletionStartedAt()
+	return _u
+}
+
+// SetDeletionFailedAt sets the "deletion_failed_at" field.
+func (_u *AgentUpdateOne) SetDeletionFailedAt(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetDeletionFailedAt(v)
+	return _u
+}
+
+// SetNillableDeletionFailedAt sets the "deletion_failed_at" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableDeletionFailedAt(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetDeletionFailedAt(*v)
+	}
+	return _u
+}
+
+// ClearDeletionFailedAt clears the value of the "deletion_failed_at" field.
+func (_u *AgentUpdateOne) ClearDeletionFailedAt() *AgentUpdateOne {
+	_u.mutation.ClearDeletionFailedAt()
+	return _u
+}
+
+// SetDeletionCode sets the "deletion_code" field.
+func (_u *AgentUpdateOne) SetDeletionCode(v string) *AgentUpdateOne {
+	_u.mutation.SetDeletionCode(v)
+	return _u
+}
+
+// SetNillableDeletionCode sets the "deletion_code" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableDeletionCode(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetDeletionCode(*v)
+	}
+	return _u
+}
+
+// ClearDeletionCode clears the value of the "deletion_code" field.
+func (_u *AgentUpdateOne) ClearDeletionCode() *AgentUpdateOne {
+	_u.mutation.ClearDeletionCode()
+	return _u
+}
+
+// SetDeletionError sets the "deletion_error" field.
+func (_u *AgentUpdateOne) SetDeletionError(v string) *AgentUpdateOne {
+	_u.mutation.SetDeletionError(v)
+	return _u
+}
+
+// SetNillableDeletionError sets the "deletion_error" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableDeletionError(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetDeletionError(*v)
+	}
+	return _u
+}
+
+// ClearDeletionError clears the value of the "deletion_error" field.
+func (_u *AgentUpdateOne) ClearDeletionError() *AgentUpdateOne {
+	_u.mutation.ClearDeletionError()
+	return _u
+}
+
+// SetDeletionPrior sets the "deletion_prior" field.
+func (_u *AgentUpdateOne) SetDeletionPrior(v string) *AgentUpdateOne {
+	_u.mutation.SetDeletionPrior(v)
+	return _u
+}
+
+// SetNillableDeletionPrior sets the "deletion_prior" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableDeletionPrior(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetDeletionPrior(*v)
+	}
+	return _u
+}
+
+// ClearDeletionPrior clears the value of the "deletion_prior" field.
+func (_u *AgentUpdateOne) ClearDeletionPrior() *AgentUpdateOne {
+	_u.mutation.ClearDeletionPrior()
+	return _u
+}
+
+// SetDeletionRequest sets the "deletion_request" field.
+func (_u *AgentUpdateOne) SetDeletionRequest(v string) *AgentUpdateOne {
+	_u.mutation.SetDeletionRequest(v)
+	return _u
+}
+
+// SetNillableDeletionRequest sets the "deletion_request" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableDeletionRequest(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetDeletionRequest(*v)
+	}
+	return _u
+}
+
+// ClearDeletionRequest clears the value of the "deletion_request" field.
+func (_u *AgentUpdateOne) ClearDeletionRequest() *AgentUpdateOne {
+	_u.mutation.ClearDeletionRequest()
+	return _u
+}
+
+// SetRunIntent sets the "run_intent" field.
+func (_u *AgentUpdateOne) SetRunIntent(v string) *AgentUpdateOne {
+	_u.mutation.SetRunIntent(v)
+	return _u
+}
+
+// SetNillableRunIntent sets the "run_intent" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableRunIntent(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetRunIntent(*v)
+	}
+	return _u
+}
+
+// ClearRunIntent clears the value of the "run_intent" field.
+func (_u *AgentUpdateOne) ClearRunIntent() *AgentUpdateOne {
+	_u.mutation.ClearRunIntent()
+	return _u
+}
+
+// SetRunIntentAt sets the "run_intent_at" field.
+func (_u *AgentUpdateOne) SetRunIntentAt(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetRunIntentAt(v)
+	return _u
+}
+
+// SetNillableRunIntentAt sets the "run_intent_at" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableRunIntentAt(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetRunIntentAt(*v)
+	}
+	return _u
+}
+
+// ClearRunIntentAt clears the value of the "run_intent_at" field.
+func (_u *AgentUpdateOne) ClearRunIntentAt() *AgentUpdateOne {
+	_u.mutation.ClearRunIntentAt()
+	return _u
+}
+
 // SetProject sets the "project" edge to the Project entity.
 func (_u *AgentUpdateOne) SetProject(v *Project) *AgentUpdateOne {
 	return _u.SetProjectID(v.ID)
@@ -3094,6 +3602,72 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.LaunchErrorCleared() {
 		_spec.ClearField(agent.FieldLaunchError, field.TypeString)
+	}
+	if value, ok := _u.mutation.DeletionState(); ok {
+		_spec.SetField(agent.FieldDeletionState, field.TypeString, value)
+	}
+	if _u.mutation.DeletionStateCleared() {
+		_spec.ClearField(agent.FieldDeletionState, field.TypeString)
+	}
+	if value, ok := _u.mutation.DeletionClaim(); ok {
+		_spec.SetField(agent.FieldDeletionClaim, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.AddedDeletionClaim(); ok {
+		_spec.AddField(agent.FieldDeletionClaim, field.TypeInt64, value)
+	}
+	if value, ok := _u.mutation.DeletionLeaseAt(); ok {
+		_spec.SetField(agent.FieldDeletionLeaseAt, field.TypeTime, value)
+	}
+	if _u.mutation.DeletionLeaseAtCleared() {
+		_spec.ClearField(agent.FieldDeletionLeaseAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.DeletionStartedAt(); ok {
+		_spec.SetField(agent.FieldDeletionStartedAt, field.TypeTime, value)
+	}
+	if _u.mutation.DeletionStartedAtCleared() {
+		_spec.ClearField(agent.FieldDeletionStartedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.DeletionFailedAt(); ok {
+		_spec.SetField(agent.FieldDeletionFailedAt, field.TypeTime, value)
+	}
+	if _u.mutation.DeletionFailedAtCleared() {
+		_spec.ClearField(agent.FieldDeletionFailedAt, field.TypeTime)
+	}
+	if value, ok := _u.mutation.DeletionCode(); ok {
+		_spec.SetField(agent.FieldDeletionCode, field.TypeString, value)
+	}
+	if _u.mutation.DeletionCodeCleared() {
+		_spec.ClearField(agent.FieldDeletionCode, field.TypeString)
+	}
+	if value, ok := _u.mutation.DeletionError(); ok {
+		_spec.SetField(agent.FieldDeletionError, field.TypeString, value)
+	}
+	if _u.mutation.DeletionErrorCleared() {
+		_spec.ClearField(agent.FieldDeletionError, field.TypeString)
+	}
+	if value, ok := _u.mutation.DeletionPrior(); ok {
+		_spec.SetField(agent.FieldDeletionPrior, field.TypeString, value)
+	}
+	if _u.mutation.DeletionPriorCleared() {
+		_spec.ClearField(agent.FieldDeletionPrior, field.TypeString)
+	}
+	if value, ok := _u.mutation.DeletionRequest(); ok {
+		_spec.SetField(agent.FieldDeletionRequest, field.TypeString, value)
+	}
+	if _u.mutation.DeletionRequestCleared() {
+		_spec.ClearField(agent.FieldDeletionRequest, field.TypeString)
+	}
+	if value, ok := _u.mutation.RunIntent(); ok {
+		_spec.SetField(agent.FieldRunIntent, field.TypeString, value)
+	}
+	if _u.mutation.RunIntentCleared() {
+		_spec.ClearField(agent.FieldRunIntent, field.TypeString)
+	}
+	if value, ok := _u.mutation.RunIntentAt(); ok {
+		_spec.SetField(agent.FieldRunIntentAt, field.TypeTime, value)
+	}
+	if _u.mutation.RunIntentAtCleared() {
+		_spec.ClearField(agent.FieldRunIntentAt, field.TypeTime)
 	}
 	if _u.mutation.ProjectCleared() {
 		edge := &sqlgraph.EdgeSpec{

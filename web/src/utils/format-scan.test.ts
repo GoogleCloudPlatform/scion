@@ -15,26 +15,21 @@
  */
 
 /**
- * Format scan (tz-refactor task 11, design.md §2.4 "Enforcement").
+ * Format scan (design.md §2.4 "Enforcement", AC17).
  *
  * CI runs `npm test` but not `npm run lint` (`.github/workflows/ci.yml`), so
  * this is a vitest source scan rather than an ESLint rule. It bans ad-hoc
  * `Date`/locale formatting tokens from every non-test file under
  * `web/src` except `utils/time.ts`, which is the one module allowed to use
- * them.
+ * them. There are no other exceptions: a banned token anywhere else fails
+ * `npm test`, and the fix is to route the call through `time.ts` (or
+ * `formatNumber` for numbers), not to exempt the file.
  *
  * The scan is a plain text match: it deliberately does not strip comments
  * or type-cast expressions, so a reference to one of these tokens in a
- * comment counts too (reworded or removed when that file migrates, same as
- * a real call site). This trades some false positives for not needing a
+ * comment counts too. This trades some false positives for not needing a
  * type-checked program in a unit test (see design.md's "Alternative
  * rejected": an AST check using the TypeScript compiler API).
- *
- * The allowlist only shrinks: `ALLOWLIST` below is a file-granular list,
- * generated at the implementation SHA of tz-refactor task 11, of every
- * remaining file with a banned token. A later migration removes its file
- * from this list; the `stale allowlist entry` test below fails if a listed
- * file no longer has a banned token, so the list cannot silently grow back.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -55,71 +50,7 @@ const EXEMPT_FILE = 'utils/time.ts';
 const BANNED_PATTERN =
   /toLocaleString\(|toLocaleDateString\(|toLocaleTimeString\(|Intl\.DateTimeFormat|Intl\.RelativeTimeFormat|hour12/;
 
-/**
- * File-granular allowlist, generated at this issue's implementation SHA by
- * scanning non-test `web/src/**\/*.ts` for `BANNED_PATTERN` outside
- * `EXEMPT_FILE`. Paths are relative to `web/src`, forward-slash separated.
- *
- * tz-refactor task 11 removed five files from a larger list by migrating
- * them to `time.ts`: the four native-chat formatters (`chat-message.ts`,
- * `chat-date-divider.ts`, `chat-interagent-marker.ts`,
- * `chat-system-line.ts`) and `access-boundary-schedule-editor.ts` (its
- * `viewerTimeZone` getter). `admin-role-bindings.ts` and
- * `scheduled-event-list.ts` stay listed: this issue fixed only their
- * `datetime-local` parsing (now `parseWallClock`), not their own private
- * relative-time formatters, which a later P3 issue migrates.
- * `profile-settings.ts` stays listed for the "Agent timezone" section's
- * zone check, which tz-refactor task 13 removes along with the section.
- *
- * The end state (P3c, tz-refactor task 21) is an empty list and the test
- * below deletes itself along with it.
- */
-const ALLOWLIST: readonly string[] = [
-  'client/chat-palette-data.ts',
-  'components/pages/admin-access-boundaries.ts',
-  'components/pages/admin-access-boundary-detail.ts',
-  'components/pages/admin-experiments.ts',
-  'components/pages/admin-maintenance.ts',
-  'components/pages/admin-quotas.ts',
-  'components/pages/admin-role-bindings.ts',
-  'components/pages/admin-role-detail.ts',
-  'components/pages/admin-roles.ts',
-  'components/pages/admin-scheduler.ts',
-  'components/pages/admin-server-config.ts',
-  'components/pages/admin-users.ts',
-  'components/pages/agent-detail.ts',
-  'components/pages/broker-detail.ts',
-  'components/pages/brokers.ts',
-  'components/pages/home.ts',
-  'components/pages/metrics-dashboard.ts',
-  'components/pages/profile-settings.ts',
-  'components/pages/project-detail.ts',
-  'components/pages/project-settings.ts',
-  'components/shared/access-boundary-audit-timeline.ts',
-  'components/shared/access-boundary-definition-summary.ts',
-  'components/shared/access-boundary-impact-summary.ts',
-  'components/shared/access-boundary-preview.ts',
-  'components/shared/agent-log-viewer.ts',
-  'components/shared/agent-message-viewer.ts',
-  'components/shared/chat/chat-members.ts',
-  'components/shared/chat/chat-search.ts',
-  'components/shared/chat/chat-space-rail.ts',
-  'components/shared/chat/chat-thread.ts',
-  'components/shared/env-var-list.ts',
-  'components/shared/file-browser.ts',
-  'components/shared/gcp-service-account-list.ts',
-  'components/shared/pre-start-hook-list.ts',
-  'components/shared/project-template-list.ts',
-  'components/shared/role-binding-utils.ts',
-  'components/shared/schedule-list.ts',
-  'components/shared/scheduled-event-list.ts',
-  'components/shared/secret-list.ts',
-  'components/shared/subscription-manager.ts',
-  'components/shared/token-list.ts',
-  'components/shared/unified-log-viewer.ts',
-];
-
-/** Recursively lists non-test `.ts` files under `dir`, relative to `SRC_ROOT`. */
+/** Recursively lists non-test `.ts` files under `dir`, as absolute paths. */
 function listSourceFiles(dir: string): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -137,30 +68,30 @@ function toRelative(absPath: string): string {
   return relative(SRC_ROOT, absPath).split(sep).join('/');
 }
 
-describe('format scan (tz-refactor task 11)', () => {
-  it('bans ad-hoc Date/locale formatting tokens outside time.ts and the allowlist', () => {
-    const offenders: string[] = [];
-    for (const absPath of listSourceFiles(SRC_ROOT)) {
-      const rel = toRelative(absPath);
-      if (rel === EXEMPT_FILE) continue;
-      if (ALLOWLIST.includes(rel)) continue;
-      const content = readFileSync(absPath, 'utf8');
-      if (BANNED_PATTERN.test(content)) {
-        offenders.push(rel);
-      }
+/** Files under `web/src`, other than `EXEMPT_FILE`, whose source matches `pattern`. */
+function filesMatching(pattern: RegExp): string[] {
+  const offenders: string[] = [];
+  for (const absPath of listSourceFiles(SRC_ROOT)) {
+    const rel = toRelative(absPath);
+    if (rel === EXEMPT_FILE) continue;
+    if (pattern.test(readFileSync(absPath, 'utf8'))) {
+      offenders.push(rel);
     }
-    expect(offenders).toEqual([]);
+  }
+  return offenders;
+}
+
+describe('format scan (AC17)', () => {
+  it('finds banned Date/locale formatting tokens only in utils/time.ts', () => {
+    expect(filesMatching(BANNED_PATTERN)).toEqual([]);
   });
 
-  it('fails on a stale allowlist entry (a listed file with no banned token)', () => {
-    const stale: string[] = [];
-    for (const rel of ALLOWLIST) {
-      const content = readFileSync(resolve(SRC_ROOT, rel), 'utf8');
-      if (!BANNED_PATTERN.test(content)) {
-        stale.push(rel);
-      }
-    }
-    expect(stale).toEqual([]);
+  it('finds hour12 in no file other than utils/time.ts', () => {
+    expect(filesMatching(/hour12/)).toEqual([]);
+  });
+
+  it('scans the exempt file itself (the path is not stale)', () => {
+    expect(listSourceFiles(SRC_ROOT).map(toRelative)).toContain(EXEMPT_FILE);
   });
 
   it('does not flag formatNumber or isValidTimeZone call sites', () => {

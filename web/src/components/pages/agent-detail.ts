@@ -81,6 +81,9 @@ import '../shared/effective-access-boundary-notice.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { terminalHref } from '../../client/open-terminal.js';
+import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
+import { formatNumber } from '../../utils/format-number.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 /**
  * Parse a Go-style duration string (e.g. "2h30m", "1h", "45m", "90s") into
@@ -133,6 +136,9 @@ function formatDurationHMS(totalSeconds: number): string {
 
 @customElement('scion-page-agent-detail')
 export class ScionPageAgentDetail extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @property({ type: Object })
   pageData: PageData | null = null;
 
@@ -898,19 +904,8 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   private formatDate(dateString: string): string {
-    try {
-      if (this.isZeroDate(dateString)) return '—';
-      const date = new Date(dateString);
-      return new Intl.DateTimeFormat('en', {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      }).format(date);
-    } catch {
-      return dateString;
-    }
+    if (this.isZeroDate(dateString)) return '—';
+    return formatInstantWithZone(dateString) || dateString;
   }
 
   private isZeroDate(dateString: string): boolean {
@@ -920,29 +915,8 @@ export class ScionPageAgentDetail extends LitElement {
   }
 
   private formatRelativeTime(dateString: string): string {
-    try {
-      if (this.isZeroDate(dateString)) return '—';
-      const date = new Date(dateString);
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
+    if (this.isZeroDate(dateString)) return '—';
+    return formatRelative(dateString);
   }
 
   private async handleAction(action: AgentLifecycleAction, event?: MouseEvent): Promise<void> {
@@ -1481,7 +1455,7 @@ export class ScionPageAgentDetail extends LitElement {
                     </sl-button>
                   `
                 : nothing}
-          ${agent.phase === 'created'
+          ${agent.phase === 'created' || can(agent._capabilities, 'update')
             ? html`
                 <a href="/agents/${this.agentId}/configure" style="text-decoration: none;">
                   <sl-button variant="default" size="small">
@@ -1771,27 +1745,27 @@ export class ScionPageAgentDetail extends LitElement {
         <div class="info-grid">
           <div class="info-item">
             <span class="info-label">TOTAL SESSIONS</span>
-            <span class="info-value">${m.totalSessions.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.totalSessions)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">INPUT TOKENS</span>
-            <span class="info-value">${m.totalTokensInput.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.totalTokensInput)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">OUTPUT TOKENS</span>
-            <span class="info-value">${m.totalTokensOutput.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.totalTokensOutput)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">CACHED TOKENS</span>
-            <span class="info-value">${m.totalTokensCached.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.totalTokensCached)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">REASONING TOKENS</span>
-            <span class="info-value">${m.totalTokensReasoning.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.totalTokensReasoning)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">AVG TOKENS / SESSION</span>
-            <span class="info-value">${m.avgTokensPerSession.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.avgTokensPerSession)}</span>
           </div>
         </div>
       </div>
@@ -1801,7 +1775,7 @@ export class ScionPageAgentDetail extends LitElement {
         <div class="info-grid">
           <div class="info-item">
             <span class="info-label">TOTAL TOOL CALLS</span>
-            <span class="info-value">${m.totalToolCalls.toLocaleString()}</span>
+            <span class="info-value">${formatNumber(m.totalToolCalls)}</span>
           </div>
           <div class="info-item">
             <span class="info-label">AVG DURATION</span>

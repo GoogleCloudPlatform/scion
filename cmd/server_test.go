@@ -386,6 +386,35 @@ type optOutRuntime struct {
 
 func (r *optOutRuntime) SupportsAttach() bool { return false }
 
+// noEmptyPerAgentRuntime is a MockRuntime that opts out of the optional
+// runtime.EmptyPerAgentCapableRuntime capability, as Cloud Run does.
+type noEmptyPerAgentRuntime struct {
+	*runtime.MockRuntime
+}
+
+func (r *noEmptyPerAgentRuntime) SupportsEmptyPerAgentWorkspace() bool { return false }
+
+// TestRegisterGlobalProjectAndBroker_EmptyPerAgentFollowsDefaultRuntime pins
+// that the embedded broker's EmptyPerAgentWorkspace capability reflects its
+// default runtime on both the create and the re-register branch (design
+// #2703 P2): false for one that opts out, as Cloud Run does.
+func TestRegisterGlobalProjectAndBroker_EmptyPerAgentFollowsDefaultRuntime(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	settings := &config.Settings{}
+	rt := &noEmptyPerAgentRuntime{MockRuntime: &runtime.MockRuntime{NameFunc: func() string { return "cloudrun" }}}
+	brokerID := tid("broker-no-empty")
+
+	for _, branch := range []string{"create", "re-register"} {
+		_, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "no-empty-broker", "http://localhost:9800", rt, true, settings)
+		require.NoError(t, err, branch)
+		broker, err := s.GetRuntimeBroker(ctx, brokerID)
+		require.NoError(t, err, branch)
+		require.NotNil(t, broker.Capabilities, branch)
+		assert.False(t, broker.Capabilities.EmptyPerAgentWorkspace, "%s: EmptyPerAgentWorkspace must be false for an opted-out default runtime", branch)
+	}
+}
+
 // TestRegisterGlobalProjectAndBroker_AttachOptOut_PersistsFalseAndCLIRefuses
 // is the producer-path integration test: a broker whose default runtime
 // opts out of attach registers through the real production path
@@ -478,6 +507,8 @@ func TestRegisterGlobalProjectAndBroker_UpdateSetsReprovisionCapability(t *testi
 	require.NotNil(t, updated.Capabilities)
 	assert.True(t, updated.Capabilities.Reprovision,
 		"re-registering an existing broker must refresh Capabilities.Reprovision to true")
+	assert.True(t, updated.Capabilities.EmptyPerAgentWorkspace,
+		"re-registering an existing broker must refresh Capabilities.EmptyPerAgentWorkspace to true")
 	assert.True(t, updated.Capabilities.Sync)
 	assert.True(t, updated.Capabilities.Attach)
 }

@@ -293,6 +293,65 @@ func (Agent) Fields() []ent.Field {
 		field.String("launch_error").
 			Optional().
 			Default(""),
+
+		// --- Backend-driven agent delete (design ptone/scion#2483 §2.1) ---
+		// A leased, sticky delete marker. Every write goes through
+		// AgentStore.UpdateAgentDeletion (never UpdateAgent), which bumps
+		// state_version so a stale whole-row writer gets ErrVersionConflict.
+		//
+		// deletion_state is "" (no delete), "deleting", "finalizing" or
+		// "failed".
+		field.String("deletion_state").
+			Optional().
+			Default(""),
+		// deletion_claim is the claim epoch, bumped on every successful claim.
+		field.Int64("deletion_claim").
+			Default(0),
+		// deletion_lease_at is the lease expiry the live engine renews. A
+		// deleting/finalizing row whose lease has passed reads as failed.
+		field.Time("deletion_lease_at").
+			Optional().
+			Nillable(),
+		field.Time("deletion_started_at").
+			Optional().
+			Nillable(),
+		field.Time("deletion_failed_at").
+			Optional().
+			Nillable(),
+		// deletion_code is the failure code (runtime_error, conflict,
+		// in_doubt, revoke_failed, finalize_failed, ...).
+		field.String("deletion_code").
+			Optional().
+			Default(""),
+		field.String("deletion_error").
+			Optional().
+			Default(""),
+		// deletion_prior is JSON {phase, activity, launchId}, captured once
+		// per delete attempt so a failed delete can restore it.
+		field.String("deletion_prior").
+			Optional().
+			Default(""),
+		// deletion_request is JSON {deleteFiles, removeBranch, soft, force,
+		// requestedBy}.
+		field.String("deletion_request").
+			Optional().
+			Default(""),
+
+		// --- Run intent ---
+		// run_intent records whether the user (or the system acting for the
+		// user) wants this agent running: "running" or "stopped". NULL means
+		// unknown; nothing treats a NULL intent as wanting the agent to run.
+		// It is written only by AgentStore.SetRunIntent and RevertRunIntent
+		// (and the one-time boot backfill), never by UpdateAgent or
+		// CreateAgent, and writing it never bumps state_version.
+		field.String("run_intent").
+			Optional().
+			Nillable(),
+		// run_intent_at is the store-clock time of the last run_intent
+		// write. It strictly increases per row, so it orders intent writes.
+		field.Time("run_intent_at").
+			Optional().
+			Nillable(),
 	}
 }
 
@@ -326,6 +385,8 @@ func (Agent) Indexes() []ent.Index {
 				entsql.IndexWhere("launch_state = 'active'"),
 			),
 		index.Fields("launch_id"),
+		// Lookup of agents on a broker by run intent.
+		index.Fields("runtime_broker_id", "run_intent"),
 		// Partial index backing CompositeStore.ReconcileHarnessConfigColumn's
 		// every-boot scan (GoogleCloudPlatform/scion#2153), which queries
 		// exactly Where(HarnessConfigIsNil(), AppliedConfigNotNil()) ordered

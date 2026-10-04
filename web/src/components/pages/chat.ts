@@ -44,7 +44,7 @@ import { customElement, property, state, query } from 'lit/decorators.js';
 
 import type { PageData, Agent } from '../../shared/types.js';
 import { apiFetch, parseApiError } from '../../client/api.js';
-import { navigateTo, stateManager } from '../../client/main.js';
+import { navigateTo, replaceRoute, stateManager } from '../../client/main.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { chatNotifications } from '../../client/chat-notifications.js';
 import { chatUnread } from '../../client/chat-unread.js';
@@ -63,6 +63,7 @@ import { paginateAll, PaginationStoppedError } from '../../client/paginate-all.j
 import { isProjectChimeEnabled, setProjectChimeEnabled } from '../../utils/audio.js';
 import { openTerminal, terminalHref, agentGraphHref } from '../../client/open-terminal.js';
 import { hasOpenModalDescendant, isOpenModalElement } from '../shared/open-modal.js';
+import { deepActiveElement } from '../shared/deep-active-element.js';
 import '../shared/chat/chat-thread.js';
 import '../shared/chat/chat-file-preview.js';
 import type { PreviewTarget } from '../shared/chat/chat-file-preview.js';
@@ -337,6 +338,13 @@ export class ScionPageChat extends LitElement {
   /** Bound listener for the rail's own-tab "Mark unread" notification. */
   private _onConversationMarkedUnread = this._handleConversationMarkedUnread.bind(this);
   private _unreadDMRequestId = 0;
+  /**
+   * Bumped whenever the user navigates within the page (opens a thread or a
+   * DM, resets the view) and when the page is removed. A lookup the user
+   * started captures it and gives up if it has changed, so a late answer
+   * never overrides what the user did since.
+   */
+  private _userNavSeq = 0;
   /**
    * Which view (a project, or the hub) last claimed the members sidebar, for
    * the two loaders that don't go through the hub walk's own guards.
@@ -815,6 +823,40 @@ export class ScionPageChat extends LitElement {
       overflow: clip;
     }
 
+    /*
+     * Landscape phones wide enough for the side-by-side layout (the page
+     * uses viewport-fit=cover): the edge columns carry the notch and
+     * rounded-corner insets inside their own surface, so the surface still
+     * runs to the screen edge and only the content moves in. The columns
+     * are content-box, so the padding adds to their width rather than
+     * taking from it. All 0 on devices without side insets; below the
+     * mobile breakpoint every panel carries both insets instead.
+     */
+    .v2-rail {
+      padding-left: env(safe-area-inset-left, 0px);
+    }
+
+    .v2-members {
+      padding-right: env(safe-area-inset-right, 0px);
+    }
+
+    /* The conversation column has several rows with their own backgrounds
+       (this header, the search and thread bars, and the composer), so
+       padding the column would leave a band beside them. Instead the column
+       says how far each side must move in, through --chat-inset-left and
+       --chat-inset-right, and each row takes that as a transparent border
+       that its background paints under. Side by side, only the right edge
+       can touch the screen, and only while the members panel is hidden; in
+       the mobile layout (below) the column is full width and takes both. */
+    .v2-content.edge-right {
+      --chat-inset-right: env(safe-area-inset-right, 0px);
+    }
+
+    .v2-thread-header {
+      border-left: var(--chat-inset-left, 0px) solid transparent;
+      border-right: var(--chat-inset-right, 0px) solid transparent;
+    }
+
     .v2-rail {
       width: 260px;
       min-width: 200px;
@@ -1008,6 +1050,23 @@ export class ScionPageChat extends LitElement {
         border: 0;
       }
 
+      /* Landscape: keep each full-width panel's content clear of the notch
+         and rounded corners. 0 on devices without side insets. The rail and
+         members panels have one surface, so they pad. */
+      .v2-panels .v2-rail,
+      .v2-panels .v2-members {
+        padding-inline: env(safe-area-inset-left, 0px) env(safe-area-inset-right, 0px);
+      }
+
+      /* The conversation panel's rows take both insets as borders (see the
+         side-by-side .v2-content.edge-right rule). Its right value is the
+         same env() as that rule's, so which of the two applies does not
+         matter, and the panel itself has no inline padding to add twice. */
+      .v2-panels .v2-content {
+        --chat-inset-left: env(safe-area-inset-left, 0px);
+        --chat-inset-right: env(safe-area-inset-right, 0px);
+      }
+
       /* ---- Left panel active ---- */
       .v2-panels[data-panel='left'] .v2-rail {
         /* 'none' rather than 'translateX(0)': a transform of any kind makes
@@ -1185,6 +1244,7 @@ export class ScionPageChat extends LitElement {
   override disconnectedCallback(): void {
     super.disconnectedCallback();
     ++this._unreadDMRequestId;
+    ++this._userNavSeq;
     ++this._hubMembersGeneration;
     this._mobileLayoutQuery?.removeEventListener('change', this._onMobileLayoutChange);
     this._mobileLayoutQuery = null;
@@ -1439,12 +1499,35 @@ export class ScionPageChat extends LitElement {
    * names, overriding a manual swipe away from it.
    */
   private isAlreadyViewingThread(projectId: string, threadId: string): boolean {
+    return !!this.openThread(projectId, threadId);
+  }
+
+  /** The open conversation, if it is this thread; otherwise null. */
+  private openThread(projectId: string, threadId: string): V2ConversationState | null {
+    const conv = this.v2Conversation;
+    return conv && !conv.isDM && conv.projectId === projectId && conv.conversationKey === threadId
+      ? conv
+      : null;
+  }
+
+  /** Does the current URL still name this readable thread route? */
+  private routeNamesThread(slug: string, threadId: string): boolean {
+    const match = window.location.pathname.match(/\/chat\/([^/]+)\/([^/]+)$/);
     return (
-      !!this.v2Conversation &&
-      !this.v2Conversation.isDM &&
-      this.v2Conversation.projectId === projectId &&
-      this.v2Conversation.conversationKey === threadId
+      !!match && decodeURIComponent(match[1]) === slug && decodeURIComponent(match[2]) === threadId
     );
+  }
+
+  /** Does the current URL still name this space route, on a mounted page? */
+  private routeNamesSpace(slug: string): boolean {
+    const match = window.location.pathname.match(/\/chat\/([^/]+)$/);
+    return this.isConnected && !!match && decodeURIComponent(match[1]) === slug;
+  }
+
+  /** Does the current URL still name this peer-ID DM route? */
+  private routeNamesDMPeer(peerId: string): boolean {
+    const match = window.location.pathname.match(/\/chat\/dm\/([^/]+)$/);
+    return !!match && decodeURIComponent(match[1]) === peerId;
   }
 
   private parseV2Route(): void {
@@ -1459,10 +1542,27 @@ export class ScionPageChat extends LitElement {
     if (legacyThreadMatch) {
       const projectId = decodeURIComponent(legacyThreadMatch[1]);
       const topicId = decodeURIComponent(legacyThreadMatch[2]);
-      // Redirect to the readable URL if we know the slug
+      // Rewrite to the readable URL in place once the slug is known, then
+      // parse that. navigateTo would rebuild the page (resetting the mobile
+      // panel the user may have swiped to since) and push an entry that Back
+      // lands on only to redirect forward again.
       const slug = this._projectIdToSlug.get(projectId);
       if (slug) {
-        navigateTo(`/chat/${encodeURIComponent(slug)}/${encodeURIComponent(topicId)}`);
+        const open = this.openThread(projectId, topicId);
+        if (open && open.projectSlug !== slug) {
+          this.v2Conversation = { ...open, projectSlug: slug };
+        }
+        void replaceRoute(`/chat/${encodeURIComponent(slug)}/${encodeURIComponent(topicId)}`).then(
+          () => {
+            // The shell titles itself from the path it now records; put the
+            // open thread's own title back on top.
+            const conv = this.openThread(projectId, topicId);
+            if (conv) {
+              dispatchPageTitle(this, conv.threadName ? `#${conv.threadName}` : 'Thread', 'Chat');
+            }
+          }
+        );
+        this.parseV2Route();
         return;
       }
       // See isAlreadyViewingThread's doc comment for why this guard matters.
@@ -1522,10 +1622,9 @@ export class ScionPageChat extends LitElement {
         return;
       }
 
-      this.mobilePanel = 'center';
-      dispatchPageTitle(this, 'DM', 'Chat');
-
       if (segment.startsWith('dm:')) {
+        this.mobilePanel = 'center';
+        dispatchPageTitle(this, 'DM', 'Chat');
         // Legacy DM key format (e.g. dm:agent:UUID:user:UUID) — use directly
         this.v2Conversation = {
           conversationKey: segment,
@@ -1551,6 +1650,16 @@ export class ScionPageChat extends LitElement {
           // If we already have the correct DM conversation open, skip.
           if (this.v2Conversation?.conversationKey === dmKey) {
             return;
+          }
+          // A /chat/dm/<peerId> URL never equals the open conversation's key,
+          // so a re-parse (rail-loaded) lands here for a DM that is already
+          // open. If it is the same peer, the key is only being corrected
+          // (the agent roster arrived after the first parse): update it in
+          // place and leave the mobile panel where the user put it.
+          const samePeer = !!this.v2Conversation?.isDM && this.v2Conversation.peerId === segment;
+          if (!samePeer) {
+            this.mobilePanel = 'center';
+            dispatchPageTitle(this, 'DM', 'Chat');
           }
 
           let peerName = '';
@@ -1578,7 +1687,7 @@ export class ScionPageChat extends LitElement {
           }
         } else {
           // User ID not available — resolve via API
-          void this.resolveDMByPeerId(segment, peerKind);
+          void this.resolveDMByPeerId(segment, peerKind, '', { fromRoute: true });
         }
       }
       return;
@@ -1656,6 +1765,16 @@ export class ScionPageChat extends LitElement {
   private async resolveSlugAndOpenThread(slug: string, threadId: string): Promise<void> {
     const projectId = await this.resolveProjectBySlug(slug);
     if (!projectId) return;
+    // While the lookup was in flight the rail may have opened this thread
+    // (and the user swiped away from it), or the user may have moved on to
+    // another conversation. Only open it if the URL still names it and it is
+    // not already open.
+    if (
+      !this.routeNamesThread(slug, threadId) ||
+      this.isAlreadyViewingThread(projectId, threadId)
+    ) {
+      return;
+    }
 
     const known = this.knownThreadMeta(threadId);
     this.v2Conversation = {
@@ -1680,7 +1799,10 @@ export class ScionPageChat extends LitElement {
    */
   private async resolveSlugAndOpenSpace(slug: string): Promise<void> {
     const projectId = await this.resolveProjectBySlug(slug);
-    if (projectId) {
+    // The rail can load during the await and the user open a thread from it,
+    // or the page be rebuilt; only open the space if it is still what the
+    // URL names on this page.
+    if (projectId && this.routeNamesSpace(slug)) {
       void this.selectSpaceBySlug(slug, projectId);
     }
     // If resolution fails, leave the URL in place — it's just a 404 space.
@@ -1742,6 +1864,8 @@ export class ScionPageChat extends LitElement {
 
     // Find #general thread (or fall back to first thread) for this space
     const threads = await this.loadSpaceThreads(projectId);
+    // Same as after the slug lookup: a thread opened during the await wins.
+    if (!this.routeNamesSpace(slug)) return;
     const target = threads.find((t: { isGeneral: boolean }) => t.isGeneral) || threads[0];
     if (target) {
       this.v2Conversation = {
@@ -2161,6 +2285,7 @@ export class ScionPageChat extends LitElement {
     threadName: string;
     defaultAgent?: string;
   }): void {
+    ++this._userNavSeq;
     // Determine the slug for the readable URL
     const slug = detail.projectSlug || this._projectIdToSlug.get(detail.projectId) || '';
 
@@ -2202,6 +2327,7 @@ export class ScionPageChat extends LitElement {
 
   /** Reset to the global /chat view (no conversation selected). */
   private handleResetView(): void {
+    ++this._userNavSeq;
     this.v2Conversation = null;
     this.v2MembersExpanded = true; // Always show tray in base view
     // No conversation to show — put the mobile view back on the rail.
@@ -2322,8 +2448,28 @@ export class ScionPageChat extends LitElement {
   private async resolveDMByPeerId(
     peerId: string,
     peerKind: 'user' | 'agent' = 'user',
-    displayName = ''
+    displayName = '',
+    opts: { fromRoute?: boolean } = {}
   ): Promise<void> {
+    // A lookup can be overtaken while it awaits. A route-driven one opens the
+    // DM only if the URL still names this peer and its DM is not already open
+    // (a re-parse on rail-loaded starts another); one the user started opens
+    // it only if they have not navigated since, including by opening another
+    // DM. Either way a late answer never moves the panel the user has since
+    // moved. The URL alone cannot tell this for a user-started lookup: an
+    // earlier lookup's own push changes it without the user doing anything.
+    const startSeq = this._userNavSeq;
+    const superseded = (): boolean =>
+      opts.fromRoute
+        ? !this.routeNamesDMPeer(peerId) ||
+          (!!this.v2Conversation?.isDM && this.v2Conversation.peerId === peerId)
+        : this._userNavSeq !== startSeq;
+    // A DM the user opened gets its own URL, as openDM gives it when the key
+    // is known; otherwise the next re-parse of the old route would close it.
+    const pushIfOpenedByUser = (dmKey: string): void => {
+      if (!opts.fromRoute) this.pushDMPath(dmKey);
+    };
+
     // 1. Try to find an existing DM via the DM list API (no user ID needed).
     try {
       const res = await apiFetch('/api/v1/chat/dms');
@@ -2341,6 +2487,7 @@ export class ScionPageChat extends LitElement {
         };
         const dm = data.dms?.find((d) => d.peerId === peerId);
         if (dm) {
+          if (superseded()) return;
           const peerName = dm.peerName || dm.peerSlug || dm.peerEmail || displayName || dm.peerId;
           this.v2Conversation = {
             conversationKey: dm.conversationKey,
@@ -2355,6 +2502,7 @@ export class ScionPageChat extends LitElement {
             muted: dm.muted === true,
           };
           this.mobilePanel = 'center';
+          pushIfOpenedByUser(dm.conversationKey);
           dispatchPageTitle(this, peerName, 'Chat');
           return;
         }
@@ -2385,7 +2533,10 @@ export class ScionPageChat extends LitElement {
       }
     }
 
-    // 3. Retry key construction with the potentially-refreshed user ID.
+    // 3. Retry key construction with the potentially-refreshed user ID. A
+    // lookup overtaken by now stops here, so it neither opens the DM nor
+    // reports a missing identity.
+    if (superseded()) return;
     const key = this.buildDMKey(peerId, peerKind);
     if (key) {
       this.v2Conversation = {
@@ -2400,6 +2551,7 @@ export class ScionPageChat extends LitElement {
         peerKind,
       };
       this.mobilePanel = 'center';
+      pushIfOpenedByUser(key);
       dispatchPageTitle(this, displayName || 'DM', 'Chat');
       return;
     }
@@ -3103,11 +3255,8 @@ export class ScionPageChat extends LitElement {
    * outermost host, so descend to the real focused element before blurring.
    */
   private dismissKeyboard(): void {
-    let el = document.activeElement as HTMLElement | null;
-    while (el?.shadowRoot?.activeElement) {
-      el = el.shadowRoot.activeElement as HTMLElement;
-    }
-    el?.blur?.();
+    const el = deepActiveElement();
+    if (el instanceof HTMLElement || el instanceof SVGElement) el.blur();
   }
 
   /** Swiping right reveals the panel to the left of the current one. */
@@ -3159,6 +3308,7 @@ export class ScionPageChat extends LitElement {
 
   /** Open the DM conversation with a member in the centre panel. */
   private openDM(memberId: string, memberKind: 'user' | 'agent', displayName: string): void {
+    ++this._userNavSeq;
     const dmKey = this.buildDMKey(memberId, memberKind);
     if (dmKey) {
       this.v2Conversation = {
@@ -3174,11 +3324,7 @@ export class ScionPageChat extends LitElement {
       };
       this.mobilePanel = 'center';
 
-      // Update the URL with the full DM key so parseV2Route can use it directly.
-      const dmPath = `/chat/dm/${encodeURIComponent(dmKey)}`;
-      const base = import.meta.env.BASE_URL;
-      const browserPath = base && base !== '/' ? base.replace(/\/$/, '') + dmPath : dmPath;
-      window.history.pushState({}, '', browserPath);
+      this.pushDMPath(dmKey);
 
       dispatchPageTitle(this, displayName, 'Chat');
       return;
@@ -3186,6 +3332,14 @@ export class ScionPageChat extends LitElement {
 
     // User ID not available — resolve via API
     void this.resolveDMByPeerId(memberId, memberKind, displayName);
+  }
+
+  /** Push the DM's full-key URL, which parseV2Route matches directly. */
+  private pushDMPath(dmKey: string): void {
+    const dmPath = `/chat/dm/${encodeURIComponent(dmKey)}`;
+    const base = import.meta.env.BASE_URL;
+    const browserPath = base && base !== '/' ? base.replace(/\/$/, '') + dmPath : dmPath;
+    window.history.pushState({}, '', browserPath);
   }
 
   /**
@@ -4286,17 +4440,8 @@ export class ScionPageChat extends LitElement {
     closeButton?.focus();
   }
 
-  /** Find the real focused element, descending through shadow roots (mirrors `dismissKeyboard`'s walk). */
-  private _deepActiveElement(): Element | null {
-    let el: Element | null = document.activeElement;
-    while (el && (el as HTMLElement).shadowRoot?.activeElement) {
-      el = (el as HTMLElement).shadowRoot!.activeElement;
-    }
-    return el;
-  }
-
   private _capturePaletteInvokerFocus(): void {
-    const el = this._deepActiveElement();
+    const el = deepActiveElement();
     this._paletteInvoker = el instanceof HTMLElement ? el : null;
     this._paletteInvokerSelection =
       el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement
@@ -4523,7 +4668,10 @@ export class ScionPageChat extends LitElement {
             : html`<div class="loading-rail"><sl-spinner></sl-spinner></div>`}
         </div>
 
-        <div class="v2-content" ?inert=${this.isMobileLayout && this.mobilePanel !== 'center'}>
+        <div
+          class="v2-content ${this.v2MembersExpanded ? '' : 'edge-right'}"
+          ?inert=${this.isMobileLayout && this.mobilePanel !== 'center'}
+        >
           ${this.v2Conversation
             ? this.renderV2Conversation()
             : html`
@@ -5045,6 +5193,7 @@ export class ScionPageChat extends LitElement {
     name: string;
     defaultAgent?: string;
   }): void {
+    ++this._userNavSeq;
     const slug = this._projectIdToSlug.get(topic.projectId) || '';
     this.v2Conversation = {
       conversationKey: topic.id,

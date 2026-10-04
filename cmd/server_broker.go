@@ -134,11 +134,12 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 			GCPHostServiceAccountEmail: detectedSAEmail,
 			GCPHostProjectID:           detectedProjectID,
 			Capabilities: &store.BrokerCapabilities{
-				WebPTY:      false,
-				Sync:        true,
-				Attach:      runtime.HasAttachSupport(rt),
-				Reprovision: true,
-				AsyncLaunch: true,
+				WebPTY:                 false,
+				Sync:                   true,
+				Attach:                 runtime.HasAttachSupport(rt),
+				Reprovision:            true,
+				AsyncLaunch:            true,
+				EmptyPerAgentWorkspace: runtime.HasEmptyPerAgentSupport(rt),
 			},
 			Profiles:       profiles,
 			DefaultProfile: defaultProfile,
@@ -176,11 +177,12 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 		// permanent false 412 on `scion reincarnate` for every embedded
 		// deployment.
 		broker.Capabilities = &store.BrokerCapabilities{
-			WebPTY:      false,
-			Sync:        true,
-			Attach:      runtime.HasAttachSupport(rt),
-			Reprovision: true,
-			AsyncLaunch: true,
+			WebPTY:                 false,
+			Sync:                   true,
+			Attach:                 runtime.HasAttachSupport(rt),
+			Reprovision:            true,
+			AsyncLaunch:            true,
+			EmptyPerAgentWorkspace: runtime.HasEmptyPerAgentSupport(rt),
 		}
 		// Ensure deployment-type labels are set on re-registration
 		if broker.Labels == nil {
