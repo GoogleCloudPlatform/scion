@@ -109,7 +109,10 @@ type HeartbeatService struct {
 
 // targetListing is one runtime target's agent listing, shared by every
 // heartbeat that waits for it. Its agents slice is shared by those
-// heartbeats, so readers must not modify it or append to it.
+// heartbeats, so readers must not modify it or append to it. The listing
+// runs under the context of the heartbeat that started it: if that context
+// is cancelled, every heartbeat waiting on the listing reports the target
+// incomplete.
 type targetListing struct {
 	done     chan struct{} // closed when agents and err are set
 	deadline time.Time
@@ -350,7 +353,9 @@ func (s *HeartbeatService) listTargets(ctx context.Context, targets []listTarget
 		if l, ok := s.listings[t.key]; ok {
 			if now.Before(l.deadline) {
 				listings[i] = l
-				joined = append(joined, t.key)
+				if onJoin != nil {
+					joined = append(joined, t.key)
+				}
 			}
 			continue
 		}
@@ -360,10 +365,8 @@ func (s *HeartbeatService) listTargets(ctx context.Context, targets []listTarget
 		go s.runListing(ctx, t.key, t.mgr, l)
 	}
 	s.mu.Unlock()
-	if onJoin != nil {
-		for _, key := range joined {
-			onJoin(key)
-		}
+	for _, key := range joined {
+		onJoin(key)
 	}
 
 	timer := time.NewTimer(time.Until(deadline))
@@ -400,10 +403,16 @@ func (s *HeartbeatService) listTargets(ctx context.Context, targets []listTarget
 func (s *HeartbeatService) runListing(ctx context.Context, key string, mgr agent.Manager, l *targetListing) {
 	listCtx, cancel := context.WithDeadline(ctx, l.deadline)
 	agents, err := mgr.List(listCtx, nil)
-	if err == nil && listCtx.Err() != nil {
+	if err == nil {
 		// Returned only after its deadline passed (or ctx ended): too old
-		// to report.
-		agents, err = nil, listCtx.Err()
+		// to report. Check the clock too: listCtx's own timer may not have
+		// fired yet when List returns just after the deadline.
+		if err = listCtx.Err(); err == nil && !time.Now().Before(l.deadline) {
+			err = context.DeadlineExceeded
+		}
+		if err != nil {
+			agents = nil
+		}
 	}
 	cancel()
 	l.agents, l.err = agents, err

@@ -348,7 +348,12 @@ func TestDefaultListingDeadline(t *testing.T) {
 func watchJoins(svc *HeartbeatService) <-chan string {
 	joined := make(chan string, 16)
 	svc.mu.Lock()
-	svc.joinedListing = func(key string) { joined <- key }
+	svc.joinedListing = func(key string) {
+		select {
+		case joined <- key:
+		default: // never block a heartbeat on an unread report
+		}
+	}
 	svc.mu.Unlock()
 	return joined
 }
@@ -431,6 +436,55 @@ func TestHeartbeatLiveness_LateResultNotReported(t *testing.T) {
 	for _, c := range calls {
 		assertHeartbeat(t, c.Heartbeat, defaultPending, map[string]string{"a1": k8sTargetB})
 	}
+	if got := defaultMgr.calls.Load(); got != 1 {
+		t.Errorf("default runtime listed %d times, want 1", got)
+	}
+}
+
+// A listing runs under the context of the heartbeat that started it. If
+// that context is cancelled, a heartbeat that joined the listing reports
+// the target incomplete, even though its own context is still live and the
+// listing later returns within its deadline.
+func TestHeartbeatLiveness_CancelledStarterLeavesJoinerIncomplete(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+	svc, defaultMgr, _ := newLivenessService(client, time.Hour, 5*time.Second)
+	joined := watchJoins(svc)
+	defaultMgr.block()
+	defer defaultMgr.unblock()
+
+	starterCtx, cancelStarter := context.WithCancel(context.Background())
+	defer cancelStarter()
+	starterDone := make(chan struct{})
+	go func() {
+		defer close(starterDone)
+		_ = svc.ForceHeartbeat(starterCtx)
+	}()
+	waitFor(t, 3*time.Second, "the first listing to start", func() bool { return defaultMgr.calls.Load() == 1 })
+	joinerErr := make(chan error, 1)
+	go func() { joinerErr <- svc.ForceHeartbeat(context.Background()) }()
+	waitForJoin(t, joined, "docker")
+
+	cancelStarter()
+	select {
+	case <-starterDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the cancelled heartbeat did not return")
+	}
+	defaultMgr.unblock() // returns well within the 5s deadline
+
+	select {
+	case err := <-joinerErr:
+		if err != nil {
+			t.Fatalf("ForceHeartbeat: %v", err)
+		}
+	case <-time.After(8 * time.Second):
+		t.Fatal("the joining heartbeat did not return")
+	}
+	calls := client.getHeartbeatCalls()
+	if len(calls) == 0 {
+		t.Fatal("the joining heartbeat sent nothing")
+	}
+	assertHeartbeat(t, calls[len(calls)-1].Heartbeat, defaultPending, map[string]string{"a1": k8sTargetB})
 	if got := defaultMgr.calls.Load(); got != 1 {
 		t.Errorf("default runtime listed %d times, want 1", got)
 	}
