@@ -51,7 +51,10 @@ export const DRAIN_MAX_REQUESTS = 4;
 /** Extra attempts per page after a failed one (so each page is tried at most three times). */
 export const DRAIN_PAGE_RETRIES = 2;
 
-/** How long {@link AgentDrainRunner} waits for the live connection before draining anyway and marking the result stale. */
+/**
+ * How long {@link AgentDrainRunner} waits for the live connection before draining anyway and
+ * marking the result stale.
+ */
 export const DRAIN_CONNECT_TIMEOUT_MS = 3000;
 
 /**
@@ -61,7 +64,10 @@ export const DRAIN_CONNECT_TIMEOUT_MS = 3000;
  */
 export type AgentDrainView = 'full' | 'compact';
 
-/** Why a drain stopped short. `status` is the HTTP status of the last failed attempt, when there was a response. */
+/**
+ * Why a drain stopped short. `status` is the HTTP status of the last failed attempt, when there
+ * was a response.
+ */
 export interface AgentDrainError {
   message: string;
   status?: number;
@@ -94,9 +100,9 @@ export interface AgentDrainResult {
   /**
    * The drain stopped with `error` before any page whose rows it uses
    * arrived: there is no result to show, and a host keeps its previous
-   * data. False whenever at
-   * least one page arrived, even one with zero readable items, so a later
-   * page failure is an incomplete result, not a first-page failure.
+   * data. False whenever at least one page arrived, even one with zero
+   * readable items, so a later page failure is an incomplete result, not a
+   * first-page failure.
    */
   firstPageFailed: boolean;
 }
@@ -119,7 +125,10 @@ export type AgentDrainFetch = (url: string, init: { signal?: AbortSignal }) => P
 
 /** Options for {@link drainAgents}. */
 export interface DrainAgentsOptions {
-  /** Aborting rejects the drain with the fetch's `AbortError` (it never resolves with a partial result). */
+  /**
+   * Aborting rejects the drain with the fetch's `AbortError` (it never resolves with a partial
+   * result).
+   */
   signal?: AbortSignal;
   view?: AgentDrainView;
   /** Defaults to {@link DRAIN_MAX_REQUESTS}. */
@@ -193,7 +202,10 @@ function wait(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-/** Whether a non-OK status is worth retrying: server errors, 408 and 429. Other 4xx answers (a bad label, a forbidden project) will not change on retry. */
+/**
+ * Whether a non-OK status is worth retrying: server errors, 408 and 429. Other 4xx answers (a bad
+ * label, a forbidden project) will not change on retry.
+ */
 function retryableStatus(status: number): boolean {
   return status >= 500 || status === 408 || status === 429;
 }
@@ -232,9 +244,9 @@ async function fetchPageOnce(
  * Guarantees:
  * - At most `maxRequests` successful page requests, a full carried
  *   `firstPage` included (a short one is discarded and not counted toward
- *   the cap); each page is attempted at most `retries + 1` times. Network errors, unparseable bodies, 5xx,
- *   408 and 429 are retried; any other non-OK status ends the drain at once
- *   with `error.status` set.
+ *   the cap); each page is attempted at most `retries + 1` times. Network
+ *   errors, unparseable bodies, 5xx, 408 and 429 are retried; any other
+ *   non-OK status ends the drain at once with `error.status` set.
  * - A page with zero items and a `nextCursor` does not end the drain (the
  *   server may filter a whole page by read access); it counts toward the
  *   cap like any other page.

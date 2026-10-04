@@ -73,6 +73,8 @@ interface FakeServerOptions {
   override?: (attempt: number, url: URL) => Response | Error | undefined;
   /** Called before each page is served, so a test can interleave live events. */
   beforeServe?: (pageIndex: number) => void;
+  /** The `_capabilities` every served page carries. Defaults to `create`. */
+  capabilities?: { actions: string[] };
 }
 
 /** A minimal legacy list endpoint: limit-sized pages over `rows`, cursor = row offset. */
@@ -102,7 +104,7 @@ function fakeServer(opts: FakeServerOptions) {
       json({
         agents,
         ...(end < opts.rows.length ? { nextCursor: String(end) } : {}),
-        _capabilities: { actions: ['create'] },
+        _capabilities: opts.capabilities ?? { actions: ['create'] },
       })
     );
   };
@@ -272,7 +274,8 @@ describe('drainAgents', () => {
 
   it('continues from an already-fetched first page and its cursor, within the same request cap', async () => {
     const rows = rowsDesc(2600);
-    const server = fakeServer({ rows });
+    // The drained pages carry other capabilities than the carried page.
+    const server = fakeServer({ rows, capabilities: { actions: ['read'] } });
     const result = await drainAgents('/x', {
       fetchFn: server.fn,
       firstPage: {
@@ -329,6 +332,20 @@ describe('drainAgents', () => {
     // The capabilities come from the drain's own first page, not the discarded one.
     expect(result.capabilities).toEqual({ actions: ['read'] });
     expect(result.firstPageFailed).toBe(false);
+  });
+
+  it('a row only the discarded short page holds never reaches the result', async () => {
+    const rows = rowsDesc(1600);
+    const server = fakeServer({ rows });
+    const gone = makeAgent(0, { id: 'gone-1', name: 'gone-1' });
+    const result = await drainAgents('/x', {
+      fetchFn: server.fn,
+      firstPage: { agents: [gone, ...rows.slice(0, 24)], nextCursor: '25' },
+    });
+    expect(result.complete).toBe(true);
+    expect(result.agents.some((a) => a.id === 'gone-1')).toBe(false);
+    expect(result.agents).toHaveLength(1600);
+    expect(result.agents.map((a) => a.id)).toEqual(rows.map((a) => a.id));
   });
 
   it('a short carried first page below the cap: the restarted drain completes the set in four pages', async () => {
