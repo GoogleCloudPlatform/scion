@@ -174,8 +174,8 @@ type Agent struct {
 	// SoftDeleteOpID is the operation ID of the soft delete that set
 	// DeletedAt ("" when the agent is live or was soft-deleted before the
 	// column existed). Restore reactivates only the delegation edges
-	// deactivated under this ID. UpdateAgent writes it; no authorization
-	// decision reads it.
+	// deactivated under this ID. Only Store.SetAgentSoftDeleteOpID writes
+	// it; UpdateAgent ignores this field. No authorization decision reads it.
 	SoftDeleteOpID string `json:"-"`
 
 	// Deletion is the computed, client-facing view of the deletion_* columns

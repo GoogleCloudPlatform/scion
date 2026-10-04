@@ -419,6 +419,26 @@ func (s *AgentStore) GetAgentsByIDs(ctx context.Context, ids []string) (map[stri
 	return result, nil
 }
 
+// SetAgentSoftDeleteOpID sets soft_delete_op_id, or clears it when opID is
+// empty. It is the column's only writer; it neither checks nor bumps
+// state_version.
+func (s *AgentStore) SetAgentSoftDeleteOpID(ctx context.Context, agentID, opID string) error {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return err
+	}
+	update := s.client.Agent.UpdateOneID(uid)
+	if opID == "" {
+		update.ClearSoftDeleteOpID()
+	} else {
+		update.SetSoftDeleteOpID(opID)
+	}
+	if err := update.Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
 // UpdateAgent updates an existing agent using optimistic locking on
 // state_version. The mutable field set mirrors the legacy SQLite store:
 // identity-adjacent operational fields are updated, while immutable lineage
@@ -767,11 +787,6 @@ func buildAgentUpdate(ac *ent.AgentClient, uid uuid.UUID, a *store.Agent, expect
 		update.ClearDeletedAt()
 	} else {
 		update.SetDeletedAt(a.DeletedAt)
-	}
-	if a.SoftDeleteOpID == "" {
-		update.ClearSoftDeleteOpID()
-	} else {
-		update.SetSoftDeleteOpID(a.SoftDeleteOpID)
 	}
 	if a.OwnerID == "" {
 		update.ClearOwnerID()

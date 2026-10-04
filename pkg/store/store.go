@@ -285,7 +285,16 @@ type AgentStore interface {
 	// Uses optimistic locking via StateVersion.
 	// Returns ErrNotFound if agent doesn't exist.
 	// Returns ErrVersionConflict if the version doesn't match.
+	// It never writes soft_delete_op_id (see SetAgentSoftDeleteOpID).
 	UpdateAgent(ctx context.Context, agent *Agent) error
+
+	// SetAgentSoftDeleteOpID sets the agent's soft_delete_op_id to opID, or
+	// clears it to NULL when opID is empty. It is the only writer of that
+	// column: UpdateAgent and CreateAgent leave it untouched. It does not
+	// check or bump state_version; the lifecycle transactions call it in the
+	// same transaction as the guarded row write it belongs to.
+	// Returns ErrNotFound if the agent doesn't exist.
+	SetAgentSoftDeleteOpID(ctx context.Context, agentID, opID string) error
 
 	// DeleteAgent removes an agent by ID.
 	// Returns ErrNotFound if the agent doesn't exist.
@@ -2470,6 +2479,13 @@ type DelegationEdgeStore interface {
 	// edge in the same scope returns ErrAlreadyExists. Returns the number of
 	// edges reactivated.
 	ReactivateDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string, cause EdgeDeactivationCause, opID string) (int, error)
+
+	// GetDeactivatedDelegationEdgesForDelegate returns exactly the inactive
+	// edges of the delegate whose recorded deactivation cause equals cause
+	// and whose operation ID equals opID: the edges
+	// ReactivateDelegationEdgesForDelegate with the same arguments would
+	// reactivate. It writes nothing.
+	GetDeactivatedDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string, cause EdgeDeactivationCause, opID string) ([]*DelegationEdge, error)
 }
 
 // =============================================================================
