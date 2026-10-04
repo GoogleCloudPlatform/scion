@@ -32,7 +32,7 @@ GitHub raw-content URLs, web log-viewer `raw` entries) are not message raw and a
 | `POST /api/v1/broker/inbound` (plugin/broker inbound) | `raw`, `message.raw` | `pkg/hub/handlers_broker_inbound.go` (`rawIngressBrokerInbound`) | before decode, topic validation, and sender synthesis |
 | `POST /api/v1/broker/inbound/routed` | `raw`, `message.raw` | `pkg/hub/handlers_broker_inbound_routed.go` (`rawIngressBrokerInboundRouted`) | same as above |
 | Scheduled-event and recurring-schedule advanced `payload` JSON | `raw` key in the payload | `pkg/hub/raw_tombstone.go` (scheduled payload check), called from `pkg/hub/handlers_scheduled_events.go` and `pkg/hub/handlers_schedules.go` | payload shape check (400) → raw probe (422) → decode; before storage |
-| Runtime broker `POST /api/v1/agents/{id}/message` | `raw`, `structured_message.raw` | `pkg/runtimebroker/handlers.go` (`sendMessage`; 2 MiB body cap, 413) | before decode and before any manager call |
+| Runtime broker `POST /api/v1/agents/{id}/message` | `raw`, `structured_message.raw` | `pkg/runtimebroker/handlers.go` (`sendMessage`; no byte cap, unchanged from before the removal: the route is Hub-only and HMAC-authenticated, and the Hub forwards a rebuilt request in which the text can appear up to three times, so the Hub ingress caps do not bound it) | before decode and before any manager call |
 | Plugin gRPC wire | field 11 | `proto/broker/v1/broker.proto` (`reserved 11; reserved "raw";`) | field number and name can never be reused |
 | CLI `scion message --raw` | flag, any value | `cmd/message.go` (`errRawFlagRemoved`, rejected in cobra `Args`; flag kept hidden only to produce the guidance) | before `PersistentPreRunE` and before any client is built: zero wire calls |
 | Outcome constant | n/a | `pkg/agentkeys/types.go` (`OutcomeRawInputRemoved`, 422), `pkg/agentkeys/doc.go` | n/a |
@@ -51,7 +51,7 @@ historical rows and payloads that still contain `"raw"` ignores the member (no R
 | `pkg/hub/raw_tombstone_test.go` | both `/message` routes (user and agent callers, same/cross project), broadcast, broker inbound and routed (before sender synthesis and topic validation), content-free audit, pre-auth body cap, broken read; zero persistence/dispatch/event/user/conversation side effects; Plain/normal/interrupt controls |
 | `pkg/hub/scheduled_payload_raw_tombstone_test.go` | scheduled-event and schedule payloads, including malformed values and positive controls |
 | `pkg/hub/agent_dm_observer_test.go` | Normal and Plain DMs still publish the observer copy |
-| `pkg/runtimebroker/message_raw_tombstone_test.go` | broker `/message` rejection with zero manager calls; Plain/normal/interrupt unaffected |
+| `pkg/runtimebroker/message_raw_tombstone_test.go` | broker `/message` rejection with zero manager calls; Plain/normal/interrupt unaffected; a Hub-shaped request near the Hub 2 MiB limit (well over 2 MiB on the wire) is delivered |
 | `pkg/agentkeys/types_test.go`, `pkg/agentkeys/broker_test.go` | `OutcomeRawInputRemoved` status mapping and allowlist membership |
 | `cmd/message_test.go` (`TestMessageCmd_RawFlag_ZeroWireCalls`) | `--raw` on every target form and mode makes zero HTTP calls |
 | `cmd/message_deprecation_test.go` (`TestRemovedFlag_Raw`) | removal guidance names `scion keys` |

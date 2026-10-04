@@ -165,8 +165,10 @@ func TestPluginInfoNilHandling(t *testing.T) {
 
 // TestStructuredMessageRawFieldReserved pins that the retired raw field
 // (number 11) stays reserved by number and name so it cannot be reused with
-// a different meaning, and that a message from an older peer that still
-// sets it decodes as an ordinary message.
+// a different meaning, and that a message from an older Hub publishing to
+// this plugin that still sets it decodes as an ordinary message. This gRPC
+// path carries messages Hub to plugin only; plugin inbound is HTTP
+// (/api/v1/broker/inbound), where the field is rejected.
 func TestStructuredMessageRawFieldReserved(t *testing.T) {
 	md := (&brokerv1.StructuredMessage{}).ProtoReflect().Descriptor()
 	assert.Nil(t, md.Fields().ByNumber(11), "field 11 must not be redefined")
@@ -175,7 +177,7 @@ func TestStructuredMessageRawFieldReserved(t *testing.T) {
 	assert.True(t, md.ReservedNames().Has("raw"), "field name raw must stay reserved")
 
 	// Wire bytes for {msg: "hi" (field 8), raw: true (field 11)} as an
-	// older peer would have sent them.
+	// older Hub publishing to this plugin would have sent them.
 	wire := []byte{0x42, 0x02, 'h', 'i', 0x58, 0x01}
 	var pb brokerv1.StructuredMessage
 	require.NoError(t, proto.Unmarshal(wire, &pb))
