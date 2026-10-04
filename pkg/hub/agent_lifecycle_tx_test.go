@@ -38,6 +38,7 @@ import (
 // with recorded session provenance, and returns it.
 func seedAgentEdge(t *testing.T, s store.Store, delegatorID string, agent *store.Agent) *store.DelegationEdge {
 	t.Helper()
+	ensureActiveUser(t, s, delegatorID)
 	e := &store.DelegationEdge{
 		DelegatorType: store.DelegationPrincipalUser,
 		DelegatorID:   delegatorID,
@@ -57,6 +58,85 @@ func seedAgentEdge(t *testing.T, s store.Store, delegatorID string, agent *store
 	}
 	require.NoError(t, s.CreateDelegationEdge(context.Background(), e))
 	return e
+}
+
+// ensureActiveUser creates an active user with id unless one exists, so the
+// delegator of a seeded edge is live for a restore.
+func ensureActiveUser(t *testing.T, s store.Store, id string) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := s.GetUser(ctx, id); err == nil {
+		return
+	} else if !errors.Is(err, store.ErrNotFound) {
+		require.NoError(t, err)
+	}
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: id, Email: id + "@delegator.test", DisplayName: "Delegator",
+		Role: store.UserRoleMember, Status: store.UserStatusActive,
+	}))
+}
+
+// hookProbe reads the store inside a hook callback without failing the test
+// from the callback: it records the first read error, and the test asserts
+// it after the request.
+type hookProbe struct {
+	mu  sync.Mutex
+	err error
+}
+
+func (p *hookProbe) record(err error) bool {
+	if err == nil {
+		return false
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.err == nil {
+		p.err = err
+	}
+	return true
+}
+
+func (p *hookProbe) failure() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.err
+}
+
+// agent reads the agent row; nil when the read failed.
+func (p *hookProbe) agent(tx store.Store, id string) *store.Agent {
+	a, err := tx.GetAgent(context.Background(), id)
+	if p.record(err) {
+		return nil
+	}
+	return a
+}
+
+// activeEdges returns the IDs of the agent's active edges.
+func (p *hookProbe) activeEdges(tx store.Store, agentID string) []string {
+	edges, err := tx.GetDelegationEdgesForDelegate(context.Background(), store.DelegationPrincipalAgent, agentID)
+	if p.record(err) {
+		return nil
+	}
+	ids := make([]string, 0, len(edges))
+	for _, e := range edges {
+		ids = append(ids, e.ID)
+	}
+	return ids
+}
+
+// audits counts the agent's mutation audit records of mutationType.
+func (p *hookProbe) audits(tx store.Store, mutationType, agentID string) int {
+	recs, _, err := tx.ListMutationAudits(context.Background(), store.MutationAuditFilter{TargetType: "agent", MutationType: mutationType})
+	if p.record(err) {
+		return -1
+	}
+	n := 0
+	for _, r := range recs {
+		if r.TargetID == agentID {
+			n++
+		}
+	}
+	return n
 }
 
 // activeEdgeIDs returns the IDs of the agent's active delegation edges.
@@ -138,14 +218,17 @@ func TestSoftDeleteTxHookOrder(t *testing.T) {
 	seedAgentEdge(t, s, tid("delegator"), agent)
 
 	var log hookLog
+	var probe hookProbe
 	check := func(tx store.Store, a *store.Agent) {
-		row, err := tx.GetAgent(context.Background(), a.ID)
-		require.NoError(t, err)
+		row := probe.agent(tx, a.ID)
+		if row == nil {
+			return
+		}
 		assert.False(t, row.DeletedAt.IsZero(), "the row is soft-deleted before the hooks")
 		assert.NotEmpty(t, row.SoftDeleteOpID, "the operation ID is stamped before the hooks")
 		assert.Equal(t, row.SoftDeleteOpID, a.SoftDeleteOpID, "the hook sees the written row")
-		assert.Empty(t, activeEdgeIDs(t, tx, a.ID), "edges are deactivated before the hooks")
-		assert.Empty(t, agentAudits(t, tx, mutationTypeAgentSoftDelete, a.ID), "the audit record is written after the hooks")
+		assert.Empty(t, probe.activeEdges(tx, a.ID), "edges are deactivated before the hooks")
+		assert.Zero(t, probe.audits(tx, mutationTypeAgentSoftDelete, a.ID), "the audit record is written after the hooks")
 	}
 	srv.RegisterSoftDeleteHook("first", recordingHook(&log, "first", check, nil))
 	srv.RegisterSoftDeleteHook("second", recordingHook(&log, "second", nil, nil))
@@ -153,6 +236,7 @@ func TestSoftDeleteTxHookOrder(t *testing.T) {
 
 	softDeleteForTest(t, srv, agent.ID)
 
+	require.NoError(t, probe.failure(), "a read inside the hook failed")
 	assert.Equal(t, []string{"first", "second"}, log.get(), "soft hooks in order; hard hooks do not run")
 	got := mustGetAgent(t, s, agent.ID)
 	require.NotEmpty(t, got.SoftDeleteOpID)
@@ -172,12 +256,13 @@ func TestHardDeleteTxHookOrder(t *testing.T) {
 	seedAgentEdge(t, s, tid("delegator"), agent)
 
 	var log hookLog
+	var probe hookProbe
 	check := func(tx store.Store, a *store.Agent) {
 		assert.Equal(t, agent.ID, a.ID, "the hook gets the pre-delete row")
 		_, err := tx.GetAgent(context.Background(), a.ID)
 		assert.ErrorIs(t, err, store.ErrNotFound, "the row is removed before the hooks")
-		assert.Empty(t, activeEdgeIDs(t, tx, a.ID), "edges are deactivated before the hooks")
-		assert.Empty(t, agentAudits(t, tx, mutationTypeAgentHardDelete, a.ID), "the audit record is written after the hooks")
+		assert.Empty(t, probe.activeEdges(tx, a.ID), "edges are deactivated before the hooks")
+		assert.Zero(t, probe.audits(tx, mutationTypeAgentHardDelete, a.ID), "the audit record is written after the hooks")
 	}
 	srv.RegisterHardDeleteHook("first", recordingHook(&log, "first", check, nil))
 	srv.RegisterHardDeleteHook("second", recordingHook(&log, "second", nil, nil))
@@ -186,6 +271,7 @@ func TestHardDeleteTxHookOrder(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 
+	require.NoError(t, probe.failure(), "a read inside the hook failed")
 	assert.Equal(t, []string{"first", "second"}, log.get(), "hard hooks in order; soft hooks do not run")
 	assert.True(t, agentGone(t, s, agent.ID))
 	sum := auditSummary(t, s, mutationTypeAgentHardDelete, agent.ID)
@@ -208,13 +294,16 @@ func TestRestoreTxHookOrder(t *testing.T) {
 	require.NotEmpty(t, opID)
 
 	var log hookLog
+	var probe hookProbe
 	check := func(tx store.Store, a *store.Agent) {
-		row, err := tx.GetAgent(context.Background(), a.ID)
-		require.NoError(t, err)
+		row := probe.agent(tx, a.ID)
+		if row == nil {
+			return
+		}
 		assert.True(t, row.DeletedAt.IsZero(), "the row is restored before the hooks")
 		assert.Empty(t, row.SoftDeleteOpID, "the operation ID is cleared before the hooks")
-		assert.Equal(t, []string{edge.ID}, activeEdgeIDs(t, tx, a.ID), "edges are reactivated before the hooks")
-		assert.Empty(t, agentAudits(t, tx, mutationTypeAgentRestore, a.ID), "the audit record is written after the hooks")
+		assert.Equal(t, []string{edge.ID}, probe.activeEdges(tx, a.ID), "edges are reactivated before the hooks")
+		assert.Zero(t, probe.audits(tx, mutationTypeAgentRestore, a.ID), "the audit record is written after the hooks")
 	}
 	srv.RegisterRestoreHook("first", recordingHook(&log, "first", check, nil))
 	srv.RegisterRestoreHook("second", recordingHook(&log, "second", nil, nil))
@@ -222,6 +311,7 @@ func TestRestoreTxHookOrder(t *testing.T) {
 	rec := restoreForTest(t, srv, agent.ID)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
+	require.NoError(t, probe.failure(), "a read inside the hook failed")
 	assert.Equal(t, []string{"first", "second"}, log.get())
 	sum := auditSummary(t, s, mutationTypeAgentRestore, agent.ID)
 	assert.Equal(t, opID, sum["op_id"])
@@ -241,18 +331,26 @@ func TestReincarnateClaimTxHookOrder(t *testing.T) {
 	})
 
 	var log hookLog
+	var probe hookProbe
 	check := func(tx store.Store, a *store.Agent) {
-		row, err := tx.GetAgent(context.Background(), a.ID)
-		require.NoError(t, err)
+		row := probe.agent(tx, a.ID)
+		if row == nil {
+			return
+		}
 		assert.Equal(t, store.ReincarnationStatePending, row.ReincarnationState, "the claim is written before the hooks")
 		recs, err := tx.ListAgentReincarnations(context.Background(), a.ID)
-		require.NoError(t, err)
+		if probe.record(err) {
+			return
+		}
 		assert.Len(t, recs, 1, "the record is created before the hooks")
 		edges, err := tx.GetDelegationEdgesForDelegate(context.Background(), store.DelegationPrincipalAgent, a.ID)
-		require.NoError(t, err)
-		require.Len(t, edges, 1)
-		assert.Equal(t, coordinator.ID, edges[0].DelegatorID, "the edge is re-recorded before the hooks")
-		assert.Empty(t, agentAudits(t, tx, mutationTypeAgentReincarnateClaim, a.ID), "the audit record is written after the hooks")
+		if probe.record(err) {
+			return
+		}
+		if assert.Len(t, edges, 1) {
+			assert.Equal(t, coordinator.ID, edges[0].DelegatorID, "the edge is re-recorded before the hooks")
+		}
+		assert.Zero(t, probe.audits(tx, mutationTypeAgentReincarnateClaim, a.ID), "the audit record is written after the hooks")
 	}
 	srv.RegisterReincarnateClaimHook("first", recordingHook(&log, "first", check, nil))
 	srv.RegisterReincarnateClaimHook("second", recordingHook(&log, "second", nil, nil))
@@ -262,6 +360,7 @@ func TestReincarnateClaimTxHookOrder(t *testing.T) {
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	waitForReincarnationSettled(t, s, agent.ID)
 
+	require.NoError(t, probe.failure(), "a read inside the hook failed")
 	assert.Equal(t, []string{"first", "second"}, log.get())
 	sum := auditSummary(t, s, mutationTypeAgentReincarnateClaim, agent.ID)
 	assert.Equal(t, true, sum["re_recorded"])
