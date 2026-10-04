@@ -69,7 +69,7 @@ func TestBuildAgentEnv_BrokerModeSkipsConfigTZ(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &api.ScionConfig{Env: tc.cfgEnv}
 			cfgBefore := cloneEnv(tc.cfgEnv)
-			env, warnings, missing, dropped := buildAgentEnv(cfg, tc.extraEnv, true)
+			env, warnings, missing, dropped := buildAgentEnv(cfg, tc.extraEnv, nil, true)
 
 			got := envListToMap(env)
 			if tc.wantTZ == "" {
@@ -98,7 +98,7 @@ func TestBuildAgentEnv_BrokerModeSkipsConfigTZ(t *testing.T) {
 func TestBuildAgentEnv_SoloModeKeepsTZ(t *testing.T) {
 	t.Setenv("TZ", "Asia/Tokyo")
 
-	env, _, missing, dropped := buildAgentEnv(&api.ScionConfig{Env: map[string]string{"TZ": ""}}, nil, false)
+	env, _, missing, dropped := buildAgentEnv(&api.ScionConfig{Env: map[string]string{"TZ": ""}}, nil, nil, false)
 	if got := envListToMap(env)["TZ"]; got != "Asia/Tokyo" {
 		t.Errorf("solo empty marker: TZ = %q, want the host value Asia/Tokyo", got)
 	}
@@ -106,7 +106,7 @@ func TestBuildAgentEnv_SoloModeKeepsTZ(t *testing.T) {
 		t.Errorf("solo mode must drop nothing: dropped=%v missing=%v", dropped, missing)
 	}
 
-	env, _, _, dropped = buildAgentEnv(&api.ScionConfig{Env: map[string]string{"TZ": "Europe/Paris"}}, nil, false)
+	env, _, _, dropped = buildAgentEnv(&api.ScionConfig{Env: map[string]string{"TZ": "Europe/Paris"}}, nil, nil, false)
 	if got := envListToMap(env)["TZ"]; got != "Europe/Paris" {
 		t.Errorf("solo config value: TZ = %q, want Europe/Paris", got)
 	}
