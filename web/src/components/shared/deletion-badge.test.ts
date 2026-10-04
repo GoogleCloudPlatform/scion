@@ -206,3 +206,119 @@ describe('scion-deletion-badge', () => {
     expect(badge?.classList.contains('failed')).toBe(true);
   });
 });
+
+describe('DeletionLeaseController deadlines beyond the lease', () => {
+  it('flips to abandoned at the lease, then hides the view at lease + 15m', () => {
+    const clock = new FakeClock();
+    const host = new FakeHost();
+    const agent: Pick<Agent, 'deletion'> = { deletion: deleting(T0 + 20_000) };
+    const c = new DeletionLeaseController(host, () => [agent], clock);
+    host.updated();
+
+    clock.advance(20_000);
+    expect(host.updates).toBe(1);
+    expect(c.view(agent)?.code).toBe('abandoned');
+
+    host.updated(); // re-render after the flip arms the expiry timer
+    expect([...clock.timers.values()].map((t) => t.at)).toEqual([T0 + 20_000 + 15 * 60_000]);
+    clock.advance(15 * 60_000);
+    expect(host.updates).toBe(2);
+    expect(c.view(agent)).toBeNull();
+    host.updated();
+    expect(clock.timers.size).toBe(0);
+  });
+
+  it('hides a failed view at its expiresAt', () => {
+    const clock = new FakeClock();
+    const host = new FakeHost();
+    const agent: Pick<Agent, 'deletion'> = {
+      deletion: {
+        state: 'failed',
+        code: 'conflict',
+        soft: false,
+        claim: 1,
+        startedAt: iso(T0),
+        expiresAt: iso(T0 + 60_000),
+      },
+    };
+    const c = new DeletionLeaseController(host, () => [agent], clock);
+    host.updated();
+    expect(c.view(agent)?.state).toBe('failed');
+    clock.advance(59_999);
+    expect(host.updates).toBe(0);
+    clock.advance(1);
+    expect(host.updates).toBe(1);
+    expect(c.view(agent)).toBeNull();
+  });
+
+  it('never arms for an in_doubt failure with no expiresAt', () => {
+    const clock = new FakeClock();
+    const host = new FakeHost();
+    const agent: Pick<Agent, 'deletion'> = {
+      deletion: { state: 'failed', code: 'in_doubt', soft: false, claim: 1, startedAt: iso(T0) },
+    };
+    new DeletionLeaseController(host, () => [agent], clock);
+    host.updated();
+    expect(clock.timers.size).toBe(0);
+  });
+
+  it('clamps a far-future deadline to the setTimeout maximum (no immediate fire)', () => {
+    const clock = new FakeClock();
+    const host = new FakeHost();
+    const farLease = T0 + 2 ** 33; // overflows a 32-bit setTimeout delay
+    const agent = { deletion: deleting(farLease) };
+    const delays: number[] = [];
+    const recording: DeletionClock = {
+      now: () => clock.now(),
+      setTimeout: (fn, ms) => {
+        delays.push(ms);
+        return clock.setTimeout(fn, ms);
+      },
+      clearTimeout: (h) => clock.clearTimeout(h),
+    };
+    const c = new DeletionLeaseController(host, () => [agent], recording);
+    host.updated();
+    expect(delays).toEqual([2 ** 31 - 1]);
+    clock.advance(0);
+    expect(host.updates).toBe(0);
+    // When the clamped timer fires early, the re-render re-arms for the rest.
+    clock.advance(2 ** 31 - 1);
+    expect(host.updates).toBe(1);
+    expect(c.isDeleting(agent)).toBe(true);
+    host.updated();
+    // The remainder is still above the cap, so it is clamped again.
+    expect(farLease - clock.now()).toBeGreaterThan(2 ** 31 - 1);
+    expect(delays[1]).toBe(2 ** 31 - 1);
+  });
+
+  it('arms on hostConnected, before the first update', () => {
+    const clock = new FakeClock();
+    const host = new FakeHost();
+    const agent = { deletion: deleting(T0 + 20_000) };
+    new DeletionLeaseController(host, () => [agent], clock);
+    expect(clock.timers.size).toBe(0);
+    for (const ctrl of host.controllers) ctrl.hostConnected?.();
+    expect(clock.timers.size).toBe(1);
+  });
+});
+
+describe('scion-deletion-badge live region', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  it('sets role="status" only when live', async () => {
+    const d = deleting(T0 + 20_000);
+    const quiet = document.createElement('scion-deletion-badge');
+    quiet.deletion = d;
+    const live = document.createElement('scion-deletion-badge');
+    live.deletion = d;
+    live.live = true;
+    document.body.append(quiet, live);
+    await quiet.updateComplete;
+    await live.updateComplete;
+    expect(quiet.shadowRoot?.querySelector('.badge')?.hasAttribute('role')).toBe(false);
+    expect(quiet.shadowRoot?.querySelector('.badge')?.getAttribute('title')).toBe('Deleting…');
+    expect(live.shadowRoot?.querySelector('.badge')?.getAttribute('role')).toBe('status');
+  });
+});

@@ -2823,5 +2823,120 @@ describe('project-detail — agent list window', () => {
       await el.updateComplete;
       expect(ids()).toEqual(['a-0', 'a-2']);
     });
+
+    const sseUpdate = (subject: string, data: unknown): void =>
+      (
+        stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+      ).handleUpdate({ subject, data });
+    const waitMs = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    /** Badge labels and icon counts inside table rows only (list view). */
+    async function rowState(
+      el: TestEl
+    ): Promise<{ badges: string[]; icons: (n: string) => number }> {
+      const rows = [...(el.shadowRoot?.querySelectorAll('tbody tr') ?? [])];
+      const badges = rows.flatMap((r) => [
+        ...(r.querySelectorAll('scion-deletion-badge') as NodeListOf<
+          HTMLElement & { updateComplete: Promise<boolean> }
+        >),
+      ]);
+      await Promise.all(badges.map((b) => b.updateComplete));
+      return {
+        badges: badges
+          .map((b) => b.shadowRoot?.querySelector('.badge')?.textContent?.trim() ?? '')
+          .filter(Boolean),
+        icons: (n: string) =>
+          rows.reduce((sum, r) => sum + r.querySelectorAll(`sl-icon[name="${n}"]`).length, 0),
+      };
+    }
+
+    const lifecycleCaps = { actions: ['read', 'update', 'delete', 'lifecycle'] };
+
+    it('list view (table rows): Deleting… badge, and Stop/Delete hidden on that row only', async () => {
+      const projectId = 'p-del-rows';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      const agents = [0, 1, 2].map((i) =>
+        makeAgent(i, { projectId, _capabilities: lifecycleCaps })
+      );
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          createFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests: [],
+          })
+        )
+      );
+      const el = await createComponent(projectId);
+      let st = await rowState(el);
+      expect(st.icons('trash')).toBe(3);
+      expect(st.icons('stop-circle')).toBe(3);
+
+      sseUpdate('agent.a-1.status', {
+        deletion: {
+          state: 'deleting',
+          soft: false,
+          claim: 1,
+          startedAt: new Date().toISOString(),
+          leaseExpiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+        },
+      });
+      await waitMs(150);
+      await el.updateComplete;
+      st = await rowState(el);
+      expect(st.badges).toEqual(['Deleting…']);
+      expect(st.icons('trash')).toBe(2);
+      expect(st.icons('stop-circle')).toBe(2);
+    });
+
+    it('paged list: the lease timer watches agentWindow.items and flips the row to Delete interrupted', async () => {
+      const projectId = 'p-del-paged';
+      localStorage.setItem('scion-view-project-agents', 'list');
+      localStorage.setItem(
+        `scion-sort-project-agents-${projectId}`,
+        JSON.stringify({ field: 'updated', dir: 'desc' })
+      );
+      const agents = Array.from({ length: PROJECT_AGENTS_FIT_THRESHOLD + 1 }, (_, i) =>
+        makeAgent(i, { projectId, _capabilities: lifecycleCaps })
+      );
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests: [],
+          })
+        )
+      );
+      const el = await createComponent(projectId);
+      expect(internals(el).agentWindow.state).toBe('paged');
+      expect(internals(el).agents).toEqual([]); // paged: rows come from the window only
+      const target = internals(el).agentWindow.items[0].id;
+
+      // A short real-time lease, delivered after mount so mount time cannot eat it.
+      sseUpdate(`agent.${target}.status`, {
+        deletion: {
+          state: 'deleting',
+          soft: false,
+          claim: 1,
+          startedAt: new Date().toISOString(),
+          leaseExpiresAt: new Date(Date.now() + 400).toISOString(),
+        },
+      });
+      await waitMs(150);
+      await el.updateComplete;
+      expect((await rowState(el)).badges).toEqual(['Deleting…']);
+
+      // Nothing else re-renders the page: only the controller's timer can.
+      await waitMs(400);
+      await el.updateComplete;
+      const st = await rowState(el);
+      expect(st.badges).toEqual(['Delete interrupted']);
+      expect(st.icons('trash')).toBe(internals(el).agentWindow.items.length);
+    });
   });
 });

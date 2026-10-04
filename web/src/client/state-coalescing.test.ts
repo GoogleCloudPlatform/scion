@@ -799,6 +799,9 @@ describe('W2: tombstoned IDs are dropped outright, never buffered as unknown', (
     vi.advanceTimersByTime(100);
     emit(sm, 'agent.a1.deleted', {});
     emit(sm, 'agent.a1.status', { phase: 'error' }); // dropped, not buffered
+    const pending = (sm as unknown as { pendingAgentDeltas: Map<string, unknown> })
+      .pendingAgentDeltas;
+    expect(pending.has('a1')).toBe(false);
 
     emit(sm, 'agent.a1.created', { phase: 'running', name: 'A1' }); // dropped: tombstoned
     vi.advanceTimersByTime(100);

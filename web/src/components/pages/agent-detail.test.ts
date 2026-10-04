@@ -64,7 +64,9 @@ class FakeStateManager extends EventTarget {
   seedProjects(): void {}
   /**
    * Mirrors the real `applyDeleteAccepted` (DELETE 202): merge the returned
-   * deletion into the known agent and flush, without removing it.
+   * deletion into the known agent and flush, without removing it. The real
+   * claim guard (`shouldApplyAcceptedDeletion`) is not reproduced here; it
+   * is covered in client/state-deletion.test.ts.
    */
   applyDeleteAccepted(id: string, deletion: unknown): boolean {
     const existing = this.agentsById.get(id);
@@ -788,6 +790,36 @@ describe('scion-page-agent-detail backend-driven delete (ptone/scion#2483 phase 
     await settle(el);
     expect(headerBadge(el)).toBe('Delete interrupted');
     expect(headerActions(el)).toEqual(expect.arrayContaining(['Stop', 'delete']));
+  });
+
+  it('force DELETE 202 (502, confirm, force 202) keeps the page with Deleting… and no redirect', async () => {
+    stubLocation();
+    const agent = actionable();
+    const el = await mount(agent);
+    fakeStateManager.setAgent(agent);
+    const internals = el as unknown as { handleAction(action: string): Promise<void> };
+    apiFetch
+      .mockImplementationOnce(() =>
+        Promise.resolve({
+          ok: false,
+          status: 502,
+          json: () => Promise.resolve({}),
+        } as unknown as Response)
+      )
+      .mockImplementationOnce(() => Promise.resolve(accepted(deletingView(Date.now() + 60_000))));
+
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    await internals.handleAction('delete');
+    await settle(el);
+
+    expect(apiFetch).toHaveBeenCalledWith(`/api/v1/agents/${AGENT_ID}?force=true`, {
+      method: 'DELETE',
+    });
+    expect((el as unknown as { deleted: boolean }).deleted).toBe(false);
+    expect(headerBadge(el)).toBe('Deleting…');
+    expect(headerActions(el)).not.toContain('delete');
+    vi.advanceTimersByTime(DELETE_REDIRECT_DELAY_MS * 2);
+    expect(navClicks).toEqual([]);
   });
 
   it('204 still shows the deleted state and redirects as before', async () => {

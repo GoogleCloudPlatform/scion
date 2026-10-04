@@ -1326,6 +1326,7 @@ export class ScionPageAgentDetail extends LitElement {
             ></scion-status-badge>
             <scion-deletion-badge
               .deletion=${this.deletionLease.view(agent)}
+              live
             ></scion-deletion-badge>
             <scion-message-mode-badge
               mode=${agent.messageMode || 'project'}

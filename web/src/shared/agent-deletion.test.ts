@@ -17,7 +17,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   deletionBadgeLabel,
-  earliestLeaseExpiry,
+  nextDeletionDeadline,
+  DELETION_DISPLAY_TTL_MS,
   effectiveDeletion,
   isDeletionActive,
   readAcceptedDeletion,
@@ -96,7 +97,7 @@ describe('deletionBadgeLabel', () => {
   });
 });
 
-describe('earliestLeaseExpiry', () => {
+describe('nextDeletionDeadline', () => {
   it('returns the earliest future lease among deleting agents', () => {
     const agents = [
       { deletion: deleting({ leaseExpiresAt: iso(T0 + 30_000) }) },
@@ -106,12 +107,12 @@ describe('earliestLeaseExpiry', () => {
       { deletion: null },
       {},
     ];
-    expect(earliestLeaseExpiry(agents, T0)).toBe(T0 + 10_000);
+    expect(nextDeletionDeadline(agents, T0)).toBe(T0 + 10_000);
   });
 
   it('returns null when nothing needs a timer', () => {
-    expect(earliestLeaseExpiry([{ deletion: null }], T0)).toBeNull();
-    expect(earliestLeaseExpiry([], T0)).toBeNull();
+    expect(nextDeletionDeadline([{ deletion: null }], T0)).toBeNull();
+    expect(nextDeletionDeadline([], T0)).toBeNull();
   });
 });
 
@@ -144,5 +145,67 @@ describe('readAcceptedDeletion', () => {
     expect(await readAcceptedDeletion(res({ deletion: 'x' }))).toBeNull();
     const bad = { json: () => Promise.reject(new Error('bad json')) } as unknown as Response;
     expect(await readAcceptedDeletion(bad)).toBeNull();
+  });
+});
+
+describe('failed-view expiry (expiresAt)', () => {
+  const failedView = (o: Partial<DeletionInfo> = {}): DeletionInfo => ({
+    ...deleting(),
+    state: 'failed',
+    code: 'runtime_error',
+    leaseExpiresAt: undefined,
+    expiresAt: iso(T0 + 15 * 60_000),
+    ...o,
+  });
+
+  it('a failed view disappears at expiresAt', () => {
+    const f = failedView();
+    expect(effectiveDeletion(f, T0 + 15 * 60_000 - 1)).toBe(f);
+    expect(effectiveDeletion(f, T0 + 15 * 60_000)).toBeNull();
+    expect(isDeletionActive({ deletion: f }, T0 + 15 * 60_000)).toBe(false);
+  });
+
+  it('in_doubt and other failed views without expiresAt never expire', () => {
+    const f = failedView({ code: 'in_doubt', expiresAt: undefined });
+    expect(effectiveDeletion(f, T0 + 1e12)).toBe(f);
+  });
+
+  it('the client-flipped abandoned view expires DELETION_DISPLAY_TTL_MS after the lease', () => {
+    const lease = T0 + 60_000;
+    const d = deleting({ leaseExpiresAt: iso(lease) });
+    expect(DELETION_DISPLAY_TTL_MS).toBe(15 * 60_000);
+    const flipped = effectiveDeletion(d, lease);
+    expect(flipped).toMatchObject({
+      state: 'failed',
+      code: 'abandoned',
+      expiresAt: iso(lease + DELETION_DISPLAY_TTL_MS),
+    });
+    expect(effectiveDeletion(d, lease + DELETION_DISPLAY_TTL_MS - 1)?.code).toBe('abandoned');
+    expect(effectiveDeletion(d, lease + DELETION_DISPLAY_TTL_MS)).toBeNull();
+  });
+
+  it('nextDeletionDeadline includes failed expiresAt and the flipped view expiry', () => {
+    // A failed view's expiry is the only deadline.
+    expect(nextDeletionDeadline([{ deletion: failedView() }], T0)).toBe(T0 + 15 * 60_000);
+    // An expired failure and an in_doubt failure need no timer.
+    expect(
+      nextDeletionDeadline(
+        [
+          { deletion: failedView({ expiresAt: iso(T0 - 1) }) },
+          { deletion: failedView({ code: 'in_doubt', expiresAt: undefined }) },
+        ],
+        T0
+      )
+    ).toBeNull();
+    // After the lease passes, the next deadline is the abandoned view's expiry.
+    const lease = T0 + 60_000;
+    const d = { deletion: deleting({ leaseExpiresAt: iso(lease) }) };
+    expect(nextDeletionDeadline([d], T0)).toBe(lease);
+    expect(nextDeletionDeadline([d], lease)).toBe(lease + DELETION_DISPLAY_TTL_MS);
+    expect(nextDeletionDeadline([d], lease + DELETION_DISPLAY_TTL_MS)).toBeNull();
+    // Earliest wins across kinds.
+    expect(
+      nextDeletionDeadline([{ deletion: failedView({ expiresAt: iso(T0 + 5_000) }) }, d], T0)
+    ).toBe(T0 + 5_000);
   });
 });

@@ -957,12 +957,16 @@ export class StateManager extends EventTarget {
       return;
     }
 
-    // A `created` for a tombstoned ID is stale (IDs are UUIDs, so a real
-    // reuse is not reachable): the hub can publish it concurrently with, or
-    // replay it after, the `deleted` that already removed the agent. Drop it
-    // like any other late delta, so it cannot re-add the agent
-    // (ptone/scion#2886). A new agent with the same *name* has a new ID and
-    // is unaffected.
+    // A `created` for a tombstoned ID is treated as stale: the hub can
+    // publish it concurrently with, or replay it after, the `deleted` that
+    // already removed the agent. Drop it like any other late delta, so it
+    // cannot re-add the agent (ptone/scion#2886). A new agent with the same
+    // *name* has a new ID and is unaffected.
+    //
+    // Known limitation (ptone/scion#2951): restoring a soft-deleted agent
+    // reuses its ID and publishes `created`, so a browser that already saw
+    // `deleted` keeps hiding the restored agent until the next scope change
+    // (setScope clears the tombstones) or a full reload.
     if (eventType === 'created' && this.state.deletedAgentIds.has(agentId)) {
       return;
     }

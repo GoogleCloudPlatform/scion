@@ -25,6 +25,12 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
+// Auto-confirm the force-delete prompt (the first confirm is skipped with
+// altKey); nothing else in this file opens a dialog.
+vi.mock('../shared/confirm-dialog.js', () => ({
+  showConfirm: vi.fn(() => Promise.resolve(true)),
+}));
+
 import './agents.js';
 import type { ScionPageAgents } from './agents.js';
 import { stateManager } from '../../client/state.js';
@@ -423,6 +429,61 @@ describe('scion-page-agents live updates (agents-changed -> mergeChanged)', () =
       await el.updateComplete;
       expect(await badgeTexts(el)).toEqual([]);
       expect(trashButtons(el)).toBe(1);
+    });
+
+    it('force DELETE 202 (502, confirm, force 202) keeps the row with Deleting…', async () => {
+      const rows = [actionable('a1'), actionable('a2')];
+      const deletes: string[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: string | URL | Request, init?: RequestInit) => {
+          if (init?.method === 'DELETE') {
+            const url = typeof input === 'string' ? input : input.toString();
+            deletes.push(url);
+            if (!url.includes('force=true')) {
+              return Promise.resolve(new Response('{}', { status: 502 }));
+            }
+            return Promise.resolve(
+              new Response(JSON.stringify({ agentId: 'a1', deletion: deletionView }), {
+                status: 202,
+                headers: { 'Content-Type': 'application/json' },
+              })
+            );
+          }
+          return Promise.resolve(jsonResponse({ agents: rows, _capabilities: { actions: [] } }));
+        })
+      );
+      const el = await mountPage();
+
+      await (el as unknown as Internals).handleAgentAction('a1', 'delete', altClick);
+      await flush();
+      await el.updateComplete;
+
+      expect(deletes).toEqual(['/api/v1/agents/a1', '/api/v1/agents/a1?force=true']);
+      expect(el.agents.map((a) => a.id).sort()).toEqual(['a1', 'a2']);
+      expect(await badgeTexts(el)).toEqual(['Deleting…']);
+      expect(trashButtons(el)).toBe(1);
+    });
+
+    it("table (list) view shows the badge in the row and hides that row's Delete", async () => {
+      localStorage.setItem('scion-view-agents', 'list');
+      stubHub([actionable('a1'), actionable('a2')], () => new Response(null));
+      const el = await mountPage();
+      expect(el.shadowRoot?.querySelectorAll('tbody tr').length).toBe(2);
+
+      handleUpdate('agent.a1.status', { deletion: deletionView });
+      await flush();
+      await el.updateComplete;
+
+      const badgeEls = [
+        ...(el.shadowRoot?.querySelectorAll('tbody tr scion-deletion-badge') ?? []),
+      ] as Array<HTMLElement & { updateComplete: Promise<boolean> }>;
+      await Promise.all(badgeEls.map((b) => b.updateComplete));
+      const rowBadges = badgeEls
+        .map((b) => b.shadowRoot?.querySelector('.badge')?.textContent?.trim())
+        .filter(Boolean);
+      expect(rowBadges).toEqual(['Deleting…']);
+      expect(el.shadowRoot?.querySelectorAll('tbody tr sl-icon[name="trash"]').length).toBe(1);
     });
 
     it('204 removes the row immediately, as before', async () => {
