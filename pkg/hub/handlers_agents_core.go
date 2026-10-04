@@ -4089,11 +4089,21 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error) {
 	}
 }
 
+// skillResolutionDispatchError returns the broker's typed required-skill
+// resolution failure (error code skill_resolution_failed) carried by err.
+func skillResolutionDispatchError(err error) (*brokerStatusError, bool) {
+	var se *brokerStatusError
+	if errors.As(err, &se) && se.brokerErrorCode() == skillResolutionErrorCode {
+		return se, true
+	}
+	return nil, false
+}
+
 // isSkillResolutionDispatchError reports whether err is the broker's typed
 // required-skill resolution failure (error code skill_resolution_failed).
 func isSkillResolutionDispatchError(err error) bool {
-	var se *brokerStatusError
-	return errors.As(err, &se) && se.brokerErrorCode() == skillResolutionErrorCode
+	_, ok := skillResolutionDispatchError(err)
+	return ok
 }
 
 // relaySkillResolutionError writes the broker's required-skill resolution
@@ -4105,8 +4115,8 @@ func isSkillResolutionDispatchError(err error) bool {
 // same as a skill that does not exist, so relaying the status unchanged
 // keeps the two indistinguishable.
 func relaySkillResolutionError(w http.ResponseWriter, err error) bool {
-	var se *brokerStatusError
-	if !errors.As(err, &se) || se.brokerErrorCode() != skillResolutionErrorCode {
+	se, ok := skillResolutionDispatchError(err)
+	if !ok {
 		return false
 	}
 	if se.RetryAfter != "" {
