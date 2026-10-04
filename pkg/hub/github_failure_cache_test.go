@@ -224,7 +224,7 @@ func TestResolveGitHubSkill_OtherFailuresAreNotRemembered(t *testing.T) {
 				require.Error(t, err)
 			}
 			assert.Equal(t, int64(2), gh.commitCalls.Load(), "each resolve must ask GitHub")
-			assert.Empty(t, srv.ghFailures.failures, "nothing may be remembered")
+			assert.Zero(t, srv.ghFailures.Len(), "nothing may be remembered")
 		})
 	}
 }
@@ -246,59 +246,15 @@ func TestFetchAndCacheGitHubSkill_SuccessClearsRememberedFailure(t *testing.T) {
 	srv.config.GitHubAppConfig.APIBaseURL = gh.URL
 	srv.config.GitHubAppConfig.RawBaseURL = gh.URL
 
-	srv.ghFailures.record(cacheKey, errors.New("remembered"))
-	require.Error(t, srv.ghFailures.recent(cacheKey))
+	srv.ghFailures.Record(cacheKey, errors.New("remembered"))
+	require.Error(t, srv.ghFailures.Recent(cacheKey))
 
 	ghRef, err := agent.ParseGitHubSkillURI(uri)
 	require.NoError(t, err)
 	entry, err := srv.fetchAndCacheGitHubSkill(context.Background(), cacheKey, uri, ghRef, "", "", true, newGHSHAMemo())
 	require.NoError(t, err)
 	require.NotNil(t, entry)
-	assert.NoError(t, srv.ghFailures.recent(cacheKey), "a success must clear the remembered failure")
-}
-
-func TestGHFailureCache_RecordSetsTTL(t *testing.T) {
-	var c ghFailureCache
-	before := time.Now()
-	c.record("k", errors.New("not found"))
-	after := time.Now()
-
-	got := c.failures["k"].expiresAt
-	assert.False(t, got.Before(before.Add(ghFailureCacheTTL)), "expiry %v is earlier than now+TTL", got)
-	assert.False(t, got.After(after.Add(ghFailureCacheTTL)), "expiry %v is later than now+TTL", got)
-}
-
-func TestGHFailureCache_ExpiredFailureIsNotServed(t *testing.T) {
-	var c ghFailureCache
-	c.record("k", errors.New("not found"))
-	c.failures["k"] = ghRememberedFailure{err: c.failures["k"].err, expiresAt: time.Now().Add(-time.Second)}
-
-	assert.NoError(t, c.recent("k"))
-	assert.NotContains(t, c.failures, "k", "an expired entry is dropped when looked up")
-}
-
-func TestGHFailureCache_RememberedFailuresAreCapped(t *testing.T) {
-	var c ghFailureCache
-	for i := 0; i < ghMaxRememberedFailures; i++ {
-		c.record(fmt.Sprintf("k%d", i), errors.New("not found"))
-	}
-	require.Len(t, c.failures, ghMaxRememberedFailures)
-
-	c.record("one-more", errors.New("not found"))
-	assert.Len(t, c.failures, ghMaxRememberedFailures)
-	assert.NoError(t, c.recent("one-more"), "a new key is not remembered at the cap")
-
-	// An existing key can still be refreshed at the cap.
-	c.record("k0", errors.New("again"))
-	assert.EqualError(t, c.recent("k0"), "again")
-
-	// Once entries expire, there is room again.
-	for k, f := range c.failures {
-		c.failures[k] = ghRememberedFailure{err: f.err, expiresAt: time.Now().Add(-time.Second)}
-	}
-	c.record("after-expiry", errors.New("not found"))
-	assert.Error(t, c.recent("after-expiry"))
-	assert.Len(t, c.failures, 1)
+	assert.NoError(t, srv.ghFailures.Recent(cacheKey), "a success must clear the remembered failure")
 }
 
 func TestIsGHNotFound(t *testing.T) {
@@ -406,7 +362,7 @@ func TestResolveGitHubSkill_StaleEntryWinsOverRememberedFailure(t *testing.T) {
 		ExpiresAt:   time.Now().Add(-time.Minute),
 		OriginalURI: uri,
 	}))
-	srv.ghFailures.record(cacheKey, errors.New("remembered not found"))
+	srv.ghFailures.Record(cacheKey, errors.New("remembered not found"))
 
 	resp, err := srv.resolveGitHubSkill(ctx, uri, project.ID, nil)
 	require.NoError(t, err, "the stale entry must be served, not the remembered failure")
@@ -484,7 +440,9 @@ func TestResolveGitHubSkill_RememberedErrorBodyIsBounded(t *testing.T) {
 	srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
 
 	page := strings.Repeat("<p>not found</p>", 64*1024) // about 1 MiB
+	var hits atomic.Int64
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(page))
 	}))
@@ -494,12 +452,15 @@ func TestResolveGitHubSkill_RememberedErrorBodyIsBounded(t *testing.T) {
 
 	_, err := srv.resolveGitHubSkill(context.Background(), uri, project.ID, nil)
 	require.Error(t, err)
-	require.Len(t, srv.ghFailures.failures, 1)
-	for _, f := range srv.ghFailures.failures {
-		assert.LessOrEqual(t, len(f.err.Error()), maxGHErrorBody+256,
-			"a remembered error must not carry the whole response body")
-		assert.Contains(t, f.err.Error(), "...")
-	}
+	require.Equal(t, 1, srv.ghFailures.Len())
+
+	// The second resolve is served from the remembered failure.
+	_, err = srv.resolveGitHubSkill(context.Background(), uri, project.ID, nil)
+	require.Error(t, err)
+	require.Equal(t, int64(1), hits.Load(), "the second resolve must not ask GitHub")
+	assert.LessOrEqual(t, len(err.Error()), maxGHErrorBody+256,
+		"a remembered error must not carry the whole response body")
+	assert.Contains(t, err.Error(), "...")
 }
 
 func TestGHErrorBody(t *testing.T) {

@@ -1264,8 +1264,9 @@ type Server struct {
 	ghLastRefreshFailure map[string]time.Time
 
 	// ghFailures remembers, per cache key, that GitHub recently reported a
-	// gh:// ref as not found (see ghFailureCache and resolveGitHubSkill).
-	ghFailures ghFailureCache
+	// gh:// ref as not found (see rememberGHNotFound and resolveGitHubSkill).
+	// It is in memory only, per hub process, and never written to the store.
+	ghFailures agent.FailureMemo
 
 	// ghCooldown holds gh:// resolution requests back per credential
 	// identity after a GitHub rate-limit response (see agent.GitHubCooldown).

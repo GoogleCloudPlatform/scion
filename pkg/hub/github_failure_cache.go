@@ -17,26 +17,7 @@ package hub
 import (
 	"errors"
 	"net/http"
-	"sync"
-	"time"
 	"unicode/utf8"
-)
-
-const (
-	// ghFailureCacheTTL is how long resolveGitHubSkill remembers that GitHub
-	// reported a gh:// ref as not found for a cache key (ref plus the token
-	// scope, see computeCacheKey). Within this window a resolution of the
-	// same key returns the remembered error without calling GitHub. It is
-	// kept short because the cause can be fixed at any time (the path is
-	// pushed, the App is granted access to the repo). The same value as the
-	// broker-side resolution cache uses.
-	ghFailureCacheTTL = time.Minute
-
-	// ghMaxRememberedFailures bounds how many failures are remembered at
-	// once. When the limit is reached after dropping expired entries, a new
-	// failure is not remembered; not remembering is always safe, it only
-	// means the next resolution asks GitHub again.
-	ghMaxRememberedFailures = 1024
 )
 
 // ghStatusError is a non-OK GitHub API response from ghResolveCommitSHA or
@@ -58,11 +39,13 @@ func isGHNotFound(err error) bool {
 	return errors.As(err, &se) && se.status == http.StatusNotFound
 }
 
-// rememberGHNotFound remembers err for cacheKey (see ghFailureCache) when
-// it is GitHub reporting the ref or skill path as not found.
+// rememberGHNotFound remembers err for cacheKey for agent.FailureMemoTTL
+// (see Server.ghFailures) when it is GitHub reporting the ref or skill path
+// as not found. The key is the resolution cache key (ref plus token scope,
+// see computeCacheKey).
 func (s *Server) rememberGHNotFound(cacheKey string, err error) {
 	if isGHNotFound(err) {
-		s.ghFailures.record(cacheKey, err)
+		s.ghFailures.Record(cacheKey, err)
 	}
 }
 
@@ -87,60 +70,4 @@ func ghErrorBody(body []byte) string {
 		n--
 	}
 	return string(body[:n]) + "..."
-}
-
-// ghFailureCache remembers recent not-found resolutions by cache key, in
-// memory only (per hub process; never written to the store). The zero
-// value is ready to use and safe for concurrent use.
-type ghFailureCache struct {
-	mu       sync.Mutex
-	failures map[string]ghRememberedFailure
-}
-
-type ghRememberedFailure struct {
-	err       error
-	expiresAt time.Time
-}
-
-// record remembers err for key until ghFailureCacheTTL from now, after
-// dropping expired entries. Once ghMaxRememberedFailures unexpired failures
-// are held, a failure for a new key is not remembered.
-func (c *ghFailureCache) record(key string, err error) {
-	now := time.Now()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.failures == nil {
-		c.failures = make(map[string]ghRememberedFailure)
-	}
-	for k, f := range c.failures {
-		if !now.Before(f.expiresAt) {
-			delete(c.failures, k)
-		}
-	}
-	if _, ok := c.failures[key]; !ok && len(c.failures) >= ghMaxRememberedFailures {
-		return
-	}
-	c.failures[key] = ghRememberedFailure{err: err, expiresAt: now.Add(ghFailureCacheTTL)}
-}
-
-// recent returns the failure remembered for key, or nil if there is none or
-// it has expired.
-func (c *ghFailureCache) recent(key string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	f, ok := c.failures[key]
-	if !ok {
-		return nil
-	}
-	if !time.Now().Before(f.expiresAt) {
-		delete(c.failures, key)
-		return nil
-	}
-	return f.err
-}
-
-func (c *ghFailureCache) clear(key string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.failures, key)
 }

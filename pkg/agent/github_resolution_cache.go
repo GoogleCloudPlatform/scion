@@ -70,22 +70,15 @@ const (
 	githubFlightTimeout = 5 * time.Minute
 
 	// failureCacheTTL is how long a non-retryable resolution failure (see
-	// cacheableFailure) is remembered for its cacheKey. Within this window a
-	// resolution of the same ref with the same credential returns the
-	// remembered error without calling GitHub. It is kept short because the
-	// cause can be fixed at any time (the path is added, access is granted).
+	// cacheableFailure) is remembered for its cacheKey (see FailureMemo).
+	// Within this window a resolution of the same ref with the same
+	// credential returns the remembered error without calling GitHub.
 	//
 	// The key carries a fingerprint of the credential value, so a credential
 	// minted fresh for each create (a GitHub App installation token) gets a
 	// new key every time: a not_found remembered for one create is not used
 	// by the next one, only by other resolutions within the same create.
-	failureCacheTTL = time.Minute
-
-	// maxRememberedFailures bounds how many failures are remembered at once
-	// (see recordFailure). When the limit is reached after dropping expired
-	// entries, a new failure is not remembered; not remembering is always
-	// safe, it only means the next resolution asks GitHub again.
-	maxRememberedFailures = 1024
+	failureCacheTTL = FailureMemoTTL
 
 	// refreshFailureBackoff bounds how often a background stale-refresh is
 	// retried for the same flight key after it fails. Without this, a
@@ -184,11 +177,10 @@ type GitHubResolutionCache struct {
 	refreshMu          sync.Mutex
 	lastRefreshFailure map[string]time.Time
 
-	// failureMu guards failures, which holds recent non-retryable
-	// resolution failures by cacheKey (see failureCacheTTL). They are kept
-	// in memory only and are never written to the cache file.
-	failureMu sync.Mutex
-	failures  map[string]cachedFailure
+	// failures holds recent non-retryable resolution failures by cacheKey
+	// (see failureCacheTTL). They are kept in memory only and are never
+	// written to the cache file.
+	failures FailureMemo
 
 	// causeMu guards flightCauses, which holds, per flight key, the record
 	// of the flight currently running for it (see flightCause).
@@ -238,12 +230,6 @@ type GitHubResolutionCache struct {
 	// onFlush, when non-nil, is called at the end of every Flush that wrote
 	// the file. Tests use it to wait for the delayed write without sleeping.
 	onFlush func()
-}
-
-// cachedFailure is a remembered non-retryable resolution failure.
-type cachedFailure struct {
-	err       error
-	expiresAt time.Time
 }
 
 type resolutionCacheEntry struct {
@@ -420,48 +406,20 @@ func newRememberedFailure(err error) error {
 	return &rememberedFailure{err: err}
 }
 
-// recordFailure remembers err for cacheKey until failureCacheTTL from now,
-// and drops any expired failures so the map stays small. Once
-// maxRememberedFailures unexpired failures are held, a failure for a new
-// cacheKey is not remembered.
+// recordFailure remembers err for cacheKey for failureCacheTTL (see
+// FailureMemo.Record).
 func (c *GitHubResolutionCache) recordFailure(cacheKey string, err error) {
-	now := time.Now()
-	c.failureMu.Lock()
-	defer c.failureMu.Unlock()
-	if c.failures == nil {
-		c.failures = make(map[string]cachedFailure)
-	}
-	for k, f := range c.failures {
-		if !now.Before(f.expiresAt) {
-			delete(c.failures, k)
-		}
-	}
-	if _, ok := c.failures[cacheKey]; !ok && len(c.failures) >= maxRememberedFailures {
-		return
-	}
-	c.failures[cacheKey] = cachedFailure{err: err, expiresAt: now.Add(failureCacheTTL)}
+	c.failures.Record(cacheKey, err)
 }
 
 // recentFailure returns the failure remembered for cacheKey, or nil if there
 // is none or it has expired.
 func (c *GitHubResolutionCache) recentFailure(cacheKey string) error {
-	c.failureMu.Lock()
-	defer c.failureMu.Unlock()
-	f, ok := c.failures[cacheKey]
-	if !ok {
-		return nil
-	}
-	if !time.Now().Before(f.expiresAt) {
-		delete(c.failures, cacheKey)
-		return nil
-	}
-	return f.err
+	return c.failures.Recent(cacheKey)
 }
 
 func (c *GitHubResolutionCache) clearFailure(cacheKey string) {
-	c.failureMu.Lock()
-	defer c.failureMu.Unlock()
-	delete(c.failures, cacheKey)
+	c.failures.Clear(cacheKey)
 }
 
 // scheduleSave requests a rewrite of the cache file after saveDelay. If a

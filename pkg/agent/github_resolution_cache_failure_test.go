@@ -110,11 +110,7 @@ func TestGitHubResolutionCache_RememberedFailureExpires(t *testing.T) {
 	_ = resolveCounting(t, cache, key, &calls, notFound)
 
 	// Move the remembered failure's expiry into the past.
-	cache.failureMu.Lock()
-	f := cache.failures[key]
-	f.expiresAt = time.Now().Add(-time.Second)
-	cache.failures[key] = f
-	cache.failureMu.Unlock()
+	cache.failures.expire(key)
 
 	if err := resolveCounting(t, cache, key, &calls, nil); err != nil {
 		t.Fatalf("resolve after expiry: %v", err)
@@ -150,16 +146,13 @@ func TestGitHubResolutionCache_RecordFailureDropsExpired(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cache.failures = map[string]cachedFailure{
-		"old": {err: errors.New("old"), expiresAt: time.Now().Add(-time.Second)},
-	}
+	cache.recordFailure("old", errors.New("old"))
+	cache.failures.expire("old")
 	cache.recordFailure("new", &githubResolveError{code: SkillErrCodeNotFound, msg: "nf"})
-	cache.failureMu.Lock()
-	defer cache.failureMu.Unlock()
-	if _, ok := cache.failures["old"]; ok {
-		t.Error("expired failure not dropped")
+	if n := cache.failures.Len(); n != 1 {
+		t.Errorf("held %d failures, want 1: the expired failure must be dropped", n)
 	}
-	if _, ok := cache.failures["new"]; !ok {
+	if cache.recentFailure("new") == nil {
 		t.Error("new failure not recorded")
 	}
 }
@@ -207,9 +200,9 @@ func TestGitHubResolutionCache_RecordFailureSetsTTL(t *testing.T) {
 	cache.recordFailure("k", &githubResolveError{code: SkillErrCodeNotFound, msg: "nf"})
 	after := time.Now()
 
-	cache.failureMu.Lock()
-	f, ok := cache.failures["k"]
-	cache.failureMu.Unlock()
+	cache.failures.mu.Lock()
+	f, ok := cache.failures.entries["k"]
+	cache.failures.mu.Unlock()
 	if !ok {
 		t.Fatal("failure not recorded")
 	}
@@ -220,7 +213,7 @@ func TestGitHubResolutionCache_RecordFailureSetsTTL(t *testing.T) {
 }
 
 // TestGitHubResolutionCache_RememberedFailuresAreCapped checks that at
-// most maxRememberedFailures unexpired failures are held: a failure for a
+// most FailureMemoMaxEntries unexpired failures are held: a failure for a
 // new key is not remembered once the limit is reached, a key already held
 // is still updated, and expired entries make room again.
 func TestGitHubResolutionCache_RememberedFailuresAreCapped(t *testing.T) {
@@ -229,7 +222,7 @@ func TestGitHubResolutionCache_RememberedFailuresAreCapped(t *testing.T) {
 		t.Fatal(err)
 	}
 	nf := &githubResolveError{code: SkillErrCodeNotFound, msg: "nf"}
-	for i := 0; i < maxRememberedFailures; i++ {
+	for i := 0; i < FailureMemoMaxEntries; i++ {
 		cache.recordFailure(fmt.Sprintf("k%d", i), nf)
 	}
 	cache.recordFailure("extra", nf)
@@ -240,15 +233,11 @@ func TestGitHubResolutionCache_RememberedFailuresAreCapped(t *testing.T) {
 	if cache.recentFailure("k0") == nil {
 		t.Error("failure for a key already held was dropped at the limit")
 	}
-	cache.failureMu.Lock()
-	if n := len(cache.failures); n != maxRememberedFailures {
-		t.Errorf("remembered %d failures, want %d", n, maxRememberedFailures)
+	if n := cache.failures.Len(); n != FailureMemoMaxEntries {
+		t.Errorf("remembered %d failures, want %d", n, FailureMemoMaxEntries)
 	}
 	// Expire one entry; the next record drops it and has room.
-	f := cache.failures["k1"]
-	f.expiresAt = time.Now().Add(-time.Second)
-	cache.failures["k1"] = f
-	cache.failureMu.Unlock()
+	cache.failures.expire("k1")
 
 	cache.recordFailure("extra", nf)
 	if cache.recentFailure("extra") == nil {

@@ -2097,9 +2097,9 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 	}
 
 	// A ref GitHub reported as not found for this cache key within the last
-	// ghFailureCacheTTL fails again now, without asking GitHub. A fresh or
+	// agent.FailureMemoTTL fails again now, without asking GitHub. A fresh or
 	// stale entry above still wins.
-	if ferr := s.ghFailures.recent(cacheKey); ferr != nil {
+	if ferr := s.ghFailures.Recent(cacheKey); ferr != nil {
 		slog.DebugContext(ctx, "github_resolution_cache: returning remembered not found", "uri", rawURI)
 		return nil, ferr
 	}
@@ -2163,7 +2163,7 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 				return entry, nil
 			}
 		}
-		if ferr := s.ghFailures.recent(cacheKey); ferr != nil {
+		if ferr := s.ghFailures.Recent(cacheKey); ferr != nil {
 			slog.DebugContext(ctx, "github_resolution_cache: returning remembered not found", "uri", rawURI)
 			return nil, ferr
 		}
@@ -2335,7 +2335,7 @@ func (s *Server) fetchAndCacheGitHubSkill(
 
 	// A successful resolution replaces any remembered not found for this
 	// key, whether or not the store write below succeeds.
-	s.ghFailures.clear(cacheKey)
+	s.ghFailures.Clear(cacheKey)
 	if s.ghResolutionStore != nil {
 		if err := s.ghResolutionStore.Put(ctx, cacheKey, entry); err != nil {
 			slog.WarnContext(ctx, "github_resolution_cache: failed to store entry",
