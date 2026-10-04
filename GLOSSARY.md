@@ -81,7 +81,7 @@ _Avoid_: agent tunnel, port proxy, hub reverse tunnel, web access
 _See also_: sciontool
 
 **Runtime**:
-The container technology that executes an agent's container: Docker, Podman, Apple Container, or Kubernetes.
+The container technology that executes an agent's container: Docker, Podman, Apple Container, Kubernetes, Cloud Run Instances, or Substrate (Agent Substrate actors on GKE).
 _Avoid_: backend, engine, executor, environment
 _See also_: Runtime Broker, Profile
 

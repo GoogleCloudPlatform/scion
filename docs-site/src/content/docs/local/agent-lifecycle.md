@@ -211,6 +211,8 @@ Always start by running `scion look <agent-name>` to inspect the active screen s
 
 `scion delete <agent-name> --non-interactive` immediately reclaims container resources. Since an agent's true deliverable is its **artifact** (pushed commits, opened PRs, files written to a shared volume), **deleting a completed agent is the default, recommended clean-up path.**
 
+In Hub mode, teardown on the Runtime Broker can outlast the request. If it does, `scion delete` waits up to three minutes for the Hub to confirm the delete, and only then removes the local worktree. If the delete fails, the worktree is kept. If the broker teardown is still unresolved, the agent also can't be started, restarted or woken (`409 delete_in_progress`) until you run `scion delete` again. See [`scion delete`](/scion/reference/cli/#scion-delete-or-rm) and [`DELETE /agents/:id`](/scion/reference/api/).
+
 However, to prevent premature deletion of agents with active or pending tasks, strict teardown guidelines must be followed.
 
 ### 1. Who May Authorize Deletion

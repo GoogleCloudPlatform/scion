@@ -18,17 +18,26 @@ credential.
 ## Overview
 
 A user access token is a scoped, revocable bearer token linked to your user account, used for
-non-interactive authentication. Unlike a full OAuth session, a UAT is **scoped to a single
-project** and carries a specific set of action permissions, so a token minted for CI can do only
-what CI needs.
+non-interactive authentication. Unlike a full OAuth session, a UAT is confined to a **boundary**
+(normally a single project) and carries a specific set of action permissions, so a token minted
+for CI can do only what CI needs.
 
 **Note on legacy keys:** the legacy `sk_live_*` API keys have been completely removed. All users
 must migrate to `scion_pat_*` tokens.
 
 ## Scoping and permissions
 
-Every token is scoped to a single project and to an explicit list of **scopes** (action
-permissions). Available scopes:
+Every token is confined to a **boundary** and to an explicit list of **scopes** (action
+permissions). The boundary is one of:
+
+- **Project** (the default, and the only boundary the CLI and Web UI mint) — the token can reach
+  only resources in that one project.
+- **Hub** — the token can reach hub-level resources as well as resources in any project. Hub-bound
+  tokens are minted through the API only (see [Creating a token](#creating-a-token)). Some
+  selectors are hub-only: `broker:create` can be minted only on a hub-bound token and is rejected
+  for a project-bound one.
+
+Available scopes:
 
 | Scope | Grants |
 |-------|--------|
@@ -73,6 +82,16 @@ succeeds for any agent in a project where your role grants `agent.port_access`, 
 built-in `project-owner` and `project-admin` roles do. Losing project access (for example,
 being removed from the project) makes every request against that project fail immediately, even
 though the token itself is still otherwise valid.
+
+Concretely, every request made with a token passes all of these checks, in order, and any error
+along the way denies the request:
+
+1. The token's boundary is valid.
+2. The request's target resolves to a scope (a project or the hub) that the boundary allows.
+3. The requested permission is inside the token's stored permission ceiling.
+4. For a project target, you still have active access to that project.
+5. Your live authority on the target (role bindings, groups, relationship grants, and access
+   boundaries) allows the action.
 
 ### Checking what you can select
 
@@ -126,6 +145,24 @@ The purpose and labels are descriptive only: they grant no permissions and canno
 after the token is created. The Hub records them, along with the token's identity, in request
 logs, authorization decisions and audit records, so you can tell which automation made a call.
 
+To mint a hub-bound token, call the API directly with an explicit `boundary` instead of a
+`projectId`. A request must name a boundary — either `projectId` (the project shorthand) or
+`boundary` — and a request that names neither is rejected with `400` (`details.reason`
+`boundary_required`) rather than being treated as a hub token. A hub boundary with a project ID,
+or a `boundary` that disagrees with `projectId`, is rejected with `boundary_invalid`. Token
+management requires a signed-in session credential; a UAT cannot mint another token:
+
+```bash
+curl -X POST -H "Authorization: Bearer $SESSION_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"name":"hub-automation","boundary":{"kind":"hub"},"scopes":["template:manage"]}' \
+     https://scion.example.com/api/v1/auth/tokens
+```
+
+Token responses include a `boundary` object (`{"kind":"project","projectId":"…"}` or
+`{"kind":"hub"}`); `projectId` is omitted for hub tokens, so read `boundary.kind` to tell them
+apart.
+
 The command prints the token value **once**. Store it securely — it cannot be retrieved later.
 Each requested scope is checked against your live authority in the project before the token is
 written. If a requested scope is denied, the Hub returns `403` with error code
@@ -153,8 +190,10 @@ owner or administrator shortcuts, require an unscoped sign-in (CLI or Web UI log
 - **Scheduled work**: creating, updating, re-targeting or resuming scheduled messages and
   scheduled `dispatch_agent` events or schedules. See
   [Scheduling](/scion/hosted/user/scheduling/#security--authorization).
-- **Broker registration**: a UAT does not satisfy the owner or super-admin shortcuts when
-  registering a Runtime Broker. See
+- **Broker registration**: broker creation (`POST /api/v1/brokers` and the embedded-broker
+  path of project registration) does not admit any UAT, whatever its boundary or scopes — even a
+  hub-bound token carrying `broker:create` is denied with `403`. A UAT also does not satisfy the
+  owner or super-admin shortcuts for re-registering a Runtime Broker. See
   [Runtime Broker](/scion/hosted/ha/runtime-broker/#broker-registration-permission).
 
 ## Trust level separation

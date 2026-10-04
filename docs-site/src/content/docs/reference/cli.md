@@ -17,6 +17,10 @@ These flags are available on all commands:
 - `-y, --yes`: Skip confirmation prompts.
 - `--non-interactive`: Full non-interactive mode (implies `--yes`, errors on ambiguous prompts).
 - `--debug`: Enable verbose debug output.
+- `--tz <IANA zone>`: Show times in this time zone, for example `America/New_York`. Defaults to the local zone (which honors `TZ`). `Local` and invalid names are rejected.
+- `--utc`: Show times in UTC. Takes precedence over `--tz`.
+
+Human-readable times use a 24-hour clock and always include a zone. `--tz` and `--utc` only change human-readable output: JSON output (`--format json`) keeps the API's UTC values.
 
 The legacy hidden `--grove` flag has been removed from every command; passing it fails with
 `unknown flag: --grove`. Use `--project`.
@@ -68,7 +72,11 @@ starting a **stopped** or **error** agent runs a fresh session. See
 Stops a running agent. This is a graceful shutdown (`SIGTERM`); the agent's
 phase becomes `stopped` and the next `start` runs a fresh session.
 
-**Usage:** `scion stop <agent-name>`
+**Usage:** `scion stop <agent-name> [flags]`
+
+- **Flags:**
+    - `--rm`: Remove the agent after stopping. In Hub mode this waits for the Hub to confirm the delete before removing the local worktree, the same way [`scion delete`](#scion-delete-or-rm) does, and prints that removal is in progress if the Hub answers `202`.
+    - `-a, --all`: Stop all running agents in the current project.
 
 ### `scion suspend`
 
@@ -323,6 +331,11 @@ Deletes an agent, removing its container, home directory, and worktree.
 - **Flags:**
     - `-b, --preserve-branch`: Preserve the git branch associated with the worktree (default: deleted).
     - `--stopped`: Delete all agents with stopped containers.
+
+In Hub mode the Hub may answer `202` when teardown is still running (see [`DELETE /agents/:id`](/scion/reference/api/)). The CLI then polls the agent every 2 seconds for up to 180 seconds. It removes the local worktree only after the Hub confirms the delete:
+- **Delete failed:** the worktree is kept and the command exits non-zero.
+- **Poll timed out or the agent can't be read (for example a `403`):** the worktree and the sync state are kept. The command prints that removal is pending and exits 0.
+- With `--format json`, a pending delete reports `"status": "accepted"` and `"worktreeKept": true` (`scion stop --rm` reports `"removalPending": true`).
 
 ### `scion sync`
 

@@ -104,6 +104,10 @@ scion hub project create https://github.com/acme/backend.git --slug my-backend
 Project IDs are always randomly generated UUIDs, so a git remote is associated metadata rather than identity: creating a project from the same git URL twice yields two distinct projects, each with its own ID. Stale project links are still automatically detected and synchronized during hub-link sync operations.
 :::
 
+:::tip[Web Dashboard alternative]
+In the dashboard's New Project dialog, pick **Git Repository** as the workspace type, or set **Start from** to a project template and enter your repository as the **Git Remote URL** override. The new project keeps the template's settings and uses your repository. See [Web Dashboard: Projects](/scion/workstation/dashboard/#projects).
+:::
+
 ---
 
 ## Step 3: Configure Project Settings, Templates & Limits

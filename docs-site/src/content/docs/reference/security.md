@@ -86,7 +86,7 @@ Scion implements a robust, hierarchical RBAC (Role-Based Access Control) and pol
 - **Resource Scopes**: Policies are attached to scopes (Hub, Project, or specific Resource) and follow a containment hierarchy.
 - **Override Model**: Lower-level policies (e.g., at the Agent level) override higher-level ones (e.g., at the Project level), allowing for granular delegation of authority.
 - **Actions**: Standardized CRUD actions (`create`, `read`, `update`, `delete`, `list`) plus resource-specific actions (`start`, `stop`, `attach`, `message`).
-- **Tiered Agent Authorization**: Agents are assigned tiered roles (`none`, `readonly`, `baseline`, `full`) that restrict their JWT scopes through project and parent-agent creation ceilings plus live delegation checks.
+- **Tiered Agent Authorization**: Agents are assigned tiered roles (`none`, `readonly`, `baseline`, `full`) that restrict their JWT scopes through project and parent-agent creation ceilings plus live delegation checks. Each delegation edge also freezes the creating credential's permission ceiling and authority provenance at creation; the delegation walk applies every hop's frozen ceiling, and edges without recorded provenance are denied for sensitive-material permissions (see [Permissions](/scion/hosted/ha/permissions/#delegation-and-revocation)).
 
 ### 3.3 GCP Service Account Assignment Gates
 
@@ -195,6 +195,8 @@ For headless environments (CI/CD, automation), Scion supports **user access toke
 - Only the SHA-256 hash of the token is stored in the database; the original value is never persisted.
 - Tokens can be scoped to specific permissions and projects, and revoked instantly via the dashboard or CLI.
 - Each token row records an explicit boundary (`boundary_kind`, default `project`). A project-boundary token must carry a `project_id`, and a database CHECK constraint enforces the pairing. At startup, the Hub logs the IDs (never the token or project) of any rows that break this rule, and such tokens are rejected when used, while valid tokens keep working. On SQLite, a hand-edited row whose `project_id` is not a UUID fails the schema migration, so correct or delete it before upgrading.
+- Tokens can be minted with an explicit hub boundary (`"boundary": {"kind": "hub"}` on `POST /api/v1/auth/tokens`), which reaches hub-level resources and every project; a request naming no boundary is rejected rather than read as hub-bound. Hub-only selectors such as `broker:create` are mintable only on hub-bound tokens, and broker creation itself still refuses every UAT.
+- Every bearer request passes one gate: the boundary is valid, the target's scope is inside the boundary, the permission is inside the stored ceiling, the holder still has active access to a project target, and the holder's live authority allows the action. Any evaluation error denies.
 - At mint time, each requested scope is checked against the caller's live authority before the token is written; an ineligible scope is refused with `403 scope_violation`.
 - A token's selected scopes are a ceiling, not a grant: minting a token with a scope records it as
   a restriction on what the token may do, and grants no access by itself. Every request the token

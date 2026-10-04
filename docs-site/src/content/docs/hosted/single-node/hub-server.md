@@ -189,11 +189,18 @@ The Scion Hub provides a built-in maintenance administration panel in the Web Da
 
 Administrators can trigger critical infrastructure operations directly from the dashboard:
 
-- **Check for Updates**: Checks for available updates and allows administrators to execute an "Update Now" action to perform a direct server rebuild.
+- **Check for Updates**: Checks for available updates and allows administrators to execute an "Update Now" action. The update banner on the maintenance and server configuration pages runs the operation that matches the deployment tier: **Update Binary (`update-binary`)** on binary-tier deployments (single-node VMs installed from releases), which downloads and verifies the release binary, swaps it in, and restarts the Hub; and `rebuild-server` on source-tier deployments. See [Maintenance (`server.maintenance`)](/scion/reference/server-config/#maintenance-servermaintenance).
 - **Rebuild Server (`rebuild-server`)**: Initiates a fire-and-forget server rebuild and restart sequence. It uses staging paths and sudoers implementation to ensure reliable updates even while the server is running.
 - **Rebuild Web (`rebuild-web`)**: Recompiles the web frontend assets.
 - **Pull Images (`pull-images`)**: Triggers the Docker/Podman executor to pull the latest agent container images.
 - **Restart Hub**: Initiates a fire-and-forget server restart (`POST /api/v1/admin/maintenance/restart`) via systemd, restricted to administrators. A modal confirmation dialog prevents accidental triggers of restarts.
+
+### Migrations
+
+The panel also lists one-time data migrations. Timezone-related ones:
+
+- **UTC Timestamp Normalize (`utc-timestamp-normalize`)**: Rewrites stored timestamps to UTC so ordering and paging are exact. On SQLite it covers every time column and the times embedded in JSON fields; on Postgres, only the JSON-embedded times. On SQLite, a background check at Hub start logs an error naming `utc-timestamp-normalize` and the affected tables when the operation is needed. Tables that can't be read at all, because of rows written in a numeric-abbreviation zone such as `Asia/Kathmandu`, are repaired automatically at start, after a one-time snapshot next to the database file (`<db>.pre-utc-timestamp-normalize-<time>.bak`). That snapshot needs about the database's size in free disk space and contains secrets, so store it like the database and delete it once the repair is verified. Back up the database before running the operation. It is safe to re-run, and a dry run (`{"params":{"dryRun":true}}`) reports without writing.
+- **Applied Config TZ Cleanup (`applied-config-tz-cleanup`)**: Optional. Converts the `TZ` that older Hubs saved in each agent's applied config into an explicit timezone pin (source `legacy`) in one pass. The Hub already does this per agent the next time its timezone is read, so this only matters relative to `applied-config-env-cleanup`: run it first to keep every saved `TZ` as a pin. Safe to re-run.
 
 ### Operation Execution & History
 
