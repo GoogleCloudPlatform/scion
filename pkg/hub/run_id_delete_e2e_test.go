@@ -193,7 +193,7 @@ func TestRunID_E2E_StaleDeleteSparesRecreatedAgent(t *testing.T) {
 
 	// Run A: create, then delete.
 	agentA := newAgent("agent-e2e-a")
-	if err := d.DispatchAgentCreate(ctx, agentA); err != nil {
+	if _, err := d.DispatchAgentCreate(ctx, agentA); err != nil {
 		t.Fatalf("create A: %v", err)
 	}
 	runA := agentA.RunID
@@ -211,7 +211,7 @@ func TestRunID_E2E_StaleDeleteSparesRecreatedAgent(t *testing.T) {
 
 	// Run B: recreate the same name.
 	agentB := newAgent("agent-e2e-b")
-	if err := d.DispatchAgentCreate(ctx, agentB); err != nil {
+	if _, err := d.DispatchAgentCreate(ctx, agentB); err != nil {
 		t.Fatalf("create B: %v", err)
 	}
 	runB := agentB.RunID

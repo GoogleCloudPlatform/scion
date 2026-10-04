@@ -79,7 +79,7 @@ const (
 	startEntryReincarnate    startEntry = "reincarnate"
 	startEntryRestore        startEntry = "restore"
 	startEntryCreateExisting startEntry = "create_existing" // POST /agents on an existing agent (resume/recreate)
-	startEntryWake           startEntry = "wake"            // DM wake of a suspended agent
+	startEntryWake           startEntry = "wake"            // DM wake (any phase where a launch refusal applies, else suspended)
 )
 
 // startRefusal is the start gate's answer when it has something to say.
@@ -96,6 +96,13 @@ type startRefusal struct {
 	Message    string
 	Details    map[string]interface{}
 	Warnings   []string
+	// InFlight marks the step 3 refusal (409 agent_launching): the agent's
+	// create launch is in flight. Entries that answer 200 with the current
+	// agent instead check it before writing the refusal.
+	InFlight bool
+	// launch marks a step 2 or 3 refusal. DM wake reports those in its
+	// runtime-error shape.
+	launch bool
 }
 
 // refuses reports whether r refuses the start.
@@ -108,8 +115,17 @@ func (r *startRefusal) write(w http.ResponseWriter) {
 	writeError(w, r.HTTPStatus, r.Code, r.Message, r.Details)
 }
 
-// dmError converts a refusing r for the DM wake path.
+// dmError converts a refusing r for the DM wake path. Launch refusals
+// (steps 2-3) keep wake's runtime-error shape; the delete refusal keeps its
+// code.
 func (r *startRefusal) dmError() *AgentDMError {
+	if r.launch {
+		return &AgentDMError{
+			Code:       ErrCodeRuntimeError,
+			Message:    r.Message,
+			HTTPStatus: http.StatusBadGateway,
+		}
+	}
 	return &AgentDMError{
 		Code:       r.Code,
 		Message:    r.Message,
@@ -128,11 +144,15 @@ func (r *startRefusal) dmError() *AgentDMError {
 //     1b. soft-deleted, on start, restart and wake → 409 "agent is
 //     deleted; restore it first";
 //  2. IsIncompleteCreate → 409 agent_create_incomplete (T1 P1b-3);
-//  3. IsInFlight → the per-entry T1 answer (200 + Warnings, or 409
-//     agent_launching) (T1 P1b-3).
+//  3. IsInFlight, before the launch deadline → 409 agent_launching with
+//     InFlight set (T1 P1b-3). Start, restart and create-existing answer
+//     it with 200 and the current agent (plus Warnings); reincarnate writes
+//     the 409; DM wake skips the wake.
 //
 // Delete comes first because the delete claim writes stopping, which also
 // makes IsIncompleteCreate true, and "deleting" is the accurate message.
+// Restore runs the same steps, but steps 2-3 never match there: both
+// predicates are false on a soft-deleted row.
 func (s *Server) startGate(ctx context.Context, a *store.Agent, entry startEntry) *startRefusal {
 	// Step 1: delete in progress.
 	blocked, err := s.deleteBlocksStart(ctx, a)
@@ -160,8 +180,8 @@ func (s *Server) startGate(ctx context.Context, a *store.Agent, entry startEntry
 		return agentDeletedRefusal(a.ID)
 	}
 
-	// Steps 2-3 (T1 P1b-3) slot in here.
-	return nil
+	// Steps 2-3: incomplete create, then in flight.
+	return launchStartRefusal(a, time.Now())
 }
 
 // agentDeletedRefusal is the 409 answer to starting or waking a

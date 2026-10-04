@@ -121,7 +121,7 @@ func TestRunID_CreateStartRestartMintPersistAndSend(t *testing.T) {
 		seen[sent] = op
 	}
 
-	if err := f.dispatcher.DispatchAgentCreate(ctx, f.agent); err != nil {
+	if _, err := f.dispatcher.DispatchAgentCreate(ctx, f.agent); err != nil {
 		t.Fatalf("DispatchAgentCreate: %v", err)
 	}
 	check("create", f.client.lastCreateReq.RunID)
@@ -156,7 +156,7 @@ func TestRunID_GatherAndFinalizeMint(t *testing.T) {
 		t.Fatalf("stored run_id = %q, want %q", got, first)
 	}
 
-	if err := f.dispatcher.DispatchFinalizeEnv(ctx, f.agent, map[string]string{"K": "v"}); err != nil {
+	if _, err := f.dispatcher.DispatchFinalizeEnv(ctx, f.agent, map[string]string{"K": "v"}); err != nil {
 		t.Fatalf("DispatchFinalizeEnv: %v", err)
 	}
 	second := f.client.lastCreateReq.RunID
@@ -520,7 +520,7 @@ func TestRunID_PersistFailureFailsDispatchClosed(t *testing.T) {
 	if f.client.startCalled {
 		t.Error("StartAgent must not be called when the run ID was not recorded")
 	}
-	if err := d.DispatchAgentCreate(ctx, f.agent); err == nil {
+	if _, err := d.DispatchAgentCreate(ctx, f.agent); err == nil {
 		t.Fatal("expected DispatchAgentCreate to fail")
 	}
 	if f.client.createCalled {
@@ -719,7 +719,7 @@ func TestRunID_CreateAdoptsBrokerRunID(t *testing.T) {
 	f := newRunIDFixture(t, "runid-create-adopt")
 	client := &reportingCreateClient{mockRuntimeBrokerClient: f.client, runID: "broker-run"}
 	d := NewHTTPAgentDispatcherWithClient(f.store, client, false, slog.Default())
-	if err := d.DispatchAgentCreate(ctx, f.agent); err != nil {
+	if _, err := d.DispatchAgentCreate(ctx, f.agent); err != nil {
 		t.Fatalf("DispatchAgentCreate: %v", err)
 	}
 	requireUUID(t, "minted run ID", f.client.lastCreateReq.RunID)

@@ -1064,10 +1064,16 @@ func (s *Server) handleExistingAgent(
 		return existingAgentConflict
 	}
 
-	// Delete in progress (design ptone/scion#2483 §2.1): every branch below
+	// Start gate (design ptone/scion#2483 §2.1): every branch below
 	// starts, resumes, restarts or recreates existingAgent, so the shared
-	// start gate runs first, after the lifecycle authz above.
+	// start gate runs first, after the lifecycle authz above. An agent whose
+	// create is in flight is returned as it is, without applying the
+	// request.
 	if ref := s.startGate(ctx, existingAgent, startEntryCreateExisting); ref.refuses() {
+		if ref.InFlight {
+			s.writeExistingAgentLaunching(ctx, w, existingAgent, project, req)
+			return existingAgentStarted
+		}
 		ref.write(w)
 		return existingAgentErrored
 	}
@@ -1124,6 +1130,9 @@ func (s *Server) handleExistingAgent(
 		}
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, resume); err != nil {
 			s.rollbackBrokerQuota(ctx, existingAgent, reserved)
+			if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
+				return res
+			}
 			switch {
 			case errors.Is(err, store.ErrDeleteInProgress):
 				deleteInProgressRefusal(existingAgent.ID).write(w)
@@ -1216,6 +1225,9 @@ func (s *Server) handleExistingAgent(
 			}
 			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, forcedRecovery); err != nil {
 				s.rollbackBrokerQuota(ctx, existingAgent, reserved)
+				if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
+					return res
+				}
 				switch {
 				case errors.Is(err, store.ErrDeleteInProgress):
 					deleteInProgressRefusal(existingAgent.ID).write(w)
@@ -1340,6 +1352,9 @@ func (s *Server) handleExistingAgent(
 			return existingAgentErrored
 		}
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, false); err != nil {
+			if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
+				return res
+			}
 			switch {
 			case errors.Is(err, store.ErrDeleteInProgress):
 				deleteInProgressRefusal(existingAgent.ID).write(w)
