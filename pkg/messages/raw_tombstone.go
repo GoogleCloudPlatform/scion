@@ -123,10 +123,24 @@ func scanMembersForRaw(dec *json.Decoder, nested []string) bool {
 	return false
 }
 
+// skipJSONValue consumes the next JSON value from dec and reports whether it
+// was well formed. It decodes into discardJSON rather than json.RawMessage:
+// both go through the same Decoder.Decode path, so validation, truncation
+// and error behaviour are unchanged, but discardJSON keeps no copy of the
+// value. A token-by-token skip is deliberately not used here: Token decodes
+// every scalar into an interface value, which rejects numbers outside the
+// float64 range (so {"a":1e400,"raw":true} would stop being reported) and
+// allocates per element.
 func skipJSONValue(dec *json.Decoder) bool {
-	var skip json.RawMessage
+	var skip discardJSON
 	return dec.Decode(&skip) == nil
 }
+
+// discardJSON is a json.Unmarshaler that ignores its input. The decoder has
+// already validated the value before UnmarshalJSON is called.
+type discardJSON struct{}
+
+func (*discardJSON) UnmarshalJSON([]byte) error { return nil }
 
 func matchesAnyFold(key string, names []string) bool {
 	for _, n := range names {
