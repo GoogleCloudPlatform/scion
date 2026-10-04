@@ -131,13 +131,14 @@ func ensureNFSWorktreeLeaf(runtimeName string, resolved runtime.ResolvedWorkspac
 		return false, fmt.Errorf("workspace_storage nfs: resolve export mount %q: %w", resolved.HostBase, err)
 	}
 
-	if _, err := os.Lstat(filepath.Join(resolvedHostBase, rel, provision.ProvisionSentinelFile)); err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			// First provisioning of this project: the init container
-			// clones the shared checkout and adds the worktree.
-			return true, nil
-		}
-		return false, fmt.Errorf("workspace_storage nfs: check provisioning state of %q: %w", rel, err)
+	provisioned, err := nfsSharedCheckoutProvisioned(resolvedHostBase, rel)
+	if err != nil {
+		return false, err
+	}
+	if !provisioned {
+		// First provisioning of this project: the init container
+		// clones the shared checkout and adds the worktree.
+		return true, nil
 	}
 
 	ok, err := ensureNFSLeaf(resolvedHostBase, leaf)
@@ -152,6 +153,26 @@ func ensureNFSWorktreeLeaf(runtimeName string, resolved runtime.ResolvedWorkspac
 			leaf, resolved.HostBase, err, nfsWorkspaceExportHint)
 	}
 	return ok, nil
+}
+
+// nfsSharedCheckoutProvisioned reports whether the project's shared
+// checkout at rel (relative to the resolved export mount hostBase) has been
+// provisioned: its sentinel is in the project's provisioning state directory
+// (<project>/provision), or, for a workspace provisioned before that
+// directory existed, in the workspace itself. Lstat is used, so a symlink
+// named like the sentinel also counts, as before; any error other than "does
+// not exist" is returned.
+func nfsSharedCheckoutProvisioned(hostBase, rel string) (bool, error) {
+	for _, dir := range []string{provision.ProjectStateDir(rel), rel} {
+		_, err := os.Lstat(filepath.Join(hostBase, dir, provision.ProvisionSentinelFile))
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return false, fmt.Errorf("workspace_storage nfs: check provisioning state of %q: %w", rel, err)
+		}
+	}
+	return false, nil
 }
 
 // nfsWorktreeSubPath is the export-relative path of an agent's worktree:
@@ -285,7 +306,16 @@ func (m *AgentManager) RemoveNFSWorktree(ctx context.Context, projectPath, proje
 		return worktree, fmt.Errorf("workspace_storage nfs: %s is not a plain directory on the export; left in place", filepath.Dir(worktree))
 	}
 
-	if err := provision.RemoveMountedWorktree(ctx, workspace, agentName, nfsWorktreeLockWait); err != nil {
+	// The init containers take the provisioning lock in the project's
+	// provisioning state directory (and the legacy one in the workspace
+	// first): take both, in the same order. The broker creates the state
+	// directory the same way as before a pod starts, so the lock is shared
+	// with the init container.
+	stateRel := provision.ProjectStateDir(rel)
+	if _, err := ensureNFSLeaf(resolvedHostBase, stateRel); err != nil {
+		return worktree, fmt.Errorf("workspace_storage nfs: prepare the provisioning state directory %q: %w; left in place", stateRel, err)
+	}
+	if err := provision.RemoveMountedWorktree(ctx, workspace, filepath.Join(resolvedHostBase, stateRel), agentName, nfsWorktreeLockWait); err != nil {
 		return worktree, err
 	}
 	purgeRemovedWorktrees(workspace)

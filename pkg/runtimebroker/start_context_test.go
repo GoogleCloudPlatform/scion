@@ -6007,3 +6007,42 @@ func TestBuildStartContext_EnvClassificationsCarried(t *testing.T) {
 }
 
 func intPtr(i int) *int { return &i }
+
+// worktreeBaseIsProvisioned accepts the sentinel in the input's own sentinel
+// directory (the base's parent by default), in the project's provisioning
+// state directory, or in the base itself (#2670), and still requires the
+// base's .git.
+func TestWorktreeBaseIsProvisioned_SentinelLocations(t *testing.T) {
+	for name, dirOf := range map[string]func(base string) string{
+		"parent":    filepath.Dir,
+		"state dir": provision.ProjectStateDir,
+		"base":      func(base string) string { return base },
+	} {
+		t.Run(name, func(t *testing.T) {
+			base := filepath.Join(t.TempDir(), "workspace")
+			if err := os.MkdirAll(filepath.Join(base, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			in := provision.ProvisionInput{Resolved: provision.ResolvedWorkspace{HostPath: base}}
+			if worktreeBaseIsProvisioned(in) {
+				t.Fatal("provisioned without a sentinel")
+			}
+			dir := dirOf(base)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, provision.ProvisionSentinelFile), []byte("x"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if !worktreeBaseIsProvisioned(in) {
+				t.Errorf("sentinel in %s not accepted", dir)
+			}
+			if err := os.RemoveAll(filepath.Join(base, ".git")); err != nil {
+				t.Fatal(err)
+			}
+			if worktreeBaseIsProvisioned(in) {
+				t.Error("provisioned without the base's .git")
+			}
+		})
+	}
+}
