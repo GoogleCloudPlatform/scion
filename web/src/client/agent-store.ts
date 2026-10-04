@@ -161,6 +161,13 @@ export const AGENT_PROBE_JITTER_MS = 3_000;
 export const AGENT_PROBE_LIMIT = 50;
 /** Pages a probe follows past its first before falling back to a full walk. */
 export const AGENT_PROBE_MAX_EXTRA_PAGES = 4;
+/**
+ * After a probe that does not catch up walks, the next such walk waits at
+ * least this long, doubling while probes keep overflowing, up to
+ * {@link AGENT_PROBE_OVERFLOW_BACKOFF_MAX_MS}. Meanwhile probes read one page.
+ */
+export const AGENT_PROBE_OVERFLOW_BACKOFF_MS = 2 * 60_000;
+export const AGENT_PROBE_OVERFLOW_BACKOFF_MAX_MS = 16 * 60_000;
 /** A probe still running after this long is abandoned; the next one is scheduled. */
 export const AGENT_PROBE_TIMEOUT_MS = 30_000;
 /** After the server refuses a list's sorted view, wait this long before probing it again. */
@@ -215,6 +222,10 @@ interface Entry {
   probeRefusalLogged: boolean;
   /** The server count that last made a probe walk, so the same mismatch walks once. */
   countWalkTotal?: number | undefined;
+  /** When the last overflow walk started (epoch ms), while probes keep overflowing. */
+  overflowWalkAt?: number | undefined;
+  /** How long after that the next overflow walk may start. */
+  overflowBackoffMs: number;
 }
 
 interface ProbePage {
@@ -582,6 +593,7 @@ export class AgentStore {
         probeTimer: null,
         probe: null,
         probeRefusalLogged: false,
+        overflowBackoffMs: 0,
       };
       this.entries.set(key, entry);
     }
@@ -953,7 +965,8 @@ export class AgentStore {
    * (deltas that land meanwhile win, deleted agents stay deleted, the
    * completeness flag is untouched). When the first page is all newer
    * than the last probe, follow further pages; when that does not catch
-   * up, or the server's count differs from the rows held, walk once.
+   * up, or the server's count differs from the rows held, walk once. Under
+   * sustained overflow, walks back off and probes read one page.
    */
   private async probe(
     entry: Entry,
@@ -963,6 +976,10 @@ export class AgentStore {
     const signal = controller.signal;
     const previous = entry.highWater;
     let highWater = previous;
+    const backingOff =
+      entry.overflowWalkAt !== undefined &&
+      this.now() - entry.overflowWalkAt < entry.overflowBackoffMs;
+    const extraPages = backingOff ? 0 : AGENT_PROBE_MAX_EXTRA_PAGES;
     const token = feed.beginSeedEpoch();
     const changed: Agent[] = [];
     const listed = new Set(entry.agents.map((a) => a.id));
@@ -970,7 +987,7 @@ export class AgentStore {
     let caughtUp = false;
     try {
       let cursor: string | undefined;
-      for (let page = 0; page <= AGENT_PROBE_MAX_EXTRA_PAGES; page++) {
+      for (let page = 0; page <= extraPages; page++) {
         const response = await this.fetchPage(probePath(entry.query, cursor), { signal });
         if (signal.aborted || entry.probe !== controller) return;
         if (!response.ok) {
@@ -1027,9 +1044,17 @@ export class AgentStore {
     }
     if (entry.walk || this.entries.get(entry.key) !== entry) return;
     if (!caughtUp) {
+      // Churn faster than the probe reads would otherwise walk every time.
+      if (backingOff) return;
+      entry.overflowBackoffMs = entry.overflowBackoffMs
+        ? Math.min(2 * entry.overflowBackoffMs, AGENT_PROBE_OVERFLOW_BACKOFF_MAX_MS)
+        : AGENT_PROBE_OVERFLOW_BACKOFF_MS;
+      entry.overflowWalkAt = this.now();
       this.walkFromProbe(entry);
       return;
     }
+    entry.overflowWalkAt = undefined;
+    entry.overflowBackoffMs = 0;
     if (total === undefined || !entry.complete) return;
     if (total === entry.agents.length) {
       entry.countWalkTotal = undefined;

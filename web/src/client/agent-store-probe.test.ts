@@ -463,6 +463,42 @@ describe('AgentStore delta probe', () => {
     expect(snapshot?.agents).toHaveLength(1 + burst.length);
   });
 
+  describe('sustained churn the probe cannot catch up with', () => {
+    const fleet = (): Agent[] => Array.from({ length: 400 }, (_, i) => row(`a${i}`, 1));
+
+    /** Heartbeat every row before each probe for `intervals`; the minutes walks started at. */
+    async function churn(h: Harness, intervals: number, from = 0): Promise<number[]> {
+      const walkMinutes: number[] = [];
+      for (let i = 1; i <= intervals; i++) {
+        h.server.heartbeat(t(1000 + (from + i) * 30));
+        const walks = h.server.walks();
+        await tick();
+        if (h.server.walks() > walks) walkMinutes.push(((from + i) * 30) / 60);
+      }
+      return walkMinutes;
+    }
+
+    it('walks on overflow at most at doubling intervals, and probes read one page meanwhile', async () => {
+      const h = await loaded(fleet());
+      const requests = h.server.requests.length;
+      const walkMinutes = await churn(h, 120);
+
+      expect(walkMinutes).toEqual([0.5, 2.5, 6.5, 14.5, 30.5, 46.5]);
+      // Each overflowing probe reads five pages; each probe in between, one.
+      expect(h.server.probes()).toBe(6 * 5 + (120 - 6));
+      // One hour: 144 probe requests plus six walks of two pages.
+      expect(h.server.requests.length - requests).toBe(h.server.probes() + 6 * 2);
+    });
+
+    it('walks at once again on overflow after a probe has caught up', async () => {
+      const h = await loaded(fleet());
+      expect(await churn(h, 14)).toEqual([0.5, 2.5, 6.5]);
+      await tick();
+      // Without the catch-up, the next walk would wait until 14.5 minutes.
+      expect(await churn(h, 2, 15)).toEqual([8]);
+    });
+  });
+
   it('stops at a page that reaches the last probe even when that page is full', async () => {
     const initial = Array.from({ length: AGENT_PROBE_LIMIT + 5 }, (_, i) => row(`o${i}`, i));
     const h = await loaded(initial);
