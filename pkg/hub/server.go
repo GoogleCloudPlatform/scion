@@ -114,6 +114,29 @@ type ServerConfig struct {
 	// Operators enabling it must provide a SharedSigningSecret or pre-provision
 	// the signing keys; otherwise first boot will (correctly) refuse to start.
 	RequireStableSigningKey bool
+
+	// ConduitTCPAllowedPorts is the operator allow-list of agent-local
+	// loopback ports a Conduit tcp stream grant may target in addition to
+	// the agent's exposed ports. The reserved ports (9810, 18380) are always
+	// refused. Only used behind the hub.conduit experiment.
+	//
+	// Not yet reachable from configuration: settings/flag wiring comes in
+	// the Phase 1 hub-wiring change (1d-ii, ptone/scion#2780). Until then
+	// it is empty, so only exposed ports are targets.
+	ConduitTCPAllowedPorts []int
+	// ConduitGrantKeyActivation is how long a rotated-in Conduit grant key
+	// is published before it signs (default 15m). It must be at least the
+	// maximum interval at which grant targets refresh their key set
+	// (Welcome and token refresh); otherwise a target that has not yet
+	// learned the new key refuses its grants. It must also be at least the
+	// hub's ring refresh interval (1m). Only used behind the hub.conduit
+	// experiment.
+	//
+	// Not yet reachable from configuration: settings/flag wiring, with
+	// load-time validation (activation >= 1m), comes in the Phase 1
+	// hub-wiring change (1d-ii, ptone/scion#2780). Until then the default
+	// applies, and rotate rejects a delay below the refresh interval.
+	ConduitGrantKeyActivation time.Duration
 	// AuthMode is the exclusive human auth mode: "oauth" (default), "proxy", "dev".
 	AuthMode string
 	// ProxyAuthenticator is the configured proxy authenticator (when AuthMode == "proxy").
@@ -978,18 +1001,23 @@ type RemoteAgentInfo struct {
 
 // Server is the Hub API HTTP server.
 type Server struct {
-	config                 ServerConfig
-	store                  store.Store
-	httpServer             *http.Server
-	mux                    *http.ServeMux
-	mu                     sync.RWMutex
-	startTime              time.Time
-	dispatcher             AgentDispatcher         // Optional dispatcher for co-located runtime broker
-	storage                storage.Storage         // Optional storage backend for templates
-	secretBackend          secret.SecretBackend    // Optional secret backend
-	agentTokenService      *AgentTokenService      // Agent JWT token service
-	userTokenService       *UserTokenService       // User JWT token service
-	downloadSigningKey     []byte                  // HMAC key for skill file capability URLs (#1792)
+	config             ServerConfig
+	store              store.Store
+	httpServer         *http.Server
+	mux                *http.ServeMux
+	mu                 sync.RWMutex
+	startTime          time.Time
+	dispatcher         AgentDispatcher      // Optional dispatcher for co-located runtime broker
+	storage            storage.Storage      // Optional storage backend for templates
+	secretBackend      secret.SecretBackend // Optional secret backend
+	agentTokenService  *AgentTokenService   // Agent JWT token service
+	userTokenService   *UserTokenService    // User JWT token service
+	downloadSigningKey []byte               // HMAC key for skill file capability URLs (#1792)
+
+	// Conduit stream grant key ring cache (conduit_grants.go); created on
+	// first use behind the hub.conduit experiment.
+	conduitGrantsOnce      sync.Once
+	conduitGrants          *conduitGrantKeys
 	listCursorSealer       *listCursorSealer       // AEAD sealer for authorizedList's opaque pagination cursors (ptone/scion#2124)
 	uatService             *UserAccessTokenService // User access token service
 	inviteService          *InviteService          // Invite code service
@@ -5209,6 +5237,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/gcp-service-accounts/", s.guarded("/api/v1/gcp-service-accounts/", s.handleGCPServiceAccountByID))
 
 	s.mux.HandleFunc("/api/v1/gcs/object", s.guarded("/api/v1/gcs/object", s.handleGCSObject))
+	s.mux.HandleFunc("/api/v1/conduit/grant-keys", s.guarded("/api/v1/conduit/grant-keys", s.handleConduitGrantKeys))
 
 	s.mux.HandleFunc("/api/v1/skills", s.guarded("/api/v1/skills", s.handleSkills))
 	s.mux.HandleFunc("/api/v1/skills/", s.guarded("/api/v1/skills/", s.handleSkillByID))
