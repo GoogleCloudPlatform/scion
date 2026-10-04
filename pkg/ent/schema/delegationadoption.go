@@ -28,7 +28,9 @@ import (
 // delegation-provenance adoption: the boot migration's cohort snapshot, or
 // an admin commit. It is evidence only; the authorization path never reads
 // it. Each written adoption deactivates the original unrecorded edge and
-// inserts a recorded edge, and this row links the two.
+// inserts a recorded edge, and this row links the two. Records are retained
+// indefinitely as evidence and carry no foreign keys, so they outlive the
+// edges and agents they name.
 type DelegationAdoption struct {
 	ent.Schema
 }
@@ -86,6 +88,18 @@ func (DelegationAdoption) Fields() []ent.Field {
 			Default(""),
 		field.String("actor_id").
 			Default(""),
+		// The admin who reverted the record. The actor_* fields keep the
+		// adopter, and after_summary keeps the adopted edge's summary.
+		field.String("reverted_by_kind").
+			Default(""),
+		field.String("reverted_by_id").
+			Default(""),
+		// Summary of the reactivated original edge.
+		field.String("revert_summary").
+			Default(""),
+		field.Time("reverted_at").
+			Optional().
+			Nillable(),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),

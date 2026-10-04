@@ -48,6 +48,14 @@ const (
 	FieldActorKind = "actor_kind"
 	// FieldActorID holds the string denoting the actor_id field in the database.
 	FieldActorID = "actor_id"
+	// FieldRevertedByKind holds the string denoting the reverted_by_kind field in the database.
+	FieldRevertedByKind = "reverted_by_kind"
+	// FieldRevertedByID holds the string denoting the reverted_by_id field in the database.
+	FieldRevertedByID = "reverted_by_id"
+	// FieldRevertSummary holds the string denoting the revert_summary field in the database.
+	FieldRevertSummary = "revert_summary"
+	// FieldRevertedAt holds the string denoting the reverted_at field in the database.
+	FieldRevertedAt = "reverted_at"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// FieldUpdated holds the string denoting the updated field in the database.
@@ -76,6 +84,10 @@ var Columns = []string{
 	FieldAfterSummary,
 	FieldActorKind,
 	FieldActorID,
+	FieldRevertedByKind,
+	FieldRevertedByID,
+	FieldRevertSummary,
+	FieldRevertedAt,
 	FieldCreated,
 	FieldUpdated,
 }
@@ -121,6 +133,12 @@ var (
 	DefaultActorKind string
 	// DefaultActorID holds the default value on creation for the "actor_id" field.
 	DefaultActorID string
+	// DefaultRevertedByKind holds the default value on creation for the "reverted_by_kind" field.
+	DefaultRevertedByKind string
+	// DefaultRevertedByID holds the default value on creation for the "reverted_by_id" field.
+	DefaultRevertedByID string
+	// DefaultRevertSummary holds the default value on creation for the "revert_summary" field.
+	DefaultRevertSummary string
 	// DefaultCreated holds the default value on creation for the "created" field.
 	DefaultCreated func() time.Time
 	// DefaultUpdated holds the default value on creation for the "updated" field.
@@ -222,6 +240,26 @@ func ByActorKind(opts ...sql.OrderTermOption) OrderOption {
 // ByActorID orders the results by the actor_id field.
 func ByActorID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldActorID, opts...).ToFunc()
+}
+
+// ByRevertedByKind orders the results by the reverted_by_kind field.
+func ByRevertedByKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRevertedByKind, opts...).ToFunc()
+}
+
+// ByRevertedByID orders the results by the reverted_by_id field.
+func ByRevertedByID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRevertedByID, opts...).ToFunc()
+}
+
+// ByRevertSummary orders the results by the revert_summary field.
+func ByRevertSummary(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRevertSummary, opts...).ToFunc()
+}
+
+// ByRevertedAt orders the results by the reverted_at field.
+func ByRevertedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRevertedAt, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.

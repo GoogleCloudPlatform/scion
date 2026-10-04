@@ -238,6 +238,62 @@ func (_c *DelegationAdoptionCreate) SetNillableActorID(v *string) *DelegationAdo
 	return _c
 }
 
+// SetRevertedByKind sets the "reverted_by_kind" field.
+func (_c *DelegationAdoptionCreate) SetRevertedByKind(v string) *DelegationAdoptionCreate {
+	_c.mutation.SetRevertedByKind(v)
+	return _c
+}
+
+// SetNillableRevertedByKind sets the "reverted_by_kind" field if the given value is not nil.
+func (_c *DelegationAdoptionCreate) SetNillableRevertedByKind(v *string) *DelegationAdoptionCreate {
+	if v != nil {
+		_c.SetRevertedByKind(*v)
+	}
+	return _c
+}
+
+// SetRevertedByID sets the "reverted_by_id" field.
+func (_c *DelegationAdoptionCreate) SetRevertedByID(v string) *DelegationAdoptionCreate {
+	_c.mutation.SetRevertedByID(v)
+	return _c
+}
+
+// SetNillableRevertedByID sets the "reverted_by_id" field if the given value is not nil.
+func (_c *DelegationAdoptionCreate) SetNillableRevertedByID(v *string) *DelegationAdoptionCreate {
+	if v != nil {
+		_c.SetRevertedByID(*v)
+	}
+	return _c
+}
+
+// SetRevertSummary sets the "revert_summary" field.
+func (_c *DelegationAdoptionCreate) SetRevertSummary(v string) *DelegationAdoptionCreate {
+	_c.mutation.SetRevertSummary(v)
+	return _c
+}
+
+// SetNillableRevertSummary sets the "revert_summary" field if the given value is not nil.
+func (_c *DelegationAdoptionCreate) SetNillableRevertSummary(v *string) *DelegationAdoptionCreate {
+	if v != nil {
+		_c.SetRevertSummary(*v)
+	}
+	return _c
+}
+
+// SetRevertedAt sets the "reverted_at" field.
+func (_c *DelegationAdoptionCreate) SetRevertedAt(v time.Time) *DelegationAdoptionCreate {
+	_c.mutation.SetRevertedAt(v)
+	return _c
+}
+
+// SetNillableRevertedAt sets the "reverted_at" field if the given value is not nil.
+func (_c *DelegationAdoptionCreate) SetNillableRevertedAt(v *time.Time) *DelegationAdoptionCreate {
+	if v != nil {
+		_c.SetRevertedAt(*v)
+	}
+	return _c
+}
+
 // SetCreated sets the "created" field.
 func (_c *DelegationAdoptionCreate) SetCreated(v time.Time) *DelegationAdoptionCreate {
 	_c.mutation.SetCreated(v)
@@ -363,6 +419,18 @@ func (_c *DelegationAdoptionCreate) defaults() {
 		v := delegationadoption.DefaultActorID
 		_c.mutation.SetActorID(v)
 	}
+	if _, ok := _c.mutation.RevertedByKind(); !ok {
+		v := delegationadoption.DefaultRevertedByKind
+		_c.mutation.SetRevertedByKind(v)
+	}
+	if _, ok := _c.mutation.RevertedByID(); !ok {
+		v := delegationadoption.DefaultRevertedByID
+		_c.mutation.SetRevertedByID(v)
+	}
+	if _, ok := _c.mutation.RevertSummary(); !ok {
+		v := delegationadoption.DefaultRevertSummary
+		_c.mutation.SetRevertSummary(v)
+	}
 	if _, ok := _c.mutation.Created(); !ok {
 		v := delegationadoption.DefaultCreated()
 		_c.mutation.SetCreated(v)
@@ -438,6 +506,15 @@ func (_c *DelegationAdoptionCreate) check() error {
 	}
 	if _, ok := _c.mutation.ActorID(); !ok {
 		return &ValidationError{Name: "actor_id", err: errors.New(`ent: missing required field "DelegationAdoption.actor_id"`)}
+	}
+	if _, ok := _c.mutation.RevertedByKind(); !ok {
+		return &ValidationError{Name: "reverted_by_kind", err: errors.New(`ent: missing required field "DelegationAdoption.reverted_by_kind"`)}
+	}
+	if _, ok := _c.mutation.RevertedByID(); !ok {
+		return &ValidationError{Name: "reverted_by_id", err: errors.New(`ent: missing required field "DelegationAdoption.reverted_by_id"`)}
+	}
+	if _, ok := _c.mutation.RevertSummary(); !ok {
+		return &ValidationError{Name: "revert_summary", err: errors.New(`ent: missing required field "DelegationAdoption.revert_summary"`)}
 	}
 	if _, ok := _c.mutation.Created(); !ok {
 		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "DelegationAdoption.created"`)}
@@ -548,6 +625,22 @@ func (_c *DelegationAdoptionCreate) createSpec() (*DelegationAdoption, *sqlgraph
 	if value, ok := _c.mutation.ActorID(); ok {
 		_spec.SetField(delegationadoption.FieldActorID, field.TypeString, value)
 		_node.ActorID = value
+	}
+	if value, ok := _c.mutation.RevertedByKind(); ok {
+		_spec.SetField(delegationadoption.FieldRevertedByKind, field.TypeString, value)
+		_node.RevertedByKind = value
+	}
+	if value, ok := _c.mutation.RevertedByID(); ok {
+		_spec.SetField(delegationadoption.FieldRevertedByID, field.TypeString, value)
+		_node.RevertedByID = value
+	}
+	if value, ok := _c.mutation.RevertSummary(); ok {
+		_spec.SetField(delegationadoption.FieldRevertSummary, field.TypeString, value)
+		_node.RevertSummary = value
+	}
+	if value, ok := _c.mutation.RevertedAt(); ok {
+		_spec.SetField(delegationadoption.FieldRevertedAt, field.TypeTime, value)
+		_node.RevertedAt = &value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(delegationadoption.FieldCreated, field.TypeTime, value)
@@ -834,6 +927,60 @@ func (u *DelegationAdoptionUpsert) SetActorID(v string) *DelegationAdoptionUpser
 // UpdateActorID sets the "actor_id" field to the value that was provided on create.
 func (u *DelegationAdoptionUpsert) UpdateActorID() *DelegationAdoptionUpsert {
 	u.SetExcluded(delegationadoption.FieldActorID)
+	return u
+}
+
+// SetRevertedByKind sets the "reverted_by_kind" field.
+func (u *DelegationAdoptionUpsert) SetRevertedByKind(v string) *DelegationAdoptionUpsert {
+	u.Set(delegationadoption.FieldRevertedByKind, v)
+	return u
+}
+
+// UpdateRevertedByKind sets the "reverted_by_kind" field to the value that was provided on create.
+func (u *DelegationAdoptionUpsert) UpdateRevertedByKind() *DelegationAdoptionUpsert {
+	u.SetExcluded(delegationadoption.FieldRevertedByKind)
+	return u
+}
+
+// SetRevertedByID sets the "reverted_by_id" field.
+func (u *DelegationAdoptionUpsert) SetRevertedByID(v string) *DelegationAdoptionUpsert {
+	u.Set(delegationadoption.FieldRevertedByID, v)
+	return u
+}
+
+// UpdateRevertedByID sets the "reverted_by_id" field to the value that was provided on create.
+func (u *DelegationAdoptionUpsert) UpdateRevertedByID() *DelegationAdoptionUpsert {
+	u.SetExcluded(delegationadoption.FieldRevertedByID)
+	return u
+}
+
+// SetRevertSummary sets the "revert_summary" field.
+func (u *DelegationAdoptionUpsert) SetRevertSummary(v string) *DelegationAdoptionUpsert {
+	u.Set(delegationadoption.FieldRevertSummary, v)
+	return u
+}
+
+// UpdateRevertSummary sets the "revert_summary" field to the value that was provided on create.
+func (u *DelegationAdoptionUpsert) UpdateRevertSummary() *DelegationAdoptionUpsert {
+	u.SetExcluded(delegationadoption.FieldRevertSummary)
+	return u
+}
+
+// SetRevertedAt sets the "reverted_at" field.
+func (u *DelegationAdoptionUpsert) SetRevertedAt(v time.Time) *DelegationAdoptionUpsert {
+	u.Set(delegationadoption.FieldRevertedAt, v)
+	return u
+}
+
+// UpdateRevertedAt sets the "reverted_at" field to the value that was provided on create.
+func (u *DelegationAdoptionUpsert) UpdateRevertedAt() *DelegationAdoptionUpsert {
+	u.SetExcluded(delegationadoption.FieldRevertedAt)
+	return u
+}
+
+// ClearRevertedAt clears the value of the "reverted_at" field.
+func (u *DelegationAdoptionUpsert) ClearRevertedAt() *DelegationAdoptionUpsert {
+	u.SetNull(delegationadoption.FieldRevertedAt)
 	return u
 }
 
@@ -1163,6 +1310,69 @@ func (u *DelegationAdoptionUpsertOne) SetActorID(v string) *DelegationAdoptionUp
 func (u *DelegationAdoptionUpsertOne) UpdateActorID() *DelegationAdoptionUpsertOne {
 	return u.Update(func(s *DelegationAdoptionUpsert) {
 		s.UpdateActorID()
+	})
+}
+
+// SetRevertedByKind sets the "reverted_by_kind" field.
+func (u *DelegationAdoptionUpsertOne) SetRevertedByKind(v string) *DelegationAdoptionUpsertOne {
+	return u.Update(func(s *DelegationAdoptionUpsert) {
+		s.SetRevertedByKind(v)
+	})
+}
+
+// UpdateRevertedByKind sets the "reverted_by_kind" field to the value that was provided on create.
+func (u *DelegationAdoptionUpsertOne) UpdateRevertedByKind() *DelegationAdoptionUpsertOne {
+	return u.Update(func(s *DelegationAdoptionUpsert) {
+		s.UpdateRevertedByKind()
+	})
+}
+
+// SetRevertedByID sets the "reverted_by_id" field.
+func (u *DelegationAdoptionUpsertOne) SetRevertedByID(v string) *DelegationAdoptionUpsertOne {
+	return u.Update(func(s *DelegationAdoptionUpsert) {
+		s.SetRevertedByID(v)
+	})
+}
+
+// UpdateRevertedByID sets the "reverted_by_id" field to the value that was provided on create.
+func (u *DelegationAdoptionUpsertOne) UpdateRevertedByID() *DelegationAdoptionUpsertOne {
+	return u.Update(func(s *DelegationAdoptionUpsert) {
+		s.UpdateRevertedByID()
+	})
+}
+
+// SetRevertSummary sets the "revert_summary" field.
+func (u *DelegationAdoptionUpsertOne) SetRevertSummary(v string) *DelegationAdoptionUpsertOne {
+	return u.Update(func(s *DelegationAdoptionUpsert) {
+		s.SetRevertSummary(v)
+	})
+}
+
+// UpdateRevertSummary sets the "revert_summary" field to the value that was provided on create.
+func (u *DelegationAdoptionUpsertOne) UpdateRevertSummary() *DelegationAdoptionUpsertOne {
+	return u.Update(func(s *DelegationAdoptionUpsert) {
+		s.UpdateRevertSummary()
+	})
+}
+
+// SetRevertedAt sets the "reverted_at" field.
+func (u *DelegationAdoptionUpsertOne) SetRevertedAt(v time.Time) *DelegationAdoptionUpsertOne {
+	return u.Update(func(s *DelegationAdoptionUpsert) {
+		s.SetRevertedAt(v)
+	})
+}
+
+// UpdateRevertedAt sets the "reverted_at" field to the value that was provided on create.
+func (u *DelegationAdoptionUpsertOne) UpdateRevertedAt() *DelegationAdoptionUpsertOne {
+	return u.Update(func(s *DelegationAdoptionUpsert) {
+		s.UpdateRevertedAt()
+	})
+}
+
+// ClearRevertedAt clears the value of the "reverted_at" field.
+func (u *DelegationAdoptionUpsertOne) ClearRevertedAt() *DelegationAdoptionUpsertOne {
+	return u.Update(func(s *DelegationAdoptionUpsert) {
+		s.ClearRevertedAt()
 	})
 }
 
@@ -1661,6 +1871,69 @@ func (u *DelegationAdoptionUpsertBulk) SetActorID(v string) *DelegationAdoptionU
 func (u *DelegationAdoptionUpsertBulk) UpdateActorID() *DelegationAdoptionUpsertBulk {
 	return u.Update(func(s *DelegationAdoptionUpsert) {
 		s.UpdateActorID()
+	})
+}
+
+// SetRevertedByKind sets the "reverted_by_kind" field.
+func (u *DelegationAdoptionUpsertBulk) SetRevertedByKind(v string) *DelegationAdoptionUpsertBulk {
+	return u.Update(func(s *DelegationAdoptionUpsert) {
+		s.SetRevertedByKind(v)
+	})
+}
+
+// UpdateRevertedByKind sets the "reverted_by_kind" field to the value that was provided on create.
+func (u *DelegationAdoptionUpsertBulk) UpdateRevertedByKind() *DelegationAdoptionUpsertBulk {
+	return u.Update(func(s *DelegationAdoptionUpsert) {
+		s.UpdateRevertedByKind()
+	})
+}
+
+// SetRevertedByID sets the "reverted_by_id" field.
+func (u *DelegationAdoptionUpsertBulk) SetRevertedByID(v string) *DelegationAdoptionUpsertBulk {
+	return u.Update(func(s *DelegationAdoptionUpsert) {
+		s.SetRevertedByID(v)
+	})
+}
+
+// UpdateRevertedByID sets the "reverted_by_id" field to the value that was provided on create.
+func (u *DelegationAdoptionUpsertBulk) UpdateRevertedByID() *DelegationAdoptionUpsertBulk {
+	return u.Update(func(s *DelegationAdoptionUpsert) {
+		s.UpdateRevertedByID()
+	})
+}
+
+// SetRevertSummary sets the "revert_summary" field.
+func (u *DelegationAdoptionUpsertBulk) SetRevertSummary(v string) *DelegationAdoptionUpsertBulk {
+	return u.Update(func(s *DelegationAdoptionUpsert) {
+		s.SetRevertSummary(v)
+	})
+}
+
+// UpdateRevertSummary sets the "revert_summary" field to the value that was provided on create.
+func (u *DelegationAdoptionUpsertBulk) UpdateRevertSummary() *DelegationAdoptionUpsertBulk {
+	return u.Update(func(s *DelegationAdoptionUpsert) {
+		s.UpdateRevertSummary()
+	})
+}
+
+// SetRevertedAt sets the "reverted_at" field.
+func (u *DelegationAdoptionUpsertBulk) SetRevertedAt(v time.Time) *DelegationAdoptionUpsertBulk {
+	return u.Update(func(s *DelegationAdoptionUpsert) {
+		s.SetRevertedAt(v)
+	})
+}
+
+// UpdateRevertedAt sets the "reverted_at" field to the value that was provided on create.
+func (u *DelegationAdoptionUpsertBulk) UpdateRevertedAt() *DelegationAdoptionUpsertBulk {
+	return u.Update(func(s *DelegationAdoptionUpsert) {
+		s.UpdateRevertedAt()
+	})
+}
+
+// ClearRevertedAt clears the value of the "reverted_at" field.
+func (u *DelegationAdoptionUpsertBulk) ClearRevertedAt() *DelegationAdoptionUpsertBulk {
+	return u.Update(func(s *DelegationAdoptionUpsert) {
+		s.ClearRevertedAt()
 	})
 }
 

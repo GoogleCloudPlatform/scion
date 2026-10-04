@@ -24393,6 +24393,10 @@ type DelegationAdoptionMutation struct {
 	after_summary      *string
 	actor_kind         *string
 	actor_id           *string
+	reverted_by_kind   *string
+	reverted_by_id     *string
+	revert_summary     *string
+	reverted_at        *time.Time
 	created            *time.Time
 	updated            *time.Time
 	clearedFields      map[string]struct{}
@@ -25183,6 +25187,163 @@ func (m *DelegationAdoptionMutation) ResetActorID() {
 	m.actor_id = nil
 }
 
+// SetRevertedByKind sets the "reverted_by_kind" field.
+func (m *DelegationAdoptionMutation) SetRevertedByKind(s string) {
+	m.reverted_by_kind = &s
+}
+
+// RevertedByKind returns the value of the "reverted_by_kind" field in the mutation.
+func (m *DelegationAdoptionMutation) RevertedByKind() (r string, exists bool) {
+	v := m.reverted_by_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRevertedByKind returns the old "reverted_by_kind" field's value of the DelegationAdoption entity.
+// If the DelegationAdoption object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationAdoptionMutation) OldRevertedByKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRevertedByKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRevertedByKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRevertedByKind: %w", err)
+	}
+	return oldValue.RevertedByKind, nil
+}
+
+// ResetRevertedByKind resets all changes to the "reverted_by_kind" field.
+func (m *DelegationAdoptionMutation) ResetRevertedByKind() {
+	m.reverted_by_kind = nil
+}
+
+// SetRevertedByID sets the "reverted_by_id" field.
+func (m *DelegationAdoptionMutation) SetRevertedByID(s string) {
+	m.reverted_by_id = &s
+}
+
+// RevertedByID returns the value of the "reverted_by_id" field in the mutation.
+func (m *DelegationAdoptionMutation) RevertedByID() (r string, exists bool) {
+	v := m.reverted_by_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRevertedByID returns the old "reverted_by_id" field's value of the DelegationAdoption entity.
+// If the DelegationAdoption object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationAdoptionMutation) OldRevertedByID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRevertedByID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRevertedByID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRevertedByID: %w", err)
+	}
+	return oldValue.RevertedByID, nil
+}
+
+// ResetRevertedByID resets all changes to the "reverted_by_id" field.
+func (m *DelegationAdoptionMutation) ResetRevertedByID() {
+	m.reverted_by_id = nil
+}
+
+// SetRevertSummary sets the "revert_summary" field.
+func (m *DelegationAdoptionMutation) SetRevertSummary(s string) {
+	m.revert_summary = &s
+}
+
+// RevertSummary returns the value of the "revert_summary" field in the mutation.
+func (m *DelegationAdoptionMutation) RevertSummary() (r string, exists bool) {
+	v := m.revert_summary
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRevertSummary returns the old "revert_summary" field's value of the DelegationAdoption entity.
+// If the DelegationAdoption object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationAdoptionMutation) OldRevertSummary(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRevertSummary is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRevertSummary requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRevertSummary: %w", err)
+	}
+	return oldValue.RevertSummary, nil
+}
+
+// ResetRevertSummary resets all changes to the "revert_summary" field.
+func (m *DelegationAdoptionMutation) ResetRevertSummary() {
+	m.revert_summary = nil
+}
+
+// SetRevertedAt sets the "reverted_at" field.
+func (m *DelegationAdoptionMutation) SetRevertedAt(t time.Time) {
+	m.reverted_at = &t
+}
+
+// RevertedAt returns the value of the "reverted_at" field in the mutation.
+func (m *DelegationAdoptionMutation) RevertedAt() (r time.Time, exists bool) {
+	v := m.reverted_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRevertedAt returns the old "reverted_at" field's value of the DelegationAdoption entity.
+// If the DelegationAdoption object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationAdoptionMutation) OldRevertedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRevertedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRevertedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRevertedAt: %w", err)
+	}
+	return oldValue.RevertedAt, nil
+}
+
+// ClearRevertedAt clears the value of the "reverted_at" field.
+func (m *DelegationAdoptionMutation) ClearRevertedAt() {
+	m.reverted_at = nil
+	m.clearedFields[delegationadoption.FieldRevertedAt] = struct{}{}
+}
+
+// RevertedAtCleared returns if the "reverted_at" field was cleared in this mutation.
+func (m *DelegationAdoptionMutation) RevertedAtCleared() bool {
+	_, ok := m.clearedFields[delegationadoption.FieldRevertedAt]
+	return ok
+}
+
+// ResetRevertedAt resets all changes to the "reverted_at" field.
+func (m *DelegationAdoptionMutation) ResetRevertedAt() {
+	m.reverted_at = nil
+	delete(m.clearedFields, delegationadoption.FieldRevertedAt)
+}
+
 // SetCreated sets the "created" field.
 func (m *DelegationAdoptionMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -25289,7 +25450,7 @@ func (m *DelegationAdoptionMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *DelegationAdoptionMutation) Fields() []string {
-	fields := make([]string, 0, 19)
+	fields := make([]string, 0, 23)
 	if m.cohort_id != nil {
 		fields = append(fields, delegationadoption.FieldCohortID)
 	}
@@ -25341,6 +25502,18 @@ func (m *DelegationAdoptionMutation) Fields() []string {
 	if m.actor_id != nil {
 		fields = append(fields, delegationadoption.FieldActorID)
 	}
+	if m.reverted_by_kind != nil {
+		fields = append(fields, delegationadoption.FieldRevertedByKind)
+	}
+	if m.reverted_by_id != nil {
+		fields = append(fields, delegationadoption.FieldRevertedByID)
+	}
+	if m.revert_summary != nil {
+		fields = append(fields, delegationadoption.FieldRevertSummary)
+	}
+	if m.reverted_at != nil {
+		fields = append(fields, delegationadoption.FieldRevertedAt)
+	}
 	if m.created != nil {
 		fields = append(fields, delegationadoption.FieldCreated)
 	}
@@ -25389,6 +25562,14 @@ func (m *DelegationAdoptionMutation) Field(name string) (ent.Value, bool) {
 		return m.ActorKind()
 	case delegationadoption.FieldActorID:
 		return m.ActorID()
+	case delegationadoption.FieldRevertedByKind:
+		return m.RevertedByKind()
+	case delegationadoption.FieldRevertedByID:
+		return m.RevertedByID()
+	case delegationadoption.FieldRevertSummary:
+		return m.RevertSummary()
+	case delegationadoption.FieldRevertedAt:
+		return m.RevertedAt()
 	case delegationadoption.FieldCreated:
 		return m.Created()
 	case delegationadoption.FieldUpdated:
@@ -25436,6 +25617,14 @@ func (m *DelegationAdoptionMutation) OldField(ctx context.Context, name string) 
 		return m.OldActorKind(ctx)
 	case delegationadoption.FieldActorID:
 		return m.OldActorID(ctx)
+	case delegationadoption.FieldRevertedByKind:
+		return m.OldRevertedByKind(ctx)
+	case delegationadoption.FieldRevertedByID:
+		return m.OldRevertedByID(ctx)
+	case delegationadoption.FieldRevertSummary:
+		return m.OldRevertSummary(ctx)
+	case delegationadoption.FieldRevertedAt:
+		return m.OldRevertedAt(ctx)
 	case delegationadoption.FieldCreated:
 		return m.OldCreated(ctx)
 	case delegationadoption.FieldUpdated:
@@ -25568,6 +25757,34 @@ func (m *DelegationAdoptionMutation) SetField(name string, value ent.Value) erro
 		}
 		m.SetActorID(v)
 		return nil
+	case delegationadoption.FieldRevertedByKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRevertedByKind(v)
+		return nil
+	case delegationadoption.FieldRevertedByID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRevertedByID(v)
+		return nil
+	case delegationadoption.FieldRevertSummary:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRevertSummary(v)
+		return nil
+	case delegationadoption.FieldRevertedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRevertedAt(v)
+		return nil
 	case delegationadoption.FieldCreated:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -25645,6 +25862,9 @@ func (m *DelegationAdoptionMutation) ClearedFields() []string {
 	if m.FieldCleared(delegationadoption.FieldAdoptedEdgeID) {
 		fields = append(fields, delegationadoption.FieldAdoptedEdgeID)
 	}
+	if m.FieldCleared(delegationadoption.FieldRevertedAt) {
+		fields = append(fields, delegationadoption.FieldRevertedAt)
+	}
 	return fields
 }
 
@@ -25664,6 +25884,9 @@ func (m *DelegationAdoptionMutation) ClearField(name string) error {
 		return nil
 	case delegationadoption.FieldAdoptedEdgeID:
 		m.ClearAdoptedEdgeID()
+		return nil
+	case delegationadoption.FieldRevertedAt:
+		m.ClearRevertedAt()
 		return nil
 	}
 	return fmt.Errorf("unknown DelegationAdoption nullable field %s", name)
@@ -25723,6 +25946,18 @@ func (m *DelegationAdoptionMutation) ResetField(name string) error {
 		return nil
 	case delegationadoption.FieldActorID:
 		m.ResetActorID()
+		return nil
+	case delegationadoption.FieldRevertedByKind:
+		m.ResetRevertedByKind()
+		return nil
+	case delegationadoption.FieldRevertedByID:
+		m.ResetRevertedByID()
+		return nil
+	case delegationadoption.FieldRevertSummary:
+		m.ResetRevertSummary()
+		return nil
+	case delegationadoption.FieldRevertedAt:
+		m.ResetRevertedAt()
 		return nil
 	case delegationadoption.FieldCreated:
 		m.ResetCreated()

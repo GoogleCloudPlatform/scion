@@ -824,6 +824,10 @@ var (
 		{Name: "after_summary", Type: field.TypeString, Default: ""},
 		{Name: "actor_kind", Type: field.TypeString, Default: ""},
 		{Name: "actor_id", Type: field.TypeString, Default: ""},
+		{Name: "reverted_by_kind", Type: field.TypeString, Default: ""},
+		{Name: "reverted_by_id", Type: field.TypeString, Default: ""},
+		{Name: "revert_summary", Type: field.TypeString, Default: ""},
+		{Name: "reverted_at", Type: field.TypeTime, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},
 	}

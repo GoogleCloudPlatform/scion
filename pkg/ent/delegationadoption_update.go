@@ -292,6 +292,68 @@ func (_u *DelegationAdoptionUpdate) SetNillableActorID(v *string) *DelegationAdo
 	return _u
 }
 
+// SetRevertedByKind sets the "reverted_by_kind" field.
+func (_u *DelegationAdoptionUpdate) SetRevertedByKind(v string) *DelegationAdoptionUpdate {
+	_u.mutation.SetRevertedByKind(v)
+	return _u
+}
+
+// SetNillableRevertedByKind sets the "reverted_by_kind" field if the given value is not nil.
+func (_u *DelegationAdoptionUpdate) SetNillableRevertedByKind(v *string) *DelegationAdoptionUpdate {
+	if v != nil {
+		_u.SetRevertedByKind(*v)
+	}
+	return _u
+}
+
+// SetRevertedByID sets the "reverted_by_id" field.
+func (_u *DelegationAdoptionUpdate) SetRevertedByID(v string) *DelegationAdoptionUpdate {
+	_u.mutation.SetRevertedByID(v)
+	return _u
+}
+
+// SetNillableRevertedByID sets the "reverted_by_id" field if the given value is not nil.
+func (_u *DelegationAdoptionUpdate) SetNillableRevertedByID(v *string) *DelegationAdoptionUpdate {
+	if v != nil {
+		_u.SetRevertedByID(*v)
+	}
+	return _u
+}
+
+// SetRevertSummary sets the "revert_summary" field.
+func (_u *DelegationAdoptionUpdate) SetRevertSummary(v string) *DelegationAdoptionUpdate {
+	_u.mutation.SetRevertSummary(v)
+	return _u
+}
+
+// SetNillableRevertSummary sets the "revert_summary" field if the given value is not nil.
+func (_u *DelegationAdoptionUpdate) SetNillableRevertSummary(v *string) *DelegationAdoptionUpdate {
+	if v != nil {
+		_u.SetRevertSummary(*v)
+	}
+	return _u
+}
+
+// SetRevertedAt sets the "reverted_at" field.
+func (_u *DelegationAdoptionUpdate) SetRevertedAt(v time.Time) *DelegationAdoptionUpdate {
+	_u.mutation.SetRevertedAt(v)
+	return _u
+}
+
+// SetNillableRevertedAt sets the "reverted_at" field if the given value is not nil.
+func (_u *DelegationAdoptionUpdate) SetNillableRevertedAt(v *time.Time) *DelegationAdoptionUpdate {
+	if v != nil {
+		_u.SetRevertedAt(*v)
+	}
+	return _u
+}
+
+// ClearRevertedAt clears the value of the "reverted_at" field.
+func (_u *DelegationAdoptionUpdate) ClearRevertedAt() *DelegationAdoptionUpdate {
+	_u.mutation.ClearRevertedAt()
+	return _u
+}
+
 // SetUpdated sets the "updated" field.
 func (_u *DelegationAdoptionUpdate) SetUpdated(v time.Time) *DelegationAdoptionUpdate {
 	_u.mutation.SetUpdated(v)
@@ -433,6 +495,21 @@ func (_u *DelegationAdoptionUpdate) sqlSave(ctx context.Context) (_node int, err
 	}
 	if value, ok := _u.mutation.ActorID(); ok {
 		_spec.SetField(delegationadoption.FieldActorID, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.RevertedByKind(); ok {
+		_spec.SetField(delegationadoption.FieldRevertedByKind, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.RevertedByID(); ok {
+		_spec.SetField(delegationadoption.FieldRevertedByID, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.RevertSummary(); ok {
+		_spec.SetField(delegationadoption.FieldRevertSummary, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.RevertedAt(); ok {
+		_spec.SetField(delegationadoption.FieldRevertedAt, field.TypeTime, value)
+	}
+	if _u.mutation.RevertedAtCleared() {
+		_spec.ClearField(delegationadoption.FieldRevertedAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(delegationadoption.FieldUpdated, field.TypeTime, value)
@@ -721,6 +798,68 @@ func (_u *DelegationAdoptionUpdateOne) SetNillableActorID(v *string) *Delegation
 	return _u
 }
 
+// SetRevertedByKind sets the "reverted_by_kind" field.
+func (_u *DelegationAdoptionUpdateOne) SetRevertedByKind(v string) *DelegationAdoptionUpdateOne {
+	_u.mutation.SetRevertedByKind(v)
+	return _u
+}
+
+// SetNillableRevertedByKind sets the "reverted_by_kind" field if the given value is not nil.
+func (_u *DelegationAdoptionUpdateOne) SetNillableRevertedByKind(v *string) *DelegationAdoptionUpdateOne {
+	if v != nil {
+		_u.SetRevertedByKind(*v)
+	}
+	return _u
+}
+
+// SetRevertedByID sets the "reverted_by_id" field.
+func (_u *DelegationAdoptionUpdateOne) SetRevertedByID(v string) *DelegationAdoptionUpdateOne {
+	_u.mutation.SetRevertedByID(v)
+	return _u
+}
+
+// SetNillableRevertedByID sets the "reverted_by_id" field if the given value is not nil.
+func (_u *DelegationAdoptionUpdateOne) SetNillableRevertedByID(v *string) *DelegationAdoptionUpdateOne {
+	if v != nil {
+		_u.SetRevertedByID(*v)
+	}
+	return _u
+}
+
+// SetRevertSummary sets the "revert_summary" field.
+func (_u *DelegationAdoptionUpdateOne) SetRevertSummary(v string) *DelegationAdoptionUpdateOne {
+	_u.mutation.SetRevertSummary(v)
+	return _u
+}
+
+// SetNillableRevertSummary sets the "revert_summary" field if the given value is not nil.
+func (_u *DelegationAdoptionUpdateOne) SetNillableRevertSummary(v *string) *DelegationAdoptionUpdateOne {
+	if v != nil {
+		_u.SetRevertSummary(*v)
+	}
+	return _u
+}
+
+// SetRevertedAt sets the "reverted_at" field.
+func (_u *DelegationAdoptionUpdateOne) SetRevertedAt(v time.Time) *DelegationAdoptionUpdateOne {
+	_u.mutation.SetRevertedAt(v)
+	return _u
+}
+
+// SetNillableRevertedAt sets the "reverted_at" field if the given value is not nil.
+func (_u *DelegationAdoptionUpdateOne) SetNillableRevertedAt(v *time.Time) *DelegationAdoptionUpdateOne {
+	if v != nil {
+		_u.SetRevertedAt(*v)
+	}
+	return _u
+}
+
+// ClearRevertedAt clears the value of the "reverted_at" field.
+func (_u *DelegationAdoptionUpdateOne) ClearRevertedAt() *DelegationAdoptionUpdateOne {
+	_u.mutation.ClearRevertedAt()
+	return _u
+}
+
 // SetUpdated sets the "updated" field.
 func (_u *DelegationAdoptionUpdateOne) SetUpdated(v time.Time) *DelegationAdoptionUpdateOne {
 	_u.mutation.SetUpdated(v)
@@ -892,6 +1031,21 @@ func (_u *DelegationAdoptionUpdateOne) sqlSave(ctx context.Context) (_node *Dele
 	}
 	if value, ok := _u.mutation.ActorID(); ok {
 		_spec.SetField(delegationadoption.FieldActorID, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.RevertedByKind(); ok {
+		_spec.SetField(delegationadoption.FieldRevertedByKind, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.RevertedByID(); ok {
+		_spec.SetField(delegationadoption.FieldRevertedByID, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.RevertSummary(); ok {
+		_spec.SetField(delegationadoption.FieldRevertSummary, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.RevertedAt(); ok {
+		_spec.SetField(delegationadoption.FieldRevertedAt, field.TypeTime, value)
+	}
+	if _u.mutation.RevertedAtCleared() {
+		_spec.ClearField(delegationadoption.FieldRevertedAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(delegationadoption.FieldUpdated, field.TypeTime, value)

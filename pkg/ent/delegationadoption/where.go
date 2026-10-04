@@ -140,6 +140,26 @@ func ActorID(v string) predicate.DelegationAdoption {
 	return predicate.DelegationAdoption(sql.FieldEQ(FieldActorID, v))
 }
 
+// RevertedByKind applies equality check predicate on the "reverted_by_kind" field. It's identical to RevertedByKindEQ.
+func RevertedByKind(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldEQ(FieldRevertedByKind, v))
+}
+
+// RevertedByID applies equality check predicate on the "reverted_by_id" field. It's identical to RevertedByIDEQ.
+func RevertedByID(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldEQ(FieldRevertedByID, v))
+}
+
+// RevertSummary applies equality check predicate on the "revert_summary" field. It's identical to RevertSummaryEQ.
+func RevertSummary(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldEQ(FieldRevertSummary, v))
+}
+
+// RevertedAt applies equality check predicate on the "reverted_at" field. It's identical to RevertedAtEQ.
+func RevertedAt(v time.Time) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldEQ(FieldRevertedAt, v))
+}
+
 // Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
 func Created(v time.Time) predicate.DelegationAdoption {
 	return predicate.DelegationAdoption(sql.FieldEQ(FieldCreated, v))
@@ -1223,6 +1243,251 @@ func ActorIDEqualFold(v string) predicate.DelegationAdoption {
 // ActorIDContainsFold applies the ContainsFold predicate on the "actor_id" field.
 func ActorIDContainsFold(v string) predicate.DelegationAdoption {
 	return predicate.DelegationAdoption(sql.FieldContainsFold(FieldActorID, v))
+}
+
+// RevertedByKindEQ applies the EQ predicate on the "reverted_by_kind" field.
+func RevertedByKindEQ(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldEQ(FieldRevertedByKind, v))
+}
+
+// RevertedByKindNEQ applies the NEQ predicate on the "reverted_by_kind" field.
+func RevertedByKindNEQ(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldNEQ(FieldRevertedByKind, v))
+}
+
+// RevertedByKindIn applies the In predicate on the "reverted_by_kind" field.
+func RevertedByKindIn(vs ...string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldIn(FieldRevertedByKind, vs...))
+}
+
+// RevertedByKindNotIn applies the NotIn predicate on the "reverted_by_kind" field.
+func RevertedByKindNotIn(vs ...string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldNotIn(FieldRevertedByKind, vs...))
+}
+
+// RevertedByKindGT applies the GT predicate on the "reverted_by_kind" field.
+func RevertedByKindGT(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldGT(FieldRevertedByKind, v))
+}
+
+// RevertedByKindGTE applies the GTE predicate on the "reverted_by_kind" field.
+func RevertedByKindGTE(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldGTE(FieldRevertedByKind, v))
+}
+
+// RevertedByKindLT applies the LT predicate on the "reverted_by_kind" field.
+func RevertedByKindLT(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldLT(FieldRevertedByKind, v))
+}
+
+// RevertedByKindLTE applies the LTE predicate on the "reverted_by_kind" field.
+func RevertedByKindLTE(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldLTE(FieldRevertedByKind, v))
+}
+
+// RevertedByKindContains applies the Contains predicate on the "reverted_by_kind" field.
+func RevertedByKindContains(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldContains(FieldRevertedByKind, v))
+}
+
+// RevertedByKindHasPrefix applies the HasPrefix predicate on the "reverted_by_kind" field.
+func RevertedByKindHasPrefix(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldHasPrefix(FieldRevertedByKind, v))
+}
+
+// RevertedByKindHasSuffix applies the HasSuffix predicate on the "reverted_by_kind" field.
+func RevertedByKindHasSuffix(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldHasSuffix(FieldRevertedByKind, v))
+}
+
+// RevertedByKindEqualFold applies the EqualFold predicate on the "reverted_by_kind" field.
+func RevertedByKindEqualFold(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldEqualFold(FieldRevertedByKind, v))
+}
+
+// RevertedByKindContainsFold applies the ContainsFold predicate on the "reverted_by_kind" field.
+func RevertedByKindContainsFold(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldContainsFold(FieldRevertedByKind, v))
+}
+
+// RevertedByIDEQ applies the EQ predicate on the "reverted_by_id" field.
+func RevertedByIDEQ(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldEQ(FieldRevertedByID, v))
+}
+
+// RevertedByIDNEQ applies the NEQ predicate on the "reverted_by_id" field.
+func RevertedByIDNEQ(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldNEQ(FieldRevertedByID, v))
+}
+
+// RevertedByIDIn applies the In predicate on the "reverted_by_id" field.
+func RevertedByIDIn(vs ...string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldIn(FieldRevertedByID, vs...))
+}
+
+// RevertedByIDNotIn applies the NotIn predicate on the "reverted_by_id" field.
+func RevertedByIDNotIn(vs ...string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldNotIn(FieldRevertedByID, vs...))
+}
+
+// RevertedByIDGT applies the GT predicate on the "reverted_by_id" field.
+func RevertedByIDGT(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldGT(FieldRevertedByID, v))
+}
+
+// RevertedByIDGTE applies the GTE predicate on the "reverted_by_id" field.
+func RevertedByIDGTE(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldGTE(FieldRevertedByID, v))
+}
+
+// RevertedByIDLT applies the LT predicate on the "reverted_by_id" field.
+func RevertedByIDLT(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldLT(FieldRevertedByID, v))
+}
+
+// RevertedByIDLTE applies the LTE predicate on the "reverted_by_id" field.
+func RevertedByIDLTE(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldLTE(FieldRevertedByID, v))
+}
+
+// RevertedByIDContains applies the Contains predicate on the "reverted_by_id" field.
+func RevertedByIDContains(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldContains(FieldRevertedByID, v))
+}
+
+// RevertedByIDHasPrefix applies the HasPrefix predicate on the "reverted_by_id" field.
+func RevertedByIDHasPrefix(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldHasPrefix(FieldRevertedByID, v))
+}
+
+// RevertedByIDHasSuffix applies the HasSuffix predicate on the "reverted_by_id" field.
+func RevertedByIDHasSuffix(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldHasSuffix(FieldRevertedByID, v))
+}
+
+// RevertedByIDEqualFold applies the EqualFold predicate on the "reverted_by_id" field.
+func RevertedByIDEqualFold(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldEqualFold(FieldRevertedByID, v))
+}
+
+// RevertedByIDContainsFold applies the ContainsFold predicate on the "reverted_by_id" field.
+func RevertedByIDContainsFold(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldContainsFold(FieldRevertedByID, v))
+}
+
+// RevertSummaryEQ applies the EQ predicate on the "revert_summary" field.
+func RevertSummaryEQ(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldEQ(FieldRevertSummary, v))
+}
+
+// RevertSummaryNEQ applies the NEQ predicate on the "revert_summary" field.
+func RevertSummaryNEQ(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldNEQ(FieldRevertSummary, v))
+}
+
+// RevertSummaryIn applies the In predicate on the "revert_summary" field.
+func RevertSummaryIn(vs ...string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldIn(FieldRevertSummary, vs...))
+}
+
+// RevertSummaryNotIn applies the NotIn predicate on the "revert_summary" field.
+func RevertSummaryNotIn(vs ...string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldNotIn(FieldRevertSummary, vs...))
+}
+
+// RevertSummaryGT applies the GT predicate on the "revert_summary" field.
+func RevertSummaryGT(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldGT(FieldRevertSummary, v))
+}
+
+// RevertSummaryGTE applies the GTE predicate on the "revert_summary" field.
+func RevertSummaryGTE(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldGTE(FieldRevertSummary, v))
+}
+
+// RevertSummaryLT applies the LT predicate on the "revert_summary" field.
+func RevertSummaryLT(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldLT(FieldRevertSummary, v))
+}
+
+// RevertSummaryLTE applies the LTE predicate on the "revert_summary" field.
+func RevertSummaryLTE(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldLTE(FieldRevertSummary, v))
+}
+
+// RevertSummaryContains applies the Contains predicate on the "revert_summary" field.
+func RevertSummaryContains(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldContains(FieldRevertSummary, v))
+}
+
+// RevertSummaryHasPrefix applies the HasPrefix predicate on the "revert_summary" field.
+func RevertSummaryHasPrefix(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldHasPrefix(FieldRevertSummary, v))
+}
+
+// RevertSummaryHasSuffix applies the HasSuffix predicate on the "revert_summary" field.
+func RevertSummaryHasSuffix(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldHasSuffix(FieldRevertSummary, v))
+}
+
+// RevertSummaryEqualFold applies the EqualFold predicate on the "revert_summary" field.
+func RevertSummaryEqualFold(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldEqualFold(FieldRevertSummary, v))
+}
+
+// RevertSummaryContainsFold applies the ContainsFold predicate on the "revert_summary" field.
+func RevertSummaryContainsFold(v string) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldContainsFold(FieldRevertSummary, v))
+}
+
+// RevertedAtEQ applies the EQ predicate on the "reverted_at" field.
+func RevertedAtEQ(v time.Time) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldEQ(FieldRevertedAt, v))
+}
+
+// RevertedAtNEQ applies the NEQ predicate on the "reverted_at" field.
+func RevertedAtNEQ(v time.Time) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldNEQ(FieldRevertedAt, v))
+}
+
+// RevertedAtIn applies the In predicate on the "reverted_at" field.
+func RevertedAtIn(vs ...time.Time) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldIn(FieldRevertedAt, vs...))
+}
+
+// RevertedAtNotIn applies the NotIn predicate on the "reverted_at" field.
+func RevertedAtNotIn(vs ...time.Time) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldNotIn(FieldRevertedAt, vs...))
+}
+
+// RevertedAtGT applies the GT predicate on the "reverted_at" field.
+func RevertedAtGT(v time.Time) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldGT(FieldRevertedAt, v))
+}
+
+// RevertedAtGTE applies the GTE predicate on the "reverted_at" field.
+func RevertedAtGTE(v time.Time) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldGTE(FieldRevertedAt, v))
+}
+
+// RevertedAtLT applies the LT predicate on the "reverted_at" field.
+func RevertedAtLT(v time.Time) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldLT(FieldRevertedAt, v))
+}
+
+// RevertedAtLTE applies the LTE predicate on the "reverted_at" field.
+func RevertedAtLTE(v time.Time) predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldLTE(FieldRevertedAt, v))
+}
+
+// RevertedAtIsNil applies the IsNil predicate on the "reverted_at" field.
+func RevertedAtIsNil() predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldIsNull(FieldRevertedAt))
+}
+
+// RevertedAtNotNil applies the NotNil predicate on the "reverted_at" field.
+func RevertedAtNotNil() predicate.DelegationAdoption {
+	return predicate.DelegationAdoption(sql.FieldNotNull(FieldRevertedAt))
 }
 
 // CreatedEQ applies the EQ predicate on the "created" field.

@@ -16,6 +16,7 @@ package entadapter
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationadoption"
@@ -66,13 +67,84 @@ func entDelegationAdoptionToStore(e *ent.DelegationAdoption) *store.DelegationAd
 		AfterSummary:      e.AfterSummary,
 		ActorKind:         e.ActorKind,
 		ActorID:           e.ActorID,
+		RevertedByKind:    e.RevertedByKind,
+		RevertedByID:      e.RevertedByID,
+		RevertSummary:     e.RevertSummary,
+		RevertedAt:        e.RevertedAt,
 		CreatedAt:         e.Created,
 		UpdatedAt:         e.Updated,
 	}
 }
 
+func invalidAdoption(format string, args ...any) error {
+	return fmt.Errorf("%w: delegation adoption: %s", store.ErrInvalidInput, fmt.Sprintf(format, args...))
+}
+
+// validateDelegationAdoption checks the fields every write must satisfy:
+// required identifiers, a known origin and status, and the edge IDs and
+// revert fields each status implies. It returns store.ErrInvalidInput.
+func validateDelegationAdoption(rec *store.DelegationAdoption) error {
+	if rec == nil {
+		return invalidAdoption("nil record")
+	}
+	if rec.CohortID == "" {
+		return invalidAdoption("cohort ID is required")
+	}
+	if rec.DelegateID == "" {
+		return invalidAdoption("delegate ID is required")
+	}
+	switch rec.Origin {
+	case store.DelegationAdoptionOriginBoot, store.DelegationAdoptionOriginAdmin:
+	default:
+		return invalidAdoption("unknown origin %q", rec.Origin)
+	}
+	if rec.PolicyVersion < 0 || rec.Depth < 0 {
+		return invalidAdoption("policy version and depth must not be negative")
+	}
+	reverted := rec.RevertedByKind != "" || rec.RevertedByID != "" || rec.RevertSummary != "" || rec.RevertedAt != nil
+	switch rec.Status {
+	case store.DelegationAdoptionPending:
+		if rec.OriginalEdgeID == "" || rec.AdoptedEdgeID != "" {
+			return invalidAdoption("a pending record names its original edge and no adopted edge")
+		}
+	case store.DelegationAdoptionAdopted:
+		if rec.OriginalEdgeID == "" || rec.AdoptedEdgeID == "" || rec.OriginalEdgeID == rec.AdoptedEdgeID {
+			return invalidAdoption("an adopted record names distinct original and adopted edges")
+		}
+	case store.DelegationAdoptionRecognized, store.DelegationAdoptionRecognizedAbovePolicy:
+		if rec.AdoptedEdgeID == "" {
+			return invalidAdoption("a recognized record names its adopted edge")
+		}
+	case store.DelegationAdoptionExcluded:
+		if rec.Reason == "" || rec.AdoptedEdgeID != "" {
+			return invalidAdoption("an excluded record has a reason and no adopted edge")
+		}
+	case store.DelegationAdoptionSkippedChanged:
+		if rec.AdoptedEdgeID != "" {
+			return invalidAdoption("a skipped record has no adopted edge")
+		}
+	case store.DelegationAdoptionReverted:
+		if rec.OriginalEdgeID == "" || rec.AdoptedEdgeID == "" {
+			return invalidAdoption("a reverted record names its original and adopted edges")
+		}
+		if rec.RevertedByKind == "" || rec.RevertedByID == "" || rec.RevertedAt == nil {
+			return invalidAdoption("a reverted record names who reverted it and when")
+		}
+		return nil
+	default:
+		return invalidAdoption("unknown status %q", rec.Status)
+	}
+	if reverted {
+		return invalidAdoption("revert fields are set only on a reverted record")
+	}
+	return nil
+}
+
 // CreateDelegationAdoption inserts rec. ID is generated when empty.
 func (s *DelegationAdoptionStore) CreateDelegationAdoption(ctx context.Context, rec *store.DelegationAdoption) error {
+	if err := validateDelegationAdoption(rec); err != nil {
+		return err
+	}
 	builder := s.client.DelegationAdoption.Create().
 		SetCohortID(rec.CohortID).
 		SetOrigin(rec.Origin).
@@ -90,7 +162,11 @@ func (s *DelegationAdoptionStore) CreateDelegationAdoption(ctx context.Context, 
 		SetBeforeFingerprint(rec.BeforeFingerprint).
 		SetAfterSummary(rec.AfterSummary).
 		SetActorKind(rec.ActorKind).
-		SetActorID(rec.ActorID)
+		SetActorID(rec.ActorID).
+		SetRevertedByKind(rec.RevertedByKind).
+		SetRevertedByID(rec.RevertedByID).
+		SetRevertSummary(rec.RevertSummary).
+		SetNillableRevertedAt(rec.RevertedAt)
 	if rec.ID != "" {
 		uid, err := parseUUID(rec.ID)
 		if err != nil {
@@ -110,6 +186,9 @@ func (s *DelegationAdoptionStore) CreateDelegationAdoption(ctx context.Context, 
 
 // UpdateDelegationAdoption writes the mutable fields of rec by ID.
 func (s *DelegationAdoptionStore) UpdateDelegationAdoption(ctx context.Context, rec *store.DelegationAdoption) error {
+	if err := validateDelegationAdoption(rec); err != nil {
+		return err
+	}
 	uid, err := parseGetID(rec.ID)
 	if err != nil {
 		return err
@@ -119,7 +198,15 @@ func (s *DelegationAdoptionStore) UpdateDelegationAdoption(ctx context.Context, 
 		SetReason(rec.Reason).
 		SetAfterSummary(rec.AfterSummary).
 		SetActorKind(rec.ActorKind).
-		SetActorID(rec.ActorID)
+		SetActorID(rec.ActorID).
+		SetRevertedByKind(rec.RevertedByKind).
+		SetRevertedByID(rec.RevertedByID).
+		SetRevertSummary(rec.RevertSummary)
+	if rec.RevertedAt == nil {
+		upd.ClearRevertedAt()
+	} else {
+		upd.SetRevertedAt(*rec.RevertedAt)
+	}
 	if rec.OriginalEdgeID == "" {
 		upd.ClearOriginalEdgeID()
 	} else {
@@ -172,6 +259,9 @@ func (s *DelegationAdoptionStore) ListDelegationAdoptions(ctx context.Context, f
 	}
 	if filter.DelegateID != "" {
 		q = q.Where(delegationadoption.DelegateIDEQ(filter.DelegateID))
+	}
+	if filter.AdoptedEdgeID != "" {
+		q = q.Where(delegationadoption.AdoptedEdgeIDEQ(filter.AdoptedEdgeID))
 	}
 	total, err := q.Clone().Count(ctx)
 	if err != nil {

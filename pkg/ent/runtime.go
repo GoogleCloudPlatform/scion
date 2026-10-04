@@ -698,12 +698,24 @@ func init() {
 	delegationadoptionDescActorID := delegationadoptionFields[17].Descriptor()
 	// delegationadoption.DefaultActorID holds the default value on creation for the actor_id field.
 	delegationadoption.DefaultActorID = delegationadoptionDescActorID.Default.(string)
+	// delegationadoptionDescRevertedByKind is the schema descriptor for reverted_by_kind field.
+	delegationadoptionDescRevertedByKind := delegationadoptionFields[18].Descriptor()
+	// delegationadoption.DefaultRevertedByKind holds the default value on creation for the reverted_by_kind field.
+	delegationadoption.DefaultRevertedByKind = delegationadoptionDescRevertedByKind.Default.(string)
+	// delegationadoptionDescRevertedByID is the schema descriptor for reverted_by_id field.
+	delegationadoptionDescRevertedByID := delegationadoptionFields[19].Descriptor()
+	// delegationadoption.DefaultRevertedByID holds the default value on creation for the reverted_by_id field.
+	delegationadoption.DefaultRevertedByID = delegationadoptionDescRevertedByID.Default.(string)
+	// delegationadoptionDescRevertSummary is the schema descriptor for revert_summary field.
+	delegationadoptionDescRevertSummary := delegationadoptionFields[20].Descriptor()
+	// delegationadoption.DefaultRevertSummary holds the default value on creation for the revert_summary field.
+	delegationadoption.DefaultRevertSummary = delegationadoptionDescRevertSummary.Default.(string)
 	// delegationadoptionDescCreated is the schema descriptor for created field.
-	delegationadoptionDescCreated := delegationadoptionFields[18].Descriptor()
+	delegationadoptionDescCreated := delegationadoptionFields[22].Descriptor()
 	// delegationadoption.DefaultCreated holds the default value on creation for the created field.
 	delegationadoption.DefaultCreated = delegationadoptionDescCreated.Default.(func() time.Time)
 	// delegationadoptionDescUpdated is the schema descriptor for updated field.
-	delegationadoptionDescUpdated := delegationadoptionFields[19].Descriptor()
+	delegationadoptionDescUpdated := delegationadoptionFields[23].Descriptor()
 	// delegationadoption.DefaultUpdated holds the default value on creation for the updated field.
 	delegationadoption.DefaultUpdated = delegationadoptionDescUpdated.Default.(func() time.Time)
 	// delegationadoption.UpdateDefaultUpdated holds the default value on update for the updated field.

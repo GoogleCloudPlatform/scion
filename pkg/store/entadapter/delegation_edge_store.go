@@ -270,24 +270,32 @@ func (s *DelegationEdgeStore) ListAllDelegationEdgesForDelegate(ctx context.Cont
 }
 
 // DeactivateDelegationEdgeGuarded deactivates edgeID with cause and opID when
-// it is active and satisfies guard. The structural predicates are part of
-// the UPDATE's WHERE clause, so a concurrent change between the read and the
-// write affects zero rows rather than deactivating a changed edge.
+// it is active and satisfies guard. Every guard predicate, including the
+// updated time, is part of the UPDATE's WHERE clause, so a concurrent change
+// between the caller's read and the write affects zero rows rather than
+// deactivating a changed edge. The existence read only distinguishes
+// ErrNotFound from an unmet precondition. A guard with both Unrecorded and
+// Recorded set, an empty cause or an empty opID returns ErrInvalidInput.
 func (s *DelegationEdgeStore) DeactivateDelegationEdgeGuarded(ctx context.Context, edgeID string, guard store.DelegationEdgeDeactivateGuard, cause store.EdgeDeactivationCause, opID string) (bool, error) {
+	if guard.Unrecorded && guard.Recorded {
+		return false, fmt.Errorf("%w: guard cannot require both unrecorded and recorded provenance", store.ErrInvalidInput)
+	}
+	if cause == "" || opID == "" {
+		return false, fmt.Errorf("%w: guarded deactivation requires a cause and an operation ID", store.ErrInvalidInput)
+	}
 	uid, err := parseGetID(edgeID)
 	if err != nil {
 		return false, err
 	}
-	current, err := s.client.DelegationEdge.Get(ctx, uid)
-	if err != nil {
+	if _, err := s.client.DelegationEdge.Get(ctx, uid); err != nil {
 		return false, mapError(err)
-	}
-	if guard.UpdatedAt != nil && !current.Updated.Equal(*guard.UpdatedAt) {
-		return false, nil
 	}
 	preds := []predicate.DelegationEdge{
 		delegationedge.IDEQ(uid),
 		delegationedge.ActiveEQ(true),
+	}
+	if guard.UpdatedAt != nil {
+		preds = append(preds, delegationedge.UpdatedEQ(*guard.UpdatedAt))
 	}
 	if guard.Unrecorded {
 		preds = append(preds,

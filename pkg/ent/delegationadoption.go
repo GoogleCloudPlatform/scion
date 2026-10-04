@@ -52,6 +52,14 @@ type DelegationAdoption struct {
 	ActorKind string `json:"actor_kind,omitempty"`
 	// ActorID holds the value of the "actor_id" field.
 	ActorID string `json:"actor_id,omitempty"`
+	// RevertedByKind holds the value of the "reverted_by_kind" field.
+	RevertedByKind string `json:"reverted_by_kind,omitempty"`
+	// RevertedByID holds the value of the "reverted_by_id" field.
+	RevertedByID string `json:"reverted_by_id,omitempty"`
+	// RevertSummary holds the value of the "revert_summary" field.
+	RevertSummary string `json:"revert_summary,omitempty"`
+	// RevertedAt holds the value of the "reverted_at" field.
+	RevertedAt *time.Time `json:"reverted_at,omitempty"`
 	// Created holds the value of the "created" field.
 	Created time.Time `json:"created,omitempty"`
 	// Updated holds the value of the "updated" field.
@@ -66,9 +74,9 @@ func (*DelegationAdoption) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case delegationadoption.FieldPolicyVersion, delegationadoption.FieldDepth:
 			values[i] = new(sql.NullInt64)
-		case delegationadoption.FieldCohortID, delegationadoption.FieldOrigin, delegationadoption.FieldOriginalEdgeID, delegationadoption.FieldAdoptedEdgeID, delegationadoption.FieldDelegateID, delegationadoption.FieldDelegatorType, delegationadoption.FieldDelegatorID, delegationadoption.FieldScopeID, delegationadoption.FieldRole, delegationadoption.FieldStatus, delegationadoption.FieldReason, delegationadoption.FieldBeforeFingerprint, delegationadoption.FieldAfterSummary, delegationadoption.FieldActorKind, delegationadoption.FieldActorID:
+		case delegationadoption.FieldCohortID, delegationadoption.FieldOrigin, delegationadoption.FieldOriginalEdgeID, delegationadoption.FieldAdoptedEdgeID, delegationadoption.FieldDelegateID, delegationadoption.FieldDelegatorType, delegationadoption.FieldDelegatorID, delegationadoption.FieldScopeID, delegationadoption.FieldRole, delegationadoption.FieldStatus, delegationadoption.FieldReason, delegationadoption.FieldBeforeFingerprint, delegationadoption.FieldAfterSummary, delegationadoption.FieldActorKind, delegationadoption.FieldActorID, delegationadoption.FieldRevertedByKind, delegationadoption.FieldRevertedByID, delegationadoption.FieldRevertSummary:
 			values[i] = new(sql.NullString)
-		case delegationadoption.FieldCreated, delegationadoption.FieldUpdated:
+		case delegationadoption.FieldRevertedAt, delegationadoption.FieldCreated, delegationadoption.FieldUpdated:
 			values[i] = new(sql.NullTime)
 		case delegationadoption.FieldID:
 			values[i] = new(uuid.UUID)
@@ -197,6 +205,31 @@ func (_m *DelegationAdoption) assignValues(columns []string, values []any) error
 			} else if value.Valid {
 				_m.ActorID = value.String
 			}
+		case delegationadoption.FieldRevertedByKind:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field reverted_by_kind", values[i])
+			} else if value.Valid {
+				_m.RevertedByKind = value.String
+			}
+		case delegationadoption.FieldRevertedByID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field reverted_by_id", values[i])
+			} else if value.Valid {
+				_m.RevertedByID = value.String
+			}
+		case delegationadoption.FieldRevertSummary:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field revert_summary", values[i])
+			} else if value.Valid {
+				_m.RevertSummary = value.String
+			}
+		case delegationadoption.FieldRevertedAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field reverted_at", values[i])
+			} else if value.Valid {
+				_m.RevertedAt = new(time.Time)
+				*_m.RevertedAt = value.Time
+			}
 		case delegationadoption.FieldCreated:
 			if value, ok := values[i].(*sql.NullTime); !ok {
 				return fmt.Errorf("unexpected type %T for field created", values[i])
@@ -299,6 +332,20 @@ func (_m *DelegationAdoption) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("actor_id=")
 	builder.WriteString(_m.ActorID)
+	builder.WriteString(", ")
+	builder.WriteString("reverted_by_kind=")
+	builder.WriteString(_m.RevertedByKind)
+	builder.WriteString(", ")
+	builder.WriteString("reverted_by_id=")
+	builder.WriteString(_m.RevertedByID)
+	builder.WriteString(", ")
+	builder.WriteString("revert_summary=")
+	builder.WriteString(_m.RevertSummary)
+	builder.WriteString(", ")
+	if v := _m.RevertedAt; v != nil {
+		builder.WriteString("reverted_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
 	builder.WriteString(", ")
 	builder.WriteString("created=")
 	builder.WriteString(_m.Created.Format(time.ANSIC))

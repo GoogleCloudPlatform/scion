@@ -3131,7 +3131,12 @@ const (
 )
 
 // DelegationEdgeDeactivateGuard is the precondition of a guarded edge
-// deactivation. The row must be active in every case.
+// deactivation. The row must be active in every case. At most one of
+// Unrecorded and Recorded may be set. The zero guard (neither set, no
+// UpdatedAt) places no condition beyond the row being active, so it
+// deactivates any active edge; callers that replace an edge by provenance
+// set Unrecorded or Recorded, and the store rejects both set together with
+// ErrInvalidInput.
 type DelegationEdgeDeactivateGuard struct {
 	// Unrecorded requires provenance version 0 and an unrecorded ceiling.
 	Unrecorded bool
@@ -3177,7 +3182,8 @@ const (
 
 // DelegationAdoption is one examined edge of a delegation-provenance
 // adoption (boot snapshot or admin commit). It is evidence only and is never
-// read by authorization.
+// read by authorization. Records are retained indefinitely and carry no
+// foreign keys.
 type DelegationAdoption struct {
 	ID                string                   `json:"id"`
 	CohortID          string                   `json:"cohortId"`
@@ -3197,8 +3203,14 @@ type DelegationAdoption struct {
 	AfterSummary      string                   `json:"afterSummary,omitempty"`
 	ActorKind         string                   `json:"actorKind,omitempty"`
 	ActorID           string                   `json:"actorId,omitempty"`
-	CreatedAt         time.Time                `json:"createdAt"`
-	UpdatedAt         time.Time                `json:"updatedAt"`
+	// RevertedBy* and RevertSummary are set by a revert. Actor* and
+	// AfterSummary keep the adopter and the adopted edge's summary.
+	RevertedByKind string     `json:"revertedByKind,omitempty"`
+	RevertedByID   string     `json:"revertedById,omitempty"`
+	RevertSummary  string     `json:"revertSummary,omitempty"`
+	RevertedAt     *time.Time `json:"revertedAt,omitempty"`
+	CreatedAt      time.Time  `json:"createdAt"`
+	UpdatedAt      time.Time  `json:"updatedAt"`
 }
 
 // DelegationAdoptionFilter selects adoption records. Empty fields do not
@@ -3210,8 +3222,10 @@ type DelegationAdoptionFilter struct {
 	Reason     string
 	ScopeID    string
 	DelegateID string
-	Limit      int
-	Offset     int
+	// AdoptedEdgeID selects the records that point at one recorded edge.
+	AdoptedEdgeID string
+	Limit         int
+	Offset        int
 }
 
 // =============================================================================
