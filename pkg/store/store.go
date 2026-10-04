@@ -754,6 +754,11 @@ type AgentStatusUpdate struct {
 	// status report from an external caller (an agent, or a user with
 	// update access) cannot set it through the wire API.
 	ClearExit bool `json:"-"`
+	// ClearMessageIf, when non-empty and Message is empty, clears the
+	// agent's message only if it still equals this value. A lifecycle path
+	// that set a transient notice uses it to retire that notice without
+	// overwriting a newer message. Internal to the hub — json:"-".
+	ClearMessageIf string `json:"-"`
 }
 
 // ProjectStore defines project-related persistence operations.

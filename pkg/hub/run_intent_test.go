@@ -160,6 +160,7 @@ func TestRunIntent_OfflineStopIsQueued(t *testing.T) {
 	assert.Empty(t, pending)
 	got = requireRunIntent(t, s, agent.ID, store.RunIntentStopped)
 	assert.Equal(t, "stopped", got.ContainerStatus)
+	assert.Empty(t, got.Message, "the queued-stop notice is cleared once the stop is applied")
 }
 
 // A queued stop is drained locally when this node holds the broker's
@@ -198,6 +199,7 @@ func TestRunIntent_OfflineStopDrainsLocallyWhenBrokerConnected(t *testing.T) {
 	}, 10*time.Second, 20*time.Millisecond, "the local drain applies the queued stop")
 	got := requireRunIntent(t, s, agent.ID, store.RunIntentStopped)
 	assert.Equal(t, "stopped", got.ContainerStatus)
+	assert.Empty(t, got.Message, "the queued-stop notice is cleared once the stop is applied")
 }
 
 // A start recorded after an offline stop, before the broker's reconnect

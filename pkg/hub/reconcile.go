@@ -228,10 +228,13 @@ func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (
 	if intentAt != nil {
 		// The queued stop has now been applied: release the per-broker
 		// reservation as a direct stop does, and replace the stop_queued
-		// container status.
+		// container status and the queued-stop notice the offline stop set.
 		s.releaseBrokerQuota(ctx, agent)
 		if agent.ContainerStatus == containerStatusStopQueued {
-			if err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{ContainerStatus: "stopped"}); err != nil {
+			if err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+				ContainerStatus: "stopped",
+				ClearMessageIf:  offlineStopMessage,
+			}); err != nil {
 				s.agentLifecycleLog.Warn("reconcile: failed to update container status after queued stop",
 					"id", d.ID, "agent_id", agent.ID, "error", err)
 			}

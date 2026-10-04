@@ -1364,6 +1364,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		su.ExitReason = ""
 		su.Message = ""
 		su.ClearExit = false
+		su.ClearMessageIf = ""
 	}
 
 	upd := tx.Agent.UpdateOneID(uid).
@@ -1447,6 +1448,8 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 
 	if su.Message != "" {
 		upd.SetMessage(su.Message)
+	} else if su.ClearMessageIf != "" && current.Message == su.ClearMessageIf {
+		upd.SetMessage("")
 	}
 	if su.ConnectionState != "" {
 		upd.SetConnectionState(su.ConnectionState)
