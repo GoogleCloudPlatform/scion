@@ -2186,8 +2186,8 @@ func (s *Server) createAgentInProject(
 			intent = store.RunIntentStopped
 		}
 		if _, err := s.recordRunIntent(ctx, agent, intent); err != nil {
-			s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, nil)
-			writeErrorFromErr(w, err, "")
+			corrID := cleanup(createRollback{Stage: createStageRunIntent, Cause: err})
+			writeCreateFailure(w, corrID, func() { writeErrorFromErr(w, err, "") })
 			return
 		}
 		if !req.ProvisionOnly {

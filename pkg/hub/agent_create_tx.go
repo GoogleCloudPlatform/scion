@@ -129,6 +129,7 @@ const (
 	createStageStorage           = "storage"
 	createStageUploadURL         = "upload_url"
 	createStageManaged           = "managed"
+	createStageRunIntent         = "run_intent"
 	createStageDispatchEnvGather = "dispatch_env_gather"
 	createStageDispatch          = "dispatch"
 	createStageMissingEnv        = "missing_env"
