@@ -54,3 +54,15 @@
 
 `release-notes/2026-09-21.md` keeps its profile timezone entry, because it
 is a historical record.
+
+## Review round 1 fixes
+
+Each fix was checked against the code at upstream 92c805cf:
+
+- **Local mode, empty `TZ`.** The host passthrough applies only to a template or inline config. `resolveAuthEnvOverlay` copies a settings harness-config `TZ: ""` into `opts.Env`, and `buildAgentEnv` applies it after the passthrough, so the key is omitted with a warning. A harness-config value also outranks a template `TZ`.
+- **Hub default over the API.** `PUT /api/v1/admin/server-config` takes the flat top-level `default_timezone` field (`ServerConfigUpdateRequest`). `agent_defaults.default_timezone` is the storage key. `server-config.md` says so too.
+- **`utc-timestamp-normalize`.** The startup check and the boot repair are SQLite-only. Postgres has no startup check.
+- **Broker drop warning.** No warning is emitted for a value equal to the one the Hub sent (`warnDroppedBrokerEnv`).
+- **`explicitTimezone` on a deleted agent** returns `409`. Updated on this page and in `api.md`.
+- **Profile `env`.** The key no longer exists. The page and `orchestrator-settings.md` now name only `harness_overrides` env.
+- **Re-run.** The `applied-config-tz-cleanup` row keeps "safe to re-run". The change that makes the Hub accept a re-run of it is ptone/scion#2928. A new note says the Maintenance page offers Run only for pending or failed migrations, so a completed one is re-run through the API.

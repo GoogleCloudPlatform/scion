@@ -60,7 +60,7 @@ For an agent dispatched by a Hub, the Hub is the only source of `TZ`. On create,
 
 ### Hub default timezone
 
-Admins set it in the web dashboard under **Admin → Server Config**, in the **Agent Defaults** card (field **Default Timezone**), or through `PUT /api/v1/admin/server-config` (`agent_defaults.default_timezone`).
+Admins set it in the web dashboard under **Admin → Server Config**, in the **Agent Defaults** card (field **Default Timezone**), or through `PUT /api/v1/admin/server-config` with the top-level field `default_timezone` (stored as the Layer-1 key `agent_defaults.default_timezone`).
 
 - An invalid name, or `Local`, is rejected with `422`.
 - Empty means no Hub default.
@@ -76,13 +76,13 @@ scion hub env set --broker=<broker> --always TZ Europe/Berlin
 
 ### What does not set `TZ`
 
-- **Runtime profiles.** There is no profile step. A `TZ` in a profile's `env` or `harness_overrides` map is not used (see [Removed: profile `timezone`](/scion/reference/orchestrator-settings/#removed-profile-timezone)).
+- **Runtime profiles.** There is no profile step. A `TZ` in a profile's `harness_overrides` env is not used (profiles have no `env` key) (see [Removed: profile `timezone`](/scion/reference/orchestrator-settings/#removed-profile-timezone)).
 - **Broker-local values.** The Runtime Broker ignores `TZ` from:
   - broker-local templates;
   - the broker settings' harness-config entry `env`;
   - the agent's persisted `scion-agent.json`.
 
-  It logs a warning, and adds a start warning, for each non-empty value it drops. An empty `TZ: ""` marker never passes the broker host's `TZ` through.
+  It logs a warning, and adds a start warning, for each non-empty value it drops that differs from the value the Hub sent. An empty `TZ: ""` marker never passes the broker host's `TZ` through.
 - **`config.env` on update.** A `TZ` key in `config.env` on an agent `PATCH` is ignored with the warning `TZ in config.env is ignored; use explicitTimezone`.
 - **Secrets.** A secret that targets `TZ` is dropped with a warning.
 
@@ -95,7 +95,7 @@ A pin is the agent's explicit timezone. It is set in three ways:
   - an IANA name pins the agent; an invalid name, or `Local`, returns `400`;
   - `""` unpins it, and the agent follows steps 2-5 from then on.
 
-  The field is accepted in any phase. A running container keeps its `TZ` until the next start, and the response warns `explicitTimezone applies at the agent's next start`. The response also carries `resolvedTimezone` (the `TZ` the next start sends, `""` when none) and `timezoneSource` (the step in the table above). See the [Agents API](/scion/reference/api/).
+  The field is accepted in any phase except on a deleted agent (`409`). A running container keeps its `TZ` until the next start, and the response warns `explicitTimezone applies at the agent's next start`. The response also carries `resolvedTimezone` (the `TZ` the next start sends, `""` when none) and `timezoneSource` (the step in the table above). See the [Agents API](/scion/reference/api/).
 - **Later, in the web dashboard.** The agent's **Configure** page has a **Timezone** row. It shows the resolved zone and its source, and offers **Pin** and **Unpin**.
 
 An agent created by an older Hub may have a `TZ` saved in its applied config env. The Hub converts that value to a pin (source `legacy`) the first time it reads the agent's timezone. The `applied-config-tz-cleanup` operation does the same for every agent in one pass (see [Operator steps](#operator-steps)).
@@ -126,7 +126,7 @@ Without a Hub there is no `TZ` chain, no Hub default timezone and no display pre
   - the harness-config `env` in `settings.yaml`, including a profile's `harness_overrides` entry for that harness config;
   - an inline config passed with `scion create --config`.
 
-  An empty `TZ: ""` entry passes your machine's `TZ` through. With no `TZ` in any of them, the container uses the image default (UTC).
+  An empty `TZ: ""` in a template or an inline config passes your machine's `TZ` through. In a `settings.yaml` harness-config entry (or a profile's `harness_overrides`), an empty `TZ` is omitted with a warning, and a value there takes precedence over a template `TZ`. With no `TZ` in any of them, the container uses the image default (UTC).
 - **CLI display** uses your local zone, with `--tz` and `--utc` as above.
 
 A Hub-created agent that is later started with a local `scion start` uses the `TZ` saved in its `scion-agent.json` again.
@@ -137,8 +137,10 @@ Two maintenance migrations relate to times. An admin runs them from **Admin → 
 
 | Key | What it does | When to run it |
 | :--- | :--- | :--- |
-| `utc-timestamp-normalize` | Rewrites stored timestamps to canonical UTC, so that ordering and paging are exact. On SQLite it covers every table time column and the times inside JSON fields; on Postgres, the times inside JSON fields. Rows a Hub wrote in a numeric-abbreviation zone (for example `Asia/Kathmandu`) are also repaired automatically at Hub start, after a database snapshot. | Once after upgrading, after a backup. The Hub logs which tables still need it. Safe to re-run, and it can run again after it completes. |
-| `applied-config-tz-cleanup` | Converts `TZ` values that older Hubs saved in agents' applied config env into `legacy` pins, in one pass, and reports how many agents it converted. | Optional, because the Hub already converts each agent lazily. Run it **before** `applied-config-env-cleanup` to keep every saved `TZ` as a pin; if the env cleanup runs first, saved values with no live source are removed and those agents follow the chain instead. Safe to re-run. |
+| `utc-timestamp-normalize` | Rewrites stored timestamps to canonical UTC, so that ordering and paging are exact. On SQLite it covers every table time column and the times inside JSON fields; on Postgres, the times inside JSON fields. On SQLite, rows a Hub wrote in a numeric-abbreviation zone (for example `Asia/Kathmandu`) are also repaired automatically at Hub start, after a database snapshot. | Once after upgrading, after a backup. On SQLite, the Hub logs at start which tables still need it; Postgres has no startup check, so run it once after upgrading. Safe to re-run, and it can run again after it completes. |
+| `applied-config-tz-cleanup` | Converts `TZ` values that older Hubs saved in agents' applied config env into `legacy` pins, in one pass, and reports how many agents it converted. | Optional, because the Hub already converts each agent lazily. Run it **before** `applied-config-env-cleanup` to keep every saved `TZ` as a pin; if the env cleanup runs first, saved values with no live source are removed and those agents follow the chain instead. Safe to re-run, and it can run again after it completes; a second run converts 0. |
+
+The Maintenance page offers **Run** only for a pending or failed migration. To re-run one of these after it has completed, use `POST /api/v1/admin/maintenance/migrations/<key>/run`.
 
 ## Related
 
