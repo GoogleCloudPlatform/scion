@@ -57,18 +57,15 @@ func TestIsBrokerGlobalDirPath(t *testing.T) {
 }
 
 func TestValidateProviderLocalPath(t *testing.T) {
-	assert.Error(t, validateProviderLocalPath("web-app", "web-app", nil, brokerGlobalDir))
-	assert.Error(t, validateProviderLocalPath("web-app", "web-app", nil, "/home/brokeruser"))
-	assert.NoError(t, validateProviderLocalPath("global", "global", nil, brokerGlobalDir))
-	assert.NoError(t, validateProviderLocalPath("Global", "global-2", nil, brokerGlobalDir))
-	assert.NoError(t, validateProviderLocalPath("Main Box", "main-box", map[string]string{"scion.io/global": "true"}, brokerGlobalDir))
-	assert.Error(t, validateProviderLocalPath("Main Box", "main-box", map[string]string{"scion.io/global": "false"}, brokerGlobalDir))
-	assert.NoError(t, validateProviderLocalPath("web-app", "web-app", nil, "/home/brokeruser/src/web-app/.scion"))
-	assert.NoError(t, validateProviderLocalPath("web-app", "web-app", nil, ""))
+	assert.Error(t, validateProviderLocalPath("web-app", "web-app", brokerGlobalDir))
+	assert.Error(t, validateProviderLocalPath("web-app", "web-app", "/home/brokeruser"))
+	assert.NoError(t, validateProviderLocalPath("Global", "global", brokerGlobalDir))
+	// Only the slug identifies the global project, not the name.
+	assert.Error(t, validateProviderLocalPath("Global", "global-2", brokerGlobalDir))
+	assert.NoError(t, validateProviderLocalPath("web-app", "web-app", "/home/brokeruser/src/web-app/.scion"))
+	assert.NoError(t, validateProviderLocalPath("web-app", "web-app", ""))
 }
 
-// The path forms hub link, hubsync and the web linked-project create send
-// for an ordinary project on a broker stay accepted.
 func TestValidateProviderLocalPath_AcceptsLinkAndSyncPaths(t *testing.T) {
 	for _, path := range []string{
 		"/home/brokeruser/src/web-app/.scion",                              // in-repo project (hub link, hubsync)
@@ -77,7 +74,7 @@ func TestValidateProviderLocalPath_AcceptsLinkAndSyncPaths(t *testing.T) {
 		"/home/brokeruser/src/web-app",                                     // project root (web linked create)
 		"/srv/checkouts/web-app/.scion",
 	} {
-		assert.NoError(t, validateProviderLocalPath("web-app", "web-app", nil, path), "path %q", path)
+		assert.NoError(t, validateProviderLocalPath("web-app", "web-app", path), "path %q", path)
 	}
 }
 
@@ -276,4 +273,55 @@ func TestAddProvider_RejectsGlobalDirPathForProject(t *testing.T) {
 
 	_, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// A client can set the scion.io/global label on an ordinary project (register
+// without a broker, or a project update). The label does not make it the
+// global project: register still rejects the global dir for it, and a stored
+// global-dir path is still repaired by a register without a path.
+func TestProjectRegister_GlobalLabelDoesNotExemptProject(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	broker := newLocalPathTestBroker(t, s, "gd-label-broker")
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/register", map[string]interface{}{
+		"name":   "gd-label-project",
+		"labels": map[string]string{"scion.io/global": "true"},
+	})
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	var created RegisterProjectResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
+	projectID := created.Project.ID
+	stored, err := s.GetProject(ctx, projectID)
+	require.NoError(t, err)
+	require.Equal(t, "true", stored.Labels["scion.io/global"], "the label must be stored for this test to mean anything")
+
+	_, code, body := registerWithBroker(t, srv, "gd-label-project", broker.ID, brokerGlobalDir)
+	require.Equal(t, http.StatusBadRequest, code, "body: %s", body)
+	assert.Contains(t, body, "global scion directory")
+
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: projectID, BrokerID: broker.ID, BrokerName: broker.Name,
+		LocalPath: brokerGlobalDir, Status: store.BrokerStatusOnline,
+	}))
+	_, code, body = registerWithBroker(t, srv, "gd-label-project", broker.ID, "")
+	require.Equal(t, http.StatusOK, code, "body: %s", body)
+	provider, err := s.GetProjectProvider(ctx, projectID, broker.ID)
+	require.NoError(t, err)
+	assert.Empty(t, provider.LocalPath, "the stored global-dir path must be cleared")
+}
+
+// A new project named "global" that comes with a git remote does not take
+// the global slug's place, so the global dir is rejected for it.
+func TestProjectRegister_NewGitProjectNamedGlobalRejectsGlobalDir(t *testing.T) {
+	srv, s := testServer(t)
+	broker := newLocalPathTestBroker(t, s, "gd-gitglobal-broker")
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/register", map[string]interface{}{
+		"name":      "global",
+		"gitRemote": "github.com/test/global",
+		"brokerId":  broker.ID,
+		"path":      brokerGlobalDir,
+	})
+	require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
 }

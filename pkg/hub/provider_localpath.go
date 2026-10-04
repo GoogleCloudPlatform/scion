@@ -20,27 +20,21 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // globalProjectSlug is the slug of a broker's global project: the CLI
 // registers it under the name "global", and the combined hub and broker
-// server creates it with this slug.
+// server creates it with this slug. Project slugs are unique on the hub.
 const globalProjectSlug = "global"
 
-// globalProjectLabel marks the global project created by the combined hub and
-// broker server.
-const globalProjectLabel = "scion.io/global"
-
-// isGlobalHubProject reports whether a hub project with this name, slug and
-// labels is the global project.
-func isGlobalHubProject(name, slug string, labels map[string]string) bool {
-	if strings.EqualFold(slug, globalProjectSlug) || labels[globalProjectLabel] == "true" {
-		return true
-	}
-	return name != "" && strings.EqualFold(api.Slugify(name), globalProjectSlug)
+// isGlobalHubProject reports whether a hub project with this slug is the
+// global project. Only the slug counts, the same rule dispatch uses to mark
+// the global project for the broker: project names and labels can be set by
+// clients and do not identify it.
+func isGlobalHubProject(slug string) bool {
+	return slug == globalProjectSlug
 }
 
 // isBrokerGlobalDirPath reports whether localPath has the shape of a broker's
@@ -79,8 +73,8 @@ func isBrokerGlobalDirPath(localPath string) bool {
 // broker's global directory for a project other than the global project.
 // Dispatching such a project with that path makes the broker treat its
 // global directory as the project.
-func validateProviderLocalPath(projectName, projectSlug string, labels map[string]string, localPath string) error {
-	if !isBrokerGlobalDirPath(localPath) || isGlobalHubProject(projectName, projectSlug, labels) {
+func validateProviderLocalPath(projectName, projectSlug, localPath string) error {
+	if !isBrokerGlobalDirPath(localPath) || isGlobalHubProject(projectSlug) {
 		return nil
 	}
 	return fmt.Errorf("localPath %q is the broker's global scion directory and cannot be used for project %q; "+
@@ -109,7 +103,7 @@ func (s *Server) registerProviderLocalPath(ctx context.Context, project *store.P
 	if err != nil {
 		return requestedPath
 	}
-	if validateProviderLocalPath(project.Name, project.Slug, project.Labels, existing.LocalPath) != nil {
+	if validateProviderLocalPath(project.Name, project.Slug, existing.LocalPath) != nil {
 		return requestedPath
 	}
 	return existing.LocalPath

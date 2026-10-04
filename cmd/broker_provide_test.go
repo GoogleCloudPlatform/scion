@@ -255,3 +255,14 @@ func TestRunBrokerProvide_CurrentLinkedProjectSendsItsPath(t *testing.T) {
 	assert.Equal(t, "p-web", body["id"])
 	assert.Equal(t, wantPath, body["path"])
 }
+
+// --path may name the global directory for the global project (hub slug
+// "global").
+func TestRunBrokerProvide_PathToGlobalDirAllowedForGlobalProject(t *testing.T) {
+	mock, globalDir := setupProvideTest(t)
+	brokerProjectID = "p-global"
+	brokerProvidePath = globalDir
+
+	require.NoError(t, runBrokerProvide(brokerProvideCmd, nil))
+	assert.Equal(t, globalDir, mock.lastRegister(t)["path"])
+}

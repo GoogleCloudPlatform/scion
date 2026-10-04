@@ -1213,7 +1213,7 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	// back to the global project.
 	if info.projectPath == "" {
 		info.projectSlug = project.Slug
-	} else if strings.EqualFold(project.Slug, globalProjectSlug) {
+	} else if isGlobalHubProject(project.Slug) {
 		// The global project's slug travels with its provider path so the
 		// broker can tell the global project apart from another project
 		// whose path points at the broker's global directory. The broker

@@ -369,3 +369,47 @@ func TestCreateAgent_HubGlobalSlugWithGlobalDirPath(t *testing.T) {
 		})
 	}
 }
+
+// The startAgent handler turns the hub's global slug sent with a path into
+// the global mark, as createAgent does: a stopped global-project agent on a
+// fresh broker starts, and another project at the same path is refused.
+func TestStartAgent_HubGlobalSlugWithGlobalDirPath(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		slug       string
+		wantStatus int
+	}{
+		{"global slug", "global", http.StatusAccepted},
+		{"no slug", "", http.StatusConflict},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newTestServer(t)
+			mgr := srv.manager.(*mockManager)
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("SCION_PROJECT_ID", "")
+			globalDir := filepath.Join(home, ".scion")
+			if err := os.MkdirAll(globalDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			body := `{"projectPath": ` + strconv.Quote(globalDir) + `, "projectSlug": ` + strconv.Quote(tc.slug) + `}`
+			req := httptest.NewRequest(http.MethodPost,
+				"/api/v1/agents/x/start?projectId=dddddddd-0000-4000-8000-000000000007", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+
+			if w.Code != tc.wantStatus {
+				t.Fatalf("expected status %d, got %d: %s", tc.wantStatus, w.Code, w.Body.String())
+			}
+			if tc.wantStatus == http.StatusAccepted && mgr.startCalls != 1 {
+				t.Errorf("expected Start to be called once, got %d", mgr.startCalls)
+			}
+			if tc.wantStatus == http.StatusConflict {
+				if _, statErr := os.Stat(filepath.Join(globalDir, config.DotScion)); !os.IsNotExist(statErr) {
+					t.Errorf("a global marker was written for a refused start (stat err %v)", statErr)
+				}
+			}
+		})
+	}
+}
