@@ -137,10 +137,13 @@ export class ScionDeletionBadge extends LitElement {
   size: 'small' | 'medium' = 'medium';
 
   /**
-   * Announce changes to assistive tech (`role="status"`). Set it only on a
-   * page's single primary badge (agent-detail's header); list rows rely on
-   * the visible text and `title`, so a page of rows does not flood the
-   * live region.
+   * Announce changes to assistive tech through a `role="status"` live
+   * region. Set it only on a page's single primary badge (agent-detail's
+   * header); list rows rely on the visible text and `title`, so a page of
+   * rows does not flood the live region. The region is rendered even
+   * while there is no deletion (visually hidden, out of layout), because
+   * screen readers announce changes only inside a region that already
+   * exists: the first "Deleting…" must land in it, not arrive with it.
    */
   @property({ type: Boolean })
   live = false;
@@ -153,6 +156,23 @@ export class ScionDeletionBadge extends LitElement {
 
     :host([hidden]) {
       display: none;
+    }
+
+    /* A live badge with nothing to show: keep the (empty) live region in
+       the accessibility tree, but take no space and no flex gap. */
+    :host([live][empty]) {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+
+    .live {
+      display: inline-flex;
+      min-width: 0;
     }
 
     .badge {
@@ -196,11 +216,18 @@ export class ScionDeletionBadge extends LitElement {
   `;
 
   protected override willUpdate(): void {
-    // Take no space (and no flex gap) when there is nothing to show.
-    this.toggleAttribute('hidden', !this.deletion);
+    // Take no space (and no flex gap) when there is nothing to show. A live
+    // badge stays rendered (visually hidden) so its live region persists.
+    this.toggleAttribute('hidden', !this.deletion && !this.live);
+    this.toggleAttribute('empty', !this.deletion);
   }
 
   override render(): TemplateResult | typeof nothing {
+    const badge = this.renderBadge();
+    return this.live ? html`<span class="live" role="status">${badge}</span>` : badge;
+  }
+
+  private renderBadge(): TemplateResult | typeof nothing {
     const d = this.deletion;
     if (!d) return nothing;
     const label = deletionBadgeLabel(d);
@@ -208,7 +235,6 @@ export class ScionDeletionBadge extends LitElement {
     return html`
       <span
         class="badge ${deleting ? 'deleting' : 'failed'} ${this.size}"
-        role=${this.live ? 'status' : nothing}
         title=${label}
         data-state=${d.state}
       >

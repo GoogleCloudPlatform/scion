@@ -307,7 +307,7 @@ describe('scion-deletion-badge live region', () => {
     document.body.innerHTML = '';
   });
 
-  it('sets role="status" only when live', async () => {
+  it('sets role="status" only when live, on a wrapper around the badge', async () => {
     const d = deleting(T0 + 20_000);
     const quiet = document.createElement('scion-deletion-badge');
     quiet.deletion = d;
@@ -317,8 +317,49 @@ describe('scion-deletion-badge live region', () => {
     document.body.append(quiet, live);
     await quiet.updateComplete;
     await live.updateComplete;
-    expect(quiet.shadowRoot?.querySelector('.badge')?.hasAttribute('role')).toBe(false);
+    expect(quiet.shadowRoot?.querySelector('[role]')).toBeNull();
     expect(quiet.shadowRoot?.querySelector('.badge')?.getAttribute('title')).toBe('Deleting…');
-    expect(live.shadowRoot?.querySelector('.badge')?.getAttribute('role')).toBe('status');
+    const region = live.shadowRoot?.querySelector('[role="status"]');
+    expect(region?.querySelector('.badge')?.textContent?.trim()).toBe('Deleting…');
+  });
+
+  it('keeps one persistent live region across null -> deleting -> failed -> null', async () => {
+    const live = document.createElement('scion-deletion-badge');
+    live.live = true;
+    document.body.append(live);
+    await live.updateComplete;
+
+    // Present (in the a11y tree) before any deletion, visually hidden and empty.
+    const region = live.shadowRoot?.querySelector('[role="status"]');
+    expect(region).not.toBeNull();
+    expect(region?.textContent?.trim()).toBe('');
+    expect(live.hasAttribute('hidden')).toBe(false);
+    expect(live.hasAttribute('empty')).toBe(true);
+
+    live.deletion = deleting(T0 + 20_000);
+    await live.updateComplete;
+    expect(live.shadowRoot?.querySelector('[role="status"]')).toBe(region);
+    expect(region?.textContent?.trim()).toBe('Deleting…');
+    expect(live.hasAttribute('empty')).toBe(false);
+
+    live.deletion = { ...deleting(T0), state: 'failed', code: 'conflict' };
+    await live.updateComplete;
+    expect(live.shadowRoot?.querySelector('[role="status"]')).toBe(region);
+    expect(region?.textContent?.trim()).toBe('Delete failed: conflict');
+
+    live.deletion = null;
+    await live.updateComplete;
+    expect(live.shadowRoot?.querySelector('[role="status"]')).toBe(region);
+    expect(region?.querySelector('.badge')).toBeNull();
+    expect(live.hasAttribute('hidden')).toBe(false);
+    expect(live.hasAttribute('empty')).toBe(true);
+  });
+
+  it('a non-live badge with no deletion is hidden and renders no region', async () => {
+    const quiet = document.createElement('scion-deletion-badge');
+    document.body.append(quiet);
+    await quiet.updateComplete;
+    expect(quiet.hasAttribute('hidden')).toBe(true);
+    expect(quiet.shadowRoot?.querySelector('[role]')).toBeNull();
   });
 });

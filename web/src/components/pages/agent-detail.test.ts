@@ -730,6 +730,21 @@ describe('scion-page-agent-detail backend-driven delete (ptone/scion#2483 phase 
 
     expect((el as unknown as { deleted: boolean }).deleted).toBe(false);
     expect(headerBadge(el)).toBe('Deleting…');
+    // Only the header badge is a live region; the current-state card's is not.
+    const allBadges = [...(el.shadowRoot?.querySelectorAll('scion-deletion-badge') ?? [])] as Array<
+      HTMLElement & { updateComplete: Promise<boolean> }
+    >;
+    await Promise.all(allBadges.map((b) => b.updateComplete));
+    const header = el.shadowRoot?.querySelector('.header scion-deletion-badge');
+    const others = allBadges.filter((b) => b !== header);
+    expect(others.length).toBeGreaterThan(0);
+    expect(header?.shadowRoot?.querySelector('[role="status"] .badge')?.textContent?.trim()).toBe(
+      'Deleting…'
+    );
+    for (const b of others) {
+      expect(b.shadowRoot?.querySelector('.badge')?.textContent?.trim()).toBe('Deleting…');
+      expect(b.shadowRoot?.querySelector('[role]')).toBeNull();
+    }
     const actions = headerActions(el);
     for (const hidden of ['Stop', 'Suspend', 'Start', 'Resume', 'delete']) {
       expect(actions).not.toContain(hidden);

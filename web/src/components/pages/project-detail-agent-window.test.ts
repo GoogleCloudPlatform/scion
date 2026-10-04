@@ -2917,24 +2917,36 @@ describe('project-detail — agent list window', () => {
       expect(internals(el).agents).toEqual([]); // paged: rows come from the window only
       const target = internals(el).agentWindow.items[0].id;
 
-      // A short real-time lease, delivered after mount so mount time cannot eat it.
-      sseUpdate(`agent.${target}.status`, {
-        deletion: {
-          state: 'deleting',
-          soft: false,
-          claim: 1,
-          startedAt: new Date().toISOString(),
-          leaseExpiresAt: new Date(Date.now() + 400).toISOString(),
-        },
-      });
-      await waitMs(150);
-      await el.updateComplete;
-      expect((await rowState(el)).badges).toEqual(['Deleting…']);
+      // Fake clock only after mount (mount waits on real timers). The lease
+      // is far enough out that nothing but the controller's timer, driven
+      // by advanceTimersByTime, can flip it.
+      let st: Awaited<ReturnType<typeof rowState>>;
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+      try {
+        sseUpdate(`agent.${target}.status`, {
+          deletion: {
+            state: 'deleting',
+            soft: false,
+            claim: 1,
+            startedAt: new Date().toISOString(),
+            leaseExpiresAt: new Date(Date.now() + 20_000).toISOString(),
+          },
+        });
+        vi.advanceTimersByTime(150); // state.ts flush fallback
+        await el.updateComplete;
+        expect((await rowState(el)).badges).toEqual(['Deleting…']);
 
-      // Nothing else re-renders the page: only the controller's timer can.
-      await waitMs(400);
-      await el.updateComplete;
-      const st = await rowState(el);
+        vi.advanceTimersByTime(19_000);
+        await el.updateComplete;
+        expect((await rowState(el)).badges).toEqual(['Deleting…']);
+
+        // Nothing else re-renders the page: only the controller's timer can.
+        vi.advanceTimersByTime(1_000);
+        await el.updateComplete;
+        st = await rowState(el);
+      } finally {
+        vi.useRealTimers();
+      }
       expect(st.badges).toEqual(['Delete interrupted']);
       expect(st.icons('trash')).toBe(internals(el).agentWindow.items.length);
     });

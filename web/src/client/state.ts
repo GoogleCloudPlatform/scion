@@ -1497,6 +1497,7 @@ export class StateManager extends EventTarget {
   applyDeleteAccepted(id: string, deletion: DeletionInfo | null | undefined): boolean {
     if (!deletion) return false;
     const existing = this.state.agents.get(id);
+    // Tombstone check is defensive: tombstoned IDs are never in state.agents.
     if (!existing || this.state.deletedAgentIds.has(id)) return false;
     if (!shouldApplyAcceptedDeletion(existing.deletion, deletion)) return false;
     this.handleAgentEvent(id, 'status', { deletion });
