@@ -52,6 +52,10 @@ type agentOwnRuntime struct {
 	mgr     agent.Manager
 	rt      scionrt.Runtime
 	profile string
+	// fingerprint identifies the profile's runtime configuration the entry
+	// was resolved from; a memoised entry whose fingerprint differs from the
+	// current settings is resolved again and replaced.
+	fingerprint string
 }
 
 type agentOwnRuntimeKey struct{}
@@ -61,6 +65,15 @@ type agentOwnRuntimeKey struct{}
 func agentOwnRuntimeFrom(ctx context.Context) *agentOwnRuntime {
 	own, _ := ctx.Value(agentOwnRuntimeKey{}).(*agentOwnRuntime)
 	return own
+}
+
+// withoutAgentOwnRuntime returns ctx with no own runtime attached, so
+// lookups search every registered runtime again.
+func withoutAgentOwnRuntime(ctx context.Context) context.Context {
+	if agentOwnRuntimeFrom(ctx) == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, agentOwnRuntimeKey{}, (*agentOwnRuntime)(nil))
 }
 
 // ownRuntimeFor returns the agent's own runtime for a request carrying ctx,
@@ -79,10 +92,18 @@ func (s *Server) ownRuntimeFor(ctx context.Context) *agentOwnRuntime {
 // ctx is returned unchanged when the agent's project directory or saved
 // profile is unknown, or the profile does not resolve.
 //
-// Results are memoised per project directory, profile and profile runtime
-// configuration, so a profile edited in settings resolves again. Concurrent
-// requests for one key share a single resolution; a failed resolution is not
+// Results are memoised per project directory and profile. Each entry keeps
+// the fingerprint of the profile runtime configuration it was resolved from;
+// when settings no longer match it (for example an edited namespace), the
+// profile is resolved again and the entry replaced. Concurrent requests for
+// one configuration share a single resolution; a failed resolution is not
 // stored and is retried on the next request.
+//
+// Per-request cost: every existing-agent request reads the agent's
+// agent-info.json and the project's settings (local file reads only). The
+// runtime itself is resolved (for Kubernetes, a client build and an API
+// server check) only on the first request for a configuration, or after
+// that configuration changes.
 func (s *Server) ensureAgentOwnRuntime(ctx context.Context, id, projectID, projectPathHint string) context.Context {
 	if s.manager == nil || s.runtime == nil {
 		return ctx
@@ -109,13 +130,14 @@ func (s *Server) ensureAgentOwnRuntime(ctx context.Context, id, projectID, proje
 	if err != nil {
 		return ctx
 	}
-	key := projectDir + "\x00" + profile + "\x00" + runtimeType + "\x00" + string(fingerprint)
+	key := projectDir + "\x00" + profile
+	fp := runtimeType + "\x00" + string(fingerprint)
 
-	if v, ok := s.agentOwnRuntimes.Load(key); ok {
+	if v, ok := s.agentOwnRuntimes.Load(key); ok && v.(*agentOwnRuntime).fingerprint == fp {
 		return context.WithValue(ctx, agentOwnRuntimeKey{}, v.(*agentOwnRuntime))
 	}
-	v, err, _ := s.agentOwnRuntimeGroup.Do(key, func() (any, error) {
-		if v, ok := s.agentOwnRuntimes.Load(key); ok {
+	v, err, _ := s.agentOwnRuntimeGroup.Do(key+"\x00"+fp, func() (any, error) {
+		if v, ok := s.agentOwnRuntimes.Load(key); ok && v.(*agentOwnRuntime).fingerprint == fp {
 			return v, nil
 		}
 		mgr, name := s.resolveManagerForOpts(api.StartOptions{Name: id, ProjectPath: projectDir, Profile: profile})
@@ -126,7 +148,7 @@ func (s *Server) ensureAgentOwnRuntime(ctx context.Context, id, projectID, proje
 		if rt == nil {
 			return nil, fmt.Errorf("manager for runtime %q exposes no runtime", name)
 		}
-		own := &agentOwnRuntime{mgr: mgr, rt: rt, profile: profile}
+		own := &agentOwnRuntime{mgr: mgr, rt: rt, profile: profile, fingerprint: fp}
 		s.agentOwnRuntimes.Store(key, own)
 		return own, nil
 	})
@@ -149,17 +171,22 @@ func (s *Server) runtimeOfManager(mgr agent.Manager) scionrt.Runtime {
 	return nil
 }
 
-// knownAgentProjectDir returns the .scion directory of a project this broker
-// already knows (a hub-managed project, or the broker's own working project)
-// that holds agent id's files and, when projectID is set, identifies as
-// projectID. The hub's projectPathHint only selects among those directories;
-// no path is built or opened from it. "" when none matches.
+// knownAgentProjectDir returns the .scion directory of the project that holds
+// agent id's files and, when projectID is set, identifies as projectID. The
+// candidates are, in order: a hub-managed project; the linked project at the
+// hub's projectPathHint (the provider's local path), accepted only when its
+// recorded identity is projectID (linkedProjectAgentDir, the check the
+// delete path uses); and the broker's own working project. When the hint
+// names one of the candidates, that one is used. "" when none matches.
 func (s *Server) knownAgentProjectDir(id, projectID, projectPathHint string) string {
 	if !isSingleCleanPathElement(id) {
 		return ""
 	}
 	var candidates []string
 	if dir, err := findAgentInHubManagedProjects(id, projectID); err == nil && dir != "" {
+		candidates = append(candidates, dir)
+	}
+	if dir := linkedProjectAgentDir(projectPathHint, id, projectID); dir != "" {
 		candidates = append(candidates, dir)
 	}
 	if cwd, err := config.GetResolvedProjectDir(""); err == nil && cwd != "" {

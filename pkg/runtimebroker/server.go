@@ -1564,17 +1564,9 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 	// The agent's own runtime, when known (ensureAgentOwnRuntime), is the
 	// only one searched; a failed List there is ErrAgentListUnavailable.
 	if own := s.ownRuntimeFor(ctx); own != nil {
-		agents, err := own.mgr.List(ctx, filter)
+		agents, err := listInOwnRuntime(ctx, own, slug, projectID)
 		if err != nil {
-			return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
-		}
-		agents = agentsForProject(agents, projectID)
-		if len(agents) == 0 && projectID != "" {
-			agents, err = own.mgr.List(ctx, map[string]string{"scion.name": slug})
-			if err != nil {
-				return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
-			}
-			agents = agentsWithoutProjectLabel(agents)
+			return agentMatch{}, err
 		}
 		return agentMatchFrom(slug, agents, own.mgr, own.rt)
 	}
@@ -1632,6 +1624,26 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 	}
 
 	return agentMatchFrom(slug, agents, matchManager, matchRuntime)
+}
+
+// listInOwnRuntime lists agent slug in the agent's own runtime with the
+// project scoping lookupAgentMatch and LookupAgent use: entries labelled for
+// projectID, else (with a projectID) entries carrying no project label. A
+// failed List wraps ErrAgentListUnavailable.
+func listInOwnRuntime(ctx context.Context, own *agentOwnRuntime, slug, projectID string) ([]api.AgentInfo, error) {
+	agents, err := own.mgr.List(ctx, scopedNameFilter(slug, projectID))
+	if err != nil {
+		return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+	}
+	agents = agentsForProject(agents, projectID)
+	if len(agents) == 0 && projectID != "" {
+		agents, err = own.mgr.List(ctx, map[string]string{"scion.name": slug})
+		if err != nil {
+			return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+		}
+		agents = agentsWithoutProjectLabel(agents)
+	}
+	return agents, nil
 }
 
 // agentMatchFrom builds lookupAgentMatch's result from the entries the
@@ -1729,15 +1741,36 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	slug = strings.ToLower(slug)
 	filter := scopedNameFilter(slug, projectID)
 
-	// Try default manager first
-	agents, err := s.manager.List(ctx, filter)
-	if err != nil {
-		return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+	// The PTY attach paths reach here without handleAgentByID, so the
+	// agent's own runtime is resolved here (see ensureAgentOwnRuntime).
+	// When known, it is the only runtime searched.
+	if agentOwnRuntimeFrom(ctx) == nil {
+		ctx = s.ensureAgentOwnRuntime(ctx, slug, projectID, "")
 	}
-	agents = agentsForProject(agents, projectID)
+	own := s.ownRuntimeFor(ctx)
+
+	var agents []api.AgentInfo
+	var err error
+	if own != nil {
+		agents, err = listInOwnRuntime(ctx, own, slug, projectID)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// Try default manager first
+		agents, err = s.manager.List(ctx, filter)
+		if err != nil {
+			return nil, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+		}
+		agents = agentsForProject(agents, projectID)
+	}
 
 	runtimeName := s.runtime.Name()
 	var matchedRuntime scionrt.Runtime
+	if own != nil {
+		runtimeName = own.rt.Name()
+		matchedRuntime = own.rt
+	}
 
 	// listUnavailable tracks whether any consulted runtime's List call itself
 	// failed (as opposed to succeeding with zero matches). A failure here must
@@ -1751,7 +1784,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	// pathological overlap cases (e.g. two Kubernetes namespace-scoped
 	// entries plus one with ListAllNamespaces) more than one could plausibly
 	// answer for the same slug.
-	if len(agents) == 0 {
+	if len(agents) == 0 && own == nil {
 		for _, aux := range s.sortedAuxiliaryRuntimes() {
 			auxAgents, auxErr := aux.Manager.List(ctx, filter)
 			if auxErr != nil {
@@ -1777,7 +1810,7 @@ func (s *Server) LookupAgent(ctx context.Context, slug, projectID string) (*Agen
 	// containers that lack a project label (pre-existing agents or solo/CLI
 	// mode). A container labeled for a different project must not match a
 	// project-scoped request, or same-slug agents across projects would collide.
-	if len(agents) == 0 && projectID != "" {
+	if len(agents) == 0 && projectID != "" && own == nil {
 		fallbackFilter := map[string]string{"scion.name": slug}
 		agents, err = s.manager.List(ctx, fallbackFilter)
 		if err != nil {
