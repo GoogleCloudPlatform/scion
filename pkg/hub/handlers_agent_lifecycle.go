@@ -559,18 +559,38 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		return
 	case api.AgentActionRestart:
 		newPhase = string(state.PhaseRunning)
-		// A restart leaves the agent running: record that before the stop leg.
-		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
-			writeRunIntentError(w, err, agent.ID)
-			return
-		}
-		if dispatcher != nil && agent.RuntimeBrokerID != "" {
+		hasBroker := dispatcher != nil && agent.RuntimeBrokerID != ""
+		reserved := false
+		if hasBroker {
 			// Refuse before the stop leg: otherwise a broker without
 			// the empty-per-agent capability would have the agent
 			// stopped and then the start refused (design #2703 D3).
 			if !s.requireEmptyPerAgentBrokerCapabilityForAgent(ctx, w, agent) {
 				return
 			}
+			// Check the broker cap before the run intent write and the
+			// stop leg (ptone/scion#2010): a restart refused at the cap
+			// must leave the agent as it was, with its container up and
+			// its run intent untouched, not stopped and then answered
+			// with 429. The reservation is held across both legs
+			// (ptone/scion#1978): releasing it after the stop leg and
+			// re-reserving before the start leg would let another start
+			// take the slot in between. This reserve is a no-op for an
+			// agent that already holds one, and applies the cap to an
+			// agent that does not (for example, a stopped agent).
+			var ok bool
+			ok, reserved = s.checkAndReserveBrokerQuotaHTTP(ctx, w, agent)
+			if !ok {
+				return
+			}
+		}
+		// A restart leaves the agent running: record that before the stop leg.
+		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
+			s.rollbackBrokerQuota(ctx, agent, reserved)
+			writeRunIntentError(w, err, agent.ID)
+			return
+		}
+		if hasBroker {
 			// Restart is implemented as stop + start so that env vars
 			// (API keys, secrets) are re-resolved from Hub storage.
 			// Stop errors are tolerated: the container may already be
@@ -584,21 +604,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			if writeBrokerRuntimeUnavailable(w, stopErr, agent.Runtime) {
 				slog.Warn("Restart: agent's runtime not available on broker, not starting",
 					"agent_id", id, "runtime", agent.Runtime)
+				s.rollbackBrokerQuota(ctx, agent, reserved)
 				return
 			}
 			if stopErr != nil {
 				slog.Warn("Restart: stop dispatch failed, proceeding with start",
 					"agent_id", id, "error", stopErr)
-			}
-			// The broker reservation is held across the restart
-			// (ptone/scion#1978). Releasing it after the stop leg and
-			// re-reserving before the start leg would let another start
-			// take the slot in between. This reserve is a no-op for an
-			// agent that already holds one, and applies the cap to an
-			// agent that does not (for example, a stopped agent).
-			ok, reserved := s.checkAndReserveBrokerQuotaHTTP(ctx, w, agent)
-			if !ok {
-				return
 			}
 			// Restart is stop + start: a fresh harness session, not a resume.
 			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", false)
