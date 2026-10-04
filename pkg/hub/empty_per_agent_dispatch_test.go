@@ -93,7 +93,7 @@ func newWorkspaceModeDispatchFixture(t *testing.T, name, gitRemote, label string
 
 func TestEmptyPerAgent_DispatchCreate_SendsCanonicalMode(t *testing.T) {
 	f := newEmptyPerAgentFixture(t, "create", true)
-	if err := f.dispatcher.DispatchAgentCreate(context.Background(), f.agent); err != nil {
+	if _, err := f.dispatcher.DispatchAgentCreate(context.Background(), f.agent); err != nil {
 		t.Fatalf("DispatchAgentCreate: %v", err)
 	}
 	req := f.client.lastCreateReq
@@ -151,7 +151,8 @@ func TestEmptyPerAgent_DispatchFailsClosedWithoutCapability(t *testing.T) {
 		run  func(f *emptyPerAgentFixture) error
 	}{
 		{"create", func(f *emptyPerAgentFixture) error {
-			return f.dispatcher.DispatchAgentCreate(context.Background(), f.agent)
+			_, err := f.dispatcher.DispatchAgentCreate(context.Background(), f.agent)
+			return err
 		}},
 		{"create-with-gather", func(f *emptyPerAgentFixture) error {
 			_, err := f.dispatcher.DispatchAgentCreateWithGather(context.Background(), f.agent)
@@ -161,7 +162,8 @@ func TestEmptyPerAgent_DispatchFailsClosedWithoutCapability(t *testing.T) {
 			return f.dispatcher.DispatchAgentProvision(context.Background(), f.agent)
 		}},
 		{"finalize-env", func(f *emptyPerAgentFixture) error {
-			return f.dispatcher.DispatchFinalizeEnv(context.Background(), f.agent, map[string]string{"K": "v"})
+			_, err := f.dispatcher.DispatchFinalizeEnv(context.Background(), f.agent, map[string]string{"K": "v"})
+			return err
 		}},
 		{"start", func(f *emptyPerAgentFixture) error {
 			return f.dispatcher.DispatchAgentStart(context.Background(), f.agent, "", false)
@@ -257,7 +259,8 @@ func TestEmptyPerAgent_DispatchInfoFailsClosedOnProjectLookupError(t *testing.T)
 		run  func(d *HTTPAgentDispatcher, a *store.Agent) error
 	}{
 		{"create", func(d *HTTPAgentDispatcher, a *store.Agent) error {
-			return d.DispatchAgentCreate(context.Background(), a)
+			_, err := d.DispatchAgentCreate(context.Background(), a)
+			return err
 		}},
 		{"start", func(d *HTTPAgentDispatcher, a *store.Agent) error {
 			return d.DispatchAgentStart(context.Background(), a, "", false)
@@ -350,7 +353,7 @@ func TestDispatch_GitProjectLegacyEmptyPerAgentLabel(t *testing.T) {
 	const remote = "github.com/a/b"
 	t.Run("create", func(t *testing.T) {
 		f := newWorkspaceModeDispatchFixture(t, "git-legacy-create", remote, "empty-per-agent", false)
-		if err := f.dispatcher.DispatchAgentCreate(context.Background(), f.agent); err != nil {
+		if _, err := f.dispatcher.DispatchAgentCreate(context.Background(), f.agent); err != nil {
 			t.Fatalf("DispatchAgentCreate (no capability needed): %v", err)
 		}
 		if got := f.client.lastCreateReq.WorkspaceMode; got != "" {

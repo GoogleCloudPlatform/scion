@@ -204,10 +204,15 @@ type HTTPAgentDispatcher struct {
 	// tests) and the wire field is omitted.
 	hubAgentDefaultsProvider func() opsettings.AgentDefaultsSettings
 
-	// profileTimezoneProvider returns the IANA timezone string for the named
-	// profile, or "" if the profile does not exist or has no timezone set.
-	// Used by buildCreateRequest to inject TZ into agent containers.
-	profileTimezoneProvider func(profileName string) string
+	// asyncLaunchSettings returns the async agent launch settings. Nil =
+	// every create is synchronous (tests, local dispatcher).
+	asyncLaunchSettings func() AsyncLaunchSettings
+
+	// autoExposePortsDefaultProvider returns the hub's auto-expose-ports
+	// default (nil = unset) at dispatch time, for the broker's lowest env
+	// tier. A callback for the same reason as hubAgentDefaultsProvider. Nil
+	// provider = no default sent.
+	autoExposePortsDefaultProvider func() *bool
 }
 
 // NewHTTPAgentDispatcher creates a new HTTP-based agent dispatcher.
@@ -359,10 +364,20 @@ func (d *HTTPAgentDispatcher) SetHubAgentDefaultsProvider(fn func() opsettings.A
 	d.hubAgentDefaultsProvider = fn
 }
 
-// SetProfileTimezoneProvider registers the accessor for looking up a profile's
-// timezone by name. The callback reads the profile map under the server lock.
-func (d *HTTPAgentDispatcher) SetProfileTimezoneProvider(fn func(profileName string) string) {
-	d.profileTimezoneProvider = fn
+// SetAutoExposePortsDefaultProvider registers the accessor for the hub's
+// auto-expose-ports default, read on every create, start and restart dispatch
+// so a settings change reaches an agent at its next start.
+func (d *HTTPAgentDispatcher) SetAutoExposePortsDefaultProvider(fn func() *bool) {
+	d.autoExposePortsDefaultProvider = fn
+}
+
+// autoExposePortsDefault returns the hub auto-expose default, or nil when no
+// provider is registered or the hub has none.
+func (d *HTTPAgentDispatcher) autoExposePortsDefault() *bool {
+	if d.autoExposePortsDefaultProvider == nil {
+		return nil
+	}
+	return d.autoExposePortsDefaultProvider()
 }
 
 // SetImageRegistry sets the image registry prefix for rewriting bare image
@@ -724,15 +739,23 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			ProjectPreStartHookScript: agent.AppliedConfig.ProjectPreStartHookScript,
 		}
 
-		// Hub operational agent_defaults (limits/resources only) travel in
-		// their own low-rank slot, NOT in InlineConfig: InlineConfig lands in
-		// the override position at provision.go's merge and would let a
-		// hub-wide floor outrank a template's explicit max_turns. The broker
-		// applies these below the template and above its own settings.yaml
-		// defaults. Nil in file mode — see remoteHubAgentDefaults.
+		// Hub operational agent_defaults (limits/resources) travel in their
+		// own low-rank slot, NOT in InlineConfig: InlineConfig lands in the
+		// override position at provision.go's merge and would let a hub-wide
+		// floor outrank a template's explicit max_turns. The broker applies
+		// these below the template and above its own settings.yaml defaults.
+		// The limit/resource fields are empty in file mode — see
+		// remoteHubAgentDefaults.
+		//
+		// The auto-expose default rides the same slot (never AppliedConfig.Env
+		// or InlineConfig.Env, both of which outrank template and
+		// harness-config env at the broker) and lands at buildAgentEnv's
+		// lowest tier.
+		var hubDefaults opsettings.AgentDefaultsSettings
 		if d.hubAgentDefaultsProvider != nil {
-			req.Config.HubAgentDefaults = remoteHubAgentDefaults(d.hubAgentDefaultsProvider())
+			hubDefaults = d.hubAgentDefaultsProvider()
 		}
+		req.Config.HubAgentDefaults = remoteHubAgentDefaults(hubDefaults, d.autoExposePortsDefault())
 
 		req.ResolvedEnv = agent.AppliedConfig.Env
 		// Classify config-level env vars as plain. Env-type secrets that
@@ -1222,31 +1245,36 @@ func (d *HTTPAgentDispatcher) applyBrokerResponse(ctx context.Context, agent *st
 		if resp.Agent.ID != "" {
 			agent.RuntimeState = "container:" + resp.Agent.ID
 		}
-		// Capture template, harness, and runtime from the broker response
-		if resp.Agent.Template != "" {
-			agent.Template = resp.Agent.Template
-		}
-		if agent.AppliedConfig != nil {
-			if resp.Agent.HarnessConfig != "" {
-				agent.AppliedConfig.HarnessConfig = resp.Agent.HarnessConfig
-			}
-			if resp.Agent.HarnessAuth != "" {
-				agent.AppliedConfig.HarnessAuth = resp.Agent.HarnessAuth
-			}
-			if resp.Agent.Image != "" {
-				agent.AppliedConfig.Image = resp.Agent.Image
-			}
-			if resp.Agent.Profile != "" {
-				agent.AppliedConfig.Profile = resp.Agent.Profile
-			}
-		}
-		if resp.Agent.Runtime != "" {
-			agent.Runtime = resp.Agent.Runtime
-		}
+		applyBrokerAgentConfig(agent, resp.Agent)
 	} else if d.debug {
 		d.log.Debug("applyBrokerResponse: broker response has nil Agent",
 			"agentName", agent.Name,
 		)
+	}
+}
+
+// applyBrokerAgentConfig copies the non-status fields of a broker's agent
+// answer (template, harness, image, profile, runtime) onto agent.
+func applyBrokerAgentConfig(agent *store.Agent, info *RemoteAgentInfo) {
+	if info.Template != "" {
+		agent.Template = info.Template
+	}
+	if agent.AppliedConfig != nil {
+		if info.HarnessConfig != "" {
+			agent.AppliedConfig.HarnessConfig = info.HarnessConfig
+		}
+		if info.HarnessAuth != "" {
+			agent.AppliedConfig.HarnessAuth = info.HarnessAuth
+		}
+		if info.Image != "" {
+			agent.AppliedConfig.Image = info.Image
+		}
+		if info.Profile != "" {
+			agent.AppliedConfig.Profile = info.Profile
+		}
+	}
+	if info.Runtime != "" {
+		agent.Runtime = info.Runtime
 	}
 }
 
@@ -1282,7 +1310,7 @@ func (d *HTTPAgentDispatcher) forgetRuntimeTarget(ctx context.Context, agent *st
 }
 
 // DispatchAgentCreate creates and starts an agent on the runtime broker.
-func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) (err error) {
+func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) (_ *CreateDispatchResult, err error) {
 	ctx, span := tracer.Start(ctx, "hub.dispatch.create")
 	defer span.End()
 	span.SetAttributes(
@@ -1292,19 +1320,19 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		return err
+		return nil, err
 	}
 
 	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		return err
+		return nil, err
 	}
 
 	req, err := d.buildCreateRequest(ctx, agent, "DispatchAgentCreate")
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		return err
+		return nil, err
 	}
 	// buildCreateRequest mints (and best-effort persists) a fresh agent
 	// credential before returning — but only when a token generator is
@@ -1320,19 +1348,27 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 		}
 	}()
 
-	resp, err := d.client.CreateAgent(ctx, agent.RuntimeBrokerID, endpoint, req)
-	if isHashMismatchError(err) {
-		if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
-			resp, err = d.client.CreateAgent(ctx, agent.RuntimeBrokerID, endpoint, req)
+	send := func(ctx context.Context, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+		resp, err := d.client.CreateAgent(ctx, agent.RuntimeBrokerID, endpoint, req)
+		if isHashMismatchError(err) {
+			if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
+				resp, err = d.client.CreateAgent(ctx, agent.RuntimeBrokerID, endpoint, req)
+			}
 		}
+		return resp, nil, err
 	}
+	resp, _, launch, err := d.dispatchLaunching(ctx, agent, endpoint, req, false, send)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		return err
+		return nil, err
+	}
+	if launch != nil {
+		d.applyAcceptedLaunchResponse(ctx, agent, resp)
+		return &CreateDispatchResult{Launch: launch}, nil
 	}
 
 	d.applyBrokerResponse(ctx, agent, resp)
-	return nil
+	return nil, nil
 }
 
 // DispatchAgentProvision provisions an agent on the runtime broker without starting it.
@@ -1532,7 +1568,7 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 // DispatchAgentCreateWithGather creates an agent with env-gather support.
 // If the broker returns 202 with env requirements, it returns the requirements
 // as the first value instead of an error.
-func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (_ *RemoteEnvRequirementsResponse, err error) {
+func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (_ *CreateDispatchResult, err error) {
 	dispatchStart := time.Now()
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return nil, err
@@ -1569,21 +1605,36 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 		"agent_id", agent.ID, "agent", agent.Name,
 		"broker", agent.RuntimeBrokerID, "buildElapsed", time.Since(dispatchStart).String())
 	brokerCallStart := time.Now()
-	resp, envReqs, err := d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
-	d.log.Info("Dispatcher: broker responded",
-		"agent_id", agent.ID, "agent", agent.Name,
-		"brokerElapsed", time.Since(brokerCallStart).String(),
-		"totalElapsed", time.Since(dispatchStart).String())
-	if isHashMismatchError(err) {
-		if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
-			resp, envReqs, err = d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+	send := func(ctx context.Context, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+		resp, envReqs, err := d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+		d.log.Info("Dispatcher: broker responded",
+			"agent_id", agent.ID, "agent", agent.Name,
+			"brokerElapsed", time.Since(brokerCallStart).String(),
+			"totalElapsed", time.Since(dispatchStart).String())
+		if isHashMismatchError(err) {
+			if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
+				resp, envReqs, err = d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+			}
 		}
+		return resp, envReqs, err
+	}
+	resp, envReqs, launch, err := d.dispatchLaunching(ctx, agent, endpoint, req, true, send)
+	if err == nil && launch != nil {
+		d.applyAcceptedLaunchResponse(ctx, agent, resp)
+		return &CreateDispatchResult{Launch: launch}, nil
 	}
 	if errors.Is(err, ErrLifecycleDeferred) {
-		envReqs, err = d.deferredCreateWithGather(ctx, agent)
+		var deferred *CreateDispatchResult
+		deferred, err = d.deferredCreateWithGather(ctx, agent)
 		if err != nil {
 			return nil, err
 		}
+		if deferred.AcceptedLaunch() != nil {
+			// The owner node accepted the create for asynchronous launch;
+			// return its result unchanged.
+			return deferred, nil
+		}
+		envReqs = deferred.EnvRequirements()
 		// Fall through to the second-pass as_needed resolution below.
 	} else if err != nil {
 		return nil, err
@@ -1603,23 +1654,25 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 			asNeededEnv = d.resolveAsNeededForKeys(ctx, agent, envReqs.Needs, envReqs.Alternatives)
 		}
 		if len(asNeededEnv) > 0 || tzNeeded {
-			err := d.finalizeEnv(ctx, agent, asNeededEnv, tzNeeded)
+			finalized, err := d.finalizeEnv(ctx, agent, asNeededEnv, tzNeeded)
 			if err == nil {
-				return nil, nil // All needs satisfied by as_needed entries
+				// All needs satisfied by as_needed entries. finalized carries
+				// Launch when that send was accepted for asynchronous launch.
+				return finalized, nil
 			}
 			var stillMissing *ErrEnvStillMissing
 			if errors.As(err, &stillMissing) {
-				return stillMissing.Requirements, nil // Partial; remaining needs returned
+				return envReqsResult(stillMissing.Requirements), nil // Partial; remaining needs returned
 			}
 			return nil, err
 		}
 	}
 
-	return envReqs, nil
+	return envReqsResult(envReqs), nil
 }
 
 // deferredCreateWithGather handles a cross-node create-with-gather via durable dispatch.
-func (d *HTTPAgentDispatcher) deferredCreateWithGather(ctx context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (d *HTTPAgentDispatcher) deferredCreateWithGather(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
 	result, err := d.deferredDataOpResult(ctx, agent, "create", &CreateWithGatherDispatchArgs{})
 	if err != nil {
 		return nil, err
@@ -1631,7 +1684,10 @@ func (d *HTTPAgentDispatcher) deferredCreateWithGather(ctx context.Context, agen
 	if err := json.Unmarshal([]byte(result.Result), &cr); err != nil {
 		return nil, fmt.Errorf("unmarshal create result: %w", err)
 	}
-	return cr.EnvRequirements, nil
+	if cr.Launch != nil {
+		return &CreateDispatchResult{Launch: cr.Launch}, nil
+	}
+	return envReqsResult(cr.EnvRequirements), nil
 }
 
 // ErrEnvStillMissing is returned when a replay-based finalize discovers that
@@ -1648,7 +1704,7 @@ func (e *ErrEnvStillMissing) Error() string {
 // at highest precedence, instead of calling the broker's stateful finalize-env
 // action. This makes the finalize HA-safe: the replay can land on any broker
 // replica because it carries the complete request state.
-func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) error {
+func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) (*CreateDispatchResult, error) {
 	return d.finalizeEnv(ctx, agent, env, false)
 }
 
@@ -1656,7 +1712,7 @@ func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *st
 // dropped: only the resolver writes TZ. answerTZ sends the resolver's
 // gather answer for TZ (UTC rather than no TZ) because the broker listed TZ
 // as needed; a TZ need reported by this replay is answered the same way.
-func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string, answerTZ bool) (err error) {
+func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string, answerTZ bool) (_ *CreateDispatchResult, err error) {
 	// Defense in depth for a caller-supplied env map that does not go through
 	// the submitAgentEnv reserved-target check (or reaches this dispatch path
 	// some other way): never let it override a scion control-plane env var.
@@ -1680,17 +1736,17 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 
 	env = d.withoutCallerTZ(ctx, agent, env)
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
-		return err
+		return nil, err
 	}
 
 	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	req, err := d.buildCreateRequest(ctx, agent, "DispatchFinalizeEnv")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	// See DispatchAgentCreate's identical defer (gated on issued, below):
 	// buildCreateRequest already minted a credential by this point if
@@ -1719,17 +1775,25 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 
 	req.EnvSources = d.buildEnvSources(ctx, agent, req.ResolvedEnv)
 
-	resp, envReqs, err := d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
-	if isHashMismatchError(err) {
-		if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
-			resp, envReqs, err = d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+	send := func(ctx context.Context, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+		resp, envReqs, err := d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+		if isHashMismatchError(err) {
+			if repairErr := d.repairHashMismatch(ctx, agent, err); repairErr == nil {
+				resp, envReqs, err = d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+			}
 		}
+		return resp, envReqs, err
 	}
+	resp, envReqs, launch, err := d.dispatchLaunching(ctx, agent, endpoint, req, true, send)
 	if errors.Is(err, ErrLifecycleDeferred) {
 		return d.deferredFinalizeEnv(ctx, agent, env)
 	}
 	if err != nil {
-		return err
+		return nil, err
+	}
+	if launch != nil {
+		d.applyAcceptedLaunchResponse(ctx, agent, resp)
+		return &CreateDispatchResult{Launch: launch}, nil
 	}
 
 	tzNeeded := takeTZGatherNeed(envReqs) && !answerTZ
@@ -1749,33 +1813,58 @@ func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agen
 			if tzNeeded {
 				setResolvedAgentTZ(req.ResolvedEnv, &req.EnvClassifications, d.resolveAgentTZ(ctx, agent, true))
 			}
-			resp2, envReqs2, err2 := d.client.CreateAgentWithGather(
-				ctx, agent.RuntimeBrokerID, endpoint, req,
-			)
+			// A fresh RequestID for the replay: reusing the first send's ID
+			// would let the broker's attempt cache replay the stored 202
+			// instead of processing the newly resolved env (and, for an
+			// async launch, the new launch ID).
+			req.RequestID = api.NewUUID()
+			resp2, envReqs2, launch2, err2 := d.dispatchLaunching(ctx, agent, endpoint, req, true, func(ctx context.Context, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+				return d.client.CreateAgentWithGather(ctx, agent.RuntimeBrokerID, endpoint, req)
+			})
 			if err2 != nil {
-				return err2
+				return nil, err2
 			}
 			takeTZGatherNeed(envReqs2)
 			if envReqs2 != nil && len(envReqs2.Needs) > 0 {
-				return &ErrEnvStillMissing{Requirements: envReqs2}
+				return nil, &ErrEnvStillMissing{Requirements: envReqs2}
+			}
+			if launch2 != nil {
+				d.applyAcceptedLaunchResponse(ctx, agent, resp2)
+				return &CreateDispatchResult{Launch: launch2}, nil
 			}
 			if resp2 != nil {
 				d.applyBrokerResponse(ctx, agent, resp2)
 			}
-			return nil
+			return nil, nil
 		}
-		return &ErrEnvStillMissing{Requirements: envReqs}
+		return nil, &ErrEnvStillMissing{Requirements: envReqs}
 	}
 
 	if resp != nil {
 		d.applyBrokerResponse(ctx, agent, resp)
 	}
-	return nil
+	return nil, nil
 }
 
 // deferredFinalizeEnv handles a cross-node finalize_env via durable dispatch.
-func (d *HTTPAgentDispatcher) deferredFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) error {
-	return d.deferredDataOp(ctx, agent, "finalize_env", &FinalizeEnvDispatchArgs{Env: env})
+// The owner's result carries Launch when its send was accepted for
+// asynchronous launch.
+func (d *HTTPAgentDispatcher) deferredFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) (*CreateDispatchResult, error) {
+	result, err := d.deferredDataOpResult(ctx, agent, "finalize_env", &FinalizeEnvDispatchArgs{Env: env})
+	if err != nil {
+		return nil, err
+	}
+	if result.Result == "" {
+		return nil, nil
+	}
+	var fr FinalizeEnvResult
+	if err := json.Unmarshal([]byte(result.Result), &fr); err != nil {
+		return nil, fmt.Errorf("unmarshal finalize_env result: %w", err)
+	}
+	if fr.Launch != nil {
+		return &CreateDispatchResult{Launch: fr.Launch}, nil
+	}
+	return nil, nil
 }
 
 // envScopePrecedence is the single, authoritative statement of the order in
@@ -2736,6 +2825,13 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		attribute.String("scion.broker.id", agent.RuntimeBrokerID),
 	)
 
+	// Start guard: no broker call
+	// while a create launch is in flight, or after one did not complete.
+	if err := d.launchGuardError(ctx, agent, "DispatchAgentStart"); err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return err
@@ -2877,6 +2973,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentStart"),
 		Workspace:            startEnv.workspace,
+		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault()),
 	}
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
@@ -2940,6 +3037,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
+	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
 	if err != nil {
@@ -2957,9 +3055,14 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 // It generates a fresh auth token so the restarted container has valid
 // Hub credentials, preventing auth loss across container restarts.
 func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *store.Agent) error {
+	// Start guard.
+	if err := d.launchGuardError(ctx, agent, "DispatchAgentRestart"); err != nil {
+		return err
+	}
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
+	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
@@ -2991,6 +3094,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		HubEndpoint:          d.effectiveAgentHubEndpoint(),
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentRestart"),
+		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault()),
 	}
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
@@ -3013,6 +3117,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentResetAuth(ctx context.Context, agent 
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
+	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
 	if err != nil {
@@ -3053,6 +3158,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
+	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
 	if err != nil {
@@ -3121,6 +3227,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *s
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
+	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
 	if err != nil {
@@ -3193,6 +3300,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentKeys(ctx context.Context, target agen
 		return agentkeys.BrokerResult{}, fmt.Errorf("%w: %w", agentkeys.ErrNotDispatched, err)
 	}
 
+	ctx = withRecordedRuntime(ctx, target.Runtime)
 	req := agentkeys.BrokerRequest{
 		ProjectID:     target.ProjectID,
 		AgentID:       target.AgentID,
@@ -3208,6 +3316,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentLogs(ctx context.Context, agent *stor
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return "", err
 	}
+	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
 	if err != nil {
@@ -3222,6 +3331,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentExec(ctx context.Context, agent *stor
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return "", 0, err
 	}
+	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
 	if err != nil {
@@ -3236,6 +3346,7 @@ func (d *HTTPAgentDispatcher) DispatchCheckAgentPrompt(ctx context.Context, agen
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return false, err
 	}
+	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
 	if err != nil {
@@ -3310,7 +3421,8 @@ func isStopTerminal(phase string) bool { return phase == "stopped" || phase == "
 // signal → wait for the terminal phase. Called when client.StartAgent returns
 // ErrLifecycleDeferred (broker not locally connected).
 func (d *HTTPAgentDispatcher) deferredStart(ctx context.Context, agent *store.Agent, args *StartDispatchArgs) error {
-	return d.deferredLifecycle(ctx, agent, "start", args, isStartTerminal)
+	err := d.deferredLifecycle(ctx, agent, "start", args, isStartTerminal)
+	return d.deferredLaunchGuardError(ctx, agent, "deferredStart", err)
 }
 
 // deferredStop handles a cross-node agent stop.
@@ -3320,7 +3432,8 @@ func (d *HTTPAgentDispatcher) deferredStop(ctx context.Context, agent *store.Age
 
 // deferredRestart handles a cross-node agent restart.
 func (d *HTTPAgentDispatcher) deferredRestart(ctx context.Context, agent *store.Agent) error {
-	return d.deferredLifecycle(ctx, agent, "restart", &RestartDispatchArgs{}, isStartTerminal)
+	err := d.deferredLifecycle(ctx, agent, "restart", &RestartDispatchArgs{}, isStartTerminal)
+	return d.deferredLaunchGuardError(ctx, agent, "deferredRestart", err)
 }
 
 // deferredDelete handles a cross-node agent delete: subscribe → write intent →
@@ -3684,4 +3797,69 @@ func deleteProjectPathQuery(ctx context.Context) string {
 		return "&projectPath=" + url.QueryEscape(pp)
 	}
 	return ""
+}
+
+type recordedRuntimeKey struct{}
+
+// dispatchRecordedRuntime returns the runtime type to send to the broker for
+// an agent whose store record carries runtime: the broker-reported runtime
+// type, or "" when there is none or the agent is a managed agent (those have
+// no broker runtime).
+func dispatchRecordedRuntime(runtime string) string {
+	runtime = strings.TrimSpace(runtime)
+	if runtime == "" || isManagedAgentRuntime(runtime) {
+		return ""
+	}
+	return runtime
+}
+
+// withRecordedRuntime attaches the agent's recorded runtime type to an
+// existing-agent broker request context (ptone/scion#2748). The broker
+// transports send it as the api.RecordedRuntimeQueryParam query parameter,
+// and the broker then looks for the agent only in runtimes of that type,
+// answering 503 with Retry-After when none is registered instead of looking
+// in its default runtime. Like withDeleteProjectPath it is carried on the
+// context to keep the RuntimeBrokerClient interface unchanged; an empty
+// runtime leaves ctx unchanged and the broker behaves as before.
+func withRecordedRuntime(ctx context.Context, runtime string) context.Context {
+	if rt := dispatchRecordedRuntime(runtime); rt != "" {
+		return context.WithValue(ctx, recordedRuntimeKey{}, rt)
+	}
+	return ctx
+}
+
+// recordedRuntimeParam returns "runtime=<escaped>" if a recorded runtime was
+// attached with withRecordedRuntime, otherwise "".
+func recordedRuntimeParam(ctx context.Context) string {
+	if rt, _ := ctx.Value(recordedRuntimeKey{}).(string); rt != "" {
+		return api.RecordedRuntimeQueryParam + "=" + url.QueryEscape(rt)
+	}
+	return ""
+}
+
+// withRecordedRuntimeQuery appends the recorded runtime parameter (if any) to
+// a raw query string, as used by the control channel transport.
+func withRecordedRuntimeQuery(ctx context.Context, query string) string {
+	param := recordedRuntimeParam(ctx)
+	switch {
+	case param == "":
+		return query
+	case query == "":
+		return param
+	default:
+		return query + "&" + param
+	}
+}
+
+// withRecordedRuntimeURL appends the recorded runtime parameter (if any) to a
+// full request URL, as used by the HTTP transport.
+func withRecordedRuntimeURL(ctx context.Context, endpoint string) string {
+	param := recordedRuntimeParam(ctx)
+	if param == "" {
+		return endpoint
+	}
+	if strings.Contains(endpoint, "?") {
+		return endpoint + "&" + param
+	}
+	return endpoint + "?" + param
 }

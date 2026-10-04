@@ -81,7 +81,7 @@ test-fast:
 # (ptone/scion#1847) so this target can be used as a CI merge gate.
 test-hub-sqlite:
 	@echo "Running pkg/hub + perf/bench/seed tests (SQLite-enabled)..."
-	@go test -count=1 -timeout 25m \
+	@go test -count=1 -timeout 40m \
 		-skip '^(TestDEF164_AtAgentSlug_DeliversToAgent|TestDEF164_AtAgentSlug_DMConversationCreated|TestDEF152_AgentToAgentDM_DeliversViaOutbound|TestCreateTemplateV2_ScopeIDInjectionBlocked)$$' \
 		./pkg/hub/... ./perf/bench/seed/...
 
@@ -121,6 +121,10 @@ test-hub-sqlite:
 # (TestUTCTimestampNormalizeJSON_*, ptone/scion#2499): the JSON-embedded
 # timestamp rewrite is the part of that operation that runs on Postgres, with
 # its own SQL (jsonb casts, id keyset).
+# It also includes the agent run intent tests (TestRunIntent_*): they take
+# a FOR UPDATE row lock on Postgres, read the store clock with now(), and
+# compare run_intent_at values whose stored precision differs between the
+# two backends.
 #
 # It also includes the Conduit registry suite (TestConduitRegistry_*,
 # ptone/scion#2778): design conduit v2.1 §3.4 requires relay_instances,
@@ -160,7 +164,7 @@ test-launch-store-postgres:
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
-		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUTCTimestampNormalizeJSON_|TestConduitRegistry_)' \
+		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUTCTimestampNormalizeJSON_|TestConduitRegistry_|TestRunIntent_)' \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \

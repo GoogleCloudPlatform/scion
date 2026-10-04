@@ -1,0 +1,125 @@
+{
+  "metadata": {
+    "name": "test-agent",
+    "namespace": "default",
+    "annotations": {
+      "gke-gcsfuse/volumes": "true",
+      "scion.gcs_volumes": "W3sic291cmNlIjoiIiwidGFyZ2V0IjoiL2RhdGEiLCJidWNrZXQiOiJiMSIsInByZWZpeCI6IiJ9LHsic291cmNlIjoiIiwidGFyZ2V0IjoiL2hvbWUvc2Npb24vY2FjaGUiLCJidWNrZXQiOiJiMiIsInByZWZpeCI6IiJ9XQ=="
+    }
+  },
+  "spec": {
+    "volumes": [
+      {
+        "name": "workspace",
+        "emptyDir": {}
+      },
+      {
+        "name": "gcs-vol-0",
+        "csi": {
+          "driver": "gcsfuse.csi.storage.gke.io",
+          "volumeAttributes": {
+            "bucketName": "b1",
+            "mountOptions": "implicit-dirs"
+          }
+        }
+      },
+      {
+        "name": "gcs-vol-1",
+        "csi": {
+          "driver": "gcsfuse.csi.storage.gke.io",
+          "volumeAttributes": {
+            "bucketName": "b2",
+            "mountOptions": "implicit-dirs"
+          }
+        }
+      }
+    ],
+    "containers": [
+      {
+        "name": "agent",
+        "image": "test:latest",
+        "command": [
+          "sh",
+          "-c",
+          "while [ ! -f /tmp/.scion-home-ready ]; do sleep 0.2; done; exec sciontool init -- sh -c \"$SCION_START_CMD\""
+        ],
+        "workingDir": "/workspace",
+        "env": [
+          {
+            "name": "SCION_START_CMD",
+            "value": "tmux new-session -d -s scion -n agent sh -c 'sleep infinity; echo $? \u003e /tmp/scion-harness-exit-code' \\; set-option -g window-size latest \\; new-window -t scion -n shell \\; select-window -t scion:agent \\; attach-session -t scion"
+          },
+          {
+            "name": "SCION_HOST_UID",
+            "value": "HOST_UID"
+          },
+          {
+            "name": "SCION_HOST_GID",
+            "value": "HOST_GID"
+          },
+          {
+            "name": "HOME",
+            "value": "/home/scion"
+          },
+          {
+            "name": "USER",
+            "value": "scion"
+          },
+          {
+            "name": "LOGNAME",
+            "value": "scion"
+          }
+        ],
+        "resources": {
+          "limits": {
+            "cpu": "2",
+            "ephemeral-storage": "10Gi",
+            "memory": "4Gi"
+          },
+          "requests": {
+            "cpu": "250m",
+            "ephemeral-storage": "10Gi",
+            "memory": "512Mi"
+          }
+        },
+        "volumeMounts": [
+          {
+            "name": "workspace",
+            "mountPath": "/workspace"
+          },
+          {
+            "name": "gcs-vol-0",
+            "mountPath": "/data"
+          },
+          {
+            "name": "gcs-vol-1",
+            "readOnly": true,
+            "mountPath": "/home/scion/cache"
+          }
+        ],
+        "imagePullPolicy": "IfNotPresent",
+        "securityContext": {
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "allowPrivilegeEscalation": false
+        },
+        "stdin": true,
+        "tty": true
+      }
+    ],
+    "restartPolicy": "Never",
+    "securityContext": {
+      "runAsUser": 1000,
+      "runAsGroup": 1000,
+      "runAsNonRoot": true,
+      "fsGroup": -1,
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      }
+    }
+  },
+  "status": {}
+}

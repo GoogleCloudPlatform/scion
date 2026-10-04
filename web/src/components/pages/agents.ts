@@ -65,6 +65,7 @@ import {
 } from '../../shared/message-mode.js';
 import type { MessageMode } from '../../shared/types.js';
 import { showToast } from '../../utils/toast.js';
+import { stopAllNotices, type StopAllResult } from '../../utils/stop-all.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { terminalHref } from '../../client/open-terminal.js';
 import { formatRelative } from '../../utils/time.js';
@@ -711,9 +712,9 @@ export class ScionPageAgents extends LitElement {
         throw new Error(await extractApiError(response, 'Failed to stop all agents'));
       }
 
-      const result = (await response.json()) as { stopped: number; failed: number };
-      if (result.failed > 0) {
-        showToast(`Stopped ${result.stopped} agents, ${result.failed} failed.`, 'warning');
+      const result = (await response.json()) as StopAllResult;
+      for (const notice of stopAllNotices(result)) {
+        showToast(notice.message, notice.variant);
       }
 
       this.backgroundRefresh();
