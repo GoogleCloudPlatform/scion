@@ -27,7 +27,9 @@
 #                                                             session.status
 #                                                             busy/retry; see
 #                                                             scion-bridge.js's
-#                                                             routeSessionIdle)
+#                                                             routeSessionIdle;
+#                                                             carries a failed
+#                                                             turn's error)
 #   tool-start       <- tool.execute.before                 (direct match)
 #   tool-end         <- tool.execute.after                  (direct match; fires on success only)
 #   prompt-submit    <- permission.replied                  (user/auto responded to a permission prompt)
@@ -42,16 +44,19 @@
 #   response-complete - no direct equivalent; session.idle covers turn end
 #   model-start      - no hook fires at model invocation start
 #
-# session.error never reaches this file at all: scion-bridge.js's route()
-# emits nothing for it (see that file's comment on the `session.error` case).
-# A turn ends exactly once, on session.idle, which always follows a
-# session.error in a real capture; routing session.error to any lifecycle
-# event here would count that same turn a second time (a real capture shows
-# session.idle firing twice for one failed prompt, so mapping session.error
-# to anything -- even a non-terminal event -- double-counts a turn against
-# hooks/handlers/limits.go's max_turns). The bridge does not invoke
-# sciontool for session.error at all, so its error text is not visible to
-# scion in any form; it remains visible in opencode's own TUI/log output.
+# session.error is never a raw event name here: scion-bridge.js's route()
+# emits nothing for it (see routeSessionError). A turn ends exactly once, on
+# session.idle, which always follows a session.error in a real capture;
+# routing session.error to any lifecycle event here would count that same
+# turn a second time (a real capture shows session.idle firing twice for one
+# failed prompt, so mapping session.error to anything -- even a non-terminal
+# event -- double-counts a turn against hooks/handlers/limits.go's
+# max_turns). Instead the bridge remembers a bounded "<name>: <message>"
+# string for the armed session and attaches it, as `error`, to that turn's
+# one gated session.idle emission, which the mapping below carries onto the
+# agent-end event (span status and log). A user abort (MessageAbortedError)
+# is not recorded, and a run that goes busy again after the error (e.g.
+# context-overflow auto-compaction) clears it.
 #
 # "message.part.updated.step-finish" is not an OpenCode wire event name; it
 # is scion-bridge.js's own key for a `message.part.updated` bus event whose
@@ -79,9 +84,12 @@ mappings:
       session_id: session_id
 
   # Agent turn completion. session.error is deliberately absent from this
-  # file -- see the note above the mappings block.
+  # file -- see the note above the mappings block; its error text arrives
+  # on session.idle instead.
   session.idle:
     event: agent-end
+    fields:
+      error: error
 
   # Tool lifecycle.
   tool.execute.before:
@@ -97,9 +105,12 @@ mappings:
       success: success
 
   # Model usage: one per completed LLM step (design §3.7, §9 phase 3b).
+  # model is the bridge's joined provider/model for the step's parent
+  # message; it takes precedence over SCION_MODEL (design §3.2).
   message.part.updated.step-finish:
     event: model-end
     fields:
+      model: model
       cache_write_tokens: cache_write_tokens
       reasoning_tokens: reasoning_tokens
 

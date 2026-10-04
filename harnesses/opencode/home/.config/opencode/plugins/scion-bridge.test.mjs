@@ -32,7 +32,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import test from 'node:test';
 
-import { createBridgeState, route, toolExecuteBeforeData, toolExecuteAfterData } from './scion-bridge.js';
+import { createBridgeState, route, sessionErrorText, toolExecuteBeforeData, toolExecuteAfterData } from './scion-bridge.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // harnesses/opencode/home/.config/opencode/plugins -> repo root is 6 levels up.
@@ -195,7 +195,7 @@ test('agent-end count matches the number of real prompt cycles, for every real r
   }
 });
 
-test('run3: session.error emits nothing, and the number of agent-ends equals the number of real prompt cycles', () => {
+test('run3: session.error emits nothing by itself, and the number of agent-ends equals the number of real prompt cycles', () => {
   const run3 = loadFixture().get('run3');
   assert.ok(run3 && run3.length > 0, 'fixture must contain run3 records');
 
@@ -214,6 +214,93 @@ test('run3: session.error emits nothing, and the number of agent-ends equals the
   // prompt cycle in this run.
   const idleEmissions = emissionsFor(run3, 'session.idle');
   assert.equal(idleEmissions.length, 1, 'run3 is one real prompt cycle (a failed one), so exactly one agent-end is expected');
+});
+
+test('run3: the captured session.error is carried onto the one agent-end as a bounded error string', () => {
+  const run3 = loadFixture().get('run3');
+  const idleEmissions = emissionsFor(run3, 'session.idle');
+  assert.equal(idleEmissions.length, 1);
+  // The capture's error is {name: "APIError", data: {message: "mock upstream
+  // failure", responseBody, responseHeaders, metadata.url, ...}}; only the
+  // name and message are carried.
+  assert.equal(idleEmissions[0].data.error, 'APIError: mock upstream failure');
+  assert.deepEqual(Object.keys(idleEmissions[0].data).sort(), ['error', 'session_id']);
+});
+
+test('run2/run4/run5: turns without a session.error carry no error on their agent-end', () => {
+  const byRun = loadFixture();
+  for (const run of ['run2', 'run4', 'run5']) {
+    for (const emission of emissionsFor(byRun.get(run), 'session.idle')) {
+      assert.equal(emission.data.error, undefined, `${run}: unexpected error on agent-end`);
+    }
+  }
+});
+
+test('a pending error is attached once, then cleared, so the next turn ends clean', () => {
+  const sessionID = 'ses_synthetic_err_clear';
+  const state = createBridgeState();
+  route(state, { type: 'session.created', properties: { info: { id: sessionID } } });
+
+  route(state, { type: 'session.status', properties: { sessionID, status: { type: 'busy' } } });
+  route(state, { type: 'session.error', properties: { sessionID, error: { name: 'APIError', data: { message: 'boom' } } } });
+  const first = route(state, { type: 'session.idle', properties: { sessionID } });
+  assert.equal(first.length, 1);
+  assert.equal(first[0].data.error, 'APIError: boom');
+  // OpenCode's own duplicate idle after the error: dropped, as before.
+  assert.deepEqual(route(state, { type: 'session.idle', properties: { sessionID } }), []);
+  assert.equal(state.pendingErrors.has(sessionID), false);
+
+  route(state, { type: 'session.status', properties: { sessionID, status: { type: 'busy' } } });
+  const second = route(state, { type: 'session.idle', properties: { sessionID } });
+  assert.equal(second.length, 1);
+  assert.equal(second[0].data.error, undefined, 'the next, successful turn must not inherit the previous error');
+});
+
+test('a session.error outside an armed turn, or for a child session, is not recorded', () => {
+  const state = createBridgeState();
+  const parentID = 'ses_synthetic_err_parent';
+  const childID = 'ses_synthetic_err_child';
+  route(state, { type: 'session.created', properties: { info: { id: parentID } } });
+  route(state, { type: 'session.created', properties: { info: { id: childID, parentID } } });
+
+  // Not armed: belongs to no turn.
+  route(state, { type: 'session.error', properties: { sessionID: parentID, error: { name: 'APIError' } } });
+  assert.equal(state.pendingErrors.has(parentID), false);
+  // Child: its idle is never emitted, so its error would never be consumed.
+  route(state, { type: 'session.status', properties: { sessionID: childID, status: { type: 'busy' } } });
+  route(state, { type: 'session.error', properties: { sessionID: childID, error: { name: 'APIError' } } });
+  assert.equal(state.pendingErrors.has(childID), false);
+  // No sessionID at all (OpenCode can publish a global session.error).
+  assert.deepEqual(route(state, { type: 'session.error', properties: { error: { name: 'APIError' } } }), []);
+  assert.equal(state.pendingErrors.size, 0);
+
+  // The parent's next real turn ends clean.
+  route(state, { type: 'session.status', properties: { sessionID: parentID, status: { type: 'busy' } } });
+  const idle = route(state, { type: 'session.idle', properties: { sessionID: parentID } });
+  assert.equal(idle.length, 1);
+  assert.equal(idle[0].data.error, undefined);
+});
+
+test('a user abort (MessageAbortedError) is not reported as a failed turn', () => {
+  const sessionID = 'ses_synthetic_abort_err';
+  const state = createBridgeState();
+  route(state, { type: 'session.created', properties: { info: { id: sessionID } } });
+  route(state, { type: 'session.status', properties: { sessionID, status: { type: 'busy' } } });
+  route(state, { type: 'session.error', properties: { sessionID, error: { name: 'MessageAbortedError', data: { message: 'aborted' } } } });
+  const idle = route(state, { type: 'session.idle', properties: { sessionID } });
+  assert.equal(idle.length, 1);
+  assert.equal(idle[0].data.error, undefined);
+});
+
+test('sessionErrorText reads only name and message, with fallbacks, bounded in length', () => {
+  assert.equal(sessionErrorText({ name: 'APIError', data: { message: 'boom', responseBody: 'secret' } }), 'APIError: boom');
+  assert.equal(sessionErrorText({ name: 'ProviderAuthError' }), 'ProviderAuthError');
+  assert.equal(sessionErrorText({ data: { message: 'only a message' } }), 'only a message');
+  assert.equal(sessionErrorText(undefined), 'session error');
+  assert.equal(sessionErrorText({ name: 42, data: { message: {} } }), 'session error');
+  const long = sessionErrorText({ name: 'APIError', data: { message: 'x'.repeat(1000) } });
+  assert.equal(long.length, 256);
+  assert.ok(long.startsWith('APIError: xxx'));
 });
 
 test('run4: permission.asked and permission.replied route through the event hook', () => {
@@ -405,6 +492,9 @@ test('session.error emits nothing even while the session is armed, with no idle 
   const idleEmissions = route(state, { type: 'session.idle', properties: { sessionID } });
 
   assert.equal(idleEmissions.length, 1, 'the one real idle at the end of this turn must give exactly one agent-end');
+  // The run went busy again after the error (it recovered), so the turn did
+  // not end on that error and its agent-end carries none.
+  assert.equal(idleEmissions[0].data.error, undefined, 'a recovered error must not be attached to the eventual agent-end');
 });
 
 // These scenarios reproduce OpenCode v1.18.33's actual SessionProcessor
@@ -539,7 +629,7 @@ test('a retry with no preceding busy still arms the gate on its own', () => {
   assert.equal(count, 1, 'retry alone must arm the gate, with no busy record required first');
 });
 
-test('bridge caches (seenModelEnds, childSessionIds, busySessionIds) evict oldest entries once MAX_CACHE_ENTRIES is exceeded', () => {
+test('bridge caches (seenModelEnds, childSessionIds, busySessionIds, pendingErrors) evict oldest entries once MAX_CACHE_ENTRIES is exceeded', () => {
   const cap = 4096;
 
   const modelEndState = createBridgeState();
@@ -588,6 +678,18 @@ test('bridge caches (seenModelEnds, childSessionIds, busySessionIds) evict oldes
   route(childBusyState, { type: 'session.created', properties: { info: { id: 'ses_child_busy', parentID: 'ses_parent_busy' } } });
   route(childBusyState, { type: 'session.status', properties: { sessionID: 'ses_child_busy', status: { type: 'busy' } } });
   assert.equal(childBusyState.busySessionIds.has('ses_child_busy'), false, 'a known child session must not be armed');
+
+  // pendingErrors is bounded the same way: arm and fail many sessions
+  // without any of them going idle.
+  const errorState = createBridgeState();
+  for (let i = 0; i < cap + 10; i++) {
+    const sessionID = `ses_err_${i}`;
+    route(errorState, { type: 'session.status', properties: { sessionID, status: { type: 'busy' } } });
+    route(errorState, { type: 'session.error', properties: { sessionID, error: { name: 'APIError' } } });
+  }
+  assert.ok(errorState.pendingErrors.size <= cap, `pendingErrors.size = ${errorState.pendingErrors.size}, want <= ${cap}`);
+  assert.equal(errorState.pendingErrors.has('ses_err_0'), false);
+  assert.equal(errorState.pendingErrors.has(`ses_err_${cap + 9}`), true);
 });
 
 test('run5: child-session step-finish usage is still counted (not silently dropped)', () => {

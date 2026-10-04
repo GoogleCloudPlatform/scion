@@ -19,7 +19,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
@@ -717,14 +716,7 @@ func (d *UsageDeriver) fingerprint(scopeName, eventName string, record *logspb.L
 // harness, model, status (matching the existing hook descriptor);
 // scion.usage.tokens gets harness, model, token_type only.
 func (d *UsageDeriver) record(ctx context.Context, increment usageIncrement) {
-	model := increment.Model
-	if model == "" {
-		model = os.Getenv("SCION_MODEL")
-	}
-	if model == "" {
-		model = "unknown"
-	}
-	model = truncateUTF8(model, 128)
+	model := telemetrycontract.ResolveModelLabel(increment.Model, os.Getenv("SCION_MODEL"))
 	harness := os.Getenv("SCION_HARNESS")
 
 	if increment.Calls != 0 && d.calls != nil {
@@ -801,20 +793,6 @@ func (d *UsageDeriver) Shutdown(ctx context.Context) error {
 		return nil
 	}
 	return d.providers.Shutdown(ctx)
-}
-
-// truncateUTF8 truncates s to at most maxBytes bytes without splitting a
-// multi-byte rune: it walks back from maxBytes to the nearest rune boundary
-// rather than cutting mid-rune, which would produce an invalid UTF-8 label
-// value.
-func truncateUTF8(s string, maxBytes int) string {
-	if len(s) <= maxBytes {
-		return s
-	}
-	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
-		maxBytes--
-	}
-	return s[:maxBytes]
 }
 
 func logAttrString(attrs []*commonpb.KeyValue, key string) string {

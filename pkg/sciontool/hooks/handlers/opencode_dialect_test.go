@@ -16,8 +16,12 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/dialects"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"gopkg.in/yaml.v3"
 )
 
@@ -462,5 +466,114 @@ func TestOpencodeDialectHasNoSessionErrorMapping(t *testing.T) {
 	}
 	if event.Name != "session.error" {
 		t.Errorf("event.Name = %q, want the raw name unchanged (no mapping entry exists for session.error)", event.Name)
+	}
+}
+
+// opencodeRun3AgentEndPayload is the exact sciontool stdin scion-bridge.js
+// produces for bus-events-1.18.33.json's run3 (a prompt failing after
+// OpenCode's provider retries are exhausted): the captured session.error
+// ({name: "APIError", data: {message: "mock upstream failure", ...}}) is
+// remembered and attached to that turn's one gated session.idle. The bridge
+// test "run3: the captured session.error is carried onto the one agent-end
+// as a bounded error string" (scion-bridge.test.mjs) pins that the bridge
+// emits exactly this, from the real capture; this replays it through the
+// real dialect.yaml and telemetry handler.
+var opencodeRun3AgentEndPayload = map[string]interface{}{
+	"hook_event_name": "session.idle",
+	"session_id":      "ses_f12e82b0fffeTWfXQtofqh9VxA",
+	"error":           "APIError: mock upstream failure",
+}
+
+// TestOpencodeDialectCarriesSessionErrorOntoTurnEndSpan is ptone/scion#2244:
+// a failed turn's error status reaches the agent.turn.end span, while the
+// turn is still a single agent-end.
+func TestOpencodeDialectCarriesSessionErrorOntoTurnEndSpan(t *testing.T) {
+	md := loadOpencodeDialect(t)
+
+	event, err := md.Parse(opencodeRun3AgentEndPayload)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if event.Name != hooks.EventAgentEnd {
+		t.Fatalf("event.Name = %q, want %q", event.Name, hooks.EventAgentEnd)
+	}
+	if event.Data.Error != "APIError: mock upstream failure" {
+		t.Errorf("event.Data.Error = %q, want the bridge's carried session.error text", event.Data.Error)
+	}
+
+	sr := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+	h := NewTelemetryHandler(tp, nil, nil)
+	if err := h.Handle(event); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+
+	spans := sr.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended span count = %d, want 1 (one turn, one agent.turn.end)", len(spans))
+	}
+	if spans[0].Name() != "agent.turn.end" {
+		t.Errorf("span name = %q, want agent.turn.end", spans[0].Name())
+	}
+	if got := spans[0].Status(); got.Code != codes.Error || got.Description != "APIError: mock upstream failure" {
+		t.Errorf("span status = %+v, want Error with the carried session.error text", got)
+	}
+
+	// A clean turn's session.idle (run2's, from the hook-payload fixture)
+	// still maps to agent-end with no error.
+	clean, err := md.Parse(map[string]interface{}{"hook_event_name": "session.idle", "session_id": "ses_clean"})
+	if err != nil {
+		t.Fatalf("Parse clean: %v", err)
+	}
+	if clean.Name != hooks.EventAgentEnd || clean.Data.Error != "" {
+		t.Errorf("clean session.idle = (%q, error %q), want agent-end with no error", clean.Name, clean.Data.Error)
+	}
+}
+
+// TestOpencodeDialectModelLabelFromPayload is ptone/scion#2242 for
+// opencode: the bridge's joined provider/model on each step-finish wins
+// over SCION_MODEL for the model label on both usage metrics (design §3.2).
+func TestOpencodeDialectModelLabelFromPayload(t *testing.T) {
+	t.Setenv("SCION_USAGE_SOURCE", "hooks")
+	t.Setenv("SCION_HARNESS", "opencode")
+	t.Setenv("SCION_MODEL", "configured-model-should-lose")
+
+	md := loadOpencodeDialect(t)
+	records := loadOpencodeHookPayloadFixture(t)
+
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	defer func() { _ = mp.Shutdown(context.Background()) }()
+	h := NewTelemetryHandler(nil, nil, nil, mp)
+
+	for _, raw := range records {
+		event, err := md.Parse(raw)
+		if err != nil {
+			t.Fatalf("Parse(%v): %v", raw, err)
+		}
+		if event.Name == hooks.EventModelEnd && event.Data.Model != "mockprov/mock-model" {
+			t.Errorf("model-end event.Data.Model = %q, want mockprov/mock-model", event.Data.Model)
+		}
+		if err := h.Handle(event); err != nil {
+			t.Fatalf("Handle: %v", err)
+		}
+	}
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	for _, name := range []string{telemetrycontract.MetricAPICalls, telemetrycontract.MetricUsageTokens} {
+		points := int64CounterDataPoints(rm, name)
+		if len(points) == 0 {
+			t.Fatalf("%s has no data points", name)
+		}
+		for _, p := range points {
+			got, _ := p.Attributes.Value(attribute.Key(telemetrycontract.ModelLabel))
+			if got.AsString() != "mockprov/mock-model" {
+				t.Errorf("%s model label = %q, want mockprov/mock-model (payload over SCION_MODEL)", name, got.AsString())
+			}
+		}
 	}
 }
