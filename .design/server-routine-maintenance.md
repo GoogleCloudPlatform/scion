@@ -87,7 +87,7 @@ CREATE INDEX idx_maintenance_ops_status ON maintenance_operations(status);
 ```
 
 **Category semantics:**
-- `migration` — One-time tasks that transition the system from state A to state B. Once completed, they are marked done, and the run endpoint rejects another run with `409 Conflict`. There is no override flag in the UI or CLI. The exception is a migration listed in `rerunnableMigrations` (`pkg/hub/utc_timestamp_normalize.go`): it is idempotent, so the run endpoint accepts it again after it completes (see §3.5). A re-run replaces the stored result (log, start time and user) of the previous run; a dry run of a completed migration keeps the completed record. The Maintenance page offers **Run** for a pending migration and **Retry** for a failed one, and no button once a migration has completed, so a completed listed migration is re-run through the API (`POST /api/v1/admin/maintenance/migrations/{key}/run`). These are seeded into the table at startup or via schema migration.
+- `migration` — One-time tasks that transition the system from state A to state B. Once completed, they are marked done, and the run endpoint rejects another run with `409 Conflict`. There is no override flag in the UI or CLI. The exception is a migration listed in `rerunnableMigrations` (`pkg/hub/utc_timestamp_normalize.go`): it is idempotent, so the run endpoint accepts it again after it completes (see §3.5). A re-run replaces the stored result (log, start time and user) of the previous run. A dry run of a completed migration is rejected with `409 Conflict`; run it without `dryRun` instead. The Maintenance page offers **Run** for a pending migration and **Retry** for a failed one, and no button once a migration has completed, so a completed listed migration is re-run through the API (`POST /api/v1/admin/maintenance/migrations/{key}/run`). These are seeded into the table at startup or via schema migration.
 - `operation` — Repeatable infrastructure tasks. Each execution creates a new history entry (see `maintenance_operation_runs` below).
 
 **Status transitions:**
@@ -233,7 +233,7 @@ Response:
 }
 ```
 
-Returns `409 Conflict` if the migration is already completed, unless it is listed in `rerunnableMigrations` (currently `utc-timestamp-normalize` and `applied-config-tz-cleanup`). A listed migration must be idempotent: a second run changes nothing the first run already fixed. A successful run replaces the stored result. A dry run of a pending migration leaves it `pending` with the dry-run log as its result; a dry run of a completed migration restores the completed status, completion time, result, start time and user, and writes the dry-run log to the hub log only.
+Returns `409 Conflict` if the migration is already completed, unless it is listed in `rerunnableMigrations` (currently `utc-timestamp-normalize` and `applied-config-tz-cleanup`). A listed migration must be idempotent: a second run changes nothing the first run already fixed. A successful run replaces the stored result. A dry run of a pending (or failed) migration leaves it `pending` with the dry-run log as its result. A dry run of a completed migration, listed or not, returns `409 Conflict` ("Migration already completed; a re-run is idempotent, so run it without dryRun") and leaves the record unchanged: a dry run would overwrite the completed record (success resets it to `pending`, a failure marks it `failed`), and a real re-run of a listed migration is idempotent and reports its own count.
 
 #### Get Run Status
 

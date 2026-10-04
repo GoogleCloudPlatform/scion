@@ -164,6 +164,15 @@ func (s *Server) executeMigration(w http.ResponseWriter, r *http.Request, key st
 	}
 	params := parseMigrationParams(body)
 
+	// A dry run of a completed (rerunnable) migration is rejected: its
+	// outcome would overwrite the completed record (a dry run resets the
+	// operation to pending, and a failed one marks it failed), and a real
+	// re-run is idempotent and reports its own count.
+	if op.Status == store.MaintenanceStatusCompleted && params["dryRun"] == "true" {
+		writeError(w, http.StatusConflict, ErrCodeConflict, "Migration already completed; a re-run is idempotent, so run it without dryRun", nil)
+		return
+	}
+
 	// Resolve the executor for this migration key.
 	executor, err := s.resolveMaintenanceExecutor(key)
 	if err != nil {
@@ -171,14 +180,6 @@ func (s *Server) executeMigration(w http.ResponseWriter, r *http.Request, key st
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, err.Error(), nil)
 		return
 	}
-
-	// Keep the record of a completed run, so that a dry run of a completed
-	// (rerunnable) migration can put it back instead of erasing it.
-	prevStatus := op.Status
-	prevCompletedAt := op.CompletedAt
-	prevResult := op.Result
-	prevStartedAt := op.StartedAt
-	prevStartedBy := op.StartedBy
 
 	// Mark the migration as running.
 	now := time.Now()
@@ -241,17 +242,6 @@ func (s *Server) executeMigration(w http.ResponseWriter, r *http.Request, key st
 			}
 			resultJSON, _ := json.Marshal(result)
 			op.Result = string(resultJSON)
-			if params["dryRun"] == "true" && prevStatus == store.MaintenanceStatusCompleted {
-				// A dry run changes nothing, so the completed run stays the
-				// record. The dry-run output goes to the hub log only.
-				op.Status = prevStatus
-				op.CompletedAt = prevCompletedAt
-				op.Result = prevResult
-				op.StartedAt = prevStartedAt
-				op.StartedBy = prevStartedBy
-				log.Info("Dry run of a completed migration; previous result kept",
-					maintenanceLogAttrs(key, "log", buf.String())...)
-			}
 			log.Info("Migration completed", maintenanceLogAttrs(key, "status", op.Status)...)
 		}
 

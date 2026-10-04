@@ -63,3 +63,16 @@ migrations, so a completed rerunnable migration is re-run through
 Not changed: a failed dry run of a completed migration, or an executor
 panic during one, still marks it `failed`. That is the pre-existing failure
 path.
+
+## Review round 2 fixes
+
+- **Dry run of a completed migration is rejected.** The round 1 restore is
+  removed. `executeMigration` now returns `409 Conflict` ("Migration already
+  completed; a re-run is idempotent, so run it without dryRun") for a dry run
+  of a completed migration. A failed or panicking dry run, or a hub restart
+  during one, can no longer overwrite the completed record, and no dry-run
+  output is left reachable only through the hub log.
+  `TestExecuteMigrationDryRunKeepsCompletedRecord` asserts the 409 and an
+  unchanged record (it fails without the check). §2 and §3.5 are updated.
+- **Concurrent runs.** The check-then-set race on the running guard predates
+  this change and is not fixed here. Follow-up: ptone/scion#2953.

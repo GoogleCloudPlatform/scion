@@ -345,10 +345,12 @@ func TestAppliedConfigTZCleanupRerunsThroughExecuteMigration(t *testing.T) {
 }
 
 // TestExecuteMigrationDryRunKeepsCompletedRecord checks that a dry run of a
-// completed rerunnable migration leaves its completion record in place,
-// while a dry run of a pending migration still leaves it pending.
+// completed rerunnable migration is rejected with 409 and leaves the
+// completion record unchanged, while a dry run of a pending migration still
+// runs and leaves it pending.
 func TestExecuteMigrationDryRunKeepsCompletedRecord(t *testing.T) {
 	key := entadapter.AppliedConfigTZCleanupKey
+	ctx := context.Background()
 	srv, s := newTestServerWithStore(t)
 	newTZCleanupFixture(t, s)
 
@@ -362,12 +364,21 @@ func TestExecuteMigrationDryRunKeepsCompletedRecord(t *testing.T) {
 	require.NotNil(t, done.CompletedAt)
 	require.NotNil(t, done.StartedAt)
 
-	dry := runMigrationViaHandler(t, srv, s, key, `{"params":{"dryRun":true}}`)
-	assert.Equal(t, store.MaintenanceStatusCompleted, dry.Status, dry.Result)
-	require.NotNil(t, dry.CompletedAt)
-	assert.True(t, done.CompletedAt.Equal(*dry.CompletedAt), "completed time must not change: %v vs %v", done.CompletedAt, dry.CompletedAt)
-	require.NotNil(t, dry.StartedAt)
-	assert.True(t, done.StartedAt.Equal(*dry.StartedAt), "started time must not change")
-	assert.Equal(t, done.StartedBy, dry.StartedBy)
-	assert.Equal(t, done.Result, dry.Result, "the completed run's result stays the record")
+	admin := NewAuthenticatedUser("u2", "other@example.com", "Other", "admin", "cli")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/migrations/"+key+"/run", strings.NewReader(`{"params":{"dryRun":true}}`))
+	req = req.WithContext(contextWithIdentity(req.Context(), admin))
+	rr := httptest.NewRecorder()
+	srv.handleAdminMaintenanceMigrations(rr, req)
+	require.Equal(t, http.StatusConflict, rr.Code, rr.Body.String())
+	assert.Contains(t, rr.Body.String(), "run it without dryRun")
+
+	after, err := s.GetMaintenanceOperation(ctx, key)
+	require.NoError(t, err)
+	assert.Equal(t, store.MaintenanceStatusCompleted, after.Status)
+	require.NotNil(t, after.CompletedAt)
+	assert.True(t, done.CompletedAt.Equal(*after.CompletedAt), "completed time must not change: %v vs %v", done.CompletedAt, after.CompletedAt)
+	require.NotNil(t, after.StartedAt)
+	assert.True(t, done.StartedAt.Equal(*after.StartedAt), "started time must not change")
+	assert.Equal(t, done.StartedBy, after.StartedBy)
+	assert.Equal(t, done.Result, after.Result, "the completed run's result stays the record")
 }
