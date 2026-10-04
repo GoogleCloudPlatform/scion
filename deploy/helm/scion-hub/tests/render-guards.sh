@@ -384,7 +384,7 @@ echo "== THE READINESS PATH IS /readyz, AND NOTHING ELSE =="
 # R6 (gd-p3-rev's sweep, made gd-em's own at 14:20Z). "/readyz" appeared ZERO
 # times across all six committed test scripts while two probes in deployment.yaml
 # depend on it. It is a hard constraint on this project -- the path is /readyz,
-# NOT /api/v1/readyz and NOT /healthz -- and until these two rows it was protected
+# NOT /api/v1/readyz and NOT the legacy health-z path -- and until these two rows it was protected
 # by nothing at all. A constraint that lives only in a brief is not a constraint.
 #
 # TWO ASSERTIONS, POSITIVE AND EXHAUSTIVE, BECAUSE EITHER ALONE IS WEAK. The
@@ -403,13 +403,19 @@ else
 fi
 # Whole chart, not just the Deployment: an httpGet path introduced in any other
 # template is in scope for this constraint too.
+#
+# ABSOLUTE PATHS ONLY. An httpGet path is always absolute. A relative `path:` is
+# a volume item (the settings Secret projects `path: settings.yaml`), which is
+# not a probe and was making this row red on every render. Every absolute path
+# is still checked, quoted or not.
 executed=$((executed + 1))
-_nother=$(render | grep 'path:' | grep -cv 'path: /readyz')
+_abs_paths() { grep -E '^[[:space:]]*(- )?path:[[:space:]]+"?/' ; }
+_nother=$(render | _abs_paths | grep -cv 'path: /readyz' || true)
 if [ "$_nother" -eq 0 ]; then
   echo "ok    no probe path other than /readyz renders anywhere in the chart"
 else
   echo "FAIL  ${_nother} probe path(s) other than /readyz render:"
-  render | grep 'path:' | grep -v 'path: /readyz' | sed 's/^/        /'
+  render | _abs_paths | grep -v 'path: /readyz' | sed 's/^/        /'
   failed=$((failed + 1))
 fi
 
