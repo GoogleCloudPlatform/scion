@@ -117,6 +117,39 @@ type Reconnector struct {
 	OnDialError func(err error, delay time.Duration)
 	// Backoff overrides the default 1s→60s policy (tests inject Rand).
 	Backoff *Backoff
+	// Decide, if set, sees how each attempt or session ended and the
+	// delay the default policy chose. It returns the delay to use, or a
+	// non-nil error to stop Run with that error (terminal close codes).
+	// It runs on Run's goroutine, so it may block (e.g. to refresh a
+	// credential); it should honour ctx.
+	Decide func(ctx context.Context, end End, delay time.Duration) (time.Duration, error)
+}
+
+// End describes how a dial attempt or a session ended, for
+// Reconnector.Decide.
+type End struct {
+	// DialErr is the error of a failed attempt (a *CloseError when the
+	// relay refused the handshake). Nil for an established session.
+	DialErr error
+	// GoAway is the GoAway the relay sent on the session, or nil.
+	GoAway *conduitv1.GoAway
+	// SessionErr is why the session ended (nil while it is still
+	// draining after a GoAway).
+	SessionErr error
+	// Lived is how long the session lived (0 for a failed attempt).
+	Lived time.Duration
+}
+
+// Code returns the close code of e: the GoAway's, else the one carried by
+// DialErr or SessionErr, else 0.
+func (e End) Code() uint32 {
+	if e.GoAway != nil {
+		return e.GoAway.GetCode()
+	}
+	if e.DialErr != nil {
+		return CodeOf(e.DialErr, 0)
+	}
+	return CodeOf(e.SessionErr, 0)
 }
 
 // Run dials until ctx is cancelled. It closes the current session and
@@ -159,6 +192,12 @@ func (r *Reconnector) Run(ctx context.Context) error {
 				return ctx.Err()
 			}
 			d := bo.Next()
+			if r.Decide != nil {
+				var stop error
+				if d, stop = r.Decide(ctx, End{DialErr: err}, d); stop != nil {
+					return stop
+				}
+			}
 			if r.OnDialError != nil {
 				r.OnDialError(err, d)
 			}
@@ -189,7 +228,15 @@ func (r *Reconnector) Run(ctx context.Context) error {
 		}
 		// Whichever case fired, decide from the session's state: a GoAway
 		// is followed by the transport close, so both may be ready.
-		if d := redialDelay(receivedGoAway(ls), clk.Now().Sub(started), bo); d > 0 {
+		ga, lived := receivedGoAway(ls), clk.Now().Sub(started)
+		d := redialDelay(ga, lived, bo)
+		if r.Decide != nil {
+			var stop error
+			if d, stop = r.Decide(ctx, End{GoAway: ga, SessionErr: ls.Err(), Lived: lived}, d); stop != nil {
+				return stop
+			}
+		}
+		if d > 0 {
 			if err := wait(d); err != nil {
 				return err
 			}

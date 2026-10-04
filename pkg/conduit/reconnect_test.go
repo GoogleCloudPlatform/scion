@@ -102,6 +102,12 @@ type reconnectHarness struct {
 func (h *reconnectHarness) drawFraction(f float64) { h.fraction.Store(&f) }
 
 func newReconnectHarness(t *testing.T) *reconnectHarness {
+	return newReconnectHarnessWith(t, nil)
+}
+
+// newReconnectHarnessWith lets configure adjust the Reconnector before it
+// runs.
+func newReconnectHarnessWith(t *testing.T, configure func(*Reconnector)) *reconnectHarness {
 	h := &reconnectHarness{
 		t:        t,
 		clk:      clock.NewFake(t0),
@@ -147,6 +153,9 @@ func newReconnectHarness(t *testing.T) *reconnectHarness {
 			}
 			return n - 1
 		}},
+	}
+	if configure != nil {
+		configure(r)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	h.cancel = cancel
