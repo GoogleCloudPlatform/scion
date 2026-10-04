@@ -394,3 +394,47 @@ func TestDispatchLaunching_AcceptedMarkSurvivesCanceledRequest(t *testing.T) {
 	assert.Equal(t, "broker-instance-1", row.LaunchOwner, "the accepted mark is written")
 	assert.Equal(t, string(state.PhaseProvisioning), row.Phase)
 }
+
+// An async create persists the run it mints before the launch begins and
+// before the send, sends that run with the launch, and keeps it when the
+// broker accepts, even if the accepted answer reports another run: only a
+// synchronous answer is adopted (ptone/scion#2550, round 6 N2).
+func TestDispatchAgentCreate_AsyncKeepsMintedRunID(t *testing.T) {
+	f := newAsyncLaunchFixture(t, &store.BrokerCapabilities{AsyncLaunch: true})
+	agent := f.agent(t, "run-id", string(state.PhaseCreated), true)
+	var atSend *store.Agent
+	f.client.answer = func(req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+		atSend = f.row(t, agent.ID)
+		resp := acceptedAnswer(req, req.LaunchID)
+		resp.Agent.RunID = "broker-other-run"
+		return resp, nil, nil
+	}
+
+	res, err := f.dispatcher.DispatchAgentCreate(context.Background(), agent)
+	require.NoError(t, err)
+	require.NotNil(t, res.AcceptedLaunch())
+	require.Len(t, f.client.sends, 1)
+	sent := f.client.sends[0]
+	require.True(t, sent.AsyncLaunch)
+	require.NotEmpty(t, sent.RunID, "the launch carries the minted run")
+	require.NotNil(t, atSend)
+	assert.Equal(t, sent.RunID, atSend.RunID, "the run is persisted before the send")
+	assert.Equal(t, sent.LaunchID, atSend.LaunchID, "the launch began before the send")
+
+	assert.Equal(t, sent.RunID, f.row(t, agent.ID).RunID, "the accepted launch keeps the minted run")
+}
+
+// A row a delete holds refuses the async create's run write: nothing is
+// sent and no launch is begun (ptone/scion#2550, round 6 N2).
+func TestDispatchAgentCreate_AsyncDeleteClaimedSendsNothing(t *testing.T) {
+	f := newAsyncLaunchFixture(t, &store.BrokerCapabilities{AsyncLaunch: true})
+	agent := f.agent(t, "claimed", string(state.PhaseCreated), true)
+	seedAgentDeletion(t, f.store, agent.ID, seedLiveDeleting)
+
+	_, err := f.dispatcher.DispatchAgentCreate(context.Background(), agent)
+	require.ErrorIs(t, err, store.ErrDeleteInProgress)
+	assert.Empty(t, f.client.sends, "nothing is sent")
+	row := f.row(t, agent.ID)
+	assert.Empty(t, row.LaunchID, "no launch is begun")
+	assert.Empty(t, row.RunID, "no run is written")
+}
