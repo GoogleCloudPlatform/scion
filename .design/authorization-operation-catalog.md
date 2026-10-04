@@ -1710,7 +1710,7 @@
 - **Before Fields:** target_user_id, email, role, status
 - **Atomic:** Yes
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `last_owner`, `conflict`
 
 ### Tests
 
@@ -1976,7 +1976,7 @@
 
 **Effects:** `update-resource`
 
-**Denial Codes:** `forbidden`
+**Denial Codes:** `forbidden`, `last_owner`, `conflict`
 
 ### Tests
 
