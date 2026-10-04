@@ -37,6 +37,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"gopkg.in/yaml.v3"
 )
 
 // startContext holds all the resolved state needed to start an agent.
@@ -175,6 +176,17 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// The broker's global directory belongs to the global project. A
+	// dispatch that names another project with that path must fail before
+	// the marker block below, which would otherwise rewrite the global
+	// marker and create project-configs entries for that project.
+	if in.ProjectPath != "" && !in.ProjectPathFromContainer {
+		if msg := globalDirProjectConflict(in.ProjectPath, in.ProjectID); msg != "" {
+			span.SetStatus(codes.Error, msg)
+			return nil, &startContextError{Status: http.StatusConflict, Message: msg}
+		}
+	}
+
 	// Ensure hub-managed projects have a .scion marker with project-id for
 	// external split storage. When the hub dispatches to a broker without a
 	// LocalPath (e.g. auto-provided embedded broker for a linked project), the
@@ -202,7 +214,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 				// Detect stale marker: hub's project ID differs and the old
 				// external config dir was cleaned up (project was deleted and
 				// recreated with the same name — miller79/scion#28).
-				if in.ProjectID != "" && marker.ProjectID != in.ProjectID {
+				// The global marker is only rewritten for the global project
+				// itself (see globalDirProjectConflict above).
+				if in.ProjectID != "" && marker.ProjectID != in.ProjectID && canRewriteProjectMarker(in.ProjectPath, in.ProjectID) {
 					extPath, _ := marker.ExternalProjectPath()
 					if isStaleExternalDir(extPath) {
 						slug := marker.ProjectSlug
@@ -1726,6 +1740,65 @@ func resolveWorktreeProvision(in worktreeProvisionInput) worktreeProvisionResult
 		WorktreePath: worktreePath,
 		ProjectRoot:  resolved.HostPath,
 	}
+}
+
+// globalDirProjectConflict returns a non-empty error message when
+// projectPath is the broker's global scion directory (or a project root whose
+// .scion entry is that directory) and projectID names a project other than
+// the global project. The global project is identified by the "global" id,
+// by the project id recorded in the global directory's .scion marker, or by
+// the hub project id in the global settings.
+func globalDirProjectConflict(projectPath, projectID string) string {
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return ""
+	}
+	if !config.IsGlobalProjectDir(projectPath) && !config.IsGlobalProjectDir(filepath.Join(projectPath, config.DotScion)) {
+		return ""
+	}
+	if projectID == "" || projectID == "global" || isGlobalDirProjectID(globalDir, projectID) {
+		return ""
+	}
+	return fmt.Sprintf("project path %q is this broker's global scion directory, which cannot hold project %s. "+
+		"Re-register this broker as a provider without a local path (scion runtime-broker provide --project <project>) "+
+		"or with the project's own directory (--path)", projectPath, projectID)
+}
+
+// canRewriteProjectMarker reports whether the stale-marker branch may rewrite
+// the .scion marker under projectPath for projectID. Any project directory
+// other than the global directory may be rewritten; the global marker only
+// for the id the global settings record for the global project.
+func canRewriteProjectMarker(projectPath, projectID string) bool {
+	if !config.IsGlobalProjectDir(projectPath) {
+		return true
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return false
+	}
+	return isGlobalDirProjectID(globalDir, projectID)
+}
+
+// isGlobalDirProjectID reports whether projectID is the hub id this broker
+// has recorded for its global project.
+func isGlobalDirProjectID(globalDir, projectID string) bool {
+	// The global marker may carry an empty slug, which ReadProjectMarker
+	// rejects, so only its project-id is read here.
+	markerPath := filepath.Join(globalDir, config.DotScion)
+	if config.IsProjectMarkerFile(markerPath) {
+		if data, err := os.ReadFile(markerPath); err == nil {
+			var marker config.ProjectMarker
+			if yaml.Unmarshal(data, &marker) == nil && marker.ProjectID != "" && marker.ProjectID == projectID {
+				return true
+			}
+		}
+	}
+	if settings, err := config.LoadSettings(globalDir); err == nil {
+		if settings.GetHubProjectID() == projectID || settings.ProjectID == projectID {
+			return true
+		}
+	}
+	return false
 }
 
 // isStaleExternalDir returns true if the external project config directory
