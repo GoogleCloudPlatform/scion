@@ -14,7 +14,8 @@
 
 // Package provision implements Tier-1 universal workspace provisioning.
 // It is a config-free leaf package that depends only on stdlib, pkg/api,
-// pkg/store, and pkg/util/fsutil (itself stdlib-only) — deliberately
+// pkg/store, pkg/util, pkg/util/fsutil (itself stdlib-only) and
+// golang.org/x/sys/unix (for no-follow file operations) — deliberately
 // avoiding pkg/config so that lean binaries (e.g. sciontool) can invoke
 // provisioning without pulling in filesystem-based project path resolution.
 package provision
@@ -25,6 +26,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -40,6 +42,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
+	"golang.org/x/sys/unix"
 )
 
 // ProvisionSentinelFile is the name of the sentinel file written atomically
@@ -3264,12 +3267,24 @@ func gitDetach(ctx context.Context, hostPath string) error {
 }
 
 // appendGitExclude appends a pattern to .git/info/exclude if not already present.
+//
+// It never follows a symlink below hostPath: .git, .git/info and
+// .git/info/exclude are each opened relative to the previous directory with
+// O_NOFOLLOW (see openGitExclude), so a symlink at any of them (for example
+// one committed to or planted in a shared checkout that the root init
+// container writes to) makes it fail instead of writing elsewhere. A missing
+// .git/info is created (0755) and a missing exclude file (0644), as before;
+// anything other than a regular file at exclude is refused.
 func appendGitExclude(hostPath, pattern string) error {
-	excludePath := filepath.Join(hostPath, ".git", "info", "exclude")
-	if err := os.MkdirAll(filepath.Dir(excludePath), 0755); err != nil {
-		return fmt.Errorf("mkdir .git/info: %w", err)
+	f, err := openGitExclude(hostPath)
+	if err != nil {
+		return err
 	}
-	data, _ := os.ReadFile(excludePath)
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.NewSectionReader(f, 0, 1<<62))
+	if err != nil {
+		return fmt.Errorf("read %s: %w", f.Name(), err)
+	}
 	// Exact line match — strings.Contains would false-positive on e.g.
 	// "my-worktrees/" or "worktrees/agent-1" and skip appending the pattern.
 	for _, line := range strings.Split(string(data), "\n") {
@@ -3277,11 +3292,7 @@ func appendGitExclude(hostPath, pattern string) error {
 			return nil
 		}
 	}
-	f, err := os.OpenFile(excludePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
+	// The file is opened with O_APPEND: every write lands at the end.
 	if len(data) > 0 && data[len(data)-1] != '\n' {
 		if _, err := f.WriteString("\n"); err != nil {
 			return err
@@ -3289,6 +3300,57 @@ func appendGitExclude(hostPath, pattern string) error {
 	}
 	_, err = f.WriteString(pattern + "\n")
 	return err
+}
+
+// openGitExclude opens hostPath/.git/info/exclude for reading and appending
+// without following a symlink at .git, info or exclude: each component is
+// opened with openat relative to its parent's descriptor and O_NOFOLLOW, so
+// none of them can be redirected by a symlink, or swapped for one between
+// a check and the open. info is created if missing; exclude is created if
+// missing and must be a regular file (O_NONBLOCK keeps a FIFO planted there
+// from blocking the open; it is then refused).
+func openGitExclude(hostPath string) (*os.File, error) {
+	const dirFlags = unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC
+	rootFd, err := unix.Open(hostPath, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", hostPath, err)
+	}
+	defer func() { _ = unix.Close(rootFd) }()
+	gitDir := filepath.Join(hostPath, ".git")
+	gitFd, err := unix.Openat(rootFd, ".git", dirFlags, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open %s without following symlinks: %w", gitDir, err)
+	}
+	defer func() { _ = unix.Close(gitFd) }()
+
+	infoDir := filepath.Join(gitDir, "info")
+	infoFd, err := unix.Openat(gitFd, "info", dirFlags, 0)
+	if errors.Is(err, unix.ENOENT) {
+		if mkErr := unix.Mkdirat(gitFd, "info", 0o755); mkErr != nil && !errors.Is(mkErr, unix.EEXIST) {
+			return nil, fmt.Errorf("mkdir %s: %w", infoDir, mkErr)
+		}
+		infoFd, err = unix.Openat(gitFd, "info", dirFlags, 0)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open %s without following symlinks: %w", infoDir, err)
+	}
+	defer func() { _ = unix.Close(infoFd) }()
+
+	excludePath := filepath.Join(infoDir, "exclude")
+	fd, err := unix.Openat(infoFd, "exclude", unix.O_RDWR|unix.O_APPEND|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("open %s without following symlinks: %w", excludePath, err)
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("stat %s: %w", excludePath, err)
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("%s is not a regular file", excludePath)
+	}
+	return os.NewFile(uintptr(fd), excludePath), nil
 }
 
 // sanitizeBranchName produces a git-safe branch name from an agent name.
