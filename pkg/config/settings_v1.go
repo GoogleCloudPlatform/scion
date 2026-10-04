@@ -1716,12 +1716,18 @@ func ValidateSubPathRoot(subPathRoot string) error {
 	// filepath.Clean("team/projects") is `team\projects`, which would reject
 	// every valid multi-segment root. Checked before the component loop so
 	// that an unclean value ("projects/", "./projects", "a//b") reports the
-	// clean value to use instead. A value with a ".." component gets no
-	// suggestion (cleaning "projects/../escape" to "escape" is not what the
-	// operator meant), nor one that cleans to "."; the component loop below
-	// reports those.
+	// clean value to use instead. A value with a ".." component is rejected
+	// for that first and gets no suggestion (cleaning "projects/../escape"
+	// to "escape" is not what the operator meant); nor does one that cleans
+	// to ".", which the component loop below reports.
 	comps := strings.Split(slashed, "/")
-	if cleaned := path.Clean(slashed); cleaned != slashed && cleaned != "." && !slices.Contains(comps, "..") {
+	// ".." is reported first, whatever else is wrong with the value: it is
+	// the component that would climb out of the export ("./a/../b" must name
+	// "..", not ".").
+	if slices.Contains(comps, "..") {
+		return fmt.Errorf("must not contain a \"..\" path component (got %q)", subPathRoot)
+	}
+	if cleaned := path.Clean(slashed); cleaned != slashed && cleaned != "." {
 		return fmt.Errorf("must be a clean path (got %q, use %q)", subPathRoot, cleaned)
 	}
 	for _, comp := range comps {
@@ -1730,8 +1736,6 @@ func ValidateSubPathRoot(subPathRoot string) error {
 			return fmt.Errorf("must not contain an empty path component (got %q)", subPathRoot)
 		case ".":
 			return fmt.Errorf("must not contain a \".\" path component (got %q)", subPathRoot)
-		case "..":
-			return fmt.Errorf("must not contain a \"..\" path component (got %q)", subPathRoot)
 		}
 	}
 	return nil

@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -204,17 +205,18 @@ func TestBrokerWorkspaceStorageWarning(t *testing.T) {
 		"nfs unclean root": {settings(nfs("projects/")), `server.workspace_storage.nfs.subpath_root must be a clean path (got "projects/", use "projects")`},
 		"cloudrun-volume traversal": {
 			settings(&config.V1WorkspaceStorageConfig{Backend: "cloudrun-volume", CloudRunVolume: &config.V1CloudRunVolumeConfig{VolumeName: "v", SubPathRoot: "../x"}}),
-			"server.workspace_storage.cloudrun_volume.subpath_root",
+			`server.workspace_storage.cloudrun_volume.subpath_root must not contain a ".." path component (got "../x")`,
 		},
 		"gke-shared-volume absolute": {
 			settings(&config.V1WorkspaceStorageConfig{Backend: "gke-shared-volume", GKESharedVolume: &config.V1GKESharedVolumeConfig{VolumeName: "v", SubPathRoot: "/x"}}),
-			"server.workspace_storage.gke_shared_volume.subpath_root must be relative",
+			`server.workspace_storage.gke_shared_volume.subpath_root must be relative, not absolute (got "/x")`,
 		},
 	}
 	for name, tc := range loud {
 		got := brokerWorkspaceStorageWarning(tc.vs)
-		if !strings.Contains(got, tc.want) || !strings.Contains(got, "agent starts") {
-			t.Errorf("%s: warning = %q, want it to contain %q and mention agent starts", name, got, tc.want)
+		wantSuffix := fmt.Sprintf("; agent starts that use the %q workspace backend will fail until it is fixed", tc.vs.Server.WorkspaceStorage.Backend)
+		if !strings.HasPrefix(got, tc.want) || !strings.HasSuffix(got, wantSuffix) {
+			t.Errorf("%s: warning = %q, want it to start with %q and end with %q", name, got, tc.want, wantSuffix)
 		}
 	}
 

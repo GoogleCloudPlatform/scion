@@ -5146,6 +5146,7 @@ func TestValidateSubPathRoot_SuggestsCleanValue(t *testing.T) {
 		"projects/../escape": `".." path component`,
 		"../projects":        `".." path component`,
 		"a/..":               `".." path component`,
+		"./a/../b":           `".." path component`,
 		".":                  `"." path component`,
 	}
 	for in, want := range noSuggestion {

@@ -70,7 +70,7 @@ func brokerWorkspaceStorageWarning(vs *config.VersionedSettings) string {
 		return ""
 	}
 	if err := vs.Server.WorkspaceStorage.ValidateSelectedSubPathRoot(); err != nil {
-		return fmt.Sprintf("invalid server.%v; agent starts that use the %q workspace backend will fail until it is fixed",
+		return fmt.Sprintf("server.%v; agent starts that use the %q workspace backend will fail until it is fixed",
 			err, vs.Server.WorkspaceStorage.Backend)
 	}
 	return ""
