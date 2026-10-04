@@ -57,7 +57,6 @@ type LeafOptions struct {
 	Log func(format string, args ...any)
 }
 
-
 // HomeDirPrefix starts the name of an agent's home directory in its agent
 // directory: home-<agent id>.
 const HomeDirPrefix = "home-"
