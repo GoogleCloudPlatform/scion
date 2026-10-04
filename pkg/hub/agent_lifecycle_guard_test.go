@@ -382,6 +382,10 @@ func TestRestoreOnlyEdgeConflictIsDelegationConflict(t *testing.T) {
 	})
 
 	rec := restoreForTest(t, srv, agent.ID)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	code, _ := errorBody(t, rec)
+	assert.Equal(t, ErrCodeConflict, code, "the generic already-exists error")
+	assert.Contains(t, rec.Body.String(), "Resource already exists")
 	assert.NotContains(t, rec.Body.String(), "active delegation that conflicts")
 	assertRestoreWroteNothing(t, s, agent, edge)
 }
