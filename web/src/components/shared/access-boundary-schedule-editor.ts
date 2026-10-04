@@ -79,17 +79,50 @@ export class ScionAccessBoundaryScheduleEditor extends LitElement {
     // overwritten string (one with no backing prop) as already being in
     // the current zone without actually converting it.
     this.rebaseCachedStrings();
-    // Initialize local fields from props
+    // Initialize local fields from props. Only fields with a backing prop
+    // are derived here, so a retained typed value with no backing prop
+    // survives a detach/reconnect (review R6-1).
     if (this.notBefore || this.expiresAt) {
-      this.hasSchedule = true;
-      if (this.notBefore) {
-        this.notBeforeLocal = this.isoToLocalDatetime(this.notBefore);
-      }
-      if (this.expiresAt) {
-        this.expiresAtLocal = this.isoToLocalDatetime(this.expiresAt);
-      }
+      this.deriveFromProps({
+        notBefore: Boolean(this.notBefore),
+        expiresAt: Boolean(this.expiresAt),
+      });
     }
   }
+
+  /**
+   * Re-derives `hasSchedule` and the cached wall-clock string of each field
+   * in `fields` from its ISO prop, in the current zone. Shared by
+   * `connectedCallback` and `willUpdate` (ptone/scion#2581) so the two
+   * derivations cannot drift. A field whose prop is unset is cleared.
+   * Callers must run `rebaseCachedStrings` first (utils/time.ts ordering
+   * contract): kept strings are rebased, then the rest re-derived here.
+   */
+  private deriveFromProps(fields: { notBefore: boolean; expiresAt: boolean }): void {
+    if (fields.notBefore) {
+      this.notBeforeLocal = this.notBefore ? this.isoToLocalDatetime(this.notBefore) : '';
+    }
+    if (fields.expiresAt) {
+      this.expiresAtLocal = this.expiresAt ? this.isoToLocalDatetime(this.expiresAt) : '';
+    }
+    if (this.notBefore || this.expiresAt) {
+      this.hasSchedule = true;
+    } else if (!this.notBeforeLocal && !this.expiresAtLocal) {
+      this.hasSchedule = false;
+    }
+  }
+
+  /**
+   * The value of each field this editor last emitted via `schedule-change`
+   * and has not yet seen come back through its prop (absent key = nothing
+   * pending). A host that feeds `schedule-change` back into `notBefore`/
+   * `expiresAt` (admin-access-boundary-editor.ts) echoes the editor's own
+   * value; re-deriving from that echo would clobber what the user is typing
+   * (e.g. a partial value emits `undefined`, whose echo would clear the
+   * field). Consumed on the next change to that prop, echo or not, so a
+   * later genuine change back to the same value still re-derives.
+   */
+  private _pendingEcho: Partial<Record<'notBefore' | 'expiresAt', Iso8601 | undefined>> = {};
 
   /**
    * Re-derives the cached `datetime-local` strings when the effective zone
@@ -99,7 +132,31 @@ export class ScionAccessBoundaryScheduleEditor extends LitElement {
    */
   override willUpdate(changed: PropertyValues<this>): void {
     super.willUpdate(changed);
+    // Ordering contract (utils/time.ts): rebase kept strings to the current
+    // zone first, then re-derive the changed fields from their props.
     this.rebaseCachedStrings();
+
+    // A new notBefore/expiresAt from the host (e.g. an async load of an
+    // existing boundary) must update the inputs, not just the first value
+    // seen at connect (ptone/scion#2581) — unless it is the echo of what
+    // this editor itself just emitted.
+    const notBefore = changed.has('notBefore') && !this.consumeEcho('notBefore');
+    const expiresAt = changed.has('expiresAt') && !this.consumeEcho('expiresAt');
+    if (notBefore || expiresAt) {
+      this.deriveFromProps({ notBefore, expiresAt });
+      this.validate();
+    }
+  }
+
+  /**
+   * True if the just-changed `field` prop equals the value this editor last
+   * emitted for it. Clears the pending marker for `field` either way.
+   */
+  private consumeEcho(field: 'notBefore' | 'expiresAt'): boolean {
+    if (!(field in this._pendingEcho)) return false;
+    const emitted = this._pendingEcho[field];
+    delete this._pendingEcho[field];
+    return this[field] === emitted;
   }
 
   /**
@@ -318,12 +375,18 @@ export class ScionAccessBoundaryScheduleEditor extends LitElement {
   }
 
   private emitChange(): void {
+    const detail: ScheduleChangeDetail = {
+      notBefore: this.hasSchedule ? this.localDatetimeToIso(this.notBeforeLocal) : undefined,
+      expiresAt: this.hasSchedule ? this.localDatetimeToIso(this.expiresAtLocal) : undefined,
+    };
+    // Only a value that differs from the current prop can come back as a
+    // prop change; an unchanged one would never be consumed.
+    this._pendingEcho = {};
+    if (detail.notBefore !== this.notBefore) this._pendingEcho.notBefore = detail.notBefore;
+    if (detail.expiresAt !== this.expiresAt) this._pendingEcho.expiresAt = detail.expiresAt;
     this.dispatchEvent(
       new CustomEvent<ScheduleChangeDetail>('schedule-change', {
-        detail: {
-          notBefore: this.hasSchedule ? this.localDatetimeToIso(this.notBeforeLocal) : undefined,
-          expiresAt: this.hasSchedule ? this.localDatetimeToIso(this.expiresAtLocal) : undefined,
-        },
+        detail,
         bubbles: true,
         composed: true,
       })

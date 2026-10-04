@@ -263,3 +263,113 @@ describe('scion-access-boundary-schedule-editor — retained typed value with no
     expect(detail!.expiresAt).toBe('2026-10-01T09:00:00.000Z');
   });
 });
+
+// ptone/scion#2581: the host (admin-access-boundary-editor) sets notBefore/
+// expiresAt asynchronously after loading an existing boundary, and feeds
+// every schedule-change back into the same props. The editor must re-derive
+// on a genuine prop change while connected, but not on the echo of its own
+// emitted value (which would clobber what the user is typing).
+describe('scion-access-boundary-schedule-editor — prop change while connected (ptone/scion#2581)', () => {
+  afterEach(() => {
+    document.body.innerHTML = '';
+    setPreferredTimeZone('');
+  });
+
+  /** Mimics admin-access-boundary-editor: feeds schedule-change back into the props. */
+  function feedBack(el: ScionAccessBoundaryScheduleEditor): void {
+    el.addEventListener('schedule-change', (e) => {
+      const d = (e as CustomEvent<ScheduleChangeDetail>).detail;
+      el.notBefore = d.notBefore;
+      el.expiresAt = d.expiresAt;
+    });
+  }
+
+  it('shows the schedule and updates the inputs when props arrive after mount', async () => {
+    const el = await mount({});
+    expect(el.shadowRoot!.querySelector('#not-before')).toBeNull();
+
+    el.notBefore = '2026-09-23T15:00:00.000Z';
+    el.expiresAt = '2026-09-30T15:00:00.000Z';
+    await el.updateComplete;
+
+    expect(displayedValue(notBeforeInput(el))).toBe('2026-09-23T15:00');
+    expect(displayedValue(expiresAtInput(el))).toBe('2026-09-30T15:00');
+
+    el.expiresAt = '2026-10-05T12:30:00.000Z';
+    await el.updateComplete;
+    expect(displayedValue(notBeforeInput(el))).toBe('2026-09-23T15:00');
+    expect(displayedValue(expiresAtInput(el))).toBe('2026-10-05T12:30');
+  });
+
+  it('flags an invalid window that arrives via props', async () => {
+    const el = await mount({ notBefore: '2026-09-23T15:00:00.000Z' });
+    el.expiresAt = '2026-09-20T15:00:00.000Z';
+    await el.updateComplete;
+    expect(el.shadowRoot!.querySelector('#schedule-validation-msg')).not.toBeNull();
+  });
+
+  it('does not reset a partially typed value when the host echoes the emitted value', async () => {
+    const el = await mount({ notBefore: '2026-09-23T15:00:00.000Z' });
+    feedBack(el);
+
+    // A partial datetime-local value parses to no instant, so the editor
+    // emits notBefore: undefined, which the host feeds straight back.
+    const input = notBeforeInput(el);
+    (input as unknown as { value: string }).value = '2026-09-2';
+    input.dispatchEvent(new Event('sl-input'));
+    await el.updateComplete;
+    await el.updateComplete;
+
+    expect(el.notBefore).toBeUndefined();
+    expect(displayedValue(notBeforeInput(el))).toBe('2026-09-2');
+  });
+
+  it('still re-derives a later genuine change back to a previously emitted value', async () => {
+    const el = await mount({ notBefore: '2026-09-23T15:00:00.000Z' });
+    feedBack(el);
+
+    const input = notBeforeInput(el);
+    (input as unknown as { value: string }).value = '2026-09-24T10:00';
+    input.dispatchEvent(new Event('sl-input'));
+    await el.updateComplete;
+    expect(el.notBefore).toBe('2026-09-24T10:00:00.000Z');
+
+    el.notBefore = '2026-01-01T00:00:00.000Z';
+    await el.updateComplete;
+    expect(displayedValue(notBeforeInput(el))).toBe('2026-01-01T00:00');
+
+    el.notBefore = '2026-09-24T10:00:00.000Z';
+    await el.updateComplete;
+    expect(displayedValue(notBeforeInput(el))).toBe('2026-09-24T10:00');
+  });
+
+  it('keeps fields consistent when a zone change and a prop change land in the same update', async () => {
+    const el = await mount({
+      notBefore: '2026-09-23T15:00:00.000Z',
+      expiresAt: '2026-09-30T15:00:00.000Z',
+    });
+
+    // Both before the next update: the zone moves to Tokyo and the host
+    // supplies a new expiresAt. notBefore (kept) is rebased; expiresAt is
+    // derived from its new instant directly in the new zone — not derived in
+    // UTC and then shifted a second time.
+    setPreferredTimeZone('Asia/Tokyo');
+    el.expiresAt = '2026-10-01T00:00:00.000Z';
+    await el.updateComplete;
+
+    expect(label(el)).toContain('Asia/Tokyo');
+    expect(displayedValue(notBeforeInput(el))).toBe('2026-09-24T00:00');
+    expect(displayedValue(expiresAtInput(el))).toBe('2026-10-01T09:00');
+
+    let detail: ScheduleChangeDetail | null = null;
+    el.addEventListener('schedule-change', (e) => {
+      detail = (e as CustomEvent<ScheduleChangeDetail>).detail;
+    });
+    const input = notBeforeInput(el);
+    (input as unknown as { value: string }).value = '2026-09-24T00:00';
+    input.dispatchEvent(new Event('sl-input'));
+    await el.updateComplete;
+    expect(detail!.notBefore).toBe('2026-09-23T15:00:00.000Z');
+    expect(detail!.expiresAt).toBe('2026-10-01T00:00:00.000Z');
+  });
+});
