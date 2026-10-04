@@ -304,7 +304,7 @@ func (s *FileSource) pickLocked() (string, time.Time, string) {
 // value, such as a shell exec'd into the container), in which case the
 // default $HOME/.scion/transport-token is consulted. Returns nil outside
 // agents, so hosts and brokers are unaffected.
-func fileSourceFromEnv() *FileSource {
+func fileSourceFromEnv(read FileReadFunc) *FileSource {
 	path := os.Getenv(EnvTransportTokenFile)
 	envTok := os.Getenv(EnvTransportToken)
 	if path == "" && envTok == "" {
@@ -313,7 +313,7 @@ func fileSourceFromEnv() *FileSource {
 	if path == "" {
 		path = DefaultTransportTokenFilePath()
 	}
-	src := NewFileSource(path, nil)
+	src := NewFileSource(path, read)
 	src.SetBootstrap(envTok)
 	return src
 }
@@ -326,7 +326,7 @@ func fileSourceFromEnv() *FileSource {
 // the agent started. Processes that were already running, and so never saw
 // SCION_TRANSPORT_TOKEN_FILE, pick it up this way. Returns nil otherwise,
 // so hosts and agents without a proxy mode are unaffected.
-func lateFileSourceFromEnv() *FileSource {
+func lateFileSourceFromEnv(read FileReadFunc) *FileSource {
 	if !IsProxyMode(os.Getenv(EnvTransportMode)) {
 		return nil
 	}
@@ -337,5 +337,5 @@ func lateFileSourceFromEnv() *FileSource {
 	if _, err := os.Lstat(path); err != nil {
 		return nil
 	}
-	return NewFileSource(path, nil)
+	return NewFileSource(path, read)
 }

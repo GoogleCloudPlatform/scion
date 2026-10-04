@@ -201,13 +201,22 @@ func ModeFromEnv() HeaderMode {
 //     a token refresh or reset-auth.
 //  4. Otherwise → nil (no transport auth)
 func FromEnv() (TokenSource, error) {
-	if src := fileSourceFromEnv(); src != nil {
+	return FromEnvWithReader(nil)
+}
+
+// FromEnvWithReader is FromEnv with the reader used by both file-backed
+// steps (the injected transport token file and the proxy-mode default
+// file). A nil read uses ReadTransportTokenFile, as FromEnv does. Callers
+// that may run with elevated privileges should pass a stricter reader,
+// such as sciontool's guarded one.
+func FromEnvWithReader(read FileReadFunc) (TokenSource, error) {
+	if src := fileSourceFromEnv(read); src != nil {
 		return src, nil
 	}
 	if src := metadataSourceFromEnv(); src != nil {
 		return src, nil
 	}
-	if src := lateFileSourceFromEnv(); src != nil {
+	if src := lateFileSourceFromEnv(read); src != nil {
 		return src, nil
 	}
 	return nil, nil

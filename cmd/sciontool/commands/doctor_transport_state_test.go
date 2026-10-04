@@ -588,11 +588,10 @@ func TestCheckTransportAuth_ProxyModeLateFileOtherHome(t *testing.T) {
 	assertNoTokenValues(t, out, fileTok)
 }
 
-// The scion user's transport file is read with the guarded reader: a
-// symlinked .scion directory or a hardlinked leaf is not reported as in use
-// and the returned source never yields its content.
-func TestCheckTransportAuth_ProxyModeLateFileOtherHomeGuarded(t *testing.T) {
-	setups := map[string]func(t *testing.T, home, tok string){
+// guardedTransportLayouts place a valid transport token at
+// <home>/.scion/transport-token in ways the guarded reader refuses.
+func guardedTransportLayouts() map[string]func(t *testing.T, home, tok string) {
+	return map[string]func(t *testing.T, home, tok string){
 		"symlinked .scion": func(t *testing.T, home, tok string) {
 			elsewhere := t.TempDir()
 			writeDoctorTransportFile(t, elsewhere, tok)
@@ -613,30 +612,71 @@ func TestCheckTransportAuth_ProxyModeLateFileOtherHomeGuarded(t *testing.T) {
 			}
 		},
 	}
-	for name, setup := range setups {
+}
+
+// runGuardedTransportCase builds the layout, applies env, runs the doctor
+// transport check, and asserts the file is not reported as in use and the
+// returned source never yields its content.
+func runGuardedTransportCase(t *testing.T, setup func(t *testing.T, home, tok string), env func(t *testing.T, home string)) {
+	t.Helper()
+	home := isolateDoctorTransport(t)
+	tok := makeDoctorTestJWT(time.Now().Add(50 * time.Minute))
+	setup(t, home, tok)
+	env(t, home)
+
+	var diag doctorDiag
+	var src transportauth.TokenSource
+	out := captureStdout(t, func() { src = checkTransportAuth(&diag) })
+
+	if strings.Contains(out, "Transport credential in use") {
+		t.Errorf("guarded file must not be reported as in use:\n%s", out)
+	}
+	if !diag.transportFailed() {
+		t.Errorf("expected a transport failure, diag=%+v\n%s", diag, out)
+	}
+	if src != nil {
+		if got, _ := src.Token(); got == tok {
+			t.Errorf("source returned the content of a guarded file")
+		}
+	}
+	assertNoTokenValues(t, out, tok)
+}
+
+// Proxy mode, scion user's file, doctor run with a different HOME (e.g.
+// exec'd as root): read with the guarded reader.
+func TestCheckTransportAuth_ProxyModeLateFileOtherHomeGuarded(t *testing.T) {
+	for name, setup := range guardedTransportLayouts() {
 		t.Run(name, func(t *testing.T) {
-			home := isolateDoctorTransport(t)
-			t.Setenv(transportauth.EnvTransportMode, "iap")
-			tok := makeDoctorTestJWT(time.Now().Add(50 * time.Minute))
-			setup(t, home, tok)
-			t.Setenv("HOME", t.TempDir())
+			runGuardedTransportCase(t, setup, func(t *testing.T, _ string) {
+				t.Setenv(transportauth.EnvTransportMode, "iap")
+				t.Setenv("HOME", t.TempDir())
+			})
+		})
+	}
+}
 
-			var diag doctorDiag
-			var src transportauth.TokenSource
-			out := captureStdout(t, func() { src = checkTransportAuth(&diag) })
+// Proxy mode, doctor run with HOME set to the scion home (e.g. root with
+// HOME=/home/scion): the FromEnv late step reads with the guarded reader.
+func TestCheckTransportAuth_ProxyModeLateFileSameHomeGuarded(t *testing.T) {
+	for name, setup := range guardedTransportLayouts() {
+		t.Run(name, func(t *testing.T) {
+			runGuardedTransportCase(t, setup, func(t *testing.T, _ string) {
+				t.Setenv(transportauth.EnvTransportMode, "iap")
+			})
+		})
+	}
+}
 
-			if strings.Contains(out, "Transport credential in use") {
-				t.Errorf("guarded file must not be reported as in use:\n%s", out)
-			}
-			if !diag.transportFailed() {
-				t.Errorf("expected a transport failure, diag=%+v\n%s", diag, out)
-			}
-			if src != nil {
-				if got, _ := src.Token(); got == tok {
-					t.Errorf("source returned the content of a guarded file")
-				}
-			}
-			assertNoTokenValues(t, out, tok)
+// Injected transport token file (SCION_TRANSPORT_TOKEN_FILE): also read
+// with the guarded reader.
+func TestCheckTransportAuth_InjectedFileGuarded(t *testing.T) {
+	for name, setup := range guardedTransportLayouts() {
+		t.Run(name, func(t *testing.T) {
+			runGuardedTransportCase(t, setup, func(t *testing.T, home string) {
+				t.Setenv(transportauth.EnvTransportMode, "iap")
+				t.Setenv(transportauth.EnvTransportTokenFile,
+					filepath.Join(home, ".scion", transportauth.TransportTokenFileName))
+			})
 		})
 	}
 }

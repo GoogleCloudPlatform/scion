@@ -229,7 +229,9 @@ func resolveHubURL() string {
 func checkTransportAuth(diag *doctorDiag) transportauth.TokenSource {
 	fmt.Println("\n--- Transport Auth ---")
 
-	src, err := transportauth.FromEnv()
+	// Both file-backed steps read with sciontool's guarded reader, as for
+	// the agent token file.
+	src, err := transportauth.FromEnvWithReader(hub.ReadTransportTokenFileGuarded)
 	if err != nil {
 		fmt.Printf("[WARN] Transport auth error: %v\n", err)
 		return nil

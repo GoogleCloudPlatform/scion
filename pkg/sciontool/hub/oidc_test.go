@@ -437,7 +437,7 @@ func TestReadTransportTokenFile_TestGuard(t *testing.T) {
 	if tokenHomeOverridden {
 		t.Skip("token home already overridden")
 	}
-	_, err := readTransportTokenFile(TransportTokenFilePath())
+	_, err := ReadTransportTokenFileGuarded(TransportTokenFilePath())
 	require.Error(t, err)
 }
 

@@ -1622,7 +1622,7 @@ func TransportTokenFilePath() string {
 // TransportTokenFilePath() that reads with the same guarded, no-follow
 // reader as the agent token file. It has no bootstrap value.
 func NewTransportTokenFileSource() *transportauth.FileSource {
-	return transportauth.NewFileSource(TransportTokenFilePath(), readTransportTokenFile)
+	return transportauth.NewFileSource(TransportTokenFilePath(), ReadTransportTokenFileGuarded)
 }
 
 // WriteTransportTokenFile persists the hub-provided transport token to the
@@ -1653,7 +1653,7 @@ func WriteTransportTokenFile(token string, uid, gid int) error {
 // the bootstrap value is older than the last refresh). Returns the path.
 func SeedTransportTokenFile(token string, uid, gid int) (string, error) {
 	path := TransportTokenFilePath()
-	if existing, err := readTransportTokenFile(path); err == nil {
+	if existing, err := ReadTransportTokenFileGuarded(path); err == nil {
 		existing = strings.TrimSpace(existing)
 		if existing != "" {
 			fileExp, ferr := transportauth.ParseTokenExpiry(existing)
@@ -1678,7 +1678,7 @@ func (c *Client) AdoptTransportTokenFile(uid, gid int) (bool, error) {
 	if !c.hasHubProvidedTransport() {
 		return false, nil
 	}
-	tok, err := readTransportTokenFile(TransportTokenFilePath())
+	tok, err := ReadTransportTokenFileGuarded(TransportTokenFilePath())
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return false, nil
@@ -1852,14 +1852,16 @@ func ReadTransportRefreshStatus() (TransportRefreshStatus, bool) {
 	return st, true
 }
 
-// readTransportTokenFile reads the transport token file through the same
-// symlink-safe, single-link-regular-file guard ReadTokenFile uses, since
-// sciontool init (root) reads it from a directory the workload owns.
+// ReadTransportTokenFileGuarded reads the transport token file through the
+// same symlink-safe, single-link-regular-file guard ReadTokenFile uses,
+// since sciontool init (root) reads it from a directory the workload owns.
+// It is a transportauth.FileReadFunc; pass it to
+// transportauth.FromEnvWithReader from processes that may run as root.
 //
 // Under go test without SetTokenHome it refuses to read the default path,
 // because the token home resolves to the real agent user's home (not
 // $HOME) and tests must never pick up a live transport token.
-func readTransportTokenFile(path string) (string, error) {
+func ReadTransportTokenFileGuarded(path string) (string, error) {
 	if testing.Testing() && !tokenHomeOverridden && path == TransportTokenFilePath() {
 		return "", fmt.Errorf("scion/hub: refusing to read %s during a test without SetTokenHome()", path)
 	}

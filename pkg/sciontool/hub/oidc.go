@@ -74,7 +74,7 @@ func (c *Client) configureOIDCTransport() {
 	}
 
 	if transportauth.IsProxyMode(os.Getenv(transportauth.EnvTransportMode)) {
-		src := transportauth.NewFileSource(TransportTokenFilePath(), readTransportTokenFile)
+		src := NewTransportTokenFileSource()
 		src.WarnLog = log.Debug
 		c.oidcSource = src
 		c.oidcMode = mode
@@ -129,7 +129,7 @@ func newTransportFileSource() *transportauth.FileSource {
 	if path == "" {
 		path = TransportTokenFilePath()
 	}
-	src := transportauth.NewFileSource(path, readTransportTokenFile)
+	src := transportauth.NewFileSource(path, ReadTransportTokenFileGuarded)
 	src.SetBootstrap(envTok)
 	return src
 }

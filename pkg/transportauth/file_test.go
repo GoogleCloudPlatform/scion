@@ -15,6 +15,7 @@
 package transportauth
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -445,4 +446,56 @@ func TestIsProxyMode(t *testing.T) {
 	assert.False(t, IsProxyMode(""))
 	assert.False(t, IsProxyMode("IAP"))
 	assert.False(t, IsProxyMode("other"))
+}
+
+// FromEnvWithReader uses the given reader for both file-backed steps.
+func TestFromEnvWithReader_BothFileSteps(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  func(t *testing.T, path string)
+	}{
+		{"injected file", func(t *testing.T, path string) {
+			t.Setenv(EnvTransportTokenFile, path)
+		}},
+		{"proxy-mode late file", func(t *testing.T, path string) {
+			t.Setenv(EnvTransportMode, "iap")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			for _, k := range []string{EnvTransportToken, EnvTransportTokenFile, EnvTransportMode,
+				EnvTransportAudience, EnvHubOIDCAudience} {
+				t.Setenv(k, "")
+			}
+			orig := IsOnGCEFunc
+			IsOnGCEFunc = func() bool { return false }
+			t.Cleanup(func() { IsOnGCEFunc = orig })
+
+			path := DefaultTransportTokenFilePath()
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("placeholder-file-value"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			tc.env(t, path)
+
+			var calls []string
+			read := func(p string) (string, error) {
+				calls = append(calls, p)
+				return "", errors.New("refused by test reader")
+			}
+			src, err := FromEnvWithReader(read)
+			if err != nil || src == nil {
+				t.Fatalf("FromEnvWithReader: src=%v err=%v", src, err)
+			}
+			if got, _ := src.Token(); got == "placeholder-file-value" {
+				t.Errorf("default reader used instead of the injected one")
+			}
+			if len(calls) == 0 || calls[0] != path {
+				t.Errorf("injected reader not called for %s: calls=%v", path, calls)
+			}
+		})
+	}
 }
