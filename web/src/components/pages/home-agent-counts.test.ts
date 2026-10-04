@@ -479,6 +479,15 @@ describe('home agent counts and the shared completeness flag', { timeout: 30_000
       { name: 'the complete response', count: 25, running: 10, member: 5, idMode: false },
       // 1,200 agents, 100 running: counts from the stats IDs.
       { name: 'the stats-ID response', count: 1200, running: 100, member: 50, idMode: true },
+      // A server without sorted mode: today's request, held, after the first.
+      {
+        name: 'today’s request to a server without sorted mode',
+        count: 25,
+        running: 10,
+        member: 5,
+        idMode: false,
+        legacy: true,
+      },
     ];
 
     describe.each(rows)('$name', (row) => {
@@ -491,7 +500,21 @@ describe('home agent counts and the shared completeness flag', { timeout: 30_000
 
       beforeEach(async () => {
         fake = newFake(row.count, row.running);
-        h = holdable(fakeFetch(fake), isGlobalAgentsList);
+        const inner = fakeFetch(fake);
+        const serve: typeof inner = (input, init) => {
+          const raw =
+            typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+          // The sorted request gets a legacy page (no complete).
+          if (row.legacy && new URL(raw, 'http://localhost').searchParams.has('sort')) {
+            fake.requests.push(raw);
+            return Promise.resolve(
+              jsonResponse({ agents: fake.agents.slice(0, 1), nextCursor: '1' })
+            );
+          }
+          return inner(input, init);
+        };
+        // Holds the request whose response the page adopts.
+        h = holdable(serve, (u) => isGlobalAgentsList(u) && (!row.legacy || u.search === ''));
         h.hold(1);
         vi.stubGlobal('fetch', vi.fn(h.fn));
         el = document.createElement('scion-page-home') as TestEl;
@@ -509,7 +532,7 @@ describe('home agent counts and the shared completeness flag', { timeout: 30_000
         (stateManager as unknown as { flush(): void }).flush();
         h.release();
         await settle(el);
-        expect(fake.requests).toHaveLength(1);
+        expect(fake.requests).toHaveLength(row.legacy ? 2 : 1);
         expect(internals(el).memberIndex === null).toBe(!row.idMode);
         expect(countsChip(el)).toBeNull();
         expect(internals(el).countsMayHaveChanged).toBe(false);

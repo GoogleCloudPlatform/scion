@@ -1443,6 +1443,19 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         }
       });
 
+      it.runIf(!row.local)('a delete off the adopted page leaves the counts', async () => {
+        handleUpdate(`agent.${row.offPage}.deleted`, {});
+        await done();
+        expect(win().items).toHaveLength(25);
+        if (row.countOnly) {
+          // The snapshot counts the deleted agent: the chip.
+          expect(win().updatesAvailable).toBe(true);
+          return;
+        }
+        expect(win().memberIndex.has(row.offPage)).toBe(false);
+        expect(win().stats.total).toBe(row.count - 1);
+      });
+
       it('a resync shows the stale banner or the chip', async () => {
         reconnect();
         await done();

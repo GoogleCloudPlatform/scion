@@ -2522,6 +2522,14 @@ describe('project-detail — agent list window', { timeout: 20_000 }, () => {
         }
       });
 
+      it.runIf(!row.local)('a delete off the adopted page leaves the counts', async () => {
+        update(`project.${projectId}.agent.deleted`, { agentId: row.offPage });
+        await done();
+        expect(win().items).toHaveLength(25);
+        expect(win().memberIndex.has(row.offPage)).toBe(false);
+        expect(internals(el).agentStats.total).toBe(row.count - 1);
+      });
+
       it('a resync shows the stale banner or the chip', async () => {
         reconnect();
         await done();
