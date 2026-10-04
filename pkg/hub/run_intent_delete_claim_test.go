@@ -18,6 +18,8 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -101,4 +103,55 @@ func TestRunIntent_DeleteClaimAfterGateRefusesWake(t *testing.T) {
 	got, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.RunIntentStopped, got.RunIntent)
+}
+
+// claimBetweenLegsDispatcher is quotaLifecycleDispatcher whose start fails
+// the way beginRun does when a delete claimed the row between a restart's
+// stop and start legs.
+type claimBetweenLegsDispatcher struct {
+	quotaLifecycleDispatcher
+	failStart bool
+}
+
+func (d *claimBetweenLegsDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
+	if d.failStart {
+		d.startCount.Add(1)
+		return fmt.Errorf("begin run: %w", store.ErrDeleteInProgress)
+	}
+	return d.quotaLifecycleDispatcher.DispatchAgentStart(ctx, agent, task, resume)
+}
+
+// A restart whose start leg is refused because a delete claimed the row
+// after the stop leg leaves the row to the delete engine: no stopped
+// status write and no release of the reservation the agent held; the
+// caller gets 409 delete_in_progress (ptone/scion#2550, round 5 N3).
+func TestRestart_DeleteClaimBetweenLegsLeavesRowToEngine(t *testing.T) {
+	disp := &claimBetweenLegsDispatcher{}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	srv.SetDispatcher(disp)
+	setBrokerAgentCeiling(t, s, 1)
+	brokerID := project.DefaultRuntimeBrokerID
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: "restart-claim", ProjectID: project.ID,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var created CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+	require.EqualValues(t, 1, brokerReservationCount(t, s, brokerID))
+	before, err := s.GetAgent(context.Background(), created.Agent.ID)
+	require.NoError(t, err)
+	require.NotEqual(t, string(state.PhaseStopped), before.Phase)
+
+	disp.failStart = true
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+created.Agent.ID+"/restart", nil)
+	requireDeleteInProgress(t, rec)
+	require.EqualValues(t, 1, disp.stopCount.Load(), "the stop leg ran")
+	require.EqualValues(t, 1, disp.startCount.Load(), "the start leg was attempted")
+
+	assert.EqualValues(t, 1, brokerReservationCount(t, s, brokerID), "the reservation is left to the delete engine")
+	got, err := s.GetAgent(context.Background(), created.Agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, before.Phase, got.Phase, "no stopped status write")
+	assert.NotEqual(t, "stopped", got.ContainerStatus)
 }

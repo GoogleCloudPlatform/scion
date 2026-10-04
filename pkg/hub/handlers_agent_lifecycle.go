@@ -608,7 +608,14 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				newPhase = agent.Phase
 			}
 			if dispatchErr != nil {
-				if stopErr == nil {
+				if errors.Is(dispatchErr, store.ErrDeleteInProgress) {
+					// A delete claimed the row between the legs
+					// (ptone/scion#2550, round 5 N3). The delete engine
+					// owns the row now: leave its phase and the
+					// reservation it held to the engine, and undo only a
+					// reservation this call created.
+					s.rollbackBrokerQuota(ctx, agent, reserved)
+				} else if stopErr == nil {
 					// The stop leg succeeded, so the container is down:
 					// release the slot and record the stopped state as an
 					// explicit stop would, so the agent does not keep
