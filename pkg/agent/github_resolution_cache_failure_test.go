@@ -138,10 +138,10 @@ func TestGitHubResolutionCache_SuccessClearsRememberedFailure(t *testing.T) {
 	}
 }
 
-// TestGitHubResolutionCache_RecordFailureDropsExpired checks that recording
-// a failure removes expired ones, so the map does not grow with refs that
-// are never resolved again.
-func TestGitHubResolutionCache_RecordFailureDropsExpired(t *testing.T) {
+// TestGitHubResolutionCache_RecordFailureSkipsExpired checks that an
+// expired failure is not served after another failure is recorded, and that
+// the new failure is.
+func TestGitHubResolutionCache_RecordFailureSkipsExpired(t *testing.T) {
 	cache, err := newTestResolutionCache(t.TempDir(), time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -149,8 +149,8 @@ func TestGitHubResolutionCache_RecordFailureDropsExpired(t *testing.T) {
 	cache.recordFailure("old", errors.New("old"))
 	cache.failures.expire("old")
 	cache.recordFailure("new", &githubResolveError{code: SkillErrCodeNotFound, msg: "nf"})
-	if n := cache.failures.Len(); n != 1 {
-		t.Errorf("held %d failures, want 1: the expired failure must be dropped", n)
+	if err := cache.recentFailure("old"); err != nil {
+		t.Errorf("expired failure served: %v", err)
 	}
 	if cache.recentFailure("new") == nil {
 		t.Error("new failure not recorded")
