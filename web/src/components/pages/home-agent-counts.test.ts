@@ -251,7 +251,9 @@ async function cost(fake: Fake, run: () => Promise<unknown>): Promise<[number, n
   return [fake.requests.length - a, others() - o];
 }
 
-describe('home agent counts and the shared completeness flag', () => {
+// The timeout is a suite option: a test's timeout is fixed when it is collected, so setting it
+// from a hook would not apply.
+describe('home agent counts and the shared completeness flag', { timeout: 30_000 }, () => {
   beforeAll(async () => {
     await import('./home.js');
     await import('./agents.js');
@@ -265,7 +267,6 @@ describe('home agent counts and the shared completeness flag', () => {
     resetHubProjectCapabilitiesCache();
     localStorage.clear();
     localStorage.setItem('scion-view-agents', 'list');
-    vi.setConfig({ testTimeout: 30_000 });
   });
 
   afterEach(() => {

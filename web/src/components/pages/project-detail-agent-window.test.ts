@@ -488,7 +488,11 @@ function createRealisticFetchHandler(opts: {
   };
 }
 
-describe('project-detail — agent list window', () => {
+// Mounting a 100-agent grid/list page is slow under the default 5s per-test timeout on a loaded
+// machine; these tests do real work (fetch handling, multiple Lit render passes) rather than
+// looping. The timeout is a suite option: a test's timeout is fixed when it is collected, so
+// setting it from a hook would not apply.
+describe('project-detail — agent list window', { timeout: 20_000 }, () => {
   beforeAll(async () => {
     await import('./project-detail.js');
   }, 60_000);
@@ -496,10 +500,6 @@ describe('project-detail — agent list window', () => {
   beforeEach(() => {
     vi.stubGlobal('EventSource', FakeEventSource);
     resetHubProjectCapabilitiesCache();
-    // Mounting a 100-agent grid/list page is slow under the default 5s
-    // per-test timeout on a loaded machine; these tests do real work
-    // (fetch handling, multiple Lit render passes) rather than looping.
-    vi.setConfig({ testTimeout: 20_000 });
   });
 
   afterEach(() => {

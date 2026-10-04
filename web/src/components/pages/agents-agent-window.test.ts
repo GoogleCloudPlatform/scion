@@ -183,7 +183,10 @@ function hasStopAll(el: TestEl): boolean {
   );
 }
 
-describe('scion-page-agents — agent list window', () => {
+// Each test mounts the page and drives real fetch handling and render passes, which is slow on a
+// loaded machine. The timeout is a suite option: a test's timeout is fixed when it is collected,
+// so setting it from a hook would not apply.
+describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
   beforeAll(async () => {
     await import('./agents.js');
   }, 60_000);
@@ -194,7 +197,6 @@ describe('scion-page-agents — agent list window', () => {
     stateManager.setScope({ type: 'brokers-list' });
     localStorage.clear();
     localStorage.setItem('scion-view-agents', 'list');
-    vi.setConfig({ testTimeout: 30_000 });
   });
 
   afterEach(() => {
