@@ -2759,4 +2759,69 @@ describe('project-detail — agent list window', () => {
       expect(el.shadowRoot?.textContent).toContain('No agents match the current filter');
     });
   });
+
+  describe('backend-driven delete (ptone/scion#2483 phase 1b)', () => {
+    it('202 keeps the card with Deleting… and no Delete button; SSE deleted removes it', async () => {
+      const projectId = 'p-del-202';
+      localStorage.setItem('scion-view-project-agents', 'grid');
+      const agents = [0, 1, 2].map((i) => makeAgent(i, { projectId }));
+      const requests: AgentsRequest[] = [];
+      const inner = createFetchHandler({
+        projectId,
+        projectCaps: { actions: ['read'] },
+        agents,
+        requests,
+      });
+      const deletion = {
+        state: 'deleting',
+        soft: false,
+        claim: 1,
+        startedAt: new Date().toISOString(),
+        leaseExpiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+      };
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: string | URL | Request, init?: RequestInit) => {
+          if (init?.method === 'DELETE') {
+            return Promise.resolve(jsonResponse({ agentId: 'a-1', deletion }, 202));
+          }
+          return inner(input, init);
+        })
+      );
+
+      const el = await createComponent(projectId);
+      const trashButtons = (): number =>
+        el.shadowRoot?.querySelectorAll('sl-icon[name="trash"]').length ?? 0;
+      expect(trashButtons()).toBe(3);
+
+      const page = el as unknown as {
+        handleAgentAction(id: string, action: string, event?: MouseEvent): Promise<void>;
+      };
+      await page.handleAgentAction('a-1', 'delete', { altKey: true } as MouseEvent);
+      await new Promise((r) => setTimeout(r, 150)); // state.ts flush fallback
+      await el.updateComplete;
+
+      const ids = (): string[] =>
+        internals(el)
+          .agents.map((a) => a.id)
+          .sort();
+      expect(ids()).toEqual(['a-0', 'a-1', 'a-2']);
+      const badges = [...(el.shadowRoot?.querySelectorAll('scion-deletion-badge') ?? [])] as Array<
+        HTMLElement & { updateComplete: Promise<boolean> }
+      >;
+      await Promise.all(badges.map((b) => b.updateComplete));
+      const labels = badges
+        .map((b) => b.shadowRoot?.querySelector('.badge')?.textContent?.trim())
+        .filter(Boolean);
+      expect(labels).toEqual(['Deleting…']);
+      expect(trashButtons()).toBe(2);
+
+      (
+        stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+      ).handleUpdate({ subject: 'agent.a-1.deleted', data: {} });
+      await new Promise((r) => setTimeout(r, 150));
+      await el.updateComplete;
+      expect(ids()).toEqual(['a-0', 'a-2']);
+    });
+  });
 });

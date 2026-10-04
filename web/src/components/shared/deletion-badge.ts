@@ -1,0 +1,205 @@
+/**
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/**
+ * "Deleting…" / "Delete failed: …" badge and the per-view lease timer for
+ * the backend-driven delete lifecycle (ptone/scion#2483 phase 1b).
+ */
+
+import { LitElement, html, css, nothing } from 'lit';
+import type { ReactiveController, ReactiveControllerHost, TemplateResult } from 'lit';
+import { customElement, property } from 'lit/decorators.js';
+import type { Agent, DeletionInfo } from '../../shared/types.js';
+import {
+  deletionBadgeLabel,
+  earliestLeaseExpiry,
+  effectiveDeletion,
+  isDeletionActive,
+} from '../../shared/agent-deletion.js';
+
+/** Injectable clock for {@link DeletionLeaseController} (tests pass a fake). */
+export interface DeletionClock {
+  now(): number;
+  setTimeout(fn: () => void, ms: number): unknown;
+  clearTimeout(handle: unknown): void;
+}
+
+const systemClock: DeletionClock = {
+  now: () => Date.now(),
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
+
+/**
+ * One timer per view, armed for the earliest future `leaseExpiresAt` among
+ * the view's `deleting` agents (N4). When it fires the host re-renders, and
+ * `effectiveDeletion` then reads the expired lease as failed/abandoned
+ * without waiting for a refetch. The timer is recomputed after every host
+ * update, so a renewal delta (which re-renders the host with a later lease)
+ * re-arms it, and a cleared or removed agent disarms it.
+ */
+export class DeletionLeaseController implements ReactiveController {
+  private handle: unknown = null;
+  private armedFor: number | null = null;
+
+  constructor(
+    private readonly host: ReactiveControllerHost,
+    private readonly getAgents: () => Iterable<Pick<Agent, 'deletion'>>,
+    private readonly clock: DeletionClock = systemClock
+  ) {
+    host.addController(this);
+  }
+
+  /** Current time on this controller's clock; render with this. */
+  now(): number {
+    return this.clock.now();
+  }
+
+  /** The deletion view for `agent` right now (lease expiry applied). */
+  view(agent: Pick<Agent, 'deletion'>): DeletionInfo | null {
+    return effectiveDeletion(agent.deletion, this.clock.now());
+  }
+
+  /** Whether `agent` has a live delete right now; hide lifecycle actions when true. */
+  isDeleting(agent: Pick<Agent, 'deletion'>): boolean {
+    return isDeletionActive(agent, this.clock.now());
+  }
+
+  hostUpdated(): void {
+    this.rearm();
+  }
+
+  hostDisconnected(): void {
+    this.disarm();
+  }
+
+  /** Re-evaluate the earliest lease and (re)arm the single timer. */
+  rearm(): void {
+    const next = earliestLeaseExpiry(this.getAgents(), this.clock.now());
+    if (next === this.armedFor) return;
+    this.disarm();
+    if (next === null) return;
+    this.armedFor = next;
+    this.handle = this.clock.setTimeout(
+      () => {
+        this.handle = null;
+        this.armedFor = null;
+        this.host.requestUpdate();
+      },
+      Math.max(0, next - this.clock.now())
+    );
+  }
+
+  private disarm(): void {
+    if (this.handle !== null) this.clock.clearTimeout(this.handle);
+    this.handle = null;
+    this.armedFor = null;
+  }
+}
+
+/**
+ * Renders nothing for `null`, "Deleting…" for a live delete, and "Delete
+ * failed: …" (or "Delete interrupted" for `abandoned`) for a failed one.
+ * Pass the *effective* view (`DeletionLeaseController.view`), not the raw
+ * `agent.deletion`, so an expired lease shows as interrupted.
+ */
+@customElement('scion-deletion-badge')
+export class ScionDeletionBadge extends LitElement {
+  @property({ attribute: false })
+  deletion: DeletionInfo | null = null;
+
+  @property({ type: String })
+  size: 'small' | 'medium' = 'medium';
+
+  static override styles = css`
+    :host {
+      display: inline-flex;
+      min-width: 0;
+    }
+
+    :host([hidden]) {
+      display: none;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.375rem;
+      padding: 0.25rem 0.625rem;
+      border-radius: 9999px;
+      font-weight: 500;
+      font-size: 0.875rem;
+      white-space: nowrap;
+      max-width: 22rem;
+      min-width: 0;
+    }
+
+    .badge.small {
+      font-size: 0.8125rem;
+      padding: 0.125rem 0.5rem;
+      gap: 0.25rem;
+      max-width: 16rem;
+    }
+
+    .label {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .badge sl-icon {
+      flex: none;
+    }
+
+    .badge.deleting {
+      background: var(--scion-badge-warning-bg, #fef3c7);
+      color: var(--scion-badge-warning-text, #92400e);
+    }
+
+    .badge.failed {
+      background: var(--scion-badge-danger-bg, #fee2e2);
+      color: var(--scion-badge-danger-text, #991b1b);
+    }
+  `;
+
+  protected override willUpdate(): void {
+    // Take no space (and no flex gap) when there is nothing to show.
+    this.toggleAttribute('hidden', !this.deletion);
+  }
+
+  override render(): TemplateResult | typeof nothing {
+    const d = this.deletion;
+    if (!d) return nothing;
+    const label = deletionBadgeLabel(d);
+    const deleting = d.state === 'deleting';
+    return html`
+      <span
+        class="badge ${deleting ? 'deleting' : 'failed'} ${this.size}"
+        role="status"
+        title=${label}
+        data-state=${d.state}
+      >
+        <sl-icon name=${deleting ? 'trash' : 'exclamation-triangle'}></sl-icon>
+        <span class="label">${label}</span>
+      </span>
+    `;
+  }
+}
+
+declare global {
+  interface HTMLElementTagNameMap {
+    'scion-deletion-badge': ScionDeletionBadge;
+  }
+}

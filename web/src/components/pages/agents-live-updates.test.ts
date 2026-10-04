@@ -320,4 +320,122 @@ describe('scion-page-agents live updates (agents-changed -> mergeChanged)', () =
     await el.updateComplete;
     expect(el.agents.find((a) => a.id === 'a1')?.phase).toBe('stopped');
   });
+
+  describe('backend-driven delete (ptone/scion#2483 phase 1b)', () => {
+    const deletionView = {
+      state: 'deleting',
+      soft: false,
+      claim: 1,
+      startedAt: new Date().toISOString(),
+      leaseExpiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+    };
+
+    /** List GET answers from `rows`; DELETE answers with `deleteResponse()`. */
+    function stubHub(rows: Agent[], deleteResponse: () => Response): void {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((_input: string | URL | Request, init?: RequestInit) => {
+          if (init?.method === 'DELETE') return Promise.resolve(deleteResponse());
+          return Promise.resolve(jsonResponse({ agents: rows, _capabilities: { actions: [] } }));
+        })
+      );
+    }
+
+    async function mountPage(): Promise<TestEl> {
+      const el = document.createElement('scion-page-agents') as TestEl;
+      document.body.appendChild(el);
+      await el.updateComplete;
+      await flush();
+      await el.updateComplete;
+      return el;
+    }
+
+    type Internals = {
+      handleAgentAction(id: string, action: string, event?: MouseEvent): Promise<void>;
+    };
+    const altClick = { altKey: true } as MouseEvent; // skips the confirm dialog
+
+    const actionable = (id: string): Agent =>
+      agent(id, { _capabilities: { actions: ['read', 'lifecycle', 'delete'] } });
+
+    function trashButtons(el: TestEl): number {
+      // The badge's own trash icon lives in its shadow root, so only the
+      // Delete buttons are counted here.
+      return el.shadowRoot?.querySelectorAll('sl-icon[name="trash"]').length ?? 0;
+    }
+
+    async function badgeTexts(el: TestEl): Promise<string[]> {
+      const badges = [...(el.shadowRoot?.querySelectorAll('scion-deletion-badge') ?? [])] as Array<
+        HTMLElement & { updateComplete: Promise<boolean> }
+      >;
+      await Promise.all(badges.map((b) => b.updateComplete));
+      return badges
+        .map((b) => b.shadowRoot?.querySelector('.badge')?.textContent?.trim() ?? '')
+        .filter(Boolean);
+    }
+
+    it('202 keeps the row with Deleting… and hides its actions; SSE deleted then removes it', async () => {
+      const rows = [actionable('a1'), actionable('a2')];
+      stubHub(
+        rows,
+        () =>
+          new Response(JSON.stringify({ agentId: 'a1', deletion: deletionView }), {
+            status: 202,
+            headers: { 'Content-Type': 'application/json' },
+          })
+      );
+      const el = await mountPage();
+      expect(trashButtons(el)).toBe(2);
+
+      await (el as unknown as Internals).handleAgentAction('a1', 'delete', altClick);
+      await flush();
+      await el.updateComplete;
+
+      expect(el.agents.map((a) => a.id).sort()).toEqual(['a1', 'a2']);
+      expect(el.agents.find((a) => a.id === 'a1')?.deletion?.state).toBe('deleting');
+      expect(await badgeTexts(el)).toEqual(['Deleting…']);
+      expect(trashButtons(el)).toBe(1);
+
+      handleUpdate('agent.a1.deleted', {});
+      await flush();
+      await el.updateComplete;
+      expect(el.agents.map((a) => a.id)).toEqual(['a2']);
+    });
+
+    it('a failed delta re-enables the row actions; deletion:null clears the badge', async () => {
+      stubHub([actionable('a1')], () => new Response(null));
+      const el = await mountPage();
+      handleUpdate('agent.a1.status', { deletion: deletionView });
+      await flush();
+      await el.updateComplete;
+      expect(trashButtons(el)).toBe(0);
+
+      handleUpdate('agent.a1.status', {
+        deletion: { ...deletionView, state: 'failed', code: 'conflict' },
+      });
+      await flush();
+      await el.updateComplete;
+      expect(await badgeTexts(el)).toEqual(['Delete failed: conflict']);
+      expect(trashButtons(el)).toBe(1);
+
+      handleUpdate('agent.a1.status', { deletion: null });
+      await flush();
+      await el.updateComplete;
+      expect(await badgeTexts(el)).toEqual([]);
+      expect(trashButtons(el)).toBe(1);
+    });
+
+    it('204 removes the row immediately, as before', async () => {
+      const rows = [actionable('a1'), actionable('a2')];
+      stubHub(rows, () => {
+        rows.splice(0, 1); // the hub has deleted a1 for the background refresh
+        return new Response(null, { status: 204 });
+      });
+      const el = await mountPage();
+
+      await (el as unknown as Internals).handleAgentAction('a1', 'delete', altClick);
+      await el.updateComplete;
+      expect(el.agents.map((a) => a.id)).toEqual(['a2']);
+    });
+  });
 });
