@@ -760,3 +760,65 @@ func TestDeleteClaimedDuringDispatch(t *testing.T) {
 		t.Error("an unrelated error maps to delete_in_progress")
 	}
 }
+
+// A delete that claims an agent whose create launch is still active (the
+// claim writes stopping, so the row also reads as an incomplete create) is
+// reported by the dispatcher's start guard as delete_in_progress, matching
+// startGate's order, with no run minted and no broker call.
+func TestDeleteClaimedDuringDispatch_PrecedesIncompleteCreate(t *testing.T) {
+	ctx := context.Background()
+	f := newRunIDFixture(t, "runid-claimed-launch")
+	created, err := f.store.GetAgent(ctx, f.agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created.Phase = "created"
+	if err := f.store.UpdateAgent(ctx, created); err != nil {
+		t.Fatalf("UpdateAgent: %v", err)
+	}
+	if _, err := f.store.BeginLaunch(ctx, f.agent.ID, store.LaunchKindCreate, time.Minute); err != nil {
+		t.Fatalf("BeginLaunch: %v", err)
+	}
+	row, err := f.store.GetAgent(ctx, f.agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row.Phase = "stopping"
+	if err := f.store.UpdateAgent(ctx, row); err != nil {
+		t.Fatalf("UpdateAgent: %v", err)
+	}
+	lease := time.Now().Add(time.Minute)
+	deleting := store.DeletionStateDeleting
+	if _, err := f.store.UpdateAgentDeletion(ctx, f.agent.ID, store.DeletionPredicate{}, store.DeletionFields{State: &deleting, LeaseAt: &lease, BumpClaim: true}); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := f.store.GetAgent(ctx, f.agent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fresh.IsIncompleteCreate() || !fresh.DeletionHoldsRow(time.Now()) {
+		t.Fatalf("precondition: incomplete=%v holds=%v", fresh.IsIncompleteCreate(), fresh.DeletionHoldsRow(time.Now()))
+	}
+	before := fresh.RunID
+
+	for _, op := range []string{"start", "restart"} {
+		var err error
+		if op == "start" {
+			err = f.dispatcher.DispatchAgentStart(ctx, fresh, "", false)
+		} else {
+			err = f.dispatcher.DispatchAgentRestart(ctx, fresh)
+		}
+		if !errors.Is(err, store.ErrDeleteInProgress) {
+			t.Errorf("%s err = %v, want ErrDeleteInProgress", op, err)
+		}
+		if ref := deleteClaimedDuringDispatch(err, f.agent.ID); ref == nil || ref.Code != ErrCodeDeleteInProgress {
+			t.Errorf("%s refusal = %+v, want %s", op, ref, ErrCodeDeleteInProgress)
+		}
+	}
+	if f.client.startCalled || f.client.restartCalled {
+		t.Error("a dispatch reached the broker")
+	}
+	if got := f.storedRunID(t); got != before {
+		t.Errorf("run ID changed from %q to %q", before, got)
+	}
+}
