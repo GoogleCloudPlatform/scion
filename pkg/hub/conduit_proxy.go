@@ -174,6 +174,14 @@ func (s *Server) serveConduitProxy(w http.ResponseWriter, r *http.Request, agent
 		},
 	}
 	defer func() { _ = conn.Close() }()
+	// The proxied exchange lives as long as the request: lift the server's
+	// read and write deadlines for this connection, so an event stream or
+	// a WebSocket (which keeps the hijacked connection's deadlines) is not
+	// cut at the server's WriteTimeout.
+	rc := http.NewResponseController(w)
+	if err := errors.Join(rc.SetReadDeadline(time.Time{}), rc.SetWriteDeadline(time.Time{})); err != nil {
+		slog.Debug("Conduit proxy: cannot lift the connection deadlines", "agent_id", agent.ID, "error", err)
+	}
 	rp.ServeHTTP(w, r)
 	slog.Debug("Proxy request",
 		"agent_id", agent.ID,
