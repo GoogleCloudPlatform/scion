@@ -244,7 +244,9 @@ type TransportSettings struct {
 // available (keeping the sciontool binary lean).
 //
 // Resolution order:
-//  1. Injected transport token (file or env) → FileSource (always wins)
+//  1. Injected transport token (file or env) → FileSource (always wins);
+//     in a proxy mode, otherwise after the metadata step of FromEnv, the
+//     default transport token file once it exists → FileSource
 //  2. On GCE && SCION_METADATA_MODE not redirected (unset or "passthrough")
 //     && audience available → MetadataSource
 //  3. Settings audience + adcNew → ADCSource

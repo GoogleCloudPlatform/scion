@@ -1618,6 +1618,13 @@ func TransportTokenFilePath() string {
 	return filepath.Join(tokenHomeResolver(), ".scion", transportauth.TransportTokenFileName)
 }
 
+// NewTransportTokenFileSource returns a file-backed transport source on
+// TransportTokenFilePath() that reads with the same guarded, no-follow
+// reader as the agent token file. It has no bootstrap value.
+func NewTransportTokenFileSource() *transportauth.FileSource {
+	return transportauth.NewFileSource(TransportTokenFilePath(), readTransportTokenFile)
+}
+
 // WriteTransportTokenFile persists the hub-provided transport token to the
 // transport token file, mode 0600, through the same fchown-then-rename
 // path WriteTokenFile uses. uid <= 0 skips the chown.

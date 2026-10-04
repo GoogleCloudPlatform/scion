@@ -588,6 +588,68 @@ func TestCheckTransportAuth_ProxyModeLateFileOtherHome(t *testing.T) {
 	assertNoTokenValues(t, out, fileTok)
 }
 
+// The scion user's transport file is read with the guarded reader: a
+// symlinked .scion directory or a hardlinked leaf is not reported as in use
+// and the returned source never yields its content.
+func TestCheckTransportAuth_ProxyModeLateFileOtherHomeGuarded(t *testing.T) {
+	setups := map[string]func(t *testing.T, home, tok string){
+		"symlinked .scion": func(t *testing.T, home, tok string) {
+			elsewhere := t.TempDir()
+			writeDoctorTransportFile(t, elsewhere, tok)
+			if err := os.Symlink(filepath.Join(elsewhere, ".scion"), filepath.Join(home, ".scion")); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"hardlinked file": func(t *testing.T, home, tok string) {
+			other := filepath.Join(t.TempDir(), "other")
+			if err := os.WriteFile(other, []byte(tok), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(home, ".scion"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(other, filepath.Join(home, ".scion", transportauth.TransportTokenFileName)); err != nil {
+				t.Skipf("hardlink not supported: %v", err)
+			}
+		},
+	}
+	for name, setup := range setups {
+		t.Run(name, func(t *testing.T) {
+			home := isolateDoctorTransport(t)
+			t.Setenv(transportauth.EnvTransportMode, "iap")
+			tok := makeDoctorTestJWT(time.Now().Add(50 * time.Minute))
+			setup(t, home, tok)
+			t.Setenv("HOME", t.TempDir())
+
+			var diag doctorDiag
+			var src transportauth.TokenSource
+			out := captureStdout(t, func() { src = checkTransportAuth(&diag) })
+
+			if strings.Contains(out, "Transport credential in use") {
+				t.Errorf("guarded file must not be reported as in use:\n%s", out)
+			}
+			if !diag.transportFailed() {
+				t.Errorf("expected a transport failure, diag=%+v\n%s", diag, out)
+			}
+			if src != nil {
+				if got, _ := src.Token(); got == tok {
+					t.Errorf("source returned the content of a guarded file")
+				}
+			}
+			assertNoTokenValues(t, out, tok)
+		})
+	}
+}
+
+// The missing-credential remediation points at the hub's minter even when
+// no refresh status recorded a problem.
+func TestPrintTransportRemediation_MissingMentionsMinter(t *testing.T) {
+	out := captureStdout(t, func() { printTransportRemediation(doctorDiag{transportMissing: true}) })
+	if !strings.Contains(out, "If reset-auth does not deliver one, check the hub's transport minter configuration and logs.") {
+		t.Errorf("expected minter hint:\n%s", out)
+	}
+}
+
 // Without a proxy mode nothing changes: no transport auth is reported.
 func TestCheckTransportAuth_NoProxyModeNone(t *testing.T) {
 	home := isolateDoctorTransport(t)
