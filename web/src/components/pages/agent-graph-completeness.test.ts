@@ -272,3 +272,23 @@ describe('/agents/graph live changes while its request is in flight', () => {
     expect(stateManager.getAgent('a2')).toBeUndefined();
   });
 });
+
+describe('/agents/graph seeding', () => {
+  it('a later response replaces the stored fields: a field it omits is gone', async () => {
+    let rows: Agent[] = [{ ...agent('a1'), taskSummary: 'x' } as Agent];
+    const h = stubHeldAgents(() => rows);
+    const el = await mountHeld(h);
+    h.release();
+    await vi.waitFor(() => expect(graphInternals(el).loading).toBe(false));
+    expect(stateManager.getAgent('a1')?.taskSummary).toBe('x');
+
+    rows = [agent('a1')];
+    const refetch = graphInternals(el).fetchAgents(true);
+    await vi.waitFor(() => expect(h.held()).toBe(1));
+    h.release();
+    await refetch;
+    expect(stateManager.getAgent('a1')).toBeDefined();
+    expect(stateManager.getAgent('a1')).not.toHaveProperty('taskSummary');
+    expect(graphInternals(el).agents[0]).not.toHaveProperty('taskSummary');
+  });
+});
