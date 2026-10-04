@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -29,5 +30,23 @@ import (
 // pin_process_utc_test.go's AST test covers where the seam is called from.
 func TestMain(m *testing.M) {
 	pinProcessUTC = func() {}
+	clearAmbientScionEnv()
 	os.Exit(m.Run())
+}
+
+// clearAmbientScionEnv unsets every SCION_* variable inherited from the
+// environment before any cmd test runs. Inside an agent container these
+// point at the live hub (SCION_HUB_ENDPOINT, SCION_AUTH_TOKEN, ...) and take
+// precedence over the mock servers and temp projects the tests set up, so
+// tests would call the real hub and fail with 401s or wrong request counts
+// (ptone/scion#2102). Tests that need a value set it themselves with
+// t.Setenv. SCION_TEST_* variables are deliberate test opt-ins (for example
+// SCION_TEST_BASH) and are kept.
+func clearAmbientScionEnv() {
+	for _, kv := range os.Environ() {
+		name, _, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(name, "SCION_") && !strings.HasPrefix(name, "SCION_TEST_") {
+			os.Unsetenv(name)
+		}
+	}
 }
