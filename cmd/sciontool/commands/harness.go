@@ -17,6 +17,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
@@ -122,7 +123,17 @@ func runHarnessProvision(ctx context.Context, manifestPath string) error {
 	// them now so validation and file-existence checks use absolute paths.
 	resolveManifestHomePaths(manifest, home)
 
-	if err := validateManifestPaths(manifest, bundleRoot, home); err != nil {
+	// SCION_HARNESS_OUTPUTS_DIR / SCION_HARNESS_SECRETS_DIR move the
+	// bundle's outputs/ and secrets/ out of the home; unset, nothing changes.
+	dirs, err := hooks.ResolveHarnessDirs(bundleRoot)
+	if err != nil {
+		return err
+	}
+	manifest.Outputs.Env = dirs.OutputPath(manifest.Outputs.Env)
+	manifest.Outputs.ResolvedAuth = dirs.OutputPath(manifest.Outputs.ResolvedAuth)
+	manifest.Outputs.Status = dirs.OutputPath(manifest.Outputs.Status)
+
+	if err := validateManifestPaths(manifest, bundleRoot, home, dirs.ExtraRoots()...); err != nil {
 		return err
 	}
 
@@ -251,8 +262,8 @@ func resolveManifestHomePaths(m *containerProvisionManifest, home string) {
 // validateManifestPaths refuses to run if any path in the manifest escapes the
 // allowed roots (the harness bundle dir or the agent home). Path traversal in
 // a manifest could let a malicious harness-config write outside its sandbox.
-func validateManifestPaths(m *containerProvisionManifest, bundleRoot, home string) error {
-	allowed := []string{bundleRoot, home}
+func validateManifestPaths(m *containerProvisionManifest, bundleRoot, home string, extraRoots ...string) error {
+	allowed := append([]string{bundleRoot, home}, extraRoots...)
 	check := func(label, path string) error {
 		if path == "" {
 			return nil
@@ -407,13 +418,27 @@ func scrubSecrets(s string, m *containerProvisionManifest) string {
 }
 
 // loadStagedSecretValues reads the per-secret files written by the host-side
-// ApplyAuthSettings into agent_home/.scion/harness/secrets/. The directory is
-// optional; missing dir means "no env-secret values were staged" and is fine.
+// ApplyAuthSettings into agent_home/.scion/harness/secrets/, and also those
+// in SCION_HARNESS_SECRETS_DIR when it is set. The directories are optional;
+// a missing dir means "no env-secret values were staged" and is fine.
 func loadStagedSecretValues(m *containerProvisionManifest) []string {
 	if m.HarnessBundleDir == "" {
 		return nil
 	}
-	dir := filepath.Join(expandHomePrefix(m.HarnessBundleDir), "secrets")
+	bundle := expandHomePrefix(m.HarnessBundleDir)
+	dirs := []string{filepath.Join(bundle, "secrets")}
+	if d, err := hooks.ResolveHarnessDirs(bundle); err == nil && d.Secrets != dirs[0] {
+		dirs = append(dirs, d.Secrets)
+	}
+	var out []string
+	for _, dir := range dirs {
+		out = append(out, readStagedSecretDir(dir)...)
+	}
+	return out
+}
+
+// readStagedSecretDir returns the non-empty values of the files in dir.
+func readStagedSecretDir(dir string) []string {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil

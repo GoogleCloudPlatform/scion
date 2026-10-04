@@ -1155,7 +1155,7 @@ func (s *Server) createAgentInProject(
 	// (design #2703 §2.4). A relative workspace path would otherwise resolve
 	// against the shared project dir, so it is not accepted.
 	if project.IsEmptyPerAgent() && req.Workspace != "" {
-		ValidationError(w, "empty-per-agent projects do not take a workspace path", nil)
+		ValidationError(w, `"Empty directory per agent" (empty-per-agent) projects do not take a workspace path`, nil)
 		return
 	}
 

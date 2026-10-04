@@ -616,7 +616,7 @@ func TestReincarnateAgent_WorktreePerAgentOrNeitherWorkspace_Returns400(t *testi
 			workspaceMode: store.WorkspaceModePerAgent,
 			nonGit:        true,
 			wantRejected:  true,
-			wantBodyText:  "reincarnate does not yet support empty-per-agent workspaces",
+			wantBodyText:  `reincarnate does not yet support \"Empty directory per agent\" (empty-per-agent) workspaces`,
 		},
 	}
 
