@@ -377,6 +377,10 @@ func notAccessible(w http.ResponseWriter, what string, path string, err error) {
 //   - GET  (filePath="")  → list files
 //   - POST (filePath="")  → upload files
 //   - DELETE (filePath!="") → delete file
+//
+// For empty-per-agent projects (design #2703) this serves the hub project
+// directory, which their agents do not see (see resolveProjectWebDAVPath).
+// Unguarded in P1; the web UI hides the Files tab for this mode (P5).
 func (s *Server) handleProjectWorkspace(w http.ResponseWriter, r *http.Request, project *store.Project, filePath string) {
 	ctx := r.Context()
 

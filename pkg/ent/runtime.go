@@ -3,6 +3,7 @@
 package ent
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstraint"
@@ -20,6 +21,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitprincipalepoch"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionaudit"
@@ -53,6 +56,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectprestarthook"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectsyncstate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/relayinstance"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/rolebinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/roledefinition"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
@@ -249,6 +253,30 @@ func init() {
 	agentDescLaunchError := agentFields[54].Descriptor()
 	// agent.DefaultLaunchError holds the default value on creation for the launch_error field.
 	agent.DefaultLaunchError = agentDescLaunchError.Default.(string)
+	// agentDescDeletionState is the schema descriptor for deletion_state field.
+	agentDescDeletionState := agentFields[55].Descriptor()
+	// agent.DefaultDeletionState holds the default value on creation for the deletion_state field.
+	agent.DefaultDeletionState = agentDescDeletionState.Default.(string)
+	// agentDescDeletionClaim is the schema descriptor for deletion_claim field.
+	agentDescDeletionClaim := agentFields[56].Descriptor()
+	// agent.DefaultDeletionClaim holds the default value on creation for the deletion_claim field.
+	agent.DefaultDeletionClaim = agentDescDeletionClaim.Default.(int64)
+	// agentDescDeletionCode is the schema descriptor for deletion_code field.
+	agentDescDeletionCode := agentFields[60].Descriptor()
+	// agent.DefaultDeletionCode holds the default value on creation for the deletion_code field.
+	agent.DefaultDeletionCode = agentDescDeletionCode.Default.(string)
+	// agentDescDeletionError is the schema descriptor for deletion_error field.
+	agentDescDeletionError := agentFields[61].Descriptor()
+	// agent.DefaultDeletionError holds the default value on creation for the deletion_error field.
+	agent.DefaultDeletionError = agentDescDeletionError.Default.(string)
+	// agentDescDeletionPrior is the schema descriptor for deletion_prior field.
+	agentDescDeletionPrior := agentFields[62].Descriptor()
+	// agent.DefaultDeletionPrior holds the default value on creation for the deletion_prior field.
+	agent.DefaultDeletionPrior = agentDescDeletionPrior.Default.(string)
+	// agentDescDeletionRequest is the schema descriptor for deletion_request field.
+	agentDescDeletionRequest := agentFields[63].Descriptor()
+	// agent.DefaultDeletionRequest holds the default value on creation for the deletion_request field.
+	agent.DefaultDeletionRequest = agentDescDeletionRequest.Default.(string)
 	// agentDescID is the schema descriptor for id field.
 	agentDescID := agentFields[0].Descriptor()
 	// agent.DefaultID holds the default value on creation for the id field.
@@ -489,6 +517,46 @@ func init() {
 	chatlinkcodeDescID := chatlinkcodeFields[0].Descriptor()
 	// chatlinkcode.DefaultID holds the default value on creation for the id field.
 	chatlinkcode.DefaultID = chatlinkcodeDescID.Default.(func() uuid.UUID)
+	conduitprincipalepochFields := schema.ConduitPrincipalEpoch{}.Fields()
+	_ = conduitprincipalepochFields
+	// conduitprincipalepochDescPrincipalKind is the schema descriptor for principal_kind field.
+	conduitprincipalepochDescPrincipalKind := conduitprincipalepochFields[0].Descriptor()
+	// conduitprincipalepoch.PrincipalKindValidator is a validator for the "principal_kind" field. It is called by the builders before save.
+	conduitprincipalepoch.PrincipalKindValidator = conduitprincipalepochDescPrincipalKind.Validators[0].(func(string) error)
+	// conduitprincipalepochDescPrincipalID is the schema descriptor for principal_id field.
+	conduitprincipalepochDescPrincipalID := conduitprincipalepochFields[1].Descriptor()
+	// conduitprincipalepoch.PrincipalIDValidator is a validator for the "principal_id" field. It is called by the builders before save.
+	conduitprincipalepoch.PrincipalIDValidator = conduitprincipalepochDescPrincipalID.Validators[0].(func(string) error)
+	conduitsessionFields := schema.ConduitSession{}.Fields()
+	_ = conduitsessionFields
+	// conduitsessionDescPrincipalKind is the schema descriptor for principal_kind field.
+	conduitsessionDescPrincipalKind := conduitsessionFields[1].Descriptor()
+	// conduitsession.PrincipalKindValidator is a validator for the "principal_kind" field. It is called by the builders before save.
+	conduitsession.PrincipalKindValidator = conduitsessionDescPrincipalKind.Validators[0].(func(string) error)
+	// conduitsessionDescPrincipalID is the schema descriptor for principal_id field.
+	conduitsessionDescPrincipalID := conduitsessionFields[2].Descriptor()
+	// conduitsession.PrincipalIDValidator is a validator for the "principal_id" field. It is called by the builders before save.
+	conduitsession.PrincipalIDValidator = conduitsessionDescPrincipalID.Validators[0].(func(string) error)
+	// conduitsessionDescRelayInstanceID is the schema descriptor for relay_instance_id field.
+	conduitsessionDescRelayInstanceID := conduitsessionFields[4].Descriptor()
+	// conduitsession.RelayInstanceIDValidator is a validator for the "relay_instance_id" field. It is called by the builders before save.
+	conduitsession.RelayInstanceIDValidator = conduitsessionDescRelayInstanceID.Validators[0].(func(string) error)
+	// conduitsessionDescTransport is the schema descriptor for transport field.
+	conduitsessionDescTransport := conduitsessionFields[6].Descriptor()
+	// conduitsession.TransportValidator is a validator for the "transport" field. It is called by the builders before save.
+	conduitsession.TransportValidator = conduitsessionDescTransport.Validators[0].(func(string) error)
+	// conduitsessionDescDraining is the schema descriptor for draining field.
+	conduitsessionDescDraining := conduitsessionFields[10].Descriptor()
+	// conduitsession.DefaultDraining holds the default value on creation for the draining field.
+	conduitsession.DefaultDraining = conduitsessionDescDraining.Default.(bool)
+	// conduitsessionDescCapabilities is the schema descriptor for capabilities field.
+	conduitsessionDescCapabilities := conduitsessionFields[11].Descriptor()
+	// conduitsession.DefaultCapabilities holds the default value on creation for the capabilities field.
+	conduitsession.DefaultCapabilities = conduitsessionDescCapabilities.Default.(json.RawMessage)
+	// conduitsessionDescID is the schema descriptor for id field.
+	conduitsessionDescID := conduitsessionFields[0].Descriptor()
+	// conduitsession.IDValidator is a validator for the "id" field. It is called by the builders before save.
+	conduitsession.IDValidator = conduitsessionDescID.Validators[0].(func(string) error)
 	conversationFields := schema.Conversation{}.Fields()
 	_ = conversationFields
 	// conversationDescExternalRef is the schema descriptor for external_ref field.
@@ -567,8 +635,83 @@ func init() {
 	decisionauditDescID := decisionauditFields[0].Descriptor()
 	// decisionaudit.DefaultID holds the default value on creation for the id field.
 	decisionaudit.DefaultID = decisionauditDescID.Default.(func() uuid.UUID)
+	delegationedgeMixin := schema.DelegationEdge{}.Mixin()
+	delegationedgeMixinFields0 := delegationedgeMixin[0].Fields()
+	_ = delegationedgeMixinFields0
+	delegationedgeMixinFields1 := delegationedgeMixin[1].Fields()
+	_ = delegationedgeMixinFields1
+	delegationedgeMixinFields2 := delegationedgeMixin[2].Fields()
+	_ = delegationedgeMixinFields2
 	delegationedgeFields := schema.DelegationEdge{}.Fields()
 	_ = delegationedgeFields
+	// delegationedgeDescProvenanceVersion is the schema descriptor for provenance_version field.
+	delegationedgeDescProvenanceVersion := delegationedgeMixinFields0[0].Descriptor()
+	// delegationedge.DefaultProvenanceVersion holds the default value on creation for the provenance_version field.
+	delegationedge.DefaultProvenanceVersion = delegationedgeDescProvenanceVersion.Default.(int)
+	// delegationedgeDescSourcePrincipalKind is the schema descriptor for source_principal_kind field.
+	delegationedgeDescSourcePrincipalKind := delegationedgeMixinFields0[1].Descriptor()
+	// delegationedge.DefaultSourcePrincipalKind holds the default value on creation for the source_principal_kind field.
+	delegationedge.DefaultSourcePrincipalKind = delegationedgeDescSourcePrincipalKind.Default.(string)
+	// delegationedgeDescSourcePrincipalID is the schema descriptor for source_principal_id field.
+	delegationedgeDescSourcePrincipalID := delegationedgeMixinFields0[2].Descriptor()
+	// delegationedge.DefaultSourcePrincipalID holds the default value on creation for the source_principal_id field.
+	delegationedge.DefaultSourcePrincipalID = delegationedgeDescSourcePrincipalID.Default.(string)
+	// delegationedgeDescSourceCredentialKind is the schema descriptor for source_credential_kind field.
+	delegationedgeDescSourceCredentialKind := delegationedgeMixinFields0[3].Descriptor()
+	// delegationedge.DefaultSourceCredentialKind holds the default value on creation for the source_credential_kind field.
+	delegationedge.DefaultSourceCredentialKind = delegationedgeDescSourceCredentialKind.Default.(string)
+	// delegationedgeDescSourceCredentialID is the schema descriptor for source_credential_id field.
+	delegationedgeDescSourceCredentialID := delegationedgeMixinFields0[4].Descriptor()
+	// delegationedge.DefaultSourceCredentialID holds the default value on creation for the source_credential_id field.
+	delegationedge.DefaultSourceCredentialID = delegationedgeDescSourceCredentialID.Default.(string)
+	// delegationedgeDescSourceEventID is the schema descriptor for source_event_id field.
+	delegationedgeDescSourceEventID := delegationedgeMixinFields0[5].Descriptor()
+	// delegationedge.DefaultSourceEventID holds the default value on creation for the source_event_id field.
+	delegationedge.DefaultSourceEventID = delegationedgeDescSourceEventID.Default.(string)
+	// delegationedgeDescSourceAuthorizationRevision is the schema descriptor for source_authorization_revision field.
+	delegationedgeDescSourceAuthorizationRevision := delegationedgeMixinFields0[7].Descriptor()
+	// delegationedge.DefaultSourceAuthorizationRevision holds the default value on creation for the source_authorization_revision field.
+	delegationedge.DefaultSourceAuthorizationRevision = delegationedgeDescSourceAuthorizationRevision.Default.(int)
+	// delegationedgeDescInitiatorPrincipalKind is the schema descriptor for initiator_principal_kind field.
+	delegationedgeDescInitiatorPrincipalKind := delegationedgeMixinFields0[8].Descriptor()
+	// delegationedge.DefaultInitiatorPrincipalKind holds the default value on creation for the initiator_principal_kind field.
+	delegationedge.DefaultInitiatorPrincipalKind = delegationedgeDescInitiatorPrincipalKind.Default.(string)
+	// delegationedgeDescInitiatorPrincipalID is the schema descriptor for initiator_principal_id field.
+	delegationedgeDescInitiatorPrincipalID := delegationedgeMixinFields0[9].Descriptor()
+	// delegationedge.DefaultInitiatorPrincipalID holds the default value on creation for the initiator_principal_id field.
+	delegationedge.DefaultInitiatorPrincipalID = delegationedgeDescInitiatorPrincipalID.Default.(string)
+	// delegationedgeDescInitiatorCredentialKind is the schema descriptor for initiator_credential_kind field.
+	delegationedgeDescInitiatorCredentialKind := delegationedgeMixinFields0[10].Descriptor()
+	// delegationedge.DefaultInitiatorCredentialKind holds the default value on creation for the initiator_credential_kind field.
+	delegationedge.DefaultInitiatorCredentialKind = delegationedgeDescInitiatorCredentialKind.Default.(string)
+	// delegationedgeDescInitiatorCredentialID is the schema descriptor for initiator_credential_id field.
+	delegationedgeDescInitiatorCredentialID := delegationedgeMixinFields0[11].Descriptor()
+	// delegationedge.DefaultInitiatorCredentialID holds the default value on creation for the initiator_credential_id field.
+	delegationedge.DefaultInitiatorCredentialID = delegationedgeDescInitiatorCredentialID.Default.(string)
+	// delegationedgeDescCeilingKind is the schema descriptor for ceiling_kind field.
+	delegationedgeDescCeilingKind := delegationedgeMixinFields1[0].Descriptor()
+	// delegationedge.DefaultCeilingKind holds the default value on creation for the ceiling_kind field.
+	delegationedge.DefaultCeilingKind = delegationedgeDescCeilingKind.Default.(string)
+	// delegationedgeDescCeilingVersion is the schema descriptor for ceiling_version field.
+	delegationedgeDescCeilingVersion := delegationedgeMixinFields1[1].Descriptor()
+	// delegationedge.DefaultCeilingVersion holds the default value on creation for the ceiling_version field.
+	delegationedge.DefaultCeilingVersion = delegationedgeDescCeilingVersion.Default.(int32)
+	// delegationedgeDescCeilingBoundaryKind is the schema descriptor for ceiling_boundary_kind field.
+	delegationedgeDescCeilingBoundaryKind := delegationedgeMixinFields1[3].Descriptor()
+	// delegationedge.DefaultCeilingBoundaryKind holds the default value on creation for the ceiling_boundary_kind field.
+	delegationedge.DefaultCeilingBoundaryKind = delegationedgeDescCeilingBoundaryKind.Default.(string)
+	// delegationedgeDescCeilingBoundaryProjectID is the schema descriptor for ceiling_boundary_project_id field.
+	delegationedgeDescCeilingBoundaryProjectID := delegationedgeMixinFields1[4].Descriptor()
+	// delegationedge.DefaultCeilingBoundaryProjectID holds the default value on creation for the ceiling_boundary_project_id field.
+	delegationedge.DefaultCeilingBoundaryProjectID = delegationedgeDescCeilingBoundaryProjectID.Default.(string)
+	// delegationedgeDescDeactivationCause is the schema descriptor for deactivation_cause field.
+	delegationedgeDescDeactivationCause := delegationedgeMixinFields2[0].Descriptor()
+	// delegationedge.DefaultDeactivationCause holds the default value on creation for the deactivation_cause field.
+	delegationedge.DefaultDeactivationCause = delegationedgeDescDeactivationCause.Default.(string)
+	// delegationedgeDescDeactivationOpID is the schema descriptor for deactivation_op_id field.
+	delegationedgeDescDeactivationOpID := delegationedgeMixinFields2[2].Descriptor()
+	// delegationedge.DefaultDeactivationOpID holds the default value on creation for the deactivation_op_id field.
+	delegationedge.DefaultDeactivationOpID = delegationedgeDescDeactivationOpID.Default.(string)
 	// delegationedgeDescDelegatorID is the schema descriptor for delegator_id field.
 	delegationedgeDescDelegatorID := delegationedgeFields[2].Descriptor()
 	// delegationedge.DelegatorIDValidator is a validator for the "delegator_id" field. It is called by the builders before save.
@@ -1174,7 +1317,7 @@ func init() {
 	// message.ThreadIDValidator is a validator for the "thread_id" field. It is called by the builders before save.
 	message.ThreadIDValidator = messageDescThreadID.Validators[0].(func(string) error)
 	// messageDescCreated is the schema descriptor for created field.
-	messageDescCreated := messageFields[19].Descriptor()
+	messageDescCreated := messageFields[21].Descriptor()
 	// message.DefaultCreated holds the default value on creation for the created field.
 	message.DefaultCreated = messageDescCreated.Default.(func() time.Time)
 	// messageDescID is the schema descriptor for id field.
@@ -1405,6 +1548,20 @@ func init() {
 	projectsyncstateDescID := projectsyncstateFields[0].Descriptor()
 	// projectsyncstate.DefaultID holds the default value on creation for the id field.
 	projectsyncstate.DefaultID = projectsyncstateDescID.Default.(func() uuid.UUID)
+	relayinstanceFields := schema.RelayInstance{}.Fields()
+	_ = relayinstanceFields
+	// relayinstanceDescInternalEndpoint is the schema descriptor for internal_endpoint field.
+	relayinstanceDescInternalEndpoint := relayinstanceFields[2].Descriptor()
+	// relayinstance.DefaultInternalEndpoint holds the default value on creation for the internal_endpoint field.
+	relayinstance.DefaultInternalEndpoint = relayinstanceDescInternalEndpoint.Default.(string)
+	// relayinstanceDescDraining is the schema descriptor for draining field.
+	relayinstanceDescDraining := relayinstanceFields[6].Descriptor()
+	// relayinstance.DefaultDraining holds the default value on creation for the draining field.
+	relayinstance.DefaultDraining = relayinstanceDescDraining.Default.(bool)
+	// relayinstanceDescID is the schema descriptor for id field.
+	relayinstanceDescID := relayinstanceFields[0].Descriptor()
+	// relayinstance.IDValidator is a validator for the "id" field. It is called by the builders before save.
+	relayinstance.IDValidator = relayinstanceDescID.Validators[0].(func(string) error)
 	rolebindingFields := schema.RoleBinding{}.Fields()
 	_ = rolebindingFields
 	// rolebindingDescPrincipalID is the schema descriptor for principal_id field.

@@ -690,7 +690,9 @@ func TestCreateAgent_TemplateTZUnaffectedByLaterTemplateEdit(t *testing.T) {
 
 	d := NewHTTPAgentDispatcherWithClient(s, &mockRuntimeBrokerClient{}, false, slog.Default())
 	d.SetHubAgentDefaultsProvider(srv.hubAgentDefaults)
-	assert.Equal(t, "Europe/Paris", d.buildStartEnv(ctx, agent, "test", "start").env["TZ"], "a start sends the pinned zone")
+	startEnv, err := d.buildStartEnv(ctx, agent, "test", mintSiteStart)
+	require.NoError(t, err)
+	assert.Equal(t, "Europe/Paris", startEnv.env["TZ"], "a start sends the pinned zone")
 
 	fresh, _, err := srv.buildFreshAppliedConfig(ctx, agent, project, "")
 	require.NoError(t, err)

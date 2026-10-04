@@ -14,7 +14,17 @@
 
 package portforward
 
-import "testing"
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	scionhub "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
+	"github.com/gorilla/websocket"
+)
 
 func TestIsLoopbackHost(t *testing.T) {
 	tests := []struct {
@@ -40,5 +50,74 @@ func TestIsLoopbackHost(t *testing.T) {
 				t.Errorf("isLoopbackHost(%q) = %v, want %v", tt.host, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRunOnce_DialCarriesTransportHeader(t *testing.T) {
+	tests := []struct {
+		name   string
+		mode   transportauth.HeaderMode
+		header string
+	}{
+		{"authorization", transportauth.HeaderAuthorization, "Authorization"},
+		{"iap", transportauth.HeaderProxyAuthorization, "Proxy-Authorization"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := make(chan http.Header, 1)
+			upgrader := websocket.Upgrader{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got <- r.Header.Clone()
+				conn, err := upgrader.Upgrade(w, r, nil)
+				if err != nil {
+					return
+				}
+				_ = conn.Close()
+			}))
+			defer srv.Close()
+
+			client := scionhub.NewClientWithConfig(srv.URL, "agent-credential", "agent-1")
+			src := transportauth.NewInjectedSource()
+			src.SetToken("transport-credential", time.Now().Add(time.Hour))
+			client.SetTransportAuth(src, tt.mode)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = NewManager(client).runOnce(ctx)
+
+			select {
+			case h := <-got:
+				if v := h.Get(tt.header); v != "Bearer transport-credential" {
+					t.Errorf("%s = %q, want transport credential", tt.header, v)
+				}
+				if v := h.Get("X-Scion-Agent-Token"); v != "agent-credential" {
+					t.Errorf("X-Scion-Agent-Token = %q", v)
+				}
+			case <-ctx.Done():
+				t.Fatal("tunnel dial never reached the server")
+			}
+		})
+	}
+}
+
+func TestRunOnce_NoTransportSourceStillDials(t *testing.T) {
+	got := make(chan http.Header, 1)
+	upgrader := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- r.Header.Clone()
+		if conn, err := upgrader.Upgrade(w, r, nil); err == nil {
+			_ = conn.Close()
+		}
+	}))
+	defer srv.Close()
+
+	client := scionhub.NewClientWithConfig(srv.URL, "agent-credential", "agent-1")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = NewManager(client).runOnce(ctx)
+
+	h := <-got
+	if v := h.Get("Authorization"); v != "" {
+		t.Errorf("unexpected Authorization header without a transport source")
 	}
 }

@@ -37,6 +37,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import { apiFetch } from '../../../client/api.js';
 import { showConfirm } from '../confirm-dialog.js';
 import { showToast } from '../../../utils/toast.js';
+import { formatInstantWithZone } from '../../../utils/time.js';
 import { touchMenuItemStyles } from '../touch-styles.js';
 import { TouchPrimaryController } from '../../../utils/input-modality.js';
 import { LongPressController, type LongPressPoint } from './long-press.js';
@@ -2366,7 +2367,7 @@ export class ScionChatSpaceRail extends LitElement {
   ): string {
     const lines: string[] = [];
     lines.push(`# Thread: ${thread.name}`);
-    lines.push(`Exported: ${new Date().toLocaleString()}`);
+    lines.push(`Exported: ${formatInstantWithZone(new Date().toISOString())}`);
     lines.push('');
     lines.push('---');
 
@@ -2375,7 +2376,7 @@ export class ScionChatSpaceRail extends LitElement {
       const sender = rawSender.replace(/^(user|agent):/, '');
       const ts = msg.createdAt ?? '';
       const content = msg.msg ?? '';
-      const formattedTs = ts ? new Date(ts).toLocaleString() : '';
+      const formattedTs = ts ? formatInstantWithZone(ts) || ts : '';
 
       lines.push('');
       lines.push(`**${sender}** (${formattedTs}):`);

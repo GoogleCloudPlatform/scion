@@ -30,7 +30,7 @@
  */
 
 import { loadPaletteAgentsBounded, type RawPaletteAgent } from './chat-palette-data.js';
-import { agentCandidateId } from './chat-palette-types.js';
+import { buildAgentCandidate } from './agent-palette-candidate.js';
 import type { PaletteCandidate } from './chat-palette-types.js';
 import { can, isTerminalAvailable } from '../shared/types.js';
 
@@ -47,16 +47,8 @@ export function isTerminalPaletteAgentViable(agent: RawPaletteAgent): boolean {
 }
 
 /**
- * Build Agents-group palette candidates for the terminal view, each with an
- * `agent` target carrying the agent ID.
- *
- * The secondary label is the project name, falling back to the slug unless
- * the slug is already the label. Name, slug and project are all searchable.
- *
- * `activityMs` is always 0: unlike chat's Agents group, there is no DM
- * recency to join here (the terminal view needs no DMs at all), so ranking
- * falls back to match tier, then label, then ID — see
- * `utils/chat-palette-match.ts`.
+ * Build Agents-group palette candidates for the terminal view: one
+ * {@link buildAgentCandidate} row per viable agent.
  */
 export function buildTerminalAgentCandidates(
   agents: readonly RawPaletteAgent[]
@@ -64,22 +56,7 @@ export function buildTerminalAgentCandidates(
   const candidates: PaletteCandidate[] = [];
   for (const agent of agents) {
     if (!agent.id || !isTerminalPaletteAgentViable(agent)) continue;
-    const displayName = agent.name || agent.slug || agent.id;
-    const slugHint = agent.slug && agent.slug !== displayName ? agent.slug : '';
-    const secondaryLabel = agent.project || slugHint;
-    const searchFields = [
-      ...new Set([displayName, agent.slug, agent.project].filter((f): f is string => !!f)),
-    ];
-
-    candidates.push({
-      id: agentCandidateId(agent.id),
-      group: 'agents',
-      label: displayName,
-      secondaryLabel,
-      searchFields,
-      activityMs: 0,
-      target: { kind: 'agent', agentId: agent.id, displayName },
-    });
+    candidates.push(buildAgentCandidate(agent));
   }
   return candidates;
 }

@@ -231,10 +231,9 @@ func TestChown_UsesCachedFd(t *testing.T) {
 }
 
 // TestOpenLogFileNoFollow_FdIsCloseOnExec proves the log fd — cached for
-// the process's whole life and, under an enforced privilege-drop runtime,
-// held open across the exec that starts the workload under dropped
-// privileges — is close-on-exec, so it never leaks a writable handle to
-// root's log into that child.
+// the process's whole life and, on Substrate, held open across the exec
+// that starts the workload under dropped privileges — is close-on-exec, so
+// it never leaks a writable handle to root's log into that child.
 func TestOpenLogFileNoFollow_FdIsCloseOnExec(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "agent.log")
 	f, err := openLogFileNoFollow(path, 0666)

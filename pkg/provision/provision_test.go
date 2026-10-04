@@ -2152,14 +2152,20 @@ func TestServerNow_WriteErrorStillRemovesProbe(t *testing.T) {
 // long as the holder is alive, so a waiter must not be able to reclaim it
 // even after waiting past the (test-scale) stale threshold.
 func TestAcquireFileLock_HeartbeatPreventsReclaimOfLiveHolder(t *testing.T) {
-	// Shrink both the stale threshold and the heartbeat interval (keeping
-	// the same ~1:6 ratio the production defaults use) so this test can
-	// actually wait PAST the stale threshold without a multi-minute sleep,
-	// while still proving the heartbeat keeps refreshing often enough
-	// relative to it that a live holder never looks abandoned.
+	// Shrink the stale threshold and heartbeat interval so this test can
+	// actually wait PAST the stale threshold without a multi-minute sleep.
+	// The ratio is deliberately much wider than the production ~1:6: a
+	// test-scale threshold of a few hundred milliseconds is within reach of
+	// ordinary scheduler and filesystem stalls on a loaded CI runner (the
+	// holder's heartbeat goroutine missing ~6 beats in a row let the waiter
+	// reclaim a live lock), and that would test the runner, not the
+	// heartbeat. A full second still lets the test wait past it quickly
+	// while needing a stall dozens of beats long before it flakes. The
+	// property under test — every beat resets the staleness clock, so a
+	// live holder outlives the threshold — does not depend on the ratio.
 	origStale, origHeartbeat, origDelay := provisionLockStaleAfter, provisionLockHeartbeatInterval, fileLockRetryDelay
-	provisionLockStaleAfter = 180 * time.Millisecond
-	provisionLockHeartbeatInterval = 30 * time.Millisecond
+	provisionLockStaleAfter = time.Second
+	provisionLockHeartbeatInterval = 25 * time.Millisecond
 	fileLockRetryDelay = 20 * time.Millisecond
 	t.Cleanup(func() {
 		provisionLockStaleAfter, provisionLockHeartbeatInterval, fileLockRetryDelay = origStale, origHeartbeat, origDelay
@@ -2169,6 +2175,7 @@ func TestAcquireFileLock_HeartbeatPreventsReclaimOfLiveHolder(t *testing.T) {
 
 	held, err := acquireFileLock(context.Background(), dir)
 	require.NoError(t, err)
+	acquiredAt := time.Now()
 	defer func() { _ = held.release() }()
 
 	heartbeatPath := filepath.Join(dir, provisionFileLockName, provisionLockHeartbeatFile)
@@ -2177,21 +2184,28 @@ func TestAcquireFileLock_HeartbeatPreventsReclaimOfLiveHolder(t *testing.T) {
 		return err == nil
 	}, time.Second, 5*time.Millisecond, "heartbeat marker should appear after the first beat")
 
+	// Wait for an observed refresh rather than sleeping a fixed number of
+	// intervals and hoping a beat landed in that window.
 	initial, err := os.Stat(heartbeatPath)
 	require.NoError(t, err)
-	time.Sleep(provisionLockHeartbeatInterval*2 + 50*time.Millisecond)
-	refreshed, err := os.Stat(heartbeatPath)
-	require.NoError(t, err)
-	assert.True(t, refreshed.ModTime().After(initial.ModTime()),
-		"heartbeat should have refreshed its marker's mtime while held")
+	require.Eventually(t, func() bool {
+		refreshed, err := os.Stat(heartbeatPath)
+		return err == nil && refreshed.ModTime().After(initial.ModTime())
+	}, 2*time.Second, 5*time.Millisecond, "heartbeat should have refreshed its marker's mtime while held")
 
-	// Wait well past the (shrunk) stale threshold — long enough that,
-	// without a heartbeat, this lock would now look abandoned — then confirm
-	// a waiter still cannot acquire it: it looks fresh, not stale.
-	time.Sleep(provisionLockStaleAfter * 2)
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	// Wait until the lock is older than the stale threshold — measured
+	// from acquisition, so time already spent above counts — so that,
+	// without a heartbeat, it would now look abandoned. Then confirm a
+	// waiter still cannot acquire it: it looks fresh, not stale.
+	time.Sleep(time.Until(acquiredAt.Add(provisionLockStaleAfter + 200*time.Millisecond)))
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	_, err = acquireFileLock(ctx, dir)
+	stolen, err := acquireFileLock(ctx, dir)
+	if err == nil {
+		// Stop the wrongly acquired lock's heartbeat goroutine so it cannot
+		// outlive this test and race a later test's package-var overrides.
+		_ = stolen.release()
+	}
 	require.Error(t, err, "a live, heartbeating holder must never be reclaimed")
 }
 
@@ -4384,3 +4398,21 @@ func TestProvision_WorktreePerAgent_ExistingRegistration_Idempotent(t *testing.T
 }
 
 func intPtr(i int) *int { return &i }
+
+// --- EmptyPerAgent rejection ---
+
+func TestProvision_RejectsEmptyPerAgent(t *testing.T) {
+	err := ProvisionShared(ProvisionInput{
+		ProjectID: "proj-1",
+		Mode:      store.SharingModeEmptyPerAgent,
+		Resolved: ResolvedWorkspace{
+			HostPath: t.TempDir(),
+		},
+	})
+	if err == nil {
+		t.Fatal("expected error for EmptyPerAgent on the shared NFS workspace")
+	}
+	if !strings.Contains(err.Error(), "EmptyPerAgent") {
+		t.Errorf("error should mention EmptyPerAgent, got: %v", err)
+	}
+}

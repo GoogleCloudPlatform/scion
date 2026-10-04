@@ -34,6 +34,7 @@ vi.mock('./api.js', async (importOriginal) => {
 });
 
 import { apiFetch } from './api.js';
+import { setPreferredTimeZone } from '../utils/time.js';
 import {
   fetchAllPaletteAgents,
   fetchPaletteDms,
@@ -2178,15 +2179,13 @@ describe('buildDocumentCandidates', () => {
     expect(candidate.group).toBe('documents');
     expect(candidate.label).toBe('photo.png');
     expect(candidate.searchFields).toEqual(['photo.png', 'Alpha']);
-    expect(candidate.secondaryLabel).toBe('Alpha — Attachment · 1.2 KB · Sep 28');
+    expect(candidate.secondaryLabel).toBe('Alpha — Attachment · 1.2 KB · Sep 28, 2026');
   });
 
   it('two attachments sharing a name and project are distinguishable by size and date', () => {
-    // Midday UTC, not midnight: the formatted date is local-time
-    // (toLocaleDateString), and a midnight-UTC fixture rolls back to the
-    // previous day in every timezone west of UTC (i.e. most of the Americas)
-    // — this must pass under any TZ, not just the one this suite happens to
-    // run under here.
+    // Midday UTC, not midnight: the formatted date is in the display zone
+    // (Auto falls back to the browser zone), and a midnight-UTC fixture
+    // rolls back to the previous day in every zone west of UTC.
     const older = attachmentFile({
       key: 'att-older',
       target: { kind: 'attachment', id: 'att-older', mime: 'image/png', size: 500 },
@@ -2212,8 +2211,28 @@ describe('buildDocumentCandidates', () => {
     const [a, b] = buildDocumentCandidates([older, newer]);
     expect(a.label).toBe(b.label); // both "photo.png" — the same-name case this exists for
     expect(a.secondaryLabel).not.toBe(b.secondaryLabel);
-    expect(a.secondaryLabel).toBe('Alpha — Attachment · 500 B · Jan 1');
-    expect(b.secondaryLabel).toBe('Alpha — Attachment · 48.8 KB · Jun 1');
+    expect(a.secondaryLabel).toBe('Alpha — Attachment · 500 B · Jan 1, 2026');
+    expect(b.secondaryLabel).toBe('Alpha — Attachment · 48.8 KB · Jun 1, 2026');
+  });
+
+  it('dates an attachment in the display zone, not the browser zone', () => {
+    // vitest pins the browser zone to UTC; 15:00Z is the next day in Tokyo.
+    setPreferredTimeZone('Asia/Tokyo');
+    try {
+      const file = attachmentFile({
+        source: {
+          conversationKey: 'dm:x',
+          messageId: 'm2',
+          sentAt: '2026-09-28T15:00:00Z',
+          projectId: 'p1',
+          projectName: 'Alpha',
+        },
+      });
+      const [candidate] = buildDocumentCandidates([file]);
+      expect(candidate.secondaryLabel).toBe('Alpha — Attachment · 1.2 KB · Sep 29, 2026');
+    } finally {
+      setPreferredTimeZone('');
+    }
   });
 
   it('omits the date from an attachment secondary label when sentAt is a Go zero timestamp', () => {
@@ -2244,7 +2263,7 @@ describe('buildDocumentCandidates', () => {
       source: { conversationKey: 'dm:x', messageId: 'm2', sentAt: '2026-09-28T12:00:00Z' },
     });
     const [candidate] = buildDocumentCandidates([file]);
-    expect(candidate.secondaryLabel).toBe('Attachment · 1.2 KB · Sep 28');
+    expect(candidate.secondaryLabel).toBe('Attachment · 1.2 KB · Sep 28, 2026');
     expect(candidate.searchFields).toEqual(['photo.png']);
   });
 

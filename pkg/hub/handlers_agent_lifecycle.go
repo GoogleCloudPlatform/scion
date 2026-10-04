@@ -139,9 +139,13 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 
-	// Publish status event (best-effort: fetch agent for ProjectID)
+	// Publish status event (best-effort: fetch agent for ProjectID). A
+	// soft-deleted row publishes nothing: its deletion was already announced,
+	// and a late report from its container must not resurrect it in clients.
 	if agent, err := s.store.GetAgent(ctx, id); err == nil {
-		s.events.PublishAgentStatus(ctx, agent)
+		if agent.DeletedAt.IsZero() {
+			s.events.PublishAgentStatus(ctx, agent)
+		}
 	} else {
 		s.agentLifecycleLog.Warn("Failed to fetch agent for status event", "agent_id", id, "error", err)
 	}
@@ -162,6 +166,25 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 // see that guard's comment.
 func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpdate) {
 	currentPhase := state.Phase(agent.Phase)
+
+	// Guard 0c: a delete in progress (design ptone/scion#2483 §2.1) owns the
+	// agent's Phase/Activity/ExitCode/ExitReason/Message, exactly like a
+	// reincarnation (Guard 0b): a dying container's report must not revive a
+	// row the delete engine is tearing down. A soft-deleted row is done — no
+	// report changes it. The store repeats this check inside the
+	// UpdateAgentStatus transaction, so a delete claim that lands between
+	// this read and that write is still honored.
+	if deletionActive(agent) || !agent.DeletedAt.IsZero() {
+		status.Phase = ""
+		status.Activity = ""
+		status.ExitCode = nil
+		status.ExitReason = ""
+		status.Message = ""
+		// The store copy of this guard also drops ClearExit; mirror it so the
+		// two stay the same predicate (reports never set it: json:"-").
+		status.ClearExit = false
+		return
+	}
 
 	// Guard 0: suspended is sticky against async status updates. When an agent
 	// is suspended, its container is being torn down, and the dying container's
@@ -321,6 +344,32 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	// Delete in progress (design ptone/scion#2483 §2.1). Authz already ran
+	// in the caller. This runs before the managed-runtime branch so managed
+	// agents get the same answers.
+	switch action {
+	case api.AgentActionStart, api.AgentActionRestart:
+		entry := startEntryStart
+		if action == api.AgentActionRestart {
+			entry = startEntryRestart
+		}
+		if ref := s.startGate(ctx, agent, entry); ref.refuses() {
+			ref.write(w)
+			return
+		}
+	case api.AgentActionStop, api.AgentActionSuspend:
+		// The agent is already going down: stop (and suspend, which would
+		// otherwise race the delete's teardown on the broker) is a no-op
+		// success.
+		if deleteStopNoop(agent) {
+			respAgent := *agent
+			respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+			respAgent.Deletion = store.ComputeAgentDeletion(agent, time.Now())
+			writeJSON(w, http.StatusOK, &respAgent)
+			return
+		}
+	}
+
 	// Managed agent lifecycle: handle directly without broker dispatch.
 	if isManagedAgentRuntime(agent.Runtime) {
 		s.handleManagedAgentLifecycle(w, r, agent, action)
@@ -442,6 +491,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	case api.AgentActionRestart:
 		newPhase = string(state.PhaseRunning)
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
+			// Refuse before the stop leg: otherwise a broker without
+			// the empty-per-agent capability would have the agent
+			// stopped and then the start refused (design #2703 D3).
+			if !s.requireEmptyPerAgentBrokerCapabilityForAgent(ctx, w, agent) {
+				return
+			}
 			// Restart is implemented as stop + start so that env vars
 			// (API keys, secrets) are re-resolved from Hub storage.
 			// Stop errors are tolerated: the container may already be
@@ -486,6 +541,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 
 	// If dispatch failed, return error
 	if dispatchErr != nil {
+		if writeAgentTokenIssueError(w, dispatchErr) {
+			return
+		}
+		if writeEmptyPerAgentCapabilityError(w, dispatchErr) {
+			return
+		}
 		RuntimeError(w, "Failed to dispatch to runtime broker: "+dispatchErr.Error())
 		return
 	}
@@ -519,11 +580,15 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	agent.Phase = newPhase
+	// A successful start/stop/restart clears a failed delete marker
+	// (design ptone/scion#2483 §2.1); publish and respond from the stored
+	// row, which a racing delete claim may have kept off newPhase.
+	s.settleLifecycleWrite(ctx, agent, newPhase)
 	s.events.PublishAgentStatus(ctx, agent)
 
 	respAgent := *agent
 	respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+	respAgent.Deletion = store.ComputeAgentDeletion(agent, time.Now())
 	writeJSON(w, http.StatusOK, agentLifecycleResponse{Agent: &respAgent, Warnings: dispatchWarns.Warnings()})
 }
 
@@ -553,8 +618,10 @@ type StopAllAgentsResponse struct {
 }
 
 // handleStopAllAgents stops all running agents, optionally scoped to a project.
-// Global (projectID=="") requires platform admin. Project-scoped allows any project
-// member: owners/admins stop all agents, regular members stop only their own.
+// Global (projectID=="") requires agent.stop_all on the hub. Project-scoped
+// allows any project member: holders of agent.stop_all on the project
+// (project owners/admins, hub admins) stop all agents; other members, by
+// active direct or group-derived role binding, stop only their own.
 func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, projectID string) {
 	if r.Method != http.MethodPost {
 		MethodNotAllowed(w, http.MethodPost)
@@ -577,35 +644,60 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 		Phase:     string(state.PhaseRunning),
 	}
 
-	isAdmin := s.authzService.Decide(ctx, AuthzRequest{
+	// agent.stop_all is decided against the hub for global stop-all and
+	// against the project-scoped agent collection for a project, so
+	// project-owner and project-admin role bindings count. This is the
+	// same resource the project's stop_all scope capability is computed on.
+	resource := Resource{Type: "agent", ID: "hub"}
+	if projectID != "" {
+		resource = Resource{Type: "agent", ParentType: "project", ParentID: projectID}
+	}
+	canStopAll := s.authzService.Decide(ctx, AuthzRequest{
 		Principal:  principalContextForIdentity(userIdent),
 		Credential: credentialContextForIdentity(userIdent),
-		Resource:   Resource{Type: "agent", ID: "hub"},
-		Action:     Action("stop_all"),
+		Resource:   resource,
+		Action:     ActionStopAll,
 		Permission: "agent.stop_all",
 	}).Allowed
-	if projectID == "" {
-		// Global stop-all: requires agent.stop_all permission
-		if !isAdmin {
+	if !canStopAll {
+		if projectID == "" {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"Only admins can stop all agents", nil)
 			return
 		}
-	} else {
-		// Project-scoped stop-all: any project member allowed
-		if !isAdmin {
-			projectRole := s.resolveUserProjectRole(ctx, projectID, userIdent.ID())
-			if projectRole == "" {
-				writeError(w, http.StatusForbidden, ErrCodeForbidden,
-					"You are not a member of this project", nil)
-				return
-			}
-			// Regular members can only stop their own agents
-			if projectRole != store.GroupMemberRoleOwner && projectRole != store.GroupMemberRoleAdmin {
-				filter.OwnerID = userIdent.ID()
-				scope = "own"
-			}
+		// Other project members stop only their own agents. Membership is the
+		// effective project role: direct or group-derived role bindings that
+		// are currently active. Only the built-in roles count: a custom
+		// project role ranks 0 in higherProjectRole, the same as no role, so
+		// a caller holding only a custom role gets 403, not scope "own".
+		// A store failure is a 500 rather than a misleading 403. That
+		// includes a binding whose role definition is missing: the store
+		// refuses to delete a role definition that still has bindings, so
+		// that is a data integrity fault, and failing closed is correct.
+		// A nil membership service is a wiring fault, also a 500, matching
+		// the other membership handlers.
+		if s.membershipService == nil {
+			s.agentLifecycleLog.Error("stop-all: membership service unavailable",
+				"project_id", projectID, "user_id", userIdent.ID())
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"membership service unavailable", nil)
+			return
 		}
+		role, err := s.membershipService.projectEffectiveRoleFromStore(ctx, s.store, userIdent.ID(), projectID)
+		if err != nil {
+			s.agentLifecycleLog.Error("stop-all: failed to resolve project membership",
+				"project_id", projectID, "user_id", userIdent.ID(), "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"failed to resolve project membership", nil)
+			return
+		}
+		if role == "" {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You are not a member of this project", nil)
+			return
+		}
+		filter.OwnerID = userIdent.ID()
+		scope = "own"
 	}
 
 	result, err := s.store.ListAgents(ctx, filter, store.ListOptions{
@@ -617,6 +709,33 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 	}
 
 	agents := result.Items
+	if scope == "own" && len(agents) > 0 {
+		// Members stop the agents the per-agent lifecycle rule allows.
+		identity := GetIdentityFromContext(ctx)
+		allowed := make([]store.Agent, 0, len(agents))
+		for i := range agents {
+			if s.agentLifecycleAllowed(ctx, identity, &agents[i]) {
+				allowed = append(allowed, agents[i])
+			}
+		}
+		if len(allowed) == 0 {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"Not authorized to stop these agents", nil)
+			return
+		}
+		agents = allowed
+	}
+
+	// Skip agents a delete is taking down: their stop would race the
+	// delete's teardown on the broker, and a stop is a no-op for them
+	// anyway (design ptone/scion#2483 §2.1).
+	live := make([]store.Agent, 0, len(agents))
+	for i := range agents {
+		if !deleteStopNoop(&agents[i]) {
+			live = append(live, agents[i])
+		}
+	}
+	agents = live
 	if len(agents) == 0 {
 		writeJSON(w, http.StatusOK, StopAllAgentsResponse{
 			Scope:   scope,
@@ -638,6 +757,18 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 		wg.Add(1)
 		go func(agent *store.Agent) {
 			defer wg.Done()
+
+			// The filter above used the list snapshot; re-read so a delete
+			// that claimed the row since is skipped the same way (a stop is
+			// a no-op for it). A delete claiming after this read is still
+			// harmless: the broker stop is idempotent, and the delete's own
+			// teardown follows.
+			if fresh, err := s.store.GetAgent(ctx, agent.ID); err == nil {
+				if deleteStopNoop(fresh) || !fresh.DeletedAt.IsZero() {
+					return
+				}
+				agent = fresh
+			}
 
 			res := stopAllResult{
 				ID:   agent.ID,
@@ -672,11 +803,17 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 					res.Error = updateErr.Error()
 				} else {
 					res.Status = "stopped"
-					agent.Phase = string(state.PhaseStopped)
+					// Clear a failed delete marker, as a single stop does,
+					// and publish the row as stored.
+					s.settleLifecycleWrite(ctx, agent, string(state.PhaseStopped))
 					// Release the per-broker reservation, same as a single
 					// explicit stop (ptone/scion#1963).
 					s.releaseBrokerQuota(ctx, agent)
-					s.events.PublishAgentStatus(ctx, agent)
+					// settleLifecycleWrite reloaded DeletedAt: a delete that
+					// soft-finished meanwhile gets no stale stopped status.
+					if agent.DeletedAt.IsZero() {
+						s.events.PublishAgentStatus(ctx, agent)
+					}
 				}
 			}
 
@@ -705,25 +842,4 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 		Scope:   scope,
 		Results: results,
 	})
-}
-
-// resolveUserProjectRole returns the user's role in the project's members group.
-// Returns "" if the user is not a member of the project.
-func (s *Server) resolveUserProjectRole(ctx context.Context, projectID, userID string) string {
-	groups, err := s.store.ListGroups(ctx, store.GroupFilter{
-		ProjectID: projectID,
-		GroupType: store.GroupTypeExplicit,
-	}, store.ListOptions{Limit: 10})
-	if err != nil || len(groups.Items) == 0 {
-		return ""
-	}
-
-	for _, g := range groups.Items {
-		membership, err := s.store.GetGroupMembership(ctx, g.ID, store.GroupMemberTypeUser, userID)
-		if err != nil {
-			continue
-		}
-		return membership.Role
-	}
-	return ""
 }

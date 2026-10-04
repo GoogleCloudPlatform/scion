@@ -164,6 +164,78 @@ func TestResolveSecrets(t *testing.T) {
 	}
 }
 
+// TestResolveSecrets_DropsReservedTarget verifies that resolveSecrets drops
+// an environment-type secret whose target is reserved for scion's own
+// control-plane env vars, even though it is stored directly (not through the
+// create/patch validation) as a stand-in for a row that predates that check.
+func TestResolveSecrets_DropsReservedTarget(t *testing.T) {
+	memStore := createTestStore(t)
+	ctx := context.Background()
+
+	reservedTargetSecret := &store.Secret{
+		ID:             tid("s-reserved"),
+		Key:            "RESERVED_NAME_SECRET",
+		EncryptedValue: "passthrough",
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "SCION_METADATA_MODE",
+		Scope:          store.ScopeUser,
+		ScopeID:        tid("user-1"),
+		InjectionMode:  store.InjectionModeAlways,
+	}
+	normalSecret := &store.Secret{
+		ID:             tid("s-normal"),
+		Key:            "API_KEY",
+		EncryptedValue: "user-api-key",
+		SecretType:     store.SecretTypeEnvironment,
+		Target:         "API_KEY",
+		Scope:          store.ScopeUser,
+		ScopeID:        tid("user-1"),
+		InjectionMode:  store.InjectionModeAlways,
+	}
+	for _, s := range []*store.Secret{reservedTargetSecret, normalSecret} {
+		if err := memStore.CreateSecret(ctx, s); err != nil {
+			t.Fatalf("failed to create test secret %s: %v", s.Key, err)
+		}
+	}
+
+	backend := secret.NewLocalBackend(memStore, "test-hub-id", "test-secret")
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	dispatcher.SetSecretBackend(backend)
+
+	agent := &store.Agent{
+		ID:      tid("agent-1"),
+		Name:    "test-agent",
+		OwnerID: tid("user-1"),
+	}
+
+	resolved, asNeededKeys, err := dispatcher.resolveSecrets(ctx, agent)
+	if err != nil {
+		t.Fatalf("resolveSecrets failed: %v", err)
+	}
+
+	for _, rs := range resolved {
+		if rs.Target == "SCION_METADATA_MODE" {
+			t.Errorf("expected the reserved-target secret to be dropped, found it in resolved: %+v", rs)
+		}
+	}
+	for _, k := range asNeededKeys {
+		if k == "SCION_METADATA_MODE" {
+			t.Errorf("expected the reserved-target secret to be dropped from asNeededKeys too, got: %v", asNeededKeys)
+		}
+	}
+
+	found := false
+	for _, rs := range resolved {
+		if rs.Name == "API_KEY" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected the non-reserved secret API_KEY to still be resolved")
+	}
+}
+
 func TestResolveSecrets_WithBackend(t *testing.T) {
 	memStore := createTestStore(t)
 	ctx := context.Background()

@@ -125,7 +125,7 @@ func (s *Server) listAgentsSorted(w http.ResponseWriter, r *http.Request, filter
 		c := complete
 		resp.Complete = &c
 	}
-	writeJSON(w, http.StatusOK, resp)
+	writeAgentList(w, p.view, resp)
 }
 
 // buildGlobalAgentPage turns the authorized store rows of a global agents

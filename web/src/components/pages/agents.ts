@@ -55,6 +55,8 @@ import '../shared/message-mode-badge.js';
 import '../shared/messageability-indicator.js';
 import '../shared/view-toggle.js';
 import '../shared/agent-tree-view.js';
+import type { ScionAgentTreeView } from '../shared/agent-tree-view.js';
+import { GraphPaletteController } from '../shared/palette/graph-palette-controller.js';
 import '../shared/quick-message-dialog.js';
 import {
   getDenialMessage,
@@ -65,6 +67,7 @@ import type { MessageMode } from '../../shared/types.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { terminalHref } from '../../client/open-terminal.js';
+import { formatRelative } from '../../utils/time.js';
 
 @customElement('scion-page-agents')
 export class ScionPageAgents extends LitElement {
@@ -115,6 +118,12 @@ export class ScionPageAgents extends LitElement {
    */
   @state()
   private viewMode: ViewMode = 'grid';
+
+  /** "Jump to agent" over the graph, offering the agents its tree view shows. */
+  readonly graphPalette = new GraphPaletteController(this, {
+    treeView: (): ScionAgentTreeView | null =>
+      this.renderRoot.querySelector('scion-agent-tree-view'),
+  });
 
   /**
    * Filter scope: 'all' (no filter), 'mine' (created by me), 'shared' (in shared projects)
@@ -777,19 +786,11 @@ export class ScionPageAgents extends LitElement {
   }
 
   private formatRelativeTime(isoString: string): string {
-    const date = new Date(isoString);
-    if (isNaN(date.getTime())) return '—';
-    const now = Date.now();
-    const diffMs = now - date.getTime();
-    if (diffMs < 0) return 'just now';
-    const seconds = Math.floor(diffMs / 1000);
-    if (seconds < 60) return 'just now';
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return `${minutes}m ago`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return `${hours}h ago`;
-    const days = Math.floor(hours / 24);
-    return `${days}d ago`;
+    const ms = new Date(isoString).getTime();
+    if (Number.isNaN(ms)) return '—';
+    // A future instant is clock skew between hub and browser.
+    if (ms > Date.now()) return 'just now';
+    return formatRelative(isoString, { style: 'narrow' });
   }
 
   private setPhaseFilter(phase: AgentPhase | ''): void {

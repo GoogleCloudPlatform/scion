@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1175,4 +1176,143 @@ func TestAgentAppliedConfig_OmitsEmpty(t *testing.T) {
 	if bytes.Contains(data, []byte("workspaceStoragePath")) {
 		t.Error("expected WorkspaceStoragePath to be omitted when empty")
 	}
+}
+
+// setupEmptyPerAgentFinalizeAgent turns the bootstrap project into a non-git
+// empty-per-agent project and creates a provisioning agent in it, as the
+// bootstrap create leaves it before sync-to/finalize.
+func setupEmptyPerAgentFinalizeAgent(t *testing.T, s store.Store, stor *mockStorage, agentID string) (*store.Agent, string) {
+	t.Helper()
+	ctx := context.Background()
+	projectID, brokerID := setupProjectAndBroker(t, s)
+	project, err := s.GetProject(ctx, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project.GitRemote = ""
+	project.Labels = map[string]string{store.LabelWorkspaceMode: string(store.SharingModeEmptyPerAgent)}
+	if err := s.UpdateProject(ctx, project); err != nil {
+		t.Fatal(err)
+	}
+	agent := &store.Agent{
+		ID:              agentID,
+		Slug:            "empty-finalize",
+		Name:            "Empty Finalize",
+		ProjectID:       projectID,
+		RuntimeBrokerID: brokerID,
+		Phase:           string(state.PhaseProvisioning),
+		AppliedConfig:   &store.AgentAppliedConfig{Task: "test task"},
+	}
+	if err := s.CreateAgent(ctx, agent); err != nil {
+		t.Fatal(err)
+	}
+	storagePath := "workspaces/" + projectID + "/" + agentID
+	stor.objects[storagePath+"/files/main.go"] = &storage.Object{Name: storagePath + "/files/main.go"}
+	return agent, storagePath
+}
+
+// TestSyncToFinalize_BootstrapMode_EmptyPerAgentIgnoresFiles is the N2
+// carry-over (design #2703 P2): finalize for an empty-per-agent agent
+// dispatches without a workspace storage path, so the broker never seeds
+// the private directory, and reports the ignored files as a warning.
+func TestSyncToFinalize_BootstrapMode_EmptyPerAgentIgnoresFiles(t *testing.T) {
+	srv, s, stor, disp := testBootstrapServer(t)
+	agentID := tid("agent_empty_finalize")
+	setupEmptyPerAgentFinalizeAgent(t, s, stor, agentID)
+
+	rec := doBootstrapRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", agentID), SyncToFinalizeRequest{
+		Manifest: &transfer.Manifest{Version: "1.0", Files: []transfer.FileInfo{{Path: "main.go", Size: 100, Hash: "sha256:abc123"}}},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp SyncToFinalizeResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Applied || resp.FilesApplied != 0 {
+		t.Errorf("Applied=%v FilesApplied=%d, want false/0 (files are ignored)", resp.Applied, resp.FilesApplied)
+	}
+	if len(resp.Warnings) != 1 || resp.Warnings[0] != api.WarningEmptyPerAgentWorkspaceFilesIgnored {
+		t.Errorf("Warnings = %v, want [%q]", resp.Warnings, api.WarningEmptyPerAgentWorkspaceFilesIgnored)
+	}
+	if len(disp.dispatchedAgents) != 1 {
+		t.Fatalf("expected 1 dispatched agent, got %d", len(disp.dispatchedAgents))
+	}
+	if got := disp.dispatchedAgents[0].AppliedConfig.WorkspaceStoragePath; got != "" {
+		t.Errorf("dispatched WorkspaceStoragePath = %q, want empty", got)
+	}
+	stored, err := s.GetAgent(context.Background(), agentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.AppliedConfig != nil && stored.AppliedConfig.WorkspaceStoragePath != "" {
+		t.Errorf("stored WorkspaceStoragePath = %q, want empty", stored.AppliedConfig.WorkspaceStoragePath)
+	}
+}
+
+// TestSyncToFinalize_BootstrapMode_EmptyPerAgentCapability412 is the N2
+// carry-over's status mapping: a broker lacking empty-per-agent support
+// surfaces as 412, as on create, not a generic 500.
+func TestSyncToFinalize_BootstrapMode_EmptyPerAgentCapability412(t *testing.T) {
+	srv, s, stor, disp := testBootstrapServer(t)
+	agentID := tid("agent_empty_finalize_412")
+	setupEmptyPerAgentFinalizeAgent(t, s, stor, agentID)
+	disp.returnErr = fmt.Errorf("dispatch: %w", errBrokerLacksEmptyPerAgent)
+
+	rec := doBootstrapRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", agentID), SyncToFinalizeRequest{
+		Manifest: &transfer.Manifest{Version: "1.0", Files: []transfer.FileInfo{{Path: "main.go", Size: 100, Hash: "sha256:abc123"}}},
+	})
+	if rec.Code != http.StatusPreconditionFailed {
+		t.Fatalf("expected status 412, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), ErrCodeUnsupportedCapability) {
+		t.Errorf("body %s should carry %s", rec.Body.String(), ErrCodeUnsupportedCapability)
+	}
+}
+
+// TestSyncToFinalize_BootstrapMode_EmptyPerAgentNilOrEmptyManifest pins that
+// the empty-per-agent branch never sees a nil manifest: a missing manifest
+// is rejected with 400 before the agent is touched (nothing dispatched),
+// and a manifest with no files reaches the branch and dispatches without a
+// warning.
+func TestSyncToFinalize_BootstrapMode_EmptyPerAgentNilOrEmptyManifest(t *testing.T) {
+	t.Run("nil manifest", func(t *testing.T) {
+		srv, s, stor, disp := testBootstrapServer(t)
+		agentID := tid("agent_empty_finalize_nil")
+		setupEmptyPerAgentFinalizeAgent(t, s, stor, agentID)
+
+		rec := doBootstrapRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", agentID), SyncToFinalizeRequest{})
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected status 400, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if len(disp.dispatchedAgents) != 0 {
+			t.Fatalf("expected no dispatch, got %d", len(disp.dispatchedAgents))
+		}
+	})
+	t.Run("manifest without files", func(t *testing.T) {
+		srv, s, stor, disp := testBootstrapServer(t)
+		agentID := tid("agent_empty_finalize_nofiles")
+		setupEmptyPerAgentFinalizeAgent(t, s, stor, agentID)
+
+		rec := doBootstrapRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/agents/%s/workspace/sync-to/finalize", agentID), SyncToFinalizeRequest{
+			Manifest: &transfer.Manifest{Version: "1.0"},
+		})
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected status 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		var resp SyncToFinalizeResponse
+		if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+			t.Fatal(err)
+		}
+		if len(resp.Warnings) != 0 {
+			t.Errorf("Warnings = %v, want none", resp.Warnings)
+		}
+		if len(disp.dispatchedAgents) != 1 {
+			t.Fatalf("expected 1 dispatched agent, got %d", len(disp.dispatchedAgents))
+		}
+		if got := disp.dispatchedAgents[0].AppliedConfig.WorkspaceStoragePath; got != "" {
+			t.Errorf("dispatched WorkspaceStoragePath = %q, want empty", got)
+		}
+	})
 }

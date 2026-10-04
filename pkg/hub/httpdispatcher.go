@@ -83,8 +83,8 @@ func (c *HTTPRuntimeBrokerClient) RestartAgent(ctx context.Context, brokerID, br
 	return c.transport.RestartAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, resolvedEnv, extras)
 }
 
-func (c *HTTPRuntimeBrokerClient) ResetAuthAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, token string) error {
-	return c.transport.ResetAuthAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, token)
+func (c *HTTPRuntimeBrokerClient) ResetAuthAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, token, transportToken string) error {
+	return c.transport.ResetAuthAgent(ctx, brokerID, brokerEndpoint, agentID, projectID, token, transportToken)
 }
 
 func (c *HTTPRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
@@ -136,6 +136,9 @@ func (d *HTTPAgentDispatcher) GetClient() RuntimeBrokerClient {
 // AgentTokenGenerator generates JWT tokens for agents.
 type AgentTokenGenerator interface {
 	GenerateAgentToken(agentID, projectID string, ancestry []string, role AgentRole, additionalScopes []AgentTokenScope) (string, error)
+	// GenerateAgentTokenForAgent issues a token for the stored agent record,
+	// bounded by its delegation chain. Every dispatcher mint site uses it.
+	GenerateAgentTokenForAgent(ctx context.Context, agent *store.Agent) (string, error)
 }
 
 // GitHubAppTokenMinter mints GitHub App installation tokens for projects.
@@ -482,6 +485,37 @@ func (d *HTTPAgentDispatcher) getBrokerEndpoint(ctx context.Context, brokerID st
 	return broker.Endpoint, nil
 }
 
+// getProvisioningBrokerEndpoint is getBrokerEndpoint for dispatches that
+// (re-)provision or start an agent (create, provision, finalize-env, start,
+// restart). It additionally fails closed when the agent's project is
+// empty-per-agent and the broker does not advertise the
+// emptyPerAgentWorkspace capability (design #2703 D3), so an old broker never
+// receives the mode. A project lookup error also fails closed; only a
+// missing project skips the check. Stop, delete and other non-provisioning
+// dispatches keep using getBrokerEndpoint.
+func (d *HTTPAgentDispatcher) getProvisioningBrokerEndpoint(ctx context.Context, agent *store.Agent) (string, error) {
+	broker, err := d.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	if err != nil {
+		return "", fmt.Errorf("failed to get runtime broker: %w", err)
+	}
+	if agent.ProjectID != "" {
+		project, err := d.store.GetProject(ctx, agent.ProjectID)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			// A deleted project cannot be empty-per-agent; nothing to gate.
+		case err != nil:
+			// Fail closed: a transient lookup error must not skip the gate
+			// (design #2703 D3).
+			return "", fmt.Errorf("failed to load project for capability check: %w", err)
+		default:
+			if err := checkEmptyPerAgentBrokerCapability(project, broker); err != nil {
+				return "", err
+			}
+		}
+	}
+	return broker.Endpoint, nil
+}
+
 // resolveProvisionCredentials collects project-scope secrets for use by the
 // broker's provision-time credential resolution (skill resolution, URI
 // variable substitution, credential helpers). These are never forwarded to
@@ -572,7 +606,10 @@ func (d *HTTPAgentDispatcher) resolveProvisionCredentials(ctx context.Context, a
 // This is shared between DispatchAgentCreate and DispatchAgentProvision.
 func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *store.Agent, callerName string) (*RemoteCreateAgentRequest, error) {
 	buildRequestStart := time.Now()
-	projectInfo := d.resolveDispatchProjectInfo(ctx, agent)
+	projectInfo, err := d.resolveDispatchProjectInfo(ctx, agent)
+	if err != nil {
+		return nil, err
+	}
 
 	// Build the remote create request
 	//
@@ -622,20 +659,16 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 		)
 	}
 
-	// Generate agent token if token generator is available
+	// Generate agent token if token generator is available. A mint error
+	// stops the dispatch before any broker request.
 	if d.tokenGenerator != nil {
-		agentRole, additionalScopes := agentRoleAndScopes(agent)
-		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
+		token, err := mintAgentTokenAt(ctx, d.tokenGenerator, d.store, agent, mintSiteCreate)
 		if err != nil {
-			if d.debug {
-				d.log.Warn("Failed to generate agent token", "error", err)
-			}
-			// Continue without token - agent will operate in unauthenticated mode
-		} else {
-			req.AgentToken = token
-			if d.debug {
-				d.log.Debug("Generated agent token", "length", len(token))
-			}
+			return nil, fmt.Errorf("%s: %w", callerName, err)
+		}
+		req.AgentToken = token
+		if d.debug {
+			d.log.Debug("Generated agent token", "length", len(token))
 		}
 	} else if d.debug {
 		d.log.Debug("No token generator configured - agent will not have Hub credentials")
@@ -779,6 +812,28 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			}
 		}
 	}
+
+	// SCION_METADATA_MODE must be hub-authoritative, never sourced from
+	// storage: overwrite whatever the fill-absent merge above put there.
+	// req.Config.GCPIdentity (set above from agent.AppliedConfig.GCPIdentity)
+	// is what the broker primarily trusts, but that struct is nil when the
+	// agent has no GCP identity configured, and the broker then falls back to
+	// this env var. Without this authoritative overwrite, a stored env var of
+	// this name would decide the metadata mode on that fallback path.
+	gcpMetadataMode := store.GCPMetadataModeBlock
+	if req.Config != nil && req.Config.GCPIdentity != nil {
+		gcpMetadataMode = req.Config.GCPIdentity.MetadataMode
+	}
+	req.ResolvedEnv["SCION_METADATA_MODE"] = gcpMetadataMode
+	classifyEnv(&req.EnvClassifications, "SCION_METADATA_MODE", api.EnvKindPlain)
+	// Marks the mode above as this hub's own authoritative write, not a value
+	// that survived from a storage/secret merge. A broker that predates this
+	// marker ignores it (harmless); a broker that checks it only trusts an
+	// elevated (non-block) mode from resolvedEnv when this is present, which
+	// is what closes the fallback path for a broker talking to an older hub
+	// that never sends this marker at all.
+	req.ResolvedEnv["SCION_METADATA_MODE_SOURCE"] = "hub"
+	classifyEnv(&req.EnvClassifications, "SCION_METADATA_MODE_SOURCE", api.EnvKindPlain)
 
 	// Include template secrets declarations for broker env-gather
 	if agent.AppliedConfig != nil && agent.AppliedConfig.TemplateID != "" {
@@ -1083,26 +1138,35 @@ type projectDispatchInfo struct {
 	workspaceMode   string // resolved workspace mode label (e.g. "shared", "worktree-per-agent")
 }
 
-func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, agent *store.Agent) projectDispatchInfo {
+// resolveDispatchProjectInfo resolves the project facts a dispatch carries.
+// A project that no longer exists yields empty info (nothing to resolve); any
+// other project lookup error is returned so the dispatch fails closed rather
+// than sending an empty workspace mode — for an empty-per-agent project that
+// would let a capable broker fall back to mounting the shared project
+// directory (design #2703 D3).
+func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, agent *store.Agent) (projectDispatchInfo, error) {
 	// Look up the local path for this project on the target runtime broker.
 	// A provider LocalPath (linked project) takes precedence over hub-native
 	// slug resolution, even for projects without a git remote. Only when there
 	// is no provider path and no git remote do we fall back to projectSlug so
 	// the broker resolves the conventional ~/.scion/projects/<slug> path.
 	if agent.ProjectID == "" {
-		return projectDispatchInfo{}
+		return projectDispatchInfo{}, nil
 	}
 
 	var info projectDispatchInfo
 
 	project, err := d.store.GetProject(ctx, agent.ProjectID)
+	if errors.Is(err, store.ErrNotFound) {
+		return projectDispatchInfo{}, nil
+	}
 	if err != nil {
-		return projectDispatchInfo{}
+		return projectDispatchInfo{}, fmt.Errorf("resolve project %s for dispatch: %w", agent.ProjectID, err)
 	}
 
 	info.sharedDirs = project.SharedDirs
 	info.sharedWorkspace = project.IsSharedWorkspace()
-	info.workspaceMode = project.Labels[store.LabelWorkspaceMode]
+	info.workspaceMode = dispatchWorkspaceMode(project)
 
 	// First check if the broker has a registered local path for this project.
 	if agent.RuntimeBrokerID != "" {
@@ -1126,7 +1190,7 @@ func (d *HTTPAgentDispatcher) resolveDispatchProjectInfo(ctx context.Context, ag
 	if info.projectPath == "" {
 		info.projectSlug = project.Slug
 	}
-	return info
+	return info, nil
 }
 
 // applyBrokerResponse updates agent fields from the broker's response and
@@ -1231,7 +1295,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 		return err
 	}
 
-	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
+	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return err
@@ -1244,10 +1308,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 	}
 	// buildCreateRequest mints (and best-effort persists) a fresh agent
 	// credential before returning — but only when a token generator is
-	// configured and GenerateAgentToken succeeds; it otherwise tolerates the
-	// absence and carries on without one. Any failure from here on must
-	// revoke it, but only if this call actually minted one — see
-	// revokeAgentCredentialsBestEffort's doc comment.
+	// configured; with none it carries on without one. A mint error has
+	// already returned above, before any broker request, and minted nothing,
+	// so there is nothing to revoke on that path. Any failure from here on
+	// must revoke the credential, but only if this call actually minted one
+	// — see revokeAgentCredentialsBestEffort's doc comment.
 	issued := req.AgentToken != ""
 	defer func() {
 		if err != nil && issued {
@@ -1305,7 +1370,7 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 		return err
 	}
 
-	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
+	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
 		return err
 	}
@@ -1473,7 +1538,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentCreateWithGather(ctx context.Context,
 		return nil, err
 	}
 
-	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
+	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
 		return nil, err
 	}
@@ -1592,12 +1657,33 @@ func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *st
 // gather answer for TZ (UTC rather than no TZ) because the broker listed TZ
 // as needed; a TZ need reported by this replay is answered the same way.
 func (d *HTTPAgentDispatcher) finalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string, answerTZ bool) (err error) {
+	// Defense in depth for a caller-supplied env map that does not go through
+	// the submitAgentEnv reserved-target check (or reaches this dispatch path
+	// some other way): never let it override a scion control-plane env var.
+	// This reassigns the local env variable, so both the merge below and the
+	// deferred-replay call further down inherit the sanitized map — and a
+	// deferred op queued before this check existed is sanitized fresh the
+	// next time it is replayed through this same function.
+	if len(env) > 0 {
+		sanitized := make(map[string]string, len(env))
+		for k, v := range env {
+			if secret.IsReservedEnvTarget(k) {
+				if d.debug {
+					d.log.Debug("DispatchFinalizeEnv: dropping reserved-target caller env", "agent_id", agent.ID, "key", k)
+				}
+				continue
+			}
+			sanitized[k] = v
+		}
+		env = sanitized
+	}
+
 	env = d.withoutCallerTZ(ctx, agent, env)
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
 
-	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
+	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
 		return err
 	}
@@ -1997,6 +2083,13 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 			if v.InjectionMode == store.InjectionModeAsNeeded {
 				continue
 			}
+			// Defense in depth for rows that predate the create/patch
+			// reserved-target check, or that reached the store through some
+			// other path: never let a stored env var decide a scion
+			// control-plane env var's value.
+			if secret.IsReservedEnvTarget(v.Key) {
+				continue
+			}
 			result[v.Key] = v.Value
 			plain[v.Key] = !v.Secret
 		}
@@ -2015,6 +2108,9 @@ func (d *HTTPAgentDispatcher) resolveEnvFromStorage(ctx context.Context, agent *
 			}
 		} else {
 			for _, v := range progenyVars {
+				if secret.IsReservedEnvTarget(v.Key) {
+					continue
+				}
 				if _, exists := result[v.Key]; exists {
 					continue // higher-precedence scope already set this key
 				}
@@ -2082,6 +2178,12 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 		}
 		for _, v := range vars {
 			if v.InjectionMode != store.InjectionModeAsNeeded {
+				continue
+			}
+			// Defense in depth, matching resolveSecrets: never satisfy an
+			// as-needed request for a scion control-plane env var from a
+			// stored plain env var either.
+			if secret.IsReservedEnvTarget(v.Key) {
 				continue
 			}
 			if _, needed := keySet[v.Key]; needed {
@@ -2174,6 +2276,12 @@ func (d *HTTPAgentDispatcher) resolveAsNeededForKeys(
 				target := sv.Target
 				if target == "" {
 					target = sv.Name
+				}
+				// Defense in depth, matching resolveSecrets: never satisfy an
+				// as-needed request for a scion control-plane env var from a
+				// stored secret.
+				if secret.IsReservedEnvTarget(target) {
+					continue
 				}
 				if _, needed := keySet[target]; needed {
 					// Store under the canonical key if this was an alternative match
@@ -2328,9 +2436,10 @@ type startEnvResult struct {
 	workspace       WorkspaceDispatchSpec
 	// tokenIssued reports whether this call actually minted a fresh Hub auth
 	// token (d.tokenGenerator succeeded and returned a non-empty token), as
-	// opposed to tolerating a nil generator or a GenerateAgentToken error and
-	// carrying on without one. DispatchAgentStart's revoke-on-failure defer
-	// must only arm when this call issued a credential to revoke.
+	// opposed to carrying on without one because no generator is configured.
+	// A mint error never reaches this struct: buildStartEnv returns the error
+	// instead. DispatchAgentStart's revoke-on-failure defer must only arm
+	// when this call issued a credential to revoke.
 	tokenIssued bool
 }
 
@@ -2348,11 +2457,24 @@ type startEnvResult struct {
 // warning's wording.
 //
 // caller is the log-message prefix ("DispatchAgentStart" or
-// "DispatchAgentRestart"); startedVerb is "start" or "restart", used only in
-// the secrets-resolution failure message, the one warning whose wording
-// differs (agent will <verb> without injected secrets) between the two
-// callers.
-func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Agent, caller, startedVerb string) startEnvResult {
+// "DispatchAgentRestart"). site is the caller's mint site, mintSiteStart or
+// mintSiteRestart; it names the site in the mint audit record and gives the
+// verb of the secrets-resolution failure message, the one warning whose
+// wording differs (agent will <verb> without injected secrets) between the
+// two callers. Any other site is an error before any work is done. It
+// returns an error only for such a site, when the agent's project cannot be
+// loaded (checked before any token is minted), or when the agent token is
+// not issued.
+func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Agent, caller string, site mintSite) (startEnvResult, error) {
+	var startedVerb string
+	switch site {
+	case mintSiteStart:
+		startedVerb = "start"
+	case mintSiteRestart:
+		startedVerb = "restart"
+	default:
+		return startEnvResult{}, fmt.Errorf("%s: unsupported mint site %q for a start", caller, site)
+	}
 	resolvedEnv := make(map[string]string)
 	var envClassifications map[string]api.EnvKind
 
@@ -2466,7 +2588,13 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// Resolve once so the switch below uses canonical constants —
 	// unrecognized or future wire labels safely fall back to shared-plain
 	// behavior.
-	projectInfo := d.resolveDispatchProjectInfo(ctx, agent)
+	//
+	// A project lookup error fails the start/restart here, before any agent
+	// or transport token is minted below, so there is nothing to revoke.
+	projectInfo, err := d.resolveDispatchProjectInfo(ctx, agent)
+	if err != nil {
+		return startEnvResult{}, err
+	}
 	resolvedMode := store.ResolveWorkspaceSharingMode(projectInfo.workspaceMode)
 	if projectInfo.workspaceMode != "" {
 		resolvedEnv["SCION_WORKSPACE_MODE"] = string(resolvedMode)
@@ -2477,6 +2605,10 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	case store.SharingModeClonePerAgent, store.SharingModeWorktreePerAgent:
 		resolvedEnv["SCION_WORKSPACE_GIT"] = "true"
 		classifyEnv(&envClassifications, "SCION_WORKSPACE_GIT", api.EnvKindPlain)
+	case store.SharingModeEmptyPerAgent:
+		// Never git: a private, initially empty directory. Kept as an
+		// explicit case so it cannot fall into the shared-plain GitClone
+		// sniff below (design #2703 §2.3).
 	case store.SharingModeSharedPlain:
 		// For shared-plain, git-ness is detected from the applied GitClone config.
 		// Note: broker-local linked projects where the workspace is already a
@@ -2496,11 +2628,18 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// createAgent path this information travels inside CreateAgentConfig,
 	// but the startAgent/restartAgent path doesn't carry that struct, so we
 	// surface the values through resolvedEnv instead.
+	//
+	// This write is unconditional and always the last word on
+	// SCION_METADATA_MODE (identity vars are set after the storage/secrets
+	// merge above, at "highest precedence" per the comment on SCION_AGENT_ID
+	// et al.): when the agent has no GCP identity configured at all, the mode
+	// still needs to be authoritatively set to the secure default rather than
+	// left for whatever a lower-precedence merge put in resolvedEnv.
+	gcpMetadataMode := store.GCPMetadataModeBlock
 	if agent.AppliedConfig != nil {
 		if gcpID := agent.AppliedConfig.GCPIdentity; gcpID != nil {
-			resolvedEnv["SCION_METADATA_MODE"] = gcpID.MetadataMode
-			classifyEnv(&envClassifications, "SCION_METADATA_MODE", api.EnvKindPlain)
-			if gcpID.MetadataMode == store.GCPMetadataModeAssign {
+			gcpMetadataMode = gcpID.MetadataMode
+			if gcpMetadataMode == store.GCPMetadataModeAssign {
 				resolvedEnv["SCION_METADATA_SA_EMAIL"] = gcpID.ServiceAccountEmail
 				classifyEnv(&envClassifications, "SCION_METADATA_SA_EMAIL", api.EnvKindPlain)
 				resolvedEnv["SCION_METADATA_PROJECT_ID"] = gcpID.ProjectID
@@ -2524,17 +2663,22 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 			}
 		}
 	}
+	resolvedEnv["SCION_METADATA_MODE"] = gcpMetadataMode
+	classifyEnv(&envClassifications, "SCION_METADATA_MODE", api.EnvKindPlain)
+	// See buildCreateRequest for why this marker travels alongside the mode.
+	resolvedEnv["SCION_METADATA_MODE_SOURCE"] = "hub"
+	classifyEnv(&envClassifications, "SCION_METADATA_MODE_SOURCE", api.EnvKindPlain)
 
-	// Generate a fresh agent token for Hub authentication.
+	// Generate a fresh agent token for Hub authentication. A mint error
+	// stops the start or restart before any broker request; nothing was
+	// minted in that case, so tokenIssued stays false.
 	tokenIssued := false
 	if d.tokenGenerator != nil {
-		agentRole, additionalScopes := agentRoleAndScopes(agent)
-		token, err := d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
+		token, err := mintAgentTokenAt(ctx, d.tokenGenerator, d.store, agent, site)
 		if err != nil {
-			if d.debug {
-				d.log.Warn(caller+": failed to generate agent token", "error", err)
-			}
-		} else if token != "" {
+			return startEnvResult{}, fmt.Errorf("%s: %w", caller, err)
+		}
+		if token != "" {
 			resolvedEnv["SCION_AUTH_TOKEN"] = token
 			tokenIssued = true
 			// Bootstrap: NOT in argv. Diverted to ~/.scion/scion-token by
@@ -2576,7 +2720,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 		projectInfo:     projectInfo,
 		workspace:       wsSpec,
 		tokenIssued:     tokenIssued,
-	}
+	}, nil
 }
 
 // DispatchAgentStart starts an agent on the runtime broker. When resume is
@@ -2597,7 +2741,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		return err
 	}
 
-	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
+	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return err
@@ -2626,7 +2770,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 
 	// Assemble the resolved env (shared with DispatchAgentRestart; see
 	// buildStartEnv).
-	startEnv := d.buildStartEnv(ctx, agent, "DispatchAgentStart", "start")
+	startEnv, err := d.buildStartEnv(ctx, agent, "DispatchAgentStart", mintSiteStart)
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
 	resolvedEnv := startEnv.env
 	envClassifications := startEnv.classifications
 	resolvedSecrets := startEnv.secrets
@@ -2636,8 +2784,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 
 	// A failure from here on must revoke the credential buildStartEnv just
 	// minted above, but only when it actually minted one — buildStartEnv
-	// tolerates a nil tokenGenerator or a GenerateAgentToken error and
-	// carries on without a credential. Arm the revoke only when all of these hold:
+	// carries on without a credential when no tokenGenerator is configured,
+	// and a mint error has already returned above, before any broker request
+	// and before this defer is armed, having minted nothing to revoke. Arm the
+	// revoke only when all of these hold:
 	//  - priorPhase (captured above, before buildStartEnv/applyBrokerResponse
 	//    could change it) is a confirmed non-running phase
 	//    (isConfirmedNonRunningPhase: created, provisioning, stopped,
@@ -2811,7 +2961,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		return err
 	}
 
-	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
+	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
 		return err
 	}
@@ -2820,7 +2970,10 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	// so the restarted container has full credentials and Hub connectivity.
 	// This mirrors the resolution in DispatchAgentStart — without it, env vars
 	// like GOOGLE_CLOUD_PROJECT are missing and auth provisioning fails.
-	startEnv := d.buildStartEnv(ctx, agent, "DispatchAgentRestart", "restart")
+	startEnv, err := d.buildStartEnv(ctx, agent, "DispatchAgentRestart", mintSiteRestart)
+	if err != nil {
+		return err
+	}
 	resolvedEnv := startEnv.env
 	envClassifications := startEnv.classifications
 
@@ -2868,8 +3021,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentResetAuth(ctx context.Context, agent 
 
 	var token string
 	if d.tokenGenerator != nil {
-		agentRole, additionalScopes := agentRoleAndScopes(agent)
-		token, err = d.tokenGenerator.GenerateAgentToken(agent.ID, agent.ProjectID, agent.Ancestry, agentRole, additionalScopes)
+		token, err = mintAgentTokenAt(ctx, d.tokenGenerator, d.store, agent, mintSiteResetAuth)
 		if err != nil {
 			return fmt.Errorf("DispatchAgentResetAuth: failed to generate agent token: %w", err)
 		}
@@ -2878,7 +3030,22 @@ func (d *HTTPAgentDispatcher) DispatchAgentResetAuth(ctx context.Context, agent 
 		return fmt.Errorf("DispatchAgentResetAuth: no token generated for agent %s", agent.ID)
 	}
 
-	return d.client.ResetAuthAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, token)
+	// Also push a fresh transport token when the hub mints them, so a
+	// reset recovers an agent whose transport token has already expired
+	// (its own refresh cannot reach the hub through the platform guard).
+	// A mint failure does not block the app-token reset.
+	var transportToken string
+	if d.transportMinter != nil && d.transportAudience != "" {
+		tToken, _, tErr := d.transportMinter.MintIDToken(ctx, d.transportAudience)
+		if tErr != nil {
+			d.log.Warn("DispatchAgentResetAuth: failed to mint transport token; resetting app token only",
+				"agent_id", agent.ID, "error", tErr)
+		} else {
+			transportToken = tToken
+		}
+	}
+
+	return d.client.ResetAuthAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, token, transportToken)
 }
 
 // DispatchAgentDelete deletes an agent from the runtime broker.
@@ -2895,8 +3062,9 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 	// For a linked project, tell the broker where the project lives on its
 	// filesystem so it can find a file-only agent (container gone) there.
 	// The broker checks the path's project identity before using it.
-	if pp := d.resolveDispatchProjectInfo(ctx, agent).projectPath; pp != "" {
-		ctx = withDeleteProjectPath(ctx, pp)
+	// Best-effort: delete proceeds without a project path on lookup failure.
+	if info, _ := d.resolveDispatchProjectInfo(ctx, agent); info.projectPath != "" {
+		ctx = withDeleteProjectPath(ctx, info.projectPath)
 	}
 
 	err = d.client.DeleteAgent(ctx, agent.RuntimeBrokerID, endpoint, agent.Slug, agent.ProjectID, deleteFiles, removeBranch, softDelete, deletedAt)
@@ -3233,11 +3401,14 @@ func (d *HTTPAgentDispatcher) deferredDataOpResult(
 	}
 
 	// 4. Wait for completion — reads result from the DB row (authoritative).
-	// Delete operations use a shorter timeout since they are lightweight
-	// broker-side operations and should not block the caller for 90 seconds.
+	// Delete operations use a shorter timeout (dispatchDeleteTimeout) since
+	// they are lightweight broker-side operations and should not block the
+	// caller for 90 seconds — unless the caller passed an explicit budget
+	// with withDeleteWaitBudget (the delete engine, design ptone/scion#2483
+	// §2.3.1), which then is the wait's only deadline.
 	var timeoutOverrides []time.Duration
 	if op == "delete" {
-		timeoutOverrides = append(timeoutOverrides, dispatchDeleteTimeout)
+		timeoutOverrides = append(timeoutOverrides, deleteWaitTimeoutFn(ctx))
 	}
 	result, err := waitForDispatchDone(ctx, eventCh, unsub, d.store, dispatchID, timeoutOverrides...)
 	if err != nil {
@@ -3393,6 +3564,17 @@ func (d *HTTPAgentDispatcher) resolveSecrets(ctx context.Context, agent *store.A
 	result := make([]ResolvedSecret, 0, len(resolved))
 	var asNeededKeys []string
 	for _, sv := range resolved {
+		// Defense in depth for rows that predate the create/patch reserved-
+		// target check, or that reached the store through some other path:
+		// drop any environment-type secret whose target is reserved for
+		// scion's own control-plane env vars before it is attached to the
+		// dispatch request at all, in either injection mode.
+		if (sv.SecretType == store.SecretTypeEnvironment || sv.SecretType == "") && secret.IsReservedEnvTarget(sv.Target) {
+			if d.debug {
+				d.log.Debug("resolveSecrets: dropping reserved-target secret", "name", sv.Name, "target", sv.Target, "scope", sv.Scope)
+			}
+			continue
+		}
 		// Only skip as_needed environment-type secrets (handled by the
 		// two-pass env-gather flow). File-type and variable-type secrets
 		// should always be placed regardless of injection mode — the

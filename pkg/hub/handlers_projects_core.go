@@ -46,11 +46,19 @@ type ListProjectsResponse struct {
 }
 
 type CreateProjectRequest struct {
-	ID            string            `json:"id,omitempty"`
-	Slug          string            `json:"slug,omitempty"`
-	Name          string            `json:"name"`
-	GitRemote     string            `json:"gitRemote,omitempty"`
-	WorkspaceMode string            `json:"workspaceMode,omitempty"` // "shared", "worktree-per-agent", or "per-agent" (default); only meaningful when gitRemote is set
+	ID        string `json:"id,omitempty"`
+	Slug      string `json:"slug,omitempty"`
+	Name      string `json:"name"`
+	GitRemote string `json:"gitRemote,omitempty"`
+	// WorkspaceMode is the create-only workspace sharing mode, stored as the
+	// server-owned scion.dev/workspace-mode label. Git projects accept
+	// "shared", "per-agent" (own git clone per agent) or "worktree-per-agent";
+	// non-git (hub-managed) projects accept "shared" or "per-agent" (empty
+	// private directory per agent). Absent means no label (non-git: shared).
+	// Unknown values and worktree-per-agent without a git remote are 400s; a
+	// raw Labels entry for the key must match this field (or is stripped when
+	// this field is empty).
+	WorkspaceMode string            `json:"workspaceMode,omitempty"`
 	Labels        map[string]string `json:"labels,omitempty"`
 	GitHubToken   string            `json:"githubToken,omitempty"`
 }
@@ -308,6 +316,16 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 
 	normalizedRemote := util.NormalizeGitRemote(req.GitRemote)
 
+	// Workspace mode is create-only and server-owned: validate the requested
+	// mode against the project's git-ness and set the label only from the
+	// validated field (design #2703 §2.4).
+	labels, err := resolveCreateWorkspaceModeLabels(req.WorkspaceMode, req.Labels, normalizedRemote != "")
+	if err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
+	req.Labels = labels
+
 	// Idempotency: if we have a client-provided ID, check for existing project
 	if req.ID != "" {
 		existing, err := s.store.GetProject(ctx, req.ID)
@@ -358,17 +376,6 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	displayName := req.Name
 	if slug != baseSlug {
 		displayName = api.DisplayNameWithSerial(req.Name, slug, baseSlug)
-	}
-
-	// Apply workspace mode label for git projects with explicit workspace mode.
-	if normalizedRemote != "" {
-		switch req.WorkspaceMode {
-		case store.WorkspaceModeShared, store.WorkspaceModePerAgent, store.WorkspaceModeWorktreePerAgent:
-			if req.Labels == nil {
-				req.Labels = make(map[string]string)
-			}
-			req.Labels[store.LabelWorkspaceMode] = req.WorkspaceMode
-		}
 	}
 
 	project := &store.Project{
@@ -684,6 +691,19 @@ func (s *Server) createProjectOwnerRoleBinding(ctx context.Context, projectID, u
 }
 
 const systemProjectMembersGroupAnnotation = "scion.io/project-members-group"
+
+// legacyProjectMembersGroupAnnotation is the project-members-group marker
+// written by the entadapter marker backfill
+// (BackfillProjectMembersGroupMarkers). It differs from
+// systemProjectMembersGroupAnnotation, the key createProjectMembersGroup
+// writes; ptone/scion#2556 tracks that mismatch. Until it is resolved, the
+// owner-clearing backfill matches either key.
+//
+// This literal duplicates the entadapter constant
+// systemProjectMembersGroupAnnotation in pkg/store/entadapter/composite.go;
+// fold the two together under ptone/scion#2556.
+const legacyProjectMembersGroupAnnotation = "scion.io/system-project-members-group"
+
 const systemProjectAgentsGroupAnnotation = "scion.io/project-agents-group"
 
 func projectMembersGroupSlug(projectSlug string) string {
@@ -695,6 +715,58 @@ func isSystemProjectMembersGroup(group *store.Group, projectID string) bool {
 		group.ProjectID == projectID &&
 		group.Annotations != nil &&
 		group.Annotations[systemProjectMembersGroupAnnotation] == "true"
+}
+
+// hasProjectMembersGroupMarker reports whether g carries either
+// project-members-group marker key and belongs to any project. It is used by
+// the owner-clearing backfill and the group PATCH guards.
+//
+// Its semantics differ from isSystemProjectMembersGroup on purpose:
+// isSystemProjectMembersGroup matches only the hub key
+// (systemProjectMembersGroupAnnotation) for one specific project, and
+// decides whether createProjectMembersGroup may adopt a group. This
+// predicate matches either key (see legacyProjectMembersGroupAnnotation)
+// for any project, so groups marked only by the entadapter backfill are
+// still protected. Fold the two together once the key mismatch is resolved
+// (ptone/scion#2556).
+func hasProjectMembersGroupMarker(g *store.Group) bool {
+	if g == nil || g.ProjectID == "" || g.Annotations == nil {
+		return false
+	}
+	return g.Annotations[systemProjectMembersGroupAnnotation] == "true" ||
+		g.Annotations[legacyProjectMembersGroupAnnotation] == "true"
+}
+
+// changesProjectMembersGroupMarker reports whether replacing the stored
+// annotations with patched would remove, add or change the value of either
+// project-members-group marker key.
+func changesProjectMembersGroupMarker(stored, patched map[string]string) bool {
+	for _, key := range []string{systemProjectMembersGroupAnnotation, legacyProjectMembersGroupAnnotation} {
+		sv, sok := stored[key]
+		pv, pok := patched[key]
+		if sok != pok || sv != pv {
+			return true
+		}
+	}
+	return false
+}
+
+// setsProjectMembersGroupMarkerKey reports whether replacing the stored
+// annotations with patched would add either project-members-group marker key
+// or change its value. Unlike changesProjectMembersGroupMarker it ignores the
+// removal of a key, so a PATCH may still drop a stray non-marking value from
+// an unmarked group.
+func setsProjectMembersGroupMarkerKey(stored, patched map[string]string) bool {
+	for _, key := range []string{systemProjectMembersGroupAnnotation, legacyProjectMembersGroupAnnotation} {
+		pv, pok := patched[key]
+		if !pok {
+			continue
+		}
+		if sv, sok := stored[key]; !sok || sv != pv {
+			return true
+		}
+	}
+	return false
 }
 
 func isSystemProjectAgentsGroup(group *store.Group, projectID string) bool {
@@ -726,21 +798,19 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 		Slug:      membersSlug,
 		GroupType: store.GroupTypeExplicit,
 		ProjectID: project.ID,
-		OwnerID:   project.OwnerID,
+		// OwnerID is deliberately left empty (ptone/scion#2599). The
+		// owner/user/group relationship row grants group.* to Group.OwnerID,
+		// and Project.OwnerID is display metadata that confers no authority
+		// (ptone/scion#2586). Copying it here would let a creator removed
+		// without an ownership transfer keep managing the members group.
+		// Members are managed through the project members endpoints;
+		// mutating this group through the group API is hub-admin-only.
 		CreatedBy: project.CreatedBy,
 		Annotations: map[string]string{
 			systemProjectMembersGroupAnnotation: "true",
 		},
 	}
 	createErr := s.store.CreateGroup(ctx, membersGroup)
-	if createErr != nil && errors.Is(createErr, store.ErrInvalidInput) && membersGroup.OwnerID != "" {
-		// FK violation: the owner user does not exist in the store. Retry
-		// without OwnerID so the group is still created for collaboration.
-		s.projectsLogger().Warn("project members group owner not found, retrying without owner",
-			"project_id", project.ID, "owner_id", membersGroup.OwnerID, "error", createErr.Error())
-		membersGroup.OwnerID = ""
-		createErr = s.store.CreateGroup(ctx, membersGroup)
-	}
 	if createErr != nil {
 		if !errors.Is(createErr, store.ErrAlreadyExists) {
 			s.projectsLogger().Warn("failed to create project members group", "project_id", project.ID, "error", createErr.Error())
@@ -762,15 +832,10 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 					"project_id", project.ID, "slug", membersSlug, "group", existing.ID)
 				return
 			} else {
+				// Adopt the existing group as is. Its OwnerID is never
+				// (re)filled from Project.OwnerID (ptone/scion#2599); the
+				// startup backfill clears any legacy value.
 				membersGroup = existing
-				// Update the owner in case it changed.
-				if membersGroup.OwnerID == "" && project.OwnerID != "" {
-					membersGroup.OwnerID = project.OwnerID
-					if updateErr := s.store.UpdateGroup(ctx, membersGroup); updateErr != nil {
-						s.projectsLogger().Warn("failed to update existing project members group",
-							"project_id", project.ID, "slug", membersSlug, "error", updateErr.Error())
-					}
-				}
 			}
 		}
 	} else {
@@ -1001,9 +1066,9 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 	// Build clone URL from the project's git remote.
 	// The clone-url label may be an explicit override (e.g. local path for testing).
 	// Only convert to HTTPS if the URL looks like a remote git URL.
-	cloneURL := resolveCloneURL(project.Labels["scion.dev/clone-url"], project.GitRemote)
+	cloneURL := resolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
 
-	defaultBranch := project.Labels["scion.dev/default-branch"]
+	defaultBranch := project.Labels[store.LabelDefaultBranch]
 	if defaultBranch == "" {
 		defaultBranch = "main"
 	}
@@ -1134,8 +1199,12 @@ func (s *Server) syncWorkspaceOnStop(ctx context.Context, agent *store.Agent) {
 	}
 
 	project, err := s.store.GetProject(ctx, agent.ProjectID)
-	if err != nil || (project.GitRemote != "" && !project.IsSharedWorkspace()) {
-		return // Not hub-native/shared-workspace or project not found
+	if err != nil || !syncsHubProjectWorkspace(project) {
+		// Project not found, not hub-native/shared-workspace, or
+		// empty-per-agent: an empty-per-agent agent's directory is private
+		// and broker-local, and syncing it would overwrite the project's
+		// hub workspace (design #2703).
+		return
 	}
 
 	// Check if broker is co-located (embedded or has local path)
@@ -1213,6 +1282,13 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	}
 
 	normalizedRemote := util.NormalizeGitRemote(req.GitRemote)
+
+	// The workspace-mode label is server-owned (design #2703 §2.4): reject
+	// values register cannot honour before any lookup or mutation.
+	if err := resolveRegisterWorkspaceModeLabels(req.Labels, normalizedRemote != ""); err != nil {
+		ValidationError(w, err.Error(), nil)
+		return
+	}
 
 	// Try to find existing project
 	var project *store.Project
@@ -2290,7 +2366,7 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 		scopeCap = s.authzService.ComputeScopeCapabilities(ctx, identity, "project", projectID, "agent")
 	}
 
-	writeJSON(w, http.StatusOK, ListAgentsResponse{
+	writeAgentList(w, legacyAgentListView(query), ListAgentsResponse{
 		Agents:       agents,
 		NextCursor:   result.NextCursor,
 		TotalCount:   result.TotalCount,
@@ -2746,7 +2822,15 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request, id string
 		}
 	}
 	if updates.Labels != nil {
-		project.Labels = updates.Labels
+		// PATCH replaces the labels map wholesale; keep the server-owned
+		// workspace-mode label and refuse attempts to change it (design
+		// #2703 §2.4 / D6).
+		merged, err := mergePatchWorkspaceModeLabel(project.Labels, updates.Labels)
+		if err != nil {
+			ValidationError(w, err.Error(), nil)
+			return
+		}
+		project.Labels = merged
 	}
 	if updates.DefaultRuntimeBrokerID != "" {
 		project.DefaultRuntimeBrokerID = updates.DefaultRuntimeBrokerID

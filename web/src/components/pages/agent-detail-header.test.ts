@@ -170,6 +170,41 @@ describe('agent detail header actions order', () => {
     expect(message.querySelector(':scope > sl-button')!.hasAttribute('disabled')).toBe(true);
   });
 
+  // The configure page carries the Timezone row, which works in any phase,
+  // so Configure shows whenever the caller may update the agent.
+  it('shows Configure for a running agent with update capability', () => {
+    expect(
+      headerActionLabels(
+        makeAgent({
+          phase: 'running',
+          _capabilities: { actions: ['read', 'lifecycle', 'attach', 'update', 'delete'] },
+        })
+      )
+    ).toEqual([GRAPH, 'Message', 'Terminal', 'Suspend', 'Stop', 'Configure', 'trash']);
+  });
+
+  it.each(['stopped', 'suspended', 'error'] as const)(
+    'shows Configure for a %s agent with update capability',
+    (phase) => {
+      const labels = headerActionLabels(
+        makeAgent({ phase, _capabilities: { actions: ['read', 'lifecycle', 'update'] } })
+      );
+      expect(labels).toContain('Configure');
+    }
+  );
+
+  it('hides Configure for a running agent without update capability', () => {
+    const labels = headerActionLabels(makeAgent({ phase: 'running' }));
+    expect(labels).not.toContain('Configure');
+  });
+
+  it('links Configure to the agent configure page', () => {
+    const actions = renderHeaderActions(
+      makeAgent({ phase: 'running', _capabilities: { actions: ['read', 'update'] } })
+    );
+    expect(actions.querySelector('a[href="/agents/a-1/configure"]')).not.toBeNull();
+  });
+
   it('puts the graph link first even with no other actions permitted', () => {
     expect(
       headerActionLabels(makeAgent({ phase: 'running', _capabilities: { actions: ['read'] } }))

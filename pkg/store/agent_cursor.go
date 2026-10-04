@@ -52,8 +52,8 @@ func EncodeAgentCursor(sort, dir string, k, created time.Time, id, binding strin
 		agentCursorV2Prefix,
 		sort,
 		dir,
-		k.Format(time.RFC3339Nano),
-		created.Format(time.RFC3339Nano),
+		k.UTC().Format(time.RFC3339Nano),
+		created.UTC().Format(time.RFC3339Nano),
 		id,
 		binding,
 	}, ",")

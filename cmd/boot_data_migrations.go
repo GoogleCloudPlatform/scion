@@ -75,6 +75,7 @@ func runBootDataMigrations(ctx context.Context, s store.Store) {
 		runMigrationSafe(ctx, s, "Broker ownership backfill", runBrokerOwnershipBackfill)                        // legacy ownerless runtime brokers
 		runMigrationSafe(ctx, s, "Non-agent dispatch_state backfill", runNonAgentDispatchStateBackfill)          // nc-promote-busy
 		runMigrationSafe(ctx, s, "Broker quota bindings to settings", runBrokerQuotaBindingsToSettingsMigration) // ptone/scion#2061 P2-D4
+		runMigrationSafe(ctx, s, "Empty-per-agent legacy report", reportEmptyPerAgentProjects)                   // ptone/scion#2703, read-only
 	})
 
 	// Split the residual report into reachable/unreachable (M6, §4.6).
@@ -284,14 +285,25 @@ func runMessageBackfill(ctx context.Context, s store.Store) {
 		}
 	}
 
+	attempted := 0
 	for _, pid := range projectIDs {
 		if doneSet[pid] {
 			continue
 		}
 
+		// Stop at once on shutdown: every further project would fail
+		// immediately with the context error and log it.
+		if ctx.Err() != nil {
+			return
+		}
+
 		// Check budget BEFORE starting the project, so we don't begin
-		// work we can't finish within the budget.
-		if time.Now().After(deadline) {
+		// work we can't finish within the budget. The first project
+		// attempted on each boot is exempt: otherwise a boot whose budget
+		// lapses before its first check (a starved host, or a tiny budget)
+		// makes no progress at all, and repeated boots never converge.
+		// Running one project per boot guarantees monotonic progress.
+		if attempted > 0 && time.Now().After(deadline) {
 			slog.Error("Message backfill: time budget exhausted; will resume next boot",
 				"budget", budget.String(),
 				"projects_remaining", countRemaining(projectIDs, doneSet),
@@ -299,6 +311,7 @@ func runMessageBackfill(ctx context.Context, s store.Store) {
 			return
 		}
 
+		attempted++
 		projectStart := time.Now()
 		result, runErr := runBackfillForProject(ctx, s, pid)
 

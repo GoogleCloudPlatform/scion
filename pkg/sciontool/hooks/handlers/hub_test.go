@@ -5,20 +5,25 @@ Copyright 2025 The Scion Authors.
 package handlers
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/dialects"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 )
 
 // scrubHubEnv clears all Hub-related environment variables for the
@@ -644,125 +649,340 @@ func TestHubHandler_ModeBehavior(t *testing.T) {
 	})
 }
 
-// TestHubHandler_AssistantTextForwarding tests that agent-end events with
-// AssistantText forward the text to the outbound-message endpoint, and that
-// very large texts are truncated.
-func TestHubHandler_AssistantTextForwarding(t *testing.T) {
-	t.Run("forwards assistant text to outbound-message endpoint", func(t *testing.T) {
-		tmpHome := t.TempDir()
-		t.Setenv("HOME", tmpHome)
+// fakeHub is a test Hub that mirrors the real hub's outbound-message
+// contract: a request naming no addressee (recipient, recipient_id or
+// conversation_ref) is rejected with 400, as resolveOutboundRouting does.
+// GET /api/v1/agents/{id} returns the configured creator attribution.
+// outboundStatus, when set, scripts the status (and Retry-After) of
+// successive outbound-message requests before falling back to 200.
+type fakeHub struct {
+	t *testing.T
 
-		var mu sync.Mutex
-		var outboundMsg string
-		var outboundType string
-		statusCalls := 0
+	createdBy string
+	ancestry  []string
+	selfFail  bool
 
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			mu.Lock()
-			defer mu.Unlock()
+	mu             sync.Mutex
+	outbound       []map[string]interface{} // accepted outbound-message payloads
+	outboundCalls  int                      // all outbound-message requests, including rejected ones
+	rejected400    int
+	statusCalls    int
+	selfCalls      int
+	outboundScript []fakeResponse
+}
 
-			var payload map[string]interface{}
-			_ = json.NewDecoder(r.Body).Decode(&payload)
+type fakeResponse struct {
+	status     int
+	retryAfter string
+	body       string
+}
 
-			if msg, ok := payload["msg"].(string); ok {
-				// outbound-message endpoint
-				outboundMsg = msg
-				outboundType, _ = payload["type"].(string)
-			} else {
-				// status endpoint
-				statusCalls++
-			}
+func newFakeHub(t *testing.T, createdBy string, ancestry ...string) *fakeHub {
+	return &fakeHub{t: t, createdBy: createdBy, ancestry: ancestry}
+}
 
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{}`))
-		}))
-		defer server.Close()
+func (f *fakeHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 
-		// Clear real Hub env, then point at the test server (issue #123).
-		scrubHubEnv(t)
-		t.Setenv("SCION_HUB_ENDPOINT", server.URL)
-		t.Setenv("SCION_AUTH_TOKEN", "test-token")
-		t.Setenv("SCION_AGENT_ID", "test-agent-id")
-
-		handler := NewHubHandler()
-		if handler == nil {
-			t.Fatal("Expected handler to be created")
+	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/agents/test-agent-id":
+		f.selfCalls++
+		if f.selfFail {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
 		}
-
-		err := handler.Handle(&hooks.Event{
-			Name: hooks.EventAgentEnd,
-			Data: hooks.EventData{AssistantText: "Hello from the agent"},
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"id": "test-agent-id", "createdBy": f.createdBy, "ancestry": f.ancestry,
 		})
-		if err != nil {
+	case r.Method == http.MethodPost && r.URL.Path == "/api/v1/agents/test-agent-id/outbound-message":
+		f.outboundCalls++
+		var payload map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		if len(f.outboundScript) > 0 {
+			next := f.outboundScript[0]
+			f.outboundScript = f.outboundScript[1:]
+			if next.retryAfter != "" {
+				w.Header().Set("Retry-After", next.retryAfter)
+			}
+			w.WriteHeader(next.status)
+			_, _ = w.Write([]byte(next.body))
+			return
+		}
+		recipient, _ := payload["recipient"].(string)
+		recipientID, _ := payload["recipient_id"].(string)
+		convRef, _ := payload["conversation_ref"].(string)
+		if recipient == "" && recipientID == "" && convRef == "" {
+			f.rejected400++
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"code":"validation_error","message":"recipient is required"}}`))
+			return
+		}
+		f.outbound = append(f.outbound, payload)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	case r.Method == http.MethodPost && r.URL.Path == "/api/v1/agents/test-agent-id/status":
+		f.statusCalls++
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	default:
+		f.t.Errorf("fakeHub: unexpected request %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+// start points the hub client env at f and returns a HubHandler.
+func (f *fakeHub) start() *HubHandler {
+	f.t.Helper()
+	f.t.Setenv("HOME", f.t.TempDir())
+	server := httptest.NewServer(f)
+	f.t.Cleanup(server.Close)
+
+	// Clear real Hub env, then point at the test server (issue #123).
+	scrubHubEnv(f.t)
+	f.t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+	f.t.Setenv("SCION_AUTH_TOKEN", "test-token")
+	f.t.Setenv("SCION_AGENT_ID", "test-agent-id")
+
+	handler := NewHubHandler()
+	if handler == nil {
+		f.t.Fatal("Expected handler to be created")
+	}
+	return handler
+}
+
+func (f *fakeHub) counts() (selfCalls, outboundCalls, accepted int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.selfCalls, f.outboundCalls, len(f.outbound)
+}
+
+// lastOutbound returns the single accepted outbound payload, failing the
+// test unless exactly one was accepted and none was rejected.
+func (f *fakeHub) lastOutbound() map[string]interface{} {
+	f.t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.rejected400 != 0 {
+		f.t.Fatalf("hub rejected %d outbound message(s) with 400 (no addressee)", f.rejected400)
+	}
+	if len(f.outbound) != 1 {
+		f.t.Fatalf("Expected exactly 1 accepted outbound message, got %d", len(f.outbound))
+	}
+	return f.outbound[0]
+}
+
+const testCreatorUserID = "11111111-1111-1111-1111-111111111111"
+
+func agentEndWithText(text string) *hooks.Event {
+	return &hooks.Event{Name: hooks.EventAgentEnd, Data: hooks.EventData{AssistantText: text}}
+}
+
+// TestHubHandler_AssistantTextForwarding tests that agent-end events with
+// AssistantText forward the text to the outbound-message endpoint addressed
+// to the agent's creator, and that very large texts are truncated.
+func TestHubHandler_AssistantTextForwarding(t *testing.T) {
+	t.Run("forwards assistant text to the creator", func(t *testing.T) {
+		fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
+		handler := fh.start()
+
+		if err := handler.Handle(agentEndWithText("Hello from the agent")); err != nil {
 			t.Fatalf("Handle returned error: %v", err)
 		}
 
-		mu.Lock()
-		defer mu.Unlock()
-		if outboundMsg != "Hello from the agent" {
-			t.Errorf("Expected outbound msg %q, got %q", "Hello from the agent", outboundMsg)
+		payload := fh.lastOutbound()
+		if payload["msg"] != "Hello from the agent" {
+			t.Errorf("Expected outbound msg %q, got %v", "Hello from the agent", payload["msg"])
 		}
-		if outboundType != "assistant-reply" {
-			t.Errorf("Expected outbound type %q, got %q", "assistant-reply", outboundType)
+		if payload["type"] != "assistant-reply" {
+			t.Errorf("Expected outbound type %q, got %v", "assistant-reply", payload["type"])
 		}
-		if statusCalls != 1 {
-			t.Errorf("Expected 1 status call (working), got %d", statusCalls)
+		if payload["recipient_id"] != testCreatorUserID {
+			t.Errorf("Expected recipient_id %q (the creator), got %v", testCreatorUserID, payload["recipient_id"])
+		}
+		fh.mu.Lock()
+		defer fh.mu.Unlock()
+		if fh.statusCalls != 1 {
+			t.Errorf("Expected 1 status call (working), got %d", fh.statusCalls)
+		}
+	})
+
+	t.Run("skips the mirror when the creator is an agent", func(t *testing.T) {
+		// Agent-created agent: CreatedBy is the parent agent, ancestry is
+		// [root user, parent agent].
+		fh := newFakeHub(t, "parent-agent-id", testCreatorUserID, "parent-agent-id")
+		handler := fh.start()
+
+		if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+		fh.mu.Lock()
+		defer fh.mu.Unlock()
+		if fh.outboundCalls != 0 {
+			t.Errorf("Expected no outbound-message request, got %d", fh.outboundCalls)
+		}
+		if fh.statusCalls != 1 {
+			t.Errorf("Expected the status update to still be sent, got %d calls", fh.statusCalls)
+		}
+	})
+
+	t.Run("skips the mirror when the creator is unknown", func(t *testing.T) {
+		fh := newFakeHub(t, "")
+		handler := fh.start()
+
+		if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+		fh.mu.Lock()
+		defer fh.mu.Unlock()
+		if fh.outboundCalls != 0 {
+			t.Errorf("Expected no outbound-message request, got %d", fh.outboundCalls)
+		}
+	})
+
+	t.Run("skips the mirror when the agent lookup fails", func(t *testing.T) {
+		fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
+		fh.selfFail = true
+		handler := fh.start()
+
+		if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+		fh.mu.Lock()
+		defer fh.mu.Unlock()
+		if fh.outboundCalls != 0 {
+			t.Errorf("Expected no outbound-message request, got %d", fh.outboundCalls)
+		}
+		if fh.statusCalls != 1 {
+			t.Errorf("Expected the status update to still be sent, got %d calls", fh.statusCalls)
 		}
 	})
 
 	t.Run("truncates assistant text to the hub message limit", func(t *testing.T) {
-		tmpHome := t.TempDir()
-		t.Setenv("HOME", tmpHome)
-
-		var mu sync.Mutex
-		var outboundMsg string
-
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			mu.Lock()
-			defer mu.Unlock()
-
-			var payload map[string]interface{}
-			_ = json.NewDecoder(r.Body).Decode(&payload)
-
-			if msg, ok := payload["msg"].(string); ok {
-				outboundMsg = msg
-			}
-
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{}`))
-		}))
-		defer server.Close()
-
-		// Clear real Hub env, then point at the test server (issue #123).
-		scrubHubEnv(t)
-		t.Setenv("SCION_HUB_ENDPOINT", server.URL)
-		t.Setenv("SCION_AUTH_TOKEN", "test-token")
-		t.Setenv("SCION_AGENT_ID", "test-agent-id")
-
-		handler := NewHubHandler()
-		if handler == nil {
-			t.Fatal("Expected handler to be created")
-		}
+		fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
+		handler := fh.start()
 
 		bigText := strings.Repeat("A", messages.MaxMessageLength*4)
-
-		err := handler.Handle(&hooks.Event{
-			Name: hooks.EventAgentEnd,
-			Data: hooks.EventData{AssistantText: bigText},
-		})
-		if err != nil {
+		if err := handler.Handle(agentEndWithText(bigText)); err != nil {
 			t.Fatalf("Handle returned error: %v", err)
 		}
 
-		mu.Lock()
-		defer mu.Unlock()
-
+		outboundMsg, _ := fh.lastOutbound()["msg"].(string)
 		// Runes, not bytes: this is the unit the hub rejects on.
 		if got := utf8.RuneCountInString(outboundMsg); got > messages.MaxMessageLength {
 			t.Errorf("Expected outbound msg to be at most %d runes, got %d", messages.MaxMessageLength, got)
 		}
 		if !strings.Contains(outboundMsg, "[truncated,") {
 			t.Error("Expected the truncated message to carry a marker saying how much went")
+		}
+	})
+}
+
+// TestHubHandler_AssistantReplyRateLimitRetry pins ptone/scion#1065: a 429
+// on the assistant-reply mirror is retried once when its Retry-After fits in
+// the hook's budget, and not at all otherwise.
+func TestHubHandler_AssistantReplyRateLimitRetry(t *testing.T) {
+	t.Run("short Retry-After: one retry, then success", func(t *testing.T) {
+		fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
+		fh.outboundScript = []fakeResponse{{status: http.StatusTooManyRequests, retryAfter: "2"}}
+		handler := fh.start()
+		var waits []time.Duration
+		handler.wait = func(_ context.Context, d time.Duration) error {
+			waits = append(waits, d) // observe, don't sleep
+			return nil
+		}
+
+		if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+		if len(waits) != 1 || waits[0] != 2*time.Second {
+			t.Errorf("Expected one wait of Retry-After (2s), got %v", waits)
+		}
+		payload := fh.lastOutbound()
+		if payload["msg"] != "Hello" {
+			t.Errorf("Expected the retried message to be delivered, got %v", payload["msg"])
+		}
+		fh.mu.Lock()
+		defer fh.mu.Unlock()
+		if fh.outboundCalls != 2 {
+			t.Errorf("Expected exactly 2 outbound requests (one retry), got %d", fh.outboundCalls)
+		}
+		if fh.statusCalls != 1 {
+			t.Errorf("Expected the status update to still be sent, got %d calls", fh.statusCalls)
+		}
+	})
+
+	t.Run("retry budget is the mirror's, not the whole hook's", func(t *testing.T) {
+		// 3s + retryReserve fits the 5s hook budget but not mirrorBudget.
+		fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
+		fh.outboundScript = []fakeResponse{{status: http.StatusTooManyRequests, retryAfter: "3"}}
+		handler := fh.start()
+		handler.wait = func(context.Context, time.Duration) error {
+			t.Error("Expected no wait: Retry-After exceeds the mirror budget")
+			return nil
+		}
+
+		if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+		_, outbound, _ := fh.counts()
+		if outbound != 1 {
+			t.Errorf("Expected exactly 1 outbound request, got %d", outbound)
+		}
+	})
+
+	t.Run("long Retry-After: no retry", func(t *testing.T) {
+		fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
+		fh.outboundScript = []fakeResponse{{status: http.StatusTooManyRequests, retryAfter: "30"}}
+		handler := fh.start()
+
+		start := time.Now()
+		if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Errorf("Expected an immediate give-up, took %s", elapsed)
+		}
+		fh.mu.Lock()
+		defer fh.mu.Unlock()
+		if fh.outboundCalls != 1 {
+			t.Errorf("Expected exactly 1 outbound request (no retry), got %d", fh.outboundCalls)
+		}
+	})
+
+	t.Run("429 without Retry-After: no retry", func(t *testing.T) {
+		fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
+		fh.outboundScript = []fakeResponse{{status: http.StatusTooManyRequests}}
+		handler := fh.start()
+
+		if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+		fh.mu.Lock()
+		defer fh.mu.Unlock()
+		if fh.outboundCalls != 1 {
+			t.Errorf("Expected exactly 1 outbound request, got %d", fh.outboundCalls)
+		}
+	})
+
+	t.Run("retry is attempted once only", func(t *testing.T) {
+		fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
+		fh.outboundScript = []fakeResponse{
+			{status: http.StatusTooManyRequests, retryAfter: "0"},
+			{status: http.StatusTooManyRequests, retryAfter: "0"},
+		}
+		handler := fh.start()
+
+		if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+		fh.mu.Lock()
+		defer fh.mu.Unlock()
+		if fh.outboundCalls != 2 {
+			t.Errorf("Expected exactly 2 outbound requests, got %d", fh.outboundCalls)
+		}
+		if len(fh.outbound) != 0 {
+			t.Errorf("Expected nothing delivered, got %d", len(fh.outbound))
 		}
 	})
 }
@@ -832,53 +1052,14 @@ func TestTruncateAssistantText(t *testing.T) {
 // assistant-reply messages include content classification metadata.
 func TestHubHandler_AssistantTextMetadataTagging(t *testing.T) {
 	t.Run("tags outbound message with metadata", func(t *testing.T) {
-		tmpHome := t.TempDir()
-		t.Setenv("HOME", tmpHome)
+		fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
+		handler := fh.start()
 
-		var mu sync.Mutex
-		var outboundPayload map[string]interface{}
-
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			mu.Lock()
-			defer mu.Unlock()
-
-			var payload map[string]interface{}
-			_ = json.NewDecoder(r.Body).Decode(&payload)
-
-			if _, ok := payload["msg"]; ok {
-				outboundPayload = payload
-			}
-
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{}`))
-		}))
-		defer server.Close()
-
-		// Clear real Hub env, then point at the test server (issue #123).
-		scrubHubEnv(t)
-		t.Setenv("SCION_HUB_ENDPOINT", server.URL)
-		t.Setenv("SCION_AUTH_TOKEN", "test-token")
-		t.Setenv("SCION_AGENT_ID", "test-agent-id")
-
-		handler := NewHubHandler()
-		if handler == nil {
-			t.Fatal("Expected handler to be created")
-		}
-
-		err := handler.Handle(&hooks.Event{
-			Name: hooks.EventAgentEnd,
-			Data: hooks.EventData{AssistantText: "Agent response"},
-		})
-		if err != nil {
+		if err := handler.Handle(agentEndWithText("Agent response")); err != nil {
 			t.Fatalf("Handle returned error: %v", err)
 		}
 
-		mu.Lock()
-		defer mu.Unlock()
-
-		if outboundPayload == nil {
-			t.Fatal("Expected outbound message to be sent")
-		}
+		outboundPayload := fh.lastOutbound()
 		// visibility field has been removed from outbound messages
 		if _, hasVis := outboundPayload["visibility"]; hasVis {
 			t.Errorf("Expected visibility field to be absent, got %v", outboundPayload["visibility"])
@@ -893,38 +1074,8 @@ func TestHubHandler_AssistantTextMetadataTagging(t *testing.T) {
 	})
 
 	t.Run("sets has_thinking metadata when thinking content was filtered", func(t *testing.T) {
-		tmpHome := t.TempDir()
-		t.Setenv("HOME", tmpHome)
-
-		var mu sync.Mutex
-		var outboundPayload map[string]interface{}
-
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			mu.Lock()
-			defer mu.Unlock()
-
-			var payload map[string]interface{}
-			_ = json.NewDecoder(r.Body).Decode(&payload)
-
-			if _, ok := payload["msg"]; ok {
-				outboundPayload = payload
-			}
-
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{}`))
-		}))
-		defer server.Close()
-
-		// Clear real Hub env, then point at the test server (issue #123).
-		scrubHubEnv(t)
-		t.Setenv("SCION_HUB_ENDPOINT", server.URL)
-		t.Setenv("SCION_AUTH_TOKEN", "test-token")
-		t.Setenv("SCION_AGENT_ID", "test-agent-id")
-
-		handler := NewHubHandler()
-		if handler == nil {
-			t.Fatal("Expected handler to be created")
-		}
+		fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
+		handler := fh.start()
 
 		err := handler.Handle(&hooks.Event{
 			Name: hooks.EventAgentEnd,
@@ -942,13 +1093,7 @@ func TestHubHandler_AssistantTextMetadataTagging(t *testing.T) {
 			t.Fatalf("Handle returned error: %v", err)
 		}
 
-		mu.Lock()
-		defer mu.Unlock()
-
-		if outboundPayload == nil {
-			t.Fatal("Expected outbound message to be sent")
-		}
-		metadata, ok := outboundPayload["metadata"].(map[string]interface{})
+		metadata, ok := fh.lastOutbound()["metadata"].(map[string]interface{})
 		if !ok {
 			t.Fatal("Expected metadata to be present")
 		}
@@ -976,5 +1121,249 @@ func TestTruncateMessage(t *testing.T) {
 		if result != tt.expected {
 			t.Errorf("truncateMessage(%q, %d) = %q, want %q", tt.input, tt.maxLen, result, tt.expected)
 		}
+	}
+}
+
+// TestHubHandler_AssistantReplyAddresseeCache pins that the resolved
+// addressee (or the decision to skip) is cached in the agent home after the
+// first successful lookup, while lookup failures are not cached.
+func TestHubHandler_AssistantReplyAddresseeCache(t *testing.T) {
+	cachePath := func() string { return filepath.Join(os.Getenv("HOME"), addresseeCacheFile) }
+
+	t.Run("resolved addressee is cached and reused", func(t *testing.T) {
+		fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
+		handler := fh.start()
+
+		for i := 0; i < 3; i++ {
+			if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+				t.Fatalf("Handle returned error: %v", err)
+			}
+		}
+		self, outbound, accepted := fh.counts()
+		if self != 1 {
+			t.Errorf("Expected 1 agent lookup across 3 Stop events, got %d", self)
+		}
+		if outbound != 3 || accepted != 3 {
+			t.Errorf("Expected 3 delivered replies, got %d requests / %d accepted", outbound, accepted)
+		}
+		c, ok := readAddresseeCache(cachePath(), "test-agent-id")
+		if !ok || c.RecipientID != testCreatorUserID {
+			t.Errorf("Expected cache to hold %q, got %+v ok=%v", testCreatorUserID, c, ok)
+		}
+		info, err := os.Stat(cachePath())
+		if err != nil {
+			t.Fatalf("stat cache: %v", err)
+		}
+		if perm := info.Mode().Perm(); perm != 0600 {
+			t.Errorf("Expected cache mode 0600, got %o", perm)
+		}
+	})
+
+	t.Run("skip decision is cached", func(t *testing.T) {
+		fh := newFakeHub(t, "parent-agent-id", testCreatorUserID, "parent-agent-id")
+		handler := fh.start()
+
+		for i := 0; i < 2; i++ {
+			if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+				t.Fatalf("Handle returned error: %v", err)
+			}
+		}
+		self, outbound, _ := fh.counts()
+		if self != 1 {
+			t.Errorf("Expected 1 agent lookup, got %d", self)
+		}
+		if outbound != 0 {
+			t.Errorf("Expected no outbound requests, got %d", outbound)
+		}
+		c, ok := readAddresseeCache(cachePath(), "test-agent-id")
+		if !ok || c.RecipientID != "" {
+			t.Errorf("Expected a cached skip, got %+v ok=%v", c, ok)
+		}
+	})
+
+	t.Run("lookup failure is not cached", func(t *testing.T) {
+		fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
+		fh.selfFail = true
+		handler := fh.start()
+
+		if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+		if _, err := os.Stat(cachePath()); !os.IsNotExist(err) {
+			t.Fatalf("Expected no cache file after a failed lookup, stat err=%v", err)
+		}
+
+		fh.mu.Lock()
+		fh.selfFail = false
+		fh.mu.Unlock()
+		if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+		self, _, accepted := fh.counts()
+		if self != 2 {
+			t.Errorf("Expected the lookup to be retried on the next Stop (2 lookups), got %d", self)
+		}
+		if accepted != 1 {
+			t.Errorf("Expected 1 delivered reply after recovery, got %d", accepted)
+		}
+	})
+
+	t.Run("pre-existing cache is used without a lookup", func(t *testing.T) {
+		fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
+		handler := fh.start()
+		const cachedID = "22222222-2222-2222-2222-222222222222"
+		writeAddresseeCache(cachePath(), addresseeCache{AgentID: "test-agent-id", RecipientID: cachedID})
+
+		if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+		if self, _, _ := fh.counts(); self != 0 {
+			t.Errorf("Expected no agent lookup, got %d", self)
+		}
+		if got := fh.lastOutbound()["recipient_id"]; got != cachedID {
+			t.Errorf("Expected recipient_id from cache %q, got %v", cachedID, got)
+		}
+	})
+
+	for name, content := range map[string]string{
+		"corrupt cache is ignored and rewritten": "{not json",
+		"empty cache is ignored and rewritten":   "",
+		"other agent's cache is ignored":         `{"agentId":"someone-else","recipientId":"33333333-3333-3333-3333-333333333333"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
+			handler := fh.start()
+			if err := os.WriteFile(cachePath(), []byte(content), 0600); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+				t.Fatalf("Handle returned error: %v", err)
+			}
+			if self, _, _ := fh.counts(); self != 1 {
+				t.Errorf("Expected a fresh lookup, got %d", self)
+			}
+			if got := fh.lastOutbound()["recipient_id"]; got != testCreatorUserID {
+				t.Errorf("Expected recipient_id %q, got %v", testCreatorUserID, got)
+			}
+			c, ok := readAddresseeCache(cachePath(), "test-agent-id")
+			if !ok || c.RecipientID != testCreatorUserID {
+				t.Errorf("Expected cache rewritten with %q, got %+v ok=%v", testCreatorUserID, c, ok)
+			}
+		})
+	}
+
+	t.Run("symlinked cache is not followed", func(t *testing.T) {
+		fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
+		handler := fh.start()
+		target := filepath.Join(t.TempDir(), "elsewhere.json")
+		if err := os.WriteFile(target, []byte(`{"agentId":"test-agent-id","recipientId":"44444444-4444-4444-4444-444444444444"}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, cachePath()); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+		if got := fh.lastOutbound()["recipient_id"]; got != testCreatorUserID {
+			t.Errorf("Expected the symlinked cache to be ignored, got recipient_id %v", got)
+		}
+		data, _ := os.ReadFile(target)
+		if !strings.Contains(string(data), "4444") {
+			t.Error("Expected the symlink target to be left untouched")
+		}
+	})
+}
+
+func TestRetryAfterWithinBudget(t *testing.T) {
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	rateLimited := func(d time.Duration) error {
+		return &hub.HTTPStatusError{StatusCode: http.StatusTooManyRequests, RetryAfter: d, HasRetryAfter: true}
+	}
+	withDeadline := func(remaining time.Duration) context.Context {
+		ctx, cancel := context.WithDeadline(context.Background(), now.Add(remaining))
+		t.Cleanup(cancel)
+		return ctx
+	}
+	tests := []struct {
+		name     string
+		ctx      context.Context
+		err      error
+		wantWait time.Duration
+		wantOK   bool
+	}{
+		{"no deadline", context.Background(), rateLimited(10 * time.Second), 10 * time.Second, true},
+		{"just under", withDeadline(2*time.Second + time.Millisecond), rateLimited(time.Second), time.Second, true},
+		{"exactly fits", withDeadline(2 * time.Second), rateLimited(time.Second), time.Second, true},
+		{"just over", withDeadline(2*time.Second - time.Millisecond), rateLimited(time.Second), 0, false},
+		{"zero wait, reserve still required", withDeadline(retryReserve - time.Millisecond), rateLimited(0), 0, false},
+		{"503 with Retry-After", context.Background(), &hub.HTTPStatusError{StatusCode: http.StatusServiceUnavailable, RetryAfter: time.Second, HasRetryAfter: true}, 0, false},
+		{"429 without Retry-After", context.Background(), &hub.HTTPStatusError{StatusCode: http.StatusTooManyRequests}, 0, false},
+		{"not an HTTPStatusError", context.Background(), errors.New("connection refused"), 0, false},
+		{"wrapped 429", context.Background(), fmt.Errorf("send: %w", rateLimited(time.Second)), time.Second, true},
+		{"nil error", context.Background(), nil, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wait, ok := retryAfterWithinBudget(tt.ctx, tt.err, now)
+			if ok != tt.wantOK || wait != tt.wantWait {
+				t.Errorf("retryAfterWithinBudget = (%s, %v), want (%s, %v)", wait, ok, tt.wantWait, tt.wantOK)
+			}
+		})
+	}
+}
+
+// A creator the hub no longer resolves (400 addr_unknown) disables the
+// mirror for the agent: the skip is cached, so later Stops send nothing.
+func TestHubHandler_AssistantReplyAddrUnknownCachesSkip(t *testing.T) {
+	fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
+	fh.outboundScript = []fakeResponse{{
+		status: http.StatusBadRequest,
+		body:   `{"error":{"code":"addr_unknown","message":"recipient_id is not a valid addressee"}}`,
+	}}
+	handler := fh.start()
+
+	for i := 0; i < 2; i++ {
+		if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+	}
+	self, outbound, _ := fh.counts()
+	if outbound != 1 {
+		t.Errorf("Expected only the first Stop to send (1 outbound request), got %d", outbound)
+	}
+	if self != 1 {
+		t.Errorf("Expected 1 agent lookup, got %d", self)
+	}
+	c, ok := readAddresseeCache(filepath.Join(os.Getenv("HOME"), addresseeCacheFile), "test-agent-id")
+	if !ok || c.RecipientID != "" {
+		t.Errorf("Expected a cached skip, got %+v ok=%v", c, ok)
+	}
+	fh.mu.Lock()
+	defer fh.mu.Unlock()
+	if fh.statusCalls != 2 {
+		t.Errorf("Expected both status updates to be sent, got %d", fh.statusCalls)
+	}
+}
+
+// Any other 400 is not treated as a permanent addressee failure.
+func TestHubHandler_AssistantReplyOther400DoesNotCacheSkip(t *testing.T) {
+	fh := newFakeHub(t, testCreatorUserID, testCreatorUserID)
+	fh.outboundScript = []fakeResponse{{
+		status: http.StatusBadRequest,
+		body:   `{"error":{"code":"validation_error","message":"msg too long"}}`,
+	}}
+	handler := fh.start()
+
+	for i := 0; i < 2; i++ {
+		if err := handler.Handle(agentEndWithText("Hello")); err != nil {
+			t.Fatalf("Handle returned error: %v", err)
+		}
+	}
+	_, outbound, accepted := fh.counts()
+	if outbound != 2 || accepted != 1 {
+		t.Errorf("Expected the second Stop to send and be accepted, got %d requests / %d accepted", outbound, accepted)
 	}
 }

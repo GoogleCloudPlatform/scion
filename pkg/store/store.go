@@ -118,6 +118,20 @@ type Store interface {
 	// pass-through (the inner callback receives the same transactional store).
 	WithTx(ctx context.Context, fn func(tx Store) error) error
 
+	// FinalizeAgentDeletion is the delete engine's terminal write (design
+	// ptone/scion#2483 §2.3), as ONE transaction: it reads the agent
+	// (row-locked where supported), evaluates pred, and when it holds
+	// either applies set (DeletionFinalizeSoft, with UpdateAgentDeletion's
+	// semantics, Derive included) or removes the agent row and its cascade
+	// (DeletionFinalizeHard, as DeleteAgent). Then, still inside the
+	// transaction and just before commit, it calls hook (when non-nil) with
+	// a transaction-scoped Store, the agent (the post-write row for soft,
+	// the pre-delete row for hard) and the mode; a non-nil hook error rolls
+	// the whole finalize back and is returned. Returns affected=0 with a nil
+	// error when the predicate did not hold or the agent does not exist.
+	// Must not be called from inside WithTx.
+	FinalizeAgentDeletion(ctx context.Context, id string, pred DeletionPredicate, mode DeletionFinalizeMode, set DeletionFields, hook DeletionFinalizeHook) (affected int, err error)
+
 	// Agent operations
 	AgentStore
 
@@ -466,6 +480,19 @@ type AgentStore interface {
 	// launches. Synchronous, bounded by a 10s internal timeout; safe to call
 	// from a 15s ticker on every replica.
 	RunLaunchReaperTick(ctx context.Context, p ReaperParams) (ReaperTickResult, error)
+
+	// --- Backend-driven agent delete (design ptone/scion#2483 §2.1) ---
+
+	// UpdateAgentDeletion is the only writer of the deletion_* columns. In
+	// one transaction (row-locked where the dialect supports it) it reads
+	// the agent, evaluates pred against that row (see
+	// DeletionPredicate.Matches), and, when it holds, applies set and bumps
+	// state_version, so a stale whole-row UpdateAgent gets ErrVersionConflict
+	// instead of clobbering phase or deletion fields. Returns affected=1 when
+	// it wrote, and affected=0 with a nil error when the predicate did not
+	// hold or the agent does not exist. Must not be called from inside
+	// WithTx.
+	UpdateAgentDeletion(ctx context.Context, id string, pred DeletionPredicate, set DeletionFields) (affected int, err error)
 }
 
 // AgentFilter defines criteria for filtering agents.
@@ -922,6 +949,17 @@ type BrokerDispatchStore interface {
 
 	// ListPendingDispatch returns pending intents for a broker (drain query).
 	ListPendingDispatch(ctx context.Context, brokerID string) ([]BrokerDispatch, error)
+
+	// HasOutstandingBrokerDispatch reports whether agentID has a dispatch
+	// intent for op that is still pending or in_progress (design
+	// ptone/scion#2483 §2.1 deleteBlocksStart). Served by the
+	// (agent_id, op, state) index.
+	HasOutstandingBrokerDispatch(ctx context.Context, agentID, op string) (bool, error)
+
+	// HasCompletedBrokerDispatchSince reports whether agentID has a dispatch
+	// intent for op that reached done at or after since (by updated_at).
+	// Used only by the delete engine's classification step.
+	HasCompletedBrokerDispatchSince(ctx context.Context, agentID, op string, since time.Time) (bool, error)
 
 	// MarkMessageDispatched CAS-flips a message pending->dispatched (dedupes drains).
 	MarkMessageDispatched(ctx context.Context, id string) (dispatched bool, err error)

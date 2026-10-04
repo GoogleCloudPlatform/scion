@@ -29,6 +29,8 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { fetchHubProjectCapabilities } from '../../client/hub-capabilities.js';
 import type { Capabilities } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
+import { formatInstantWithZone } from '../../utils/time.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 interface ProjectTemplate {
   id: string;
@@ -45,6 +47,9 @@ interface ProjectItem {
 
 @customElement('scion-project-template-list')
 export class ScionProjectTemplateList extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @state() private templates: ProjectTemplate[] = [];
   /**
    * Hub-scope project capabilities. "Create Template" and "Create From" both
@@ -443,7 +448,9 @@ export class ScionProjectTemplateList extends LitElement {
   }
 
   private renderTemplate(template: ProjectTemplate) {
-    const created = template.created ? new Date(template.created).toLocaleDateString() : '';
+    const created = template.created
+      ? formatInstantWithZone(template.created, 'date') || template.created
+      : '';
     return html`
       <div class="template-row">
         <sl-icon class="template-icon" name="file-earmark-code"></sl-icon>

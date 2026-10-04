@@ -113,30 +113,6 @@ export function getLifecycleStatus(binding: {
 }
 
 // ---------------------------------------------------------------------------
-// Formatting helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Format a date string to a short human-readable form.
- * Example: "Aug 30, 2026, 5:42 PM"
- */
-export function formatDateTime(dateString: string): string {
-  try {
-    const date = new Date(dateString);
-    if (isNaN(date.getTime())) return dateString;
-    return date.toLocaleString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-      hour: 'numeric',
-      minute: '2-digit',
-    });
-  } catch {
-    return dateString;
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Icon helpers
 // ---------------------------------------------------------------------------
 
