@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-fixture-coverage vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-launch-store-postgres test-fixture-coverage vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build

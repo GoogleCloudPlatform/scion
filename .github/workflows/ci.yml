@@ -488,12 +488,15 @@ jobs:
           # clean scan. The `|| st=$?` guard keeps `bash -e` from aborting, so
           # a self-test failure fails the step via the explicit exit 1 below,
           # before the real scan runs. Exit 3 means a required tool (grep) is
-          # missing, not that the matcher is broken.
+          # missing and 126/127 mean the script itself could not be executed;
+          # neither means the matcher is broken.
           st=0
           ./hack/check-method-not-allowed.sh --self-test || st=$?
           if [ "$st" -ne 0 ]; then
             if [ "$st" -eq 3 ]; then
               echo "::error title=405 Allow header NOT checked::check-method-not-allowed --self-test could not run (exit 3: required tool missing) — NOTHING WAS ANALYSED. This is an environment failure, not a statement about the codebase."
+            elif [ "$st" -eq 126 ] || [ "$st" -eq 127 ]; then
+              echo "::error title=405 Allow header NOT checked::hack/check-method-not-allowed.sh could not be executed (exit $st: not found or not executable) — NOTHING WAS ANALYSED. This is a checkout or permissions failure, not a statement about the codebase."
             else
               echo "::error title=405 Allow header NOT checked::check-method-not-allowed --self-test failed (exit $st) — the matcher is broken on this runner, so NOTHING WAS ANALYSED."
             fi
