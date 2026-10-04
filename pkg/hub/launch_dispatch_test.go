@@ -452,10 +452,10 @@ type claimOnBeginLaunchStore struct {
 }
 
 func (s claimOnBeginLaunchStore) BeginLaunch(ctx context.Context, agentID, kind string, timeout time.Duration) (string, error) {
-	row, err := s.Store.GetAgent(ctx, agentID)
+	row, err := s.GetAgent(ctx, agentID)
 	require.NoError(s.t, err)
 	row.Phase = string(state.PhaseStopping)
-	require.NoError(s.t, s.Store.UpdateAgent(ctx, row))
+	require.NoError(s.t, s.UpdateAgent(ctx, row))
 	seedAgentDeletion(s.t, s.Store, agentID, seedLiveDeleting)
 	return s.Store.BeginLaunch(ctx, agentID, kind, timeout)
 }
