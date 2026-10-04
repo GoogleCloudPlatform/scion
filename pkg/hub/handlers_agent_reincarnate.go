@@ -224,7 +224,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// discarding work. Refused explicitly in v1 (design #2703 D4).
 	if project.IsEmptyPerAgent() {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-			"reincarnate does not yet support empty-per-agent workspaces", nil)
+			`reincarnate does not yet support "Empty directory per agent" (empty-per-agent) workspaces`, nil)
 		return
 	}
 

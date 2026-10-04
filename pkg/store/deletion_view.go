@@ -37,6 +37,9 @@ const (
 	DeletionCodeAbandoned      = "abandoned"
 	DeletionCodeRevokeFailed   = "revoke_failed"
 	DeletionCodeFinalizeFailed = "finalize_failed"
+	// DeletionCodeRuntimeUnavailable: the broker does not have the agent's
+	// runtime available, so the delete did not run there; retryable.
+	DeletionCodeRuntimeUnavailable = "runtime_unavailable"
 )
 
 // DeletionDisplayTTL is how long a failed delete stays visible in the view
@@ -50,7 +53,7 @@ const DeletionDisplayTTL = 15 * time.Minute
 // failed.
 type DeletionInfo struct {
 	State          string     `json:"state"`          // "deleting" (incl. finalizing) | "failed"
-	Code           string     `json:"code,omitempty"` // runtime_error | conflict | in_doubt | abandoned | revoke_failed | finalize_failed
+	Code           string     `json:"code,omitempty"` // runtime_error | conflict | in_doubt | abandoned | revoke_failed | finalize_failed | runtime_unavailable
 	Error          string     `json:"error,omitempty"`
 	Soft           bool       `json:"soft"`
 	Claim          int64      `json:"claim"` // named to avoid confusion with Agent.Generation (reincarnation)

@@ -730,7 +730,10 @@ func deleteAgentQuery(ctx context.Context, projectID string, opts DeleteAgentOpt
 	if opts.SoftDelete {
 		query += fmt.Sprintf("&softDelete=true&deletedAt=%s", url.QueryEscape(opts.DeletedAt.UTC().Format(time.RFC3339)))
 	}
-	return query
+	// The recorded runtime (GoogleCloudPlatform/scion#2423) rides on ctx, as
+	// for every other existing-agent operation, so both transports send it
+	// beside runId.
+	return withRecordedRuntimeQuery(ctx, query)
 }
 
 // RemoteCreateAgentRequest is the request body for creating an agent on a remote runtime broker.
@@ -3537,10 +3540,6 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	dispatcher.SetHubAgentDefaultsProvider(s.hubAgentDefaults)
 	dispatcher.SetAutoExposePortsDefaultProvider(s.autoExposePortsDefault)
 
-	// Wire profile timezone provider so dispatch can inject TZ from the
-	// profile's first-class timezone field into agent containers.
-	dispatcher.SetProfileTimezoneProvider(s.profileTimezone)
-
 	// Set image registry so bare image names are rewritten before dispatch
 	dispatcher.SetImageRegistry(s.resolveImageRegistry())
 
@@ -3703,10 +3702,29 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 				endLifecycleOp()
 				continue
 			}
+		}
+		priorIntent, intentAt, err := s.swapRunIntent(ctx, agent, store.RunIntentStopped)
+		if err != nil {
+			slog.Error("Scheduler: auto-suspend intent write failed",
+				"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
+			endLifecycleOp()
+			continue
+		}
+		if agent.RuntimeBrokerID != "" {
 			s.syncWorkspaceOnStop(ctx, agent)
 			if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
 				slog.Error("Scheduler: auto-suspend dispatch failed",
 					"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
+				// This stop was the system's, not the user's: if it
+				// replaced a running intent, put that back unless something
+				// newer replaced it. A prior stopped intent (for example a
+				// user stop whose dispatch also failed) stays stopped.
+				if priorIntent == store.RunIntentRunning {
+					if _, rerr := s.store.RevertRunIntent(ctx, agent.ID, store.RunIntentStopped, intentAt, store.RunIntentRunning); rerr != nil {
+						slog.Error("Scheduler: auto-suspend intent revert failed",
+							"agent_id", agent.ID, "agent_name", agent.Name, "error", rerr)
+					}
+				}
 				endLifecycleOp()
 				continue
 			}
@@ -3717,7 +3735,7 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 			ContainerStatus: "stopped",
 			Activity:        "",
 		}
-		err := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate)
+		err = s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate)
 		endLifecycleOp()
 		if err != nil {
 			slog.Error("Scheduler: auto-suspend status update failed",
@@ -4527,6 +4545,9 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			return nil
 		}
 
+		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
+			return fmt.Errorf("failed to dispatch agent %q: %w", slug, err)
+		}
 		if err := dispatcher.DispatchAgentCreate(ctx, agent); err != nil {
 			slog.Error("Scheduler: failed to dispatch agent creation",
 				"eventID", evt.ID,

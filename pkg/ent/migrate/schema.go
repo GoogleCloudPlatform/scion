@@ -214,6 +214,8 @@ var (
 		{Name: "deletion_error", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "deletion_prior", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "deletion_request", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "run_intent", Type: field.TypeString, Nullable: true},
+		{Name: "run_intent_at", Type: field.TypeTime, Nullable: true},
 		{Name: "project_id", Type: field.TypeUUID},
 	}
 	// AgentsTable holds the schema information for the "agents" table.
@@ -224,7 +226,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[64]},
+				Columns:    []*schema.Column{AgentsColumns[66]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -233,7 +235,7 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[64]},
+				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[66]},
 			},
 			{
 				Name:    "agent_launch_deadline",
@@ -247,6 +249,11 @@ var (
 				Name:    "agent_launch_id",
 				Unique:  false,
 				Columns: []*schema.Column{AgentsColumns[44]},
+			},
+			{
+				Name:    "agent_runtime_broker_id_run_intent",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[25], AgentsColumns[64]},
 			},
 			{
 				Name:    "agent_harness_config_reconcile_pending",

@@ -745,3 +745,33 @@ func TestDeleteAgent_PostResolutionCancelIsRunAware(t *testing.T) {
 		})
 	}
 }
+
+// The recorded-runtime restriction (GoogleCloudPlatform/scion#2423) applies
+// before the run filter: a run that lives only on a runtime outside the
+// recorded type is not found, so the delete answers 404 with no side effects
+// on either runtime rather than reaching across to the other runtime.
+func TestDeleteAgent_RecordedRuntimeRestrictsBeforeRunFilter(t *testing.T) {
+	srv, dockerMgr, k8sMgr := newRecordedRuntimeServer(t, true)
+	dockerMgr.agents = []api.AgentInfo{withRun(rrAgentInfo("docker-container"), "run-a")}
+	k8sMgr.agents = []api.AgentInfo{withRun(rrAgentInfo("k8s-pod"), "run-b")}
+
+	w := serveRR(srv, http.MethodDelete, "/api/v1/agents/"+rrAgent+rrQuery("docker")+"&runId=run-b", "")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404; body = %s", w.Code, w.Body.String())
+	}
+	if dockerMgr.acted() != 0 || k8sMgr.acted() != 0 {
+		t.Errorf("acted: docker=%d kubernetes=%d, want none", dockerMgr.acted(), k8sMgr.acted())
+	}
+	if n := k8sMgr.lists.Load(); n != 0 {
+		t.Errorf("kubernetes runtime listed %d times, want 0", n)
+	}
+
+	// The same run under its own recorded type is deleted there only.
+	w = serveRR(srv, http.MethodDelete, "/api/v1/agents/"+rrAgent+rrQuery("kubernetes")+"&runId=run-b", "")
+	if w.Code >= 300 {
+		t.Fatalf("status = %d, want success; body = %s", w.Code, w.Body.String())
+	}
+	if k8sMgr.acted() != 1 || dockerMgr.acted() != 0 {
+		t.Errorf("acted: docker=%d kubernetes=%d, want kubernetes only", dockerMgr.acted(), k8sMgr.acted())
+	}
+}

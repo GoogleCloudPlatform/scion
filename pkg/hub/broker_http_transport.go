@@ -269,6 +269,7 @@ func (t *brokerHTTPTransport) StopAgent(ctx context.Context, brokerID, brokerEnd
 	if projectID != "" {
 		endpoint += "?projectId=" + url.QueryEscape(projectID)
 	}
+	endpoint = withRecordedRuntimeURL(ctx, endpoint)
 	resp, err := t.doRequest(ctx, brokerID, http.MethodPost, endpoint, nil)
 	if err != nil {
 		return fmt.Errorf("failed to send request: %w", err)
@@ -285,6 +286,7 @@ func (t *brokerHTTPTransport) RestartAgent(ctx context.Context, brokerID, broker
 	if projectID != "" {
 		endpoint += "?projectId=" + url.QueryEscape(projectID)
 	}
+	endpoint = withRecordedRuntimeURL(ctx, endpoint)
 	payload := map[string]interface{}{}
 	if len(resolvedEnv) > 0 {
 		payload["resolvedEnv"] = resolvedEnv
@@ -334,6 +336,7 @@ func (t *brokerHTTPTransport) ResetAuthAgent(ctx context.Context, brokerID, brok
 	if projectID != "" {
 		endpoint += "?projectId=" + url.QueryEscape(projectID)
 	}
+	endpoint = withRecordedRuntimeURL(ctx, endpoint)
 	body, err := json.Marshal(resetAuthBody(token, transportToken))
 	if err != nil {
 		return fmt.Errorf("failed to marshal reset-auth request: %w", err)
@@ -369,6 +372,7 @@ func (t *brokerHTTPTransport) MessageAgent(ctx context.Context, brokerID, broker
 	if projectID != "" {
 		endpoint += "?projectId=" + url.QueryEscape(projectID)
 	}
+	endpoint = withRecordedRuntimeURL(ctx, endpoint)
 
 	// Build the request body with structured message if available
 	reqBody := map[string]interface{}{
@@ -442,6 +446,7 @@ func (t *brokerHTTPTransport) ExecuteKeys(ctx context.Context, brokerID, brokerE
 	path := strings.ReplaceAll(agentkeys.BrokerRoutePath, "{id}", url.PathEscape(agentSlug))
 	endpoint := fmt.Sprintf("%s%s?%s=%s", strings.TrimSuffix(brokerEndpoint, "/"), path,
 		agentkeys.BrokerProjectIDQueryParam, url.QueryEscape(req.ProjectID))
+	endpoint = withRecordedRuntimeURL(ctx, endpoint)
 
 	httpReq, err := http.NewRequestWithContext(ctx, agentkeys.BrokerRouteMethod, endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -521,6 +526,7 @@ func (t *brokerHTTPTransport) CheckAgentPrompt(ctx context.Context, brokerID, br
 	if projectID != "" {
 		endpoint += "?projectId=" + url.QueryEscape(projectID)
 	}
+	endpoint = withRecordedRuntimeURL(ctx, endpoint)
 	resp, err := t.doRequest(ctx, brokerID, http.MethodPost, endpoint, nil)
 	if err != nil {
 		return false, fmt.Errorf("failed to send request: %w", err)
@@ -576,6 +582,7 @@ func (t *brokerHTTPTransport) GetAgentLogs(ctx context.Context, brokerID, broker
 	if projectID != "" {
 		endpoint += sep + "projectId=" + url.QueryEscape(projectID)
 	}
+	endpoint = withRecordedRuntimeURL(ctx, endpoint)
 	resp, err := t.doRequest(ctx, brokerID, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to send request: %w", err)
@@ -596,6 +603,7 @@ func (t *brokerHTTPTransport) ExecAgent(ctx context.Context, brokerID, brokerEnd
 	if projectID != "" {
 		endpoint += "?projectId=" + url.QueryEscape(projectID)
 	}
+	endpoint = withRecordedRuntimeURL(ctx, endpoint)
 
 	body, err := json.Marshal(map[string]interface{}{
 		"command": command,

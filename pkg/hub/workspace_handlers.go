@@ -486,6 +486,10 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			RuntimeError(w, "No dispatcher available")
 			return
 		}
+		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
 		if err := dispatcher.DispatchAgentCreate(ctx, agent); err != nil {
 			if ref := deleteClaimedDuringDispatch(err, agent.ID); ref != nil {
 				ref.write(w)

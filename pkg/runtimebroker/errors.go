@@ -156,7 +156,7 @@ func (s *Server) startFailureDetails(ctx context.Context, mgr agent.Manager, id,
 //   - Any List failure: ok is false; the hub falls back as for an older
 //     broker.
 func (s *Server) currentRunID(ctx context.Context, mgr agent.Manager, id, projectID string) (string, bool) {
-	managers := s.allManagers()
+	managers := s.allManagers(ctx)
 	if mgr != nil && !slices.Contains(managers, mgr) {
 		managers = append(managers, mgr)
 	}

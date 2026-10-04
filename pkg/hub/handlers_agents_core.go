@@ -958,6 +958,13 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, agent *store.Agent, ru
 	// does.
 	if deleteRuntime != nil {
 		func() {
+			sctx, cancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
+			defer cancel()
+			if _, err := s.recordRunIntent(sctx, agent, store.RunIntentStopped); err != nil {
+				s.agentLifecycleLog.Warn("Create-failure cleanup: run intent write failed", "agent_id", agent.ID, "error", err)
+			}
+		}()
+		func() {
 			rctx, cancel := detachedCleanupContext(ctx, createCleanupRuntimeTimeout)
 			defer cancel()
 			if err := deleteRuntime(rctx); err != nil {
@@ -1150,7 +1157,7 @@ func (s *Server) createAgentInProject(
 	// (design #2703 §2.4). A relative workspace path would otherwise resolve
 	// against the shared project dir, so it is not accepted.
 	if project.IsEmptyPerAgent() && req.Workspace != "" {
-		ValidationError(w, "empty-per-agent projects do not take a workspace path", nil)
+		ValidationError(w, `"Empty directory per agent" (empty-per-agent) projects do not take a workspace path`, nil)
 		return
 	}
 
@@ -2110,6 +2117,16 @@ func (s *Server) createAgentInProject(
 	s.agentLifecycleLog.Info("Hub: pre-dispatch setup complete",
 		preDispatchAttrs...)
 	if dispatcher := s.GetDispatcher(); dispatcher != nil {
+		// A create is a start, unless it only provisions.
+		intent := store.RunIntentRunning
+		if req.ProvisionOnly {
+			intent = store.RunIntentStopped
+		}
+		if _, err := s.recordRunIntent(ctx, agent, intent); err != nil {
+			s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, nil)
+			writeErrorFromErr(w, err, "")
+			return
+		}
 		if !req.ProvisionOnly {
 			// Use env-gather dispatch if requested
 			if req.GatherEnv {
@@ -3554,7 +3571,7 @@ func (s *Server) awaitAgentDeletion(w http.ResponseWriter, r *http.Request, plan
 		case deletionOutcomeDeleted:
 			w.WriteHeader(http.StatusNoContent)
 		case deletionOutcomeFailed:
-			writeDeletionFailure(w, plan.snapshot.ID, out.code, out.message)
+			writeDeletionFailure(w, plan.snapshot.ID, out.code, out.message, out.retryAfter)
 		default: // lost: someone else holds the row now
 			s.joinAgentDeletion(w, r, plan.snapshot.ID, plan.claim, deadline)
 		}
@@ -3862,6 +3879,9 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, id stri
 
 	output, exitCode, err := dispatcher.DispatchAgentExec(ctx, agent, req.Command, req.Timeout)
 	if err != nil {
+		if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
+			return
+		}
 		RuntimeError(w, "Failed to execute command on runtime broker: "+err.Error())
 		return
 	}
@@ -4099,6 +4119,9 @@ func (s *Server) handleAgentResetAuth(w http.ResponseWriter, r *http.Request, id
 
 	if err := disp.DispatchAgentResetAuth(ctx, agent); err != nil {
 		slog.Error("Failed to reset agent auth", "agent_id", id, "error", err)
+		if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
+			return
+		}
 		if writeAgentTokenIssueError(w, err) {
 			return
 		}
