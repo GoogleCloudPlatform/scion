@@ -1008,15 +1008,21 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 		}
 		compensationFailureCorrelationID = compensationFailureID(ctx)
 		logCompensationFailure(ctx, agent.ID, compensationFailureCorrelationID, opID, err)
-		// Fallback, sharing one store budget. First deactivate the edges on
-		// their own: this succeeds when the transaction failed on another
-		// write (for example the audit insert). Then remove the row so a
-		// failed compensation does not also leave the agent in place. When
-		// the deactivation fails too, the edge stays active with a deleted
-		// delegate, which nothing reads as authority (the walk, the
-		// provenance lookup and the mint all need the agent row).
+		// Fallback, sharing one store budget. First remove the row so a
+		// failed compensation does not also leave the agent in place. Only
+		// once the row is gone, deactivate its edges on their own (this
+		// succeeds when the transaction failed on another write, for example
+		// the audit insert). When the delete fails, the row keeps its active
+		// edge, so it stays held to its recorded ceiling. When the
+		// deactivation fails, the edge stays active with a deleted delegate,
+		// which nothing reads as authority (the walk, the provenance lookup
+		// and the mint all need the agent row).
 		fctx, fcancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
 		defer fcancel()
+		if derr := s.store.DeleteAgent(fctx, agent.ID); derr != nil && !errors.Is(derr, store.ErrNotFound) {
+			s.agentLifecycleLog.Warn("Create-failure cleanup: agent row delete failed", "agent_id", agent.ID, "error", derr)
+			return
+		}
 		now := time.Now()
 		if _, derr := s.store.DeactivateDelegationEdgesForDelegate(fctx, store.DelegationPrincipalAgent, agent.ID, store.Deactivation{
 			Cause: store.EdgeDeactivationCreateCompensation,
@@ -1024,9 +1030,6 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 			OpID:  opID,
 		}); derr != nil {
 			s.agentLifecycleLog.Warn("Create-failure cleanup: edge deactivation failed", "agent_id", agent.ID, "op_id", opID, "error", derr)
-		}
-		if derr := s.store.DeleteAgent(fctx, agent.ID); derr != nil && !errors.Is(derr, store.ErrNotFound) {
-			s.agentLifecycleLog.Warn("Create-failure cleanup: agent row delete failed", "agent_id", agent.ID, "error", derr)
 		}
 	}()
 	// Detaches from ctx and applies its own timeout internally.
