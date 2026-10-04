@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -478,4 +479,28 @@ func TestGHErrorBody(t *testing.T) {
 	// A character ending exactly at byte 512 is kept.
 	prefix = strings.Repeat("a", maxGHErrorBody-2)
 	assert.Equal(t, prefix+"é...", ghErrorBody([]byte(prefix+"é"+"tail")))
+
+	// A four-byte character starting at byte 509 is kept whole: the
+	// back-off reaches its bound exactly at the start of the sequence.
+	prefix = strings.Repeat("a", maxGHErrorBody-3)
+	got = ghErrorBody([]byte(prefix + "\U0001F600" + "tail"))
+	assert.True(t, utf8.ValidString(got), "cut body %q is not valid UTF-8", got)
+	assert.Equal(t, prefix+"...", got)
+}
+
+func TestGHErrorBodyInvalidUTF8(t *testing.T) {
+	// A body of only continuation bytes has no rune start to back off to;
+	// the cut stops utf8.UTFMax-1 bytes before the limit instead of
+	// discarding the whole body.
+	body := bytes.Repeat([]byte{0x80}, maxGHErrorBody+100)
+	got := ghErrorBody(body)
+	want := string(body[:maxGHErrorBody-(utf8.UTFMax-1)]) + "..."
+	assert.Equal(t, want, got)
+	assert.Len(t, got, maxGHErrorBody-(utf8.UTFMax-1)+len("..."))
+
+	// Invalid bytes after valid text are cut at the same bound.
+	prefix := strings.Repeat("a", maxGHErrorBody-10)
+	body = append([]byte(prefix), bytes.Repeat([]byte{0xBF}, 50)...)
+	got = ghErrorBody(body)
+	assert.Equal(t, string(body[:maxGHErrorBody-(utf8.UTFMax-1)])+"...", got)
 }

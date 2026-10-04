@@ -75,13 +75,15 @@ const maxGHErrorBody = 512
 // ghErrorBody returns body for use in a ghStatusError message, cut to
 // maxGHErrorBody bytes with "..." appended when it is longer. The cut backs
 // off to the start of a UTF-8 sequence so a multi-byte character is never
-// split.
+// split. The back-off is at most utf8.UTFMax-1 bytes, the longest a valid
+// sequence can reach past the cut; a body that is not valid UTF-8 there is
+// cut at that bound instead of shrinking further.
 func ghErrorBody(body []byte) string {
 	if len(body) <= maxGHErrorBody {
 		return string(body)
 	}
 	n := maxGHErrorBody
-	for n > 0 && !utf8.RuneStart(body[n]) {
+	for n > maxGHErrorBody-(utf8.UTFMax-1) && !utf8.RuneStart(body[n]) {
 		n--
 	}
 	return string(body[:n]) + "..."
