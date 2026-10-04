@@ -187,8 +187,10 @@ func nfsSharedCheckoutProvisioned(hostBase, rel string) (bool, error) {
 		case err == nil:
 			return true, nil
 		case errors.Is(err, fs.ErrNotExist):
-		case isNFSLeafPermissionError(err) && permErr == nil:
-			permErr = err
+		case isNFSLeafPermissionError(err):
+			if permErr == nil {
+				permErr = err
+			}
 		default:
 			return false, fmt.Errorf("workspace_storage nfs: check provisioning state of %q: %w", rel, err)
 		}

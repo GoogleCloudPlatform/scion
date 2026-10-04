@@ -222,3 +222,26 @@ func TestRemoveNFSWorktree_StateDirNotCreatableUsesLegacyLock(t *testing.T) {
 	assert.NoDirExists(t, path)
 	assert.NoDirExists(t, provision.ProjectStateDir(ws))
 }
+
+// With a permission error on both locations, the first one (the state
+// directory's) is returned, as a permission error.
+func TestNFSSharedCheckoutProvisioned_PermissionErrorOnBoth(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	hostBase := t.TempDir()
+	rel := filepath.Join("projects", testNFSWorkspaceProjectID, "workspace")
+	ws := filepath.Join(hostBase, rel)
+	stateDir := provision.ProjectStateDir(ws)
+	for _, dir := range []string{ws, stateDir} {
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, os.Chmod(dir, 0))
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	}
+
+	provisioned, err := nfsSharedCheckoutProvisioned(hostBase, rel)
+	require.Error(t, err)
+	assert.False(t, provisioned)
+	assert.True(t, isNFSLeafPermissionError(err), "%v", err)
+	assert.Contains(t, err.Error(), filepath.Join(stateDir, provision.ProvisionSentinelFile), "the first (state directory) error is returned")
+}
