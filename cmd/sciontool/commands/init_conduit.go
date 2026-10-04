@@ -82,6 +82,7 @@ func newPortForwarding(c *hub.Client, disableConduit bool, getenv func(string) s
 				LaunchID:              getenv(conduit.EnvLaunchID),
 				Token:                 c.AuthToken,
 				ApplyTransportHeaders: c.ApplyTransportHeaders,
+				HTTPClient:            c.HTTPClient(),
 				RefreshCredential: func(ctx context.Context) error {
 					_, _, err := c.RefreshToken(ctx)
 					return err

@@ -105,7 +105,8 @@ type Options struct {
 	// RefreshCredential obtains a fresh agent token after the hub refused
 	// the current one (4401 / HTTP 401). Optional.
 	RefreshCredential func(ctx context.Context) error
-	// HTTPClient fetches grant keys (default http.DefaultClient).
+	// HTTPClient fetches grant keys; pass the hub client's HTTP client so
+	// transport settings live in one place (default http.DefaultClient).
 	HTTPClient *http.Client
 	// WS overrides the WebSocket dialer (tests, TLS).
 	WS *websocket.Dialer

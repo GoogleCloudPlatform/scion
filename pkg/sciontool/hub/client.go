@@ -262,6 +262,16 @@ func (c *Client) HubURL() string {
 	return c.hubURL
 }
 
+// HTTPClient returns the client's HTTP client, which carries the hub
+// transport settings (timeout and transport credential), so other hub
+// callers share them.
+func (c *Client) HTTPClient() *http.Client {
+	if c == nil {
+		return nil
+	}
+	return c.client
+}
+
 func (c *Client) AgentID() string {
 	if c == nil {
 		return ""
