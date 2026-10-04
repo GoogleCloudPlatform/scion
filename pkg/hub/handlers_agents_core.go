@@ -1594,8 +1594,8 @@ func (s *Server) createAgentInProject(
 		OwnerID:         createdBy,
 		Ancestry:        ancestry,
 		// Async agent create (design §3.2): persisted so a later env/workspace
-		// finalize request can still see the client's opt-in. No dispatch path
-		// reads this yet; the async dispatch path will.
+		// finalize request can still see the client's opt-in. Read by
+		// dispatchLaunching (launch_dispatch.go).
 		LaunchAsyncOptIn: req.AcceptAsyncLaunch,
 	}
 
