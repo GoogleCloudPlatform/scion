@@ -88,7 +88,6 @@ func TestDispatchAgentStartRestart_UnflaggedGrantClearsStaleRequireLocalRuntimeM
 	t.Run("start", func(t *testing.T) {
 		mockClient := &mockRuntimeBrokerClient{}
 		dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
-		dispatcher.SetProfileTimezoneProvider(func(name string) string { return "" })
 
 		agent := newAgent("agent-marker-clear-start")
 		if err := dispatcher.DispatchAgentStart(ctx, agent, "", false); err != nil {

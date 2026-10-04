@@ -64,8 +64,8 @@ func (d *recordingDispatcher) getCalls() []dispatchCall {
 }
 
 // Implement remaining AgentDispatcher methods as no-ops.
-func (d *recordingDispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent) error {
-	return nil
+func (d *recordingDispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 func (d *recordingDispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error {
 	return nil
@@ -90,7 +90,7 @@ func (d *recordingDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Ag
 func (d *recordingDispatcher) DispatchCheckAgentPrompt(_ context.Context, _ *store.Agent) (bool, error) {
 	return false, nil
 }
-func (d *recordingDispatcher) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (d *recordingDispatcher) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*CreateDispatchResult, error) {
 	return nil, nil
 }
 func (d *recordingDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
@@ -99,8 +99,8 @@ func (d *recordingDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agen
 func (d *recordingDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
 	return "", 0, nil
 }
-func (d *recordingDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) error {
-	return nil
+func (d *recordingDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 
 // notificationTestEnv holds all components for a notification test.

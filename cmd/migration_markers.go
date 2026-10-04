@@ -57,6 +57,10 @@ const (
 	// the probe runs on every boot regardless. See
 	// cmd/boot_utc_timestamp_repair.go.
 	MigrationUTCTimestampRepair MigrationName = "utc_timestamp_repair"
+	// MigrationRunIntentBackfill is the one-shot migration that sets
+	// agents.run_intent for rows that predate the column. See
+	// cmd/boot_run_intent_backfill.go.
+	MigrationRunIntentBackfill MigrationName = "run_intent_backfill"
 )
 
 // migrationMarker records the completion state of a single migration.
@@ -209,7 +213,7 @@ func isKnownMigration(name MigrationName) bool {
 	case MigrationDMKey, MigrationBackfill, MigrationGroupRefRepair, MigrationWorkspaceModeLabel,
 		MigrationBrokerOwnershipBackfill, MigrationNonAgentDispatchStateBackfill,
 		MigrationBrokerQuotaBindingsToSettings, MigrationEmptyPerAgentLegacyReport,
-		MigrationUTCTimestampRepair:
+		MigrationUTCTimestampRepair, MigrationRunIntentBackfill:
 		return true
 	default:
 		return false

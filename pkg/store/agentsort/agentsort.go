@@ -13,10 +13,10 @@
 // limitations under the License.
 
 // Package agentsort is the single reference implementation of the
-// server-sorted agent list total order (design lists-graph.md 4.2). Both the
-// project-endpoint positioning (pkg/hub) and the test suites that assert
-// pages concatenate to "the agentsort reference" use it, so there is exactly
-// one place that can get a tie-break wrong.
+// server-sorted agent list total order. Both the project-endpoint
+// positioning (pkg/hub) and the test suites that assert pages concatenate
+// to "the agentsort reference" use it, so there is exactly one place that
+// can get a tie-break wrong.
 package agentsort
 
 import (
@@ -24,13 +24,13 @@ import (
 	"time"
 )
 
-// Sort key names, matching the "sort" query parameter (design 4.1).
+// Sort key names, matching the "sort" query parameter.
 const (
 	Created = "created"
 	Updated = "updated"
 )
 
-// Direction names, matching the "dir" query parameter (design 4.1).
+// Direction names, matching the "dir" query parameter.
 const (
 	Asc  = "asc"
 	Desc = "desc"
@@ -49,9 +49,9 @@ type Row struct {
 
 // KeyFor builds the Row for one agent's position under sort. lastActivity
 // may be the zero time when the agent has none, which matches the store's
-// NULL representation (design 4.2: "the store writes a zero
-// LastActivityEvent as NULL... COALESCE therefore matches the client's
-// '0001' rule").
+// NULL representation: the store writes a zero LastActivityEvent as NULL,
+// so COALESCE(last_activity_event, updated) matches the client's '0001'
+// (zero-time) rule.
 func KeyFor(sort string, id string, created, updated, lastActivity time.Time) Row {
 	k := created
 	if sort == Updated {
@@ -63,7 +63,7 @@ func KeyFor(sort string, id string, created, updated, lastActivity time.Time) Ro
 	return Row{K: k, Created: created, ID: id}
 }
 
-// Less reports whether a sorts strictly before b in the section-4.2 total
+// Less reports whether a sorts strictly before b in the sorted-mode total
 // order for dir. The sort key is already folded into Row.K by KeyFor, so
 // only the direction is needed here:
 //
@@ -74,7 +74,7 @@ func KeyFor(sort string, id string, created, updated, lastActivity time.Time) Ro
 //
 // Ties are always broken by created DESC then id DESC, regardless of dir —
 // this is what makes both directions show ties in the same created-desc
-// order, matching today's client (design 4.2).
+// order, matching today's client.
 func Less(dir string, a, b Row) bool {
 	if !a.K.Equal(b.K) {
 		if dir == Asc {
@@ -100,11 +100,10 @@ func Compare(dir string, a, b Row) int {
 	return 0
 }
 
-// SortRows sorts rows in place into the section-4.2 total order for dir
+// SortRows sorts rows in place into the sorted-mode total order for dir
 // (rows must come from KeyFor with a single sort key). It is used by the
 // project endpoint, which reads its candidate set unordered (bounded by the
-// candidate ceiling) and positions it in Go rather than in SQL (design
-// lists-graph.md 5.3).
+// candidate ceiling) and positions it in Go rather than in SQL.
 func SortRows(dir string, rows []Row) {
 	stdsort.Slice(rows, func(i, j int) bool { return Less(dir, rows[i], rows[j]) })
 }

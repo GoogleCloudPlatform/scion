@@ -303,6 +303,12 @@ func TestCheckEmptyPerAgentBrokerCapability(t *testing.T) {
 	require.ErrorIs(t, err, errBrokerLacksEmptyPerAgent)
 	assert.Contains(t, err.Error(), "old-broker")
 	require.ErrorIs(t, checkEmptyPerAgentBrokerCapability(empty, noCap), errBrokerLacksEmptyPerAgent)
+
+	// No broker name: the message stays well-formed (no "broker  cannot").
+	err = checkEmptyPerAgentBrokerCapability(empty, nil)
+	require.ErrorIs(t, err, errBrokerLacksEmptyPerAgent)
+	assert.Equal(t, errBrokerLacksEmptyPerAgent.Error(), err.Error())
+	assert.NotContains(t, err.Error(), "upgrade")
 }
 
 // TestDeriveCloneWorkspaceMode covers the clone re-derivation rule without
