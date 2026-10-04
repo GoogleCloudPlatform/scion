@@ -17,7 +17,7 @@
 /**
  * Test harness for the agent store: a fake EventSource the feed's real
  * SSE client connects through, an in-memory agent-list server honouring
- * `limit`/`cursor` (and `sort=updated`, newest first, with `totalCount`),
+ * `limit`/`cursor` (and `sort=updated` in the hub's order, with `totalCount`),
  * and a store wired to both with a real `StateManager` feed per connection.
  */
 
@@ -156,6 +156,11 @@ export interface AgentServer {
   walks(pathPrefix?: string): number;
   /** Probe requests (`sort=updated`), every page, optionally for one path prefix. */
   probes(pathPrefix?: string): number;
+  /**
+   * A broker heartbeat: set `updated` on every row (or the given ids) to
+   * `at`, leaving the last activity time alone, as the hub does.
+   */
+  heartbeat(at: string, ids?: readonly string[]): void;
   /** Single-agent requests (`/api/v1/agents/{id}`), optionally for one id. */
   agentFetches(id?: string): number;
 }
@@ -166,9 +171,20 @@ function isSorted(path: string): boolean {
   return new URL(path, 'http://localhost').searchParams.has('sort');
 }
 
-function updatedMs(a: Agent): number {
-  const ms = a.updated ? Date.parse(a.updated) : NaN;
-  return Number.isNaN(ms) ? 0 : ms;
+function ms(value: string | undefined): number {
+  const parsed = value ? Date.parse(value) : NaN;
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+/**
+ * The hub's `sort=updated` order, newest first: the last activity time when
+ * set, else `updated`; ties on `created`, then id, both descending.
+ */
+function compareUpdatedKey(a: Agent, b: Agent): number {
+  const key = (x: Agent): number => ms(x.lastActivityEvent) || ms(x.updated);
+  return (
+    key(b) - key(a) || ms(b.created) - ms(a.created) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0)
+  );
 }
 
 export function createAgentServer(initial: Agent[] = []): AgentServer {
@@ -211,8 +227,7 @@ export function createAgentServer(initial: Agent[] = []): AgentServer {
       const scoped = project
         ? server.agents.filter((a) => a.projectId === decodeURIComponent(project))
         : server.agents;
-      // Newest first; a stable sort keeps list order among equal times.
-      const rows = sorted ? [...scoped].sort((a, b) => updatedMs(b) - updatedMs(a)) : scoped;
+      const rows = sorted ? [...scoped].sort(compareUpdatedKey) : scoped;
       const page = rows.slice(offset, offset + limit);
       const end = offset + page.length;
       const body = {
@@ -253,6 +268,11 @@ export function createAgentServer(initial: Agent[] = []): AgentServer {
       ).length,
     probes: (pathPrefix = '') =>
       server.requests.filter((p) => p.startsWith(pathPrefix) && isSorted(p)).length,
+    heartbeat: (at, ids) => {
+      server.agents = server.agents.map((a) =>
+        ids === undefined || ids.includes(a.id) ? { ...a, updated: at } : a
+      );
+    },
     agentFetches: (id) =>
       server.requests.filter((p) => {
         const match = SINGLE_AGENT.exec(new URL(p, 'http://localhost').pathname)?.[1];
