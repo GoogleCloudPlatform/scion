@@ -247,7 +247,7 @@ func TestProjectOwnerID_UpdateProjectDoesNotWriteOwnerID(t *testing.T) {
 	before := *got
 	before.Name = "Renamed again"
 	require.NoError(t, ps.UpdateProject(ctx, &before))
-	assert.Equal(t, transferred, before.OwnerID)
+	assert.Equal(t, transferred, before.OwnerID, "UpdateProject must refresh p.OwnerID to the transferred owner")
 
 	got, err = ps.GetProject(ctx, p.ID)
 	require.NoError(t, err)

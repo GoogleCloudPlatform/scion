@@ -1064,6 +1064,24 @@ func TestRS2_TransferredOwnership(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, userA.ID, stale.OwnerID, "precondition: OwnerID names the old owner")
 
+		// Precondition: the bindings say userA is a member and userB the
+		// owner, so this subtest does not rely on the earlier ones.
+		ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+		require.NoError(t, err)
+		bindings, err := s.ListRoleBindingsForScope(ctx, store.RoleScopeProject, proj.ID)
+		require.NoError(t, err)
+		hasRole := func(userID, roleDefID string) bool {
+			for _, b := range bindings {
+				if b.PrincipalType == store.RoleBindingPrincipalUser && b.PrincipalID == userID && b.RoleDefinitionID == roleDefID {
+					return true
+				}
+			}
+			return false
+		}
+		require.True(t, hasRole(userA.ID, memberRD.ID), "precondition: userA holds a member binding")
+		require.False(t, hasRole(userA.ID, ownerRD.ID), "precondition: userA holds no owner binding")
+		require.True(t, hasRole(userB.ID, ownerRD.ID), "precondition: userB holds the owner binding")
+
 		projectIDs := func(u *store.User, scope string) []string {
 			rec := doRequestAsUser(t, srv, u, http.MethodGet, "/api/v1/projects?scope="+scope, nil)
 			require.Equal(t, http.StatusOK, rec.Code)
