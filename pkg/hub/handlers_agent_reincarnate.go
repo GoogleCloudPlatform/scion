@@ -346,14 +346,25 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// below) looking fresh forever.
 	claimedAt := time.Now()
 	agent.ReincarnationUpdatedAt = &claimedAt
-	if err := s.store.UpdateAgent(ctx, agent); err != nil {
-		if errors.Is(err, store.ErrVersionConflict) {
+	// The claim also requires that no start claim is held, live or
+	// unconfirmed: a start whose outcome is unknown may still create a
+	// container this reincarnation would then compete with.
+	newVersion, err := s.store.ClaimAgentReincarnation(ctx, agent.ID, agent.StateVersion, claimedAt)
+	if err != nil {
+		var held *store.ClaimHeldError
+		switch {
+		case errors.Is(err, store.ErrVersionConflict):
 			Conflict(w, "agent was concurrently modified; retry")
-			return
+		case errors.As(err, &held):
+			Conflict(w, "a start is in progress for this agent; retry once it completes")
+		case errors.Is(err, store.ErrClaimPredicate):
+			Conflict(w, "a reincarnation is already pending for this agent")
+		default:
+			writeErrorFromErr(w, err, "")
 		}
-		writeErrorFromErr(w, err, "")
 		return
 	}
+	agent.StateVersion = newVersion
 
 	requestedBy := ""
 	requesterIdentity := GetIdentityFromContext(ctx)

@@ -1838,7 +1838,7 @@ func TestReincarnateAgent_DryRunConflictsWhenAlreadyStarting(t *testing.T) {
 
 // TestReincarnateAgent_AC8_OrphanCannotWedgeAfterConflict is the design §3.4
 // Amendment A3 regression test: a version conflict on the claim write (the guarded
-// UpdateAgent that sets reincarnation_state=pending) must leave nothing
+// ClaimAgentReincarnation that sets reincarnation_state=pending) must leave nothing
 // behind — no orphaned agent_reincarnations row, and no stuck claim — so a
 // retry succeeds. Before the fix, the record was created FIRST, so any
 // failure on the following UpdateAgent left a permanent pending row with no
@@ -1849,15 +1849,15 @@ type failOnceUpdateStore struct {
 	failed bool
 }
 
-func (f *failOnceUpdateStore) UpdateAgent(ctx context.Context, a *store.Agent) error {
+func (f *failOnceUpdateStore) ClaimAgentReincarnation(ctx context.Context, agentID string, expectedVersion int64, at time.Time) (int64, error) {
 	f.mu.Lock()
 	if !f.failed {
 		f.failed = true
 		f.mu.Unlock()
-		return store.ErrVersionConflict
+		return 0, store.ErrVersionConflict
 	}
 	f.mu.Unlock()
-	return f.Store.UpdateAgent(ctx, a)
+	return f.Store.ClaimAgentReincarnation(ctx, agentID, expectedVersion, at)
 }
 
 func TestReincarnateAgent_AC8_OrphanCannotWedgeAfterConflict(t *testing.T) {

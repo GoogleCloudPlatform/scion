@@ -143,6 +143,11 @@ func (s *Server) recordRecoveryObservations(ctx context.Context, brokerID string
 				continue // a same-slug entry could not be matched: leave it alone
 			}
 			o.Target, o.State = observationTarget(a), store.ObservedAbsent
+			if o.Target == "" && len(targets) == 1 {
+				// No recorded or expected target: on a broker with a
+				// single complete target, that is the agent's target.
+				o.Target = targets[0]
+			}
 		}
 		if o.Target == "" || !complete[o.Target] {
 			continue
