@@ -3,6 +3,7 @@
 package ent
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/accessconstraint"
@@ -20,6 +21,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitprincipalepoch"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionaudit"
@@ -53,6 +56,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectprestarthook"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectsyncstate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/relayinstance"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/rolebinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/roledefinition"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
@@ -517,6 +521,46 @@ func init() {
 	chatlinkcodeDescID := chatlinkcodeFields[0].Descriptor()
 	// chatlinkcode.DefaultID holds the default value on creation for the id field.
 	chatlinkcode.DefaultID = chatlinkcodeDescID.Default.(func() uuid.UUID)
+	conduitprincipalepochFields := schema.ConduitPrincipalEpoch{}.Fields()
+	_ = conduitprincipalepochFields
+	// conduitprincipalepochDescPrincipalKind is the schema descriptor for principal_kind field.
+	conduitprincipalepochDescPrincipalKind := conduitprincipalepochFields[0].Descriptor()
+	// conduitprincipalepoch.PrincipalKindValidator is a validator for the "principal_kind" field. It is called by the builders before save.
+	conduitprincipalepoch.PrincipalKindValidator = conduitprincipalepochDescPrincipalKind.Validators[0].(func(string) error)
+	// conduitprincipalepochDescPrincipalID is the schema descriptor for principal_id field.
+	conduitprincipalepochDescPrincipalID := conduitprincipalepochFields[1].Descriptor()
+	// conduitprincipalepoch.PrincipalIDValidator is a validator for the "principal_id" field. It is called by the builders before save.
+	conduitprincipalepoch.PrincipalIDValidator = conduitprincipalepochDescPrincipalID.Validators[0].(func(string) error)
+	conduitsessionFields := schema.ConduitSession{}.Fields()
+	_ = conduitsessionFields
+	// conduitsessionDescPrincipalKind is the schema descriptor for principal_kind field.
+	conduitsessionDescPrincipalKind := conduitsessionFields[1].Descriptor()
+	// conduitsession.PrincipalKindValidator is a validator for the "principal_kind" field. It is called by the builders before save.
+	conduitsession.PrincipalKindValidator = conduitsessionDescPrincipalKind.Validators[0].(func(string) error)
+	// conduitsessionDescPrincipalID is the schema descriptor for principal_id field.
+	conduitsessionDescPrincipalID := conduitsessionFields[2].Descriptor()
+	// conduitsession.PrincipalIDValidator is a validator for the "principal_id" field. It is called by the builders before save.
+	conduitsession.PrincipalIDValidator = conduitsessionDescPrincipalID.Validators[0].(func(string) error)
+	// conduitsessionDescRelayInstanceID is the schema descriptor for relay_instance_id field.
+	conduitsessionDescRelayInstanceID := conduitsessionFields[4].Descriptor()
+	// conduitsession.RelayInstanceIDValidator is a validator for the "relay_instance_id" field. It is called by the builders before save.
+	conduitsession.RelayInstanceIDValidator = conduitsessionDescRelayInstanceID.Validators[0].(func(string) error)
+	// conduitsessionDescTransport is the schema descriptor for transport field.
+	conduitsessionDescTransport := conduitsessionFields[6].Descriptor()
+	// conduitsession.TransportValidator is a validator for the "transport" field. It is called by the builders before save.
+	conduitsession.TransportValidator = conduitsessionDescTransport.Validators[0].(func(string) error)
+	// conduitsessionDescDraining is the schema descriptor for draining field.
+	conduitsessionDescDraining := conduitsessionFields[10].Descriptor()
+	// conduitsession.DefaultDraining holds the default value on creation for the draining field.
+	conduitsession.DefaultDraining = conduitsessionDescDraining.Default.(bool)
+	// conduitsessionDescCapabilities is the schema descriptor for capabilities field.
+	conduitsessionDescCapabilities := conduitsessionFields[11].Descriptor()
+	// conduitsession.DefaultCapabilities holds the default value on creation for the capabilities field.
+	conduitsession.DefaultCapabilities = conduitsessionDescCapabilities.Default.(json.RawMessage)
+	// conduitsessionDescID is the schema descriptor for id field.
+	conduitsessionDescID := conduitsessionFields[0].Descriptor()
+	// conduitsession.IDValidator is a validator for the "id" field. It is called by the builders before save.
+	conduitsession.IDValidator = conduitsessionDescID.Validators[0].(func(string) error)
 	conversationFields := schema.Conversation{}.Fields()
 	_ = conversationFields
 	// conversationDescExternalRef is the schema descriptor for external_ref field.
@@ -1508,6 +1552,20 @@ func init() {
 	projectsyncstateDescID := projectsyncstateFields[0].Descriptor()
 	// projectsyncstate.DefaultID holds the default value on creation for the id field.
 	projectsyncstate.DefaultID = projectsyncstateDescID.Default.(func() uuid.UUID)
+	relayinstanceFields := schema.RelayInstance{}.Fields()
+	_ = relayinstanceFields
+	// relayinstanceDescInternalEndpoint is the schema descriptor for internal_endpoint field.
+	relayinstanceDescInternalEndpoint := relayinstanceFields[2].Descriptor()
+	// relayinstance.DefaultInternalEndpoint holds the default value on creation for the internal_endpoint field.
+	relayinstance.DefaultInternalEndpoint = relayinstanceDescInternalEndpoint.Default.(string)
+	// relayinstanceDescDraining is the schema descriptor for draining field.
+	relayinstanceDescDraining := relayinstanceFields[6].Descriptor()
+	// relayinstance.DefaultDraining holds the default value on creation for the draining field.
+	relayinstance.DefaultDraining = relayinstanceDescDraining.Default.(bool)
+	// relayinstanceDescID is the schema descriptor for id field.
+	relayinstanceDescID := relayinstanceFields[0].Descriptor()
+	// relayinstance.IDValidator is a validator for the "id" field. It is called by the builders before save.
+	relayinstance.IDValidator = relayinstanceDescID.Validators[0].(func(string) error)
 	rolebindingFields := schema.RoleBinding{}.Fields()
 	_ = rolebindingFields
 	// rolebindingDescPrincipalID is the schema descriptor for principal_id field.

@@ -1091,6 +1091,15 @@ type StartOptions struct {
 	// LabelRunID label. When empty (local/CLI mode, or an older hub) the
 	// agent manager mints a UUID itself, so every new entry carries one.
 	RunID string
+
+	// ResolvedKubernetesServiceAccountName is the Kubernetes ServiceAccount
+	// resolved by the broker from the operator-configured GSA mapping;
+	// applied over the template and persisted config at start, when
+	// non-empty. It is not part of InlineConfig because it must also apply
+	// when starting or restarting an existing agent, whose Kubernetes config
+	// otherwise comes only from the template chain and the persisted config,
+	// not from InlineConfig.
+	ResolvedKubernetesServiceAccountName string
 }
 
 // ResourceHandle identifies one runtime resource created during a launch

@@ -2224,6 +2224,12 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	}
 	mgr, resolvedRuntimeType := s.resolveManagerForOpts(opts)
 	recheckHubDefaultPassthrough(opts.Env, sc.EnvClassifications, resolvedRuntimeType)
+	if sce := rejectKubernetesAssignRuntimeChange(opts, sc.AssignSelection, resolvedRuntimeType, func() dispatchProfileSelection {
+		return s.resolveDispatchProfileSelection(opts)
+	}); sce != nil {
+		s.writeStartContextError(w, sce, "start agent")
+		return
+	}
 	if sce := rejectKubernetesBlock(resolvedRuntimeType, opts.Env["SCION_METADATA_MODE"]); sce != nil {
 		s.writeStartContextError(w, sce, "start agent")
 		return
@@ -2665,6 +2671,12 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// already stopped. See the identical re-check and comment in startAgent.
 	mgr, resolvedRuntimeType := s.resolveManagerForOpts(opts)
 	recheckHubDefaultPassthrough(opts.Env, sc.EnvClassifications, resolvedRuntimeType)
+	if sce := rejectKubernetesAssignRuntimeChange(opts, sc.AssignSelection, resolvedRuntimeType, func() dispatchProfileSelection {
+		return s.resolveDispatchProfileSelection(opts)
+	}); sce != nil {
+		s.writeStartContextError(w, sce, "restart agent")
+		return
+	}
 	if sce := rejectKubernetesBlock(resolvedRuntimeType, opts.Env["SCION_METADATA_MODE"]); sce != nil {
 		s.writeStartContextError(w, sce, "restart agent")
 		return

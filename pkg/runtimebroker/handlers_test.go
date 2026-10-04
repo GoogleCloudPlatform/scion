@@ -1476,7 +1476,10 @@ runtimes:
 }
 
 // envCapturingManager captures the environment variables passed to Start().
-// Used for testing that Hub credentials are properly set.
+// Used for testing that Hub credentials are properly set. The embedded
+// mockManager's own lastStartOpts captures the full options struct, for
+// tests that need a field with no dedicated lastXxx accessor here (e.g.
+// ResolvedKubernetesServiceAccountName).
 type envCapturingManager struct {
 	mockManager
 	lastEnv           map[string]string
