@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
@@ -517,4 +518,61 @@ type RuntimeBrokerSummary struct {
 	Name      string `json:"name"`
 	Status    string `json:"status"`
 	IsDefault bool   `json:"isDefault,omitempty"`
+}
+
+// brokerCodeRuntimeUnavailable is the runtime broker's error code for a 503
+// meaning the runtime that holds the agent is not available on the broker
+// right now — for an existing-agent request, typically because no runtime of
+// the agent's recorded type is registered there (ptone/scion#2748).
+const brokerCodeRuntimeUnavailable = "runtime_unavailable"
+
+// defaultBrokerRuntimeRetryAfter is the Retry-After the hub sends with a
+// relayed runtime_unavailable 503 when the broker gave no usable value.
+const defaultBrokerRuntimeRetryAfter = "30"
+
+// isBrokerRuntimeUnavailable reports whether err is a runtime broker's 503
+// answer with error code runtime_unavailable.
+func isBrokerRuntimeUnavailable(err error) bool {
+	var se *brokerStatusError
+	return errors.As(err, &se) && se.StatusCode == http.StatusServiceUnavailable &&
+		se.brokerErrorCode() == brokerCodeRuntimeUnavailable
+}
+
+// writeBrokerRuntimeUnavailable relays a broker's runtime_unavailable 503 for
+// an existing-agent operation as a retryable 503 (with Retry-After) instead of
+// the generic 502, and reports whether it did; for any other error it writes
+// nothing and returns false. runtime is the agent's recorded runtime type.
+// Like the logs relay, the message is the hub's own text rather than the
+// broker's response body, and the broker's Retry-After is used only if it is
+// a positive number of seconds.
+func writeBrokerRuntimeUnavailable(w http.ResponseWriter, err error, runtime string) bool {
+	if !isBrokerRuntimeUnavailable(err) {
+		return false
+	}
+	w.Header().Set("Retry-After", brokerRuntimeRetryAfter(err))
+	writeError(w, http.StatusServiceUnavailable, brokerCodeRuntimeUnavailable, brokerRuntimeUnavailableMessage(runtime), nil)
+	return true
+}
+
+// brokerRuntimeRetryAfter is the Retry-After to send for a broker's
+// runtime_unavailable answer: the broker's value if it is a positive number
+// of seconds, otherwise defaultBrokerRuntimeRetryAfter.
+func brokerRuntimeRetryAfter(err error) string {
+	var se *brokerStatusError
+	if errors.As(err, &se) {
+		if n, convErr := strconv.Atoi(strings.TrimSpace(se.RetryAfter)); convErr == nil && n > 0 {
+			return strconv.Itoa(n)
+		}
+	}
+	return defaultBrokerRuntimeRetryAfter
+}
+
+// brokerRuntimeUnavailableMessage is the hub's client-facing text for a
+// broker's runtime_unavailable answer; runtime is the agent's recorded
+// runtime type.
+func brokerRuntimeUnavailableMessage(runtime string) string {
+	if rt := dispatchRecordedRuntime(runtime); rt != "" {
+		return fmt.Sprintf("Runtime %q is not available on the agent's runtime broker; retry later or check the broker's runtime configuration", rt)
+	}
+	return "The agent's runtime is not available on its runtime broker; retry later or check the broker's runtime configuration"
 }
