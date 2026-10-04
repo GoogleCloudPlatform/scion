@@ -797,6 +797,11 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 			return createdPod.Name, err
 		}
 		runtimeLog.Info("Agent home prepared", "agent", config.Name, "phase", "home-prepare", "mode", homeMode)
+		if config.HomeDir != "" {
+			if _, err := r.execInPod(ctx, namespace, createdPod.Name, k8sHomeHooksGuardCommand(util.GetHomeDir(config.UnixUsername))); err != nil {
+				return createdPod.Name, fmt.Errorf("agent home check failed: %w", err)
+			}
+		}
 	}
 
 	if config.HomeDir != "" {

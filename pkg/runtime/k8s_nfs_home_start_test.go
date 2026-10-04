@@ -752,7 +752,11 @@ func TestRun_NFSHomeModeAndMarkSeeded(t *testing.T) {
 			if runErr != nil {
 				t.Fatalf("Run: %v (steps %q)", runErr, steps)
 			}
+			guard := idx("sh -c for p in")
 			mark, sync, gate := idx("sciontool home mark-seeded"), idx("home-sync"), idx("touch /tmp/.scion-home-ready")
+			if guard < 0 || guard > sync {
+				t.Errorf("hooks guard must run before the transfer: guard %d, sync %d", guard, sync)
+			}
 			if tc.wantMark != (mark >= 0) {
 				t.Fatalf("mark-seeded run = %v, want %v (steps %q)", mark >= 0, tc.wantMark, steps)
 			}
@@ -768,5 +772,42 @@ func TestRun_NFSHomeModeAndMarkSeeded(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The seed-over transfer is refused when .scion or .scion/hooks is a
+// symbolic link, so hook scripts are never written through a link.
+func TestK8sHomeHooksGuardCommand(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no sh")
+	}
+	run := func(home string) (string, error) {
+		cmd := k8sHomeHooksGuardCommand(home)
+		out, err := exec.Command(cmd[0], cmd[1:]...).CombinedOutput()
+		return string(out), err
+	}
+	home := t.TempDir()
+	if out, err := run(home); err != nil {
+		t.Errorf("empty home refused: %v %s", err, out)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".scion", "hooks"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := run(home); err != nil {
+		t.Errorf("plain .scion/hooks refused: %v %s", err, out)
+	}
+	for _, linked := range []string{".scion/hooks", ".scion"} {
+		h := t.TempDir()
+		target := t.TempDir()
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(h, linked)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(h, linked)); err != nil {
+			t.Fatal(err)
+		}
+		out, err := run(h)
+		if err == nil || !strings.Contains(out, "is a symbolic link") {
+			t.Errorf("%s linked: err %v, output %q", linked, err, out)
+		}
 	}
 }

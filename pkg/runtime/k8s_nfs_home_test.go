@@ -345,14 +345,30 @@ func TestK8sHomeLinkVerifyScript(t *testing.T) {
 		if err := os.Symlink(other, ssh); err != nil {
 			t.Fatal(err)
 		}
-		for _, skipped := range []bool{false, true} {
-			out, err := runLinkVerify(t, home, links, map[string]bool{".ssh/id_rsa": skipped})
-			if err == nil {
-				t.Fatalf("skipped=%v: expected verification to fail", skipped)
-			}
-			if want := "home file check failed at " + ssh + ": parent directory is a symbolic link"; !strings.Contains(out, want) {
-				t.Errorf("skipped=%v: output = %q, want %q", skipped, out, want)
-			}
+		out, err := runLinkVerify(t, home, links, nil)
+		if err == nil {
+			t.Fatal("expected verification to fail")
+		}
+		if want := "home file check failed at " + ssh + ": parent directory is a symbolic link"; !strings.Contains(out, want) {
+			t.Errorf("output = %q, want %q", out, want)
+		}
+		// The link step skips a target behind a linked parent; such a
+		// target is not checked.
+		if out, err := runLinkVerify(t, home, links, map[string]bool{".ssh/id_rsa": true}); err != nil {
+			t.Errorf("skipped target behind a linked parent refused: %v %s", err, out)
+		}
+	})
+
+	t.Run("recorded_skip_directory_or_missing", func(t *testing.T) {
+		home, links := setup(t)
+		if out, err := runLinkVerify(t, home, links, map[string]bool{".ssh/id_rsa": true}); err != nil {
+			t.Errorf("skipped missing target refused: %v %s", err, out)
+		}
+		if err := os.Mkdir(filepath.Join(home, ".ssh/id_rsa"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := runLinkVerify(t, home, links, map[string]bool{".ssh/id_rsa": true}); err != nil {
+			t.Errorf("skipped directory target refused: %v %s", err, out)
 		}
 	})
 
@@ -389,12 +405,11 @@ func TestK8sHomeLinkVerifyScript(t *testing.T) {
 			}
 		}, false, "symbolic link does not point to the staged file"},
 		{"missing", func(*testing.T, string, string) {}, false, "missing"},
-		{"skip_recorded_but_directory", func(t *testing.T, target, _ string) {
+		{"directory", func(t *testing.T, target, _ string) {
 			if err := os.Mkdir(target, 0o700); err != nil {
 				t.Fatal(err)
 			}
-		}, true, "expected a symbolic link to the staged file or a user file, found a directory"},
-		{"skip_recorded_but_missing", func(*testing.T, string, string) {}, true, "missing"},
+		}, false, "expected a symbolic link to the staged file"},
 	}
 	for _, tc := range fails {
 		t.Run(tc.name, func(t *testing.T) {
@@ -453,10 +468,10 @@ func TestPlaceK8sHomeFiles_LinkModeVerifiesOnly(t *testing.T) {
 	if strings.Contains(cmds[1], "place ") || strings.Contains(cmds[1], "cp ") {
 		t.Errorf("link mode ran a copy: %q", cmds[1])
 	}
-	if !strings.Contains(cmds[1], "check '/home/scion/.gemini/oauth_creds.json' '/run/scion/agent-secrets/GEMINI_OAUTH' 1") {
-		t.Errorf("recorded skip not passed: %q", cmds[1])
+	if strings.Contains(cmds[1], "/home/scion/.gemini/oauth_creds.json") {
+		t.Errorf("recorded skip was checked: %q", cmds[1])
 	}
-	if !strings.Contains(cmds[1], "check '/home/scion/.ssh/id_rsa' '/run/scion/agent-secrets/SSH_KEY' 0") {
+	if !strings.Contains(cmds[1], "check '/home/scion/.ssh/id_rsa' '/run/scion/agent-secrets/SSH_KEY'\n") {
 		t.Errorf("link check missing: %q", cmds[1])
 	}
 

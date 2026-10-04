@@ -219,12 +219,13 @@ type k8sHomeLinkResult struct {
 const k8sHomeLinkSkipped = "skipped"
 
 // k8sHomeLinkVerifyScript returns a POSIX shell script that checks each
-// link target under home without following links. Every directory between
-// home and a target must not be a symbolic link. A target that is not in
-// skipped must be a symbolic link to its staged source. A target in skipped
-// holds a user file the link step kept, and may be any entry except a
-// directory (a regular file, or the user's own symbolic link). Anything else
-// fails, naming the path. The script reads and writes nothing else.
+// link target under home without following links. For a target that is not
+// in skipped, every directory between home and the target must not be a
+// symbolic link, and the target must be a symbolic link to its staged
+// source. A target in skipped is one the link step left alone (a user's
+// file, link or directory at the target, or a parent that is a symbolic
+// link or not a directory) and is not checked. Anything else fails, naming
+// the path. The script reads and writes nothing else.
 func k8sHomeLinkVerifyScript(home string, links []k8sHomeLink, skipped map[string]bool) string {
 	var b strings.Builder
 	b.WriteString(`fail() {
@@ -237,17 +238,7 @@ parent() {
 	fi
 }
 check() {
-	t=$1; src=$2; skip=$3
-	if [ "$skip" = 1 ]; then
-		if [ -L "$t" ]; then
-			return 0
-		elif [ -d "$t" ]; then
-			fail "$t" "expected a symbolic link to the staged file or a user file, found a directory"
-		elif [ -e "$t" ]; then
-			return 0
-		fi
-		fail "$t" "missing"
-	fi
+	t=$1; src=$2
 	if [ -L "$t" ]; then
 		l=$(readlink "$t") || fail "$t" "cannot read symbolic link"
 		[ "$l" = "$src" ] || fail "$t" "symbolic link does not point to the staged file"
@@ -260,17 +251,16 @@ check() {
 `)
 	seen := map[string]bool{}
 	for _, l := range links {
+		if skipped[l.Target] {
+			continue
+		}
 		for _, dir := range homeLinkParents(l.Target) {
 			if !seen[dir] {
 				seen[dir] = true
 				fmt.Fprintf(&b, "parent %s\n", shellQuote(path.Join(home, dir)))
 			}
 		}
-		skip := "0"
-		if skipped[l.Target] {
-			skip = "1"
-		}
-		fmt.Fprintf(&b, "check %s %s %s\n", shellQuote(path.Join(home, l.Target)), shellQuote(l.Source), skip)
+		fmt.Fprintf(&b, "check %s %s\n", shellQuote(path.Join(home, l.Target)), shellQuote(l.Source))
 	}
 	return b.String()
 }
@@ -784,4 +774,17 @@ func acquireHomeStartLock(ctx context.Context, config RunConfig) (func(), error)
 			}
 		})
 	}, nil
+}
+
+// k8sHomeHooksGuardCommand fails when .scion or .scion/hooks in the home is
+// a symbolic link, so the seed-over transfer never writes hook scripts
+// through a link. It runs before the transfer, while no agent process runs
+// in the pod.
+func k8sHomeHooksGuardCommand(home string) []string {
+	return []string{"sh", "-c", `for p in "$1/.scion" "$1/.scion/hooks"; do
+	if [ -L "$p" ]; then
+		echo "home_prepare_failed: $p is a symbolic link in the agent home; the home is not transferred through it" >&2
+		exit 1
+	fi
+done`, "sh", home}
 }
