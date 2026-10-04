@@ -335,6 +335,9 @@ const (
 	k8sHomeLeafContainer = "home-leaf"
 	// k8sHomePrepareContainer prepares the home at every start.
 	k8sHomePrepareContainer = "home-prepare"
+	// k8sWorkspaceProvisionContainer is the workspace provisioning init
+	// container buildPod adds for NFS workspaces.
+	k8sWorkspaceProvisionContainer = "workspace-provision"
 	// k8sHomePrepareMount and k8sHomeAgentDirMount are where those init
 	// containers mount the home and the agent directory.
 	k8sHomePrepareMount  = "/scion-home"
@@ -528,18 +531,27 @@ type homeMountRules struct {
 	home      string             // home path in the agent container
 	mount     corev1.VolumeMount // the agent container's home mount
 	agentDir  string             // <root>/<pid>/agents/<slug> on the export
+	agentsDir string             // <root>/<pid>/agents on the export
 	forbidden map[string]bool    // export paths no container may mount
+	// provisionMount, when set, is the exact mount of the agent directory
+	// the clone-per-agent workspace provisioning init container uses.
+	provisionMount *corev1.VolumeMount
 }
 
-func newHomeMountRules(home string, mount corev1.VolumeMount, hs *HomeStorageRealization) (homeMountRules, error) {
+func newHomeMountRules(home string, mount corev1.VolumeMount, hs *HomeStorageRealization, provisionMount *corev1.VolumeMount) (homeMountRules, error) {
 	agentDir, _, err := NFSHomeSubPaths(hs.SubPathRoot, hs.ProjectID, hs.AgentSlug, hs.AgentID)
 	if err != nil {
 		return homeMountRules{}, err
 	}
 	project := filepath.Join(hs.SubPathRoot, hs.ProjectID)
+	forbidden := map[string]bool{"": true, ".": true, "/": true, project: true, filepath.Join(project, "agents"): true}
+	// The subpath root and every ancestor of it.
+	for p := hs.SubPathRoot; p != "." && p != "/" && p != ""; p = filepath.Dir(p) {
+		forbidden[p] = true
+	}
 	return homeMountRules{
-		home: home, mount: mount, agentDir: agentDir,
-		forbidden: map[string]bool{"": true, ".": true, "/": true, hs.SubPathRoot: true, project: true, filepath.Join(project, "agents"): true},
+		home: home, mount: mount, agentDir: agentDir, agentsDir: filepath.Join(project, "agents"),
+		forbidden: forbidden, provisionMount: provisionMount,
 	}, nil
 }
 
@@ -548,15 +560,17 @@ func newHomeMountRules(home string, mount corev1.VolumeMount, hs *HomeStorageRea
 //     on the agent container;
 //   - no container mounts the home volume at the export root, the subpath
 //     root, the project directory or its agents directory;
-//   - only the home-leaf init container (and the workspace provisioning
-//     init container, which already mounts the agent directory of a
-//     clone-per-agent workspace) mounts the agent directory.
+//   - no container mounts another agent's directory or anything in it;
+//   - only the home-leaf init container mounts the agent directory, and,
+//     for a clone-per-agent workspace on the same claim, the workspace
+//     provisioning init container with exactly the mount buildPod gives
+//     it.
 //
 // On an NFS-home pod the home is the export, so another mount there would
 // hide it or be created inside it, and a wider mount of the home volume
 // would expose other agents' homes.
 func checkHomeMounts(pod *corev1.Pod, rules homeMountRules) error {
-	check := func(container string, mounts []corev1.VolumeMount, isAgent, mayMountAgentDir bool) error {
+	check := func(container string, mounts []corev1.VolumeMount, isAgent bool, mayMountAgentDir func(corev1.VolumeMount) bool) error {
 		for _, vm := range mounts {
 			p := path.Clean(vm.MountPath)
 			if (p == rules.home || strings.HasPrefix(p, rules.home+"/")) && (!isAgent || vm != rules.mount) {
@@ -570,15 +584,19 @@ func checkHomeMounts(pod *corev1.Pod, rules homeMountRules) error {
 			if vm.SubPath == "" || rules.forbidden[sub] {
 				return fmt.Errorf("container %q mounts the home volume %q at export path %q; with home storage %q that path is not mounted", container, vm.Name, vm.SubPath, HomeStorageNFS)
 			}
-			if sub == rules.agentDir && !mayMountAgentDir {
+			if rest, ok := strings.CutPrefix(sub, rules.agentsDir+"/"); ok && rules.agentsDir+"/"+strings.SplitN(rest, "/", 2)[0] != rules.agentDir {
+				return fmt.Errorf("container %q mounts %q of the home volume, which belongs to another agent", container, vm.SubPath)
+			}
+			if sub == rules.agentDir && !mayMountAgentDir(vm) {
 				return fmt.Errorf("container %q mounts the agent directory %q of the home volume; with home storage %q only the home-leaf init container mounts it", container, vm.SubPath, HomeStorageNFS)
 			}
 		}
 		return nil
 	}
 	found := 0
+	never := func(corev1.VolumeMount) bool { return false }
 	for i, c := range pod.Spec.Containers {
-		if err := check(c.Name, c.VolumeMounts, i == 0, false); err != nil {
+		if err := check(c.Name, c.VolumeMounts, i == 0, never); err != nil {
 			return err
 		}
 		if i == 0 {
@@ -590,8 +608,14 @@ func checkHomeMounts(pod *corev1.Pod, rules homeMountRules) error {
 		}
 	}
 	for _, c := range pod.Spec.InitContainers {
-		mayMountAgentDir := c.Name == k8sHomeLeafContainer || c.Name == "workspace-provision"
-		if err := check(c.Name, c.VolumeMounts, false, mayMountAgentDir); err != nil {
+		may := never
+		switch c.Name {
+		case k8sHomeLeafContainer:
+			may = func(corev1.VolumeMount) bool { return true }
+		case k8sWorkspaceProvisionContainer:
+			may = func(vm corev1.VolumeMount) bool { return rules.provisionMount != nil && vm == *rules.provisionMount }
+		}
+		if err := check(c.Name, c.VolumeMounts, false, may); err != nil {
 			return err
 		}
 	}

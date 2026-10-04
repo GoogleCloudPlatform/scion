@@ -2135,6 +2135,10 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	agentVolumeMounts := []corev1.VolumeMount{workspaceVolumeMount}
 	agentWorkingDir := "/workspace"
 	initWorkspaceMount := workspaceVolumeMount
+	// provisionAgentDirMount is the provisioning container's mount of the
+	// agent directory (clone-per-agent only), which the home mount guard
+	// allows.
+	var provisionAgentDirMount *corev1.VolumeMount
 	nfsAgentDir := config.NFSAgentDirName != "" && nfsInitContainerInjected(config)
 	if nfsAgentDir && nfsWorktree {
 		return nil, fmt.Errorf("an agent cannot use both a worktree and its own workspace on the NFS workspace")
@@ -2153,6 +2157,8 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			{Name: "workspace", MountPath: "/workspace", SubPath: filepath.Join(agentDirSubPath, provision.AgentWorkspaceDir)},
 		}
 		initWorkspaceMount = corev1.VolumeMount{Name: "workspace", MountPath: "/workspace", SubPath: agentDirSubPath}
+		m := initWorkspaceMount
+		provisionAgentDirMount = &m
 	}
 	if nfsWorktree {
 		// Same layout as the local runtimes: the shared .git at
@@ -2405,7 +2411,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 
 		initContainer := corev1.Container{
-			Name:            "workspace-provision",
+			Name:            k8sWorkspaceProvisionContainer,
 			Image:           config.Image,
 			Command:         initCommand,
 			Env:             initEnv,
@@ -2748,7 +2754,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	}
 
 	if nfsHome {
-		rules, err := newHomeMountRules(containerHome, homeParts.mount, config.HomeStorage)
+		rules, err := newHomeMountRules(containerHome, homeParts.mount, config.HomeStorage, provisionAgentDirMount)
 		if err != nil {
 			return nil, err
 		}

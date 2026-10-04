@@ -284,7 +284,8 @@ func TestCheckHomeMounts(t *testing.T) {
 	home := "/home/scion"
 	hs := &HomeStorageRealization{SubPathRoot: "p", ProjectID: "x", AgentSlug: "a", AgentID: testHomeAgentID}
 	homeMount := corev1.VolumeMount{Name: k8sHomeVolume, MountPath: home, SubPath: "p/x/agents/a/home-" + testHomeAgentID}
-	rules, err := newHomeMountRules(home, homeMount, hs)
+	provision := corev1.VolumeMount{Name: k8sHomeVolume, MountPath: "/workspace", SubPath: "p/x/agents/a"}
+	rules, err := newHomeMountRules(home, homeMount, hs, &provision)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,6 +326,10 @@ func TestCheckHomeMounts(t *testing.T) {
 		"agent dir on the agent":      pod([]corev1.VolumeMount{homeMount, homeVol("p/x/agents/a")}),
 		"agent dir on another init":   pod([]corev1.VolumeMount{homeMount}, corev1.Container{Name: k8sHomePrepareContainer, VolumeMounts: []corev1.VolumeMount{homeVol("p/x/agents/a")}}),
 		"export root on an init":      pod([]corev1.VolumeMount{homeMount}, corev1.Container{Name: k8sHomeLeafContainer, VolumeMounts: []corev1.VolumeMount{homeVol("")}}),
+		"provision with another path": pod([]corev1.VolumeMount{homeMount}, corev1.Container{Name: k8sWorkspaceProvisionContainer, VolumeMounts: []corev1.VolumeMount{{Name: k8sHomeVolume, MountPath: "/other", SubPath: "p/x/agents/a"}}}),
+		"another agent's dir":         pod([]corev1.VolumeMount{homeMount, homeVol("p/x/agents/b")}),
+		"another agent's home":        pod([]corev1.VolumeMount{homeMount, homeVol("p/x/agents/b/home-" + testHomeAgentID)}),
+		"another agent's dir on leaf": pod([]corev1.VolumeMount{homeMount}, corev1.Container{Name: k8sHomeLeafContainer, VolumeMounts: []corev1.VolumeMount{homeVol("p/x/agents/b")}}),
 	} {
 		if err := checkHomeMounts(p, rules); err == nil {
 			t.Errorf("%s: accepted", name)
@@ -921,7 +926,12 @@ func TestRun_NFSHomeHarnessSecretsStagedInMemory(t *testing.T) {
 		}
 		return -1
 	}
-	mk, tr, gate := idx("sh -c mkdir -p "+k8sHarnessSecretsDir), idx("transfer "+k8sHarnessSecretsDir), idx("touch /tmp/.scion-home-ready")
+	mk, tr, gate := -1, idx("transfer "+k8sHarnessSecretsDir), idx("touch /tmp/.scion-home-ready")
+	for i, s := range steps {
+		if s == "sh -c mkdir -p /run/scion/mem/harness-secrets && chmod 0700 /run/scion/mem/harness-secrets" {
+			mk = i
+		}
+	}
 	if mk < 0 || mk > tr || tr > gate {
 		t.Errorf("order: mkdir %d, secrets transfer %d, gate %d", mk, tr, gate)
 	}
@@ -1166,4 +1176,112 @@ func captureStdout(t *testing.T, f func()) string {
 	f()
 	_ = w.Close()
 	return <-done
+}
+
+// With a shared mode (no clone-per-agent provisioning mount), the
+// provisioning container may not mount the agent directory; a two-component
+// subpath root forbids each of its ancestors.
+func TestCheckHomeMounts_SharedModeAndNestedRoot(t *testing.T) {
+	home := "/home/scion"
+	hs := &HomeStorageRealization{SubPathRoot: "a/b", ProjectID: "x", AgentSlug: "s", AgentID: testHomeAgentID}
+	homeMount := corev1.VolumeMount{Name: k8sHomeVolume, MountPath: home, SubPath: "a/b/x/agents/s/home-" + testHomeAgentID}
+	rules, err := newHomeMountRules(home, homeMount, hs, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pod := func(extra ...corev1.Container) *corev1.Pod {
+		return &corev1.Pod{Spec: corev1.PodSpec{
+			Containers:     []corev1.Container{{Name: "agent", VolumeMounts: []corev1.VolumeMount{homeMount}}},
+			InitContainers: extra,
+		}}
+	}
+	if err := checkHomeMounts(pod(), rules); err != nil {
+		t.Fatalf("valid pod rejected: %v", err)
+	}
+	provision := corev1.Container{Name: k8sWorkspaceProvisionContainer, VolumeMounts: []corev1.VolumeMount{{Name: k8sHomeVolume, MountPath: "/workspace", SubPath: "a/b/x/agents/s"}}}
+	if err := checkHomeMounts(pod(provision), rules); err == nil {
+		t.Error("shared mode: the provisioning container mounting the agent directory was accepted")
+	}
+	for _, sub := range []string{"a", "a/b", "a/b/x", "a/b/x/agents", "a/b/x/agents/other"} {
+		c := corev1.Container{Name: k8sHomeLeafContainer, VolumeMounts: []corev1.VolumeMount{{Name: k8sHomeVolume, MountPath: "/mnt", SubPath: sub}}}
+		if err := checkHomeMounts(pod(c), rules); err == nil {
+			t.Errorf("subPath %q accepted", sub)
+		}
+	}
+}
+
+// A clone-per-agent workspace on the same claim as the home builds: the
+// provisioning container's own mount of the agent directory is accepted.
+func TestBuildPod_NFSHomeClonePerAgentSharedClaim(t *testing.T) {
+	rt, _, _ := newTestK8sRuntime()
+	cfg := nfsHomeTestConfig(true)
+	cfg.Name = "a"
+	cfg.WorkspaceBackendName = "nfs"
+	cfg.NFSPVClaimName = "home-pvc"
+	cfg.NFSSubPath = "projects/" + testHomeProjectID + "/workspace"
+	cfg.NFSAgentDirName = "a"
+	pod, err := rt.buildPod("default", cfg)
+	if err != nil {
+		t.Fatalf("buildPod: %v", err)
+	}
+	found := false
+	for _, c := range pod.Spec.InitContainers {
+		if c.Name == k8sWorkspaceProvisionContainer {
+			for _, vm := range c.VolumeMounts {
+				if vm.SubPath == "projects/"+testHomeProjectID+"/agents/a" && vm.MountPath == "/workspace" {
+					found = true
+				}
+			}
+		}
+	}
+	if !found {
+		t.Errorf("provisioning container does not mount the agent directory: %+v", pod.Spec.InitContainers)
+	}
+}
+
+// For an NFS-home start the previous pod's Secrets are deleted after the
+// pod is confirmed stopped and before the new pod is created.
+func TestRun_NFSHomeSecretDeleteBetweenConfirmAndCreate(t *testing.T) {
+	rt, cs, _ := newTestK8sRuntime()
+	cfg := nfsHomeTestConfig(true)
+	cfg.Name = "a"
+	adc := filepath.Join(t.TempDir(), "adc.json")
+	if err := os.WriteFile(adc, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.ResolvedAuth.Files[0].SourcePath = adc
+	if _, err := cs.CoreV1().Pods("default").Create(context.Background(), runningNFSHomePod("a"), metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	keepPodsOnDelete(cs)
+	start := time.Unix(1000, 0)
+	fc := &fakeTerminationClock{now: start}
+	gone := false
+	fc.onTick = func(now time.Time) {
+		if !gone && now.Sub(start) >= 20*time.Second {
+			gone = true
+			_ = cs.Tracker().Delete(corev1.SchemeGroupVersion.WithResource("pods"), "default", "a")
+		}
+	}
+	rt.execReadyClock = fc.clock()
+	cs.PrependReactor("create", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, errors.New("stop here")
+	})
+	if _, err := rt.Run(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), "stop here") {
+		t.Fatalf("Run: %v", err)
+	}
+	lastPodGet, secretDelete, podCreate := -1, -1, -1
+	for i, a := range cs.Actions() {
+		switch {
+		case a.GetResource().Resource == "pods" && a.GetVerb() == "get":
+			lastPodGet = i
+		case a.GetResource().Resource == "secrets" && a.GetVerb() == "delete" && secretDelete < 0:
+			secretDelete = i
+		case a.GetResource().Resource == "pods" && a.GetVerb() == "create":
+			podCreate = i
+		}
+	}
+	if secretDelete < 0 || lastPodGet >= secretDelete || secretDelete >= podCreate {
+		t.Errorf("order: last pod read %d, secret delete %d, pod create %d", lastPodGet, secretDelete, podCreate)
+	}
 }
