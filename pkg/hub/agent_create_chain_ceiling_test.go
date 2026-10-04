@@ -612,11 +612,12 @@ func (f *legacyFixture) assignBody(slug string) map[string]interface{} {
 	}
 }
 
-// assertSAGateDenied asserts the SA gate's generic 403.
-func assertSAGateDenied(t *testing.T, rec *httptest.ResponseRecorder) {
+// assertSAGateUnrecordedDenied asserts the SA gate's 403 for a delegation
+// chain with an unrecorded hop.
+func assertSAGateUnrecordedDenied(t *testing.T, rec *httptest.ResponseRecorder) {
 	t.Helper()
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Equal(t, saAssignGenericForbiddenMsg, decodeTargetAPIError(t, rec).Message)
+	assert.Equal(t, scaUnrecordedDenyMsg, decodeTargetAPIError(t, rec).Message)
 }
 
 // agentIdentityFor returns the request identity for a production token.
@@ -628,7 +629,7 @@ func (f *chainFixture) agentIdentityFor(t *testing.T, token string) *agentIdenti
 }
 
 // assertGateUnrecorded asserts that the SA gate denies the token's agent at
-// surface with the generic SA-assign message, and that the gate's
+// surface with the unrecorded-provenance message, and that the gate's
 // CheckAccess denies with ceiling_unrecorded.
 func (f *legacyFixture) assertGateUnrecorded(t *testing.T, token, surface string) {
 	t.Helper()
@@ -639,7 +640,7 @@ func (f *legacyFixture) assertGateUnrecorded(t *testing.T, token, surface string
 	rec := httptest.NewRecorder()
 	r := httptest.NewRequest(http.MethodPatch, "/api/v1/agents/"+identity.ID(), nil).WithContext(ctx)
 	require.False(t, f.srv.authorizeSAAssignment(rec, r, f.sa, surface))
-	assertSAGateDenied(t, rec)
+	assertSAGateUnrecordedDenied(t, rec)
 }
 
 // An agent whose only edge is unrecorded: a create that takes the project
@@ -650,7 +651,7 @@ func TestLegacyAgentChildWithDefaultSADenied(t *testing.T) {
 	f.setProjectAnnotation(t, projectSettingDefaultGCPIdentitySAID, f.sa.ID)
 	token := f.agentToken(t, f.legacy.ID)
 	writesBefore := countCreateWrites(t, f.store, f.proj.ID)
-	assertSAGateDenied(t, f.createAsParent(t, token, CreateAgentRequest{Name: "legacy-dsa-c"}))
+	assertSAGateUnrecordedDenied(t, f.createAsParent(t, token, CreateAgentRequest{Name: "legacy-dsa-c"}))
 	assertAgentCreateWroteNothing(t, f.store, f.proj.ID, "legacy-dsa-c", f.legacy.ID, 0, writesBefore)
 	f.assertGateUnrecorded(t, token, SurfaceAgentCreate)
 }
@@ -661,7 +662,7 @@ func TestLegacyAgentChildWithExplicitSADenied(t *testing.T) {
 	f := newLegacyFixture(t, "legacy-esa")
 	token := f.agentToken(t, f.legacy.ID)
 	writesBefore := countCreateWrites(t, f.store, f.proj.ID)
-	assertSAGateDenied(t, f.createAsParent(t, token, f.assignBody("legacy-esa-c")))
+	assertSAGateUnrecordedDenied(t, f.createAsParent(t, token, f.assignBody("legacy-esa-c")))
 	assertAgentCreateWroteNothing(t, f.store, f.proj.ID, "legacy-esa-c", f.legacy.ID, 0, writesBefore)
 	f.assertGateUnrecorded(t, token, SurfaceAgentCreate)
 }
@@ -692,7 +693,7 @@ func TestLegacyParentDescendantInheritsUnrecordedDenial(t *testing.T) {
 	token := f.agentToken(t, child.ID)
 
 	writesBefore := countCreateWrites(t, f.store, f.proj.ID)
-	assertSAGateDenied(t, f.createAsParent(t, token, f.assignBody("legacy-desc-esa")))
+	assertSAGateUnrecordedDenied(t, f.createAsParent(t, token, f.assignBody("legacy-desc-esa")))
 	assertAgentCreateWroteNothing(t, f.store, f.proj.ID, "legacy-desc-esa", child.ID, 0, writesBefore)
 
 	grand, _ := f.createdAgent(t, f.createAsParent(t, token, CreateAgentRequest{Name: "legacy-desc-gc"}), "legacy-desc-gc")
@@ -704,7 +705,7 @@ func TestLegacyParentDescendantInheritsUnrecordedDenial(t *testing.T) {
 	f.setProjectAnnotation(t, projectSettingDefaultGCPIdentityMode, store.GCPMetadataModeAssign)
 	f.setProjectAnnotation(t, projectSettingDefaultGCPIdentitySAID, f.sa.ID)
 	writesBefore = countCreateWrites(t, f.store, f.proj.ID)
-	assertSAGateDenied(t, f.createAsParent(t, token, CreateAgentRequest{Name: "legacy-desc-dsa"}))
+	assertSAGateUnrecordedDenied(t, f.createAsParent(t, token, CreateAgentRequest{Name: "legacy-desc-dsa"}))
 	assertAgentCreateWroteNothing(t, f.store, f.proj.ID, "legacy-desc-dsa", child.ID, 1, writesBefore)
 	f.assertGateUnrecorded(t, token, SurfaceAgentCreate)
 }

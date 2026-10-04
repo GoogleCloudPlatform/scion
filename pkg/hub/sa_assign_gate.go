@@ -329,13 +329,19 @@ const saAssignGenericForbiddenMsg = "You don't have permission to assign this GC
 // test can drive every DenyCause value, including one no constant names,
 // without going through the full evaluateSAAssignment call chain.
 //
-// The two ceiling messages name "a principal in its delegation chain" rather
-// than "the principal that created it": cause is set (and propagated) at
+// The orphaned and lacks-permission messages name "a principal in its
+// delegation chain" rather than "the principal that created it": cause is
+// set (and propagated) at
 // every depth of walkDelegationChain's recursion (authz_delegation_ceiling.go),
 // so the failing link can be the agent's own creator or any creator further
 // up the chain. Saying "the principal that created it" would be false
 // whenever the failure is a grandparent or higher — see the DenyCause doc
 // comment on authz.go, which already says "directly or transitively".
+//
+// DenyCauseCeilingUnrecorded names the usual origin of the cause, an agent
+// created before provenance was recorded, and the supported remedy. The same
+// cause also covers a hop whose provenance version this binary does not
+// interpret (hopEffectCeilingDeny); the remedy is the same for both.
 //
 // DenyCauseCeilingError and any unrecognised cause (including "", the zero
 // value) fall through to the generic message: a store fault is
@@ -351,6 +357,10 @@ func saAssignForbiddenMessage(cause DenyCause) string {
 		return "This agent cannot assign service accounts: a principal in its delegation chain " +
 			"(the user or agent that created it, or one of their creators) does not hold permission " +
 			"to assign this service account."
+	case DenyCauseCeilingUnrecorded:
+		return "This agent cannot assign service accounts: its delegation chain includes an agent " +
+			"created without recorded provenance (this agent or one of the agents that created it). " +
+			"Recreate the agent, or have an authorized user reincarnate it."
 	default:
 		return saAssignGenericForbiddenMsg
 	}
