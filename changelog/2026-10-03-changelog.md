@@ -1,0 +1,41 @@
+# Release Notes (2026-10-03)
+
+A new Substrate runtime runs agents as Agent Substrate actors on GKE. Non-git projects gain an empty-per-agent workspace mode, end to end. Agent delete became an asynchronous, failure-aware lifecycle, and the hub's message pipeline got a broad correctness pass. The timezone refactor reached the CLI, the Configure page and the rest of the web UI.
+
+## ⚠️ BREAKING CHANGES
+* **`SCION_*` and `GCE_METADATA_*` are reserved env targets** (#2372): Hub secret and env-var writes to these names are rejected, and existing values are dropped at dispatch and on the broker. Runtime-set values win on collision. The hub now always sends an explicit `SCION_METADATA_MODE` (default `block`), and the broker downgrades an elevated mode that lacks the hub's source marker.
+* **Agent delete can return 202** (#2391, #2399, #2351): `DELETE` on an agent returns 204 when done, 202 if teardown is still running after about 20s, and 502/503 with a code on failure. A failed delete leaves a marker that blocks start, restart, wake and reincarnate (409 `delete_in_progress`) until it's retried or forced. `scion delete` and `stop --rm` now wait for confirmation before removing the local worktree. API clients that can't tell 202 from 204 should poll until the agent is gone.
+* **GCP identity `assign` on Kubernetes uses Workload Identity** (#2364): The pod runs as a Kubernetes ServiceAccount that the operator has already bound to the GSA, instead of using the metadata emulator. Configure `kubernetes_service_account_mappings` (GSA to KSA) on the runtime entry or profile in the broker's global settings. Scion doesn't create KSAs or grant IAM. Mismatched namespaces or `serviceAccountName` values return 400.
+* **Project members groups are system-managed** (#2369): Members groups are now created without an owner, and a startup backfill clears the owner on existing ones. Changing a members group through the group API is hub-admin-only. Manage membership through the project members endpoints.
+
+## 🚀 Features
+* **Substrate runtime** (#2376): A `substrate` runtime runs each agent as an Agent Substrate actor on GKE, backed by the ateapi control plane and the atenet router. It includes an in-actor `sciontool substrate-serve` control server running with the enforced privilege drop, egress checked against the operator's `egress_allow`, and cluster and broker manifests plus operations docs under `deploy/substrate/`.
+* **Empty-per-agent workspaces for non-git projects** (#2365, #2390, #2397, #2409): A non-git project with `workspaceMode=per-agent` gives each agent a private, initially empty directory. The New Project dialog adds "Empty directory per agent", and `scion hub projects create --workspace-mode` supports it. Brokers advertise the `emptyPerAgentWorkspace` capability, and dispatch fails with 412 where it isn't supported (such as Cloud Run).
+* **Template-aware Create Project dialog** (#2371, #2368): "Start from" lists project templates and clones the chosen one, with an optional git remote override. Cloning with an override now actually uses the new repo.
+* **Timezones in the CLI and the rest of the UI** (#2377, #2387, #2357, #2373, #2374, #2395): CLI times always include a zone, with global `--tz <IANA>` and `--utc` flags; JSON output stays UTC. The agent Configure page has a Timezone row with Pin and Unpin, available in every phase. Lists, admin, access-boundary, log, chat and file-browser views all format times in the display zone with a 24h clock. A `make time-literals` gate fixed 30 server-side sites.
+* **Timezone maintenance operations** (#2403, #2388): `utc-timestamp-normalize` rewrites legacy stored timestamps to UTC (a startup check reports when it's needed). The optional `applied-config-tz-cleanup` converts saved agent TZ values into explicit pins.
+* **Kubernetes and shared-dir settings** (#2380, #2393, #2356): An opt-in `safe_to_evict: false` keeps agent pods from autoscaler eviction (extended run time on Autopilot). `shared_dir_storage_backend` (`local` or `nfs`) can be set per runtime or profile, so one broker can keep Docker agents local and Kubernetes agents on NFS. The broker now reconciles NFS mounts, with a new `workspace_storage.nfs.auto_mount` setting, per-share healthz, and `scion doctor` checks.
+* **Compact agent lists** (#2396): `view=compact` on `GET /api/v1/agents` and the project agents list drops `appliedConfig`, which roughly halves the response at 500 agents. Paging, capabilities and authorization are unchanged.
+* **Jump to agent on the graph** (#2361): Cmd/Ctrl+K on graph views opens an agents-only palette. Picking an agent expands its ancestors, then centers and highlights it.
+* **Transport credential diagnostics** (#2382): `sciontool doctor` reports the transport credential's source, expiry and last refresh. `reset-auth` also delivers a fresh transport credential, and refresh mint failures are surfaced.
+* **Groundwork** (#2401, #2404, #2342): The Conduit wire protocol, session library and session registry (three new empty tables), plus a declarative per-harness `thinking:` block. Nothing uses them yet.
+
+## 🔒 Security
+* **User access tokens gated on boundary and live authority** (#2407): Every bearer request checks the token's boundary, target scope, exact permission ceiling, current project access and live user authority. Any error denies. Tokens can now be minted with an explicit hub boundary. `broker:create` is mintable only on hub-bound tokens.
+* **Frozen delegation ceilings with provenance** (#2355): Agent create records where the agent's authority came from and caps the child role to the creating credential's ceiling, in one transaction. The delegation walk applies each hop's frozen ceiling, and permissions that require recorded provenance are denied on older, unrecorded edges. Agent token mint and refresh filter scopes by the chain ceiling.
+* **Project owners and admins can open members' exposed ports** (#2379): The built-in `project-owner` and `project-admin` roles (revision 5, reconciled at startup) gain `agent.port_access` for oversight. Attach, exec, env and port registration stay denied. *(Credit: miller79)*
+
+## 🐛 Fixes
+* **Message pipeline correctness** (#2370): Message failures are recorded even when the request is cancelled or the broker times out. Async failures mark the right message row. Undeliverable group members are stored as failed with a reason. User notifications are stored exactly once. Broker failure reasons are sanitized on every path. The Stop hook mirrors agent replies to the agent's creating user explicitly. Sub-agent transcripts are no longer mirrored, and human callers now see `senderProjectId` and `recipientProjectId`.
+* **Expired transport credential in in-agent clients** (#2347): Hooks, `sciontool status`, the git credential helper, the in-agent CLI and port-forward kept sending the bootstrap credential after it expired. The refreshed credential is now written to `~/.scion/transport-token` and shared with all of them.
+* **Provisioner fixes reach existing nodes** (#2405): Harness-config seeding always refreshes `provision.py`, `scion_harness.py` and `capture_auth.py`. A non-force `harness-config upgrade` refreshes changed scripts and keeps a backup of each.
+* **Chat space members list every agent** (#2389): The members rail stopped at 200 agents. It now walks all pages, using the same authorization as the agent list.
+* **Faster skill resolution** (#2353): A create's GitHub skill refs resolve up to four at a time instead of one after another.
+* **Binary-tier updates from the server config page** (#2350): The update banner runs `update-binary` on single-node VM deployments instead of always running `rebuild-server`.
+* **Chat image preview after reconnect** (#2343): The expanded preview no longer shows a broken image.
+
+## 🔧 CI & Infrastructure
+* **CI offload, phase 0** (#2402): The full test suite now runs on pushes to main, nightly and on demand instead of on PRs. Per-PR runs cancel superseded runs. Watch the post-merge Full Test Suite for failures outside test-fast and hub-sqlite.
+
+## 📖 Docs
+* **Structured markdown in agent messages** (#2411): The `scion-messaging` skill now requires a bold headline, bullets and bulleted choices with a marked recommendation.
