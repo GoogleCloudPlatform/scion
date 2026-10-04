@@ -118,6 +118,56 @@ func fstatRequireTrusted(fd int, displayPath string, selfUID uint32) error {
 	return nil
 }
 
+// OpenNoFollowRootOwnedFile opens path as a regular file, applying the same
+// root-owned-or-self-owned, not-group/other-writable check to its entire
+// parent chain (OpenParentNoFollowRootOwned) and to the leaf itself.
+//
+// path must already be free of symlink components by the time this is
+// called — e.g. the output of filepath.EvalSymlinks — so this can safely use
+// O_NOFOLLOW at every step without refusing a perfectly ordinary system
+// layout where "/bin" or "/sbin" are themselves symlinks into "/usr" (Debian
+// and most other modern distributions' merged-/usr layout): a caller that
+// wants to allow a legitimate root-installed symlink chain (e.g. Debian's
+// iptables, which resolves through /etc/alternatives) resolves it first,
+// then verifies the real destination with this function — the destination,
+// and every real directory leading to it, is what must be root-owned (or
+// self-owned, on a runtime with no separate root/workload identity to
+// protect against), never the symlink names along the way.
+//
+// Used by cmd/sciontool/commands' substrate rootfs-fixup and serve paths to
+// verify a destination file is safe to open (never a workload-planted
+// symlink, and never reached through a workload-writable or
+// non-root-owned parent directory) before root reads or writes through
+// it. This does not check the file's link count: a hardlink to an
+// otherwise-legitimate root-owned file, planted before this process ever
+// reaches it, is not detected or refused here.
+func OpenNoFollowRootOwnedFile(path string) (*os.File, error) {
+	dirFd, leaf, err := OpenParentNoFollowRootOwned(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = syscall.Close(dirFd) }()
+
+	f, err := OpenAt(dirFd, leaf, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, fmt.Errorf("dirfd: open %s: %w", path, err)
+	}
+	var st syscall.Stat_t
+	if err := syscall.Fstat(int(f.Fd()), &st); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("dirfd: fstat %s: %w", path, err)
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFREG {
+		_ = f.Close()
+		return nil, fmt.Errorf("dirfd: %s is not a regular file (mode %#o)", path, st.Mode&syscall.S_IFMT)
+	}
+	if verr := fstatRequireTrusted(int(f.Fd()), path, uint32(os.Geteuid())); verr != nil {
+		_ = f.Close()
+		return nil, verr
+	}
+	return f, nil
+}
+
 // maxSymlinkHops bounds VerifyRootOwnedExecutable's manual symlink-chain
 // walk, generously beyond any real installation this codebase's search
 // paths are expected to encounter (Debian's update-alternatives chains are

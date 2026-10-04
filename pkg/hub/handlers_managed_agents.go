@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/managedagent"
@@ -210,6 +211,22 @@ func (s *Server) handleManagedAgentLifecycle(w http.ResponseWriter, r *http.Requ
 	var newPhase string
 	var actionErr error
 
+	// Record the run intent before acting, as the broker-backed lifecycle
+	// paths do. A stop whose action fails keeps intent stopped.
+	var intent store.RunIntent
+	switch action {
+	case "start", "restart":
+		intent = store.RunIntentRunning
+	case "stop":
+		intent = store.RunIntentStopped
+	}
+	if intent != "" {
+		if _, err := s.recordRunIntent(ctx, agent, intent); err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+	}
+
 	switch action {
 	case "start":
 		newPhase = string("running")
@@ -247,12 +264,16 @@ func (s *Server) handleManagedAgentLifecycle(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	agent.Phase = newPhase
+	// A successful start/stop/restart clears a failed delete marker
+	// (design ptone/scion#2483 §2.1); publish and respond from the stored
+	// row, which a racing delete claim may have kept off newPhase.
+	s.settleLifecycleWrite(ctx, agent, newPhase)
 	s.events.PublishAgentStatus(ctx, agent)
 
 	respAgent := *agent
 	respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
-	writeJSON(w, http.StatusOK, respAgent)
+	respAgent.Deletion = store.ComputeAgentDeletion(agent, time.Now())
+	writeJSON(w, http.StatusOK, &respAgent)
 }
 
 // formatManagedAgentLook returns the latest interaction formatted as structured text.

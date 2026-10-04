@@ -18,12 +18,14 @@
  * Tests for the UTC-only cron presentation in the recurring schedule list:
  * a schedule whose stored expression carries a CRON_TZ=/TZ= prefix shows a
  * "zone prefix not supported" badge, and the cron field keeps its "(UTC)"
- * help text.
+ * help text. Also covers next-run display: the next run is shown in the
+ * display zone with a zone label, beside the UTC cron expression.
  */
 
 // @vitest-environment happy-dom
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { setPreferredTimeZone } from '../../utils/time.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let mod: any;
@@ -156,5 +158,101 @@ describe('scion-schedule-list zone-prefix badge', () => {
       (i) => (i.getAttribute('help-text') ?? '').includes('cron')
     );
     expect(cronInput?.getAttribute('help-text')).toContain('(UTC)');
+  });
+});
+
+describe('scion-schedule-list next-run in the display zone', () => {
+  // Vitest pins the browser zone to UTC; the preference below differs from
+  // it, and the next run falls on midnight in that zone.
+  const NOW = '2026-10-01T12:00:00Z';
+  const NEXT_RUN = '2026-10-01T15:00:00Z'; // 00:00 on Oct 2 in Asia/Tokyo
+
+  beforeAll(async () => {
+    mod = await import('./schedule-list.js');
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+    setPreferredTimeZone('');
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function useFakeNow(): void {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(NOW));
+  }
+
+  it('shows the next run in the preferred zone, 24-hour, with a zone label', async () => {
+    useFakeNow();
+    setPreferredTimeZone('Asia/Tokyo');
+    const el = await mount([schedule({ name: 'nightly', nextRunAt: NEXT_RUN })]);
+
+    const row = rowFor(el, 'nightly');
+    expect(row.textContent).toContain('in 3 hours');
+    const absolute = row.querySelector('.next-run-absolute');
+    expect(absolute?.textContent?.trim()).toBe('Oct 2, 2026, 00:00 (Asia/Tokyo)');
+    // The cron column stays labelled UTC, next to the zoned next run.
+    const headers = Array.from((el.shadowRoot as ShadowRoot).querySelectorAll('thead th')).map(
+      (th) => th.textContent?.trim()
+    );
+    expect(headers).toContain('Cron (UTC)');
+  });
+
+  it('shows a next run days away in days, not hours, beside the labelled absolute', async () => {
+    useFakeNow();
+    setPreferredTimeZone('Asia/Tokyo');
+    // Three days after NEXT_RUN: still midnight in Tokyo.
+    const el = await mount([schedule({ name: 'weekly', nextRunAt: '2026-10-04T15:00:00Z' })]);
+    const row = rowFor(el, 'weekly');
+    expect(row.textContent).toContain('in 3 days');
+    expect(row.querySelector('.next-run-absolute')?.textContent?.trim()).toBe(
+      'Oct 5, 2026, 00:00 (Asia/Tokyo)'
+    );
+  });
+
+  it('shows "now" for an overdue next run', async () => {
+    useFakeNow();
+    setPreferredTimeZone('Asia/Tokyo');
+    const el = await mount([schedule({ name: 'late', nextRunAt: '2026-10-01T11:00:00Z' })]);
+    const row = rowFor(el, 'late');
+    const cells = Array.from(row.querySelectorAll('td')).map((td) => td.textContent ?? '');
+    const nextRunCell = cells.find((c) => c.includes('(Asia/Tokyo)')) ?? '';
+    expect(nextRunCell).toMatch(/^\s*now\b/);
+    expect(nextRunCell).not.toContain('ago');
+  });
+
+  it('re-renders the next run when the display zone changes', async () => {
+    useFakeNow();
+    const el = await mount([schedule({ name: 'nightly', nextRunAt: NEXT_RUN })]);
+    const absolute = () =>
+      rowFor(el, 'nightly').querySelector('.next-run-absolute')?.textContent?.trim();
+    expect(absolute()).toBe('Oct 1, 2026, 15:00 (UTC)');
+
+    setPreferredTimeZone('Asia/Tokyo');
+    await settle(el as unknown as { updateComplete: Promise<unknown> });
+    expect(absolute()).toBe('Oct 2, 2026, 00:00 (Asia/Tokyo)');
+  });
+
+  it('shows the zoned next run in the detail dialog beside the UTC cron', async () => {
+    useFakeNow();
+    setPreferredTimeZone('Asia/Tokyo');
+    const el = await mount([schedule({ name: 'nightly', nextRunAt: NEXT_RUN })]);
+    rowFor(el, 'nightly').click();
+    await settle(el as unknown as { updateComplete: Promise<unknown> });
+    const dialog = (el.shadowRoot as ShadowRoot).querySelector('sl-dialog[label^="Schedule:"]');
+    expect(dialog?.textContent).toContain('Cron (UTC):');
+    expect(dialog?.querySelector('.next-run-absolute')?.textContent?.trim()).toBe(
+      'Oct 2, 2026, 00:00 (Asia/Tokyo)'
+    );
+  });
+
+  it('shows no next run for a paused schedule', async () => {
+    useFakeNow();
+    const el = await mount([
+      schedule({ name: 'paused-one', status: 'paused', nextRunAt: NEXT_RUN }),
+    ]);
+    expect(rowFor(el, 'paused-one').querySelector('.next-run-absolute')).toBeNull();
   });
 });

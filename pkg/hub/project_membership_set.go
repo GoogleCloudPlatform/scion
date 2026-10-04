@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -544,6 +545,26 @@ func (e *governanceDenialError) Error() string { return e.decision.Reason }
 
 func asGovernanceDenial(d MembershipDecision) error {
 	return &governanceDenialError{decision: d}
+}
+
+// governanceDenial builds the in-transaction refusal for a re-evaluated
+// governance check that carries only a status and a reason: 404 maps to
+// not_found, 409 to conflict, and anything else to
+// role_assignment_forbidden. The decision has no Details.
+func governanceDenial(status int, reason string) error {
+	code := ErrCodeRoleAssignmentForbidden
+	switch status {
+	case http.StatusNotFound:
+		code = "not_found"
+	case http.StatusConflict:
+		code = "conflict"
+	}
+	return asGovernanceDenial(MembershipDecision{
+		Allowed:    false,
+		DenialCode: code,
+		Reason:     reason,
+		HTTPStatus: status,
+	})
 }
 
 // membershipChangedError signals that the principal's role set changed

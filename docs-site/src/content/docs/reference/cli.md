@@ -371,8 +371,8 @@ the agent's status message reads "migrating to generation N".
 Reincarnation works for agents in clone-per-agent, shared-workspace (shared-plain), and
 Hub-managed workspaces. For a shared-workspace agent, the agent record, identity, and shared
 checkout are preserved, and sibling agents sharing the checkout are not restarted. Agents in
-worktree-per-agent projects are not yet supported; the Hub rejects the request with
-`400 Bad Request`. Reincarnating another agent requires the `agent.lifecycle` permission (the same
+worktree-per-agent projects and agents in empty-per-agent projects are not yet supported; the Hub
+rejects the request with `400 Bad Request`. Reincarnating another agent requires the `agent.lifecycle` permission (the same
 as stop, start, and restart); an agent can always reincarnate itself.
 
 **Usage:** `scion reincarnate [agent-name] [flags]`
@@ -613,6 +613,7 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
             - `--expires <duration>`: Expiry duration (e.g., 30d, 90d, 1y, default: 90d).
             - `--purpose <text>`: Optional bounded description of what the token is for (≤128 bytes, single line, no control characters). Immutable after issuance — there is no update command.
             - `--label <key=value>`: Optional bounded label (repeatable). Keys are lowercase `[a-z][a-z0-9_.-]*` (≤32 bytes); values are ≤64 bytes from a restricted charset. A set of attribution-shaped keys (e.g. `user_id`, `agent`, `actor_binding`) are reserved and rejected. Immutable after issuance.
+    - `scopes`: List every scope accepted by `create --scopes`. With `--project <string>`, also report which scopes you may currently select for a token scoped to that project and, for each one you cannot, why. Supports `--json`.
     - `list`: List your access tokens.
     - `revoke <token-id>`: Revoke a token (remains visible in listings as revoked).
     - `delete <token-id>`: Permanently delete a token.
@@ -620,7 +621,10 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
 - `scion hub notifications`: **Deprecated**. This command has been moved to the top-level `scion notifications` command group.
 - `scion hub link`: Link the current local project to the Hub.
 - `scion hub unlink`: Unlink the current project from the Hub locally.
-- `scion hub projects`: List all projects registered on the Hub.
+- `scion hub projects` (alias `project`): List all projects registered on the Hub.
+    - `create [git-url]`: Create a project on the Hub. With a git URL, the project is anchored to that repository. Without one, a Hub-managed project without git is created; `--name` is then required and `--branch` is not allowed.
+        - Flags: `--slug`, `--name`, `--branch`, `--workspace-mode`, `--json`
+        - `--workspace-mode <shared|per-agent|worktree-per-agent>`: The [workspace sharing mode](/scion/local/workspaces-and-sharing/#setting-the-mode-on-a-hub-project). On a project without git, `per-agent` gives each agent an empty private directory (empty-per-agent). The mode is set at create time only and cannot be changed later. The Hub validates the value: unknown values, and `worktree-per-agent` without a git URL, fail with the Hub's `400` message.
     - `info [project-name]`: Show details for a project, including its providers. Each provider shows its Runtime Broker's capacity as `(agents: count/limit)`, or `(agents: count)` when that Runtime Broker has no limit. `(not enforced)` is appended when the hub-wide switch for Runtime Broker quota enforcement is off.
 - `scion hub brokers`: List all runtime brokers registered on the Hub.
 - `scion hub secret`: Manage write-only secrets on the Hub.
@@ -635,8 +639,6 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
     - `set <key>=<value>`: Set a variable.
     - `get [key]`: Get variable values.
     - `clear <key>`: Remove a variable.
-- `scion hub project create <git-url>`: Create a project from a remote git repository.
-    - Flags: `--slug`, `--name`, `--branch`, `--json`
 - `scion hub hook` (alias `psh`): Manage hub-scoped (baseline) pre-start hooks. Requires administrator privileges.
     - `list` (alias `ls`): List hub-scoped pre-start hooks.
     - `show <id-or-slug>`: Show details and script content of a hub-scoped hook.

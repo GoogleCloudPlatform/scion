@@ -30,6 +30,7 @@ import { listPageStyles } from '../shared/resource-styles.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
 import '../shared/view-toggle.js';
+import { formatRelative } from '../../utils/time.js';
 
 type SkillSortField = 'name' | 'updated' | 'created';
 type SortDir = 'asc' | 'desc';
@@ -273,19 +274,11 @@ export class ScionPageSkills extends LitElement {
   }
 
   private formatRelativeTime(isoString: string): string {
-    const date = new Date(isoString);
-    if (isNaN(date.getTime())) return '—';
-    const now = Date.now();
-    const diffMs = now - date.getTime();
-    if (diffMs < 0) return 'just now';
-    const seconds = Math.floor(diffMs / 1000);
-    if (seconds < 60) return 'just now';
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) return `${minutes}m ago`;
-    const hours = Math.floor(minutes / 60);
-    if (hours < 24) return `${hours}h ago`;
-    const days = Math.floor(hours / 24);
-    return `${days}d ago`;
+    const ms = new Date(isoString).getTime();
+    if (Number.isNaN(ms)) return '—';
+    // A future instant is clock skew between hub and browser.
+    if (ms > Date.now()) return 'just now';
+    return formatRelative(isoString, { style: 'narrow' });
   }
 
   private onViewChange(e: CustomEvent<{ view: ViewMode }>): void {

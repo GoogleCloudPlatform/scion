@@ -255,7 +255,16 @@ func TestBuildStartContext_UnflaggedPassthroughUnaffectedByRuntimeRemap(t *testi
 // same struct-or-env precedence SCION_METADATA_MODE itself already has.
 func TestBuildStartContext_HubDefaultPassthroughDowngradedFromEnvFlag(t *testing.T) {
 	srv, _ := newTestServerForRuntimeRemap(t)
-	projectPath := writeRemapSettings(t, "kubernetes")
+	// Remap to a fictitious non-local, non-Kubernetes runtime with a mock
+	// resolver, as TestBuildStartContext_HubDefaultPassthroughDowngradedOnRuntimeRemap
+	// does. "kubernetes" no longer exercises the downgrade (block is not
+	// offered on Kubernetes, ptone/scion#2328), and without the override the
+	// resolver builds a real cluster client: where one is reachable the
+	// dispatch resolves to Kubernetes and keeps passthrough.
+	projectPath := writeRemapSettings(t, "other")
+	srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profileFlag string) runtime.Runtime {
+		return &runtime.MockRuntime{NameFunc: func() string { return "other" }}
+	}
 
 	r := httptest.NewRequest("POST", "/api/v1/agents", nil)
 	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
@@ -446,6 +455,10 @@ func TestStartAgent_HubDefaultPassthroughDowngradedWhenSavedProfileDiffers(t *te
 // resolves to Kubernetes rather than docker, the re-check that runs after
 // that second, authoritative resolution must NOT downgrade to block —
 // Kubernetes keeps its own runtime-aware default of passthrough instead.
+// The request body includes SCION_METADATA_MODE_SOURCE=hub, matching what a
+// real hub dispatch always sends alongside an elevated mode; without it this
+// resolvedEnv would be treated as untrusted and downgraded before the
+// Kubernetes carve-out is ever reached.
 func TestStartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKubernetes(t *testing.T) {
 	srv, _, remapRuntime := newTestServerForSavedProfileRemap(t, "test-agent-1", "kubernetes")
 	var capturedEnv []string
@@ -457,6 +470,7 @@ func TestStartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKubernete
 	body, err := json.Marshal(map[string]any{
 		"resolvedEnv": map[string]string{
 			"SCION_METADATA_MODE":                  "passthrough",
+			"SCION_METADATA_MODE_SOURCE":           "hub",
 			"SCION_METADATA_REQUIRE_LOCAL_RUNTIME": "true",
 		},
 	})
@@ -526,7 +540,8 @@ func TestRestartAgent_HubDefaultPassthroughDowngradedWhenSavedProfileDiffers(t *
 // TestRestartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKubernetes
 // is the restart-path twin of
 // TestStartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKubernetes
-// above.
+// above, including the same SCION_METADATA_MODE_SOURCE=hub marker and the
+// same reason for it.
 func TestRestartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKubernetes(t *testing.T) {
 	srv, _, remapRuntime := newTestServerForSavedProfileRemap(t, "test-agent-1", "kubernetes")
 	var capturedEnv []string
@@ -538,6 +553,7 @@ func TestRestartAgent_HubDefaultPassthroughKeptWhenSavedProfileResolvesToKuberne
 	body, err := json.Marshal(map[string]any{
 		"resolvedEnv": map[string]string{
 			"SCION_METADATA_MODE":                  "passthrough",
+			"SCION_METADATA_MODE_SOURCE":           "hub",
 			"SCION_METADATA_REQUIRE_LOCAL_RUNTIME": "true",
 		},
 	})

@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -254,7 +255,7 @@ type tzWarningDispatcher struct {
 	createAgentDispatcher
 }
 
-func (d *tzWarningDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (d *tzWarningDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
 	addDispatchWarnings(ctx, "Warning: TZ dropped by broker")
 	return d.createAgentDispatcher.DispatchAgentCreateWithGather(ctx, agent)
 }
@@ -269,6 +270,49 @@ func TestCreateAgent_RelaysDispatchWarnings(t *testing.T) {
 	var resp CreateAgentResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Contains(t, resp.Warnings, "Warning: TZ dropped by broker")
+}
+
+// submitEnvWarningDispatcher reports a broker warning from finalize-env
+// and returns an accepted launch. It removes the agent row first, so the
+// hub's accepted-launch persist fails and adds its own warning.
+type submitEnvWarningDispatcher struct {
+	createAgentDispatcher
+	st store.Store
+}
+
+func (d *submitEnvWarningDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, _ map[string]string) (*CreateDispatchResult, error) {
+	addDispatchWarnings(ctx, "Warning: TZ dropped by broker")
+	if err := d.st.DeleteAgent(ctx, agent.ID); err != nil {
+		return nil, err
+	}
+	return &CreateDispatchResult{Launch: &LaunchAccepted{ID: "launch-submit-warn"}}, nil
+}
+
+// TestSubmitAgentEnv_RelaysDispatchWarnings checks the submit-env response
+// carries both the broker warnings collected during finalize-env and the
+// hub's accepted-launch warnings.
+func TestSubmitAgentEnv_RelaysDispatchWarnings(t *testing.T) {
+	disp := &submitEnvWarningDispatcher{}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	disp.st = s
+	agent := &store.Agent{
+		ID:              tid("agent-submit-warn"),
+		Name:            "submit-warn",
+		Slug:            "submit-warn",
+		ProjectID:       project.ID,
+		RuntimeBrokerID: project.DefaultRuntimeBrokerID,
+		Phase:           string(state.PhaseProvisioning),
+	}
+	require.NoError(t, s.CreateAgent(context.Background(), agent))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/agents/submit-warn/env",
+		SubmitEnvRequest{Env: map[string]string{"API_KEY": "v"}})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp.Warnings, 2, "%v", resp.Warnings)
+	assert.Equal(t, "Warning: TZ dropped by broker", resp.Warnings[0])
+	assert.True(t, strings.HasPrefix(resp.Warnings[1], "Failed to update agent after launch was accepted: "), resp.Warnings[1])
 }
 
 // TestCreateAgent_EnvGatherNeverAsksForTZ checks the 202 env-gather
@@ -690,7 +734,9 @@ func TestCreateAgent_TemplateTZUnaffectedByLaterTemplateEdit(t *testing.T) {
 
 	d := NewHTTPAgentDispatcherWithClient(s, &mockRuntimeBrokerClient{}, false, slog.Default())
 	d.SetHubAgentDefaultsProvider(srv.hubAgentDefaults)
-	assert.Equal(t, "Europe/Paris", d.buildStartEnv(ctx, agent, "test", "start").env["TZ"], "a start sends the pinned zone")
+	startEnv, err := d.buildStartEnv(ctx, agent, "test", mintSiteStart)
+	require.NoError(t, err)
+	assert.Equal(t, "Europe/Paris", startEnv.env["TZ"], "a start sends the pinned zone")
 
 	fresh, _, err := srv.buildFreshAppliedConfig(ctx, agent, project, "")
 	require.NoError(t, err)

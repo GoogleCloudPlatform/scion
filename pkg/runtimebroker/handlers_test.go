@@ -64,6 +64,8 @@ type mockManager struct {
 	provisionErr          error
 	stopErr               error
 	listErr               error
+	deleteTargetErr       error
+	messageErr            error
 	lastStartOpts         api.StartOptions
 	lastDeleteProjectPath string
 	lastDeleteAgentID     string
@@ -164,6 +166,9 @@ func (m *mockManager) DeleteTarget(ctx context.Context, agentName, containerID s
 	m.lastDeleteContainerID = containerID
 	m.lastDeleteFiles = deleteFiles
 	m.deleteCalls++
+	if m.deleteTargetErr != nil {
+		return false, m.deleteTargetErr
+	}
 	return true, nil
 }
 
@@ -278,11 +283,11 @@ func (m *mockManager) LastListFilter() map[string]string {
 }
 
 func (m *mockManager) Message(ctx context.Context, agentID, projectID string, message string, interrupt bool) error {
-	return nil
+	return m.messageErr
 }
 
 func (m *mockManager) MessageRaw(ctx context.Context, agentID, projectID string, keys string) error {
-	return nil
+	return m.messageErr
 }
 
 func (m *mockManager) SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
@@ -470,7 +475,35 @@ func TestHostInfo(t *testing.T) {
 	}
 
 	if resp.Capabilities == nil {
-		t.Error("expected capabilities to be present")
+		t.Fatal("expected capabilities to be present")
+	}
+	if !resp.Capabilities.EmptyPerAgentWorkspace {
+		t.Error("expected capabilities.emptyPerAgentWorkspace to be true (design #2703 P2)")
+	}
+}
+
+// TestHostInfo_EmptyPerAgentFollowsDefaultRuntime pins that /api/v1/info
+// advertises EmptyPerAgentWorkspace per default runtime (false for one that
+// opts out, as Cloud Run does), matching the heartbeat.
+func TestHostInfo_EmptyPerAgentFollowsDefaultRuntime(t *testing.T) {
+	srv := newTestServer(t)
+	srv.runtime = &noEmptyPerAgentTestRuntime{MockRuntime: &runtime.MockRuntime{NameFunc: func() string { return "cloudrun" }}}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/info", nil)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, w.Code)
+	}
+	var resp BrokerInfoResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.Capabilities == nil {
+		t.Fatal("expected capabilities to be present")
+	}
+	if resp.Capabilities.EmptyPerAgentWorkspace {
+		t.Error("capabilities.emptyPerAgentWorkspace = true, want false for a default runtime that opts out")
 	}
 }
 
@@ -1440,7 +1473,10 @@ runtimes:
 }
 
 // envCapturingManager captures the environment variables passed to Start().
-// Used for testing that Hub credentials are properly set.
+// Used for testing that Hub credentials are properly set. The embedded
+// mockManager's own lastStartOpts captures the full options struct, for
+// tests that need a field with no dedicated lastXxx accessor here (e.g.
+// ResolvedKubernetesServiceAccountName).
 type envCapturingManager struct {
 	mockManager
 	lastEnv           map[string]string
@@ -1933,9 +1969,10 @@ func TestCreateAgentProvisionOnly_PlainProvision_DoesNotEchoReprovisioned(t *tes
 // plain (unwrapped, not agent.ErrReprovisionRefused) Reprovision failure: the
 // handler must return the generic 500 — not the 409 the sentinel-wrapped
 // path gets — and must not echo reprovisioned:true for a request that never
-// actually succeeded. A neutral error message (no "reprovision refused"
-// substring) keeps this test from being satisfied by accident if the 409
-// path's body text ever changed to also contain "error".
+// actually succeeded. The body must carry the fixed, identity-free
+// "Failed to provision agent" message, never Reprovision's own raw error
+// text, which could carry a runtime-specific detail this response must not
+// disclose.
 func TestCreateAgentProvisionOnly_ReprovisionError_ReturnsErrorNoEcho(t *testing.T) {
 	srv, mgr := newTestServerWithProvisionCapture()
 	mgr.reprovisionErr = errors.New("boom: transient broker failure")
@@ -1960,8 +1997,11 @@ func TestCreateAgentProvisionOnly_ReprovisionError_ReturnsErrorNoEcho(t *testing
 	if !mgr.reprovisionCalled {
 		t.Error("expected Reprovision to have been attempted")
 	}
-	if !strings.Contains(w.Body.String(), "boom: transient broker failure") {
-		t.Errorf("expected the error body to surface the Reprovision error, got: %s", w.Body.String())
+	if strings.Contains(w.Body.String(), "boom: transient broker failure") {
+		t.Errorf("the error body must never surface Reprovision's own raw error text, got: %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "Failed to provision agent") {
+		t.Errorf("expected the fixed, identity-free provision-failure message, got: %s", w.Body.String())
 	}
 	if strings.Contains(w.Body.String(), `"reprovisioned":true`) {
 		t.Errorf("a failed Reprovision must never echo reprovisioned:true, got: %s", w.Body.String())
@@ -2667,7 +2707,7 @@ func TestCreateAgentHubManagedProjectSettingsEndpoint(t *testing.T) {
 		"name": "hub-managed-agent",
 		"projectSlug": "settings-test-project",
 		"hubEndpoint": "http://localhost:9810",
-		"config": {"template": "claude"}
+		"config": {"template": "claude", "workspace": "` + projectPath + `"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -3905,7 +3945,7 @@ func TestCreateAgentProjectSlugResolvesProjectPath(t *testing.T) {
 		"projectId": "project-abc",
 		"projectSlug": "my-hub-project",
 		"provisionOnly": true,
-		"config": {"template": "claude"}
+		"config": {"template": "claude", "workspace": "/hub/projects/my-hub-project"}
 	}`
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -28,6 +29,8 @@ var (
 	nonInteractive bool   // Full non-interactive mode (implies --yes, errors on ambiguous prompts)
 	autoHelp       = true // Default to true, updated in PersistentPreRunE
 	debugMode      bool   // Enable debug output
+	displayTZ      string // --tz: IANA zone for human-readable time output
+	displayUTC     bool   // --utc: show human-readable times in UTC
 )
 
 // rootCmd represents the base command when called without any subcommands
@@ -44,6 +47,13 @@ return an error instead of blocking.`,
 	SilenceErrors: true,
 	SilenceUsage:  true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		// Cobra checks flag groups (e.g. --tz/--utc) only after this hook
+		// returns, so check them first: a later hook error, such as running
+		// outside a project, must not hide a flag conflict.
+		if err := cmd.ValidateFlagGroups(); err != nil {
+			return err
+		}
+
 		// Warn (once per process) about legacy environment variables that
 		// scion no longer reads. For real top-level invocations this has
 		// already run in Execute(), before any settings or project
@@ -51,6 +61,15 @@ return an error instead of blocking.`,
 		// path for callers that invoke rootCmd directly (e.g. cmd-level
 		// tests) without going through the package's own Execute().
 		maybeWarnRemovedLegacyEnv(cmd)
+
+		// Display zone for human-readable times: --tz/--utc, else the
+		// process local zone. Set on every invocation so a previous
+		// invocation in the same process (tests) cannot leak its zone.
+		loc, err := clitime.ResolveZone(displayTZ, displayUTC)
+		if err != nil {
+			return err
+		}
+		clitime.SetZone(loc)
 
 		// --non-interactive implies --yes
 		if nonInteractive {
@@ -317,6 +336,11 @@ func init() {
 	// Confirmation and non-interactive flags
 	rootCmd.PersistentFlags().BoolVarP(&autoConfirm, "yes", "y", false, "Skip confirmation prompt")
 	rootCmd.PersistentFlags().BoolVar(&nonInteractive, "non-interactive", false, "Non-interactive mode: implies --yes, errors on ambiguous prompts")
+
+	// Display zone for human-readable times (JSON output is always UTC)
+	rootCmd.PersistentFlags().StringVar(&displayTZ, "tz", "", "Show times in this IANA time zone, e.g. America/New_York (default: local zone; JSON output is unchanged)")
+	rootCmd.PersistentFlags().BoolVar(&displayUTC, "utc", false, "Show times in UTC (JSON output is unchanged)")
+	rootCmd.MarkFlagsMutuallyExclusive("tz", "utc")
 
 	// Debug mode flag
 	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Enable debug output (equivalent to SCION_DEBUG=1)")

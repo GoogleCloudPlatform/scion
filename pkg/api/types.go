@@ -17,6 +17,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -333,6 +334,15 @@ type KubernetesConfig struct {
 	ImagePullPolicy       string            `json:"imagePullPolicy,omitempty" yaml:"imagePullPolicy,omitempty"`                   // Always, IfNotPresent, Never
 	SharedDirStorageClass string            `json:"shared_dir_storage_class,omitempty" yaml:"shared_dir_storage_class,omitempty"` // Storage class for shared dir PVCs (must support RWX)
 	SharedDirSize         string            `json:"shared_dir_size,omitempty" yaml:"shared_dir_size,omitempty"`                   // Default size per shared dir PVC (e.g. "10Gi")
+	// SafeToEvict, when explicitly false, adds the
+	// cluster-autoscaler.kubernetes.io/safe-to-evict: "false" annotation to
+	// the agent pod. On GKE Autopilot this requests extended run duration;
+	// on other clusters it stops the cluster autoscaler from scaling the
+	// node down while the pod runs. Only false has an effect: nil and true
+	// both leave the pod unannotated. Overrides the profile's and the
+	// runtime entry's safe_to_evict, if any. Ignored on non-Kubernetes
+	// runtimes.
+	SafeToEvict *bool `json:"safeToEvict,omitempty" yaml:"safeToEvict,omitempty"`
 }
 
 // K8sToleration mirrors corev1.Toleration for use in agent configuration
@@ -494,6 +504,14 @@ type ScionConfig struct {
 	// path, bind-mounted directly with no git worktree/branch, even when inside a
 	// repo. Persisted so resume/restart honors the same contract as first start.
 	ExplicitWorkspace bool `json:"explicit_workspace,omitempty" yaml:"explicit_workspace,omitempty"`
+
+	// EmptyPerAgentWorkspace records that the agent's workspace is its
+	// private, non-git agents/<slug>/workspace directory (design #2703).
+	// Persisted so a restart or resume that arrives without the mode (e.g.
+	// a dropped or undecodable request body) can never fall back to legacy
+	// workspace resolution or an enclosing repo root, and so delete skips
+	// worktree/branch cleanup for it.
+	EmptyPerAgentWorkspace bool `json:"empty_per_agent_workspace,omitempty" yaml:"empty_per_agent_workspace,omitempty"`
 
 	// Info contains persisted metadata about the agent
 	Info *AgentInfo `json:"-" yaml:"-"`
@@ -848,6 +866,22 @@ func IsSharedWorkspaceFromContext(ctx context.Context) bool {
 	return v
 }
 
+type emptyPerAgentWorkspaceContextKey struct{}
+
+// ContextWithEmptyPerAgentWorkspace returns a new context marking the agent's
+// workspace as empty-per-agent (design #2703): a private, initially empty,
+// non-git directory at <projectDir>/agents/<slug>/workspace.
+func ContextWithEmptyPerAgentWorkspace(ctx context.Context) context.Context {
+	return context.WithValue(ctx, emptyPerAgentWorkspaceContextKey{}, true)
+}
+
+// IsEmptyPerAgentWorkspaceFromContext returns true if the context marks the
+// agent's workspace as empty-per-agent.
+func IsEmptyPerAgentWorkspaceFromContext(ctx context.Context) bool {
+	v, _ := ctx.Value(emptyPerAgentWorkspaceContextKey{}).(bool)
+	return v
+}
+
 type githubAppContextKey struct{}
 
 // ContextWithGitHubApp returns a new context with the GitHub App enabled flag attached.
@@ -943,11 +977,19 @@ func HarnessConfigPathFromContext(ctx context.Context) string {
 // The zero value means "the Hub supplied no defaults"; callers leave the
 // pointer nil in that case so an unset field is indistinguishable on the wire
 // from a Hub that predates the field. See design §3.2.3.
+//
+// AutoExposePorts is the Hub's auto-expose-ports default
+// (SCION_AUTO_EXPOSE_PORTS). It is the lowest env tier: buildAgentEnv applies
+// it only when no higher tier (hub-resolved env, template, harness-config
+// env, scion-agent.json) left the key set. Unlike the four limit fields it is
+// sent on start and restart as well as create, so a change to the Hub default
+// reaches an agent at its next start.
 type HubAgentDefaults struct {
-	MaxTurns      int           `json:"maxTurns,omitempty"`
-	MaxModelCalls int           `json:"maxModelCalls,omitempty"`
-	MaxDuration   string        `json:"maxDuration,omitempty"`
-	Resources     *ResourceSpec `json:"resources,omitempty"`
+	MaxTurns        int           `json:"maxTurns,omitempty"`
+	MaxModelCalls   int           `json:"maxModelCalls,omitempty"`
+	MaxDuration     string        `json:"maxDuration,omitempty"`
+	Resources       *ResourceSpec `json:"resources,omitempty"`
+	AutoExposePorts *bool         `json:"autoExposePorts,omitempty"`
 }
 
 // IsEmpty reports whether no default carries a value. An empty set is not put
@@ -957,7 +999,22 @@ func (d *HubAgentDefaults) IsEmpty() bool {
 	if d == nil {
 		return true
 	}
-	return d.MaxTurns == 0 && d.MaxModelCalls == 0 && d.MaxDuration == "" && d.Resources == nil
+	return d.MaxTurns == 0 && d.MaxModelCalls == 0 && d.MaxDuration == "" && d.Resources == nil &&
+		d.AutoExposePorts == nil
+}
+
+// EnvAutoExposePorts is the env key that enables in-container port
+// auto-exposure (read by sciontool's autoexpose.ConfigFromEnv).
+const EnvAutoExposePorts = "SCION_AUTO_EXPOSE_PORTS"
+
+// DefaultEnv returns the env entries the Hub defaults contribute at the
+// lowest env tier, or nil when there are none. Callers apply each entry only
+// when the key is otherwise unset.
+func (d *HubAgentDefaults) DefaultEnv() map[string]string {
+	if d == nil || d.AutoExposePorts == nil {
+		return nil
+	}
+	return map[string]string{EnvAutoExposePorts: strconv.FormatBool(*d.AutoExposePorts)}
 }
 
 type hubAgentDefaultsContextKey struct{}
@@ -996,13 +1053,24 @@ type StartOptions struct {
 	Env               map[string]string
 	ResolvedSecrets   []ResolvedSecret
 	BrokerMode        bool // When true, auth gathering skips local sources (broker env + filesystem)
-	Detached          *bool
-	Resume            bool
-	NoAuth            bool
-	Branch            string
-	Workspace         string
-	GitClone          *GitCloneConfig // When set, skip workspace creation; sciontool clones inside container
-	SharedWorkspace   bool            // When true, workspace is a shared git clone (git-workspace hybrid); skip worktree, configure credential helper
+	// TrustedHubEndpoint is the broker's own operator-derived resolution of
+	// the hub endpoint — set only in BrokerMode, only from the request
+	// HubEndpoint, the hub connection endpoint, or this broker's configured
+	// HubEndpoint (never from ResolvedEnv/Config.Env, which a project or
+	// template creator controls). It is empty when none
+	// of those operator tiers produced a value, even if Env's own
+	// SCION_HUB_ENDPOINT is non-empty. Runtime.Run's substrate egress
+	// allowlist is the one consumer that must read this field instead of
+	// Env["SCION_HUB_ENDPOINT"] — see pkg/agent/run.go and
+	// pkg/runtime/substrate_egress.go.
+	TrustedHubEndpoint string
+	Detached           *bool
+	Resume             bool
+	NoAuth             bool
+	Branch             string
+	Workspace          string
+	GitClone           *GitCloneConfig // When set, skip workspace creation; sciontool clones inside container
+	SharedWorkspace    bool            // When true, workspace is a shared git clone (git-workspace hybrid); skip worktree, configure credential helper
 	// FreshProvision marks this dispatch as a create, not a start or restart:
 	// GetAgent wipes and re-clones an existing populated workspace only when
 	// this is set, so a same-named leftover agent directory is not confused
@@ -1014,12 +1082,62 @@ type StartOptions struct {
 	SharedDirs        []SharedDir  // Project-level shared directories (from Hub, merged with settings)
 	ExtraHosts        []string     // Extra --add-host entries for container networking (e.g. "example.com:host-gateway")
 
+	// EmptyPerAgentWorkspace gives the agent a private, initially empty,
+	// non-git workspace at <projectDir>/agents/<slug>/workspace (design
+	// #2703). Mutually exclusive with Workspace, GitClone and SharedWorkspace.
+	EmptyPerAgentWorkspace bool
+
 	// ProjectPreStartHookScript is the project-owner-supplied shell script
 	// inlined from the project's active ProjectPreStartHook at agent-create
 	// time. If non-empty, the broker writes it to pre-start.d/30-project-custom
 	// before the agent container starts.
 	ProjectPreStartHookScript string
+
+	// Checkpoint, when set, is called by the runtime immediately before each
+	// resource-creating call (an async launch's pre-create gate, design
+	// t1-async-create-v11.md §3.8.3). A non-nil error stops the launch
+	// before that resource is created, and the runtime returns it (wrapped).
+	// step names the resource about to be created (e.g. "secrets",
+	// "pod_create"). Nil (the synchronous path) means no gate.
+	Checkpoint func(ctx context.Context, step string) error
+	// OnResourceCreated, when set, is called by the runtime after each true
+	// create of a launch-owned runtime resource, with the created object's
+	// identity (design §3.8.4), so an aborted launch can delete exactly what
+	// it created. Nil (the synchronous path) means nothing is recorded.
+	// Setting it also makes the caller the owner of a failed or cancelled
+	// start's cleanup: the runtime then skips its own start cleanup and
+	// leaves the reported resources to the caller. Set both hooks together.
+	OnResourceCreated func(ResourceHandle)
+	// ResolvedKubernetesServiceAccountName is the Kubernetes ServiceAccount
+	// resolved by the broker from the operator-configured GSA mapping;
+	// applied over the template and persisted config at start, when
+	// non-empty. It is not part of InlineConfig because it must also apply
+	// when starting or restarting an existing agent, whose Kubernetes config
+	// otherwise comes only from the template chain and the persisted config,
+	// not from InlineConfig.
+	ResolvedKubernetesServiceAccountName string
 }
+
+// ResourceHandle identifies one runtime resource created during a launch
+// (design t1-async-create-v11.md §3.8.4), reported by the runtime via
+// StartOptions.OnResourceCreated after each true create. UID is the
+// identity a cleanup deletes by: the Kubernetes object UID, or the
+// container ID for container runtimes. Namespace is empty for runtimes
+// that have no namespaces.
+type ResourceHandle struct {
+	Kind      string // one of the ResourceKind* constants
+	Namespace string
+	Name      string
+	UID       string
+}
+
+// ResourceHandle.Kind values.
+const (
+	ResourceKindSecret              = "secret"
+	ResourceKindSecretProviderClass = "secretproviderclass"
+	ResourceKindPod                 = "pod"
+	ResourceKindContainer           = "container"
+)
 
 type StatusEvent struct {
 	AgentID   string `json:"agent_id"`

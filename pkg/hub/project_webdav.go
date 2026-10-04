@@ -168,6 +168,11 @@ func (s *Server) updateProjectSyncState(projectID, workspacePath string) {
 // for a given project. For hub-managed and shared-workspace projects, this is the
 // hub-managed workspace directory. For linked projects (workspace on a remote
 // broker), this is the hub's cached copy of that workspace.
+//
+// Empty-per-agent projects (design #2703) also resolve to the hub project
+// directory here, although their agents never mount it: each agent gets a
+// private, broker-local directory. This is intentionally left unguarded in
+// P1; the web UI hides the Files tab for this mode (P5).
 func (s *Server) resolveProjectWebDAVPath(ctx context.Context, project *store.Project) (string, error) {
 	// Hub-managed projects (no git remote) always have a managed workspace
 	if project.GitRemote == "" {

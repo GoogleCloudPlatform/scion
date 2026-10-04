@@ -27,7 +27,9 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import { formatInstantWithZone, formatRelative } from '../../utils/time.js';
 import { showToast } from '../../utils/toast.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 interface MaintenanceOperation {
   id: string;
@@ -107,6 +109,9 @@ interface UpdateAvailableResponse {
 
 @customElement('scion-page-admin-maintenance')
 export class ScionPageAdminMaintenance extends LitElement {
+  /** Re-renders absolute times when the display timezone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @state()
   private loading = true;
 
@@ -847,61 +852,17 @@ export class ScionPageAdminMaintenance extends LitElement {
 
   private formatDate(dateString: string | undefined): string {
     if (!dateString) return '';
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return '';
-      return date.toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-      });
-    } catch {
-      return dateString;
-    }
+    return formatInstantWithZone(dateString, 'date');
   }
 
   private formatDateTime(dateString: string | undefined): string {
     if (!dateString) return '';
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return '';
-      return date.toLocaleDateString('en-US', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-      });
-    } catch {
-      return dateString;
-    }
+    return formatInstantWithZone(dateString);
   }
 
   private formatRelativeTime(dateString: string | undefined): string {
-    if (!dateString) return '';
-    try {
-      const date = new Date(dateString);
-      if (isNaN(date.getTime())) return '';
-      const diffMs = Date.now() - date.getTime();
-      const diffSeconds = Math.round(diffMs / 1000);
-      const diffMinutes = Math.round(diffMs / (1000 * 60));
-      const diffHours = Math.round(diffMs / (1000 * 60 * 60));
-      const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-
-      const rtf = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
-
-      if (Math.abs(diffSeconds) < 60) {
-        return rtf.format(-diffSeconds, 'second');
-      } else if (Math.abs(diffMinutes) < 60) {
-        return rtf.format(-diffMinutes, 'minute');
-      } else if (Math.abs(diffHours) < 24) {
-        return rtf.format(-diffHours, 'hour');
-      } else {
-        return rtf.format(-diffDays, 'day');
-      }
-    } catch {
-      return dateString;
-    }
+    if (!dateString || Number.isNaN(new Date(dateString).getTime())) return '';
+    return formatRelative(dateString);
   }
 
   private formatDuration(startStr: string, endStr?: string): string {

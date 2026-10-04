@@ -510,7 +510,7 @@ func main() {
 		"processMentions":     "derivative of validated primary message (mention fan-out)",
 		"dispatchToAgent":     "server-internal lifecycle signal (notification dispatch)",
 		"dispatchToChannels":  "server-internal lifecycle signal (channel notification)",
-		"dispatchToBroker":    "server-internal lifecycle signal (broker notification)",
+		"publishToBroker":     "server-internal lifecycle signal (broker notification)",
 		"messageEventHandler": "scheduled payload validated at creation time",
 	}
 

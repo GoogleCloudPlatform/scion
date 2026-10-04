@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -403,9 +404,19 @@ func validateDefaultTimezone(tz string) error {
 
 // handlePutServerConfig updates the global settings.yaml.
 func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
-	var req ServerConfigUpdateRequest
-	if err := readJSON(r, &req); err != nil {
+	rawBody, err := readRawBody(w, r)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
+		return
+	}
+	var req ServerConfigUpdateRequest
+	if err := json.NewDecoder(bytes.NewReader(rawBody)).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "Invalid request body", nil)
+		return
+	}
+	// The typed decode above silently drops a removed profiles.<name>.timezone
+	// key, so check the raw body before settings.yaml is touched.
+	if rejectRemovedProfileTimezone(w, rawBody) {
 		return
 	}
 
@@ -445,6 +456,51 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	if errs := config.ValidateSharedDirSizes(req.Runtimes, req.Profiles); len(errs) > 0 {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
 		return
+	}
+
+	// shared_dir_storage_backend on runtime and profile entries must be
+	// "local" or "nfs", and "nfs" needs a complete
+	// server.shared_dir_storage.nfs block (from this request, else the
+	// current global settings). When the request changes
+	// server.shared_dir_storage, it is also checked against the runtimes
+	// and profiles already stored, so removing or emptying the nfs block
+	// cannot strand an existing nfs override. Configuration only; no mount
+	// is checked.
+	sdInRequest := req.Server != nil && req.Server.SharedDirStorage != nil
+	if req.Runtimes != nil || req.Profiles != nil || sdInRequest {
+		runtimes, profiles := req.Runtimes, req.Profiles
+		var sdGlobal *config.V1SharedDirStorageConfig
+		if sdInRequest {
+			sdGlobal = req.Server.SharedDirStorage
+		}
+		sdKnown := true
+		if !sdInRequest || runtimes == nil || profiles == nil {
+			gs, _, gErr := config.LoadGlobalSettings()
+			switch {
+			case gErr != nil:
+				// The current settings cannot be read, so the merged
+				// result is unknown; validation at agent start still
+				// applies.
+				sdKnown = false
+			case gs != nil:
+				if sdInRequest {
+					if runtimes == nil {
+						runtimes = gs.Runtimes
+					}
+					if profiles == nil {
+						profiles = gs.Profiles
+					}
+				} else if gs.Server != nil {
+					sdGlobal = gs.Server.SharedDirStorage
+				}
+			}
+		}
+		if sdKnown {
+			if errs := config.ValidateSharedDirStorageBackends(runtimes, profiles, sdGlobal); len(errs) > 0 {
+				writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, errs[0].Error(), nil)
+				return
+			}
+		}
 	}
 
 	globalDir, err := config.GetGlobalDir()
@@ -508,6 +564,20 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// safe_to_evict on a non-Kubernetes runtime is saved and ignored, with
+	// the same warning as config validate. Checked on the merged file so a
+	// profile is matched against a runtime saved earlier.
+	var saveWarnings []string
+	if req.Runtimes != nil || req.Profiles != nil {
+		var merged struct {
+			Runtimes map[string]config.V1RuntimeConfig `yaml:"runtimes"`
+			Profiles map[string]config.V1ProfileConfig `yaml:"profiles"`
+		}
+		if yamlv3.Unmarshal(newData, &merged) == nil {
+			saveWarnings = safeToEvictSaveWarnings(merged.Runtimes, merged.Profiles)
+		}
+	}
+
 	if err := os.WriteFile(settingsPath, newData, 0644); err != nil {
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "Failed to write settings file", nil)
 		return
@@ -520,10 +590,26 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 	// Attempt to reload applicable runtime settings
 	reloadResults := s.reloadSettings()
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"status": "saved",
 		"reload": reloadResults,
-	})
+	}
+	if len(saveWarnings) > 0 {
+		resp["warnings"] = saveWarnings
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// safeToEvictSaveWarnings returns, and logs, a warning for each runtime or
+// profile that sets safe_to_evict on a non-Kubernetes runtime. The value is
+// saved and ignored at agent start; this is the same rule as config
+// validate. Used by both the file-mode and DB-mode PUT handlers.
+func safeToEvictSaveWarnings(runtimes map[string]config.V1RuntimeConfig, profiles map[string]config.V1ProfileConfig) []string {
+	warnings := config.SafeToEvictIgnoredWarnings(runtimes, profiles)
+	for _, msg := range warnings {
+		slog.Warn("Server config saved with an ignored setting", "warning", msg)
+	}
+	return warnings
 }
 
 // reloadSettings re-reads the settings file and applies runtime-changeable values.
@@ -576,26 +662,31 @@ func (s *Server) reloadSettings() map[string]interface{} {
 	return results
 }
 
+// setOrDeleteString applies an optional string update to the raw settings
+// map: nil leaves the key untouched, "" deletes it, anything else sets it.
+func setOrDeleteString(raw map[string]interface{}, key string, v *string) {
+	if v == nil {
+		return
+	}
+	if *v == "" {
+		delete(raw, key)
+		return
+	}
+	raw[key] = *v
+}
+
 // applySettingsUpdates merges the update request into the raw settings map.
 func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateRequest) {
 	if req.SchemaVersion != nil {
 		raw["schema_version"] = *req.SchemaVersion
 	}
-	if req.ActiveProfile != nil {
-		raw["active_profile"] = *req.ActiveProfile
-	}
-	if req.DefaultTemplate != nil {
-		raw["default_template"] = *req.DefaultTemplate
-	}
-	if req.DefaultHarnessConfig != nil {
-		raw["default_harness_config"] = *req.DefaultHarnessConfig
-	}
-	if req.ImageRegistry != nil {
-		raw["image_registry"] = *req.ImageRegistry
-	}
-	if req.WorkspacePath != nil {
-		raw["workspace_path"] = *req.WorkspacePath
-	}
+	// Top-level string settings: an explicit "" deletes the key from
+	// settings.yaml; a nil pointer (key omitted) means "no change".
+	setOrDeleteString(raw, "active_profile", req.ActiveProfile)
+	setOrDeleteString(raw, "default_template", req.DefaultTemplate)
+	setOrDeleteString(raw, "default_harness_config", req.DefaultHarnessConfig)
+	setOrDeleteString(raw, "image_registry", req.ImageRegistry)
+	setOrDeleteString(raw, "workspace_path", req.WorkspacePath)
 
 	if req.Server != nil {
 		newServer := marshalToMap(req.Server)
@@ -664,27 +755,9 @@ func applySettingsUpdates(raw map[string]interface{}, req *ServerConfigUpdateReq
 			delete(raw, "default_thinking_level")
 		}
 	}
-	if req.DefaultMaxAgentRole != nil {
-		if *req.DefaultMaxAgentRole != "" {
-			raw["default_max_agent_role"] = *req.DefaultMaxAgentRole
-		} else {
-			delete(raw, "default_max_agent_role")
-		}
-	}
-	if req.DefaultAgentRole != nil {
-		if *req.DefaultAgentRole != "" {
-			raw["default_agent_role"] = *req.DefaultAgentRole
-		} else {
-			delete(raw, "default_agent_role")
-		}
-	}
-	if req.DefaultRuntimeBroker != nil {
-		if *req.DefaultRuntimeBroker != "" {
-			raw["default_runtime_broker"] = *req.DefaultRuntimeBroker
-		} else {
-			delete(raw, "default_runtime_broker")
-		}
-	}
+	setOrDeleteString(raw, "default_max_agent_role", req.DefaultMaxAgentRole)
+	setOrDeleteString(raw, "default_agent_role", req.DefaultAgentRole)
+	setOrDeleteString(raw, "default_runtime_broker", req.DefaultRuntimeBroker)
 	if req.DefaultTimezone != nil {
 		if *req.DefaultTimezone != "" {
 			raw["default_timezone"] = *req.DefaultTimezone

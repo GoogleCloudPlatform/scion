@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
 )
@@ -143,7 +144,7 @@ func runAllowListList(cmd *cobra.Command, args []string) error {
 	for _, entry := range resp.Items {
 		fmt.Printf("%-40s %-30s %s\n",
 			entry.Email,
-			entry.Created.Format(time.RFC3339),
+			clitime.Format(entry.Created, clitime.Full),
 			entry.Note,
 		)
 	}

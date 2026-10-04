@@ -27,6 +27,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
 )
@@ -154,7 +155,7 @@ func runSkillsShow(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Tags: %s\n", strings.Join(skill.Tags, ", "))
 	}
 	fmt.Printf("Status: %s\n", skill.Status)
-	fmt.Printf("Created: %s\n", skill.Created.Format(time.RFC3339))
+	fmt.Printf("Created: %s\n", clitime.Format(skill.Created, clitime.Full))
 
 	// Show versions
 	versions, err := hubCtx.Client.Skills().ListVersions(ctx, skill.ID)
@@ -603,7 +604,7 @@ func runSkillsVersions(cmd *cobra.Command, args []string) error {
 		if len(hash) > 20 {
 			hash = hash[:20] + "..."
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", v.Version, v.Status, v.Created.Format("2006-01-02"), hash)
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", v.Version, v.Status, clitime.Format(v.Created, clitime.Date), hash)
 	}
 	return w.Flush()
 }
