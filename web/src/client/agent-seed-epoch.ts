@@ -85,8 +85,14 @@ export interface AgentSeedResult {
   liveCreated: Agent[];
   /**
    * IDs of response rows left out because the agent was deleted live
-   * (before or while the request was in flight). A page that renders the
-   * response as one server page is short by this many rows.
+   * (before or while the request was in flight) and the store no longer
+   * holds it. A page that renders the response as one server page is short
+   * by at least this many rows.
+   *
+   * A tombstoned row whose agent the store holds again (a live `created`
+   * after the `deleted`) is still left out of `agents`, but is not listed
+   * here: a refresh would leave it out the same way, so offering one could
+   * never clear the shortfall.
    */
   dropped: string[];
   /** A live create could not be decided (no `isMember` rule). */
@@ -216,7 +222,7 @@ export class AgentSeedEpoch {
     const dropped: string[] = [];
     for (const a of agents) {
       if (tombstones.has(a.id)) {
-        dropped.push(a.id);
+        if (!this.state.getAgent(a.id)) dropped.push(a.id);
         continue;
       }
       members.set(a.id, this.state.getAgent(a.id) ?? a);

@@ -208,6 +208,21 @@ describe('AgentSeedEpoch', () => {
     expect(result.dropped).toEqual(['a', 'b']);
   });
 
+  it('seed does not report a row as dropped when the store holds its agent again after the delete', () => {
+    const sm = newState();
+    sm.seedAgents([makeAgent('a'), makeAgent('b')]);
+    emit(sm, 'agent.a.deleted', { agentId: 'a' });
+    emit(sm, 'agent.a.created', { ...makeAgent('a'), agentId: 'a' });
+    emit(sm, 'agent.b.deleted', { agentId: 'b' });
+    expect(sm.getAgent('a')).toBeDefined();
+    const epoch = new AgentSeedEpoch(sm);
+    const result = epoch.seed([makeAgent('a'), makeAgent('b')], { partial: false });
+    epoch.close();
+    // Both stay off the result; only the agent the store no longer holds is dropped.
+    expect(result.agents.map((x) => x.id)).toEqual([]);
+    expect(result.dropped).toEqual(['b']);
+  });
+
   it('sawResync is set by a live-connection resync while open, and only then', () => {
     const resync = (sm: StateManager): void => {
       sm.sseClientInstance.dispatchEvent(new CustomEvent('disconnected'));

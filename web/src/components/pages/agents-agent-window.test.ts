@@ -1989,4 +1989,55 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       expect(q.has('fit')).toBe(false);
     });
   });
+
+  describe('a deleted then restored agent on the page', () => {
+    async function pagedWithDeleted(restore: boolean): Promise<{
+      el: TestEl;
+      fake: Fake;
+      id: string;
+    }> {
+      const fake: Fake = {
+        agents: Array.from({ length: 1200 }, (_, i) => makeAgent(i)),
+        requests: [],
+      };
+      stubFake(fake);
+      const el = await mount();
+      const win = internals(el).agentWindow;
+      expect(win.state).toBe('paged');
+      const id = win.items[0].id;
+      handleUpdate(`agent.${id}.deleted`, {});
+      await flushLive(el);
+      if (restore) {
+        const restored = fake.agents.find((a) => a.id === id)!;
+        handleUpdate(`agent.${id}.created`, { ...restored, agentId: id });
+        await flushLive(el);
+      }
+      return { el, fake, id };
+    }
+
+    it('a restored agent leaves no chip after each refresh, and stays off the page', async () => {
+      const { el, fake, id } = await pagedWithDeleted(true);
+      const win = internals(el).agentWindow;
+      for (let i = 0; i < 2; i++) {
+        const before = fake.requests.length;
+        await win.refresh();
+        await settle(el);
+        expect(fake.requests.length - before).toBe(1);
+        expect(win.updatesAvailable).toBe(false);
+        expect(win.items.some((a) => a.id === id)).toBe(false);
+        expect(win.memberIndex.has(id)).toBe(false);
+        expect(stateManager.getAgent(id)).toBeDefined();
+      }
+    });
+
+    it('a deleted agent the response still lists shows the chip after a refresh', async () => {
+      const { el, id } = await pagedWithDeleted(false);
+      const win = internals(el).agentWindow;
+      await win.refresh();
+      await settle(el);
+      expect(win.items.some((a) => a.id === id)).toBe(false);
+      expect(win.items).toHaveLength(24);
+      expect(win.updatesAvailable).toBe(true);
+    });
+  });
 });

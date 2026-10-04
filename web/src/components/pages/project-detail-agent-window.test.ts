@@ -1220,6 +1220,59 @@ describe('project-detail — agent list window', { timeout: 20_000 }, () => {
       expect(internals(el).agentWindow.updatesAvailable).toBe(true);
       expect(requests.length).toBe(before);
     });
+
+    describe('a deleted then restored agent on the page', () => {
+      async function pagedWithDeleted(
+        projectId: string,
+        restore: boolean
+      ): Promise<{ el: TestEl; requests: AgentsRequest[]; id: string }> {
+        const agents = Array.from({ length: 30 }, (_, i) => makeAgent(i, { projectId }));
+        const requests: AgentsRequest[] = [];
+        const el = await mountForcedPaged(projectId, agents, requests);
+        const win = internals(el).agentWindow;
+        expect(win.state).toBe('paged');
+        const id = win.items[0].id;
+        const update = (subject: string, data: unknown): void =>
+          (
+            stateManager as unknown as {
+              handleUpdate(u: { subject: string; data: unknown }): void;
+            }
+          ).handleUpdate({ subject, data });
+        update(`project.${projectId}.agent.deleted`, { agentId: id });
+        await flushLive(el);
+        if (restore) {
+          const restored = agents.find((a) => a.id === id)!;
+          update(`project.${projectId}.agent.created`, { ...restored, agentId: id });
+          await flushLive(el);
+        }
+        return { el, requests, id };
+      }
+
+      it('a restored agent leaves no chip after each refresh, and stays off the page', async () => {
+        const { el, requests, id } = await pagedWithDeleted('p-paged-restored', true);
+        const win = internals(el).agentWindow;
+        for (let i = 0; i < 2; i++) {
+          const before = requests.length;
+          await win.refresh();
+          await settle(el);
+          expect(requests.length - before).toBe(1);
+          expect(win.updatesAvailable).toBe(false);
+          expect(win.items.some((a) => a.id === id)).toBe(false);
+          expect(win.memberIndex.has(id)).toBe(false);
+          expect(stateManager.getAgent(id)).toBeDefined();
+        }
+      });
+
+      it('a deleted agent the response still lists shows the chip after a refresh', async () => {
+        const { el, id } = await pagedWithDeleted('p-paged-deleted-listed', false);
+        const win = internals(el).agentWindow;
+        await win.refresh();
+        await settle(el);
+        expect(win.items.some((a) => a.id === id)).toBe(false);
+        expect(win.items).toHaveLength(24);
+        expect(win.updatesAvailable).toBe(true);
+      });
+    });
   });
 
   describe('small state: live updates', () => {
