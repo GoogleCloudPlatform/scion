@@ -107,8 +107,8 @@ func TestDelete_StopsContainerBeforeRemoving(t *testing.T) {
 			calls = append(calls, "stop:"+id)
 			return nil
 		},
-		DeleteFunc: func(ctx context.Context, id string) error {
-			calls = append(calls, "delete:"+id)
+		DeleteFunc: func(ctx context.Context, ref runtime.RunRef) error {
+			calls = append(calls, "delete:"+ref.ID)
 			return nil
 		},
 	}
@@ -143,8 +143,8 @@ func TestDelete_ProceedsWhenStopFails(t *testing.T) {
 			calls = append(calls, "stop:"+id)
 			return fmt.Errorf("container is not running")
 		},
-		DeleteFunc: func(ctx context.Context, id string) error {
-			calls = append(calls, "delete:"+id)
+		DeleteFunc: func(ctx context.Context, ref runtime.RunRef) error {
+			calls = append(calls, "delete:"+ref.ID)
 			return nil
 		},
 	}
