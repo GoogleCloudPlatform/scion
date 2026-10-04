@@ -1017,6 +1017,7 @@ describe('scion-page-agents — agent list window', () => {
       h.hold();
       vi.stubGlobal('fetch', vi.fn(h.fn));
       localStorage.setItem('scion-view-agents', 'graph');
+      const run = vi.spyOn(AgentDrainRunner.prototype, 'run');
       const el = await mountUnsettled();
       // The tree view drains from the first request.
       await vi.waitFor(() => expect(h.heldCount).toBe(1));
@@ -1029,7 +1030,13 @@ describe('scion-page-agents — agent list window', () => {
       unmount(el);
       expect(h.sent[0].signal?.aborted).toBe(true);
       h.release();
-      for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+      // Wait until the aborted drain run has settled with no result.
+      expect(run).toHaveBeenCalledTimes(1);
+      let outcome: unknown = 'pending';
+      void (run.mock.results[0].value as Promise<unknown>).then((r) => (outcome = r));
+      await vi.waitFor(() => expect(outcome).toBeNull());
+      await el.updateComplete;
+      expect(run).toHaveBeenCalledTimes(1);
       expect(h.sent).toHaveLength(1);
       expect(stateManager.getAgents()).toHaveLength(0);
       expect(stateManager.isAgentSetComplete('full')).toBe(false);

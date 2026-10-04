@@ -4292,6 +4292,7 @@ describe('project-detail — agent list window', () => {
       const agents = Array.from({ length: 1200 }, (_, i) => makeAgent(i, { projectId }));
       const ctl = controlledFetch(projectId, agents);
       ctl.holdNext();
+      const run = vi.spyOn(AgentDrainRunner.prototype, 'run');
       const el = await createComponent(projectId, { holdsFirstLoad: true });
       await vi.waitFor(() => expect(ctl.heldCount).toBe(1));
       expect(ctl.sent).toHaveLength(1);
@@ -4303,7 +4304,13 @@ describe('project-detail — agent list window', () => {
       el.remove();
       expect(ctl.sent[0].signal?.aborted).toBe(true);
       ctl.release();
-      for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+      // Wait until the aborted drain run has settled with no result.
+      expect(run).toHaveBeenCalledTimes(1);
+      let outcome: unknown = 'pending';
+      void (run.mock.results[0].value as Promise<unknown>).then((r) => (outcome = r));
+      await vi.waitFor(() => expect(outcome).toBeNull());
+      await el.updateComplete;
+      expect(run).toHaveBeenCalledTimes(1);
       expect(ctl.sent).toHaveLength(1);
       expect(stateManager.getAgents().filter((a) => a.projectId === projectId)).toHaveLength(0);
     });
