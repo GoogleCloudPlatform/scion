@@ -1762,10 +1762,24 @@ func withHubAgentDefaults(ctx context.Context, cfg *CreateAgentConfig) context.C
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if cfg == nil || cfg.HubAgentDefaults.IsEmpty() {
+	if cfg == nil {
 		return ctx
 	}
-	return api.ContextWithHubAgentDefaults(ctx, cfg.HubAgentDefaults)
+	return withStartHubAgentDefaults(ctx, cfg.HubAgentDefaults)
+}
+
+// withStartHubAgentDefaults attaches hub defaults decoded from a start or
+// restart request body (or a create request's config) to ctx, so
+// Manager.Start's buildAgentEnv applies their env entries at its lowest tier.
+// Returns ctx unchanged for a nil or empty value.
+func withStartHubAgentDefaults(ctx context.Context, d *api.HubAgentDefaults) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if d.IsEmpty() {
+		return ctx
+	}
+	return api.ContextWithHubAgentDefaults(ctx, d)
 }
 
 // emptyPerAgentConflict returns a client-facing message when an
