@@ -738,6 +738,8 @@ Settings that can be changed at runtime and are shared across all replicas. Stor
 | `project_defaults` | `default_scratchpad` |
 | *(reserved)* `global_defaults` | Reserved for future hub-resource design — not implemented |
 
+`agent_defaults.default_timezone` is the Hub default `TZ` for agent containers: an IANA zone name, used only when the agent has no pin and no `TZ` environment variable applies. Empty means no default (the image default, UTC). An invalid name or `Local` is rejected with `422`. In `settings.yaml` it is the top-level `default_timezone` key. It does not change how times are stored or displayed. See [Times and Timezones](/scion/reference/times-and-timezones/#hub-default-timezone).
+
 ### Precedence
 
 In Postgres mode, the effective value for any Layer-1 key is resolved in this order (highest priority first):
