@@ -65,6 +65,31 @@ func TestComputeAgentDeletion(t *testing.T) {
 		}
 	})
 
+	// Design note D4 (phase 2): the finalizing stage is visible on the
+	// deleting view, and on the failed view of a lapsed finalizing row, and
+	// absent for every other stored state.
+	t.Run("stage marks finalizing rows only", func(t *testing.T) {
+		cases := []struct {
+			name  string
+			a     *Agent
+			state string
+			stage string
+		}{
+			{"live finalizing", &Agent{DeletionState: DeletionStateFinalizing, DeletionLeaseAt: tp(now.Add(time.Minute))}, DeletionStateDeleting, DeletionStageFinalizing},
+			{"lapsed finalizing", &Agent{DeletionState: DeletionStateFinalizing, DeletionLeaseAt: tp(now.Add(-time.Minute))}, DeletionStateFailed, DeletionStageFinalizing},
+			{"revoke_failed finalizing", &Agent{DeletionState: DeletionStateFinalizing, DeletionLeaseAt: tp(now), DeletionCode: DeletionCodeRevokeFailed}, DeletionStateFailed, DeletionStageFinalizing},
+			{"live deleting", &Agent{DeletionState: DeletionStateDeleting, DeletionLeaseAt: tp(now.Add(time.Minute))}, DeletionStateDeleting, ""},
+			{"lapsed deleting", &Agent{DeletionState: DeletionStateDeleting, DeletionLeaseAt: tp(now.Add(-time.Minute))}, DeletionStateFailed, ""},
+			{"failed", &Agent{DeletionState: DeletionStateFailed, DeletionCode: DeletionCodeInDoubt}, DeletionStateFailed, ""},
+		}
+		for _, tc := range cases {
+			got := ComputeAgentDeletion(tc.a, now)
+			if got == nil || got.State != tc.state || got.Stage != tc.stage {
+				t.Errorf("%s: got %+v, want state %q stage %q", tc.name, got, tc.state, tc.stage)
+			}
+		}
+	})
+
 	t.Run("lease-expired deleting reads failed/abandoned with expiresAt", func(t *testing.T) {
 		lease := now.Add(-time.Minute)
 		a := &Agent{DeletionState: DeletionStateDeleting, DeletionLeaseAt: tp(lease), DeletionStartedAt: tp(started)}
@@ -224,5 +249,38 @@ func TestAgent_JSON_DeletionPopulated(t *testing.T) {
 		if _, ok := m[k]; ok {
 			t.Errorf("raw column %q must not be serialized", k)
 		}
+	}
+}
+
+// The exact JSON key set of DeletionInfo (design §2.2 plus the additive
+// phase-2 "stage"): stage is omitted unless set, and present as
+// "finalizing" when set.
+func TestDeletionInfo_JSONKeys(t *testing.T) {
+	keys := func(d DeletionInfo) map[string]interface{} {
+		data, err := json.Marshal(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var m map[string]interface{}
+		_ = json.Unmarshal(data, &m)
+		return m
+	}
+	lease := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	base := keys(DeletionInfo{State: DeletionStateDeleting, LeaseExpiresAt: &lease})
+	want := []string{"state", "soft", "claim", "startedAt", "leaseExpiresAt"}
+	if len(base) != len(want) {
+		t.Fatalf("keys = %v, want exactly %v", base, want)
+	}
+	for _, k := range want {
+		if _, ok := base[k]; !ok {
+			t.Errorf("missing key %q in %v", k, base)
+		}
+	}
+	full := keys(DeletionInfo{
+		State: DeletionStateFailed, Code: DeletionCodeAbandoned, Error: "e",
+		ExpiresAt: &lease, LeaseExpiresAt: &lease, Stage: DeletionStageFinalizing,
+	})
+	if len(full) != 9 || full["stage"] != "finalizing" {
+		t.Fatalf("keys = %v, want 9 keys with stage=finalizing", full)
 	}
 }

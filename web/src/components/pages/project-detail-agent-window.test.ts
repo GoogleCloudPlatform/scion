@@ -2833,17 +2833,26 @@ describe('project-detail — agent list window', () => {
     /** Badge labels and icon counts inside table rows only (list view). */
     async function rowState(
       el: TestEl
-    ): Promise<{ badges: string[]; icons: (n: string) => number }> {
+    ): Promise<{ badges: string[]; banners: string[]; icons: (n: string) => number }> {
       const rows = [...(el.shadowRoot?.querySelectorAll('tbody tr') ?? [])];
       const badges = rows.flatMap((r) => [
         ...(r.querySelectorAll('scion-deletion-badge') as NodeListOf<
           HTMLElement & { updateComplete: Promise<boolean> }
         >),
       ]);
-      await Promise.all(badges.map((b) => b.updateComplete));
+      const banners = rows.flatMap((r) => [
+        ...(r.querySelectorAll('scion-deletion-banner') as NodeListOf<
+          HTMLElement & { updateComplete: Promise<boolean> }
+        >),
+      ]);
+      await Promise.all([...badges, ...banners].map((b) => b.updateComplete));
       return {
         badges: badges
           .map((b) => b.shadowRoot?.querySelector('.badge')?.textContent?.trim() ?? '')
+          .filter(Boolean),
+        // Phase 2: a failed view shows the compact failure banner instead.
+        banners: banners
+          .map((b) => b.shadowRoot?.querySelector('.title')?.textContent?.trim() ?? '')
           .filter(Boolean),
         icons: (n: string) =>
           rows.reduce((sum, r) => sum + r.querySelectorAll(`sl-icon[name="${n}"]`).length, 0),
@@ -2947,7 +2956,8 @@ describe('project-detail — agent list window', () => {
       } finally {
         vi.useRealTimers();
       }
-      expect(st.badges).toEqual(['Delete interrupted']);
+      expect(st.badges).toEqual([]);
+      expect(st.banners).toEqual(['Delete interrupted']);
       expect(st.icons('trash')).toBe(internals(el).agentWindow.items.length);
     });
   });

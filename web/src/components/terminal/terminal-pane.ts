@@ -134,6 +134,14 @@ export class ScionTerminalPane extends LitElement {
   @state()
   private agentPhase: AgentPhase = 'created';
 
+  /**
+   * The agent is stopping (e.g. while it is being deleted, ptone/scion#2483
+   * C#11). Set by the workspace root's SSE bridge; it only adds a
+   * non-fatal notice and never tears the session down.
+   */
+  @state()
+  private agentStopping = false;
+
   @state()
   private agentActivity: AgentActivity | '' = '';
 
@@ -637,6 +645,13 @@ export class ScionTerminalPane extends LitElement {
       background: var(--scion-primary-hover, #2563eb);
     }
 
+    .stopping-notice {
+      padding: 0.375rem 1rem;
+      background: var(--scion-badge-warning-bg, #fef3c7);
+      color: var(--scion-badge-warning-text, #92400e);
+      font-size: 0.75rem;
+    }
+
     .error-banner {
       padding: 0.375rem 1rem;
       background: var(--scion-badge-danger-bg, #fee2e2);
@@ -893,6 +908,20 @@ export class ScionTerminalPane extends LitElement {
     }
     if (!this.hasAttribute('tabindex')) this.tabIndex = -1;
     this.focus();
+  }
+
+  /**
+   * Show or clear the non-fatal "Agent is stopping…" notice. The session
+   * is untouched: it keeps running if the agent returns to running, and
+   * the SSE bridge marks it unavailable on stopped/deleted as before.
+   */
+  setAgentStopping(stopping: boolean): void {
+    this.agentStopping = stopping;
+  }
+
+  /** Whether the stopping notice is shown (tests and the bridge). */
+  get isAgentStoppingShown(): boolean {
+    return this.agentStopping;
   }
 
   /** Presentation only. Output continues to be parsed by the same xterm. */
@@ -2128,6 +2157,9 @@ export class ScionTerminalPane extends LitElement {
             `
           : ''}
       </div>
+      ${this.agentStopping
+        ? html`<div class="stopping-notice" role="status">Agent is stopping…</div>`
+        : nothing}
       ${this.error
         ? html`
             <div class="error-banner">

@@ -707,12 +707,23 @@ describe('scion-page-agent-detail backend-driven delete (ptone/scion#2483 phase 
     return inner ? (inner.textContent ?? '').trim() : null;
   }
 
+  /** The failure banner's title under the header (phase 2), or null. */
+  function headerBanner(el: ScionPageAgentDetail): string | null {
+    const banner = el.shadowRoot?.querySelector('scion-deletion-banner');
+    const title = banner?.shadowRoot?.querySelector('.title');
+    return title ? (title.textContent ?? '').trim() : null;
+  }
+
   async function settle(el: ScionPageAgentDetail): Promise<void> {
     await el.updateComplete;
     const badge = el.shadowRoot?.querySelector('.header scion-deletion-badge') as
       | (HTMLElement & { updateComplete: Promise<boolean> })
       | null;
     await badge?.updateComplete;
+    const banner = el.shadowRoot?.querySelector('scion-deletion-banner') as
+      | (HTMLElement & { updateComplete: Promise<boolean> })
+      | null;
+    await banner?.updateComplete;
   }
 
   it('202 keeps the page, shows Deleting…, hides actions; SSE deleted then redirects', async () => {
@@ -776,13 +787,17 @@ describe('scion-page-agent-detail backend-driven delete (ptone/scion#2483 phase 
     } as Agent);
     fakeStateManager.notifyAgentsUpdated();
     await settle(el);
-    expect(headerBadge(el)).toBe('Delete failed: boom');
+    // Phase 2: the failure shows in the banner; the header badge is for a
+    // live delete only.
+    expect(headerBadge(el)).toBeNull();
+    expect(headerBanner(el)).toBe('Delete failed: boom');
     expect(headerActions(el)).toEqual(expect.arrayContaining(['Stop', 'delete']));
 
     fakeStateManager.setAgent({ ...agent, deletion: null } as Agent);
     fakeStateManager.notifyAgentsUpdated();
     await settle(el);
     expect(headerBadge(el)).toBeNull();
+    expect(headerBanner(el)).toBeNull();
     expect(headerActions(el)).toEqual(expect.arrayContaining(['Stop', 'delete']));
   });
 
@@ -803,7 +818,8 @@ describe('scion-page-agent-detail backend-driven delete (ptone/scion#2483 phase 
 
     vi.advanceTimersByTime(1);
     await settle(el);
-    expect(headerBadge(el)).toBe('Delete interrupted');
+    expect(headerBadge(el)).toBeNull();
+    expect(headerBanner(el)).toBe('Delete interrupted');
     expect(headerActions(el)).toEqual(expect.arrayContaining(['Stop', 'delete']));
   });
 

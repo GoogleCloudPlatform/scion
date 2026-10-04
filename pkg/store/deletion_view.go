@@ -60,7 +60,18 @@ type DeletionInfo struct {
 	StartedAt      time.Time  `json:"startedAt"`
 	LeaseExpiresAt *time.Time `json:"leaseExpiresAt,omitempty"` // deleting
 	ExpiresAt      *time.Time `json:"expiresAt,omitempty"`      // failed, except in_doubt and finalizing
+	// Stage is "finalizing" when the row's stored state is finalizing
+	// (teardown done, finalize running or interrupted), on both the
+	// deleting and the failed view; omitted otherwise. The deleting view
+	// otherwise hides finalizing, so without it a client that flips a
+	// lapsed lease itself cannot tell that the row never expires from view
+	// and blocks start until a retry or force (design note D4, phase 2).
+	Stage string `json:"stage,omitempty"`
 }
+
+// DeletionStageFinalizing is the DeletionInfo.Stage value for a row whose
+// stored state is finalizing.
+const DeletionStageFinalizing = "finalizing"
 
 // DeletionPriorState is the JSON stored in Agent.DeletionPrior: the state a
 // failed delete restores (design §2.1 claim).
@@ -154,7 +165,8 @@ func (a *Agent) DeletionEffectiveCode(now time.Time) string {
 //     leaseAt on a claim, so this fallback is defensive). A row with none of
 //     the three has no expiresAt;
 //   - lease-expired finalizing rows and in_doubt rows have no expiresAt and
-//     never expire from view.
+//     never expire from view;
+//   - a finalizing row (live or lease-expired) carries stage "finalizing".
 //
 // A soft-deleted row (DeletedAt set) has no view.
 func ComputeAgentDeletion(a *Agent, now time.Time) *DeletionInfo {
@@ -168,6 +180,9 @@ func ComputeAgentDeletion(a *Agent, now time.Time) *DeletionInfo {
 	}
 	if a.DeletionStartedAt != nil {
 		info.StartedAt = *a.DeletionStartedAt
+	}
+	if a.DeletionState == DeletionStateFinalizing {
+		info.Stage = DeletionStageFinalizing
 	}
 	if a.DeletionActive(now) {
 		info.State = DeletionStateDeleting

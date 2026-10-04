@@ -62,6 +62,7 @@ import {
 } from '../../shared/lineage.js';
 import type { StatusType } from './status-badge.js';
 import './status-badge.js';
+import { DeletionLeaseController } from './deletion-badge.js';
 import { getMessageModeDisplay, getDenialMessage } from '../../shared/message-mode.js';
 import type { MessageMode } from '../../shared/types.js';
 import './quick-message-dialog.js';
@@ -181,6 +182,12 @@ export class ScionAgentTreeView extends LitElement {
   @state() private highlightId: string | null = null;
 
   @query('.canvas') private canvasEl?: HTMLDivElement;
+
+  /**
+   * Re-renders when a node's delete lease lapses (it flips to interrupted)
+   * or a failed view expires (ptone/scion#2483 phase 2), like the pages.
+   */
+  private readonly deletionLease = new DeletionLeaseController(this, () => this.agents);
 
   private boundOnWheel = (e: WheelEvent) => this.onWheel(e);
   private boundOnKeyDown = (e: KeyboardEvent) => this.onKeyDown(e);
@@ -489,6 +496,15 @@ export class ScionAgentTreeView extends LitElement {
 
     .node:hover .name {
       text-decoration: underline;
+    }
+
+    /* Status badge plus the compact deletion badge (graph shows the
+       deletion state, never lifecycle actions). */
+    .node .badges {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      min-width: 0;
     }
 
     .node .meta {
@@ -1343,11 +1359,18 @@ export class ScionAgentTreeView extends LitElement {
           title=${`${agent.name}${agent.template ? ` — ${agent.template}` : ''}${isRoot && creator ? `\ncreated by ${creator}` : ''}`}
         >
           <span class="name">${agent.name}</span>
-          <scion-status-badge
-            status=${status as StatusType}
-            label=${status}
-            size="small"
-          ></scion-status-badge>
+          <span class="badges">
+            <scion-status-badge
+              status=${status as StatusType}
+              label=${status}
+              size="small"
+            ></scion-status-badge>
+            <scion-deletion-badge
+              .deletion=${this.deletionLease.view(agent)}
+              size="small"
+              compact
+            ></scion-deletion-badge>
+          </span>
           ${agent.template ? html`<span class="meta">${agent.template}</span>` : nothing}
           <span
             class="mode-icon"

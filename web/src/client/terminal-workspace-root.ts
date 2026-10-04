@@ -732,6 +732,13 @@ export class TerminalWorkspaceRoot {
 
         // SSE → session bridge: reconcile metadata availability with session connection
         try {
+          // A stopping agent (e.g. one being deleted, ptone/scion#2483
+          // C#11) gets a non-fatal notice only: no teardown. Any other
+          // phase clears it; running recovers, and stopped/deleted are
+          // marked unavailable below as before.
+          this.panes
+            .get(entry.state.key)
+            ?.setAgentStopping(next.availability !== 'deleted' && next.agent?.phase === 'stopping');
           if (
             next.availability === 'deleted' &&
             entry.session.state.connection !== 'closed' &&

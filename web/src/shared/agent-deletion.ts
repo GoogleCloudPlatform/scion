@@ -49,7 +49,10 @@ function leaseExpiryMs(d: DeletionInfo): number | null {
  * its next read (pkg/store/deletion_view.go):
  *
  * - a `deleting` view whose lease has passed reads as `failed`/`abandoned`,
- *   expiring `DELETION_DISPLAY_TTL_MS` after the lease;
+ *   expiring `DELETION_DISPLAY_TTL_MS` after the lease. A `finalizing`
+ *   stage row keeps the generic `abandoned` code but gets no `expiresAt`:
+ *   the hub never expires it, and it blocks start until a retry or force
+ *   (design note D4);
  * - a `failed` view whose `expiresAt` has passed reads as `null`. Views
  *   with no `expiresAt` (in_doubt, finalizing) never expire.
  *
@@ -64,12 +67,14 @@ export function effectiveDeletion(
   if (deletion.state === 'deleting') {
     const lease = leaseExpiryMs(deletion);
     if (lease === null || nowMs < lease) return deletion;
-    view = {
+    const flipped: DeletionInfo = {
       ...deletion,
       state: 'failed',
       code: deletion.code || 'abandoned',
-      expiresAt: new Date(lease + DELETION_DISPLAY_TTL_MS).toISOString(),
     };
+    if (deletion.stage === 'finalizing') delete flipped.expiresAt;
+    else flipped.expiresAt = new Date(lease + DELETION_DISPLAY_TTL_MS).toISOString();
+    view = flipped;
   }
   const expires = parseMs(view.expiresAt);
   if (expires !== null && nowMs >= expires) return null;
@@ -103,6 +108,59 @@ export function deletionBadgeLabel(d: DeletionInfo): string {
   if (d.code === 'abandoned') return 'Delete interrupted';
   const detail = d.error || (d.code ? (FAILURE_TEXT[d.code] ?? d.code.replace(/_/g, ' ')) : '');
   return detail ? `Delete failed: ${detail}` : 'Delete failed';
+}
+
+/** Codes the hub stores only while a row is finalizing (design §2.3). */
+const FINALIZING_CODES = new Set(['revoke_failed', 'finalize_failed']);
+
+/**
+ * Whether a failed view blocks starting the agent (design §2.1
+ * `deleteBlocksStart`): an `in_doubt` failure (a cross-node teardown may
+ * still run) or a finalizing row (teardown has already run). Start then
+ * returns 409 `delete_in_progress`, and Force is the way out.
+ */
+export function deletionBlocksStart(d: DeletionInfo | null | undefined): boolean {
+  if (!d || d.state !== 'failed') return false;
+  return d.code === 'in_doubt' || d.stage === 'finalizing' || FINALIZING_CODES.has(d.code ?? '');
+}
+
+/** Short hint for a start-blocking failure, for dense rows. */
+export const DELETION_START_BLOCKED_HINT = 'Start is blocked; Force delete finishes it.';
+
+/**
+ * Explanation shown when Start (or resume/restart) returns 409
+ * `delete_in_progress`, instead of the generic error toast.
+ */
+export const START_BLOCKED_BY_DELETE_MESSAGE =
+  "This agent can't be started because its delete hasn't finished. " +
+  'Retry the delete, or use Force delete to finish removing it.';
+
+/**
+ * The failure banner's text for a failed view: `title` is the badge label
+ * (`Delete failed: <error>`, `Delete interrupted`, ...), `detail` explains
+ * what happened and what Retry and Force do. For an `in_doubt` or
+ * finalizing row the detail says that starting is blocked and that Force
+ * is the way out (design §8 phase 2, D3).
+ */
+export function deletionBannerText(d: DeletionInfo): { title: string; detail: string } {
+  const title = deletionBadgeLabel(d);
+  let detail: string;
+  if (d.code === 'in_doubt') {
+    detail =
+      "The broker hasn't confirmed that the agent's container was removed. " +
+      'Starting this agent is blocked until it does. Force delete is the way out: ' +
+      'it finishes removing the agent without that confirmation.';
+  } else if (deletionBlocksStart(d)) {
+    detail =
+      "The agent's container was already torn down, so starting this agent is blocked. " +
+      'Retry the delete, or use Force delete to finish removing it.';
+  } else if (d.code === 'abandoned') {
+    detail =
+      'The hub stopped working on this delete before it finished. Retry it, or force delete.';
+  } else {
+    detail = 'Retry the delete, or force delete to remove the agent despite the broker error.';
+  }
+  return { title, detail };
 }
 
 /**

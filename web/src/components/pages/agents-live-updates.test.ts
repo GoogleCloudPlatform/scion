@@ -380,6 +380,16 @@ describe('scion-page-agents live updates (agents-changed -> mergeChanged)', () =
         .filter(Boolean);
     }
 
+    async function bannerTitles(el: TestEl): Promise<string[]> {
+      const banners = [
+        ...(el.shadowRoot?.querySelectorAll('scion-deletion-banner') ?? []),
+      ] as Array<HTMLElement & { updateComplete: Promise<boolean> }>;
+      await Promise.all(banners.map((b) => b.updateComplete));
+      return banners
+        .map((b) => b.shadowRoot?.querySelector('.title')?.textContent?.trim() ?? '')
+        .filter(Boolean);
+    }
+
     it('202 keeps the row with Deleting… and hides its actions; SSE deleted then removes it', async () => {
       const rows = [actionable('a1'), actionable('a2')];
       stubHub(
@@ -421,13 +431,16 @@ describe('scion-page-agents live updates (agents-changed -> mergeChanged)', () =
       });
       await flush();
       await el.updateComplete;
-      expect(await badgeTexts(el)).toEqual(['Delete failed: conflict']);
+      // Phase 2: the failure shows in the card's banner, not the badge.
+      expect(await badgeTexts(el)).toEqual([]);
+      expect(await bannerTitles(el)).toEqual(['Delete failed: conflict']);
       expect(trashButtons(el)).toBe(1);
 
       handleUpdate('agent.a1.status', { deletion: null });
       await flush();
       await el.updateComplete;
       expect(await badgeTexts(el)).toEqual([]);
+      expect(await bannerTitles(el)).toEqual([]);
       expect(trashButtons(el)).toBe(1);
     });
 
