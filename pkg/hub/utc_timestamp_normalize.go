@@ -51,12 +51,19 @@ func (e *UTCTimestampNormalizeExecutor) Run(ctx context.Context, logger io.Write
 }
 
 // rerunnableMigrations lists migration-category operations that may run
-// again after completing. utc-timestamp-normalize is idempotent, and the
-// startup check keeps reporting rows it has not yet rewritten (rows written
-// by an older binary, restored from a backup, or written by a later
-// migration), so the remedy it names must stay available.
+// again after completing. Each one is idempotent: a second run changes
+// nothing that the first run already fixed.
+//
+//   - utc-timestamp-normalize: the startup check keeps reporting rows it has
+//     not yet rewritten (rows written by an older binary, restored from a
+//     backup, or written by a later migration), so the remedy it names must
+//     stay available.
+//   - applied-config-tz-cleanup: its description promises a safe re-run that
+//     converts 0. A run strips TZ from both env copies, so a second run
+//     skips every agent it already handled and writes no agent row.
 var rerunnableMigrations = map[string]bool{
 	entadapter.UTCTimestampNormalizeKey: true,
+	"applied-config-tz-cleanup":         true,
 }
 
 // storeDB returns the store's *sql.DB and ent dialect, or nil and "" when

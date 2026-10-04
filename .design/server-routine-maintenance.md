@@ -87,7 +87,7 @@ CREATE INDEX idx_maintenance_ops_status ON maintenance_operations(status);
 ```
 
 **Category semantics:**
-- `migration` — One-time tasks that transition the system from state A to state B. Once completed, they are marked done and cannot be re-run from the UI (CLI `--force` flag remains for exceptional cases). These are seeded into the table at startup or via schema migration.
+- `migration` — One-time tasks that transition the system from state A to state B. Once completed, they are marked done, and the run endpoint rejects another run with `409 Conflict`. There is no override flag in the UI or CLI. The exception is a migration listed in `rerunnableMigrations` (`pkg/hub/utc_timestamp_normalize.go`): it is idempotent, so the run endpoint accepts it again after it completes (see §3.5). The Maintenance page offers **Run** only for a pending or failed migration, so a completed listed migration is re-run through the API (`POST /api/v1/admin/maintenance/migrations/{key}/run`). These are seeded into the table at startup or via schema migration.
 - `operation` — Repeatable infrastructure tasks. Each execution creates a new history entry (see `maintenance_operation_runs` below).
 
 **Status transitions:**
@@ -127,7 +127,7 @@ The following migrations are seeded into `maintenance_operations` by `SeedMainte
 |-----|-------|-------------|
 | `secret-hub-id-migration` | Secret Hub ID Namespace Migration | Migrates hub-scoped secrets from the legacy fixed "hub" scope ID to the per-instance hub ID. Required when upgrading a hub that was created before the hub ID namespacing feature. Only needed for GCP Secret Manager backend. |
 | `applied-config-env-cleanup` | Applied Config Env Cleanup | Removes entries from `agent.appliedConfig.env` that a since-fixed merge-back could have written for agents created before the fix: `GITHUB_TOKEN` unconditionally, plus any other key that matches a secret-flagged entry in the agent's reachable env-var or secret scopes. Safe to re-run. |
-| `applied-config-tz-cleanup` | Applied Config TZ Cleanup | Optional. Converts the `TZ` that older hubs saved in `agent.appliedConfig.env` into an explicit timezone pin (source `legacy`) in one pass and reports how many agents it converted. The hub already does this lazily on each timezone read. Safe to re-run; a second run converts 0. Both orders with `applied-config-env-cleanup` are safe: run this first to keep every saved `TZ` as a pin; if the env cleanup runs first, saved `TZ` values that match no live plain source are removed and those agents follow the timezone settings instead. |
+| `applied-config-tz-cleanup` | Applied Config TZ Cleanup | Optional. Converts the `TZ` that older hubs saved in `agent.appliedConfig.env` into an explicit timezone pin (source `legacy`) in one pass and reports how many agents it converted. The hub already does this lazily on each timezone read. Safe to re-run: it is listed in `rerunnableMigrations` (see §3.5), and a second run converts 0. Both orders with `applied-config-env-cleanup` are safe: run this first to keep every saved `TZ` as a pin; if the env cleanup runs first, saved `TZ` values that match no live plain source are removed and those agents follow the timezone settings instead. |
 | `utc-timestamp-normalize` | UTC Timestamp Normalize | Rewrites stored timestamps to UTC so that ordering and paging are exact: on SQLite, every ent time column, every webchat time column and the times embedded in JSON fields; on Postgres, the JSON-embedded times. Tables that cannot be read because of rows written in a numeric-abbreviation zone (for example Asia/Kathmandu) are repaired automatically at hub start, after a snapshot of the database. Back up the database first. Safe to re-run: it is listed in `rerunnableMigrations`, so it is exempt from the completed-migration guard (see §3.5). |
 
 ### 3.4 Seeded Operations
@@ -233,7 +233,7 @@ Response:
 }
 ```
 
-Returns `409 Conflict` if the migration is already completed, unless it is listed in `rerunnableMigrations` (currently only `utc-timestamp-normalize`).
+Returns `409 Conflict` if the migration is already completed, unless it is listed in `rerunnableMigrations` (currently `utc-timestamp-normalize` and `applied-config-tz-cleanup`). A listed migration must be idempotent: a second run changes nothing the first run already fixed.
 
 #### Get Run Status
 

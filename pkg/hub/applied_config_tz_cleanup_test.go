@@ -19,6 +19,9 @@ package hub
 import (
 	"bytes"
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -286,4 +289,54 @@ func TestAppliedConfigTZCleanupRegistered(t *testing.T) {
 	exec, err := srv.resolveMaintenanceExecutor("applied-config-tz-cleanup")
 	require.NoError(t, err)
 	assert.IsType(t, &AppliedConfigTZCleanupExecutor{}, exec)
+}
+
+// TestAppliedConfigTZCleanupRerunsThroughExecuteMigration runs the migration
+// twice through the admin endpoint. The second run is accepted (not 409,
+// because the key is in rerunnableMigrations), completes, converts 0 and
+// writes no agent row.
+func TestAppliedConfigTZCleanupRerunsThroughExecuteMigration(t *testing.T) {
+	const key = "applied-config-tz-cleanup"
+	ctx := context.Background()
+	srv, s := newTestServerWithStore(t)
+	f := newTZCleanupFixture(t, s)
+	require.True(t, rerunnableMigrations[key], "the description promises a safe re-run")
+
+	admin := NewAuthenticatedUser("u1", "admin@example.com", "Admin", "admin", "cli")
+	run := func() *store.MaintenanceOperation {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/admin/maintenance/migrations/"+key+"/run", strings.NewReader(`{}`))
+		req = req.WithContext(contextWithIdentity(req.Context(), admin))
+		rr := httptest.NewRecorder()
+		srv.handleAdminMaintenanceMigrations(rr, req)
+		require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+		var got *store.MaintenanceOperation
+		require.Eventually(t, func() bool {
+			var err error
+			got, err = s.GetMaintenanceOperation(ctx, key)
+			return err == nil && got.Status != store.MaintenanceStatusRunning
+		}, 10*time.Second, 20*time.Millisecond)
+		return got
+	}
+
+	first := run()
+	require.Equal(t, store.MaintenanceStatusCompleted, first.Status, first.Result)
+	assert.Contains(t, first.Result, "Adopted 5 agent TZ value(s)")
+
+	versions := map[string]int64{}
+	for _, id := range f.all() {
+		a, err := s.GetAgent(ctx, id)
+		require.NoError(t, err)
+		versions[id] = a.StateVersion
+	}
+
+	second := run()
+	require.Equal(t, store.MaintenanceStatusCompleted, second.Status, second.Result)
+	assert.Contains(t, second.Result, "Adopted 0 agent TZ value(s) as legacy pins; stripped TZ from 0 agent(s)")
+	for id, v := range versions {
+		a, err := s.GetAgent(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, v, a.StateVersion, "agent %s must not be written by the second run", id)
+	}
+	assertLegacyPin(t, s, f.envOnly, "Asia/Kathmandu")
 }
