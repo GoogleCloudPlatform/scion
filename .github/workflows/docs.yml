@@ -53,8 +53,19 @@ jobs:
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         uses: actions/configure-pages@v6
 
+      # Pinned release tarball with a checksum. d2lang.com/install.sh calls the
+      # GitHub API without auth and hits the shared-runner rate limit (403).
       - name: Install D2
-        run: curl -fsSL https://d2lang.com/install.sh | sh -s --
+        env:
+          D2_VERSION: v0.9.0
+          D2_SHA256: 5669ddc46b99e942cc96078f4a4e36d5e62103348f4c05179ede27802fdd87a9
+        run: |
+          tarball="d2-${D2_VERSION}-linux-amd64.tar.gz"
+          curl -fsSL --retry 3 -o "${RUNNER_TEMP}/${tarball}" \
+            "https://github.com/terrastruct/d2/releases/download/${D2_VERSION}/${tarball}"
+          echo "${D2_SHA256}  ${RUNNER_TEMP}/${tarball}" | sha256sum -c -
+          tar -xzf "${RUNNER_TEMP}/${tarball}" -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/d2-${D2_VERSION}/bin" >> "$GITHUB_PATH"
 
       - name: Install dependencies
         run: cd docs-site && npm install
