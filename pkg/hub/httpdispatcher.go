@@ -208,6 +208,10 @@ type HTTPAgentDispatcher struct {
 	// profile, or "" if the profile does not exist or has no timezone set.
 	// Used by buildCreateRequest to inject TZ into agent containers.
 	profileTimezoneProvider func(profileName string) string
+
+	// conduitCapability reports whether this hub serves conduit sessions
+	// (SCION_HUB_CONDUIT). Nil means never.
+	conduitCapability func() bool
 }
 
 // NewHTTPAgentDispatcher creates a new HTTP-based agent dispatcher.
@@ -298,6 +302,28 @@ func (d *HTTPAgentDispatcher) SetHubName(name string) {
 }
 
 // SetSecretBackend sets the secret backend for resolving secrets.
+// SetConduitCapability sets the check behind SCION_HUB_CONDUIT: agents
+// dispatched while it reports true get SCION_HUB_CONDUIT=true and dial the
+// conduit endpoint; otherwise the variable is removed and sciontool keeps
+// the legacy port-forward tunnel.
+func (d *HTTPAgentDispatcher) SetConduitCapability(fn func() bool) {
+	d.conduitCapability = fn
+}
+
+// applyConduitCapability sets or removes SCION_HUB_CONDUIT. The hub owns
+// the variable: a value from config or storage env is replaced or dropped.
+func (d *HTTPAgentDispatcher) applyConduitCapability(env map[string]string, cls *map[string]api.EnvKind) {
+	if d.conduitCapability != nil && d.conduitCapability() {
+		env[envHubConduit] = "true"
+		classifyEnv(cls, envHubConduit, api.EnvKindPlain)
+		return
+	}
+	delete(env, envHubConduit)
+	if *cls != nil {
+		delete(*cls, envHubConduit)
+	}
+}
+
 func (d *HTTPAgentDispatcher) SetSecretBackend(b secret.SecretBackend) {
 	d.secretBackend = b
 }
@@ -1088,6 +1114,11 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			}
 		}
 	}
+
+	if req.ResolvedEnv == nil {
+		req.ResolvedEnv = make(map[string]string)
+	}
+	d.applyConduitCapability(req.ResolvedEnv, &req.EnvClassifications)
 
 	resolvedSkillsCount := 0
 	if req.PreResolvedSkills != nil {
@@ -2711,6 +2742,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	}
 
 	d.injectLifecycleGitHubToken(ctx, agent, resolvedEnv, &envClassifications, caller)
+	d.applyConduitCapability(resolvedEnv, &envClassifications)
 
 	return startEnvResult{
 		env:             resolvedEnv,

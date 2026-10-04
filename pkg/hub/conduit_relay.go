@@ -106,6 +106,17 @@ func (s *Server) ConduitEnabled() bool {
 	return s.experimentEnabled(conduitExperiment)
 }
 
+// envHubConduit tells sciontool that this hub serves conduit sessions. Its
+// absence (an older hub, or hub.conduit off) keeps sciontool on the legacy
+// port-forward tunnel without ever calling /api/v1/conduit.
+const envHubConduit = "SCION_HUB_CONDUIT"
+
+// conduitServing reports whether agents should dial the conduit endpoint:
+// hub.conduit is on and this node runs the relay.
+func (s *Server) conduitServing() bool {
+	return s.experimentEnabled(conduitExperiment) && s.conduit.Load() != nil
+}
+
 // ConduitGrantRingShared reports whether the grant key ring is persisted
 // with the shared at-rest encryption key, so every hub node signs and
 // verifies with the same ring. Without it each node holds its own
