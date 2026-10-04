@@ -2295,8 +2295,8 @@ func (s *Server) listProjectAgents(w http.ResponseWriter, r *http.Request, proje
 	}
 
 	// Legacy mode. identity is resolved generically (user or agent) because
-	// the new project cursor binding below covers both callers (design 4.4:
-	// "This is new in both modes"; the CLI walk test exercises both).
+	// the new project cursor binding below covers both callers (it applies
+	// in both legacy and sorted mode; the CLI walk test exercises both).
 	identity := GetIdentityFromContext(ctx)
 	cursorBinding := scopedCursorBinding(sortSuffix("project-agents:"+projectID, "", ""), filter, identity)
 	cursor := query.Get("cursor")

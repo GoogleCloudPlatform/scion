@@ -42,7 +42,7 @@ import (
 // _capabilities deep-equal the legacy path's ComputeCapabilitiesBatch-
 // derived _capabilities, action order included (the technique
 // TestListProjectAgentsSorted_CapsDeepEqualLegacy already uses for the
-// owner case); and (2) the exact decision count the design's 5+8n
+// owner case); and (2) the exact decision count the 5+8n
 // (all-readable, complete) formula predicts.
 
 // TestListProjectAgentsSorted_CapsDeepEqual_ScopedUAT exercises the one
@@ -84,8 +84,8 @@ func TestListProjectAgentsSorted_CapsDeepEqual_ScopedUAT(t *testing.T) {
 			"scoped UAT: sorted mode's merged capabilities must deep-equal the legacy ComputeCapabilitiesBatch output for agent %s, including action order", a.ID)
 	}
 
-	// 5 (gate + 4 scope caps) + n (step-3 read pass, via DecideFromContext)
-	// + 7n (step-6 remaining actions, via DecideFromContext) = 5 + 8n.
+	// 5 (gate + 4 scope caps) + n (read pass, via DecideFromContext)
+	// + 7n (remaining-actions pass, via DecideFromContext) = 5 + 8n.
 	// DecideFromContext costs exactly one Decide/audit record per
 	// (resource, action), the same as CheckAccess (authz.go: "All
 	// authorization decisions route through the AK1 kernel -- there are no

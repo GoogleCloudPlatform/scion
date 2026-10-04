@@ -1034,8 +1034,8 @@ func entAgentToMember(a *ent.Agent) store.AgentMember {
 // The SQL SELECT list is exactly agentMemberSelectFields — no wide column
 // (AppliedConfig in particular) is ever read off the wire for a candidate
 // row — which is what keeps a 2,000-row candidate scan cheap enough for the
-// server's request WriteTimeout, not just what the design's equality gate
-// requires.
+// server's request WriteTimeout, not just what the member/full equality
+// gate requires.
 //
 // The candidate set is bounded by the caller's ceiling check to at most a
 // couple thousand rows, so this fetches every matching row up to max (with
