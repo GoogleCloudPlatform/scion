@@ -46,6 +46,8 @@ interface PageInternals {
   loading?: boolean;
   agentsLoading?: boolean;
   countsLoading?: boolean;
+  /** Home: the counts chip is raised (rendered only in count-only mode). */
+  countsMayHaveChanged?: boolean;
   memberIndex?: AgentMemberIndex | null;
   agents: Agent[];
   agentWindow?: AgentListWindow;
@@ -85,7 +87,7 @@ async function settle(el: TestEl, allowPending: () => number = () => 0): Promise
     expect(fetchState().pending).toBeLessThanOrEqual(allowPending());
   };
   for (;;) {
-    await vi.waitFor(idle);
+    await vi.waitFor(idle, { timeout: 10_000 });
     const before = fetchState().calls;
     // Yield one macrotask so response bodies are read and handled.
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -421,6 +423,10 @@ describe('home agent counts and the shared completeness flag', { timeout: 30_000
       expect(internals(el).memberIndex).not.toBeNull();
       expect(internals(el).memberIndex?.has('g-07000')).toBe(true);
       expect(activeCount(el)).toBe('102');
+      // Exact counts raise no chip. The chip renders only in count-only
+      // mode, so the flag behind it is checked too.
+      expect(countsChip(el)).toBeNull();
+      expect(internals(el).countsMayHaveChanged).toBe(false);
     });
   });
 
@@ -464,6 +470,95 @@ describe('home agent counts and the shared completeness flag', { timeout: 30_000
       await settle(el);
       expect(internals(el).memberIndex?.getPhase('g-00500')).toBe('stopped');
       expect(activeCount(el)).toBe('100');
+    });
+  });
+
+  describe('every home response keeps the live changes that land while it is in flight', () => {
+    const rows = [
+      // 25 agents, 10 running: the complete set.
+      { name: 'the complete response', count: 25, running: 10, member: 5, idMode: false },
+      // 1,200 agents, 100 running: counts from the stats IDs.
+      { name: 'the stats-ID response', count: 1200, running: 100, member: 50, idMode: true },
+    ];
+
+    describe.each(rows)('$name', (row) => {
+      let el: TestEl;
+      let h: ReturnType<typeof holdable>;
+      let fake: Fake;
+      const id = `g-${String(row.member).padStart(5, '0')}`;
+      const total = (): number =>
+        internals(el).memberIndex?.stats.total ?? internals(el).agents.length;
+
+      beforeEach(async () => {
+        fake = newFake(row.count, row.running);
+        h = holdable(fakeFetch(fake), isGlobalAgentsList);
+        h.hold(1);
+        vi.stubGlobal('fetch', vi.fn(h.fn));
+        el = document.createElement('scion-page-home') as TestEl;
+        (el as unknown as { pageData: unknown }).pageData = {
+          path: '/',
+          title: 'Page',
+          user: USER,
+        };
+        document.body.appendChild(el);
+        await el.updateComplete;
+        await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      });
+
+      const done = async (): Promise<void> => {
+        (stateManager as unknown as { flush(): void }).flush();
+        h.release();
+        await settle(el);
+        expect(fake.requests).toHaveLength(1);
+        expect(internals(el).memberIndex === null).toBe(!row.idMode);
+        expect(countsChip(el)).toBeNull();
+        expect(internals(el).countsMayHaveChanged).toBe(false);
+      };
+
+      it('with no live change the counts are the response’s', async () => {
+        await done();
+        expect(activeCount(el)).toBe(String(row.running));
+        expect(total()).toBe(row.count);
+      });
+
+      it('a phase change to an agent the store holds counts', async () => {
+        stateManager.seedAgents([makeAgent(row.member)]);
+        handleUpdate(`agent.${id}.status`, { agentId: id, phase: 'stopped' });
+        await done();
+        expect(activeCount(el)).toBe(String(row.running - 1));
+      });
+
+      it('a phase change to an agent not in the store counts', async () => {
+        expect(stateManager.getAgent(id)).toBeUndefined();
+        handleUpdate(`agent.${id}.status`, { agentId: id, phase: 'stopped' });
+        await done();
+        expect(activeCount(el)).toBe(String(row.running - 1));
+      });
+
+      it('an activity change to a running agent not in the store leaves it running', async () => {
+        expect(stateManager.getAgent(id)).toBeUndefined();
+        handleUpdate(`agent.${id}.status`, { agentId: id, activity: 'thinking' });
+        await done();
+        expect(activeCount(el)).toBe(String(row.running));
+        if (row.idMode) expect(internals(el).memberIndex?.getPhase(id)).toBe('running');
+        else expect(internals(el).agents.find((a) => a.id === id)?.activity).toBe('thinking');
+      });
+
+      it('a create the response predates counts', async () => {
+        const created = makeAgent(7000, { phase: 'running' });
+        handleUpdate(`agent.${created.id}.created`, { ...created, agentId: created.id });
+        await done();
+        expect(activeCount(el)).toBe(String(row.running + 1));
+        expect(total()).toBe(row.count + 1);
+      });
+
+      it('a delete leaves the agent out of the counts', async () => {
+        handleUpdate(`agent.${id}.deleted`, {});
+        await done();
+        expect(activeCount(el)).toBe(String(row.running - 1));
+        expect(total()).toBe(row.count - 1);
+        expect(stateManager.getAgent(id)).toBeUndefined();
+      });
     });
   });
 
@@ -532,7 +627,19 @@ describe('home agent counts and the shared completeness flag', { timeout: 30_000
         'a status change of an agent not in the store',
         () => handleUpdate('agent.g-00002.status', { agentId: 'g-00002', phase: 'stopped' }),
       ],
+      [
+        'an activity change of an agent not in the store',
+        () => handleUpdate('agent.g-00002.status', { agentId: 'g-00002', activity: 'thinking' }),
+      ],
+      [
+        'a status change of an agent the store holds',
+        () => {
+          stateManager.seedAgents([makeAgent(3)]);
+          handleUpdate('agent.g-00003.status', { agentId: 'g-00003', phase: 'stopped' });
+        },
+      ],
       ['a delete', () => handleUpdate('agent.g-00001.deleted', {})],
+      ['a resync of the live connection', reconnect],
       [
         'a create',
         () => {
@@ -555,6 +662,17 @@ describe('home agent counts and the shared completeness flag', { timeout: 30_000
         expect(countsChip(el)).not.toBeNull();
       });
     }
+
+    it('count-only: a resync of the live connection after the load shows the chip', async () => {
+      const { el, h, fake } = await mountHeldCountOnly();
+      h.release();
+      await settle(el);
+      expect(countsChip(el)).toBeNull();
+      reconnect();
+      await flushLive(el);
+      expect(countsChip(el)).not.toBeNull();
+      expect(fake.requests).toHaveLength(1);
+    });
 
     it('count-only: with no change in flight the chip stays hidden', async () => {
       const { el, h } = await mountHeldCountOnly();

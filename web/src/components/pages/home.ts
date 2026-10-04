@@ -122,6 +122,7 @@ export class ScionPageHome extends LitElement {
 
   private boundOnAgentsUpdated = this.onAgentsUpdated.bind(this);
   private boundOnAgentsChanged = this.onAgentsChanged.bind(this);
+  private boundOnAgentsResync = this.onAgentsResync.bind(this);
   private boundOnProjectsUpdated = this.onProjectsUpdated.bind(this);
 
   override connectedCallback(): void {
@@ -131,6 +132,7 @@ export class ScionPageHome extends LitElement {
     // Subscribe before snapshot so no deltas are missed between read and listen
     stateManager.addEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
     stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
+    stateManager.addEventListener('agents-resync', this.boundOnAgentsResync);
     stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated as EventListener);
 
     // Use hydrated data if available, avoiding unnecessary fetches on SSR load
@@ -169,6 +171,7 @@ export class ScionPageHome extends LitElement {
     super.disconnectedCallback();
     stateManager.removeEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
     stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
+    stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync);
     stateManager.removeEventListener(
       'projects-updated',
       this.boundOnProjectsUpdated as EventListener
@@ -207,6 +210,14 @@ export class ScionPageHome extends LitElement {
       if (delta.phase && index.has(id)) index.set(id, delta.phase);
     }
     this.countsTick++;
+  }
+
+  /**
+   * The live connection came back after a drop: changes may have been
+   * missed. A count-only snapshot shows the chip.
+   */
+  private onAgentsResync(): void {
+    if (this.memberIndex?.countOnly) this.countsMayHaveChanged = true;
   }
 
   private get activeAgentCount(): number {
@@ -249,8 +260,9 @@ export class ScionPageHome extends LitElement {
     } else {
       index.seedCounts(stats.total, stats.running);
       // The snapshot cannot be adjusted, so any change that landed while
-      // the request was in flight may already have changed it.
-      this.countsMayHaveChanged = epoch.sawChanges;
+      // the request was in flight, or a resync that may have missed some,
+      // may already have changed it.
+      this.countsMayHaveChanged = epoch.sawChanges || epoch.sawResync;
     }
     this.memberIndex = index;
     this.agents = stateManager.getAgents();
