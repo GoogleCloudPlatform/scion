@@ -314,6 +314,18 @@ describe('scion-page-skills pagination', () => {
     expect(internals(el).loading).toBe(false);
   });
 
+  it('shows the error state for a raw-array body, not a silent empty list', async () => {
+    // The hub always sends the {skills, nextCursor, _capabilities} envelope;
+    // paginateAll rejects any other body shape before parsePage runs.
+    const { el } = await mountSkillsPage(() => Promise.resolve(jsonResponse([skill('1')])));
+    element = el;
+
+    const errorState = el.shadowRoot?.querySelector('.error-state');
+    expect(errorState).not.toBeNull();
+    expect(errorState?.textContent).toContain('response body was not an object');
+    expect(shownSkills(el)).toEqual([]);
+  });
+
   it('shows the error state when the first page fails', async () => {
     const { el } = await mountSkillsPage(() =>
       Promise.resolve(jsonResponse({ error: { code: 'internal' } }, 500))
