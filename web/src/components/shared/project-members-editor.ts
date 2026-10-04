@@ -197,7 +197,9 @@ export function builtInOptionState(
   if (ineligible) return { disabled: true, reason: ineligible };
   const tier = getRoleTier(role.name);
   if (ctx.isLastOwner && tier !== 'owner') return { disabled: true, reason: LAST_OWNER_REASON };
-  if (!tierAllowed(tier, ctx.caps)) return { disabled: true, reason: TIER_REASON };
+  if (!tierAllowed(tier, ctx.caps)) {
+    return { disabled: true, reason: addModeRoleReason(role, ctx.mode) || TIER_REASON };
+  }
   if (ctx.mode === 'add' && !role.grantable) {
     return { disabled: true, reason: describeCustomRoleError(role.reason || 'Not assignable') };
   }
@@ -205,16 +207,32 @@ export function builtInOptionState(
 }
 
 /**
+ * The assignable-roles reason for a role the actor can't newly grant, or ''
+ * when none applies. The catalog is evaluated as an add, so its reason only
+ * describes Add mode; in Edit mode the PUT decides.
+ */
+export function addModeRoleReason(role: AssignableProjectRole, mode: MemberDialogMode): string {
+  if (mode !== 'add' || role.grantable || !role.reason) return '';
+  return describeCustomRoleError(role.reason);
+}
+
+/**
  * Enabled/disabled state of one custom-role checkbox. Without
  * canManageCustomRoles every checkbox is read-only (the section caption
- * explains why). A held role can always be unchecked; removal needs no
- * delegation ceiling.
+ * explains why); in Add mode each one also carries its assignable-roles
+ * reason. A held role can always be unchecked; removal needs no delegation
+ * ceiling.
  */
 export function customRoleState(
   role: AssignableProjectRole,
-  opts: { caps: MembershipCapabilities | null; held: boolean }
+  opts: { caps: MembershipCapabilities | null; held: boolean; mode?: MemberDialogMode }
 ): OptionState {
-  if (!opts.caps?.canManageCustomRoles) return { disabled: true, reason: '' };
+  if (!opts.caps?.canManageCustomRoles) {
+    return {
+      disabled: true,
+      reason: opts.held ? '' : addModeRoleReason(role, opts.mode ?? 'edit'),
+    };
+  }
   if (opts.held) return { disabled: false, reason: '' };
   if (!role.grantable) {
     return { disabled: true, reason: describeCustomRoleError(role.reason || 'Not assignable') };
@@ -261,6 +279,13 @@ export function defaultBuiltInForAdd(
     if (role && !builtInOptionState(role, ctx).disabled) return role.id;
   }
   return NO_PROJECT_ROLE;
+}
+
+/** Whether any binding in the view comes from somewhere other than a direct
+ *  grant. The Source column is shown only then; while every binding is
+ *  direct it would read "Direct" on every row. */
+export function hasNonDirectSource(groups: readonly ProjectMemberGroup[]): boolean {
+  return groups.some((g) => g.bindings.some((b) => (b.source || 'direct') !== 'direct'));
 }
 
 /** The row's built-in binding, if any. */
@@ -1643,6 +1668,7 @@ export class ScionProjectMembersEditor extends LitElement {
   }
 
   private renderMembersTable() {
+    const showSource = hasNonDirectSource(this.groups);
     return html`
       <div class="table-container">
         <table>
@@ -1650,12 +1676,12 @@ export class ScionProjectMembersEditor extends LitElement {
             <tr>
               <th>Member</th>
               <th>Roles</th>
-              <th class="hide-mobile">Source</th>
+              ${showSource ? html`<th class="hide-mobile">Source</th>` : nothing}
               ${!this.effectiveReadOnly ? html`<th class="actions-cell">Actions</th>` : nothing}
             </tr>
           </thead>
           <tbody>
-            ${this.groups.map((group) => this.renderMemberRow(group))}
+            ${this.groups.map((group) => this.renderMemberRow(group, showSource))}
           </tbody>
         </table>
       </div>
@@ -1675,7 +1701,7 @@ export class ScionProjectMembersEditor extends LitElement {
     `;
   }
 
-  private renderMemberRow(group: ProjectMemberGroup) {
+  private renderMemberRow(group: ProjectMemberGroup, showSource: boolean) {
     const key = `${group.principalType}:${group.principalId}`;
     const isRemoving = this.removingKey === key;
     const inherited = group.bindings.find((b) => b.source !== 'direct');
@@ -1699,14 +1725,16 @@ export class ScionProjectMembersEditor extends LitElement {
           </div>
         </td>
         <td>${this.renderRoleBadges(group)}</td>
-        <td class="hide-mobile">
-          <span class="provenance-badge ${inherited ? 'group-derived' : 'direct'}">
-            ${inherited
-              ? html`<sl-icon name="diagram-3"></sl-icon> Via group:
-                  ${inherited.sourceGroupName || inherited.source}`
-              : html`<sl-icon name="person-check"></sl-icon> Direct`}
-          </span>
-        </td>
+        ${showSource
+          ? html`<td class="hide-mobile">
+              <span class="provenance-badge ${inherited ? 'group-derived' : 'direct'}">
+                ${inherited
+                  ? html`<sl-icon name="diagram-3"></sl-icon> Via group:
+                      ${inherited.sourceGroupName || inherited.source}`
+                  : html`<sl-icon name="person-check"></sl-icon> Direct`}
+              </span>
+            </td>`
+          : nothing}
         ${!this.effectiveReadOnly
           ? html`
               <td class="actions-cell">
@@ -1862,7 +1890,11 @@ export class ScionProjectMembersEditor extends LitElement {
           ${roles.map((role) => {
             const state: OptionState = this.dlgLockedReason
               ? { disabled: true, reason: '' }
-              : customRoleState(role, { caps: this.capabilities, held: held.has(role.id) });
+              : customRoleState(role, {
+                  caps: this.capabilities,
+                  held: held.has(role.id),
+                  mode: this.dialogMode,
+                });
             return html`
               <sl-checkbox
                 class=${this.dlgErrorRoleId === role.id ? 'option-error' : ''}

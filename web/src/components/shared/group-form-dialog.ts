@@ -45,6 +45,7 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 
+import { isProjectMembersGroup } from '../../shared/groups.js';
 import type { AdminGroup, UpdateGroupRequest } from '../../shared/groups.js';
 import { createGroup, updateGroup, getGroup, GroupsApiError } from '../../client/groups-api.js';
 import { showToast } from '../../utils/toast.js';
@@ -429,7 +430,9 @@ export class ScionGroupFormDialog extends LitElement {
       hasChanges = true;
     }
 
-    if (this.editOwnerId !== this.originalOwnerId) {
+    // A project members group's owner is managed by the project; the hub
+    // rejects any ownerId on it, so it is never sent.
+    if (this.editOwnerId !== this.originalOwnerId && !this.ownerManagedByProject) {
       patch.ownerId = this.editOwnerId;
       hasChanges = true;
     }
@@ -750,17 +753,28 @@ export class ScionGroupFormDialog extends LitElement {
   // Owner picker (edit mode)
   // ---------------------------------------------------------------------------
 
+  /** The group is a project members group, whose owner the project manages. */
+  private get ownerManagedByProject(): boolean {
+    return this.mode === 'edit' && isProjectMembersGroup(this.group);
+  }
+
   private renderOwnerPicker() {
+    const managed = this.ownerManagedByProject;
     return html`
       <div class="form-group">
         <scion-principal-picker
           principalType="user"
           label="Owner"
           value=${this.editOwnerId}
-          ?disabled=${this.submitting}
+          ?disabled=${this.submitting || managed}
           @principal-change=${(e: CustomEvent<PrincipalChangeDetail>) => this.handleOwnerChange(e)}
         ></scion-principal-picker>
-        ${this.ownerChanged
+        ${managed
+          ? html`<div class="help-text owner-managed">
+              This project members group's owner is managed by the project.
+            </div>`
+          : nothing}
+        ${!managed && this.ownerChanged
           ? html`
               <div class="owner-warning" role="alert">
                 <sl-icon name="exclamation-triangle" aria-hidden="true"></sl-icon>

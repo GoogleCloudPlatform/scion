@@ -51,6 +51,32 @@ export function canGroup(
 }
 
 /* -------------------------------------------------------------------------- */
+/* Project members group markers                                              */
+/* -------------------------------------------------------------------------- */
+
+/** Marker annotation the hub writes on a project's members group. */
+export const PROJECT_MEMBERS_GROUP_ANNOTATION = 'scion.io/project-members-group';
+
+/** Legacy members-group marker written by the store backfill
+ *  (ptone/scion#2556 tracks folding it into the key above). */
+export const SYSTEM_PROJECT_MEMBERS_GROUP_ANNOTATION = 'scion.io/system-project-members-group';
+
+/**
+ * Whether a group is a project members group, by either marker key. Mirrors
+ * the hub's hasProjectMembersGroupMarker: the hub refuses to set an owner on
+ * such a group (ptone/scion#2668), since the project manages its access.
+ */
+export function isProjectMembersGroup(
+  group: Pick<AdminGroup, 'projectId' | 'annotations'> | null | undefined
+): boolean {
+  if (!group?.projectId || !group.annotations) return false;
+  return (
+    group.annotations[PROJECT_MEMBERS_GROUP_ANNOTATION] === 'true' ||
+    group.annotations[SYSTEM_PROJECT_MEMBERS_GROUP_ANNOTATION] === 'true'
+  );
+}
+
+/* -------------------------------------------------------------------------- */
 /* Request / response interfaces                                              */
 /* -------------------------------------------------------------------------- */
 

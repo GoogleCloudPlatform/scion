@@ -52,11 +52,13 @@ import {
   TIER_REASON,
   builtInOptionState,
   canEditRow,
+  addModeRoleReason,
   canRemoveRow,
   customRoleState,
   defaultBuiltInForAdd,
   deriveDialogLock,
   describeCustomRoleError,
+  hasNonDirectSource,
   isCustomProjectRole,
   isEmptySelection,
   isLastOwnerByTier,
@@ -1597,5 +1599,100 @@ describe('Transfer Ownership', () => {
   it('is hidden without canTransfer', async () => {
     const el = await mountEditor(ALL_GROUPS, ADMIN_CAPS, ADMIN_CATALOG);
     expect(q(el, 'sl-button[variant="warning"]')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Source column (ptone/scion#2672 item 3)
+// ---------------------------------------------------------------------------
+
+describe('Source column', () => {
+  const VIA_GROUP: ProjectMemberGroup = {
+    ...DAVE,
+    bindings: DAVE.bindings.map((b) => ({
+      ...b,
+      source: 'group:g-eng',
+      sourceGroupName: 'Engineering',
+    })),
+  };
+
+  it('hasNonDirectSource is false while every binding is direct', () => {
+    expect(hasNonDirectSource(ALL_GROUPS)).toBe(false);
+    expect(hasNonDirectSource([])).toBe(false);
+    expect(hasNonDirectSource([VIA_GROUP])).toBe(true);
+  });
+
+  it('is hidden when every binding is direct', async () => {
+    const el = await mountEditor(ALL_GROUPS, OWNER_CAPS);
+    const headers = qa(el, 'thead th').map((th) => th.textContent?.trim());
+    expect(headers).not.toContain('Source');
+    expect(qa(el, '.provenance-badge')).toHaveLength(0);
+  });
+
+  it('is shown when at least one binding has a non-direct source', async () => {
+    const groups = ALL_GROUPS.map((g) => (g === DAVE ? VIA_GROUP : g));
+    const el = await mountEditor(groups, OWNER_CAPS);
+    const headers = qa(el, 'thead th').map((th) => th.textContent?.trim());
+    expect(headers).toContain('Source');
+    // Every row gets a cell, so columns stay aligned.
+    expect(qa(el, '.provenance-badge')).toHaveLength(groups.length);
+    const badge = (key: string) =>
+      row(el, key).querySelector('.provenance-badge')?.textContent?.replace(/\s+/g, ' ').trim();
+    expect(badge('user:u-dave')).toBe('Via group: Engineering');
+    expect(badge('user:u-alice')).toBe('Direct');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Add dialog per-role reasons (ptone/scion#2672 item 4)
+// ---------------------------------------------------------------------------
+
+describe('Add dialog per-role reasons', () => {
+  it('addModeRoleReason reports the catalog reason in Add mode only', () => {
+    const owner = ADMIN_CATALOG[0];
+    expect(addModeRoleReason(owner, 'add')).toBe('requires project owner');
+    expect(addModeRoleReason(owner, 'edit')).toBe('');
+    expect(addModeRoleReason(R_MEMBER, 'add')).toBe('');
+    expect(addModeRoleReason({ ...R_OWNER, grantable: false, reason: '' }, 'add')).toBe('');
+  });
+
+  it('admin Add dialog shows each disabled role with its assignable-roles reason', async () => {
+    const el = await mountEditor(ALL_GROUPS, ADMIN_CAPS, ADMIN_CATALOG);
+    el.openAddDialog();
+    await el.updateComplete;
+
+    // Built-in roles above the admin's tier stay visible, disabled, with the
+    // hub's reason rather than the generic tier text.
+    for (const v of ['r-owner', 'r-admin']) {
+      expect(radio(el, v).hasAttribute('disabled')).toBe(true);
+      expect(radio(el, v).textContent).toContain('requires project owner');
+      expect(radio(el, v).textContent).not.toContain(TIER_REASON);
+    }
+    expect(radio(el, 'r-member').hasAttribute('disabled')).toBe(false);
+
+    // Custom roles are listed (not omitted), disabled, each with its reason.
+    for (const id of ['r-msg', 'r-ceil']) {
+      const cb = checkbox(el, id);
+      expect(cb).not.toBeNull();
+      expect(cb!.hasAttribute('disabled')).toBe(true);
+      expect(cb!.textContent).toContain('custom role changes require role-binding authority');
+    }
+  });
+
+  it('falls back to the tier text when the catalog gives no reason', async () => {
+    const el = await mountEditor(ALL_GROUPS, ADMIN_CAPS, [R_OWNER, R_ADMIN, R_MEMBER]);
+    el.openAddDialog();
+    await el.updateComplete;
+    expect(radio(el, 'r-owner').textContent).toContain(TIER_REASON);
+  });
+
+  it('Edit mode keeps the tier text and leaves custom checkboxes without a reason', () => {
+    expect(customRoleState(ADMIN_CATALOG[4], { caps: ADMIN_CAPS, held: false })).toEqual({
+      disabled: true,
+      reason: '',
+    });
+    expect(
+      customRoleState(ADMIN_CATALOG[4], { caps: ADMIN_CAPS, held: true, mode: 'add' })
+    ).toEqual({ disabled: true, reason: '' });
   });
 });
