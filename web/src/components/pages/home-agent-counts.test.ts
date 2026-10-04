@@ -46,7 +46,7 @@ interface PageInternals {
   loading?: boolean;
   agentsLoading?: boolean;
   countsLoading?: boolean;
-  /** Home: the counts chip is raised (rendered only in count-only mode). */
+  /** Home: the counts chip is raised (rendered unless the response was the complete set). */
   countsMayHaveChanged?: boolean;
   memberIndex?: AgentMemberIndex | null;
   agents: Agent[];
@@ -423,8 +423,58 @@ describe('home agent counts and the shared completeness flag', { timeout: 30_000
       expect(internals(el).memberIndex).not.toBeNull();
       expect(internals(el).memberIndex?.has('g-07000')).toBe(true);
       expect(activeCount(el)).toBe('102');
-      // Exact counts raise no chip. The chip renders only in count-only
-      // mode, so the flag behind it is checked too.
+      // Exact counts raise no chip, and the flag behind it is off.
+      expect(countsChip(el)).toBeNull();
+      expect(internals(el).countsMayHaveChanged).toBe(false);
+    });
+  });
+
+  describe('a resync of the live connection', () => {
+    it('stats-ID mode: a resync that lands while home’s request is in flight shows the chip', async () => {
+      const fake = newFake(1200, 100);
+      const h = holdable(fakeFetch(fake), isGlobalAgentsList);
+      h.hold(1);
+      vi.stubGlobal('fetch', vi.fn(h.fn));
+      const el = document.createElement('scion-page-home') as TestEl;
+      (el as unknown as { pageData: unknown }).pageData = { path: '/', title: 'Page', user: USER };
+      document.body.appendChild(el);
+      await el.updateComplete;
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      reconnect();
+      h.release();
+      await settle(el);
+      expect(fake.requests).toHaveLength(1);
+      expect(internals(el).memberIndex?.countOnly).toBe(false);
+      expect(activeCount(el)).toBe('100');
+      expect(countsChip(el)).not.toBeNull();
+    });
+
+    it('stats-ID mode: a resync after the load shows the chip; a click is one request that clears it', async () => {
+      const fake = newFake(1200, 100);
+      vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
+      const el = await mountPage('scion-page-home');
+      expect(internals(el).memberIndex?.countOnly).toBe(false);
+      expect(countsChip(el)).toBeNull();
+      reconnect();
+      await flushLive(el);
+      expect(countsChip(el)).not.toBeNull();
+      expect(fake.requests).toHaveLength(1);
+      const [agents, others] = await cost(fake, async () => {
+        countsChip(el)!.click();
+        await settle(el);
+      });
+      expect([agents, others]).toEqual([1, 0]);
+      expect(countsChip(el)).toBeNull();
+      expect(activeCount(el)).toBe('100');
+    });
+
+    it('the complete set: a resync shows no chip', async () => {
+      const fake = newFake(25, 10);
+      vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
+      const el = await mountPage('scion-page-home');
+      expect(internals(el).memberIndex).toBeNull();
+      reconnect();
+      await flushLive(el);
       expect(countsChip(el)).toBeNull();
       expect(internals(el).countsMayHaveChanged).toBe(false);
     });

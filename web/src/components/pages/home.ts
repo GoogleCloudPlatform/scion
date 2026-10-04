@@ -214,10 +214,12 @@ export class ScionPageHome extends LitElement {
 
   /**
    * The live connection came back after a drop: changes may have been
-   * missed. A count-only snapshot shows the chip.
+   * missed. Counts from a response that was not the complete set (stats
+   * IDs or a count-only snapshot) show the chip. The complete set stays
+   * as it is.
    */
   private onAgentsResync(): void {
-    if (this.memberIndex?.countOnly) this.countsMayHaveChanged = true;
+    if (this.memberIndex) this.countsMayHaveChanged = true;
   }
 
   private get activeAgentCount(): number {
@@ -256,7 +258,9 @@ export class ScionPageHome extends LitElement {
       for (const [id, delta] of epoch.unknownChanges) {
         if (delta.phase && index.has(id)) index.set(id, delta.phase);
       }
-      this.countsMayHaveChanged = false;
+      // Every change the epoch saw is applied above. A resync may have
+      // missed some, so it shows the chip.
+      this.countsMayHaveChanged = epoch.sawResync;
     } else {
       index.seedCounts(stats.total, stats.running);
       // The snapshot cannot be adjusted, so any change that landed while
@@ -600,6 +604,7 @@ export class ScionPageHome extends LitElement {
                   label="Ready"
                   size="small"
                 ></scion-status-badge>
+                ${this.memberIndex ? this.renderCountsChip() : nothing}
               </div>`}
         </div>
         <div class="stat-card">
@@ -715,19 +720,27 @@ export class ScionPageHome extends LitElement {
   private renderCountOnlyNote(): TemplateResult {
     return html`<div class="stat-change counts-note">
       <span>${formatNumber(this.memberIndex?.stats.total ?? 0)} agents, as of last refresh</span>
-      ${this.countsMayHaveChanged
-        ? html`<sl-tag
-            class="counts-chip"
-            size="small"
-            variant="primary"
-            pill
-            @click=${(): void => this.onCountsChip()}
-          >
-            <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
-            counts may have changed · Refresh
-          </sl-tag>`
-        : nothing}
+      ${this.renderCountsChip()}
     </div>`;
+  }
+
+  /**
+   * The counts chip, while the counts may have changed: in count-only mode
+   * after any live change or a resync, and in stats-ID mode after a resync.
+   * A click refreshes the counts with one agents request.
+   */
+  private renderCountsChip(): TemplateResult | typeof nothing {
+    if (!this.countsMayHaveChanged) return nothing;
+    return html`<sl-tag
+      class="counts-chip"
+      size="small"
+      variant="primary"
+      pill
+      @click=${(): void => this.onCountsChip()}
+    >
+      <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+      counts may have changed · Refresh
+    </sl-tag>`;
   }
 
   private onCountsChip(): void {
