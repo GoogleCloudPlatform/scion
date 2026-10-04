@@ -49,11 +49,16 @@ func TestNFSProvisionStateSubPath(t *testing.T) {
 		{"/abs/x/workspace", ""},
 		{"../x/workspace", ""},
 		{"projects/proj-\x00123/workspace", ""},
-		{"projects/proj-123\x00/workspace", "proj-123"},
 	} {
 		_, err := NFSProvisionStateSubPath(tc.subPath, tc.projectID)
 		assert.Error(t, err, "subPath %q project %q", tc.subPath, tc.projectID)
 	}
+
+	// A NUL byte outside the project component is rejected by the NUL rule
+	// itself (the path is otherwise valid for the project), with the
+	// unexpected-subPath error rather than the project-mismatch one.
+	_, err = NFSProvisionStateSubPath("pro\x00jects/proj-123/workspace", "proj-123")
+	require.ErrorContains(t, err, "unexpected NFS workspace subPath")
 
 	// A component that merely starts with ".." is an ordinary name.
 	got, err = NFSProvisionStateSubPath("..foo/proj-123/workspace", "proj-123")
