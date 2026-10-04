@@ -23,51 +23,25 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// TestCheckWorkspaceBackendMode pins that empty-per-agent fails closed on
-// NFS workspace storage (design #2703 P2; NFS support is P3) and that no
-// other backend/mode combination is affected.
-func TestCheckWorkspaceBackendMode(t *testing.T) {
-	cfgs := map[string]*config.V1WorkspaceStorageConfig{
-		"nil":               nil,
-		"empty":             {},
-		"local":             {Backend: "local"},
-		"nfs":               {Backend: "nfs", NFS: &config.V1NFSConfig{MountRoot: "/mnt/ws"}},
-		"cloudrun-volume":   {Backend: "cloudrun-volume"},
-		"gke-shared-volume": {Backend: "gke-shared-volume"},
-	}
-	modes := []store.WorkspaceSharingMode{
-		store.SharingModeSharedPlain,
-		store.SharingModeWorktreePerAgent,
-		store.SharingModeClonePerAgent,
-		store.SharingModeEmptyPerAgent,
-	}
-	for name, cfg := range cfgs {
-		for _, mode := range modes {
-			err := CheckWorkspaceBackendMode(cfg, mode)
-			wantErr := name == "nfs" && mode == store.SharingModeEmptyPerAgent
-			if wantErr {
-				if !errors.Is(err, ErrEmptyPerAgentNFSUnsupported) {
-					t.Errorf("CheckWorkspaceBackendMode(%s, %s) = %v, want ErrEmptyPerAgentNFSUnsupported", name, mode, err)
-				}
-			} else if err != nil {
-				t.Errorf("CheckWorkspaceBackendMode(%s, %s) = %v, want nil", name, mode, err)
-			}
-		}
-	}
-}
-
-// TestSelectWorkspaceBackend_EmptyPerAgentIsLocal pins that empty-per-agent
-// never selects a shared-volume backend: it has no shared project workspace.
-func TestSelectWorkspaceBackend_EmptyPerAgentIsLocal(t *testing.T) {
-	for _, cfg := range []*config.V1WorkspaceStorageConfig{
-		nil,
-		{Backend: "local"},
-		{Backend: "nfs", NFS: &config.V1NFSConfig{MountRoot: "/mnt/ws"}},
-		{Backend: "cloudrun-volume"},
-		{Backend: "gke-shared-volume"},
+// TestSelectWorkspaceBackend_EmptyPerAgent pins that empty-per-agent takes
+// the NFS backend when NFS workspace storage is configured (design #2703
+// P3: the caller mounts the agent's own directory on it), and the local
+// backend for every other configuration, including the other shared-volume
+// backends.
+func TestSelectWorkspaceBackend_EmptyPerAgent(t *testing.T) {
+	for _, tc := range []struct {
+		cfg  *config.V1WorkspaceStorageConfig
+		want string
+	}{
+		{nil, "local"},
+		{&config.V1WorkspaceStorageConfig{}, "local"},
+		{&config.V1WorkspaceStorageConfig{Backend: "local"}, "local"},
+		{&config.V1WorkspaceStorageConfig{Backend: "nfs", NFS: &config.V1NFSConfig{MountRoot: "/mnt/ws"}}, "nfs"},
+		{&config.V1WorkspaceStorageConfig{Backend: "cloudrun-volume"}, "local"},
+		{&config.V1WorkspaceStorageConfig{Backend: "gke-shared-volume"}, "local"},
 	} {
-		if got := SelectWorkspaceBackend(cfg, store.SharingModeEmptyPerAgent).Name(); got != "local" {
-			t.Errorf("SelectWorkspaceBackend(%+v, empty-per-agent) = %q, want local", cfg, got)
+		if got := SelectWorkspaceBackend(tc.cfg, store.SharingModeEmptyPerAgent).Name(); got != tc.want {
+			t.Errorf("SelectWorkspaceBackend(%+v, empty-per-agent) = %q, want %q", tc.cfg, got, tc.want)
 		}
 	}
 }

@@ -1276,3 +1276,38 @@ func TestIsKubernetesRuntime(t *testing.T) {
 		assert.False(t, isKubernetesRuntime(name), "%s should not be the kubernetes runtime", name)
 	}
 }
+
+func TestSelectSharedDirStorage_NilSettingsIsError(t *testing.T) {
+	cfg, err := selectSharedDirStorage(nil, "", "", "a1")
+	require.Error(t, err)
+	assert.Nil(t, cfg)
+	assert.Contains(t, err.Error(), "a1")
+}
+
+// sdsRecordTempFiles lists leftover temporary record files in dir.
+func sdsRecordTempFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, sharedDirStorageRecordFile+".tmp-*"))
+	require.NoError(t, err)
+	return matches
+}
+
+func TestWriteSharedDirStorageRecord_LeavesNoTempFile(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, writeSharedDirStorageRecord(dir, "nfs"))
+	got, err := readSharedDirStorageRecord(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "nfs", got)
+	info, err := os.Stat(filepath.Join(dir, sharedDirStorageRecordFile))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o644), info.Mode().Perm())
+	assert.Empty(t, sdsRecordTempFiles(t, dir))
+}
+
+func TestWriteSharedDirStorageRecord_FailedRenameRemovesTempFile(t *testing.T) {
+	dir := t.TempDir()
+	// A non-empty directory at the record path makes the rename fail.
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, sharedDirStorageRecordFile, "x"), 0o755))
+	require.Error(t, writeSharedDirStorageRecord(dir, "nfs"))
+	assert.Empty(t, sdsRecordTempFiles(t, dir))
+}
