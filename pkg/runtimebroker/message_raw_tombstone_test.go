@@ -167,9 +167,6 @@ func TestSendMessage_PlainNormalInterruptUnaffected(t *testing.T) {
 	}
 }
 
-// TestSendMessage_OversizedBodyRejected pins the 2 MiB bound on the
-// buffered /message body read: an oversized body gets 413
-// payload_too_large and reaches no delivery primitive and no message log.
 // TestSendMessage_HubShapedNearLimitDelivered pins that this Hub-only route
 // applies no byte cap of its own. The Hub accepts message bodies up to 2 MiB
 // on its public ingress and then forwards a rebuilt request in which the text
