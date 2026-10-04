@@ -411,16 +411,31 @@ func TestRunIntent_RevertToRunningSkippedWhileDeleteHoldsRow(t *testing.T) {
 			require.NoError(t, err)
 			stoppedAt, err := s.SetRunIntent(ctx, a.ID, store.RunIntentStopped)
 			require.NoError(t, err)
+			// b holds running from before the claim, for the revert to stopped.
+			b := makeAgent(projectID, "revert-delete-agent-b")
+			require.NoError(t, s.CreateAgent(ctx, b))
+			runningAt, err := s.SetRunIntent(ctx, b.ID, store.RunIntentRunning)
+			require.NoError(t, err)
 			set := store.DeletionFields{DeletedAt: tc.deletedAt, LeaseAt: tc.leaseAt}
 			if tc.state != "" {
 				st := tc.state
 				set.State = &st
 			}
-			n, err := s.UpdateAgentDeletion(ctx, a.ID, store.DeletionPredicate{}, set)
-			require.NoError(t, err)
-			require.Equal(t, 1, n)
+			for _, id := range []string{a.ID, b.ID} {
+				n, err := s.UpdateAgentDeletion(ctx, id, store.DeletionPredicate{}, set)
+				require.NoError(t, err)
+				require.Equal(t, 1, n)
+			}
 
-			changed, err := s.RevertRunIntent(ctx, a.ID, store.RunIntentStopped, stoppedAt, store.RunIntentRunning)
+			// A revert to stopped applies whatever the delete state.
+			changed, err := s.RevertRunIntent(ctx, b.ID, store.RunIntentRunning, runningAt, store.RunIntentStopped)
+			require.NoError(t, err)
+			assert.True(t, changed, "running -> stopped revert on a held row")
+			gotB, err := s.GetAgent(ctx, b.ID)
+			require.NoError(t, err)
+			assert.Equal(t, store.RunIntentStopped, gotB.RunIntent)
+
+			changed, err = s.RevertRunIntent(ctx, a.ID, store.RunIntentStopped, stoppedAt, store.RunIntentRunning)
 			require.NoError(t, err)
 			got, err := s.GetAgent(ctx, a.ID)
 			require.NoError(t, err)
@@ -431,10 +446,6 @@ func TestRunIntent_RevertToRunningSkippedWhileDeleteHoldsRow(t *testing.T) {
 			}
 			assert.True(t, changed)
 			assert.Equal(t, store.RunIntentRunning, got.RunIntent)
-			// The reverse revert to stopped applies whatever the delete state.
-			changed, err = s.RevertRunIntent(ctx, a.ID, store.RunIntentRunning, stoppedAt, store.RunIntentStopped)
-			require.NoError(t, err)
-			assert.True(t, changed)
 		})
 	}
 }
