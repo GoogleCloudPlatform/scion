@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -92,7 +93,13 @@ type reconnectHarness struct {
 	sessions chan Session
 	cancel   context.CancelFunc
 	done     chan error
+	// fraction, when set, makes the RNG draw that fraction of its range
+	// instead of the top.
+	fraction atomic.Pointer[float64]
 }
+
+// drawFraction makes later draws return f of their range.
+func (h *reconnectHarness) drawFraction(f float64) { h.fraction.Store(&f) }
 
 func newReconnectHarness(t *testing.T) *reconnectHarness {
 	h := &reconnectHarness{
@@ -135,6 +142,9 @@ func newReconnectHarness(t *testing.T) *reconnectHarness {
 		},
 		Backoff: &Backoff{Rand: func(n int64) int64 {
 			h.ceilings <- time.Duration(n - 1)
+			if f := h.fraction.Load(); f != nil {
+				return int64(float64(n-1) * *f)
+			}
 			return n - 1
 		}},
 	}
@@ -246,27 +256,59 @@ func TestReconnectorReplacesOnGoAway(t *testing.T) {
 	}
 }
 
-// TestReconnectorHonoursReconnectAfter: the relay's reconnect hint delays
-// the replacement dial.
+// TestReconnectorHonoursReconnectAfter: the replacement dial waits the
+// delay drawn from the relay's reconnect window. The harness RNG draws
+// the top of the window, so the dial must not happen before it. A window
+// wider than the backoff maximum is honoured too.
 func TestReconnectorHonoursReconnectAfter(t *testing.T) {
+	for _, window := range []time.Duration{5 * time.Second, 90 * time.Second} {
+		t.Run(window.String(), func(t *testing.T) {
+			h := newReconnectHarness(t)
+			_, relay := h.connect()
+			h.age(MinPlannedDrainLife)
+			if err := relay.GoAway(GoAwayOptions{ReconnectAfter: window}); err != nil {
+				t.Fatal(err)
+			}
+			// The GoAway with no streams closes both sessions; only the
+			// window timer remains. Whether the Reconnector saw Done or
+			// GoAwayReceived first, it classifies the end from the session
+			// state.
+			h.expectCeiling(window) // the window draw, not a backoff
+			settle(t, h.clk, 1)
+			h.clk.Advance(window - time.Millisecond)
+			select {
+			case h.plan <- nil:
+				t.Fatal("redialled before the drawn delay")
+			default:
+			}
+			h.clk.Advance(time.Millisecond)
+			h.connect()
+			h.noCeiling()
+		})
+	}
+}
+
+// TestReconnectorGoAwayDrawsWithinWindow: the Reconnector waits exactly
+// the value drawn from [0, reconnect_after_ms], here a point inside the
+// window.
+func TestReconnectorGoAwayDrawsWithinWindow(t *testing.T) {
 	h := newReconnectHarness(t)
+	h.drawFraction(0.3)
 	_, relay := h.connect()
 	h.age(MinPlannedDrainLife)
-	if err := relay.GoAway(GoAwayOptions{ReconnectAfter: 5 * time.Second}); err != nil {
+	if err := relay.GoAway(GoAwayOptions{ReconnectAfter: 10 * time.Second}); err != nil {
 		t.Fatal(err)
 	}
-	// The GoAway with no streams closes both sessions; only the hint
-	// timer remains. Whether the Reconnector saw Done or GoAwayReceived
-	// first, it classifies the end from the session state.
+	h.expectCeiling(10 * time.Second)
 	settle(t, h.clk, 1)
+	h.clk.Advance(3*time.Second - time.Millisecond)
 	select {
 	case h.plan <- nil:
-		t.Fatal("redialled before reconnect_after_ms")
+		t.Fatal("redialled before the drawn delay")
 	default:
 	}
-	h.clk.Advance(5 * time.Second)
+	h.clk.Advance(time.Millisecond)
 	h.connect()
-	h.noCeiling()
 }
 
 // TestReconnectorBacksOffOnFailureGoAway: a GoAway that is not a planned
@@ -309,8 +351,15 @@ func TestReconnectorBacksOffOnEarlyPlannedDrain(t *testing.T) {
 // whether its GoAway is seen while the session lingers or after it has
 // already closed, so the Reconnector's select order cannot change it.
 func TestRedialDelayOrderings(t *testing.T) {
+	// windowTop draws the top of the range and fails on a backoff draw
+	// (any range other than the 3s window).
 	noRand := func(t *testing.T) *Backoff {
-		return &Backoff{Rand: func(int64) int64 { t.Fatal("unexpected backoff"); return 0 }}
+		return &Backoff{Rand: func(n int64) int64 {
+			if time.Duration(n-1) != 3*time.Second {
+				t.Fatalf("unexpected draw over %v", time.Duration(n-1))
+			}
+			return n - 1
+		}}
 	}
 	t.Run("GoAway then Done", func(t *testing.T) {
 		accepted := make(chan Stream, 1)
@@ -326,7 +375,7 @@ func TestRedialDelayOrderings(t *testing.T) {
 			t.Fatal("dialer ended; want it still draining")
 		}
 		if d := redialDelay(receivedGoAway(p.dialer), MinPlannedDrainLife, noRand(t)); d != 3*time.Second {
-			t.Fatalf("delay %v, want the 3s hint", d)
+			t.Fatalf("delay %v, want the top of the 3s window", d)
 		}
 	})
 	t.Run("Done already closed", func(t *testing.T) {
@@ -336,7 +385,7 @@ func TestRedialDelayOrderings(t *testing.T) {
 		}
 		_ = waitDone(t, p.dialer)
 		if d := redialDelay(receivedGoAway(p.dialer), MinPlannedDrainLife, noRand(t)); d != 3*time.Second {
-			t.Fatalf("delay %v, want the 3s hint", d)
+			t.Fatalf("delay %v, want the top of the 3s window", d)
 		}
 	})
 	t.Run("Done without GoAway", func(t *testing.T) {
@@ -361,12 +410,13 @@ func TestRedialDelayOrderings(t *testing.T) {
 		}{
 			{"planned 4503", &conduitv1.GoAway{Code: CloseRelayRestart, ReconnectAfterMs: 500}, MinPlannedDrainLife, 500 * time.Millisecond},
 			{"planned by deadline", &conduitv1.GoAway{Code: CloseForbidden, DrainDeadlineMs: 1000}, MinPlannedDrainLife, 0},
-			{"hint capped", &conduitv1.GoAway{Code: CloseRelayRestart, ReconnectAfterMs: 3600_000}, MinPlannedDrainLife, BackoffMax},
+			{"window capped", &conduitv1.GoAway{Code: CloseRelayRestart, ReconnectAfterMs: 3600_000}, MinPlannedDrainLife, MaxReconnectWindow},
+			{"window wider than the backoff maximum", &conduitv1.GoAway{Code: CloseRelayRestart, ReconnectAfterMs: 90_000}, MinPlannedDrainLife, 90 * time.Second},
 			{"protocol error", &conduitv1.GoAway{Code: CloseProtocolError}, time.Hour, time.Second},
 			{"unauthenticated", &conduitv1.GoAway{Code: CloseUnauthenticated}, time.Hour, time.Second},
 			{"relay timeout", &conduitv1.GoAway{Code: CloseRelayTimeout}, time.Hour, time.Second},
 			{"early planned", &conduitv1.GoAway{Code: CloseRelayRestart}, time.Second, time.Second},
-			{"early planned, longer hint", &conduitv1.GoAway{Code: CloseRelayRestart, ReconnectAfterMs: 5000}, time.Second, 5 * time.Second},
+			{"early planned, longer window", &conduitv1.GoAway{Code: CloseRelayRestart, ReconnectAfterMs: 5000}, time.Second, 5 * time.Second},
 		} {
 			if d := redialDelay(tc.ga, tc.lived, &Backoff{Rand: ceil}); d != tc.want {
 				t.Errorf("%s: delay %v, want %v", tc.name, d, tc.want)

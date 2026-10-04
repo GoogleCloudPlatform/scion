@@ -37,6 +37,10 @@ const (
 	// straight away is backed off like a failure, so it cannot cause a
 	// tight reconnect loop.
 	MinPlannedDrainLife = 10 * time.Second
+	// MaxReconnectWindow caps the GoAway reconnect window the dialer
+	// honours. It matches the largest window a relay may be configured
+	// with (server.hub.conduit.reconnect_window).
+	MaxReconnectWindow = 5 * time.Minute
 )
 
 // Backoff computes full-jitter exponential delays. It is not safe for
@@ -76,15 +80,29 @@ func (b *Backoff) Next() time.Duration {
 	return time.Duration(r(int64(c) + 1))
 }
 
+// Window returns a delay drawn uniformly from [0, w] (0 for w <= 0). It
+// does not advance the attempt counter.
+func (b *Backoff) Window(w time.Duration) time.Duration {
+	if w <= 0 {
+		return 0
+	}
+	r := b.Rand
+	if r == nil {
+		r = rand.Int64N
+	}
+	return time.Duration(r(int64(w) + 1))
+}
+
 // Reset returns to the base delay.
 func (b *Backoff) Reset() { b.attempt = 0 }
 
 // Reconnector keeps one dialer-side session alive (all principals): it
 // dials, hands each session to OnSession, and redials with Backoff when the
 // session ends. When the relay announces a planned drain (GoAway 4503, or
-// any GoAway with a drain deadline) the replacement is dialed at once
-// (after the relay's reconnect hint) while the old session drains. Any
-// other GoAway (4400 protocol error, 4401/4403 auth) is a failure and
+// any GoAway with a drain deadline) the replacement is dialed after a delay
+// drawn uniformly from [0, reconnect_after_ms] (full jitter, so the
+// dialers of a draining relay spread out) while the old session drains.
+// Any other GoAway (4400 protocol error, 4401/4403 auth) is a failure and
 // backs off.
 type Reconnector struct {
 	Dialer transport.Dialer
@@ -214,19 +232,20 @@ func plannedDrain(ga *conduitv1.GoAway) bool {
 // redialDelay is the wait before replacing a session that lived for lived
 // and ended (or was told to go away) with ga (nil: no GoAway). A session
 // that lived BackoffResetLive resets the backoff. A planned drain of a
-// session that lived MinPlannedDrainLife waits only for the relay's
-// reconnect hint (capped at BackoffMax); everything else backs off, never
-// shorter than the hint.
+// session that lived MinPlannedDrainLife waits a delay drawn uniformly from
+// the relay's reconnect window [0, reconnect_after_ms] (capped at
+// MaxReconnectWindow); everything else backs off, and a planned drain of a
+// fresh session waits the longer of the backoff and the window draw.
 func redialDelay(ga *conduitv1.GoAway, lived time.Duration, bo *Backoff) time.Duration {
 	if lived >= BackoffResetLive {
 		bo.Reset()
 	}
-	var hint time.Duration
-	if plannedDrain(ga) {
-		hint = min(time.Duration(ga.GetReconnectAfterMs())*time.Millisecond, BackoffMax)
-		if lived >= MinPlannedDrainLife {
-			return hint
-		}
+	if !plannedDrain(ga) {
+		return bo.Next()
 	}
-	return max(bo.Next(), hint)
+	window := min(time.Duration(ga.GetReconnectAfterMs())*time.Millisecond, MaxReconnectWindow)
+	if lived >= MinPlannedDrainLife {
+		return bo.Window(window)
+	}
+	return max(bo.Next(), bo.Window(window))
 }
