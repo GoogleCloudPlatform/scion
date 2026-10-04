@@ -423,6 +423,49 @@ describe('home agent counts and the shared completeness flag', () => {
     });
   });
 
+  describe('home load: changes to agents not in the store while the request is in flight', () => {
+    async function mountHeld(fake: Fake): Promise<{ el: TestEl; h: ReturnType<typeof holdable> }> {
+      const h = holdable(fakeFetch(fake), isGlobalAgentsList);
+      h.hold(1);
+      vi.stubGlobal('fetch', vi.fn(h.fn));
+      const el = document.createElement('scion-page-home') as TestEl;
+      (el as unknown as { pageData: unknown }).pageData = { path: '/', title: 'Page', user: USER };
+      document.body.appendChild(el);
+      await el.updateComplete;
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      return { el, h };
+    }
+
+    it('a delta for an agent missing from the stats changes neither the total nor the running count', async () => {
+      const fake = newFake(1200, 100);
+      const { el, h } = await mountHeld(fake);
+      handleUpdate('agent.g-09999.status', { agentId: 'g-09999', phase: 'running' });
+      (stateManager as unknown as { flush(): void }).flush();
+      h.release();
+      await settle(el);
+      expect(internals(el).memberIndex?.has('g-09999')).toBe(false);
+      expect(internals(el).memberIndex?.stats).toEqual({ total: 1200, running: 100 });
+      expect(activeCount(el)).toBe('100');
+    });
+
+    it('an agent changed while unknown, then created and changed again, counts with its latest phase', async () => {
+      const fake = newFake(1200, 100);
+      const { el, h } = await mountHeld(fake);
+      // g-00500 is stopped in the stats the held answer will carry.
+      handleUpdate('agent.g-00500.status', { agentId: 'g-00500', phase: 'running' });
+      (stateManager as unknown as { flush(): void }).flush();
+      const a = makeAgent(500, { phase: 'running' });
+      handleUpdate('agent.g-00500.created', { ...a, agentId: a.id });
+      handleUpdate('agent.g-00500.status', { agentId: 'g-00500', phase: 'stopped' });
+      (stateManager as unknown as { flush(): void }).flush();
+      expect(stateManager.getAgent('g-00500')?.phase).toBe('stopped');
+      h.release();
+      await settle(el);
+      expect(internals(el).memberIndex?.getPhase('g-00500')).toBe('stopped');
+      expect(activeCount(el)).toBe('100');
+    });
+  });
+
   describe('count-only mode above 2,000 agents', () => {
     it('shows the count as of last refresh; a live change shows the chip; a click is one limit=1 fit request that updates the count', async () => {
       const fake = newFake(2003, 40);

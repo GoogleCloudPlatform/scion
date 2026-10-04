@@ -234,14 +234,16 @@ export class ScionPageHome extends LitElement {
     const index = new AgentMemberIndex();
     if (stats.agents) {
       index.seed(dropTombstonedPairs(stats.agents, deleted));
-      // Changes that landed while the request was in flight: phase changes
-      // of agents not in the store, then agents upserted live.
-      for (const [id, delta] of epoch.unknownChanges) {
-        if (delta.phase && index.has(id)) index.set(id, delta.phase);
-      }
+      // Changes that landed while the request was in flight, in the order
+      // the paged window replays them: agents upserted live, then phase
+      // changes of agents not in the store. The epoch leaves out an ID
+      // upserted after its unknown delta, so the two never overlap.
       for (const id of epoch.changedIds) {
         const agent = stateManager.getAgent(id);
         if (agent) index.set(id, agent.phase);
+      }
+      for (const [id, delta] of epoch.unknownChanges) {
+        if (delta.phase && index.has(id)) index.set(id, delta.phase);
       }
       this.countsMayHaveChanged = false;
     } else {
