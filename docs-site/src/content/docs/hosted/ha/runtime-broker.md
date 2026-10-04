@@ -92,7 +92,7 @@ For containerized brokers, set `SCION_TRANSPORT_MODE` and `SCION_TRANSPORT_AUDIE
 
 See [Brokers behind IAP](/scion/hosted/ha/auth-proxy-iap/#brokers-behind-iap) for the full deployment guide, including Workload Identity setup and the registration Job manifest.
 
-## In-Cluster Broker for the Substrate Runtime
+## In-Cluster Runtime Broker for the Substrate Runtime
 
 The `substrate` runtime runs each agent as an [Agent Substrate](https://github.com/agent-substrate/substrate) actor on GKE. Because Substrate's control API (`ateapi`) and inbound router (`atenet-router`) have no authorization of their own, the Runtime Broker for this runtime must run **inside** the GKE cluster rather than reaching in over a LoadBalancer or Ingress. Inside each actor, `sciontool substrate-serve` runs as PID 1 and serves the broker's bootstrap, exec and health requests with the enforced privilege drop in place. Agent egress is limited to the Hub, git, model and telemetry hosts plus any public hostnames the operator lists in the runtime's `egress_allow`. The agent image must be pinned by digest.
 
