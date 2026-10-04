@@ -25,7 +25,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, Skill, SkillScope, Capabilities } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
-import { paginateAll, PaginationStoppedError } from '../../client/paginate-all.js';
+import { paginateAll, PaginationError, PaginationStoppedError } from '../../client/paginate-all.js';
 import { listPageStyles } from '../shared/resource-styles.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/status-badge.js';
@@ -213,9 +213,11 @@ export class ScionPageSkills extends LitElement {
     }
 
     const ssrData = this.pageData?.data as
-      | { skills?: Skill[]; _capabilities?: Capabilities }
+      | { skills?: Skill[]; nextCursor?: string; _capabilities?: Capabilities }
       | undefined;
-    if (ssrData?.skills && this.scopeFilter === '' && !this.searchQuery) {
+    // The server prefetch is a single page; when it has more, walk every
+    // page on the client instead (ptone/scion#1949).
+    if (ssrData?.skills && !ssrData.nextCursor && this.scopeFilter === '' && !this.searchQuery) {
       this.skills = ssrData.skills;
       this.scopeCapabilities = ssrData._capabilities;
       this.loading = false;
@@ -242,12 +244,14 @@ export class ScionPageSkills extends LitElement {
       if (this.scopeFilter) params.set('scope', this.scopeFilter);
       if (this.searchQuery) params.set('search', this.searchQuery);
 
+      const qs = params.toString();
       await paginateAll<Skill>({
-        path: `/api/v1/skills?${params.toString()}`,
+        path: qs ? `/api/v1/skills?${qs}` : '/api/v1/skills',
         pageSize: SKILLS_PAGE_SIZE,
         label: 'Skills',
-        // A newer load (search or scope change) supersedes this one.
-        shouldContinue: () => generation === this.loadGeneration,
+        // A newer load (search or scope change) supersedes this one, and a
+        // detached page needs no more pages.
+        shouldContinue: () => generation === this.loadGeneration && this.isConnected,
         parsePage: (body) => {
           const data = body as {
             skills?: Skill[];
@@ -271,7 +275,10 @@ export class ScionPageSkills extends LitElement {
       console.error('Failed to load skills:', err);
       const message = err instanceof Error ? err.message : 'Failed to load skills';
       if (firstPage) {
-        this.error = message;
+        // paginateAll's errors are terse ("Skills request failed: 403"), so
+        // say what failed; other errors (e.g. network) read as they are.
+        this.error =
+          err instanceof PaginationError ? `Failed to load skills (${message})` : message;
       } else {
         // A later page failed: keep the pages that loaded and say so.
         this.skills = loaded;
@@ -442,9 +449,15 @@ export class ScionPageSkills extends LitElement {
     return html`
       <sl-alert class="partial-load-notice" variant="warning" open>
         <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
-        Showing ${this.skills.length} skills; the rest could not be loaded
-        (${this.partialLoadError}).
-        <sl-button size="small" variant="text" @click=${() => this.loadSkills()}>Retry</sl-button>
+        Showing ${this.skills.length} skill${this.skills.length === 1 ? '' : 's'}; the rest could
+        not be loaded (${this.partialLoadError}).
+        <sl-button
+          size="small"
+          variant="text"
+          aria-label="Retry loading skills"
+          @click=${() => this.loadSkills()}
+          >Retry</sl-button
+        >
       </sl-alert>
     `;
   }

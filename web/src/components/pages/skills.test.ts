@@ -22,7 +22,21 @@
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 
-type PageEl = HTMLElement & { updateComplete: Promise<boolean> };
+type PageEl = HTMLElement & {
+  updateComplete: Promise<boolean>;
+  pageData?: unknown;
+};
+
+/** Private page state the tests drive or observe. */
+type PageInternals = {
+  loading: boolean;
+  scopeFilter: string;
+  loadSkills(): Promise<void>;
+};
+
+function internals(el: PageEl): PageInternals {
+  return el as unknown as PageInternals;
+}
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -46,26 +60,36 @@ function urlOf(input: string | URL | Request): string {
   return typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
 }
 
+/** Wait until the page has finished loading and rendered. */
+async function settled(el: PageEl): Promise<void> {
+  await vi.waitFor(() => expect(internals(el).loading).toBe(false));
+  await el.updateComplete;
+}
+
 async function mountSkillsPage(
-  handler: (url: string) => Promise<Response>
+  handler: (url: string) => Promise<Response>,
+  pageData?: unknown
 ): Promise<{ el: PageEl; fetchMock: ReturnType<typeof vi.fn> }> {
   const fetchMock = vi.fn((input: string | URL | Request) => handler(urlOf(input)));
   vi.stubGlobal('fetch', fetchMock);
   const el = document.createElement('scion-page-skills') as PageEl;
+  if (pageData) el.pageData = pageData;
   document.body.appendChild(el);
-  for (let i = 0; i < 3; i++) {
-    await el.updateComplete;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  await el.updateComplete;
+  await settled(el);
   return { el, fetchMock };
 }
 
-function shownSkillNames(el: PageEl): string[] {
+function shownSkills(el: PageEl): string[] {
   return Array.from(el.shadowRoot?.querySelectorAll('.skill-card') ?? [])
     .map((card) => card.getAttribute('href') ?? '')
     .sort();
 }
+
+const FIRST_PAGE = {
+  skills: [skill('1'), skill('2')],
+  nextCursor: 'c2',
+  _capabilities: { actions: ['create'] },
+};
 
 describe('scion-page-skills pagination', () => {
   let element: PageEl | null = null;
@@ -82,47 +106,100 @@ describe('scion-page-skills pagination', () => {
   });
 
   it('shows every page and keeps the first page capabilities', async () => {
-    const { el, fetchMock } = await mountSkillsPage((url) => {
-      if (url.includes('cursor=c2')) {
-        return Promise.resolve(jsonResponse({ skills: [skill('3')] }));
-      }
-      return Promise.resolve(
-        jsonResponse({
-          skills: [skill('1'), skill('2')],
-          nextCursor: 'c2',
-          _capabilities: { actions: ['create'] },
-        })
-      );
-    });
+    const { el, fetchMock } = await mountSkillsPage((url) =>
+      Promise.resolve(
+        jsonResponse(url.includes('cursor=c2') ? { skills: [skill('3')] } : FIRST_PAGE)
+      )
+    );
     element = el;
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    const firstUrl = urlOf(fetchMock.mock.calls[0][0] as string);
+    expect(firstUrl).toBe('/api/v1/skills?status=active&limit=200');
     expect(urlOf(fetchMock.mock.calls[1][0] as string)).toContain('cursor=c2');
-    expect(shownSkillNames(el)).toEqual(['/skills/1', '/skills/2', '/skills/3']);
+    expect(shownSkills(el)).toEqual(['/skills/1', '/skills/2', '/skills/3']);
     expect(el.shadowRoot?.querySelector('a[href="/skills/new"]')).not.toBeNull();
     expect(el.shadowRoot?.querySelector('.partial-load-notice')).toBeNull();
   });
 
   it('keeps loaded pages and shows a notice when a later page fails', async () => {
-    const { el } = await mountSkillsPage((url) => {
-      if (url.includes('cursor=c2')) {
-        return Promise.resolve(jsonResponse({ error: { code: 'internal' } }, 500));
-      }
-      return Promise.resolve(
-        jsonResponse({
-          skills: [skill('1'), skill('2')],
-          nextCursor: 'c2',
-          _capabilities: { actions: ['create'] },
-        })
-      );
-    });
+    const { el } = await mountSkillsPage((url) =>
+      Promise.resolve(
+        url.includes('cursor=c2')
+          ? jsonResponse({ error: { code: 'internal' } }, 500)
+          : jsonResponse(FIRST_PAGE)
+      )
+    );
     element = el;
 
-    expect(shownSkillNames(el)).toEqual(['/skills/1', '/skills/2']);
+    expect(shownSkills(el)).toEqual(['/skills/1', '/skills/2']);
     const notice = el.shadowRoot?.querySelector('.partial-load-notice');
     expect(notice).not.toBeNull();
+    expect(notice?.textContent).toContain('Showing 2 skills;');
     expect(notice?.textContent).toContain('500');
     expect(el.shadowRoot?.querySelector('a[href="/skills/new"]')).not.toBeNull();
+    expect(el.shadowRoot?.querySelector('.error-state')).toBeNull();
+  });
+
+  it('Retry after a partial failure loads every page and clears the notice', async () => {
+    let failPage2 = true;
+    const { el } = await mountSkillsPage((url) => {
+      if (url.includes('cursor=c2')) {
+        return Promise.resolve(
+          failPage2
+            ? jsonResponse({ error: { code: 'internal' } }, 500)
+            : jsonResponse({ skills: [skill('3')] })
+        );
+      }
+      return Promise.resolve(jsonResponse(FIRST_PAGE));
+    });
+    element = el;
+    expect(el.shadowRoot?.querySelector('.partial-load-notice')).not.toBeNull();
+
+    failPage2 = false;
+    const retry = el.shadowRoot?.querySelector(
+      '.partial-load-notice sl-button[aria-label="Retry loading skills"]'
+    ) as HTMLElement | null;
+    expect(retry).not.toBeNull();
+    retry!.click();
+    await settled(el);
+
+    expect(el.shadowRoot?.querySelector('.partial-load-notice')).toBeNull();
+    expect(shownSkills(el)).toEqual(['/skills/1', '/skills/2', '/skills/3']);
+  });
+
+  it('ignores a superseded walk', async () => {
+    let releaseStale!: (r: Response) => void;
+    const stalePage2 = new Promise<Response>((resolve) => (releaseStale = resolve));
+    const fetchMock = vi.fn((input: string | URL | Request) => {
+      const url = urlOf(input);
+      if (url.includes('scope=core')) {
+        return Promise.resolve(jsonResponse({ skills: [skill('core-1')] }));
+      }
+      if (url.includes('cursor=c2')) return stalePage2;
+      return Promise.resolve(jsonResponse(FIRST_PAGE));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const el = document.createElement('scion-page-skills') as PageEl;
+    element = el;
+    document.body.appendChild(el);
+    // The first walk is now waiting on its second page.
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    // A scope change starts a newer load, which finishes first.
+    internals(el).scopeFilter = 'core';
+    await internals(el).loadSkills();
+    await el.updateComplete;
+    expect(shownSkills(el)).toEqual(['/skills/core-1']);
+
+    // The stale walk's last page arrives late and must not be shown.
+    releaseStale(jsonResponse({ skills: [skill('stale')] }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await el.updateComplete;
+
+    expect(shownSkills(el)).toEqual(['/skills/core-1']);
+    expect(internals(el).loading).toBe(false);
+    expect(el.shadowRoot?.querySelector('.partial-load-notice')).toBeNull();
     expect(el.shadowRoot?.querySelector('.error-state')).toBeNull();
   });
 
@@ -132,7 +209,40 @@ describe('scion-page-skills pagination', () => {
     );
     element = el;
 
-    expect(el.shadowRoot?.querySelector('.error-state')).not.toBeNull();
-    expect(shownSkillNames(el)).toEqual([]);
+    const errorState = el.shadowRoot?.querySelector('.error-state');
+    expect(errorState).not.toBeNull();
+    expect(errorState?.textContent).toContain('Failed to load skills (Skills request failed: 500)');
+    expect(shownSkills(el)).toEqual([]);
+  });
+
+  it('walks the remaining pages when the server prefetch has a nextCursor', async () => {
+    const { el, fetchMock } = await mountSkillsPage(
+      (url) =>
+        Promise.resolve(
+          jsonResponse(url.includes('cursor=c2') ? { skills: [skill('3')] } : FIRST_PAGE)
+        ),
+      { path: '/skills', title: 'Skills', data: FIRST_PAGE }
+    );
+    element = el;
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(shownSkills(el)).toEqual(['/skills/1', '/skills/2', '/skills/3']);
+    expect(el.shadowRoot?.querySelector('a[href="/skills/new"]')).not.toBeNull();
+  });
+
+  it('uses a complete server prefetch without fetching', async () => {
+    const { el, fetchMock } = await mountSkillsPage(
+      () => Promise.reject(new Error('unexpected fetch')),
+      {
+        path: '/skills',
+        title: 'Skills',
+        data: { skills: [skill('1')], _capabilities: { actions: ['create'] } },
+      }
+    );
+    element = el;
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(shownSkills(el)).toEqual(['/skills/1']);
+    expect(el.shadowRoot?.querySelector('a[href="/skills/new"]')).not.toBeNull();
   });
 });
