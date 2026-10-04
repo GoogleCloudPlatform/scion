@@ -47,7 +47,7 @@ import type { StatusType } from '../shared/status-badge.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
 import type { AgentsChangedDetail } from '../../client/state.js';
-import { mergeChanged, dropTombstoned, dropTombstonedPairs } from '../../client/agent-merge.js';
+import { mergeChanged, dropTombstonedPairs } from '../../client/agent-merge.js';
 import { AgentListWindow } from '../../client/agent-list-window.js';
 import type {
   AgentListTrigger,
@@ -887,9 +887,11 @@ export class ScionPageAgents extends LitElement {
       // `phase`, so a page fetched with one is only part of the set: the
       // whole set is drained from the start.
       const legacy = data.complete === undefined;
-      // Each drain is entered with the sorted request ended here, not only
-      // in the finally below (which repeats both calls as no-ops): the drain
-      // carries no ticket.
+      // The drain carries no ticket, so each branch ends the sorted request
+      // before it drains. The phase branch also closes this epoch (its
+      // drain starts its own); the carry branch hands the epoch to the drain,
+      // which closes it. The finally below ends the request and closes the
+      // epoch again, which does nothing once they are ended and closed.
       if (legacy && phase) {
         // The restarted drain runs its own epoch.
         this.agentWindow.endSortedRequest(ticket);
@@ -916,20 +918,20 @@ export class ScionPageAgents extends LitElement {
 
       this.loadedScope = requestedScope;
       this.adoptScopeCapabilities(Array.isArray(body) ? undefined : data._capabilities);
-      // A REST response can race an SSE `deleted` already processed.
-      const fresh = dropTombstoned(data.agents || [], stateManager.getDeletedAgentIds());
+      // Seeding drops any agent already deleted live: a REST response can
+      // race an SSE `deleted`.
       if (complete) {
-        this.agents = epoch.seed(fresh, {
+        this.agents = epoch.seed(data.agents || [], {
           partial: false,
           isMember: (agent) => requestedScope === 'all' && matchesCommittedLabel(agent, label),
         }).agents;
-        this.agentWindow.setSmall();
+        this.agentWindow.setSmall(epoch.sawResync);
         this.markCompleteSet(requestedScope, label);
       } else {
         // Paged: `this.agents` stays empty; stats and Stop-all read the
         // member index through the window.
         this.agents = [];
-        this.agentWindow.setPaged(this.seedPage(epoch, fresh, data), label, ticket.key);
+        this.agentWindow.setPaged(this.seedPage(epoch, data), label, ticket.key);
       }
       return true;
     } finally {
@@ -1028,8 +1030,7 @@ export class ScionPageAgents extends LitElement {
         throw new Error(await extractApiError(response, 'Failed to load agents'));
       }
       const data = (await response.json()) as GlobalAgentsResponse;
-      const fresh = dropTombstoned(data.agents || [], stateManager.getDeletedAgentIds());
-      return this.seedPage(epoch, fresh, data);
+      return this.seedPage(epoch, data);
     } finally {
       epoch.close();
     }
@@ -1037,17 +1038,16 @@ export class ScionPageAgents extends LitElement {
 
   /**
    * Seed one sorted page under its epoch and build the window's page
-   * result. IDs already deleted live are dropped from `stats.agents` too,
-   * so a deleted agent never re-enters the member index.
+   * result. Rows of agents already deleted live are left out (and counted,
+   * for the backfill chip), and their IDs are dropped from `stats.agents`
+   * too, so a deleted agent never re-enters the member index. The live
+   * changes and any resync since the request was sent go to the window to
+   * replay.
    */
-  private seedPage(
-    epoch: AgentSeedEpoch,
-    fresh: Agent[],
-    data: GlobalAgentsResponse
-  ): PagedPageResult {
+  private seedPage(epoch: AgentSeedEpoch, data: GlobalAgentsResponse): PagedPageResult {
     // A full-view page: each object replaces the stored one, so a field
     // the server no longer sends does not linger.
-    const seeded = epoch.seed(fresh, { partial: false });
+    const seeded = epoch.seed(data.agents || [], { partial: false });
     let stats = data.stats;
     if (stats?.agents) {
       const agents = dropTombstonedPairs(stats.agents, stateManager.getDeletedAgentIds());
@@ -1060,6 +1060,9 @@ export class ScionPageAgents extends LitElement {
       stats,
       liveChanged: epoch.changedIds,
       liveUnknown: epoch.unknownChanges,
+      liveDeleted: epoch.deletedChanges,
+      droppedRows: seeded.dropped.length,
+      liveResync: epoch.sawResync,
     };
   }
 

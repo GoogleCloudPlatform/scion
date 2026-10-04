@@ -194,6 +194,25 @@ export interface PagedPageResult {
    * the chip.
    */
   liveUnknown?: ReadonlyMap<string, UnknownAgentDelta> | undefined;
+  /**
+   * IDs deleted live while this request was in flight (see
+   * `AgentSeedEpoch.deletedChanges`). The window replays them as the
+   * `deleted` part of an `agents-changed` flush: each leaves the member
+   * index, and a count-only snapshot shows the chip.
+   */
+  liveDeleted?: readonly string[] | undefined;
+  /**
+   * How many of the server's rows were left out of `agents` because the
+   * agent was deleted live. The page is short by that many rows, so the
+   * window shows the backfill chip, as it does for a live on-page delete.
+   */
+  droppedRows?: number | undefined;
+  /**
+   * The live connection resynced while this request was in flight (see
+   * `AgentSeedEpoch.sawResync`): the response may predate changes the
+   * connection missed, so the window shows the chip after adopting it.
+   */
+  liveResync?: boolean | undefined;
 }
 
 /** Fetches one sorted page for paged navigation. Rejecting sets the window's `error`. */
@@ -505,10 +524,11 @@ export class AgentListWindow extends EventTarget {
    * response with `complete: true`, or a legacy page with no `nextCursor`.
    * The host must already have assigned the array `getHeldAgents()`
    * returns. Resets `pageIndex` to 0 when leaving `paged`; clears the
-   * stale and incomplete flags.
+   * incomplete flag, and sets the stale flag to `stale` (a live-connection
+   * resync while the response was in flight).
    */
-  setSmall(): void {
-    this.enterLocal('small', null, false);
+  setSmall(stale = false): void {
+    this.enterLocal('small', null, stale);
   }
 
   /**
@@ -592,20 +612,27 @@ export class AgentListWindow extends EventTarget {
   }
 
   /**
-   * Replays a response's {@link PagedPageResult.liveChanged} and
-   * {@link PagedPageResult.liveUnknown} over the adopted page and member
-   * index, as one `agents-changed` flush.
+   * Replays what landed while a response was in flight over the adopted
+   * page and member index: its {@link PagedPageResult.liveDeleted},
+   * {@link PagedPageResult.liveChanged} and
+   * {@link PagedPageResult.liveUnknown} as one `agents-changed` flush,
+   * then the chip for rows dropped as deleted
+   * ({@link PagedPageResult.droppedRows}) or a resync
+   * ({@link PagedPageResult.liveResync}).
    */
   private replayLiveChanges(result: PagedPageResult): void {
     const upserted = result.liveChanged ?? [];
+    const deleted = result.liveDeleted ?? [];
     const unknown = result.liveUnknown ?? new Map<string, UnknownAgentDelta>();
-    if (upserted.length === 0 && unknown.size === 0) return;
-    this.applyChanges({
-      upserted: [...upserted],
-      deleted: [],
-      unknown: new Map(unknown),
-      generation: 0,
-    });
+    if (upserted.length > 0 || deleted.length > 0 || unknown.size > 0) {
+      this.applyChanges({
+        upserted: [...upserted],
+        deleted: [...deleted],
+        unknown: new Map(unknown),
+        generation: 0,
+      });
+    }
+    if ((result.droppedRows ?? 0) > 0 || result.liveResync) this._updatesAvailable = true;
   }
 
   /**

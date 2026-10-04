@@ -2290,6 +2290,248 @@ describe('project-detail — agent list window', { timeout: 20_000 }, () => {
     });
   });
 
+  describe('every adopted response keeps the live changes that land while it is in flight', () => {
+    /** The window surface these tests read. */
+    interface MatrixWindow {
+      state: string;
+      items: Agent[];
+      updatesAvailable: boolean;
+      stale: boolean;
+      banner: { kind: string } | null;
+      stats: { total: number; running: number };
+      memberIndex: { has(id: string): boolean; getPhase(id: string): string | undefined };
+      next(): Promise<void>;
+      refresh(): Promise<void>;
+    }
+
+    /**
+     * One way the page adopts an agents response. `start` mounts the page
+     * and returns once that response's request is held; the test then
+     * applies one live change, releases the request and checks the result.
+     */
+    interface AdoptRow {
+      name: string;
+      count: number;
+      /** The persisted sort field: `name` needs the complete set, so the page drains. */
+      sortField: 'updated' | 'name';
+      /** Hold the page's own first request, or a window page fetch after it settled. */
+      fetchPage?: (win: MatrixWindow) => Promise<void>;
+      /** The adopted result is the complete set (small), not a server page. */
+      local: boolean;
+      /** An agent the adopted response lists (on the adopted page, or in the set). */
+      row: string;
+      /** Paged: a member that is not on the adopted page. */
+      offPage: string;
+      /** Paged: an activity time that sorts onto the adopted page. */
+      onPageKey: string;
+      /** Paged: a brand-new agent could land on the adopted page. */
+      createLands: boolean;
+    }
+
+    // 60 agents page as a-59..a-35 (page 0), a-34..a-10 (page 1), a-9..a-0.
+    const page0Key = '2026-03-01T00:00:00Z';
+    const rows: AdoptRow[] = [
+      {
+        name: 'the complete fit response',
+        count: 10,
+        sortField: 'updated',
+        local: true,
+        row: 'a-7',
+        offPage: '',
+        onPageKey: '',
+        createLands: false,
+      },
+      {
+        name: 'the paged fit response',
+        count: 60,
+        sortField: 'updated',
+        local: false,
+        row: 'a-50',
+        offPage: 'a-0',
+        onPageKey: page0Key,
+        createLands: true,
+      },
+      {
+        name: 'a Next response',
+        count: 60,
+        sortField: 'updated',
+        fetchPage: (win) => win.next(),
+        local: false,
+        row: 'a-30',
+        offPage: 'a-0',
+        onPageKey: '2026-01-02T00:00:20.500Z',
+        createLands: false,
+      },
+      {
+        name: 'a chip refresh response',
+        count: 60,
+        sortField: 'updated',
+        fetchPage: (win) => win.refresh(),
+        local: false,
+        row: 'a-50',
+        offPage: 'a-0',
+        onPageKey: page0Key,
+        createLands: true,
+      },
+      {
+        name: 'a drain response',
+        count: 60,
+        sortField: 'name',
+        local: true,
+        row: 'a-8',
+        offPage: '',
+        onPageKey: '',
+        createLands: false,
+      },
+    ];
+
+    let seq = 0;
+    const update = (subject: string, data: unknown) =>
+      (
+        stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+      ).handleUpdate({ subject, data });
+    const reconnect = () => {
+      const sse = (stateManager as unknown as { sseClientInstance: EventTarget }).sseClientInstance;
+      sse.dispatchEvent(new CustomEvent('disconnected'));
+      sse.dispatchEvent(new CustomEvent('connected'));
+    };
+
+    describe.each(rows)('$name', (row) => {
+      let el: TestEl;
+      let h: ReturnType<typeof holdable>;
+      let projectId: string;
+      const win = (): MatrixWindow => internals(el).agentWindow as unknown as MatrixWindow;
+      const shown = (id: string): Agent | undefined =>
+        row.local
+          ? (internals(el) as unknown as { agents: Agent[] }).agents.find((a) => a.id === id)
+          : win().items.find((a) => a.id === id);
+      const agentOf = (id: string): Agent => makeAgent(Number(id.slice(2)), { projectId });
+
+      beforeEach(async () => {
+        projectId = `p-adopt-${++seq}`;
+        localStorage.setItem('scion-view-project-agents', 'list');
+        localStorage.setItem(
+          `scion-sort-project-agents-${projectId}`,
+          JSON.stringify({ field: row.sortField, dir: 'desc' })
+        );
+        const agents = Array.from({ length: row.count }, (_, i) => makeAgent(i, { projectId }));
+        h = holdable(
+          createRealisticFetchHandler({
+            projectId,
+            projectCaps: { actions: ['read'] },
+            agents,
+            requests: [],
+          }),
+          (u) => u.pathname === `/api/v1/projects/${projectId}/agents`
+        );
+        vi.stubGlobal('fetch', vi.fn(h.fn));
+        if (row.fetchPage) {
+          el = await createComponent(projectId);
+          expect(win().state).toBe('paged');
+          h.hold();
+          void row.fetchPage(win());
+        } else {
+          h.hold();
+          el = await createComponent(projectId, { holdsFirstLoad: true });
+        }
+        await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      });
+
+      const done = async (): Promise<void> => {
+        await flushLive(el);
+        h.release();
+        await settle(el);
+        expect(win().state).toBe(row.local ? 'small' : 'paged');
+      };
+
+      it('with no live change: no chip and no stale banner', async () => {
+        await done();
+        expect(win().updatesAvailable).toBe(false);
+        expect(win().stale).toBe(false);
+      });
+
+      it('a phase change to an agent the store holds survives', async () => {
+        if (!stateManager.getAgent(row.row)) stateManager.seedAgents([agentOf(row.row)]);
+        update(`project.${projectId}.agent.status`, { agentId: row.row, phase: 'stopped' });
+        await done();
+        expect(stateManager.getAgent(row.row)?.phase).toBe('stopped');
+        expect(shown(row.row)?.phase).toBe('stopped');
+        expect(internals(el).agentStats).toMatchObject({
+          total: row.count,
+          running: row.count - 1,
+        });
+      });
+
+      it('a phase change to an agent not in the store survives', async () => {
+        const id = row.local ? row.row : row.offPage;
+        expect(stateManager.getAgent(id)).toBeUndefined();
+        update(`project.${projectId}.agent.status`, { agentId: id, phase: 'stopped' });
+        await done();
+        if (row.local) expect(shown(id)?.phase).toBe('stopped');
+        else expect(win().memberIndex.getPhase(id)).toBe('stopped');
+        expect(internals(el).agentStats).toMatchObject({
+          total: row.count,
+          running: row.count - 1,
+        });
+      });
+
+      it('an activity change to an agent not in the store survives', async () => {
+        if (row.local) {
+          expect(stateManager.getAgent(row.row)).toBeUndefined();
+          update(`project.${projectId}.agent.status`, { agentId: row.row, activity: 'thinking' });
+          await done();
+          expect(shown(row.row)?.activity).toBe('thinking');
+          return;
+        }
+        // Off the page: an activity time that sorts onto the adopted page.
+        expect(stateManager.getAgent(row.offPage)).toBeUndefined();
+        update(`project.${projectId}.agent.status`, {
+          agentId: row.offPage,
+          activity: 'thinking',
+          lastActivityEvent: row.onPageKey,
+        });
+        await done();
+        expect(win().updatesAvailable).toBe(true);
+      });
+
+      it('a create the response predates is kept', async () => {
+        const created = makeAgent(5000, { projectId, updated: page0Key });
+        update(`project.${projectId}.agent.created`, { ...created, agentId: created.id });
+        await done();
+        expect(internals(el).agentStats.total).toBe(row.count + 1);
+        if (row.local) {
+          expect(shown(created.id)).toBeDefined();
+        } else {
+          expect(win().memberIndex.has(created.id)).toBe(true);
+          expect(win().updatesAvailable).toBe(row.createLands);
+        }
+      });
+
+      it('a delete leaves the agent out', async () => {
+        update(`project.${projectId}.agent.deleted`, { agentId: row.row });
+        await done();
+        expect(shown(row.row)).toBeUndefined();
+        expect(internals(el).agentStats.total).toBe(row.count - 1);
+        if (!row.local) {
+          // The adopted page is one row short: the backfill chip.
+          expect(win().items).toHaveLength(24);
+          expect(win().updatesAvailable).toBe(true);
+        }
+      });
+
+      it('a resync shows the stale banner or the chip', async () => {
+        reconnect();
+        await done();
+        if (row.local) {
+          expect(win().stale).toBe(true);
+          expect(win().banner?.kind).toBe('stale');
+        } else {
+          expect(win().updatesAvailable).toBe(true);
+        }
+      });
+    });
+  });
+
   describe('label typing while paged', () => {
     it('does not reset pageIndex or issue a request, and DOES apply the live preview filter to the page', async () => {
       const projectId = 'p-typing';

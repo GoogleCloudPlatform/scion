@@ -347,6 +347,29 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       expect(internals(el).agents.length).toBe(1999);
     });
 
+    it('a phase filter change during a carrying legacy drain neither aborts it nor sends a request', async () => {
+      const fake: Fake = {
+        agents: Array.from({ length: 1200 }, (_, i) => makeAgent(i)),
+        requests: [],
+      };
+      const h = heldLimitIgnoringLegacy(fake);
+      h.hold(2);
+      const el = await mountUnsettled();
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      h.release();
+      await vi.waitFor(() => expect(h.sent).toHaveLength(2));
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      // Drain page 2 is held. The drain carries no sorted request, so a
+      // phase filter change (local once held) has nothing to supersede.
+      internals(el).setPhaseFilter('stopped');
+      await el.updateComplete;
+      h.release();
+      await settle(el);
+      expect(h.sent.some((r) => r.signal?.aborted)).toBe(false);
+      expect(h.sent).toHaveLength(3);
+      expect(internals(el).agentWindow.state).toBe('held');
+    });
+
     /** An old server: no sorted mode, but `limit` is honoured. */
     const limitHonouringLegacy =
       (fake: Fake) => (input: string | URL | Request, init?: RequestInit) => {
@@ -1139,6 +1162,297 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       await settle(el);
       expect(internals(el).agentWindow.memberIndex.countOnly).toBe(true);
       expect(pager(el).showChip).toBe(false);
+    });
+  });
+
+  describe('every adopted response keeps the live changes that land while it is in flight', () => {
+    /**
+     * One way the page adopts an agents response. `start` mounts the page
+     * and returns once that response's request is held; the test then
+     * applies one live change, releases the request and checks the result.
+     */
+    interface AdoptRow {
+      name: string;
+      count: number;
+      start(h: ReturnType<typeof holdable>): Promise<TestEl>;
+      /** The adopted result is the held set (small or held), not a server page. */
+      local: boolean;
+      countOnly: boolean;
+      /** An agent the adopted response lists (on the adopted page, or in the set). */
+      row: string;
+      /** Paged: a member that is not on the adopted page. */
+      offPage: string;
+      /** Paged: an activity time that sorts onto the adopted page. */
+      onPageKey: string;
+      /** Paged: a brand-new agent could land on the adopted page. */
+      createLands: boolean;
+      /** The server ignores sorted mode and `limit`. */
+      legacy?: boolean;
+    }
+
+    const allAgents = (count: number): Agent[] =>
+      Array.from({ length: count }, (_, i) => makeAgent(i));
+
+    function holdFake(count: number, legacy = false): ReturnType<typeof holdable> {
+      const fake: Fake = { agents: allAgents(count), requests: [] };
+      const serve = (input: string | URL | Request, init?: RequestInit) => {
+        if (!legacy) return fakeFetch(fake)(input, init);
+        // An old server that ignores sorted mode and `limit`.
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const u = new URL(raw, 'http://localhost');
+        for (const k of ['sort', 'dir', 'fit', 'stats', 'limit', 'phase']) u.searchParams.delete(k);
+        return fakeFetch(fake)(u.pathname + (u.search || ''), init);
+      };
+      const h = holdable(serve, isGlobalAgentsList);
+      vi.stubGlobal('fetch', vi.fn(h.fn));
+      return h;
+    }
+
+    async function heldFirstLoad(h: ReturnType<typeof holdable>): Promise<TestEl> {
+      h.hold();
+      const el = await mountUnsettled();
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      return el;
+    }
+
+    async function heldWindowFetch(
+      h: ReturnType<typeof holdable>,
+      fetchPage: (win: AgentListWindow) => Promise<void>
+    ): Promise<TestEl> {
+      const el = await mount();
+      expect(internals(el).agentWindow.state).toBe('paged');
+      h.hold();
+      void fetchPage(internals(el).agentWindow);
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      return el;
+    }
+
+    const page0Key = '2026-01-03T00:00:00Z';
+    const rows: AdoptRow[] = [
+      {
+        name: 'the complete fit response',
+        count: 300,
+        start: heldFirstLoad,
+        local: true,
+        countOnly: false,
+        row: 'g-00007',
+        offPage: '',
+        onPageKey: '',
+        createLands: false,
+      },
+      {
+        name: 'the paged fit response',
+        count: 1200,
+        start: heldFirstLoad,
+        local: false,
+        countOnly: false,
+        row: 'g-01190',
+        offPage: 'g-00010',
+        onPageKey: page0Key,
+        createLands: true,
+      },
+      {
+        name: 'a Next response',
+        count: 1200,
+        start: (h) => heldWindowFetch(h, (win) => win.next()),
+        local: false,
+        countOnly: false,
+        row: 'g-01160',
+        offPage: 'g-00010',
+        // Page 1 holds g-01174 down to g-01150.
+        onPageKey: '2026-01-02T00:00:00.01160Z',
+        createLands: false,
+      },
+      {
+        name: 'a chip refresh response',
+        count: 1200,
+        start: (h) => heldWindowFetch(h, (win) => win.refresh()),
+        local: false,
+        countOnly: false,
+        row: 'g-01190',
+        offPage: 'g-00010',
+        onPageKey: page0Key,
+        createLands: true,
+      },
+      {
+        name: 'a drain response',
+        count: 1200,
+        start: (h) => {
+          // A mode filter is complete-needing: the page drains.
+          localStorage.setItem('scion-filter-agents-mode', 'project');
+          return heldFirstLoad(h);
+        },
+        local: true,
+        countOnly: false,
+        row: 'g-00008',
+        offPage: '',
+        onPageKey: '',
+        createLands: false,
+      },
+      {
+        name: 'a drain that carries a legacy first page',
+        count: 1200,
+        legacy: true,
+        start: heldFirstLoad,
+        local: true,
+        countOnly: false,
+        row: 'g-00008',
+        offPage: '',
+        onPageKey: '',
+        createLands: false,
+      },
+      {
+        name: 'the count-only fit response',
+        count: 2002,
+        start: heldFirstLoad,
+        local: false,
+        countOnly: true,
+        row: 'g-01990',
+        offPage: 'g-00010',
+        onPageKey: page0Key,
+        createLands: true,
+      },
+      {
+        name: 'a count-only Next response',
+        count: 2002,
+        start: (h) => heldWindowFetch(h, (win) => win.next()),
+        local: false,
+        countOnly: true,
+        row: 'g-01960',
+        offPage: 'g-00010',
+        onPageKey: '2026-01-02T00:00:00.01960Z',
+        createLands: false,
+      },
+      {
+        name: 'a count-only chip refresh response',
+        count: 2002,
+        start: (h) => heldWindowFetch(h, (win) => win.refresh()),
+        local: false,
+        countOnly: true,
+        row: 'g-01990',
+        offPage: 'g-00010',
+        onPageKey: page0Key,
+        createLands: true,
+      },
+    ];
+
+    const indexOf = (id: string): number => Number(id.slice(2));
+
+    describe.each(rows)('$name', (row) => {
+      let el: TestEl;
+      let h: ReturnType<typeof holdable>;
+      const win = (): AgentListWindow => internals(el).agentWindow;
+      const shown = (id: string): Agent | undefined =>
+        row.local
+          ? internals(el).agents.find((a) => a.id === id)
+          : win().items.find((a) => a.id === id);
+
+      beforeEach(async () => {
+        h = holdFake(row.count, row.legacy ?? false);
+        el = await row.start(h);
+      });
+
+      const done = async (): Promise<void> => {
+        await flushLive(el);
+        h.release();
+        await settle(el);
+        expect(win().state).toBe(row.local ? (row.count <= 500 ? 'small' : 'held') : 'paged');
+        expect(win().memberIndex.countOnly).toBe(row.countOnly);
+      };
+
+      it('with no live change: no chip and no stale banner', async () => {
+        await done();
+        expect(win().updatesAvailable).toBe(false);
+        expect(win().stale).toBe(false);
+      });
+
+      it('a phase change to an agent the store holds survives', async () => {
+        const row0 = makeAgent(indexOf(row.row));
+        if (!stateManager.getAgent(row.row)) stateManager.seedAgents([row0]);
+        handleUpdate(`agent.${row.row}.status`, { agentId: row.row, phase: 'stopped' });
+        await done();
+        expect(stateManager.getAgent(row.row)?.phase).toBe('stopped');
+        if (row.countOnly) {
+          expect(win().updatesAvailable).toBe(true);
+          return;
+        }
+        expect(shown(row.row)?.phase).toBe('stopped');
+        expect(win().stats).toMatchObject({ total: row.count, running: row.count - 1 });
+      });
+
+      it('a phase change to an agent not in the store survives', async () => {
+        const id = row.local ? row.row : row.offPage;
+        expect(stateManager.getAgent(id)).toBeUndefined();
+        handleUpdate(`agent.${id}.status`, { agentId: id, phase: 'stopped' });
+        await done();
+        if (row.countOnly) {
+          expect(win().updatesAvailable).toBe(true);
+          return;
+        }
+        if (row.local) expect(shown(id)?.phase).toBe('stopped');
+        else expect(win().memberIndex.getPhase(id)).toBe('stopped');
+        expect(win().stats).toMatchObject({ total: row.count, running: row.count - 1 });
+      });
+
+      it('an activity change to an agent not in the store survives', async () => {
+        if (row.local) {
+          expect(stateManager.getAgent(row.row)).toBeUndefined();
+          handleUpdate(`agent.${row.row}.status`, { agentId: row.row, activity: 'thinking' });
+          await done();
+          expect(shown(row.row)?.activity).toBe('thinking');
+          return;
+        }
+        // Off the page: an activity time that sorts onto the adopted page.
+        expect(stateManager.getAgent(row.offPage)).toBeUndefined();
+        handleUpdate(`agent.${row.offPage}.status`, {
+          agentId: row.offPage,
+          activity: 'thinking',
+          lastActivityEvent: row.onPageKey,
+        });
+        await done();
+        expect(win().updatesAvailable).toBe(true);
+      });
+
+      it('a create the response predates is kept', async () => {
+        const created = makeAgent(5000);
+        handleUpdate(`agent.${created.id}.created`, { ...created, agentId: created.id });
+        await done();
+        if (row.countOnly) {
+          expect(win().updatesAvailable).toBe(true);
+          return;
+        }
+        expect(win().stats.total).toBe(row.count + 1);
+        if (row.local) {
+          expect(shown(created.id)).toBeDefined();
+        } else {
+          expect(win().memberIndex.has(created.id)).toBe(true);
+          expect(win().updatesAvailable).toBe(row.createLands);
+        }
+      });
+
+      it('a delete leaves the agent out', async () => {
+        handleUpdate(`agent.${row.row}.deleted`, {});
+        await done();
+        expect(shown(row.row)).toBeUndefined();
+        if (!row.countOnly) expect(win().stats.total).toBe(row.count - 1);
+        if (!row.local) {
+          // The adopted page is one row short: the backfill chip.
+          expect(win().items).toHaveLength(24);
+          expect(win().updatesAvailable).toBe(true);
+        }
+      });
+
+      it('a resync shows the stale banner or the chip', async () => {
+        reconnect();
+        await done();
+        if (row.local) {
+          expect(win().stale).toBe(true);
+          expect(win().banner?.kind).toBe('stale');
+        } else {
+          expect(win().updatesAvailable).toBe(true);
+        }
+      });
     });
   });
 

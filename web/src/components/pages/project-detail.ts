@@ -66,7 +66,7 @@ import type {
 import { AgentDrainRunner } from '../../client/agent-drain.js';
 import { AgentSeedEpoch } from '../../client/agent-seed-epoch.js';
 import type { SeededDrainResult } from '../../client/agent-drain.js';
-import { mergeChanged, dropTombstoned, dropTombstonedPairs } from '../../client/agent-merge.js';
+import { mergeChanged, dropTombstonedPairs } from '../../client/agent-merge.js';
 import type { AgentSortField, SortDir } from '../../shared/agent-sort.js';
 import '../shared/git-remote-display.js';
 import type { ViewMode } from '../shared/view-toggle.js';
@@ -1722,27 +1722,24 @@ export class ScionPageProjectDetail extends LitElement {
       this.agentScopeCapabilities = data._capabilities;
     }
 
-    // A REST response can race an SSE `deleted` already processed in an
-    // earlier flush; drop any such ID before it enters page-level state
-    // (`stateManager.seedAgents` already drops it from its own map, but
-    // `this.agents`/the window are this page's own copies).
-    const freshAgents = dropTombstoned(data.agents || [], stateManager.getDeletedAgentIds());
-
+    // A REST response can race an SSE `deleted` already processed: the
+    // epoch's seed leaves any such row out of both the store and the
+    // page's own copies (`this.agents`, the window).
     if (data.complete) {
       // The complete set: the response plus live creates it predates.
-      this.agents = epoch.seed(freshAgents, {
+      this.agents = epoch.seed(data.agents || [], {
         partial: false,
         isMember: (agent) => this.isProjectMember(agent, label),
       }).agents;
       if (!this.agentScopeCapabilities) {
         this.agentScopeCapabilities = this.agents.find((a) => a._capabilities)?._capabilities;
       }
-      this.agentWindow.setSmall();
+      this.agentWindow.setSmall(epoch.sawResync);
     } else {
       // Paged: `this.agents` stays empty; stats and Stop-all read the
       // member index through `agentStats` instead.
       this.agents = [];
-      this.agentWindow.setPaged(this.seedPage(epoch, freshAgents, data), label, ticket.key);
+      this.agentWindow.setPaged(this.seedPage(epoch, data), label, ticket.key);
     }
     return true;
   }
@@ -1868,8 +1865,8 @@ export class ScionPageProjectDetail extends LitElement {
   /**
    * `stats` with any already-tombstoned ID dropped from `stats.agents`
    * because a paged response's member-index seed can race an SSE
-   * `deleted` the same way the page's own agent rows can (`dropTombstoned`
-   * above) — without this, a deleted agent's count would re-enter the
+   * `deleted` the same way the page's own agent rows can (which the
+   * epoch's seed leaves out) — without this, a deleted agent's count would re-enter the
    * member index via `stats.agents` and nothing would ever remove it
    * again, inflating the paged total/running counts and Stop-all
    * visibility. Returns `stats` itself when there is nothing to drop.
@@ -1910,10 +1907,7 @@ export class ScionPageProjectDetail extends LitElement {
         throw new Error(await extractApiError(response, 'Failed to load agents'));
       }
       const data = (await response.json()) as SortedAgentsResponse;
-      // Same race as the page-load paths above: a server page can still
-      // list an ID whose SSE `deleted` this client already processed.
-      const fresh = dropTombstoned(data.agents || [], stateManager.getDeletedAgentIds());
-      return this.seedPage(epoch, fresh, data);
+      return this.seedPage(epoch, data);
     } finally {
       epoch.close();
     }
@@ -1921,18 +1915,17 @@ export class ScionPageProjectDetail extends LitElement {
 
   /**
    * Seed one sorted page under its epoch and build the window's page
-   * result: the page rows as the store's current objects, and the live
-   * changes that landed while the request was in flight (upserted IDs and
-   * deltas for agents not in the store) for the window to replay.
+   * result: the page rows as the store's current objects (a row of an
+   * agent already deleted live is left out, and counted for the backfill
+   * chip), and what landed while the request was in flight (upserted,
+   * deleted, and deltas for agents not in the store, plus any resync) for
+   * the window to replay.
    */
-  private seedPage(
-    epoch: AgentSeedEpoch,
-    fresh: Agent[],
-    data: SortedAgentsResponse
-  ): PagedPageResult {
+  private seedPage(epoch: AgentSeedEpoch, data: SortedAgentsResponse): PagedPageResult {
     // A full-view page: each object replaces the stored one, so a field
-    // the server no longer sends does not linger.
-    const seeded = epoch.seed(fresh, { partial: false });
+    // the server no longer sends does not linger. Seeding skips a server
+    // page row whose SSE `deleted` this client already processed.
+    const seeded = epoch.seed(data.agents || [], { partial: false });
     return {
       agents: seeded.agents,
       nextCursor: data.nextCursor,
@@ -1940,6 +1933,9 @@ export class ScionPageProjectDetail extends LitElement {
       stats: this.freshStats(data.stats),
       liveChanged: epoch.changedIds,
       liveUnknown: epoch.unknownChanges,
+      liveDeleted: epoch.deletedChanges,
+      droppedRows: seeded.dropped.length,
+      liveResync: epoch.sawResync,
     };
   }
 

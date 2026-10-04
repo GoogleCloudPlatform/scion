@@ -394,7 +394,9 @@ export interface AgentDrainRunOptions {
  * deletes, each as the state store's current object (so a live update that
  * arrived during the walk is reflected). `stale` means the result may miss
  * live changes: the live connection was not up within
- * {@link DRAIN_CONNECT_TIMEOUT_MS}, or a live create could not be decided.
+ * {@link DRAIN_CONNECT_TIMEOUT_MS}, a live create could not be decided, or
+ * the live connection resynced while the walk (or a carried first page's
+ * request) was in flight.
  */
 export interface SeededDrainResult extends AgentDrainResult {
   stale: boolean;
@@ -504,7 +506,11 @@ export class AgentDrainRunner {
         partial: options.view === 'compact',
         ...(options.isMember ? { isMember: options.isMember } : {}),
       });
-      return { ...drained, agents: seeded.agents, stale: lateConnect || seeded.undecided };
+      return {
+        ...drained,
+        agents: seeded.agents,
+        stale: lateConnect || seeded.undecided || epoch.sawResync,
+      };
     } finally {
       this.state.removeEventListener('scope-changed', onScopeChanged);
       epoch?.close();
