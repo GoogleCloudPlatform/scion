@@ -56,7 +56,11 @@ func WithTimeout(d time.Duration) TransportOption {
 	}
 }
 
-// WithRetry configures automatic retry behavior.
+// WithRetry configures automatic retry behavior for Do: up to maxRetries
+// further attempts after a transport error or a 5xx response, waiting wait
+// between attempts. Retries are off by default (MaxRetries 0). A retry
+// replays the whole request, body included, so only enable this for
+// transports whose Do callers are idempotent; DoNoRetry is never retried.
 func WithRetry(maxRetries int, wait time.Duration) TransportOption {
 	return func(t *Transport) {
 		t.MaxRetries = maxRetries
@@ -99,6 +103,17 @@ func NewTransport(baseURL string, opts ...TransportOption) *Transport {
 
 // Do executes an HTTP request with configured behaviors.
 // Handles retries, timeout, and wraps errors.
+//
+// With MaxRetries > 0 (WithRetry), a transport error or a 5xx response is
+// retried. Each retry re-sends the full request body, rewound from
+// req.GetBody (which http.NewRequest populates for *bytes.Reader,
+// *bytes.Buffer and *strings.Reader bodies). A request whose body cannot be
+// rewound (non-empty Body, nil GetBody) is sent exactly once and its first
+// response or error is returned unchanged.
+//
+// A retry replays the request, so Do must only be used with retries enabled
+// for idempotent operations. Non-idempotent operations should use DoNoRetry
+// (or a *NoRetry helper such as PostNoRetry) instead.
 func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, error) {
 	if err := t.prepare(req); err != nil {
 		return nil, err
@@ -108,9 +123,23 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 	var resp *http.Response
 	var err error
 
+	canRewind := bodyRewindable(req)
 	attempts := t.MaxRetries + 1
 	for i := 0; i < attempts; i++ {
-		resp, err = t.HTTPClient.Do(req.WithContext(ctx))
+		attempt := req.WithContext(ctx)
+		if i > 0 && req.GetBody != nil {
+			// The previous attempt drained (and the client closed) the body;
+			// hand this attempt a fresh copy. attempt is a shallow copy, so
+			// the caller's req is left untouched.
+			body, gerr := req.GetBody()
+			if gerr != nil {
+				return nil, fmt.Errorf("request failed: rewinding body for retry: %w", gerr)
+			}
+			attempt.Body = body
+		}
+
+		resp, err = t.HTTPClient.Do(attempt)
+		retry := i < t.MaxRetries && canRewind
 		if err != nil {
 			// Check if context was cancelled
 			if ctx.Err() != nil {
@@ -118,7 +147,7 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 			}
 
 			// Retry on network errors
-			if i < t.MaxRetries {
+			if retry {
 				time.Sleep(t.RetryWait)
 				continue
 			}
@@ -126,7 +155,7 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 		}
 
 		// Retry on 5xx errors
-		if resp.StatusCode >= 500 && i < t.MaxRetries {
+		if resp.StatusCode >= 500 && retry {
 			_ = resp.Body.Close()
 			time.Sleep(t.RetryWait)
 			continue
@@ -136,6 +165,12 @@ func (t *Transport) Do(ctx context.Context, req *http.Request) (*http.Response, 
 	}
 
 	return resp, nil
+}
+
+// bodyRewindable reports whether req can be re-sent with its full body: it
+// has no body at all, or its body can be recreated through GetBody.
+func bodyRewindable(req *http.Request) bool {
+	return req.Body == nil || req.Body == http.NoBody || req.GetBody != nil
 }
 
 // prepare applies the headers and authentication every send path (Do and
