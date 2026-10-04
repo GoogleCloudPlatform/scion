@@ -366,21 +366,46 @@ describe('scion-access-boundary-schedule-editor — prop change while connected 
     expect(displayedValue(notBeforeInput(el))).toBe('2026-09-24T10:00');
   });
 
-  it('re-derives a host change to a value emitted before a detach/reconnect re-derive', async () => {
-    // Non-echoing host.
-    const el = await mount({ notBefore: '2026-09-23T15:00:00.000Z' });
+  it.each([
+    ['notBefore', notBeforeInput],
+    ['expiresAt', expiresAtInput],
+  ] as const)(
+    're-derives a host change to an emitted %s value after a detach/reconnect re-derive',
+    async (field, inputOf) => {
+      // Non-echoing host.
+      const el = await mount({ [field]: '2026-09-23T15:00:00.000Z' });
 
+      const input = inputOf(el);
+      (input as unknown as { value: string }).value = '2026-09-24T10:00';
+      input.dispatchEvent(new Event('sl-input'));
+      await el.updateComplete;
+
+      // Reconnect re-derives from the (unchanged) prop, discarding the typed
+      // value, so the earlier emit is no longer what the input shows.
+      el.remove();
+      document.body.appendChild(el);
+      await el.updateComplete;
+      expect(displayedValue(inputOf(el))).toBe('2026-09-23T15:00');
+
+      el[field] = '2026-09-24T10:00:00.000Z';
+      await el.updateComplete;
+      expect(displayedValue(inputOf(el))).toBe('2026-09-24T10:00');
+    }
+  );
+
+  it('drops an older pending emit when a later emit equals the prop', async () => {
+    // Non-echoing host: emit Y, then type the prop value X back (no new
+    // pending marker, since it equals the prop). A later host change to Y
+    // is genuine and must re-derive, not be swallowed as an echo of the
+    // older emit.
+    const el = await mount({ notBefore: '2026-09-23T15:00:00.000Z' });
     const input = notBeforeInput(el);
     (input as unknown as { value: string }).value = '2026-09-24T10:00';
     input.dispatchEvent(new Event('sl-input'));
     await el.updateComplete;
-
-    // Reconnect re-derives from the (unchanged) prop, discarding the typed
-    // value, so the earlier emit is no longer what the input shows.
-    el.remove();
-    document.body.appendChild(el);
+    (input as unknown as { value: string }).value = '2026-09-23T15:00';
+    input.dispatchEvent(new Event('sl-input'));
     await el.updateComplete;
-    expect(displayedValue(notBeforeInput(el))).toBe('2026-09-23T15:00');
 
     el.notBefore = '2026-09-24T10:00:00.000Z';
     await el.updateComplete;
