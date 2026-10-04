@@ -175,7 +175,7 @@ func NFSWarnOnlyRuntime(name string) bool {
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -185,7 +185,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -205,7 +205,7 @@ func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleInfo(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -362,7 +362,7 @@ func resolveInfoProfileRuntime(vs *config.VersionedSettings, name, defaultRuntim
 // handleHubConnections returns live status of all hub connections.
 func (s *Server) handleHubConnections(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
 
@@ -408,7 +408,7 @@ func (s *Server) handleAgents(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		s.createAgent(w, r)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
 
@@ -1756,7 +1756,7 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.deleteAgent(w, r, id, projectID)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodGet, http.MethodDelete)
 	}
 }
 
@@ -1959,7 +1959,7 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, p
 		return
 	}
 	if r.Method != method {
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, method)
 		return
 	}
 
@@ -4785,7 +4785,7 @@ func (s *Server) handleProjectBySlug(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		s.deleteProject(w, r, slug)
 	default:
-		MethodNotAllowed(w)
+		MethodNotAllowed(w, http.MethodDelete)
 	}
 }
 
