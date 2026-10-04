@@ -585,3 +585,36 @@ func TestProjectDeleteDeactivatesAgentEdges(t *testing.T) {
 	assert.Empty(t, activeEdgeIDs(t, s, outside.ID), "the edge delegated by the project agent is deactivated")
 	assert.Equal(t, []string{kept.ID}, activeEdgeIDs(t, s, bystander.ID), "an unrelated edge stays active")
 }
+
+// --- soft-delete operation ID carry-through ---
+
+// reloadGuardedColumns carries the stored soft-delete operation ID into a
+// stale in-memory copy.
+func TestReloadGuardedColumnsCarriesSoftDeleteOpID(t *testing.T) {
+	srv, s, _, _ := engineTestServer(t)
+	agent := setupBrokerAgentInPhase(t, s, "reload-opid", state.PhaseStopped)
+	stale := mustGetAgent(t, s, agent.ID)
+	require.NoError(t, s.SetAgentSoftDeleteOpID(context.Background(), agent.ID, "op-reload"))
+
+	require.NoError(t, srv.reloadGuardedColumns(context.Background(), stale))
+	assert.Equal(t, "op-reload", stale.SoftDeleteOpID)
+}
+
+// The hard-delete audit of a soft-deleted agent records the soft delete's
+// operation ID; a never soft-deleted agent's record omits the key.
+func TestHardDeleteAuditRecordsSoftDeleteOpID(t *testing.T) {
+	srv, s, _, _ := engineTestServer(t)
+	hardDelete := func(id string) map[string]any {
+		row := mustGetAgent(t, s, id)
+		require.NoError(t, s.WithTx(context.Background(), func(tx store.Store) error {
+			return srv.hardDeleteAgentTx(context.Background(), tx, row, AuditActor{})
+		}))
+		return auditSummary(t, s, mutationTypeAgentHardDelete, id)
+	}
+
+	soft, _ := softDeletedWithEdge(t, srv, s, "hard-after-soft", store.DelegationPrincipalUser, tid("hard-delegator"))
+	assert.Equal(t, soft.SoftDeleteOpID, hardDelete(soft.ID)["soft_delete_op_id"])
+
+	live := setupBrokerAgentInPhase(t, s, "hard-live", state.PhaseStopped)
+	assert.NotContains(t, hardDelete(live.ID), "soft_delete_op_id")
+}
