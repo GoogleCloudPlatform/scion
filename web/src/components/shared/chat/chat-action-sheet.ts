@@ -74,7 +74,12 @@ export class ScionActionSheet extends LitElement {
       max-height: 70vh;
       max-height: 70dvh;
       box-sizing: border-box;
-      padding: 0 0 env(safe-area-inset-bottom, 0px);
+      /* Clear the home indicator, and in landscape the notch and rounded
+         corners (the page uses viewport-fit=cover). The bottom inset stays
+         even with the keyboard up: opening the modal sheet moves focus
+         into it, which closes the keyboard. */
+      padding: 0 env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px)
+        env(safe-area-inset-left, 0px);
       border: none;
       border-radius: 0.875rem 0.875rem 0 0;
       background: var(--scion-surface, #ffffff);

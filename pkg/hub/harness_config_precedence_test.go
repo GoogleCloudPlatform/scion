@@ -51,7 +51,7 @@ type capturingDispatcher struct {
 	dispatched              bool
 }
 
-func (d *capturingDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) error {
+func (d *capturingDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
 	d.dispatched = true
 	if agent.AppliedConfig != nil {
 		d.dispatchedHarnessConfig = agent.AppliedConfig.HarnessConfig
@@ -59,11 +59,11 @@ func (d *capturingDispatcher) DispatchAgentCreate(ctx context.Context, agent *st
 	return d.createAgentDispatcher.DispatchAgentCreate(ctx, agent)
 }
 
-func (d *capturingDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error) {
-	if err := d.DispatchAgentCreate(ctx, agent); err != nil {
+func (d *capturingDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
+	if _, err := d.DispatchAgentCreate(ctx, agent); err != nil {
 		return nil, err
 	}
-	return d.envReqs, nil
+	return envReqsResult(d.envReqs), nil
 }
 
 // setProjectHarnessConfigAnnotation stamps the project-level
