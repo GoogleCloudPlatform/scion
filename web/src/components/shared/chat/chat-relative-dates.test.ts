@@ -74,6 +74,12 @@ describe('scion-chat-members activity age', () => {
     expect(fmt(iso)).toBe(want);
   });
 
+  it('switches to an absolute date at exactly 7 days', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(NOW));
+    expect(fmt('2026-09-16T12:00:00Z')).toBe('Sep 16, 2026 (UTC)');
+  });
+
   it('shows an older date in the display zone, with the zone named', () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(NOW));

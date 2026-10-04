@@ -52,10 +52,13 @@ part (a) deferred until `formatRelative` gained a `style` option.
     half rounds toward zero (59.5 minutes reads "59m ago").
   - Future instants read "now", as before in search, while members used to
     read "just now". Chat timestamps are past by nature, so a future value is
-    clock skew and is clamped, as other list views do.
+    clock skew and is clamped to "now". Other list views clamp the same
+    condition to "just now"; chat uses "now" to match `formatRelative`'s
+    zero output.
 - **Tests.** `chat-relative-dates.test.ts` uses a fixed clock with boundary
   cases for both components (now, 59s, 59m40s, the exact half, 23h40m, 6d,
-  6d14h, +5m clamped to "now", and the switch at exactly 7 days). `chat-members.test.ts`
+  6d14h, +5m clamped to "now", and the switch at exactly 7 days for both
+  components). `chat-members.test.ts`
   expects "10m ago".
 - **Other ladders.** A grep of `web/src` found no other hand-rolled "ago"
   ladder. The remaining relative-time helpers already call `formatRelative`.
