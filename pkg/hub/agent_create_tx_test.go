@@ -43,11 +43,14 @@ type createTxFaultStore struct {
 	auditErrFor string
 	subErr      error
 	deactErr    error
+	// outerDeleteErr fails DeleteAgent outside a transaction only.
+	outerDeleteErr error
 }
 
 func (s *createTxFaultStore) wrap(tx store.Store) *createTxFaultStore {
 	c := *s
 	c.Store = tx
+	c.outerDeleteErr = nil
 	return &c
 }
 
@@ -60,6 +63,13 @@ func (s *createTxFaultStore) CreateMutationAudit(ctx context.Context, r *store.M
 		return errors.New("injected mutation audit write fault")
 	}
 	return s.Store.CreateMutationAudit(ctx, r)
+}
+
+func (s *createTxFaultStore) DeleteAgent(ctx context.Context, id string) error {
+	if s.outerDeleteErr != nil {
+		return s.outerDeleteErr
+	}
+	return s.Store.DeleteAgent(ctx, id)
 }
 
 func (s *createTxFaultStore) CreateNotificationSubscription(ctx context.Context, sub *store.NotificationSubscription) error {
@@ -342,6 +352,31 @@ func TestDispatchCompensationAuditFailureDeactivatesEdge(t *testing.T) {
 		store.EdgeDeactivationCreateCompensation, logged.OpID)
 	require.NoError(t, err)
 	assert.Equal(t, 1, n, "one edge deactivated with cause create_compensation under the logged op ID")
+}
+
+// When the compensation transaction and the fallback row delete both fail,
+// the agent row keeps its active edge: the fallback deactivates the edge
+// only after the row is gone.
+func TestDispatchCompensationDeleteFailureKeepsRowAndEdge(t *testing.T) {
+	f := newUATCreateFixture(t, "comp-delete-fail")
+	client := f.withDispatcher(t)
+	client.returnErr = errors.New("broker unavailable")
+	real := f.store
+	f.srv.store = &createTxFaultStore{
+		Store:          real,
+		auditErrFor:    mutationTypeAgentCreateDispatchFailed,
+		outerDeleteErr: errors.New("injected agent delete fault"),
+	}
+
+	rec, logs := f.createWithRequestID(t, "req-comp-delete-fail", CreateAgentRequest{Name: "comp-delete-fail"})
+	require.NotNil(t, client.lastCreateReq)
+	agentID := client.lastCreateReq.ID
+	assertCompensationFailureResponse(t, rec, logs, "req-comp-delete-fail", agentID)
+
+	row, err := real.GetAgent(context.Background(), agentID)
+	require.NoError(t, err, "the row survives the failed delete")
+	assert.True(t, row.DeletedAt.IsZero())
+	assert.Len(t, activeEdgesFor(t, real, agentID), 1, "the surviving row keeps its active edge")
 }
 
 // A second compensation of the same create changes nothing and writes no
