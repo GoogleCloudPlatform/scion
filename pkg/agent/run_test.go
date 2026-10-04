@@ -159,7 +159,7 @@ func TestBuildAgentEnv(t *testing.T) {
 		"EMPTY_EXTRA_KEY": "", // Should be omitted
 	}
 
-	env, warnings, missingKeys, _ := buildAgentEnv(scionCfg, extraEnv, false)
+	env, warnings, missingKeys, _ := buildAgentEnv(scionCfg, extraEnv, nil, false)
 
 	expected := map[string]string{
 		"NORMAL_KEY":    "normal-value",
@@ -213,7 +213,7 @@ func TestBuildAgentEnv_MissingKeysReturned(t *testing.T) {
 		},
 	}
 
-	env, _, missingKeys, _ := buildAgentEnv(scionCfg, nil, false)
+	env, _, missingKeys, _ := buildAgentEnv(scionCfg, nil, nil, false)
 
 	if len(env) != 1 {
 		t.Errorf("expected 1 env var, got %d: %v", len(env), env)
@@ -2566,7 +2566,7 @@ func TestBuildAgentEnv_EmptyValuePassthrough(t *testing.T) {
 		},
 	}
 
-	env, warnings, missingKeys, _ := buildAgentEnv(scionCfg, nil, false)
+	env, warnings, missingKeys, _ := buildAgentEnv(scionCfg, nil, nil, false)
 
 	envMap := make(map[string]string)
 	for _, e := range env {
@@ -2605,7 +2605,7 @@ func TestBuildAgentEnv_ScionExtraPath(t *testing.T) {
 		},
 	}
 
-	env, warnings, _, _ := buildAgentEnv(scionCfg, nil, false)
+	env, warnings, _, _ := buildAgentEnv(scionCfg, nil, nil, false)
 
 	envMap := make(map[string]string)
 	for _, e := range env {
@@ -2650,7 +2650,7 @@ func TestBuildAgentEnv_HubEndpointOverride(t *testing.T) {
 			extraEnv["SCION_HUB_URL"] = scionCfg.Hub.Endpoint
 		}
 
-		env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, false)
+		env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, nil, false)
 
 		envMap := make(map[string]string)
 		for _, e := range env {
@@ -2675,7 +2675,7 @@ func TestBuildAgentEnv_HubEndpointOverride(t *testing.T) {
 			"SCION_HUB_URL":      "https://hub.example.com",
 		}
 
-		env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, false)
+		env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, nil, false)
 
 		envMap := make(map[string]string)
 		for _, e := range env {
@@ -3519,7 +3519,7 @@ func TestBuildAgentEnv_TelemetryInjection(t *testing.T) {
 		}
 	}
 
-	env, _, _, _ := buildAgentEnv(scionCfg, opts, false)
+	env, _, _, _ := buildAgentEnv(scionCfg, opts, nil, false)
 
 	envMap := make(map[string]string)
 	for _, e := range env {
@@ -4255,7 +4255,7 @@ func TestBuildAgentEnv_TelemetryNoOverrideExplicit(t *testing.T) {
 		}
 	}
 
-	env, _, _, _ := buildAgentEnv(scionCfg, opts, false)
+	env, _, _, _ := buildAgentEnv(scionCfg, opts, nil, false)
 
 	envMap := make(map[string]string)
 	for _, e := range env {
@@ -4288,7 +4288,7 @@ func TestBuildAgentEnv_HubEnvVarsSurviveMerge(t *testing.T) {
 		"SCION_AGENT_NAME":   "test-agent",
 	}
 
-	env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, false)
+	env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, nil, false)
 
 	envMap := make(map[string]string)
 	for _, e := range env {
@@ -4787,7 +4787,7 @@ func TestBuildAgentEnv_EnvKeyScionHubEndpointOverride(t *testing.T) {
 			}
 		}
 
-		env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, false)
+		env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, nil, false)
 
 		envMap := make(map[string]string)
 		for _, e := range env {
@@ -4835,7 +4835,7 @@ func TestBuildAgentEnv_EnvKeyScionHubEndpointOverride(t *testing.T) {
 			}
 		}
 
-		env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, false)
+		env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, nil, false)
 
 		envMap := make(map[string]string)
 		for _, e := range env {

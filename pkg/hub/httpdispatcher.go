@@ -204,6 +204,12 @@ type HTTPAgentDispatcher struct {
 	// tests) and the wire field is omitted.
 	hubAgentDefaultsProvider func() opsettings.AgentDefaultsSettings
 
+	// autoExposePortsDefaultProvider returns the hub's auto-expose-ports
+	// default (nil = unset) at dispatch time, for the broker's lowest env
+	// tier. A callback for the same reason as hubAgentDefaultsProvider. Nil
+	// provider = no default sent.
+	autoExposePortsDefaultProvider func() *bool
+
 	// profileTimezoneProvider returns the IANA timezone string for the named
 	// profile, or "" if the profile does not exist or has no timezone set.
 	// Used by buildCreateRequest to inject TZ into agent containers.
@@ -357,6 +363,22 @@ func (d *HTTPAgentDispatcher) SetHarnessConfigRepairer(fn func(ctx context.Conte
 // without a restart. Mirrors SetHarnessConfigRepairer.
 func (d *HTTPAgentDispatcher) SetHubAgentDefaultsProvider(fn func() opsettings.AgentDefaultsSettings) {
 	d.hubAgentDefaultsProvider = fn
+}
+
+// SetAutoExposePortsDefaultProvider registers the accessor for the hub's
+// auto-expose-ports default, read on every create, start and restart dispatch
+// so a settings change reaches an agent at its next start.
+func (d *HTTPAgentDispatcher) SetAutoExposePortsDefaultProvider(fn func() *bool) {
+	d.autoExposePortsDefaultProvider = fn
+}
+
+// autoExposePortsDefault returns the hub auto-expose default, or nil when no
+// provider is registered or the hub has none.
+func (d *HTTPAgentDispatcher) autoExposePortsDefault() *bool {
+	if d.autoExposePortsDefaultProvider == nil {
+		return nil
+	}
+	return d.autoExposePortsDefaultProvider()
 }
 
 // SetProfileTimezoneProvider registers the accessor for looking up a profile's
@@ -724,15 +746,23 @@ func (d *HTTPAgentDispatcher) buildCreateRequest(ctx context.Context, agent *sto
 			ProjectPreStartHookScript: agent.AppliedConfig.ProjectPreStartHookScript,
 		}
 
-		// Hub operational agent_defaults (limits/resources only) travel in
-		// their own low-rank slot, NOT in InlineConfig: InlineConfig lands in
-		// the override position at provision.go's merge and would let a
-		// hub-wide floor outrank a template's explicit max_turns. The broker
-		// applies these below the template and above its own settings.yaml
-		// defaults. Nil in file mode — see remoteHubAgentDefaults.
+		// Hub operational agent_defaults (limits/resources) travel in their
+		// own low-rank slot, NOT in InlineConfig: InlineConfig lands in the
+		// override position at provision.go's merge and would let a hub-wide
+		// floor outrank a template's explicit max_turns. The broker applies
+		// these below the template and above its own settings.yaml defaults.
+		// The limit/resource fields are empty in file mode — see
+		// remoteHubAgentDefaults.
+		//
+		// The auto-expose default rides the same slot (never AppliedConfig.Env
+		// or InlineConfig.Env, both of which outrank template and
+		// harness-config env at the broker) and lands at buildAgentEnv's
+		// lowest tier.
+		var hubDefaults opsettings.AgentDefaultsSettings
 		if d.hubAgentDefaultsProvider != nil {
-			req.Config.HubAgentDefaults = remoteHubAgentDefaults(d.hubAgentDefaultsProvider())
+			hubDefaults = d.hubAgentDefaultsProvider()
 		}
+		req.Config.HubAgentDefaults = remoteHubAgentDefaults(hubDefaults, d.autoExposePortsDefault())
 
 		req.ResolvedEnv = agent.AppliedConfig.Env
 		// Classify config-level env vars as plain. Env-type secrets that
@@ -2877,6 +2907,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStart(ctx context.Context, agent *sto
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentStart"),
 		Workspace:            startEnv.workspace,
+		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault()),
 	}
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)
@@ -2991,6 +3022,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 		HubEndpoint:          d.effectiveAgentHubEndpoint(),
 		UserID:               agent.OwnerID,
 		ProvisionCredentials: d.resolveProvisionCredentials(ctx, agent, "DispatchAgentRestart"),
+		HubAgentDefaults:     startHubAgentDefaults(d.autoExposePortsDefault()),
 	}
 	if d.creatorSkillPreResolver != nil {
 		extras.PreResolvedSkills = d.creatorSkillPreResolver(ctx, agent)

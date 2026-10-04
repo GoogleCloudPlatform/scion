@@ -1131,7 +1131,7 @@ authDone:
 		}
 	}
 
-	agentEnv, envWarnings, missingEnvKeys, droppedConfigEnv := buildAgentEnv(finalScionCfg, opts.Env, opts.BrokerMode)
+	agentEnv, envWarnings, missingEnvKeys, droppedConfigEnv := buildAgentEnv(finalScionCfg, opts.Env, api.HubAgentDefaultsFromContext(ctx).DefaultEnv(), opts.BrokerMode)
 	droppedBrokerEnvVars = append(droppedBrokerEnvVars, droppedConfigEnv...)
 	hubOnlyEnvWarnings := warnDroppedBrokerEnv(agentID, opts.Env, droppedBrokerEnvVars)
 	warnings = append(warnings, hubOnlyEnvWarnings...)
@@ -2107,7 +2107,12 @@ func containerName(projectName, agentName string) string {
 // skipped value is returned in dropped. scionCfg itself is never modified.
 // An empty hub-only key in extraEnv is omitted without being reported as
 // missing: for those keys empty means "unset", never "required".
-func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, brokerMode bool) (env []string, warnings []string, missingKeys []string, dropped []droppedBrokerEnv) {
+//
+// defaultEnv is the lowest tier, below both layers (it carries the Hub's
+// defaults, see api.HubAgentDefaults.DefaultEnv). Each entry is applied only
+// when the key is absent from the merged env or has an empty value, i.e. when
+// no layer would otherwise put it in the container.
+func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaultEnv map[string]string, brokerMode bool) (env []string, warnings []string, missingKeys []string, dropped []droppedBrokerEnv) {
 	combined := make(map[string]string)
 
 	if scionCfg != nil && scionCfg.Env != nil {
@@ -2144,6 +2149,12 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, broker
 	// Add extraEnv
 	for k, v := range extraEnv {
 		combined[k] = v
+	}
+	// Lowest tier: fill only what no layer above set.
+	for k, v := range defaultEnv {
+		if combined[k] == "" {
+			combined[k] = v
+		}
 	}
 
 	agentEnv := []string{}
