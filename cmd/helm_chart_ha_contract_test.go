@@ -60,13 +60,16 @@ const chartDir = "../deploy/helm/scion-hub"
 const gatesArtifact = chartDir + "/hack/ha-gates.txt"
 
 // audienceWellFormed is a Cloud Run IAP audience in the shape
-// isSupportedIAPAudience accepts. audienceMalformed is the shape an operator
-// produces by pasting an OAuth client ID into the field, which is the mistake
-// the format gate exists to catch.
-const (
-	audienceWellFormed = "/projects/1/locations/us-central1/services/hub"
-	audienceMalformed  = "my-iap-audience"
-)
+// isSupportedIAPAudience accepts. The walk offers it only if the hub asks for
+// an audience.
+//
+// THERE USED TO BE A SECOND, MALFORMED-AUDIENCE ARM. It existed to reach the
+// format gate. The chart now renders an audience on every proxy shape and
+// refuses an HA render whose audience the format gate would refuse, so the hub
+// never asks this walk for one and the two arms were byte-identical. The format
+// gate is covered instead by TestHelmChartIAPAudiencePattern, which checks the
+// chart's audience patterns against isSupportedIAPAudience directly.
+const audienceWellFormed = "/projects/1/locations/us-central1/services/hub"
 
 // supplier grants exactly the thing one gate asked for, and reports what it
 // granted. A supplier that returns ok=false has hit the probe's limit, not the
@@ -275,9 +278,9 @@ func TestHelmChartHAGateWalk(t *testing.T) {
 	b.WriteString("# time because the preflight returns on first failure.\n")
 	b.WriteString("#\n")
 	b.WriteString("# THE COUNT DEPENDS ON WHAT THE ARM SUPPLIES. Each step records its grant.\n")
-	b.WriteString("# The two audience arms differ in exactly one value, which is offered only\n")
-	b.WriteString("# if the hub asks for an audience. Where the rendered settings.yaml already\n")
-	b.WriteString("# carries one, neither arm is asked and the two lists agree.\n")
+	b.WriteString("# The arm's audience is offered only if the hub asks for one. The chart's\n")
+	b.WriteString("# proxy shapes all render one, so the audience format gate is checked by\n")
+	b.WriteString("# TestHelmChartIAPAudiencePattern rather than by a malformed-audience arm.\n")
 	b.WriteString("#\n")
 	b.WriteString("# CORPUS BINDING. This walk reads the committed goldens, so on its own it\n")
 	b.WriteString("# measures the goldens and not the chart. The digests below close that gap\n")
@@ -310,7 +313,6 @@ func TestHelmChartHAGateWalk(t *testing.T) {
 		}
 		for _, arm := range []struct{ label, audience string }{
 			{"audience well-formed", audienceWellFormed},
-			{"audience malformed", audienceMalformed},
 		} {
 			fmt.Fprintf(&b, "\n===== %s [%s = %q]\n", filepath.Base(g), arm.label, arm.audience)
 			n, keys := walkOne(t, &b, settings, gateSupplier(t, arm.audience))
@@ -348,7 +350,7 @@ the walk.`, addedGates, removedGates)
 	// TERMINATED lines that round-trips against itself forever. The number is
 	// not the subject of any claim; it exists so that zero cannot pass.
 	if totalRefusals == 0 {
-		t.Fatal("VACUOUS: the walk recorded no refusals at all across every golden and both audience arms. Whatever this run measured, it was not the hub's preflight.")
+		t.Fatal("VACUOUS: the walk recorded no refusals at all across every golden. Whatever this run measured, it was not the hub's preflight.")
 	}
 
 	got := b.String()

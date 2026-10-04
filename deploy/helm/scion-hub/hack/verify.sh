@@ -205,16 +205,27 @@ NO_RENDERED_SETTINGS=(existing-secret)
 # 364 -> 362 for the IAP/transport values and the removal of
 # acknowledgeHAUnlanded. Summed per step against a run of the parent commit,
 # and the run agrees:
-#   -13  "NOTES.txt names every unlanded gate ..." removed
+#   -12  "NOTES.txt names every unlanded gate ..." removed
 #    -6  "the gate list is the same list everywhere it is written" removed
 #    +2  the auth-mode diff now excises server.auth.proxy/transport and checks
 #        the proxy arm's excision equals ci/values-settings.yaml, the oauth arm's
 #        is empty
-#   +15  "the walk finds only the session-secret gate ...": 4 walk arms, 5 NOTES
+#   +14  "the walk finds only the session-secret gate ...": 4 walk arms, 5 NOTES
 #        table rows, 1 oauth-NOTES absence, 1 acknowledgeHAUnlanded absence,
-#        2 on-a-route presences, 1 default absence, 1 positive twin
-# 364 - 13 - 6 + 2 + 15 = 362.
-EXPECTED_TOTAL=362
+#        2 on-a-route presences, 1 default absence. The positive twin (the
+#        unlanded-work section row) already existed under the same label, so it
+#        is in neither the removed nor the added count.
+# 364 - 12 - 6 + 2 + 14 = 362.
+#
+# 362 -> 361 for the chart-iap-transport review fixes:
+#    -2  the malformed-audience walk arms (settings.yaml, settings-oauth.yaml),
+#        dropped with the arm itself; TestHelmChartIAPAudiencePattern covers the
+#        audience format gate instead
+#    +2  the config.existingSecret + K_SERVICE NOTES rows (on a route with no
+#        rendered settings.yaml; no rendered-settings claims)
+#    -1  the NOT_YET needle for "the session secret", removed from the notes
+# 362 - 2 + 2 - 1 = 361.
+EXPECTED_TOTAL=361
 
 failures=0
 assertions=0
@@ -1257,8 +1268,11 @@ canon_block() {
 # chart delivers by environment variable and the walk grants as an env value.
 # A KEY row here is a settings key the chart fails to render; a second PROSE
 # row is a hub gate this step has not seen.
+# One audience arm: the malformed-audience arm was dropped because every
+# chart proxy shape renders an audience, so the hub never asked for one and the
+# two arms were identical. TestHelmChartIAPAudiencePattern covers the format gate.
 for _golden in settings.yaml settings-oauth.yaml; do
-  for _arm in well-formed malformed; do
+  for _arm in well-formed; do
     canon_block "$_golden" "$_arm" >"$WORK/canon-${_golden}-${_arm}.txt"
     [[ -s "$WORK/canon-${_golden}-${_arm}.txt" ]] || meta_failure "hack/ha-gates.txt has no CANON block for ${_golden} [audience ${_arm}]. Either the arm header changed or the extraction is reading the wrong block; the assertion below would compare against nothing."
     _keys="$(grep -c '^KEY ' "$WORK/canon-${_golden}-${_arm}.txt" || true)"
@@ -1323,6 +1337,26 @@ if grep -qF 'WHAT THIS RELEASE DOES NOT YET DO' "$WORK/notes-plain.txt"; then
   pass "the default release's NOTES still carries the unlanded-work section, so the absence above is an absence and not an empty render"
 else
   fail "the default release's NOTES has no unlanded-work section at all, so the HA-route absence above proves nothing"
+fi
+
+# config.existingSecret ON A ROUTE. K_SERVICE is the one route the chart can see
+# under config.existingSecret, and in that shape the chart renders no
+# settings.yaml and checks none of it, so NOTES must not claim the rendered file
+# passes the preflight or that the chart refuses an incomplete render.
+render_notes "$WORK/notes-existing-kservice.txt" -f "$CHART_DIR/ci/values-existing-secret.yaml" \
+  --set 'hub.extraEnv[0].name=K_SERVICE' --set-string 'hub.extraEnv[0].value=scion-hub'
+if grep -qF 'THESE VALUES ARE ON ONE OF THOSE ROUTES' "$WORK/notes-existing-kservice.txt" \
+  && grep -qF 'the chart rendered no settings.yaml; your file must satisfy the preflight' "$WORK/notes-existing-kservice.txt"; then
+  pass "the config.existingSecret + K_SERVICE release's NOTES says it is on a route and that the chart rendered no settings.yaml"
+else
+  fail "the config.existingSecret + K_SERVICE release's NOTES does not say both that it is on an HA route and that the chart rendered no settings.yaml for the preflight"
+fi
+_es_false="$(grep -cE 'The rendered settings.yaml passes it|the chart refuses an HA render' "$WORK/notes-existing-kservice.txt" || true)"
+_ack_true="$(grep -cE 'The rendered settings.yaml passes it|the chart refuses an HA render' "$WORK/notes-ack.txt" || true)"
+if [[ "$_es_false" -eq 0 && "$_ack_true" -eq 2 ]]; then
+  pass "the rendered-settings claims appear in the proxy release's NOTES and not in the config.existingSecret + K_SERVICE release's"
+else
+  fail "the rendered-settings claims ('passes it', 'the chart refuses an HA render') appear ${_es_false} times under config.existingSecret + K_SERVICE (want 0) and ${_ack_true} times in the proxy release (want 2)"
 fi
 
 # --------------------------------------------------------------------------
@@ -2915,6 +2949,13 @@ FX
 # recorded, because when the Cloud SQL phase merges this fixture becomes
 # reproducible and the comment says how.
 #
+# HISTORICAL COMMAND. The command above is the one that produced this fixture on
+# gd-p2-dev's branch, and it does not reproduce on the current chart:
+# acknowledgeHAUnlanded has been removed, and this postgres + gcs shape under
+# auth.mode proxy now also needs auth.proxy.iap.audience, auth.transport.mode,
+# auth.transport.oidcAudience and auth.transport.platformAuthSa. The fixture is
+# kept as captured; the command is a record of its provenance, not a recipe.
+#
 # It carries the two properties most likely to break an entry-boundary rule and
 # both are load-bearing: restartPolicy: Always is the LAST key of the entry, and
 # a nested `- ALL` sequence sits between the entry's first dash and it.
@@ -3363,7 +3404,7 @@ _ps_bad="$(_pipe_unguarded "$_self" | wc -l || true)"
 #
 # So: bump this number in the diff that adds the assignment. That is the same
 # contract every other pinned count in this suite carries.
-PIPE_SITES_EXPECTED=41   # 44, less the gate-parity step's sites (removed with acknowledgeHAUnlanded), plus the four in its replacement.
+PIPE_SITES_EXPECTED=43   # 44, less the gate-parity step's sites (removed with acknowledgeHAUnlanded), plus the four in its replacement, plus the two in the config.existingSecret + K_SERVICE NOTES rows.
 if [[ "$_ps_total" -ne "$PIPE_SITES_EXPECTED" ]]; then
   meta_failure "the pipeline-assignment sweep found $_ps_total sites in $_self, pinned at $PIPE_SITES_EXPECTED. If you added an assignment-from-a-pipeline, give it a || fallback and bump PIPE_SITES_EXPECTED in the same diff. If you did not, the pattern has stopped matching and the zero below would mean nothing."
 else
@@ -3481,10 +3522,13 @@ declare -A NOT_YET=(
   # client_secret.
   ["GCS credentials beyond the bucket name"]='settings:credentials|service_account|key_file'
   ["Filestore"]='settings:workspace_storage'
-  ["the session secret"]='settings:session_secret|signing_key'
-  ["Ingress or IAP"]='kinds:^kind: (Ingress|BackendConfig)'
+  # "the session secret" WAS HERE. The chart delivers it by environment variable
+  # from auth.sessionSecret or auth.existingSecret, so the notes stopped listing
+  # it as unconfigured (chart-iap-transport review, N7). Its needle looked only
+  # in settings.yaml, where the secret never goes, so it could not go red.
+  ["Ingress or the IAP-enforcing load balancer"]='kinds:^kind: (Ingress|BackendConfig)'
 )
-EXPECTED_NOT_YET=4
+EXPECTED_NOT_YET=3
 
 # The sentence, read out of the shipped template. It carries no template
 # actions - checked, it is static prose - so the source text and the rendered

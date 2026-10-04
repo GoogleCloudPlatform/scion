@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=150   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 17 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 37 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport).
+EXPECTED_TOTAL=152   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -386,7 +386,7 @@ echo "== THE READINESS PATH IS /readyz, AND NOTHING ELSE =="
 # R6 (gd-p3-rev's sweep, made gd-em's own at 14:20Z). "/readyz" appeared ZERO
 # times across all six committed test scripts while two probes in deployment.yaml
 # depend on it. It is a hard constraint on this project -- the path is /readyz,
-# NOT /api/v1/readyz and NOT the legacy health-z path -- and until these two rows it was protected
+# NOT /api/v1/readyz and NOT the legacy health-z path -- and until the rows below it was protected
 # by nothing at all. A constraint that lives only in a brief is not a constraint.
 #
 # TWO ASSERTIONS, POSITIVE AND EXHAUSTIVE, BECAUSE EITHER ALONE IS WEAK. The
@@ -394,30 +394,82 @@ echo "== THE READINESS PATH IS /readyz, AND NOTHING ELSE =="
 # a correct one is deleted. The no-other-path row alone passes VACUOUSLY if the
 # probes stop rendering altogether -- zero paths is zero wrong paths. Together
 # they pin "exactly two, and both of them /readyz".
+# STRUCTURAL, NOT BY VALUE SHAPE. Only a `path:` that is a direct child of an
+# `httpGet:` mapping is a probe (or lifecycle-hook) path, so that is the only
+# `path:` this section reads. Volume `items` entries (the settings Secret
+# projects `path: settings.yaml`) and hostPath volumes are skipped because they
+# are not under httpGet, whatever their value looks like. Both quote styles are
+# unwrapped, and a relative value is read with a leading slash added, because
+# Kubernetes does not require one on an httpGet path and the kubelet adds it
+# when it builds the URL. Flow-style `httpGet: {path: ...}` is not parsed; the
+# chart renders block style, and the self-test row below pins what is parsed.
+_httpget_paths() {
+  awk '
+    function ind(s) { match(s, /^ */); return RLENGTH }
+    /^[[:space:]]*$/ { next }
+    inblk && ind($0) <= hind { inblk = 0 }
+    inblk && $0 ~ /^[[:space:]]*(- )?path:/ {
+      v = $0
+      sub(/^[[:space:]]*(- )?path:[[:space:]]*/, "", v)
+      sub(/[[:space:]]+#.*$/, "", v); sub(/[[:space:]]+$/, "", v)
+      if (v ~ /^".*"$/ || v ~ /^\047.*\047$/) v = substr(v, 2, length(v) - 2)
+      if (substr(v, 1, 1) != "/") v = "/" v
+      print v
+    }
+    /^[[:space:]]*(- )?httpGet:[[:space:]]*$/ { inblk = 1; hind = ind($0) }
+  '
+}
+# THE EXTRACTOR'S OWN CHECK. A synthetic manifest with one probe path in each
+# form the extractor must read, and two non-probe `path:` lines it must skip.
+executed=$((executed + 1))
+_synthetic='      livenessProbe:
+        httpGet:
+          path: "/dq"
+          port: http
+      startupProbe:
+        httpGet:
+          path: \047/sq\047
+      readinessProbe:
+        httpGet:
+          path: relative
+          httpHeaders:
+            - name: X
+              value: y
+      volumes:
+        - name: s
+          secret:
+            items:
+              - key: settings.yaml
+                path: settings.yaml
+        - name: h
+          hostPath:
+            path: /var/data'
+_synthetic="$(printf '%b' "$_synthetic")"
+_synthgot="$(printf '%s\n' "$_synthetic" | _httpget_paths | tr '\n' ' ')"
+if [ "$_synthgot" = "/dq /sq /relative " ]; then
+  echo "ok    the httpGet path extractor reads double-quoted, single-quoted and relative paths and skips volume paths"
+else
+  echo "FAIL  the httpGet path extractor read [${_synthgot}] from the synthetic manifest; expected [/dq /sq /relative ]"
+  failed=$((failed + 1))
+fi
 executed=$((executed + 1))
 _probeout="$("$HELM" template t "$CHART" "${BASE[@]}" -s templates/deployment.yaml 2>&1)"
-_nready=$(printf '%s\n' "$_probeout" | grep -c 'path: /readyz')
+_nready=$(printf '%s\n' "$_probeout" | _httpget_paths | grep -cx '/readyz' || true)
 if [ "$_nready" -eq 2 ]; then
   echo "ok    both probes point at /readyz (exactly 2)"
 else
-  echo "FAIL  expected exactly 2 'path: /readyz' in the Deployment, got ${_nready}"
+  echo "FAIL  expected exactly 2 httpGet paths of /readyz in the Deployment, got ${_nready}"
   failed=$((failed + 1))
 fi
 # Whole chart, not just the Deployment: an httpGet path introduced in any other
 # template is in scope for this constraint too.
-#
-# ABSOLUTE PATHS ONLY. An httpGet path is always absolute. A relative `path:` is
-# a volume item (the settings Secret projects `path: settings.yaml`), which is
-# not a probe and was making this row red on every render. Every absolute path
-# is still checked, quoted or not.
 executed=$((executed + 1))
-_abs_paths() { grep -E '^[[:space:]]*(- )?path:[[:space:]]+"?/' ; }
-_nother=$(render | _abs_paths | grep -cv 'path: /readyz' || true)
+_nother=$(render | _httpget_paths | grep -cvx '/readyz' || true)
 if [ "$_nother" -eq 0 ]; then
   echo "ok    no probe path other than /readyz renders anywhere in the chart"
 else
   echo "FAIL  ${_nother} probe path(s) other than /readyz render:"
-  render | _abs_paths | grep -v 'path: /readyz' | sed 's/^/        /'
+  render | _httpget_paths | grep -vx '/readyz' | sed 's/^/        /'
   failed=$((failed + 1))
 fi
 
@@ -645,6 +697,11 @@ reject "r3: gcs storage with proxy auth, no transport" "storage.provider is gcs 
   "${GCS[@]}"
 reject "an HA proxy refusal names the transport mode it needs" "must be iap - set auth.transport.mode: iap" \
   "${GCS[@]}"
+# The preflight reads oidc_audience as TrimRight(TrimSpace(x), "/"), so a value
+# of only slashes is empty to it. The render-time check must strip them too.
+reject "HA, oidcAudience of only slashes" "oidc_audience is empty once surrounding whitespace and trailing slashes are removed" \
+  "${GCS[@]}" --set auth.transport.mode=iap --set-string 'auth.transport.oidcAudience=//' \
+  --set auth.transport.platformAuthSa=probe-rg@probe-project.iam.gserviceaccount.com
 
 # POSITIVE TWINS, ONE PER ROUTE: each refusal clears once the values the
 # preflight reads are supplied, and by nothing else.

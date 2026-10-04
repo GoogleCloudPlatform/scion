@@ -502,9 +502,9 @@ WHAT THIS RELEASE DOES NOT YET DO
 
   The chart is being built incrementally. It renders the hub's settings.yaml and
   it wires Cloud SQL and the database URL, but it does not yet configure GCS
-  credentials beyond the bucket name, Filestore, the session secret, Ingress
-  or IAP. The hub's own IAP and transport settings are rendered; the load
-  balancer that enforces IAP is not. Do not treat this as a production install.
+  credentials beyond the bucket name, Filestore, Ingress or the IAP-enforcing
+  load balancer. The hub's own IAP and transport settings are rendered. Do not
+  treat this as a production install.
 
   The Cloud SQL wiring is RENDERED BUT UNRUN. No part of it has been applied to
   a cluster or dialled at a real instance: the deploying principal is refused by
@@ -531,8 +531,15 @@ WHAT THIS RELEASE DOES NOT YET DO
   session secret by environment variable from auth.sessionSecret or
   auth.existingSecret, which it already requires.
 {{- if eq (toString ($auth.mode | default "")) "proxy" }}
+{{- if not .Values.config.existingSecret }}
+
   Under auth.mode proxy the preflight also checks the IAP and transport
   settings, and the chart refuses an HA render that is missing any of them:
+{{- else }}
+
+  Under auth.mode proxy the preflight also checks the IAP and transport
+  settings:
+{{- end }}
 
     server.auth.proxy.provider: iap         auth.proxy.provider
     server.auth.proxy.iap.audience          auth.proxy.iap.audience
@@ -544,9 +551,12 @@ WHAT THIS RELEASE DOES NOT YET DO
   /projects/<number>/locations/<region>/services/<name>. An all-zero
   placeholder passes the preflight with a warning and then fails every IAP
   login, so replace it with the real backend service ID once the load
-  balancer exists. Changing it changes settings.yaml, and the checksum
+  balancer exists.
+{{- if not .Values.config.existingSecret }} Changing it changes settings.yaml, and the checksum
   annotation rolls the pods.
+{{- end }}
 {{- else }}
+
   Under auth.mode: {{ $auth.mode | default "" }} the hub's IAP gates sit inside
   `if cfg.Auth.Mode == "proxy"` and this shape never reaches them.
 {{- end }}
@@ -562,9 +572,14 @@ WHAT THIS RELEASE DOES NOT YET DO
   THESE VALUES ARE ON ONE OF THOSE ROUTES.
 
   {{ $haRoutes }}, so the hub's isHADeployment test is true for this release
-  and its preflight runs at every start. The rendered settings.yaml passes it
+  and its preflight runs at every start.
+{{- if not .Values.config.existingSecret }} The rendered settings.yaml passes it
   (hack/ha-gates.txt is that walk over the chart's own fixtures); the session
   secret is checked at startup from the environment, not from this file.
+{{- else }} Under config.existingSecret
+  the chart rendered no settings.yaml; your file must satisfy the preflight.
+  The session secret is checked at startup from the environment.
+{{- end }}
 {{- end }}
 
   The hub images published from this repository today run as root, so until a

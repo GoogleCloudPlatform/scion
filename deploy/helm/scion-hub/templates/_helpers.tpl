@@ -2322,7 +2322,7 @@ container env entries alike, and asserting this guard refuses every one of them.
 {{- range $entry := .Values.hub.extraEnv }}
 {{- $name := toString (dig "name" "" $entry) }}
 {{- if regexMatch "^SCION_SERVER_(DATABASE|OIDC)_" $name }}
-{{- fail (printf "hub.extraEnv may not set %s. Some of these names bind and some are discarded, and both outcomes are wrong here. If it binds - SCION_SERVER_DATABASE_DRIVER and SCION_SERVER_DATABASE_URL both do - applyEnvOverrides applies it AFTER settings.yaml is loaded (pkg/config/hub_config.go:683) and it wins, so the hub runs a configuration this chart did not render and this chart's guards did not see: set the driver to postgres this way and isHADeployment (cmd/server_foreground.go:927) becomes true while the chart's HA checks never run, and the hub aborts at the hosted HA preflight. If it is discarded - anything whose koanf tag contains an underscore, such as SCION_SERVER_DATABASE_MAX_OPEN_CONNS - k.Unmarshal drops it with no error, and DetectEnvOverrides (pkg/config/opsettings/koanf.go:347) still lists it to the admin server-config view as an active override, so it is reported as applied. Configure the database through the rendered settings.yaml at server.database instead." $name) }}
+{{- fail (printf "hub.extraEnv may not set %s. Some of these names bind and some are discarded, and both outcomes are wrong here. If it binds - SCION_SERVER_DATABASE_DRIVER and SCION_SERVER_DATABASE_URL both do - applyEnvOverrides applies it AFTER settings.yaml is loaded (pkg/config/hub_config.go) and it wins, so the hub runs a configuration this chart did not render and this chart's guards did not see: set the driver to postgres this way and isHADeployment (cmd/server_foreground.go) becomes true while the chart's HA checks never run, and the hub aborts at the hosted HA preflight. If it is discarded - anything whose koanf tag contains an underscore, such as SCION_SERVER_DATABASE_MAX_OPEN_CONNS - k.Unmarshal drops it with no error, and DetectEnvOverrides (pkg/config/opsettings/koanf.go) still lists it to the admin server-config view as an active override, so it is reported as applied. Configure the database through the rendered settings.yaml at server.database instead." $name) }}
 {{- end }}
 {{- if has $name $shadowable }}
 {{- fail (printf "hub.extraEnv may not set %s: the chart sets it, and hub.extraEnv is appended to the container's env list, which wins twice over - a container env entry takes precedence over the same name from envFrom, and a later entry in the list takes precedence over an earlier one. Either way the chart's value is replaced with no error and nothing in the manifest that reads as a conflict." $name) }}
@@ -2555,6 +2555,17 @@ NOT EVALUATED UNDER config.existingSecret: the chart renders no settings.yaml in
 that shape, so it cannot see the driver, the storage provider or the auth mode.
 Route 1 is still checked, because extraEnv is the chart's own value either way.
 */}}
+{{- /*
+The shape isSupportedIAPAudience (cmd/server_foreground.go) accepts, as a
+regular expression over the NORMALISED audience (see the HA check in
+scion-hub.assertSettings for the normalisation). One line, no
+surrounding whitespace: TestHelmChartIAPAudiencePattern reads it out of this
+file verbatim and checks it against the hub function.
+*/}}
+{{- define "scion-hub.iapAudiencePattern" -}}
+^/projects/[^/]+/(locations/[^/]+/services|global/backendServices)/[^/]+$
+{{- end }}
+
 {{- define "scion-hub.haRoutes" -}}
 {{- $routes := list }}
 {{- range .Values.hub.extraEnv }}
@@ -2842,9 +2853,14 @@ The audience is required on every proxy render, HA or not: initHubServer and
 initWebServer (cmd/server_foreground.go) both refuse provider iap without one.
 Its SHAPE is checked only where the hub checks it, on an HA shape, by
 isSupportedIAPAudience; outside HA the hub verifies JWTs against whatever
-non-empty value it is given. The regular expression is applied to the value as
-written and accepts exactly what strings.TrimRight(strings.TrimSpace(aud), "/")
-followed by isSupportedIAPAudience accepts.
+non-empty value it is given. The shape is matched on the normalised value,
+trim (strip trailing slashes (trim aud)) - sprig's trim is strings.TrimSpace -
+with the plain pattern in scion-hub.iapAudiencePattern. The inner trim and the
+strip are validateHostedHAPreflight's TrimRight(TrimSpace(aud), "/"); the outer
+trim is the TrimSpace inside isSupportedIAPAudience. On that value the pattern
+accepts exactly what isSupportedIAPAudience accepts, and
+TestHelmChartIAPAudiencePattern (cmd/helm_chart_ha_contract_test.go) checks the
+two against each other.
 
 The HA half replaces the acknowledgement this chart used to demand: with every
 gate validateHostedHAPreflight applies under auth.mode proxy now modelled, a
@@ -2864,7 +2880,8 @@ fixtures leave only the session secret, which arrives by env, not by this file.
 {{- end }}
 {{- if $routes }}
 {{- $problems := list }}
-{{- if not (regexMatch "^\\s*/projects/[^/]+/(locations/[^/]+/services|global/backendServices)/([^/]+/+|[^/]*[^/\\s])\\s*$" $emittedAudience) }}
+{{- $normalisedAudience := trim (regexReplaceAll "/+$" (trim $emittedAudience) "") }}
+{{- if not (regexMatch (include "scion-hub.iapAudiencePattern" $root) $normalisedAudience) }}
 {{- $problems = append $problems (printf "auth.proxy.iap.audience is %s, which is not /projects/<number>/global/backendServices/<id> or /projects/<number>/locations/<region>/services/<name> (isSupportedIAPAudience)" (include "scion-hub.diagValue" $emittedAudience)) }}
 {{- end }}
 {{- $transport := dig "server" "auth" "transport" (dict) $doc }}
@@ -2872,8 +2889,8 @@ fixtures leave only the session secret, which arrives by env, not by this file.
 {{- if ne (toString (dig "mode" "" $transport)) "iap" }}
 {{- $problems = append $problems (printf "server.auth.transport.mode is %s, and must be iap - set auth.transport.mode: iap" (include "scion-hub.diagValue" (dig "mode" "" $transport))) }}
 {{- end }}
-{{- if not (trim (toString (dig "oidc_audience" "" $transport))) }}
-{{- $problems = append $problems "server.auth.transport.oidc_audience is empty - set auth.transport.oidcAudience to the IAP OAuth client ID" }}
+{{- if not (regexReplaceAll "/+$" (trim (toString (dig "oidc_audience" "" $transport))) "") }}
+{{- $problems = append $problems "server.auth.transport.oidc_audience is empty once surrounding whitespace and trailing slashes are removed, as the preflight removes them - set auth.transport.oidcAudience to the IAP OAuth client ID" }}
 {{- end }}
 {{- if not (trim (toString (dig "platform_auth_sa" "" $transport))) }}
 {{- $problems = append $problems "server.auth.transport.platform_auth_sa is empty - set auth.transport.platformAuthSa to the service account email the hub mints transport tokens as" }}
@@ -3123,15 +3140,18 @@ writes, so jwt is reachable only through config.existingSecret. Saying so at
 render time is better than the collision message, which would not mention the
 route.
 
-The audience is rendered as the HA preflight reads it - surrounding whitespace
-trimmed, then trailing slashes stripped, and nothing more
-(strings.TrimRight(strings.TrimSpace(aud), "/") in validateHostedHAPreflight) - so the value the hub verifies JWTs against is the
-value its preflight approved.
+The audience is rendered normalised as the HA preflight normalises it -
+surrounding whitespace trimmed, then trailing slashes stripped
+(strings.TrimRight(strings.TrimSpace(aud), "/") in validateHostedHAPreflight),
+then trimmed once more. The last trim is the one isSupportedIAPAudience applies
+inside its own strings.Split; rendering it means a value such as "<path> /"
+reaches the hub as "<path>" rather than "<path> ", so the value the hub
+verifies JWTs against is the value its preflight approved.
 */}}
 {{- $authOut := dict "mode" $auth.mode }}
 {{- $proxyValues := $auth.proxy | default (dict) }}
 {{- $iapValues := $proxyValues.iap | default (dict) }}
-{{- $audience := regexReplaceAll "/+$" (trim (toString ($iapValues.audience | default ""))) "" }}
+{{- $audience := trim (regexReplaceAll "/+$" (trim (toString ($iapValues.audience | default ""))) "") }}
 {{- if eq (toString $auth.mode) "proxy" }}
 {{- $provider := toString ($proxyValues.provider | default "iap") }}
 {{- if ne $provider "iap" }}

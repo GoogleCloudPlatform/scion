@@ -7,9 +7,9 @@
 # time because the preflight returns on first failure.
 #
 # THE COUNT DEPENDS ON WHAT THE ARM SUPPLIES. Each step records its grant.
-# The two audience arms differ in exactly one value, which is offered only
-# if the hub asks for an audience. Where the rendered settings.yaml already
-# carries one, neither arm is asked and the two lists agree.
+# The arm's audience is offered only if the hub asks for one. The chart's
+# proxy shapes all render one, so the audience format gate is checked by
+# TestHelmChartIAPAudiencePattern rather than by a malformed-audience arm.
 #
 # CORPUS BINDING. This walk reads the committed goldens, so on its own it
 # measures the goldens and not the chart. The digests below close that gap
@@ -34,32 +34,12 @@ config   mode="hosted" hub_id="ci-minimal" driver="sqlite" storage="local" auth.
 routes   isHADeployment=false hostedHAGuardsRequired=false
 TERMINATED no gates: the preflight does not run for this shape.
 
-===== minimal.yaml [audience malformed = "my-iap-audience"]
-config   mode="hosted" hub_id="ci-minimal" driver="sqlite" storage="local" auth.mode="proxy"
-routes   isHADeployment=false hostedHAGuardsRequired=false
-TERMINATED no gates: the preflight does not run for this shape.
-
 ===== session-existing.yaml [audience well-formed = "/projects/1/locations/us-central1/services/hub"]
 config   mode="hosted" hub_id="ci-session-existing" driver="sqlite" storage="local" auth.mode="proxy"
 routes   isHADeployment=false hostedHAGuardsRequired=false
 TERMINATED no gates: the preflight does not run for this shape.
 
-===== session-existing.yaml [audience malformed = "my-iap-audience"]
-config   mode="hosted" hub_id="ci-session-existing" driver="sqlite" storage="local" auth.mode="proxy"
-routes   isHADeployment=false hostedHAGuardsRequired=false
-TERMINATED no gates: the preflight does not run for this shape.
-
 ===== settings-oauth.yaml [audience well-formed = "/projects/1/locations/us-central1/services/hub"]
-config   mode="hosted" hub_id="ci-settings" driver="postgres" storage="gcs" auth.mode="oauth"
-routes   isHADeployment=true hostedHAGuardsRequired=true
- 1  hosted HA deployment requires a durable session/signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET
-    granted env SCION_SERVER_SESSION_SECRET="probe-secret"
-TERMINATED the hub ran out of gates: preflight passes after 1.
-CANON BEGIN
-PROSE hosted HA deployment requires a durable session/signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET
-CANON END
-
-===== settings-oauth.yaml [audience malformed = "my-iap-audience"]
 config   mode="hosted" hub_id="ci-settings" driver="postgres" storage="gcs" auth.mode="oauth"
 routes   isHADeployment=true hostedHAGuardsRequired=true
  1  hosted HA deployment requires a durable session/signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET
@@ -79,22 +59,7 @@ CANON BEGIN
 PROSE hosted HA deployment requires a durable session/signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET
 CANON END
 
-===== settings.yaml [audience malformed = "my-iap-audience"]
-config   mode="hosted" hub_id="ci-settings" driver="postgres" storage="gcs" auth.mode="proxy"
-routes   isHADeployment=true hostedHAGuardsRequired=true
- 1  hosted HA deployment requires a durable session/signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET
-    granted env SCION_SERVER_SESSION_SECRET="probe-secret"
-TERMINATED the hub ran out of gates: preflight passes after 1.
-CANON BEGIN
-PROSE hosted HA deployment requires a durable session/signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET
-CANON END
-
 ===== varied.yaml [audience well-formed = "/projects/1/locations/us-central1/services/hub"]
-config   mode="hosted" hub_id="ci-varied" driver="sqlite" storage="local" auth.mode="proxy"
-routes   isHADeployment=false hostedHAGuardsRequired=false
-TERMINATED no gates: the preflight does not run for this shape.
-
-===== varied.yaml [audience malformed = "my-iap-audience"]
 config   mode="hosted" hub_id="ci-varied" driver="sqlite" storage="local" auth.mode="proxy"
 routes   isHADeployment=false hostedHAGuardsRequired=false
 TERMINATED no gates: the preflight does not run for this shape.
