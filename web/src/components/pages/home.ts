@@ -236,8 +236,8 @@ export class ScionPageHome extends LitElement {
       index.seed(dropTombstonedPairs(stats.agents, deleted));
       // Changes that landed while the request was in flight: phase changes
       // of agents not in the store, then agents upserted live.
-      for (const [id, phase] of epoch.unknownPhaseChanges) {
-        if (index.has(id)) index.set(id, phase);
+      for (const [id, delta] of epoch.unknownChanges) {
+        if (delta.phase && index.has(id)) index.set(id, delta.phase);
       }
       for (const id of epoch.changedIds) {
         const agent = stateManager.getAgent(id);

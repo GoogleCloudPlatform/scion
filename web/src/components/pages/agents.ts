@@ -1055,6 +1055,7 @@ export class ScionPageAgents extends LitElement {
       totalCount: data.totalCount ?? seeded.agents.length,
       stats,
       liveChanged: epoch.changedIds,
+      liveUnknown: epoch.unknownChanges,
     };
   }
 

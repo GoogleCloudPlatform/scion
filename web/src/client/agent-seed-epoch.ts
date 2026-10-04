@@ -28,11 +28,17 @@
  *   is still part of the membership a page renders;
  * - records every ID upserted live, so a page that adopts a fresh member
  *   index or server page can replay those changes into it;
- * - records the latest phase of every ID changed live while not in the
- *   store, so a page whose counts come from the response can replay it.
+ * - records the merged delta of every ID changed live while not in the
+ *   store, so a page whose counts or member index come from the response
+ *   can replay it (see {@link AgentSeedEpoch.unknownChanges}).
  */
 import type { Agent } from '../shared/types.js';
-import type { AgentsChangedDetail, SeedEpochToken, StateManager } from './state.js';
+import type {
+  AgentsChangedDetail,
+  SeedEpochToken,
+  StateManager,
+  UnknownAgentDelta,
+} from './state.js';
 import { stateManager } from './state.js';
 
 /** The state-store surface the protocol needs (injectable for tests). */
@@ -79,7 +85,7 @@ export class AgentSeedEpoch {
   private readonly token: SeedEpochToken;
   private readonly createdIds = new Set<string>();
   private readonly upsertedIds = new Set<string>();
-  private readonly unknownPhases = new Map<string, string>();
+  private readonly unknownDeltas = new Map<string, UnknownAgentDelta>();
   private closed = false;
 
   private readonly onCreated = (e: Event): void => {
@@ -89,9 +95,19 @@ export class AgentSeedEpoch {
 
   private readonly onChanged = (e: Event): void => {
     const data = (e as CustomEvent<{ data?: Partial<AgentsChangedDetail> }>).detail?.data;
-    for (const id of data?.upserted ?? []) this.upsertedIds.add(id);
+    for (const id of data?.upserted ?? []) {
+      this.upsertedIds.add(id);
+      // The store now holds the agent, with every earlier unknown delta
+      // applied, so its object supersedes the recorded one.
+      this.unknownDeltas.delete(id);
+    }
     for (const [id, delta] of data?.unknown ?? []) {
-      if (delta.phase) this.unknownPhases.set(id, delta.phase);
+      // Per field, the last value wins (the same merge as the store's flush).
+      const next: UnknownAgentDelta = { ...this.unknownDeltas.get(id) };
+      if (delta.phase !== undefined) next.phase = delta.phase;
+      if (delta.activity !== undefined) next.activity = delta.activity;
+      if (delta.lastActivityEvent !== undefined) next.lastActivityEvent = delta.lastActivityEvent;
+      this.unknownDeltas.set(id, next);
     }
   };
 
@@ -113,13 +129,20 @@ export class AgentSeedEpoch {
   }
 
   /**
-   * The latest live phase of each ID that changed while not in the store
-   * (an unknown-ID delta) since the epoch opened, minus those deleted
-   * since. Recording stops at {@link close}.
+   * The merged live delta of each ID that changed while not in the store
+   * (an unknown-ID delta) since the epoch opened, in the shape of
+   * {@link AgentsChangedDetail.unknown}: per field, the last value wins.
+   * An ID upserted live after its unknown delta is left out (its store
+   * object is newer), as is an ID deleted since. Recording stops at
+   * {@link close}.
    */
-  get unknownPhaseChanges(): Array<[string, string]> {
+  get unknownChanges(): Map<string, UnknownAgentDelta> {
     const tombstones = this.state.getDeletedAgentIds();
-    return Array.from(this.unknownPhases).filter(([id]) => !tombstones.has(id));
+    const out = new Map<string, UnknownAgentDelta>();
+    for (const [id, delta] of this.unknownDeltas) {
+      if (!tombstones.has(id)) out.set(id, { ...delta });
+    }
+    return out;
   }
 
   /**

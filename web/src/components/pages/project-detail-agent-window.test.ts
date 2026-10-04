@@ -2207,6 +2207,28 @@ describe('project-detail — agent list window', () => {
       expect(m.requests.length).toBe(1);
     });
 
+    it('above the fit threshold: an off-page phase change while the paged fit request is in flight reaches the running count', async () => {
+      const projectId = 'p-live-fit-unknown';
+      const m = await mountHeld(projectId, 'list', 'updated', 60);
+      expect(await m.waitHeld()).toContain('fit=');
+      // The oldest agent sorts last, off page 0, and is not in the store yet.
+      expect(stateManager.getAgent('a-0')).toBeUndefined();
+
+      (
+        stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+      ).handleUpdate({
+        subject: `project.${projectId}.agent.status`,
+        data: { agentId: 'a-0', phase: 'stopped' },
+      });
+      await flushSse(m.el);
+      await m.release();
+
+      expect(internals(m.el).agentWindow.state).toBe('paged');
+      expect(internals(m.el).agentWindow.items.some((a) => a.id === 'a-0')).toBe(false);
+      expect(internals(m.el).agentStats).toMatchObject({ total: 60, running: 59 });
+      expect(m.requests.length).toBe(1);
+    });
+
     it('the legacy first request: the create joins the drained set', async () => {
       const projectId = 'p-live-legacy';
       const m = await mountHeld(projectId, 'list', 'name', 10);

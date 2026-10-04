@@ -185,6 +185,15 @@ export interface PagedPageResult {
    * freshly seeded member index.
    */
   liveChanged?: readonly string[] | undefined;
+  /**
+   * The merged live delta of each ID that changed while this request was in
+   * flight but was not in the state store (see `AgentSeedEpoch.unknownChanges`).
+   * The window replays it as the `unknown` part of an `agents-changed`
+   * flush: an off-page member's phase follows it, and an activity time that
+   * could land on the page (or any change to a count-only snapshot) shows
+   * the chip.
+   */
+  liveUnknown?: ReadonlyMap<string, UnknownAgentDelta> | undefined;
 }
 
 /** Fetches one sorted page for paged navigation. Rejecting sets the window's `error`. */
@@ -578,14 +587,25 @@ export class AgentListWindow extends EventTarget {
     this.committedLabel = committedLabel;
     this.pagedParams = fetchedKey ?? this.serverParamsKey();
     this.seedStats(result.stats);
-    this.replayLiveChanges(result.liveChanged);
+    this.replayLiveChanges(result);
     this.notifyChange();
   }
 
-  /** Replays a response's {@link PagedPageResult.liveChanged} over the adopted page and member index. */
-  private replayLiveChanges(ids: readonly string[] | undefined): void {
-    if (!ids || ids.length === 0) return;
-    this.applyChanges({ upserted: [...ids], deleted: [], unknown: new Map(), generation: 0 });
+  /**
+   * Replays a response's {@link PagedPageResult.liveChanged} and
+   * {@link PagedPageResult.liveUnknown} over the adopted page and member
+   * index, as one `agents-changed` flush.
+   */
+  private replayLiveChanges(result: PagedPageResult): void {
+    const upserted = result.liveChanged ?? [];
+    const unknown = result.liveUnknown ?? new Map<string, UnknownAgentDelta>();
+    if (upserted.length === 0 && unknown.size === 0) return;
+    this.applyChanges({
+      upserted: [...upserted],
+      deleted: [],
+      unknown: new Map(unknown),
+      generation: 0,
+    });
   }
 
   /**
@@ -815,7 +835,7 @@ export class AgentListWindow extends EventTarget {
       }
       this._updatesAvailable = false;
       this.seedStats(result.stats);
-      this.replayLiveChanges(result.liveChanged);
+      this.replayLiveChanges(result);
     } catch (err) {
       if (gen !== this.generation) return;
       if (this.pageController === controller) this.pageController = null;

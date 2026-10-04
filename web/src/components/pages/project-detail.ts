@@ -1921,8 +1921,9 @@ export class ScionPageProjectDetail extends LitElement {
 
   /**
    * Seed one sorted page under its epoch and build the window's page
-   * result: the page rows as the store's current objects, and the IDs
-   * changed live while the request was in flight for the window to replay.
+   * result: the page rows as the store's current objects, and the live
+   * changes that landed while the request was in flight (upserted IDs and
+   * deltas for agents not in the store) for the window to replay.
    */
   private seedPage(
     epoch: AgentSeedEpoch,
@@ -1938,6 +1939,7 @@ export class ScionPageProjectDetail extends LitElement {
       totalCount: data.totalCount,
       stats: this.freshStats(data.stats),
       liveChanged: epoch.changedIds,
+      liveUnknown: epoch.unknownChanges,
     };
   }
 

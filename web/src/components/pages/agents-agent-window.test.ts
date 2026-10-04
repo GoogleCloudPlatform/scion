@@ -947,6 +947,85 @@ describe('scion-page-agents — agent list window', () => {
     });
   });
 
+  describe('live changes to agents not in the store while a paged request is in flight', () => {
+    function heldFake(length: number): { fake: Fake; h: ReturnType<typeof holdable> } {
+      const fake: Fake = {
+        agents: Array.from({ length }, (_, i) => makeAgent(i)),
+        requests: [],
+      };
+      const h = holdable(fakeFetch(fake), isGlobalAgentsList);
+      vi.stubGlobal('fetch', vi.fn(h.fn));
+      return { fake, h };
+    }
+
+    it('an off-page phase change while the paged fit request is in flight reaches the running count', async () => {
+      const { h } = heldFake(1200);
+      h.hold();
+      const el = await mountUnsettled();
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      expect(stateManager.getAgent('g-00010')).toBeUndefined();
+      handleUpdate('agent.g-00010.status', { agentId: 'g-00010', phase: 'stopped' });
+      await flushLive(el);
+      h.release();
+      await settle(el);
+      const win = internals(el).agentWindow;
+      expect(win.state).toBe('paged');
+      expect(win.items.some((a) => a.id === 'g-00010')).toBe(false);
+      expect(win.stats.total).toBe(1200);
+      expect(win.stats.running).toBe(1199);
+      expect(win.memberIndex.getPhase('g-00010')).toBe('stopped');
+    });
+
+    it('an off-page activity bump during a held Next raises the chip', async () => {
+      const { h } = heldFake(1200);
+      const el = await mount();
+      const win = internals(el).agentWindow;
+      expect(win.state).toBe('paged');
+      h.hold();
+      void win.next();
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      expect(query(h.sent.at(-1)!.url).get('cursor')).toBe('25');
+      // Page 1 holds g-01174 down to g-01150; this activity time sorts inside it.
+      handleUpdate('agent.g-00010.status', {
+        agentId: 'g-00010',
+        lastActivityEvent: '2026-01-02T00:00:00.01160Z',
+      });
+      await flushLive(el);
+      h.release();
+      await settle(el);
+      expect(win.pageIndex).toBe(1);
+      expect(win.items[0].id).toBe('g-01174');
+      expect(win.updatesAvailable).toBe(true);
+      expect(pager(el).showChip).toBe(true);
+    });
+
+    it('count-only: a change to an agent not in the store while the fit request is in flight raises the chip', async () => {
+      const { h } = heldFake(2002);
+      h.hold();
+      const el = await mountUnsettled();
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      handleUpdate('agent.g-00005.status', { agentId: 'g-00005', phase: 'stopped' });
+      await flushLive(el);
+      h.release();
+      await settle(el);
+      const win = internals(el).agentWindow;
+      expect(win.memberIndex.countOnly).toBe(true);
+      expect(text(el)).toContain('2,002 agents · 2,002 running, as of last refresh');
+      expect(pager(el).showChip).toBe(true);
+    });
+
+    it('count-only: with no live change the chip stays hidden', async () => {
+      const { h } = heldFake(2002);
+      h.hold();
+      const el = await mountUnsettled();
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      h.release();
+      await settle(el);
+      expect(internals(el).agentWindow.memberIndex.countOnly).toBe(true);
+      expect(pager(el).showChip).toBe(false);
+    });
+  });
+
   describe('live creates under a committed label', () => {
     it('a live create during a labelled scope-all fit request joins only if it matches the label', async () => {
       const fake: Fake = {

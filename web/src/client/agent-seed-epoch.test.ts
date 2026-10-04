@@ -119,7 +119,7 @@ describe('AgentSeedEpoch', () => {
     expect(openEpochs(sm)).toBe(0);
   });
 
-  it('unknownPhaseChanges lists the latest live phase of IDs not in the store, minus deletes', () => {
+  it('unknownChanges merges the live deltas of IDs not in the store per field, minus deletes', () => {
     const sm = newState();
     sm.seedAgents([makeAgent('a')]);
     const epoch = new AgentSeedEpoch(sm);
@@ -127,13 +127,33 @@ describe('AgentSeedEpoch', () => {
     emit(sm, 'agent.y.status', { agentId: 'y', phase: 'running' });
     emit(sm, 'agent.z.status', { agentId: 'z', activity: 'thinking' });
     emit(sm, 'agent.a.status', { phase: 'stopped' });
-    emit(sm, 'agent.x.status', { agentId: 'x', phase: 'stopped' });
+    emit(sm, 'agent.x.status', {
+      agentId: 'x',
+      phase: 'stopped',
+      lastActivityEvent: '2026-02-01T00:00:00Z',
+    });
+    emit(sm, 'agent.x.status', { agentId: 'x', lastActivityEvent: '2026-03-01T00:00:00Z' });
     emit(sm, 'agent.y.deleted', { agentId: 'y' });
-    expect(epoch.unknownPhaseChanges).toEqual([['x', 'stopped']]);
+    expect(epoch.unknownChanges).toEqual(
+      new Map([
+        ['x', { phase: 'stopped', lastActivityEvent: '2026-03-01T00:00:00Z' }],
+        ['z', { activity: 'thinking' }],
+      ])
+    );
     expect(epoch.changedIds).toEqual(['a']);
     epoch.close();
     emit(sm, 'agent.w.status', { agentId: 'w', phase: 'running' });
-    expect(epoch.unknownPhaseChanges).toEqual([['x', 'stopped']]);
+    expect(Array.from(epoch.unknownChanges.keys())).toEqual(['x', 'z']);
+  });
+
+  it('unknownChanges leaves out an ID created live after its unknown delta', () => {
+    const sm = newState();
+    const epoch = new AgentSeedEpoch(sm);
+    emit(sm, 'agent.x.status', { agentId: 'x', phase: 'running' });
+    emit(sm, 'agent.x.created', makeAgent('x', { phase: 'stopped' }));
+    expect(epoch.unknownChanges.size).toBe(0);
+    expect(epoch.changedIds).toEqual(['x']);
+    epoch.close();
   });
 
   it('close without seeding still ends the store epoch and stops recording', () => {
