@@ -26,6 +26,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
@@ -116,7 +117,7 @@ func readHomeStorageRecord(agentDir string) (*homeStorageRecord, error) {
 	switch rec.Backend {
 	case homeStoragePending, config.HomeStorageBackendLocal:
 	case config.HomeStorageBackendNFS:
-		if rec.ShareID == "" || rec.PVClaimName == "" || rec.SubPathRoot == "" ||
+		if rec.ShareID == "" || rec.PVClaimName == "" || !validSubPathRoot(rec.SubPathRoot) ||
 			(rec.Leaf != config.HomeStorageLeafPod && rec.Leaf != config.HomeStorageLeafBroker) {
 			return nil, fmt.Errorf("the agent's home storage record %s is incomplete", path)
 		}
@@ -215,16 +216,24 @@ func resolveHomeStorage(in homeStorageInput) (*homeStoragePlan, error) {
 	// Pending: the agent's first start.
 	gs, err := in.LoadSettings()
 	if errors.Is(err, errHomeStorageNotConfigured) {
-		// The settings cannot be read but do not mention home storage:
-		// start with a local home and leave the record pending.
-		slog.Warn("Start: global settings could not be loaded; server.home_storage is not mentioned in them, so the agent starts with a local home",
+		// The settings cannot be read but do not mention home storage: the
+		// agent gets, and records, a local home, so the choice is made once.
+		slog.Warn("Start: global settings could not be loaded; server.home_storage is not mentioned in them, so the agent gets a local home",
 			"agent", in.AgentName)
+		if err := writeHomeStorageRecord(in.AgentDir, homeStorageRecord{Backend: config.HomeStorageBackendLocal}); err != nil {
+			return nil, fmt.Errorf("recording the agent's home storage: %w", err)
+		}
 		return localHomeStoragePlan(), nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("loading global settings for home storage: %w", err)
 	}
 	resolved := gs.ResolveHomeStorage(in.Profile)
+	// Values are checked where they are used: an unknown value (a typo or
+	// the wrong case) fails the start and is never recorded.
+	if err := checkResolvedHomeStorage(resolved); err != nil {
+		return nil, err
+	}
 	if resolved.Backend != config.HomeStorageBackendNFS || !in.ExperimentOn {
 		if resolved.Backend == config.HomeStorageBackendNFS {
 			slog.Warn("Start: home storage nfs is configured but the experiment is off; the agent gets a local home",
@@ -270,7 +279,43 @@ func checkNFSHomeStart(in homeStorageInput, hs *config.V1HomeStorageConfig) erro
 	if !shareddirs.ValidProjectID(in.ProjectID) {
 		return homeStorageUnavailable("no valid hub project ID")
 	}
+	if !validHomeSlug(in.Slug) {
+		return homeStorageUnavailable("agent name %q is not an agent slug", in.Slug)
+	}
 	return nil
+}
+
+// checkResolvedHomeStorage fails on a resolved backend, or (for nfs) leaf
+// mode, that is not a known value, naming the settings key it came from.
+func checkResolvedHomeStorage(r config.ResolvedHomeStorage) error {
+	source := func(src, fallback string) string {
+		if src == "" {
+			return fallback
+		}
+		return src
+	}
+	switch r.Backend {
+	case config.HomeStorageBackendLocal, config.HomeStorageBackendNFS:
+	default:
+		return fmt.Errorf("%s must be \"local\" or \"nfs\" (got %q)", source(r.BackendSource, "home storage backend"), r.Backend)
+	}
+	if r.Backend == config.HomeStorageBackendNFS && r.Leaf != config.HomeStorageLeafPod && r.Leaf != config.HomeStorageLeafBroker {
+		return fmt.Errorf("%s must be \"pod\" or \"broker\" (got %q)", source(r.LeafSource, "home storage leaf"), r.Leaf)
+	}
+	return nil
+}
+
+// validHomeSlug reports whether slug is an agent slug: non-empty and
+// already in the form api.ValidateAgentName produces.
+func validHomeSlug(slug string) bool {
+	s, err := api.ValidateAgentName(slug)
+	return err == nil && s == slug && slug != ""
+}
+
+// validSubPathRoot reports whether root is a clean, non-empty relative
+// path that stays inside the export.
+func validSubPathRoot(root string) bool {
+	return root != "" && filepath.IsLocal(root) && filepath.Clean(root) == root && !strings.Contains(root, "\\")
 }
 
 func homeStorageGlobal(gs *config.VersionedSettings) *config.V1HomeStorageConfig {
@@ -300,6 +345,9 @@ func newNFSHomeStoragePlan(in homeStorageInput, gs *config.VersionedSettings, le
 		return nil, homeStorageUnavailable("home_storage nfs needs a complete shared_dir_storage nfs block for profile %q: %v", in.Profile, err)
 	}
 	share := sd.NFS.Shares[0]
+	if !validSubPathRoot(nfsSubPathRoot(sd.NFS)) {
+		return nil, homeStorageUnavailable("shared_dir_storage nfs subpath_root %q is not a clean relative path", nfsSubPathRoot(sd.NFS))
+	}
 	if share.PVName == "" {
 		return nil, homeStorageUnavailable("home_storage nfs needs a claim (shares[0].pv_name) in shared_dir_storage for profile %q", in.Profile)
 	}

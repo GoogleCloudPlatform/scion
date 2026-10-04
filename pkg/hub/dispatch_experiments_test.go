@@ -19,8 +19,13 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
@@ -100,5 +105,46 @@ func TestDispatch_Experiments_OnWire(t *testing.T) {
 	}
 	if got := startHubAgentDefaults(nil, d.dispatchExperiments()); got != nil {
 		t.Errorf("off: start dispatch must omit the defaults, got %+v", got)
+	}
+}
+
+// Start and restart dispatches carry the enabled experiment, and an admin
+// toggle applies to the next dispatch.
+func TestDispatch_Experiments_OnStartAndRestart(t *testing.T) {
+	ctx := context.Background()
+	d, client, ag := autoExposeDispatchFixture(t)
+	enabled := []string{experiments.K8sNFSHome}
+	d.SetDispatchExperimentsProvider(func() []string { return enabled })
+
+	require.NoError(t, d.DispatchAgentStart(ctx, ag, "", false))
+	require.NotNil(t, client.lastStartExtras.HubAgentDefaults)
+	assert.Equal(t, []string{experiments.K8sNFSHome}, client.lastStartExtras.HubAgentDefaults.Experiments)
+
+	require.NoError(t, d.DispatchAgentRestart(ctx, ag))
+	require.NotNil(t, client.lastRestartExtras.HubAgentDefaults)
+	assert.Equal(t, []string{experiments.K8sNFSHome}, client.lastRestartExtras.HubAgentDefaults.Experiments)
+
+	enabled = nil
+	require.NoError(t, d.DispatchAgentStart(ctx, ag, "", false))
+	assert.Nil(t, client.lastStartExtras.HubAgentDefaults, "nothing is sent once the experiment is off")
+	require.NoError(t, d.DispatchAgentRestart(ctx, ag))
+	assert.Nil(t, client.lastRestartExtras.HubAgentDefaults)
+}
+
+// server.home_storage and server.shared_dir_storage are settings-file
+// (Layer-0) keys: a DB-mode PUT that sets them is rejected with 422, naming
+// the key, and nothing is stored.
+func TestPutServerConfigDB_StorageBlocksAreLayer0(t *testing.T) {
+	for body, key := range map[string]string{
+		`{"server": {"home_storage": {"backend": "nfs"}}}`:       "server.home_storage",
+		`{"server": {"shared_dir_storage": {"backend": "nfs"}}}`: "server.shared_dir_storage",
+	} {
+		t.Run(key, func(t *testing.T) {
+			srv, _, ops := newTestDBServer(t)
+			rr := httptest.NewRecorder()
+			srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body), ops)
+			assert.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
+			assert.Contains(t, rr.Body.String(), key)
+		})
 	}
 }
