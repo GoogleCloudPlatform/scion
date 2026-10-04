@@ -2412,10 +2412,6 @@ type DelegationEdgeStore interface {
 	// the given principal is the delegator (granting authority).
 	GetDelegationEdgesForDelegator(ctx context.Context, delegatorType, delegatorID string) ([]*DelegationEdge, error)
 
-	// DeactivateDelegationEdge marks an edge as inactive.
-	// Returns ErrNotFound if the edge doesn't exist.
-	DeactivateDelegationEdge(ctx context.Context, edgeID string) error
-
 	// DeactivateDelegationEdgesForDelegate deactivates every active edge
 	// whose delegate is (delegateType, delegateID) and records d on each.
 	// d.Cause and d.OpID are required; a zero d.At is set to the current
