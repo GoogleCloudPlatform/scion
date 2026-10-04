@@ -1396,11 +1396,13 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 	// A provider path that is the broker's global directory is only valid
 	// for the global project. Checked before any project or provider write.
 	if req.Path != "" && (req.BrokerID != "" || req.Broker != nil) {
+		// Labels count only on an existing project, not as sent here.
 		targetName, targetSlug := req.Name, api.Slugify(req.Name)
+		var targetLabels map[string]string
 		if project != nil {
-			targetName, targetSlug = project.Name, project.Slug
+			targetName, targetSlug, targetLabels = project.Name, project.Slug, project.Labels
 		}
-		if err := validateProviderLocalPath(targetName, targetSlug, req.Path); err != nil {
+		if err := validateProviderLocalPath(targetName, targetSlug, targetLabels, req.Path); err != nil {
 			ValidationError(w, err.Error(), map[string]interface{}{"field": "path"})
 			return
 		}

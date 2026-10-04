@@ -2389,7 +2389,7 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 			}
 		}
 		if target, err := s.store.GetProject(ctx, projectID); err == nil {
-			if err := validateProviderLocalPath(target.Name, target.Slug, cleanPath); err != nil {
+			if err := validateProviderLocalPath(target.Name, target.Slug, target.Labels, cleanPath); err != nil {
 				ValidationError(w, err.Error(), map[string]interface{}{"field": "localPath"})
 				return
 			}

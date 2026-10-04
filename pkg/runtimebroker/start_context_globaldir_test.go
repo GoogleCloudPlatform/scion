@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -163,10 +164,208 @@ func TestBuildStartContext_GlobalMarkerUpdatedForRecreatedGlobalProject(t *testi
 
 func TestCanRewriteProjectMarker(t *testing.T) {
 	_, _, globalDir, _ := newGlobalDirTestServer(t, testGlobalProjectID, "global")
-	if !canRewriteProjectMarker(filepath.Join(t.TempDir(), "web-demo"), testOtherProjectID) {
+	if !canRewriteProjectMarker(filepath.Join(t.TempDir(), "web-demo"), testOtherProjectID, false) {
 		t.Error("an ordinary project dir must stay rewritable")
 	}
-	if canRewriteProjectMarker(globalDir, testOtherProjectID) {
+	if canRewriteProjectMarker(globalDir, testOtherProjectID, false) {
 		t.Error("the global marker must not be rewritable for another project")
+	}
+	if !canRewriteProjectMarker(globalDir, testOtherProjectID, true) {
+		t.Error("the global marker must be rewritable for the hub's global project")
+	}
+}
+
+func TestSplitHubGlobalSlug(t *testing.T) {
+	cases := []struct {
+		path, slug, wantSlug string
+		wantGlobal           bool
+	}{
+		{"/home/u/.scion", "global", "", true},
+		{"/home/u/.scion", "web-app", "web-app", false},
+		{"", "global", "global", false},
+		{"", "web-app", "web-app", false},
+		{"/home/u/.scion", "", "", false},
+	}
+	for _, tc := range cases {
+		slug, global := splitHubGlobalSlug(tc.path, tc.slug)
+		if slug != tc.wantSlug || global != tc.wantGlobal {
+			t.Errorf("splitHubGlobalSlug(%q, %q) = (%q, %v), want (%q, %v)",
+				tc.path, tc.slug, slug, global, tc.wantSlug, tc.wantGlobal)
+		}
+	}
+}
+
+// newGlobalDirOnlyTestServer is newGlobalDirTestServer without a global
+// marker: a fresh broker whose global directory holds settings only.
+func newGlobalDirOnlyTestServer(t *testing.T) (srv *Server, globalDir string) {
+	t.Helper()
+	srv, _, globalDir, markerPath := newGlobalDirTestServer(t, testGlobalProjectID, "global")
+	if err := os.Remove(markerPath); err != nil {
+		t.Fatal(err)
+	}
+	return srv, globalDir
+}
+
+// A fresh broker (no global marker, no hub id in the global settings), as on
+// a combined hub and broker server, accepts the global project the hub marks
+// as global, and records its id in a new global marker as before.
+func TestBuildStartContext_HubGlobalProjectAllowedWithoutRecordedID(t *testing.T) {
+	srv, globalDir := newGlobalDirOnlyTestServer(t)
+	const hubGlobalID = "aaaaaaaa-0000-4000-8000-000000000004"
+
+	if _, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:             "x",
+		ProjectPath:      globalDir,
+		ProjectID:        hubGlobalID,
+		HubGlobalProject: true,
+		Operation:        opCreate,
+	}); err != nil {
+		t.Fatalf("hub global project dispatch failed: %v", err)
+	}
+	b := readFileOrFatal(t, filepath.Join(globalDir, config.DotScion))
+	if !strings.Contains(string(b), hubGlobalID) {
+		t.Errorf("expected the global marker to record %q, got %q", hubGlobalID, b)
+	}
+}
+
+// Without the hub's mark, the same fresh broker refuses another project and
+// writes no marker.
+func TestBuildStartContext_FreshGlobalDirRefusesUnmarkedProject(t *testing.T) {
+	srv, globalDir := newGlobalDirOnlyTestServer(t)
+
+	_, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "x",
+		ProjectPath: globalDir,
+		ProjectID:   testOtherProjectID,
+		Operation:   opCreate,
+	})
+	var sce *startContextError
+	if !errors.As(err, &sce) || sce.Status != http.StatusConflict {
+		t.Fatalf("expected a 409 startContextError, got %T %v", err, err)
+	}
+	if _, statErr := os.Stat(filepath.Join(globalDir, config.DotScion)); !os.IsNotExist(statErr) {
+		t.Errorf("a global marker was written for another project (stat err %v)", statErr)
+	}
+}
+
+// When the global project was recreated on the hub, the global marker holds
+// the old id and the settings record nothing. The hub's mark admits the new
+// id, and a readable stale marker is updated to it.
+func TestBuildStartContext_HubGlobalProjectRecreated(t *testing.T) {
+	const newGlobalID = "bbbbbbbb-0000-4000-8000-000000000005"
+	for _, slug := range []string{"global", ""} {
+		t.Run("marker slug "+strconv.Quote(slug), func(t *testing.T) {
+			srv, _, globalDir, markerPath := newGlobalDirTestServer(t, testGlobalProjectID, slug)
+			before := readFileOrFatal(t, markerPath)
+
+			if _, err := srv.buildStartContext(context.Background(), startContextInputs{
+				Name:             "x",
+				ProjectPath:      globalDir,
+				ProjectID:        newGlobalID,
+				HubGlobalProject: true,
+				Operation:        opCreate,
+			}); err != nil {
+				t.Fatalf("recreated hub global project dispatch failed: %v", err)
+			}
+			after := readFileOrFatal(t, markerPath)
+			if slug == "" {
+				// ReadProjectMarker rejects an empty slug, so the marker
+				// block leaves such a marker alone, as before.
+				if !bytes.Equal(before, after) {
+					t.Errorf("empty-slug marker changed: %q -> %q", before, after)
+				}
+				return
+			}
+			if !strings.Contains(string(after), newGlobalID) {
+				t.Errorf("expected the stale global marker updated to %q, got %q", newGlobalID, after)
+			}
+		})
+	}
+}
+
+// The stale-marker branch must not rewrite the global marker for a dispatch
+// the guard admits without the hub's mark or a settings id: id "global" with
+// a readable, stale global marker.
+func TestBuildStartContext_GlobalIDDoesNotRewriteGlobalMarker(t *testing.T) {
+	srv, _, globalDir, markerPath := newGlobalDirTestServer(t, testGlobalProjectID, "global")
+	before := readFileOrFatal(t, markerPath)
+
+	if _, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "x",
+		ProjectPath: globalDir,
+		ProjectID:   "global",
+		Operation:   opCreate,
+	}); err != nil {
+		t.Fatalf("global id dispatch failed: %v", err)
+	}
+	if after := readFileOrFatal(t, markerPath); !bytes.Equal(before, after) {
+		t.Errorf("global marker changed for id \"global\":\nbefore: %q\nafter:  %q", before, after)
+	}
+}
+
+// A global marker that disagrees with the id the global settings record does
+// not admit the marker's id (for example a marker left over from an earlier
+// faulty dispatch).
+func TestBuildStartContext_SettingsIDOverridesGlobalMarker(t *testing.T) {
+	srv, _, globalDir, _ := newGlobalDirTestServer(t, testOtherProjectID, "")
+	if err := config.UpdateSetting(globalDir, "hub.projectId", testGlobalProjectID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:        "x",
+		ProjectPath: globalDir,
+		ProjectID:   testOtherProjectID,
+		Operation:   opCreate,
+	})
+	var sce *startContextError
+	if !errors.As(err, &sce) || sce.Status != http.StatusConflict {
+		t.Fatalf("expected a 409 for the marker's id when settings record another, got %T %v", err, err)
+	}
+}
+
+// The createAgent handler turns the hub's global slug sent with a path into
+// the global mark: the fresh-broker global project is created, and another
+// project at the same path is refused.
+func TestCreateAgent_HubGlobalSlugWithGlobalDirPath(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		slug       string
+		wantStatus int
+	}{
+		{"global slug", "global", http.StatusCreated},
+		{"no slug", "", http.StatusConflict},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, mgr := newTestServerWithProvisionCapture()
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv("SCION_PROJECT_ID", "")
+			globalDir := filepath.Join(home, ".scion")
+			if err := os.MkdirAll(globalDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			body := `{
+				"name": "x",
+				"id": "agent-uuid-gd",
+				"slug": "x",
+				"projectId": "cccccccc-0000-4000-8000-000000000006",
+				"projectSlug": ` + strconv.Quote(tc.slug) + `,
+				"projectPath": ` + strconv.Quote(globalDir) + `,
+				"provisionOnly": true,
+				"config": {"template": "claude"}
+			}`
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+
+			if w.Code != tc.wantStatus {
+				t.Fatalf("expected status %d, got %d: %s", tc.wantStatus, w.Code, w.Body.String())
+			}
+			if tc.wantStatus == http.StatusCreated && mgr.lastOpts.ProjectPath != globalDir {
+				t.Errorf("expected ProjectPath %q, got %q", globalDir, mgr.lastOpts.ProjectPath)
+			}
+		})
 	}
 }

@@ -169,3 +169,89 @@ func TestRunBrokerProvide_GlobalProjectFromHomeSendsGlobalDir(t *testing.T) {
 	assert.Equal(t, "global", body["name"])
 	assert.Equal(t, globalDir, body["path"])
 }
+
+// hub link from a linked project checkout registers the local broker as a
+// provider with that project's own path.
+func TestRunHubLink_AddsProviderWithProjectPath(t *testing.T) {
+	_, globalDir := setupProvideTest(t)
+	origGlobal := globalMode
+	t.Cleanup(func() { globalMode = origGlobal })
+	globalMode = false
+	t.Setenv("SCION_AUTH_TOKEN", "test-token")
+
+	var (
+		mu        sync.Mutex
+		providers []map[string]interface{}
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case r.URL.Path == "/api/v1/projects/register" && r.Method == http.MethodPost:
+			var body map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"project": map[string]interface{}{"id": "p-linked", "name": body["name"], "slug": body["name"]},
+				"created": true,
+			})
+		case strings.HasSuffix(r.URL.Path, "/providers") && r.Method == http.MethodPost:
+			var body map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
+			providers = append(providers, body)
+			mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"provider": body})
+		case r.URL.Path == "/api/v1/projects" && r.Method == http.MethodGet:
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"projects": []interface{}{}})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]interface{}{"code": "not_found", "message": "not found"},
+			})
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("SCION_HUB_ENDPOINT", server.URL)
+
+	checkout := filepath.Join(t.TempDir(), "web-app")
+	scionDir := filepath.Join(checkout, ".scion")
+	require.NoError(t, os.MkdirAll(scionDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(scionDir, "settings.json"), []byte(`{"project_id":"local-web"}`), 0644))
+	require.NotEmpty(t, globalDir)
+	t.Chdir(checkout)
+
+	require.NoError(t, runHubLink(hubLinkCmd, nil))
+
+	wantPath, err := filepath.EvalSymlinks(scionDir)
+	require.NoError(t, err)
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, providers, 1)
+	assert.Equal(t, "broker-1", providers[0]["brokerId"])
+	assert.Equal(t, wantPath, providers[0]["localPath"])
+}
+
+// provide with no --project from a linked project checkout sends that
+// project's path.
+func TestRunBrokerProvide_CurrentLinkedProjectSendsItsPath(t *testing.T) {
+	mock, _ := setupProvideTest(t)
+	checkout := filepath.Join(t.TempDir(), "web-app")
+	scionDir := filepath.Join(checkout, ".scion")
+	require.NoError(t, os.MkdirAll(scionDir, 0755))
+	settings, err := json.Marshal(map[string]interface{}{
+		"hub": map[string]interface{}{"enabled": true, "endpoint": os.Getenv("SCION_HUB_ENDPOINT"), "projectId": "p-web"},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(scionDir, "settings.json"), settings, 0644))
+	t.Chdir(checkout)
+
+	require.NoError(t, runBrokerProvide(brokerProvideCmd, nil))
+
+	wantPath, err := filepath.EvalSymlinks(scionDir)
+	require.NoError(t, err)
+	body := mock.lastRegister(t)
+	assert.Equal(t, "p-web", body["id"])
+	assert.Equal(t, wantPath, body["path"])
+}

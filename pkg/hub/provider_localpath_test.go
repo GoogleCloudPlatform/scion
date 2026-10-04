@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"testing"
@@ -33,14 +34,19 @@ const brokerGlobalDir = "/home/brokeruser/.scion"
 
 func TestIsBrokerGlobalDirPath(t *testing.T) {
 	cases := map[string]bool{
-		"/home/scion/.scion":                          true,
-		"/home/scion/.scion/":                         true,
-		"/root/.scion":                                true,
-		"/Users/alice/.scion":                         true,
-		"/home/scion/src/repo/.scion":                 false,
+		"/home/scion/.scion":          true,
+		"/home/scion/.scion/":         true,
+		"/root/.scion":                true,
+		"/Users/alice/.scion":         true,
+		"/home/scion":                 true, // project root form
+		"/root":                       true,
+		"/Users/alice/":               true,
+		"/home/scion/src/repo/.scion": false,
+		"/home/scion/src/repo":        false,
 		"/home/scion/.scion/project-configs/x/.scion": false,
 		"/home/scion/.scion/projects/web":             false,
 		"/home/.scion":                                false,
+		"/home":                                       false,
 		"/srv/repo/.scion":                            false,
 		"":                                            false,
 		"relative/.scion":                             false,
@@ -51,11 +57,28 @@ func TestIsBrokerGlobalDirPath(t *testing.T) {
 }
 
 func TestValidateProviderLocalPath(t *testing.T) {
-	assert.Error(t, validateProviderLocalPath("web-app", "web-app", brokerGlobalDir))
-	assert.NoError(t, validateProviderLocalPath("global", "global", brokerGlobalDir))
-	assert.NoError(t, validateProviderLocalPath("Global", "global-2", brokerGlobalDir))
-	assert.NoError(t, validateProviderLocalPath("web-app", "web-app", "/home/brokeruser/src/web-app/.scion"))
-	assert.NoError(t, validateProviderLocalPath("web-app", "web-app", ""))
+	assert.Error(t, validateProviderLocalPath("web-app", "web-app", nil, brokerGlobalDir))
+	assert.Error(t, validateProviderLocalPath("web-app", "web-app", nil, "/home/brokeruser"))
+	assert.NoError(t, validateProviderLocalPath("global", "global", nil, brokerGlobalDir))
+	assert.NoError(t, validateProviderLocalPath("Global", "global-2", nil, brokerGlobalDir))
+	assert.NoError(t, validateProviderLocalPath("Main Box", "main-box", map[string]string{"scion.io/global": "true"}, brokerGlobalDir))
+	assert.Error(t, validateProviderLocalPath("Main Box", "main-box", map[string]string{"scion.io/global": "false"}, brokerGlobalDir))
+	assert.NoError(t, validateProviderLocalPath("web-app", "web-app", nil, "/home/brokeruser/src/web-app/.scion"))
+	assert.NoError(t, validateProviderLocalPath("web-app", "web-app", nil, ""))
+}
+
+// The path forms hub link, hubsync and the web linked-project create send
+// for an ordinary project on a broker stay accepted.
+func TestValidateProviderLocalPath_AcceptsLinkAndSyncPaths(t *testing.T) {
+	for _, path := range []string{
+		"/home/brokeruser/src/web-app/.scion",                              // in-repo project (hub link, hubsync)
+		"/home/brokeruser/.scion/project-configs/web-app__1dfdd6c7/.scion", // external split-storage project
+		"/home/brokeruser/.scion/projects/web-app",                         // hub-managed project directory
+		"/home/brokeruser/src/web-app",                                     // project root (web linked create)
+		"/srv/checkouts/web-app/.scion",
+	} {
+		assert.NoError(t, validateProviderLocalPath("web-app", "web-app", nil, path), "path %q", path)
+	}
 }
 
 func newLocalPathTestBroker(t *testing.T, s store.Store, name string) *store.RuntimeBroker {
@@ -168,23 +191,73 @@ func TestProjectRegister_RepairsStoredGlobalDirPath(t *testing.T) {
 	}
 }
 
-// A re-register with no path clears any stored path, so provide without a
-// path always leaves the provider path-less.
-func TestProjectRegister_EmptyPathClearsStoredPath(t *testing.T) {
+// A re-register with no path (provide --project without --path) keeps a
+// linked provider's path.
+func TestProjectRegister_EmptyPathKeepsLinkedPath(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
-	broker := newLocalPathTestBroker(t, s, "gd-clear-broker")
+	broker := newLocalPathTestBroker(t, s, "gd-keep-broker")
 	projectDir := filepath.Join(t.TempDir(), "web-app", ".scion")
 
-	resp, code, body := registerWithBroker(t, srv, "gd-clear-project", broker.ID, projectDir)
+	resp, code, body := registerWithBroker(t, srv, "gd-keep-project", broker.ID, projectDir)
 	require.Equal(t, http.StatusOK, code, "body: %s", body)
 
-	_, code, body = registerWithBroker(t, srv, "gd-clear-project", broker.ID, "")
+	_, code, body = registerWithBroker(t, srv, "gd-keep-project", broker.ID, "")
 	require.Equal(t, http.StatusOK, code, "body: %s", body)
 
 	provider, err := s.GetProjectProvider(ctx, resp.Project.ID, broker.ID)
 	require.NoError(t, err)
-	assert.Empty(t, provider.LocalPath)
+	assert.Equal(t, projectDir, provider.LocalPath)
+}
+
+func TestAddProvider_AcceptsLinkedProjectPath(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	broker := newLocalPathTestBroker(t, s, "gd-add-ok-broker")
+	project := &store.Project{ID: tid("gd-add-ok-project"), Name: "gd-add-ok-project", Slug: "gd-add-ok-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+	projectRoot := t.TempDir()
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/providers", map[string]interface{}{
+		"brokerId":  broker.ID,
+		"localPath": projectRoot,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
+
+	provider, err := s.GetProjectProvider(ctx, project.ID, broker.ID)
+	require.NoError(t, err)
+	assert.Equal(t, projectRoot, provider.LocalPath)
+}
+
+// The global project's provider path travels with the global slug, so the
+// broker can tell it from another project pointed at its global directory.
+// Other projects with a provider path send no slug, as before.
+func TestResolveDispatchProjectInfo_GlobalSlugWithProviderPath(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name, slug, path, wantSlug string
+	}{
+		{name: "global with path", slug: "global", path: brokerGlobalDir, wantSlug: "global"},
+		{name: "global without path", slug: "global", wantSlug: "global"},
+		{name: "project with path", slug: "gd-web", path: "/home/brokeruser/src/web/.scion", wantSlug: ""},
+		{name: "project without path", slug: "gd-web-native", wantSlug: "gd-web-native"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, s := testServer(t)
+			broker := newLocalPathTestBroker(t, s, "gd-dispatch-broker")
+			d := NewHTTPAgentDispatcherWithClient(s, nil, false, slog.Default())
+			project := &store.Project{ID: tid("gd-dispatch-" + tc.slug), Name: tc.slug, Slug: tc.slug}
+			require.NoError(t, s.CreateProject(ctx, project))
+			require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+				ProjectID: project.ID, BrokerID: broker.ID, BrokerName: broker.Name, LocalPath: tc.path,
+				Status: store.BrokerStatusOnline,
+			}))
+			info, err := d.resolveDispatchProjectInfo(ctx, &store.Agent{ProjectID: project.ID, RuntimeBrokerID: broker.ID})
+			require.NoError(t, err)
+			assert.Equal(t, tc.path, info.projectPath)
+			assert.Equal(t, tc.wantSlug, info.projectSlug)
+		})
+	}
 }
 
 func TestAddProvider_RejectsGlobalDirPathForProject(t *testing.T) {

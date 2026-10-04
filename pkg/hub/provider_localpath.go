@@ -25,51 +25,62 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// globalProjectSlug is the slug the CLI registers a broker's global project
-// under (the global project is registered with the name "global").
+// globalProjectSlug is the slug of a broker's global project: the CLI
+// registers it under the name "global", and the combined hub and broker
+// server creates it with this slug.
 const globalProjectSlug = "global"
 
-// isGlobalProjectName reports whether a hub project with this name or slug
-// is the global project.
-func isGlobalProjectName(name, slug string) bool {
-	if strings.EqualFold(slug, globalProjectSlug) {
+// globalProjectLabel marks the global project created by the combined hub and
+// broker server.
+const globalProjectLabel = "scion.io/global"
+
+// isGlobalHubProject reports whether a hub project with this name, slug and
+// labels is the global project.
+func isGlobalHubProject(name, slug string, labels map[string]string) bool {
+	if strings.EqualFold(slug, globalProjectSlug) || labels[globalProjectLabel] == "true" {
 		return true
 	}
 	return name != "" && strings.EqualFold(api.Slugify(name), globalProjectSlug)
 }
 
 // isBrokerGlobalDirPath reports whether localPath has the shape of a broker's
-// global scion directory: a ".scion" entry directly inside a user home
-// directory (/root, /home/<user> or /Users/<user>).
+// global scion directory, or of a project root whose .scion entry is that
+// directory: a user home directory (/root, /home/<user> or /Users/<user>),
+// or a ".scion" entry directly inside one.
 //
-// The hub cannot inspect the broker's filesystem, so it relies on this shape.
+// The hub cannot inspect the broker's filesystem, so this is a fast,
+// shape-only check that fails a request before any write. The broker is the
+// authority: it refuses a global-directory path for any other project at
+// dispatch time, including homes this check does not recognize.
+//
 // config.GetGlobalDir places the global directory at $HOME/.scion, and a
-// project rooted at a home directory resolves to that same directory, so a
-// path of this shape never names an ordinary project. A broker whose home
-// lives elsewhere is not recognized here; the broker refuses such a path
-// itself at dispatch time.
+// project rooted at a home directory resolves to that same directory, so
+// neither shape names an ordinary project.
 func isBrokerGlobalDirPath(localPath string) bool {
 	if localPath == "" {
 		return false
 	}
 	clean := filepath.ToSlash(filepath.Clean(localPath))
-	if !strings.HasPrefix(clean, "/") || filepath.Base(clean) != config.DotScion {
+	if !strings.HasPrefix(clean, "/") {
 		return false
 	}
-	home := filepath.ToSlash(filepath.Dir(clean))
+	home := clean
+	if filepath.Base(clean) == config.DotScion {
+		home = filepath.ToSlash(filepath.Dir(clean))
+	}
 	if home == "/root" {
 		return true
 	}
 	parent := filepath.ToSlash(filepath.Dir(home))
-	return (parent == "/home" || parent == "/Users") && filepath.Base(home) != ""
+	return (parent == "/home" || parent == "/Users") && filepath.Base(home) != config.DotScion
 }
 
 // validateProviderLocalPath rejects a provider local path that points at the
 // broker's global directory for a project other than the global project.
 // Dispatching such a project with that path makes the broker treat its
 // global directory as the project.
-func validateProviderLocalPath(projectName, projectSlug, localPath string) error {
-	if !isBrokerGlobalDirPath(localPath) || isGlobalProjectName(projectName, projectSlug) {
+func validateProviderLocalPath(projectName, projectSlug string, labels map[string]string, localPath string) error {
+	if !isBrokerGlobalDirPath(localPath) || isGlobalHubProject(projectName, projectSlug, labels) {
 		return nil
 	}
 	return fmt.Errorf("localPath %q is the broker's global scion directory and cannot be used for project %q; "+
@@ -82,12 +93,12 @@ func validateProviderLocalPath(projectName, projectSlug, localPath string) error
 //
 //   - A new project, or a broker that is not yet a provider, takes the
 //     requested path.
-//   - A request with no path clears any stored path, so re-running provide
-//     without a path repairs a provider registered with a wrong one.
-//   - Otherwise an existing provider with no path keeps none, which avoids
-//     converting a hub-native project into a linked one, and an existing
-//     path is kept unless it is the broker's global directory for a project
-//     other than the global project.
+//   - A stored path that is the broker's global directory for a project
+//     other than the global project is replaced by the requested path, or
+//     cleared when the request has none, so re-running provide repairs it.
+//   - Otherwise the stored path is kept: an existing provider with no path
+//     keeps none, which avoids converting a hub-native project into a linked
+//     one, and a linked path is not dropped by a register that omits it.
 //
 // requestedPath must already have passed validateProviderLocalPath.
 func (s *Server) registerProviderLocalPath(ctx context.Context, project *store.Project, brokerID, requestedPath string, created bool) string {
@@ -98,10 +109,7 @@ func (s *Server) registerProviderLocalPath(ctx context.Context, project *store.P
 	if err != nil {
 		return requestedPath
 	}
-	if requestedPath == "" {
-		return ""
-	}
-	if existing.LocalPath != "" && validateProviderLocalPath(project.Name, project.Slug, existing.LocalPath) != nil {
+	if validateProviderLocalPath(project.Name, project.Slug, project.Labels, existing.LocalPath) != nil {
 		return requestedPath
 	}
 	return existing.LocalPath
