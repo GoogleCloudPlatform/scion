@@ -4477,10 +4477,11 @@ func (s *Server) resolveManagerForAgent(ctx context.Context, id, projectID strin
 // allManagers returns the default manager plus every distinct auxiliary
 // runtime's manager, in deterministic (sorted-by-identity) order. Used by
 // resolveDeleteTarget, currentRunID (a failed start's run report) and the
-// stop path's record-less-actor probe (recordlessActorProbe) to search every registered runtime rather than
-// only the one a slug-based lookup happens to resolve to first — a
-// record-less actor (see RecordlessActorProber) never matches a slug-based
-// lookup at all, so that lookup must not be relied on here.
+// stop path's record-less-actor probe (recordlessActorProbe) to search
+// every registered runtime rather than only the one a slug-based lookup
+// happens to resolve to first — a record-less actor (see
+// RecordlessActorProber) never matches a slug-based lookup at all, so that
+// lookup must not be relied on here.
 //
 // A recorded runtime type on ctx (ptone/scion#2748) limits the list to
 // runtimes of that type.
