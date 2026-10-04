@@ -2971,6 +2971,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
+	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
 	if err != nil {
@@ -2991,6 +2992,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentRestart(ctx context.Context, agent *s
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
+	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
@@ -3045,6 +3047,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentResetAuth(ctx context.Context, agent 
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
+	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
 	if err != nil {
@@ -3085,6 +3088,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
+	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
 	if err != nil {
@@ -3153,6 +3157,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *s
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
+	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
 	if err != nil {
@@ -3225,6 +3230,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentKeys(ctx context.Context, target agen
 		return agentkeys.BrokerResult{}, fmt.Errorf("%w: %w", agentkeys.ErrNotDispatched, err)
 	}
 
+	ctx = withRecordedRuntime(ctx, target.Runtime)
 	req := agentkeys.BrokerRequest{
 		ProjectID:     target.ProjectID,
 		AgentID:       target.AgentID,
@@ -3240,6 +3246,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentLogs(ctx context.Context, agent *stor
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return "", err
 	}
+	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
 	if err != nil {
@@ -3254,6 +3261,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentExec(ctx context.Context, agent *stor
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return "", 0, err
 	}
+	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
 	if err != nil {
@@ -3268,6 +3276,7 @@ func (d *HTTPAgentDispatcher) DispatchCheckAgentPrompt(ctx context.Context, agen
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return false, err
 	}
+	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
 	if err != nil {
@@ -3716,4 +3725,69 @@ func deleteProjectPathQuery(ctx context.Context) string {
 		return "&projectPath=" + url.QueryEscape(pp)
 	}
 	return ""
+}
+
+type recordedRuntimeKey struct{}
+
+// dispatchRecordedRuntime returns the runtime type to send to the broker for
+// an agent whose store record carries runtime: the broker-reported runtime
+// type, or "" when there is none or the agent is a managed agent (those have
+// no broker runtime).
+func dispatchRecordedRuntime(runtime string) string {
+	runtime = strings.TrimSpace(runtime)
+	if runtime == "" || isManagedAgentRuntime(runtime) {
+		return ""
+	}
+	return runtime
+}
+
+// withRecordedRuntime attaches the agent's recorded runtime type to an
+// existing-agent broker request context (ptone/scion#2748). The broker
+// transports send it as the api.RecordedRuntimeQueryParam query parameter,
+// and the broker then looks for the agent only in runtimes of that type,
+// answering 503 with Retry-After when none is registered instead of looking
+// in its default runtime. Like withDeleteProjectPath it is carried on the
+// context to keep the RuntimeBrokerClient interface unchanged; an empty
+// runtime leaves ctx unchanged and the broker behaves as before.
+func withRecordedRuntime(ctx context.Context, runtime string) context.Context {
+	if rt := dispatchRecordedRuntime(runtime); rt != "" {
+		return context.WithValue(ctx, recordedRuntimeKey{}, rt)
+	}
+	return ctx
+}
+
+// recordedRuntimeParam returns "runtime=<escaped>" if a recorded runtime was
+// attached with withRecordedRuntime, otherwise "".
+func recordedRuntimeParam(ctx context.Context) string {
+	if rt, _ := ctx.Value(recordedRuntimeKey{}).(string); rt != "" {
+		return api.RecordedRuntimeQueryParam + "=" + url.QueryEscape(rt)
+	}
+	return ""
+}
+
+// withRecordedRuntimeQuery appends the recorded runtime parameter (if any) to
+// a raw query string, as used by the control channel transport.
+func withRecordedRuntimeQuery(ctx context.Context, query string) string {
+	param := recordedRuntimeParam(ctx)
+	switch {
+	case param == "":
+		return query
+	case query == "":
+		return param
+	default:
+		return query + "&" + param
+	}
+}
+
+// withRecordedRuntimeURL appends the recorded runtime parameter (if any) to a
+// full request URL, as used by the HTTP transport.
+func withRecordedRuntimeURL(ctx context.Context, endpoint string) string {
+	param := recordedRuntimeParam(ctx)
+	if param == "" {
+		return endpoint
+	}
+	if strings.Contains(endpoint, "?") {
+		return endpoint + "&" + param
+	}
+	return endpoint + "?" + param
 }

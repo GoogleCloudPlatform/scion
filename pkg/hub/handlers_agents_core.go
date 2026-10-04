@@ -3550,7 +3550,7 @@ func (s *Server) awaitAgentDeletion(w http.ResponseWriter, r *http.Request, plan
 		case deletionOutcomeDeleted:
 			w.WriteHeader(http.StatusNoContent)
 		case deletionOutcomeFailed:
-			writeDeletionFailure(w, plan.snapshot.ID, out.code, out.message)
+			writeDeletionFailure(w, plan.snapshot.ID, out.code, out.message, out.retryAfter)
 		default: // lost: someone else holds the row now
 			s.joinAgentDeletion(w, r, plan.snapshot.ID, plan.claim, deadline)
 		}
@@ -3858,6 +3858,9 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, id stri
 
 	output, exitCode, err := dispatcher.DispatchAgentExec(ctx, agent, req.Command, req.Timeout)
 	if err != nil {
+		if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
+			return
+		}
 		RuntimeError(w, "Failed to execute command on runtime broker: "+err.Error())
 		return
 	}
@@ -4095,6 +4098,9 @@ func (s *Server) handleAgentResetAuth(w http.ResponseWriter, r *http.Request, id
 
 	if err := disp.DispatchAgentResetAuth(ctx, agent); err != nil {
 		slog.Error("Failed to reset agent auth", "agent_id", id, "error", err)
+		if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
+			return
+		}
 		if writeAgentTokenIssueError(w, err) {
 			return
 		}
