@@ -1447,6 +1447,34 @@ type V1GKESharedVolumeConfig struct {
 	SubPathRoot string `json:"subpath_root,omitempty" yaml:"subpath_root,omitempty" koanf:"subpath_root"`
 }
 
+// DefaultWorkspaceSubPathRoot is the subpath_root used by every storage
+// backend (workspace_storage nfs, cloudrun_volume and gke_shared_volume, and
+// shared_dir_storage nfs) when none is configured. It is the single source of
+// that default: code that needs the effective value must call
+// SubPathRootOrDefault or ResolveSubPathRoot rather than repeat the literal.
+const DefaultWorkspaceSubPathRoot = "projects"
+
+// SubPathRootOrDefault returns subPathRoot, or DefaultWorkspaceSubPathRoot
+// when it is empty. It does not validate; see ResolveSubPathRoot.
+func SubPathRootOrDefault(subPathRoot string) string {
+	if subPathRoot == "" {
+		return DefaultWorkspaceSubPathRoot
+	}
+	return subPathRoot
+}
+
+// ResolveSubPathRoot returns the effective subpath_root (the default when
+// subPathRoot is empty) after checking it with ValidateSubPathRoot. Callers
+// that build filesystem or export paths from a subpath_root must use this, so
+// no path is ever built from an unvalidated value.
+func ResolveSubPathRoot(subPathRoot string) (string, error) {
+	root := SubPathRootOrDefault(subPathRoot)
+	if err := ValidateSubPathRoot(root); err != nil {
+		return "", fmt.Errorf("subpath_root %w", err)
+	}
+	return root, nil
+}
+
 // ApplyNFSDefaults fills default values for NFS sub-fields when Backend is "nfs".
 // When Backend is empty or "local", the NFS block is left as-is (no materialization).
 // This is idempotent and safe to call multiple times.
@@ -1467,7 +1495,7 @@ func (ws *V1WorkspaceStorageConfig) ApplyNFSDefaults() {
 		ws.NFS.GID = 1000
 	}
 	if ws.NFS.SubPathRoot == "" {
-		ws.NFS.SubPathRoot = "projects"
+		ws.NFS.SubPathRoot = DefaultWorkspaceSubPathRoot
 	}
 }
 
@@ -1480,6 +1508,85 @@ func (ws *V1WorkspaceStorageConfig) ValidateNFS() error {
 	if ws.NFS == nil || len(ws.NFS.Shares) == 0 {
 		return fmt.Errorf("workspace_storage.backend is \"nfs\" but no NFS shares are defined; " +
 			"add at least one entry under workspace_storage.nfs.shares")
+	}
+	return nil
+}
+
+// Workspace storage backend names accepted in workspace_storage.backend.
+// An empty backend means "local".
+const (
+	WorkspaceStorageBackendLocal           = "local"
+	WorkspaceStorageBackendNFS             = "nfs"
+	WorkspaceStorageBackendCloudRunVolume  = "cloudrun-volume"
+	WorkspaceStorageBackendGKESharedVolume = "gke-shared-volume"
+)
+
+// ApplyWorkspaceStorageDefaults fills default values for the block selected
+// by Backend: ApplyNFSDefaults for "nfs", and the subpath_root default for
+// "cloudrun-volume" and "gke-shared-volume" when their block is present (a
+// missing volume block is left nil for ValidateWorkspaceStorage to report).
+// Other backends, including unknown ones, are left as-is. Idempotent.
+func (ws *V1WorkspaceStorageConfig) ApplyWorkspaceStorageDefaults() {
+	if ws == nil {
+		return
+	}
+	switch ws.Backend {
+	case WorkspaceStorageBackendNFS:
+		ws.ApplyNFSDefaults()
+	case WorkspaceStorageBackendCloudRunVolume:
+		if ws.CloudRunVolume != nil {
+			ws.CloudRunVolume.SubPathRoot = SubPathRootOrDefault(ws.CloudRunVolume.SubPathRoot)
+		}
+	case WorkspaceStorageBackendGKESharedVolume:
+		if ws.GKESharedVolume != nil {
+			ws.GKESharedVolume.SubPathRoot = SubPathRootOrDefault(ws.GKESharedVolume.SubPathRoot)
+		}
+	}
+}
+
+// ValidateWorkspaceStorage returns an error if the workspace storage config
+// cannot be used: an unknown backend name, an "nfs" backend without shares
+// (ValidateNFS), a volume backend without its block or without a
+// volume_name, or a subpath_root that ValidateSubPathRoot rejects. A nil
+// config, an empty backend and "local" are valid. Call after
+// ApplyWorkspaceStorageDefaults.
+//
+// Backend names are matched exactly (case-sensitive), as everywhere else
+// they are consumed: a backend like "NFS" was previously treated as local.
+func (ws *V1WorkspaceStorageConfig) ValidateWorkspaceStorage() error {
+	if ws == nil {
+		return nil
+	}
+
+	var subPathRoot, block string
+	switch ws.Backend {
+	case "", WorkspaceStorageBackendLocal:
+		return nil
+	case WorkspaceStorageBackendNFS:
+		if err := ws.ValidateNFS(); err != nil {
+			return err
+		}
+		subPathRoot, block = ws.NFS.SubPathRoot, "nfs"
+	case WorkspaceStorageBackendCloudRunVolume:
+		if ws.CloudRunVolume == nil || ws.CloudRunVolume.VolumeName == "" {
+			return fmt.Errorf("workspace_storage.backend is %q but workspace_storage.cloudrun_volume.volume_name is not set; "+
+				"set it to the name of the volume declared in the Cloud Run service", ws.Backend)
+		}
+		subPathRoot, block = ws.CloudRunVolume.SubPathRoot, "cloudrun_volume"
+	case WorkspaceStorageBackendGKESharedVolume:
+		if ws.GKESharedVolume == nil || ws.GKESharedVolume.VolumeName == "" {
+			return fmt.Errorf("workspace_storage.backend is %q but workspace_storage.gke_shared_volume.volume_name is not set; "+
+				"set it to the pod volume that mounts the shared PVC at /mnt/<volume_name>", ws.Backend)
+		}
+		subPathRoot, block = ws.GKESharedVolume.SubPathRoot, "gke_shared_volume"
+	default:
+		return fmt.Errorf("workspace_storage.backend %q is not supported; use one of %q, %q, %q or %q",
+			ws.Backend, WorkspaceStorageBackendLocal, WorkspaceStorageBackendNFS,
+			WorkspaceStorageBackendCloudRunVolume, WorkspaceStorageBackendGKESharedVolume)
+	}
+
+	if err := ValidateSubPathRoot(SubPathRootOrDefault(subPathRoot)); err != nil {
+		return fmt.Errorf("workspace_storage.%s.subpath_root %w", block, err)
 	}
 	return nil
 }
@@ -1551,14 +1658,14 @@ func (s *V1SharedDirStorageConfig) Validate() error {
 		return fmt.Errorf("server.shared_dir_storage.backend is \"nfs\" but nfs.shares[0].id is empty")
 	}
 	if s.NFS.SubPathRoot != "" {
-		if err := validateSubPathRoot(s.NFS.SubPathRoot); err != nil {
+		if err := ValidateSubPathRoot(s.NFS.SubPathRoot); err != nil {
 			return fmt.Errorf("server.shared_dir_storage.nfs.subpath_root %w", err)
 		}
 	}
 	return nil
 }
 
-// validateSubPathRoot rejects a subpath_root that would produce a
+// ValidateSubPathRoot rejects a subpath_root that would produce a
 // confusing error or an unsafe path-component chain once joined with the
 // project ID and shared-dir name (round 6 review nit #6). An absolute
 // value (e.g. "/projects") produces a leading empty path component when
@@ -1570,8 +1677,14 @@ func (s *V1SharedDirStorageConfig) Validate() error {
 // actionable message instead. "." and ".." components have no meaningful
 // interpretation here either: subpath_root exists to name one literal,
 // fixed subdirectory of the export, not to navigate the tree.
-func validateSubPathRoot(subPathRoot string) error {
-	if filepath.IsAbs(subPathRoot) {
+//
+// It is the one subpath_root validator shared by every storage backend and
+// by the runtimes that build paths from the value (see ResolveSubPathRoot).
+// Beyond the component checks, the value must already be clean
+// (filepath.Clean(v) == v), so the configured string is exactly the path
+// segment chain that gets joined.
+func ValidateSubPathRoot(subPathRoot string) error {
+	if filepath.IsAbs(subPathRoot) || strings.HasPrefix(filepath.ToSlash(subPathRoot), "/") {
 		return fmt.Errorf("must be relative, not absolute (got %q)", subPathRoot)
 	}
 	for _, comp := range strings.Split(filepath.ToSlash(subPathRoot), "/") {
@@ -1583,6 +1696,9 @@ func validateSubPathRoot(subPathRoot string) error {
 		case "..":
 			return fmt.Errorf("must not contain a \"..\" path component (got %q)", subPathRoot)
 		}
+	}
+	if filepath.Clean(subPathRoot) != subPathRoot {
+		return fmt.Errorf("must be a clean path (got %q, want %q)", subPathRoot, filepath.Clean(subPathRoot))
 	}
 	return nil
 }
@@ -1636,10 +1752,7 @@ func (s *V1SharedDirStorageConfig) ResolvedLayoutSummary() string {
 		hostBase = filepath.Join(s.NFS.MountRoot, s.NFS.Shares[0].ID)
 		pvName = s.NFS.Shares[0].PVName
 	}
-	subPathRoot := s.NFS.SubPathRoot
-	if subPathRoot == "" {
-		subPathRoot = "projects"
-	}
+	subPathRoot := SubPathRootOrDefault(s.NFS.SubPathRoot)
 	return fmt.Sprintf("backend=nfs host_base=%s subpath_root=%s pv_name=%s", hostBase, subPathRoot, pvName)
 }
 
@@ -2912,7 +3025,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 
 	// Workspace storage — thread into GlobalConfig so the hub can read it.
 	if v1.WorkspaceStorage != nil {
-		v1.WorkspaceStorage.ApplyNFSDefaults()
+		v1.WorkspaceStorage.ApplyWorkspaceStorageDefaults()
 		gc.WorkspaceStorage = v1.WorkspaceStorage
 	}
 

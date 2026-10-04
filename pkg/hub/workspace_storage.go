@@ -173,9 +173,9 @@ func (s *Server) volumeBackedProjectPath(wsCfg *config.V1WorkspaceStorageConfig,
 	if mountRoot == "" {
 		return "", false
 	}
-	if subPathRoot == "" {
-		subPathRoot = "projects"
-	}
+	// No validation here: ValidateWorkspaceStorage rejects a bad
+	// subpath_root at hub startup, before any path is built.
+	subPathRoot = config.SubPathRootOrDefault(subPathRoot)
 
 	volPath := filepath.Join(mountRoot, subPathRoot, "hub-projects", slug)
 	if hasWorkspaceContent(volPath) {

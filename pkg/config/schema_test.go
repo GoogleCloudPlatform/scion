@@ -441,6 +441,27 @@ server:
 	assert.NotEmpty(t, errors, "non-boolean nfs.auto_mount should produce a validation error")
 }
 
+func TestValidateSettings_WorkspaceStorageVolumeNameRequired(t *testing.T) {
+	for _, block := range []string{"cloudrun_volume", "gke_shared_volume"} {
+		t.Run(block, func(t *testing.T) {
+			good := []byte("schema_version: \"1\"\nserver:\n  workspace_storage:\n    " + block + ":\n      volume_name: workspaces\n")
+			errors, err := ValidateSettings(good, "1")
+			require.NoError(t, err)
+			assert.Empty(t, errors)
+
+			missing := []byte("schema_version: \"1\"\nserver:\n  workspace_storage:\n    " + block + ":\n      subpath_root: projects\n")
+			errors, err = ValidateSettings(missing, "1")
+			require.NoError(t, err)
+			assert.NotEmpty(t, errors, "missing volume_name should produce a validation error")
+
+			empty := []byte("schema_version: \"1\"\nserver:\n  workspace_storage:\n    " + block + ":\n      volume_name: \"\"\n")
+			errors, err = ValidateSettings(empty, "1")
+			require.NoError(t, err)
+			assert.NotEmpty(t, errors, "empty volume_name should produce a validation error")
+		})
+	}
+}
+
 func TestValidateSettings_InvalidServerLogLevel(t *testing.T) {
 	data := []byte(`
 schema_version: "1"

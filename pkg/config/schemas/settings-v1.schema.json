@@ -1177,15 +1177,17 @@
         "nfs": { "$ref": "#/$defs/serverWorkspaceStorageNFS" },
         "cloudrun_volume": {
           "type": "object",
+          "required": ["volume_name"],
           "properties": {
-            "volume_name": { "type": "string" },
+            "volume_name": { "type": "string", "minLength": 1, "description": "Cloud Run volume declared in the service; mounted at /mnt/<volume_name>." },
             "subpath_root": { "type": "string", "default": "projects" }
           }
         },
         "gke_shared_volume": {
           "type": "object",
+          "required": ["volume_name"],
           "properties": {
-            "volume_name": { "type": "string" },
+            "volume_name": { "type": "string", "minLength": 1, "description": "Pod volume that mounts the shared PVC at /mnt/<volume_name>." },
             "pv_claim_name": { "type": "string" },
             "subpath_root": { "type": "string", "default": "projects" }
           }

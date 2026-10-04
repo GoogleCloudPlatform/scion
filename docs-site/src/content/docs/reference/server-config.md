@@ -230,20 +230,35 @@ Configures the backend and mount settings for storing and managing agent workspa
 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `backend` | string | `"local"` | Storage backend pivot: `"local"` (node-local directories), `"nfs"` (Network File System mounts), `"cloudrun-volume"` (Cloud Run platform-managed volume mounts), or `"gke-shared-volume"` (GKE shared CSI-backed PVC mounts). |
+| `backend` | string | `"local"` | Storage backend pivot: `"local"` (node-local directories), `"nfs"` (Network File System mounts), `"cloudrun-volume"` (Cloud Run platform-managed volume mounts), or `"gke-shared-volume"` (GKE shared CSI-backed PVC mounts). Names are case-sensitive; any other value stops the Hub at startup. |
 | `nfs.mount_root` | string | | The host base directory under which NFS exports are mounted. |
 | `nfs.mount_options` | string | `"vers=3,hard,nconnect=4,_netdev"` | Standard mount options passed to the `mount.nfs` utility. |
 | `nfs.auto_mount` | boolean | `false` | Whether the Runtime Broker mounts the shares itself. See [NFS Mounts on the Runtime Broker](#nfs-mounts-on-the-runtime-broker). Requires the broker to run as root. |
 | `nfs.uid` | integer | `1000` | Node-independent owner UID for NFS-backed workspace trees to ensure consistent container write permissions (not yet applied on Kubernetes; ptone/scion#2608). |
 | `nfs.gid` | integer | `1000` | Node-independent owner GID for NFS-backed workspace trees. |
 | `nfs.storage_class` | string | | The Kubernetes StorageClass name used to dynamically allocate volumes on GKE. |
-| `nfs.subpath_root` | string | `"projects"` | The default base folder name within the share for project workspaces. |
+| `nfs.subpath_root` | string | `"projects"` | The base folder within the share for project workspaces. See [subpath_root](#subpath_root). |
 | `nfs.shares` | list of objects | `[]` | List of NFS share objects. Each share requires: `id` (stable ID), `server` (IP address or hostname), `export` (exported path, e.g., `/scion-workspaces`), and optional `pv_name` (for GKE). |
-| `cloudrun_volume.volume_name` | string | | The name of the platform volume declared in the Cloud Run service specification. The Hub resolves workspaces under `/mnt/<volume_name>`, which is where Cloud Run mounts a declared volume. Without a volume name there is no mount point: the Hub fails readiness (`GET /readyz` returns `503`), blocks workspace writes on Cloud Run, and never builds a workspace path from the empty name. |
-| `cloudrun_volume.subpath_root` | string | `"projects"` | Sub-directory prefix within the Cloud Run volume. |
-| `gke_shared_volume.volume_name` | string | | The K8s volume name referencing the persistent volume claim (PVC). **The pod spec must mount that volume at `/mnt/<volume_name>`**: the Hub derives every workspace path from it, and a pod that mounts the PVC elsewhere fails readiness (`GET /readyz` returns `503`) rather than writing workspaces to ephemeral container storage. |
+| `cloudrun_volume.volume_name` | string | | **Required** when `backend` is `"cloudrun-volume"`. The name of the platform volume declared in the Cloud Run service specification. The Hub resolves workspaces under `/mnt/<volume_name>`, which is where Cloud Run mounts a declared volume. If it is missing or empty, the Hub refuses to start. |
+| `cloudrun_volume.subpath_root` | string | `"projects"` | Sub-directory prefix within the Cloud Run volume. See [subpath_root](#subpath_root). |
+| `gke_shared_volume.volume_name` | string | | **Required** when `backend` is `"gke-shared-volume"`; if it is missing or empty, the Hub refuses to start. The K8s volume name referencing the persistent volume claim (PVC). **The pod spec must mount that volume at `/mnt/<volume_name>`**: the Hub derives every workspace path from it, and a pod that mounts the PVC elsewhere fails readiness (`GET /readyz` returns `503`) rather than writing workspaces to ephemeral container storage. |
 | `gke_shared_volume.pv_claim_name` | string | | The name of the GKE-managed PVC bound to the shared storage backend (e.g. Filestore). |
-| `gke_shared_volume.subpath_root` | string | `"projects"` | Sub-directory prefix within the GKE volume. |
+| `gke_shared_volume.subpath_root` | string | `"projects"` | Sub-directory prefix within the GKE volume. See [subpath_root](#subpath_root). |
+
+#### Startup validation
+
+The Hub checks `workspace_storage` when it starts, and refuses to start with an error naming the bad field when:
+
+- `backend` is not one of the four names above;
+- `backend` is `"nfs"` and `nfs.shares` is empty;
+- `backend` is `"cloudrun-volume"` or `"gke-shared-volume"` and the matching `volume_name` is missing or empty;
+- the selected backend's `subpath_root` is invalid (see below).
+
+A Runtime Broker that runs without the Hub keeps its own NFS handling: it logs a warning and skips the NFS checks instead of failing (see [NFS Mounts on the Runtime Broker](#nfs-mounts-on-the-runtime-broker)).
+
+#### subpath_root
+
+`subpath_root` is the directory inside the share or volume that holds project trees, at `<subpath_root>/<project-id>/...`. It defaults to `"projects"` for every backend, and for `shared_dir_storage.nfs`. It must be a clean relative path: no leading `/`, no `.` or `..` components, no empty components and no trailing `/`. It may have several components, for example `team/projects`. The Cloud Run runtime's NFS export paths use the same `nfs.subpath_root`.
 
 #### NFS Mounts on the Runtime Broker
 

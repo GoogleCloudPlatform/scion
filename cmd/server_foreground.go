@@ -145,6 +145,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if enableHub {
+		if err := validateHubWorkspaceStorage(cfg); err != nil {
+			return err
+		}
+	}
 
 	// 3. Resolve admin mode settings
 	adminMode := cfg.AdminMode
@@ -948,6 +953,25 @@ func initServerLogging(cmd *cobra.Command) (cleanups []func(), requestLogger *sl
 
 // loadAndReconcileConfig loads the server configuration file and reconciles
 // it with command-line flags and workstation defaults.
+// validateHubWorkspaceStorage fails hub startup when server.workspace_storage
+// cannot be used: an unknown backend, nfs without shares, a volume backend
+// without volume_name, or an invalid subpath_root. Without it the hub would
+// quietly fall back to ephemeral local project paths and only readiness
+// would notice. Broker-only processes keep their own handling (the broker
+// warns and skips NFS checks; see brokerNFSConfig).
+func validateHubWorkspaceStorage(cfg *config.GlobalConfig) error {
+	if cfg == nil {
+		return nil
+	}
+	// Defaults are applied during config load; applying them again is
+	// idempotent and keeps this check independent of the load path.
+	cfg.WorkspaceStorage.ApplyWorkspaceStorageDefaults()
+	if err := cfg.WorkspaceStorage.ValidateWorkspaceStorage(); err != nil {
+		return fmt.Errorf("invalid server.workspace_storage: %w", err)
+	}
+	return nil
+}
+
 func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 	cfg, err := config.LoadGlobalConfig(serverConfigPath)
 	if err != nil {
