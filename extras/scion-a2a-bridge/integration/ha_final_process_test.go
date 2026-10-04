@@ -244,6 +244,17 @@ func taskIdentity(t *testing.T, raw json.RawMessage) (string, string, string) {
 
 func publishBrokerMessage(t *testing.T, bridgeProcess *testProcess, hubToken, userID, taskID, messageID, messageType, text string) {
 	t.Helper()
+	publishBrokerMessageAt(t, bridgeProcess, hubToken, userID, taskID, messageID, messageType, text, time.Now())
+}
+
+// publishBrokerMessageAt publishes with an explicit message timestamp. Use it
+// to simulate broker redelivery: a redelivered message is byte-identical, so
+// it carries the original timestamp. The bridge derives artifact IDs (and so
+// artifact dedup keys) from timestamp+body, so two publishes stamped with
+// time.Now() that straddle a second boundary are two distinct messages, not a
+// redelivery (ptone/scion#2912).
+func publishBrokerMessageAt(t *testing.T, bridgeProcess *testProcess, hubToken, userID, taskID, messageID, messageType, text string, timestamp time.Time) {
+	t.Helper()
 	creds := grpcbroker.NewTokenSourceCredentials(&fixedTokenSource{token: hubToken}, false, grpcbroker.WithCloudRunHeader())
 	connection, err := grpc.NewClient(strings.TrimPrefix(bridgeProcess.URL(), "http://"),
 		grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithPerRPCCredentials(creds))
@@ -261,7 +272,7 @@ func publishBrokerMessage(t *testing.T, bridgeProcess *testProcess, hubToken, us
 		Topic: fmt.Sprintf("scion.project.proj1.user.%s.messages", userID),
 		Message: &brokerv1.StructuredMessage{
 			Version: 1, Sender: "agent:agent1", Recipient: "user:" + userID,
-			Msg: text, Type: messageType, Timestamp: time.Now().UTC().Format(time.RFC3339), Metadata: metadata,
+			Msg: text, Type: messageType, Timestamp: timestamp.UTC().Format(time.RFC3339), Metadata: metadata,
 		},
 	})
 	if err != nil {
@@ -627,8 +638,11 @@ func TestCrossReplicaStreamCursor(t *testing.T) {
 		cursorUUID(taskID), snapCursor, workingEventID, cursorSSEEvidence(firstSnapshot), cursorSSEEvidence(restartSnapshot), cursorSSEEvidence(workingEvent))
 	assertNoSSE(t, reconnected, 250*time.Millisecond)
 
-	publishBrokerMessage(t, h.bridgeB, h.hubToken, stats.LastUserID, taskID, "cursor-final", messages.TypeAssistantReply, "final once")
-	publishBrokerMessage(t, h.bridgeB, h.hubToken, stats.LastUserID, taskID, "cursor-final", messages.TypeAssistantReply, "final once")
+	// Publish the final reply, then redeliver it. The redelivery must carry the
+	// same timestamp as the original, as a real broker redelivery would.
+	finalAt := time.Now()
+	publishBrokerMessageAt(t, h.bridgeB, h.hubToken, stats.LastUserID, taskID, "cursor-final", messages.TypeAssistantReply, "final once", finalAt)
+	publishBrokerMessageAt(t, h.bridgeB, h.hubToken, stats.LastUserID, taskID, "cursor-final", messages.TypeAssistantReply, "final once", finalAt)
 	for {
 		ev := nextSSE(t, reconnected, 3*time.Second)
 		if bytes.Contains(ev.data, []byte("_bridgeEventID")) {
@@ -659,6 +673,19 @@ func TestCrossReplicaStreamCursor(t *testing.T) {
 	}
 	if cursor <= 0 || distinct != total {
 		t.Fatalf("cursor=%d distinct_dedup=%d total_events=%d", cursor, distinct, total)
+	}
+	// The redelivered final reply must not add a second artifact or message
+	// event. Distinct dedup keys alone cannot show this, because an artifact
+	// key that drifts between deliveries is still "distinct".
+	var finalArtifacts, finalMessages int64
+	if err := store.DB().QueryRow(`SELECT
+		COUNT(*) FILTER (WHERE dedup_key LIKE 'cursor-final:artifact:%'),
+		COUNT(*) FILTER (WHERE dedup_key = 'cursor-final:message')
+		FROM a2a_task_events WHERE task_id=$1`, taskID).Scan(&finalArtifacts, &finalMessages); err != nil {
+		t.Fatal(err)
+	}
+	if finalArtifacts != 1 || finalMessages != 1 {
+		t.Fatalf("redelivered final reply: artifact_events=%d message_events=%d, want 1 each", finalArtifacts, finalMessages)
 	}
 }
 
