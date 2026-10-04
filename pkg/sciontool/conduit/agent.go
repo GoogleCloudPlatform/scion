@@ -43,8 +43,9 @@ import (
 
 // Environment variables read by sciontool.
 const (
-	// EnvLaunchID carries the agent's launch id, set by the broker on
-	// create. It is presented as Hello.capabilities.endpoint_incarnation.
+	// EnvLaunchID carries the agent's launch id, set by the broker when
+	// the hub request carries one. It is presented as
+	// Hello.capabilities.endpoint_incarnation.
 	EnvLaunchID = "SCION_LAUNCH_ID"
 	// EnvHubConduit is set to "true" by a hub that serves conduit
 	// sessions (hub.conduit on). Without it sciontool never dials

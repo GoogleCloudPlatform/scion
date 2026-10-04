@@ -71,10 +71,11 @@ type startContextInputs struct {
 	Name    string
 	AgentID string // Hub UUID (for env injection and logging)
 	Slug    string
-	// LaunchID is the Hub's launch identifier from a create request. It
-	// is injected as SCION_LAUNCH_ID, which sciontool presents to the
-	// conduit endpoint as its endpoint incarnation. Empty on start and
-	// restart, which send no launch id.
+	// LaunchID is the launch identifier of the request, when the Hub sent
+	// one. It is injected as SCION_LAUNCH_ID, which sciontool presents to
+	// the conduit endpoint as its endpoint incarnation. Empty when the
+	// request carries none (no hub path records launches yet;
+	// ptone/scion#2933).
 	LaunchID string
 
 	// Project
@@ -532,7 +533,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 	// SCION_LAUNCH_ID is broker-owned: a value from the resolved env is
 	// never passed through, so the container presents either the launch id
-	// of this create or none.
+	// of this request or none.
 	if in.LaunchID != "" {
 		env["SCION_LAUNCH_ID"] = in.LaunchID
 		classifyBrokerEnv("SCION_LAUNCH_ID", api.EnvKindPlain)
