@@ -2282,7 +2282,7 @@ func (s *Server) applyInlineConfigUpdate(agentName, projectPath string, inlineCo
 // survives and stays last among that URI's references, and on that path the
 // installed result is unchanged. Resolvers that resolve each reference on
 // its own (gcp-skill://, and gh:// when the Hub is unavailable) install the
-// same files under the same name; the surviving entry now carries the latest
+// same files under the same name; the surviving entry carries the latest
 // Scope and Optional, matching the Hub path. References with the same URI
 // but different As are kept as separate entries, because the dedupe does not
 // merge different install names (the per-reference resolvers install both).

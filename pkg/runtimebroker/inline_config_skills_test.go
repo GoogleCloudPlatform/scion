@@ -119,7 +119,7 @@ func TestApplyInlineConfigUpdate_CollapsesExistingDuplicates(t *testing.T) {
 }
 
 // TestApplyInlineConfigUpdate_HubEntryReplacesExisting verifies, through
-// MergeScionConfig as well as the collapse, that the entry the Hub sends now
+// MergeScionConfig as well as the collapse, that the entry the Hub sends
 // replaces an existing entry for the same skill whatever the scopes, and
 // moves to its own position at the end.
 func TestApplyInlineConfigUpdate_HubEntryReplacesExisting(t *testing.T) {
