@@ -295,8 +295,9 @@ async function chooseSelect(el: MountedEl, select: Element, value: string): Prom
 
 describe('Create Agent: block is not offered for a Kubernetes target', () => {
   // Mounting the full Create Agent page (5 concurrent fetches, a large
-  // render tree) is slower than the default 5s test timeout under happy-dom.
-  vi.setConfig({ testTimeout: 15000 });
+  // render tree) is slower than the default 5s test timeout under happy-dom,
+  // so the suite sets a longer timeout (third describe argument). A suite
+  // timeout is used rather than vi.setConfig, which changes worker-global config.
 
   it('hides Block when the selected broker has a single, kubernetes-only profile', async () => {
     const el = await mountAgentCreate();
@@ -1644,7 +1645,7 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
     expect(tracker.bodies).toHaveLength(1);
     expect(tracker.bodies[0].gcp_identity).toEqual({ metadata_mode: 'block' });
   });
-});
+}, 15_000);
 
 /**
  * ptone/scion#2548: loadGCPServiceAccounts is fired unawaited on a project
@@ -1653,7 +1654,8 @@ describe('Create Agent: block is not offered for a Kubernetes target', () => {
  * and an arriving default must never overwrite an explicit user pick.
  */
 describe('Create Agent: GCP identity defaults do not race', () => {
-  vi.setConfig({ testTimeout: 15000 });
+  // Mounts the full Create Agent page; see the suite timeout (third describe
+  // argument) on the suite above for why.
 
   interface Deferred {
     promise: Promise<Response>;
@@ -1849,4 +1851,4 @@ describe('Create Agent: GCP identity defaults do not race', () => {
     // The project default is still recorded, for normalization and hints.
     expect(page.defaultGcpMetadataMode).toBe('passthrough');
   });
-});
+}, 15_000);

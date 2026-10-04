@@ -142,6 +142,17 @@ var compiled = []Experiment{
 		Owner:       "native-chat",
 		ReviewBy:    "2026-12-30",
 	},
+	{
+		Name:        "hub.conduit",
+		Title:       "Conduit connection layer",
+		Description: "Enables the hub surfaces of Conduit, the unified agent/broker connection layer: Ed25519 stream grants and the GET /api/v1/conduit/grant-keys endpoint. Phase 1 is library-only; no existing connection path changes.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#2774",
+		Owner:       "conduit",
+		ReviewBy:    "2027-03-31",
+	},
 }
 
 // compiledRetired lists names that PUT rejects true/false for, ignores and

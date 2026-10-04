@@ -124,7 +124,7 @@ describe('scion-chat-members agent tooltip', () => {
     const el = await mount([
       agent({ detailMessage: 'Running tests', lastActivityEvent: tenMinAgo, lastSeen: '' }),
     ]);
-    expect(tooltipContent(el)).toBe('Running tests\nUpdated: 10 min ago');
+    expect(tooltipContent(el)).toBe('Running tests\nUpdated: 10m ago');
   });
 
   it('ignores the heartbeat time — only the activity event drives "Updated"', async () => {
