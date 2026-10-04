@@ -510,6 +510,21 @@ export class ScionAgentTreeView extends LitElement {
       text-decoration: underline;
     }
 
+    /* A node whose parent agent is not loaded: a tab above the card. */
+    .node .ancestor-missing {
+      position: absolute;
+      top: -9px;
+      left: 8px;
+      padding: 0 6px;
+      font-size: 0.65rem;
+      line-height: 16px;
+      white-space: nowrap;
+      border: 1px dashed var(--sl-color-neutral-400);
+      border-radius: 8px;
+      background: var(--sl-color-neutral-50);
+      color: var(--sl-color-neutral-700);
+    }
+
     .node .meta {
       font-size: 0.72rem;
       color: var(--sl-color-neutral-600);
@@ -1376,9 +1391,13 @@ export class ScionAgentTreeView extends LitElement {
     const status = getAgentDisplayStatus(agent);
     const color = VARIANT_COLOR[getStateDisplay(status).variant];
     const modeDisplay = getMessageModeDisplay(agent.messageMode);
-    const creator = agent.appliedConfig?.creatorName || agent.createdBy || '';
+    const creator = agent.creatorName || agent.appliedConfig?.creatorName || agent.createdBy || '';
     const parentId = parentIdOf(agent);
     const isRoot = !parentId || !agentById.has(parentId);
+    // The direct parent is an agent (ancestry longer than the root user)
+    // that is not in the loaded set, e.g. beyond an incomplete load: the
+    // node renders as a root and says so.
+    const ancestorMissing = isRoot && (agent.ancestry?.length ?? 0) > 1;
     const dim = related !== null && !related.has(agent.id);
     const descendants = hiddenCounts.get(agent.id) ?? 0;
     const collapsed = this.collapsedIds.has(agent.id);
@@ -1404,6 +1423,15 @@ export class ScionAgentTreeView extends LitElement {
           style="border-left-color: ${color}"
           title=${`${agent.name}${agent.template ? ` — ${agent.template}` : ''}${isRoot && creator ? `\ncreated by ${creator}` : ''}`}
         >
+          ${ancestorMissing
+            ? html`<span
+                class="ancestor-missing"
+                role="img"
+                aria-label="Ancestor not loaded"
+                title="Ancestor not loaded"
+                ><sl-icon name="diagram-3"></sl-icon> ancestor not loaded</span
+              >`
+            : nothing}
           <span class="name">${agent.name}</span>
           <scion-status-badge
             status=${status as StatusType}
@@ -1486,7 +1514,7 @@ export class ScionAgentTreeView extends LitElement {
     let label = '';
     for (const a of agents) {
       if (a.ancestry?.length !== 1 || a.ancestry[0] !== u.id) continue;
-      label = a.appliedConfig?.creatorName || a.createdBy || '';
+      label = a.creatorName || a.appliedConfig?.creatorName || a.createdBy || '';
       if (label) break;
     }
     if (!label) label = u.id.slice(0, 8);
