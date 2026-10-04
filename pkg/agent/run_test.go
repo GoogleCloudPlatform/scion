@@ -4336,7 +4336,7 @@ func TestBuildAgentEnv_AuthoritativeMetadataModeWinsOverConfigEnv(t *testing.T) 
 		"SCION_METADATA_MODE": "block",
 	}
 
-	env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, true)
+	env, _, _, _ := buildAgentEnv(scionCfg, extraEnv, nil, true)
 
 	envMap := make(map[string]string)
 	for _, e := range env {
