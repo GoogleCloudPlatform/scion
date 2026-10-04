@@ -1866,10 +1866,11 @@ export class ScionPageProjectDetail extends LitElement {
    * `stats` with any already-tombstoned ID dropped from `stats.agents`
    * because a paged response's member-index seed can race an SSE
    * `deleted` the same way the page's own agent rows can (which the
-   * epoch's seed leaves out) — without this, a deleted agent's count would re-enter the
-   * member index via `stats.agents` and nothing would ever remove it
-   * again, inflating the paged total/running counts and Stop-all
-   * visibility. Returns `stats` itself when there is nothing to drop.
+   * epoch's seed leaves out) — without this, a deleted agent's count
+   * would re-enter the member index via `stats.agents` and nothing would
+   * ever remove it again, inflating the paged total/running counts and
+   * Stop-all visibility. Returns `stats` itself when there is nothing to
+   * drop.
    */
   private freshStats(stats: SortedAgentsResponse['stats']): SortedAgentsResponse['stats'] {
     if (!stats?.agents) return stats;
