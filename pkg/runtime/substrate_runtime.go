@@ -393,7 +393,7 @@ func (r *SubstrateRuntime) ExecUser() string { return "scion" }
 // egress policy) before returning.
 // errEmptyPerAgentSubstrate is returned by SubstrateRuntime.Run for an
 // empty-per-agent agent (design #2703).
-var errEmptyPerAgentSubstrate = errors.New(`substrate: "Empty directory per agent" (empty-per-agent) workspaces are not supported` + " on the substrate runtime, " +
+var errEmptyPerAgentSubstrate = errors.New("substrate: \"Empty directory per agent\" (empty-per-agent) workspaces are not supported on the substrate runtime, " +
 	"which does not mount the agent's workspace directory; use a Docker, Podman, Apple or Kubernetes broker for this project")
 
 func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, error) {
