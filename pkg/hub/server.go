@@ -575,6 +575,9 @@ type StartExtras struct {
 	ProvisionCredentials map[string]string
 	PreResolvedSkills    *ResolveSkillsResponse
 	Workspace            WorkspaceDispatchSpec
+	// HubAgentDefaults carries the hub defaults a start applies at the
+	// broker's lowest tier (see startHubAgentDefaults). Nil = none.
+	HubAgentDefaults *RemoteHubAgentDefaults
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -603,6 +606,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.Workspace.WorkspaceMode != "" {
 		payload["workspaceMode"] = extras.Workspace.WorkspaceMode
+	}
+	if extras.HubAgentDefaults != nil {
+		payload["hubAgentDefaults"] = extras.HubAgentDefaults
 	}
 }
 
@@ -854,7 +860,8 @@ type RemoteAgentConfig struct {
 }
 
 // RemoteHubAgentDefaults carries the four limit/resource operational
-// agent_defaults from the hub to a runtime broker.
+// agent_defaults, plus the auto-expose-ports default, from the hub to a
+// runtime broker.
 //
 // Only the fields that need no hub-side resolution travel here.
 // default_template and default_harness_config are absent by design: the hub
@@ -870,10 +877,11 @@ type RemoteAgentConfig struct {
 // the broker decodes into; TestRemoteHubAgentDefaults_WireCompatibleWithBroker
 // pins that.
 type RemoteHubAgentDefaults struct {
-	MaxTurns      int               `json:"maxTurns,omitempty"`
-	MaxModelCalls int               `json:"maxModelCalls,omitempty"`
-	MaxDuration   string            `json:"maxDuration,omitempty"`
-	Resources     *api.ResourceSpec `json:"resources,omitempty"`
+	MaxTurns        int               `json:"maxTurns,omitempty"`
+	MaxModelCalls   int               `json:"maxModelCalls,omitempty"`
+	MaxDuration     string            `json:"maxDuration,omitempty"`
+	Resources       *api.ResourceSpec `json:"resources,omitempty"`
+	AutoExposePorts *bool             `json:"autoExposePorts,omitempty"`
 }
 
 // RemoteGCPIdentityConfig holds GCP identity configuration sent from Hub to Broker.
@@ -3476,6 +3484,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// takes s.mu; it returns the zero value in file mode, where the wire field
 	// is then omitted and broker behaviour is unchanged.
 	dispatcher.SetHubAgentDefaultsProvider(s.hubAgentDefaults)
+	dispatcher.SetAutoExposePortsDefaultProvider(s.autoExposePortsDefault)
 
 	// Set image registry so bare image names are rewritten before dispatch
 	dispatcher.SetImageRegistry(s.resolveImageRegistry())
