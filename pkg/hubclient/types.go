@@ -68,6 +68,27 @@ type Agent struct {
 	// (design ptone/scion#2483 §2.2). It is nil when no delete is active or
 	// failed.
 	Deletion *DeletionInfo `json:"deletion,omitempty"`
+	// Message is the Hub's human-readable status message for the agent,
+	// for example the reason a launch failed.
+	Message string `json:"message,omitempty"`
+	// Launch describes the agent's current or most recent launch. It is
+	// absent when the Hub does not report launches or the agent has none.
+	Launch *AgentLaunch `json:"launch,omitempty"`
+}
+
+// AgentLaunch is the Hub's view of an agent's current or most recent launch.
+type AgentLaunch struct {
+	ID        string `json:"id"`
+	State     string `json:"state"`  // "active" | "ended"
+	Active    bool   `json:"active"` // the launch is in flight
+	Kind      string `json:"kind"`   // create | start | restart
+	Step      string `json:"step,omitempty"`
+	Error     string `json:"error,omitempty"` // launch error code, e.g. image_pull_failed
+	EndReason string `json:"endReason,omitempty"`
+	// Deadline and RemainingSeconds are present only while the launch is
+	// active. RemainingSeconds is never negative.
+	Deadline         *time.Time `json:"deadline,omitempty"`
+	RemainingSeconds *int       `json:"remainingSeconds,omitempty"`
 }
 
 // AgentConfig represents agent configuration.
