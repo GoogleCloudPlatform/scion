@@ -554,6 +554,40 @@ func TestCheckTransportAuth_ProxyModeLateFileInUse(t *testing.T) {
 	assertNoTokenValues(t, out, fileTok)
 }
 
+// Proxy mode, the token arrived later in the scion user's file, and doctor
+// runs with a different HOME (e.g. exec'd as root): the file is reported
+// through the file-backed source, not as missing.
+func TestCheckTransportAuth_ProxyModeLateFileOtherHome(t *testing.T) {
+	home := isolateDoctorTransport(t)
+	t.Setenv(transportauth.EnvTransportMode, "iap")
+	fileTok := makeDoctorTestJWT(time.Now().Add(50 * time.Minute))
+	path := writeDoctorTransportFile(t, home, fileTok)
+	t.Setenv("HOME", t.TempDir())
+
+	out, diag := runCheckTransportAuth(t)
+
+	if diag.transportFailed() || diag.transportMissing {
+		t.Fatalf("expected no transport failure, diag=%+v\n%s", diag, out)
+	}
+	if !diag.transportConfigured {
+		t.Fatalf("expected transport configured, diag=%+v\n%s", diag, out)
+	}
+	for _, want := range []string{
+		"Transport Auth: hub-provided token",
+		"[ OK ] Transport credential in use: refreshed file " + path,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	for _, bad := range []string{"none received yet", "awaiting first token"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("output must not contain %q:\n%s", bad, out)
+		}
+	}
+	assertNoTokenValues(t, out, fileTok)
+}
+
 // Without a proxy mode nothing changes: no transport auth is reported.
 func TestCheckTransportAuth_NoProxyModeNone(t *testing.T) {
 	home := isolateDoctorTransport(t)

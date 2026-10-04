@@ -235,6 +235,9 @@ func checkTransportAuth(diag *doctorDiag) transportauth.TokenSource {
 		return nil
 	}
 	if src == nil {
+		src = scionHomeLateFileSource()
+	}
+	if src == nil {
 		if mode := os.Getenv(transportauth.EnvTransportMode); transportauth.IsProxyMode(mode) {
 			// A proxy guards the hub but no transport token has been
 			// received yet (for example the dispatch-time mint failed).
@@ -274,6 +277,26 @@ func checkTransportAuth(diag *doctorDiag) transportauth.TokenSource {
 	}
 
 	return src
+}
+
+// scionHomeLateFileSource returns a file-backed source for the scion
+// user's transport token file when a proxy mode is set and that file
+// exists. FromEnv looks under $HOME, so doctor run with another HOME (for
+// example exec'd as root) would otherwise miss a token the agent received
+// after start. It returns nil outside a proxy mode or when the file is
+// absent.
+func scionHomeLateFileSource() transportauth.TokenSource {
+	if !transportauth.IsProxyMode(os.Getenv(transportauth.EnvTransportMode)) {
+		return nil
+	}
+	path := hub.TransportTokenFilePath()
+	if path == "" {
+		return nil
+	}
+	if _, err := os.Lstat(path); err != nil {
+		return nil
+	}
+	return transportauth.NewFileSource(path, nil)
 }
 
 func wrapTransport(client *http.Client, src transportauth.TokenSource) {
