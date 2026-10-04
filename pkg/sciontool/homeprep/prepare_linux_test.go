@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -645,4 +646,74 @@ func TestPrepare_SkeletonDirectoriesKeepOwnerAccess(t *testing.T) {
 	require.Equal(t, StateSeeding, s.State)
 	_, err = Prepare(e.opts("s2"))
 	require.NoError(t, err)
+}
+
+// A read-only .scion: the link record is not written, links under .scion
+// are skipped, the start continues, and no temporary file is left.
+func TestPrepare_ReadOnlyScionDirRecordNotWritten(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root writes into read-only directories")
+	}
+	bothResolvers(t, func(t *testing.T) {
+		e := newPrepEnv(t)
+		e.write(SentinelName, `{"version":1,"agent_id":"`+testAgentID+`","state":"seeded","uid":`+itoa(os.Getuid())+`,"start_id":"x"}`)
+		scion := filepath.Join(e.home, ".scion")
+		require.NoError(t, os.Mkdir(scion, 0o755))
+		require.NoError(t, os.Chmod(scion, 0o555))
+		t.Cleanup(func() { _ = os.Chmod(scion, 0o755) })
+		_, err := Prepare(e.opts("s1", credLink, secretsLink))
+		require.NoError(t, err)
+		var res LinksResult
+		e.memJSON(LinksResultFileName, &res)
+		assert.Equal(t, []LinkResult{{credLink.Target, LinkLinked}, {secretsLink.Target, LinkSkipped}}, res.Links)
+		ents, err := os.ReadDir(scion)
+		require.NoError(t, err)
+		assert.Empty(t, ents, "no record and no temporary file in .scion")
+		for _, n := range e.homeNames() {
+			if n != SentinelName {
+				assert.False(t, strings.HasPrefix(n, ReservedPrefix), "leftover %s", n)
+			}
+		}
+	})
+}
+
+// A link record that a later start could not rewrite is stale: it never
+// causes a user's file or link to be removed.
+func TestPrepare_StaleLinkRecordRemovesNothing(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root writes into read-only directories")
+	}
+	bothResolvers(t, func(t *testing.T) {
+		e := newPrepEnv(t)
+		oldLink := Link{Target: ".old/token", Source: "/run/scion/auth-files/token", Mode: "0600"}
+		_, err := Prepare(e.opts("s1", credLink, oldLink))
+		require.NoError(t, err)
+		require.NoError(t, MarkSeeded(e.home, testAgentID, "s1"))
+
+		// s2 cannot rewrite the record (still s1's).
+		scion := filepath.Join(e.home, ".scion")
+		require.NoError(t, os.Chmod(scion, 0o555))
+		_, err = Prepare(e.opts("s2", credLink, oldLink))
+		require.NoError(t, err)
+		require.NoError(t, os.Chmod(scion, 0o755))
+
+		// The user replaces both links with their own file and link.
+		cred := filepath.Join(e.home, credLink.Target)
+		require.NoError(t, os.Remove(cred))
+		require.NoError(t, os.WriteFile(cred, []byte("mine"), 0o600))
+		old := filepath.Join(e.home, oldLink.Target)
+		require.NoError(t, os.Remove(old))
+		require.NoError(t, os.Symlink("/my/own", old))
+
+		// s3 sees s1's record: not trusted, so nothing of the user's goes.
+		_, err = Prepare(e.opts("s3", credLink))
+		require.NoError(t, err)
+		data, err := os.ReadFile(cred)
+		require.NoError(t, err)
+		assert.Equal(t, "mine", string(data), "a user file is not replaced on a stale record")
+		assert.Equal(t, "/my/own", readlink(t, old), "a user link is not removed on a stale record")
+		var res LinksResult
+		e.memJSON(LinksResultFileName, &res)
+		assert.Equal(t, []LinkResult{{credLink.Target, LinkSkipped}}, res.Links)
+	})
 }
