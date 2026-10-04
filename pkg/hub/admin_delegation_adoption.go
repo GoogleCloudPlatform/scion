@@ -63,9 +63,12 @@ type delegationAdoptionActor struct {
 	CredentialKind string // store.InitiatorCredentialKindSession | ...DevLocal
 }
 
-// authorizeDelegationAdoption admits a hub system admin on an interactive
-// session or the recognized local development user, and writes 401/403
-// otherwise.
+// authorizeDelegationAdoption admits a hub system admin and writes 401/403
+// otherwise. The adoption admin endpoints require an interactive or dev
+// credential: the credential kind is read from the request's credential
+// context (never inferred from the identity's Go type), and a missing or
+// unrecognized credential context is denied. The returned actor's
+// CredentialKind is derived from that same context.
 func (s *Server) authorizeDelegationAdoption(w http.ResponseWriter, r *http.Request) (delegationAdoptionActor, bool) {
 	ctx := r.Context()
 	resource := Resource{Type: "hub", ID: delegationAdoptionPath}
@@ -74,41 +77,52 @@ func (s *Server) authorizeDelegationAdoption(w http.ResponseWriter, r *http.Requ
 		Unauthorized(w)
 		return delegationAdoptionActor{}, false
 	}
-	var (
-		actor delegationAdoptionActor
-		user  UserIdentity
-	)
-	switch id := identity.(type) {
-	case *DevUser:
-		if !isTrustedLocalDevUser(id) || s.authzService == nil || !s.authzService.devLocalAuthorityEnabled() {
-			logAuthzDenial(r, identity, resource, ActionManage, "local development authority not enabled")
-			Forbidden(w)
-			return delegationAdoptionActor{}, false
-		}
-		actor = delegationAdoptionActor{UserID: id.ID(), CredentialKind: store.InitiatorCredentialKindDevLocal}
-		user = id
-	case *AuthenticatedUser:
-		if id == nil || id.ID() == "" {
-			Forbidden(w)
-			return delegationAdoptionActor{}, false
-		}
-		actor = delegationAdoptionActor{UserID: id.ID(), CredentialKind: store.InitiatorCredentialKindSession}
-		user = id
-	default:
-		logAuthzDenial(r, identity, resource, ActionManage, "credential kind may not run delegation adoption")
+	deny := func(reason string) (delegationAdoptionActor, bool) {
+		logAuthzDenial(r, identity, resource, ActionManage, reason)
 		Forbidden(w)
 		return delegationAdoptionActor{}, false
+	}
+	credential := GetCredentialContextFromContext(ctx)
+	switch credential.Kind {
+	case CredentialKindInteractive, CredentialKindDev:
+	default:
+		// Fail closed: missing, unknown, UAT, agent, federation, broker
+		// (including a broker request carrying a user identity) and hub
+		// delivery credentials.
+		return deny("credential kind may not run delegation adoption")
+	}
+	user, ok := identity.(UserIdentity)
+	if !ok || isNilIdentity(user) || user.ID() == "" {
+		return deny("non-user identity")
+	}
+	if IsScopedUserIdentity(user) {
+		return deny("scoped user access token")
+	}
+	if _, federated := user.(FederatedIdentity); federated {
+		return deny("federated identity")
+	}
+	kind := initiatorCredentialKindFor(identity, credential.Kind)
+	switch kind {
+	case store.InitiatorCredentialKindSession:
+	case store.InitiatorCredentialKindDevLocal:
+		if s.authzService == nil || !s.authzService.devLocalAuthorityEnabled() {
+			return deny("local development authority not enabled")
+		}
+	default:
+		// A dev credential on an identity other than the trusted local
+		// development user.
+		return deny("credential kind may not run delegation adoption")
 	}
 	if !s.isDelegationAdoptionAdmin(ctx, user) {
-		logAuthzDenial(r, identity, resource, ActionManage, "not a system admin")
-		Forbidden(w)
-		return delegationAdoptionActor{}, false
+		return deny("not a system admin")
 	}
-	return actor, true
+	return delegationAdoptionActor{UserID: user.ID(), CredentialKind: kind}, true
 }
 
 // isDelegationAdoptionAdmin reports whether user is a hub system admin: an
 // unscoped local platform admin or a holder of the system super-admin role.
+// No registered permission covers this check (adoption adds none), so it is
+// a direct system-admin test rather than a Decide call.
 func (s *Server) isDelegationAdoptionAdmin(ctx context.Context, user UserIdentity) bool {
 	if IsUnscopedLocalPlatformAdmin(user) {
 		return true
@@ -444,16 +458,6 @@ type delegationAdoptionCommitResponse struct {
 	Records   []*store.DelegationAdoption `json:"records"`
 }
 
-// delegationAdoptionCommitHook, when set, runs after authorization and
-// before the commit transaction. Tests use it to change state between the
-// admin check and the commit.
-var delegationAdoptionCommitHook func()
-
-// delegationAdoptionHopHook, when set, runs before each hop of a commit
-// inside the transaction; an error fails the commit. Tests use it to inject
-// a write failure.
-var delegationAdoptionHopHook func(i int) error
-
 // handleDelegationAdoptionCommits serves POST .../commits. The plan is
 // recomputed inside one transaction; a fingerprint that differs from the
 // preview's returns 409 stale_authorization_preview. Every hop is written in
@@ -485,8 +489,8 @@ func (s *Server) handleDelegationAdoptionCommits(w http.ResponseWriter, r *http.
 		BadRequest(w, "planId does not match planFingerprint")
 		return
 	}
-	if delegationAdoptionCommitHook != nil {
-		delegationAdoptionCommitHook()
+	if s.delegationAdoptionCommitHook != nil {
+		s.delegationAdoptionCommitHook()
 	}
 
 	ctx := r.Context()
@@ -584,8 +588,8 @@ func (s *Server) commitAdoption(ctx context.Context, tx store.Store, plan *deleg
 		if rec.Status != store.DelegationAdoptionPending {
 			continue
 		}
-		if delegationAdoptionHopHook != nil {
-			if err := delegationAdoptionHopHook(len(out)); err != nil {
+		if s.delegationAdoptionHopHook != nil {
+			if err := s.delegationAdoptionHopHook(len(out)); err != nil {
 				return nil, err
 			}
 		}

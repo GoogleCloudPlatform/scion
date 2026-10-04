@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/delegationadoption"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -232,13 +233,12 @@ func TestDelegationAdoptionCommitRechecksAdmin(t *testing.T) {
 	body := adoptBody(f.legacy.ID)
 	p := f.adoptionPreview(t, admin, body)
 
-	delegationAdoptionCommitHook = func() {
+	f.srv.delegationAdoptionCommitHook = func() {
 		u, err := f.store.GetUser(context.Background(), admin.ID)
 		require.NoError(t, err)
 		u.Status = "suspended"
 		require.NoError(t, f.store.UpdateUser(context.Background(), u))
 	}
-	t.Cleanup(func() { delegationAdoptionCommitHook = nil })
 	rec := f.adoptionCommit(t, admin, withFingerprint(body, p))
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Equal(t, ErrCodeMutationPermissionLost, decodeTargetAPIError(t, rec).Code)
@@ -254,13 +254,12 @@ func TestDelegationAdoptionCommitIsAllOrNothing(t *testing.T) {
 	p := f.adoptionPreview(t, admin, body)
 	require.Equal(t, 2, p.Writes)
 
-	delegationAdoptionHopHook = func(i int) error {
+	f.srv.delegationAdoptionHopHook = func(i int) error {
 		if i == 1 {
 			return errors.New("injected write failure")
 		}
 		return nil
 	}
-	t.Cleanup(func() { delegationAdoptionHopHook = nil })
 	rec := f.adoptionCommit(t, admin, withFingerprint(body, p))
 	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
 	for _, id := range []string{f.legacy.ID, c.ID} {
@@ -271,7 +270,7 @@ func TestDelegationAdoptionCommitIsAllOrNothing(t *testing.T) {
 	assert.Empty(t, f.adoptionRecords(t))
 	assert.Empty(t, f.adoptionAudits(t, mutationTypeDelegationAdoption))
 
-	delegationAdoptionHopHook = nil
+	f.srv.delegationAdoptionHopHook = nil
 	rec = f.adoptionCommit(t, admin, withFingerprint(body, p))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Len(t, f.adoptionRecords(t), 2)
@@ -439,4 +438,131 @@ func TestDelegationAdoptionStatusReportsPendingByReason(t *testing.T) {
 	decodeJSONBody(t, rec, &status)
 	require.Len(t, status.Records, 1)
 	assert.Equal(t, ghost.ID, status.Records[0].DelegateID)
+}
+
+// adoptionHandlerRequest calls an adoption handler directly with the given
+// identity and credential context, bypassing the authentication middleware.
+// A zero credential leaves the context without a credential context.
+func adoptionHandlerRequest(h http.HandlerFunc, path string, identity Identity, credential *CredentialContext, body map[string]interface{}) *httptest.ResponseRecorder {
+	b, _ := json.Marshal(body)
+	ctx := contextWithIdentity(context.Background(), identity)
+	if credential != nil {
+		ctx = contextWithCredentialContext(ctx, *credential)
+	}
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h(w, req)
+	return w
+}
+
+// ensureDevUserRecord stores the trusted local development user as an
+// active admin, as a dev-auth hub does.
+func ensureDevUserRecord(t *testing.T, s store.Store) {
+	t.Helper()
+	if _, err := s.GetUser(context.Background(), DevUserID); err == nil {
+		return
+	}
+	createTestUserWithRole(t, s, DevUserID, "dev@adopt.test", store.UserRoleAdmin, store.SystemRoleSuperAdmin)
+}
+
+// The adoption admin endpoints require an interactive or dev credential.
+// The credential kind comes from the request's credential context; an
+// admin identity under any other credential kind, or without a credential
+// context, is refused on both preview and commit.
+func TestDelegationAdoptionRequiresInteractiveOrDevCredential(t *testing.T) {
+	f := newLegacyFixture(t, "adopt-cred")
+	admin := adoptionAdmin(t, f.store, "adopt-cred-admin")
+	ensureDevUserRecord(t, f.store)
+	devAgent := f.seedLegacyAgent(t, "adopt-cred-dev", nil, AgentRoleFull)
+	require.True(t, f.srv.authzService.devLocalAuthorityEnabled())
+
+	adminUser := authUser(admin)
+	devUser := NewDevUser(DevUserConfig{Username: "dev", DisplayName: "Dev", Email: "dev@adopt.test"})
+	uat := NewScopedUserIdentityWithCeiling(adminUser, "", nil, "uat-"+admin.ID,
+		permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: []string{"hub.health.read"}})
+	federated := NewFederatedUserIdentity("https://issuer.adopt.test", "sub", admin.Email, "Fed", "admin", nil)
+	agent := &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: f.legacy.ID}, ProjectID: f.proj.ID}}
+
+	cred := func(c CredentialContext) *CredentialContext { return &c }
+	denied := []struct {
+		name       string
+		identity   Identity
+		credential *CredentialContext
+	}{
+		{"broker credential carrying an admin user", adminUser, cred(CredentialContext{Kind: CredentialKindBroker, ID: "broker-1", Type: "broker"})},
+		{"user access token", uat, cred(credentialContextForIdentity(uat))},
+		{"user access token kind on an admin user", adminUser, cred(CredentialContext{Kind: CredentialKindUAT})},
+		{"agent", agent, cred(CredentialContext{Kind: CredentialKindAgentJWT})},
+		{"agent credential kind on an admin user", adminUser, cred(CredentialContext{Kind: CredentialKindAgentJWT})},
+		{"federated identity", federated, cred(credentialContextForIdentity(federated))},
+		{"federated identity with an interactive kind", federated, cred(CredentialContext{Kind: CredentialKindInteractive})},
+		{"hub delivery credential on an admin user", adminUser, cred(CredentialContext{Kind: CredentialKindHubDelivery})},
+		{"unknown credential kind", adminUser, cred(CredentialContext{Kind: "something_else"})},
+		{"missing credential context", adminUser, nil},
+		{"dev credential on an admin session identity", adminUser, cred(CredentialContext{Kind: CredentialKindDev})},
+	}
+
+	body := adoptBody(f.legacy.ID)
+	p := f.adoptionPreview(t, admin, body)
+	commitBody := withFingerprint(body, p)
+	for _, tc := range denied {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := adoptionHandlerRequest(f.srv.handleDelegationAdoptionPreviews, delegationAdoptionPath+"/previews", tc.identity, tc.credential, body)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "preview: %s", rec.Body.String())
+			rec = adoptionHandlerRequest(f.srv.handleDelegationAdoptionCommits, delegationAdoptionPath+"/commits", tc.identity, tc.credential, commitBody)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "commit: %s", rec.Body.String())
+		})
+	}
+	assert.Empty(t, f.adoptionRecords(t), "no denied request writes")
+	assert.Equal(t, store.EffectCeilingUnrecorded, activeEdgesFor(t, f.store, f.legacy.ID)[0].Kind)
+
+	// Allowed: an interactive admin session, on preview and commit. The
+	// recorded initiator credential kind is session.
+	interactive := cred(CredentialContext{Kind: CredentialKindInteractive, Type: adminUser.Type()})
+	rec := adoptionHandlerRequest(f.srv.handleDelegationAdoptionPreviews, delegationAdoptionPath+"/previews", adminUser, interactive, body)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = adoptionHandlerRequest(f.srv.handleDelegationAdoptionCommits, delegationAdoptionPath+"/commits", adminUser, interactive, commitBody)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	e := activeEdgesFor(t, f.store, f.legacy.ID)[0]
+	assert.Equal(t, store.EffectCeilingBounded, e.Kind)
+	assert.Equal(t, admin.ID, e.InitiatorPrincipalID)
+	assert.Equal(t, store.InitiatorCredentialKindSession, e.InitiatorCredentialKind)
+
+	// Allowed: the trusted local development user on a dev credential. The
+	// recorded initiator credential kind is dev_local.
+	devCred := cred(CredentialContext{Kind: CredentialKindDev})
+	devBody := adoptBody(devAgent.ID)
+	rec = adoptionHandlerRequest(f.srv.handleDelegationAdoptionPreviews, delegationAdoptionPath+"/previews", devUser, devCred, devBody)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var dp delegationAdoptionPreviewResponse
+	decodeJSONBody(t, rec, &dp)
+	require.Equal(t, 1, dp.Writes)
+	rec = adoptionHandlerRequest(f.srv.handleDelegationAdoptionCommits, delegationAdoptionPath+"/commits", devUser, devCred, withFingerprint(devBody, dp))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	e = activeEdgesFor(t, f.store, devAgent.ID)[0]
+	assert.Equal(t, store.EffectCeilingBounded, e.Kind)
+	assert.Equal(t, DevUserID, e.InitiatorPrincipalID)
+	assert.Equal(t, store.InitiatorCredentialKindDevLocal, e.InitiatorCredentialKind)
+}
+
+// The trusted local development user is refused when this server does not
+// accept local development authority.
+func TestDelegationAdoptionRefusesDevUserWithoutDevLocalAuthority(t *testing.T) {
+	f := newLegacyFixture(t, "adopt-devoff")
+	ensureDevUserRecord(t, f.store)
+	devUser := NewDevUser(DevUserConfig{Username: "dev", DisplayName: "Dev", Email: "dev@adopt.test"})
+	devCred := &CredentialContext{Kind: CredentialKindDev}
+	body := adoptBody(f.legacy.ID)
+	rec := adoptionHandlerRequest(f.srv.handleDelegationAdoptionPreviews, delegationAdoptionPath+"/previews", devUser, devCred, body)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var p delegationAdoptionPreviewResponse
+	decodeJSONBody(t, rec, &p)
+
+	f.srv.authzService.setDevLocalAuthorityEnabled(false)
+	rec = adoptionHandlerRequest(f.srv.handleDelegationAdoptionPreviews, delegationAdoptionPath+"/previews", devUser, devCred, body)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	rec = adoptionHandlerRequest(f.srv.handleDelegationAdoptionCommits, delegationAdoptionPath+"/commits", devUser, devCred, withFingerprint(body, p))
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Empty(t, f.adoptionRecords(t))
 }
