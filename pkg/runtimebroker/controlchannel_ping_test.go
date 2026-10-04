@@ -165,6 +165,23 @@ func TestControlChannelPing_ReadDeadlineClosesConnection(t *testing.T) {
 	closeClient(t, c, connectDone)
 }
 
+// When the read deadline passes long before the next ping is due, the
+// message loop stops the ping loop itself instead of leaving it (and the
+// reconnect) waiting for a ping write to fail on the closed connection.
+func TestControlChannelPing_ReadDeadlineStopsIdlePingLoop(t *testing.T) {
+	hub := newFakeControlHub(t)
+	c := newPingTestClient(hub, nil)
+	c.config.PingInterval = time.Hour
+	c.config.PongWait = 100 * time.Millisecond
+
+	connectDone := make(chan error, 1)
+	go func() { connectDone <- c.Connect(context.Background()) }()
+	t.Cleanup(func() { _ = c.Close() })
+
+	assertReconnectsBounded(t, hub)
+	closeClient(t, c, connectDone)
+}
+
 // A failed ping write closes the connection at once and the client
 // reconnects, without waiting for the read deadline.
 func TestControlChannelPing_WriteErrorClosesAndReconnects(t *testing.T) {
