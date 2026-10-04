@@ -534,6 +534,11 @@ func notFoundAsLost(err error) error {
 // Otherwise (unconfirmed, or an expired lease) the link is left alone and
 // the start-claim reaper settles the claim. Nothing is added when row holds
 // no create claim.
+//
+// This relies on every BeginLaunch of an agent holding a create claim
+// coming from the claim's holder or from its deferred continuation on the
+// node that owns the broker: BeginLaunch has no claim ID, so a launch begun
+// by anyone else would be adopted by the claim.
 func linkLaunchClaim(u *ent.AgentUpdateOne, row *ent.Agent, launchID string, now time.Time) *ent.AgentUpdateOne {
 	if row.StartClaimID == nil || row.StartClaimKind != string(store.StartClaimCreate) {
 		return u

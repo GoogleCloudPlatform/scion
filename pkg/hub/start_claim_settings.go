@@ -201,6 +201,9 @@ func validateStartClaimSettingStrings(base StartClaimSettings, d opsettings.Life
 			return fmt.Errorf("invalid %s %q: %v", f.name, f.v, err)
 		}
 	}
+	// The base is what is applied today: an out-of-range startup value has
+	// already been replaced by its default, so it must not fail a PUT.
+	base, _ = base.normalized()
 	c, _ := parseStartClaimSettings(base, d.StartClaimLeaseTTL, d.StartMaxDuration, d.StartUnconfirmedHold, d.StartCreateUnconfirmedHold)
 	if _, warns := c.normalized(); len(warns) > 0 {
 		return errors.New(warns[0])

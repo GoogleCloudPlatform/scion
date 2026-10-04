@@ -91,3 +91,13 @@ func TestPutServerConfigDB_StartClaimValidatedAgainstStartupValues(t *testing.T)
 		t.Errorf("a create hold over the default hold accepted: %d %s", rr.Code, rr.Body.String())
 	}
 }
+
+// An out-of-range startup value is replaced by its default when applied, so
+// it must not fail an unrelated lifecycle PUT.
+func TestPutServerConfigDB_OutOfRangeStartupValueDoesNotFailUnrelatedPut(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+	srv.config.StartClaim = StartClaimSettings{LeaseTTL: time.Second}
+	if rr := putStartClaimConfigDB(t, srv, ops, `{"server": {"hub": {"stalled_threshold": "10m"}}}`); rr.Code != http.StatusOK {
+		t.Errorf("unrelated PUT rejected: %d %s", rr.Code, rr.Body.String())
+	}
+}
