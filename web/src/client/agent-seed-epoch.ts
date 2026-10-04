@@ -89,10 +89,11 @@ export interface AgentSeedResult {
    * holds it. A page that renders the response as one server page is short
    * by at least this many rows.
    *
-   * A tombstoned row whose agent the store holds again (a live `created`
-   * after the `deleted`) is still left out of `agents`, but is not listed
-   * here: a refresh would leave it out the same way, so offering one could
-   * never clear the shortfall.
+   * A tombstoned row whose agent the store still holds is left out of
+   * `agents`, but is not listed here: a refresh would leave it out the same
+   * way, so offering one could never clear the shortfall. (The store
+   * ignores a live `created` for a tombstoned ID, so it does not re-add a
+   * deleted agent that way.)
    */
   dropped: string[];
   /** A live create could not be decided (no `isMember` rule). */

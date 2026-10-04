@@ -1222,7 +1222,7 @@ describe('project-detail — agent list window', () => {
       expect(requests.length).toBe(before);
     });
 
-    describe('a deleted then restored agent on the page', () => {
+    describe('a deleted agent on the page, and a later create for it', () => {
       async function pagedWithDeleted(
         projectId: string,
         restore: boolean
@@ -1249,18 +1249,22 @@ describe('project-detail — agent list window', () => {
         return { el, requests, id };
       }
 
-      it('a restored agent leaves no chip after each refresh, and stays off the page', async () => {
+      it('a create for a deleted agent is ignored: it stays off the page, and a refresh that still lists it shows the chip', async () => {
         const { el, requests, id } = await pagedWithDeleted('p-paged-restored', true);
         const win = internals(el).agentWindow;
+        expect(stateManager.getAgent(id)).toBeUndefined();
         for (let i = 0; i < 2; i++) {
           const before = requests.length;
           await win.refresh();
           await settle(el);
           expect(requests.length - before).toBe(1);
-          expect(win.updatesAvailable).toBe(false);
+          // The row is left out as deleted and the store does not hold the
+          // agent, so the page is one row short: the backfill chip.
+          expect(win.items).toHaveLength(24);
+          expect(win.updatesAvailable).toBe(true);
           expect(win.items.some((a) => a.id === id)).toBe(false);
           expect(win.memberIndex.has(id)).toBe(false);
-          expect(stateManager.getAgent(id)).toBeDefined();
+          expect(stateManager.getAgent(id)).toBeUndefined();
         }
       });
 

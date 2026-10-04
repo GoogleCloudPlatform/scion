@@ -1990,7 +1990,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
     });
   });
 
-  describe('a deleted then restored agent on the page', () => {
+  describe('a deleted agent on the page, and a later create for it', () => {
     async function pagedWithDeleted(restore: boolean): Promise<{
       el: TestEl;
       fake: Fake;
@@ -2015,18 +2015,22 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       return { el, fake, id };
     }
 
-    it('a restored agent leaves no chip after each refresh, and stays off the page', async () => {
+    it('a create for a deleted agent is ignored: it stays off the page, and a refresh that still lists it shows the chip', async () => {
       const { el, fake, id } = await pagedWithDeleted(true);
       const win = internals(el).agentWindow;
+      expect(stateManager.getAgent(id)).toBeUndefined();
       for (let i = 0; i < 2; i++) {
         const before = fake.requests.length;
         await win.refresh();
         await settle(el);
         expect(fake.requests.length - before).toBe(1);
-        expect(win.updatesAvailable).toBe(false);
+        // The row is left out as deleted and the store does not hold the
+        // agent, so the page is one row short: the backfill chip.
+        expect(win.items).toHaveLength(24);
+        expect(win.updatesAvailable).toBe(true);
         expect(win.items.some((a) => a.id === id)).toBe(false);
         expect(win.memberIndex.has(id)).toBe(false);
-        expect(stateManager.getAgent(id)).toBeDefined();
+        expect(stateManager.getAgent(id)).toBeUndefined();
       }
     });
 
@@ -2041,7 +2045,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
     });
 
     for (const serverLists of [false, true]) {
-      it(`an agent deleted then created again while a refresh is in flight stays off the page (${serverLists ? 'the response still lists it' : 'the response no longer lists it'})`, async () => {
+      it(`a create for an agent deleted while a refresh is in flight is ignored, and the agent stays off the page (${serverLists ? 'the response still lists it' : 'the response no longer lists it'})`, async () => {
         const fake: Fake = {
           agents: Array.from({ length: 1200 }, (_, i) => makeAgent(i)),
           requests: [],
@@ -2062,7 +2066,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         await flushLive(el);
         handleUpdate(`agent.${id}.created`, { ...agent, agentId: id });
         await flushLive(el);
-        expect(stateManager.getAgent(id)).toBeDefined();
+        expect(stateManager.getAgent(id)).toBeUndefined();
         h.release();
         await refreshed;
         await settle(el);
@@ -2071,10 +2075,10 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
         expect(win.items.some((a) => a.id === id)).toBe(false);
         expect(win.memberIndex.has(id)).toBe(false);
         // The page rows are the response's minus the deleted agent. A row
-        // left out for an agent the store holds again is not counted as
-        // dropped, so no chip is shown.
+        // the response still lists is left out as deleted, so the page is
+        // one row short: the backfill chip.
         expect(win.items).toHaveLength(serverLists ? 24 : 25);
-        expect(win.updatesAvailable).toBe(false);
+        expect(win.updatesAvailable).toBe(serverLists);
       });
     }
   });

@@ -18,6 +18,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Agent } from '../shared/types.js';
 import { StateManager } from './state.js';
 import { AgentSeedEpoch } from './agent-seed-epoch.js';
+import type { AgentSeedEpochState } from './agent-seed-epoch.js';
 
 class FakeEventSource extends EventTarget {
   readyState = 0;
@@ -209,13 +210,24 @@ describe('AgentSeedEpoch', () => {
   });
 
   it('seed does not report a row as dropped when the store holds its agent again after the delete', () => {
+    // The state store ignores a live create for a deleted ID, so a store
+    // that holds a tombstoned agent is stubbed here: the rule still keys
+    // off whether the store holds the agent, not off the tombstone alone.
     const sm = newState();
     sm.seedAgents([makeAgent('a'), makeAgent('b')]);
     emit(sm, 'agent.a.deleted', { agentId: 'a' });
-    emit(sm, 'agent.a.created', { ...makeAgent('a'), agentId: 'a' });
     emit(sm, 'agent.b.deleted', { agentId: 'b' });
-    expect(sm.getAgent('a')).toBeDefined();
-    const epoch = new AgentSeedEpoch(sm);
+    const heldAgain = makeAgent('a');
+    const state: AgentSeedEpochState = {
+      beginSeedEpoch: () => sm.beginSeedEpoch(),
+      seedAgents: (agents, options) => sm.seedAgents(agents, options),
+      endSeedEpoch: (token) => sm.endSeedEpoch(token),
+      getDeletedAgentIds: () => sm.getDeletedAgentIds(),
+      getAgent: (id) => (id === 'a' ? heldAgain : sm.getAgent(id)),
+      addEventListener: sm.addEventListener.bind(sm),
+      removeEventListener: sm.removeEventListener.bind(sm),
+    };
+    const epoch = new AgentSeedEpoch(state);
     const result = epoch.seed([makeAgent('a'), makeAgent('b')], { partial: false });
     epoch.close();
     // Both stay off the result; only the agent the store no longer holds is dropped.
@@ -223,13 +235,26 @@ describe('AgentSeedEpoch', () => {
     expect(result.dropped).toEqual(['b']);
   });
 
-  it('an agent deleted then created again while the request is in flight stays off the result', () => {
+  it('a live create for a deleted agent is ignored, so a response row for it counts as dropped', () => {
+    const sm = newState();
+    sm.seedAgents([makeAgent('a'), makeAgent('b')]);
+    emit(sm, 'agent.a.deleted', { agentId: 'a' });
+    emit(sm, 'agent.a.created', { ...makeAgent('a'), agentId: 'a' });
+    expect(sm.getAgent('a')).toBeUndefined();
+    const epoch = new AgentSeedEpoch(sm);
+    const result = epoch.seed([makeAgent('a'), makeAgent('b')], { partial: false });
+    epoch.close();
+    expect(result.agents.map((x) => x.id)).toEqual(['b']);
+    expect(result.dropped).toEqual(['a']);
+  });
+
+  it('a create for an agent deleted while the request is in flight is ignored and stays off the result', () => {
     const sm = newState();
     sm.seedAgents([makeAgent('a'), makeAgent('b')]);
     const epoch = new AgentSeedEpoch(sm);
     emit(sm, 'agent.a.deleted', { agentId: 'a' });
     emit(sm, 'agent.a.created', { ...makeAgent('a'), agentId: 'a' });
-    expect(sm.getAgent('a')).toBeDefined();
+    expect(sm.getAgent('a')).toBeUndefined();
     const result = epoch.seed([makeAgent('b')], { partial: false, isMember: () => true });
     epoch.close();
     // The live create does not join: the agent stays deleted for list pages.
