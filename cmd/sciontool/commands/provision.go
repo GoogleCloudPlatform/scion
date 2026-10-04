@@ -49,6 +49,11 @@ agent's own directory: it prepares the empty workspace directory inside it
 for the agent container's clone, records the branch, and writes the
 sentinel next to the workspace. It does not clone.
 
+In empty-per-agent mode (SCION_WORKSPACE_MODE=empty-per-agent, with
+SCION_AGENT_SLUG), it does the same without a branch: it makes sure the
+agent's empty workspace directory exists and writes the sentinel. Nothing
+is cloned and no git is run.
+
 In --wait-for-sentinel mode, polls for the sentinel file written by the
 winning node's init container and exits 0 when found or non-zero on timeout.
 
@@ -132,7 +137,9 @@ func runProvision(ctx context.Context) error {
 	// Clone-per-agent: the workspace path is the agent's directory
 	// (<project>/agents/<agent name>); this step prepares its workspace
 	// directory and the agent container clones into it.
-	agentDir := mode == store.SharingModeClonePerAgent
+	// Empty-per-agent on NFS: the same agent directory, whose workspace
+	// stays empty (no branch, no clone).
+	agentDir := mode == store.SharingModeClonePerAgent || mode == store.SharingModeEmptyPerAgent
 	if worktree || agentDir {
 		if slug, err := api.ValidateAgentName(agentSlug); err != nil || slug != agentSlug {
 			return fmt.Errorf("provision: %s mode needs SCION_AGENT_SLUG set to the agent's slug (got %q)", mode, agentSlug)
@@ -209,7 +216,11 @@ func runProvision(ctx context.Context) error {
 		}
 	}
 	if agentDir {
-		setAgentDirInput(&in, agentSlug, os.Getenv("SCION_AGENT_BRANCH"), provisionTimeout)
+		branch := os.Getenv("SCION_AGENT_BRANCH")
+		if mode == store.SharingModeEmptyPerAgent {
+			branch = ""
+		}
+		setAgentDirInput(&in, agentSlug, branch, provisionTimeout)
 	}
 	if !in.RequireChownSuccess {
 		log.Info("Best-effort chown requested (workspace directory prepared by the broker); a failed chown is logged and provisioning continues")
