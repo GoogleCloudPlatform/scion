@@ -400,6 +400,18 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       expect(g(el).agents).toHaveLength(24);
     });
 
+    it('an agent deleted and then created again live stays out, as in a drain', async () => {
+      const fake = newFake(25);
+      vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
+      const el = await mountGraph();
+      const victim = fake.agents[4];
+      liveUpdate(`agent.${victim.id}.deleted`, { agentId: victim.id });
+      liveUpdate(`agent.${victim.id}.created`, { ...victim, phase: 'stopped' });
+      await el.updateComplete;
+      expect(stateManager.getDeletedAgentIds().has(victim.id)).toBe(true);
+      expect(g(el).agents.some((a) => a.id === victim.id)).toBe(false);
+    });
+
     it('a live status change updates the member object', async () => {
       const fake = newFake(25);
       vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
