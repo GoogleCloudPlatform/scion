@@ -178,6 +178,13 @@ const (
 // conversation on the Hub. ChannelToSurfaceStrict is used rather than
 // ChannelToSurface because the latter maps unknown channel names (plugins
 // can be registered under any name) to "native".
+//
+// An empty channel is gated on purpose, even though on a broker deployment
+// with no reply affinity it can fan out to plugin spokes (Slack and Teams
+// accept an empty channel and deliver to the ThreadID). A direct API caller
+// sending a plugin-format thread_id with no channel therefore gets a 422 and
+// must name the channel. The CLI cannot reach this case: --thread-id
+// requires --channel.
 func outboundThreadGateApplies(channel string) bool {
 	surface, err := messaging.ChannelToSurfaceStrict(channel)
 	return err == nil && surface == "native"

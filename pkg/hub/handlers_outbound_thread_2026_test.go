@@ -168,9 +168,11 @@ func TestOutbound_FreeTextThreadID_Unresolved_Rejected(t *testing.T) {
 
 	apiErr := decodeErrorResponse(t, rr.Body.Bytes())
 	assert.Equal(t, ErrCodeUnprocessable, apiErr.Code)
-	assert.Contains(t, apiErr.Message, threadID, "error must name the thread_id")
-	assert.Contains(t, apiErr.Message, "conv:<uuid>", "error must point to conv:<uuid> addressing")
-	assert.NotContains(t, apiErr.Message, "project", "error must not make a scope claim")
+	// Pin the exact signed-off text: it names the thread_id, points to
+	// conv:<uuid> addressing, and makes no scope claim.
+	assert.Equal(t, `thread_id "c0ffee00-old-thread-uuid" does not match an existing conversation; `+
+		`address the conversation with conv:<uuid> (see 'scion conversation list'), `+
+		`or omit thread_id to message the recipient directly`, apiErr.Message)
 
 	// No conversation was minted for the thread key ...
 	extRef, err := messaging.ThreadConversationExternalRef(project.ID, threadID)
@@ -289,10 +291,10 @@ func TestOutbound_FreeTextThreadID_DeletedTopic_Rejected(t *testing.T) {
 	require.Equal(t, http.StatusUnprocessableEntity, rr.Code, "body: %s", rr.Body.String())
 	apiErr := decodeErrorResponse(t, rr.Body.Bytes())
 	assert.Equal(t, ErrCodeUnprocessable, apiErr.Code)
-	assert.Contains(t, apiErr.Message, "refers to a deleted conversation")
-	assert.NotContains(t, apiErr.Message, "project", "error must not make a scope claim")
-	assert.Contains(t, apiErr.Message, topicID)
-	assert.Contains(t, apiErr.Message, "conv:<uuid>")
+	// Pin the exact signed-off text (no scope claim).
+	assert.Equal(t, `thread_id "`+topicID+`" refers to a deleted conversation; `+
+		`address an active conversation with conv:<uuid> (see 'scion conversation list'), `+
+		`or omit thread_id to message the recipient directly`, apiErr.Message)
 
 	assertOnlyControlMessage(t, srv, s, project, agent, user)
 }
