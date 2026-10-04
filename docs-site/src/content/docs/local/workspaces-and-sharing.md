@@ -76,7 +76,7 @@ A useful rule of thumb:
 
 - **No git, collaborate on shared files** → **Shared-plain**.
 - **No git, each agent works on its own** → **Empty-per-agent**.
-- **Local git repo, parallel agents, one shared history** → **Worktree-per-agent** (on a Hub-managed project, requires git 2.48+ on the broker).
+- **Local git repo, parallel agents, one shared history** → **Worktree-per-agent**.
 - **Hub-managed git project, or agents that need fully independent checkouts** → **Clone-per-agent**.
 
 Note that the same git project used locally with worktrees may switch to clone-based provisioning once it is managed by a Hub, unless the Hub project is created with workspace mode `worktree-per-agent`.
