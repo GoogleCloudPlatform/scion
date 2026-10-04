@@ -336,6 +336,11 @@ type heartbeatReport struct {
 	// observed holds, for each matched agent, the target that listed it and
 	// whether it was running or terminal (recovery_observations.go).
 	observed map[string]observedAgent
+
+	// The broker's agents, listed at most once per heartbeat (brokerAgents).
+	agentsLoaded bool
+	agents       []store.Agent
+	agentsErr    error
 }
 
 func newHeartbeatReport() *heartbeatReport {
@@ -360,25 +365,16 @@ func inventoryAllowsReconcile(prev *store.RuntimeBroker, hb *brokerHeartbeatRequ
 	return now.Sub(prev.LastHeartbeat) < grace
 }
 
-// listRunningBrokerAgents returns every non-deleted agent assigned to
-// brokerID in phase running, following pagination.
-func (s *Server) listRunningBrokerAgents(ctx context.Context, brokerID string) ([]store.Agent, error) {
-	var out []store.Agent
-	opts := store.ListOptions{SkipTotalCount: true}
-	for {
-		res, err := s.store.ListAgents(ctx, store.AgentFilter{
-			RuntimeBrokerID: brokerID,
-			Phase:           string(state.PhaseRunning),
-		}, opts)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, res.Items...)
-		if res.NextCursor == "" {
-			return out, nil
-		}
-		opts.Cursor = res.NextCursor
+// brokerAgents returns every non-deleted agent assigned to brokerID,
+// listed once per heartbeat and shared by the missing-container reconcile
+// and the runtime observations.
+func (r *heartbeatReport) brokerAgents(ctx context.Context, s *Server, brokerID string) ([]store.Agent, error) {
+	if r.agentsLoaded {
+		return r.agents, r.agentsErr
 	}
+	r.agentsLoaded = true
+	r.agents, r.agentsErr = s.listBrokerAgents(ctx, brokerID)
+	return r.agents, r.agentsErr
 }
 
 // pendingLifecycleAgents returns the IDs of agents with a queued lifecycle
@@ -414,7 +410,7 @@ func (s *Server) reconcileMissingAgents(ctx context.Context, brokerID string, pr
 	}
 
 	complete := hb.completeTargets()
-	agents, err := s.listRunningBrokerAgents(ctx, brokerID)
+	agents, err := report.brokerAgents(ctx, s, brokerID)
 	if err != nil {
 		s.agentLifecycleLog.Warn("heartbeat reconcile: failed to list broker agents",
 			"broker_id", brokerID, "error", err)
@@ -424,6 +420,9 @@ func (s *Server) reconcileMissingAgents(ctx context.Context, brokerID string, pr
 	var missing []store.Agent
 	for i := range agents {
 		a := &agents[i]
+		if a.Phase != string(state.PhaseRunning) {
+			continue
+		}
 		if report.present[a.ID] || report.unresolvedSlugs[a.Slug] {
 			continue
 		}

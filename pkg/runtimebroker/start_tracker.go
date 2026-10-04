@@ -184,19 +184,26 @@ func (s *Server) startsInFlightSnapshot() []launchKey {
 }
 
 // inFlightStartStopWait bounds how long a stop waits for a cancelled start
-// of the same agent to finish its cleanup before stopping anyway.
-const inFlightStartStopWait = 60 * time.Second
+// of the same agent to finish its cleanup before stopping anyway. It is
+// below the hub's 60s stop-all dispatch deadline.
+const inFlightStartStopWait = 45 * time.Second
 
-// shutdownStartsWait bounds how long Shutdown waits for cancelled starts.
-const shutdownStartsWait = 30 * time.Second
+// shutdownDeadline bounds Shutdown's two waits together: for cancelled
+// starts to finish their cleanup, then for the HTTP server to drain.
+const shutdownDeadline = 30 * time.Second
 
 // cancelInFlightStart cancels the tracked starts of key and waits, bounded
 // by ctx and inFlightStartStopWait, for their cleanup.
 func (s *Server) cancelInFlightStart(ctx context.Context, key launchKey) {
 	waitCtx, cancel := context.WithTimeout(ctx, inFlightStartStopWait)
 	defer cancel()
-	if !s.startsInFlight.cancelAndWait(waitCtx, key) {
+	began := time.Now()
+	finished := s.startsInFlight.cancelAndWait(waitCtx, key)
+	if waited := time.Since(began); !finished {
 		s.agentLifecycleLog.Warn("Stop proceeding before a cancelled start finished its cleanup",
-			"project_id", key.ProjectID, "agent", key.Slug)
+			"project_id", key.ProjectID, "agent", key.Slug, "waited", waited)
+	} else if waited > time.Second {
+		s.agentLifecycleLog.Info("Stop waited for a cancelled start to finish its cleanup",
+			"project_id", key.ProjectID, "agent", key.Slug, "waited", waited)
 	}
 }

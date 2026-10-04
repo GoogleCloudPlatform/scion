@@ -39,10 +39,13 @@ type observedAgent struct {
 }
 
 // heartbeatObservedState classifies a listed agent: present and terminal
-// (exited, failed, completed, or a terminal phase), otherwise present and
-// running. A pending or starting container is running.
+// when it has an exit code, a terminal phase or a terminal container
+// status; otherwise present and running. A pending or starting container is
+// running, and so is one still running out its termination grace (for
+// example a Kubernetes pod with a deletion timestamp, which may already
+// carry an exit reason such as evicted).
 func heartbeatObservedState(hb brokerAgentHeartbeat) store.RecoveryObservedState {
-	if hb.ExitCode != nil || hb.ExitReason != "" {
+	if hb.ExitCode != nil {
 		return store.ObservedPresentTerminal
 	}
 	switch state.Phase(hb.Phase) {
@@ -112,9 +115,17 @@ func (s *Server) recordRecoveryObservations(ctx context.Context, brokerID string
 		targets = append(targets, t)
 	}
 
-	agents, err := s.listBrokerAgents(ctx, brokerID)
+	agents, err := report.brokerAgents(ctx, s, brokerID)
 	if err != nil {
 		slog.Warn("Recovery observations: listing broker agents failed", "broker_id", brokerID, "error", err)
+		return
+	}
+	// A queued create, start or restart dispatch (for a broker reached
+	// through another hub node) may create a container at any moment:
+	// record it as a start in flight.
+	pending, err := s.pendingLifecycleAgents(ctx, brokerID)
+	if err != nil {
+		slog.Warn("Recovery observations: listing pending dispatches failed", "broker_id", brokerID, "error", err)
 		return
 	}
 	inFlight := hb.startsInFlightKeys()
@@ -124,7 +135,7 @@ func (s *Server) recordRecoveryObservations(ctx context.Context, brokerID string
 		if !needsRecoveryObservation(a) {
 			continue
 		}
-		o := store.RecoveryObservation{AgentID: a.ID, InFlight: inFlight[[2]string{a.ProjectID, a.Slug}]}
+		o := store.RecoveryObservation{AgentID: a.ID, InFlight: inFlight[[2]string{a.ProjectID, a.Slug}] || pending[a.ID]}
 		if seen, ok := report.observed[a.ID]; ok {
 			o.Target, o.State = seen.target, seen.state
 		} else {
@@ -167,29 +178,22 @@ const observationFreshness = 30 * time.Second
 
 // observationFresh reports whether obs may be read as current, using the
 // complete-inventory time of obs's target on its broker (inv):
-//  1. when sessionComparable, the target was listed complete in the
-//     broker's current control channel session (when the broker has one).
-//     connected_at is written on the hub process clock, so it is comparable
-//     with the store-clock inventory time only on SQLite, where both are the
-//     single hub process's clock. Elsewhere (Postgres) and for HTTP-only
-//     brokers (no session), rule 3 together with inventoryAllowsReconcile
-//     covers reconnects;
-//  2. obs is no newer than that inventory;
-//  3. that inventory is at most two heartbeat intervals old at now.
+//  1. obs was written by that inventory: observations and inventory times
+//     are written together in one transaction with one store-clock value,
+//     so an older row (an agent that has since left the observed set, or
+//     an observation of an earlier inventory) does not match;
+//  2. that inventory is at most two heartbeat intervals old at now.
 //
-// now must be the store clock.
-func observationFresh(obs store.RecoveryObservationRecord, inv map[string]time.Time, broker *store.RuntimeBroker, now time.Time, sessionComparable bool) bool {
+// Reconnects are covered by rule 2 together with the complete-inventory
+// gate (inventoryAllowsReconcile): the first heartbeat after a gap is not
+// used, so no inventory time is refreshed until a complete inventory in the
+// new period. now must be the store clock.
+func observationFresh(obs store.RecoveryObservationRecord, inv map[string]time.Time, now time.Time) bool {
 	if obs.Target == "" || obs.ObservedAt.IsZero() {
 		return false
 	}
 	t, ok := inv[obs.Target]
-	if !ok {
-		return false
-	}
-	if sessionComparable && broker != nil && broker.ConnectedAt != nil && !broker.ConnectedAt.IsZero() && !t.After(*broker.ConnectedAt) {
-		return false
-	}
-	if obs.ObservedAt.After(t) {
+	if !ok || !obs.ObservedAt.Equal(t) {
 		return false
 	}
 	return now.Sub(t) <= 2*observationFreshness

@@ -1151,11 +1151,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// handler and wait for Run's deferred cleanup, before the hub
 	// connections and the HTTP server drain, so no start outlives the
 	// starts this process last reported in flight.
-	startsCtx, startsCancel := context.WithTimeout(ctx, shutdownStartsWait)
-	if !s.startsInFlight.cancelAllAndWait(startsCtx) {
+	// One deadline covers both this wait and the HTTP drain below.
+	ctx, cancel := context.WithTimeout(ctx, shutdownDeadline)
+	defer cancel()
+	if !s.startsInFlight.cancelAllAndWait(ctx) {
 		slog.Warn("Shutdown proceeding before every cancelled start finished its cleanup")
 	}
-	startsCancel()
 
 	// Stop all hub connections
 	s.hubMu.RLock()
@@ -1169,9 +1170,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 
 	slog.Info("Runtime Broker API server shutting down...")
-
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
 
 	return srv.Shutdown(ctx)
 }

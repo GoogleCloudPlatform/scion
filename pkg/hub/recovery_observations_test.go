@@ -40,7 +40,8 @@ func TestRecoveryObservations_HeartbeatObservedState(t *testing.T) {
 		{brokerAgentHeartbeat{ContainerStatus: "Exited (255) 2 hours ago"}, store.ObservedPresentTerminal},
 		{brokerAgentHeartbeat{ContainerStatus: "Succeeded"}, store.ObservedPresentTerminal},
 		{brokerAgentHeartbeat{Phase: "running", ExitCode: &code}, store.ObservedPresentTerminal},
-		{brokerAgentHeartbeat{Phase: "running", ExitReason: "evicted"}, store.ObservedPresentTerminal},
+		{brokerAgentHeartbeat{Phase: "running", ExitReason: "evicted"}, store.ObservedPresentRunning},
+		{brokerAgentHeartbeat{Phase: "running", ContainerStatus: "Terminating", ExitReason: "evicted"}, store.ObservedPresentRunning},
 	}
 	for _, tc := range cases {
 		assert.Equal(t, tc.want, heartbeatObservedState(tc.hb), "%+v", tc.hb)
@@ -70,35 +71,73 @@ func TestRecoveryObservations_NeedsObservation(t *testing.T) {
 
 func TestRecoveryObservations_Freshness(t *testing.T) {
 	now := time.Now()
-	obs := store.RecoveryObservationRecord{Target: "A", ObservedAt: now.Add(-10 * time.Second)}
-	inv := map[string]time.Time{"A": now.Add(-10 * time.Second), "B": now.Add(-time.Hour)}
+	invA := now.Add(-10 * time.Second)
+	obs := store.RecoveryObservationRecord{Target: "A", ObservedAt: invA}
+	inv := map[string]time.Time{"A": invA, "B": now.Add(-time.Hour)}
 
-	assert.True(t, observationFresh(obs, inv, &store.RuntimeBroker{}, now, true))
+	assert.True(t, observationFresh(obs, inv, now), "written by the target's latest complete inventory")
 
 	// Per target: B has not been listed complete for an hour, so its
 	// observations are stale even though A is current.
-	b := obs
-	b.Target = "B"
-	b.ObservedAt = now.Add(-time.Hour)
-	assert.False(t, observationFresh(b, inv, &store.RuntimeBroker{}, now, true), "an incomplete target's observation is stale")
+	b := store.RecoveryObservationRecord{Target: "B", ObservedAt: now.Add(-time.Hour)}
+	assert.False(t, observationFresh(b, inv, now), "an incomplete target's observation is stale")
 
 	unknown := obs
 	unknown.Target = "C"
-	assert.False(t, observationFresh(unknown, inv, &store.RuntimeBroker{}, now, true))
+	assert.False(t, observationFresh(unknown, inv, now))
 
-	// Current session: the inventory must postdate the control channel
-	// session start.
-	connected := now.Add(-5 * time.Second)
-	assert.False(t, observationFresh(obs, inv, &store.RuntimeBroker{ConnectedAt: &connected}, now, true), "an inventory from before this session is stale")
-	assert.True(t, observationFresh(obs, inv, &store.RuntimeBroker{ConnectedAt: &connected}, now, false), "the session rule is skipped where connected_at is on another clock")
-	earlier := now.Add(-time.Minute)
-	assert.True(t, observationFresh(obs, inv, &store.RuntimeBroker{ConnectedAt: &earlier}, now, true))
+	// A row older than its target's latest inventory (an agent that has
+	// left the observed set, or an earlier inventory) is not current.
+	older := obs
+	older.ObservedAt = invA.Add(-30 * time.Second)
+	assert.False(t, observationFresh(older, inv, now), "a row older than its inventory is stale")
 
 	newer := obs
 	newer.ObservedAt = now
-	assert.False(t, observationFresh(newer, inv, &store.RuntimeBroker{}, now, true), "an observation newer than its inventory is not covered by it")
+	assert.False(t, observationFresh(newer, inv, now), "an observation newer than its inventory is not covered by it")
 
-	assert.False(t, observationFresh(obs, inv, &store.RuntimeBroker{}, now.Add(2*observationFreshness), true), "older than two heartbeat intervals is stale")
+	assert.False(t, observationFresh(obs, inv, invA.Add(2*observationFreshness+time.Second)), "older than two heartbeat intervals is stale")
+}
+
+// A row left behind when its agent leaves the observed set keeps its old
+// observed_at; a later complete inventory of the same target must not make
+// it read as current.
+func TestRecoveryObservations_RowLeftBehindIsNotFresh(t *testing.T) {
+	f := newReconcileFixture(t)
+	ctx := context.Background()
+	a := f.addAgent("left", "error", "")
+	_, err := f.s.SetRunIntent(ctx, a.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+	f.heartbeat(completeInventory())
+
+	// The agent leaves the observed set (its intent is now stopped).
+	_, err = f.s.SetRunIntent(ctx, a.ID, store.RunIntentStopped)
+	require.NoError(t, err)
+	time.Sleep(2 * time.Millisecond)
+	f.heartbeat(completeInventory())
+
+	obs, err := f.s.GetRecoveryObservations(ctx, []string{a.ID})
+	require.NoError(t, err)
+	rows, err := f.s.ListBrokerTargetInventory(ctx, f.brokerID)
+	require.NoError(t, err)
+	assert.False(t, observationFresh(obs[a.ID], targetInventoryTimes(rows), time.Now()))
+}
+
+func TestRecoveryObservations_QueuedStartIsInFlight(t *testing.T) {
+	f := newReconcileFixture(t)
+	ctx := context.Background()
+	a := f.addAgent("queued", "stopped", "")
+	_, err := f.s.SetRunIntent(ctx, a.ID, store.RunIntentRunning)
+	require.NoError(t, err)
+	require.NoError(t, f.s.InsertBrokerDispatch(ctx, &store.BrokerDispatch{
+		ID: tid("queued-start"), BrokerID: f.brokerID, AgentID: a.ID, AgentSlug: a.Slug, ProjectID: f.projectID, Op: "start",
+	}))
+	f.heartbeat(completeInventory())
+	got, err := f.s.GetRecoveryObservations(ctx, []string{a.ID})
+	require.NoError(t, err)
+	require.Contains(t, got, a.ID)
+	assert.Equal(t, store.ObservedAbsent, got[a.ID].State)
+	assert.True(t, got[a.ID].InFlight, "a queued start dispatch is a start in flight")
 }
 
 func TestRecoveryObservations_RecordedFromHeartbeat(t *testing.T) {
@@ -195,5 +234,5 @@ func TestRecoveryObservations_HTTPBrokerReconnectFreshness(t *testing.T) {
 	obs, err := f.s.GetRecoveryObservations(ctx, []string{a.ID})
 	require.NoError(t, err)
 	assert.True(t, obs[a.ID].ObservedAt.Equal(before[a.ID].ObservedAt), "the first heartbeat after the gap writes nothing")
-	assert.False(t, observationFresh(obs[a.ID], inv, broker, later, true), "the pre-gap observation is not fresh after the first heartbeat")
+	assert.False(t, observationFresh(obs[a.ID], inv, later), "the pre-gap observation is not fresh after the first heartbeat")
 }
