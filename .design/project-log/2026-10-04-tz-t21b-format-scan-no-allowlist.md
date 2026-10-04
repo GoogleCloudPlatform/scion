@@ -39,7 +39,7 @@ The scope grew to include the chat compact-age swap that tz-refactor task 21
 part (a) deferred until `formatRelative` gained a `style` option.
 
 - **What changed.** `chat-members.ts` `formatRelativeTime` and `chat-search.ts`
-  `formatTime` now render ages under 7 days, and future instants, with
+  `formatTime` now render ages under 7 days with
   `formatRelative(iso, { style: 'narrow' })`. Older instants keep their
   absolute-date branches and titles unchanged.
 - **Behaviour deltas** (narrow `en` output verified in this Node):
@@ -50,12 +50,12 @@ part (a) deferred until `formatRelative` gained a `style` option.
     `Math.round`, so 59m40s reads "1h ago", 23h40m reads "yesterday", and
     6d14h reads "7d ago" while still on the relative branch. An exact past
     half rounds toward zero (59.5 minutes reads "59m ago").
-  - Future instants used to read "just now"/"now"; they now read "in 5m".
-    Other list views built on `formatRelative` clamp future instants to
-    "just now" as clock skew, so this is the one difference from them.
+  - Future instants read "now", as before in search, while members used to
+    read "just now". Chat timestamps are past by nature, so a future value is
+    clock skew and is clamped, as other list views do.
 - **Tests.** `chat-relative-dates.test.ts` uses a fixed clock with boundary
   cases for both components (now, 59s, 59m40s, the exact half, 23h40m, 6d,
-  6d14h, +5m, and the switch at exactly 7 days). `chat-members.test.ts`
+  6d14h, +5m clamped to "now", and the switch at exactly 7 days). `chat-members.test.ts`
   expects "10m ago".
 - **Other ladders.** A grep of `web/src` found no other hand-rolled "ago"
   ladder. The remaining relative-time helpers already call `formatRelative`.
