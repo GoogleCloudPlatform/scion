@@ -51,6 +51,11 @@ func TestFailureMemo_ZeroValue(t *testing.T) {
 }
 
 func TestFailureMemo_RecordSetsTTL(t *testing.T) {
+	// A remembered failure lasts one minute: long enough to spare repeated
+	// lookups close together, short enough that a fix shows up quickly.
+	if FailureMemoTTL != time.Minute {
+		t.Fatalf("FailureMemoTTL = %v, want %v", FailureMemoTTL, time.Minute)
+	}
 	var m FailureMemo
 	before := time.Now()
 	m.Record("k", errors.New("not found"))
