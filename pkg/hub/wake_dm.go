@@ -69,12 +69,26 @@ type WakeResult struct {
 func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeResult, *AgentDMError) {
 	phase := state.Phase(agent.Phase)
 
+	// A create launch in flight or left incomplete skips the wake in any
+	// phase. The answer comes from the start gate, so a delete in progress
+	// still wins over the launch refusal.
+	if launchStartRefusal(agent, time.Now()).refuses() {
+		if ref := s.startGate(ctx, agent, startEntryWake); ref.refuses() {
+			s.messageLog.Info("wake: skipped by the start gate",
+				"agent_id", agent.ID, "code", ref.Code)
+			return nil, ref.dmError()
+		}
+	}
+
 	switch phase {
 	case state.PhaseSuspended:
-		// Delete in progress (design ptone/scion#2483 §2.1): refuse before
+		// Start gate (design ptone/scion#2483 §2.1): a delete in progress,
+		// an incomplete create or an in-flight launch skips the wake before
 		// any quota reservation or start dispatch, so the message is not
 		// delivered either (AC-4). The sender's DM authz already ran.
 		if ref := s.startGate(ctx, agent, startEntryWake); ref.refuses() {
+			s.messageLog.Info("wake: skipped by the start gate",
+				"agent_id", agent.ID, "code", ref.Code)
 			return nil, ref.dmError()
 		}
 
@@ -139,6 +153,11 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 		// restore its prior session rather than starting fresh.
 		if err := dispatcher.DispatchAgentStart(ctx, agent, "", true); err != nil {
 			s.rollbackBrokerQuota(ctx, agent, reserved)
+			if refusal := s.launchRefusalFromError(ctx, agent.ID, err); refusal != nil {
+				s.messageLog.Info("wake: skipped, agent create is launching or incomplete",
+					"agent_id", agent.ID, "code", refusal.Code)
+				return nil, refusal.dmError()
+			}
 			if errors.Is(err, errBrokerLacksEmptyPerAgent) {
 				// Fail closed like the other dispatch sites (design #2703 D3).
 				return nil, &AgentDMError{

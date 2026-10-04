@@ -62,17 +62,17 @@ func (d *siteIntentDispatcher) intents(op string) []store.RunIntent {
 	return append([]store.RunIntent(nil), d.seen[op]...)
 }
 
-func (d *siteIntentDispatcher) DispatchAgentCreate(_ context.Context, agent *store.Agent) error {
+func (d *siteIntentDispatcher) DispatchAgentCreate(_ context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
 	d.record("create", agent.ID)
 	if d.createErr != nil {
-		return d.createErr
+		return nil, d.createErr
 	}
 	agent.Phase = string(state.PhaseRunning)
-	return nil
+	return nil, nil
 }
 
-func (d *siteIntentDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error) {
-	return nil, d.DispatchAgentCreate(ctx, agent)
+func (d *siteIntentDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
+	return d.DispatchAgentCreate(ctx, agent)
 }
 
 func (d *siteIntentDispatcher) DispatchAgentProvision(_ context.Context, agent *store.Agent) error {
