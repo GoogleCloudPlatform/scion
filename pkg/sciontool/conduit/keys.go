@@ -17,6 +17,7 @@ package conduit
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -96,6 +97,20 @@ func (a *Agent) refreshKeysLoop(ctx context.Context) {
 		wait, retry = retry, min(retry*2, keyRetryMax, interval)
 		log.Warn("Conduit: grant key refresh failed, retrying in %v: %v", wait, err)
 	}
+}
+
+// errKeyRedirect refuses a redirect on the grant-key route.
+var errKeyRedirect = errors.New("grant keys: redirect not followed")
+
+// keyClient returns a copy of c (http.DefaultClient if nil) that does not
+// follow redirects; c itself is left unchanged.
+func keyClient(c *http.Client) *http.Client {
+	if c == nil {
+		c = http.DefaultClient
+	}
+	kc := *c
+	kc.CheckRedirect = func(*http.Request, []*http.Request) error { return errKeyRedirect }
+	return &kc
 }
 
 // RefreshKeys fetches the hub's current grant verification keys over the

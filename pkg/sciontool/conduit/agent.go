@@ -155,9 +155,7 @@ func New(opts Options) (*Agent, error) {
 	if opts.KeyRefreshInterval <= 0 || opts.KeyRefreshInterval > KeyRefreshInterval {
 		opts.KeyRefreshInterval = KeyRefreshInterval
 	}
-	if opts.HTTPClient == nil {
-		opts.HTTPClient = http.DefaultClient
-	}
+	opts.HTTPClient = keyClient(opts.HTTPClient)
 	if opts.DialLocal == nil {
 		d := &net.Dialer{Timeout: localDialTimeout}
 		opts.DialLocal = d.DialContext

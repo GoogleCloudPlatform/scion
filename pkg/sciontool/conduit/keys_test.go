@@ -16,7 +16,11 @@ package conduit
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -225,6 +229,74 @@ func TestKeyRetryBackoff(t *testing.T) {
 				if n := h.keyHits.Load(); n != int64(i+2) {
 					t.Fatalf("retry %d: no fetch after %v (%d fetches)", i+1, d, n)
 				}
+			}
+		})
+	}
+}
+
+// TestAgentKeyRefreshDoesNotFollowRedirects: a redirect on the grant-key
+// route fails the fetch, the redirect target gets no request, the current
+// keys are kept, the retry backoff applies, and the caller's client is
+// left unchanged.
+func TestAgentKeyRefreshDoesNotFollowRedirects(t *testing.T) {
+	for _, status := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			k1 := newTestKey(t, "k1")
+			var elsewhere atomic.Int64
+			other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				elsewhere.Add(1)
+				_ = json.NewEncoder(w).Encode(map[string]any{"keys": grant.ToWire(nil)})
+			}))
+			t.Cleanup(other.Close)
+
+			h := newFakeHub(t, k1.public)
+			shared := &http.Client{Timeout: time.Minute}
+			clk := clock.NewFake(time.Unix(1_700_000_000, 0))
+			a, err := New(Options{
+				HubURL: h.srv.URL, AgentID: testAgentID, ProjectID: testProjectID,
+				Token:      func() string { return "t" },
+				HTTPClient: shared,
+				Clock:      clk,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := a.RefreshKeys(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			h.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				h.keyHits.Add(1)
+				http.Redirect(w, r, other.URL+"/api/v1/conduit/grant-keys", status)
+			})
+
+			if err := a.RefreshKeys(context.Background()); !errors.Is(err, errKeyRedirect) {
+				t.Fatalf("RefreshKeys = %v, want the redirect refused", err)
+			}
+			if _, ok := a.Keys().Lookup("k1"); !ok {
+				t.Fatal("key set lost after a refused redirect")
+			}
+
+			// In the loop, the refused redirect is a failed fetch and is
+			// retried after keyRetryMin.
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() { a.refreshKeysLoop(ctx); close(done) }()
+			t.Cleanup(func() { cancel(); <-done })
+			before := h.keyHits.Load()
+			for i, d := range []time.Duration{KeyRefreshInterval, keyRetryMin} {
+				waitPending(t, clk, 1)
+				clk.Advance(d)
+				waitPending(t, clk, 1)
+				if n := h.keyHits.Load() - before; n != int64(i+1) {
+					t.Fatalf("after %v: %d fetches, want %d", d, n, i+1)
+				}
+			}
+
+			if n := elsewhere.Load(); n != 0 {
+				t.Fatalf("redirect target received %d requests", n)
+			}
+			if shared.CheckRedirect != nil {
+				t.Fatal("the caller's HTTP client was modified")
 			}
 		})
 	}
