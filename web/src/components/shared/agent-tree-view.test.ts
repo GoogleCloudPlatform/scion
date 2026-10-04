@@ -1428,7 +1428,7 @@ describe('deletion badge on graph nodes', () => {
   let el: ScionAgentTreeView;
 
   async function mountTree(agents: Agent[]): Promise<void> {
-    el = document.createElement('scion-agent-tree-view') as ScionAgentTreeView;
+    el = document.createElement('scion-agent-tree-view');
     el.agents = agents;
     document.body.appendChild(el);
     await el.updateComplete;
@@ -1441,11 +1441,11 @@ describe('deletion badge on graph nodes', () => {
 
   /** The compact badge text and full title on the node linking to /agents/<id>. */
   async function nodeBadge(id: string): Promise<{ text: string; title: string } | null> {
-    const badge = el.shadowRoot!.querySelector(
+    const badge = el.shadowRoot!.querySelector<HTMLElement & { updateComplete: Promise<boolean> }>(
       `a.node[href="/agents/${id}"] scion-deletion-badge`
-    ) as (HTMLElement & { updateComplete: Promise<boolean> }) | null;
+    );
     await badge?.updateComplete;
-    const inner = badge?.shadowRoot?.querySelector('.badge') as HTMLElement | null | undefined;
+    const inner = badge?.shadowRoot?.querySelector<HTMLElement>('.badge');
     return inner ? { text: inner.textContent?.trim() ?? '', title: inner.title } : null;
   }
 
