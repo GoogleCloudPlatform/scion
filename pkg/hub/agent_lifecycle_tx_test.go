@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -631,8 +632,9 @@ func TestReincarnateReRecordsProvenance(t *testing.T) {
 		a.Slug = "coordinator-" + tidSlugSafe(t.Name())
 	})
 
+	requester := delegatingRequesterFor(coordinator.ID, project.ID)
 	rec := httptest.NewRecorder()
-	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, delegatingRequesterFor(coordinator.ID, project.ID), ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, requester, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	waitForReincarnationSettled(t, s, agent.ID)
 
@@ -651,6 +653,8 @@ func TestReincarnateReRecordsProvenance(t *testing.T) {
 	assert.Equal(t, coordinator.ID, e.SourcePrincipalID)
 	assert.Equal(t, store.SourceCredentialAgent, e.SourceCredentialKind)
 	assert.NotEqual(t, store.EffectCeilingUnrecorded, e.Kind, "the requester's ceiling is recorded")
+	assert.Equal(t, permissions.CeilingVersionV1, e.Version)
+	assertCeilingFromSource(t, srv, requester, e.EffectCeiling)
 
 	sum := auditSummary(t, s, mutationTypeAgentReincarnateClaim, agent.ID)
 	assert.Equal(t, true, sum["re_recorded"])
@@ -664,8 +668,8 @@ func TestReincarnateReRecordsProvenance(t *testing.T) {
 }
 
 // A requester whose effect ceiling does not cover the agent's role gets 403
-// (delegation_ceiling) with nothing claimed, even when its token scopes pass
-// CanDelegate.
+// (delegation_ceiling) with nothing claimed, on a dry run and a real run,
+// even when its token scopes pass CanDelegate.
 func TestReincarnateOverCeilingForbidden(t *testing.T) {
 	srv, s, project, broker := setupReincarnateTestServer(t, newReincarnateTestDispatcher())
 	agent := newReincarnateTestAgent(t, s, project, broker, nil)
@@ -679,11 +683,13 @@ func TestReincarnateOverCeilingForbidden(t *testing.T) {
 	// stored role, none, which does not cover baseline's project:read.
 	srv.authzService.mintDevAuthOverride = false
 
-	rec := httptest.NewRecorder()
-	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, delegatingRequesterFor(coordinator.ID, project.ID), ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
-	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	_, details := errorBody(t, rec)
-	assert.Equal(t, string(DeniedByDelegationCeiling), details["denied_by"])
+	for _, dryRun := range []bool{true, false} {
+		rec := httptest.NewRecorder()
+		srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, delegatingRequesterFor(coordinator.ID, project.ID), ReincarnateAgentRequest{Handoff: "h", DryRun: dryRun}), agent.ID)
+		require.Equal(t, http.StatusForbidden, rec.Code, "dryRun=%v: %s", dryRun, rec.Body.String())
+		_, details := errorBody(t, rec)
+		assert.Equal(t, string(DeniedByDelegationCeiling), details["denied_by"], "dryRun=%v", dryRun)
+	}
 
 	assertNothingClaimed(t, s, agent, edge)
 }
