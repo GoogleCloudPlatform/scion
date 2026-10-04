@@ -17,6 +17,7 @@ package hub
 import (
 	"bufio"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -72,6 +73,10 @@ func (s *Server) handleAdminAllowList(w http.ResponseWriter, r *http.Request) {
 		MethodNotAllowed(w, http.MethodGet, http.MethodPost)
 	}
 }
+
+// errAllowListUserNotFound marks a store.ErrNotFound returned by
+// tx.DeleteUser in the allow-list delete, so only that case maps to 404.
+var errAllowListUserNotFound = errors.New("allow-list user not found")
 
 // handleAdminAllowListByEmail handles sub-paths under /api/v1/admin/allow-list/.
 // DEPRECATED: Use the new invite endpoints instead.
@@ -133,12 +138,37 @@ func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if err := s.store.DeleteUser(r.Context(), existingUser.ID); err != nil {
-		if err == store.ErrNotFound {
-			writeError(w, http.StatusNotFound, ErrCodeNotFound, "email not found in allow list", nil)
-			return
+	// Same last-project-owner guard and role-binding cascade as
+	// DELETE /api/v1/users/{id} (ptone/scion#2598): an invited user may hold
+	// bindings if they were pre-added to a project.
+	err = s.store.WithTx(r.Context(), func(tx store.Store) error {
+		if err := guardAndCascadeUserRoleBindingsTx(r.Context(), tx, existingUser.ID, s.membershipNow()); err != nil {
+			return err
 		}
-		InternalError(w)
+		if err := tx.DeleteUser(r.Context(), existingUser.ID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return errAllowListUserNotFound
+			}
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		var lastOwnerErr *lastProjectOwnerDeleteError
+		switch {
+		case errors.As(err, &lastOwnerErr):
+			writeLastProjectOwnerDeleteError(w, lastOwnerErr)
+		case errors.Is(err, errUserRoleBindingsChanged):
+			writeUserRoleBindingsChangedError(w)
+		case errors.Is(err, errAllowListUserNotFound):
+			// Only a not-found from DeleteUser itself is a client 404; a
+			// not-found inside the guard (e.g. a missing role definition)
+			// is a server error and falls through to 500.
+			writeError(w, http.StatusNotFound, ErrCodeNotFound, "email not found in allow list", nil)
+		default:
+			slog.Error("allow-list delete failed", "error", err)
+			InternalError(w)
+		}
 		return
 	}
 

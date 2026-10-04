@@ -387,6 +387,13 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteAuthenticated,
 	},
 
+	// Conduit grant verification keys (public halves only), behind the
+	// hub.conduit experiment. Any authenticated principal may read them.
+	"/api/v1/conduit/grant-keys": {
+		Pattern: "/api/v1/conduit/grant-keys", RouteID: "conduit.grant_keys",
+		Classification: RouteAuthenticated,
+	},
+
 	// -------------------------------------------------------------------------
 	// Policy: Skills
 	// -------------------------------------------------------------------------
