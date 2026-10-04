@@ -165,6 +165,12 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	"DeletionStartedAt": true, "DeletionFailedAt": true, "DeletionCode": true,
 	"DeletionError": true, "DeletionPrior": true, "DeletionRequest": true,
 	"Deletion": true,
+	// run_id is written only through SetAgentRunID and
+	// CompareAndSwapAgentRunID (ptone/scion#2550): CreateAgent and
+	// UpdateAgent never write it, so it cannot round-trip here. It is not an
+	// authz input, and no list reader uses it (only the delete dispatch, from
+	// a single-row read).
+	"RunID": true,
 }
 
 func reflectFillStoreAgent(t *testing.T, projectID string) *store.Agent {
