@@ -2165,7 +2165,7 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 		// switch is reached, so v is guaranteed non-nil here and
 		// v.Boundary() cannot dereference a nil receiver.
 		boundary := v.Boundary()
-		cc := CredentialContext{Kind: CredentialKindUAT, ID: v.CredentialID(), ProjectID: v.ScopedProjectID(), Boundary: &boundary, Scopes: v.ScopedScopes(), Ceiling: v.Ceiling()}
+		cc := CredentialContext{Kind: CredentialKindUAT, ID: v.CredentialID(), ProjectID: boundary.ProjectID, Boundary: &boundary, Scopes: v.ScopedScopes(), Ceiling: v.Ceiling()}
 		// Carry the descriptive decoration, if ValidateToken attached one,
 		// through to the credential context. This is the single copy point;
 		// decoration is never otherwise derived here. Decoration() already
