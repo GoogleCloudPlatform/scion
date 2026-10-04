@@ -65,6 +65,13 @@ const OCCLUDER_MIN_INSET_PX = 1;
 /** `scale` within this distance of 1 counts as "not zoomed". */
 const ZOOM_1_TOLERANCE = 0.01;
 
+/**
+ * Largest window scroll or visual-viewport offset, in CSS px, that counts as
+ * "not scrolled". On high-DPI screens either can settle on a sub-pixel value
+ * that `scrollTo(0, 0)` cannot clear; resetting on that would loop forever.
+ */
+const SCROLL_TOLERANCE_PX = 0.5;
+
 const APP_HEIGHT_PROPERTY = '--scion-app-height';
 const KEYBOARD_OPEN_PROPERTY = '--scion-kb-open';
 
@@ -115,7 +122,7 @@ export function installViewportFrame(win: Window = window): () => void {
       atZoom1 &&
       !shortOccluder &&
       root.classList.contains(APP_FRAME_CLASS) &&
-      (win.scrollY !== 0 || vv.offsetTop !== 0)
+      (Math.abs(win.scrollY) > SCROLL_TOLERANCE_PX || Math.abs(vv.offsetTop) > SCROLL_TOLERANCE_PX)
     ) {
       win.scrollTo(0, 0);
     }

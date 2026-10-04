@@ -277,6 +277,28 @@ describe('installViewportFrame: scroll reset', () => {
     expect(win.scrollTo).toHaveBeenCalledWith(0, 0);
   });
 
+  it('ignores a sub-pixel window scroll but resets a whole-pixel one', () => {
+    root().classList.add(APP_FRAME_CLASS);
+    install();
+    win.scrollY = 0.3;
+    emit(win, 'scroll');
+    expect(win.scrollTo).not.toHaveBeenCalled();
+
+    win.scrollY = 2;
+    emit(win, 'scroll');
+    expect(win.scrollTo).toHaveBeenCalledWith(0, 0);
+  });
+
+  it('ignores a sub-pixel visual-viewport offset but resets a whole-pixel one', () => {
+    root().classList.add(APP_FRAME_CLASS);
+    install();
+    emit(vv, 'scroll', { offsetTop: 0.3 });
+    expect(win.scrollTo).not.toHaveBeenCalled();
+
+    emit(vv, 'scroll', { offsetTop: 2 });
+    expect(win.scrollTo).toHaveBeenCalledWith(0, 0);
+  });
+
   it('leaves an unscrolled frame alone', () => {
     root().classList.add(APP_FRAME_CLASS);
     install();
