@@ -835,8 +835,12 @@ func newStartAgentMockHubServer(t *testing.T, projectID, agentName, agentID, age
 }
 
 // saveAttachTestState saves the package-level variables that startAgentViaHub
-// reads, and returns a function that restores them.
+// reads, and returns a function that restores them. It also shortens the
+// launch-wait poll interval and fallback budget so a test whose agent never
+// reaches running fails within seconds instead of minutes.
 func saveAttachTestState() func() {
+	origPoll, origFallback := launchPollInterval, launchWaitFallback
+	launchPollInterval, launchWaitFallback = 10*time.Millisecond, 5*time.Second
 	origAttach := attach
 	origTemplate := templateName
 	origBranch := branch
@@ -856,6 +860,7 @@ func saveAttachTestState() func() {
 		harnessAuthFlag = origHAuth
 		startNoNotify = origNoNotify
 		labelFlags = origLabels
+		launchPollInterval, launchWaitFallback = origPoll, origFallback
 	}
 }
 
