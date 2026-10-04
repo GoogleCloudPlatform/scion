@@ -136,6 +136,9 @@ func (a *AuthzService) CanDelegate(ctx context.Context, actor Identity, grant Gr
 //   - A project-scoped grant must name its project, and the token boundary
 //     must allow that project (BoundaryAllows): a project boundary allows
 //     only its own project, a hub boundary allows any project.
+//   - An agent delegation must name the same project in ProjectID and
+//     ScopeID, for every boundary kind, because the authority check runs
+//     on ProjectID and the boundary check runs on ScopeID.
 //   - Under a hub boundary the holder must also currently have access to
 //     that project (ProjectTargetAdmission), for the permission of the
 //     operation that creates the grant, on that project. The boundary
@@ -160,6 +163,9 @@ func (a *AuthzService) enforceUATDelegation(ctx context.Context, scoped *ScopedU
 
 	if grant.ScopeID == "" {
 		return deny("scoped credential cannot delegate a project grant that names no project")
+	}
+	if grant.Type == GrantTypeAgentDelegation && grant.ProjectID != grant.ScopeID {
+		return deny("scoped credential cannot delegate an agent grant that names two projects")
 	}
 	boundary := scoped.Boundary()
 	if !BoundaryAllows(boundary, TargetScope{Kind: TargetScopeProject, ProjectID: grant.ScopeID}) {
@@ -187,13 +193,17 @@ func (a *AuthzService) enforceUATDelegation(ctx context.Context, scoped *ScopedU
 //
 //   - an agent delegation is created by agent creation, which enforces
 //     agent.create on an agent in the project;
-//   - a project role binding or project membership is created by the
-//     project membership routes, which enforce project.manage on the
-//     project.
+//   - a project membership, or a project role binding for a built-in
+//     project role, is created by the project membership routes, which
+//     enforce project.manage on the project;
+//   - a project role binding for a custom role is admitted on
+//     project.manage on the project as its project-level access check. Its
+//     route additionally enforces role_binding.create at hub level.
 //
 // Any other grant type has no project admission target, and ok is false.
 // An agent delegation whose ProjectID differs from its ScopeID names two
-// projects, and ok is false.
+// projects, and ok is false; enforceUATDelegation denies that case before
+// it gets here.
 func uatDelegationAdmissionTarget(grant GrantDescriptor) (permissionID string, target Resource, ok bool) {
 	switch grant.Type {
 	case GrantTypeAgentDelegation:

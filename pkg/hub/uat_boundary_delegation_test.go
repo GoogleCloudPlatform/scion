@@ -81,8 +81,10 @@ func projectRoleBindingGrant(projectID string, perms ...string) GrantDescriptor 
 }
 
 // TestCanDelegate_ProjectBoundaryRequiresMatchingGrantProject pins that a
-// project-boundary UAT delegates only into its own project, and that a
-// project grant naming no project is denied for every UAT boundary kind.
+// project-boundary UAT delegates only into its own project, that a project
+// grant naming no project is denied for every UAT boundary kind, and that an
+// agent delegation naming two different projects is denied for every UAT
+// boundary kind.
 func TestCanDelegate_ProjectBoundaryRequiresMatchingGrantProject(t *testing.T) {
 	f := newDelegationFixture(t, "proj-match")
 	ctx := context.Background()
@@ -95,6 +97,14 @@ func TestCanDelegate_ProjectBoundaryRequiresMatchingGrantProject(t *testing.T) {
 	d = f.authz.CanDelegate(ctx, projectToken, agentDelegationGrant(f.projectQ))
 	assert.False(t, d.Allowed, "a grant in another project is denied")
 	assert.Contains(t, d.Reason, "outside its project")
+
+	for name, actor := range map[string]*ScopedUserIdentity{"project boundary": projectToken, "hub boundary": hubToken} {
+		grant := agentDelegationGrant(f.projectP)
+		grant.ProjectID = f.projectQ
+		d := f.authz.CanDelegate(ctx, actor, grant)
+		assert.False(t, d.Allowed, "%s: an agent delegation whose ProjectID differs from its ScopeID is denied", name)
+		assert.Contains(t, d.Reason, "names two projects", name)
+	}
 
 	for name, actor := range map[string]*ScopedUserIdentity{"project boundary": projectToken, "hub boundary": hubToken} {
 		for _, grant := range []GrantDescriptor{
@@ -113,7 +123,9 @@ func TestCanDelegate_ProjectBoundaryRequiresMatchingGrantProject(t *testing.T) {
 // hub-boundary UAT delegates into a project only while its holder currently
 // has access to that project: the boundary admits any project, and project
 // access decides. A user with hub membership only, and a former member, are
-// denied.
+// denied. The reason assertions are the discriminator for the project
+// access check: the downstream authority check also denies these grants,
+// so the outcome alone does not show which check denied them.
 func TestCanDelegate_HubBoundaryProjectGrantRequiresCurrentAccess(t *testing.T) {
 	f := newDelegationFixture(t, "hub-access")
 	ctx := context.Background()
