@@ -478,7 +478,19 @@ func cursorState(value string) string {
 	}
 }
 
-func cursorPayloadEvidence(payload []byte) string {
+// cursorPayloadShape is the quote-free classification of an SSE or durable
+// payload. It carries no raw payload content.
+type cursorPayloadShape struct {
+	valid          bool
+	kind           string
+	taskID         string
+	state          string
+	historyLen     int
+	internalCursor bool
+	artifact       bool
+}
+
+func classifyCursorPayload(payload []byte) cursorPayloadShape {
 	var shape struct {
 		ID     string `json:"id"`
 		TaskID string `json:"taskId"`
@@ -507,9 +519,8 @@ func cursorPayloadEvidence(payload []byte) string {
 		Artifact json.RawMessage            `json:"artifact"`
 		Metadata map[string]json.RawMessage `json:"metadata"`
 	}
-	hash := sha256.Sum256(payload)
 	if json.Unmarshal(payload, &shape) != nil {
-		return fmt.Sprintf("bytes=%d sha256=%x json=invalid", len(payload), hash)
+		return cursorPayloadShape{kind: "invalid"}
 	}
 	kind, taskID, state, historyLen := "other", shape.TaskID, shape.Status.State, 0
 	switch {
@@ -527,8 +538,25 @@ func cursorPayloadEvidence(payload []byte) string {
 		kind = "durable-status"
 	}
 	_, internalCursor := shape.Metadata["_bridgeEventID"]
+	return cursorPayloadShape{
+		valid:          true,
+		kind:           kind,
+		taskID:         taskID,
+		state:          state,
+		historyLen:     historyLen,
+		internalCursor: internalCursor,
+		artifact:       len(shape.Artifact) > 0,
+	}
+}
+
+func cursorPayloadEvidence(payload []byte) string {
+	hash := sha256.Sum256(payload)
+	shape := classifyCursorPayload(payload)
+	if !shape.valid {
+		return fmt.Sprintf("bytes=%d sha256=%x json=invalid", len(payload), hash)
+	}
 	return fmt.Sprintf("bytes=%d sha256=%x kind=%s task_id=%s state=%s history_count=%d internal_cursor_present=%t artifact_present=%t",
-		len(payload), hash, kind, cursorUUID(taskID), cursorState(state), historyLen, internalCursor, len(shape.Artifact) > 0)
+		len(payload), hash, shape.kind, cursorUUID(shape.taskID), cursorState(shape.state), shape.historyLen, shape.internalCursor, shape.artifact)
 }
 
 func cursorSSEEvidence(event sseWireEvent) string {
@@ -643,13 +671,21 @@ func TestCrossReplicaStreamCursor(t *testing.T) {
 	finalAt := time.Now()
 	publishBrokerMessageAt(t, h.bridgeB, h.hubToken, stats.LastUserID, taskID, "cursor-final", messages.TypeAssistantReply, "final once", finalAt)
 	publishBrokerMessageAt(t, h.bridgeB, h.hubToken, stats.LastUserID, taskID, "cursor-final", messages.TypeAssistantReply, "final once", finalAt)
-	for {
+	// The final publish plus its redelivery must yield exactly one
+	// artifact-update followed by the COMPLETED status-update. Anything else in
+	// this window (for example a replayed WORKING status, or a duplicate
+	// artifact) is a cursor or dedup regression.
+	for i, want := range []string{"artifact-update", "status-update"} {
 		ev := nextSSE(t, reconnected, 3*time.Second)
 		if bytes.Contains(ev.data, []byte("_bridgeEventID")) {
 			t.Fatalf("bridge event ID leaked on wire: %s", cursorSSEEvidence(ev))
 		}
-		if bytes.Contains(ev.data, []byte("TASK_STATE_COMPLETED")) {
-			break
+		shape := classifyCursorPayload(ev.data)
+		if shape.kind != want || shape.taskID != taskID {
+			t.Fatalf("final event %d: want kind=%s for task, got: %s", i, want, cursorSSEEvidence(ev))
+		}
+		if want == "status-update" && shape.state != "TASK_STATE_COMPLETED" {
+			t.Fatalf("final event %d: want state=TASK_STATE_COMPLETED, got: %s", i, cursorSSEEvidence(ev))
 		}
 	}
 	assertNoSSE(t, reconnected, 250*time.Millisecond)
