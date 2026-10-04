@@ -269,6 +269,13 @@ type CreateAgentRequest struct {
 	// Controls metadata server behavior and optional service account binding.
 	// When nil, the project default (if any) is applied by the Hub.
 	GCPIdentity *GCPIdentityConfig `json:"gcp_identity,omitempty"`
+
+	// AcceptAsyncLaunch opts in to a non-blocking launch. A Hub that has
+	// async launch enabled may then answer as soon as the broker accepts the
+	// create, with the agent in a pre-running phase and an active Launch;
+	// the client follows the launch with GET agent. A Hub that does not
+	// support or enable it ignores the field and answers synchronously.
+	AcceptAsyncLaunch bool `json:"acceptAsyncLaunch,omitempty"`
 }
 
 // GCPIdentityConfig specifies GCP identity configuration for agent creation.
