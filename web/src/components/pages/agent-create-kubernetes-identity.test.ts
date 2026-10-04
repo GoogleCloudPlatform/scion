@@ -1773,6 +1773,53 @@ describe('Create Agent: GCP identity defaults do not race', () => {
     expect(page.gcpServiceAccountId).toBe('sa-b');
   });
 
+  it('drops an older load for the same project after switching A -> B -> A', async () => {
+    const el = await mountAgentCreate();
+    const page = internals(el) as Page;
+
+    // The first pA accounts request is held; later ones answer at once with
+    // newer data. projectId is pA again by the time the held one lands, so
+    // only the load sequence number can tell it is stale.
+    const firstAAccounts = deferred();
+    let aAccountCalls = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        const ok = (body: unknown): Promise<Response> =>
+          Promise.resolve({ ok: true, status: 200, json: async () => body } as Response);
+        if (url.includes('/projects/pA/gcp-service-accounts')) {
+          aAccountCalls++;
+          return aAccountCalls === 1
+            ? firstAAccounts.promise
+            : ok({ items: [makeServiceAccount('sa-a2')] });
+        }
+        if (url.includes('/projects/pA/settings')) {
+          return ok({ defaultGCPIdentityMode: 'passthrough' });
+        }
+        return ok({ items: [] });
+      })
+    );
+
+    page.projectId = 'pA';
+    const load1 = page.loadGCPServiceAccounts();
+    page.projectId = 'pB';
+    await page.loadGCPServiceAccounts();
+    page.projectId = 'pA';
+    await page.loadGCPServiceAccounts();
+    expect(page.gcpServiceAccounts.map((sa) => sa.id)).toEqual(['sa-a2']);
+    expect(page.gcpMetadataMode).toBe('passthrough');
+
+    firstAAccounts.resolve({ items: [makeServiceAccount('sa-a1')] });
+    await load1;
+    await flush();
+    await el.updateComplete;
+
+    expect(page.gcpServiceAccounts.map((sa) => sa.id)).toEqual(['sa-a2']);
+    expect(page.gcpMetadataMode).toBe('passthrough');
+    expect(page.defaultGcpMetadataMode).toBe('passthrough');
+  });
+
   it('keeps a user pick made while the settings fetch is in flight when the default arrives', async () => {
     const el = await mountAgentCreate();
     const page = internals(el) as Page;
