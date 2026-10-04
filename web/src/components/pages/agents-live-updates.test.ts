@@ -31,8 +31,21 @@ vi.mock('../shared/confirm-dialog.js', () => ({
   showConfirm: vi.fn(() => Promise.resolve(true)),
 }));
 
+// The shared delete helper, spied but running for real (pass-through), so
+// tests can prove the page delegates every delete to it.
+vi.mock('../../client/agent-delete.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../client/agent-delete.js')>();
+  return { ...actual, runAgentDelete: vi.fn(actual.runAgentDelete) };
+});
+// showToast needs the real Shoelace sl-alert; record the messages instead.
+vi.mock('../../utils/toast.js', () => ({ showToast: vi.fn() }));
+
 import './agents.js';
 import type { ScionPageAgents } from './agents.js';
+import { runAgentDelete } from '../../client/agent-delete.js';
+import { showToast } from '../../utils/toast.js';
+import { showConfirm } from '../shared/confirm-dialog.js';
+import { START_BLOCKED_BY_DELETE_MESSAGE } from '../../shared/agent-deletion.js';
 import { stateManager } from '../../client/state.js';
 import type { Agent } from '../../shared/types.js';
 
@@ -510,6 +523,267 @@ describe('scion-page-agents live updates (agents-changed -> mergeChanged)', () =
       await (el as unknown as Internals).handleAgentAction('a1', 'delete', altClick);
       await el.updateComplete;
       expect(el.agents.map((a) => a.id)).toEqual(['a2']);
+    });
+  });
+
+  describe('phase 2: shared delete helper and failure banner (ptone/scion#2483)', () => {
+    const T = Date.now();
+    const base = {
+      soft: false,
+      claim: 1,
+      startedAt: new Date(T).toISOString(),
+    };
+    const liveDeleting = {
+      ...base,
+      state: 'deleting',
+      leaseExpiresAt: new Date(T + 600_000).toISOString(),
+    };
+    const failedCodes: Array<[string, Record<string, unknown>, string]> = [
+      [
+        'runtime_error',
+        { code: 'runtime_error', error: 'broker refused' },
+        'Delete failed: broker refused',
+      ],
+      ['conflict', { code: 'conflict' }, 'Delete failed: conflict'],
+      ['abandoned', { code: 'abandoned' }, 'Delete interrupted'],
+      [
+        'revoke_failed',
+        { code: 'revoke_failed', stage: 'finalizing' },
+        'Delete failed: could not revoke credentials',
+      ],
+      [
+        'finalize_failed',
+        { code: 'finalize_failed', stage: 'finalizing' },
+        'Delete failed: could not finalize',
+      ],
+      ['in_doubt', { code: 'in_doubt' }, 'Delete failed: outcome unknown'],
+    ];
+
+    type Internals = {
+      handleAgentAction(id: string, action: string, event?: MouseEvent): Promise<void>;
+      setPhaseFilter(p: string): void;
+    };
+    const actionable = (id: string, o: Partial<Agent> = {}): Agent =>
+      agent(id, { _capabilities: { actions: ['read', 'lifecycle', 'delete'] }, ...o });
+
+    function stub(rows: Agent[], onMutate?: (url: string, init: RequestInit) => Response) {
+      const mutations: string[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: string | URL | Request, init?: RequestInit) => {
+          const url = typeof input === 'string' ? input : input.toString();
+          if (init?.method && init.method !== 'GET') {
+            mutations.push(`${init.method} ${url}`);
+            return Promise.resolve(
+              onMutate ? onMutate(url, init) : new Response(null, { status: 204 })
+            );
+          }
+          return Promise.resolve(jsonResponse({ agents: rows, _capabilities: { actions: [] } }));
+        })
+      );
+      return mutations;
+    }
+
+    async function mount(): Promise<TestEl> {
+      const el = document.createElement('scion-page-agents') as TestEl;
+      document.body.appendChild(el);
+      await el.updateComplete;
+      await flush();
+      await el.updateComplete;
+      return el;
+    }
+
+    type BannerEl = HTMLElement & { updateComplete: Promise<boolean> };
+    async function banners(el: TestEl, scope = ''): Promise<BannerEl[]> {
+      const list = [
+        ...(el.shadowRoot?.querySelectorAll(`${scope} scion-deletion-banner`) ?? []),
+      ] as BannerEl[];
+      await Promise.all(list.map((b) => b.updateComplete));
+      return list.filter((b) => !b.hasAttribute('hidden'));
+    }
+    const title = (b: BannerEl): string =>
+      b.shadowRoot?.querySelector('.title')?.textContent?.trim() ?? '';
+
+    beforeEach(() => {
+      vi.mocked(runAgentDelete).mockClear();
+      vi.mocked(showToast).mockClear();
+      vi.mocked(showConfirm).mockClear();
+    });
+
+    it('the Delete button delegates to the shared helper; the page sends no DELETE itself', async () => {
+      const mutations = stub([actionable('a1'), actionable('a2')]);
+      const el = await mount();
+      vi.mocked(runAgentDelete).mockResolvedValueOnce({ kind: 'deleted', forced: false });
+      const click = { altKey: true } as MouseEvent;
+      await (el as unknown as Internals).handleAgentAction('a1', 'delete', click);
+      await el.updateComplete;
+      expect(runAgentDelete).toHaveBeenCalledTimes(1);
+      expect(runAgentDelete).toHaveBeenCalledWith(
+        expect.objectContaining({ agentId: 'a1', agentName: 'a1', event: click })
+      );
+      expect(mutations).toEqual([]);
+      expect(el.agents.map((a) => a.id)).toEqual(['a2']); // page presentation on deleted
+    });
+
+    it('a failed outcome is toasted; cancelled and accepted keep the row', async () => {
+      stub([actionable('a1')]);
+      const el = await mount();
+      const internals = el as unknown as Internals;
+      vi.mocked(runAgentDelete).mockResolvedValueOnce({
+        kind: 'failed',
+        forced: false,
+        status: 409,
+        code: 'conflict',
+        message: 'ambiguous target',
+      });
+      await internals.handleAgentAction('a1', 'delete');
+      expect(showToast).toHaveBeenCalledWith('ambiguous target');
+      vi.mocked(runAgentDelete).mockResolvedValueOnce({ kind: 'cancelled' });
+      await internals.handleAgentAction('a1', 'delete');
+      vi.mocked(runAgentDelete).mockResolvedValueOnce({
+        kind: 'accepted',
+        forced: false,
+        deletion: null,
+      });
+      await internals.handleAgentAction('a1', 'delete');
+      expect(el.agents.map((a) => a.id)).toEqual(['a1']);
+      expect(showToast).toHaveBeenCalledTimes(1);
+    });
+
+    for (const [name, extra, expected] of failedCodes) {
+      it(`${name}: card and table row show the failure banner with Retry and Force`, async () => {
+        stub([actionable('a1'), actionable('a2')]);
+        const el = await mount();
+        handleUpdate('agent.a1.status', {
+          deletion: { ...base, state: 'failed', ...extra },
+        });
+        await flush();
+        await el.updateComplete;
+        const cards = await banners(el, '.agent-card');
+        expect(cards.map(title)).toEqual([expected]);
+        expect(cards[0].hasAttribute('compact')).toBe(false);
+        expect(cards[0].shadowRoot?.querySelector('.retry')).not.toBeNull();
+        expect(cards[0].shadowRoot?.querySelector('.force')).not.toBeNull();
+
+        localStorage.setItem('scion-view-agents', 'list');
+        el.remove();
+        const listEl = await mount();
+        const rows = await banners(listEl, 'tbody tr');
+        expect(rows.map(title)).toEqual([expected]);
+        expect(rows[0].hasAttribute('compact')).toBe(true);
+        expect(rows[0].shadowRoot?.querySelector('.force')).not.toBeNull();
+      });
+    }
+
+    it('a client-flipped abandoned view (lease passed, no new data) shows the banner', async () => {
+      stub([actionable('a1')]);
+      const el = await mount();
+      handleUpdate('agent.a1.status', {
+        deletion: { ...liveDeleting, leaseExpiresAt: new Date(Date.now() - 1_000).toISOString() },
+      });
+      await flush();
+      await el.updateComplete;
+      expect((await banners(el)).map(title)).toEqual(['Delete interrupted']);
+    });
+
+    it('Force is absent on a live deleting view (no banner at all)', async () => {
+      stub([actionable('a1')]);
+      const el = await mount();
+      handleUpdate('agent.a1.status', { deletion: liveDeleting });
+      await flush();
+      await el.updateComplete;
+      expect(await banners(el)).toEqual([]);
+    });
+
+    it('Retry runs a normal DELETE without a confirm; Force asks and sends ?force=true', async () => {
+      const mutations = stub([actionable('a1')], () => new Response(null, { status: 502 }));
+      const el = await mount();
+      handleUpdate('agent.a1.status', {
+        deletion: { ...base, state: 'failed', code: 'in_doubt' },
+      });
+      await flush();
+      await el.updateComplete;
+      const [banner] = await banners(el);
+
+      vi.mocked(showConfirm).mockResolvedValueOnce(false); // decline the 502 force fallback
+      (banner.shadowRoot?.querySelector('.retry') as HTMLElement).click();
+      await vi.waitFor(() => expect(runAgentDelete).toHaveBeenCalledTimes(1));
+      expect(runAgentDelete).toHaveBeenLastCalledWith(
+        expect.objectContaining({ agentId: 'a1', confirm: false })
+      );
+      expect(vi.mocked(runAgentDelete).mock.calls[0][0].force).toBeUndefined();
+      await vi.mocked(runAgentDelete).mock.results[0].value; // the retry settles
+      expect(mutations).toEqual(['DELETE /api/v1/agents/a1']);
+
+      vi.mocked(showConfirm).mockClear();
+      (banner.shadowRoot?.querySelector('.force') as HTMLElement).click();
+      await vi.waitFor(() => expect(runAgentDelete).toHaveBeenCalledTimes(2));
+      expect(runAgentDelete).toHaveBeenLastCalledWith(
+        expect.objectContaining({ agentId: 'a1', force: true })
+      );
+      await vi.waitFor(() =>
+        expect(mutations).toEqual([
+          'DELETE /api/v1/agents/a1',
+          'DELETE /api/v1/agents/a1?force=true',
+        ])
+      );
+      expect(showConfirm).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(showConfirm).mock.calls[0][0]).toMatch(/^Force delete agent "a1"/);
+    });
+
+    it('Start answered 409 delete_in_progress shows the explanation, not the generic error', async () => {
+      stub(
+        [actionable('a1', { phase: 'stopped' })],
+        () =>
+          new Response(
+            JSON.stringify({
+              error: { code: 'delete_in_progress', message: 'agent is being deleted' },
+            }),
+            { status: 409, headers: { 'Content-Type': 'application/json' } }
+          )
+      );
+      const el = await mount();
+      await (el as unknown as Internals).handleAgentAction('a1', 'start');
+      expect(showToast).toHaveBeenCalledWith(START_BLOCKED_BY_DELETE_MESSAGE);
+    });
+
+    it('the stopping filter shows stopping agents, and live deltas move agents in and out', async () => {
+      stub([
+        actionable('a1', { phase: 'stopping' }),
+        actionable('a2'),
+        actionable('a3', { phase: 'stopped' }),
+      ]);
+      const el = await mount();
+      const internals = el as unknown as Internals & { displayAgents: Agent[] };
+      const shown = (): string[] => internals.displayAgents.map((a) => a.id).sort();
+
+      const button = [...(el.shadowRoot?.querySelectorAll('.filter-bar button') ?? [])].find(
+        (b) => b.textContent?.trim() === 'Stopping'
+      ) as HTMLElement | undefined;
+      expect(button).toBeDefined();
+      button!.click();
+      await el.updateComplete;
+      expect(localStorage.getItem('scion-filter-agents-phase')).toBe('stopping');
+      expect(shown()).toEqual(['a1']);
+
+      handleUpdate('agent.a2.status', { phase: 'stopping' }); // enters
+      await flush();
+      await el.updateComplete;
+      expect(shown()).toEqual(['a1', 'a2']);
+
+      handleUpdate('agent.a1.status', { phase: 'stopped' }); // leaves
+      await flush();
+      await el.updateComplete;
+      expect(shown()).toEqual(['a2']);
+    });
+
+    it('a persisted stopping filter is restored', async () => {
+      localStorage.setItem('scion-filter-agents-phase', 'stopping');
+      stub([actionable('a1', { phase: 'stopping' }), actionable('a2')]);
+      const el = await mount();
+      expect((el as unknown as { displayAgents: Agent[] }).displayAgents.map((a) => a.id)).toEqual([
+        'a1',
+      ]);
     });
   });
 });

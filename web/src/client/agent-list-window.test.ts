@@ -996,3 +996,46 @@ describe('AgentListWindow — cursor invalidation vs. a concurrent window fetch'
     expect(win.hasNext).toBe(false);
   });
 });
+
+// ptone/scion#2483 phase 2: the pages' new "Stopping" filter option goes
+// through the same generic phaseFilter as the others.
+describe('AgentListWindow — stopping phase filter', () => {
+  it('small state: stopping agents only, and phase changes move them in and out', () => {
+    let agents = [agent('a', { phase: 'stopping' }), agent('b'), agent('c', { phase: 'stopped' })];
+    const { win } = createWindow({
+      viewState: makeViewState({ phaseFilter: 'stopping', pageSize: 10 }),
+      getHeldAgents: () => agents,
+    });
+    win.setSmall();
+    expect(win.items.map((a) => a.id)).toEqual(['a']);
+    agents = [agent('a', { phase: 'stopped' }), agent('b', { phase: 'stopping' }), agents[2]];
+    expect(win.items.map((a) => a.id)).toEqual(['b']);
+  });
+
+  it('paged state: an off-page member entering stopping shows the updates chip', () => {
+    const live = new Map<string, Agent>();
+    const { win } = createWindow({
+      viewState: makeViewState({ phaseFilter: 'stopping' }),
+      getAgent: (id) => live.get(id),
+    });
+    win.setPaged(
+      {
+        agents: [agent('a', { phase: 'stopping' })],
+        totalCount: 1,
+        stats: {
+          total: 2,
+          running: 1,
+          agents: [
+            ['a', 'stopping'],
+            ['z', 'running'],
+          ],
+        },
+      },
+      ''
+    );
+    expect(win.items.map((a) => a.id)).toEqual(['a']);
+    live.set('z', agent('z', { phase: 'stopping' }));
+    win.applyChanges({ upserted: ['z'], deleted: [], unknown: new Map(), generation: 1 });
+    expect(win.updatesAvailable).toBe(true);
+  });
+});

@@ -30,6 +30,22 @@ import { resetHubProjectCapabilitiesCache } from '../../client/hub-capabilities.
 import { stateManager } from '../../client/state.js';
 import { PROJECT_AGENTS_FIT_THRESHOLD } from '../../client/agent-list-window.js';
 
+// Phase 2 (ptone/scion#2483): the shared delete helper, spied but running
+// for real (pass-through), so tests can prove the page delegates to it; the
+// confirm dialog and toasts are stubbed (they need real Shoelace elements).
+vi.mock('../../client/agent-delete.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../client/agent-delete.js')>();
+  return { ...actual, runAgentDelete: vi.fn(actual.runAgentDelete) };
+});
+vi.mock('../shared/confirm-dialog.js', () => ({
+  showConfirm: vi.fn(() => Promise.resolve(true)),
+}));
+vi.mock('../../utils/toast.js', () => ({ showToast: vi.fn() }));
+import { runAgentDelete } from '../../client/agent-delete.js';
+import { showConfirm } from '../shared/confirm-dialog.js';
+import { showToast } from '../../utils/toast.js';
+import { START_BLOCKED_BY_DELETE_MESSAGE } from '../../shared/agent-deletion.js';
+
 /** happy-dom has no EventSource; setScope opens one. */
 class FakeEventSource extends EventTarget {
   static readonly CONNECTING = 0;
@@ -2959,6 +2975,240 @@ describe('project-detail — agent list window', () => {
       expect(st.badges).toEqual([]);
       expect(st.banners).toEqual(['Delete interrupted']);
       expect(st.icons('trash')).toBe(internals(el).agentWindow.items.length);
+    });
+  });
+
+  describe('phase 2: shared delete helper, failure banner, stopping filter (ptone/scion#2483)', () => {
+    const lifecycleCaps = { actions: ['read', 'update', 'delete', 'lifecycle'] };
+    const base = { soft: false, claim: 1, startedAt: new Date().toISOString() };
+    const sseUpdate = (subject: string, data: unknown): void =>
+      (
+        stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+      ).handleUpdate({ subject, data });
+    const flushState = (): Promise<unknown> => new Promise((r) => setTimeout(r, 150));
+    type BannerEl = HTMLElement & { updateComplete: Promise<boolean> };
+    type Page = {
+      handleAgentAction(id: string, action: string, event?: MouseEvent): Promise<void>;
+      displayAgents: Agent[];
+    };
+
+    async function banners(el: TestEl, scope: string): Promise<BannerEl[]> {
+      const list = [
+        ...(el.shadowRoot?.querySelectorAll(`${scope} scion-deletion-banner`) ?? []),
+      ] as BannerEl[];
+      await Promise.all(list.map((b) => b.updateComplete));
+      return list.filter((b) => !b.hasAttribute('hidden'));
+    }
+    const title = (b: BannerEl): string =>
+      b.shadowRoot?.querySelector('.title')?.textContent?.trim() ?? '';
+
+    /** A small project; mutations (non-GET) are recorded and answered by `onMutate`. */
+    async function mountProject(
+      projectId: string,
+      agents: Agent[],
+      view: 'grid' | 'list',
+      onMutate: (url: string) => Response = () => new Response(null, { status: 204 })
+    ): Promise<{ el: TestEl; mutations: string[] }> {
+      localStorage.setItem('scion-view-project-agents', view);
+      const mutations: string[] = [];
+      const inner = createFetchHandler({
+        projectId,
+        projectCaps: { actions: ['read'] },
+        agents,
+        requests: [],
+      });
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: string | URL | Request, init?: RequestInit) => {
+          const url = typeof input === 'string' ? input : input.toString();
+          if (init?.method && init.method !== 'GET') {
+            mutations.push(`${init.method} ${url}`);
+            return Promise.resolve(onMutate(url));
+          }
+          return inner(input, init);
+        })
+      );
+      const el = await createComponent(projectId);
+      return { el, mutations };
+    }
+
+    beforeEach(() => {
+      vi.mocked(runAgentDelete).mockClear();
+      vi.mocked(showConfirm).mockClear();
+      vi.mocked(showToast).mockClear();
+    });
+
+    it('Delete delegates to the shared helper; the page sends no DELETE itself', async () => {
+      const agents = [0, 1].map((i) =>
+        makeAgent(i, { projectId: 'p2-deleg', _capabilities: lifecycleCaps })
+      );
+      const { el, mutations } = await mountProject('p2-deleg', agents, 'grid');
+      vi.mocked(runAgentDelete).mockResolvedValueOnce({ kind: 'deleted', forced: false });
+      const click = { altKey: true } as MouseEvent;
+      await (el as unknown as Page).handleAgentAction('a-1', 'delete', click);
+      await el.updateComplete;
+      expect(runAgentDelete).toHaveBeenCalledTimes(1);
+      expect(runAgentDelete).toHaveBeenCalledWith(
+        expect.objectContaining({ agentId: 'a-1', agentName: 'agent-1', event: click })
+      );
+      expect(mutations).toEqual([]);
+      expect(internals(el).agents.map((a) => a.id)).toEqual(['a-0']);
+    });
+
+    it('a 502 now offers the force fallback (the helper owns it), and a failure is toasted', async () => {
+      const agents = [makeAgent(0, { projectId: 'p2-502', _capabilities: lifecycleCaps })];
+      const { el, mutations } = await mountProject('p2-502', agents, 'grid', () =>
+        jsonResponse({ error: { code: 'runtime_error', message: 'broker down' } }, 502)
+      );
+      vi.mocked(showConfirm).mockResolvedValueOnce(false); // decline force
+      await (el as unknown as Page).handleAgentAction('a-0', 'delete', {
+        altKey: true,
+      } as MouseEvent);
+      expect(showConfirm).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(showConfirm).mock.calls[0][0]).toMatch(/Force delete this agent\?/);
+      expect(mutations).toEqual(['DELETE /api/v1/agents/a-0']);
+      expect(showToast).toHaveBeenCalledWith('broker down');
+    });
+
+    const codes: Array<[string, Record<string, unknown>, string]> = [
+      [
+        'runtime_error',
+        { code: 'runtime_error', error: 'broker refused' },
+        'Delete failed: broker refused',
+      ],
+      ['conflict', { code: 'conflict' }, 'Delete failed: conflict'],
+      ['abandoned', { code: 'abandoned' }, 'Delete interrupted'],
+      [
+        'revoke_failed',
+        { code: 'revoke_failed', stage: 'finalizing' },
+        'Delete failed: could not revoke credentials',
+      ],
+      [
+        'finalize_failed',
+        { code: 'finalize_failed', stage: 'finalizing' },
+        'Delete failed: could not finalize',
+      ],
+      ['in_doubt', { code: 'in_doubt' }, 'Delete failed: outcome unknown'],
+    ];
+    for (const [name, extra, expected] of codes) {
+      it(`${name}: the card (full) and the row (compact) show the failure banner with Retry and Force`, async () => {
+        for (const view of ['grid', 'list'] as const) {
+          const projectId = `p2-${name}-${view}`;
+          const agents = [0, 1].map((i) =>
+            makeAgent(i, { projectId, _capabilities: lifecycleCaps })
+          );
+          const { el } = await mountProject(projectId, agents, view);
+          sseUpdate('agent.a-0.status', { deletion: { ...base, state: 'failed', ...extra } });
+          await flushState();
+          await el.updateComplete;
+          const list = await banners(el, view === 'grid' ? '.agent-card' : 'tbody tr');
+          expect(list.map(title)).toEqual([expected]);
+          expect(list[0].hasAttribute('compact')).toBe(view === 'list');
+          expect(list[0].shadowRoot?.querySelector('.retry')).not.toBeNull();
+          expect(list[0].shadowRoot?.querySelector('.force')).not.toBeNull();
+          el.remove();
+        }
+      });
+    }
+
+    it('a client-flipped abandoned view shows the banner; a live deleting view shows none (no Force)', async () => {
+      const agents = [0, 1].map((i) =>
+        makeAgent(i, { projectId: 'p2-flip', _capabilities: lifecycleCaps })
+      );
+      const { el } = await mountProject('p2-flip', agents, 'grid');
+      sseUpdate('agent.a-0.status', {
+        deletion: {
+          ...base,
+          state: 'deleting',
+          leaseExpiresAt: new Date(Date.now() + 600_000).toISOString(),
+        },
+      });
+      sseUpdate('agent.a-1.status', {
+        deletion: {
+          ...base,
+          state: 'deleting',
+          leaseExpiresAt: new Date(Date.now() - 1_000).toISOString(),
+        },
+      });
+      await flushState();
+      await el.updateComplete;
+      const list = await banners(el, '.agent-card');
+      expect(list.map(title)).toEqual(['Delete interrupted']);
+    });
+
+    it('Retry calls the helper without a confirm; Force with force:true and ?force=true', async () => {
+      const agents = [makeAgent(0, { projectId: 'p2-btn', _capabilities: lifecycleCaps })];
+      const { el, mutations } = await mountProject('p2-btn', agents, 'list');
+      sseUpdate('agent.a-0.status', { deletion: { ...base, state: 'failed', code: 'in_doubt' } });
+      await flushState();
+      await el.updateComplete;
+      const [banner] = await banners(el, 'tbody tr');
+
+      (banner.shadowRoot?.querySelector('.retry') as HTMLElement).click();
+      await vi.waitFor(() => expect(runAgentDelete).toHaveBeenCalledTimes(1));
+      await vi.mocked(runAgentDelete).mock.results[0].value;
+      expect(vi.mocked(runAgentDelete).mock.calls[0][0]).toMatchObject({
+        agentId: 'a-0',
+        confirm: false,
+      });
+      expect(vi.mocked(runAgentDelete).mock.calls[0][0].force).toBeUndefined();
+      expect(showConfirm).not.toHaveBeenCalled();
+
+      (banner.shadowRoot?.querySelector('.force') as HTMLElement).click();
+      await vi.waitFor(() => expect(runAgentDelete).toHaveBeenCalledTimes(2));
+      await vi.mocked(runAgentDelete).mock.results[1].value;
+      expect(vi.mocked(runAgentDelete).mock.calls[1][0]).toMatchObject({
+        agentId: 'a-0',
+        force: true,
+      });
+      expect(showConfirm).toHaveBeenCalledTimes(1);
+      expect(mutations).toEqual([
+        'DELETE /api/v1/agents/a-0',
+        'DELETE /api/v1/agents/a-0?force=true',
+      ]);
+    });
+
+    it('Start answered 409 delete_in_progress shows the explanation', async () => {
+      const agents = [
+        makeAgent(0, { projectId: 'p2-start', phase: 'stopped', _capabilities: lifecycleCaps }),
+      ];
+      const { el } = await mountProject('p2-start', agents, 'grid', () =>
+        jsonResponse({ error: { code: 'delete_in_progress', message: 'being deleted' } }, 409)
+      );
+      await (el as unknown as Page).handleAgentAction('a-0', 'start');
+      expect(showToast).toHaveBeenCalledWith(START_BLOCKED_BY_DELETE_MESSAGE);
+    });
+
+    it('the stopping filter shows stopping agents, and live deltas move agents in and out', async () => {
+      const projectId = 'p2-filter';
+      const agents = [
+        makeAgent(0, { projectId, phase: 'stopping' }),
+        makeAgent(1, { projectId }),
+        makeAgent(2, { projectId, phase: 'stopped' }),
+      ];
+      const { el } = await mountProject(projectId, agents, 'grid');
+      const shown = (): string[] => (el as unknown as Page).displayAgents.map((a) => a.id).sort();
+      const button = [...(el.shadowRoot?.querySelectorAll('.filter-bar button') ?? [])].find(
+        (b) => b.textContent?.trim() === 'Stopping'
+      ) as HTMLElement | undefined;
+      expect(button).toBeDefined();
+      button!.click();
+      await el.updateComplete;
+      expect(localStorage.getItem(`scion-filter-project-agents-phase-${projectId}`)).toBe(
+        'stopping'
+      );
+      await vi.waitFor(() => expect(shown()).toEqual(['a-0']));
+
+      sseUpdate('agent.a-1.status', { phase: 'stopping' });
+      await flushState();
+      await el.updateComplete;
+      expect(shown()).toEqual(['a-0', 'a-1']);
+
+      sseUpdate('agent.a-0.status', { phase: 'stopped' });
+      await flushState();
+      await el.updateComplete;
+      expect(shown()).toEqual(['a-1']);
+      expect(el.shadowRoot?.querySelectorAll('.agent-card').length).toBe(1);
     });
   });
 });
