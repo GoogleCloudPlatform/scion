@@ -1503,6 +1503,31 @@ func newTestServerWithEnvCapture() (*Server, *envCapturingManager) {
 	return New(cfg, mgr, rt), mgr
 }
 
+// TestCreateAgentPassesLaunchIDEnv pins the create request's launchId
+// reaching the agent container as SCION_LAUNCH_ID.
+func TestCreateAgentPassesLaunchIDEnv(t *testing.T) {
+	srv, mgr := newTestServerWithEnvCapture()
+
+	body := `{
+		"name": "test-agent",
+		"id": "agent-uuid-123",
+		"launchId": "launch-uuid-789",
+		"config": {"template": "claude"}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, w.Code, w.Body.String())
+	}
+	if got := mgr.lastEnv["SCION_LAUNCH_ID"]; got != "launch-uuid-789" {
+		t.Errorf("SCION_LAUNCH_ID = %q, want %q", got, "launch-uuid-789")
+	}
+}
+
 // TestCreateAgentWithHubCredentials tests that Hub authentication env vars are passed to agent.
 // This verifies the fix from progress-report.md: RuntimeBroker sets SCION_HUB_URL, SCION_AUTH_TOKEN, SCION_AGENT_ID.
 func TestCreateAgentWithHubCredentials(t *testing.T) {

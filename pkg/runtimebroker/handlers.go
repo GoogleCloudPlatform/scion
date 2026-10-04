@@ -1031,6 +1031,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 	sc, err := s.buildStartContext(ctx, startContextInputs{
 		Name:               req.Name,
 		AgentID:            req.ID,
+		LaunchID:           req.LaunchID,
 		Slug:               req.Slug,
 		ProjectPath:        req.ProjectPath,
 		ProjectSlug:        req.ProjectSlug,
