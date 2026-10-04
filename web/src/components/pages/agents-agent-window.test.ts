@@ -2039,5 +2039,43 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       expect(win.items).toHaveLength(24);
       expect(win.updatesAvailable).toBe(true);
     });
+
+    for (const serverLists of [false, true]) {
+      it(`an agent deleted then created again while a refresh is in flight stays off the page (${serverLists ? 'the response still lists it' : 'the response no longer lists it'})`, async () => {
+        const fake: Fake = {
+          agents: Array.from({ length: 1200 }, (_, i) => makeAgent(i)),
+          requests: [],
+        };
+        const h = holdable(fakeFetch(fake), isGlobalAgentsList);
+        vi.stubGlobal('fetch', vi.fn(h.fn));
+        const el = await mount();
+        const win = internals(el).agentWindow;
+        expect(win.state).toBe('paged');
+        const id = win.items[0].id;
+        const agent = fake.agents.find((a) => a.id === id)!;
+
+        h.hold();
+        const refreshed = win.refresh();
+        await vi.waitFor(() => expect(h.heldCount).toBe(1));
+        if (!serverLists) fake.agents = fake.agents.filter((a) => a.id !== id);
+        handleUpdate(`agent.${id}.deleted`, {});
+        await flushLive(el);
+        handleUpdate(`agent.${id}.created`, { ...agent, agentId: id });
+        await flushLive(el);
+        expect(stateManager.getAgent(id)).toBeDefined();
+        h.release();
+        await refreshed;
+        await settle(el);
+
+        expect(h.sent).toHaveLength(2);
+        expect(win.items.some((a) => a.id === id)).toBe(false);
+        expect(win.memberIndex.has(id)).toBe(false);
+        // The page rows are the response's minus the deleted agent. A row
+        // left out for an agent the store holds again is not counted as
+        // dropped, so no chip is shown.
+        expect(win.items).toHaveLength(serverLists ? 24 : 25);
+        expect(win.updatesAvailable).toBe(false);
+      });
+    }
   });
 });

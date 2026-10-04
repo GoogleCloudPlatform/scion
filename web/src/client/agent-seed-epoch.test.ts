@@ -223,6 +223,21 @@ describe('AgentSeedEpoch', () => {
     expect(result.dropped).toEqual(['b']);
   });
 
+  it('an agent deleted then created again while the request is in flight stays off the result', () => {
+    const sm = newState();
+    sm.seedAgents([makeAgent('a'), makeAgent('b')]);
+    const epoch = new AgentSeedEpoch(sm);
+    emit(sm, 'agent.a.deleted', { agentId: 'a' });
+    emit(sm, 'agent.a.created', { ...makeAgent('a'), agentId: 'a' });
+    expect(sm.getAgent('a')).toBeDefined();
+    const result = epoch.seed([makeAgent('b')], { partial: false, isMember: () => true });
+    epoch.close();
+    // The live create does not join: the agent stays deleted for list pages.
+    expect(result.agents.map((x) => x.id)).toEqual(['b']);
+    expect(result.liveCreated).toEqual([]);
+    expect(result.dropped).toEqual([]);
+  });
+
   it('sawResync is set by a live-connection resync while open, and only then', () => {
     const resync = (sm: StateManager): void => {
       sm.sseClientInstance.dispatchEvent(new CustomEvent('disconnected'));
