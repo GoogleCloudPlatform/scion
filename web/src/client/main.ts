@@ -54,6 +54,7 @@ import {
 } from '../lib/admin-permissions.js';
 import { ACCOUNT_TEARDOWN_EVENT, type AccountTeardownDetail } from '../utils/auth.js';
 import { chatRecentFiles } from './chat-recent-files.js';
+import { installViewportFrame } from './viewport.js';
 import {
   buildRecentFilesScope,
   shouldClearRecentFilesOnTeardown,
@@ -807,6 +808,11 @@ window.addEventListener('unhandledrejection', (event) => {
 async function init(): Promise<void> {
   console.info('[Scion] Initializing client...');
 
+  // Size the app frame to the visible area while the on-screen keyboard is
+  // open (iOS), and undo any page pan in frame mode. Installed for the life
+  // of the page, so the disposer is not kept.
+  installViewportFrame();
+
   // Get initial data from SSR and hydrate state manager
   const initialData = getInitialData();
   if (initialData) {
@@ -1374,6 +1380,28 @@ function navigateTo(path: string): void {
   void renderRoute(path);
 }
 
+/**
+ * Rewrites the current URL to an equivalent app path without rendering
+ * anything, keeping its query and hash, for a page that already shows what
+ * the new path names. Records the path as the active shell's rendered path,
+ * as a render would, so returning to it (e.g. from the terminal workspace)
+ * still reuses the page. Resolves once the shell has re-rendered for it.
+ */
+function replaceRoute(path: string): Promise<void> {
+  const search = window.location.search;
+  window.history.replaceState(
+    window.history.state,
+    '',
+    browserPath(path) + search + window.location.hash
+  );
+  const shell = activeShell?.element as
+    | (HTMLElement & { currentPath: string; updateComplete?: Promise<unknown> })
+    | undefined;
+  if (!shell) return Promise.resolve();
+  shell.currentPath = search ? `${path}${search}` : path;
+  return Promise.resolve(shell.updateComplete).then(() => undefined);
+}
+
 // Initialize when DOM is ready
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', () => {
@@ -1388,4 +1416,4 @@ if (document.readyState === 'loading') {
 export { openTerminal, terminalHref } from './open-terminal.js';
 
 // Export for use in components and tests
-export { getInitialData, navigateTo, stateManager };
+export { getInitialData, navigateTo, replaceRoute, stateManager };

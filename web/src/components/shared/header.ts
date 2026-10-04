@@ -186,8 +186,15 @@ export class ScionHeader extends LitElement {
          is the one element here that can lose characters harmlessly. */
       grid-template-columns: minmax(0, 1fr) auto minmax(max-content, 1fr);
       align-items: center;
+      /* The page uses viewport-fit=cover, so the header runs under a notch
+         or status bar. The top inset is padding on top of the content
+         height (content-box, stated explicitly so the header never loses
+         its 60px row to the inset), and the side insets (landscape) widen
+         the inline padding. Every inset is 0 on devices without one. */
+      box-sizing: content-box;
       height: var(--scion-header-height, 60px);
-      padding: 0 1.5rem;
+      padding: env(safe-area-inset-top, 0px) max(1.5rem, env(safe-area-inset-right, 0px)) 0
+        max(1.5rem, env(safe-area-inset-left, 0px));
       background: var(--scion-surface, #ffffff);
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
     }
