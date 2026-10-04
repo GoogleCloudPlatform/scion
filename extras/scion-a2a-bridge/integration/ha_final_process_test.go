@@ -509,7 +509,8 @@ func classifyCursorPayload(payload []byte) cursorPayloadShape {
 				} `json:"status"`
 			} `json:"statusUpdate"`
 			ArtifactUpdate *struct {
-				TaskID string `json:"taskId"`
+				TaskID   string          `json:"taskId"`
+				Artifact json.RawMessage `json:"artifact"`
 			} `json:"artifactUpdate"`
 		} `json:"result"`
 		Status struct {
@@ -545,7 +546,7 @@ func classifyCursorPayload(payload []byte) cursorPayloadShape {
 		state:          state,
 		historyLen:     historyLen,
 		internalCursor: internalCursor,
-		artifact:       len(shape.Artifact) > 0,
+		artifact:       len(shape.Artifact) > 0 || (shape.Result.ArtifactUpdate != nil && len(shape.Result.ArtifactUpdate.Artifact) > 0),
 	}
 }
 
@@ -673,8 +674,9 @@ func TestCrossReplicaStreamCursor(t *testing.T) {
 	publishBrokerMessageAt(t, h.bridgeB, h.hubToken, stats.LastUserID, taskID, "cursor-final", messages.TypeAssistantReply, "final once", finalAt)
 	// The final publish plus its redelivery must yield exactly one
 	// artifact-update followed by the COMPLETED status-update. Anything else in
-	// this window (for example a replayed WORKING status, or a duplicate
-	// artifact) is a cursor or dedup regression.
+	// this window (for example a replayed WORKING status) is a cursor
+	// regression. A duplicate artifact from the redelivery would arrive after
+	// COMPLETED, so the assertNoSSE below catches that case.
 	for i, want := range []string{"artifact-update", "status-update"} {
 		ev := nextSSE(t, reconnected, 3*time.Second)
 		if bytes.Contains(ev.data, []byte("_bridgeEventID")) {
