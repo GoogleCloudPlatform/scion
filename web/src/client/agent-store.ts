@@ -1010,12 +1010,11 @@ export class AgentStore {
     // Deleted agents were not seeded, so the merge skips them.
     const upserted = Array.from(new Set(changed.map((row) => row.id)));
     if (upserted.length > 0) {
-      this.applyChange(feed, {
-        upserted,
-        deleted: [],
-        unknown: new Map(),
-        generation: feed.scopeGeneration,
-      });
+      this.applyChange(
+        feed,
+        { upserted, deleted: [], unknown: new Map(), generation: feed.scopeGeneration },
+        entry
+      );
     }
     if (entry.walk || this.entries.get(entry.key) !== entry) return;
     if (!caughtUp) {
@@ -1164,8 +1163,12 @@ export class AgentStore {
     return new Set([...this.carriedTombstones, ...own]);
   }
 
-  /** Apply one coalesced feed flush to every entry, notifying each changed entry once. */
-  private applyChange(feed: StateManager, change: AgentsChangedDetail): void {
+  /**
+   * Apply one coalesced feed flush to every entry, notifying each changed
+   * entry once. With `only`, the rows came from that entry's own read: only
+   * it adds rows it lacks, and the others update rows they already hold.
+   */
+  private applyChange(feed: StateManager, change: AgentsChangedDetail, only?: Entry): void {
     const added = new Set<string>();
     for (const entry of this.entries.values()) {
       // An entry that never loaded and is not loading holds no rows to keep
@@ -1174,7 +1177,7 @@ export class AgentStore {
       const held = entry.agents;
       const next = mergeChanged(held, change, {
         getAgent: (id) => feed.getAgent(id),
-        shouldAdd: shouldAddFor(entry.query),
+        shouldAdd: only && only !== entry ? (): boolean => false : shouldAddFor(entry.query),
         scopeCapabilities: entry.scopeCapabilities,
       });
       if (next === held) continue;

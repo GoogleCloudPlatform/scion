@@ -315,6 +315,54 @@ describe('AgentStore delta probe', () => {
     expect(h.server.walks()).toBe(walks);
   });
 
+  describe('a probe adds rows only to the list it read', () => {
+    const NO_DM = { _messageability: { canMessage: false } } as Partial<Agent>;
+    const withoutMessageability = (a: Agent): Agent => {
+      const copy: Agent & { _messageability?: unknown } = { ...a };
+      delete copy._messageability;
+      return copy;
+    };
+
+    it('a project probe does not add to the hub list a row the project endpoint renders', async () => {
+      // The project list probes first, the hub list a few seconds later.
+      const draws = [0, 1];
+      const h = await loaded([row('a1', 1, NO_DM)], P1, {
+        random: (): number => draws.shift() ?? 0.5,
+      });
+      h.server.projectRow = withoutMessageability;
+      h.store.retain(HUB, () => {});
+      await h.store.ensure(HUB);
+      h.server.agents.push(row('a2', 5, NO_DM));
+
+      await tick(AGENT_PROBE_INTERVAL_MS - AGENT_PROBE_JITTER_MS);
+      expect(h.server.probes('/api/v1/projects/')).toBe(1);
+      expect(ids(h.store.peek(P1)).sort()).toEqual(['a1', 'a2']);
+      expect(ids(h.store.peek(HUB))).toEqual(['a1']);
+
+      await tick(2 * AGENT_PROBE_JITTER_MS);
+      expect(h.server.probes('/api/v1/agents?')).toBe(1);
+      const a2 = find(h.store.peek(HUB), 'a2') as
+        | (Agent & { _messageability?: unknown })
+        | undefined;
+      expect(a2?._messageability).toEqual({ canMessage: false });
+    });
+
+    it('a hub probe does not add to a project list, and updates the rows it holds', async () => {
+      const h = await loaded([row('a1', 1)], P1);
+      h.store.retain(HUB, () => {});
+      await h.store.ensure(HUB);
+      h.server.sortedStatus = (path): number | undefined =>
+        path.startsWith('/api/v1/projects/') ? 422 : undefined;
+      h.server.agents[0] = row('a1', 4, { name: 'renamed' });
+      h.server.agents.push(row('a2', 5));
+      await tick();
+
+      expect(ids(h.store.peek(HUB)).sort()).toEqual(['a1', 'a2']);
+      expect(ids(h.store.peek(P1))).toEqual(['a1']);
+      expect(find(h.store.peek(P1), 'a1')?.name).toBe('renamed');
+    });
+  });
+
   it('measures the next probe from the newest row the last probe saw', async () => {
     const h = await loaded([row('a1', 1)]);
     h.server.agents.push(
