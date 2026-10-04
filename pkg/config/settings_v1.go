@@ -1563,7 +1563,7 @@ func (s *V1SharedDirStorageConfig) Validate() error {
 
 // validateSubPathRoot rejects a subpath_root that would produce a
 // confusing error or an unsafe path-component chain once joined with the
-// project ID and shared-dir name (round 6 review nit #6). An absolute
+// project ID and shared-dir name. An absolute
 // value (e.g. "/projects") produces a leading empty path component when
 // the resulting relative path is split on "/", which the component walk in
 // pkg/agent/shared_dir_storage_unix.go then reports as a confusing
@@ -1573,14 +1573,6 @@ func (s *V1SharedDirStorageConfig) Validate() error {
 // actionable message instead. "." and ".." components have no meaningful
 // interpretation here either: subpath_root exists to name one literal,
 // fixed subdirectory of the export, not to navigate the tree.
-// ValidateSubPathRoot is the subpath_root rule for any value, including one
-// read back from a per-agent record: relative, with no empty, "." or ".."
-// component. An empty value is the caller's to handle (it means the
-// default).
-func ValidateSubPathRoot(subPathRoot string) error {
-	return validateSubPathRoot(subPathRoot)
-}
-
 func validateSubPathRoot(subPathRoot string) error {
 	if filepath.IsAbs(subPathRoot) {
 		return fmt.Errorf("must be relative, not absolute (got %q)", subPathRoot)
@@ -1596,6 +1588,14 @@ func validateSubPathRoot(subPathRoot string) error {
 		}
 	}
 	return nil
+}
+
+// ValidateSubPathRoot is the subpath_root rule for any value, including one
+// read back from a per-agent record: relative, with no empty, "." or ".."
+// component. An empty value is the caller's to handle (it means the
+// default).
+func ValidateSubPathRoot(subPathRoot string) error {
+	return validateSubPathRoot(subPathRoot)
 }
 
 // sharedDirStorageIgnoredNFSFields lists the V1NFSConfig fields that are
