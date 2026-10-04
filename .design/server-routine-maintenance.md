@@ -233,7 +233,7 @@ Response:
 }
 ```
 
-Returns `409 Conflict` if the migration is already completed, unless it is listed in `rerunnableMigrations` (currently `utc-timestamp-normalize` and `applied-config-tz-cleanup`). A listed migration must be idempotent: a second run changes nothing the first run already fixed. A successful run replaces the stored result. A dry run of a pending (or failed) migration leaves it `pending` with the dry-run log as its result. A dry run of a completed migration, listed or not, returns `409 Conflict` ("Migration already completed; a re-run is idempotent, so run it without dryRun") and leaves the record unchanged: a dry run would overwrite the completed record (success resets it to `pending`, a failure marks it `failed`), and a real re-run of a listed migration is idempotent and reports its own count.
+Returns `409 Conflict` if the migration is already completed, unless it is listed in `rerunnableMigrations` (currently `utc-timestamp-normalize` and `applied-config-tz-cleanup`). A listed migration must be idempotent: a second run changes nothing the first run already fixed. A successful run replaces the stored result. A dry run of a pending (or failed) migration leaves it `pending` with the dry-run log as its result. A dry run of a completed migration returns `409 Conflict` and leaves the record unchanged. An unlisted migration gets the plain "Migration already completed" from the guard above; a listed one gets "Migration already completed; a re-run is idempotent, so run it without dryRun". The reasons: a dry run would overwrite the completed record (success resets it to `pending`, a failure marks it `failed`), and a real re-run of a listed migration is idempotent and reports its own count.
 
 #### Get Run Status
 

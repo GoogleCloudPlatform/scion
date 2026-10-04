@@ -76,3 +76,9 @@ path.
   unchanged record (it fails without the check). §2 and §3.5 are updated.
 - **Concurrent runs.** The check-then-set race on the running guard predates
   this change and is not fixed here. Follow-up: ptone/scion#2953.
+
+## Review round 3 fix
+
+- §3.5 now gives each 409 message where it applies. An unlisted completed
+  migration gets the plain "Migration already completed" from the earlier
+  guard. Only a listed one gets the dry-run message.
