@@ -24,7 +24,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 
 import {
   PROJECT_MEMBERS_GROUP_ANNOTATION,
-  SYSTEM_PROJECT_MEMBERS_GROUP_ANNOTATION,
+  LEGACY_PROJECT_MEMBERS_GROUP_ANNOTATION,
   isProjectMembersGroup,
 } from '../../shared/groups.js';
 import type { AdminGroup } from '../../shared/groups.js';
@@ -32,6 +32,7 @@ import { ScionGroupFormDialog } from './group-form-dialog.js';
 
 interface DialogInternals {
   editOwnerId: string;
+  formName: string;
   buildPatch(): Record<string, unknown> | null;
 }
 
@@ -56,7 +57,7 @@ const MEMBERS_GROUP = adminGroup({
 
 const LEGACY_MEMBERS_GROUP = adminGroup({
   projectId: 'p-1',
-  annotations: { [SYSTEM_PROJECT_MEMBERS_GROUP_ANNOTATION]: 'true' },
+  annotations: { [LEGACY_PROJECT_MEMBERS_GROUP_ANNOTATION]: 'true' },
 });
 
 const PLAIN_GROUP = adminGroup({ ownerId: 'u-alice' });
@@ -113,9 +114,13 @@ describe('group form owner field', () => {
     it(`is disabled with help text on a ${name}`, async () => {
       const el = await mountEdit(group);
       expect(picker(el).hasAttribute('disabled')).toBe(true);
-      expect(el.shadowRoot!.querySelector('.owner-managed')?.textContent).toContain(
-        'owner is managed by the project'
+      const help = el.shadowRoot!.querySelector('.owner-managed');
+      expect(help?.textContent?.replace(/\s+/g, ' ').trim()).toBe(
+        "Project members groups have no owner; access is managed through the project's members."
       );
+      // The help text describes the disabled picker for assistive technology.
+      expect(help?.id).toBeTruthy();
+      expect(picker(el).getAttribute('aria-describedby')).toBe(help!.id);
     });
   }
 
@@ -126,10 +131,21 @@ describe('group form owner field', () => {
     expect(i.buildPatch()).toBeNull();
   });
 
+  it('sends only the other fields on a mixed edit of a project members group', async () => {
+    const el = await mountEdit(MEMBERS_GROUP);
+    const i = el as unknown as DialogInternals;
+    i.formName = 'Renamed Members';
+    i.editOwnerId = 'u-mallory';
+    const patch = i.buildPatch();
+    expect(patch).toEqual({ name: 'Renamed Members' });
+    expect(patch).not.toHaveProperty('ownerId');
+  });
+
   it('stays editable on an ordinary group', async () => {
     const el = await mountEdit(PLAIN_GROUP);
     expect(picker(el).hasAttribute('disabled')).toBe(false);
     expect(el.shadowRoot!.querySelector('.owner-managed')).toBeNull();
+    expect(picker(el).hasAttribute('aria-describedby')).toBe(false);
     const i = el as unknown as DialogInternals;
     i.editOwnerId = 'u-bob';
     expect(i.buildPatch()).toEqual({ ownerId: 'u-bob' });

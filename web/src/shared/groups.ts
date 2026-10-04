@@ -57,9 +57,11 @@ export function canGroup(
 /** Marker annotation the hub writes on a project's members group. */
 export const PROJECT_MEMBERS_GROUP_ANNOTATION = 'scion.io/project-members-group';
 
-/** Legacy members-group marker written by the store backfill
- *  (ptone/scion#2556 tracks folding it into the key above). */
-export const SYSTEM_PROJECT_MEMBERS_GROUP_ANNOTATION = 'scion.io/system-project-members-group';
+/** Legacy members-group marker written by the store backfill. ptone/scion#2556
+ *  tracks folding it into the key above, and ptone/scion#2843 migrates groups
+ *  to the canonical key; the second check in isProjectMembersGroup goes once
+ *  the legacy key is retired. */
+export const LEGACY_PROJECT_MEMBERS_GROUP_ANNOTATION = 'scion.io/system-project-members-group';
 
 /**
  * Whether a group is a project members group, by either marker key. Mirrors
@@ -72,7 +74,7 @@ export function isProjectMembersGroup(
   if (!group?.projectId || !group.annotations) return false;
   return (
     group.annotations[PROJECT_MEMBERS_GROUP_ANNOTATION] === 'true' ||
-    group.annotations[SYSTEM_PROJECT_MEMBERS_GROUP_ANNOTATION] === 'true'
+    group.annotations[LEGACY_PROJECT_MEMBERS_GROUP_ANNOTATION] === 'true'
   );
 }
 

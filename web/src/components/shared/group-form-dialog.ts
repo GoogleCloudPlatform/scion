@@ -767,11 +767,12 @@ export class ScionGroupFormDialog extends LitElement {
           label="Owner"
           value=${this.editOwnerId}
           ?disabled=${this.submitting || managed}
+          aria-describedby=${managed ? 'owner-managed-help' : nothing}
           @principal-change=${(e: CustomEvent<PrincipalChangeDetail>) => this.handleOwnerChange(e)}
         ></scion-principal-picker>
         ${managed
-          ? html`<div class="help-text owner-managed">
-              This project members group's owner is managed by the project.
+          ? html`<div id="owner-managed-help" class="help-text owner-managed">
+              Project members groups have no owner; access is managed through the project's members.
             </div>`
           : nothing}
         ${!managed && this.ownerChanged

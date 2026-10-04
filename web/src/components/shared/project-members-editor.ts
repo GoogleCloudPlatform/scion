@@ -198,12 +198,32 @@ export function builtInOptionState(
   const tier = getRoleTier(role.name);
   if (ctx.isLastOwner && tier !== 'owner') return { disabled: true, reason: LAST_OWNER_REASON };
   if (!tierAllowed(tier, ctx.caps)) {
-    return { disabled: true, reason: addModeRoleReason(role, ctx.mode) || TIER_REASON };
+    return { disabled: true, reason: builtInTierReason(role, ctx.mode) };
   }
   if (ctx.mode === 'add' && !role.grantable) {
     return { disabled: true, reason: describeCustomRoleError(role.reason || 'Not assignable') };
   }
   return enabled;
+}
+
+/**
+ * Hub denial codes for a governance refusal: the actor's own tier may not
+ * grant the role (pkg/hub checkBuiltInChangeGovernance, ErrCodeRoleAssignmentForbidden
+ * and ErrCodeTargetRoleProtected). The hub's reason text for these is a
+ * machine string such as `actor role "admin" cannot add target role "owner"`.
+ */
+const GOVERNANCE_DENIAL_CODES: readonly string[] = [
+  'role_assignment_forbidden',
+  'target_role_protected',
+];
+
+/**
+ * The hub's custom-role authority refusal: role_assignment_forbidden with
+ * details.requiredPermission. The custom-roles section caption already states
+ * this cause.
+ */
+function isCustomRoleAuthorityDenial(role: AssignableProjectRole): boolean {
+  return role.denialCode === 'role_assignment_forbidden' && !!role.details?.requiredPermission;
 }
 
 /**
@@ -217,10 +237,21 @@ export function addModeRoleReason(role: AssignableProjectRole, mode: MemberDialo
 }
 
 /**
+ * Reason for a built-in role above the actor's tier. A governance refusal
+ * (or one without a denial code) reads as the readable tier text; any other
+ * code (credential gate, delegation ceiling) shows the hub's reason, mapped
+ * by describeCustomRoleError.
+ */
+export function builtInTierReason(role: AssignableProjectRole, mode: MemberDialogMode): string {
+  if (!role.denialCode || GOVERNANCE_DENIAL_CODES.includes(role.denialCode)) return TIER_REASON;
+  return addModeRoleReason(role, mode) || TIER_REASON;
+}
+
+/**
  * Enabled/disabled state of one custom-role checkbox. Without
  * canManageCustomRoles every checkbox is read-only (the section caption
- * explains why); in Add mode each one also carries its assignable-roles
- * reason. A held role can always be unchecked; removal needs no delegation
+ * explains why); in Add mode an unheld one also carries its assignable-roles
+ * reason when that differs from the caption's cause. A held role can always be unchecked; removal needs no delegation
  * ceiling.
  */
 export function customRoleState(
@@ -228,10 +259,10 @@ export function customRoleState(
   opts: { caps: MembershipCapabilities | null; held: boolean; mode?: MemberDialogMode }
 ): OptionState {
   if (!opts.caps?.canManageCustomRoles) {
-    return {
-      disabled: true,
-      reason: opts.held ? '' : addModeRoleReason(role, opts.mode ?? 'edit'),
-    };
+    // The section caption states the custom-role authority cause once, so a
+    // row repeats only a different cause and otherwise keeps its description.
+    if (opts.held || isCustomRoleAuthorityDenial(role)) return { disabled: true, reason: '' };
+    return { disabled: true, reason: addModeRoleReason(role, opts.mode ?? 'edit') };
   }
   if (opts.held) return { disabled: false, reason: '' };
   if (!role.grantable) {
@@ -285,7 +316,13 @@ export function defaultBuiltInForAdd(
  *  grant. The Source column is shown only then; while every binding is
  *  direct it would read "Direct" on every row. */
 export function hasNonDirectSource(groups: readonly ProjectMemberGroup[]): boolean {
-  return groups.some((g) => g.bindings.some((b) => (b.source || 'direct') !== 'direct'));
+  return groups.some((g) => g.bindings.some(isNonDirectSource));
+}
+
+/** Whether a binding comes from somewhere other than a direct grant. An
+ *  empty source counts as direct, matching the hub's default. */
+export function isNonDirectSource(b: Pick<ProjectMemberBinding, 'source'>): boolean {
+  return (b.source || 'direct') !== 'direct';
 }
 
 /** The row's built-in binding, if any. */
@@ -1704,7 +1741,7 @@ export class ScionProjectMembersEditor extends LitElement {
   private renderMemberRow(group: ProjectMemberGroup, showSource: boolean) {
     const key = `${group.principalType}:${group.principalId}`;
     const isRemoving = this.removingKey === key;
-    const inherited = group.bindings.find((b) => b.source !== 'direct');
+    const inherited = group.bindings.find(isNonDirectSource);
     const lastOwner = isLastDirectOwner(group, this.groups);
     const editable = canEditRow(group, this.capabilities);
     const remove = canRemoveRow(group, this.capabilities, this.groups);
