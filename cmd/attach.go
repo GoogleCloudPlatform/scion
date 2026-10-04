@@ -350,6 +350,14 @@ func attachViaHub(hubCtx *HubContext, agentName string) error {
 	// Check agent lifecycle status - the agent must be running to attach.
 	agentPhase, _ := hubAgentPhaseActivity(agent.Phase, agent.Activity, agent.Status)
 	if agentPhase != string(state.PhaseRunning) {
+		if launchActive(agent) {
+			step := ""
+			if agent.Launch.Step != "" {
+				step = ", step: " + agent.Launch.Step
+			}
+			return fmt.Errorf("agent '%s' is still launching (phase: %s%s)\n\nWait for it and attach with: scion start %s --attach",
+				agentName, agentPhase, step, agentName)
+		}
 		// Build a helpful error message with available status info
 		statusInfo := agent.Status
 		if statusInfo == "" {
