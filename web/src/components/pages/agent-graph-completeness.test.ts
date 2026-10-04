@@ -292,6 +292,32 @@ describe('/agents/graph seeding', () => {
     expect(graphInternals(el).agents[0]).not.toHaveProperty('taskSummary');
   });
 
+  it('a successful request closes its seed epoch and removes its listeners', async () => {
+    stubAgentsResponse(() => jsonResponse({ agents: [agent('a1')] }));
+    const el = await mountGraph();
+    const openEpochs = (): number =>
+      (stateManager as unknown as { seedEpochs: Map<unknown, unknown> }).seedEpochs.size;
+    expect(openEpochs()).toBe(0);
+    // The epoch's listeners: each fetch adds and removes every one once.
+    // (The store ends the epoch itself when it seeds, so its end call alone
+    // would not show that the epoch was closed.)
+    const names = ['agent-created', 'agents-changed', 'agents-resync'];
+    const add = vi.spyOn(stateManager, 'addEventListener');
+    const remove = vi.spyOn(stateManager, 'removeEventListener');
+    const count = (spy: typeof add | typeof remove, name: string): number =>
+      spy.mock.calls.filter(([type]) => type === name).length;
+    for (let fetch = 1; fetch <= 2; fetch++) {
+      await graphInternals(el).fetchAgents(true);
+      for (const name of names) {
+        expect(count(add, name)).toBe(fetch);
+        expect(count(remove, name)).toBe(fetch);
+      }
+      expect(openEpochs()).toBe(0);
+    }
+    expect(agentRequests).toHaveLength(3);
+    expect(graphInternals(el).agents.map((a) => a.id)).toEqual(['a1']);
+  });
+
   it('a failed request still closes its seed epoch', async () => {
     stubAgentsResponse(() => jsonResponse({ error: { message: 'boom' } }, 500));
     vi.spyOn(console, 'error').mockImplementation(() => {});
