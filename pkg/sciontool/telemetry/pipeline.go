@@ -245,7 +245,13 @@ func (p *Pipeline) Start(ctx context.Context) error {
 	// p.usageDeriver is an atomic.Pointer: a log request can arrive
 	// concurrently with this Store, between receiver.Start returning above
 	// and this assignment running, and handleLogs's Load must never race it.
-	if deriver, err := NewUsageDeriver(ctx, p.config); err != nil {
+	// The deriver dials the receiver's bound gRPC port, not the configured
+	// one: with SCION_OTEL_GRPC_PORT=0 the configured port is 0 and the
+	// receiver listens on an ephemeral port.
+	grpcPort, httpPort := p.receiver.BoundPorts()
+	deriverConfig := *p.config
+	deriverConfig.GRPCPort = grpcPort
+	if deriver, err := NewUsageDeriver(ctx, &deriverConfig); err != nil {
 		log.Error("Failed to create usage deriver: %v", err)
 	} else {
 		p.usageDeriver.Store(deriver)
@@ -272,7 +278,7 @@ func (p *Pipeline) Start(ctx context.Context) error {
 		p.initSelfMetrics(ctx)
 	}
 
-	log.Info("Telemetry pipeline started (gRPC: %d, HTTP: %d)", p.config.GRPCPort, p.config.HTTPPort)
+	log.Info("Telemetry pipeline started (gRPC: %d, HTTP: %d)", grpcPort, httpPort)
 
 	return nil
 }

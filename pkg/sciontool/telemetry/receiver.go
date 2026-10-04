@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -236,6 +237,31 @@ func (r *Receiver) waitGRPCShutdown(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// BoundPorts returns the gRPC and HTTP ports the receiver is actually
+// listening on. They differ from the configured ports when the config
+// requests port 0 (an ephemeral port). Before the first Start they fall
+// back to the configured ports.
+func (r *Receiver) BoundPorts() (grpcPort, httpPort int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return listenPort(r.grpcListenAddr, r.config.GRPCPort), listenPort(r.httpListenAddr, r.config.HTTPPort)
+}
+
+func listenPort(addr string, fallback int) int {
+	if addr == "" {
+		return fallback
+	}
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fallback
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return fallback
+	}
+	return port
 }
 
 // IsRunning returns true if the receiver is running.
