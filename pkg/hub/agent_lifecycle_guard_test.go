@@ -183,7 +183,7 @@ func TestPostDispatchWriteKeepsSoftDeletedRow(t *testing.T) {
 // --- restore guards ---
 
 // A restore of a row read before a concurrent write fails the
-// state_version guard and writes nothing.
+// state_version guard, runs no restore hook and writes nothing.
 func TestRestoreStaleVersionWritesNothing(t *testing.T) {
 	srv, s, _, _ := engineTestServer(t)
 	agent, edge := softDeletedWithEdge(t, srv, s, "restore-stale", store.DelegationPrincipalUser, tid("stale-delegator"))
@@ -193,9 +193,15 @@ func TestRestoreStaleVersionWritesNothing(t *testing.T) {
 	fresh.Message = "concurrent write"
 	require.NoError(t, s.UpdateAgent(context.Background(), fresh))
 	before := mustGetAgent(t, s, agent.ID)
+	hookCalled := false
+	srv.RegisterRestoreHook("record", func(context.Context, store.Store, *store.Agent, AuditActor) error {
+		hookCalled = true
+		return nil
+	})
 
 	err := srv.restoreAgentTx(context.Background(), &stale, AuditActor{})
 	require.ErrorIs(t, err, store.ErrVersionConflict)
+	assert.False(t, hookCalled, "the restore hook does not run")
 	assertRestoreWroteNothing(t, s, before, edge)
 }
 
