@@ -7,8 +7,9 @@
 # time because the preflight returns on first failure.
 #
 # THE COUNT DEPENDS ON WHAT THE ARM SUPPLIES. Each step records its grant.
-# The two audience arms differ in exactly one value and return different
-# lists; that is a fact about the hub, not a defect in the walk.
+# The two audience arms differ in exactly one value, which is offered only
+# if the hub asks for an audience. Where the rendered settings.yaml already
+# carries one, neither arm is asked and the two lists agree.
 #
 # CORPUS BINDING. This walk reads the committed goldens, so on its own it
 # measures the goldens and not the chart. The digests below close that gap
@@ -19,11 +20,11 @@
 #
 # GOLDEN DIGESTS (sha256, as walked)
 #   existing-secret.yaml     db0359b7092a35d6580b7985f2d07e2e69c4ea185118e52c1d0125142a08f76a
-#   minimal.yaml             825687810e5bfe64fa7c8f07196f601ac62e78fa52aa07abb2846075cd938ccd
-#   session-existing.yaml    2d436bf967947f1d0c11b6478e2f910473791ec0cfa2c817ac8bd4bc16c29cca
+#   minimal.yaml             fa1f95f9e13d85a06bb8a5914a4a6f561d9cd8f4437c98ee8bc85b4e55483307
+#   session-existing.yaml    a6a272606b88e9bbf81151c3a116d81ce610a6a3085377e39cbafb6eebdf34b6
 #   settings-oauth.yaml      9e3d59c1d371451a65bafe09a400ed8faa4d0e7603a90f1328e5f0e40931c701
-#   settings.yaml            ad65ca93c88cdd5be8896118287ed1d57a53c4c3b582e593d4a82f33dcdd3552
-#   varied.yaml              428bd2e80dfdc3ac0b2af0407785f498c8a8b16b3352330d284a5876e1692d6f
+#   settings.yaml            60e8864d021936116102207301fc72718d61be380fdf6fc1c8389250065716e9
+#   varied.yaml              12b1c7a8ba1f58f3cbc6d77754631c9125847d5677d32356884c580c8781e345
 
 ===== existing-secret.yaml
 NO RENDERED settings.yaml: no "settings.yaml: |" block in this golden
@@ -73,27 +74,9 @@ config   mode="hosted" hub_id="ci-settings" driver="postgres" storage="gcs" auth
 routes   isHADeployment=true hostedHAGuardsRequired=true
  1  hosted HA deployment requires a durable session/signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET
     granted env SCION_SERVER_SESSION_SECRET="probe-secret"
- 2  hosted HA deployment requires server.auth.proxy.provider=iap; got ""
-    granted server.auth.proxy.provider="iap"
- 3  hosted HA deployment requires server.auth.proxy.iap.audience
-    granted server.auth.proxy.iap.audience="/projects/1/locations/us-central1/services/hub"
- 4  hosted HA deployment requires server.auth.transport; do not use server.transport
-    granted server.auth.transport={}
- 5  hosted HA deployment requires server.auth.transport.mode=iap; got ""
-    granted server.auth.transport.mode="iap"
- 6  hosted HA deployment requires server.auth.transport.oidc_audience
-    granted server.auth.transport.oidc_audience="probe-client-id"
- 7  hosted HA deployment requires server.auth.transport.platform_auth_sa
-    granted server.auth.transport.platform_auth_sa="probe@..."
-TERMINATED the hub ran out of gates: preflight passes after 7.
+TERMINATED the hub ran out of gates: preflight passes after 1.
 CANON BEGIN
 PROSE hosted HA deployment requires a durable session/signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET
-KEY   server.auth.proxy.provider
-KEY   server.auth.proxy.iap.audience
-KEY   server.auth.transport
-KEY   server.auth.transport.mode
-KEY   server.auth.transport.oidc_audience
-KEY   server.auth.transport.platform_auth_sa
 CANON END
 
 ===== settings.yaml [audience malformed = "my-iap-audience"]
@@ -101,18 +84,9 @@ config   mode="hosted" hub_id="ci-settings" driver="postgres" storage="gcs" auth
 routes   isHADeployment=true hostedHAGuardsRequired=true
  1  hosted HA deployment requires a durable session/signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET
     granted env SCION_SERVER_SESSION_SECRET="probe-secret"
- 2  hosted HA deployment requires server.auth.proxy.provider=iap; got ""
-    granted server.auth.proxy.provider="iap"
- 3  hosted HA deployment requires server.auth.proxy.iap.audience
-    granted server.auth.proxy.iap.audience="my-iap-audience"
- 4  hosted HA deployment requires a supported IAP audience: Cloud Run (/projects/<number>/locations/<region>/services/<service>) or GCLB (/projects/<number>/global/backendServices/<id>); got "my-iap-audience"
-TERMINATED the probe ran out of moves at gate 4. This is a LIMIT OF THIS ARM, not a
-           property of the hub: there may be further gates behind this one.
+TERMINATED the hub ran out of gates: preflight passes after 1.
 CANON BEGIN
 PROSE hosted HA deployment requires a durable session/signing secret; set --session-secret or SCION_SERVER_SESSION_SECRET
-KEY   server.auth.proxy.provider
-KEY   server.auth.proxy.iap.audience
-PROSE hosted HA deployment requires a supported IAP audience: Cloud Run (/projects/<number>/locations/<region>/services/<service>) or GCLB (/projects/<number>/global/backendServices/<id>); got "my-iap-audience"
 CANON END
 
 ===== varied.yaml [audience well-formed = "/projects/1/locations/us-central1/services/hub"]

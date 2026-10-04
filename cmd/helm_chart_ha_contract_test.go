@@ -179,19 +179,15 @@ func gateSupplier(t *testing.T, audience string) supplier {
 //
 // The third is the one a wantGates literal would have passed.
 var authoredProxyGates = []string{
-	// server.database.url headed this list until the Cloud SQL phase. It was
-	// removed because THIS TRIPWIRE WENT RED AND NAMED IT - "gates the authored
-	// list names and the hub no longer refuses on: [server.database.url]" - not
-	// because an author decided the phase had landed it. That is the intended
-	// direction of travel: the chart renders a URL, the hub stops objecting, the
-	// authored list is corrected by the object it is a tripwire for.
+	// server.database.url headed this list until the Cloud SQL phase, and the
+	// six IAP/transport gates followed the session secret until the chart
+	// modelled auth.proxy and auth.transport. Each was removed because THIS
+	// TRIPWIRE WENT RED AND NAMED IT - "gates the authored list names and the
+	// hub no longer refuses on: [...]" - not because an author decided a phase
+	// had landed it. That is the intended direction of travel: the chart
+	// renders a value, the hub stops objecting, the authored list is corrected
+	// by the object it is a tripwire for.
 	"", // the durable session/signing secret: a prose gate, it names no key
-	"server.auth.proxy.provider",
-	"server.auth.proxy.iap.audience",
-	"server.auth.transport",
-	"server.auth.transport.mode",
-	"server.auth.transport.oidc_audience",
-	"server.auth.transport.platform_auth_sa",
 }
 
 // TestHelmChartHAGateWalk derives the gate list and compares it to the
@@ -279,8 +275,9 @@ func TestHelmChartHAGateWalk(t *testing.T) {
 	b.WriteString("# time because the preflight returns on first failure.\n")
 	b.WriteString("#\n")
 	b.WriteString("# THE COUNT DEPENDS ON WHAT THE ARM SUPPLIES. Each step records its grant.\n")
-	b.WriteString("# The two audience arms differ in exactly one value and return different\n")
-	b.WriteString("# lists; that is a fact about the hub, not a defect in the walk.\n")
+	b.WriteString("# The two audience arms differ in exactly one value, which is offered only\n")
+	b.WriteString("# if the hub asks for an audience. Where the rendered settings.yaml already\n")
+	b.WriteString("# carries one, neither arm is asked and the two lists agree.\n")
 	b.WriteString("#\n")
 	b.WriteString("# CORPUS BINDING. This walk reads the committed goldens, so on its own it\n")
 	b.WriteString("# measures the goldens and not the chart. The digests below close that gap\n")
