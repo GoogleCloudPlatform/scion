@@ -262,6 +262,10 @@ If the Hub is configured to mint transport tokens but cannot mint one (for examp
 
 `scion agent reset-auth <agent>` also pushes a fresh transport token when the Hub mints them. The broker writes it to `~/.scion/transport-token` next to the agent token, and `sciontool init` reloads it straight away and records the outcome `reset`, so doctor no longer shows an earlier failed refresh as the latest event. A value that cannot be parsed is not adopted: the agent keeps its current credential, restores the file from it, and records the reset as failed. This recovers an agent whose transport token has already expired, since that agent's own refresh can no longer get through the platform guard. If the Hub cannot mint a transport token, the reset still replaces the agent token.
 
+### Agents that started without a transport token
+
+If the Hub cannot mint a transport token at dispatch time, the agent starts without one. The Hub still sets `SCION_TRANSPORT_MODE` whenever it is configured to mint transport tokens. In a proxy mode (`iap` or `cloudrun_invoker`), such an agent adopts the first transport token it receives later, either from a token refresh or from `reset-auth`. That token is written to `~/.scion/transport-token` through the same path as a normal refresh, and every in-agent hub client, including processes that were already running, picks it up without a restart. Until then, requests carry no transport header, and `sciontool doctor` reports that no transport credential has been received. Because the platform guard usually blocks the agent's own refresh until it has a credential, `reset-auth` is the usual way to recover. Without a proxy mode, the agent ignores a transport token that arrives after start.
+
 ### Diagnosing with `sciontool doctor`
 
 Inside the agent, `sciontool doctor` has a **Transport Auth** section that shows:

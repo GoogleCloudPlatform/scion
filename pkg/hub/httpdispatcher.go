@@ -2803,9 +2803,6 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 		// proxy guards the hub and can adopt a transport token delivered
 		// later by a token refresh or reset-auth.
 		if d.transportMode != "" {
-			if resolvedEnv == nil {
-				resolvedEnv = make(map[string]string)
-			}
 			resolvedEnv["SCION_TRANSPORT_MODE"] = d.transportMode
 			classifyEnv(&envClassifications, "SCION_TRANSPORT_MODE", api.EnvKindPlain)
 		}
