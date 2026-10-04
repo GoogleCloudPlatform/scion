@@ -545,3 +545,28 @@ func TestDelegationEdgeGuardedDeactivateAndReactivate(t *testing.T) {
 	_, err = w.cs.GetDelegationEdge(w.ctx, uuid.NewString())
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
+
+// A hop whose fingerprinted state changes after the snapshot, while its edge
+// row stays the same, is skipped rather than adopted under the new state.
+func TestProvenanceAdoptionSkipsHopChangedAfterSnapshot(t *testing.T) {
+	w := newAdoptionWorld(t)
+	u := w.user()
+	a := w.agent(u, nil, "full")
+	ea := w.activeEdge(a.ID)
+	w.backfillMarker()
+	w.cs.adoptionHopHook = func(_ int, rec *store.DelegationAdoption) error {
+		stored, err := w.cs.GetAgent(w.ctx, rec.DelegateID)
+		if err != nil {
+			return err
+		}
+		stored.AppliedConfig.AgentRole = "baseline"
+		return w.cs.UpdateAgent(w.ctx, stored)
+	}
+	w.migrate()
+	r := w.record(a.ID)
+	assert.Equal(t, store.DelegationAdoptionSkippedChanged, r.Status)
+	assert.Equal(t, string(delegationadoption.ReasonFingerprintChanged), r.Reason)
+	e := w.activeEdge(a.ID)
+	assert.Equal(t, ea.ID, e.ID)
+	assert.Equal(t, store.EffectCeilingUnrecorded, e.Kind)
+}
