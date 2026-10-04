@@ -537,6 +537,10 @@ type AgentStore interface {
 
 	// SwapRunIntent is SetRunIntent that also returns the intent the row
 	// held before the write ("" for none), read under the same row lock.
+	//
+	// SetRunIntent and SwapRunIntent return ErrDeleteInProgress, and write
+	// nothing, for RunIntentRunning on a row a delete holds
+	// (DeletionHoldsRow) or a soft-deleted row (ptone/scion#2550).
 	SwapRunIntent(ctx context.Context, agentID string, intent RunIntent) (prior RunIntent, at time.Time, err error)
 
 	// RevertRunIntent sets run_intent to `to` only if the row still holds

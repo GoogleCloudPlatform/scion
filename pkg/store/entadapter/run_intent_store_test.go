@@ -322,3 +322,63 @@ func TestRunIntent_ListFilterOrRunIntent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, res.Items, 2, "Phase alone is unchanged")
 }
+
+// A running intent is refused with store.ErrDeleteInProgress, writing
+// nothing, on the rows SetAgentRunID refuses: a start that the run-ID write
+// would refuse must not leave intent running (ptone/scion#2550, round 5
+// N2). A stopped intent is always recorded, since the delete engine
+// records one on the row it holds.
+func TestRunIntent_RunningRefusedWhileDeleteHoldsRow(t *testing.T) {
+	ctx := context.Background()
+	now := time.Now()
+	live, expired := now.Add(time.Minute), now.Add(-time.Minute)
+	for _, tc := range []struct {
+		name      string
+		state     string
+		leaseAt   *time.Time
+		deletedAt *time.Time
+		refused   bool
+	}{
+		{"no delete", "", nil, nil, false},
+		{"deleting, live lease", store.DeletionStateDeleting, &live, nil, true},
+		{"deleting, lease expired", store.DeletionStateDeleting, &expired, nil, false},
+		{"finalizing", store.DeletionStateFinalizing, &expired, nil, true},
+		{"failed", store.DeletionStateFailed, nil, nil, false},
+		{"soft-deleted", "", nil, &now, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, projectID := newTestAgentStore(t)
+			a := makeAgent(projectID, "intent-delete-agent")
+			require.NoError(t, s.CreateAgent(ctx, a))
+			firstAt, err := s.SetRunIntent(ctx, a.ID, store.RunIntentStopped)
+			require.NoError(t, err)
+			set := store.DeletionFields{DeletedAt: tc.deletedAt}
+			if tc.state != "" {
+				st := tc.state
+				set.State = &st
+			}
+			set.LeaseAt = tc.leaseAt
+			n, err := s.UpdateAgentDeletion(ctx, a.ID, store.DeletionPredicate{}, set)
+			require.NoError(t, err)
+			require.Equal(t, 1, n)
+
+			_, _, err = s.SwapRunIntent(ctx, a.ID, store.RunIntentRunning)
+			got, gerr := s.GetAgent(ctx, a.ID)
+			require.NoError(t, gerr)
+			if tc.refused {
+				require.ErrorIs(t, err, store.ErrDeleteInProgress)
+				assert.Equal(t, store.RunIntentStopped, got.RunIntent, "a refused write changes nothing")
+				require.NotNil(t, got.RunIntentAt)
+				assert.True(t, got.RunIntentAt.Equal(firstAt), "a refused write keeps run_intent_at")
+				_, err = s.SetRunIntent(ctx, a.ID, store.RunIntentRunning)
+				require.ErrorIs(t, err, store.ErrDeleteInProgress, "SetRunIntent refuses too")
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, store.RunIntentRunning, got.RunIntent)
+			}
+			// Stopped is recorded whatever the delete state.
+			_, err = s.SetRunIntent(ctx, a.ID, store.RunIntentStopped)
+			require.NoError(t, err)
+		})
+	}
+}

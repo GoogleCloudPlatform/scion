@@ -309,6 +309,12 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		statusCode = http.StatusConflict
 		code = ErrCodeConflict
 		message = "Resource already exists"
+	case errors.Is(err, store.ErrDeleteInProgress):
+		// A start-side write (run ID or running intent) refused because a
+		// delete holds the row (ptone/scion#2550).
+		statusCode = http.StatusConflict
+		code = ErrCodeDeleteInProgress
+		message = deleteInProgressRefusal("").Message
 	case errors.Is(err, store.ErrVersionConflict):
 		statusCode = http.StatusConflict
 		code = ErrCodeVersionConflict
