@@ -382,13 +382,12 @@ func ProvisionShared(in ProvisionInput) error {
 		return fmt.Errorf("ProvisionShared: ClonePerAgent mode must not use NFS backend " +
 			"(should be routed to localBackend by SelectWorkspaceBackend)")
 	}
-	// Guard: EmptyPerAgent has no shared project workspace to provision. Its
-	// private per-agent directory is local-only until NFS per-agent support
-	// lands (design #2703 P3); runtime.CheckWorkspaceBackendMode fails closed
-	// for it on NFS, so reaching here is a routing bug.
+	// Guard: EmptyPerAgent has no shared project workspace to provision. On
+	// NFS its private agent directory is prepared by ProvisionAgentDir
+	// (design #2703 P3), so reaching here is a routing bug.
 	if in.Mode == store.SharingModeEmptyPerAgent {
 		return fmt.Errorf("ProvisionShared: EmptyPerAgent mode has no shared workspace to provision " +
-			"(should be routed to localBackend by SelectWorkspaceBackend)")
+			"(its agent directory is prepared by ProvisionAgentDir)")
 	}
 
 	if in.Resolved.HostPath == "" {

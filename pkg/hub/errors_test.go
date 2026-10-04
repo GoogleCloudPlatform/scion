@@ -134,17 +134,18 @@ func TestMethodNotAllowed_WithAllowedMethods(t *testing.T) {
 	}
 }
 
-func TestMethodNotAllowed_WithoutAllowedMethods(t *testing.T) {
+// A bare MethodNotAllowed(w) no longer compiles, so the old "no Allow
+// header" case is replaced by the minimum: a single allowed method.
+func TestMethodNotAllowed_SingleMethod(t *testing.T) {
 	rr := httptest.NewRecorder()
-	MethodNotAllowed(rr)
+	MethodNotAllowed(rr, http.MethodGet)
 
 	if rr.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected status %d, got %d", http.StatusMethodNotAllowed, rr.Code)
 	}
 
-	allow := rr.Header().Get("Allow")
-	if allow != "" {
-		t.Errorf("expected no Allow header, got %q", allow)
+	if allow := rr.Header().Get("Allow"); allow != "GET" {
+		t.Errorf("expected Allow header %q, got %q", "GET", allow)
 	}
 
 	var resp ErrorResponse

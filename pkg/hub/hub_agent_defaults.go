@@ -18,7 +18,6 @@ import (
 	"context"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -53,6 +52,15 @@ func (s *Server) hubAgentDefaults() opsettings.AgentDefaultsSettings {
 		d.DefaultThinkingLevel = &v
 	}
 	return d
+}
+
+// autoExposePortsDefault returns a copy of the hub's auto-expose-ports
+// default under s.mu, or nil when unset. The settings propagation goroutine
+// rewrites the pointer while the hub runs (ApplySnapshot).
+func (s *Server) autoExposePortsDefault() *bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return copyBoolPtr(s.config.AutoExposePortsDefault)
 }
 
 // agentDefaultsEqual reports whether two agent_defaults sections carry the same
@@ -170,21 +178,6 @@ func (s *Server) warnHubDefaultTemplateUnusable(ctx context.Context, name, proje
 		"hub operational default_template is unusable; creating the agent with no template. "+
 			"Fix or clear default_template in the hub agent_defaults settings",
 		"template", name, "project_id", projectID, "reason", reason)
-}
-
-// profileTimezone returns the IANA timezone string for the named profile, or ""
-// if the profile does not exist or has no timezone set. Thread-safe: delegates
-// to SettingsOverlay.ProfileTimezone which reads the single timezone field
-// under RLock without deep-copying the entire profiles map.
-func (s *Server) profileTimezone(profileName string) string {
-	if profileName == "" {
-		return ""
-	}
-	overlay := config.GetGlobalSettingsOverlay()
-	if overlay == nil {
-		return ""
-	}
-	return overlay.ProfileTimezone(profileName)
 }
 
 // hubDefaultHarnessConfigCtxKey marks a request context in which

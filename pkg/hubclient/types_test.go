@@ -301,3 +301,66 @@ func TestResolvedSecret_JSON(t *testing.T) {
 		}
 	})
 }
+
+func TestAgent_JSON_Launch(t *testing.T) {
+	jsonData := `{
+		"id": "agent-1",
+		"phase": "provisioning",
+		"message": "pulling image",
+		"launch": {
+			"id": "launch-1",
+			"state": "active",
+			"active": true,
+			"kind": "create",
+			"step": "image_pull",
+			"deadline": "2026-10-02T12:05:00Z",
+			"remainingSeconds": 0
+		}
+	}`
+	var a Agent
+	if err := json.Unmarshal([]byte(jsonData), &a); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if a.Message != "pulling image" {
+		t.Errorf("Message = %q", a.Message)
+	}
+	l := a.Launch
+	if l == nil {
+		t.Fatal("Launch is nil")
+	}
+	if l.ID != "launch-1" || l.State != "active" || !l.Active || l.Kind != "create" || l.Step != "image_pull" {
+		t.Errorf("unexpected launch: %+v", l)
+	}
+	if l.Deadline == nil || l.Deadline.UTC().Format("2006-01-02T15:04:05Z") != "2026-10-02T12:05:00Z" {
+		t.Errorf("Deadline = %v", l.Deadline)
+	}
+	// remainingSeconds 0 must stay distinguishable from absent.
+	if l.RemainingSeconds == nil || *l.RemainingSeconds != 0 {
+		t.Errorf("RemainingSeconds = %v", l.RemainingSeconds)
+	}
+
+	var old Agent
+	if err := json.Unmarshal([]byte(`{"id":"agent-1","phase":"running"}`), &old); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if old.Launch != nil {
+		t.Errorf("an older Hub's agent must decode with no launch, got %+v", old.Launch)
+	}
+}
+
+func TestCreateAgentRequest_AcceptAsyncLaunchJSON(t *testing.T) {
+	b, err := json.Marshal(CreateAgentRequest{Name: "a1", AcceptAsyncLaunch: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"acceptAsyncLaunch":true`) {
+		t.Errorf("opt-in missing: %s", b)
+	}
+	b, err = json.Marshal(CreateAgentRequest{Name: "a1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "acceptAsyncLaunch") {
+		t.Errorf("opt-in must be omitted when false: %s", b)
+	}
+}
