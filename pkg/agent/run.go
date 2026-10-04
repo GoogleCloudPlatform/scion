@@ -1415,7 +1415,7 @@ authDone:
 		ExperimentOn: api.HubAgentDefaultsFromContext(ctx).ExperimentEnabled(experiments.K8sNFSHome),
 		LoadSettings: func() (*config.VersionedSettings, error) {
 			if startGlobalSettings != nil {
-				return startGlobalSettings, nil
+				return checkHomeStorageLoaded(startGlobalSettings)
 			}
 			return loadHomeStorageSettings()
 		},
