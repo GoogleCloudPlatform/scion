@@ -222,6 +222,25 @@ func TestHookProviderEmitsCounterDeltaAndOtherInstrumentTemporalities(t *testing
 }
 
 func TestHookProviderEmittedResourceAndPointsPassStrictCloudAdmission(t *testing.T) {
+	t.Run("clean env", func(t *testing.T) {
+		testHookProviderStrictCloudAdmission(t, nil)
+	})
+	// ptone/scion#2249: the OTel SDK merges resource.Environment() into
+	// every provider resource, so OTEL_RESOURCE_ATTRIBUTES and
+	// OTEL_SERVICE_NAME in sciontool's environment must not reach the
+	// loopback providers' resource and fail GCP admission.
+	t.Run("OTEL resource env set", func(t *testing.T) {
+		testHookProviderStrictCloudAdmission(t, map[string]string{
+			"OTEL_RESOURCE_ATTRIBUTES": "deployment.environment=prod,host.name=leak,service.name=env-service,scion.agent.id=env-agent",
+			"OTEL_SERVICE_NAME":        "env-service-name",
+		})
+	})
+}
+
+func testHookProviderStrictCloudAdmission(t *testing.T, ambient map[string]string) {
+	for key, value := range ambient {
+		t.Setenv(key, value)
+	}
 	for key, value := range map[string]string{
 		"SCION_AGENT_ID": "agent", "SCION_AGENT_SLUG": "slug", "SCION_PROJECT_ID": "project",
 		"SCION_HARNESS": "claude", "SCION_MODEL": "model", "SCION_BROKER_ID": "broker-id", "SCION_BROKER_NAME": "broker",
@@ -241,6 +260,7 @@ func TestHookProviderEmittedResourceAndPointsPassStrictCloudAdmission(t *testing
 		for key, want := range map[string]string{
 			"scion.agent.id": "agent", "scion.agent.slug": "slug", "scion.project.id": "project",
 			"scion.harness": "claude", "scion.model": "model", "scion.broker.id": "broker-id", "scion.broker.name": "broker",
+			"service.name": "sciontool",
 		} {
 			if got := attrValue(decision.Data[0].Resource.Attributes, key); got != want {
 				results <- fmt.Errorf("authoritative resource %s = %q, want %q", key, got, want)
