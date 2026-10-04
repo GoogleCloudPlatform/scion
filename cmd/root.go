@@ -4,6 +4,7 @@ Copyright © 2025 NAME HERE <EMAIL ADDRESS>
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -287,8 +288,19 @@ func Execute() {
 		if shouldShowUsageOnError(cmd, autoHelp) {
 			_ = cmd.Usage()
 		}
-		os.Exit(1)
+		os.Exit(exitCodeFor(err))
 	}
+}
+
+// exitCodeFor returns the process exit status for a failed command: the
+// status requested by an error implementing exitCoder (anywhere in the
+// wrap chain), otherwise 1.
+func exitCodeFor(err error) int {
+	var ec exitCoder
+	if errors.As(err, &ec) && ec.ExitCode() > 0 {
+		return ec.ExitCode()
+	}
+	return 1
 }
 
 // shouldShowUsageOnError reports whether Execute should print cmd's usage
