@@ -232,12 +232,6 @@ func Unprocessable(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, message, nil)
 }
 
-// skillErrCodeForbidden is the per-URI code the Hub's batch skill resolve
-// returns for a gh:// ref when the caller may not resolve GitHub skills for
-// the project. It reaches the broker as a SkillResolutionError.Code through
-// PreResolvedSkills.
-const skillErrCodeForbidden = "forbidden"
-
 // skillResolutionHTTPStatus maps a SkillResolutionError.Code to an HTTP
 // status. Each cause gets the status whose standard semantics best fit it:
 //   - not_found: 404, a skill genuinely absent at the given ref.
@@ -258,7 +252,7 @@ func skillResolutionHTTPStatus(code string) int {
 	switch code {
 	case agent.SkillErrCodeNotFound:
 		return http.StatusNotFound
-	case skillErrCodeForbidden:
+	case agent.SkillErrCodeForbidden:
 		return http.StatusForbidden
 	case agent.SkillErrCodeRateLimited:
 		return http.StatusTooManyRequests

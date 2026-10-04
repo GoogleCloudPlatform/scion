@@ -1562,7 +1562,7 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(skillRef.URI, "gh://") {
 			if !ghProjectAllowed {
 				resolveErrors = append(resolveErrors, ResolveSkillError{
-					URI: skillRef.URI, Code: "forbidden",
+					URI: skillRef.URI, Code: agent.SkillErrCodeForbidden,
 					Message: "you do not have permission to resolve GitHub skills for this project",
 				})
 				continue
