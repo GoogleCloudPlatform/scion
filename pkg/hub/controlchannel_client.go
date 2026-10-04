@@ -185,6 +185,7 @@ func (c *ControlChannelBrokerClient) StopAgent(ctx context.Context, brokerID, br
 	if projectID != "" {
 		query = "projectId=" + url.QueryEscape(projectID)
 	}
+	query = withRecordedRuntimeQuery(ctx, query)
 	_, err := c.doRequest(ctx, brokerID, "POST", path, query, nil)
 	return err
 }
@@ -197,6 +198,7 @@ func (c *ControlChannelBrokerClient) RestartAgent(ctx context.Context, brokerID,
 	if projectID != "" {
 		query = "projectId=" + url.QueryEscape(projectID)
 	}
+	query = withRecordedRuntimeQuery(ctx, query)
 	payload := map[string]interface{}{}
 	if len(resolvedEnv) > 0 {
 		payload["resolvedEnv"] = resolvedEnv
@@ -225,6 +227,7 @@ func (c *ControlChannelBrokerClient) ResetAuthAgent(ctx context.Context, brokerI
 	if projectID != "" {
 		query = "projectId=" + url.QueryEscape(projectID)
 	}
+	query = withRecordedRuntimeQuery(ctx, query)
 	body, err := json.Marshal(resetAuthBody(token, transportToken))
 	if err != nil {
 		return fmt.Errorf("failed to marshal reset-auth request: %w", err)
@@ -245,6 +248,7 @@ func (c *ControlChannelBrokerClient) DeleteAgent(ctx context.Context, brokerID, 
 	if softDelete {
 		query += fmt.Sprintf("&softDelete=true&deletedAt=%s", url.QueryEscape(deletedAt.UTC().Format(time.RFC3339)))
 	}
+	query = withRecordedRuntimeQuery(ctx, query)
 	_, err := c.doRequest(ctx, brokerID, "DELETE", path, query, nil)
 	if err != nil {
 		// A 404 means the broker has no such agent in this project; treat
@@ -266,6 +270,7 @@ func (c *ControlChannelBrokerClient) MessageAgent(ctx context.Context, brokerID,
 	if projectID != "" {
 		query = "projectId=" + url.QueryEscape(projectID)
 	}
+	query = withRecordedRuntimeQuery(ctx, query)
 
 	// Build the request body with structured message if available
 	reqBody := map[string]interface{}{
@@ -330,6 +335,7 @@ func (c *ControlChannelBrokerClient) ExecuteKeys(ctx context.Context, brokerID, 
 
 	path := strings.ReplaceAll(agentkeys.BrokerRoutePath, "{id}", url.PathEscape(agentSlug))
 	query := agentkeys.BrokerProjectIDQueryParam + "=" + url.QueryEscape(req.ProjectID)
+	query = withRecordedRuntimeQuery(ctx, query)
 
 	if err := checkBodySize(agentkeys.BrokerRouteMethod, path, body); err != nil {
 		// Too large to tunnel safely: a Hub-side, pre-send capability limit,
@@ -372,6 +378,7 @@ func (c *ControlChannelBrokerClient) CheckAgentPrompt(ctx context.Context, broke
 	if projectID != "" {
 		query = "projectId=" + url.QueryEscape(projectID)
 	}
+	query = withRecordedRuntimeQuery(ctx, query)
 
 	resp, err := c.doRequest(ctx, brokerID, "POST", path, query, nil)
 	if err != nil {
@@ -435,6 +442,7 @@ func (c *ControlChannelBrokerClient) GetAgentLogs(ctx context.Context, brokerID,
 		}
 		query += "projectId=" + url.QueryEscape(projectID)
 	}
+	query = withRecordedRuntimeQuery(ctx, query)
 	resp, err := c.doRequest(ctx, brokerID, "GET", path, query, nil)
 	if err != nil {
 		return "", err
@@ -450,6 +458,7 @@ func (c *ControlChannelBrokerClient) ExecAgent(ctx context.Context, brokerID, br
 	if projectID != "" {
 		query = "projectId=" + url.QueryEscape(projectID)
 	}
+	query = withRecordedRuntimeQuery(ctx, query)
 
 	body, err := json.Marshal(map[string]interface{}{
 		"command": command,
@@ -614,7 +623,7 @@ func (c *ControlChannelBrokerClient) doRequest(ctx context.Context, brokerID, me
 	}
 
 	if resp.StatusCode >= 400 {
-		return nil, &brokerStatusError{StatusCode: resp.StatusCode, Body: string(resp.Body)}
+		return nil, &brokerStatusError{StatusCode: resp.StatusCode, Body: string(resp.Body), RetryAfter: resp.Headers["Retry-After"]}
 	}
 
 	return resp, nil

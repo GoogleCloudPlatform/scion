@@ -27,6 +27,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersecret"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/brokersetting"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/chatlinkcode"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitprincipalepoch"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/conduitsession"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionaudit"
@@ -62,6 +64,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectprestarthook"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectsyncstate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/relayinstance"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/rolebinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/roledefinition"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/runtimebroker"
@@ -107,6 +110,8 @@ const (
 	TypeBrokerSecret             = "BrokerSecret"
 	TypeBrokerSetting            = "BrokerSetting"
 	TypeChatLinkCode             = "ChatLinkCode"
+	TypeConduitPrincipalEpoch    = "ConduitPrincipalEpoch"
+	TypeConduitSession           = "ConduitSession"
 	TypeConversation             = "Conversation"
 	TypeConversationParticipant  = "ConversationParticipant"
 	TypeDecisionAudit            = "DecisionAudit"
@@ -141,6 +146,7 @@ const (
 	TypeProjectContributor       = "ProjectContributor"
 	TypeProjectPreStartHook      = "ProjectPreStartHook"
 	TypeProjectSyncState         = "ProjectSyncState"
+	TypeRelayInstance            = "RelayInstance"
 	TypeRoleBinding              = "RoleBinding"
 	TypeRoleDefinition           = "RoleDefinition"
 	TypeRuntimeBroker            = "RuntimeBroker"
@@ -4581,6 +4587,8 @@ type AgentMutation struct {
 	deletion_error           *string
 	deletion_prior           *string
 	deletion_request         *string
+	run_intent               *string
+	run_intent_at            *time.Time
 	clearedFields            map[string]struct{}
 	project                  *uuid.UUID
 	clearedproject           bool
@@ -7738,6 +7746,104 @@ func (m *AgentMutation) ResetDeletionRequest() {
 	delete(m.clearedFields, agent.FieldDeletionRequest)
 }
 
+// SetRunIntent sets the "run_intent" field.
+func (m *AgentMutation) SetRunIntent(s string) {
+	m.run_intent = &s
+}
+
+// RunIntent returns the value of the "run_intent" field in the mutation.
+func (m *AgentMutation) RunIntent() (r string, exists bool) {
+	v := m.run_intent
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRunIntent returns the old "run_intent" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldRunIntent(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRunIntent is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRunIntent requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRunIntent: %w", err)
+	}
+	return oldValue.RunIntent, nil
+}
+
+// ClearRunIntent clears the value of the "run_intent" field.
+func (m *AgentMutation) ClearRunIntent() {
+	m.run_intent = nil
+	m.clearedFields[agent.FieldRunIntent] = struct{}{}
+}
+
+// RunIntentCleared returns if the "run_intent" field was cleared in this mutation.
+func (m *AgentMutation) RunIntentCleared() bool {
+	_, ok := m.clearedFields[agent.FieldRunIntent]
+	return ok
+}
+
+// ResetRunIntent resets all changes to the "run_intent" field.
+func (m *AgentMutation) ResetRunIntent() {
+	m.run_intent = nil
+	delete(m.clearedFields, agent.FieldRunIntent)
+}
+
+// SetRunIntentAt sets the "run_intent_at" field.
+func (m *AgentMutation) SetRunIntentAt(t time.Time) {
+	m.run_intent_at = &t
+}
+
+// RunIntentAt returns the value of the "run_intent_at" field in the mutation.
+func (m *AgentMutation) RunIntentAt() (r time.Time, exists bool) {
+	v := m.run_intent_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRunIntentAt returns the old "run_intent_at" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldRunIntentAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRunIntentAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRunIntentAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRunIntentAt: %w", err)
+	}
+	return oldValue.RunIntentAt, nil
+}
+
+// ClearRunIntentAt clears the value of the "run_intent_at" field.
+func (m *AgentMutation) ClearRunIntentAt() {
+	m.run_intent_at = nil
+	m.clearedFields[agent.FieldRunIntentAt] = struct{}{}
+}
+
+// RunIntentAtCleared returns if the "run_intent_at" field was cleared in this mutation.
+func (m *AgentMutation) RunIntentAtCleared() bool {
+	_, ok := m.clearedFields[agent.FieldRunIntentAt]
+	return ok
+}
+
+// ResetRunIntentAt resets all changes to the "run_intent_at" field.
+func (m *AgentMutation) ResetRunIntentAt() {
+	m.run_intent_at = nil
+	delete(m.clearedFields, agent.FieldRunIntentAt)
+}
+
 // ClearProject clears the "project" edge to the Project entity.
 func (m *AgentMutation) ClearProject() {
 	m.clearedproject = true
@@ -7907,7 +8013,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 63)
+	fields := make([]string, 0, 65)
 	if m.slug != nil {
 		fields = append(fields, agent.FieldSlug)
 	}
@@ -8097,6 +8203,12 @@ func (m *AgentMutation) Fields() []string {
 	if m.deletion_request != nil {
 		fields = append(fields, agent.FieldDeletionRequest)
 	}
+	if m.run_intent != nil {
+		fields = append(fields, agent.FieldRunIntent)
+	}
+	if m.run_intent_at != nil {
+		fields = append(fields, agent.FieldRunIntentAt)
+	}
 	return fields
 }
 
@@ -8231,6 +8343,10 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.DeletionPrior()
 	case agent.FieldDeletionRequest:
 		return m.DeletionRequest()
+	case agent.FieldRunIntent:
+		return m.RunIntent()
+	case agent.FieldRunIntentAt:
+		return m.RunIntentAt()
 	}
 	return nil, false
 }
@@ -8366,6 +8482,10 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldDeletionPrior(ctx)
 	case agent.FieldDeletionRequest:
 		return m.OldDeletionRequest(ctx)
+	case agent.FieldRunIntent:
+		return m.OldRunIntent(ctx)
+	case agent.FieldRunIntentAt:
+		return m.OldRunIntentAt(ctx)
 	}
 	return nil, fmt.Errorf("unknown Agent field %s", name)
 }
@@ -8816,6 +8936,20 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetDeletionRequest(v)
 		return nil
+	case agent.FieldRunIntent:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRunIntent(v)
+		return nil
+	case agent.FieldRunIntentAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRunIntentAt(v)
+		return nil
 	}
 	return fmt.Errorf("unknown Agent field %s", name)
 }
@@ -9071,6 +9205,12 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldDeletionRequest) {
 		fields = append(fields, agent.FieldDeletionRequest)
 	}
+	if m.FieldCleared(agent.FieldRunIntent) {
+		fields = append(fields, agent.FieldRunIntent)
+	}
+	if m.FieldCleared(agent.FieldRunIntentAt) {
+		fields = append(fields, agent.FieldRunIntentAt)
+	}
 	return fields
 }
 
@@ -9222,6 +9362,12 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldDeletionRequest:
 		m.ClearDeletionRequest()
+		return nil
+	case agent.FieldRunIntent:
+		m.ClearRunIntent()
+		return nil
+	case agent.FieldRunIntentAt:
+		m.ClearRunIntentAt()
 		return nil
 	}
 	return fmt.Errorf("unknown Agent nullable field %s", name)
@@ -9419,6 +9565,12 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldDeletionRequest:
 		m.ResetDeletionRequest()
+		return nil
+	case agent.FieldRunIntent:
+		m.ResetRunIntent()
+		return nil
+	case agent.FieldRunIntentAt:
+		m.ResetRunIntentAt()
 		return nil
 	}
 	return fmt.Errorf("unknown Agent field %s", name)
@@ -19002,6 +19154,1649 @@ func (m *ChatLinkCodeMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *ChatLinkCodeMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown ChatLinkCode edge %s", name)
+}
+
+// ConduitPrincipalEpochMutation represents an operation that mutates the ConduitPrincipalEpoch nodes in the graph.
+type ConduitPrincipalEpochMutation struct {
+	config
+	op             Op
+	typ            string
+	id             *int
+	principal_kind *string
+	principal_id   *string
+	epoch          *int64
+	addepoch       *int64
+	clearedFields  map[string]struct{}
+	done           bool
+	oldValue       func(context.Context) (*ConduitPrincipalEpoch, error)
+	predicates     []predicate.ConduitPrincipalEpoch
+}
+
+var _ ent.Mutation = (*ConduitPrincipalEpochMutation)(nil)
+
+// conduitprincipalepochOption allows management of the mutation configuration using functional options.
+type conduitprincipalepochOption func(*ConduitPrincipalEpochMutation)
+
+// newConduitPrincipalEpochMutation creates new mutation for the ConduitPrincipalEpoch entity.
+func newConduitPrincipalEpochMutation(c config, op Op, opts ...conduitprincipalepochOption) *ConduitPrincipalEpochMutation {
+	m := &ConduitPrincipalEpochMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeConduitPrincipalEpoch,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withConduitPrincipalEpochID sets the ID field of the mutation.
+func withConduitPrincipalEpochID(id int) conduitprincipalepochOption {
+	return func(m *ConduitPrincipalEpochMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *ConduitPrincipalEpoch
+		)
+		m.oldValue = func(ctx context.Context) (*ConduitPrincipalEpoch, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().ConduitPrincipalEpoch.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withConduitPrincipalEpoch sets the old ConduitPrincipalEpoch of the mutation.
+func withConduitPrincipalEpoch(node *ConduitPrincipalEpoch) conduitprincipalepochOption {
+	return func(m *ConduitPrincipalEpochMutation) {
+		m.oldValue = func(context.Context) (*ConduitPrincipalEpoch, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m ConduitPrincipalEpochMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m ConduitPrincipalEpochMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *ConduitPrincipalEpochMutation) ID() (id int, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *ConduitPrincipalEpochMutation) IDs(ctx context.Context) ([]int, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []int{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().ConduitPrincipalEpoch.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetPrincipalKind sets the "principal_kind" field.
+func (m *ConduitPrincipalEpochMutation) SetPrincipalKind(s string) {
+	m.principal_kind = &s
+}
+
+// PrincipalKind returns the value of the "principal_kind" field in the mutation.
+func (m *ConduitPrincipalEpochMutation) PrincipalKind() (r string, exists bool) {
+	v := m.principal_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPrincipalKind returns the old "principal_kind" field's value of the ConduitPrincipalEpoch entity.
+// If the ConduitPrincipalEpoch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ConduitPrincipalEpochMutation) OldPrincipalKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPrincipalKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPrincipalKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPrincipalKind: %w", err)
+	}
+	return oldValue.PrincipalKind, nil
+}
+
+// ResetPrincipalKind resets all changes to the "principal_kind" field.
+func (m *ConduitPrincipalEpochMutation) ResetPrincipalKind() {
+	m.principal_kind = nil
+}
+
+// SetPrincipalID sets the "principal_id" field.
+func (m *ConduitPrincipalEpochMutation) SetPrincipalID(s string) {
+	m.principal_id = &s
+}
+
+// PrincipalID returns the value of the "principal_id" field in the mutation.
+func (m *ConduitPrincipalEpochMutation) PrincipalID() (r string, exists bool) {
+	v := m.principal_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPrincipalID returns the old "principal_id" field's value of the ConduitPrincipalEpoch entity.
+// If the ConduitPrincipalEpoch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ConduitPrincipalEpochMutation) OldPrincipalID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPrincipalID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPrincipalID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPrincipalID: %w", err)
+	}
+	return oldValue.PrincipalID, nil
+}
+
+// ResetPrincipalID resets all changes to the "principal_id" field.
+func (m *ConduitPrincipalEpochMutation) ResetPrincipalID() {
+	m.principal_id = nil
+}
+
+// SetEpoch sets the "epoch" field.
+func (m *ConduitPrincipalEpochMutation) SetEpoch(i int64) {
+	m.epoch = &i
+	m.addepoch = nil
+}
+
+// Epoch returns the value of the "epoch" field in the mutation.
+func (m *ConduitPrincipalEpochMutation) Epoch() (r int64, exists bool) {
+	v := m.epoch
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldEpoch returns the old "epoch" field's value of the ConduitPrincipalEpoch entity.
+// If the ConduitPrincipalEpoch object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ConduitPrincipalEpochMutation) OldEpoch(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldEpoch is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldEpoch requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldEpoch: %w", err)
+	}
+	return oldValue.Epoch, nil
+}
+
+// AddEpoch adds i to the "epoch" field.
+func (m *ConduitPrincipalEpochMutation) AddEpoch(i int64) {
+	if m.addepoch != nil {
+		*m.addepoch += i
+	} else {
+		m.addepoch = &i
+	}
+}
+
+// AddedEpoch returns the value that was added to the "epoch" field in this mutation.
+func (m *ConduitPrincipalEpochMutation) AddedEpoch() (r int64, exists bool) {
+	v := m.addepoch
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetEpoch resets all changes to the "epoch" field.
+func (m *ConduitPrincipalEpochMutation) ResetEpoch() {
+	m.epoch = nil
+	m.addepoch = nil
+}
+
+// Where appends a list predicates to the ConduitPrincipalEpochMutation builder.
+func (m *ConduitPrincipalEpochMutation) Where(ps ...predicate.ConduitPrincipalEpoch) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the ConduitPrincipalEpochMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *ConduitPrincipalEpochMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.ConduitPrincipalEpoch, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *ConduitPrincipalEpochMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *ConduitPrincipalEpochMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (ConduitPrincipalEpoch).
+func (m *ConduitPrincipalEpochMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *ConduitPrincipalEpochMutation) Fields() []string {
+	fields := make([]string, 0, 3)
+	if m.principal_kind != nil {
+		fields = append(fields, conduitprincipalepoch.FieldPrincipalKind)
+	}
+	if m.principal_id != nil {
+		fields = append(fields, conduitprincipalepoch.FieldPrincipalID)
+	}
+	if m.epoch != nil {
+		fields = append(fields, conduitprincipalepoch.FieldEpoch)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *ConduitPrincipalEpochMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case conduitprincipalepoch.FieldPrincipalKind:
+		return m.PrincipalKind()
+	case conduitprincipalepoch.FieldPrincipalID:
+		return m.PrincipalID()
+	case conduitprincipalepoch.FieldEpoch:
+		return m.Epoch()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *ConduitPrincipalEpochMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case conduitprincipalepoch.FieldPrincipalKind:
+		return m.OldPrincipalKind(ctx)
+	case conduitprincipalepoch.FieldPrincipalID:
+		return m.OldPrincipalID(ctx)
+	case conduitprincipalepoch.FieldEpoch:
+		return m.OldEpoch(ctx)
+	}
+	return nil, fmt.Errorf("unknown ConduitPrincipalEpoch field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *ConduitPrincipalEpochMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case conduitprincipalepoch.FieldPrincipalKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPrincipalKind(v)
+		return nil
+	case conduitprincipalepoch.FieldPrincipalID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPrincipalID(v)
+		return nil
+	case conduitprincipalepoch.FieldEpoch:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetEpoch(v)
+		return nil
+	}
+	return fmt.Errorf("unknown ConduitPrincipalEpoch field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *ConduitPrincipalEpochMutation) AddedFields() []string {
+	var fields []string
+	if m.addepoch != nil {
+		fields = append(fields, conduitprincipalepoch.FieldEpoch)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *ConduitPrincipalEpochMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case conduitprincipalepoch.FieldEpoch:
+		return m.AddedEpoch()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *ConduitPrincipalEpochMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case conduitprincipalepoch.FieldEpoch:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddEpoch(v)
+		return nil
+	}
+	return fmt.Errorf("unknown ConduitPrincipalEpoch numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *ConduitPrincipalEpochMutation) ClearedFields() []string {
+	return nil
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *ConduitPrincipalEpochMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *ConduitPrincipalEpochMutation) ClearField(name string) error {
+	return fmt.Errorf("unknown ConduitPrincipalEpoch nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *ConduitPrincipalEpochMutation) ResetField(name string) error {
+	switch name {
+	case conduitprincipalepoch.FieldPrincipalKind:
+		m.ResetPrincipalKind()
+		return nil
+	case conduitprincipalepoch.FieldPrincipalID:
+		m.ResetPrincipalID()
+		return nil
+	case conduitprincipalepoch.FieldEpoch:
+		m.ResetEpoch()
+		return nil
+	}
+	return fmt.Errorf("unknown ConduitPrincipalEpoch field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *ConduitPrincipalEpochMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *ConduitPrincipalEpochMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *ConduitPrincipalEpochMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *ConduitPrincipalEpochMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *ConduitPrincipalEpochMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *ConduitPrincipalEpochMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *ConduitPrincipalEpochMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown ConduitPrincipalEpoch unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *ConduitPrincipalEpochMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown ConduitPrincipalEpoch edge %s", name)
+}
+
+// ConduitSessionMutation represents an operation that mutates the ConduitSession nodes in the graph.
+type ConduitSessionMutation struct {
+	config
+	op                   Op
+	typ                  string
+	id                   *string
+	principal_kind       *string
+	principal_id         *string
+	project_id           *string
+	relay_generation     *int64
+	addrelay_generation  *int64
+	transport            *string
+	endpoint_incarnation *string
+	exec_scope           *string
+	connection_epoch     *int64
+	addconnection_epoch  *int64
+	draining             *bool
+	capabilities         *json.RawMessage
+	appendcapabilities   json.RawMessage
+	connected_at         *time.Time
+	last_seen            *time.Time
+	clearedFields        map[string]struct{}
+	relay                *string
+	clearedrelay         bool
+	done                 bool
+	oldValue             func(context.Context) (*ConduitSession, error)
+	predicates           []predicate.ConduitSession
+}
+
+var _ ent.Mutation = (*ConduitSessionMutation)(nil)
+
+// conduitsessionOption allows management of the mutation configuration using functional options.
+type conduitsessionOption func(*ConduitSessionMutation)
+
+// newConduitSessionMutation creates new mutation for the ConduitSession entity.
+func newConduitSessionMutation(c config, op Op, opts ...conduitsessionOption) *ConduitSessionMutation {
+	m := &ConduitSessionMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeConduitSession,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withConduitSessionID sets the ID field of the mutation.
+func withConduitSessionID(id string) conduitsessionOption {
+	return func(m *ConduitSessionMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *ConduitSession
+		)
+		m.oldValue = func(ctx context.Context) (*ConduitSession, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().ConduitSession.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withConduitSession sets the old ConduitSession of the mutation.
+func withConduitSession(node *ConduitSession) conduitsessionOption {
+	return func(m *ConduitSessionMutation) {
+		m.oldValue = func(context.Context) (*ConduitSession, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m ConduitSessionMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m ConduitSessionMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of ConduitSession entities.
+func (m *ConduitSessionMutation) SetID(id string) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *ConduitSessionMutation) ID() (id string, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *ConduitSessionMutation) IDs(ctx context.Context) ([]string, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []string{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().ConduitSession.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetPrincipalKind sets the "principal_kind" field.
+func (m *ConduitSessionMutation) SetPrincipalKind(s string) {
+	m.principal_kind = &s
+}
+
+// PrincipalKind returns the value of the "principal_kind" field in the mutation.
+func (m *ConduitSessionMutation) PrincipalKind() (r string, exists bool) {
+	v := m.principal_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPrincipalKind returns the old "principal_kind" field's value of the ConduitSession entity.
+// If the ConduitSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ConduitSessionMutation) OldPrincipalKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPrincipalKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPrincipalKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPrincipalKind: %w", err)
+	}
+	return oldValue.PrincipalKind, nil
+}
+
+// ResetPrincipalKind resets all changes to the "principal_kind" field.
+func (m *ConduitSessionMutation) ResetPrincipalKind() {
+	m.principal_kind = nil
+}
+
+// SetPrincipalID sets the "principal_id" field.
+func (m *ConduitSessionMutation) SetPrincipalID(s string) {
+	m.principal_id = &s
+}
+
+// PrincipalID returns the value of the "principal_id" field in the mutation.
+func (m *ConduitSessionMutation) PrincipalID() (r string, exists bool) {
+	v := m.principal_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPrincipalID returns the old "principal_id" field's value of the ConduitSession entity.
+// If the ConduitSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ConduitSessionMutation) OldPrincipalID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPrincipalID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPrincipalID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPrincipalID: %w", err)
+	}
+	return oldValue.PrincipalID, nil
+}
+
+// ResetPrincipalID resets all changes to the "principal_id" field.
+func (m *ConduitSessionMutation) ResetPrincipalID() {
+	m.principal_id = nil
+}
+
+// SetProjectID sets the "project_id" field.
+func (m *ConduitSessionMutation) SetProjectID(s string) {
+	m.project_id = &s
+}
+
+// ProjectID returns the value of the "project_id" field in the mutation.
+func (m *ConduitSessionMutation) ProjectID() (r string, exists bool) {
+	v := m.project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldProjectID returns the old "project_id" field's value of the ConduitSession entity.
+// If the ConduitSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ConduitSessionMutation) OldProjectID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldProjectID: %w", err)
+	}
+	return oldValue.ProjectID, nil
+}
+
+// ClearProjectID clears the value of the "project_id" field.
+func (m *ConduitSessionMutation) ClearProjectID() {
+	m.project_id = nil
+	m.clearedFields[conduitsession.FieldProjectID] = struct{}{}
+}
+
+// ProjectIDCleared returns if the "project_id" field was cleared in this mutation.
+func (m *ConduitSessionMutation) ProjectIDCleared() bool {
+	_, ok := m.clearedFields[conduitsession.FieldProjectID]
+	return ok
+}
+
+// ResetProjectID resets all changes to the "project_id" field.
+func (m *ConduitSessionMutation) ResetProjectID() {
+	m.project_id = nil
+	delete(m.clearedFields, conduitsession.FieldProjectID)
+}
+
+// SetRelayInstanceID sets the "relay_instance_id" field.
+func (m *ConduitSessionMutation) SetRelayInstanceID(s string) {
+	m.relay = &s
+}
+
+// RelayInstanceID returns the value of the "relay_instance_id" field in the mutation.
+func (m *ConduitSessionMutation) RelayInstanceID() (r string, exists bool) {
+	v := m.relay
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRelayInstanceID returns the old "relay_instance_id" field's value of the ConduitSession entity.
+// If the ConduitSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ConduitSessionMutation) OldRelayInstanceID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRelayInstanceID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRelayInstanceID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRelayInstanceID: %w", err)
+	}
+	return oldValue.RelayInstanceID, nil
+}
+
+// ResetRelayInstanceID resets all changes to the "relay_instance_id" field.
+func (m *ConduitSessionMutation) ResetRelayInstanceID() {
+	m.relay = nil
+}
+
+// SetRelayGeneration sets the "relay_generation" field.
+func (m *ConduitSessionMutation) SetRelayGeneration(i int64) {
+	m.relay_generation = &i
+	m.addrelay_generation = nil
+}
+
+// RelayGeneration returns the value of the "relay_generation" field in the mutation.
+func (m *ConduitSessionMutation) RelayGeneration() (r int64, exists bool) {
+	v := m.relay_generation
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRelayGeneration returns the old "relay_generation" field's value of the ConduitSession entity.
+// If the ConduitSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ConduitSessionMutation) OldRelayGeneration(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRelayGeneration is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRelayGeneration requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRelayGeneration: %w", err)
+	}
+	return oldValue.RelayGeneration, nil
+}
+
+// AddRelayGeneration adds i to the "relay_generation" field.
+func (m *ConduitSessionMutation) AddRelayGeneration(i int64) {
+	if m.addrelay_generation != nil {
+		*m.addrelay_generation += i
+	} else {
+		m.addrelay_generation = &i
+	}
+}
+
+// AddedRelayGeneration returns the value that was added to the "relay_generation" field in this mutation.
+func (m *ConduitSessionMutation) AddedRelayGeneration() (r int64, exists bool) {
+	v := m.addrelay_generation
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetRelayGeneration resets all changes to the "relay_generation" field.
+func (m *ConduitSessionMutation) ResetRelayGeneration() {
+	m.relay_generation = nil
+	m.addrelay_generation = nil
+}
+
+// SetTransport sets the "transport" field.
+func (m *ConduitSessionMutation) SetTransport(s string) {
+	m.transport = &s
+}
+
+// Transport returns the value of the "transport" field in the mutation.
+func (m *ConduitSessionMutation) Transport() (r string, exists bool) {
+	v := m.transport
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldTransport returns the old "transport" field's value of the ConduitSession entity.
+// If the ConduitSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ConduitSessionMutation) OldTransport(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldTransport is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldTransport requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldTransport: %w", err)
+	}
+	return oldValue.Transport, nil
+}
+
+// ResetTransport resets all changes to the "transport" field.
+func (m *ConduitSessionMutation) ResetTransport() {
+	m.transport = nil
+}
+
+// SetEndpointIncarnation sets the "endpoint_incarnation" field.
+func (m *ConduitSessionMutation) SetEndpointIncarnation(s string) {
+	m.endpoint_incarnation = &s
+}
+
+// EndpointIncarnation returns the value of the "endpoint_incarnation" field in the mutation.
+func (m *ConduitSessionMutation) EndpointIncarnation() (r string, exists bool) {
+	v := m.endpoint_incarnation
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldEndpointIncarnation returns the old "endpoint_incarnation" field's value of the ConduitSession entity.
+// If the ConduitSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ConduitSessionMutation) OldEndpointIncarnation(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldEndpointIncarnation is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldEndpointIncarnation requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldEndpointIncarnation: %w", err)
+	}
+	return oldValue.EndpointIncarnation, nil
+}
+
+// ResetEndpointIncarnation resets all changes to the "endpoint_incarnation" field.
+func (m *ConduitSessionMutation) ResetEndpointIncarnation() {
+	m.endpoint_incarnation = nil
+}
+
+// SetExecScope sets the "exec_scope" field.
+func (m *ConduitSessionMutation) SetExecScope(s string) {
+	m.exec_scope = &s
+}
+
+// ExecScope returns the value of the "exec_scope" field in the mutation.
+func (m *ConduitSessionMutation) ExecScope() (r string, exists bool) {
+	v := m.exec_scope
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExecScope returns the old "exec_scope" field's value of the ConduitSession entity.
+// If the ConduitSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ConduitSessionMutation) OldExecScope(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExecScope is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExecScope requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExecScope: %w", err)
+	}
+	return oldValue.ExecScope, nil
+}
+
+// ClearExecScope clears the value of the "exec_scope" field.
+func (m *ConduitSessionMutation) ClearExecScope() {
+	m.exec_scope = nil
+	m.clearedFields[conduitsession.FieldExecScope] = struct{}{}
+}
+
+// ExecScopeCleared returns if the "exec_scope" field was cleared in this mutation.
+func (m *ConduitSessionMutation) ExecScopeCleared() bool {
+	_, ok := m.clearedFields[conduitsession.FieldExecScope]
+	return ok
+}
+
+// ResetExecScope resets all changes to the "exec_scope" field.
+func (m *ConduitSessionMutation) ResetExecScope() {
+	m.exec_scope = nil
+	delete(m.clearedFields, conduitsession.FieldExecScope)
+}
+
+// SetConnectionEpoch sets the "connection_epoch" field.
+func (m *ConduitSessionMutation) SetConnectionEpoch(i int64) {
+	m.connection_epoch = &i
+	m.addconnection_epoch = nil
+}
+
+// ConnectionEpoch returns the value of the "connection_epoch" field in the mutation.
+func (m *ConduitSessionMutation) ConnectionEpoch() (r int64, exists bool) {
+	v := m.connection_epoch
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldConnectionEpoch returns the old "connection_epoch" field's value of the ConduitSession entity.
+// If the ConduitSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ConduitSessionMutation) OldConnectionEpoch(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldConnectionEpoch is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldConnectionEpoch requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldConnectionEpoch: %w", err)
+	}
+	return oldValue.ConnectionEpoch, nil
+}
+
+// AddConnectionEpoch adds i to the "connection_epoch" field.
+func (m *ConduitSessionMutation) AddConnectionEpoch(i int64) {
+	if m.addconnection_epoch != nil {
+		*m.addconnection_epoch += i
+	} else {
+		m.addconnection_epoch = &i
+	}
+}
+
+// AddedConnectionEpoch returns the value that was added to the "connection_epoch" field in this mutation.
+func (m *ConduitSessionMutation) AddedConnectionEpoch() (r int64, exists bool) {
+	v := m.addconnection_epoch
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetConnectionEpoch resets all changes to the "connection_epoch" field.
+func (m *ConduitSessionMutation) ResetConnectionEpoch() {
+	m.connection_epoch = nil
+	m.addconnection_epoch = nil
+}
+
+// SetDraining sets the "draining" field.
+func (m *ConduitSessionMutation) SetDraining(b bool) {
+	m.draining = &b
+}
+
+// Draining returns the value of the "draining" field in the mutation.
+func (m *ConduitSessionMutation) Draining() (r bool, exists bool) {
+	v := m.draining
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDraining returns the old "draining" field's value of the ConduitSession entity.
+// If the ConduitSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ConduitSessionMutation) OldDraining(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDraining is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDraining requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDraining: %w", err)
+	}
+	return oldValue.Draining, nil
+}
+
+// ResetDraining resets all changes to the "draining" field.
+func (m *ConduitSessionMutation) ResetDraining() {
+	m.draining = nil
+}
+
+// SetCapabilities sets the "capabilities" field.
+func (m *ConduitSessionMutation) SetCapabilities(jm json.RawMessage) {
+	m.capabilities = &jm
+	m.appendcapabilities = nil
+}
+
+// Capabilities returns the value of the "capabilities" field in the mutation.
+func (m *ConduitSessionMutation) Capabilities() (r json.RawMessage, exists bool) {
+	v := m.capabilities
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCapabilities returns the old "capabilities" field's value of the ConduitSession entity.
+// If the ConduitSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ConduitSessionMutation) OldCapabilities(ctx context.Context) (v json.RawMessage, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCapabilities is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCapabilities requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCapabilities: %w", err)
+	}
+	return oldValue.Capabilities, nil
+}
+
+// AppendCapabilities adds jm to the "capabilities" field.
+func (m *ConduitSessionMutation) AppendCapabilities(jm json.RawMessage) {
+	m.appendcapabilities = append(m.appendcapabilities, jm...)
+}
+
+// AppendedCapabilities returns the list of values that were appended to the "capabilities" field in this mutation.
+func (m *ConduitSessionMutation) AppendedCapabilities() (json.RawMessage, bool) {
+	if len(m.appendcapabilities) == 0 {
+		return nil, false
+	}
+	return m.appendcapabilities, true
+}
+
+// ResetCapabilities resets all changes to the "capabilities" field.
+func (m *ConduitSessionMutation) ResetCapabilities() {
+	m.capabilities = nil
+	m.appendcapabilities = nil
+}
+
+// SetConnectedAt sets the "connected_at" field.
+func (m *ConduitSessionMutation) SetConnectedAt(t time.Time) {
+	m.connected_at = &t
+}
+
+// ConnectedAt returns the value of the "connected_at" field in the mutation.
+func (m *ConduitSessionMutation) ConnectedAt() (r time.Time, exists bool) {
+	v := m.connected_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldConnectedAt returns the old "connected_at" field's value of the ConduitSession entity.
+// If the ConduitSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ConduitSessionMutation) OldConnectedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldConnectedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldConnectedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldConnectedAt: %w", err)
+	}
+	return oldValue.ConnectedAt, nil
+}
+
+// ResetConnectedAt resets all changes to the "connected_at" field.
+func (m *ConduitSessionMutation) ResetConnectedAt() {
+	m.connected_at = nil
+}
+
+// SetLastSeen sets the "last_seen" field.
+func (m *ConduitSessionMutation) SetLastSeen(t time.Time) {
+	m.last_seen = &t
+}
+
+// LastSeen returns the value of the "last_seen" field in the mutation.
+func (m *ConduitSessionMutation) LastSeen() (r time.Time, exists bool) {
+	v := m.last_seen
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastSeen returns the old "last_seen" field's value of the ConduitSession entity.
+// If the ConduitSession object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ConduitSessionMutation) OldLastSeen(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastSeen is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastSeen requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastSeen: %w", err)
+	}
+	return oldValue.LastSeen, nil
+}
+
+// ResetLastSeen resets all changes to the "last_seen" field.
+func (m *ConduitSessionMutation) ResetLastSeen() {
+	m.last_seen = nil
+}
+
+// SetRelayID sets the "relay" edge to the RelayInstance entity by id.
+func (m *ConduitSessionMutation) SetRelayID(id string) {
+	m.relay = &id
+}
+
+// ClearRelay clears the "relay" edge to the RelayInstance entity.
+func (m *ConduitSessionMutation) ClearRelay() {
+	m.clearedrelay = true
+	m.clearedFields[conduitsession.FieldRelayInstanceID] = struct{}{}
+}
+
+// RelayCleared reports if the "relay" edge to the RelayInstance entity was cleared.
+func (m *ConduitSessionMutation) RelayCleared() bool {
+	return m.clearedrelay
+}
+
+// RelayID returns the "relay" edge ID in the mutation.
+func (m *ConduitSessionMutation) RelayID() (id string, exists bool) {
+	if m.relay != nil {
+		return *m.relay, true
+	}
+	return
+}
+
+// RelayIDs returns the "relay" edge IDs in the mutation.
+// Note that IDs always returns len(IDs) <= 1 for unique edges, and you should use
+// RelayID instead. It exists only for internal usage by the builders.
+func (m *ConduitSessionMutation) RelayIDs() (ids []string) {
+	if id := m.relay; id != nil {
+		ids = append(ids, *id)
+	}
+	return
+}
+
+// ResetRelay resets all changes to the "relay" edge.
+func (m *ConduitSessionMutation) ResetRelay() {
+	m.relay = nil
+	m.clearedrelay = false
+}
+
+// Where appends a list predicates to the ConduitSessionMutation builder.
+func (m *ConduitSessionMutation) Where(ps ...predicate.ConduitSession) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the ConduitSessionMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *ConduitSessionMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.ConduitSession, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *ConduitSessionMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *ConduitSessionMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (ConduitSession).
+func (m *ConduitSessionMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *ConduitSessionMutation) Fields() []string {
+	fields := make([]string, 0, 13)
+	if m.principal_kind != nil {
+		fields = append(fields, conduitsession.FieldPrincipalKind)
+	}
+	if m.principal_id != nil {
+		fields = append(fields, conduitsession.FieldPrincipalID)
+	}
+	if m.project_id != nil {
+		fields = append(fields, conduitsession.FieldProjectID)
+	}
+	if m.relay != nil {
+		fields = append(fields, conduitsession.FieldRelayInstanceID)
+	}
+	if m.relay_generation != nil {
+		fields = append(fields, conduitsession.FieldRelayGeneration)
+	}
+	if m.transport != nil {
+		fields = append(fields, conduitsession.FieldTransport)
+	}
+	if m.endpoint_incarnation != nil {
+		fields = append(fields, conduitsession.FieldEndpointIncarnation)
+	}
+	if m.exec_scope != nil {
+		fields = append(fields, conduitsession.FieldExecScope)
+	}
+	if m.connection_epoch != nil {
+		fields = append(fields, conduitsession.FieldConnectionEpoch)
+	}
+	if m.draining != nil {
+		fields = append(fields, conduitsession.FieldDraining)
+	}
+	if m.capabilities != nil {
+		fields = append(fields, conduitsession.FieldCapabilities)
+	}
+	if m.connected_at != nil {
+		fields = append(fields, conduitsession.FieldConnectedAt)
+	}
+	if m.last_seen != nil {
+		fields = append(fields, conduitsession.FieldLastSeen)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *ConduitSessionMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case conduitsession.FieldPrincipalKind:
+		return m.PrincipalKind()
+	case conduitsession.FieldPrincipalID:
+		return m.PrincipalID()
+	case conduitsession.FieldProjectID:
+		return m.ProjectID()
+	case conduitsession.FieldRelayInstanceID:
+		return m.RelayInstanceID()
+	case conduitsession.FieldRelayGeneration:
+		return m.RelayGeneration()
+	case conduitsession.FieldTransport:
+		return m.Transport()
+	case conduitsession.FieldEndpointIncarnation:
+		return m.EndpointIncarnation()
+	case conduitsession.FieldExecScope:
+		return m.ExecScope()
+	case conduitsession.FieldConnectionEpoch:
+		return m.ConnectionEpoch()
+	case conduitsession.FieldDraining:
+		return m.Draining()
+	case conduitsession.FieldCapabilities:
+		return m.Capabilities()
+	case conduitsession.FieldConnectedAt:
+		return m.ConnectedAt()
+	case conduitsession.FieldLastSeen:
+		return m.LastSeen()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *ConduitSessionMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case conduitsession.FieldPrincipalKind:
+		return m.OldPrincipalKind(ctx)
+	case conduitsession.FieldPrincipalID:
+		return m.OldPrincipalID(ctx)
+	case conduitsession.FieldProjectID:
+		return m.OldProjectID(ctx)
+	case conduitsession.FieldRelayInstanceID:
+		return m.OldRelayInstanceID(ctx)
+	case conduitsession.FieldRelayGeneration:
+		return m.OldRelayGeneration(ctx)
+	case conduitsession.FieldTransport:
+		return m.OldTransport(ctx)
+	case conduitsession.FieldEndpointIncarnation:
+		return m.OldEndpointIncarnation(ctx)
+	case conduitsession.FieldExecScope:
+		return m.OldExecScope(ctx)
+	case conduitsession.FieldConnectionEpoch:
+		return m.OldConnectionEpoch(ctx)
+	case conduitsession.FieldDraining:
+		return m.OldDraining(ctx)
+	case conduitsession.FieldCapabilities:
+		return m.OldCapabilities(ctx)
+	case conduitsession.FieldConnectedAt:
+		return m.OldConnectedAt(ctx)
+	case conduitsession.FieldLastSeen:
+		return m.OldLastSeen(ctx)
+	}
+	return nil, fmt.Errorf("unknown ConduitSession field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *ConduitSessionMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case conduitsession.FieldPrincipalKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPrincipalKind(v)
+		return nil
+	case conduitsession.FieldPrincipalID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPrincipalID(v)
+		return nil
+	case conduitsession.FieldProjectID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetProjectID(v)
+		return nil
+	case conduitsession.FieldRelayInstanceID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRelayInstanceID(v)
+		return nil
+	case conduitsession.FieldRelayGeneration:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRelayGeneration(v)
+		return nil
+	case conduitsession.FieldTransport:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetTransport(v)
+		return nil
+	case conduitsession.FieldEndpointIncarnation:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetEndpointIncarnation(v)
+		return nil
+	case conduitsession.FieldExecScope:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExecScope(v)
+		return nil
+	case conduitsession.FieldConnectionEpoch:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetConnectionEpoch(v)
+		return nil
+	case conduitsession.FieldDraining:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDraining(v)
+		return nil
+	case conduitsession.FieldCapabilities:
+		v, ok := value.(json.RawMessage)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCapabilities(v)
+		return nil
+	case conduitsession.FieldConnectedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetConnectedAt(v)
+		return nil
+	case conduitsession.FieldLastSeen:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastSeen(v)
+		return nil
+	}
+	return fmt.Errorf("unknown ConduitSession field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *ConduitSessionMutation) AddedFields() []string {
+	var fields []string
+	if m.addrelay_generation != nil {
+		fields = append(fields, conduitsession.FieldRelayGeneration)
+	}
+	if m.addconnection_epoch != nil {
+		fields = append(fields, conduitsession.FieldConnectionEpoch)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *ConduitSessionMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case conduitsession.FieldRelayGeneration:
+		return m.AddedRelayGeneration()
+	case conduitsession.FieldConnectionEpoch:
+		return m.AddedConnectionEpoch()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *ConduitSessionMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case conduitsession.FieldRelayGeneration:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddRelayGeneration(v)
+		return nil
+	case conduitsession.FieldConnectionEpoch:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddConnectionEpoch(v)
+		return nil
+	}
+	return fmt.Errorf("unknown ConduitSession numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *ConduitSessionMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(conduitsession.FieldProjectID) {
+		fields = append(fields, conduitsession.FieldProjectID)
+	}
+	if m.FieldCleared(conduitsession.FieldExecScope) {
+		fields = append(fields, conduitsession.FieldExecScope)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *ConduitSessionMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *ConduitSessionMutation) ClearField(name string) error {
+	switch name {
+	case conduitsession.FieldProjectID:
+		m.ClearProjectID()
+		return nil
+	case conduitsession.FieldExecScope:
+		m.ClearExecScope()
+		return nil
+	}
+	return fmt.Errorf("unknown ConduitSession nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *ConduitSessionMutation) ResetField(name string) error {
+	switch name {
+	case conduitsession.FieldPrincipalKind:
+		m.ResetPrincipalKind()
+		return nil
+	case conduitsession.FieldPrincipalID:
+		m.ResetPrincipalID()
+		return nil
+	case conduitsession.FieldProjectID:
+		m.ResetProjectID()
+		return nil
+	case conduitsession.FieldRelayInstanceID:
+		m.ResetRelayInstanceID()
+		return nil
+	case conduitsession.FieldRelayGeneration:
+		m.ResetRelayGeneration()
+		return nil
+	case conduitsession.FieldTransport:
+		m.ResetTransport()
+		return nil
+	case conduitsession.FieldEndpointIncarnation:
+		m.ResetEndpointIncarnation()
+		return nil
+	case conduitsession.FieldExecScope:
+		m.ResetExecScope()
+		return nil
+	case conduitsession.FieldConnectionEpoch:
+		m.ResetConnectionEpoch()
+		return nil
+	case conduitsession.FieldDraining:
+		m.ResetDraining()
+		return nil
+	case conduitsession.FieldCapabilities:
+		m.ResetCapabilities()
+		return nil
+	case conduitsession.FieldConnectedAt:
+		m.ResetConnectedAt()
+		return nil
+	case conduitsession.FieldLastSeen:
+		m.ResetLastSeen()
+		return nil
+	}
+	return fmt.Errorf("unknown ConduitSession field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *ConduitSessionMutation) AddedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.relay != nil {
+		edges = append(edges, conduitsession.EdgeRelay)
+	}
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *ConduitSessionMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case conduitsession.EdgeRelay:
+		if id := m.relay; id != nil {
+			return []ent.Value{*id}
+		}
+	}
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *ConduitSessionMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 1)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *ConduitSessionMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *ConduitSessionMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.clearedrelay {
+		edges = append(edges, conduitsession.EdgeRelay)
+	}
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *ConduitSessionMutation) EdgeCleared(name string) bool {
+	switch name {
+	case conduitsession.EdgeRelay:
+		return m.clearedrelay
+	}
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *ConduitSessionMutation) ClearEdge(name string) error {
+	switch name {
+	case conduitsession.EdgeRelay:
+		m.ClearRelay()
+		return nil
+	}
+	return fmt.Errorf("unknown ConduitSession unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *ConduitSessionMutation) ResetEdge(name string) error {
+	switch name {
+	case conduitsession.EdgeRelay:
+		m.ResetRelay()
+		return nil
+	}
+	return fmt.Errorf("unknown ConduitSession edge %s", name)
 }
 
 // ConversationMutation represents an operation that mutates the Conversation nodes in the graph.
@@ -52048,6 +53843,759 @@ func (m *ProjectSyncStateMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *ProjectSyncStateMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown ProjectSyncState edge %s", name)
+}
+
+// RelayInstanceMutation represents an operation that mutates the RelayInstance nodes in the graph.
+type RelayInstanceMutation struct {
+	config
+	op                Op
+	typ               string
+	id                *string
+	generation        *int64
+	addgeneration     *int64
+	internal_endpoint *string
+	public_endpoint   *string
+	started_at        *time.Time
+	last_seen         *time.Time
+	draining          *bool
+	clearedFields     map[string]struct{}
+	sessions          map[string]struct{}
+	removedsessions   map[string]struct{}
+	clearedsessions   bool
+	done              bool
+	oldValue          func(context.Context) (*RelayInstance, error)
+	predicates        []predicate.RelayInstance
+}
+
+var _ ent.Mutation = (*RelayInstanceMutation)(nil)
+
+// relayinstanceOption allows management of the mutation configuration using functional options.
+type relayinstanceOption func(*RelayInstanceMutation)
+
+// newRelayInstanceMutation creates new mutation for the RelayInstance entity.
+func newRelayInstanceMutation(c config, op Op, opts ...relayinstanceOption) *RelayInstanceMutation {
+	m := &RelayInstanceMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeRelayInstance,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withRelayInstanceID sets the ID field of the mutation.
+func withRelayInstanceID(id string) relayinstanceOption {
+	return func(m *RelayInstanceMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *RelayInstance
+		)
+		m.oldValue = func(ctx context.Context) (*RelayInstance, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().RelayInstance.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withRelayInstance sets the old RelayInstance of the mutation.
+func withRelayInstance(node *RelayInstance) relayinstanceOption {
+	return func(m *RelayInstanceMutation) {
+		m.oldValue = func(context.Context) (*RelayInstance, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m RelayInstanceMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m RelayInstanceMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of RelayInstance entities.
+func (m *RelayInstanceMutation) SetID(id string) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *RelayInstanceMutation) ID() (id string, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *RelayInstanceMutation) IDs(ctx context.Context) ([]string, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []string{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().RelayInstance.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetGeneration sets the "generation" field.
+func (m *RelayInstanceMutation) SetGeneration(i int64) {
+	m.generation = &i
+	m.addgeneration = nil
+}
+
+// Generation returns the value of the "generation" field in the mutation.
+func (m *RelayInstanceMutation) Generation() (r int64, exists bool) {
+	v := m.generation
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldGeneration returns the old "generation" field's value of the RelayInstance entity.
+// If the RelayInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RelayInstanceMutation) OldGeneration(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldGeneration is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldGeneration requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldGeneration: %w", err)
+	}
+	return oldValue.Generation, nil
+}
+
+// AddGeneration adds i to the "generation" field.
+func (m *RelayInstanceMutation) AddGeneration(i int64) {
+	if m.addgeneration != nil {
+		*m.addgeneration += i
+	} else {
+		m.addgeneration = &i
+	}
+}
+
+// AddedGeneration returns the value that was added to the "generation" field in this mutation.
+func (m *RelayInstanceMutation) AddedGeneration() (r int64, exists bool) {
+	v := m.addgeneration
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetGeneration resets all changes to the "generation" field.
+func (m *RelayInstanceMutation) ResetGeneration() {
+	m.generation = nil
+	m.addgeneration = nil
+}
+
+// SetInternalEndpoint sets the "internal_endpoint" field.
+func (m *RelayInstanceMutation) SetInternalEndpoint(s string) {
+	m.internal_endpoint = &s
+}
+
+// InternalEndpoint returns the value of the "internal_endpoint" field in the mutation.
+func (m *RelayInstanceMutation) InternalEndpoint() (r string, exists bool) {
+	v := m.internal_endpoint
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldInternalEndpoint returns the old "internal_endpoint" field's value of the RelayInstance entity.
+// If the RelayInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RelayInstanceMutation) OldInternalEndpoint(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldInternalEndpoint is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldInternalEndpoint requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldInternalEndpoint: %w", err)
+	}
+	return oldValue.InternalEndpoint, nil
+}
+
+// ResetInternalEndpoint resets all changes to the "internal_endpoint" field.
+func (m *RelayInstanceMutation) ResetInternalEndpoint() {
+	m.internal_endpoint = nil
+}
+
+// SetPublicEndpoint sets the "public_endpoint" field.
+func (m *RelayInstanceMutation) SetPublicEndpoint(s string) {
+	m.public_endpoint = &s
+}
+
+// PublicEndpoint returns the value of the "public_endpoint" field in the mutation.
+func (m *RelayInstanceMutation) PublicEndpoint() (r string, exists bool) {
+	v := m.public_endpoint
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPublicEndpoint returns the old "public_endpoint" field's value of the RelayInstance entity.
+// If the RelayInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RelayInstanceMutation) OldPublicEndpoint(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPublicEndpoint is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPublicEndpoint requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPublicEndpoint: %w", err)
+	}
+	return oldValue.PublicEndpoint, nil
+}
+
+// ClearPublicEndpoint clears the value of the "public_endpoint" field.
+func (m *RelayInstanceMutation) ClearPublicEndpoint() {
+	m.public_endpoint = nil
+	m.clearedFields[relayinstance.FieldPublicEndpoint] = struct{}{}
+}
+
+// PublicEndpointCleared returns if the "public_endpoint" field was cleared in this mutation.
+func (m *RelayInstanceMutation) PublicEndpointCleared() bool {
+	_, ok := m.clearedFields[relayinstance.FieldPublicEndpoint]
+	return ok
+}
+
+// ResetPublicEndpoint resets all changes to the "public_endpoint" field.
+func (m *RelayInstanceMutation) ResetPublicEndpoint() {
+	m.public_endpoint = nil
+	delete(m.clearedFields, relayinstance.FieldPublicEndpoint)
+}
+
+// SetStartedAt sets the "started_at" field.
+func (m *RelayInstanceMutation) SetStartedAt(t time.Time) {
+	m.started_at = &t
+}
+
+// StartedAt returns the value of the "started_at" field in the mutation.
+func (m *RelayInstanceMutation) StartedAt() (r time.Time, exists bool) {
+	v := m.started_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStartedAt returns the old "started_at" field's value of the RelayInstance entity.
+// If the RelayInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RelayInstanceMutation) OldStartedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStartedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStartedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStartedAt: %w", err)
+	}
+	return oldValue.StartedAt, nil
+}
+
+// ResetStartedAt resets all changes to the "started_at" field.
+func (m *RelayInstanceMutation) ResetStartedAt() {
+	m.started_at = nil
+}
+
+// SetLastSeen sets the "last_seen" field.
+func (m *RelayInstanceMutation) SetLastSeen(t time.Time) {
+	m.last_seen = &t
+}
+
+// LastSeen returns the value of the "last_seen" field in the mutation.
+func (m *RelayInstanceMutation) LastSeen() (r time.Time, exists bool) {
+	v := m.last_seen
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLastSeen returns the old "last_seen" field's value of the RelayInstance entity.
+// If the RelayInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RelayInstanceMutation) OldLastSeen(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLastSeen is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLastSeen requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLastSeen: %w", err)
+	}
+	return oldValue.LastSeen, nil
+}
+
+// ResetLastSeen resets all changes to the "last_seen" field.
+func (m *RelayInstanceMutation) ResetLastSeen() {
+	m.last_seen = nil
+}
+
+// SetDraining sets the "draining" field.
+func (m *RelayInstanceMutation) SetDraining(b bool) {
+	m.draining = &b
+}
+
+// Draining returns the value of the "draining" field in the mutation.
+func (m *RelayInstanceMutation) Draining() (r bool, exists bool) {
+	v := m.draining
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDraining returns the old "draining" field's value of the RelayInstance entity.
+// If the RelayInstance object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RelayInstanceMutation) OldDraining(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDraining is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDraining requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDraining: %w", err)
+	}
+	return oldValue.Draining, nil
+}
+
+// ResetDraining resets all changes to the "draining" field.
+func (m *RelayInstanceMutation) ResetDraining() {
+	m.draining = nil
+}
+
+// AddSessionIDs adds the "sessions" edge to the ConduitSession entity by ids.
+func (m *RelayInstanceMutation) AddSessionIDs(ids ...string) {
+	if m.sessions == nil {
+		m.sessions = make(map[string]struct{})
+	}
+	for i := range ids {
+		m.sessions[ids[i]] = struct{}{}
+	}
+}
+
+// ClearSessions clears the "sessions" edge to the ConduitSession entity.
+func (m *RelayInstanceMutation) ClearSessions() {
+	m.clearedsessions = true
+}
+
+// SessionsCleared reports if the "sessions" edge to the ConduitSession entity was cleared.
+func (m *RelayInstanceMutation) SessionsCleared() bool {
+	return m.clearedsessions
+}
+
+// RemoveSessionIDs removes the "sessions" edge to the ConduitSession entity by IDs.
+func (m *RelayInstanceMutation) RemoveSessionIDs(ids ...string) {
+	if m.removedsessions == nil {
+		m.removedsessions = make(map[string]struct{})
+	}
+	for i := range ids {
+		delete(m.sessions, ids[i])
+		m.removedsessions[ids[i]] = struct{}{}
+	}
+}
+
+// RemovedSessions returns the removed IDs of the "sessions" edge to the ConduitSession entity.
+func (m *RelayInstanceMutation) RemovedSessionsIDs() (ids []string) {
+	for id := range m.removedsessions {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// SessionsIDs returns the "sessions" edge IDs in the mutation.
+func (m *RelayInstanceMutation) SessionsIDs() (ids []string) {
+	for id := range m.sessions {
+		ids = append(ids, id)
+	}
+	return
+}
+
+// ResetSessions resets all changes to the "sessions" edge.
+func (m *RelayInstanceMutation) ResetSessions() {
+	m.sessions = nil
+	m.clearedsessions = false
+	m.removedsessions = nil
+}
+
+// Where appends a list predicates to the RelayInstanceMutation builder.
+func (m *RelayInstanceMutation) Where(ps ...predicate.RelayInstance) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the RelayInstanceMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *RelayInstanceMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.RelayInstance, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *RelayInstanceMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *RelayInstanceMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (RelayInstance).
+func (m *RelayInstanceMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *RelayInstanceMutation) Fields() []string {
+	fields := make([]string, 0, 6)
+	if m.generation != nil {
+		fields = append(fields, relayinstance.FieldGeneration)
+	}
+	if m.internal_endpoint != nil {
+		fields = append(fields, relayinstance.FieldInternalEndpoint)
+	}
+	if m.public_endpoint != nil {
+		fields = append(fields, relayinstance.FieldPublicEndpoint)
+	}
+	if m.started_at != nil {
+		fields = append(fields, relayinstance.FieldStartedAt)
+	}
+	if m.last_seen != nil {
+		fields = append(fields, relayinstance.FieldLastSeen)
+	}
+	if m.draining != nil {
+		fields = append(fields, relayinstance.FieldDraining)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *RelayInstanceMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case relayinstance.FieldGeneration:
+		return m.Generation()
+	case relayinstance.FieldInternalEndpoint:
+		return m.InternalEndpoint()
+	case relayinstance.FieldPublicEndpoint:
+		return m.PublicEndpoint()
+	case relayinstance.FieldStartedAt:
+		return m.StartedAt()
+	case relayinstance.FieldLastSeen:
+		return m.LastSeen()
+	case relayinstance.FieldDraining:
+		return m.Draining()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *RelayInstanceMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case relayinstance.FieldGeneration:
+		return m.OldGeneration(ctx)
+	case relayinstance.FieldInternalEndpoint:
+		return m.OldInternalEndpoint(ctx)
+	case relayinstance.FieldPublicEndpoint:
+		return m.OldPublicEndpoint(ctx)
+	case relayinstance.FieldStartedAt:
+		return m.OldStartedAt(ctx)
+	case relayinstance.FieldLastSeen:
+		return m.OldLastSeen(ctx)
+	case relayinstance.FieldDraining:
+		return m.OldDraining(ctx)
+	}
+	return nil, fmt.Errorf("unknown RelayInstance field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *RelayInstanceMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case relayinstance.FieldGeneration:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetGeneration(v)
+		return nil
+	case relayinstance.FieldInternalEndpoint:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetInternalEndpoint(v)
+		return nil
+	case relayinstance.FieldPublicEndpoint:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPublicEndpoint(v)
+		return nil
+	case relayinstance.FieldStartedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStartedAt(v)
+		return nil
+	case relayinstance.FieldLastSeen:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLastSeen(v)
+		return nil
+	case relayinstance.FieldDraining:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDraining(v)
+		return nil
+	}
+	return fmt.Errorf("unknown RelayInstance field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *RelayInstanceMutation) AddedFields() []string {
+	var fields []string
+	if m.addgeneration != nil {
+		fields = append(fields, relayinstance.FieldGeneration)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *RelayInstanceMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case relayinstance.FieldGeneration:
+		return m.AddedGeneration()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *RelayInstanceMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case relayinstance.FieldGeneration:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddGeneration(v)
+		return nil
+	}
+	return fmt.Errorf("unknown RelayInstance numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *RelayInstanceMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(relayinstance.FieldPublicEndpoint) {
+		fields = append(fields, relayinstance.FieldPublicEndpoint)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *RelayInstanceMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *RelayInstanceMutation) ClearField(name string) error {
+	switch name {
+	case relayinstance.FieldPublicEndpoint:
+		m.ClearPublicEndpoint()
+		return nil
+	}
+	return fmt.Errorf("unknown RelayInstance nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *RelayInstanceMutation) ResetField(name string) error {
+	switch name {
+	case relayinstance.FieldGeneration:
+		m.ResetGeneration()
+		return nil
+	case relayinstance.FieldInternalEndpoint:
+		m.ResetInternalEndpoint()
+		return nil
+	case relayinstance.FieldPublicEndpoint:
+		m.ResetPublicEndpoint()
+		return nil
+	case relayinstance.FieldStartedAt:
+		m.ResetStartedAt()
+		return nil
+	case relayinstance.FieldLastSeen:
+		m.ResetLastSeen()
+		return nil
+	case relayinstance.FieldDraining:
+		m.ResetDraining()
+		return nil
+	}
+	return fmt.Errorf("unknown RelayInstance field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *RelayInstanceMutation) AddedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.sessions != nil {
+		edges = append(edges, relayinstance.EdgeSessions)
+	}
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *RelayInstanceMutation) AddedIDs(name string) []ent.Value {
+	switch name {
+	case relayinstance.EdgeSessions:
+		ids := make([]ent.Value, 0, len(m.sessions))
+		for id := range m.sessions {
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *RelayInstanceMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.removedsessions != nil {
+		edges = append(edges, relayinstance.EdgeSessions)
+	}
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *RelayInstanceMutation) RemovedIDs(name string) []ent.Value {
+	switch name {
+	case relayinstance.EdgeSessions:
+		ids := make([]ent.Value, 0, len(m.removedsessions))
+		for id := range m.removedsessions {
+			ids = append(ids, id)
+		}
+		return ids
+	}
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *RelayInstanceMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 1)
+	if m.clearedsessions {
+		edges = append(edges, relayinstance.EdgeSessions)
+	}
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *RelayInstanceMutation) EdgeCleared(name string) bool {
+	switch name {
+	case relayinstance.EdgeSessions:
+		return m.clearedsessions
+	}
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *RelayInstanceMutation) ClearEdge(name string) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown RelayInstance unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *RelayInstanceMutation) ResetEdge(name string) error {
+	switch name {
+	case relayinstance.EdgeSessions:
+		m.ResetSessions()
+		return nil
+	}
+	return fmt.Errorf("unknown RelayInstance edge %s", name)
 }
 
 // RoleBindingMutation represents an operation that mutates the RoleBinding nodes in the graph.

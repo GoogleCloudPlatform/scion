@@ -165,6 +165,9 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	"DeletionStartedAt": true, "DeletionFailedAt": true, "DeletionCode": true,
 	"DeletionError": true, "DeletionPrior": true, "DeletionRequest": true,
 	"Deletion": true,
+	// Run intent columns are written only through SetRunIntent and
+	// RevertRunIntent (never by CreateAgent/UpdateAgent).
+	"RunIntent": true, "RunIntentAt": true,
 }
 
 func reflectFillStoreAgent(t *testing.T, projectID string) *store.Agent {
