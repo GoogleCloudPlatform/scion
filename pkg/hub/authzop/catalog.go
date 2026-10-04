@@ -109,12 +109,13 @@ var SecurityMutationSymbols = map[string]string{
 	"RevokeAgentCredentialsByAgent": "revoke-authority",
 
 	// Secret operations
-	"CreateSecret":         "create-resource",
-	"UpdateSecret":         "update-resource",
-	"UpsertSecret":         "create-resource",
-	"DeleteSecret":         "delete-resource",
-	"DeleteSecretsByScope": "delete-resource",
-	"GetSecretValue":       "read-secret",
+	"CreateSecret":               "create-resource",
+	"UpdateSecret":               "update-resource",
+	"UpdateSecretValueIfVersion": "update-resource",
+	"UpsertSecret":               "create-resource",
+	"DeleteSecret":               "delete-resource",
+	"DeleteSecretsByScope":       "delete-resource",
+	"GetSecretValue":             "read-secret",
 
 	// Broker secret operations
 	"CreateBrokerSecret": "create-resource",
@@ -2719,6 +2720,7 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/messages", Kind: ExemptionAuthenticationOnly, Reason: "List own messages, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/messages/", Kind: ExemptionAuthenticationOnly, Reason: "Manage own message by ID, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/gcs/object", Kind: ExemptionAuthenticationOnly, Reason: "gs:// link fetch, inline message-visibility-based authorization", Owner: "route_metadata.go"},
+	{Pattern: "/api/v1/conduit/grant-keys", Kind: ExemptionAuthenticationOnly, Reason: "Conduit grant public keys, authenticated read-only, experiment-gated", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/message-channels", Kind: ExemptionAuthenticationOnly, Reason: "List own message channels, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/chat/user-prefs", Kind: ExemptionAuthenticationOnly, Reason: "Chat preferences, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/chat/presence", Kind: ExemptionAuthenticationOnly, Reason: "Chat presence, self-service", Owner: "route_metadata.go"},
@@ -3098,6 +3100,12 @@ var MutationClassifications = []MutationClassification{
 	{File: "pkg/hub/oidckeys.go", Function: "loadKeysetFromDB", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset load, cryptographic infrastructure", Scope: "pkg/hub/oidckeys.go"}},
 	{File: "pkg/hub/oidckeys.go", Function: "loadOrCreateKey", Symbol: "GetSecretValue", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset load-or-create, cryptographic infrastructure", Scope: "pkg/hub/oidckeys.go"}},
 	{File: "pkg/hub/oidckeys.go", Function: "saveKeysetToDB", Symbol: "UpsertSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "OIDC keyset save, cryptographic infrastructure", Scope: "pkg/hub/oidckeys.go"}},
+
+	// -----------------------------------------------------------------------
+	// pkg/hub/conduit_grants.go — Conduit grant signing key ring
+	// -----------------------------------------------------------------------
+	{File: "pkg/hub/conduit_grants.go", Function: "Create", Symbol: "CreateSecret", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Conduit grant key ring bootstrap, cryptographic infrastructure", Scope: "pkg/hub/conduit_grants.go"}},
+	{File: "pkg/hub/conduit_grants.go", Function: "CompareAndSwap", Symbol: "UpdateSecretValueIfVersion", Exemption: &MutationExemption{Kind: ExemptionInternalOnly, Reason: "Conduit grant key ring rotation (compare-and-swap), cryptographic infrastructure", Scope: "pkg/hub/conduit_grants.go"}},
 
 	// -----------------------------------------------------------------------
 	// pkg/hub/lifecycle_hook_executor.go — pre-start hook execution
