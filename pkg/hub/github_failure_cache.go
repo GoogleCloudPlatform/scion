@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -72,12 +73,18 @@ func (s *Server) rememberGHNotFound(cacheKey string, err error) {
 const maxGHErrorBody = 512
 
 // ghErrorBody returns body for use in a ghStatusError message, cut to
-// maxGHErrorBody bytes with "..." appended when it is longer.
+// maxGHErrorBody bytes with "..." appended when it is longer. The cut backs
+// off to the start of a UTF-8 sequence so a multi-byte character is never
+// split.
 func ghErrorBody(body []byte) string {
 	if len(body) <= maxGHErrorBody {
 		return string(body)
 	}
-	return string(body[:maxGHErrorBody]) + "..."
+	n := maxGHErrorBody
+	for n > 0 && !utf8.RuneStart(body[n]) {
+		n--
+	}
+	return string(body[:n]) + "..."
 }
 
 // ghFailureCache remembers recent not-found resolutions by cache key, in

@@ -27,6 +27,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -460,4 +461,21 @@ func TestGHErrorBody(t *testing.T) {
 	exact := strings.Repeat("a", maxGHErrorBody)
 	assert.Equal(t, exact, ghErrorBody([]byte(exact)))
 	assert.Equal(t, exact+"...", ghErrorBody([]byte(exact+"b")))
+
+	// A two-byte character starting at byte 511 would be split by a plain
+	// cut at 512; the cut moves back to before it.
+	prefix := strings.Repeat("a", maxGHErrorBody-1)
+	got := ghErrorBody([]byte(prefix + "é" + "tail"))
+	assert.True(t, utf8.ValidString(got), "cut body %q is not valid UTF-8", got)
+	assert.Equal(t, prefix+"...", got)
+
+	// A three-byte character starting at byte 510 is also kept whole.
+	prefix = strings.Repeat("a", maxGHErrorBody-2)
+	got = ghErrorBody([]byte(prefix + "€" + "tail"))
+	assert.True(t, utf8.ValidString(got), "cut body %q is not valid UTF-8", got)
+	assert.Equal(t, prefix+"...", got)
+
+	// A character ending exactly at byte 512 is kept.
+	prefix = strings.Repeat("a", maxGHErrorBody-2)
+	assert.Equal(t, prefix+"é...", ghErrorBody([]byte(prefix+"é"+"tail")))
 }
