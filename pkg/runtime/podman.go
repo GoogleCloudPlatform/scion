@@ -228,8 +228,10 @@ func (r *PodmanRuntime) Stop(ctx context.Context, id string) error {
 	return err
 }
 
-func (r *PodmanRuntime) Delete(ctx context.Context, id string) error {
-	_, err := runSimpleCommand(ctx, r.Command, "rm", "-f", id)
+// Delete removes the container ref.ID. The engine container ID is already
+// unique per run, so ref.RunID needs no further check here.
+func (r *PodmanRuntime) Delete(ctx context.Context, ref RunRef) error {
+	_, err := runSimpleCommand(ctx, r.Command, "rm", "-f", ref.ID)
 	return err
 }
 
@@ -304,6 +306,7 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 
 			info := api.AgentInfo{
 				ContainerID:     c.Id,
+				RunID:           labels[api.LabelRunID],
 				Name:            name,
 				ContainerStatus: c.Status,
 				Phase:           phaseFromContainerStatus(c.Status),

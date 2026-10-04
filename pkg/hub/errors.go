@@ -309,6 +309,12 @@ func writeErrorFromErr(w http.ResponseWriter, err error, requestID string) {
 		statusCode = http.StatusConflict
 		code = ErrCodeConflict
 		message = "Resource already exists"
+	case errors.Is(err, store.ErrDeleteInProgress):
+		// A start-side write (run ID or running intent) refused because a
+		// delete holds the row (ptone/scion#2550).
+		statusCode = http.StatusConflict
+		code = ErrCodeDeleteInProgress
+		message = deleteInProgressRefusal("").Message
 	case errors.Is(err, store.ErrVersionConflict):
 		statusCode = http.StatusConflict
 		code = ErrCodeVersionConflict
@@ -450,12 +456,12 @@ func InternalError(w http.ResponseWriter) {
 		"Internal server error", nil)
 }
 
-// MethodNotAllowed writes a 405 Method Not Allowed response.
-// If allowedMethods are provided, an Allow header is set per RFC 9110 §15.5.6.
-func MethodNotAllowed(w http.ResponseWriter, allowedMethods ...string) {
-	if len(allowedMethods) > 0 {
-		w.Header().Set("Allow", strings.Join(allowedMethods, ", "))
-	}
+// MethodNotAllowed writes a 405 Method Not Allowed response with the Allow
+// header RFC 9110 §15.5.6 requires. The signature requires at least one
+// method, so a bare call does not compile.
+func MethodNotAllowed(w http.ResponseWriter, allowedMethod string, otherMethods ...string) {
+	methods := append([]string{allowedMethod}, otherMethods...)
+	w.Header().Set("Allow", strings.Join(methods, ", "))
 	writeError(w, http.StatusMethodNotAllowed, "method_not_allowed",
 		"Method not allowed", nil)
 }
