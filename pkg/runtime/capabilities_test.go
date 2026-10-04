@@ -59,3 +59,38 @@ func TestHasAttachSupport_FieldPresentFalse(t *testing.T) {
 		t.Error("HasAttachSupport = true, want false for a runtime reporting SupportsAttach() = false")
 	}
 }
+
+// emptyPerAgentCapableRuntime is a MockRuntime that also implements the
+// optional EmptyPerAgentCapableRuntime capability, reporting the given value.
+type emptyPerAgentCapableRuntime struct {
+	*MockRuntime
+	supports bool
+}
+
+func (r *emptyPerAgentCapableRuntime) SupportsEmptyPerAgentWorkspace() bool { return r.supports }
+
+// TestHasEmptyPerAgentSupport pins the per-runtime empty-per-agent
+// capability a broker advertises (design #2703 P2): Cloud Run, which rejects
+// the mode at Run, and substrate, which never mounts RunConfig.Workspace,
+// report false; Cloud Run sandbox (a per-agent copy) and a
+// runtime without the optional interface report true.
+func TestHasEmptyPerAgentSupport(t *testing.T) {
+	for name, tc := range map[string]struct {
+		rt   Runtime
+		want bool
+	}{
+		"cloudrun":                       {rt: &CloudRunRuntime{}, want: false},
+		"cloudrun-sandbox":               {rt: &CloudRunSandboxRuntime{}, want: true},
+		"substrate":                      {rt: &SubstrateRuntime{}, want: false},
+		"runtime without the capability": {rt: &MockRuntime{}, want: true},
+		"runtime reporting true":         {rt: &emptyPerAgentCapableRuntime{MockRuntime: &MockRuntime{}, supports: true}, want: true},
+		"runtime reporting false":        {rt: &emptyPerAgentCapableRuntime{MockRuntime: &MockRuntime{}, supports: false}, want: false},
+		"nil runtime":                    {rt: nil, want: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := HasEmptyPerAgentSupport(tc.rt); got != tc.want {
+				t.Errorf("HasEmptyPerAgentSupport = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

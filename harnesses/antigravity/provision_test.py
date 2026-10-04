@@ -18,6 +18,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shlex
+import subprocess
 import tempfile
 import unittest
 import unittest.mock
@@ -682,3 +684,61 @@ class ProvisionThinkingWiringTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WrapperSecretsDirTest(unittest.TestCase):
+    """agy-wrapper.sh reads AGY_TOKEN from SCION_HARNESS_SECRETS_DIR when set."""
+
+    def _wrapper(self, home: str, secrets_dir: str | None) -> str:
+        provision._generate_wrapper_script(home, True, False, secrets_dir=secrets_dir)
+        with open(os.path.join(home, ".scion", "harness", "agy-wrapper.sh"), encoding="utf-8") as f:
+            return f.read()
+
+    def test_default_reads_bundle_secrets(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            script = self._wrapper(home, None)
+        self.assertIn(os.path.join(home, ".scion", "harness", "secrets", "AGY_TOKEN"), script)
+
+    def test_secrets_dir_used_when_set(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            script = self._wrapper(home, "/run/scion/mem/harness-secrets")
+        self.assertIn("/run/scion/mem/harness-secrets/AGY_TOKEN", script)
+        self.assertNotIn(os.path.join(home, ".scion", "harness", "secrets", "AGY_TOKEN"), script)
+
+    def test_secrets_dir_is_shell_quoted(self) -> None:
+        secrets_dir = "/run/scion/mem/harness secrets/it's"
+        with tempfile.TemporaryDirectory() as home:
+            script = self._wrapper(home, secrets_dir)
+            wrapper = os.path.join(home, ".scion", "harness", "agy-wrapper.sh")
+            check = subprocess.run(["bash", "-n", wrapper], capture_output=True, text=True)
+        quoted = shlex.quote(secrets_dir + "/AGY_TOKEN")
+        self.assertIn(f"if [ -f {quoted} ]; then", script)
+        self.assertIn(f"< {quoted} 2>/dev/null", script)
+        self.assertEqual(check.returncode, 0, check.stderr)
+
+    def test_secrets_dir_outside_mem_dir_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, \
+                unittest.mock.patch.dict(os.environ, {
+                    "SCION_HARNESS_SECRETS_DIR": "/etc",
+                    "SCION_HARNESS_OUTPUTS_DIR": "",
+                }):
+            with self.assertRaises(scion_harness.ProvisionError):
+                _invoke(tmp, env_vars=[], explicit_type="none")
+
+    def test_provision_passes_env_value(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def fake_wrapper(*args: Any, **kwargs: Any) -> None:
+            seen["secrets_dir"] = kwargs.get("secrets_dir")
+
+        for value, want in (("", None), ("/run/scion/mem/harness-secrets", "/run/scion/mem/harness-secrets")):
+            with self.subTest(value=value):
+                seen.clear()
+                with tempfile.TemporaryDirectory() as tmp, \
+                        unittest.mock.patch.object(provision, "_generate_wrapper_script", fake_wrapper), \
+                        unittest.mock.patch.dict(os.environ, {
+                            "SCION_HARNESS_SECRETS_DIR": value,
+                            "SCION_HARNESS_OUTPUTS_DIR": "",
+                        }):
+                    _invoke(tmp, env_vars=[], explicit_type="none")
+                self.assertEqual(seen["secrets_dir"], want)

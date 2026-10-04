@@ -190,6 +190,22 @@ export function isSharedWorkspace(project: Project): boolean {
 }
 
 /**
+ * Check whether a project gives each agent its own empty directory (#2703):
+ * no git remote and a hub-owned workspace-mode label of per-agent, or the
+ * raw empty-per-agent value (the hub's ResolveProjectSharingMode treats
+ * both the same on a non-git project).
+ */
+export function isEmptyPerAgentWorkspace(project?: {
+  gitRemote?: string | undefined;
+  labels?: Record<string, string> | undefined;
+}): boolean {
+  if (!project) return false;
+  if (project.gitRemote) return false;
+  const mode = project.labels?.['scion.dev/workspace-mode'];
+  return mode === 'per-agent' || mode === 'empty-per-agent';
+}
+
+/**
  * Check whether a project uses worktree-per-agent workspace mode.
  */
 export function isWorktreeWorkspace(project: Project): boolean {

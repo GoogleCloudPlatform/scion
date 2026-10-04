@@ -26,7 +26,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -65,8 +64,8 @@ func (d *recordingDispatcher) getCalls() []dispatchCall {
 }
 
 // Implement remaining AgentDispatcher methods as no-ops.
-func (d *recordingDispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent) error {
-	return nil
+func (d *recordingDispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 func (d *recordingDispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error {
 	return nil
@@ -91,7 +90,7 @@ func (d *recordingDispatcher) DispatchAgentDelete(_ context.Context, _ *store.Ag
 func (d *recordingDispatcher) DispatchCheckAgentPrompt(_ context.Context, _ *store.Agent) (bool, error) {
 	return false, nil
 }
-func (d *recordingDispatcher) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (d *recordingDispatcher) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*CreateDispatchResult, error) {
 	return nil, nil
 }
 func (d *recordingDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
@@ -100,45 +99,9 @@ func (d *recordingDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agen
 func (d *recordingDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
 	return "", 0, nil
 }
-func (d *recordingDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) error {
-	return nil
+func (d *recordingDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) (*CreateDispatchResult, error) {
+	return nil, nil
 }
-
-// recordingBroker is a mock MessageBroker that records Publish calls.
-type recordingBroker struct {
-	mu        sync.Mutex
-	publishes []brokerPublish
-}
-
-type brokerPublish struct {
-	topic string
-	msg   *messages.StructuredMessage
-}
-
-func (b *recordingBroker) Publish(_ context.Context, topic string, msg *messages.StructuredMessage) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.publishes = append(b.publishes, brokerPublish{topic: topic, msg: msg})
-	return nil
-}
-
-func (b *recordingBroker) Subscribe(_ string, _ eventbus.EventHandler) (eventbus.Subscription, error) {
-	return &noopSubscription{}, nil
-}
-
-func (b *recordingBroker) Close() error { return nil }
-
-func (b *recordingBroker) getPublishes() []brokerPublish {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	result := make([]brokerPublish, len(b.publishes))
-	copy(result, b.publishes)
-	return result
-}
-
-type noopSubscription struct{}
-
-func (s *noopSubscription) Unsubscribe() error { return nil }
 
 // notificationTestEnv holds all components for a notification test.
 type notificationTestEnv struct {
@@ -150,6 +113,9 @@ type notificationTestEnv struct {
 	watched    *store.Agent // the agent being watched
 	subscriber *store.Agent // the agent receiving notifications
 	sub        *store.NotificationSubscription
+	// quiesceBroker, when set (startRealBrokerProxy), drains and closes the
+	// broker bus so every asynchronous deliverToUser has finished.
+	quiesceBroker func()
 }
 
 // setupNotificationTest creates an in-memory SQLite store, event publisher,
@@ -501,32 +467,24 @@ func TestNotificationDispatcher_UserSubscriberInboxWithBroker(t *testing.T) {
 	}
 	require.NoError(t, env.store.CreateNotificationSubscription(context.Background(), userSub))
 
-	// Set up a broker proxy — notifications are routed through the broker so
-	// external integrations (Telegram, Discord) can render state-change cards.
-	rb := &recordingBroker{}
-	proxy := NewMessageBrokerProxy(rb, env.store, env.pub, func() AgentDispatcher { return env.dispatcher }, slog.Default())
-	env.nd.SetBrokerProxy(proxy)
+	// A real, started broker proxy: its deliverToUser subscriber persists the
+	// published notification, so the notifier must not write the row too
+	// (ptone/scion#1906). A non-recording mock here masked the duplicate.
+	bus := env.startRealBrokerProxy(t)
 
 	env.nd.Start()
 	defer env.nd.Stop()
 
 	env.publishStatus("completed")
 
-	// Wait for processing
-	time.Sleep(300 * time.Millisecond)
+	// Exactly one inbox row, written by the broker path.
+	msgs := env.settledUserRows(t, "user-broker-inbox")
+	assert.Len(t, msgs, 1, "the notification must be persisted exactly once when a broker is present")
 
 	// Broker should receive the notification for external integrations.
-	publishes := rb.getPublishes()
+	publishes := bus.published()
 	require.Len(t, publishes, 1, "broker should receive notification publish")
-	assert.Equal(t, messages.TypeStateChange, publishes[0].msg.Type)
-
-	// Inbox message should also be created directly for the web UI.
-	msgs, err := env.store.ListMessages(context.Background(), store.MessageFilter{
-		RecipientID: "user-broker-inbox",
-		ProjectID:   env.project.ID,
-	}, store.ListOptions{})
-	require.NoError(t, err)
-	assert.Len(t, msgs.Items, 1, "inbox message should be created directly even when broker is present")
+	assert.Equal(t, messages.TypeStateChange, publishes[0].Type)
 }
 
 func TestNotificationDispatcher_UserSubscriberInboxWaitingForInput(t *testing.T) {
@@ -967,10 +925,8 @@ func TestNotificationDispatcher_BrokerUsedForUserNotification(t *testing.T) {
 	}
 	require.NoError(t, env.store.CreateNotificationSubscription(context.Background(), userSub))
 
-	// Set up a recording broker and wire it as the broker proxy
-	rb := &recordingBroker{}
-	proxy := NewMessageBrokerProxy(rb, env.store, env.pub, func() AgentDispatcher { return env.dispatcher }, slog.Default())
-	env.nd.SetBrokerProxy(proxy)
+	// A real, started broker proxy (see UserSubscriberInboxWithBroker).
+	bus := env.startRealBrokerProxy(t)
 
 	// Also set up a recording channel — should also receive the notification
 	// as a fallback for deployments without broker plugins.
@@ -986,22 +942,15 @@ func TestNotificationDispatcher_BrokerUsedForUserNotification(t *testing.T) {
 
 	env.publishStatus("completed")
 
-	// Wait for processing
-	time.Sleep(300 * time.Millisecond)
+	// Inbox message persisted exactly once, by the broker path.
+	msgs := env.settledUserRows(t, "user-broker")
+	assert.Len(t, msgs, 1, "the notification must be persisted exactly once")
 
 	// Broker should receive the notification for external integrations.
-	publishes := rb.getPublishes()
+	publishes := bus.published()
 	require.Len(t, publishes, 1, "broker should receive notification publish")
-	assert.Equal(t, messages.TypeStateChange, publishes[0].msg.Type)
-	assert.Equal(t, "COMPLETED", publishes[0].msg.Status)
-
-	// Inbox message should be created directly for the web UI.
-	msgs, err := env.store.ListMessages(context.Background(), store.MessageFilter{
-		RecipientID: "user-broker",
-		ProjectID:   env.project.ID,
-	}, store.ListOptions{})
-	require.NoError(t, err)
-	assert.Len(t, msgs.Items, 1, "inbox message should be created directly")
+	assert.Equal(t, messages.TypeStateChange, publishes[0].Type)
+	assert.Equal(t, "COMPLETED", publishes[0].Status)
 
 	// Channel registry should also be called as a fallback.
 	assert.Len(t, ch.getDeliveries(), 1, "channel registry should receive the notification")
@@ -1186,15 +1135,24 @@ func TestNotificationDispatcher_DeletedTrigger(t *testing.T) {
 	}
 	require.NoError(t, env.store.CreateNotificationSubscription(ctx, deletedSub))
 
-	env.nd.Start()
-	defer env.nd.Stop()
+	// The delete engine resolves DELETED subscribers from its snapshot
+	// before the row is removed, then persists and delivers them
+	// asynchronously after the delete committed (design ptone/scion#2483
+	// §2.3). There is no deleted-event subscriber any more.
+	pending := env.nd.ResolveDeletedNotifications(ctx, env.watched)
+	require.Len(t, pending, 1)
 
-	// Publish an agent deleted event
-	env.pub.PublishAgentDeleted(ctx, env.watched.ID, env.project.ID)
+	// Resolution is a read only: nothing is stored or sent yet, and the
+	// delivery works after the watched row is gone (hard delete).
+	assert.Empty(t, env.dispatcher.getCalls())
+	require.NoError(t, env.store.DeleteAgent(ctx, env.watched.ID))
 
-	require.Eventually(t, func() bool {
-		return len(env.dispatcher.getCalls()) == 1
-	}, 2*time.Second, 50*time.Millisecond)
+	select {
+	case <-env.nd.DeliverDeletedNotifications(ctx, pending):
+	case <-time.After(2 * time.Second):
+		t.Fatal("delivery did not finish")
+	}
+	require.Len(t, env.dispatcher.getCalls(), 1)
 
 	calls := env.dispatcher.getCalls()
 	assert.Contains(t, calls[0].Message, "watched-agent has been DELETED")
@@ -1208,17 +1166,20 @@ func TestNotificationDispatcher_DeletedTrigger(t *testing.T) {
 func TestNotificationDispatcher_DeletedNotMatchedWithoutSubscription(t *testing.T) {
 	env := setupNotificationTest(t)
 
-	// Default subscription does not include DELETED
+	// Default subscription does not include DELETED: nothing resolves.
+	ctx := context.Background()
+	pending := env.nd.ResolveDeletedNotifications(ctx, env.watched)
+	assert.Empty(t, pending)
+	<-env.nd.DeliverDeletedNotifications(ctx, pending)
+	assert.Empty(t, env.dispatcher.getCalls())
+
+	// A deleted event on the bus no longer triggers anything either: the
+	// dispatcher does not subscribe to it.
 	env.nd.Start()
 	defer env.nd.Stop()
-
-	env.pub.PublishAgentDeleted(context.Background(), env.watched.ID, env.project.ID)
-
-	// Give time for event to be processed
-	time.Sleep(200 * time.Millisecond)
-
-	// Should not trigger since default sub only has COMPLETED and WAITING_FOR_INPUT
-	assert.Empty(t, env.dispatcher.getCalls())
+	env.pub.PublishAgentDeleted(ctx, env.watched.ID, env.project.ID)
+	assert.Never(t, func() bool { return len(env.dispatcher.getCalls()) > 0 },
+		200*time.Millisecond, 10*time.Millisecond, "no dispatch for a bus deleted event")
 }
 
 func TestFormatNotificationMessage_Deleted(t *testing.T) {

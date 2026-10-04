@@ -45,6 +45,31 @@ type RunConfig struct {
 	Resources          *api.ResourceSpec
 	Kubernetes         *api.KubernetesConfig
 	GitClone           *api.GitCloneConfig
+	// TrustedHubEndpoint is the hub endpoint Substrate's egress allowlist
+	// trusts. In broker mode, this field arrives already resolved by the
+	// runtime broker from operator-controlled tiers only — the request's
+	// HubEndpoint field, the hub connection endpoint, or the broker's own
+	// configured HubEndpoint (see api.StartOptions.TrustedHubEndpoint and
+	// runtimebroker's resolveEffectiveHubEndpoint) — with project settings
+	// and the resolved env excluded from this egress-trust path, even
+	// though either may still supply the agent's own delivered hub
+	// endpoint. Outside broker mode, it is instead the caller-provided
+	// opts.Env's own SCION_HUB_ENDPOINT, captured at the top of Start
+	// before anything can override it, falling back to the project
+	// settings file when that is empty — a legitimate trusted source on
+	// this path, since there is no broker-side operator resolution to
+	// defer to. Neither the agent-level Hub config nor an agent/template
+	// config's own SCION_HUB_ENDPOINT env entry ever feeds this field
+	// (pkg/agent/run.go): both are creator-controlled and are applied only
+	// to the final agent env, after this value is captured or resolved.
+	// Every runtime except Substrate ignores this field; base
+	// env-resolution behaviour for every other runtime is unchanged.
+	// Substrate uses it as the one egress-allowlisted hub host, independent
+	// of whatever SCION_HUB_ENDPOINT/SCION_HUB_URL end up in the final
+	// agent env (see substrateEgressHostnames) — an agent/template env
+	// override can point the *agent's own* hub calls at a different value,
+	// but must never widen the egress allowlist to match it.
+	TrustedHubEndpoint string
 	SharedDirs         []api.SharedDir
 	// SharedDirStorage holds the resolved shared-dir storage plan when
 	// server.shared_dir_storage.backend is "nfs" (design
@@ -70,6 +95,11 @@ type RunConfig struct {
 	// "gke-shared-volume". Used to branch UID/GID injection and skip per-start
 	// chown when NFS (N1-5); the branches below key on "nfs" only.
 	WorkspaceBackendName string
+	// HomeStorageBackend selects where the agent home lives on the
+	// Kubernetes runtime. Empty (or "local") keeps the home in the pod and
+	// the pod spec unchanged. HomeStorageNFS builds an NFS-home pod (see
+	// k8s_nfs_home.go). Nothing sets HomeStorageNFS yet.
+	HomeStorageBackend string
 	// NFSUID and NFSGID are the stable, node-independent UID/GID for NFS-backed
 	// workspaces. Advertised as SCION_HOST_UID/GID when WorkspaceBackendName is "nfs"
 	// instead of os.Getuid()/os.Getgid(). Default 1000:1000 (design §9.1).
@@ -115,6 +145,11 @@ type RunConfig struct {
 	// NFSAgentBranch is the branch the agent's workspace is created for,
 	// recorded by the init container. Only used with NFSAgentDirName.
 	NFSAgentBranch string
+	// NFSAgentDirEmpty marks an NFSAgentDirName agent of an empty-per-agent
+	// project: the mounts are the same, but the init container prepares an
+	// empty workspace with no branch record (SCION_WORKSPACE_MODE
+	// empty-per-agent) and nothing clones into it. NFSAgentBranch is unused.
+	NFSAgentDirEmpty bool
 	// NFSStorageClass is the K8s StorageClass for NFS-backed PVCs.
 	// Used when creating shared-dir PVCs on NFS. Empty uses cluster default.
 	NFSStorageClass string

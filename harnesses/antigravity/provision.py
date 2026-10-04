@@ -273,7 +273,10 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     thinking_tier = scion_harness.resolve_thinking(ctx)
     ctx.info(f"model={model} tier={thinking_tier or '<agy default>'}")
 
-    _generate_wrapper_script(ctx.home, has_token, is_enterprise, is_adc=is_adc, thinking_tier=thinking_tier)
+    _generate_wrapper_script(
+        ctx.home, has_token, is_enterprise, is_adc=is_adc, thinking_tier=thinking_tier,
+        secrets_dir=scion_harness.harness_dir_override(scion_harness.HARNESS_SECRETS_DIR_ENV),
+    )
     ctx.write_outputs(resolved, env=env_overlay)
     _copy_instructions(ctx.bundle_dir, ctx.home, instructions_file)
     _generate_hooks_json(ctx.home)
@@ -374,6 +377,7 @@ def _generate_wrapper_script(
     home: str, has_token: bool, is_enterprise: bool,
     is_adc: bool = False,
     thinking_tier: str | None = None,
+    secrets_dir: str | None = None,
 ) -> None:
     """Generate agy-wrapper.sh that inits keyring and execs AGY.
 
@@ -393,9 +397,10 @@ def _generate_wrapper_script(
     are skipped because ADC auth uses GOOGLE_APPLICATION_CREDENTIALS instead
     of the keyring-based OAuth flow. GCP settings patching still runs.
     """
-    secret_path = os.path.join(
-        home, ".scion", "harness", "secrets", "AGY_TOKEN"
-    )
+    # secrets_dir is SCION_HARNESS_SECRETS_DIR when set.
+    if secrets_dir is None:
+        secrets_dir = os.path.join(home, ".scion", "harness", "secrets")
+    secret_path = os.path.join(secrets_dir, "AGY_TOKEN")
     oauth_token_path = os.path.join(
         home, ".gemini", "antigravity-cli", "antigravity-oauth-token"
     )
@@ -451,11 +456,11 @@ echo "agy-wrapper: keyring initialized (DBUS=$DBUS_SESSION_BUS_ADDRESS)" >&2
 echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" > ~/.scion/harness/.dbus-env
 
 # Inject OAuth token into keyring (staging file, target path, env var fallback)
-if [ -f "{secret_path}" ]; then
+if [ -f {shlex.quote(secret_path)} ]; then
     secret-tool store \\
         --label="Password for antigravity on gemini" \\
         service gemini username antigravity \\
-        < "{secret_path}" 2>/dev/null \\
+        < {shlex.quote(secret_path)} 2>/dev/null \\
         && echo "agy-wrapper: token injected into keyring (from staging file)" >&2 \\
         || echo "agy-wrapper: WARNING: failed to inject token" >&2
 elif [ -f "{oauth_token_path}" ]; then

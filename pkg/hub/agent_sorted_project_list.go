@@ -419,9 +419,9 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 			continue // deleted between the two reads: dropped
 		}
 		// An explicit, single-field check kept alongside the store-driven
-		// recheck below as the design's stated belt-and-suspenders -- it
-		// also still fires if a full row were ever fetched by a path that
-		// does not itself filter by project.
+		// recheck below as deliberate belt-and-suspenders -- it also still
+		// fires if a full row were ever fetched by a path that does not
+		// itself filter by project.
 		if full.ProjectID != projectID {
 			continue
 		}
@@ -485,7 +485,7 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 		c := complete
 		resp.Complete = &c
 	}
-	writeJSON(w, http.StatusOK, resp)
+	writeAgentList(w, p.view, resp)
 }
 
 // isSortedModeRequest reports whether query requests sorted mode: any

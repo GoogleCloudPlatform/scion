@@ -76,6 +76,14 @@ broker logs a one-time warning at startup if any of them are set, and logs the
 resolved layout (`backend`, `host_base`, `subpath_root`, `pv_name`) exactly
 once per start.
 
+To keep a broker's Docker profile on the local layout while only the `gke`
+profile uses the export, leave `server.shared_dir_storage.backend` as `local`
+(keeping the `nfs` block) and set `shared_dir_storage_backend: nfs` on the
+`gke` runtime entry or profile. The override is read at every agent start (no
+restart), and an `nfs`-resolved start still needs the export mounted on that
+broker; a missing mount fails only those starts. See
+[Per-profile backend](../../docs-site/src/content/docs/reference/server-config.md#per-profile-backend).
+
 The NFS server is reachable only at its internal IP inside the hub's own VPC,
 so any broker configured with `shared_dir_storage: nfs` must run on that same
 VPC network (or one routed to it) to mount the share.

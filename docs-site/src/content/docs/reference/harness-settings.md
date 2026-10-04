@@ -121,13 +121,38 @@ hash before writing.
 scion harness-config list                 # local configs (add --hub to merge in Hub configs)
 scion harness-config show <name>          # details (local path/image, or Hub ID/status/source URL)
 scion harness-config reset <name>         # restore the global dir to embedded defaults
-scion harness-config upgrade [name]       # add missing support files / metadata
+scion harness-config upgrade [name]       # add missing support files / metadata, refresh provisioner scripts
 ```
 
-`reset` overwrites a config with the binary's embedded defaults. `upgrade` is non-destructive: it
-adds newly-required support files and merges missing metadata without clobbering your values (use
-`--dry-run` to preview, `--activate-script` to switch a config to container-script provisioning,
-`--force` to override). With no name, `upgrade` processes every config in the global directory.
+`reset` overwrites a config with the binary's embedded defaults. `upgrade` does not clobber your
+config values: it adds newly-required support files and merges missing metadata into
+`config.yaml` (use `--dry-run` to preview, `--activate-script` to switch a config to
+container-script provisioning, `--force` to override). It does refresh provisioner scripts, as
+described below. With no name, `upgrade` processes every config in the global directory.
+
+The provisioner scripts `provision.py`, `scion_harness.py`, and `capture_auth.py` belong to the
+harness bundle, not to you:
+
+- **Non-force seeding** (`scion init --machine`, hosted-mode `scion server` start, and Hub
+  system-init) writes only to the bundled config directories, such as `harness-configs/claude`.
+  It replaces these scripts on every run, the same way it treats `config.yaml`.
+- **`upgrade`** replaces them with the bundled copy when they differ, but only in a bundled
+  config: one whose directory name matches its harness. It backs up each script as
+  `<file>.bak.<timestamp>` first and reports it as a `refresh_file` action.
+
+Either way, provisioner fixes reach nodes that already have the config, and your other files
+are kept. Non-force seeding and non-force `upgrade` never touch two kinds of script:
+
+- Scripts in a **custom-named** config, such as one installed with
+  `harness-config install --name my-claude`.
+- Scripts that are **symlinks**. These are treated as user-managed and skipped (`upgrade`
+  reports a `skip_file` action).
+
+The force paths still replace the whole config, and they write through symlinks. These are
+`harness-config reset`, `upgrade --force`, and workstation-mode `scion server` start.
+
+To customize a provisioner, publish it as your own harness-config under a different name. Do
+not edit the bundled scripts in place.
 
 ### Deleting
 

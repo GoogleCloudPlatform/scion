@@ -814,7 +814,7 @@ func TestRun_PlacesHomeFilesAfterSyncBeforeStartupGate(t *testing.T) {
 				}
 				return "", nil
 			}
-			rt.homeSync = func(_ context.Context, _, _, src, dst string) error {
+			rt.homeSync = func(_ context.Context, _, _, src, dst string, _ []string) error {
 				mu.Lock()
 				cmds = append(cmds, "home-sync "+src+" "+dst)
 				mu.Unlock()

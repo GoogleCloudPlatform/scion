@@ -389,7 +389,7 @@ func authorizeCandidatePage[T any](ctx context.Context, identity Identity, items
 }
 
 func authorizedListCursor(created time.Time, id, binding string) string {
-	return base64.URLEncoding.EncodeToString([]byte(created.Format(time.RFC3339Nano) + "," + id + "," + binding))
+	return base64.URLEncoding.EncodeToString([]byte(created.UTC().Format(time.RFC3339Nano) + "," + id + "," + binding))
 }
 
 // scopedCursorBinding creates a cursor binding that includes the endpoint,
@@ -406,13 +406,20 @@ func scopedCursorBinding(endpoint string, filter any, identity Identity) string 
 	// Build the binding input: endpoint + filter + principal context.
 	// The principal context includes the identity type and unique identifier
 	// so that cursors are not transferable between principals or credential types.
+	// A nil identity, or a non-nil interface holding a nil pointer, carries
+	// no principal; both bind with an empty identity component, matching
+	// principalContextForIdentity, and no method is called on a nil receiver.
 	var identityKey string
-	if identity != nil {
+	if !isNilIdentity(identity) {
 		// Include the concrete credential type to distinguish session JWT
 		// from scoped UAT (same user ID, different authority ceiling).
 		switch id := identity.(type) {
 		case *ScopedUserIdentity:
-			identityKey = fmt.Sprintf("scoped_uat:%s:%s:%s", id.ID(), id.ScopedProjectID(), id.CredentialID())
+			// Keyed on the boundary kind as well as its project, so a cursor
+			// minted under a hub-boundary token never matches one minted
+			// under a project-boundary token, or the reverse.
+			boundary := id.Boundary()
+			identityKey = fmt.Sprintf("scoped_uat:%s:%s:%s:%s", id.ID(), boundary.Kind, boundary.ProjectID, id.CredentialID())
 		case AgentIdentity:
 			identityKey = fmt.Sprintf("agent_jwt:%s:%s:%s", id.ID(), id.ProjectID(), id.TokenID())
 		default:

@@ -41,6 +41,32 @@ const dispatchRollingTimeout = 90 * time.Second
 // to conclude the broker is unreachable.
 const dispatchDeleteTimeout = 15 * time.Second
 
+// deleteWaitBudgetKey carries an explicit deferred-delete wait budget on a
+// context (see withDeleteWaitBudget).
+type deleteWaitBudgetKey struct{}
+
+// withDeleteWaitBudget returns ctx carrying d as the wait budget for a
+// cross-node (deferred) delete dispatched under it. Only the delete engine
+// sets it, to the time remaining on its own dispatch budget, so the wait can
+// never fire before that budget (design ptone/scion#2483 §2.3.1). Every
+// other DispatchAgentDelete caller (project deletion, env-gather recreate,
+// reconcile, create-failure cleanup) passes no budget and keeps
+// dispatchDeleteTimeout, whatever its ctx deadline.
+func withDeleteWaitBudget(ctx context.Context, d time.Duration) context.Context {
+	return context.WithValue(ctx, deleteWaitBudgetKey{}, d)
+}
+
+// deleteWaitTimeoutFn computes the deferred-delete wait timeout for ctx: the
+// budget set by withDeleteWaitBudget when present and positive, else
+// dispatchDeleteTimeout. A package-level seam so tests can make the wait's
+// timer fire before the engine's ctx.
+var deleteWaitTimeoutFn = func(ctx context.Context) time.Duration {
+	if d, ok := ctx.Value(deleteWaitBudgetKey{}).(time.Duration); ok && d > 0 {
+		return d
+	}
+	return dispatchDeleteTimeout
+}
+
 // waitForAgentTransition waits for an agent's phase to reach a terminal state,
 // using a rolling timeout that resets on ANY AgentStatusEvent (phase, activity,
 // or detail change). The caller must subscribe to the agent's status events
