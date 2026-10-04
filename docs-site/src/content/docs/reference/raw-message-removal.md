@@ -20,7 +20,7 @@ retry: a client that still sends `raw` is refused, and nothing is delivered.
 | Hub `POST /api/v1/projects/:projectId/broadcast` with `raw` or `structured_message.raw` | Rejected with an older code | `422 raw_input_removed` |
 | Message Broker plugins: `POST /api/v1/broker/inbound` or `/inbound/routed` with `raw` or `message.raw` | Rejected with an older code | `422 raw_input_removed`, checked before topic validation and sender resolution |
 | A scheduled event or recurring schedule whose advanced `payload` JSON contains `raw` | Rejected with an older code | `422 raw_input_removed`; nothing is stored |
-| Runtime Broker `/message` (Hub-to-broker only) with `structured_message.raw` | Sent keystrokes | `422 raw_input_removed`; nothing reaches the agent |
+| Runtime Broker `/message` (Hub-to-broker only) with `raw` or `structured_message.raw` | Sent keystrokes | `422 raw_input_removed`; nothing reaches the agent |
 
 The field is rejected whatever its value (`true`, `false`, `null`, a wrong type or a malformed
 value) and however it is capitalized. A rejected request has no side effects: no message or
@@ -88,7 +88,7 @@ Differences to plan for:
 
 Hub, Runtime Broker and CLI must all be on a release that includes the keys operation. An older
 Hub answers `scion keys` with its own `404`, which the CLI reports as `hub_unsupported`; it never
-falls back to the message path. An older Runtime Broker behind a current Hub answers
+falls back to the message path. Against an older Runtime Broker, a current Hub answers
 `422 keys_unsupported`. Upgrade both rather than looking for a workaround.
 
 Message Broker plugins need no change unless they relied on the `raw` field. Field 11 (`raw`) of

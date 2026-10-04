@@ -252,7 +252,7 @@ func TestSendMessage_RetiredRawRejectionLogsAreContentFree(t *testing.T) {
 	}
 	// Positive control: the request log saw the rejected requests, so the
 	// leak check below is not vacuous.
-	if !strings.Contains(buf.String(), "422") {
+	if !strings.Contains(buf.String(), "status=422") {
 		t.Fatalf("request log did not record the rejected requests:\n%s", buf.String())
 	}
 	if strings.Contains(buf.String(), secret) {

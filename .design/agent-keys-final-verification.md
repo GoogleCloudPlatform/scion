@@ -13,7 +13,7 @@ ptone/scion#2191 to #2202) is complete, and keeps the deferred work separate.
 | --- | --- |
 | Branch | `scion/agent-keys-4-3` |
 | Base | Keys 4.2 head `957c3a2` (fork PR ptone/scion#2905, approved, submitted upstream, not yet merged) |
-| Tested revision | `266dbcc6` (4.2 head plus this task's two new tests and doc fixes; later commits on this branch change only this file) |
+| Tested revision | `266dbcc6` (4.2 head plus this task's two new tests and doc fixes). Later commits add this file and apply review nits (one tightened assertion in `TestSendMessage_RetiredRawRejectionLogsAreContentFree`, re-run and passing, plus doc wording). |
 | Environment | Hermetic only: unit tests, `httptest` servers, mock runtimes and a private disposable tmux server. No live Hub, deployed agent, `scion start` or `scion create` was used. |
 
 When 4.2 merges upstream, this branch is rebased onto upstream `main`, the matrix and gates are
@@ -155,7 +155,7 @@ That command now fails, so the guidance should move to `scion keys <agent> "0"` 
 These are not blockers recorded by any core review, but the issue owner should see them before
 calling core complete:
 
-- ptone/scion#2721 (fix ptone/scion#2722, open): in an unlinked local project, the created-agent
+- ptone/scion#2721 (fork fix ptone/scion#2722; upstream fix GoogleCloudPlatform/scion#2349 is green and in the merge queue; open, pending merge, and core closes only after it lands): in an unlinked local project, the created-agent
   on-disk scan in `agent.List` ignores the `scion.name` filter, so `scion keys <name>` can report
   an ambiguity, or pick a created-only agent that was not requested. It is still present at the
   tested revision (`pkg/agent/list.go`). Local mode only, with no authorization boundary
