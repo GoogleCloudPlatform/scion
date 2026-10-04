@@ -1380,6 +1380,28 @@ function navigateTo(path: string): void {
   void renderRoute(path);
 }
 
+/**
+ * Rewrites the current URL to an equivalent app path without rendering
+ * anything, keeping its query and hash, for a page that already shows what
+ * the new path names. Records the path as the active shell's rendered path,
+ * as a render would, so returning to it (e.g. from the terminal workspace)
+ * still reuses the page. Resolves once the shell has re-rendered for it.
+ */
+function replaceRoute(path: string): Promise<void> {
+  const search = window.location.search;
+  window.history.replaceState(
+    window.history.state,
+    '',
+    browserPath(path) + search + window.location.hash
+  );
+  const shell = activeShell?.element as
+    | (HTMLElement & { currentPath: string; updateComplete?: Promise<unknown> })
+    | undefined;
+  if (!shell) return Promise.resolve();
+  shell.currentPath = search ? `${path}${search}` : path;
+  return Promise.resolve(shell.updateComplete).then(() => undefined);
+}
+
 // Initialize when DOM is ready
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', () => {
@@ -1394,4 +1416,4 @@ if (document.readyState === 'loading') {
 export { openTerminal, terminalHref } from './open-terminal.js';
 
 // Export for use in components and tests
-export { getInitialData, navigateTo, stateManager };
+export { getInitialData, navigateTo, replaceRoute, stateManager };
