@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -205,7 +206,7 @@ func TestRestart_DeleteClaimBetweenLegsRollsBackOwnReservation(t *testing.T) {
 
 	disp.failStart = true
 	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+created.Agent.ID+"/restart", nil)
-	requireDeleteInProgress(t, rec)
+	requireIntentDeleteInProgress(t, rec, created.Agent.ID)
 	require.EqualValues(t, 1, disp.startCount.Load(), "the start leg was attempted")
 	assert.EqualValues(t, 0, brokerReservationCount(t, s, brokerID), "the restart's own reservation is rolled back")
 }
@@ -265,4 +266,71 @@ func TestRunIntent_DeleteClaimAfterGateRefusesSyncFinalize(t *testing.T) {
 	got, err := base.GetAgent(context.Background(), agent.ID)
 	require.NoError(t, err)
 	assert.Equal(t, store.RunIntentStopped, got.RunIntent, "intent is not left running")
+}
+
+// The managed-agent lifecycle writes the running intent before it acts; a
+// delete claim refuses it with 409 delete_in_progress (details.agentId)
+// and the intent stays stopped (ptone/scion#2550, round 7 nit-3).
+func TestRunIntent_DeleteClaimAfterGateRefusesManagedStart(t *testing.T) {
+	managedBackendMu.Lock()
+	prevBackend := managedBackendInst
+	managedBackendInst = stubManagedAgentBackend{}
+	managedBackendMu.Unlock()
+	t.Cleanup(func() {
+		managedBackendMu.Lock()
+		managedBackendInst = prevBackend
+		managedBackendMu.Unlock()
+	})
+
+	srv, base := testServer(t)
+	ctx := context.Background()
+	agent := setupBrokerAgentInPhase(t, base, "ri-claim-managed", state.PhaseStopped)
+	agent.Runtime = ManagedRuntimePrefix + "stub"
+	require.NoError(t, base.UpdateAgent(ctx, agent))
+	_, err := base.SetRunIntent(ctx, agent.ID, store.RunIntentStopped)
+	require.NoError(t, err)
+	srv.store = preClaimReadStore{Store: base}
+	seedAgentDeletion(t, base, agent.ID, seedLiveDeleting)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
+	requireIntentDeleteInProgress(t, rec, agent.ID)
+	got, err := base.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.RunIntentStopped, got.RunIntent, "intent is not left running")
+	assert.Equal(t, string(state.PhaseStopped), got.Phase)
+}
+
+// claimOnRunningIntentStore lands a delete claim just before a running
+// intent is written: for a fresh create, the window between the row's
+// creation and its running-intent write.
+type claimOnRunningIntentStore struct {
+	store.Store
+	t *testing.T
+}
+
+func (s claimOnRunningIntentStore) SwapRunIntent(ctx context.Context, agentID string, intent store.RunIntent) (store.RunIntent, time.Time, error) {
+	if intent == store.RunIntentRunning {
+		seedAgentDeletion(s.t, s.Store, agentID, seedLiveDeleting)
+	}
+	return s.Store.SwapRunIntent(ctx, agentID, intent)
+}
+
+// A fresh create whose running-intent write meets a delete claim answers
+// 409 delete_in_progress (details.agentId) with no create dispatch
+// (ptone/scion#2550, round 7 nit-3).
+func TestRunIntent_DeleteClaimRefusesFreshCreate(t *testing.T) {
+	disp := newSiteIntentDispatcher(nil)
+	srv, base, project := setupCreateAgentServer(t, disp)
+	disp.s = base
+	srv.store = claimOnRunningIntentStore{Store: base, t: t}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: "ri-claim-fresh", ProjectID: project.ID, Task: "work",
+	})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	var body ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, ErrCodeDeleteInProgress, body.Error.Code)
+	assert.NotEmpty(t, body.Error.Details["agentId"], "details.agentId")
+	assert.Empty(t, disp.intents("create"), "no create dispatch")
 }
