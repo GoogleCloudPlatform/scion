@@ -125,7 +125,10 @@ type InitRunOptions struct {
 	// command) always leaves this false — that behaviour is unchanged. A
 	// caller whose network path can't route that traffic sets this to true.
 	DisablePortForwarding bool
-	// DisableConduit keeps the port-forward tunnel even when the hub advertises conduit (see portForwarding).
+
+	// DisableConduit keeps the legacy port-forward tunnel even when the hub
+	// advertises conduit (SCION_HUB_CONDUIT=true). The zero value dials the
+	// conduit endpoint when, and only when, the hub advertises it.
 	DisableConduit bool
 
 	// DisableReExec skips RunInit's environ-purge re-exec (see
