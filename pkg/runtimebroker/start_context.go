@@ -1360,9 +1360,8 @@ func validateMountedWorktree(workspacePath, base string) error {
 // provision.ProvisionShared makes internally (its "sentinel exists" step). A
 // caller that already knows a worktree it must not touch exists uses this to
 // decide not to call ProvisionShared at all when either is missing —
-// ProvisionShared's own self-heal (gitCloneWorkspace's removeDirContents)
-// assumes no worktree can exist yet whenever the sentinel is missing, and
-// would otherwise wipe every worktree under the shared base.
+// ProvisionShared clones whenever the sentinel is missing, which assumes no
+// worktree can exist yet under the shared base.
 func worktreeBaseIsProvisioned(in provision.ProvisionInput) bool {
 	sentinelDir := in.SentinelDir
 	if sentinelDir == "" {
@@ -1476,10 +1475,9 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 	}
 
 	// When a worktree that must not be touched already exists, ProvisionShared
-	// must never be allowed to reach its own self-heal path: gitCloneWorkspace's
-	// removeDirContents can fire once the provisioning sentinel is missing, and
-	// wipes every worktree under the shared base — including this one — while
-	// ProvisionShared still returns success. Fail closed instead whenever
+	// must never be allowed to re-run its clone step, which runs once the
+	// provisioning sentinel is missing and assumes no worktree exists under
+	// the shared base yet. Fail closed instead whenever
 	// either the sentinel or the shared base's .git is missing, which is a
 	// superset of that trigger condition.
 	if preExisted && !worktreeBaseIsProvisioned(result.ProvisionInput) {

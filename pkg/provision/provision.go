@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -410,7 +411,7 @@ func ProvisionShared(in ProvisionInput) error {
 	// — ensureWorktree must run under it even when the base clone is already
 	// done — so only SharedPlain can skip locking entirely here.
 	if in.Mode != store.SharingModeWorktreePerAgent {
-		if _, err := os.Stat(sentinelPath); err == nil {
+		if _, err := os.Stat(sentinelPath); err == nil && !markedWorkspaceNeedsClone(in) {
 			slog.Debug("ProvisionShared: workspace already provisioned (sentinel exists, pre-lock)",
 				"project_id", in.ProjectID, "sentinel", sentinelPath)
 			return nil
@@ -441,6 +442,9 @@ func ProvisionShared(in ProvisionInput) error {
 		// Already provisioned — skip to worktree setup if needed.
 		slog.Debug("ProvisionShared: workspace already provisioned (sentinel exists)",
 			"project_id", in.ProjectID, "sentinel", sentinelPath)
+		if markedWorkspaceNeedsClone(in) {
+			return cloneIntoMarkedWorkspace(ctx, in, held.stillOwned, sentinelDir)
+		}
 		if in.MountedWorktree && in.Mode == store.SharingModeWorktreePerAgent {
 			// The shared checkout may have been provisioned in another mode:
 			// add what worktrees need, leaving its contents and HEAD alone.
@@ -925,7 +929,7 @@ const provisionLockEvictedAtFile = "evicted-at"
 // used throughout the lock machinery below, so tests can simulate a failure
 // at exactly the owner-marker-write point — a real disk-full/read-only-mount
 // fault isn't something a hermetic unit test can portably trigger otherwise.
-// moveRenameFile is the same idea for gitCloneViaTempDir's clone-move step
+// moveRenameFile is the same idea for gitCloneWorkspace's clone-move step
 // specifically, kept as its own variable so a test simulating a move
 // failure can't also perturb the lock's own rename calls running around it.
 // Production code never reassigns any of these.
@@ -1107,7 +1111,7 @@ var timeNow = time.Now
 // specifically that it no longer holds the lock) until one of those
 // actually happens. stillOwned()
 // is checked before the sentinel write and before the clone-move step in
-// gitCloneViaTempDir; a direct gitCloneDirect clone and ensureWorktree's
+// gitCloneWorkspace; the clone itself and ensureWorktree's
 // git calls run under the lock-derived ctx (cancelled once the heartbeat
 // notices) but do not re-verify ownership synchronously mid-operation. A
 // holder partition longer than its bound, healing after one of those steps
@@ -1390,12 +1394,11 @@ func garbageCollectLockLitter(dir string) {
 // once old enough.
 //
 // The staging directory's name deliberately starts with provisionFileLockName
-// (not some unrelated prefix): gitCloneViaTempDir's pre-clone stray-content
-// clear (removeDirContentsExceptPrefix) exempts anything under that prefix
-// because the live lock and its evicted/staging siblings need to survive it — a staging
-// directory with a different prefix would NOT be exempt, and one caller's
-// in-progress create here could be deleted out from under it by a
-// DIFFERENT, concurrently-running caller's clone-prep clear. Sharing the
+// (not some unrelated prefix): gitCloneWorkspace's pre-clone workspace
+// check (unexpectedWorkspaceEntries) accepts anything under that prefix
+// because the live lock and its evicted/staging siblings sit next to the
+// clone — a staging directory with a different prefix would make a
+// concurrently-running caller's clone refuse the workspace. Sharing the
 // prefix closes that gap for free. provisionLockStagingPattern is the single
 // source of truth for that prefix, shared with tests that need to construct
 // or recognize a staging directory the same way this function does.
@@ -2038,130 +2041,322 @@ func lockLooksAbandoned(dir, path string) bool {
 	return now.Sub(last) > provisionLockStaleAfter
 }
 
-// gitCloneWorkspace performs the git clone into the workspace directory.
-// It clones directly into in.Resolved.HostPath (gitCloneDirect) unless the
-// filesystem-fallback lock's own on-disk marker would sit inside that exact
-// directory — which only happens when there is no store.AdvisoryLocker AND
-// the sentinel directory equals the workspace directory itself (the k8s init
-// container's configuration: SentinelDir is set to the workspace dir because
-// only it is mounted, not its parent — see ProvisionInput.SentinelDir's
-// doc). In that one case, `git clone` would refuse the target outright
-// (it must be completely empty, lock marker included), so
-// gitCloneViaTempDir routes around it by cloning into a guaranteed-empty
-// scratch subdirectory and moving the result up.
-//
-// This is deliberately narrower than "no Locker" alone: the broker's own
-// host-side worktree-per-agent flow and Cloud Run's provisioning also run
-// with in.Locker == nil today, but both use a
-// sentinel directory that is the workspace's PARENT, so their lock marker
-// (once the fallback lock applies to them too) never lands inside the clone
-// target — they clone exactly as before this change.
-// stillOwned reports whether the caller still holds the provisioning lock;
-// nil means "not applicable" (e.g. the store.AdvisoryLocker path never
-// reaches gitCloneViaTempDir at all, since its lock never lives inside the
-// clone target — see gitCloneWorkspace's doc).
-func gitCloneWorkspace(ctx context.Context, in ProvisionInput, stillOwned func() bool) error {
-	dest := in.Resolved.HostPath
-	lockInsideDest := in.Locker == nil && resolveSentinelDir(in) == dest
-	if !lockInsideDest {
-		return gitCloneDirect(ctx, in)
+// markedWorkspaceNeedsClone reports whether a shared-plain git workspace that
+// already has its provisioning marker is still empty and should be cloned.
+// A workspace provisioned before the Kubernetes init container received the
+// project's clone settings has the marker but nothing in it. Only an empty
+// workspace qualifies: it holds no user data, so cloning into it under the
+// lock is safe. A workspace with any entry other than Scion's own
+// provisioning artifacts (provisioningArtifact) is left as it is.
+func markedWorkspaceNeedsClone(in ProvisionInput) bool {
+	if in.Mode != store.SharingModeSharedPlain || in.GitClone == nil || in.GitClone.URL == "" {
+		return false
 	}
-	return gitCloneViaTempDir(ctx, in, stillOwned)
+	entries, err := os.ReadDir(in.Resolved.HostPath)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !provisioningArtifact(e) {
+			return false
+		}
+	}
+	return true
 }
 
-// gitCloneViaTempDir clones into a freshly created, uniquely-named scratch
-// subdirectory of in.Resolved.HostPath (always empty, regardless of what
-// else — e.g. the filesystem-fallback lock marker — already lives in the
-// real target) and moves the result up into the real target afterward.
-func gitCloneViaTempDir(ctx context.Context, in ProvisionInput, stillOwned func() bool) error {
+// provisioningArtifact reports whether e is one of Scion's own provisioning
+// artifacts in a workspace, and nothing else:
+//   - the provisioning marker file (ProvisionSentinelFile);
+//   - the filesystem-fallback lock directory (provisionFileLockName) and its
+//     siblings "<lock>.stage-*", "<lock>.evict-*" and "<lock>.clock-probe";
+//   - a scratch directory left by an interrupted clone (cloneTempDirPrefix).
+func provisioningArtifact(e os.DirEntry) bool {
+	name := e.Name()
+	switch {
+	case name == ProvisionSentinelFile:
+		return e.Type().IsRegular()
+	case name == provisionFileLockName || strings.HasPrefix(name, provisionFileLockName+"."):
+		return true
+	case strings.HasPrefix(name, cloneTempDirPrefix):
+		return e.IsDir() && e.Type()&os.ModeSymlink == 0
+	default:
+		return false
+	}
+}
+
+// cloneIntoMarkedWorkspace clones into a marked but empty shared-plain
+// workspace (markedWorkspaceNeedsClone) and chowns the result. The caller
+// holds the provisioning lock and has re-checked the marker under it. The
+// marker is already present, so nothing is written for it; a failed clone
+// leaves the workspace as empty as it was, and the next start tries again.
+func cloneIntoMarkedWorkspace(ctx context.Context, in ProvisionInput, stillOwned func() bool, sentinelDir string) error {
+	slog.Info("ProvisionShared: workspace has a provisioning marker but is empty, cloning",
+		"project_id", in.ProjectID, "host_path", in.Resolved.HostPath)
+	if err := gitCloneWorkspace(ctx, in, stillOwned); err != nil {
+		return fmt.Errorf("ProvisionShared: git clone: %w", err)
+	}
+	uid, gid := resolveUID(in), resolveGID(in)
+	if err := chownProjectTree(ctx, in.Resolved.HostPath, sentinelDir, uid, gid); err != nil {
+		if in.RequireChownSuccess {
+			return fmt.Errorf("ProvisionShared: chown %s to %d:%d: %w", in.Resolved.HostPath, uid, gid, err)
+		}
+		slog.Warn("ProvisionShared: chown failed (non-fatal, may lack privileges)",
+			"project_id", in.ProjectID, "path", in.Resolved.HostPath, "uid", uid, "gid", gid, "error", err)
+	}
+	return nil
+}
+
+// cloneTempDirPrefix names the scratch directory a clone attempt creates
+// under the workspace. Nothing else creates entries with this prefix, so a
+// leftover one is the remains of an earlier, interrupted attempt and is
+// removed before the next one.
+const cloneTempDirPrefix = ".scion-clone-"
+
+// gitCloneWorkspace clones in.GitClone into in.Resolved.HostPath. The caller
+// holds the provisioning lock and has already checked that the workspace has
+// no provisioning marker.
+//
+// The workspace is often a mount point (a k8s PVC subPath), so it cannot be
+// swapped out as a whole. The clone runs in a fresh scratch directory under
+// the workspace, and its entries are then renamed into place with .git last
+// (moveDirContentsUp). A clone that fails, or stops before the rename, leaves
+// at most that scratch directory behind. The workspace's own content is never
+// cleared:
+//   - a .git already in the workspace means an earlier clone finished (.git
+//     is always renamed last), so it is reused;
+//   - leftover scratch directories from an earlier attempt are removed;
+//   - any other entry, apart from the provisioning lock's own files, the
+//     mount points of in-workspace shared dirs (.scion-volumes) and an empty
+//     worktrees directory, makes the clone fail with those entries named.
+//     Content the clone did not create is left for an operator to move.
+//
+// stillOwned reports whether the caller still holds the provisioning lock;
+// nil means not applicable (the store.AdvisoryLocker path).
+func gitCloneWorkspace(ctx context.Context, in ProvisionInput, stillOwned func() bool) error {
 	dest := in.Resolved.HostPath
 
-	// A prior attempt may have completed the clone directly into dest
-	// before this mechanism existed, or partially completed a later step
-	// (e.g. chown) after a fully successful clone — either way, a .git dir
-	// already there means there is a usable prior clone to reuse, exactly
-	// gitCloneDirect's own self-heal rule for the Locker-present path.
 	if _, statErr := os.Stat(filepath.Join(dest, ".git")); statErr == nil {
 		slog.Warn("ProvisionShared: workspace already has a .git dir, reusing prior clone",
 			"project_id", in.ProjectID, "path", dest)
 		return nil
 	}
 
-	// dest may hold stray content from an older, incomplete attempt (not
-	// just the lock marker and its stage/evict siblings) — mirror
-	// gitCloneDirect's own protection: refuse to touch a non-empty
-	// "worktrees" dir (WorktreePerAgent mode keeps every agent's checkout
-	// there, unrelated to this clone), and otherwise clear stray entries so
-	// provisioning self-heals — but never remove anything under the lock's
-	// own name, which is still legitimately in use for the duration of this
-	// call: the live lock itself, a concurrent caller's in-progress
-	// "<lock>.stage-*" staging directory, or an "<lock>.evict-<id>" entry
-	// awaiting garbage collection.
-	if nonEmpty, checkErr := dirHasEntries(filepath.Join(dest, "worktrees")); checkErr != nil || nonEmpty {
-		return fmt.Errorf("refusing to clear %s before clone: checking worktrees failed or found it non-empty (err=%v, nonEmpty=%v)",
-			dest, checkErr, nonEmpty)
+	if err := removeCloneTempDirs(dest); err != nil {
+		return err
 	}
-	if err := removeDirContentsExceptPrefix(dest, provisionFileLockName); err != nil {
-		return fmt.Errorf("clear stray contents of %s before clone: %w", dest, err)
+	unexpected, err := unexpectedWorkspaceEntries(dest)
+	if err != nil {
+		return err
+	}
+	if len(unexpected) > 0 {
+		return fmt.Errorf("workspace %s is not empty but has no provisioning marker and no .git (found %s); "+
+			"refusing to clone into it or clear it: move those entries out of the workspace and start the agent again",
+			dest, strings.Join(unexpected, ", "))
 	}
 
-	tmpDir, err := os.MkdirTemp(dest, ".scion-clone-*")
+	tmpDir, err := os.MkdirTemp(dest, cloneTempDirPrefix+"*")
 	if err != nil {
 		return fmt.Errorf("create temp clone dir under %s: %w", dest, err)
 	}
 	tmpIn := in
 	tmpIn.Resolved.HostPath = tmpDir
-	if cloneErr := gitCloneDirect(ctx, tmpIn); cloneErr != nil {
+	if cloneErr := runGitClone(ctx, tmpIn); cloneErr != nil {
 		_ = os.RemoveAll(tmpDir)
 		return cloneErr
 	}
 
 	// Re-verify ownership immediately before the irreversible move into
 	// dest: the clone above can take a long time, long enough for this
-	// holder to have silently lost the lock to
-	// a reclaimer since the heartbeat's last check. Moving cloned content
-	// into dest while a second provisioner also believes it owns the lock
-	// would let both finish and contend over the sentinel write — a
-	// synchronous check right here closes that gap.
+	// holder to have silently lost the lock to a reclaimer since the
+	// heartbeat's last check. Moving cloned content into dest while a second
+	// provisioner also believes it owns the lock would let both finish and
+	// contend over the sentinel write.
 	if stillOwned != nil && !stillOwned() {
 		_ = os.RemoveAll(tmpDir)
-		return fmt.Errorf("gitCloneViaTempDir: lost the provisioning lock during clone; refusing to move cloned content into %s", dest)
+		return fmt.Errorf("gitCloneWorkspace: lost the provisioning lock during clone; refusing to move cloned content into %s", dest)
 	}
 
 	if err := moveDirContentsUp(tmpDir, dest); err != nil {
-		// Roll back completely rather than leave a partial clone: dest must
-		// never end up with a .git dir but missing working-tree files, which
-		// this function's own ".git present -> reuse" self-heal check above
-		// would otherwise mistake for a valid completed clone on retry.
+		// moveDirContentsUp has already removed what it moved; drop the
+		// rest of this attempt's scratch directory too.
 		_ = os.RemoveAll(tmpDir)
 		return fmt.Errorf("move cloned contents from %s to %s: %w", tmpDir, dest, err)
 	}
 
-	// Once dest has a real .git, exclude the lock's own on-disk footprint
-	// (the live lock, its clock-probe file, and any stage/evict leftovers)
-	// from git's view: every subsequent agent start for a WorktreePerAgent
-	// project still takes this same lock for ensureWorktree even after the
-	// base clone is done, and without this, each one would transiently show
-	// up in `git status` / get swept up by `git add -A` inside the shared
-	// checkout every agent works in. One-time,
-	// since .git/info/exclude persists for the life of the clone.
-	//
-	// Anchored to the repo root with a leading "/" — the lock only ever
-	// lives directly in the sentinel dir, never nested (see
-	// chownProjectTree's doc on the identical constraint) — so an untracked
-	// file elsewhere in the repo that merely happens to share the lock's
-	// name prefix is never hidden from `git status` or swept into `git add
-	// -A`. (.git/info/exclude has no effect on already-tracked files
-	// either way.)
-	if err := appendGitExclude(dest, "/"+provisionFileLockName); err != nil {
-		slog.Warn("gitCloneViaTempDir: failed to exclude lock marker from git status (non-fatal)",
-			"project_id", in.ProjectID, "path", dest, "error", err)
-	} else if err := appendGitExclude(dest, "/"+provisionFileLockName+".*"); err != nil {
-		slog.Warn("gitCloneViaTempDir: failed to exclude lock marker variants from git status (non-fatal)",
-			"project_id", in.ProjectID, "path", dest, "error", err)
+	// When the filesystem-fallback lock lives in the workspace itself (the
+	// k8s init container, where only the workspace is mounted), keep its
+	// on-disk footprint (the live lock, its clock-probe file and any
+	// stage/evict leftovers) out of git's view: every later start of a
+	// worktree-per-agent project takes the same lock inside the shared
+	// checkout. Anchored with a leading "/", since the lock only ever lives
+	// directly in the sentinel dir, so an untracked file elsewhere that
+	// shares the prefix stays visible.
+	if in.Locker == nil && resolveSentinelDir(in) == dest {
+		if err := appendGitExclude(dest, "/"+provisionFileLockName); err != nil {
+			slog.Warn("gitCloneWorkspace: failed to exclude lock marker from git status (non-fatal)",
+				"project_id", in.ProjectID, "path", dest, "error", err)
+		} else if err := appendGitExclude(dest, "/"+provisionFileLockName+".*"); err != nil {
+			slog.Warn("gitCloneWorkspace: failed to exclude lock marker variants from git status (non-fatal)",
+				"project_id", in.ProjectID, "path", dest, "error", err)
+		}
+	}
+	// The marker can sit in the workspace too (an init container with only
+	// the workspace mounted): keep it out of git's view as well.
+	if resolveSentinelDir(in) == dest {
+		if err := appendGitExclude(dest, "/"+ProvisionSentinelFile); err != nil {
+			slog.Warn("gitCloneWorkspace: failed to exclude the provisioning marker from git status (non-fatal)",
+				"project_id", in.ProjectID, "path", dest, "error", err)
+		}
 	}
 
 	return os.Remove(tmpDir)
+}
+
+// removeCloneTempDirs removes the scratch directories (cloneTempDirPrefix)
+// that earlier, interrupted clone attempts left in dir. Only directories are
+// removed; a regular file or symlink with that name is left in place and is
+// then reported by unexpectedWorkspaceEntries.
+func removeCloneTempDirs(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("read dir %s: %w", dir, err)
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), cloneTempDirPrefix) || e.Type()&os.ModeType != os.ModeDir {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		slog.Warn("ProvisionShared: removing scratch directory left by an earlier clone attempt", "path", p)
+		if err := os.RemoveAll(p); err != nil {
+			return fmt.Errorf("remove leftover clone dir %s: %w", p, err)
+		}
+	}
+	return nil
+}
+
+// unexpectedWorkspaceEntries returns the names of the entries in dir that a
+// clone may not be placed next to: everything except the provisioning lock's
+// own files, the provisioning marker, the .scion-volumes directory (mount points of in-workspace
+// shared dirs, created before the pod starts) and an empty worktrees
+// directory. The names are sorted.
+func unexpectedWorkspaceEntries(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read dir %s: %w", dir, err)
+	}
+	var unexpected []string
+	for _, e := range entries {
+		name := e.Name()
+		isDir := e.Type()&os.ModeType == os.ModeDir
+		switch {
+		case name == provisionFileLockName || strings.HasPrefix(name, provisionFileLockName+"."):
+			continue
+		case name == ProvisionSentinelFile && e.Type().IsRegular():
+			// Only present on the marked-but-empty path
+			// (cloneIntoMarkedWorkspace); the marker is kept.
+			continue
+		case name == ".scion-volumes" && isDir:
+			continue
+		case name == "worktrees" && isDir:
+			nonEmpty, checkErr := dirHasEntries(filepath.Join(dir, name))
+			if checkErr != nil {
+				return nil, fmt.Errorf("check %s: %w", filepath.Join(dir, name), checkErr)
+			}
+			if !nonEmpty {
+				continue
+			}
+		}
+		unexpected = append(unexpected, name)
+	}
+	return unexpected, nil
+}
+
+// runGitClone runs git clone into in.Resolved.HostPath, which must be empty
+// or absent. The clone runs under ctx via exec.CommandContext so that a
+// cancelled or timed-out context stops the git process. Interactive prompts
+// are disabled. The returned error names the repository without credentials,
+// query string or fragment, and says when the failure is a missing or
+// rejected credential.
+func runGitClone(ctx context.Context, in ProvisionInput) error {
+	gc := in.GitClone
+	args := []string{"clone"}
+
+	// Depth: nil/omitted = shallow depth 1, 0 = full clone (no --depth), >0 = that depth.
+	depth := 1
+	if gc.Depth != nil {
+		depth = *gc.Depth
+	}
+	if depth > 0 {
+		args = append(args, "--depth", fmt.Sprintf("%d", depth))
+	}
+	if gc.Branch != "" {
+		args = append(args, "--branch", gc.Branch)
+	}
+	args = append(args, gc.URL, in.Resolved.HostPath)
+
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	output, err := cmd.CombinedOutput()
+	if err == nil {
+		return nil
+	}
+	return cloneError(gc.URL, string(output), err)
+}
+
+// cloneError builds the error for a failed clone of rawURL. git's output is
+// stripped of the URL's credentials before it is included.
+func cloneError(rawURL, output string, runErr error) error {
+	safeURL := redactCloneURL(rawURL)
+	detail := strings.TrimSpace(sanitizeCloneOutput(output, rawURL))
+	if detail == "" && runErr != nil {
+		detail = runErr.Error()
+	}
+	switch util.ClassifyGitError(detail).Kind {
+	case util.GitErrAuth:
+		return fmt.Errorf("git clone %s: the repository needs credentials, and workspace provisioning has none "+
+			"(it clones without a git token, so a private repository cannot be cloned here): %s", safeURL, detail)
+	case util.GitErrNotFound:
+		return fmt.Errorf("git clone %s: repository or branch not found "+
+			"(a private repository also reports this when no credentials are given): %s", safeURL, detail)
+	default:
+		return fmt.Errorf("git clone %s: %s", safeURL, detail)
+	}
+}
+
+// redactCloneURL returns rawURL without userinfo, query string or fragment,
+// any of which can carry a token. An unparseable URL is never echoed.
+func redactCloneURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "<unparseable clone URL>"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
+}
+
+// sanitizeCloneOutput removes rawURL's credentials, query string and
+// fragment from text (git's own output can echo the URL).
+func sanitizeCloneOutput(text, rawURL string) string {
+	if rawURL == "" || text == "" {
+		return text
+	}
+	out := strings.ReplaceAll(text, rawURL, redactCloneURL(rawURL))
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return out
+	}
+	if u.User != nil && u.User.String() != "" {
+		out = strings.ReplaceAll(out, u.User.String()+"@", "")
+	}
+	if u.RawQuery != "" {
+		out = strings.ReplaceAll(out, "?"+u.RawQuery, "")
+	}
+	if u.Fragment != "" {
+		out = strings.ReplaceAll(out, "#"+u.Fragment, "")
+	}
+	return out
 }
 
 // moveDirContentsUp moves every entry from src into dest via os.Rename,
@@ -2195,8 +2390,7 @@ func moveDirContentsUp(src, dest string) error {
 	var moved []string
 	// rollback undoes every move already applied to dest, so a caller that
 	// hits an error mid-move gets dest back to exactly how it looked before
-	// this call started (modulo whatever gitCloneViaTempDir's own stray-
-	// content clear already removed) — belt-and-suspenders on top of the
+	// this call started — belt-and-suspenders on top of the
 	// .git-last ordering below, which is what actually guarantees dest can
 	// never look like a valid-but-corrupt clone.
 	rollback := func() {
@@ -2228,132 +2422,6 @@ func moveDirContentsUp(src, dest string) error {
 		if err := move(gitEntryName); err != nil {
 			rollback()
 			return fmt.Errorf("move %s to %s: %w", gitEntryName, dest, err)
-		}
-	}
-	return nil
-}
-
-// gitCloneDirect performs the git clone directly into in.Resolved.HostPath.
-// The clone runs under ctx via exec.CommandContext so that a cancelled/
-// timed-out context kills the git process instead of leaving it orphaned.
-// Callers must ensure in.Resolved.HostPath is empty (or absent) before
-// calling — that's git clone's own requirement, and gitCloneWorkspace's two
-// paths (gitCloneDirect / gitCloneViaTempDir) each guarantee it a different
-// way.
-func gitCloneDirect(ctx context.Context, in ProvisionInput) error {
-	gc := in.GitClone
-
-	runClone := func() ([]byte, error) {
-		args := []string{"clone"}
-
-		// Set depth: nil/omitted = shallow depth 1, 0 = full clone (no --depth), >0 = that depth.
-		depth := 1 // default: shallow
-		if gc.Depth != nil {
-			depth = *gc.Depth
-		}
-		if depth > 0 {
-			args = append(args, "--depth", fmt.Sprintf("%d", depth))
-		}
-		// depth == 0 means full clone: no --depth flag
-
-		// Set branch if specified.
-		if gc.Branch != "" {
-			args = append(args, "--branch", gc.Branch)
-		}
-
-		// Clone into the workspace directory.
-		args = append(args, gc.URL, in.Resolved.HostPath)
-
-		cmd := exec.CommandContext(ctx, "git", args...)
-		cmd.Env = append(os.Environ(),
-			// Disable interactive prompts during provisioning.
-			"GIT_TERMINAL_PROMPT=0",
-		)
-		return cmd.CombinedOutput()
-	}
-
-	output, err := runClone()
-	if err == nil {
-		return nil
-	}
-
-	// If the workspace is not empty, the clone fails with "already exists and
-	// is not an empty directory". This happens after a partially-failed prior
-	// attempt (the sentinel was never written, else we'd have skipped cloning).
-	if strings.Contains(string(output), "already exists and is not an empty directory") {
-		// If .git is present a prior clone completed — reuse it as-is.
-		if _, statErr := os.Stat(filepath.Join(in.Resolved.HostPath, ".git")); statErr == nil {
-			slog.Warn("ProvisionShared: workspace not empty but .git present, reusing prior clone",
-				"project_id", in.ProjectID, "path", in.Resolved.HostPath)
-			return nil
-		}
-
-		// No .git — the prior attempt died mid-clone, leaving partial contents
-		// behind. Clear the directory so provisioning self-heals on retry
-		// without manual intervention, then clone once more. Refuse when a
-		// "worktrees" subdirectory already holds anything: for
-		// worktree-per-agent, that directory holds every agent's checkout,
-		// and clearing the base out from under them would destroy work that
-		// has nothing to do with this clone's own failure.
-		if nonEmpty, checkErr := dirHasEntries(filepath.Join(in.Resolved.HostPath, "worktrees")); checkErr != nil || nonEmpty {
-			return fmt.Errorf("git clone failed (dir not empty) and checking %s/worktrees before clearing the shared base failed or found it non-empty (err=%v, nonEmpty=%v); refusing to clear it",
-				in.Resolved.HostPath, checkErr, nonEmpty)
-		}
-		slog.Warn("ProvisionShared: workspace not empty and no .git (incomplete prior clone), cleaning and retrying",
-			"project_id", in.ProjectID, "path", in.Resolved.HostPath)
-		if cleanErr := removeDirContents(in.Resolved.HostPath); cleanErr != nil {
-			return fmt.Errorf("git clone failed (dir not empty) and cleanup of %s failed: %w",
-				in.Resolved.HostPath, cleanErr)
-		}
-		if output, err = runClone(); err == nil {
-			return nil
-		}
-		return fmt.Errorf("git clone %s (after cleanup retry): %s", gc.URL, strings.TrimSpace(string(output)))
-	}
-
-	return fmt.Errorf("git clone %s: %s", gc.URL, strings.TrimSpace(string(output)))
-}
-
-// removeDirContents removes every entry inside dir while leaving dir itself
-// in place. The workspace directory is frequently a mount point (e.g. a k8s
-// PVC subPath), so it cannot be removed outright — only its contents can be
-// cleared. gitCloneViaTempDir uses removeDirContentsExceptPrefix instead,
-// which additionally exempts the fallback lock's own on-disk footprint.
-func removeDirContents(dir string) error {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return fmt.Errorf("read dir %s: %w", dir, err)
-	}
-	for _, e := range entries {
-		p := filepath.Join(dir, e.Name())
-		if err := os.RemoveAll(p); err != nil {
-			return fmt.Errorf("remove %s: %w", p, err)
-		}
-	}
-	return nil
-}
-
-// removeDirContentsExceptPrefix removes every entry in dir whose name does
-// not start with prefix, leaving dir itself in place. Used to clear stray
-// content around the fallback file lock (gitCloneViaTempDir): the live lock
-// directory is always named exactly prefix, but a concurrent caller's
-// in-progress "<prefix>.stage-*" staging directory, an "<prefix>.evict-<id>"
-// entry awaiting garbage collection, or the "<prefix>.clock-probe" file are
-// all also either legitimately in use or harmless litter under that same
-// prefix — never something a clone retry should delete out from under
-// whichever caller is using it.
-func removeDirContentsExceptPrefix(dir, prefix string) error {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return fmt.Errorf("read dir %s: %w", dir, err)
-	}
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), prefix) {
-			continue
-		}
-		p := filepath.Join(dir, e.Name())
-		if err := os.RemoveAll(p); err != nil {
-			return fmt.Errorf("remove %s: %w", p, err)
 		}
 	}
 	return nil
