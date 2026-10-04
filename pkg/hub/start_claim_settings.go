@@ -182,29 +182,26 @@ func carryForwardStartClaimSettings(ctx context.Context, ops *OperationalSetting
 }
 
 // validateStartClaimSettingStrings checks the start-claim keys of a
-// lifecycle document: each set value must parse as a duration and be within
-// its range (the create hold is compared with the effective hold).
-func validateStartClaimSettingStrings(d opsettings.LifecycleSettings) error {
-	var c StartClaimSettings
-	for _, f := range []struct {
-		name string
-		v    string
-		dst  *time.Duration
-	}{
-		{"start_claim_lease_ttl", d.StartClaimLeaseTTL, &c.LeaseTTL},
-		{"start_max_duration", d.StartMaxDuration, &c.MaxDuration},
-		{"start_unconfirmed_hold", d.StartUnconfirmedHold, &c.UnconfirmedHold},
-		{"start_create_unconfirmed_hold", d.StartCreateUnconfirmedHold, &c.CreateUnconfirmedHold},
+// lifecycle document against the settings they would produce: base (the
+// startup value, which ApplySnapshot also uses for absent keys) with each
+// set key parsed over it. Each set value must parse as a duration, and the
+// result must be within range (the create hold is compared with the
+// effective hold).
+func validateStartClaimSettingStrings(base StartClaimSettings, d opsettings.LifecycleSettings) error {
+	for _, f := range []struct{ name, v string }{
+		{"start_claim_lease_ttl", d.StartClaimLeaseTTL},
+		{"start_max_duration", d.StartMaxDuration},
+		{"start_unconfirmed_hold", d.StartUnconfirmedHold},
+		{"start_create_unconfirmed_hold", d.StartCreateUnconfirmedHold},
 	} {
 		if f.v == "" {
 			continue
 		}
-		v, err := time.ParseDuration(f.v)
-		if err != nil {
+		if _, err := time.ParseDuration(f.v); err != nil {
 			return fmt.Errorf("invalid %s %q: %v", f.name, f.v, err)
 		}
-		*f.dst = v
 	}
+	c, _ := parseStartClaimSettings(base, d.StartClaimLeaseTTL, d.StartMaxDuration, d.StartUnconfirmedHold, d.StartCreateUnconfirmedHold)
 	if _, warns := c.normalized(); len(warns) > 0 {
 		return errors.New(warns[0])
 	}

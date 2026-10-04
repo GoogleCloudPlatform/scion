@@ -527,9 +527,13 @@ func notFoundAsLost(err error) error {
 
 // linkLaunchClaim adds to u, a BeginLaunch write of launch launchID on row,
 // the link from row's create claim to that launch, so only that launch's
-// end settles the claim. A live create claim already linked to an earlier
-// launch saw that launch superseded: it is demoted, as a superseded end
-// would. Nothing is added when row holds no create claim.
+// end settles the claim. A claim with no link is linked. A claim linked to
+// an earlier launch is relinked while it is live with an unexpired lease:
+// its holder is still running the start, and a deferred create runs a
+// second BeginLaunch for the same start on the node that owns the broker.
+// Otherwise (unconfirmed, or an expired lease) the link is left alone and
+// the start-claim reaper settles the claim. Nothing is added when row holds
+// no create claim.
 func linkLaunchClaim(u *ent.AgentUpdateOne, row *ent.Agent, launchID string, now time.Time) *ent.AgentUpdateOne {
 	if row.StartClaimID == nil || row.StartClaimKind != string(store.StartClaimCreate) {
 		return u
@@ -537,8 +541,10 @@ func linkLaunchClaim(u *ent.AgentUpdateOne, row *ent.Agent, launchID string, now
 	switch {
 	case row.StartClaimLaunchID == "":
 		u.SetStartClaimLaunchID(launchID)
-	case row.StartClaimLaunchID != launchID && row.StartClaimState == string(store.StartClaimLive):
-		demoteStartClaim(u, claimTime(now), 0)
+	case row.StartClaimLaunchID != launchID &&
+		row.StartClaimState == string(store.StartClaimLive) &&
+		row.StartClaimLeaseUntil != nil && row.StartClaimLeaseUntil.After(claimTime(now)):
+		u.SetStartClaimLaunchID(launchID)
 	}
 	return u
 }

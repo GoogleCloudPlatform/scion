@@ -93,7 +93,9 @@ type ClaimHeldError struct {
 	Since         time.Time
 	LeaseUntil    *time.Time
 	UnconfirmedAt *time.Time
-	HoldUntil     *time.Time
+	// HoldUntil is nil for a claim made unconfirmed by a launch's end; use
+	// StartClaimHolds.HoldExpiry for the effective end of the hold.
+	HoldUntil *time.Time
 }
 
 func (e *ClaimHeldError) Error() string {

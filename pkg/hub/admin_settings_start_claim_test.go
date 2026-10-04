@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 )
@@ -74,5 +75,19 @@ func TestPutServerConfigDB_StartClaimSettingsValidated(t *testing.T) {
 	}
 	if rr := putStartClaimConfigDB(t, srv, ops, `{"server": {"hub": {"start_max_duration": "15m"}}}`); rr.Code != http.StatusOK {
 		t.Errorf("valid value rejected: %d %s", rr.Code, rr.Body.String())
+	}
+}
+
+// Validation uses the effective settings: absent keys take the startup
+// value, as ApplySnapshot does.
+func TestPutServerConfigDB_StartClaimValidatedAgainstStartupValues(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+	srv.config.StartClaim = StartClaimSettings{UnconfirmedHold: 20 * time.Minute}
+	if rr := putStartClaimConfigDB(t, srv, ops, `{"server": {"hub": {"start_create_unconfirmed_hold": "15m"}}}`); rr.Code != http.StatusOK {
+		t.Errorf("a create hold under the startup hold rejected: %d %s", rr.Code, rr.Body.String())
+	}
+	srv.config.StartClaim = StartClaimSettings{}
+	if rr := putStartClaimConfigDB(t, srv, ops, `{"server": {"hub": {"start_create_unconfirmed_hold": "15m"}}}`); rr.Code != http.StatusUnprocessableEntity {
+		t.Errorf("a create hold over the default hold accepted: %d %s", rr.Code, rr.Body.String())
 	}
 }

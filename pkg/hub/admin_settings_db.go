@@ -581,7 +581,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		}
 		var lc opsettings.LifecycleSettings
 		if err := json.Unmarshal(merged, &lc); err == nil {
-			if err := validateStartClaimSettingStrings(lc); err != nil {
+			if err := validateStartClaimSettingStrings(s.config.StartClaim, lc); err != nil {
 				writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, err.Error(), nil)
 				return
 			}

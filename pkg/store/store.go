@@ -598,8 +598,13 @@ type AgentStore interface {
 	ListAgentsWithStartClaim(ctx context.Context) ([]*Agent, error)
 
 	// StoreClock reads the store clock: Postgres now(), or the single SQLite
-	// process's clock. Comparisons against stored claim and inventory times
-	// (hold expiry, observation freshness) use it.
+	// process's clock. The columns written on this clock are run_intent_at,
+	// every start_claim_* time, agent_recovery observed_at and
+	// first_absent_at, broker_target_inventory last_complete_inventory_at
+	// and the launch_* times; comparisons against them (hold expiry,
+	// observation freshness) use it. Broker last_heartbeat and connected_at
+	// are written on the hub process clock instead, so on Postgres they are
+	// not comparable with store-clock times.
 	StoreClock(ctx context.Context) (time.Time, error)
 
 	// ClaimAgentReincarnation records a reincarnation as pending (state
