@@ -10,6 +10,39 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 )
 
+// clearNativeTelemetryEnv unsets every inherited variable that the native
+// telemetry policy inspects (see hooks.ValidateNativeTelemetryEnv), plus
+// SCION_* runtime contract variables, for the duration of the test. Agent
+// containers export several of these (OTEL_EXPORTER_OTLP_*, CODEX_HOME,
+// CLAUDE_CODE_ENABLE_TELEMETRY, ...), so without this the tests depend on
+// the ambient environment. t.Setenv restores the original values.
+func clearNativeTelemetryEnv(t *testing.T) {
+	t.Helper()
+	for _, entry := range os.Environ() {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok || key == "" || !nativeTelemetryTestKey(key) {
+			continue
+		}
+		t.Setenv(key, "")
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("unset %s: %v", key, err)
+		}
+	}
+}
+
+func nativeTelemetryTestKey(key string) bool {
+	switch key {
+	case "CLAUDE_CODE_ENABLE_TELEMETRY", "GROK_EXTERNAL_OTEL", "CODEX_HOME":
+		return true
+	}
+	for _, prefix := range []string{"OTEL_", "GEMINI_TELEMETRY_", "COPILOT_OTEL_", "GROK_TELEMETRY_", "SCION_"} {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func TestNativeTelemetryPolicyRejectsBeforeChildLaunch(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
@@ -28,6 +61,7 @@ func TestNativeTelemetryPolicyRejectsBeforeChildLaunch(t *testing.T) {
 		{"marker", "enabled", hooks.NativeTelemetryPolicyKey, "disabled", "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			clearNativeTelemetryEnv(t)
 			if tc.inheritedKey != "" {
 				t.Setenv(tc.inheritedKey, tc.inheritedValue)
 			}
@@ -63,6 +97,7 @@ func TestNativeTelemetryPolicyEffectiveChildEnv(t *testing.T) {
 		{"disabled", "disabled", "0", "http://127.0.0.1:4317"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			clearNativeTelemetryEnv(t)
 			t.Setenv("UNRELATED_CLI", "cli")
 			out := filepath.Join(t.TempDir(), "env")
 			cfg := DefaultConfig()
@@ -92,6 +127,7 @@ func TestNativeTelemetryPolicyEffectiveChildEnv(t *testing.T) {
 }
 
 func TestNativeTelemetryNoPolicyKeepsLegacyPrecedence(t *testing.T) {
+	clearNativeTelemetryEnv(t)
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://cli.invalid")
 	out := filepath.Join(t.TempDir(), "endpoint")
 	cfg := DefaultConfig()
