@@ -119,10 +119,6 @@ type ServerConfig struct {
 	// loopback ports a Conduit tcp stream grant may target in addition to
 	// the agent's exposed ports. The reserved ports (9810, 18380) are always
 	// refused. Only used behind the hub.conduit experiment.
-	//
-	// Not yet reachable from configuration: settings/flag wiring comes in
-	// the Phase 1 hub-wiring change (1d-ii, ptone/scion#2780). Until then
-	// it is empty, so only exposed ports are targets.
 	ConduitTCPAllowedPorts []int
 	// ConduitGrantKeyActivation is how long a rotated-in Conduit grant key
 	// is published before it signs (default 15m). It must be at least the
@@ -131,11 +127,6 @@ type ServerConfig struct {
 	// learned the new key refuses its grants. It must also be at least the
 	// hub's ring refresh interval (1m). Only used behind the hub.conduit
 	// experiment.
-	//
-	// Not yet reachable from configuration: settings/flag wiring, with
-	// load-time validation (activation >= 1m), comes in the Phase 1
-	// hub-wiring change (1d-ii, ptone/scion#2780). Until then the default
-	// applies, and rotate rejects a delay below the refresh interval.
 	ConduitGrantKeyActivation time.Duration
 	// AuthMode is the exclusive human auth mode: "oauth" (default), "proxy", "dev".
 	AuthMode string
