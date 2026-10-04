@@ -360,6 +360,7 @@ func (a *AuthzService) walkDelegationChainWithCause(
 			}
 			if c, why := hopEffectCeilingDeny(edge, permissionID, resource, agentID, a.devLocalAuthorityEnabled()); c != "" {
 				addStep("delegation_ceiling_effect_denied", fmt.Sprintf("edge %s: %s", edge.ID, why))
+				a.logUnrecordedHop(c, edge, permissionID)
 				setCause(c)
 				return false, why, nil
 			}
@@ -387,6 +388,7 @@ func (a *AuthzService) walkDelegationChainWithCause(
 			}
 			if c, why := hopEffectCeilingDeny(edge, permissionID, resource, agentID, a.devLocalAuthorityEnabled()); c != "" {
 				addStep("delegation_ceiling_effect_denied", fmt.Sprintf("edge %s: %s", edge.ID, why))
+				a.logUnrecordedHop(c, edge, permissionID)
 				setCause(c)
 				return false, why, nil
 			}
@@ -400,6 +402,18 @@ func (a *AuthzService) walkDelegationChainWithCause(
 			return false, fmt.Sprintf("delegation edge %s has an unsupported delegator type", edge.ID), nil
 		}
 	}
+}
+
+// logUnrecordedHop logs, server-side only, the delegate whose hop denied with
+// ceiling_unrecorded, so an admin can correlate the denial with the
+// delegation-adoption status view. Nothing here reaches the caller.
+func (a *AuthzService) logUnrecordedHop(cause DenyCause, edge *store.DelegationEdge, permissionID string) {
+	if cause != DenyCauseCeilingUnrecorded || a.logger == nil {
+		return
+	}
+	a.logger.Info("delegation ceiling: unrecorded hop denied a permission that requires recorded provenance",
+		"delegate_id", edge.DelegateID, "scope_id", edge.ScopeID, "permission", permissionID,
+		"remediation_path", delegationAdoptionPath)
 }
 
 // hopEffectCeilingDeny applies a hop's frozen provenance and effect ceiling

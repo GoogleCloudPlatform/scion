@@ -27,31 +27,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// DelegationProvenanceAdoptionMarkerSection is the completion marker of the
-// delegation-provenance adoption migration. It is independent of the edge
-// backfill marker (migration_delegation_edge_backfill_v1), which plays no
-// part in whether this migration runs.
-const DelegationProvenanceAdoptionMarkerSection = "migration_delegation_provenance_adoption_v1"
-
-// DelegationProvenanceAdoptionCohortSection is the cohort snapshot header.
-// Once it exists, no new snapshot is taken: later runs only work through
-// the snapshot's pending records, so no row written after the snapshot can
-// enter the automatic cohort.
-const DelegationProvenanceAdoptionCohortSection = "delegation_provenance_adoption_cohort"
-
-// delegationAdoptionSchemaVersion is the layout of the header and marker.
-const delegationAdoptionSchemaVersion = 1
-
-// DelegationAdoptionHeader is the JSON value of the cohort header and of the
-// completion marker.
-type DelegationAdoptionHeader struct {
-	SchemaVersion int            `json:"schema_version"`
-	PolicyVersion int            `json:"policy_version"`
-	CohortID      string         `json:"cohort_id"`
-	Completed     bool           `json:"completed,omitempty"`
-	Counts        map[string]int `json:"counts,omitempty"`
-}
-
 func (c *CompositeStore) adoptionLog() *slog.Logger {
 	if c.adoptionLogger != nil {
 		return c.adoptionLogger
@@ -76,11 +51,11 @@ func (c *CompositeStore) adoptionLog() *slog.Logger {
 // denial, and the summary and the admin status view report them.
 func (c *CompositeStore) AdoptLegacyDelegationProvenance(ctx context.Context) error {
 	log := c.adoptionLog()
-	if s, err := c.GetHubSetting(ctx, DelegationProvenanceAdoptionMarkerSection); err == nil {
-		var m DelegationAdoptionHeader
-		if jerr := json.Unmarshal(s.Value, &m); jerr != nil || m.SchemaVersion != delegationAdoptionSchemaVersion {
+	if s, err := c.GetHubSetting(ctx, delegationadoption.MarkerSection); err == nil {
+		var m delegationadoption.Header
+		if jerr := json.Unmarshal(s.Value, &m); jerr != nil || m.SchemaVersion != delegationadoption.HeaderSchemaVersion {
 			log.Warn("delegation provenance adoption: marker has an unknown layout; treated as complete",
-				"section", DelegationProvenanceAdoptionMarkerSection)
+				"section", delegationadoption.MarkerSection)
 		}
 		return nil
 	} else if !errors.Is(err, store.ErrNotFound) {
@@ -129,8 +104,8 @@ func (c *CompositeStore) AdoptLegacyDelegationProvenance(ctx context.Context) er
 	if failed || counts[string(store.DelegationAdoptionPending)] > 0 {
 		return nil
 	}
-	value, err := json.Marshal(DelegationAdoptionHeader{
-		SchemaVersion: delegationAdoptionSchemaVersion,
+	value, err := json.Marshal(delegationadoption.Header{
+		SchemaVersion: delegationadoption.HeaderSchemaVersion,
 		PolicyVersion: int(delegationadoption.PolicyVersion),
 		CohortID:      cohortID,
 		Completed:     true,
@@ -139,7 +114,7 @@ func (c *CompositeStore) AdoptLegacyDelegationProvenance(ctx context.Context) er
 	if err != nil {
 		return err
 	}
-	_, err = c.UpsertHubSetting(ctx, DelegationProvenanceAdoptionMarkerSection, value, "migration", 0, "seeded")
+	_, err = c.UpsertHubSetting(ctx, delegationadoption.MarkerSection, value, "migration", 0, "seeded")
 	if errors.Is(err, store.ErrRevisionConflict) {
 		return nil
 	}
@@ -150,8 +125,8 @@ func (c *CompositeStore) AdoptLegacyDelegationProvenance(ctx context.Context) er
 // takes the snapshot: every examined hop's record and the header, written
 // in one transaction.
 func (c *CompositeStore) ensureAdoptionSnapshot(ctx context.Context) (string, error) {
-	if s, err := c.GetHubSetting(ctx, DelegationProvenanceAdoptionCohortSection); err == nil {
-		var h DelegationAdoptionHeader
+	if s, err := c.GetHubSetting(ctx, delegationadoption.CohortSection); err == nil {
+		var h delegationadoption.Header
 		if jerr := json.Unmarshal(s.Value, &h); jerr != nil || h.CohortID == "" {
 			return "", fmt.Errorf("cohort header is unreadable")
 		}
@@ -165,13 +140,13 @@ func (c *CompositeStore) ensureAdoptionSnapshot(ctx context.Context) (string, er
 		return "", err
 	}
 	cohortID := uuid.NewString()
-	records := SnapshotRecords(plan, cohortID, store.DelegationAdoptionOriginBoot)
+	records := delegationadoption.SnapshotRecords(plan, cohortID, store.DelegationAdoptionOriginBoot)
 	counts := map[string]int{}
 	for _, r := range records {
 		counts[string(r.Status)]++
 	}
-	header, err := json.Marshal(DelegationAdoptionHeader{
-		SchemaVersion: delegationAdoptionSchemaVersion,
+	header, err := json.Marshal(delegationadoption.Header{
+		SchemaVersion: delegationadoption.HeaderSchemaVersion,
 		PolicyVersion: int(delegationadoption.PolicyVersion),
 		CohortID:      cohortID,
 		Counts:        counts,
@@ -194,7 +169,7 @@ func (c *CompositeStore) ensureAdoptionSnapshot(ctx context.Context) (string, er
 		}
 	}
 	if _, err := tx.HubSetting.Create().
-		SetSection(DelegationProvenanceAdoptionCohortSection).
+		SetSection(delegationadoption.CohortSection).
 		SetValue(header).
 		SetRevision(1).
 		SetUpdatedBy("migration").
@@ -206,54 +181,6 @@ func (c *CompositeStore) ensureAdoptionSnapshot(ctx context.Context) (string, er
 		return "", fmt.Errorf("commit snapshot: %w", err)
 	}
 	return cohortID, nil
-}
-
-// SnapshotRecords returns the records a plan contributes to a cohort:
-// adoptable hops as pending, already-adopted hops as recognized (or
-// recognized_above_policy), and excluded hops whose edge is not a recorded
-// edge. Recorded hops are valid path members but not cohort members, so
-// they get no record.
-func SnapshotRecords(plan *delegationadoption.Plan, cohortID, origin string) []*store.DelegationAdoption {
-	var out []*store.DelegationAdoption
-	for _, h := range plan.Hops {
-		rec := &store.DelegationAdoption{
-			CohortID:          cohortID,
-			Origin:            origin,
-			PolicyVersion:     int(plan.PolicyVersion),
-			DelegateID:        h.DelegateID,
-			ScopeID:           h.ProjectID,
-			Depth:             h.Depth,
-			Reason:            string(h.Reason),
-			BeforeFingerprint: h.Fingerprint,
-		}
-		if h.Edge != nil {
-			rec.DelegatorType = h.Edge.DelegatorType
-			rec.DelegatorID = h.Edge.DelegatorID
-			rec.ScopeID = h.Edge.ScopeID
-			rec.Role = h.Edge.Role
-		}
-		switch h.Outcome {
-		case delegationadoption.OutcomeAdopt:
-			rec.Status = store.DelegationAdoptionPending
-			rec.OriginalEdgeID = h.Edge.ID
-		case delegationadoption.OutcomeRecognized, delegationadoption.OutcomeRecognizedAbovePolicy:
-			rec.Status = store.DelegationAdoptionStatus(h.Outcome)
-			rec.OriginalEdgeID = h.OriginalEdgeID
-			rec.AdoptedEdgeID = h.Edge.ID
-		case delegationadoption.OutcomeExcluded:
-			if h.Edge != nil && h.Edge.ProvenanceVersion == store.ProvenanceVersionV1 && h.Edge.Kind != store.EffectCeilingUnrecorded {
-				continue
-			}
-			rec.Status = store.DelegationAdoptionExcluded
-			if h.Edge != nil {
-				rec.OriginalEdgeID = h.Edge.ID
-			}
-		default:
-			continue
-		}
-		out = append(out, rec)
-	}
-	return out
 }
 
 // adoptOneHop applies one pending record in its own transaction and writes

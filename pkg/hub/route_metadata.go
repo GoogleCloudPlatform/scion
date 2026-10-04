@@ -702,6 +702,21 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Classification: RouteHubAdmin,
 		Permission:     "hub.auth_reset.execute", Resource: "hub", Action: "execute",
 	},
+	// Delegation-provenance adoption recovery: hub system admin on a session
+	// or local development credential only (checked again in the handler).
+	// Deliberately no registered permission, so it cannot be delegated.
+	"/api/v1/admin/delegation-adoption": {
+		Pattern: "/api/v1/admin/delegation-adoption", RouteID: "admin.delegationAdoption",
+		Classification: RouteHubAdmin,
+	},
+	"/api/v1/admin/delegation-adoption/previews": {
+		Pattern: "/api/v1/admin/delegation-adoption/previews", RouteID: "admin.delegationAdoption.previews",
+		Classification: RouteHubAdmin,
+	},
+	"/api/v1/admin/delegation-adoption/commits": {
+		Pattern: "/api/v1/admin/delegation-adoption/commits", RouteID: "admin.delegationAdoption.commits",
+		Classification: RouteHubAdmin,
+	},
 	"/api/v1/admin/gcp-quota": {
 		Pattern: "/api/v1/admin/gcp-quota", RouteID: "admin.gcpQuota",
 		Classification: RouteHubAdmin,

@@ -27,7 +27,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -46,7 +45,7 @@ type provenanceAdopter interface {
 func runBootAdoption(t *testing.T, s store.Store) {
 	t.Helper()
 	ctx := context.Background()
-	for _, section := range []string{entadapter.DelegationProvenanceAdoptionMarkerSection, entadapter.DelegationProvenanceAdoptionCohortSection} {
+	for _, section := range []string{delegationadoption.MarkerSection, delegationadoption.CohortSection} {
 		if err := s.DeleteHubSetting(ctx, section); err != nil && !errors.Is(err, store.ErrNotFound) {
 			require.NoError(t, err)
 		}

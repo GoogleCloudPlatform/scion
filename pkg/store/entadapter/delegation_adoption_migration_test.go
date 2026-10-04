@@ -140,23 +140,23 @@ func (w *adoptionWorld) record(agentID string) *store.DelegationAdoption {
 	return found
 }
 
-func (w *adoptionWorld) marker() *DelegationAdoptionHeader {
+func (w *adoptionWorld) marker() *delegationadoption.Header {
 	w.t.Helper()
-	s, err := w.cs.GetHubSetting(w.ctx, DelegationProvenanceAdoptionMarkerSection)
+	s, err := w.cs.GetHubSetting(w.ctx, delegationadoption.MarkerSection)
 	if errors.Is(err, store.ErrNotFound) {
 		return nil
 	}
 	require.NoError(w.t, err)
-	var h DelegationAdoptionHeader
+	var h delegationadoption.Header
 	require.NoError(w.t, json.Unmarshal(s.Value, &h))
 	return &h
 }
 
-func (w *adoptionWorld) header() *DelegationAdoptionHeader {
+func (w *adoptionWorld) header() *delegationadoption.Header {
 	w.t.Helper()
-	s, err := w.cs.GetHubSetting(w.ctx, DelegationProvenanceAdoptionCohortSection)
+	s, err := w.cs.GetHubSetting(w.ctx, delegationadoption.CohortSection)
 	require.NoError(w.t, err)
-	var h DelegationAdoptionHeader
+	var h delegationadoption.Header
 	require.NoError(w.t, json.Unmarshal(s.Value, &h))
 	return &h
 }
@@ -282,7 +282,7 @@ func TestProvenanceAdoptionResumesAfterCrashBeforeMarker(t *testing.T) {
 	require.NotNil(t, w.marker())
 
 	// Crash after every hop but before the marker: the next run writes it.
-	_ = w.cs.DeleteHubSetting(w.ctx, DelegationProvenanceAdoptionMarkerSection)
+	_ = w.cs.DeleteHubSetting(w.ctx, delegationadoption.MarkerSection)
 	w.migrate()
 	require.NotNil(t, w.marker())
 	assert.Len(t, w.records(), 3)
@@ -500,7 +500,7 @@ func TestProvenanceAdoptionUnknownMarkerLayoutIsComplete(t *testing.T) {
 	u := w.user()
 	a := w.agent(u, nil, "full")
 	w.backfillMarker()
-	_, err := w.cs.UpsertHubSetting(w.ctx, DelegationProvenanceAdoptionMarkerSection,
+	_, err := w.cs.UpsertHubSetting(w.ctx, delegationadoption.MarkerSection,
 		json.RawMessage(`{"schema_version":9}`), "migration", 0, "seeded")
 	require.NoError(t, err)
 	w.migrate()

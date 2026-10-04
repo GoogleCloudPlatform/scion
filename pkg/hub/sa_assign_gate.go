@@ -292,6 +292,9 @@ type saAssignDenial struct {
 	kind         saAssignDenialKind
 	msg          string
 	resourceType string
+	// cause is the Layer 1 decision's DenyCause. A ceiling_unrecorded cause
+	// adds the delegation-provenance adoption details; msg is unchanged.
+	cause DenyCause
 }
 
 func (d *saAssignDenial) Error() string {
@@ -310,7 +313,7 @@ func (d *saAssignDenial) write(w http.ResponseWriter) {
 	case saAssignDenyUnauthorized:
 		Unauthorized(w)
 	case saAssignDenyForbiddenStructured:
-		writeForbiddenStructured(w, d.msg, d.resourceType, ActionAssign)
+		writeForbiddenStructuredDenialCause(w, d.msg, d.resourceType, ActionAssign, "", d.cause)
 	default:
 		writeForbidden(w, d.msg)
 	}
@@ -404,7 +407,8 @@ func (s *Server) evaluateSAAssignment(ctx context.Context, r *http.Request, sa *
 	if decision := s.authzService.CheckAccess(ctx, identity, resource, ActionAssign); !decision.Allowed {
 		logAuthzDenial(r, identity, resource, ActionAssign, decision.Reason)
 		return &saAssignDenial{kind: saAssignDenyForbiddenStructured,
-			msg: saAssignForbiddenMessage(decision.DenyCause), resourceType: resource.Type}
+			msg: saAssignForbiddenMessage(decision.DenyCause), resourceType: resource.Type,
+			cause: decision.DenyCause}
 	}
 
 	// Layer 2: GCP actAs.
