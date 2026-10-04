@@ -1002,7 +1002,7 @@
         },
         "launch_timeout": {
           "type": "string",
-          "description": "Whole-launch budget for an asynchronous create, from the start of the launch to a terminal Hub state (Go duration, e.g. '15m'; default '5m'). A launch still in progress at the deadline is ended. Below 30s is rejected and the default is used, since the broker's fixed 20s abort margin would leave no time for a launch to run. Restart required to change.",
+          "description": "Whole-launch budget for an asynchronous create, from the start of the launch to a terminal Hub state (Go duration, e.g. '15m'; default '5m'). A launch that has not reached a terminal Hub state by the deadline is ended. A non-zero value below 30s is rejected and the default is used, since the broker's fixed 20s abort margin would leave no time for a launch to run. Restart required to change.",
           "x-env-var": "SCION_SERVER_HUB_LAUNCHTIMEOUT",
           "x-since": "1"
         },
