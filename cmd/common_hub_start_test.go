@@ -417,7 +417,7 @@ func TestHubCloneTransportNote(t *testing.T) {
 
 // The hub lists only brokers the caller may use in a 422 no_runtime_broker.
 // When that list is empty, the CLI surfaces the hub's message instead of
-// prompting; with a non-empty list off a terminal, it asks for --broker.
+// prompting; with a non-empty list and autoConfirm set (no picker), it asks for --broker.
 func TestCreateAgentWithBrokerResolution_NoRuntimeBroker(t *testing.T) {
 	const projectID = "proj-nrb"
 	for _, tc := range []struct {
@@ -427,7 +427,7 @@ func TestCreateAgentWithBrokerResolution_NoRuntimeBroker(t *testing.T) {
 	}{
 		{"empty list", []map[string]interface{}{}, "No runtime brokers available for this project that you have permission to use"},
 		{"missing list", nil, "No runtime brokers available for this project that you have permission to use"},
-		{"usable brokers, non-interactive", []map[string]interface{}{{"id": "b1", "name": "one", "status": "online"}}, "--broker"},
+		{"usable brokers, autoConfirm", []map[string]interface{}{{"id": "b1", "name": "one", "status": "online"}}, "--broker"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Never prompt, whatever stdin is: autoConfirm skips the
