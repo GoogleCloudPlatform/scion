@@ -1015,8 +1015,10 @@ export class AgentStore {
           highWater = newest;
         }
         const last = updatedAt(rows[rows.length - 1]);
+        // With no mark yet (no row had a time), there is nothing to catch up
+        // with: the count check finds agents the list lacks.
         caughtUp =
-          !body.nextCursor || (previous !== undefined && last !== undefined && last <= previous);
+          !body.nextCursor || previous === undefined || (last !== undefined && last <= previous);
         if (caughtUp) break;
         cursor = body.nextCursor;
       }

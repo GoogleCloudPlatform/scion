@@ -463,6 +463,33 @@ describe('AgentStore delta probe', () => {
     expect(snapshot?.agents).toHaveLength(1 + burst.length);
   });
 
+  describe('a list whose rows carry no time', () => {
+    it('reads one page after an empty walk and walks for the count', async () => {
+      const h = await loaded([]);
+      h.server.agents.push(
+        ...Array.from({ length: 6 * AGENT_PROBE_LIMIT }, (_, i) => row(`n${i}`, 100 + i))
+      );
+      await tick();
+      expect(h.server.probes()).toBe(1);
+      expect(h.server.walks()).toBe(2);
+      expect(h.store.peek(HUB)?.agents).toHaveLength(6 * AGENT_PROBE_LIMIT);
+    });
+
+    it('reads one page per probe and does not walk once the count matches', async () => {
+      const timeless = (id: string): Agent => agent(id, { _capabilities: CAPS });
+      const h = await loaded([timeless('a1')]);
+      h.server.agents.push(
+        ...Array.from({ length: 6 * AGENT_PROBE_LIMIT }, (_, i) => timeless(`n${i}`))
+      );
+      await tick();
+      await tick();
+      await tick();
+      expect(h.server.probes()).toBe(3);
+      expect(h.server.walks()).toBe(2);
+      expect(h.store.peek(HUB)?.agents).toHaveLength(1 + 6 * AGENT_PROBE_LIMIT);
+    });
+  });
+
   describe('sustained churn the probe cannot catch up with', () => {
     const fleet = (): Agent[] => Array.from({ length: 400 }, (_, i) => row(`a${i}`, 1));
 
