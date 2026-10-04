@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -675,4 +676,84 @@ func TestListEnvVarsOrderedByKey(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, list, 3)
 	assert.Equal(t, []string{"ALPHA", "MIKE", "ZEBRA"}, []string{list[0].Key, list[1].Key, list[2].Key})
+}
+
+// =============================================================================
+// UpdateSecretValueIfVersion: value compare-and-swap on Version.
+// =============================================================================
+
+func TestUpdateSecretValueIfVersion(t *testing.T) {
+	ss := newTestSecretStore(t)
+	ctx := context.Background()
+	scopeID := uuid.New().String()
+	sec := &store.Secret{ID: uuid.New().String(), Key: "VAL_CAS", EncryptedValue: "v1", Scope: store.ScopeHub, ScopeID: scopeID, Description: "keep"}
+	require.NoError(t, ss.CreateSecret(ctx, sec))
+	require.Equal(t, 1, sec.Version)
+
+	// Matching version applies and bumps Version; other columns are kept.
+	applied, err := ss.UpdateSecretValueIfVersion(ctx, "VAL_CAS", store.ScopeHub, scopeID, 1, "v2")
+	require.NoError(t, err)
+	assert.True(t, applied)
+	val, err := ss.GetSecretValue(ctx, "VAL_CAS", store.ScopeHub, scopeID)
+	require.NoError(t, err)
+	assert.Equal(t, "v2", val)
+	got, err := ss.GetSecret(ctx, "VAL_CAS", store.ScopeHub, scopeID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, got.Version, "a successful CAS increments Version")
+	assert.Equal(t, "keep", got.Description, "other columns are untouched")
+
+	// A stale version does not apply and changes nothing.
+	applied, err = ss.UpdateSecretValueIfVersion(ctx, "VAL_CAS", store.ScopeHub, scopeID, 1, "stale")
+	require.NoError(t, err)
+	assert.False(t, applied, "a stale expectedVersion must not apply")
+	val, err = ss.GetSecretValue(ctx, "VAL_CAS", store.ScopeHub, scopeID)
+	require.NoError(t, err)
+	assert.Equal(t, "v2", val, "value must be untouched")
+	got, err = ss.GetSecret(ctx, "VAL_CAS", store.ScopeHub, scopeID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, got.Version, "Version must not bump on a CAS that doesn't apply")
+
+	// A missing row reports applied=false without error.
+	applied, err = ss.UpdateSecretValueIfVersion(ctx, "ghost", store.ScopeHub, scopeID, 1, "x")
+	require.NoError(t, err)
+	assert.False(t, applied)
+}
+
+// TestUpdateSecretValueIfVersion_ConcurrentSameVersion: two writers racing
+// with the same expected version; exactly one applies.
+func TestUpdateSecretValueIfVersion_ConcurrentSameVersion(t *testing.T) {
+	ss := newTestSecretStore(t)
+	ctx := context.Background()
+	scopeID := uuid.New().String()
+	require.NoError(t, ss.CreateSecret(ctx, &store.Secret{ID: uuid.New().String(), Key: "VAL_CAS_RACE", EncryptedValue: "v1", Scope: store.ScopeHub, ScopeID: scopeID}))
+
+	values := []string{"a", "b"}
+	results := make([]bool, len(values))
+	errs := make([]error, len(values))
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i, v := range values {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results[i], errs[i] = ss.UpdateSecretValueIfVersion(ctx, "VAL_CAS_RACE", store.ScopeHub, scopeID, 1, v)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	winner := -1
+	for i := range values {
+		require.NoError(t, errs[i])
+		if results[i] {
+			require.Equal(t, -1, winner, "both writers applied")
+			winner = i
+		}
+	}
+	require.NotEqual(t, -1, winner, "neither writer applied")
+	got, err := ss.GetSecret(ctx, "VAL_CAS_RACE", store.ScopeHub, scopeID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, got.Version)
+	assert.Equal(t, values[winner], got.EncryptedValue, "the stored value is the winner's")
 }
