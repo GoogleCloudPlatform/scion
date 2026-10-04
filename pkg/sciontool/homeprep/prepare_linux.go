@@ -97,7 +97,11 @@ func Prepare(opts PrepareOptions) (string, error) {
 		}
 	}
 
-	results, err := placeLinks(r, opts.Links, opts.StartID, opts.logf)
+	prevStartID := ""
+	if dec.Mode == ModeSeedOver {
+		prevStartID = read.Sentinel.StartID
+	}
+	results, err := placeLinks(r, opts.Links, opts.StartID, prevStartID, opts.logf)
 	if err != nil {
 		return "", err
 	}
@@ -588,16 +592,26 @@ func copyFileBeneath(r *root, src, rel string, mode uint32) error {
 // LinksRecordPath, unless .scion is not a plain directory this user can
 // write, in which case nothing is written and the next start recognises
 // its links by their targets.
-func placeLinks(r *root, links []Link, startID string, logf func(string, ...any)) ([]LinkResult, error) {
+//
+// The record is trusted only when it was written by the previous start
+// (its start ID is prevStartID, the one in the sentinel before this start
+// stamps it). A record left over from an older start, because a later
+// start could not rewrite it, never causes a user's file or link to be
+// removed: without a trusted record only links already pointing at their
+// staged files count as scion's.
+func placeLinks(r *root, links []Link, startID, prevStartID string, logf func(string, ...any)) ([]LinkResult, error) {
 	prev := map[string]bool{}
 	if data, err := r.readFile(LinksRecordPath, maxSentinelBytes); err == nil {
 		var rec linksRecord
-		if json.Unmarshal(data, &rec) == nil {
+		switch {
+		case json.Unmarshal(data, &rec) != nil:
+			logf("Warning: ignoring an unreadable %s", LinksRecordPath)
+		case rec.StartID == "" || rec.StartID != prevStartID:
+			logf("Warning: ignoring %s, which was not written by the previous start", LinksRecordPath)
+		default:
 			for _, t := range rec.Links {
 				prev[t] = true
 			}
-		} else {
-			logf("Warning: ignoring an unreadable %s", LinksRecordPath)
 		}
 	} else if !errors.Is(err, unix.ENOENT) {
 		logf("Warning: ignoring %s: %v", LinksRecordPath, err)
@@ -637,7 +651,7 @@ func placeLinks(r *root, links []Link, startID string, logf func(string, ...any)
 	}
 
 	slices.Sort(placed)
-	data, err := json.Marshal(linksRecord{Links: placed})
+	data, err := json.Marshal(linksRecord{StartID: startID, Links: placed})
 	if err != nil {
 		return nil, err
 	}
@@ -645,7 +659,7 @@ func placeLinks(r *root, links []Link, startID string, logf func(string, ...any)
 		if foreignPathErr(err) || deniedErr(err) {
 			// Links under .scion were skipped for the same reason; the
 			// next start recognises its links by their sources instead.
-			logf("Warning: .scion is a symbolic link or not a directory in the agent home; the placed links are not recorded")
+			logf("Warning: .scion cannot be used in the agent home (%v); the placed links are not recorded", err)
 			return results, nil
 		}
 		return nil, classErr(ErrClassPrepare, "cannot create .scion in the agent home: %v", err)

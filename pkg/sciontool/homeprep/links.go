@@ -47,10 +47,11 @@ type LinksResult struct {
 	Links []LinkResult `json:"links"`
 }
 
-// linksRecord is the content of LinksRecordPath: the targets the last
-// start placed as links.
+// linksRecord is the content of LinksRecordPath: the targets a start
+// placed as links, and that start's ID.
 type linksRecord struct {
-	Links []string `json:"links"`
+	StartID string   `json:"start_id"`
+	Links   []string `json:"links"`
 }
 
 // ParseLinks parses and validates SCION_HOME_LINKS. Targets must be
