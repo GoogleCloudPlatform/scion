@@ -296,3 +296,71 @@ func TestStartContextSpanText_PrefersOriginalErrOverCuratedMessage(t *testing.T)
 		t.Errorf("startContextSpanText(plain error) = %q, want %q unchanged", got, plain.Error())
 	}
 }
+
+// TestMethodNotAllowed_SetsAllowHeader pins the helper itself: RFC 9110
+// section 15.5.6 requires a 405 to carry an Allow header (ptone/scion#2421).
+func TestMethodNotAllowed_SetsAllowHeader(t *testing.T) {
+	tests := []struct {
+		name    string
+		methods []string
+		want    string
+	}{
+		{"single", []string{http.MethodGet}, "GET"},
+		{"multiple", []string{http.MethodGet, http.MethodDelete}, "GET, DELETE"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			MethodNotAllowed(w, tt.methods[0], tt.methods[1:]...)
+			if w.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("status = %d, want %d", w.Code, http.StatusMethodNotAllowed)
+			}
+			if got := w.Header().Get("Allow"); got != tt.want {
+				t.Errorf("Allow = %q, want %q", got, tt.want)
+			}
+			if _, present := w.Header()["Allow"]; tt.want == "" && present {
+				t.Errorf("Allow header set with no methods")
+			}
+		})
+	}
+}
+
+// TestMethodNotAllowed_AllowHeaderPerRoute drives every runtimebroker route
+// that answers 405 with a method it does not accept, and asserts the Allow
+// header lists exactly the methods that route does accept. One row per
+// MethodNotAllowed call site fixed in ptone/scion#2421.
+func TestMethodNotAllowed_AllowHeaderPerRoute(t *testing.T) {
+	srv := newTestServer(t)
+	tests := []struct {
+		method, path, wantAllow string
+	}{
+		{http.MethodPost, "/healthz", "GET"},
+		{http.MethodPost, "/readyz", "GET"},
+		{http.MethodPost, "/api/v1/info", "GET"},
+		{http.MethodPost, "/api/v1/hub-connections", "GET"},
+		{http.MethodPut, "/api/v1/agents", "GET, POST"},
+		{http.MethodPut, "/api/v1/agents/test-agent-1", "GET, DELETE"},
+		{http.MethodGet, "/api/v1/agents/test-agent-1/stop", "POST"},
+		{http.MethodPost, "/api/v1/agents/test-agent-1/logs", "GET"},
+		{http.MethodGet, "/api/v1/projects/some-project", "DELETE"},
+		{http.MethodPost, "/api/v1/images/status", "GET"},
+		{http.MethodGet, "/api/v1/images/pull", "POST"},
+		{http.MethodGet, "/api/v1/images/local", "DELETE"},
+		{http.MethodGet, "/api/v1/workspace/upload", "POST"},
+		{http.MethodGet, "/api/v1/workspace/apply", "POST"},
+		{http.MethodGet, "/api/v1/workspace/project-upload", "POST"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+			if w.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("status = %d, want %d (body: %s)", w.Code, http.StatusMethodNotAllowed, w.Body.String())
+			}
+			if got := w.Header().Get("Allow"); got != tt.wantAllow {
+				t.Errorf("Allow = %q, want %q", got, tt.wantAllow)
+			}
+		})
+	}
+}
