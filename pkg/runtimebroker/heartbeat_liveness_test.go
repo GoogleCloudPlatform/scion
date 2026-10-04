@@ -238,6 +238,7 @@ func TestHeartbeatLiveness_ListingRecovers(t *testing.T) {
 func TestHeartbeatLiveness_ConcurrentHeartbeatJoinsListing(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
 	svc, defaultMgr, _ := newLivenessService(client, time.Hour, 5*time.Second)
+	joined := watchJoins(svc)
 	defaultMgr.block()
 	defer defaultMgr.unblock()
 
@@ -245,9 +246,8 @@ func TestHeartbeatLiveness_ConcurrentHeartbeatJoinsListing(t *testing.T) {
 	go func() { errs <- svc.ForceHeartbeat(context.Background()) }()
 	waitFor(t, 3*time.Second, "the first listing to start", func() bool { return defaultMgr.calls.Load() == 1 })
 	go func() { errs <- svc.ForceHeartbeat(context.Background()) }()
-	// Give the second heartbeat time to reach its wait before the listing
-	// finishes; it must join, not list again.
-	time.Sleep(100 * time.Millisecond)
+	// The second heartbeat must join the listing in progress, not list again.
+	waitForJoin(t, joined, "docker")
 	defaultMgr.unblock()
 
 	for i := 0; i < 2; i++ {
@@ -340,5 +340,98 @@ func TestDefaultListingDeadline(t *testing.T) {
 		if got := defaultListingDeadline(tc.interval); got >= tc.interval {
 			t.Errorf("defaultListingDeadline(%v) = %v, not below the interval", tc.interval, got)
 		}
+	}
+}
+
+// watchJoins reports each target key for which a heartbeat joins a listing
+// already in progress.
+func watchJoins(svc *HeartbeatService) <-chan string {
+	joined := make(chan string, 16)
+	svc.mu.Lock()
+	svc.joinedListing = func(key string) { joined <- key }
+	svc.mu.Unlock()
+	return joined
+}
+
+func waitForJoin(t *testing.T, joined <-chan string, key string) {
+	t.Helper()
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case got := <-joined:
+			if got == key {
+				return
+			}
+		case <-timeout:
+			t.Fatalf("no heartbeat joined the %s listing within 5s", key)
+		}
+	}
+}
+
+// A heartbeat never writes into a listing's result, which concurrent
+// heartbeats may share: merging the auxiliary agents must not use spare
+// capacity in the default target's slice.
+func TestHeartbeatLiveness_SharedListingNotModified(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+	svc, defaultMgr, _ := newLivenessService(client, time.Hour, 5*time.Second)
+	listed := make([]api.AgentInfo, 1, 8)
+	listed[0] = api.AgentInfo{Name: "d1", ProjectID: "p1", Phase: "running"}
+	defaultMgr.agents = listed
+
+	if err := svc.ForceHeartbeat(context.Background()); err != nil {
+		t.Fatalf("ForceHeartbeat: %v", err)
+	}
+	calls := client.getHeartbeatCalls()
+	if len(calls) != 1 {
+		t.Fatalf("got %d heartbeats, want 1", len(calls))
+	}
+	assertHeartbeat(t, calls[0].Heartbeat, allComplete, allAgents)
+	if spare := listed[:2][1]; spare.Name != "" {
+		t.Errorf("heartbeat wrote agent %q into the listing's spare capacity", spare.Name)
+	}
+}
+
+// A heartbeat that joined a listing before its deadline, and whose own
+// deadline is later, does not report that listing's result when it arrives
+// after the listing's deadline.
+func TestHeartbeatLiveness_LateResultNotReported(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+	svc, defaultMgr, _ := newLivenessService(client, time.Hour, time.Second)
+	joined := watchJoins(svc)
+	defaultMgr.block()
+	defer defaultMgr.unblock()
+
+	errs := make(chan error, 2)
+	go func() { errs <- svc.ForceHeartbeat(context.Background()) }()
+	waitFor(t, 3*time.Second, "the first listing to start", func() bool { return defaultMgr.calls.Load() == 1 })
+	svc.mu.Lock()
+	svc.listingDeadline = 10 * time.Second
+	svc.mu.Unlock()
+	// Joins the listing (deadline 1s) and waits up to 10s for it.
+	go func() { errs <- svc.ForceHeartbeat(context.Background()) }()
+	waitForJoin(t, joined, "docker")
+	// The first heartbeat goes out once the listing's deadline has passed.
+	waitForHeartbeats(t, client, 1, 5*time.Second)
+	defaultMgr.unblock() // the listing returns late
+
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-errs:
+			if err != nil {
+				t.Fatalf("ForceHeartbeat: %v", err)
+			}
+		case <-time.After(15 * time.Second):
+			t.Fatal("ForceHeartbeat did not return")
+		}
+	}
+	calls := client.getHeartbeatCalls()
+	if len(calls) != 2 {
+		t.Fatalf("got %d heartbeats, want 2", len(calls))
+	}
+	for _, c := range calls {
+		assertHeartbeat(t, c.Heartbeat, defaultPending, map[string]string{"a1": k8sTargetB})
+	}
+	if got := defaultMgr.calls.Load(); got != 1 {
+		t.Errorf("default runtime listed %d times, want 1", got)
 	}
 }

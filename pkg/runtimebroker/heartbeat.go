@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -99,12 +100,16 @@ type HeartbeatService struct {
 	// a target whose listing has run past its deadline, so a hung runtime
 	// cannot pile up goroutines.
 	listings map[string]*targetListing
-	stopCh   chan struct{}
-	doneCh   chan struct{}
+	// joinedListing, if set, is called with each target key for which a
+	// heartbeat joined a listing already in progress. Tests use it.
+	joinedListing func(key string)
+	stopCh        chan struct{}
+	doneCh        chan struct{}
 }
 
 // targetListing is one runtime target's agent listing, shared by every
-// heartbeat that waits for it.
+// heartbeat that waits for it. Its agents slice is shared by those
+// heartbeats, so readers must not modify it or append to it.
 type targetListing struct {
 	done     chan struct{} // closed when agents and err are set
 	deadline time.Time
@@ -335,7 +340,9 @@ type listTarget struct {
 func (s *HeartbeatService) listTargets(ctx context.Context, targets []listTarget, deadline time.Time) ([][]api.AgentInfo, []error) {
 	now := time.Now()
 	listings := make([]*targetListing, len(targets))
+	var joined []string
 	s.mu.Lock()
+	onJoin := s.joinedListing
 	if s.listings == nil {
 		s.listings = make(map[string]*targetListing)
 	}
@@ -343,6 +350,7 @@ func (s *HeartbeatService) listTargets(ctx context.Context, targets []listTarget
 		if l, ok := s.listings[t.key]; ok {
 			if now.Before(l.deadline) {
 				listings[i] = l
+				joined = append(joined, t.key)
 			}
 			continue
 		}
@@ -352,6 +360,11 @@ func (s *HeartbeatService) listTargets(ctx context.Context, targets []listTarget
 		go s.runListing(ctx, t.key, t.mgr, l)
 	}
 	s.mu.Unlock()
+	if onJoin != nil {
+		for _, key := range joined {
+			onJoin(key)
+		}
+	}
 
 	timer := time.NewTimer(time.Until(deadline))
 	defer timer.Stop()
@@ -537,9 +550,11 @@ func (s *HeartbeatService) gatherProjectAgents(ctx context.Context) ([]hubclient
 	// The default runtime's agents. If its listing failed (e.g. its runtime
 	// binary is missing or it was too slow), continue — auxiliary runtimes
 	// may still work.
+	// Listing results may be shared with concurrent heartbeats and are
+	// read-only: copy before appending the auxiliary agents.
 	var agents []api.AgentInfo
 	if listErrs[0] == nil {
-		agents = listed[0]
+		agents = slices.Clone(listed[0])
 	}
 	for _, ag := range agents {
 		agentTargets[heartbeatAgentKey(ag)] = targets[0].id
