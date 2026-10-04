@@ -317,3 +317,25 @@ func fileSourceFromEnv() *FileSource {
 	src.SetBootstrap(envTok)
 	return src
 }
+
+// lateFileSourceFromEnv builds a FileSource for the default transport token
+// file when SCION_TRANSPORT_MODE names a proxy mode, no transport token was
+// injected, and the file exists. sciontool init removes a leftover file at
+// start when no transport token was injected, so the file then exists only
+// because a token refresh or reset-auth delivered a transport token after
+// the agent started. Processes that were already running, and so never saw
+// SCION_TRANSPORT_TOKEN_FILE, pick it up this way. Returns nil otherwise,
+// so hosts and agents without a proxy mode are unaffected.
+func lateFileSourceFromEnv() *FileSource {
+	if !IsProxyMode(os.Getenv(EnvTransportMode)) {
+		return nil
+	}
+	path := DefaultTransportTokenFilePath()
+	if path == "" {
+		return nil
+	}
+	if _, err := os.Lstat(path); err != nil {
+		return nil
+	}
+	return NewFileSource(path, nil)
+}

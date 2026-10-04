@@ -170,6 +170,13 @@ func ModeFromString(mode string) HeaderMode {
 	}
 }
 
+// IsProxyMode reports whether mode (a SCION_TRANSPORT_MODE value) names a
+// platform proxy in front of the hub that requires a transport credential:
+// "iap" or "cloudrun_invoker".
+func IsProxyMode(mode string) bool {
+	return mode == "iap" || mode == "cloudrun_invoker"
+}
+
 // ModeFromEnv reads SCION_TRANSPORT_MODE and returns the corresponding
 // HeaderMode. Returns HeaderAuthorization when unset or unrecognised.
 func ModeFromEnv() HeaderMode {
@@ -188,17 +195,32 @@ func ModeFromEnv() HeaderMode {
 //  2. On GCE && SCION_METADATA_MODE not redirected (unset or "passthrough")
 //     && audience configured (SCION_TRANSPORT_AUDIENCE or
 //     SCION_HUB_OIDC_AUDIENCE) → MetadataSource
-//  3. Otherwise → nil (no transport auth)
+//  3. SCION_TRANSPORT_MODE names a proxy mode and the default transport
+//     token file exists → FileSource for that file. This covers an agent
+//     that started without a transport token and received one later, from
+//     a token refresh or reset-auth.
+//  4. Otherwise → nil (no transport auth)
 func FromEnv() (TokenSource, error) {
 	if src := fileSourceFromEnv(); src != nil {
 		return src, nil
 	}
+	if src := metadataSourceFromEnv(); src != nil {
+		return src, nil
+	}
+	if src := lateFileSourceFromEnv(); src != nil {
+		return src, nil
+	}
+	return nil, nil
+}
 
+// metadataSourceFromEnv returns a MetadataSource when running on GCE with
+// the real metadata server reachable and a transport audience configured.
+func metadataSourceFromEnv() *MetadataSource {
 	if !IsOnGCEFunc() {
-		return nil, nil
+		return nil
 	}
 	if mode := os.Getenv(EnvMetadataMode); IsMetadataRedirected(mode) {
-		return nil, nil
+		return nil
 	}
 
 	audience := os.Getenv(EnvTransportAudience)
@@ -206,10 +228,9 @@ func FromEnv() (TokenSource, error) {
 		audience = os.Getenv(EnvHubOIDCAudience)
 	}
 	if audience == "" {
-		return nil, nil
+		return nil
 	}
-
-	return NewMetadataSource(audience), nil
+	return NewMetadataSource(audience)
 }
 
 // TransportSettings holds transport auth settings read from settings.yaml.

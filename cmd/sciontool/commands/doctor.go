@@ -235,6 +235,19 @@ func checkTransportAuth(diag *doctorDiag) transportauth.TokenSource {
 		return nil
 	}
 	if src == nil {
+		if mode := os.Getenv(transportauth.EnvTransportMode); transportauth.IsProxyMode(mode) {
+			// A proxy guards the hub but no transport token has been
+			// received yet (for example the dispatch-time mint failed).
+			// A later refresh or reset-auth installs one.
+			diag.transportConfigured = true
+			diag.transportMissing = true
+			fmt.Println("[INFO] Transport Auth: hub-provided token")
+			printTransportModeAndAudience()
+			fmt.Printf("[FAIL] Transport credential: none received yet (no %s value and no file at %s)\n",
+				transportauth.EnvTransportToken, transportauth.DefaultTransportTokenFilePath())
+			reportTransportRefreshStatus(diag)
+			return nil
+		}
 		fmt.Println("[INFO] Transport Auth: none")
 		return nil
 	}

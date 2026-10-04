@@ -498,3 +498,66 @@ func TestCheckAuthentication_UnparseableLocationFixedMessage(t *testing.T) {
 		t.Errorf("raw Location printed:\n%s", out)
 	}
 }
+
+// Proxy mode, no transport token received yet (dispatch-time mint failed):
+// doctor reports the missing credential instead of "none".
+func TestCheckTransportAuth_ProxyModeNoneReceivedFails(t *testing.T) {
+	isolateDoctorTransport(t)
+	t.Setenv(transportauth.EnvTransportMode, "iap")
+
+	out, diag := runCheckTransportAuth(t)
+
+	if !diag.transportMissing || !diag.transportConfigured {
+		t.Fatalf("expected a missing transport credential, diag=%+v\n%s", diag, out)
+	}
+	for _, want := range []string{
+		"Mode: iap (header: Proxy-Authorization)",
+		"[FAIL] Transport credential: none received yet",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Transport Auth: none") {
+		t.Errorf("proxy mode must not be reported as no transport auth:\n%s", out)
+	}
+}
+
+// Proxy mode, the token arrived later through the file: doctor shows the
+// file-backed source in effect with its expiry, never the value.
+func TestCheckTransportAuth_ProxyModeLateFileInUse(t *testing.T) {
+	home := isolateDoctorTransport(t)
+	t.Setenv(transportauth.EnvTransportMode, "iap")
+	fileTok := makeDoctorTestJWT(time.Now().Add(50 * time.Minute))
+	path := writeDoctorTransportFile(t, home, fileTok)
+
+	out, diag := runCheckTransportAuth(t)
+
+	if diag.transportFailed() {
+		t.Fatalf("expected no transport failure, diag=%+v\n%s", diag, out)
+	}
+	for _, want := range []string{
+		"Transport Auth: hub-provided token",
+		"[ OK ] Transport credential in use: refreshed file " + path,
+		"env  (SCION_TRANSPORT_TOKEN): not set in this process",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	assertNoTokenValues(t, out, fileTok)
+}
+
+// Without a proxy mode nothing changes: no transport auth is reported.
+func TestCheckTransportAuth_NoProxyModeNone(t *testing.T) {
+	home := isolateDoctorTransport(t)
+	writeDoctorTransportFile(t, home, makeDoctorTestJWT(time.Now().Add(50*time.Minute)))
+
+	out, diag := runCheckTransportAuth(t)
+	if diag.transportConfigured || diag.transportFailed() {
+		t.Fatalf("expected no transport auth, diag=%+v\n%s", diag, out)
+	}
+	if !strings.Contains(out, "[INFO] Transport Auth: none") {
+		t.Errorf("expected none:\n%s", out)
+	}
+}

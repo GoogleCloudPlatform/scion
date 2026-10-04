@@ -169,6 +169,9 @@ type Client struct {
 	retryMaxDelay  time.Duration
 	oidcSource     transportauth.TokenSource // transport-layer OIDC token source (nil = disabled)
 	oidcMode       transportauth.HeaderMode  // header carrying the transport token
+	// oidcLate is true when oidcSource is the file-backed source installed
+	// in proxy mode for an agent that started without a transport token.
+	oidcLate bool
 	// tokenChownUID and tokenChownGID are the ownership StartTokenRefresh
 	// applies (via WriteTokenFile) to the token file after every refresh.
 	// Guarded by tokenMu alongside token itself. Set once, before the
@@ -1716,13 +1719,21 @@ const transportResetUnparseableMessage = "reset-auth delivered a transport token
 // restoreTransportTokenFile rewrites the transport token file with the
 // credential this client currently uses, when that credential parses. The
 // source gives an unparseable file value zero expiry, so a valid in-memory
-// or bootstrap value is what Token returns here.
+// or bootstrap value is what Token returns here. A client in proxy mode
+// that started without a transport token may have no valid credential to
+// restore; the unparseable file is then removed, so other processes do not
+// pick it up.
 func (c *Client) restoreTransportTokenFile(uid, gid int) {
 	cur, err := c.oidcSource.Token()
 	if err != nil || cur == "" {
 		return
 	}
 	if _, err := transportauth.ParseTokenExpiry(cur); err != nil {
+		if c.oidcLate {
+			if _, rerr := removeFileNoFollow(TransportTokenFilePath()); rerr != nil {
+				log.Error("Failed to remove unusable transport token file: %v", rerr)
+			}
+		}
 		return
 	}
 	if err := WriteTransportTokenFile(cur, uid, gid); err != nil {

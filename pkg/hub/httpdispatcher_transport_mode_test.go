@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
@@ -173,5 +174,69 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_NoTransportMode(t *testing.T) {
 	}
 	if _, ok := mockClient.lastResolvedEnv["SCION_TRANSPORT_TOKEN"]; ok {
 		t.Error("SCION_TRANSPORT_TOKEN should not be in resolvedEnv when no transport minter")
+	}
+}
+
+// TestHTTPAgentDispatcher_DispatchAgentStart_TransportModeOnMintFailure
+// verifies that SCION_TRANSPORT_MODE is still injected when the transport
+// minter fails at dispatch time, so the agent can adopt a transport token
+// delivered later by a token refresh or reset-auth. No token is injected.
+func TestHTTPAgentDispatcher_DispatchAgentStart_TransportModeOnMintFailure(t *testing.T) {
+	ctx := context.Background()
+	memStore := createTestStore(t)
+
+	if err := memStore.CreateProject(ctx, &store.Project{
+		ID:        tid("project-mf"),
+		Name:      "mint-failure",
+		Slug:      "mint-failure",
+		GitRemote: "https://github.com/example/repo.git",
+	}); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+	if err := memStore.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
+		ID:       tid("broker-mf"),
+		Name:     "test-broker-mf",
+		Slug:     "test-broker-mf",
+		Endpoint: "http://localhost:9800",
+		Status:   store.BrokerStatusOnline,
+	}); err != nil {
+		t.Fatalf("failed to create runtime broker: %v", err)
+	}
+	if err := memStore.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  tid("project-mf"),
+		BrokerID:   tid("broker-mf"),
+		BrokerName: "test-broker-mf",
+		LocalPath:  "/home/user/projects/.scion",
+		Status:     store.BrokerStatusOnline,
+	}); err != nil {
+		t.Fatalf("failed to add project provider: %v", err)
+	}
+
+	mockClient := &mockRuntimeBrokerClient{}
+	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
+	minter := &FakeTransportMinter{Err: errors.New("mint unavailable")}
+	dispatcher.SetTransportMinter(minter, "https://iap-client-id.apps.googleusercontent.com", "iap")
+
+	agent := &store.Agent{
+		ID:              "agent-mf-123",
+		Name:            "mint-failure-agent",
+		Slug:            "mint-failure-agent",
+		ProjectID:       tid("project-mf"),
+		RuntimeBrokerID: tid("broker-mf"),
+	}
+	if err := dispatcher.DispatchAgentStart(ctx, agent, "", false); err != nil {
+		t.Fatalf("DispatchAgentStart failed: %v", err)
+	}
+	if minter.CallCount == 0 {
+		t.Fatal("expected the transport minter to be called")
+	}
+
+	if v := mockClient.lastResolvedEnv["SCION_TRANSPORT_MODE"]; v != "iap" {
+		t.Errorf("expected SCION_TRANSPORT_MODE='iap' after a mint failure, got %q", v)
+	}
+	for _, k := range []string{"SCION_TRANSPORT_TOKEN", "SCION_TRANSPORT_AUDIENCE", "SCION_TRANSPORT_TOKEN_EXPIRY"} {
+		if _, ok := mockClient.lastResolvedEnv[k]; ok {
+			t.Errorf("%s should not be in resolvedEnv when the mint failed", k)
+		}
 	}
 }
