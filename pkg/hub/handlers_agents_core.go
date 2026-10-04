@@ -2122,7 +2122,7 @@ func (s *Server) createAgentInProject(
 		}
 		if _, err := s.recordRunIntent(ctx, agent, intent); err != nil {
 			s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, nil)
-			writeErrorFromErr(w, err, "")
+			writeRunIntentError(w, err, agent.ID)
 			return
 		}
 		if !req.ProvisionOnly {

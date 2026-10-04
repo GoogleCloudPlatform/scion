@@ -222,6 +222,18 @@ func deleteClaimedDuringDispatch(err error, agentID string) *startRefusal {
 	return deleteInProgressRefusal(agentID)
 }
 
+// writeRunIntentError answers a failed running-intent write. A refusal
+// because a delete holds the row (store.ErrDeleteInProgress) gets the same
+// delete_in_progress body, details.agentId included, as every other
+// delete_in_progress answer; anything else goes to writeErrorFromErr.
+func writeRunIntentError(w http.ResponseWriter, err error, agentID string) {
+	if refusal := deleteClaimedDuringDispatch(err, agentID); refusal != nil {
+		refusal.write(w)
+		return
+	}
+	writeErrorFromErr(w, err, "")
+}
+
 // clearFailedDeletion clears a failed delete marker after a successful
 // start, stop, restart or reincarnate (design §2.1). A row that reads as
 // failed counts: state=failed, or a deleting row whose lease has expired.

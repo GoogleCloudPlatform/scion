@@ -500,7 +500,7 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			return
 		}
 		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
-			writeErrorFromErr(w, err, "")
+			writeRunIntentError(w, err, agent.ID)
 			return
 		}
 		created, err := dispatcher.DispatchAgentCreate(ctx, agent)

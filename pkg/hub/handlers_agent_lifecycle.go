@@ -492,7 +492,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// design, run intent semantics).
 			if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
 				s.rollbackBrokerQuota(ctx, agent, reserved)
-				writeErrorFromErr(w, err, "")
+				writeRunIntentError(w, err, agent.ID)
 				return
 			}
 			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", resume)
@@ -510,7 +510,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				s.rollbackBrokerQuota(ctx, agent, reserved)
 			}
 		} else if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
-			writeErrorFromErr(w, err, "")
+			writeRunIntentError(w, err, agent.ID)
 			return
 		}
 	case api.AgentActionStop:
@@ -561,7 +561,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		newPhase = string(state.PhaseRunning)
 		// A restart leaves the agent running: record that before the stop leg.
 		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
-			writeErrorFromErr(w, err, "")
+			writeRunIntentError(w, err, agent.ID)
 			return
 		}
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {

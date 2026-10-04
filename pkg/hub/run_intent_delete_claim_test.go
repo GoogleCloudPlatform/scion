@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -43,17 +44,41 @@ func (s preClaimReadStore) GetAgent(ctx context.Context, id string) (*store.Agen
 	if err != nil || a == nil {
 		return a, err
 	}
+	return preClaim(a), nil
+}
+
+func (s preClaimReadStore) GetAgentBySlug(ctx context.Context, projectID, slug string) (*store.Agent, error) {
+	a, err := s.Store.GetAgentBySlug(ctx, projectID, slug)
+	if err != nil || a == nil {
+		return a, err
+	}
+	return preClaim(a), nil
+}
+
+func preClaim(a *store.Agent) *store.Agent {
 	c := *a
 	c.DeletionState = ""
 	c.DeletionLeaseAt = nil
-	return &c, nil
+	return &c
+}
+
+// requireIntentDeleteInProgress asserts the delete_in_progress answer of a
+// refused running-intent write, in the shape every delete_in_progress
+// answer has: details.agentId names the agent (round 6 n1).
+func requireIntentDeleteInProgress(t *testing.T, rec *httptest.ResponseRecorder, agentID string) {
+	t.Helper()
+	requireDeleteInProgress(t, rec)
+	var body ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, ErrCodeDeleteInProgress, body.Error.Code)
+	assert.Equal(t, agentID, body.Error.Details["agentId"], "details.agentId")
 }
 
 // A delete that claims the row after the start gate passed refuses the
-// start's running-intent write: start, restart and create-on-existing answer
-// 409 delete_in_progress, nothing is dispatched (restart's stop leg
-// included), and the stored intent stays as the delete left it
-// (ptone/scion#2550, round 5 N2).
+// start's running-intent write: start, restart and create-on-existing answer 409
+// delete_in_progress, nothing is dispatched (restart's stop leg included),
+// and the stored intent stays as the delete left it (ptone/scion#2550,
+// round 5 N2).
 func TestRunIntent_DeleteClaimAfterGateRefusesStart(t *testing.T) {
 	for _, action := range []string{api.AgentActionStart, api.AgentActionRestart} {
 		t.Run(action, func(t *testing.T) {
@@ -68,7 +93,7 @@ func TestRunIntent_DeleteClaimAfterGateRefusesStart(t *testing.T) {
 			seedAgentDeletion(t, base, agent.ID, seedLiveDeleting)
 
 			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/"+action, nil)
-			requireDeleteInProgress(t, rec)
+			requireIntentDeleteInProgress(t, rec, agent.ID)
 			assert.Zero(t, disp.starts, "no start dispatch")
 			assert.Zero(t, disp.stops, "no stop dispatch")
 
