@@ -691,7 +691,7 @@ func TestFinishHubStart_FinalizeWaitsOnOldHub(t *testing.T) {
 	var err error
 	stderr := captureStderr(t, func() {
 		_ = captureStdout(t, func() {
-			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, finalizeCreateResponse(nil), nil, true)
+			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, false, finalizeCreateResponse(nil), nil, true)
 		})
 	})
 	require.NoError(t, err)
@@ -712,7 +712,7 @@ func TestFinishHubStart_FinalizeBudgetFromFirstGet(t *testing.T) {
 	start := time.Now()
 	_ = captureStderr(t, func() {
 		_ = captureStdout(t, func() {
-			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, finalizeCreateResponse(activeLaunch("", 3, nil)), nil, true)
+			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, false, finalizeCreateResponse(activeLaunch("", 3, nil)), nil, true)
 		})
 	})
 	var timeout *launchWaitTimeoutError
@@ -729,7 +729,7 @@ func TestFinishHubStart_FinalizeNoWaitReportsCurrentPhase(t *testing.T) {
 	var err error
 	stderr := captureStderr(t, func() {
 		_ = captureStdout(t, func() {
-			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, finalizeCreateResponse(nil), nil, true)
+			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, false, finalizeCreateResponse(nil), nil, true)
 		})
 	})
 	require.NoError(t, err)
@@ -749,7 +749,7 @@ func TestFinishHubStart_FinalizeNoWaitFetchFailsOmitsPhase(t *testing.T) {
 	var stdout string
 	_ = captureStderr(t, func() {
 		stdout = captureStdout(t, func() {
-			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, finalizeCreateResponse(nil), nil, true)
+			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, false, finalizeCreateResponse(nil), nil, true)
 		})
 	})
 	require.NoError(t, err)
@@ -893,7 +893,7 @@ func TestFinishHubStart_JSONAttachAfterFinalizeAttaches(t *testing.T) {
 	var stdout string
 	_ = captureStderr(t, func() {
 		stdout = captureStdout(t, func() {
-			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, finalizeCreateResponse(nil), nil, true)
+			err = finishHubStart(hubCtx, launchTestProjectID, "a1", false, false, finalizeCreateResponse(nil), nil, true)
 		})
 	})
 	// The attach step stops at the token gate in this test.

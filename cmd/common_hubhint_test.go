@@ -148,6 +148,12 @@ func TestShowUsageForError_HubFailuresSuppressUsage(t *testing.T) {
 		{"fmt-wrapped hub 400 APIError", fmt.Errorf("failed: %w", apiErr(400, "invalid_request", "bad")), false},
 		{"wrapHubError 404", wrapHubError(apiErr(404, "agent_not_found", "gone")), false},
 		{"wrapHubError connectivity", wrapHubError(transportErr()), false},
+		// Hub launch outcomes (#2360) are runtime results, not usage errors.
+		{"incomplete create (hub 409)", incompleteCreateError("a1", &apiclient.APIError{StatusCode: 409, Code: errCodeAgentCreateIncomplete, Message: "create did not complete"}), false},
+		{"launch failed", &launchFailedError{Agent: "a1", Phase: "error", Reason: "agent 'a1' did not start"}, false},
+		{"launch wait timeout", &launchWaitTimeoutError{Agent: "a1"}, false},
+		{"launch wait interrupted", &launchWaitInterruptedError{Agent: "a1"}, false},
+		{"fmt-wrapped launch wait timeout", fmt.Errorf("start: %w", &launchWaitTimeoutError{Agent: "a1"}), false},
 		{"non-hub runtime error keeps usage", errors.New("some local failure"), true},
 	}
 	for _, tt := range tests {

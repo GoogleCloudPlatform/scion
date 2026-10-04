@@ -166,6 +166,8 @@ func TestStartAgentViaHub_SendsNoAuthOnWire(t *testing.T) {
 
 // ptone/scion#1911: the existing-agent pre-check converts start on a stopped
 // or suspended agent into a resume request, and leaves other phases alone.
+// The success line uses the same verb as the action line (a stopped agent is
+// "Restarting" and then "restarted", not "resumed").
 func TestStartAgentViaHub_ExistingAgentPreCheck(t *testing.T) {
 	const projectID, agentName = "proj-precheck", "precheck-agent"
 
@@ -173,20 +175,21 @@ func TestStartAgentViaHub_ExistingAgentPreCheck(t *testing.T) {
 		phase      string
 		wantResume bool
 		wantAction string
+		wantResult string
 	}{
-		{"", false, "Starting agent"},
-		{"stopped", true, "Restarting agent"},
-		{"suspended", true, "Resuming agent"},
-		{"running", false, "Starting agent"},
+		{"", false, "Starting agent", "started"},
+		{"stopped", true, "Restarting agent", "restarted"},
+		{"suspended", true, "Resuming agent", "resumed"},
+		{"running", false, "Starting agent", "started"},
 		// The hub only restarts error-phase agents in place with --force,
 		// so start leaves them as-is (and the hub still reports 409).
-		{"error", false, "Starting agent"},
+		{"error", false, "Starting agent", "started"},
 	} {
 		t.Run("phase="+tc.phase, func(t *testing.T) {
 			resetHubStartGlobals(t)
 			stub := newHubStartStub(t, projectID, agentName, tc.phase)
 			var err error
-			stdout, _ := captureStdIO(t, func() {
+			stdout, stderr := captureStdIO(t, func() {
 				err = startAgentViaHub(nil, stub.hubCtx(t, projectID), agentName, "", false, nil)
 			})
 			require.NoError(t, err)
@@ -198,6 +201,7 @@ func TestStartAgentViaHub_ExistingAgentPreCheck(t *testing.T) {
 				assert.False(t, present, "resume must not be set for phase %q", tc.phase)
 			}
 			assert.Contains(t, stdout, tc.wantAction+" '"+agentName+"'")
+			assert.Contains(t, stderr, "Agent '"+agentName+"' "+tc.wantResult+" via Hub.")
 		})
 	}
 }

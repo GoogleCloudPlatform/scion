@@ -396,11 +396,22 @@ type hubError struct {
 func (e *hubError) Error() string { return e.msg }
 func (e *hubError) Unwrap() error { return e.err }
 
-// isHubFailure reports whether err came from talking to the Hub: either it
-// went through wrapHubError, or it wraps a structured *apiclient.APIError.
+// isHubFailure reports whether err came from talking to the Hub: it went
+// through wrapHubError, it is a Hub launch outcome (launchFailedError,
+// launchWaitTimeoutError, launchWaitInterruptedError), or it wraps a
+// structured *apiclient.APIError.
 func isHubFailure(err error) bool {
 	var he *hubError
 	if errors.As(err, &he) {
+		return true
+	}
+	// Launch outcomes reported by the Hub (an incomplete or failed create,
+	// a wait that timed out or was interrupted) are runtime results, not
+	// usage errors, even though they do not wrap an APIError.
+	var lf *launchFailedError
+	var lt *launchWaitTimeoutError
+	var li *launchWaitInterruptedError
+	if errors.As(err, &lf) || errors.As(err, &lt) || errors.As(err, &li) {
 		return true
 	}
 	var apiErr *apiclient.APIError
@@ -1398,15 +1409,20 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		workspaceFinalized = true
 	}
 
-	return finishHubStart(hubCtx, projectID, agentName, resume, resp, remainingWarnings, workspaceFinalized)
+	// A stopped agent is restarted in place with a fresh session; report it
+	// with the same word as the "Restarting agent" line above.
+	restarted := hubStartActionWord(existingPhase, resume, req.ForceResume) == "Restarting"
+	return finishHubStart(hubCtx, projectID, agentName, resume, restarted, resp, remainingWarnings, workspaceFinalized)
 }
 
 // finishHubStart completes a Hub start after the create (and any workspace
 // finalize): it waits for the launch when needed, reports the result, and
-// attaches with --attach. textWarnings are the create warnings still to
-// print in text output (those not already shown as workspace notices); JSON
-// output carries all of resp.Warnings.
-func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume bool, resp *hubclient.CreateAgentResponse, textWarnings []string, workspaceFinalized bool) error {
+// attaches with --attach. restarted reports a stopped agent restarted in
+// place, so the success line matches the "Restarting" action word.
+// textWarnings are the create warnings still to print in text output (those
+// not already shown as workspace notices); JSON output carries all of
+// resp.Warnings.
+func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume, restarted bool, resp *hubclient.CreateAgentResponse, textWarnings []string, workspaceFinalized bool) error {
 	// Decide whether to wait for the agent to reach running:
 	//   - after a workspace finalize, which dispatches the start;
 	//   - when the Hub accepted the create for an asynchronous launch;
@@ -1466,7 +1482,10 @@ func finishHubStart(hubCtx *HubContext, projectID, agentName string, resume bool
 	}
 
 	displayStatus := "started"
-	if resume {
+	switch {
+	case restarted:
+		displayStatus = "restarted"
+	case resume:
 		displayStatus = "resumed"
 	}
 	launching := !needWait && launchActive(finalAgent)
