@@ -1038,9 +1038,11 @@ export class ScionPageAgents extends LitElement {
 
   /**
    * Seed one sorted page under its epoch and build the window's page
-   * result. Rows of agents already deleted live are left out (and counted,
-   * for the backfill chip), and their IDs are dropped from `stats.agents`
-   * too, so a deleted agent never re-enters the member index. The live
+   * result. Rows of agents already deleted live are left out, and their
+   * IDs are dropped from `stats.agents` too, so a deleted agent never
+   * re-enters the member index. A left-out row whose agent the store no
+   * longer holds is counted for the backfill chip (`AgentSeedResult.dropped`):
+   * the page is short by at least that many rows. The live
    * changes and any resync since the request was sent go to the window to
    * replay.
    */

@@ -203,8 +203,10 @@ export interface PagedPageResult {
   liveDeleted?: readonly string[] | undefined;
   /**
    * How many of the server's rows were left out of `agents` because the
-   * agent was deleted live. The page is short by that many rows, so the
-   * window shows the backfill chip, as it does for a live on-page delete.
+   * agent was deleted live and the store no longer holds it (see
+   * `AgentSeedResult.dropped`). The page is short by at least that many
+   * rows, so the window shows the backfill chip, as it does for a live
+   * on-page delete.
    */
   droppedRows?: number | undefined;
   /**

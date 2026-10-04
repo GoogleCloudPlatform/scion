@@ -107,7 +107,11 @@ export class ScionPageHome extends LitElement {
    */
   private memberIndex: AgentMemberIndex | null = null;
 
-  /** Count-only mode: a live change may have changed the snapshot counts. */
+  /**
+   * The counts may be stale, so the refresh chip shows. In count-only mode
+   * it is set after any live change or a resync; with stats IDs, only
+   * after a resync of the live connection.
+   */
   @state()
   private countsMayHaveChanged = false;
 

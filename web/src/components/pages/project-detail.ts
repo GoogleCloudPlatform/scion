@@ -1917,8 +1917,10 @@ export class ScionPageProjectDetail extends LitElement {
   /**
    * Seed one sorted page under its epoch and build the window's page
    * result: the page rows as the store's current objects (a row of an
-   * agent already deleted live is left out, and counted for the backfill
-   * chip), and what landed while the request was in flight (upserted,
+   * agent already deleted live is left out; if the store no longer holds
+   * the agent it is counted for the backfill chip, as in
+   * `AgentSeedResult.dropped`, and the page is short by at least that many
+   * rows), and what landed while the request was in flight (upserted,
    * deleted, and deltas for agents not in the store, plus any resync) for
    * the window to replay.
    */
