@@ -17,6 +17,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -1027,11 +1028,19 @@ func HarnessConfigPathFromContext(ctx context.Context) string {
 // The zero value means "the Hub supplied no defaults"; callers leave the
 // pointer nil in that case so an unset field is indistinguishable on the wire
 // from a Hub that predates the field. See design §3.2.3.
+//
+// AutoExposePorts is the Hub's auto-expose-ports default
+// (SCION_AUTO_EXPOSE_PORTS). It is the lowest env tier: buildAgentEnv applies
+// it only when no higher tier (hub-resolved env, template, harness-config
+// env, scion-agent.json) left the key set. Unlike the four limit fields it is
+// sent on start and restart as well as create, so a change to the Hub default
+// reaches an agent at its next start.
 type HubAgentDefaults struct {
-	MaxTurns      int           `json:"maxTurns,omitempty"`
-	MaxModelCalls int           `json:"maxModelCalls,omitempty"`
-	MaxDuration   string        `json:"maxDuration,omitempty"`
-	Resources     *ResourceSpec `json:"resources,omitempty"`
+	MaxTurns        int           `json:"maxTurns,omitempty"`
+	MaxModelCalls   int           `json:"maxModelCalls,omitempty"`
+	MaxDuration     string        `json:"maxDuration,omitempty"`
+	Resources       *ResourceSpec `json:"resources,omitempty"`
+	AutoExposePorts *bool         `json:"autoExposePorts,omitempty"`
 }
 
 // IsEmpty reports whether no default carries a value. An empty set is not put
@@ -1041,7 +1050,22 @@ func (d *HubAgentDefaults) IsEmpty() bool {
 	if d == nil {
 		return true
 	}
-	return d.MaxTurns == 0 && d.MaxModelCalls == 0 && d.MaxDuration == "" && d.Resources == nil
+	return d.MaxTurns == 0 && d.MaxModelCalls == 0 && d.MaxDuration == "" && d.Resources == nil &&
+		d.AutoExposePorts == nil
+}
+
+// EnvAutoExposePorts is the env key that enables in-container port
+// auto-exposure (read by sciontool's autoexpose.ConfigFromEnv).
+const EnvAutoExposePorts = "SCION_AUTO_EXPOSE_PORTS"
+
+// DefaultEnv returns the env entries the Hub defaults contribute at the
+// lowest env tier, or nil when there are none. Callers apply each entry only
+// when the key is otherwise unset.
+func (d *HubAgentDefaults) DefaultEnv() map[string]string {
+	if d == nil || d.AutoExposePorts == nil {
+		return nil
+	}
+	return map[string]string{EnvAutoExposePorts: strconv.FormatBool(*d.AutoExposePorts)}
 }
 
 type hubAgentDefaultsContextKey struct{}
@@ -1135,6 +1159,14 @@ type StartOptions struct {
 	// start's cleanup: the runtime then skips its own start cleanup and
 	// leaves the reported resources to the caller. Set both hooks together.
 	OnResourceCreated func(ResourceHandle)
+	// ResolvedKubernetesServiceAccountName is the Kubernetes ServiceAccount
+	// resolved by the broker from the operator-configured GSA mapping;
+	// applied over the template and persisted config at start, when
+	// non-empty. It is not part of InlineConfig because it must also apply
+	// when starting or restarting an existing agent, whose Kubernetes config
+	// otherwise comes only from the template chain and the persisted config,
+	// not from InlineConfig.
+	ResolvedKubernetesServiceAccountName string
 }
 
 // ResourceHandle identifies one runtime resource created during a launch

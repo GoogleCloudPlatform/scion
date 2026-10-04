@@ -114,11 +114,12 @@ Furthermore, agent identities are **strictly scoped by their project** (e.g., `p
 
 ### Workspace Sharing Modes
 
-A **Workspace** is the working directory mounted into a single agent's container at `/workspace`. How it is provisioned across a project's agents is set by the project's **workspace sharing mode**. There is one universal set of three modes, intended for both local and Hub-managed projects:
+A **Workspace** is the working directory mounted into a single agent's container at `/workspace`. How it is provisioned across a project's agents is set by the project's **workspace sharing mode**, chosen when the project is created. There are four modes:
 
 - **Shared-plain** — One workspace directory is mounted into every agent with no per-agent isolation. This is the model used for plain (non-git) projects.
-- **Worktree-per-agent** — Each agent gets its own [git worktree](https://git-scm.com/docs/git-worktree) over a shared checkout, isolating working trees while sharing one clone's history. Supported in local mode and on Hub-managed projects; requires git 2.48 or later on the broker (on Kubernetes, the NFS workspace backend).
+- **Worktree-per-agent** — Each agent gets its own [git worktree](https://git-scm.com/docs/git-worktree) over a shared checkout, isolating working trees while sharing one clone's history. Supported in local mode and on Hub-managed git projects; requires git 2.48 or later on the broker (on Kubernetes, only with NFS workspace storage).
 - **Clone-per-agent** — Each agent gets its own full git clone of the repository.
+- **Empty-per-agent** — For Hub-managed projects without git: each agent gets its own private directory that starts empty. Use [shared directories](/scion/local/workspaces-and-sharing/#2-the-shared-directories-invariant) to share or keep files.
 
 **Worktree-per-agent (local git projects):**
 - A new worktree is created (e.g. at `../.scion_worktrees/<project>/<agent>`) with a dedicated branch, and mounted into the agent's container as `/workspace`.
@@ -132,6 +133,8 @@ When a Hub manages a git-based project and worktree-per-agent mode is not select
 - This approach handles workspaces that already contain `.scion` metadata or `.scion-volumes` directories, clearing stale artifacts before initialization.
 - SSH credentials on the host are not used; a `GITHUB_TOKEN` is required.
 - This strategy is consistent across all broker machines, whether or not the repo exists locally.
+
+This means a git project used locally with worktrees may switch to clone-based provisioning once it is managed by a Hub, unless the Hub project is created with workspace mode `worktree-per-agent`.
 
 **Worktree-per-agent (Hub-managed git projects):** the broker provisions a shared base clone and gives each agent its own worktree over it, the same mount shape as the local-mode case, gated on the broker's git version being 2.48 or later; the broker falls back to clone-per-agent if worktree provisioning is not possible. See the [About Workspaces](/scion/local/workspace/) guide for details.
 

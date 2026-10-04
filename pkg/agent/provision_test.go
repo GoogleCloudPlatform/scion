@@ -1527,8 +1527,9 @@ func TestProvisionAgent_SharedWorkspaceRelocatesAgentState(t *testing.T) {
 }
 
 // TestProvisionAgent_SharedWorkspaceMigratesLegacyState verifies that an
-// agent provisioned under the old layout (prompt.md / scion-agent.json
-// in-project) gets its state moved to the external path on next provision.
+// agent provisioned under the old layout (prompt.md, scion-agent.json and
+// the shared-dir storage record in-project) gets its state moved to the
+// external path on next provision.
 func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -1565,6 +1566,9 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(legacyDir, "scion-agent.json"), []byte(`{"harness":"claude"}`), 0644); err != nil {
 		t.Fatalf("write legacy scion-agent.json: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(legacyDir, sharedDirStorageRecordFile), []byte(`{"backend":"nfs"}`+"\n"), 0644); err != nil {
+		t.Fatalf("write legacy shared-dir storage record: %v", err)
+	}
 
 	sharedWorkspace := filepath.Join(tmpDir, "shared-ws")
 	_ = os.MkdirAll(sharedWorkspace, 0755)
@@ -1590,6 +1594,9 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(legacyDir, "scion-agent.json")); err == nil {
 		t.Errorf("legacy in-project scion-agent.json still exists after migration")
 	}
+	if _, err := os.Stat(filepath.Join(legacyDir, sharedDirStorageRecordFile)); err == nil {
+		t.Errorf("legacy in-project shared-dir storage record still exists after migration")
+	}
 
 	// External path must contain the migrated content.
 	extAgentDir := filepath.Join(tmpDir, ".scion", "project-configs", "project__550e8400", ".scion", "agents", "legacy-agent")
@@ -1599,6 +1606,14 @@ func TestProvisionAgent_SharedWorkspaceMigratesLegacyState(t *testing.T) {
 	}
 	if string(data) != "old task" {
 		t.Errorf("migrated prompt.md content = %q, want %q", string(data), "old task")
+	}
+	// The recorded shared-dir storage backend moves with the agent state.
+	recorded, err := readSharedDirStorageRecord(extAgentDir)
+	if err != nil {
+		t.Fatalf("reading the migrated shared-dir storage record: %v", err)
+	}
+	if recorded != "nfs" {
+		t.Errorf("migrated shared-dir storage backend = %q, want %q", recorded, "nfs")
 	}
 }
 

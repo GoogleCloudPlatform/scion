@@ -598,7 +598,7 @@ func UpdateLastSyncedAt(projectPath string, hubTime time.Time) {
 		}
 	}
 
-	currentState.LastSyncedAt = ts.Format(time.RFC3339Nano)
+	currentState.LastSyncedAt = ts.UTC().Format(time.RFC3339Nano)
 
 	if err := saveProjectStateAtomic(projectPath, currentState); err != nil {
 		debugf("Warning: failed to save lastSyncedAt to state.yaml: %v", err)
@@ -801,7 +801,7 @@ func CompareAgents(ctx context.Context, hubCtx *HubContext) (*SyncResult, error)
 
 		result.StaleLocal = append(result.StaleLocal, name)
 		debugf("Agent %s local-only but stale (local=%s, watermark=%s), marking StaleLocal",
-			name, localTS.Format(time.RFC3339Nano), lastSyncedAt.Format(time.RFC3339Nano))
+			name, localTS.UTC().Format(time.RFC3339Nano), lastSyncedAt.Format(time.RFC3339Nano))
 	}
 
 	// Find agents on Hub but not locally present.

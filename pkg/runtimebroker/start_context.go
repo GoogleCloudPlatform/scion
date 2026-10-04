@@ -68,6 +68,12 @@ type startContext struct {
 	// Manager.Start/Provision, exactly like withHubAgentDefaults threads
 	// req.Config's agent_defaults.
 	ProvisionedWorktreeRepoRoot string
+
+	// AssignSelection is the profile and runtime entry a GCP identity
+	// "assign" dispatch on Kubernetes read its ServiceAccount mapping and
+	// namespace from, or nil when no ServiceAccount was resolved. The start
+	// and restart handlers compare it with their own later resolution.
+	AssignSelection *dispatchProfileSelection
 }
 
 // startContextInputs captures the handler-specific fields that vary across
@@ -383,6 +389,27 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		return nil, sce
 	}
 
+	// GCP identity mode "assign" on the Kubernetes runtime uses Workload
+	// Identity instead of the sciontool metadata emulator: the pod runs as a
+	// Kubernetes ServiceAccount (KSA) the operator has already bound to the
+	// requested GSA via Workload Identity, out of band. Scion never creates,
+	// annotates, or binds KSAs itself (see docs-site/.../ha/setup-gcp.md).
+	// Resolved here, alongside the block rejection above and before any env
+	// or pod work, for the same reason: it can reject the dispatch outright.
+	// It rewrites gcpMetadataMode to "passthrough" so the env-emission switch
+	// below sets SCION_METADATA_MODE with no new switch arm;
+	// assignIdentity.SAEmail/ProjectID carry the SA email and
+	// project ID forward to that switch, which sets them as informational
+	// env, since the passthrough case does not set them on its own.
+	assignIdentity, sce := s.resolveKubernetesAssignIdentity(in, isKubernetes, gcpMetadataMode, gcpIdentityProfile)
+	if sce != nil {
+		return nil, sce
+	}
+	resolvedKSAName := assignIdentity.KSAName
+	if resolvedKSAName != "" {
+		gcpMetadataMode = store.GCPMetadataModePassthrough
+	}
+
 	// --- Build merged environment ---
 	env := make(map[string]string)
 
@@ -642,6 +669,24 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		// hub separately injects it via resolvedEnv. See ptone/scion#1873.
 		env["SCION_METADATA_MODE"] = gcpMetadataMode
 		classifyBrokerEnv("SCION_METADATA_MODE", api.EnvKindPlain)
+		// resolvedKSAName is only non-empty when a Kubernetes "assign"
+		// dispatch rewrote gcpMetadataMode to "passthrough" above (see that
+		// block's comment). The hub's start/restart path already injects
+		// SCION_METADATA_SA_EMAIL/PROJECT_ID into resolvedEnv unconditionally
+		// for assign, and at least one harness (harnesses/grok-build)
+		// consumes SCION_METADATA_PROJECT_ID directly for Vertex AI
+		// autodetection and project fallback, independent of the metadata
+		// emulator. Setting them here too, from the same values that block
+		// already resolved, makes create produce the same env as
+		// start/restart instead of differing by dispatch path. A genuine
+		// (non-rewritten) passthrough dispatch never reaches this branch, so
+		// it is unaffected.
+		if resolvedKSAName != "" {
+			env["SCION_METADATA_SA_EMAIL"] = assignIdentity.SAEmail
+			classifyBrokerEnv("SCION_METADATA_SA_EMAIL", api.EnvKindPlain)
+			env["SCION_METADATA_PROJECT_ID"] = assignIdentity.ProjectID
+			classifyBrokerEnv("SCION_METADATA_PROJECT_ID", api.EnvKindPlain)
+		}
 	default:
 		return nil, &startContextError{
 			Status: http.StatusBadRequest,
@@ -700,6 +745,20 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if in.InlineConfig != nil {
 		opts.InlineConfig = in.InlineConfig
 	}
+
+	// ResolvedKubernetesServiceAccountName (not InlineConfig) is how the
+	// mapped KSA reaches the pod: for an existing agent, GetAgent
+	// (pkg/agent/provision.go) builds its config from the template chain
+	// plus the persisted scion-agent.json and never consults InlineConfig,
+	// so a value injected only into opts.InlineConfig would silently not
+	// apply on start/restart of an agent that already has a persisted
+	// config. This field is read directly in pkg/agent/run.go's Kubernetes
+	// RunConfig builder, after GetAgent, so it applies on create and on
+	// start/restart alike. It is never persisted (not part of ScionConfig),
+	// so it is recomputed fresh on every dispatch, the same way
+	// SCION_METADATA_MODE itself is — a later mapping change takes effect on
+	// the next start without touching scion-agent.json.
+	opts.ResolvedKubernetesServiceAccountName = resolvedKSAName
 
 	if len(in.SharedDirs) > 0 {
 		opts.SharedDirs = in.SharedDirs
@@ -948,14 +1007,19 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// re-run this same check after their own, later resolution.
 	downgradeUnverifiedHubDefaultPassthrough(env, envCls, gcpMetadataMode, requireLocalRuntime, dispatchRuntimeType)
 
-	return &startContext{
+	sc := &startContext{
 		Opts:                        opts,
 		TemplateSlug:                templateSlug,
 		Manager:                     mgr,
 		RuntimeType:                 dispatchRuntimeType,
 		EnvClassifications:          envCls,
 		ProvisionedWorktreeRepoRoot: provisionedWorktreeRoot,
-	}, nil
+	}
+	if resolvedKSAName != "" {
+		sel := assignIdentity.Selection
+		sc.AssignSelection = &sel
+	}
+	return sc, nil
 }
 
 // hubDefaultPassthroughRuntimeTypes mirrors pkg/hub's map of the same name
@@ -1776,10 +1840,24 @@ func withHubAgentDefaults(ctx context.Context, cfg *CreateAgentConfig) context.C
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if cfg == nil || cfg.HubAgentDefaults.IsEmpty() {
+	if cfg == nil {
 		return ctx
 	}
-	return api.ContextWithHubAgentDefaults(ctx, cfg.HubAgentDefaults)
+	return withStartHubAgentDefaults(ctx, cfg.HubAgentDefaults)
+}
+
+// withStartHubAgentDefaults attaches hub defaults decoded from a start or
+// restart request body (or a create request's config) to ctx, so
+// Manager.Start's buildAgentEnv applies their env entries at its lowest tier.
+// Returns ctx unchanged for a nil or empty value.
+func withStartHubAgentDefaults(ctx context.Context, d *api.HubAgentDefaults) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if d.IsEmpty() {
+		return ctx
+	}
+	return api.ContextWithHubAgentDefaults(ctx, d)
 }
 
 // emptyPerAgentConflict returns a client-facing message when an

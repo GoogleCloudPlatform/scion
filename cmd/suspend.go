@@ -337,7 +337,7 @@ func suspendAllAgentsViaHub(hubCtx *HubContext) error {
 			agentCtx, agentCancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer agentCancel()
 
-			if err := agentSvc.Suspend(agentCtx, ag.Name); err != nil {
+			if _, err := agentSvc.Suspend(agentCtx, ag.Name); err != nil {
 				res.Status = "error"
 				res.Error = wrapHubError(fmt.Errorf("failed to suspend: %w", err)).Error()
 				mu.Lock()
@@ -409,9 +409,11 @@ func suspendAgentViaHub(hubCtx *HubContext, agentName string) error {
 
 	agentSvc := hubCtx.Client.ProjectAgents(projectID)
 
-	if err := agentSvc.Suspend(ctx, agentName); err != nil {
+	suspendResp, err := agentSvc.Suspend(ctx, agentName)
+	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to suspend agent via Hub: %w", err))
 	}
+	printLifecycleWarnings(suspendResp)
 
 	if isJSONOutput() {
 		return outputJSON(ActionResult{

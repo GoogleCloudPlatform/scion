@@ -48,6 +48,7 @@ var expectedSelectorRegistry = map[string][]string{
 	"agent:message":              {"agent.message"},
 	"agent:port_access":          {"agent.port_access"},
 	"agent:read":                 {"agent.read"},
+	"broker:create":              {"broker.create"},
 	"broker:list":                {"broker.list"},
 	"broker:read":                {"broker.read"},
 	"gcp_service_account:assign": {"gcp_service_account.assign"},
@@ -105,7 +106,6 @@ func TestResolveSelector_UnknownSelectorsFailClosed(t *testing.T) {
 		"nonsense",
 		"agent:frobnicate",
 		"hub:read",          // exactly the resource:action reconstruction a fallback would accept
-		"broker:create",     // no UATScope on broker.create today; not yet a selector (D.0a/D.1 add it)
 		"hub.settings:read", // no such literal UATScope exists
 	} {
 		if _, ok := ResolveSelector(selector); ok {
@@ -222,13 +222,11 @@ func TestPermissionAllowedBoundaries_CoversEveryUATScope(t *testing.T) {
 
 // permissionAllowedBoundariesPreReviewedWithoutUATScope is the explicit
 // allowlist for a PermissionAllowedBoundaries key that has no
-// Permission.UATScope yet: broker.create is pre-reviewed as Hub-only ahead
-// of its UATScope landing, so ResolveSelector resolves it correctly the
-// moment that field is added, with no second boundary-table change needed.
-// A key on neither this list nor a Registry row with a non-empty UATScope
-// is stale and must be removed.
+// Permission.UATScope: a boundary entry that precedes its selector. A key
+// on neither this list nor a Registry row with a non-empty UATScope is
+// stale and must be removed.
 var permissionAllowedBoundariesPreReviewedWithoutUATScope = map[string]bool{
-	"broker.create": true,
+	// No entries.
 }
 
 // TestPermissionAllowedBoundaries_NoStaleKeys is the reverse of the coverage

@@ -1401,8 +1401,8 @@ func (c *ProjectAdmissionCache) put(key projectAdmissionCacheKey, v ProjectAdmis
 // pass a mismatched pair.
 var ErrProjectMismatch = errors.New("target project does not match requested projectID")
 
-// ProjectTargetAdmission is the ONE runtime composition C.1 (from inside
-// enforceUATConstraints) and D.1's cross-project bearer gate call for an
+// ProjectTargetAdmission is the ONE runtime composition the bearer gate
+// (evaluateBearerGate, for every boundary kind) calls for an
 // ACTUAL request with a resolved target. Composes ProjectMembershipEvidence
 // OR SystemAuthorityProof(permissionID, class-derived-from-target's actual
 // ScopeKind) for projectID/permissionID/target. Returns ErrProjectMismatch

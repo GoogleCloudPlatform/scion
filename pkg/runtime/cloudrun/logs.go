@@ -218,7 +218,7 @@ func cloudRunInstanceLogFilter(instanceName string, projectID string, lastSeen t
 		logFilterString(projectID),
 	)
 	if !lastSeen.IsZero() {
-		filter += fmt.Sprintf(` AND timestamp > %s`, logFilterString(lastSeen.Format(time.RFC3339Nano)))
+		filter += fmt.Sprintf(` AND timestamp > %s`, logFilterString(lastSeen.UTC().Format(time.RFC3339Nano)))
 	}
 	return filter
 }

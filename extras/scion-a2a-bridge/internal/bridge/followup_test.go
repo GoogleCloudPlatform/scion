@@ -95,17 +95,17 @@ func (m *mockAgentService) ResetAuth(ctx context.Context, agentID string) error 
 func (m *mockAgentService) Delete(ctx context.Context, agentID string, opts *hubclient.DeleteAgentOptions) error {
 	return fmt.Errorf("not implemented")
 }
-func (m *mockAgentService) Start(ctx context.Context, agentID string) error {
-	return fmt.Errorf("not implemented")
+func (m *mockAgentService) Start(ctx context.Context, agentID string) (*hubclient.LifecycleResponse, error) {
+	return nil, fmt.Errorf("not implemented")
 }
-func (m *mockAgentService) Stop(ctx context.Context, agentID string) error {
-	return fmt.Errorf("not implemented")
+func (m *mockAgentService) Stop(ctx context.Context, agentID string) (*hubclient.LifecycleResponse, error) {
+	return nil, fmt.Errorf("not implemented")
 }
-func (m *mockAgentService) Suspend(ctx context.Context, agentID string) error {
-	return fmt.Errorf("not implemented")
+func (m *mockAgentService) Suspend(ctx context.Context, agentID string) (*hubclient.LifecycleResponse, error) {
+	return nil, fmt.Errorf("not implemented")
 }
-func (m *mockAgentService) Restart(ctx context.Context, agentID string) error {
-	return fmt.Errorf("not implemented")
+func (m *mockAgentService) Restart(ctx context.Context, agentID string) (*hubclient.LifecycleResponse, error) {
+	return nil, fmt.Errorf("not implemented")
 }
 func (m *mockAgentService) StopAll(ctx context.Context) (*hubclient.StopAllResponse, error) {
 	return nil, fmt.Errorf("not implemented")

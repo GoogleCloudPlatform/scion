@@ -38,11 +38,11 @@ import {
 } from '../../client/git-remote.js';
 import { fetchHubProjectCapabilities } from '../../client/hub-capabilities.js';
 import type { PageData } from '../../shared/types.js';
-import { can } from '../../shared/types.js';
+import { can, isEmptyPerAgentWorkspace } from '../../shared/types.js';
 import '../shared/status-badge.js';
 import '../shared/dir-browser.js';
 
-type WorkspaceType = 'git' | 'shared' | 'linked';
+type WorkspaceType = 'git' | 'shared' | 'empty-per-agent' | 'linked';
 type GitWorkspaceMode = 'per-agent' | 'worktree-per-agent' | 'shared';
 
 /** "Start from" value meaning no template. Template options use the project ID. */
@@ -67,12 +67,14 @@ interface WorkspaceTypeOption {
   hint: string;
   /** Offered only on a workstation hub with an embedded broker (design OQ-10). */
   workstationOnly?: boolean;
+  /** Shows a "New" badge on the option (mock 07a). */
+  isNew?: boolean;
 }
 
 /**
- * Workspace Type options, in display order. Adding a type (e.g. #2703's
- * "Empty directory per agent") is one entry here plus its request body in
- * handleSubmit.
+ * Workspace Type options, in display order. Adding a type is one entry here
+ * plus its request body in handleSubmit. To gate a type (e.g. behind an
+ * experiment), filter it out in availableWorkspaceTypes.
  */
 const WORKSPACE_TYPES: readonly WorkspaceTypeOption[] = [
   {
@@ -84,6 +86,12 @@ const WORKSPACE_TYPES: readonly WorkspaceTypeOption[] = [
     value: 'shared',
     label: 'Shared workspace directory',
     hint: 'One directory managed by the Hub and shared by every agent in this project. No git repository required.',
+  },
+  {
+    value: 'empty-per-agent',
+    label: 'Empty directory per agent',
+    hint: 'Each agent gets its own new, empty directory. Nothing is shared between agents. No git repository required.',
+    isNew: true,
   },
   {
     value: 'linked',
@@ -110,11 +118,13 @@ function workspaceTypeLabel(type: WorkspaceType): string {
 
 /**
  * The workspace type a clone of this template gets. Without a git remote the
- * clone is a shared workspace directory — including linked templates, whose
+ * clone keeps an empty-per-agent mode (re-derived by the clone) and is
+ * otherwise a shared workspace directory — including linked templates, whose
  * providers are not copied (design OQ-7).
  */
 function templateWorkspaceType(t: ProjectTemplate): WorkspaceType {
-  return t.gitRemote ? 'git' : 'shared';
+  if (t.gitRemote) return 'git';
+  return isEmptyPerAgentWorkspace(t) ? 'empty-per-agent' : 'shared';
 }
 
 /** The git workspace mode a clone of this git template gets (re-derived by the clone). */
@@ -1065,6 +1075,10 @@ export class ScionPageProjectCreate extends LitElement {
         if (this.githubToken.trim()) {
           body.githubToken = this.githubToken.trim();
         }
+      } else if (this.mode === 'empty-per-agent') {
+        // Option C (#2703): per-agent on a project without git is an empty
+        // directory per agent. The hub owns the workspace-mode label.
+        body.workspaceMode = 'per-agent';
       }
 
       const response = await apiFetch('/api/v1/projects', {
@@ -1457,9 +1471,26 @@ export class ScionPageProjectCreate extends LitElement {
           .value=${this.mode}
           @sl-change=${(e: Event) => this.onModeChange(e)}
         >
-          ${workspaceTypes.map((t) => html`<sl-option value=${t.value}>${t.label}</sl-option>`)}
+          ${workspaceTypes.map(
+            (t) =>
+              html`<sl-option value=${t.value}
+                >${t.label}${t.isNew
+                  ? html`<sl-badge slot="suffix" variant="primary" pill class="new-badge"
+                      >New</sl-badge
+                    >`
+                  : nothing}</sl-option
+              >`
+          )}
         </sl-select>
         <div class="hint">${selectedType?.hint ?? ''}</div>
+        ${this.mode === 'empty-per-agent'
+          ? html`<div class="workspace-mode-note empty-per-agent-note">
+              The directory is created on the broker when the agent starts. It is kept across
+              suspend/resume where the broker's storage allows, and is
+              <strong>deleted when the agent is deleted</strong>. Use shared dirs or a git remote
+              for anything you need to keep.
+            </div>`
+          : nothing}
       </div>
 
       ${this.mode === 'git'

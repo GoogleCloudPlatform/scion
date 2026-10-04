@@ -69,16 +69,19 @@ The container technology that executes an agent's container: Docker, Podman, App
 The working directory mounted into a single agent's container at `/workspace`. How it is provisioned across a project's agents is set by the project's **workspace sharing mode**.
 
 ### Workspace sharing mode
-How a project's workspace is provisioned across its agents — one universal set of three modes intended for both local and Hub-managed projects: **Shared-plain**, **Worktree-per-agent**, and **Clone-per-agent**.
+How a project's workspace is provisioned across its agents. There are four canonical modes: **Shared-plain**, **Worktree-per-agent** and **Clone-per-agent**, plus **Empty-per-agent** for Hub-managed projects without git. The mode is chosen when the project is created and cannot be changed afterwards. "Workspace mode" is the name of the API field (`workspaceMode`) and CLI flag (`--workspace-mode`) whose values select the sharing mode. See [Workspaces & Sharing Modes](/scion/local/workspaces-and-sharing/).
 
 ### Shared-plain
 A workspace sharing mode where one workspace directory is mounted into every agent with no per-agent isolation — the model used for plain (non-git) projects.
 
 ### Worktree-per-agent
-A workspace sharing mode where each agent gets its own git worktree over a shared checkout, isolating working trees while sharing one clone's history. Supported in local mode and on Hub-managed projects; requires git 2.48 or later on the broker (on Kubernetes, the NFS workspace backend).
+A workspace sharing mode where each agent gets its own git worktree over a shared checkout, isolating working trees while sharing one clone's history. Supported in local mode and on Hub-managed git projects; requires git 2.48 or later on the broker, and on Kubernetes it requires NFS workspace storage.
 
 ### Clone-per-agent
 A workspace sharing mode where each agent gets its own full git clone of the repository.
+
+### Empty-per-agent
+A workspace sharing mode for Hub-managed projects without git, where each agent gets its own private directory that starts empty and is not a git repository. It is kept across suspend/resume where storage allows and deleted with the agent. Selected with workspace mode `per-agent` on a project without a git remote.
 
 ### Shared directory
 A persistent, mutable volume shared by the agents within one project. Backed by host filesystem directories (local) or Kubernetes PersistentVolumeClaims (K8s). In hosted deployments, `server.shared_dir_storage` can place them on a shared NFS export so they span Runtime Brokers.

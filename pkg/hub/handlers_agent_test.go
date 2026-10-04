@@ -821,7 +821,7 @@ type createAgentDispatcher struct {
 	logsErr       error
 }
 
-func (d *createAgentDispatcher) DispatchAgentCreate(_ context.Context, agent *store.Agent) error {
+func (d *createAgentDispatcher) DispatchAgentCreate(_ context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
 	d.capturedAgent = agent
 	if d.createPhase != "" {
 		agent.Phase = d.createPhase
@@ -832,7 +832,7 @@ func (d *createAgentDispatcher) DispatchAgentCreate(_ context.Context, agent *st
 	if d.createStatus != "" {
 		agent.ContainerStatus = d.createStatus
 	}
-	return nil
+	return nil, nil
 }
 func (d *createAgentDispatcher) DispatchAgentProvision(_ context.Context, agent *store.Agent) error {
 	agent.Phase = string(state.PhaseCreated)
@@ -866,11 +866,11 @@ func (d *createAgentDispatcher) DispatchAgentMessage(_ context.Context, _ *store
 func (d *createAgentDispatcher) DispatchCheckAgentPrompt(_ context.Context, _ *store.Agent) (bool, error) {
 	return false, nil
 }
-func (d *createAgentDispatcher) DispatchAgentCreateWithGather(_ context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error) {
-	if err := d.DispatchAgentCreate(context.Background(), agent); err != nil {
+func (d *createAgentDispatcher) DispatchAgentCreateWithGather(_ context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
+	if _, err := d.DispatchAgentCreate(context.Background(), agent); err != nil {
 		return nil, err
 	}
-	return d.envReqs, nil
+	return envReqsResult(d.envReqs), nil
 }
 
 // failingCreateDispatcher is a mock dispatcher whose DispatchAgentCreateWithGather
@@ -883,7 +883,7 @@ type failingCreateDispatcher struct {
 	deleteBranch      bool
 }
 
-func (d *failingCreateDispatcher) DispatchAgentCreateWithGather(_ context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (d *failingCreateDispatcher) DispatchAgentCreateWithGather(_ context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
 	d.capturedAgent = agent
 	return nil, d.createErr
 }
@@ -899,8 +899,8 @@ func (d *createAgentDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Ag
 func (d *createAgentDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
 	return d.execOutput, d.execExitCode, nil
 }
-func (d *createAgentDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) error {
-	return nil
+func (d *createAgentDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 
 // setupCreateAgentServer creates a test server with a dispatcher and a project+broker ready for agent creation.
