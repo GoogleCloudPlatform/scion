@@ -1729,6 +1729,21 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Every request below except start acts on an existing agent: target the
+	// runtime that holds it, checking the runtime type the hub recorded for
+	// it first, and answer 503 only when no runtime lists the agent and this
+	// broker has no manager for the recorded type (see applyRecordedRuntime).
+	// Keys applies the same check itself, after reading its body, so it can
+	// answer in its own result shape.
+	if isExistingAgentRequest(action) {
+		ctx, recorded, err := s.applyRecordedRuntime(r, id, projectID)
+		if err != nil {
+			writeRuntimeNotRegistered(w, recorded)
+			return
+		}
+		r = r.WithContext(ctx)
+	}
+
 	// Handle actions
 	if action != "" {
 		s.handleAgentAction(w, r, id, projectID, action)
@@ -2501,7 +2516,7 @@ func (s *Server) stopAgent(w http.ResponseWriter, r *http.Request, id, projectID
 		// recordlessActorProbe's manager loop on every unresolved stop, for
 		// a type assertion that can never succeed.
 		if projectID != "" && s.hasRecordlessProber() {
-			managers := s.allManagers()
+			managers := s.allManagers(ctx)
 			scope, recordless, perr := recordlessActorProbe(ctx, managers, projectID)
 			if perr != nil {
 				span.SetStatus(codes.Error, perr.Error())
@@ -2911,6 +2926,22 @@ func (s *Server) sendKeys(w http.ResponseWriter, r *http.Request, id, projectID 
 	// Bind ctx to the capped deadline so SendKeys's own internal checks
 	// (after its target-lock wait, and immediately before Exec — contract
 	// §4.2's remaining two enforcement points) observe it.
+	// Target the runtime holding the agent, recorded runtime type first,
+	// failing only when no runtime lists it and the recorded type has no
+	// manager here (see applyRecordedRuntime).
+	// OutcomeKeysUnavailable is broker-assertable at 503: nothing ran.
+	rtCtx, recorded, rtErr := s.applyRecordedRuntime(r, id, projectID)
+	if rtErr != nil {
+		span.SetStatus(codes.Error, "recorded runtime not registered")
+		s.logKeysOutcome(req, agentkeys.OutcomeKeysUnavailable, time.Since(admittedAt))
+		w.Header().Set("Retry-After", recordedRuntimeRetryAfterSeconds)
+		writeKeysResult(w, req.OperationID, agentkeys.OutcomeKeysUnavailable, runtimeNotRegisteredMessage(recorded))
+		return
+	}
+	if want := recordedRuntimeFrom(rtCtx); want != "" {
+		ctx = withRecordedRuntime(ctx, want)
+	}
+
 	execCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 
@@ -3417,8 +3448,10 @@ type HasPromptResponse struct {
 func (s *Server) checkAgentPrompt(w http.ResponseWriter, r *http.Request, id, projectID string) {
 	ctx := r.Context()
 
-	// Find the agent to get its project path
-	agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true"})
+	// Find the agent to get its project path. resolveManagerForAgent keeps
+	// the search within a recorded runtime type (ptone/scion#2748) and is the
+	// default manager otherwise.
+	agents, err := s.resolveManagerForAgent(ctx, id, projectID).List(ctx, map[string]string{"scion.agent": "true"})
 	if err != nil {
 		s.writeRuntimeOpError(w, ctx, "list agents", err, "agent_id", id)
 		return
@@ -4318,27 +4351,55 @@ func hasAgentInProjectOrUnlabeled(agents []api.AgentInfo, projectID string) bool
 // existing agent. Keeping the pair together prevents manager-based and direct
 // runtime operations from drifting to different backends.
 func (s *Server) resolveAgentRuntimeTarget(ctx context.Context, id, projectID string) (agent.Manager, scionrt.Runtime) {
+	if mgr, rt, found := s.findAgentRuntimeTarget(ctx, id, projectID); found {
+		return mgr, rt
+	}
+
+	// Default fallback — the agent may have already been removed or the
+	// runtime is genuinely the default one (e.g. pod already deleted). With
+	// a recorded runtime type the fallback stays within that type: the first
+	// allowed runtime (applyRecordedRuntime only restricts to a type that
+	// has one).
+	if !s.defaultRuntimeAllowed(ctx) {
+		if auxRuntimes := s.sortedAuxiliaryRuntimesFor(ctx); len(auxRuntimes) > 0 {
+			return auxRuntimes[0].Manager, auxRuntimes[0].Runtime
+		}
+	}
+	return s.manager, s.runtime
+}
+
+// findAgentRuntimeTarget searches the runtimes a request carrying ctx may
+// target, default first, for agent id and returns the manager/runtime pair
+// that lists it. found is false when no runtime lists it (a failed List
+// counts as not listing it).
+func (s *Server) findAgentRuntimeTarget(ctx context.Context, id, projectID string) (agent.Manager, scionrt.Runtime, bool) {
 	slug := strings.ToLower(id)
 	filter := map[string]string{"scion.name": slug}
 	if projectID != "" {
 		filter["scion.project_id"] = projectID
 	}
 
+	// A recorded runtime type (ptone/scion#2748) restricts the search to
+	// runtimes of that type; without one every runtime is searched.
+	useDefault := s.defaultRuntimeAllowed(ctx)
+
 	// Try the default runtime first.
-	agents, err := s.manager.List(ctx, filter)
-	if err == nil && len(agents) > 0 {
-		return s.manager, s.runtime
+	if useDefault {
+		agents, err := s.manager.List(ctx, filter)
+		if err == nil && len(agents) > 0 {
+			return s.manager, s.runtime, true
+		}
 	}
 
 	// Snapshot the auxiliary runtimes, sorted by identity, so manager calls
 	// happen without the lock and in a deterministic order — more than one
 	// auxiliary runtime can share a type (see auxiliaryRuntimeIdentity).
-	auxRuntimes := s.sortedAuxiliaryRuntimes()
+	auxRuntimes := s.sortedAuxiliaryRuntimesFor(ctx)
 
 	for _, aux := range auxRuntimes {
 		auxAgents, auxErr := aux.Manager.List(ctx, filter)
 		if auxErr == nil && len(auxAgents) > 0 {
-			return aux.Manager, aux.Runtime
+			return aux.Manager, aux.Runtime, true
 		}
 	}
 
@@ -4346,21 +4407,21 @@ func (s *Server) resolveAgentRuntimeTarget(ctx context.Context, id, projectID st
 	// This supports pre-existing containers and solo/CLI mode.
 	if projectID != "" {
 		fallbackFilter := map[string]string{"scion.name": slug}
-		agents, err = s.manager.List(ctx, fallbackFilter)
-		if err == nil && hasAgentInProjectOrUnlabeled(agents, projectID) {
-			return s.manager, s.runtime
+		if useDefault {
+			agents, err := s.manager.List(ctx, fallbackFilter)
+			if err == nil && hasAgentInProjectOrUnlabeled(agents, projectID) {
+				return s.manager, s.runtime, true
+			}
 		}
 		for _, aux := range auxRuntimes {
 			auxAgents, auxErr := aux.Manager.List(ctx, fallbackFilter)
 			if auxErr == nil && hasAgentInProjectOrUnlabeled(auxAgents, projectID) {
-				return aux.Manager, aux.Runtime
+				return aux.Manager, aux.Runtime, true
 			}
 		}
 	}
 
-	// Default fallback — the agent may have already been removed or the
-	// runtime is genuinely the default one (e.g. pod already deleted).
-	return s.manager, s.runtime
+	return nil, nil, false
 }
 
 // resolveManagerForAgent returns the manager for an existing agent so
@@ -4371,26 +4432,25 @@ func (s *Server) resolveManagerForAgent(ctx context.Context, id, projectID strin
 }
 
 // allManagers returns the default manager plus every distinct auxiliary
-// runtime's manager, in deterministic (sorted-by-name) order. Used by
+// runtime's manager, in deterministic (sorted-by-identity) order. Used by
 // resolveDeleteTarget and the stop path's record-less-actor probe
 // (recordlessActorProbe) to search every registered runtime rather than
 // only the one a slug-based lookup happens to resolve to first — a
 // record-less actor (see RecordlessActorProber) never matches a slug-based
 // lookup at all, so that lookup must not be relied on here.
-func (s *Server) allManagers() []agent.Manager {
-	managers := []agent.Manager{s.manager}
-	s.auxiliaryRuntimesMu.RLock()
-	auxNames := make([]string, 0, len(s.auxiliaryRuntimes))
-	for name := range s.auxiliaryRuntimes {
-		auxNames = append(auxNames, name)
+//
+// A recorded runtime type on ctx (ptone/scion#2748) limits the list to
+// runtimes of that type.
+func (s *Server) allManagers(ctx context.Context) []agent.Manager {
+	var managers []agent.Manager
+	if s.defaultRuntimeAllowed(ctx) {
+		managers = append(managers, s.manager)
 	}
-	sort.Strings(auxNames)
-	for _, name := range auxNames {
-		if aux := s.auxiliaryRuntimes[name]; aux.Manager != nil && aux.Manager != s.manager {
+	for _, aux := range s.sortedAuxiliaryRuntimesFor(ctx) {
+		if aux.Manager != nil && aux.Manager != s.manager {
 			managers = append(managers, aux.Manager)
 		}
 	}
-	s.auxiliaryRuntimesMu.RUnlock()
 	return managers
 }
 
@@ -4949,7 +5009,7 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, project
 		mgr   agent.Manager
 		entry api.AgentInfo
 	}
-	managers := s.allManagers()
+	managers := s.allManagers(ctx)
 
 	var listErr error
 	collect := func(filter map[string]string, accept func(api.AgentInfo) bool) []candidate {
@@ -5108,16 +5168,18 @@ type agentResourceCleaner interface {
 
 // cleanupLeftoverAgentResources removes the per-agent runtime objects of an
 // agent whose container no longer exists, across the default and every
-// auxiliary runtime, since the container may have run on any of them. It is
-// scoped to projectID and does nothing without one. It is best effort: a
-// failure is logged and does not fail the delete, matching the cleanup that
-// runtime Delete does when the container still exists.
+// auxiliary runtime, since the container may have run on any of them. When
+// the request carries a recorded runtime type (ptone/scion#2748), only
+// runtimes of that type are cleaned. It is scoped to projectID and does
+// nothing without one. It is best effort: a failure is logged and does not
+// fail the delete, matching the cleanup that runtime Delete does when the
+// container still exists.
 func (s *Server) cleanupLeftoverAgentResources(ctx context.Context, agentName, projectID string) {
 	if projectID == "" {
 		return
 	}
 	slug := api.Slugify(agentName)
-	for _, mgr := range s.allManagers() {
+	for _, mgr := range s.allManagers(ctx) {
 		c, ok := mgr.(agentResourceCleaner)
 		if !ok {
 			continue

@@ -1117,6 +1117,11 @@ func (s *Server) handleExistingAgent(
 		// This branch only runs for suspended agents, so resume the harness
 		// session (Claude --continue) rather than starting fresh.
 		resume := existingAgent.Phase == string(state.PhaseSuspended)
+		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
+			s.rollbackBrokerQuota(ctx, existingAgent, reserved)
+			writeErrorFromErr(w, err, "")
+			return existingAgentErrored
+		}
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, resume); err != nil {
 			s.rollbackBrokerQuota(ctx, existingAgent, reserved)
 			switch {
@@ -1202,6 +1207,11 @@ func (s *Server) handleExistingAgent(
 			if !ok {
 				return existingAgentErrored
 			}
+			if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
+				s.rollbackBrokerQuota(ctx, existingAgent, reserved)
+				writeErrorFromErr(w, err, "")
+				return existingAgentErrored
+			}
 			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, forcedRecovery); err != nil {
 				s.rollbackBrokerQuota(ctx, existingAgent, reserved)
 				switch {
@@ -1246,6 +1256,10 @@ func (s *Server) handleExistingAgent(
 
 	// Phase 2: Env-gather re-provisioning — provisioning + GatherEnv requested.
 	if req.GatherEnv && existingAgent.Phase == string(state.PhaseProvisioning) {
+		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentStopped); err != nil {
+			writeErrorFromErr(w, err, "")
+			return existingAgentErrored
+		}
 		dispatcher := s.GetDispatcher()
 		if dispatcher != nil && existingAgent.RuntimeBrokerID != "" {
 			if err := dispatcher.DispatchAgentDelete(ctx, existingAgent, false, false, false, time.Time{}); err != nil {
@@ -1317,6 +1331,10 @@ func (s *Server) handleExistingAgent(
 		// Dispatch start action — DispatchAgentStart applies the broker's
 		// response (status, container info) onto existingAgent in-place.
 		// A created/provisioning agent has no prior session to resume.
+		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
+			writeErrorFromErr(w, err, "")
+			return existingAgentErrored
+		}
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, false); err != nil {
 			switch {
 			case writeAgentTokenIssueError(w, err):
