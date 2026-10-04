@@ -996,7 +996,10 @@ export class ScionChatMembers extends LitElement {
     // "Updated" is the last state change — matching the agent list's column,
     // not the `lastSeen` heartbeat.
     const detailText =
-      a.detailMessage || (a.activity ? stateLabel(a.activity) : '') || a.phase || 'unknown';
+      a.detailMessage ||
+      (a.activity ? stateLabel(a.activity.toLowerCase()) : '') ||
+      a.phase ||
+      'unknown';
     const updated = a.lastActivityEvent ? this.formatRelativeTime(a.lastActivityEvent) : '';
     const updatedText = updated ? `Updated: ${updated}` : '';
     const tooltipContent = updatedText ? `${detailText}\n${updatedText}` : detailText;

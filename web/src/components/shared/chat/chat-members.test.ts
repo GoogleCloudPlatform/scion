@@ -113,6 +113,10 @@ describe('scion-chat-members agent tooltip', () => {
     document.body.innerHTML = '';
     const waiting = await mount([agent({ activity: 'waiting_for_input' })]);
     expect(tooltipContent(waiting)).toBe('waiting for input');
+    document.body.innerHTML = '';
+    // Matched case-insensitively, like the badge's status lookup.
+    const upper = await mount([agent({ activity: 'BLOCKED' as never })]);
+    expect(tooltipContent(upper)).toBe('waiting on others');
   });
 
   it('shows the last activity event as the updated time', async () => {
