@@ -24,6 +24,7 @@ import {
   DRAIN_MAX_REQUESTS,
   DRAIN_PAGE_LIMIT,
   drainAgents,
+  wait,
   type AgentDrainFetch,
 } from './agent-drain.js';
 import { AgentSeedEpoch } from './agent-seed-epoch.js';
@@ -823,5 +824,71 @@ describe('AgentDrainRunner (seed-epoch protocol)', () => {
     expect(result?.capped).toBe(true);
     expect(result?.complete).toBe(false);
     expect(server.urls).toHaveLength(4);
+  });
+});
+
+/** Settle state of a promise after pending microtasks run, with no timer advanced. */
+async function settleState<T>(
+  p: Promise<T>
+): Promise<{ done: boolean; value?: T; error?: unknown }> {
+  const state: { done: boolean; value?: T; error?: unknown } = { done: false };
+  p.then(
+    (value) => {
+      state.done = true;
+      state.value = value;
+    },
+    (error: unknown) => {
+      state.done = true;
+      state.error = error;
+    }
+  );
+  for (let i = 0; i < 10; i++) await Promise.resolve();
+  return state;
+}
+
+describe('abort handling for signals that are already aborted', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('wait rejects at once with AbortError for an already-aborted signal, as an abort mid-wait does', async () => {
+    const mid = new AbortController();
+    const midWait = settleState(wait(60_000, mid.signal));
+    mid.abort();
+    const midState = await midWait;
+    expect(midState.done).toBe(true);
+    expect(midState.error).toMatchObject({ name: 'AbortError' });
+
+    const pre = new AbortController();
+    pre.abort();
+    const preState = await settleState(wait(60_000, pre.signal));
+    expect(preState.done).toBe(true);
+    expect(preState.error).toMatchObject({ name: 'AbortError' });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('the connection wait settles at once for an already-aborted signal, with the same result as an abort mid-wait', async () => {
+    const sm = new StateManager();
+    sm.setScope({ type: 'project', projectId: 'p1' });
+    const runner = new AgentDrainRunner({ state: sm, connectTimeoutMs: 60_000 });
+    const waitForConnection = (signal: AbortSignal): Promise<boolean> =>
+      (
+        runner as unknown as { waitForConnection(s: AbortSignal): Promise<boolean> }
+      ).waitForConnection(signal);
+
+    const mid = new AbortController();
+    const midWait = settleState(waitForConnection(mid.signal));
+    mid.abort();
+    const midState = await midWait;
+    expect(midState).toMatchObject({ done: true, value: true });
+
+    const pre = new AbortController();
+    pre.abort();
+    const preState = await settleState(waitForConnection(pre.signal));
+    expect(preState).toMatchObject({ done: true, value: true });
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

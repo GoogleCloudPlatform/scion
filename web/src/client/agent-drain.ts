@@ -185,10 +185,11 @@ function abortError(): Error {
   return err;
 }
 
-function wait(ms: number, signal?: AbortSignal): Promise<void> {
-  if (ms <= 0) {
-    return signal?.aborted ? Promise.reject(abortError()) : Promise.resolve();
-  }
+/** Exported for testing: resolves after `ms`, or rejects with an `AbortError` once `signal` aborts. */
+export function wait(ms: number, signal?: AbortSignal): Promise<void> {
+  // An abort listener added after the signal fired never runs: reject now.
+  if (signal?.aborted) return Promise.reject(abortError());
+  if (ms <= 0) return Promise.resolve();
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       signal?.removeEventListener('abort', onAbort);
@@ -520,6 +521,8 @@ export class AgentDrainRunner {
 
   /** Resolves `true` if the connection did not come up in time (or the wait was rejected). */
   private async waitForConnection(signal: AbortSignal): Promise<boolean> {
+    // An abort listener added after the signal fired never runs: settle now.
+    if (signal.aborted) return true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<boolean>((resolve) => {
       timer = setTimeout(() => resolve(true), this.connectTimeoutMs);
