@@ -31,9 +31,11 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	sconduit "github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
 	sciontoollog "github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
@@ -95,14 +97,23 @@ type proxyApp struct {
 	got  chan *http.Request
 }
 
-func newProxyApp(t *testing.T) *proxyApp {
+// newProxyApp starts the app; a nil handler answers "hello <path>?<query>".
+func newProxyApp(t *testing.T, handler http.Handler) *proxyApp {
 	t.Helper()
 	a := &proxyApp{got: make(chan *http.Request, 16)}
+	if handler == nil {
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-App", "ok")
+			w.Header().Set("Set-Cookie", "app=1")
+			_, _ = io.WriteString(w, "hello "+r.URL.Path+"?"+r.URL.RawQuery)
+		})
+	}
 	a.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		a.got <- r.Clone(context.Background())
-		w.Header().Set("X-App", "ok")
-		w.Header().Set("Set-Cookie", "app=1")
-		_, _ = io.WriteString(w, "hello "+r.URL.Path+"?"+r.URL.RawQuery)
+		select {
+		case a.got <- r.Clone(context.Background()):
+		default:
+		}
+		handler.ServeHTTP(w, r)
 	}))
 	t.Cleanup(a.srv.Close)
 	u, err := url.Parse(a.srv.URL)
@@ -119,11 +130,18 @@ type conduitProxyFixture struct {
 	*relayFixture
 	app       *proxyApp
 	userToken string
+	// base is the hub URL agents and callers use (default f.public).
+	base string
+	// sciontool is the agent started last; sessions counts its admitted
+	// sessions.
+	sciontool *sconduit.Agent
+	sessions  atomic.Int64
 }
 
-func newConduitProxyFixture(t *testing.T) *conduitProxyFixture {
+func newConduitProxyFixture(t *testing.T, app http.Handler) *conduitProxyFixture {
 	t.Helper()
-	f := &conduitProxyFixture{relayFixture: newRelayFixture(t, nil), app: newProxyApp(t)}
+	f := &conduitProxyFixture{relayFixture: newRelayFixture(t, nil), app: newProxyApp(t, app)}
+	f.base = f.public.URL
 	setConduitExperiment(t, f.srv, true)
 	require.True(t, f.srv.conduitServing())
 	ctx := context.Background()
@@ -138,29 +156,69 @@ func newConduitProxyFixture(t *testing.T) *conduitProxyFixture {
 	return f
 }
 
+// withWriteTimeout serves the hub on a server with the given write
+// timeout (as production does) and makes it f.base.
+func (f *conduitProxyFixture) withWriteTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(f.srv.Handler())
+	srv.Config.WriteTimeout = d
+	srv.Start()
+	t.Cleanup(srv.Close)
+	f.base = srv.URL
+}
+
+// fixtureClock is the sciontool agent's clock: it reads the fixture's
+// clock (grants are minted on it) and never fires timers.
+type fixtureClock struct {
+	*clock.Fake
+	now func() time.Time
+}
+
+func (c fixtureClock) Now() time.Time { return c.now() }
+
 // startAgent runs a sciontool conduit agent for the launched agent and
 // returns once its session is admitted. stop ends it and waits for Run.
 func (f *conduitProxyFixture) startAgent(t *testing.T) (stop func()) {
 	t.Helper()
+	admitted := make(chan *conduitv1.Welcome, 4)
+	stop, _ = f.runAgent(t, f.launched.LaunchID, admitted)
+	select {
+	case w := <-admitted:
+		require.Equal(t, f.launched.LaunchID, w.GetEndpointIncarnation())
+	case <-time.After(10 * time.Second):
+		t.Fatal("conduit session not admitted")
+	}
+	return stop
+}
+
+// runAgent runs a sciontool conduit agent presenting launchID, reporting
+// admitted sessions on admitted, and returns a stop function and Run's
+// result.
+func (f *conduitProxyFixture) runAgent(t *testing.T, launchID string, admitted chan<- *conduitv1.Welcome) (stop func(), result <-chan error) {
+	t.Helper()
 	guardSciontoolLog()
 	tok := f.agentToken(t, f.launched)
-	admitted := make(chan *conduitv1.Welcome, 4)
 	a, err := sconduit.New(sconduit.Options{
-		HubURL:    f.public.URL,
+		HubURL:    f.base,
 		AgentID:   f.launched.ID,
 		ProjectID: f.launched.ProjectID,
-		LaunchID:  f.launched.LaunchID,
+		LaunchID:  launchID,
 		Token:     func() string { return tok },
-		OnSession: func(w *conduitv1.Welcome) { admitted <- w },
-		// Grants are minted on the fixture's clock.
-		Clock: clock.NewFake(f.clock.Now()),
+		OnSession: func(w *conduitv1.Welcome) {
+			f.sessions.Add(1)
+			admitted <- w
+		},
+		Backoff: &conduit.Backoff{Rand: func(int64) int64 { return 0 }},
+		Clock:   fixtureClock{Fake: clock.NewFake(f.clock.Now()), now: f.clock.Now},
 	})
 	require.NoError(t, err)
+	f.sciontool = a
 	ctx, cancel := context.WithCancel(context.Background())
 	exited := make(chan struct{})
+	res := make(chan error, 1)
 	go func() {
 		defer close(exited)
-		_ = a.Run(ctx)
+		res <- a.Run(ctx)
 	}()
 	var once bool
 	stop = func() {
@@ -176,20 +234,14 @@ func (f *conduitProxyFixture) startAgent(t *testing.T) (stop func()) {
 		}
 	}
 	t.Cleanup(stop)
-	select {
-	case w := <-admitted:
-		require.Equal(t, f.launched.LaunchID, w.GetEndpointIncarnation())
-	case <-time.After(10 * time.Second):
-		t.Fatal("conduit session not admitted")
-	}
-	return stop
+	return stop, res
 }
 
 // get sends a request through the hub's port proxy route.
 func (f *conduitProxyFixture) get(t *testing.T, path string, header http.Header) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet,
-		f.public.URL+"/api/v1/agents/"+f.launched.ID+"/ports/"+strconv.Itoa(f.app.port)+"/proxy"+path, nil)
+		f.base+"/api/v1/agents/"+f.launched.ID+"/ports/"+strconv.Itoa(f.app.port)+"/proxy"+path, nil)
 	require.NoError(t, err)
 	for k, v := range header {
 		req.Header[k] = v
@@ -216,7 +268,7 @@ func guardSciontoolLog() {
 // tunnel exists), reaches 127.0.0.1:port inside the agent without the
 // caller's credentials, and the response is sandboxed.
 func TestConduitProxyThroughSession(t *testing.T) {
-	f := newConduitProxyFixture(t)
+	f := newConduitProxyFixture(t, nil)
 	f.startAgent(t)
 	require.False(t, f.srv.portTunnels.has(f.launched.ID), "no legacy tunnel")
 
@@ -241,7 +293,7 @@ func TestConduitProxyThroughSession(t *testing.T) {
 // session nor a tunnel, the proxy answers 503 agent_offline (an HTML page
 // for browsers), for plain requests and WebSocket upgrades alike.
 func TestConduitProxyAgentOffline(t *testing.T) {
-	f := newConduitProxyFixture(t)
+	f := newConduitProxyFixture(t, nil)
 	for _, tc := range []struct {
 		name   string
 		header http.Header
@@ -276,7 +328,7 @@ func TestConduitProxyAgentOffline(t *testing.T) {
 // session ends its exposed ports are kept; the proxy answers 503
 // agent_offline until the agent reconnects, then serves again.
 func TestConduitProxyKeepsPortsWhenSessionEnds(t *testing.T) {
-	f := newConduitProxyFixture(t)
+	f := newConduitProxyFixture(t, nil)
 	stop := f.startAgent(t)
 	require.Equal(t, http.StatusOK, f.get(t, "/", nil).StatusCode)
 
