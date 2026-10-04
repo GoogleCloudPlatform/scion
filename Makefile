@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-launch-store-postgres test-fixture-coverage vet lint vet-integration vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-custom golangci-lint web web-typecheck web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -85,6 +85,15 @@ test-hub-sqlite:
 		-skip '^(TestDEF164_AtAgentSlug_DeliversToAgent|TestDEF164_AtAgentSlug_DMConversationCreated|TestDEF152_AgentToAgentDM_DeliversViaOutbound|TestCreateTemplateV2_ScopeIDInjectionBlocked)$$' \
 		./pkg/hub/... ./perf/bench/seed/...
 
+## test-fixture-coverage: Run the hub fixture coverage gate (TestFixtureCoverage) with SQLite
+# internal/fixturegen's tests carry `//go:build !no_sqlite`, so
+# "make test-fast" never compiles them and a schema change that skips the
+# fixture went red only in the non-blocking full suite (ptone/scion#625,
+# ptone/scion#1931). CI runs this in the pkg/hub SQLite Tests job.
+test-fixture-coverage:
+	@echo "Running fixture coverage gate (SQLite-enabled)..."
+	@go test -count=1 ./internal/fixturegen/...
+
 ## test-launch-store-postgres: Run the T1 async-create launch store/reaper
 # suite against a real Postgres server (design t1-async-create-v11.md §6,
 # "Postgres in CI"). Requires -tags integration and SCION_TEST_POSTGRES_URL;
@@ -110,6 +119,10 @@ test-hub-sqlite:
 # dialect-dependent behavior (usesRowLocks/FOR UPDATE) the same way the T1
 # tests do, so they belong in this job's Postgres coverage rather than running
 # only against SQLite.
+#
+# It also includes the secret-value compare-and-swap tests
+# (TestUpdateSecretValueIfVersion*): the Conduit grant key ring rotation relies
+# on this conditional UPDATE, and HA hubs run it on Postgres.
 #
 # It also includes the ListSchedules keyset-cursor tests (TestListSchedules_*,
 # ptone/scion#2502): the keyset compares and binds `created` timestamps, whose
@@ -164,13 +177,31 @@ test-launch-store-postgres:
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
-		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUTCTimestampNormalizeJSON_|TestConduitRegistry_|TestRunIntent_|TestStartClaim_|TestRecoveryObs_)' \
+		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUTCTimestampNormalizeJSON_|TestConduitRegistry_|TestRunIntent_|TestUpdateSecretValueIfVersion|TestStartClaim_|TestRecoveryObs_)' \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \
 	if [ $$status -ne 0 ]; then exit $$status; fi; \
 	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres.log; then \
 		echo "ERROR: one or more Postgres-only launch tests were skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi
+
+## test-tz-contract: Run the real-binary timestamp contract test (SQLite; Postgres too when SCION_TEST_POSTGRES_URL is set)
+# It builds cmd/scion, starts `scion server start --foreground` under non-UTC TZ values
+# and checks every timestamp on the wire is the written instant in UTC ("Z").
+# SQLite always runs; Postgres runs when SCION_TEST_POSTGRES_URL is set, and
+# the target then fails if the Postgres cases did not pass.
+test-tz-contract:
+	@echo "Running the timestamp contract test..."
+	@go test -tags tzcontract -count=1 -timeout 15m -v \
+		./pkg/hub/tzcontract/... > /tmp/test-tz-contract.log 2>&1; \
+	status=$$?; \
+	cat /tmp/test-tz-contract.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if [ -n "$$SCION_TEST_POSTGRES_URL" ] && \
+		! grep -qE '^[[:space:]]*--- PASS: TestTimestampContract/postgres ' /tmp/test-tz-contract.log; then \
+		echo "ERROR: SCION_TEST_POSTGRES_URL is set but the Postgres contract cases did not run." >&2; \
 		exit 1; \
 	fi
 
@@ -182,11 +213,11 @@ vet:
 lint:
 	@go vet -tags no_sqlite ./...
 
-## vet-integration: Compile-check integration-tagged code (go vet -tags 'integration volume_test')
+## vet-integration: Compile-check integration-tagged code (go vet -tags 'integration volume_test tzcontract')
 # Catches build breaks in integration-tagged files that other vet/lint
 # targets skip (ptone/scion#2348).
 vet-integration:
-	@go vet -tags 'integration volume_test' ./...
+	@go vet -tags 'integration volume_test tzcontract' ./...
 
 ## vet-integration-extras: Compile-check integration-tagged code in every extras/ module that has it
 # vet-integration only covers the root module's ./... tree; extras/*
@@ -280,8 +311,15 @@ check-authorization-catalog:
 check-route-authz-manifest:
 	@./hack/check-route-authz-manifest.sh
 
+## check-method-not-allowed: Flag bare MethodNotAllowed(w) calls (405 without Allow) in pkg/hub and pkg/runtimebroker
+# NOTE: same caveat as check-authz-guards above -- make collapses the
+# script's exit 1 (violations) and exit 3/4 (nothing was analysed) into one
+# code. CI invokes the script directly to tell those apart.
+check-method-not-allowed:
+	@./hack/check-method-not-allowed.sh
+
 ## check-custom: Run all custom CI lint checks (see hack/LINT-CONVENTIONS.md)
-check-custom: compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals
+check-custom: compat-literals check-annotation-prefix check-authz-guards check-setenv-guard check-conversation-upsert-guard check-security-marker-gates check-authorization-catalog check-route-authz-manifest cli-time-zones time-literals check-method-not-allowed
 	@echo "All custom checks passed."
 
 ## golangci-lint: Run golangci-lint on new issues only (install via: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest)
@@ -375,7 +413,7 @@ ci: fmt-check lint check-custom test-fast build
 	@echo "CI passed."
 
 ## ci-full: Run the full CI pipeline locally (mirrors GitHub Actions, includes web + golangci-lint)
-ci-full: fmt-check web web-typecheck web-test lint vet-integration vet-integration-extras check-custom golangci-lint test-fast build
+ci-full: fmt-check web web-typecheck web-test lint vet-integration vet-integration-extras check-custom golangci-lint test-fast test-fixture-coverage build
 	@echo ""
 	@echo "CI (full) passed."
 
@@ -388,6 +426,28 @@ proto:
 		--go-grpc_out=. --go-grpc_opt=module=github.com/GoogleCloudPlatform/scion \
 		proto/broker/v1/broker.proto proto/conduit/v1/conduit.proto
 	@echo "Proto generation done."
+
+## ent-check: Verify generated ent code (pkg/ent) matches pkg/ent/schema
+# Regenerates in place, then fails if anything under pkg/ent (tracked diff
+# or new untracked files -- a new schema adds new directories, which
+# git diff alone does not see) or go.mod/go.sum changed. The generator runs
+# with -mod=mod, so a codegen dependency missing from go.sum shows up as a
+# go.mod/go.sum diff, which is a real failure. Run on a clean pkg/ent tree:
+# uncommitted pkg/ent edits read as drift (ptone/scion#2746).
+# Exit codes: 1 = drift; 3 = go generate itself failed (not drift), shown by
+# make as "Error 3".
+# Keep in sync with the ent-generate-check step in .github/workflows/ci.yml:
+# it greps for the "go generate ./pkg/ent failed (not drift)" line below.
+ent-check:
+	@echo "Checking ent generated code is up to date..."
+	@go generate ./pkg/ent || { echo "go generate ./pkg/ent failed (not drift)"; exit 3; }
+	@untracked="$$(git status --porcelain --untracked-files=all -- pkg/ent | grep '^??' || true)"; \
+	if ! git diff --exit-code --stat -- pkg/ent go.mod go.sum || [ -n "$$untracked" ]; then \
+		[ -z "$$untracked" ] || { echo "Untracked generated files:"; echo "$$untracked"; }; \
+		echo "ent generated code is out of date. Run 'go generate ./pkg/ent' and commit the result."; \
+		exit 1; \
+	fi; \
+	echo "ent generated code is up to date."
 
 ## proto-check: Verify generated protobuf code is up to date
 proto-check:

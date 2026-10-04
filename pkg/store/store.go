@@ -1408,6 +1408,15 @@ type SecretStore interface {
 	// (ptone/scion#2152 round-2 review finding 11).
 	UpdateSecretRefIfMatches(ctx context.Context, key, scope, scopeID, expectedRef string, expectedVersion int, newRef string) (applied bool, err error)
 
+	// UpdateSecretValueIfVersion conditionally replaces only the
+	// EncryptedValue column, applying the change and incrementing Version
+	// only if the row's current Version equals expectedVersion. Returns
+	// applied=false (no error) if the row doesn't exist or its Version has
+	// moved on, e.g. a concurrent writer updated it first. Callers use it
+	// for compare-and-swap read-modify-write on a value they own: read the
+	// row with GetSecret, compute the new value, then retry on applied=false.
+	UpdateSecretValueIfVersion(ctx context.Context, key, scope, scopeID string, expectedVersion int, newEncryptedValue string) (applied bool, err error)
+
 	// UpsertSecret creates or updates a secret.
 	// Uses key+scope+scopeId as the unique identifier.
 	UpsertSecret(ctx context.Context, secret *Secret) (created bool, err error)
