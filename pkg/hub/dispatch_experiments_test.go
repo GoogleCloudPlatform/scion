@@ -145,6 +145,7 @@ func TestPutServerConfigDB_StorageBlocksAreLayer0(t *testing.T) {
 			srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body), ops)
 			assert.Equal(t, http.StatusUnprocessableEntity, rr.Code, rr.Body.String())
 			assert.Contains(t, rr.Body.String(), key)
+			assert.Contains(t, rr.Body.String(), "layer0_rejected")
 		})
 	}
 }

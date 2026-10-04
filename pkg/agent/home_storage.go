@@ -312,10 +312,10 @@ func validHomeSlug(slug string) bool {
 	return err == nil && s == slug && slug != ""
 }
 
-// validSubPathRoot reports whether root is a clean, non-empty relative
-// path that stays inside the export.
+// validSubPathRoot reports whether root is a non-empty subpath root that
+// passes the settings rule (config.ValidateSubPathRoot).
 func validSubPathRoot(root string) bool {
-	return root != "" && filepath.IsLocal(root) && filepath.Clean(root) == root && !strings.Contains(root, "\\")
+	return root != "" && config.ValidateSubPathRoot(root) == nil
 }
 
 func homeStorageGlobal(gs *config.VersionedSettings) *config.V1HomeStorageConfig {
@@ -345,9 +345,6 @@ func newNFSHomeStoragePlan(in homeStorageInput, gs *config.VersionedSettings, le
 		return nil, homeStorageUnavailable("home_storage nfs needs a complete shared_dir_storage nfs block for profile %q: %v", in.Profile, err)
 	}
 	share := sd.NFS.Shares[0]
-	if !validSubPathRoot(nfsSubPathRoot(sd.NFS)) {
-		return nil, homeStorageUnavailable("shared_dir_storage nfs subpath_root %q is not a clean relative path", nfsSubPathRoot(sd.NFS))
-	}
 	if share.PVName == "" {
 		return nil, homeStorageUnavailable("home_storage nfs needs a claim (shares[0].pv_name) in shared_dir_storage for profile %q", in.Profile)
 	}
@@ -383,6 +380,11 @@ func recordedNFSHomeStorage(in homeStorageInput, rec *homeStorageRecord) (*homeS
 		nfs = gs.Server.SharedDirStorage.NFS
 	}
 	if nfs != nil {
+		// The host mount root and shares come from the current block, so
+		// it must be complete and valid before any of it is used.
+		if err := (&config.V1SharedDirStorageConfig{Backend: config.HomeStorageBackendNFS, NFS: nfs}).Validate(); err != nil {
+			return nil, homeStorageUnavailable("the agent has an NFS home but server.shared_dir_storage.nfs is not valid: %v", err)
+		}
 		for _, share := range nfs.Shares {
 			if share.ID == rec.ShareID && share.PVName == rec.PVClaimName {
 				return &homeStoragePlan{
@@ -419,6 +421,15 @@ func loadHomeStorageSettings() (*config.VersionedSettings, error) {
 		}
 		return nil, errHomeStorageNotConfigured
 	}
+	return checkHomeStorageLoaded(gs)
+}
+
+// checkHomeStorageLoaded fails when the global settings file mentions home
+// storage but gs does not carry it, which happens when a file without
+// schema_version "1" takes the legacy loader. It applies to every source
+// of global settings a start uses, including the snapshot shared with the
+// shared-dir backend.
+func checkHomeStorageLoaded(gs *config.VersionedSettings) (*config.VersionedSettings, error) {
 	if gs != nil && (gs.Server == nil || gs.Server.HomeStorage == nil) &&
 		config.GlobalSettingsIsLegacyFormat() && config.GlobalSettingsMentions("home_storage") {
 		return nil, fmt.Errorf("global settings mention home_storage but it was not loaded (missing schema_version: \"1\"?)")

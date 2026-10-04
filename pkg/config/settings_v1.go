@@ -1573,6 +1573,14 @@ func (s *V1SharedDirStorageConfig) Validate() error {
 // actionable message instead. "." and ".." components have no meaningful
 // interpretation here either: subpath_root exists to name one literal,
 // fixed subdirectory of the export, not to navigate the tree.
+// ValidateSubPathRoot is the subpath_root rule for any value, including one
+// read back from a per-agent record: relative, with no empty, "." or ".."
+// component. An empty value is the caller's to handle (it means the
+// default).
+func ValidateSubPathRoot(subPathRoot string) error {
+	return validateSubPathRoot(subPathRoot)
+}
+
 func validateSubPathRoot(subPathRoot string) error {
 	if filepath.IsAbs(subPathRoot) {
 		return fmt.Errorf("must be relative, not absolute (got %q)", subPathRoot)
