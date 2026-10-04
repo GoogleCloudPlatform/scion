@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -120,35 +121,71 @@ func (s *Server) commitAgentCreate(ctx context.Context, w agentCreateWrite) erro
 	})
 }
 
+// Stages of a committed create at which a failure rolls it back. Each
+// cleanup site records its own stage in the agent_create_dispatch_failed
+// audit record, so readers can tell a failure before dispatch from a
+// dispatch failure.
+const (
+	createStageStorage           = "storage"
+	createStageUploadURL         = "upload_url"
+	createStageManaged           = "managed"
+	createStageDispatchEnvGather = "dispatch_env_gather"
+	createStageDispatch          = "dispatch"
+	createStageMissingEnv        = "missing_env"
+)
+
+// createCompensation is the input of compensateAgentCreate.
+type createCompensation struct {
+	Agent *store.Agent
+	// OriginalAuditID is the ID of the create's audit record; empty when
+	// unknown.
+	OriginalAuditID string
+	// OpID identifies the edge deactivation and is recorded in the audit
+	// record. A fresh ID is used when empty.
+	OpID string
+	// Stage is the create stage whose failure triggered the rollback (one
+	// of the createStage* values).
+	Stage string
+	// Cause is the failure that triggered the rollback; may be nil.
+	Cause error
+}
+
 // compensateAgentCreate rolls back a committed create after a later step
 // failed, in one transaction: it deletes the agent row (identity keys
 // cascade), deactivates the agent's delegation edges with cause
 // create_compensation, and writes an agent_create_dispatch_failed audit
-// record naming the create's audit record. originalAuditID may be empty
-// when it is unknown.
+// record naming the create's audit record and the failed stage.
+//
+// It is idempotent: when the agent row is already gone and no active edge
+// is left, it changes nothing and writes no audit record.
 //
 // The caller passes a context detached from the request (see
 // cleanupFailedCreate). Credential revocation, the broker-side delete and
 // the quota release stay with the caller.
-func (s *Server) compensateAgentCreate(ctx context.Context, agent *store.Agent, originalAuditID string, cause error) error {
-	opID := api.NewUUID()
+func (s *Server) compensateAgentCreate(ctx context.Context, c createCompensation) error {
+	opID := c.OpID
+	if opID == "" {
+		opID = api.NewUUID()
+	}
 	now := time.Now()
 	summary := struct {
 		OriginalAuditID string `json:"original_audit_id,omitempty"`
 		OpID            string `json:"op_id"`
+		Stage           string `json:"stage,omitempty"`
 		Error           string `json:"error,omitempty"`
-	}{OriginalAuditID: originalAuditID, OpID: opID}
-	if cause != nil {
-		summary.Error = truncateAuditText(cause.Error(), 512)
+	}{OriginalAuditID: c.OriginalAuditID, OpID: opID, Stage: c.Stage}
+	if c.Cause != nil {
+		summary.Error = truncateAuditText(c.Cause.Error(), 512)
 	}
 	after, err := json.Marshal(summary)
 	if err != nil {
 		return err
 	}
+	agentID := c.Agent.ID
 	record := &store.MutationAuditRecord{
 		MutationType: mutationTypeAgentCreateDispatchFailed,
 		TargetType:   "agent",
-		TargetID:     agent.ID,
+		TargetID:     agentID,
 		AfterSummary: string(after),
 		Timestamp:    now,
 	}
@@ -156,15 +193,24 @@ func (s *Server) compensateAgentCreate(ctx context.Context, agent *store.Agent, 
 	applyHubActorFallback(record)
 
 	return s.store.WithTx(ctx, func(tx store.Store) error {
-		if err := tx.DeleteAgent(ctx, agent.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
-			return fmt.Errorf("delete agent: %w", err)
+		rowDeleted := true
+		if err := tx.DeleteAgent(ctx, agentID); err != nil {
+			if !errors.Is(err, store.ErrNotFound) {
+				return fmt.Errorf("delete agent: %w", err)
+			}
+			rowDeleted = false
 		}
-		if _, err := tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agent.ID, store.Deactivation{
+		deactivated, err := tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agentID, store.Deactivation{
 			Cause: store.EdgeDeactivationCreateCompensation,
 			At:    &now,
 			OpID:  opID,
-		}); err != nil {
+		})
+		if err != nil {
 			return fmt.Errorf("deactivate delegation edges: %w", err)
+		}
+		if !rowDeleted && deactivated == 0 {
+			// Already compensated: nothing changed, so nothing to record.
+			return nil
 		}
 		if err := tx.CreateMutationAudit(ctx, record); err != nil {
 			return fmt.Errorf("compensation audit: %w", err)
@@ -192,17 +238,23 @@ func applyHubActorFallback(record *store.MutationAuditRecord) {
 	}
 }
 
-// truncateAuditText bounds free text copied into an audit summary.
+// truncateAuditText bounds free text copied into an audit summary to at
+// most max bytes, cutting at a rune boundary so a multi-byte character is
+// never split.
 func truncateAuditText(s string, max int) string {
 	if len(s) <= max {
 		return s
 	}
-	return s[:max]
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 // logCompensationFailure logs a failed compensation at ERROR with its
-// correlation ID.
-func logCompensationFailure(ctx context.Context, agentID, correlationID string, err error) {
+// correlation ID and the op ID its edge deactivation used.
+func logCompensationFailure(ctx context.Context, agentID, correlationID, opID string, err error) {
 	slog.ErrorContext(ctx, "agent create compensation failed",
-		"agent_id", agentID, "correlation_id", correlationID, "error", err)
+		"agent_id", agentID, "correlation_id", correlationID, "op_id", opID, "error", err)
 }
