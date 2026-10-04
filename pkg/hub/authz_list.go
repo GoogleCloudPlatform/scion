@@ -122,10 +122,11 @@ func (a *AuthzService) ResolveListScopes(ctx context.Context, identity Identity,
 	// Step 5: Call the pure kernel function.
 	scopes := ResolveAuthorizedScopes(principalClosure, permissionID, candidates, roleDefinitions, time.Now())
 
-	// Step 6: Apply credential caveats. UAT-scoped users and project-scoped
-	// agents must have their scope set intersected with the credential's
-	// allowed project, since credential restrictions can only reduce authority.
-	scopes = applyCredentialCaveats(identity, scopes)
+	// Step 6: Apply credential caveats. A UAT-backed user's scope set is
+	// reduced by its token boundary (and, for a hub boundary, its permission
+	// ceiling), and a project-scoped agent's by its token project, since
+	// credential restrictions can only reduce authority.
+	scopes = applyCredentialCaveats(identity, permissionID, scopes)
 
 	// Step 7: Apply AccessConstraints (C-2 fix).
 	// Load applicable constraints for the principal closure and check whether
@@ -140,15 +141,36 @@ func (a *AuthzService) ResolveListScopes(ctx context.Context, identity Identity,
 }
 
 // applyCredentialCaveats intersects the resolved scope set with any credential-
-// level project restrictions. This implements the design invariant that
-// "credential scopes, suspension, and delegation ceilings run after the union
-// [of grants] and can only reduce it."
-func applyCredentialCaveats(identity Identity, scopes ScopeSet) ScopeSet {
+// level restrictions. This implements the design invariant that "credential
+// scopes, suspension, and delegation ceilings run after the union [of grants]
+// and can only reduce it."
+//
+// For a UAT-backed identity the reduction is chosen by its token boundary:
+//   - a valid project boundary intersects the set with that one project;
+//   - a valid hub boundary applies no project intersection (the grant-derived
+//     set is already the user's live authority), but the set is empty unless
+//     the token's permission ceiling contains permissionID;
+//   - an invalid boundary yields the empty set.
+func applyCredentialCaveats(identity Identity, permissionID string, scopes ScopeSet) ScopeSet {
 	switch id := identity.(type) {
 	case *ScopedUserIdentity:
-		// UAT-scoped user: restrict to the UAT's project scope.
-		if pid := id.ScopedProjectID(); pid != "" {
-			return scopes.Intersection(ScopeSetExplicit(pid))
+		if id == nil {
+			return ScopeSetNone()
+		}
+		boundary := id.Boundary()
+		if !boundary.Valid() {
+			return ScopeSetNone()
+		}
+		switch boundary.Kind {
+		case BoundaryKindProject:
+			return scopes.Intersection(ScopeSetExplicit(boundary.ProjectID))
+		case BoundaryKindHub:
+			if !id.Ceiling().Allows(permissionID) {
+				return ScopeSetNone()
+			}
+			return scopes
+		default:
+			return ScopeSetNone()
 		}
 	case AgentIdentity:
 		// Agent with a project scope from its token.

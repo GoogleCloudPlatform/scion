@@ -420,7 +420,7 @@ func TestApplyCredentialCaveats_ScopedUser(t *testing.T) {
 	user := NewAuthenticatedUser("u1", "user@example.com", "User", "member", "cli")
 	scoped := NewScopedUserIdentity(user, "proj-1", []string{"agent:read"})
 
-	result := applyCredentialCaveats(scoped, ScopeSetAll())
+	result := applyCredentialCaveats(scoped, "agent.list", ScopeSetAll())
 	want := ScopeSetExplicit("proj-1")
 	if !result.Equal(want) {
 		t.Fatalf("ScopedUser with project scope: got %v, want %v", result, want)
@@ -434,7 +434,7 @@ func TestApplyCredentialCaveats_ScopedUserExplicitIntersection(t *testing.T) {
 	user := NewAuthenticatedUser("u1", "user@example.com", "User", "member", "cli")
 	scoped := NewScopedUserIdentity(user, "proj-1", []string{"agent:read"})
 
-	result := applyCredentialCaveats(scoped, ScopeSetExplicit("proj-1", "proj-2"))
+	result := applyCredentialCaveats(scoped, "agent.list", ScopeSetExplicit("proj-1", "proj-2"))
 	want := ScopeSetExplicit("proj-1")
 	if !result.Equal(want) {
 		t.Fatalf("ScopedUser intersecting Explicit(proj-1,proj-2): got %v, want %v", result, want)
@@ -447,7 +447,7 @@ func TestApplyCredentialCaveats_ScopedUserDisjoint(t *testing.T) {
 	user := NewAuthenticatedUser("u1", "user@example.com", "User", "member", "cli")
 	scoped := NewScopedUserIdentity(user, "proj-1", []string{"agent:read"})
 
-	result := applyCredentialCaveats(scoped, ScopeSetExplicit("proj-other"))
+	result := applyCredentialCaveats(scoped, "agent.list", ScopeSetExplicit("proj-other"))
 	if !result.IsNone() {
 		t.Fatalf("ScopedUser with disjoint project: got %v, want None", result)
 	}
@@ -463,7 +463,7 @@ func TestApplyCredentialCaveats_Agent(t *testing.T) {
 	}
 	agent.Subject = "agent-1"
 
-	result := applyCredentialCaveats(agent, ScopeSetExplicit("proj-a", "proj-b"))
+	result := applyCredentialCaveats(agent, "agent.list", ScopeSetExplicit("proj-a", "proj-b"))
 	want := ScopeSetExplicit("proj-a")
 	if !result.Equal(want) {
 		t.Fatalf("Agent with project scope: got %v, want %v", result, want)
@@ -480,7 +480,7 @@ func TestApplyCredentialCaveats_AgentAll(t *testing.T) {
 	}
 	agent.Subject = "agent-1"
 
-	result := applyCredentialCaveats(agent, ScopeSetAll())
+	result := applyCredentialCaveats(agent, "agent.list", ScopeSetAll())
 	want := ScopeSetExplicit("proj-a")
 	if !result.Equal(want) {
 		t.Fatalf("Agent narrowing All: got %v, want %v", result, want)
@@ -497,7 +497,7 @@ func TestApplyCredentialCaveats_AgentDisjoint(t *testing.T) {
 	}
 	agent.Subject = "agent-1"
 
-	result := applyCredentialCaveats(agent, ScopeSetExplicit("proj-b", "proj-c"))
+	result := applyCredentialCaveats(agent, "agent.list", ScopeSetExplicit("proj-b", "proj-c"))
 	if !result.IsNone() {
 		t.Fatalf("Agent with disjoint project: got %v, want None", result)
 	}
@@ -509,34 +509,34 @@ func TestApplyCredentialCaveats_UnscopedUser(t *testing.T) {
 	user := NewAuthenticatedUser("u1", "user@example.com", "User", "admin", "cli")
 
 	all := ScopeSetAll()
-	result := applyCredentialCaveats(user, all)
+	result := applyCredentialCaveats(user, "agent.list", all)
 	if !result.Equal(all) {
 		t.Fatalf("Unscoped user with All: got %v, want All", result)
 	}
 
 	explicit := ScopeSetExplicit("proj-1", "proj-2")
-	result = applyCredentialCaveats(user, explicit)
+	result = applyCredentialCaveats(user, "agent.list", explicit)
 	if !result.Equal(explicit) {
 		t.Fatalf("Unscoped user with Explicit: got %v, want %v", result, explicit)
 	}
 
 	none := ScopeSetNone()
-	result = applyCredentialCaveats(user, none)
+	result = applyCredentialCaveats(user, "agent.list", none)
 	if !result.Equal(none) {
 		t.Fatalf("Unscoped user with None: got %v, want None", result)
 	}
 }
 
 // TestApplyCredentialCaveats_ScopedUserNoProject verifies that a
-// ScopedUserIdentity without a project scope returns the scope set unchanged.
+// ScopedUserIdentity whose project boundary has no project ID lists nothing:
+// an empty project ID is an invalid boundary, never an unscoped one.
 func TestApplyCredentialCaveats_ScopedUserNoProject(t *testing.T) {
 	user := NewAuthenticatedUser("u1", "user@example.com", "User", "member", "cli")
 	scoped := NewScopedUserIdentity(user, "", []string{"agent:read"})
 
-	all := ScopeSetAll()
-	result := applyCredentialCaveats(scoped, all)
-	if !result.Equal(all) {
-		t.Fatalf("ScopedUser with empty project scope: got %v, want All", result)
+	result := applyCredentialCaveats(scoped, "agent.list", ScopeSetAll())
+	if !result.IsNone() {
+		t.Fatalf("ScopedUser with empty project scope: got %v, want None", result)
 	}
 }
 
@@ -551,7 +551,7 @@ func TestApplyCredentialCaveats_AgentNoProject(t *testing.T) {
 	agent.Subject = "agent-1"
 
 	explicit := ScopeSetExplicit("proj-a", "proj-b")
-	result := applyCredentialCaveats(agent, explicit)
+	result := applyCredentialCaveats(agent, "agent.list", explicit)
 	if !result.Equal(explicit) {
 		t.Fatalf("Agent with empty project: got %v, want %v", result, explicit)
 	}
@@ -561,7 +561,7 @@ func TestApplyCredentialCaveats_AgentNoProject(t *testing.T) {
 // returns the scope set unchanged (no panic).
 func TestApplyCredentialCaveats_NilIdentity(t *testing.T) {
 	all := ScopeSetAll()
-	result := applyCredentialCaveats(nil, all)
+	result := applyCredentialCaveats(nil, "agent.list", all)
 	if !result.Equal(all) {
 		t.Fatalf("nil identity: got %v, want All", result)
 	}
