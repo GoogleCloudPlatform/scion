@@ -108,6 +108,21 @@ func TestLeaf_SquashedExport(t *testing.T) {
 	assert.Contains(t, err.Error(), "broker host mount")
 }
 
+// A failure after the leaf step's own mkdir removes the empty directory,
+// so the next start creates it again.
+func TestLeaf_FailureRemovesItsOwnDirectory(t *testing.T) {
+	old := fchownFn
+	fchownFn = func(fd, uid, gid int) error { return unix.EPERM }
+	t.Cleanup(func() { fchownFn = old })
+	dir := t.TempDir()
+	require.Error(t, Leaf(leafOpts(dir)))
+	_, err := os.Lstat(filepath.Join(dir, HomeDirPrefix+testAgentID))
+	assert.True(t, os.IsNotExist(err), "the directory this call created is removed")
+
+	fchownFn = old
+	require.NoError(t, Leaf(leafOpts(dir)), "a later start succeeds")
+}
+
 // Step 0: a kubelet-created (root-owned) agent directory is normalised; an
 // agent directory owned by anyone else is left alone.
 func TestLeaf_AgentDirNormalisation(t *testing.T) {

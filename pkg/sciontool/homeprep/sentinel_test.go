@@ -103,6 +103,7 @@ func TestParseLinks(t *testing.T) {
 		`[{"target":"a","source":"relative"}]`,
 		`[{"target":"a","source":"/run/scion/../x"}]`,
 		`[{"target":"a","source":"/x"},{"target":"./a","source":"/y"}]`,
+		`[{"target":".config","source":"/x"},{"target":".config/gcloud/creds.json","source":"/y"}]`,
 	} {
 		_, err := ParseLinks(bad)
 		assert.Error(t, err, bad)

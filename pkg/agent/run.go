@@ -1289,6 +1289,10 @@ authDone:
 	// successfully loaded global settings, so a start that fell back to the
 	// local layout after a load error never records that fallback.
 	sharedDirStorageResolved := false
+	// startGlobalSettings is the global settings snapshot the shared-dir
+	// backend was chosen from, when it was loaded; the home storage below
+	// is resolved from the same snapshot.
+	var startGlobalSettings *config.VersionedSettings
 	if len(effectiveSharedDirs) > 0 {
 		recorded, recErr := readSharedDirStorageRecord(agentDir)
 		if recErr != nil {
@@ -1340,6 +1344,7 @@ authDone:
 			return nil, fmt.Errorf(
 				"global settings mention server.shared_dir_storage but it was not loaded (missing schema_version: \"1\"?)")
 		} else if globalSettings != nil {
+			startGlobalSettings = globalSettings
 			// The backend can be overridden per profile or runtime entry.
 			// The profile is the one named for this start, else the one
 			// the agent was created with (as for the shared-dir PVC
@@ -1408,7 +1413,12 @@ authDone:
 		AgentID:      hubDispatchedAgentID,
 		ProjectID:    hubDispatchedProjectID,
 		ExperimentOn: api.HubAgentDefaultsFromContext(ctx).ExperimentEnabled(experiments.K8sNFSHome),
-		LoadSettings: loadHomeStorageSettings,
+		LoadSettings: func() (*config.VersionedSettings, error) {
+			if startGlobalSettings != nil {
+				return startGlobalSettings, nil
+			}
+			return loadHomeStorageSettings()
+		},
 	})
 	if err != nil {
 		return nil, err

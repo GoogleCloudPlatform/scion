@@ -83,6 +83,15 @@ func ParseLinks(raw string) ([]Link, error) {
 		seen[t] = true
 		links[i].Target = t
 	}
+	// A target inside another target cannot be placed together with it:
+	// one would have to be a directory and a link at once.
+	for _, a := range links {
+		for _, b := range links {
+			if strings.HasPrefix(b.Target, a.Target+"/") {
+				return nil, fmt.Errorf("home link target %q is inside home link target %q", b.Target, a.Target)
+			}
+		}
+	}
 	return links, nil
 }
 

@@ -114,15 +114,20 @@ func Leaf(opts LeafOptions) error {
 			opts.HomeName, st.Uid, st.Gid, st.Mode&0o7777, opts.UID, opts.GID, homeDirMode)
 	}
 
-	// Step 4.
+	// Step 4. A failure removes the empty directory this call created, so
+	// a later start can create it again instead of meeting a mismatch.
+	fail := func(err error) error {
+		_ = unix.Unlinkat(dirFd, opts.HomeName, unix.AT_REMOVEDIR)
+		return err
+	}
 	if err := stripACLs(homeFd); err != nil {
-		return classErr(ErrClassLeafFailed, "cannot remove inherited ACLs from %s: %v", opts.HomeName, err)
+		return fail(classErr(ErrClassLeafFailed, "cannot remove inherited ACLs from %s: %v", opts.HomeName, err))
 	}
 	if err := fchownFn(homeFd, opts.UID, opts.GID); err != nil {
-		return leafChownErr(opts.HomeName, err)
+		return fail(leafChownErr(opts.HomeName, err))
 	}
 	if err := unix.Fchmod(homeFd, homeDirMode); err != nil {
-		return classErr(ErrClassLeafFailed, "cannot set the mode of %s: %v", opts.HomeName, err)
+		return fail(classErr(ErrClassLeafFailed, "cannot set the mode of %s: %v", opts.HomeName, err))
 	}
 	return nil
 }
