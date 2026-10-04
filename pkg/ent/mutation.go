@@ -4587,6 +4587,8 @@ type AgentMutation struct {
 	deletion_error           *string
 	deletion_prior           *string
 	deletion_request         *string
+	run_intent               *string
+	run_intent_at            *time.Time
 	clearedFields            map[string]struct{}
 	project                  *uuid.UUID
 	clearedproject           bool
@@ -7744,6 +7746,104 @@ func (m *AgentMutation) ResetDeletionRequest() {
 	delete(m.clearedFields, agent.FieldDeletionRequest)
 }
 
+// SetRunIntent sets the "run_intent" field.
+func (m *AgentMutation) SetRunIntent(s string) {
+	m.run_intent = &s
+}
+
+// RunIntent returns the value of the "run_intent" field in the mutation.
+func (m *AgentMutation) RunIntent() (r string, exists bool) {
+	v := m.run_intent
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRunIntent returns the old "run_intent" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldRunIntent(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRunIntent is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRunIntent requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRunIntent: %w", err)
+	}
+	return oldValue.RunIntent, nil
+}
+
+// ClearRunIntent clears the value of the "run_intent" field.
+func (m *AgentMutation) ClearRunIntent() {
+	m.run_intent = nil
+	m.clearedFields[agent.FieldRunIntent] = struct{}{}
+}
+
+// RunIntentCleared returns if the "run_intent" field was cleared in this mutation.
+func (m *AgentMutation) RunIntentCleared() bool {
+	_, ok := m.clearedFields[agent.FieldRunIntent]
+	return ok
+}
+
+// ResetRunIntent resets all changes to the "run_intent" field.
+func (m *AgentMutation) ResetRunIntent() {
+	m.run_intent = nil
+	delete(m.clearedFields, agent.FieldRunIntent)
+}
+
+// SetRunIntentAt sets the "run_intent_at" field.
+func (m *AgentMutation) SetRunIntentAt(t time.Time) {
+	m.run_intent_at = &t
+}
+
+// RunIntentAt returns the value of the "run_intent_at" field in the mutation.
+func (m *AgentMutation) RunIntentAt() (r time.Time, exists bool) {
+	v := m.run_intent_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRunIntentAt returns the old "run_intent_at" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldRunIntentAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRunIntentAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRunIntentAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRunIntentAt: %w", err)
+	}
+	return oldValue.RunIntentAt, nil
+}
+
+// ClearRunIntentAt clears the value of the "run_intent_at" field.
+func (m *AgentMutation) ClearRunIntentAt() {
+	m.run_intent_at = nil
+	m.clearedFields[agent.FieldRunIntentAt] = struct{}{}
+}
+
+// RunIntentAtCleared returns if the "run_intent_at" field was cleared in this mutation.
+func (m *AgentMutation) RunIntentAtCleared() bool {
+	_, ok := m.clearedFields[agent.FieldRunIntentAt]
+	return ok
+}
+
+// ResetRunIntentAt resets all changes to the "run_intent_at" field.
+func (m *AgentMutation) ResetRunIntentAt() {
+	m.run_intent_at = nil
+	delete(m.clearedFields, agent.FieldRunIntentAt)
+}
+
 // ClearProject clears the "project" edge to the Project entity.
 func (m *AgentMutation) ClearProject() {
 	m.clearedproject = true
@@ -7913,7 +8013,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 63)
+	fields := make([]string, 0, 65)
 	if m.slug != nil {
 		fields = append(fields, agent.FieldSlug)
 	}
@@ -8103,6 +8203,12 @@ func (m *AgentMutation) Fields() []string {
 	if m.deletion_request != nil {
 		fields = append(fields, agent.FieldDeletionRequest)
 	}
+	if m.run_intent != nil {
+		fields = append(fields, agent.FieldRunIntent)
+	}
+	if m.run_intent_at != nil {
+		fields = append(fields, agent.FieldRunIntentAt)
+	}
 	return fields
 }
 
@@ -8237,6 +8343,10 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.DeletionPrior()
 	case agent.FieldDeletionRequest:
 		return m.DeletionRequest()
+	case agent.FieldRunIntent:
+		return m.RunIntent()
+	case agent.FieldRunIntentAt:
+		return m.RunIntentAt()
 	}
 	return nil, false
 }
@@ -8372,6 +8482,10 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldDeletionPrior(ctx)
 	case agent.FieldDeletionRequest:
 		return m.OldDeletionRequest(ctx)
+	case agent.FieldRunIntent:
+		return m.OldRunIntent(ctx)
+	case agent.FieldRunIntentAt:
+		return m.OldRunIntentAt(ctx)
 	}
 	return nil, fmt.Errorf("unknown Agent field %s", name)
 }
@@ -8822,6 +8936,20 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetDeletionRequest(v)
 		return nil
+	case agent.FieldRunIntent:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRunIntent(v)
+		return nil
+	case agent.FieldRunIntentAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRunIntentAt(v)
+		return nil
 	}
 	return fmt.Errorf("unknown Agent field %s", name)
 }
@@ -9077,6 +9205,12 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldDeletionRequest) {
 		fields = append(fields, agent.FieldDeletionRequest)
 	}
+	if m.FieldCleared(agent.FieldRunIntent) {
+		fields = append(fields, agent.FieldRunIntent)
+	}
+	if m.FieldCleared(agent.FieldRunIntentAt) {
+		fields = append(fields, agent.FieldRunIntentAt)
+	}
 	return fields
 }
 
@@ -9228,6 +9362,12 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldDeletionRequest:
 		m.ClearDeletionRequest()
+		return nil
+	case agent.FieldRunIntent:
+		m.ClearRunIntent()
+		return nil
+	case agent.FieldRunIntentAt:
+		m.ClearRunIntentAt()
 		return nil
 	}
 	return fmt.Errorf("unknown Agent nullable field %s", name)
@@ -9425,6 +9565,12 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldDeletionRequest:
 		m.ResetDeletionRequest()
+		return nil
+	case agent.FieldRunIntent:
+		m.ResetRunIntent()
+		return nil
+	case agent.FieldRunIntentAt:
+		m.ResetRunIntentAt()
 		return nil
 	}
 	return fmt.Errorf("unknown Agent field %s", name)

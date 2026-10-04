@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 )
 
 func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id string) {
@@ -277,6 +278,7 @@ func (s *Server) harnessSupportsResume(agent *store.Agent) (bool, string) {
 // broker, persists phase=suspended (container_status=stopped, activity cleared),
 // and publishes the resulting status event. It returns *errHarnessNoResume when
 // the harness cannot resume so callers can decline to suspend.
+// The run intent is set to stopped before the dispatch.
 func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	if ok, reason := s.harnessSupportsResume(agent); !ok {
 		return &errHarnessNoResume{reason: reason}
@@ -285,6 +287,10 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	// The container is stopped before phase=suspended is written; see
 	// beginLifecycleOp.
 	defer s.beginLifecycleOp(agent.ID)()
+
+	if _, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped); err != nil {
+		return err
+	}
 
 	dispatcher := s.GetDispatcher()
 	if dispatcher != nil && agent.RuntimeBrokerID != "" {
@@ -323,6 +329,29 @@ func (s *Server) suspendAgent(ctx context.Context, agent *store.Agent) error {
 	s.releaseBrokerQuota(ctx, agent)
 	s.events.PublishAgentStatus(ctx, agent)
 	return nil
+}
+
+// recordRunIntent sets the agent's run intent in the store and mirrors the
+// stored value on agent. Every lifecycle path that dispatches a start, stop,
+// restart, create or delete records the intent first (see
+// TestLifecycleDispatchCallsRecordRunIntent).
+func (s *Server) recordRunIntent(ctx context.Context, agent *store.Agent, intent store.RunIntent) (time.Time, error) {
+	_, at, err := s.swapRunIntent(ctx, agent, intent)
+	return at, err
+}
+
+// swapRunIntent is recordRunIntent that also returns the intent the agent
+// held before the write ("" for none). A system-initiated stop uses it to
+// put back only an intent it actually replaced.
+func (s *Server) swapRunIntent(ctx context.Context, agent *store.Agent, intent store.RunIntent) (store.RunIntent, time.Time, error) {
+	prior, at, err := s.store.SwapRunIntent(ctx, agent.ID, intent)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("record run intent %s: %w", intent, err)
+	}
+	agent.RunIntent = intent
+	stored := at
+	agent.RunIntentAt = &stored
+	return prior, at, nil
 }
 
 // AgentLifecycleStartRequest is the optional JSON body for the "start"
@@ -376,7 +405,20 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	if !s.checkBrokerAvailability(w, r, agent) {
+	if action == api.AgentActionStop {
+		// A stop is recorded before the broker check, so it holds even when
+		// the broker is offline: the stop is then queued for the broker's
+		// reconnect.
+		intentAt, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped)
+		if err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		if !s.brokerReachable(ctx, agent) {
+			s.queueOfflineStop(w, r, agent, intentAt)
+			return
+		}
+	} else if !s.checkBrokerAvailability(w, r, agent) {
 		return
 	}
 
@@ -432,6 +474,14 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			if !ok {
 				return
 			}
+			// Intent stays running if the dispatch below fails: a failed
+			// start is still a start the user asked for (pod recovery
+			// design, run intent semantics).
+			if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
+				s.rollbackBrokerQuota(ctx, agent, reserved)
+				writeErrorFromErr(w, err, "")
+				return
+			}
 			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", resume)
 			// DispatchAgentStart applies the broker response in-place;
 			// use the broker-reported phase if it was set.
@@ -446,6 +496,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				// (ptone/scion#1978).
 				s.rollbackBrokerQuota(ctx, agent, reserved)
 			}
+		} else if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
+			writeErrorFromErr(w, err, "")
+			return
 		}
 	case api.AgentActionStop:
 		newPhase = string(state.PhaseStopped)
@@ -493,6 +546,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		return
 	case api.AgentActionRestart:
 		newPhase = string(state.PhaseRunning)
+		// A restart leaves the agent running: record that before the stop leg.
+		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
 			// Refuse before the stop leg: otherwise a broker without
 			// the empty-per-agent capability would have the agent
@@ -610,6 +668,101 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 	writeJSON(w, http.StatusOK, agentLifecycleResponse{Agent: &respAgent, Warnings: dispatchWarns.Warnings()})
 }
 
+// Offline stop: the container status and message an agent gets when its
+// stop is queued for an offline broker.
+const (
+	containerStatusStopQueued = "stop_queued"
+	offlineStopMessage        = "Stop queued: broker offline; it will be applied when the broker reconnects."
+)
+
+// queueOfflineStop handles a stop for an agent whose broker is offline. The
+// stop intent is already recorded at intentAt. It queues a durable stop
+// dispatch carrying intentAt, which the broker's reconnect drain applies only
+// if no newer start or stop has been recorded since (see execDispatchStop),
+// marks the agent stopped with container status stop_queued, and responds
+// 202 Accepted with a warning.
+func (s *Server) queueOfflineStop(w http.ResponseWriter, r *http.Request, agent *store.Agent, intentAt time.Time) {
+	ctx := r.Context()
+	at := intentAt
+	argsJSON, err := MarshalDispatchArgs(StopDispatchArgs{IntentAt: &at})
+	if err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	dispatch := &store.BrokerDispatch{
+		ID:        uuid.NewString(),
+		BrokerID:  agent.RuntimeBrokerID,
+		AgentID:   agent.ID,
+		AgentSlug: agent.Slug,
+		ProjectID: agent.ProjectID,
+		Op:        "stop",
+		Args:      argsJSON,
+	}
+	setBrokerDispatchInitiator(ctx, dispatch)
+	if err := s.store.InsertBrokerDispatch(ctx, dispatch); err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	s.clearExposedPortsForAgent(ctx, agent.ID)
+	newPhase := string(state.PhaseStopped)
+	if err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+		Phase:           newPhase,
+		ContainerStatus: containerStatusStopQueued,
+		Activity:        "",
+		Message:         offlineStopMessage,
+	}); err != nil {
+		writeErrorFromErr(w, err, "")
+		return
+	}
+	s.agentLifecycleLog.Info("Stop queued for offline broker",
+		"agent_id", agent.ID, "broker_id", agent.RuntimeBrokerID, "dispatch_id", dispatch.ID)
+
+	agent.Phase = newPhase
+	agent.ContainerStatus = containerStatusStopQueued
+	agent.Activity = ""
+	agent.Message = offlineStopMessage
+	s.events.PublishAgentStatus(ctx, agent)
+
+	// The broker may have reconnected after the reachability check, in which
+	// case its reconnect drain already ran and missed this row.
+	s.wakeBrokerDrain(ctx, agent.RuntimeBrokerID)
+
+	respAgent := *agent
+	respAgent.AppliedConfig = redactAppliedConfigEnvForResponse(agent.AppliedConfig, canViewAgentEnv(ctx, s, agent))
+	writeJSON(w, http.StatusAccepted, agentLifecycleResponse{Agent: &respAgent, Warnings: []string{offlineStopMessage}})
+}
+
+// wakeBrokerDrain asks the node that holds brokerID's control channel to
+// drain its pending broker_dispatch rows. It sends a best-effort command-bus
+// signal (other nodes) and, when this node holds the channel, starts a local
+// drain. Both are wakeups only: the row is durable, and a reconnect drains
+// it as well. The drain is CAS-gated, so a duplicate wakeup is harmless.
+func (s *Server) wakeBrokerDrain(ctx context.Context, brokerID string) {
+	if brokerID == "" {
+		return
+	}
+	if s.commandBus != nil {
+		if err := s.commandBus.SignalBrokerCmd(ctx, brokerID); err != nil {
+			s.agentLifecycleLog.Warn("Broker drain signal failed; the row drains on reconnect",
+				"broker_id", brokerID, "error", err)
+		}
+	}
+	if s.controlChannel != nil && s.controlChannel.IsConnected(brokerID) {
+		go func() {
+			dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), brokerDrainWakeTimeout)
+			defer cancel()
+			s.reconcileBroker(dctx, brokerID)
+		}()
+	}
+}
+
+// brokerDrainWakeTimeout bounds the local drain wakeBrokerDrain starts. A
+// drain cut short leaves its unclaimed rows queued for the next drain; the
+// row in flight at the deadline stays in progress until ReapStuckDispatch
+// requeues it.
+const brokerDrainWakeTimeout = 5 * time.Minute
+
 // agentLifecycleResponse is the lifecycle action response: the agent, plus
 // any warnings the dispatch raised. Warnings is omitted when empty, so the
 // body is unchanged for clients that only read the agent.
@@ -655,11 +808,28 @@ func (s *Server) recordRestartStopped(ctx context.Context, id string) {
 
 // StopAllAgentsResponse is the response from the stop-all endpoint.
 type StopAllAgentsResponse struct {
-	Stopped int             `json:"stopped"`
-	Failed  int             `json:"failed"`
-	Total   int             `json:"total"`
-	Scope   string          `json:"scope,omitempty"` // "all" or "own"
-	Results []stopAllResult `json:"results"`
+	Stopped int `json:"stopped"`
+	Failed  int `json:"failed"`
+	// StopRecorded counts agents whose start was in flight: their intent
+	// is now stopped, but the start was not interrupted.
+	StopRecorded int             `json:"stopRecorded,omitempty"`
+	Total        int             `json:"total"`
+	Scope        string          `json:"scope,omitempty"` // "all" or "own"
+	Results      []stopAllResult `json:"results"`
+}
+
+// stopAllStatusStopRecorded is the stop-all result status for an agent whose
+// start was in flight: the stop intent is recorded and nothing is dispatched.
+const stopAllStatusStopRecorded = "stop_recorded"
+
+// startInFlightPhase reports whether phase is one a start passes through
+// before the agent is running.
+func startInFlightPhase(phase string) bool {
+	switch state.Phase(phase) {
+	case state.PhaseProvisioning, state.PhaseCloning, state.PhaseStarting:
+		return true
+	}
+	return false
 }
 
 // handleStopAllAgents stops all running agents, optionally scoped to a project.
@@ -684,9 +854,13 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 
 	// Determine authorization and scope
 	scope := "all"
+	// Running agents, plus any agent whose recorded intent is still running
+	// (for example one in phase error), so stop-all leaves no agent
+	// intended to run.
 	filter := store.AgentFilter{
-		ProjectID: projectID,
-		Phase:     string(state.PhaseRunning),
+		ProjectID:   projectID,
+		Phase:       string(state.PhaseRunning),
+		OrRunIntent: string(store.RunIntentRunning),
 	}
 
 	// agent.stop_all is decided against the hub for global stop-all and
@@ -820,6 +994,31 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 				Name: agent.Name,
 			}
 
+			if _, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped); err != nil {
+				res.Status = "error"
+				res.Error = err.Error()
+				mu.Lock()
+				results = append(results, res)
+				mu.Unlock()
+				return
+			}
+			// An agent that is not running only had its intent left at
+			// running: recording the stop intent is all it needs. For an
+			// agent whose start is still in flight, the start is not
+			// interrupted: the agent may still come up running, with
+			// intent stopped (as after a user stop whose dispatch failed).
+			// It is reported as stop_recorded rather than stopped.
+			if agent.Phase != string(state.PhaseRunning) {
+				res.Status = "stopped"
+				if startInFlightPhase(agent.Phase) {
+					res.Status = stopAllStatusStopRecorded
+				}
+				mu.Lock()
+				results = append(results, res)
+				mu.Unlock()
+				return
+			}
+
 			// Dispatch stop to broker
 			var dispatchErr error
 			if dispatcher != nil && agent.RuntimeBrokerID != "" {
@@ -872,19 +1071,24 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 
 	stopped := 0
 	failed := 0
+	recorded := 0
 	for _, r := range results {
-		if r.Status == "stopped" {
+		switch r.Status {
+		case "stopped":
 			stopped++
-		} else {
+		case stopAllStatusStopRecorded:
+			recorded++
+		default:
 			failed++
 		}
 	}
 
 	writeJSON(w, http.StatusOK, StopAllAgentsResponse{
-		Stopped: stopped,
-		Failed:  failed,
-		Total:   len(results),
-		Scope:   scope,
-		Results: results,
+		Stopped:      stopped,
+		Failed:       failed,
+		StopRecorded: recorded,
+		Total:        len(results),
+		Scope:        scope,
+		Results:      results,
 	})
 }

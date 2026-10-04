@@ -150,6 +150,13 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 	if a.LaunchLastReportAt != nil {
 		sa.LaunchLastReportAt = *a.LaunchLastReportAt
 	}
+	if a.RunIntent != nil {
+		sa.RunIntent = store.RunIntent(*a.RunIntent)
+	}
+	if a.RunIntentAt != nil {
+		t := *a.RunIntentAt
+		sa.RunIntentAt = &t
+	}
 	if a.ReincarnationUpdatedAt != nil {
 		t := *a.ReincarnationUpdatedAt
 		sa.ReincarnationUpdatedAt = &t
@@ -1213,8 +1220,13 @@ func agentFilterPredicates(filter store.AgentFilter) ([]predicate.Agent, error) 
 	if filter.RuntimeBrokerID != "" {
 		preds = append(preds, agent.RuntimeBrokerIDEQ(filter.RuntimeBrokerID))
 	}
-	if filter.Phase != "" {
+	switch {
+	case filter.Phase != "" && filter.OrRunIntent != "":
+		preds = append(preds, agent.Or(agent.PhaseEQ(filter.Phase), agent.RunIntentEQ(filter.OrRunIntent)))
+	case filter.Phase != "":
 		preds = append(preds, agent.PhaseEQ(filter.Phase))
+	case filter.OrRunIntent != "":
+		preds = append(preds, agent.RunIntentEQ(filter.OrRunIntent))
 	}
 	if filter.AncestorID != "" {
 		preds = append(preds, ancestryContains(filter.AncestorID))
@@ -1352,6 +1364,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		su.ExitReason = ""
 		su.Message = ""
 		su.ClearExit = false
+		su.ClearMessageIf = ""
 	}
 
 	upd := tx.Agent.UpdateOneID(uid).
@@ -1435,6 +1448,8 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 
 	if su.Message != "" {
 		upd.SetMessage(su.Message)
+	} else if su.ClearMessageIf != "" && current.Message == su.ClearMessageIf {
+		upd.SetMessage("")
 	}
 	if su.ConnectionState != "" {
 		upd.SetConnectionState(su.ConnectionState)

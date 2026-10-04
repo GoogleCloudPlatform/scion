@@ -958,6 +958,13 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, agent *store.Agent, ru
 	// does.
 	if deleteRuntime != nil {
 		func() {
+			sctx, cancel := detachedCleanupContext(ctx, createCleanupStoreTimeout)
+			defer cancel()
+			if _, err := s.recordRunIntent(sctx, agent, store.RunIntentStopped); err != nil {
+				s.agentLifecycleLog.Warn("Create-failure cleanup: run intent write failed", "agent_id", agent.ID, "error", err)
+			}
+		}()
+		func() {
 			rctx, cancel := detachedCleanupContext(ctx, createCleanupRuntimeTimeout)
 			defer cancel()
 			if err := deleteRuntime(rctx); err != nil {
@@ -2110,6 +2117,16 @@ func (s *Server) createAgentInProject(
 	s.agentLifecycleLog.Info("Hub: pre-dispatch setup complete",
 		preDispatchAttrs...)
 	if dispatcher := s.GetDispatcher(); dispatcher != nil {
+		// A create is a start, unless it only provisions.
+		intent := store.RunIntentRunning
+		if req.ProvisionOnly {
+			intent = store.RunIntentStopped
+		}
+		if _, err := s.recordRunIntent(ctx, agent, intent); err != nil {
+			s.cleanupFailedCreate(ctx, agent, runtimeBrokerID, cleanupSkipRevoke, nil)
+			writeErrorFromErr(w, err, "")
+			return
+		}
 		if !req.ProvisionOnly {
 			// Use env-gather dispatch if requested
 			if req.GatherEnv {
