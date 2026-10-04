@@ -114,6 +114,29 @@ type ServerConfig struct {
 	// Operators enabling it must provide a SharedSigningSecret or pre-provision
 	// the signing keys; otherwise first boot will (correctly) refuse to start.
 	RequireStableSigningKey bool
+
+	// ConduitTCPAllowedPorts is the operator allow-list of agent-local
+	// loopback ports a Conduit tcp stream grant may target in addition to
+	// the agent's exposed ports. The reserved ports (9810, 18380) are always
+	// refused. Only used behind the hub.conduit experiment.
+	//
+	// Not yet reachable from configuration: settings/flag wiring comes in
+	// the Phase 1 hub-wiring change (1d-ii, ptone/scion#2780). Until then
+	// it is empty, so only exposed ports are targets.
+	ConduitTCPAllowedPorts []int
+	// ConduitGrantKeyActivation is how long a rotated-in Conduit grant key
+	// is published before it signs (default 15m). It must be at least the
+	// maximum interval at which grant targets refresh their key set
+	// (Welcome and token refresh); otherwise a target that has not yet
+	// learned the new key refuses its grants. It must also be at least the
+	// hub's ring refresh interval (1m). Only used behind the hub.conduit
+	// experiment.
+	//
+	// Not yet reachable from configuration: settings/flag wiring, with
+	// load-time validation (activation >= 1m), comes in the Phase 1
+	// hub-wiring change (1d-ii, ptone/scion#2780). Until then the default
+	// applies, and rotate rejects a delay below the refresh interval.
+	ConduitGrantKeyActivation time.Duration
 	// AuthMode is the exclusive human auth mode: "oauth" (default), "proxy", "dev".
 	AuthMode string
 	// ProxyAuthenticator is the configured proxy authenticator (when AuthMode == "proxy").
@@ -468,8 +491,10 @@ func (s *Server) agentSecretsUserScopeOnly() bool {
 // Implementations may be local (co-located hub+broker) or remote (HTTP-based).
 type AgentDispatcher interface {
 	// DispatchAgentCreate creates and starts an agent on the runtime broker.
-	// Returns the updated agent info after creation/start.
-	DispatchAgentCreate(ctx context.Context, agent *store.Agent) error
+	// It updates agent in place from the broker's answer. A non-nil result
+	// with Launch set means the broker accepted the create for asynchronous
+	// launch (see CreateDispatchResult).
+	DispatchAgentCreate(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error)
 
 	// DispatchAgentProvision provisions an agent on the runtime broker without starting it.
 	// This sets up directories, worktree, templates, and settings but does not launch the container.
@@ -520,12 +545,15 @@ type AgentDispatcher interface {
 	DispatchCheckAgentPrompt(ctx context.Context, agent *store.Agent) (bool, error)
 
 	// DispatchAgentCreateWithGather creates an agent with env-gather support.
-	// If the broker returns 202 with env requirements, it returns the requirements
-	// instead of an error. The second return value is non-nil when gather is needed.
-	DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error)
+	// If the broker returns 202 with env requirements, the result carries them
+	// in EnvReqs instead of an error. Launch is set when the broker accepted
+	// the create for asynchronous launch.
+	DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error)
 
 	// DispatchFinalizeEnv sends gathered env vars to the broker to complete agent creation.
-	DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) error
+	// Launch is set in the result when the broker accepted the create for
+	// asynchronous launch.
+	DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) (*CreateDispatchResult, error)
 }
 
 // WorkspaceDispatchSpec carries the inputs a broker needs to recreate an
@@ -733,6 +761,14 @@ type RemoteCreateAgentRequest struct {
 	// catalog rather than reused (`scion reincarnate`, design §3.4). See
 	// runtimebroker.CreateAgentRequest.Reprovision, the wire twin this maps to.
 	Reprovision bool `json:"reprovision,omitempty"`
+	// AsyncLaunch, LaunchID, LaunchTimeoutSeconds and LaunchKeepaliveSeconds
+	// mirror runtimebroker.CreateAgentRequest's async launch fields. They are
+	// set only by dispatchLaunching. LaunchTimeoutSeconds is the remaining
+	// launch budget at send time.
+	AsyncLaunch            bool   `json:"asyncLaunch,omitempty"`
+	LaunchID               string `json:"launchId,omitempty"`
+	LaunchTimeoutSeconds   int    `json:"launchTimeoutSeconds,omitempty"`
+	LaunchKeepaliveSeconds int    `json:"launchKeepaliveSeconds,omitempty"`
 	// ProjectPath is the local filesystem path to the project on the target runtime broker.
 	// This is looked up from the project provider record for the target broker.
 	ProjectPath string `json:"projectPath,omitempty"`
@@ -910,6 +946,15 @@ type RemoteAgentResponse struct {
 	// an old broker has no such field and silently ran a plain Provision
 	// instead, which must not be reported as reincarnate success.
 	Reprovisioned bool `json:"reprovisioned,omitempty"`
+
+	// LaunchPending, LaunchID and LaunchInstanceID mirror
+	// runtimebroker.CreateAgentResponse's async launch echo. LaunchPending
+	// with a LaunchID equal to the request's means the broker accepted the
+	// create for asynchronous launch; LaunchInstanceID is the broker process
+	// that owns it.
+	LaunchPending    bool   `json:"launchPending,omitempty"`
+	LaunchID         string `json:"launchId,omitempty"`
+	LaunchInstanceID string `json:"launchInstanceId,omitempty"`
 }
 
 // RemoteEnvRequirementsResponse is returned by the broker when env gather is needed.
@@ -955,18 +1000,23 @@ type RemoteAgentInfo struct {
 
 // Server is the Hub API HTTP server.
 type Server struct {
-	config                 ServerConfig
-	store                  store.Store
-	httpServer             *http.Server
-	mux                    *http.ServeMux
-	mu                     sync.RWMutex
-	startTime              time.Time
-	dispatcher             AgentDispatcher         // Optional dispatcher for co-located runtime broker
-	storage                storage.Storage         // Optional storage backend for templates
-	secretBackend          secret.SecretBackend    // Optional secret backend
-	agentTokenService      *AgentTokenService      // Agent JWT token service
-	userTokenService       *UserTokenService       // User JWT token service
-	downloadSigningKey     []byte                  // HMAC key for skill file capability URLs (#1792)
+	config             ServerConfig
+	store              store.Store
+	httpServer         *http.Server
+	mux                *http.ServeMux
+	mu                 sync.RWMutex
+	startTime          time.Time
+	dispatcher         AgentDispatcher      // Optional dispatcher for co-located runtime broker
+	storage            storage.Storage      // Optional storage backend for templates
+	secretBackend      secret.SecretBackend // Optional secret backend
+	agentTokenService  *AgentTokenService   // Agent JWT token service
+	userTokenService   *UserTokenService    // User JWT token service
+	downloadSigningKey []byte               // HMAC key for skill file capability URLs (#1792)
+
+	// Conduit stream grant key ring cache (conduit_grants.go); created on
+	// first use behind the hub.conduit experiment.
+	conduitGrantsOnce      sync.Once
+	conduitGrants          *conduitGrantKeys
 	listCursorSealer       *listCursorSealer       // AEAD sealer for authorizedList's opaque pagination cursors (ptone/scion#2124)
 	uatService             *UserAccessTokenService // User access token service
 	inviteService          *InviteService          // Invite code service
@@ -3484,6 +3534,10 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// takes s.mu; it returns the zero value in file mode, where the wire field
 	// is then omitted and broker behaviour is unchanged.
 	dispatcher.SetHubAgentDefaultsProvider(s.hubAgentDefaults)
+
+	// Wire the async agent launch settings. They are static after startup;
+	// the accessor reads them under s.mu.
+	dispatcher.SetAsyncLaunchSettingsProvider(s.asyncLaunchSettings)
 	dispatcher.SetAutoExposePortsDefaultProvider(s.autoExposePortsDefault)
 
 	// Set image registry so bare image names are rewritten before dispatch
@@ -4418,6 +4472,11 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// agent-create path. See deriveAgentConfig.
 		s.deriveAgentConfig(ctx, agent, project, tmpl)
 
+		// Scheduled creates have no waiting client, so they opt in to
+		// asynchronous launch server-side. It only takes effect when
+		// hub.asyncAgentLaunch is on.
+		agent.LaunchAsyncOptIn = true
+
 		if err := s.createAgentWithIdentityKey(ctx, agent, slug); err != nil {
 			return fmt.Errorf("failed to create agent %q: %w", slug, err)
 		}
@@ -4494,7 +4553,8 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
 			return fmt.Errorf("failed to dispatch agent %q: %w", slug, err)
 		}
-		if err := dispatcher.DispatchAgentCreate(ctx, agent); err != nil {
+		created, err := dispatcher.DispatchAgentCreate(ctx, agent)
+		if err != nil {
 			slog.Error("Scheduler: failed to dispatch agent creation",
 				"eventID", evt.ID,
 				"agent_id", agent.ID,
@@ -4503,6 +4563,14 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 				"executor_kind", dispatchExecutor.Kind,
 				"executor_id", dispatchExecutor.ID)
 			return fmt.Errorf("failed to dispatch agent %q: %w", slug, err)
+		}
+		if created.AcceptedLaunch() != nil {
+			// The row is already provisioning; persist the non-status
+			// fields from the dispatch.
+			if _, err := s.persistAcceptedLaunch(ctx, agent); err != nil {
+				slog.Warn("Scheduler: failed to persist agent after accepted launch",
+					"eventID", evt.ID, "agent_id", agent.ID, "error", err)
+			}
 		}
 
 		slog.Info("Scheduler: agent dispatched successfully",
@@ -5167,6 +5235,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/gcp-service-accounts/", s.guarded("/api/v1/gcp-service-accounts/", s.handleGCPServiceAccountByID))
 
 	s.mux.HandleFunc("/api/v1/gcs/object", s.guarded("/api/v1/gcs/object", s.handleGCSObject))
+	s.mux.HandleFunc("/api/v1/conduit/grant-keys", s.guarded("/api/v1/conduit/grant-keys", s.handleConduitGrantKeys))
 
 	s.mux.HandleFunc("/api/v1/skills", s.guarded("/api/v1/skills", s.handleSkills))
 	s.mux.HandleFunc("/api/v1/skills/", s.guarded("/api/v1/skills/", s.handleSkillByID))

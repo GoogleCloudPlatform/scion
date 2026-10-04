@@ -204,8 +204,8 @@ type reconcileTestDispatcher struct {
 	onMessage func(agent *store.Agent, msg string) error
 }
 
-func (d *reconcileTestDispatcher) DispatchAgentCreate(context.Context, *store.Agent) error {
-	return nil
+func (d *reconcileTestDispatcher) DispatchAgentCreate(context.Context, *store.Agent) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 func (d *reconcileTestDispatcher) DispatchAgentProvision(context.Context, *store.Agent) error {
 	return nil
@@ -242,11 +242,11 @@ func (d *reconcileTestDispatcher) DispatchAgentExec(context.Context, *store.Agen
 func (d *reconcileTestDispatcher) DispatchCheckAgentPrompt(context.Context, *store.Agent) (bool, error) {
 	return false, nil
 }
-func (d *reconcileTestDispatcher) DispatchAgentCreateWithGather(context.Context, *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (d *reconcileTestDispatcher) DispatchAgentCreateWithGather(context.Context, *store.Agent) (*CreateDispatchResult, error) {
 	return nil, nil
 }
-func (d *reconcileTestDispatcher) DispatchFinalizeEnv(context.Context, *store.Agent, map[string]string) error {
-	return nil
+func (d *reconcileTestDispatcher) DispatchFinalizeEnv(context.Context, *store.Agent, map[string]string) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 
 type assertErr struct{}
