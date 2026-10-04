@@ -1052,7 +1052,8 @@ var legacyProjectMembersGroupMarkerPageSize = 500
 // same time. The consequence is the pre-fix behaviour (the group is not
 // adopted and project re-ensure logs "refusing to adopt"), with no security
 // impact. To re-run the migration, an operator deletes the hub setting
-// migration_legacy_project_members_group_marker_v1 and restarts the hub.
+// migration_legacy_project_members_group_marker_v1
+// (LegacyProjectMembersGroupMarkerMigrationSection) and restarts the hub.
 func (c *CompositeStore) MigrateLegacyProjectMembersGroupMarkers(ctx context.Context) error {
 	if _, err := c.GetHubSetting(ctx, LegacyProjectMembersGroupMarkerMigrationSection); err == nil {
 		return nil

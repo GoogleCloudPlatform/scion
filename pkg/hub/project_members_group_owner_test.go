@@ -847,6 +847,9 @@ func TestProjectMembersGroup_LegacyMarkerAdoptedAfterMigration(t *testing.T) {
 	bindingsAfter, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, creator.ID)
 	require.NoError(t, err)
 	assert.Len(t, bindingsAfter, len(bindingsBefore), "adoption must not grant the creator a role binding")
+	groupBindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalGroup, legacy.ID)
+	require.NoError(t, err)
+	assert.Empty(t, groupBindings, "adoption must not create a role binding naming the members group as principal")
 
 	// As for any canonical members group, re-ensure re-adds the creator as a
 	// group owner member (no project authority under PM1).

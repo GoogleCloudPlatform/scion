@@ -607,9 +607,10 @@ const (
 	// LegacyAnnotationProjectMembersGroup is the marker key the store marker
 	// backfill wrote before ptone/scion#2556. The one-shot migration
 	// MigrateLegacyProjectMembersGroupMarkers rewrites it to
-	// AnnotationProjectMembersGroup. It is only read, never written: the
-	// group API marker guards and the owner-clearing backfill still accept
-	// it, because an older binary may write it during a rolling upgrade.
+	// AnnotationProjectMembersGroup. No current code sets it; the migration
+	// only removes it. The group API marker guards and the owner-clearing
+	// backfill still accept it, because an older binary may write it during
+	// a rolling upgrade.
 	LegacyAnnotationProjectMembersGroup = "scion.io/system-project-members-group"
 )
 
