@@ -141,9 +141,10 @@ export class ScionPageAgentCreate extends LitElement {
    * The GCP identity mode that applies when nothing has been explicitly
    * chosen, *before* any Kubernetes-only display substitution: this page's
    * own "block" placeholder, or the project's configured default. Set only
-   * in loadGCPServiceAccounts, in lockstep with the same assignments that
-   * seed gcpMetadataMode's initial value, so the two can never drift apart
-   * from each other even if other state changes mid-request.
+   * in loadGCPServiceAccounts, which always records the project default it
+   * found here; the current value (gcpMetadataMode) is seeded from it only
+   * when !gcpIdentityUserSet, so an explicit user pick made while the load
+   * was in flight is left in place (ptone/scion#2548).
    *
    * normalizeGcpModeForTarget derives the untouched display value fresh from
    * this field on every relevant change, rather than remembering "the
@@ -158,8 +159,9 @@ export class ScionPageAgentCreate extends LitElement {
   /**
    * The service account ID that goes with defaultGcpMetadataMode === 'assign'
    * (empty otherwise). Set only in loadGCPServiceAccounts, alongside
-   * defaultGcpMetadataMode and gcpServiceAccountId's own initial value, for
-   * the same reason: so normalizeGcpModeForTarget can restore the correct
+   * defaultGcpMetadataMode: it always records the project default, and
+   * gcpServiceAccountId is seeded from it only when !gcpIdentityUserSet. It
+   * exists so normalizeGcpModeForTarget can restore the correct
    * service account, not just the correct mode, if an explicit choice that
    * cleared gcpServiceAccountId is later undone by the Kubernetes Block
    * constraint (see normalizeGcpModeForTarget).
