@@ -88,11 +88,6 @@ func (m *rrManager) Message(ctx context.Context, agentID, projectID string, mess
 	return m.listCountingManager.Message(ctx, agentID, projectID, message, interrupt)
 }
 
-func (m *rrManager) MessageRaw(ctx context.Context, agentID, projectID string, keys string) error {
-	m.acts.Add(1)
-	return m.listCountingManager.MessageRaw(ctx, agentID, projectID, keys)
-}
-
 func (m *rrManager) SendKeys(ctx context.Context, projectID, agentSlug, expectedAgentID, keys string) error {
 	m.acts.Add(1)
 	return m.listCountingManager.SendKeys(ctx, projectID, agentSlug, expectedAgentID, keys)
