@@ -1166,7 +1166,11 @@ func effectiveGCPMetadataMode(isKubernetesDispatch bool, cfg *CreateAgentConfig,
 		//
 		// The current hub always writes SCION_METADATA_MODE_SOURCE=hub
 		// alongside its own authoritative mode (DispatchAgentStart,
-		// DispatchAgentRestart, buildCreateRequest). A hub old enough to
+		// DispatchAgentRestart, buildCreateRequest), and leaves the mode
+		// itself absent when the agent has no GCP identity configured, so
+		// that case reaches the runtime default below rather than this
+		// branch. A hub that predates that still sends "block" here, which
+		// Kubernetes refuses; it needs a hub upgrade. A hub old enough to
 		// predate that write won't send the marker at all, and on such a hub
 		// this value could be whatever a stray stored env var or secret
 		// happened to contain rather than a real dispatch decision. Downgrade

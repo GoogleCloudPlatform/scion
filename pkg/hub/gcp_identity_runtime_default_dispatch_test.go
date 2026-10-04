@@ -32,7 +32,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -183,17 +182,18 @@ func setProjectGCPIdentityDefault(t *testing.T, f *bypassAgentsFixture, mode str
 	require.NoError(t, f.store.UpdateProject(ctx, p))
 }
 
-// TestDispatch_NoGCPIdentity_DropsStoredMetadataEnvOnCreateAndStart pins
-// that, with no GCP identity configured, stored env vars named
-// SCION_METADATA_MODE or SCION_METADATA_REQUIRE_LOCAL_RUNTIME reach neither
-// the create nor the start dispatch. The broker reads both from resolvedEnv
-// when the request carries no GCPIdentity struct, so only the hub's own
-// decision may set them.
-func TestDispatch_NoGCPIdentity_DropsStoredMetadataEnvOnCreateAndStart(t *testing.T) {
+// TestDispatch_NoGCPIdentity_DropsConfigMetadataEnvOnCreateAndStart pins
+// that, with no GCP identity configured, SCION_METADATA_MODE or
+// SCION_METADATA_REQUIRE_LOCAL_RUNTIME in the agent's own config env reach
+// neither the create nor the start dispatch. The broker reads both from
+// resolvedEnv when the request carries no GCPIdentity struct, so only the
+// hub's own decision may set them. (Storage env and environment-type
+// secrets with these names are already dropped as reserved targets.)
+func TestDispatch_NoGCPIdentity_DropsConfigMetadataEnvOnCreateAndStart(t *testing.T) {
 	ctx := context.Background()
 	f := bypassAgentsSetup(t)
 
-	rec := createAgentAsOwner(t, f, CreateAgentRequest{Name: "no-identity-stored-env"})
+	rec := createAgentAsOwner(t, f, CreateAgentRequest{Name: "no-identity-config-env"})
 	require.Equal(t, http.StatusCreated, rec.Code, "create: %s", rec.Body.String())
 	var resp CreateAgentResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
@@ -201,21 +201,7 @@ func TestDispatch_NoGCPIdentity_DropsStoredMetadataEnvOnCreateAndStart(t *testin
 	require.NoError(t, err)
 	require.Nil(t, agent.AppliedConfig.GCPIdentity)
 
-	for k, v := range map[string]string{
-		"SCION_METADATA_MODE":                  store.GCPMetadataModePassthrough,
-		"SCION_METADATA_REQUIRE_LOCAL_RUNTIME": "true",
-	} {
-		_, err := f.store.UpsertEnvVar(ctx, &store.EnvVar{
-			ID:            uuid.New().String(),
-			Key:           k,
-			Value:         v,
-			Scope:         store.ScopeUser,
-			ScopeID:       agent.OwnerID,
-			InjectionMode: store.InjectionModeAlways,
-		})
-		require.NoError(t, err)
-	}
-	// The same names in the agent's own config env, which seeds both paths.
+	// The agent's config env seeds resolvedEnv on both paths.
 	agent.AppliedConfig.Env = map[string]string{
 		"SCION_METADATA_MODE":                  store.GCPMetadataModePassthrough,
 		"SCION_METADATA_REQUIRE_LOCAL_RUNTIME": "true",

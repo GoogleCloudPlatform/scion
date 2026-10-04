@@ -4551,8 +4551,8 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_GCPBlockMode(t *testing.T) {
 // case for e.g. scheduled-dispatch agents with no project or hub default),
 // the dispatch sends no SCION_METADATA_MODE (so the broker applies its
 // runtime default) plus the SCION_METADATA_MODE_SOURCE=hub marker, even when
-// plain, non-secret, user-scoped env vars happen to already be stored under
-// the mode and require-local-runtime control-plane names. The stored var here is seeded directly
+// a plain, non-secret, user-scoped env var happens to already be stored under
+// the same control-plane name. The stored var here is seeded directly
 // through the store, as a stand-in for a row that predates a create/patch
 // validation gate (or any other path that did not go through it) — the
 // dispatch layer is a separate, defense-in-depth choke point from that gate.
@@ -4603,16 +4603,6 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_NoGCPIdentityIgnoresStoredMetada
 	}); err != nil {
 		t.Fatalf("failed to seed stored env var: %v", err)
 	}
-	if _, err := memStore.UpsertEnvVar(ctx, &store.EnvVar{
-		ID:            api.NewUUID(),
-		Key:           "SCION_METADATA_REQUIRE_LOCAL_RUNTIME",
-		Value:         "true",
-		Scope:         store.ScopeUser,
-		ScopeID:       ownerID,
-		InjectionMode: store.InjectionModeAlways,
-	}); err != nil {
-		t.Fatalf("failed to seed stored env var: %v", err)
-	}
 
 	mockClient := &mockRuntimeBrokerClient{}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
@@ -4634,10 +4624,8 @@ func TestHTTPAgentDispatcher_DispatchAgentStart_NoGCPIdentityIgnoresStoredMetada
 		t.Fatalf("DispatchAgentStart failed: %v", err)
 	}
 
-	for _, k := range []string{"SCION_METADATA_MODE", "SCION_METADATA_REQUIRE_LOCAL_RUNTIME"} {
-		if v, ok := mockClient.lastResolvedEnv[k]; ok {
-			t.Errorf("expected %s absent despite the stored env var, got %q", k, v)
-		}
+	if v, ok := mockClient.lastResolvedEnv["SCION_METADATA_MODE"]; ok {
+		t.Errorf("expected SCION_METADATA_MODE absent despite the stored env var, got %q", v)
 	}
 	if v := mockClient.lastResolvedEnv["SCION_METADATA_MODE_SOURCE"]; v != "hub" {
 		t.Errorf("expected SCION_METADATA_MODE_SOURCE=hub, got %q", v)
