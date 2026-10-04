@@ -199,9 +199,12 @@ type GitHubResolutionCache struct {
 	// never waits on refreshWG while a new refresh is being added to it.
 	// refreshWG counts background stale-refresh goroutines (see
 	// resolveWithFetchAccept); closing, once set by Close, stops new ones
-	// from starting.
+	// from starting. running is the number of those goroutines that have
+	// not finished yet, so Close can tell, without waiting, whether any are
+	// left once ctx is done.
 	lifecycleMu sync.Mutex
 	closing     bool
+	running     int
 	refreshWG   sync.WaitGroup
 
 	// drainOnce starts the single goroutine that closes drained once
@@ -385,6 +388,38 @@ func cacheableFailure(err error) bool {
 	return errors.As(err, &rerr) && rerr.code == SkillErrCodeNotFound && !rerr.fileMissingAfterListing
 }
 
+// rememberedFailure is what the failure cache holds for a not_found. One
+// cacheKey (ref plus credential value) can be shared by callers in other
+// projects that spell the ref differently, for example with ?token= naming
+// their own secret, so it keeps only the stage and the cause, never the
+// spelling of the ref whose fetch failed. Its message is safe for every
+// caller as is; the resolver puts the caller's own ref back in (see
+// withCallerRef).
+type rememberedFailure struct {
+	stage string
+	err   error
+}
+
+func (e *rememberedFailure) Error() string {
+	if e.stage == "" {
+		return e.err.Error()
+	}
+	return e.stage + ": " + e.err.Error()
+}
+
+func (e *rememberedFailure) Unwrap() error { return e.err }
+
+// newRememberedFailure returns the part of a fetch error that the failure
+// cache may hand to other callers: without the failing caller's ref when
+// err carries one (see refStageError).
+func newRememberedFailure(err error) error {
+	var se *refStageError
+	if errors.As(err, &se) {
+		return &rememberedFailure{stage: se.stage, err: se.err}
+	}
+	return &rememberedFailure{err: err}
+}
+
 // recordFailure remembers err for cacheKey until failureCacheTTL from now,
 // and drops any expired failures so the map stays small. Once
 // maxRememberedFailures unexpired failures are held, a failure for a new
@@ -476,8 +511,8 @@ func (c *GitHubResolutionCache) Flush() {
 // or for ctx to be done, whichever comes first, and then writes any pending
 // entries to disk (see Flush), so a refresh that completed during the wait
 // is persisted. The write happens even when ctx is done first; Close then
-// returns ctx.Err(), and a refresh still running may finish after the write
-// without being persisted.
+// returns ctx.Err() if a refresh is still running (nil if none is), and that
+// refresh may finish after the write without being persisted.
 //
 // The cache stays usable after Close: lookups and synchronous resolutions
 // work as before, a stale entry is served without starting a refresh, and a
@@ -494,10 +529,22 @@ func (c *GitHubResolutionCache) Close(ctx context.Context) error {
 	select {
 	case <-c.refreshesDone():
 	case <-ctx.Done():
-		err = ctx.Err()
+		// select picks at random when both are ready, and the goroutine
+		// behind refreshesDone may not have run yet: report ctx only when a
+		// refresh is still running.
+		if c.refreshesRunning() {
+			err = ctx.Err()
+		}
 	}
 	c.Flush()
 	return err
+}
+
+// refreshesRunning reports whether any background refresh has not finished.
+func (c *GitHubResolutionCache) refreshesRunning() bool {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	return c.running > 0
 }
 
 // refreshesDone returns a channel closed once every background refresh has
@@ -525,8 +572,14 @@ func (c *GitHubResolutionCache) startRefresh(refresh func()) bool {
 		return false
 	}
 	c.refreshWG.Add(1)
+	c.running++
 	go func() {
 		defer c.refreshWG.Done()
+		defer func() {
+			c.lifecycleMu.Lock()
+			c.running--
+			c.lifecycleMu.Unlock()
+		}()
 		refresh()
 	}()
 	return true
@@ -1004,7 +1057,7 @@ func (c *GitHubResolutionCache) coalesceFetchAccept(
 		skill, ferr := fetch(flightCtx)
 		if ferr != nil {
 			if cacheableFailure(ferr) {
-				c.recordFailure(cacheKey, ferr)
+				c.recordFailure(cacheKey, newRememberedFailure(ferr))
 			}
 			return ResolvedSkill{}, ferr
 		}

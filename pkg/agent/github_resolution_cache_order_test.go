@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -161,5 +162,57 @@ func TestGitHubSkillResolver_RawDownloadNotFoundIsNotRemembered(t *testing.T) {
 	}
 	if got := rawHits.Load(); got != 2 {
 		t.Fatalf("raw download was requested %d times, want 2 (the failure must not be remembered)", got)
+	}
+}
+
+// TestGitHubSkillResolver_RememberedFailureNamesCallersOwnRef checks that a
+// not_found remembered for one project is served to another project whose
+// ?token= secret has the same value (so the same cache key) with that
+// project's own ref in the message, never the first project's spelling.
+func TestGitHubSkillResolver_RememberedFailureNamesCallersOwnRef(t *testing.T) {
+	server, mux := newTestGitHubServer(t)
+	var commitHits atomic.Int32
+	mux.HandleFunc("/repos/acme/tools/commits/main", func(w http.ResponseWriter, _ *http.Request) {
+		commitHits.Add(1)
+		http.Error(w, "not found", http.StatusNotFound)
+	})
+
+	cache, err := newTestResolutionCache(t.TempDir(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newResolver := func(secret string) *GitHubSkillResolver {
+		r := newTestGitHubResolver(server)
+		r.provisionCredentials = map[string]string{secret: "shared-value"}
+		r.resolutionCache = cache
+		return r
+	}
+
+	resolve := func(r *GitHubSkillResolver, secret, project string) ResolveError {
+		t.Helper()
+		uri := "gh://acme/tools/missing@main?token=" + secret
+		res, err := r.Resolve(context.Background(), []api.SkillReference{{URI: uri}}, ResolveOpts{ProjectID: project})
+		if err != nil {
+			t.Fatalf("Resolve %s: %v", uri, err)
+		}
+		if len(res.Errors) != 1 || res.Errors[0].Code != SkillErrCodeNotFound {
+			t.Fatalf("Resolve %s: errors = %+v, want one not_found", uri, res.Errors)
+		}
+		return res.Errors[0]
+	}
+
+	first := resolve(newResolver("P1_SECRET"), "P1_SECRET", "p1")
+	if !strings.Contains(first.Message, "P1_SECRET") {
+		t.Fatalf("first message %q does not name its own ref", first.Message)
+	}
+	second := resolve(newResolver("P2_SECRET"), "P2_SECRET", "p2")
+	if got := commitHits.Load(); got != 1 {
+		t.Fatalf("commits endpoint hit %d times, want 1 (second call served from the remembered failure)", got)
+	}
+	if strings.Contains(second.Message, "P1_SECRET") {
+		t.Fatalf("second message %q names the other project's ref", second.Message)
+	}
+	if !strings.Contains(second.Message, "gh://acme/tools/missing@main?token=P2_SECRET") {
+		t.Fatalf("second message %q does not name its own ref", second.Message)
 	}
 }

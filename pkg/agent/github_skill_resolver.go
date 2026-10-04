@@ -640,7 +640,7 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 
 		skill, err := r.resolutionCache.resolveWithFetchAccept(ctx, cacheKey, flightKey, credID, logRef, isBranchRef, refreshAllowed, accept, fetch)
 		if err != nil {
-			return nil, withRateLimitRef(err, ghRef.Raw)
+			return nil, withRateLimitRef(withCallerRef(err, ghRef.Raw), ghRef.Raw)
 		}
 		resolved = skill
 	} else {
@@ -669,6 +669,31 @@ func (r *GitHubSkillResolver) resolveOne(ctx context.Context, ghRef *GitHubSkill
 		resolved.githubCredentialRef = ghRef.Raw
 	}
 	return &resolved, nil
+}
+
+// refStageError is a fetchOne failure at one stage (resolving the ref or
+// listing the skill directory) for one caller's spelling of a ref. The
+// failure cache keeps only stage and err (see rememberedFailure), since ref
+// can name a secret that belongs to that caller.
+type refStageError struct {
+	stage string
+	ref   string
+	err   error
+}
+
+func (e *refStageError) Error() string { return e.stage + " for " + e.ref + ": " + e.err.Error() }
+
+func (e *refStageError) Unwrap() error { return e.err }
+
+// withCallerRef returns a remembered failure (see rememberedFailure) with
+// ref, this caller's own spelling of the ref, put back into the message.
+// Other errors are returned unchanged.
+func withCallerRef(err error, ref string) error {
+	var rf *rememberedFailure
+	if errors.As(err, &rf) && rf.stage != "" {
+		return &refStageError{stage: rf.stage, ref: ref, err: rf.err}
+	}
+	return err
 }
 
 // withRateLimitRef returns err as a *GitHubRateLimitError naming ref when err
@@ -701,12 +726,12 @@ func (r *GitHubSkillResolver) cooldownRetryAfter(rl *GitHubRateLimitError) strin
 func (r *GitHubSkillResolver) fetchOne(ctx context.Context, ghRef *GitHubSkillRef, ref api.SkillReference, token string) (ResolvedSkill, error) {
 	commitSHA, err := r.resolveCommitSHA(ctx, ghRef, token)
 	if err != nil {
-		return ResolvedSkill{}, fmt.Errorf("failed to resolve ref for %s: %w", ghRef.Raw, err)
+		return ResolvedSkill{}, &refStageError{stage: "failed to resolve ref", ref: ghRef.Raw, err: err}
 	}
 
 	contents, err := r.listContents(ctx, ghRef, commitSHA, token)
 	if err != nil {
-		return ResolvedSkill{}, fmt.Errorf("failed to list skill contents for %s: %w", ghRef.Raw, err)
+		return ResolvedSkill{}, &refStageError{stage: "failed to list skill contents", ref: ghRef.Raw, err: err}
 	}
 
 	if len(contents) == 0 {

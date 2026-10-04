@@ -645,6 +645,29 @@ func TestGitHubResolutionCache_CloseStopsWaitingOnContext(t *testing.T) {
 	}
 }
 
+// TestGitHubResolutionCache_CloseWithDoneContextAndNoRefreshes checks that
+// Close returns nil, not ctx.Err(), when ctx is already done but no refresh
+// is left running: none was started, or the one started has finished.
+func TestGitHubResolutionCache_CloseWithDoneContextAndNoRefreshes(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := 0; i < 200; i++ {
+		cache, err := newTestResolutionCache(t.TempDir(), time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i%2 == 1 {
+			if !cache.startRefresh(func() {}) {
+				t.Fatal("startRefresh declined before Close")
+			}
+			cache.refreshWG.Wait()
+		}
+		if err := cache.Close(ctx); err != nil {
+			t.Fatalf("iteration %d: Close = %v, want nil", i, err)
+		}
+	}
+}
+
 // TestGitHubResolutionCache_NoRefreshAfterClose checks that after Close a
 // stale entry is still served but no background refresh is started, and
 // that a synchronous resolution still works.
