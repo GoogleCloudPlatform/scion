@@ -33,9 +33,9 @@ import (
 // noopDispatcher is a minimal AgentDispatcher that does nothing.
 type noopDispatcher struct{}
 
-func (noopDispatcher) DispatchAgentCreate(_ context.Context, agent *store.Agent) error {
+func (noopDispatcher) DispatchAgentCreate(_ context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
 	agent.Phase = string(state.PhaseRunning)
-	return nil
+	return nil, nil
 }
 func (noopDispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error   { return nil }
 func (noopDispatcher) DispatchAgentReprovision(_ context.Context, _ *store.Agent) error { return nil }
@@ -54,7 +54,7 @@ func (noopDispatcher) DispatchAgentMessage(_ context.Context, _ *store.Agent, _ 
 func (noopDispatcher) DispatchCheckAgentPrompt(_ context.Context, _ *store.Agent) (bool, error) {
 	return false, nil
 }
-func (noopDispatcher) DispatchAgentCreateWithGather(_ context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (noopDispatcher) DispatchAgentCreateWithGather(_ context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
 	agent.Phase = string(state.PhaseRunning)
 	return nil, nil
 }
@@ -64,8 +64,8 @@ func (noopDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int
 func (noopDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
 	return "", 0, nil
 }
-func (noopDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) error {
-	return nil
+func (noopDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 
 // setupEventTestServer creates a test server with an event publisher, project, broker, and dispatcher.

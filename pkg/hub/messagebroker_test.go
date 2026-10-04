@@ -46,8 +46,8 @@ type brokerDispatchedMsg struct {
 	messageID  string // hub message ID carried on the dispatch context (#1820)
 }
 
-func (d *brokerMockDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) error {
-	return nil
+func (d *brokerMockDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 func (d *brokerMockDispatcher) DispatchAgentProvision(ctx context.Context, agent *store.Agent) error {
 	return nil
@@ -86,7 +86,7 @@ func (d *brokerMockDispatcher) DispatchAgentMessage(ctx context.Context, agent *
 func (d *brokerMockDispatcher) DispatchCheckAgentPrompt(ctx context.Context, agent *store.Agent) (bool, error) {
 	return false, nil
 }
-func (d *brokerMockDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (d *brokerMockDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
 	return nil, nil
 }
 func (d *brokerMockDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
@@ -95,8 +95,8 @@ func (d *brokerMockDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Age
 func (d *brokerMockDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
 	return "", 0, nil
 }
-func (d *brokerMockDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) error {
-	return nil
+func (d *brokerMockDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 
 func (d *brokerMockDispatcher) getMessages() []brokerDispatchedMsg {

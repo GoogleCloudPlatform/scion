@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -81,8 +82,10 @@ type SyncToFinalizeResponse struct {
 	FilesApplied int `json:"filesApplied"`
 	// BytesTransferred is the total bytes transferred.
 	BytesTransferred int64 `json:"bytesTransferred"`
-	// Warnings lists non-fatal issues, e.g. files ignored because the
-	// project gives each agent an empty workspace directory.
+	// Warnings lists non-fatal notices, for example that the agent was
+	// already launching and the workspace was not applied, or that files were
+	// ignored because the project gives each agent an empty workspace
+	// directory.
 	Warnings []string `json:"warnings,omitempty"`
 }
 
@@ -412,6 +415,16 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// A launch is already in flight (for example a duplicate finalize): do
+	// not dispatch again.
+	if agent.IsInFlight() {
+		writeJSON(w, http.StatusOK, SyncToFinalizeResponse{
+			Applied:  false,
+			Warnings: []string{launchInFlightInputsWarning},
+		})
+		return
+	}
+
 	// Check agent is in a valid state for finalize
 	if agent.Phase != string(state.PhaseRunning) && agent.Phase != string(state.PhaseProvisioning) {
 		Conflict(w, "Agent must be running or provisioning")
@@ -486,7 +499,16 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			RuntimeError(w, "No dispatcher available")
 			return
 		}
-		if err := dispatcher.DispatchAgentCreate(ctx, agent); err != nil {
+		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		created, err := dispatcher.DispatchAgentCreate(ctx, agent)
+		if errors.Is(err, ErrLaunchInvalidPhase) {
+			writeLaunchInvalidPhase(w)
+			return
+		}
+		if err != nil {
 			if writeAgentTokenIssueError(w, err) {
 				return
 			}
@@ -497,8 +519,14 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 			return
 		}
 
-		// Update agent status from broker response
-		if err := s.store.UpdateAgent(ctx, agent); err != nil {
+		if created.AcceptedLaunch() != nil {
+			// Accepted for asynchronous launch: the row is already
+			// provisioning; merge only the non-status fields.
+			if _, err := s.persistAcceptedLaunch(ctx, agent); err != nil {
+				s.workspaceLog.Warn("Failed to update agent after accepted launch", "error", err)
+			}
+		} else if err := s.store.UpdateAgent(ctx, agent); err != nil {
+			// Update agent status from broker response
 			s.workspaceLog.Warn("Failed to update agent status after dispatch", "error", err)
 		}
 

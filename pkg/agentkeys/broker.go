@@ -89,6 +89,13 @@ type Target struct {
 
 	// ProjectID is the canonical (Hub-resolved) project ID owning the agent.
 	ProjectID string
+
+	// Runtime is the runtime type the Hub recorded for the agent (store
+	// Agent.Runtime), or "" if none. It is sent as the broker's recorded
+	// runtime query parameter so the broker looks for the agent only in
+	// runtimes of that type (ptone/scion#2748); it is not part of
+	// BrokerRequest's body.
+	Runtime string
 }
 
 // BrokerRequest is the typed, internal Hub->broker keys dispatch contract —

@@ -276,7 +276,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate(t *testing.T) {
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -693,7 +693,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithProjectProviderPath(t *test
 		RuntimeBrokerID: tid("broker-1"),
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -745,7 +745,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_ThreadsWorkspaceMode(t *testing
 		RuntimeBrokerID: tid("broker-wt"),
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -787,7 +787,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_MissingBrokerEndpoint(t *testin
 		RuntimeBrokerID: tid("host-1"),
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("expected DispatchAgentCreate to succeed (client handles empty endpoint), got: %v", err)
 	}
@@ -860,7 +860,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithoutProjectProviderPath(t *t
 		RuntimeBrokerID: tid("broker-1"),
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -1574,7 +1574,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithWorkspace(t *testing.T) {
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -1622,7 +1622,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithCreatorName(t *testing.T) {
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -1666,7 +1666,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_WithoutCreatorName(t *testing.T
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -1707,7 +1707,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_DoesNotSetProvisionOnly(t *test
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -2625,7 +2625,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_InjectsDevToken(t *testing.T) {
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -2671,7 +2671,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoDevToken(t *testing.T) {
 		RuntimeBrokerID: tid("host-1"),
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -2717,7 +2717,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_DevTokenMergesWithExistingEnv(t
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -2829,7 +2829,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesGitClone(t *testing.T
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -2999,7 +2999,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesProfile(t *testing.T)
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -3055,7 +3055,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesProjectSlug_HubManage
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -3108,7 +3108,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_ProjectSlugSet_GitProject(t *te
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -3153,7 +3153,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_EmptyProfile(t *testing.T) {
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -3234,7 +3234,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoProjectSlug_LocalPathProject(
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -3331,7 +3331,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_LinkedProjectNoGitRemote(t *tes
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -3605,7 +3605,7 @@ func TestDispatchAgentCreate_IncludesStorageEnvVars(t *testing.T) {
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -4039,7 +4039,8 @@ func TestHTTPAgentDispatcher_AgentEndpointOverride(t *testing.T) {
 		{
 			name: "create, unset",
 			dispatch: func(ctx context.Context, d *HTTPAgentDispatcher, agent *store.Agent) error {
-				return d.DispatchAgentCreate(ctx, agent)
+				_, err := d.DispatchAgentCreate(ctx, agent)
+				return err
 			},
 			injected: func(m *mockRuntimeBrokerClient) (string, bool) {
 				if m.lastCreateReq == nil {
@@ -4053,7 +4054,8 @@ func TestHTTPAgentDispatcher_AgentEndpointOverride(t *testing.T) {
 			name:          "create, override set",
 			agentEndpoint: agentEndpoint,
 			dispatch: func(ctx context.Context, d *HTTPAgentDispatcher, agent *store.Agent) error {
-				return d.DispatchAgentCreate(ctx, agent)
+				_, err := d.DispatchAgentCreate(ctx, agent)
+				return err
 			},
 			injected: func(m *mockRuntimeBrokerClient) (string, bool) {
 				if m.lastCreateReq == nil {
@@ -4271,7 +4273,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_PropagatesSharedWorkspace(t *te
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -4995,7 +4997,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_AppliesImageRegistry(t *testing
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -5044,7 +5046,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_NoRegistryNoRewrite(t *testing.
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -5089,7 +5091,7 @@ func TestHTTPAgentDispatcher_DispatchAgentCreate_FullyQualifiedImageNotRewritten
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -5159,7 +5161,7 @@ func TestBuildCreateRequest_RelativeWorkspaceSurvives(t *testing.T) {
 			},
 		}
 
-		err := dispatcher.DispatchAgentCreate(ctx, agent)
+		_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 		if err != nil {
 			t.Fatalf("DispatchAgentCreate failed: %v", err)
 		}
@@ -5191,7 +5193,7 @@ func TestBuildCreateRequest_RelativeWorkspaceSurvives(t *testing.T) {
 			},
 		}
 
-		err := dispatcher.DispatchAgentCreate(ctx, agent)
+		_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 		if err != nil {
 			t.Fatalf("DispatchAgentCreate failed: %v", err)
 		}
@@ -5617,7 +5619,7 @@ func TestDispatchFinalizeEnv_PartialAutoResolve(t *testing.T) {
 
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
-	err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{
+	_, err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{
 		"DB_HOST": "cli-provided-host",
 	})
 	if err != nil {
@@ -5671,7 +5673,7 @@ func TestDispatchFinalizeEnv_FullAutoResolveInFinalize(t *testing.T) {
 
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
-	err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{
+	_, err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{
 		"CLI_VAR": "cli-value",
 	})
 	if err != nil {
@@ -5705,7 +5707,7 @@ func TestDispatchFinalizeEnv_NoAsNeededMatches(t *testing.T) {
 
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
-	err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{
+	_, err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{
 		"SOME_VAR": "some-value",
 	})
 
@@ -5755,7 +5757,7 @@ func TestDispatchFinalizeEnv_DropsReservedTargetFromCallerEnv(t *testing.T) {
 
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
-	err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{
+	_, err := dispatcher.DispatchFinalizeEnv(ctx, agent, map[string]string{
 		"SCION_METADATA_MODE":        "passthrough",
 		"SCION_METADATA_MODE_SOURCE": "hub",
 		"ORDINARY_VAR":               "ordinary-value",
@@ -6029,7 +6031,7 @@ func TestDispatchAgentCreate_IncludesHubName(t *testing.T) {
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -6070,7 +6072,6 @@ func TestHTTPAgentDispatcher_TZInjection_HubDefault(t *testing.T) {
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
 
 	// No profile timezone provider (or returns empty).
-	dispatcher.SetProfileTimezoneProvider(func(name string) string { return "" })
 
 	// Hub default timezone.
 	dispatcher.SetHubAgentDefaultsProvider(func() opsettings.AgentDefaultsSettings {
@@ -6090,7 +6091,7 @@ func TestHTTPAgentDispatcher_TZInjection_HubDefault(t *testing.T) {
 		},
 	}
 
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
+	_, err := dispatcher.DispatchAgentCreate(ctx, agent)
 	if err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
@@ -6155,7 +6156,6 @@ func TestHTTPAgentDispatcher_TZInjection_HubDefault_FileMode(t *testing.T) {
 
 	mockClient := &mockRuntimeBrokerClient{}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
-	dispatcher.SetProfileTimezoneProvider(func(name string) string { return "" })
 	// The real accessor, not a test closure — this is what makes the test
 	// prove the GlobalConfig/BuildLayer1SnapshotFromFile fix, not just the
 	// dispatcher's pre-existing injection logic.
@@ -6174,7 +6174,7 @@ func TestHTTPAgentDispatcher_TZInjection_HubDefault_FileMode(t *testing.T) {
 		},
 	}
 
-	if err := dispatcher.DispatchAgentCreate(ctx, agent); err != nil {
+	if _, err := dispatcher.DispatchAgentCreate(ctx, agent); err != nil {
 		t.Fatalf("DispatchAgentCreate failed: %v", err)
 	}
 
@@ -6208,66 +6208,12 @@ func TestHTTPAgentDispatcher_TZInjection_HubDefault_FileMode(t *testing.T) {
 			Profile:       "no-tz",
 		},
 	}
-	if err := dispatcher.DispatchAgentCreate(ctx, agent2); err != nil {
+	if _, err := dispatcher.DispatchAgentCreate(ctx, agent2); err != nil {
 		t.Fatalf("DispatchAgentCreate (after clear) failed: %v", err)
 	}
 	if _, ok := mockClient.lastCreateReq.ResolvedEnv["TZ"]; ok {
 		t.Errorf("TZ present in ResolvedEnv after clearing default_timezone, want absent: %q",
 			mockClient.lastCreateReq.ResolvedEnv["TZ"])
-	}
-}
-
-// TestHTTPAgentDispatcher_TZInjection_Precedence_ProfileEnvTZ verifies that
-// a raw TZ in profile env prevents the hub default from being applied, but is
-// itself overridden by the first-class profile timezone field.
-func TestHTTPAgentDispatcher_TZInjection_Precedence_ProfileEnvTZ(t *testing.T) {
-	ctx := context.Background()
-	memStore := createTestStore(t)
-
-	broker := &store.RuntimeBroker{
-		ID:       tid("tz-broker-3"),
-		Name:     "tz-host-3",
-		Slug:     "tz-host-3",
-		Endpoint: "http://localhost:9800",
-		Status:   store.BrokerStatusOnline,
-	}
-	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
-		t.Fatalf("create broker: %v", err)
-	}
-
-	mockClient := &mockRuntimeBrokerClient{}
-	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())
-
-	// Profile timezone returns empty (no first-class timezone set).
-	dispatcher.SetProfileTimezoneProvider(func(name string) string { return "" })
-
-	// Hub default timezone should NOT apply because config env has TZ.
-	dispatcher.SetHubAgentDefaultsProvider(func() opsettings.AgentDefaultsSettings {
-		return opsettings.AgentDefaultsSettings{DefaultTimezone: "America/Chicago"}
-	})
-
-	agent := &store.Agent{
-		ID:              tid("tz-agent-3"),
-		Name:            "tz-agent-3",
-		Slug:            "tz-agent-3",
-		ProjectID:       tid("project-1"),
-		RuntimeBrokerID: tid("tz-broker-3"),
-		AppliedConfig: &store.AgentAppliedConfig{
-			HarnessConfig: "claude",
-			Task:          "test env tz precedence",
-			Profile:       "env-tz-profile",
-			Env:           map[string]string{"TZ": "Europe/London"},
-		},
-	}
-
-	err := dispatcher.DispatchAgentCreate(ctx, agent)
-	if err != nil {
-		t.Fatalf("DispatchAgentCreate failed: %v", err)
-	}
-
-	env := mockClient.lastCreateReq.ResolvedEnv
-	if got := env["TZ"]; got != "Europe/London" {
-		t.Errorf("TZ = %q, want Europe/London (config env TZ should beat hub default)", got)
 	}
 }
 

@@ -84,7 +84,8 @@ func (f *tzDispatchFixture) seedEnv(t *testing.T, scope, scopeID, value, mode st
 
 func (f *tzDispatchFixture) createTZ(t *testing.T) string {
 	t.Helper()
-	require.NoError(t, f.d.DispatchAgentCreate(context.Background(), f.agent))
+	_, err := f.d.DispatchAgentCreate(context.Background(), f.agent)
+	require.NoError(t, err)
 	require.NotNil(t, f.client.lastCreateReq)
 	return f.client.lastCreateReq.ResolvedEnv["TZ"]
 }
@@ -240,7 +241,8 @@ func TestAgentTZDispatch_TZSecretsDropped(t *testing.T) {
 		{SecretMeta: secret.SecretMeta{Name: "other-secret", SecretType: "environment", Target: "OTHER", Scope: "user", ScopeID: f.agent.OwnerID, InjectionMode: "always"}, Value: "x"},
 	}})
 	ctx, warns := withDispatchWarnings(context.Background())
-	require.NoError(t, f.d.DispatchAgentCreate(ctx, f.agent))
+	_, err := f.d.DispatchAgentCreate(ctx, f.agent)
+	require.NoError(t, err)
 	req := f.client.lastCreateReq
 	assert.Equal(t, "Asia/Tokyo", req.ResolvedEnv["TZ"])
 	var targets []string
@@ -330,9 +332,9 @@ func TestAgentTZDispatch_NoLaunderViaOldBrokerGather(t *testing.T) {
 			f.client.createWithGatherFunc = oldBrokerReportingTZ(&reqs)
 			ctx := context.Background()
 
-			envReqs, err := f.d.DispatchAgentCreateWithGather(ctx, f.agent)
+			res, err := f.d.DispatchAgentCreateWithGather(ctx, f.agent)
 			require.NoError(t, err)
-			assert.Nil(t, envReqs, "the CLI must never be asked for TZ")
+			assert.Nil(t, res.EnvRequirements(), "the CLI must never be asked for TZ")
 			require.NotEmpty(t, reqs)
 			if hubDefault == "" {
 				// The first request carries no TZ, so the old broker asks;
@@ -358,7 +360,8 @@ func TestAgentTZDispatch_NoLaunderViaOldBrokerGather(t *testing.T) {
 			// A submitted TZ (e.g. a CLI or reconcile replay) is ignored.
 			reqs = nil
 			ctx, warns := withDispatchWarnings(ctx)
-			require.NoError(t, f.d.DispatchFinalizeEnv(ctx, f.agent, map[string]string{"TZ": "Europe/Berlin"}))
+			_, err = f.d.DispatchFinalizeEnv(ctx, f.agent, map[string]string{"TZ": "Europe/Berlin"})
+			require.NoError(t, err)
 			assert.Empty(t, f.agent.AppliedConfig.ExplicitTimezone)
 			for _, r := range reqs {
 				assert.NotEqual(t, "Europe/Berlin", r.ResolvedEnv["TZ"])
