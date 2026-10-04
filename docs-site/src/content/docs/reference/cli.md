@@ -66,6 +66,28 @@ starting a **stopped** or **error** agent runs a fresh session. See
     - `--broker <string>`: Preferred runtime broker ID or name for execution.
     - `--message-mode <mode>`: Set the agent's initial message mode (`project`, `branch`, `lineage`, `none`, or `hub`). Defaults to `project`. See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes).
     - `--notify`: Get notified via the browser or system when the spawned agent reaches a terminal state.
+    - `--no-wait`: *(Hub mode)* Return as soon as the Hub accepts the launch instead of waiting for the agent to reach `running`. Ignored with `--attach`.
+    - `--wait-timeout <duration>`: *(Hub mode)* How long to wait for the agent to start (for example `10m`); must not be negative. The default is the Hub's remaining launch budget plus 30 seconds, or 5 minutes when the Hub does not advertise one. Raise it if the Hub's launch timeout has been raised.
+
+In Hub mode, `start` waits for the agent to reach `running` when the Hub
+launches it asynchronously, after a workspace upload, or with `--attach`.
+Otherwise (for example when the Hub does not launch asynchronously) it returns
+as soon as the Hub answers, as before, possibly while the agent is still
+provisioning. While waiting, each launch step is printed to stderr (nothing
+extra under `--format json`). If the wait times out, or you press Ctrl-C, only
+the wait stops: the launch continues on the Hub, and re-running
+`scion start <agent-name>` resumes waiting. Ctrl-C exits with status 130 and
+SIGTERM with 143; a failed launch or a timeout exits 1. Network errors and
+Hub answers of 5xx, 408 or 429 are retried while waiting; any other 4xx (for
+example 401 or 403) stops the wait at once with the Hub's error, and the launch
+continues on the Hub. If the agent's create did not
+complete (for example the image could not be pulled), the error shows the
+stored template and task. Delete the agent and create it again
+(`scion delete <agent-name>`, then `scion start` with the same template and
+task). If soft-delete retention is enabled on the Hub, the name stays reserved
+until the agent is deleted with force=true or purged; until then, use a new
+name. With `--format json`, `--attach` after a workspace upload attaches
+without printing the JSON result.
 
 ### `scion stop`
 
@@ -112,6 +134,7 @@ session.
 - **Flags:**
     - `-a, --attach`: Attach to the agent immediately.
     - `-f, --force`: Force resume an agent in the `error` phase. This attempts an in-place restart of a crashed or interrupted session, preserving the prior harness conversation state instead of starting fresh.
+    - `--no-wait`, `--wait-timeout <duration>`: *(Hub mode)* Same as for [`scion start`](#scion-start-or-run).
 
 ### `scion attach`
 
