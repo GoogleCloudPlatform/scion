@@ -33,18 +33,24 @@ type Action string
 
 // Action constants for authorization checks.
 const (
-	ActionCreate       Action = "create"
-	ActionRead         Action = "read"
-	ActionUpdate       Action = "update"
-	ActionDelete       Action = "delete"
-	ActionList         Action = "list"
-	ActionManage       Action = "manage"
-	ActionStart        Action = "start"
-	ActionStop         Action = "stop"
-	ActionMessage      Action = "message"
-	ActionAttach       Action = "attach"
-	ActionLifecycle    Action = "lifecycle"
-	ActionPortAccess   Action = "port_access"
+	ActionCreate     Action = "create"
+	ActionRead       Action = "read"
+	ActionUpdate     Action = "update"
+	ActionDelete     Action = "delete"
+	ActionList       Action = "list"
+	ActionManage     Action = "manage"
+	ActionStart      Action = "start"
+	ActionStop       Action = "stop"
+	ActionMessage    Action = "message"
+	ActionAttach     Action = "attach"
+	ActionLifecycle  Action = "lifecycle"
+	ActionPortAccess Action = "port_access"
+	// ActionTunnel gates the Conduit `scion tunnel` / `scion ssh` request
+	// path (not a stream kind). It is not a registered permission of its
+	// own: it is granted wherever agent.port_access is (see
+	// conduitAuthzFor), so every role, relationship and token scope that
+	// carries port access carries it.
+	ActionTunnel       Action = "tunnel"
 	ActionRegister     Action = "register"
 	ActionAddMember    Action = "addMember"
 	ActionRemoveMember Action = "removeMember"

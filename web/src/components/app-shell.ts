@@ -147,6 +147,9 @@ export class ScionApp extends LitElement {
     .content {
       flex: 1;
       padding: 1.5rem;
+      /* The last of the scrolled content clears the home indicator (the
+         page uses viewport-fit=cover); the inset is 0 elsewhere. */
+      padding-bottom: max(1.5rem, env(safe-area-inset-bottom, 0px));
       overflow: auto;
       overscroll-behavior: contain;
       display: flex;
@@ -156,6 +159,7 @@ export class ScionApp extends LitElement {
     @media (max-width: 640px) {
       .content {
         padding: 1rem;
+        padding-bottom: max(1rem, env(safe-area-inset-bottom, 0px));
       }
     }
 

@@ -1803,6 +1803,16 @@ func lastOwnerDenial() *MembershipDecision {
 // countActiveDirectOwnersFromStore counts active direct-user project-owner
 // bindings in the provided store, which may be transactional.
 func (svc *ProjectMembershipService) countActiveDirectOwnersFromStore(ctx context.Context, s store.Store, projectID string) (int, error) {
+	return countActiveDirectProjectOwners(ctx, s, projectID, svc.nowFunc(), "")
+}
+
+// countActiveDirectProjectOwners counts the active (not expired, not
+// scheduled) direct-user project-owner bindings on projectID in s, which may
+// be transactional. Bindings whose principal is excludeUserID are skipped, so
+// callers can ask "how many owners remain besides this user"; pass "" to count
+// every owner. This is the single definition of "owner" used by the last-owner
+// rule, shared by the members API and user deletion.
+func countActiveDirectProjectOwners(ctx context.Context, s store.Store, projectID string, now time.Time, excludeUserID string) (int, error) {
 	bindings, err := s.ListRoleBindingsForScope(ctx, store.RoleScopeProject, projectID)
 	if err != nil {
 		return 0, err
@@ -1811,10 +1821,12 @@ func (svc *ProjectMembershipService) countActiveDirectOwnersFromStore(ctx contex
 	if err != nil {
 		return 0, err
 	}
-	now := svc.nowFunc()
 	count := 0
 	for _, b := range bindings {
 		if b.PrincipalType != store.RoleBindingPrincipalUser || b.RoleDefinitionID != ownerRoleDef.ID {
+			continue
+		}
+		if excludeUserID != "" && b.PrincipalID == excludeUserID {
 			continue
 		}
 		if !isBindingActive(b, now) {
