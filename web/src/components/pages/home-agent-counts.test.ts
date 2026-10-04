@@ -767,6 +767,81 @@ describe('home agent counts and the shared completeness flag', { timeout: 30_000
     });
   });
 
+  describe('home load guards', () => {
+    it('a second chip click while the first refresh is in flight sends no request', async () => {
+      const fake = newFake(2003, 40);
+      const h = holdable(fakeFetch(fake), isGlobalAgentsList);
+      vi.stubGlobal('fetch', vi.fn(h.fn));
+      const el = await mountPage('scion-page-home');
+      expect(internals(el).memberIndex?.countOnly).toBe(true);
+      handleUpdate('agent.g-00002.status', { agentId: 'g-00002', phase: 'stopped' });
+      await flushLive(el);
+      expect(countsChip(el)).not.toBeNull();
+
+      h.hold(1);
+      const before = fake.requests.length;
+      countsChip(el)!.click();
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      await el.updateComplete;
+      expect(internals(el).countsLoading).toBe(true);
+      expect(countsChip(el)).not.toBeNull();
+      countsChip(el)!.click();
+      await el.updateComplete;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(h.sent.length).toBe(2);
+      expect(h.heldCount).toBe(1);
+
+      h.release();
+      await settle(el);
+      expect(fake.requests.length - before).toBe(1);
+      expect(countsChip(el)).toBeNull();
+    });
+
+    it('when two loads overlap, the later load’s response wins even if it arrives first', async () => {
+      const fake = newFake(2003, 40);
+      // Each agents request waits for its own gate; the fake answers with
+      // whatever its agents are when the gate opens.
+      const gates: Array<() => void> = [];
+      const inner = fakeFetch(fake);
+      const gated: typeof inner = async (input, init) => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (isGlobalAgentsList(new URL(raw, 'http://localhost'))) {
+          await new Promise<void>((resolve) => gates.push(resolve));
+        }
+        return inner(input, init);
+      };
+      vi.stubGlobal('fetch', vi.fn(gated));
+      // Projects in state and no agents: home sends the agents request alone.
+      visitProjects(fake);
+      const el = document.createElement('scion-page-home') as TestEl;
+      (el as unknown as { pageData: unknown }).pageData = { path: '/', title: 'Page', user: USER };
+      document.body.appendChild(el);
+      await el.updateComplete;
+      await vi.waitFor(() => expect(gates).toHaveLength(1));
+      // Leave and come back: the second visit sends its own load.
+      el.remove();
+      document.body.appendChild(el);
+      await el.updateComplete;
+      await vi.waitFor(() => expect(gates).toHaveLength(2));
+
+      // The later load answers first, with 2,005 agents, 45 running.
+      fake.agents = newFake(2005, 45).agents;
+      gates[1]();
+      await settle(el, () => 1);
+      expect(activeCount(el)).toBe('45');
+      expect(text(el)).toContain('2,005 agents, as of last refresh');
+
+      // The earlier load answers last, with 2,003 agents, 40 running: it is discarded.
+      fake.agents = newFake(2003, 40).agents;
+      gates[0]();
+      await settle(el);
+      expect(fake.requests).toHaveLength(2);
+      expect(activeCount(el)).toBe('45');
+      expect(text(el)).toContain('2,005 agents, as of last refresh');
+    });
+  });
+
   describe('home seeds full objects', () => {
     it('a field dropped by a later full-view load is gone from the store', async () => {
       const fake = newFake(2003, 40);
