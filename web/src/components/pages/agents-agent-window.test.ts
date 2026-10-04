@@ -286,6 +286,65 @@ describe('scion-page-agents — agent list window', () => {
       expect(stateManager.isAgentSetComplete('full')).toBe(true);
     });
 
+    /** An old server that ignores sorted mode and `limit`, held until the test releases it. */
+    function heldLimitIgnoringLegacy(fake: Fake): ReturnType<typeof holdable> {
+      const legacy = (input: string | URL | Request, init?: RequestInit) => {
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const u = new URL(raw, 'http://localhost');
+        for (const k of ['sort', 'dir', 'fit', 'stats', 'limit', 'phase']) u.searchParams.delete(k);
+        return fakeFetch(fake)(u.pathname + (u.search || ''), init);
+      };
+      const h = holdable(legacy, isGlobalAgentsList);
+      vi.stubGlobal('fetch', vi.fn(h.fn));
+      return h;
+    }
+
+    it('a live phase change to a row of a carried legacy first page survives the drain', async () => {
+      const fake: Fake = {
+        agents: Array.from({ length: 1200 }, (_, i) => makeAgent(i)),
+        requests: [],
+      };
+      const h = heldLimitIgnoringLegacy(fake);
+      h.hold();
+      const el = await mountUnsettled();
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      // g-00007 is on the held first page, which still says running.
+      handleUpdate('agent.g-00007.status', { agentId: 'g-00007', phase: 'stopped' });
+      await flushLive(el);
+      h.release();
+      await settle(el);
+      expect(fake.requests.length).toBe(3);
+      expect(new URL(fake.requests[1], 'http://localhost').searchParams.get('cursor')).toBe('500');
+      expect(internals(el).agentWindow.state).toBe('held');
+      expect(stateManager.getAgent('g-00007')?.phase).toBe('stopped');
+      expect(internals(el).agents.find((a) => a.id === 'g-00007')?.phase).toBe('stopped');
+      expect(internals(el).agentWindow.stats).toMatchObject({ total: 1200, running: 1199 });
+    });
+
+    it('a full legacy first page with one row deleted live is still carried', async () => {
+      const fake: Fake = {
+        agents: Array.from({ length: 2000 }, (_, i) => makeAgent(i)),
+        requests: [],
+      };
+      const h = heldLimitIgnoringLegacy(fake);
+      h.hold();
+      const el = await mountUnsettled();
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      // The server's answer still lists g-00007, which this client saw deleted.
+      handleUpdate('agent.g-00007.deleted', {});
+      await flushLive(el);
+      h.release();
+      await settle(el);
+      // The first request plus pages from cursors 500, 1000 and 1500.
+      expect(fake.requests.length).toBe(4);
+      expect(
+        fake.requests.slice(1).map((u) => new URL(u, 'http://localhost').searchParams.get('cursor'))
+      ).toEqual(['500', '1000', '1500']);
+      expect(internals(el).agents.some((a) => a.id === 'g-00007')).toBe(false);
+      expect(internals(el).agents.length).toBe(1999);
+    });
+
     /** An old server: no sorted mode, but `limit` is honoured. */
     const limitHonouringLegacy =
       (fake: Fake) => (input: string | URL | Request, init?: RequestInit) => {
@@ -320,6 +379,36 @@ describe('scion-page-agents — agent list window', () => {
       expect(new Set(internals(el).agents.map((a) => a.id)).size).toBe(1600);
       expect(stateManager.isAgentSetComplete('full')).toBe(true);
       expect(text(el)).not.toContain('more exist');
+    });
+
+    it('a row only the discarded short answer holds never reaches the agents, the store or the counts', async () => {
+      const fake: Fake = {
+        agents: Array.from({ length: 1600 }, (_, i) => makeAgent(i)),
+        requests: [],
+      };
+      const inner = limitHonouringLegacy(fake);
+      // The short answer still lists an agent the server no longer returns.
+      const gone = makeAgent(9999, { id: 'gone-1', name: 'gone-1' });
+      const withGoneRow = async (input: string | URL | Request, init?: RequestInit) => {
+        const res = await inner(input, init);
+        const raw =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        if (!isGlobalAgentsList(new URL(raw, 'http://localhost'))) return res;
+        if (query(raw).get('limit') !== '25') return res;
+        const body = (await res.clone().json()) as { agents: Agent[] };
+        return new Response(JSON.stringify({ ...body, agents: [gone, ...body.agents] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      };
+      vi.stubGlobal('fetch', vi.fn(withGoneRow));
+      const el = await mount();
+      expect(fake.requests).toHaveLength(5);
+      expect(internals(el).agentWindow.state).toBe('held');
+      expect(internals(el).agents.some((a) => a.id === 'gone-1')).toBe(false);
+      expect(internals(el).agents).toHaveLength(1600);
+      expect(stateManager.getAgent('gone-1')).toBeUndefined();
+      expect(internals(el).agentWindow.stats.total).toBe(1600);
     });
 
     it('2,100 agents at page size 25 on a legacy server that honours limit end capped in five requests with exactly the newest 2,000', async () => {
@@ -974,6 +1063,24 @@ describe('scion-page-agents — agent list window', () => {
       expect(win.stats.total).toBe(1200);
       expect(win.stats.running).toBe(1199);
       expect(win.memberIndex.getPhase('g-00010')).toBe('stopped');
+    });
+
+    it('an off-page agent changed while unknown, then created and changed again, counts with its latest phase', async () => {
+      const { h } = heldFake(1200);
+      h.hold();
+      const el = await mountUnsettled();
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      handleUpdate('agent.g-00010.status', { agentId: 'g-00010', phase: 'stopped' });
+      await flushLive(el);
+      handleUpdate('agent.g-00010.created', { ...makeAgent(10), agentId: 'g-00010' });
+      handleUpdate('agent.g-00010.status', { agentId: 'g-00010', phase: 'running' });
+      await flushLive(el);
+      expect(stateManager.getAgent('g-00010')?.phase).toBe('running');
+      h.release();
+      await settle(el);
+      const win = internals(el).agentWindow;
+      expect(win.memberIndex.getPhase('g-00010')).toBe('running');
+      expect(win.stats.running).toBe(1200);
     });
 
     it('an off-page activity bump during a held Next raises the chip', async () => {

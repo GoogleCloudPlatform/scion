@@ -887,21 +887,25 @@ export class ScionPageAgents extends LitElement {
       // `phase`, so a page fetched with one is only part of the set: the
       // whole set is drained from the start.
       const legacy = data.complete === undefined;
-      if (legacy && (phase || data.nextCursor)) {
-        // Ended here, not only in the finally below (which repeats both
-        // calls as no-ops): the drain carries no ticket, and a restarted
-        // drain runs its own epoch.
+      // Each drain is entered with the sorted request ended here, not only
+      // in the finally below (which repeats both calls as no-ops): the drain
+      // carries no ticket.
+      if (legacy && phase) {
+        // The restarted drain runs its own epoch.
         this.agentWindow.endSortedRequest(ticket);
-        if (phase || !data.nextCursor) {
-          epoch.close();
-          return await this.drainGlobalAgents(label, gen, requestedScope);
-        }
+        epoch.close();
+        return await this.drainGlobalAgents(label, gen, requestedScope);
+      }
+      if (legacy && data.nextCursor) {
         // The drain takes over this epoch and closes it, so live changes
         // since the request was sent are kept, whether or not it uses the
-        // page's rows.
+        // page's rows. The rows are passed as the server sent them: the
+        // drain decides by the page's length whether to carry it, and
+        // seeding drops any agent deleted live.
+        this.agentWindow.endSortedRequest(ticket);
         return await this.drainGlobalAgents(label, gen, requestedScope, {
           firstPage: {
-            agents: dropTombstoned(data.agents || [], stateManager.getDeletedAgentIds()),
+            agents: data.agents || [],
             nextCursor: data.nextCursor,
             capabilities: Array.isArray(body) ? undefined : data._capabilities,
           },
