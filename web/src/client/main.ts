@@ -54,6 +54,7 @@ import {
 } from '../lib/admin-permissions.js';
 import { ACCOUNT_TEARDOWN_EVENT, type AccountTeardownDetail } from '../utils/auth.js';
 import { chatRecentFiles } from './chat-recent-files.js';
+import { installViewportFrame } from './viewport.js';
 import {
   buildRecentFilesScope,
   shouldClearRecentFilesOnTeardown,
@@ -806,6 +807,11 @@ window.addEventListener('unhandledrejection', (event) => {
  */
 async function init(): Promise<void> {
   console.info('[Scion] Initializing client...');
+
+  // Size the app frame to the visible area while the on-screen keyboard is
+  // open (iOS), and undo any page pan in frame mode. Installed for the life
+  // of the page, so the disposer is not kept.
+  installViewportFrame();
 
   // Get initial data from SSR and hydrate state manager
   const initialData = getInitialData();

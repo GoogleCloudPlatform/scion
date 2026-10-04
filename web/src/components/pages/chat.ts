@@ -816,6 +816,40 @@ export class ScionPageChat extends LitElement {
       overflow: clip;
     }
 
+    /*
+     * Landscape phones wide enough for the side-by-side layout (the page
+     * uses viewport-fit=cover): the edge columns carry the notch and
+     * rounded-corner insets inside their own surface, so the surface still
+     * runs to the screen edge and only the content moves in. The columns
+     * are content-box, so the padding adds to their width rather than
+     * taking from it. All 0 on devices without side insets; below the
+     * mobile breakpoint every panel carries both insets instead.
+     */
+    .v2-rail {
+      padding-left: env(safe-area-inset-left, 0px);
+    }
+
+    .v2-members {
+      padding-right: env(safe-area-inset-right, 0px);
+    }
+
+    /* The conversation column has several rows with their own backgrounds
+       (this header, the search and thread bars, and the composer), so
+       padding the column would leave a band beside them. Instead the column
+       says how far each side must move in, through --chat-inset-left and
+       --chat-inset-right, and each row takes that as a transparent border
+       that its background paints under. Side by side, only the right edge
+       can touch the screen, and only while the members panel is hidden; in
+       the mobile layout (below) the column is full width and takes both. */
+    .v2-content.edge-right {
+      --chat-inset-right: env(safe-area-inset-right, 0px);
+    }
+
+    .v2-thread-header {
+      border-left: var(--chat-inset-left, 0px) solid transparent;
+      border-right: var(--chat-inset-right, 0px) solid transparent;
+    }
+
     .v2-rail {
       width: 260px;
       min-width: 200px;
@@ -1007,6 +1041,23 @@ export class ScionPageChat extends LitElement {
            width and push content off the left edge on iOS Safari. */
         box-sizing: border-box;
         border: 0;
+      }
+
+      /* Landscape: keep each full-width panel's content clear of the notch
+         and rounded corners. 0 on devices without side insets. The rail and
+         members panels have one surface, so they pad. */
+      .v2-panels .v2-rail,
+      .v2-panels .v2-members {
+        padding-inline: env(safe-area-inset-left, 0px) env(safe-area-inset-right, 0px);
+      }
+
+      /* The conversation panel's rows take both insets as borders (see the
+         side-by-side .v2-content.edge-right rule). Its right value is the
+         same env() as that rule's, so which of the two applies does not
+         matter, and the panel itself has no inline padding to add twice. */
+      .v2-panels .v2-content {
+        --chat-inset-left: env(safe-area-inset-left, 0px);
+        --chat-inset-right: env(safe-area-inset-right, 0px);
       }
 
       /* ---- Left panel active ---- */
@@ -4512,7 +4563,10 @@ export class ScionPageChat extends LitElement {
             : html`<div class="loading-rail"><sl-spinner></sl-spinner></div>`}
         </div>
 
-        <div class="v2-content" ?inert=${this.isMobileLayout && this.mobilePanel !== 'center'}>
+        <div
+          class="v2-content ${this.v2MembersExpanded ? '' : 'edge-right'}"
+          ?inert=${this.isMobileLayout && this.mobilePanel !== 'center'}
+        >
           ${this.v2Conversation
             ? this.renderV2Conversation()
             : html`
