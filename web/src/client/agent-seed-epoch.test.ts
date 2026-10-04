@@ -156,6 +156,30 @@ describe('AgentSeedEpoch', () => {
     epoch.close();
   });
 
+  it('sawChanges is set by an upsert, a create, a delete or an unknown-ID delta, until close', () => {
+    const cases: Array<[string, (sm: StateManager) => void]> = [
+      ['upsert', (sm) => emit(sm, 'agent.a.status', { phase: 'stopped' })],
+      ['create', (sm) => emit(sm, 'agent.n.created', makeAgent('n'))],
+      ['delete', (sm) => emit(sm, 'agent.a.deleted', { agentId: 'a' })],
+      ['unknown', (sm) => emit(sm, 'agent.x.status', { agentId: 'x', phase: 'stopped' })],
+    ];
+    for (const [name, change] of cases) {
+      const sm = newState();
+      sm.seedAgents([makeAgent('a')]);
+      const epoch = new AgentSeedEpoch(sm);
+      expect(epoch.sawChanges, name).toBe(false);
+      change(sm);
+      expect(epoch.sawChanges, name).toBe(true);
+      epoch.close();
+    }
+    const sm = newState();
+    sm.seedAgents([makeAgent('a')]);
+    const epoch = new AgentSeedEpoch(sm);
+    epoch.close();
+    emit(sm, 'agent.a.status', { phase: 'stopped' });
+    expect(epoch.sawChanges).toBe(false);
+  });
+
   it('close without seeding still ends the store epoch and stops recording', () => {
     const sm = newState();
     const epoch = new AgentSeedEpoch(sm);

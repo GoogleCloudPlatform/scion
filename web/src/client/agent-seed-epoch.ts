@@ -30,7 +30,9 @@
  *   index or server page can replay those changes into it;
  * - records the merged delta of every ID changed live while not in the
  *   store, so a page whose counts or member index come from the response
- *   can replay it (see {@link AgentSeedEpoch.unknownChanges}).
+ *   can replay it (see {@link AgentSeedEpoch.unknownChanges});
+ * - records whether any live change landed at all, for a page that holds
+ *   counts it cannot adjust (see {@link AgentSeedEpoch.sawChanges}).
  */
 import type { Agent } from '../shared/types.js';
 import type {
@@ -85,6 +87,7 @@ export class AgentSeedEpoch {
   private readonly token: SeedEpochToken;
   private readonly createdIds = new Set<string>();
   private readonly upsertedIds = new Set<string>();
+  private readonly deletedIds = new Set<string>();
   private readonly unknownDeltas = new Map<string, UnknownAgentDelta>();
   private closed = false;
 
@@ -95,6 +98,7 @@ export class AgentSeedEpoch {
 
   private readonly onChanged = (e: Event): void => {
     const data = (e as CustomEvent<{ data?: Partial<AgentsChangedDetail> }>).detail?.data;
+    for (const id of data?.deleted ?? []) this.deletedIds.add(id);
     for (const id of data?.upserted ?? []) {
       this.upsertedIds.add(id);
       // The store now holds the agent, with every earlier unknown delta
@@ -143,6 +147,21 @@ export class AgentSeedEpoch {
       if (!tombstones.has(id)) out.set(id, { ...delta });
     }
     return out;
+  }
+
+  /**
+   * Whether any live change landed since the epoch opened: an upsert, a
+   * create, a delete or an unknown-ID delta. A page holding counts it
+   * cannot adjust (a count-only snapshot) uses it to offer a refresh.
+   * Recording stops at {@link close}.
+   */
+  get sawChanges(): boolean {
+    return (
+      this.upsertedIds.size > 0 ||
+      this.createdIds.size > 0 ||
+      this.deletedIds.size > 0 ||
+      this.unknownDeltas.size > 0
+    );
   }
 
   /**

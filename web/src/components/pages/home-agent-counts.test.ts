@@ -465,6 +465,62 @@ describe('home agent counts and the shared completeness flag', () => {
     });
   });
 
+  describe('count-only mode: changes while home’s request is in flight', () => {
+    async function mountHeldCountOnly(): Promise<{
+      el: TestEl;
+      h: ReturnType<typeof holdable>;
+      fake: Fake;
+    }> {
+      const fake = newFake(2003, 40);
+      const h = holdable(fakeFetch(fake), isGlobalAgentsList);
+      h.hold(1);
+      vi.stubGlobal('fetch', vi.fn(h.fn));
+      const el = document.createElement('scion-page-home') as TestEl;
+      (el as unknown as { pageData: unknown }).pageData = { path: '/', title: 'Page', user: USER };
+      document.body.appendChild(el);
+      await el.updateComplete;
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      return { el, h, fake };
+    }
+
+    const changes: Array<[string, () => void]> = [
+      [
+        'a status change of an agent not in the store',
+        () => handleUpdate('agent.g-00002.status', { agentId: 'g-00002', phase: 'stopped' }),
+      ],
+      ['a delete', () => handleUpdate('agent.g-00001.deleted', {})],
+      [
+        'a create',
+        () => {
+          const a = makeAgent(8000);
+          handleUpdate(`agent.${a.id}.created`, { ...a, agentId: a.id });
+        },
+      ],
+    ];
+
+    for (const [name, change] of changes) {
+      it(`count-only: ${name} that lands while home’s request is in flight shows the chip`, async () => {
+        const { el, h, fake } = await mountHeldCountOnly();
+        change();
+        (stateManager as unknown as { flush(): void }).flush();
+        h.release();
+        await settle(el);
+        expect(fake.requests).toHaveLength(1);
+        expect(internals(el).memberIndex?.countOnly).toBe(true);
+        expect(activeCount(el)).toBe('40');
+        expect(countsChip(el)).not.toBeNull();
+      });
+    }
+
+    it('count-only: with no change in flight the chip stays hidden', async () => {
+      const { el, h } = await mountHeldCountOnly();
+      h.release();
+      await settle(el);
+      expect(internals(el).memberIndex?.countOnly).toBe(true);
+      expect(countsChip(el)).toBeNull();
+    });
+  });
+
   describe('home seeds full objects', () => {
     it('a field dropped by a later full-view load is gone from the store', async () => {
       const fake = newFake(2003, 40);

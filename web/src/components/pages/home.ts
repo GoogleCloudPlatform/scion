@@ -243,11 +243,14 @@ export class ScionPageHome extends LitElement {
         const agent = stateManager.getAgent(id);
         if (agent) index.set(id, agent.phase);
       }
+      this.countsMayHaveChanged = false;
     } else {
       index.seedCounts(stats.total, stats.running);
+      // The snapshot cannot be adjusted, so any change that landed while
+      // the request was in flight may already have changed it.
+      this.countsMayHaveChanged = epoch.sawChanges;
     }
     this.memberIndex = index;
-    this.countsMayHaveChanged = false;
     this.agents = stateManager.getAgents();
   }
 
