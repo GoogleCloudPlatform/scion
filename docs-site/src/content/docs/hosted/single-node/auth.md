@@ -60,6 +60,12 @@ You can also set it from **Admin > Server Config**, or seed it with `SCION_SEED_
 
 `server.auth.default_user_role` is a different setting from the federation `default_role` described under [OIDC-Based Federation](#oidc-based-federation) below, which only applies to users who authenticate with federated OIDC tokens.
 
+### Deleting users
+
+Deleting a user on **Admin > Users** (`DELETE /api/v1/users/{id}`) fails with `409 last_owner` if the user is the only active owner of any project, including a project where their owner binding has expired. The error's `details.projects` lists those projects. Transfer ownership or add another owner on each one, then delete the user again. If someone grants the user a role or changes one of their roles while the delete runs (for example, transfers a project to them) and that change commits first, the delete is aborted with `409 conflict` and nothing is changed; retry it. A concurrent revoke of one of the user's roles does not abort the delete. A grant that commits in the last moments before the delete itself commits is not detected and can leave a stale binding on the deleted user ([ptone/scion#2769](https://github.com/ptone/scion/issues/2769)). The deprecated allow-list delete (`DELETE /api/v1/admin/allow-list/{email}`) applies the same rules.
+
+When the deletion succeeds, Scion also removes all of the user's role bindings (project, hub and system). Bindings left behind by deletions made before this change are not cleaned up. To clear such a binding when it is a project's only owner, add a real owner first, then remove the old binding from the project's members.
+
 ## OAuth Authentication
 
 Scion supports OAuth authentication via Google and GitHub. OAuth credentials are configured separately for web and CLI clients due to different redirect URI requirements.

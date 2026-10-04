@@ -33,18 +33,24 @@ type Action string
 
 // Action constants for authorization checks.
 const (
-	ActionCreate       Action = "create"
-	ActionRead         Action = "read"
-	ActionUpdate       Action = "update"
-	ActionDelete       Action = "delete"
-	ActionList         Action = "list"
-	ActionManage       Action = "manage"
-	ActionStart        Action = "start"
-	ActionStop         Action = "stop"
-	ActionMessage      Action = "message"
-	ActionAttach       Action = "attach"
-	ActionLifecycle    Action = "lifecycle"
-	ActionPortAccess   Action = "port_access"
+	ActionCreate     Action = "create"
+	ActionRead       Action = "read"
+	ActionUpdate     Action = "update"
+	ActionDelete     Action = "delete"
+	ActionList       Action = "list"
+	ActionManage     Action = "manage"
+	ActionStart      Action = "start"
+	ActionStop       Action = "stop"
+	ActionMessage    Action = "message"
+	ActionAttach     Action = "attach"
+	ActionLifecycle  Action = "lifecycle"
+	ActionPortAccess Action = "port_access"
+	// ActionTunnel gates the Conduit `scion tunnel` / `scion ssh` request
+	// path (not a stream kind). It is not a registered permission of its
+	// own: it is granted wherever agent.port_access is (see
+	// conduitAuthzFor), so every role, relationship and token scope that
+	// carries port access carries it.
+	ActionTunnel       Action = "tunnel"
 	ActionRegister     Action = "register"
 	ActionAddMember    Action = "addMember"
 	ActionRemoveMember Action = "removeMember"
@@ -2159,7 +2165,7 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 		// switch is reached, so v is guaranteed non-nil here and
 		// v.Boundary() cannot dereference a nil receiver.
 		boundary := v.Boundary()
-		cc := CredentialContext{Kind: CredentialKindUAT, ID: v.CredentialID(), ProjectID: v.ScopedProjectID(), Boundary: &boundary, Scopes: v.ScopedScopes(), Ceiling: v.Ceiling()}
+		cc := CredentialContext{Kind: CredentialKindUAT, ID: v.CredentialID(), ProjectID: boundary.ProjectID, Boundary: &boundary, Scopes: v.ScopedScopes(), Ceiling: v.Ceiling()}
 		// Carry the descriptive decoration, if ValidateToken attached one,
 		// through to the credential context. This is the single copy point;
 		// decoration is never otherwise derived here. Decoration() already
