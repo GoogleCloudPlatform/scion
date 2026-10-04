@@ -326,6 +326,46 @@ describe('AgentStore delta probe', () => {
     expect(h.server.probes()).toBe(3);
   });
 
+  describe('a probe interrupted after its first page', () => {
+    const renamedCount = 2 * AGENT_PROBE_LIMIT + 20;
+    const initial = (): Agent[] =>
+      Array.from({ length: renamedCount }, (_, i) => row(`a${i}`, 1 + i));
+    const renameAll = (h: Harness): void => {
+      h.server.agents = h.server.agents.map((a, i) =>
+        row(a.id, 1000 + i, { name: `renamed-${a.id}` })
+      );
+    };
+    const renamed = (h: Harness): number =>
+      (h.store.peek(HUB)?.agents ?? []).filter((a) => a.name.startsWith('renamed-')).length;
+
+    it('reads the same pages again after a later page fails', async () => {
+      const h = await loaded(initial());
+      renameAll(h);
+      h.server.sortedStatus = (path): number | undefined =>
+        path.includes('cursor=') ? 500 : undefined;
+      await tick();
+      h.server.sortedStatus = undefined;
+      await tick();
+      await tick();
+      expect(renamed(h)).toBe(renamedCount);
+    });
+
+    it('reads the same pages again after the page is hidden mid-probe', async () => {
+      const h = await loaded(initial());
+      renameAll(h);
+      h.server.sortedStatus = (path): undefined => {
+        if (path.includes('cursor=')) h.visibility.set('hidden');
+        return undefined;
+      };
+      await tick();
+      h.server.sortedStatus = undefined;
+      h.visibility.set('visible');
+      await tick();
+      await tick();
+      expect(renamed(h)).toBe(renamedCount);
+    });
+  });
+
   it('stops at a full page without a next cursor', async () => {
     const h = await loaded([]);
     h.server.agents.push(

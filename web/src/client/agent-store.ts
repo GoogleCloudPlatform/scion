@@ -951,6 +951,7 @@ export class AgentStore {
   ): Promise<void> {
     const signal = controller.signal;
     const previous = entry.highWater;
+    let highWater = previous;
     const token = feed.beginSeedEpoch();
     const changed: Agent[] = [];
     const listed = new Set(entry.agents.map((a) => a.id));
@@ -984,8 +985,8 @@ export class AgentStore {
           }
         }
         const newest = newestUpdated(rows);
-        if (newest !== undefined && (entry.highWater === undefined || newest > entry.highWater)) {
-          entry.highWater = newest;
+        if (newest !== undefined && (highWater === undefined || newest > highWater)) {
+          highWater = newest;
         }
         const last = updatedAt(rows[rows.length - 1]);
         caughtUp =
@@ -996,6 +997,9 @@ export class AgentStore {
       if (this.feed !== feed) return;
       const fresh = changed.filter((row) => !this.carriedTombstones.has(row.id));
       feed.seedAgents(fresh, { token, partial: true });
+      // Only a merged probe moves the mark; an interrupted one reads the
+      // same pages again.
+      entry.highWater = highWater;
     } catch (err) {
       if (!isAbortError(err)) console.warn('[agent-store] agent probe failed:', err);
       return;
