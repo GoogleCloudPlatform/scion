@@ -200,7 +200,7 @@ export class ScionAgentTreeView extends LitElement {
   private boundOnWheel = (e: WheelEvent) => this.onWheel(e);
   private boundOnKeyDown = (e: KeyboardEvent) => this.onKeyDown(e);
   private boundOnSelectStart = (e: Event): void => this.onSelectStart(e);
-  /** Whether a non-collapsed selection already existed when the current pan began. */
+  /** Whether a range selection (see hasRangeSelection) already existed when the current pan began. */
   private hadSelectionAtPanStart = false;
   /** Canvas-content size of the last computed layout (for keyboard "fit"). */
   private contentW = 0;
@@ -878,9 +878,13 @@ export class ScionAgentTreeView extends LitElement {
     // preventDefault on pointerdown does not reliably stop text selection in
     // Chromium, and a selection can begin before the .dragging class
     // (user-select: none) applies (ptone/scion#765). Suppress selectstart
-    // for the duration of the gesture instead; capture on document so it
-    // also catches a selection starting outside the canvas.
+    // for the duration of the gesture instead. selectstart is not composed,
+    // so one fired on text inside this component's shadow root (node
+    // labels, nested shadow roots retargeted here) never reaches document:
+    // the render root needs its own capture listener. The document listener
+    // still catches a selection starting outside the component.
     this.hadSelectionAtPanStart = hasRangeSelection(window.getSelection());
+    this.renderRoot.addEventListener('selectstart', this.boundOnSelectStart, true);
     document.addEventListener('selectstart', this.boundOnSelectStart, true);
     this.canvasEl?.setPointerCapture(e.pointerId);
     this.canvasEl?.classList.add('dragging');
@@ -905,7 +909,7 @@ export class ScionAgentTreeView extends LitElement {
 
   /**
    * Ends the pan if pointer capture is lost without a pointerup/pointercancel
-   * (e.g. the browser drops capture), so the document-wide selectstart
+   * (e.g. the browser drops capture), so the selectstart
    * suppression cannot outlive the gesture. Idempotent after onPointerUp.
    */
   private onLostPointerCapture(): void {
@@ -915,6 +919,7 @@ export class ScionAgentTreeView extends LitElement {
   /** Ends a pan gesture: stops suppressing selection and drops the dragging style. */
   private endPan(): void {
     this.dragging = false;
+    this.renderRoot.removeEventListener('selectstart', this.boundOnSelectStart, true);
     document.removeEventListener('selectstart', this.boundOnSelectStart, true);
     this.canvasEl?.classList.remove('dragging');
   }
@@ -1202,7 +1207,7 @@ export class ScionAgentTreeView extends LitElement {
         @pointermove=${this.onPointerMove}
         @pointerup=${this.onPointerUp}
         @pointercancel=${this.onPointerUp}
-        @lostpointercapture=${(): void => this.onLostPointerCapture()}
+        @lostpointercapture=${this.onLostPointerCapture}
         @pointerleave=${() => (this.hoverId = null)}
       >
         <div

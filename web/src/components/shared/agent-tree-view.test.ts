@@ -1447,8 +1447,10 @@ describe('scion-agent-tree-view drag-to-pan suppresses text selection', () => {
   }
 
   /** Dispatches a selectstart on `target` and returns whether it was prevented. */
+  // Not composed, as browsers fire it: a selectstart on shadow-root text
+  // never reaches document, so the component must listen on its render root.
   function selectStartPrevented(target: EventTarget): boolean {
-    const ev = new Event('selectstart', { bubbles: true, composed: true, cancelable: true });
+    const ev = new Event('selectstart', { bubbles: true, composed: false, cancelable: true });
     target.dispatchEvent(ev);
     return ev.defaultPrevented;
   }
@@ -1525,6 +1527,22 @@ describe('scion-agent-tree-view drag-to-pan suppresses text selection', () => {
       expect(removeAllRanges).not.toHaveBeenCalled();
     } finally {
       spy.mockRestore();
+    }
+  });
+
+  it('removes the selectstart listeners from both the render root and document when the pan ends', () => {
+    const rootRemove = vi.spyOn(el.renderRoot, 'removeEventListener');
+    const docRemove = vi.spyOn(document, 'removeEventListener');
+    try {
+      pointer('pointerdown');
+      pointer('pointerup');
+      const removedSelectStart = (spy: typeof rootRemove): boolean =>
+        spy.mock.calls.some(([type, , opts]) => type === 'selectstart' && opts === true);
+      expect(removedSelectStart(rootRemove)).toBe(true);
+      expect(removedSelectStart(docRemove)).toBe(true);
+    } finally {
+      rootRemove.mockRestore();
+      docRemove.mockRestore();
     }
   });
 
