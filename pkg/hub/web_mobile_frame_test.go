@@ -115,18 +115,50 @@ func normalizeCSS(block string) string {
 	return strings.Join(strings.Fields(block), " ")
 }
 
+// wantViewportMetaContent is the exact viewport meta content both page
+// templates must carry: viewport-fit=cover lets the bars run edge to edge on
+// notched and home-indicator devices (the safe-area-inset padding that goes
+// with it lives in the header, composer, chat panels and app-shell content),
+// and interactive-widget=resizes-content makes Android shrink the layout
+// viewport for the on-screen keyboard. Pinch zoom must stay available, so
+// there is never a maximum-scale or user-scalable.
+const wantViewportMetaContent = "width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+
+// viewportMetaRE captures the content attribute of the viewport meta tag.
+var viewportMetaRE = regexp.MustCompile(`<meta name="viewport" content="([^"]*)"`)
+
+// viewportMetaContents returns the content attribute of every viewport meta
+// tag in html, so a test can catch a second, conflicting tag as well as a
+// wrong value.
+func viewportMetaContents(html string) []string {
+	var contents []string
+	for _, m := range viewportMetaRE.FindAllStringSubmatch(html, -1) {
+		contents = append(contents, m[1])
+	}
+	return contents
+}
+
 func TestSPAShellViewportMeta(t *testing.T) {
 	html := renderSPAShell(t)
-	assert.Contains(t, html,
-		`<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">`)
+	assert.Equal(t, []string{wantViewportMetaContent}, viewportMetaContents(html),
+		"the SPA shell must carry exactly one viewport meta with the expected content")
 	assert.NotContains(t, html, "maximum-scale",
 		"viewport meta must never disable pinch zoom")
 	assert.NotContains(t, html, "user-scalable",
 		"viewport meta must never disable pinch zoom")
-	// viewport-fit=cover needs safe-area-inset padding added at the same
-	// time it ships, so it is not part of this frame-only change.
-	assert.NotContains(t, html, "viewport-fit",
-		"viewport-fit=cover ships together with safe-area insets, not here")
+}
+
+func TestSPAShellViewportMetaMatchesIndexHTML(t *testing.T) {
+	indexBytes, err := os.ReadFile("../../web/index.html")
+	require.NoError(t, err, "reading web/index.html")
+	indexHTML := string(indexBytes)
+
+	assert.Equal(t, []string{wantViewportMetaContent}, viewportMetaContents(indexHTML),
+		"web/index.html must carry exactly one viewport meta with the expected content")
+	assert.Equal(t, viewportMetaContents(renderSPAShell(t)), viewportMetaContents(indexHTML),
+		"pkg/hub/web.go and web/index.html must carry the same viewport meta")
+	assert.NotContains(t, indexHTML, "maximum-scale")
+	assert.NotContains(t, indexHTML, "user-scalable")
 }
 
 func TestSPAShellMobileFrameCSS(t *testing.T) {
@@ -157,9 +189,11 @@ func TestSPAShellMobileFrameCSS(t *testing.T) {
 }
 
 // TestSPAShellIndexHTMLParity guards the requirement that web.go and
-// web/index.html change their critical mobile-frame CSS and viewport meta
-// together. It reads web/index.html directly off disk relative to this
-// package, following the existing convention in permission_registry_test.go.
+// web/index.html change their critical mobile-frame CSS together (the
+// viewport meta has its own check,
+// TestSPAShellViewportMetaMatchesIndexHTML). It reads web/index.html
+// directly off disk relative to this package, following the existing
+// convention in permission_registry_test.go.
 //
 // The comparison reads spaShellTemplate as raw source (a package-level
 // string, not rendered through html/template) and extracts both sides
@@ -179,11 +213,6 @@ func TestSPAShellIndexHTMLParity(t *testing.T) {
 	indexBlock := normalizeCSS(extractBetween(t, indexHTML, mobileFrameStartMarker, mobileFrameEndMarker))
 	assert.Equal(t, shellBlock, indexBlock,
 		"critical mobile-frame CSS must stay identical (modulo comments and formatting) between pkg/hub/web.go and web/index.html")
-
-	assert.Contains(t, indexHTML,
-		`<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content" />`)
-	assert.NotContains(t, indexHTML, "maximum-scale")
-	assert.NotContains(t, indexHTML, "user-scalable")
 }
 
 // mobileFrameSyntheticBlock is a small stand-in for the real mobile-frame
