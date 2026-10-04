@@ -77,15 +77,20 @@ var ErrAgentBranchMismatch = errors.New("the agent's kept workspace was created 
 // The lock, the record and the sentinel live in the agent directory, next
 // to the workspace and not in it, so the agent container still finds an
 // empty workspace to clone into.
+//
+// With in.Mode empty-per-agent (design #2703 P3) it does the same except
+// for the branch: in.AgentName is ignored, and the branch record is neither
+// checked nor written. Nothing ever clones into that workspace.
 func ProvisionAgentDir(in ProvisionInput) error {
-	if in.Mode != store.SharingModeClonePerAgent {
-		return fmt.Errorf("ProvisionAgentDir: mode %q is not clone-per-agent", in.Mode)
+	emptyWorkspace := in.Mode == store.SharingModeEmptyPerAgent
+	if in.Mode != store.SharingModeClonePerAgent && !emptyWorkspace {
+		return fmt.Errorf("ProvisionAgentDir: mode %q is not clone-per-agent or empty-per-agent", in.Mode)
 	}
 	if slug, err := api.ValidateAgentName(in.AgentID); err != nil || slug != in.AgentID {
 		return fmt.Errorf("ProvisionAgentDir: agent name %q is not an agent slug", in.AgentID)
 	}
 	branch := in.AgentName
-	if branch == "" || branch != strings.TrimSpace(branch) || strings.ContainsAny(branch, "\n\r") {
+	if !emptyWorkspace && (branch == "" || branch != strings.TrimSpace(branch) || strings.ContainsAny(branch, "\n\r")) {
 		return fmt.Errorf("ProvisionAgentDir: invalid branch %q", branch)
 	}
 	agentDir := in.Resolved.HostPath
@@ -132,6 +137,10 @@ func ProvisionAgentDir(in ProvisionInput) error {
 
 	recordPath := filepath.Join(agentDir, AgentBranchFile)
 	recorded := readAgentBranch(recordPath)
+	if emptyWorkspace {
+		// No branch: the record is neither checked nor written.
+		recorded = branch
+	}
 	if populated && recorded != "" && recorded != branch {
 		return fmt.Errorf("%w: agent %q has a kept workspace created for branch %q, not %q; "+
 			"delete the agent with its files, or create it with branch %q", ErrAgentBranchMismatch, in.AgentID, recorded, branch, recorded)

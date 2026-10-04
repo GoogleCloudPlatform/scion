@@ -359,6 +359,184 @@ class TestWriteOutputs(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
+class TestHarnessDirEnv(unittest.TestCase):
+    """SCION_HARNESS_OUTPUTS_DIR and SCION_HARNESS_SECRETS_DIR."""
+
+    _UNSET = {sh.HARNESS_OUTPUTS_DIR_ENV: "", sh.HARNESS_SECRETS_DIR_ENV: ""}
+
+    @staticmethod
+    def _set_candidates(ctx, candidates):
+        # Candidates are read on first use, so rewriting the file is enough.
+        with open(os.path.join(ctx.inputs_dir, "auth-candidates.json"), "w") as f:
+            json.dump(candidates, f)
+
+    def test_unset_keeps_bundle_dirs(self):
+        with mock.patch.dict(os.environ, self._UNSET):
+            ctx = _make_ctx()
+            self.assertEqual(ctx.outputs_dir, os.path.join(ctx.bundle_dir, "outputs"))
+            self.assertEqual(ctx.secrets_dir, os.path.join(ctx.bundle_dir, "secrets"))
+            self.assertEqual(ctx.output_paths(), (
+                os.path.join(ctx.bundle_dir, "outputs", "resolved-auth.json"),
+                os.path.join(ctx.bundle_dir, "outputs", "env.json"),
+            ))
+
+    def test_outputs_dir_env_moves_outputs(self):
+        root = tempfile.mkdtemp()
+        outdir = os.path.join(root, "outputs")
+        os.makedirs(outdir)
+        with mock.patch.object(sh, "HARNESS_DIRS_ROOT", root), \
+                mock.patch.dict(os.environ, {**self._UNSET, sh.HARNESS_OUTPUTS_DIR_ENV: outdir}):
+            ctx = _make_ctx()
+            self.assertEqual(ctx.outputs_dir, outdir)
+            ctx.write_outputs(sh.ResolvedAuth(method="none"), env={"FOO": "bar"})
+            self.assertEqual(ctx.output_paths(), (
+                os.path.join(outdir, "resolved-auth.json"),
+                os.path.join(outdir, "env.json"),
+            ))
+            self.assertEqual(json.load(open(os.path.join(outdir, "env.json")))["FOO"], "bar")
+            self.assertFalse(os.path.exists(os.path.join(ctx.bundle_dir, "outputs", "env.json")))
+
+    def test_secret_paths_unchanged_when_unset(self):
+        with mock.patch.dict(os.environ, self._UNSET):
+            ctx = _make_ctx()
+            staged = os.path.join(ctx.bundle_dir, "secrets", "MY_KEY")
+            self._set_candidates(ctx, {
+                "env_secret_files": {"MY_KEY": staged},
+                "file_secret_files": {"cred": "~/.scion/harness/secrets/cred"},
+            })
+            self.assertEqual(ctx.env_secret_files, {"MY_KEY": staged})
+            self.assertEqual(ctx.file_secret_files, {"cred": "~/.scion/harness/secrets/cred"})
+
+    def test_secrets_dir_env_moves_staged_secrets(self):
+        root = tempfile.mkdtemp()
+        secdir = os.path.join(root, "harness-secrets")
+        os.makedirs(secdir)
+        with open(os.path.join(secdir, "MY_KEY"), "w") as f:
+            f.write("value-from-mem\n")
+        with mock.patch.object(sh, "HARNESS_DIRS_ROOT", root), \
+                mock.patch.dict(os.environ, {**self._UNSET, sh.HARNESS_SECRETS_DIR_ENV: secdir}):
+            ctx = _make_ctx()
+            other = "/etc/other/OTHER"
+            self._set_candidates(ctx, {
+                "env_secret_files": {
+                    "MY_KEY": os.path.join(ctx.bundle_dir, "secrets", "MY_KEY"),
+                    "OTHER": other,
+                },
+                "file_secret_files": {"cred": os.path.join(ctx.bundle_dir, "secrets", "sub", "cred")},
+            })
+            self.assertEqual(ctx.secrets_dir, secdir)
+            self.assertEqual(ctx.env_secret_files, {
+                "MY_KEY": os.path.join(secdir, "MY_KEY"),
+                "OTHER": other,
+            })
+            self.assertEqual(ctx.file_secret_files, {"cred": os.path.join(secdir, "sub", "cred")})
+            self.assertEqual(ctx.read_secret("MY_KEY"), "value-from-mem")
+
+    def test_relative_value_rejected(self):
+        for name in (sh.HARNESS_OUTPUTS_DIR_ENV, sh.HARNESS_SECRETS_DIR_ENV):
+            with self.subTest(name=name):
+                with mock.patch.dict(os.environ, {**self._UNSET, name: "relative/dir"}):
+                    with self.assertRaises(sh.ProvisionError) as cm:
+                        sh.harness_dir_override(name)
+                    self.assertIn(name, str(cm.exception))
+
+    def test_value_outside_mem_dir_rejected(self):
+        values = [
+            "/",
+            "/etc",
+            "/run/scion/agent-secrets",
+            "/run/scion/mem/../agent-secrets",
+            "/run/scion/memx",
+            "/run/scion/memx/outputs",
+            "/run/scion/mem",
+            "/run/scion/mem/",
+        ]
+        for name in (sh.HARNESS_OUTPUTS_DIR_ENV, sh.HARNESS_SECRETS_DIR_ENV):
+            for value in values:
+                with self.subTest(name=name, value=value):
+                    with mock.patch.dict(os.environ, {**self._UNSET, name: value}):
+                        with self.assertRaises(sh.ProvisionError) as cm:
+                            sh.harness_dir_override(name)
+                        self.assertIn(name, str(cm.exception))
+                        self.assertIn("below /run/scion/mem", str(cm.exception))
+
+    def test_default_root_accepts_dirs_below_it(self):
+        for value in ("/run/scion/mem/outputs", "/run/scion/mem/harness-secrets/"):
+            with self.subTest(value=value):
+                with mock.patch.dict(os.environ, {**self._UNSET, sh.HARNESS_OUTPUTS_DIR_ENV: value}):
+                    self.assertEqual(sh.harness_dir_override(sh.HARNESS_OUTPUTS_DIR_ENV), value.rstrip("/"))
+
+    def test_symlink_component_rejected(self):
+        tmp = tempfile.mkdtemp()
+        root = os.path.join(tmp, "mem")
+        os.makedirs(os.path.join(root, "real"))
+        os.makedirs(os.path.join(tmp, "other"))
+        os.symlink(os.path.join(tmp, "other"), os.path.join(root, "link"))
+        cases = [
+            (os.path.join(root, "real"), True),
+            (os.path.join(root, "real", "not-yet"), True),
+            (os.path.join(root, "link"), False),
+            (os.path.join(root, "link", "outputs"), False),
+        ]
+        with mock.patch.object(sh, "HARNESS_DIRS_ROOT", root):
+            for value, ok in cases:
+                with self.subTest(value=value):
+                    with mock.patch.dict(os.environ, {**self._UNSET, sh.HARNESS_OUTPUTS_DIR_ENV: value}):
+                        if ok:
+                            self.assertEqual(sh.harness_dir_override(sh.HARNESS_OUTPUTS_DIR_ENV), value)
+                        else:
+                            with self.assertRaises(sh.ProvisionError) as cm:
+                                sh.harness_dir_override(sh.HARNESS_OUTPUTS_DIR_ENV)
+                            self.assertIn("symbolic link", str(cm.exception))
+
+    def test_root_reached_through_symlink_rejected(self):
+        tmp = tempfile.mkdtemp()
+        root = os.path.join(tmp, "mem")
+        os.makedirs(os.path.join(root, "real"))
+        linked_root = os.path.join(tmp, "linked-mem")
+        os.symlink(root, linked_root)
+        value = os.path.join(linked_root, "real")
+        with mock.patch.object(sh, "HARNESS_DIRS_ROOT", linked_root):
+            with mock.patch.dict(os.environ, {**self._UNSET, sh.HARNESS_OUTPUTS_DIR_ENV: value}):
+                with self.assertRaises(sh.ProvisionError) as cm:
+                    sh.harness_dir_override(sh.HARNESS_OUTPUTS_DIR_ENV)
+                self.assertIn(linked_root + " is a symbolic link", str(cm.exception))
+
+    def test_component_check_error_rejected(self):
+        tmp = tempfile.mkdtemp()
+        root = os.path.join(tmp, "mem")
+        os.makedirs(root)
+        with open(os.path.join(root, "file"), "w") as f:
+            f.write("x")
+        cases = [os.path.join(root, "file", "outputs")]
+        if os.geteuid() != 0:
+            locked = os.path.join(root, "locked")
+            os.makedirs(locked)
+            os.chmod(locked, 0)
+            self.addCleanup(os.chmod, locked, 0o700)
+            cases.append(os.path.join(locked, "outputs"))
+        with mock.patch.object(sh, "HARNESS_DIRS_ROOT", root):
+            for value in cases:
+                with self.subTest(value=value):
+                    with mock.patch.dict(os.environ, {**self._UNSET, sh.HARNESS_OUTPUTS_DIR_ENV: value}):
+                        with self.assertRaises(sh.ProvisionError) as cm:
+                            sh.harness_dir_override(sh.HARNESS_OUTPUTS_DIR_ENV)
+                        self.assertIn(sh.HARNESS_OUTPUTS_DIR_ENV, str(cm.exception))
+
+    def test_leading_double_slash_folded(self):
+        with mock.patch.dict(os.environ, {**self._UNSET, sh.HARNESS_OUTPUTS_DIR_ENV: "//run/scion/mem/outputs"}):
+            self.assertEqual(sh.harness_dir_override(sh.HARNESS_OUTPUTS_DIR_ENV), "/run/scion/mem/outputs")
+        with mock.patch.dict(os.environ, {**self._UNSET, sh.HARNESS_OUTPUTS_DIR_ENV: "//run/scion/memx"}):
+            with self.assertRaises(sh.ProvisionError):
+                sh.harness_dir_override(sh.HARNESS_OUTPUTS_DIR_ENV)
+
+    def test_remap_under(self):
+        self.assertEqual(sh.remap_under("/b/secrets/K", "/b/secrets", "/m"), "/m/K")
+        self.assertEqual(sh.remap_under("/b/secrets", "/b/secrets", "/m"), "/m")
+        self.assertEqual(sh.remap_under("/b/secrets2/K", "/b/secrets", "/m"), "/b/secrets2/K")
+        self.assertEqual(sh.remap_under("", "/b/secrets", "/m"), "")
+
+
 class TestSecretWhitespace(unittest.TestCase):
     def test_rstrip_cr_lf_only(self):
         ctx = _make_ctx()

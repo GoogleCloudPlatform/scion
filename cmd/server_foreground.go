@@ -2258,18 +2258,33 @@ func initOperationalSettingsWithRetry(ctx context.Context, cfg *config.GlobalCon
 //  1. Acquires advisory lock "hub_settings_seed"
 //  2. If no _meta row exists, seeds sections from settings.yaml (file values only)
 //  3. Releases the lock
-//  4. Calls Refresh to load sections, then applySnapshot
-//  5. Logs any env-overridden Layer-1 keys as a WARN
+//  4. Calls Refresh to load sections
+//  5. Retires stored runtime-profile timezone values (hub.RetireProfileTimezones)
+//  6. Applies the snapshot
+//  7. Logs any env-overridden Layer-1 keys as a WARN
 func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, s store.Store, globalDir string) error {
+	// The runtime-profile timezone was removed. Scan the settings file for
+	// leftover profiles.<name>.timezone keys (a raw map walk; the struct
+	// field is gone) so the seed material can drop them and the retirement
+	// step below can report or migrate them.
+	tzScan, err := config.ScanSettingsFileProfileTimezones(globalDir)
+	if err != nil {
+		slog.Warn("Could not scan the settings file for removed runtime-profile timezones", "file", tzScan.Path, "error", err)
+	}
+
 	settingStore, ok := s.(store.HubSettingStore)
 	if !ok {
 		log.Println("WARNING: store does not implement HubSettingStore; skipping operational settings init")
+		_ = hub.RetireProfileTimezones(ctx, nil, hub.ProfileTimezoneRetireInput{File: tzScan}, slog.Default())
 		return nil
 	}
 
 	// Build koanf instances.
 	envKoanf := config.LoadEnvKoanf()
 	bootstrapKoanf := config.LoadBootstrapKoanf()
+	// Seed material never carries the removed key, so the every-boot sync
+	// cannot write it back into a seeded profiles row.
+	config.DeleteLegacyProfileTimezones(bootstrapKoanf, tzScan.ProfileTimezones)
 
 	// Log deprecation warnings for SCION_SERVER_* env vars that overlap
 	// Layer-1 settings (these should use SCION_SEED_* instead).
@@ -2308,6 +2323,17 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 	}
 	if len(changed) > 0 {
 		log.Printf("Operational settings loaded from DB: %v", changed)
+	}
+
+	// Retire stored runtime-profile timezone values once settings are
+	// loaded and seeded, before the snapshot is applied and before the
+	// dispatcher is wired. Non-fatal: a failure leaves the values in place
+	// (nothing reads them) and the next start retries.
+	if err := hub.RetireProfileTimezones(ctx, ops, hub.ProfileTimezoneRetireInput{
+		DBTier: hubSrv.IsPostgres(),
+		File:   tzScan,
+	}, slog.Default()); err != nil {
+		slog.Error("Retiring runtime-profile timezones failed; will retry at the next start", "error", err)
 	}
 
 	snap := ops.Snapshot()

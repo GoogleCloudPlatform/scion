@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -364,6 +365,9 @@ func TestMintConduitGrant_StreamParamAllowList(t *testing.T) {
 		{"events with a filter", grant.StreamHeader{Kind: grant.StreamKindEvents, Params: map[string]string{"filter": "*"}}, errConduitInvalid},
 		{"pty with tcp params", grant.StreamHeader{Kind: grant.StreamKindPTY, Params: map[string]string{grant.ParamHost: "127.0.0.1", grant.ParamPort: "3000"}}, errConduitInvalid},
 		{"tcp with an extra param", grant.StreamHeader{Kind: grant.StreamKindTCP, Params: map[string]string{grant.ParamHost: "127.0.0.1", grant.ParamPort: "3000", "x": "y"}}, errConduitInvalid},
+		// agent_id is only for broker targets, even when it names this agent.
+		{"logs with agent_id on an agent target", grant.StreamHeader{Kind: grant.StreamKindLogs, Params: map[string]string{grant.ParamAgentID: f.agent.ID}}, errConduitInvalid},
+		{"pty with agent_id on an agent target", grant.StreamHeader{Kind: grant.StreamKindPTY, Params: map[string]string{grant.ParamAgentID: f.agent.ID}}, errConduitInvalid},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, claims, err := f.mint(f.owner, tc.h)
@@ -444,6 +448,82 @@ func TestMintConduitGrant_AgentCaller(t *testing.T) {
 	assert.ErrorIs(t, err, errConduitForbidden, "cross-project agent")
 	_, _, err = f.mint(other, grant.StreamHeader{Kind: grant.StreamKindPTY})
 	assert.ErrorIs(t, err, errConduitForbidden, "agent without lifecycle scope cannot attach")
+}
+
+// decideSpy counts AuthzService.Decide calls through the decision audit
+// hook (every decision is audited at sample rate 1).
+type decideSpy struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (d *decideSpy) EmitDecisionAudit(context.Context, *store.DecisionAuditRecord) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.calls++
+}
+
+func (d *decideSpy) count() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.calls
+}
+
+// TestMintConduitGrant_AgentReadAndPortSkipKernel: with a real agent token
+// identity, the agent rules alone decide read and port streams; neither
+// path reaches Decide. Reads are denied, as on the agent logs and events
+// routes, where no agent scope grants agent.read.
+func TestMintConduitGrant_AgentReadAndPortSkipKernel(t *testing.T) {
+	f := newConduitFixture(t)
+	spy := &decideSpy{}
+	f.srv.authzService.DecisionAuditSampleRate = 1.0
+	f.srv.authzService.SetDecisionAuditEmitter(spy)
+	agentToken := func(id, projectID string, scopes ...AgentTokenScope) AgentIdentity {
+		return &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:      jwt.Claims{Subject: id},
+			ProjectID:   projectID,
+			Scopes:      scopes,
+			Ancestry:    f.agent.Ancestry,
+			ScopeSchema: CurrentAgentScopeSchema,
+		}}
+	}
+	self := agentToken(f.agent.ID, f.agent.ProjectID, ScopeProjectRead)
+	peer := agentToken(tid("peer-agent"), f.agent.ProjectID, ScopeProjectRead)
+	foreign := agentToken(tid("foreign-agent"), "other-project", ScopeProjectRead)
+	noScope := agentToken(f.agent.ID, f.agent.ProjectID)
+
+	// The kernel denies the equivalent logs-route read for the same token.
+	require.False(t, f.srv.authzService.CheckAccess(context.Background(), self, agentResource(f.agent), ActionRead).Allowed)
+	require.Equal(t, 1, spy.count(), "spy observes Decide")
+
+	tests := []struct {
+		name    string
+		ident   AgentIdentity
+		header  grant.StreamHeader
+		allowed bool
+	}{
+		{"self logs", self, grant.StreamHeader{Kind: grant.StreamKindLogs}, false},
+		{"self events", self, grant.StreamHeader{Kind: grant.StreamKindEvents}, false},
+		{"peer logs", peer, grant.StreamHeader{Kind: grant.StreamKindLogs}, false},
+		{"peer events", peer, grant.StreamHeader{Kind: grant.StreamKindEvents}, false},
+		{"logs without project:read", noScope, grant.StreamHeader{Kind: grant.StreamKindLogs}, false},
+		{"foreign logs", foreign, grant.StreamHeader{Kind: grant.StreamKindLogs}, false},
+		{"self tcp", self, tcpHeader("3000"), true},
+		{"peer tcp", peer, tcpHeader("3000"), false},
+		{"foreign tcp", foreign, tcpHeader("3000"), false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			before := spy.count()
+			_, _, err := f.mint(tc.ident, tc.header)
+			if tc.allowed {
+				require.NoError(t, err)
+			} else {
+				require.ErrorIs(t, err, errConduitForbidden)
+			}
+			assert.Equal(t, before, spy.count(), "agent read/port streams must not reach Decide")
+		})
+	}
 }
 
 var testGrantEncryptionKey = secret.DeriveLocalEncryptionKey("test-shared-secret")
@@ -559,6 +639,104 @@ func TestConduitGrantKeySet_EphemeralWithoutEncryption(t *testing.T) {
 	assert.True(t, ok)
 	_, err = s.GetSecret(ctx, conduitGrantKeySecretName, store.ScopeHub, conduitGrantKeyScopeID)
 	assert.NoError(t, err)
+}
+
+// TestConduitGrantKeySet_EphemeralLogs: the memory-only ring is announced
+// once per server at INFO, with a one-time WARN only where nodes must share
+// signing keys, and no key material in either.
+func TestConduitGrantKeySet_EphemeralLogs(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		stableKeys bool
+		wantWarn   bool
+	}{
+		{"single node", false, false},
+		{"nodes must share keys", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _ := testServer(t)
+			srv.encryptionKey = nil
+			srv.config.RequireStableSigningKey = tc.stableKeys
+			srv.conduitGrantsOnce = sync.Once{}
+			srv.conduitGrants = nil
+			buf := captureSlogDefault(t)
+
+			ctx := context.Background()
+			for range 3 {
+				_, err := srv.conduitGrantKeySet().signer(ctx)
+				require.NoError(t, err)
+			}
+			logs := buf.String()
+			assert.Equal(t, 1, strings.Count(logs, "Conduit grant key ring is ephemeral"), logs)
+			assert.Contains(t, logs, "level=INFO msg=\"Conduit grant key ring is ephemeral")
+			wantWarns := 0
+			if tc.wantWarn {
+				wantWarns = 1
+			}
+			assert.Equal(t, wantWarns, strings.Count(logs, "level=WARN msg=\"Conduit grant key ring is per node"), logs)
+
+			ring, _, err := srv.conduitGrantKeySet().store.Load(ctx)
+			require.NoError(t, err)
+			assertNoKeyMaterial(t, logs, ring)
+		})
+	}
+}
+
+func assertNoKeyMaterial(t *testing.T, s string, ring *grant.KeyRing) {
+	t.Helper()
+	for _, k := range ring.Keys {
+		for _, enc := range []string{base64.StdEncoding.EncodeToString(k.Seed), base64.RawURLEncoding.EncodeToString(k.Seed), fmt.Sprintf("%x", k.Seed)} {
+			assert.NotContains(t, s, enc)
+		}
+	}
+	assert.NotContains(t, s, "seed")
+}
+
+// TestConduitGrantKeys_UnreadableRingFailsClosedAndLogs: a stored ring this
+// node cannot decrypt (for example a changed shared signing secret) is not
+// replaced; mint fails closed and an actionable ERROR naming the secret is
+// logged at most once per refresh interval.
+func TestConduitGrantKeys_UnreadableRingFailsClosedAndLogs(t *testing.T) {
+	_, s := testServer(t)
+	ctx := context.Background()
+	clock := &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
+	writer := newConduitGrantKeys(newTestDBGrantKeyStore(t, s), clock.Now)
+	_, err := writer.signer(ctx)
+	require.NoError(t, err)
+
+	other, err := newDBConduitGrantKeyStore(s, secret.DeriveLocalEncryptionKey("a-different-secret"))
+	require.NoError(t, err)
+	node := newConduitGrantKeys(other, clock.Now)
+	buf := captureSlogDefault(t)
+
+	const logLine = "Conduit grant key ring cannot be read"
+	for range 3 {
+		_, err = node.signer(ctx)
+		require.ErrorIs(t, err, errConduitGrantRingUnreadable)
+	}
+	logs := buf.String()
+	assert.Equal(t, 1, strings.Count(logs, logLine), "logged once per refresh interval")
+	assert.Contains(t, logs, "level=ERROR")
+	assert.Contains(t, logs, "secret_key="+conduitGrantKeySecretName)
+	assert.Contains(t, logs, "scope_id="+conduitGrantKeyScopeID)
+	assert.Contains(t, logs, "Discarding the ring is safe")
+
+	clock.Advance(conduitGrantKeyRefresh - time.Second)
+	_, err = node.publicKeys(ctx)
+	require.ErrorIs(t, err, errConduitGrantRingUnreadable)
+	assert.Equal(t, 1, strings.Count(buf.String(), logLine))
+	clock.Advance(time.Second)
+	_, err = node.publicKeys(ctx)
+	require.ErrorIs(t, err, errConduitGrantRingUnreadable)
+	assert.Equal(t, 2, strings.Count(buf.String(), logLine), "logged again after the refresh interval")
+
+	// Not replaced: the stored ring is still the writer's.
+	ring, _, err := newTestDBGrantKeyStore(t, s).Load(ctx)
+	require.NoError(t, err)
+	wsigner, err := writer.signer(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, wsigner.KeyID, ring.Keys[0].KeyID)
+	assertNoKeyMaterial(t, buf.String(), ring)
 }
 
 // TestConduitGrantKeys_Rotation: rotation by kid propagates to other nodes;
@@ -678,6 +856,20 @@ func TestServer_ConduitGrantKeyActivationSetting(t *testing.T) {
 	assert.Equal(t, conduitGrantKeyDefaultActivation, srv.conduitGrantKeyActivation())
 	srv.config.ConduitGrantKeyActivation = 2 * time.Hour
 	assert.Equal(t, 2*time.Hour, srv.conduitGrantKeyActivation())
+}
+
+// nilSecretStore returns (nil, nil) from GetSecret, as a store
+// implementation may for a missing row.
+type nilSecretStore struct{ store.SecretStore }
+
+func (nilSecretStore) GetSecret(context.Context, string, string, string) (*store.Secret, error) {
+	return nil, nil
+}
+
+func TestDBConduitGrantKeyStore_NilRecordIsNotFound(t *testing.T) {
+	db := newTestDBGrantKeyStore(t, nilSecretStore{})
+	_, _, err := db.Load(context.Background())
+	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
 type failingGrantKeyStore struct{}

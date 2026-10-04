@@ -36,7 +36,8 @@ import (
 // (UpdateAgentDeletion), publishes status{deletion:deleting}, and starts
 // runAgentDeletion on a context detached from the request. The handler then
 // waits up to deleteSyncWait on the engine's in-process completion channel:
-// a fast delete answers 204/502/409 as before, a slow one answers 202 and
+// a fast delete answers 204/502/409 as before (503 when the broker does not
+// have the agent's runtime available), a slow one answers 202 and
 // its outcome arrives as events. A concurrent DELETE joins the live one.
 
 // Timing knobs. Variables, not constants, so tests can shrink them.
@@ -83,9 +84,34 @@ const (
 
 // deletionOutcome is sent exactly once on the engine's completion channel.
 type deletionOutcome struct {
-	kind    deletionOutcomeKind
-	code    string // failed: the deletion code
-	message string // failed: the stored error message
+	kind       deletionOutcomeKind
+	code       string // failed: the deletion code
+	message    string // failed: the stored error message
+	retryAfter string // failed with runtime_unavailable: the Retry-After to send
+}
+
+// deletionRetryAfter remembers, per agent, the Retry-After of the latest
+// runtime_unavailable delete failure classified by this hub process, so a
+// request that joins that delete answers with the same value. A joiner on
+// another hub process (or after a restart) has no entry and falls back to
+// defaultBrokerRuntimeRetryAfter. One entry per agent, replaced on the next
+// such failure and removed when a delete of the agent completes.
+var deletionRetryAfter sync.Map // agent ID -> deletionRetryAfterEntry
+
+type deletionRetryAfterEntry struct {
+	claim int64
+	value string
+}
+
+// deletionRetryAfterFor returns the remembered Retry-After for the agent's
+// failed delete at claim, or "" if this process has none.
+func deletionRetryAfterFor(agentID string, claim int64) string {
+	if v, ok := deletionRetryAfter.Load(agentID); ok {
+		if e := v.(deletionRetryAfterEntry); e.claim == claim {
+			return e.value
+		}
+	}
+	return ""
 }
 
 // agentDeletionPlan is what the engine needs from the claim.
@@ -244,6 +270,10 @@ func (s *Server) runAgentDeletion(reqCtx context.Context, plan *agentDeletionPla
 				} else {
 					out = e.abandonOutcome()
 				}
+			}
+			if out.kind == deletionOutcomeDeleted {
+				// The agent is gone: drop any remembered Retry-After.
+				deletionRetryAfter.Delete(plan.snapshot.ID)
 			}
 			e.stopRenewal()
 			cancel(nil)
@@ -531,6 +561,15 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 	ctx, cancel := context.WithTimeout(e.ctx, deleteDispatchBudget)
 	defer cancel()
 
+	// A delete is a stop: record it before anything is dispatched. The
+	// claim already holds the row, so a failed write is logged rather than
+	// failing the delete. A rollback leaves this intent in place (see
+	// rollback).
+	if _, err := s.recordRunIntent(ctx, agent, store.RunIntentStopped); err != nil {
+		s.agentLifecycleLog.Warn("Failed to record run intent for agent delete",
+			"agent_id", agent.ID, "error", err)
+	}
+
 	// Managed agent: clean up cloud resources directly, skip the broker.
 	// Errors are logged, as before (follow-up 4).
 	if isManagedAgentRuntime(agent.Runtime) {
@@ -632,6 +671,20 @@ func (e *deletionEngine) classifyDispatchFailure(dispatchErr error, since time.T
 		// not a gateway failure.
 		code = store.DeletionCodeConflict
 		msg = "Failed to delete agent on runtime broker: " + se.brokerErrorMessage()
+	} else if isBrokerRuntimeUnavailable(dispatchErr) {
+		// The broker does not have the agent's recorded runtime available
+		// (ptone/scion#2748): nothing ran there and the agent may still be
+		// running, so restore it; the caller may retry, and force=true
+		// still removes the record.
+		code = store.DeletionCodeRuntimeUnavailable
+		msg = brokerRuntimeUnavailableMessage(e.plan.snapshot.Runtime)
+		retryAfter := brokerRuntimeRetryAfter(dispatchErr)
+		// Stored before the rollback publishes, so a joiner woken by that
+		// event already finds it.
+		deletionRetryAfter.Store(agentID, deletionRetryAfterEntry{claim: e.plan.claim, value: retryAfter})
+		out := e.rollback(code, msg)
+		out.retryAfter = retryAfter
+		return out, false
 	}
 	return e.rollback(code, msg), false
 }
@@ -668,6 +721,11 @@ func (e *deletionEngine) rollback(code, msg string) deletionOutcome {
 			}
 		},
 	}
+	// The run intent stays stopped, as dispatch recorded it, even when the
+	// prior phase restored here is a live one (including a broker that was
+	// unavailable): a failed delete is treated like a stop whose dispatch
+	// failed. Nothing acts on a live agent with intent stopped yet, so this
+	// only records what the user last asked for.
 	n, err := e.s.store.UpdateAgentDeletion(ctx, e.agentID(), e.claimPred(store.DeletionStateDeleting), set)
 	if err != nil {
 		e.s.agentLifecycleLog.Error("delete engine: rollback write failed",
@@ -868,14 +926,24 @@ func deleteSyncWaitFor(r *http.Request) time.Duration {
 }
 
 // writeDeletionFailure writes the HTTP answer for a failed delete: 409 for a
-// broker conflict, 502 otherwise (today's codes on the fast path).
-func writeDeletionFailure(w http.ResponseWriter, agentID, code, message string) {
+// broker conflict, a retryable 503 when the broker does not have the agent's
+// runtime available, 502 otherwise (today's codes on the fast path).
+// retryAfter is the 503's Retry-After; "" means defaultBrokerRuntimeRetryAfter.
+func writeDeletionFailure(w http.ResponseWriter, agentID, code, message, retryAfter string) {
 	if message == "" {
 		message = "agent delete failed (" + code + ")"
 	}
 	details := map[string]interface{}{"agentId": agentID, "deletionCode": code}
 	if code == store.DeletionCodeConflict {
 		writeError(w, http.StatusConflict, ErrCodeConflict, message, details)
+		return
+	}
+	if code == store.DeletionCodeRuntimeUnavailable {
+		if retryAfter == "" {
+			retryAfter = defaultBrokerRuntimeRetryAfter
+		}
+		w.Header().Set("Retry-After", retryAfter)
+		writeError(w, http.StatusServiceUnavailable, brokerCodeRuntimeUnavailable, message, details)
 		return
 	}
 	writeError(w, http.StatusBadGateway, ErrCodeRuntimeError, message, details)
@@ -897,8 +965,9 @@ func (s *Server) writeDeleteAccepted(w http.ResponseWriter, agentID string) {
 // subscribes first, then re-reads the row on every wake-up and on a 1s poll;
 // events are only a wake-up signal, the row decides:
 //   - row gone, or DeletedAt set → 204;
-//   - failed (or lease expired) at a claim >= observedClaim → 502/409 with
-//     the code the view shows;
+//   - failed (or lease expired) at a claim >= observedClaim → the answer for
+//     the code the view shows: 409 for a conflict, a retryable 503 with
+//     Retry-After for runtime_unavailable, 502 otherwise;
 //   - deadline → 202.
 func (s *Server) joinAgentDeletion(w http.ResponseWriter, r *http.Request, agentID string, observedClaim int64, deadline time.Time) {
 	evCh, unsub := s.events.Subscribe("agent."+agentID+".deleted", "agent."+agentID+".status")
@@ -963,13 +1032,13 @@ func (s *Server) resolveJoinFromRow(w http.ResponseWriter, ctx context.Context, 
 		return false
 	}
 	if code := row.DeletionEffectiveCode(now); code != "" {
-		writeDeletionFailure(w, agentID, code, row.DeletionError)
+		writeDeletionFailure(w, agentID, code, row.DeletionError, deletionRetryAfterFor(agentID, row.DeletionClaim))
 		return true
 	}
 	if row.DeletionState == store.DeletionStateNone && row.DeletionClaim >= observedClaim {
 		// The marker was cleared after a failure (a successful start or stop
 		// clears it): the delete did not complete.
-		writeDeletionFailure(w, agentID, store.DeletionCodeRuntimeError, "agent delete did not complete")
+		writeDeletionFailure(w, agentID, store.DeletionCodeRuntimeError, "agent delete did not complete", "")
 		return true
 	}
 	return false
