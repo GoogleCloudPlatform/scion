@@ -1736,6 +1736,15 @@ func (s *Server) handleAgentByID(w http.ResponseWriter, r *http.Request) {
 	// Keys applies the same check itself, after reading its body, so it can
 	// answer in its own result shape.
 	if isExistingAgentRequest(action) {
+		// Resolve the runtime the agent's own saved profile selects first,
+		// so it is registered (also after a broker restart) and is the
+		// only runtime the operation queries (see ensureAgentOwnRuntime).
+		// Restart is excluded: it starts the agent in the runtime its saved
+		// profile selects now, so its stop must still find the agent in
+		// whichever runtime it is running in, which may differ.
+		if action != api.AgentActionRestart {
+			r = r.WithContext(s.ensureAgentOwnRuntime(r.Context(), id, projectID, r.URL.Query().Get("projectPath")))
+		}
 		ctx, recorded, err := s.applyRecordedRuntime(r, id, projectID)
 		if err != nil {
 			writeRuntimeNotRegistered(w, recorded)
@@ -2930,6 +2939,12 @@ func (s *Server) sendKeys(w http.ResponseWriter, r *http.Request, id, projectID 
 	// failing only when no runtime lists it and the recorded type has no
 	// manager here (see applyRecordedRuntime).
 	// OutcomeKeysUnavailable is broker-assertable at 503: nothing ran.
+	if ownCtx := s.ensureAgentOwnRuntime(r.Context(), id, projectID, r.URL.Query().Get("projectPath")); ownCtx != r.Context() {
+		r = r.WithContext(ownCtx)
+		if own := agentOwnRuntimeFrom(ownCtx); own != nil {
+			ctx = context.WithValue(ctx, agentOwnRuntimeKey{}, own)
+		}
+	}
 	rtCtx, recorded, rtErr := s.applyRecordedRuntime(r, id, projectID)
 	if rtErr != nil {
 		span.SetStatus(codes.Error, "recorded runtime not registered")
@@ -4355,6 +4370,13 @@ func (s *Server) resolveAgentRuntimeTarget(ctx context.Context, id, projectID st
 		return mgr, rt
 	}
 
+	// The agent's own runtime, when known, is the fallback too: the agent
+	// is gone from it (or it could not be listed), and the operation
+	// reports that from there rather than from an unrelated runtime.
+	if own := s.ownRuntimeFor(ctx); own != nil {
+		return own.mgr, own.rt
+	}
+
 	// Default fallback — the agent may have already been removed or the
 	// runtime is genuinely the default one (e.g. pod already deleted). With
 	// a recorded runtime type the fallback stays within that type: the first
@@ -4377,6 +4399,21 @@ func (s *Server) findAgentRuntimeTarget(ctx context.Context, id, projectID strin
 	filter := map[string]string{"scion.name": slug}
 	if projectID != "" {
 		filter["scion.project_id"] = projectID
+	}
+
+	// The agent's own runtime, when known, is the only one searched.
+	if own := s.ownRuntimeFor(ctx); own != nil {
+		agents, err := own.mgr.List(ctx, filter)
+		if err == nil && len(agents) > 0 {
+			return own.mgr, own.rt, true
+		}
+		if projectID != "" {
+			agents, err := own.mgr.List(ctx, map[string]string{"scion.name": slug})
+			if err == nil && hasAgentInProjectOrUnlabeled(agents, projectID) {
+				return own.mgr, own.rt, true
+			}
+		}
+		return nil, nil, false
 	}
 
 	// A recorded runtime type (ptone/scion#2748) restricts the search to
@@ -4441,7 +4478,13 @@ func (s *Server) resolveManagerForAgent(ctx context.Context, id, projectID strin
 //
 // A recorded runtime type on ctx (ptone/scion#2748) limits the list to
 // runtimes of that type.
+//
+// When the agent's own runtime is known (ensureAgentOwnRuntime), it is the
+// only manager returned.
 func (s *Server) allManagers(ctx context.Context) []agent.Manager {
+	if own := s.ownRuntimeFor(ctx); own != nil {
+		return []agent.Manager{own.mgr}
+	}
 	var managers []agent.Manager
 	if s.defaultRuntimeAllowed(ctx) {
 		managers = append(managers, s.manager)
@@ -5071,7 +5114,7 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, project
 		t := &deleteTarget{
 			mgr:         m.mgr,
 			name:        id,
-			containerID: m.entry.ContainerID,
+			containerID: scionrt.AgentOperationID(m.entry),
 			projectPath: m.entry.ProjectPath,
 			projectID:   m.entry.ProjectID,
 		}
@@ -5111,6 +5154,16 @@ func (s *Server) resolveDeleteTarget(ctx context.Context, id, projectID, project
 	// HTTP body.
 	if listErr != nil {
 		return nil, errDeleteTargetUnknown
+	}
+
+	// Only the agent's own runtime was searched. If its profile was edited
+	// after the agent started (for example a new namespace), the agent's
+	// container may still run where the old settings put it; name what was
+	// checked so an operator can find it.
+	if own := s.ownRuntimeFor(ctx); own != nil {
+		s.agentLifecycleLog.Warn("Agent delete: no container found in the agent's own runtime; checked only that runtime",
+			"agent_id", id, "project_id", projectID, "profile", own.profile,
+			"runtime", own.rt.Name(), "namespace", ownRuntimeNamespace(own.rt))
 	}
 
 	// Before accepting a file-only target below (which reports success —

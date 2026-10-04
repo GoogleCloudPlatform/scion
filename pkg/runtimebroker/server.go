@@ -35,6 +35,7 @@ import (
 
 	"github.com/google/uuid"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -277,6 +278,13 @@ type Server struct {
 	// access — resolving a real Kubernetes runtime calls Verify() against
 	// the API server.
 	resolveAuxiliaryRuntime func(projectPath, agentName, profileFlag string) scionrt.Runtime
+
+	// agentOwnRuntimes memoises the runtime an existing agent's saved
+	// profile resolves to (see ensureAgentOwnRuntime), keyed by project dir
+	// and profile; agentOwnRuntimeGroup collapses concurrent resolutions of
+	// one key into a single call. Failed resolutions are not stored.
+	agentOwnRuntimes     sync.Map
+	agentOwnRuntimeGroup singleflight.Group
 
 	// projectProvisionMu serializes worktree provisioning per project on this
 	// node. Without this, concurrent agent creations for the same project could
@@ -1552,6 +1560,25 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 	slug = strings.ToLower(slug)
 
 	filter := scopedNameFilter(slug, projectID)
+
+	// The agent's own runtime, when known (ensureAgentOwnRuntime), is the
+	// only one searched; a failed List there is ErrAgentListUnavailable.
+	if own := s.ownRuntimeFor(ctx); own != nil {
+		agents, err := own.mgr.List(ctx, filter)
+		if err != nil {
+			return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+		}
+		agents = agentsForProject(agents, projectID)
+		if len(agents) == 0 && projectID != "" {
+			agents, err = own.mgr.List(ctx, map[string]string{"scion.name": slug})
+			if err != nil {
+				return agentMatch{}, fmt.Errorf("%w: failed to list agents: %w", ErrAgentListUnavailable, err)
+			}
+			agents = agentsWithoutProjectLabel(agents)
+		}
+		return agentMatchFrom(slug, agents, own.mgr, own.rt)
+	}
+
 	// A recorded runtime type (ptone/scion#2748) can exclude the default
 	// runtime; auxListAgentsSorted applies the same restriction.
 	useDefault := s.defaultRuntimeAllowed(ctx)
@@ -1604,6 +1631,12 @@ func (s *Server) lookupAgentMatch(ctx context.Context, slug, projectID string) (
 		}
 	}
 
+	return agentMatchFrom(slug, agents, matchManager, matchRuntime)
+}
+
+// agentMatchFrom builds lookupAgentMatch's result from the entries the
+// runtime behind matchManager/matchRuntime listed for slug.
+func agentMatchFrom(slug string, agents []api.AgentInfo, matchManager agent.Manager, matchRuntime scionrt.Runtime) (agentMatch, error) {
 	if len(agents) == 0 {
 		return agentMatch{}, &agentNotFoundError{slug: slug}
 	}

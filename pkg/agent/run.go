@@ -167,7 +167,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 					return nil, err
 				}
 			}
-			if err := m.Runtime.Delete(ctx, a.ContainerID); err != nil {
+			if err := m.Runtime.Delete(ctx, runtime.AgentOperationID(a)); err != nil {
 				return nil, fmt.Errorf("failed to cleanup existing container: %w", err)
 			}
 		}
