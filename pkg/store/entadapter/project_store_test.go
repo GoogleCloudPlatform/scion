@@ -255,6 +255,16 @@ func TestProjectOwnerID_UpdateProjectDoesNotWriteOwnerID(t *testing.T) {
 	assert.Equal(t, transferred, got.OwnerID, "a stale full-row write must not undo SetProjectOwnerID")
 }
 
+// TestProjectOwnerID_UpdateProjectNilReturnsInvalidInput pins that
+// UpdateProject rejects a nil project with store.ErrInvalidInput instead of
+// panicking.
+func TestProjectOwnerID_UpdateProjectNilReturnsInvalidInput(t *testing.T) {
+	ps := newTestProjectStore(t)
+	var err error
+	require.NotPanics(t, func() { err = ps.UpdateProject(context.Background(), nil) })
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+}
+
 func TestProject_SharedDirsRoundTrip(t *testing.T) {
 	ps := newTestProjectStore(t)
 	ctx := context.Background()
