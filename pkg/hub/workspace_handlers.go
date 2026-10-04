@@ -505,7 +505,7 @@ func (s *Server) handleWorkspaceSyncToFinalize(w http.ResponseWriter, r *http.Re
 		}
 		created, err := dispatcher.DispatchAgentCreate(ctx, agent)
 		if errors.Is(err, ErrLaunchInvalidPhase) {
-			writeLaunchInvalidPhase(w)
+			writeLaunchInvalidPhase(w, err, agent.ID)
 			return
 		}
 		if err != nil {

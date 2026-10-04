@@ -2137,7 +2137,7 @@ func (s *Server) createAgentInProject(
 					// A stop or delete reached the record before the launch
 					// began. Nothing was sent to the broker; the record is
 					// left to that operation.
-					writeLaunchInvalidPhase(w)
+					writeLaunchInvalidPhase(w, err, agent.ID)
 					return
 				} else if err != nil {
 					// Dispatch failed — clean up provisioned files on the broker
@@ -2186,7 +2186,7 @@ func (s *Server) createAgentInProject(
 					// A stop or delete reached the record before the launch
 					// began. Nothing was sent to the broker; the record is
 					// left to that operation.
-					writeLaunchInvalidPhase(w)
+					writeLaunchInvalidPhase(w, err, agent.ID)
 					return
 				} else if err != nil {
 					// Dispatch failed — clean up provisioned files on the broker
@@ -2289,8 +2289,14 @@ const launchInFlightInputsWarning = "agent is already launching; request inputs 
 
 // writeLaunchInvalidPhase answers a create, env submit or workspace finalize
 // whose launch could not begin because the agent left the created and
-// provisioning phases (for example it was stopped meanwhile).
-func writeLaunchInvalidPhase(w http.ResponseWriter) {
+// provisioning phases (for example it was stopped meanwhile). When a delete
+// holds the row (err wraps store.ErrDeleteInProgress) it answers 409
+// delete_in_progress instead (ptone/scion#2550).
+func writeLaunchInvalidPhase(w http.ResponseWriter, err error, agentID string) {
+	if refusal := deleteClaimedDuringDispatch(err, agentID); refusal != nil {
+		refusal.write(w)
+		return
+	}
 	writeError(w, http.StatusConflict, "invalid_state",
 		"agent is no longer in a phase that can be launched (it may have been stopped or deleted)", nil)
 }
@@ -2613,7 +2619,7 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 	ctx, dispatchWarns := withDispatchWarnings(ctx)
 	finalized, err := dispatcher.DispatchFinalizeEnv(ctx, agent, req.Env)
 	if errors.Is(err, ErrLaunchInvalidPhase) {
-		writeLaunchInvalidPhase(w)
+		writeLaunchInvalidPhase(w, err, agent.ID)
 		return
 	}
 	if err != nil {

@@ -19,7 +19,10 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -263,6 +266,7 @@ func TestDispatchAgentCreate_InvalidPhaseIsNotSent(t *testing.T) {
 	_, err := f.dispatcher.DispatchAgentCreate(context.Background(), agent)
 	require.ErrorIs(t, err, ErrLaunchInvalidPhase)
 	require.ErrorIs(t, err, store.ErrInvalidPhase)
+	assert.NotErrorIs(t, err, store.ErrDeleteInProgress, "a plain stop is not a delete")
 	assert.Empty(t, f.client.sends, "nothing is sent for an agent that can no longer launch")
 }
 
@@ -437,4 +441,50 @@ func TestDispatchAgentCreate_AsyncDeleteClaimedSendsNothing(t *testing.T) {
 	row := f.row(t, agent.ID)
 	assert.Empty(t, row.LaunchID, "no launch is begun")
 	assert.Empty(t, row.RunID, "no run is written")
+}
+
+// claimOnBeginLaunchStore lands a delete claim (phase stopping plus a live
+// deleting lease, as the delete engine writes it) just before BeginLaunch:
+// the window between the create's beginRun and its BeginLaunch.
+type claimOnBeginLaunchStore struct {
+	store.Store
+	t *testing.T
+}
+
+func (s claimOnBeginLaunchStore) BeginLaunch(ctx context.Context, agentID, kind string, timeout time.Duration) (string, error) {
+	row, err := s.Store.GetAgent(ctx, agentID)
+	require.NoError(s.t, err)
+	row.Phase = string(state.PhaseStopping)
+	require.NoError(s.t, s.Store.UpdateAgent(ctx, row))
+	seedAgentDeletion(s.t, s.Store, agentID, seedLiveDeleting)
+	return s.Store.BeginLaunch(ctx, agentID, kind, timeout)
+}
+
+// A delete claim landing between beginRun and BeginLaunch is reported as
+// the delete (store.ErrDeleteInProgress), still wrapped in
+// ErrLaunchInvalidPhase so callers leave the row to the delete; nothing is
+// sent (ptone/scion#2550, round 6 n3).
+func TestDispatchAgentCreate_DeleteClaimBeforeBeginLaunch(t *testing.T) {
+	base := createTestStore(t)
+	f := newAsyncLaunchFixtureOn(t, claimOnBeginLaunchStore{Store: base, t: t}, &store.BrokerCapabilities{AsyncLaunch: true})
+	agent := f.agent(t, "claim-before-begin", string(state.PhaseCreated), true)
+
+	_, err := f.dispatcher.DispatchAgentCreate(context.Background(), agent)
+	require.ErrorIs(t, err, ErrLaunchInvalidPhase)
+	require.ErrorIs(t, err, store.ErrDeleteInProgress)
+	assert.Empty(t, f.client.sends, "nothing is sent")
+	assert.Empty(t, f.row(t, agent.ID).LaunchID, "no launch is begun")
+}
+
+// writeLaunchInvalidPhase answers delete_in_progress, with details.agentId,
+// when the refusal was a delete, and invalid_state otherwise (round 6 n3).
+func TestWriteLaunchInvalidPhase_DeleteHoldsRow(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeLaunchInvalidPhase(rec, fmt.Errorf("%w: %w", ErrLaunchInvalidPhase, store.ErrDeleteInProgress), "agent-1")
+	requireIntentDeleteInProgress(t, rec, "agent-1")
+
+	rec = httptest.NewRecorder()
+	writeLaunchInvalidPhase(rec, fmt.Errorf("%w: %w", ErrLaunchInvalidPhase, store.ErrInvalidPhase), "agent-1")
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	assert.Contains(t, rec.Body.String(), "invalid_state")
 }
