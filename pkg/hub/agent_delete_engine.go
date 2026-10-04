@@ -95,7 +95,7 @@ type deletionOutcome struct {
 // request that joins that delete answers with the same value. A joiner on
 // another hub process (or after a restart) has no entry and falls back to
 // defaultBrokerRuntimeRetryAfter. One entry per agent, replaced on the next
-// such failure.
+// such failure and removed when a delete of the agent completes.
 var deletionRetryAfter sync.Map // agent ID -> deletionRetryAfterEntry
 
 type deletionRetryAfterEntry struct {
@@ -270,6 +270,10 @@ func (s *Server) runAgentDeletion(reqCtx context.Context, plan *agentDeletionPla
 				} else {
 					out = e.abandonOutcome()
 				}
+			}
+			if out.kind == deletionOutcomeDeleted {
+				// The agent is gone: drop any remembered Retry-After.
+				deletionRetryAfter.Delete(plan.snapshot.ID)
 			}
 			e.stopRenewal()
 			cancel(nil)

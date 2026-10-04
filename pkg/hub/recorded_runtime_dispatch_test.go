@@ -434,12 +434,16 @@ func TestRecordedRuntime_DeleteRuntimeUnavailableRollsBack(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, joined.Code, joined.Body.String())
 	require.Equal(t, defaultBrokerRuntimeRetryAfter, joined.Header().Get("Retry-After"))
 
-	// The runtime is registered again: a retry deletes the agent.
+	// The runtime is registered again: a retry deletes the agent, and the
+	// completed delete drops the agent's remembered Retry-After.
+	deletionRetryAfter.Store(agent.ID, deletionRetryAfterEntry{claim: got.DeletionClaim, value: "7"})
 	mockClient.returnErr = nil
 	rec = doRequest(t, srv, http.MethodDelete, "/api/v1/agents/"+agent.ID, nil)
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 	_, err = s.GetAgent(ctx, agent.ID)
 	require.ErrorIs(t, err, store.ErrNotFound)
+	_, remembered := deletionRetryAfter.Load(agent.ID)
+	require.False(t, remembered, "a completed delete must drop the remembered Retry-After")
 }
 
 // TestRecordedRuntime_ForceDeleteRemovesHubRecord pins that force=true still
