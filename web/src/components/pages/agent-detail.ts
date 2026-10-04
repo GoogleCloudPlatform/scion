@@ -1707,6 +1707,11 @@ export class ScionPageAgentDetail extends LitElement {
     return html`
       <div class="card">
         <h3 class="card-title">Exposed Ports</h3>
+        ${canOpen
+          ? nothing
+          : html`<p class="port-no-access" style="color: var(--scion-text-muted, #64748b);">
+              You don't have port access on this agent.
+            </p>`}
         <div class="info-grid">
           ${ports.map(
             (p) => html`
@@ -1722,11 +1727,7 @@ export class ScionPageAgentDetail extends LitElement {
                       >
                         Open in new tab
                       </a>`
-                    : html`<span
-                        class="port-no-access"
-                        style="color: var(--scion-text-muted, #64748b);"
-                        >You don't have port access</span
-                      >`}
+                    : html`<span style="color: var(--scion-text-muted, #64748b);">—</span>`}
                 </span>
               </div>
             `

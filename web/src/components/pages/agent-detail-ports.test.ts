@@ -84,12 +84,13 @@ describe('agent detail Exposed Ports card capability gate', () => {
       l.textContent?.trim()
     );
     expect(labels).toEqual([':8080 (web)', ':3000']);
-    expect(host.querySelectorAll('.port-no-access').length).toBe(2);
+    expect(host.querySelectorAll('.port-no-access').length).toBe(1);
   });
 
   it('fails closed when capabilities are absent', () => {
     const host = renderPortsCard(makeAgent({ _capabilities: undefined }));
     expect(host.querySelectorAll('a').length).toBe(0);
     expect(host.querySelectorAll('.info-item').length).toBe(2);
+    expect(host.querySelectorAll('.port-no-access').length).toBe(1);
   });
 });
