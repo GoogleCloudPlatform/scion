@@ -474,6 +474,23 @@ func TestReincarnateMove_CurrentBrokerVisibleToUserWithoutRead(t *testing.T) {
 	assert.Equal(t, f.src.ID, resp.TargetBrokerID)
 }
 
+// The current-broker exemption also applies when the broker is named, not
+// identified: a user without broker read who names the agent's current
+// broker gets a plain reincarnate, even when a hidden broker shares that
+// name (case-insensitively).
+func TestReincarnateMove_CurrentBrokerByNameVisibleWithHiddenTwin(t *testing.T) {
+	f := setupMoveFixture(t, false, nil)
+	require.NoError(t, f.s.RemoveProjectProvider(context.Background(), f.project.ID, f.src.ID))
+	f.addMoveBroker(t, "twin-of-src-", strings.ToUpper(f.src.Name), "twin-of-src", false)
+	_, do := f.unprivilegedUser(t)
+	rec := do(ReincarnateAgentRequest{DryRun: true, TargetBroker: f.src.Name})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp ReincarnateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Nil(t, resp.MoveVerdict, "same broker is not a move")
+	assert.Equal(t, f.src.ID, resp.TargetBrokerID)
+}
+
 // An auto-providing broker is visible to a caller with no other rights:
 // the request reaches the checks (and stops at access, since the user may
 // not link brokers to the project).
@@ -589,6 +606,15 @@ func TestReincarnateMove_ExactIDWinsOverName(t *testing.T) {
 	f := setupMoveFixture(t, true, nil)
 	f.addMoveBroker(t, "named-like-id-", f.dst.ID, "named-like-id", true)
 	f.assertTargetResolvesTo(t, f.dst.ID, f.dst)
+}
+
+// An exact ID match on a hidden broker is not a match: resolution falls
+// through to names and slugs, so a visible broker whose name is that ID
+// string resolves (a direct 404 would reveal the hidden ID exists).
+func TestReincarnateMove_HiddenIDFallsThroughToVisibleName(t *testing.T) {
+	f := setupMoveFixture(t, false, nil)
+	vis := f.addMoveBroker(t, "named-like-hidden-id-", f.dst.ID, "named-like-hidden-id", true)
+	f.assertTargetResolvesTo(t, f.dst.ID, vis)
 }
 
 // A name or slug matching more than one visible broker is refused with a
