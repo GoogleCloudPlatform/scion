@@ -625,6 +625,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
 			return
 		}
+		if errs := config.ValidateHomeStorageOverrides(runtimes, profiles); len(errs) > 0 {
+			writeError(w, http.StatusUnprocessableEntity, ErrCodeValidationError, errs[0].Error(), nil)
+			return
+		}
 		// shared_dir_storage_backend "nfs" needs a complete
 		// server.shared_dir_storage.nfs block, which lives only in the
 		// global settings file. Configuration only; no mount is checked.

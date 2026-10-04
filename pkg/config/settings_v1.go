@@ -995,9 +995,12 @@ type V1ServerConfig struct {
 	// directories, independent of WorkspaceStorage (design
 	// deploy-config-explore §3.2). See V1SharedDirStorageConfig.
 	SharedDirStorage *V1SharedDirStorageConfig `json:"shared_dir_storage,omitempty" yaml:"shared_dir_storage,omitempty" koanf:"shared_dir_storage"`
-	Secrets          *V1SecretsConfig          `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
-	LogLevel         string                    `json:"log_level,omitempty" yaml:"log_level,omitempty" koanf:"log_level"`
-	LogFormat        string                    `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
+	// HomeStorage selects where the agent home of Kubernetes agents lives.
+	// See V1HomeStorageConfig.
+	HomeStorage *V1HomeStorageConfig `json:"home_storage,omitempty" yaml:"home_storage,omitempty" koanf:"home_storage"`
+	Secrets     *V1SecretsConfig     `json:"secrets,omitempty" yaml:"secrets,omitempty" koanf:"secrets"`
+	LogLevel    string               `json:"log_level,omitempty" yaml:"log_level,omitempty" koanf:"log_level"`
+	LogFormat   string               `json:"log_format,omitempty" yaml:"log_format,omitempty" koanf:"log_format"`
 
 	// Maintenance holds binary auto-update and deployment tier settings.
 	Maintenance *V1MaintenanceConfig `json:"maintenance,omitempty" yaml:"maintenance,omitempty" koanf:"maintenance"`
@@ -1924,6 +1927,14 @@ type V1RuntimeConfig struct {
 	// server.shared_dir_storage.nfs. Read from global settings only; see
 	// ResolveSharedDirStorage.
 	SharedDirStorageBackend string `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
+	// HomeStorageBackend overrides server.home_storage.backend ("local" or
+	// "nfs") for agents whose profile uses this runtime entry. A profile's
+	// own value wins over it. Read from global settings only; see
+	// ResolveHomeStorage.
+	HomeStorageBackend string `json:"home_storage_backend,omitempty" yaml:"home_storage_backend,omitempty" koanf:"home_storage_backend"`
+	// HomeStorageLeaf overrides server.home_storage.leaf ("pod" or
+	// "broker") for agents whose profile uses this runtime entry.
+	HomeStorageLeaf string `json:"home_storage_leaf,omitempty" yaml:"home_storage_leaf,omitempty" koanf:"home_storage_leaf"`
 	// CloudRun holds Cloud Run-specific settings when Type is "cloudrun".
 	CloudRun *CloudRunConfig `json:"cloudrun,omitempty" yaml:"cloudrun,omitempty" koanf:"cloudrun"`
 	// CloudRunInstances holds Cloud Run Instances-specific settings when Type is "cloudrun-instances".
@@ -2159,6 +2170,14 @@ type V1ProfileConfig struct {
 	// from server.shared_dir_storage.nfs. Read from global settings only;
 	// see ResolveSharedDirStorage.
 	SharedDirStorageBackend string `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
+	// HomeStorageBackend overrides server.home_storage.backend ("local" or
+	// "nfs") for agents using this profile. It wins over the same key on
+	// the profile's runtime entry. Read from global settings only; see
+	// ResolveHomeStorage.
+	HomeStorageBackend string `json:"home_storage_backend,omitempty" yaml:"home_storage_backend,omitempty" koanf:"home_storage_backend"`
+	// HomeStorageLeaf overrides server.home_storage.leaf ("pod" or
+	// "broker") for agents using this profile.
+	HomeStorageLeaf string `json:"home_storage_leaf,omitempty" yaml:"home_storage_leaf,omitempty" koanf:"home_storage_leaf"`
 	// KubernetesServiceAccountMappings overrides, per GSA email, the
 	// runtime-level mapping of the same name for agents created under this
 	// profile. See V1RuntimeConfig.KubernetesServiceAccountMappings and

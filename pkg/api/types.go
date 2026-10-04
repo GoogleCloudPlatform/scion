@@ -990,6 +990,24 @@ type HubAgentDefaults struct {
 	MaxDuration     string        `json:"maxDuration,omitempty"`
 	Resources       *ResourceSpec `json:"resources,omitempty"`
 	AutoExposePorts *bool         `json:"autoExposePorts,omitempty"`
+	// Experiments lists the hub experiments that change what a broker does
+	// for this dispatch and are enabled on the hub (for example
+	// experiments.K8sNFSHome). The hub sends only names that are on; an
+	// absent name is off.
+	Experiments []string `json:"experiments,omitempty"`
+}
+
+// ExperimentEnabled reports whether the hub sent name as enabled.
+func (d *HubAgentDefaults) ExperimentEnabled(name string) bool {
+	if d == nil {
+		return false
+	}
+	for _, e := range d.Experiments {
+		if e == name {
+			return true
+		}
+	}
+	return false
 }
 
 // IsEmpty reports whether no default carries a value. An empty set is not put
@@ -1000,7 +1018,7 @@ func (d *HubAgentDefaults) IsEmpty() bool {
 		return true
 	}
 	return d.MaxTurns == 0 && d.MaxModelCalls == 0 && d.MaxDuration == "" && d.Resources == nil &&
-		d.AutoExposePorts == nil
+		d.AutoExposePorts == nil && len(d.Experiments) == 0
 }
 
 // EnvAutoExposePorts is the env key that enables in-container port

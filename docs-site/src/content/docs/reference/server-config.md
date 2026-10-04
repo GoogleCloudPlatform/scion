@@ -355,6 +355,59 @@ server:
 - **Hub file browser and attachments**: the Hub's file browser, archive downloads and attachment staging use `server.shared_dir_storage.backend` only, not the per-profile override.
 - **Cleanup on delete**: deleting a project removes its tree from the export whenever `server.shared_dir_storage.nfs` is complete, whatever the backend settings select. An agent can still be on `nfs` by its record after every setting has moved to `local`, and the Hub cannot read records kept on brokers. If the global backend is not `nfs` and the export is not mounted on the Hub's host, cleanup logs a warning and the delete still succeeds.
 
+### Agent Home Storage (`server.home_storage`)
+
+Selects where the home directory of Kubernetes agents lives. With the default `local` backend the home is inside the pod and is filled from the broker's copy at every start. With `nfs`, each agent's home is a directory on the NFS export of its profile's [shared-dir storage](#shared-directory-storage-servershared_dir_storage), kept across stops, restarts and pod replacements.
+
+The `nfs` backend is in development. It takes effect only when the hub's `hub.k8s_nfs_home` [experiment](/scion/reference/experiments/) is on and `allow_incomplete_phases` is set; in this version a start that resolves to `nfs` fails with an error that says the feature is not yet available.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `backend` | string | `local` | `local` or `nfs`. A runtime entry or profile can override it with `home_storage_backend`. |
+| `leaf` | string | `pod` | How an agent's home directory is created on the export: `pod` (an init container in the agent's pod) or `broker` (the broker, through its own mount of the export at the shared-dir storage `mount_root`). A runtime entry or profile can override it with `home_storage_leaf`. |
+| `stop_grace_seconds` | int | `30` | Termination grace period of pods with an NFS home. |
+| `termination_wait_seconds` | int | `15` | How long a start waits, beyond the grace period, for the agent's previous pod to stop. |
+| `skeleton_max_bytes` | int | `268435456` | Largest image home skeleton copied into a new home. |
+| `allow_incomplete_phases` | bool | `false` | Development only. Allows the `nfs` backend while the feature is incomplete. |
+
+The backend and leaf mode for an agent are resolved when it first starts, each in this order:
+
+1. `profiles.<name>.home_storage_backend` (or `home_storage_leaf`) for the agent's profile.
+2. `runtimes.<name>.home_storage_backend` (or `home_storage_leaf`) for that profile's runtime entry.
+3. `server.home_storage.backend` (or `leaf`).
+4. `local` (or `pod`).
+
+```yaml
+server:
+  shared_dir_storage:
+    backend: local
+    nfs:
+      mount_root: /mnt/scion-nfs
+      shares:
+        - id: shared
+          pv_name: scion-shared-pvc
+  home_storage:
+    allow_incomplete_phases: true
+runtimes:
+  gke:
+    type: kubernetes
+profiles:
+  gke:
+    runtime: gke
+    shared_dir_storage_backend: nfs
+    home_storage_backend: nfs
+    home_storage_leaf: pod
+  docker:
+    runtime: docker
+```
+
+- **Kubernetes only**: agents on any other runtime always get a local home, whatever the settings say. An `nfs` value on a non-Kubernetes runtime entry or profile is accepted with a warning.
+- **Share**: the home uses the first share and claim of the profile's resolved `shared_dir_storage` `nfs` block. A profile that selects `home_storage_backend: nfs` without `shared_dir_storage` `nfs` fails to start agents, with an error naming the profile.
+- **Hub agents only**: an NFS home is named after the agent's hub ID, at `<subpath_root>/<project id>/agents/<agent>/home-<agent id>` on the export. A start without a hub agent ID fails.
+- **Chosen from global settings**: like `server.shared_dir_storage`, the per-profile and per-runtime keys are read from the broker's global settings, never from project settings. On a co-located Hub and broker whose runtimes and profiles are stored in the database, the stored values apply, and an edit takes effect at the next agent start with no restart. `server.home_storage` itself is read from `settings.yaml` only.
+- **Recorded per agent**: a new agent's home storage is decided at its first start and recorded in `home-storage.json` in the agent's directory on the broker, next to `shared-dir-storage.json`. Later starts, restarts and reincarnations use the record, so a settings change never moves an existing home. A recorded `nfs` home whose share is no longer configured, or whose agent is started with the experiment off, fails to start rather than getting a new, empty home. Agents created before the record existed keep a local home.
+- **Startup summary**: the startup log has a warning for each invalid value and one line per profile that resolves to `nfs`.
+
 ### Scheduler (`server.scheduler`)
 
 Controls the background task scheduler in the Hub. This regulates the tick interval and concurrency of recurring maintenance tasks (such as telemetry aggregation, session cleanups, and heartbeats) to match database capacity.

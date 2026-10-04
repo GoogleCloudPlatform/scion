@@ -33,6 +33,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
@@ -135,6 +136,13 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// below is unaffected and keeps its existing settings.Hub.ProjectID
 	// fallback for labels, RunConfig.ProjectID, etc.
 	hubDispatchedProjectID := projectID
+	// The hub agent ID, snapshotted for the same reason: an NFS agent home
+	// is named after it (resolveHomeStorage), and it must come from the
+	// dispatch, never from settings or the agent name.
+	hubDispatchedAgentID := ""
+	if opts.Env != nil {
+		hubDispatchedAgentID = opts.Env["SCION_AGENT_ID"]
+	}
 
 	// 0. Check if container already exists (scoped to this project)
 	slug := api.Slugify(opts.Name)
@@ -1384,6 +1392,27 @@ authDone:
 			slog.Warn("Start: could not record the agent's shared-dir storage backend", "agent", opts.Name, "error", err)
 		}
 	}
+	// Home storage: local, or (Kubernetes only) an NFS home on the export of
+	// the profile's shared_dir_storage. Chosen at the agent's first start
+	// and recorded, before any pod exists; later starts use the record.
+	homeStorageProfile := opts.Profile
+	if homeStorageProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
+		homeStorageProfile = finalScionCfg.Info.Profile
+	}
+	if _, err := resolveHomeStorage(homeStorageInput{
+		AgentDir:     agentDir,
+		AgentName:    opts.Name,
+		Slug:         slug,
+		RuntimeName:  m.Runtime.Name(),
+		Profile:      homeStorageProfile,
+		AgentID:      hubDispatchedAgentID,
+		ProjectID:    hubDispatchedProjectID,
+		ExperimentOn: api.HubAgentDefaultsFromContext(ctx).ExperimentEnabled(experiments.K8sNFSHome),
+		LoadSettings: loadHomeStorageSettings,
+	}); err != nil {
+		return nil, err
+	}
+
 	if len(sharedDirVolumes) > 0 {
 		// Add SCION_VOLUMES env var for discoverability
 		opts.Env["SCION_VOLUMES"] = "/scion-volumes"
