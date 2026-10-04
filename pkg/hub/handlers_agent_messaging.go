@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -1461,16 +1462,26 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 	// defensive revalidation: a genuine collision surfaces as the same
 	// store.ErrIdentityKeyConflict (409) a create or rename would get, rather
 	// than silently restoring an agent whose key now belongs to someone else.
-	// The same transaction reactivates the delegation edges the soft delete
-	// deactivated (a conflicting active edge is a 409) and writes the
-	// agent_restore audit record.
+	// The same transaction checks that every delegator of the edges the soft
+	// delete deactivated is live (otherwise a 409, or a 503 when the lookup
+	// fails), reactivates those edges (a conflicting active edge is a 409)
+	// and writes the agent_restore audit record.
 	if err := s.restoreAgentTx(ctx, agent, auditActorFromContext(ctx)); err != nil {
 		if errors.Is(err, errAgentNotSoftDeleted) {
 			BadRequest(w, "Agent is not in deleted state")
 			return
 		}
-		if errors.Is(err, store.ErrAlreadyExists) {
+		if errors.Is(err, errRestoreEdgeConflict) {
 			Conflict(w, "The agent already has an active delegation that conflicts with the one being restored")
+			return
+		}
+		if errors.Is(err, errRestoreDelegatorNotLive) {
+			Conflict(w, "A principal that delegated to this agent is not active, so its delegation cannot be restored")
+			return
+		}
+		if errors.Is(err, errRestoreDelegatorLookup) {
+			slog.Error("restore: delegator lookup failed", "agent_id", agent.ID, "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Could not verify the agent's delegators; retry the restore", nil)
 			return
 		}
 		writeErrorFromErr(w, err, "")

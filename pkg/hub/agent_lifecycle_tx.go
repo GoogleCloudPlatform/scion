@@ -26,7 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Agent lifecycle transactions (ptone/scion#2121): soft delete, hard delete,
+// Agent lifecycle transactions: soft delete, hard delete,
 // restore and the reincarnation claim each commit the agent-row write, the
 // delegation-edge (de)activation, the registered hooks and one mutation
 // audit record in a single store transaction.
@@ -46,6 +46,23 @@ const (
 // errAgentNotSoftDeleted is returned by restoreAgentTx when the agent is not
 // in the soft-deleted state.
 var errAgentNotSoftDeleted = errors.New("agent is not in deleted state")
+
+// errRestoreEdgeConflict wraps the store.ErrAlreadyExists a restore gets when
+// a delegation edge it would reactivate conflicts with an active edge. The
+// restore handler maps only this sentinel to 409, so an ErrAlreadyExists
+// from another write in the restore transaction is not reported as an edge
+// conflict.
+var errRestoreEdgeConflict = errors.New("restore: a delegation edge to reactivate conflicts with an active edge")
+
+// errRestoreDelegatorNotLive is returned by restoreAgentTx when the delegator
+// of an edge deactivated by the soft delete is not live: a user that is
+// missing or not active, or an agent that is missing or soft-deleted. The
+// restore writes nothing and the deactivation records stay intact.
+var errRestoreDelegatorNotLive = errors.New("restore: a delegator of the agent's delegation edges is not live")
+
+// errRestoreDelegatorLookup wraps a store error from the delegator check. The
+// restore writes nothing.
+var errRestoreDelegatorLookup = errors.New("restore: delegator lookup failed")
 
 // AgentTxHook runs inside a lifecycle transaction, after the agent-row write
 // and the delegation-edge (de)activation and before the audit record, with a
@@ -180,7 +197,7 @@ func (s *Server) softDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 
 	row := *a
 	row.SoftDeleteOpID = opID
-	if err := tx.UpdateAgent(ctx, &row); err != nil {
+	if err := tx.SetAgentSoftDeleteOpID(ctx, row.ID, opID); err != nil {
 		return fmt.Errorf("soft delete: stamp operation ID: %w", err)
 	}
 	n, err := tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, row.ID, store.Deactivation{
@@ -235,7 +252,8 @@ func (s *Server) hardDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 		OpID             string `json:"op_id"`
 		EdgesDeactivated int    `json:"edges_deactivated"`
 		IncompleteCreate bool   `json:"incomplete_create,omitempty"`
-	}{opID, n, a.IsIncompleteCreate()})
+		SoftDeleteOpID   string `json:"soft_delete_op_id,omitempty"`
+	}{opID, n, a.IsIncompleteCreate(), a.SoftDeleteOpID})
 	if err != nil {
 		return err
 	}
@@ -248,14 +266,17 @@ func (s *Server) hardDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 // restoreAgentTx restores the soft-deleted agent a in one transaction. a is
 // the row the caller loaded and gated; the restore write is guarded by its
 // state_version, so the operation ID read from it is the one on the row
-// being restored. In order: clear DeletedAt and SoftDeleteOpID, re-assert
-// the identity keys, reactivate exactly the delegation edges deactivated
-// under the stored operation ID (none when it is empty), run the restore
-// hooks, and write the agent_restore audit record.
+// being restored. In order: check that the delegator of every edge
+// deactivated under the stored operation ID is live, clear DeletedAt and
+// SoftDeleteOpID, re-assert the identity keys, reactivate exactly those
+// edges (none when the operation ID is empty), run the restore hooks, and
+// write the agent_restore audit record.
 //
-// A conflicting active edge returns store.ErrAlreadyExists and a concurrent
-// change store.ErrVersionConflict; either rolls everything back. On success
-// a carries the restored row.
+// A delegator that is not live returns errRestoreDelegatorNotLive, a store
+// error during that check errRestoreDelegatorLookup, a conflicting active
+// edge errRestoreEdgeConflict and a concurrent change
+// store.ErrVersionConflict; each rolls everything back. On success a
+// carries the restored row.
 func (s *Server) restoreAgentTx(ctx context.Context, a *store.Agent, actor AuditActor) error {
 	if a.DeletedAt.IsZero() {
 		return errAgentNotSoftDeleted
@@ -269,7 +290,15 @@ func (s *Server) restoreAgentTx(ctx context.Context, a *store.Agent, actor Audit
 	row.Updated = now
 	hooks := s.lifecycleTxHooks.snapshot(&s.lifecycleTxHooks.restore)
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if opID != "" {
+			if err := checkRestoreDelegatorsLive(ctx, tx, row.ID, opID); err != nil {
+				return err
+			}
+		}
 		if err := tx.UpdateAgent(ctx, &row); err != nil {
+			return err
+		}
+		if err := tx.SetAgentSoftDeleteOpID(ctx, row.ID, ""); err != nil {
 			return err
 		}
 		if err := tx.ReplaceAgentIdentityKeys(ctx, row.ID, row.ProjectID, api.IdentityKeysFor(row.Slug, row.Name)); err != nil {
@@ -278,6 +307,9 @@ func (s *Server) restoreAgentTx(ctx context.Context, a *store.Agent, actor Audit
 		reactivated := 0
 		if opID != "" {
 			n, err := tx.ReactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, row.ID, store.EdgeDeactivationAgentSoftDelete, opID)
+			if errors.Is(err, store.ErrAlreadyExists) {
+				return fmt.Errorf("%w: %w", errRestoreEdgeConflict, err)
+			}
 			if err != nil {
 				return fmt.Errorf("restore: reactivate delegation edges: %w", err)
 			}
@@ -303,6 +335,54 @@ func (s *Server) restoreAgentTx(ctx context.Context, a *store.Agent, actor Audit
 	}
 	*a = row
 	return nil
+}
+
+// checkRestoreDelegatorsLive checks the delegator of every edge deactivated
+// for agentID under the soft delete opID. A user delegator is live when it
+// exists and is active; an agent delegator when it exists and is not
+// soft-deleted. It reads only, so the restore writes nothing when it fails.
+func checkRestoreDelegatorsLive(ctx context.Context, tx store.Store, agentID, opID string) error {
+	edges, err := tx.GetDeactivatedDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agentID, store.EdgeDeactivationAgentSoftDelete, opID)
+	if err != nil {
+		return fmt.Errorf("%w: list deactivated edges: %w", errRestoreDelegatorLookup, err)
+	}
+	for _, e := range edges {
+		live, err := delegatorLive(ctx, tx, e.DelegatorType, e.DelegatorID)
+		if err != nil {
+			return fmt.Errorf("%w: %s %s: %w", errRestoreDelegatorLookup, e.DelegatorType, e.DelegatorID, err)
+		}
+		if !live {
+			return fmt.Errorf("%w: %s %s", errRestoreDelegatorNotLive, e.DelegatorType, e.DelegatorID)
+		}
+	}
+	return nil
+}
+
+// delegatorLive reports whether the delegator of an edge is live. A missing
+// principal is not live; any other store error is returned.
+func delegatorLive(ctx context.Context, tx store.Store, delegatorType, delegatorID string) (bool, error) {
+	switch delegatorType {
+	case store.DelegationPrincipalUser:
+		u, err := tx.GetUser(ctx, delegatorID)
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return u.Status == store.UserStatusActive, nil
+	case store.DelegationPrincipalAgent:
+		a, err := tx.GetAgent(ctx, delegatorID)
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return a.DeletedAt.IsZero(), nil
+	default:
+		return false, nil
+	}
 }
 
 // reincarnateAuthority is the authority a reincarnation by another principal
