@@ -233,7 +233,6 @@ interface AgentConfigureInternals {
 }
 
 describe('agent-configure: block is not a NEW choice for a Kubernetes target', () => {
-  vi.setConfig({ testTimeout: 15000 });
   let element: HTMLElement | null = null;
 
   beforeAll(async () => {
@@ -620,4 +619,4 @@ describe('agent-configure: block is not a NEW choice for a Kubernetes target', (
     expect(page.gcpIdentityUserSet).toBe(false);
     expect(page.gcpMetadataMode).toBe('passthrough');
   });
-});
+}, 15_000);
