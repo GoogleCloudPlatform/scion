@@ -855,10 +855,15 @@ func (s *Server) isProjectOwner(ctx context.Context, userID, projectID string) b
 // UAT-backed sender: the boundary is valid and allows the target's scope,
 // the ceiling allows agent.message, and for a project target the holder
 // currently has access to that project. It returns nil when every stage
-// passes. User message authorization calls it before any ancestry or
-// project-owner allow, so no messaging allow reaches a target outside the
-// token's boundary or the holder's current project access.
+// passes. A nil scoped identity denies at entry with the reason the bearer
+// gate gives a missing credential. User message authorization calls it
+// before any ancestry or project-owner allow, so no messaging allow reaches
+// a target outside the token's boundary or the holder's current project
+// access.
 func (a *AuthzService) uatMessageGate(ctx context.Context, scoped *ScopedUserIdentity, target Resource) *Decision {
+	if scoped == nil {
+		return &Decision{Allowed: false, Reason: bearerReasonProjectAccessDenied}
+	}
 	principal := principalContextForIdentity(scoped)
 	in, _ := bearerGateInputsFor(principal, CredentialContext{})
 	return a.evaluateBearerGate(ctx, principal, in, target, TargetScopeEvidence{}, ActionMessage, "agent.message", nil, nil)
