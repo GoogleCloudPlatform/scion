@@ -56,6 +56,12 @@ export interface ApiFetchOptions extends RequestInit {
 }
 
 /**
+ * User-safe reason for a 403 whose body could not be read because the
+ * request was aborted mid-read.
+ */
+export const ACCESS_DENIED_UNREADABLE_REASON = 'Access denied';
+
+/**
  * Fetch wrapper that includes credentials and handles 403 responses.
  *
  * Returns the raw Response object so callers can handle the body themselves.
@@ -139,7 +145,15 @@ export async function apiFetch(path: string, options?: ApiFetchOptions): Promise
         };
       }
     } catch {
-      // Body wasn't JSON — use empty detail
+      if (options?.signal?.aborted) {
+        // The caller aborted the request (e.g. a paginateAll page timeout)
+        // while the 403 body was still arriving, so the read failed for a
+        // reason that says nothing about the body. Report a generic denial
+        // rather than empty detail; the body was never seen, so this is
+        // not treated as user_suspended (ptone/scion#2583).
+        detail = { reason: ACCESS_DENIED_UNREADABLE_REASON };
+      }
+      // Otherwise the body wasn't JSON — use empty detail.
     }
 
     // A suspended account is terminal: trigger a full page reload so the

@@ -16,7 +16,7 @@
 
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import type { AccessDeniedDetail } from './api.js';
-import { apiFetch, _resetSuspendedState } from './api.js';
+import { apiFetch, _resetSuspendedState, ACCESS_DENIED_UNREADABLE_REASON } from './api.js';
 
 /**
  * Build a fake Response with the given status and JSON body.
@@ -451,5 +451,116 @@ describe('apiFetch — user_suspended handling', () => {
     expect(reloadSpy).toHaveBeenCalledTimes(1);
     // No toasts.
     expect(captured).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 403 body read aborted mid-read (ptone/scion#2583)
+// ---------------------------------------------------------------------------
+
+describe('apiFetch — 403 body read aborted by the request signal', () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+  let captured: AccessDeniedDetail[];
+  let reloadSpy: ReturnType<typeof vi.fn>;
+
+  function listener(e: Event) {
+    captured.push((e as CustomEvent<AccessDeniedDetail>).detail);
+  }
+
+  /**
+   * A 403 whose body sends `prefix` and then stalls until `signal` aborts,
+   * at which point the stream errors (as a fetch body does on abort).
+   */
+  function slowResponse(prefix: string, signal: AbortSignal): Response {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(prefix));
+        signal.addEventListener('abort', () => {
+          controller.error(new DOMException('The operation was aborted.', 'AbortError'));
+        });
+      },
+    });
+    return new Response(body, {
+      status: 403,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  beforeEach(() => {
+    captured = [];
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    window.addEventListener('scion:access-denied', listener);
+    _resetSuspendedState();
+    reloadSpy = vi.fn();
+    Object.defineProperty(window, 'location', {
+      value: { ...window.location, reload: reloadSpy },
+      writable: true,
+      configurable: true,
+    });
+  });
+
+  afterEach(() => {
+    window.removeEventListener('scion:access-denied', listener);
+    vi.restoreAllMocks();
+  });
+
+  it('dispatches a generic reason, not empty detail, when aborted mid-read', async () => {
+    const controller = new AbortController();
+    fetchMock.mockResolvedValue(slowResponse('{"error":{"code":"forb', controller.signal));
+
+    const pending = apiFetch('/api/v1/slow', { signal: controller.signal });
+    setTimeout(() => controller.abort(), 10);
+    const res = await pending;
+
+    expect(res.status).toBe(403);
+    expect(captured).toEqual([{ reason: ACCESS_DENIED_UNREADABLE_REASON }]);
+    expect(reloadSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not treat an aborted user_suspended body as suspended', async () => {
+    const controller = new AbortController();
+    fetchMock.mockResolvedValue(
+      slowResponse('{"error":{"code":"user_suspended","mess', controller.signal)
+    );
+
+    const pending = apiFetch('/api/v1/slow', { signal: controller.signal });
+    setTimeout(() => controller.abort(), 10);
+    await pending;
+
+    expect(reloadSpy).not.toHaveBeenCalled();
+    expect(captured).toEqual([{ reason: ACCESS_DENIED_UNREADABLE_REASON }]);
+
+    // Later handling is not suppressed: a readable user_suspended 403 still reloads.
+    fetchMock.mockResolvedValue(
+      fakeResponse(403, { error: { code: 'user_suspended', message: 'suspended' } })
+    );
+    await apiFetch('/api/v1/next');
+    expect(reloadSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('honours suppressAccessDeniedToast when aborted mid-read', async () => {
+    const controller = new AbortController();
+    fetchMock.mockResolvedValue(slowResponse('{"err', controller.signal));
+
+    const pending = apiFetch('/api/v1/slow', {
+      signal: controller.signal,
+      suppressAccessDeniedToast: true,
+    });
+    setTimeout(() => controller.abort(), 10);
+    await pending;
+
+    expect(captured).toHaveLength(0);
+    expect(reloadSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps empty detail for an unparseable body when not aborted', async () => {
+    const controller = new AbortController();
+    fetchMock.mockResolvedValue(
+      new Response('Forbidden', { status: 403, headers: { 'Content-Type': 'text/plain' } })
+    );
+
+    await apiFetch('/api/v1/plain', { signal: controller.signal });
+    expect(captured).toEqual([{}]);
   });
 });
