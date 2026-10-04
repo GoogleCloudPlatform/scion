@@ -286,7 +286,7 @@ jobs:
   hub-sqlite-tests:
     name: pkg/hub SQLite Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 50
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -310,13 +310,15 @@ jobs:
       #
       # It is scoped to pkg/hub and perf/bench/seed (not the whole module)
       # and runs as its own parallel job so it doesn't add to the
-      # wall-clock time of Build & Test. Runtime is currently ~12-15
-      # minutes (738-868s measured locally; GoogleCloudPlatform/scion#2031
-      # hit the old 15m go test timeout at ~900s). The 25m go test timeout /
-      # 30m job timeout give headroom above that, with the job limit kept
-      # above the go test timeout so a real hang still produces go's
-      # goroutine dump instead of a bare job kill. The longer-term fix is
-      # splitting pkg/hub into smaller suites.
+      # wall-clock time of Build & Test. Clean CI runs range from ~770s to
+      # ~1480s, close to the old 25m (1500s) go test timeout
+      # (ptone/scion#2732; GoogleCloudPlatform/scion#2031 hit the earlier
+      # 15m limit). The 40m go test timeout / 50m job timeout give headroom
+      # above that, with the job limit kept far enough above the go test
+      # timeout (~3m of build and setup overhead) that a real hang still
+      # produces go's goroutine dump instead of a bare job kill. The
+      # longer-term fix is splitting pkg/hub into smaller suites
+      # (ptone/scion#1847).
       #
       # Four tests are skipped: they have known, pre-existing failures
       # unrelated to this job (ptone/scion#1847) that already reproduce on

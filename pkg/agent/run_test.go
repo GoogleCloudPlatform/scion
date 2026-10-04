@@ -5977,6 +5977,104 @@ harness_configs:
 	}
 }
 
+// TestStart_RestartOfExistingAgent_ResolvedKubernetesServiceAccountNameOverridesPersistedValue
+// is the exact regression case a dedicated StartOptions field exists to fix:
+// GetAgent, for an EXISTING agent, builds its config from the template chain
+// plus the PERSISTED scion-agent.json — never from InlineConfig. A fresh
+// single-Start test cannot exercise this (ProvisionAgent's own template
+// merge already gets a first provision right); only a genuine second Start
+// against an already-provisioned agent, whose scion-agent.json now holds a
+// ServiceAccountName from that first provision, distinguishes "the override
+// still applies against a persisted value" from "it only ever applied
+// against a live template".
+func TestStart_RestartOfExistingAgent_ResolvedKubernetesServiceAccountNameOverridesPersistedValue(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	oldWd, _ := os.Getwd()
+	_ = os.Chdir(tmpDir)
+	defer func() { _ = os.Chdir(oldWd) }()
+
+	originalHome := os.Getenv("HOME")
+	defer func() { _ = os.Setenv("HOME", originalHome) }()
+	_ = os.Setenv("HOME", tmpDir)
+
+	globalScionDir := filepath.Join(tmpDir, ".scion")
+
+	hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+	_ = os.MkdirAll(hcDir, 0755)
+	_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: generic\nuser: scion\nimage: file-default:latest\n"), 0644)
+
+	tplDir := filepath.Join(globalScionDir, "templates", "default")
+	_ = os.MkdirAll(tplDir, 0755)
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness", "kubernetes": {"serviceAccountName": "template-ksa"}}`), 0644)
+
+	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: k8s
+profiles:
+  k8s:
+    runtime: kubernetes
+runtimes:
+  kubernetes:
+    type: kubernetes
+`), 0644)
+
+	projectDir := filepath.Join(tmpDir, "project")
+	projectScionDir := filepath.Join(projectDir, ".scion")
+	_ = os.MkdirAll(projectScionDir, 0755)
+
+	var capturedConfig runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+			capturedConfig = cfg
+			return "mock-id", nil
+		},
+	}
+
+	mgr := NewManager(mockRT)
+
+	// First Start (fresh provision): no resolved KSA yet, so the agent's
+	// persisted scion-agent.json ends up with the template's ServiceAccountName.
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:        "test-agent",
+		ProjectPath: projectScionDir,
+		BrokerMode:  true,
+		NoAuth:      true,
+	}); err != nil {
+		t.Fatalf("first Start failed: %v", err)
+	}
+	if capturedConfig.Kubernetes == nil || capturedConfig.Kubernetes.ServiceAccountName != "template-ksa" {
+		got := ""
+		if capturedConfig.Kubernetes != nil {
+			got = capturedConfig.Kubernetes.ServiceAccountName
+		}
+		t.Fatalf("precondition failed: first-provision ServiceAccountName = %q, want the template's 'template-ksa'", got)
+	}
+
+	// Second Start (restart of the now-existing agent), with the broker
+	// having resolved a KSA mapping for this dispatch. It must win over the
+	// value now persisted in scion-agent.json from the first provision, not
+	// be silently ignored the way an InlineConfig-only value would be.
+	if _, err := mgr.Start(context.Background(), api.StartOptions{
+		Name:                                 "test-agent",
+		ProjectPath:                          projectScionDir,
+		BrokerMode:                           true,
+		NoAuth:                               true,
+		ResolvedKubernetesServiceAccountName: "resolved-ksa",
+	}); err != nil {
+		t.Fatalf("restart Start failed: %v", err)
+	}
+	if capturedConfig.Kubernetes == nil || capturedConfig.Kubernetes.ServiceAccountName != "resolved-ksa" {
+		got := ""
+		if capturedConfig.Kubernetes != nil {
+			got = capturedConfig.Kubernetes.ServiceAccountName
+		}
+		t.Errorf("restart ServiceAccountName = %q, want the resolved KSA %q (not the stale persisted template value)", got, "resolved-ksa")
+	}
+}
+
 // TestStart_RestartAfterSettingsPullPolicyRemoved_ClearsStalePersistedValue
 // pins ptone/scion#2156: image_pull_policy must behave exactly like image on
 // a restart — removing a Hub settings harness_configs.<h>.image_pull_policy
@@ -6258,6 +6356,131 @@ runtimes:
 			}
 			if gotPolicy != tt.wantPullPolicy {
 				t.Errorf("RunConfig.Kubernetes.ImagePullPolicy = %q, want %q", gotPolicy, tt.wantPullPolicy)
+			}
+		})
+	}
+}
+
+// TestStart_ResolvedKubernetesServiceAccountNameOverridesTemplate covers the
+// three cases for opts.ResolvedKubernetesServiceAccountName (the broker's
+// GCP-identity-mapped KSA for Kubernetes assign): it applies whether or not
+// the template chain sets a Kubernetes config at all, always wins over a
+// template-set ServiceAccountName when non-empty, and leaves an existing
+// template value untouched when empty (not just "does nothing" — the
+// template's own value must survive, exactly as before this field existed).
+func TestStart_ResolvedKubernetesServiceAccountNameOverridesTemplate(t *testing.T) {
+	tests := []struct {
+		name                       string
+		templateExtra              string
+		resolvedServiceAccountName string
+		wantServiceAccountName     string
+		wantKubernetesConfigAtAll  bool
+	}{
+		{
+			name:                       "no template Kubernetes config at all, only the resolved KSA",
+			resolvedServiceAccountName: "resolved-ksa",
+			wantServiceAccountName:     "resolved-ksa",
+			wantKubernetesConfigAtAll:  true,
+		},
+		{
+			// MB: no template Kubernetes config, no resolved KSA (e.g. a
+			// dispatch that never resolved a GCP identity mode "assign"
+			// mapping), and no other resolved Kubernetes field (pull
+			// policy) either — RunConfig.Kubernetes must stay nil, exactly
+			// the pre-existing behavior for an agent with no Kubernetes
+			// configuration at all. A missing nil-return guard here would
+			// instead produce an all-zero-value *api.KubernetesConfig.
+			name:                      "no template Kubernetes config and no resolved KSA stays nil",
+			wantKubernetesConfigAtAll: false,
+		},
+		{
+			name:                       "template ServiceAccountName is overridden by the resolved KSA",
+			templateExtra:              `, "kubernetes": {"serviceAccountName": "template-ksa"}`,
+			resolvedServiceAccountName: "resolved-ksa",
+			wantServiceAccountName:     "resolved-ksa",
+			wantKubernetesConfigAtAll:  true,
+		},
+		{
+			name:                      "empty resolved value leaves the template ServiceAccountName untouched",
+			templateExtra:             `, "kubernetes": {"serviceAccountName": "template-ksa"}`,
+			wantServiceAccountName:    "template-ksa",
+			wantKubernetesConfigAtAll: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+
+			oldWd, _ := os.Getwd()
+			_ = os.Chdir(tmpDir)
+			defer func() { _ = os.Chdir(oldWd) }()
+
+			originalHome := os.Getenv("HOME")
+			defer func() { _ = os.Setenv("HOME", originalHome) }()
+			_ = os.Setenv("HOME", tmpDir)
+
+			globalScionDir := filepath.Join(tmpDir, ".scion")
+
+			hcDir := filepath.Join(globalScionDir, "harness-configs", "test-harness")
+			_ = os.MkdirAll(hcDir, 0755)
+			_ = os.WriteFile(filepath.Join(hcDir, "config.yaml"), []byte("harness: generic\nuser: scion\nimage: file-default:latest\n"), 0644)
+
+			tplDir := filepath.Join(globalScionDir, "templates", "default")
+			_ = os.MkdirAll(tplDir, 0755)
+			tplJSON := `{"default_harness_config": "test-harness"` + tt.templateExtra + `}`
+			_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplJSON), 0644)
+
+			_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
+active_profile: k8s
+profiles:
+  k8s:
+    runtime: kubernetes
+runtimes:
+  kubernetes:
+    type: kubernetes
+`), 0644)
+
+			projectDir := filepath.Join(tmpDir, "project")
+			projectScionDir := filepath.Join(projectDir, ".scion")
+			_ = os.MkdirAll(projectScionDir, 0755)
+
+			var capturedConfig runtime.RunConfig
+			mockRT := &runtime.MockRuntime{
+				ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+					return []api.AgentInfo{}, nil
+				},
+				RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+					capturedConfig = cfg
+					return "mock-id", nil
+				},
+			}
+
+			mgr := NewManager(mockRT)
+
+			_, err := mgr.Start(context.Background(), api.StartOptions{
+				Name:                                 "test-agent",
+				ProjectPath:                          projectScionDir,
+				BrokerMode:                           true,
+				NoAuth:                               true,
+				ResolvedKubernetesServiceAccountName: tt.resolvedServiceAccountName,
+			})
+			if err != nil {
+				t.Fatalf("Start failed: %v", err)
+			}
+
+			if tt.wantKubernetesConfigAtAll && capturedConfig.Kubernetes == nil {
+				t.Fatal("expected RunConfig.Kubernetes to be set, got nil")
+			}
+			if !tt.wantKubernetesConfigAtAll && capturedConfig.Kubernetes != nil {
+				t.Fatalf("expected RunConfig.Kubernetes to be nil, got %+v", capturedConfig.Kubernetes)
+			}
+			gotServiceAccountName := ""
+			if capturedConfig.Kubernetes != nil {
+				gotServiceAccountName = capturedConfig.Kubernetes.ServiceAccountName
+			}
+			if gotServiceAccountName != tt.wantServiceAccountName {
+				t.Errorf("RunConfig.Kubernetes.ServiceAccountName = %q, want %q", gotServiceAccountName, tt.wantServiceAccountName)
 			}
 		})
 	}
