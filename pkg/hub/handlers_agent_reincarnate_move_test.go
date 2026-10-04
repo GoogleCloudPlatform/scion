@@ -94,6 +94,7 @@ func setupMoveFixture(t *testing.T, dstIsProvider bool, mutate func(dst *store.R
 	agent := newReincarnateTestAgent(t, s, project, src, func(a *store.Agent) {
 		a.Runtime = "kubernetes"
 	})
+	require.Equal(t, src.ID, agent.RuntimeBrokerID, "fixture agent runs on src")
 	return &moveFixture{srv: srv, s: s, disp: disp, project: project, src: src, dst: dst, agent: agent}
 }
 
@@ -120,7 +121,7 @@ func (f *moveFixture) assertNoMoveSideEffects(t *testing.T, agentCount int) {
 	after, err := f.s.GetAgent(ctx, f.agent.ID)
 	require.NoError(t, err)
 	assert.Equal(t, f.agent.StateVersion, after.StateVersion, "agent row must be untouched")
-	assert.Equal(t, f.src.ID, after.RuntimeBrokerID, "agent must stay on its broker")
+	assert.Equal(t, f.agent.RuntimeBrokerID, after.RuntimeBrokerID, "agent must stay on its broker")
 	assert.Equal(t, 1, after.Generation)
 	assert.Equal(t, "", after.ReincarnationState)
 
@@ -319,6 +320,34 @@ func TestReincarnateMove_NonDryRun_Returns501AndAgentUntouched(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, ErrCodeNotImplemented, body.Error.Code)
 	f.assertNoMoveSideEffects(t, count)
+}
+
+// An agent not assigned to any broker cannot be moved: --broker is refused
+// with a 400 before the target is resolved, with or without dry run.
+func TestReincarnateMove_UnassignedAgent_Returns400(t *testing.T) {
+	for _, dryRun := range []bool{true, false} {
+		t.Run(fmt.Sprintf("dryRun=%v", dryRun), func(t *testing.T) {
+			f := setupMoveFixture(t, true, nil)
+			ctx := context.Background()
+			f.agent.RuntimeBrokerID = ""
+			require.NoError(t, f.s.UpdateAgent(ctx, f.agent))
+			agent, err := f.s.GetAgent(ctx, f.agent.ID)
+			require.NoError(t, err)
+			require.Empty(t, agent.RuntimeBrokerID)
+			f.agent = agent
+			count := f.agentCount(t)
+
+			for _, target := range []string{f.dst.ID, "no-such-broker"} {
+				rec := f.reincarnate(t, ReincarnateAgentRequest{DryRun: dryRun, Handoff: "h", TargetBroker: target})
+				require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+				var body ErrorResponse
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+				assert.Equal(t, ErrCodeValidationError, body.Error.Code)
+				assert.Equal(t, "cannot move an agent that is not currently assigned to a broker", body.Error.Message)
+			}
+			f.assertNoMoveSideEffects(t, count)
+		})
+	}
 }
 
 // An old target broker reports no workspace storage descriptor: a 412 at

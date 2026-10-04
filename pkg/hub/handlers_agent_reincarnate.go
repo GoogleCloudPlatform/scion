@@ -193,6 +193,12 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	var moveTarget *store.RuntimeBroker
 	targetBrokerID := ""
 	if req.TargetBroker != "" {
+		// A move needs a source broker; refuse before resolving the target.
+		if agent.RuntimeBrokerID == "" {
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+				"cannot move an agent that is not currently assigned to a broker", nil)
+			return
+		}
 		dst, ambiguous, err := s.resolveMoveTargetBroker(ctx, req.TargetBroker, agent.RuntimeBrokerID, project.ID)
 		if err != nil {
 			writeErrorFromErr(w, err, "")
@@ -207,7 +213,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 			return
 		}
 		targetBrokerID = dst.ID
-		if agent.RuntimeBrokerID != "" && dst.ID != agent.RuntimeBrokerID {
+		if dst.ID != agent.RuntimeBrokerID {
 			moveTarget = dst
 		}
 	}
