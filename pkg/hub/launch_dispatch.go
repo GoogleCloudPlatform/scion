@@ -243,8 +243,8 @@ func (d *HTTPAgentDispatcher) dispatchLaunching(
 		// is already launching, so a client disconnect must not drop this
 		// write.
 		markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
 		_, err := d.store.MarkLaunchAccepted(markCtx, agent.ID, launchID, resp.LaunchInstanceID)
-		cancel()
 		if err != nil {
 			// The broker is launching; its first claim records the owner
 			// if this write was lost.

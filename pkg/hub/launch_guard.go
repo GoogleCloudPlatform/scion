@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"time"
 
@@ -168,7 +167,7 @@ func (d *HTTPAgentDispatcher) launchGuardError(ctx context.Context, agent *store
 	fresh, err := d.store.GetAgent(ctx, agent.ID)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
-			slog.Warn("start guard: agent re-read failed, proceeding",
+			d.log.WarnContext(ctx, "start guard: agent re-read failed, proceeding",
 				"op", op, "agent_id", agent.ID, "error", err)
 		}
 		return nil
