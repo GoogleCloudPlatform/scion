@@ -154,3 +154,121 @@ describe('/agents/graph completeness flag', () => {
     expect(stateManager.isAgentSetComplete('compact')).toBe(false);
   });
 });
+
+/**
+ * Serves the agents list from `rows()` at the time each response is
+ * released. Each request waits until `release()` lets it through.
+ */
+function stubHeldAgents(rows: () => Agent[]): { release(): void; held(): number } {
+  const gates: Array<() => void> = [];
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async (input: string | URL | Request) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (new URL(url, 'http://localhost').pathname !== '/api/v1/agents') {
+        return jsonResponse({}, 404);
+      }
+      agentRequests.push(url);
+      await new Promise<void>((resolve) => gates.push(resolve));
+      return jsonResponse({ agents: rows() });
+    })
+  );
+  return {
+    release: () => gates.shift()?.(),
+    held: () => gates.length,
+  };
+}
+
+function liveUpdate(subject: string, data: unknown): void {
+  (
+    stateManager as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+  ).handleUpdate({
+    subject,
+    data,
+  });
+  (stateManager as unknown as { flush(): void }).flush();
+}
+
+interface GraphInternals {
+  agents: Agent[];
+  loading: boolean;
+  fetchAgents(quiet: boolean): Promise<void>;
+}
+
+function graphInternals(el: GraphPage): GraphInternals {
+  return el as unknown as GraphInternals;
+}
+
+/** Mounts the graph and returns once its first request is held. */
+async function mountHeld(h: { held(): number }): Promise<GraphPage> {
+  const el = document.createElement('scion-page-agent-graph') as GraphPage;
+  el.pageData = {
+    path: '/agents/graph',
+    title: 'Agent graph',
+    user: { id: 'u', email: 'u@example.com', name: 'U', role: 'member' },
+  };
+  document.body.appendChild(el);
+  page = el;
+  await vi.waitFor(() => expect(h.held()).toBe(1));
+  return el;
+}
+
+describe('/agents/graph live changes while its request is in flight', () => {
+  it('a status for an agent not yet in the store survives the seed', async () => {
+    const h = stubHeldAgents(() => [agent('a1'), agent('a2')]);
+    const el = await mountHeld(h);
+    liveUpdate('agent.a1.status', { agentId: 'a1', phase: 'stopped' });
+    h.release();
+    await vi.waitFor(() => expect(graphInternals(el).loading).toBe(false));
+    expect(stateManager.isAgentSetComplete('full')).toBe(true);
+    expect(stateManager.getAgent('a1')?.phase).toBe('stopped');
+    expect(graphInternals(el).agents.find((a) => a.id === 'a1')?.phase).toBe('stopped');
+  });
+
+  it('an activity for an agent not yet in the store survives the seed', async () => {
+    const h = stubHeldAgents(() => [agent('a1')]);
+    const el = await mountHeld(h);
+    liveUpdate('agent.a1.status', { agentId: 'a1', activity: 'thinking' });
+    h.release();
+    await vi.waitFor(() => expect(graphInternals(el).loading).toBe(false));
+    expect(stateManager.getAgent('a1')?.activity).toBe('thinking');
+    expect(graphInternals(el).agents[0]?.activity).toBe('thinking');
+  });
+
+  it('a delete neither renders the agent nor keeps it in the store', async () => {
+    const h = stubHeldAgents(() => [agent('a1'), agent('a2')]);
+    const el = await mountHeld(h);
+    liveUpdate('agent.a2.deleted', { agentId: 'a2' });
+    h.release();
+    await vi.waitFor(() => expect(graphInternals(el).loading).toBe(false));
+    expect(graphInternals(el).agents.map((a) => a.id)).toEqual(['a1']);
+    expect(stateManager.getAgent('a2')).toBeUndefined();
+    expect(stateManager.isAgentSetComplete('full')).toBe(true);
+  });
+
+  it('a create the response predates is rendered and kept in the store', async () => {
+    const h = stubHeldAgents(() => [agent('a1')]);
+    const el = await mountHeld(h);
+    liveUpdate('agent.n1.created', agent('n1', 'p2'));
+    h.release();
+    await vi.waitFor(() => expect(graphInternals(el).loading).toBe(false));
+    expect(graphInternals(el).agents.map((a) => a.id)).toEqual(['a1', 'n1']);
+    expect(stateManager.getAgent('n1')).toBeDefined();
+  });
+
+  it('a status for a known agent during the ancestry refetch survives the older row', async () => {
+    const h = stubHeldAgents(() => [agent('a1'), agent('a2')]);
+    const el = await mountHeld(h);
+    h.release();
+    await vi.waitFor(() => expect(graphInternals(el).loading).toBe(false));
+    const refetch = graphInternals(el).fetchAgents(true);
+    await vi.waitFor(() => expect(h.held()).toBe(1));
+    liveUpdate('agent.a1.status', { agentId: 'a1', phase: 'stopped' });
+    liveUpdate('agent.a2.deleted', { agentId: 'a2' });
+    h.release();
+    await refetch;
+    expect(stateManager.getAgent('a1')?.phase).toBe('stopped');
+    expect(graphInternals(el).agents.map((a) => [a.id, a.phase])).toEqual([['a1', 'stopped']]);
+    expect(stateManager.getAgent('a2')).toBeUndefined();
+  });
+});

@@ -19,6 +19,7 @@ import { customElement, property, state } from 'lit/decorators.js';
 import type { PageData, Agent } from '../../shared/types.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { stateManager } from '../../client/state.js';
+import { AgentSeedEpoch } from '../../client/agent-seed-epoch.js';
 import type { Orientation } from '../../shared/lineage.js';
 import type { ViewMode } from '../shared/view-toggle.js';
 import '../shared/view-toggle.js';
@@ -119,6 +120,10 @@ export class AgentGraphPage extends LitElement {
   }
 
   private async fetchAgents(quiet: boolean): Promise<void> {
+    // Opened before the request is sent, so a live change that lands while
+    // it is in flight survives the (older) response, and an agent deleted
+    // meanwhile is neither seeded nor rendered.
+    const epoch = new AgentSeedEpoch();
     try {
       const response = await apiFetch('/api/v1/agents');
       if (!response.ok) {
@@ -127,8 +132,10 @@ export class AgentGraphPage extends LitElement {
         );
       }
       const data = (await response.json()) as { agents?: Agent[] } | Agent[];
-      this.agents = Array.isArray(data) ? data : data.agents || [];
-      stateManager.seedAgents(this.agents);
+      const rows = Array.isArray(data) ? data : data.agents || [];
+      // Every dashboard agent belongs to the graph, so a live create the
+      // response predates joins it.
+      this.agents = epoch.seed(rows, { partial: false, isMember: () => true }).agents;
       if (Array.isArray(data) || !(data as { nextCursor?: string }).nextCursor)
         stateManager.markAgentSetComplete('full');
     } catch (err) {
@@ -136,6 +143,8 @@ export class AgentGraphPage extends LitElement {
       if (!quiet) {
         this.error = err instanceof Error ? err.message : 'Failed to load agents';
       }
+    } finally {
+      epoch.close();
     }
   }
 
