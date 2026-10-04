@@ -249,33 +249,32 @@ func TestRestoreAfterDeleteClaimConflicts(t *testing.T) {
 	assertRestoreWroteNothing(t, s, before, edge)
 }
 
-// A restore whose row has its soft-delete operation ID changed after the
-// handler loaded it uses the operation ID read inside the transaction:
-// SetAgentSoftDeleteOpID does not bump state_version, so the restore
-// proceeds, reactivates the edges deactivated under the new ID and records
-// that ID in its audit.
+// A restore whose soft-delete operation ID changes after the row was loaded
+// uses the operation ID read inside the transaction: SetAgentSoftDeleteOpID
+// does not bump state_version, so the restore proceeds, reactivates the
+// edge deactivated under the new ID and records that ID in its audit.
 func TestRestoreUsesOpIDReadInTx(t *testing.T) {
 	srv, s, _, _ := engineTestServer(t)
+	ctx := context.Background()
 	agent, edge := softDeletedWithEdge(t, srv, s, "restore-opid-moved", store.DelegationPrincipalUser, tid("moved-delegator"))
+	loaded := *agent
+
+	// Move the edge's deactivation and the row's operation ID to a new ID.
 	const movedOpID = "op-moved"
-	srv.store = &claimOnLoadStore{Store: s, claim: func() {
-		ctx := context.Background()
-		n, err := s.ReactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agent.ID, store.EdgeDeactivationAgentSoftDelete, agent.SoftDeleteOpID)
-		require.NoError(t, err)
-		require.Equal(t, 1, n)
-		now := time.Now()
-		n, err = s.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agent.ID, store.Deactivation{
-			Cause: store.EdgeDeactivationAgentSoftDelete, At: &now, OpID: movedOpID,
-		})
-		require.NoError(t, err)
-		require.Equal(t, 1, n)
-		require.NoError(t, s.SetAgentSoftDeleteOpID(ctx, agent.ID, movedOpID))
-	}}
+	n, err := s.ReactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agent.ID, store.EdgeDeactivationAgentSoftDelete, agent.SoftDeleteOpID)
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	now := time.Now()
+	n, err = s.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agent.ID, store.Deactivation{
+		Cause: store.EdgeDeactivationAgentSoftDelete, At: &now, OpID: movedOpID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	require.NoError(t, s.SetAgentSoftDeleteOpID(ctx, agent.ID, movedOpID))
+	require.Equal(t, loaded.StateVersion, mustGetAgent(t, s, agent.ID).StateVersion, "precondition: the version is unchanged")
 
-	rec := restoreForTest(t, srv, agent.ID)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NoError(t, srv.restoreAgentTx(ctx, &loaded, AuditActor{}))
 
-	srv.store = s
 	got := mustGetAgent(t, s, agent.ID)
 	assert.True(t, got.DeletedAt.IsZero(), "the row is restored")
 	assert.Empty(t, got.SoftDeleteOpID)
