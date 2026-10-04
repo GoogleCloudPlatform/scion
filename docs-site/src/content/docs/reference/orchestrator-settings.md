@@ -117,6 +117,7 @@ runtimes:
 | `shared_dir_storage_class` | string | (Kubernetes) Default StorageClass for shared-dir PVCs. Must support `ReadWriteMany`. A profile's value wins over this, and a template or agent `kubernetes.shared_dir_storage_class` wins over both. Default: the cluster's default class. |
 | `shared_dir_size` | string | (Kubernetes) Default size for each shared-dir PVC, as a positive Kubernetes quantity (e.g. `10Gi`, `1Ti`). Same precedence as `shared_dir_storage_class`. Default: `10Gi`. |
 | `safe_to_evict` | bool | (Kubernetes) Set to `false` to add the `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"` annotation to agent pods. Only `false` has an effect; unset or `true` adds nothing. A profile's value wins over this, and a template or agent `kubernetes.safeToEvict` wins over both. Ignored, with a validation warning, on other runtime types. |
+| `shared_dir_storage_backend` | string | `local` or `nfs`. Overrides [`server.shared_dir_storage.backend`](/scion/reference/server-config/#per-profile-backend) for agents whose profile uses this runtime. A profile's value wins over this. Read from global settings only. |
 | `env` | map | Environment variables to set for the runtime. |
 
 :::note
@@ -220,12 +221,12 @@ profiles:
 | `default_harness_auth` | string | Default authentication type for new agents under this profile. |
 | `image_registry` | string | Profile-level registry override. Takes precedence over the top-level `image_registry`. |
 | `env` | map | Environment variables merged into the runtime environment. |
-| `timezone` | string | IANA timezone name, validated on write (an invalid name is rejected with `422`). **No longer applied to agents**: the Hub does not read a profile timezone when it resolves an agent's `TZ` (see below). |
 | `harness_overrides` | map | Per-harness-config overrides. Keys match `harness_configs` names. |
 | `secrets` | list | Required secrets for agents created under this profile. |
 | `shared_dir_storage_class` | string | (Kubernetes) StorageClass for shared-dir PVCs created under this profile. Wins over the runtime entry's value; a template or agent `kubernetes.shared_dir_storage_class` wins over this. |
 | `shared_dir_size` | string | (Kubernetes) Size for each shared-dir PVC created under this profile. Same precedence as `shared_dir_storage_class`. |
 | `safe_to_evict` | bool | (Kubernetes) Safe-to-evict setting for agent pods created under this profile. Wins over the runtime entry's value; a template or agent `kubernetes.safeToEvict` wins over this. |
+| `shared_dir_storage_backend` | string | `local` or `nfs`. Overrides [`server.shared_dir_storage.backend`](/scion/reference/server-config/#per-profile-backend) for agents using this profile. Wins over the runtime entry's value. Read from global settings only. |
 
 **Shared-dir PVC class and size (Kubernetes).** Each key is resolved separately, and the first source that sets it wins: the agent's or template's `kubernetes:` block, then the profile, then the profile's runtime entry, then the built-in default (the cluster's default class and `10Gi`). On GKE Autopilot, set an RWX class such as `standard-rwx`. See [Shared Directory PVCs](/scion/hosted/ha/kubernetes/#shared-directory-pvcs).
 
@@ -235,10 +236,12 @@ profiles:
 
 1. The agent's explicit timezone: a `TZ` given at create time (request `config.env`, a Hub-resolved template, or the Hub harness config), or a pin set later with the agent `PATCH` field `explicitTimezone` (see [Agents API](/scion/reference/api/)).
 2. A `TZ` entry in the Hub environment-variable store with injection mode `always`, at user, project, hub or broker scope (user wins), then an ancestor's user-scope variable shared with progeny.
-3. The Hub-level `agent_defaults.default_timezone` (see [Operational settings](/scion/reference/server-config/#layer-1--operational-postgres-hub_settings-table)).
+3. The Hub-level `agent_defaults.default_timezone` (Admin → Server config → Agent defaults; see [Operational settings](/scion/reference/server-config/#layer-1--operational-postgres-hub_settings-table)). In `settings.yaml` this is the top-level `default_timezone` key.
 4. Otherwise no `TZ` is sent and the container uses the image default (UTC).
 
-There is no runtime-profile step: neither the profile's `timezone` field nor a `TZ` in its `env` map is used. The Runtime Broker also ignores `TZ` from broker-local templates, broker settings (harness-config entry `env`) and the agent's persisted `scion-agent.json`, and logs a warning for each non-empty value it drops. To give every agent on a broker a timezone, set a broker-scope `TZ` environment variable on the Hub instead. Local mode (no Hub) is unaffected.
+There is no runtime-profile step: a `TZ` in a profile's `env` or `harness_overrides` map is not used. The Runtime Broker also ignores `TZ` from broker-local templates, broker settings (harness-config entry `env`) and the agent's persisted `scion-agent.json`, and logs a warning for each non-empty value it drops. To give every agent on a broker a timezone, set a broker-scope `TZ` environment variable on the Hub instead. Local mode (no Hub) is unaffected.
+
+**Removed: profile `timezone`.** The profile `timezone` field was removed. A request to `PUT /api/v1/admin/server-config` that still sends `profiles.<name>.timezone`, even as an empty string, is rejected with `422`. At startup a Postgres-backed Hub strips stored values from its profile settings. If exactly one zone was set and no Hub default existed, it is copied into `agent_defaults.default_timezone`, and `agent_defaults` then becomes admin-managed, so `settings.yaml` no longer seeds it on that Hub. A file-based Hub never rewrites `settings.yaml`; it logs each leftover key, and the `default_timezone: <zone>` line to add when one zone would have been copied.
 
 ## Telemetry Configuration (`telemetry`)
 

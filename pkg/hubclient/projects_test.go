@@ -163,3 +163,48 @@ func TestProjectsList_IgnoresLegacyGrovesKey(t *testing.T) {
 		t.Errorf("Projects = %+v, want empty (legacy 'groves' key must not be honored)", resp.Projects)
 	}
 }
+
+func TestProjectsCreate_WorkspaceModeInBody(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mode    string
+		wantKey bool
+	}{
+		{name: "per-agent sent", mode: "per-agent", wantKey: true},
+		{name: "empty omitted", mode: "", wantKey: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var body map[string]interface{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/api/v1/projects" {
+					t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("decode body: %v", err)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusCreated)
+				_, _ = w.Write([]byte(`{"id": "p1", "name": "Scratch", "slug": "scratch"}`))
+			}))
+			defer server.Close()
+
+			client, _ := New(server.URL)
+			if _, err := client.Projects().Create(context.Background(), &CreateProjectRequest{
+				Name:          "Scratch",
+				WorkspaceMode: tc.mode,
+			}); err != nil {
+				t.Fatalf("Create failed: %v", err)
+			}
+			got, ok := body["workspaceMode"]
+			if ok != tc.wantKey {
+				t.Fatalf("workspaceMode present = %v, want %v (body %v)", ok, tc.wantKey, body)
+			}
+			if tc.wantKey && got != tc.mode {
+				t.Errorf("workspaceMode = %v, want %q", got, tc.mode)
+			}
+			if _, ok := body["gitRemote"]; ok {
+				t.Errorf("gitRemote present for hub-managed create: %v", body)
+			}
+		})
+	}
+}

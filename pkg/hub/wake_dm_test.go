@@ -179,8 +179,8 @@ func (d *wakeTrackingDispatcher) getMessageCalls() []wakeDispatchMsg {
 }
 
 // Implement remaining AgentDispatcher methods as no-ops.
-func (d *wakeTrackingDispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent) error {
-	return nil
+func (d *wakeTrackingDispatcher) DispatchAgentCreate(_ context.Context, _ *store.Agent) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 func (d *wakeTrackingDispatcher) DispatchAgentProvision(_ context.Context, _ *store.Agent) error {
 	return nil
@@ -204,7 +204,7 @@ func (d *wakeTrackingDispatcher) DispatchAgentDelete(_ context.Context, _ *store
 func (d *wakeTrackingDispatcher) DispatchCheckAgentPrompt(_ context.Context, _ *store.Agent) (bool, error) {
 	return false, nil
 }
-func (d *wakeTrackingDispatcher) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (d *wakeTrackingDispatcher) DispatchAgentCreateWithGather(_ context.Context, _ *store.Agent) (*CreateDispatchResult, error) {
 	return nil, nil
 }
 func (d *wakeTrackingDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
@@ -213,8 +213,8 @@ func (d *wakeTrackingDispatcher) DispatchAgentLogs(_ context.Context, _ *store.A
 func (d *wakeTrackingDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
 	return "", 0, nil
 }
-func (d *wakeTrackingDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) error {
-	return nil
+func (d *wakeTrackingDispatcher) DispatchFinalizeEnv(_ context.Context, _ *store.Agent, _ map[string]string) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 
 // ---------------------------------------------------------------------------

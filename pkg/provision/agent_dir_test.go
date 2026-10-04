@@ -454,3 +454,75 @@ func TestRemoveAgentWorkspace_IgnoresCancellation(t *testing.T) {
 	require.NoError(t, RemoveAgentWorkspace(ctx, agentDir, testLockWait))
 	assert.NoDirExists(t, filepath.Join(agentDir, AgentWorkspaceDir))
 }
+
+// Empty-per-agent (design #2703 P3): the same steps as clone-per-agent
+// except the branch. The workspace is created and chowned, the sentinel is
+// written, and no branch record is checked or written, so any branch input
+// (or none) is accepted. A restart keeps the workspace's files and chowns
+// nothing again; a record left by an earlier clone-per-agent agent of the
+// same name is left as it is and does not refuse the start.
+func TestProvisionAgentDir_EmptyPerAgent(t *testing.T) {
+	agentDir := newAgentDir(t)
+	calls := recordChownCalls(t, nil)
+	in := agentDirInput(agentDir, "agent-1", "")
+	in.Mode = store.SharingModeEmptyPerAgent
+
+	require.NoError(t, ProvisionAgentDir(in))
+	workspace := filepath.Join(agentDir, AgentWorkspaceDir)
+	assert.Empty(t, dirNames(t, workspace))
+	assert.NoFileExists(t, filepath.Join(agentDir, AgentBranchFile))
+	assert.FileExists(t, filepath.Join(agentDir, ProvisionSentinelFile))
+	assert.Equal(t, []chownCall{{workspace, 4321, 8765}}, *calls)
+
+	require.NoError(t, os.WriteFile(filepath.Join(workspace, "notes.txt"), []byte("kept"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(agentDir, AgentBranchFile), []byte("scion/old\n"), 0o644))
+	calls = recordChownCalls(t, nil)
+	in.AgentName = "feature/ignored"
+	require.NoError(t, ProvisionAgentDir(in))
+	assert.Empty(t, *calls, "a workspace with files is not chowned again")
+	assert.FileExists(t, filepath.Join(workspace, "notes.txt"))
+	assert.Equal(t, "scion/old", readAgentBranch(filepath.Join(agentDir, AgentBranchFile)), "an existing record is not rewritten")
+}
+
+// Empty-per-agent still needs the agent's slug and an agent directory.
+func TestProvisionAgentDir_EmptyPerAgentRejectsBadInput(t *testing.T) {
+	recordChownCalls(t, nil)
+	for name, mutate := range map[string]func(*ProvisionInput){
+		"empty slug":        func(in *ProvisionInput) { in.AgentID = "" },
+		"dot-dot slug":      func(in *ProvisionInput) { in.AgentID = ".." },
+		"upper-case slug":   func(in *ProvisionInput) { in.AgentID = "Agent-1" },
+		"no host path":      func(in *ProvisionInput) { in.Resolved.HostPath = "" },
+		"missing agent dir": func(in *ProvisionInput) { in.Resolved.HostPath = filepath.Join(in.Resolved.HostPath, "missing") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			agentDir := newAgentDir(t)
+			in := agentDirInput(agentDir, "agent-1", "")
+			in.Mode = store.SharingModeEmptyPerAgent
+			mutate(&in)
+			require.Error(t, ProvisionAgentDir(in))
+			assert.Empty(t, dirNames(t, agentDir), "nothing is created")
+		})
+	}
+}
+
+// Delete of an empty-per-agent agent's files removes only its workspace:
+// the agent directory and anything else in it (such as a home directory
+// kept next to the workspace) stay.
+func TestRemoveAgentWorkspace_EmptyPerAgentKeepsSiblings(t *testing.T) {
+	agentDir := newAgentDir(t)
+	recordChownCalls(t, nil)
+	in := agentDirInput(agentDir, "agent-1", "")
+	in.Mode = store.SharingModeEmptyPerAgent
+	require.NoError(t, ProvisionAgentDir(in))
+	workspace := filepath.Join(agentDir, AgentWorkspaceDir)
+	require.NoError(t, os.WriteFile(filepath.Join(workspace, "notes.txt"), []byte("x"), 0o644))
+	home := filepath.Join(agentDir, "home-agent-id-1")
+	require.NoError(t, os.MkdirAll(home, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(home, ".profile"), []byte("x"), 0o644))
+
+	require.NoError(t, RemoveAgentWorkspace(context.Background(), agentDir, testLockWait))
+	require.NoError(t, PurgeRemovedAgentWorkspaces(agentDir))
+	assert.NoDirExists(t, workspace)
+	assert.FileExists(t, filepath.Join(home, ".profile"))
+	assert.FileExists(t, filepath.Join(agentDir, ProvisionSentinelFile))
+}

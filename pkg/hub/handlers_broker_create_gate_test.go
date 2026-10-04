@@ -34,9 +34,9 @@ import (
 // ptone/scion#2138: the broker.create gate and scoped-credential
 // restrictions on POST /api/v1/brokers and POST /api/v1/projects/register.
 //
-// broker.create is a hub-level permission (no UATScope yet: today's UATs are
-// project-bound, and enforceUATConstraints already rejects any project-scoped
-// UAT against a hub-level resource). These tests exercise that boundary
+// broker.create is a hub-level permission. Its selector is mintable only on
+// a hub-boundary UAT, and broker creation does not admit bearer credentials.
+// These tests exercise that boundary
 // through real middleware and handlers — no manually constructed identity
 // stands in for the authorization decision itself — and confirm that neither
 // the target-owner nor the super-admin shortcut in
@@ -282,35 +282,75 @@ func TestProjectRegisterEmbeddedBroker_NoBrokerCreateDenied(t *testing.T) {
 	assert.Equal(t, quotaBefore, quotaAfter, "a denied embedded registration must not consume a quota slot")
 }
 
-// TestBrokerCreateGate_RegistryRowHasNoUATScopeYet pins the current
-// decision: broker.create has no UATScope yet, so it cannot appear in a
-// token-create request or a UAT's effective scopes. ptone/scion#2123
-// introduces the hub-bound UAT boundary that broker.create needs before a
-// "broker:create" selector can be safely offered.
-func TestBrokerCreateGate_RegistryRowHasNoUATScopeYet(t *testing.T) {
+// TestBrokerCreateGate_SelectorIsHubBoundaryOnly pins that broker.create's
+// UAT selector is "broker:create" and that it is allowed under the hub
+// boundary only.
+func TestBrokerCreateGate_SelectorIsHubBoundaryOnly(t *testing.T) {
 	found := false
 	for _, p := range permissions.Registry {
 		if p.ID != "broker.create" {
 			continue
 		}
 		found = true
-		assert.Empty(t, p.UATScope,
-			"broker.create must not have a UATScope yet (ptone/scion#2123 introduces the hub-bound UAT boundary it needs first)")
+		assert.Equal(t, "broker:create", p.UATScope)
 	}
 	require.True(t, found, "broker.create must exist in the registry")
+
+	boundaries, ok := permissions.SelectorAllowedBoundaries("broker.create")
+	require.True(t, ok)
+	assert.Equal(t, []permissions.BoundaryKind{permissions.BoundaryKindHub}, boundaries)
 }
 
-// TestBrokerCreateGate_ProjectUATCannotMintBrokerCreateScope confirms that
-// "broker:create" is rejected outright as an unknown UAT scope: a project
-// UAT cannot be minted with it today, independent of any issuer-authority
-// check.
-func TestBrokerCreateGate_ProjectUATCannotMintBrokerCreateScope(t *testing.T) {
+// TestBrokerCreateGate_ProjectBoundaryCannotMintBrokerCreate pins that a
+// project-boundary token cannot carry broker:create: the selector is not
+// allowed under a project boundary, whatever the issuer's authority.
+func TestBrokerCreateGate_ProjectBoundaryCannotMintBrokerCreate(t *testing.T) {
 	srv, s := testServer(t)
 	projectID := tid("gate-mint-brokercreate-proj")
 	ownerID := tid("gate-mint-brokercreate-owner")
 	createRS1Project(t, s, projectID, ownerID)
+	grantPermissionViaRoleBinding(t, s, ownerID, "broker.create", store.RoleScopeSystem, "")
 
 	_, _, err := srv.uatService.CreateToken(rs4MintContext(ownerID), ownerID, "gate-mint-test", projectID, []string{"broker:create"}, nil)
-	require.Error(t, err, "minting a UAT with scope broker:create must fail")
-	assert.ErrorIs(t, err, ErrInvalidUATScope)
+	require.Error(t, err, "minting a project-boundary UAT with scope broker:create must fail")
+	var violation *UATScopeViolationError
+	require.ErrorAs(t, err, &violation)
+	assert.Equal(t, "broker:create", violation.Selector)
+	assert.Equal(t, MintDenialBoundaryNotAllowed, violation.Reason)
+}
+
+// TestBrokerCreateGate_HubUATNotAdmittedForBrokerCreation pins that broker
+// creation does not admit bearer credentials: a hub-boundary UAT carrying
+// broker:create, held by a user with a live system broker.create grant, is
+// denied on POST /api/v1/brokers, while a session for the same user is
+// admitted.
+func TestBrokerCreateGate_HubUATNotAdmittedForBrokerCreation(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	projectID := tid("gate-hubuat-brokercreate-proj")
+	ownerID := tid("gate-hubuat-brokercreate-owner")
+	createRS1Project(t, s, projectID, ownerID)
+	grantPermissionViaRoleBinding(t, s, ownerID, "broker.create", store.RoleScopeSystem, "")
+
+	key, token, err := srv.uatService.CreateTokenWithParams(rs4MintContext(ownerID), CreateTokenParams{
+		UserID:   ownerID,
+		Name:     "gate-hubuat-brokercreate",
+		Boundary: TokenBoundary{Kind: BoundaryKindHub},
+		Scopes:   []string{"broker:create"},
+	})
+	require.NoError(t, err, "a user with system broker.create may mint a hub UAT carrying broker:create")
+	require.Equal(t, string(BoundaryKindHub), token.BoundaryKind)
+
+	const uatBroker = "gate-hubuat-brokercreate-uat"
+	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: uatBroker})
+	assert.Equal(t, http.StatusForbidden, rec.Code, "a hub UAT must not be admitted for broker creation; got: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "joinToken", "denied response must not carry a join token")
+	_, err = s.GetRuntimeBrokerByName(ctx, uatBroker)
+	assert.ErrorIs(t, err, store.ErrNotFound, "a denied registration must not create a broker record")
+
+	owner, err := s.GetUser(ctx, ownerID)
+	require.NoError(t, err)
+	const sessionBroker = "gate-hubuat-brokercreate-session"
+	rec = doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: sessionBroker})
+	assert.Less(t, rec.Code, 300, "a session for a user with broker.create must be admitted; got %d: %s", rec.Code, rec.Body.String())
 }

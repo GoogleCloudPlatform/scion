@@ -32,7 +32,7 @@ import (
 )
 
 // TestCountAgents_MatchesListAgentsTotal pins that CountAgents applies the
-// exact predicate ListAgents' own COUNT does (design lists-graph.md 5.1).
+// exact predicate ListAgents' own COUNT does.
 func TestCountAgents_MatchesListAgentsTotal(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
@@ -67,7 +67,7 @@ func TestCountAgents_MatchesListAgentsTotal(t *testing.T) {
 // NULL last_activity_event. created is required (the schema's Created field
 // is NOT NULL); updated defaults to created when zero; lastActivity is left
 // NULL (unset) when zero, matching agent_store.go's "a zero LastActivityEvent
-// is stored as NULL" rule (design 4.2).
+// is stored as NULL" rule.
 func createAgentWithTimestamps(t *testing.T, s *AgentStore, projectID, slug string, created, updated, lastActivity time.Time) *store.Agent {
 	t.Helper()
 	ctx := context.Background()
@@ -218,7 +218,7 @@ func TestListAgentMembers_ProjectionEqualsFullRow(t *testing.T) {
 }
 
 // TestListAgentMembers_MaxBoundsCandidatePool asserts the sorted-mode
-// candidate ceiling's read-side bound (design 5.3 step 1): a candidate pool
+// candidate ceiling's read-side bound: a candidate pool
 // larger than max returns exactly max rows, never more, so a pool that grew
 // between the caller's COUNT and this read is still detected by comparing
 // len(result) against the ceiling.

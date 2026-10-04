@@ -34,6 +34,10 @@ type agentListParams struct {
 	hasFit bool
 	stats  bool
 	cursor string
+	// view is agentListViewFull or agentListViewCompact. It selects only
+	// the per-item response shape, so it is not part of the cursor
+	// binding: a cursor works across views.
+	view string
 }
 
 // maxSortedLimit is the sorted-mode page size ceiling: limit stays in
@@ -82,8 +86,8 @@ func parseAgentListParams(w http.ResponseWriter, query url.Values, limit int) (a
 // other than sort and dir, for a caller that has already validated those
 // with parseSortAndDir and passes the result in, so they are parsed exactly
 // once per request. filter/limit parsing shared with legacy mode happens in
-// the caller; this only clamps limit and validates fit, stats and the
-// fit/cursor exclusion. It writes the 400 response itself on failure.
+// the caller; this only clamps limit and validates fit, stats, view and
+// the fit/cursor exclusion. It writes the 400 response itself on failure.
 //
 // sort accepts both "created" and "updated" on both endpoints.
 func parseAgentListParamsAfterSortDir(w http.ResponseWriter, query url.Values, limit int, sort, dir string) (agentListParams, bool) {
@@ -116,6 +120,12 @@ func parseAgentListParamsAfterSortDir(w http.ResponseWriter, query url.Values, l
 	}
 
 	p.stats = query.Get("stats") == "1"
+
+	view, ok := parseSortedAgentListView(w, query)
+	if !ok {
+		return p, false
+	}
+	p.view = view
 	return p, true
 }
 
