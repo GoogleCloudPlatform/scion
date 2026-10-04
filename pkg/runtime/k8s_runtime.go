@@ -595,8 +595,27 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	if err := hooks.checkpoint(ctx, CheckpointStepPreClean); err != nil {
 		return "", err
 	}
+	// NFS-home agents: one start at a time per agent, across brokers that
+	// share the store, from before the previous pod is removed until the new
+	// pod exists, so two pods never write to the same home.
+	nfsHomeStart, err := nfsHomePod(config)
+	if err != nil {
+		return "", err
+	}
+	releaseHomeLock := func() {}
+	if nfsHomeStart {
+		release, err := acquireHomeStartLock(ctx, config)
+		if err != nil {
+			return "", err
+		}
+		releaseHomeLock = release
+	}
+	defer func() { releaseHomeLock() }()
+
 	r.cleanupAgentSecrets(ctx, namespace, config.Name)
-	r.cleanupStalePod(ctx, namespace, config.Name)
+	if err := r.cleanupStalePod(ctx, namespace, config.Name, config.HomeStorage); err != nil {
+		return "", err
+	}
 	cleanupArmed = true
 
 	// The hub transport credential is delivered through the per-agent Secret
@@ -744,6 +763,8 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	}
 	podCreated = true
 	hooks.created(api.ResourceHandle{Kind: api.ResourceKindPod, Namespace: namespace, Name: createdPod.Name, UID: string(createdPod.UID)})
+	releaseHomeLock()
+	releaseHomeLock = func() {}
 	runtimeLog.Info("Pod created", "agent", config.Name, "namespace", namespace,
 		"phase", "pod-create", "elapsed_ms", time.Since(podCreateStart).Milliseconds())
 
@@ -762,6 +783,20 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	runtimeLog.Info("Waiting for pod exec tunnel", "agent", config.Name, "namespace", namespace, "phase", "wait-exec")
 	if err := r.waitForExecReady(ctx, namespace, createdPod.Name, config.Name); err != nil {
 		return createdPod.Name, fmt.Errorf("pod exec tunnel not ready: %w", err)
+	}
+
+	// NFS-home pods: home-prepare chose how this start fills the home.
+	homeMode := ""
+	if nfsHomeStart {
+		out, err := r.execInPod(ctx, namespace, createdPod.Name, k8sHomeModeCommand)
+		if err != nil {
+			return createdPod.Name, fmt.Errorf("failed to read %s: %w", k8sHomeModeFile, err)
+		}
+		homeMode, err = parseK8sHomeMode(out, config.Labels[labelStartID])
+		if err != nil {
+			return createdPod.Name, err
+		}
+		runtimeLog.Info("Agent home prepared", "agent", config.Name, "phase", "home-prepare", "mode", homeMode)
 	}
 
 	if config.HomeDir != "" {
@@ -791,13 +826,27 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		// "/home" (a critical system directory, not a per-user home), so the
 		// in-pod chown below is refused outright rather than recursively
 		// re-owning every home directory on the node.
-		if chownArgs, ok := chownRecursiveArgs(config.UnixUsername, destHome); !ok {
+		if nfsHomeStart {
+			// The home on the export is written only by the pod user; a
+			// recursive chown over it is not needed and could not change
+			// files the export maps to another owner.
+		} else if chownArgs, ok := chownRecursiveArgs(config.UnixUsername, destHome); !ok {
 			runtimeLog.Warn("Skipping home directory chown: UnixUsername is empty", "agent", config.Name, "destHome", destHome)
 		} else if _, err := r.execInPod(ctx, namespace, createdPod.Name, chownArgs); err != nil {
 			runtimeLog.Debug("Failed to chown home directory (non-fatal)", "error", err)
 		}
 		runtimeLog.Info("Home sync complete", "agent", config.Name, "phase", "home-sync",
 			"sync_ms", syncMs, "chown_ms", time.Since(chownStart).Milliseconds())
+	}
+
+	// A new or interrupted home is marked seeded once the transfer is in
+	// it; mark-seeded fails if a newer start has taken over the home.
+	if homeMode == k8sHomeModeSeed {
+		hs := config.HomeStorage
+		if _, err := r.execInPod(ctx, namespace, createdPod.Name,
+			k8sHomeMarkSeededCommand(util.GetHomeDir(config.UnixUsername), hs.AgentID, config.Labels[labelStartID])); err != nil {
+			return createdPod.Name, fmt.Errorf("failed to mark the agent home seeded: %w", err)
+		}
 	}
 
 	// Copy staged secret and auth files to their targets in the agent home
@@ -2079,6 +2128,21 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 		}
 	}
 
+	// NFS-home pods: the home volume and mount, and the home init
+	// containers (k8s_nfs_home.go).
+	var homeParts nfsHomePodParts
+	if nfsHome {
+		workspaceClaim := ""
+		if config.WorkspaceBackendName == "nfs" && config.NFSPVClaimName != "" {
+			workspaceClaim = config.NFSPVClaimName
+		}
+		homeParts, err = r.nfsHomePodSpec(config, containerHome, workspaceClaim)
+		if err != nil {
+			return nil, err
+		}
+		agentVolumeMounts = append(agentVolumeMounts, homeParts.mount)
+	}
+
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        config.Name,
@@ -2306,6 +2370,19 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 			SecurityContext: initSecurityContext,
 		}
 		pod.Spec.InitContainers = append(pod.Spec.InitContainers, initContainer)
+	}
+
+	if nfsHome {
+		// The home init containers run first: the home directory must
+		// exist before any container mounts it.
+		pod.Spec.InitContainers = append(homeParts.initContainers, pod.Spec.InitContainers...)
+		if homeParts.volume != nil {
+			pod.Spec.Volumes = append(pod.Spec.Volumes, *homeParts.volume)
+		}
+		grace := int64(homeTerminationGrace(config.HomeStorage))
+		pod.Spec.TerminationGracePeriodSeconds = &grace
+		onRootMismatch := corev1.FSGroupChangeOnRootMismatch
+		pod.Spec.SecurityContext.FSGroupChangePolicy = &onRootMismatch
 	}
 
 	// Append secret volumes and mounts
@@ -2628,7 +2705,7 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	}
 
 	if nfsHome {
-		if err := checkNoMountsUnderHome(pod, containerHome); err != nil {
+		if err := checkHomeMounts(pod, containerHome, homeParts.mount); err != nil {
 			return nil, err
 		}
 	}
@@ -3126,13 +3203,22 @@ func (r *KubernetesRuntime) Delete(ctx context.Context, id string) error {
 	// the pod was already gone (see cleanupAgentSecrets).
 	r.cleanupAgentSecrets(ctx, namespace, id)
 
-	// 'id' is the pod name
-	// Use GracePeriodSeconds=0 for immediate termination since Delete is used
-	// for force-removal (e.g. scion rm), not graceful shutdown.
-	gracePeriod := int64(0)
-	err := r.Client.Clientset.CoreV1().Pods(namespace).Delete(ctx, id, metav1.DeleteOptions{
-		GracePeriodSeconds: &gracePeriod,
-	})
+	// 'id' is the pod name. Delete is used for removal (scion rm, stop),
+	// not graceful shutdown, so pods are deleted immediately, except
+	// NFS-home pods, which are deleted with their grace period so they stop
+	// writing to the home before another pod of the agent starts (see
+	// podDeleteOptions). Either way the call returns once the delete is
+	// accepted. If the pod cannot be read, the graceful delete is used.
+	pods := r.Client.Clientset.CoreV1().Pods(namespace)
+	opts := metav1.DeleteOptions{}
+	pod, getErr := pods.Get(ctx, id, metav1.GetOptions{})
+	switch {
+	case k8serrors.IsNotFound(getErr):
+		return nil
+	case getErr == nil:
+		opts = podDeleteOptions(pod)
+	}
+	err := pods.Delete(ctx, id, opts)
 	if err != nil && !k8serrors.IsNotFound(err) {
 		return fmt.Errorf("failed to delete pod: %w", err)
 	}
@@ -3219,15 +3305,14 @@ func (r *KubernetesRuntime) cleanupStartResources(ctx context.Context, namespace
 		if list, err := pods.List(ctx, selector); err != nil {
 			warn("Pod", agentName, err)
 		} else {
-			gracePeriod := int64(0)
-			for _, p := range list.Items {
+			for i := range list.Items {
+				p := &list.Items[i]
 				if p.Name != agentName {
 					continue
 				}
-				deleted("Pod", agentName, pods.Delete(ctx, agentName, metav1.DeleteOptions{
-					GracePeriodSeconds: &gracePeriod,
-					Preconditions:      uidPrecondition(p.UID),
-				}))
+				opts := podDeleteOptions(p)
+				opts.Preconditions = uidPrecondition(p.UID)
+				deleted("Pod", agentName, pods.Delete(ctx, agentName, opts))
 			}
 		}
 	}
@@ -3241,15 +3326,45 @@ func (r *KubernetesRuntime) cleanupStartResources(ctx context.Context, namespace
 }
 
 // cleanupStalePod deletes an existing pod with the given name if it exists.
-// This prevents "already exists" errors when recreating an agent.
-func (r *KubernetesRuntime) cleanupStalePod(ctx context.Context, namespace, podName string) {
+// This prevents "already exists" errors when recreating an agent. Other
+// pods are deleted immediately and failures are only logged, as before. An
+// NFS-home pod is deleted with its grace period and the start waits until
+// its containers are confirmed stopped (waitForPodTermination), so the new
+// pod never writes to the home while the old one still does; a pod that
+// cannot be confirmed stopped fails the start with a retryable error.
+//
+// hs supplies the configured termination wait (nil uses the default); the
+// grace period is the previous pod's own.
+func (r *KubernetesRuntime) cleanupStalePod(ctx context.Context, namespace, podName string, hs *HomeStorageRealization) error {
+	pods := r.Client.Clientset.CoreV1().Pods(namespace)
+	pod, err := pods.Get(ctx, podName, metav1.GetOptions{})
+	if k8serrors.IsNotFound(err) {
+		return nil
+	}
+	if err == nil && isNFSHomePod(pod) {
+		if derr := pods.Delete(ctx, podName, podDeleteOptions(pod)); derr != nil && !k8serrors.IsNotFound(derr) {
+			return fmt.Errorf("%w: failed to delete the previous pod %s: %v", errPreviousPodUnconfirmed, podName, derr)
+		}
+		wait := defaultHomeTerminationWaitSeconds
+		if hs != nil && hs.TerminationWaitSeconds > 0 {
+			wait = hs.TerminationWaitSeconds
+		}
+		grace := defaultHomeStopGraceSeconds
+		if g := pod.Spec.TerminationGracePeriodSeconds; g != nil && *g > 0 {
+			grace = int(*g)
+		}
+		bound := time.Duration(grace+wait) * time.Second
+		runtimeLog.Info("Waiting for the previous pod to stop", "pod", podName, "namespace", namespace, "bound", bound.String(), "phase", "home-wait")
+		return r.waitForPodTermination(ctx, namespace, podName, pod.UID, bound)
+	}
 	gracePeriod := int64(0)
-	err := r.Client.Clientset.CoreV1().Pods(namespace).Delete(ctx, podName, metav1.DeleteOptions{
+	err = pods.Delete(ctx, podName, metav1.DeleteOptions{
 		GracePeriodSeconds: &gracePeriod,
 	})
 	if err != nil && !k8serrors.IsNotFound(err) {
 		runtimeLog.Debug("Failed to clean up stale pod", "pod", podName, "namespace", namespace, "error", err)
 	}
+	return nil
 }
 
 // k8sDisruptionExitReason inspects a pod for signs that it was removed by a
@@ -3717,6 +3832,13 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 	// Tar sync (Snapshot)
 	if direction == SyncUnspecified {
 		return fmt.Errorf("direction (to or from) must be specified for tar sync. Example: scion sync to %s", agent.ContainerID)
+	}
+
+	// The home of an NFS-home agent is kept on the export across starts;
+	// it is not copied to or from the broker's copy.
+	if homeDir != "" && homeKeptOnExport(agent.Annotations) {
+		fmt.Printf("Agent home is kept on persistent storage; not syncing it.\n")
+		homeDir = ""
 	}
 
 	if direction == SyncFrom {

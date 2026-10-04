@@ -1399,7 +1399,7 @@ authDone:
 	if homeStorageProfile == "" && finalScionCfg != nil && finalScionCfg.Info != nil {
 		homeStorageProfile = finalScionCfg.Info.Profile
 	}
-	if _, err := resolveHomeStorage(homeStorageInput{
+	homePlan, err := resolveHomeStorage(homeStorageInput{
 		AgentDir:     agentDir,
 		AgentName:    opts.Name,
 		Slug:         slug,
@@ -1409,8 +1409,17 @@ authDone:
 		ProjectID:    hubDispatchedProjectID,
 		ExperimentOn: api.HubAgentDefaultsFromContext(ctx).ExperimentEnabled(experiments.K8sNFSHome),
 		LoadSettings: loadHomeStorageSettings,
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, err
+	}
+	homeStorage, err := prepareHomeStorage(homePlan, hubDispatchedProjectID, slug)
+	if err != nil {
+		return nil, err
+	}
+	homeStorageBackend := ""
+	if homeStorage != nil {
+		homeStorageBackend = runtime.HomeStorageNFS
 	}
 
 	if len(sharedDirVolumes) > 0 {
@@ -1772,6 +1781,8 @@ authDone:
 		TrustedHubEndpoint: trustedHubEndpoint,
 		SharedDirs:         effectiveSharedDirs,
 		SharedDirStorage:   sharedDirStorage,
+		HomeStorageBackend: homeStorageBackend,
+		HomeStorage:        homeStorage,
 		BrokerMode:         opts.BrokerMode,
 		NoAuth: opts.NoAuth && noAuthConfig != nil &&
 			(noAuthConfig.Behavior == "drop-to-shell" || noAuthConfig.Behavior == "allow"),

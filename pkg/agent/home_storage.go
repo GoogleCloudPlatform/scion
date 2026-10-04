@@ -44,7 +44,7 @@ import (
 // homeStorageNFSAvailable reports whether this build can start agents with
 // an NFS home. While it is false, a start that resolves to an NFS home
 // fails with a clear error instead of starting with a different home.
-var homeStorageNFSAvailable = false
+var homeStorageNFSAvailable = true
 
 // homeStorageRecordFile is the per-agent file, in the agent directory next
 // to scion-agent.json and the shared-dir storage record, that records the

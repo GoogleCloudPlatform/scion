@@ -169,6 +169,7 @@ func TestAdvisoryLockKeys_AllUnique(t *testing.T) {
 		// with singletons or each other).
 		{"LockWorkspaceProvision", LockWorkspaceProvision},
 		{"LockQuotaEnforcement", LockQuotaEnforcement},
+		{"LockAgentHomeStart", LockAgentHomeStart},
 		{"LockNotificationDispatchSweep", LockNotificationDispatchSweep},
 		{"LockReleaseUpdateCheck", LockReleaseUpdateCheck},
 		{"LockFailedMessageRetention", LockFailedMessageRetention},
