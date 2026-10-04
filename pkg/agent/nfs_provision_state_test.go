@@ -245,3 +245,32 @@ func TestNFSSharedCheckoutProvisioned_PermissionErrorOnBoth(t *testing.T) {
 	assert.True(t, isNFSLeafPermissionError(err), "%v", err)
 	assert.Contains(t, err.Error(), filepath.Join(stateDir, provision.ProvisionSentinelFile), "the first (state directory) error is returned")
 }
+
+// With no state directory and a permission error on the workspace root (the
+// legacy location), the checkout is not reported provisioned: the permission
+// error is returned, and ensureNFSWorktreeLeaf leaves the worktree
+// directory to the node.
+func TestNFSSharedCheckoutProvisioned_StateDirAbsentLegacyPermissionError(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	mountRoot := filepath.Join(t.TempDir(), "nfs")
+	resolved := resolveTestNFSWorkspace(t, mountRoot)
+	ws := resolved.HostPath
+	require.NoError(t, os.MkdirAll(ws, 0o755))
+	require.NoDirExists(t, provision.ProjectStateDir(ws))
+	require.NoError(t, os.Chmod(ws, 0))
+	t.Cleanup(func() { _ = os.Chmod(ws, 0o755) })
+	hostBase, err := filepath.EvalSymlinks(resolved.HostBase)
+	require.NoError(t, err)
+
+	provisioned, err := nfsSharedCheckoutProvisioned(hostBase, resolved.ServerRelativePath)
+	require.Error(t, err)
+	assert.False(t, provisioned)
+	assert.True(t, isNFSLeafPermissionError(err), "%v", err)
+	assert.Contains(t, err.Error(), filepath.Join(ws, provision.ProvisionSentinelFile))
+
+	ok, err := ensureNFSWorktreeLeaf("kubernetes", resolved, "ws-pv", "agent-1")
+	require.NoError(t, err)
+	assert.False(t, ok, "left to the node")
+}
