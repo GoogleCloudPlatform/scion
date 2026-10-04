@@ -2420,7 +2420,7 @@ func (s *Server) addProjectProvider(w http.ResponseWriter, r *http.Request, proj
 	// so agents and templates directories exist before the first agent starts.
 	if cleanPath != "" {
 		scionDir := filepath.Join(cleanPath, ".scion")
-		if err := config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
+		if err := initLinkedProjectDir(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
 			slog.Warn("failed to initialize .scion in linked project",
 				"project_id", projectID, "localPath", cleanPath, "error", err.Error())
 		}

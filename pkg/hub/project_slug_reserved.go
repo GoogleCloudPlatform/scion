@@ -24,11 +24,12 @@ import (
 )
 
 // The global project's slug identifies it to the hub and, through dispatch,
-// to the broker (see isGlobalHubProject). It is reserved: client project
-// routes cannot create or rename a project to it, in any letter case. Only
-// the global project's own creation takes it: the combined hub and broker
-// server's store write, and project register without a git remote (the CLI
-// global-project flow).
+// to the broker (see isGlobalHubProject). It is reserved: project create,
+// clone, update and register with a git remote cannot take it, in any letter
+// case. Two paths can: the combined hub and broker server's store write, and
+// project register without a git remote (the CLI global-project flow), which
+// takes it while no project holds it. The hub cannot tell that register from
+// another register without a git remote named "global".
 
 // reservedProjectSlugMessage explains a refused reserved slug.
 var reservedProjectSlugMessage = fmt.Sprintf("project slug %q is reserved for the global project", globalProjectSlug)

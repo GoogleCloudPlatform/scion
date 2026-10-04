@@ -24,6 +24,12 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
+// initLinkedProjectDir initializes the .scion directory of a provider's
+// linked project path when a provider is registered with one. A variable so
+// tests can register broker-shaped paths without writing outside their temp
+// directories.
+var initLinkedProjectDir = config.InitProject
+
 // globalProjectSlug is the slug of a broker's global project: the CLI
 // registers it under the name "global", and the combined hub and broker
 // server creates it with this slug. Project slugs are unique on the hub.
@@ -31,9 +37,10 @@ const globalProjectSlug = "global"
 
 // isGlobalHubProject reports whether a hub project with this slug is the
 // global project. Only the slug counts, the same rule dispatch uses to mark
-// the global project for the broker. The slug is reserved on client project
-// routes (see isReservedProjectSlug); project names and labels can be set by
-// clients and do not identify the global project.
+// the global project for the broker. Project create, clone, update and
+// register with a git remote cannot take the slug (see
+// isReservedProjectSlug); project names and labels can be set by clients and
+// do not identify the global project.
 func isGlobalHubProject(slug string) bool {
 	return slug == globalProjectSlug
 }

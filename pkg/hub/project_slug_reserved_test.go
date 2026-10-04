@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -109,12 +110,15 @@ func TestProjectClone_ReservedSlug(t *testing.T) {
 	}
 	require.NoError(t, s.CreateProject(ctx, project))
 
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/clone",
-		map[string]interface{}{"name": "Copy", "slug": "global"})
-	require.Equal(t, http.StatusBadRequest, rec.Code, "body: %s", rec.Body.String())
-	assertNoProjectWithSlug(t, s, "global")
+	for _, slug := range []string{"global", "GLOBAL"} {
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/clone",
+			map[string]interface{}{"name": "Copy", "slug": slug})
+		require.Equal(t, http.StatusBadRequest, rec.Code, "slug %q body: %s", slug, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), "reserved for the global project")
+		assertNoProjectWithSlug(t, s, slug)
+	}
 
-	rec = doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/clone",
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/clone",
 		map[string]interface{}{"name": "Global"})
 	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
 	var clone store.Project
@@ -122,32 +126,49 @@ func TestProjectClone_ReservedSlug(t *testing.T) {
 	assert.Equal(t, "global-1", clone.Slug)
 }
 
-// The real global project keeps working: the CLI global flow (register
-// without a git remote) creates it with the global slug and its provider
-// path, a re-register finds it, and dispatch marks it for the broker.
+// stubLinkedProjectInit replaces the hub's linked-project init for the test
+// and records the directories it was asked to initialize.
+func stubLinkedProjectInit(t *testing.T) *[]string {
+	t.Helper()
+	var dirs []string
+	orig := initLinkedProjectDir
+	initLinkedProjectDir = func(dir string, _ []api.Harness, _ ...config.InitProjectOpts) error {
+		dirs = append(dirs, dir)
+		return nil
+	}
+	t.Cleanup(func() { initLinkedProjectDir = orig })
+	return &dirs
+}
+
+// The real global project keeps working on a fresh hub: the CLI global flow
+// (register without a git remote, name "global") with the broker's
+// global-dir-shaped path creates the project with the global slug and stores
+// that path, a re-register finds it, and dispatch marks it for the broker.
 func TestProjectRegister_GlobalProjectStillRegistersAndDispatches(t *testing.T) {
+	inits := stubLinkedProjectInit(t)
 	srv, s := testServer(t)
 	ctx := context.Background()
 	broker := newLocalPathTestBroker(t, s, "gd-realglobal-broker")
+	require.True(t, isBrokerGlobalDirPath(brokerGlobalDir), "the path must take the global-dir check")
 
-	// The hub runs InitProject on a linked path; keep it off real dirs.
-	globalDir := t.TempDir() + "/home/brokeruser/.scion"
-
-	resp, code, body := registerWithBroker(t, srv, "global", broker.ID, globalDir)
+	resp, code, body := registerWithBroker(t, srv, "global", broker.ID, brokerGlobalDir)
 	require.Equal(t, http.StatusOK, code, "body: %s", body)
+	assert.True(t, resp.Created)
 	assert.Equal(t, "global", resp.Project.Slug)
 
-	again, code, body := registerWithBroker(t, srv, "global", broker.ID, globalDir)
-	require.Equal(t, http.StatusOK, code, "body: %s", body)
-	assert.Equal(t, resp.Project.ID, again.Project.ID)
+	provider, err := s.GetProjectProvider(ctx, resp.Project.ID, broker.ID)
+	require.NoError(t, err)
+	assert.Equal(t, brokerGlobalDir, provider.LocalPath)
+	assert.Equal(t, []string{brokerGlobalDir + "/.scion"}, *inits)
 
-	// The broker's real global dir has the <home>/.scion shape; the global
-	// project may store it.
-	require.NoError(t, validateProviderLocalPath(resp.Project.Name, resp.Project.Slug, brokerGlobalDir))
+	again, code, body := registerWithBroker(t, srv, "global", broker.ID, brokerGlobalDir)
+	require.Equal(t, http.StatusOK, code, "body: %s", body)
+	assert.False(t, again.Created)
+	assert.Equal(t, resp.Project.ID, again.Project.ID)
 
 	d := NewHTTPAgentDispatcherWithClient(s, nil, false, nil)
 	info, err := d.resolveDispatchProjectInfo(ctx, &store.Agent{ProjectID: resp.Project.ID, RuntimeBrokerID: broker.ID})
 	require.NoError(t, err)
-	assert.Equal(t, globalDir, info.projectPath)
+	assert.Equal(t, brokerGlobalDir, info.projectPath)
 	assert.Equal(t, "global", info.projectSlug)
 }

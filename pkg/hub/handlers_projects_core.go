@@ -1678,7 +1678,7 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		// directory structure so agents and templates directories exist.
 		if localPath != "" {
 			scionDir := filepath.Join(localPath, ".scion")
-			if err := config.InitProject(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
+			if err := initLinkedProjectDir(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
 				s.projectsLogger().Warn("failed to initialize .scion in linked project",
 					"project_id", project.ID, "localPath", localPath, "error", err.Error())
 			}
