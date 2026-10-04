@@ -46,7 +46,9 @@ func clearAmbientScionEnv() {
 	for _, kv := range os.Environ() {
 		name, _, _ := strings.Cut(kv, "=")
 		if strings.HasPrefix(name, "SCION_") && !strings.HasPrefix(name, "SCION_TEST_") {
-			os.Unsetenv(name)
+			if err := os.Unsetenv(name); err != nil {
+				panic("clearAmbientScionEnv: unset " + name + ": " + err.Error())
+			}
 		}
 	}
 }
