@@ -66,6 +66,18 @@ export class ScionAccessBoundaryScheduleEditor extends LitElement {
    */
   private _renderedZone = effectiveTimeZone();
 
+  /**
+   * The value of each field this editor last emitted via `schedule-change`
+   * and has not yet seen come back through its prop (absent key = nothing
+   * pending). A host that feeds `schedule-change` back into `notBefore`/
+   * `expiresAt` (admin-access-boundary-editor.ts) echoes the editor's own
+   * value; re-deriving from that echo would clobber what the user is typing
+   * (e.g. a partial value emits `undefined`, whose echo would clear the
+   * field). Consumed on the next change to that prop, echo or not, so a
+   * later genuine change back to the same value still re-derives.
+   */
+  private _pendingEcho: Partial<Record<'notBefore' | 'expiresAt', Iso8601 | undefined>> = {};
+
   private get viewerTimeZone(): string {
     return effectiveTimeZone();
   }
@@ -113,22 +125,16 @@ export class ScionAccessBoundaryScheduleEditor extends LitElement {
   }
 
   /**
-   * The value of each field this editor last emitted via `schedule-change`
-   * and has not yet seen come back through its prop (absent key = nothing
-   * pending). A host that feeds `schedule-change` back into `notBefore`/
-   * `expiresAt` (admin-access-boundary-editor.ts) echoes the editor's own
-   * value; re-deriving from that echo would clobber what the user is typing
-   * (e.g. a partial value emits `undefined`, whose echo would clear the
-   * field). Consumed on the next change to that prop, echo or not, so a
-   * later genuine change back to the same value still re-derives.
-   */
-  private _pendingEcho: Partial<Record<'notBefore' | 'expiresAt', Iso8601 | undefined>> = {};
-
-  /**
    * Re-derives the cached `datetime-local` strings when the effective zone
    * changes between updates (review R4-1). See `rebaseCachedStrings` for
    * what this actually does; `willUpdate` is just one of its two call
    * sites (`connectedCallback` is the other, review R6-1).
+   *
+   * It also re-derives a field (and `hasSchedule`) through `deriveFromProps`
+   * when the host changes its `notBefore`/`expiresAt` prop while connected
+   * (ptone/scion#2581), after the zone rebase — except when the new value
+   * is the host's echo of what this editor itself last emitted (see
+   * `_pendingEcho`), so a value the user is typing is not clobbered.
    */
   override willUpdate(changed: PropertyValues<this>): void {
     super.willUpdate(changed);

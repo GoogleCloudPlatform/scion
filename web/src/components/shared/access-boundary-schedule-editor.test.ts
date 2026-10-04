@@ -324,7 +324,7 @@ describe('scion-access-boundary-schedule-editor — prop change while connected 
     expect(displayedValue(notBeforeInput(el))).toBe('2026-09-2');
   });
 
-  it('still re-derives a later genuine change back to a previously emitted value', async () => {
+  it('re-derives a host value equal to an earlier emit after an intervening change', async () => {
     const el = await mount({ notBefore: '2026-09-23T15:00:00.000Z' });
     feedBack(el);
 
@@ -341,6 +341,61 @@ describe('scion-access-boundary-schedule-editor — prop change while connected 
     el.notBefore = '2026-09-24T10:00:00.000Z';
     await el.updateComplete;
     expect(displayedValue(notBeforeInput(el))).toBe('2026-09-24T10:00');
+  });
+
+  it('re-derives when the host never echoes: a pending emit is consumed by the next unrelated change', async () => {
+    // No feedBack: the host ignores schedule-change, so the emitted value
+    // stays pending until the prop next changes.
+    const el = await mount({ notBefore: '2026-09-23T15:00:00.000Z' });
+
+    const input = notBeforeInput(el);
+    (input as unknown as { value: string }).value = '2026-09-24T10:00';
+    input.dispatchEvent(new Event('sl-input'));
+    await el.updateComplete;
+    expect(el.notBefore).toBe('2026-09-23T15:00:00.000Z');
+
+    // An unrelated value consumes the pending marker and re-derives.
+    el.notBefore = '2026-01-01T00:00:00.000Z';
+    await el.updateComplete;
+    expect(displayedValue(notBeforeInput(el))).toBe('2026-01-01T00:00');
+
+    // The host now sets the earlier emitted value: no longer pending, so it
+    // re-derives too.
+    el.notBefore = '2026-09-24T10:00:00.000Z';
+    await el.updateComplete;
+    expect(displayedValue(notBeforeInput(el))).toBe('2026-09-24T10:00');
+  });
+
+  it('closes the schedule when the host clears both props', async () => {
+    const el = await mount({
+      notBefore: '2026-09-23T15:00:00.000Z',
+      expiresAt: '2026-09-30T15:00:00.000Z',
+    });
+    expect(el.shadowRoot!.querySelector('#not-before')).not.toBeNull();
+
+    el.notBefore = undefined;
+    el.expiresAt = undefined;
+    await el.updateComplete;
+
+    expect(el.shadowRoot!.querySelector('#not-before')).toBeNull();
+    expect(el.shadowRoot!.querySelector('sl-checkbox')!.hasAttribute('checked')).toBe(false);
+  });
+
+  it('keeps the schedule open when the host clears its props but a typed value remains', async () => {
+    // expiresAt has no backing prop: the user typed it and the host does not
+    // feed it back.
+    const el = await mount({ notBefore: '2026-09-23T15:00:00.000Z' });
+    const expires = expiresAtInput(el);
+    (expires as unknown as { value: string }).value = '2026-10-01T09:00';
+    expires.dispatchEvent(new Event('sl-input'));
+    await el.updateComplete;
+
+    el.notBefore = undefined;
+    await el.updateComplete;
+
+    expect(el.shadowRoot!.querySelector('sl-checkbox')!.hasAttribute('checked')).toBe(true);
+    expect(displayedValue(notBeforeInput(el))).toBe('');
+    expect(displayedValue(expiresAtInput(el))).toBe('2026-10-01T09:00');
   });
 
   it('keeps fields consistent when a zone change and a prop change land in the same update', async () => {
