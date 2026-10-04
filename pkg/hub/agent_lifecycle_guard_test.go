@@ -229,6 +229,7 @@ func TestRestoreAfterDeleteClaimConflicts(t *testing.T) {
 
 	rec := restoreForTest(t, srv, agent.ID)
 	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "delegated to this agent is not active", "the 409 comes from the delete claim")
 
 	srv.store = s
 	before := mustGetAgent(t, s, agent.ID)
