@@ -170,28 +170,54 @@ func TestSendMessage_PlainNormalInterruptUnaffected(t *testing.T) {
 // TestSendMessage_OversizedBodyRejected pins the 2 MiB bound on the
 // buffered /message body read: an oversized body gets 413
 // payload_too_large and reaches no delivery primitive and no message log.
-func TestSendMessage_OversizedBodyRejected(t *testing.T) {
+// TestSendMessage_HubShapedNearLimitDelivered pins that this Hub-only route
+// applies no byte cap of its own. The Hub accepts message bodies up to 2 MiB
+// on its public ingress and then forwards a rebuilt request in which the text
+// appears three times (structured_message.msg, the nested rendered
+// delivery_text, and the top-level delivery_text), so the forwarded body is
+// well over 2 MiB. It must be delivered, not refused with 413.
+func TestSendMessage_HubShapedNearLimitDelivered(t *testing.T) {
 	mgr := &recordingMessageManager{mockManager: &mockManager{}}
 	srv := newTestServerWithManager(t, mgr)
-	messageLogSpy := &spyLogHandler{}
-	srv.messageLog = slog.New(messageLogSpy)
 
-	body := `{"message":"` + strings.Repeat("x", maxMessageBodyBytes) + `"}`
-	w := postRawBrokerMessage(t, srv, body)
-	if w.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("status = %d, want 413; body: %.300s", w.Code, w.Body.String())
+	// Just under the Hub's 2 MiB public ingress limit.
+	text := strings.Repeat("x", 2<<20-4096)
+	delivery := "---BEGIN SCION MESSAGE---\n" + text + "\n---END SCION MESSAGE---"
+	reqBody := map[string]interface{}{
+		"interrupt":  false,
+		"project_id": "proj-1",
+		"message_id": "msg-1",
+		"structured_message": map[string]interface{}{
+			"version":       1,
+			"sender":        "user:alice",
+			"recipient":     "agent:test-agent",
+			"msg":           text,
+			"type":          "instruction",
+			"delivery_text": delivery,
+		},
+		"delivery_text": delivery,
 	}
-	var resp ErrorResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode error response: %v", err)
+	raw, err := json.Marshal(reqBody)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
 	}
-	if resp.Error.Code != "payload_too_large" {
-		t.Errorf("code = %q, want payload_too_large", resp.Error.Code)
+	if len(raw) <= 3*(2<<20)-3*4096 {
+		t.Fatalf("forwarded body is %d bytes; the test needs a body well over 2 MiB", len(raw))
 	}
-	if msgs, keys := mgr.calls(); msgs != 0 || keys != 0 {
-		t.Errorf("delivery calls = (message %d, keys %d), want zero", msgs, keys)
+
+	w := postRawBrokerMessage(t, srv, string(raw))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (a Hub-forwarded near-limit message must be delivered); body: %.300s", w.Code, w.Body.String())
 	}
-	if messageLogSpy.records != 0 {
-		t.Errorf("message log written on rejection: %d", messageLogSpy.records)
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if len(mgr.messages) != 1 {
+		t.Fatalf("mgr.Message calls = %d, want 1", len(mgr.messages))
+	}
+	if mgr.messages[0] != delivery {
+		t.Errorf("delivered %d bytes, want the top-level delivery_text (%d bytes)", len(mgr.messages[0]), len(delivery))
+	}
+	if mgr.keys != 0 {
+		t.Fatalf("message path must never call SendKeys, got %d", mgr.keys)
 	}
 }
