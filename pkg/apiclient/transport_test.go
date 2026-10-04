@@ -366,11 +366,13 @@ func TestDo_StillRetriesOn5xx(t *testing.T) {
 	}
 }
 
-// TestDo_RetryResendsFullBodyOn5xx proves a bodied POST that gets a 503 is
-// retried with its full body: the server sees two requests carrying the
-// identical JSON payload, and the caller gets the second attempt's 200.
-// Without the GetBody rewind the second attempt carries a drained body and
-// fails client-side (ContentLength=N with Body length 0).
+// TestDo_RetryResendsFullBodyOn5xx is an end-to-end smoke test over a real
+// socket: a bodied POST that gets a 503 is retried, the server sees two
+// requests carrying the identical JSON payload, and the caller gets the
+// second attempt's 200. It is NOT a regression guard for the body rewind:
+// Go's *http.Transport can itself re-read GetBody on this connection path,
+// so it passes even if Do stops rewinding. The regression guard is
+// TestDo_RetryResendsFullBodyOn5xx_RoundTripper.
 func TestDo_RetryResendsFullBodyOn5xx(t *testing.T) {
 	var (
 		mu     sync.Mutex

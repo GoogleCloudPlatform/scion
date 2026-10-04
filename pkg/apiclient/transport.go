@@ -109,8 +109,9 @@ func NewTransport(baseURL string, opts ...TransportOption) *Transport {
 // retried. Each retry re-sends the full request body, rewound from
 // req.GetBody (which http.NewRequest populates for *bytes.Reader,
 // *bytes.Buffer and *strings.Reader bodies). A request whose body cannot be
-// rewound (non-empty Body, nil GetBody) is sent exactly once and its first
-// response or error is returned unchanged.
+// rewound (non-empty Body, nil GetBody) is sent exactly once: its first
+// response is returned as-is, and its first transport error is returned
+// wrapped as "request failed: %w".
 //
 // A retry replays the request, so Do must only be used with retries enabled
 // for idempotent operations. Non-idempotent operations should use DoNoRetry
