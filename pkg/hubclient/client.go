@@ -484,7 +484,8 @@ func WithTimeout(d time.Duration) Option {
 // Retries are off by default. A retry replays the whole request, body
 // included, and only the methods that use the no-retry send are exempt, so
 // enabling this on a client that issues non-idempotent writes can duplicate
-// them.
+// them. Pinning those writes to the no-retry send is tracked in
+// ptone/scion#2955.
 func WithRetry(maxRetries int, wait time.Duration) Option {
 	return func(c *client) {
 		c.transport.MaxRetries = maxRetries

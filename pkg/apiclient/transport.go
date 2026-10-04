@@ -61,6 +61,7 @@ func WithTimeout(d time.Duration) TransportOption {
 // between attempts. Retries are off by default (MaxRetries 0). A retry
 // replays the whole request, body included, so only enable this for
 // transports whose Do callers are idempotent; DoNoRetry is never retried.
+// Pinning non-idempotent callers is tracked in ptone/scion#2955.
 func WithRetry(maxRetries int, wait time.Duration) TransportOption {
 	return func(t *Transport) {
 		t.MaxRetries = maxRetries
