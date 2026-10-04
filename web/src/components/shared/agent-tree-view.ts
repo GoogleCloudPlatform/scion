@@ -123,6 +123,17 @@ const HIGHLIGHT_MS = 2000;
 const PENDING_REVEAL_MS = 1000;
 
 /**
+ * Whether `sel` holds a non-empty range selection. Uses `type`, not
+ * `isCollapsed`: for a selection inside a shadow root, Chromium retargets
+ * `window.getSelection()` to the host and reports `isCollapsed === true`
+ * even though `type === 'Range'` and the text is non-empty, so
+ * `isCollapsed` cannot detect a selection of the graph's own text.
+ */
+function hasRangeSelection(sel: Selection | null): boolean {
+  return !!sel && sel.type === 'Range';
+}
+
+/**
  * Inline agent lineage graph component. Accepts an `agents` property (the
  * already-filtered list from the parent page) and renders it as an
  * interactive pan/zoom forest. All rendering state (hover, collapse,
@@ -869,8 +880,7 @@ export class ScionAgentTreeView extends LitElement {
     // (user-select: none) applies (ptone/scion#765). Suppress selectstart
     // for the duration of the gesture instead; capture on document so it
     // also catches a selection starting outside the canvas.
-    const sel = window.getSelection();
-    this.hadSelectionAtPanStart = !!sel && !sel.isCollapsed;
+    this.hadSelectionAtPanStart = hasRangeSelection(window.getSelection());
     document.addEventListener('selectstart', this.boundOnSelectStart, true);
     this.canvasEl?.setPointerCapture(e.pointerId);
     this.canvasEl?.classList.add('dragging');
@@ -887,10 +897,19 @@ export class ScionAgentTreeView extends LitElement {
       // Drop any selection that slipped through during the pan; leave one
       // that already existed before it.
       const sel = window.getSelection();
-      if (sel && !sel.isCollapsed && !this.hadSelectionAtPanStart) sel.removeAllRanges();
+      if (sel && hasRangeSelection(sel) && !this.hadSelectionAtPanStart) sel.removeAllRanges();
     }
     this.endPan();
     this.canvasEl?.releasePointerCapture(e.pointerId);
+  }
+
+  /**
+   * Ends the pan if pointer capture is lost without a pointerup/pointercancel
+   * (e.g. the browser drops capture), so the document-wide selectstart
+   * suppression cannot outlive the gesture. Idempotent after onPointerUp.
+   */
+  private onLostPointerCapture(): void {
+    this.endPan();
   }
 
   /** Ends a pan gesture: stops suppressing selection and drops the dragging style. */
@@ -1183,6 +1202,7 @@ export class ScionAgentTreeView extends LitElement {
         @pointermove=${this.onPointerMove}
         @pointerup=${this.onPointerUp}
         @pointercancel=${this.onPointerUp}
+        @lostpointercapture=${(): void => this.onLostPointerCapture()}
         @pointerleave=${() => (this.hoverId = null)}
       >
         <div

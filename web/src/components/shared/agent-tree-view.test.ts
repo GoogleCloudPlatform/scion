@@ -1493,12 +1493,19 @@ describe('scion-agent-tree-view drag-to-pan suppresses text selection', () => {
   });
 
   it('clears a selection that started during the pan on pointerup', () => {
+    // Mocked as Chromium reports a selection of shadow-root text: type
+    // 'Range' but isCollapsed true (window.getSelection() is retargeted to
+    // the host), so the check must key off type, not isCollapsed.
     const removeAllRanges = vi.fn();
-    const sel = { isCollapsed: true, removeAllRanges };
+    const sel: { type: string; isCollapsed: boolean; removeAllRanges: () => void } = {
+      type: 'Caret',
+      isCollapsed: true,
+      removeAllRanges,
+    };
     const spy = vi.spyOn(window, 'getSelection').mockReturnValue(sel as unknown as Selection);
     try {
       pointer('pointerdown');
-      sel.isCollapsed = false; // a selection slipped through mid-gesture
+      sel.type = 'Range'; // a selection slipped through mid-gesture
       pointer('pointerup');
       expect(removeAllRanges).toHaveBeenCalledTimes(1);
     } finally {
@@ -1508,7 +1515,7 @@ describe('scion-agent-tree-view drag-to-pan suppresses text selection', () => {
 
   it('leaves a selection that existed before the pan, and one made without panning', () => {
     const removeAllRanges = vi.fn();
-    const sel = { isCollapsed: false, removeAllRanges };
+    const sel = { type: 'Range', isCollapsed: true, removeAllRanges };
     const spy = vi.spyOn(window, 'getSelection').mockReturnValue(sel as unknown as Selection);
     try {
       pointer('pointerdown');
@@ -1519,6 +1526,14 @@ describe('scion-agent-tree-view drag-to-pan suppresses text selection', () => {
     } finally {
       spy.mockRestore();
     }
+  });
+
+  it('ends the pan and stops suppressing selection when pointer capture is lost', () => {
+    pointer('pointerdown');
+    expect(selectStartPrevented(document.body)).toBe(true);
+    pointer('lostpointercapture');
+    expect(canvas().classList.contains('dragging')).toBe(false);
+    expect(selectStartPrevented(document.body)).toBe(false);
   });
 
   it('does not start a pan (or suppress selection) from a link or button', () => {
