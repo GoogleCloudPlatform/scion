@@ -31,8 +31,11 @@ import { LitElement, html, css, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { apiFetch } from '../../../client/api.js';
-import { formatInstant, formatInstantWithZone } from '../../../utils/time.js';
+import { formatInstant, formatInstantWithZone, formatRelative } from '../../../utils/time.js';
 import { DisplayZoneController } from '../../../utils/display-zone-controller.js';
+
+/** Ages under this are shown relative; older ones as an absolute date. */
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Shape of a search result from GET /api/v1/chat/search */
 interface SearchResult {
@@ -398,16 +401,8 @@ export class ScionChatSearch extends LitElement {
   private formatTime(iso: string): string {
     const d = new Date(iso);
     if (isNaN(d.getTime())) return '';
-    const now = Date.now();
-    const diffMs = now - d.getTime();
-    const diffMin = Math.floor(diffMs / 60000);
-
-    if (diffMin < 1) return 'now';
-    if (diffMin < 60) return `${diffMin}m ago`;
-    const diffHrs = Math.floor(diffMin / 60);
-    if (diffHrs < 24) return `${diffHrs}h ago`;
-    const diffDays = Math.floor(diffHrs / 24);
-    if (diffDays < 7) return `${diffDays}d ago`;
+    // Under a week (or in the future): a compact relative age.
+    if (Date.now() - d.getTime() < WEEK_MS) return formatRelative(iso, { style: 'narrow' });
 
     // Older than a week: a compact absolute date in the display zone; the
     // zone is named in the element's title (the slot does not shrink).
