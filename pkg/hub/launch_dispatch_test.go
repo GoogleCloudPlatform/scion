@@ -471,6 +471,7 @@ func TestDispatchAgentCreate_DeleteClaimBeforeBeginLaunch(t *testing.T) {
 
 	_, err := f.dispatcher.DispatchAgentCreate(context.Background(), agent)
 	require.ErrorIs(t, err, ErrLaunchInvalidPhase)
+	require.ErrorIs(t, err, store.ErrInvalidPhase)
 	require.ErrorIs(t, err, store.ErrDeleteInProgress)
 	assert.Empty(t, f.client.sends, "nothing is sent")
 	assert.Empty(t, f.row(t, agent.ID).LaunchID, "no launch is begun")

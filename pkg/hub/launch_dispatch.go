@@ -219,11 +219,12 @@ func (d *HTTPAgentDispatcher) dispatchLaunching(
 		if errors.Is(err, store.ErrInvalidPhase) {
 			// A delete that claimed the row after beginRun moved it out of
 			// the launchable phases: say so (ptone/scion#2550). The error
-			// still wraps ErrLaunchInvalidPhase, so callers leave the row
-			// to the delete as for any other phase change.
+			// still wraps ErrLaunchInvalidPhase and store.ErrInvalidPhase,
+			// so callers leave the row to the delete as for any other
+			// phase change.
 			if fresh, gerr := d.store.GetAgent(ctx, agent.ID); gerr == nil &&
 				(!fresh.DeletedAt.IsZero() || fresh.DeletionHoldsRow(time.Now())) {
-				err = store.ErrDeleteInProgress
+				return nil, nil, nil, fmt.Errorf("%w: %w: %w", ErrLaunchInvalidPhase, err, store.ErrDeleteInProgress)
 			}
 			return nil, nil, nil, fmt.Errorf("%w: %w", ErrLaunchInvalidPhase, err)
 		}
