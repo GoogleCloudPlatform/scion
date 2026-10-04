@@ -66,3 +66,8 @@ Each fix was checked against the code at upstream 92c805cf:
 - **`explicitTimezone` on a deleted agent** returns `409`. Updated on this page and in `api.md`.
 - **Profile `env`.** The key no longer exists. The page and `orchestrator-settings.md` now name only `harness_overrides` env.
 - **Re-run.** The `applied-config-tz-cleanup` row keeps "safe to re-run". The change that makes the Hub accept a re-run of it is ptone/scion#2928. A new note says the Maintenance page offers Run only for pending or failed migrations, so a completed one is re-run through the API.
+
+## Review round 2 fixes
+
+- **Local mode precedence.** A harness-config `TZ` reaches the container through `opts.Env` as `extraEnv`, which `buildAgentEnv` applies over the merged template and inline config env. A value there therefore beats both. An empty one cancels a template or inline `TZ`, and the container gets UTC.
+- **Maintenance button.** A failed migration's button reads **Retry** (`admin-maintenance.ts`), not **Run**.

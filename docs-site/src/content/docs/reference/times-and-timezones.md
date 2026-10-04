@@ -126,7 +126,7 @@ Without a Hub there is no `TZ` chain, no Hub default timezone and no display pre
   - the harness-config `env` in `settings.yaml`, including a profile's `harness_overrides` entry for that harness config;
   - an inline config passed with `scion create --config`.
 
-  An empty `TZ: ""` in a template or an inline config passes your machine's `TZ` through. In a `settings.yaml` harness-config entry (or a profile's `harness_overrides`), an empty `TZ` is omitted with a warning, and a value there takes precedence over a template `TZ`. With no `TZ` in any of them, the container uses the image default (UTC).
+  An empty `TZ: ""` in a template or an inline config passes your machine's `TZ` through. A `TZ` in a `settings.yaml` harness-config entry (or a profile's `harness_overrides`) takes precedence over a template or inline-config `TZ`. If it is empty, `TZ` is omitted with a warning, even when a template or inline config sets one, and the container uses the image default (UTC). With no `TZ` in any of them, the container uses the image default (UTC).
 - **CLI display** uses your local zone, with `--tz` and `--utc` as above.
 
 A Hub-created agent that is later started with a local `scion start` uses the `TZ` saved in its `scion-agent.json` again.
@@ -140,7 +140,7 @@ Two maintenance migrations relate to times. An admin runs them from **Admin → 
 | `utc-timestamp-normalize` | Rewrites stored timestamps to canonical UTC, so that ordering and paging are exact. On SQLite it covers every table time column and the times inside JSON fields; on Postgres, the times inside JSON fields. On SQLite, rows a Hub wrote in a numeric-abbreviation zone (for example `Asia/Kathmandu`) are also repaired automatically at Hub start, after a database snapshot. | Once after upgrading, after a backup. On SQLite, the Hub logs at start which tables still need it; Postgres has no startup check, so run it once after upgrading. Safe to re-run, and it can run again after it completes. |
 | `applied-config-tz-cleanup` | Converts `TZ` values that older Hubs saved in agents' applied config env into `legacy` pins, in one pass, and reports how many agents it converted. | Optional, because the Hub already converts each agent lazily. Run it **before** `applied-config-env-cleanup` to keep every saved `TZ` as a pin; if the env cleanup runs first, saved values with no live source are removed and those agents follow the chain instead. Safe to re-run, and it can run again after it completes; a second run converts 0. |
 
-The Maintenance page offers **Run** only for a pending or failed migration. To re-run one of these after it has completed, use `POST /api/v1/admin/maintenance/migrations/<key>/run`.
+The Maintenance page offers **Run** for a pending migration and **Retry** for a failed one, and no button once a migration has completed. To re-run one of these after it has completed, use `POST /api/v1/admin/maintenance/migrations/<key>/run`.
 
 ## Related
 
