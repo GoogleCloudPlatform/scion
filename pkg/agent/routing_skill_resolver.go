@@ -350,7 +350,7 @@ func (r *RoutingSkillResolver) retryErrorsWithFallback(
 func perRefErrors(refs []api.SkillReference, msg string) []ResolveError {
 	errs := make([]ResolveError, len(refs))
 	for i, ref := range refs {
-		errs[i] = ResolveError{URI: ref.URI, Code: "resolve_failed", Message: msg}
+		errs[i] = ResolveError{URI: ref.URI, Code: SkillErrCodeResolveFailed, Message: msg}
 	}
 	return errs
 }

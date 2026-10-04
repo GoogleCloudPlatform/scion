@@ -1569,7 +1569,7 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 			}
 			ghResolved, err := s.resolveGitHubSkill(ctx, skillRef.URI, req.ProjectID, refSHAMemo)
 			if err != nil {
-				code := "resolve_failed"
+				code := agent.SkillErrCodeResolveFailed
 				var rl *agent.GitHubRateLimitError
 				if errors.As(err, &rl) {
 					code = agent.GitHubRateLimitedCode

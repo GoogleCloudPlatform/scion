@@ -526,7 +526,7 @@ func panicOutcome(ref api.SkillReference, p any) refOutcome {
 	slog.Error("github: panic during skill resolution",
 		"uri", ref.URI, "panic", fmt.Sprint(p), "stack", string(debug.Stack()))
 	return refOutcome{rerr: &ResolveError{
-		URI: ref.URI, Code: "resolve_failed",
+		URI: ref.URI, Code: SkillErrCodeResolveFailed,
 		Message: "internal error during GitHub skill resolution",
 	}}
 }
@@ -538,7 +538,7 @@ func (r *GitHubSkillResolver) resolveRef(ctx context.Context, ghRef *GitHubSkill
 	if err == nil {
 		return refOutcome{skill: resolved}
 	}
-	code := "resolve_failed"
+	code := SkillErrCodeResolveFailed
 	var retryAfter string
 	var rl *GitHubRateLimitError
 	var rerr *githubResolveError
