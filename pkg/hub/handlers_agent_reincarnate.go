@@ -155,6 +155,17 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// its marker.
 	admittedDeletionClaim := agent.DeletionClaim
 
+	// Authority re-record: a requester other than the agent itself becomes
+	// the agent's recorded delegator, so it must pass CanDelegate and its
+	// ceiling must cover the stored role. Checked right after the start
+	// gate, before the request body, the broker and the agent state are
+	// examined and before anything is written, so a refused request claims
+	// nothing and a dry run reports the same refusal.
+	auth, ok := s.reincarnateAuthorityFor(w, r, agent)
+	if !ok {
+		return
+	}
+
 	var req ReincarnateAgentRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -310,16 +321,6 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
 	targetGeneration := agent.Generation + 1
 
-	// Authority re-record (ptone/scion#2121): a requester other than the
-	// agent itself becomes the agent's recorded delegator, so it must pass
-	// CanDelegate and its ceiling must cover the stored role. Checked before
-	// the dry-run return and before anything is written, so a refused
-	// request claims nothing and a dry run reports the same refusal.
-	auth, ok := s.reincarnateAuthorityFor(w, r, agent)
-	if !ok {
-		return
-	}
-
 	if req.DryRun {
 		writeJSON(w, http.StatusOK, ReincarnateAgentResponse{
 			AgentID:    agent.ID,
@@ -330,16 +331,15 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// AC-8 / design §3.4 Amendment A3: the claim is guarded by the agent
-	// row's own optimistic lock (state_version), and the claim and the
-	// reincarnation record commit together, so a version conflict or any
-	// other failure leaves no record stuck in "pending".
+	// The claim is guarded by the agent row's own optimistic lock
+	// (state_version), and the claim and the reincarnation record commit
+	// together, so a version conflict or any other failure leaves no record
+	// stuck in "pending".
 	//
 	// The already-pending/already-starting check itself lives above, before
-	// the plan is computed, so it also gates --dry-run (design §3.4
-	// Amendment A11 item 3); a concurrent real request could slip in between
-	// that check and this claim, and the claim's state_version CAS catches
-	// that race.
+	// the plan is computed, so it also gates --dry-run; a concurrent real
+	// request could slip in between that check and this claim, and the
+	// claim's state_version CAS catches that race.
 	agent.ReincarnationState = store.ReincarnationStatePending
 	// Design §3.4 Amendment A6.6: ReincarnationUpdatedAt (not Updated) is
 	// what the replica-safe sweep's agent-state backstop keys its staleness
@@ -493,7 +493,7 @@ func (s *Server) ensureReincarnateRequesterSubscribed(ctx context.Context, agent
 }
 
 // reincarnateAuthorityFor decides what authority a reincarnation of agent
-// re-records (ptone/scion#2121). A self-reincarnation re-records nothing: it
+// re-records. A self-reincarnation re-records nothing: it
 // returns nil, and the existing edge with its frozen provenance and ceiling
 // stays in force. Any other requester becomes the recorded delegator, so it
 // must pass CanDelegate for the stored role, and its source ceiling must

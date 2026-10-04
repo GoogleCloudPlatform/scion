@@ -871,12 +871,11 @@ func (e *deletionEngine) rowGone() bool {
 	return errors.Is(err, store.ErrNotFound)
 }
 
-// agentDeletionFinalizeSeam runs inside the finalize transaction (soft and
-// hard, including the hard delete of an incomplete create), just before
-// commit, with a transaction-scoped store. A non-nil error rolls the
-// finalize back, and the engine fails with finalize_failed. It is the
-// attachment point for lifecycle hooks and op-ID stamping
-// (ptone/scion#2121); a no-op until then. Tests may replace it.
+// agentDeletionFinalizeSeam is a test seam. It runs inside the finalize
+// transaction (soft and hard, including the hard delete of an incomplete
+// create), with a transaction-scoped store, before the Server's lifecycle
+// finalize (agentFinalizeHook). A non-nil error rolls the finalize back, and
+// the engine fails with finalize_failed. Production code leaves it a no-op.
 var agentDeletionFinalizeSeam store.DeletionFinalizeHook = func(context.Context, store.Store, *store.Agent, store.DeletionFinalizeMode) error {
 	return nil
 }
