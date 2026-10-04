@@ -575,3 +575,74 @@ func TestRoot_NoSymlinksEvenInsideHome(t *testing.T) {
 		require.NoError(t, err)
 	})
 }
+
+// A read-only directory on a link's path (an image .config kept at 0555, or
+// a user's read-only .config/gcloud) skips the link; it never wedges the
+// seed or later starts, and the directory's mode is left alone.
+func TestPrepare_ReadOnlyLinkParentSkips(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root writes into read-only directories")
+	}
+	bothResolvers(t, func(t *testing.T) {
+		e := newPrepEnv(t)
+		cfg := filepath.Join(e.skeleton, ".config")
+		require.NoError(t, os.Mkdir(cfg, 0o755))
+		require.NoError(t, os.Chmod(cfg, 0o555))
+		t.Cleanup(func() {
+			_ = os.Chmod(cfg, 0o755)
+			_ = os.Chmod(filepath.Join(e.home, ".config"), 0o755)
+		})
+		mode, err := Prepare(e.opts("s1", credLink, secretsLink))
+		require.NoError(t, err)
+		assert.Equal(t, ModeSeed, mode)
+		require.NoError(t, MarkSeeded(e.home, testAgentID, "s1"))
+		mode, err = Prepare(e.opts("s2", credLink, secretsLink))
+		require.NoError(t, err)
+		assert.Equal(t, ModeSeedOver, mode)
+		var res LinksResult
+		e.memJSON(LinksResultFileName, &res)
+		assert.Equal(t, []LinkResult{{credLink.Target, LinkSkipped}, {secretsLink.Target, LinkLinked}}, res.Links)
+		st, err := os.Stat(filepath.Join(e.home, ".config"))
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0o555), st.Mode().Perm(), "the read-only directory is not re-moded")
+
+		// A user's read-only parent in a seeded home.
+		e2 := newPrepEnv(t)
+		e2.write(SentinelName, `{"version":1,"agent_id":"`+testAgentID+`","state":"seeded","uid":`+itoa(os.Getuid())+`,"start_id":"x"}`)
+		gcloud := filepath.Join(e2.home, ".config", "gcloud")
+		require.NoError(t, os.MkdirAll(gcloud, 0o755))
+		require.NoError(t, os.Chmod(gcloud, 0o555))
+		t.Cleanup(func() { _ = os.Chmod(gcloud, 0o755) })
+		_, err = Prepare(e2.opts("s3", credLink))
+		require.NoError(t, err)
+		e2.memJSON(LinksResultFileName, &res)
+		assert.Equal(t, []LinkResult{{credLink.Target, LinkSkipped}}, res.Links)
+	})
+}
+
+// Skeleton directories always keep owner read and search, even when the
+// image directory lacks them, so cleanup and traversal can enter them.
+func TestPrepare_SkeletonDirectoriesKeepOwnerAccess(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores directory modes")
+	}
+	e := newPrepEnv(t)
+	d := filepath.Join(e.skeleton, ".noexec")
+	require.NoError(t, os.MkdirAll(filepath.Join(d, "child"), 0o755))
+	require.NoError(t, os.Chmod(d, 0o600))
+	t.Cleanup(func() {
+		_ = os.Chmod(d, 0o755)
+		_ = os.Chmod(filepath.Join(e.home, ".noexec"), 0o755)
+	})
+	_, err := Prepare(e.opts("s1"))
+	require.NoError(t, err)
+	st, err := os.Stat(filepath.Join(e.home, ".noexec"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), st.Mode().Perm(), "image mode 0600 plus owner read and search")
+
+	// The interrupted-seed cleanup can enter and remove it.
+	s := e.sentinel()
+	require.Equal(t, StateSeeding, s.State)
+	_, err = Prepare(e.opts("s2"))
+	require.NoError(t, err)
+}
