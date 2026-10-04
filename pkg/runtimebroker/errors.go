@@ -150,12 +150,12 @@ func Forbidden(w http.ResponseWriter) {
 
 // MethodNotAllowed writes a 405 Method Not Allowed response. RFC 9110
 // section 15.5.6 requires a 405 to carry an Allow header listing the methods
-// the target resource supports; pass them as allowedMethods. A call with no
-// methods is flagged by hack/check-method-not-allowed.sh.
-func MethodNotAllowed(w http.ResponseWriter, allowedMethods ...string) {
-	if len(allowedMethods) > 0 {
-		w.Header().Set("Allow", strings.Join(allowedMethods, ", "))
-	}
+// the target resource supports. The signature requires at least one method,
+// so a bare call does not compile; hack/check-method-not-allowed.sh remains
+// as a backstop for helpers that keep a variadic-only signature.
+func MethodNotAllowed(w http.ResponseWriter, allowedMethod string, otherMethods ...string) {
+	methods := append([]string{allowedMethod}, otherMethods...)
+	w.Header().Set("Allow", strings.Join(methods, ", "))
 	writeError(w, http.StatusMethodNotAllowed, ErrCodeMethodNotAllowed,
 		"Method not allowed", nil)
 }

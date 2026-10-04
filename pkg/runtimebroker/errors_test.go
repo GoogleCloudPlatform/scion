@@ -307,12 +307,11 @@ func TestMethodNotAllowed_SetsAllowHeader(t *testing.T) {
 	}{
 		{"single", []string{http.MethodGet}, "GET"},
 		{"multiple", []string{http.MethodGet, http.MethodDelete}, "GET, DELETE"},
-		{"none", nil, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			w := httptest.NewRecorder()
-			MethodNotAllowed(w, tt.methods...)
+			MethodNotAllowed(w, tt.methods[0], tt.methods[1:]...)
 			if w.Code != http.StatusMethodNotAllowed {
 				t.Fatalf("status = %d, want %d", w.Code, http.StatusMethodNotAllowed)
 			}

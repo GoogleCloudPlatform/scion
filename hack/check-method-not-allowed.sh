@@ -62,12 +62,12 @@ self_test() {
   local dir rc out n
   dir="$(mktemp -d)"
   # shellcheck disable=SC2064 # expand $dir now
-  trap "rm -rf '$dir'" RETURN
+  trap "rm -rf '$dir'" EXIT
 
   mkdir -p "$dir/clean" "$dir/bad" "$dir/empty"
   cat >"$dir/clean/h.go" <<'GO'
 package h
-func MethodNotAllowed(w http.ResponseWriter, allowedMethods ...string) {}
+func MethodNotAllowed(w http.ResponseWriter, allowedMethod string, otherMethods ...string) {}
 func a(w http.ResponseWriter) { MethodNotAllowed(w, http.MethodGet) }
 GO
   cat >"$dir/bad/h.go" <<'GO'
