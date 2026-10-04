@@ -228,13 +228,25 @@ func TestPrepare_LinkRules(t *testing.T) {
 		e2.memJSON(LinksResultFileName, &res)
 		assert.Equal(t, []LinkResult{{secretsLink.Target, LinkSkipped}}, res.Links)
 
-		// A directory at a target fails the start.
+		// A directory at a target is kept and the link skipped.
 		e3 := newPrepEnv(t)
 		require.NoError(t, os.MkdirAll(filepath.Join(e3.home, credLink.Target), 0o755))
 		e3.write(SentinelName, `{"version":1,"agent_id":"`+testAgentID+`","state":"seeded","uid":`+itoa(os.Getuid())+`,"start_id":"x"}`)
 		_, err = Prepare(e3.opts("s4", credLink))
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "a directory is in its place")
+		require.NoError(t, err)
+		st, err := os.Lstat(filepath.Join(e3.home, credLink.Target))
+		require.NoError(t, err)
+		assert.True(t, st.IsDir())
+		e3.memJSON(LinksResultFileName, &res)
+		assert.Equal(t, []LinkResult{{credLink.Target, LinkSkipped}}, res.Links)
+
+		// Without the link record (lost), a link already pointing at the
+		// staged file is recognised as scion's.
+		require.NoError(t, os.Remove(filepath.Join(e.home, LinksRecordPath)))
+		_, err = Prepare(e.opts("s5", credLink, secretsLink))
+		require.NoError(t, err)
+		e.memJSON(LinksResultFileName, &res)
+		assert.Equal(t, []LinkResult{{credLink.Target, LinkLinked}, {secretsLink.Target, LinkLinked}}, res.Links)
 	})
 }
 
@@ -243,40 +255,99 @@ func itoa(n int) string {
 	return string(b)
 }
 
-// A symbolic link planted in a link's parent path is never followed: the
-// start fails and nothing is written outside the home.
+// A symbolic link in a link's parent path is never followed, whether it
+// points outside the home or inside it: the link is skipped, the start
+// continues, and nothing is written through the symbolic link.
 func TestPrepare_ConfinedBeneathHome(t *testing.T) {
 	bothResolvers(t, func(t *testing.T) {
+		seeded := func(e *prepEnv) {
+			e.write(SentinelName, `{"version":1,"agent_id":"`+testAgentID+`","state":"seeded","uid":`+itoa(os.Getuid())+`,"start_id":"x"}`)
+		}
+		// Outside the home.
 		e := newPrepEnv(t)
 		outside := filepath.Join(e.base, "x")
 		require.NoError(t, os.Mkdir(outside, 0o755))
-		e.write(SentinelName, `{"version":1,"agent_id":"`+testAgentID+`","state":"seeded","uid":`+itoa(os.Getuid())+`,"start_id":"x"}`)
+		seeded(e)
 		require.NoError(t, os.Symlink("../x", filepath.Join(e.home, ".config")))
-
 		_, err := Prepare(e.opts("s1", credLink))
-		require.Error(t, err)
-		var ce *ClassError
-		require.ErrorAs(t, err, &ce)
-		assert.Equal(t, ErrClassPrepare, ce.Class)
+		require.NoError(t, err)
 		ents, err := os.ReadDir(outside)
 		require.NoError(t, err)
-		assert.Empty(t, ents, "nothing may be created through the planted link")
+		assert.Empty(t, ents, "nothing may be created through the link")
+		var res LinksResult
+		e.memJSON(LinksResultFileName, &res)
+		assert.Equal(t, []LinkResult{{credLink.Target, LinkSkipped}}, res.Links)
 
-		// .scion as a symbolic link: hooks are not cleared through it and
-		// the link record is not written through it.
+		// Inside the home (a user's symbolic link to their own config dir).
 		e2 := newPrepEnv(t)
-		e2.write(SentinelName, `{"version":1,"agent_id":"`+testAgentID+`","state":"seeded","uid":`+itoa(os.Getuid())+`,"start_id":"x"}`)
-		out2 := filepath.Join(e2.base, "y")
-		require.NoError(t, os.MkdirAll(filepath.Join(out2, "hooks"), 0o755))
-		require.NoError(t, os.WriteFile(filepath.Join(out2, "hooks", "keep"), []byte("k"), 0o644))
-		require.NoError(t, os.Symlink("../y", filepath.Join(e2.home, ".scion")))
-		_, err = Prepare(e2.opts("s2"))
-		require.Error(t, err)
-		_, err = os.Stat(filepath.Join(out2, "hooks", "keep"))
-		require.NoError(t, err, "files behind a planted link are untouched")
-		_, err = os.Stat(filepath.Join(out2, ".home-links.json"))
+		seeded(e2)
+		require.NoError(t, os.Mkdir(filepath.Join(e2.home, ".xdg"), 0o755))
+		require.NoError(t, os.Symlink(".xdg", filepath.Join(e2.home, ".config")))
+		_, err = Prepare(e2.opts("s2", credLink))
+		require.NoError(t, err)
+		ents, err = os.ReadDir(filepath.Join(e2.home, ".xdg"))
+		require.NoError(t, err)
+		assert.Empty(t, ents, "a link pointing inside the home is not followed either")
+		e2.memJSON(LinksResultFileName, &res)
+		assert.Equal(t, []LinkResult{{credLink.Target, LinkSkipped}}, res.Links)
+
+		// .scion as a symbolic link: hooks are not cleared and the record
+		// is not written through it.
+		e3 := newPrepEnv(t)
+		seeded(e3)
+		out3 := filepath.Join(e3.base, "y")
+		require.NoError(t, os.MkdirAll(filepath.Join(out3, "hooks"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(out3, "hooks", "keep"), []byte("k"), 0o644))
+		require.NoError(t, os.Symlink("../y", filepath.Join(e3.home, ".scion")))
+		_, err = Prepare(e3.opts("s3", secretsLink))
+		require.NoError(t, err)
+		_, err = os.Stat(filepath.Join(out3, "hooks", "keep"))
+		require.NoError(t, err, "files behind the link are untouched")
+		_, err = os.Lstat(filepath.Join(out3, ".home-links.json"))
+		assert.True(t, os.IsNotExist(err))
+		_, err = os.Lstat(filepath.Join(out3, "secrets.json"))
 		assert.True(t, os.IsNotExist(err))
 	})
+}
+
+// An image home whose .config is a symbolic link (to .xdg) seeds, and every
+// later start succeeds; links under .config are skipped.
+func TestPrepare_ImageHomeWithSymlinkedConfig(t *testing.T) {
+	bothResolvers(t, func(t *testing.T) {
+		e := newPrepEnv(t)
+		require.NoError(t, os.Mkdir(filepath.Join(e.skeleton, ".xdg"), 0o755))
+		require.NoError(t, os.Symlink(".xdg", filepath.Join(e.skeleton, ".config")))
+		mode, err := Prepare(e.opts("s1", credLink, secretsLink))
+		require.NoError(t, err)
+		assert.Equal(t, ModeSeed, mode)
+		require.NoError(t, MarkSeeded(e.home, testAgentID, "s1"))
+		for _, start := range []string{"s2", "s3"} {
+			mode, err = Prepare(e.opts(start, credLink, secretsLink))
+			require.NoError(t, err)
+			assert.Equal(t, ModeSeedOver, mode)
+		}
+		var res LinksResult
+		e.memJSON(LinksResultFileName, &res)
+		assert.Equal(t, []LinkResult{{credLink.Target, LinkSkipped}, {secretsLink.Target, LinkLinked}}, res.Links)
+		ents, err := os.ReadDir(filepath.Join(e.home, ".xdg"))
+		require.NoError(t, err)
+		assert.Empty(t, ents)
+	})
+}
+
+// The home itself must not be a symbolic link.
+func TestPrepare_SymlinkedHomeRefused(t *testing.T) {
+	e := newPrepEnv(t)
+	link := filepath.Join(e.base, "home-link")
+	require.NoError(t, os.Symlink(e.home, link))
+	o := e.opts("s1")
+	o.Home = link
+	_, err := Prepare(o)
+	var ce *ClassError
+	require.ErrorAs(t, err, &ce)
+	assert.Equal(t, ErrClassUnavailable, ce.Class)
+	assert.Empty(t, e.homeNames(), "nothing is written through a linked home")
+	require.Error(t, MarkSeeded(link, testAgentID, "s1"))
 }
 
 func TestPrepare_FailClosedSentinel(t *testing.T) {
@@ -391,4 +462,116 @@ func TestMarkSeeded_Rechecks(t *testing.T) {
 	require.NoError(t, MarkSeeded(e.home, testAgentID, "s1"), "marking twice is fine")
 	require.Error(t, MarkSeeded(filepath.Join(e.base, "missing"), testAgentID, "s1"))
 	require.Error(t, MarkSeeded(e.mem, testAgentID, "s1"), "no sentinel")
+}
+
+// A cleanup that fails partway keeps the sentinel, so the home is never
+// left with content and no sentinel.
+func TestPrepare_InterruptedCleanupFailureKeepsSentinel(t *testing.T) {
+	e := newPrepEnv(t)
+	e.write(SentinelName, `{"version":1,"agent_id":"`+testAgentID+`","state":"seeding","uid":`+itoa(os.Getuid())+`,"start_id":"old"}`)
+	e.write("a", "1")
+	e.write("b", "2")
+	calls := 0
+	removeEntryTestHook = func(name string) error {
+		calls++
+		if calls == 2 {
+			return unix.EIO
+		}
+		return nil
+	}
+	t.Cleanup(func() { removeEntryTestHook = nil })
+	_, err := Prepare(e.opts("new"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), ErrClassSeed)
+	s := e.sentinel()
+	assert.Equal(t, StateSeeding, s.State)
+	assert.Equal(t, "old", s.StartID)
+
+	// The next start finishes the cleanup.
+	removeEntryTestHook = nil
+	_, err = Prepare(e.opts("newer"))
+	require.NoError(t, err)
+	assert.Equal(t, []string{".scion", SentinelName}, e.homeNames())
+}
+
+// mark-seeded re-reads the sentinel after writing it: a newer start that
+// stamped the sentinel meanwhile makes it fail.
+func TestMarkSeeded_RecheckAfterWrite(t *testing.T) {
+	e := newPrepEnv(t)
+	_, err := Prepare(e.opts("s1"))
+	require.NoError(t, err)
+	markSeededAfterWriteTestHook = func() {
+		s := e.sentinel()
+		s.StartID = "s2"
+		data, _ := json.Marshal(s)
+		require.NoError(t, os.WriteFile(filepath.Join(e.home, SentinelName), data, 0o644))
+	}
+	t.Cleanup(func() { markSeededAfterWriteTestHook = nil })
+	err = MarkSeeded(e.home, testAgentID, "s1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "changed to start")
+	require.Error(t, MarkSeeded(e.home, "not-an-id", "s2"), "the agent ID is validated")
+}
+
+// Image home directories keep their modes, read-only ones included.
+func TestPrepare_SkeletonKeepsDirectoryModes(t *testing.T) {
+	e := newPrepEnv(t)
+	ro := filepath.Join(e.skeleton, ".ro")
+	require.NoError(t, os.MkdirAll(filepath.Join(ro, "sub"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(ro, "sub", "f"), []byte("x"), 0o444))
+	require.NoError(t, os.Chmod(filepath.Join(ro, "sub"), 0o555))
+	require.NoError(t, os.Chmod(ro, 0o550))
+	t.Cleanup(func() { _ = os.Chmod(ro, 0o755); _ = os.Chmod(filepath.Join(ro, "sub"), 0o755) })
+	_, err := Prepare(e.opts("s1"))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = os.Chmod(filepath.Join(e.home, ".ro"), 0o755)
+		_ = os.Chmod(filepath.Join(e.home, ".ro", "sub"), 0o755)
+	})
+	st, err := os.Stat(filepath.Join(e.home, ".ro"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o550), st.Mode().Perm())
+	st, err = os.Stat(filepath.Join(e.home, ".ro", "sub"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o555), st.Mode().Perm())
+	data, err := os.ReadFile(filepath.Join(e.home, ".ro", "sub", "f"))
+	require.NoError(t, err)
+	assert.Equal(t, "x", string(data))
+}
+
+// An image home that cannot be read is recorded as skipped, not copied.
+func TestPrepare_UnreadableImageHome(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root reads any directory")
+	}
+	e := newPrepEnv(t)
+	require.NoError(t, os.Chmod(e.skeleton, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(e.skeleton, 0o755) })
+	_, err := Prepare(e.opts("s1"))
+	require.NoError(t, err)
+	assert.Equal(t, SkeletonSkipped, e.sentinel().Skeleton)
+}
+
+// A symbolic link that points inside the home is not followed by the
+// beneath resolver either: seed-over does not clear hooks through a linked
+// .scion, and opening a path through such a link fails.
+func TestRoot_NoSymlinksEvenInsideHome(t *testing.T) {
+	bothResolvers(t, func(t *testing.T) {
+		e := newPrepEnv(t)
+		e.write(SentinelName, `{"version":1,"agent_id":"`+testAgentID+`","state":"seeded","uid":`+itoa(os.Getuid())+`,"start_id":"x"}`)
+		e.write("real/hooks/keep", "k")
+		require.NoError(t, os.Symlink("real", filepath.Join(e.home, ".scion")))
+		_, err := Prepare(e.opts("s1"))
+		require.NoError(t, err)
+		_, err = os.Stat(filepath.Join(e.home, "real", "hooks", "keep"))
+		require.NoError(t, err, "hooks behind a link inside the home are not cleared")
+
+		r, err := openRoot(e.home)
+		require.NoError(t, err)
+		defer r.close()
+		_, err = r.open(".scion/hooks/keep", unix.O_RDONLY, 0)
+		require.Error(t, err)
+		_, err = r.open("real/hooks/keep", unix.O_RDONLY, 0)
+		require.NoError(t, err)
+	})
 }

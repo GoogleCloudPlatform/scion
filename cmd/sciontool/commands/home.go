@@ -165,15 +165,14 @@ or mode fails without being changed.`,
 	},
 }
 
-// homeFail prints err, leaves it in the termination log for the broker, and
-// returns it so the command exits non-zero.
+// homeFail leaves err in the termination log for the broker and returns it,
+// so the command exits non-zero and sciontool prints it once.
 func homeFail(cmd *cobra.Command, err error) error {
 	msg := err.Error()
 	var ce *homeprep.ClassError
 	if !errors.As(err, &ce) {
 		msg = homeprep.ErrClassPrepare + ": " + msg
 	}
-	_, _ = fmt.Fprintln(cmd.ErrOrStderr(), msg)
 	if f, ferr := os.OpenFile(terminationLogPath, os.O_WRONLY|os.O_TRUNC, 0); ferr == nil {
 		_, _ = io.WriteString(f, msg)
 		_ = f.Close()

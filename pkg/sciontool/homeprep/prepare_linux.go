@@ -71,7 +71,7 @@ func Prepare(opts PrepareOptions) (string, error) {
 		}
 		if dec.CleanInterrupted {
 			opts.logf("Previous seed of the agent home did not finish; clearing it")
-			if err := removeContents(r.fd, func(n string) bool { return n == SentinelName }); err != nil {
+			if err := removeContents(r.fd, keepSentinel); err != nil {
 				return "", classErr(ErrClassSeed, "cannot clear an interrupted seed: %v", err)
 			}
 		}
@@ -122,8 +122,8 @@ func Prepare(opts PrepareOptions) (string, error) {
 // read again and must still carry startID, so a start that is no longer the
 // latest one fails.
 func MarkSeeded(home, agentID, startID string) error {
-	if agentID == "" || startID == "" {
-		return classErr(ErrClassPrepare, "agent ID and start ID are required")
+	if !ValidAgentID(agentID) || startID == "" {
+		return classErr(ErrClassPrepare, "a valid agent ID and a start ID are required")
 	}
 	r, err := openRoot(home)
 	if err != nil {
@@ -153,6 +153,9 @@ func MarkSeeded(home, agentID, startID string) error {
 		if err := writeSentinel(r, s); err != nil {
 			return classErr(ErrClassPrepare, "cannot write the home sentinel: %v", err)
 		}
+	}
+	if markSeededAfterWriteTestHook != nil {
+		markSeededAfterWriteTestHook()
 	}
 	again := readSentinel(r)
 	if again.Err != nil || again.Sentinel == nil {
@@ -293,6 +296,18 @@ func removeEntry(dirFd int, name string) error {
 	return nil
 }
 
+// keepSentinel keeps the sentinel during an interrupted-seed cleanup, so a
+// cleanup that fails partway still leaves the home marked as seeding.
+func keepSentinel(name string) bool { return name == SentinelName }
+
+// removeEntryTestHook, when set, is called before each entry removeContents
+// removes; a returned error stops the cleanup there. Tests only.
+var removeEntryTestHook func(name string) error
+
+// markSeededAfterWriteTestHook, when set, runs between MarkSeeded's write
+// and its read-back. Tests only.
+var markSeededAfterWriteTestHook func()
+
 // maxRemoveDepth bounds the recursion of removeContents.
 var maxRemoveDepth = 256
 
@@ -319,6 +334,11 @@ func removeContentsDepth(dirFd int, keep func(string) bool, depth int) error {
 	for _, name := range names {
 		if keep != nil && keep(name) {
 			continue
+		}
+		if removeEntryTestHook != nil {
+			if err := removeEntryTestHook(name); err != nil {
+				return fmt.Errorf("%s: %w", name, err)
+			}
 		}
 		var st unix.Stat_t
 		if err := unix.Fstatat(dirFd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
@@ -398,6 +418,11 @@ func copySkeleton(r *root, src string, max int64, logf func(string, ...any)) (st
 		return "", fmt.Errorf("the image home %s is the agent home itself", src)
 	}
 
+	if _, err := os.ReadDir(src); err != nil {
+		logf("Warning: the image home %s cannot be read (%v); it is not copied into the new home", src, err)
+		return SkeletonSkipped, nil
+	}
+
 	var total int64
 	err = filepath.WalkDir(src, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -422,6 +447,11 @@ func copySkeleton(r *root, src string, max int64, logf func(string, ...any)) (st
 		return SkeletonSkipped, nil
 	}
 
+	type dirMode struct {
+		rel  string
+		mode uint32
+	}
+	var dirModes []dirMode
 	err = filepath.WalkDir(src, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			if d != nil && d.IsDir() {
@@ -444,9 +474,10 @@ func copySkeleton(r *root, src string, max int64, logf func(string, ...any)) (st
 		}
 		switch {
 		case d.IsDir():
-			if err := mkdirBeneath(r, rel, uint32(info.Mode().Perm())); err != nil {
+			if err := mkdirBeneath(r, rel); err != nil {
 				return fmt.Errorf("%s: %w", rel, err)
 			}
+			dirModes = append(dirModes, dirMode{rel, uint32(info.Mode().Perm())})
 		case d.Type()&os.ModeSymlink != 0:
 			target, lerr := os.Readlink(p)
 			if lerr != nil {
@@ -478,16 +509,32 @@ func copySkeleton(r *root, src string, max int64, logf func(string, ...any)) (st
 	if err != nil {
 		return "", err
 	}
+	// Directories were writable while they were filled; give them their
+	// image modes now, deepest first, so read-only directories stay
+	// read-only.
+	for i := len(dirModes) - 1; i >= 0; i-- {
+		fd, err := r.open(dirModes[i].rel, unix.O_DIRECTORY|unix.O_RDONLY, 0)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", dirModes[i].rel, err)
+		}
+		err = unix.Fchmod(fd, dirModes[i].mode)
+		_ = unix.Close(fd)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", dirModes[i].rel, err)
+		}
+	}
 	return SkeletonCopied, nil
 }
 
-func mkdirBeneath(r *root, rel string, mode uint32) error {
+// mkdirBeneath creates rel writable by its owner (0700); copySkeleton sets
+// its final mode once it is filled.
+func mkdirBeneath(r *root, rel string) error {
 	dir, leaf, err := r.parent(rel)
 	if err != nil {
 		return err
 	}
 	defer closeUnlessRoot(r, dir)
-	if err := unix.Mkdirat(dir, leaf, mode|0o700); err != nil && !errors.Is(err, unix.EEXIST) {
+	if err := unix.Mkdirat(dir, leaf, 0o700); err != nil && !errors.Is(err, unix.EEXIST) {
 		return err
 	}
 	fd, err := unix.Openat(dir, leaf, unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_RDONLY|unix.O_CLOEXEC, 0)
@@ -495,7 +542,7 @@ func mkdirBeneath(r *root, rel string, mode uint32) error {
 		return err
 	}
 	defer func() { _ = unix.Close(fd) }()
-	return unix.Fchmod(fd, mode|0o700)
+	return unix.Fchmod(fd, 0o700)
 }
 
 func copyFileBeneath(r *root, src, rel string, mode uint32) error {
@@ -589,6 +636,12 @@ func placeLinks(r *root, links []Link, startID string, logf func(string, ...any)
 		return nil, err
 	}
 	if err := r.mkdirAll(".scion", 0o755); err != nil {
+		if foreignPathErr(err) {
+			// Links under .scion were skipped for the same reason; the
+			// next start recognises its links by their sources instead.
+			logf("Warning: .scion is a symbolic link or not a directory in the agent home; the placed links are not recorded")
+			return results, nil
+		}
 		return nil, classErr(ErrClassPrepare, "cannot create .scion in the agent home: %v", err)
 	}
 	if err := r.writeFileAtomic(LinksRecordPath, ".home-links."+randSuffix(), append(data, '\n'), 0o644); err != nil {
@@ -597,14 +650,30 @@ func placeLinks(r *root, links []Link, startID string, logf func(string, ...any)
 	return results, nil
 }
 
+// foreignPathErr reports whether err means a path component is not a
+// plain directory: a symbolic link (ELOOP, EXDEV from RESOLVE_BENEATH, or
+// ELOOP from RESOLVE_NO_SYMLINKS) or another kind of file (ENOTDIR,
+// EEXIST from mkdir over a file).
+func foreignPathErr(err error) bool {
+	return errors.Is(err, unix.ELOOP) || errors.Is(err, unix.EXDEV) || errors.Is(err, unix.ENOTDIR) || errors.Is(err, unix.EEXIST)
+}
+
 func placeLink(r *root, l Link, wasLink bool, startID string, logf func(string, ...any)) (string, error) {
 	if parent := filepath.ToSlash(filepath.Dir(l.Target)); parent != "." {
 		if err := r.mkdirAll(parent, 0o755); err != nil {
-			return "", classErr(ErrClassPrepare, "cannot place the link %s: its parent directory is not a plain directory in the agent home (%v)", l.Target, err)
+			if foreignPathErr(err) {
+				logf("Warning: a parent directory of %s is a symbolic link or not a directory in the agent home; the staged file is not linked there", l.Target)
+				return LinkSkipped, nil
+			}
+			return "", classErr(ErrClassPrepare, "cannot place the link %s: %v", l.Target, err)
 		}
 	}
 	dir, leaf, err := r.parent(l.Target)
 	if err != nil {
+		if foreignPathErr(err) {
+			logf("Warning: a parent directory of %s is a symbolic link or not a directory in the agent home; the staged file is not linked there", l.Target)
+			return LinkSkipped, nil
+		}
 		return "", classErr(ErrClassPrepare, "cannot place the link %s: %v", l.Target, err)
 	}
 	defer closeUnlessRoot(r, dir)
@@ -624,6 +693,11 @@ func placeLink(r *root, l Link, wasLink bool, startID string, logf func(string, 
 	switch st.Mode & unix.S_IFMT {
 	case unix.S_IFLNK:
 		if !wasLink {
+			// Without a record (lost or unreadable), a link that already
+			// points at the staged file is scion's own.
+			if cur, rerr := readlinkAt(dir, leaf); rerr == nil && cur == l.Source {
+				return LinkLinked, nil
+			}
 			logf("Warning: %s is a symbolic link that scion did not place; keeping it", l.Target)
 			return LinkSkipped, nil
 		}
@@ -651,9 +725,20 @@ func placeLink(r *root, l Link, wasLink bool, startID string, logf func(string, 
 		}
 		return LinkLinked, nil
 	case unix.S_IFDIR:
-		return "", classErr(ErrClassPrepare, "cannot place the link %s: a directory is in its place", l.Target)
+		logf("Warning: %s is a directory in the agent home; the staged file is not linked there", l.Target)
+		return LinkSkipped, nil
 	default:
 		logf("Warning: %s is a special file; keeping it", l.Target)
 		return LinkSkipped, nil
 	}
+}
+
+// readlinkAt reads the symbolic link name in dirFd.
+func readlinkAt(dirFd int, name string) (string, error) {
+	buf := make([]byte, 4096)
+	n, err := unix.Readlinkat(dirFd, name, buf)
+	if err != nil {
+		return "", err
+	}
+	return string(buf[:n]), nil
 }
