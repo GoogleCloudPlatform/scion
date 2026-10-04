@@ -48,7 +48,14 @@ func TestLeaf_CreateAndNoOp(t *testing.T) {
 	assert.Equal(t, uint32(homeDirMode), modeOf(t, home))
 
 	// Idempotent: an existing home with the expected owner, group and mode
-	// is left alone, contents included.
+	// is left alone, whether empty or not.
+	require.NoError(t, Leaf(leafOpts(dir)))
+	var st unix.Stat_t
+	require.NoError(t, unix.Lstat(home, &st), "an existing empty home is kept")
+	assert.Equal(t, uint32(homeDirMode), st.Mode&0o7777)
+	assert.Equal(t, uint32(unix.S_IFDIR), st.Mode&unix.S_IFMT)
+	assert.Equal(t, uint32(os.Getuid()), st.Uid)
+	assert.Equal(t, uint32(os.Getgid()), st.Gid)
 	require.NoError(t, os.WriteFile(filepath.Join(home, "f"), []byte("x"), 0o644))
 	require.NoError(t, Leaf(leafOpts(dir)))
 	_, err := os.Stat(filepath.Join(home, "f"))

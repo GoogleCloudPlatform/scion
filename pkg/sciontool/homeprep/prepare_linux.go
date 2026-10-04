@@ -510,14 +510,16 @@ func copySkeleton(r *root, src string, max int64, logf func(string, ...any)) (st
 		return "", err
 	}
 	// Directories were writable while they were filled; give them their
-	// image modes now, deepest first, so read-only directories stay
-	// read-only.
+	// image modes now, so read-only directories stay read-only. The owner
+	// always keeps read and search (u+rx), so a later cleanup and every
+	// traversal of the home can still enter them (which also makes the
+	// order of these changes irrelevant).
 	for i := len(dirModes) - 1; i >= 0; i-- {
 		fd, err := r.open(dirModes[i].rel, unix.O_DIRECTORY|unix.O_RDONLY, 0)
 		if err != nil {
 			return "", fmt.Errorf("%s: %w", dirModes[i].rel, err)
 		}
-		err = unix.Fchmod(fd, dirModes[i].mode)
+		err = unix.Fchmod(fd, dirModes[i].mode|0o500)
 		_ = unix.Close(fd)
 		if err != nil {
 			return "", fmt.Errorf("%s: %w", dirModes[i].rel, err)
@@ -571,17 +573,21 @@ func copyFileBeneath(r *root, src, rel string, mode uint32) error {
 // At each target:
 //   - absent: the link is created (missing parent directories are created
 //     as this user);
+//   - a symbolic link that already points at the staged file: kept, as
+//     linked (this also covers a lost or unreadable link record);
 //   - a symbolic link the previous start recorded: it is replaced;
 //   - a regular file where the previous start recorded a link (a tool
 //     replaced the link): the file is removed and the link placed again;
-//   - anything else (a user's file or link): it is kept and the target is
-//     reported as skipped, with a warning;
-//   - a directory, or a parent that is not a directory or is a symbolic
-//     link: preparation fails, naming the target.
+//   - a user's file, link or directory, or a parent path with a symbolic
+//     link, a non-directory or a directory this user may not write: kept,
+//     reported as skipped, with a warning naming the target. The start
+//     continues; user directories are never re-moded.
 //
 // Links the previous start recorded that are no longer requested are
 // removed if they are still symbolic links. The new set is recorded in
-// LinksRecordPath.
+// LinksRecordPath, unless .scion is not a plain directory this user can
+// write, in which case nothing is written and the next start recognises
+// its links by their targets.
 func placeLinks(r *root, links []Link, startID string, logf func(string, ...any)) ([]LinkResult, error) {
 	prev := map[string]bool{}
 	if data, err := r.readFile(LinksRecordPath, maxSentinelBytes); err == nil {
@@ -636,7 +642,7 @@ func placeLinks(r *root, links []Link, startID string, logf func(string, ...any)
 		return nil, err
 	}
 	if err := r.mkdirAll(".scion", 0o755); err != nil {
-		if foreignPathErr(err) {
+		if foreignPathErr(err) || deniedErr(err) {
 			// Links under .scion were skipped for the same reason; the
 			// next start recognises its links by their sources instead.
 			logf("Warning: .scion is a symbolic link or not a directory in the agent home; the placed links are not recorded")
@@ -644,7 +650,11 @@ func placeLinks(r *root, links []Link, startID string, logf func(string, ...any)
 		}
 		return nil, classErr(ErrClassPrepare, "cannot create .scion in the agent home: %v", err)
 	}
-	if err := r.writeFileAtomic(LinksRecordPath, ".home-links."+randSuffix(), append(data, '\n'), 0o644); err != nil {
+	if err := r.writeFileAtomic(LinksRecordPath, ReservedPrefix+"links."+randSuffix(), append(data, '\n'), 0o644); err != nil {
+		if deniedErr(err) {
+			logf("Warning: %s cannot be written (%v); the placed links are not recorded", LinksRecordPath, err)
+			return results, nil
+		}
 		return nil, classErr(ErrClassPrepare, "cannot record the placed links: %v", err)
 	}
 	return results, nil
@@ -658,23 +668,36 @@ func foreignPathErr(err error) bool {
 	return errors.Is(err, unix.ELOOP) || errors.Is(err, unix.EXDEV) || errors.Is(err, unix.ENOTDIR) || errors.Is(err, unix.EEXIST)
 }
 
+// deniedErr reports whether err is a permission refusal (EACCES, EPERM),
+// for example a read-only directory in the home.
+func deniedErr(err error) bool {
+	return errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPERM)
+}
+
 func placeLink(r *root, l Link, wasLink bool, startID string, logf func(string, ...any)) (string, error) {
+	// skipOr reports a path the link step may not or cannot use (a foreign
+	// component or a permission refusal) as skipped, with a warning naming
+	// the target; any other error fails the start. User directories are
+	// never re-moded to make room.
+	skipOr := func(err error, format string) (string, error) {
+		switch {
+		case foreignPathErr(err):
+			logf("Warning: a path component of %s is a symbolic link or not a directory in the agent home; the staged file is not linked there", l.Target)
+			return LinkSkipped, nil
+		case deniedErr(err):
+			logf("Warning: %s cannot be written in the agent home (%v); the staged file is not linked there", l.Target, err)
+			return LinkSkipped, nil
+		}
+		return "", classErr(ErrClassPrepare, format, l.Target, err)
+	}
 	if parent := filepath.ToSlash(filepath.Dir(l.Target)); parent != "." {
 		if err := r.mkdirAll(parent, 0o755); err != nil {
-			if foreignPathErr(err) {
-				logf("Warning: a parent directory of %s is a symbolic link or not a directory in the agent home; the staged file is not linked there", l.Target)
-				return LinkSkipped, nil
-			}
-			return "", classErr(ErrClassPrepare, "cannot place the link %s: %v", l.Target, err)
+			return skipOr(err, "cannot place the link %s: %v")
 		}
 	}
 	dir, leaf, err := r.parent(l.Target)
 	if err != nil {
-		if foreignPathErr(err) {
-			logf("Warning: a parent directory of %s is a symbolic link or not a directory in the agent home; the staged file is not linked there", l.Target)
-			return LinkSkipped, nil
-		}
-		return "", classErr(ErrClassPrepare, "cannot place the link %s: %v", l.Target, err)
+		return skipOr(err, "cannot place the link %s: %v")
 	}
 	defer closeUnlessRoot(r, dir)
 
@@ -683,31 +706,31 @@ func placeLink(r *root, l Link, wasLink bool, startID string, logf func(string, 
 	switch {
 	case errors.Is(err, unix.ENOENT):
 		if err := unix.Symlinkat(l.Source, dir, leaf); err != nil {
-			return "", classErr(ErrClassPrepare, "cannot place the link %s: %v", l.Target, err)
+			return skipOr(err, "cannot place the link %s: %v")
 		}
 		return LinkLinked, nil
 	case err != nil:
-		return "", classErr(ErrClassPrepare, "cannot check %s: %v", l.Target, err)
+		return skipOr(err, "cannot check %s: %v")
 	}
 
 	switch st.Mode & unix.S_IFMT {
 	case unix.S_IFLNK:
+		// A link that already points at the staged file is scion's own,
+		// whether or not the record (lost or unreadable) lists it.
+		if cur, rerr := readlinkAt(dir, leaf); rerr == nil && cur == l.Source {
+			return LinkLinked, nil
+		}
 		if !wasLink {
-			// Without a record (lost or unreadable), a link that already
-			// points at the staged file is scion's own.
-			if cur, rerr := readlinkAt(dir, leaf); rerr == nil && cur == l.Source {
-				return LinkLinked, nil
-			}
 			logf("Warning: %s is a symbolic link that scion did not place; keeping it", l.Target)
 			return LinkSkipped, nil
 		}
-		tmp := ".scion-home-link." + safeName(startID) + "." + randSuffix()
+		tmp := ReservedPrefix + "link." + safeName(startID) + "." + randSuffix()
 		if err := unix.Symlinkat(l.Source, dir, tmp); err != nil {
-			return "", classErr(ErrClassPrepare, "cannot place the link %s: %v", l.Target, err)
+			return skipOr(err, "cannot place the link %s: %v")
 		}
 		if err := unix.Renameat(dir, tmp, dir, leaf); err != nil {
 			_ = unix.Unlinkat(dir, tmp, 0)
-			return "", classErr(ErrClassPrepare, "cannot place the link %s: %v", l.Target, err)
+			return skipOr(err, "cannot place the link %s: %v")
 		}
 		return LinkLinked, nil
 	case unix.S_IFREG:
@@ -718,10 +741,10 @@ func placeLink(r *root, l Link, wasLink bool, startID string, logf func(string, 
 		// A tool replaced the link with a file: its changes are discarded,
 		// as they were with the read-only mount the link replaces.
 		if err := unix.Unlinkat(dir, leaf, 0); err != nil && !errors.Is(err, unix.ENOENT) {
-			return "", classErr(ErrClassPrepare, "cannot replace %s: %v", l.Target, err)
+			return skipOr(err, "cannot replace %s: %v")
 		}
 		if err := unix.Symlinkat(l.Source, dir, leaf); err != nil {
-			return "", classErr(ErrClassPrepare, "cannot place the link %s: %v", l.Target, err)
+			return skipOr(err, "cannot place the link %s: %v")
 		}
 		return LinkLinked, nil
 	case unix.S_IFDIR:

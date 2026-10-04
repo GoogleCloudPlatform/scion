@@ -316,12 +316,12 @@ func TestResolveHomeStorage_PathComponents(t *testing.T) {
 		require.Error(t, err, "slug %q", slug)
 		assert.Equal(t, homeStoragePending, h.record().Backend)
 	}
-	for _, root := range []string{"../x", "/abs", "a/../b", "a//b"} {
+	for _, root := range []string{"../x", "/abs", "a/../b", "a//b", ".", "./a"} {
 		h := newHSHarness(t)
 		h.gs.Server.SharedDirStorage.NFS.SubPathRoot = root
 		_, err := resolveHomeStorage(h.input("kubernetes", "gke"))
 		require.Error(t, err, "subpath root %q", root)
-		assert.Contains(t, err.Error(), "subpath_root")
+		assert.Contains(t, err.Error(), "subpath")
 		assert.Equal(t, homeStoragePending, h.record().Backend)
 
 		// Read back from a record.
@@ -527,4 +527,19 @@ func TestProvisionAgent_HomeStorageRecord(t *testing.T) {
 	rec, err = readHomeStorageRecord(agentDir)
 	require.NoError(t, err)
 	assert.Nil(t, rec, "re-provisioning a pre-feature agent writes no record")
+}
+
+// On a later start the current shared_dir_storage nfs block must be valid
+// before its mount root is used.
+func TestResolveHomeStorage_RecordedNFSNeedsValidNFSBlock(t *testing.T) {
+	h := newHSHarness(t)
+	require.NoError(t, writeHomeStorageRecord(h.agentDir, homeStorageRecord{Backend: "nfs", Leaf: "broker", ShareID: "share-1", PVClaimName: "pv-1", SubPathRoot: "trees"}))
+	h.gs.Server.SharedDirStorage.NFS.MountRoot = ""
+	_, err := resolveHomeStorage(h.input("kubernetes", "gke"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "server.shared_dir_storage.nfs is not valid")
+	h.gs.Server.SharedDirStorage.NFS.MountRoot = "/srv/nfs"
+	h.gs.Server.SharedDirStorage.NFS.SubPathRoot = "../x"
+	_, err = resolveHomeStorage(h.input("kubernetes", "gke"))
+	require.Error(t, err)
 }

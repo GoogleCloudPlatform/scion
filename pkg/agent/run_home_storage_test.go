@@ -17,6 +17,8 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -129,4 +131,39 @@ func TestStartHomeStorage_NFSHome(t *testing.T) {
 	}, *c.cfg.HomeStorage)
 	assert.Equal(t, &homeStorageRecord{Backend: "nfs", Leaf: "pod", ShareID: "share-1", PVClaimName: "pv-1", SubPathRoot: "projects"},
 		startHomeRecord(t, f, "gke-agent"))
+}
+
+// A settings file without schema_version that sets server.home_storage is
+// not loaded with its server block. A start with shared dirs (which takes
+// the shared-dir settings snapshot) must fail, not record a local home.
+func TestStartHomeStorage_LegacySettingsWithSharedDirsFailClosed(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	f.writeRawGlobalSettings(t, `active_profile: local
+server:
+  home_storage:
+    backend: nfs
+`)
+	var c sdsCapture
+	opts := homeStorageStartOpts(f, "gke-agent", "")
+	opts.SharedDirs = []api.SharedDir{{Name: "scratchpad"}}
+	_, err := NewManager(newSDSMockRuntime("kubernetes", &c)).Start(withNFSHomeExperiment(context.Background()), opts)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "schema_version")
+	assert.Equal(t, 0, c.ran)
+	assert.Equal(t, &homeStorageRecord{Backend: homeStoragePending}, startHomeRecord(t, f, "gke-agent"))
+}
+
+// With v1 settings, a start with shared dirs resolves the home from the
+// shared-dir settings snapshot.
+func TestStartHomeStorage_SharedDirSnapshot(t *testing.T) {
+	f := newSharedDirStorageRunFixture(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(f.tmpDir, "share-1"), 0o775))
+	f.writeRawGlobalSettings(t, homeStorageStartSettings(f.tmpDir))
+	var c sdsCapture
+	opts := homeStorageStartOpts(f, "gke-agent", "gke")
+	opts.SharedDirs = []api.SharedDir{{Name: "scratchpad"}}
+	_, err := NewManager(newSDSMockRuntime("kubernetes", &c)).Start(context.Background(), opts)
+	require.NoError(t, err)
+	require.Equal(t, 1, c.ran)
+	assert.Equal(t, &homeStorageRecord{Backend: "local"}, startHomeRecord(t, f, "gke-agent"))
 }
