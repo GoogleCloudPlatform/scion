@@ -401,8 +401,11 @@ export class ScionChatSearch extends LitElement {
   private formatTime(iso: string): string {
     const d = new Date(iso);
     if (isNaN(d.getTime())) return '';
-    // Under a week (or in the future): a compact relative age.
-    if (Date.now() - d.getTime() < WEEK_MS) return formatRelative(iso, { style: 'narrow' });
+    const ageMs = Date.now() - d.getTime();
+    // A future instant is clock skew between hub and browser.
+    if (ageMs < 0) return 'now';
+    // Under a week: a compact relative age.
+    if (ageMs < WEEK_MS) return formatRelative(iso, { style: 'narrow' });
 
     // Older than a week: a compact absolute date in the display zone; the
     // zone is named in the element's title (the slot does not shrink).

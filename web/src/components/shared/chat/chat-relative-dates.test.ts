@@ -15,10 +15,10 @@
  */
 
 /**
- * Chat members and chat search: ages under a week (and future instants) use
+ * Chat members and chat search: ages under a week use
  * `formatRelative(iso, { style: 'narrow' })` ("5m ago"); older instants show
  * an absolute date through `time.ts`, in the display zone with the zone named
- * (tz-refactor task 21).
+ * (tz-refactor task 21). A future instant is clock skew and reads "now".
  */
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
@@ -61,7 +61,7 @@ const COMPACT_CASES: Array<[string, string, string]> = [
   ['3 days', '2026-09-20T12:00:00Z', '3d ago'],
   ['6 days', '2026-09-17T12:00:00Z', '6d ago'],
   ['6d14h rounds to 7 days', '2026-09-16T22:00:00Z', '7d ago'],
-  ['5 minutes in the future', '2026-09-23T12:05:00Z', 'in 5m'],
+  ['5 minutes in the future (clock skew) clamps to now', '2026-09-23T12:05:00Z', 'now'],
 ];
 
 describe('scion-chat-members activity age', () => {
