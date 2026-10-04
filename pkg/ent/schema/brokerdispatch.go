@@ -62,6 +62,9 @@ func (BrokerDispatch) Fields() []ent.Field {
 		field.String("state").
 			Default("pending"),
 		// result: JSON; for ops that return data (check_prompt, env-gather).
+		// On a failed row it carries the broker error envelope
+		// ({"brokerError":{status,code,body,retryAfter}}) when the broker
+		// answered with an HTTP error status.
 		field.String("result").
 			Optional(),
 		// claimed_by: hub instanceID that reconciled this intent.

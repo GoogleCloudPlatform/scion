@@ -980,8 +980,11 @@ type BrokerDispatchStore interface {
 	// CompleteBrokerDispatch marks a dispatch done with an optional result JSON.
 	CompleteBrokerDispatch(ctx context.Context, id, result string) error
 
-	// FailBrokerDispatch marks a dispatch failed, records the error, bumps attempts.
-	FailBrokerDispatch(ctx context.Context, id, errMsg string) error
+	// FailBrokerDispatch marks a dispatch failed, records the error, bumps
+	// attempts, and records result (when non-empty) in the same update. On a
+	// failed row, result carries the broker's error envelope for the
+	// originating node.
+	FailBrokerDispatch(ctx context.Context, id, errMsg, result string) error
 
 	// GetBrokerDispatch returns a single dispatch row by ID (used by the
 	// originator to read the result after the owner completes it).
