@@ -95,6 +95,11 @@ type RunConfig struct {
 	// "gke-shared-volume". Used to branch UID/GID injection and skip per-start
 	// chown when NFS (N1-5); the branches below key on "nfs" only.
 	WorkspaceBackendName string
+	// HomeStorageBackend selects where the agent home lives on the
+	// Kubernetes runtime. Empty (or "local") keeps the home in the pod and
+	// the pod spec unchanged. HomeStorageNFS builds an NFS-home pod (see
+	// k8s_nfs_home.go). Nothing sets HomeStorageNFS yet.
+	HomeStorageBackend string
 	// NFSUID and NFSGID are the stable, node-independent UID/GID for NFS-backed
 	// workspaces. Advertised as SCION_HOST_UID/GID when WorkspaceBackendName is "nfs"
 	// instead of os.Getuid()/os.Getgid(). Default 1000:1000 (design §9.1).
@@ -140,6 +145,11 @@ type RunConfig struct {
 	// NFSAgentBranch is the branch the agent's workspace is created for,
 	// recorded by the init container. Only used with NFSAgentDirName.
 	NFSAgentBranch string
+	// NFSAgentDirEmpty marks an NFSAgentDirName agent of an empty-per-agent
+	// project: the mounts are the same, but the init container prepares an
+	// empty workspace with no branch record (SCION_WORKSPACE_MODE
+	// empty-per-agent) and nothing clones into it. NFSAgentBranch is unused.
+	NFSAgentDirEmpty bool
 	// NFSStorageClass is the K8s StorageClass for NFS-backed PVCs.
 	// Used when creating shared-dir PVCs on NFS. Empty uses cluster default.
 	NFSStorageClass string

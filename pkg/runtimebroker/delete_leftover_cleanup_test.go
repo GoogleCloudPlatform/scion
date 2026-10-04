@@ -184,3 +184,51 @@ func TestDeleteAgent_LeftoverCleanupFailure_ResponseUnchanged(t *testing.T) {
 		assertCleanupCalls(t, mgr.cleanupCalls(), cleanupCall{"dev", scopeProjB})
 	})
 }
+
+// TestDeleteAgent_RecordedRuntime_CleansOnlyThatRuntime pins that a delete
+// carrying a recorded runtime type (ptone/scion#2748) removes leftover
+// objects only from runtimes of that type.
+func TestDeleteAgent_RecordedRuntime_CleansOnlyThatRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		recorded             string
+		wantDefault, wantK8s bool
+	}{
+		{"kubernetes", false, true},
+		{"docker", true, false},
+		{"", true, true},
+	} {
+		t.Run("runtime="+tc.recorded, func(t *testing.T) {
+			mgr := &cleanupRecordingManager{}
+			srv, home := newCleanupTestServer(t, mgr)
+			srv.runtime = &runtime.MockRuntime{NameFunc: func() string { return "docker" }}
+			makeHubProject(t, home, "proj-b", scopeProjB, "dev")
+			aux := &cleanupRecordingManager{}
+			srv.auxiliaryRuntimesMu.Lock()
+			srv.auxiliaryRuntimes["k8s-aux"] = auxiliaryRuntime{
+				Runtime: &runtime.MockRuntime{NameFunc: func() string { return "kubernetes" }},
+				Manager: aux,
+			}
+			srv.auxiliaryRuntimesMu.Unlock()
+
+			query := "projectId=" + scopeProjB + "&deleteFiles=true"
+			if tc.recorded != "" {
+				query += "&" + api.RecordedRuntimeQueryParam + "=" + tc.recorded
+			}
+			rec := doDelete(t, srv, "dev", query)
+			if rec.Code != http.StatusNoContent {
+				t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+			}
+			want := []cleanupCall{{"dev", scopeProjB}}
+			if tc.wantDefault {
+				assertCleanupCalls(t, mgr.cleanupCalls(), want...)
+			} else {
+				assertCleanupCalls(t, mgr.cleanupCalls())
+			}
+			if tc.wantK8s {
+				assertCleanupCalls(t, aux.cleanupCalls(), want...)
+			} else {
+				assertCleanupCalls(t, aux.cleanupCalls())
+			}
+		})
+	}
+}

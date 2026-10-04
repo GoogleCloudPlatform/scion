@@ -157,3 +157,62 @@ func TestRunProvision_AgentDir_OlderImageFallback(t *testing.T) {
 		t.Errorf("workspace should stay empty, has %v", names)
 	}
 }
+
+// Empty-per-agent (design #2703 P3): the init container makes sure the
+// agent's workspace exists and writes the sentinel next to it. It does not
+// clone (even with clone settings in its environment), runs no git, and
+// writes no branch record, whatever SCION_AGENT_BRANCH says. A restart keeps
+// the agent's files.
+func TestRunProvision_EmptyPerAgentMode_OnlyEnsuresWorkspace(t *testing.T) {
+	origin := provisionTestRepo(t)
+	agentDir := filepath.Join(t.TempDir(), "projects", "proj-1", "agents", "agent-1")
+	if err := os.MkdirAll(agentDir, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	setupProvisionCmd(t, agentDir, "shared-plain", origin)
+	t.Setenv("SCION_WORKSPACE_MODE", "empty-per-agent")
+	t.Setenv("SCION_AGENT_SLUG", "agent-1")
+	t.Setenv("SCION_AGENT_BRANCH", "scion/agent-1")
+
+	if err := runProvision(context.Background()); err != nil {
+		t.Fatalf("runProvision: %v", err)
+	}
+	ws := filepath.Join(agentDir, provision.AgentWorkspaceDir)
+	if names := entryNames(t, ws); len(names) != 0 {
+		t.Errorf("workspace should be created empty, has %v", names)
+	}
+	if _, err := os.Stat(filepath.Join(agentDir, provision.ProvisionSentinelFile)); err != nil {
+		t.Errorf("sentinel not written in the agent directory: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(agentDir, provision.AgentBranchFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("no branch record expected, got err=%v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(ws, "notes.txt"), []byte("kept"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SCION_AGENT_BRANCH", "feature/other")
+	if err := runProvision(context.Background()); err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	if got := readTestFile(t, filepath.Join(ws, "notes.txt")); got != "kept" {
+		t.Errorf("kept file = %q", got)
+	}
+}
+
+// Empty-per-agent needs the agent's slug; nothing is written without it.
+func TestRunProvision_EmptyPerAgentMode_NeedsSlug(t *testing.T) {
+	for _, slug := range []string{"", "..", "a/b", "Agent-1"} {
+		agentDir := newTestAgentDir(t)
+		setupProvisionCmd(t, agentDir, "shared-plain", "")
+		t.Setenv("SCION_WORKSPACE_MODE", "empty-per-agent")
+		t.Setenv("SCION_AGENT_SLUG", slug)
+		err := runProvision(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "needs SCION_AGENT_SLUG") {
+			t.Errorf("slug %q: want the SCION_AGENT_SLUG error, got %v", slug, err)
+		}
+		if names := entryNames(t, agentDir); len(names) != 1 || names[0] != provision.AgentWorkspaceDir {
+			t.Errorf("slug %q: agent directory changed: %v", slug, names)
+		}
+	}
+}

@@ -64,9 +64,9 @@ const BANNED_PATTERN =
  * them to `time.ts`: the four native-chat formatters (`chat-message.ts`,
  * `chat-date-divider.ts`, `chat-interagent-marker.ts`,
  * `chat-system-line.ts`) and `access-boundary-schedule-editor.ts` (its
- * `viewerTimeZone` getter). `profile-settings.ts` stays listed for the
- * "Agent timezone" section's zone check, which tz-refactor task 13 removes
- * along with the section.
+ * `viewerTimeZone` getter). tz-refactor task 13 removed
+ * `profile-settings.ts` along with its "Agent timezone" section and that
+ * section's zone check.
  *
  * tz-refactor task 19 removed the list pages, `components/shared/*list*`
  * files and every file with a private relative-time helper outside the
@@ -90,9 +90,7 @@ const BANNED_PATTERN =
  * The end state (P3c, tz-refactor task 21) is an empty list and the test
  * below deletes itself along with it.
  */
-const ALLOWLIST: readonly string[] = [
-  'components/pages/profile-settings.ts',
-];
+const ALLOWLIST: readonly string[] = [];
 
 /** Recursively lists non-test `.ts` files under `dir`, relative to `SRC_ROOT`. */
 function listSourceFiles(dir: string): string[] {
@@ -125,6 +123,10 @@ describe('format scan (tz-refactor task 11)', () => {
       }
     }
     expect(offenders).toEqual([]);
+  });
+
+  it('no longer lists profile-settings.ts', () => {
+    expect(ALLOWLIST).not.toContain('components/pages/profile-settings.ts');
   });
 
   it('fails on a stale allowlist entry (a listed file with no banned token)', () => {
