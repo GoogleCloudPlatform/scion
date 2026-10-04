@@ -604,7 +604,11 @@ func TestVerify_NonCanonicalEncodingRefused(t *testing.T) {
 		{"LF inside header", []byte(insert(parts[0], 3, "\n") + "." + parts[1] + "." + parts[2])},
 		{"trailing newline", append(append([]byte{}, good...), '\n')},
 		{"space", []byte(parts[0] + " ." + parts[1] + "." + parts[2])},
-		{"standard base64 alphabet", []byte(strings.NewReplacer("-", "+", "_", "/").Replace(string(good)))},
+		// Standard-alphabet characters, placed explicitly (a random token
+		// need not contain any '-' or '_' to translate).
+		{"standard base64 '+'", []byte(parts[0] + "." + parts[1] + ".+" + parts[2][1:])},
+		{"standard base64 '/'", []byte(parts[0] + "." + parts[1] + "." + parts[2][:5] + "/" + parts[2][6:])},
+		{"standard base64 padding", []byte(parts[0] + "." + parts[1] + "." + parts[2] + "==")},
 		{"uppercase header keys", forgeRaw(f.signer.Key, `{"ALG":"EdDSA","TYP":"conduit-grant+jwt","KID":"`+kid+`"}`, payload)},
 		{"mixed-case header key", forgeRaw(f.signer.Key, `{"alg":"EdDSA","Typ":"conduit-grant+jwt","kid":"`+kid+`"}`, payload)},
 		{"duplicate header key", forgeRaw(f.signer.Key, `{"alg":"none","typ":"conduit-grant+jwt","kid":"`+kid+`","alg":"EdDSA"}`, payload)},

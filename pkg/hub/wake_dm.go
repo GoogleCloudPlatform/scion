@@ -127,6 +127,14 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			}
 		}
 
+		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
+			s.rollbackBrokerQuota(ctx, agent, reserved)
+			return nil, &AgentDMError{
+				Code:       ErrCodeRuntimeError,
+				Message:    "Failed to wake agent: " + err.Error(),
+				HTTPStatus: http.StatusInternalServerError,
+			}
+		}
 		// Resume the suspended agent. continue=true tells the harness to
 		// restore its prior session rather than starting fresh.
 		if err := dispatcher.DispatchAgentStart(ctx, agent, "", true); err != nil {

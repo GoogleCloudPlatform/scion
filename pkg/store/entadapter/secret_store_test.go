@@ -18,6 +18,7 @@ package entadapter
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -716,4 +717,43 @@ func TestUpdateSecretValueIfVersion(t *testing.T) {
 	applied, err = ss.UpdateSecretValueIfVersion(ctx, "ghost", store.ScopeHub, scopeID, 1, "x")
 	require.NoError(t, err)
 	assert.False(t, applied)
+}
+
+// TestUpdateSecretValueIfVersion_ConcurrentSameVersion: two writers racing
+// with the same expected version; exactly one applies.
+func TestUpdateSecretValueIfVersion_ConcurrentSameVersion(t *testing.T) {
+	ss := newTestSecretStore(t)
+	ctx := context.Background()
+	scopeID := uuid.New().String()
+	require.NoError(t, ss.CreateSecret(ctx, &store.Secret{ID: uuid.New().String(), Key: "VAL_CAS_RACE", EncryptedValue: "v1", Scope: store.ScopeHub, ScopeID: scopeID}))
+
+	values := []string{"a", "b"}
+	results := make([]bool, len(values))
+	errs := make([]error, len(values))
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i, v := range values {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results[i], errs[i] = ss.UpdateSecretValueIfVersion(ctx, "VAL_CAS_RACE", store.ScopeHub, scopeID, 1, v)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	winner := -1
+	for i := range values {
+		require.NoError(t, errs[i])
+		if results[i] {
+			require.Equal(t, -1, winner, "both writers applied")
+			winner = i
+		}
+	}
+	require.NotEqual(t, -1, winner, "neither writer applied")
+	got, err := ss.GetSecret(ctx, "VAL_CAS_RACE", store.ScopeHub, scopeID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, got.Version)
+	assert.Equal(t, values[winner], got.EncryptedValue, "the stored value is the winner's")
 }
