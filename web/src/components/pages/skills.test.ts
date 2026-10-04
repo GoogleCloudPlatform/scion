@@ -210,6 +210,8 @@ describe('scion-page-skills pagination', () => {
       if (url.includes('scope=core')) {
         return Promise.resolve(jsonResponse({ skills: [skill('core-1')] }));
       }
+      if (url.includes('cursor=c3'))
+        return Promise.resolve(jsonResponse({ skills: [skill('c3')] }));
       if (url.includes('cursor=c2')) return stale.promise;
       return Promise.resolve(jsonResponse(FIRST_PAGE));
     });
@@ -224,8 +226,12 @@ describe('scion-page-skills pagination', () => {
     expect(shownSkills(el)).toEqual(['/skills/core-1']);
 
     // The stale walk's last page arrives late and must not be shown.
-    stale.resolve(jsonResponse({ skills: [skill('stale')] }));
+    // It also has a further page, which the superseded walk must not fetch.
+    stale.resolve(jsonResponse({ skills: [skill('stale')], nextCursor: 'c3' }));
     await loads[0];
+    expect(fetchMock.mock.calls.some((c) => urlOf(c[0] as string).includes('cursor=c3'))).toBe(
+      false
+    );
     await el.updateComplete;
 
     expect(shownSkills(el)).toEqual(['/skills/core-1']);
@@ -302,9 +308,10 @@ describe('scion-page-skills pagination', () => {
     page2.resolve(jsonResponse({ skills: [skill('3')], nextCursor: 'c3' }));
     await loads[0];
 
-    expect(fetchMock.mock.calls.map((c) => urlOf(c[0] as string))).not.toEqual(
-      expect.arrayContaining([expect.stringContaining('cursor=c3')])
+    expect(fetchMock.mock.calls.some((c) => urlOf(c[0] as string).includes('cursor=c3'))).toBe(
+      false
     );
+    expect(internals(el).loading).toBe(false);
   });
 
   it('shows the error state when the first page fails', async () => {
