@@ -90,19 +90,30 @@ func softDeletedWithEdge(t *testing.T, srv *Server, s store.Store, name, delegat
 }
 
 // lifecycleFaultStore injects store errors into the reads the restore's
-// delegator check makes, including inside transactions.
+// delegator check makes, including inside transactions. failAgentID fails
+// GetAgent for that ID inside a transaction only, so the handler's load
+// outside the transaction succeeds.
 type lifecycleFaultStore struct {
 	store.Store
-	failUser  bool
-	failEdges bool
+	failUser    bool
+	failEdges   bool
+	failAgentID string
+	inTx        bool
 }
 
 var errInjectedLookup = errors.New("injected lookup fault")
 
 func (f *lifecycleFaultStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
 	return f.Store.WithTx(ctx, func(tx store.Store) error {
-		return fn(&lifecycleFaultStore{Store: tx, failUser: f.failUser, failEdges: f.failEdges})
+		return fn(&lifecycleFaultStore{Store: tx, failUser: f.failUser, failEdges: f.failEdges, failAgentID: f.failAgentID, inTx: true})
 	})
+}
+
+func (f *lifecycleFaultStore) GetAgent(ctx context.Context, id string) (*store.Agent, error) {
+	if f.inTx && f.failAgentID != "" && id == f.failAgentID {
+		return nil, errInjectedLookup
+	}
+	return f.Store.GetAgent(ctx, id)
 }
 
 func (f *lifecycleFaultStore) GetUser(ctx context.Context, id string) (*store.User, error) {
@@ -346,21 +357,30 @@ func TestRestoreRefusesNotLiveDelegator(t *testing.T) {
 }
 
 // A store error during the restore's delegator check returns 503 and writes
-// nothing: a fault reading the deactivated edges, and one reading a
-// delegator.
+// nothing: a fault reading the deactivated edges, one reading a user
+// delegator and one reading an agent delegator inside the transaction.
 func TestRestoreDelegatorLookupFault503(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		fault lifecycleFaultStore
+	for i, tc := range []struct {
+		name          string
+		delegatorType string
+		fault         lifecycleFaultStore
 	}{
-		{"edge read", lifecycleFaultStore{failEdges: true}},
-		{"delegator read", lifecycleFaultStore{failUser: true}},
+		{"edge read", store.DelegationPrincipalUser, lifecycleFaultStore{failEdges: true}},
+		{"user delegator read", store.DelegationPrincipalUser, lifecycleFaultStore{failUser: true}},
+		{"agent delegator read", store.DelegationPrincipalAgent, lifecycleFaultStore{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, s, _, _ := engineTestServer(t)
-			agent, edge := softDeletedWithEdge(t, srv, s, "lookup-fault-"+tidSlugSafe(tc.name), store.DelegationPrincipalUser, tid("fault-delegator-"+tc.name))
+			delegatorID := tid("fault-delegator-" + tc.name)
+			if tc.delegatorType == store.DelegationPrincipalAgent {
+				delegatorID = setupBrokerAgentInPhase(t, s, "fault-parent-"+string(rune('a'+i)), state.PhaseRunning).ID
+			}
+			agent, edge := softDeletedWithEdge(t, srv, s, "lookup-fault-"+tidSlugSafe(tc.name), tc.delegatorType, delegatorID)
 			fault := tc.fault
 			fault.Store = s
+			if tc.delegatorType == store.DelegationPrincipalAgent {
+				fault.failAgentID = delegatorID
+			}
 			srv.store = &fault
 
 			rec := restoreForTest(t, srv, agent.ID)
