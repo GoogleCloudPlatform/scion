@@ -540,7 +540,26 @@ func reincarnateByUser(t *testing.T, identity func(user *store.User, projectID s
 	require.NoError(t, err)
 	require.Len(t, edges, 1)
 	require.NotEqual(t, old.ID, edges[0].ID, "the edge is re-recorded")
+	assertReincarnateReplacedEdge(t, s, agent.ID, old.ID)
 	return srv, user, edges[0], id
+}
+
+// assertReincarnateReplacedEdge asserts the reincarnation claim of agentID
+// deactivated exactly the edge oldID, with cause reincarnate_replaced, under
+// the operation ID its agent_reincarnate_claim audit records. It reads only.
+func assertReincarnateReplacedEdge(t *testing.T, s store.Store, agentID, oldID string) {
+	t.Helper()
+	sum := auditSummary(t, s, mutationTypeAgentReincarnateClaim, agentID)
+	opID, _ := sum["op_id"].(string)
+	require.NotEmpty(t, opID, "the claim audit records an operation ID")
+	replaced, err := s.GetDeactivatedDelegationEdgesForDelegate(context.Background(), store.DelegationPrincipalAgent, agentID,
+		store.EdgeDeactivationReincarnateReplaced, opID)
+	require.NoError(t, err)
+	ids := make([]string, 0, len(replaced))
+	for _, e := range replaced {
+		ids = append(ids, e.ID)
+	}
+	assert.Equal(t, []string{oldID}, ids, "the replaced edge is deactivated under the claim's operation ID")
 }
 
 // A reincarnation by a session user re-records the edge with the user as

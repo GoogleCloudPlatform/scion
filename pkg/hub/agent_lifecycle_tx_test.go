@@ -659,12 +659,7 @@ func TestReincarnateReRecordsProvenance(t *testing.T) {
 	sum := auditSummary(t, s, mutationTypeAgentReincarnateClaim, agent.ID)
 	assert.Equal(t, true, sum["re_recorded"])
 	assert.EqualValues(t, 1, sum["edges_replaced"])
-	opID, _ := sum["op_id"].(string)
-	require.NotEmpty(t, opID)
-	// Oracle for the inactive edge: reactivating it under the claim's
-	// operation ID and cause collides with the new active edge.
-	_, err = s.ReactivateDelegationEdgesForDelegate(context.Background(), store.DelegationPrincipalAgent, agent.ID, store.EdgeDeactivationReincarnateReplaced, opID)
-	assert.ErrorIs(t, err, store.ErrAlreadyExists, "the replaced edge is inactive under the claim's operation ID")
+	assertReincarnateReplacedEdge(t, s, agent.ID, old.ID)
 }
 
 // A requester whose effect ceiling does not cover the agent's role gets 403
