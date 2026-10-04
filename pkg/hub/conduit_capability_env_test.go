@@ -36,7 +36,8 @@ func TestDispatchConduitCapabilityEnv(t *testing.T) {
 		env      func(*mockRuntimeBrokerClient) map[string]string
 	}{
 		{"create", func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
-			return d.DispatchAgentCreate(ctx, a)
+			_, err := d.DispatchAgentCreate(ctx, a)
+			return err
 		}, func(m *mockRuntimeBrokerClient) map[string]string { return m.lastCreateReq.ResolvedEnv }},
 		{"start", func(ctx context.Context, d *HTTPAgentDispatcher, a *store.Agent) error {
 			return d.DispatchAgentStart(ctx, a, "", false)
