@@ -154,33 +154,82 @@ type routingResult struct {
 	Def152DerivedRecipient bool
 }
 
-// outboundThreadConversationExists reports whether a free-text thread key
-// (extRef = "thread:<project>:<threadID>") already names a conversation that
-// ResolveOrCreateConversationByKey would reuse rather than mint: a webchat
-// topic for threadID (when tl is set), or a native conversation whose
-// external_ref is extRef. A topic that exists but has no conversation_id yet
-// counts as existing; the resolver refuses to mint for it and reports its own
-// error. Lookup failures other than "not found" are returned as errors.
-func outboundThreadConversationExists(
+// outboundThreadState is the result of outboundThreadConversationState.
+type outboundThreadState int
+
+const (
+	// outboundThreadMissing: nothing the resolver would reuse exists, so it
+	// would mint a new, participant-less group conversation.
+	outboundThreadMissing outboundThreadState = iota
+	// outboundThreadExists: a live webchat topic or a native conversation
+	// with the thread's external_ref exists and will be reused.
+	outboundThreadExists
+	// outboundThreadDeleted: the thread is a webchat topic that has been
+	// soft-deleted. The resolver would reuse its conversation, but nobody can
+	// see it any more.
+	outboundThreadDeleted
+)
+
+// outboundThreadGateApplies reports whether the ptone/scion#2026
+// existing-thread check applies to an outbound send on channel (after S2
+// reply affinity). It applies only to native delivery: the web channel or no
+// channel. External channel plugins (Slack, Teams, Google Chat, ...) deliver
+// to the ThreadID themselves, so for them the thread need not exist as a
+// conversation on the Hub. ChannelToSurfaceStrict is used rather than
+// ChannelToSurface because the latter maps unknown channel names (plugins
+// can be registered under any name) to "native".
+func outboundThreadGateApplies(channel string) bool {
+	surface, err := messaging.ChannelToSurfaceStrict(channel)
+	return err == nil && surface == "native"
+}
+
+// outboundThreadConversationState reports whether a free-text thread key
+// (extRef = "thread:<project>:<threadID>") names a conversation that
+// ResolveOrCreateConversationByKey would reuse rather than mint, and whether
+// that conversation is still visible:
+//
+//   - a live webchat topic for threadID (when tl is set): exists. A topic that
+//     has no conversation_id yet also counts; the resolver refuses to mint
+//     for it and reports its own error.
+//   - a soft-deleted webchat topic for threadID: deleted. This is stricter
+//     than the resolver, which reuses a deleted topic's conversation.
+//   - otherwise, a native conversation whose external_ref is extRef: exists.
+//   - otherwise: missing.
+//
+// Lookup failures other than "not found" are returned as errors.
+//
+// The check and the resolver's upsert are not atomic: if the conversation is
+// deleted in between, the resolver mints a fresh row. The window is tiny and
+// needs a concurrent deletion, so it is accepted.
+func outboundThreadConversationState(
 	ctx context.Context,
 	cr messaging.ConversationReader,
 	tl messaging.TopicConversationLookup,
 	extRef, threadID string,
-) (bool, error) {
+) (outboundThreadState, error) {
 	if tl != nil {
-		if _, err := tl.GetTopicConversationIDIncludingDeleted(ctx, threadID); err == nil {
-			return true, nil
-		} else if !errors.Is(err, store.ErrNotFound) {
-			return false, fmt.Errorf("topic lookup: %w", err)
+		_, err := tl.GetTopicConversationID(ctx, threadID)
+		if err == nil {
+			return outboundThreadExists, nil
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return outboundThreadMissing, fmt.Errorf("topic lookup: %w", err)
+		}
+		_, err = tl.GetTopicConversationIDIncludingDeleted(ctx, threadID)
+		if err == nil {
+			return outboundThreadDeleted, nil
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return outboundThreadMissing, fmt.Errorf("topic lookup (including deleted): %w", err)
 		}
 	}
 	if _, err := cr.GetConversationByExternalRef(ctx, "native", extRef); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			return false, nil
+			return outboundThreadMissing, nil
 		}
-		return false, fmt.Errorf("conversation lookup: %w", err)
+		return outboundThreadMissing, fmt.Errorf("conversation lookup: %w", err)
 	}
-	return true, nil
+	return outboundThreadExists, nil
 }
 
 // resolveOutboundRouting consolidates recipient resolution, conversation
@@ -571,31 +620,39 @@ func (s *Server) resolveOutboundRouting(
 			s.mu.RLock()
 			wcs := s.webChatStore
 			s.mu.RUnlock()
-			// #2026: a free-text (non-dm:) thread_id may only address a thread
-			// conversation that already exists. Minting one here would create a
+			// #2026: on native delivery (web or no channel), a free-text
+			// (non-dm:) thread_id may only address a thread conversation that
+			// already exists and is visible. Minting one here would create a
 			// participant-less group conversation that the recipient never
-			// sees, while the sender is told "sent". Reject instead, before any
-			// conversation or message row is written.
-			if kind == "group" {
+			// sees, while the sender is told "sent". Reject instead, before
+			// any conversation or message row is written. External channels
+			// are exempt: their plugin delivers to the ThreadID itself.
+			if kind == "group" && outboundThreadGateApplies(req.Channel) {
 				var tl messaging.TopicConversationLookup
 				if wcs != nil {
 					tl = wcs
 				}
-				exists, existsErr := outboundThreadConversationExists(ctx, s.store, tl, extRef, req.ThreadID)
-				if existsErr != nil {
+				state, stateErr := outboundThreadConversationState(ctx, s.store, tl, extRef, req.ThreadID)
+				if stateErr != nil {
 					s.messageLog.Error("thread conversation lookup failed",
-						"thread_id", req.ThreadID, "agent_id", agent.ID, "error", existsErr)
+						"thread_id", req.ThreadID, "agent_id", agent.ID, "error", stateErr)
 					writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 						"thread conversation lookup failed", nil)
-					return nil, existsErr
+					return nil, stateErr
 				}
-				if !exists {
-					err := fmt.Errorf("thread %q does not resolve to an existing conversation", req.ThreadID)
+				switch state {
+				case outboundThreadMissing:
 					writeError(w, http.StatusUnprocessableEntity, ErrCodeUnprocessable,
-						fmt.Sprintf("thread_id %q does not match an existing conversation in this project; "+
+						fmt.Sprintf("thread_id %q does not match an existing conversation; "+
 							"address the conversation with conv:<uuid> (see 'scion conversation list'), "+
 							"or omit thread_id to message the recipient directly", req.ThreadID), nil)
-					return nil, err
+					return nil, fmt.Errorf("thread %q does not resolve to an existing conversation", req.ThreadID)
+				case outboundThreadDeleted:
+					writeError(w, http.StatusUnprocessableEntity, ErrCodeUnprocessable,
+						fmt.Sprintf("thread_id %q refers to a deleted conversation; "+
+							"address an active conversation with conv:<uuid> (see 'scion conversation list'), "+
+							"or omit thread_id to message the recipient directly", req.ThreadID), nil)
+					return nil, fmt.Errorf("thread %q refers to a deleted conversation", req.ThreadID)
 				}
 			}
 			if wcs != nil {

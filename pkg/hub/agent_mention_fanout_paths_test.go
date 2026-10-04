@@ -581,8 +581,8 @@ func TestMentionFanout_UsesPreTranslationBodyForMentionExtraction(t *testing.T) 
 }
 
 // An agent sender's outbound message can carry a free-text thread_id that
-// was never resolved against an existing, caller-referenced conversation
-// (DEF-138 Rules 2/3 mint a new project-scoped group from it on the spot).
+// resolves to an existing project-scoped group conversation via DEF-138
+// Rules 2/3, without the caller asserting it.
 // A mention fanned out from a message like that must not carry that
 // thread_id, or any key derived from it, onto the mentioned agent's row:
 // fan-out falls back to its own fresh sender<->mentioned-agent DM, exactly
