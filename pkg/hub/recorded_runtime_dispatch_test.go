@@ -47,8 +47,9 @@ import (
 // verifier. It records, per route, the recorded runtime parameter of every
 // request that passed signature verification.
 type rrRecordingBroker struct {
-	mu   sync.Mutex
-	seen map[string][]string // route suffix -> runtime param values ("<absent>" if missing)
+	mu        sync.Mutex
+	seen      map[string][]string // route suffix -> runtime param values ("<absent>" if missing)
+	deleteRun []string            // runId param of every verified DELETE
 }
 
 func (b *rrRecordingBroker) record(route string, q url.Values) {
@@ -65,6 +66,9 @@ func (b *rrRecordingBroker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	route := r.URL.Path[strings.LastIndex(r.URL.Path, "/"):]
 	if r.Method == http.MethodDelete {
 		route = "DELETE"
+		b.mu.Lock()
+		b.deleteRun = append(b.deleteRun, r.URL.Query().Get("runId"))
+		b.mu.Unlock()
 	}
 	b.record(route, r.URL.Query())
 	w.Header().Set("Content-Type", "application/json")
@@ -121,6 +125,7 @@ func TestRecordedRuntime_DispatchSendsSignedParamOverHTTP(t *testing.T) {
 			require.NoError(t, d.DispatchAgentStop(ctx, agent))
 			require.NoError(t, d.DispatchAgentRestart(ctx, agent))
 			require.NoError(t, d.DispatchAgentResetAuth(ctx, agent))
+			agent.RunID = "run-1" // the restart above minted its own run
 			require.NoError(t, d.DispatchAgentDelete(ctx, agent, true, false, false, time.Time{}))
 			require.NoError(t, d.DispatchAgentMessage(ctx, agent, "hi", false, nil))
 			_, err := d.DispatchAgentLogs(ctx, agent, 10)
@@ -139,6 +144,10 @@ func TestRecordedRuntime_DispatchSendsSignedParamOverHTTP(t *testing.T) {
 				if len(got) != 1 || got[0] != tc.want {
 					t.Errorf("%s: recorded runtime params %v, want [%s] (a request missing here failed signature verification or was not sent)", route, got, tc.want)
 				}
+			}
+			// The run ID rides inside the same signed DELETE (ptone/scion#2550).
+			if len(rb.deleteRun) != 1 || rb.deleteRun[0] != "run-1" {
+				t.Errorf("DELETE runId params %v, want [run-1]", rb.deleteRun)
 			}
 		})
 	}

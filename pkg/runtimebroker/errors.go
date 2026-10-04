@@ -141,15 +141,20 @@ func (s *Server) startFailureDetails(ctx context.Context, mgr agent.Manager, id,
 }
 
 // currentRunID reports the scion.run_id of the agent's runtime entry after
-// a failed start. It re-lists, under the request's ctx, the default
-// manager, every auxiliary manager and mgr (the one the start went to),
-// scoped to projectID the way a delete resolves its target
-// (collectAgentCandidates), so it sees what a later delete would see,
-// including a previous entry left on another runtime.
+// a failed start. It re-lists, under the request's ctx, allManagers(ctx)
+// plus mgr (the one the start went to), scoped to projectID the way a
+// delete resolves its target (collectAgentCandidates). allManagers honours
+// a recorded runtime type on ctx (ptone/scion#2748): a restart carries one,
+// so the list is limited to runtimes of the recorded type plus mgr; a
+// start carries none, so every registered runtime is listed. Either way it
+// sees what a later delete under the same ctx rules would see, including a
+// previous entry left on another listed runtime.
 //
 //   - One container entry: its run, or "" when it carries no run label.
 //   - Entries of more than one run: "", so the hub's next delete resolves
-//     by name, as before run IDs, which fails closed (409) on ambiguity.
+//     by name, as before run IDs. Name resolution fails closed (409) only
+//     on ambiguity among the runtimes that delete itself lists; an entry
+//     on a runtime outside its recorded type is not seen.
 //   - No container entry on any runtime (file-only entries do not count):
 //     ok is false. The hub then keeps the run it minted, so a delayed delete
 //     cannot remove a same-name agent created later.
