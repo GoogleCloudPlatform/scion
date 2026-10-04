@@ -624,6 +624,23 @@ describe('AgentStore delta probe', () => {
     await settle();
   });
 
+  it('resets for a different signed-in user before probing as them', async () => {
+    let user = 'u1';
+    const h = await loaded([row('a1', 1)], HUB, { currentUserId: () => user });
+    const listed = h.store.peek(HUB);
+    user = 'u2';
+    h.server.agents.push(row('b1', 5));
+    await tick();
+
+    // The old user's list is not merged into; the new user's walk reads it.
+    expect(ids(listed)).toEqual(['a1']);
+    expect(h.server.probes()).toBe(0);
+    expect(h.feeds).toHaveLength(2);
+    await h.connect();
+    expect(h.server.walks()).toBe(2);
+    expect(ids(h.store.peek(HUB)).sort()).toEqual(['a1', 'b1']);
+  });
+
   it('keeps probing after a failed probe', async () => {
     const h = await loaded([row('a1', 1)]);
     h.server.sortedStatus = (): number => 500;

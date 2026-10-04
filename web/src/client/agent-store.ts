@@ -920,6 +920,9 @@ export class AgentStore {
   }
 
   private runProbeTick(entry: Entry): void {
+    // A different signed-in user resets the store, which replaces this entry.
+    this.checkUser();
+    if (this.entries.get(entry.key) !== entry) return;
     const feed = this.feed;
     // A walk in flight reads everything a probe would; try on the next tick.
     if (!feed || entry.walk) {
