@@ -1573,6 +1573,8 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 				var rl *agent.GitHubRateLimitError
 				if errors.As(err, &rl) {
 					code = agent.GitHubRateLimitedCode
+				} else if isGHNotFound(err) {
+					code = agent.SkillErrCodeNotFound
 				}
 				resolveErrors = append(resolveErrors, ResolveSkillError{
 					URI: skillRef.URI, Code: code, Message: err.Error(),

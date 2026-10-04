@@ -126,6 +126,51 @@ func TestSkillsResolve_GHNotFoundIsRemembered(t *testing.T) {
 	assert.Equal(t, int64(2), gh.calls(), "another ref must still be resolved against GitHub")
 }
 
+// A GitHub 404, for the ref or for the skill path, is reported with the
+// not_found per-URI code (also when the remembered failure is served), so
+// the create path maps it to 404. Other GitHub failures keep resolve_failed.
+func TestSkillsResolve_GHNotFoundCode(t *testing.T) {
+	const (
+		owner     = "acme"
+		repo      = "code-repo"
+		skillPath = "skills/thing"
+		commitSHA = "efefefefefefefefefefefefefefefefefefefef"
+	)
+	cases := []struct {
+		name           string
+		uri            string
+		commitStatus   int
+		contentsStatus int
+		wantCode       string
+	}{
+		{"missing ref", "gh://" + owner + "/" + repo + "/thing@no-such-branch", http.StatusNotFound, http.StatusOK, agent.SkillErrCodeNotFound},
+		{"missing skill path", "gh://" + owner + "/" + repo + "/thing@main", http.StatusOK, http.StatusNotFound, agent.SkillErrCodeNotFound},
+		{"unprocessable ref", "gh://" + owner + "/" + repo + "/thing@bad", http.StatusUnprocessableEntity, http.StatusOK, "resolve_failed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, _, alice, _, project := setupSkillAuthzTest(t)
+			srv.ghResolutionStore = NewGitHubResolutionStore(enttest.NewClient(t))
+			gh := newStatusGitHub(t, owner, repo, skillPath, commitSHA)
+			gh.commitStatus.Store(int64(tc.commitStatus))
+			gh.contentsStatus.Store(int64(tc.contentsStatus))
+			srv.config.GitHubAppConfig.APIBaseURL = gh.URL
+			srv.config.GitHubAppConfig.RawBaseURL = gh.URL
+
+			for i := 0; i < 2; i++ {
+				rec := doRequestAsUser(t, srv, alice, http.MethodPost, "/api/v1/skills/resolve",
+					ResolveSkillsRequest{Skills: []ResolveSkillRef{{URI: tc.uri}}, ProjectID: project.ID})
+				require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+				var resp ResolveSkillsResponse
+				require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+				require.Empty(t, resp.Resolved)
+				require.Len(t, resp.Errors, 1)
+				assert.Equal(t, tc.wantCode, resp.Errors[0].Code, "request %d: %s", i+1, resp.Errors[0].Message)
+			}
+		})
+	}
+}
+
 // A skill path that is missing at an existing ref is remembered too.
 func TestResolveGitHubSkill_MissingSkillPathIsRemembered(t *testing.T) {
 	const (
@@ -480,8 +525,9 @@ func TestGHErrorBody(t *testing.T) {
 	prefix = strings.Repeat("a", maxGHErrorBody-2)
 	assert.Equal(t, prefix+"é...", ghErrorBody([]byte(prefix+"é"+"tail")))
 
-	// A four-byte character starting at byte 509 is kept whole: the
-	// back-off reaches its bound exactly at the start of the sequence.
+	// A four-byte character starting at byte 509 is dropped whole rather
+	// than split: the back-off reaches its bound exactly at the start of
+	// the sequence.
 	prefix = strings.Repeat("a", maxGHErrorBody-3)
 	got = ghErrorBody([]byte(prefix + "\U0001F600" + "tail"))
 	assert.True(t, utf8.ValidString(got), "cut body %q is not valid UTF-8", got)
