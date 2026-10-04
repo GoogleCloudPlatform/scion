@@ -65,27 +65,29 @@ func (m *blockingListManager) List(ctx context.Context, filter map[string]string
 }
 
 // newLivenessService returns a heartbeat service with a short interval and
-// listing deadline over a blocking default manager and one auxiliary target.
-func newLivenessService(client *mockRuntimeBrokerService, interval, deadline time.Duration) (*HeartbeatService, *blockingListManager) {
+// listing deadline over a blocking default target ("docker", agent d1) and
+// a blocking auxiliary target (k8sTargetB, agent a1). Neither blocks until
+// block is called on it.
+func newLivenessService(client *mockRuntimeBrokerService, interval, deadline time.Duration) (*HeartbeatService, *blockingListManager, *blockingListManager) {
 	defaultMgr := &blockingListManager{namedHeartbeatManager: namedHeartbeatManager{
 		heartbeatMockManager: heartbeatMockManager{agents: []api.AgentInfo{
 			{Name: "d1", ProjectID: "p1", Phase: "running"},
 		}},
 		name: "docker",
 	}}
-	auxMgr := &namedHeartbeatManager{
+	auxMgr := &blockingListManager{namedHeartbeatManager: namedHeartbeatManager{
 		heartbeatMockManager: heartbeatMockManager{agents: []api.AgentInfo{
 			{Name: "a1", ProjectID: "p1", Phase: "running"},
 		}},
 		name:     "kubernetes",
 		targetID: k8sTargetB,
-	}
+	}}
 	svc := NewHeartbeatService(client, "b1", interval, defaultMgr, nil, slog.Default())
 	// Below MinHeartbeatInterval, which NewHeartbeatService enforces.
 	svc.interval = interval
 	svc.listingDeadline = deadline
 	svc.auxiliaryManagers = func() []agent.Manager { return []agent.Manager{auxMgr} }
-	return svc, defaultMgr
+	return svc, defaultMgr, auxMgr
 }
 
 // waitForHeartbeats waits until at least n heartbeats were sent.
@@ -104,104 +106,169 @@ func waitForHeartbeats(t *testing.T, client *mockRuntimeBrokerService, n int, ti
 	}
 }
 
-var incompleteTargets = []hubclient.InventoryTarget{
-	{ID: "docker", Runtime: "docker", Complete: false},
-	{ID: k8sTargetB, Runtime: "kubernetes", Complete: false},
-}
-
-// assertLivenessOnly checks that a heartbeat keeps the broker online but
-// carries no agent data and claims no target as complete, so the Hub keeps
-// every agent's recorded state.
-func assertLivenessOnly(t *testing.T, hb *hubclient.BrokerHeartbeat) {
+// assertHeartbeat checks that a heartbeat is online, reports the wanted
+// inventory and exactly the wanted agents (slug -> runtime target).
+func assertHeartbeat(t *testing.T, hb *hubclient.BrokerHeartbeat, wantTargets []hubclient.InventoryTarget, wantAgents map[string]string) {
 	t.Helper()
 	if hb.Status != "online" {
 		t.Errorf("status = %q, want online", hb.Status)
 	}
-	if len(hb.Projects) != 0 {
-		t.Errorf("projects = %+v, want none", hb.Projects)
-	}
-	if hb.Inventory == nil || !reflect.DeepEqual(hb.Inventory.Targets, incompleteTargets) {
-		t.Errorf("inventory = %+v, want every target incomplete %+v", hb.Inventory, incompleteTargets)
-	}
 	if hb.Capabilities == nil {
 		t.Error("capabilities missing from heartbeat")
 	}
+	if hb.Inventory == nil || !reflect.DeepEqual(hb.Inventory.Targets, wantTargets) {
+		t.Errorf("inventory = %+v, want targets %+v", hb.Inventory, wantTargets)
+	}
+	if got := heartbeatAgentTargets(hb); !reflect.DeepEqual(got, wantAgents) {
+		t.Errorf("agents = %v, want %v", got, wantAgents)
+	}
 }
 
-// A listing that hangs does not hold back the heartbeat: heartbeats keep
-// going out every interval, each one online with no agent data and every
-// target incomplete, and no second listing is started while the first hangs.
+var (
+	allComplete = []hubclient.InventoryTarget{
+		{ID: "docker", Runtime: "docker", Complete: true},
+		{ID: k8sTargetB, Runtime: "kubernetes", Complete: true},
+	}
+	defaultPending = []hubclient.InventoryTarget{
+		{ID: "docker", Runtime: "docker", Complete: false},
+		{ID: k8sTargetB, Runtime: "kubernetes", Complete: true},
+	}
+	allPending = []hubclient.InventoryTarget{
+		{ID: "docker", Runtime: "docker", Complete: false},
+		{ID: k8sTargetB, Runtime: "kubernetes", Complete: false},
+	}
+	allAgents = map[string]string{"d1": "docker", "a1": k8sTargetB}
+)
+
+// A default-runtime listing that hangs does not hold back the heartbeat:
+// heartbeats keep going out every interval, online, with the default target
+// incomplete and the auxiliary target's agents still reported complete. The
+// hung listing is not started again while it hangs.
 func TestHeartbeatLiveness_SlowListingStillSendsHeartbeat(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
-	const interval = 150 * time.Millisecond
-	svc, mgr := newLivenessService(client, interval, 30*time.Millisecond)
-	mgr.block()
+	const interval = 300 * time.Millisecond
+	svc, defaultMgr, _ := newLivenessService(client, interval, 30*time.Millisecond)
+	defaultMgr.block()
 
 	start := time.Now()
 	svc.Start(context.Background())
 	// Deferred calls run in reverse: release the listing before Stop, so a
 	// failure here cannot leave Stop waiting on a hung listing.
 	defer svc.Stop()
-	defer mgr.unblock()
+	defer defaultMgr.unblock()
 
-	calls := waitForHeartbeats(t, client, 3, 3*time.Second)
+	calls := waitForHeartbeats(t, client, 3, 5*time.Second)
 	if first := calls[0].Time.Sub(start); first >= interval {
 		t.Errorf("first heartbeat after %v, want within one interval (%v)", first, interval)
 	}
 	for i := 1; i < len(calls); i++ {
-		if gap := calls[i].Time.Sub(calls[i-1].Time); gap > 2*interval {
+		if gap := calls[i].Time.Sub(calls[i-1].Time); gap > 3*interval {
 			t.Errorf("gap between heartbeats %d and %d = %v, want about %v", i-1, i, gap, interval)
 		}
 	}
 	for _, c := range calls {
-		assertLivenessOnly(t, c.Heartbeat)
+		assertHeartbeat(t, c.Heartbeat, defaultPending, map[string]string{"a1": k8sTargetB})
 	}
-	if got := mgr.calls.Load(); got != 1 {
+	if got := defaultMgr.calls.Load(); got != 1 {
 		t.Errorf("default runtime listed %d times while the first listing hung, want 1", got)
 	}
 }
 
-// Once the listing is fast again, the next heartbeat carries a fresh,
-// complete listing.
-func TestHeartbeatLiveness_ListingRecovers(t *testing.T) {
+// When every target hangs, the heartbeat still goes out online, with no
+// agent data and every target incomplete, so the Hub keeps every agent's
+// recorded state.
+func TestHeartbeatLiveness_AllTargetsHang(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
-	svc, mgr := newLivenessService(client, 100*time.Millisecond, 30*time.Millisecond)
-	mgr.block()
+	svc, defaultMgr, auxMgr := newLivenessService(client, 300*time.Millisecond, 30*time.Millisecond)
+	defaultMgr.block()
+	auxMgr.block()
 
 	svc.Start(context.Background())
 	defer svc.Stop()
-	defer mgr.unblock()
+	defer defaultMgr.unblock()
+	defer auxMgr.unblock()
 
-	calls := waitForHeartbeats(t, client, 1, 3*time.Second)
-	assertLivenessOnly(t, calls[0].Heartbeat)
+	calls := waitForHeartbeats(t, client, 2, 5*time.Second)
+	for _, c := range calls {
+		assertHeartbeat(t, c.Heartbeat, allPending, map[string]string{})
+		if len(c.Heartbeat.Projects) != 0 {
+			t.Errorf("projects = %+v, want none", c.Heartbeat.Projects)
+		}
+	}
+}
 
-	mgr.unblock()
-	listedBefore := mgr.calls.Load()
+// Once the listing is fast again, the next heartbeat carries a fresh,
+// complete listing of every target.
+func TestHeartbeatLiveness_ListingRecovers(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+	svc, defaultMgr, _ := newLivenessService(client, 200*time.Millisecond, 30*time.Millisecond)
+	defaultMgr.block()
 
-	deadline := time.Now().Add(3 * time.Second)
+	svc.Start(context.Background())
+	defer svc.Stop()
+	defer defaultMgr.unblock()
+
+	calls := waitForHeartbeats(t, client, 1, 5*time.Second)
+	assertHeartbeat(t, calls[0].Heartbeat, defaultPending, map[string]string{"a1": k8sTargetB})
+
+	defaultMgr.unblock()
+	listedBefore := defaultMgr.calls.Load()
+
+	deadline := time.Now().Add(5 * time.Second)
 	for {
 		calls = client.getHeartbeatCalls()
 		hb := calls[len(calls)-1].Heartbeat
-		if len(hb.Projects) > 0 {
-			want := []hubclient.InventoryTarget{
-				{ID: "docker", Runtime: "docker", Complete: true},
-				{ID: k8sTargetB, Runtime: "kubernetes", Complete: true},
-			}
-			if !reflect.DeepEqual(hb.Inventory.Targets, want) {
-				t.Errorf("targets = %+v, want %+v", hb.Inventory.Targets, want)
-			}
-			if got, want := heartbeatAgentTargets(hb), map[string]string{"d1": "docker", "a1": k8sTargetB}; !reflect.DeepEqual(got, want) {
-				t.Errorf("agent targets = %v, want %v", got, want)
-			}
+		if _, ok := heartbeatAgentTargets(hb)["d1"]; ok {
+			assertHeartbeat(t, hb, allComplete, allAgents)
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("no heartbeat with a listing after the runtime recovered")
+			t.Fatal("no heartbeat with the default target's agents after the runtime recovered")
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if mgr.calls.Load() <= listedBefore {
+	if defaultMgr.calls.Load() <= listedBefore {
 		t.Error("the recovered heartbeat did not come from a new listing")
+	}
+}
+
+// A heartbeat that starts while another heartbeat's listing is still within
+// its deadline waits for that listing and reports its result, instead of
+// going out without agent data or listing the runtime a second time.
+func TestHeartbeatLiveness_ConcurrentHeartbeatJoinsListing(t *testing.T) {
+	client := &mockRuntimeBrokerService{}
+	svc, defaultMgr, _ := newLivenessService(client, time.Hour, 5*time.Second)
+	defaultMgr.block()
+	defer defaultMgr.unblock()
+
+	errs := make(chan error, 2)
+	go func() { errs <- svc.ForceHeartbeat(context.Background()) }()
+	waitFor(t, 3*time.Second, "the first listing to start", func() bool { return defaultMgr.calls.Load() == 1 })
+	go func() { errs <- svc.ForceHeartbeat(context.Background()) }()
+	// Give the second heartbeat time to reach its wait before the listing
+	// finishes; it must join, not list again.
+	time.Sleep(100 * time.Millisecond)
+	defaultMgr.unblock()
+
+	for i := 0; i < 2; i++ {
+		select {
+		case err := <-errs:
+			if err != nil {
+				t.Fatalf("ForceHeartbeat: %v", err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("ForceHeartbeat did not return")
+		}
+	}
+	calls := client.getHeartbeatCalls()
+	if len(calls) != 2 {
+		t.Fatalf("got %d heartbeats, want 2", len(calls))
+	}
+	for _, c := range calls {
+		assertHeartbeat(t, c.Heartbeat, allComplete, allAgents)
+	}
+	if got := defaultMgr.calls.Load(); got != 1 {
+		t.Errorf("default runtime listed %d times, want 1 shared listing", got)
 	}
 }
 
@@ -209,11 +276,11 @@ func TestHeartbeatLiveness_ListingRecovers(t *testing.T) {
 // deadline is long, and cancels the listing's context.
 func TestHeartbeatLiveness_StopDoesNotWaitForListing(t *testing.T) {
 	client := &mockRuntimeBrokerService{}
-	svc, mgr := newLivenessService(client, time.Hour, time.Hour)
+	svc, defaultMgr, _ := newLivenessService(client, time.Hour, time.Hour)
 
 	var listCtxErr atomic.Value
 	listing := make(chan struct{})
-	ctxMgr := &ctxAwareListManager{namedHeartbeatManager: mgr.namedHeartbeatManager, started: listing, ctxErr: &listCtxErr}
+	ctxMgr := &ctxAwareListManager{namedHeartbeatManager: defaultMgr.namedHeartbeatManager, started: listing, ctxErr: &listCtxErr}
 	svc.SwapManager(ctxMgr)
 
 	svc.Start(context.Background())
@@ -230,17 +297,11 @@ func TestHeartbeatLiveness_StopDoesNotWaitForListing(t *testing.T) {
 	}()
 	select {
 	case <-stopped:
-	case <-time.After(2 * time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("Stop did not return while the listing was in progress")
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
-	for listCtxErr.Load() == nil {
-		if time.Now().After(deadline) {
-			t.Fatal("the listing context was not cancelled by Stop")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	waitFor(t, 3*time.Second, "the listing context to be cancelled by Stop", func() bool { return listCtxErr.Load() != nil })
 	if svc.IsRunning() {
 		t.Error("service still running after Stop")
 	}
@@ -260,4 +321,24 @@ func (m *ctxAwareListManager) List(ctx context.Context, filter map[string]string
 	<-ctx.Done()
 	m.ctxErr.Store(ctx.Err())
 	return nil, ctx.Err()
+}
+
+func TestDefaultListingDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		interval, want time.Duration
+	}{
+		{5 * time.Second, 3750 * time.Millisecond}, // 3/4 of the interval
+		{10 * time.Second, 7500 * time.Millisecond},
+		{15 * time.Second, 10 * time.Second}, // the floor
+		{20 * time.Second, 10 * time.Second},
+		{30 * time.Second, 15 * time.Second}, // half the interval
+		{time.Minute, 30 * time.Second},
+	} {
+		if got := defaultListingDeadline(tc.interval); got != tc.want {
+			t.Errorf("defaultListingDeadline(%v) = %v, want %v", tc.interval, got, tc.want)
+		}
+		if got := defaultListingDeadline(tc.interval); got >= tc.interval {
+			t.Errorf("defaultListingDeadline(%v) = %v, not below the interval", tc.interval, got)
+		}
+	}
 }

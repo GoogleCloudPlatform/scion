@@ -37,6 +37,10 @@ type fakeControlHub struct {
 	connects atomic.Int32
 	ended    atomic.Int32 // connections the hub saw end
 
+	// ignorePings makes the hub drop pings without answering, so the
+	// broker's read deadline is what ends each connection.
+	ignorePings bool
+
 	mu    sync.Mutex
 	conns []*websocket.Conn
 }
@@ -66,6 +70,9 @@ func newFakeControlHub(t *testing.T) *fakeControlHub {
 		h.conns = append(h.conns, ws)
 		h.mu.Unlock()
 		h.connects.Add(1)
+		if h.ignorePings {
+			ws.SetPingHandler(func(string) error { return nil })
+		}
 		if _, _, err := ws.ReadMessage(); err != nil { // connect message
 			h.ended.Add(1)
 			return
@@ -116,6 +123,46 @@ func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+// assertReconnectsBounded waits for repeated reconnects and checks, while
+// the client keeps reconnecting, that every replaced connection has ended on
+// the hub and that the goroutine count does not grow with the number of
+// connections (no ping loop or reader outlives its connection).
+func assertReconnectsBounded(t *testing.T, hub *fakeControlHub) {
+	t.Helper()
+	const rounds = 8
+	replacedEnded := func() bool { return hub.ended.Load() >= hub.connects.Load()-1 }
+
+	waitFor(t, 5*time.Second, "repeated reconnects", func() bool { return hub.connects.Load() >= rounds })
+	waitFor(t, 3*time.Second, "replaced connections to end on the hub", replacedEnded)
+	first := runtime.NumGoroutine()
+	firstConnects := hub.connects.Load()
+
+	waitFor(t, 5*time.Second, "more reconnects", func() bool { return hub.connects.Load() >= firstConnects+rounds })
+	waitFor(t, 3*time.Second, "replaced connections to end on the hub", replacedEnded)
+	// Allow a little slack for a connection being set up or torn down at
+	// the moment of each sample.
+	if second := runtime.NumGoroutine(); second > first+4 {
+		t.Errorf("goroutines grew from %d to %d over %d reconnects", first, second, hub.connects.Load()-firstConnects)
+	}
+}
+
+// When the hub stops answering pings, the read deadline ends the connection;
+// the client closes it, reconnects, and leaves neither the replaced
+// connections nor their ping loops behind.
+func TestControlChannelPing_ReadDeadlineClosesConnection(t *testing.T) {
+	hub := newFakeControlHub(t)
+	hub.ignorePings = true
+	c := newPingTestClient(hub, nil)
+	c.config.PongWait = 100 * time.Millisecond
+
+	connectDone := make(chan error, 1)
+	go func() { connectDone <- c.Connect(context.Background()) }()
+	t.Cleanup(func() { _ = c.Close() })
+
+	assertReconnectsBounded(t, hub)
+	closeClient(t, c, connectDone)
 }
 
 // A failed ping write closes the connection at once and the client
@@ -190,12 +237,7 @@ func TestControlChannelPing_RepeatedFailuresDoNotLeak(t *testing.T) {
 	connectDone := make(chan error, 1)
 	go func() { connectDone <- c.Connect(context.Background()) }()
 
-	const rounds = 8
-	waitFor(t, 5*time.Second, "repeated reconnects", func() bool { return hub.connects.Load() >= rounds })
-	// Every connection but possibly the current one has ended on the hub.
-	waitFor(t, 3*time.Second, "replaced connections to be closed", func() bool {
-		return hub.ended.Load() >= hub.connects.Load()-1
-	})
+	assertReconnectsBounded(t, hub)
 
 	closeClient(t, c, connectDone)
 	hub.closeAll()
