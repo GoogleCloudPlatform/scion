@@ -31,8 +31,9 @@ const globalProjectSlug = "global"
 
 // isGlobalHubProject reports whether a hub project with this slug is the
 // global project. Only the slug counts, the same rule dispatch uses to mark
-// the global project for the broker: project names and labels can be set by
-// clients and do not identify it.
+// the global project for the broker. The slug is reserved on client project
+// routes (see isReservedProjectSlug); project names and labels can be set by
+// clients and do not identify the global project.
 func isGlobalHubProject(slug string) bool {
 	return slug == globalProjectSlug
 }

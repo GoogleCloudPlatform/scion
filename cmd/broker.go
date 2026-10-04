@@ -199,8 +199,9 @@ Examples:
   scion runtime-broker provide
 
   # Add local broker as provider for a specific project. No local path is
-  # sent: an existing provider path for this broker is kept, otherwise the
-  # broker uses its hub-managed project directory.
+  # sent: an existing provider path for this broker is kept (a stored
+  # global-directory path is cleared), otherwise the broker uses its
+  # hub-managed project directory.
   scion runtime-broker provide --project <project-id>
 
   # Add local broker as provider for a project linked to a local checkout
@@ -373,7 +374,7 @@ func init() {
 	brokerProvideCmd.Flags().StringVar(&brokerBrokerID, "broker", "", "Broker name or ID to use (for remote broker operations)")
 	brokerProvideCmd.Flags().BoolVar(&brokerMakeDefault, "make-default", false, "Set this broker as the default for the project")
 	brokerProvideCmd.Flags().StringVar(&brokerHubFlag, "hub", "", "Hub connection name (from 'scion runtime-broker hubs')")
-	brokerProvideCmd.Flags().StringVar(&brokerProvidePath, "path", "", "Local project path to register for this broker (default with --project: none sent; an existing provider path is kept, otherwise the broker uses its hub-managed project directory)")
+	brokerProvideCmd.Flags().StringVar(&brokerProvidePath, "path", "", "Local project path to register for this broker (default with --project: none sent; an existing provider path is kept unless it is the global directory, otherwise the broker uses its hub-managed project directory)")
 
 	brokerWithdrawCmd.Flags().StringVar(&brokerProjectID, "project", "", "Project name or ID to remove as provider from")
 
@@ -1165,7 +1166,7 @@ func runBrokerProvide(cmd *cobra.Command, args []string) error {
 	if localProjectPath != "" {
 		fmt.Printf("Local project path: %s\n", localProjectPath)
 	} else {
-		fmt.Println("No local path sent; an existing provider path for this broker is kept, otherwise the broker uses its hub-managed project directory.")
+		fmt.Println("No local path sent; an existing provider path for this broker is kept (a stored global-directory path is cleared), otherwise the broker uses its hub-managed project directory.")
 	}
 
 	// Handle --make-default flag
