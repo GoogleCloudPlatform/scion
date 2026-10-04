@@ -239,8 +239,8 @@ func TestReactivatePreservesCeilingAndProvenance(t *testing.T) {
 	require.NoError(t, s.CreateDelegationEdge(ctx, e))
 	before := allEdgesFor(t, s, "agent-p")[e.ID]
 	require.NotNil(t, before)
-	require.Equal(t, store.EffectCeilingBounded, before.EffectCeiling.Kind)
-	require.Equal(t, 1, before.AuthorityProvenance.ProvenanceVersion)
+	require.Equal(t, store.EffectCeilingBounded, before.Kind)
+	require.Equal(t, 1, before.ProvenanceVersion)
 
 	n, err := s.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, "agent-p",
 		store.Deactivation{Cause: store.EdgeDeactivationAgentSoftDelete, OpID: "op-p"})
