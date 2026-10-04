@@ -140,14 +140,7 @@ func TestRunID_E2E_StaleDeleteSparesRecreatedAgent(t *testing.T) {
 	// directory under ~/.scion/projects.
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	origWd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(t.TempDir()); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(origWd) })
+	t.Chdir(t.TempDir())
 
 	const slug, name = "e2e-proj", "dev"
 	projectID := tid("project-e2e")
