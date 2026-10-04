@@ -934,7 +934,7 @@ type createRollback struct {
 	// env vars), where no such revoke fired.
 	RevokeCredentials bool
 	// DeleteRuntime deletes the agent's runtime-side resources; nil when
-	// there are none yet.
+	// the create has none.
 	DeleteRuntime func(context.Context) error
 }
 
