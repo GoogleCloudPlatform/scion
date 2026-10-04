@@ -147,6 +147,20 @@ type Agent struct {
 	RunIntent   RunIntent  `json:"-"`
 	RunIntentAt *time.Time `json:"-"`
 
+	// Start claim (see start_claim.go). StartClaimID is "" when no claim is
+	// held. Internal bookkeeping, untagged like the launch columns.
+	// UpdateAgent and CreateAgent never write them; the only writers are the
+	// AgentStore start-claim methods and a launch's terminal write.
+	StartClaimID            string          `json:"-"`
+	StartClaimKind          StartClaimKind  `json:"-"`
+	StartClaimState         StartClaimState `json:"-"`
+	StartClaimOwner         string          `json:"-"`
+	StartClaimTarget        string          `json:"-"`
+	StartClaimAt            *time.Time      `json:"-"`
+	StartClaimLeaseUntil    *time.Time      `json:"-"`
+	StartClaimUnconfirmedAt *time.Time      `json:"-"`
+	StartClaimHoldUntil     *time.Time      `json:"-"`
+
 	// Launch is the computed, client-facing view of the launch_* columns
 	// above (design §3.2; see launch_view.go). It is nil unless a
 	// caller populates it (e.g. enrichAgent/enrichAgents in pkg/hub via

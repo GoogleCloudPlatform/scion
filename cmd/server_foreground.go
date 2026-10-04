@@ -1816,6 +1816,12 @@ func buildHubServerConfig(cfg *config.GlobalConfig, hubEndpoint, devAuthToken st
 		SchedulerIntervalSeconds:     cfg.Scheduler.IntervalSeconds,
 		SchedulerMaxConcurrency:      cfg.Scheduler.MaxConcurrency, // *int: nil = use default, *0 = unlimited
 		Workstation:                  !hostedMode,
+		StartClaim: hub.StartClaimSettings{
+			LeaseTTL:              cfg.Hub.StartClaimLeaseTTL,
+			MaxDuration:           cfg.Hub.StartMaxDuration,
+			UnconfirmedHold:       cfg.Hub.StartUnconfirmedHold,
+			CreateUnconfirmedHold: cfg.Hub.StartCreateUnconfirmedHold,
+		},
 		DevUserConfig: hub.DevUserConfig{
 			Username:    cfg.Auth.Username,
 			DisplayName: cfg.Auth.DisplayName,

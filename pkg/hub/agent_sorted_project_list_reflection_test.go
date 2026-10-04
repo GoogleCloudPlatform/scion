@@ -167,6 +167,12 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	// Run intent columns are written only through SetRunIntent and
 	// RevertRunIntent (never by CreateAgent/UpdateAgent).
 	"RunIntent": true, "RunIntentAt": true,
+	// Start claim columns are written only through the start-claim store
+	// methods (never by CreateAgent/UpdateAgent).
+	"StartClaimID": true, "StartClaimKind": true, "StartClaimState": true,
+	"StartClaimOwner": true, "StartClaimTarget": true, "StartClaimAt": true,
+	"StartClaimLeaseUntil": true, "StartClaimUnconfirmedAt": true,
+	"StartClaimHoldUntil": true,
 }
 
 func reflectFillStoreAgent(t *testing.T, projectID string) *store.Agent {

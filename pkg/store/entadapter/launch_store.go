@@ -334,9 +334,13 @@ func (s *AgentStore) EndLaunch(ctx context.Context, agentID, launchID, reason st
 		return nil
 	}
 
-	if _, err := ltx.client.Agent.UpdateOneID(uid).
+	now, err := storeNow(ctx, ltx.tx, isPG)
+	if err != nil {
+		return err
+	}
+	if _, err := withLaunchEndSettlement(ltx.client.Agent.UpdateOneID(uid).
 		SetLaunchState(store.LaunchStateEnded).
-		SetLaunchEndReason(reason).
+		SetLaunchEndReason(reason), current, reason, now).
 		Save(ctx); err != nil {
 		return mapError(err)
 	}

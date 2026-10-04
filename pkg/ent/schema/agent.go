@@ -352,6 +352,52 @@ func (Agent) Fields() []ent.Field {
 		field.Time("run_intent_at").
 			Optional().
 			Nillable(),
+
+		// --- Start claim ---
+		// An owned, leased claim taken before any start is dispatched, so at
+		// most one start (or queued-stop drain) acts on an agent at a time.
+		// The start_claim_* columns are written only by the AgentStore
+		// start-claim methods (start_claim.go), never by UpdateAgent or
+		// CreateAgent, and writing them never bumps state_version.
+		//
+		// start_claim_id is NULL when no claim is held.
+		field.String("start_claim_id").
+			Optional().
+			Nillable(),
+		// start_claim_kind: user, restart, wake, create, recovery,
+		// reincarnate or stop.
+		field.String("start_claim_kind").
+			Optional().
+			Default(""),
+		// start_claim_state: live (the holder renews its lease) or
+		// unconfirmed (the outcome is unknown; held until the runtime shows
+		// what happened).
+		field.String("start_claim_state").
+			Optional().
+			Default(""),
+		// start_claim_owner is the hub instance that holds a live claim.
+		field.String("start_claim_owner").
+			Optional().
+			Default(""),
+		// start_claim_target is the runtime target the start is expected to
+		// use, for agents that have no recorded target yet.
+		field.String("start_claim_target").
+			Optional().
+			Default(""),
+		// Store-clock times: when the claim was taken, when its lease ends,
+		// when it became unconfirmed, and the end of the unconfirmed hold.
+		field.Time("start_claim_at").
+			Optional().
+			Nillable(),
+		field.Time("start_claim_lease_until").
+			Optional().
+			Nillable(),
+		field.Time("start_claim_unconfirmed_at").
+			Optional().
+			Nillable(),
+		field.Time("start_claim_hold_until").
+			Optional().
+			Nillable(),
 	}
 }
 
@@ -387,6 +433,11 @@ func (Agent) Indexes() []ent.Index {
 		index.Fields("launch_id"),
 		// Lookup of agents on a broker by run intent.
 		index.Fields("runtime_broker_id", "run_intent"),
+		// The start-claim reaper's scan: only rows holding a claim.
+		index.Fields("start_claim_state", "start_claim_lease_until").
+			Annotations(
+				entsql.IndexWhere("start_claim_id IS NOT NULL"),
+			),
 		// Partial index backing CompositeStore.ReconcileHarnessConfigColumn's
 		// every-boot scan (GoogleCloudPlatform/scion#2153), which queries
 		// exactly Where(HarnessConfigIsNil(), AppliedConfigNotNil()) ordered

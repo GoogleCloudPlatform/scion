@@ -228,6 +228,10 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	resp.Server.Hub.AutoSuspendStalled = &b
 	resp.Server.Hub.StalledThreshold = snap.StalledThreshold
 	resp.Server.Hub.SoftDeleteRetention = snap.SoftDeleteRetention
+	resp.Server.Hub.StartClaimLeaseTTL = snap.StartClaimLeaseTTL
+	resp.Server.Hub.StartMaxDuration = snap.StartMaxDuration
+	resp.Server.Hub.StartUnconfirmedHold = snap.StartUnconfirmedHold
+	resp.Server.Hub.StartCreateUnconfirmedHold = snap.StartCreateUnconfirmedHold
 	b2 := snap.SoftDeleteRetainFiles
 	resp.Server.Hub.SoftDeleteRetainFiles = &b2
 
@@ -997,6 +1001,18 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if hub.SoftDeleteRetention != "" {
 				keys = append(keys, "server.hub.soft_delete_retention")
 			}
+			if hub.StartClaimLeaseTTL != "" {
+				keys = append(keys, "server.hub.start_claim_lease_ttl")
+			}
+			if hub.StartMaxDuration != "" {
+				keys = append(keys, "server.hub.start_max_duration")
+			}
+			if hub.StartUnconfirmedHold != "" {
+				keys = append(keys, "server.hub.start_unconfirmed_hold")
+			}
+			if hub.StartCreateUnconfirmedHold != "" {
+				keys = append(keys, "server.hub.start_create_unconfirmed_hold")
+			}
 			if hub.SoftDeleteRetainFiles != nil {
 				keys = append(keys, "server.hub.soft_delete_retain_files")
 			}
@@ -1386,6 +1402,10 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 				d.SoftDeleteRetention = req.Server.Hub.SoftDeleteRetention
 			}
 			d.SoftDeleteRetainFiles = req.Server.Hub.SoftDeleteRetainFiles
+			d.StartClaimLeaseTTL = req.Server.Hub.StartClaimLeaseTTL
+			d.StartMaxDuration = req.Server.Hub.StartMaxDuration
+			d.StartUnconfirmedHold = req.Server.Hub.StartUnconfirmedHold
+			d.StartCreateUnconfirmedHold = req.Server.Hub.StartCreateUnconfirmedHold
 		}
 		doc = d
 
