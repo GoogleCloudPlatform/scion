@@ -258,7 +258,7 @@ scion keys my-agent "Enter"
 
 **In local mode**, `scion keys` uses the local keys primitive with identical tmux-argument semantics and the same input validation (including rejecting an empty string). It works for projects linked to a Hub project and for purely local projects that never ran `scion hub enable`; the target is resolved within the selected project only, and an ambiguous match fails rather than guessing. There is no Hub authorization, rate limit, or audit record, since no Hub is involved.
 
-`scion keys` replaces the removed `scion message --raw` flag. `scion message --raw` now fails locally, before any request is sent, with guidance naming `scion keys`; update scripts and skills to call `scion keys` directly.
+`scion keys` replaces the removed `scion message --raw` flag. `scion message --raw` now fails locally, before any request is sent, with guidance naming `scion keys`; update scripts and skills to call `scion keys` directly. See [Migrating from raw message delivery](/scion/reference/raw-message-removal/).
 
 ### `scion set-message-mode`
 
