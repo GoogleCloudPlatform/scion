@@ -75,10 +75,11 @@ func requireIntentDeleteInProgress(t *testing.T, rec *httptest.ResponseRecorder,
 }
 
 // A delete that claims the row after the start gate passed refuses the
-// start's running-intent write: start, restart and create-on-existing answer 409
+// start's running-intent write: lifecycle start and restart answer 409
 // delete_in_progress, nothing is dispatched (restart's stop leg included),
 // and the stored intent stays as the delete left it (ptone/scion#2550,
-// round 5 N2).
+// round 5 N2). Create-on-existing and the workspace sync-to finalize are
+// covered by the tests below.
 func TestRunIntent_DeleteClaimAfterGateRefusesStart(t *testing.T) {
 	for _, action := range []string{api.AgentActionStart, api.AgentActionRestart} {
 		t.Run(action, func(t *testing.T) {
@@ -207,4 +208,61 @@ func TestRestart_DeleteClaimBetweenLegsRollsBackOwnReservation(t *testing.T) {
 	requireDeleteInProgress(t, rec)
 	require.EqualValues(t, 1, disp.startCount.Load(), "the start leg was attempted")
 	assert.EqualValues(t, 0, brokerReservationCount(t, s, brokerID), "the restart's own reservation is rolled back")
+}
+
+// Create-on-existing (handleExistingAgent): each path that starts the
+// existing agent writes the running intent first, and a delete claim that
+// landed after the name lookup refuses it with 409 delete_in_progress and
+// no start (ptone/scion#2550, round 6 N4).
+func TestRunIntent_DeleteClaimAfterGateRefusesCreateOnExisting(t *testing.T) {
+	cases := []struct {
+		name  string
+		phase state.Phase
+		req   CreateAgentRequest
+	}{
+		{name: "suspended-resume", phase: state.PhaseSuspended},
+		{name: "stopped-resume", phase: state.PhaseStopped, req: CreateAgentRequest{Resume: true}},
+		{name: "provisioning-start", phase: state.PhaseProvisioning},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := newSiteIntentDispatcher(nil)
+			srv, base, project := setupCreateAgentServer(t, disp)
+			disp.s = base
+			name := "ri-claim-existing-" + tc.name
+			agent := createSiteAgent(t, base, project, name, tc.phase, store.RunIntentStopped)
+			srv.store = preClaimReadStore{Store: base}
+			seedAgentDeletion(t, base, agent.ID, seedLiveDeleting)
+
+			req := tc.req
+			req.Name, req.ProjectID, req.Task = name, project.ID, "work"
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", req)
+			requireIntentDeleteInProgress(t, rec, agent.ID)
+			assert.Empty(t, disp.intents("start"), "no start dispatch")
+			got, err := base.GetAgent(context.Background(), agent.ID)
+			require.NoError(t, err)
+			assert.Equal(t, store.RunIntentStopped, got.RunIntent, "intent is not left running")
+		})
+	}
+}
+
+// The workspace sync-to finalize bootstrap dispatch writes the running
+// intent first; a delete claim refuses it with 409 delete_in_progress and
+// no create dispatch (ptone/scion#2550, round 6 N4).
+func TestRunIntent_DeleteClaimAfterGateRefusesSyncFinalize(t *testing.T) {
+	disp := newSiteIntentDispatcher(nil)
+	srv, base, project := setupCreateAgentServer(t, disp)
+	disp.s = base
+	srv.SetStorage(newMockStorage("test-bucket"))
+	agent := createSiteAgent(t, base, project, "ri-claim-sync", state.PhaseProvisioning, store.RunIntentStopped)
+	srv.store = preClaimReadStore{Store: base}
+	seedAgentDeletion(t, base, agent.ID, seedLiveDeleting)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/workspace/sync-to/finalize",
+		map[string]any{"manifest": map[string]any{"version": "1.0", "files": []any{}}})
+	requireIntentDeleteInProgress(t, rec, agent.ID)
+	assert.Empty(t, disp.intents("create"), "no create dispatch")
+	got, err := base.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, store.RunIntentStopped, got.RunIntent, "intent is not left running")
 }
