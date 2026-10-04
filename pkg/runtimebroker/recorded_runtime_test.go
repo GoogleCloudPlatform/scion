@@ -447,18 +447,19 @@ func TestCanonicalRuntimeName(t *testing.T) {
 		want string
 		ok   bool
 	}{
-		"kubernetes":       {"kubernetes", true},
-		"k8s":              {"kubernetes", true},
-		"remote":           {"kubernetes", true},
-		"docker":           {"docker", true},
-		"podman":           {"podman", true},
-		"container":        {"container", true},
-		"cloudrun":         {"cloudrun", true},
-		"cloudrun-sandbox": {"cloudrun-sandbox", true},
-		"":                 {"", false},
-		"local":            {"", false},
-		"auto":             {"", false},
-		"managed:x":        {"", false},
+		"kubernetes":         {"kubernetes", true},
+		"k8s":                {"kubernetes", true},
+		"remote":             {"kubernetes", true},
+		"docker":             {"docker", true},
+		"podman":             {"podman", true},
+		"container":          {"container", true},
+		"cloudrun":           {"cloudrun", true},
+		"cloudrun-instances": {"cloudrun", true},
+		"cloudrun-sandbox":   {"cloudrun-sandbox", true},
+		"":                   {"", false},
+		"local":              {"", false},
+		"auto":               {"", false},
+		"managed:x":          {"", false},
 	}
 	for in, tc := range cases {
 		got, ok := canonicalRuntimeName(in)

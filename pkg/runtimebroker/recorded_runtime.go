@@ -60,7 +60,8 @@ const recordedRuntimeRetryAfterSeconds = "30"
 // runtimes pkg/runtime.GetRuntime (factory.go) constructs. Kubernetes
 // spellings are classified separately by isKubernetesRuntimeName, which
 // mirrors GetRuntime's own normalization ("remote" → "kubernetes", "k8s"
-// accepted alongside "kubernetes").
+// accepted alongside "kubernetes"); "cloudrun-instances" is likewise mapped
+// to "cloudrun" by canonicalRuntimeName.
 var knownRuntimeNames = map[string]bool{
 	"docker":           true,
 	"podman":           true,
@@ -78,6 +79,11 @@ var knownRuntimeNames = map[string]bool{
 func canonicalRuntimeName(name string) (string, bool) {
 	if isKubernetesRuntimeName(name) {
 		return "kubernetes", true
+	}
+	if name == "cloudrun-instances" {
+		// GetRuntime builds a CloudRunRuntime for "cloudrun-instances",
+		// and that runtime reports its name as "cloudrun".
+		return "cloudrun", true
 	}
 	if knownRuntimeNames[name] {
 		return name, true
