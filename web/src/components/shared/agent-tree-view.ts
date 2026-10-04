@@ -43,7 +43,11 @@ import {
   canMessageAgent,
   isTerminalAvailable,
 } from '../../shared/types.js';
-import { getStateDisplay, type StatusVariant } from '../../shared/agent-state-display.js';
+import {
+  getStateDisplay,
+  stateLabel,
+  type StatusVariant,
+} from '../../shared/agent-state-display.js';
 import {
   buildLineageForest,
   computeStableLayout,
@@ -1345,7 +1349,7 @@ export class ScionAgentTreeView extends LitElement {
           <span class="name">${agent.name}</span>
           <scion-status-badge
             status=${status as StatusType}
-            label=${status}
+            label=${stateLabel(status)}
             size="small"
           ></scion-status-badge>
           ${agent.template ? html`<span class="meta">${agent.template}</span>` : nothing}

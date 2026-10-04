@@ -107,6 +107,14 @@ describe('scion-chat-members agent tooltip', () => {
     expect(tooltipContent(el)).toBe('thinking');
   });
 
+  it('falls back to the display label, not the raw state name (ptone/scion#1571)', async () => {
+    const blocked = await mount([agent({ activity: 'blocked' })]);
+    expect(tooltipContent(blocked)).toBe('waiting on others');
+    document.body.innerHTML = '';
+    const waiting = await mount([agent({ activity: 'waiting_for_input' })]);
+    expect(tooltipContent(waiting)).toBe('waiting for input');
+  });
+
   it('shows the last activity event as the updated time', async () => {
     const tenMinAgo = new Date(Date.now() - 10 * 60_000).toISOString();
     const el = await mount([

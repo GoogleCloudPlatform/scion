@@ -54,6 +54,7 @@ interface AgentNotificationsResponse {
   agentNotifications: Notification[];
 }
 import type { StatusType } from '../shared/status-badge.js';
+import { stateLabel } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
@@ -1293,7 +1294,7 @@ export class ScionPageAgentDetail extends LitElement {
             <h1>${agent.name}</h1>
             <scion-status-badge
               status=${getAgentDisplayStatus(agent) as StatusType}
-              label=${getAgentDisplayStatus(agent)}
+              label=${stateLabel(getAgentDisplayStatus(agent))}
             ></scion-status-badge>
             <scion-message-mode-badge
               mode=${agent.messageMode || 'project'}
@@ -1540,7 +1541,7 @@ export class ScionPageAgentDetail extends LitElement {
               ${agent.activity
                 ? html`<scion-status-badge
                       status=${agent.activity as StatusType}
-                      label=${agent.activity}
+                      label=${stateLabel(agent.activity)}
                       size="small"
                     ></scion-status-badge
                     >${(agent.lastActivityEvent && !this.isZeroDate(agent.lastActivityEvent)) ||
