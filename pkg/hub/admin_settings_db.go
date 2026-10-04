@@ -1092,6 +1092,12 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 		if srv.WorkspaceStorage != nil && !isZeroStruct(srv.WorkspaceStorage) {
 			keys = append(keys, "server.workspace_storage")
 		}
+		if srv.SharedDirStorage != nil && !isZeroStruct(srv.SharedDirStorage) {
+			keys = append(keys, "server.shared_dir_storage")
+		}
+		if srv.HomeStorage != nil && !isZeroStruct(srv.HomeStorage) {
+			keys = append(keys, "server.home_storage")
+		}
 		if srv.MessageBroker != nil && !isZeroStruct(srv.MessageBroker) {
 			keys = append(keys, "server.message_broker")
 		}

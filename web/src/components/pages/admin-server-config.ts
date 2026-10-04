@@ -3509,8 +3509,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                   >
                   ${this.renderFieldValue(
                     'default_gcp_identity_mode',
-                    this.defaultGCPIdentityMode ||
-                      'None (runtime default: Block; Passthrough on Kubernetes)',
+                    this.defaultGCPIdentityMode || 'None (runtime default: Block; Passthrough on Kubernetes)',
                     html`${this.renderEnvBadge('default_gcp_identity_mode')}<sl-select
                         placeholder="None (runtime default: Block; Passthrough on Kubernetes)"
                         clearable

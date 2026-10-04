@@ -250,15 +250,112 @@ func TestResolveHomeStorage_FirstStartFailures(t *testing.T) {
 	}
 }
 
-// Settings that cannot be loaded and never mention home storage give a
-// local home and keep the record pending.
+// Settings that cannot be loaded and never mention home storage give, and
+// record, a local home, so the choice is made once.
 func TestResolveHomeStorage_UnloadableSettingsWithoutHomeStorage(t *testing.T) {
 	h := newHSHarness(t)
 	h.loadErr = errHomeStorageNotConfigured
 	plan, err := resolveHomeStorage(h.input("kubernetes", "gke"))
 	require.NoError(t, err)
 	assert.Equal(t, "local", plan.Backend)
-	assert.Equal(t, homeStoragePending, h.record().Backend)
+	assert.Equal(t, &homeStorageRecord{Backend: "local"}, h.record())
+}
+
+// Settings values are checked where they are used: an unknown backend or
+// leaf value fails the start, names its key, and is never recorded.
+func TestResolveHomeStorage_UnknownValuesFailAndAreNotRecorded(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(h *hsHarness, in *homeStorageInput)
+		wantErr string
+	}{
+		{"backend wrong case", func(h *hsHarness, in *homeStorageInput) {
+			p := h.gs.Profiles["gke"]
+			p.HomeStorageBackend = "NFS"
+			h.gs.Profiles["gke"] = p
+		}, "profiles.gke.home_storage_backend"},
+		{"backend wrong case, experiment off", func(h *hsHarness, in *homeStorageInput) {
+			p := h.gs.Profiles["gke"]
+			p.HomeStorageBackend = "NFS"
+			h.gs.Profiles["gke"] = p
+			in.ExperimentOn = false
+		}, "profiles.gke.home_storage_backend"},
+		{"global backend typo", func(h *hsHarness, in *homeStorageInput) {
+			p := h.gs.Profiles["gke"]
+			p.HomeStorageBackend = ""
+			h.gs.Profiles["gke"] = p
+			h.gs.Server.HomeStorage.Backend = "nfs "
+		}, "server.home_storage.backend"},
+		{"leaf wrong case", func(h *hsHarness, in *homeStorageInput) {
+			r := h.gs.Runtimes["k8s"]
+			r.HomeStorageLeaf = "Broker"
+			h.gs.Runtimes["k8s"] = r
+		}, "runtimes.k8s.home_storage_leaf"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newHSHarness(t)
+			in := h.input("kubernetes", "gke")
+			tt.mutate(h, &in)
+			_, err := resolveHomeStorage(in)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+			assert.Equal(t, &homeStorageRecord{Backend: homeStoragePending}, h.record())
+		})
+	}
+}
+
+// Every path component is checked: the slug and the subpath root, on the
+// first start and when read back from the record.
+func TestResolveHomeStorage_PathComponents(t *testing.T) {
+	for _, slug := range []string{"", "My Agent", "a/b", ".."} {
+		h := newHSHarness(t)
+		in := h.input("kubernetes", "gke")
+		in.Slug = slug
+		_, err := resolveHomeStorage(in)
+		require.Error(t, err, "slug %q", slug)
+		assert.Equal(t, homeStoragePending, h.record().Backend)
+	}
+	for _, root := range []string{"../x", "/abs", "a/../b", "a//b"} {
+		h := newHSHarness(t)
+		h.gs.Server.SharedDirStorage.NFS.SubPathRoot = root
+		_, err := resolveHomeStorage(h.input("kubernetes", "gke"))
+		require.Error(t, err, "subpath root %q", root)
+		assert.Contains(t, err.Error(), "subpath_root")
+		assert.Equal(t, homeStoragePending, h.record().Backend)
+
+		// Read back from a record.
+		h2 := newHSHarness(t)
+		require.NoError(t, os.WriteFile(filepath.Join(h2.agentDir, homeStorageRecordFile),
+			[]byte(`{"backend":"nfs","leaf":"pod","share_id":"share-1","pv_claim_name":"pv-1","subpath_root":"`+root+`"}`), 0o644))
+		_, err = resolveHomeStorage(h2.input("kubernetes", "gke"))
+		require.Error(t, err, "recorded subpath root %q", root)
+	}
+	// A recorded slug is the agent's own; a start whose slug is not a slug
+	// fails even with a valid record.
+	h := newHSHarness(t)
+	require.NoError(t, writeHomeStorageRecord(h.agentDir, homeStorageRecord{Backend: "nfs", Leaf: "pod", ShareID: "share-1", PVClaimName: "pv-1", SubPathRoot: "trees"}))
+	in := h.input("kubernetes", "gke")
+	in.Slug = "Not A Slug"
+	_, err := resolveHomeStorage(in)
+	require.Error(t, err)
+}
+
+// A non-Kubernetes start does not read the record, so even a damaged one
+// gives a local home without an error.
+func TestResolveHomeStorage_NonKubernetesIgnoresDamagedRecord(t *testing.T) {
+	h := newHSHarness(t)
+	require.NoError(t, os.WriteFile(filepath.Join(h.agentDir, homeStorageRecordFile), []byte("not json"), 0o644))
+	plan, err := resolveHomeStorage(h.input("docker", "local"))
+	require.NoError(t, err)
+	assert.Equal(t, "local", plan.Backend)
+	_, err = resolveHomeStorage(h.input("kubernetes", "gke"))
+	assert.Error(t, err, "a Kubernetes start does read, and refuse, the damaged record")
+}
+
+// This version does not start agents with an NFS home.
+func TestHomeStorageNFSAvailable_OffInThisVersion(t *testing.T) {
+	assert.False(t, homeStorageNFSAvailable)
 }
 
 // After the first start the record decides, whatever the settings say now.
@@ -420,4 +517,13 @@ func TestProvisionAgent_HomeStorageRecord(t *testing.T) {
 	rec, err = readHomeStorageRecord(agentDir)
 	require.NoError(t, err)
 	assert.Equal(t, "local", rec.Backend, "provisioning an existing agent keeps its record")
+
+	// An agent created before the record existed has none; provisioning it
+	// again must not mark it pending, so it keeps a local home.
+	require.NoError(t, os.Remove(filepath.Join(agentDir, homeStorageRecordFile)))
+	_, _, _, err = ProvisionAgent(context.Background(), "hs-agent", "default", "", "claude", projectScionDir, "", "", "", "")
+	require.NoError(t, err)
+	rec, err = readHomeStorageRecord(agentDir)
+	require.NoError(t, err)
+	assert.Nil(t, rec, "re-provisioning a pre-feature agent writes no record")
 }
