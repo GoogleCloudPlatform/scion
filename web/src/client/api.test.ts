@@ -510,7 +510,8 @@ describe('apiFetch — 403 body read aborted by the request signal', () => {
     fetchMock.mockResolvedValue(slowResponse('{"error":{"code":"forb', controller.signal));
 
     const pending = apiFetch('/api/v1/slow', { signal: controller.signal });
-    setTimeout(() => controller.abort(), 10);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    controller.abort();
     const res = await pending;
 
     expect(res.status).toBe(403);
@@ -525,7 +526,8 @@ describe('apiFetch — 403 body read aborted by the request signal', () => {
     );
 
     const pending = apiFetch('/api/v1/slow', { signal: controller.signal });
-    setTimeout(() => controller.abort(), 10);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    controller.abort();
     await pending;
 
     expect(reloadSpy).not.toHaveBeenCalled();
@@ -547,7 +549,8 @@ describe('apiFetch — 403 body read aborted by the request signal', () => {
       signal: controller.signal,
       suppressAccessDeniedToast: true,
     });
-    setTimeout(() => controller.abort(), 10);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    controller.abort();
     await pending;
 
     expect(captured).toHaveLength(0);

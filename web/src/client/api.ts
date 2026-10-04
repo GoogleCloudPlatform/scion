@@ -57,9 +57,11 @@ export interface ApiFetchOptions extends RequestInit {
 
 /**
  * User-safe reason for a 403 whose body could not be read because the
- * request was aborted mid-read.
+ * request was aborted mid-read. Distinct from a server-sent 'Access denied'
+ * reason, which the toast shows as written; formatAccessDenied treats this
+ * one as generic.
  */
-export const ACCESS_DENIED_UNREADABLE_REASON = 'Access denied';
+export const ACCESS_DENIED_UNREADABLE_REASON = "You don't have permission to perform this action.";
 
 /**
  * Fetch wrapper that includes credentials and handles 403 responses.
