@@ -393,7 +393,7 @@ func (s *Server) dispatchRoutedRecipient(
 	if params.isPrimary {
 		msg = &messages.StructuredMessage{
 			Version:     messages.Version,
-			Timestamp:   params.now.Format(time.RFC3339),
+			Timestamp:   params.now.UTC().Format(time.RFC3339),
 			Sender:      params.req.Message.Sender,
 			SenderID:    params.req.Message.SenderID,
 			Recipient:   "agent:" + agent.Slug,
@@ -413,7 +413,7 @@ func (s *Server) dispatchRoutedRecipient(
 		)
 		// Override NewMention's time.Now() with the shared arrival timestamp
 		// so all recipients see one consistent arrival time (design step 6).
-		msg.Timestamp = params.now.Format(time.RFC3339)
+		msg.Timestamp = params.now.UTC().Format(time.RFC3339)
 		msg.SenderID = params.req.Message.SenderID
 		msg.RecipientID = agent.ID
 		msg.Urgent = params.req.Message.Urgent

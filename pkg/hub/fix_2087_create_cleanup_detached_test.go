@@ -149,7 +149,7 @@ type cancelingCreateDispatcher struct {
 	credJTI string
 }
 
-func (d *cancelingCreateDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (d *cancelingCreateDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
 	d.capturedAgent = agent
 	d.heldBeforeCleanup = observeReservations(d.t, d.s, agent.ID)
 	d.credJTI = "p0-cred-" + agent.ID
@@ -166,7 +166,7 @@ func (d *cancelingCreateDispatcher) DispatchAgentCreateWithGather(ctx context.Co
 	if d.createErr != nil {
 		return nil, d.createErr
 	}
-	return d.envReqs, nil
+	return envReqsResult(d.envReqs), nil
 }
 
 func (d *cancelingCreateDispatcher) DispatchAgentDelete(ctx context.Context, _ *store.Agent, _, _, _ bool, _ time.Time) error {

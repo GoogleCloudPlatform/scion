@@ -192,7 +192,8 @@ func TestAllMintSitesUseCeiledHelper(t *testing.T) {
 	require.NotEmpty(t, want)
 	require.Less(t, len(want), len(ScopesForRole(AgentRoleFull)), "the ceiling narrows the full scope set")
 
-	require.NoError(t, f.disp.DispatchAgentCreate(ctx, a))
+	_, err := f.disp.DispatchAgentCreate(ctx, a)
+	require.NoError(t, err)
 	assert.ElementsMatch(t, want, f.tokenClaims(t, f.client.lastCreateReq.AgentToken).Scopes, "create")
 
 	require.NoError(t, f.disp.DispatchAgentStart(ctx, a, "", false))
@@ -293,7 +294,7 @@ func TestDispatcherCreateMintDenialKeepsExistingCredential(t *testing.T) {
 	before := getTestAgentCredential(t, f.store, jti)
 	require.Nil(t, before.RevokedAt)
 
-	err := f.disp.DispatchAgentCreate(context.Background(), a)
+	_, err := f.disp.DispatchAgentCreate(context.Background(), a)
 	require.ErrorIs(t, err, ErrProvenanceMissing)
 	assert.False(t, f.client.createCalled, "no broker create")
 	assertIssueDeniedAudit(t, f.store, a.ID, mintSiteCreate, string(DenyCauseCeilingOrphaned))

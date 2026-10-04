@@ -23,6 +23,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
 )
@@ -270,8 +271,8 @@ func runScheduleList(cmd *cobra.Command, args []string) error {
 				if len(id) > 8 {
 					id = id[:8]
 				}
-				fireAt := formatScheduleTime(evt.FireAt, evt.Status)
-				created := formatRelativeTime(evt.CreatedAt)
+				fireAt := scheduleWhen(evt.FireAt, evt.Status)
+				created := clitime.Ago(evt.CreatedAt)
 				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", id, evt.EventType, evt.Status, fireAt, created)
 			}
 			_ = w.Flush()
@@ -296,7 +297,7 @@ func runScheduleList(cmd *cobra.Command, args []string) error {
 				}
 				nextRun := "-"
 				if sched.NextRunAt != nil {
-					nextRun = formatScheduleTime(*sched.NextRunAt, sched.Status)
+					nextRun = scheduleWhen(*sched.NextRunAt, sched.Status)
 				}
 				_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", id, sched.Name, sched.CronExpr, nextRun, sched.Status)
 			}
@@ -379,14 +380,14 @@ func printEventDetail(evt *hubclient.ScheduledEvent) {
 	fmt.Printf("Scheduled Event: %s\n", evt.ID)
 	fmt.Printf("  Type:       %s\n", evt.EventType)
 	fmt.Printf("  Status:     %s\n", evt.Status)
-	fmt.Printf("  Fire At:    %s (%s)\n", evt.FireAt.Format(time.RFC3339), formatScheduleTime(evt.FireAt, evt.Status))
+	fmt.Printf("  Fire At:    %s (%s)\n", clitime.Format(evt.FireAt, clitime.Full), scheduleWhen(evt.FireAt, evt.Status))
 	fmt.Printf("  Project:      %s\n", evt.ProjectID)
-	fmt.Printf("  Created:    %s\n", evt.CreatedAt.Format(time.RFC3339))
+	fmt.Printf("  Created:    %s\n", clitime.Format(evt.CreatedAt, clitime.Full))
 	if evt.CreatedBy != "" {
 		fmt.Printf("  Created By: %s\n", evt.CreatedBy)
 	}
 	if evt.FiredAt != nil {
-		fmt.Printf("  Fired At:   %s\n", evt.FiredAt.Format(time.RFC3339))
+		fmt.Printf("  Fired At:   %s\n", clitime.Format(*evt.FiredAt, clitime.Full))
 	}
 	if evt.Error != "" {
 		fmt.Printf("  Error:      %s\n", evt.Error)
@@ -415,10 +416,10 @@ func printScheduleDetail(sched *hubclient.Schedule) {
 	fmt.Printf("  Status:     %s\n", sched.Status)
 	fmt.Printf("  Cron:       %s\n", sched.CronExpr)
 	if sched.NextRunAt != nil {
-		fmt.Printf("  Next Run:   %s (%s)\n", sched.NextRunAt.Format(time.RFC3339), formatScheduleTime(*sched.NextRunAt, sched.Status))
+		fmt.Printf("  Next Run:   %s (%s)\n", clitime.Format(*sched.NextRunAt, clitime.Full), scheduleWhen(*sched.NextRunAt, sched.Status))
 	}
 	if sched.LastRunAt != nil {
-		lastRunInfo := sched.LastRunAt.Format(time.RFC3339)
+		lastRunInfo := clitime.Format(*sched.LastRunAt, clitime.Full)
 		if sched.LastRunStatus != "" {
 			lastRunInfo += " (" + sched.LastRunStatus + ")"
 		}
@@ -426,7 +427,7 @@ func printScheduleDetail(sched *hubclient.Schedule) {
 	}
 	fmt.Printf("  Event Type: %s\n", sched.EventType)
 	fmt.Printf("  Project:      %s\n", sched.ProjectID)
-	fmt.Printf("  Created:    %s\n", sched.CreatedAt.Format(time.RFC3339))
+	fmt.Printf("  Created:    %s\n", clitime.Format(sched.CreatedAt, clitime.Full))
 	if sched.CreatedBy != "" {
 		fmt.Printf("  Created By: %s\n", sched.CreatedBy)
 	}
@@ -539,7 +540,7 @@ func runScheduleCreate(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Scheduled event created: %s\n", evt.ID)
 	fmt.Printf("  Type:    %s\n", evt.EventType)
-	fmt.Printf("  Fire At: %s\n", evt.FireAt.Format(time.RFC3339))
+	fmt.Printf("  Fire At: %s\n", clitime.Format(evt.FireAt, clitime.Full))
 
 	return nil
 }
@@ -593,7 +594,7 @@ func runScheduleCreateRecurring(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Cron:     %s\n", sched.CronExpr)
 	fmt.Printf("  Status:   %s\n", sched.Status)
 	if sched.NextRunAt != nil {
-		fmt.Printf("  Next Run: %s\n", sched.NextRunAt.Format(time.RFC3339))
+		fmt.Printf("  Next Run: %s\n", clitime.Format(*sched.NextRunAt, clitime.Full))
 	}
 
 	return nil
@@ -647,7 +648,7 @@ func runScheduleResume(cmd *cobra.Command, args []string) error {
 
 	msg := fmt.Sprintf("Schedule %s resumed.", fullID)
 	if sched.NextRunAt != nil {
-		msg += fmt.Sprintf(" Next run: %s", sched.NextRunAt.Format(time.RFC3339))
+		msg += fmt.Sprintf(" Next run: %s", clitime.Format(*sched.NextRunAt, clitime.Full))
 	}
 
 	return outputActionResult(ActionResult{
@@ -728,7 +729,7 @@ func runScheduleHistory(cmd *cobra.Command, args []string) error {
 		}
 		firedAt := "-"
 		if evt.FiredAt != nil {
-			firedAt = formatRelativeTime(*evt.FiredAt)
+			firedAt = clitime.Ago(*evt.FiredAt)
 		}
 		errStr := "-"
 		if evt.Error != "" {
@@ -742,49 +743,6 @@ func runScheduleHistory(cmd *cobra.Command, args []string) error {
 	_ = w.Flush()
 
 	return nil
-}
-
-// formatScheduleTime returns a human-readable time description for an event.
-func formatScheduleTime(t time.Time, status string) string {
-	if status == "pending" {
-		diff := time.Until(t)
-		if diff <= 0 {
-			return "now"
-		}
-		return "in " + formatScheduleDuration(diff)
-	}
-	// Reuse formatRelativeTime from hub.go for past times
-	return formatRelativeTime(t)
-}
-
-// formatScheduleDuration returns a human-readable duration string.
-func formatScheduleDuration(d time.Duration) string {
-	if d < time.Minute {
-		s := int(d.Seconds())
-		if s <= 1 {
-			return "1 second"
-		}
-		return fmt.Sprintf("%d seconds", s)
-	}
-	if d < time.Hour {
-		m := int(d.Minutes())
-		if m == 1 {
-			return "1 minute"
-		}
-		return fmt.Sprintf("%d minutes", m)
-	}
-	if d < 24*time.Hour {
-		h := int(d.Hours())
-		if h == 1 {
-			return "1 hour"
-		}
-		return fmt.Sprintf("%d hours", h)
-	}
-	days := int(d.Hours() / 24)
-	if days == 1 {
-		return "1 day"
-	}
-	return fmt.Sprintf("%d days", days)
 }
 
 func init() {
@@ -820,4 +778,14 @@ func init() {
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleAgent, "agent", "", "Target agent name")
 	scheduleCreateRecurringCmd.Flags().StringVar(&scheduleMessage, "message", "", "Message body")
 	scheduleCreateRecurringCmd.Flags().BoolVar(&scheduleInterrupt, "interrupt", false, "Interrupt the agent")
+}
+
+// scheduleWhen renders a scheduled time relative to now. A pending time that
+// is already due reads "now", as in the web scheduler views, rather than
+// "Xm ago"; every other time uses clitime.Relative.
+func scheduleWhen(t time.Time, status string) string {
+	if status == "pending" && !t.IsZero() && !t.After(clitime.Now()) {
+		return "now"
+	}
+	return clitime.Relative(t)
 }

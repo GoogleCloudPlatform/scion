@@ -15,6 +15,8 @@
 package config
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -1148,6 +1150,142 @@ runtimes:
 	errors, err := ValidateSettings(data, "1")
 	require.NoError(t, err)
 	assert.Empty(t, errors, "an empty priority_class_name means unset and must pass validation")
+}
+
+func TestValidateSettings_KubernetesServiceAccountMappings(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    kubernetes_service_account_mappings:
+      agent-worker@my-project.iam.gserviceaccount.com: agent-worker-ksa
+profiles:
+  prod:
+    runtime: k8s
+    kubernetes_service_account_mappings:
+      agent-worker@my-project.iam.gserviceaccount.com: profile-ksa
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.Empty(t, errors, "kubernetes_service_account_mappings on both runtimes and profiles should pass schema validation")
+}
+
+func TestValidateSettings_KubernetesServiceAccountMappings_InvalidKeyRejected(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    kubernetes_service_account_mappings:
+      not-a-gsa-email: agent-worker-ksa
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "a key that is not a well-formed GCP service account email should fail schema validation")
+}
+
+func TestValidateSettings_KubernetesServiceAccountMappings_InvalidValueRejected(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    kubernetes_service_account_mappings:
+      agent-worker@my-project.iam.gserviceaccount.com: "Not_A_Valid_KSA_Name"
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "a value that is not a valid DNS-1123 subdomain KSA name should fail schema validation")
+}
+
+func TestValidateSettings_KubernetesServiceAccountMappings_UppercaseKeyRejected(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    kubernetes_service_account_mappings:
+      Agent-Worker@my-project.iam.gserviceaccount.com: agent-worker-ksa
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "an uppercase GCP service account email key should fail schema validation")
+}
+
+func TestValidateSettings_KubernetesServiceAccountMappings_EmptyValueRejected(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    kubernetes_service_account_mappings:
+      agent-worker@my-project.iam.gserviceaccount.com: ""
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "an empty KSA name value should fail schema validation")
+}
+
+func TestValidateSettings_KubernetesServiceAccountMappings_ValueTooLongRejected(t *testing.T) {
+	longName := strings.Repeat("a", 254)
+	data := []byte(fmt.Sprintf(`
+schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    kubernetes_service_account_mappings:
+      agent-worker@my-project.iam.gserviceaccount.com: %q
+`, longName))
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "a 254-character KSA name value should fail schema validation (max 253)")
+}
+
+func TestValidateSettings_RuntimeNamespace(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		namespace string
+		wantValid bool
+	}{
+		{name: "label", namespace: "scion-agents", wantValid: true},
+		{name: "empty means unset", namespace: "", wantValid: true},
+		{name: "63 characters", namespace: strings.Repeat("a", 63), wantValid: true},
+		{name: "64 characters", namespace: strings.Repeat("a", 64)},
+		{name: "uppercase", namespace: "Scion-Agents"},
+		{name: "dotted", namespace: "scion.agents"},
+		{name: "leading hyphen", namespace: "-scion"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := []byte(fmt.Sprintf(`
+schema_version: "1"
+runtimes:
+  k8s:
+    type: kubernetes
+    namespace: %q
+`, tc.namespace))
+			errors, err := ValidateSettings(data, "1")
+			require.NoError(t, err)
+			if tc.wantValid {
+				assert.Empty(t, errors)
+			} else {
+				assert.NotEmpty(t, errors)
+			}
+		})
+	}
+}
+
+func TestValidateSettings_ProfileKubernetesNamespaceRejected(t *testing.T) {
+	data := []byte(`
+schema_version: "1"
+profiles:
+  prod:
+    runtime: k8s
+    kubernetes_namespace: scion-agents
+`)
+	errors, err := ValidateSettings(data, "1")
+	require.NoError(t, err)
+	assert.NotEmpty(t, errors, "profiles carry no namespace; a profile selects a runtime entry that sets one")
 }
 
 func TestValidateSettings_ServerHubSoftDelete(t *testing.T) {

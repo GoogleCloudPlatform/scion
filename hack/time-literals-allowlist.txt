@@ -1,0 +1,17 @@
+# Allowlist for the time-literals gate (hack/check-time-literals.sh).
+#
+# One exception per line:
+#
+#   <file> | <function> | <finding> | <one-line justification>
+#
+# <file> is the repo-relative path, <function> the enclosing function as the
+# gate prints it (Type.Method, Func, or "(package)"), and <finding> the text
+# after "allowlist anchor:" in the gate's output. Whitespace inside <finding>
+# is normalised. One entry covers every identical finding in that function.
+# No line numbers: entries survive unrelated edits.
+#
+# Entries are reviewed like code. Prefer fixing the site (add .UTC(), bind the
+# time.Time) over adding an entry. An entry that matches nothing fails the
+# gate, so delete entries together with the code they cover.
+#
+# There are currently no exceptions.

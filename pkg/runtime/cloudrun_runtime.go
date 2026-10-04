@@ -943,7 +943,7 @@ func sanitizeGCPLabelValue(value string) string {
 
 // errEmptyPerAgentCloudRun is returned by CloudRunRuntime.Run for an
 // empty-per-agent agent (design #2703).
-var errEmptyPerAgentCloudRun = errors.New("cloudrun: empty-per-agent workspaces are not supported on the Cloud Run runtime, " +
+var errEmptyPerAgentCloudRun = errors.New("cloudrun: \"Empty directory per agent\" (empty-per-agent) workspaces are not supported on the Cloud Run runtime, " +
 	"which always mounts the project's shared workspace; use a Docker, Podman, Apple or Kubernetes broker for this project")
 
 // isEmptyPerAgentRun reports whether cfg starts an empty-per-agent agent,

@@ -307,9 +307,9 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 // ComputeCapabilitiesForActions evaluates identity's capabilities over
 // resources for exactly the given actions, in that order, rather than the
 // full ResourceActions[resourceType] set ComputeCapabilitiesBatch uses. It is
-// the thin read-pass variant design lists-graph.md 5.3 (step 3, the sorted
-// project endpoint's per-candidate ActionRead-only pass) and step 5a/6 (the
-// full-row re-decision and remaining-actions merge) call for.
+// the thin read-pass variant used by the sorted project endpoint for its
+// per-candidate ActionRead-only pass and for the full-row re-decision and
+// remaining-actions merge.
 //
 // It runs the identical evaluation path ComputeCapabilitiesBatch does —
 // DecideFromContext for a scoped UAT, CheckAccess otherwise — so a caller
@@ -352,12 +352,12 @@ func (a *AuthzService) ComputeCapabilitiesForActions(ctx context.Context, identi
 // evaluated on the member snapshot) with a capability result for the
 // remaining actions (evaluated on the full row), preserving the action order
 // ResourceActions[resourceType] defines — the same order
-// ComputeCapabilitiesBatch produces, which is what design lists-graph.md 5.3
-// step 6 requires (the non-waivable deep-equality gate) and what the
-// decision-count accounting depends on: an item whose read decision came
-// from step 3 and whose remaining
-// actions came from step 6 must look identical to one where every action was
-// decided by a single ComputeCapabilitiesBatch call.
+// ComputeCapabilitiesBatch produces, which is what the non-waivable
+// deep-equality gate requires and what the decision-count accounting
+// depends on: an item whose read decision came from the read pass and
+// whose remaining actions came from the remaining-actions pass must look
+// identical to one where every action was decided by a single
+// ComputeCapabilitiesBatch call.
 func mergeCapabilities(order []Action, readCap, restCap *Capabilities) *Capabilities {
 	allowed := make([]string, 0, len(order))
 	for _, action := range order {
