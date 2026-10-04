@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversation"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/conversationparticipant"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/decisionaudit"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationadoption"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/entitlementbinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/envvar"
@@ -115,6 +116,7 @@ const (
 	TypeConversation             = "Conversation"
 	TypeConversationParticipant  = "ConversationParticipant"
 	TypeDecisionAudit            = "DecisionAudit"
+	TypeDelegationAdoption       = "DelegationAdoption"
 	TypeDelegationEdge           = "DelegationEdge"
 	TypeEntitlementBinding       = "EntitlementBinding"
 	TypeEnvVar                   = "EnvVar"
@@ -24364,6 +24366,1420 @@ func (m *DecisionAuditMutation) ClearEdge(name string) error {
 // It returns an error if the edge is not defined in the schema.
 func (m *DecisionAuditMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown DecisionAudit edge %s", name)
+}
+
+// DelegationAdoptionMutation represents an operation that mutates the DelegationAdoption nodes in the graph.
+type DelegationAdoptionMutation struct {
+	config
+	op                 Op
+	typ                string
+	id                 *uuid.UUID
+	cohort_id          *string
+	origin             *string
+	policy_version     *int
+	addpolicy_version  *int
+	original_edge_id   *string
+	adopted_edge_id    *string
+	delegate_id        *string
+	delegator_type     *string
+	delegator_id       *string
+	scope_id           *string
+	role               *string
+	depth              *int
+	adddepth           *int
+	status             *string
+	reason             *string
+	before_fingerprint *string
+	after_summary      *string
+	actor_kind         *string
+	actor_id           *string
+	created            *time.Time
+	updated            *time.Time
+	clearedFields      map[string]struct{}
+	done               bool
+	oldValue           func(context.Context) (*DelegationAdoption, error)
+	predicates         []predicate.DelegationAdoption
+}
+
+var _ ent.Mutation = (*DelegationAdoptionMutation)(nil)
+
+// delegationadoptionOption allows management of the mutation configuration using functional options.
+type delegationadoptionOption func(*DelegationAdoptionMutation)
+
+// newDelegationAdoptionMutation creates new mutation for the DelegationAdoption entity.
+func newDelegationAdoptionMutation(c config, op Op, opts ...delegationadoptionOption) *DelegationAdoptionMutation {
+	m := &DelegationAdoptionMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeDelegationAdoption,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withDelegationAdoptionID sets the ID field of the mutation.
+func withDelegationAdoptionID(id uuid.UUID) delegationadoptionOption {
+	return func(m *DelegationAdoptionMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *DelegationAdoption
+		)
+		m.oldValue = func(ctx context.Context) (*DelegationAdoption, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().DelegationAdoption.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withDelegationAdoption sets the old DelegationAdoption of the mutation.
+func withDelegationAdoption(node *DelegationAdoption) delegationadoptionOption {
+	return func(m *DelegationAdoptionMutation) {
+		m.oldValue = func(context.Context) (*DelegationAdoption, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m DelegationAdoptionMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m DelegationAdoptionMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of DelegationAdoption entities.
+func (m *DelegationAdoptionMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *DelegationAdoptionMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *DelegationAdoptionMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().DelegationAdoption.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetCohortID sets the "cohort_id" field.
+func (m *DelegationAdoptionMutation) SetCohortID(s string) {
+	m.cohort_id = &s
+}
+
+// CohortID returns the value of the "cohort_id" field in the mutation.
+func (m *DelegationAdoptionMutation) CohortID() (r string, exists bool) {
+	v := m.cohort_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCohortID returns the old "cohort_id" field's value of the DelegationAdoption entity.
+// If the DelegationAdoption object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationAdoptionMutation) OldCohortID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCohortID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCohortID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCohortID: %w", err)
+	}
+	return oldValue.CohortID, nil
+}
+
+// ResetCohortID resets all changes to the "cohort_id" field.
+func (m *DelegationAdoptionMutation) ResetCohortID() {
+	m.cohort_id = nil
+}
+
+// SetOrigin sets the "origin" field.
+func (m *DelegationAdoptionMutation) SetOrigin(s string) {
+	m.origin = &s
+}
+
+// Origin returns the value of the "origin" field in the mutation.
+func (m *DelegationAdoptionMutation) Origin() (r string, exists bool) {
+	v := m.origin
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOrigin returns the old "origin" field's value of the DelegationAdoption entity.
+// If the DelegationAdoption object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationAdoptionMutation) OldOrigin(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOrigin is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOrigin requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOrigin: %w", err)
+	}
+	return oldValue.Origin, nil
+}
+
+// ResetOrigin resets all changes to the "origin" field.
+func (m *DelegationAdoptionMutation) ResetOrigin() {
+	m.origin = nil
+}
+
+// SetPolicyVersion sets the "policy_version" field.
+func (m *DelegationAdoptionMutation) SetPolicyVersion(i int) {
+	m.policy_version = &i
+	m.addpolicy_version = nil
+}
+
+// PolicyVersion returns the value of the "policy_version" field in the mutation.
+func (m *DelegationAdoptionMutation) PolicyVersion() (r int, exists bool) {
+	v := m.policy_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPolicyVersion returns the old "policy_version" field's value of the DelegationAdoption entity.
+// If the DelegationAdoption object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationAdoptionMutation) OldPolicyVersion(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPolicyVersion is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPolicyVersion requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPolicyVersion: %w", err)
+	}
+	return oldValue.PolicyVersion, nil
+}
+
+// AddPolicyVersion adds i to the "policy_version" field.
+func (m *DelegationAdoptionMutation) AddPolicyVersion(i int) {
+	if m.addpolicy_version != nil {
+		*m.addpolicy_version += i
+	} else {
+		m.addpolicy_version = &i
+	}
+}
+
+// AddedPolicyVersion returns the value that was added to the "policy_version" field in this mutation.
+func (m *DelegationAdoptionMutation) AddedPolicyVersion() (r int, exists bool) {
+	v := m.addpolicy_version
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetPolicyVersion resets all changes to the "policy_version" field.
+func (m *DelegationAdoptionMutation) ResetPolicyVersion() {
+	m.policy_version = nil
+	m.addpolicy_version = nil
+}
+
+// SetOriginalEdgeID sets the "original_edge_id" field.
+func (m *DelegationAdoptionMutation) SetOriginalEdgeID(s string) {
+	m.original_edge_id = &s
+}
+
+// OriginalEdgeID returns the value of the "original_edge_id" field in the mutation.
+func (m *DelegationAdoptionMutation) OriginalEdgeID() (r string, exists bool) {
+	v := m.original_edge_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldOriginalEdgeID returns the old "original_edge_id" field's value of the DelegationAdoption entity.
+// If the DelegationAdoption object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationAdoptionMutation) OldOriginalEdgeID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldOriginalEdgeID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldOriginalEdgeID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldOriginalEdgeID: %w", err)
+	}
+	return oldValue.OriginalEdgeID, nil
+}
+
+// ClearOriginalEdgeID clears the value of the "original_edge_id" field.
+func (m *DelegationAdoptionMutation) ClearOriginalEdgeID() {
+	m.original_edge_id = nil
+	m.clearedFields[delegationadoption.FieldOriginalEdgeID] = struct{}{}
+}
+
+// OriginalEdgeIDCleared returns if the "original_edge_id" field was cleared in this mutation.
+func (m *DelegationAdoptionMutation) OriginalEdgeIDCleared() bool {
+	_, ok := m.clearedFields[delegationadoption.FieldOriginalEdgeID]
+	return ok
+}
+
+// ResetOriginalEdgeID resets all changes to the "original_edge_id" field.
+func (m *DelegationAdoptionMutation) ResetOriginalEdgeID() {
+	m.original_edge_id = nil
+	delete(m.clearedFields, delegationadoption.FieldOriginalEdgeID)
+}
+
+// SetAdoptedEdgeID sets the "adopted_edge_id" field.
+func (m *DelegationAdoptionMutation) SetAdoptedEdgeID(s string) {
+	m.adopted_edge_id = &s
+}
+
+// AdoptedEdgeID returns the value of the "adopted_edge_id" field in the mutation.
+func (m *DelegationAdoptionMutation) AdoptedEdgeID() (r string, exists bool) {
+	v := m.adopted_edge_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAdoptedEdgeID returns the old "adopted_edge_id" field's value of the DelegationAdoption entity.
+// If the DelegationAdoption object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationAdoptionMutation) OldAdoptedEdgeID(ctx context.Context) (v *string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAdoptedEdgeID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAdoptedEdgeID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAdoptedEdgeID: %w", err)
+	}
+	return oldValue.AdoptedEdgeID, nil
+}
+
+// ClearAdoptedEdgeID clears the value of the "adopted_edge_id" field.
+func (m *DelegationAdoptionMutation) ClearAdoptedEdgeID() {
+	m.adopted_edge_id = nil
+	m.clearedFields[delegationadoption.FieldAdoptedEdgeID] = struct{}{}
+}
+
+// AdoptedEdgeIDCleared returns if the "adopted_edge_id" field was cleared in this mutation.
+func (m *DelegationAdoptionMutation) AdoptedEdgeIDCleared() bool {
+	_, ok := m.clearedFields[delegationadoption.FieldAdoptedEdgeID]
+	return ok
+}
+
+// ResetAdoptedEdgeID resets all changes to the "adopted_edge_id" field.
+func (m *DelegationAdoptionMutation) ResetAdoptedEdgeID() {
+	m.adopted_edge_id = nil
+	delete(m.clearedFields, delegationadoption.FieldAdoptedEdgeID)
+}
+
+// SetDelegateID sets the "delegate_id" field.
+func (m *DelegationAdoptionMutation) SetDelegateID(s string) {
+	m.delegate_id = &s
+}
+
+// DelegateID returns the value of the "delegate_id" field in the mutation.
+func (m *DelegationAdoptionMutation) DelegateID() (r string, exists bool) {
+	v := m.delegate_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDelegateID returns the old "delegate_id" field's value of the DelegationAdoption entity.
+// If the DelegationAdoption object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationAdoptionMutation) OldDelegateID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDelegateID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDelegateID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDelegateID: %w", err)
+	}
+	return oldValue.DelegateID, nil
+}
+
+// ResetDelegateID resets all changes to the "delegate_id" field.
+func (m *DelegationAdoptionMutation) ResetDelegateID() {
+	m.delegate_id = nil
+}
+
+// SetDelegatorType sets the "delegator_type" field.
+func (m *DelegationAdoptionMutation) SetDelegatorType(s string) {
+	m.delegator_type = &s
+}
+
+// DelegatorType returns the value of the "delegator_type" field in the mutation.
+func (m *DelegationAdoptionMutation) DelegatorType() (r string, exists bool) {
+	v := m.delegator_type
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDelegatorType returns the old "delegator_type" field's value of the DelegationAdoption entity.
+// If the DelegationAdoption object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationAdoptionMutation) OldDelegatorType(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDelegatorType is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDelegatorType requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDelegatorType: %w", err)
+	}
+	return oldValue.DelegatorType, nil
+}
+
+// ResetDelegatorType resets all changes to the "delegator_type" field.
+func (m *DelegationAdoptionMutation) ResetDelegatorType() {
+	m.delegator_type = nil
+}
+
+// SetDelegatorID sets the "delegator_id" field.
+func (m *DelegationAdoptionMutation) SetDelegatorID(s string) {
+	m.delegator_id = &s
+}
+
+// DelegatorID returns the value of the "delegator_id" field in the mutation.
+func (m *DelegationAdoptionMutation) DelegatorID() (r string, exists bool) {
+	v := m.delegator_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDelegatorID returns the old "delegator_id" field's value of the DelegationAdoption entity.
+// If the DelegationAdoption object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationAdoptionMutation) OldDelegatorID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDelegatorID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDelegatorID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDelegatorID: %w", err)
+	}
+	return oldValue.DelegatorID, nil
+}
+
+// ResetDelegatorID resets all changes to the "delegator_id" field.
+func (m *DelegationAdoptionMutation) ResetDelegatorID() {
+	m.delegator_id = nil
+}
+
+// SetScopeID sets the "scope_id" field.
+func (m *DelegationAdoptionMutation) SetScopeID(s string) {
+	m.scope_id = &s
+}
+
+// ScopeID returns the value of the "scope_id" field in the mutation.
+func (m *DelegationAdoptionMutation) ScopeID() (r string, exists bool) {
+	v := m.scope_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldScopeID returns the old "scope_id" field's value of the DelegationAdoption entity.
+// If the DelegationAdoption object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationAdoptionMutation) OldScopeID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldScopeID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldScopeID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldScopeID: %w", err)
+	}
+	return oldValue.ScopeID, nil
+}
+
+// ResetScopeID resets all changes to the "scope_id" field.
+func (m *DelegationAdoptionMutation) ResetScopeID() {
+	m.scope_id = nil
+}
+
+// SetRole sets the "role" field.
+func (m *DelegationAdoptionMutation) SetRole(s string) {
+	m.role = &s
+}
+
+// Role returns the value of the "role" field in the mutation.
+func (m *DelegationAdoptionMutation) Role() (r string, exists bool) {
+	v := m.role
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRole returns the old "role" field's value of the DelegationAdoption entity.
+// If the DelegationAdoption object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationAdoptionMutation) OldRole(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRole is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRole requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRole: %w", err)
+	}
+	return oldValue.Role, nil
+}
+
+// ResetRole resets all changes to the "role" field.
+func (m *DelegationAdoptionMutation) ResetRole() {
+	m.role = nil
+}
+
+// SetDepth sets the "depth" field.
+func (m *DelegationAdoptionMutation) SetDepth(i int) {
+	m.depth = &i
+	m.adddepth = nil
+}
+
+// Depth returns the value of the "depth" field in the mutation.
+func (m *DelegationAdoptionMutation) Depth() (r int, exists bool) {
+	v := m.depth
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDepth returns the old "depth" field's value of the DelegationAdoption entity.
+// If the DelegationAdoption object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationAdoptionMutation) OldDepth(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDepth is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDepth requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDepth: %w", err)
+	}
+	return oldValue.Depth, nil
+}
+
+// AddDepth adds i to the "depth" field.
+func (m *DelegationAdoptionMutation) AddDepth(i int) {
+	if m.adddepth != nil {
+		*m.adddepth += i
+	} else {
+		m.adddepth = &i
+	}
+}
+
+// AddedDepth returns the value that was added to the "depth" field in this mutation.
+func (m *DelegationAdoptionMutation) AddedDepth() (r int, exists bool) {
+	v := m.adddepth
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetDepth resets all changes to the "depth" field.
+func (m *DelegationAdoptionMutation) ResetDepth() {
+	m.depth = nil
+	m.adddepth = nil
+}
+
+// SetStatus sets the "status" field.
+func (m *DelegationAdoptionMutation) SetStatus(s string) {
+	m.status = &s
+}
+
+// Status returns the value of the "status" field in the mutation.
+func (m *DelegationAdoptionMutation) Status() (r string, exists bool) {
+	v := m.status
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldStatus returns the old "status" field's value of the DelegationAdoption entity.
+// If the DelegationAdoption object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationAdoptionMutation) OldStatus(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldStatus is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldStatus requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldStatus: %w", err)
+	}
+	return oldValue.Status, nil
+}
+
+// ResetStatus resets all changes to the "status" field.
+func (m *DelegationAdoptionMutation) ResetStatus() {
+	m.status = nil
+}
+
+// SetReason sets the "reason" field.
+func (m *DelegationAdoptionMutation) SetReason(s string) {
+	m.reason = &s
+}
+
+// Reason returns the value of the "reason" field in the mutation.
+func (m *DelegationAdoptionMutation) Reason() (r string, exists bool) {
+	v := m.reason
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldReason returns the old "reason" field's value of the DelegationAdoption entity.
+// If the DelegationAdoption object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationAdoptionMutation) OldReason(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldReason is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldReason requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldReason: %w", err)
+	}
+	return oldValue.Reason, nil
+}
+
+// ResetReason resets all changes to the "reason" field.
+func (m *DelegationAdoptionMutation) ResetReason() {
+	m.reason = nil
+}
+
+// SetBeforeFingerprint sets the "before_fingerprint" field.
+func (m *DelegationAdoptionMutation) SetBeforeFingerprint(s string) {
+	m.before_fingerprint = &s
+}
+
+// BeforeFingerprint returns the value of the "before_fingerprint" field in the mutation.
+func (m *DelegationAdoptionMutation) BeforeFingerprint() (r string, exists bool) {
+	v := m.before_fingerprint
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBeforeFingerprint returns the old "before_fingerprint" field's value of the DelegationAdoption entity.
+// If the DelegationAdoption object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationAdoptionMutation) OldBeforeFingerprint(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBeforeFingerprint is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBeforeFingerprint requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBeforeFingerprint: %w", err)
+	}
+	return oldValue.BeforeFingerprint, nil
+}
+
+// ResetBeforeFingerprint resets all changes to the "before_fingerprint" field.
+func (m *DelegationAdoptionMutation) ResetBeforeFingerprint() {
+	m.before_fingerprint = nil
+}
+
+// SetAfterSummary sets the "after_summary" field.
+func (m *DelegationAdoptionMutation) SetAfterSummary(s string) {
+	m.after_summary = &s
+}
+
+// AfterSummary returns the value of the "after_summary" field in the mutation.
+func (m *DelegationAdoptionMutation) AfterSummary() (r string, exists bool) {
+	v := m.after_summary
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAfterSummary returns the old "after_summary" field's value of the DelegationAdoption entity.
+// If the DelegationAdoption object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationAdoptionMutation) OldAfterSummary(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAfterSummary is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAfterSummary requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAfterSummary: %w", err)
+	}
+	return oldValue.AfterSummary, nil
+}
+
+// ResetAfterSummary resets all changes to the "after_summary" field.
+func (m *DelegationAdoptionMutation) ResetAfterSummary() {
+	m.after_summary = nil
+}
+
+// SetActorKind sets the "actor_kind" field.
+func (m *DelegationAdoptionMutation) SetActorKind(s string) {
+	m.actor_kind = &s
+}
+
+// ActorKind returns the value of the "actor_kind" field in the mutation.
+func (m *DelegationAdoptionMutation) ActorKind() (r string, exists bool) {
+	v := m.actor_kind
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldActorKind returns the old "actor_kind" field's value of the DelegationAdoption entity.
+// If the DelegationAdoption object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationAdoptionMutation) OldActorKind(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldActorKind is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldActorKind requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldActorKind: %w", err)
+	}
+	return oldValue.ActorKind, nil
+}
+
+// ResetActorKind resets all changes to the "actor_kind" field.
+func (m *DelegationAdoptionMutation) ResetActorKind() {
+	m.actor_kind = nil
+}
+
+// SetActorID sets the "actor_id" field.
+func (m *DelegationAdoptionMutation) SetActorID(s string) {
+	m.actor_id = &s
+}
+
+// ActorID returns the value of the "actor_id" field in the mutation.
+func (m *DelegationAdoptionMutation) ActorID() (r string, exists bool) {
+	v := m.actor_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldActorID returns the old "actor_id" field's value of the DelegationAdoption entity.
+// If the DelegationAdoption object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationAdoptionMutation) OldActorID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldActorID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldActorID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldActorID: %w", err)
+	}
+	return oldValue.ActorID, nil
+}
+
+// ResetActorID resets all changes to the "actor_id" field.
+func (m *DelegationAdoptionMutation) ResetActorID() {
+	m.actor_id = nil
+}
+
+// SetCreated sets the "created" field.
+func (m *DelegationAdoptionMutation) SetCreated(t time.Time) {
+	m.created = &t
+}
+
+// Created returns the value of the "created" field in the mutation.
+func (m *DelegationAdoptionMutation) Created() (r time.Time, exists bool) {
+	v := m.created
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreated returns the old "created" field's value of the DelegationAdoption entity.
+// If the DelegationAdoption object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationAdoptionMutation) OldCreated(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreated is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreated requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreated: %w", err)
+	}
+	return oldValue.Created, nil
+}
+
+// ResetCreated resets all changes to the "created" field.
+func (m *DelegationAdoptionMutation) ResetCreated() {
+	m.created = nil
+}
+
+// SetUpdated sets the "updated" field.
+func (m *DelegationAdoptionMutation) SetUpdated(t time.Time) {
+	m.updated = &t
+}
+
+// Updated returns the value of the "updated" field in the mutation.
+func (m *DelegationAdoptionMutation) Updated() (r time.Time, exists bool) {
+	v := m.updated
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdated returns the old "updated" field's value of the DelegationAdoption entity.
+// If the DelegationAdoption object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *DelegationAdoptionMutation) OldUpdated(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdated is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdated requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdated: %w", err)
+	}
+	return oldValue.Updated, nil
+}
+
+// ResetUpdated resets all changes to the "updated" field.
+func (m *DelegationAdoptionMutation) ResetUpdated() {
+	m.updated = nil
+}
+
+// Where appends a list predicates to the DelegationAdoptionMutation builder.
+func (m *DelegationAdoptionMutation) Where(ps ...predicate.DelegationAdoption) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the DelegationAdoptionMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *DelegationAdoptionMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.DelegationAdoption, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *DelegationAdoptionMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *DelegationAdoptionMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (DelegationAdoption).
+func (m *DelegationAdoptionMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *DelegationAdoptionMutation) Fields() []string {
+	fields := make([]string, 0, 19)
+	if m.cohort_id != nil {
+		fields = append(fields, delegationadoption.FieldCohortID)
+	}
+	if m.origin != nil {
+		fields = append(fields, delegationadoption.FieldOrigin)
+	}
+	if m.policy_version != nil {
+		fields = append(fields, delegationadoption.FieldPolicyVersion)
+	}
+	if m.original_edge_id != nil {
+		fields = append(fields, delegationadoption.FieldOriginalEdgeID)
+	}
+	if m.adopted_edge_id != nil {
+		fields = append(fields, delegationadoption.FieldAdoptedEdgeID)
+	}
+	if m.delegate_id != nil {
+		fields = append(fields, delegationadoption.FieldDelegateID)
+	}
+	if m.delegator_type != nil {
+		fields = append(fields, delegationadoption.FieldDelegatorType)
+	}
+	if m.delegator_id != nil {
+		fields = append(fields, delegationadoption.FieldDelegatorID)
+	}
+	if m.scope_id != nil {
+		fields = append(fields, delegationadoption.FieldScopeID)
+	}
+	if m.role != nil {
+		fields = append(fields, delegationadoption.FieldRole)
+	}
+	if m.depth != nil {
+		fields = append(fields, delegationadoption.FieldDepth)
+	}
+	if m.status != nil {
+		fields = append(fields, delegationadoption.FieldStatus)
+	}
+	if m.reason != nil {
+		fields = append(fields, delegationadoption.FieldReason)
+	}
+	if m.before_fingerprint != nil {
+		fields = append(fields, delegationadoption.FieldBeforeFingerprint)
+	}
+	if m.after_summary != nil {
+		fields = append(fields, delegationadoption.FieldAfterSummary)
+	}
+	if m.actor_kind != nil {
+		fields = append(fields, delegationadoption.FieldActorKind)
+	}
+	if m.actor_id != nil {
+		fields = append(fields, delegationadoption.FieldActorID)
+	}
+	if m.created != nil {
+		fields = append(fields, delegationadoption.FieldCreated)
+	}
+	if m.updated != nil {
+		fields = append(fields, delegationadoption.FieldUpdated)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *DelegationAdoptionMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case delegationadoption.FieldCohortID:
+		return m.CohortID()
+	case delegationadoption.FieldOrigin:
+		return m.Origin()
+	case delegationadoption.FieldPolicyVersion:
+		return m.PolicyVersion()
+	case delegationadoption.FieldOriginalEdgeID:
+		return m.OriginalEdgeID()
+	case delegationadoption.FieldAdoptedEdgeID:
+		return m.AdoptedEdgeID()
+	case delegationadoption.FieldDelegateID:
+		return m.DelegateID()
+	case delegationadoption.FieldDelegatorType:
+		return m.DelegatorType()
+	case delegationadoption.FieldDelegatorID:
+		return m.DelegatorID()
+	case delegationadoption.FieldScopeID:
+		return m.ScopeID()
+	case delegationadoption.FieldRole:
+		return m.Role()
+	case delegationadoption.FieldDepth:
+		return m.Depth()
+	case delegationadoption.FieldStatus:
+		return m.Status()
+	case delegationadoption.FieldReason:
+		return m.Reason()
+	case delegationadoption.FieldBeforeFingerprint:
+		return m.BeforeFingerprint()
+	case delegationadoption.FieldAfterSummary:
+		return m.AfterSummary()
+	case delegationadoption.FieldActorKind:
+		return m.ActorKind()
+	case delegationadoption.FieldActorID:
+		return m.ActorID()
+	case delegationadoption.FieldCreated:
+		return m.Created()
+	case delegationadoption.FieldUpdated:
+		return m.Updated()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *DelegationAdoptionMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case delegationadoption.FieldCohortID:
+		return m.OldCohortID(ctx)
+	case delegationadoption.FieldOrigin:
+		return m.OldOrigin(ctx)
+	case delegationadoption.FieldPolicyVersion:
+		return m.OldPolicyVersion(ctx)
+	case delegationadoption.FieldOriginalEdgeID:
+		return m.OldOriginalEdgeID(ctx)
+	case delegationadoption.FieldAdoptedEdgeID:
+		return m.OldAdoptedEdgeID(ctx)
+	case delegationadoption.FieldDelegateID:
+		return m.OldDelegateID(ctx)
+	case delegationadoption.FieldDelegatorType:
+		return m.OldDelegatorType(ctx)
+	case delegationadoption.FieldDelegatorID:
+		return m.OldDelegatorID(ctx)
+	case delegationadoption.FieldScopeID:
+		return m.OldScopeID(ctx)
+	case delegationadoption.FieldRole:
+		return m.OldRole(ctx)
+	case delegationadoption.FieldDepth:
+		return m.OldDepth(ctx)
+	case delegationadoption.FieldStatus:
+		return m.OldStatus(ctx)
+	case delegationadoption.FieldReason:
+		return m.OldReason(ctx)
+	case delegationadoption.FieldBeforeFingerprint:
+		return m.OldBeforeFingerprint(ctx)
+	case delegationadoption.FieldAfterSummary:
+		return m.OldAfterSummary(ctx)
+	case delegationadoption.FieldActorKind:
+		return m.OldActorKind(ctx)
+	case delegationadoption.FieldActorID:
+		return m.OldActorID(ctx)
+	case delegationadoption.FieldCreated:
+		return m.OldCreated(ctx)
+	case delegationadoption.FieldUpdated:
+		return m.OldUpdated(ctx)
+	}
+	return nil, fmt.Errorf("unknown DelegationAdoption field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *DelegationAdoptionMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case delegationadoption.FieldCohortID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCohortID(v)
+		return nil
+	case delegationadoption.FieldOrigin:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOrigin(v)
+		return nil
+	case delegationadoption.FieldPolicyVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPolicyVersion(v)
+		return nil
+	case delegationadoption.FieldOriginalEdgeID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetOriginalEdgeID(v)
+		return nil
+	case delegationadoption.FieldAdoptedEdgeID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAdoptedEdgeID(v)
+		return nil
+	case delegationadoption.FieldDelegateID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDelegateID(v)
+		return nil
+	case delegationadoption.FieldDelegatorType:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDelegatorType(v)
+		return nil
+	case delegationadoption.FieldDelegatorID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDelegatorID(v)
+		return nil
+	case delegationadoption.FieldScopeID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetScopeID(v)
+		return nil
+	case delegationadoption.FieldRole:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRole(v)
+		return nil
+	case delegationadoption.FieldDepth:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDepth(v)
+		return nil
+	case delegationadoption.FieldStatus:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetStatus(v)
+		return nil
+	case delegationadoption.FieldReason:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetReason(v)
+		return nil
+	case delegationadoption.FieldBeforeFingerprint:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBeforeFingerprint(v)
+		return nil
+	case delegationadoption.FieldAfterSummary:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAfterSummary(v)
+		return nil
+	case delegationadoption.FieldActorKind:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetActorKind(v)
+		return nil
+	case delegationadoption.FieldActorID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetActorID(v)
+		return nil
+	case delegationadoption.FieldCreated:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreated(v)
+		return nil
+	case delegationadoption.FieldUpdated:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdated(v)
+		return nil
+	}
+	return fmt.Errorf("unknown DelegationAdoption field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *DelegationAdoptionMutation) AddedFields() []string {
+	var fields []string
+	if m.addpolicy_version != nil {
+		fields = append(fields, delegationadoption.FieldPolicyVersion)
+	}
+	if m.adddepth != nil {
+		fields = append(fields, delegationadoption.FieldDepth)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *DelegationAdoptionMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case delegationadoption.FieldPolicyVersion:
+		return m.AddedPolicyVersion()
+	case delegationadoption.FieldDepth:
+		return m.AddedDepth()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *DelegationAdoptionMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case delegationadoption.FieldPolicyVersion:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddPolicyVersion(v)
+		return nil
+	case delegationadoption.FieldDepth:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddDepth(v)
+		return nil
+	}
+	return fmt.Errorf("unknown DelegationAdoption numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *DelegationAdoptionMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(delegationadoption.FieldOriginalEdgeID) {
+		fields = append(fields, delegationadoption.FieldOriginalEdgeID)
+	}
+	if m.FieldCleared(delegationadoption.FieldAdoptedEdgeID) {
+		fields = append(fields, delegationadoption.FieldAdoptedEdgeID)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *DelegationAdoptionMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *DelegationAdoptionMutation) ClearField(name string) error {
+	switch name {
+	case delegationadoption.FieldOriginalEdgeID:
+		m.ClearOriginalEdgeID()
+		return nil
+	case delegationadoption.FieldAdoptedEdgeID:
+		m.ClearAdoptedEdgeID()
+		return nil
+	}
+	return fmt.Errorf("unknown DelegationAdoption nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *DelegationAdoptionMutation) ResetField(name string) error {
+	switch name {
+	case delegationadoption.FieldCohortID:
+		m.ResetCohortID()
+		return nil
+	case delegationadoption.FieldOrigin:
+		m.ResetOrigin()
+		return nil
+	case delegationadoption.FieldPolicyVersion:
+		m.ResetPolicyVersion()
+		return nil
+	case delegationadoption.FieldOriginalEdgeID:
+		m.ResetOriginalEdgeID()
+		return nil
+	case delegationadoption.FieldAdoptedEdgeID:
+		m.ResetAdoptedEdgeID()
+		return nil
+	case delegationadoption.FieldDelegateID:
+		m.ResetDelegateID()
+		return nil
+	case delegationadoption.FieldDelegatorType:
+		m.ResetDelegatorType()
+		return nil
+	case delegationadoption.FieldDelegatorID:
+		m.ResetDelegatorID()
+		return nil
+	case delegationadoption.FieldScopeID:
+		m.ResetScopeID()
+		return nil
+	case delegationadoption.FieldRole:
+		m.ResetRole()
+		return nil
+	case delegationadoption.FieldDepth:
+		m.ResetDepth()
+		return nil
+	case delegationadoption.FieldStatus:
+		m.ResetStatus()
+		return nil
+	case delegationadoption.FieldReason:
+		m.ResetReason()
+		return nil
+	case delegationadoption.FieldBeforeFingerprint:
+		m.ResetBeforeFingerprint()
+		return nil
+	case delegationadoption.FieldAfterSummary:
+		m.ResetAfterSummary()
+		return nil
+	case delegationadoption.FieldActorKind:
+		m.ResetActorKind()
+		return nil
+	case delegationadoption.FieldActorID:
+		m.ResetActorID()
+		return nil
+	case delegationadoption.FieldCreated:
+		m.ResetCreated()
+		return nil
+	case delegationadoption.FieldUpdated:
+		m.ResetUpdated()
+		return nil
+	}
+	return fmt.Errorf("unknown DelegationAdoption field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *DelegationAdoptionMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *DelegationAdoptionMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *DelegationAdoptionMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *DelegationAdoptionMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *DelegationAdoptionMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *DelegationAdoptionMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *DelegationAdoptionMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown DelegationAdoption unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *DelegationAdoptionMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown DelegationAdoption edge %s", name)
 }
 
 // DelegationEdgeMutation represents an operation that mutates the DelegationEdge nodes in the graph.

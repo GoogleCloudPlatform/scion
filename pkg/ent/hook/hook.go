@@ -249,6 +249,18 @@ func (f DecisionAuditFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Valu
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.DecisionAuditMutation", m)
 }
 
+// The DelegationAdoptionFunc type is an adapter to allow the use of ordinary
+// function as DelegationAdoption mutator.
+type DelegationAdoptionFunc func(context.Context, *ent.DelegationAdoptionMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f DelegationAdoptionFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.DelegationAdoptionMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.DelegationAdoptionMutation", m)
+}
+
 // The DelegationEdgeFunc type is an adapter to allow the use of ordinary
 // function as DelegationEdge mutator.
 type DelegationEdgeFunc func(context.Context, *ent.DelegationEdgeMutation) (ent.Value, error)

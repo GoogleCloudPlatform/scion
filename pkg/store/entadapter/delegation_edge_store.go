@@ -16,11 +16,13 @@ package entadapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/delegationedge"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -230,6 +232,141 @@ func (s *DelegationEdgeStore) DeactivateDelegationEdge(ctx context.Context, edge
 		Save(ctx)
 	if err != nil {
 		return mapError(err)
+	}
+	return nil
+}
+
+// GetDelegationEdge returns one edge by ID, active or not.
+func (s *DelegationEdgeStore) GetDelegationEdge(ctx context.Context, edgeID string) (*store.DelegationEdge, error) {
+	uid, err := parseGetID(edgeID)
+	if err != nil {
+		return nil, err
+	}
+	e, err := s.client.DelegationEdge.Get(ctx, uid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return entDelegationEdgeToStore(e), nil
+}
+
+// ListAllDelegationEdgesForDelegate returns every edge, active or not, where
+// the given principal is the delegate, oldest first.
+func (s *DelegationEdgeStore) ListAllDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string) ([]*store.DelegationEdge, error) {
+	edges, err := s.client.DelegationEdge.Query().
+		Where(
+			delegationedge.DelegateTypeEQ(delegationedge.DelegateType(delegateType)),
+			delegationedge.DelegateIDEQ(delegateID),
+		).
+		Order(ent.Asc(delegationedge.FieldCreated), ent.Asc(delegationedge.FieldID)).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	result := make([]*store.DelegationEdge, len(edges))
+	for i, e := range edges {
+		result[i] = entDelegationEdgeToStore(e)
+	}
+	return result, nil
+}
+
+// DeactivateDelegationEdgeGuarded deactivates edgeID with cause and opID when
+// it is active and satisfies guard. The structural predicates are part of
+// the UPDATE's WHERE clause, so a concurrent change between the read and the
+// write affects zero rows rather than deactivating a changed edge.
+func (s *DelegationEdgeStore) DeactivateDelegationEdgeGuarded(ctx context.Context, edgeID string, guard store.DelegationEdgeDeactivateGuard, cause store.EdgeDeactivationCause, opID string) (bool, error) {
+	uid, err := parseGetID(edgeID)
+	if err != nil {
+		return false, err
+	}
+	current, err := s.client.DelegationEdge.Get(ctx, uid)
+	if err != nil {
+		return false, mapError(err)
+	}
+	if guard.UpdatedAt != nil && !current.Updated.Equal(*guard.UpdatedAt) {
+		return false, nil
+	}
+	preds := []predicate.DelegationEdge{
+		delegationedge.IDEQ(uid),
+		delegationedge.ActiveEQ(true),
+	}
+	if guard.Unrecorded {
+		preds = append(preds,
+			delegationedge.ProvenanceVersionEQ(0),
+			delegationedge.CeilingKindEQ(string(store.EffectCeilingUnrecorded)),
+		)
+	}
+	if guard.Recorded {
+		preds = append(preds,
+			delegationedge.ProvenanceVersionEQ(store.ProvenanceVersionV1),
+			delegationedge.CeilingKindIn(string(store.EffectCeilingBounded), string(store.EffectCeilingPrincipal)),
+		)
+	}
+	now := time.Now()
+	n, err := s.client.DelegationEdge.Update().
+		Where(preds...).
+		SetActive(false).
+		SetDeactivationCause(string(cause)).
+		SetDeactivatedAt(now).
+		SetDeactivationOpID(opID).
+		SetUpdated(now).
+		Save(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return n == 1, nil
+}
+
+// ReactivateDelegationEdge reactivates edgeID when it is inactive with cause
+// expectCause and no other active edge exists for its delegate and scope.
+// The partial unique index on active edges backs the second condition
+// against a concurrent insert.
+func (s *DelegationEdgeStore) ReactivateDelegationEdge(ctx context.Context, edgeID string, expectCause store.EdgeDeactivationCause) error {
+	uid, err := parseGetID(edgeID)
+	if err != nil {
+		return err
+	}
+	current, err := s.client.DelegationEdge.Get(ctx, uid)
+	if err != nil {
+		return mapError(err)
+	}
+	if current.Active || current.DeactivationCause != string(expectCause) {
+		return store.ErrRevisionConflict
+	}
+	others, err := s.client.DelegationEdge.Query().
+		Where(
+			delegationedge.DelegateTypeEQ(current.DelegateType),
+			delegationedge.DelegateIDEQ(current.DelegateID),
+			delegationedge.ScopeTypeEQ(current.ScopeType),
+			delegationedge.ScopeIDEQ(current.ScopeID),
+			delegationedge.ActiveEQ(true),
+		).
+		Count(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	if others > 0 {
+		return store.ErrRevisionConflict
+	}
+	n, err := s.client.DelegationEdge.Update().
+		Where(
+			delegationedge.IDEQ(uid),
+			delegationedge.ActiveEQ(false),
+			delegationedge.DeactivationCauseEQ(string(expectCause)),
+		).
+		SetActive(true).
+		SetDeactivationCause("").
+		ClearDeactivatedAt().
+		SetDeactivationOpID("").
+		SetUpdated(time.Now()).
+		Save(ctx)
+	if err != nil {
+		if mapped := mapError(err); errors.Is(mapped, store.ErrAlreadyExists) {
+			return store.ErrRevisionConflict
+		}
+		return mapError(err)
+	}
+	if n != 1 {
+		return store.ErrRevisionConflict
 	}
 	return nil
 }

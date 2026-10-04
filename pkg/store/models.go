@@ -3108,6 +3108,13 @@ const (
 	EdgeDeactivationDelegatorDeleted    EdgeDeactivationCause = "delegator_deleted"
 	EdgeDeactivationCreateCompensation  EdgeDeactivationCause = "create_compensation"
 	EdgeDeactivationReincarnateReplaced EdgeDeactivationCause = "reincarnate_replaced"
+	// EdgeDeactivationProvenanceAdopted marks an unrecorded edge replaced by
+	// a recorded edge under a delegation-provenance compatibility policy.
+	// The row is kept as evidence and is what a revert reactivates.
+	EdgeDeactivationProvenanceAdopted EdgeDeactivationCause = "provenance_adopted"
+	// EdgeDeactivationAdoptionReverted marks an adopted edge deactivated by
+	// an adoption revert.
+	EdgeDeactivationAdoptionReverted EdgeDeactivationCause = "adoption_reverted"
 )
 
 // Deactivation is the deactivation record of an edge or assignment.
@@ -3122,6 +3129,90 @@ const (
 	DelegationPrincipalUser  = "user"
 	DelegationPrincipalAgent = "agent"
 )
+
+// DelegationEdgeDeactivateGuard is the precondition of a guarded edge
+// deactivation. The row must be active in every case.
+type DelegationEdgeDeactivateGuard struct {
+	// Unrecorded requires provenance version 0 and an unrecorded ceiling.
+	Unrecorded bool
+	// Recorded requires provenance version 1 and a bounded or principal
+	// ceiling.
+	Recorded bool
+	// UpdatedAt, when non-nil, requires the row's updated time to equal it.
+	UpdatedAt *time.Time
+}
+
+// =============================================================================
+// Delegation-provenance adoption records
+// =============================================================================
+
+// DelegationAdoptionStatus is the outcome recorded for one examined edge.
+type DelegationAdoptionStatus string
+
+const (
+	// DelegationAdoptionPending: in the boot snapshot, not written.
+	DelegationAdoptionPending DelegationAdoptionStatus = "pending"
+	// DelegationAdoptionAdopted: the original edge was replaced by a
+	// recorded edge (AdoptedEdgeID).
+	DelegationAdoptionAdopted DelegationAdoptionStatus = "adopted"
+	// DelegationAdoptionRecognized: the active edge already carries a
+	// migration-recorded bounded ceiling; it is left as is.
+	DelegationAdoptionRecognized DelegationAdoptionStatus = "recognized"
+	// DelegationAdoptionRecognizedAbovePolicy: recognized, and its ceiling
+	// is not a subset of the compatibility policy. Reported only.
+	DelegationAdoptionRecognizedAbovePolicy DelegationAdoptionStatus = "recognized_above_policy"
+	// DelegationAdoptionExcluded: never adopted automatically (Reason).
+	DelegationAdoptionExcluded DelegationAdoptionStatus = "excluded"
+	// DelegationAdoptionSkippedChanged: state changed after the snapshot.
+	DelegationAdoptionSkippedChanged DelegationAdoptionStatus = "skipped_changed"
+	// DelegationAdoptionReverted: the adoption was reverted.
+	DelegationAdoptionReverted DelegationAdoptionStatus = "reverted"
+)
+
+// Delegation adoption origins.
+const (
+	DelegationAdoptionOriginBoot  = "boot_migration"
+	DelegationAdoptionOriginAdmin = "admin_commit"
+)
+
+// DelegationAdoption is one examined edge of a delegation-provenance
+// adoption (boot snapshot or admin commit). It is evidence only and is never
+// read by authorization.
+type DelegationAdoption struct {
+	ID                string                   `json:"id"`
+	CohortID          string                   `json:"cohortId"`
+	Origin            string                   `json:"origin"`
+	PolicyVersion     int                      `json:"policyVersion"`
+	OriginalEdgeID    string                   `json:"originalEdgeId,omitempty"`
+	AdoptedEdgeID     string                   `json:"adoptedEdgeId,omitempty"`
+	DelegateID        string                   `json:"delegateId"`
+	DelegatorType     string                   `json:"delegatorType,omitempty"`
+	DelegatorID       string                   `json:"delegatorId,omitempty"`
+	ScopeID           string                   `json:"scopeId,omitempty"`
+	Role              string                   `json:"role,omitempty"`
+	Depth             int                      `json:"depth"`
+	Status            DelegationAdoptionStatus `json:"status"`
+	Reason            string                   `json:"reason,omitempty"`
+	BeforeFingerprint string                   `json:"beforeFingerprint,omitempty"`
+	AfterSummary      string                   `json:"afterSummary,omitempty"`
+	ActorKind         string                   `json:"actorKind,omitempty"`
+	ActorID           string                   `json:"actorId,omitempty"`
+	CreatedAt         time.Time                `json:"createdAt"`
+	UpdatedAt         time.Time                `json:"updatedAt"`
+}
+
+// DelegationAdoptionFilter selects adoption records. Empty fields do not
+// filter. Limit 0 returns every match.
+type DelegationAdoptionFilter struct {
+	CohortID   string
+	Origin     string
+	Status     DelegationAdoptionStatus
+	Reason     string
+	ScopeID    string
+	DelegateID string
+	Limit      int
+	Offset     int
+}
 
 // =============================================================================
 // Agent Credentials (Permissions Foundation Phase 1H)

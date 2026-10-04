@@ -106,6 +106,7 @@ type CompositeStore struct {
 	*ConversationStore
 	*RoleStore
 	*DelegationEdgeStore
+	*DelegationAdoptionStore
 	*AgentCredentialStore
 	*AgentIdentityKeyStore
 	*DecisionAuditStore
@@ -135,6 +136,21 @@ type CompositeStore struct {
 	// of invalid rows. Nil means slog.Default(). Tests set it per instance
 	// to capture the report without replacing the process-wide logger.
 	uatBoundaryLogger *slog.Logger
+
+	// adoptionLogger receives AdoptLegacyDelegationProvenance's summary.
+	// Nil means slog.Default().
+	adoptionLogger *slog.Logger
+
+	// adoptionHopHook, when set, runs before each pending hop of
+	// AdoptLegacyDelegationProvenance; a non-nil error stops the loop as a
+	// write failure would. Tests use it to inject failures and concurrent
+	// changes.
+	adoptionHopHook func(i int, rec *store.DelegationAdoption) error
+
+	// adoptionTxHook, when set, runs inside each hop's transaction after the
+	// adoption writes and before the record update; a non-nil error rolls
+	// the hop back. Tests use it to inject a write failure mid-hop.
+	adoptionTxHook func(tx store.Store, rec *store.DelegationAdoption) error
 }
 
 // Compile-time assertion that CompositeStore satisfies the full store.Store
@@ -212,6 +228,7 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 		ConversationStore:          NewConversationStore(client),
 		RoleStore:                  NewRoleStore(client),
 		DelegationEdgeStore:        NewDelegationEdgeStore(client),
+		DelegationAdoptionStore:    NewDelegationAdoptionStore(client),
 		AgentCredentialStore:       NewAgentCredentialStore(client),
 		AgentIdentityKeyStore:      NewAgentIdentityKeyStore(client),
 		DecisionAuditStore:         NewDecisionAuditStore(client),
@@ -518,6 +535,13 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	}
 	if err := c.BackfillDelegationEdges(ctx); err != nil {
 		return fmt.Errorf("delegation edge backfill: %w", err)
+	}
+	// After BackfillDelegationEdges, so edges that backfill writes on a very
+	// old database are planned too. Its own marker gates it; the backfill
+	// marker does not. A failure is not fatal: unadopted hops keep their
+	// current denial and the next boot retries.
+	if err := c.AdoptLegacyDelegationProvenance(ctx); err != nil {
+		c.adoptionLog().Error("delegation provenance adoption failed (non-fatal); retried on next boot", "error", err)
 	}
 	if err := c.BackfillProjectMembersGroupMarkers(ctx); err != nil {
 		return fmt.Errorf("project members group marker backfill: %w", err)

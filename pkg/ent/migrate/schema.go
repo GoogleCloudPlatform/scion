@@ -804,6 +804,60 @@ var (
 			},
 		},
 	}
+	// DelegationAdoptionsColumns holds the columns for the "delegation_adoptions" table.
+	DelegationAdoptionsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeUUID},
+		{Name: "cohort_id", Type: field.TypeString},
+		{Name: "origin", Type: field.TypeString},
+		{Name: "policy_version", Type: field.TypeInt, Default: 0},
+		{Name: "original_edge_id", Type: field.TypeString, Nullable: true},
+		{Name: "adopted_edge_id", Type: field.TypeString, Nullable: true},
+		{Name: "delegate_id", Type: field.TypeString, Default: ""},
+		{Name: "delegator_type", Type: field.TypeString, Default: ""},
+		{Name: "delegator_id", Type: field.TypeString, Default: ""},
+		{Name: "scope_id", Type: field.TypeString, Default: ""},
+		{Name: "role", Type: field.TypeString, Default: ""},
+		{Name: "depth", Type: field.TypeInt, Default: 0},
+		{Name: "status", Type: field.TypeString},
+		{Name: "reason", Type: field.TypeString, Default: ""},
+		{Name: "before_fingerprint", Type: field.TypeString, Default: ""},
+		{Name: "after_summary", Type: field.TypeString, Default: ""},
+		{Name: "actor_kind", Type: field.TypeString, Default: ""},
+		{Name: "actor_id", Type: field.TypeString, Default: ""},
+		{Name: "created", Type: field.TypeTime},
+		{Name: "updated", Type: field.TypeTime},
+	}
+	// DelegationAdoptionsTable holds the schema information for the "delegation_adoptions" table.
+	DelegationAdoptionsTable = &schema.Table{
+		Name:       "delegation_adoptions",
+		Columns:    DelegationAdoptionsColumns,
+		PrimaryKey: []*schema.Column{DelegationAdoptionsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "delegationadoption_cohort_id_original_edge_id",
+				Unique:  true,
+				Columns: []*schema.Column{DelegationAdoptionsColumns[1], DelegationAdoptionsColumns[4]},
+			},
+			{
+				Name:    "delegationadoption_adopted_edge_id",
+				Unique:  true,
+				Columns: []*schema.Column{DelegationAdoptionsColumns[5]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "status = 'adopted'",
+				},
+			},
+			{
+				Name:    "delegationadoption_delegate_id_status",
+				Unique:  false,
+				Columns: []*schema.Column{DelegationAdoptionsColumns[6], DelegationAdoptionsColumns[12]},
+			},
+			{
+				Name:    "delegationadoption_cohort_id_status",
+				Unique:  false,
+				Columns: []*schema.Column{DelegationAdoptionsColumns[1], DelegationAdoptionsColumns[12]},
+			},
+		},
+	}
 	// DelegationEdgesColumns holds the columns for the "delegation_edges" table.
 	DelegationEdgesColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -2496,6 +2550,7 @@ var (
 		ConversationsTable,
 		ConversationParticipantsTable,
 		DecisionAuditsTable,
+		DelegationAdoptionsTable,
 		DelegationEdgesTable,
 		EntitlementBindingsTable,
 		EnvVarsTable,
