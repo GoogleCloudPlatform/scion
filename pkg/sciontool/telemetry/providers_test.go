@@ -57,6 +57,7 @@ func TestNewProviders_IgnoresExternalEndpoint(t *testing.T) {
 		Enabled:      true,
 		CloudEnabled: true,
 		Endpoint:     "", // no endpoint
+		GRPCPort:     startStubLoopbackReceiver(t),
 	}
 	p, err := NewProviders(context.Background(), cfg, false)
 	if err != nil {
@@ -363,6 +364,7 @@ func TestNewProviders_CloudDisabledStillUsesLocalBoundary(t *testing.T) {
 		Enabled:      true,
 		CloudEnabled: false,
 		Endpoint:     "localhost:4317",
+		GRPCPort:     startStubLoopbackReceiver(t),
 	}
 	p, err := NewProviders(context.Background(), cfg, false)
 	if err != nil {
@@ -374,12 +376,31 @@ func TestNewProviders_CloudDisabledStillUsesLocalBoundary(t *testing.T) {
 	shutdownProvidersForTest(t, p)
 }
 
+// startStubLoopbackReceiver starts a loopback receiver with no-op handlers
+// on an ephemeral port and returns that port, so provider tests export to a
+// live endpoint instead of dialing 127.0.0.1:0 and waiting out the export
+// timeout at Shutdown.
+func startStubLoopbackReceiver(t *testing.T) int {
+	t.Helper()
+	receiver := NewReceiver(&Config{Enabled: true},
+		func(context.Context, []*tracepb.ResourceSpans) error { return nil },
+		WithLogHandler(func(context.Context, []*logspb.ResourceLogs) error { return nil }),
+		WithMetricHandler(func(context.Context, []*metricpb.ResourceMetrics) error { return nil }),
+	)
+	if err := receiver.Start(context.Background()); err != nil {
+		t.Fatalf("start stub receiver: %v", err)
+	}
+	t.Cleanup(func() { _ = receiver.Stop(context.Background()) })
+	port, _ := receiver.BoundPorts()
+	return port
+}
+
 func shutdownProvidersForTest(t *testing.T, providers *Providers) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	if err := providers.Shutdown(ctx); err != nil {
-		t.Logf("Shutdown returned expected error without a receiver: %v", err)
+		t.Fatalf("Shutdown: %v", err)
 	}
 }
 
@@ -396,6 +417,7 @@ func TestNewProviders_SyncMode(t *testing.T) {
 		CloudEnabled: true,
 		Endpoint:     "localhost:4317",
 		Insecure:     true,
+		GRPCPort:     startStubLoopbackReceiver(t),
 	}
 	p, err := NewProviders(context.Background(), cfg, false)
 	if err != nil {
@@ -414,13 +436,7 @@ func TestNewProviders_SyncMode(t *testing.T) {
 		t.Error("expected non-nil MeterProvider")
 	}
 
-	// Shutdown may return export errors when no collector is listening;
-	// this is expected in tests and not a provider creation failure.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := p.Shutdown(ctx); err != nil {
-		t.Logf("Shutdown returned expected export error (no collector): %v", err)
-	}
+	shutdownProvidersForTest(t, p)
 }
 
 func TestNewProviders_BatchMode(t *testing.T) {
@@ -429,6 +445,7 @@ func TestNewProviders_BatchMode(t *testing.T) {
 		CloudEnabled: true,
 		Endpoint:     "localhost:4317",
 		Insecure:     true,
+		GRPCPort:     startStubLoopbackReceiver(t),
 	}
 	p, err := NewProviders(context.Background(), cfg, true)
 	if err != nil {
@@ -447,11 +464,5 @@ func TestNewProviders_BatchMode(t *testing.T) {
 		t.Error("expected non-nil MeterProvider")
 	}
 
-	// Shutdown may return export errors when no collector is listening;
-	// this is expected in tests and not a provider creation failure.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := p.Shutdown(ctx); err != nil {
-		t.Logf("Shutdown returned expected export error (no collector): %v", err)
-	}
+	shutdownProvidersForTest(t, p)
 }
