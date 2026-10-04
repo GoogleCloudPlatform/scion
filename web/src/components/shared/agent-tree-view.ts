@@ -879,10 +879,12 @@ export class ScionAgentTreeView extends LitElement {
     // Chromium, and a selection can begin before the .dragging class
     // (user-select: none) applies (ptone/scion#765). Suppress selectstart
     // for the duration of the gesture instead. selectstart is not composed,
-    // so one fired on text inside this component's shadow root (node
-    // labels, nested shadow roots retargeted here) never reaches document:
-    // the render root needs its own capture listener. The document listener
-    // still catches a selection starting outside the component.
+    // so one fired on text in this component's shadow root (node and user
+    // labels) never reaches document: the render root needs its own capture
+    // listener. Text inside a nested component's shadow root is not covered,
+    // but no such text is pannable today (badges sit inside node links,
+    // which never pan). The document listener still catches a selection
+    // starting outside the component.
     this.hadSelectionAtPanStart = hasRangeSelection(window.getSelection());
     this.renderRoot.addEventListener('selectstart', this.boundOnSelectStart, true);
     document.addEventListener('selectstart', this.boundOnSelectStart, true);
@@ -919,6 +921,7 @@ export class ScionAgentTreeView extends LitElement {
   /** Ends a pan gesture: stops suppressing selection and drops the dragging style. */
   private endPan(): void {
     this.dragging = false;
+    this.hadSelectionAtPanStart = false;
     this.renderRoot.removeEventListener('selectstart', this.boundOnSelectStart, true);
     document.removeEventListener('selectstart', this.boundOnSelectStart, true);
     this.canvasEl?.classList.remove('dragging');

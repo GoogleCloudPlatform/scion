@@ -1554,6 +1554,22 @@ describe('scion-agent-tree-view drag-to-pan suppresses text selection', () => {
     expect(selectStartPrevented(document.body)).toBe(false);
   });
 
+  it('does not clear a selection on a pointerup with no pan in progress', () => {
+    // Fresh element: no earlier pan has set hadSelectionAtPanStart, so only
+    // the dragging guard in onPointerUp keeps the selection (e.g. a click on
+    // a node link, whose pointerup still bubbles to the canvas).
+    const removeAllRanges = vi.fn();
+    const sel = { type: 'Range', isCollapsed: true, removeAllRanges };
+    const spy = vi.spyOn(window, 'getSelection').mockReturnValue(sel as unknown as Selection);
+    try {
+      pointer('pointerup', el.shadowRoot!.querySelector('.canvas a')!);
+      pointer('pointerup');
+      expect(removeAllRanges).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('does not start a pan (or suppress selection) from a link or button', () => {
     // Node cards are links, so a pointerdown on a node label never pans and a
     // double-click there can still select the label text.
