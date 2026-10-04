@@ -1698,6 +1698,11 @@ export class ScionPageAgentDetail extends LitElement {
     const ports = agent.exposedPorts;
     if (!ports || ports.length === 0) return nothing;
 
+    // Opening a port goes through the port proxy, which the hub authorizes
+    // with agent.port_access. Fail closed: without the capability, list the
+    // ports but offer no link that would only return 403 (ptone/scion#2540).
+    const canOpen = can(agent._capabilities, 'port_access');
+
     return html`
       <div class="card">
         <h3 class="card-title">Exposed Ports</h3>
@@ -1707,14 +1712,20 @@ export class ScionPageAgentDetail extends LitElement {
               <div class="info-item">
                 <span class="info-label"> :${p.port}${p.label ? ` (${p.label})` : ''} </span>
                 <span class="info-value">
-                  <a
-                    href="/api/v1/agents/${agent.id}/ports/${p.port}/proxy/"
-                    target="_blank"
-                    rel="noopener"
-                    class="port-link"
-                  >
-                    Open in new tab
-                  </a>
+                  ${canOpen
+                    ? html`<a
+                        href="/api/v1/agents/${agent.id}/ports/${p.port}/proxy/"
+                        target="_blank"
+                        rel="noopener"
+                        class="port-link"
+                      >
+                        Open in new tab
+                      </a>`
+                    : html`<span
+                        class="port-no-access"
+                        style="color: var(--scion-text-muted, #64748b);"
+                        >You don't have port access</span
+                      >`}
                 </span>
               </div>
             `
