@@ -826,6 +826,15 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		if s.config.Debug {
 			s.agentLifecycleLog.Debug("Shared workspace mode enabled", "agent_id", in.AgentID)
 		}
+		// The shared workspace's clone settings only reach the runtime as
+		// the Kubernetes init container's clone settings (GitCloneForInit).
+		// They never set GitClone, so the workspace is still mounted, not
+		// cloned per agent. Ignored when GitClone is set: that request asks
+		// for a per-agent clone instead.
+		if gc := in.Config.SharedWorkspaceClone; gc != nil && gc.URL != "" && in.Config.GitClone == nil {
+			gcCopy := *gc
+			opts.SharedWorkspaceClone = &gcCopy
+		}
 	}
 
 	// --- Worktree-per-agent mode ---

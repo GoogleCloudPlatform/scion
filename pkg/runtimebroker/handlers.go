@@ -2063,6 +2063,9 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		// share a single git checkout instead of being given a worktree, and
 		// without this flag the broker would create a worktree on restart.
 		SharedWorkspace bool `json:"sharedWorkspace,omitempty"`
+		// SharedWorkspaceClone is re-sent with SharedWorkspace on every
+		// start, like GitClone below (see CreateAgentConfig).
+		SharedWorkspaceClone *api.GitCloneConfig `json:"sharedWorkspaceClone,omitempty"`
 		// Resume requests harness session continuation (e.g. Claude
 		// --continue). The hub is the source of truth and sets this from the
 		// agent's stored phase; when unset we fall back to GetSavedPhase below.
@@ -2117,16 +2120,17 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 
 	// Build config for buildStartContext (startAgent uses a subset of CreateAgentConfig)
 	var cfg *CreateAgentConfig
-	if startReq.Task != "" || startReq.HarnessConfig != "" || startReq.HarnessConfigID != "" || startReq.HarnessConfigHash != "" || len(startReq.SharedDirs) > 0 || startReq.SharedWorkspace || startReq.GitClone != nil || startReq.Branch != "" {
+	if startReq.Task != "" || startReq.HarnessConfig != "" || startReq.HarnessConfigID != "" || startReq.HarnessConfigHash != "" || len(startReq.SharedDirs) > 0 || startReq.SharedWorkspace || startReq.SharedWorkspaceClone != nil || startReq.GitClone != nil || startReq.Branch != "" {
 		cfg = &CreateAgentConfig{
-			Task:              startReq.Task,
-			HarnessConfig:     startReq.HarnessConfig,
-			HarnessConfigID:   startReq.HarnessConfigID,
-			HarnessConfigHash: startReq.HarnessConfigHash,
-			SharedDirs:        startReq.SharedDirs,
-			SharedWorkspace:   startReq.SharedWorkspace,
-			GitClone:          startReq.GitClone,
-			Branch:            startReq.Branch,
+			Task:                 startReq.Task,
+			HarnessConfig:        startReq.HarnessConfig,
+			HarnessConfigID:      startReq.HarnessConfigID,
+			HarnessConfigHash:    startReq.HarnessConfigHash,
+			SharedDirs:           startReq.SharedDirs,
+			SharedWorkspace:      startReq.SharedWorkspace,
+			SharedWorkspaceClone: startReq.SharedWorkspaceClone,
+			GitClone:             startReq.GitClone,
+			Branch:               startReq.Branch,
 		}
 	}
 
