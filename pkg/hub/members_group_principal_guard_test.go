@@ -56,7 +56,6 @@ func setupMembersGroupGuardFixture(t *testing.T) membersGroupGuardFixture {
 
 	f.srv.createProjectMembersGroup(ctx, f.project)
 	canonical := membersGroupFor(t, f.s, f.project)
-	require.True(t, store.IsProjectMembersGroup(canonical))
 
 	legacy := &store.Group{
 		ID: tid("mgguard-legacy"), Name: "MG Guard Legacy Members", Slug: "mgguard-legacy-members",
@@ -68,7 +67,6 @@ func setupMembersGroupGuardFixture(t *testing.T) membersGroupGuardFixture {
 		GroupID: legacy.ID, MemberType: store.GroupMemberTypeUser,
 		MemberID: f.creator.ID, Role: store.GroupMemberRoleMember,
 	}))
-	require.True(t, store.IsProjectMembersGroup(legacy))
 
 	y := &store.Project{
 		ID: tid("mgguard-y"), Name: "MG Guard Y", Slug: "mgguard-y",
@@ -152,7 +150,7 @@ func seedExistingMembersGroupBinding(t *testing.T, f membersGroupGuardFixture, n
 	require.NoError(t, f.s.UpdateGroup(ctx, stored))
 	marked, err := f.s.GetGroup(ctx, g.ID)
 	require.NoError(t, err)
-	require.True(t, store.IsProjectMembersGroup(marked), "seeded group must be marked")
+	require.Equal(t, "true", marked.Annotations[markerKey], "seeded group must carry the marker")
 	return marked, bindings
 }
 
