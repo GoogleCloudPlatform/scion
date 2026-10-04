@@ -1443,4 +1443,44 @@ describe('chat page — late DM peer lookups', () => {
     });
     expect(el.mobilePanel).toBe('center');
   });
+
+  it('a lookup overtaken during the user refresh builds no key and logs no error', async () => {
+    // The DM list has no match, so the lookup falls back to fetching the
+    // user, and that request is held until released.
+    let releaseMe: () => void = () => {};
+    vi.mocked(apiFetch).mockImplementation(async (path: string) => {
+      if (path === '/api/v1/chat/dms') {
+        return new Response(JSON.stringify({ dms: [] }), { status: 200 });
+      }
+      if (path === '/api/v1/auth/me') {
+        await new Promise<void>((resolve) => (releaseMe = resolve));
+        // No ID, so a key could not be built had the lookup gone on.
+        return new Response('{}', { status: 200 });
+      }
+      return new Response('{}', { status: 200 });
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const el = createPageWithoutUserId();
+    const buildKey = vi.spyOn(el, 'buildDMKey');
+    window.history.replaceState({}, '', '/chat');
+    el.parseV2Route();
+    el.openDM('agent-1', 'agent', 'Coder One');
+    // openDM tries the key once itself before it starts the lookup.
+    buildKey.mockClear();
+    await flush();
+    el.navigateToThread({
+      conversationKey: 'topic-2',
+      projectId: 'p1',
+      projectSlug: 'alpha',
+      threadName: 'two',
+    });
+
+    releaseMe();
+    await flush();
+
+    expect(buildKey).not.toHaveBeenCalled();
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(el.v2Conversation.conversationKey).toBe('topic-2');
+    errorSpy.mockRestore();
+  });
 });

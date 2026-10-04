@@ -2482,10 +2482,12 @@ export class ScionPageChat extends LitElement {
       }
     }
 
-    // 3. Retry key construction with the potentially-refreshed user ID.
+    // 3. Retry key construction with the potentially-refreshed user ID. A
+    // lookup overtaken by now stops here, so it neither opens the DM nor
+    // reports a missing identity.
+    if (superseded()) return;
     const key = this.buildDMKey(peerId, peerKind);
     if (key) {
-      if (superseded()) return;
       this.v2Conversation = {
         conversationKey: key,
         projectId: this.inheritedProjectId(),
