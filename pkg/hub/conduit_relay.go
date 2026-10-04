@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/router"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/target"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -95,6 +96,7 @@ type ConduitRelayOptions struct {
 type conduitRuntime struct {
 	relay    *relay.Relay
 	registry *registry.Registry
+	router   *router.Router
 	store    registry.Store
 	now      func() time.Time
 }
@@ -189,7 +191,17 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 	if err != nil {
 		return fmt.Errorf("conduit relay: %w", err)
 	}
-	rt := &conduitRuntime{relay: r, registry: reg, store: st, now: now}
+	rtr, err := router.New(router.Config{
+		Relay:    r,
+		Registry: reg,
+		Store:    st,
+		Peers:    &relay.PeerClient{HTTP: opts.HTTPClient, Auth: opts.PeerAuth},
+		Now:      now,
+	})
+	if err != nil {
+		return fmt.Errorf("conduit router: %w", err)
+	}
+	rt := &conduitRuntime{relay: r, registry: reg, router: rtr, store: st, now: now}
 	// Published before Start: the internal listener is already serving and
 	// the self-check probe must reach this relay's internal handler.
 	if !s.conduit.CompareAndSwap(nil, rt) {

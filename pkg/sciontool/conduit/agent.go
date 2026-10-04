@@ -116,6 +116,9 @@ type Options struct {
 	// default net.Dialer). It is only ever called with a 127.0.0.1
 	// address.
 	DialLocal func(ctx context.Context, network, addr string) (net.Conn, error)
+	// OnSession is called after each admitted session's grant keys are
+	// installed. Optional.
+	OnSession func(*conduitv1.Welcome)
 	// Clock, Backoff and Session tune timers and the session config
 	// (tests).
 	Clock   clock.Clock
@@ -206,6 +209,9 @@ func (a *Agent) Run(ctx context.Context) error {
 			a.applyWelcomeKeys(w)
 			log.Info("Conduit session established (session %s, relay %s, incarnation %q)",
 				w.GetSessionId(), w.GetRelayInstanceId(), w.GetEndpointIncarnation())
+			if a.opts.OnSession != nil {
+				a.opts.OnSession(w)
+			}
 		},
 		Backoff: a.opts.Backoff,
 		Decide:  a.decide,
