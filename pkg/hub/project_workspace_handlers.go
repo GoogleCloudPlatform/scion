@@ -135,8 +135,13 @@ func (s *Server) workspaceWriteBlocked() bool {
 	wsCfg := s.config.WorkspaceStorageConfig
 	if wsCfg != nil {
 		switch wsCfg.Backend {
-		case "nfs", "cloudrun-volume", "gke-shared-volume":
+		case "nfs":
 			return false // Known durable backend → writes allowed
+		case "cloudrun-volume", "gke-shared-volume":
+			// A volume backend without a volume name has no mount point:
+			// hubManagedProjectPath falls back to the ephemeral local path,
+			// so it is not durable and writes are blocked (ptone/scion#1073).
+			return workspaceMountRoot(wsCfg) == ""
 		}
 	}
 	// No config, empty backend, "local", or unrecognized → block writes
