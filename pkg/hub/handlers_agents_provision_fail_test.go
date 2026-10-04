@@ -36,6 +36,7 @@ type skillFailDispatcher struct {
 	createAgentDispatcher
 	provisionErr     error
 	startErr         error
+	createErr        error
 	provisionedAgent *store.Agent
 }
 
@@ -45,6 +46,13 @@ func (d *skillFailDispatcher) DispatchAgentProvision(ctx context.Context, agent 
 		return d.provisionErr
 	}
 	return d.createAgentDispatcher.DispatchAgentProvision(ctx, agent)
+}
+
+func (d *skillFailDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
+	if d.createErr != nil {
+		return nil, d.createErr
+	}
+	return d.createAgentDispatcher.DispatchAgentCreate(ctx, agent)
 }
 
 func (d *skillFailDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
@@ -265,4 +273,19 @@ func TestCreateAgent_ExistingAgentStartRelaysSkillResolutionError(t *testing.T) 
 			assertSkillErrorRelayed(t, rec, http.StatusGatewayTimeout, "timeout")
 		})
 	}
+}
+
+// The start that follows a workspace upload (sync-to finalize) relays a
+// required-skill resolution failure from the broker with its status and
+// code, as the other start paths do, instead of a 502.
+func TestWorkspaceSyncToFinalize_RelaysSkillResolutionError(t *testing.T) {
+	disp := &skillFailDispatcher{createErr: brokerSkillError(http.StatusTooManyRequests, "rate_limited", "30")}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	srv.SetStorage(newMockStorage("test-bucket"))
+	agent := createSiteAgent(t, s, project, "ws-skill-fail", state.PhaseProvisioning, store.RunIntentStopped)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/workspace/sync-to/finalize",
+		map[string]any{"manifest": map[string]any{"version": "1.0", "files": []any{}}})
+	assertSkillErrorRelayed(t, rec, http.StatusTooManyRequests, "rate_limited")
+	assert.Equal(t, "30", rec.Header().Get("Retry-After"))
 }
