@@ -231,6 +231,42 @@ func TestRestoreAfterDeleteClaimConflicts(t *testing.T) {
 	assertRestoreWroteNothing(t, s, before, edge)
 }
 
+// A restore whose row has its soft-delete operation ID changed after the
+// handler loaded it uses the operation ID read inside the transaction:
+// SetAgentSoftDeleteOpID does not bump state_version, so the restore
+// proceeds, reactivates the edges deactivated under the new ID and records
+// that ID in its audit.
+func TestRestoreUsesOpIDReadInTx(t *testing.T) {
+	srv, s, _, _ := engineTestServer(t)
+	agent, edge := softDeletedWithEdge(t, srv, s, "restore-opid-moved", store.DelegationPrincipalUser, tid("moved-delegator"))
+	const movedOpID = "op-moved"
+	srv.store = &claimOnLoadStore{Store: s, claim: func() {
+		ctx := context.Background()
+		n, err := s.ReactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agent.ID, store.EdgeDeactivationAgentSoftDelete, agent.SoftDeleteOpID)
+		require.NoError(t, err)
+		require.Equal(t, 1, n)
+		now := time.Now()
+		n, err = s.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, agent.ID, store.Deactivation{
+			Cause: store.EdgeDeactivationAgentSoftDelete, At: &now, OpID: movedOpID,
+		})
+		require.NoError(t, err)
+		require.Equal(t, 1, n)
+		require.NoError(t, s.SetAgentSoftDeleteOpID(ctx, agent.ID, movedOpID))
+	}}
+
+	rec := restoreForTest(t, srv, agent.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	srv.store = s
+	got := mustGetAgent(t, s, agent.ID)
+	assert.True(t, got.DeletedAt.IsZero(), "the row is restored")
+	assert.Empty(t, got.SoftDeleteOpID)
+	assert.Equal(t, []string{edge.ID}, activeEdgeIDs(t, s, agent.ID), "the edge deactivated under the new operation ID is reactivated")
+	sum := auditSummary(t, s, mutationTypeAgentRestore, agent.ID)
+	assert.Equal(t, movedOpID, sum["op_id"])
+	assert.EqualValues(t, 1, sum["edges_reactivated"])
+}
+
 // A restore whose deactivated edges have a delegator that is not live
 // returns 409 and writes nothing; the deactivation record stays intact, so
 // the restore succeeds once the delegator is live again.

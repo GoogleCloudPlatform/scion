@@ -265,12 +265,13 @@ func (s *Server) hardDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 
 // restoreAgentTx restores the soft-deleted agent a in one transaction. a is
 // the row the caller loaded and gated; the restore write is guarded by its
-// state_version, so the operation ID read from it is the one on the row
-// being restored. In order: check that the delegator of every edge
-// deactivated under the stored operation ID is live, clear DeletedAt and
-// SoftDeleteOpID, re-assert the identity keys, reactivate exactly those
-// edges (none when the operation ID is empty), run the restore hooks, and
-// write the agent_restore audit record.
+// state_version. SetAgentSoftDeleteOpID does not bump state_version, so the
+// operation ID is re-read with GetAgent inside the transaction and that
+// value, not the one on a, selects the edges. In order: re-read the
+// operation ID, check that the delegator of every edge deactivated under it
+// is live, clear DeletedAt and SoftDeleteOpID, re-assert the identity keys,
+// reactivate exactly those edges (none when the operation ID is empty), run
+// the restore hooks, and write the agent_restore audit record.
 //
 // A delegator that is not live returns errRestoreDelegatorNotLive, a store
 // error during that check errRestoreDelegatorLookup, a conflicting active
@@ -281,7 +282,6 @@ func (s *Server) restoreAgentTx(ctx context.Context, a *store.Agent, actor Audit
 	if a.DeletedAt.IsZero() {
 		return errAgentNotSoftDeleted
 	}
-	opID := a.SoftDeleteOpID
 	now := time.Now()
 
 	row := *a
@@ -290,6 +290,14 @@ func (s *Server) restoreAgentTx(ctx context.Context, a *store.Agent, actor Audit
 	row.Updated = now
 	hooks := s.lifecycleTxHooks.snapshot(&s.lifecycleTxHooks.restore)
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
+		cur, err := tx.GetAgent(ctx, row.ID)
+		if err != nil {
+			return err
+		}
+		if cur.DeletedAt.IsZero() {
+			return errAgentNotSoftDeleted
+		}
+		opID := cur.SoftDeleteOpID
 		if opID != "" {
 			if err := checkRestoreDelegatorsLive(ctx, tx, row.ID, opID); err != nil {
 				return err
