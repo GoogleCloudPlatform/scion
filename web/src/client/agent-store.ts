@@ -665,7 +665,10 @@ export class AgentStore {
             onPage: (_page, all) => {
               if (entry.walk !== walk || !firstLoad) return;
               const tombstones = this.tombstonesOf(feed);
-              const listed = dropTombstoned([...all], tombstones);
+              // Changes SSE delivered since the walk began win over its pages.
+              const listed = dropTombstoned([...all], tombstones).map((a) =>
+                feed.withSeedEpochDeltas(token, a)
+              );
               const listedIds = new Set(listed.map((a) => a.id));
               // Keep rows SSE added during the walk that no page has listed yet.
               const added = entry.agents.filter(

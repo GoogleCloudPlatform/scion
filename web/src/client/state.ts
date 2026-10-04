@@ -1340,6 +1340,16 @@ export class StateManager extends EventTarget {
   }
 
   /**
+   * `agent` as `seedAgents` with `token` would apply the deltas recorded
+   * for it so far, without storing it: for showing REST rows read while
+   * the epoch is open. Returns `agent` itself when none were recorded.
+   */
+  withSeedEpochDeltas(token: SeedEpochToken, agent: Agent): Agent {
+    const recorded = this.seedEpochs.get(token)?.deltas.get(agent.id);
+    return recorded ? applyCompactedDelta(agent, recorded, agent.id) : agent;
+  }
+
+  /**
    * Start recording per-ID deltas applied while a REST fetch is in flight,
    * so `seedAgents` can re-apply anything fresher than the response it is
    * about to seed (§7, §8). Returns a token to pass to `seedAgents` and

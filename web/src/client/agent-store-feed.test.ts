@@ -169,6 +169,32 @@ describe('AgentStore SSE application', () => {
     expect(ids(progress[progress.length - 1])).toEqual(['a1', 'a2', 'a3', 'a9']);
     expect(ids(snapshot)).toEqual(['a1', 'a2', 'a3', 'a9']);
   });
+  it('keeps a status change that lands between pages of a first load in later progress snapshots', async () => {
+    const h = createHarness([agent('a1', { phase: 'running' }), agent('a2'), agent('a3')], {
+      pageSize: 1,
+    });
+    const progress: AgentListSnapshot[] = [];
+    let release: (() => void) | undefined;
+    const loading = h.store.ensure(HUB, {
+      onProgress: (s) => {
+        progress.push(s);
+        // Hold the pages after the first.
+        if (progress.length === 1) release = h.server.pause();
+      },
+    });
+    await h.connect();
+    await vi.waitFor(() => expect(release).toBeDefined());
+
+    await h.emitAgent('status', { agentId: 'a1', phase: 'stopped' });
+    const changed = progress.length;
+    release!();
+    const snapshot = await loading;
+
+    const later = progress.slice(changed);
+    expect(later.length).toBeGreaterThan(0);
+    expect(later.map((s) => find(s, 'a1')?.phase)).toEqual(later.map(() => 'stopped'));
+    expect(find(snapshot, 'a1')?.phase).toBe('stopped');
+  });
 });
 
 describe('AgentStore agents created over SSE', () => {
