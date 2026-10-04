@@ -1180,14 +1180,14 @@ export class ScionPageAgentCreate extends LitElement {
 
     // Auto-expose ports: sent, as explicit values, only when the user operated
     // the control. Otherwise the hub resolves the project, then template,
-    // then hub default value.
+    // then hub default value. The list is always sent with the control, as
+    // in agent-configure.ts: an empty list means "no list" and, as an
+    // explicit value, overrides a template's list.
     if (this.autoExposeTouched) {
       env.SCION_AUTO_EXPOSE_PORTS = this.autoExposePortsEnabled ? 'true' : 'false';
       if (this.autoExposePortsEnabled) {
         env.SCION_AUTO_EXPOSE_MODE = this.autoExposePortsMode;
-        if (this.autoExposePortsList) {
-          env.SCION_AUTO_EXPOSE_PORTS_LIST = this.autoExposePortsList;
-        }
+        env.SCION_AUTO_EXPOSE_PORTS_LIST = this.autoExposePortsList;
         env.SCION_AUTO_EXPOSE_INTERVAL = this.autoExposePortsInterval || '3s';
       }
     }

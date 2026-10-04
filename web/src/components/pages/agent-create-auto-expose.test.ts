@@ -151,6 +151,21 @@ describe('agent-create auto-expose', () => {
     });
   }
 
+  it('sends an empty port list when the user cleared it, overriding a template list', async () => {
+    const c = await mountAgentCreate(true);
+    const list = c.shadowRoot?.querySelector('sl-input[placeholder="e.g. 3000,5173,8080"]') as
+      | (HTMLElement & { value: string })
+      | null;
+    expect(list).toBeTruthy();
+    list!.value = '';
+    list!.dispatchEvent(new Event('sl-input'));
+    await c.updateComplete;
+    expect(sentAutoExposeKeys(c)).toMatchObject({
+      SCION_AUTO_EXPOSE_PORTS: 'true',
+      SCION_AUTO_EXPOSE_PORTS_LIST: '',
+    });
+  });
+
   it('labels the control as inherited, naming the hub default, until the user operates it', async () => {
     const c = await mountAgentCreate(false);
     expect(labelText(c)).toBe(
