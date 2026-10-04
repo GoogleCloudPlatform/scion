@@ -63,9 +63,9 @@ Controls the central Hub API server.
 | `admin_emails` | list | `[]` | List of emails granted super-admin access. Listed users are always admins: they are promoted on sign-in. When the list is non-empty, an admin whose email is removed from it is demoted to [`default_user_role`](#authentication-serverauth) at the next hub restart or their next sign-in, whichever comes first. At restart, both `admin_emails` and the default role come from `settings.yaml` or the environment, so a change made only in the Admin UI (Postgres mode) takes effect at the user's next sign-in. If the default role was set only in the Admin UI, a user demoted at restart becomes Member. Two exceptions: admins promoted from **Admin > Users** (or the users API) stay admins, and nobody is demoted if the startup safety check failed (for example, no existing user matched the list at startup and there were no UI-promoted admins); demotions resume only after the configuration is fixed and the hub is restarted. Roles set from the admin UI for users who were never config admins (`member`, `viewer`) are not changed by this list. |
 | `soft_delete_retention` | duration | | Duration to retain soft-deleted agents (e.g., `"72h"`). |
 | `soft_delete_retain_files` | bool | `false` | Preserve workspace files during the soft-delete period. |
-| `async_agent_launch` | bool | `false` | **Reserved.** No create path reads this yet, so setting it has no effect until the async dispatch path lands. Once live: the non-blocking agent create kill switch — a launch is non-blocking only when this is on **and** the client request also opts in (`acceptAsyncLaunch`); clients that never opt in stay synchronous permanently. Restart required to change. |
-| `launch_timeout` | duration | `"5m"` | **Reserved.** Not yet read by any create path. Once live: the whole-launch budget for an opted-in launch, from acceptance to a terminal Hub state. Values below `30s` are rejected (the broker's fixed 20s abort margin would leave no time for a launch to run) and the default is used instead. Restart required to change. |
-| `launch_keepalive_seconds` | int | `15` | Broker keepalive interval, in seconds. Today it sets only the reaper's staleness window (when a launch is presumed lost, 8x this value); it will also be sent to the broker once the async dispatch path lands. Restart required to change. |
+| `async_agent_launch` | bool | `false` | Turns on asynchronous agent create. A create is asynchronous only when this is on **and** the request opts in (`acceptAsyncLaunch`); `scion start`, `scion resume`, and scheduled agent creates opt in, other clients stay synchronous. Provision-only creates and reprovisioning are always synchronous. See [Asynchronous agent create](#asynchronous-agent-create). Startup-only: restart required to change. Env: `SCION_SERVER_HUB_ASYNCAGENTLAUNCH`. |
+| `launch_timeout` | duration | `"5m"` | Whole-launch budget for an asynchronous create, from the moment the Hub begins the launch until the agent is running. A launch still in progress at this deadline is ended and the agent is set to `error` (`launch_timeout`). A Go duration string such as `"15m"`. There is no upper limit. A value below `30s` is replaced by the default (`5m`) with a warning in the Hub log. In `settings.yaml`, a value that is not a valid duration is ignored and the default applies. Raise it for clusters with slow pod starts. Startup-only: restart required to change. Env: `SCION_SERVER_HUB_LAUNCHTIMEOUT`. |
+| `launch_keepalive_seconds` | int | `15` | Keepalive interval, in seconds, that the Hub sends to the Runtime Broker with each asynchronous create. A launch whose broker sends no report for 8x this interval (120s at the default) is ended and the agent is set to `error` (`broker_lost`). Values of `0` or less use the default. Startup-only: restart required to change. Env: `SCION_SERVER_HUB_LAUNCHKEEPALIVESECONDS`. |
 | `missing_agent_grace` | duration | `"3m"` | How long a `running` agent may be absent from its Runtime Broker's heartbeat before the Hub marks it `error` with exit reason `container_missing` (an existing `preempted` or `evicted` exit reason and its message are kept). Applies only when the broker is online, reported a complete runtime inventory, and sent a recent previous heartbeat; agents with a lifecycle operation in progress are skipped. Values below `"1m"` fall back to the default. Env: `SCION_SERVER_HUB_MISSINGAGENTGRACE`. |
 | `cors` | object | | CORS configuration (see below). |
 
@@ -75,6 +75,30 @@ Controls the central Hub API server.
 | :--- | :--- | :--- | :--- |
 | `enabled` | bool | `true` | Enable CORS. |
 | `allowed_origins` | list | `["*"]` | Allowed origins. |
+
+#### Asynchronous agent create
+
+By default, a Hub agent create is synchronous: the Hub holds the create request open while the Runtime Broker provisions the workspace and starts the agent. That request is bounded by the CLI's HTTP client timeout (30s) and by the Hub's `write_timeout` (`60s` by default), so the synchronous path is not suited to agents that take several minutes to start.
+
+With `async_agent_launch: true`, the Hub instead answers as soon as the broker accepts the create. The agent is returned in a pre-running phase with an active launch, and the broker finishes the start in the background:
+
+- **Opt-in per request.** `scion start` and `scion resume` opt in on every Hub create and then poll the agent until it is `running`, `error`, or `stopped`. By default they wait for the Hub's remaining launch budget plus 30 seconds (5 minutes when the Hub does not report a budget); `--wait-timeout` overrides this and `--no-wait` returns once the Hub has accepted. See [`scion start`](/scion/reference/cli/#scion-start-or-run). Scheduled agent creates opt in server-side. Requests that do not opt in are synchronous.
+- **The wait is not the launch.** If the CLI stops waiting (the wait budget runs out, or Ctrl-C), the launch continues on the Hub and broker, and the agent still comes up. Run `scion start <agent>` again to resume waiting.
+- **Bounded by `launch_timeout`.** A launch that has not reached `running` by its deadline is ended: the broker stops it shortly before the deadline, and the Hub sets the agent to `error` with launch error `launch_timeout` shortly after. Starting such an agent is refused with `agent_create_incomplete`; delete it and create it again.
+- **Starts during a launch.** While a launch is in progress and before its deadline, a start of that agent is refused with `agent_launching` rather than starting it twice.
+
+**Requirements.** The Hub, the Runtime Broker, and the CLI must all run a version that includes asynchronous create. A broker that reports no async launch support, or that answers the create synchronously, gets the synchronous create, so mixing versions is safe but slow starts on an older broker keep the synchronous limits. A broker runtime that cannot serve an asynchronous launch also falls back to the synchronous create.
+
+**Slow pod starts.** On clusters with slow node provisioning, for example GKE Autopilot cold starts where a new node is added and the agent image takes several minutes to pull, raise `launch_timeout` so the launch is not ended first:
+
+```yaml
+server:
+  hub:
+    async_agent_launch: true
+    launch_timeout: "15m"
+```
+
+Both keys are read only at Hub startup; restart the Hub after changing them. They cannot be set through the admin server-config API (see [Layer 0](#layer-0--bootstrap-file--env-only)).
 
 ### Broker Settings (`server.broker`)
 
