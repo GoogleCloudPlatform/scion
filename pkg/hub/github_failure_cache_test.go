@@ -145,7 +145,7 @@ func TestSkillsResolve_GHNotFoundCode(t *testing.T) {
 	}{
 		{"missing ref", "gh://" + owner + "/" + repo + "/thing@no-such-branch", http.StatusNotFound, http.StatusOK, agent.SkillErrCodeNotFound},
 		{"missing skill path", "gh://" + owner + "/" + repo + "/thing@main", http.StatusOK, http.StatusNotFound, agent.SkillErrCodeNotFound},
-		{"unprocessable ref", "gh://" + owner + "/" + repo + "/thing@bad", http.StatusUnprocessableEntity, http.StatusOK, "resolve_failed"},
+		{"unprocessable ref", "gh://" + owner + "/" + repo + "/thing@bad", http.StatusUnprocessableEntity, http.StatusOK, agent.SkillErrCodeResolveFailed},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
