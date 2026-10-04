@@ -2859,7 +2859,7 @@ with the plain pattern in scion-hub.iapAudiencePattern. The inner trim and the
 strip are validateHostedHAPreflight's TrimRight(TrimSpace(aud), "/"); the outer
 trim is the TrimSpace inside isSupportedIAPAudience. On that value the pattern
 accepts exactly what isSupportedIAPAudience accepts, and
-TestHelmChartIAPAudiencePattern (cmd/helm_chart_ha_contract_test.go) checks the
+TestHelmChartIAPAudiencePattern (cmd/helm_chart_iap_audience_test.go) checks the
 two against each other.
 
 The HA half replaces the acknowledgement this chart used to demand: with every
