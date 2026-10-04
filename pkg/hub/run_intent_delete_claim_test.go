@@ -155,3 +155,31 @@ func TestRestart_DeleteClaimBetweenLegsLeavesRowToEngine(t *testing.T) {
 	assert.Equal(t, before.Phase, got.Phase, "no stopped status write")
 	assert.NotEqual(t, "stopped", got.ContainerStatus)
 }
+
+// A stopped agent holds no reservation, so its restart reserves a slot.
+// When the start leg is refused because a delete claimed the row, that
+// slot is this call's and is rolled back; it does not wait for reconcile
+// (ptone/scion#2550, round 6 N3).
+func TestRestart_DeleteClaimBetweenLegsRollsBackOwnReservation(t *testing.T) {
+	disp := &claimBetweenLegsDispatcher{}
+	srv, s, project := setupCreateAgentServer(t, disp)
+	srv.SetDispatcher(disp)
+	setBrokerAgentCeiling(t, s, 1)
+	brokerID := project.DefaultRuntimeBrokerID
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
+		Name: "restart-claim-stopped", ProjectID: project.ID,
+	})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var created CreateAgentResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+created.Agent.ID+"/stop", nil)
+	require.Less(t, rec.Code, 300, rec.Body.String())
+	require.EqualValues(t, 0, brokerReservationCount(t, s, brokerID), "a stopped agent holds no reservation")
+
+	disp.failStart = true
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+created.Agent.ID+"/restart", nil)
+	requireDeleteInProgress(t, rec)
+	require.EqualValues(t, 1, disp.startCount.Load(), "the start leg was attempted")
+	assert.EqualValues(t, 0, brokerReservationCount(t, s, brokerID), "the restart's own reservation is rolled back")
+}
