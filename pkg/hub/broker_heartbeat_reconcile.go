@@ -333,10 +333,13 @@ type heartbeatReport struct {
 	// these slugs is treated as present, which errs on the side of leaving
 	// it alone.
 	unresolvedSlugs map[string]bool
+	// observed holds, for each matched agent, the target that listed it and
+	// whether it was running or terminal (recovery_observations.go).
+	observed map[string]observedAgent
 }
 
 func newHeartbeatReport() *heartbeatReport {
-	return &heartbeatReport{present: map[string]bool{}, unresolvedSlugs: map[string]bool{}}
+	return &heartbeatReport{present: map[string]bool{}, unresolvedSlugs: map[string]bool{}, observed: map[string]observedAgent{}}
 }
 
 // inventoryAllowsReconcile reports whether this heartbeat may be used to

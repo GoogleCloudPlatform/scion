@@ -95,6 +95,11 @@ type BrokerCapabilities struct {
 	// directory at <projectDir>/agents/<slug>/workspace (design #2703). The
 	// hub refuses to dispatch such agents to a broker without it (412).
 	EmptyPerAgentWorkspace bool `json:"emptyPerAgentWorkspace"`
+	// StartsInFlight indicates the broker reports the agent starts still
+	// running on it in every heartbeat (BrokerHeartbeat.StartsInFlight). Only
+	// then does the hub read a start's absence from that list as "no start
+	// in flight".
+	StartsInFlight bool `json:"startsInFlight,omitempty"`
 }
 
 // ProjectInfo is a summary of a project registered on this broker.
