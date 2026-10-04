@@ -706,8 +706,10 @@ func RunInit(args []string, opts InitRunOptions) int {
 			// while still requiring success on first creation.
 			var fallbackExists bool
 			if harnessReq.EnvOverlayPath != "" {
-				existingOverlay := hooks.ResolveContainerPath(harnessReq.EnvOverlayPath, agentHome)
-				if _, statErr := os.Stat(existingOverlay); statErr == nil {
+				existingOverlay, _, pathErr := harnessReq.ResolveEnvOverlay(agentHome)
+				if pathErr != nil {
+					log.Error("Cannot locate previous env overlay: %v", pathErr)
+				} else if _, statErr := os.Stat(existingOverlay); statErr == nil {
 					log.Info("WARNING: Pre-start provisioning failed but previous env overlay exists at %s, using fallback", existingOverlay)
 					fallbackExists = true
 				}
@@ -777,9 +779,11 @@ func RunInit(args []string, opts InitRunOptions) int {
 	var harnessEnvOverlay map[string]string
 	var nativeTelemetryPolicy string
 	if harnessReq.EnvOverlayPath != "" {
-		overlayPath := hooks.ResolveContainerPath(harnessReq.EnvOverlayPath, agentHome)
-		allowedRoots := []string{harnessReq.BundleDir, agentHome}
-		overlay, err := hooks.LoadEnvOverlay(overlayPath, allowedRoots)
+		overlayPath, allowedRoots, err := harnessReq.ResolveEnvOverlay(agentHome)
+		var overlay map[string]string
+		if err == nil {
+			overlay, err = hooks.LoadEnvOverlay(overlayPath, allowedRoots)
+		}
 		if err != nil {
 			log.Error("Failed to load harness env overlay %s: %v", overlayPath, err)
 			if harnessReq.Required {
