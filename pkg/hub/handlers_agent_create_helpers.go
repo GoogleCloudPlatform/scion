@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"maps"
 	"net/http"
 	"sort"
 	"strconv"
@@ -153,7 +154,12 @@ func (s *Server) buildAppliedConfig(req CreateAgentRequest, creatorName string, 
 
 	if req.Config != nil {
 		ac.Image = req.Config.Image
-		ac.Env = req.Config.Env
+		// Env gets its own map, never req.Config.Env itself: ac.InlineConfig
+		// below IS req.Config, so sharing the map would let every later
+		// AppliedConfig.Env writer (the template-env fill, the project
+		// auto-expose tier, the post-dispatch resolved-env merge) leak into
+		// InlineConfig.Env, which holds the requester's explicit keys only.
+		ac.Env = maps.Clone(req.Config.Env)
 		ac.Model = req.Config.Model
 		ac.ThinkingLevel = req.Config.ThinkingLevel
 
@@ -425,26 +431,22 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 // InlineConfig is not a record of the requester's explicit inputs after this
 // runs: this function creates it when nil (mergeInjectedSkills always does,
 // which is why a bare create's InlineConfig is never nil) and writes into it
-// — template/hub/project telemetry defaults, the project- or hub-level
-// SCION_AUTO_EXPOSE_PORTS default (in InlineConfig.Env), the resolved Model
-// alias, and InlineConfig.Skills (see above). It also receives the template
-// env merge below by aliasing, not by a write in this function: the create
-// path's config builder, buildAppliedConfig, sets AppliedConfig.InlineConfig
-// to req.Config itself and AppliedConfig.Env to req.Config.Env, so
-// InlineConfig *is* the request object and AppliedConfig.Env is its Env
-// field — every InlineConfig write listed above also mutates the request,
-// and, in the same direction, when the requester supplied any env, the
-// template-env-merge writes below land in InlineConfig.Env too (and the
-// auto-expose key also appears in AppliedConfig.Env). InlineConfig.Telemetry
-// can also be aliased, by this function's own template-telemetry fill, to
-// resolvedTemplate.Config.Telemetry, so the project TelemetryEnabled write
-// above can mutate the template object through that shared pointer.
-// InlineConfig therefore cannot be stripped back to explicit inputs by
-// removing known hub/project keys — the aliased template-env keys are
-// indistinguishable from explicit ones by inspecting InlineConfig. A caller
-// that needs the original explicit request inputs (reincarnate does) must
-// capture them before this runs, not read them back out of InlineConfig
-// afterward.
+// — template/hub/project telemetry defaults, the resolved Model alias, and
+// InlineConfig.Skills (see above). The create path's config builder,
+// buildAppliedConfig, sets AppliedConfig.InlineConfig to req.Config itself,
+// so every InlineConfig write listed above also mutates the request.
+// InlineConfig.Telemetry can also be aliased, by this function's own
+// template-telemetry fill, to resolvedTemplate.Config.Telemetry, so the
+// project TelemetryEnabled write above can mutate the template object through
+// that shared pointer. A caller that needs the original explicit request
+// inputs (reincarnate does) must capture them before this runs, not read them
+// back out of InlineConfig afterward.
+//
+// InlineConfig.Env is the exception: nothing here writes it. AppliedConfig.Env
+// is a separate map (buildAppliedConfig clones it), so the template-env merge
+// and the SCION_AUTO_EXPOSE_PORTS project tier (resolveAutoExposeEnv) land in
+// AppliedConfig.Env only, and InlineConfig.Env keeps the requester's explicit
+// keys.
 //
 // Precondition: agent.AppliedConfig must be non-nil (populateAgentConfig's
 // caller-facing guard covers today's only call site; a direct caller must
@@ -720,42 +722,22 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 		}
 	}
 
-	// Apply project-level AutoExposePortsEnabled override.
-	// Only set the env var if the agent's own config does not already specify it,
-	// so agent-level settings take priority over project-level.
-	if project != nil && project.Annotations != nil {
-		if val, ok := project.Annotations[projectSettingAutoExposePortsEnabled]; ok {
-			enabled, err := strconv.ParseBool(val)
-			if err == nil {
-				if agent.AppliedConfig.InlineConfig == nil {
-					agent.AppliedConfig.InlineConfig = &api.ScionConfig{}
-				}
-				if agent.AppliedConfig.InlineConfig.Env == nil {
-					agent.AppliedConfig.InlineConfig.Env = make(map[string]string)
-				}
-				if _, exists := agent.AppliedConfig.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"]; !exists {
-					agent.AppliedConfig.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"] = strconv.FormatBool(enabled)
-				}
+	// SCION_AUTO_EXPOSE_PORTS: explicit and project tiers. Runs after the
+	// template-env fill above so the project tier can overwrite a template
+	// value. The hub default is never written here; see resolveAutoExposeEnv.
+	// Explicit keys come from the CreateInputs snapshot every create path
+	// takes before derivation; a config without one falls back to
+	// InlineConfig.Env, which nothing on these paths writes derived keys to.
+	if agent.AppliedConfig != nil {
+		var explicitEnv map[string]string
+		if ci := agent.AppliedConfig.CreateInputs; ci != nil {
+			if ci.InlineConfig != nil {
+				explicitEnv = ci.InlineConfig.Env
 			}
+		} else if agent.AppliedConfig.InlineConfig != nil {
+			explicitEnv = agent.AppliedConfig.InlineConfig.Env
 		}
-	}
-
-	// Apply hub-level AutoExposePortsDefault as lowest-priority fallback.
-	// Injects SCION_AUTO_EXPOSE_PORTS if neither the agent config nor
-	// the project annotation already set it, respecting both true and false defaults.
-	s.mu.RLock()
-	hubAutoExposeDefault := s.config.AutoExposePortsDefault
-	s.mu.RUnlock()
-	if hubAutoExposeDefault != nil {
-		if agent.AppliedConfig.InlineConfig == nil {
-			agent.AppliedConfig.InlineConfig = &api.ScionConfig{}
-		}
-		if agent.AppliedConfig.InlineConfig.Env == nil {
-			agent.AppliedConfig.InlineConfig.Env = make(map[string]string)
-		}
-		if _, exists := agent.AppliedConfig.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"]; !exists {
-			agent.AppliedConfig.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"] = strconv.FormatBool(*hubAutoExposeDefault)
-		}
+		resolveAutoExposeEnv(agent.AppliedConfig, project, explicitEnv)
 	}
 
 	// Merge injected skills from hub/user/project scopes into InlineConfig.Skills
@@ -769,6 +751,47 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 	// leaves the env records. Every create entry point (HTTP create,
 	// scheduled spawn and reincarnate) reaches this via deriveAgentConfig.
 	s.captureCreateTimezone(ctx, agent, resolvedHC)
+}
+
+// resolveAutoExposeEnv resolves SCION_AUTO_EXPOSE_PORTS into ac.Env by the
+// B1 order in settings-precedence.md, highest first:
+//
+//  1. user-explicit: the key is in explicit (the request's env snapshot,
+//     CreateInputs.InlineConfig.Env). That value is already in ac.Env, so
+//     nothing is written.
+//  2. project annotation scion.io/auto-expose-ports-enabled: written into
+//     ac.Env, overwriting a template-derived value.
+//  3. template env, already merged into ac.Env by the template-env fill, is
+//     left as is; harness-config env applies at the broker below it.
+//  4. hub AutoExposePortsDefault: never written to the agent record. The
+//     dispatcher sends it in api.HubAgentDefaults and the broker's
+//     buildAgentEnv applies it only when no higher tier set the key.
+//
+// explicit must be the request snapshot, not ac.Env, so a template-derived
+// value is never mistaken for an explicit one. Neither InlineConfig.Env nor
+// CreateInputs is written: the resolved value is derived, not explicit.
+func resolveAutoExposeEnv(ac *store.AgentAppliedConfig, project *store.Project, explicit map[string]string) {
+	if ac == nil {
+		return
+	}
+	if _, ok := explicit[api.EnvAutoExposePorts]; ok {
+		return
+	}
+	if project == nil || project.Annotations == nil {
+		return
+	}
+	val, ok := project.Annotations[projectSettingAutoExposePortsEnabled]
+	if !ok {
+		return
+	}
+	enabled, err := strconv.ParseBool(val)
+	if err != nil {
+		return
+	}
+	if ac.Env == nil {
+		ac.Env = make(map[string]string)
+	}
+	ac.Env[api.EnvAutoExposePorts] = strconv.FormatBool(enabled)
 }
 
 // mergeInjectedSkills fetches injected-skills refs from hub, user, and project
@@ -1041,10 +1064,16 @@ func (s *Server) handleExistingAgent(
 		return existingAgentConflict
 	}
 
-	// Delete in progress (design ptone/scion#2483 §2.1): every branch below
+	// Start gate (design ptone/scion#2483 §2.1): every branch below
 	// starts, resumes, restarts or recreates existingAgent, so the shared
-	// start gate runs first, after the lifecycle authz above.
+	// start gate runs first, after the lifecycle authz above. An agent whose
+	// create is in flight is returned as it is, without applying the
+	// request.
 	if ref := s.startGate(ctx, existingAgent, startEntryCreateExisting); ref.refuses() {
+		if ref.InFlight {
+			s.writeExistingAgentLaunching(ctx, w, existingAgent, project, req)
+			return existingAgentStarted
+		}
 		ref.write(w)
 		return existingAgentErrored
 	}
@@ -1094,8 +1123,16 @@ func (s *Server) handleExistingAgent(
 		// This branch only runs for suspended agents, so resume the harness
 		// session (Claude --continue) rather than starting fresh.
 		resume := existingAgent.Phase == string(state.PhaseSuspended)
+		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
+			s.rollbackBrokerQuota(ctx, existingAgent, reserved)
+			writeErrorFromErr(w, err, "")
+			return existingAgentErrored
+		}
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, resume); err != nil {
 			s.rollbackBrokerQuota(ctx, existingAgent, reserved)
+			if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
+				return res
+			}
 			switch {
 			case writeAgentTokenIssueError(w, err):
 				// Response written.
@@ -1179,8 +1216,16 @@ func (s *Server) handleExistingAgent(
 			if !ok {
 				return existingAgentErrored
 			}
+			if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
+				s.rollbackBrokerQuota(ctx, existingAgent, reserved)
+				writeErrorFromErr(w, err, "")
+				return existingAgentErrored
+			}
 			if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, forcedRecovery); err != nil {
 				s.rollbackBrokerQuota(ctx, existingAgent, reserved)
+				if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
+					return res
+				}
 				switch {
 				case writeAgentTokenIssueError(w, err):
 					// Response written.
@@ -1223,6 +1268,10 @@ func (s *Server) handleExistingAgent(
 
 	// Phase 2: Env-gather re-provisioning — provisioning + GatherEnv requested.
 	if req.GatherEnv && existingAgent.Phase == string(state.PhaseProvisioning) {
+		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentStopped); err != nil {
+			writeErrorFromErr(w, err, "")
+			return existingAgentErrored
+		}
 		dispatcher := s.GetDispatcher()
 		if dispatcher != nil && existingAgent.RuntimeBrokerID != "" {
 			if err := dispatcher.DispatchAgentDelete(ctx, existingAgent, false, false, false, time.Time{}); err != nil {
@@ -1294,7 +1343,14 @@ func (s *Server) handleExistingAgent(
 		// Dispatch start action — DispatchAgentStart applies the broker's
 		// response (status, container info) onto existingAgent in-place.
 		// A created/provisioning agent has no prior session to resume.
+		if _, err := s.recordRunIntent(ctx, existingAgent, store.RunIntentRunning); err != nil {
+			writeErrorFromErr(w, err, "")
+			return existingAgentErrored
+		}
 		if err := dispatcher.DispatchAgentStart(ctx, existingAgent, req.Task, false); err != nil {
+			if res, ok := s.writeExistingAgentGuardError(ctx, w, existingAgent, project, req, err); ok {
+				return res
+			}
 			switch {
 			case writeAgentTokenIssueError(w, err):
 				// Response written.

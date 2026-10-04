@@ -33,25 +33,25 @@ import (
 
 // This file covers the order-parity gate: an HTTP-level page walk whose
 // concatenated pages must equal the agentsort reference order over the
-// authorized, filtered set, at a scale closer to the design's own test-plan
+// authorized, filtered set, at a scale closer to a realistic project
 // (1,200 agents) than the small fixtures used elsewhere in this package.
 //
-// Scope note (documented deviation): design 9 asks for page sizes
+// Scope note (deliberate reduction): the full matrix would be page sizes
 // {1, 7, 25, 500} at n=1,200. Sorted mode's per-request cost is 5+n+7P -- every
 // page re-evaluates the read pass over all 1,200 candidates, so a
 // fine-grained walk (e.g. limit=1, 1,200 requests) at that N costs well over
 // a million decisions and would make this single test the slowest thing in
 // the suite by a wide margin. This test instead: (a) walks
-// n=1,200 at limit=500 (3 pages, the page size real drains actually use,
-// design 8) for both directions, and (b) walks the full {1,7,25} page-size
-// set from the design's list at a smaller n=100, which exercises the same
+// n=1,200 at limit=500 (3 pages, the page size real drains actually use)
+// for both directions, and (b) walks the remaining {1,7,25} page sizes
+// at a smaller n=100, which exercises the same
 // off-page-boundary and cursor-continuation logic -- the actual risk this
 // gate protects against -- at a cost the suite can afford. limit=500 is
 // covered at n=100 by the existing small-fixture tests elsewhere in this
 // package.
 
 // referenceOrderIDs returns the authorized, filtered set's IDs in the
-// design 4.2 total order for (sort, dir), independent of any HTTP
+// sorted-mode total order for (sort, dir), independent of any HTTP
 // pagination: a direct, single, unpaged store.Store.ListAgentMembers call.
 func referenceOrderIDs(t *testing.T, s store.Store, projectID, sortKey, dir string, max int) []string {
 	t.Helper()
@@ -132,8 +132,8 @@ func TestListProjectAgentsSorted_OrderParity_PageSizeSweep(t *testing.T) {
 	}
 }
 
-// TestListProjectAgentsSorted_OrderParity_PhaseAndLabelFilter covers design
-// 9's "filters (phase, label)" dimension: the walk must still concatenate
+// TestListProjectAgentsSorted_OrderParity_PhaseAndLabelFilter covers the
+// filters (phase, label) dimension: the walk must still concatenate
 // to the reference order when restricted to a phase and a label.
 func TestListProjectAgentsSorted_OrderParity_PhaseAndLabelFilter(t *testing.T) {
 	f := sortedListSetup(t)

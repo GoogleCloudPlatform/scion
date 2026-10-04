@@ -108,3 +108,23 @@ func TestDeleteAgent_KeepFilesKeepsNFSWorktree(t *testing.T) {
 		t.Fatalf("RemoveNFSAgentFiles called with deleteFiles=false: %q", mgr.calls)
 	}
 }
+
+// An empty-per-agent agent (design #2703 P3) goes through the same
+// name-keyed removal on delete with files: its own workspace on the NFS
+// export is removed by RemoveNFSAgentFiles, with no separate remover.
+func TestDeleteAgent_EmptyPerAgentRemovesNFSAgentFiles(t *testing.T) {
+	mgr := &worktreeRemovingManager{filteringMockManager: &filteringMockManager{}}
+	srv, home, _ := newWorktreeRemovalServer(t, mgr)
+	scionDir, _ := makeHubProject(t, home, "proj-a", scopeProjA, "dev")
+	info := labelled("dev", "cid-a", scopeProjA, scionDir)
+	info.Labels["scion.dev/workspace-mode"] = "empty-per-agent"
+	mgr.agents = []api.AgentInfo{info}
+
+	rec := doDelete(t, srv, "dev", "projectId="+scopeProjA+"&deleteFiles=true")
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(mgr.calls) != 1 || mgr.calls[0] != scionDir+"|"+scopeProjA+"|dev" {
+		t.Fatalf("RemoveNFSAgentFiles calls = %q", mgr.calls)
+	}
+}
