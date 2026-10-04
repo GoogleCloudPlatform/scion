@@ -17,7 +17,7 @@ package runtime
 import (
 	"fmt"
 	"path"
-	"path/filepath"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -49,7 +49,7 @@ const NFSProvisionStateEnv = "SCION_PROVISION_STATE_DIR"
 // only from workspaceSubPath and is checked to be a direct child of the
 // same parent. Kubernetes subPaths use forward slashes whatever the OS.
 func NFSProvisionStateSubPath(workspaceSubPath, projectID string) (string, error) {
-	if workspaceSubPath == "" || !filepath.IsLocal(workspaceSubPath) || path.Clean(workspaceSubPath) != workspaceSubPath ||
+	if !isLocalSlashPath(workspaceSubPath) || path.Clean(workspaceSubPath) != workspaceSubPath ||
 		path.Base(workspaceSubPath) != "workspace" || path.Dir(workspaceSubPath) == "." {
 		return "", fmt.Errorf("provisioning state: unexpected NFS workspace subPath %q", workspaceSubPath)
 	}
@@ -58,10 +58,26 @@ func NFSProvisionStateSubPath(workspaceSubPath, projectID string) (string, error
 		return "", fmt.Errorf("provisioning state: NFS workspace subPath %q is not under project %q", workspaceSubPath, projectID)
 	}
 	stateSubPath := path.Join(projectDir, provision.ProvisionStateDirName)
-	if path.Clean(stateSubPath) != stateSubPath || !filepath.IsLocal(stateSubPath) || path.Dir(stateSubPath) != projectDir {
+	if path.Clean(stateSubPath) != stateSubPath || !isLocalSlashPath(stateSubPath) || path.Dir(stateSubPath) != projectDir {
 		return "", fmt.Errorf("provisioning state: resolved subPath %q escapes %q", stateSubPath, projectDir)
 	}
 	return stateSubPath, nil
+}
+
+// isLocalSlashPath reports whether p is a usable relative Kubernetes subPath,
+// with forward slashes whatever the OS: not empty, not absolute, no NUL
+// byte, and no ".." component once cleaned. Components are compared whole,
+// so a name such as "..foo" is allowed.
+func isLocalSlashPath(p string) bool {
+	if p == "" || path.IsAbs(p) || strings.ContainsRune(p, 0) {
+		return false
+	}
+	for _, elem := range strings.Split(path.Clean(p), "/") {
+		if elem == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 // nfsProvisionStateInitMount returns the workspace-provision init

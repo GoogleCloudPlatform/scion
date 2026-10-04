@@ -45,9 +45,36 @@ func TestNFSProvisionStateSubPath(t *testing.T) {
 		{"projects/proj-123/agents/agent-1", "proj-123"},
 		{"projects/proj-123/workspaces", "proj-123"},
 		{"projects/proj-123/workspace", "proj-456"},
+		{"..", ""},
+		{"/abs/x/workspace", ""},
+		{"../x/workspace", ""},
+		{"projects/proj-\x00123/workspace", ""},
+		{"projects/proj-123\x00/workspace", "proj-123"},
 	} {
 		_, err := NFSProvisionStateSubPath(tc.subPath, tc.projectID)
 		assert.Error(t, err, "subPath %q project %q", tc.subPath, tc.projectID)
+	}
+
+	// A component that merely starts with ".." is an ordinary name.
+	got, err = NFSProvisionStateSubPath("..foo/proj-123/workspace", "proj-123")
+	require.NoError(t, err)
+	assert.Equal(t, "..foo/proj-123/provision", got)
+}
+
+func TestIsLocalSlashPath(t *testing.T) {
+	for p, want := range map[string]bool{
+		"":                 false,
+		"..":               false,
+		"../x":             false,
+		"x/..":             true, // cleans to "."
+		"x/../..":          false,
+		"/abs/x":           false,
+		"a\x00b":           false,
+		"..foo/x":          true,
+		"x/..foo":          true,
+		"projects/p1/work": true,
+	} {
+		assert.Equal(t, want, isLocalSlashPath(p), "%q", p)
 	}
 }
 
