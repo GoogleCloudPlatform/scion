@@ -210,7 +210,8 @@ export function builtInOptionState(
  * Hub denial codes for a governance refusal: the actor's own tier may not
  * grant the role (pkg/hub checkBuiltInChangeGovernance, ErrCodeRoleAssignmentForbidden
  * and ErrCodeTargetRoleProtected). The hub's reason text for these is a
- * machine string such as `actor role "admin" cannot add target role "owner"`.
+ * machine string such as
+ * `actor role "project-admin" cannot add target role "project-owner"`.
  */
 const GOVERNANCE_DENIAL_CODES: readonly string[] = [
   'role_assignment_forbidden',
@@ -239,10 +240,19 @@ export function addModeRoleReason(role: AssignableProjectRole, mode: MemberDialo
 /**
  * Reason for a built-in role above the actor's tier. A governance refusal
  * (or one without a denial code) reads as the readable tier text; any other
- * code (credential gate, delegation ceiling) shows the hub's reason, mapped
- * by describeCustomRoleError.
+ * code (such as the credential gate) shows the hub's reason, mapped by
+ * describeCustomRoleError.
+ *
+ * The hub's delegation ceiling (canDelegateRefusalFor) shares
+ * target_role_protected, so a ceiling refusal here would also read as the
+ * tier text. That is safe only because the hub runs governance before
+ * CanDelegate, so a tier-blocked built-in carries the governance code. A
+ * ceiling refusal on a tier-allowed role goes through builtInOptionState's
+ * !grantable branch instead.
  */
 export function builtInTierReason(role: AssignableProjectRole, mode: MemberDialogMode): string {
+  // The direct-owner refusal ("only direct project owners can manage ...") is
+  // collapsed to TIER_REASON on purpose; D3 makes it effectively unreachable.
   if (!role.denialCode || GOVERNANCE_DENIAL_CODES.includes(role.denialCode)) return TIER_REASON;
   return addModeRoleReason(role, mode) || TIER_REASON;
 }
@@ -251,8 +261,8 @@ export function builtInTierReason(role: AssignableProjectRole, mode: MemberDialo
  * Enabled/disabled state of one custom-role checkbox. Without
  * canManageCustomRoles every checkbox is read-only (the section caption
  * explains why); in Add mode an unheld one also carries its assignable-roles
- * reason when that differs from the caption's cause. A held role can always be unchecked; removal needs no delegation
- * ceiling.
+ * reason when that differs from the caption's cause. A held role can always
+ * be unchecked; removal needs no delegation ceiling.
  */
 export function customRoleState(
   role: AssignableProjectRole,

@@ -767,7 +767,6 @@ export class ScionGroupFormDialog extends LitElement {
           label="Owner"
           value=${this.editOwnerId}
           ?disabled=${this.submitting || managed}
-          aria-describedby=${managed ? 'owner-managed-help' : nothing}
           @principal-change=${(e: CustomEvent<PrincipalChangeDetail>) => this.handleOwnerChange(e)}
         ></scion-principal-picker>
         ${managed

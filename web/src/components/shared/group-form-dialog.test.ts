@@ -118,9 +118,6 @@ describe('group form owner field', () => {
       expect(help?.textContent?.replace(/\s+/g, ' ').trim()).toBe(
         "Project members groups have no owner; access is managed through the project's members."
       );
-      // The help text describes the disabled picker for assistive technology.
-      expect(help?.id).toBeTruthy();
-      expect(picker(el).getAttribute('aria-describedby')).toBe(help!.id);
     });
   }
 
@@ -145,7 +142,6 @@ describe('group form owner field', () => {
     const el = await mountEdit(PLAIN_GROUP);
     expect(picker(el).hasAttribute('disabled')).toBe(false);
     expect(el.shadowRoot!.querySelector('.owner-managed')).toBeNull();
-    expect(picker(el).hasAttribute('aria-describedby')).toBe(false);
     const i = el as unknown as DialogInternals;
     i.editOwnerId = 'u-bob';
     expect(i.buildPatch()).toEqual({ ownerId: 'u-bob' });
