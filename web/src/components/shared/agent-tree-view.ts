@@ -188,6 +188,9 @@ export class ScionAgentTreeView extends LitElement {
 
   private boundOnWheel = (e: WheelEvent) => this.onWheel(e);
   private boundOnKeyDown = (e: KeyboardEvent) => this.onKeyDown(e);
+  private boundOnSelectStart = (e: Event): void => this.onSelectStart(e);
+  /** Whether a non-collapsed selection already existed when the current pan began. */
+  private hadSelectionAtPanStart = false;
   /** Canvas-content size of the last computed layout (for keyboard "fit"). */
   private contentW = 0;
   private contentH = 0;
@@ -372,6 +375,7 @@ export class ScionAgentTreeView extends LitElement {
     }
 
     .canvas.dragging {
+      -webkit-user-select: none;
       user-select: none;
       cursor: grabbing;
     }
@@ -666,6 +670,7 @@ export class ScionAgentTreeView extends LitElement {
     super.disconnectedCallback();
     this.removeEventListener('wheel', this.boundOnWheel);
     window.removeEventListener('keydown', this.boundOnKeyDown);
+    this.endPan();
     cancelAnimationFrame(this.pendingRevealFrame);
     this.dropPendingReveal();
     clearTimeout(this.highlightTimer);
@@ -859,6 +864,14 @@ export class ScionAgentTreeView extends LitElement {
     this.dragStartY = e.clientY;
     this.dragPanX = this.panX;
     this.dragPanY = this.panY;
+    // preventDefault on pointerdown does not reliably stop text selection in
+    // Chromium, and a selection can begin before the .dragging class
+    // (user-select: none) applies (ptone/scion#765). Suppress selectstart
+    // for the duration of the gesture instead; capture on document so it
+    // also catches a selection starting outside the canvas.
+    const sel = window.getSelection();
+    this.hadSelectionAtPanStart = !!sel && !sel.isCollapsed;
+    document.addEventListener('selectstart', this.boundOnSelectStart, true);
     this.canvasEl?.setPointerCapture(e.pointerId);
     this.canvasEl?.classList.add('dragging');
   }
@@ -870,9 +883,26 @@ export class ScionAgentTreeView extends LitElement {
   }
 
   private onPointerUp(e: PointerEvent): void {
-    this.dragging = false;
+    if (this.dragging) {
+      // Drop any selection that slipped through during the pan; leave one
+      // that already existed before it.
+      const sel = window.getSelection();
+      if (sel && !sel.isCollapsed && !this.hadSelectionAtPanStart) sel.removeAllRanges();
+    }
+    this.endPan();
     this.canvasEl?.releasePointerCapture(e.pointerId);
+  }
+
+  /** Ends a pan gesture: stops suppressing selection and drops the dragging style. */
+  private endPan(): void {
+    this.dragging = false;
+    document.removeEventListener('selectstart', this.boundOnSelectStart, true);
     this.canvasEl?.classList.remove('dragging');
+  }
+
+  /** Prevents text selection from starting while a pan is in progress. */
+  private onSelectStart(e: Event): void {
+    if (this.dragging) e.preventDefault();
   }
 
   private onShowUsersChange(e: Event): void {
