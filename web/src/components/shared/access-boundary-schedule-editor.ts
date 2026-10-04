@@ -109,12 +109,17 @@ export class ScionAccessBoundaryScheduleEditor extends LitElement {
    * derivations cannot drift. A field whose prop is unset is cleared.
    * Callers must run `rebaseCachedStrings` first (utils/time.ts ordering
    * contract): kept strings are rebased, then the rest re-derived here.
+   * Re-deriving a field from its prop also drops any pending echo for it:
+   * the local string no longer reflects the emitted value, so a later host
+   * change to that value is genuine and must re-derive.
    */
   private deriveFromProps(fields: { notBefore: boolean; expiresAt: boolean }): void {
     if (fields.notBefore) {
+      delete this._pendingEcho.notBefore;
       this.notBeforeLocal = this.notBefore ? this.isoToLocalDatetime(this.notBefore) : '';
     }
     if (fields.expiresAt) {
+      delete this._pendingEcho.expiresAt;
       this.expiresAtLocal = this.expiresAt ? this.isoToLocalDatetime(this.expiresAt) : '';
     }
     if (this.notBefore || this.expiresAt) {

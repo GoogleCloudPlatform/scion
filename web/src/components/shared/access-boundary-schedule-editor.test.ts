@@ -366,6 +366,27 @@ describe('scion-access-boundary-schedule-editor — prop change while connected 
     expect(displayedValue(notBeforeInput(el))).toBe('2026-09-24T10:00');
   });
 
+  it('re-derives a host change to a value emitted before a detach/reconnect re-derive', async () => {
+    // Non-echoing host.
+    const el = await mount({ notBefore: '2026-09-23T15:00:00.000Z' });
+
+    const input = notBeforeInput(el);
+    (input as unknown as { value: string }).value = '2026-09-24T10:00';
+    input.dispatchEvent(new Event('sl-input'));
+    await el.updateComplete;
+
+    // Reconnect re-derives from the (unchanged) prop, discarding the typed
+    // value, so the earlier emit is no longer what the input shows.
+    el.remove();
+    document.body.appendChild(el);
+    await el.updateComplete;
+    expect(displayedValue(notBeforeInput(el))).toBe('2026-09-23T15:00');
+
+    el.notBefore = '2026-09-24T10:00:00.000Z';
+    await el.updateComplete;
+    expect(displayedValue(notBeforeInput(el))).toBe('2026-09-24T10:00');
+  });
+
   it('closes the schedule when the host clears both props', async () => {
     const el = await mount({
       notBefore: '2026-09-23T15:00:00.000Z',
