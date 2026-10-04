@@ -1664,7 +1664,11 @@ describe('Source column', () => {
     const groups = ALL_GROUPS.map((g) =>
       g === DAVE ? VIA_GROUP : g === ALL_GROUPS[0] ? EMPTY_SOURCE : g
     );
-    const el = await mountEditor(groups, OWNER_CAPS);
+    const el = await mountEditor(ALL_GROUPS, OWNER_CAPS);
+    // Set the rows directly: loading normalizes an empty source to "direct",
+    // and this pins the row renderer's own predicate.
+    el.groups = groups;
+    await el.updateComplete;
     const key = `${EMPTY_SOURCE.principalType}:${EMPTY_SOURCE.principalId}`;
     expect(row(el, key).querySelector('.provenance-badge')?.textContent).toContain('Direct');
   });
