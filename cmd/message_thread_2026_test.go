@@ -35,7 +35,7 @@ const (
 	thread2026Known    = "known-thread"
 	thread2026Stale    = "stale-thread-uuid"
 	thread2026ConvID   = "11111111-2222-3333-4444-555555555555"
-	thread2026RejectMs = `thread_id "stale-thread-uuid" does not match an existing conversation in this project; address the conversation with conv:<uuid> (see 'scion conversation list'), or omit thread_id to message the recipient directly`
+	thread2026RejectMs = `thread_id "stale-thread-uuid" does not match an existing conversation; address the conversation with conv:<uuid> (see 'scion conversation list'), or omit thread_id to message the recipient directly`
 )
 
 // newThread2026Hub mimics the hub's outbound-message endpoint after #2026:

@@ -418,6 +418,9 @@ func TestDeprecatedFlag_ThreadID(t *testing.T) {
 	})
 	assert.Contains(t, stderr, "Warning: --thread-id is deprecated")
 	assert.Contains(t, stderr, "conv:<uuid>")
+	assert.Contains(t, stderr, "for user: recipients on the web channel",
+		"#2026: the rejection applies only to native (web) user: sends")
+	assert.NotContains(t, stderr, "project", "#2026: no scope claim")
 	assert.NotContains(t, stderr, "@<agent-name>",
 		"#2026: --thread-id guidance must not point user: senders at @<agent-name>")
 }

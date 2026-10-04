@@ -69,7 +69,7 @@ var deprecationReplacements = []struct {
 	{"in", "use 'scion schedule create --in' instead"},
 	{"at", "use 'scion schedule create --at' instead"},
 	{"channel", "address the conversation with conv:<uuid> (see 'scion conversation list'), or use @<name> to message an agent directly"},
-	{"thread-id", "address the conversation with conv:<uuid> (see 'scion conversation list'); the Hub rejects a thread ID that does not match an existing conversation"},
+	{"thread-id", "address the conversation with conv:<uuid> (see 'scion conversation list'); for user: recipients on the web channel, the Hub rejects a thread ID that does not match an existing conversation"},
 	{"cc", "--cc is deprecated and will be removed"},
 }
 
