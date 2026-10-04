@@ -40,6 +40,12 @@
  *   reapplied on top of its REST rows, and tombstoned agents never return.
  * - While the feed is down, or an entry is stale, `ensure` revalidates
  *   rather than answering from memory.
+ * - A retained hub or unfiltered project list is probed every 30s (±3s)
+ *   while the page is visible, for changes SSE does not carry: one compact
+ *   page of the 50 most recently updated rows, applied as a seeded merge.
+ *   It walks once when it cannot catch up in five pages or when the
+ *   server's count differs from the rows held. A probe never sets the
+ *   completeness flag.
  */
 
 import type { Agent, Capabilities } from '../shared/types.js';
@@ -112,7 +118,18 @@ export interface AgentStoreOptions {
   maxUnretained?: number;
   /** How long the feed stays connected after the last entry is released. */
   feedIdleMs?: number;
+  /**
+   * Whether the page is visible, and where its `visibilitychange` is heard.
+   * Probes run only while it is visible. Defaults to `document`; `null`
+   * counts as always visible.
+   */
+  visibility?: VisibilitySource | null;
+  /** Random source for probe jitter, in [0, 1). */
+  random?: () => number;
 }
+
+/** The part of `document` the probe schedule reads. */
+export type VisibilitySource = EventTarget & { readonly visibilityState: string };
 
 /** Page size for every agent-list walk. Server maximum is 500. */
 export const AGENT_STORE_PAGE_SIZE = 200;
@@ -132,6 +149,20 @@ export const AGENT_READ_CONCURRENCY = 4;
 export const AGENT_READ_BURST_LIMIT = 8;
 /** A single-agent read is abandoned after this long. */
 export const AGENT_READ_TIMEOUT_MS = 30_000;
+/**
+ * A retained hub or project list is probed this often for changes SSE does
+ * not carry (renames, labels, capabilities, agents added or removed without
+ * an event): one request for the most recently updated rows.
+ */
+export const AGENT_PROBE_INTERVAL_MS = 30_000;
+/** Each probe is scheduled up to this much earlier or later. */
+export const AGENT_PROBE_JITTER_MS = 3_000;
+/** Rows per probe page. */
+export const AGENT_PROBE_LIMIT = 50;
+/** Pages a probe follows past its first before falling back to a full walk. */
+export const AGENT_PROBE_MAX_EXTRA_PAGES = 4;
+/** A probe still running after this long is abandoned; the next one is scheduled. */
+export const AGENT_PROBE_TIMEOUT_MS = 30_000;
 
 interface Waiter {
   resolve: (snapshot: AgentListSnapshot) => void;
@@ -171,6 +202,21 @@ interface Entry {
   walk: Walk | null;
   lastUsed: number;
   evictTimer: ReturnType<typeof setTimeout> | null;
+  probeTimer: ReturnType<typeof setTimeout> | null;
+  /** Aborts the probe in flight. */
+  probe: AbortController | null;
+  /** Newest `updated` (epoch ms) seen by the last walk or probe. */
+  highWater?: number | undefined;
+  /** The server refused the sorted view for this list; it is not probed again. */
+  probeUnavailable: boolean;
+  /** The server count that last made a probe walk, so the same mismatch walks once. */
+  countWalkTotal?: number | undefined;
+}
+
+interface ProbePage {
+  agents?: Agent[];
+  nextCursor?: string;
+  totalCount?: number;
 }
 
 function abortError(message: string): DOMException {
@@ -189,6 +235,44 @@ export function agentQueryKey(q: AgentQuery): string {
   if (q.scope === 'hub' && q.ownership) params.push(`ownership=${q.ownership}`);
   const base = q.scope === 'hub' ? 'hub' : `project:${q.projectId}`;
   return params.length > 0 ? `${base}?${params.join('&')}` : base;
+}
+
+/** Probes cover the lists SSE adds to: the whole hub and unfiltered projects. */
+function isProbeable(q: AgentQuery): boolean {
+  if (q.label?.trim()) return false;
+  return q.scope !== 'hub' || !q.ownership;
+}
+
+/** The newest-first sorted page of a probeable list. */
+function probePath(q: AgentQuery, cursor?: string): string {
+  const params = new URLSearchParams({
+    sort: 'updated',
+    dir: 'desc',
+    limit: String(AGENT_PROBE_LIMIT),
+    view: 'compact',
+  });
+  if (cursor) params.set('cursor', cursor);
+  const base =
+    q.scope === 'hub'
+      ? '/api/v1/agents'
+      : `/api/v1/projects/${encodeURIComponent(q.projectId)}/agents`;
+  return `${base}?${params.toString()}`;
+}
+
+/** `updated` as epoch ms, or undefined when absent or unparsable. */
+function updatedAt(agent: Agent | undefined): number | undefined {
+  if (!agent?.updated) return undefined;
+  const ms = Date.parse(agent.updated);
+  return Number.isNaN(ms) ? undefined : ms;
+}
+
+function newestUpdated(rows: readonly Agent[]): number | undefined {
+  let newest: number | undefined;
+  for (const row of rows) {
+    const ms = updatedAt(row);
+    if (ms !== undefined && (newest === undefined || ms > newest)) newest = ms;
+  }
+  return newest;
 }
 
 function queryPath(q: AgentQuery, view: 'full' | 'compact'): string {
@@ -262,6 +346,8 @@ export class AgentStore {
   private readonly evictionGraceMs: number;
   private readonly maxUnretained: number;
   private readonly feedIdleMs: number;
+  private readonly visibility: VisibilitySource | null;
+  private readonly random: () => number;
 
   constructor(options: AgentStoreOptions = {}) {
     this.fetchPage = options.fetch ?? defaultFetch;
@@ -276,6 +362,13 @@ export class AgentStore {
     this.evictionGraceMs = options.evictionGraceMs ?? DEFAULT_EVICTION_GRACE_MS;
     this.maxUnretained = options.maxUnretained ?? DEFAULT_MAX_UNRETAINED;
     this.feedIdleMs = options.feedIdleMs ?? DEFAULT_FEED_IDLE_MS;
+    this.visibility =
+      options.visibility === undefined
+        ? typeof document !== 'undefined'
+          ? document
+          : null
+        : options.visibility;
+    this.random = options.random ?? Math.random;
 
     const events =
       options.events === undefined
@@ -283,7 +376,12 @@ export class AgentStore {
           ? window
           : null
         : options.events;
-    this.detachEvents = events ? this.listenForTriggers(events) : (): void => {};
+    const detachTriggers = events ? this.listenForTriggers(events) : (): void => {};
+    const detachVisibility = this.listenForVisibility();
+    this.detachEvents = (): void => {
+      detachTriggers();
+      detachVisibility();
+    };
   }
 
   // --- Public API ---
@@ -357,6 +455,7 @@ export class AgentStore {
     this.touch(entry);
     entry.retainers.add(listener);
     this.ensureFeed();
+    this.syncProbe(entry);
     let released = false;
     return () => {
       if (released) return;
@@ -367,6 +466,7 @@ export class AgentStore {
       if (!current || (current !== entry && !current.retainers.delete(listener))) return;
       current.lastUsed = this.now();
       this.maybeAbortWalk(current);
+      this.syncProbe(current);
       this.scheduleIdleWork(current);
     };
   }
@@ -411,6 +511,7 @@ export class AgentStore {
     for (const entry of entries) {
       if (entry.evictTimer) clearTimeout(entry.evictTimer);
       entry.evictTimer = null;
+      this.stopProbe(entry);
       entry.walk?.controller.abort();
       entry.walk = null;
       const waiters = Array.from(entry.waiters);
@@ -474,6 +575,9 @@ export class AgentStore {
         walk: null,
         lastUsed: this.now(),
         evictTimer: null,
+        probeTimer: null,
+        probe: null,
+        probeUnavailable: false,
       };
       this.entries.set(key, entry);
     }
@@ -571,6 +675,9 @@ export class AgentStore {
       sseAdded: new Set(),
       feedDropped: false,
     };
+    // The walk reads everything a probe would.
+    entry.probe?.abort();
+    entry.probe = null;
     entry.walk = walk;
     entry.followUp = false;
     entry.status = 'loading';
@@ -725,6 +832,7 @@ export class AgentStore {
 
       entry.walk = null;
       entry.agents = Array.from(byId.values());
+      entry.highWater = newestUpdated(rows);
       entry.scopeCapabilities = scopeCapabilities;
       entry.status = 'ready';
       entry.complete = !truncated;
@@ -769,7 +877,172 @@ export class AgentStore {
       w.cleanup();
       w.resolve(entry.snapshot);
     }
+    this.syncProbe(entry);
     this.scheduleIdleWork(entry);
+  }
+
+  // --- Delta probe ---
+
+  /**
+   * Keep the entry's probe timer running exactly while it may probe: the
+   * entry is current, retained, loaded, probeable, the server has not
+   * refused its sorted view, and the page is visible. Otherwise stop it.
+   */
+  private syncProbe(entry: Entry): void {
+    const eligible =
+      this.entries.get(entry.key) === entry &&
+      entry.retainers.size > 0 &&
+      entry.fetchedAt !== undefined &&
+      !entry.probeUnavailable &&
+      isProbeable(entry.query) &&
+      this.isVisible();
+    if (!eligible) {
+      this.stopProbe(entry);
+      return;
+    }
+    if (entry.probeTimer || entry.probe) return;
+    const jitter = (this.random() * 2 - 1) * AGENT_PROBE_JITTER_MS;
+    entry.probeTimer = setTimeout(() => {
+      entry.probeTimer = null;
+      this.runProbeTick(entry);
+    }, AGENT_PROBE_INTERVAL_MS + jitter);
+  }
+
+  private stopProbe(entry: Entry): void {
+    if (entry.probeTimer) clearTimeout(entry.probeTimer);
+    entry.probeTimer = null;
+    entry.probe?.abort();
+    entry.probe = null;
+  }
+
+  private isVisible(): boolean {
+    return !this.visibility || this.visibility.visibilityState === 'visible';
+  }
+
+  private runProbeTick(entry: Entry): void {
+    const feed = this.feed;
+    // A walk in flight reads everything a probe would; try on the next tick.
+    if (!feed || entry.walk) {
+      this.syncProbe(entry);
+      return;
+    }
+    const controller = new AbortController();
+    entry.probe = controller;
+    const timer = setTimeout(() => controller.abort(), AGENT_PROBE_TIMEOUT_MS);
+    void this.probe(entry, feed, controller).finally(() => {
+      clearTimeout(timer);
+      if (entry.probe === controller) entry.probe = null;
+      this.syncProbe(entry);
+    });
+  }
+
+  /**
+   * One delta probe: read the most recently updated rows, newest first, and
+   * merge those the feed does not hold or holds older, as a seeded merge
+   * (deltas that land meanwhile win, deleted agents stay deleted, the
+   * completeness flag is untouched). When the first page is all newer
+   * than the last probe, follow further pages; when that does not catch
+   * up, or the server's count differs from the rows held, walk once.
+   */
+  private async probe(
+    entry: Entry,
+    feed: StateManager,
+    controller: AbortController
+  ): Promise<void> {
+    const signal = controller.signal;
+    const previous = entry.highWater;
+    const token = feed.beginSeedEpoch();
+    const changed: Agent[] = [];
+    const listed = new Set(entry.agents.map((a) => a.id));
+    let total: number | undefined;
+    let caughtUp = false;
+    try {
+      let cursor: string | undefined;
+      for (let page = 0; page <= AGENT_PROBE_MAX_EXTRA_PAGES; page++) {
+        const response = await this.fetchPage(probePath(entry.query, cursor), { signal });
+        if (signal.aborted || entry.probe !== controller) return;
+        if (!response.ok) {
+          // The project list refuses its sorted view above its candidate
+          // ceiling; that list relies on resync walks instead.
+          if (response.status === 422) entry.probeUnavailable = true;
+          return;
+        }
+        const body = (await response.json()) as ProbePage;
+        if (signal.aborted || entry.probe !== controller) return;
+        const rows = Array.isArray(body.agents) ? body.agents : [];
+        if (typeof body.totalCount === 'number') total = body.totalCount;
+        for (const row of rows) {
+          const held = feed.getAgent(row.id);
+          const rowUpdated = updatedAt(row);
+          const heldUpdated = updatedAt(held);
+          if (
+            !held ||
+            !listed.has(row.id) ||
+            (rowUpdated !== undefined && (heldUpdated === undefined || rowUpdated > heldUpdated))
+          ) {
+            changed.push(row);
+          }
+        }
+        const newest = newestUpdated(rows);
+        if (newest !== undefined && (entry.highWater === undefined || newest > entry.highWater)) {
+          entry.highWater = newest;
+        }
+        const last = updatedAt(rows[rows.length - 1]);
+        caughtUp =
+          !body.nextCursor || (previous !== undefined && last !== undefined && last <= previous);
+        if (caughtUp) break;
+        cursor = body.nextCursor;
+      }
+      if (this.feed !== feed) return;
+      const fresh = changed.filter((row) => !this.carriedTombstones.has(row.id));
+      feed.seedAgents(fresh, { token, partial: true });
+    } catch (err) {
+      if (!isAbortError(err)) console.warn('[agent-store] agent probe failed:', err);
+      return;
+    } finally {
+      feed.endSeedEpoch(token);
+    }
+
+    // Deleted agents were not seeded, so the merge skips them.
+    const upserted = Array.from(new Set(changed.map((row) => row.id)));
+    if (upserted.length > 0) {
+      this.applyChange(feed, {
+        upserted,
+        deleted: [],
+        unknown: new Map(),
+        generation: feed.scopeGeneration,
+      });
+    }
+    if (entry.walk || this.entries.get(entry.key) !== entry) return;
+    if (!caughtUp) {
+      this.walkFromProbe(entry);
+      return;
+    }
+    if (total === undefined || !entry.complete) return;
+    if (total === entry.agents.length) {
+      entry.countWalkTotal = undefined;
+      return;
+    }
+    // Agents granted, revoked or deleted without an event. A count that
+    // already made a walk does not make another until it changes.
+    if (entry.countWalkTotal === total) return;
+    entry.countWalkTotal = total;
+    this.walkFromProbe(entry);
+  }
+
+  private walkFromProbe(entry: Entry): void {
+    entry.stale = true;
+    this.startWalk(entry);
+  }
+
+  private listenForVisibility(): () => void {
+    const target = this.visibility;
+    if (!target) return (): void => {};
+    const onChange = (): void => {
+      for (const entry of this.entries.values()) this.syncProbe(entry);
+    };
+    target.addEventListener('visibilitychange', onChange);
+    return () => target.removeEventListener('visibilitychange', onChange);
   }
 
   // --- Feed ---

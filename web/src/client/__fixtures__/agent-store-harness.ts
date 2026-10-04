@@ -17,8 +17,8 @@
 /**
  * Test harness for the agent store: a fake EventSource the feed's real
  * SSE client connects through, an in-memory agent-list server honouring
- * `limit`/`cursor`, and a store wired to both with a real `StateManager`
- * feed per connection.
+ * `limit`/`cursor` (and `sort=updated`, newest first, with `totalCount`),
+ * and a store wired to both with a real `StateManager` feed per connection.
  */
 
 import { vi } from 'vitest';
@@ -135,6 +135,10 @@ export interface AgentServer {
   requests: string[];
   /** Status for the next responses; 200 serves pages. */
   status: number;
+  /** Status for a sorted (probe) request, by path; undefined falls back to `status`. */
+  sortedStatus?: ((path: string) => number | undefined) | undefined;
+  /** `totalCount` of sorted pages, when set; otherwise the rows they page through. */
+  totalCount?: number | undefined;
   /** Scope capabilities sent with each page. */
   scopeCapabilities?: Agent['_capabilities'];
   fetch: ReturnType<typeof vi.fn<(path: string, options: ApiFetchOptions) => Promise<Response>>>;
@@ -148,13 +152,24 @@ export interface AgentServer {
    * response already on the wire would.
    */
   holdAgentReads(options?: { ignoreAbort?: boolean }): () => void;
-  /** Walks started: list requests without a cursor, optionally for one path prefix. */
+  /** Walks started: unsorted list requests without a cursor, optionally for one path prefix. */
   walks(pathPrefix?: string): number;
+  /** Probe requests (`sort=updated`), every page, optionally for one path prefix. */
+  probes(pathPrefix?: string): number;
   /** Single-agent requests (`/api/v1/agents/{id}`), optionally for one id. */
   agentFetches(id?: string): number;
 }
 
 const SINGLE_AGENT = /^\/api\/v1\/agents\/([^/?]+)$/;
+
+function isSorted(path: string): boolean {
+  return new URL(path, 'http://localhost').searchParams.has('sort');
+}
+
+function updatedMs(a: Agent): number {
+  const ms = a.updated ? Date.parse(a.updated) : NaN;
+  return Number.isNaN(ms) ? 0 : ms;
+}
 
 export function createAgentServer(initial: Agent[] = []): AgentServer {
   let held: Gate | null = null;
@@ -168,8 +183,9 @@ export function createAgentServer(initial: Agent[] = []): AgentServer {
       const signal = options.signal;
       if (held) await Promise.race([held.promise, abortable(signal)]);
       if (signal?.aborted) throw new DOMException('aborted', 'AbortError');
-      const status = server.status;
       const url = new URL(path, 'http://localhost');
+      const sorted = url.searchParams.get('sort') === 'updated';
+      const status = (sorted ? server.sortedStatus?.(path) : undefined) ?? server.status;
       const single = SINGLE_AGENT.exec(url.pathname)?.[1];
       if (single !== undefined && heldReads) {
         const reads = heldReads;
@@ -192,14 +208,17 @@ export function createAgentServer(initial: Agent[] = []): AgentServer {
       const limit = Number(url.searchParams.get('limit') ?? '50');
       const offset = Number(url.searchParams.get('cursor') ?? '0');
       const project = /^\/api\/v1\/projects\/([^/]+)\/agents$/.exec(url.pathname)?.[1];
-      const rows = project
+      const scoped = project
         ? server.agents.filter((a) => a.projectId === decodeURIComponent(project))
         : server.agents;
+      // Newest first; a stable sort keeps list order among equal times.
+      const rows = sorted ? [...scoped].sort((a, b) => updatedMs(b) - updatedMs(a)) : scoped;
       const page = rows.slice(offset, offset + limit);
       const end = offset + page.length;
       const body = {
         agents: page.map((a) => (project && server.projectRow ? server.projectRow(a) : { ...a })),
         ...(end < rows.length ? { nextCursor: String(end) } : {}),
+        ...(sorted ? { totalCount: server.totalCount ?? rows.length } : {}),
         ...(server.scopeCapabilities ? { _capabilities: server.scopeCapabilities } : {}),
       };
       return {
@@ -229,8 +248,11 @@ export function createAgentServer(initial: Agent[] = []): AgentServer {
         (p) =>
           p.startsWith(pathPrefix) &&
           !p.includes('cursor=') &&
+          !isSorted(p) &&
           !SINGLE_AGENT.test(new URL(p, 'http://localhost').pathname)
       ).length,
+    probes: (pathPrefix = '') =>
+      server.requests.filter((p) => p.startsWith(pathPrefix) && isSorted(p)).length,
     agentFetches: (id) =>
       server.requests.filter((p) => {
         const match = SINGLE_AGENT.exec(new URL(p, 'http://localhost').pathname)?.[1];
@@ -240,6 +262,16 @@ export function createAgentServer(initial: Agent[] = []): AgentServer {
   return server;
 }
 
+/** Stands in for `document`'s visibility. */
+export class FakeVisibility extends EventTarget {
+  visibilityState: 'visible' | 'hidden' = 'visible';
+
+  set(state: 'visible' | 'hidden'): void {
+    this.visibilityState = state;
+    this.dispatchEvent(new Event('visibilitychange'));
+  }
+}
+
 export interface Harness {
   store: AgentStore;
   server: AgentServer;
@@ -247,6 +279,8 @@ export interface Harness {
   feeds: StateManager[];
   /** Where window-level triggers are dispatched. */
   events: EventTarget;
+  /** The page visibility the store's probes follow; visible at start. */
+  visibility: FakeVisibility;
   /** The feed's current stream. */
   stream: () => FakeEventSource;
   /** Open the feed's current stream and let waiting walks proceed. */
@@ -262,7 +296,8 @@ export async function settle(): Promise<void> {
 
 /**
  * A store over an in-memory server with a real `StateManager` feed. Call
- * after `vi.useFakeTimers()`; stubs `EventSource` globally.
+ * after `vi.useFakeTimers()`; stubs `EventSource` globally. Probe jitter is
+ * zero unless `random` is passed, so a probe fires exactly every interval.
  */
 export function createHarness(
   initial: Agent[] = [],
@@ -273,8 +308,11 @@ export function createHarness(
   const server = createAgentServer(initial);
   const feeds: StateManager[] = [];
   const events = new EventTarget();
+  const visibility = new FakeVisibility();
   const store = new AgentStore({
     fetch: server.fetch,
+    visibility,
+    random: (): number => 0.5,
     feedFactory: (): StateManager => {
       const feed = new StateManager();
       feeds.push(feed);
@@ -289,6 +327,7 @@ export function createHarness(
     server,
     feeds,
     events,
+    visibility,
     stream,
     connect: async (): Promise<void> => {
       stream().open();
