@@ -32,6 +32,44 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch } from '../../client/api.js';
 
+/** Group fields the picker reads from the group search API. */
+export interface PickerGroup {
+  id: string;
+  name: string;
+  slug: string;
+  projectId?: string;
+  annotations?: Record<string, string>;
+}
+
+/**
+ * Marker annotation keys for system project members groups. Mirrors
+ * store.AnnotationProjectMembersGroup and
+ * store.LegacyAnnotationProjectMembersGroup.
+ */
+const PROJECT_MEMBERS_GROUP_ANNOTATIONS = [
+  'scion.io/project-members-group',
+  'scion.io/system-project-members-group',
+];
+
+/**
+ * Reports whether a group is a system project members group: it belongs to a
+ * project and carries either marker annotation with the value "true". Mirrors
+ * store.IsProjectMembersGroup.
+ */
+export function isProjectMembersGroup(group: PickerGroup): boolean {
+  if (!group.projectId || !group.annotations) return false;
+  return PROJECT_MEMBERS_GROUP_ANNOTATIONS.some((key) => group.annotations?.[key] === 'true');
+}
+
+/**
+ * Removes system project members groups from group search results. These
+ * groups are system-managed and cannot be granted roles or nested in another
+ * group, so the picker never offers them. The server enforces the same rule.
+ */
+export function selectableGroups(groups: PickerGroup[]): PickerGroup[] {
+  return groups.filter((g) => !isProjectMembersGroup(g));
+}
+
 /** Event detail emitted when a principal is selected. */
 export interface PrincipalChangeDetail {
   principalType: string;
@@ -366,9 +404,9 @@ export class ScionPrincipalPicker extends LitElement {
       if (requestId !== this.groupSearchRequestId) return;
       if (response.ok) {
         const data = (await response.json()) as {
-          groups?: Array<{ id: string; name: string; slug: string }>;
+          groups?: PickerGroup[];
         };
-        this.groupSearchResults = data.groups || [];
+        this.groupSearchResults = selectableGroups(data.groups || []);
       }
     } catch (err) {
       if (requestId !== this.groupSearchRequestId) return;

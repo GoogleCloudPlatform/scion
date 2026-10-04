@@ -1,0 +1,114 @@
+/**
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/**
+ * scion-principal-picker — group search filtering.
+ *
+ * Project members groups are system-managed and cannot be granted roles or
+ * nested in another group, so the picker never offers them.
+ */
+
+import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+
+import type { PickerGroup } from './principal-picker.js';
+
+const CANONICAL: PickerGroup = {
+  id: 'g-canonical',
+  name: 'Alpha Members',
+  slug: 'project:alpha:members',
+  projectId: 'p-alpha',
+  annotations: { 'scion.io/project-members-group': 'true' },
+};
+const LEGACY: PickerGroup = {
+  id: 'g-legacy',
+  name: 'Beta Members',
+  slug: 'project:beta:members',
+  projectId: 'p-beta',
+  annotations: { 'scion.io/system-project-members-group': 'true' },
+};
+const NORMAL: PickerGroup = { id: 'g-normal', name: 'Platform Team', slug: 'platform-team' };
+const PROJECT_UNMARKED: PickerGroup = {
+  id: 'g-project-unmarked',
+  name: 'Alpha Reviewers',
+  slug: 'alpha-reviewers',
+  projectId: 'p-alpha',
+};
+const MARKER_FALSE: PickerGroup = {
+  id: 'g-marker-false',
+  name: 'Alpha Other',
+  slug: 'alpha-other',
+  projectId: 'p-alpha',
+  annotations: { 'scion.io/project-members-group': 'false' },
+};
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let mod: any;
+
+beforeAll(async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(() => Promise.resolve(new Response('{}', { status: 200 })))
+  );
+  mod = await import('./principal-picker.js');
+  vi.restoreAllMocks();
+});
+
+afterEach(() => {
+  document.body.innerHTML = '';
+  vi.restoreAllMocks();
+});
+
+describe('isProjectMembersGroup', () => {
+  it('matches the canonical and the legacy marker', () => {
+    expect(mod.isProjectMembersGroup(CANONICAL)).toBe(true);
+    expect(mod.isProjectMembersGroup(LEGACY)).toBe(true);
+  });
+
+  it('does not match ordinary groups', () => {
+    expect(mod.isProjectMembersGroup(NORMAL)).toBe(false);
+    expect(mod.isProjectMembersGroup(PROJECT_UNMARKED)).toBe(false);
+    expect(mod.isProjectMembersGroup(MARKER_FALSE)).toBe(false);
+    expect(mod.isProjectMembersGroup({ ...CANONICAL, projectId: undefined } as PickerGroup)).toBe(
+      false
+    );
+  });
+});
+
+describe('group search results', () => {
+  it('drops project members groups and keeps the others', async () => {
+    const all = [CANONICAL, NORMAL, LEGACY, PROJECT_UNMARKED, MARKER_FALSE];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ groups: all }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          })
+        )
+      )
+    );
+
+    const el = new mod.ScionPrincipalPicker();
+    el.principalType = 'group';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    await (el as unknown as { searchGroups(q: string): Promise<void> }).searchGroups('al');
+    const results = (el as unknown as { groupSearchResults: PickerGroup[] }).groupSearchResults;
+    expect(results.map((g) => g.id)).toEqual(['g-normal', 'g-project-unmarked', 'g-marker-false']);
+  });
+});

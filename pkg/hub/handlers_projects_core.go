@@ -730,11 +730,7 @@ func isSystemProjectMembersGroup(group *store.Group, projectID string) bool {
 // still protected. Fold the two together once the key mismatch is resolved
 // (ptone/scion#2556).
 func hasProjectMembersGroupMarker(g *store.Group) bool {
-	if g == nil || g.ProjectID == "" || g.Annotations == nil {
-		return false
-	}
-	return g.Annotations[systemProjectMembersGroupAnnotation] == "true" ||
-		g.Annotations[legacyProjectMembersGroupAnnotation] == "true"
+	return store.IsProjectMembersGroup(g)
 }
 
 // changesProjectMembersGroupMarker reports whether replacing the stored

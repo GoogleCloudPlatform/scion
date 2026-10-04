@@ -454,8 +454,17 @@ func (s *GroupStore) AddGroupMember(ctx context.Context, member *store.GroupMemb
 		member.AddedAt = m.AddedAt
 
 	case store.GroupMemberTypeGroup:
+		// Project members groups are system-managed and cannot be nested
+		// as a child of another group.
+		child, err := s.client.Group.Get(ctx, memberUID)
+		if err != nil {
+			return mapError(err)
+		}
+		if store.IsProjectMembersGroup(entGroupToStore(child)) {
+			return fmt.Errorf("%w: group %s", store.ErrProjectMembersGroupPrincipal, member.MemberID)
+		}
 		// Group nesting uses the child_groups M2M edge
-		_, err := s.client.Group.UpdateOneID(groupUID).
+		_, err = s.client.Group.UpdateOneID(groupUID).
 			AddChildGroupIDs(memberUID).
 			Save(ctx)
 		if err != nil {

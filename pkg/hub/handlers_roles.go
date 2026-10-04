@@ -1288,6 +1288,12 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			}
 		}
 		req.PrincipalID = g.ID
+		// Project members groups cannot be granted roles, on any scope.
+		if store.IsProjectMembersGroup(g) {
+			writeError(w, http.StatusBadRequest, ErrCodePrincipalIneligible,
+				projectMembersGroupPrincipalMessage, projectMembersGroupPrincipalDetails(g.ID))
+			return
+		}
 	}
 
 	if req.ScopeType != store.RoleScopeSystem && req.ScopeType != store.RoleScopeProject {
@@ -1382,7 +1388,7 @@ func (s *Server) createRoleBinding(w http.ResponseWriter, r *http.Request, user 
 			if denial != nil && !denial.Allowed {
 				// Error contract: membership-service 403s surfaced through the
 				// role-binding endpoint include structured details.
-				var details map[string]interface{}
+				details := legacyMembershipDenialDetails(denial)
 				if denial.HTTPStatus == http.StatusForbidden {
 					details = map[string]interface{}{
 						"resource_type": "role_binding",

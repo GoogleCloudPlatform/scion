@@ -603,6 +603,37 @@ const (
 	LabelTemplate = "scion.io/template"
 )
 
+// Project members group marker annotations (ptone/scion#2556).
+const (
+	// AnnotationProjectMembersGroup marks a group as the hub-managed
+	// project:<slug>:members group. It is the key the hub writes
+	// (createProjectMembersGroup) and the key project registration checks
+	// before adopting an existing group with that slug.
+	AnnotationProjectMembersGroup = "scion.io/project-members-group"
+
+	// LegacyAnnotationProjectMembersGroup is the marker key written by the
+	// store marker backfill (BackfillProjectMembersGroupMarkers). Readers
+	// that guard members groups accept it alongside
+	// AnnotationProjectMembersGroup, so a group marked only by the backfill,
+	// or by an older binary during a rolling upgrade, is still recognised.
+	LegacyAnnotationProjectMembersGroup = "scion.io/system-project-members-group"
+)
+
+// IsProjectMembersGroup reports whether g is a system project members group:
+// it belongs to a project and carries either members-group marker key with
+// the value "true".
+//
+// Project members groups are system-managed. They cannot be the principal of
+// a role binding or be nested as a child of another group; the store
+// refuses both with ErrProjectMembersGroupPrincipal.
+func IsProjectMembersGroup(g *Group) bool {
+	if g == nil || g.ProjectID == "" || g.Annotations == nil {
+		return false
+	}
+	return g.Annotations[AnnotationProjectMembersGroup] == "true" ||
+		g.Annotations[LegacyAnnotationProjectMembersGroup] == "true"
+}
+
 // Git source labels for git-anchored projects. LabelCloneURL is the URL agents
 // and shared-workspace init actually clone from (it takes precedence over
 // Project.GitRemote), LabelSourceURL records the remote as the user entered it,

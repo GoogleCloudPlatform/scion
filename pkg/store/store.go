@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -41,6 +42,13 @@ var (
 	// ErrDirectUserOnly is returned when a role binding for a direct-user-only
 	// role (super-admin, project-owner) is attempted with a non-user principal.
 	ErrDirectUserOnly = errors.New("this role requires a direct user principal")
+
+	// ErrProjectMembersGroupPrincipal is returned when a role binding or a
+	// child-group edge would name a project members group (see
+	// IsProjectMembersGroup). Project members groups are system-managed and
+	// cannot be granted roles or nested in another group. It wraps
+	// ErrInvalidInput so generic mappers report it as a bad request.
+	ErrProjectMembersGroupPrincipal = fmt.Errorf("%w: project members groups cannot be role-binding principals or child groups", ErrInvalidInput)
 
 	// ErrScopeMismatch is returned when a role binding's scope type does not
 	// match the role definition's scope type.
