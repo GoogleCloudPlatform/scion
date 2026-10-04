@@ -1,0 +1,346 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# In-cluster broker manifest for the `substrate` runtime
+# (.design/kubernetes/substrate-runtime.md §1). This is a plain manifest, not
+# a Helm chart — see deploy/substrate/README.md for placeholders, the
+# out-of-band Secret the operator must create, apply order, and verification
+# commands. Every dollar-brace placeholder below is meant to be resolved with
+# `envsubst` (or equivalent) before `kubectl apply`; see the README for the
+# full list and suggested defaults.
+#
+# No secret values live in this file. Broker→Hub credentials come from a
+# Secret created out-of-band (README §"Secret creation").
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${BROKER_NAMESPACE}
+  labels:
+    app.kubernetes.io/name: scion-substrate-broker
+    app.kubernetes.io/part-of: scion-substrate-integration
+---
+# The broker's own identity. It authenticates to ateapi (api.ate-system.svc)
+# by minting a token for *itself* via the Kubernetes TokenRequest API
+# (pkg/runtime/substrate/dialer.go), not via a projected volume — hence the
+# Role below granting `create` on `serviceaccounts/token`, scoped to this
+# ServiceAccount's own name only.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: scion-substrate-broker
+  namespace: ${BROKER_NAMESPACE}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: scion-substrate-broker-tokenrequest
+  namespace: ${BROKER_NAMESPACE}
+rules:
+  # TokenRequest for the broker's own ServiceAccount, audience=token_audience
+  # (default api.ate-system.svc). resourceNames pins this to the named SA
+  # only — the broker cannot mint tokens for any other identity.
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    resourceNames: ["scion-substrate-broker"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: scion-substrate-broker-tokenrequest
+  namespace: ${BROKER_NAMESPACE}
+subjects:
+  - kind: ServiceAccount
+    name: scion-substrate-broker
+    namespace: ${BROKER_NAMESPACE}
+roleRef:
+  kind: Role
+  name: scion-substrate-broker-tokenrequest
+  apiGroup: rbac.authorization.k8s.io
+---
+# ClusterTrustBundle is cluster-scoped, so verifying ateapi TLS against one
+# (pkg/runtime/substrate/dialer.go, when substrate.cluster_trust_bundle is
+# set — the router hop is plaintext today and is not covered by this)
+# needs a ClusterRole, not a namespaced Role. Only needed if you use
+# cluster_trust_bundle instead of ca_file — keep both anyway, since it's
+# read-only and harmless if unused.
+#
+# certificates.k8s.io/v1beta1 vs v1: GKE 1.37+ may have promoted
+# ClusterTrustBundle to v1 — RBAC rules key on group+resource, not API
+# version, so this Role works either way. Verify which version your cluster
+# actually serves with:
+#   kubectl api-resources --api-group=certificates.k8s.io
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: scion-substrate-broker-ctb-reader
+rules:
+  # resourceNames pins this to the one ClusterTrustBundle substrate.cluster_trust_bundle
+  # actually names, for least privilege — the broker cannot read any other
+  # cluster's/tenant's trust bundle.
+  - apiGroups: ["certificates.k8s.io"]
+    resources: ["clustertrustbundles"]
+    resourceNames: ["${CLUSTER_TRUST_BUNDLE_NAME}"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: scion-substrate-broker-ctb-reader
+subjects:
+  - kind: ServiceAccount
+    name: scion-substrate-broker
+    namespace: ${BROKER_NAMESPACE}
+roleRef:
+  kind: ClusterRole
+  name: scion-substrate-broker-ctb-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+# Settings file holding the substrate runtime profile. Mounted at
+# $HOME/.scion/settings.yaml in the broker container (config.GetGlobalDir()
+# is always $HOME/.scion — see
+# pkg/config/paths.go — there is no path env override), so HOME must be set
+# to match the mountPath below (see the Deployment's env and volumeMounts).
+#
+# server.broker.broker_id/hub_endpoint (pkg/config/settings_v1.go
+# V1BrokerConfig) are NOT secrets — broker_id is a stable UUID, not a
+# credential, and hub_endpoint is just a URL. This is also the *current*
+# location: settings_v1.go's legacy-key migration explicitly maps the old
+# flat `hub.brokerId` to `server.broker.broker_id` ("hub.brokerId is
+# deprecated; moved to server.broker.broker_id"), confirming this nesting is
+# correct and not the deprecated one. Deliberately absent:
+# server.broker.broker_token — that field exists in the same struct but IS
+# the secret (the legacy single-shared-secret auth mode); the per-connection
+# `hub-credentials/<name>.json` Secret below is what this deployment
+# actually authenticates with, so broker_token has no reason to appear here.
+#
+# active_profile: substrate makes the substrate profile the broker's
+# DEFAULT runtime, not just one it can resolve when a start request names
+# it explicitly. Without this, pkg/runtime.GetRuntime("", "") — used for
+# the broker's own primary agent.Manager, e.g. the one HeartbeatService
+# lists from every tick — resolves an empty profile name through
+# ResolveRuntime(""), which falls back to vs.ActiveProfile; with no
+# active_profile set, that fallback fails and GetRuntime falls all the way
+# through to Linux auto-detection, landing on "docker". The broker then
+# shells out to a docker binary that was never going to exist in this
+# image, producing a "docker ps failed" WARN on every single heartbeat.
+# Setting this is the fix, not a workaround: `runtimes`/`profiles` alone
+# only make substrate resolvable, `active_profile` is what makes it the
+# one actually used when nothing more specific is asked for.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: scion-substrate-broker-settings
+  namespace: ${BROKER_NAMESPACE}
+data:
+  settings.yaml: |
+    schema_version: "1"
+    active_profile: substrate
+    server:
+      broker:
+        broker_id: "${HUB_BROKER_ID}"
+        hub_endpoint: "${HUB_ENDPOINT}"
+    runtimes:
+      substrate-prod:
+        type: substrate
+        substrate:
+          api_endpoint: api.${ATE_SYSTEM_NAMESPACE}.svc:443
+          router_endpoint: http://atenet-router.${ATE_SYSTEM_NAMESPACE}.svc:80
+          token_audience: api.${ATE_SYSTEM_NAMESPACE}.svc
+          cluster_trust_bundle: ${CLUSTER_TRUST_BUNDLE_NAME}
+          sandbox_class: gvisor
+          sandbox_config_name: ${SANDBOX_CONFIG_NAME}
+          # workerSelector is matched against the target WorkerPool custom
+          # resource's own metadata.labels — NOT any Kubernetes Pod label,
+          # and NOT the ate.dev/worker-pool label atecontroller stamps onto
+          # generated worker pods (that one exists for k8s-native pod
+          # selection — NetworkPolicy podSelectors, etc. — and has nothing
+          # to do with ActorTemplate-to-WorkerPool matching). Confirmed
+          # against upstream (demos/multi-template/*.yaml.tmpl: a
+          # WorkerPool's own `metadata.labels` is exactly what
+          # `workerSelector.matchLabels` on the consuming ActorTemplate
+          # matches against). Getting this wrong doesn't fail to apply —
+          # CreateActor fails at runtime with "no free workers" because
+          # zero WorkerPools match. See the README for how to read the
+          # correct value off the actual WorkerPool object.
+          worker_selector:
+            ${WORKER_SELECTOR_KEY}: "${WORKER_SELECTOR_VALUE}"
+          snapshot_storage: ${SNAPSHOT_STORAGE_URI}
+          egress_allow: []
+          template_ready_timeout: 10m
+    profiles:
+      substrate:
+        runtime: substrate-prod
+      # The embedded default settings (pkg/config/embeds/default_settings.yaml)
+      # always define profiles.local and profiles.remote, resolving to the
+      # docker and Kubernetes runtimes respectively; a project or global
+      # settings layer only overwrites the exact leaf keys it sets, so it
+      # never removes them. discoverAuxiliaryRuntimes (pkg/runtimebroker)
+      # then registers every profile whose resolved runtime type differs
+      # from this broker's default ("substrate"), which is what pulls in a
+      # docker and a Kubernetes auxiliary runtime this deployment never
+      # uses: this container has no docker binary and this broker's RBAC
+      # does not allow listing Kubernetes pods, so both auxiliary runtimes'
+      # List calls fail on every request that reaches resolveDeleteTarget,
+      # masking the broker-restart identity gap this deployment already
+      # works around (see OPERATIONS.md, "After a broker restart"). Repointing
+      # both profile names at this same substrate-prod runtime is enough:
+      # their resolved type then equals the default's, so
+      # discoverAuxiliaryRuntimes registers nothing extra and neither
+      # failure mode exists on this broker. See OPERATIONS.md, "After a broker
+      # restart", for the rest of that issue.
+      local:
+        runtime: substrate-prod
+      remote:
+        runtime: substrate-prod
+---
+# Broker credentials (BrokerID + HMAC SecretKey) come from a Secret created
+# out-of-band — see README "Secret creation". This is a reference only, not
+# a live object: kubectl create secret generic below produces the
+# equivalent of this shape. Nothing in this file ever carries a secret
+# value.
+#
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: scion-substrate-broker-hub-credentials
+#   namespace: ${BROKER_NAMESPACE}
+# type: Opaque
+# data:
+#   ${HUB_CONNECTION_NAME}.json: <base64, created out-of-band, never committed>
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scion-substrate-broker
+  namespace: ${BROKER_NAMESPACE}
+  labels:
+    app: scion-substrate-broker
+spec:
+  replicas: 1
+  # Recreate, not the apps/v1 default RollingUpdate: a rolling update briefly
+  # runs the old and new broker pods together, and both share the same
+  # broker_id (server.broker.broker_id in the ConfigMap above), which makes
+  # the hub's control channel flap while it sees a duplicate broker-ID
+  # connection.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: scion-substrate-broker
+  template:
+    metadata:
+      labels:
+        app: scion-substrate-broker
+    spec:
+      serviceAccountName: scion-substrate-broker
+      # subPath ConfigMap/Secret mounts below only replace the individual
+      # files they name; fsGroup makes sure the broker (running as a
+      # non-root image UID, if the branch-built image sets one) can still
+      # read them and write elsewhere under $HOME/.scion (state, logs).
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: scion-substrate-broker
+          image: ${BROKER_IMAGE}
+          # runAsNonRoot/runAsUser are deliberately NOT set here: the
+          # branch-built broker image (Dockerfile.hub) has no USER
+          # directive, so it runs as root by design, and runAsNonRoot:
+          # true against a root-only image would just CrashLoopBackOff
+          # the container rather than harden it. Set these two once
+          # Dockerfile.hub gains a non-root USER. The rest of this
+          # securityContext holds regardless of that: the broker process
+          # itself never needs privilege escalation, Linux capabilities
+          # beyond the default set, or a syscall filter looser than the
+          # container runtime's own default.
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          args:
+            - "server"
+            - "start"
+            - "--foreground"
+            - "--hosted"
+            - "--enable-runtime-broker"
+            - "--runtime-broker-port=9800"
+            # Without an explicit --host, a standalone broker in --hosted mode
+            # (no --enable-hub) binds to 127.0.0.1 by design
+            # (loadAndReconcileConfig, cmd/server_foreground.go — a safety net so a fresh
+            # broker can be reached by `scion runtime-broker register` on
+            # loopback before HMAC keys exist). That default breaks the
+            # readinessProbe/livenessProbe below: kubelet connects to the pod
+            # IP, not localhost inside the container's own netns, so a
+            # loopback-only listener refuses it with connection-refused.
+            # --host=0.0.0.0 sets cmd.Flags().Changed("host"), which skips
+            # that safety net and lets RuntimeBroker.Host fall through to its
+            # own default (0.0.0.0) — confirmed by reading
+            # server_foreground.go; cfg.Hub.Host is also set by this flag,
+            # but every read of it is gated on --enable-hub/--enable-web
+            # (both false here), so it has no effect. See the README's HMAC
+            # strict-mode note for why this bind is safe.
+            - "--host=0.0.0.0"
+          env:
+            - name: HOME
+              value: /home/scion
+            # SCION_HUB_ENDPOINT is a fallback the broker reads if settings.yaml
+            # doesn't resolve one (cmd/root.go GetHubEndpoint); harmless to set
+            # alongside the ConfigMap's server.broker.hub_endpoint.
+            - name: SCION_HUB_ENDPOINT
+              value: "${HUB_ENDPOINT}"
+          ports:
+            - name: broker-api
+              containerPort: 9800
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 9800
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9800
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          volumeMounts:
+            - name: settings
+              mountPath: /home/scion/.scion/settings.yaml
+              subPath: settings.yaml
+              readOnly: true
+            - name: hub-credentials
+              mountPath: /home/scion/.scion/hub-credentials/${HUB_CONNECTION_NAME}.json
+              subPath: ${HUB_CONNECTION_NAME}.json
+              readOnly: true
+      volumes:
+        - name: settings
+          configMap:
+            name: scion-substrate-broker-settings
+        - name: hub-credentials
+          secret:
+            secretName: scion-substrate-broker-hub-credentials
+            defaultMode: 0400
+---
+# The router ingress NetworkPolicy (atenet-router-restrict-ingress) lives in
+# deploy/substrate/cluster/networkpolicy.yaml, alongside the worker-namespace
+# default-deny baseline it's paired with — both are cluster-level
+# prerequisites, not broker-specific, and cluster/ is where every other
+# cluster-level manifest in this folder lives. See cluster/networkpolicy.yaml
+# and cluster/README.md for what it does, why, and the
+# ${ATE_SYSTEM_NAMESPACE}/${BROKER_NAMESPACE} placeholders it needs resolved
+# (the same values this file uses).

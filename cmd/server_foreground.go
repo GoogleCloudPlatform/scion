@@ -178,7 +178,8 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		// In hosted mode, materialize any missing harness configs from the
 		// binary's embedded catalog. This ensures newly added harness configs
 		// from binary updates are available on disk without a full InitGlobal.
-		// Force=false preserves any operator-customized configs.
+		// Force=false refreshes bundle-owned files (config.yaml and the
+		// provisioner scripts) but preserves other operator files.
 		if err := config.MaterializeBundledHarnessConfigs(globalDir, config.MaterializeOptions{Force: false}); err != nil {
 			log.Printf("Warning: failed to materialize missing harness configs: %v", err)
 		}
@@ -1348,12 +1349,20 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 
 	s := entadapter.NewCompositeStore(entClient)
 
+	// Repair SQLite tables whose timestamps the driver cannot scan BEFORE
+	// migrateStore: Migrate reads tables through ent and fails, fatally, on
+	// such rows, so this cannot move into runBootDataMigrations. It uses raw
+	// SQL only, snapshots the database before writing, and is a no-op on
+	// Postgres and on a store with nothing to repair.
+	tsRepair := repairUnreadableTimestamps(ctx, s)
+
 	// Migrate runs Ent's schema migration and seeds built-in maintenance
 	// operations (parity with the former raw-SQL store).
 	if err := migrateStore(ctx, cfg, s); err != nil {
 		_ = s.Close()
 		return nil, nil, fmt.Errorf("failed to run migrations: %w", err)
 	}
+	markUTCTimestampRepairComplete(ctx, s, tsRepair)
 
 	runBootDataMigrations(ctx, s)
 
@@ -2233,18 +2242,33 @@ func initOperationalSettingsWithRetry(ctx context.Context, cfg *config.GlobalCon
 //  1. Acquires advisory lock "hub_settings_seed"
 //  2. If no _meta row exists, seeds sections from settings.yaml (file values only)
 //  3. Releases the lock
-//  4. Calls Refresh to load sections, then applySnapshot
-//  5. Logs any env-overridden Layer-1 keys as a WARN
+//  4. Calls Refresh to load sections
+//  5. Retires stored runtime-profile timezone values (hub.RetireProfileTimezones)
+//  6. Applies the snapshot
+//  7. Logs any env-overridden Layer-1 keys as a WARN
 func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server, s store.Store, globalDir string) error {
+	// The runtime-profile timezone was removed. Scan the settings file for
+	// leftover profiles.<name>.timezone keys (a raw map walk; the struct
+	// field is gone) so the seed material can drop them and the retirement
+	// step below can report or migrate them.
+	tzScan, err := config.ScanSettingsFileProfileTimezones(globalDir)
+	if err != nil {
+		slog.Warn("Could not scan the settings file for removed runtime-profile timezones", "file", tzScan.Path, "error", err)
+	}
+
 	settingStore, ok := s.(store.HubSettingStore)
 	if !ok {
 		log.Println("WARNING: store does not implement HubSettingStore; skipping operational settings init")
+		_ = hub.RetireProfileTimezones(ctx, nil, hub.ProfileTimezoneRetireInput{File: tzScan}, slog.Default())
 		return nil
 	}
 
 	// Build koanf instances.
 	envKoanf := config.LoadEnvKoanf()
 	bootstrapKoanf := config.LoadBootstrapKoanf()
+	// Seed material never carries the removed key, so the every-boot sync
+	// cannot write it back into a seeded profiles row.
+	config.DeleteLegacyProfileTimezones(bootstrapKoanf, tzScan.ProfileTimezones)
 
 	// Log deprecation warnings for SCION_SERVER_* env vars that overlap
 	// Layer-1 settings (these should use SCION_SEED_* instead).
@@ -2283,6 +2307,17 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 	}
 	if len(changed) > 0 {
 		log.Printf("Operational settings loaded from DB: %v", changed)
+	}
+
+	// Retire stored runtime-profile timezone values once settings are
+	// loaded and seeded, before the snapshot is applied and before the
+	// dispatcher is wired. Non-fatal: a failure leaves the values in place
+	// (nothing reads them) and the next start retries.
+	if err := hub.RetireProfileTimezones(ctx, ops, hub.ProfileTimezoneRetireInput{
+		DBTier: hubSrv.IsPostgres(),
+		File:   tzScan,
+	}, slog.Default()); err != nil {
+		slog.Error("Retiring runtime-profile timezones failed; will retry at the next start", "error", err)
 	}
 
 	snap := ops.Snapshot()
@@ -2654,7 +2689,7 @@ var logSharedDirStorageStartupGuard sync.Once
 // impure half, factored out so a test can call it directly -- as many times
 // as it likes, with a captured logf -- without the once-per-process guard
 // making every call after the first a no-op. It loads global settings the
-// same env-free, global-only way the Start path does (config.LoadGlobalSettings,
+// same env-free, global-only way the Start path does (config.LoadGlobalSettingsWithOverlay,
 // never LoadEffectiveSettings, so this can never be influenced by a
 // project's own settings.yaml) and forwards to logSharedDirStorageStartup.
 //
@@ -2665,7 +2700,7 @@ var logSharedDirStorageStartupGuard sync.Once
 // request/agent-start actually needs it, so this is the heads-up an
 // operator sees before that happens.
 func loadAndLogSharedDirStorageStartup(logf func(format string, args ...interface{})) {
-	globalSettings, _, gErr := config.LoadGlobalSettings()
+	globalSettings, _, gErr := config.LoadGlobalSettingsWithOverlay()
 	if gErr != nil {
 		if config.GlobalSettingsMentions("shared_dir_storage") {
 			logf("Warning: server.shared_dir_storage: global settings failed to load (%v); "+
@@ -2673,10 +2708,60 @@ func loadAndLogSharedDirStorageStartup(logf func(format string, args ...interfac
 		}
 		return
 	}
-	if globalSettings == nil || globalSettings.Server == nil {
+	if globalSettings == nil {
 		return
 	}
-	logSharedDirStorageStartup(globalSettings.Server.SharedDirStorage, logf)
+	if globalSettings.Server != nil {
+		logSharedDirStorageStartup(globalSettings.Server.SharedDirStorage, logf)
+	}
+	logSharedDirStorageOverridesStartup(globalSettings, logf)
+}
+
+// logSharedDirStorageOverridesStartup logs one line per profile whose
+// shared-dir storage backend comes from a profile or runtime entry
+// shared_dir_storage_backend override, and a warning per invalid override.
+// It checks configuration only and never touches the filesystem: an nfs
+// override whose export is not mounted on this host is reported when an
+// agent using it starts, not here, so a missing mount never affects startup
+// or agents that use the local backend. Overrides set through the hub's
+// settings API after startup are not in this summary; they apply to the
+// next agent start.
+func logSharedDirStorageOverridesStartup(gs *config.VersionedSettings, logf func(format string, args ...interface{})) {
+	if gs == nil {
+		return
+	}
+	var global *config.V1SharedDirStorageConfig
+	if gs.Server != nil {
+		global = gs.Server.SharedDirStorage
+	}
+	for _, e := range config.ValidateSharedDirStorageBackends(gs.Runtimes, gs.Profiles, global) {
+		logf("Warning: %s", e.Error())
+	}
+	names := make([]string, 0, len(gs.Profiles))
+	for name := range gs.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		cfg, source := gs.ResolveSharedDirStorage(name)
+		if cfg == nil || source == config.SharedDirStorageGlobalSource {
+			continue
+		}
+		line := fmt.Sprintf("shared_dir_storage for profile %s: backend=%s (from %s)", name, sharedDirBackendLabel(cfg), source)
+		if summary := cfg.ResolvedLayoutSummary(); summary != "" {
+			line = fmt.Sprintf("shared_dir_storage for profile %s: %s (from %s)", name, summary, source)
+		}
+		logf("%s", line)
+	}
+}
+
+// sharedDirBackendLabel is the backend a resolved config selects, with
+// nil and "" shown as local.
+func sharedDirBackendLabel(cfg *config.V1SharedDirStorageConfig) string {
+	if cfg != nil && cfg.Backend == "nfs" {
+		return "nfs"
+	}
+	return "local"
 }
 
 // logSharedDirStorageStartupOnce calls loadAndLogSharedDirStorageStartup
@@ -2713,9 +2798,72 @@ func colocatedBrokerRegisters(cfg *config.GlobalConfig, s store.Store) bool {
 	return enableHub && cfg.RuntimeBroker.Enabled && !simulateRemoteBroker && s != nil
 }
 
+// refuseErrorRuntimeAtStartup returns a non-nil error when rt — the broker's
+// own default runtime, as resolved once at startup by runtime.GetRuntime — is
+// an *runtime.ErrorRuntime for a substrate default runtime that failed
+// deterministic config validation, i.e. its error matches
+// runtime.ErrSubstrateProfileInvalid. The scope is substrate only.
+//
+// GetRuntime never returns an error or nil: a construction or validation
+// failure comes back as a Runtime whose every method returns the stored
+// error. For a substrate profile, a config validation failure is a settings
+// problem — a profile that fails ValidateOperatorOnlySubstrateProfile, or an
+// operator-defined runtime block that fails NewSubstrateRuntime's config
+// checks (required endpoints, substrate.Validate) — that a running broker
+// can never recover from, and that also governs where the bootstrap payload
+// and the actor's egress are sent. Refuse to start instead of coming up
+// looking healthy; the operator fixes the settings and restarts.
+//
+// Every other *ErrorRuntime does not block startup: the broker starts
+// degraded exactly as it always has, logging the "error" runtime name,
+// because those failures can be transient or environmental. That includes a
+// substrate runtime whose construct-time dependencies failed (building the
+// Kubernetes client, or substrate.Dial's trust-bundle/CA load and API dial,
+// e.g. on an API-server blip at boot) — refusing on those would turn a
+// transient outage into a boot crash loop. The broker starts degraded
+// instead, but that degraded state is not self-healing: the default runtime
+// is resolved once here and is not rebuilt until the broker process
+// restarts, and /healthz still reports healthy (the "error" runtime counts
+// as an available runtime in the health check), so nothing restarts the
+// broker automatically. Operators must alert on the logged degraded "error"
+// runtime line and restart the broker to rebuild the runtime. It also
+// includes, for example, a Kubernetes client that fails Verify at startup,
+// or a missing container CLI.
+//
+// Named profiles other than the default are unaffected: those are resolved
+// lazily, per request, and this check only ever sees the one runtime
+// GetRuntime("", "") resolves to at startup. A per-request profile whose
+// construction fails is not memoized on the error, so it retries
+// construction on the next request rather than staying degraded until a
+// restart (see resolveManagerForOpts).
+func refuseErrorRuntimeAtStartup(rt runtime.Runtime) error {
+	er, ok := rt.(*runtime.ErrorRuntime)
+	if !ok || !errors.Is(er.Err, runtime.ErrSubstrateProfileInvalid) {
+		return nil
+	}
+	return fmt.Errorf("runtime broker: configured substrate runtime failed config validation: %w", er.Err)
+}
+
+// resolveBrokerDefaultRuntime resolves the broker's default runtime with
+// getRuntime (runtime.GetRuntime in production), applies
+// refuseErrorRuntimeAtStartup, and logs the runtime the broker will use. It
+// is the first step of startRuntimeBroker; the returned runtime is the one
+// the broker's manager is built on, so the refusal cannot be skipped without
+// also losing the runtime itself.
+func resolveBrokerDefaultRuntime(getRuntime func(projectPath, profileName string) runtime.Runtime, logf func(format string, args ...interface{})) (runtime.Runtime, error) {
+	rt := getRuntime("", "")
+	if err := refuseErrorRuntimeAtStartup(rt); err != nil {
+		return nil, err
+	}
+	logf("Runtime broker using runtime: %s", rt.Name())
+	return rt, nil
+}
+
 func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.GlobalConfig, hubSrv *hub.Server, webSrv *hub.WebServer, s store.Store, hubEndpoint, devAuthToken string, brokerSettings *config.Settings, globalDir string, requestLogger, messageLogger *slog.Logger, wg *sync.WaitGroup, errCh chan error) error {
-	rt := runtime.GetRuntime("", "")
-	log.Printf("Runtime broker using runtime: %s", rt.Name())
+	rt, err := resolveBrokerDefaultRuntime(runtime.GetRuntime, log.Printf)
+	if err != nil {
+		return err
+	}
 	statelessCloudRunBroker := enableHub && !simulateRemoteBroker && rt != nil && rt.Name() == "cloudrun"
 
 	mgr := agent.NewManager(rt)

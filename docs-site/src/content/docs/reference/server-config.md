@@ -163,9 +163,10 @@ When transport auth is configured, the Hub injects these environment variables i
 
 | Variable | Description |
 | :--- | :--- |
-| `SCION_TRANSPORT_TOKEN` | Initial Google OIDC ID token for the transport layer. |
+| `SCION_TRANSPORT_TOKEN` | Initial Google OIDC ID token for the transport layer. Bootstrap only: `sciontool init` moves it to `~/.scion/transport-token` and removes it from the child environment. If the file cannot be written, the value stays in the environment and is used until it expires. |
+| `SCION_TRANSPORT_TOKEN_FILE` | Set by `sciontool init` for child processes. Path of the transport token file, which every refresh rewrites. |
 | `SCION_TRANSPORT_AUDIENCE` | Audience the transport token was minted for. |
-| `SCION_TRANSPORT_TOKEN_EXPIRY` | Token expiry in RFC 3339 format. |
+| `SCION_TRANSPORT_TOKEN_EXPIRY` | Expiry of the initial token, in RFC 3339 format. Bootstrap only: removed by `sciontool init` together with `SCION_TRANSPORT_TOKEN`. |
 | `SCION_TRANSPORT_MODE` | Transport mode (`iap` or `cloudrun_invoker`). Injected alongside the other three transport vars so that in-agent clients can select the correct header placement. |
 
 #### Broker transport configuration
@@ -290,6 +291,7 @@ With the `nfs` backend, the Hub and brokers also apply the following:
 
 - **Symlink-safe access**: Every Hub operation on an NFS shared directory goes through the same confined resolver. This covers the web file browser, archive downloads, attachment staging, and shared-dir deletion. The resolver walks each path component with `O_NOFOLLOW`, anchored on the inode of the project's tree, and refuses any symlink in the path. A missing or incomplete `nfs` block, or an unusable host base directory, fails closed on the Hub as well as on agent start.
 - **Leaf modes and ACLs**: A newly created shared directory gets mode `2775` (setgid, group-writable) and a minimal default POSIX ACL, so files agents create inside it inherit group write access regardless of umask. If the export does not support POSIX ACLs, a warning is logged once and the directory stays plain `2775` with no ACL. Directories that already existed are never modified. See the [hybrid tier guide](https://github.com/GoogleCloudPlatform/scion/blob/main/docs/deploy/hybrid-tier.md) for the manual fix-up recipe.
+- **Ownership on an export that does not squash ids**: the broker creates the project chain as its own user and never changes ownership. Upper directories get `2755` and the leaf `2775`, and each inherits the group of a setgid parent. Pods create nothing on this export; they mount the existing leaf by `subPath`. When agents with different uids share a directory, for example Docker agents and Kubernetes pods, give the share directory (`<mount_root>/<share id>`) a shared group with the setgid bit (for example `chgrp <gid>` and `chmod 2775`), make the broker user a member of that group, and set the pods' `fsGroup` to it; Kubernetes adds `fsGroup` as a supplementary group and does not change ownership on NFS volumes. If the export does not support POSIX ACLs, files created inside a leaf follow each writer's umask, so use umask `002` for every agent that writes there.
 - **Cleanup on delete**: Deleting a project removes its `<subpath_root>/<project id>/shared-dirs` tree from the export. Removing a single shared directory removes that directory's contents. Both are best-effort: failures are logged and never block or roll back the database change.
 - **Startup summary**: At startup the server logs one `server.shared_dir_storage resolved layout: …` line, plus a warning if any ignored `nfs` fields are set.
 
@@ -308,6 +310,50 @@ server:
           export: /scion-shared
           pv_name: scion-shared-pvc
 ```
+
+#### Per-profile backend
+
+A runtime entry or a profile can override the backend with `shared_dir_storage_backend` (`local` or `nfs`). This lets one broker keep its Docker profile on `local` while a Kubernetes profile uses `nfs`. The backend for an agent is resolved when it starts, in this order:
+
+1. `profiles.<name>.shared_dir_storage_backend` for the agent's profile.
+2. `runtimes.<name>.shared_dir_storage_backend` for that profile's runtime entry.
+3. `server.shared_dir_storage.backend`.
+
+The `nfs` details always come from `server.shared_dir_storage.nfs`, so an `nfs` override needs a complete `nfs` block there. Settings validation rejects an `nfs` override without one. Validation checks configuration only and never looks at the mount. On a Hub that stores runtimes and profiles in the database, `server.shared_dir_storage.nfs` is edited only in `settings.yaml`, and such an edit is not checked against the overrides stored in the database; an `nfs` override left without a complete block fails at agent start with an error that names the key.
+
+```yaml
+runtimes:
+  docker:
+    type: docker
+  gke:
+    type: kubernetes
+    shared_dir_storage_backend: nfs
+profiles:
+  local:
+    runtime: docker
+  gke:
+    runtime: gke
+server:
+  shared_dir_storage:
+    backend: local
+    nfs:
+      mount_root: /mnt/scion-nfs
+      shares:
+        - id: shared
+          pv_name: scion-shared-pvc
+```
+
+- **Chosen from global settings**: like `server.shared_dir_storage`, the overrides are read from the broker's global settings, never from project settings. On a co-located Hub and broker whose runtimes and profiles are stored in the database, the stored values apply. This picks the backend for an agent's first start; after that, the agent's recorded backend applies (see below).
+- **No restart**: overrides are read again at every agent start, so a change made in `settings.yaml` or through the Hub settings API applies to the next agent start.
+- **Recorded per agent**: an agent records the backend its shared directories were set up with and keeps it on later starts, even if the settings change.
+  - The record is `shared-dir-storage.json` in the agent's directory on the broker, next to `scion-agent.json`. It is outside the agent's home. In the default layouts the agent's container does not mount it. In two older layouts the agent's directory sits inside the workspace mount, so the container sees the record there, as it sees `scion-agent.json`: a non-git project whose `.scion` directory is inside the project, and a shared-workspace git project without an external agents directory. Reincarnating the agent keeps the record, and moving a shared-workspace agent's state out of the project moves the record with it.
+  - If an agent recorded `nfs` and the `nfs` block was later removed, its start fails with an error that says so, before any host path is touched.
+  - An override that later fails validation does not block an agent that recorded a backend, because the agent does not use it. It still fails the first start of a new agent.
+  - A start that could not load the global settings records nothing, so the agent picks up its configured backend once the settings load again.
+  - Agents created before the backend was recorded use the current resolution.
+- **Host mount**: a broker that starts an `nfs`-resolved agent needs the export mounted at `<mount_root>/<share id>`, as with the global `nfs` backend. A missing mount fails only agents that resolve to `nfs`. Agents on the `local` backend, server startup, and health checks are not affected. The startup log has one line per profile whose backend comes from an override.
+- **Hub file browser and attachments**: the Hub's file browser, archive downloads and attachment staging use `server.shared_dir_storage.backend` only, not the per-profile override.
+- **Cleanup on delete**: deleting a project removes its tree from the export whenever `server.shared_dir_storage.nfs` is complete, whatever the backend settings select. An agent can still be on `nfs` by its record after every setting has moved to `local`, and the Hub cannot read records kept on brokers. If the global backend is not `nfs` and the export is not mounted on the Hub's host, cleanup logs a warning and the delete still succeeds.
 
 ### Scheduler (`server.scheduler`)
 

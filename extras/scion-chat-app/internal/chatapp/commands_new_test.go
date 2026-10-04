@@ -40,11 +40,11 @@ func (s *stubAgentService) Create(ctx context.Context, req *hubclient.CreateAgen
 	return nil, fmt.Errorf("not implemented")
 }
 
-func (s *stubAgentService) Start(ctx context.Context, id string) error {
+func (s *stubAgentService) Start(ctx context.Context, id string) (*hubclient.LifecycleResponse, error) {
 	if s.startFunc != nil {
-		return s.startFunc(ctx, id)
+		return &hubclient.LifecycleResponse{}, s.startFunc(ctx, id)
 	}
-	return nil
+	return &hubclient.LifecycleResponse{}, nil
 }
 
 func (s *stubAgentService) SendStructuredMessage(ctx context.Context, id string, msg *messages.StructuredMessage, interrupt, notify, wake bool) (*hubclient.MessageResponse, error) {

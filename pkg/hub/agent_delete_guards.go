@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
@@ -76,7 +77,7 @@ const (
 	startEntryReincarnate    startEntry = "reincarnate"
 	startEntryRestore        startEntry = "restore"
 	startEntryCreateExisting startEntry = "create_existing" // POST /agents on an existing agent (resume/recreate)
-	startEntryWake           startEntry = "wake"            // DM wake of a suspended agent
+	startEntryWake           startEntry = "wake"            // DM wake (any phase where a launch refusal applies, else suspended)
 )
 
 // startRefusal is the start gate's answer when it has something to say.
@@ -93,6 +94,13 @@ type startRefusal struct {
 	Message    string
 	Details    map[string]interface{}
 	Warnings   []string
+	// InFlight marks the step 3 refusal (409 agent_launching): the agent's
+	// create launch is in flight. Entries that answer 200 with the current
+	// agent instead check it before writing the refusal.
+	InFlight bool
+	// launch marks a step 2 or 3 refusal. DM wake reports those in its
+	// runtime-error shape.
+	launch bool
 }
 
 // refuses reports whether r refuses the start.
@@ -105,8 +113,17 @@ func (r *startRefusal) write(w http.ResponseWriter) {
 	writeError(w, r.HTTPStatus, r.Code, r.Message, r.Details)
 }
 
-// dmError converts a refusing r for the DM wake path.
+// dmError converts a refusing r for the DM wake path. Launch refusals
+// (steps 2-3) keep wake's runtime-error shape; the delete refusal keeps its
+// code.
 func (r *startRefusal) dmError() *AgentDMError {
+	if r.launch {
+		return &AgentDMError{
+			Code:       ErrCodeRuntimeError,
+			Message:    r.Message,
+			HTTPStatus: http.StatusBadGateway,
+		}
+	}
 	return &AgentDMError{
 		Code:       r.Code,
 		Message:    r.Message,
@@ -123,11 +140,15 @@ func (r *startRefusal) dmError() *AgentDMError {
 //
 //  1. deleteBlocksStart → 409 delete_in_progress (this design);
 //  2. IsIncompleteCreate → 409 agent_create_incomplete (T1 P1b-3);
-//  3. IsInFlight → the per-entry T1 answer (200 + Warnings, or 409
-//     agent_launching) (T1 P1b-3).
+//  3. IsInFlight, before the launch deadline → 409 agent_launching with
+//     InFlight set (T1 P1b-3). Start, restart and create-existing answer
+//     it with 200 and the current agent (plus Warnings); reincarnate writes
+//     the 409; DM wake skips the wake.
 //
 // Delete comes first because the delete claim writes stopping, which also
 // makes IsIncompleteCreate true, and "deleting" is the accurate message.
+// Restore runs the same steps, but steps 2-3 never match there: both
+// predicates are false on a soft-deleted row.
 func (s *Server) startGate(ctx context.Context, a *store.Agent, entry startEntry) *startRefusal {
 	// Step 1: delete in progress.
 	blocked, err := s.deleteBlocksStart(ctx, a)
@@ -153,8 +174,8 @@ func (s *Server) startGate(ctx context.Context, a *store.Agent, entry startEntry
 		}
 	}
 
-	// Steps 2-3 (T1 P1b-3) slot in here.
-	return nil
+	// Steps 2-3: incomplete create, then in flight.
+	return launchStartRefusal(a, time.Now())
 }
 
 // clearFailedDeletion clears a failed delete marker after a successful
@@ -248,11 +269,19 @@ func (s *Server) clearFailedDeletionAtClaim(ctx context.Context, a *store.Agent,
 func (s *Server) settleLifecycleWrite(ctx context.Context, a *store.Agent, newPhase string) {
 	a.Phase = newPhase
 	s.clearFailedDeletion(ctx, a)
-	fresh, err := s.store.GetAgent(ctx, a.ID)
-	if err != nil {
+	if err := s.reloadGuardedColumns(ctx, a); err != nil {
 		s.agentLifecycleLog.Warn("failed to re-read agent after lifecycle write",
 			"agent_id", a.ID, "error", err)
-		return
+	}
+}
+
+// reloadGuardedColumns re-reads a's row and copies the columns a concurrent
+// delete (or a guarded store write) may have changed, so a following publish
+// reports the row as stored rather than as the caller assumed it.
+func (s *Server) reloadGuardedColumns(ctx context.Context, a *store.Agent) error {
+	fresh, err := s.store.GetAgent(ctx, a.ID)
+	if err != nil {
+		return err
 	}
 	a.Phase = fresh.Phase
 	a.Activity = fresh.Activity
@@ -261,6 +290,7 @@ func (s *Server) settleLifecycleWrite(ctx context.Context, a *store.Agent, newPh
 	a.ExitReason = fresh.ExitReason
 	a.Message = fresh.Message
 	a.StateVersion = fresh.StateVersion
+	a.DeletedAt = fresh.DeletedAt
 	a.DeletionState = fresh.DeletionState
 	a.DeletionClaim = fresh.DeletionClaim
 	a.DeletionLeaseAt = fresh.DeletionLeaseAt
@@ -270,4 +300,23 @@ func (s *Server) settleLifecycleWrite(ctx context.Context, a *store.Agent, newPh
 	a.DeletionError = fresh.DeletionError
 	a.DeletionPrior = fresh.DeletionPrior
 	a.DeletionRequest = fresh.DeletionRequest
+	return nil
+}
+
+// publishAgentStatusFresh publishes a's status from a re-read of its row
+// (design note F): a status write that raced a delete must not publish the
+// phase it intended over the delete's stopping/deleted. Nothing is published
+// when the row is gone or soft-deleted.
+func (s *Server) publishAgentStatusFresh(ctx context.Context, a *store.Agent) {
+	if err := s.reloadGuardedColumns(ctx, a); err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.agentLifecycleLog.Warn("failed to re-read agent before status publish",
+				"agent_id", a.ID, "error", err)
+		}
+		return
+	}
+	if !a.DeletedAt.IsZero() {
+		return
+	}
+	s.events.PublishAgentStatus(ctx, a)
 }

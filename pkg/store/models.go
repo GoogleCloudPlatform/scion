@@ -139,6 +139,14 @@ type Agent struct {
 	LaunchStep         string    `json:"-"`
 	LaunchError        string    `json:"-"`
 
+	// RunIntent is whether the agent should be running ("running" or
+	// "stopped"); "" means unknown (NULL). RunIntentAt is the store-clock
+	// time of the last intent write. Internal bookkeeping, untagged like the
+	// launch columns. UpdateAgent and CreateAgent never write them; the only
+	// writers are SetRunIntent, RevertRunIntent and BackfillRunIntent.
+	RunIntent   RunIntent  `json:"-"`
+	RunIntentAt *time.Time `json:"-"`
+
 	// Launch is the computed, client-facing view of the launch_* columns
 	// above (design §3.2; see launch_view.go). It is nil unless a
 	// caller populates it (e.g. enrichAgent/enrichAgents in pkg/hub via
@@ -595,6 +603,16 @@ const (
 	LabelTemplate = "scion.io/template"
 )
 
+// Git source labels for git-anchored projects. LabelCloneURL is the URL agents
+// and shared-workspace init actually clone from (it takes precedence over
+// Project.GitRemote), LabelSourceURL records the remote as the user entered it,
+// and LabelDefaultBranch is the branch to clone.
+const (
+	LabelCloneURL      = "scion.dev/clone-url"
+	LabelSourceURL     = "scion.dev/source-url"
+	LabelDefaultBranch = "scion.dev/default-branch"
+)
+
 // Workspace mode constants for git projects.
 // When a git project has the workspace mode label set to "shared", it uses a
 // single shared clone mounted by all agents instead of per-agent clones.
@@ -628,6 +646,15 @@ const (
 	// on K8s are not supported and fall back to clone-per-agent).
 	// Maps from label value "worktree-per-agent".
 	SharingModeWorktreePerAgent WorkspaceSharingMode = "worktree-per-agent"
+
+	// SharingModeEmptyPerAgent: each agent gets its own private, initially
+	// empty, non-git directory. Only valid for non-git (hub-managed) projects;
+	// the hub derives it from the "per-agent" label on a project without a git
+	// remote (see ResolveProjectSharingMode). It is the canonical value sent to
+	// brokers and exported as SCION_WORKSPACE_MODE; the bare "per-agent" label
+	// is never forwarded for such projects because label-only resolution maps
+	// it to clone-per-agent.
+	SharingModeEmptyPerAgent WorkspaceSharingMode = "empty-per-agent"
 )
 
 // ResolveWorkspaceSharingMode maps a workspace mode label value (wire format) to
@@ -642,9 +669,52 @@ func ResolveWorkspaceSharingMode(label string) WorkspaceSharingMode {
 		return SharingModeClonePerAgent
 	case WorkspaceModeWorktreePerAgent:
 		return SharingModeWorktreePerAgent
+	case string(SharingModeEmptyPerAgent):
+		return SharingModeEmptyPerAgent
 	default:
 		// Empty or unrecognized: default to shared-plain.
 		return SharingModeSharedPlain
+	}
+}
+
+// ResolveProjectSharingMode is the single source of truth mapping a project's
+// workspace-mode label and git-ness to the canonical WorkspaceSharingMode.
+// For git projects it matches ResolveWorkspaceSharingMode, except that a raw
+// "empty-per-agent" label (a non-git-only mode) resolves to
+// SharingModeSharedPlain like any other unrecognized value. For non-git
+// projects, "per-agent" (or the canonical "empty-per-agent") resolves to
+// SharingModeEmptyPerAgent and everything else to SharingModeSharedPlain.
+func ResolveProjectSharingMode(label string, isGit bool) WorkspaceSharingMode {
+	if isGit {
+		if label == string(SharingModeEmptyPerAgent) {
+			return SharingModeSharedPlain
+		}
+		return ResolveWorkspaceSharingMode(label)
+	}
+	switch label {
+	case WorkspaceModePerAgent, string(SharingModeEmptyPerAgent):
+		return SharingModeEmptyPerAgent
+	default:
+		return SharingModeSharedPlain
+	}
+}
+
+// ValidateWorkspaceMode reports whether a requested workspace mode (API/label
+// value) is allowed for a project of the given git-ness. An empty mode is
+// always valid (it means "no label"). worktree-per-agent requires a git
+// remote; unknown values are rejected.
+func ValidateWorkspaceMode(mode string, isGit bool) error {
+	switch mode {
+	case "", WorkspaceModeShared, WorkspaceModePerAgent:
+		return nil
+	case WorkspaceModeWorktreePerAgent:
+		if !isGit {
+			return fmt.Errorf("workspace mode %q requires a git remote", mode)
+		}
+		return nil
+	default:
+		return fmt.Errorf("invalid workspace mode %q: must be one of %q, %q, %q",
+			mode, WorkspaceModeShared, WorkspaceModePerAgent, WorkspaceModeWorktreePerAgent)
 	}
 }
 
@@ -708,6 +778,19 @@ func (p *Project) IsSharedWorkspace() bool {
 // per-agent git worktrees over a shared base clone.
 func (p *Project) IsWorktreePerAgent() bool {
 	return p.GitRemote != "" && p.Labels[LabelWorkspaceMode] == WorkspaceModeWorktreePerAgent
+}
+
+// SharingMode returns the canonical workspace sharing mode for this project,
+// derived from its workspace-mode label and whether it has a git remote.
+func (p *Project) SharingMode() WorkspaceSharingMode {
+	return ResolveProjectSharingMode(p.Labels[LabelWorkspaceMode], p.GitRemote != "")
+}
+
+// IsEmptyPerAgent returns true if this is a non-git project configured so
+// each agent gets its own empty, private workspace directory. It is defined
+// via SharingMode so the two can never disagree.
+func (p *Project) IsEmptyPerAgent() bool {
+	return p != nil && p.SharingMode() == SharingModeEmptyPerAgent
 }
 
 // IsTemplate returns true if this project is marked as a project template.
@@ -795,6 +878,11 @@ type BrokerCapabilities struct {
 	// create path and the launch-report protocol (design t1-async-create-v11.md
 	// §3.2, §7 P1b-1).
 	AsyncLaunch bool `json:"asyncLaunch"`
+	// EmptyPerAgentWorkspace indicates the broker can provision the
+	// empty-per-agent workspace sharing mode (private empty directory per
+	// agent on non-git projects). The hub refuses to dispatch such agents to
+	// brokers without it, returning 412 (fail closed; design #2703 D3).
+	EmptyPerAgentWorkspace bool `json:"emptyPerAgentWorkspace"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
@@ -944,20 +1032,17 @@ type HarnessConfig struct {
 
 // HarnessConfigData holds the harness-specific configuration details.
 type HarnessConfigData struct {
-	Harness                 string                   `json:"harness,omitempty"`
-	Image                   string                   `json:"image,omitempty"`
-	User                    string                   `json:"user,omitempty"`
-	Model                   string                   `json:"model,omitempty"`
-	Args                    []string                 `json:"args,omitempty"`
-	Env                     map[string]string        `json:"env,omitempty"`
-	AuthSelectedType        string                   `json:"authSelectedType,omitempty"`
-	Secrets                 []api.RequiredSecret     `json:"secrets,omitempty"`
-	ModelAliases            map[string]string        `json:"modelAliases,omitempty"`
-	ThinkingBudgetMap       map[string]int           `json:"thinkingBudgetMap,omitempty"`
-	ThinkingBudgetFlag      string                   `json:"thinkingBudgetFlag,omitempty"`
-	ThinkingBudgetConfigKey string                   `json:"thinkingBudgetConfigKey,omitempty"`
-	NoAuthBehavior          string                   `json:"noAuthBehavior,omitempty"`
-	AuthMeta                *api.HarnessAuthMetadata `json:"authMeta,omitempty"`
+	Harness          string                   `json:"harness,omitempty"`
+	Image            string                   `json:"image,omitempty"`
+	User             string                   `json:"user,omitempty"`
+	Model            string                   `json:"model,omitempty"`
+	Args             []string                 `json:"args,omitempty"`
+	Env              map[string]string        `json:"env,omitempty"`
+	AuthSelectedType string                   `json:"authSelectedType,omitempty"`
+	Secrets          []api.RequiredSecret     `json:"secrets,omitempty"`
+	ModelAliases     map[string]string        `json:"modelAliases,omitempty"`
+	NoAuthBehavior   string                   `json:"noAuthBehavior,omitempty"`
+	AuthMeta         *api.HarnessAuthMetadata `json:"authMeta,omitempty"`
 }
 
 // HarnessConfigStatus constants
@@ -2927,6 +3012,109 @@ type DelegationEdge struct {
 	Grandfathered bool      `json:"grandfathered"`
 	CreatedAt     time.Time `json:"createdAt"`
 	UpdatedAt     time.Time `json:"updatedAt"`
+
+	// AuthorityProvenance, EffectCeiling and Deactivation are recorded at
+	// write time and stay off public JSON. Their zero values mean
+	// "unrecorded": an edge written without them never reads as principal.
+	AuthorityProvenance
+	EffectCeiling
+	Deactivation
+}
+
+// EffectCeilingKind is the kind of a frozen effect ceiling.
+type EffectCeilingKind string
+
+const (
+	// EffectCeilingUnrecorded is the zero value: provenance was not
+	// recorded. It never carries permission IDs and is never read as
+	// EffectCeilingPrincipal.
+	EffectCeilingUnrecorded EffectCeilingKind = ""
+	// EffectCeilingBounded carries a complete permission allow-list
+	// interpreted under Version. An empty list allows nothing.
+	EffectCeilingBounded EffectCeilingKind = "bounded"
+	// EffectCeilingPrincipal carries no credential caveat: the live
+	// principal's authority is the only bound.
+	EffectCeilingPrincipal EffectCeilingKind = "principal"
+)
+
+// EffectCeiling is the frozen upper bound recorded with an
+// authority-producing write. It is never recomputed after the write.
+type EffectCeiling struct {
+	Kind              EffectCeilingKind          `json:"-"`
+	Version           permissions.CeilingVersion `json:"-"` // bounded only: copied unchanged from a UAT source, or V1 for coverage computed from an agent parent
+	PermissionIDs     []string                   `json:"-"` // bounded only; sorted, de-duplicated
+	BoundaryKind      string                     `json:"-"` // permissions.BoundaryKind of the source credential; "" for principal
+	BoundaryProjectID string                     `json:"-"`
+	SourceExpiresAt   *time.Time                 `json:"-"` // UAT expiry when the source credential is a UAT (descriptive only)
+}
+
+// Frozen returns the permission ceiling for a bounded ceiling. ok is false
+// for principal and unrecorded; callers must branch on Kind and must never
+// treat !ok as unrestricted.
+func (c EffectCeiling) Frozen() (permissions.FrozenPermissionCeiling, bool) {
+	if c.Kind != EffectCeilingBounded {
+		return permissions.FrozenPermissionCeiling{}, false
+	}
+	ids := c.PermissionIDs
+	if ids == nil {
+		ids = []string{}
+	}
+	return permissions.FrozenPermissionCeiling{Version: c.Version, PermissionIDs: ids}, true
+}
+
+// SourceCredentialKind is the credential that authenticated the source of an
+// authority-producing write.
+type SourceCredentialKind string
+
+const (
+	SourceCredentialSession         SourceCredentialKind = "session"
+	SourceCredentialDevLocal        SourceCredentialKind = "dev_local"
+	SourceCredentialUAT             SourceCredentialKind = "uat"
+	SourceCredentialAgent           SourceCredentialKind = "agent"
+	SourceCredentialScheduler       SourceCredentialKind = "scheduler"
+	SourceCredentialSystemMigration SourceCredentialKind = "system_migration"
+)
+
+// ProvenanceVersionV1 is the first recorded AuthorityProvenance layout.
+// ProvenanceVersion 0 means provenance was not recorded.
+const ProvenanceVersionV1 = 1
+
+// AuthorityProvenance records who authorized an authority-producing write
+// and with which credential. The Initiator* fields use the
+// InitiatorAttribution names and value domain.
+type AuthorityProvenance struct {
+	ProvenanceVersion           int                  `json:"-"` // 0 = unrecorded, 1 = v1
+	SourcePrincipalKind         string               `json:"-"` // "user" | "agent"
+	SourcePrincipalID           string               `json:"-"`
+	SourceCredentialKind        SourceCredentialKind `json:"-"`
+	SourceCredentialID          string               `json:"-"` // UAT ID, agent credential JTI; "" for session and dev_local
+	SourceEventID               string               `json:"-"` // scheduler: fired scheduled event ID (reference only)
+	SourceScheduleID            string               `json:"-"` // scheduler: recurring schedule ID, may be empty
+	SourceAuthorizationRevision int                  `json:"-"` // scheduler: revision the event snapshotted
+	InitiatorPrincipalKind      string               `json:"-"`
+	InitiatorPrincipalID        string               `json:"-"`
+	InitiatorCredentialKind     string               `json:"-"` // InitiatorCredentialKind* domain
+	InitiatorCredentialID       string               `json:"-"`
+}
+
+// EdgeDeactivationCause records why a delegation edge or assignment was
+// deactivated. The empty value means active, or deactivated before causes
+// were recorded.
+type EdgeDeactivationCause string
+
+const (
+	EdgeDeactivationAgentSoftDelete     EdgeDeactivationCause = "agent_soft_delete"
+	EdgeDeactivationAgentHardDelete     EdgeDeactivationCause = "agent_hard_delete"
+	EdgeDeactivationDelegatorDeleted    EdgeDeactivationCause = "delegator_deleted"
+	EdgeDeactivationCreateCompensation  EdgeDeactivationCause = "create_compensation"
+	EdgeDeactivationReincarnateReplaced EdgeDeactivationCause = "reincarnate_replaced"
+)
+
+// Deactivation is the deactivation record of an edge or assignment.
+type Deactivation struct {
+	Cause EdgeDeactivationCause `json:"-"`
+	At    *time.Time            `json:"-"`
+	OpID  string                `json:"-"` // one ID per deactivating operation
 }
 
 // Delegation edge principal types

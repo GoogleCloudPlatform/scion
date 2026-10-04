@@ -31,7 +31,11 @@ fi
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 
-rg -n 'scion\.io/' \
+# The explicit "." matters: with no path argument, rg searches stdin whenever
+# stdin is a pipe (as it is for a CI step), finds nothing, and the check
+# passes vacuously. With "." rg prints paths as ./pkg/...; the sed strips that
+# prefix so the anchored allowlist patterns below still match.
+{ rg -n 'scion\.io/' . \
   --glob '*.go' \
   --glob '*.yaml' \
   --glob '*.yml' \
@@ -44,7 +48,7 @@ rg -n 'scion\.io/' \
   --glob '!docs-repo/**' \
   --glob '!reviews/**' \
   --glob '!web/**' \
-  --glob '!scratch/**' >"$tmp" || true
+  --glob '!scratch/**' || true; } | sed 's|^\./||' >"$tmp"
 
 if [[ ! -s "$tmp" ]]; then
   echo "check-annotation-prefix: analysed ${sha}, no scion.io/ references found" >&2
@@ -113,7 +117,8 @@ allowed_paths=(
 
   # --- pkg/hub/ (additional) ---
   # Core project handlers: defines system annotation constants for project
-  # members-group and agents-group.
+  # members-group and agents-group, including the legacy read-only
+  # scion.io/system-project-members-group key (ptone/scion#2556).
   "^pkg/hub/handlers_projects_core.go$"
 
   # Passthrough gate: checks scion.io/broker-role label on embedded brokers.

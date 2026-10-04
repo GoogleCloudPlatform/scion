@@ -73,8 +73,9 @@ type AgentDefaultsSettings struct {
 	DefaultAgentRole     string            `json:"default_agent_role,omitempty"`
 	DefaultRuntimeBroker string            `json:"default_runtime_broker,omitempty"`
 	// DefaultTimezone is the hub-level IANA timezone fallback (e.g.
-	// "America/Los_Angeles"). Applied as TZ when neither the profile's
-	// first-class timezone field nor a raw TZ in the profile env is set.
+	// "America/Los_Angeles") for agent containers: applied as TZ when the
+	// agent has no pinned timezone and no storage-scope TZ environment
+	// variable applies.
 	DefaultTimezone string `json:"default_timezone,omitempty"`
 	// DefaultGCPIdentityMode is the hub-wide fallback GCP metadata mode
 	// ("block", "passthrough", or "assign") applied when neither the agent

@@ -221,8 +221,11 @@ func (a *AuthzService) walkDelegationChain(
 // that does not resolve or is deleted and for a migration-provenance deny,
 // and DenyCauseCeilingDelegatorLacksPermission for a delegator that resolves
 // (including a user that is not active, for example suspended or invited)
-// but does not hold the permission. A lookup error is returned as an error
-// and classified by the caller. Every other deny leaves cause unchanged.
+// but does not hold the permission. After a hop's delegator-authority check
+// passes, hopEffectCeilingDeny applies the hop's frozen provenance and
+// effect ceiling and records ceiling_source_not_allowed, ceiling_unrecorded
+// or ceiling_effect_exceeded. A lookup error is returned as an error and
+// classified by the caller. Every other deny leaves cause unchanged.
 func (a *AuthzService) walkDelegationChainWithCause(
 	ctx context.Context,
 	resource Resource,
@@ -355,6 +358,11 @@ func (a *AuthzService) walkDelegationChainWithCause(
 				setCause(DenyCauseCeilingDelegatorLacksPermission)
 				return false, fmt.Sprintf("delegator %s does not hold %s", edge.DelegatorID, permissionID), nil
 			}
+			if c, why := hopEffectCeilingDeny(edge, permissionID, resource, agentID, a.devLocalAuthorityEnabled()); c != "" {
+				addStep("delegation_ceiling_effect_denied", fmt.Sprintf("edge %s: %s", edge.ID, why))
+				setCause(c)
+				return false, why, nil
+			}
 			addStep("delegation_ceiling_allowed",
 				fmt.Sprintf("delegator user %s holds %s (%s)", edge.DelegatorID, permissionID, reason))
 			return true, "delegation ceiling passed", nil
@@ -377,6 +385,11 @@ func (a *AuthzService) walkDelegationChainWithCause(
 				setCause(DenyCauseCeilingDelegatorLacksPermission)
 				return false, fmt.Sprintf("delegator agent %s does not hold %s: %s", edge.DelegatorID, permissionID, reason), nil
 			}
+			if c, why := hopEffectCeilingDeny(edge, permissionID, resource, agentID, a.devLocalAuthorityEnabled()); c != "" {
+				addStep("delegation_ceiling_effect_denied", fmt.Sprintf("edge %s: %s", edge.ID, why))
+				setCause(c)
+				return false, why, nil
+			}
 			addStep("delegation_ceiling_link_allowed",
 				fmt.Sprintf("delegator agent %s holds %s; continuing", edge.DelegatorID, permissionID))
 			delegateID = edge.DelegatorID
@@ -386,6 +399,48 @@ func (a *AuthzService) walkDelegationChainWithCause(
 				fmt.Sprintf("edge %s has delegator type %q", edge.ID, edge.DelegatorType))
 			return false, fmt.Sprintf("delegation edge %s has an unsupported delegator type", edge.ID), nil
 		}
+	}
+}
+
+// hopEffectCeilingDeny applies a hop's frozen provenance and effect ceiling
+// to permissionID, after the delegator-authority check has passed for the
+// hop. It returns the empty cause when the hop passes. In order:
+//   - a dev_local hop requires dev auth on this server and the delegator
+//     user:DevUserID (the delegator-authority check has already denied a
+//     missing or inactive delegator);
+//   - a hop whose provenance version is not understood denies every
+//     permission in recordedProvenanceRequired;
+//   - a bounded hop denies a permission its ceiling does not allow, with the
+//     self-operation exception only when the resource is the acting agent;
+//   - an unrecorded hop denies every permission in
+//     recordedProvenanceRequired and passes the rest;
+//   - a principal hop passes.
+func hopEffectCeilingDeny(edge *store.DelegationEdge, permissionID string, resource Resource, actingAgentID string, devLocalEnabled bool) (DenyCause, string) {
+	if hasDevLocalProvenance(edge) {
+		if !devLocalEnabled {
+			return DenyCauseCeilingSourceNotAllowed, "delegation ceiling: " + reasonDevLocalDisabled
+		}
+		if edge.DelegatorType != store.DelegationPrincipalUser || edge.DelegatorID != DevUserID {
+			return DenyCauseCeilingSourceNotAllowed, "delegation ceiling: local development provenance with another delegator"
+		}
+	}
+	if !knownProvenanceVersion(edge.ProvenanceVersion) && recordedProvenanceRequired[permissionID] {
+		return DenyCauseCeilingUnrecorded, fmt.Sprintf("delegation ceiling: %s requires recorded provenance", permissionID)
+	}
+	switch edge.Kind {
+	case store.EffectCeilingPrincipal:
+		return "", ""
+	case store.EffectCeilingUnrecorded:
+		if recordedProvenanceRequired[permissionID] {
+			return DenyCauseCeilingUnrecorded, fmt.Sprintf("delegation ceiling: %s requires recorded provenance", permissionID)
+		}
+		return "", ""
+	default:
+		selfTarget := resource.Type == "agent" && resource.ID != "" && resource.ID == actingAgentID
+		if !EffectCeilingAllows(edge.EffectCeiling, permissionID, selfTarget) {
+			return DenyCauseCeilingEffectExceeded, fmt.Sprintf("delegation ceiling: %s is outside the frozen effect ceiling", permissionID)
+		}
+		return "", ""
 	}
 }
 

@@ -654,6 +654,7 @@ func TestFindRuntimeBrokerByIDViaList_FreshCursorEveryPage_StopsAtPageCap(t *tes
 func TestResolveAttachTransport_PlainMode(t *testing.T) {
 	// Ensure all transport auth env vars are unset.
 	t.Setenv("SCION_TRANSPORT_TOKEN", "")
+	t.Setenv("SCION_TRANSPORT_TOKEN_FILE", "")
 	t.Setenv("SCION_TRANSPORT_AUDIENCE", "")
 	t.Setenv("SCION_HUB_OIDC_AUDIENCE", "")
 	t.Setenv("SCION_METADATA_MODE", "")
@@ -683,6 +684,8 @@ func TestResolveAttachTransport_PlainMode(t *testing.T) {
 func TestResolveAttachTransport_IAPMode(t *testing.T) {
 	// A minimal three-part JWT-shaped value; ParseTokenExpiry falls back to
 	// DefaultTTL on any parse error, so we don't need a valid signature.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SCION_TRANSPORT_TOKEN_FILE", "")
 	t.Setenv("SCION_TRANSPORT_TOKEN", "header.payload.sig")
 	t.Setenv("SCION_TRANSPORT_MODE", "iap")
 
@@ -832,8 +835,12 @@ func newStartAgentMockHubServer(t *testing.T, projectID, agentName, agentID, age
 }
 
 // saveAttachTestState saves the package-level variables that startAgentViaHub
-// reads, and returns a function that restores them.
+// reads, and returns a function that restores them. It also shortens the
+// launch-wait poll interval and fallback budget so a test whose agent never
+// reaches running fails within seconds instead of minutes.
 func saveAttachTestState() func() {
+	origPoll, origFallback := launchPollInterval, launchWaitFallback
+	launchPollInterval, launchWaitFallback = 10*time.Millisecond, 5*time.Second
 	origAttach := attach
 	origTemplate := templateName
 	origBranch := branch
@@ -853,6 +860,7 @@ func saveAttachTestState() func() {
 		harnessAuthFlag = origHAuth
 		startNoNotify = origNoNotify
 		labelFlags = origLabels
+		launchPollInterval, launchWaitFallback = origPoll, origFallback
 	}
 }
 

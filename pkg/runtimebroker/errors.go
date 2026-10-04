@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -23,6 +24,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // APIError represents a standardized error response.
@@ -54,6 +57,25 @@ const (
 	ErrCodeHubUnreachable     = "hub_unreachable"
 	ErrCodeTemplateError      = "template_error"
 	ErrCodeSkillResolution    = "skill_resolution_failed"
+
+	// ErrCodeAgentIdentityUnknown marks a delete/stop that could not be
+	// verified as safe because a runtime process restart dropped the
+	// in-memory record needed to tell "not found" apart from "exists, but
+	// unidentifiable." Stable within this broker's own HTTP API, but what a
+	// hub or CLI caller sees differs by which endpoint triggered it:
+	//   - delete: the hub re-codes this broker's 409 as its own generic
+	//     "conflict" error (pkg/hub/handlers_agents_core.go, the
+	//     errors.As(err, &se) && se.StatusCode == http.StatusConflict check
+	//     around its DispatchAgentDelete call), so a caller sees this code's
+	//     message text, not the code itself;
+	//   - stop: the hub's stop dispatch (pkg/hub/handlers_agent_lifecycle.go,
+	//     the AgentActionStop case) has no equivalent check — every
+	//     DispatchAgentStop error, this one included, becomes a generic 502
+	//     "runtime_error" before the CLI sees it, so this 409 is not even
+	//     distinguishable as a conflict there today.
+	// Either way this constant lets broker-level callers and tests branch on
+	// it, not (yet) the hub or the CLI.
+	ErrCodeAgentIdentityUnknown = "agent_identity_unknown"
 
 	// ErrCodeRuntimeLogsUnsupported marks a logs request that a runtime
 	// declines to serve at all, rather than one that failed. The broker uses
@@ -136,6 +158,16 @@ func Conflict(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusConflict, ErrCodeConflict, message, nil)
 }
 
+// AgentIdentityUnknown writes a 409 Conflict response with the stable
+// ErrCodeAgentIdentityUnknown code for a delete/stop that a runtime process
+// restart made impossible to verify as safe. message must stay generic —
+// it must not name any runtime-specific scope (e.g. a namespace) or point
+// at a runtime-specific document; a caller's own log line carries those
+// details instead (see agentIdentityUnknownError).
+func AgentIdentityUnknown(w http.ResponseWriter, message string) {
+	writeError(w, http.StatusConflict, ErrCodeAgentIdentityUnknown, message, nil)
+}
+
 // RuntimeLogsUnsupported writes a 501 Not Implemented response with the
 // stable ErrCodeRuntimeLogsUnsupported code for a runtime that declines to
 // serve logs at all (pkg/runtime.ErrLogsNotSupported). message must not
@@ -164,6 +196,76 @@ func InternalError(w http.ResponseWriter) {
 // RuntimeError writes a 500 error for runtime failures.
 func RuntimeError(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, message, nil)
+}
+
+// OpaqueError wraps a runtime-op failure (a container/pod runtime backend —
+// Docker, Podman, Kubernetes, substrate — declining a lifecycle operation)
+// with a fixed, identity-free message: Error() never returns the wrapped
+// error's own text, since a real backend error routinely embeds a
+// container ID, pod name, namespace, node name, image reference, or file
+// path — internal infrastructure identity a broker client has no
+// entitlement to see, whether or not it's authorized for the agent itself.
+// The wrapped error stays reachable via Unwrap for server-side telemetry
+// (span.SetStatus) and logging, neither of which is the HTTP response
+// body.
+type OpaqueError struct {
+	msg string
+	err error
+}
+
+// NewOpaqueError returns an OpaqueError whose Error() is exactly msg,
+// wrapping err for telemetry/logging only.
+func NewOpaqueError(msg string, err error) *OpaqueError {
+	return &OpaqueError{msg: msg, err: err}
+}
+
+func (e *OpaqueError) Error() string { return e.msg }
+func (e *OpaqueError) Unwrap() error { return e.err }
+
+// runtimeOpError builds the OpaqueError a broker runtime-op handler
+// (start, stop, restart, delete, exec, message, logs, list) writes to its
+// client on failure: op names the operation in the fixed message (e.g.
+// "stop agent", "list agents"), never anything about the specific agent,
+// runtime, or backend involved. writeRuntimeOpError is the preferred caller
+// for this; createAgent, the start/restart Manager.Start failure branches,
+// and the stop handler's record-less-probe branch (handlers.go) call
+// runtimeOpError/RuntimeError directly instead, each with its own inline
+// log call (and, for create/start, its own span.SetStatus) rather than
+// going through writeRuntimeOpError — raw err still always reaches the
+// log on every path, just not through this one function.
+func runtimeOpError(op string, err error) *OpaqueError {
+	return NewOpaqueError(fmt.Sprintf("Failed to %s", op), err)
+}
+
+// writeRuntimeOpError is the call most runtime-op handlers (stop, restart,
+// delete, exec, message, logs, list) make on failure: it logs err
+// at scope op (plus any extra key/value pairs the caller has on hand — an
+// agent or project ID, for instance) via s.agentLifecycleLog, records err on
+// ctx's active span (trace.SpanFromContext(ctx) is a documented no-op when
+// ctx carries none, so this is always safe to call), and writes the fixed,
+// identity-free response body runtimeOpError builds.
+//
+// Not every runtime-op failure path routes through this one call — see
+// runtimeOpError's own doc comment for the create/start/restart/stop sites
+// that log and (mostly) set span status inline instead — but every one of
+// them still logs err before building the fixed response body, so err
+// always reaches the server's own log, never just the client's opaque
+// "Failed to <op>" message.
+//
+// Never call this with a *startContextError: that type carries its own
+// curated Status/Message from buildStartContext (a template/config
+// problem, not runtime topology) and must go through
+// writeStartContextError instead — routing it through runtimeOpError's
+// fixed "Failed to <op>" message would discard a message that was already
+// safe to show the caller verbatim.
+func (s *Server) writeRuntimeOpError(w http.ResponseWriter, ctx context.Context, op string, err error, extra ...any) {
+	args := make([]any, 0, len(extra)+2)
+	args = append(args, "op", op)
+	args = append(args, extra...)
+	args = append(args, "error", err)
+	s.agentLifecycleLog.Error("runtime op failed", args...)
+	trace.SpanFromContext(ctx).SetStatus(codes.Error, err.Error())
+	RuntimeError(w, runtimeOpError(op, err).Error())
 }
 
 // RuntimeUnavailable writes a 503 error for a transient container-runtime
@@ -288,22 +390,37 @@ func SkillResolutionFailed(w http.ResponseWriter, err *agent.SkillResolutionErro
 // hardcoding one.
 //
 // A Hub-connectivity failure (IsHubError) keeps its existing, more specific
-// handling — a retryable 503 hub_unreachable, or a 500 template_error for
-// any other hydration failure — ahead of the generic Status check; neither
-// of those was the 500-collapsing bug this helper fixes. err need not be a
-// *startContextError at all (any error buildStartContext could return,
-// including ones from other call sites in this package): a plain error
-// still gets the pre-existing generic 500 behavior.
+// handling — a retryable 503 hub_unreachable, or a redacted 500
+// template_error for any other hydration failure — ahead of the generic
+// Status check; neither of those was the 500-collapsing bug this helper
+// fixes. err need not be a *startContextError at all (any error
+// buildStartContext could return, including ones from other call sites in
+// this package): a plain error still gets the pre-existing generic 500
+// behavior.
 //
 // Any 4xx Status — not just exactly 400 — is treated as a client-caused
 // validation failure: buildStartContext only ever sets Status to a value it
 // means as a client error, so collapsing just one 4xx (400) into the generic
 // 500 path while honoring others would be an arbitrary distinction, not a
-// deliberate one.
-func writeStartContextError(w http.ResponseWriter, err error) int {
+// deliberate one. sce.Message is written to the client verbatim here (never
+// through runtimeOpError's redaction) since buildStartContext composes it
+// itself as client-safe text for exactly this case.
+//
+// Every other path writes a client-safe, op-labeled message built by
+// runtimeOpError (see its own doc comment for why) instead of err's own
+// text, which can carry a container ID, pod name, namespace, node name,
+// image reference, or file path a broker client has no entitlement to see —
+// template hydration's own error text is no exception (it can carry a
+// template path or a storage bucket/object name). Each such path logs the
+// real error server-side first (preferring a *startContextError's
+// OriginalErr, the actual underlying failure, over its own curated Message)
+// so the detail reaches the broker's own diagnostics before being redacted
+// out of the response body.
+func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op string) int {
 	sce, ok := err.(*startContextError)
 	if !ok {
-		RuntimeError(w, err.Error())
+		s.agentLifecycleLog.Warn("buildStartContext failed", "op", op, "error", err)
+		RuntimeError(w, runtimeOpError(op, err).Error())
 		return http.StatusInternalServerError
 	}
 	if sce.IsHubError {
@@ -311,13 +428,47 @@ func writeStartContextError(w http.ResponseWriter, err error) int {
 			HubUnreachableError(w, sce.OriginalErr.Error())
 			return http.StatusServiceUnavailable
 		}
-		TemplateError(w, err.Error())
+		s.agentLifecycleLog.Warn("buildStartContext failed", "op", op, "error", startContextDiagnostic(sce))
+		TemplateError(w, runtimeOpError(op, err).Error())
 		return http.StatusInternalServerError
 	}
 	if sce.Status >= 400 && sce.Status < 500 {
 		writeError(w, sce.Status, ErrCodeValidationError, sce.Message, nil)
 		return sce.Status
 	}
-	RuntimeError(w, err.Error())
+	s.agentLifecycleLog.Warn("buildStartContext failed", "op", op, "error", startContextDiagnostic(sce))
+	RuntimeError(w, runtimeOpError(op, err).Error())
 	return http.StatusInternalServerError
+}
+
+// startContextDiagnostic returns the real, underlying error a
+// *startContextError's own Message may have been built from: its
+// OriginalErr when set (the actual failure buildStartContext composed
+// Message around), or sce itself when OriginalErr is nil (Message IS the
+// whole story — e.g. an unpinned image or an unrecognized GCP metadata
+// mode — so there is nothing more specific to log). Used so a server-side
+// log line records the real detail, not just the client-safe Message the
+// caller is about to redact out of the response body.
+func startContextDiagnostic(sce *startContextError) error {
+	if sce.OriginalErr != nil {
+		return sce.OriginalErr
+	}
+	return sce
+}
+
+// startContextSpanText is startContextDiagnostic's counterpart for a span
+// status message, callable with buildStartContext's raw, not-yet-type-
+// asserted return value: a caller recording err on an OTEL span via
+// span.SetStatus(codes.Error, err.Error()) would otherwise record a
+// *startContextError's own curated, client-safe Message (that type's
+// Error() method returns Message verbatim) on an internal diagnostics
+// surface that should carry the real failure instead — spans are never
+// shown to the broker's own caller the way the HTTP response body is. When
+// err is not a *startContextError at all, its own Error() text is already
+// the real detail, so it passes through unchanged.
+func startContextSpanText(err error) string {
+	if sce, ok := err.(*startContextError); ok {
+		return startContextDiagnostic(sce).Error()
+	}
+	return err.Error()
 }

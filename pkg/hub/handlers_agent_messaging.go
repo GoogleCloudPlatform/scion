@@ -947,8 +947,9 @@ func (s *Server) checkDirectThreadIDMatchesDMKey(w http.ResponseWriter, conversa
 
 // handleAgentOutboundMessage handles POST /api/v1/agents/{id}/outbound-message.
 // Agents use this to send messages to human inboxes. Authenticated via agent
-// token (self-access only). The recipient defaults to the agent's creator when
-// not explicitly specified.
+// token (self-access only). An explicit addressee is required — a recipient,
+// recipient_id, or conversation_ref; there is no default recipient, and a
+// request naming none is rejected with 400 (see resolveOutboundRouting).
 func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Request, id string) {
 	ctx := r.Context()
 
@@ -1139,7 +1140,12 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		CreatedAt:      time.Now(),
 	}
 
+	// ptone/scion#2100: stamp Version and the row's CreatedAt (RFC3339 UTC)
+	// so observers and the legacy envelope see real values, as
+	// ExecuteAgentDM does.
 	structuredMsg := &messages.StructuredMessage{
+		Version:              messages.Version,
+		Timestamp:            storeMsg.CreatedAt.UTC().Format(time.RFC3339),
 		Sender:               storeMsg.Sender,
 		SenderID:             storeMsg.SenderID,
 		Recipient:            storeMsg.Recipient,
@@ -1474,7 +1480,10 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 
 	s.events.PublishAgentCreated(ctx, agent)
 
-	writeJSON(w, http.StatusOK, agent.ToAPI())
+	// Answer with the same enriched shape as GET /agents/{id}, so the
+	// restored agent carries its deletion view (null) and project/broker
+	// names like every other agent response.
+	s.writeAgentGetResponse(w, r, agent)
 }
 
 // MessageRequest is the request body for sending a message to an agent.
@@ -1567,17 +1576,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			}
 			structuredMsg.Sender = "agent:" + senderSlug
 		}
-		// Default version, timestamp and type when the client omits them
-		// (e.g. the web UI sends a minimal structured_message).
-		if structuredMsg.Version == 0 {
-			structuredMsg.Version = messages.Version
-		}
-		if structuredMsg.Timestamp == "" {
-			structuredMsg.Timestamp = time.Now().UTC().Format(time.RFC3339)
-		}
-		if structuredMsg.Type == "" {
-			structuredMsg.Type = messages.TypeInstruction
-		}
+		defaultInboundStructured(structuredMsg)
 		messaging.RecordStep(ctx, "sender_identity_extracted")
 	} else if req.Message != "" {
 		plainMessage = req.Message
@@ -2558,7 +2557,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		if isManagedAgentRuntime(agent.Runtime) {
 			if err := s.managedAgentMessage(ctx, agent, plainMessage, req.Interrupt); err != nil {
 				if persistedMsgID != "" {
-					if markErr := s.store.MarkMessageFailed(ctx, persistedMsgID, err.Error()); markErr != nil {
+					if markErr := s.markFailed(ctx, persistedMsgID, err.Error()); markErr != nil {
 						s.messageLog.Error("Failed to mark message as failed", "id", persistedMsgID, "error", markErr)
 					}
 				}
@@ -2572,7 +2571,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				Phase:    agent.Phase,
 				Activity: agent.Activity,
 			})
-			s.events.PublishAgentStatus(ctx, agent)
+			// Publish from a re-read: a delete that claimed the row meanwhile
+			// must not be painted over (design ptone/scion#2483 note F).
+			s.publishAgentStatusFresh(ctx, agent)
 
 			// B11/B13: reflect persistence failure in the response status.
 			// The request still succeeds (dispatch worked), but the caller
@@ -2594,12 +2595,20 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			}
 
 			// Synchronous delivery with 30s retry deadline for transient broker failures.
-			retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
+			// ptone/scion#1839: carry the persisted message ID so a broker
+			// that accepts (buffers) the message and later fails to flush it
+			// can report the failure back against this row, as the
+			// agent-to-agent (ExecuteAgentDM) and web chat paths do.
+			dispatchCtx := ctx
+			if persistedMsgID != "" {
+				dispatchCtx = withDispatchMessageID(ctx, persistedMsgID)
+			}
+			retryCtx, retryCancel := context.WithTimeout(dispatchCtx, 30*time.Second)
 			defer retryCancel()
 
 			if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, dispatchMsg.Msg, req.Interrupt, dispatchMsg); err != nil {
 				if persistedMsgID != "" {
-					if markErr := s.store.MarkMessageFailed(ctx, persistedMsgID, err.Error()); markErr != nil {
+					if markErr := s.markFailed(ctx, persistedMsgID, err.Error()); markErr != nil {
 						s.messageLog.Error("Failed to mark message as failed", "id", persistedMsgID, "error", markErr)
 					}
 				}
@@ -2610,6 +2619,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 					// container: a state conflict, not a broker failure.
 					writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
 						"Agent has no running container; the message was not delivered", nil)
+				} else if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
+					// Written: the agent's runtime is not available on its
+					// broker right now, a retryable 503 (ptone/scion#2748).
+					s.messageLog.Warn("Message not delivered: agent's runtime not available on broker",
+						"agent_id", agent.ID, "runtime", agent.Runtime)
 				} else if req.Wake {
 					RuntimeError(w, "Agent resumed successfully but message delivery failed: "+err.Error())
 				} else {
@@ -2863,6 +2877,35 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				recipDispatchState = store.MessageDispatchDeferred
 			}
 
+			// ptone/scion#1839: per-member deliverability gate, mirroring
+			// the phase gate on direct sends (handleAgentMessage,
+			// ExecuteAgentDM, deliverToAgent). A non-running member cannot
+			// receive terminal input; dispatching would leave a
+			// "dispatched" row the broker then silently drops. Evaluated
+			// before the row is built so it is persisted already failed
+			// (one write; the SSE event carries the true state) and stays
+			// visible in history. Deferred (reincarnating) members are
+			// exempt: they are saved for catch-up instead. A missing
+			// dispatcher or runtime broker is known here too, so those rows
+			// are also persisted already failed rather than published as
+			// "dispatched" and marked failed afterwards. All reasons are
+			// hub-generated, so they are safe to return to the caller.
+			var gateReason *string
+			if !recipDeferred {
+				var reason string
+				if gateErr := validateGroupMemberDeliverable(agent); gateErr != nil {
+					reason = gateErr.Message
+				} else if dispatcher == nil {
+					reason = "dispatcher not available"
+				} else if agent.RuntimeBrokerID == "" {
+					reason = "agent has no runtime broker"
+				}
+				if reason != "" {
+					recipDispatchState = store.MessageDispatchFailed
+					gateReason = &reason
+				}
+			}
+
 			agentMsg := *msg
 			agentMsg.Type = messages.TypeGroupSet
 			agentMsg.Recipient = "agent:" + agent.Slug
@@ -2883,6 +2926,8 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				GroupID:       groupID,
 				DispatchState: recipDispatchState,
 				CreatedAt:     time.Now(),
+
+				DispatchFailureReason: gateReason,
 			}
 			// Phase 5 dual-write: resolve-or-create conversation for group set message.
 			// B5 SECURITY: derive sender from authenticated context, never payload.
@@ -2972,20 +3017,27 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				continue
 			}
 
-			if dispatcher == nil {
-				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "dispatcher not available"}
-				continue
-			}
-			if agent.RuntimeBrokerID == "" {
-				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: "agent has no runtime broker"}
+			// ptone/scion#1839: the row was persisted already failed by the
+			// gate above (phase, no dispatcher, or no runtime broker).
+			if gateReason != nil {
+				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: *gateReason}
 				continue
 			}
 
-			retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
+			// ptone/scion#1839: carry the per-member persisted message ID
+			// (RecipientID = agent.ID, Recipient = "agent:<slug>") so a
+			// post-acceptance broker failure is reported against this row.
+			groupDispatchCtx := ctx
+			if persisted {
+				groupDispatchCtx = withDispatchMessageID(ctx, storeMsg.ID)
+			}
+			retryCtx, retryCancel := context.WithTimeout(groupDispatchCtx, 30*time.Second)
 			if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, plainMessage, interrupt, &agentMsg); err != nil {
 				retryCancel()
-				if markErr := s.store.MarkMessageFailed(ctx, storeMsg.ID, err.Error()); markErr != nil {
-					s.messageLog.Error("Failed to mark set message as failed", "id", storeMsg.ID, "error", markErr)
+				if persisted {
+					if markErr := s.markFailed(ctx, storeMsg.ID, err.Error()); markErr != nil {
+						s.messageLog.Error("Failed to mark set message as failed", "id", storeMsg.ID, "error", markErr)
+					}
 				}
 				results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "failed", Error: err.Error()}
 				continue
@@ -3292,6 +3344,10 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 	// running agent.
 	req.StructuredMessage.Broadcasted = true
 
+	// ptone/scion#2100: fill what a minimal client payload omits, as
+	// handleAgentMessage does.
+	defaultInboundStructured(req.StructuredMessage)
+
 	// Use authenticated identity for self-skip, not the Sender field.
 	// The Sender field is a display label; the auth identity is the
 	// security-relevant identity. A forged Sender could change which
@@ -3451,7 +3507,9 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 			DispatchState: store.MessageDispatchDispatched,
 			CreatedAt:     time.Now(),
 		}
+		persisted := true
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
+			persisted = false
 			s.messageLog.Error("Failed to persist broadcast message", "agent_id", agent.ID, "error", err)
 		}
 
@@ -3467,7 +3525,15 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 			})
 		}
 
-		retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
+		// ptone/scion#1839: carry the per-agent persisted message ID
+		// (RecipientID = agent.ID) so a post-acceptance broker failure is
+		// reported against this row. Only when the row exists — an ID with
+		// no row would point the broker's report at nothing.
+		broadcastDispatchCtx := ctx
+		if persisted {
+			broadcastDispatchCtx = withDispatchMessageID(ctx, storeMsg.ID)
+		}
+		retryCtx, retryCancel := context.WithTimeout(broadcastDispatchCtx, 30*time.Second)
 		dispatchErr := dispatchWithBrokerRetry(retryCtx, dispatcher, &agent, agentMsg.Msg, interrupt, &agentMsg)
 		retryCancel()
 
@@ -3475,13 +3541,31 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 			s.messageLog.Error("Failed to deliver broadcast message to agent",
 				"agent_id", agent.ID,
 				"agentSlug", agent.Slug, "error", dispatchErr)
-			if markErr := s.store.MarkMessageFailed(ctx, storeMsg.ID, dispatchErr.Error()); markErr != nil {
-				s.messageLog.Error("Failed to mark broadcast message as failed", "id", storeMsg.ID, "error", markErr)
+			if persisted {
+				if markErr := s.markFailed(ctx, storeMsg.ID, dispatchErr.Error()); markErr != nil {
+					s.messageLog.Error("Failed to mark broadcast message as failed", "id", storeMsg.ID, "error", markErr)
+				}
 			}
 			s.publishBroadcastDeliveryFailed(ctx, &agent, &agentMsg, dispatchErr)
 		}
 	}
 	return true
+}
+
+// defaultInboundStructured fills Version, Timestamp (RFC3339 UTC) and Type
+// when a client-supplied structured message omits them (e.g. the web UI
+// sends a minimal structured_message), so everything the hub publishes
+// carries them (ptone/scion#2100). Client-supplied values are kept.
+func defaultInboundStructured(msg *messages.StructuredMessage) {
+	if msg.Version == 0 {
+		msg.Version = messages.Version
+	}
+	if msg.Timestamp == "" {
+		msg.Timestamp = time.Now().UTC().Format(time.RFC3339)
+	}
+	if msg.Type == "" {
+		msg.Type = messages.TypeInstruction
+	}
 }
 
 // publishBroadcastDeliveryFailed publishes a DELIVERY_FAILED notification to the
@@ -3490,21 +3574,24 @@ func (s *Server) publishBroadcastDeliveryFailed(ctx context.Context, targetAgent
 	if !strings.HasPrefix(msg.Sender, "agent:") || msg.SenderID == "" {
 		return
 	}
+	// ptone/scion#1838: detach from the (possibly expired/cancelled)
+	// dispatch ctx, as publishDeliveryFailed does, with the notice budget
+	// (deliveryNoticeTimeout) since the notice itself goes via the broker.
+	ctx, cancel := detachedContext(ctx, deliveryNoticeTimeout)
+	defer cancel()
 	senderAgent, err := s.store.GetAgent(ctx, msg.SenderID)
 	if err != nil {
 		return
 	}
 
-	failMsg := fmt.Sprintf("Broadcast delivery failed to agent %q: %v", targetAgent.Slug, deliveryErr)
-	structuredMsg := &messages.StructuredMessage{
-		Sender:      "system",
-		Recipient:   msg.Sender,
-		RecipientID: senderAgent.ID,
-		Msg:         failMsg,
-		Type:        messages.TypeSystem,
-		Status:      "DELIVERY_FAILED",
-		Metadata:    map[string]string{"system_category": messages.SystemCategoryDeliveryFailed},
+	// ptone/scion#1841: sanitize the (possibly broker-supplied) error text
+	// before it reaches the sender's terminal, as publishDeliveryFailed does.
+	reason := "unknown error"
+	if deliveryErr != nil {
+		reason = sanitizeFailureReason(deliveryErr.Error())
 	}
+	failMsg := fmt.Sprintf("Broadcast delivery failed to agent %q: %s", targetAgent.Slug, reason)
+	structuredMsg := newDeliveryNotice(msg.Sender, senderAgent.ID, failMsg, "DELIVERY_FAILED", messages.SystemCategoryDeliveryFailed)
 
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
@@ -3553,18 +3640,29 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 	// function's behaviour does not depend on caller discipline.
 	originalMsg.Metadata = messaging.StripReservedMetadata(originalMsg.Metadata)
 
-	// List project agents for resolution.
-	agentList, err := s.store.ListAgents(ctx, store.AgentFilter{ProjectID: primaryAgent.ProjectID}, store.ListOptions{Limit: 200})
+	// List every project agent for resolution, walking all pages so a
+	// mention of an agent beyond the first page still resolves.
+	projectAgents, err := listAllProjectAgents(ctx, s.store, primaryAgent.ProjectID)
 	if err != nil {
-		s.messageLog.Error("Failed to list project agents for mention resolution", "error", err)
-		return nil
+		// Report every mention as failed rather than dropping them: the
+		// caller must be able to tell "lookup failed" from "no such agent".
+		s.messageLog.Error("Failed to list project agents for mention resolution",
+			"project_id", primaryAgent.ProjectID, "error", err)
+		// With no known agents, ResolveMentions applies its usual
+		// de-duplication and primary-recipient skip and reports every
+		// remaining mention as not_found; relabel those as errors.
+		failed := messages.ResolveMentions(mentionSlugs, nil, primaryAgent.Slug)
+		for i := range failed {
+			failed[i].Status, failed[i].Error = "error", "mention resolution unavailable"
+		}
+		return failed
 	}
 
 	// Build the AgentInfo slice and a slug-to-agent map for dispatch.
-	agentInfos := make([]messages.AgentInfo, 0, len(agentList.Items))
-	agentBySlug := make(map[string]*store.Agent, len(agentList.Items))
-	for i := range agentList.Items {
-		a := &agentList.Items[i]
+	agentInfos := make([]messages.AgentInfo, 0, len(projectAgents))
+	agentBySlug := make(map[string]*store.Agent, len(projectAgents))
+	for i := range projectAgents {
+		a := &projectAgents[i]
 		agentInfos = append(agentInfos, messages.AgentInfo{Slug: a.Slug, Name: a.Name})
 		agentBySlug[strings.ToLower(a.Slug)] = a
 	}
@@ -3746,7 +3844,14 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		}
 
 		// Per-dispatch timeout is the lesser of 10s or the remaining aggregate budget.
-		dispatchCtx, cancel := context.WithTimeout(aggregateCtx, 10*time.Second)
+		// ptone/scion#1839: carry the persisted mention row's ID
+		// (RecipientID = mentionAgent.ID) so a post-acceptance broker
+		// failure is reported against it.
+		mentionDispatchParent := aggregateCtx
+		if persisted {
+			mentionDispatchParent = withDispatchMessageID(aggregateCtx, storeMsg.ID)
+		}
+		dispatchCtx, cancel := context.WithTimeout(mentionDispatchParent, 10*time.Second)
 		if dispatchErr := dispatchWithBrokerRetry(dispatchCtx, dispatcher, mentionAgent, mentionMsg.Msg, false, mentionMsg); dispatchErr != nil {
 			cancel()
 			if aggregateCtx.Err() != nil {
@@ -3757,7 +3862,7 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 				results[i].Error = "dispatch failed: " + dispatchErr.Error()
 			}
 			if persisted {
-				if markErr := s.store.MarkMessageFailed(ctx, storeMsg.ID, dispatchErr.Error()); markErr != nil {
+				if markErr := s.markFailed(ctx, storeMsg.ID, dispatchErr.Error()); markErr != nil {
 					s.messageLog.Error("Failed to mark mention message as failed", "id", storeMsg.ID, "error", markErr)
 				}
 			}

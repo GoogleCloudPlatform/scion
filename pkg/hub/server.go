@@ -469,8 +469,10 @@ func (s *Server) agentSecretsUserScopeOnly() bool {
 // Implementations may be local (co-located hub+broker) or remote (HTTP-based).
 type AgentDispatcher interface {
 	// DispatchAgentCreate creates and starts an agent on the runtime broker.
-	// Returns the updated agent info after creation/start.
-	DispatchAgentCreate(ctx context.Context, agent *store.Agent) error
+	// It updates agent in place from the broker's answer. A non-nil result
+	// with Launch set means the broker accepted the create for asynchronous
+	// launch (see CreateDispatchResult).
+	DispatchAgentCreate(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error)
 
 	// DispatchAgentProvision provisions an agent on the runtime broker without starting it.
 	// This sets up directories, worktree, templates, and settings but does not launch the container.
@@ -521,12 +523,15 @@ type AgentDispatcher interface {
 	DispatchCheckAgentPrompt(ctx context.Context, agent *store.Agent) (bool, error)
 
 	// DispatchAgentCreateWithGather creates an agent with env-gather support.
-	// If the broker returns 202 with env requirements, it returns the requirements
-	// instead of an error. The second return value is non-nil when gather is needed.
-	DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error)
+	// If the broker returns 202 with env requirements, the result carries them
+	// in EnvReqs instead of an error. Launch is set when the broker accepted
+	// the create for asynchronous launch.
+	DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error)
 
 	// DispatchFinalizeEnv sends gathered env vars to the broker to complete agent creation.
-	DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) error
+	// Launch is set in the result when the broker accepted the create for
+	// asynchronous launch.
+	DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) (*CreateDispatchResult, error)
 }
 
 // WorkspaceDispatchSpec carries the inputs a broker needs to recreate an
@@ -576,6 +581,9 @@ type StartExtras struct {
 	ProvisionCredentials map[string]string
 	PreResolvedSkills    *ResolveSkillsResponse
 	Workspace            WorkspaceDispatchSpec
+	// HubAgentDefaults carries the hub defaults a start applies at the
+	// broker's lowest tier (see startHubAgentDefaults). Nil = none.
+	HubAgentDefaults *RemoteHubAgentDefaults
 }
 
 // applyStartExtras writes extras onto payload as flat top-level wire keys.
@@ -604,6 +612,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.Workspace.WorkspaceMode != "" {
 		payload["workspaceMode"] = extras.Workspace.WorkspaceMode
+	}
+	if extras.HubAgentDefaults != nil {
+		payload["hubAgentDefaults"] = extras.HubAgentDefaults
 	}
 }
 
@@ -646,7 +657,7 @@ type RuntimeBrokerClient interface {
 	// ResetAuthAgent injects a fresh auth token into a running agent without restarting it.
 	// brokerID is used for HMAC authentication lookup.
 	// projectID scopes the lookup to a specific project (required for uniqueness).
-	ResetAuthAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, token string) error
+	ResetAuthAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, token, transportToken string) error
 
 	// DeleteAgent deletes an agent from a remote runtime broker.
 	// brokerID is used for HMAC authentication lookup.
@@ -728,6 +739,14 @@ type RemoteCreateAgentRequest struct {
 	// catalog rather than reused (`scion reincarnate`, design §3.4). See
 	// runtimebroker.CreateAgentRequest.Reprovision, the wire twin this maps to.
 	Reprovision bool `json:"reprovision,omitempty"`
+	// AsyncLaunch, LaunchID, LaunchTimeoutSeconds and LaunchKeepaliveSeconds
+	// mirror runtimebroker.CreateAgentRequest's async launch fields. They are
+	// set only by dispatchLaunching. LaunchTimeoutSeconds is the remaining
+	// launch budget at send time.
+	AsyncLaunch            bool   `json:"asyncLaunch,omitempty"`
+	LaunchID               string `json:"launchId,omitempty"`
+	LaunchTimeoutSeconds   int    `json:"launchTimeoutSeconds,omitempty"`
+	LaunchKeepaliveSeconds int    `json:"launchKeepaliveSeconds,omitempty"`
 	// ProjectPath is the local filesystem path to the project on the target runtime broker.
 	// This is looked up from the project provider record for the target broker.
 	ProjectPath string `json:"projectPath,omitempty"`
@@ -855,7 +874,8 @@ type RemoteAgentConfig struct {
 }
 
 // RemoteHubAgentDefaults carries the four limit/resource operational
-// agent_defaults from the hub to a runtime broker.
+// agent_defaults, plus the auto-expose-ports default, from the hub to a
+// runtime broker.
 //
 // Only the fields that need no hub-side resolution travel here.
 // default_template and default_harness_config are absent by design: the hub
@@ -871,10 +891,11 @@ type RemoteAgentConfig struct {
 // the broker decodes into; TestRemoteHubAgentDefaults_WireCompatibleWithBroker
 // pins that.
 type RemoteHubAgentDefaults struct {
-	MaxTurns      int               `json:"maxTurns,omitempty"`
-	MaxModelCalls int               `json:"maxModelCalls,omitempty"`
-	MaxDuration   string            `json:"maxDuration,omitempty"`
-	Resources     *api.ResourceSpec `json:"resources,omitempty"`
+	MaxTurns        int               `json:"maxTurns,omitempty"`
+	MaxModelCalls   int               `json:"maxModelCalls,omitempty"`
+	MaxDuration     string            `json:"maxDuration,omitempty"`
+	Resources       *api.ResourceSpec `json:"resources,omitempty"`
+	AutoExposePorts *bool             `json:"autoExposePorts,omitempty"`
 }
 
 // RemoteGCPIdentityConfig holds GCP identity configuration sent from Hub to Broker.
@@ -903,6 +924,15 @@ type RemoteAgentResponse struct {
 	// an old broker has no such field and silently ran a plain Provision
 	// instead, which must not be reported as reincarnate success.
 	Reprovisioned bool `json:"reprovisioned,omitempty"`
+
+	// LaunchPending, LaunchID and LaunchInstanceID mirror
+	// runtimebroker.CreateAgentResponse's async launch echo. LaunchPending
+	// with a LaunchID equal to the request's means the broker accepted the
+	// create for asynchronous launch; LaunchInstanceID is the broker process
+	// that owns it.
+	LaunchPending    bool   `json:"launchPending,omitempty"`
+	LaunchID         string `json:"launchId,omitempty"`
+	LaunchInstanceID string `json:"launchInstanceId,omitempty"`
 }
 
 // RemoteEnvRequirementsResponse is returned by the broker when env gather is needed.
@@ -1689,6 +1719,7 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	// gates whether this server currently admits dev_local authority at
 	// all. See devLocalAuthorityEnabled's doc comment (devauth.go).
 	srv.authzService.setDevLocalAuthorityEnabled(cfg.DevAuthToken != "")
+	srv.authzService.mintDevAuthOverride = cfg.DevAuthToken != ""
 
 	// Wire decision audit emitter
 	auditEmitter := NewStoreDecisionAuditEmitter(s, logging.Subsystem("hub.decision-audit"))
@@ -3482,9 +3513,10 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// is then omitted and broker behaviour is unchanged.
 	dispatcher.SetHubAgentDefaultsProvider(s.hubAgentDefaults)
 
-	// Wire profile timezone provider so dispatch can inject TZ from the
-	// profile's first-class timezone field into agent containers.
-	dispatcher.SetProfileTimezoneProvider(s.profileTimezone)
+	// Wire the async agent launch settings. They are static after startup;
+	// the accessor reads them under s.mu.
+	dispatcher.SetAsyncLaunchSettingsProvider(s.asyncLaunchSettings)
+	dispatcher.SetAutoExposePortsDefaultProvider(s.autoExposePortsDefault)
 
 	// Set image registry so bare image names are rewritten before dispatch
 	dispatcher.SetImageRegistry(s.resolveImageRegistry())
@@ -3498,6 +3530,10 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 // Dev-auth mode overrides to full if the role would be more restrictive,
 // preserving dev-mode behavior where all agents get full access.
 // Additional scopes are merged with the role-based defaults, deduplicated.
+//
+// It applies no delegation ceiling and has no production caller: every mint
+// and refresh site calls GenerateAgentTokenForAgent. It serves test helpers
+// (TestAllMintSitesUseCeiledHelper pins this).
 func (s *Server) GenerateAgentToken(agentID, projectID string, ancestry []string, role AgentRole, additionalScopes []AgentTokenScope) (string, error) {
 	s.mu.RLock()
 	tokenService := s.agentTokenService
@@ -3644,10 +3680,29 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 				endLifecycleOp()
 				continue
 			}
+		}
+		priorIntent, intentAt, err := s.swapRunIntent(ctx, agent, store.RunIntentStopped)
+		if err != nil {
+			slog.Error("Scheduler: auto-suspend intent write failed",
+				"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
+			endLifecycleOp()
+			continue
+		}
+		if agent.RuntimeBrokerID != "" {
 			s.syncWorkspaceOnStop(ctx, agent)
 			if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
 				slog.Error("Scheduler: auto-suspend dispatch failed",
 					"agent_id", agent.ID, "agent_name", agent.Name, "error", err)
+				// This stop was the system's, not the user's: if it
+				// replaced a running intent, put that back unless something
+				// newer replaced it. A prior stopped intent (for example a
+				// user stop whose dispatch also failed) stays stopped.
+				if priorIntent == store.RunIntentRunning {
+					if _, rerr := s.store.RevertRunIntent(ctx, agent.ID, store.RunIntentStopped, intentAt, store.RunIntentRunning); rerr != nil {
+						slog.Error("Scheduler: auto-suspend intent revert failed",
+							"agent_id", agent.ID, "agent_name", agent.Name, "error", rerr)
+					}
+				}
 				endLifecycleOp()
 				continue
 			}
@@ -3658,7 +3713,7 @@ func (s *Server) autoSuspendStalledAgents(ctx context.Context, agents []store.Ag
 			ContainerStatus: "stopped",
 			Activity:        "",
 		}
-		err := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate)
+		err = s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate)
 		endLifecycleOp()
 		if err != nil {
 			slog.Error("Scheduler: auto-suspend status update failed",
@@ -3740,7 +3795,7 @@ func (s *Server) messageEventHandler() EventHandler {
 				"eventID", evt.ID,
 				"agentName", payload.AgentName,
 				"agent_id", payload.AgentID,
-				"scheduledFor", evt.FireAt.Format(time.RFC3339),
+				"scheduledFor", evt.FireAt.UTC().Format(time.RFC3339),
 				"staleness", staleness.Truncate(time.Second).String())
 		}
 
@@ -4187,7 +4242,7 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			slog.Warn("Scheduler: firing stale dispatch_agent event",
 				"eventID", evt.ID,
 				"agentName", payload.AgentName,
-				"scheduledFor", evt.FireAt.Format(time.RFC3339),
+				"scheduledFor", evt.FireAt.UTC().Format(time.RFC3339),
 				"staleness", staleness.Truncate(time.Second).String())
 		}
 
@@ -4395,6 +4450,11 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		// agent-create path. See deriveAgentConfig.
 		s.deriveAgentConfig(ctx, agent, project, tmpl)
 
+		// Scheduled creates have no waiting client, so they opt in to
+		// asynchronous launch server-side. It only takes effect when
+		// hub.asyncAgentLaunch is on.
+		agent.LaunchAsyncOptIn = true
+
 		if err := s.createAgentWithIdentityKey(ctx, agent, slug); err != nil {
 			return fmt.Errorf("failed to create agent %q: %w", slug, err)
 		}
@@ -4468,7 +4528,11 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 			return nil
 		}
 
-		if err := dispatcher.DispatchAgentCreate(ctx, agent); err != nil {
+		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
+			return fmt.Errorf("failed to dispatch agent %q: %w", slug, err)
+		}
+		created, err := dispatcher.DispatchAgentCreate(ctx, agent)
+		if err != nil {
 			slog.Error("Scheduler: failed to dispatch agent creation",
 				"eventID", evt.ID,
 				"agent_id", agent.ID,
@@ -4477,6 +4541,14 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 				"executor_kind", dispatchExecutor.Kind,
 				"executor_id", dispatchExecutor.ID)
 			return fmt.Errorf("failed to dispatch agent %q: %w", slug, err)
+		}
+		if created.AcceptedLaunch() != nil {
+			// The row is already provisioning; persist the non-status
+			// fields from the dispatch.
+			if _, err := s.persistAcceptedLaunch(ctx, agent); err != nil {
+				slog.Warn("Scheduler: failed to persist agent after accepted launch",
+					"eventID", evt.ID, "agent_id", agent.ID, "error", err)
+			}
 		}
 
 		slog.Info("Scheduler: agent dispatched successfully",
@@ -4739,6 +4811,11 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	}
 	s.scheduler = NewScheduler(s.store, logging.Subsystem("hub.scheduler"), schedOpts...)
 	s.registerSchedulerHandlers()
+
+	// Report non-canonical stored timestamps (SQLite). It runs in the
+	// background: on a large store the check is a full scan per time column,
+	// and nothing at start depends on its result.
+	s.startStoredTimestampCheck(ctx)
 
 	// Pause schedules whose cron expression carries an unsupported zone
 	// prefix before the evaluator's first tick, so it never runs them.

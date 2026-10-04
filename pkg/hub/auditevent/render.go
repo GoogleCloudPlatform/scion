@@ -87,7 +87,7 @@ func newRenderSnapshot(event EnvelopeV1) renderSnapshot {
 		serialized: serializedEnvelopeV1{
 			SchemaVersion: snapshotEvent.SchemaVersion,
 			EventID:       snapshotEvent.EventID,
-			OccurredAt:    snapshotEvent.OccurredAt.Format("2006-01-02T15:04:05.999999999Z07:00"),
+			OccurredAt:    snapshotEvent.OccurredAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"),
 			Family:        snapshotEvent.Family,
 			Action:        snapshotEvent.Action,
 			Phase:         snapshotEvent.Phase,

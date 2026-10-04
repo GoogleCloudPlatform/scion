@@ -27,3 +27,10 @@ var ErrEventBusClosed = errors.New("event bus is closed")
 // does not, since nothing else re-delivers or surfaces the loss
 // (ptone/scion#2311).
 var ErrSubscriberBufferFull = errors.New("event bus: subscriber buffer full")
+
+// ErrInProcessPublish wraps a failure of the inprocess spoke inside a
+// FanOutEventBus publish. Callers that need to know whether the hub's own
+// subscribers received a message (as opposed to an external plugin spoke
+// failing) test for it with errors.Is; the underlying cause stays reachable
+// too (e.g. ErrEventBusClosed, ErrSubscriberBufferFull).
+var ErrInProcessPublish = errors.New("inprocess bus publish failed")
