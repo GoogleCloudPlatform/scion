@@ -128,3 +128,81 @@ func TestRemoveNFSWorktree_ProvisionStateDirSymlinkFails(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, provision.IsRealWorktreeDir(provision.WorktreePath(ws, "test-agent"), ws))
 }
+
+// B1: a broker that cannot search the state directory (one the node created
+// and the init container gave to the agents' user and group) falls back to
+// the legacy sentinel, and otherwise leaves the worktree directory to the
+// node instead of failing the create.
+func TestEnsureNFSWorktreeLeaf_StateDirUnreadable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	mountRoot := filepath.Join(t.TempDir(), "nfs")
+	resolved := resolveTestNFSWorkspace(t, mountRoot)
+	require.NoError(t, os.MkdirAll(resolved.HostPath, 0o770))
+	stateDir := provision.ProjectStateDir(resolved.HostPath)
+	require.NoError(t, os.MkdirAll(stateDir, 0o770))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, provision.ProvisionSentinelFile), []byte("x"), 0o644))
+	require.NoError(t, os.Chmod(stateDir, 0))
+	t.Cleanup(func() { _ = os.Chmod(stateDir, 0o770) })
+	rel := resolved.ServerRelativePath
+	hostBase, err := filepath.EvalSymlinks(resolved.HostBase)
+	require.NoError(t, err)
+	wt := filepath.Join(resolved.HostPath, "worktrees", "agent-1")
+
+	_, err = nfsSharedCheckoutProvisioned(hostBase, rel)
+	require.Error(t, err)
+	assert.True(t, isNFSLeafPermissionError(err), "%v", err)
+	ok, err := ensureNFSWorktreeLeaf("kubernetes", resolved, "ws-pv", "agent-1")
+	require.NoError(t, err)
+	assert.False(t, ok, "left to the node")
+	assert.NoDirExists(t, wt)
+
+	// With the legacy sentinel the checkout counts as provisioned.
+	require.NoError(t, os.WriteFile(filepath.Join(resolved.HostPath, provision.ProvisionSentinelFile), []byte("x"), 0o644))
+	provisioned, err := nfsSharedCheckoutProvisioned(hostBase, rel)
+	require.NoError(t, err)
+	assert.True(t, provisioned)
+	ok, err = ensureNFSWorktreeLeaf("kubernetes", resolved, "ws-pv", "agent-1")
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.DirExists(t, wt)
+}
+
+// N1: a broker that may not write in the state directory removes the
+// worktree under the legacy lock only, instead of leaving it in place.
+func TestRemoveNFSWorktree_StateDirNotWritableUsesLegacyLock(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	f, ws := setupNFSWorktreeRemoval(t)
+	runPurgeInline(t)
+	stateDir := provision.ProjectStateDir(ws)
+	require.NoError(t, os.MkdirAll(stateDir, 0o755))
+	require.NoError(t, os.Chmod(stateDir, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(stateDir, 0o755) })
+
+	path, err := kubernetesTestManager("kubernetes").RemoveNFSWorktree(context.Background(), f.projectScionDir, testNFSWorkspaceProjectID, "test-agent")
+	require.NoError(t, err)
+	assert.NoDirExists(t, path)
+	assert.NoDirExists(t, filepath.Join(stateDir, ".scion-provision.lock"))
+	assert.NoDirExists(t, filepath.Join(ws, ".scion-provision.lock"))
+}
+
+// N1: the same when the broker may not create the state directory at all.
+func TestRemoveNFSWorktree_StateDirNotCreatableUsesLegacyLock(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	f, ws := setupNFSWorktreeRemoval(t)
+	runPurgeInline(t)
+	projectDir := filepath.Dir(ws)
+	require.NoError(t, os.RemoveAll(provision.ProjectStateDir(ws)))
+	require.NoError(t, os.Chmod(projectDir, 0o555))
+	t.Cleanup(func() { _ = os.Chmod(projectDir, 0o755) })
+
+	path, err := kubernetesTestManager("kubernetes").RemoveNFSWorktree(context.Background(), f.projectScionDir, testNFSWorkspaceProjectID, "test-agent")
+	require.NoError(t, err)
+	assert.NoDirExists(t, path)
+	assert.NoDirExists(t, provision.ProjectStateDir(ws))
+}

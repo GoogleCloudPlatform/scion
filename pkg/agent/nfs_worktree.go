@@ -30,6 +30,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"golang.org/x/sys/unix"
 )
 
 // nfsWorktreeSelection decides whether an agent on the NFS workspace backend
@@ -132,6 +133,17 @@ func ensureNFSWorktreeLeaf(runtimeName string, resolved runtime.ResolvedWorkspac
 	}
 
 	provisioned, err := nfsSharedCheckoutProvisioned(resolvedHostBase, rel)
+	if err != nil && isNFSLeafPermissionError(err) {
+		// The broker cannot look into the state directory (for example one
+		// the node created and the init container gave to the agents' user
+		// and group) and found no legacy sentinel: leave the worktree
+		// directory to the node, as for a directory the broker may not
+		// create.
+		slog.Warn("workspace_storage nfs: the broker could not check whether the shared checkout is provisioned, so the node will create "+
+			"the agent's worktree directory when the pod starts, which requires an export that allows root to create directories (no_root_squash)",
+			"host_base", resolved.HostBase, "sub_path", leaf, "error", err)
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
@@ -160,19 +172,70 @@ func ensureNFSWorktreeLeaf(runtimeName string, resolved runtime.ResolvedWorkspac
 // provisioned: its sentinel is in the project's provisioning state directory
 // (<project>/provision), or, for a workspace provisioned before that
 // directory existed, in the workspace itself. Lstat is used, so a symlink
-// named like the sentinel also counts, as before; any error other than "does
-// not exist" is returned.
+// named like the sentinel also counts, as before.
+//
+// A permission error on the state directory does not end the check: the
+// legacy location is checked next, and the permission error is returned
+// (wrapped, so isNFSLeafPermissionError matches it) only when the sentinel
+// is not found there either. Any other error than "does not exist" is
+// returned straight away.
 func nfsSharedCheckoutProvisioned(hostBase, rel string) (bool, error) {
+	var permErr error
 	for _, dir := range []string{provision.ProjectStateDir(rel), rel} {
 		_, err := os.Lstat(filepath.Join(hostBase, dir, provision.ProvisionSentinelFile))
-		if err == nil {
+		switch {
+		case err == nil:
 			return true, nil
-		}
-		if !errors.Is(err, fs.ErrNotExist) {
+		case errors.Is(err, fs.ErrNotExist):
+		case isNFSLeafPermissionError(err) && permErr == nil:
+			permErr = err
+		default:
 			return false, fmt.Errorf("workspace_storage nfs: check provisioning state of %q: %w", rel, err)
 		}
 	}
+	if permErr != nil {
+		return false, fmt.Errorf("workspace_storage nfs: check provisioning state of %q: %w", rel, permErr)
+	}
 	return false, nil
+}
+
+// nfsRemovalStateDir returns the provisioning state directory whose lock
+// RemoveNFSWorktree takes after the legacy lock in the workspace, the same
+// order as the provisioning init containers. The path is derived the same
+// way as the runtime's mount (runtime.NFSProvisionStateSubPath) and the
+// directory is created like before a pod starts (ensureNFSLeaf, no symlink
+// following).
+//
+// When the broker is not allowed to create, open or write in the directory
+// (a permission error, or no write and search access to an existing one),
+// it returns "" with a warning: the removal then takes only the legacy lock,
+// which every provisioning init container and broker takes first while
+// legacy support exists, so it still excludes them all. A symlink, a
+// regular file or any other unusable path is an error, and the worktree is
+// left in place.
+//
+// TODO(ptone/scion#2974): when the legacy lock is dropped, this fallback
+// must go: the state-directory lock is then the only lock, and a removal
+// that cannot take it must fail.
+func nfsRemovalStateDir(hostBase, rel, projectID string) (string, error) {
+	stateRel, err := runtime.NFSProvisionStateSubPath(rel, projectID)
+	if err != nil {
+		return "", fmt.Errorf("workspace_storage nfs: %w; left in place", err)
+	}
+	stateDir := filepath.Join(hostBase, stateRel)
+	_, err = ensureNFSLeaf(hostBase, stateRel)
+	if err == nil {
+		err = unix.Access(stateDir, unix.W_OK|unix.X_OK)
+	}
+	if err != nil && isNFSLeafPermissionError(err) {
+		slog.Warn("workspace_storage nfs: the broker cannot use the provisioning state directory; removing the worktree under the legacy provisioning lock only",
+			"path", stateDir, "error", err)
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("workspace_storage nfs: prepare the provisioning state directory %q: %w; left in place", stateRel, err)
+	}
+	return stateDir, nil
 }
 
 // nfsWorktreeSubPath is the export-relative path of an agent's worktree:
@@ -306,16 +369,11 @@ func (m *AgentManager) RemoveNFSWorktree(ctx context.Context, projectPath, proje
 		return worktree, fmt.Errorf("workspace_storage nfs: %s is not a plain directory on the export; left in place", filepath.Dir(worktree))
 	}
 
-	// The init containers take the provisioning lock in the project's
-	// provisioning state directory (and the legacy one in the workspace
-	// first): take both, in the same order. The broker creates the state
-	// directory the same way as before a pod starts, so the lock is shared
-	// with the init container.
-	stateRel := provision.ProjectStateDir(rel)
-	if _, err := ensureNFSLeaf(resolvedHostBase, stateRel); err != nil {
-		return worktree, fmt.Errorf("workspace_storage nfs: prepare the provisioning state directory %q: %w; left in place", stateRel, err)
+	stateDir, err := nfsRemovalStateDir(resolvedHostBase, rel, projectID)
+	if err != nil {
+		return worktree, err
 	}
-	if err := provision.RemoveMountedWorktree(ctx, workspace, filepath.Join(resolvedHostBase, stateRel), agentName, nfsWorktreeLockWait); err != nil {
+	if err := provision.RemoveMountedWorktree(ctx, workspace, stateDir, agentName, nfsWorktreeLockWait); err != nil {
 		return worktree, err
 	}
 	purgeRemovedWorktrees(workspace)

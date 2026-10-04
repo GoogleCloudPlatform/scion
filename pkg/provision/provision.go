@@ -401,6 +401,19 @@ func resolveSentinelDir(in ProvisionInput) string {
 	return filepath.Dir(in.Resolved.HostPath)
 }
 
+// SentinelDirs returns the directories ProvisionShared looks in for the
+// sentinel, in order: the sentinel directory (SentinelDir, or the
+// workspace's parent by default), then LegacyDir when set and different.
+// A caller that must agree with ProvisionShared about whether the shared
+// checkout is provisioned checks exactly these (see SentinelPresent).
+func (in ProvisionInput) SentinelDirs() []string {
+	sentinelDir := resolveSentinelDir(in)
+	if legacy := legacyDir(in, sentinelDir); legacy != "" {
+		return []string{sentinelDir, legacy}
+	}
+	return []string{sentinelDir}
+}
+
 // legacyDir returns in.LegacyDir when it names a directory other than
 // sentinelDir, and "" otherwise.
 func legacyDir(in ProvisionInput, sentinelDir string) string {
@@ -411,13 +424,19 @@ func legacyDir(in ProvisionInput, sentinelDir string) string {
 }
 
 // excludeLegacySentinel adds "/.scion-provisioned" to the workspace's git
-// excludes when the sentinel was found in the legacy location inside the
-// workspace (foundDir is the workspace itself), so an existing workspace
-// stops showing it in git status. Best effort: a workspace without a .git
-// directory, or a failed write, is left alone.
-func excludeLegacySentinel(in ProvisionInput, foundDir string) {
+// excludes when the legacy layout is in use (LegacyDir is the workspace) and
+// a sentinel file is in the workspace root, so it does not show in git
+// status. That is checked independently of where the sentinel that ended
+// provisioning was found: a pod running an older sciontool writes the
+// legacy sentinel back into the workspace root even after the state
+// directory has its own. Best effort: a workspace without a .git directory,
+// or a failed write, is left alone.
+func excludeLegacySentinel(in ProvisionInput) {
 	ws := in.Resolved.HostPath
-	if in.LegacyDir == "" || filepath.Clean(foundDir) != filepath.Clean(ws) || filepath.Clean(in.LegacyDir) != filepath.Clean(ws) {
+	if in.LegacyDir == "" || filepath.Clean(in.LegacyDir) != filepath.Clean(ws) {
+		return
+	}
+	if _, err := os.Lstat(filepath.Join(ws, ProvisionSentinelFile)); err != nil {
 		return
 	}
 	if fi, err := os.Lstat(filepath.Join(ws, ".git")); err != nil || !fi.IsDir() {
@@ -489,10 +508,10 @@ func ProvisionShared(in ProvisionInput) error {
 	// — ensureWorktree must run under it even when the base clone is already
 	// done — so only SharedPlain can skip locking entirely here.
 	if in.Mode != store.SharingModeWorktreePerAgent {
-		if dir, ok := findSentinel(sentinelDir, legacyDir(in, sentinelDir)); ok {
+		if dir, ok := findSentinel(in.SentinelDirs()...); ok {
 			slog.Debug("ProvisionShared: workspace already provisioned (sentinel exists, pre-lock)",
 				"project_id", in.ProjectID, "sentinel_dir", dir)
-			excludeLegacySentinel(in, dir)
+			excludeLegacySentinel(in)
 			return nil
 		}
 	}
@@ -517,11 +536,11 @@ func ProvisionShared(in ProvisionInput) error {
 
 	// --- Step 2: Check sentinel (under the lock: closes the gap between
 	// the pre-lock check above and actually acquiring the lock) ---
-	if dir, ok := findSentinel(sentinelDir, legacyDir(in, sentinelDir)); ok {
+	if dir, ok := findSentinel(in.SentinelDirs()...); ok {
 		// Already provisioned — skip to worktree setup if needed.
 		slog.Debug("ProvisionShared: workspace already provisioned (sentinel exists)",
 			"project_id", in.ProjectID, "sentinel_dir", dir)
-		excludeLegacySentinel(in, dir)
+		excludeLegacySentinel(in)
 		if in.MountedWorktree && in.Mode == store.SharingModeWorktreePerAgent {
 			// The shared checkout may have been provisioned in another mode:
 			// add what worktrees need, leaving its contents and HEAD alone.

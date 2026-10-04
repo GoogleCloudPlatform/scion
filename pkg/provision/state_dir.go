@@ -23,20 +23,27 @@ import (
 )
 
 // stateDirMode is the mode PrepareStateDir gives a provisioning state
-// directory the node created: setgid, so new entries keep its group, and
-// group read, write and search, so the broker and the provisioning init
-// container can both take and reclaim the lock in it.
-const stateDirMode = 0o2770
+// directory: setgid, so new entries keep its group, group read, write and
+// search, so the broker and the provisioning init container can both take
+// and reclaim the lock in it, and read and search for others, the same 2775
+// as a broker-created leaf. Others keep search access so a broker outside
+// the group can still see whether the sentinel exists, as it could when the
+// sentinel was in the workspace root (the sentinel and lock carry no
+// secrets).
+const stateDirMode = 0o2775
 
 // PrepareStateDir checks the provisioning state directory mounted into the
 // Kubernetes init container at dir (the root of its own subPath mount) and,
-// when fixOwnership is set, gives it to uid:gid with mode 2770.
+// when fixOwnership is set, gives it to uid:gid with mode 2775.
 //
-// The broker normally creates the directory on the export before the pod
-// exists, with setgid and group write (see ChownBestEffortEnv). When it
-// could not (no export mount on the broker, or no permission), the kubelet
-// creates the subPath as root and the caller passes fixOwnership. Only dir
-// itself is changed, never anything in it.
+// sciontool passes fixOwnership whenever the workspace chown is strict, that
+// is unless the runtime set ChownBestEffortEnv. The runtime sets that only
+// when the broker created, or found with setgid and group write, EVERY
+// directory the pod mounts from the claim (the aggregate prepared flag), not
+// just this one. So a state directory the broker did create is still chowned
+// and chmodded when any other leaf was left to the node, and the kubelet-made
+// case (no export mount on the broker, or no permission) is always covered.
+// Only dir itself is changed, never anything in it.
 //
 // It fails closed: dir must be an absolute, clean path to a real directory.
 // A symlink, a regular file or any other non-directory is an error,

@@ -354,3 +354,61 @@ func TestPrepareStateDir(t *testing.T) {
 		require.Error(t, PrepareStateDir(dir, os.Getuid()+1, os.Getgid(), true))
 	})
 }
+
+// N4: an older pod can write the legacy sentinel back into the workspace
+// root after the state directory has its own; it is still git-excluded.
+func TestProvisionShared_StateDir_RecreatedLegacySentinelExcluded(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "")
+	origin := initBareGitRepo(t)
+	workspace, stateDir := stateDirLayout(t)
+	require.NoError(t, ProvisionShared(stateDirInput(workspace, stateDir, origin, store.SharingModeSharedPlain)))
+	require.FileExists(t, filepath.Join(stateDir, ProvisionSentinelFile))
+	require.NoError(t, writeSentinel(filepath.Join(workspace, ProvisionSentinelFile)))
+
+	require.NoError(t, ProvisionShared(stateDirInput(workspace, stateDir, origin, store.SharingModeSharedPlain)))
+	exclude, err := os.ReadFile(filepath.Join(workspace, ".git", "info", "exclude"))
+	require.NoError(t, err)
+	assert.Contains(t, strings.Split(string(exclude), "\n"), "/"+ProvisionSentinelFile)
+	out, err := exec.Command("git", "-C", workspace, "status", "--porcelain", "--ignored=no").CombinedOutput()
+	require.NoError(t, err, string(out))
+	assert.Empty(t, strings.TrimSpace(string(out)))
+}
+
+// SentinelDirs lists what ProvisionShared checks.
+func TestProvisionInput_SentinelDirs(t *testing.T) {
+	ws := "/p/workspace"
+	assert.Equal(t, []string{"/p"}, ProvisionInput{Resolved: ResolvedWorkspace{HostPath: ws}}.SentinelDirs())
+	assert.Equal(t, []string{"/s", ws}, ProvisionInput{Resolved: ResolvedWorkspace{HostPath: ws}, SentinelDir: "/s", LegacyDir: ws}.SentinelDirs())
+	assert.Equal(t, []string{ws}, ProvisionInput{Resolved: ResolvedWorkspace{HostPath: ws}, SentinelDir: ws, LegacyDir: ws}.SentinelDirs())
+}
+
+// N5: the combined lock depends on the first (legacy) lock as well: when it
+// is lost, the combined ctx is cancelled and stillOwned reports false, even
+// though the second lock is still held.
+func TestAcquireOrderedFileLocks_LosingFirstLockCancels(t *testing.T) {
+	origHeartbeat := provisionLockHeartbeatInterval
+	provisionLockHeartbeatInterval = 10 * time.Millisecond
+	t.Cleanup(func() { provisionLockHeartbeatInterval = origHeartbeat })
+
+	workspace, stateDir := stateDirLayout(t)
+	held, err := acquireOrderedFileLocks(context.Background(), []string{workspace, stateDir}, 30*time.Second)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = held.release() })
+	require.True(t, held.stillOwned())
+
+	legacyLock := filepath.Join(workspace, provisionFileLockName)
+	require.NoError(t, os.RemoveAll(legacyLock)) // force-evict the legacy lock
+	_, err = tryCreateFileLock(legacyLock)       // a successor acquires it
+	require.NoError(t, err)
+
+	select {
+	case <-held.ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("losing the legacy lock did not cancel the combined ctx")
+	}
+	assert.False(t, held.stillOwned())
+	assert.DirExists(t, filepath.Join(stateDir, provisionFileLockName), "the second lock is still held")
+	require.NoError(t, held.release())
+	assert.NoDirExists(t, filepath.Join(stateDir, provisionFileLockName))
+	assert.DirExists(t, legacyLock, "the successor's lock is untouched")
+}

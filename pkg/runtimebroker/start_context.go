@@ -1359,16 +1359,11 @@ func validateMountedWorktree(workspacePath, base string) error {
 // assumes no worktree can exist yet whenever the sentinel is missing, and
 // would otherwise wipe every worktree under the shared base.
 //
-// The sentinel is looked for in the provisioning input's own sentinel
-// directory (the base's parent by default), then in the project's
-// provisioning state directory and the base itself, where the Kubernetes
-// init container writes it now and wrote it before (#2670).
+// The sentinel is looked for in exactly the directories ProvisionShared
+// checks (in.SentinelDirs: the sentinel directory, the base's parent by
+// default, and LegacyDir when set), so the two never disagree.
 func worktreeBaseIsProvisioned(in provision.ProvisionInput) bool {
-	sentinelDir := in.SentinelDir
-	if sentinelDir == "" {
-		sentinelDir = filepath.Dir(in.Resolved.HostPath)
-	}
-	if !provision.SentinelPresent(sentinelDir, provision.ProjectStateDir(in.Resolved.HostPath), in.Resolved.HostPath) {
+	if !provision.SentinelPresent(in.SentinelDirs()...) {
 		return false
 	}
 	if _, err := os.Stat(filepath.Join(in.Resolved.HostPath, ".git")); err != nil {

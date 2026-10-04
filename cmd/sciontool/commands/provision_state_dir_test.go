@@ -80,7 +80,7 @@ func TestProvisionStateDir(t *testing.T) {
 // With the state directory mounted (#2670) the sentinel and the lock are
 // kept there: the clone lands in the workspace, which holds no sentinel and
 // no live lock. Without the broker's preparation the directory is given to
-// the workspace owner with mode 2770.
+// the workspace owner with mode 2775.
 func TestRunProvision_StateDir_SentinelOutsideWorkspace(t *testing.T) {
 	origin := provisionTestRepo(t)
 	workspace, stateDir := newStateDirLayout(t)
@@ -101,8 +101,8 @@ func TestRunProvision_StateDir_SentinelOutsideWorkspace(t *testing.T) {
 			t.Errorf("%s left in the workspace root", name)
 		}
 	}
-	if got := dirMode(t, stateDir); got != 0o2770 {
-		t.Errorf("state directory mode = %o, want 2770", got)
+	if got := dirMode(t, stateDir); got != 0o2775 {
+		t.Errorf("state directory mode = %o, want 2775", got)
 	}
 	if out := gitT(t, workspace, "status", "--porcelain", "--ignored=no"); out != "" {
 		t.Errorf("git status of the workspace is not clean:\n%s", out)
@@ -225,4 +225,33 @@ func setWaitFlags(t *testing.T, workspace string) {
 	provisionWaitSentinel = true
 	provisionTimeout = 2
 	provisionPollInterval = 1
+}
+
+// A waiter that cannot search the state directory (EACCES) keeps falling
+// back to the legacy sentinel in the workspace root, and otherwise keeps
+// waiting until its timeout.
+func TestWaitForSentinel_StateDirUnreadableFallsBackToLegacy(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+	workspace, stateDir := newStateDirLayout(t)
+	if err := os.WriteFile(filepath.Join(stateDir, provision.ProvisionSentinelFile), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(stateDir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(stateDir, 0o755) })
+	setWaitFlags(t, workspace)
+	t.Setenv(provisionStateDirEnv, stateDir)
+
+	if err := runWaitForSentinel(context.Background()); err == nil {
+		t.Fatal("expected a timeout: the state directory cannot be searched and there is no legacy sentinel")
+	}
+	if err := os.WriteFile(filepath.Join(workspace, provision.ProvisionSentinelFile), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runWaitForSentinel(context.Background()); err != nil {
+		t.Errorf("legacy sentinel not accepted: %v", err)
+	}
 }
