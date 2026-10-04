@@ -1768,11 +1768,11 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	var extraVolumes []corev1.Volume
 	var extraVolumeMounts []corev1.VolumeMount
 
-	containerHome := util.GetHomeDir(config.UnixUsername)
 	nfsHome, err := nfsHomePod(config)
 	if err != nil {
 		return nil, err
 	}
+	containerHome := util.GetHomeDir(config.UnixUsername)
 	fileProjections := r.k8sFileProjections(config)
 	if err := checkK8sHomeFileTargets(r.k8sHomeFilePlacements(config)); err != nil {
 		return nil, err
