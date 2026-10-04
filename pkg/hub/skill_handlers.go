@@ -1982,6 +1982,14 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 		}
 	}
 
+	// A ref GitHub reported as not found for this cache key within the last
+	// ghFailureCacheTTL fails again now, without asking GitHub. A fresh or
+	// stale entry above still wins.
+	if ferr := s.ghFailures.recent(cacheKey); ferr != nil {
+		slog.DebugContext(ctx, "github_resolution_cache: returning remembered not found", "uri", rawURI)
+		return nil, ferr
+	}
+
 	// A miss during a rate-limit cooldown fails now, without starting a
 	// flight: no request could be sent for this identity anyway.
 	if retryAt, cooling := s.githubCooldown().Active(cooldownID); cooling {
@@ -2040,6 +2048,10 @@ func (s *Server) resolveGitHubSkill(ctx context.Context, rawURI, projectID strin
 			if entry, hit, gerr := s.ghResolutionStore.Get(flightCtx, cacheKey); gerr == nil && hit {
 				return entry, nil
 			}
+		}
+		if ferr := s.ghFailures.recent(cacheKey); ferr != nil {
+			slog.DebugContext(ctx, "github_resolution_cache: returning remembered not found", "uri", rawURI)
+			return nil, ferr
 		}
 
 		return s.fetchAndCacheGitHubSkill(flightCtx, cacheKey, rawURI, ghRef, token, installID, isBranchRef, refSHAMemo)
@@ -2165,14 +2177,18 @@ func (s *Server) fetchAndCacheGitHubSkill(
 		var err error
 		commitSHA, err = ghResolveCommitSHA(ctx, cooldown, cooldownID, apiBase, ghRef.Owner, ghRef.Repo, ghRef.Ref, token)
 		if err != nil {
-			return nil, fmt.Errorf("failed to resolve commit SHA: %w", err)
+			err = fmt.Errorf("failed to resolve commit SHA: %w", err)
+			s.rememberGHNotFound(cacheKey, err)
+			return nil, err
 		}
 		refSHAMemo.set(memoKey, commitSHA)
 	}
 
 	fileEntries, err := ghListContents(ctx, cooldown, cooldownID, apiBase, rawBase, ghRef.Owner, ghRef.Repo, ghRef.SkillPath, commitSHA, token)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list contents: %w", err)
+		err = fmt.Errorf("failed to list contents: %w", err)
+		s.rememberGHNotFound(cacheKey, err)
+		return nil, err
 	}
 
 	if len(fileEntries) == 0 {
@@ -2203,6 +2219,9 @@ func (s *Server) fetchAndCacheGitHubSkill(
 		OriginalURI: rawURI,
 	}
 
+	// A successful resolution replaces any remembered not found for this
+	// key, whether or not the store write below succeeds.
+	s.ghFailures.clear(cacheKey)
 	if s.ghResolutionStore != nil {
 		if err := s.ghResolutionStore.Put(ctx, cacheKey, entry); err != nil {
 			slog.WarnContext(ctx, "github_resolution_cache: failed to store entry",

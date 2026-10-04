@@ -145,41 +145,12 @@ The agent is provisioned but not started, even when a task is given. Run
 			SkipSync:    true,
 		})
 		if hubErr == nil && hctx != nil && hctx.Client != nil {
-			hubResolver := agent.NewHubSkillResolver(hctx.Client.Skills())
-			resolver := agent.NewRoutingSkillResolver(hubResolver)
-			ghToken := os.Getenv("GITHUB_TOKEN")
-			ghResolver := agent.NewGitHubSkillResolverWithCredentials(ghToken, nil, nil)
-			resolver.Register("gh", ghResolver)
+			var flushResolutions func()
+			ctx, flushResolutions = withLocalSkillResolution(ctx, hctx.Client.Skills(), hctx.Client.SkillRegistries(),
+				hctx.ProjectID, os.Getenv("GITHUB_TOKEN"), nil)
 			// Write resolutions to the disk cache before this process exits,
 			// rather than relying on the cache's delayed write.
-			defer ghResolver.FlushCache()
-
-			registrySvc := hctx.Client.SkillRegistries()
-			gcpLookup := func(ctx context.Context, name string) (*agent.RegistryLookupResult, error) {
-				reg, err := registrySvc.Get(ctx, name)
-				if err != nil {
-					return nil, err
-				}
-				if reg == nil {
-					return nil, fmt.Errorf("registry %q not found", name)
-				}
-				return &agent.RegistryLookupResult{
-					Name:     reg.Name,
-					Endpoint: reg.Endpoint,
-					Type:     reg.Type,
-					Status:   reg.Status,
-				}, nil
-			}
-			resolver.Register("gcp-skill", agent.NewGCPSkillResolver(gcpLookup))
-
-			ctx = agent.ContextWithSkillResolver(ctx, resolver)
-			// Credentials for install-phase downloads of gh:// skills: the
-			// default for skills the Hub resolved, and the GitHub resolver's
-			// own lookup for skills it served from its disk cache.
-			ctx = ghResolver.WithInstallCredentials(ctx, ghToken)
-			if hctx.ProjectID != "" {
-				ctx = agent.ContextWithResolveProjectID(ctx, hctx.ProjectID)
-			}
+			defer flushResolutions()
 		}
 
 		_, err = mgr.Provision(ctx, opts)
@@ -193,6 +164,53 @@ The agent is provisioned but not started, even when a task is given. Run
 		writeLocalCreateResult(os.Stdout, agentName)
 		return nil
 	},
+}
+
+// withLocalSkillResolution returns ctx set up to resolve skills for a local
+// create: a routing resolver that sends skill:// refs and bare names to the
+// Hub, gh:// refs to a GitHub resolver using ghToken, and gcp-skill:// refs
+// to a resolver that looks registries up through the Hub; the credentials
+// the install step needs for gh:// downloads; and projectID as the resolve
+// project, when set. cache is the GitHub resolution cache to use, or nil for
+// the default one. The returned func writes pending resolution cache entries
+// to disk and must be called before the process exits.
+func withLocalSkillResolution(
+	ctx context.Context,
+	skills hubclient.SkillService,
+	registries hubclient.SkillRegistryService,
+	projectID, ghToken string,
+	cache *agent.GitHubResolutionCache,
+) (context.Context, func()) {
+	resolver := agent.NewRoutingSkillResolver(agent.NewHubSkillResolver(skills))
+	ghResolver := agent.NewGitHubSkillResolverWithCredentials(ghToken, nil, cache)
+	resolver.Register("gh", ghResolver)
+
+	gcpLookup := func(ctx context.Context, name string) (*agent.RegistryLookupResult, error) {
+		reg, err := registries.Get(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		if reg == nil {
+			return nil, fmt.Errorf("registry %q not found", name)
+		}
+		return &agent.RegistryLookupResult{
+			Name:     reg.Name,
+			Endpoint: reg.Endpoint,
+			Type:     reg.Type,
+			Status:   reg.Status,
+		}, nil
+	}
+	resolver.Register("gcp-skill", agent.NewGCPSkillResolver(gcpLookup))
+
+	ctx = agent.ContextWithSkillResolver(ctx, resolver)
+	// Credentials for install-phase downloads of gh:// skills: the default
+	// for skills the Hub resolved, and the GitHub resolver's own lookup for
+	// skills it served from its disk cache.
+	ctx = ghResolver.WithInstallCredentials(ctx, ghToken)
+	if projectID != "" {
+		ctx = agent.ContextWithResolveProjectID(ctx, projectID)
+	}
+	return ctx, ghResolver.FlushCache
 }
 
 // scion create provisions an agent and never starts it; scion start launches

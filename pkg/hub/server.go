@@ -1262,6 +1262,10 @@ type Server struct {
 	ghRefreshFailMu      sync.Mutex
 	ghLastRefreshFailure map[string]time.Time
 
+	// ghFailures remembers, per cache key, that GitHub recently reported a
+	// gh:// ref as not found (see ghFailureCache and resolveGitHubSkill).
+	ghFailures ghFailureCache
+
 	// ghCooldown holds gh:// resolution requests back per credential
 	// identity after a GitHub rate-limit response (see agent.GitHubCooldown).
 	// Nil means the process-wide agent.SharedGitHubCooldown, the same
