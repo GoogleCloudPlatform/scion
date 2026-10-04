@@ -163,6 +163,8 @@ export const AGENT_PROBE_LIMIT = 50;
 export const AGENT_PROBE_MAX_EXTRA_PAGES = 4;
 /** A probe still running after this long is abandoned; the next one is scheduled. */
 export const AGENT_PROBE_TIMEOUT_MS = 30_000;
+/** After the server refuses a list's sorted view, wait this long before probing it again. */
+export const AGENT_PROBE_REFUSED_RETRY_MS = 10 * 60_000;
 
 interface Waiter {
   resolve: (snapshot: AgentListSnapshot) => void;
@@ -207,8 +209,10 @@ interface Entry {
   probe: AbortController | null;
   /** Newest `updated` (epoch ms) seen by the last walk or probe. */
   highWater?: number | undefined;
-  /** The server refused the sorted view for this list; it is not probed again. */
-  probeUnavailable: boolean;
+  /** The server refused the sorted view for this list: no probe before this time (epoch ms). */
+  probeRetryAt?: number | undefined;
+  /** A refusal for this list has been logged. */
+  probeRefusalLogged: boolean;
   /** The server count that last made a probe walk, so the same mismatch walks once. */
   countWalkTotal?: number | undefined;
 }
@@ -577,7 +581,7 @@ export class AgentStore {
         evictTimer: null,
         probeTimer: null,
         probe: null,
-        probeUnavailable: false,
+        probeRefusalLogged: false,
       };
       this.entries.set(key, entry);
     }
@@ -885,15 +889,15 @@ export class AgentStore {
 
   /**
    * Keep the entry's probe timer running exactly while it may probe: the
-   * entry is current, retained, loaded, probeable, the server has not
-   * refused its sorted view, and the page is visible. Otherwise stop it.
+   * entry is current, retained, loaded and probeable, and the page is
+   * visible. Otherwise stop it. After the server refuses the list's sorted
+   * view, the next probe waits {@link AGENT_PROBE_REFUSED_RETRY_MS}.
    */
   private syncProbe(entry: Entry): void {
     const eligible =
       this.entries.get(entry.key) === entry &&
       entry.retainers.size > 0 &&
       entry.fetchedAt !== undefined &&
-      !entry.probeUnavailable &&
       isProbeable(entry.query) &&
       this.isVisible();
     if (!eligible) {
@@ -902,10 +906,14 @@ export class AgentStore {
     }
     if (entry.probeTimer || entry.probe) return;
     const jitter = (this.random() * 2 - 1) * AGENT_PROBE_JITTER_MS;
-    entry.probeTimer = setTimeout(() => {
-      entry.probeTimer = null;
-      this.runProbeTick(entry);
-    }, AGENT_PROBE_INTERVAL_MS + jitter);
+    const refused = (entry.probeRetryAt ?? 0) - this.now();
+    entry.probeTimer = setTimeout(
+      () => {
+        entry.probeTimer = null;
+        this.runProbeTick(entry);
+      },
+      Math.max(AGENT_PROBE_INTERVAL_MS + jitter, refused)
+    );
   }
 
   private stopProbe(entry: Entry): void {
@@ -966,9 +974,7 @@ export class AgentStore {
         const response = await this.fetchPage(probePath(entry.query, cursor), { signal });
         if (signal.aborted || entry.probe !== controller) return;
         if (!response.ok) {
-          // The project list refuses its sorted view above its candidate
-          // ceiling; that list relies on resync walks instead.
-          if (response.status === 422) entry.probeUnavailable = true;
+          if (response.status === 422) this.probeRefused(entry);
           return;
         }
         const body = (await response.json()) as ProbePage;
@@ -1034,6 +1040,18 @@ export class AgentStore {
     if (entry.countWalkTotal === total) return;
     entry.countWalkTotal = total;
     this.walkFromProbe(entry);
+  }
+
+  /**
+   * The project list refuses its sorted view while its candidate count,
+   * taken before read filtering, is above its ceiling; that can change
+   * either way. Rely on resync walks for a while, then try again.
+   */
+  private probeRefused(entry: Entry): void {
+    entry.probeRetryAt = this.now() + AGENT_PROBE_REFUSED_RETRY_MS;
+    if (entry.probeRefusalLogged) return;
+    entry.probeRefusalLogged = true;
+    console.info(`[agent-store] ${entry.key}: sorted agent list unavailable; probing paused`);
   }
 
   private walkFromProbe(entry: Entry): void {

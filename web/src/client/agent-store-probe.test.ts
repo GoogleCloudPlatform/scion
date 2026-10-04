@@ -27,6 +27,7 @@ import {
   AGENT_PROBE_INTERVAL_MS,
   AGENT_PROBE_JITTER_MS,
   AGENT_PROBE_LIMIT,
+  AGENT_PROBE_REFUSED_RETRY_MS,
   AGENT_PROBE_TIMEOUT_MS,
   type AgentListSnapshot,
   type AgentQuery,
@@ -597,7 +598,8 @@ describe('AgentStore delta probe', () => {
     expect(a1.appliedConfig).toEqual({ harness: 'claude' });
   });
 
-  it('stops probing a project list whose sorted view the server refuses, and keeps probing the hub', async () => {
+  it('pauses probing a project list whose sorted view the server refuses, and keeps probing the hub', async () => {
+    const info = vi.mocked(console.info);
     const h = await loaded([row('a1', 1)], P1);
     h.store.retain(HUB, () => {});
     await h.store.ensure(HUB);
@@ -605,11 +607,28 @@ describe('AgentStore delta probe', () => {
       path.startsWith('/api/v1/projects/') ? 422 : undefined;
     await tick();
     expect(h.server.probes('/api/v1/projects/')).toBe(1);
-    h.server.sortedStatus = undefined;
-    await tick();
-    await tick();
+    await tick(AGENT_PROBE_REFUSED_RETRY_MS - AGENT_PROBE_INTERVAL_MS);
     expect(h.server.probes('/api/v1/projects/')).toBe(1);
-    expect(h.server.probes('/api/v1/agents?')).toBe(3);
+    expect(h.server.probes('/api/v1/agents?')).toBe(
+      AGENT_PROBE_REFUSED_RETRY_MS / AGENT_PROBE_INTERVAL_MS
+    );
+
+    // Refused again after the pause: logged once, paused again.
+    await tick();
+    expect(h.server.probes('/api/v1/projects/')).toBe(2);
+    const refusals = (): number =>
+      info.mock.calls.filter(([message]) => String(message).includes('probing paused')).length;
+    expect(refusals()).toBe(1);
+
+    // Served after the next pause: probing resumes each interval.
+    h.server.sortedStatus = undefined;
+    h.server.agents.push(row('a2', 5));
+    await tick(AGENT_PROBE_REFUSED_RETRY_MS);
+    expect(h.server.probes('/api/v1/projects/')).toBe(3);
+    expect(ids(h.store.peek(P1)).sort()).toEqual(['a1', 'a2']);
+    await tick();
+    expect(h.server.probes('/api/v1/projects/')).toBe(4);
+    expect(refusals()).toBe(1);
   });
 
   it('abandons a probe that hangs and probes again on the next tick', async () => {
