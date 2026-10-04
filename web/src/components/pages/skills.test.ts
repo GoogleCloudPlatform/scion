@@ -30,6 +30,7 @@ type PageEl = HTMLElement & {
 /** Private page state the tests drive or observe. */
 type PageInternals = {
   loading: boolean;
+  skills: { id: string }[];
   scopeFilter: string;
   loadSkills(): Promise<void>;
 };
@@ -76,6 +77,40 @@ async function mountSkillsPage(
   if (pageData) el.pageData = pageData;
   document.body.appendChild(el);
   await settled(el);
+  return { el, fetchMock };
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((r) => (resolve = r));
+  return { promise, resolve };
+}
+
+/**
+ * Record every loadSkills() promise, in call order, so a test can wait for a
+ * specific walk to settle instead of guessing with timers.
+ */
+function spyOnLoads(): Promise<void>[] {
+  const proto = customElements.get('scion-page-skills')!.prototype as PageInternals;
+  const orig = proto.loadSkills;
+  const loads: Promise<void>[] = [];
+  vi.spyOn(proto, 'loadSkills').mockImplementation(function (this: PageInternals) {
+    const p = orig.call(this);
+    loads.push(p);
+    return p;
+  });
+  return loads;
+}
+
+/** Mount the page without waiting for it to settle. */
+function mountWithHandler(handler: (url: string) => Promise<Response>): {
+  el: PageEl;
+  fetchMock: ReturnType<typeof vi.fn>;
+} {
+  const fetchMock = vi.fn((input: string | URL | Request) => handler(urlOf(input)));
+  vi.stubGlobal('fetch', fetchMock);
+  const el = document.createElement('scion-page-skills') as PageEl;
+  document.body.appendChild(el);
   return { el, fetchMock };
 }
 
@@ -158,7 +193,7 @@ describe('scion-page-skills pagination', () => {
 
     failPage2 = false;
     const retry = el.shadowRoot?.querySelector(
-      '.partial-load-notice sl-button[aria-label="Retry loading skills"]'
+      '.partial-load-notice sl-button.partial-load-retry'
     ) as HTMLElement | null;
     expect(retry).not.toBeNull();
     retry!.click();
@@ -168,21 +203,17 @@ describe('scion-page-skills pagination', () => {
     expect(shownSkills(el)).toEqual(['/skills/1', '/skills/2', '/skills/3']);
   });
 
-  it('ignores a superseded walk', async () => {
-    let releaseStale!: (r: Response) => void;
-    const stalePage2 = new Promise<Response>((resolve) => (releaseStale = resolve));
-    const fetchMock = vi.fn((input: string | URL | Request) => {
-      const url = urlOf(input);
+  it('ignores a superseded walk that succeeds late', async () => {
+    const loads = spyOnLoads();
+    const stale = deferred<Response>();
+    const { el, fetchMock } = mountWithHandler((url) => {
       if (url.includes('scope=core')) {
         return Promise.resolve(jsonResponse({ skills: [skill('core-1')] }));
       }
-      if (url.includes('cursor=c2')) return stalePage2;
+      if (url.includes('cursor=c2')) return stale.promise;
       return Promise.resolve(jsonResponse(FIRST_PAGE));
     });
-    vi.stubGlobal('fetch', fetchMock);
-    const el = document.createElement('scion-page-skills') as PageEl;
     element = el;
-    document.body.appendChild(el);
     // The first walk is now waiting on its second page.
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
 
@@ -193,14 +224,87 @@ describe('scion-page-skills pagination', () => {
     expect(shownSkills(el)).toEqual(['/skills/core-1']);
 
     // The stale walk's last page arrives late and must not be shown.
-    releaseStale(jsonResponse({ skills: [skill('stale')] }));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    stale.resolve(jsonResponse({ skills: [skill('stale')] }));
+    await loads[0];
     await el.updateComplete;
 
     expect(shownSkills(el)).toEqual(['/skills/core-1']);
     expect(internals(el).loading).toBe(false);
     expect(el.shadowRoot?.querySelector('.partial-load-notice')).toBeNull();
     expect(el.shadowRoot?.querySelector('.error-state')).toBeNull();
+  });
+
+  it('ignores a superseded walk that fails late', async () => {
+    const loads = spyOnLoads();
+    const stale = deferred<Response>();
+    const { el, fetchMock } = mountWithHandler((url) => {
+      if (url.includes('scope=core')) {
+        return Promise.resolve(jsonResponse({ skills: [skill('core-1')] }));
+      }
+      if (url.includes('cursor=c2')) return stale.promise;
+      return Promise.resolve(jsonResponse(FIRST_PAGE));
+    });
+    element = el;
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    internals(el).scopeFilter = 'core';
+    await internals(el).loadSkills();
+
+    stale.resolve(jsonResponse({ error: { code: 'internal' } }, 500));
+    await loads[0];
+    await el.updateComplete;
+
+    expect(shownSkills(el)).toEqual(['/skills/core-1']);
+    expect(el.shadowRoot?.querySelector('.partial-load-notice')).toBeNull();
+    expect(el.shadowRoot?.querySelector('.error-state')).toBeNull();
+  });
+
+  it('keeps loading while the newer load runs when a stale walk settles', async () => {
+    const loads = spyOnLoads();
+    const stale = deferred<Response>();
+    const core = deferred<Response>();
+    const { el, fetchMock } = mountWithHandler((url) => {
+      if (url.includes('scope=core')) return core.promise;
+      if (url.includes('cursor=c2')) return stale.promise;
+      return Promise.resolve(jsonResponse(FIRST_PAGE));
+    });
+    element = el;
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    // Start the newer load but leave its response pending.
+    internals(el).scopeFilter = 'core';
+    void internals(el).loadSkills();
+
+    stale.resolve(jsonResponse({ skills: [skill('stale')] }));
+    await loads[0];
+    await el.updateComplete;
+    expect(internals(el).loading).toBe(true);
+    expect(internals(el).skills.map((sk) => sk.id)).not.toContain('stale');
+
+    core.resolve(jsonResponse({ skills: [skill('core-1')] }));
+    await loads[1];
+    await el.updateComplete;
+    expect(internals(el).loading).toBe(false);
+    expect(shownSkills(el)).toEqual(['/skills/core-1']);
+  });
+
+  it('stops walking pages once the page is detached', async () => {
+    const loads = spyOnLoads();
+    const page2 = deferred<Response>();
+    const { el, fetchMock } = mountWithHandler((url) => {
+      if (url.includes('cursor=c3')) return Promise.resolve(jsonResponse({ skills: [] }));
+      if (url.includes('cursor=c2')) return page2.promise;
+      return Promise.resolve(jsonResponse(FIRST_PAGE));
+    });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    el.remove();
+    page2.resolve(jsonResponse({ skills: [skill('3')], nextCursor: 'c3' }));
+    await loads[0];
+
+    expect(fetchMock.mock.calls.map((c) => urlOf(c[0] as string))).not.toEqual(
+      expect.arrayContaining([expect.stringContaining('cursor=c3')])
+    );
   });
 
   it('shows the error state when the first page fails', async () => {

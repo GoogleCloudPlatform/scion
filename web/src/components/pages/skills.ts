@@ -244,9 +244,8 @@ export class ScionPageSkills extends LitElement {
       if (this.scopeFilter) params.set('scope', this.scopeFilter);
       if (this.searchQuery) params.set('search', this.searchQuery);
 
-      const qs = params.toString();
       await paginateAll<Skill>({
-        path: qs ? `/api/v1/skills?${qs}` : '/api/v1/skills',
+        path: `/api/v1/skills?${params.toString()}`,
         pageSize: SKILLS_PAGE_SIZE,
         label: 'Skills',
         // A newer load (search or scope change) supersedes this one, and a
@@ -454,7 +453,7 @@ export class ScionPageSkills extends LitElement {
         <sl-button
           size="small"
           variant="text"
-          aria-label="Retry loading skills"
+          class="partial-load-retry"
           @click=${() => this.loadSkills()}
           >Retry</sl-button
         >
