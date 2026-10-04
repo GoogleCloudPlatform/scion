@@ -478,6 +478,17 @@ describe('home agent counts and the shared completeness flag', { timeout: 30_000
       expect(countsChip(el)).toBeNull();
       expect(internals(el).countsMayHaveChanged).toBe(false);
     });
+
+    it('a home that left the page no longer reacts to a resync', async () => {
+      const fake = newFake(2003, 40);
+      vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
+      const el = await mountPage('scion-page-home');
+      expect(internals(el).memberIndex?.countOnly).toBe(true);
+      expect(internals(el).countsMayHaveChanged).toBe(false);
+      el.remove();
+      reconnect();
+      expect(internals(el).countsMayHaveChanged).toBe(false);
+    });
   });
 
   describe('home load: changes to agents not in the store while the request is in flight', () => {

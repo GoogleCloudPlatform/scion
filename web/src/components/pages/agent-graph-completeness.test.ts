@@ -291,4 +291,18 @@ describe('/agents/graph seeding', () => {
     expect(stateManager.getAgent('a1')).not.toHaveProperty('taskSummary');
     expect(graphInternals(el).agents[0]).not.toHaveProperty('taskSummary');
   });
+
+  it('a failed request still closes its seed epoch', async () => {
+    stubAgentsResponse(() => jsonResponse({ error: { message: 'boom' } }, 500));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const el = await mountGraph();
+    const openEpochs = (): number =>
+      (stateManager as unknown as { seedEpochs: Map<unknown, unknown> }).seedEpochs.size;
+    expect(openEpochs()).toBe(0);
+    const end = vi.spyOn(stateManager, 'endSeedEpoch');
+    await graphInternals(el).fetchAgents(false);
+    expect(agentRequests).toHaveLength(2);
+    expect(end).toHaveBeenCalledTimes(1);
+    expect(openEpochs()).toBe(0);
+  });
 });
