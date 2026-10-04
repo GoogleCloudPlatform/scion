@@ -502,8 +502,12 @@ func TestCheckAuthentication_UnparseableLocationFixedMessage(t *testing.T) {
 // Proxy mode, no transport token received yet (dispatch-time mint failed):
 // doctor reports the missing credential instead of "none".
 func TestCheckTransportAuth_ProxyModeNoneReceivedFails(t *testing.T) {
-	isolateDoctorTransport(t)
+	home := isolateDoctorTransport(t)
 	t.Setenv(transportauth.EnvTransportMode, "iap")
+	// Doctor run with a different HOME (e.g. exec'd as root) still names
+	// the scion user's file.
+	t.Setenv("HOME", t.TempDir())
+	scionPath := filepath.Join(home, ".scion", transportauth.TransportTokenFileName)
 
 	out, diag := runCheckTransportAuth(t)
 
@@ -511,8 +515,10 @@ func TestCheckTransportAuth_ProxyModeNoneReceivedFails(t *testing.T) {
 		t.Fatalf("expected a missing transport credential, diag=%+v\n%s", diag, out)
 	}
 	for _, want := range []string{
+		"Transport Auth: hub-provided token (awaiting first token)",
 		"Mode: iap (header: Proxy-Authorization)",
 		"[FAIL] Transport credential: none received yet",
+		"no file at " + scionPath + ")",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q:\n%s", want, out)

@@ -239,12 +239,14 @@ func checkTransportAuth(diag *doctorDiag) transportauth.TokenSource {
 			// A proxy guards the hub but no transport token has been
 			// received yet (for example the dispatch-time mint failed).
 			// A later refresh or reset-auth installs one.
+			// The path shown is the scion user's file, which is where the
+			// agent writes it, even when doctor runs with another HOME.
 			diag.transportConfigured = true
 			diag.transportMissing = true
-			fmt.Println("[INFO] Transport Auth: hub-provided token")
+			fmt.Println("[INFO] Transport Auth: hub-provided token (awaiting first token)")
 			printTransportModeAndAudience()
 			fmt.Printf("[FAIL] Transport credential: none received yet (no %s value and no file at %s)\n",
-				transportauth.EnvTransportToken, transportauth.DefaultTransportTokenFilePath())
+				transportauth.EnvTransportToken, hub.TransportTokenFilePath())
 			reportTransportRefreshStatus(diag)
 			return nil
 		}
