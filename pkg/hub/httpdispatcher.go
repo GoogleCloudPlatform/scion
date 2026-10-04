@@ -209,11 +209,6 @@ type HTTPAgentDispatcher struct {
 	// tier. A callback for the same reason as hubAgentDefaultsProvider. Nil
 	// provider = no default sent.
 	autoExposePortsDefaultProvider func() *bool
-
-	// profileTimezoneProvider returns the IANA timezone string for the named
-	// profile, or "" if the profile does not exist or has no timezone set.
-	// Used by buildCreateRequest to inject TZ into agent containers.
-	profileTimezoneProvider func(profileName string) string
 }
 
 // NewHTTPAgentDispatcher creates a new HTTP-based agent dispatcher.
@@ -379,12 +374,6 @@ func (d *HTTPAgentDispatcher) autoExposePortsDefault() *bool {
 		return nil
 	}
 	return d.autoExposePortsDefaultProvider()
-}
-
-// SetProfileTimezoneProvider registers the accessor for looking up a profile's
-// timezone by name. The callback reads the profile map under the server lock.
-func (d *HTTPAgentDispatcher) SetProfileTimezoneProvider(fn func(profileName string) string) {
-	d.profileTimezoneProvider = fn
 }
 
 // SetImageRegistry sets the image registry prefix for rewriting bare image

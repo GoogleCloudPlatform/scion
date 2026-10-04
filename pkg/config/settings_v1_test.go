@@ -4238,7 +4238,6 @@ func TestGetVersionedSettingValueNestedMaps(t *testing.T) {
 			"staging": {
 				Runtime:       "docker",
 				ImageRegistry: "ghcr.io/myorg",
-				Timezone:      "America/Los_Angeles",
 				HarnessOverrides: map[string]V1HarnessOverride{
 					"claude": {Image: "override-image"},
 				},
@@ -4275,7 +4274,6 @@ func TestGetVersionedSettingValueNestedMaps(t *testing.T) {
 	}{
 		{"profiles.staging.runtime", "docker"},
 		{"profiles.staging.image_registry", "ghcr.io/myorg"},
-		{"profiles.staging.timezone", "America/Los_Angeles"},
 		{"profiles.staging.default_template", ""},
 		{"runtimes.local.type", "docker"},
 		{"runtimes.local.namespace", "ns1"},
@@ -4386,7 +4384,7 @@ func TestCredentialLikeFieldPatternAlternatives(t *testing.T) {
 		// never be refused, or config get would break for every user.
 		"runtime",
 		"namespace",
-		"timezone",
+		"default_template",
 		"image_registry",
 		"list_all_namespaces",
 		// A documented gap (see credentialLikeFieldPattern's comment): a

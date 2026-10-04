@@ -3486,10 +3486,6 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	dispatcher.SetHubAgentDefaultsProvider(s.hubAgentDefaults)
 	dispatcher.SetAutoExposePortsDefaultProvider(s.autoExposePortsDefault)
 
-	// Wire profile timezone provider so dispatch can inject TZ from the
-	// profile's first-class timezone field into agent containers.
-	dispatcher.SetProfileTimezoneProvider(s.profileTimezone)
-
 	// Set image registry so bare image names are rewritten before dispatch
 	dispatcher.SetImageRegistry(s.resolveImageRegistry())
 
