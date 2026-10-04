@@ -136,6 +136,10 @@ type conduitProxyFixture struct {
 	// sessions.
 	sciontool *sconduit.Agent
 	sessions  atomic.Int64
+	// agentClock fires the sciontool agent's timers; onEnd, when set,
+	// receives its reconnect decisions.
+	agentClock *clock.Fake
+	onEnd      func(end conduit.End, delay time.Duration, err error)
 }
 
 func newConduitProxyFixture(t *testing.T, app http.Handler) *conduitProxyFixture {
@@ -168,7 +172,8 @@ func (f *conduitProxyFixture) withWriteTimeout(t *testing.T, d time.Duration) {
 }
 
 // fixtureClock is the sciontool agent's clock: it reads the fixture's
-// clock (grants are minted on it) and never fires timers.
+// clock (grants are minted on it); its timers fire only when the test
+// advances f.agentClock.
 type fixtureClock struct {
 	*clock.Fake
 	now func() time.Time
@@ -198,6 +203,7 @@ func (f *conduitProxyFixture) runAgent(t *testing.T, launchID string, admitted c
 	t.Helper()
 	guardSciontoolLog()
 	tok := f.agentToken(t, f.launched)
+	f.agentClock = clock.NewFake(f.clock.Now())
 	a, err := sconduit.New(sconduit.Options{
 		HubURL:    f.base,
 		AgentID:   f.launched.ID,
@@ -208,8 +214,9 @@ func (f *conduitProxyFixture) runAgent(t *testing.T, launchID string, admitted c
 			f.sessions.Add(1)
 			admitted <- w
 		},
+		OnEnd:   f.onEnd,
 		Backoff: &conduit.Backoff{Rand: func(int64) int64 { return 0 }},
-		Clock:   fixtureClock{Fake: clock.NewFake(f.clock.Now()), now: f.clock.Now},
+		Clock:   fixtureClock{Fake: f.agentClock, now: f.clock.Now},
 	})
 	require.NoError(t, err)
 	f.sciontool = a

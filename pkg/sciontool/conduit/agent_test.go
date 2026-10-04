@@ -26,6 +26,7 @@ import (
 	"time"
 
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
@@ -42,8 +43,8 @@ func TestClassifyCloseCodes(t *testing.T) {
 		end  core.End
 		want Action
 	}{
-		{"4409 at handshake", core.End{DialErr: ce(4409)}, ActionStop},
-		{"4409 on a live session", core.End{GoAway: ga(4409)}, ActionStop},
+		{"4409 at handshake", core.End{DialErr: ce(4409)}, ActionRefused},
+		{"4409 on a live session", core.End{GoAway: ga(4409)}, ActionRefused},
 		{"4403", core.End{DialErr: ce(4403)}, ActionStop},
 		{"4404", core.End{GoAway: ga(4404)}, ActionStop},
 		{"4401 at handshake", core.End{DialErr: ce(4401)}, ActionRefreshCredential},
@@ -121,9 +122,9 @@ func TestAgentHelloCarriesLaunchID(t *testing.T) {
 	}
 }
 
-// TestAgentStopsOnTerminalCodes: 4409 (a superseded launch), 4403 and
-// 4404 stop the dialer with a *TerminalError after one attempt; an HTTP
-// 404 stops it with ErrUnsupported.
+// TestAgentStopsOnTerminalCodes: 4403 and 4404 stop the dialer with a
+// *TerminalError after one attempt; an HTTP 404 stops it with
+// ErrUnsupported.
 func TestAgentStopsOnTerminalCodes(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -131,7 +132,6 @@ func TestAgentStopsOnTerminalCodes(t *testing.T) {
 		wantCode uint32
 		wantErr  error
 	}{
-		{"4409 superseded", func(h *fakeHub) { h.reject = core.Reject(closeSuperseded, "superseded_incarnation") }, closeSuperseded, nil},
 		{"4403 forbidden", func(h *fakeHub) { h.reject = core.Reject(core.CloseForbidden, "forbidden") }, core.CloseForbidden, nil},
 		{"4404 not found", func(h *fakeHub) { h.reject = core.Reject(closeTargetNotFound, "target_not_found") }, closeTargetNotFound, nil},
 		{"HTTP 404 old hub", func(h *fakeHub) { h.status = http.StatusNotFound }, 0, ErrUnsupported},
@@ -159,21 +159,186 @@ func TestAgentStopsOnTerminalCodes(t *testing.T) {
 	}
 }
 
-// TestAgentStopsWhenLiveSessionSuperseded: a live session the hub closes
-// with 4409 stops the dialer; it does not redial.
-func TestAgentStopsWhenLiveSessionSuperseded(t *testing.T) {
+// TestAgentRefusalWindow pins the 4409 rule: each refusal is retried
+// after BackoffMax, the dialer stops once refusals have persisted for
+// RefusalStopAfter, an admission starts a new window, and other failures
+// in between neither stop nor reset it.
+func TestAgentRefusalWindow(t *testing.T) {
+	type event struct {
+		kind      string // refuse | refuse_live | admit | transient
+		at        time.Duration
+		wantDelay time.Duration
+		wantStop  bool
+	}
+	refusals := func(kind string, from, to time.Duration) []event {
+		var evs []event
+		for at := from; at < from+RefusalStopAfter && at <= to; at += core.BackoffMax {
+			evs = append(evs, event{kind: kind, at: at, wantDelay: core.BackoffMax})
+		}
+		return evs
+	}
+	stop := func(at time.Duration) event { return event{kind: "refuse", at: at, wantStop: true} }
+	cat := func(parts ...[]event) []event {
+		var evs []event
+		for _, p := range parts {
+			evs = append(evs, p...)
+		}
+		return evs
+	}
+	tests := []struct {
+		name   string
+		events []event
+	}{
+		{"zombie: retried every BackoffMax, stops after RefusalStopAfter",
+			cat(refusals("refuse", 0, RefusalStopAfter), []event{stop(RefusalStopAfter)})},
+		{"refused live session counts like a handshake refusal",
+			cat(refusals("refuse_live", 0, RefusalStopAfter), []event{stop(RefusalStopAfter)})},
+		{"admission inside the window starts a new one",
+			cat(refusals("refuse", 0, 3*time.Minute), []event{{kind: "admit", at: 4 * time.Minute}},
+				refusals("refuse", 5*time.Minute, 15*time.Minute), []event{stop(15 * time.Minute)})},
+		{"transient failures neither stop nor reset the window",
+			cat(refusals("refuse", 0, time.Minute),
+				[]event{{kind: "transient", at: 90 * time.Second, wantDelay: 3 * time.Second}},
+				refusals("refuse", 2*time.Minute, RefusalStopAfter-time.Minute), []event{stop(RefusalStopAfter)})},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			start := time.Unix(1_700_000_000, 0)
+			clk := clock.NewFake(start)
+			a, err := New(Options{HubURL: "http://hub", AgentID: testAgentID, ProjectID: testProjectID, Token: func() string { return "t" }, Clock: clk})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, ev := range tt.events {
+				clk.Advance(start.Add(ev.at).Sub(clk.Now()))
+				var end core.End
+				switch ev.kind {
+				case "admit":
+					a.admitted()
+					continue
+				case "refuse":
+					end = core.End{DialErr: &core.CloseError{Code: closeSuperseded, Reason: "superseded_incarnation"}}
+				case "refuse_live":
+					end = core.End{GoAway: &conduitv1.GoAway{Code: closeSuperseded, Reason: "superseded_incarnation"}}
+				case "transient":
+					end = core.End{DialErr: &core.CloseError{Code: core.CloseRelayTimeout}}
+				}
+				d, err := a.decide(context.Background(), end, 3*time.Second)
+				if ev.wantStop {
+					var te *TerminalError
+					if !errors.As(err, &te) || te.Code != closeSuperseded {
+						t.Fatalf("at %v: decide = %v, %v; want TerminalError 4409", ev.at, d, err)
+					}
+					continue
+				}
+				if err != nil || d != ev.wantDelay {
+					t.Fatalf("at %v (%s): decide = %v, %v; want %v", ev.at, ev.kind, d, err, ev.wantDelay)
+				}
+			}
+		})
+	}
+}
+
+type decision struct {
+	end   core.End
+	delay time.Duration
+	err   error
+}
+
+// refusalAgent runs an Agent against h on a fake clock and returns the
+// clock, its decisions and Run's result.
+func refusalAgent(t *testing.T, h *fakeHub) (*clock.Fake, <-chan decision, <-chan error) {
+	t.Helper()
+	clk := clock.NewFake(time.Unix(1_700_000_000, 0))
+	decisions := make(chan decision, 32)
+	_, done := startAgent(t, h, func(o *Options) {
+		o.Clock = clk
+		o.OnEnd = func(end core.End, d time.Duration, err error) { decisions <- decision{end, d, err} }
+	})
+	return clk, decisions, done
+}
+
+func nextDecision(t *testing.T, decisions <-chan decision) decision {
+	t.Helper()
+	select {
+	case d := <-decisions:
+		return d
+	case <-time.After(waitTimeout):
+		t.Fatal("no reconnect decision")
+		return decision{}
+	}
+}
+
+// TestAgentSupersededRedialsOncePerMinute: a container the hub keeps
+// refusing with 4409 (a zombie) redials once per BackoffMax, never
+// sooner, and stops with a *TerminalError once the refusals have
+// persisted for RefusalStopAfter.
+func TestAgentSupersededRedialsOncePerMinute(t *testing.T) {
 	h := newFakeHub(t)
-	_, done := startAgent(t, h, nil)
-	s := h.nextSession(t)
-	if err := s.CloseWithCode(closeSuperseded, "superseded_incarnation"); err != nil {
-		t.Fatal(err)
+	h.set(func(h *fakeHub) { h.reject = core.Reject(closeSuperseded, "superseded_incarnation") })
+	clk, decisions, done := refusalAgent(t, h)
+	start := clk.Now()
+	for attempt := int64(1); ; attempt++ {
+		d := nextDecision(t, decisions)
+		if d.err != nil {
+			break
+		}
+		if d.delay != core.BackoffMax {
+			t.Fatalf("attempt %d: redial in %v, want %v", attempt, d.delay, core.BackoffMax)
+		}
+		waitPending(t, clk, 2) // the redial timer and the key refresh
+		clk.Advance(core.BackoffMax - time.Second)
+		if n := h.conduitHits.Load(); n != attempt {
+			t.Fatalf("redialed early: %d attempts after attempt %d", n, attempt)
+		}
+		clk.Advance(time.Second)
 	}
 	var te *TerminalError
 	if err := runResult(t, done); !errors.As(err, &te) || te.Code != closeSuperseded {
 		t.Fatalf("Run = %v, want TerminalError 4409", err)
 	}
-	if n := h.conduitHits.Load(); n != 1 {
-		t.Fatalf("%d conduit attempts, want 1", n)
+	if got := clk.Now().Sub(start); got != RefusalStopAfter {
+		t.Fatalf("stopped after %v, want %v", got, RefusalStopAfter)
+	}
+	if n, want := h.conduitHits.Load(), int64(RefusalStopAfter/core.BackoffMax)+1; n != want {
+		t.Fatalf("%d attempts, want %d", n, want)
+	}
+}
+
+// TestAgentRecoversWhenRefusalClears: a container whose 4409 refusals
+// clear inside the window is admitted on its next redial and keeps
+// running; a later 4409 on the live session is retried, not terminal.
+func TestAgentRecoversWhenRefusalClears(t *testing.T) {
+	h := newFakeHub(t)
+	refuse := func(h *fakeHub) { h.reject = core.Reject(closeSuperseded, "superseded_incarnation") }
+	h.set(refuse)
+	clk, decisions, done := refusalAgent(t, h)
+	for i := range 3 {
+		if d := nextDecision(t, decisions); d.err != nil || d.delay != core.BackoffMax {
+			t.Fatalf("decision = %v, %v; want redial in %v", d.delay, d.err, core.BackoffMax)
+		}
+		waitPending(t, clk, 2)
+		if i == 2 {
+			h.set(func(h *fakeHub) { h.reject = nil }) // the refusal clears
+		}
+		clk.Advance(core.BackoffMax)
+	}
+	s := h.nextSession(t)
+	if n := h.conduitHits.Load(); n != 4 {
+		t.Fatalf("%d attempts, want 4", n)
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("Run returned %v after the refusal cleared", err)
+	default:
+	}
+
+	h.set(refuse)
+	if err := s.CloseWithCode(closeSuperseded, "superseded_incarnation"); err != nil {
+		t.Fatal(err)
+	}
+	if d := nextDecision(t, decisions); d.err != nil || d.delay != core.BackoffMax || d.end.Code() != closeSuperseded {
+		t.Fatalf("live 4409: decision = %v, %v (code %d); want redial in %v", d.delay, d.err, d.end.Code(), core.BackoffMax)
 	}
 }
 

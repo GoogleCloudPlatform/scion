@@ -66,14 +66,19 @@ const (
 // agent) does not cause a refresh per attempt.
 const credentialRefreshMinInterval = time.Minute
 
+// RefusalStopAfter is how long 4409 refusals must persist, with no
+// admission in between, before the dialer stops. Until then each refusal
+// is retried after core.BackoffMax.
+const RefusalStopAfter = 10 * time.Minute
+
 // ErrUnsupported means the hub answered the conduit endpoint with 404: it
 // does not serve conduit sessions (an old hub, or hub.conduit off). The
 // caller falls back to the port-forward tunnel.
 var ErrUnsupported = errors.New("conduit: hub does not serve conduit sessions")
 
 // TerminalError stops the dialer: the hub refused this agent in a way a
-// reconnect cannot fix (4409 superseded launch, 4403 forbidden, 4404 not
-// found, or an HTTP 403 on the upgrade).
+// reconnect cannot fix (4403 forbidden, 4404 not found, an HTTP 403 on the
+// upgrade, or 4409 refusals that persisted for RefusalStopAfter).
 type TerminalError struct {
 	Code   uint32 // close code, or 0 for an HTTP refusal
 	Status int    // HTTP status of a refused upgrade, else 0
@@ -121,6 +126,10 @@ type Options struct {
 	// OnSession is called after each admitted session's grant keys are
 	// installed. Optional.
 	OnSession func(*conduitv1.Welcome)
+	// OnEnd is called after each attempt or session ends with the
+	// dialer's decision: the redial delay, or the error Run returns.
+	// Optional.
+	OnEnd func(end core.End, delay time.Duration, err error)
 	// Clock, Backoff and Session tune timers and the session config
 	// (tests).
 	Clock   clock.Clock
@@ -139,6 +148,9 @@ type Agent struct {
 	mu            sync.Mutex
 	applied       []*conduitv1.Welcome // Welcomes whose keys were applied, newest last
 	lastCredRefsh time.Time
+	// refusedSince is when the current run of 4409 refusals began (zero
+	// while none is in progress); an admitted session resets it.
+	refusedSince time.Time
 }
 
 // New validates opts and returns an Agent.
@@ -192,7 +204,8 @@ func EndpointURL(hubURL string) (string, error) {
 
 // Run keeps a conduit session to the hub until ctx ends (ctx.Err()), the
 // hub turns out not to serve conduit (ErrUnsupported), or the hub refuses
-// the agent terminally (*TerminalError).
+// the agent terminally (*TerminalError; for 4409 only once refusals have
+// persisted for RefusalStopAfter).
 func (a *Agent) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -206,6 +219,7 @@ func (a *Agent) Run(ctx context.Context) error {
 		Config: cfg,
 		Hello:  a.hello,
 		OnSession: func(_ context.Context, s core.Session, w *conduitv1.Welcome) {
+			a.admitted()
 			a.applyWelcomeKeys(w)
 			log.Info("Conduit session established (session %s, relay %s, incarnation %q)",
 				w.GetSessionId(), w.GetRelayInstanceId(), w.GetEndpointIncarnation())
@@ -214,7 +228,13 @@ func (a *Agent) Run(ctx context.Context) error {
 			}
 		},
 		Backoff: a.opts.Backoff,
-		Decide:  a.decide,
+		Decide: func(ctx context.Context, end core.End, delay time.Duration) (time.Duration, error) {
+			d, err := a.decide(ctx, end, delay)
+			if a.opts.OnEnd != nil {
+				a.opts.OnEnd(end, d, err)
+			}
+			return d, err
+		},
 	}
 	return r.Run(ctx)
 }
@@ -259,6 +279,10 @@ const (
 	// ActionRefreshCredential refreshes the agent token, then redials
 	// after the default delay.
 	ActionRefreshCredential
+	// ActionRefused redials after BackoffMax, and stops with a
+	// *TerminalError once refusals have persisted for RefusalStopAfter
+	// (4409).
+	ActionRefused
 	// ActionStop stops with a *TerminalError.
 	ActionStop
 	// ActionUnsupported stops with ErrUnsupported (the hub has no
@@ -268,7 +292,9 @@ const (
 
 // Classify maps how an attempt or session ended to the dialer's action:
 //
-//	4409 superseded launch, 4403, 4404, HTTP 403  stop (terminal)
+//	4409                                          redial after BackoffMax; stop
+//	                                              after RefusalStopAfter of refusals
+//	4403, 4404, HTTP 403                          stop (terminal)
 //	HTTP 404                                      stop: hub has no conduit
 //	4401, HTTP 401                                refresh credential, redial
 //	4400                                          redial after BackoffMax
@@ -288,7 +314,9 @@ func Classify(end core.End) Action {
 		return ActionBackoff
 	}
 	switch end.Code() {
-	case closeSuperseded, core.CloseForbidden, closeTargetNotFound:
+	case closeSuperseded:
+		return ActionRefused
+	case core.CloseForbidden, closeTargetNotFound:
 		return ActionStop
 	case core.CloseUnauthenticated:
 		return ActionRefreshCredential
@@ -309,6 +337,8 @@ func (a *Agent) decide(ctx context.Context, end core.End, delay time.Duration) (
 		te := terminalError(end)
 		log.Error("Conduit: %v; not reconnecting", te)
 		return 0, te
+	case ActionRefused:
+		return a.refused(end, cause)
 	case ActionMaxBackoff:
 		log.Error("Conduit: protocol error (%v); reconnecting in %v", cause, core.BackoffMax)
 		return core.BackoffMax, nil
@@ -321,6 +351,33 @@ func (a *Agent) decide(ctx context.Context, end core.End, delay time.Duration) (
 		log.Info("Conduit session ended (%v); reconnecting in %v", cause, delay)
 	}
 	return delay, nil
+}
+
+// admitted ends any run of 4409 refusals.
+func (a *Agent) admitted() {
+	a.mu.Lock()
+	a.refusedSince = time.Time{}
+	a.mu.Unlock()
+}
+
+// refused handles a 4409: it redials after BackoffMax until refusals have
+// persisted, with no admission in between, for RefusalStopAfter, then
+// stops with a *TerminalError.
+func (a *Agent) refused(end core.End, cause string) (time.Duration, error) {
+	now := a.clk.Now()
+	a.mu.Lock()
+	if a.refusedSince.IsZero() {
+		a.refusedSince = now
+	}
+	since := now.Sub(a.refusedSince)
+	a.mu.Unlock()
+	if since >= RefusalStopAfter {
+		te := terminalError(end)
+		log.Error("Conduit: %v for %v; not reconnecting", te, since)
+		return 0, te
+	}
+	log.Warn("Conduit: refused (%v); retrying in %v", cause, core.BackoffMax)
+	return core.BackoffMax, nil
 }
 
 // refreshCredential refreshes the agent token, at most once per

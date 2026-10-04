@@ -19,7 +19,6 @@ package hub
 import (
 	"bufio"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -29,8 +28,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
-	sconduit "github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
 	scionhub "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	scionportforward "github.com/GoogleCloudPlatform/scion/pkg/sciontool/portforward"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
@@ -234,19 +233,36 @@ func TestConduitProxyVersionMatrix(t *testing.T) {
 	}
 }
 
-// TestConduitSciontoolSupersededLaunchStops: a sciontool presenting a
+// TestConduitSciontoolSupersededLaunchRefused: a sciontool presenting a
 // launch id the hub has superseded is refused 4409 by the real hub and
-// stops for good instead of redialing.
-func TestConduitSciontoolSupersededLaunchStops(t *testing.T) {
+// redials only after the maximum backoff, without being admitted (it
+// stops once refusals persist; see the sciontool conduit tests).
+func TestConduitSciontoolSupersededLaunchRefused(t *testing.T) {
 	f := newConduitProxyFixture(t, nil)
+	type decision struct {
+		code  uint32
+		delay time.Duration
+		err   error
+	}
+	decisions := make(chan decision, 4)
+	f.onEnd = func(end conduit.End, delay time.Duration, err error) {
+		decisions <- decision{end.Code(), delay, err}
+	}
 	_, result := f.runAgent(t, "superseded-launch", make(chan *conduitv1.Welcome, 1))
-	select {
-	case err := <-result:
-		var te *sconduit.TerminalError
-		require.True(t, errors.As(err, &te), "Run: %v", err)
-		assert.Equal(t, relay.CloseSupersededIncarnation, te.Code)
-	case <-time.After(10 * time.Second):
-		t.Fatal("sciontool kept redialing a superseded launch")
+	for attempt := 1; attempt <= 2; attempt++ {
+		select {
+		case d := <-decisions:
+			require.NoError(t, d.err, "attempt %d", attempt)
+			assert.Equal(t, relay.CloseSupersededIncarnation, d.code, "attempt %d", attempt)
+			assert.Equal(t, conduit.BackoffMax, d.delay, "attempt %d", attempt)
+		case err := <-result:
+			t.Fatalf("sciontool stopped on attempt %d: %v", attempt, err)
+		case <-time.After(10 * time.Second):
+			t.Fatalf("no decision for attempt %d", attempt)
+		}
+		// The redial timer and the key refresh are armed.
+		require.True(t, f.agentClock.WaitFor(10*time.Second, func(n int) bool { return n == 2 }))
+		f.agentClock.Advance(conduit.BackoffMax)
 	}
 	assert.Zero(t, f.sessions.Load())
 }
