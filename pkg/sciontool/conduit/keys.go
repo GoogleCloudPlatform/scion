@@ -37,6 +37,14 @@ import (
 // least this often already trusts a key before it signs anything.
 const KeyRefreshInterval = 10 * time.Minute
 
+// After a failed grant-key fetch the next attempt comes after
+// keyRetryMin, doubling per consecutive failure up to keyRetryMax (both
+// bounded by the refresh interval). A success restores the normal cadence.
+const (
+	keyRetryMin = 30 * time.Second
+	keyRetryMax = 5 * time.Minute
+)
+
 // keyRefreshTimeout bounds one grant-key fetch.
 const keyRefreshTimeout = 30 * time.Second
 
@@ -66,19 +74,27 @@ func (a *Agent) applyWelcomeKeys(w *conduitv1.Welcome) {
 }
 
 // refreshKeysLoop refreshes the grant keys every KeyRefreshInterval (or
-// the configured shorter interval) until ctx ends.
+// the configured shorter interval) until ctx ends. A failed fetch is
+// retried with backoff (keyRetryMin doubling to keyRetryMax) instead of
+// waiting a full interval.
 func (a *Agent) refreshKeysLoop(ctx context.Context) {
+	interval := a.opts.KeyRefreshInterval
+	wait, retry := interval, min(keyRetryMin, interval)
 	for {
-		ch, stop := clock.After(a.clk, a.opts.KeyRefreshInterval)
+		ch, stop := clock.After(a.clk, wait)
 		select {
 		case <-ctx.Done():
 			stop()
 			return
 		case <-ch:
 		}
-		if err := a.RefreshKeys(ctx); err != nil && ctx.Err() == nil {
-			log.Warn("Conduit: grant key refresh failed: %v", err)
+		err := a.RefreshKeys(ctx)
+		if err == nil || ctx.Err() != nil {
+			wait, retry = interval, min(keyRetryMin, interval)
+			continue
 		}
+		wait, retry = retry, min(retry*2, keyRetryMax, interval)
+		log.Warn("Conduit: grant key refresh failed, retrying in %v: %v", wait, err)
 	}
 }
 
