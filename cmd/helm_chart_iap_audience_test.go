@@ -137,6 +137,17 @@ func TestHelmChartIAPAudiencePattern(t *testing.T) {
 		{"missing segment", "/projects/123/backendServices/456"},
 		{"wrong literal", "/projects/123/global/backendservices/456"},
 		{"mixed forms", "/projects/123/locations/r/backendServices/456"},
+		// Near misses: a third path form, a swapped or misspelt literal. A
+		// pattern widened by one more alternation accepts one of these.
+		{"global, unknown kind", "/projects/1/global/foo/x"},
+		{"global services", "/projects/1/global/services/x"},
+		{"locations backendServices", "/projects/1/locations/r/backendServices/x"},
+		{"regions backendServices", "/projects/1/regions/r/backendServices/x"},
+		{"locations, unknown kind", "/projects/1/locations/r/foo/x"},
+		{"singular backendService", "/projects/1/global/backendService/x"},
+		{"singular service", "/projects/1/locations/r/service/x"},
+		{"singular project", "/project/1/global/backendServices/x"},
+		{"zones services", "/projects/1/zones/z/services/x"},
 		{"oauth client id", "123-abc.apps.googleusercontent.com"},
 		{"bare word", "my-iap-audience"},
 		// Trailing slashes.
@@ -168,6 +179,28 @@ func TestHelmChartIAPAudiencePattern(t *testing.T) {
 		if got := schema.MatchString(c.aud); got != hub {
 			t.Errorf("%s (%q): values.schema.json pattern on the raw value says %v, the hub says %v", c.name, c.aud, got, hub)
 		}
+	}
+
+	// GENERATED NEAR MISSES: every scope crossed with every resource kind,
+	// so a widened alternation is caught whichever combination it adds.
+	var generatedAccepted int
+	for _, scope := range []string{"global", "locations/r", "regions/r", "zones/z"} {
+		for _, kind := range []string{"services", "backendServices", "foo"} {
+			aud := "/projects/1/" + scope + "/" + kind + "/x"
+			hub := hubAcceptsIAPAudience(aud)
+			if hub {
+				generatedAccepted++
+			}
+			if got := helper.MatchString(chartNormaliseAudience(aud)); got != hub {
+				t.Errorf("generated %q: _helpers.tpl iapAudiencePattern says %v, the hub says %v", aud, got, hub)
+			}
+			if got := schema.MatchString(aud); got != hub {
+				t.Errorf("generated %q: values.schema.json pattern says %v, the hub says %v", aud, got, hub)
+			}
+		}
+	}
+	if generatedAccepted != 2 {
+		t.Errorf("the hub accepts %d of the generated scope x kind audiences, expected exactly 2 (global/backendServices and locations/services)", generatedAccepted)
 	}
 
 	// THE ONE DELIBERATE DIFFERENCE. The schema passes the empty string,
