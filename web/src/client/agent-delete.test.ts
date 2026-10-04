@@ -51,6 +51,7 @@ import {
   forceDeleteConfirmMessage,
 } from './agent-delete.js';
 import { StateManager } from './state.js';
+import { extractApiError } from './api.js';
 import { showConfirm } from '../components/shared/confirm-dialog.js';
 import { effectiveDeletion, START_BLOCKED_BY_DELETE_MESSAGE } from '../shared/agent-deletion.js';
 
@@ -246,6 +247,42 @@ describe('runAgentDelete', () => {
     expect(busy).toEqual([true, false]);
   });
 
+  it('a network error during the force fallback → failed with forced: true', async () => {
+    stubFetch(hubError(502, 'runtime_error', 'broker down'), new TypeError('Failed to fetch'));
+    const out = await runAgentDelete({ agentId: 'a1', confirm: false });
+    expect(out).toEqual({
+      kind: 'failed',
+      forced: true,
+      status: null,
+      code: '',
+      message: 'Failed to fetch',
+    });
+  });
+
+  it('error text matches extractApiError for every body shape (review N2)', async () => {
+    const bodies: unknown[] = [
+      { error: { code: 'conflict', message: 'ambiguous target' } },
+      { error: { code: 'x', message: 'm', details: { guidance: 'do this' } } },
+      { error: { code: 'x' }, message: 'top-level message' },
+      { error: { code: 'x' } },
+      { message: 'plain message' },
+      { error: 'string error' },
+      {},
+    ];
+    for (const body of bodies) {
+      const want = await extractApiError(json(409, body), 'Failed to delete agent');
+      stubFetch(json(409, body));
+      const out = await runAgentDelete({ agentId: 'a1', confirm: false });
+      expect(out, JSON.stringify(body)).toMatchObject({ kind: 'failed', message: want });
+    }
+  });
+
+  it('keeps the envelope code when the message is top-level: {error:{code}, message}', async () => {
+    stubFetch(json(409, { error: { code: 'conflict' }, message: 'top-level message' }));
+    const out = await runAgentDelete({ agentId: 'a1', confirm: false });
+    expect(out).toMatchObject({ kind: 'failed', code: 'conflict', message: 'top-level message' });
+  });
+
   describe('force (the failure banner)', () => {
     it('asks the force confirm, then sends ?force=true directly', async () => {
       const calls = stubFetch(noContent());
@@ -304,6 +341,21 @@ describe('lifecycleActionErrorMessage', () => {
     expect(msg).toBe(START_BLOCKED_BY_DELETE_MESSAGE);
     expect(msg).toMatch(/can't be started/);
     expect(msg).toMatch(/Force delete/);
+  });
+
+  it('{error:{code}, message}: delete_in_progress is still explained; other codes pass the top-level message (review N2)', async () => {
+    expect(
+      await lifecycleActionErrorMessage(
+        json(409, { error: { code: 'delete_in_progress' }, message: 'being deleted' }),
+        'x'
+      )
+    ).toBe(START_BLOCKED_BY_DELETE_MESSAGE);
+    expect(
+      await lifecycleActionErrorMessage(
+        json(409, { error: { code: 'agent_launching' }, message: 'launching' }),
+        'x'
+      )
+    ).toBe('launching');
   });
 
   it('passes other errors through (another 409 code, other statuses)', async () => {

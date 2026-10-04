@@ -158,7 +158,7 @@ export function deletionBannerText(d: DeletionInfo): { title: string; detail: st
     detail =
       'The hub stopped working on this delete before it finished. Retry it, or force delete.';
   } else {
-    detail = 'Retry the delete, or force delete to remove the agent despite the broker error.';
+    detail = 'Retry the delete, or force delete to remove the agent anyway.';
   }
   return { title, detail };
 }

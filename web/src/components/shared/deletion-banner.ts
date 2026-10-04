@@ -47,6 +47,14 @@ export class ScionDeletionBanner extends LitElement {
   @property({ type: Boolean, attribute: 'can-delete' })
   canDelete = false;
 
+  /**
+   * The agent's name, for the buttons' accessible labels ("Retry delete of
+   * <name>", "Force delete <name>"), so a list of failed rows reads
+   * distinctly to assistive tech.
+   */
+  @property({ type: String, attribute: 'agent-name' })
+  agentName = '';
+
   /** A delete request for this agent is in flight; disable the buttons. */
   @property({ type: Boolean })
   busy = false;
@@ -142,6 +150,18 @@ export class ScionDeletionBanner extends LitElement {
       white-space: nowrap;
     }
 
+    /* The full explanation for keyboard and screen-reader users on dense
+       rows, where it is otherwise only in the hover title. */
+    .visually-hidden {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+
     .compact .hint {
       font-size: 0.75rem;
     }
@@ -169,6 +189,7 @@ export class ScionDeletionBanner extends LitElement {
         <sl-button
           class="retry"
           size="small"
+          aria-label=${this.agentName ? `Retry delete of ${this.agentName}` : 'Retry delete'}
           ?disabled=${this.busy}
           ?loading=${this.busy}
           @click=${(e: Event): void => this.emit('deletion-retry', e)}
@@ -179,6 +200,7 @@ export class ScionDeletionBanner extends LitElement {
         <sl-button
           class="force"
           size="small"
+          aria-label=${this.agentName ? `Force delete ${this.agentName}` : 'Force delete'}
           variant="danger"
           outline
           ?disabled=${this.busy}
@@ -204,6 +226,7 @@ export class ScionDeletionBanner extends LitElement {
             <span class="title">${title}</span>
           </span>
           ${blocked ? html`<span class="hint">${DELETION_START_BLOCKED_HINT}</span>` : nothing}
+          <span class="detail visually-hidden">${detail}</span>
           ${this.renderActions()}
         </div>
       `;

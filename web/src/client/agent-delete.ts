@@ -104,7 +104,11 @@ const FORCE_CONFIRM_OPTIONS = {
   variant: 'danger',
 } as const;
 
-/** Error code and message from a failed response (the `extractApiError` text). */
+/**
+ * Error code and message from a failed response. The message matches
+ * `extractApiError` exactly; this also returns the code, which
+ * `lifecycleActionErrorMessage` needs, from a single body read.
+ */
 async function readError(
   res: Response,
   fallback: string
@@ -114,17 +118,19 @@ async function readError(
       error?: { code?: string; message?: string; details?: { guidance?: string } } | string;
       message?: string;
     } | null;
-    if (data && typeof data.error === 'object' && data.error) {
-      const code = data.error.code ?? '';
-      if (data.error.message) {
-        let message = data.error.message;
-        if (data.error.details?.guidance) message += ` — ${data.error.details.guidance}`;
-        return { code, message };
-      }
-      return { code, message: fallback };
+    // Same message precedence as `extractApiError` (api.ts): the envelope's
+    // `error.message` (+ guidance), else a top-level `message`, else a string
+    // `error`; the code comes from the envelope when there is one.
+    const envelope = data && typeof data.error === 'object' && data.error ? data.error : null;
+    const code = envelope?.code ?? '';
+    if (envelope?.message) {
+      let message = envelope.message;
+      if (envelope.details?.guidance) message += ` — ${envelope.details.guidance}`;
+      return { code, message };
     }
-    if (data && typeof data.message === 'string') return { code: '', message: data.message };
-    if (data && typeof data.error === 'string') return { code: '', message: data.error };
+    if (data && typeof data.message === 'string') return { code, message: data.message };
+    if (data && typeof data.error === 'string') return { code, message: data.error };
+    return { code, message: fallback };
   } catch {
     // Not JSON.
   }

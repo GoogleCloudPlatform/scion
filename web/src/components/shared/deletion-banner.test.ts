@@ -177,6 +177,30 @@ describe('scion-deletion-banner', () => {
     expect(plain.shadowRoot?.querySelector('.hint')).toBeNull();
   });
 
+  it('compact rows carry the full explanation in a visually hidden span (review nit 2)', async () => {
+    const el = await mount(view({ code: 'in_doubt' }), { compact: true });
+    const detail = el.shadowRoot?.querySelector('.compact .detail.visually-hidden');
+    expect(detail?.textContent).toMatch(/starting this agent is blocked/i);
+  });
+
+  it('Retry and Force are labelled with the agent name (review nit 3)', async () => {
+    const el = await mount(view({ code: 'runtime_error' }));
+    el.agentName = 'alpha';
+    await el.updateComplete;
+    expect(el.shadowRoot?.querySelector('.retry')?.getAttribute('aria-label')).toBe(
+      'Retry delete of alpha'
+    );
+    expect(el.shadowRoot?.querySelector('.force')?.getAttribute('aria-label')).toBe(
+      'Force delete alpha'
+    );
+  });
+
+  it('conflict gets code-neutral wording, not "broker error" (review nit 1)', async () => {
+    const el = await mount(view({ code: 'conflict' }));
+    expect(text(el, '.detail')).not.toMatch(/broker/i);
+    expect(text(el, '.detail')).toMatch(/Retry the delete, or force delete/);
+  });
+
   it('role="alert" only when live', async () => {
     const quiet = await mount(view({ code: 'runtime_error' }));
     expect(quiet.shadowRoot?.querySelector('[role="alert"]')).toBeNull();

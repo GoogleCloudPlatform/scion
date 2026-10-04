@@ -78,6 +78,7 @@ func TestComputeAgentDeletion(t *testing.T) {
 			{"live finalizing", &Agent{DeletionState: DeletionStateFinalizing, DeletionLeaseAt: tp(now.Add(time.Minute))}, DeletionStateDeleting, DeletionStageFinalizing},
 			{"lapsed finalizing", &Agent{DeletionState: DeletionStateFinalizing, DeletionLeaseAt: tp(now.Add(-time.Minute))}, DeletionStateFailed, DeletionStageFinalizing},
 			{"revoke_failed finalizing", &Agent{DeletionState: DeletionStateFinalizing, DeletionLeaseAt: tp(now), DeletionCode: DeletionCodeRevokeFailed}, DeletionStateFailed, DeletionStageFinalizing},
+			{"finalize_failed finalizing", &Agent{DeletionState: DeletionStateFinalizing, DeletionLeaseAt: tp(now), DeletionCode: DeletionCodeFinalizeFailed}, DeletionStateFailed, DeletionStageFinalizing},
 			{"live deleting", &Agent{DeletionState: DeletionStateDeleting, DeletionLeaseAt: tp(now.Add(time.Minute))}, DeletionStateDeleting, ""},
 			{"lapsed deleting", &Agent{DeletionState: DeletionStateDeleting, DeletionLeaseAt: tp(now.Add(-time.Minute))}, DeletionStateFailed, ""},
 			{"failed", &Agent{DeletionState: DeletionStateFailed, DeletionCode: DeletionCodeInDoubt}, DeletionStateFailed, ""},

@@ -3179,6 +3179,18 @@ describe('project-detail — agent list window', () => {
       expect(showToast).toHaveBeenCalledWith(START_BLOCKED_BY_DELETE_MESSAGE);
     });
 
+    it('a persisted stopping filter is restored (review nit 6)', async () => {
+      const projectId = 'p2-filter-persisted';
+      localStorage.setItem(`scion-filter-project-agents-phase-${projectId}`, 'stopping');
+      const agents = [makeAgent(0, { projectId, phase: 'stopping' }), makeAgent(1, { projectId })];
+      const { el } = await mountProject(projectId, agents, 'grid');
+      await vi.waitFor(() =>
+        expect((el as unknown as Page).displayAgents.map((a) => a.id)).toEqual(['a-0'])
+      );
+      const active = el.shadowRoot?.querySelector('.filter-bar button.active');
+      expect(active?.textContent?.trim()).toBe('Stopping');
+    });
+
     it('the stopping filter shows stopping agents, and live deltas move agents in and out', async () => {
       const projectId = 'p2-filter';
       const agents = [

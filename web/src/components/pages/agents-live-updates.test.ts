@@ -46,7 +46,7 @@ import { runAgentDelete } from '../../client/agent-delete.js';
 import { showToast } from '../../utils/toast.js';
 import { showConfirm } from '../shared/confirm-dialog.js';
 import { START_BLOCKED_BY_DELETE_MESSAGE } from '../../shared/agent-deletion.js';
-import { stateManager } from '../../client/state.js';
+import { stateManager, StateManager } from '../../client/state.js';
 import type { Agent } from '../../shared/types.js';
 
 /** happy-dom has no EventSource; setScope opens one. */
@@ -75,9 +75,9 @@ beforeAll(() => {
   });
 });
 
-function jsonResponse(body: unknown): Response {
+function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
-    status: 200,
+    status,
     headers: { 'Content-Type': 'application/json' },
   });
 }
@@ -730,6 +730,68 @@ describe('scion-page-agents live updates (agents-changed -> mergeChanged)', () =
       expect(showConfirm).toHaveBeenCalledTimes(1);
       expect(vi.mocked(showConfirm).mock.calls[0][0]).toMatch(/^Force delete agent "a1"/);
     });
+
+    // Design acceptance (§8 phase 2) end to end through a page: browser A
+    // (a bare StateManager) starts a delete that fails; browser B (this page,
+    // on the stateManager singleton) sees the failed view from SSE only,
+    // clicks Force in its banner, and both browsers end with the agent
+    // removed once the hub publishes `deleted` (review N3).
+    for (const answer of ['204', '202'] as const) {
+      it(`a second browser force-completes a failed delete it did not start, via the page's Force button (force → ${answer})`, async () => {
+        const forceClaim = {
+          ...base,
+          claim: 2,
+          state: 'deleting',
+          leaseExpiresAt: new Date(Date.now() + 600_000).toISOString(),
+        };
+        const mutations = stub([actionable('a1'), actionable('a2')], () =>
+          answer === '204'
+            ? new Response(null, { status: 204 })
+            : jsonResponse({ agentId: 'a1', deletion: forceClaim }, 202)
+        );
+        const browserA = new StateManager();
+        browserA.setScope({ type: 'dashboard' });
+        const el = await mount(); // browser B
+        const emitTo = (sm: StateManager, subject: string, data: unknown): void =>
+          (
+            sm as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }
+          ).handleUpdate({ subject, data });
+        const hubPublish = async (subject: string, data: unknown): Promise<void> => {
+          emitTo(browserA, subject, data);
+          handleUpdate(subject, data);
+          await flush();
+          await el.updateComplete;
+        };
+        await hubPublish('agent.a1.created', { phase: 'running', name: 'a1' });
+        await hubPublish('agent.a1.status', { deletion: { ...liveDeleting } });
+        await hubPublish('agent.a1.status', {
+          deletion: { ...base, state: 'failed', code: 'runtime_error', error: 'broker refused' },
+        });
+        expect(browserA.getAgent('a1')?.deletion?.state).toBe('failed');
+
+        const [banner] = await banners(el, '.agent-card');
+        expect(title(banner)).toBe('Delete failed: broker refused');
+        (banner.shadowRoot?.querySelector('.force') as HTMLElement).click();
+        await vi.waitFor(() => expect(runAgentDelete).toHaveBeenCalledTimes(1));
+        await vi.mocked(runAgentDelete).mock.results[0].value;
+        expect(mutations).toEqual(['DELETE /api/v1/agents/a1?force=true']);
+        await flush();
+        await el.updateComplete;
+        if (answer === '202') {
+          // B shows the force claim as Deleting… until the hub finishes.
+          expect(el.agents.find((a) => a.id === 'a1')?.deletion).toMatchObject({
+            state: 'deleting',
+            claim: 2,
+          });
+          await hubPublish('agent.a1.status', { deletion: forceClaim });
+        }
+
+        await hubPublish('agent.a1.deleted', {});
+        expect(browserA.getAgent('a1')).toBeUndefined();
+        expect(el.agents.map((a) => a.id)).toEqual(['a2']);
+        browserA.disconnect();
+      });
+    }
 
     it('Start answered 409 delete_in_progress shows the explanation, not the generic error', async () => {
       stub(

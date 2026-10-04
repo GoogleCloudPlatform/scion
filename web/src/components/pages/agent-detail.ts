@@ -803,6 +803,7 @@ export class ScionPageAgentDetail extends LitElement {
       class="deletion-banner"
       live
       .deletion=${view}
+      agent-name=${agent.name}
       ?can-delete=${can(agent._capabilities, 'delete')}
       ?busy=${this.actionLoading['delete'] || false}
       @deletion-retry=${(): void => void this.deleteAgent({ confirm: false })}

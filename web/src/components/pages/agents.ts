@@ -1361,6 +1361,7 @@ export class ScionPageAgents extends LitElement {
     return html`<scion-deletion-banner
       class="deletion-banner"
       .deletion=${view}
+      agent-name=${agent.name}
       ?can-delete=${can(agent._capabilities, 'delete')}
       ?busy=${this.actionLoading[agent.id] || false}
       ?compact=${compact}
