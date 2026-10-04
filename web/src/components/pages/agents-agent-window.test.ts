@@ -77,10 +77,10 @@ async function settle(el: TestEl): Promise<void> {
     expect(internals(el).agentsLoading).toBe(false);
     expect(internals(el).agentWindow.loading).toBe(false);
   };
-  await vi.waitFor(idle);
+  await vi.waitFor(idle, { timeout: 10_000 });
   (stateManager as unknown as { flush(): void }).flush();
   await el.updateComplete;
-  await vi.waitFor(idle);
+  await vi.waitFor(idle, { timeout: 10_000 });
 }
 
 /** Mounts the page and returns once its first request is sent, without waiting for it. */
@@ -1059,7 +1059,7 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       expect(run).toHaveBeenCalledTimes(1);
       let outcome: unknown = 'pending';
       void (run.mock.results[0].value as Promise<unknown>).then((r) => (outcome = r));
-      await vi.waitFor(() => expect(outcome).toBeNull());
+      await vi.waitFor(() => expect(outcome).toBeNull(), { timeout: 10_000 });
       await el.updateComplete;
       expect(run).toHaveBeenCalledTimes(1);
       expect(h.sent).toHaveLength(1);

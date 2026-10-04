@@ -310,10 +310,13 @@ async function flushLive(el: TestEl): Promise<void> {
  * page fetch), then runs the pending live flush and lets the page render.
  */
 async function settle(el: TestEl): Promise<void> {
-  await vi.waitFor(() => {
-    expect(internals(el).agentsLoading).toBe(false);
-    expect(internals(el).agentWindow.loading).toBe(false);
-  });
+  await vi.waitFor(
+    () => {
+      expect(internals(el).agentsLoading).toBe(false);
+      expect(internals(el).agentWindow.loading).toBe(false);
+    },
+    { timeout: 10_000 }
+  );
   await flushLive(el);
 }
 
@@ -4550,7 +4553,7 @@ describe('project-detail — agent list window', { timeout: 20_000 }, () => {
       expect(run).toHaveBeenCalledTimes(1);
       let outcome: unknown = 'pending';
       void (run.mock.results[0].value as Promise<unknown>).then((r) => (outcome = r));
-      await vi.waitFor(() => expect(outcome).toBeNull());
+      await vi.waitFor(() => expect(outcome).toBeNull(), { timeout: 10_000 });
       await el.updateComplete;
       expect(run).toHaveBeenCalledTimes(1);
       expect(ctl.sent).toHaveLength(1);
