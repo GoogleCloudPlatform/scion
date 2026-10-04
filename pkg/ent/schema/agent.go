@@ -337,6 +337,22 @@ func (Agent) Fields() []ent.Field {
 			Optional().
 			Default(""),
 
+		// --- Run intent ---
+		// run_intent records whether the user (or the system acting for the
+		// user) wants this agent running: "running" or "stopped". NULL means
+		// unknown; nothing treats a NULL intent as wanting the agent to run.
+		// It is written only by AgentStore.SetRunIntent and RevertRunIntent
+		// (and the one-time boot backfill), never by UpdateAgent or
+		// CreateAgent, and writing it never bumps state_version.
+		field.String("run_intent").
+			Optional().
+			Nillable(),
+		// run_intent_at is the store-clock time of the last run_intent
+		// write. It strictly increases per row, so it orders intent writes.
+		field.Time("run_intent_at").
+			Optional().
+			Nillable(),
+
 		// soft_delete_op_id is the operation ID of the soft delete that
 		// produced the current DeletedAt. The soft delete deactivates the
 		// agent's delegation edges under this ID, and restore reactivates
@@ -379,6 +395,8 @@ func (Agent) Indexes() []ent.Index {
 				entsql.IndexWhere("launch_state = 'active'"),
 			),
 		index.Fields("launch_id"),
+		// Lookup of agents on a broker by run intent.
+		index.Fields("runtime_broker_id", "run_intent"),
 		// Partial index backing CompositeStore.ReconcileHarnessConfigColumn's
 		// every-boot scan (GoogleCloudPlatform/scion#2153), which queries
 		// exactly Where(HarnessConfigIsNil(), AppliedConfigNotNil()) ordered

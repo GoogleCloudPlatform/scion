@@ -1782,3 +1782,36 @@ func TestAgentStore_NoWidening_NewFiltersRespectAuthorizedProjectIDs(t *testing.
 		assert.ElementsMatch(t, []string{visibleDescendant.ID}, ids(result.Items))
 	})
 }
+
+func TestUpdateAgentStatus_ClearMessageIf(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	a := makeAgent(projectID, "clear-message-if")
+	require.NoError(t, s.CreateAgent(ctx, a))
+
+	const notice = "Stop queued: broker offline."
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Message: notice}))
+
+	// A different value leaves the message in place.
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{
+		ContainerStatus: "stopped",
+		ClearMessageIf:  "some other notice",
+	}))
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, notice, got.Message)
+	assert.Equal(t, "stopped", got.ContainerStatus)
+
+	// The matching value clears it.
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{ClearMessageIf: notice}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Empty(t, got.Message)
+
+	// An explicit message in the same update wins.
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Message: notice}))
+	require.NoError(t, s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Message: "newer", ClearMessageIf: notice}))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "newer", got.Message)
+}

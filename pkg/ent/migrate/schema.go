@@ -213,6 +213,8 @@ var (
 		{Name: "deletion_error", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "deletion_prior", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "deletion_request", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "run_intent", Type: field.TypeString, Nullable: true},
+		{Name: "run_intent_at", Type: field.TypeTime, Nullable: true},
 		{Name: "soft_delete_op_id", Type: field.TypeString, Nullable: true},
 		{Name: "project_id", Type: field.TypeUUID},
 	}
@@ -224,7 +226,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[64]},
+				Columns:    []*schema.Column{AgentsColumns[66]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -233,7 +235,7 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[64]},
+				Columns: []*schema.Column{AgentsColumns[1], AgentsColumns[66]},
 			},
 			{
 				Name:    "agent_launch_deadline",
@@ -247,6 +249,11 @@ var (
 				Name:    "agent_launch_id",
 				Unique:  false,
 				Columns: []*schema.Column{AgentsColumns[44]},
+			},
+			{
+				Name:    "agent_runtime_broker_id_run_intent",
+				Unique:  false,
+				Columns: []*schema.Column{AgentsColumns[25], AgentsColumns[63]},
 			},
 			{
 				Name:    "agent_harness_config_reconcile_pending",
@@ -581,6 +588,74 @@ var (
 				Name:    "chatlinkcode_expires_at",
 				Unique:  false,
 				Columns: []*schema.Column{ChatLinkCodesColumns[7]},
+			},
+		},
+	}
+	// ConduitPrincipalEpochsColumns holds the columns for the "conduit_principal_epochs" table.
+	ConduitPrincipalEpochsColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeInt, Increment: true},
+		{Name: "principal_kind", Type: field.TypeString},
+		{Name: "principal_id", Type: field.TypeString},
+		{Name: "epoch", Type: field.TypeInt64},
+	}
+	// ConduitPrincipalEpochsTable holds the schema information for the "conduit_principal_epochs" table.
+	ConduitPrincipalEpochsTable = &schema.Table{
+		Name:       "conduit_principal_epochs",
+		Columns:    ConduitPrincipalEpochsColumns,
+		PrimaryKey: []*schema.Column{ConduitPrincipalEpochsColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "conduitprincipalepoch_principal_kind_principal_id",
+				Unique:  true,
+				Columns: []*schema.Column{ConduitPrincipalEpochsColumns[1], ConduitPrincipalEpochsColumns[2]},
+			},
+		},
+	}
+	// ConduitSessionsColumns holds the columns for the "conduit_sessions" table.
+	ConduitSessionsColumns = []*schema.Column{
+		{Name: "session_id", Type: field.TypeString},
+		{Name: "principal_kind", Type: field.TypeString},
+		{Name: "principal_id", Type: field.TypeString},
+		{Name: "project_id", Type: field.TypeString, Nullable: true},
+		{Name: "relay_generation", Type: field.TypeInt64},
+		{Name: "transport", Type: field.TypeString},
+		{Name: "endpoint_incarnation", Type: field.TypeString},
+		{Name: "exec_scope", Type: field.TypeString, Nullable: true},
+		{Name: "connection_epoch", Type: field.TypeInt64},
+		{Name: "draining", Type: field.TypeBool, Default: false},
+		{Name: "capabilities", Type: field.TypeJSON, Default: "{}"},
+		{Name: "connected_at", Type: field.TypeTime},
+		{Name: "last_seen", Type: field.TypeTime},
+		{Name: "relay_instance_id", Type: field.TypeString},
+	}
+	// ConduitSessionsTable holds the schema information for the "conduit_sessions" table.
+	ConduitSessionsTable = &schema.Table{
+		Name:       "conduit_sessions",
+		Columns:    ConduitSessionsColumns,
+		PrimaryKey: []*schema.Column{ConduitSessionsColumns[0]},
+		ForeignKeys: []*schema.ForeignKey{
+			{
+				Symbol:     "conduit_sessions_relay_instances_sessions",
+				Columns:    []*schema.Column{ConduitSessionsColumns[13]},
+				RefColumns: []*schema.Column{RelayInstancesColumns[0]},
+				OnDelete:   schema.Cascade,
+			},
+		},
+		Indexes: []*schema.Index{
+			{
+				Name:    "conduitsession_principal_kind_principal_id_last_seen",
+				Unique:  false,
+				Columns: []*schema.Column{ConduitSessionsColumns[1], ConduitSessionsColumns[2], ConduitSessionsColumns[12]},
+				Annotation: &entsql.IndexAnnotation{
+					DescColumns: map[string]bool{
+						ConduitSessionsColumns[12].Name: true,
+					},
+				},
+			},
+			{
+				Name:    "conduitsession_relay_instance_id_relay_generation",
+				Unique:  false,
+				Columns: []*schema.Column{ConduitSessionsColumns[13], ConduitSessionsColumns[4]},
 			},
 		},
 	}
@@ -1762,6 +1837,22 @@ var (
 			},
 		},
 	}
+	// RelayInstancesColumns holds the columns for the "relay_instances" table.
+	RelayInstancesColumns = []*schema.Column{
+		{Name: "instance_id", Type: field.TypeString},
+		{Name: "generation", Type: field.TypeInt64},
+		{Name: "internal_endpoint", Type: field.TypeString, Default: ""},
+		{Name: "public_endpoint", Type: field.TypeString, Nullable: true},
+		{Name: "started_at", Type: field.TypeTime},
+		{Name: "last_seen", Type: field.TypeTime},
+		{Name: "draining", Type: field.TypeBool, Default: false},
+	}
+	// RelayInstancesTable holds the schema information for the "relay_instances" table.
+	RelayInstancesTable = &schema.Table{
+		Name:       "relay_instances",
+		Columns:    RelayInstancesColumns,
+		PrimaryKey: []*schema.Column{RelayInstancesColumns[0]},
+	}
 	// RoleBindingsColumns holds the columns for the "role_bindings" table.
 	RoleBindingsColumns = []*schema.Column{
 		{Name: "id", Type: field.TypeUUID},
@@ -2401,6 +2492,8 @@ var (
 		BrokerSecretsTable,
 		BrokerSettingsTable,
 		ChatLinkCodesTable,
+		ConduitPrincipalEpochsTable,
+		ConduitSessionsTable,
 		ConversationsTable,
 		ConversationParticipantsTable,
 		DecisionAuditsTable,
@@ -2435,6 +2528,7 @@ var (
 		ProjectContributorsTable,
 		ProjectPreStartHooksTable,
 		ProjectSyncStateTable,
+		RelayInstancesTable,
 		RoleBindingsTable,
 		RoleDefinitionsTable,
 		RuntimeBrokersTable,
@@ -2484,6 +2578,13 @@ func init() {
 	}
 	ChatLinkCodesTable.Annotation = &entsql.Annotation{
 		Table: "chat_link_codes",
+	}
+	ConduitPrincipalEpochsTable.Annotation = &entsql.Annotation{
+		Table: "conduit_principal_epochs",
+	}
+	ConduitSessionsTable.ForeignKeys[0].RefTable = RelayInstancesTable
+	ConduitSessionsTable.Annotation = &entsql.Annotation{
+		Table: "conduit_sessions",
 	}
 	ConversationsTable.Annotation = &entsql.Annotation{
 		Table: "conversations",
@@ -2566,6 +2667,9 @@ func init() {
 	}
 	ProjectSyncStateTable.Annotation = &entsql.Annotation{
 		Table: "project_sync_state",
+	}
+	RelayInstancesTable.Annotation = &entsql.Annotation{
+		Table: "relay_instances",
 	}
 	RoleBindingsTable.ForeignKeys[0].RefTable = RoleDefinitionsTable
 	RuntimeBrokersTable.Annotation = &entsql.Annotation{

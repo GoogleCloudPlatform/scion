@@ -146,6 +146,10 @@
           "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
           "description": "PriorityClass name (DNS-1123 subdomain) applied to the agent pod's spec.priorityClassName, or the empty string for unset. The PriorityClass must already exist on the cluster; Scion does not create one. Overrides any runtimes.<name>.priority_class_name default."
         },
+        "safeToEvict": {
+          "type": "boolean",
+          "description": "Kubernetes only. false adds the cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\" annotation to the agent pod (on GKE Autopilot this requests extended run duration). true is accepted and adds nothing. Overrides any profiles.<name>.safe_to_evict or runtimes.<name>.safe_to_evict default."
+        },
         "imagePullPolicy": {
           "type": "string",
           "enum": ["Always", "IfNotPresent", "Never"],

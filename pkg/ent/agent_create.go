@@ -854,6 +854,34 @@ func (_c *AgentCreate) SetNillableDeletionRequest(v *string) *AgentCreate {
 	return _c
 }
 
+// SetRunIntent sets the "run_intent" field.
+func (_c *AgentCreate) SetRunIntent(v string) *AgentCreate {
+	_c.mutation.SetRunIntent(v)
+	return _c
+}
+
+// SetNillableRunIntent sets the "run_intent" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableRunIntent(v *string) *AgentCreate {
+	if v != nil {
+		_c.SetRunIntent(*v)
+	}
+	return _c
+}
+
+// SetRunIntentAt sets the "run_intent_at" field.
+func (_c *AgentCreate) SetRunIntentAt(v time.Time) *AgentCreate {
+	_c.mutation.SetRunIntentAt(v)
+	return _c
+}
+
+// SetNillableRunIntentAt sets the "run_intent_at" field if the given value is not nil.
+func (_c *AgentCreate) SetNillableRunIntentAt(v *time.Time) *AgentCreate {
+	if v != nil {
+		_c.SetRunIntentAt(*v)
+	}
+	return _c
+}
+
 // SetSoftDeleteOpID sets the "soft_delete_op_id" field.
 func (_c *AgentCreate) SetSoftDeleteOpID(v string) *AgentCreate {
 	_c.mutation.SetSoftDeleteOpID(v)
@@ -1425,6 +1453,14 @@ func (_c *AgentCreate) createSpec() (*Agent, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.DeletionRequest(); ok {
 		_spec.SetField(agent.FieldDeletionRequest, field.TypeString, value)
 		_node.DeletionRequest = value
+	}
+	if value, ok := _c.mutation.RunIntent(); ok {
+		_spec.SetField(agent.FieldRunIntent, field.TypeString, value)
+		_node.RunIntent = &value
+	}
+	if value, ok := _c.mutation.RunIntentAt(); ok {
+		_spec.SetField(agent.FieldRunIntentAt, field.TypeTime, value)
+		_node.RunIntentAt = &value
 	}
 	if value, ok := _c.mutation.SoftDeleteOpID(); ok {
 		_spec.SetField(agent.FieldSoftDeleteOpID, field.TypeString, value)
@@ -2590,6 +2626,42 @@ func (u *AgentUpsert) UpdateDeletionRequest() *AgentUpsert {
 // ClearDeletionRequest clears the value of the "deletion_request" field.
 func (u *AgentUpsert) ClearDeletionRequest() *AgentUpsert {
 	u.SetNull(agent.FieldDeletionRequest)
+	return u
+}
+
+// SetRunIntent sets the "run_intent" field.
+func (u *AgentUpsert) SetRunIntent(v string) *AgentUpsert {
+	u.Set(agent.FieldRunIntent, v)
+	return u
+}
+
+// UpdateRunIntent sets the "run_intent" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateRunIntent() *AgentUpsert {
+	u.SetExcluded(agent.FieldRunIntent)
+	return u
+}
+
+// ClearRunIntent clears the value of the "run_intent" field.
+func (u *AgentUpsert) ClearRunIntent() *AgentUpsert {
+	u.SetNull(agent.FieldRunIntent)
+	return u
+}
+
+// SetRunIntentAt sets the "run_intent_at" field.
+func (u *AgentUpsert) SetRunIntentAt(v time.Time) *AgentUpsert {
+	u.Set(agent.FieldRunIntentAt, v)
+	return u
+}
+
+// UpdateRunIntentAt sets the "run_intent_at" field to the value that was provided on create.
+func (u *AgentUpsert) UpdateRunIntentAt() *AgentUpsert {
+	u.SetExcluded(agent.FieldRunIntentAt)
+	return u
+}
+
+// ClearRunIntentAt clears the value of the "run_intent_at" field.
+func (u *AgentUpsert) ClearRunIntentAt() *AgentUpsert {
+	u.SetNull(agent.FieldRunIntentAt)
 	return u
 }
 
@@ -3898,6 +3970,48 @@ func (u *AgentUpsertOne) UpdateDeletionRequest() *AgentUpsertOne {
 func (u *AgentUpsertOne) ClearDeletionRequest() *AgentUpsertOne {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearDeletionRequest()
+	})
+}
+
+// SetRunIntent sets the "run_intent" field.
+func (u *AgentUpsertOne) SetRunIntent(v string) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunIntent(v)
+	})
+}
+
+// UpdateRunIntent sets the "run_intent" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateRunIntent() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunIntent()
+	})
+}
+
+// ClearRunIntent clears the value of the "run_intent" field.
+func (u *AgentUpsertOne) ClearRunIntent() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunIntent()
+	})
+}
+
+// SetRunIntentAt sets the "run_intent_at" field.
+func (u *AgentUpsertOne) SetRunIntentAt(v time.Time) *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunIntentAt(v)
+	})
+}
+
+// UpdateRunIntentAt sets the "run_intent_at" field to the value that was provided on create.
+func (u *AgentUpsertOne) UpdateRunIntentAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunIntentAt()
+	})
+}
+
+// ClearRunIntentAt clears the value of the "run_intent_at" field.
+func (u *AgentUpsertOne) ClearRunIntentAt() *AgentUpsertOne {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunIntentAt()
 	})
 }
 
@@ -5376,6 +5490,48 @@ func (u *AgentUpsertBulk) UpdateDeletionRequest() *AgentUpsertBulk {
 func (u *AgentUpsertBulk) ClearDeletionRequest() *AgentUpsertBulk {
 	return u.Update(func(s *AgentUpsert) {
 		s.ClearDeletionRequest()
+	})
+}
+
+// SetRunIntent sets the "run_intent" field.
+func (u *AgentUpsertBulk) SetRunIntent(v string) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunIntent(v)
+	})
+}
+
+// UpdateRunIntent sets the "run_intent" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateRunIntent() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunIntent()
+	})
+}
+
+// ClearRunIntent clears the value of the "run_intent" field.
+func (u *AgentUpsertBulk) ClearRunIntent() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunIntent()
+	})
+}
+
+// SetRunIntentAt sets the "run_intent_at" field.
+func (u *AgentUpsertBulk) SetRunIntentAt(v time.Time) *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.SetRunIntentAt(v)
+	})
+}
+
+// UpdateRunIntentAt sets the "run_intent_at" field to the value that was provided on create.
+func (u *AgentUpsertBulk) UpdateRunIntentAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.UpdateRunIntentAt()
+	})
+}
+
+// ClearRunIntentAt clears the value of the "run_intent_at" field.
+func (u *AgentUpsertBulk) ClearRunIntentAt() *AgentUpsertBulk {
+	return u.Update(func(s *AgentUpsert) {
+		s.ClearRunIntentAt()
 	})
 }
 

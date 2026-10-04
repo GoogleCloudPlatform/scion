@@ -142,6 +142,10 @@ const (
 	FieldDeletionPrior = "deletion_prior"
 	// FieldDeletionRequest holds the string denoting the deletion_request field in the database.
 	FieldDeletionRequest = "deletion_request"
+	// FieldRunIntent holds the string denoting the run_intent field in the database.
+	FieldRunIntent = "run_intent"
+	// FieldRunIntentAt holds the string denoting the run_intent_at field in the database.
+	FieldRunIntentAt = "run_intent_at"
 	// FieldSoftDeleteOpID holds the string denoting the soft_delete_op_id field in the database.
 	FieldSoftDeleteOpID = "soft_delete_op_id"
 	// EdgeProject holds the string denoting the project edge name in mutations.
@@ -241,6 +245,8 @@ var Columns = []string{
 	FieldDeletionError,
 	FieldDeletionPrior,
 	FieldDeletionRequest,
+	FieldRunIntent,
+	FieldRunIntentAt,
 	FieldSoftDeleteOpID,
 }
 
@@ -678,6 +684,16 @@ func ByDeletionPrior(opts ...sql.OrderTermOption) OrderOption {
 // ByDeletionRequest orders the results by the deletion_request field.
 func ByDeletionRequest(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldDeletionRequest, opts...).ToFunc()
+}
+
+// ByRunIntent orders the results by the run_intent field.
+func ByRunIntent(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRunIntent, opts...).ToFunc()
+}
+
+// ByRunIntentAt orders the results by the run_intent_at field.
+func ByRunIntentAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRunIntentAt, opts...).ToFunc()
 }
 
 // BySoftDeleteOpID orders the results by the soft_delete_op_id field.

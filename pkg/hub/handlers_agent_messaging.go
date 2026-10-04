@@ -2618,6 +2618,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 					// container: a state conflict, not a broker failure.
 					writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
 						"Agent has no running container; the message was not delivered", nil)
+				} else if writeBrokerRuntimeUnavailable(w, err, agent.Runtime) {
+					// Written: the agent's runtime is not available on its
+					// broker right now, a retryable 503 (ptone/scion#2748).
+					s.messageLog.Warn("Message not delivered: agent's runtime not available on broker",
+						"agent_id", agent.ID, "runtime", agent.Runtime)
 				} else if req.Wake {
 					RuntimeError(w, "Agent resumed successfully but message delivery failed: "+err.Error())
 				} else {

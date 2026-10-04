@@ -141,7 +141,10 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Delete in progress (design ptone/scion#2483 §2.1).
+	// Start gate (design ptone/scion#2483 §2.1): a delete in progress, an
+	// incomplete create or an in-flight launch is refused, the last with
+	// 409 agent_launching, since the worker would stop and reprovision a
+	// launching agent.
 	if ref := s.startGate(ctx, agent, startEntryReincarnate); ref.refuses() {
 		ref.write(w)
 		return
@@ -224,7 +227,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// discarding work. Refused explicitly in v1 (design #2703 D4).
 	if project.IsEmptyPerAgent() {
 		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
-			"reincarnate does not yet support empty-per-agent workspaces", nil)
+			`reincarnate does not yet support "Empty directory per agent" (empty-per-agent) workspaces`, nil)
 		return
 	}
 

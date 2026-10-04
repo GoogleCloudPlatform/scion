@@ -1199,6 +1199,46 @@ func (_u *AgentUpdate) ClearDeletionRequest() *AgentUpdate {
 	return _u
 }
 
+// SetRunIntent sets the "run_intent" field.
+func (_u *AgentUpdate) SetRunIntent(v string) *AgentUpdate {
+	_u.mutation.SetRunIntent(v)
+	return _u
+}
+
+// SetNillableRunIntent sets the "run_intent" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableRunIntent(v *string) *AgentUpdate {
+	if v != nil {
+		_u.SetRunIntent(*v)
+	}
+	return _u
+}
+
+// ClearRunIntent clears the value of the "run_intent" field.
+func (_u *AgentUpdate) ClearRunIntent() *AgentUpdate {
+	_u.mutation.ClearRunIntent()
+	return _u
+}
+
+// SetRunIntentAt sets the "run_intent_at" field.
+func (_u *AgentUpdate) SetRunIntentAt(v time.Time) *AgentUpdate {
+	_u.mutation.SetRunIntentAt(v)
+	return _u
+}
+
+// SetNillableRunIntentAt sets the "run_intent_at" field if the given value is not nil.
+func (_u *AgentUpdate) SetNillableRunIntentAt(v *time.Time) *AgentUpdate {
+	if v != nil {
+		_u.SetRunIntentAt(*v)
+	}
+	return _u
+}
+
+// ClearRunIntentAt clears the value of the "run_intent_at" field.
+func (_u *AgentUpdate) ClearRunIntentAt() *AgentUpdate {
+	_u.mutation.ClearRunIntentAt()
+	return _u
+}
+
 // SetSoftDeleteOpID sets the "soft_delete_op_id" field.
 func (_u *AgentUpdate) SetSoftDeleteOpID(v string) *AgentUpdate {
 	_u.mutation.SetSoftDeleteOpID(v)
@@ -1734,6 +1774,18 @@ func (_u *AgentUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if _u.mutation.DeletionRequestCleared() {
 		_spec.ClearField(agent.FieldDeletionRequest, field.TypeString)
+	}
+	if value, ok := _u.mutation.RunIntent(); ok {
+		_spec.SetField(agent.FieldRunIntent, field.TypeString, value)
+	}
+	if _u.mutation.RunIntentCleared() {
+		_spec.ClearField(agent.FieldRunIntent, field.TypeString)
+	}
+	if value, ok := _u.mutation.RunIntentAt(); ok {
+		_spec.SetField(agent.FieldRunIntentAt, field.TypeTime, value)
+	}
+	if _u.mutation.RunIntentAtCleared() {
+		_spec.ClearField(agent.FieldRunIntentAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.SoftDeleteOpID(); ok {
 		_spec.SetField(agent.FieldSoftDeleteOpID, field.TypeString, value)
@@ -3045,6 +3097,46 @@ func (_u *AgentUpdateOne) ClearDeletionRequest() *AgentUpdateOne {
 	return _u
 }
 
+// SetRunIntent sets the "run_intent" field.
+func (_u *AgentUpdateOne) SetRunIntent(v string) *AgentUpdateOne {
+	_u.mutation.SetRunIntent(v)
+	return _u
+}
+
+// SetNillableRunIntent sets the "run_intent" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableRunIntent(v *string) *AgentUpdateOne {
+	if v != nil {
+		_u.SetRunIntent(*v)
+	}
+	return _u
+}
+
+// ClearRunIntent clears the value of the "run_intent" field.
+func (_u *AgentUpdateOne) ClearRunIntent() *AgentUpdateOne {
+	_u.mutation.ClearRunIntent()
+	return _u
+}
+
+// SetRunIntentAt sets the "run_intent_at" field.
+func (_u *AgentUpdateOne) SetRunIntentAt(v time.Time) *AgentUpdateOne {
+	_u.mutation.SetRunIntentAt(v)
+	return _u
+}
+
+// SetNillableRunIntentAt sets the "run_intent_at" field if the given value is not nil.
+func (_u *AgentUpdateOne) SetNillableRunIntentAt(v *time.Time) *AgentUpdateOne {
+	if v != nil {
+		_u.SetRunIntentAt(*v)
+	}
+	return _u
+}
+
+// ClearRunIntentAt clears the value of the "run_intent_at" field.
+func (_u *AgentUpdateOne) ClearRunIntentAt() *AgentUpdateOne {
+	_u.mutation.ClearRunIntentAt()
+	return _u
+}
+
 // SetSoftDeleteOpID sets the "soft_delete_op_id" field.
 func (_u *AgentUpdateOne) SetSoftDeleteOpID(v string) *AgentUpdateOne {
 	_u.mutation.SetSoftDeleteOpID(v)
@@ -3610,6 +3702,18 @@ func (_u *AgentUpdateOne) sqlSave(ctx context.Context) (_node *Agent, err error)
 	}
 	if _u.mutation.DeletionRequestCleared() {
 		_spec.ClearField(agent.FieldDeletionRequest, field.TypeString)
+	}
+	if value, ok := _u.mutation.RunIntent(); ok {
+		_spec.SetField(agent.FieldRunIntent, field.TypeString, value)
+	}
+	if _u.mutation.RunIntentCleared() {
+		_spec.ClearField(agent.FieldRunIntent, field.TypeString)
+	}
+	if value, ok := _u.mutation.RunIntentAt(); ok {
+		_spec.SetField(agent.FieldRunIntentAt, field.TypeTime, value)
+	}
+	if _u.mutation.RunIntentAtCleared() {
+		_spec.ClearField(agent.FieldRunIntentAt, field.TypeTime)
 	}
 	if value, ok := _u.mutation.SoftDeleteOpID(); ok {
 		_spec.SetField(agent.FieldSoftDeleteOpID, field.TypeString, value)

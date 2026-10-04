@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/stretchr/testify/assert"
@@ -64,9 +65,9 @@ func allEdgesFor(t *testing.T, s *DelegationEdgeStore, delegateID string) map[st
 func TestDeactivateEdgesForDelegateStore(t *testing.T) {
 	ctx := context.Background()
 	s := NewDelegationEdgeStore(enttest.NewClient(t))
-	a := seedEdge(t, s, store.DelegationPrincipalUser, "user-1", "agent-a", "p1")
-	b := seedEdge(t, s, store.DelegationPrincipalUser, "user-1", "agent-a", "p2")
-	other := seedEdge(t, s, store.DelegationPrincipalUser, "user-1", "agent-b", "p1")
+	a := seedEdge(t, s, store.DelegationPrincipalUser, "user-1", "agent-a", "proj-a")
+	b := seedEdge(t, s, store.DelegationPrincipalUser, "user-1", "agent-a", "proj-b")
+	other := seedEdge(t, s, store.DelegationPrincipalUser, "user-1", "agent-b", "proj-a")
 
 	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	n, err := s.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, "agent-a",
@@ -103,11 +104,11 @@ func TestDeactivateEdgesForDelegateStore(t *testing.T) {
 func TestDeactivateEdgesForDelegatorStore(t *testing.T) {
 	ctx := context.Background()
 	s := NewDelegationEdgeStore(enttest.NewClient(t))
-	e1 := seedEdge(t, s, store.DelegationPrincipalUser, "user-del", "agent-1", "p1")
-	e2 := seedEdge(t, s, store.DelegationPrincipalUser, "user-del", "agent-2", "p1")
-	keep := seedEdge(t, s, store.DelegationPrincipalUser, "user-keep", "agent-3", "p1")
+	e1 := seedEdge(t, s, store.DelegationPrincipalUser, "user-del", "agent-1", "proj-a")
+	e2 := seedEdge(t, s, store.DelegationPrincipalUser, "user-del", "agent-2", "proj-a")
+	keep := seedEdge(t, s, store.DelegationPrincipalUser, "user-keep", "agent-3", "proj-a")
 	// Same ID, different delegator type: not matched.
-	agentTyped := seedEdge(t, s, store.DelegationPrincipalAgent, "user-del", "agent-4", "p1")
+	agentTyped := seedEdge(t, s, store.DelegationPrincipalAgent, "user-del", "agent-4", "proj-a")
 
 	n, err := s.DeactivateDelegationEdgesForDelegator(ctx, store.DelegationPrincipalUser, "user-del",
 		store.Deactivation{Cause: store.EdgeDeactivationDelegatorDeleted, OpID: "op-user"})
@@ -134,18 +135,18 @@ func TestDeactivateEdgesForDelegatorStore(t *testing.T) {
 func TestReactivateEdgesForDelegateStoreIsExact(t *testing.T) {
 	ctx := context.Background()
 	s := NewDelegationEdgeStore(enttest.NewClient(t))
-	target := seedEdge(t, s, store.DelegationPrincipalUser, "user-1", "agent-r", "p1")
+	target := seedEdge(t, s, store.DelegationPrincipalUser, "user-1", "agent-r", "proj-a")
 	n, err := s.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, "agent-r",
 		store.Deactivation{Cause: store.EdgeDeactivationAgentSoftDelete, OpID: "op-this"})
 	require.NoError(t, err)
 	require.Equal(t, 1, n)
 
 	// Edges of other operations and causes on other scopes.
-	earlier := seedEdge(t, s, store.DelegationPrincipalUser, "user-1", "agent-r", "p2")
+	earlier := seedEdge(t, s, store.DelegationPrincipalUser, "user-1", "agent-r", "proj-b")
 	_, err = s.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, "agent-r",
 		store.Deactivation{Cause: store.EdgeDeactivationAgentSoftDelete, OpID: "op-earlier"})
 	require.NoError(t, err)
-	comp := seedEdge(t, s, store.DelegationPrincipalUser, "user-1", "agent-r", "p3")
+	comp := seedEdge(t, s, store.DelegationPrincipalUser, "user-1", "agent-r", "proj-c")
 	_, err = s.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, "agent-r",
 		store.Deactivation{Cause: store.EdgeDeactivationCreateCompensation, OpID: "op-this"})
 	require.NoError(t, err)
@@ -168,24 +169,99 @@ func TestReactivateEdgesForDelegateStoreIsExact(t *testing.T) {
 	assert.Equal(t, 0, n)
 }
 
+// A conflicting reactivate inside a transaction is refused and changes
+// nothing: the deactivated edge stays inactive with its record.
 func TestReactivateEdgesForDelegateStoreConflict(t *testing.T) {
 	ctx := context.Background()
-	s := NewDelegationEdgeStore(enttest.NewClient(t))
-	seedEdge(t, s, store.DelegationPrincipalUser, "user-1", "agent-c", "p1")
+	client := enttest.NewClient(t)
+	cs := NewCompositeStore(client)
+	s := NewDelegationEdgeStore(client)
+	old := seedEdge(t, s, store.DelegationPrincipalUser, "user-1", "agent-c", "proj-a")
+	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	_, err := s.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, "agent-c",
-		store.Deactivation{Cause: store.EdgeDeactivationAgentSoftDelete, OpID: "op-1"})
+		store.Deactivation{Cause: store.EdgeDeactivationAgentSoftDelete, At: &at, OpID: "op-1"})
 	require.NoError(t, err)
-	seedEdge(t, s, store.DelegationPrincipalUser, "user-2", "agent-c", "p1")
+	current := seedEdge(t, s, store.DelegationPrincipalUser, "user-2", "agent-c", "proj-a")
 
-	_, err = s.ReactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, "agent-c",
-		store.EdgeDeactivationAgentSoftDelete, "op-1")
+	err = cs.WithTx(ctx, func(tx store.Store) error {
+		_, err := tx.ReactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, "agent-c",
+			store.EdgeDeactivationAgentSoftDelete, "op-1")
+		return err
+	})
 	assert.ErrorIs(t, err, store.ErrAlreadyExists, "a second active edge in the same scope is refused")
+
+	got := allEdgesFor(t, s, "agent-c")
+	o := got[old.ID]
+	require.NotNil(t, o)
+	assert.False(t, o.Active, "the deactivated edge stays inactive")
+	assert.Equal(t, store.EdgeDeactivationAgentSoftDelete, o.Cause)
+	assert.Equal(t, "op-1", o.OpID)
+	require.NotNil(t, o.At)
+	assert.True(t, at.Equal(*o.At))
+	assert.True(t, got[current.ID].Active, "the other active edge is untouched")
+}
+
+// Deactivate and reactivate write only the active flag and the deactivation
+// record: a bounded ceiling and v1 provenance come back unchanged.
+func TestReactivatePreservesCeilingAndProvenance(t *testing.T) {
+	ctx := context.Background()
+	s := NewDelegationEdgeStore(enttest.NewClient(t))
+	expires := time.Date(2026, 6, 7, 8, 9, 10, 0, time.UTC)
+	e := &store.DelegationEdge{
+		DelegatorType: store.DelegationPrincipalUser,
+		DelegatorID:   "user-1",
+		DelegateType:  store.DelegationPrincipalAgent,
+		DelegateID:    "agent-p",
+		ScopeType:     store.RoleScopeProject,
+		ScopeID:       "proj-a",
+		Role:          "worker",
+		Active:        true,
+		EffectCeiling: store.EffectCeiling{
+			Kind:              store.EffectCeilingBounded,
+			Version:           permissions.CeilingVersionV1,
+			PermissionIDs:     []string{"agent.read", "agent.stop"},
+			BoundaryKind:      "project",
+			BoundaryProjectID: "proj-a",
+			SourceExpiresAt:   &expires,
+		},
+		AuthorityProvenance: store.AuthorityProvenance{
+			ProvenanceVersion:       1,
+			SourcePrincipalKind:     store.DelegationPrincipalUser,
+			SourcePrincipalID:       "user-1",
+			SourceCredentialKind:    store.SourceCredentialUAT,
+			SourceCredentialID:      "uat-1",
+			InitiatorPrincipalKind:  store.DelegationPrincipalUser,
+			InitiatorPrincipalID:    "user-1",
+			InitiatorCredentialKind: "uat",
+			InitiatorCredentialID:   "uat-1",
+		},
+	}
+	require.NoError(t, s.CreateDelegationEdge(ctx, e))
+	before := allEdgesFor(t, s, "agent-p")[e.ID]
+	require.NotNil(t, before)
+	require.Equal(t, store.EffectCeilingBounded, before.Kind)
+	require.Equal(t, 1, before.ProvenanceVersion)
+
+	n, err := s.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, "agent-p",
+		store.Deactivation{Cause: store.EdgeDeactivationAgentSoftDelete, OpID: "op-p"})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+	n, err = s.ReactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, "agent-p",
+		store.EdgeDeactivationAgentSoftDelete, "op-p")
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	after := allEdgesFor(t, s, "agent-p")[e.ID]
+	require.NotNil(t, after)
+	assert.True(t, after.Active)
+	assert.Equal(t, before.EffectCeiling, after.EffectCeiling, "ceiling unchanged")
+	assert.Equal(t, before.AuthorityProvenance, after.AuthorityProvenance, "provenance unchanged")
 }
 
 func TestEdgeDeactivationRejectsInvalidRecord(t *testing.T) {
 	ctx := context.Background()
 	s := NewDelegationEdgeStore(enttest.NewClient(t))
-	seedEdge(t, s, store.DelegationPrincipalUser, "user-1", "agent-v", "p1")
+	seedEdge(t, s, store.DelegationPrincipalUser, "user-1", "agent-v", "proj-a")
 
 	for name, d := range map[string]store.Deactivation{
 		"empty cause":      {OpID: "op"},

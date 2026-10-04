@@ -83,8 +83,8 @@ func newReincarnateTestDispatcher() *reincarnateTestDispatcher {
 	return &reincarnateTestDispatcher{}
 }
 
-func (d *reincarnateTestDispatcher) DispatchAgentCreate(context.Context, *store.Agent) error {
-	return nil
+func (d *reincarnateTestDispatcher) DispatchAgentCreate(context.Context, *store.Agent) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 func (d *reincarnateTestDispatcher) DispatchAgentProvision(context.Context, *store.Agent) error {
 	return nil
@@ -141,11 +141,11 @@ func (d *reincarnateTestDispatcher) DispatchAgentExec(context.Context, *store.Ag
 func (d *reincarnateTestDispatcher) DispatchCheckAgentPrompt(context.Context, *store.Agent) (bool, error) {
 	return false, nil
 }
-func (d *reincarnateTestDispatcher) DispatchAgentCreateWithGather(context.Context, *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (d *reincarnateTestDispatcher) DispatchAgentCreateWithGather(context.Context, *store.Agent) (*CreateDispatchResult, error) {
 	return nil, nil
 }
-func (d *reincarnateTestDispatcher) DispatchFinalizeEnv(context.Context, *store.Agent, map[string]string) error {
-	return nil
+func (d *reincarnateTestDispatcher) DispatchFinalizeEnv(context.Context, *store.Agent, map[string]string) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 
 // waitForReincarnationSettled polls the store until the agent's most recent
@@ -629,7 +629,7 @@ func TestReincarnateAgent_WorktreePerAgentOrNeitherWorkspace_Returns400(t *testi
 			workspaceMode: store.WorkspaceModePerAgent,
 			nonGit:        true,
 			wantRejected:  true,
-			wantBodyText:  "reincarnate does not yet support empty-per-agent workspaces",
+			wantBodyText:  `reincarnate does not yet support \"Empty directory per agent\" (empty-per-agent) workspaces`,
 		},
 	}
 

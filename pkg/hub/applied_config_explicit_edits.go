@@ -241,11 +241,9 @@ var autoExposeEnvKeys = map[string]bool{
 // Two different precedence orders apply, because the page itself reads env
 // two different ways:
 //   - The four autoExposeEnvKeys are read per key by the dedicated
-//     auto-expose controls, with InlineConfig.Env winning (R4-2) --
-//     resolveDerivedConfig's project/hub auto-expose default is stamped
-//     into InlineConfig.Env only, and the controls must show it even when
-//     AppliedConfig.Env happens to hold a different value for the same key
-//     (e.g. a template's own env, merged into AppliedConfig.Env only).
+//     auto-expose controls: InlineConfig.Env (the requester's explicit
+//     value) first, then AppliedConfig.Env (the project- or
+//     template-derived value resolveDerivedConfig writes there).
 //   - Every other key is read by the custom env-row editor as a whole map,
 //     ac.env || ic.env: AppliedConfig.Env wins outright whenever it is
 //     non-empty, and InlineConfig.Env is consulted per key only as a

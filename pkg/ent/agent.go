@@ -147,6 +147,10 @@ type Agent struct {
 	DeletionPrior string `json:"deletion_prior,omitempty"`
 	// DeletionRequest holds the value of the "deletion_request" field.
 	DeletionRequest string `json:"deletion_request,omitempty"`
+	// RunIntent holds the value of the "run_intent" field.
+	RunIntent *string `json:"run_intent,omitempty"`
+	// RunIntentAt holds the value of the "run_intent_at" field.
+	RunIntentAt *time.Time `json:"run_intent_at,omitempty"`
 	// SoftDeleteOpID holds the value of the "soft_delete_op_id" field.
 	SoftDeleteOpID *string `json:"soft_delete_op_id,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
@@ -210,9 +214,9 @@ func (*Agent) scanValues(columns []string) ([]any, error) {
 			values[i] = new(sql.NullBool)
 		case agent.FieldExitCode, agent.FieldCurrentTurns, agent.FieldCurrentModelCalls, agent.FieldStateVersion, agent.FieldGeneration, agent.FieldLaunchSeq, agent.FieldDeletionClaim:
 			values[i] = new(sql.NullInt64)
-		case agent.FieldSlug, agent.FieldName, agent.FieldTemplate, agent.FieldStatus, agent.FieldMessageMode, agent.FieldPhase, agent.FieldActivity, agent.FieldToolName, agent.FieldConnectionState, agent.FieldContainerStatus, agent.FieldExitReason, agent.FieldRuntimeState, agent.FieldStalledFromActivity, agent.FieldImage, agent.FieldRuntime, agent.FieldRuntimeBrokerID, agent.FieldTaskSummary, agent.FieldMessage, agent.FieldAppliedConfig, agent.FieldHarnessConfig, agent.FieldReincarnationState, agent.FieldLaunchID, agent.FieldLaunchState, agent.FieldLaunchEndReason, agent.FieldLaunchKind, agent.FieldLaunchOwner, agent.FieldLaunchStep, agent.FieldLaunchError, agent.FieldDeletionState, agent.FieldDeletionCode, agent.FieldDeletionError, agent.FieldDeletionPrior, agent.FieldDeletionRequest, agent.FieldSoftDeleteOpID:
+		case agent.FieldSlug, agent.FieldName, agent.FieldTemplate, agent.FieldStatus, agent.FieldMessageMode, agent.FieldPhase, agent.FieldActivity, agent.FieldToolName, agent.FieldConnectionState, agent.FieldContainerStatus, agent.FieldExitReason, agent.FieldRuntimeState, agent.FieldStalledFromActivity, agent.FieldImage, agent.FieldRuntime, agent.FieldRuntimeBrokerID, agent.FieldTaskSummary, agent.FieldMessage, agent.FieldAppliedConfig, agent.FieldHarnessConfig, agent.FieldReincarnationState, agent.FieldLaunchID, agent.FieldLaunchState, agent.FieldLaunchEndReason, agent.FieldLaunchKind, agent.FieldLaunchOwner, agent.FieldLaunchStep, agent.FieldLaunchError, agent.FieldDeletionState, agent.FieldDeletionCode, agent.FieldDeletionError, agent.FieldDeletionPrior, agent.FieldDeletionRequest, agent.FieldRunIntent, agent.FieldSoftDeleteOpID:
 			values[i] = new(sql.NullString)
-		case agent.FieldCreated, agent.FieldUpdated, agent.FieldLastSeen, agent.FieldLastActivityEvent, agent.FieldStartedAt, agent.FieldDeletedAt, agent.FieldReincarnationUpdatedAt, agent.FieldLaunchDeadline, agent.FieldLaunchLastReportAt, agent.FieldDeletionLeaseAt, agent.FieldDeletionStartedAt, agent.FieldDeletionFailedAt:
+		case agent.FieldCreated, agent.FieldUpdated, agent.FieldLastSeen, agent.FieldLastActivityEvent, agent.FieldStartedAt, agent.FieldDeletedAt, agent.FieldReincarnationUpdatedAt, agent.FieldLaunchDeadline, agent.FieldLaunchLastReportAt, agent.FieldDeletionLeaseAt, agent.FieldDeletionStartedAt, agent.FieldDeletionFailedAt, agent.FieldRunIntentAt:
 			values[i] = new(sql.NullTime)
 		case agent.FieldID, agent.FieldProjectID:
 			values[i] = new(uuid.UUID)
@@ -636,6 +640,20 @@ func (_m *Agent) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.DeletionRequest = value.String
 			}
+		case agent.FieldRunIntent:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field run_intent", values[i])
+			} else if value.Valid {
+				_m.RunIntent = new(string)
+				*_m.RunIntent = value.String
+			}
+		case agent.FieldRunIntentAt:
+			if value, ok := values[i].(*sql.NullTime); !ok {
+				return fmt.Errorf("unexpected type %T for field run_intent_at", values[i])
+			} else if value.Valid {
+				_m.RunIntentAt = new(time.Time)
+				*_m.RunIntentAt = value.Time
+			}
 		case agent.FieldSoftDeleteOpID:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field soft_delete_op_id", values[i])
@@ -908,6 +926,16 @@ func (_m *Agent) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("deletion_request=")
 	builder.WriteString(_m.DeletionRequest)
+	builder.WriteString(", ")
+	if v := _m.RunIntent; v != nil {
+		builder.WriteString("run_intent=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.RunIntentAt; v != nil {
+		builder.WriteString("run_intent_at=")
+		builder.WriteString(v.Format(time.ANSIC))
+	}
 	builder.WriteString(", ")
 	if v := _m.SoftDeleteOpID; v != nil {
 		builder.WriteString("soft_delete_op_id=")

@@ -227,11 +227,16 @@ place() {
 	return b.String()
 }
 
-// placeK8sHomeFiles copies the staged secret and auth files to their targets
-// in the agent home, as the pod user. It runs after the home sync and before
-// the startup gate is signalled, so the harness sees the files at the same
-// paths a direct mount would have used. Only target paths are logged.
-func (r *KubernetesRuntime) placeK8sHomeFiles(ctx context.Context, namespace, podName string, config RunConfig) error {
+// placeK8sHomeFiles delivers the staged secret and auth files to their
+// targets in the agent home, as the pod user. It runs after the home sync
+// and before the startup gate is signalled, so the harness sees the files at
+// the same paths a direct mount would have used. In copy mode it copies each
+// file; in link mode (NFS-home pods, see k8s_nfs_home.go) it only verifies
+// the links. Only target paths are logged.
+func (r *KubernetesRuntime) placeK8sHomeFiles(ctx context.Context, namespace, podName string, config RunConfig, mode k8sHomeFileMode) error {
+	if mode == k8sHomeFilesLink {
+		return r.verifyK8sHomeLinks(ctx, namespace, podName, config)
+	}
 	placements := r.k8sHomeFilePlacements(config)
 	if len(placements) == 0 {
 		return nil

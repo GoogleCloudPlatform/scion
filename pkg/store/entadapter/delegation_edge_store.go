@@ -218,23 +218,6 @@ func (s *DelegationEdgeStore) GetDelegationEdgesForDelegator(ctx context.Context
 	return result, nil
 }
 
-// DeactivateDelegationEdge marks an edge as inactive.
-func (s *DelegationEdgeStore) DeactivateDelegationEdge(ctx context.Context, edgeID string) error {
-	uid, err := parseGetID(edgeID)
-	if err != nil {
-		return err
-	}
-	now := time.Now()
-	_, err = s.client.DelegationEdge.UpdateOneID(uid).
-		SetActive(false).
-		SetUpdated(now).
-		Save(ctx)
-	if err != nil {
-		return mapError(err)
-	}
-	return nil
-}
-
 // validateEdgeDeactivation checks a deactivation record before it is
 // written to delegation edges.
 func validateEdgeDeactivation(cause store.EdgeDeactivationCause, opID string) error {

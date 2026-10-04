@@ -527,7 +527,7 @@ func TestRecordlessActorProbe_DedupesAcrossManagers(t *testing.T) {
 	srv.auxiliaryRuntimes["substrate-dup"] = auxiliaryRuntime{Runtime: srv.runtime, Manager: dupMgr}
 	srv.auxiliaryRuntimesMu.Unlock()
 
-	atespace, names, err := recordlessActorProbe(context.Background(), srv.allManagers(), gapProjBID)
+	atespace, names, err := recordlessActorProbe(context.Background(), srv.allManagers(context.Background()), gapProjBID)
 	if err != nil {
 		t.Fatalf("recordlessActorProbe() error = %v", err)
 	}

@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
 )
@@ -164,8 +165,8 @@ func runAgentSecretGet(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Ref:     %s\n", secret.SecretRef)
 	}
 	fmt.Printf("  Version: %d\n", secret.Version)
-	fmt.Printf("  Created: %s\n", secret.Created.Format(time.RFC3339))
-	fmt.Printf("  Updated: %s\n", secret.Updated.Format(time.RFC3339))
+	fmt.Printf("  Created: %s\n", clitime.Format(secret.Created, clitime.Full))
+	fmt.Printf("  Updated: %s\n", clitime.Format(secret.Updated, clitime.Full))
 	if secret.Description != "" {
 		fmt.Printf("  Description: %s\n", secret.Description)
 	}
@@ -362,13 +363,13 @@ func runAgentSecretList(cmd *cobra.Command, _ []string) error {
 
 	fmt.Println("Secrets (scope: project):")
 	fmt.Printf("%-30s  %-12s  %-8s  %s\n", "KEY", "TYPE", "VERSION", "UPDATED")
-	fmt.Printf("%-30s  %-12s  %-8s  %s\n", "------------------------------", "------------", "--------", "-------------------")
+	fmt.Printf("%-30s  %-12s  %-8s  %s\n", "------------------------------", "------------", "--------", "-----------------------")
 	for _, s := range resp.Secrets {
 		typeLabel := s.SecretType
 		if typeLabel == "" {
 			typeLabel = "environment"
 		}
-		fmt.Printf("%-30s  %-12s  v%-7d  %s\n", truncate(s.Key, 30), typeLabel, s.Version, s.Updated.Format("2006-01-02 15:04:05"))
+		fmt.Printf("%-30s  %-12s  v%-7d  %s\n", truncate(s.Key, 30), typeLabel, s.Version, clitime.Format(s.Updated, clitime.Full))
 	}
 
 	return nil
