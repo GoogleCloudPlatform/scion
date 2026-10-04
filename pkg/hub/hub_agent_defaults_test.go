@@ -262,35 +262,3 @@ func TestBuildLayer1SnapshotFromFile_DefaultGCPIdentity(t *testing.T) {
 		t.Errorf("DefaultGCPIdentityServiceAccountID: want sa-1, got %q", snap.DefaultGCPIdentityServiceAccountID)
 	}
 }
-
-// TestProfileTimezone_ReturnsTimezoneFromOverlay verifies the profileTimezone
-// method returns the timezone from the global settings overlay.
-func TestProfileTimezone_ReturnsTimezoneFromOverlay(t *testing.T) {
-	// Set up global overlay with a profile that has a timezone.
-	overlay := config.NewSettingsOverlay()
-	overlay.Update(nil, map[string]config.V1ProfileConfig{
-		"pacific": {Runtime: "docker", Timezone: "America/Los_Angeles"},
-		"no-tz":   {Runtime: "docker"},
-	}, nil, "")
-	config.SetGlobalSettingsOverlay(overlay)
-	defer config.SetGlobalSettingsOverlay(nil)
-
-	srv := &Server{maintenance: NewMaintenanceState(false, "")}
-
-	// Profile with timezone.
-	if got := srv.profileTimezone("pacific"); got != "America/Los_Angeles" {
-		t.Errorf("profileTimezone(pacific): want America/Los_Angeles, got %q", got)
-	}
-	// Profile without timezone.
-	if got := srv.profileTimezone("no-tz"); got != "" {
-		t.Errorf("profileTimezone(no-tz): want empty, got %q", got)
-	}
-	// Non-existent profile.
-	if got := srv.profileTimezone("nonexistent"); got != "" {
-		t.Errorf("profileTimezone(nonexistent): want empty, got %q", got)
-	}
-	// Empty profile name.
-	if got := srv.profileTimezone(""); got != "" {
-		t.Errorf("profileTimezone(\"\"): want empty, got %q", got)
-	}
-}

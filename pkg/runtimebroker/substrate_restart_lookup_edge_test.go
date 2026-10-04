@@ -379,7 +379,7 @@ func TestRecordlessActorProbe_DistinctUIDsSameNameAcrossEndpoints_NotCollapsed(t
 	rt2 := runtime.NewSubstrateRuntimeForTest(fc2, substrate.NewRouterClient(""), nil, config.V1SubstrateConfig{})
 	addAuxRuntime(t, srv, "substrate-second-endpoint", rt2)
 
-	atespace, names, err := recordlessActorProbe(context.Background(), srv.allManagers(), gapProjBID)
+	atespace, names, err := recordlessActorProbe(context.Background(), srv.allManagers(context.Background()), gapProjBID)
 	if err != nil {
 		t.Fatalf("recordlessActorProbe() error = %v", err)
 	}

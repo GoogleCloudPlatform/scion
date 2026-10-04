@@ -48,9 +48,9 @@ When a Hub manages a git-based project, agents are provisioned with an independe
 
 Each agent in a **Hub-managed project without git** gets its **own private directory** that starts empty.
 
-The directory is not a git repository, and no other agent can see it. It lives under the agent's directory on the Runtime Broker (`<project>/agents/<agent>/workspace`).
+The directory is not a git repository, and no other agent can see it. It lives under the agent's directory on the Runtime Broker (`<project>/agents/<agent>/workspace`). On Kubernetes with NFS workspace storage it lives on the NFS export instead, at `<subpath_root>/<project-id>/agents/<agent>/workspace`.
 
-- It is kept across suspend/resume where storage allows. On Kubernetes without NFS workspace storage (including `gke-shared-volume`), the contents are lost when the agent stops (see [Kubernetes](/scion/hosted/ha/kubernetes/)).
+- It is kept across suspend/resume where storage allows, including on Kubernetes with NFS workspace storage. On Kubernetes without NFS workspace storage (including `gke-shared-volume`), the contents are lost when the agent stops (see [Kubernetes](/scion/hosted/ha/kubernetes/)).
 - It is deleted together with the agent. Use [shared directories](#2-the-shared-directories-invariant) for files that agents should share or that must outlive an agent.
 - Files from your local project directory are **not** uploaded into it. When you start an agent from a local non-git directory, the CLI shows the Hub's warning that the files were ignored.
 - Reincarnate (moving the agent to another Runtime Broker) is not supported for this mode.

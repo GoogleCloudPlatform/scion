@@ -76,6 +76,7 @@ func runBootDataMigrations(ctx context.Context, s store.Store) {
 		runMigrationSafe(ctx, s, "Non-agent dispatch_state backfill", runNonAgentDispatchStateBackfill)          // nc-promote-busy
 		runMigrationSafe(ctx, s, "Broker quota bindings to settings", runBrokerQuotaBindingsToSettingsMigration) // ptone/scion#2061 P2-D4
 		runMigrationSafe(ctx, s, "Empty-per-agent legacy report", reportEmptyPerAgentProjects)                   // ptone/scion#2703, read-only
+		runMigrationSafe(ctx, s, "Run intent backfill", runRunIntentBackfill)                                    // agents.run_intent
 	})
 
 	// Split the residual report into reachable/unreachable (M6, §4.6).
