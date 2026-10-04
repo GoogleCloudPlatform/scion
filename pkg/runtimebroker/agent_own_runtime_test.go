@@ -60,6 +60,9 @@ type ownRTFixture struct {
 	nsRequests    map[string][]string // namespace -> "verb resource"
 	forbiddenNS   map[string]bool
 	resolverCalls atomic.Int32
+	// ownListAll makes the resolved profile runtime list all namespaces
+	// with "default" as its default namespace.
+	ownListAll bool
 }
 
 func (f *ownRTFixture) requests(ns string) []string {
@@ -170,10 +173,17 @@ func newOwnRTFixture(t *testing.T, savedProfile string, withPod bool) *ownRTFixt
 	cfg.BrokerID = "test-broker-id"
 	cfg.BrokerName = "test-host"
 	f.srv = New(cfg, agent.NewManager(defaultRT), defaultRT)
+	// The profile names its own kubeconfig context, as in the settings above.
+	profileClient := k8s.NewTestClient(fake.NewSimpleDynamicClient(k8sruntime.NewScheme()), f.cs)
+	profileClient.CurrentContext = "agents-ctx"
 	f.srv.resolveAuxiliaryRuntime = func(projectPath, agentName, profile string) runtime.Runtime {
 		f.resolverCalls.Add(1)
-		rt := runtime.NewKubernetesRuntime(client)
+		rt := runtime.NewKubernetesRuntime(profileClient)
 		rt.DefaultNamespace = ownRTProfileNS
+		if f.ownListAll {
+			rt.DefaultNamespace = "default"
+			rt.ListAllNamespaces = true
+		}
 		return rt
 	}
 	return f
@@ -244,6 +254,43 @@ func TestDeleteAgent_ProfileNamespace_AfterBrokerRestart(t *testing.T) {
 	}
 	if n := len(f.srv.sortedAuxiliaryRuntimes()); n != 1 {
 		t.Fatalf("auxiliary runtimes after delete = %d, want 1", n)
+	}
+}
+
+// A profile runtime that lists all namespaces finds the pod outside its own
+// default namespace; the delete addresses the pod by its namespace and sends
+// nothing to the default namespace, where it has no access.
+func TestDeleteAgent_ProfileRuntimeListsAllNamespaces_DeletesByPodNamespace(t *testing.T) {
+	f := newOwnRTFixture(t, "agents", true)
+	f.ownListAll = true
+
+	w := f.do(t, http.MethodDelete, ownRTDeletePath)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("delete status = %d, body %s; want 204", w.Code, w.Body.String())
+	}
+	if f.podExists(t) {
+		t.Fatal("pod still present in the profile namespace")
+	}
+	if got := f.requests("default"); len(got) != 0 {
+		t.Fatalf("requests sent to the default namespace: %v", got)
+	}
+}
+
+// Stop through a profile runtime that lists all namespaces addresses the pod
+// by its namespace and sends nothing to the default namespace.
+func TestStopAgent_ProfileRuntimeListsAllNamespaces_StopsByPodNamespace(t *testing.T) {
+	f := newOwnRTFixture(t, "agents", true)
+	f.ownListAll = true
+
+	w := f.do(t, http.MethodPost, "/api/v1/agents/"+ownRTAgent+"/stop?projectId="+ownRTProjectID+"&runtime=kubernetes")
+	if w.Code >= 300 {
+		t.Fatalf("stop status = %d, body %s; want success", w.Code, w.Body.String())
+	}
+	if f.podExists(t) {
+		t.Fatal("pod still present after stop")
+	}
+	if got := f.requests("default"); len(got) != 0 {
+		t.Fatalf("requests sent to the default namespace: %v", got)
 	}
 }
 
