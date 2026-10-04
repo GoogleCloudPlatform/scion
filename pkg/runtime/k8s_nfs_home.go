@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -167,13 +166,11 @@ func nfsHomeVolume() (corev1.Volume, corev1.VolumeMount) {
 
 // nfsHomeEnv returns the env vars an NFS-home pod adds. They are appended
 // after the plain values so they take precedence.
+//
+// The link list is not among them: only the home-prepare init container
+// receives SCION_HOME_LINKS.
 func (r *KubernetesRuntime) nfsHomeEnv(config RunConfig) ([]corev1.EnvVar, error) {
-	links, err := json.Marshal(r.k8sHomeLinks(config))
-	if err != nil {
-		return nil, fmt.Errorf("failed to encode home links: %w", err)
-	}
 	env := []corev1.EnvVar{
-		{Name: homeLinksEnvVar, Value: string(links)},
 		{Name: harnessOutputsDirEnvVar, Value: k8sHarnessOutputsDir},
 		{Name: harnessSecretsDirEnvVar, Value: k8sHarnessSecretsDir},
 	}
@@ -525,46 +522,81 @@ func (r *KubernetesRuntime) nfsHomePodSpec(config RunConfig, containerHome, work
 	return parts, nil
 }
 
-// checkHomeMounts allows exactly one mount at the home path, the home
-// mount itself on the agent container, and rejects any other mount at or
-// under the home in any container of the pod. On an NFS-home pod the home
-// is the export, so another mount there would hide it or be created
-// inside it.
-func checkHomeMounts(pod *corev1.Pod, home string, homeMount corev1.VolumeMount) error {
-	check := func(container string, mounts []corev1.VolumeMount, isAgent bool) error {
+// homeMountRules describes, for checkHomeMounts, the home mount and the
+// export paths the home volume must not expose.
+type homeMountRules struct {
+	home      string             // home path in the agent container
+	mount     corev1.VolumeMount // the agent container's home mount
+	agentDir  string             // <root>/<pid>/agents/<slug> on the export
+	forbidden map[string]bool    // export paths no container may mount
+}
+
+func newHomeMountRules(home string, mount corev1.VolumeMount, hs *HomeStorageRealization) (homeMountRules, error) {
+	agentDir, _, err := NFSHomeSubPaths(hs.SubPathRoot, hs.ProjectID, hs.AgentSlug, hs.AgentID)
+	if err != nil {
+		return homeMountRules{}, err
+	}
+	project := filepath.Join(hs.SubPathRoot, hs.ProjectID)
+	return homeMountRules{
+		home: home, mount: mount, agentDir: agentDir,
+		forbidden: map[string]bool{"": true, ".": true, "/": true, hs.SubPathRoot: true, project: true, filepath.Join(project, "agents"): true},
+	}, nil
+}
+
+// checkHomeMounts enforces, for an NFS-home pod:
+//   - exactly one mount at or under the home path: the home mount itself,
+//     on the agent container;
+//   - no container mounts the home volume at the export root, the subpath
+//     root, the project directory or its agents directory;
+//   - only the home-leaf init container (and the workspace provisioning
+//     init container, which already mounts the agent directory of a
+//     clone-per-agent workspace) mounts the agent directory.
+//
+// On an NFS-home pod the home is the export, so another mount there would
+// hide it or be created inside it, and a wider mount of the home volume
+// would expose other agents' homes.
+func checkHomeMounts(pod *corev1.Pod, rules homeMountRules) error {
+	check := func(container string, mounts []corev1.VolumeMount, isAgent, mayMountAgentDir bool) error {
 		for _, vm := range mounts {
 			p := path.Clean(vm.MountPath)
-			if p != home && !strings.HasPrefix(p, home+"/") {
+			if (p == rules.home || strings.HasPrefix(p, rules.home+"/")) && (!isAgent || vm != rules.mount) {
+				return fmt.Errorf("volume %q is mounted at %s in container %q, at or inside the agent home %s; with home storage %q only the home volume may be mounted there",
+					vm.Name, vm.MountPath, container, rules.home, HomeStorageNFS)
+			}
+			if vm.Name != rules.mount.Name {
 				continue
 			}
-			if isAgent && vm == homeMount {
-				continue
+			sub := path.Clean(vm.SubPath)
+			if vm.SubPath == "" || rules.forbidden[sub] {
+				return fmt.Errorf("container %q mounts the home volume %q at export path %q; with home storage %q that path is not mounted", container, vm.Name, vm.SubPath, HomeStorageNFS)
 			}
-			return fmt.Errorf("volume %q is mounted at %s in container %q, at or inside the agent home %s; with home storage %q only the home volume may be mounted there",
-				vm.Name, vm.MountPath, container, home, HomeStorageNFS)
+			if sub == rules.agentDir && !mayMountAgentDir {
+				return fmt.Errorf("container %q mounts the agent directory %q of the home volume; with home storage %q only the home-leaf init container mounts it", container, vm.SubPath, HomeStorageNFS)
+			}
 		}
 		return nil
 	}
 	found := 0
 	for i, c := range pod.Spec.Containers {
-		if err := check(c.Name, c.VolumeMounts, i == 0); err != nil {
+		if err := check(c.Name, c.VolumeMounts, i == 0, false); err != nil {
 			return err
 		}
 		if i == 0 {
 			for _, vm := range c.VolumeMounts {
-				if vm == homeMount {
+				if vm == rules.mount {
 					found++
 				}
 			}
 		}
 	}
 	for _, c := range pod.Spec.InitContainers {
-		if err := check(c.Name, c.VolumeMounts, false); err != nil {
+		mayMountAgentDir := c.Name == k8sHomeLeafContainer || c.Name == "workspace-provision"
+		if err := check(c.Name, c.VolumeMounts, false, mayMountAgentDir); err != nil {
 			return err
 		}
 	}
 	if found != 1 {
-		return fmt.Errorf("the agent home %s must be mounted exactly once in the agent container (found %d)", home, found)
+		return fmt.Errorf("the agent home %s must be mounted exactly once in the agent container (found %d)", rules.home, found)
 	}
 	return nil
 }
@@ -766,13 +798,12 @@ func acquireHomeStartLock(ctx context.Context, config RunConfig) (func(), error)
 	if !acquired {
 		return nil, fmt.Errorf("%w: another start of agent %s is in progress; retry", errAgentStartInProgress, config.Name)
 	}
-	var once sync.Once
+	// Run calls the returned func exactly once: after the pod is created,
+	// or on the way out of a start that did not get that far.
 	return func() {
-		once.Do(func() {
-			if err := release(); err != nil {
-				runtimeLog.Error("Failed to release the agent start lock", "agent", config.Name, "error", err)
-			}
-		})
+		if err := release(); err != nil {
+			runtimeLog.Error("Failed to release the agent start lock", "agent", config.Name, "error", err)
+		}
 	}, nil
 }
 
@@ -788,3 +819,24 @@ func k8sHomeHooksGuardCommand(home string) []string {
 	fi
 done`, "sh", home}
 }
+
+// Paths, relative to the agent home, of the harness bundle's secrets and
+// outputs on the broker. For NFS-home pods they are never transferred into
+// the home on the export: the secrets are staged in memory
+// (k8sHarnessSecretsDir) and the outputs are regenerated in the pod
+// (k8sHarnessOutputsDir).
+const (
+	harnessBundleSecretsRel = ".scion/harness/secrets"
+	harnessBundleOutputsRel = ".scion/harness/outputs"
+)
+
+// nfsHomeSyncExcludes returns what the home transfer of an NFS-home pod
+// leaves out: the link targets and the harness bundle's secrets and
+// outputs.
+func (r *KubernetesRuntime) nfsHomeSyncExcludes(config RunConfig) []string {
+	return append(r.k8sHomeLinkTargets(config), harnessBundleSecretsRel, harnessBundleOutputsRel)
+}
+
+// k8sHarnessSecretsDirCommand creates the in-memory harness secrets
+// directory, private to the pod user.
+var k8sHarnessSecretsDirCommand = []string{"sh", "-c", "mkdir -p " + k8sHarnessSecretsDir + " && chmod 0700 " + k8sHarnessSecretsDir}

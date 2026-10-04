@@ -36,6 +36,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/homeprep"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 func TestNFSHomeSubPaths(t *testing.T) {
@@ -273,7 +274,7 @@ func TestBuildPod_NFSHomeMainEnvUnchangedByHomeSettings(t *testing.T) {
 	}
 	for _, e := range base {
 		switch e.Name {
-		case homeAgentIDEnvVar, homeStartIDEnvVar, homeGIDEnvVar, homeSkeletonSrcEnvVar, homeSkeletonMaxEnvVar:
+		case homeAgentIDEnvVar, homeStartIDEnvVar, homeGIDEnvVar, homeSkeletonSrcEnvVar, homeSkeletonMaxEnvVar, homeLinksEnvVar:
 			t.Errorf("agent container env has %s", e.Name)
 		}
 	}
@@ -281,17 +282,30 @@ func TestBuildPod_NFSHomeMainEnvUnchangedByHomeSettings(t *testing.T) {
 
 func TestCheckHomeMounts(t *testing.T) {
 	home := "/home/scion"
+	hs := &HomeStorageRealization{SubPathRoot: "p", ProjectID: "x", AgentSlug: "a", AgentID: testHomeAgentID}
 	homeMount := corev1.VolumeMount{Name: k8sHomeVolume, MountPath: home, SubPath: "p/x/agents/a/home-" + testHomeAgentID}
+	rules, err := newHomeMountRules(home, homeMount, hs)
+	if err != nil {
+		t.Fatal(err)
+	}
 	pod := func(agent []corev1.VolumeMount, init ...corev1.Container) *corev1.Pod {
 		return &corev1.Pod{Spec: corev1.PodSpec{
 			Containers:     []corev1.Container{{Name: "agent", VolumeMounts: agent}},
 			InitContainers: init,
 		}}
 	}
+	leaf := corev1.Container{Name: k8sHomeLeafContainer, VolumeMounts: []corev1.VolumeMount{{Name: k8sHomeVolume, MountPath: k8sHomeAgentDirMount, SubPath: "p/x/agents/a"}}}
 	ok := pod([]corev1.VolumeMount{homeMount, {Name: "workspace", MountPath: "/workspace"}, {Name: "scion-mem", MountPath: "/run/scion/mem"}},
-		corev1.Container{Name: k8sHomePrepareContainer, VolumeMounts: []corev1.VolumeMount{{Name: k8sHomeVolume, MountPath: k8sHomePrepareMount}}})
-	if err := checkHomeMounts(ok, home, homeMount); err != nil {
+		leaf,
+		corev1.Container{Name: k8sHomePrepareContainer, VolumeMounts: []corev1.VolumeMount{{Name: k8sHomeVolume, MountPath: k8sHomePrepareMount, SubPath: homeMount.SubPath}}},
+		corev1.Container{Name: "workspace-provision", VolumeMounts: []corev1.VolumeMount{{Name: k8sHomeVolume, MountPath: "/workspace", SubPath: "p/x/agents/a"}}})
+	if err := checkHomeMounts(ok, rules); err != nil {
 		t.Errorf("valid pod rejected: %v", err)
+	}
+	withSidecar := pod([]corev1.VolumeMount{homeMount})
+	withSidecar.Spec.Containers = append(withSidecar.Spec.Containers, corev1.Container{Name: "sidecar", VolumeMounts: []corev1.VolumeMount{homeMount}})
+	homeVol := func(sub string) corev1.VolumeMount {
+		return corev1.VolumeMount{Name: k8sHomeVolume, MountPath: "/mnt", SubPath: sub}
 	}
 	for name, p := range map[string]*corev1.Pod{
 		"another volume at the home":  pod([]corev1.VolumeMount{homeMount, {Name: "gcs-vol-0", MountPath: "/home/scion"}}),
@@ -302,8 +316,17 @@ func TestCheckHomeMounts(t *testing.T) {
 		"home missing":                pod([]corev1.VolumeMount{{Name: "workspace", MountPath: "/workspace"}}),
 		"init container in the home":  pod([]corev1.VolumeMount{homeMount}, corev1.Container{Name: "x", VolumeMounts: []corev1.VolumeMount{{Name: "w", MountPath: "/home/scion/.ssh"}}}),
 		"init container at the home":  pod([]corev1.VolumeMount{homeMount}, corev1.Container{Name: "x", VolumeMounts: []corev1.VolumeMount{homeMount}}),
+		"home mount on a sidecar":     withSidecar,
+		"home volume at export root":  pod([]corev1.VolumeMount{homeMount, homeVol("")}),
+		"home volume at slash":        pod([]corev1.VolumeMount{homeMount, homeVol("/")}),
+		"home volume at subpath root": pod([]corev1.VolumeMount{homeMount, homeVol("p")}),
+		"home volume at project":      pod([]corev1.VolumeMount{homeMount, homeVol("p/x")}),
+		"home volume at agents":       pod([]corev1.VolumeMount{homeMount, homeVol("p/x/agents/")}),
+		"agent dir on the agent":      pod([]corev1.VolumeMount{homeMount, homeVol("p/x/agents/a")}),
+		"agent dir on another init":   pod([]corev1.VolumeMount{homeMount}, corev1.Container{Name: k8sHomePrepareContainer, VolumeMounts: []corev1.VolumeMount{homeVol("p/x/agents/a")}}),
+		"export root on an init":      pod([]corev1.VolumeMount{homeMount}, corev1.Container{Name: k8sHomeLeafContainer, VolumeMounts: []corev1.VolumeMount{homeVol("")}}),
 	} {
-		if err := checkHomeMounts(p, home, homeMount); err == nil {
+		if err := checkHomeMounts(p, rules); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
 	}
@@ -667,7 +690,6 @@ func TestRun_NFSHomeStartLock(t *testing.T) {
 		t.Errorf("second acquire: %v", err)
 	}
 	release()
-	release()
 	again, err := acquireHomeStartLock(context.Background(), RunConfig{Name: "a", Locker: l, HomeStorage: cfg.HomeStorage})
 	if err != nil {
 		t.Errorf("after release: %v", err)
@@ -810,4 +832,338 @@ func TestK8sHomeHooksGuardCommand(t *testing.T) {
 			t.Errorf("%s linked: err %v, output %q", linked, err, out)
 		}
 	}
+}
+
+// NFS-home starts: the harness bundle's secrets and outputs are left out
+// of the home transfer, and the secrets are staged in memory only, with a
+// separate transfer into SCION_HARNESS_SECRETS_DIR before the startup gate.
+func TestRun_NFSHomeHarnessSecretsStagedInMemory(t *testing.T) {
+	rt, clientset, _ := newTestK8sRuntime()
+	rt.execProbe = func(context.Context, string, string) error { return nil }
+	type transfer struct {
+		src, dest string
+		excludes  []string
+	}
+	var mu sync.Mutex
+	var steps []string
+	var transfers []transfer
+	rt.podExec = func(_ context.Context, _, _ string, cmd []string) (string, error) {
+		joined := strings.Join(cmd, " ")
+		mu.Lock()
+		steps = append(steps, joined)
+		mu.Unlock()
+		if joined == "cat "+k8sHomeModeFile {
+			pod, err := clientset.CoreV1().Pods("default").Get(context.Background(), "nfs-agent", metav1.GetOptions{})
+			if err != nil {
+				return "", err
+			}
+			return `{"mode":"seed-over","start_id":"` + pod.Labels[labelStartID] + `"}`, nil
+		}
+		return "", nil
+	}
+	rt.homeSync = func(_ context.Context, _, _, src, dest string, ex []string) error {
+		mu.Lock()
+		transfers = append(transfers, transfer{src, dest, ex})
+		steps = append(steps, "transfer "+dest)
+		mu.Unlock()
+		return nil
+	}
+	adc := filepath.Join(t.TempDir(), "adc.json")
+	if err := os.WriteFile(adc, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := nfsHomeTestConfig(true)
+	config.Name = "nfs-agent"
+	config.HomeStorage.AgentSlug = "nfs-agent"
+	config.Labels = nil
+	config.Harness = &MockHarness{}
+	config.ResolvedAuth.Files[0].SourcePath = adc
+	config.HomeDir = t.TempDir()
+	secrets := filepath.Join(config.HomeDir, ".scion", "harness", "secrets")
+	if err := os.MkdirAll(secrets, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(secrets, "API_KEY"), []byte("k"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := startFakeK8sPod(t, rt, clientset, config); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(transfers) != 2 {
+		t.Fatalf("transfers = %+v, want the home and the in-memory secrets", transfers)
+	}
+	home, mem := transfers[0], transfers[1]
+	if home.src != config.HomeDir || home.dest != "/home/scion" {
+		t.Errorf("home transfer = %+v", home)
+	}
+	for _, ex := range []string{".scion/harness/secrets", ".scion/harness/outputs"} {
+		found := false
+		for _, e := range home.excludes {
+			if e == ex {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("home transfer does not exclude %s: %v", ex, home.excludes)
+		}
+	}
+	if mem.src != secrets || mem.dest != k8sHarnessSecretsDir {
+		t.Errorf("secrets transfer = %+v, want %s to %s", mem, secrets, k8sHarnessSecretsDir)
+	}
+	idx := func(prefix string) int {
+		for i, s := range steps {
+			if strings.HasPrefix(s, prefix) {
+				return i
+			}
+		}
+		return -1
+	}
+	mk, tr, gate := idx("sh -c mkdir -p "+k8sHarnessSecretsDir), idx("transfer "+k8sHarnessSecretsDir), idx("touch /tmp/.scion-home-ready")
+	if mk < 0 || mk > tr || tr > gate {
+		t.Errorf("order: mkdir %d, secrets transfer %d, gate %d", mk, tr, gate)
+	}
+}
+
+// The home transfer of an NFS-home pod never includes the harness bundle's
+// secrets or outputs, whatever the links are.
+func TestNFSHomeSyncExcludes(t *testing.T) {
+	rt, _, _ := newTestK8sRuntime()
+	for _, cfg := range []RunConfig{nfsHomeTestConfig(true), withTestHomeStorage(RunConfig{Name: "a", Image: "i", UnixUsername: "scion"})} {
+		ex := rt.nfsHomeSyncExcludes(cfg)
+		want := map[string]bool{".scion/harness/secrets": false, ".scion/harness/outputs": false}
+		for _, e := range ex {
+			if _, ok := want[e]; ok {
+				want[e] = true
+			}
+		}
+		for k, v := range want {
+			if !v {
+				t.Errorf("excludes %v lack %s", ex, k)
+			}
+		}
+	}
+}
+
+// An NFS-home start never force-deletes a previous pod it could not read.
+func TestCleanupStalePod_UnreadablePodRefused(t *testing.T) {
+	rt, cs, _ := newTestK8sRuntime()
+	if _, err := cs.CoreV1().Pods("default").Create(context.Background(), runningNFSHomePod("a"), metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	deletes := keepPodsOnDelete(cs)
+	cs.PrependReactor("get", "pods", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, errors.New("connection reset")
+	})
+	err := rt.cleanupStalePod(context.Background(), "default", "a", &HomeStorageRealization{})
+	if !errors.Is(err, errPreviousPodUnconfirmed) || !strings.Contains(err.Error(), "connection reset") {
+		t.Errorf("err = %v, want previous_pod_unconfirmed wrapping the read error", err)
+	}
+	if len(*deletes) != 0 {
+		t.Errorf("deletes = %+v, want none", *deletes)
+	}
+}
+
+// For an NFS-home start the previous pod's secrets are removed only after
+// the pod is confirmed stopped.
+func TestRun_NFSHomeSecretsCleanedAfterPreviousPod(t *testing.T) {
+	rt, cs, _ := newTestK8sRuntime()
+	cfg := nfsHomeTestConfig(true)
+	cfg.Name = "a"
+	if _, err := cs.CoreV1().Pods("default").Create(context.Background(), runningNFSHomePod("a"), metav1.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	keepPodsOnDelete(cs)
+	fc := &fakeTerminationClock{now: time.Unix(1000, 0)}
+	rt.execReadyClock = fc.clock()
+	_, err := rt.Run(context.Background(), cfg)
+	if !errors.Is(err, errPreviousPodUnconfirmed) {
+		t.Fatalf("err = %v, want previous_pod_unconfirmed", err)
+	}
+	for _, a := range cs.Actions() {
+		if a.GetResource().Resource == "secrets" && (a.GetVerb() == "delete" || a.GetVerb() == "delete-collection" || a.GetVerb() == "list") {
+			t.Errorf("secrets touched (%s) before the previous pod was confirmed stopped", a.GetVerb())
+		}
+	}
+}
+
+// countingLocker records acquires and releases.
+type countingLocker struct {
+	mu                 sync.Mutex
+	acquires, releases int
+	acquire            bool
+}
+
+func (l *countingLocker) TryAdvisoryLock(context.Context, store.AdvisoryLockKey) (bool, func() error, error) {
+	return false, func() error { return nil }, nil
+}
+
+func (l *countingLocker) TryAdvisoryLockObject(context.Context, store.AdvisoryLockKey, int32) (bool, func() error, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.acquire {
+		return false, func() error { return nil }, nil
+	}
+	l.acquires++
+	return true, func() error {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		l.releases++
+		return nil
+	}, nil
+}
+
+// The per-agent start lock, when a locker is supplied, is released exactly
+// once: on a refusal after it was taken, on a pod build failure, and after
+// the pod is created.
+func TestRun_NFSHomeStartLockReleasedOnce(t *testing.T) {
+	t.Run("previous pod unconfirmed", func(t *testing.T) {
+		rt, cs, _ := newTestK8sRuntime()
+		cfg := nfsHomeTestConfig(true)
+		cfg.Name = "a"
+		l := &countingLocker{acquire: true}
+		cfg.Locker = l
+		if _, err := cs.CoreV1().Pods("default").Create(context.Background(), runningNFSHomePod("a"), metav1.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		keepPodsOnDelete(cs)
+		rt.execReadyClock = (&fakeTerminationClock{now: time.Unix(1000, 0)}).clock()
+		if _, err := rt.Run(context.Background(), cfg); !errors.Is(err, errPreviousPodUnconfirmed) {
+			t.Fatalf("err = %v", err)
+		}
+		if l.acquires != 1 || l.releases != 1 {
+			t.Errorf("acquires %d, releases %d; want 1 and 1", l.acquires, l.releases)
+		}
+	})
+	t.Run("pod build failure", func(t *testing.T) {
+		rt, _, _ := newTestK8sRuntime()
+		cfg := nfsHomeTestConfig(true)
+		cfg.Name = "a"
+		cfg.HomeStorage.Leaf = "unknown"
+		l := &countingLocker{acquire: true}
+		cfg.Locker = l
+		if _, err := rt.Run(context.Background(), cfg); err == nil {
+			t.Fatal("expected a pod build failure")
+		}
+		if l.acquires != 1 || l.releases != 1 {
+			t.Errorf("acquires %d, releases %d; want 1 and 1", l.acquires, l.releases)
+		}
+	})
+	t.Run("pod created", func(t *testing.T) {
+		rt, clientset, _ := newTestK8sRuntime()
+		rt.execProbe = func(context.Context, string, string) error { return nil }
+		l := &countingLocker{acquire: true}
+		rt.podExec = func(_ context.Context, _, _ string, cmd []string) (string, error) {
+			if strings.Join(cmd, " ") == "cat "+k8sHomeModeFile {
+				l.mu.Lock()
+				released := l.releases
+				l.mu.Unlock()
+				if released != 1 {
+					t.Errorf("lock not released once the pod exists (releases %d)", released)
+				}
+				pod, err := clientset.CoreV1().Pods("default").Get(context.Background(), "nfs-agent", metav1.GetOptions{})
+				if err != nil {
+					return "", err
+				}
+				return `{"mode":"seed-over","start_id":"` + pod.Labels[labelStartID] + `"}`, nil
+			}
+			return "", nil
+		}
+		rt.homeSync = func(context.Context, string, string, string, string, []string) error { return nil }
+		adc := filepath.Join(t.TempDir(), "adc.json")
+		if err := os.WriteFile(adc, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg := nfsHomeTestConfig(true)
+		cfg.Name = "nfs-agent"
+		cfg.HomeStorage.AgentSlug = "nfs-agent"
+		cfg.Labels = nil
+		cfg.Harness = &MockHarness{}
+		cfg.ResolvedAuth.Files[0].SourcePath = adc
+		cfg.HomeDir = t.TempDir()
+		cfg.Locker = l
+		if err := startFakeK8sPod(t, rt, clientset, cfg); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if l.acquires != 1 || l.releases != 1 {
+			t.Errorf("acquires %d, releases %d; want 1 and 1", l.acquires, l.releases)
+		}
+	})
+}
+
+// Sync of an NFS-home agent copies the workspace only, in both directions,
+// and says that the home is not synced.
+func TestSync_NFSHomePodSkipsHome(t *testing.T) {
+	for _, dir := range []SyncDirection{SyncTo, SyncFrom} {
+		t.Run(string(dir), func(t *testing.T) {
+			rt, cs, _ := newTestK8sRuntime()
+			pod := newFakeAgentPodWithHomeDirAnnotation("test-agent", "/some/agent/home")
+			pod.Annotations[k8sHomeStorageAnnotation] = HomeStorageNFS
+			if _, err := cs.CoreV1().Pods("default").Create(context.Background(), pod, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			var copied []string
+			rt.syncTransfer = func(_ context.Context, _, _, src, dest string, _ bool) error {
+				copied = append(copied, src+" -> "+dest)
+				return nil
+			}
+			out := captureStdout(t, func() {
+				if err := rt.Sync(context.Background(), "test-agent", dir); err != nil {
+					t.Fatalf("Sync: %v", err)
+				}
+			})
+			if len(copied) != 1 || !strings.Contains(copied[0], "/workspace") {
+				t.Errorf("copies = %v, want the workspace only", copied)
+			}
+			if !strings.Contains(out, "Agent home is kept on persistent storage; not syncing it.") {
+				t.Errorf("no notice in %q", out)
+			}
+
+			// A plain pod still syncs its home.
+			rt2, cs2, _ := newTestK8sRuntime()
+			plain := newFakeAgentPodWithHomeDirAnnotation("test-agent", "/some/agent/home")
+			if _, err := cs2.CoreV1().Pods("default").Create(context.Background(), plain, metav1.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			copied = nil
+			rt2.syncTransfer = rt.syncTransfer
+			captureStdout(t, func() {
+				if err := rt2.Sync(context.Background(), "test-agent", dir); err != nil {
+					t.Fatalf("Sync: %v", err)
+				}
+			})
+			if len(copied) != 2 {
+				t.Errorf("plain pod copies = %v, want workspace and home", copied)
+			}
+		})
+	}
+}
+
+func captureStdout(t *testing.T, f func()) string {
+	t.Helper()
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = w
+	done := make(chan string)
+	go func() {
+		var b strings.Builder
+		buf := make([]byte, 4096)
+		for {
+			n, err := r.Read(buf)
+			b.Write(buf[:n])
+			if err != nil {
+				break
+			}
+		}
+		done <- b.String()
+	}()
+	defer func() { os.Stdout = old }()
+	f()
+	_ = w.Close()
+	return <-done
 }

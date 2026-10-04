@@ -366,7 +366,7 @@ The `nfs` backend is in development. It takes effect only when the hub's `hub.k8
 | `backend` | string | `local` | `local` or `nfs`. A runtime entry or profile can override it with `home_storage_backend`. |
 | `leaf` | string | `pod` | How an agent's home directory is created on the export: `pod` (an init container in the agent's pod) or `broker` (the broker, through its own mount of the export at the shared-dir storage `mount_root`). A runtime entry or profile can override it with `home_storage_leaf`. |
 | `stop_grace_seconds` | int | `30` | Termination grace period of pods with an NFS home. |
-| `termination_wait_seconds` | int | `15` | How long a start waits, beyond the grace period, for the agent's previous pod to stop. |
+| `termination_wait_seconds` | int | `15` | How long a start waits, beyond the grace period, for the agent's previous pod to stop. Keep `stop_grace_seconds` plus this below 90 (the hub's start window; the broker request timeout is 120); the server warns at startup and `scion config validate` warns when it is not. |
 | `skeleton_max_bytes` | int | `268435456` | Largest image home skeleton copied into a new home. |
 | `allow_incomplete_phases` | bool | `false` | Development only. Allows the `nfs` backend while the feature is incomplete. |
 

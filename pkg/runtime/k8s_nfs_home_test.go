@@ -149,17 +149,8 @@ func TestBuildPod_NFSHomeVersusPlainPod(t *testing.T) {
 			t.Errorf("nfs %s = %q, want %q", k, ne[k], v)
 		}
 	}
-	var links []k8sHomeLink
-	if err := json.Unmarshal([]byte(ne["SCION_HOME_LINKS"]), &links); err != nil {
-		t.Fatalf("SCION_HOME_LINKS is not JSON: %v", err)
-	}
-	if !reflect.DeepEqual(links, rt.k8sHomeLinks(nfsCfg)) {
-		t.Errorf("SCION_HOME_LINKS = %+v, want %+v", links, rt.k8sHomeLinks(nfsCfg))
-	}
-	for _, s := range nfsCfg.ResolvedSecrets {
-		if strings.Contains(ne["SCION_HOME_LINKS"], s.Value) && len(s.Value) > 1 {
-			t.Errorf("SCION_HOME_LINKS contains the value of %s", s.Name)
-		}
+	if _, ok := ne["SCION_HOME_LINKS"]; ok {
+		t.Error("the agent container must not receive SCION_HOME_LINKS; only home-prepare does")
 	}
 }
 
@@ -174,8 +165,11 @@ func TestBuildPod_NFSHomeWithoutSecretsJSON(t *testing.T) {
 	if _, ok := env["SCION_SECRETS_FILE"]; ok {
 		t.Error("SCION_SECRETS_FILE set without a secrets.json")
 	}
-	if env["SCION_HOME_LINKS"] != "[]" {
-		t.Errorf("SCION_HOME_LINKS = %q, want []", env["SCION_HOME_LINKS"])
+	if _, ok := env["SCION_HOME_LINKS"]; ok {
+		t.Error("the agent container must not receive SCION_HOME_LINKS")
+	}
+	if prep := pod.Spec.InitContainers[len(pod.Spec.InitContainers)-1]; containerEnv(prep)["SCION_HOME_LINKS"] != "[]" {
+		t.Errorf("home-prepare SCION_HOME_LINKS = %q, want []", containerEnv(prep)["SCION_HOME_LINKS"])
 	}
 }
 
@@ -642,7 +636,7 @@ func TestRun_NFSHomeExcludesLinksAndVerifies(t *testing.T) {
 				}
 				return
 			}
-			wantEx := []string{".ssh/id_rsa", ".gemini/oauth_creds.json", ".config/gcloud/telemetry.json", ".scion/secrets.json", ".config/gcloud/application_default_credentials.json"}
+			wantEx := []string{".ssh/id_rsa", ".gemini/oauth_creds.json", ".config/gcloud/telemetry.json", ".scion/secrets.json", ".config/gcloud/application_default_credentials.json", ".scion/harness/secrets", ".scion/harness/outputs"}
 			if !sameStrings(excludes, wantEx) {
 				t.Errorf("sync excludes = %v, want %v", excludes, wantEx)
 			}

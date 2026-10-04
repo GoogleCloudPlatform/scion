@@ -83,6 +83,11 @@ type KubernetesRuntime struct {
 	// (syncToPod). Tests use it to observe the order of the start steps.
 	homeSync func(ctx context.Context, namespace, podName, sourcePath, destPath string, excludes []string) error
 
+	// syncTransfer, when set, replaces the copies Sync performs (toPod is
+	// true for broker to pod). Tests use it to observe which paths Sync
+	// transfers.
+	syncTransfer func(ctx context.Context, namespace, podName, src, dest string, toPod bool) error
+
 	// PriorityClassName is the runtime-level default spec.priorityClassName
 	// applied to agent pods (settings runtimes.<name>.priority_class_name).
 	// An explicit per-template/agent kubernetes.priorityClassName overrides
@@ -612,9 +617,17 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	}
 	defer func() { releaseHomeLock() }()
 
-	r.cleanupAgentSecrets(ctx, namespace, config.Name)
+	// An NFS-home start removes the previous pod first and its secrets only
+	// once the pod is confirmed stopped, so a pod still shutting down keeps
+	// the secrets it mounted.
+	if !nfsHomeStart {
+		r.cleanupAgentSecrets(ctx, namespace, config.Name)
+	}
 	if err := r.cleanupStalePod(ctx, namespace, config.Name, config.HomeStorage); err != nil {
 		return "", err
+	}
+	if nfsHomeStart {
+		r.cleanupAgentSecrets(ctx, namespace, config.Name)
 	}
 	cleanupArmed = true
 
@@ -809,8 +822,12 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		runtimeLog.Info("Syncing agent home", "agent", config.Name, "source", config.HomeDir, "dest", destHome, "phase", "home-sync")
 		fmt.Printf("  Syncing agent home (%s -> %s)...\n", config.HomeDir, destHome)
 		homeSyncStart := time.Now()
-		// NFS-home pods: the sync never writes over a link target.
+		// NFS-home pods: the sync never writes over a link target, and the
+		// harness bundle's secrets and outputs never reach the export.
 		homeLinkTargets := r.k8sHomeLinkTargets(config)
+		if nfsHomeStart {
+			homeLinkTargets = r.nfsHomeSyncExcludes(config)
+		}
 		err = r.syncWithRetry(ctx, func() error {
 			if r.homeSync != nil {
 				return r.homeSync(ctx, namespace, createdPod.Name, config.HomeDir, destHome, homeLinkTargets)
@@ -842,6 +859,27 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 		}
 		runtimeLog.Info("Home sync complete", "agent", config.Name, "phase", "home-sync",
 			"sync_ms", syncMs, "chown_ms", time.Since(chownStart).Milliseconds())
+	}
+
+	// NFS-home pods: the harness bundle's secrets are staged in memory
+	// only, in the directory SCION_HARNESS_SECRETS_DIR names, before the
+	// harness runs.
+	if nfsHomeStart && config.HomeDir != "" {
+		secretsSrc := filepath.Join(config.HomeDir, harnessBundleSecretsRel)
+		if st, err := os.Lstat(secretsSrc); err == nil && st.IsDir() {
+			if _, err := r.execInPod(ctx, namespace, createdPod.Name, k8sHarnessSecretsDirCommand); err != nil {
+				return createdPod.Name, fmt.Errorf("failed to create the in-memory harness secrets directory: %w", err)
+			}
+			err = r.syncWithRetry(ctx, func() error {
+				if r.homeSync != nil {
+					return r.homeSync(ctx, namespace, createdPod.Name, secretsSrc, k8sHarnessSecretsDir, nil)
+				}
+				return r.syncToPod(ctx, namespace, createdPod.Name, secretsSrc, k8sHarnessSecretsDir)
+			})
+			if err != nil {
+				return createdPod.Name, fmt.Errorf("failed to stage the harness secrets: %w", err)
+			}
+		}
 	}
 
 	// A new or interrupted home is marked seeded once the transfer is in
@@ -2710,7 +2748,11 @@ func (r *KubernetesRuntime) buildPod(namespace string, config RunConfig) (*corev
 	}
 
 	if nfsHome {
-		if err := checkHomeMounts(pod, containerHome, homeParts.mount); err != nil {
+		rules, err := newHomeMountRules(containerHome, homeParts.mount, config.HomeStorage)
+		if err != nil {
+			return nil, err
+		}
+		if err := checkHomeMounts(pod, rules); err != nil {
 			return nil, err
 		}
 	}
@@ -3346,6 +3388,11 @@ func (r *KubernetesRuntime) cleanupStalePod(ctx context.Context, namespace, podN
 	if k8serrors.IsNotFound(err) {
 		return nil
 	}
+	if err != nil && hs != nil {
+		// An NFS-home start never force-deletes a pod it could not read:
+		// it may be a previous pod of this agent still writing to the home.
+		return fmt.Errorf("%w: cannot read the previous pod %s: %v", errPreviousPodUnconfirmed, podName, err)
+	}
 	if err == nil && isNFSHomePod(pod) {
 		if derr := pods.Delete(ctx, podName, podDeleteOptions(pod)); derr != nil && !k8serrors.IsNotFound(derr) {
 			return fmt.Errorf("%w: failed to delete the previous pod %s: %v", errPreviousPodUnconfirmed, podName, derr)
@@ -3849,7 +3896,7 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 	if direction == SyncFrom {
 		fmt.Printf("Syncing workspace (agent -> %s)...\n", workspacePath)
 		if err := r.syncWithRetry(ctx, func() error {
-			return r.syncFromPod(ctx, namespace, agent.ContainerID, "/workspace", workspacePath)
+			return r.syncTransferFn(ctx, namespace, agent.ContainerID, "/workspace", workspacePath, false)
 		}); err != nil {
 			return err
 		}
@@ -3857,7 +3904,7 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 			destHome := util.GetHomeDir(username)
 			fmt.Printf("Syncing agent home (agent -> %s)...\n", homeDir)
 			if err := r.syncWithRetry(ctx, func() error {
-				return r.syncFromPod(ctx, namespace, agent.ContainerID, destHome, homeDir)
+				return r.syncTransferFn(ctx, namespace, agent.ContainerID, destHome, homeDir, false)
 			}); err != nil {
 				return err
 			}
@@ -3867,7 +3914,7 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 
 	fmt.Printf("Syncing workspace (%s -> agent)...\n", workspacePath)
 	if err := r.syncWithRetry(ctx, func() error {
-		return r.syncToPod(ctx, namespace, agent.ContainerID, workspacePath, "/workspace")
+		return r.syncTransferFn(ctx, namespace, agent.ContainerID, workspacePath, "/workspace", true)
 	}); err != nil {
 		return err
 	}
@@ -3875,12 +3922,24 @@ func (r *KubernetesRuntime) Sync(ctx context.Context, id string, direction SyncD
 		destHome := util.GetHomeDir(username)
 		fmt.Printf("Syncing agent home (%s -> agent)...\n", homeDir)
 		if err := r.syncWithRetry(ctx, func() error {
-			return r.syncToPod(ctx, namespace, agent.ContainerID, homeDir, destHome)
+			return r.syncTransferFn(ctx, namespace, agent.ContainerID, homeDir, destHome, true)
 		}); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// syncTransferFn copies src to dest for Sync, from the broker to the pod
+// when toPod is true and back otherwise.
+func (r *KubernetesRuntime) syncTransferFn(ctx context.Context, namespace, podName, src, dest string, toPod bool) error {
+	if r.syncTransfer != nil {
+		return r.syncTransfer(ctx, namespace, podName, src, dest, toPod)
+	}
+	if toPod {
+		return r.syncToPod(ctx, namespace, podName, src, dest)
+	}
+	return r.syncFromPod(ctx, namespace, podName, src, dest)
 }
 
 func (r *KubernetesRuntime) Exec(ctx context.Context, id string, cmd []string) (string, error) {
