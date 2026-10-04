@@ -82,3 +82,7 @@ path.
 - §3.5 now gives each 409 message where it applies. An unlisted completed
   migration gets the plain "Migration already completed" from the earlier
   guard. Only a listed one gets the dry-run message.
+
+## Upstream merge
+
+- Merged upstream main 833426e9 as merge commit 829b8bfb. No conflicts, and the remerge-diff is empty. Build and vet are clean. The targeted pkg/hub run passes 53/53 under TZ=Asia/Tokyo and TZ=Asia/Kathmandu.
