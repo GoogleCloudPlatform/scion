@@ -531,6 +531,12 @@ func (t *brokerHTTPTransport) ExecuteKeys(ctx context.Context, brokerID, brokerE
 // agentkeys.ClassifyDispatchError maps to OutcomeKeysOutcomeUnknown — the
 // honest "may have run" outcome required by
 // .design/agent-keys-contract.md §2.5/§4.3.
+//
+// The Op == "dial" clause only matters when gotConn is true: the transport
+// handed the request a connection that proved unusable before any write
+// (an HTTP/2 errClientConnUnusable retry) and the replacement dial then
+// failed, which is still pre-send. Do not remove it as redundant or widen
+// it to other ops.
 func classifyKeysSendError(err error, gotConn bool) error {
 	var opErr *net.OpError
 	if !gotConn || (errors.As(err, &opErr) && opErr.Op == "dial") {

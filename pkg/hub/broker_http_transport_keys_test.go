@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 // TestHTTPRuntimeBrokerClient_ExecuteKeys_Dispatched proves the HTTP
@@ -578,7 +579,10 @@ func pendingDialKeysClient(t *testing.T, clientTimeout time.Duration) (*HTTPRunt
 		rt.CloseIdleConnections()
 	})
 	client := NewHTTPRuntimeBrokerClient()
-	client.transport.keysClient.Transport = rt
+	// Wrap the stub the same way newBrokerHTTPTransport wraps
+	// http.DefaultTransport, so the trace context goes through otelhttp
+	// exactly as it does in production.
+	client.transport.keysClient.Transport = otelhttp.NewTransport(rt)
 	client.transport.keysClient.Timeout = clientTimeout
 	return client, &dials
 }
@@ -678,5 +682,52 @@ func TestHTTPRuntimeBrokerClient_ExecuteKeys_DeadlineAfterConnectIsUnknown(t *te
 	}
 	if got := hits.Load(); got != 1 {
 		t.Fatalf("expected the broker handler to be reached exactly once, got %d", got)
+	}
+}
+
+// TestHTTPRuntimeBrokerClient_ExecuteKeys_HTTP2DeadlineAfterConnectIsUnknown
+// runs the keys request over HTTP/2 and checks that the connection trace
+// still fires before any frame is written: a deadline that expires while the
+// broker handler is running must stay keys_outcome_unknown, never
+// keys_unavailable.
+func TestHTTPRuntimeBrokerClient_ExecuteKeys_HTTP2DeadlineAfterConnectIsUnknown(t *testing.T) {
+	release := make(chan struct{})
+	var hits, h2Hits atomic.Int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.ProtoMajor == 2 {
+			h2Hits.Add(1)
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+	defer close(release)
+
+	// srv.Client()'s transport trusts the test certificate and negotiates h2.
+	client := NewHTTPRuntimeBrokerClient()
+	client.transport.keysClient.Transport = otelhttp.NewTransport(srv.Client().Transport)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_, err := client.ExecuteKeys(ctx, tid("broker-1"), srv.URL, "test-agent", agentkeys.BrokerRequest{OperationID: "op-1", ExecuteBefore: time.Now().Add(time.Minute)})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if errors.Is(err, agentkeys.ErrNotDispatched) {
+		t.Fatalf("a deadline after the request reached the broker over HTTP/2 must not be ErrNotDispatched, got %v", err)
+	}
+	if got := agentkeys.ClassifyDispatchError(err); got != agentkeys.OutcomeKeysOutcomeUnknown {
+		t.Fatalf("ClassifyDispatchError = %q, want %q", got, agentkeys.OutcomeKeysOutcomeUnknown)
+	}
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("expected the broker handler to be reached exactly once, got %d", got)
+	}
+	if got := h2Hits.Load(); got != 1 {
+		t.Fatalf("expected the request to arrive over HTTP/2, got %d HTTP/2 requests", got)
 	}
 }
