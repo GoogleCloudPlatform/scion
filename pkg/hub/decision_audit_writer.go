@@ -35,8 +35,8 @@ import (
 // transient database contention delays records instead of losing them.
 // EmitDecisionAudit never blocks on the store and never logs: it appends to
 // one of two fixed-capacity in-memory FIFOs (deny/unknown records and allow
-// records) under a short mutex and returns. A small fixed pool of workers,
-// started on the first record, drains the deny FIFO first, retrying
+// records) under a short mutex and returns. A small fixed pool of workers
+// drains the deny FIFO first, retrying
 // transient store errors with capped, jittered exponential backoff. When the
 // queue is full, allow records are shed before deny records. Every lost
 // record is counted (by reason and decision); a writer-owned goroutine logs
@@ -170,11 +170,10 @@ type StoreDecisionAuditEmitter struct {
 	cfg     decisionAuditWriterConfig
 	metrics atomic.Pointer[decisionAuditMetricsBox]
 
-	mu      sync.Mutex
-	denies  decisionAuditFIFO // deny and unknown records; written first
-	allows  decisionAuditFIFO // allow records; shed first when full
-	started bool              // workers running; set on the first record
-	closed  bool
+	mu     sync.Mutex
+	denies decisionAuditFIFO // deny and unknown records; written first
+	allows decisionAuditFIFO // allow records; shed first when full
+	closed bool
 
 	wake      chan struct{}
 	stop      chan struct{}
@@ -190,7 +189,7 @@ type StoreDecisionAuditEmitter struct {
 }
 
 // NewStoreDecisionAuditEmitter creates a store-backed decision audit
-// emitter. Its workers start with the first record.
+// emitter and starts its writer workers and drop log goroutine.
 func NewStoreDecisionAuditEmitter(s store.Store, logger *slog.Logger) *StoreDecisionAuditEmitter {
 	return newStoreDecisionAuditEmitter(s, logger, defaultDecisionAuditWriterConfig())
 }
@@ -209,19 +208,14 @@ func newStoreDecisionAuditEmitter(s store.Store, logger *slog.Logger, cfg decisi
 		pending: map[decisionAuditDropKey]int64{},
 	}
 	e.abortCtx, e.abort = context.WithCancel(context.Background())
-	return e
-}
-
-// startLocked starts the workers and the drop log goroutine. The caller
-// holds e.mu and has checked that the emitter is neither started nor
-// closed, so every wg.Add happens before Close's wg.Wait.
-func (e *StoreDecisionAuditEmitter) startLocked() {
-	e.started = true
-	e.wg.Add(e.cfg.workers + 1)
-	for i := 0; i < e.cfg.workers; i++ {
+	// Started eagerly rather than on the first record, so the goroutine
+	// count of a Server is fixed once New returns.
+	e.wg.Add(cfg.workers + 1)
+	for i := 0; i < cfg.workers; i++ {
 		go e.worker()
 	}
 	go e.dropLogLoop()
+	return e
 }
 
 // SetMetrics swaps in a metrics recorder. A nil recorder disables metrics.
@@ -272,9 +266,6 @@ func (e *StoreDecisionAuditEmitter) EmitDecisionAudit(_ context.Context, record 
 		e.mu.Unlock()
 		e.recordDrop(DecisionAuditDropShutdown, decision, nil)
 		return
-	}
-	if !e.started {
-		e.startLocked()
 	}
 	if e.denies.len()+e.allows.len() >= e.cfg.queueSize {
 		if decision == "allow" || e.allows.len() == 0 {

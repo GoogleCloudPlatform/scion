@@ -542,26 +542,6 @@ func TestDecisionAuditWriter_DropsAreNotLoggedOnDecisionPath(t *testing.T) {
 	assert.Contains(t, h.messages()[1], "dropped=2")
 }
 
-func TestDecisionAuditWriter_NoWorkersUntilFirstRecord(t *testing.T) {
-	fs := &fakeDecisionAuditStore{}
-	e := newTestDecisionAuditEmitter(t, fs, testDecisionAuditConfig())
-	e.mu.Lock()
-	started := e.started
-	e.mu.Unlock()
-	assert.False(t, started)
-
-	start := time.Now()
-	e.Close(context.Background())
-	assert.Less(t, time.Since(start), time.Second)
-
-	e.EmitDecisionAudit(context.Background(), auditRec("deny", "late"))
-	e.mu.Lock()
-	started = e.started
-	e.mu.Unlock()
-	assert.False(t, started, "a record after Close does not start workers")
-	assert.Equal(t, int64(1), e.droppedCount(DecisionAuditDropShutdown, "deny"))
-}
-
 func TestDecisionAuditWriter_CloseLifecycle(t *testing.T) {
 	t.Run("close twice", func(t *testing.T) {
 		fs := &fakeDecisionAuditStore{}
