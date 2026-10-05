@@ -477,7 +477,11 @@ func TestOpencodeDialectHasNoSessionErrorMapping(t *testing.T) {
 // test "run3: the captured session.error is carried onto the one agent-end
 // as a bounded error string" (scion-bridge.test.mjs) pins that the bridge
 // emits exactly this, from the real capture; this replays it through the
-// real dialect.yaml and telemetry handler.
+// real dialect.yaml and telemetry handler. Note this does not by itself
+// guard dialect.yaml's explicit `error: error` field on session.idle:
+// MappingDialect.Parse copies any top-level string `error` into Data.Error
+// by default, so the test would pass without that field too (the field is
+// kept as documentation of the contract).
 var opencodeRun3AgentEndPayload = map[string]interface{}{
 	"hook_event_name": "session.idle",
 	"session_id":      "ses_f12e82b0fffeTWfXQtofqh9VxA",
@@ -534,6 +538,9 @@ func TestOpencodeDialectCarriesSessionErrorOntoTurnEndSpan(t *testing.T) {
 // TestOpencodeDialectModelLabelFromPayload is ptone/scion#2242 for
 // opencode: the bridge's joined provider/model on each step-finish wins
 // over SCION_MODEL for the model label on both usage metrics (design §3.2).
+// opencode never emits model-start, so every model-end is unpaired and no
+// gen_ai.api.duration is recorded; the test pins that too. The duration
+// label precedence is covered by the antigravity tests, which pair.
 func TestOpencodeDialectModelLabelFromPayload(t *testing.T) {
 	t.Setenv("SCION_USAGE_SOURCE", "hooks")
 	t.Setenv("SCION_HARNESS", "opencode")
@@ -563,6 +570,9 @@ func TestOpencodeDialectModelLabelFromPayload(t *testing.T) {
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(context.Background(), &rm); err != nil {
 		t.Fatalf("Collect: %v", err)
+	}
+	if d := float64HistogramDataPoints(rm, "gen_ai.api.duration"); len(d) != 0 {
+		t.Errorf("gen_ai.api.duration has %d points, want 0 (opencode model-ends are always unpaired)", len(d))
 	}
 	for _, name := range []string{telemetrycontract.MetricAPICalls, telemetrycontract.MetricUsageTokens} {
 		points := int64CounterDataPoints(rm, name)

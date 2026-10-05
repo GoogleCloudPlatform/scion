@@ -214,6 +214,20 @@ func TestAntigravityFixture_CallsPerInvocationNoDoubleCount(t *testing.T) {
 	if gotToolCalls != 1 {
 		t.Errorf("agent.tool.calls = %d, want 1 (the one real PreToolUse/PostToolUse pair)", gotToolCalls)
 	}
+	// gen_ai.api.duration is recorded on the paired path (this one handler
+	// sees each PreInvocation before its PostInvocation) and carries the same
+	// payload model label as gen_ai.api.calls.
+	durationPoints := float64HistogramDataPoints(rm, "gen_ai.api.duration")
+	if len(durationPoints) == 0 {
+		t.Fatal("gen_ai.api.duration has no data points; expected one per paired invocation")
+	}
+	for _, p := range durationPoints {
+		got, _ := p.Attributes.Value(attribute.Key(telemetrycontract.ModelLabel))
+		if got.AsString() != "gemini-3.1-pro-low" {
+			t.Errorf("gen_ai.api.duration model label = %q, want gemini-3.1-pro-low (payload over SCION_MODEL)", got.AsString())
+		}
+	}
+
 	// ptone/scion#2243: the tool-end metric is labelled with the real tool
 	// name from PostToolUse's toolCall.name, not left empty.
 	for _, p := range int64CounterDataPoints(rm, "agent.tool.calls") {
@@ -271,7 +285,10 @@ func TestAntigravityFixture_ModelFromPayload(t *testing.T) {
 
 // TestAntigravityDialect_ModelLabelFallsBackToUnknown pins the rest of
 // design §3.2's precedence for a payload without modelName: SCION_MODEL
-// when set, otherwise "unknown" -- never an absent label.
+// when set, otherwise "unknown" -- never an absent label -- on both
+// gen_ai.api.calls and gen_ai.api.duration. A PreInvocation is handled
+// first so the PostInvocation pairs with it and the duration histogram is
+// recorded (the unpaired path records calls only).
 func TestAntigravityDialect_ModelLabelFallsBackToUnknown(t *testing.T) {
 	md, _ := loadAntigravityFixture(t)
 	for _, tc := range []struct{ envModel, want string }{
@@ -281,19 +298,21 @@ func TestAntigravityDialect_ModelLabelFallsBackToUnknown(t *testing.T) {
 		t.Run("SCION_MODEL="+tc.envModel, func(t *testing.T) {
 			t.Setenv("SCION_USAGE_SOURCE", "hooks")
 			t.Setenv("SCION_MODEL", tc.envModel)
-			event, err := md.Parse(map[string]interface{}{
-				"hook_event_name": "PostInvocation",
-				"conversationId":  "c",
-			})
-			if err != nil {
-				t.Fatalf("Parse: %v", err)
-			}
 			reader := sdkmetric.NewManualReader()
 			mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 			defer func() { _ = mp.Shutdown(context.Background()) }()
 			h := NewTelemetryHandler(nil, nil, nil, mp)
-			if err := h.Handle(event); err != nil {
-				t.Fatalf("Handle: %v", err)
+			for _, name := range []string{"PreInvocation", "PostInvocation"} {
+				event, err := md.Parse(map[string]interface{}{
+					"hook_event_name": name,
+					"conversationId":  "c",
+				})
+				if err != nil {
+					t.Fatalf("Parse(%s): %v", name, err)
+				}
+				if err := h.Handle(event); err != nil {
+					t.Fatalf("Handle(%s): %v", name, err)
+				}
 			}
 			var rm metricdata.ResourceMetrics
 			if err := reader.Collect(context.Background(), &rm); err != nil {
@@ -305,7 +324,15 @@ func TestAntigravityDialect_ModelLabelFallsBackToUnknown(t *testing.T) {
 			}
 			got, ok := points[0].Attributes.Value(attribute.Key(telemetrycontract.ModelLabel))
 			if !ok || got.AsString() != tc.want {
-				t.Errorf("model label = %q (present=%t), want %q", got.AsString(), ok, tc.want)
+				t.Errorf("gen_ai.api.calls model label = %q (present=%t), want %q", got.AsString(), ok, tc.want)
+			}
+			durations := float64HistogramDataPoints(rm, "gen_ai.api.duration")
+			if len(durations) != 1 {
+				t.Fatalf("gen_ai.api.duration points = %d, want 1", len(durations))
+			}
+			got, ok = durations[0].Attributes.Value(attribute.Key(telemetrycontract.ModelLabel))
+			if !ok || got.AsString() != tc.want {
+				t.Errorf("gen_ai.api.duration model label = %q (present=%t), want %q", got.AsString(), ok, tc.want)
 			}
 		})
 	}
@@ -439,6 +466,23 @@ func int64CounterDataPoints(rm metricdata.ResourceMetrics, name string) []metric
 			}
 			if sum, ok := m.Data.(metricdata.Sum[int64]); ok {
 				points = append(points, sum.DataPoints...)
+			}
+		}
+	}
+	return points
+}
+
+// float64HistogramDataPoints returns every data point of the named
+// Histogram[float64] metric across all scope metrics in rm.
+func float64HistogramDataPoints(rm metricdata.ResourceMetrics, name string) []metricdata.HistogramDataPoint[float64] {
+	var points []metricdata.HistogramDataPoint[float64]
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			if h, ok := m.Data.(metricdata.Histogram[float64]); ok {
+				points = append(points, h.DataPoints...)
 			}
 		}
 	}

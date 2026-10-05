@@ -186,7 +186,7 @@ When an agent starts, the broker:
 
 Scion includes a native OTel metrics pipeline that captures operational data from agent sessions. This data is recorded as counters and histograms, providing a time-series view of agent performance. 
 
-To enable harness-aware telemetry, Scion automatically injects `SCION_HARNESS` and `SCION_MODEL` environment variables into all agent containers.
+To enable harness-aware telemetry, Scion injects the `SCION_HARNESS` environment variable into every agent container, and `SCION_MODEL` when the agent's configuration names a model. When a usage source reports no model of its own and `SCION_MODEL` is unset, the `model` label on `gen_ai.api.calls`, `gen_ai.api.duration` and `scion.usage.tokens` is `unknown`.
 
 ### Enriched Resource Attributes
 
@@ -418,8 +418,8 @@ Harness hook events are automatically converted to OTLP spans:
 | `tool-start` | `agent.tool.call` | tool_name, tool_input |
 | `tool-end` | `agent.tool.result` | tool_name, success, duration_ms |
 | `prompt-submit` | `agent.user.prompt` | prompt |
-| `model-start` | `gen_ai.api.request` | model |
-| `model-end` | `gen_ai.api.response` | success |
+| `model-start` | `gen_ai.api.request` | model (only when the hook payload names one) |
+| `model-end` | `gen_ai.api.response` | success, model (only when the hook payload names one) |
 
 ### Session Metrics (Gemini)
 

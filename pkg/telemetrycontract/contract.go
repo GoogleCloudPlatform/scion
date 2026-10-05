@@ -84,7 +84,8 @@ type LabelKV struct{ Key, Value string }
 // UsageTokenPointAttrs returns the producer point-label set for
 // MetricUsageTokens (design §3.2): harness and model only, each omitted if
 // empty. Producers pass a model already resolved through ResolveModelLabel,
-// so in practice the model label is always present (UnknownModel at worst). token_type is per-point (one of the TokenType* values) and added
+// so in practice the model label is always present (UnknownModel at
+// worst). token_type is per-point (one of the TokenType* values) and added
 // by the caller alongside these.
 //
 // Unlike MetricAPICalls, which keeps agent_id/project_id for Cloud

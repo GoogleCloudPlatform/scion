@@ -8,6 +8,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -350,6 +351,9 @@ func (h *TelemetryHandler) emitLogRecord(ctx context.Context, event *hooks.Event
 	if event.Data.Message != "" {
 		attrs = append(attrs, slog.String("message", event.Data.Message))
 	}
+	if model := payloadModel(event); model != "" {
+		attrs = append(attrs, slog.String(telemetrycontract.ModelLabel, model))
+	}
 	if event.Data.Success {
 		attrs = append(attrs, slog.Bool("success", true))
 	}
@@ -421,6 +425,10 @@ func (h *TelemetryHandler) eventToAttributes(event *hooks.Event) []attribute.Key
 
 	if event.Data.Message != "" {
 		attrs = append(attrs, attribute.String("message", event.Data.Message))
+	}
+
+	if model := payloadModel(event); model != "" {
+		attrs = append(attrs, attribute.String(telemetrycontract.ModelLabel, model))
 	}
 
 	return attrs
@@ -509,6 +517,18 @@ func usageHookRecordingEnabled() bool {
 // UsageDeriver resolves through the same telemetrycontract helper.
 func hookModelLabel(event *hooks.Event) string {
 	return telemetrycontract.ResolveModelLabel(event.Data.Model, os.Getenv("SCION_MODEL"))
+}
+
+// payloadModel returns the event payload's own model (bounded like the
+// metric label), or "" when the payload carried none. Hook spans and logs
+// carry a model attribute only in that case: unlike the usage metrics, they
+// describe the event itself, so they never fall back to SCION_MODEL or
+// "unknown".
+func payloadModel(event *hooks.Event) string {
+	if strings.TrimSpace(event.Data.Model) == "" {
+		return ""
+	}
+	return telemetrycontract.ResolveModelLabel(event.Data.Model, "")
 }
 
 // recordEndMetrics records metrics when a paired end event completes.
