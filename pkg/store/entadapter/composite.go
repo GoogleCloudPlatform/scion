@@ -544,7 +544,7 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 	// Deferred snapshot: when planning or the snapshot write fails on the
 	// first boot, the hub serves requests with no snapshot, and the next
 	// boot's snapshot includes rows written in between. Every path rule
-	// still applies to those rows, and the admin status view reports
+	// applies to those rows, and the admin status view reports
 	// snapshotTaken=false until a snapshot exists.
 	if err := c.AdoptLegacyDelegationProvenance(ctx); err != nil {
 		c.adoptionLog().Error("delegation provenance adoption failed (non-fatal); retried on next boot", "error", err)

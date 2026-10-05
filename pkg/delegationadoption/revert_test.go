@@ -122,14 +122,14 @@ func TestBuildRevertDedupesRecordsByAdoptedEdge(t *testing.T) {
 	assert.Equal(t, []string{"r2"}, p2.Hops[0].CoveredRecordIDs)
 	assert.Zero(t, p2.Refused())
 
-	// Only one requested: the sibling is still covered, so no record is
+	// Only one requested: the sibling is covered, so no record is
 	// left pointing at an inactive edge.
 	p3, err := BuildRevert(ctx, w, []string{"r1"}, nil)
 	require.NoError(t, err)
 	require.Len(t, p3.Hops, 1)
 	assert.Equal(t, []string{"r2"}, p3.Hops[0].CoveredRecordIDs)
 
-	// A sibling that is no longer revertible is not covered.
+	// A sibling that is not revertible is not covered.
 	w.records["r2"].Status = store.DelegationAdoptionReverted
 	p4, err := BuildRevert(ctx, w, []string{"r1"}, nil)
 	require.NoError(t, err)

@@ -442,7 +442,7 @@ func TestDelegationAdoptionStatusReportsPendingByReason(t *testing.T) {
 }
 
 // adoptionHandlerRequest calls an adoption handler directly with the given
-// identity and credential context, bypassing the authentication middleware.
+// identity and credential context, without the authentication middleware.
 // A zero credential leaves the context without a credential context.
 func adoptionHandlerRequest(h http.HandlerFunc, path string, identity Identity, credential *CredentialContext, body map[string]interface{}) *httptest.ResponseRecorder {
 	b, _ := json.Marshal(body)
