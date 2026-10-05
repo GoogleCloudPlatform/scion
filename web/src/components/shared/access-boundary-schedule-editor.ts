@@ -66,6 +66,18 @@ export class ScionAccessBoundaryScheduleEditor extends LitElement {
    */
   private _renderedZone = effectiveTimeZone();
 
+  /**
+   * The value of each field this editor last emitted via `schedule-change`
+   * and has not yet seen come back through its prop (absent key = nothing
+   * pending). A host that feeds `schedule-change` back into `notBefore`/
+   * `expiresAt` (admin-access-boundary-editor.ts) echoes the editor's own
+   * value; re-deriving from that echo would clobber what the user is typing
+   * (e.g. a partial value emits `undefined`, whose echo would clear the
+   * field). Consumed on the next change to that prop, echo or not, so a
+   * later genuine change back to the same value still re-derives.
+   */
+  private _pendingEcho: Partial<Record<'notBefore' | 'expiresAt', Iso8601 | undefined>> = {};
+
   private get viewerTimeZone(): string {
     return effectiveTimeZone();
   }
@@ -79,15 +91,41 @@ export class ScionAccessBoundaryScheduleEditor extends LitElement {
     // overwritten string (one with no backing prop) as already being in
     // the current zone without actually converting it.
     this.rebaseCachedStrings();
-    // Initialize local fields from props
+    // Initialize local fields from props. Only fields with a backing prop
+    // are derived here, so a retained typed value with no backing prop
+    // survives a detach/reconnect (review R6-1).
+    if (this.notBefore || this.expiresAt) {
+      this.deriveFromProps({
+        notBefore: Boolean(this.notBefore),
+        expiresAt: Boolean(this.expiresAt),
+      });
+    }
+  }
+
+  /**
+   * Re-derives `hasSchedule` and the cached wall-clock string of each field
+   * in `fields` from its ISO prop, in the current zone. Shared by
+   * `connectedCallback` and `willUpdate` (ptone/scion#2581) so the two
+   * derivations cannot drift. A field whose prop is unset is cleared.
+   * Callers must run `rebaseCachedStrings` first (utils/time.ts ordering
+   * contract): kept strings are rebased, then the rest re-derived here.
+   * Re-deriving a field from its prop also drops any pending echo for it:
+   * the local string no longer reflects the emitted value, so a later host
+   * change to that value is genuine and must re-derive.
+   */
+  private deriveFromProps(fields: { notBefore: boolean; expiresAt: boolean }): void {
+    if (fields.notBefore) {
+      delete this._pendingEcho.notBefore;
+      this.notBeforeLocal = this.notBefore ? this.isoToLocalDatetime(this.notBefore) : '';
+    }
+    if (fields.expiresAt) {
+      delete this._pendingEcho.expiresAt;
+      this.expiresAtLocal = this.expiresAt ? this.isoToLocalDatetime(this.expiresAt) : '';
+    }
     if (this.notBefore || this.expiresAt) {
       this.hasSchedule = true;
-      if (this.notBefore) {
-        this.notBeforeLocal = this.isoToLocalDatetime(this.notBefore);
-      }
-      if (this.expiresAt) {
-        this.expiresAtLocal = this.isoToLocalDatetime(this.expiresAt);
-      }
+    } else if (!this.notBeforeLocal && !this.expiresAtLocal) {
+      this.hasSchedule = false;
     }
   }
 
@@ -96,10 +134,40 @@ export class ScionAccessBoundaryScheduleEditor extends LitElement {
    * changes between updates (review R4-1). See `rebaseCachedStrings` for
    * what this actually does; `willUpdate` is just one of its two call
    * sites (`connectedCallback` is the other, review R6-1).
+   *
+   * It also re-derives a field (and `hasSchedule`) through `deriveFromProps`
+   * when the host changes its `notBefore`/`expiresAt` prop while connected
+   * (ptone/scion#2581), after the zone rebase — except when the new value
+   * is the host's echo of what this editor itself last emitted (see
+   * `_pendingEcho`), so a value the user is typing is not clobbered.
    */
   override willUpdate(changed: PropertyValues<this>): void {
     super.willUpdate(changed);
+    // Ordering contract (utils/time.ts): rebase kept strings to the current
+    // zone first, then re-derive the changed fields from their props.
     this.rebaseCachedStrings();
+
+    // A new notBefore/expiresAt from the host (e.g. an async load of an
+    // existing boundary) must update the inputs, not just the first value
+    // seen at connect (ptone/scion#2581) — unless it is the echo of what
+    // this editor itself just emitted.
+    const notBefore = changed.has('notBefore') && !this.consumeEcho('notBefore');
+    const expiresAt = changed.has('expiresAt') && !this.consumeEcho('expiresAt');
+    if (notBefore || expiresAt) {
+      this.deriveFromProps({ notBefore, expiresAt });
+      this.validate();
+    }
+  }
+
+  /**
+   * True if the just-changed `field` prop equals the value this editor last
+   * emitted for it. Clears the pending marker for `field` either way.
+   */
+  private consumeEcho(field: 'notBefore' | 'expiresAt'): boolean {
+    if (!(field in this._pendingEcho)) return false;
+    const emitted = this._pendingEcho[field];
+    delete this._pendingEcho[field];
+    return this[field] === emitted;
   }
 
   /**
@@ -318,12 +386,18 @@ export class ScionAccessBoundaryScheduleEditor extends LitElement {
   }
 
   private emitChange(): void {
+    const detail: ScheduleChangeDetail = {
+      notBefore: this.hasSchedule ? this.localDatetimeToIso(this.notBeforeLocal) : undefined,
+      expiresAt: this.hasSchedule ? this.localDatetimeToIso(this.expiresAtLocal) : undefined,
+    };
+    // Only a value that differs from the current prop can come back as a
+    // prop change; an unchanged one would never be consumed.
+    this._pendingEcho = {};
+    if (detail.notBefore !== this.notBefore) this._pendingEcho.notBefore = detail.notBefore;
+    if (detail.expiresAt !== this.expiresAt) this._pendingEcho.expiresAt = detail.expiresAt;
     this.dispatchEvent(
       new CustomEvent<ScheduleChangeDetail>('schedule-change', {
-        detail: {
-          notBefore: this.hasSchedule ? this.localDatetimeToIso(this.notBeforeLocal) : undefined,
-          expiresAt: this.hasSchedule ? this.localDatetimeToIso(this.expiresAtLocal) : undefined,
-        },
+        detail,
         bubbles: true,
         composed: true,
       })

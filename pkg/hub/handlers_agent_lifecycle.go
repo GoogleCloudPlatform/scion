@@ -492,7 +492,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// design, run intent semantics).
 			if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
 				s.rollbackBrokerQuota(ctx, agent, reserved)
-				writeErrorFromErr(w, err, "")
+				writeRunIntentError(w, err, agent.ID)
 				return
 			}
 			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", resume)
@@ -510,7 +510,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				s.rollbackBrokerQuota(ctx, agent, reserved)
 			}
 		} else if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
-			writeErrorFromErr(w, err, "")
+			writeRunIntentError(w, err, agent.ID)
 			return
 		}
 	case api.AgentActionStop:
@@ -561,7 +561,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		newPhase = string(state.PhaseRunning)
 		// A restart leaves the agent running: record that before the stop leg.
 		if _, err := s.recordRunIntent(ctx, agent, store.RunIntentRunning); err != nil {
-			writeErrorFromErr(w, err, "")
+			writeRunIntentError(w, err, agent.ID)
 			return
 		}
 		if dispatcher != nil && agent.RuntimeBrokerID != "" {
@@ -608,7 +608,14 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				newPhase = agent.Phase
 			}
 			if dispatchErr != nil {
-				if stopErr == nil {
+				if errors.Is(dispatchErr, store.ErrDeleteInProgress) {
+					// A delete claimed the row between the legs
+					// (ptone/scion#2550, round 5 N3). The delete engine
+					// owns the row now: leave its phase and the
+					// reservation it held to the engine, and undo only a
+					// reservation this call created.
+					s.rollbackBrokerQuota(ctx, agent, reserved)
+				} else if stopErr == nil {
 					// The stop leg succeeded, so the container is down:
 					// release the slot and record the stopped state as an
 					// explicit stop would, so the agent does not keep
@@ -625,8 +632,13 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		}
 	}
 
-	// If dispatch failed, return error
+	// If dispatch failed, return error. A required-skill resolution failure
+	// keeps the broker's status and code; anything else is a 502.
 	if dispatchErr != nil {
+		if ref := deleteClaimedDuringDispatch(dispatchErr, agent.ID); ref != nil {
+			ref.write(w)
+			return
+		}
 		// A launch that began after the entry check is caught by the
 		// dispatcher guard; answer as the entry check does.
 		if refusal := s.launchRefusalFromError(ctx, agent.ID, dispatchErr); refusal != nil {
@@ -648,6 +660,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			return
 		}
 		if writeEmptyPerAgentCapabilityError(w, dispatchErr) {
+			return
+		}
+		if relaySkillResolutionError(w, dispatchErr) {
 			return
 		}
 		RuntimeError(w, "Failed to dispatch to runtime broker: "+dispatchErr.Error())

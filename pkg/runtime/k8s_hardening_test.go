@@ -1058,7 +1058,7 @@ func TestDelete_NamespaceSlashFormat(t *testing.T) {
 
 	rt := NewKubernetesRuntime(client)
 
-	err := rt.Delete(context.Background(), "production/test-agent")
+	err := rt.Delete(context.Background(), RunRef{ID: "production/test-agent"})
 	if err != nil {
 		t.Fatalf("Delete failed: %v", err)
 	}

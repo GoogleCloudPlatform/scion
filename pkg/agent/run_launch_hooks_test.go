@@ -88,8 +88,8 @@ func TestStart_CheckpointsBeforeDeletingAnExistingAgent(t *testing.T) {
 				ListFunc: func(ctx context.Context, labels map[string]string) ([]api.AgentInfo, error) {
 					return []api.AgentInfo{{Name: "test-agent", ContainerID: "old-id", Phase: string(state.PhaseRunning)}}, nil
 				},
-				DeleteFunc: func(ctx context.Context, id string) error {
-					events = append(events, "delete:"+id)
+				DeleteFunc: func(ctx context.Context, ref runtime.RunRef) error {
+					events = append(events, "delete:"+ref.ID)
 					return nil
 				},
 				RunFunc: func(ctx context.Context, config runtime.RunConfig) (string, error) {

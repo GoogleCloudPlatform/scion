@@ -50,9 +50,9 @@ func (b *cloudrunVolumeBackend) Resolve(in ResolveInput) (ResolvedWorkspace, err
 		return ResolvedWorkspace{}, fmt.Errorf("cloudrunVolumeBackend.Resolve: volume_name is required")
 	}
 
-	subPathRoot := b.cfg.SubPathRoot
-	if subPathRoot == "" {
-		subPathRoot = "projects"
+	subPathRoot, err := config.ResolveSubPathRoot(b.cfg.SubPathRoot)
+	if err != nil {
+		return ResolvedWorkspace{}, fmt.Errorf("cloudrunVolumeBackend.Resolve: %w", err)
 	}
 
 	workspaceRelPath := filepath.Join(subPathRoot, in.ProjectID, "workspace")
