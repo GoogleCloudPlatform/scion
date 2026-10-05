@@ -401,8 +401,8 @@ func TestDeleteStopped_RequiresProjectContext(t *testing.T) {
 	// Unset Hub context to avoid synthetic project root detection
 	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT_ID"} {
 		if val, ok := os.LookupEnv(e); ok {
+			t.Setenv(e, val) // registers restore of the original value via t.Cleanup
 			_ = os.Unsetenv(e)
-			defer func() { _ = os.Setenv(e, val) }()
 		}
 	}
 
@@ -665,8 +665,8 @@ func TestDeleteCmd_ForceViaHubDoesNotWarnLocalMode(t *testing.T) {
 func TestDeleteCmd_ForceInLocalModeWarnsAndDeletes(t *testing.T) {
 	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT_ID"} {
 		if val, ok := os.LookupEnv(e); ok {
+			t.Setenv(e, val) // registers restore of the original value via t.Cleanup
 			_ = os.Unsetenv(e)
-			defer func() { _ = os.Setenv(e, val) }()
 		}
 	}
 
