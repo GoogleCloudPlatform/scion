@@ -116,8 +116,8 @@
         },
         "adminEmails": {
           "type": "array",
-          "items": {"type": "string", "pattern": "^\\S+@\\S+$"},
-          "description": "Email addresses auto-promoted to the admin role, rendered as server.hub.admin_emails in settings.yaml (V1ServerHubConfig, pkg/config/settings_v1.go). Empty omits the key."
+          "items": {"type": "string", "pattern": "^[^\\s,]+@[^\\s,]+$"},
+          "description": "Email addresses auto-promoted to the admin role, rendered as server.hub.admin_emails in settings.yaml (V1ServerHubConfig, pkg/config/settings_v1.go). One address per entry: an entry containing a comma is refused, because the hub comma-splits a one-element list but keeps commas literal in a longer one, so the same entry would mean different things depending on its neighbours. Empty omits the key."
         },
         "baseUrl": {
           "type": "string",
@@ -353,7 +353,7 @@
       "properties": {
         "imageRegistry": {
           "type": "string",
-          "description": "Registry prefix agent images are pulled from. Rendered as the top-level image_registry key of settings.yaml. Required by the template when the chart renders settings.yaml, because the hub refuses to start its in-process broker without a registry; config.extra image_registry or a hub.extraEnv SCION_IMAGE_REGISTRY also satisfies it."
+          "description": "Registry prefix agent images are pulled from. Rendered as the top-level image_registry key of settings.yaml. Required by the template when the chart renders settings.yaml, because the hub refuses to start its in-process broker without a registry; config.extra image_registry for the active profile, or a non-empty hub.extraEnv SCION_IMAGE_REGISTRY or SCION_MAINTENANCE_IMAGE_REGISTRY, also satisfies it."
         }
       }
     },

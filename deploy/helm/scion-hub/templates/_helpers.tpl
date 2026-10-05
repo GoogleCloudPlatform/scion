@@ -1768,7 +1768,8 @@ Exactly one list is.
    NOT DELIVERED HERE. Live on argv, nothing to disagree with, would simply take
    effect if passed:
 
-     storage-dir     cfg.Storage.LocalPath, cmd/server_foreground.go:890-892.
+     storage-dir     cfg.Storage.LocalPath, loadAndReconcileConfig
+                     (cmd/server_foreground.go).
                      Arrives with the workspace share.
 
    THIS HEADER WAS CORRECT AND STOPPED BEING CORRECT WITHOUT THE FILE BEING
@@ -2329,8 +2330,40 @@ container env entries alike, and asserting this guard refuses every one of them.
 {{- end }}
 {{- range $entry := .Values.hub.extraEnv }}
 {{- $name := toString (dig "name" "" $entry) }}
-{{- if regexMatch "^SCION_SERVER_(DATABASE|OIDC)_" $name }}
-{{- fail (printf "hub.extraEnv may not set %s. Some of these names bind and some are discarded, and both outcomes are wrong here. If it binds - SCION_SERVER_DATABASE_DRIVER and SCION_SERVER_DATABASE_URL both do - applyEnvOverrides applies it AFTER settings.yaml is loaded (pkg/config/hub_config.go) and it wins, so the hub runs a configuration this chart did not render and this chart's guards did not see: set the driver to postgres this way and isHADeployment (cmd/server_foreground.go) becomes true while the chart's HA checks never run, and the hub aborts at the hosted HA preflight. If it is discarded - anything whose koanf tag contains an underscore, such as SCION_SERVER_DATABASE_MAX_OPEN_CONNS - k.Unmarshal drops it with no error, and DetectEnvOverrides (pkg/config/opsettings/koanf.go) still lists it to the admin server-config view as an active override, so it is reported as applied. Configure the database through the rendered settings.yaml at server.database instead." $name) }}
+{{- if regexMatch "^SCION_SERVER_(DATABASE|OIDC|SECRETS)_" $name }}
+{{- fail (printf "hub.extraEnv may not set %s (SCION_SERVER_DATABASE_*, SCION_SERVER_OIDC_* and SCION_SERVER_SECRETS_* are refused). Some of these names bind and some are discarded, and both outcomes are wrong here. If it binds - SCION_SERVER_DATABASE_DRIVER and SCION_SERVER_DATABASE_URL both do - applyEnvOverrides applies it AFTER settings.yaml is loaded (pkg/config/hub_config.go) and it wins, so the hub runs a configuration this chart did not render and this chart's guards did not see: set the driver to postgres this way and isHADeployment (cmd/server_foreground.go) becomes true while the chart's HA checks never run, and the hub aborts at the hosted HA preflight. If it is discarded - anything whose koanf tag contains an underscore, such as SCION_SERVER_DATABASE_MAX_OPEN_CONNS - k.Unmarshal drops it with no error, and DetectEnvOverrides (pkg/config/opsettings/koanf.go) still lists it to the admin server-config view as an active override, so it is reported as applied. Configure the database through the rendered settings.yaml at server.database instead. The same holds for SCION_SERVER_SECRETS_BACKEND, which binds to server.secrets.backend after settings.yaml and can select gcpsm with no project, a hub that only logs the backend error and runs with no secret backend; configure it through secrets.backend and secrets.gcpsm, which render server.secrets." $name) }}
+{{- end }}
+{{- /*
+TWO NAMES THAT REACH THE SETTINGS DOCUMENT THROUGH THE KOANF ENV LAYER, refused
+here rather than modelled. LoadVersionedSettings (pkg/config/settings_v1.go)
+loads SCION_* environment variables on top of settings.yaml, so these do more
+than the registry check in scion-hub.settings can see from the rendered file:
+
+  SCION_ACTIVE_PROFILE overrides active_profile, so the profile whose
+  image_registry the hub resolves is not the one the chart read. Refused in
+  every form, literal or valueFrom. Set active_profile through config.extra -
+  which assertNoExtraCollision refuses today, because the chart writes it - or
+  not at all.
+
+  SCION_IMAGE_REGISTRY or SCION_MAINTENANCE_IMAGE_REGISTRY with an empty literal
+  value. requireImageRegistryForBroker (cmd/server_foreground.go) skips an empty
+  variable, so neither is a registry source. For SCION_IMAGE_REGISTRY it is
+  worse: the env layer has already replaced the settings file's image_registry
+  with "", so a registry the chart rendered is erased and the hub refuses to
+  start. The maintenance name is refused alongside it so that the two names
+  follow one rule. An entry with no value and no valueFrom is the same empty
+  string to Kubernetes and is refused too. A non-empty value is accepted and
+  counts as a registry source; a valueFrom is accepted unread.
+
+Applied here, in the extraEnv guard, so that it also holds under
+config.existingSecret, where the settings file is the operator's but the
+environment is still the chart's.
+*/}}
+{{- if eq $name "SCION_ACTIVE_PROFILE" }}
+{{- fail "hub.extraEnv may not set SCION_ACTIVE_PROFILE: the hub loads SCION_* environment variables over settings.yaml (LoadVersionedSettings, pkg/config/settings_v1.go), so it would replace active_profile and change which profile's image_registry the hub resolves, without the chart's registry check seeing it. Set active_profile through config.extra instead; the chart renders active_profile: default, so changing it there is refused as a collision until the chart supports it." }}
+{{- end }}
+{{- if and (has $name (list "SCION_IMAGE_REGISTRY" "SCION_MAINTENANCE_IMAGE_REGISTRY")) (not (dig "valueFrom" "" $entry)) (eq (toString (dig "value" "" $entry)) "") }}
+{{- fail (printf "hub.extraEnv may not set %s to an empty value. An empty value is not a registry source: requireImageRegistryForBroker (cmd/server_foreground.go) skips it. An empty SCION_IMAGE_REGISTRY also erases the rendered one, because the hub loads SCION_* environment variables over settings.yaml (LoadVersionedSettings, pkg/config/settings_v1.go) and image_registry becomes \"\", so the hub refuses to start with no registry. Remove the entry, or give it a non-empty value or a valueFrom." $name) }}
 {{- end }}
 {{- if has $name $shadowable }}
 {{- fail (printf "hub.extraEnv may not set %s: the chart sets it, and hub.extraEnv is appended to the container's env list, which wins twice over - a container env entry takes precedence over the same name from envFrom, and a later entry in the list takes precedence over an earlier one. Either way the chart's value is replaced with no error and nothing in the manifest that reads as a conflict." $name) }}
@@ -3342,9 +3375,18 @@ non-empty:
 
 Those are the cases accepted here, read off the merged document and
 hub.extraEnv: agents.imageRegistry and config.extra both reach (3), and an
-extraEnv entry of either name with a value or a valueFrom reaches (1) or (2).
-A valueFrom is accepted unread because the chart cannot see what it resolves
-to. The hub's DB-backed settings overlay does not count: startRuntimeBroker
+extraEnv entry of either name with a non-empty value or a valueFrom reaches (1)
+or (2). A valueFrom is accepted unread because the chart cannot see what it
+resolves to.
+
+This is only correct because scion-hub.assertExtraEnv refuses the two env
+entries that would change (3) behind the file's back. The koanf env layer in
+LoadVersionedSettings applies SCION_* variables over settings.yaml, so
+SCION_ACTIVE_PROFILE would change which profile (3) reads, and an empty
+SCION_IMAGE_REGISTRY would overwrite the top-level image_registry with "". The
+chart refuses SCION_ACTIVE_PROFILE in hub.extraEnv outright and refuses either
+registry variable with an empty literal value, rather than modelling the env
+layer's precedence here. The hub's DB-backed settings overlay does not count: startRuntimeBroker
 installs it after this check has run.
 
 Not the check described under --profile in the reserved-flag comments. That
@@ -3376,6 +3418,10 @@ same render is reported first.
 {{- end }}
 {{- end }}
 {{- if not (or $registryFromSettings $registryFromEnv) }}
+{{- /* An extraEnv refusal is the more specific diagnosis when one applies - an
+empty SCION_IMAGE_REGISTRY, or SCION_ACTIVE_PROFILE moving off the profile read
+here - and this Secret renders before the Deployment that runs the guard. */}}
+{{- include "scion-hub.assertExtraEnv" . }}
 {{- fail "agents.imageRegistry is required: this chart always runs the hub with an in-process runtime broker (--enable-runtime-broker), and with the broker enabled the hub refuses to start without an image registry (requireImageRegistryForBroker, cmd/server_foreground.go: \"image_registry is not configured, but the runtime broker requires it\"). Set agents.imageRegistry to the registry prefix agent images are pulled from, for example us-docker.pkg.dev/<project>/<repo>. The hub also accepts image_registry for the active profile through config.extra, or SCION_IMAGE_REGISTRY or SCION_MAINTENANCE_IMAGE_REGISTRY through hub.extraEnv." }}
 {{- end }}
 {{- $rendered }}

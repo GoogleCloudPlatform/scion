@@ -399,9 +399,8 @@ config:
   # Not listed, because they refuse rather than go quiet: config.extra,
   # storage.bucket, agents.imageRegistry, hub.adminEmails, a non-local
   # secrets.backend and the secrets.gcpsm values, the database name, user and
-  # password,
-  # the OAuth web client credentials, auth.proxy.iap.audience and the three
-  # auth.transport values fail the render when set together with this
+  # password, the OAuth web client credentials, auth.proxy.iap.audience and the
+  # three auth.transport values fail the render when set together with this
   # (NOTES.txt prints the exact list). auth.proxy.provider is not on either
   # list: its only legal value is its default, so there is nothing an operator
   # could set that goes quiet. auth.mode carries it instead - under proxy mode

@@ -21,7 +21,7 @@
 # too.
 set -u
 
-EXPECTED_TOTAL=172   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 9 (agents.imageRegistry for the in-process broker: three refusals, six acceptances) + 4 (the Deployment selector-label contract).
+EXPECTED_TOTAL=187   # 77 (upstream) + 53 (credential guard fixes: F2 name-axis, multi-line-leaf, anchor-class, map-KEY, URL-userinfo F3, readyz probe-path) - 13 (the assertHAUnlanded block and its ha-gates-derived refusal checks, removed with the acknowledgement) + 33 (HA routes under proxy, auth.proxy.iap.audience, auth.proxy.provider, auth.transport) + 1 (the httpGet path extractor's self-test row) + 1 (HA oidcAudience of only slashes) + 7 (secrets.backend: five refusals, one acceptance, one rendered-shape check) + 9 (agents.imageRegistry for the in-process broker: three refusals, six acceptances) + 4 (the Deployment selector-label contract) + 11 (hub.extraEnv over the koanf env layer: seven refusals, four acceptances) + 1 (SCION_SERVER_SECRETS_* refusal) + 3 (hub.adminEmails: two refusals, one rendered-shape check).
 CHART="${CHART:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 HELM="${HELM:-helm}"
 # auth.sessionSecret became REQUIRED in the session-secret phase, and it is here for the same
@@ -893,7 +893,7 @@ echo "== agents.imageRegistry is required for the in-process broker =="
 reject "no registry anywhere" "agents.imageRegistry is required" --set agents.imageRegistry=
 reject "registry only on a profile that is not active" "agents.imageRegistry is required" \
   --set agents.imageRegistry= --set config.extra.profiles.other.image_registry=example.invalid/agents
-reject "SCION_IMAGE_REGISTRY with an empty value" "agents.imageRegistry is required" \
+reject "SCION_IMAGE_REGISTRY with an empty value" "to an empty value" \
   --set agents.imageRegistry= --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY' --set-string 'hub.extraEnv[0].value='
 accept "agents.imageRegistry set"
 accept "top-level image_registry through config.extra" \
@@ -907,6 +907,75 @@ accept "SCION_MAINTENANCE_IMAGE_REGISTRY through hub.extraEnv valueFrom" \
   --set 'hub.extraEnv[0].valueFrom.configMapKeyRef.name=registry' --set 'hub.extraEnv[0].valueFrom.configMapKeyRef.key=prefix'
 accept "no registry under config.existingSecret" \
   --set agents.imageRegistry= --set auth.proxy.iap.audience= --set config.existingSecret=operator-owned
+
+echo "== hub.extraEnv entries the koanf env layer applies over settings.yaml =="
+# LoadVersionedSettings loads SCION_* variables over settings.yaml, so two
+# extraEnv shapes change what the registry check above read from the file. The
+# chart refuses them rather than modelling env precedence (assertExtraEnv).
+#
+# An empty SCION_IMAGE_REGISTRY erases the rendered image_registry: this first
+# row rendered before the refusal and the hub then refused to start.
+reject "empty SCION_IMAGE_REGISTRY alongside agents.imageRegistry" "to an empty value" \
+  --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY' --set-string 'hub.extraEnv[0].value='
+reject "empty SCION_MAINTENANCE_IMAGE_REGISTRY" "to an empty value" \
+  --set 'hub.extraEnv[0].name=SCION_MAINTENANCE_IMAGE_REGISTRY' --set-string 'hub.extraEnv[0].value='
+reject "SCION_IMAGE_REGISTRY with neither value nor valueFrom" "to an empty value" \
+  --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY'
+reject "empty SCION_IMAGE_REGISTRY under config.existingSecret" "to an empty value" \
+  --set agents.imageRegistry= --set auth.proxy.iap.audience= --set config.existingSecret=operator-owned \
+  --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY' --set-string 'hub.extraEnv[0].value='
+accept "non-empty SCION_IMAGE_REGISTRY alongside agents.imageRegistry" \
+  --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY' --set 'hub.extraEnv[0].value=example.invalid/other'
+accept "non-empty literal SCION_MAINTENANCE_IMAGE_REGISTRY as the only source" \
+  --set agents.imageRegistry= --set 'hub.extraEnv[0].name=SCION_MAINTENANCE_IMAGE_REGISTRY' \
+  --set 'hub.extraEnv[0].value=example.invalid/agents'
+accept "SCION_IMAGE_REGISTRY valueFrom alongside agents.imageRegistry" \
+  --set 'hub.extraEnv[0].name=SCION_IMAGE_REGISTRY' \
+  --set 'hub.extraEnv[0].valueFrom.configMapKeyRef.name=registry' --set 'hub.extraEnv[0].valueFrom.configMapKeyRef.key=prefix'
+# SCION_ACTIVE_PROFILE overrides active_profile. The first row was a false
+# refusal (the hub would resolve profiles.other), the second a false accept
+# (the hub would resolve no registry); both are now one refusal.
+reject "SCION_ACTIVE_PROFILE naming a profile that has a registry" "may not set SCION_ACTIVE_PROFILE" \
+  --set agents.imageRegistry= --set config.extra.profiles.other.image_registry=example.invalid/agents \
+  --set 'hub.extraEnv[0].name=SCION_ACTIVE_PROFILE' --set 'hub.extraEnv[0].value=other'
+reject "SCION_ACTIVE_PROFILE moving off the profile that has a registry" "may not set SCION_ACTIVE_PROFILE" \
+  --set agents.imageRegistry= --set config.extra.profiles.default.image_registry=example.invalid/agents \
+  --set 'hub.extraEnv[0].name=SCION_ACTIVE_PROFILE' --set 'hub.extraEnv[0].value=other'
+reject "SCION_ACTIVE_PROFILE through valueFrom" "active_profile through config.extra" \
+  --set 'hub.extraEnv[0].name=SCION_ACTIVE_PROFILE' \
+  --set 'hub.extraEnv[0].valueFrom.configMapKeyRef.name=profile' --set 'hub.extraEnv[0].valueFrom.configMapKeyRef.key=name'
+accept "a name that only begins with SCION_ACTIVE_PROFILE" \
+  --set 'hub.extraEnv[0].name=SCION_ACTIVE_PROFILE_NOTE' --set 'hub.extraEnv[0].value=x'
+
+echo "== SCION_SERVER_SECRETS_* through hub.extraEnv =="
+# SCION_SERVER_SECRETS_BACKEND binds after settings.yaml and can select gcpsm
+# with no project, which the hub only logs; secrets.backend refuses that shape.
+reject "SCION_SERVER_SECRETS_BACKEND" "SCION_SERVER_SECRETS_* are refused" \
+  --set 'hub.extraEnv[0].name=SCION_SERVER_SECRETS_BACKEND' --set 'hub.extraEnv[0].value=gcpsm'
+
+echo "== hub.adminEmails =="
+# One address per entry. The hub comma-splits a one-element list only, so a
+# comma would mean two admins or one invalid address depending on the list.
+reject "adminEmails entry with a comma, schema layer" "hub.adminEmails.0" \
+  --set 'hub.adminEmails[0]=a@example.invalid\,b@example.invalid'
+reject "adminEmails with config.existingSecret" "inline settings values (hub.adminEmails)" \
+  --set agents.imageRegistry= --set auth.proxy.iap.audience= --set config.existingSecret=operator-owned \
+  --set 'hub.adminEmails[0]=a@example.invalid'
+executed=$((executed + 1))
+_ae="$(render --set 'hub.adminEmails={a@example.invalid,b@example.invalid}' --show-only templates/secret-settings.yaml)"
+_ad="$(render --show-only templates/secret-settings.yaml)"
+if ! printf '%s\n' "$_ae" | grep -q '^kind: Secret$' || ! printf '%s\n' "$_ad" | grep -q '^kind: Secret$'; then
+  echo "FAIL  server.hub.admin_emails shape: a render produced no settings Secret, so nothing was inspected"
+  failed=$((failed + 1))
+elif printf '%s\n' "$_ae" | grep -A2 -E '^ +admin_emails:$' | grep -qE '^ +- a@example.invalid$' \
+  && printf '%s\n' "$_ae" | grep -A2 -E '^ +admin_emails:$' | grep -qE '^ +- b@example.invalid$' \
+  && ! printf '%s\n' "$_ad" | grep -q 'admin_emails'; then
+  echo "ok    hub.adminEmails renders server.hub.admin_emails as a list; empty renders no admin_emails"
+else
+  echo "FAIL  server.hub.admin_emails shape: the list did not render, or an empty list rendered the key"
+  failed=$((failed + 1))
+fi
+unset _ae _ad
 
 echo "== secrets.backend =="
 # local renders nothing; gcpsm renders server.secrets and needs a project. The
