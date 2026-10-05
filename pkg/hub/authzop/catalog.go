@@ -899,8 +899,9 @@ var Catalog = []OperationSpec{
 		Effects:          []SecurityEffect{EffectUpdateResource},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
-		// conflict: the agent's owner user no longer exists, or its
-		// identity key is now taken by another agent.
+		// conflict: the agent's owner user no longer exists, its identity
+		// key is now taken by another agent, a delegator of its restored
+		// edges is not live, or one of those edges conflicts.
 		DenialCodes: []DenialCode{DenialForbidden, DenialConflict},
 		TestRefs:    []TestRef{{Package: "pkg/hub", Function: "TestAgentSubRoute_CatalogDrift"}},
 	},
