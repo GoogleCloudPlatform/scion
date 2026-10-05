@@ -52,15 +52,14 @@ type DeliveryEnvelope struct {
 // DeliveryOptions captures transport-level options that are not part of the
 // message envelope itself (per design section 2.8).
 type DeliveryOptions struct {
-	Plain bool // deliver raw text only, no JSON wrapper
-	Raw   bool // keystroke injection — raw text only
+	Plain bool // deliver the message text only, no JSON wrapper
 }
 
 // FormatNewDelivery formats a new-style Message with its Addressees and
 // conversation context into the delivery envelope for an agent.
 // convInfo may be nil when no conversation context is available; the
 // "conversation" key is omitted from the envelope rather than fabricated.
-// If the message has plain/raw delivery options, only the raw msg text is returned.
+// If the message has the plain delivery option, only the msg text is returned.
 //
 // isMention, when true, sets the envelope's type to "mention" (instead of
 // "message") and forces the "to" field to be present even for a single
@@ -74,7 +73,7 @@ func FormatNewDelivery(
 	isMention bool,
 	isReply bool,
 ) string {
-	if opts.Plain || opts.Raw {
+	if opts.Plain {
 		return msg.Body
 	}
 

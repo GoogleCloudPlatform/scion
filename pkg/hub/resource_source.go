@@ -273,7 +273,7 @@ func (rs *ResourceStore) BootstrapSource(ctx context.Context, src ResourceSource
 		return result, fmt.Errorf("%s: normalize staged dir: %w", p.Label(), err)
 	}
 
-	files, err := transfer.CollectFiles(dir, nil)
+	files, err := rs.collectFiles(dir)
 	if err != nil {
 		result.Failed++
 		return result, err

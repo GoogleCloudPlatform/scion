@@ -26,6 +26,7 @@
  */
 
 import { dispatchTeardown } from '../utils/auth.js';
+import { recordHubDateHeader } from '../shared/hub-clock.js';
 
 /** Detail payload for the scion:access-denied custom event. */
 export interface AccessDeniedDetail {
@@ -56,6 +57,14 @@ export interface ApiFetchOptions extends RequestInit {
 }
 
 /**
+ * User-safe reason for a 403 whose body could not be read because the
+ * request was aborted mid-read. Distinct from a server-sent 'Access denied'
+ * reason, which the toast shows as written; formatAccessDenied treats this
+ * one as generic.
+ */
+export const ACCESS_DENIED_UNREADABLE_REASON = "You don't have permission to perform this action.";
+
+/**
  * Fetch wrapper that includes credentials and handles 403 responses.
  *
  * Returns the raw Response object so callers can handle the body themselves.
@@ -81,11 +90,14 @@ export function _resetSuspendedState(): void {
 
 export async function apiFetch(path: string, options?: ApiFetchOptions): Promise<Response> {
   const start = performance.now();
+  const sentMs = Date.now();
   const response = await fetch(path, {
     ...options,
     credentials: 'include',
   });
   const elapsed = performance.now() - start;
+  // Hub clock estimate for the delete lease flip (ptone/scion#2952).
+  recordHubDateHeader(response.headers?.get?.('date'), sentMs, Date.now());
 
   if (elapsed > API_SLOW_THRESHOLD_MS) {
     console.warn(
@@ -139,7 +151,15 @@ export async function apiFetch(path: string, options?: ApiFetchOptions): Promise
         };
       }
     } catch {
-      // Body wasn't JSON — use empty detail
+      if (options?.signal?.aborted) {
+        // The caller aborted the request (e.g. a paginateAll page timeout)
+        // while the 403 body was still arriving, so the read failed for a
+        // reason that says nothing about the body. Report a generic denial
+        // rather than empty detail; the body was never seen, so this is
+        // not treated as user_suspended (ptone/scion#2583).
+        detail = { reason: ACCESS_DENIED_UNREADABLE_REASON };
+      }
+      // Otherwise the body wasn't JSON — use empty detail.
     }
 
     // A suspended account is terminal: trigger a full page reload so the

@@ -97,6 +97,11 @@ const (
 	ErrCodeInternalError   = "internal_error"
 	ErrCodeRuntimeError    = "runtime_error"
 	ErrCodeUnavailable     = "unavailable"
+
+	// ErrCodeAgentNotFound is the hub's code for a 404 caused specifically by
+	// an unknown agent (pkg/hub/errors.go ErrCodeAgentNotFound), as opposed
+	// to a generic not_found (e.g. "Project not found").
+	ErrCodeAgentNotFound = "agent_not_found"
 )
 
 // errorResponse matches the API error response format.

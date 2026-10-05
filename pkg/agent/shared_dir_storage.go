@@ -161,10 +161,7 @@ func resolveSharedDirs(
 	// computed something unexpected (round 2 review finding F1). This also
 	// protects the K8s subPath, since it comes from the same
 	// ServerRelativePath.
-	subPathRoot := sdCfg.NFS.SubPathRoot
-	if subPathRoot == "" {
-		subPathRoot = "projects"
-	}
+	subPathRoot := config.SubPathRootOrDefault(sdCfg.NFS.SubPathRoot)
 	for _, name := range names {
 		sd, ok := res.SharedDirs[name]
 		if !ok {
@@ -358,19 +355,26 @@ func readSharedDirStorageRecord(agentDir string) (string, error) {
 }
 
 // writeSharedDirStorageRecord records backend for the agent whose
-// directory is agentDir. The file is written to a temporary name and
-// renamed into place, so a reader never sees a partial record. The file and
-// the directory are synced so the record survives a crash.
+// directory is agentDir, through writeAgentRecordFile.
 func writeSharedDirStorageRecord(agentDir, backend string) error {
 	if agentDir == "" {
 		return fmt.Errorf("no agent directory to record the shared-dir storage backend in")
 	}
-	data, err := json.Marshal(sharedDirStorageRecord{Backend: backend})
+	return writeAgentRecordFile(agentDir, sharedDirStorageRecordFile, sharedDirStorageRecord{Backend: backend})
+}
+
+// writeAgentRecordFile writes v as JSON to the file name in agentDir. It is
+// the single writer for the per-agent storage records (shared-dir storage
+// and home storage). The file is written to a temporary name and renamed
+// into place, so a reader never sees a partial record. The file and the
+// directory are synced so the record survives a crash.
+func writeAgentRecordFile(agentDir, name string, v any) error {
+	data, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(agentDir, sharedDirStorageRecordFile)
-	tmp, err := os.CreateTemp(agentDir, sharedDirStorageRecordFile+".tmp-*")
+	path := filepath.Join(agentDir, name)
+	tmp, err := os.CreateTemp(agentDir, name+".tmp-*")
 	if err != nil {
 		return err
 	}

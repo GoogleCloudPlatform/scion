@@ -162,7 +162,13 @@ scion message @tech-lead "See the test results." --attach ./results.json
 
 # Read message body from a file (useful for long messages or scripted workflows)
 scion message @tech-lead --body-file ./review-notes.md
+
+# Read the message body from stdin (`-`, or equivalently `--body-file -`)
+git log --oneline -5 | scion message @tech-lead -
+scion message @tech-lead --body-file - < ./review-notes.md
 ```
+
+For `--body-file` and stdin, trailing CR/LF characters are trimmed; everything else is sent exactly as read.
 
 ### Message Formatting
 
@@ -170,7 +176,17 @@ The `scion message` CLI delivers the body argument **verbatim** — it performs 
 
 To include newlines, use real newlines inside shell quoted strings or heredocs. Do **not** use JSON-encoded bodies or literal backslash-n (`\n`) sequences — those will appear as literal characters in the delivered message.
 
-**Correct** — real newlines in a quoted string:
+:::caution[Backticks and `$(...)` are expanded by your shell]
+Inside a double-quoted argument, the shell runs anything in backticks or `$(...)` **before** `scion` starts, and substitutes the output into the message (often an empty string, plus whatever side effects the command had). Use double quotes only for plain text. For bodies that contain code, backticks, or `$`, use `--body-file`, or stdin with a quoted heredoc:
+
+```bash
+scion message --non-interactive @reviewer - <<'EOF'
+Please run `make test` and paste the output of $(go env GOPATH).
+EOF
+```
+:::
+
+**Correct** — real newlines in a quoted string (plain text only, no backticks or `$`):
 ```bash
 scion message --non-interactive @reviewer "PR #42 is ready for review.
 
@@ -198,7 +214,7 @@ scion message --non-interactive @reviewer "PR #42 is ready for review.\n\nBranch
 ### Related Commands
 
 - **`scion broadcast`**: Send a message to all agents in the current project, or use `--all` for a global broadcast. The `--broadcast` and `--all` flags on `scion message` have been removed; use this command instead.
-- **`scion keys`**: Send literal terminal input to an agent's tmux session (e.g., `scion keys editor "Enter"`, as a separate call from `scion keys editor "Escape"`), with no envelope and no automatic Enter. Useful for unblocking interactive prompts. Works for container-backed agents in Hub and local mode; not supported for managed-runtime agents (see [Managed Agents](/scion/hosted/single-node/managed-agents/#limitations)). When run by an agent, it can only target agents in the agent's own project — cross-project targets are refused, by the CLI and the Hub alike; a human operator using `--project` can target other projects, in Hub mode with the same authority as `scion attach` on the target. Local mode has no Hub authorization. In Hub mode it is authorized like terminal attach rather than messaging — message mode does not gate it — and requires, for an agent caller, a live attach relationship on the target in addition to shared project membership (see [CLI Reference](/scion/reference/cli/#scion-keys)). There is no key-sequence syntax: issue one `scion keys` call per key press. This replaces the deprecated `--raw` flag on `scion message`, kept only as a migration alias.
+- **`scion keys`**: Send literal terminal input to an agent's tmux session (e.g., `scion keys editor "Enter"`, as a separate call from `scion keys editor "Escape"`), with no envelope and no automatic Enter. Useful for unblocking interactive prompts. Works for container-backed agents in Hub and local mode; not supported for managed-runtime agents (see [Managed Agents](/scion/hosted/single-node/managed-agents/#limitations)). When run by an agent, it can only target agents in the agent's own project — cross-project targets are refused, by the CLI and the Hub alike; a human operator using `--project` can target other projects, in Hub mode with the same authority as `scion attach` on the target. Local mode has no Hub authorization. In Hub mode it is authorized like terminal attach rather than messaging — message mode does not gate it — and requires, for an agent caller, a live attach relationship on the target in addition to shared project membership (see [CLI Reference](/scion/reference/cli/#scion-keys)). There is no key-sequence syntax: issue one `scion keys` call per key press. This replaces the removed `--raw` flag on `scion message`, which now fails with guidance naming `scion keys`.
 
 ### Conversation Management
 
@@ -381,7 +397,7 @@ Scion maintains different limits depending on the recipient type:
   `validation_error: message exceeds 2000 character limit`
   * *Tip*: If you have a long message or log to send to a user, split it into multiple messages under 1,800 characters, or write the full content to a shared scratchpad file and send the filepath.
 * **Agent-to-Agent Messages**: **No enforced length cap in code**. You can send larger payloads safely between agents.
-* **Large-DM offload (opt-in)**: A Hub administrator can set `offload_threshold_runes` in the Hub messaging settings (`PUT /api/v1/admin/messaging`). When an agent-recipient DM body is longer than the threshold, the agent's terminal receives a short stub instead: the body size, a preview, and one command to fetch the full body (for example, `scion conversation get-message conv:<conversation-id> <message-id> --body`). The stored message, the Web Dashboard, and other observers always keep the full body. Raw and plain messages are never offloaded. The default threshold is `0` (disabled); leave it there until your agent images include a `scion` CLI with that fetch command.
+* **Large-DM offload (opt-in)**: A Hub administrator can set `offload_threshold_runes` in the Hub messaging settings (`PUT /api/v1/admin/messaging`). When an agent-recipient DM body is longer than the threshold, the agent's terminal receives a short stub instead: the body size, a preview, and one command to fetch the full body (for example, `scion conversation get-message conv:<conversation-id> <message-id> --body`). The stored message, the Web Dashboard, and other observers always keep the full body. Plain messages are never offloaded. The default threshold is `0` (disabled); leave it there until your agent images include a `scion` CLI with that fetch command.
 
 ### 2. Inbound Message Type Discrimination
 
