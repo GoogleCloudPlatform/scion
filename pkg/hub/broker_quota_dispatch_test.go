@@ -26,7 +26,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -41,6 +43,7 @@ type hookedStartDispatcher struct {
 	quotaLifecycleDispatcher
 	onStart   func(agent *store.Agent)
 	onStop    func(agent *store.Agent)
+	onDelete  func(agent *store.Agent)
 	failStart bool
 }
 
@@ -55,6 +58,13 @@ func (d *hookedStartDispatcher) DispatchAgentStart(_ context.Context, agent *sto
 	agent.Phase = string(state.PhaseRunning)
 	agent.ContainerStatus = "running"
 	return nil
+}
+
+func (d *hookedStartDispatcher) DispatchAgentDelete(ctx context.Context, agent *store.Agent, deleteFiles, removeBranch, soft bool, startedAt time.Time) error {
+	if d.onDelete != nil {
+		d.onDelete(agent)
+	}
+	return d.quotaLifecycleDispatcher.DispatchAgentDelete(ctx, agent, deleteFiles, removeBranch, soft, startedAt)
 }
 
 func (d *hookedStartDispatcher) DispatchAgentStop(_ context.Context, agent *store.Agent) error {
@@ -307,7 +317,7 @@ func TestStartDispatch_CountedPhaseNotMarked(t *testing.T) {
 
 // The store clears the stale stop/crash message on a stopped/error ->
 // running write. With "starting" written in between, the start's final
-// write clears it explicitly, unless a newer message arrived meanwhile.
+// write clears it explicitly (ClearTerminalRemnants).
 func TestStartDispatch_StartClearsPriorStopMessage(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -316,7 +326,6 @@ func TestStartDispatch_StartClearsPriorStopMessage(t *testing.T) {
 	}{
 		{"stopped", state.PhaseStopped, ""},
 		{"error", state.PhaseError, ""},
-		{"newer-message-kept", state.PhaseStopped, "fresh status from the new container"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, s := testServer(t)
@@ -400,6 +409,9 @@ func TestHeartbeatPhaseGuard_StoppedReportMidStart(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, string(state.PhaseRunning), got.Phase)
 	assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID))
+	assert.Empty(t, got.Message, "the old container's exit message does not survive the start")
+	assert.Empty(t, got.ExitReason)
+	assert.Nil(t, got.ExitCode)
 }
 
 // Restart window: between the stop and start legs the row still reads
@@ -484,4 +496,152 @@ func TestHeartbeatPhaseGuarded(t *testing.T) {
 			end()
 		}
 	}
+}
+
+// ptone/scion#2014 review F1/F2: at every start-type site, a heartbeat
+// guarded mid-dispatch stores the old container's exit message, code and
+// reason; the start's final write clears them, and the stalled marker,
+// however the row reads by then.
+func TestStartDispatch_FinalWriteClearsTerminalRemnants(t *testing.T) {
+	forEachStartSite(t, func(t *testing.T, site startSiteCase, async bool) {
+		disp := &hookedStartDispatcher{}
+		srv, s, broker, agentID, run := site.setup(t, disp, async)
+		grantDevUserRuntimeBrokerAccess(t, s)
+		ctx := context.Background()
+		row, err := s.GetAgent(ctx, agentID)
+		require.NoError(t, err)
+		row.StalledFromActivity = string(state.ActivityWorking)
+		row.Message = "Agent stopped"
+		require.NoError(t, s.UpdateAgent(ctx, row))
+
+		var midPhase string
+		disp.onStart = func(*store.Agent) {
+			cur, err := s.GetAgent(ctx, agentID)
+			require.NoError(t, err)
+			postStoppedHeartbeat(t, srv, broker.ID, cur)
+			cur, err = s.GetAgent(ctx, agentID)
+			require.NoError(t, err)
+			midPhase = cur.Phase
+			require.NotEmpty(t, cur.Message, "the guarded heartbeat stored its exit message")
+			markReady(t, s, agentID)
+		}
+		require.True(t, run(), "start succeeds")
+		assert.Equal(t, string(state.PhaseStarting), midPhase, "the heartbeat's phase was guarded")
+
+		got, err := s.GetAgent(ctx, agentID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseRunning), got.Phase)
+		assert.Empty(t, got.Message, "no stale exit message on the running agent")
+		assert.Empty(t, got.ExitReason)
+		assert.Nil(t, got.ExitCode)
+		assert.Empty(t, got.StalledFromActivity, "the stalled marker is cleared")
+	})
+}
+
+// The reviewer's reproduction (F1): restart of a running and of a stopped
+// agent with a stopped heartbeat guarded mid-dispatch ends with message "".
+func TestStartDispatch_RestartGuardedHeartbeatLeavesNoStaleMessage(t *testing.T) {
+	for _, phase := range []state.Phase{state.PhaseRunning, state.PhaseStopped} {
+		t.Run(string(phase), func(t *testing.T) {
+			srv, s := testServer(t)
+			grantDevUserRuntimeBrokerAccess(t, s)
+			disp := &hookedStartDispatcher{}
+			srv.SetDispatcher(disp)
+			setBrokerAgentCeiling(t, s, 2)
+			ctx := context.Background()
+			sfx := "sd-f1-" + string(phase)
+			broker, project := newQuotaTestBrokerAndProject(t, s, sfx)
+			a := newQuotaTestAgent(t, s, broker, project, sfx, phase)
+			if phase == state.PhaseRunning {
+				reserveBrokerSlot(t, s, broker, a.ID)
+			}
+			disp.onStart = func(*store.Agent) { postStoppedHeartbeat(t, srv, broker.ID, a) }
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restart", nil)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			got, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseRunning), got.Phase)
+			assert.Equal(t, "", got.Message)
+			assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID))
+		})
+	}
+}
+
+// F5(i)/F9(a): a caller whose snapshot is stale (it read stopped/suspended,
+// the row is running now) does not write starting over the running row:
+// the start fails as a conflict before dispatch and releases the
+// reservation it created; the phase is unchanged.
+func TestStartDispatch_StaleSnapshotConflicts(t *testing.T) {
+	setup := func(t *testing.T, name string, snapshot state.Phase) (*Server, store.Store, *store.RuntimeBroker, *store.Agent, *hookedStartDispatcher) {
+		srv, s := testServer(t)
+		disp := &hookedStartDispatcher{}
+		srv.SetDispatcher(disp)
+		setBrokerAgentCeiling(t, s, 2)
+		broker, project := newQuotaTestBrokerAndProject(t, s, "sd-stale-"+name)
+		a := newQuotaTestAgent(t, s, broker, project, "sd-stale-"+name, snapshot)
+		require.NoError(t, s.UpdateAgentStatus(context.Background(), a.ID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}))
+		return srv, s, broker, a, disp
+	}
+	assertUnchanged := func(t *testing.T, s store.Store, broker *store.RuntimeBroker, a *store.Agent, disp *hookedStartDispatcher) {
+		got, err := s.GetAgent(context.Background(), a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, string(state.PhaseRunning), got.Phase, "the running row is not overwritten")
+		assert.EqualValues(t, 0, brokerReservationCount(t, s, broker.ID), "the reservation the call created is released")
+		assert.EqualValues(t, 0, disp.startCount.Load(), "nothing dispatched")
+	}
+
+	t.Run("helper", func(t *testing.T) {
+		srv, s, broker, a, disp := setup(t, "helper", state.PhaseStopped)
+		sd, err := srv.beginStartDispatch(context.Background(), a)
+		require.Error(t, err)
+		assert.Nil(t, sd)
+		assert.ErrorIs(t, err, errStartingWrite)
+		assert.ErrorIs(t, err, store.ErrPhaseMismatch)
+		assertUnchanged(t, s, broker, a, disp)
+	})
+	t.Run("http", func(t *testing.T) {
+		srv, s, broker, a, disp := setup(t, "http", state.PhaseStopped)
+		w := httptest.NewRecorder()
+		_, ok := srv.beginStartDispatchHTTP(context.Background(), w, a)
+		require.False(t, ok)
+		assert.Equal(t, http.StatusConflict, w.Code, w.Body.String())
+		assertUnchanged(t, s, broker, a, disp)
+	})
+	t.Run("wake", func(t *testing.T) {
+		srv, s, broker, a, disp := setup(t, "wake", state.PhaseSuspended)
+		_, dmErr := srv.wakeAgentForDM(context.Background(), a)
+		require.NotNil(t, dmErr)
+		assert.Equal(t, http.StatusConflict, dmErr.HTTPStatus)
+		assertUnchanged(t, s, broker, a, disp)
+	})
+}
+
+// F6/F9(e): the guard also holds during a non-start op. A stopped heartbeat
+// that lands mid-stop is not applied over running; the stop writes stopped
+// itself and releases the slot.
+func TestHeartbeatPhaseGuard_DuringStop(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	disp := &hookedStartDispatcher{}
+	srv.SetDispatcher(disp)
+	setBrokerAgentCeiling(t, s, 2)
+	ctx := context.Background()
+	broker, project := newQuotaTestBrokerAndProject(t, s, "hbg-stop")
+	a := newQuotaTestAgent(t, s, broker, project, "hbg-stop", state.PhaseRunning)
+	reserveBrokerSlot(t, s, broker, a.ID)
+	var midPhase string
+	disp.onStop = func(*store.Agent) {
+		postStoppedHeartbeat(t, srv, broker.ID, a)
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		midPhase = got.Phase
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/stop", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, string(state.PhaseRunning), midPhase, "guarded during the stop op")
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseStopped), got.Phase)
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID))
 }

@@ -590,6 +590,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				return
 			}
 			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", resume)
+			if dispatchErr == nil {
+				// The container is up: the final status write below
+				// moves the row off starting.
+				sd.settle()
+			}
 			// DispatchAgentStart applies the broker response in-place;
 			// use the broker-reported phase if it was set.
 			if dispatchErr == nil && agent.Phase != "" {
@@ -708,6 +713,11 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			}
 			// Restart is stop + start: a fresh harness session, not a resume.
 			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", false)
+			if dispatchErr == nil {
+				// The container is up: the final status write below
+				// moves the row off starting.
+				sd.settle()
+			}
 			// DispatchAgentStart applies the broker response in-place;
 			// use the broker-reported phase if it was set.
 			if dispatchErr == nil && agent.Phase != "" {
@@ -802,9 +812,12 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			statusUpdate.ContainerStatus = agent.ContainerStatus
 		}
 		statusUpdate.ClearExit = true
-		statusUpdate.ClearMessageIf = sd.clearMessageIf()
+		// A new generation: clear the prior one's message and stalled
+		// marker too, whatever the row reads now (beginStartDispatch wrote
+		// starting, and a heartbeat guarded mid-dispatch may have stored
+		// the old container's exit message).
+		statusUpdate.ClearTerminalRemnants = true
 	}
-	sd.settle()
 	if err := s.store.UpdateAgentStatus(ctx, id, statusUpdate); err != nil {
 		writeErrorFromErr(w, err, "")
 		return

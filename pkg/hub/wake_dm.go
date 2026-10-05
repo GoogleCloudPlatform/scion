@@ -142,6 +142,15 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 					HTTPStatus: http.StatusTooManyRequests,
 				}
 			}
+			if errors.Is(err, store.ErrPhaseMismatch) {
+				// The agent left suspended after it was read: nothing was
+				// dispatched.
+				return nil, &AgentDMError{
+					Code:       ErrCodeConflict,
+					Message:    "Failed to wake agent: its phase changed; retry",
+					HTTPStatus: http.StatusConflict,
+				}
+			}
 			if errors.Is(err, errStartingWrite) {
 				return nil, &AgentDMError{
 					Code:       ErrCodeRuntimeError,
@@ -196,6 +205,10 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			}
 		}
 
+		// The resume dispatch succeeded and the container is up: keep the
+		// reservation from here on, whatever the writes below do.
+		sd.settle()
+
 		// Transition to 'starting' while waiting for readiness.
 		statusUpdate := store.AgentStatusUpdate{Phase: string(state.PhaseStarting)}
 		if err := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate); err != nil {
@@ -208,7 +221,13 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			}
 		}
 		agent.Phase = string(state.PhaseStarting)
-		sd.settle()
+		// The dispatch leg is over. End the lifecycle op so the readiness
+		// wait sees a heartbeat-reported exit. Residual (as before
+		// ptone/scion#2014): a heartbeat gathered before the resume that
+		// reports the suspended container stopped, landing after this
+		// point, moves the row to stopped and releases the slot while the
+		// new container is up; the running write below does not
+		// re-reserve, so the count stays low until the hourly backfill.
 		endOp()
 		// Publish from a re-read: a delete that claimed the row meanwhile
 		// must not be painted over (design ptone/scion#2483 note F).
@@ -245,8 +264,16 @@ func (s *Server) wakeAgentForDM(ctx context.Context, agent *store.Agent) (*WakeR
 			}
 		}
 
-		// Agent is ready — transition to 'running'.
-		statusUpdate = store.AgentStatusUpdate{Phase: string(state.PhaseRunning)}
+		// Agent is ready — transition to 'running', clearing the prior
+		// generation's message, stalled marker and exit fields (the row
+		// reads starting, so the store's terminal -> running clear does not
+		// fire), and replacing a container status a guarded heartbeat may
+		// have stored for the old container.
+		statusUpdate = store.AgentStatusUpdate{
+			Phase:                 string(state.PhaseRunning),
+			ClearTerminalRemnants: true,
+			ContainerStatus:       agent.ContainerStatus,
+		}
 		if err := s.store.UpdateAgentStatus(ctx, agent.ID, statusUpdate); err != nil {
 			s.messageLog.Error("wake: failed to update agent phase to running",
 				"agent_id", agent.ID, "error", err)

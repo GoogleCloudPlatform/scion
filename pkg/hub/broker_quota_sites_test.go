@@ -232,6 +232,9 @@ func TestBrokerQuota_RestartStopLegErrorRollsBackReservation(t *testing.T) {
 				want = 1
 			}
 			assert.EqualValues(t, want, brokerReservationCount(t, s, broker.ID))
+			got, err := s.GetAgent(context.Background(), a.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(tc.phase), got.Phase, "the phase is restored")
 		})
 	}
 }

@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -33,6 +34,12 @@ var (
 	// ErrDeleteInProgress is returned by SetAgentRunID when a delete holds
 	// the agent's row (see AgentStore.SetAgentRunID).
 	ErrDeleteInProgress = errors.New("agent delete in progress")
+
+	// ErrPhaseMismatch is returned by UpdateAgentStatus when
+	// AgentStatusUpdate.IfPhase is set and the stored phase differs. It wraps
+	// ErrVersionConflict, so callers and the HTTP error mapping treat it as a
+	// conflict.
+	ErrPhaseMismatch = fmt.Errorf("agent phase changed: %w", ErrVersionConflict)
 
 	// ErrSuperAdminBindingRestricted is returned when a non-reconciler caller
 	// attempts to create a role binding for the super-admin role definition.
@@ -902,6 +909,21 @@ type AgentStatusUpdate struct {
 	// that set a transient notice uses it to retire that notice without
 	// overwriting a newer message. Internal to the hub — json:"-".
 	ClearMessageIf string `json:"-"`
+	// ClearTerminalRemnants, when true, applies the clear a stopped/error ->
+	// running write gets whatever the stored phase is: the message (unless
+	// Message is set on this update), the stalled marker, and the exit code
+	// and reason. A lifecycle start, restart or wake brings up a new
+	// generation of the agent, and its final write uses this because the row
+	// no longer reads stopped/error by then (beginStartDispatch writes
+	// starting first, and a heartbeat guarded during the dispatch may have
+	// stored the old container's exit message). Internal to the hub —
+	// json:"-".
+	ClearTerminalRemnants bool `json:"-"`
+	// IfPhase, when non-empty, makes the update conditional: it applies only
+	// if the stored phase equals IfPhase, checked on the row read inside the
+	// update's transaction; otherwise UpdateAgentStatus returns
+	// ErrPhaseMismatch and writes nothing. Internal to the hub — json:"-".
+	IfPhase string `json:"-"`
 }
 
 // ProjectStore defines project-related persistence operations.

@@ -1173,6 +1173,11 @@ func (s *Server) handleExistingAgent(
 		// pod actually stopping, which describes the old pod, not this one.
 		existingAgent.ExitReason = ""
 		existingAgent.ExitCode = nil
+		// The row read starting during the dispatch (beginStartDispatch),
+		// so clear the rest of the prior generation's remnants here, as
+		// ClearTerminalRemnants does for a status write.
+		existingAgent.Message = ""
+		existingAgent.StalledFromActivity = ""
 		if err := s.store.UpdateAgent(ctx, existingAgent); err != nil {
 			s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
 		}
@@ -1274,6 +1279,11 @@ func (s *Server) handleExistingAgent(
 			// pod, not this one.
 			existingAgent.ExitReason = ""
 			existingAgent.ExitCode = nil
+			// The row read starting during the dispatch (beginStartDispatch),
+			// so clear the rest of the prior generation's remnants here, as
+			// ClearTerminalRemnants does for a status write.
+			existingAgent.Message = ""
+			existingAgent.StalledFromActivity = ""
 			if err := s.updateAgentAfterDispatch(ctx, existingAgent); err != nil {
 				s.agentLifecycleLog.Warn("Failed to update agent status after resume", "agent_id", existingAgent.ID, "error", err)
 			}
