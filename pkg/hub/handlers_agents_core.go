@@ -2005,7 +2005,7 @@ func (s *Server) createAgentInProject(
 				s.agentLifecycleLog.Warn("Failed to update agent status to provisioning", "agent_id", agent.ID, "error", err)
 			}
 
-			s.events.PublishAgentCreated(ctx, agent)
+			s.publishAgentCreatedIfLive(ctx, agent)
 
 			expires := time.Now().Add(SignedURLExpiry)
 			s.enrichAgent(ctx, agent, project, nil)
@@ -2096,7 +2096,7 @@ func (s *Server) createAgentInProject(
 			s.agentLifecycleLog.Warn("Failed to update managed agent after create", "agent_id", agent.ID, "error", err)
 		}
 
-		s.events.PublishAgentCreated(ctx, agent)
+		s.publishAgentCreatedIfLive(ctx, agent)
 		s.enrichAgent(ctx, agent, project, nil)
 
 		writeJSON(w, http.StatusCreated, CreateAgentResponse{
@@ -2159,7 +2159,7 @@ func (s *Server) createAgentInProject(
 						s.agentLifecycleLog.Warn("Failed to update agent phase for env-gather", "agent_id", agent.ID, "error", err)
 					}
 
-					s.events.PublishAgentCreated(ctx, agent)
+					s.publishAgentCreatedIfLive(ctx, agent)
 
 					s.enrichAgent(ctx, agent, project, nil)
 					hubEnvGather := s.buildEnvGatherResponse(ctx, agent, envReqs)
@@ -2252,11 +2252,8 @@ func (s *Server) createAgentInProject(
 	// and since the frontend may have already dropped the earlier "status" event
 	// (it ignores status events for agents not yet in state), the UI would never
 	// reflect the error.
-	if latest, err := s.store.GetAgent(ctx, agent.ID); err == nil {
-		s.events.PublishAgentCreated(ctx, latest)
-	} else {
-		s.events.PublishAgentCreated(ctx, agent)
-	}
+	// A delete that claimed the row meanwhile suppresses it (ptone/scion#2972).
+	s.publishAgentCreatedIfLive(ctx, agent)
 
 	// Enrich agent with project and broker names for display
 	s.enrichAgent(ctx, agent, project, nil)
