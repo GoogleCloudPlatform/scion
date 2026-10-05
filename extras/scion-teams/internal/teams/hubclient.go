@@ -185,15 +185,17 @@ type hubAgent struct {
 
 // --- Hub API query methods ---
 
-// ListAgents returns the agents for a given project.
+// ListAgents returns the agents for a given project, read as the linked
+// user identified by onBehalfOf ("user:<email>").
 // GET /api/v1/projects/{projectID}/agents
-func (c *HubClient) ListAgents(ctx context.Context, projectID string) ([]AgentInfo, error) {
+func (c *HubClient) ListAgents(ctx context.Context, projectID, onBehalfOf string) ([]AgentInfo, error) {
 	u := fmt.Sprintf("%s/api/v1/projects/%s/agents", c.hubURL, url.PathEscape(projectID))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create list agents request: %w", err)
 	}
+	setOnBehalfOf(req, onBehalfOf)
 	if err := c.signRequest(req); err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)
 	}
@@ -257,15 +259,17 @@ func (c *HubClient) ListProjects(ctx context.Context) ([]ProjectOption, error) {
 	return projects, nil
 }
 
-// ListProjectsForUser returns projects owned by or associated with a specific user.
+// ListProjectsForUser returns projects owned by a specific user, read as the
+// linked user identified by onBehalfOf ("user:<email>").
 // GET /api/v1/projects?ownerId=<ownerID>
-func (c *HubClient) ListProjectsForUser(ctx context.Context, ownerID string) ([]ProjectOption, error) {
+func (c *HubClient) ListProjectsForUser(ctx context.Context, ownerID, onBehalfOf string) ([]ProjectOption, error) {
 	u := c.hubURL + "/api/v1/projects?ownerId=" + url.QueryEscape(ownerID)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create list user projects request: %w", err)
 	}
+	setOnBehalfOf(req, onBehalfOf)
 	if err := c.signRequest(req); err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)
 	}
@@ -293,15 +297,17 @@ func (c *HubClient) ListProjectsForUser(ctx context.Context, ownerID string) ([]
 	return projects, nil
 }
 
-// GetProjectStatus returns the details of a single project.
+// GetProjectStatus returns the details of a single project, read as the
+// linked user identified by onBehalfOf ("user:<email>").
 // GET /api/v1/projects/{projectID}
-func (c *HubClient) GetProjectStatus(ctx context.Context, projectID string) (*ProjectOption, error) {
+func (c *HubClient) GetProjectStatus(ctx context.Context, projectID, onBehalfOf string) (*ProjectOption, error) {
 	u := fmt.Sprintf("%s/api/v1/projects/%s", c.hubURL, url.PathEscape(projectID))
 
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create get project request: %w", err)
 	}
+	setOnBehalfOf(req, onBehalfOf)
 	if err := c.signRequest(req); err != nil {
 		return nil, fmt.Errorf("sign request: %w", err)
 	}
@@ -433,6 +439,28 @@ func generateLinkCode() string {
 		b[i] = chars[n.Int64()]
 	}
 	return string(b)
+}
+
+// onBehalfOfHeader names the linked user a request is made for.
+const onBehalfOfHeader = "X-Scion-On-Behalf-Of"
+
+// setOnBehalfOf attaches the linked user ("user:<email>") to req. An empty
+// onBehalfOf leaves req unchanged.
+func setOnBehalfOf(req *http.Request, onBehalfOf string) {
+	if onBehalfOf == "" {
+		return
+	}
+	req.Header.Set(onBehalfOfHeader, onBehalfOf)
+	req.Header.Set("X-Scion-Signed-Headers", "x-scion-on-behalf-of")
+}
+
+// onBehalfOfUser returns the "user:<email>" principal for a linked user, or
+// "" when the mapping has no Scion email.
+func onBehalfOfUser(mapping *TeamsUserMapping) string {
+	if mapping == nil || mapping.ScionEmail == "" {
+		return ""
+	}
+	return "user:" + mapping.ScionEmail
 }
 
 // signRequest adds HMAC authentication headers to the request.

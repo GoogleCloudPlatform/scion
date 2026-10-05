@@ -141,6 +141,32 @@ func testActivity(text string) *Activity {
 	}
 }
 
+// linkTestUser stores a link mapping for testActivity's sender.
+func linkTestUser(t *testing.T, broker *TeamsBroker) {
+	t.Helper()
+	err := broker.store.CreateUserMapping(context.Background(), &TeamsUserMapping{
+		TeamsUserID:      "aad-user-1",
+		TeamsDisplayName: "Test User",
+		ScionUserID:      "scion-1",
+		ScionEmail:       "user@example.com",
+		LinkedAt:         time.Now(),
+	})
+	require.NoError(t, err)
+}
+
+// linkTestChannel stores a channel link for testActivity's conversation.
+func linkTestChannel(t *testing.T, broker *TeamsBroker) {
+	t.Helper()
+	err := broker.store.CreateChannelLink(context.Background(), &ChannelLink{
+		ConversationID: "conv-1",
+		ProjectID:      "proj-1",
+		ProjectSlug:    "test-project",
+		LinkedAt:       time.Now(),
+		Active:         true,
+	})
+	require.NoError(t, err)
+}
+
 func TestCommandDispatch_KnownCommands(t *testing.T) {
 	broker, _ := testBrokerWithStore(t, nil)
 	handler := broker.commandHandler
@@ -407,6 +433,7 @@ func TestUnlinkCommand_NotLinked(t *testing.T) {
 func TestAgentsCommand(t *testing.T) {
 	hubHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/projects/proj-1/agents" {
+			assert.Equal(t, "user:user@example.com", r.Header.Get("X-Scion-On-Behalf-Of"))
 			json.NewEncoder(w).Encode(hubAgentsResponse{
 				Agents: []hubAgent{
 					{ID: "a1", Slug: "dev-1", Activity: "coding", Phase: "running"},
@@ -419,6 +446,7 @@ func TestAgentsCommand(t *testing.T) {
 	})
 
 	broker, ms := testBrokerWithStore(t, hubHandler)
+	linkTestUser(t, broker)
 	handler := broker.commandHandler
 
 	// Pre-create a channel link.
@@ -449,6 +477,7 @@ func TestAgentsCommand(t *testing.T) {
 func TestStatusCommand_ProjectOverview(t *testing.T) {
 	hubHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/projects/proj-1/agents" {
+			assert.Equal(t, "user:user@example.com", r.Header.Get("X-Scion-On-Behalf-Of"))
 			json.NewEncoder(w).Encode(hubAgentsResponse{
 				Agents: []hubAgent{
 					{ID: "a1", Slug: "dev-1", Phase: "running"},
@@ -461,6 +490,7 @@ func TestStatusCommand_ProjectOverview(t *testing.T) {
 	})
 
 	broker, ms := testBrokerWithStore(t, hubHandler)
+	linkTestUser(t, broker)
 
 	err := broker.store.CreateChannelLink(context.Background(), &ChannelLink{
 		ConversationID: "conv-1",
@@ -482,6 +512,7 @@ func TestStatusCommand_ProjectOverview(t *testing.T) {
 func TestStatusCommand_SpecificAgent(t *testing.T) {
 	hubHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/projects/proj-1/agents" {
+			assert.Equal(t, "user:user@example.com", r.Header.Get("X-Scion-On-Behalf-Of"))
 			json.NewEncoder(w).Encode(hubAgentsResponse{
 				Agents: []hubAgent{
 					{ID: "a1", Slug: "dev-1", Activity: "coding feature X", Phase: "running"},
@@ -493,6 +524,7 @@ func TestStatusCommand_SpecificAgent(t *testing.T) {
 	})
 
 	broker, ms := testBrokerWithStore(t, hubHandler)
+	linkTestUser(t, broker)
 
 	err := broker.store.CreateChannelLink(context.Background(), &ChannelLink{
 		ConversationID: "conv-1",
@@ -865,5 +897,53 @@ func TestAgentPhaseEmoji(t *testing.T) {
 
 	for _, tc := range tests {
 		assert.Equal(t, tc.expected, agentPhaseEmoji(tc.phase), "phase=%q", tc.phase)
+	}
+}
+
+func TestHubReadCommands_SendLinkedUser(t *testing.T) {
+	for _, text := range []string{"agents", "status", "status dev-1", "default dev-1"} {
+		t.Run(text, func(t *testing.T) {
+			var gotHeader string
+			hubHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/v1/projects/proj-1/agents" {
+					gotHeader = r.Header.Get("X-Scion-On-Behalf-Of")
+					json.NewEncoder(w).Encode(hubAgentsResponse{
+						Agents: []hubAgent{{ID: "a1", Slug: "dev-1", Phase: "running"}},
+					})
+					return
+				}
+				w.WriteHeader(http.StatusNotFound)
+			})
+			broker, ms := testBrokerWithStore(t, hubHandler)
+			linkTestUser(t, broker)
+			linkTestChannel(t, broker)
+
+			handled, err := broker.commandHandler.Handle(context.Background(), testActivity(text))
+			assert.True(t, handled)
+			assert.NoError(t, err)
+			assert.Equal(t, "user:user@example.com", gotHeader)
+			require.NotEmpty(t, ms.sent)
+		})
+	}
+}
+
+func TestHubReadCommands_UnlinkedUserGetsRegisterHint(t *testing.T) {
+	for _, text := range []string{"agents", "status", "status dev-1", "default dev-1"} {
+		t.Run(text, func(t *testing.T) {
+			hubCalled := false
+			hubHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hubCalled = true
+				w.WriteHeader(http.StatusForbidden)
+			})
+			broker, ms := testBrokerWithStore(t, hubHandler)
+			linkTestChannel(t, broker)
+
+			handled, err := broker.commandHandler.Handle(context.Background(), testActivity(text))
+			assert.True(t, handled)
+			assert.NoError(t, err)
+			assert.False(t, hubCalled, "hub should not be called for an unlinked user")
+			require.Len(t, ms.sent, 1)
+			assert.Contains(t, ms.sent[0].Text, "register")
+		})
 	}
 }
