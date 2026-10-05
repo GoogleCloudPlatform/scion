@@ -557,8 +557,10 @@ func TestReincarnateMove_ProjectProviderVisibleToUserWithoutRead(t *testing.T) {
 
 // An agent without agent-create scope still sees a broker that serves its
 // project. Moving itself there needs only its reincarnate rights (A8), so
-// the dry run is eligible; another agent moving it with lifecycle scope but
-// no agent-create scope is refused at the access check, not hidden.
+// the dry run is eligible. Another agent moving it with lifecycle scope but
+// no agent-create scope would become its recorded delegator, so the
+// delegation authority check refuses it with 403 before any move check
+// runs: the refusal carries no verdict and nothing is written.
 func TestReincarnateMove_AgentServesProjectWithoutScope(t *testing.T) {
 	f := setupMoveFixture(t, true, nil)
 	count := f.agentCount(t)
@@ -578,8 +580,8 @@ func TestReincarnateMove_AgentServesProjectWithoutScope(t *testing.T) {
 
 	rec = do(agentIdentityFor(tid("coordinator"), f.project.ID, ScopeAgentLifecycle))
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	_, _, v := decodeMoveRefusal(t, rec)
-	assertVerdictFailedAt(t, v, moveCheckAccess)
+	assert.Contains(t, rec.Body.String(), "Cannot delegate agent authority you do not hold")
+	assert.NotContains(t, rec.Body.String(), `"verdict"`, "refused before the move checks")
 	f.assertNoMoveSideEffects(t, count)
 }
 
