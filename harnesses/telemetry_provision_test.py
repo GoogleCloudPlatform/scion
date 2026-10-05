@@ -130,6 +130,15 @@ class TelemetryProvisionTest(unittest.TestCase):
                 self.assertEqual(config['target'], 'local')
                 self.assertNotIn('outfile', config)
 
+    def test_gemini_sets_usage_source_native_only_when_enabled(self):
+        # ptone/scion#2234: the native gemini_cli.api_response rule is
+        # fixture-vetted, so gemini-cli now declares the D4/D10 opt-in the
+        # same way claude, codex and copilot do.
+        enabled_env, _ = self._invoke('gemini-cli', True, 4317)
+        self.assertEqual(enabled_env['SCION_USAGE_SOURCE'], 'native')
+        disabled_env, _ = self._invoke('gemini-cli', False, 4317)
+        self.assertNotIn('SCION_USAGE_SOURCE', disabled_env)
+
     def test_codex_default_custom_and_disabled(self):
         for enabled, port in ((True, 4317), (True, 14317), (False, 14317)):
             with self.subTest(enabled=enabled, port=port):
