@@ -276,24 +276,7 @@ func (r *PodmanRuntime) List(ctx context.Context, labelFilter map[string]string)
 		}
 
 		// Filter by labels if requested
-		match := true
-		for k, v := range labelFilter {
-			actual := labels[k]
-			if actual == "" {
-				switch k {
-				case projectkeys.LabelProject:
-					actual = projectkeys.ProjectNameFromLabels(labels)
-				case projectkeys.LabelProjectID:
-					actual = projectkeys.ProjectIDFromLabels(labels)
-				case projectkeys.LabelProjectPath:
-					actual = projectkeys.ProjectPathFromLabels(labels)
-				}
-			}
-			if !projectkeys.LabelValuesMatch(k, actual, v) {
-				match = false
-				break
-			}
-		}
+		match := LabelsMatchFilter(labels, labelFilter)
 
 		if match {
 			// Prefer the scion.name label (slugified) over Podman container name,
