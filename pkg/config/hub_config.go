@@ -1981,21 +1981,29 @@ func findTopLevelSettingsRaw(configPath string) map[string]interface{} {
 	return nil
 }
 
+// decodeTopLevelSection decodes raw[key] into out (a pointer to a small
+// typed struct) through yaml.v3, so typed fields accept the same spellings
+// as a direct settings.yaml decode (e.g. YAML 1.1 booleans yes/no/on/off).
+// It reports whether the section was present and decoded.
+func decodeTopLevelSection(raw map[string]interface{}, key string, out interface{}) bool {
+	section, ok := raw[key]
+	if !ok || section == nil {
+		return false
+	}
+	data, err := yamlv3.Marshal(section)
+	if err != nil {
+		return false
+	}
+	return yamlv3.Unmarshal(data, out) == nil
+}
+
 // topLevelTelemetryEnabled returns settings.yaml's top-level
 // telemetry.enabled, or nil when unset. It decodes through V1TelemetryConfig
 // like applyTopLevelSettingsSections, so YAML 1.1 booleans (yes/no/on/off)
 // are read the same way on both load paths.
 func topLevelTelemetryEnabled(raw map[string]interface{}) *bool {
-	telRaw, ok := raw["telemetry"]
-	if !ok || telRaw == nil {
-		return nil
-	}
-	data, err := yamlv3.Marshal(telRaw)
-	if err != nil {
-		return nil
-	}
 	var tel V1TelemetryConfig
-	if err := yamlv3.Unmarshal(data, &tel); err != nil {
+	if !decodeTopLevelSection(raw, "telemetry", &tel) {
 		return nil
 	}
 	return tel.Enabled
@@ -2025,39 +2033,30 @@ func applyTopLevelSettingsSections(gc *GlobalConfig, raw map[string]interface{})
 
 	// Check for top-level "project_defaults" section — it lives outside
 	// "server" in settings.yaml and controls hub-level project creation defaults.
-	if pdRaw, ok := raw["project_defaults"]; ok && pdRaw != nil {
-		if pdMap, ok := pdRaw.(map[string]interface{}); ok {
-			if ds, ok := pdMap["default_scratchpad"]; ok {
-				if b, ok := ds.(bool); ok {
-					gc.DefaultScratchpad = &b
-				}
-			}
-		}
+	var pd struct {
+		DefaultScratchpad *bool `yaml:"default_scratchpad"`
+	}
+	if decodeTopLevelSection(raw, "project_defaults", &pd) && pd.DefaultScratchpad != nil {
+		gc.DefaultScratchpad = pd.DefaultScratchpad
 	}
 
 	// Check for top-level "quotas" section — it lives outside "server" in
 	// settings.yaml and controls hub-level quota enforcement toggles.
-	if qRaw, ok := raw["quotas"]; ok && qRaw != nil {
-		if qMap, ok := qRaw.(map[string]interface{}); ok {
-			if eb, ok := qMap["enforce_broker_quotas"]; ok {
-				if b, ok := eb.(bool); ok {
-					gc.EnforceBrokerQuotas = &b
-				}
-			}
-		}
+	var q struct {
+		EnforceBrokerQuotas *bool `yaml:"enforce_broker_quotas"`
+	}
+	if decodeTopLevelSection(raw, "quotas", &q) && q.EnforceBrokerQuotas != nil {
+		gc.EnforceBrokerQuotas = q.EnforceBrokerQuotas
 	}
 
 	// Check for top-level "agent_secrets" section — it lives outside
 	// "server" in settings.yaml and controls hub-level policy for secrets
 	// written by agents.
-	if asRaw, ok := raw["agent_secrets"]; ok && asRaw != nil {
-		if asMap, ok := asRaw.(map[string]interface{}); ok {
-			if uso, ok := asMap["user_scope_only"]; ok {
-				if b, ok := uso.(bool); ok {
-					gc.AgentSecretsUserScopeOnly = &b
-				}
-			}
-		}
+	var as struct {
+		UserScopeOnly *bool `yaml:"user_scope_only"`
+	}
+	if decodeTopLevelSection(raw, "agent_secrets", &as) && as.UserScopeOnly != nil {
+		gc.AgentSecretsUserScopeOnly = as.UserScopeOnly
 	}
 
 	// Top-level default_harness_config — read from raw YAML.
