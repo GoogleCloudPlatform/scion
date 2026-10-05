@@ -37,6 +37,25 @@ type linkedUserHub struct {
 	// projects selects the GET /projects answer: "" returns one project,
 	// "empty" returns none, and "error" returns a 500.
 	projects string
+
+	// fail maps "METHOD path" to an error answer for that request.
+	fail map[string]hubFailure
+}
+
+// hubFailure is an error answer from the fake hub.
+type hubFailure struct {
+	status int
+	body   string
+}
+
+// failRequest makes the fake hub answer method+path with status and body.
+func (h *linkedUserHub) failRequest(method, path string, status int, body string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.fail == nil {
+		h.fail = make(map[string]hubFailure)
+	}
+	h.fail[method+" "+path] = hubFailure{status: status, body: body}
 }
 
 func (h *linkedUserHub) snapshot() []recordedHubCall {
@@ -67,9 +86,16 @@ func (h *linkedUserHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		SignedHeaders: r.Header.Get("X-Scion-Signed-Headers"),
 	})
 	projectsMode := h.projects
+	failure, failing := h.fail[r.Method+" "+r.URL.Path]
 	h.mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
+
+	if failing && onBehalfOf != "" {
+		w.WriteHeader(failure.status)
+		_, _ = io.WriteString(w, failure.body)
+		return
+	}
 
 	if onBehalfOf == "" {
 		w.WriteHeader(http.StatusForbidden)
@@ -568,7 +594,7 @@ func TestHandlers_UnlinkedUserIsAskedToLink(t *testing.T) {
 		{name: "no link", want: msgLinkAccountFirst},
 		{name: "link without email", mapping: &DiscordUserMapping{
 			DiscordUserID: luOtherUser, DiscordUsername: "bob", ScionUserID: "scion-user-2", LinkedAt: time.Now(),
-		}, want: msgReRegisterForEmail},
+		}, want: staleLinkText},
 	}
 
 	for _, h := range linkCheckHandlers() {
@@ -589,7 +615,7 @@ func TestHandlers_UnlinkedUserIsAskedToLink(t *testing.T) {
 				assert.Zero(t, ws.writeCount(), "no write without a linked account")
 				bodies := e.discord.allBodies()
 				assert.Contains(t, bodies, jsonText(t, u.want))
-				for _, other := range []string{msgLinkAccountFirst, msgReRegisterForEmail} {
+				for _, other := range []string{msgLinkAccountFirst, staleLinkText} {
 					if other != u.want {
 						assert.NotContains(t, bodies, jsonText(t, other))
 					}
@@ -997,7 +1023,7 @@ func TestDefaultAgentButtons_RequireLinkedUser(t *testing.T) {
 		{name: "no link", user: luOtherUser, reply: msgLinkAccountFirst},
 		{name: "link without email", user: luOtherUser, mapping: &DiscordUserMapping{
 			DiscordUserID: luOtherUser, DiscordUsername: "bob", ScionUserID: "scion-user-2", LinkedAt: time.Now(),
-		}, reply: msgReRegisterForEmail},
+		}, reply: staleLinkText},
 	}
 
 	for _, arm := range arms {
@@ -1102,7 +1128,7 @@ func TestSettingsAndNotificationButtons_RequireLinkedUser(t *testing.T) {
 		{name: "no link", user: luOtherUser, reply: msgLinkAccountFirst},
 		{name: "link without email", user: luOtherUser, mapping: &DiscordUserMapping{
 			DiscordUserID: luOtherUser, DiscordUsername: "bob", ScionUserID: "scion-user-2", LinkedAt: time.Now(),
-		}, reply: msgReRegisterForEmail},
+		}, reply: staleLinkText},
 	}
 
 	for _, arm := range arms {

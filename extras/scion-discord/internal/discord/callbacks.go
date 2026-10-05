@@ -101,17 +101,9 @@ func (h *CallbackHandler) handleSetupProject(s *discordgo.Session, i *discordgo.
 		return
 	}
 
-	// Fetch agents for the selected project as the invoking user.
-	agents, err := h.hubClient.ListAgents(ctx, projectID, onBehalfOf)
-	if err != nil {
-		h.log.Error("Failed to list agents for project", "project_id", projectID, "error", err)
-		h.respondUpdate(s, i, "Failed to fetch agents. Please try `/scion setup` again.", nil)
-		return
-	}
-
-	// Resolve the project slug from the user's own projects, falling back
-	// to the project ID.
-	projectSlug := projectID
+	// Resolve the project slug from the user's own projects. It is "" when
+	// unknown; the link then falls back to the project ID.
+	projectSlug := ""
 	projects, projErr := h.hubClient.ListProjectsForUser(ctx, onBehalfOf)
 	if projErr != nil {
 		h.log.Warn("Failed to list user projects for slug", "project_id", projectID, "error", projErr)
@@ -121,6 +113,17 @@ func (h *CallbackHandler) handleSetupProject(s *discordgo.Session, i *discordgo.
 			projectSlug = p.DisplayName()
 			break
 		}
+	}
+
+	// Fetch agents for the selected project as the invoking user.
+	agents, err := h.hubClient.ListAgents(ctx, projectID, onBehalfOf)
+	if err != nil {
+		h.log.Error("Failed to list agents for project", "project_id", projectID, "error", err)
+		h.respondUpdate(s, i, hubErrorText(err, emailFromPrincipal(onBehalfOf), projectSlug, "Failed to fetch agents. Please try `/scion setup` again."), nil)
+		return
+	}
+	if projectSlug == "" {
+		projectSlug = projectID
 	}
 
 	// Save the link immediately with no default agent.

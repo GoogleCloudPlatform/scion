@@ -88,7 +88,7 @@ func (c *httpHubClient) ListProjectsForUser(ctx context.Context, onBehalfOf stri
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("list user projects returned status %d", resp.StatusCode)
+		return nil, newHubError("list user projects", resp)
 	}
 
 	var result hubProjectsResponse
@@ -123,7 +123,7 @@ func (c *httpHubClient) ListAgents(ctx context.Context, projectID, onBehalfOf st
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("list agents returned status %d", resp.StatusCode)
+		return nil, newHubError("list agents", resp)
 	}
 
 	var result hubAgentsResponse
@@ -174,7 +174,7 @@ func (c *httpHubClient) ListTemplates(ctx context.Context, projectID, onBehalfOf
 
 	if globalResp.StatusCode != http.StatusOK {
 		slog.Debug("Hub returned non-OK for list global templates", "status", globalResp.StatusCode, "url", globalURL)
-		return nil, fmt.Errorf("list global templates returned status %d", globalResp.StatusCode)
+		return nil, newHubError("list global templates", globalResp)
 	}
 
 	var globalResult hubTemplatesResponse
@@ -308,7 +308,7 @@ func (c *httpHubClient) CreateAgent(ctx context.Context, projectID string, req C
 		return nil, fmt.Errorf("validation error: %s", he.Message)
 
 	case http.StatusForbidden: // 403 — permission denied
-		return nil, fmt.Errorf("you don't have permission to create agents in this project")
+		return nil, newHubError("create agent", resp)
 
 	default:
 		he := parseHubError(resp)
@@ -367,8 +367,7 @@ func (c *httpHubClient) ListSecrets(ctx context.Context, scope, scopeID, onBehal
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		he := parseHubError(resp)
-		return nil, fmt.Errorf("list secrets returned status %d: %s", resp.StatusCode, he.Message)
+		return nil, newHubError("list secrets", resp)
 	}
 
 	var result hubListSecretsResponse
@@ -401,8 +400,7 @@ func (c *httpHubClient) GetSecret(ctx context.Context, key, scope, scopeID, onBe
 		return nil, fmt.Errorf("secret %q not found", key)
 	}
 	if resp.StatusCode != http.StatusOK {
-		he := parseHubError(resp)
-		return nil, fmt.Errorf("get secret returned status %d: %s", resp.StatusCode, he.Message)
+		return nil, newHubError("get secret", resp)
 	}
 
 	var info SecretInfo
@@ -443,8 +441,7 @@ func (c *httpHubClient) SetSecret(ctx context.Context, key, value, scope, scopeI
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		he := parseHubError(resp)
-		return fmt.Errorf("set secret returned status %d: %s", resp.StatusCode, he.Message)
+		return newHubError("set secret", resp)
 	}
 	return nil
 }
@@ -469,8 +466,7 @@ func (c *httpHubClient) DeleteSecret(ctx context.Context, key, scope, scopeID, o
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusOK {
-		he := parseHubError(resp)
-		return fmt.Errorf("delete secret returned status %d: %s", resp.StatusCode, he.Message)
+		return newHubError("delete secret", resp)
 	}
 	return nil
 }

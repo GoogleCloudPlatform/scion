@@ -768,7 +768,7 @@ func (h *CommandHandler) HandleSetup(s *discordgo.Session, i *discordgo.Interact
 	projects, err := h.hubClient.ListProjectsForUser(ctx, onBehalfOf)
 	if err != nil {
 		h.log.Warn("Failed to list user projects", "error", err, "discord_user_id", discordUserID)
-		h.followup(s, i, "Failed to fetch your projects. Please try `/scion setup` again.")
+		h.followup(s, i, hubErrorText(err, emailFromPrincipal(onBehalfOf), "", "Failed to fetch your projects. Please try `/scion setup` again."))
 		return
 	}
 
@@ -863,7 +863,7 @@ func (h *CommandHandler) HandleAgents(s *discordgo.Session, i *discordgo.Interac
 	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, onBehalfOf)
 	if err != nil {
 		h.log.Error("Failed to list agents", "error", err, "project_id", link.ProjectID)
-		h.followup(s, i, "Failed to fetch agents. Please try again later.")
+		h.followup(s, i, hubErrorText(err, emailFromPrincipal(onBehalfOf), link.ProjectSlug, "Failed to fetch agents. Please try again later."))
 		return
 	}
 
@@ -980,7 +980,8 @@ func (h *CommandHandler) HandleStatus(s *discordgo.Session, i *discordgo.Interac
 
 	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, onBehalfOf)
 	if err != nil {
-		h.followup(s, i, "Failed to fetch agent status. Please try again.")
+		h.log.Warn("Failed to list agents for status", "error", err, "project_id", link.ProjectID)
+		h.followup(s, i, hubErrorText(err, emailFromPrincipal(onBehalfOf), link.ProjectSlug, "Failed to fetch agent status. Please try again."))
 		return
 	}
 
@@ -1073,7 +1074,8 @@ func (h *CommandHandler) HandleMessage(s *discordgo.Session, i *discordgo.Intera
 	// Verify the agent exists.
 	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, sender)
 	if err != nil {
-		h.followup(s, i, "Failed to verify agent. Please try again.")
+		h.log.Warn("Failed to list agents for message", "error", err, "project_id", link.ProjectID)
+		h.followup(s, i, hubErrorText(err, emailFromPrincipal(sender), link.ProjectSlug, agentListUnavailableText))
 		return
 	}
 	found := false
@@ -1175,7 +1177,7 @@ func (h *CommandHandler) HandleDefault(s *discordgo.Session, i *discordgo.Intera
 	agents, err := h.getAgents(ctx, link.ProjectID, onBehalfOf)
 	if err != nil {
 		h.log.Error("Failed to list agents", "error", err, "project_id", link.ProjectID)
-		h.followup(s, i, "Failed to fetch agents. Please try again later.")
+		h.followup(s, i, hubErrorText(err, emailFromPrincipal(onBehalfOf), link.ProjectSlug, "Failed to fetch agents. Please try again later."))
 		return
 	}
 
@@ -1409,7 +1411,7 @@ func (h *CommandHandler) HandleTerminal(s *discordgo.Session, i *discordgo.Inter
 	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, onBehalfOf)
 	if err != nil {
 		h.log.Error("Failed to list agents", "error", err, "project_id", link.ProjectID)
-		h.followup(s, i, "Failed to fetch agents. Please try again later.")
+		h.followup(s, i, hubErrorText(err, emailFromPrincipal(onBehalfOf), link.ProjectSlug, "Failed to fetch agents. Please try again later."))
 		return
 	}
 
@@ -1496,7 +1498,7 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 	agents, err := h.hubClient.ListAgents(ctx, link.ProjectID, onBehalfOf)
 	if err != nil {
 		h.log.Error("Failed to list agents for slug conflict check", "error", err, "project_id", link.ProjectID)
-		h.followup(s, i, "Failed to verify agent name availability. Please try again.")
+		h.followup(s, i, hubErrorText(err, emailFromPrincipal(onBehalfOf), link.ProjectSlug, agentListUnavailableText))
 		return
 	}
 	for _, agent := range agents {
@@ -1512,7 +1514,7 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 		templates, err := h.hubClient.ListTemplates(ctx, link.ProjectID, onBehalfOf)
 		if err != nil {
 			h.log.Error("Failed to list templates for validation", "error", err, "project_id", link.ProjectID)
-			h.followup(s, i, "Failed to verify template. Please try again.")
+			h.followup(s, i, hubErrorText(err, emailFromPrincipal(onBehalfOf), link.ProjectSlug, "Failed to verify template. Please try again."))
 			return
 		}
 		found := false
@@ -1623,6 +1625,12 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 	// --- Error compensation matrix ---
 	// Handle all four outcomes from the concurrent fan-out.
 
+	// agentErrText describes a failed agent creation to the user.
+	agentErrText := ""
+	if agentErr != nil {
+		agentErrText = deniedText(agentErr, emailFromPrincipal(onBehalfOf), link.ProjectSlug, "create agents", agentErr.Error())
+	}
+
 	switch {
 	case agentErr != nil && threadErr != nil:
 		// Both failed — single ephemeral error.
@@ -1637,7 +1645,7 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 			"Failed to create both the agent and the thread.\n"+
 				"Agent error: %s\n"+
 				"Thread error: %s",
-			agentErr.Error(), threadErrMsg))
+			agentErrText, threadErrMsg))
 		return
 
 	case agentErr != nil && threadErr == nil:
@@ -1646,7 +1654,7 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 			"agent_error", agentErr, "slug", slug, "thread_id", thread.ID)
 		if statusMsgID != "" {
 			_, editErr := s.ChannelMessageEdit(thread.ID, statusMsgID,
-				fmt.Sprintf("❌ Agent creation failed: %s", agentErr.Error()))
+				fmt.Sprintf("❌ Agent creation failed: %s", agentErrText))
 			if editErr != nil {
 				h.log.Error("Failed to edit status message after agent error", "error", editErr)
 			}
@@ -1655,7 +1663,7 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 			"Thread **%s** was created but the agent could not be started.\n"+
 				"Error: %s\n"+
 				"You can retry with `/scion thread` or manually create an agent and bind it with `/scion default <agent>` in the thread.",
-			title, agentErr.Error()))
+			title, agentErrText))
 		return
 
 	case agentErr == nil && threadErr != nil:
@@ -1864,10 +1872,6 @@ var errNoLinkedUser = errors.New("no linked user")
 // user's linked Scion account and there is none.
 const msgLinkAccountFirst = "Please link your Discord account first with `/scion register`."
 
-// msgReRegisterForEmail is the reply sent when the invoking user is linked
-// but the link has no email address.
-const msgReRegisterForEmail = "Your linked account has no email address. Please re-register with `/scion register` so your email is recorded."
-
 // msgAccountLookupFailed is the reply sent when the link lookup itself fails.
 const msgAccountLookupFailed = "Something went wrong looking up your account. Please try again."
 
@@ -1901,7 +1905,7 @@ func lookupUserMapping(ctx context.Context, store Store, log *slog.Logger, disco
 
 // requirePrincipal returns the invoking user's principal. When the user has
 // no linked account, it calls reply with a prompt to run /scion register;
-// when the link has no email, it calls reply with a prompt to re-register;
+// when the link has no email, it calls reply with staleLinkText;
 // when the lookup fails, it replies with a retry message. In each of these
 // cases it returns false, and callers return without reading agents or
 // calling the hub.
@@ -1916,7 +1920,7 @@ func requirePrincipal(ctx context.Context, store Store, log *slog.Logger, discor
 		return "", false
 	}
 	if mapping.ScionEmail == "" {
-		reply(msgReRegisterForEmail)
+		reply(staleLinkText)
 		return "", false
 	}
 	return principalForMapping(mapping), true

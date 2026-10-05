@@ -168,7 +168,8 @@ func (h *CommandHandler) HandleSecretModalSubmit(s *discordgo.Session, i *discor
 	err := h.hubClient.SetSecret(ctx, key, value, "project", projectID, onBehalfOf)
 	if err != nil {
 		h.log.Error("Failed to set secret via hub", "error", err, "key", key, "project_id", projectID)
-		h.followup(s, i, fmt.Sprintf("Failed to set secret **%s**: %s", key, err))
+		h.followup(s, i, secretErrorText(err, onBehalfOf, h.projectSlugFor(ctx, s, i.ChannelID, projectID), "set", key,
+			fmt.Sprintf("Failed to set secret **%s**: %s", key, err)))
 		return
 	}
 
@@ -207,7 +208,7 @@ func (h *CommandHandler) HandleSecretList(s *discordgo.Session, i *discordgo.Int
 	secrets, err := h.hubClient.ListSecrets(ctx, "project", link.ProjectID, onBehalfOf)
 	if err != nil {
 		h.log.Error("Failed to list secrets", "error", err, "project_id", link.ProjectID)
-		h.followup(s, i, "Failed to list secrets. Please try again later.")
+		h.followup(s, i, deniedText(err, emailFromPrincipal(onBehalfOf), link.ProjectSlug, "list secrets", "Failed to list secrets. Please try again later."))
 		return
 	}
 
@@ -274,7 +275,8 @@ func (h *CommandHandler) HandleSecretGet(s *discordgo.Session, i *discordgo.Inte
 	info, err := h.hubClient.GetSecret(ctx, key, "project", link.ProjectID, onBehalfOf)
 	if err != nil {
 		h.log.Error("Failed to get secret", "error", err, "key", key, "project_id", link.ProjectID)
-		h.followup(s, i, fmt.Sprintf("Failed to get secret **%s**: %s", key, err))
+		h.followup(s, i, secretErrorText(err, onBehalfOf, link.ProjectSlug, "read", key,
+			fmt.Sprintf("Failed to get secret **%s**: %s", key, err)))
 		return
 	}
 
@@ -333,11 +335,30 @@ func (h *CommandHandler) HandleSecretDelete(s *discordgo.Session, i *discordgo.I
 	err = h.hubClient.DeleteSecret(ctx, key, "project", link.ProjectID, onBehalfOf)
 	if err != nil {
 		h.log.Error("Failed to delete secret", "error", err, "key", key, "project_id", link.ProjectID)
-		h.followup(s, i, fmt.Sprintf("Failed to delete secret **%s**: %s", key, err))
+		h.followup(s, i, secretErrorText(err, onBehalfOf, link.ProjectSlug, "delete", key,
+			fmt.Sprintf("Failed to delete secret **%s**: %s", key, err)))
 		return
 	}
 
 	h.followup(s, i, fmt.Sprintf("Secret **%s** has been deleted.", key))
 	h.log.Info("Secret deleted via Discord",
 		"key", key, "project_id", link.ProjectID, "discord_user", discordUserID)
+}
+
+// secretErrorText returns the reply for a failed secret request: verb
+// ("read", "set", "delete") names what was asked for the secret key. A
+// denial that does not say which action was denied names the secret and
+// the verb. Other errors get fallback.
+func secretErrorText(err error, onBehalfOf, project, verb, key, fallback string) string {
+	return deniedText(err, emailFromPrincipal(onBehalfOf), project, fmt.Sprintf("%s the secret **%s**", verb, key), fallback)
+}
+
+// projectSlugFor returns the slug of projectID when it is the project the
+// channel is linked to, or "" when unknown.
+func (h *CommandHandler) projectSlugFor(ctx context.Context, s *discordgo.Session, channelID, projectID string) string {
+	link, err := resolveChannelLink(ctx, s, h.store, channelID)
+	if err != nil || link == nil || link.ProjectID != projectID {
+		return ""
+	}
+	return link.ProjectSlug
 }

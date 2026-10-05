@@ -1323,7 +1323,17 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 
 	// Get project agents (with cache refresh) — only needed for legacy path.
 	// Without a linked sender, getProjectAgents uses the cache only.
-	agents := b.getProjectAgents(ctx, link.ProjectID, principalForMapping(senderMapping))
+	agents, agentsErr := b.getProjectAgents(ctx, link.ProjectID, principalForMapping(senderMapping))
+	// agentListErrText tells the sender why their message could not be
+	// routed when no agent list is available, instead of reporting an
+	// addressed agent as unknown.
+	agentListErrText := func() string {
+		email := ""
+		if senderMapping != nil {
+			email = senderMapping.ScionEmail
+		}
+		return hubErrorText(agentsErr, email, link.ProjectSlug, agentListUnavailableText)
+	}
 
 	// Three-tier @-mention routing (additive model: effectiveDefault is
 	// included as implicit primary when explicit agent mentions are present).
@@ -1350,12 +1360,23 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	if len(targets) == 0 {
 		// If bot was mentioned but no agent resolved, send error feedback.
 		if isBotMentioned(m, botUserID) {
+			if agentsErr != nil {
+				s.ChannelMessageSend(channelID, agentListErrText())
+				return
+			}
 			unresolved := extractUnresolvedMentions(m.Content, botUserID, agents)
 			if len(unresolved) > 0 {
 				errMsg := fmt.Sprintf("Unknown agent: %s. Use `/scion agents` to see available agents.", strings.Join(unresolved, ", "))
 				s.ChannelMessageSend(channelID, errMsg)
 			}
 		}
+		return
+	}
+
+	// A sender the hub denies (including a link it no longer accepts) is
+	// never routed; they are told why instead.
+	if isForbiddenHubError(agentsErr) {
+		s.ChannelMessageSend(channelID, agentListErrText())
 		return
 	}
 
@@ -1389,6 +1410,11 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 				hasUnknownStartMention = true
 				break
 			}
+		}
+		if hasUnknownStartMention && countAgentStartMentions(classified) == 0 && agentsErr != nil {
+			// Without an agent list the mention cannot be checked.
+			s.ChannelMessageSend(channelID, agentListErrText())
+			return
 		}
 		if hasUnknownStartMention && countAgentStartMentions(classified) == 0 {
 			var unresolved []string
@@ -2001,8 +2027,9 @@ func (b *DiscordBroker) deliverRoutedInbound(projectID, defaultAgent string, msg
 //
 // onBehalfOf is the message author's principal, sent with the hub refresh.
 // When it is empty, the cached list is returned (even if stale) and the hub
-// is not called.
-func (b *DiscordBroker) getProjectAgents(ctx context.Context, projectID, onBehalfOf string) []string {
+// is not called. A stale cache also covers a failed refresh. A non-nil
+// error is the hub error when no list is available.
+func (b *DiscordBroker) getProjectAgents(ctx context.Context, projectID, onBehalfOf string) ([]string, error) {
 	b.mu.RLock()
 	store := b.store
 	hubClient := b.hubClient
@@ -2010,7 +2037,7 @@ func (b *DiscordBroker) getProjectAgents(ctx context.Context, projectID, onBehal
 	b.mu.RUnlock()
 
 	if store == nil {
-		return nil
+		return nil, nil
 	}
 
 	cached, err := store.GetProjectAgents(ctx, projectID)
@@ -2018,23 +2045,23 @@ func (b *DiscordBroker) getProjectAgents(ctx context.Context, projectID, onBehal
 		b.log.Warn("Failed to read agent cache", "project_id", projectID, "error", err)
 	}
 	if cached != nil && time.Since(cached.RefreshedAt) < ttl {
-		return cached.AgentSlugs
+		return cached.AgentSlugs, nil
 	}
 
 	if hubClient == nil || onBehalfOf == "" {
 		if cached != nil {
-			return cached.AgentSlugs
+			return cached.AgentSlugs, nil
 		}
-		return nil
+		return nil, nil
 	}
 
 	agents, err := hubClient.ListAgents(ctx, projectID, onBehalfOf)
 	if err != nil {
 		b.log.Warn("Failed to refresh agent list from hub", "project_id", projectID, "error", err)
 		if cached != nil {
-			return cached.AgentSlugs
+			return cached.AgentSlugs, nil
 		}
-		return nil
+		return nil, err
 	}
 
 	slugs := agentSlugs(agents)
@@ -2047,7 +2074,7 @@ func (b *DiscordBroker) getProjectAgents(ctx context.Context, projectID, onBehal
 		b.log.Warn("Failed to cache agents", "project_id", projectID, "error", saveErr)
 	}
 
-	return slugs
+	return slugs, nil
 }
 
 // --- Routing helpers ---

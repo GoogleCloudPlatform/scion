@@ -1997,7 +1997,8 @@ func TestGetProjectAgents_RefreshCarriesLinkedUser(t *testing.T) {
 	b.hubClient = NewHTTPHubClient(hub.URL, "", "", nil)
 	b.agentCacheTTL = 0
 
-	slugs := b.getProjectAgents(context.Background(), "p1", "user:alice@example.com")
+	slugs, err := b.getProjectAgents(context.Background(), "p1", "user:alice@example.com")
+	require.NoError(t, err)
 	assert.Equal(t, []string{"worker"}, slugs)
 
 	calls := rec.snapshot()
