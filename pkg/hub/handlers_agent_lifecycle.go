@@ -716,6 +716,10 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 				slog.Warn("Restart: stop dispatch failed, proceeding with start",
 					"agent_id", id, "error", stopErr)
 			}
+			// The dying container's own status report (phase stopped)
+			// may have released the slot during the stop leg; the restart
+			// held it throughout, so put it back without the cap check.
+			sd.reassertReservation(ctx)
 			// Restart is stop + start: a fresh harness session, not a resume.
 			dispatchErr = dispatcher.DispatchAgentStart(ctx, agent, "", false)
 			if dispatchErr == nil {

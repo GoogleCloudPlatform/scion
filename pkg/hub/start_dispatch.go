@@ -105,6 +105,11 @@ var errStartingWrite = errors.New("record starting phase before dispatch")
 //     narrow residual window, accepted).
 //   - settle only marks the handle. If the final write fails, the row stays
 //     starting with the reservation held, and only a heartbeat corrects it.
+//   - A restart calls reassertReservation after its stop leg: the dying
+//     container's own status report (phase stopped, through the agent status
+//     endpoint, not the heartbeat) releases the slot while the stop leg runs,
+//     and the guard below does not cover that path. The re-assert puts it
+//     back without the cap check.
 //   - rollback restores priorPhase with one conditional write (IfPhase
 //     starting), so a phase written meanwhile (a heartbeat from another
 //     replica, a launch reaper) is kept. Under a live delete claim the
@@ -210,6 +215,21 @@ func (d *startDispatch) rollback(ctx context.Context) {
 	d.s.rollbackBrokerQuota(ctx, d.agent, d.reserved)
 }
 
+// reassertReservation re-records the agent's reservation, without the cap
+// check, if it no longer holds one (reassertBrokerReservation). A restart
+// calls it after its stop leg: the dying container's own status report
+// (phase stopped) can release the slot while the stop leg runs, on any
+// replica. A reservation re-created here belongs to this dispatch from then
+// on: rollback releases it, and on success it stays held.
+func (d *startDispatch) reassertReservation(ctx context.Context) {
+	if d == nil {
+		return
+	}
+	if d.s.reassertBrokerReservation(ctx, d.agent) {
+		d.reserved = true
+	}
+}
+
 // wroteStarting reports whether beginStartDispatch attempted the
 // PhaseStarting write (the agent's phase was uncounted). The write may have
 // been dropped by the store's delete guard; see the contract, item 2.
@@ -252,7 +272,10 @@ func (d *startDispatch) settle() {
 //
 // lifecycleOps is a per-replica hint (see lifecycleOpTracker), so this guard
 // only covers ops run by the replica that handles the heartbeat; the quota
-// reconcile's age gate is the backstop.
+// reconcile's age gate is the backstop. It covers only the broker heartbeat:
+// the agent's own status report (a dying container reporting stopped during
+// a restart's stop leg) still applies, and the restart re-asserts its
+// reservation after the stop leg (startDispatch.reassertReservation).
 func (s *Server) heartbeatPhaseGuarded(agent *store.Agent, hbPhase string) bool {
 	if hbPhase == "" || isBrokerQuotaCountedPhase(hbPhase) {
 		return false

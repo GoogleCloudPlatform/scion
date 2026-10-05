@@ -95,6 +95,49 @@ func (s *Server) checkAndReserveBrokerQuota(ctx context.Context, agent *store.Ag
 	return s.quotaService.Reserve(ctx, store.LimitMaxAgentsPerBroker, agent.RuntimeBrokerID, store.QuotaScopeBroker, agent.RuntimeBrokerID, agent.ID)
 }
 
+// reassertBrokerReservation records agent's max_agents_per_broker
+// reservation if it holds none, without the cap check, the way
+// ReconcileStaleBrokerQuotaReservations backfills one: it is accounting for
+// a slot the caller already held, not a new admission decision. A restart
+// calls it after its stop leg, because the dying container's own status
+// report (phase stopped) releases the reservation through
+// reconcileBrokerQuotaOnPhaseChange while the stop leg runs. Reports whether
+// it created a reservation. Best-effort: failures are logged.
+func (s *Server) reassertBrokerReservation(ctx context.Context, agent *store.Agent) bool {
+	if s.quotaService == nil || agent == nil || agent.RuntimeBrokerID == "" {
+		return false
+	}
+	def, err := s.store.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.agentLifecycleLog.Warn("quota: re-assert after stop leg: limit lookup failed",
+				"agent_id", agent.ID, "error", err)
+		}
+		return false
+	}
+	has, err := s.store.HasActiveReservation(ctx, def.ID, agent.ID)
+	if err != nil || has {
+		if err != nil {
+			s.agentLifecycleLog.Warn("quota: re-assert after stop leg: reservation check failed",
+				"agent_id", agent.ID, "error", err)
+		}
+		return false
+	}
+	if _, err := s.store.CreateUsageReservation(ctx, &store.UsageReservation{
+		LimitDefinitionID: def.ID,
+		SubjectID:         agent.RuntimeBrokerID,
+		ScopeType:         store.QuotaScopeBroker,
+		ScopeID:           agent.RuntimeBrokerID,
+		ResourceID:        agent.ID,
+		Reserved:          1,
+	}); err != nil {
+		s.agentLifecycleLog.Warn("quota: re-assert after stop leg failed",
+			"agent_id", agent.ID, "error", err)
+		return false
+	}
+	return true
+}
+
 // reconcileBrokerQuotaOnPhaseChange updates agent's max_agents_per_broker
 // reservation to match an *observed* phase transition (heartbeat or agent
 // self-report status update) rather than an explicit lifecycle action. It is

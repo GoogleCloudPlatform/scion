@@ -21,6 +21,7 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -509,7 +510,7 @@ func TestHeartbeatPhaseGuarded(t *testing.T) {
 	}
 }
 
-// ptone/scion#2014 review F1/F2: at every start-type site, a heartbeat
+// ptone/scion#2014: at every start-type site, a heartbeat
 // guarded mid-dispatch stores the old container's exit message, code and
 // reason; the start's final write clears them, and the stalled marker,
 // however the row reads by then.
@@ -579,9 +580,9 @@ func TestStartDispatch_RestartGuardedHeartbeatLeavesNoStaleMessage(t *testing.T)
 	}
 }
 
-// F5(i)/F9(a): a caller whose snapshot is stale (it read stopped/suspended,
-// the row is running now) does not write starting over the running row:
-// the start fails as a conflict before dispatch and releases the
+// ptone/scion#2014: a caller whose snapshot is stale (it read
+// stopped/suspended, the row is running now) does not write starting over the
+// running row: the start fails as a conflict before dispatch and releases the
 // reservation it created; the phase is unchanged.
 func TestStartDispatch_StaleSnapshotConflicts(t *testing.T) {
 	setup := func(t *testing.T, name string, snapshot state.Phase) (*Server, store.Store, *store.RuntimeBroker, *store.Agent, *hookedStartDispatcher) {
@@ -628,9 +629,9 @@ func TestStartDispatch_StaleSnapshotConflicts(t *testing.T) {
 	})
 }
 
-// F6/F9(e): the guard also holds during a non-start op. A stopped heartbeat
-// that lands mid-stop is not applied over running; the stop writes stopped
-// itself and releases the slot.
+// ptone/scion#2014: the heartbeat guard also holds during a non-start op. A
+// stopped heartbeat that lands mid-stop is not applied over running; the stop
+// writes stopped itself and releases the slot.
 func TestHeartbeatPhaseGuard_DuringStop(t *testing.T) {
 	srv, s := testServer(t)
 	grantDevUserRuntimeBrokerAccess(t, s)
@@ -669,9 +670,9 @@ func claimDeleteInHook(t *testing.T, srv *Server, agentID string) *agentDeletion
 	return plan
 }
 
-// F3: a start that fails under a delete claim, then the delete fails: the
-// delete rollback restores stopped (no start in flight any more), not the
-// starting the claim captured, with the failed marker set.
+// ptone/scion#2014: a start that fails under a delete claim, then the delete
+// fails: the delete rollback restores stopped (no start in flight any more),
+// not the starting the claim captured, with the failed marker set.
 func TestStartDispatch_FailedStartThenFailedDeleteEndsStopped(t *testing.T) {
 	srv, s := testServer(t)
 	disp := &hookedStartDispatcher{failStart: true}
@@ -700,9 +701,10 @@ func TestStartDispatch_FailedStartThenFailedDeleteEndsStopped(t *testing.T) {
 	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID))
 }
 
-// F3 guard: while the start dispatch is still in flight (lifecycle op held),
-// a failed delete restores the captured starting as before; the start's own
-// rollback then restores the prior phase once the delete has failed.
+// ptone/scion#2014: while the start dispatch is still in flight (lifecycle op
+// held), a failed delete restores the captured starting as before; the
+// start's own rollback then restores the prior phase once the delete has
+// failed.
 func TestStartDispatch_FailedDeleteDuringStartRestoresStarting(t *testing.T) {
 	srv, s := testServer(t)
 	disp := &hookedStartDispatcher{failStart: true}
@@ -730,9 +732,9 @@ func TestStartDispatch_FailedDeleteDuringStartRestoresStarting(t *testing.T) {
 	assert.Equal(t, string(state.PhaseStopped), got.Phase, "the start's rollback restores the prior phase")
 }
 
-// F3: a running intent cannot be recorded after the claim (the store
-// refuses it while the delete holds the row, ptone/scion#2550), so the
-// failed delete restores stopped.
+// ptone/scion#2014, ptone/scion#2550: a running intent cannot be recorded
+// after the claim (the store refuses it while the delete holds the row,
+// ptone/scion#2550), so the failed delete restores stopped.
 func TestStartDispatch_FailedDeleteIntentRefusedUnderClaim(t *testing.T) {
 	srv, s := testServer(t)
 	disp := &hookedStartDispatcher{failStart: true}
@@ -758,8 +760,8 @@ func TestStartDispatch_FailedDeleteIntentRefusedUnderClaim(t *testing.T) {
 	assert.Equal(t, string(state.PhaseStopped), got.Phase)
 }
 
-// F3 control: a live launch keeps today's behaviour; the captured starting
-// is restored.
+// ptone/scion#2014: a live launch keeps today's behaviour; the captured
+// starting is restored.
 func TestStartDispatch_FailedDeleteKeepsStartingUnderLiveLaunch(t *testing.T) {
 	srv, s := testServer(t)
 	disp := &hookedStartDispatcher{}
@@ -780,7 +782,7 @@ func TestStartDispatch_FailedDeleteKeepsStartingUnderLiveLaunch(t *testing.T) {
 	assert.Equal(t, string(state.PhaseStarting), got.Phase, "a live launch keeps the prior restore")
 }
 
-// Review round 2 F1: the wake clears the previous generation's leftovers on
+// ptone/scion#2014: the wake clears the previous generation's leftovers on
 // its post-dispatch starting write, so a status the new container posts
 // during the readiness wait ("Agent started") survives the running write.
 func TestStartDispatch_WakeKeepsNewGenerationStatus(t *testing.T) {
@@ -826,10 +828,11 @@ func TestStartDispatch_WakeKeepsNewGenerationStatus(t *testing.T) {
 	assert.Equal(t, "Agent started", got.Message, "the new generation's status survives the running write")
 }
 
-// Review round 2 F2: a delete that claimed the row after the caller read it
-// (the claim moved it to stopping) is answered as #2415's delete_in_progress,
-// not as a generic phase conflict, by the helper, the HTTP helper and the
-// wake; nothing is dispatched and the reservation is released.
+// ptone/scion#2014, ptone/scion#2550: a delete that claimed the row after the
+// caller read it (the claim moved it to stopping) is answered as #2415's
+// delete_in_progress, not as a generic phase conflict, by the helper, the
+// HTTP helper and the wake; nothing is dispatched and the reservation is
+// released.
 func TestStartDispatch_DeleteClaimBeforeStartingWrite(t *testing.T) {
 	setup := func(t *testing.T, name string, snapshot state.Phase) (*Server, store.Store, *store.RuntimeBroker, *store.Agent, *hookedStartDispatcher) {
 		srv, s := testServer(t)
@@ -899,7 +902,7 @@ func (f *failingStartingStore) UpdateAgentStatus(ctx context.Context, id string,
 	return f.Store.UpdateAgentStatus(ctx, id, su)
 }
 
-// Review round 2 F6(a): a starting write that fails for a reason other than
+// ptone/scion#2014: a starting write that fails for a reason other than
 // a phase mismatch answers 500 over HTTP and ErrCodeRuntimeError from the
 // wake, releases the reservation the call created, leaves the phase as it
 // was, and dispatches nothing.
@@ -940,10 +943,10 @@ func TestStartDispatch_StartingWriteFailure(t *testing.T) {
 	})
 }
 
-// Review round 2 F6(b): the F3 delete-engine branch through a restart. The
-// restart's start leg fails because a delete claimed the row mid-dispatch
-// (ErrDeleteInProgress branch); the delete then fails, and the row ends
-// stopped, not starting.
+// ptone/scion#2014: the delete rollback's stopped-for-starting branch through
+// a restart. The restart's start leg fails because a delete claimed the row
+// mid-dispatch (ErrDeleteInProgress branch); the delete then fails, and the
+// row ends stopped, not starting.
 func TestStartDispatch_RestartFailedUnderClaimThenFailedDeleteEndsStopped(t *testing.T) {
 	srv, s := testServer(t)
 	disp := &hookedStartDispatcher{failStart: true, startErr: fmt.Errorf("start refused: %w", store.ErrDeleteInProgress)}
@@ -970,7 +973,7 @@ func TestStartDispatch_RestartFailedUnderClaimThenFailedDeleteEndsStopped(t *tes
 	assert.Equal(t, store.DeletionStateFailed, got.DeletionState)
 }
 
-// Review round 3 F1: a start on an agent that is already running is not a
+// ptone/scion#2014: a start on an agent that is already running is not a
 // new generation (no starting write, no stop leg): the final write keeps the
 // live harness's message, activity and stalled marker.
 func TestStartDispatch_StartOnRunningAgentKeepsLiveStatus(t *testing.T) {
@@ -1023,7 +1026,7 @@ func (r *recordingStatusStore) lastHeartbeat(t *testing.T) store.AgentStatusUpda
 	return r.heartbeats[len(r.heartbeats)-1]
 }
 
-// Review round 3 F5: the heartbeat wiring for round 2's F3. While an op is
+// ptone/scion#2014: the heartbeat wiring of the guard. While an op is
 // held on an agent whose stored phase is uncounted (the heartbeat's snapshot
 // predating a starting write), a stopped report's phase is dropped before
 // the store write and the quota reconcile, while its exit code and reason
@@ -1078,4 +1081,108 @@ func TestHeartbeatPhaseGuard_UncountedStoredPhaseEndToEnd(t *testing.T) {
 			assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID), "no reconcile release")
 		})
 	}
+}
+
+// postDyingStoppedReport posts the dying container's own status report
+// (phase stopped), as sciontool does on a clean SIGTERM, through the agent
+// status endpoint with the agent's identity.
+func postDyingStoppedReport(t *testing.T, srv *Server, a *store.Agent) {
+	t.Helper()
+	body, err := json.Marshal(store.AgentStatusUpdate{Phase: string(state.PhaseStopped), Message: "Agent stopped"})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+a.ID+"/status", bytes.NewReader(body))
+	req = req.WithContext(contextWithIdentity(req.Context(), agentIdentityFor(a.ID, a.ProjectID, ScopeAgentStatusUpdate)))
+	rec := httptest.NewRecorder()
+	srv.updateAgentStatus(rec, req, a.ID)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// ptone/scion#2010, ptone/scion#2014: the dying container's own stopped
+// report during a restart's stop leg releases the reservation through the
+// status endpoint; the restart re-asserts it after the stop leg, so a
+// successful restart ends running with the slot held.
+func TestRestart_DyingContainerStoppedReportKeepsReservation(t *testing.T) {
+	srv, s := testServer(t)
+	disp := &hookedStartDispatcher{}
+	srv.SetDispatcher(disp)
+	setBrokerAgentCeiling(t, s, 2)
+	ctx := context.Background()
+	broker, project := newQuotaTestBrokerAndProject(t, s, "rs-dying")
+	a := newQuotaTestAgent(t, s, broker, project, "rs-dying", state.PhaseRunning)
+	reserveBrokerSlot(t, s, broker, a.ID)
+	var releasedDuringStop bool
+	disp.onStop = func(*store.Agent) {
+		postDyingStoppedReport(t, srv, a)
+		releasedDuringStop = !hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID)
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restart", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.True(t, releasedDuringStop, "precondition: the self-report released the slot")
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), got.Phase)
+	assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID), "the restart keeps its slot")
+	assert.EqualValues(t, 1, brokerReservationCount(t, s, broker.ID))
+}
+
+// ptone/scion#2010, ptone/scion#2014: when the restart's start leg then
+// fails, the re-asserted reservation is released exactly once, whichever
+// failure branch runs (stop leg succeeded: release and record stopped; both
+// legs failed: rollback), and another agent's slot is untouched.
+func TestRestart_DyingContainerStoppedReportFailedStartReleasesOnce(t *testing.T) {
+	for _, stopFails := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stopFails=%v", stopFails), func(t *testing.T) {
+			srv, s := testServer(t)
+			disp := &hookedStartDispatcher{failStart: true}
+			srv.SetDispatcher(disp)
+			setBrokerAgentCeiling(t, s, 3)
+			ctx := context.Background()
+			sfx := fmt.Sprintf("rs-dying-fail-%v", stopFails)
+			broker, project := newQuotaTestBrokerAndProject(t, s, sfx)
+			a := newQuotaTestAgent(t, s, broker, project, sfx, state.PhaseRunning)
+			reserveBrokerSlot(t, s, broker, a.ID)
+			other := newQuotaTestAgent(t, s, broker, project, sfx+"-other", state.PhaseRunning)
+			reserveBrokerSlot(t, s, broker, other.ID)
+			disp.onStop = func(*store.Agent) { postDyingStoppedReport(t, srv, a) }
+			if stopFails {
+				srv.SetDispatcher(&stopFailingHooked{hookedStartDispatcher: disp})
+			}
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restart", nil)
+			require.GreaterOrEqual(t, rec.Code, 500, rec.Body.String())
+			assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, a.ID))
+			assert.True(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, other.ID))
+			assert.EqualValues(t, 1, brokerReservationCount(t, s, broker.ID))
+			got, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			assert.Equal(t, string(state.PhaseStopped), got.Phase)
+		})
+	}
+}
+
+// stopFailingHooked is a hookedStartDispatcher whose stop leg runs its hook
+// and then fails.
+type stopFailingHooked struct {
+	*hookedStartDispatcher
+}
+
+func (d *stopFailingHooked) DispatchAgentStop(ctx context.Context, agent *store.Agent) error {
+	_ = d.hookedStartDispatcher.DispatchAgentStop(ctx, agent)
+	return errors.New("simulated broker stop failure")
+}
+
+// ptone/scion#2014: a create-of-an-existing-agent resume that retries its
+// full-row write after a version conflict carries the cleared message and
+// stalled marker (empty values included) onto the re-read row.
+func TestMergeDispatchedAgent_RunningCarriesClearedMessageAndStalled(t *testing.T) {
+	dst := &store.Agent{
+		Phase:               string(state.PhaseStarting),
+		Message:             "Agent crashed with exit code 137",
+		StalledFromActivity: string(state.ActivityWorking),
+	}
+	src := &store.Agent{Phase: string(state.PhaseRunning)}
+	mergeDispatchedAgent(dst, src)
+	assert.Equal(t, string(state.PhaseRunning), dst.Phase)
+	assert.Empty(t, dst.Message)
+	assert.Empty(t, dst.StalledFromActivity)
 }

@@ -2405,6 +2405,11 @@ func mergeDispatchedAgent(dst, src *store.Agent) {
 	if src.Phase == string(state.PhaseRunning) {
 		dst.ExitReason = src.ExitReason
 		dst.ExitCode = src.ExitCode
+		// Likewise the caller's clear of the prior generation's message
+		// and stalled marker (empty values included), so the retry writes
+		// what the first attempt would have (ptone/scion#2014).
+		dst.Message = src.Message
+		dst.StalledFromActivity = src.StalledFromActivity
 	}
 }
 
