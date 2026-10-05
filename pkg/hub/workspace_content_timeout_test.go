@@ -537,3 +537,18 @@ func TestReincarnateAgent_HungStorageReturns503(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), mountRoot, "response must not leak the path")
 	assert.Contains(t, rec.Body.String(), "Workspace storage is not responding")
 }
+
+// Caller audit (round 3): workspace-path resource import answers 503, not
+// 400, when the project workspace cannot be resolved.
+func TestProjectImportTemplates_WorkspacePath_HungStorageReturns503(t *testing.T) {
+	srv, s, mountRoot := hungStorageServer(t)
+	srv.SetStorage(newMockStorage("hung-import-bucket"))
+	project := &store.Project{ID: tid("project-hung-import"), Slug: "hung-import", Name: "Hung Import Project"}
+	require.NoError(t, s.CreateProject(context.Background(), project))
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+project.ID+"/import-templates",
+		ImportTemplatesRequest{WorkspacePath: "templates"})
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), mountRoot, "response must not leak the path")
+	assert.Contains(t, rec.Body.String(), "Workspace storage is not responding")
+}
