@@ -85,17 +85,21 @@ export interface AgentSeedResult {
   liveCreated: Agent[];
   /**
    * IDs of response rows left out because the agent was deleted live while
-   * the request was in flight (its delete arrived after the epoch opened)
-   * and the store does not hold it. A page that renders the response as
-   * one server page is short by at least this many rows, and a refresh
-   * clears the shortfall.
+   * the request was in flight: the store tombstoned it after the epoch
+   * opened. This does not wait for the store's deferred `agents-changed`
+   * flush, so a delete whose flush has not landed yet still counts. A page
+   * that renders the response as one server page is short by at least
+   * this many rows, and a refresh clears the shortfall.
    *
-   * Every other tombstoned row is left out of `agents` without being
-   * listed here, because a refresh would leave it out the same way:
-   * - a row whose tombstone predates the request (for example a deleted
-   *   agent the server lists again; the store ignores a live `created` for
-   *   a tombstoned ID, so it never re-enters the store);
-   * - a row whose agent the store still holds.
+   * A row whose tombstone predates the request (for example a deleted
+   * agent the server lists again; the store ignores a live `created` for a
+   * tombstoned ID, so it never re-enters the store) is left out of
+   * `agents` without being listed here, because a refresh would leave it
+   * out the same way.
+   *
+   * The rule also skips a row whose agent the store holds. The real store
+   * never holds a tombstoned ID, so that check is defensive; the seed-epoch
+   * test with a stubbed store that holds a tombstoned agent covers it.
    */
   dropped: string[];
   /** A live create could not be decided (no `isMember` rule). */
@@ -110,6 +114,8 @@ export class AgentSeedEpoch {
   private readonly upsertedIds = new Set<string>();
   private readonly deletedIds = new Set<string>();
   private readonly unknownDeltas = new Map<string, UnknownAgentDelta>();
+  /** The store's tombstones when the epoch opened. */
+  private readonly tombstonedAtOpen: ReadonlySet<string>;
   private resynced = false;
   private closed = false;
 
@@ -148,6 +154,9 @@ export class AgentSeedEpoch {
     this.state.addEventListener('agents-changed', this.onChanged);
     this.state.addEventListener('agents-resync', this.onResync);
     this.token = this.state.beginSeedEpoch();
+    // A copy: the store's set is live, and a delete adds to it at once,
+    // before its agents-changed flush reaches onChanged.
+    this.tombstonedAtOpen = new Set(this.state.getDeletedAgentIds());
   }
 
   /**
@@ -227,7 +236,7 @@ export class AgentSeedEpoch {
       if (tombstones.has(a.id)) {
         // Only a delete that arrived during this request makes the page
         // short; an older tombstone hides the row on every refresh.
-        if (this.deletedIds.has(a.id) && !this.state.getAgent(a.id)) dropped.push(a.id);
+        if (!this.tombstonedAtOpen.has(a.id) && !this.state.getAgent(a.id)) dropped.push(a.id);
         continue;
       }
       members.set(a.id, this.state.getAgent(a.id) ?? a);

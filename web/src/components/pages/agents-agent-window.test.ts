@@ -164,6 +164,39 @@ async function flushLive(el: TestEl): Promise<void> {
 }
 
 /**
+ * Stops the state store from scheduling its coalesced flush on its own, so
+ * a live update stays unflushed (tombstoned, but with no agents-changed)
+ * until the test flushes it. Returns a restore function.
+ */
+function deferLiveFlush(): () => void {
+  const sm = stateManager as unknown as { scheduleFlush(): void; flushScheduled: boolean };
+  const spy = vi.spyOn(sm, 'scheduleFlush').mockImplementation(function (this: {
+    flushScheduled: boolean;
+  }) {
+    this.flushScheduled = true;
+  });
+  return () => spy.mockRestore();
+}
+
+/**
+ * Records, for the first agents-changed that carries `id` as deleted,
+ * whether the page's agent window was still loading at that moment.
+ */
+function watchDeleteFlush(
+  id: string,
+  loading: () => boolean
+): { loadingAtFlush?: boolean; stop(): void } {
+  const out: { loadingAtFlush?: boolean; stop(): void } = { stop: () => {} };
+  const onChanged = (e: Event): void => {
+    const deleted = (e as CustomEvent<{ data?: { deleted?: string[] } }>).detail?.data?.deleted;
+    if (out.loadingAtFlush === undefined && deleted?.includes(id)) out.loadingAtFlush = loading();
+  };
+  stateManager.addEventListener('agents-changed', onChanged);
+  out.stop = () => stateManager.removeEventListener('agents-changed', onChanged);
+  return out;
+}
+
+/**
  * Drops and reopens the live connection through the state store's own
  * SSE client, so the resync goes through the real state path.
  */
@@ -2067,6 +2100,50 @@ describe('scion-page-agents — agent list window', { timeout: 30_000 }, () => {
       h.release();
       await refreshed;
       await settle(el);
+      // The response predates the delete and still lists the row: the page
+      // is one row short, and a refresh can fill it.
+      expect(win.items.some((a) => a.id === id)).toBe(false);
+      expect(win.items).toHaveLength(24);
+      expect(win.updatesAvailable).toBe(true);
+
+      // The next refresh's delete predates its request, so it raises no chip.
+      await win.refresh();
+      await settle(el);
+      expect(h.sent).toHaveLength(3);
+      expect(win.items.some((a) => a.id === id)).toBe(false);
+      expect(win.items).toHaveLength(24);
+      expect(win.updatesAvailable).toBe(false);
+    });
+
+    it('a delete applied during an in-flight refresh whose flush lands after the response raises the chip for that refresh only', async () => {
+      const fake: Fake = {
+        agents: Array.from({ length: 1200 }, (_, i) => makeAgent(i)),
+        requests: [],
+      };
+      const h = holdable(fakeFetch(fake), isGlobalAgentsList);
+      vi.stubGlobal('fetch', vi.fn(h.fn));
+      const el = await mount();
+      const win = internals(el).agentWindow;
+      expect(win.state).toBe('paged');
+      const id = win.items[0].id;
+
+      h.hold();
+      const refreshed = win.refresh();
+      await vi.waitFor(() => expect(h.heldCount).toBe(1));
+      const restoreFlush = deferLiveFlush();
+      const watch = watchDeleteFlush(id, () => win.loading);
+      try {
+        handleUpdate(`agent.${id}.deleted`, {});
+        expect(watch.loadingAtFlush).toBeUndefined();
+        h.release();
+        await refreshed;
+        await settle(el);
+      } finally {
+        restoreFlush();
+        watch.stop();
+      }
+      // The delete reached agents-changed only after the response was adopted.
+      expect(watch.loadingAtFlush).toBe(false);
       // The response predates the delete and still lists the row: the page
       // is one row short, and a refresh can fill it.
       expect(win.items.some((a) => a.id === id)).toBe(false);

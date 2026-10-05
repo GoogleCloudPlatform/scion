@@ -56,6 +56,22 @@ function emit(sm: StateManager, subject: string, data: unknown): void {
   (sm as unknown as { flush(): void }).flush();
 }
 
+/**
+ * Applies a live update without flushing: the store records it (a delete
+ * tombstones the ID at once), but agents-changed fires only at the next
+ * {@link flushLive}, as with the store's deferred flush in a browser.
+ */
+function emitUnflushed(sm: StateManager, subject: string, data: unknown): void {
+  (sm as unknown as { handleUpdate(u: { subject: string; data: unknown }): void }).handleUpdate({
+    subject,
+    data,
+  });
+}
+
+function flushLive(sm: StateManager): void {
+  (sm as unknown as { flush(): void }).flush();
+}
+
 function openEpochs(sm: StateManager): number {
   return (sm as unknown as { seedEpochs: Map<unknown, unknown> }).seedEpochs.size;
 }
@@ -218,6 +234,45 @@ describe('AgentSeedEpoch', () => {
     });
     epoch.close();
     expect(result.agents.map((a) => a.id)).toEqual(['c']);
+    expect(result.dropped).toEqual(['b']);
+  });
+
+  it('seed reports a row as dropped when its live delete is applied but not yet flushed', () => {
+    const sm = newState();
+    sm.seedAgents([makeAgent('a'), makeAgent('b'), makeAgent('c')]);
+    emit(sm, 'agent.a.deleted', { agentId: 'a' });
+    const epoch = new AgentSeedEpoch(sm);
+    let changedEvents = 0;
+    const onChanged = (): void => {
+      changedEvents++;
+    };
+    sm.addEventListener('agents-changed', onChanged);
+    emitUnflushed(sm, 'agent.b.deleted', { agentId: 'b' });
+    expect(changedEvents).toBe(0);
+    expect(epoch.deletedChanges).toEqual([]);
+    const result = epoch.seed([makeAgent('a'), makeAgent('b'), makeAgent('c')], {
+      partial: false,
+    });
+    epoch.close();
+    sm.removeEventListener('agents-changed', onChanged);
+    expect(result.agents.map((x) => x.id)).toEqual(['c']);
+    expect(result.dropped).toEqual(['b']);
+  });
+
+  it('seed reports a row as dropped when the flush of its live delete lands after the seed', () => {
+    const sm = newState();
+    sm.seedAgents([makeAgent('a'), makeAgent('b'), makeAgent('c')]);
+    emit(sm, 'agent.a.deleted', { agentId: 'a' });
+    const epoch = new AgentSeedEpoch(sm);
+    emitUnflushed(sm, 'agent.b.deleted', { agentId: 'b' });
+    const result = epoch.seed([makeAgent('a'), makeAgent('b'), makeAgent('c')], {
+      partial: false,
+    });
+    flushLive(sm);
+    // The late flush is still recorded for replay before close.
+    expect(epoch.deletedChanges).toEqual(['b']);
+    epoch.close();
+    expect(result.agents.map((x) => x.id)).toEqual(['c']);
     expect(result.dropped).toEqual(['b']);
   });
 
