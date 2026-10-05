@@ -238,6 +238,18 @@ type BrokerHeartbeat struct {
 	// An older broker omits the field and the hub keeps every stored
 	// value.
 	ProfileAttach []ProfileAttachState `json:"profileAttach,omitempty"`
+	// StartsInFlight lists the agent starts still running on the broker
+	// when this heartbeat was built, read before the agents were listed, so
+	// a start that finishes between the two reads is either listed here or
+	// its container is in Projects. Meaningful only when
+	// Capabilities.StartsInFlight is true; an older broker omits both.
+	StartsInFlight []StartInFlight `json:"startsInFlight,omitempty"`
+}
+
+// StartInFlight identifies one agent start running on a broker.
+type StartInFlight struct {
+	ProjectID string `json:"projectId"`
+	Slug      string `json:"slug"`
 }
 
 // ProfileAttachState is one profile's attach capability in a heartbeat.

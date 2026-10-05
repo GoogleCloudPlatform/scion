@@ -77,7 +77,11 @@ type HeartbeatService struct {
 	auxiliaryManagers func() []agent.Manager // optional: returns managers for non-default runtimes
 	version           string
 	projectFilter     func(projectID string) bool // returns true if this project belongs to this hub
-	log               *slog.Logger
+	// startsInFlight returns the agent starts running on this broker
+	// (Server.startsInFlightSnapshot). Optional: when nil, the heartbeat
+	// neither lists starts nor advertises the capability.
+	startsInFlight func() []launchKey
+	log            *slog.Logger
 
 	// defaultRuntime is the broker's own default runtime instance, set once
 	// by the caller that constructs this service (which already holds it)
@@ -325,6 +329,19 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 	}
 	if s.profileAttach != nil {
 		heartbeat.ProfileAttach = s.profileAttach()
+	}
+
+	// Starts in flight are read BEFORE the agents are listed: a start that
+	// finishes between the two reads is then either still listed here or
+	// its container is in the agent list, so the hub never sees neither.
+	if s.startsInFlight != nil {
+		heartbeat.Capabilities.StartsInFlight = true
+		for _, k := range s.startsInFlight() {
+			if s.projectFilter != nil && !s.projectFilter(k.ProjectID) {
+				continue
+			}
+			heartbeat.StartsInFlight = append(heartbeat.StartsInFlight, hubclient.StartInFlight{ProjectID: k.ProjectID, Slug: k.Slug})
+		}
 	}
 
 	// Gather per-project agent counts. gatherProjectAgents snapshots the

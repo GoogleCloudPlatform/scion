@@ -67,58 +67,180 @@ var deleteWaitTimeoutFn = func(ctx context.Context) time.Duration {
 	return dispatchDeleteTimeout
 }
 
-// waitForAgentTransition waits for an agent's phase to reach a terminal state,
-// using a rolling timeout that resets on ANY AgentStatusEvent (phase, activity,
-// or detail change). The caller must subscribe to the agent's status events
-// BEFORE writing the durable intent, and pass the subscription channel +
-// unsubscribe function here.
+// Lifecycle wait timings. Package variables so tests can shorten them.
+var (
+	// lifecycleRollingTimeout is waitForLifecycleOutcome's rolling window:
+	// any non-terminal agent status event resets it.
+	lifecycleRollingTimeout = dispatchRollingTimeout
+	// lifecycleRowPollInterval is how often waitForLifecycleOutcome re-reads
+	// the dispatch row regardless of events. Agent status events keep
+	// resetting the rolling window, so without this a missed done event
+	// would go unnoticed until the caller's deadline.
+	lifecycleRowPollInterval = 10 * time.Second
+	// lifecycleErrorPhaseGrace is how long waitForLifecycleOutcome waits for
+	// the dispatch row to fail after an error phase arrives first, so the
+	// broker's typed error wins over the generic error-phase error.
+	lifecycleErrorPhaseGrace = 5 * time.Second
+)
+
+// waitForLifecycleOutcome waits for the outcome of a cross-node start, stop
+// or restart. The caller subscribes to BOTH agent.<id>.status and
+// broker.dispatch.<dispatchID>.done before writing the dispatch row, and
+// passes the subscription channel and unsubscribe function here.
 //
-// Parameters:
-//   - events: the subscription channel from EventPublisher.Subscribe("agent.<id>.status")
-//   - unsub:  the unsubscribe function returned by Subscribe (called on return)
-//   - terminal: returns true when the agent's phase indicates the op is done
-//     (e.g. "running" or "error" for start; "stopped" or "error" for stop)
+// The dispatch row is authoritative for failure: whenever it reads failed,
+// the wait returns dispatchFailureError, which carries the broker's typed
+// error when the executing node recorded one. Success is still the op's
+// success phase (running for start/restart, stopped for stop); a done row
+// alone does not end the wait.
 //
-// Returns the terminal phase on success, or ErrDispatchFailed on rolling
-// timeout, or ctx.Err() on context cancellation.
-func waitForAgentTransition(
+//   - success phase: return nil.
+//   - error phase: return the row's failure if it is failed. While the row
+//     is still pending or in_progress, wait up to lifecycleErrorPhaseGrace
+//     for it to fail, then return the generic error-phase error. For any
+//     other row state (done, or unreadable) return that error at once.
+//   - done event: read the row; return its failure if it is failed. If an
+//     error phase is waiting out its grace and the row is now finished
+//     without failing, return the error-phase error. Otherwise keep waiting
+//     (the executor's write may have lost its CAS). The rolling window is
+//     not reset.
+//   - other status events reset the rolling window.
+//   - every lifecycleRowPollInterval the row is read as on a done event, and
+//     when the rolling window expires it is read for its failure, in case
+//     the done event was missed. Rolling window
+//     expiry otherwise returns ErrDispatchFailed.
+//   - ctx cancellation returns ctx.Err(), including when a row read in any
+//     of the cases above fails because ctx ended.
+func waitForLifecycleOutcome(
 	ctx context.Context,
 	events <-chan Event,
 	unsub func(),
+	st store.BrokerDispatchStore,
+	dispatchID, op string,
 	terminal func(phase string) bool,
-) (string, error) {
+) error {
 	defer unsub()
 
-	timeout := dispatchRollingTimeout
-	timer := time.NewTimer(timeout)
+	doneSubject := "broker.dispatch." + dispatchID + ".done"
+	errorPhaseErr := fmt.Errorf("agent entered error phase during %s", op)
+
+	// readRow returns the dispatch row's state and, when it is failed, its
+	// failure. A row that cannot be read reports state "" (a later read
+	// retries), unless the read failed because ctx ended: then ctx.Err() is
+	// returned as the outcome, as the ctx.Done case would.
+	readRow := func() (string, error) {
+		d, err := st.GetBrokerDispatch(ctx, dispatchID)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return "", ctxErr
+			}
+			return "", nil
+		}
+		if d.State != store.DispatchStateFailed {
+			return d.State, nil
+		}
+		return d.State, dispatchFailureError(d)
+	}
+	rowFailure := func() error {
+		_, err := readRow()
+		return err
+	}
+
+	timer := time.NewTimer(lifecycleRollingTimeout)
 	defer timer.Stop()
+	poll := time.NewTicker(lifecycleRowPollInterval)
+	defer poll.Stop()
+	var graceTimer *time.Timer
+	var grace <-chan time.Time // set once an error phase has arrived
+	defer func() {
+		if graceTimer != nil {
+			graceTimer.Stop()
+		}
+	}()
+	// rowOutcome re-reads the row on a done event or a poll: its failure if
+	// it is failed, the error-phase error if an error phase is waiting out
+	// its grace and the executor has since finished the row without failing
+	// it, else nil (keep waiting).
+	rowOutcome := func() error {
+		rowState, err := readRow()
+		if err != nil {
+			return err
+		}
+		if grace != nil && rowState != "" && rowState != store.DispatchStatePending && rowState != store.DispatchStateInProgress {
+			return errorPhaseErr
+		}
+		return nil
+	}
 
 	for {
 		select {
 		case ev, ok := <-events:
 			if !ok {
-				return "", ErrDispatchFailed
+				if err := rowFailure(); err != nil {
+					return err
+				}
+				return ErrDispatchFailed
+			}
+			if ev.Subject == doneSubject {
+				if err := rowOutcome(); err != nil {
+					return err
+				}
+				continue
 			}
 			var status AgentStatusEvent
 			if err := json.Unmarshal(ev.Data, &status); err != nil {
 				continue
 			}
-			if terminal(status.Phase) {
-				return status.Phase, nil
-			}
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
+			if !terminal(status.Phase) {
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
 				}
+				timer.Reset(lifecycleRollingTimeout)
+				continue
 			}
-			timer.Reset(timeout)
+			if status.Phase != "error" {
+				return nil
+			}
+			rowState, err := readRow()
+			if err != nil {
+				return err
+			}
+			if rowState != store.DispatchStatePending && rowState != store.DispatchStateInProgress {
+				// The executor has finished without failing the row (the
+				// broker accepted the op), or the row cannot be read: the
+				// error phase is the outcome.
+				return errorPhaseErr
+			}
+			if grace == nil {
+				graceTimer = time.NewTimer(lifecycleErrorPhaseGrace)
+				grace = graceTimer.C
+			}
+
+		case <-grace:
+			if err := rowFailure(); err != nil {
+				return err
+			}
+			return errorPhaseErr
+
+		case <-poll.C:
+			if err := rowOutcome(); err != nil {
+				return err
+			}
 
 		case <-timer.C:
-			return "", ErrDispatchFailed
+			if err := rowFailure(); err != nil {
+				return err
+			}
+			if grace != nil {
+				return errorPhaseErr
+			}
+			return ErrDispatchFailed
 
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return ctx.Err()
 		}
 	}
 }

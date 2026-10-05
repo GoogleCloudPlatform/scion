@@ -38,7 +38,6 @@ import {
   can,
   canAny,
   canLifecycle,
-  getAgentDisplayStatus,
   isAgentRunning,
   isTerminalAvailable,
   isEmptyPerAgentWorkspace,
@@ -46,8 +45,7 @@ import {
   RESUME_BEST_EFFORT_CONFIRM_MESSAGE,
   lifecycleActionRequestInit,
 } from '../../shared/types.js';
-import type { StatusType } from '../shared/status-badge.js';
-import { stateLabel } from '../../shared/agent-state-display.js';
+import { agentStatusBadge } from '../../shared/agent-state-display.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import { stateManager } from '../../client/state.js';
@@ -3298,11 +3296,7 @@ export class ScionPageProjectDetail extends LitElement {
             : '\u2014'}
         </td>
         <td>
-          <scion-status-badge
-            status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${stateLabel(getAgentDisplayStatus(agent))}
-            size="small"
-          ></scion-status-badge>
+          ${agentStatusBadge(agent, { size: 'small' })}
           <scion-deletion-badge
             .deletion=${this.deletingView(agent)}
             size="small"
@@ -3479,11 +3473,7 @@ export class ScionPageProjectDetail extends LitElement {
                 : ''}
             </div>
           </div>
-          <scion-status-badge
-            status=${getAgentDisplayStatus(agent) as StatusType}
-            label=${stateLabel(getAgentDisplayStatus(agent))}
-            size="small"
-          ></scion-status-badge>
+          ${agentStatusBadge(agent, { size: 'small' })}
           <scion-deletion-badge
             .deletion=${this.deletingView(agent)}
             size="small"
