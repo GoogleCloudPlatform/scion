@@ -368,7 +368,8 @@ function newestMark(rows: readonly Agent[]): ProbeMark | undefined {
  * which heartbeats rewrite and no list consumer reads; and `creatorName`, the
  * compact view's copy of `appliedConfig.creatorName`, which a full row (from
  * a full-view walk or a single-agent read) holds only inside `appliedConfig`.
- * A row that changes otherwise merges with all of them.
+ * A probe row that lacks one of them does not make the held row stale
+ * either. A row that changes otherwise merges with all of them.
  */
 const PROBE_UNCOMPARED_FIELDS: ReadonlySet<string> = new Set([
   'updated',

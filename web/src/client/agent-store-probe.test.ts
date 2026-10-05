@@ -594,6 +594,25 @@ describe('AgentStore delta probe', () => {
       expect(find(h.store.peek(HUB), 'a2')).toBe(a2);
     });
 
+    it('does not publish when a probe row lacks a creator name the held row has', async () => {
+      const h = await loaded(
+        Array.from({ length: 10 }, (_, i) =>
+          active(`a${i}`, 1, { appliedConfig: { creatorName: 'Ada' } } as Partial<Agent>)
+        )
+      );
+      let publishes = 0;
+      h.store.retain(HUB, () => publishes++);
+      const a3 = find(h.store.peek(HUB), 'a3') as (Agent & { creatorName?: string }) | undefined;
+      expect(a3?.creatorName).toBe('Ada');
+      h.server.agents = h.server.agents.map((a) => ({ ...a, appliedConfig: {} }) as Agent);
+      h.server.heartbeat(t(1000));
+      await tick();
+
+      expect(h.server.probes()).toBe(1);
+      expect(publishes).toBe(0);
+      expect(find(h.store.peek(HUB), 'a3')).toBe(a3);
+    });
+
     it('does not publish for the empty values a full row holds and compact probe rows omit', async () => {
       const h = await loaded([active('a1', 1)]);
       h.server.agents.push(
