@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -1194,5 +1195,67 @@ func TestRoutingSkillResolver_RouteFilter_AllDirectSkipsPrimaryGroup(t *testing.
 	}
 	if len(result.Resolved) != 2 {
 		t.Fatalf("expected both refs resolved via the fallback, got %+v", result.Resolved)
+	}
+}
+
+// TestRoutingSkillResolver_RouteFilter_DirectFallbackErrorIsPerRef checks
+// that a transport-level error from the fallback on directly routed refs
+// becomes a per-ref error for each of those refs, while the refs routed to
+// the primary in the same scheme group, and other scheme groups, still
+// resolve.
+func TestRoutingSkillResolver_RouteFilter_DirectFallbackErrorIsPerRef(t *testing.T) {
+	hub := &mockSchemeResolver{
+		name:     "hub",
+		resolved: []ResolvedSkill{{Name: "hub-served", URI: "gh://o/r/hub-served"}},
+	}
+	fb := &routeFilterMock{
+		mockSchemeResolver: &mockSchemeResolver{name: "github", hardErr: errors.New("connection reset")},
+		direct: func(ref api.SkillReference) bool {
+			return ref.URI == "gh://o/r/direct-1" || ref.URI == "gh://o/r/direct-2"
+		},
+	}
+	other := &mockSchemeResolver{
+		name:     "gcp",
+		resolved: []ResolvedSkill{{Name: "other", URI: "gcp-skill://reg/other"}},
+	}
+
+	router := NewRoutingSkillResolver(hub)
+	router.RegisterFallback("gh", fb)
+	router.Register("gcp-skill", other)
+
+	result, err := router.Resolve(context.Background(), []api.SkillReference{
+		{URI: "gh://o/r/hub-served"},
+		{URI: "gh://o/r/direct-1"},
+		{URI: "gh://o/r/direct-2"},
+		{URI: "gcp-skill://reg/other"},
+	}, ResolveOpts{})
+	if err != nil {
+		t.Fatalf("Resolve returned %v; a fallback failure on direct refs must not fail the whole call", err)
+	}
+
+	resolved := map[string]bool{}
+	for _, s := range result.Resolved {
+		resolved[s.URI] = true
+	}
+	if !resolved["gh://o/r/hub-served"] || !resolved["gcp-skill://reg/other"] || len(result.Resolved) != 2 {
+		t.Errorf("resolved = %+v, want the primary-routed gh ref and the gcp-skill ref", result.Resolved)
+	}
+
+	errByURI := map[string]ResolveError{}
+	for _, e := range result.Errors {
+		errByURI[e.URI] = e
+	}
+	if len(result.Errors) != 2 {
+		t.Fatalf("errors = %+v, want one per direct ref", result.Errors)
+	}
+	for _, uri := range []string{"gh://o/r/direct-1", "gh://o/r/direct-2"} {
+		e, ok := errByURI[uri]
+		if !ok {
+			t.Errorf("no error for %s", uri)
+			continue
+		}
+		if e.Code != "resolve_failed" || !strings.Contains(e.Message, "connection reset") {
+			t.Errorf("%s: error %+v, want resolve_failed naming the fallback failure", uri, e)
+		}
 	}
 }

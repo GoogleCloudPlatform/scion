@@ -646,7 +646,8 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		}
 	}
 
-	// If dispatch failed, return error
+	// If dispatch failed, return error. A required-skill resolution failure
+	// keeps the broker's status and code; anything else is a 502.
 	if dispatchErr != nil {
 		if ref := deleteClaimedDuringDispatch(dispatchErr, agent.ID); ref != nil {
 			ref.write(w)
@@ -673,6 +674,9 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			return
 		}
 		if writeEmptyPerAgentCapabilityError(w, dispatchErr) {
+			return
+		}
+		if relaySkillResolutionError(w, dispatchErr) {
 			return
 		}
 		RuntimeError(w, "Failed to dispatch to runtime broker: "+dispatchErr.Error())
