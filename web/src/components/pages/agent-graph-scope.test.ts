@@ -646,6 +646,24 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
   });
 
   describe('picker', () => {
+    it('a project drained after a capped unscoped set still offers every known project', async () => {
+      const fake = newFake(2001);
+      vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
+      const el = await mountGraph();
+      const all = (g(el).projects as Array<{ id: string }>).map((p) => p.id);
+      expect(all).toHaveLength(7);
+      const optionValues = () =>
+        [...(el.shadowRoot?.querySelectorAll('sl-select sl-option') ?? [])].map((o) =>
+          o.getAttribute('value')
+        );
+      expect(optionValues()).toEqual(all);
+      await pick(el, 'p-1');
+      expect(g(el).memberScope).toBe('p-1');
+      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      expect((g(el).projects as Array<{ id: string }>).map((p) => p.id)).toEqual(all);
+      expect(optionValues()).toEqual(all);
+    });
+
     it('a capped unscoped drain is reused for all projects; a project choice drains that project', async () => {
       const fake = newFake(2001);
       vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
@@ -1423,7 +1441,7 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       expect(banner(el, 'stale')).toBeNull();
     });
 
-    it('the Retry button of the incomplete banner shows loading while it drains', async () => {
+    it('the Retry button of the incomplete banner shows loading and is disabled while it drains', async () => {
       const fake = newFake(2001);
       const h = holdable(fakeFetch(fake), (u) => !u.searchParams.has('cursor'));
       vi.stubGlobal('fetch', vi.fn(h.fn));
@@ -1435,10 +1453,16 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       expect(banner(el, 'incomplete')?.querySelector('sl-button')?.hasAttribute('loading')).toBe(
         true
       );
+      expect(banner(el, 'incomplete')?.querySelector('sl-button')?.hasAttribute('disabled')).toBe(
+        true
+      );
       expect(treeView(el)).not.toBeNull();
       h.release();
       await settle(el);
       expect(banner(el, 'incomplete')?.querySelector('sl-button')?.hasAttribute('loading')).toBe(
+        false
+      );
+      expect(banner(el, 'incomplete')?.querySelector('sl-button')?.hasAttribute('disabled')).toBe(
         false
       );
     });
@@ -1604,7 +1628,6 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       expect(bannerText(el, 'stale')).toBe(STALE);
       el.remove();
       expect(g(el).probed).toBe(false);
-      expect(g(el).knownLarge).toBe(false);
       expect(g(el).memberScope).toBeNull();
       expect(g(el).stale).toBe(false);
       expect(g(el).agents).toEqual([]);
@@ -1661,6 +1684,57 @@ describe('/agents/graph scope and loading', { timeout: 60_000 }, () => {
       expect(g(el).stale).toBe(false);
       expect(banner(el, 'stale')).toBeNull();
       expect(fake.requests).toEqual([]);
+    });
+
+    it('a page re-attached after a failed multi-page drain forgets the large set and probes again', async () => {
+      const fake = newFake(1200);
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(failingFetch(fake, (u) => u.searchParams.get('cursor') === '1000'))
+      );
+      const el = await mountGraph();
+      expect(g(el).knownLarge).toBe(true);
+      expect(stateManager.isAgentSetComplete('compact')).toBe(false);
+      el.remove();
+      expect(g(el).knownLarge).toBe(false);
+      window.history.replaceState({}, '', '/agents/graph?project=p-1');
+      const before = fake.requests.length;
+      document.body.appendChild(el);
+      await el.updateComplete;
+      await settle(el);
+      expect(graphRequests(fake, before)).toEqual([PROBE, PROJECT_PAGE('p-1')]);
+      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+    });
+
+    it('a re-attached page does not carry a late first connect of its earlier attachment into its probe', async () => {
+      vi.stubGlobal('EventSource', SilentEventSource);
+      stateManager.setScope({ type: 'agent-detail', agentId: 'x' });
+      const fake = newFake(25);
+      const h = holdable(fakeFetch(fake), (u) => !u.searchParams.has('sort'));
+      vi.stubGlobal('fetch', vi.fn(h.fn));
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const el = await mountUnsettled('', { connectTimeoutMs: 60_000 });
+      vi.advanceTimersByTime(3000);
+      expect((el as unknown as { firstConnectLate: boolean }).firstConnectLate).toBe(true);
+      vi.useRealTimers();
+      el.remove();
+      window.history.replaceState({}, '', '/agents/graph?project=p-1');
+      const hp = holdable(fakeFetch(fake), (u) => u.searchParams.has('sort'));
+      vi.stubGlobal('fetch', vi.fn(hp.fn));
+      hp.hold(1);
+      document.body.appendChild(el);
+      await el.updateComplete;
+      await vi.waitFor(() => expect(hp.heldCount).toBe(1));
+      // The connection comes up after re-attach, within the new attachment's
+      // connect wait, while its probe is still in flight.
+      stateManager.sseClientInstance.dispatchEvent(new CustomEvent('connected'));
+      await stateManager.sseConnected(stateManager.scopeGeneration);
+      hp.release();
+      await settle(el);
+      expect(graphRequests(fake)).toEqual([PROBE]);
+      expect(ids(g(el).visibleAgents)).toEqual(projectIds(fake, 'p-1'));
+      expect(g(el).stale).toBe(false);
+      expect(banner(el, 'stale')).toBeNull();
     });
   });
 
