@@ -30,6 +30,11 @@ var createTempFile = os.CreateTemp
 // temporary file: nothing has been written and the target is untouched.
 var errAtomicTempCreate = errors.New("cannot create temporary file")
 
+// errAtomicNotDurable marks a writeFileAtomic failure after the rename: the
+// new content is in place, but the directory fsync failed, so the rename
+// may not survive a crash.
+var errAtomicNotDurable = errors.New("file replaced but the change may not be durable")
+
 // writeFileAtomic writes data to targetPath through a temporary file in the
 // same directory followed by a rename, so readers never see a partial file.
 // It preserves the mode of an existing regular file and uses 0644 otherwise.
@@ -37,7 +42,9 @@ var errAtomicTempCreate = errors.New("cannot create temporary file")
 // user (for example root, under sudo).
 //
 // It needs write permission on the directory. A temp-file creation failure
-// wraps errAtomicTempCreate so callers can choose an in-place fallback.
+// wraps errAtomicTempCreate so callers can choose an in-place fallback. An
+// error wrapping errAtomicNotDurable means the content was replaced but may
+// not be durable; repeating the write is safe.
 //
 // It does not serialise concurrent read-modify-write cycles: with two
 // writers the last rename wins and the other update is lost (no torn file,
@@ -90,7 +97,7 @@ func syncDir(dir string) error {
 	}
 	defer func() { _ = d.Close() }()
 	if err := d.Sync(); err != nil && !errors.Is(err, syscall.EINVAL) && !errors.Is(err, syscall.ENOTSUP) && !errors.Is(err, errors.ErrUnsupported) {
-		return fmt.Errorf("sync directory %s: %w", dir, err)
+		return fmt.Errorf("%w: sync directory %s: %w", errAtomicNotDurable, dir, err)
 	}
 	return nil
 }

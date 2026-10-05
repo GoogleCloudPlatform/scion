@@ -42,11 +42,26 @@ import (
 // back to a full decode/encode that expands the aliases instead.
 var errYAMLEditThroughAlias = errors.New("yaml edit path goes through an alias or anchor")
 
-// isYAMLShared reports whether editing n in place could affect other parts
-// of the document: n is an alias, or carries an anchor that aliases can
-// refer to.
+// isYAMLShared reports whether n cannot be edited in place without
+// diverging from a decode/encode of the document: n is an alias, carries an
+// anchor that aliases can refer to, or is a mapping with a `<<` merge key
+// (whose merged keys a node edit cannot see or remove).
 func isYAMLShared(n *yaml.Node) bool {
-	return n != nil && (n.Kind == yaml.AliasNode || n.Anchor != "")
+	return n != nil && (n.Kind == yaml.AliasNode || n.Anchor != "" || hasYAMLMergeKey(n))
+}
+
+// hasYAMLMergeKey reports whether the mapping n has a `<<` merge key.
+func hasYAMLMergeKey(n *yaml.Node) bool {
+	if n.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		k := n.Content[i]
+		if k.Kind == yaml.ScalarNode && (k.Tag == "!!merge" || (k.Value == "<<" && k.Style == 0)) {
+			return true
+		}
+	}
+	return false
 }
 
 // resolveAlias follows n through any YAML anchors/aliases (`key: *v`) to
@@ -222,8 +237,8 @@ func replacementScalar(old, value *yaml.Node) *yaml.Node {
 }
 
 // checkYAMLPathUnshared returns errYAMLEditThroughAlias if root or any
-// existing node along path (the target value included) is an alias or
-// carries an anchor.
+// existing node along path (the target value included) is shared in the
+// isYAMLShared sense: an alias, anchored, or a mapping with a merge key.
 func checkYAMLPathUnshared(root *yaml.Node, path []string) error {
 	m := root
 	if isYAMLShared(m) {

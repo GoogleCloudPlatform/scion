@@ -471,6 +471,10 @@ var structParityBases = []structParityBase{
 	{name: "schema-version-int", file: "settings.yaml", content: "schema_version: 1\nactive_profile: a\n"},
 	{name: "flow-parent", file: "settings.yaml", content: "schema_version: \"1\"\nhub: {endpoint: https://e, enabled: true}\nserver: {broker: {broker_id: b}}\n"},
 	{name: "yml", file: "settings.yml", content: writebackFixture},
+	{name: "merge-key", file: "settings.yaml", content: "schema_version: \"1\"\nx-base: &b\n  endpoint: https://base\n  enabled: true\nx-auth: &a\n  username: base-user\nhub:\n  <<: *b\n  linked: true\nserver:\n  auth:\n    <<: *a\n    email: own@x\n"},
+	{name: "merge-key-explicit-override", file: "settings.yaml", content: "schema_version: \"1\"\nx-base: &b\n  endpoint: https://base\nhub:\n  <<: *b\n  endpoint: https://own\n"},
+	{name: "merge-key-root", file: "settings.yaml", content: "x-top: &t\n  active_profile: merged\n  image_registry: merged-registry\nschema_version: \"1\"\n<<: *t\n"},
+	{name: "tagged-map-parent", file: "settings.yaml", content: "schema_version: \"1\"\nhub: !!map\n  endpoint: https://e\n"},
 }
 
 // runStructParity checks, for every key and a spread of values, that the
@@ -861,4 +865,129 @@ func TestReplaceYAMLMapValue_NonScalar(t *testing.T) {
 		assert.Equal(t, "v", got.Value, src)
 		assert.Equal(t, lineComment, got.LineComment, src)
 	}
+}
+
+// TestUpdateVersionedSetting_MergeKeys covers the review repros: a delete
+// under a `<<` merge key must remove the merged value, as the struct path
+// does, rather than silently do nothing or uncover it.
+func TestUpdateVersionedSetting_MergeKeys(t *testing.T) {
+	for name, src := range map[string]string{
+		"merged only":       "schema_version: \"1\"\nx-base: &b {endpoint: https://base}\nhub: {<<: *b, linked: true}\n",
+		"explicit override": "schema_version: \"1\"\nx-base: &b {endpoint: https://base}\nhub:\n  <<: *b\n  endpoint: https://own\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := writeSettingsFixture(t, src)
+			require.NoError(t, UpdateVersionedSetting(dir, "hub.endpoint", ""))
+			vs, err := LoadSingleFileVersioned(dir)
+			require.NoError(t, err)
+			assert.Equal(t, "", vs.GetHubEndpoint())
+		})
+	}
+	t.Run("helpers refuse mappings with merge keys", func(t *testing.T) {
+		doc, err := parseYAMLMappingDocument([]byte("x: &b {k: 1}\nh:\n  <<: *b\n  j: 2\nt:\n  !!merge <<: *b\n"))
+		require.NoError(t, err)
+		root := doc.Content[0]
+		_, err = setYAMLPath(root, []string{"h", "k"}, newYAMLStringScalar("v"))
+		assert.ErrorIs(t, err, errYAMLEditThroughAlias)
+		_, err = deleteYAMLPath(root, []string{"h", "j"})
+		assert.ErrorIs(t, err, errYAMLEditThroughAlias)
+		_, err = deleteYAMLPath(root, []string{"t", "k"})
+		assert.ErrorIs(t, err, errYAMLEditThroughAlias)
+		quoted, err := parseYAMLMappingDocument([]byte("h:\n  '<<': literal\n"))
+		require.NoError(t, err)
+		_, err = setYAMLPath(quoted.Content[0], []string{"h", "k"}, newYAMLStringScalar("v"))
+		assert.NoError(t, err, "a quoted '<<' is an ordinary key")
+	})
+}
+
+// TestWriteSettingsFileAtomic_SymlinkedDirectoryRelativeLink is the review's
+// dotfiles layout: the settings directory is a symlink and the settings
+// file is a relative link with `..`, which must resolve against the
+// physical parent, as the kernel (and every read) does.
+func TestWriteSettingsFileAtomic_SymlinkedDirectoryRelativeLink(t *testing.T) {
+	setup := func(t *testing.T, realFile bool) (root, scionDir string) {
+		root = t.TempDir()
+		for _, d := range []string{"home/shared", "real/scion", "real/shared"} {
+			require.NoError(t, os.MkdirAll(filepath.Join(root, d), 0755))
+		}
+		require.NoError(t, os.Symlink(filepath.Join("..", "real", "scion"), filepath.Join(root, "home", ".scion")))
+		require.NoError(t, os.Symlink(filepath.Join("..", "shared", "settings.yaml"), filepath.Join(root, "real", "scion", "settings.yaml")))
+		if realFile {
+			require.NoError(t, os.WriteFile(filepath.Join(root, "real", "shared", "settings.yaml"), []byte("schema_version: \"1\"\nimage_registry: a\n"), 0644))
+		}
+		return root, filepath.Join(root, "home", ".scion")
+	}
+	assertResult := func(t *testing.T, root, scionDir string) {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(root, "real", "shared", "settings.yaml"))
+		require.NoError(t, err)
+		assert.Contains(t, string(data), "image_registry: b")
+		_, err = os.Stat(filepath.Join(root, "home", "shared", "settings.yaml"))
+		assert.True(t, os.IsNotExist(err), "write landed at the lexical path")
+		fi, err := os.Lstat(filepath.Join(root, "real", "scion", "settings.yaml"))
+		require.NoError(t, err)
+		assert.True(t, fi.Mode()&os.ModeSymlink != 0, "settings link was replaced")
+		vs, err := LoadSingleFileVersioned(scionDir)
+		require.NoError(t, err)
+		assert.Equal(t, "b", vs.ImageRegistry)
+	}
+
+	t.Run("existing target", func(t *testing.T) {
+		root, scionDir := setup(t, true)
+		require.NoError(t, UpdateVersionedSetting(scionDir, "image_registry", "b"))
+		assertResult(t, root, scionDir)
+	})
+	t.Run("dangling target", func(t *testing.T) {
+		root, scionDir := setup(t, false)
+		require.NoError(t, UpdateVersionedSetting(scionDir, "image_registry", "b"))
+		assertResult(t, root, scionDir)
+	})
+	t.Run("struct save through the same layout", func(t *testing.T) {
+		root, scionDir := setup(t, true)
+		vs, err := LoadSingleFileVersioned(scionDir)
+		require.NoError(t, err)
+		vs.ImageRegistry = "b"
+		require.NoError(t, SaveVersionedSettings(scionDir, vs))
+		assertResult(t, root, scionDir)
+	})
+}
+
+func TestUpdateVersionedSetting_DanglingYMLSymlink(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "real"), 0755))
+	link := filepath.Join(dir, "settings.yml")
+	require.NoError(t, os.Symlink(filepath.Join("real", "settings.yml"), link))
+	require.NoError(t, UpdateVersionedSetting(dir, "active_profile", "local"))
+	_, err := os.Lstat(filepath.Join(dir, "settings.yaml"))
+	assert.True(t, os.IsNotExist(err), "settings.yaml created next to a dangling settings.yml link")
+	fi, err := os.Lstat(link)
+	require.NoError(t, err)
+	assert.True(t, fi.Mode()&os.ModeSymlink != 0)
+	vs, err := LoadSingleFileVersioned(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "local", vs.ActiveProfile)
+}
+
+func TestUpdateVersionedSetting_RoundTripRefusal(t *testing.T) {
+	t.Run("tagged mapping parent delete passes the guard", func(t *testing.T) {
+		dir := writeSettingsFixture(t, "schema_version: \"1\"\nhub: !!map\n  endpoint: https://e\n  linked: true\n")
+		require.NoError(t, UpdateVersionedSetting(dir, "hub.endpoint", ""))
+		vs, err := LoadSingleFileVersioned(dir)
+		require.NoError(t, err)
+		assert.Equal(t, "", vs.GetHubEndpoint())
+		assert.True(t, vs.IsHubLinked())
+	})
+	t.Run("an encoding that does not round-trip is refused", func(t *testing.T) {
+		const src = "schema_version: \"1\"\nhub: {endpoint: https://e}\n"
+		dir := writeSettingsFixture(t, src)
+		orig := encodeSettingsYAML
+		t.Cleanup(func() { encodeSettingsYAML = orig })
+		encodeSettingsYAML = func(*yaml.Node, int) ([]byte, error) {
+			return []byte("hub: # c\n{}\n"), nil
+		}
+		err := UpdateVersionedSetting(dir, "hub.linked", "true")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "do not round-trip")
+		assert.Equal(t, src, readSettingsFile(t, dir))
+	})
 }

@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -4030,9 +4031,14 @@ func LoadSingleFileVersioned(dir string) (*VersionedSettings, error) {
 //
 // A YAML file is edited in place: only the target key changes, so comments, key order,
 // unknown keys and formatting elsewhere in the file survive. The file is not rewritten
-// when the value is already set, and is otherwise replaced atomically. A JSON file (or
-// a YAML edit that would have to write through an alias) goes through the struct
-// round-trip in updateVersionedSettingStruct, which saves back to the same YAML file.
+// when the value is already set, and is otherwise replaced atomically. A JSON file goes
+// through the struct round-trip in updateVersionedSettingStruct, which saves back to the
+// same file name.
+//
+// Fallback cliff: if a node on the edited YAML path is an alias, carries an anchor or
+// is a mapping with a `<<` merge key, an in-place edit could change other keys or miss
+// merged ones. The whole file is then rewritten from the struct instead, which loses
+// comments and unknown keys and reorders keys (logged at debug level).
 func UpdateVersionedSetting(dir string, key string, value string) error {
 	settingsPath := GetSettingsPath(dir)
 	if filepath.Ext(settingsPath) == ".json" {
@@ -4051,6 +4057,8 @@ func UpdateVersionedSetting(dir string, key string, value string) error {
 	}
 	err = updateVersionedSettingYAML(dir, settingsPath, edit)
 	if errors.Is(err, errYAMLEditThroughAlias) {
+		slog.Debug("settings: alias, anchor or merge key on the edited path; rewriting the whole file from the struct (comments and unknown keys are lost)",
+			"path", settingsPath, "key", key)
 		return updateVersionedSettingStruct(dir, key, value)
 	}
 	return err
@@ -4134,7 +4142,7 @@ func updateVersionedSettingYAML(dir, settingsPath string, edit versionedSettingE
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("failed to create directory %s: %w", dir, err)
 		}
-		targetPath = filepath.Join(dir, "settings.yaml")
+		targetPath = newSettingsFilePath(dir)
 	} else {
 		// Same legacy hub.grove_id migration LoadSingleFileVersioned runs.
 		_, override = migrateProjectSettingsFile(targetPath)
@@ -4192,11 +4200,14 @@ func updateVersionedSettingYAML(dir, settingsPath string, edit versionedSettingE
 	}
 
 	// Both candidate outputs must decode to exactly the edited tree's data.
+	// Only the first YAML document is parsed, compared and re-encoded, so a
+	// full re-encode drops any later documents, as the struct path always
+	// did; loaders ignore them. A splice keeps them.
 	var want interface{}
 	if err := doc.Decode(&want); err != nil {
 		return fmt.Errorf("failed to decode edited settings: %w", err)
 	}
-	out, err := encodeYAMLDocument(doc, indent)
+	out, err := encodeSettingsYAML(doc, indent)
 	if err != nil {
 		return fmt.Errorf("failed to marshal versioned settings: %w", err)
 	}
@@ -4212,6 +4223,23 @@ func updateVersionedSettingYAML(dir, settingsPath string, edit versionedSettingE
 		return nil
 	}
 	return writeSettingsFileAtomic(targetPath, out)
+}
+
+// encodeSettingsYAML is encodeYAMLDocument. It is a variable so tests can
+// reach the round-trip refusal in updateVersionedSettingYAML.
+var encodeSettingsYAML = encodeYAMLDocument
+
+// newSettingsFilePath returns the file a new settings file in dir should be
+// written to: a dangling settings.yaml or settings.yml symlink (written
+// through, keeping the link), else dir/settings.yaml.
+func newSettingsFilePath(dir string) string {
+	for _, name := range []string{"settings.yaml", "settings.yml"} {
+		p := filepath.Join(dir, name)
+		if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return p
+		}
+	}
+	return filepath.Join(dir, "settings.yaml")
 }
 
 // spliceVersionedSettingEdit applies edit to orig as a byte-level splice.
@@ -4247,21 +4275,35 @@ func writeSettingsFileAtomic(path string, data []byte) error {
 	return err
 }
 
-// resolveSettingsWriteTarget follows path through any symlinks to the file
-// a write should replace. A dangling link resolves to its (relative-to-the-
-// link) target, so the write creates that file and keeps the link, as
-// os.WriteFile would; it is an error if the target's directory is missing.
+// resolveSettingsWriteTarget returns the file a write to path should
+// replace, following symlinks the way the kernel does so the write lands in
+// the file that reads see. An existing target is resolved with
+// filepath.EvalSymlinks. A dangling link is walked by hand to its final
+// (missing) target, resolving each hop's parent directory physically before
+// applying a relative link, so `..` in a link under a symlinked directory
+// means what it means to the kernel. The write then creates that target and
+// keeps the link, as os.WriteFile would. It is an error if the dangling
+// target's directory does not exist.
 func resolveSettingsWriteTarget(path string) (string, error) {
+	if _, err := os.Stat(path); err == nil {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return "", fmt.Errorf("failed to resolve settings file %s: %w", path, err)
+		}
+		return resolved, nil
+	}
 	p := path
 	for hops := 0; hops < 40; hops++ {
 		fi, err := os.Lstat(p)
 		if errors.Is(err, fs.ErrNotExist) {
-			if p != path {
-				if st, derr := os.Stat(filepath.Dir(p)); derr != nil || !st.IsDir() {
-					return "", fmt.Errorf("settings file %s is a dangling symlink to %s, and its directory does not exist", path, p)
-				}
+			if p == path {
+				return p, nil
 			}
-			return p, nil
+			physical, derr := physicalParentPath(p)
+			if derr != nil {
+				return "", fmt.Errorf("settings file %s is a dangling symlink to %s, and its directory does not exist", path, p)
+			}
+			return physical, nil
 		}
 		if err != nil {
 			return "", fmt.Errorf("failed to inspect settings file %s: %w", p, err)
@@ -4274,11 +4316,48 @@ func resolveSettingsWriteTarget(path string) (string, error) {
 			return "", fmt.Errorf("failed to read symlink %s: %w", p, err)
 		}
 		if !filepath.IsAbs(link) {
-			link = filepath.Join(filepath.Dir(p), link)
+			dir, _ := splitLastPathElem(p)
+			parent, err := filepath.EvalSymlinks(dir)
+			if err != nil {
+				return "", fmt.Errorf("failed to resolve the directory of symlink %s: %w", p, err)
+			}
+			// Not filepath.Join: that would clean `..` in link lexically.
+			// Lstat lets the kernel resolve it, and the next hop resolves
+			// the parent with EvalSymlinks.
+			link = parent + string(filepath.Separator) + link
 		}
 		p = link
 	}
 	return "", fmt.Errorf("settings file %s: too many levels of symbolic links", path)
+}
+
+// splitLastPathElem splits p at its last separator without cleaning it
+// (filepath.Dir would collapse `..` lexically).
+func splitLastPathElem(p string) (dir, base string) {
+	i := strings.LastIndex(p, string(filepath.Separator))
+	if i < 0 {
+		return ".", p
+	}
+	dir, base = p[:i], p[i+1:]
+	if dir == "" {
+		dir = string(filepath.Separator)
+	}
+	return dir, base
+}
+
+// physicalParentPath resolves the directory part of p (which may contain
+// unresolved `..` after a symlink) with filepath.EvalSymlinks, which
+// applies `..` to the resolved path, and rejoins the last element.
+func physicalParentPath(p string) (string, error) {
+	dir, base := splitLastPathElem(p)
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", err
+	}
+	if st, err := os.Stat(resolved); err != nil || !st.IsDir() {
+		return "", fmt.Errorf("%s is not a directory", resolved)
+	}
+	return filepath.Join(resolved, base), nil
 }
 
 // updateVersionedSettingStruct is the struct round-trip form of
