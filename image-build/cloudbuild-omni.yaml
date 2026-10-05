@@ -216,4 +216,4 @@ substitutions:
 options:
   dynamicSubstitutions: true
   machineType: 'E2_HIGHCPU_8'
-timeout: 2400s # 40 minutes - measured 641s (build 9a1b9766, 2026-08-27)
+timeout: 7200s # 2 hours - measured 641s (build 9a1b9766), but it also builds scion-base, seen at ~40m (build 14e5e1c1)
