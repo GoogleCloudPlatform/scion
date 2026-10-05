@@ -143,6 +143,9 @@ func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Requ
 	// bindings if they were pre-added to a project.
 	err = s.store.WithTx(r.Context(), func(tx store.Store) error {
 		if err := checkUserOwnsNoAgentsTx(r.Context(), tx, existingUser.ID); err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return errAllowListUserNotFound
+			}
 			return err
 		}
 		if err := guardAndCascadeUserRoleBindingsTx(r.Context(), tx, existingUser.ID, s.membershipNow()); err != nil {
@@ -167,7 +170,8 @@ func (s *Server) handleAdminAllowListByEmail(w http.ResponseWriter, r *http.Requ
 		case errors.Is(err, errUserRoleBindingsChanged):
 			writeUserRoleBindingsChangedError(w)
 		case errors.Is(err, errAllowListUserNotFound):
-			// Only a not-found from DeleteUser itself is a client 404; a
+			// Only a not-found for the user itself (from DeleteUser or the
+			// user-row lock in checkUserOwnsNoAgentsTx) is a client 404; a
 			// not-found inside the guard (e.g. a missing role definition)
 			// is a server error and falls through to 500.
 			writeError(w, http.StatusNotFound, ErrCodeNotFound, "email not found in allow list", nil)

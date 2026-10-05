@@ -1030,11 +1030,25 @@ func (s *Server) createAgentWithIdentityKey(ctx context.Context, agent *store.Ag
 // agent's delegation edge written in the same transaction. When edge is
 // non-nil its DelegateID is set to agent.ID, and a failed edge write rolls
 // back the agent row and its identity keys. A nil edge writes no edge.
+//
+// When a user delegates to the agent and owns it (edge.DelegatorType is
+// user and edge.DelegatorID is agent.OwnerID), the transaction first takes
+// a shared lock on that user's row and re-checks that the user exists
+// (lockAgentOwnerUserTx, ptone/scion#2769). A create racing the user's
+// delete then either commits first, so the delete sees the agent and is
+// refused, or fails with errAgentOwnerUserMissing.
 func (s *Server) createAgentWithIdentityKeyAndEdge(ctx context.Context, agent *store.Agent, slug string, edge *store.DelegationEdge) error {
 	if _, err := api.ValidateDisplayName(slug); err != nil {
 		return fmt.Errorf("%w: %s", errInvalidDisplayName, err)
 	}
+	ownerUserID := ""
+	if edge != nil && edge.DelegatorType == store.DelegationPrincipalUser && edge.DelegatorID == agent.OwnerID {
+		ownerUserID = agent.OwnerID
+	}
 	return s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := lockAgentOwnerUserTx(ctx, tx, ownerUserID); err != nil {
+			return err
+		}
 		if err := tx.CreateAgent(ctx, agent); err != nil {
 			return err
 		}
@@ -1933,6 +1947,11 @@ func (s *Server) createAgentInProject(
 		s.releaseAgentQuotas(ctx, agent.ID, runtimeBrokerID)
 		if errors.Is(err, errInvalidDisplayName) {
 			writeError(w, http.StatusBadRequest, "invalid_name", err.Error(), nil)
+			return
+		}
+		if errors.Is(err, errAgentOwnerUserMissing) {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				"cannot create the agent: its owner no longer exists", nil)
 			return
 		}
 		writeErrorFromErr(w, err, "")

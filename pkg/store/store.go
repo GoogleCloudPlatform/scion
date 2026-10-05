@@ -1336,6 +1336,17 @@ type UserStore interface {
 	// Returns ErrNotFound if the user doesn't exist.
 	DeleteUser(ctx context.Context, id string) error
 
+	// LockUserRow locks the user row until the surrounding transaction ends
+	// (ptone/scion#2769). On PostgreSQL exclusive=true runs
+	// SELECT ... FOR UPDATE and exclusive=false runs SELECT ... FOR SHARE, so
+	// a user delete (exclusive) and an agent create or restore for that user
+	// (shared) serialize under READ COMMITTED. On SQLite this is a plain read
+	// (SQLite already serializes writes at the database level).
+	//
+	// Must be called inside a transaction (WithTx). Returns ErrNotFound if
+	// the user does not exist.
+	LockUserRow(ctx context.Context, id string, exclusive bool) error
+
 	// ListUsers returns users matching the filter criteria.
 	ListUsers(ctx context.Context, filter UserFilter, opts ListOptions) (*ListResult[User], error)
 

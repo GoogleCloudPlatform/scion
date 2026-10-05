@@ -1125,6 +1125,10 @@ type Server struct {
 	ctx         context.Context    // Server-lifetime context; cancelled on Shutdown
 	ctxCancel   context.CancelFunc // Cancels ctx
 
+	// userScopedDataSweepDone is closed when the startup sweep of deleted
+	// users' user-scope data ends (startUserScopedDataSweep).
+	userScopedDataSweepDone <-chan struct{}
+
 	// githubWebhookNoSecretWarnOnce ensures the "no webhook secret configured"
 	// rejection is logged at most once per process, so a hub being repeatedly
 	// probed on the GitHub webhook endpoint does not fill its log.
@@ -1970,12 +1974,10 @@ func New(cfg ServerConfig, s store.Store) (*Server, error) {
 	}
 
 	// Remove user-scope secrets and env vars whose user no longer exists
-	// (ptone/scion#2769). Runs after seedDevUser so the dev user exists.
-	if n, err := srv.sweepOrphanedUserScopedData(ctx); err != nil {
-		slog.Warn("Failed to sweep user-scope data of deleted users", "error", err)
-	} else if n > 0 {
-		slog.Info("Removed user-scope data of deleted users", "users", n)
-	}
+	// (ptone/scion#2769). Runs after seedDevUser so the dev user exists. The
+	// removal runs in the background under one time budget and is
+	// non-fatal; see startUserScopedDataSweep.
+	srv.userScopedDataSweepDone = srv.startUserScopedDataSweep(srv.ctx)
 
 	// Seed platform skills into hub_settings["injected_skills"].system (idempotent).
 	// Runs on every startup so that the system list is always in sync with the binary.

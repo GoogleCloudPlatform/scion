@@ -32,10 +32,13 @@ import (
 //
 // A user who still owns agents cannot be deleted: both delete paths
 // (DELETE /api/v1/users/{id} and the deprecated allow-list delete) refuse
-// with 409 conflict and list the agents in details.agents. After a delete
-// commits, the user's user-scope secrets and env vars are removed as a best
-// effort, and a startup sweep removes any left behind for users that no
-// longer exist.
+// with 409 conflict and list the agents in details.agents. On PostgreSQL the
+// delete locks the user row (FOR UPDATE) before the check, and agent create
+// and restore lock it shared (FOR SHARE) and re-check that the owner exists,
+// so a create racing a delete either commits first (and the delete sees the
+// agent) or fails. After a delete commits, the user's user-scope secrets and
+// env vars are removed as a best effort, and a startup sweep removes any left
+// behind for users that no longer exist.
 
 // ownedAgentRef identifies an agent that blocks the deletion of its owner.
 type ownedAgentRef struct {
@@ -64,25 +67,34 @@ func writeUserOwnsAgentsDeleteError(w http.ResponseWriter, e *userOwnsAgentsDele
 		map[string]interface{}{"agents": e.agents})
 }
 
-// ownedAgentsPageSize is the page size used when listing a user's agents.
-const ownedAgentsPageSize = 100
+// ownedAgentsPageSize is the page size used when listing a user's agents. It
+// is a variable so tests can force several pages.
+var ownedAgentsPageSize = 100
 
 // checkUserOwnsNoAgentsTx refuses the deletion of userID while agents with
 // OwnerID == userID exist. It runs inside the delete transaction.
 //
-// Soft-deleted agents do not count: the agent list hides them by default
-// (AgentFilter.IncludeDeleted is false), and they are purged later. Every
-// other agent counts whatever its phase, including a stopped agent or one
-// whose deletion is still in progress, since all of those still appear in
-// the agent list.
+// It first locks the user row exclusively (SELECT ... FOR UPDATE on
+// PostgreSQL; see store.UserStore.LockUserRow). Agent create and restore
+// take a shared lock on the owner's row in their own transactions and
+// re-check that the user exists (lockAgentOwnerUserTx), so an agent created
+// for the user either commits before this check runs (and is listed) or
+// waits for the delete and then fails. It returns store.ErrNotFound if the
+// user no longer exists.
 //
-// The check is a read, so an agent created for the user after it and before
-// the transaction commits is not seen.
+// Soft-deleted agents do not count: the agent list hides them by default
+// (AgentFilter.IncludeDeleted is false), and they are purged later; restore
+// refuses an agent whose owner user no longer exists. Every other agent
+// counts whatever its phase, including a stopped agent or one whose deletion
+// is still in progress, since all of those still appear in the agent list.
 func checkUserOwnsNoAgentsTx(ctx context.Context, tx store.Store, userID string) error {
 	// agents.owner_id is a UUID column, so a user ID that is not a UUID
 	// cannot own an agent (and the store rejects it as a filter value).
 	if _, err := uuid.Parse(userID); err != nil {
 		return nil
+	}
+	if err := tx.LockUserRow(ctx, userID, true); err != nil {
+		return err
 	}
 	var owned []ownedAgentRef
 	opts := store.ListOptions{Limit: ownedAgentsPageSize, SkipTotalCount: true}
@@ -106,6 +118,50 @@ func checkUserOwnsNoAgentsTx(ctx context.Context, tx store.Store, userID string)
 	return &userOwnsAgentsDeleteError{agents: owned}
 }
 
+// errAgentOwnerUserMissing is returned by lockAgentOwnerUserTx when the user
+// who owns (or is about to own) an agent no longer exists.
+var errAgentOwnerUserMissing = errors.New("the agent's owner no longer exists")
+
+// lockAgentOwnerUserTx takes a shared lock on the row of ownerUserID, the
+// user who owns an agent being created or restored, and re-checks that the
+// user exists (ptone/scion#2769). It runs inside the create or restore
+// transaction, before the agent row is written. Paired with the exclusive
+// lock checkUserOwnsNoAgentsTx takes in the user delete transaction, it
+// serializes the two on PostgreSQL. It returns errAgentOwnerUserMissing when
+// the user does not exist. An empty or non-UUID ID is not a user that can own
+// an agent and is skipped.
+func lockAgentOwnerUserTx(ctx context.Context, tx store.Store, ownerUserID string) error {
+	if ownerUserID == "" {
+		return nil
+	}
+	if _, err := uuid.Parse(ownerUserID); err != nil {
+		return nil
+	}
+	if err := tx.LockUserRow(ctx, ownerUserID, false); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return errAgentOwnerUserMissing
+		}
+		return err
+	}
+	return nil
+}
+
+// agentOwnerUserID returns the agent's OwnerID when the owner is a user, or
+// "" when it is another principal (an agent) or cannot be told. OwnerID is a
+// polymorphic principal reference. An agent a user created records that user
+// as both its owner and the root of its ancestry ([userID]); an agent another
+// agent created records the parent agent as its owner and the parent at the
+// end of its ancestry, after the root user. So the owner is a user when it is
+// the ancestry root, unless the ancestry is that one ID and the ID is also an
+// agent (a legacy parent agent with an empty ancestry of its own), which the
+// caller checks.
+func agentOwnerUserID(a *store.Agent) string {
+	if a.OwnerID == "" || len(a.Ancestry) == 0 || a.Ancestry[0] != a.OwnerID {
+		return ""
+	}
+	return a.OwnerID
+}
+
 // userScopedDataCleanupTimeout bounds the post-delete cleanup of one user's
 // secrets and env vars, which may call an external secret backend.
 const userScopedDataCleanupTimeout = 30 * time.Second
@@ -119,7 +175,11 @@ const userScopedDataCleanupTimeout = 30 * time.Second
 func (s *Server) removeUserScopedData(ctx context.Context, userID string) bool {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), userScopedDataCleanupTimeout)
 	defer cancel()
+	return s.removeUserScopedDataCtx(ctx, userID)
+}
 
+// removeUserScopedDataCtx is removeUserScopedData bounded only by ctx.
+func (s *Server) removeUserScopedDataCtx(ctx context.Context, userID string) bool {
 	ok := true
 	if n, err := s.store.DeleteEnvVarsByScope(ctx, store.ScopeUser, userID); err != nil {
 		ok = false
@@ -131,11 +191,7 @@ func (s *Server) removeUserScopedData(ctx context.Context, userID string) bool {
 
 	backend := s.GetSecretBackend()
 	if backend == nil {
-		// No secret backend is configured, so the secret API cannot have
-		// written any values. Rows left from an earlier configuration are
-		// kept: their values may live in an external backend that this hub
-		// cannot reach now, and removing the rows would lose the reference.
-		return ok
+		return s.removeUserScopedSecretRowsWithoutBackend(ctx, userID) && ok
 	}
 
 	metas, err := backend.List(ctx, secret.Filter{Scope: secret.ScopeUser, ScopeID: userID})
@@ -160,23 +216,114 @@ func (s *Server) removeUserScopedData(ctx context.Context, userID string) bool {
 	return ok
 }
 
-// sweepOrphanedUserScopedData removes user-scope secrets and env vars whose
-// user no longer exists. It runs at startup and catches values left behind by
-// a failed post-delete cleanup or by deletes from before that cleanup
-// existed. A user lookup error other than not-found leaves that user's values
-// untouched. It returns the number of missing users whose values it removed.
-func (s *Server) sweepOrphanedUserScopedData(ctx context.Context) (int, error) {
+// removeUserScopedSecretRowsWithoutBackend handles a deleted user's
+// user-scope secret rows when no secret backend is configured (the backend
+// failed to initialize at startup). A row whose value is stored in the hub
+// database (written by the local backend, encrypted or plaintext) is
+// deleted, so the value does not outlive the user. A row with no value in the
+// database only references an external backend (GCP Secret Manager); it is
+// kept so a later sweep, once the backend is reachable, can remove the
+// external value too. A row that holds a value and also names an external
+// reference is deleted, and the dropped reference is logged at Warn. It
+// reports whether every row was removed.
+func (s *Server) removeUserScopedSecretRowsWithoutBackend(ctx context.Context, userID string) bool {
+	rows, err := s.store.ListSecrets(ctx, store.SecretFilter{Scope: store.ScopeUser, ScopeID: userID})
+	if err != nil {
+		slog.Warn("user delete: failed to list user-scope secrets",
+			"user_id", userID, "error", err)
+		return false
+	}
+	ok := true
+	removed, kept := 0, 0
+	for _, row := range rows {
+		// ListSecrets never returns the value, so read it to tell a
+		// DB-stored value from an external reference.
+		value, err := s.store.GetSecretValue(ctx, row.Key, store.ScopeUser, userID)
+		if errors.Is(err, store.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			ok = false
+			slog.Warn("user delete: failed to read user-scope secret",
+				"user_id", userID, "name", row.Key, "error", err)
+			continue
+		}
+		if value == "" {
+			ok = false
+			kept++
+			continue
+		}
+		if row.SecretRef != "" {
+			slog.Warn("user delete: dropping external secret reference with the secret row; remove the external value manually",
+				"user_id", userID, "name", row.Key, "secret_ref", row.SecretRef)
+		}
+		if err := s.store.DeleteSecret(ctx, row.Key, store.ScopeUser, userID); err != nil && !errors.Is(err, store.ErrNotFound) {
+			ok = false
+			slog.Warn("user delete: failed to remove user-scope secret",
+				"user_id", userID, "name", row.Key, "error", err)
+			continue
+		}
+		removed++
+	}
+	if removed > 0 {
+		slog.Info("user delete: removed user-scope secrets stored in the hub database",
+			"user_id", userID, "count", removed)
+	}
+	if kept > 0 {
+		slog.Warn("user delete: no secret backend configured; keeping user-scope secret rows that reference an external backend until a sweep can remove them",
+			"user_id", userID, "count", kept)
+	}
+	return ok
+}
+
+// userScopedDataSweepBudget bounds the whole startup sweep, including every
+// call to an external secret backend.
+const userScopedDataSweepBudget = 2 * time.Minute
+
+// startUserScopedDataSweep runs the startup sweep in the background so a slow
+// or unreachable secret backend cannot delay startup. The missing users are
+// found before it returns (database reads only); their values are removed in
+// a goroutine under one total time budget (userScopedDataSweepBudget). The
+// sweep is non-fatal: failures are logged at Warn. The returned channel is
+// closed when the goroutine ends.
+func (s *Server) startUserScopedDataSweep(parent context.Context) <-chan struct{} {
+	done := make(chan struct{})
+	missing, err := s.findOrphanedUserScopeIDs(parent)
+	if err != nil {
+		slog.Warn("Failed to sweep user-scope data of deleted users", "error", err)
+		close(done)
+		return done
+	}
+	if len(missing) == 0 {
+		close(done)
+		return done
+	}
+	go func() {
+		defer close(done)
+		ctx, cancel := context.WithTimeout(parent, userScopedDataSweepBudget)
+		defer cancel()
+		removed, kept := s.removeOrphanedUserScopedData(ctx, missing)
+		slog.Info("Swept user-scope data of deleted users",
+			"users_removed", removed, "users_kept_or_failed", kept)
+	}()
+	return done
+}
+
+// findOrphanedUserScopeIDs returns, sorted, the scope IDs of user-scope
+// secrets and env vars whose user no longer exists. A user lookup error
+// other than not-found leaves that ID out, so its values are kept.
+func (s *Server) findOrphanedUserScopeIDs(ctx context.Context) ([]string, error) {
 	scopeIDs := make(map[string]bool)
 	envVars, err := s.store.ListEnvVars(ctx, store.EnvVarFilter{Scope: store.ScopeUser})
 	if err != nil {
-		return 0, fmt.Errorf("list user-scope env vars: %w", err)
+		return nil, fmt.Errorf("list user-scope env vars: %w", err)
 	}
 	for _, ev := range envVars {
 		scopeIDs[ev.ScopeID] = true
 	}
 	secrets, err := s.store.ListSecrets(ctx, store.SecretFilter{Scope: store.ScopeUser})
 	if err != nil {
-		return 0, fmt.Errorf("list user-scope secrets: %w", err)
+		return nil, fmt.Errorf("list user-scope secrets: %w", err)
 	}
 	for _, sec := range secrets {
 		scopeIDs[sec.ScopeID] = true
@@ -184,12 +331,6 @@ func (s *Server) sweepOrphanedUserScopedData(ctx context.Context) (int, error) {
 
 	ids := make([]string, 0, len(scopeIDs))
 	for id := range scopeIDs {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-
-	swept := 0
-	for _, id := range ids {
 		if id == "" {
 			continue
 		}
@@ -200,8 +341,42 @@ func (s *Server) sweepOrphanedUserScopedData(ctx context.Context) (int, error) {
 				"user_id", id, "error", err)
 			continue
 		}
-		s.removeUserScopedData(ctx, id)
-		swept++
+		ids = append(ids, id)
 	}
-	return swept, nil
+	sort.Strings(ids)
+	return ids, nil
+}
+
+// removeOrphanedUserScopedData removes the user-scope data of each missing
+// user under ctx. removed counts the users whose data was fully removed;
+// kept counts the users with values left behind (a removal failure, a row
+// kept for an external backend, or the budget running out).
+func (s *Server) removeOrphanedUserScopedData(ctx context.Context, missing []string) (removed, kept int) {
+	for _, id := range missing {
+		if ctx.Err() != nil {
+			kept++
+			continue
+		}
+		if s.removeUserScopedDataCtx(ctx, id) {
+			removed++
+		} else {
+			kept++
+		}
+	}
+	return removed, kept
+}
+
+// sweepOrphanedUserScopedData removes user-scope secrets and env vars whose
+// user no longer exists, synchronously under ctx. It catches values left
+// behind by a failed post-delete cleanup or by deletes from before that
+// cleanup existed. A user lookup error other than not-found leaves that
+// user's values untouched. removed is the number of missing users whose
+// values were all removed; kept is the number with values left behind.
+func (s *Server) sweepOrphanedUserScopedData(ctx context.Context) (removed, kept int, err error) {
+	missing, err := s.findOrphanedUserScopeIDs(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	removed, kept = s.removeOrphanedUserScopedData(ctx, missing)
+	return removed, kept, nil
 }

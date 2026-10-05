@@ -78,7 +78,7 @@ func requireOwnsAgentsDenial(t *testing.T, rec *httptest.ResponseRecorder, agent
 	assert.ElementsMatch(t, want, resp.Error.Details.Agents)
 }
 
-func TestDeleteUser_OwnsLiveAgentDenied(t *testing.T) {
+func TestDeleteUser_OwnsAgentDenied(t *testing.T) {
 	srv, s, _, _, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 	dave := newActiveMember(t, s, "user-dave", "dave@test.com")
@@ -128,7 +128,7 @@ func TestDeleteUser_OwnedAgentDeletedAllowed(t *testing.T) {
 	}
 }
 
-func TestDeprecatedAllowListDelete_OwnsLiveAgentDenied(t *testing.T) {
+func TestDeprecatedAllowListDelete_OwnsAgentDenied(t *testing.T) {
 	srv, s, _, _, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
 	carol := newInvitedUser(t, s, "user-carol", "carol@test.com")
@@ -252,9 +252,10 @@ func TestSweepOrphanedUserScopedData(t *testing.T) {
 	seedUserScopedData(t, s, b, live.ID)
 	seedUserScopedData(t, s, b, missing)
 
-	n, err := srv.sweepOrphanedUserScopedData(context.Background())
+	removed, kept, err := srv.sweepOrphanedUserScopedData(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, 1, n)
+	assert.Equal(t, 1, removed)
+	assert.Zero(t, kept)
 
 	sec, ev := userScopedCounts(t, s, missing)
 	assert.Zero(t, sec, "a missing user's secrets must be swept")
@@ -264,9 +265,10 @@ func TestSweepOrphanedUserScopedData(t *testing.T) {
 	assert.Equal(t, 1, ev, "a live user's env vars must be kept")
 
 	// Idempotent.
-	n, err = srv.sweepOrphanedUserScopedData(context.Background())
+	removed, kept, err = srv.sweepOrphanedUserScopedData(context.Background())
 	require.NoError(t, err)
-	assert.Zero(t, n)
+	assert.Zero(t, removed)
+	assert.Zero(t, kept)
 }
 
 // sweepGetUserErrStore fails GetUser with a non-not-found error.
@@ -286,10 +288,246 @@ func TestSweepOrphanedUserScopedData_LookupErrorKeepsValues(t *testing.T) {
 	srv.store = &sweepGetUserErrStore{Store: s}
 	t.Cleanup(func() { srv.store = s })
 
-	n, err := srv.sweepOrphanedUserScopedData(context.Background())
+	removed, kept, err := srv.sweepOrphanedUserScopedData(context.Background())
 	require.NoError(t, err)
-	assert.Zero(t, n)
+	assert.Zero(t, removed)
+	assert.Zero(t, kept)
 	sec, ev := userScopedCounts(t, s, missing)
 	assert.Equal(t, 1, sec)
 	assert.Equal(t, 1, ev)
+}
+
+// seedNoBackendSecretRows gives scopeID three user-scope secret rows written
+// directly to the store, as the backends would have left them:
+//   - DB_VALUE: a value stored in the hub database (local backend, plaintext
+//     legacy/dev mode; an encrypted value is stored the same way),
+//   - EXT_REF: an external reference only (GCP Secret Manager: no value in
+//     the database),
+//   - BOTH: a value in the database that also names an external reference.
+func seedNoBackendSecretRows(t *testing.T, s store.Store, scopeID string) {
+	t.Helper()
+	ctx := context.Background()
+	for _, sec := range []*store.Secret{
+		{Key: "DB_VALUE", EncryptedValue: "plaintext-value"},
+		{Key: "EXT_REF", SecretRef: "gcpsm:projects/p/secrets/ext-" + scopeID},
+		{Key: "BOTH", EncryptedValue: "enc-value", SecretRef: "gcpsm:projects/p/secrets/both-" + scopeID},
+	} {
+		sec.ID = api.NewUUID()
+		sec.SecretType = "environment"
+		sec.Scope = store.ScopeUser
+		sec.ScopeID = scopeID
+		require.NoError(t, s.CreateSecret(ctx, sec))
+	}
+}
+
+// userScopedSecretKeys returns the keys of scopeID's user-scope secrets.
+func userScopedSecretKeys(t *testing.T, s store.Store, scopeID string) []string {
+	t.Helper()
+	rows, err := s.ListSecrets(context.Background(), store.SecretFilter{Scope: store.ScopeUser, ScopeID: scopeID})
+	require.NoError(t, err)
+	keys := make([]string, 0, len(rows))
+	for _, r := range rows {
+		keys = append(keys, r.Key)
+	}
+	return keys
+}
+
+// TestDeleteUser_NoSecretBackend: with no secret backend configured, the
+// deleted user's secret rows whose value is stored in the hub database are
+// deleted; a row that only references an external backend is kept for a
+// later sweep. A dropped external reference is logged at Warn.
+func TestDeleteUser_NoSecretBackend(t *testing.T) {
+	srv, s := testServer(t)
+	srv.SetSecretBackend(nil)
+	dave := newActiveMember(t, s, "user-dave", "dave@test.com")
+	erin := newActiveMember(t, s, "user-erin", "erin@test.com")
+	seedNoBackendSecretRows(t, s, dave.ID)
+	seedNoBackendSecretRows(t, s, erin.ID)
+	_, err := s.UpsertEnvVar(context.Background(), &store.EnvVar{
+		ID: api.NewUUID(), Key: "LOG_LEVEL", Value: "debug",
+		Scope: store.ScopeUser, ScopeID: dave.ID, InjectionMode: store.InjectionModeAsNeeded,
+	})
+	require.NoError(t, err)
+	logs := captureSlogDefault(t)
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/users/"+dave.ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	assert.Equal(t, []string{"EXT_REF"}, userScopedSecretKeys(t, s, dave.ID),
+		"rows holding a value in the hub database must be deleted; the external-only row is kept")
+	_, ev := userScopedCounts(t, s, dave.ID)
+	assert.Zero(t, ev, "env vars are removed")
+	assert.ElementsMatch(t, []string{"DB_VALUE", "EXT_REF", "BOTH"}, userScopedSecretKeys(t, s, erin.ID),
+		"another user's rows must be kept")
+
+	out := logs.String()
+	assert.True(t, strings.Contains(out, "level=WARN") &&
+		strings.Contains(out, "dropping external secret reference") &&
+		strings.Contains(out, "gcpsm:projects/p/secrets/both-"+dave.ID), out)
+
+	// The kept row is retried by the sweep: with still no backend it stays
+	// and the user counts as kept, not removed.
+	removed, kept, err := srv.sweepOrphanedUserScopedData(context.Background())
+	require.NoError(t, err)
+	assert.Zero(t, removed)
+	assert.Equal(t, 1, kept)
+	assert.Equal(t, []string{"EXT_REF"}, userScopedSecretKeys(t, s, dave.ID))
+}
+
+// TestSweepOrphanedUserScopedData_CountsKeptSeparately: a missing user whose
+// secret delete fails counts as kept, not removed.
+func TestSweepOrphanedUserScopedData_CountsKeptSeparately(t *testing.T) {
+	srv, s := testServer(t)
+	b := useLocalSecretBackend(t, srv, s)
+	gone := tid("user-gone")
+	failing := tid("user-gone-2")
+	seedUserScopedData(t, s, b, gone)
+	seedUserScopedData(t, s, b, failing)
+	srv.SetSecretBackend(&selectiveFailingDeleteBackend{SecretBackend: b, failScopeID: failing})
+
+	removed, kept, err := srv.sweepOrphanedUserScopedData(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, removed)
+	assert.Equal(t, 1, kept)
+	sec, _ := userScopedCounts(t, s, gone)
+	assert.Zero(t, sec)
+	sec, _ = userScopedCounts(t, s, failing)
+	assert.Equal(t, 1, sec)
+}
+
+// selectiveFailingDeleteBackend fails Delete for one scope ID.
+type selectiveFailingDeleteBackend struct {
+	secret.SecretBackend
+	failScopeID string
+}
+
+func (b *selectiveFailingDeleteBackend) Delete(ctx context.Context, name, scope, scopeID string) error {
+	if scopeID == b.failScopeID {
+		return errors.New("backend unavailable")
+	}
+	return b.SecretBackend.Delete(ctx, name, scope, scopeID)
+}
+
+// TestDeleteUser_OwnsAgentDeniedListsEveryPage: the 409 lists every owned
+// agent, not just the first page.
+func TestDeleteUser_OwnsAgentDeniedListsEveryPage(t *testing.T) {
+	prev := ownedAgentsPageSize
+	ownedAgentsPageSize = 2
+	t.Cleanup(func() { ownedAgentsPageSize = prev })
+
+	srv, s, _, _, project := setupDemoPolicyTest(t)
+	dave := newActiveMember(t, s, "user-dave", "dave@test.com")
+	var agents []*store.Agent
+	for _, slug := range []string{"dave-a", "dave-b", "dave-c", "dave-d", "dave-e"} {
+		agents = append(agents, createOwnedAgent(t, s, slug, project.ID, dave.ID))
+	}
+
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/users/"+dave.ID, nil)
+	requireOwnsAgentsDenial(t, rec, agents...)
+}
+
+// TestNew_SchedulesUserScopedDataSweep: building a server runs the startup
+// sweep in the background, removing a missing user's values.
+func TestNew_SchedulesUserScopedDataSweep(t *testing.T) {
+	s, err := newTestStore(":memory:")
+	require.NoError(t, err)
+	ctx := context.Background()
+	require.NoError(t, s.Migrate(ctx))
+	missing := tid("user-gone")
+	_, err = s.UpsertEnvVar(ctx, &store.EnvVar{
+		ID: api.NewUUID(), Key: "LOG_LEVEL", Value: "debug",
+		Scope: store.ScopeUser, ScopeID: missing, InjectionMode: store.InjectionModeAsNeeded,
+	})
+	require.NoError(t, err)
+
+	srv, _ := testServerWithStore(t, s)
+	require.NotNil(t, srv.userScopedDataSweepDone)
+	select {
+	case <-srv.userScopedDataSweepDone:
+	case <-time.After(30 * time.Second):
+		t.Fatal("startup sweep did not finish")
+	}
+	_, ev := userScopedCounts(t, s, missing)
+	assert.Zero(t, ev, "the startup sweep must remove a missing user's env vars")
+}
+
+// softDeletedAgent creates a soft-deleted agent in the project.
+func softDeletedAgent(t *testing.T, s store.Store, slug, projectID, ownerID string, ancestry []string) *store.Agent {
+	t.Helper()
+	a := &store.Agent{
+		ID: tid("agent-" + slug), Slug: slug, Name: slug, ProjectID: projectID,
+		Phase: "stopped", OwnerID: ownerID, CreatedBy: ownerID, Ancestry: ancestry,
+		AppliedConfig: &store.AgentAppliedConfig{InlineConfig: &api.ScionConfig{}},
+		DeletedAt:     time.Now().Add(-time.Hour),
+	}
+	require.NoError(t, s.CreateAgent(context.Background(), a))
+	return a
+}
+
+// TestRestoreAgent_OwnerUserDeletedRefused: an agent whose owner user was
+// deleted cannot be restored (409); agents owned by an agent principal are
+// unaffected, even when that agent no longer exists.
+func TestRestoreAgent_OwnerUserDeletedRefused(t *testing.T) {
+	srv, s, _, _, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+	dave := newActiveMember(t, s, "user-dave", "dave@test.com")
+	daveAgent := softDeletedAgent(t, s, "dave-agent", project.ID, dave.ID, []string{dave.ID})
+	// A sub-agent owned by an agent that is gone: not a user owner.
+	parentID := tid("agent-gone-parent")
+	child := softDeletedAgent(t, s, "child-agent", project.ID, parentID, []string{dave.ID, parentID})
+
+	// The soft-deleted agent does not block the delete.
+	rec := doRequest(t, srv, http.MethodDelete, "/api/v1/users/"+dave.ID, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+daveAgent.ID+"/restore", nil)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "owner no longer exists")
+	got, err := s.GetAgent(ctx, daveAgent.ID)
+	require.NoError(t, err)
+	assert.False(t, got.DeletedAt.IsZero(), "a refused restore must leave the agent deleted")
+
+	rec = doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+child.ID+"/restore", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	got, err = s.GetAgent(ctx, child.ID)
+	require.NoError(t, err)
+	assert.True(t, got.DeletedAt.IsZero(), "an agent-owned agent is restored")
+}
+
+// TestRestoreAgent_OwnerUserExistsRestored: the owner check does not block
+// restoring an agent whose owner user exists.
+func TestRestoreAgent_OwnerUserExistsRestored(t *testing.T) {
+	srv, s, _, _, project := setupDemoPolicyTest(t)
+	dave := newActiveMember(t, s, "user-dave", "dave@test.com")
+	a := softDeletedAgent(t, s, "dave-agent", project.ID, dave.ID, []string{dave.ID})
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restore", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// TestCreateAgentWithIdentityKeyAndEdge_OwnerUserMissing: an agent create
+// whose owner user no longer exists fails in the create transaction and
+// writes nothing; an agent-delegated create is not checked against users.
+func TestCreateAgentWithIdentityKeyAndEdge_OwnerUserMissing(t *testing.T) {
+	srv, s, _, _, project := setupDemoPolicyTest(t)
+	ctx := context.Background()
+	gone := tid("user-gone")
+
+	a := &store.Agent{ID: tid("agent-orphan"), Slug: "orphan", Name: "orphan", ProjectID: project.ID,
+		Phase: "created", OwnerID: gone, CreatedBy: gone}
+	edge := &store.DelegationEdge{DelegatorType: store.DelegationPrincipalUser, DelegatorID: gone,
+		DelegateType: store.DelegationPrincipalAgent, ScopeType: store.RoleScopeProject,
+		ScopeID: project.ID, Role: string(AgentRoleNone), Active: true}
+	err := srv.createAgentWithIdentityKeyAndEdge(ctx, a, "orphan", edge)
+	require.ErrorIs(t, err, errAgentOwnerUserMissing)
+	_, err = s.GetAgent(ctx, a.ID)
+	require.ErrorIs(t, err, store.ErrNotFound, "a refused create must write no agent")
+
+	dave := newActiveMember(t, s, "user-dave", "dave@test.com")
+	ok := &store.Agent{ID: tid("agent-ok"), Slug: "ok-agent", Name: "ok-agent", ProjectID: project.ID,
+		Phase: "created", OwnerID: dave.ID, CreatedBy: dave.ID}
+	okEdge := &store.DelegationEdge{DelegatorType: store.DelegationPrincipalUser, DelegatorID: dave.ID,
+		DelegateType: store.DelegationPrincipalAgent, ScopeType: store.RoleScopeProject,
+		ScopeID: project.ID, Role: string(AgentRoleNone), Active: true}
+	require.NoError(t, srv.createAgentWithIdentityKeyAndEdge(ctx, ok, "ok-agent", okEdge))
 }

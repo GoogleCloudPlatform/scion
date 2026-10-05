@@ -1583,13 +1583,30 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 	// api.IdentityKeysFor is also what the backfill migration uses, so a
 	// legacy row's empty-display-name-key tolerance is handled identically
 	// by both.
+	//
+	// An agent whose owner is a user that no longer exists is not restored
+	// (ptone/scion#2769): the user delete refuses while the user owns
+	// agents, but soft-deleted agents do not count, so restoring one would
+	// bring back an agent owned by a missing user. The owner check takes a
+	// shared lock on the user's row in the restore transaction, so it also
+	// serializes with a concurrent user delete on PostgreSQL. Agents owned by
+	// other principals are not checked.
 	keys := api.IdentityKeysFor(agent.Slug, agent.Name)
+	ownerUserID := agentOwnerUserID(agent)
 	if err := s.store.WithTx(ctx, func(tx store.Store) error {
+		if err := checkRestoreOwnerTx(ctx, tx, ownerUserID); err != nil {
+			return err
+		}
 		if err := tx.UpdateAgent(ctx, agent); err != nil {
 			return err
 		}
 		return tx.ReplaceAgentIdentityKeys(ctx, agent.ID, agent.ProjectID, keys)
 	}); err != nil {
+		if errors.Is(err, errAgentOwnerUserMissing) {
+			writeError(w, http.StatusConflict, ErrCodeConflict,
+				"cannot restore the agent: its owner no longer exists", nil)
+			return
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}
@@ -1600,6 +1617,25 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 	// restored agent carries its deletion view (null) and project/broker
 	// names like every other agent response.
 	s.writeAgentGetResponse(w, r, agent)
+}
+
+// checkRestoreOwnerTx refuses the restore, with errAgentOwnerUserMissing,
+// when ownerUserID (agentOwnerUserID of the agent) names a user that no
+// longer exists. It locks the user's row shared (lockAgentOwnerUserTx). A
+// legacy agent created by a parent agent with an empty ancestry records the
+// parent as both owner and ancestry root; an owner that is an agent is not a
+// missing user, so the restore goes ahead.
+func checkRestoreOwnerTx(ctx context.Context, tx store.Store, ownerUserID string) error {
+	err := lockAgentOwnerUserTx(ctx, tx, ownerUserID)
+	if !errors.Is(err, errAgentOwnerUserMissing) {
+		return err
+	}
+	if _, getErr := tx.GetAgent(ctx, ownerUserID); getErr == nil {
+		return nil
+	} else if !errors.Is(getErr, store.ErrNotFound) {
+		return getErr
+	}
+	return err
 }
 
 // MessageRequest is the request body for sending a message to an agent.
