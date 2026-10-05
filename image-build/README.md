@@ -239,17 +239,37 @@ targets; submit it directly from the repo root:
 ```bash
 gcloud builds submit \
   --config=image-build/cloudbuild-hub-gke.yaml \
-  --ignore-file=image-build/gcloudignore-omni \
+  --ignore-file=image-build/gcloudignore-hub-gke \
   --substitutions=_REGISTRY=<registry>,_SHORT_SHA=$(git rev-parse --short HEAD) \
   .
 ```
 
 `--ignore-file` is required because the default `.gcloudignore` drops the web
-source the Dockerfile builds. No moving tag is pushed: repointing one needs an
-explicit ACK, and the chart prefers pinning the image by digest (`image.digest`
-over `image.tag`). Locally, `docker build --target hub-gke .` builds the same
-image; `docker build .` with no `--target` still builds the root-running
-runtime image.
+source the Dockerfile builds. Use `gcloudignore-hub-gke`, not
+`gcloudignore-omni`: both keep the web source, but omni's unanchored
+`agents.md` and `.gemini/` patterns also drop the embedded default-template
+files under `pkg/config/embeds/` and `resources/` (gitignore semantics match a
+slash-less pattern at any depth), so the build succeeds with those files
+missing from the binary. `gcloudignore-hub-gke` anchors those patterns to the
+repo root, as the root `.dockerignore` does.
+
+No moving tag is pushed: repointing one needs an explicit ACK, and the chart
+prefers pinning the image by digest (`image.digest` over `image.tag`).
+
+The image is **linux/amd64 only** (the frontend and builder stages do not
+cross-compile; see the file's header). On a cluster with arm64 nodes, pin the
+hub pod to amd64 nodes, e.g. chart value
+`hub.nodeSelector: {kubernetes.io/arch: amd64}`.
+
+Locally, from a clean checkout, `docker build --platform linux/amd64 --target
+hub-gke .` builds from the same source files as the Cloud Build upload above,
+so the binary embeds the same templates and web UI. It is not byte-identical:
+base images are pulled at build time and layer timestamps differ.
+`docker build .` with no `--target` still builds the root-running runtime
+image. With BuildKit (the default `docker build`, and `buildx`), a default
+build skips the unused `hub-gke` stage; the legacy builder
+(`DOCKER_BUILDKIT=0`) runs that stage too but still outputs the runtime image,
+so it only costs build time.
 
 ## Package Registries
 

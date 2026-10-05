@@ -60,15 +60,20 @@ ENTRYPOINT ["/usr/local/bin/scion"]
 # Deliberately absent: CMD. No arguments are baked into the image; the chart
 # supplies them.
 #
-# $HOME/.scion is pre-created so it is writable by uid 1000. Note that
-# cmd/server_foreground.go calls config.InitGlobal only when that directory
-# does not exist, so a server started from this image without a volume there
-# takes the "directory exists" branch. The chart mounts an emptyDir at that
-# path, so under the chart the directory exists at startup either way.
+# $HOME/.scion is pre-created, deliberately, so the directory exists and is
+# owned by uid 1000. Consequence: cmd/server_foreground.go calls
+# config.InitGlobal only when that directory does not exist, so a server
+# started from this image WITHOUT a volume at ~/.scion (e.g. a bare
+# `docker run ... server start`) skips InitGlobal and does not create
+# settings.yaml or the global templates there. Under the chart this makes no
+# difference: the chart mounts an emptyDir at that path, so the directory
+# exists at startup either way, and the chart supplies settings.yaml.
 #
-# The chown is not redundant with `useradd -m`: -m sets the owner, but the
-# primary gid is whichever one useradd allocates, while USER below names gid
-# 1000 explicitly.
+# Why the chown: `mkdir -p /home/scion/.scion` runs as root, so without it
+# ~/.scion would be root-owned and not writable by uid 1000. (`useradd -m`
+# already gives /home/scion itself to the new user; on debian:bookworm-slim it
+# also creates group scion with gid 1000, but the chown names 1000:1000
+# explicitly so ownership matches USER below regardless.)
 FROM runtime AS hub-gke
 RUN useradd -u 1000 -m -d /home/scion scion \
  && mkdir -p /home/scion/.scion \

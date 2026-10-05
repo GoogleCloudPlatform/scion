@@ -21,13 +21,17 @@
 #
 #   gcloud builds submit \
 #     --config=image-build/cloudbuild-hub-gke.yaml \
-#     --ignore-file=image-build/gcloudignore-omni \
+#     --ignore-file=image-build/gcloudignore-hub-gke \
 #     --substitutions=_REGISTRY=<registry>,_SHORT_SHA=$(git rev-parse --short HEAD) \
 #     .
 #
 # WHY --ignore-file: the default .gcloudignore drops the web source
 # (web/src/, web/*.json, ...), and the root Dockerfile's frontend stage runs
-# `npm ci && npm run build`. gcloudignore-omni keeps the web source.
+# `npm ci && npm run build`. gcloudignore-hub-gke keeps the web source, like
+# gcloudignore-omni, and also anchors its root-file patterns (/agents.md,
+# /.gemini/, ...) so the embedded template files under pkg/config/embeds/ and
+# resources/ are uploaded; the unanchored patterns in gcloudignore-omni and
+# .gcloudignore drop them silently. See that file's header.
 #
 # TAGS: only the per-commit $_SHORT_SHA tag is pushed. There is deliberately no
 # moving tag and no substitution that defaults to one: repointing a moving tag

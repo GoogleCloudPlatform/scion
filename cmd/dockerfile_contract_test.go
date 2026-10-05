@@ -15,10 +15,14 @@
 package cmd
 
 import (
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 // dockerfileInstr is one logical Dockerfile instruction (continuations joined).
@@ -28,22 +32,27 @@ type dockerfileInstr struct {
 }
 
 // dockerfileStage is a build stage: its FROM base, optional name, and body.
+// base and name are lower-cased, because BuildKit matches stage names
+// case-insensitively.
 type dockerfileStage struct {
 	base   string
 	name   string
 	instrs []dockerfileInstr
 }
 
-// parseDockerfileStages is a minimal Dockerfile parser: it drops comments and
-// blank lines, joins backslash continuations, and splits on FROM. It is enough
-// to check stage structure; it is not a general Dockerfile parser.
+// parseDockerfileStages is a minimal Dockerfile parser: it drops comment and
+// blank lines (including those inside a backslash continuation, as Docker
+// does), joins backslash continuations, and splits on FROM. It is enough to
+// check stage structure; it is not a general Dockerfile parser. In particular
+// it does not handle parser directives (`# escape=`) or heredocs (`RUN <<EOF`);
+// the root Dockerfile uses neither.
 func parseDockerfileStages(t *testing.T, content string) []dockerfileStage {
 	t.Helper()
 	var logical []string
 	var cur strings.Builder
 	for _, line := range strings.Split(content, "\n") {
 		trimmed := strings.TrimSpace(line)
-		if cur.Len() == 0 && (trimmed == "" || strings.HasPrefix(trimmed, "#")) {
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
 		if strings.HasSuffix(trimmed, "\\") {
@@ -74,9 +83,9 @@ func parseDockerfileStages(t *testing.T, content string) []dockerfileStage {
 			if len(parts) == 0 {
 				t.Fatalf("FROM with no image: %q", l)
 			}
-			st.base = parts[0]
+			st.base = strings.ToLower(parts[0])
 			if len(parts) == 3 && strings.EqualFold(parts[1], "AS") {
-				st.name = parts[2]
+				st.name = strings.ToLower(parts[2])
 			}
 			stages = append(stages, st)
 			continue
@@ -94,15 +103,70 @@ func parseDockerfileStages(t *testing.T, content string) []dockerfileStage {
 
 func findStage(stages []dockerfileStage, name string) *dockerfileStage {
 	for i := range stages {
-		if stages[i].name == name {
+		if stages[i].name == strings.ToLower(name) {
 			return &stages[i]
 		}
 	}
 	return nil
 }
 
+// stageChain returns the named stage followed by every stage it inherits from
+// through FROM <stage>, stopping at the first external base image.
+func stageChain(stages []dockerfileStage, name string) []*dockerfileStage {
+	var chain []*dockerfileStage
+	seen := map[string]bool{}
+	for st := findStage(stages, name); st != nil && !seen[st.name]; st = findStage(stages, st.base) {
+		seen[st.name] = true
+		chain = append(chain, st)
+	}
+	return chain
+}
+
+// envOrArgKeys returns the variable names an ENV or ARG instruction sets. It
+// handles `K=V [K2=V2 ...]` and the legacy `ENV K V` form; values with
+// embedded spaces may yield extra tokens, which only makes it stricter.
+func envOrArgKeys(args string) []string {
+	fields := strings.Fields(args)
+	if len(fields) == 0 {
+		return nil
+	}
+	if !strings.Contains(fields[0], "=") {
+		return []string{fields[0]} // ENV K V, or ARG K
+	}
+	var keys []string
+	for _, f := range fields {
+		k, _, _ := strings.Cut(f, "=")
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// envValue returns the value the last ENV in the stage assigns to key.
+func envValue(st *dockerfileStage, key string) (string, bool) {
+	var val string
+	var found bool
+	for _, in := range st.instrs {
+		if in.cmd != "ENV" {
+			continue
+		}
+		fields := strings.Fields(in.args)
+		if len(fields) >= 2 && !strings.Contains(fields[0], "=") && fields[0] == key {
+			val, found = strings.Join(fields[1:], " "), true
+			continue
+		}
+		for _, f := range fields {
+			if k, v, ok := strings.Cut(f, "="); ok && k == key {
+				val, found = strings.Trim(v, `"'`), true
+			}
+		}
+	}
+	return val, found
+}
+
 // checkRootDockerfileContract returns the list of contract violations for the
 // repo-root Dockerfile. See the stage comments in that file for the reasons.
+// The runtime stage's body is deliberately not pinned instruction by
+// instruction; only the properties below are.
 func checkRootDockerfileContract(t *testing.T, content string) []string {
 	t.Helper()
 	stages := parseDockerfileStages(t, content)
@@ -138,49 +202,278 @@ func checkRootDockerfileContract(t *testing.T, content string) []string {
 	gke := findStage(stages, "hub-gke")
 	if gke == nil {
 		errs = append(errs, "no stage named hub-gke")
-	} else {
-		if gke.base != "runtime" {
-			errs = append(errs, "hub-gke must be FROM runtime; got FROM "+gke.base)
+		return errs
+	}
+	if gke.base != "runtime" {
+		errs = append(errs, "hub-gke must be FROM runtime; got FROM "+gke.base)
+	}
+	var user string
+	var runs []string
+	for _, in := range gke.instrs {
+		switch in.cmd {
+		case "USER":
+			user = in.args
+		case "CMD":
+			errs = append(errs, "hub-gke must not set CMD: CMD "+in.args)
+		case "ENTRYPOINT":
+			errs = append(errs, "hub-gke must inherit ENTRYPOINT from runtime: ENTRYPOINT "+in.args)
+		case "RUN":
+			runs = append(runs, strings.Join(strings.Fields(in.args), " "))
 		}
-		var user string
-		for _, in := range gke.instrs {
-			switch in.cmd {
-			case "USER":
-				user = in.args
-			case "CMD":
-				errs = append(errs, "hub-gke must not set CMD: CMD "+in.args)
-			case "ENTRYPOINT":
-				errs = append(errs, "hub-gke must inherit ENTRYPOINT from runtime: ENTRYPOINT "+in.args)
-			case "ENV":
-				if strings.Contains(strings.ToUpper(in.args), "KUBECONFIG") {
-					errs = append(errs, "hub-gke must not set ENV KUBECONFIG: ENV "+in.args)
+	}
+	if user != "1000:1000" {
+		errs = append(errs, "hub-gke final USER must be 1000:1000; got "+user)
+	}
+	if home, ok := envValue(gke, "HOME"); !ok || home != "/home/scion" {
+		errs = append(errs, "hub-gke must set ENV HOME=/home/scion; got "+home)
+	}
+	allRuns := strings.Join(runs, "\n")
+	for _, want := range []string{
+		"useradd -u 1000 ",            // the uid the chart's runAsUser assumes, and the passwd entry ssh needs
+		"mkdir -p /home/scion/.scion", // ~/.scion exists and is created before the chown
+		"chown -R 1000:1000 /home/scion",
+	} {
+		if !strings.Contains(allRuns, want) {
+			errs = append(errs, "hub-gke must RUN `"+strings.TrimSpace(want)+"`")
+		}
+	}
+
+	// No KUBECONFIG in hub-gke or in any stage it inherits from: a baked
+	// KUBECONFIG pointing at a loadable file beats in-cluster auth.
+	for _, st := range stageChain(stages, "hub-gke") {
+		for _, in := range st.instrs {
+			if in.cmd != "ENV" && in.cmd != "ARG" {
+				continue
+			}
+			for _, k := range envOrArgKeys(in.args) {
+				if strings.EqualFold(k, "KUBECONFIG") {
+					errs = append(errs, "stage "+st.name+" (hub-gke or a stage it inherits from) must not set "+in.cmd+" KUBECONFIG: "+in.cmd+" "+in.args)
 				}
 			}
-		}
-		if user != "1000:1000" {
-			errs = append(errs, "hub-gke final USER must be 1000:1000; got "+user)
 		}
 	}
 	return errs
 }
 
+// cloudBuildFile is the subset of a Cloud Build config the checker reads.
+type cloudBuildFile struct {
+	Steps []struct {
+		Name       string   `yaml:"name"`
+		ID         string   `yaml:"id"`
+		Entrypoint string   `yaml:"entrypoint"`
+		Args       []string `yaml:"args"`
+	} `yaml:"steps"`
+	Substitutions map[string]string `yaml:"substitutions"`
+}
+
+const (
+	hubGKEImageTag   = "$_REGISTRY/scion-hub-gke:$_SHORT_SHA"
+	hubGKEIgnoreFile = "image-build/gcloudignore-hub-gke"
+)
+
 // checkHubGKECloudBuildContract returns violations for the hub-gke Cloud Build
-// file: it must build --target hub-gke and must not push a moving tag.
+// file. It parses the YAML and inspects step args and substitutions, so
+// comments (e.g. "never latest") do not trip it.
 func checkHubGKECloudBuildContract(content string) []string {
+	var cb cloudBuildFile
+	if err := yaml.Unmarshal([]byte(content), &cb); err != nil {
+		return []string{"cloudbuild-hub-gke.yaml does not parse: " + err.Error()}
+	}
 	var errs []string
-	if strings.Contains(strings.ToLower(content), "latest") {
-		errs = append(errs, "cloudbuild-hub-gke.yaml must not mention `latest` (only the per-commit $_SHORT_SHA tag is pushed)")
+
+	for k, v := range cb.Substitutions {
+		if strings.Contains(k, "_TAG") {
+			errs = append(errs, "cloudbuild-hub-gke.yaml must not define a _TAG substitution: "+k)
+		}
+		if strings.Contains(strings.ToLower(v), "latest") {
+			errs = append(errs, "cloudbuild-hub-gke.yaml substitution "+k+" must not mention latest: "+v)
+		}
 	}
-	if strings.Contains(content, "_TAG") {
-		errs = append(errs, "cloudbuild-hub-gke.yaml must not use a _TAG substitution")
+
+	buildIdx, shaIdx := -1, -1
+	for i, s := range cb.Steps {
+		joined := strings.Join(s.Args, " ")
+		if strings.Contains(strings.ToLower(joined), "latest") {
+			errs = append(errs, "cloudbuild-hub-gke.yaml step "+s.ID+" args must not mention latest (only the $_SHORT_SHA tag is pushed)")
+		}
+		if strings.Contains(joined, "_TAG") {
+			errs = append(errs, "cloudbuild-hub-gke.yaml step "+s.ID+" args must not use a _TAG substitution")
+		}
+		if len(s.Args) >= 2 && s.Args[0] == "buildx" && s.Args[1] == "build" {
+			if buildIdx >= 0 {
+				errs = append(errs, "cloudbuild-hub-gke.yaml must have exactly one buildx build step")
+			}
+			buildIdx = i
+		}
+		if s.ID == "require-short-sha" && strings.Contains(joined, `test -n "$_SHORT_SHA"`) {
+			shaIdx = i
+		}
 	}
-	if !strings.Contains(content, "'hub-gke'") || !strings.Contains(content, "'--target'") {
-		errs = append(errs, "cloudbuild-hub-gke.yaml must build with --target hub-gke")
+	if shaIdx < 0 {
+		errs = append(errs, "cloudbuild-hub-gke.yaml must have a require-short-sha step that runs `test -n \"$_SHORT_SHA\"`")
 	}
-	if !strings.Contains(content, "'$_REGISTRY/scion-hub-gke:$_SHORT_SHA'") {
-		errs = append(errs, "cloudbuild-hub-gke.yaml must tag $_REGISTRY/scion-hub-gke:$_SHORT_SHA")
+	if buildIdx < 0 {
+		return append(errs, "cloudbuild-hub-gke.yaml has no buildx build step")
+	}
+	if shaIdx >= 0 && shaIdx > buildIdx {
+		errs = append(errs, "cloudbuild-hub-gke.yaml require-short-sha step must precede the build step")
+	}
+
+	// Collect the build step's flags, accepting both "--flag value" and
+	// "--flag=value".
+	var tags []string
+	flags := map[string][]string{}
+	push := false
+	args := cb.Steps[buildIdx].Args[2:]
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		name, val, hasEq := strings.Cut(a, "=")
+		switch name {
+		case "--push":
+			push = true
+			continue
+		case "-t", "--tag", "-f", "--file", "--platform", "--target":
+		default:
+			continue
+		}
+		if !hasEq {
+			if i+1 >= len(args) {
+				errs = append(errs, "cloudbuild-hub-gke.yaml build flag "+name+" has no value")
+				continue
+			}
+			i++
+			val = args[i]
+		}
+		switch name {
+		case "-t", "--tag":
+			tags = append(tags, val)
+		case "-f", "--file":
+			flags["-f"] = append(flags["-f"], val)
+		default:
+			flags[name] = append(flags[name], val)
+		}
+	}
+	if len(tags) != 1 || tags[0] != hubGKEImageTag {
+		errs = append(errs, "cloudbuild-hub-gke.yaml must pass exactly one -t, "+hubGKEImageTag+"; got "+strings.Join(tags, ", "))
+	}
+	if !push {
+		errs = append(errs, "cloudbuild-hub-gke.yaml build step must pass --push")
+	}
+	for flag, want := range map[string]string{"-f": "Dockerfile", "--platform": "linux/amd64", "--target": "hub-gke"} {
+		if got := flags[flag]; len(got) != 1 || got[0] != want {
+			errs = append(errs, "cloudbuild-hub-gke.yaml build step must pass "+flag+" "+want+"; got "+strings.Join(got, ", "))
+		}
+	}
+
+	// The ignore file is only named in the usage comment; check it textually.
+	if !strings.Contains(content, "--ignore-file="+hubGKEIgnoreFile) {
+		errs = append(errs, "cloudbuild-hub-gke.yaml usage must pass --ignore-file="+hubGKEIgnoreFile)
+	}
+	if strings.Contains(content, "--ignore-file=image-build/gcloudignore-omni") {
+		errs = append(errs, "cloudbuild-hub-gke.yaml must not point at gcloudignore-omni as its ignore file")
 	}
 	return errs
+}
+
+// embedRoots are the //go:embed all: roots compiled into the scion binary
+// (pkg/config/init.go, resources/embed.go).
+var embedRoots = []string{
+	"pkg/config/embeds",
+	"resources/templates",
+	"resources/platform_skills",
+	"resources/mandatory_boilerplate",
+}
+
+// gcloudignoreMatches reports whether a single gcloudignore (gitignore
+// semantics) exclude pattern matches the slash-separated relative path p or
+// one of its parent directories. Supported: anchored patterns (leading or
+// inner slash), unanchored patterns (match any path component), trailing "/"
+// (directories only) and path.Match globs. "**" is not supported; the caller
+// rejects it.
+func gcloudignoreMatches(pattern, p string) bool {
+	dirOnly := strings.HasSuffix(pattern, "/")
+	pat := strings.TrimSuffix(pattern, "/")
+	anchored := strings.Contains(pat, "/")
+	pat = strings.TrimPrefix(pat, "/")
+	comps := strings.Split(p, "/")
+	for i := range comps {
+		isDir := i < len(comps)-1
+		if dirOnly && !isDir {
+			continue
+		}
+		subject := comps[i]
+		if anchored {
+			subject = strings.Join(comps[:i+1], "/")
+		}
+		if ok, _ := path.Match(pat, subject); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// checkHubGKEIgnoreFileContract returns violations for gcloudignore-hub-gke:
+// no exclude pattern may drop a file under an embed root, and the agents.md
+// and .gemini/ patterns must be anchored to the repo root. Lines pulled in by
+// `#!include:.gitignore` are not evaluated (gcloud reads them; this checker
+// does not); `gcloud meta list-files-for-upload` covers them.
+func checkHubGKEIgnoreFileContract(content string, embedFiles []string) []string {
+	var errs []string
+	var patterns []string
+	for _, line := range strings.Split(content, "\n") {
+		l := strings.TrimSpace(line)
+		if l == "" || strings.HasPrefix(l, "#") {
+			continue
+		}
+		if strings.HasPrefix(l, "!") || strings.Contains(l, "**") {
+			errs = append(errs, "gcloudignore-hub-gke: pattern "+l+" is not supported by this checker; extend gcloudignoreMatches")
+			continue
+		}
+		patterns = append(patterns, l)
+	}
+	for _, want := range []string{"/agents.md", "/.gemini/"} {
+		found := false
+		for _, p := range patterns {
+			if p == want {
+				found = true
+			}
+		}
+		if !found {
+			errs = append(errs, "gcloudignore-hub-gke must contain the root-anchored pattern "+want)
+		}
+	}
+	for _, f := range embedFiles {
+		for _, p := range patterns {
+			if gcloudignoreMatches(p, f) {
+				errs = append(errs, "gcloudignore-hub-gke pattern "+p+" drops embedded file "+f)
+			}
+		}
+	}
+	return errs
+}
+
+func listEmbedFiles(t *testing.T) []string {
+	t.Helper()
+	var files []string
+	for _, root := range embedRoots {
+		err := filepath.WalkDir(filepath.Join("..", root), func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if !d.IsDir() {
+				rel, _ := filepath.Rel("..", p)
+				files = append(files, filepath.ToSlash(rel))
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", root, err)
+		}
+	}
+	if len(files) == 0 {
+		t.Fatal("no embedded files found")
+	}
+	return files
 }
 
 func readRepoFile(t *testing.T, rel string) string {
@@ -198,52 +491,120 @@ func TestRootDockerfileHubGKEContract(t *testing.T) {
 	}
 }
 
-func TestHubGKECloudBuildContract(t *testing.T) {
+func TestDockerfileContractHubGKECloudBuild(t *testing.T) {
 	for _, e := range checkHubGKECloudBuildContract(readRepoFile(t, "image-build/cloudbuild-hub-gke.yaml")) {
 		t.Error(e)
 	}
 }
 
-// TestDockerfileContractCheckerDetectsViolations proves the checkers fail on
-// the mutations they exist to catch, so a passing contract test means something.
+func TestDockerfileContractHubGKEIgnoreFile(t *testing.T) {
+	for _, e := range checkHubGKEIgnoreFileContract(readRepoFile(t, hubGKEIgnoreFile), listEmbedFiles(t)) {
+		t.Error(e)
+	}
+	readme := readRepoFile(t, "image-build/README.md")
+	if !strings.Contains(readme, "--ignore-file="+hubGKEIgnoreFile) {
+		t.Error("image-build/README.md must pass --ignore-file=" + hubGKEIgnoreFile + " for the hub-gke build")
+	}
+}
+
+// mustReplace applies a mutation and fails if it did not change the input.
+func mustReplace(t *testing.T, s, old, new string) string {
+	t.Helper()
+	if !strings.Contains(s, old) {
+		t.Fatalf("mutation anchor not found: %q", old)
+	}
+	return strings.Replace(s, old, new, 1)
+}
+
+// expectViolation fails unless errs contains a message containing want.
+func expectViolation(t *testing.T, name string, errs []string, want string) {
+	t.Helper()
+	for _, e := range errs {
+		if strings.Contains(e, want) {
+			return
+		}
+	}
+	t.Errorf("%s: expected a violation containing %q; got %q", name, want, errs)
+}
+
+// TestDockerfileContractCheckerDetectsViolations proves each checker assertion
+// fails on the mutation it exists to catch (by its specific message), and that
+// the parser does not report violations on valid inputs it used to misread.
 func TestDockerfileContractCheckerDetectsViolations(t *testing.T) {
 	good := readRepoFile(t, "Dockerfile")
 	idx := strings.LastIndex(good, "\nFROM runtime\n")
 	if idx < 0 {
 		t.Fatal("trailing FROM runtime not found")
 	}
-	dockerMutations := map[string]string{
-		"trailing stage removed":   good[:idx+1],
-		"stage appended after it":  good + "\nFROM runtime AS extra\nRUN true\n",
-		"hub-gke CMD added":        strings.Replace(good, "USER 1000:1000\n", "USER 1000:1000\nCMD [\"server\"]\n", 1),
-		"hub-gke KUBECONFIG added": strings.Replace(good, "ENV HOME=/home/scion\n", "ENV HOME=/home/scion KUBECONFIG=/k\n", 1),
-		"hub-gke USER root":        strings.Replace(good, "USER 1000:1000\n", "USER 0:0\n", 1),
-		"runtime ENTRYPOINT moved": strings.Replace(good, `ENTRYPOINT ["/usr/local/bin/scion"]`, `ENTRYPOINT ["/bin/sh"]`, 1),
-		"hub-gke from debian":      strings.Replace(good, "FROM runtime AS hub-gke", "FROM debian:bookworm-slim AS hub-gke", 1),
+	const homeLine = "ENV HOME=/home/scion\n"
+	dockerMutations := []struct{ name, src, want string }{
+		{"trailing stage removed", good[:idx+1], "final stage must be"},
+		{"stage appended after it", good + "\nFROM runtime AS extra\nRUN true\n", "final stage must be"},
+		{"hub-gke CMD added", mustReplace(t, good, "USER 1000:1000\n", "USER 1000:1000\nCMD [\"server\"]\n"), "must not set CMD"},
+		{"hub-gke USER root", mustReplace(t, good, "USER 1000:1000\n", "USER 0:0\n"), "final USER must be 1000:1000"},
+		{"runtime ENTRYPOINT moved", mustReplace(t, good, `ENTRYPOINT ["/usr/local/bin/scion"]`, `ENTRYPOINT ["/bin/sh"]`), "ENTRYPOINT must be"},
+		{"hub-gke from debian", mustReplace(t, good, "FROM runtime AS hub-gke", "FROM debian:bookworm-slim AS hub-gke"), "must be FROM runtime"},
+		{"hub-gke HOME removed", mustReplace(t, good, homeLine, ""), "ENV HOME=/home/scion"},
+		{"hub-gke HOME=/root", mustReplace(t, good, homeLine, "ENV HOME=/root\n"), "ENV HOME=/home/scion"},
+		{"hub-gke HOME overridden later", mustReplace(t, good, homeLine, homeLine+"ENV HOME /root\n"), "ENV HOME=/home/scion"},
+		{"useradd uid changed", mustReplace(t, good, "useradd -u 1000 ", "useradd -u 1001 "), "useradd -u 1000"},
+		{"mkdir ~/.scion removed", mustReplace(t, good, " && mkdir -p /home/scion/.scion \\\n", ""), "mkdir -p /home/scion/.scion"},
+		{"chown changed", mustReplace(t, good, "chown -R 1000:1000 /home/scion", "chown -R 1000 /home/scion"), "chown -R 1000:1000 /home/scion"},
+		{"hub-gke ENV KUBECONFIG", mustReplace(t, good, homeLine, "ENV HOME=/home/scion KUBECONFIG=/k\n"), "must not set ENV KUBECONFIG"},
+		{"hub-gke ARG KUBECONFIG", mustReplace(t, good, homeLine, homeLine+"ARG KUBECONFIG\n"), "must not set ARG KUBECONFIG"},
+		{"runtime ENV KUBECONFIG", mustReplace(t, good, "EXPOSE 8080\n", "EXPOSE 8080\nENV KUBECONFIG=/k\n"), "stage runtime (hub-gke or a stage it inherits from) must not set ENV KUBECONFIG"},
+		{"runtime ENV KUBECONFIG legacy form", mustReplace(t, good, "EXPOSE 8080\n", "EXPOSE 8080\nENV KUBECONFIG /k\n"), "must not set ENV KUBECONFIG"},
+		{"runtime ARG KUBECONFIG", mustReplace(t, good, "EXPOSE 8080\n", "EXPOSE 8080\nARG KUBECONFIG=/k\n"), "must not set ARG KUBECONFIG"},
+		{"KUBECONFIG after a comment in a continuation", mustReplace(t, good, homeLine, "ENV HOME=/home/scion \\\n# note\n    KUBECONFIG=/k\n"), "must not set ENV KUBECONFIG"},
 	}
-	for name, m := range dockerMutations {
-		if m == good {
-			t.Errorf("%s: mutation did not apply", name)
-			continue
-		}
-		if errs := checkRootDockerfileContract(t, m); len(errs) == 0 {
-			t.Errorf("%s: checker did not report a violation", name)
+	for _, m := range dockerMutations {
+		expectViolation(t, m.name, checkRootDockerfileContract(t, m.src), m.want)
+	}
+
+	// Valid variants the parser must not misreport.
+	dockerValid := map[string]string{
+		"comment inside a continuation": mustReplace(t, good, homeLine, "ENV HOME=/home/scion \\\n# KUBECONFIG is deliberately not set\n    FOO=1\n"),
+		"stage names in other case":     mustReplace(t, mustReplace(t, good, "FROM runtime AS hub-gke", "from RUNTIME as HUB-GKE"), "\nFROM runtime\n", "\nfrom Runtime\n"),
+	}
+	for name, src := range dockerValid {
+		if errs := checkRootDockerfileContract(t, src); len(errs) != 0 {
+			t.Errorf("%s: valid Dockerfile reported violations: %q", name, errs)
 		}
 	}
 
 	cb := readRepoFile(t, "image-build/cloudbuild-hub-gke.yaml")
-	cbMutations := map[string]string{
-		"latest tag added": strings.Replace(cb, "      - '$_REGISTRY/scion-hub-gke:$_SHORT_SHA'\n",
-			"      - '$_REGISTRY/scion-hub-gke:$_SHORT_SHA'\n      - '-t'\n      - '$_REGISTRY/scion-hub-gke:latest'\n", 1),
-		"target dropped": strings.Replace(cb, "'hub-gke'", "'runtime'", 1),
+	const tagLine = "      - '$_REGISTRY/scion-hub-gke:$_SHORT_SHA'\n"
+	cbMutations := []struct{ name, src, want string }{
+		{"latest tag added", mustReplace(t, cb, tagLine, tagLine+"      - '-t'\n      - '$_REGISTRY/scion-hub-gke:latest'\n"), "must not mention latest"},
+		{"second moving tag", mustReplace(t, cb, tagLine, tagLine+"      - '-t'\n      - '$_REGISTRY/scion-hub-gke:main'\n"), "exactly one -t"},
+		{"second tag in --tag= form", mustReplace(t, cb, tagLine, tagLine+"      - '--tag=$_REGISTRY/scion-hub-gke:main'\n"), "exactly one -t"},
+		{"tag not the short sha", mustReplace(t, cb, tagLine, "      - '$_REGISTRY/scion-hub-gke:dev'\n"), "exactly one -t"},
+		{"_TAG substitution", mustReplace(t, cb, "  _SHORT_SHA: ''\n", "  _SHORT_SHA: ''\n  _TAG: 'main'\n"), "_TAG substitution"},
+		{"target dropped", mustReplace(t, cb, "'hub-gke'", "'runtime'"), "--target hub-gke"},
+		{"multi-arch platform", mustReplace(t, cb, "'linux/amd64'", "'linux/amd64,linux/arm64'"), "--platform linux/amd64"},
+		{"--push dropped", mustReplace(t, cb, "      - '--push'\n", ""), "must pass --push"},
+		{"-f swapped", mustReplace(t, cb, "      - 'Dockerfile'\n", "      - 'image-build/hub/Dockerfile'\n"), "-f Dockerfile"},
+		{"require-short-sha neutered", mustReplace(t, cb, `'test -n "$_SHORT_SHA" || { echo "ERROR: pass --substitutions=_SHORT_SHA=<git short sha>" >&2; exit 1; }'`, "'true'"), "require-short-sha step"},
+		{"ignore file reverted to omni", strings.ReplaceAll(cb, "gcloudignore-hub-gke", "gcloudignore-omni"), "--ignore-file=" + hubGKEIgnoreFile},
 	}
-	for name, m := range cbMutations {
-		if m == cb {
-			t.Errorf("%s: mutation did not apply", name)
-			continue
-		}
-		if errs := checkHubGKECloudBuildContract(m); len(errs) == 0 {
-			t.Errorf("%s: checker did not report a violation", name)
-		}
+	for _, m := range cbMutations {
+		expectViolation(t, m.name, checkHubGKECloudBuildContract(m.src), m.want)
 	}
+	if errs := checkHubGKECloudBuildContract("# never latest\n" + cb); len(errs) != 0 {
+		t.Errorf("latest in a comment: valid file reported violations: %q", errs)
+	}
+
+	ign := readRepoFile(t, hubGKEIgnoreFile)
+	embedFiles := listEmbedFiles(t)
+	ignMutations := []struct{ name, src, want string }{
+		{"agents.md unanchored", mustReplace(t, ign, "\n/agents.md\n", "\nagents.md\n"), "drops embedded file pkg/config/embeds/templates/default/agents.md"},
+		{".gemini/ unanchored", mustReplace(t, ign, "\n/.gemini/\n", "\n.gemini/\n"), "drops embedded file resources/templates/default/home/.gemini/.geminiignore"},
+		{"agents.md pattern removed", mustReplace(t, ign, "\n/agents.md\n", "\n"), "root-anchored pattern /agents.md"},
+		{"unanchored directory pattern", ign + "\ntemplates/\n", "pattern templates/ drops embedded file"},
+	}
+	for _, m := range ignMutations {
+		expectViolation(t, m.name, checkHubGKEIgnoreFileContract(m.src, embedFiles), m.want)
+	}
+	// The same check against gcloudignore-omni reproduces the review's finding.
+	expectViolation(t, "gcloudignore-omni", checkHubGKEIgnoreFileContract(readRepoFile(t, "image-build/gcloudignore-omni"), embedFiles), "pattern agents.md drops embedded file")
 }
