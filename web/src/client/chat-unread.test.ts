@@ -31,6 +31,8 @@ import {
   ChatUnreadCounter,
   countUnreadDMs,
   countUnreadSpaces,
+  INITIAL_REFRESH_MAX_DELAY_MS,
+  startChatUnreadIfEligible,
   UNREAD_REFRESH_DEBOUNCE_MS,
   type UnreadDM,
   type UnreadSpace,
@@ -179,8 +181,8 @@ describe('ChatUnreadCounter', () => {
     mockChatApi([{ unreadCount: 1 }], []);
     const counter = new ChatUnreadCounter();
     counter.start();
-    // start() refreshes once immediately.
-    await vi.advanceTimersByTimeAsync(0);
+    // start() refreshes once, by the deferral bound at the latest.
+    await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS);
     apiFetch.mockClear();
 
     try {
@@ -210,7 +212,7 @@ describe('ChatUnreadCounter', () => {
 
     const counter = new ChatUnreadCounter();
     counter.start();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS);
     expect(getUnreadBadge()).toBe(0);
 
     try {
@@ -253,7 +255,7 @@ describe('ChatUnreadCounter', () => {
 
     const counter = new ChatUnreadCounter();
     counter.start();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS);
     expect(getUnreadBadge()).toBe(0);
 
     try {
@@ -288,7 +290,7 @@ describe('ChatUnreadCounter', () => {
     });
     const counter = new ChatUnreadCounter();
     counter.start();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS);
     expect(getUnreadBadge()).toBe(0);
 
     try {
@@ -309,7 +311,7 @@ describe('ChatUnreadCounter', () => {
     mockChatApi([{ unreadCount: 1 }], []);
     const counter = new ChatUnreadCounter();
     counter.start();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS);
     apiFetch.mockClear();
 
     try {
@@ -334,7 +336,7 @@ describe('ChatUnreadCounter', () => {
     mockChatApi([{ unreadCount: 1 }], []);
     const counter = new ChatUnreadCounter();
     counter.start();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS);
     apiFetch.mockClear();
 
     try {
@@ -359,7 +361,7 @@ describe('ChatUnreadCounter', () => {
     mockChatApi([], []);
     const counter = new ChatUnreadCounter();
     counter.start();
-    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS);
     counter.stop();
     apiFetch.mockClear();
 
@@ -382,5 +384,366 @@ describe('ChatUnreadCounter', () => {
 
     expect(getUnreadBadge()).toBe(6);
     localStorage.clear();
+  });
+});
+
+/** Requests the counter sent, by endpoint. */
+function chatRequests(): { spaces: number; dms: number } {
+  const urls = apiFetch.mock.calls.map((c) => String(c[0]));
+  return {
+    spaces: urls.filter((u) => u.endsWith('/chat/spaces')).length,
+    dms: urls.filter((u) => u.endsWith('/chat/dms')).length,
+  };
+}
+
+/**
+ * A controllable requestIdleCallback. happy-dom has none, so without this the
+ * counter takes its timer fallback.
+ */
+function installIdleCallback(): {
+  runIdle: () => void;
+  timeouts: Array<number | undefined>;
+  cancelled: number[];
+  restore: () => void;
+} {
+  const pending = new Map<number, IdleRequestCallback>();
+  const timeouts: Array<number | undefined> = [];
+  const cancelled: number[] = [];
+  let next = 1;
+  const w = window as unknown as {
+    requestIdleCallback?: unknown;
+    cancelIdleCallback?: unknown;
+  };
+  w.requestIdleCallback = (cb: IdleRequestCallback, opts?: IdleRequestOptions): number => {
+    const id = next++;
+    pending.set(id, cb);
+    timeouts.push(opts?.timeout);
+    return id;
+  };
+  w.cancelIdleCallback = (id: number): void => {
+    cancelled.push(id);
+    pending.delete(id);
+  };
+  return {
+    runIdle: () => {
+      const cbs = [...pending.values()];
+      pending.clear();
+      for (const cb of cbs) cb({ didTimeout: false, timeRemaining: () => 50 });
+    },
+    timeouts,
+    cancelled,
+    restore: () => {
+      delete w.requestIdleCallback;
+      delete w.cancelIdleCallback;
+    },
+  };
+}
+
+describe('ChatUnreadCounter first refresh', () => {
+  it('sends nothing on start, then one pair at the first idle period', async () => {
+    vi.useFakeTimers();
+    const idle = installIdleCallback();
+    mockChatApi([{ unreadCount: 2 }], [{ hasUnread: true }]);
+    const counter = new ChatUnreadCounter();
+    try {
+      counter.start();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(apiFetch).not.toHaveBeenCalled();
+      // Bounded: idle may never come on a busy page.
+      expect(idle.timeouts).toHaveLength(1);
+      expect(idle.timeouts[0]).toBeGreaterThan(0);
+      expect(idle.timeouts[0]).toBeLessThanOrEqual(3000);
+
+      idle.runIdle();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+      expect(getUnreadBadge()).toBe(3);
+    } finally {
+      counter.stop();
+      idle.restore();
+    }
+  });
+
+  it('falls back to a bounded timer where requestIdleCallback is missing', async () => {
+    vi.useFakeTimers();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    try {
+      counter.start();
+      await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS - 1);
+      expect(apiFetch).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+      expect(INITIAL_REFRESH_MAX_DELAY_MS).toBeLessThanOrEqual(3000);
+    } finally {
+      counter.stop();
+    }
+  });
+
+  it('refreshes once for a chat notification that arrives before idle', async () => {
+    vi.useFakeTimers();
+    const idle = installIdleCallback();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    try {
+      counter.start();
+      stateManager.dispatchEvent(
+        new CustomEvent('notification-created', {
+          detail: { state: {}, data: { status: MENTION_STATUS } },
+        })
+      );
+      await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS + 1);
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+
+      // The idle period arriving afterwards must not repeat it.
+      idle.runIdle();
+      await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS);
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+      expect(getUnreadBadge()).toBe(1);
+    } finally {
+      counter.stop();
+      idle.restore();
+    }
+  });
+
+  it('sends nothing when stopped before idle', async () => {
+    vi.useFakeTimers();
+    const idle = installIdleCallback();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    try {
+      counter.start();
+      counter.stop();
+      idle.runIdle();
+      await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS * 2);
+
+      expect(apiFetch).not.toHaveBeenCalled();
+      expect(idle.cancelled).toHaveLength(1);
+    } finally {
+      idle.restore();
+    }
+  });
+
+  it('sends nothing when stopped before the fallback timer', async () => {
+    vi.useFakeTimers();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    counter.start();
+    counter.stop();
+    await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS * 2);
+
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('sends nothing when both halves were pushed before idle', async () => {
+    vi.useFakeTimers();
+    const idle = installIdleCallback();
+    mockChatApi([{ unreadCount: 9 }], [{ hasUnread: true }]);
+    const counter = new ChatUnreadCounter();
+    try {
+      counter.start();
+      counter.setSpaceUnread([{ unreadCount: 4 }]);
+      counter.setDMUnread([{ hasUnread: true }, { hasUnread: true, muted: true }]);
+      idle.runIdle();
+      await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS);
+
+      expect(apiFetch).not.toHaveBeenCalled();
+      expect(getUnreadBadge()).toBe(5);
+    } finally {
+      counter.stop();
+      idle.restore();
+    }
+  });
+
+  it('still fetches both halves when only one was pushed before idle', async () => {
+    vi.useFakeTimers();
+    const idle = installIdleCallback();
+    mockChatApi([{ unreadCount: 2 }], [{ hasUnread: true }]);
+    const counter = new ChatUnreadCounter();
+    try {
+      counter.start();
+      counter.setSpaceUnread([{ unreadCount: 2 }]);
+      idle.runIdle();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+      expect(getUnreadBadge()).toBe(3);
+    } finally {
+      counter.stop();
+      idle.restore();
+    }
+  });
+});
+
+describe('ChatUnreadCounter hold for chat page pushes', () => {
+  it('sends nothing when the page pushes both halves during the hold', async () => {
+    vi.useFakeTimers();
+    const idle = installIdleCallback();
+    mockChatApi([{ unreadCount: 9 }], []);
+    const counter = new ChatUnreadCounter();
+    try {
+      counter.start();
+      counter.holdFirstRefreshForPagePushes();
+      // Idle arriving while the page's own requests are in flight is ignored.
+      idle.runIdle();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(apiFetch).not.toHaveBeenCalled();
+
+      counter.setSpaceUnread([{ unreadCount: 3 }]);
+      counter.setDMUnread([{ hasUnread: true }]);
+      await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS * 2);
+
+      expect(apiFetch).not.toHaveBeenCalled();
+      expect(getUnreadBadge()).toBe(4);
+      expect(idle.cancelled).toHaveLength(1);
+    } finally {
+      counter.stop();
+      idle.restore();
+    }
+  });
+
+  it('fetches the pair at the bound when only one half was pushed', async () => {
+    vi.useFakeTimers();
+    mockChatApi([{ unreadCount: 2 }], [{ hasUnread: true }]);
+    const counter = new ChatUnreadCounter();
+    try {
+      counter.start();
+      counter.holdFirstRefreshForPagePushes();
+      counter.setSpaceUnread([{ unreadCount: 2 }]);
+      await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS - 1);
+      expect(apiFetch).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+      expect(getUnreadBadge()).toBe(3);
+    } finally {
+      counter.stop();
+    }
+  });
+
+  it('fetches the pair at the bound when nothing was pushed', async () => {
+    vi.useFakeTimers();
+    const idle = installIdleCallback();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    try {
+      counter.start();
+      counter.holdFirstRefreshForPagePushes();
+      idle.runIdle();
+      await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS - 1);
+      expect(apiFetch).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+    } finally {
+      counter.stop();
+      idle.restore();
+    }
+  });
+
+  it('measures the bound from start, not from the hold', async () => {
+    vi.useFakeTimers();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    const idle = installIdleCallback();
+    try {
+      counter.start();
+      await vi.advanceTimersByTimeAsync(1000);
+      counter.holdFirstRefreshForPagePushes();
+      await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS - 1000 - 1);
+      expect(apiFetch).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+    } finally {
+      counter.stop();
+      idle.restore();
+    }
+  });
+
+  it('has no effect once the first refresh has run', async () => {
+    vi.useFakeTimers();
+    const idle = installIdleCallback();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    try {
+      counter.start();
+      idle.runIdle();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+
+      counter.holdFirstRefreshForPagePushes();
+      await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS * 2);
+
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      counter.stop();
+      idle.restore();
+    }
+  });
+
+  it('sends nothing and leaves no timer when stopped during the hold', async () => {
+    vi.useFakeTimers();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    counter.start();
+    counter.holdFirstRefreshForPagePushes();
+    await vi.advanceTimersByTimeAsync(1000);
+    counter.stop();
+    expect(vi.getTimerCount()).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS * 2);
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it('never holds a refresh for a live chat event', async () => {
+    vi.useFakeTimers();
+    mockChatApi([{ unreadCount: 1 }], []);
+    const counter = new ChatUnreadCounter();
+    try {
+      counter.start();
+      counter.holdFirstRefreshForPagePushes();
+      stateManager.dispatchEvent(new CustomEvent('chat-message-received', { detail: {} }));
+      await vi.advanceTimersByTimeAsync(UNREAD_REFRESH_DEBOUNCE_MS + 1);
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+
+      await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS * 2);
+      expect(chatRequests()).toEqual({ spaces: 1, dms: 1 });
+    } finally {
+      counter.stop();
+    }
+  });
+
+  it('does nothing when the counter was never started', async () => {
+    // Chat disabled or nobody signed in: the chat page's hold must not turn
+    // into a fetch of its own.
+    vi.useFakeTimers();
+    mockChatApi([], []);
+    const counter = new ChatUnreadCounter();
+    counter.holdFirstRefreshForPagePushes();
+    await vi.advanceTimersByTimeAsync(INITIAL_REFRESH_MAX_DELAY_MS * 2);
+
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('startChatUnreadIfEligible', () => {
+  it('starts only for a signed-in user with chat enabled', () => {
+    const cases: Array<[boolean, boolean, boolean]> = [
+      [true, true, true],
+      [true, false, false],
+      [false, true, false],
+      [false, false, false],
+    ];
+    for (const [signedIn, chatEnabled, expected] of cases) {
+      const start = vi.fn();
+      expect(startChatUnreadIfEligible({ start }, signedIn, chatEnabled)).toBe(expected);
+      expect(start).toHaveBeenCalledTimes(expected ? 1 : 0);
+    }
   });
 });

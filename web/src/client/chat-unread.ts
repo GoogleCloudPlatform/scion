@@ -38,6 +38,17 @@ import { stateManager } from './state.js';
  */
 export const UNREAD_REFRESH_DEBOUNCE_MS = 500;
 
+/**
+ * Upper bound on how long the first refresh waits after start(). The first
+ * refresh runs at the page's first idle period so it does not compete with
+ * the page's own requests, and no later than this. It is also how long the
+ * chat page's hold lasts (see holdFirstRefreshForPagePushes).
+ */
+export const INITIAL_REFRESH_MAX_DELAY_MS = 3000;
+
+type InitialHandle =
+  { kind: 'idle'; id: number } | { kind: 'timeout'; id: ReturnType<typeof setTimeout> };
+
 /** The unread fields of `GET /api/v1/chat/spaces`. */
 export interface UnreadSpace {
   unreadCount?: number;
@@ -75,10 +86,21 @@ export class ChatUnreadCounter {
   private stopped = false;
   /** Incrementing counter to detect stale refresh results. */
   private refreshId = 0;
+  /** The pending first refresh, until it runs or is superseded. */
+  private initial: InitialHandle | null = null;
+  private startedAt = 0;
+  private holdingForPagePushes = false;
+  /** Which halves have been pushed in since start(). */
+  private spacesPushed = false;
+  private dmsPushed = false;
   private readonly boundSchedule = (): void => this.scheduleRefresh();
   private readonly boundNotification = (e: Event): void => this.onNotification(e);
 
-  /** Begins tracking, with one immediate refresh. */
+  /**
+   * Begins tracking. The first refresh is deferred to the page's first idle
+   * period (at most INITIAL_REFRESH_MAX_DELAY_MS), so it stays off the
+   * critical path of the page's own requests.
+   */
   start(): void {
     if (this.listening) return;
     // Anything that can create or clear an unread conversation.
@@ -87,7 +109,11 @@ export class ChatUnreadCounter {
     stateManager.addEventListener('chat-read-state-updated', this.boundSchedule);
     this.listening = true;
     this.stopped = false;
-    void this.refresh();
+    this.spacesPushed = false;
+    this.dmsPushed = false;
+    this.holdingForPagePushes = false;
+    this.startedAt = Date.now();
+    this.scheduleInitialRefresh();
   }
 
   stop(): void {
@@ -98,6 +124,28 @@ export class ChatUnreadCounter {
     this.listening = false;
     this.stopped = true;
     this.cancelPending();
+    this.cancelInitialRefresh();
+  }
+
+  /**
+   * Holds the first refresh for data the chat page is about to push in.
+   *
+   * The chat page loads both halves itself, and those loads are slow enough
+   * that an idle-time refresh would usually go out alongside them. Once this
+   * is called, the first refresh waits until INITIAL_REFRESH_MAX_DELAY_MS
+   * after start() instead of the first idle period; if both halves were pushed
+   * by then it sends nothing, otherwise it fetches both as usual.
+   *
+   * Only the first refresh is affected: this does nothing once that refresh
+   * has run or been superseded, and refreshes for live chat events are never
+   * held.
+   */
+  holdFirstRefreshForPagePushes(): void {
+    if (!this.initial || this.holdingForPagePushes) return;
+    this.holdingForPagePushes = true;
+    this.cancelInitialRefresh();
+    const remaining = Math.max(0, this.startedAt + INITIAL_REFRESH_MAX_DELAY_MS - Date.now());
+    this.initial = { kind: 'timeout', id: setTimeout(() => this.runInitialRefresh(), remaining) };
   }
 
   /**
@@ -112,12 +160,14 @@ export class ChatUnreadCounter {
    */
   setSpaceUnread(spaces: readonly UnreadSpace[]): void {
     this.spaceUnread = countUnreadSpaces(spaces);
+    this.spacesPushed = true;
     this.publish();
   }
 
   /** DM half, from data the chat page already loaded. */
   setDMUnread(dms: readonly UnreadDM[]): void {
     this.dmUnread = countUnreadDMs(dms);
+    this.dmsPushed = true;
     this.publish();
   }
 
@@ -141,6 +191,9 @@ export class ChatUnreadCounter {
 
   /** Coalesces a burst of events into a single refresh. */
   scheduleRefresh(): void {
+    // This refresh carries both halves, so a pending first refresh would
+    // only repeat it.
+    this.cancelInitialRefresh();
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => {
       this.timer = null;
@@ -150,6 +203,7 @@ export class ChatUnreadCounter {
 
   /** Recomputes both halves from the server. */
   async refresh(): Promise<void> {
+    this.cancelInitialRefresh();
     const localId = ++this.refreshId;
     const [spaces, dms] = await Promise.all([this.fetchSpaces(), this.fetchDMs()]);
     // Discard stale results: a newer refresh was started while we awaited.
@@ -157,6 +211,35 @@ export class ChatUnreadCounter {
     if (spaces) this.spaceUnread = countUnreadSpaces(spaces);
     if (dms) this.dmUnread = countUnreadDMs(dms);
     this.publish();
+  }
+
+  private scheduleInitialRefresh(): void {
+    this.cancelInitialRefresh();
+    const run = (): void => this.runInitialRefresh();
+    if (typeof window.requestIdleCallback === 'function') {
+      this.initial = {
+        kind: 'idle',
+        id: window.requestIdleCallback(run, { timeout: INITIAL_REFRESH_MAX_DELAY_MS }),
+      };
+    } else {
+      this.initial = { kind: 'timeout', id: setTimeout(run, INITIAL_REFRESH_MAX_DELAY_MS) };
+    }
+  }
+
+  private runInitialRefresh(): void {
+    this.initial = null;
+    // The chat page already supplied both halves: fetching them again would
+    // repeat its requests for the same answer.
+    if (this.spacesPushed && this.dmsPushed) return;
+    void this.refresh();
+  }
+
+  private cancelInitialRefresh(): void {
+    const pending = this.initial;
+    if (!pending) return;
+    this.initial = null;
+    if (pending.kind === 'idle') window.cancelIdleCallback(pending.id);
+    else clearTimeout(pending.id);
   }
 
   private cancelPending(): void {
@@ -193,6 +276,21 @@ export class ChatUnreadCounter {
       return null;
     }
   }
+}
+
+/**
+ * Starts the counter only for a signed-in user with native chat enabled. With
+ * chat disabled the endpoints it reads are not registered, and with nobody
+ * signed in there is nothing to count. Returns whether it started.
+ */
+export function startChatUnreadIfEligible(
+  counter: Pick<ChatUnreadCounter, 'start'>,
+  signedIn: boolean,
+  chatEnabled: boolean
+): boolean {
+  if (!signedIn || !chatEnabled) return false;
+  counter.start();
+  return true;
 }
 
 /** The page-wide unread counter. */

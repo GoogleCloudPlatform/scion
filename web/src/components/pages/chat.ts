@@ -1320,6 +1320,9 @@ export class ScionPageChat extends LitElement {
     this._paletteAgentsRelease = agentStore.retain({ scope: 'hub' }, (snapshot) =>
       this._handlePaletteAgentSnapshot(snapshot)
     );
+    // The rail and the DM load below push both unread halves into the tab
+    // badge counter; hold its first refresh for them rather than repeat them.
+    chatUnread.holdFirstRefreshForPagePushes();
     void this.initV2();
   }
 
