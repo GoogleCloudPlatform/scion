@@ -157,8 +157,8 @@ export interface AgentServer {
   /** Probe requests (`sort=updated`), every page, optionally for one path prefix. */
   probes(pathPrefix?: string): number;
   /**
-   * A broker heartbeat: set `updated` on every row (or the given ids) to
-   * `at`, leaving the last activity time alone, as the hub does.
+   * A broker heartbeat: set `updated` and `lastSeen` on every row (or the
+   * given ids) to `at`, leaving the last activity time alone, as the hub does.
    */
   heartbeat(at: string, ids?: readonly string[]): void;
   /** Single-agent requests (`/api/v1/agents/{id}`), optionally for one id. */
@@ -181,6 +181,38 @@ function ms(value: string | undefined): number {
  * set, else `updated`; ties on `created`, then id, both descending. A Go zero
  * time (`0001-01-01T00:00:00Z`) is how the hub writes an unset activity time.
  */
+/** The keys of a `view=compact` list item, as the hub's compact view emits them. */
+const COMPACT_KEYS = [
+  'id',
+  'slug',
+  'name',
+  'template',
+  'projectId',
+  'project',
+  'labels',
+  'phase',
+  'activity',
+  'containerStatus',
+  'messageMode',
+  'ancestry',
+  'createdBy',
+  'created',
+  'updated',
+  'lastActivityEvent',
+  '_capabilities',
+  '_messageability',
+] as const;
+
+/** A row as the compact view lists it: its compact keys, and the creator's name. */
+function compactRow(a: Agent): Agent {
+  const row: Record<string, unknown> = {};
+  const full = a as unknown as Record<string, unknown>;
+  for (const key of COMPACT_KEYS) if (full[key] !== undefined) row[key] = full[key];
+  const creatorName = a.appliedConfig?.creatorName;
+  if (creatorName) row.creatorName = creatorName;
+  return row as unknown as Agent;
+}
+
 function compareUpdatedKey(a: Agent, b: Agent): number {
   const activity = (x: Agent): number =>
     x.lastActivityEvent?.startsWith('0001') ? 0 : ms(x.lastActivityEvent);
@@ -204,6 +236,7 @@ export function createAgentServer(initial: Agent[] = []): AgentServer {
       if (signal?.aborted) throw new DOMException('aborted', 'AbortError');
       const url = new URL(path, 'http://localhost');
       const sorted = url.searchParams.get('sort') === 'updated';
+      const compact = url.searchParams.get('view') === 'compact';
       const status = (sorted ? server.sortedStatus?.(path) : undefined) ?? server.status;
       const single = SINGLE_AGENT.exec(url.pathname)?.[1];
       if (single !== undefined && heldReads) {
@@ -235,9 +268,10 @@ export function createAgentServer(initial: Agent[] = []): AgentServer {
       const end = offset + page.length;
       const body = {
         // A copy, as a response would be: no object shared with the rows held.
-        agents: page.map((a) =>
-          structuredClone(project && server.projectRow ? server.projectRow(a) : a)
-        ),
+        agents: page.map((a) => {
+          const listed = project && server.projectRow ? server.projectRow(a) : a;
+          return structuredClone(compact ? compactRow(listed) : listed);
+        }),
         ...(end < rows.length ? { nextCursor: String(end) } : {}),
         ...(sorted ? { totalCount: server.totalCount ?? rows.length } : {}),
         ...(server.scopeCapabilities ? { _capabilities: server.scopeCapabilities } : {}),
@@ -276,7 +310,7 @@ export function createAgentServer(initial: Agent[] = []): AgentServer {
       server.requests.filter((p) => p.startsWith(pathPrefix) && isSorted(p)).length,
     heartbeat: (at, ids) => {
       server.agents = server.agents.map((a) =>
-        ids === undefined || ids.includes(a.id) ? { ...a, updated: at } : a
+        ids === undefined || ids.includes(a.id) ? { ...a, updated: at, lastSeen: at } : a
       );
     },
     agentFetches: (id) =>

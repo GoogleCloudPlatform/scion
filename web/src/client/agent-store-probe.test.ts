@@ -471,9 +471,12 @@ describe('AgentStore delta probe', () => {
   });
 
   describe('the order a probe reads', () => {
-    /** A row whose last activity time is `activity` seconds into the day. */
+    /**
+     * A row whose last activity time is `activity` seconds into the day, with
+     * `lastSeen`, a field the full rows have and compact probe rows lack.
+     */
     const active = (id: string, activity: number, extra: Partial<Agent> = {}): Agent =>
-      row(id, activity, { lastActivityEvent: t(activity), ...extra });
+      row(id, activity, { lastActivityEvent: t(activity), lastSeen: t(activity), ...extra });
 
     it('does not publish while heartbeats move only `updated`, and merges a row changed with them', async () => {
       let publishes = 0;
@@ -496,6 +499,26 @@ describe('AgentStore delta probe', () => {
       await tick();
       expect(publishes).toBe(1);
       expect(find(h.store.peek(HUB), 'a99')?.labels).toEqual({ team: 'blue' });
+    });
+
+    it('merges a row whose activity time moves while its activity stays the same', async () => {
+      const h = await loaded(Array.from({ length: 10 }, (_, i) => active(`a${i}`, 1)));
+      h.server.heartbeat(t(1000));
+      h.server.agents[3] = { ...h.server.agents[3], lastActivityEvent: t(900) };
+      await tick();
+      expect(find(h.store.peek(HUB), 'a3')?.lastActivityEvent).toBe(t(900));
+    });
+
+    it('merges a field the held row has as null', async () => {
+      const h = await loaded(
+        Array.from({ length: 10 }, (_, i) =>
+          active(`a${i}`, 1, { labels: null } as unknown as Partial<Agent>)
+        )
+      );
+      h.server.heartbeat(t(1000));
+      h.server.agents[3] = { ...h.server.agents[3], labels: { team: 'blue' } };
+      await tick();
+      expect(find(h.store.peek(HUB), 'a3')?.labels).toEqual({ team: 'blue' });
     });
 
     it('reads one page and does not walk while heartbeats move only `updated`', async () => {
