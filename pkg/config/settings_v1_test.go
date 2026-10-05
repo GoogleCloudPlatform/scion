@@ -5021,11 +5021,11 @@ func TestWorkspaceStorageConfig_ValidateNFS(t *testing.T) {
 			{"unset uses defaults", 0, 0, ""},
 			{"explicit", 2000, 3000, ""},
 			{"maximum", 4294967294, 4294967294, ""},
-			{"negative one uid", -1, 1000, "workspace_storage.nfs.uid"},
-			{"negative one gid", 1000, -1, "workspace_storage.nfs.gid"},
-			{"negative uid", -7, 1000, "workspace_storage.nfs.uid"},
-			{"unsigned sentinel gid", 1000, 4294967295, "workspace_storage.nfs.gid"},
-			{"out of range uid", 1 << 33, 1000, "workspace_storage.nfs.uid"},
+			{"negative one uid", -1, 1000, "server.workspace_storage.nfs.uid"},
+			{"negative one gid", 1000, -1, "server.workspace_storage.nfs.gid"},
+			{"negative uid", -7, 1000, "server.workspace_storage.nfs.uid"},
+			{"unsigned sentinel gid", 1000, 4294967295, "server.workspace_storage.nfs.gid"},
+			{"out of range uid", 1 << 33, 1000, "server.workspace_storage.nfs.uid"},
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {

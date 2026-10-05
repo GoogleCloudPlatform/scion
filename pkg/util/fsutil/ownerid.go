@@ -16,10 +16,10 @@ package fsutil
 
 import "fmt"
 
-// MaxOwnerID is the largest uid or gid ValidateOwnerID accepts. uid_t and
-// gid_t are 32-bit unsigned on Linux, and the all-ones value 4294967295 is
-// (uid_t)-1, which chown and lchown read as "leave unchanged", so it is
-// excluded.
+// MaxOwnerID is the largest uid or gid ValidateOwnerID accepts. The bound
+// is the uid_t/gid_t limit on Linux and darwin, where both are 32-bit
+// unsigned; the all-ones value 4294967295 is (uid_t)-1, which chown and
+// lchown read as "leave unchanged", so it is excluded.
 const MaxOwnerID = 4294967294
 
 // ValidateOwnerID returns an error naming field unless id is in

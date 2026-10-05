@@ -1517,6 +1517,13 @@ func (ws *V1WorkspaceStorageConfig) ApplyNFSDefaults() {
 	}
 }
 
+// Full settings keys for the NFS owner ids, used in error messages so a
+// broker warning or a failed agent start names the exact setting.
+const (
+	NFSUIDKey = "server.workspace_storage.nfs.uid"
+	NFSGIDKey = "server.workspace_storage.nfs.gid"
+)
+
 // ValidateNFS returns an error if Backend is "nfs" but the NFS block is
 // misconfigured: no shares defined, or a uid or gid outside
 // [0, fsutil.MaxOwnerID]. Call after ApplyNFSDefaults.
@@ -1529,10 +1536,10 @@ func (ws *V1WorkspaceStorageConfig) ValidateNFS() error {
 			"add at least one entry under workspace_storage.nfs.shares")
 	}
 	// An unset (0) uid/gid has become the default 1000 in ApplyNFSDefaults.
-	if err := fsutil.ValidateOwnerID("workspace_storage.nfs.uid", ws.NFS.UID); err != nil {
+	if err := fsutil.ValidateOwnerID(NFSUIDKey, ws.NFS.UID); err != nil {
 		return err
 	}
-	if err := fsutil.ValidateOwnerID("workspace_storage.nfs.gid", ws.NFS.GID); err != nil {
+	if err := fsutil.ValidateOwnerID(NFSGIDKey, ws.NFS.GID); err != nil {
 		return err
 	}
 	return nil

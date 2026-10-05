@@ -697,27 +697,31 @@ func TestStartNFSWorkspace_PermissionDeniedLeavesDirectoryToNode(t *testing.T) {
 
 // Start checks the configured workspace_storage.nfs uid/gid before the
 // runtime gets them: a broker only warns about invalid settings at
-// startup, so an out-of-range id must stop the start here with the field
-// named, and the pod is never created. Valid values, including the
-// default, still start.
+// startup, so an out-of-range id must stop the start here with the full
+// key named, before any leaf directory is created on the export, and the
+// pod is never created. Valid values, including the default, still start.
 func TestStartNFSWorkspace_OwnerIDRange(t *testing.T) {
 	tests := []struct {
 		name      string
 		ownerYAML string
 		wantField string
-		wantUID   int
+		// wantUID/wantGID are the ids the runtime must get; 0 means
+		// unset, which the runtime reads as the default 1000.
+		wantUID, wantGID int
 	}{
-		{name: "unset uses default", ownerYAML: "", wantUID: 1000},
-		{name: "explicit", ownerYAML: "      uid: 2000\n      gid: 2000\n", wantUID: 2000},
-		{name: "maximum", ownerYAML: "      uid: 4294967294\n", wantUID: 4294967294},
-		{name: "negative one uid", ownerYAML: "      uid: -1\n", wantField: "nfs.uid"},
-		{name: "negative gid", ownerYAML: "      gid: -5\n", wantField: "nfs.gid"},
-		{name: "unsigned sentinel uid", ownerYAML: "      uid: 4294967295\n", wantField: "nfs.uid"},
+		{name: "unset uses default", ownerYAML: ""},
+		{name: "explicit", ownerYAML: "      uid: 2000\n      gid: 3000\n", wantUID: 2000, wantGID: 3000},
+		{name: "maximum", ownerYAML: "      uid: 4294967294\n      gid: 4294967294\n", wantUID: 4294967294, wantGID: 4294967294},
+		{name: "negative one uid", ownerYAML: "      uid: -1\n", wantField: "server.workspace_storage.nfs.uid"},
+		{name: "negative gid", ownerYAML: "      gid: -5\n", wantField: "server.workspace_storage.nfs.gid"},
+		{name: "unsigned sentinel uid", ownerYAML: "      uid: 4294967295\n", wantField: "server.workspace_storage.nfs.uid"},
+		{name: "unsigned sentinel gid", ownerYAML: "      gid: 4294967295\n", wantField: "server.workspace_storage.nfs.gid"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			mountRoot := filepath.Join(t.TempDir(), "nfs")
 			require.NoError(t, os.MkdirAll(filepath.Join(mountRoot, "share-1"), 0o755))
+			projectsDir := filepath.Join(mountRoot, "share-1", "projects")
 			f := newSharedDirStorageRunFixture(t)
 			f.writeGlobalSettings(t, fmt.Sprintf(nfsWorkspaceStartYAML, mountRoot+"\n"+strings.TrimSuffix(tt.ownerYAML, "\n")))
 			ran := false
@@ -741,16 +745,16 @@ func TestStartNFSWorkspace_OwnerIDRange(t *testing.T) {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantField)
 				assert.False(t, ran, "the pod must not be created")
+				_, statErr := os.Stat(projectsDir)
+				assert.True(t, os.IsNotExist(statErr),
+					"no leaf directory may be created on the export for an invalid id (stat err: %v)", statErr)
 				return
 			}
 			require.NoError(t, err)
 			require.True(t, ran)
-			if tt.wantUID == 1000 && tt.ownerYAML == "" {
-				// 0 or 1000: both mean the default to the runtime.
-				assert.Contains(t, []int{0, 1000}, got.NFSUID)
-				return
-			}
+			assert.DirExists(t, filepath.Join(projectsDir, testNFSWorkspaceProjectID, "workspace"))
 			assert.Equal(t, tt.wantUID, got.NFSUID)
+			assert.Equal(t, tt.wantGID, got.NFSGID)
 		})
 	}
 }

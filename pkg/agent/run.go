@@ -1486,6 +1486,18 @@ authDone:
 		}
 		backend := runtime.SelectWorkspaceBackend(settings.Server.WorkspaceStorage, sharingMode)
 		if backend.Name() == "nfs" {
+			// A broker only warns about invalid workspace_storage at
+			// startup, so check the ids here, before any leaf directory
+			// is created on the export and before the runtime uses them
+			// for ownership. 0 still means "use the default 1000".
+			if nfsCfg := settings.Server.WorkspaceStorage.NFS; nfsCfg != nil {
+				if err := fsutil.ValidateOwnerID(config.NFSUIDKey, nfsCfg.UID); err != nil {
+					return nil, err
+				}
+				if err := fsutil.ValidateOwnerID(config.NFSGIDKey, nfsCfg.GID); err != nil {
+					return nil, err
+				}
+			}
 			sharedDirNames := make([]string, 0, len(effectiveSharedDirs))
 			for _, dir := range effectiveSharedDirs {
 				sharedDirNames = append(sharedDirNames, dir.Name)
@@ -1570,15 +1582,6 @@ authDone:
 				nfsSubPathRoot = settings.Server.WorkspaceStorage.NFS.SubPathRoot
 				nfsUID = settings.Server.WorkspaceStorage.NFS.UID
 				nfsGID = settings.Server.WorkspaceStorage.NFS.GID
-				// A broker only warns about invalid workspace_storage at
-				// startup, so check the ids here before the runtime uses
-				// them for ownership. 0 still means "use the default 1000".
-				if err := fsutil.ValidateOwnerID("server.workspace_storage.nfs.uid", nfsUID); err != nil {
-					return nil, err
-				}
-				if err := fsutil.ValidateOwnerID("server.workspace_storage.nfs.gid", nfsGID); err != nil {
-					return nil, err
-				}
 				nfsStorageClass = settings.Server.WorkspaceStorage.NFS.StorageClass
 			}
 		}
