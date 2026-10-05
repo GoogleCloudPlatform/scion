@@ -37,6 +37,9 @@ const (
 	DeletionCodeAbandoned      = "abandoned"
 	DeletionCodeRevokeFailed   = "revoke_failed"
 	DeletionCodeFinalizeFailed = "finalize_failed"
+	// DeletionCodeRuntimeUnavailable: the broker does not have the agent's
+	// runtime available, so the delete did not run there; retryable.
+	DeletionCodeRuntimeUnavailable = "runtime_unavailable"
 )
 
 // DeletionDisplayTTL is how long a failed delete stays visible in the view
@@ -50,7 +53,7 @@ const DeletionDisplayTTL = 15 * time.Minute
 // failed.
 type DeletionInfo struct {
 	State          string     `json:"state"`          // "deleting" (incl. finalizing) | "failed"
-	Code           string     `json:"code,omitempty"` // runtime_error | conflict | in_doubt | abandoned | revoke_failed | finalize_failed
+	Code           string     `json:"code,omitempty"` // runtime_error | conflict | in_doubt | abandoned | revoke_failed | finalize_failed | runtime_unavailable
 	Error          string     `json:"error,omitempty"`
 	Soft           bool       `json:"soft"`
 	Claim          int64      `json:"claim"` // named to avoid confusion with Agent.Generation (reincarnation)
@@ -113,6 +116,29 @@ func (a *Agent) DeletionActive(now time.Time) bool {
 		return false
 	}
 	return a.DeletionLeaseAt != nil && a.DeletionLeaseAt.After(now)
+}
+
+// DeletionHoldsRow reports whether a delete holds the row against a start:
+// the row is finalizing (teardown has run, even if the lease expired: only a
+// retry or force moves it on), or deleting under a live lease. A deleting row
+// whose lease has passed or was never set does not hold it. This is the
+// in-flight part of the start gate (the hub's deleteBlocksStart) and the
+// rule SetAgentRunID refuses under (entadapter's runIDWritable is its SQL
+// form, plus deleted_at IS NULL), so both read one definition
+// (ptone/scion#2550 P1).
+func DeletionHoldsRow(state string, leaseAt *time.Time, now time.Time) bool {
+	switch state {
+	case DeletionStateFinalizing:
+		return true
+	case DeletionStateDeleting:
+		return leaseAt != nil && leaseAt.After(now)
+	}
+	return false
+}
+
+// DeletionHoldsRow is DeletionHoldsRow over the agent's deletion fields.
+func (a *Agent) DeletionHoldsRow(now time.Time) bool {
+	return a != nil && DeletionHoldsRow(a.DeletionState, a.DeletionLeaseAt, now)
 }
 
 // DeletionEffectiveCode returns the code a failed or lease-expired delete

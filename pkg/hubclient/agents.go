@@ -49,16 +49,16 @@ type AgentService interface {
 	Delete(ctx context.Context, agentID string, opts *DeleteAgentOptions) error
 
 	// Start starts a stopped agent.
-	Start(ctx context.Context, agentID string) error
+	Start(ctx context.Context, agentID string) (*LifecycleResponse, error)
 
 	// Stop stops a running agent.
-	Stop(ctx context.Context, agentID string) error
+	Stop(ctx context.Context, agentID string) (*LifecycleResponse, error)
 
 	// Suspend pauses a running agent, preserving state for later resume.
-	Suspend(ctx context.Context, agentID string) error
+	Suspend(ctx context.Context, agentID string) (*LifecycleResponse, error)
 
 	// Restart restarts an agent.
-	Restart(ctx context.Context, agentID string) error
+	Restart(ctx context.Context, agentID string) (*LifecycleResponse, error)
 
 	// ResetAuth injects a fresh token into a running agent without restarting.
 	ResetAuth(ctx context.Context, agentID string) error
@@ -216,10 +216,14 @@ type StopAllResult struct {
 
 // StopAllResponse is the response from the stop-all endpoint.
 type StopAllResponse struct {
-	Stopped int             `json:"stopped"`
-	Failed  int             `json:"failed"`
-	Total   int             `json:"total"`
-	Results []StopAllResult `json:"results"`
+	Stopped int `json:"stopped"`
+	Failed  int `json:"failed"`
+	// StopRecorded counts agents whose start was in flight: the stop intent
+	// is recorded but the start is not interrupted (result status
+	// "stop_recorded").
+	StopRecorded int             `json:"stopRecorded,omitempty"`
+	Total        int             `json:"total"`
+	Results      []StopAllResult `json:"results"`
 }
 
 // CreateAgentRequest is the request body for creating an agent.
@@ -256,6 +260,12 @@ type CreateAgentRequest struct {
 	// AgentRole specifies the requested authorization role.
 	AgentRole string `json:"agentRole,omitempty"`
 
+	// NoAuth disables auth credential propagation into the agent container
+	// (CLI --no-auth). Honoured by the Hub on the create path only; an
+	// existing agent that is resumed/restarted in place does not re-read it
+	// (ptone/scion#1855).
+	NoAuth bool `json:"noAuth,omitempty"`
+
 	// MessageMode specifies the initial message mode for the agent.
 	// Valid values: "none", "lineage", "branch", "project", "hub".
 	// When omitted, resolved from template, parent inheritance, or "project" default.
@@ -265,6 +275,13 @@ type CreateAgentRequest struct {
 	// Controls metadata server behavior and optional service account binding.
 	// When nil, the project default (if any) is applied by the Hub.
 	GCPIdentity *GCPIdentityConfig `json:"gcp_identity,omitempty"`
+
+	// AcceptAsyncLaunch opts in to a non-blocking launch. A Hub that has
+	// async launch enabled may then answer as soon as the broker accepts the
+	// create, with the agent in a pre-running phase and an active Launch;
+	// the client follows the launch with GET agent. A Hub that does not
+	// support or enable it ignores the field and answers synchronously.
+	AcceptAsyncLaunch bool `json:"acceptAsyncLaunch,omitempty"`
 }
 
 // GCPIdentityConfig specifies GCP identity configuration for agent creation.
@@ -456,6 +473,15 @@ func (s *agentService) Update(ctx context.Context, agentID string, req *UpdateAg
 
 // Delete removes an agent.
 func (s *agentService) Delete(ctx context.Context, agentID string, opts *DeleteAgentOptions) error {
+	resp, err := s.c.delete(ctx, s.deletePath(agentID, opts), nil)
+	if err != nil {
+		return err
+	}
+	return apiclient.CheckResponse(resp)
+}
+
+// deletePath builds the DELETE URL, with the query parameters for opts.
+func (s *agentService) deletePath(agentID string, opts *DeleteAgentOptions) string {
 	path := s.agentPath(agentID)
 	if opts != nil {
 		query := url.Values{}
@@ -474,48 +500,66 @@ func (s *agentService) Delete(ctx context.Context, agentID string, opts *DeleteA
 			path += "?" + query.Encode()
 		}
 	}
-
-	resp, err := s.c.delete(ctx, path, nil)
-	if err != nil {
-		return err
-	}
-	return apiclient.CheckResponse(resp)
+	return path
 }
 
 // Start starts a stopped agent.
-func (s *agentService) Start(ctx context.Context, agentID string) error {
-	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/start", nil, nil)
-	if err != nil {
-		return err
-	}
-	return apiclient.CheckResponse(resp)
+func (s *agentService) Start(ctx context.Context, agentID string) (*LifecycleResponse, error) {
+	return s.lifecycle(ctx, agentID, "start")
 }
 
 // Stop stops a running agent.
-func (s *agentService) Stop(ctx context.Context, agentID string) error {
-	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/stop", nil, nil)
-	if err != nil {
-		return err
-	}
-	return apiclient.CheckResponse(resp)
+func (s *agentService) Stop(ctx context.Context, agentID string) (*LifecycleResponse, error) {
+	return s.lifecycle(ctx, agentID, "stop")
 }
 
 // Suspend pauses a running agent, preserving state for later resume.
-func (s *agentService) Suspend(ctx context.Context, agentID string) error {
-	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/suspend", nil, nil)
-	if err != nil {
-		return err
-	}
-	return apiclient.CheckResponse(resp)
+func (s *agentService) Suspend(ctx context.Context, agentID string) (*LifecycleResponse, error) {
+	return s.lifecycle(ctx, agentID, "suspend")
 }
 
 // Restart restarts an agent.
-func (s *agentService) Restart(ctx context.Context, agentID string) error {
-	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/restart", nil, nil)
+func (s *agentService) Restart(ctx context.Context, agentID string) (*LifecycleResponse, error) {
+	return s.lifecycle(ctx, agentID, "restart")
+}
+
+// LifecycleResponse is the result of a start, stop, suspend or restart.
+type LifecycleResponse struct {
+	// Agent is the agent as the hub left it, when the hub returned it.
+	Agent *Agent
+	// Warnings are messages the hub raised while applying the action.
+	Warnings []string
+	// Queued is true when the hub accepted the action but has not applied
+	// it yet (HTTP 202), for example a stop for an agent whose broker is
+	// offline, which runs when the broker reconnects.
+	Queued bool
+}
+
+// lifecycle posts a lifecycle action and decodes the hub's response. The
+// body is the agent plus an optional warnings list; a body that cannot be
+// decoded is ignored, since the action itself succeeded.
+func (s *agentService) lifecycle(ctx context.Context, agentID, action string) (*LifecycleResponse, error) {
+	resp, err := s.c.post(ctx, s.agentPath(agentID)+"/"+action, nil, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return apiclient.CheckResponse(resp)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 400 {
+		return nil, apiclient.ParseErrorResponse(resp)
+	}
+	out := &LifecycleResponse{Queued: resp.StatusCode == http.StatusAccepted}
+	var body struct {
+		Agent
+		Warnings []string `json:"warnings,omitempty"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err == nil {
+		out.Warnings = body.Warnings
+		if body.ID != "" {
+			agent := body.Agent
+			out.Agent = &agent
+		}
+	}
+	return out, nil
 }
 
 // ResetAuth injects a fresh token into a running agent without restarting.
@@ -718,6 +762,10 @@ type OutboundMessageResult struct {
 	RecipientID string `json:"recipient_id"`
 	// Deferred is set only when Status == "deferred".
 	Deferred string `json:"deferred,omitempty"`
+	// ConversationID is the conversation the message was recorded in. It is
+	// empty on hubs that predate this field, and on paths that do not report
+	// it (for example, a send to another agent).
+	ConversationID string `json:"conversation_id,omitempty"`
 	// MentionResults reports the outcome of server-side @mention fan-out,
 	// one entry per resolved mention name. Empty when the message had no
 	// mentions, or on hubs that predate this field.

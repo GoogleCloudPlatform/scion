@@ -654,6 +654,7 @@ func TestFindRuntimeBrokerByIDViaList_FreshCursorEveryPage_StopsAtPageCap(t *tes
 func TestResolveAttachTransport_PlainMode(t *testing.T) {
 	// Ensure all transport auth env vars are unset.
 	t.Setenv("SCION_TRANSPORT_TOKEN", "")
+	t.Setenv("SCION_TRANSPORT_TOKEN_FILE", "")
 	t.Setenv("SCION_TRANSPORT_AUDIENCE", "")
 	t.Setenv("SCION_HUB_OIDC_AUDIENCE", "")
 	t.Setenv("SCION_METADATA_MODE", "")
@@ -683,6 +684,8 @@ func TestResolveAttachTransport_PlainMode(t *testing.T) {
 func TestResolveAttachTransport_IAPMode(t *testing.T) {
 	// A minimal three-part JWT-shaped value; ParseTokenExpiry falls back to
 	// DefaultTTL on any parse error, so we don't need a valid signature.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SCION_TRANSPORT_TOKEN_FILE", "")
 	t.Setenv("SCION_TRANSPORT_TOKEN", "header.payload.sig")
 	t.Setenv("SCION_TRANSPORT_MODE", "iap")
 
@@ -832,8 +835,12 @@ func newStartAgentMockHubServer(t *testing.T, projectID, agentName, agentID, age
 }
 
 // saveAttachTestState saves the package-level variables that startAgentViaHub
-// reads, and returns a function that restores them.
+// reads, and returns a function that restores them. It also shortens the
+// launch-wait poll interval and fallback budget so a test whose agent never
+// reaches running fails within seconds instead of minutes.
 func saveAttachTestState() func() {
+	origPoll, origFallback := launchPollInterval, launchWaitFallback
+	launchPollInterval, launchWaitFallback = 10*time.Millisecond, 5*time.Second
 	origAttach := attach
 	origTemplate := templateName
 	origBranch := branch
@@ -853,6 +860,7 @@ func saveAttachTestState() func() {
 		harnessAuthFlag = origHAuth
 		startNoNotify = origNoNotify
 		labelFlags = origLabels
+		launchPollInterval, launchWaitFallback = origPoll, origFallback
 	}
 }
 
@@ -902,7 +910,7 @@ func TestStartAgentViaHub_Site2_PlainMode_EmptyToken_RequiresAppToken(t *testing
 		// ProjectPath is empty → workspace scan and hubsync calls are skipped.
 	}
 
-	err = startAgentViaHub(hubCtx, agentName, "", false, nil)
+	err = startAgentViaHub(nil, hubCtx, agentName, "", false, nil)
 
 	require.Error(t, err)
 	assert.True(t, strings.Contains(err.Error(), "no access token found for Hub"),
@@ -945,7 +953,7 @@ func TestStartAgentViaHub_Site2_NoAttachAgent_ReturnsExplicitError(t *testing.T)
 		// ProjectPath is empty → workspace scan and hubsync calls are skipped.
 	}
 
-	err = startAgentViaHub(hubCtx, agentName, "", false, nil)
+	err = startAgentViaHub(nil, hubCtx, agentName, "", false, nil)
 
 	require.Error(t, err)
 	const wantMsg = "attach is not supported for agents on the noattach runtime"
@@ -1057,7 +1065,7 @@ func TestStartAgentViaHub_Site1_NoAttachAgent_ReturnsExplicitError(t *testing.T)
 		ProjectPath: scionDir,
 	}
 
-	err = startAgentViaHub(hubCtx, agentName, "", false, nil)
+	err = startAgentViaHub(nil, hubCtx, agentName, "", false, nil)
 
 	require.Error(t, err)
 	const wantMsg = "attach is not supported for agents on the noattach runtime"
@@ -1195,7 +1203,7 @@ func TestStartAgentViaHub_Site2_IAPMode_EmptyToken_PassesGate(t *testing.T) {
 		// ProjectPath is empty → workspace scan and hubsync calls are skipped.
 	}
 
-	err = startAgentViaHub(hubCtx, agentName, "", false, nil)
+	err = startAgentViaHub(nil, hubCtx, agentName, "", false, nil)
 
 	// The function is expected to fail at the WebSocket dial step (the mock HTTP
 	// server does not handle WebSocket upgrades) — that confirms the gate was

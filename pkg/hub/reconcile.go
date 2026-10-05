@@ -186,10 +186,36 @@ func (s *Server) execDispatchStart(ctx context.Context, d store.BrokerDispatch) 
 	return "", nil
 }
 
+// stopSupersededResult is the result recorded on a queued stop row that was
+// not applied because a newer start or stop superseded it.
+const stopSupersededResult = `{"superseded":true}`
+
 func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (string, error) {
 	agent, err := s.resolveDispatchAgent(ctx, d)
 	if err != nil {
 		return "", err
+	}
+	var intentAt *time.Time
+	if d.Args != "" {
+		args, err := UnmarshalStopArgs(d.Args)
+		if err != nil {
+			return "", fmt.Errorf("unmarshal stop args: %w", err)
+		}
+		intentAt = args.IntentAt
+	}
+	// A stop queued while the broker was offline applies only while the
+	// stop intent it was queued for is still the current one; a start or
+	// stop recorded since then supersedes it.
+	//
+	// This is a check, not a lock: a start recorded after this check but
+	// before the broker applies the stop below can still be overtaken by
+	// the stop, which leaves the agent stopped with intent running. The
+	// check only narrows that window to the stop dispatch itself; nothing
+	// in this change acts on a running intent whose agent is stopped.
+	if intentAt != nil && !agent.RunIntentMatches(store.RunIntentStopped, *intentAt) {
+		s.agentLifecycleLog.Info("reconcile: queued stop superseded by a newer run intent; not applied",
+			"id", d.ID, "agent_id", agent.ID, "run_intent", agent.RunIntent)
+		return stopSupersededResult, nil
 	}
 	defer s.beginLifecycleOp(agent.ID)()
 	dispatcher := s.GetDispatcher()
@@ -198,6 +224,21 @@ func (s *Server) execDispatchStop(ctx context.Context, d store.BrokerDispatch) (
 	}
 	if err := dispatcher.DispatchAgentStop(ctx, agent); err != nil {
 		return "", fmt.Errorf("dispatch stop: %w", err)
+	}
+	if intentAt != nil {
+		// The queued stop has now been applied: release the per-broker
+		// reservation as a direct stop does, and replace the stop_queued
+		// container status and the queued-stop notice the offline stop set.
+		s.releaseBrokerQuota(ctx, agent)
+		if agent.ContainerStatus == containerStatusStopQueued {
+			if err := s.store.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{
+				ContainerStatus: "stopped",
+				ClearMessageIf:  offlineStopMessage,
+			}); err != nil {
+				s.agentLifecycleLog.Warn("reconcile: failed to update container status after queued stop",
+					"id", d.ID, "agent_id", agent.ID, "error", err)
+			}
+		}
 	}
 	return "", nil
 }
@@ -282,10 +323,11 @@ func (s *Server) execDispatchFinalizeEnv(ctx context.Context, d store.BrokerDisp
 		}
 		env = args.Env
 	}
-	if err := dispatcher.DispatchFinalizeEnv(ctx, agent, env); err != nil {
+	finalized, err := dispatcher.DispatchFinalizeEnv(ctx, agent, env)
+	if err != nil {
 		return "", fmt.Errorf("dispatch finalize_env: %w", err)
 	}
-	result, err := json.Marshal(FinalizeEnvResult{Success: true})
+	result, err := json.Marshal(FinalizeEnvResult{Success: true, Launch: finalized.AcceptedLaunch()})
 	if err != nil {
 		return "", fmt.Errorf("marshal finalize_env result: %w", err)
 	}
@@ -301,11 +343,11 @@ func (s *Server) execDispatchCreate(ctx context.Context, d store.BrokerDispatch)
 	if dispatcher == nil {
 		return "", fmt.Errorf("no dispatcher available")
 	}
-	envReqs, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
+	created, err := dispatcher.DispatchAgentCreateWithGather(ctx, agent)
 	if err != nil {
 		return "", fmt.Errorf("dispatch create: %w", err)
 	}
-	cr := CreateWithGatherResult{EnvRequirements: envReqs}
+	cr := CreateWithGatherResult{EnvRequirements: created.EnvRequirements(), Launch: created.AcceptedLaunch()}
 	result, err := json.Marshal(cr)
 	if err != nil {
 		return "", fmt.Errorf("marshal create result: %w", err)

@@ -445,17 +445,19 @@ func TestGolden_ProjectAdminAccess(t *testing.T) {
 			"project admin should have %s access on project agents", action)
 	}
 
-	// miller79/scion#88: admin must NOT attach to or reach ports of another
-	// member's agent — the agent runs with its owner's user-scoped secrets.
-	for _, action := range []Action{ActionAttach, ActionPortAccess} {
-		decision := f.authz.CheckAccess(ctx, admin, alphaAgentRes, action)
-		assert.False(t, decision.Allowed,
-			"project admin should NOT have %s access on another member's agent", action)
-	}
+	// admin must NOT attach to another member's agent —
+	// the agent runs with its owner's user-scoped secrets.
+	decision := f.authz.CheckAccess(ctx, admin, alphaAgentRes, ActionAttach)
+	assert.False(t, decision.Allowed,
+		"project admin should NOT have attach access on another member's agent")
+	// admin may open another member's forwarded ports.
+	decision = f.authz.CheckAccess(ctx, admin, alphaAgentRes, ActionPortAccess)
+	assert.True(t, decision.Allowed,
+		"project admin should have port_access on project agents: %s", decision.Reason)
 
 	// CO1 CUTOVER: Admin cannot delete agents — project-admin role excludes
 	// delete action. This is an INTENTIONAL restriction.
-	decision := f.authz.CheckAccess(ctx, admin, alphaAgentRes, ActionDelete)
+	decision = f.authz.CheckAccess(ctx, admin, alphaAgentRes, ActionDelete)
 	assert.False(t, decision.Allowed,
 		"project admin should NOT have delete access (project-admin role excludes delete)")
 }

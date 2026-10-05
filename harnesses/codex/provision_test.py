@@ -76,17 +76,41 @@ def temporary_env(name: str, value: str | None):
             os.environ[name] = old
 
 
-def _invoke_provision(thinking_level: str | None) -> str:
+# Mirrors harnesses/codex/config.yaml's `thinking:` block exactly. The Go
+# test TestEmbeddedHarnessThinkingBlocks (harnesses/thinking_config_test.go)
+# pins the yaml side to the same literal table, so the two cannot drift.
+CODEX_THINKING = {
+    "levels": [
+        {"max": 25, "value": "low"},
+        {"max": 50, "value": "medium"},
+        {"max": 75, "value": "high"},
+        {"max": 100, "value": "xhigh"},
+    ],
+    "default": "medium",
+}
+
+_DEFAULT_HARNESS_CONFIG: dict[str, Any] = {"thinking": CODEX_THINKING}
+
+
+def _invoke_provision(
+    thinking_level: str | None,
+    harness_config: dict[str, Any] | None = None,
+) -> tuple[str, list[str]]:
     """Run the real provision() entry point end to end and return the
-    written ~/.codex/config.toml content.
+    written ~/.codex/config.toml content plus every ctx.warn message.
 
     Modeled on telemetry_provision_test.py's _invoke: a temp HOME, a
     minimal bundle dir, auth forced to "none", and provision() itself
     invoked -- not just the helpers it calls -- so a revert of the
-    one-line SCION_THINKING_LEVEL wiring inside provision() actually
-    fails the test (ptone/scion#2484 review round 1, R1). `thinking_level`
-    is the raw (unstripped) env value; None means unset.
+    SCION_THINKING_LEVEL wiring inside provision() actually fails the
+    test (ptone/scion#2484 review round 1, R1). `thinking_level` is the
+    raw (unstripped) env value; None means unset. `harness_config`
+    defaults to one carrying config.yaml's thinking block, as the real
+    manifest does.
     """
+    if harness_config is None:
+        harness_config = _DEFAULT_HARNESS_CONFIG
+    warnings: list[str] = []
     with tempfile.TemporaryDirectory() as tmp:
         home = os.path.join(tmp, "home")
         bundle = os.path.join(home, ".scion", "harness")
@@ -94,13 +118,14 @@ def _invoke_provision(thinking_level: str | None) -> str:
         with temporary_home(home), temporary_env("SCION_THINKING_LEVEL", thinking_level):
             ctx = scion_harness.ProvisionContext("codex", {
                 "harness_bundle_dir": bundle,
-                "harness_config": {},
+                "harness_config": harness_config,
             })
             ctx.select_auth = lambda _: scion_harness.ResolvedAuth("none")
+            ctx.warn = warnings.append  # type: ignore[method-assign]
             provision.provision(ctx)
         config_path = os.path.join(home, ".codex", "config.toml")
         with open(config_path, "r", encoding="utf-8") as f:
-            return f.read()
+            return f.read(), warnings
 
 
 @contextmanager
@@ -375,91 +400,72 @@ class CodexProvisionTest(unittest.TestCase):
         self.assertIn('trace_exporter = "none"', content)
         self.assertNotIn('external.invalid', content)
 
-    def test_resolve_reasoning_effort_maps_thinking_levels(self) -> None:
-        self.assertEqual(provision._resolve_reasoning_effort(0), "low")
-        self.assertEqual(provision._resolve_reasoning_effort(25), "low")
-        self.assertEqual(provision._resolve_reasoning_effort(26), "medium")
-        self.assertEqual(provision._resolve_reasoning_effort(50), "medium")
-        self.assertEqual(provision._resolve_reasoning_effort(51), "high")
-        self.assertEqual(provision._resolve_reasoning_effort(75), "high")
-        self.assertEqual(provision._resolve_reasoning_effort(76), "xhigh")
-        self.assertEqual(provision._resolve_reasoning_effort(100), "xhigh")
-
-    def test_resolve_reasoning_effort_clamps_out_of_range(self) -> None:
-        self.assertEqual(provision._resolve_reasoning_effort(-10), "low")
-        self.assertEqual(provision._resolve_reasoning_effort(150), "xhigh")
-
-    # -- SCION_THINKING_LEVEL -> reasoning_effort resolution (ptone/scion#2479) --
+    # -- SCION_THINKING_LEVEL -> model_reasoning_effort (ptone/scion#2673) --
     #
-    # Scion sets no thinking level anywhere by default, so with
-    # model_reasoning_effort left unwritten codex fell back to its own
-    # bundled per-model catalog default ("low" for the model behind Scion's
-    # "medium" alias). _resolve_reasoning_effort_env is the fix: it always
-    # returns a usable effort, defaulting to _DEFAULT_REASONING_EFFORT
-    # ("medium") whenever SCION_THINKING_LEVEL doesn't resolve to an
-    # explicit level, while an explicit, valid level still wins outright.
+    # Characterization table: the bucket table and the "medium" default
+    # (ptone/scion#2479) moved from hard-coded provision.py helpers into
+    # config.yaml's `thinking:` block. Every expected value below is the
+    # output of the pre-migration _resolve_reasoning_effort /
+    # _resolve_reasoning_effort_env pair, so this pins codex's behaviour as
+    # byte-for-byte unchanged. Drives the real provision() entry point.
 
-    def test_resolve_reasoning_effort_env_unset_defaults_to_medium(self) -> None:
-        self.assertEqual(
-            provision._resolve_reasoning_effort_env(_test_ctx(), ""),
-            provision._DEFAULT_REASONING_EFFORT,
-        )
-        self.assertEqual(provision._DEFAULT_REASONING_EFFORT, "medium")
-
-    def test_resolve_reasoning_effort_env_explicit_levels_win(self) -> None:
-        self.assertEqual(provision._resolve_reasoning_effort_env(_test_ctx(), "10"), "low")
-        self.assertEqual(provision._resolve_reasoning_effort_env(_test_ctx(), "90"), "xhigh")
-
-    def test_resolve_reasoning_effort_env_invalid_value_defaults_to_medium(self) -> None:
-        # Chosen behavior (stated in the PR body): a non-integer value is
-        # treated the same as unset/blank rather than silently reproducing
-        # the "no model_reasoning_effort written -> codex's own low
-        # default" bug this fallback exists to fix.
-        self.assertEqual(provision._resolve_reasoning_effort_env(_test_ctx(), "not-a-number"), "medium")
-
-    def test_reconcile_codex_toml_writes_resolved_effort(self) -> None:
-        """_reconcile_codex_toml accepts a reasoning_effort written for the
-        first time (a previously-absent key) across every outcome of
-        _resolve_reasoning_effort_env: unset/invalid fall back to medium,
-        an explicit level keeps the existing bucket mapping (review round
-        1, N2: collapses 5 near-duplicate tests into one subTest table;
-        the regression coverage for provision()'s own wiring lives in
-        test_provision_resolves_reasoning_effort_from_env instead)."""
+    def test_provision_reasoning_effort_matches_pre_migration_behaviour(self) -> None:
         cases = (
-            ("", "medium"),
-            ("10", "low"),
-            ("90", "xhigh"),
-            ("not-a-number", "medium"),
+            # (raw SCION_THINKING_LEVEL, expected effort, expect a warning)
+            (None, "medium", False),
+            ("", "medium", False),
+            ("   ", "medium", False),
+            ("-10", "low", False),
+            ("0", "low", False),
+            ("25", "low", False),
+            ("26", "medium", False),
+            ("50", "medium", False),
+            ("51", "high", False),
+            ("75", "high", False),
+            (" 75 ", "high", False),
+            ("76", "xhigh", False),
+            ("100", "xhigh", False),
+            ("150", "xhigh", False),
+            ("abc", "medium", True),
         )
-        for thinking_raw, expected_effort in cases:
-            with self.subTest(thinking_raw=thinking_raw):
-                with tempfile.TemporaryDirectory() as tmp:
-                    with temporary_home(tmp):
-                        effort = provision._resolve_reasoning_effort_env(_test_ctx(), thinking_raw)
-                        self.assertEqual(effort, expected_effort)
-                        provision._reconcile_codex_toml(_test_ctx(), None, None, reasoning_effort=effort)
-                        config_path = os.path.join(tmp, ".codex", "config.toml")
-                        with open(config_path, "r", encoding="utf-8") as f:
-                            content = f.read()
-                        self.assertIn(f'model_reasoning_effort = "{expected_effort}"', content)
+        for raw, expected_effort, expect_warning in cases:
+            with self.subTest(raw=raw):
+                content, warnings = _invoke_provision(raw)
+                self.assertEqual(
+                    tomllib.loads(content).get("model_reasoning_effort"), expected_effort
+                )
+                self.assertEqual(content.count("model_reasoning_effort"), 1)
+                if expect_warning:
+                    self.assertTrue(
+                        any("not a valid integer" in w for w in warnings),
+                        f"expected an invalid-level warning, got: {warnings}",
+                    )
+                else:
+                    self.assertEqual(warnings, [])
 
-    def test_provision_resolves_reasoning_effort_from_env(self) -> None:
-        """Regression test for ptone/scion#2479 (review round 1, R1): drives
-        the real provision() entry point, not just the helpers it calls, so
-        reverting provision()'s one-line SCION_THINKING_LEVEL wiring fails
-        this test. Covers unset, whitespace-only, an explicit level padded
-        with whitespace (provision() strips before resolving), and an
-        invalid value."""
-        cases = (
-            (None, "medium"),
-            ("   ", "medium"),
-            (" 75 ", "high"),
-            ("abc", "medium"),
-        )
-        for thinking_level, expected_effort in cases:
-            with self.subTest(thinking_level=thinking_level):
-                content = _invoke_provision(thinking_level)
-                self.assertIn(f'model_reasoning_effort = "{expected_effort}"', content)
+    def test_provision_without_thinking_block_writes_no_effort_and_warns(self) -> None:
+        """Risk R1: a stale/customized config.yaml without the thinking
+        block loses the medium default. provision() must not invent one,
+        and must warn loudly that model_reasoning_effort was not written."""
+        for raw in (None, "60"):
+            with self.subTest(raw=raw):
+                content, warnings = _invoke_provision(raw, harness_config={})
+                self.assertNotIn("reasoning_effort", content)
+                self.assertTrue(
+                    any("no thinking block" in w for w in warnings),
+                    f"expected a missing-thinking-block warning, got: {warnings}",
+                )
+
+    def test_provision_reasoning_effort_follows_config_thinking_block(self) -> None:
+        """The table is data: a different thinking block changes the output,
+        proving provision.py no longer hard-codes the buckets."""
+        harness_config = {
+            "thinking": {"levels": [{"max": 100, "value": "minimal"}], "default": "high"},
+        }
+        for raw, expected in (("10", "minimal"), (None, "high")):
+            with self.subTest(raw=raw):
+                content, _ = _invoke_provision(raw, harness_config=harness_config)
+                self.assertEqual(tomllib.loads(content).get("model_reasoning_effort"), expected)
 
     def test_reconcile_codex_toml_writes_model_reasoning_effort(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

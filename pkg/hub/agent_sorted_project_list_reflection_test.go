@@ -93,12 +93,11 @@ func TestResourceEqual_NilVsEmptyStillNormalizes(t *testing.T) {
 // --- the member/full equality gate, reflection-filled, real round trip ---
 
 // reflectFillStoreAgent returns a *store.Agent with every exported field set
-// to a distinguishable non-zero value (design lists-graph.md 9: "the
-// fixture full is filled by reflection so that every exported store.Agent
-// field is non-zero"), via generic reflection plus a short list of
-// special-cased fields that must hold a specific shape to round-trip
-// through the real store (valid UUIDs, a real MessageMode enum value, etc.)
-// rather than an arbitrary string.
+// to a distinguishable non-zero value (the fixture is filled by reflection
+// so that every exported store.Agent field is non-zero), via generic
+// reflection plus a short list of special-cased fields that must hold a
+// specific shape to round-trip through the real store (valid UUIDs, a real
+// MessageMode enum value, etc.) rather than an arbitrary string.
 //
 // The fields below are deliberately left at their zero value, each for a
 // documented, store-enforced reason rather than an oversight:
@@ -165,6 +164,15 @@ var reflectFillStoreAgentSkipFields = map[string]bool{
 	"DeletionStartedAt": true, "DeletionFailedAt": true, "DeletionCode": true,
 	"DeletionError": true, "DeletionPrior": true, "DeletionRequest": true,
 	"Deletion": true,
+	// run_id is written only through SetAgentRunID and
+	// CompareAndSwapAgentRunID (ptone/scion#2550): CreateAgent and
+	// UpdateAgent never write it, so it cannot round-trip here. It is not an
+	// authz input, and no list reader uses it (only the delete dispatch, from
+	// a single-row read).
+	"RunID": true,
+	// Run intent columns are written only through SetRunIntent and
+	// RevertRunIntent (never by CreateAgent/UpdateAgent).
+	"RunIntent": true, "RunIntentAt": true,
 }
 
 func reflectFillStoreAgent(t *testing.T, projectID string) *store.Agent {

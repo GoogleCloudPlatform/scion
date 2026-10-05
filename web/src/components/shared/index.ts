@@ -25,6 +25,8 @@ export { ScionHeader } from './header.js';
 export { ScionBreadcrumb } from './breadcrumb.js';
 export { ScionStatusBadge } from './status-badge.js';
 export type { StatusType } from './status-badge.js';
+export { ScionDeletionBadge, DeletionLeaseController } from './deletion-badge.js';
+export type { DeletionClock } from './deletion-badge.js';
 export { ScionEnvVarList } from './env-var-list.js';
 export { ScionSecretList } from './secret-list.js';
 export { ScionNotificationTray } from './notification-tray.js';
@@ -66,7 +68,6 @@ export {
   PROJECT_DIRECT_USER_ONLY_ROLES,
   PROJECT_OWNER_ROLE_NAMES,
   getLifecycleStatus,
-  formatDateTime,
   getPrincipalIcon,
 } from './role-binding-utils.js';
 export type { LifecycleStatus } from './role-binding-utils.js';

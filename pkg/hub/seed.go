@@ -143,14 +143,14 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.ProjectRoleOwner,
 			Description: "Project owner with full project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    4, // R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    5, // R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectOwnerPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleAdmin,
 			Description: "Project admin with most project permissions (no delete, no set_message_mode)",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    4, // R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    5, // R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectAdminPermissionIDs(),
 		},
 		{
@@ -284,18 +284,25 @@ func projectOwnerPermissionIDs() []string {
 		// token_refresh, identity_token, port_forward, notify) are excluded:
 		// those are intended for agent identities, not human project admins.
 		//
-		// agent.attach and agent.port_access are excluded (R3,
-		// miller79/scion#88): agents run with their creator's user-scoped
-		// secrets, so terminal/port access to another member's agent would
-		// expose that member's credentials. Owners reach their own agents
-		// and progeny via the resource-owner and ancestor relationship grants.
-		// agent.lifecycle (start/stop/suspend/restart/restore) is retained so
-		// owners keep management oversight of members' agents.
+		// agent.attach is excluded (R3): agents run with
+		// their creator's user-scoped secrets, so a terminal on another
+		// member's agent would expose that member's credentials. Owners reach
+		// their own agents and progeny via the resource-owner and ancestor
+		// relationship grants. agent.lifecycle (start/stop/suspend/restart/
+		// restore) is retained so owners keep management oversight of
+		// members' agents.
+		//
+		// agent.port_access is included (R5) so owners and admins can open
+		// members' already-exposed ports for oversight. It does not grant
+		// terminal, exec or env access (agent.attach), or port registration
+		// (hub-level). project-member still does not carry it; grant it to
+		// members through a custom role.
 		"agent.create",
 		"agent.delete",
 		"agent.lifecycle",
 		"agent.list",
 		"agent.message",
+		"agent.port_access",
 		"agent.read",
 		"agent.set_message_mode",
 		"agent.stop_all",
@@ -361,12 +368,13 @@ func projectOwnerPermissionIDs() []string {
 func projectAdminPermissionIDs() []string {
 	return []string{
 		// Agent lifecycle and operations (no delete, no set_message_mode,
-		// no agent-self credential permissions, no attach/port_access — see
-		// projectOwnerPermissionIDs for the miller79/scion#88 rationale)
+		// no agent-self credential permissions, no attach — see
+		// projectOwnerPermissionIDs for the rationale)
 		"agent.create",
 		"agent.lifecycle",
 		"agent.list",
 		"agent.message",
+		"agent.port_access",
 		"agent.read",
 		"agent.stop_all",
 		"agent.update",
@@ -838,24 +846,103 @@ func agentRolePermissionIDs(role AgentRole) []string {
 	return ids
 }
 
-// BackfillRoleBindings creates role bindings from existing User.Role values and
-// project ownership. It is idempotent (skips if binding already exists) and
-// called from the startup/migration path.
+// BackfillRoleBindings runs the startup role-binding backfills:
+//   - system role bindings from User.Role;
+//   - project-owner role bindings from Project.CreatedBy (only when the
+//     User.Role step succeeded, preserving the original ordering);
+//   - clearing the legacy Group.OwnerID on project members groups
+//     (ptone/scion#2599), which always runs regardless of earlier failures.
+//
+// Every step is idempotent. Steps do not stop at the first failure: their
+// errors are combined with errors.Join and returned together, and the
+// startup caller logs them as a warning.
 func BackfillRoleBindings(ctx context.Context, s store.Store) error {
+	var errs []error
+
 	// Backfill system role bindings from User.Role
 	if err := backfillUserRoleBindings(ctx, s); err != nil {
-		return fmt.Errorf("backfill user role bindings: %w", err)
+		errs = append(errs, fmt.Errorf("backfill user role bindings: %w", err))
+	} else if err := backfillProjectOwnerRoleBindings(ctx, s); err != nil {
+		// Backfill project-owner role bindings from Project.CreatedBy.
+		// Pre-existing projects (created before project-scoped RoleBindings were
+		// introduced) have a legacy CreatedBy/OwnerID but no project-owner
+		// RoleBinding. This causes the project members view to show "no members"
+		// and the "my projects" filter to miss RoleBinding-based membership.
+		errs = append(errs, fmt.Errorf("backfill project owner role bindings: %w", err))
 	}
 
-	// Backfill project-owner role bindings from Project.CreatedBy.
-	// Pre-existing projects (created before project-scoped RoleBindings were
-	// introduced) have a legacy CreatedBy/OwnerID but no project-owner
-	// RoleBinding. This causes the project members view to show "no members"
-	// and the "my projects" filter to miss RoleBinding-based membership.
-	if err := backfillProjectOwnerRoleBindings(ctx, s); err != nil {
-		return fmt.Errorf("backfill project owner role bindings: %w", err)
+	// Clear the legacy Group.OwnerID copied from Project.OwnerID onto
+	// project members groups (ptone/scion#2599). This is security-relevant
+	// (it removes a stale group.* grant) and independent of the steps above,
+	// so it runs even when they fail, and its error is joined with theirs
+	// rather than hiding them.
+	if err := backfillClearProjectMembersGroupOwners(ctx, s); err != nil {
+		errs = append(errs, fmt.Errorf("clear project members group owners: %w", err))
 	}
 
+	return errors.Join(errs...)
+}
+
+// projectMembersGroupOwnerBackfillPageSize is the ListGroups page size for
+// backfillClearProjectMembersGroupOwners. It is a package variable, not a
+// const, so tests can shrink it to exercise the pagination loop.
+var projectMembersGroupOwnerBackfillPageSize = 200
+
+// backfillClearProjectMembersGroupOwners clears Group.OwnerID on every
+// project members group (ptone/scion#2599). createProjectMembersGroup used to
+// copy Project.OwnerID into Group.OwnerID, and the owner/user/group
+// relationship row grants group.* to Group.OwnerID, so a creator removed
+// from the project without an ownership transfer kept managing the members
+// group. Project.OwnerID confers no authority (ptone/scion#2586), and the
+// members group is now created without an owner.
+//
+// Groups are identified by the project-members-group marker annotation
+// (either key, see store.LegacyAnnotationProjectMembersGroup), never by
+// slug, so a user-created group with a look-alike slug is left untouched.
+// The pass runs on every startup and is idempotent: a group whose OwnerID is
+// already empty is skipped, so a second run changes nothing. Per-group update
+// errors are logged and skipped.
+func backfillClearProjectMembersGroupOwners(ctx context.Context, s store.Store) error {
+	// All groups are scanned rather than filtering by GroupType: the scan is
+	// paginated and cheap, and a type filter could miss legacy group shapes.
+	var cursor string
+	var cleared int
+	for {
+		groups, err := s.ListGroups(ctx, store.GroupFilter{}, store.ListOptions{
+			Limit:          projectMembersGroupOwnerBackfillPageSize,
+			Cursor:         cursor,
+			SkipTotalCount: true,
+		})
+		if err != nil {
+			return fmt.Errorf("list groups for members group owner backfill: %w", err)
+		}
+
+		for i := range groups.Items {
+			g := &groups.Items[i]
+			if g.OwnerID == "" || !hasProjectMembersGroupMarker(g) {
+				continue
+			}
+			prevOwner := g.OwnerID
+			g.OwnerID = ""
+			if err := s.UpdateGroup(ctx, g); err != nil {
+				slog.Warn("failed to clear project members group owner during backfill",
+					"group_id", g.ID, "project_id", g.ProjectID, "error", err)
+				continue
+			}
+			slog.Info("cleared project members group owner",
+				"group_id", g.ID, "project_id", g.ProjectID, "previous_owner_id", prevOwner)
+			cleared++
+		}
+
+		if groups.NextCursor == "" {
+			break
+		}
+		cursor = groups.NextCursor
+	}
+
+	if cleared > 0 {
+		slog.Info("cleared project members group owners", "cleared", cleared)
+	}
 	return nil
 }
 

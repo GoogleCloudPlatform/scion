@@ -15,42 +15,31 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { activityLabel } from './agent-state-display.js';
+import { ACTIVITY_DISPLAY, stateLabel } from './agent-state-display.js';
 
-describe('activityLabel', () => {
-  it('returns the display label for a known activity that defines one', () => {
-    expect(activityLabel('blocked')).toBe('waiting');
-    expect(activityLabel('waiting_for_input')).toBe('waiting for input');
+describe('stateLabel', () => {
+  it("shows the 'blocked' activity as 'waiting on others' (ptone/scion#1571)", () => {
+    expect(stateLabel('blocked')).toBe('waiting on others');
   });
 
-  it('returns undefined for a known activity without a label', () => {
-    expect(activityLabel('thinking')).toBeUndefined();
-  });
-
-  it('returns undefined for unknown and empty keys', () => {
-    expect(activityLabel('not-a-real-activity')).toBeUndefined();
-    expect(activityLabel('')).toBeUndefined();
-    expect(activityLabel(undefined)).toBeUndefined();
-  });
-
-  it('ignores inherited prototype keys', () => {
-    // A non-enumerable `label` on Object.prototype is reachable through
-    // `constructor` and `__proto__`; only an own-property check skips them.
-    Object.defineProperty(Object.prototype, 'label', {
-      value: 'inherited',
-      writable: true,
-      configurable: true,
+  it('keeps the blocked icon, variant and no pulse', () => {
+    expect(ACTIVITY_DISPLAY.blocked).toEqual({
+      emoji: '🕓',
+      icon: 'clock-history',
+      variant: 'neutral',
+      pulse: false,
+      label: 'waiting on others',
     });
-    try {
-      expect(activityLabel('constructor')).toBeUndefined();
-      expect(activityLabel('__proto__')).toBeUndefined();
-    } finally {
-      delete (Object.prototype as { label?: string }).label;
-    }
   });
 
-  it('matches case-insensitively', () => {
-    expect(activityLabel('Blocked')).toBe('waiting');
-    expect(activityLabel('LIMITS_EXCEEDED')).toBe('limits exceeded');
+  it('uses other defined display labels', () => {
+    expect(stateLabel('waiting_for_input')).toBe('waiting for input');
+    expect(stateLabel('limits_exceeded')).toBe('limits exceeded');
+  });
+
+  it('falls back to the raw value for states without a label', () => {
+    expect(stateLabel('thinking')).toBe('thinking');
+    expect(stateLabel('running')).toBe('running');
+    expect(stateLabel('something-new')).toBe('something-new');
   });
 });

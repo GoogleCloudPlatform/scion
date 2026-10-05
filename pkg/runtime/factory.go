@@ -46,7 +46,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 			util.Debugf("GetRuntime: ResolveRuntime failed: %v", err)
 			// If profile resolution fails, we might be passed a direct runtime type
 			// Fallback to legacy behavior for now if profileName matches a known type
-			if profileName == "docker" || profileName == "podman" || profileName == "kubernetes" || profileName == "k8s" || profileName == "container" || profileName == "remote" || profileName == "local" || profileName == "cloudrun" || profileName == "cloudrun-instances" || profileName == "cloudrun-sandbox" {
+			if profileName == "docker" || profileName == "podman" || profileName == "kubernetes" || profileName == "k8s" || profileName == "container" || profileName == "remote" || profileName == "local" || profileName == "cloudrun" || profileName == "cloudrun-instances" || profileName == "cloudrun-sandbox" || profileName == "substrate" {
 				runtimeType = profileName
 				util.Debugf("GetRuntime: using profileName as runtimeType: %s", runtimeType)
 			} else {
@@ -236,6 +236,30 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 	case "cloudrun-sandbox":
 		rt := NewCloudRunSandboxRuntime(rtConfig.CloudRunSandbox)
 		return rt
+	case "substrate":
+		// No auto-detect branch: substrate is only ever selected explicitly
+		// by profile (substrate-runtime.md §2), so this case is unreachable via
+		// the "local"/"auto" detection above.
+		//
+		// The runtime definition itself must be operator-only: project-merged
+		// settings (vs) may select an operator-defined substrate profile by
+		// name, but must never define or override its runtime block. See
+		// ValidateOperatorOnlySubstrateProfile's doc comment for why.
+		if verr := ValidateOperatorOnlySubstrateProfile(vs, profileName); verr != nil {
+			util.Debugf("GetRuntime: substrate profile failed operator-only validation: %v", verr)
+			return &ErrorRuntime{Err: substrateProfileInvalid(verr)}
+		}
+		// NewSubstrateRuntime already tags its deterministic config
+		// validation failures with ErrSubstrateProfileInvalid; construct-time
+		// dependency failures (Kubernetes client build, substrate.Dial) are
+		// passed through untagged so they surface as a plain degraded
+		// ErrorRuntime, not a startup refusal. Do not wrap err here.
+		rt, err := NewSubstrateRuntime(rtConfig.Substrate)
+		if err != nil {
+			util.Debugf("GetRuntime: failed to create substrate runtime: %v", err)
+			return &ErrorRuntime{Err: err}
+		}
+		return rt
 	}
 
 	// Fallback should not be reached if logic is correct, but default to Docker
@@ -307,7 +331,7 @@ func (e *ErrorRuntime) Stop(ctx context.Context, id string) error {
 	return e.Err
 }
 
-func (e *ErrorRuntime) Delete(ctx context.Context, id string) error {
+func (e *ErrorRuntime) Delete(ctx context.Context, ref RunRef) error {
 	return e.Err
 }
 

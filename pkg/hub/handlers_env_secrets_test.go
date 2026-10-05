@@ -411,6 +411,70 @@ func TestPatchSecret_UserScope_TypeChangeToFileValidatesStoredTarget(t *testing.
 	}
 }
 
+// TestPatchSecret_UserScope_ReservedTargetOnEnvironmentSecret_Rejected verifies
+// that PATCH cannot retarget an existing environment-type secret onto a name
+// reserved for scion's own control-plane environment variables.
+func TestPatchSecret_UserScope_ReservedTargetOnEnvironmentSecret_Rejected(t *testing.T) {
+	srv, s := testServer(t)
+	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
+	srv.SetSecretBackend(localBackend)
+
+	// Create an ordinary environment-type secret.
+	createBody := SetSecretRequest{
+		Value:  base64.StdEncoding.EncodeToString([]byte("secret-value")),
+		Type:   "environment",
+		Target: "MY_APP_TOKEN",
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/RETARGET_KEY", createBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT (create) expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// PATCH the target onto a reserved control-plane name — should be rejected.
+	patchBody := PatchSecretRequest{
+		Target: "SCION_METADATA_MODE",
+	}
+	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/secrets/RETARGET_KEY", patchBody)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("PATCH onto reserved target: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPatchSecret_UserScope_TypeChangeToEnvironmentValidatesStoredTarget
+// verifies that PATCH cannot repurpose a non-environment secret as an
+// environment-type secret when its already-stored target is reserved for
+// scion's own control-plane environment variables. The stored target is only
+// reachable this way because variable-type secrets are not restricted to
+// injectable environment-variable names.
+func TestPatchSecret_UserScope_TypeChangeToEnvironmentValidatesStoredTarget(t *testing.T) {
+	srv, s := testServer(t)
+	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
+	srv.SetSecretBackend(localBackend)
+
+	// Create a variable-type secret whose target happens to collide with a
+	// reserved control-plane name (allowed for variable-type secrets, since
+	// they are never projected into the container environment by name).
+	createBody := SetSecretRequest{
+		Value:  base64.StdEncoding.EncodeToString([]byte("secret-value")),
+		Type:   "variable",
+		Target: "SCION_METADATA_MODE",
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/secrets/RETYPE_KEY", createBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT (create) expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// PATCH with type=environment but no target — the stored target is
+	// reserved, so validation should reject it.
+	patchBody := PatchSecretRequest{
+		Type: "environment",
+	}
+	rec = doRequest(t, srv, http.MethodPatch, "/api/v1/secrets/RETYPE_KEY", patchBody)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("PATCH type change to environment with reserved stored target: expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // =============================================================================
 // R2: Missing injectionMode validation
 // =============================================================================
@@ -662,5 +726,42 @@ func TestEnvVar_PlainEnvVar_AllowProgeny_AsNeeded_Rejected(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPut, "/api/v1/env/PLAIN_PROGENY_KEY?scope=user", body)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("PUT (plain env, as_needed + allowProgeny) expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestEnvVar_PlainEnvVar_ReservedTarget_Rejected verifies that a plain
+// (non-secret) env var whose key is reserved for scion's own control-plane
+// environment variables is rejected at creation time. A plain env var's key
+// is itself the name it is projected under in the container environment, so
+// it needs the same reserved-target check as an environment-type secret's
+// target.
+func TestEnvVar_PlainEnvVar_ReservedTarget_Rejected(t *testing.T) {
+	srv, _ := testServer(t)
+
+	body := SetEnvVarRequest{
+		Value: "test-value",
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/env/SCION_METADATA_MODE?scope=user", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("PUT (plain env, reserved key) expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestEnvVar_SecretPromotion_ReservedTarget_Rejected verifies that promoting
+// an env var to a secret (req.Secret=true) still enforces the reserved-target
+// check: the promoted secret's target is the same key, and a reserved key
+// must be rejected on that path too.
+func TestEnvVar_SecretPromotion_ReservedTarget_Rejected(t *testing.T) {
+	srv, s := testServer(t)
+	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
+	srv.SetSecretBackend(localBackend)
+
+	body := SetEnvVarRequest{
+		Value:  "test-value",
+		Secret: true,
+	}
+	rec := doRequest(t, srv, http.MethodPut, "/api/v1/env/SCION_METADATA_MODE?scope=user", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("PUT (secret promotion, reserved key) expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

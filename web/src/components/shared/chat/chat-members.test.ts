@@ -107,9 +107,16 @@ describe('scion-chat-members agent tooltip', () => {
     expect(tooltipContent(el)).toBe('thinking');
   });
 
-  it('falls back to the activity display label when one is defined', async () => {
-    const el = await mount([agent({ activity: 'blocked' })]);
-    expect(tooltipContent(el)).toBe('waiting');
+  it('falls back to the display label, not the raw state name (ptone/scion#1571)', async () => {
+    const blocked = await mount([agent({ activity: 'blocked' })]);
+    expect(tooltipContent(blocked)).toBe('waiting on others');
+    document.body.innerHTML = '';
+    const waiting = await mount([agent({ activity: 'waiting_for_input' })]);
+    expect(tooltipContent(waiting)).toBe('waiting for input');
+    document.body.innerHTML = '';
+    // Matched case-insensitively, like resolveAgentStatus (the badge's status source).
+    const upper = await mount([agent({ activity: 'BLOCKED' as never })]);
+    expect(tooltipContent(upper)).toBe('waiting on others');
   });
 
   it('shows the last activity event as the updated time', async () => {
@@ -117,7 +124,7 @@ describe('scion-chat-members agent tooltip', () => {
     const el = await mount([
       agent({ detailMessage: 'Running tests', lastActivityEvent: tenMinAgo, lastSeen: '' }),
     ]);
-    expect(tooltipContent(el)).toBe('Running tests\nUpdated: 10 min ago');
+    expect(tooltipContent(el)).toBe('Running tests\nUpdated: 10m ago');
   });
 
   it('ignores the heartbeat time — only the activity event drives "Updated"', async () => {

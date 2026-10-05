@@ -12,18 +12,25 @@ Conventions for scripts in `hack/check-*.sh`. Reference implementations:
 | 1 | Analysed, violations found (list on stderr). |
 | 2 | **RESERVED.** GNU make flattens all non-zero recipe exits to 2, so this code can never be owned by a script. Read it as "ask the log." |
 | 3 | COULD NOT ANALYSE: required tool missing (e.g. `rg` not installed). |
-| 4 | COULD NOT ANALYSE: no candidate files matched (wrong cwd, empty checkout). |
+| 4 | COULD NOT ANALYSE: no candidate files matched (wrong cwd, empty checkout), or a declared scan root directory is missing (e.g. `check-method-not-allowed.sh` tests its roots before scanning, so a renamed root cannot silently shrink the scan). |
 
-For security-grade checks, 3 and 4 must fail the build — a run that examined
-nothing must not look like a clean pass. Formatting-grade checks may exit 0
-for both 3 (missing tool) and 4 (no candidates) — see Severity Levels below.
+Exit 3 is unconditional: every check, at every severity level, exits 3 when a
+required tool is missing. A run that examined nothing must not look like a
+clean pass (ptone/scion#1114). Use the shared `require_tool` helper in
+`hack/lib/require-tool.sh` rather than open-coding the check. Severity governs
+only the no-candidates case (exit 4 vs exit 0) — see Severity Levels below.
 
 ## Severity Levels
 
-| Level | Tool-missing behaviour | Rationale |
-|-------|------------------------|-----------|
-| **Security-grade** | Exit 3 (build failure). | A silently skipped security check ships a bypass. |
-| **Formatting-grade** | Exit 0 (silent skip). | A silently skipped format check costs a reformat later. |
+| Level | No-candidates behaviour | Rationale |
+|-------|-------------------------|-----------|
+| **Security-grade** | Exit 4 (build failure). | An empty scan of a security surface usually means the scan is broken, and a silently skipped security check ships a bypass. |
+| **Formatting-grade** | Exit 0 (pass). | Zero matches for a formatting pattern is a legitimate clean state. |
+
+A missing tool is **not** a severity question: it always exits 3 (see Exit
+Codes above). Formatting-grade checks used to exit 0 on a missing tool; that
+let a local `make ci` without `rg` report a clean pass for checks that never
+ran.
 
 Choose the level at script creation time and document it in the script header.
 
@@ -68,7 +75,7 @@ Recommended order for new check scripts:
 1. Header comment   — what it checks, why, exit codes, severity level
 2. set -euo pipefail
 3. cd to repo root  — cd "$(dirname "$0")/.."
-4. Dependency check — exit 3 (security) or exit 0 (formatting) if tool missing
+4. Dependency check — source hack/lib/require-tool.sh; require_tool exits 3
 5. Pre-filter       — find candidate files (exit 4 if none, or exit 0 for formatting)
 6. Classify/scan    — run the actual analysis
 7. Allowlist filter — remove known-good entries

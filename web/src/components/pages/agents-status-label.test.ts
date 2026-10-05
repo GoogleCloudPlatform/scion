@@ -16,7 +16,7 @@
 
 /**
  * The agent list's status badges must use the shared display label from
- * agent-state-display.ts (e.g. "waiting" for the `blocked` activity), not
+ * agent-state-display.ts (e.g. "waiting on others" for the `blocked` activity), not
  * the raw status key (ptone/scion#1571).
  */
 
@@ -101,7 +101,7 @@ describe('scion-page-agents status badge label', () => {
   });
 
   for (const view of ['grid', 'list'] as const) {
-    it(`renders a blocked agent as "waiting" in the ${view} view`, async () => {
+    it(`renders a blocked agent as "waiting on others" in the ${view} view`, async () => {
       store.set('scion-view-agents', view);
       const el = document.createElement('scion-page-agents') as LitElement;
       document.body.appendChild(el);
@@ -117,9 +117,9 @@ describe('scion-page-agents status badge label', () => {
       expect(badges).toHaveLength(1);
       const badge = badges[0];
       await badge.updateComplete;
-      expect(badge.label).toBe('');
+      expect(badge.label).toBe('waiting on others');
       const text = badge.shadowRoot?.textContent ?? '';
-      expect(text).toContain('waiting');
+      expect(text).toContain('waiting on others');
       expect(text).not.toContain('blocked');
     });
   }

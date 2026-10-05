@@ -21,9 +21,7 @@
 
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
-import { html, render, type TemplateResult } from 'lit';
-
-import type { Agent, Capabilities, PageData, UserRole } from '../../shared/types.js';
+import type { Capabilities, PageData, UserRole } from '../../shared/types.js';
 import { resetHubProjectCapabilitiesCache } from '../../client/hub-capabilities.js';
 
 /** happy-dom has no EventSource; setScope opens one. */
@@ -187,67 +185,4 @@ describe('scion-page-project-detail — Clone / Create Template gating', () => {
     expect(text).not.toContain('Create Template');
     expect(hasClone(element)).toBe(false);
   });
-});
-
-describe('scion-page-project-detail — agent status badges (ptone/scion#1571)', () => {
-  let element: HTMLElement | null = null;
-  let container: HTMLElement | null = null;
-
-  beforeAll(async () => {
-    await import('./project-detail.js');
-  }, 60_000);
-
-  beforeEach(() => {
-    vi.stubGlobal('EventSource', FakeEventSource);
-    resetHubProjectCapabilitiesCache();
-  });
-
-  afterEach(() => {
-    element?.remove();
-    element = null;
-    container?.remove();
-    container = null;
-    vi.restoreAllMocks();
-    vi.unstubAllGlobals();
-  });
-
-  const blockedAgent = {
-    id: 'a1',
-    name: 'a1',
-    projectId: PROJECT_ID,
-    template: 't',
-    phase: 'running',
-    activity: 'blocked',
-    _capabilities: { actions: [] },
-  } as unknown as Agent;
-
-  type Renderers = {
-    renderAgentRow(a: Agent): TemplateResult;
-    renderAgentCard(a: Agent): TemplateResult;
-  };
-
-  // A badge `label` attribute overrides the shared display label
-  // ("waiting" for `blocked`), so neither site may set one.
-  for (const site of ['renderAgentRow', 'renderAgentCard'] as const) {
-    it(`${site} leaves the status badge label unset`, async () => {
-      element = await createComponent({ projectCaps: { actions: ['read'] } });
-      container = document.createElement('div');
-      document.body.appendChild(container);
-      const tpl = (element as unknown as Renderers)[site](blockedAgent);
-      render(
-        site === 'renderAgentRow'
-          ? html`<table>
-              <tbody>
-                ${tpl}
-              </tbody>
-            </table>`
-          : tpl,
-        container
-      );
-
-      const badge = container.querySelector('scion-status-badge');
-      expect(badge?.getAttribute('status')).toBe('blocked');
-      expect(badge?.getAttribute('label')).toBeNull();
-    });
-  }
 });

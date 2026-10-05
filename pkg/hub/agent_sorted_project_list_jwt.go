@@ -171,5 +171,5 @@ func (s *Server) listProjectAgentsSortedAgentJWT(w http.ResponseWriter, r *http.
 		c := complete
 		resp.Complete = &c
 	}
-	writeJSON(w, http.StatusOK, resp)
+	writeAgentList(w, p.view, resp)
 }

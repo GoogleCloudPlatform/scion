@@ -28,6 +28,8 @@ import { apiFetch, extractApiError } from '../../client/api.js';
 import { getDenialMessage } from '../../shared/message-mode.js';
 import type { Message } from '../../shared/types.js';
 import './json-browser.js';
+import { formatInstant, formatInstantWithZone } from '../../utils/time.js';
+import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 
 interface MessageLogEntry {
   timestamp: string;
@@ -70,6 +72,9 @@ const MAX_BUFFER = 500;
 
 @customElement('scion-agent-message-viewer')
 export class ScionAgentMessageViewer extends LitElement {
+  /** Re-renders timestamps and date dividers when the display zone changes. */
+  readonly _zone = new DisplayZoneController(this);
+
   @property()
   agentId = '';
 
@@ -938,24 +943,16 @@ export class ScionAgentMessageViewer extends LitElement {
     let lastDate = '';
 
     for (const msg of this.messages) {
-      const d = new Date(msg.timestamp);
-      const dateStr = d.toLocaleDateString('en', {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-      });
+      // Date divider and row time in the effective display zone (24-hour);
+      // the divider names the zone.
+      const dateStr = formatInstantWithZone(msg.timestamp, 'date');
 
       if (dateStr !== lastDate) {
         lastDate = dateStr;
         rows.push(html`<div class="date-divider">${dateStr}</div>`);
       }
 
-      const timeStr = d.toLocaleTimeString('en', {
-        hour12: false,
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-      });
+      const timeStr = formatInstant(msg.timestamp, 'time-seconds');
       const isExpanded = this.expandedIds.has(msg.insertId);
 
       const dirIcon = msg.direction === 'sent' ? 'box-arrow-up-right' : 'box-arrow-in-down-left';

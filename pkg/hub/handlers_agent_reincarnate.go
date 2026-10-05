@@ -141,14 +141,18 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Delete in progress (design ptone/scion#2483 §2.1).
+	// Start gate (design ptone/scion#2483 §2.1): a delete in progress, an
+	// incomplete create or an in-flight launch is refused, the last with
+	// 409 agent_launching, since the worker would stop and reprovision a
+	// launching agent.
 	if ref := s.startGate(ctx, agent, startEntryReincarnate); ref.refuses() {
 		ref.write(w)
 		return
 	}
-	// The delete claim the gate admitted; the worker pins its completion
-	// failed-marker clear to it (see clearFailedDeletion), so a delete that
-	// claims after this point keeps its marker.
+	// The delete claim the gate admitted; the worker pins the failed-marker
+	// clear just before its completion write to it (see
+	// clearFailedDeletion), so a delete that claims after this point keeps
+	// its marker.
 	admittedDeletionClaim := agent.DeletionClaim
 
 	var req ReincarnateAgentRequest
@@ -218,6 +222,15 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// touch a workspace it did not find already on disk): this is what
 	// makes --dry-run report the restriction too, instead of a dry run
 	// showing a plan that a real request could not safely execute.
+	// Empty-per-agent workspaces are broker-local, unsynced state: the only
+	// possible reincarnation would be a fresh empty directory, silently
+	// discarding work. Refused explicitly in v1 (design #2703 D4).
+	if project.IsEmptyPerAgent() {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError,
+			`reincarnate does not yet support "Empty directory per agent" (empty-per-agent) workspaces`, nil)
+		return
+	}
+
 	hasGitClone := agent.AppliedConfig != nil && agent.AppliedConfig.GitClone != nil
 	var effectiveWorkspace string
 	var linkedProjectPath string

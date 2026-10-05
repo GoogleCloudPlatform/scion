@@ -92,6 +92,7 @@ func (s *Server) beginSyncStart(ctx context.Context, req CreateAgentRequest, opt
 		registry:        s.launchRegistry,
 	}
 	ss.rec = newLaunchRecord(ss.owner, req.ID, store.LaunchKindCreate, "", time.Time{}, cancel)
+	ss.rec.RunID = opts.RunID
 
 	var supersededDone <-chan struct{}
 	if ss.registry != nil {
@@ -164,4 +165,13 @@ func (s *Server) cancelLocalLaunch(key launchKey) {
 		return
 	}
 	s.launchRegistry.CancelLocal(key)
+}
+
+// cancelLocalLaunchForRun is cancelLocalLaunch for a delete naming run
+// runID; see launchRegistry.CancelLocalForRun.
+func (s *Server) cancelLocalLaunchForRun(key launchKey, runID string) {
+	if s.launchRegistry == nil {
+		return
+	}
+	s.launchRegistry.CancelLocalForRun(key, runID)
 }

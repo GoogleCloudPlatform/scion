@@ -5,7 +5,7 @@
 # check ensures no new scion.io/ references are added without explicit intent.
 #
 # Severity: FORMATTING-GRADE
-#   - Missing rg: exit 0 (silent skip)
+#   - Missing rg: exit 3 (nothing analysed; see hack/lib/require-tool.sh)
 #   - No candidates: exit 0
 #   - Violations found: exit 1
 #   - Clean: exit 0
@@ -21,17 +21,20 @@ if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
   sha="${sha}-dirty"
 fi
 
-# --- Dependency check (formatting-grade: exit 0 if missing) ---
-if ! command -v rg >/dev/null 2>&1; then
-  echo "Warning: ripgrep (rg) not found — skipping annotation-prefix check" >&2
-  exit 0
-fi
+# --- Dependency check (exit 3 if missing, at every severity level) ---
+# shellcheck source=SCRIPTDIR/lib/require-tool.sh
+source hack/lib/require-tool.sh
+require_tool rg check-annotation-prefix "ripgrep (rg)"
 
 # --- Pre-filter: find candidate files ---
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 
-rg -n 'scion\.io/' \
+# The explicit "." matters: with no path argument, rg searches stdin whenever
+# stdin is a pipe (as it is for a CI step), finds nothing, and the check
+# passes vacuously. With "." rg prints paths as ./pkg/...; the sed strips that
+# prefix so the anchored allowlist patterns below still match.
+{ rg -n 'scion\.io/' . \
   --glob '*.go' \
   --glob '*.yaml' \
   --glob '*.yml' \
@@ -44,7 +47,7 @@ rg -n 'scion\.io/' \
   --glob '!docs-repo/**' \
   --glob '!reviews/**' \
   --glob '!web/**' \
-  --glob '!scratch/**' >"$tmp" || true
+  --glob '!scratch/**' || true; } | sed 's|^\./||' >"$tmp"
 
 if [[ ! -s "$tmp" ]]; then
   echo "check-annotation-prefix: analysed ${sha}, no scion.io/ references found" >&2
@@ -74,7 +77,12 @@ allowed_paths=(
   # Ent adapter: queries brokers by scion.io/broker-role label.
   "^pkg/store/entadapter/project_store.go$"
 
-  # Model constants: defines LabelTemplate = "scion.io/template".
+  # Model constants: defines LabelTemplate = "scion.io/template", the
+  # shared project members group marker keys (canonical
+  # scion.io/project-members-group and the read-only legacy
+  # scion.io/system-project-members-group, ptone/scion#2556) and the project
+  # agents group marker scion.io/project-agents-group, so pkg/hub and
+  # pkg/store/entadapter import one definition.
   "^pkg/store/models.go$"
 
   # --- pkg/hub/ ---
@@ -107,15 +115,12 @@ allowed_paths=(
   "^pkg/hubclient/types.go$"
 
   # --- pkg/store/entadapter/ ---
-  # Composite adapter: defines system annotation constants for project
-  # members-group, agents-group, and adoption-review-required.
+  # Composite adapter: defines the adoption-review-required annotation
+  # constant (the agents-group and members-group keys live in
+  # pkg/store/models.go).
   "^pkg/store/entadapter/composite.go$"
 
   # --- pkg/hub/ (additional) ---
-  # Core project handlers: defines system annotation constants for project
-  # members-group and agents-group.
-  "^pkg/hub/handlers_projects_core.go$"
-
   # Passthrough gate: checks scion.io/broker-role label on embedded brokers.
   "^pkg/hub/passthrough_gate.go$"
 

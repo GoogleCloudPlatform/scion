@@ -77,12 +77,15 @@ export const ACTIVITY_DISPLAY: Record<AgentActivity, StateDisplay> = {
     pulse: false,
     label: 'waiting for input',
   },
+  // Display only: the activity is still 'blocked' in the API and CLI. Users
+  // read 'blocked' as broken; it means waiting on an external dependency
+  // (another agent, a user reply, a scheduled event) (ptone/scion#1571).
   blocked: {
-    emoji: '⏸️',
+    emoji: '🕓',
     icon: 'clock-history',
     variant: 'neutral',
     pulse: false,
-    label: 'waiting',
+    label: 'waiting on others',
   },
   completed: { emoji: '✅', icon: 'check-circle', variant: 'success', pulse: false },
   limits_exceeded: {
@@ -115,14 +118,11 @@ export function getStateDisplay(status: string): StateDisplay {
 }
 
 /**
- * Get the human-readable display label for an activity, if one is defined.
- * Matching is case-insensitive and only considers own keys of
- * ACTIVITY_DISPLAY. Returns undefined for unknown activities and for known
- * activities without a custom label, so callers can fall back to the raw
- * value.
+ * Human-readable label for an agent phase or activity: the display label
+ * when one is defined (e.g. 'blocked' → 'waiting on others'), otherwise the
+ * raw value. Use this wherever a state name is shown as text, so no call
+ * site renders a raw state that has a display label.
  */
-export function activityLabel(activity: string | undefined): string | undefined {
-  const key = (activity || '').toLowerCase();
-  if (!Object.hasOwn(ACTIVITY_DISPLAY, key)) return undefined;
-  return ACTIVITY_DISPLAY[key as AgentActivity].label;
+export function stateLabel(status: string): string {
+  return getStateDisplay(status).label ?? status;
 }

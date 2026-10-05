@@ -190,6 +190,22 @@ export function isSharedWorkspace(project: Project): boolean {
 }
 
 /**
+ * Check whether a project gives each agent its own empty directory (#2703):
+ * no git remote and a hub-owned workspace-mode label of per-agent, or the
+ * raw empty-per-agent value (the hub's ResolveProjectSharingMode treats
+ * both the same on a non-git project).
+ */
+export function isEmptyPerAgentWorkspace(project?: {
+  gitRemote?: string | undefined;
+  labels?: Record<string, string> | undefined;
+}): boolean {
+  if (!project) return false;
+  if (project.gitRemote) return false;
+  const mode = project.labels?.['scion.dev/workspace-mode'];
+  return mode === 'per-agent' || mode === 'empty-per-agent';
+}
+
+/**
  * Check whether a project uses worktree-per-agent workspace mode.
  */
 export function isWorktreeWorkspace(project: Project): boolean {
@@ -623,6 +639,46 @@ export interface Agent {
 
   // Children agent IDs (populated by some API responses)
   childrenIds?: string[];
+
+  // Backend-driven delete lifecycle (ptone/scion#2483 §2.2). The hub always
+  // sends this key on REST agents and SSE status deltas; an explicit `null`
+  // means no delete is active and must clear any earlier value.
+  deletion?: DeletionInfo | null;
+}
+
+/** `DeletionInfo.state` values the hub publishes (`finalizing` reads as `deleting`). */
+export type DeletionState = 'deleting' | 'failed';
+
+/**
+ * Failure codes on a `failed` deletion (pkg/store/deletion_view.go). Kept
+ * open-ended so an unknown future code still renders its `error` text.
+ */
+export type DeletionCode =
+  | 'runtime_error'
+  | 'conflict'
+  | 'in_doubt'
+  | 'abandoned'
+  | 'revoke_failed'
+  | 'finalize_failed'
+  | 'runtime_unavailable'
+  | (string & Record<never, never>);
+
+/**
+ * The hub's computed delete view for an agent (Go `store.DeletionInfo`).
+ * While `deleting`, the engine renews `leaseExpiresAt` about every 20s; a
+ * view whose lease passes without renewal reads as `failed`/`abandoned`.
+ */
+export interface DeletionInfo {
+  state: DeletionState;
+  code?: DeletionCode;
+  error?: string;
+  soft: boolean;
+  claim: number;
+  startedAt: string;
+  /** Set while `deleting`. */
+  leaseExpiresAt?: string;
+  /** Set on `failed`, except `in_doubt` and finalizing rows. */
+  expiresAt?: string;
 }
 
 /**

@@ -19,7 +19,6 @@ package hub
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -47,8 +46,8 @@ type brokerDispatchedMsg struct {
 	messageID  string // hub message ID carried on the dispatch context (#1820)
 }
 
-func (d *brokerMockDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) error {
-	return nil
+func (d *brokerMockDispatcher) DispatchAgentCreate(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 func (d *brokerMockDispatcher) DispatchAgentProvision(ctx context.Context, agent *store.Agent) error {
 	return nil
@@ -87,7 +86,7 @@ func (d *brokerMockDispatcher) DispatchAgentMessage(ctx context.Context, agent *
 func (d *brokerMockDispatcher) DispatchCheckAgentPrompt(ctx context.Context, agent *store.Agent) (bool, error) {
 	return false, nil
 }
-func (d *brokerMockDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*RemoteEnvRequirementsResponse, error) {
+func (d *brokerMockDispatcher) DispatchAgentCreateWithGather(ctx context.Context, agent *store.Agent) (*CreateDispatchResult, error) {
 	return nil, nil
 }
 func (d *brokerMockDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Agent, _ int) (string, error) {
@@ -96,8 +95,8 @@ func (d *brokerMockDispatcher) DispatchAgentLogs(_ context.Context, _ *store.Age
 func (d *brokerMockDispatcher) DispatchAgentExec(_ context.Context, _ *store.Agent, _ []string, _ int) (string, int, error) {
 	return "", 0, nil
 }
-func (d *brokerMockDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) error {
-	return nil
+func (d *brokerMockDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) (*CreateDispatchResult, error) {
+	return nil, nil
 }
 
 func (d *brokerMockDispatcher) getMessages() []brokerDispatchedMsg {
@@ -1474,205 +1473,3 @@ func TestMessageBrokerProxy_SubscribesAgentResumedAfterStart(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
-
-// TestDeliverToAgent_RawMessage_RefusedByBackstop_ContentFreeDefectLog covers
-// the asynchronous-caller branch of contract §6.1(a)'s
-// dispatch-layer backstop. deliverToAgent (and its siblings
-// fanOutToProject/fanOutGlobal) forward msg.Raw unchanged with no guard of
-// their own — by design, per the doc comment on deliverToAgent, because no
-// production publisher is supposed to ever put a raw message on this bus.
-// This test proves that if one somehow did, the backstop in the real
-// HTTPAgentDispatcher.DispatchAgentMessage (not a generic mock dispatcher)
-// still refuses it: the raw payload is never handed to the broker client,
-// the persisted row is marked failed, and the defect log line carries no
-// message content — only agent_id and the fixed "defect" label. The target
-// agent sender *is* still notified of the delivery failure (deliverToAgent's
-// existing publishDeliveryFailed behaviour, proven elsewhere, e.g.
-// TestDeliverToAgent_RejectsNonRunningAgent) — that notice is expected and
-// is itself a real (non-raw) broker call, so this test asserts on *what* was
-// sent, not merely whether the mock was invoked at all.
-func TestDeliverToAgent_RawMessage_RefusedByBackstop_ContentFreeDefectLog(t *testing.T) {
-	const secret = "ASYNC-BACKSTOP-SECRET-7QXM"
-
-	buf := captureSlogDefault(t)
-
-	s := newBrokerTestStore(t)
-	projectID := setupBrokerTestProject(t, s)
-	sender := setupBrokerTestAgent(t, s, projectID, "async-backstop-sender", "running")
-	target := setupBrokerTestAgent(t, s, projectID, "async-backstop-target", "running")
-
-	mockClient := &mockRuntimeBrokerClient{}
-	dispatcher := NewHTTPAgentDispatcherWithClient(s, mockClient, false, slog.Default())
-
-	events := NewChannelEventPublisher()
-	defer events.Close()
-	b := eventbus.NewInProcessEventBus(slog.Default())
-	defer func() { _ = b.Close() }()
-	proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
-
-	msg := messages.NewInstruction("agent:"+sender.Slug, "agent:"+target.Slug, secret)
-	msg.SenderID = sender.ID
-	msg.RecipientID = target.ID
-	msg.Raw = true
-
-	proxy.deliverToAgent(context.Background(), projectID, target.Slug, msg)
-
-	// The only broker call that may have happened is deliverToAgent's own
-	// DELIVERY_FAILED notice to the *sender* (expected, unrelated to the
-	// backstop) — never a delivery to the target, and never one carrying
-	// the raw payload itself.
-	if mockClient.messageCalled {
-		if mockClient.lastAgentID != sender.Slug {
-			t.Errorf("the only broker call must be the sender's DELIVERY_FAILED notice (agent %s), got a call to agent %s", sender.Slug, mockClient.lastAgentID)
-		}
-		if strings.Contains(mockClient.lastMessage, secret) {
-			t.Errorf("the DELIVERY_FAILED notice must not contain the raw payload: %q", mockClient.lastMessage)
-		}
-	}
-
-	rows, err := s.ListMessages(context.Background(), store.MessageFilter{AgentID: target.ID}, store.ListOptions{})
-	if err != nil {
-		t.Fatalf("ListMessages: %v", err)
-	}
-	if len(rows.Items) != 1 {
-		t.Fatalf("expected exactly one persisted row for the target, got %d", len(rows.Items))
-	}
-	if rows.Items[0].DispatchState != store.MessageDispatchFailed {
-		t.Errorf("DispatchState = %q, want %q (the backstop's refusal must mark the row failed)", rows.Items[0].DispatchState, store.MessageDispatchFailed)
-	}
-
-	logOutput := buf.String()
-	if !strings.Contains(logOutput, "raw_reached_dispatch_layer") {
-		t.Errorf("expected the content-free defect log line, got: %s", logOutput)
-	}
-	if !strings.Contains(logOutput, target.ID) {
-		t.Errorf("expected the defect log line to carry agent_id, got: %s", logOutput)
-	}
-	if strings.Contains(logOutput, secret) {
-		t.Errorf("defect log line must not contain the message content: %s", logOutput)
-	}
-}
-
-// TestAsyncDeliveryFailureCallers_NeverBuildRawTrue covers
-// contract §6.1(a)'s list of async direct DispatchAgentMessage callers:
-// publishDeliveryFailed, publishDeliveryDeferred, publishBroadcastDeliveryFailed
-// and reconcile.deliverMessage each construct the structuredMsg they hand to
-// DispatchAgentMessage themselves — none of them forward a caller-supplied
-// StructuredMessage — so none can ever carry Raw==true. This is a static
-// property of each function's own struct literal; the table below drives
-// each one through a recordingDispatcher and asserts what it actually built,
-// as a regression guard against a future change that threaded a
-// caller-supplied message through instead.
-func TestAsyncDeliveryFailureCallers_NeverBuildRawTrue(t *testing.T) {
-	t.Run("publishDeliveryFailed", func(t *testing.T) {
-		s := newBrokerTestStore(t)
-		projectID := setupBrokerTestProject(t, s)
-		sender := setupBrokerTestAgent(t, s, projectID, "a39-pdf-sender", "running")
-
-		dispatcher := &recordingDispatcher{}
-		events := NewChannelEventPublisher()
-		defer events.Close()
-		b := eventbus.NewInProcessEventBus(slog.Default())
-		defer func() { _ = b.Close() }()
-		proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
-
-		msg := messages.NewInstruction("agent:"+sender.Slug, "agent:target", "hello")
-		msg.SenderID = sender.ID
-		proxy.publishDeliveryFailed(context.Background(), projectID, "target-agent", msg, errTestDeliveryFailure)
-
-		calls := dispatcher.getCalls()
-		if len(calls) != 1 {
-			t.Fatalf("expected exactly one dispatch call, got %d", len(calls))
-		}
-		if calls[0].StructuredMessage == nil || calls[0].StructuredMessage.Raw {
-			t.Errorf("publishDeliveryFailed's structuredMsg.Raw = %+v, want Raw==false", calls[0].StructuredMessage)
-		}
-	})
-
-	t.Run("publishDeliveryDeferred", func(t *testing.T) {
-		s := newBrokerTestStore(t)
-		projectID := setupBrokerTestProject(t, s)
-		sender := setupBrokerTestAgent(t, s, projectID, "a39-pdd-sender", "running")
-
-		dispatcher := &recordingDispatcher{}
-		events := NewChannelEventPublisher()
-		defer events.Close()
-		b := eventbus.NewInProcessEventBus(slog.Default())
-		defer func() { _ = b.Close() }()
-		proxy := NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
-
-		msg := messages.NewInstruction("agent:"+sender.Slug, "agent:target", "hello")
-		msg.SenderID = sender.ID
-		proxy.publishDeliveryDeferred(context.Background(), "target-agent", msg)
-
-		calls := dispatcher.getCalls()
-		if len(calls) != 1 {
-			t.Fatalf("expected exactly one dispatch call, got %d", len(calls))
-		}
-		if calls[0].StructuredMessage == nil || calls[0].StructuredMessage.Raw {
-			t.Errorf("publishDeliveryDeferred's structuredMsg.Raw = %+v, want Raw==false", calls[0].StructuredMessage)
-		}
-	})
-
-	t.Run("publishBroadcastDeliveryFailed", func(t *testing.T) {
-		srv, s := testServer(t)
-		ctx := context.Background()
-		project := &store.Project{ID: tid("a39-pbdf-project"), Slug: "a39-pbdf-project", Name: "A39 Project", Created: time.Now(), Updated: time.Now()}
-		if err := s.CreateProject(ctx, project); err != nil {
-			t.Fatalf("CreateProject: %v", err)
-		}
-		sender := &store.Agent{ID: tid("a39-pbdf-sender"), Slug: "a39-pbdf-sender", Name: "Sender", ProjectID: project.ID, Phase: "running", Created: time.Now(), Updated: time.Now()}
-		if err := s.CreateAgent(ctx, sender); err != nil {
-			t.Fatalf("CreateAgent: %v", err)
-		}
-		target := &store.Agent{ID: tid("a39-pbdf-target"), Slug: "a39-pbdf-target", Name: "Target", ProjectID: project.ID, Phase: "running", Created: time.Now(), Updated: time.Now()}
-
-		dispatcher := &recordingDispatcher{}
-		srv.SetDispatcher(dispatcher)
-
-		msg := messages.NewInstruction("agent:"+sender.Slug, "", "hello")
-		msg.SenderID = sender.ID
-		srv.publishBroadcastDeliveryFailed(ctx, target, msg, errTestDeliveryFailure)
-
-		calls := dispatcher.getCalls()
-		if len(calls) != 1 {
-			t.Fatalf("expected exactly one dispatch call, got %d", len(calls))
-		}
-		if calls[0].StructuredMessage == nil || calls[0].StructuredMessage.Raw {
-			t.Errorf("publishBroadcastDeliveryFailed's structuredMsg.Raw = %+v, want Raw==false", calls[0].StructuredMessage)
-		}
-	})
-
-	t.Run("reconcile.deliverMessage", func(t *testing.T) {
-		srv, s := testServer(t)
-		ctx := context.Background()
-		project := &store.Project{ID: tid("a39-dm-project"), Slug: "a39-dm-project", Name: "A39 Project", Created: time.Now(), Updated: time.Now()}
-		if err := s.CreateProject(ctx, project); err != nil {
-			t.Fatalf("CreateProject: %v", err)
-		}
-		agent := &store.Agent{ID: tid("a39-dm-agent"), Slug: "a39-dm-agent", Name: "Agent", ProjectID: project.ID, Phase: "running", RuntimeBrokerID: tid("a39-dm-broker"), Created: time.Now(), Updated: time.Now()}
-		if err := s.CreateAgent(ctx, agent); err != nil {
-			t.Fatalf("CreateAgent: %v", err)
-		}
-
-		dispatcher := &recordingDispatcher{}
-		srv.SetDispatcher(dispatcher)
-
-		m := &store.Message{ID: api.NewUUID(), AgentID: agent.ID, Msg: "hello"}
-		if err := srv.deliverMessage(ctx, m); err != nil {
-			t.Fatalf("deliverMessage: %v", err)
-		}
-
-		calls := dispatcher.getCalls()
-		if len(calls) != 1 {
-			t.Fatalf("expected exactly one dispatch call, got %d", len(calls))
-		}
-		// deliverMessage passes nil for structuredMsg entirely -- not even an
-		// empty StructuredMessage{} -- so there is no Raw field to be true.
-		if calls[0].StructuredMessage != nil {
-			t.Errorf("deliverMessage's structuredMsg = %+v, want nil", calls[0].StructuredMessage)
-		}
-	})
-}
-
-var errTestDeliveryFailure = fmt.Errorf("test delivery failure")

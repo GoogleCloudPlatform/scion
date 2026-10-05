@@ -287,18 +287,18 @@ describe('scion-agent-tree-view layout cache (#2388)', () => {
     expect(viaCache).toEqual(viaFreshRecompute);
   });
 
-  /** The status-badge `status` for the node whose card links to /agents/<id>. */
-  function badgeStatus(agentId: string): string | null {
+  /** The status-badge `label` for the node whose card links to /agents/<id>. */
+  function statusLabel(agentId: string): string | null {
     return (
       el
         .shadowRoot!.querySelector(`a.node[href="/agents/${agentId}"] scion-status-badge`)
-        ?.getAttribute('status') ?? null
+        ?.getAttribute('label') ?? null
     );
   }
 
   it('renders the current status on a cache hit, not the stale cached node object (#2388 review B1)', async () => {
     const before = cachedLayout(el);
-    expect(badgeStatus('k1')).toBe('running');
+    expect(statusLabel('k1')).toBe('running');
 
     // Same id/parentId/name for every agent (topology signature unchanged,
     // so this is a cache hit), but k1's own status changed. If renderNode
@@ -308,20 +308,7 @@ describe('scion-agent-tree-view layout cache (#2388)', () => {
     await el.updateComplete;
 
     expect(cachedLayout(el)).toBe(before); // confirms this really was a cache hit
-    expect(badgeStatus('k1')).toBe('stopped');
-  });
-
-  // Not a cache test: nested here only to reuse this block's fixture and
-  // badgeStatus() helper.
-  describe('status badge label (#1571)', () => {
-    it('leaves the status badge label unset so it uses the display label (#1571)', async () => {
-      el.agents = el.agents.map((a) => (a.id === 'k1' ? { ...a, activity: 'blocked' } : a));
-      await el.updateComplete;
-
-      expect(badgeStatus('k1')).toBe('blocked');
-      const badge = el.shadowRoot!.querySelector('a.node[href="/agents/k1"] scion-status-badge');
-      expect(badge?.getAttribute('label')).toBeNull();
-    });
+    expect(statusLabel('k1')).toBe('stopped');
   });
 
   /** Edges whose title indicates non-messageable ("mismatch") styling. */
@@ -1429,5 +1416,167 @@ describe('scion-agent-tree-view revealAgent and focusAgentNode', () => {
     expect(internals().panX).toBe(10);
     expect(internals().panY).toBe(20);
     expect(el.shadowRoot!.querySelector('.jump-highlight')).toBeNull();
+  });
+});
+
+// ptone/scion#765: dragging the canvas to pan must not start a text
+// selection, while text stays selectable when no pan is in progress.
+describe('scion-agent-tree-view drag-to-pan suppresses text selection', () => {
+  let el: ScionAgentTreeView;
+
+  beforeEach(async () => {
+    el = document.createElement('scion-agent-tree-view');
+    el.agents = [agent('r1', 'root', ['user-1']), agent('k1', 'kid', ['user-1', 'r1'])];
+    document.body.appendChild(el);
+    await el.updateComplete;
+  });
+
+  afterEach(() => {
+    el.remove();
+    document.body.innerHTML = '';
+  });
+
+  function canvas(): HTMLElement {
+    return el.shadowRoot!.querySelector('.canvas')!;
+  }
+
+  function pointer(type: string, target: EventTarget = canvas()): void {
+    target.dispatchEvent(
+      new PointerEvent(type, { bubbles: true, composed: true, cancelable: true, pointerId: 1 })
+    );
+  }
+
+  /** Dispatches a selectstart on `target` and returns whether it was prevented. */
+  // Not composed, as browsers fire it: a selectstart on shadow-root text
+  // never reaches document, so the component must listen on its render root.
+  function selectStartPrevented(target: EventTarget): boolean {
+    const ev = new Event('selectstart', { bubbles: true, composed: false, cancelable: true });
+    target.dispatchEvent(ev);
+    return ev.defaultPrevented;
+  }
+
+  /** Some text node inside the canvas (a node label), where a selection would begin. */
+  function textTarget(): Node {
+    const walker = document.createTreeWalker(canvas(), NodeFilter.SHOW_TEXT);
+    let n: Node | null;
+    while ((n = walker.nextNode())) {
+      if (n.textContent?.trim()) return n;
+    }
+    return canvas();
+  }
+
+  it('prevents selectstart during an active pan', () => {
+    pointer('pointerdown');
+    expect(canvas().classList.contains('dragging')).toBe(true);
+    expect(selectStartPrevented(textTarget())).toBe(true);
+    // Also outside the canvas while the gesture is active.
+    expect(selectStartPrevented(document.body)).toBe(true);
+    pointer('pointerup');
+  });
+
+  it('does not prevent selectstart when no pan is active', () => {
+    expect(selectStartPrevented(textTarget())).toBe(false);
+
+    pointer('pointerdown');
+    pointer('pointerup');
+    expect(canvas().classList.contains('dragging')).toBe(false);
+    expect(selectStartPrevented(textTarget())).toBe(false);
+    expect(selectStartPrevented(document.body)).toBe(false);
+  });
+
+  it('stops suppressing selection after pointercancel and after disconnect mid-pan', () => {
+    pointer('pointerdown');
+    pointer('pointercancel');
+    expect(selectStartPrevented(textTarget())).toBe(false);
+
+    pointer('pointerdown');
+    el.remove();
+    expect(selectStartPrevented(document.body)).toBe(false);
+  });
+
+  it('clears a selection that started during the pan on pointerup', () => {
+    // Mocked as Chromium reports a selection of shadow-root text: type
+    // 'Range' but isCollapsed true (window.getSelection() is retargeted to
+    // the host), so the check must key off type, not isCollapsed.
+    const removeAllRanges = vi.fn();
+    const sel: { type: string; isCollapsed: boolean; removeAllRanges: () => void } = {
+      type: 'Caret',
+      isCollapsed: true,
+      removeAllRanges,
+    };
+    const spy = vi.spyOn(window, 'getSelection').mockReturnValue(sel as unknown as Selection);
+    try {
+      pointer('pointerdown');
+      sel.type = 'Range'; // a selection slipped through mid-gesture
+      pointer('pointerup');
+      expect(removeAllRanges).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('leaves a selection that existed before the pan, and one made without panning', () => {
+    const removeAllRanges = vi.fn();
+    const sel = { type: 'Range', isCollapsed: true, removeAllRanges };
+    const spy = vi.spyOn(window, 'getSelection').mockReturnValue(sel as unknown as Selection);
+    try {
+      pointer('pointerdown');
+      pointer('pointerup');
+      // pointerup with no pan in progress (e.g. after a click on a link).
+      pointer('pointerup');
+      expect(removeAllRanges).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('removes the selectstart listeners from both the render root and document when the pan ends', () => {
+    const rootRemove = vi.spyOn(el.renderRoot, 'removeEventListener');
+    const docRemove = vi.spyOn(document, 'removeEventListener');
+    try {
+      pointer('pointerdown');
+      pointer('pointerup');
+      const removedSelectStart = (spy: typeof rootRemove): boolean =>
+        spy.mock.calls.some(([type, , opts]) => type === 'selectstart' && opts === true);
+      expect(removedSelectStart(rootRemove)).toBe(true);
+      expect(removedSelectStart(docRemove)).toBe(true);
+    } finally {
+      rootRemove.mockRestore();
+      docRemove.mockRestore();
+    }
+  });
+
+  it('ends the pan and stops suppressing selection when pointer capture is lost', () => {
+    pointer('pointerdown');
+    expect(selectStartPrevented(document.body)).toBe(true);
+    pointer('lostpointercapture');
+    expect(canvas().classList.contains('dragging')).toBe(false);
+    expect(selectStartPrevented(document.body)).toBe(false);
+  });
+
+  it('does not clear a selection on a pointerup with no pan in progress', () => {
+    // Fresh element: no earlier pan has set hadSelectionAtPanStart, so only
+    // the dragging guard in onPointerUp keeps the selection (e.g. a click on
+    // a node link, whose pointerup still bubbles to the canvas).
+    const removeAllRanges = vi.fn();
+    const sel = { type: 'Range', isCollapsed: true, removeAllRanges };
+    const spy = vi.spyOn(window, 'getSelection').mockReturnValue(sel as unknown as Selection);
+    try {
+      pointer('pointerup', el.shadowRoot!.querySelector('.canvas a')!);
+      pointer('pointerup');
+      expect(removeAllRanges).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('does not start a pan (or suppress selection) from a link or button', () => {
+    // Node cards are links, so a pointerdown on a node label never pans and a
+    // double-click there can still select the label text.
+    const link = el.shadowRoot!.querySelector('.canvas a');
+    expect(link).not.toBeNull();
+    pointer('pointerdown', link!);
+    expect(canvas().classList.contains('dragging')).toBe(false);
+    expect(selectStartPrevented(textTarget())).toBe(false);
   });
 });

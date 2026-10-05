@@ -28,6 +28,34 @@ import (
 // never returns this.
 var ErrLogsNotSupported = errors.New("agent logs are not available on this runtime")
 
+// RecordlessActor identifies one actor a RecordlessActorProber found running
+// with no in-memory record of which request created it — for example, after
+// the runtime's own process restarted. UID should be a globally unique,
+// backend-assigned identifier (not derived from Name alone), so a caller
+// checking more than one runtime instance can dedupe by actor identity
+// rather than by a name that can collide across instances.
+type RecordlessActor struct {
+	Name string
+	UID  string
+}
+
+// RecordlessActorProber is an optional capability a Runtime may implement
+// when it cannot always tell a project-scoped caller "not found" apart from
+// "this process lost the record that would prove it" — a runtime whose
+// actors carry no labels the broker can query after a restart is one
+// example. RecordlessActors reports the runtime's own scope
+// for projectID (for example, a namespace) and the names of any actor in it
+// with no such record, so a caller can turn a would-be not-found into an
+// explicit, distinguishable error instead of an idempotent success that
+// would silently orphan the actor.
+//
+// A runtime that always keeps an authoritative record of what it is running
+// does not need to implement this interface; the type assertion simply
+// fails for it, and its callers' behavior is unchanged.
+type RecordlessActorProber interface {
+	RecordlessActors(ctx context.Context, projectID string) (scope string, actors []RecordlessActor, err error)
+}
+
 // PerProfileInstancesRuntime is an optional capability a Runtime may
 // implement to say that its instances are bound to a specific profile's
 // configuration, so a request naming a different profile of the same
@@ -70,6 +98,46 @@ type AttachCapableRuntime interface {
 func HasAttachSupport(rt Runtime) bool {
 	ac, ok := rt.(AttachCapableRuntime)
 	return !ok || ac.SupportsAttach()
+}
+
+// AsyncLaunchUnsupportedRuntime is an optional capability a Runtime may
+// implement to report that it cannot serve an asynchronous launch. An async
+// launch depends on the runtime calling RunConfig.Checkpoint and
+// RunConfig.OnResourceCreated from Run, so the broker can cancel the launch
+// at a checkpoint and clean up the resources the runtime reported. A runtime
+// that does not call those hooks reports true here, and the broker falls
+// back to a synchronous create for it.
+//
+// A runtime that does not implement this interface is treated as supporting
+// async launch (missing capability ⇒ supported).
+type AsyncLaunchUnsupportedRuntime interface {
+	AsyncLaunchUnsupported() bool
+}
+
+// HasAsyncLaunchSupport reports whether rt can serve an asynchronous
+// launch: true unless rt implements AsyncLaunchUnsupportedRuntime and
+// reports true.
+func HasAsyncLaunchSupport(rt Runtime) bool {
+	au, ok := rt.(AsyncLaunchUnsupportedRuntime)
+	return !ok || !au.AsyncLaunchUnsupported()
+}
+
+// EmptyPerAgentCapableRuntime is an optional capability a Runtime may
+// implement to report whether it can run an empty-per-agent workspace
+// (design #2703): a private, non-git per-agent directory on the node or pod.
+// A runtime that does not implement it is treated as supporting the mode;
+// one that cannot (Cloud Run, which rejects the mode at Run) opts out by
+// implementing this and reporting false.
+type EmptyPerAgentCapableRuntime interface {
+	SupportsEmptyPerAgentWorkspace() bool
+}
+
+// HasEmptyPerAgentSupport reports whether rt supports empty-per-agent
+// workspaces: true unless rt implements EmptyPerAgentCapableRuntime and
+// reports false. Brokers advertise it per default runtime, like Attach.
+func HasEmptyPerAgentSupport(rt Runtime) bool {
+	ec, ok := rt.(EmptyPerAgentCapableRuntime)
+	return !ok || ec.SupportsEmptyPerAgentWorkspace()
 }
 
 // AgentResourceCleaner is an optional capability a Runtime may implement

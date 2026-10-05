@@ -54,14 +54,16 @@ func doctorIAPMiddleware(expectedToken string, next http.Handler) http.Handler {
 // SCION_TRANSPORT_TOKEN is set.
 func TestCheckTransportAuth_Injected(t *testing.T) {
 	token := makeDoctorTestJWT(time.Now().Add(1 * time.Hour))
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SCION_TRANSPORT_TOKEN_FILE", "")
 	t.Setenv("SCION_TRANSPORT_TOKEN", token)
 
-	src := checkTransportAuth()
+	src := checkTransportAuth(&doctorDiag{})
 	if src == nil {
 		t.Fatal("expected non-nil transport source")
 	}
-	if _, ok := src.(*transportauth.InjectedSource); !ok {
-		t.Errorf("expected InjectedSource, got %T", src)
+	if _, ok := src.(*transportauth.FileSource); !ok {
+		t.Errorf("expected FileSource, got %T", src)
 	}
 }
 
@@ -70,6 +72,7 @@ func TestCheckTransportAuth_Injected(t *testing.T) {
 func TestCheckTransportAuth_None(t *testing.T) {
 	for _, key := range []string{
 		"SCION_TRANSPORT_TOKEN",
+		"SCION_TRANSPORT_TOKEN_FILE",
 		"SCION_TRANSPORT_AUDIENCE",
 		"SCION_HUB_OIDC_AUDIENCE",
 	} {
@@ -79,7 +82,7 @@ func TestCheckTransportAuth_None(t *testing.T) {
 	transportauth.IsOnGCEFunc = func() bool { return false }
 	defer func() { transportauth.IsOnGCEFunc = orig }()
 
-	src := checkTransportAuth()
+	src := checkTransportAuth(&doctorDiag{})
 	if src != nil {
 		t.Errorf("expected nil transport source, got %T", src)
 	}
@@ -168,7 +171,7 @@ func TestCheckAuthentication_WithTransportAuth(t *testing.T) {
 	_ = os.WriteFile(scionDir+"/scion-token", []byte("test-scion-token"), 0600)
 
 	failures := 0
-	result := checkAuthentication(server.URL, &failures, src)
+	result := checkAuthentication(server.URL, &failures, src, &doctorDiag{})
 	if !result {
 		t.Error("expected authentication check to pass with transport auth")
 	}
@@ -239,7 +242,7 @@ func TestCheckAuthentication_DoesNotRevokeOriginalToken(t *testing.T) {
 	_ = os.WriteFile(scionDir+"/scion-token", []byte(originalToken), 0600)
 
 	failures := 0
-	result := checkAuthentication(server.URL, &failures, nil)
+	result := checkAuthentication(server.URL, &failures, nil, &doctorDiag{})
 	if !result {
 		t.Errorf("expected authentication check to pass, got failures=%d", failures)
 	}

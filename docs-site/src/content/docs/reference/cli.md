@@ -44,6 +44,16 @@ implicitly resumes its harness session (continuing the prior conversation);
 starting a **stopped** or **error** agent runs a fresh session. See
 [`scion suspend`](#scion-suspend) and [`scion resume`](#scion-resume).
 
+**In Hub mode**, starting an existing **stopped** agent restarts it in place
+(printed as "Restarting", with a fresh session), the same as `scion resume`.
+Starting an **error**-phase agent still fails with a conflict: use
+`scion resume --force` or delete it first. When an existing agent is reused in
+place, the Hub applies only the task and `--attach`. Other configuration flags
+you set explicitly (for example `--type`, `--image`, `--harness-config`,
+`--broker`, `--label` or `--no-auth`) are not applied, and the CLI prints a
+warning that names them. `--no-auth` on an existing agent is tracked in
+ptone/scion#1855.
+
 **Usage:** `scion start <agent-name> [task] [flags]`
 
 - **Arguments:**
@@ -54,14 +64,36 @@ starting a **stopped** or **error** agent runs a fresh session. See
     - `-t, --type <string>`: Template to use (default "gemini").
     - `-i, --image <string>`: Override container image.
     - `-a, --attach`: Attach to the agent immediately after starting.
-    - `--no-auth`: Disable authentication propagation.
+    - `--no-auth`: Disable authentication propagation (also sent to the Hub in Hub mode; applies when the agent is created).
     - `-d, --detached`: Run in detached mode (default true).
     - `--config <path>`: Path to inline agent config file (YAML/JSON) for Just-In-Time (JIT) overrides, or `-` for stdin.
     - `--harness-config <string>`: Named harness configuration to use.
     - `--harness-auth <string>`: Override auth method for the harness. Universal types: `api-key`, `oauth-token`, `vertex-ai`, `auth-file` (each harness accepts a subset — see [Harness Authentication](/scion/local/agent-credentials/)).
-    - `--broker <string>`: Preferred runtime broker ID or name for execution.
+    - `--broker <string>`: Preferred runtime broker ID, name, or slug for execution. In Hub mode, a broker that does not exist fails with `runtime_broker_not_found` (404), and the message lists the brokers you can use.
     - `--message-mode <mode>`: Set the agent's initial message mode (`project`, `branch`, `lineage`, `none`, or `hub`). Defaults to `project`. See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes).
     - `--notify`: Get notified via the browser or system when the spawned agent reaches a terminal state.
+    - `--no-wait`: *(Hub mode)* Return as soon as the Hub accepts the launch instead of waiting for the agent to reach `running`. Ignored with `--attach`.
+    - `--wait-timeout <duration>`: *(Hub mode)* How long to wait for the agent to start (for example `10m`); must not be negative. The default is the Hub's remaining launch budget plus 30 seconds, or 5 minutes when the Hub does not advertise one. Raise it if the Hub's launch timeout has been raised.
+
+In Hub mode, `start` waits for the agent to reach `running` when the Hub
+launches it asynchronously, after a workspace upload, or with `--attach`.
+Otherwise (for example when the Hub does not launch asynchronously) it returns
+as soon as the Hub answers, as before, possibly while the agent is still
+provisioning. While waiting, each launch step is printed to stderr (nothing
+extra under `--format json`). If the wait times out, or you press Ctrl-C, only
+the wait stops: the launch continues on the Hub, and re-running
+`scion start <agent-name>` resumes waiting. Ctrl-C exits with status 130 and
+SIGTERM with 143; a failed launch or a timeout exits 1. Network errors and
+Hub answers of 5xx, 408 or 429 are retried while waiting; any other 4xx (for
+example 401 or 403) stops the wait at once with the Hub's error, and the launch
+continues on the Hub. If the agent's create did not
+complete (for example the image could not be pulled), the error shows the
+stored template and task. Delete the agent and create it again
+(`scion delete <agent-name>`, then `scion start` with the same template and
+task). If soft-delete retention is enabled on the Hub, the name stays reserved
+until the agent is deleted with force=true or purged; until then, use a new
+name. With `--format json`, `--attach` after a workspace upload attaches
+without printing the JSON result.
 
 ### `scion stop`
 
@@ -104,6 +136,7 @@ session.
 - **Flags:**
     - `-a, --attach`: Attach to the agent immediately.
     - `-f, --force`: Force resume an agent in the `error` phase. This attempts an in-place restart of a crashed or interrupted session, preserving the prior harness conversation state instead of starting fresh.
+    - `--no-wait`, `--wait-timeout <duration>`: *(Hub mode)* Same as for [`scion start`](#scion-start-or-run).
 
 ### `scion attach`
 
@@ -136,20 +169,20 @@ Sends a message to a running agent or user.
 
 - **Arguments:**
     - `<recipient>`: The recipient (see above).
-    - `<message>`: The text to send.
+    - `<message>`: The text to send. Pass `-` to read the body from stdin.
 - **Flags:**
     - `-i, --interrupt`: Interrupt the harness before sending the message.
     - `-w, --wake`: Resume a suspended agent before delivering the message.
-    - `--body-file <path>`: Read the message body from a file instead of passing it inline. Useful for long messages and scripted workflows. Mutually exclusive with the inline `<message>` argument.
+    - `--body-file <path>`: Read the message body from a file instead of passing it inline. Useful for long messages and scripted workflows. `--body-file -` reads the body from stdin, like a `-` message argument. Mutually exclusive with the inline `<message>` argument.
     - `--attach <path>`: Attach one or more file paths (repeatable). File paths must be within allowed roots (`/workspace` or `/scion-volumes`), where relative paths resolve against `/workspace`.
-        - **Constraints:** Cannot be combined with `--raw`, `--in`, or `--at`.
+        - **Constraints:** Cannot be combined with `--in` or `--at`.
         - **Requirements:** Requires Hub mode (`scion hub enable`). If run in local mode, the command will fail with an error suggesting you include file contents directly in the message text. If the file is not a regular file (e.g., is a directory) or is outside allowed roots, the command will fail.
     - `--cc <agents>`: *(Deprecated — will be removed.)* Carbon copy additional agents. This flag is **repeatable** and also accepts a **comma-separated list** of agent names (e.g., `--cc dev-agent,qa-agent --cc test-agent`). Use `group[...]` addressing or body `@mentions` instead.
     - `--notify`: *(Deprecated — use `scion notifications subscribe` instead.)* Get notified when the target agent(s) respond or reach a terminal state after receiving the message.
     - `--plain`: *(Deprecated — will be removed.)*  Mark for plain-text delivery.
-    - `--channel <channel>`: *(Deprecated — use conversation addressing instead.)* Target a specific message channel (e.g., `telegram`, `gchat`, `teams`, `web`).
-    - `--thread-id <id>`: *(Deprecated — use conversation addressing instead.)* Target a specific thread ID within the channel.
-    - `--raw`: *(Deprecated — use `scion keys` instead.)* Hidden, migration-only alias for `scion keys`: it sends through the same keys operation (the Hub's `/keys` route in Hub mode, the same local keys primitive in local mode), never through the message path; do not use it in new scripts or skills. Only an ordinary message to a single agent in the same project is accepted: before sending anything, the CLI rejects `--raw` combined with `--plain`, `--attach`, `--interrupt`, `--wake`, `--notify`, `--cc`, `--in`/`--at`, `--channel`/`--thread-id`, user or `group[...]` recipients, conversation addressing other than a same-project agent, or a cross-project target.
+    - `--channel <channel>`: *(Deprecated — address the conversation with `conv:<uuid>` instead, or use `@<name>` to message an agent.)* Target a specific message channel (e.g., `telegram`, `gchat`, `teams`, `web`).
+    - `--thread-id <id>`: *(Deprecated — address the conversation with `conv:<uuid>` instead; `scion conversation list` shows conversation IDs.)* Target a specific thread ID within the channel. For `user:` recipients on the web channel, the thread must already exist as a conversation: the Hub rejects an unknown or deleted thread ID (HTTP 422) instead of creating a new conversation, and the command exits 1. External channels (for example Slack, Teams, or Google Chat) deliver to the thread ID themselves and are not checked. On success, a `user:` send prints the conversation the message was recorded in.
+    - `--raw`: *(Removed — use `scion keys` instead.)* Raw keystroke delivery through messages has been removed. Any use of `--raw` (with any value, target, or mode) fails before anything is sent, with an error pointing to `scion keys`. The Hub likewise rejects a message request carrying the retired `raw` field with `422 raw_input_removed`.
     - `--in <duration>`: *(Deprecated — use `scion schedule create --in` instead.)* Schedule message delivery after a duration.
     - `--at <time>`: *(Deprecated — use `scion schedule create --at` instead.)* Schedule message delivery at an absolute time.
 
@@ -183,6 +216,18 @@ Sends a message to a running agent or user.
     scion message --non-interactive @reviewer "PR #42 is ready for review.\n\nBranch: fix/auth-bug\nCI: all green"
     ```
 
+**Message body input:** for `--body-file` and stdin (`-` or `--body-file -`), trailing CR/LF characters are trimmed and everything else, including interior newlines, is sent exactly as read. An inline `<message>` is sent as given. An empty body is an error.
+
+:::caution[Backticks and `$(...)` in double-quoted messages]
+Your shell expands backticks and `$(...)` inside double-quoted arguments **before** `scion` runs: it executes the command and splices its output into the message. `scion` cannot detect or undo this. To send code or shell snippets verbatim, use `--body-file`, or stdin with a quoted heredoc (`<<'EOF'`):
+
+```bash
+scion message my-agent - <<'EOF'
+Run `make test`, then check $(git rev-parse HEAD).
+EOF
+```
+:::
+
 ### `scion broadcast`
 
 Sends a message to all running agents in the current project (or across all projects).
@@ -209,11 +254,11 @@ scion keys my-agent "Enter"
 
 **In Hub mode**, `scion keys` calls the Hub's dedicated keys operation described in [API Reference](/scion/reference/api/#agents-apiv1agents) (the project-scoped `/keys` route), never the message path. That means: input validation and bounding to 4096 UTF-8 bytes before dispatch (an empty `<keys>` string is rejected before any request is sent); authorization mirroring `agent.attach` (a human operator needs the same authority as opening a terminal — closed/`none` message mode does not block it, and message-only authority does not grant it; an agent caller additionally needs a live attach relationship on the target — see [Permissions & Policy](/scion/hosted/ha/permissions/)); a `409` rather than a wake/start for a stopped or suspended target, and a `503` (safe to retry only after fixing the route — never a `502`/`504`, which must never be retried automatically) for an unreachable broker or no immediate route; single-attempt delivery with no automatic retry, even if the client is configured with retries; no message, conversation, or terminal-content record, only content-free audit; and a `422 keys_unsupported` error for a managed-runtime target or an un-upgraded Runtime Broker — see [API Reference](/scion/reference/api/#agents-apiv1agents) for the full outcome table. A Hub predating the `/keys` route itself (rather than just an old broker behind an up-to-date Hub) answers with that Hub's own generic `404`. The CLI reports any `404`/`405` without an `operation_id` — an old Hub, or a project the Hub does not recognize — as a rejection (`hub_unsupported`), and never falls back to the message path.
 
-**Outcome reporting.** Every attempt resolves to one of three outcomes: `dispatched` (the Runtime Broker acknowledged terminal injection — not that the harness acted on it), `rejected` (definitely not delivered; safe to correct and retry), or `unknown` (may or may not have reached the terminal; check with `scion look` before resending). With `--format json`, the CLI prints exactly one result object on success or failure, including the outcome, the machine outcome code when known, and the Hub's `operation_id` when one was returned.
+**Outcome reporting.** Every attempt resolves to one of three outcomes: `dispatched` (the Runtime Broker acknowledged terminal injection — not that the harness acted on it), `rejected` (definitely not delivered; safe to correct and retry), or `unknown` (may or may not have reached the terminal; check with `scion look` before resending). With `--format json`, the CLI prints exactly one result object on success or failure, including the outcome, the machine outcome code when known, and the Hub's `operation_id` when one was returned. The outcome code is never empty or a generic placeholder: if a proxy or gateway answers for the Hub (for example a bare `502` with no body, or any response with no keys outcome code and no `operation_id`) and the status does not prove the keys were not delivered, the CLI reports outcome `unknown` with code `keys_outcome_unknown` and a message naming the HTTP status, and exits non-zero.
 
 **In local mode**, `scion keys` uses the local keys primitive with identical tmux-argument semantics and the same input validation (including rejecting an empty string). It works for projects linked to a Hub project and for purely local projects that never ran `scion hub enable`; the target is resolved within the selected project only, and an ambiguous match fails rather than guessing. There is no Hub authorization, rate limit, or audit record, since no Hub is involved.
 
-`scion message --raw` is the deprecated predecessor of this command, kept only as a hidden alias that sends through the same keys operation — new scripts and skills should call `scion keys` directly, never `--raw`.
+`scion keys` replaces the removed `scion message --raw` flag. `scion message --raw` now fails locally, before any request is sent, with guidance naming `scion keys`; update scripts and skills to call `scion keys` directly.
 
 ### `scion set-message-mode`
 
@@ -371,8 +416,8 @@ the agent's status message reads "migrating to generation N".
 Reincarnation works for agents in clone-per-agent, shared-workspace (shared-plain), and
 Hub-managed workspaces. For a shared-workspace agent, the agent record, identity, and shared
 checkout are preserved, and sibling agents sharing the checkout are not restarted. Agents in
-worktree-per-agent projects are not yet supported; the Hub rejects the request with
-`400 Bad Request`. Reincarnating another agent requires the `agent.lifecycle` permission (the same
+worktree-per-agent projects and agents in empty-per-agent projects are not yet supported; the Hub
+rejects the request with `400 Bad Request`. Reincarnating another agent requires the `agent.lifecycle` permission (the same
 as stop, start, and restart); an agent can always reincarnate itself.
 
 **Usage:** `scion reincarnate [agent-name] [flags]`
@@ -587,9 +632,9 @@ full lifecycle.
 
 - `list`: List local harness-configs. Flags: `--hub` (also include Hub-registered configs).
 - `show <name>`: Show config details (local path/image, or Hub ID, image status, and source URL).
-- `install <source>`: Install a config from a GitHub URL, local path, rclone URI, or archive. Flags: `--name` (override derived name), `--force` (overwrite existing), `--global` (register at global scope on the Hub).
+- `install <source>`: Install a config from a GitHub URL, local path, rclone URI, or archive. The name is `--name`, else the config's `name` field, else its `harness` field, else the source directory name. Flags: `--name` (override derived name), `--force` (overwrite an existing config with the same name in the target scope, locally or on the Hub; without it install refuses), `--global` (install globally / register at global scope on the Hub; default is the current project).
 - `update [name]`: Re-import (refresh) a config from its stored source URL. Flags: `--url <url>` (override/set the stored source URL for one config), `--all` (re-import every config that has a stored source URL). `--url` and `--all` are mutually exclusive; requires a Hub connection.
-- `sync <name>` (alias `push`): Upload a local config to the Hub (changed files only). Flags: `--name` (publish under a different Hub name).
+- `sync <name>` (alias `push`): Upload a local config to the Hub (changed files only), creating it or updating the same-named config in the target scope. Scope is the current project by default, or global with `--global`; the output shows the scope used. Flags: `--name` (publish under a different Hub name).
 - `pull <name>`: Download a config from the Hub. Flags: `--to <path>` (destination; defaults to the global dir).
 - `reset <name>`: Restore a config to the binary's embedded defaults.
 - `upgrade [name]`: Add missing support files and metadata without clobbering user values. Flags: `--dry-run`, `--activate-script`, `--force`. With no name, upgrades all configs in the global directory.
@@ -613,6 +658,7 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
             - `--expires <duration>`: Expiry duration (e.g., 30d, 90d, 1y, default: 90d).
             - `--purpose <text>`: Optional bounded description of what the token is for (≤128 bytes, single line, no control characters). Immutable after issuance — there is no update command.
             - `--label <key=value>`: Optional bounded label (repeatable). Keys are lowercase `[a-z][a-z0-9_.-]*` (≤32 bytes); values are ≤64 bytes from a restricted charset. A set of attribution-shaped keys (e.g. `user_id`, `agent`, `actor_binding`) are reserved and rejected. Immutable after issuance.
+    - `scopes`: List every scope accepted by `create --scopes`. With `--project <string>`, also report which scopes you may currently select for a token scoped to that project and, for each one you cannot, why. Supports `--json`.
     - `list`: List your access tokens.
     - `revoke <token-id>`: Revoke a token (remains visible in listings as revoked).
     - `delete <token-id>`: Permanently delete a token.
@@ -620,7 +666,10 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
 - `scion hub notifications`: **Deprecated**. This command has been moved to the top-level `scion notifications` command group.
 - `scion hub link`: Link the current local project to the Hub.
 - `scion hub unlink`: Unlink the current project from the Hub locally.
-- `scion hub projects`: List all projects registered on the Hub.
+- `scion hub projects` (alias `project`): List all projects registered on the Hub.
+    - `create [git-url]`: Create a project on the Hub. With a git URL, the project is anchored to that repository. Without one, a Hub-managed project without git is created; `--name` is then required and `--branch` is not allowed.
+        - Flags: `--slug`, `--name`, `--branch`, `--workspace-mode`, `--json`
+        - `--workspace-mode <shared|per-agent|worktree-per-agent>`: The [workspace sharing mode](/scion/local/workspaces-and-sharing/#setting-the-mode-on-a-hub-project). On a project without git, `per-agent` gives each agent an empty private directory (empty-per-agent). The mode is set at create time only and cannot be changed later. The Hub validates the value: unknown values, and `worktree-per-agent` without a git URL, fail with the Hub's `400` message.
     - `info [project-name]`: Show details for a project, including its providers. Each provider shows its Runtime Broker's capacity as `(agents: count/limit)`, or `(agents: count)` when that Runtime Broker has no limit. `(not enforced)` is appended when the hub-wide switch for Runtime Broker quota enforcement is off.
 - `scion hub brokers`: List all runtime brokers registered on the Hub.
 - `scion hub secret`: Manage write-only secrets on the Hub.
@@ -635,8 +684,6 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
     - `set <key>=<value>`: Set a variable.
     - `get [key]`: Get variable values.
     - `clear <key>`: Remove a variable.
-- `scion hub project create <git-url>`: Create a project from a remote git repository.
-    - Flags: `--slug`, `--name`, `--branch`, `--json`
 - `scion hub hook` (alias `psh`): Manage hub-scoped (baseline) pre-start hooks. Requires administrator privileges.
     - `list` (alias `ls`): List hub-scoped pre-start hooks.
     - `show <id-or-slug>`: Show details and script content of a hub-scoped hook.
