@@ -5122,6 +5122,53 @@ func TestBrokerHeartbeat_RejectsPhaseRegression(t *testing.T) {
 		"heartbeat should not regress phase from running to starting")
 }
 
+// TestBrokerHeartbeat_RejectsRunningToCreatedRegression pins ptone/scion#494:
+// a heartbeat reporting phase=created for an agent the hub has as running
+// must not regress it. PhaseCreated has ordinal 1, so it counts as active
+// and the heartbeat's ordinal guard suppresses the downgrade.
+func TestBrokerHeartbeat_RejectsRunningToCreatedRegression(t *testing.T) {
+	srv, s := testServer(t)
+	grantDevUserRuntimeBrokerAccess(t, s)
+	ctx := context.Background()
+
+	project := &store.Project{ID: tid("proj-hb-created"), Name: "HB Created Project", Slug: "hb-created-project"}
+	require.NoError(t, s.CreateProject(ctx, project))
+
+	broker := &store.RuntimeBroker{
+		ID: tid("broker-hb-created"), Name: "HB Created Broker", Slug: "hb-created-broker",
+		Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	agent := &store.Agent{
+		ID: tid("agent-hb-created"), Slug: "hb-created-slug", Name: "HB Created Agent",
+		ProjectID: project.ID, RuntimeBrokerID: broker.ID,
+		Phase:    string(state.PhaseRunning),
+		Activity: string(state.ActivityWorking),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+
+	hb := brokerHeartbeatRequest{
+		Status: "online",
+		Projects: []brokerProjectHeartbeat{{
+			ProjectID:  project.ID,
+			AgentCount: 1,
+			Agents: []brokerAgentHeartbeat{{
+				Slug:            agent.Slug,
+				Phase:           string(state.PhaseCreated),
+				ContainerStatus: "created",
+			}},
+		}},
+	}
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/runtime-brokers/"+broker.ID+"/heartbeat", hb)
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, string(state.PhaseRunning), updated.Phase,
+		"heartbeat should not regress phase from running to created")
+}
+
 // TestAgentStatusUpdate_SuspendedIsStickyAgainstStatusPost verifies that a
 // dying container's async sciontool /status POST (phase=stopped,
 // activity=crashed) cannot clobber a suspended agent's phase. If it did, a
