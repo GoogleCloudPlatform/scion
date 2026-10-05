@@ -1641,7 +1641,7 @@ func TestCreateBrokerRegistrationForAuthorizedMatch_IDMismatchRefused(t *testing
 	_, err = svc.CreateBrokerRegistrationForAuthorizedMatch(ctx, CreateBrokerRegistrationRequest{
 		Name:        "pin-mismatch-host",
 		AutoProvide: !beforeAutoProvide,
-	}, "someone-else", "a-different-broker-id-than-was-matched")
+	}, "someone-else", "a-different-broker-id-than-was-matched", true)
 	if !errors.Is(err, ErrBrokerRegistrationAuthorizationStale) {
 		t.Fatalf("expected ErrBrokerRegistrationAuthorizationStale, got: %v", err)
 	}
@@ -1652,6 +1652,63 @@ func TestCreateBrokerRegistrationForAuthorizedMatch_IDMismatchRefused(t *testing
 	}
 	if after.AutoProvide != beforeAutoProvide {
 		t.Errorf("broker must not be mutated when the authorized ID does not match the lookup")
+	}
+}
+
+// TestCreateBrokerRegistrationForAuthorizedMatch_AutoProvidePin covers the
+// auto-provide pin: a caller admitted only to keep auto-provide on
+// (autoProvideAuthorized=false) is refused when the re-read broker has
+// auto-provide off, and proceeds when it is still on.
+func TestCreateBrokerRegistrationForAuthorizedMatch_AutoProvidePin(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		stored      bool
+		authorized  bool
+		wantStale   bool
+		wantStored  bool
+		requestedOn bool
+	}{
+		{name: "keep on, stored off", stored: false, authorized: false, requestedOn: true, wantStale: true, wantStored: false},
+		{name: "keep on, stored on", stored: true, authorized: false, requestedOn: true, wantStale: false, wantStored: true},
+		{name: "turn on with broker.auto_provide, stored off", stored: false, authorized: true, requestedOn: true, wantStale: false, wantStored: true},
+		{name: "turn off, stored on", stored: true, authorized: false, requestedOn: false, wantStale: false, wantStored: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, s := setupTestBrokerAuthService(t)
+			ctx := context.Background()
+
+			broker := &store.RuntimeBroker{
+				ID:          tid("pin-autoprovide-broker"),
+				Name:        "pin-autoprovide-host",
+				Slug:        "pin-autoprovide-host",
+				Status:      store.BrokerStatusOffline,
+				AutoProvide: tc.stored,
+				CreatedBy:   "owner",
+			}
+			if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
+				t.Fatalf("CreateRuntimeBroker failed: %v", err)
+			}
+
+			_, err := svc.CreateBrokerRegistrationForAuthorizedMatch(ctx, CreateBrokerRegistrationRequest{
+				Name:        "pin-autoprovide-host",
+				AutoProvide: tc.requestedOn,
+			}, "owner", broker.ID, tc.authorized)
+			if tc.wantStale {
+				if !errors.Is(err, ErrBrokerRegistrationAuthorizationStale) {
+					t.Fatalf("expected ErrBrokerRegistrationAuthorizationStale, got: %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			after, err := s.GetRuntimeBroker(ctx, broker.ID)
+			if err != nil {
+				t.Fatalf("GetRuntimeBroker failed: %v", err)
+			}
+			if after.AutoProvide != tc.wantStored {
+				t.Errorf("AutoProvide = %v, want %v", after.AutoProvide, tc.wantStored)
+			}
+		})
 	}
 }
 
@@ -1675,7 +1732,7 @@ func TestCreateBrokerRegistrationForAuthorizedMatch_EmptyIDRefused(t *testing.T)
 	_, err = svc.CreateBrokerRegistrationForAuthorizedMatch(ctx, CreateBrokerRegistrationRequest{
 		Name:        "pin-empty-host",
 		AutoProvide: !beforeAutoProvide,
-	}, "someone-else", "")
+	}, "someone-else", "", true)
 	if err == nil {
 		t.Fatal("expected an error for an empty expectedExistingBrokerID, got nil")
 	}

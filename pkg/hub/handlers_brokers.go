@@ -128,20 +128,25 @@ func (s *Server) createBrokerRegistration(w http.ResponseWriter, r *http.Request
 	// nothing extra.
 	// ptone/scion#2107: a preserveSettings request writes no settings and
 	// joins this condition as "&& !req.PreserveSettings".
+	autoProvideAuthorized := false
 	if req.AutoProvide && (existingBroker == nil || !existingBroker.AutoProvide) {
 		if !s.authorizeBrokerAutoProvide(w, r) {
 			return
 		}
+		autoProvideAuthorized = true
 	}
 
 	// Create the broker registration. Pin the mutation to what was just
 	// authorized above, so a lookup race between the authorization check
 	// and this call cannot redirect it onto a broker the caller was not
 	// authorized against — whether that means reusing a specific existing
-	// broker, or, when none matched, creating a genuinely new one.
+	// broker, or, when none matched, creating a genuinely new one. A
+	// re-registration that kept auto-provide on without the
+	// broker.auto_provide check is also pinned to the broker still having
+	// auto-provide on.
 	var resp *CreateBrokerRegistrationResponse
 	if existingBroker != nil {
-		resp, err = s.brokerAuthService.CreateBrokerRegistrationForAuthorizedMatch(r.Context(), req, user.ID(), existingBroker.ID)
+		resp, err = s.brokerAuthService.CreateBrokerRegistrationForAuthorizedMatch(r.Context(), req, user.ID(), existingBroker.ID, autoProvideAuthorized)
 	} else {
 		resp, err = s.brokerAuthService.CreateBrokerRegistrationForAuthorizedNew(r.Context(), req, user.ID())
 	}

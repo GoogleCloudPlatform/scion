@@ -482,24 +482,23 @@ func TestBrokerHubToken_OwnerTokenCannotRotate(t *testing.T) {
 // Lookup changes between authorization and mutation
 // ----------------------------------------------------------------------------
 
-// brokerLookupSwapStore wraps a store and runs onLookup on the second
-// GetRuntimeBrokerByName call after it is armed: the first call is the
-// handler's authorization lookup and the second is the registration
-// service's own lookup.
+// brokerLookupSwapStore wraps a store and runs onLookup, once, on the first
+// GetRuntimeBrokerByName call made by the registration service's own
+// lookup (its context carries the marker set by createBrokerRegistration).
+// The handler's authorization lookup carries no marker and reaches the
+// wrapped store, however many lookups either side performs.
 type brokerLookupSwapStore struct {
 	store.Store
 	mu       sync.Mutex
-	armed    bool
-	calls    int
+	fired    bool
 	onLookup func(ctx context.Context, name string) (*store.RuntimeBroker, error)
 }
 
 func (w *brokerLookupSwapStore) GetRuntimeBrokerByName(ctx context.Context, name string) (*store.RuntimeBroker, error) {
 	w.mu.Lock()
-	hook := w.armed && w.onLookup != nil
+	hook := !w.fired && w.onLookup != nil && isBrokerRegistrationLookup(ctx)
 	if hook {
-		w.calls++
-		hook = w.calls == 2
+		w.fired = true
 	}
 	w.mu.Unlock()
 	if hook {
@@ -508,9 +507,17 @@ func (w *brokerLookupSwapStore) GetRuntimeBrokerByName(ctx context.Context, name
 	return w.Store.GetRuntimeBrokerByName(ctx, name)
 }
 
-func installBrokerLookupSwap(srv *Server, s store.Store, onLookup func(ctx context.Context, name string) (*store.RuntimeBroker, error)) {
-	w := &brokerLookupSwapStore{Store: s, armed: true, onLookup: onLookup}
+// hookFired reports whether onLookup ran on the service's lookup.
+func (w *brokerLookupSwapStore) hookFired() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.fired
+}
+
+func installBrokerLookupSwap(srv *Server, s store.Store, onLookup func(ctx context.Context, name string) (*store.RuntimeBroker, error)) *brokerLookupSwapStore {
+	w := &brokerLookupSwapStore{Store: s, onLookup: onLookup}
 	srv.brokerAuthService.store = w
+	return w
 }
 
 func assertNoJoinToken(t *testing.T, s store.Store, brokerID string) {
@@ -527,7 +534,7 @@ func TestBrokerHubToken_SameNameBrokerAppearsDuringNewRegistration(t *testing.T)
 
 	const name = "hubtoken-race-new-broker"
 	var inserted *store.RuntimeBroker
-	installBrokerLookupSwap(srv, s, func(ctx context.Context, n string) (*store.RuntimeBroker, error) {
+	swap := installBrokerLookupSwap(srv, s, func(ctx context.Context, n string) (*store.RuntimeBroker, error) {
 		inserted = createReregistrationTestBroker(t, s, name, other.ID)
 		return s.GetRuntimeBrokerByName(ctx, n)
 	})
@@ -536,6 +543,7 @@ func TestBrokerHubToken_SameNameBrokerAppearsDuringNewRegistration(t *testing.T)
 
 	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
 	assert.NotContains(t, rec.Body.String(), "joinToken")
+	require.True(t, swap.hookFired(), "the change must land on the registration service's own lookup")
 	require.NotNil(t, inserted, "the service lookup must have run")
 	assertBrokerUnchanged(t, s, inserted.ID)
 	got, err := s.GetRuntimeBroker(context.Background(), inserted.ID)
@@ -551,7 +559,7 @@ func TestBrokerHubToken_NameMatchChangesDuringOwnerReregistration(t *testing.T) 
 	target := createReregistrationTestBroker(t, s, "hubtoken-race-rereg-target", other.ID)
 	key := mintHubBrokerUAT(t, srv, owner.ID, "broker:create")
 
-	installBrokerLookupSwap(srv, s, func(ctx context.Context, _ string) (*store.RuntimeBroker, error) {
+	swap := installBrokerLookupSwap(srv, s, func(ctx context.Context, _ string) (*store.RuntimeBroker, error) {
 		return s.GetRuntimeBroker(ctx, target.ID)
 	})
 
@@ -566,4 +574,36 @@ func TestBrokerHubToken_NameMatchChangesDuringOwnerReregistration(t *testing.T) 
 	assertBrokerUnchanged(t, s, target.ID)
 	assertNoJoinToken(t, s, own.ID)
 	assertNoJoinToken(t, s, target.ID)
+	assert.True(t, swap.hookFired(), "the change must land on the registration service's own lookup")
+}
+
+// A re-registration that keeps auto-provide on skips the
+// broker.auto_provide check, so it is pinned to the broker still having
+// auto-provide on when the service re-reads it.
+func TestBrokerHubToken_AutoProvideTurnedOffDuringOwnerReregistration(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	owner := newHubMemberUser(t, s, "hubtoken-race-autoprovide-owner")
+	broker := createReregistrationTestBroker(t, s, "hubtoken-race-autoprovide-broker", owner.ID)
+	broker.AutoProvide = true
+	require.NoError(t, s.UpdateRuntimeBroker(ctx, broker))
+
+	swap := installBrokerLookupSwap(srv, s, func(ctx context.Context, n string) (*store.RuntimeBroker, error) {
+		current, err := s.GetRuntimeBrokerByName(ctx, n)
+		require.NoError(t, err)
+		current.AutoProvide = false
+		require.NoError(t, s.UpdateRuntimeBroker(ctx, current))
+		return s.GetRuntimeBrokerByName(ctx, n)
+	})
+
+	rec := doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{
+		Name:        broker.Name,
+		AutoProvide: true,
+		Labels:      map[string]string{"env": "updated"},
+	})
+
+	assert.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "joinToken")
+	require.True(t, swap.hookFired(), "the change must land on the registration service's own lookup")
+	assertBrokerUnchanged(t, s, broker.ID)
 }
