@@ -255,7 +255,11 @@ describe('hub members: one load per view', () => {
     serveUsers(() => pendingUsers.promise);
     const page = await mountPage();
     try {
-      page.dispatchEvent(new CustomEvent('rail-loaded', { detail: { spaceIds: [], spaces: [] } }));
+      page.dispatchEvent(
+        new CustomEvent('rail-loaded', {
+          detail: { spaceIds: [], spaces: [] },
+        })
+      );
       await settle();
 
       pendingUsers.resolve(usersPage(['u1']));
@@ -280,6 +284,7 @@ describe('hub members: the fallback poll', () => {
     const page = await mountPage();
     try {
       expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+      const ensure = vi.spyOn(harness.store, 'ensure');
       const usersBefore = usersRequests();
       const agentRequestsBefore = harness.server.requests.filter(
         (p) => !p.includes('sort=')
@@ -296,6 +301,31 @@ describe('hub members: the fallback poll', () => {
       );
       expect(storeWalks()).toBe(1);
       expect(pageAgentRequests()).toBe(0);
+      // The poll does not ask the store while the shown list is ready.
+      expect(ensure).not.toHaveBeenCalled();
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('asks the store again after a failed revalidation, and the next walk refreshes the sidebar', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      expect(storeWalks()).toBe(1);
+      harness.server.status = 500;
+      harness.store.invalidate('resync');
+      await settle();
+      expect(harness.store.peek({ scope: 'hub' })?.status).toBe('error');
+      expect(storeWalks()).toBe(2);
+      harness.server.status = 200;
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await settle();
+
+      expect(storeWalks()).toBe(3);
+      expect(harness.store.peek({ scope: 'hub' })?.status).toBe('ready');
+      expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
     } finally {
       unmount(page);
     }
@@ -365,6 +395,60 @@ describe('hub members: live updates from the store', () => {
     }
   });
 
+  it('after a failed revalidation the kept rows stay live: an SSE change reaches the sidebar', async () => {
+    serveUsers(() => usersPage(['u1']));
+    const page = await mountPage();
+    try {
+      harness.server.status = 500;
+      harness.store.invalidate('resync');
+      await settle();
+      expect(harness.store.peek({ scope: 'hub' })?.status).toBe('error');
+      harness.server.status = 200;
+
+      await harness.emitAgent('status', {
+        agentId: 'a1',
+        projectId: 'p1',
+        activity: 'working',
+      });
+      expect(page.v2AgentMembers.find((m) => m.id === 'a1')?.activity).toBe('working');
+
+      // Back on the hub view after a space view, agents-updated reads the
+      // same kept rows.
+      vi.mocked(apiFetch).mockImplementation(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ humans: [], agents: [] }), {
+            status: 200,
+          })
+        )
+      );
+      page.v2Conversation = {
+        conversationKey: 'p1',
+        projectId: 'p1',
+        isDM: false,
+      };
+      await page.loadV2Members('p1');
+      expect(page.v2AgentMembers).toEqual([]);
+      page.v2Conversation = null;
+      globalMap.stateManager.dispatchEvent(new Event('agents-updated'));
+      expect(ids(page.v2AgentMembers)).toEqual(['a1', 'a2']);
+    } finally {
+      unmount(page);
+    }
+  });
+
+  it('a failed first load shows nothing from the error snapshot', async () => {
+    serveUsers(() => usersPage(['u1']));
+    harness.server.status = 500;
+    const page = await mountPage();
+    try {
+      expect(harness.store.peek({ scope: 'hub' })?.status).toBe('error');
+      globalMap.stateManager.dispatchEvent(new Event('agents-updated'));
+      expect(page.v2AgentMembers).toEqual([]);
+    } finally {
+      unmount(page);
+    }
+  });
+
   it('a DM opened from the hub view keeps the hub list live, read from the store', async () => {
     serveUsers(() => usersPage(['u1']));
     const page = await mountPage();
@@ -376,7 +460,11 @@ describe('hub members: live updates from the store', () => {
       };
       await settle();
 
-      await harness.emitAgent('status', { agentId: 'a2', projectId: 'p1', activity: 'thinking' });
+      await harness.emitAgent('status', {
+        agentId: 'a2',
+        projectId: 'p1',
+        activity: 'thinking',
+      });
       expect(page.v2AgentMembers.find((m) => m.id === 'a2')?.activity).toBe('thinking');
 
       // The global map's agents-updated, in this view, also reads the store's
@@ -426,7 +514,11 @@ describe('hub members: live updates from the store', () => {
     serveUsers(() => usersPage(['u1']));
     const page = await mountPage();
     try {
-      page.v2Conversation = { conversationKey: 'p1', projectId: 'p1', isDM: false };
+      page.v2Conversation = {
+        conversationKey: 'p1',
+        projectId: 'p1',
+        isDM: false,
+      };
       page.v2AgentMembers = [{ id: 'proj-agent', kind: 'agent', displayName: 'Proj Agent' }];
       vi.mocked(apiFetch).mockImplementation(async () => new Promise<Response>(() => {}));
       void page.loadV2Members('p1');
@@ -486,7 +578,11 @@ describe('hub members: compact rows never reach the global agent map', () => {
           )
         )
       );
-      page.v2Conversation = { conversationKey: 'p1', projectId: 'p1', isDM: false };
+      page.v2Conversation = {
+        conversationKey: 'p1',
+        projectId: 'p1',
+        isDM: false,
+      };
       await page.loadV2Members('p1');
       expect(Array.from(globalMap.agents.keys())).toEqual(['sp1']);
 
@@ -534,7 +630,11 @@ describe('hub members: view-change race', () => {
     const page = await mountPage();
     try {
       expect(page._hubAgentsLoad).not.toBeNull();
-      page.v2Conversation = { conversationKey: 'dm:user:u9', projectId: '', isDM: true };
+      page.v2Conversation = {
+        conversationKey: 'dm:user:u9',
+        projectId: '',
+        isDM: true,
+      };
       await settle();
       expect(page._hubAgentsLoad).toBeNull();
 
@@ -593,7 +693,11 @@ describe('hub members: view-change race', () => {
         page.v2Conversation = null;
         page.loadHubMembers();
       });
-      page.v2Conversation = { projectId: 'p1', conversationKey: 'p1', isDM: false };
+      page.v2Conversation = {
+        projectId: 'p1',
+        conversationKey: 'p1',
+        isDM: false,
+      };
       await settle();
 
       // The users walk stopped for the moment the conversation was open
@@ -1030,7 +1134,11 @@ describe('hub members: request counts per trigger', () => {
           page.v2Conversation = null;
           page.loadHubMembers();
         });
-        page.v2Conversation = { projectId: 'p1', conversationKey: 'p1', isDM: false };
+        page.v2Conversation = {
+          projectId: 'p1',
+          conversationKey: 'p1',
+          isDM: false,
+        };
         await settle();
       },
       // Stopped attempt: page 1 only. Re-run: 2.

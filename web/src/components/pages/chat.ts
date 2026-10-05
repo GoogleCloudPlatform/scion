@@ -235,6 +235,18 @@ function parseHubUsersPage(body: unknown): { items: RawHubUser[]; nextCursor?: s
   return { items: data.users ?? [], ...(data.nextCursor ? { nextCursor: data.nextCursor } : {}) };
 }
 
+/**
+ * Whether a hub list snapshot holds a loaded list for the sidebar: ready, or
+ * failed after a load (a failed revalidation keeps the rows, and SSE changes
+ * go on applying to them). A failed first load has no rows and no
+ * `fetchedAt`; a walk's progress is partial.
+ */
+function hubSnapshotHasRows(snapshot: AgentListSnapshot): boolean {
+  return (
+    snapshot.status === 'ready' || (snapshot.status === 'error' && snapshot.fetchedAt !== undefined)
+  );
+}
+
 /** The agent store query behind the hub view's agent members (and the palette). */
 const HUB_AGENTS_QUERY = { scope: 'hub' } as const;
 
@@ -1424,8 +1436,10 @@ export class ScionPageChat extends LitElement {
         void this.loadV2Members(this.v2Conversation.projectId);
       } else {
         // Human membership has no SSE event, so the users list is walked
-        // again. The agents are kept current by the agent store (SSE and
-        // its own probe), so this walks no agent list once they are shown.
+        // again. A walk already in flight is joined, not followed by another,
+        // so the users list can be up to about two poll intervals old. The
+        // agents are kept current by the agent store (SSE and its own probe),
+        // so this walks no agent list while the shown list is ready.
         void this.loadHubMembers({ refresh: true });
       }
     }, FALLBACK_POLL_INTERVAL_MS);
@@ -1951,7 +1965,7 @@ export class ScionPageChat extends LitElement {
   private _handleAgentsUpdated(): void {
     if (this._sidebarShowsHubView()) {
       const snapshot = agentStore.peek(HUB_AGENTS_QUERY);
-      if (snapshot?.status === 'ready') this._publishHubAgents(snapshot);
+      if (snapshot && hubSnapshotHasRows(snapshot)) this._publishHubAgents(snapshot);
       return;
     }
     // Only adopt agents belonging to the current view: the open conversation's
@@ -2591,8 +2605,9 @@ export class ScionPageChat extends LitElement {
    * over SSE; the page retains the hub entry while connected, so every
    * ready snapshot after the first publish updates the sidebar (see
    * {@link _handleHubAgentSnapshot}). `options.refresh` (the fallback poll)
-   * therefore asks the store only while the list is not shown yet, for
-   * example after a failed first load.
+   * therefore asks the store only while the list is not shown yet (a failed
+   * first load, say) or the store's list is not ready (a failed
+   * revalidation), so in steady state it requests no agent list.
    */
   private loadHubMembers(options?: { refresh?: boolean }): void {
     // Claim the sidebar for the hub view before anything else, so a project
@@ -2600,7 +2615,10 @@ export class ScionPageChat extends LitElement {
     // is discarded even when this call only joins a load.
     ++this._membersViewSeq;
     const generation = this._hubMembersGeneration;
-    const loadAgents = !options?.refresh || !this._hubAgentsLive;
+    const loadAgents =
+      !options?.refresh ||
+      !this._hubAgentsLive ||
+      agentStore.peek(HUB_AGENTS_QUERY)?.status !== 'ready';
     queueMicrotask(() => {
       if (generation !== this._hubMembersGeneration) return;
       this._loadHubUsers(generation);
@@ -2641,13 +2659,13 @@ export class ScionPageChat extends LitElement {
 
   /**
    * Every snapshot of the retained hub list: the palette's Agents group, and
-   * the members sidebar while it shows the hub view. Only ready snapshots
-   * reach the sidebar; a walk's progress and a failed revalidation leave it
-   * as it is.
+   * the members sidebar while it shows the hub view. Snapshots holding a
+   * loaded list reach the sidebar (see {@link hubSnapshotHasRows}); a walk's
+   * progress and a failed first load leave it as it is.
    */
   private _handleHubAgentSnapshot(snapshot: AgentListSnapshot): void {
     this._handlePaletteAgentSnapshot(snapshot);
-    if (snapshot.status !== 'ready' || !this._sidebarShowsHubView()) return;
+    if (!hubSnapshotHasRows(snapshot) || !this._sidebarShowsHubView()) return;
     this._publishHubAgents(snapshot);
   }
 
