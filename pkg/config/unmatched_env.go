@@ -85,6 +85,8 @@ var knownInertServerEnvNames = map[string]string{
 	"SCION_SERVER_BROKER_BROKERTOKEN":                   "SCION_SERVER_BROKER_BROKER_TOKEN",
 	"SCION_SERVER_BROKER_AUTOPROVIDE":                   "SCION_SERVER_BROKER_AUTO_PROVIDE",
 	"SCION_SERVER_HUB_PUBLIC_URL":                       "SCION_SERVER_HUB_ENDPOINT",
+	// Named by an old storage-migration error message.
+	"SCION_SERVER_HUB_ID": "SCION_SERVER_HUB_HUBID",
 	// No SCION_SERVER_* spelling sets the boot log level or format; see
 	// knownInertServerEnvNotes.
 	"SCION_SERVER_LOG_LEVEL":  "SCION_SERVER_LOGLEVEL",

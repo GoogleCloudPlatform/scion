@@ -110,10 +110,18 @@ func TestDirectServerEnvNames_MatchGetenvCallSites(t *testing.T) {
 
 	noLayer1 := func(string) bool { return false }
 	for name, file := range read {
+		if _, inert := knownInertServerEnvNames[name]; inert {
+			t.Errorf("%s in %s names a known-inert variable (knownInertServerEnvNames): "+
+				"reword the literal or move it into unmatched_env.go; do NOT add it to directServerEnvNames, "+
+				"which would silence the startup warning for a name that does nothing", name, file)
+			continue
+		}
 		if directServerEnvNames[name] || serverEnvMatches(name, noLayer1) {
 			continue
 		}
-		t.Errorf("%s appears in %s but is not in directServerEnvNames, so the startup warning flags it", name, file)
+		t.Errorf("%s appears in %s and the startup warning would flag it. If the code reads it with os.Getenv, "+
+			"add it to directServerEnvNames; if the literal is not an env read (a hint, log or error string), "+
+			"reword it or move the name into unmatched_env.go instead", name, file)
 	}
 	for name := range directServerEnvNames {
 		if _, ok := read[name]; !ok {

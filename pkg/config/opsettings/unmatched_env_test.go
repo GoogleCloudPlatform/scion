@@ -48,6 +48,7 @@ func TestFindUnmatchedSettingsEnv_FlagsWithHint(t *testing.T) {
 		"SCION_SERVER_BROKER_PORT":           "SCION_SERVER_RUNTIMEBROKER_PORT",
 		"SCION_SERVER_BROKER_BROKERID":       "SCION_SERVER_BROKER_BROKER_ID",
 		"SCION_SERVER_HUB_ADMINEMAIL":        "SCION_SERVER_HUB_ADMINEMAILS",
+		"SCION_SERVER_HUB_ID":                "SCION_SERVER_HUB_HUBID",
 		"SCION_SERVER_AUTH_USER_ACCESS_MODE": "SCION_SERVER_AUTH_USERACCESSMODE",
 		// VersionedSettings spellings of CORS keys the hub reads from the
 		// flattened GlobalConfig fields.
