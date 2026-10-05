@@ -29,13 +29,17 @@ const MaxPreviousRunIDs = 8
 func AppendPreviousRunID(prev []string, replaced, current string) (next, dropped []string) {
 	next = make([]string, 0, len(prev)+1)
 	seen := make(map[string]bool, len(prev)+1)
-	for _, r := range append(append([]string(nil), prev...), replaced) {
+	keep := func(r string) {
 		if r == "" || r == current || seen[r] {
-			continue
+			return
 		}
 		seen[r] = true
 		next = append(next, r)
 	}
+	for _, r := range prev {
+		keep(r)
+	}
+	keep(replaced)
 	if over := len(next) - MaxPreviousRunIDs; over > 0 {
 		dropped = append([]string(nil), next[:over]...)
 		next = next[over:]
