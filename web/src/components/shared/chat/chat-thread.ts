@@ -2526,6 +2526,8 @@ export class ScionChatThread extends LitElement {
           body: JSON.stringify(body),
         },
         wake,
+        // Recipients from the composer's accepted mentions: may undercount
+        // typed ones, which fails safe (see wakeConfirmBudgetMs).
         this.wakeConfirmBudgetOverrideMs ?? wakeConfirmBudgetMs(1 + new Set(mentions ?? []).size)
       );
 

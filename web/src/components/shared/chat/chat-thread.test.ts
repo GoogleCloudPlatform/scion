@@ -849,6 +849,25 @@ describe('scion-chat-thread wake on send', () => {
     expect(onError).toHaveBeenCalledTimes(1);
   });
 
+  it('shows the maintenance answer instead of retrying it', async () => {
+    const el = await mountFastRetry();
+    const internals = el as unknown as Internals;
+    showConfirmMock.mockResolvedValueOnce(true);
+    apiFetch.mockResolvedValueOnce(wakeOfferResponse());
+    apiFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: () => Promise.resolve({ error: 'system_maintenance', message: 'Down for maintenance' }),
+    } as unknown as Response);
+
+    const onError = vi.fn();
+    await send(internals, { onSuccess: vi.fn(), onError });
+
+    expect(sendBodies()).toHaveLength(2);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(internals.sendError).not.toContain('Could not confirm');
+  });
+
   it('sizes the confirmation budget from the recipient count', async () => {
     const el = await mount();
     const internals = el as unknown as Internals & {

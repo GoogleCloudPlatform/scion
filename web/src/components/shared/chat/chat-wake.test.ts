@@ -138,7 +138,13 @@ describe('isGatewayDrop', () => {
   it('treats a gateway status without a hub error as a drop', () => {
     expect(isGatewayDrop(502, null)).toBe(true);
     expect(isGatewayDrop(504, { message: 'gateway timeout' })).toBe(true);
-    expect(isGatewayDrop(503, { error: 'plain' })).toBe(true);
+    expect(isGatewayDrop(503, { error: '' })).toBe(true);
+  });
+
+  it("treats maintenance mode's top-level string error as a hub answer", () => {
+    expect(
+      isGatewayDrop(503, { error: 'system_maintenance', message: 'Down for maintenance' })
+    ).toBe(false);
   });
 
   it("returns the hub's own structured answers", () => {

@@ -52,6 +52,13 @@ export const WAKE_CONFIRM_MAX_MS = 5 * 60_000 - 30_000;
  * keeps confirming its outcome after a dropped connection: the hub's wake
  * budget for that many recipients plus a margin, capped below the hub's
  * idempotency TTL.
+ *
+ * Both limits fail safe. The caller counts the composer's accepted
+ * mentions, while the hub resolves recipients from the content, so typed
+ * mentions can undercount; and from 5 recipients up the cap is at or below
+ * the hub's budget. Either way confirmation may give up early and report
+ * an unknown outcome while the hub is still working; it never causes a
+ * duplicate, since giving up sends nothing.
  */
 export function wakeConfirmBudgetMs(recipients: number): number {
   const n = Math.max(1, Math.floor(recipients));
@@ -147,15 +154,17 @@ const GATEWAY_STATUSES = new Set([502, 503, 504]);
 
 /**
  * Whether a response with this status and parsed body is a gateway drop
- * (no structured hub error) rather than the hub's own answer. The hub also
- * uses 502/503 for real failures (a wake that failed, dispatch not
- * available), always with a JSON `error.code`; those are answers and must
- * not be retried.
+ * (no hub error) rather than the hub's own answer. The hub also uses
+ * 502/503 for real failures, and those are answers that must not be
+ * retried: API errors carry a JSON `error.code` (a wake that failed,
+ * dispatch not available), and maintenance mode answers 503 with a
+ * top-level string `error` ("system_maintenance").
  */
 export function isGatewayDrop(status: number, data: unknown): boolean {
   if (!GATEWAY_STATUSES.has(status)) return false;
   if (!data || typeof data !== 'object') return true;
   const err = (data as { error?: unknown }).error;
+  if (typeof err === 'string' && err) return false;
   return !(err && typeof err === 'object' && typeof (err as { code?: unknown }).code === 'string');
 }
 
