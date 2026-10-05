@@ -1914,12 +1914,22 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 	}
 	b.mu.RUnlock()
 
+	// Resolve effective default agent: topic-level override first, then chat-level.
+	effectiveDefault := link.DefaultAgent
+	if tgMsg.MessageThreadID != 0 {
+		if topicDefault, err := b.store.GetTopicDefault(ctx, chatID, tgMsg.MessageThreadID); err != nil {
+			b.log.Error("Failed to get topic default", "error", err)
+		} else if topicDefault != "" {
+			effectiveDefault = topicDefault
+		}
+	}
+
 	// Resolve the sender's link before any agent-cache access: a sender
 	// the plugin cannot act as is never routed nor served cached data.
 	senderLookup := b.lookupSender(ctx, tgMsg.From)
 	if senderLookup.err != nil {
 		b.log.Debug("Message from unresolved sender not routed", "chat_id", chatID, "reason", senderLookup.err)
-		b.replyUnresolvedSender(ctx, tgMsg, botUsername, senderLookup.err)
+		b.replyUnresolvedSender(ctx, tgMsg, botUsername, effectiveDefault, senderLookup.err)
 		return
 	}
 
@@ -1941,16 +1951,6 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 		listUnavailable(replyTo)
 	}
 
-	// Resolve effective default agent: topic-level override first, then chat-level.
-	effectiveDefault := link.DefaultAgent
-	if tgMsg.MessageThreadID != 0 {
-		if topicDefault, err := b.store.GetTopicDefault(ctx, chatID, tgMsg.MessageThreadID); err != nil {
-			b.log.Error("Failed to get topic default", "error", err)
-		} else if topicDefault != "" {
-			effectiveDefault = topicDefault
-		}
-	}
-
 	// Resolve target agents from @-mentions.
 	targets, isAll := resolveTargetAgents(tgMsg, botUsername, effectiveDefault, agents)
 
@@ -1970,7 +1970,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 			replyText = string([]rune(replyText)[:100])
 		}
 		b.log.Debug("Fallback1: reply-to message text sample", "text_prefix", replyText)
-		if b.botInfo != nil && tgMsg.ReplyToMessage.From != nil && tgMsg.ReplyToMessage.From.ID == b.botInfo.ID {
+		if b.isReplyToBot(tgMsg) {
 			slug := extractAgentFromBotMessage(tgMsg.ReplyToMessage.Text)
 			b.log.Debug("Fallback1: extractAgentFromBotMessage result", "slug", slug)
 			if slug != "" {
@@ -1985,7 +1985,7 @@ func (b *TelegramBrokerV2) handleGroupMessage(tgMsg *TGMessage) {
 	// Fallback 2: most recent conversation context for this user+project.
 	if len(targets) == 0 && tgMsg.ReplyToMessage != nil {
 		b.log.Debug("Fallback1: failed - trying conversation context")
-		if b.botInfo != nil && tgMsg.ReplyToMessage.From != nil && tgMsg.ReplyToMessage.From.ID == b.botInfo.ID {
+		if b.isReplyToBot(tgMsg) {
 			if tgMsg.From != nil {
 				senderIDStr := strconv.FormatInt(tgMsg.From.ID, 10)
 				cc, err := b.store.GetLatestConversationContext(ctx, senderIDStr, link.ProjectID)
@@ -2916,21 +2916,39 @@ func (b *TelegramBrokerV2) getProjectAgents(ctx context.Context, projectID strin
 
 // replyUnresolvedSender answers a group message whose sender cannot be
 // acted as (unknown sender, not linked, link without email, or lookup
-// failure). Nothing derived from the agent cache is used: the sender is
-// answered only when they address the bot, otherwise the message is
-// ignored.
-func (b *TelegramBrokerV2) replyUnresolvedSender(ctx context.Context, tgMsg *TGMessage, botUsername string, lookupErr error) {
-	if !isBotMentioned(tgMsg, botUsername) && !b.isReplyToBot(tgMsg) {
-		return
-	}
+// failure). Nothing derived from the agent cache is used. A sender who
+// addresses the bot is told what to do. A sender with a link that needs
+// re-registering, or whose link could not be read, is also told when the
+// message would go to the default agent. Other messages are ignored.
+func (b *TelegramBrokerV2) replyUnresolvedSender(ctx context.Context, tgMsg *TGMessage, botUsername, effectiveDefault string, lookupErr error) {
+	addressed := isBotMentioned(tgMsg, botUsername) || b.isReplyToBot(tgMsg)
 	text := registerHint
 	switch {
 	case errors.Is(lookupErr, errSenderLinkStale):
 		text = staleLinkText
+		addressed = addressed || defaultAgentApplies(tgMsg, botUsername, effectiveDefault)
 	case errors.Is(lookupErr, errSenderLookupFailed):
 		text = "Something went wrong. Please try again."
+		addressed = addressed || defaultAgentApplies(tgMsg, botUsername, effectiveDefault)
+	}
+	if !addressed {
+		return
 	}
 	b.api.SendMessage(ctx, tgMsg.Chat.ID, text, "") //nolint:errcheck
+}
+
+// defaultAgentApplies reports whether an unaddressed message would go to
+// the group's default agent: plain text or an attachment, not a command,
+// not leading with an @mention. It does not use the agent list.
+func defaultAgentApplies(tgMsg *TGMessage, botUsername, effectiveDefault string) bool {
+	if effectiveDefault == "" {
+		return false
+	}
+	if tgMsg.Photo != nil || tgMsg.Document != nil || tgMsg.Audio != nil || tgMsg.Video != nil {
+		return true
+	}
+	text := strings.TrimSpace(tgMsg.Text)
+	return text != "" && !strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "@") && !hasNonBotUserMention(tgMsg, botUsername, nil)
 }
 
 // isReplyToBot reports whether the message replies to a message the bot

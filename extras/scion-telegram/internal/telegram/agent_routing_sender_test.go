@@ -186,71 +186,173 @@ func TestV2_AgentCache_PerUser_DeniedUserDoesNotSeeAnothersList(t *testing.T) {
 	assert.NotContains(t, sent[0].Text, "coder")
 }
 
+// lookupFailedText is the reply when the sender's link cannot be read.
+const lookupFailedText = "Something went wrong. Please try again."
+
 // unresolvedSenders put sender 456 in each state the plugin cannot act as,
-// with the reply expected when the bot is addressed.
+// with the reply expected when the sender is answered. repliesToDefault
+// marks the states that are also answered for a message that would go to
+// the default agent.
 var unresolvedSenders = map[string]struct {
-	setup func(t *testing.T, b *TelegramBrokerV2)
-	from  func(msg *TGMessage)
-	want  string
+	setup            func(t *testing.T, b *TelegramBrokerV2)
+	from             func(msg *TGMessage)
+	want             string
+	repliesToDefault bool
 }{
-	"unlinked":       {func(*testing.T, *TelegramBrokerV2) {}, nil, registerHint},
-	"unknown sender": {func(*testing.T, *TelegramBrokerV2) {}, func(msg *TGMessage) { msg.From = nil }, registerHint},
+	"unlinked":       {func(*testing.T, *TelegramBrokerV2) {}, nil, registerHint, false},
+	"unknown sender": {func(*testing.T, *TelegramBrokerV2) {}, func(msg *TGMessage) { msg.From = nil }, registerHint, false},
 	"link without email": {func(t *testing.T, b *TelegramBrokerV2) {
 		require.NoError(t, b.store.SaveUserMapping(context.Background(), &TelegramUserMapping{
 			TelegramUserID: "456", ScionUserID: "u-456", LinkedAt: time.Now().UTC(),
 		}))
-	}, nil, staleLinkText},
-	"lookup failure": {func(_ *testing.T, b *TelegramBrokerV2) { b.store = mappingLookupFailingStore{b.store} }, nil, "Something went wrong. Please try again."},
+	}, nil, staleLinkText, true},
+	"lookup failure": {func(_ *testing.T, b *TelegramBrokerV2) { b.store = mappingLookupFailingStore{b.store} }, nil, lookupFailedText, true},
+}
+
+// unresolvedSenderMessages are the message shapes sent by an unresolved
+// sender. toDefault marks messages that would go to the default agent.
+var unresolvedSenderMessages = map[string]struct {
+	msg          func() *TGMessage
+	defaultAgent string
+	addressed    bool
+	toDefault    bool
+}{
+	"plain text, default agent":    {func() *TGMessage { return plainGroupMessage(456, "hello") }, "coder", false, true},
+	"plain text, no default agent": {func() *TGMessage { return plainGroupMessage(456, "hello") }, "", false, false},
+	"attachment, default agent": {func() *TGMessage {
+		msg := plainGroupMessage(456, "")
+		msg.Photo = []PhotoSize{{FileID: "photo-1", Width: 100, Height: 100}}
+		return msg
+	}, "coder", false, true},
+	"command-like text, default agent": {func() *TGMessage { return plainGroupMessage(456, "/notacommand") }, "coder", false, false},
+	"agent mention":                    {func() *TGMessage { return plainGroupMessage(456, "@coder hello") }, "coder", false, false},
+	"unknown @token":                   {func() *TGMessage { return plainGroupMessage(456, "hey @reviewer look") }, "", false, false},
+	"bot mention":                      {func() *TGMessage { return botMentionMessage(456, "hello") }, "coder", true, false},
+	"bot mention, no default agent":    {func() *TGMessage { return botMentionMessage(456, "hello") }, "", true, false},
+	"bot mention plus agent":           {func() *TGMessage { return botMentionMessage(456, "@coder hello") }, "coder", true, false},
+	"reply to bot message":             {func() *TGMessage { return replyToBotMessage(456, "go ahead") }, "", true, false},
+}
+
+// agentCacheStates are the agent-cache contents an unresolved sender's
+// message is checked against.
+var agentCacheStates = map[string]func(t *testing.T, store Store){
+	"fresh lists of other users": func(t *testing.T, store Store) {
+		saveAgentCache(t, store, "user:bob@example.com", "proj-1", time.Now(), "coder", "reviewer")
+		saveAgentCache(t, store, "user:carol@example.com", "proj-1", time.Now(), "coder")
+	},
+	"stale lists of other users": func(t *testing.T, store Store) {
+		saveStaleAgentCache(t, store, "user:bob@example.com", "proj-1", "coder", "reviewer")
+		saveStaleAgentCache(t, store, "user:carol@example.com", "proj-1", "coder")
+	},
+}
+
+// unresolvedSenderReplies sends msg from an unresolved sender in a group
+// with defaultAgent and returns the replies. cache, when set, fills the
+// agent cache first.
+func unresolvedSenderReplies(t *testing.T, sender string, msgName string, cache func(*testing.T, Store)) []string {
+	t.Helper()
+	sc := unresolvedSenders[sender]
+	mc := unresolvedSenderMessages[msgName]
+	b, tgSrv, hub := newRoutingTestBroker(t)
+	saveTestGroupLink(t, b.store, -200, "proj-1", "my-project", mc.defaultAgent)
+	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
+	if cache != nil {
+		cache(t, b.store)
+	}
+	sc.setup(t, b)
+	delivered := false
+	b.InboundHandler = func(string, *messages.StructuredMessage) { delivered = true }
+	msg := mc.msg()
+	if sc.from != nil {
+		sc.from(msg)
+	}
+
+	b.handleGroupMessage(msg)
+
+	assert.False(t, delivered, "an unresolved sender is never routed")
+	assert.Empty(t, hub.agentCalls(), "no hub call for an unresolved sender")
+	replies := []string{}
+	for _, m := range tgSrv.getSentMessages() {
+		replies = append(replies, m.Text)
+	}
+	return replies
+}
+
+func TestV2_UnresolvedSender_Replies(t *testing.T) {
+	for senderName, sc := range unresolvedSenders {
+		for msgName, mc := range unresolvedSenderMessages {
+			t.Run(senderName+"/"+msgName, func(t *testing.T) {
+				replies := unresolvedSenderReplies(t, senderName, msgName, nil)
+				if mc.addressed || (sc.repliesToDefault && mc.toDefault) {
+					assert.Equal(t, []string{sc.want}, replies)
+				} else {
+					assert.Empty(t, replies, "no reply")
+				}
+			})
+		}
+	}
 }
 
 func TestV2_UnresolvedSender_SameReplyWhetherOrNotAgentsCached(t *testing.T) {
-	msgs := map[string]struct {
-		msg       func() *TGMessage
-		addressed bool
-	}{
-		"plain text to default agent": {func() *TGMessage { return plainGroupMessage(456, "hello") }, false},
-		"agent mention":               {func() *TGMessage { return plainGroupMessage(456, "@coder hello") }, false},
-		"unknown @token":              {func() *TGMessage { return plainGroupMessage(456, "hey @reviewer look") }, false},
-		"bot mention":                 {func() *TGMessage { return botMentionMessage(456, "hello") }, true},
-		"bot mention plus agent":      {func() *TGMessage { return botMentionMessage(456, "@coder hello") }, true},
-		"reply to bot message":        {func() *TGMessage { return replyToBotMessage(456, "go ahead") }, true},
-	}
-	for senderName, sc := range unresolvedSenders {
-		for msgName, mc := range msgs {
-			var replies [2][]string
-			for i, cached := range []bool{false, true} {
-				t.Run(fmt.Sprintf("%s/%s/cached=%v", senderName, msgName, cached), func(t *testing.T) {
-					b, tgSrv, hub := newRoutingTestBroker(t)
-					hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
-					if cached {
-						// Other users' fresh and stale entries.
-						saveAgentCache(t, b.store, "user:bob@example.com", "proj-1", time.Now(), "coder")
-						saveStaleAgentCache(t, b.store, "user:carol@example.com", "proj-1", "coder")
-					}
-					sc.setup(t, b)
-					delivered := false
-					b.InboundHandler = func(string, *messages.StructuredMessage) { delivered = true }
-					msg := mc.msg()
-					if sc.from != nil {
-						sc.from(msg)
-					}
-
-					b.handleGroupMessage(msg)
-
-					assert.False(t, delivered, "an unresolved sender is never routed")
-					assert.Empty(t, hub.agentCalls(), "no hub call for an unresolved sender")
-					for _, m := range tgSrv.getSentMessages() {
-						replies[i] = append(replies[i], m.Text)
-					}
-					if mc.addressed {
-						assert.Equal(t, []string{sc.want}, replies[i])
-					} else {
-						assert.Empty(t, replies[i], "silent when the bot is not addressed")
-					}
+	for senderName := range unresolvedSenders {
+		for msgName := range unresolvedSenderMessages {
+			for cacheName, cache := range agentCacheStates {
+				t.Run(senderName+"/"+msgName+"/"+cacheName, func(t *testing.T) {
+					uncached := unresolvedSenderReplies(t, senderName, msgName, nil)
+					cached := unresolvedSenderReplies(t, senderName, msgName, cache)
+					assert.Equal(t, uncached, cached, "same replies with and without cached agents")
 				})
 			}
-			assert.Equal(t, replies[0], replies[1], "%s/%s: same reply with and without cached agents", senderName, msgName)
 		}
+	}
+}
+
+func TestV2_UnresolvedSender_NeverSeenSenderUnaddressedTextGetsNoReply(t *testing.T) {
+	b, tgSrv, hub := newRoutingTestBroker(t) // default agent "coder"
+	delivered := false
+	b.InboundHandler = func(string, *messages.StructuredMessage) { delivered = true }
+
+	b.handleGroupMessage(plainGroupMessage(456, "hello"))
+
+	assert.False(t, delivered)
+	assert.Empty(t, hub.agentCalls())
+	assert.Empty(t, tgSrv.getSentMessages())
+}
+
+func TestV2_UnresolvedSender_LookupFailureReplyIsGeneric(t *testing.T) {
+	for _, linked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("linked=%v", linked), func(t *testing.T) {
+			for _, msg := range []*TGMessage{plainGroupMessage(456, "hello"), botMentionMessage(456, "@coder hello")} {
+				b, tgSrv, _ := newRoutingTestBroker(t)
+				if linked {
+					linkTestUser(t, b.store, 456, "alice@example.com")
+				}
+				saveAgentCache(t, b.store, "user:alice@example.com", "proj-1", time.Now(), "coder")
+				b.store = mappingLookupFailingStore{b.store}
+
+				b.handleGroupMessage(msg)
+
+				sent := tgSrv.getSentMessages()
+				require.Len(t, sent, 1)
+				assert.Equal(t, lookupFailedText, sent[0].Text)
+			}
+		})
+	}
+}
+
+func TestV2_UnresolvedSender_LinkWithoutEmailGetsReregisterText(t *testing.T) {
+	for _, msg := range []*TGMessage{plainGroupMessage(456, "hello"), botMentionMessage(456, "@coder hello"), replyToBotMessage(456, "go ahead")} {
+		b, tgSrv, _ := newRoutingTestBroker(t)
+		saveAgentCache(t, b.store, "user:bob@example.com", "proj-1", time.Now(), "coder")
+		require.NoError(t, b.store.SaveUserMapping(context.Background(), &TelegramUserMapping{
+			TelegramUserID: "456", ScionUserID: "u-456", LinkedAt: time.Now().UTC(),
+		}))
+
+		b.handleGroupMessage(msg)
+
+		sent := tgSrv.getSentMessages()
+		require.Len(t, sent, 1)
+		assert.Equal(t, staleLinkText, sent[0].Text)
 	}
 }
 
