@@ -441,6 +441,41 @@ server:
 	assert.NotEmpty(t, errors, "non-boolean nfs.auto_mount should produce a validation error")
 }
 
+func TestValidateSettings_WorkspaceStorageVolumeNameRequired(t *testing.T) {
+	// The requirement is conditional on backend, like ValidateWorkspaceStorage:
+	// only the selected volume block must name its volume.
+	for backend, block := range map[string]string{"cloudrun-volume": "cloudrun_volume", "gke-shared-volume": "gke_shared_volume"} {
+		t.Run(block, func(t *testing.T) {
+			doc := func(backend, body string) []byte {
+				return []byte("schema_version: \"1\"\nserver:\n  workspace_storage:\n    backend: " + backend + "\n" + body)
+			}
+			blockWith := func(field string) string { return "    " + block + ":\n      " + field + "\n" }
+
+			valid := map[string][]byte{
+				"selected block with volume_name": doc(backend, blockWith("volume_name: workspaces")),
+				"unselected leftover block":       doc("nfs", blockWith("subpath_root: projects")),
+				"unselected empty volume_name":    doc("local", blockWith(`volume_name: ""`)),
+			}
+			for name, data := range valid {
+				errors, err := ValidateSettings(data, "1")
+				require.NoError(t, err)
+				assert.Empty(t, errors, name)
+			}
+
+			invalid := map[string][]byte{
+				"missing volume_name": doc(backend, blockWith("subpath_root: projects")),
+				"empty volume_name":   doc(backend, blockWith(`volume_name: ""`)),
+				"missing block":       doc(backend, ""),
+			}
+			for name, data := range invalid {
+				errors, err := ValidateSettings(data, "1")
+				require.NoError(t, err)
+				assert.NotEmpty(t, errors, name)
+			}
+		})
+	}
+}
+
 func TestValidateSettings_InvalidServerLogLevel(t *testing.T) {
 	data := []byte(`
 schema_version: "1"

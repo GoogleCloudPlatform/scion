@@ -44,6 +44,16 @@ implicitly resumes its harness session (continuing the prior conversation);
 starting a **stopped** or **error** agent runs a fresh session. See
 [`scion suspend`](#scion-suspend) and [`scion resume`](#scion-resume).
 
+**In Hub mode**, starting an existing **stopped** agent restarts it in place
+(printed as "Restarting", with a fresh session), the same as `scion resume`.
+Starting an **error**-phase agent still fails with a conflict: use
+`scion resume --force` or delete it first. When an existing agent is reused in
+place, the Hub applies only the task and `--attach`. Other configuration flags
+you set explicitly (for example `--type`, `--image`, `--harness-config`,
+`--broker`, `--label` or `--no-auth`) are not applied, and the CLI prints a
+warning that names them. `--no-auth` on an existing agent is tracked in
+ptone/scion#1855.
+
 **Usage:** `scion start <agent-name> [task] [flags]`
 
 - **Arguments:**
@@ -54,12 +64,12 @@ starting a **stopped** or **error** agent runs a fresh session. See
     - `-t, --type <string>`: Template to use (default "gemini").
     - `-i, --image <string>`: Override container image.
     - `-a, --attach`: Attach to the agent immediately after starting.
-    - `--no-auth`: Disable authentication propagation.
+    - `--no-auth`: Disable authentication propagation (also sent to the Hub in Hub mode; applies when the agent is created).
     - `-d, --detached`: Run in detached mode (default true).
     - `--config <path>`: Path to inline agent config file (YAML/JSON) for Just-In-Time (JIT) overrides, or `-` for stdin.
     - `--harness-config <string>`: Named harness configuration to use.
     - `--harness-auth <string>`: Override auth method for the harness. Universal types: `api-key`, `oauth-token`, `vertex-ai`, `auth-file` (each harness accepts a subset — see [Harness Authentication](/scion/local/agent-credentials/)).
-    - `--broker <string>`: Preferred runtime broker ID or name for execution.
+    - `--broker <string>`: Preferred runtime broker ID, name, or slug for execution. In Hub mode, a broker that does not exist fails with `runtime_broker_not_found` (404), and the message lists the brokers you can use.
     - `--message-mode <mode>`: Set the agent's initial message mode (`project`, `branch`, `lineage`, `none`, or `hub`). Defaults to `project`. See [Message Authorization & Modes](/scion/hosted/user/messaging/#message-authorization--modes).
     - `--notify`: Get notified via the browser or system when the spawned agent reaches a terminal state.
     - `--no-wait`: *(Hub mode)* Return as soon as the Hub accepts the launch instead of waiting for the agent to reach `running`. Ignored with `--attach`.
@@ -194,19 +204,19 @@ Sends a message to a running agent or user.
 
 - **Arguments:**
     - `<recipient>`: The recipient (see above).
-    - `<message>`: The text to send.
+    - `<message>`: The text to send. Pass `-` to read the body from stdin.
 - **Flags:**
     - `-i, --interrupt`: Interrupt the harness before sending the message.
     - `-w, --wake`: Resume a suspended agent before delivering the message.
-    - `--body-file <path>`: Read the message body from a file instead of passing it inline. Useful for long messages and scripted workflows. Mutually exclusive with the inline `<message>` argument.
+    - `--body-file <path>`: Read the message body from a file instead of passing it inline. Useful for long messages and scripted workflows. `--body-file -` reads the body from stdin, like a `-` message argument. Mutually exclusive with the inline `<message>` argument.
     - `--attach <path>`: Attach one or more file paths (repeatable). File paths must be within allowed roots (`/workspace` or `/scion-volumes`), where relative paths resolve against `/workspace`.
         - **Constraints:** Cannot be combined with `--raw`, `--in`, or `--at`.
         - **Requirements:** Requires Hub mode (`scion hub enable`). If run in local mode, the command will fail with an error suggesting you include file contents directly in the message text. If the file is not a regular file (e.g., is a directory) or is outside allowed roots, the command will fail.
     - `--cc <agents>`: *(Deprecated — will be removed.)* Carbon copy additional agents. This flag is **repeatable** and also accepts a **comma-separated list** of agent names (e.g., `--cc dev-agent,qa-agent --cc test-agent`). Use `group[...]` addressing or body `@mentions` instead.
     - `--notify`: *(Deprecated — use `scion notifications subscribe` instead.)* Get notified when the target agent(s) respond or reach a terminal state after receiving the message.
     - `--plain`: *(Deprecated — will be removed.)*  Mark for plain-text delivery.
-    - `--channel <channel>`: *(Deprecated — use conversation addressing instead.)* Target a specific message channel (e.g., `telegram`, `gchat`, `teams`, `web`).
-    - `--thread-id <id>`: *(Deprecated — use conversation addressing instead.)* Target a specific thread ID within the channel.
+    - `--channel <channel>`: *(Deprecated — address the conversation with `conv:<uuid>` instead, or use `@<name>` to message an agent.)* Target a specific message channel (e.g., `telegram`, `gchat`, `teams`, `web`).
+    - `--thread-id <id>`: *(Deprecated — address the conversation with `conv:<uuid>` instead; `scion conversation list` shows conversation IDs.)* Target a specific thread ID within the channel. For `user:` recipients on the web channel, the thread must already exist as a conversation: the Hub rejects an unknown or deleted thread ID (HTTP 422) instead of creating a new conversation, and the command exits 1. External channels (for example Slack, Teams, or Google Chat) deliver to the thread ID themselves and are not checked. On success, a `user:` send prints the conversation the message was recorded in.
     - `--raw`: *(Deprecated — use `scion keys` instead.)* Hidden, migration-only alias for `scion keys`: it sends through the same keys operation (the Hub's `/keys` route in Hub mode, the same local keys primitive in local mode), never through the message path; do not use it in new scripts or skills. Only an ordinary message to a single agent in the same project is accepted: before sending anything, the CLI rejects `--raw` combined with `--plain`, `--attach`, `--interrupt`, `--wake`, `--notify`, `--cc`, `--in`/`--at`, `--channel`/`--thread-id`, user or `group[...]` recipients, conversation addressing other than a same-project agent, or a cross-project target.
     - `--in <duration>`: *(Deprecated — use `scion schedule create --in` instead.)* Schedule message delivery after a duration.
     - `--at <time>`: *(Deprecated — use `scion schedule create --at` instead.)* Schedule message delivery at an absolute time.
@@ -240,6 +250,18 @@ Sends a message to a running agent or user.
     # BAD: literal \n chars appear in the delivered message
     scion message --non-interactive @reviewer "PR #42 is ready for review.\n\nBranch: fix/auth-bug\nCI: all green"
     ```
+
+**Message body input:** for `--body-file` and stdin (`-` or `--body-file -`), trailing CR/LF characters are trimmed and everything else, including interior newlines, is sent exactly as read. An inline `<message>` is sent as given. An empty body is an error.
+
+:::caution[Backticks and `$(...)` in double-quoted messages]
+Your shell expands backticks and `$(...)` inside double-quoted arguments **before** `scion` runs: it executes the command and splices its output into the message. `scion` cannot detect or undo this. To send code or shell snippets verbatim, use `--body-file`, or stdin with a quoted heredoc (`<<'EOF'`):
+
+```bash
+scion message my-agent - <<'EOF'
+Run `make test`, then check $(git rev-parse HEAD).
+EOF
+```
+:::
 
 ### `scion broadcast`
 
@@ -645,9 +667,9 @@ full lifecycle.
 
 - `list`: List local harness-configs. Flags: `--hub` (also include Hub-registered configs).
 - `show <name>`: Show config details (local path/image, or Hub ID, image status, and source URL).
-- `install <source>`: Install a config from a GitHub URL, local path, rclone URI, or archive. Flags: `--name` (override derived name), `--force` (overwrite existing), `--global` (register at global scope on the Hub).
+- `install <source>`: Install a config from a GitHub URL, local path, rclone URI, or archive. The name is `--name`, else the config's `name` field, else its `harness` field, else the source directory name. Flags: `--name` (override derived name), `--force` (overwrite an existing config with the same name in the target scope, locally or on the Hub; without it install refuses), `--global` (install globally / register at global scope on the Hub; default is the current project).
 - `update [name]`: Re-import (refresh) a config from its stored source URL. Flags: `--url <url>` (override/set the stored source URL for one config), `--all` (re-import every config that has a stored source URL). `--url` and `--all` are mutually exclusive; requires a Hub connection.
-- `sync <name>` (alias `push`): Upload a local config to the Hub (changed files only). Flags: `--name` (publish under a different Hub name).
+- `sync <name>` (alias `push`): Upload a local config to the Hub (changed files only), creating it or updating the same-named config in the target scope. Scope is the current project by default, or global with `--global`; the output shows the scope used. Flags: `--name` (publish under a different Hub name).
 - `pull <name>`: Download a config from the Hub. Flags: `--to <path>` (destination; defaults to the global dir).
 - `reset <name>`: Restore a config to the binary's embedded defaults.
 - `upgrade [name]`: Add missing support files and metadata without clobbering user values. Flags: `--dry-run`, `--activate-script`, `--force`. With no name, upgrades all configs in the global directory.

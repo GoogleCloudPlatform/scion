@@ -16,6 +16,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -4973,6 +4974,13 @@ func TestWorkspaceStorageConfig_NFSDefaults(t *testing.T) {
 		assert.Nil(t, ws.NFS)
 	})
 
+	t.Run("backend name is case-sensitive", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{Backend: "NFS"}
+		ws.ApplyNFSDefaults()
+		assert.Nil(t, ws.NFS, "only the exact name \"nfs\" selects the NFS backend")
+		assert.NoError(t, ws.ValidateNFS(), "ValidateNFS ignores non-nfs backends; ValidateWorkspaceStorage rejects the name")
+	})
+
 	t.Run("nil receiver is safe", func(t *testing.T) {
 		var ws *V1WorkspaceStorageConfig
 		ws.ApplyNFSDefaults() // should not panic
@@ -5011,6 +5019,163 @@ func TestWorkspaceStorageConfig_ValidateNFS(t *testing.T) {
 		err := ws.ValidateNFS()
 		require.NoError(t, err)
 	})
+}
+
+func TestWorkspaceStorageConfig_ApplyWorkspaceStorageDefaults(t *testing.T) {
+	t.Run("nfs delegates to ApplyNFSDefaults", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{Backend: "nfs"}
+		ws.ApplyWorkspaceStorageDefaults()
+		require.NotNil(t, ws.NFS)
+		assert.Equal(t, DefaultWorkspaceSubPathRoot, ws.NFS.SubPathRoot)
+		assert.Equal(t, 1000, ws.NFS.UID)
+	})
+
+	t.Run("cloudrun-volume defaults subpath_root", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{Backend: "cloudrun-volume", CloudRunVolume: &V1CloudRunVolumeConfig{VolumeName: "vol"}}
+		ws.ApplyWorkspaceStorageDefaults()
+		assert.Equal(t, DefaultWorkspaceSubPathRoot, ws.CloudRunVolume.SubPathRoot)
+	})
+
+	t.Run("gke-shared-volume defaults subpath_root", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{Backend: "gke-shared-volume", GKESharedVolume: &V1GKESharedVolumeConfig{VolumeName: "vol"}}
+		ws.ApplyWorkspaceStorageDefaults()
+		assert.Equal(t, DefaultWorkspaceSubPathRoot, ws.GKESharedVolume.SubPathRoot)
+	})
+
+	t.Run("explicit subpath_root is preserved", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{Backend: "gke-shared-volume", GKESharedVolume: &V1GKESharedVolumeConfig{VolumeName: "vol", SubPathRoot: "trees"}}
+		ws.ApplyWorkspaceStorageDefaults()
+		assert.Equal(t, "trees", ws.GKESharedVolume.SubPathRoot)
+	})
+
+	t.Run("missing volume block stays nil", func(t *testing.T) {
+		ws := &V1WorkspaceStorageConfig{Backend: "cloudrun-volume"}
+		ws.ApplyWorkspaceStorageDefaults()
+		assert.Nil(t, ws.CloudRunVolume)
+	})
+
+	t.Run("local, unknown and nil are left alone", func(t *testing.T) {
+		for _, backend := range []string{"", "local", "s3", "NFS"} {
+			ws := &V1WorkspaceStorageConfig{Backend: backend}
+			ws.ApplyWorkspaceStorageDefaults()
+			assert.Equal(t, &V1WorkspaceStorageConfig{Backend: backend}, ws)
+		}
+		var ws *V1WorkspaceStorageConfig
+		ws.ApplyWorkspaceStorageDefaults() // must not panic
+	})
+}
+
+func TestWorkspaceStorageConfig_ValidateWorkspaceStorage(t *testing.T) {
+	nfsShares := []V1NFSShare{{ID: "share1", Server: "10.0.0.2", Export: "/data"}}
+	tests := []struct {
+		name    string
+		ws      *V1WorkspaceStorageConfig
+		wantErr string // empty means valid
+	}{
+		{name: "nil", ws: nil},
+		{name: "empty backend", ws: &V1WorkspaceStorageConfig{}},
+		{name: "local", ws: &V1WorkspaceStorageConfig{Backend: "local"}},
+		{name: "unknown backend", ws: &V1WorkspaceStorageConfig{Backend: "s3"}, wantErr: `workspace_storage.backend "s3" is not supported`},
+		{name: "backend names are case-sensitive", ws: &V1WorkspaceStorageConfig{Backend: "NFS"}, wantErr: "is not supported"},
+		{name: "nfs without shares", ws: &V1WorkspaceStorageConfig{Backend: "nfs"}, wantErr: "no NFS shares are defined"},
+		{name: "nfs with shares", ws: &V1WorkspaceStorageConfig{Backend: "nfs", NFS: &V1NFSConfig{Shares: nfsShares}}},
+		{
+			name:    "nfs with absolute subpath_root",
+			ws:      &V1WorkspaceStorageConfig{Backend: "nfs", NFS: &V1NFSConfig{Shares: nfsShares, SubPathRoot: "/projects"}},
+			wantErr: "workspace_storage.nfs.subpath_root must be relative",
+		},
+		{name: "cloudrun-volume", ws: &V1WorkspaceStorageConfig{Backend: "cloudrun-volume", CloudRunVolume: &V1CloudRunVolumeConfig{VolumeName: "vol"}}},
+		{name: "cloudrun-volume without block", ws: &V1WorkspaceStorageConfig{Backend: "cloudrun-volume"}, wantErr: "cloudrun_volume.volume_name is not set"},
+		{
+			name:    "cloudrun-volume with empty volume_name",
+			ws:      &V1WorkspaceStorageConfig{Backend: "cloudrun-volume", CloudRunVolume: &V1CloudRunVolumeConfig{SubPathRoot: "projects"}},
+			wantErr: "cloudrun_volume.volume_name is not set",
+		},
+		{
+			name:    "cloudrun-volume with traversing subpath_root",
+			ws:      &V1WorkspaceStorageConfig{Backend: "cloudrun-volume", CloudRunVolume: &V1CloudRunVolumeConfig{VolumeName: "vol", SubPathRoot: "../x"}},
+			wantErr: "workspace_storage.cloudrun_volume.subpath_root",
+		},
+		{name: "gke-shared-volume", ws: &V1WorkspaceStorageConfig{Backend: "gke-shared-volume", GKESharedVolume: &V1GKESharedVolumeConfig{VolumeName: "vol", PVClaimName: "pvc"}}},
+		{name: "gke-shared-volume without block", ws: &V1WorkspaceStorageConfig{Backend: "gke-shared-volume"}, wantErr: "gke_shared_volume.volume_name is not set"},
+		{
+			name:    "gke-shared-volume with empty volume_name",
+			ws:      &V1WorkspaceStorageConfig{Backend: "gke-shared-volume", GKESharedVolume: &V1GKESharedVolumeConfig{PVClaimName: "pvc"}},
+			wantErr: "gke_shared_volume.volume_name is not set",
+		},
+		{
+			name:    "gke-shared-volume with unclean subpath_root",
+			ws:      &V1WorkspaceStorageConfig{Backend: "gke-shared-volume", GKESharedVolume: &V1GKESharedVolumeConfig{VolumeName: "vol", SubPathRoot: "projects/"}},
+			wantErr: "workspace_storage.gke_shared_volume.subpath_root",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.ws.ApplyWorkspaceStorageDefaults()
+			err := tt.ws.ValidateWorkspaceStorage()
+			if tt.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+// TestValidateSubPathRoot_SuggestsCleanValue pins the clean-path check: it
+// runs before the component checks so an unclean value names the value to
+// use instead, and gives no suggestion for ".." or for a value that cleans
+// to ".".
+func TestValidateSubPathRoot_SuggestsCleanValue(t *testing.T) {
+	suggest := map[string]string{
+		"projects/":        "projects",
+		"./projects":       "projects",
+		"projects/.":       "projects",
+		"a//b":             "a/b",
+		"team/./projects/": "team/projects",
+	}
+	for in, want := range suggest {
+		err := ValidateSubPathRoot(in)
+		require.Error(t, err, in)
+		assert.Contains(t, err.Error(), fmt.Sprintf("must be a clean path (got %q, use %q)", in, want))
+	}
+
+	noSuggestion := map[string]string{
+		"projects/../escape": `".." path component`,
+		"../projects":        `".." path component`,
+		"a/..":               `".." path component`,
+		"./a/../b":           `".." path component`,
+		".":                  `"." path component`,
+	}
+	for in, want := range noSuggestion {
+		err := ValidateSubPathRoot(in)
+		require.Error(t, err, in)
+		assert.NotContains(t, err.Error(), "use ", in)
+		assert.Contains(t, err.Error(), want, in)
+	}
+
+	for _, valid := range []string{"projects", "team/projects", "a.b/c-d"} {
+		assert.NoError(t, ValidateSubPathRoot(valid), valid)
+	}
+}
+
+func TestResolveSubPathRoot(t *testing.T) {
+	got, err := ResolveSubPathRoot("")
+	require.NoError(t, err)
+	assert.Equal(t, DefaultWorkspaceSubPathRoot, got)
+
+	for _, valid := range []string{"projects", "trees", "team/trees"} {
+		got, err := ResolveSubPathRoot(valid)
+		require.NoError(t, err, valid)
+		assert.Equal(t, valid, got)
+	}
+
+	for _, invalid := range []string{"/projects", "../projects", "a/../b", "a/./b", "./a", "a/", "a//b", "..", "."} {
+		_, err := ResolveSubPathRoot(invalid)
+		assert.Error(t, err, invalid)
+	}
 }
 
 func TestWorkspaceStorageConfig_BackendUnset_IsLocal(t *testing.T) {
@@ -5112,9 +5277,9 @@ func TestSharedDirStorageConfig_Validate(t *testing.T) {
 		want  string
 	}{
 		{"absolute", "/projects", "must be relative"},
-		{"empty component", "projects//nested", "empty path component"},
+		{"empty component", "projects//nested", `must be a clean path (got "projects//nested", use "projects/nested")`},
 		{"leading slash empty component", "/", "must be relative"},
-		{"dot component", "projects/./nested", "\".\" path component"},
+		{"dot component", "projects/./nested", `use "projects/nested"`},
 		{"dotdot component", "projects/../escape", "\"..\" path component"},
 		{"bare dotdot", "..", "\"..\" path component"},
 	}

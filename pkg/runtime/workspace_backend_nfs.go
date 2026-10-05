@@ -64,9 +64,9 @@ func (b *nfsBackend) Resolve(in ResolveInput) (ResolvedWorkspace, error) {
 	}
 
 	share := b.cfg.Shares[0]
-	subPathRoot := b.cfg.SubPathRoot
-	if subPathRoot == "" {
-		subPathRoot = "projects"
+	subPathRoot, err := config.ResolveSubPathRoot(b.cfg.SubPathRoot)
+	if err != nil {
+		return ResolvedWorkspace{}, fmt.Errorf("nfsBackend.Resolve: %w", err)
 	}
 
 	// Server-relative workspace path: <SubPathRoot>/<projectID>/workspace

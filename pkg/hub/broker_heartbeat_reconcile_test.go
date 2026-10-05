@@ -812,3 +812,82 @@ func TestLifecycleOpTracker(t *testing.T) {
 	assert.False(t, tr.active("a"))
 	tr.begin("")() // no-op
 }
+
+// noListingHeartbeat is the heartbeat a broker sends when no target was
+// listed in time: online, no agent data, every target incomplete.
+func noListingHeartbeat() brokerHeartbeatRequest {
+	return brokerHeartbeatRequest{
+		Status: store.BrokerStatusOnline,
+		Inventory: &brokerInventory{Targets: []brokerInventoryTarget{
+			{ID: "docker", Runtime: "docker", Complete: false},
+			{ID: k8sTargetB, Runtime: "kubernetes", Complete: false},
+		}},
+	}
+}
+
+// snapshotAgents returns the current rows of the given agents.
+func (f *reconcileFixture) snapshotAgents(agents ...*store.Agent) map[string]*store.Agent {
+	f.t.Helper()
+	out := make(map[string]*store.Agent, len(agents))
+	for _, a := range agents {
+		out[a.ID] = f.get(a.ID)
+	}
+	return out
+}
+
+// assertAgentsUnchanged checks that the heartbeat-driven fields of each
+// agent still match its snapshot.
+func (f *reconcileFixture) assertAgentsUnchanged(before map[string]*store.Agent) {
+	f.t.Helper()
+	for id, prev := range before {
+		got := f.get(id)
+		assert.Equal(f.t, prev.Phase, got.Phase, "phase of %s", prev.Slug)
+		assert.Equal(f.t, prev.Activity, got.Activity, "activity of %s", prev.Slug)
+		assert.Equal(f.t, prev.ExitReason, got.ExitReason, "exit reason of %s", prev.Slug)
+		assert.Equal(f.t, prev.ContainerStatus, got.ContainerStatus, "container status of %s", prev.Slug)
+		assert.True(f.t, prev.LastSeen.Equal(got.LastSeen), "last seen of %s", prev.Slug)
+		assert.Equal(f.t, agentRuntimeTarget(prev), agentRuntimeTarget(got), "runtime target of %s", prev.Slug)
+	}
+}
+
+// TestHeartbeat_NoListingOnlineBrokerKeepsAgentState: an online broker
+// whose agent listing did not finish in time sends a heartbeat with no agent
+// data and every target incomplete. Even for an agent whose
+// missing-container clock has already run out, nothing is concluded: no
+// agent changes and the clocks restart. (The same heartbeat with the targets
+// marked complete would mark that agent as having no container.)
+func TestHeartbeat_NoListingOnlineBrokerKeepsAgentState(t *testing.T) {
+	f := newReconcileFixture(t)
+	reported := f.addAgent("reported", "running", "working")
+	omitted := f.addAgent("omitted", "running", "working")
+
+	// A complete heartbeat that omits one agent starts its clock; run the
+	// clock out so the next complete heartbeat would conclude it.
+	f.heartbeat(completeInventory(), reported.Slug)
+	require.True(t, f.hasClock(omitted.ID))
+	f.expireClock(omitted.ID)
+	before := f.snapshotAgents(reported, omitted)
+
+	f.send(noListingHeartbeat())
+
+	f.assertAgentsUnchanged(before)
+	assert.False(t, f.hasClock(omitted.ID), "an incomplete heartbeat restarts the clocks rather than concluding")
+}
+
+// TestHeartbeat_NoListingMarksOfflineBrokerOnline: after a control-channel
+// loss marked the broker offline, a heartbeat with no agent data and every
+// target incomplete marks it online again and changes no agent.
+func TestHeartbeat_NoListingMarksOfflineBrokerOnline(t *testing.T) {
+	f := newReconcileFixture(t)
+	ctx := context.Background()
+	running := f.addAgent("running", "running", "working")
+	before := f.snapshotAgents(running)
+
+	require.NoError(t, f.s.UpdateRuntimeBrokerHeartbeat(ctx, f.brokerID, store.BrokerStatusOffline))
+	f.send(noListingHeartbeat())
+
+	broker, err := f.s.GetRuntimeBroker(ctx, f.brokerID)
+	require.NoError(t, err)
+	assert.Equal(t, store.BrokerStatusOnline, broker.Status, "the heartbeat marks the broker online")
+	f.assertAgentsUnchanged(before)
+}
