@@ -1316,9 +1316,13 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 		// @all broadcast: fall through to legacy path below.
 	}
 
+	// Look up the sender's link once; it decides both the agent refresh and
+	// the sender identity below.
+	senderMapping := lookupUserMapping(ctx, store, b.log, m.Author.ID)
+
 	// Get project agents (with cache refresh) — only needed for legacy path.
 	// Without a linked sender, getProjectAgents uses the cache only.
-	agents := b.getProjectAgents(ctx, link.ProjectID, linkedPrincipal(ctx, store, b.log, m.Author.ID))
+	agents := b.getProjectAgents(ctx, link.ProjectID, principalForMapping(senderMapping))
 
 	// Three-tier @-mention routing (additive model: effectiveDefault is
 	// included as implicit primary when explicit agent mentions are present).
@@ -1358,13 +1362,14 @@ func (b *DiscordBroker) handleIncomingMessage(s *discordgo.Session, m *discordgo
 	sender := "discord:" + m.Author.Username
 	senderID := m.Author.ID
 
-	mapping, err := store.GetUserMapping(ctx, senderID)
-	if err == nil && mapping != nil && mapping.ScionEmail != "" {
-		sender = "user:" + mapping.ScionEmail
-	} else if mapping == nil {
+	if senderMapping == nil {
 		b.log.Debug("Unregistered user tried to mention agent", "sender_id", senderID)
 		s.ChannelMessageSend(channelID, "Please use `/scion register` first to interact with agents.")
 		return
+	}
+	// A link without an email keeps the Discord username as the sender.
+	if senderMapping.ScionEmail != "" {
+		sender = "user:" + senderMapping.ScionEmail
 	}
 
 	// Classify mentions by position before stripping.

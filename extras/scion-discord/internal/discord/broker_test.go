@@ -1924,8 +1924,10 @@ func TestConfigure_SessionReplacement_ClearsSubs(t *testing.T) {
 	// Calling Configure with bot_token should close old session and clear subs.
 	err := b.Configure(map[string]string{
 		"bot_token": "Bot fake-token-for-test",
+		"db_path":   filepath.Join(t.TempDir(), "discord.db"),
 	})
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = b.Close() })
 
 	// After Phase 1 reconfigure:
 	// - Old subs should be cleared (so Subscribe("*") would trigger startGateway)

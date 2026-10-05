@@ -62,9 +62,6 @@ type CreateAgentResponse struct {
 
 // HubClient provides access to the Scion hub API for project and agent listing.
 type HubClient interface {
-	ListProjects(ctx context.Context) ([]ProjectOption, error)
-	ListProjectsFresh(ctx context.Context) ([]ProjectOption, error)
-
 	// The read methods below take onBehalfOf, a namespaced principal (e.g.
 	// "user:alice@example.com") sent as X-Scion-On-Behalf-Of. An empty value
 	// omits the header.
@@ -1867,58 +1864,59 @@ var errNoLinkedUser = errors.New("no linked user")
 // user's linked Scion account and there is none.
 const msgLinkAccountFirst = "Please link your Discord account first with `/scion register`."
 
+// msgReRegisterForEmail is the reply sent when the invoking user is linked
+// but the link has no email address.
+const msgReRegisterForEmail = "Your linked account has no email address. Please re-register with `/scion register` so your email is recorded."
+
 // msgAccountLookupFailed is the reply sent when the link lookup itself fails.
 const msgAccountLookupFailed = "Something went wrong looking up your account. Please try again."
 
-// lookupPrincipal returns the namespaced principal for a Discord user, or ""
-// when the user is unknown, unlinked, or linked without an email.
-func lookupPrincipal(ctx context.Context, store Store, discordUserID string) (string, error) {
+// lookupUserMapping returns the Discord user's link, or nil when the user is
+// unknown, unlinked, or the lookup fails; a failed lookup is logged.
+func lookupUserMapping(ctx context.Context, store Store, log *slog.Logger, discordUserID string) *DiscordUserMapping {
 	if store == nil || discordUserID == "" {
-		return "", nil
+		return nil
 	}
 	mapping, err := store.GetUserMapping(ctx, discordUserID)
 	if err != nil {
-		return "", err
-	}
-	return principalForMapping(mapping), nil
-}
-
-// linkedPrincipal looks up the Discord user's link and returns the namespaced
-// principal sent as X-Scion-On-Behalf-Of on hub calls made for that user. It
-// returns "" when the user is unknown, unlinked, or the lookup fails; a
-// failed lookup is logged.
-func linkedPrincipal(ctx context.Context, store Store, log *slog.Logger, discordUserID string) string {
-	principal, err := lookupPrincipal(ctx, store, discordUserID)
-	if err != nil {
 		if log == nil {
 			log = slog.Default()
 		}
 		log.Warn("Failed to look up user link", "discord_user_id", discordUserID, "error", err)
-		return ""
+		return nil
 	}
-	return principal
+	return mapping
 }
 
 // requirePrincipal returns the invoking user's principal. When the user has
-// no linked account with an email, it calls reply with a prompt to run
-// /scion register and returns false; when the lookup fails, it replies with
-// a retry message and returns false. Callers return without reading agents
-// or calling the hub when ok is false.
+// no linked account, it calls reply with a prompt to run /scion register;
+// when the link has no email, it calls reply with a prompt to re-register;
+// when the lookup fails, it replies with a retry message. In each of these
+// cases it returns false, and callers return without reading agents or
+// calling the hub.
 func requirePrincipal(ctx context.Context, store Store, log *slog.Logger, discordUserID string, reply func(string)) (principal string, ok bool) {
-	principal, err := lookupPrincipal(ctx, store, discordUserID)
-	if err != nil {
-		if log == nil {
-			log = slog.Default()
+	var mapping *DiscordUserMapping
+	if store != nil && discordUserID != "" {
+		var err error
+		mapping, err = store.GetUserMapping(ctx, discordUserID)
+		if err != nil {
+			if log == nil {
+				log = slog.Default()
+			}
+			log.Warn("Failed to look up user link", "discord_user_id", discordUserID, "error", err)
+			reply(msgAccountLookupFailed)
+			return "", false
 		}
-		log.Warn("Failed to look up user link", "discord_user_id", discordUserID, "error", err)
-		reply(msgAccountLookupFailed)
-		return "", false
 	}
-	if principal == "" {
+	if mapping == nil {
 		reply(msgLinkAccountFirst)
 		return "", false
 	}
-	return principal, true
+	if mapping.ScionEmail == "" {
+		reply(msgReRegisterForEmail)
+		return "", false
+	}
+	return principalForMapping(mapping), true
 }
 
 // requirePrincipal is the CommandHandler form of requirePrincipal that replies

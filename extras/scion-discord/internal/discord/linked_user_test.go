@@ -69,12 +69,6 @@ func (h *linkedUserHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 
-	// The broker-scoped project list does not need a linked user.
-	if r.URL.Path == "/api/v1/broker/projects" {
-		_ = json.NewEncoder(w).Encode(hubProjectsResponse{Projects: []hubProject{{ID: "other", Slug: "other-project"}}})
-		return
-	}
-
 	if onBehalfOf == "" {
 		w.WriteHeader(http.StatusForbidden)
 		_, _ = io.WriteString(w, `{"error":{"code":"forbidden","message":"linked user required"}}`)
@@ -102,6 +96,10 @@ func (h *linkedUserHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(hubTemplatesResponse{Templates: []hubTemplate{{Slug: "default", Name: "Default"}}})
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/secrets":
 		_ = json.NewEncoder(w).Encode(hubListSecretsResponse{Secrets: []SecretInfo{{Key: "API_KEY"}}})
+	case r.Method == http.MethodPut && r.URL.Path == "/api/v1/secrets/API_KEY":
+		_, _ = io.WriteString(w, `{}`)
+	case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/secrets/API_KEY":
+		w.WriteHeader(http.StatusNoContent)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/secrets/API_KEY":
 		_ = json.NewEncoder(w).Encode(SecretInfo{Key: "API_KEY", Scope: "project", ScopeID: luProject})
 	default:
@@ -363,8 +361,6 @@ func TestHandleSetup_ListsLinkedUserProjects(t *testing.T) {
 	for _, c := range e.hub.callsTo(http.MethodGet, "/api/v1/projects") {
 		assert.Empty(t, c.RawQuery, "project list is scoped by the linked user, not an ownerId filter")
 	}
-	assert.Empty(t, e.hub.callsTo(http.MethodGet, "/api/v1/broker/projects"),
-		"setup offers only the user's projects")
 	assert.Contains(t, e.discord.allBodies(), "setup:proj:"+luProject)
 }
 
@@ -407,9 +403,10 @@ func (h *linkedUserHub) setProjects(mode string) {
 // link lookups.
 type countingStore struct {
 	Store
-	mu               sync.Mutex
-	agentCacheReads  int
-	userMappingError error
+	mu                 sync.Mutex
+	agentCacheReads    int
+	userMappingLookups int
+	userMappingError   error
 }
 
 func (c *countingStore) GetProjectAgents(ctx context.Context, projectID string) (*ProjectAgents, error) {
@@ -421,6 +418,7 @@ func (c *countingStore) GetProjectAgents(ctx context.Context, projectID string) 
 
 func (c *countingStore) GetUserMapping(ctx context.Context, discordUserID string) (*DiscordUserMapping, error) {
 	c.mu.Lock()
+	c.userMappingLookups++
 	err := c.userMappingError
 	c.mu.Unlock()
 	if err != nil {
@@ -433,6 +431,12 @@ func (c *countingStore) reads() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.agentCacheReads
+}
+
+func (c *countingStore) lookups() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.userMappingLookups
 }
 
 const luOtherUser = "du-bob"
@@ -459,57 +463,90 @@ func (e *linkedUserEnv) useCountingStore(t *testing.T) *countingStore {
 	return cs
 }
 
-func TestHandlers_UnlinkedUserIsAskedToLink(t *testing.T) {
-	handlers := []struct {
-		name string
-		run  func(e *linkedUserEnv, user string)
-	}{
-		{"agents", func(e *linkedUserEnv, u string) { e.commands.HandleAgents(e.session, asUser(luCommand("agents"), u)) }},
-		{"status", func(e *linkedUserEnv, u string) {
+// luSecretModalSubmit builds the secret set modal submission for API_KEY.
+func luSecretModalSubmit() *discordgo.InteractionCreate {
+	return luInteraction(discordgo.InteractionModalSubmit, discordgo.ModalSubmitInteractionData{
+		CustomID: "secret:set:API_KEY:" + luProject,
+		Components: []discordgo.MessageComponent{
+			&discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+				&discordgo.TextInput{CustomID: "secret_value", Value: "s3cr3t"},
+			}},
+		},
+	})
+}
+
+// linkCheckHandler runs one handler that needs the invoking user's link.
+type linkCheckHandler struct {
+	name string
+	run  func(t *testing.T, e *linkedUserEnv, user string)
+}
+
+// linkCheckHandlers lists the handlers that check the invoking user's link
+// before reading agents or calling the hub.
+func linkCheckHandlers() []linkCheckHandler {
+	return []linkCheckHandler{
+		{"agents", func(_ *testing.T, e *linkedUserEnv, u string) {
+			e.commands.HandleAgents(e.session, asUser(luCommand("agents"), u))
+		}},
+		{"status", func(_ *testing.T, e *linkedUserEnv, u string) {
 			e.commands.HandleStatus(e.session, asUser(luCommand("status", luStringOpt("agent", "worker")), u))
 		}},
-		{"message", func(e *linkedUserEnv, u string) {
+		{"message", func(_ *testing.T, e *linkedUserEnv, u string) {
 			e.commands.HandleMessage(e.session, asUser(luCommand("message", luStringOpt("agent", "worker"), luStringOpt("text", "hi")), u))
 		}},
-		{"terminal", func(e *linkedUserEnv, u string) {
+		{"terminal", func(_ *testing.T, e *linkedUserEnv, u string) {
 			e.commands.HandleTerminal(e.session, asUser(luCommand("terminal", luStringOpt("agent", "worker")), u))
 		}},
-		{"default", func(e *linkedUserEnv, u string) { e.commands.HandleDefault(e.session, asUser(luCommand("default"), u)) }},
-		{"default with agent", func(e *linkedUserEnv, u string) {
+		{"default", func(_ *testing.T, e *linkedUserEnv, u string) {
+			e.commands.HandleDefault(e.session, asUser(luCommand("default"), u))
+		}},
+		{"default with agent", func(_ *testing.T, e *linkedUserEnv, u string) {
 			e.commands.HandleDefault(e.session, asUser(luCommand("default", luStringOpt("agent", "worker")), u))
 		}},
-		{"thread", func(e *linkedUserEnv, u string) {
+		{"thread", func(_ *testing.T, e *linkedUserEnv, u string) {
 			e.commands.HandleThread(e.session, asUser(luCommand("thread", luStringOpt("title", "Fix the build")), u))
 		}},
-		{"secret list", func(e *linkedUserEnv, u string) {
+		{"secret list", func(_ *testing.T, e *linkedUserEnv, u string) {
 			e.commands.HandleSecretList(e.session, asUser(luSecretCommand("list"), u))
 		}},
-		{"secret get", func(e *linkedUserEnv, u string) {
+		{"secret get", func(_ *testing.T, e *linkedUserEnv, u string) {
 			e.commands.HandleSecretGet(e.session, asUser(luSecretCommand("get", luStringOpt("key", "API_KEY")), u))
 		}},
-		{"setup", func(e *linkedUserEnv, u string) {
+		{"secret set", func(_ *testing.T, e *linkedUserEnv, u string) {
+			e.commands.HandleSecretSet(e.session, asUser(luSecretCommand("set", luStringOpt("key", "API_KEY")), u))
+		}},
+		{"secret set submit", func(_ *testing.T, e *linkedUserEnv, u string) {
+			e.commands.HandleSecretModalSubmit(e.session, asUser(luSecretModalSubmit(), u))
+		}},
+		{"secret delete", func(_ *testing.T, e *linkedUserEnv, u string) {
+			e.commands.HandleSecretDelete(e.session, asUser(luSecretCommand("delete", luStringOpt("key", "API_KEY")), u))
+		}},
+		{"setup", func(t *testing.T, e *linkedUserEnv, u string) {
 			require.NoError(t, e.store.DeleteChannelLink(context.Background(), luChannel))
 			e.commands.HandleSetup(e.session, asUser(luCommand("setup"), u))
 		}},
-		{"setup project select", func(e *linkedUserEnv, u string) {
+		{"setup project select", func(_ *testing.T, e *linkedUserEnv, u string) {
 			i := asUser(luInteraction(discordgo.InteractionMessageComponent, discordgo.MessageComponentInteractionData{
 				CustomID: "setup:proj:" + luProject,
 			}), u)
 			e.callback.Dispatch(e.session, i, "setup:proj:"+luProject, nil)
 		}},
 	}
+}
 
+func TestHandlers_UnlinkedUserIsAskedToLink(t *testing.T) {
 	users := []struct {
 		name    string
 		mapping *DiscordUserMapping
+		want    string
 	}{
-		{name: "no link"},
+		{name: "no link", want: msgLinkAccountFirst},
 		{name: "link without email", mapping: &DiscordUserMapping{
 			DiscordUserID: luOtherUser, DiscordUsername: "bob", ScionUserID: "scion-user-2", LinkedAt: time.Now(),
-		}},
+		}, want: msgReRegisterForEmail},
 	}
 
-	for _, h := range handlers {
+	for _, h := range linkCheckHandlers() {
 		for _, u := range users {
 			t.Run(h.name+"/"+u.name, func(t *testing.T) {
 				e := newLinkedUserEnv(t)
@@ -519,14 +556,57 @@ func TestHandlers_UnlinkedUserIsAskedToLink(t *testing.T) {
 					require.NoError(t, e.store.CreateUserMapping(context.Background(), u.mapping))
 				}
 
-				h.run(e, luOtherUser)
+				h.run(t, e, luOtherUser)
 
 				assert.Empty(t, e.hub.snapshot(), "no hub call without a linked account")
 				assert.Zero(t, cs.reads(), "no agent cache read without a linked account")
-				assert.Contains(t, e.discord.allBodies(), "Please link your Discord account first with `/scion register`.")
+				bodies := e.discord.allBodies()
+				assert.Contains(t, bodies, jsonText(t, u.want))
+				for _, other := range []string{msgLinkAccountFirst, msgReRegisterForEmail} {
+					if other != u.want {
+						assert.NotContains(t, bodies, jsonText(t, other))
+					}
+				}
 			})
 		}
 	}
+}
+
+// jsonText returns msg as it appears inside a JSON string in a Discord
+// request body.
+func jsonText(t *testing.T, msg string) string {
+	t.Helper()
+	b, err := json.Marshal(msg)
+	require.NoError(t, err)
+	return strings.Trim(string(b), `"`)
+}
+
+func TestHandleSecretWrites_LinkedUser(t *testing.T) {
+	t.Run("set opens the modal", func(t *testing.T) {
+		e := newLinkedUserEnv(t)
+		e.linkChannel(t)
+
+		e.commands.HandleSecretSet(e.session, luSecretCommand("set", luStringOpt("key", "API_KEY")))
+
+		assert.Contains(t, e.discord.allBodies(), "secret:set:API_KEY:"+luProject)
+	})
+	t.Run("set submit", func(t *testing.T) {
+		e := newLinkedUserEnv(t)
+
+		e.commands.HandleSecretModalSubmit(e.session, luSecretModalSubmit())
+
+		assertLinkedUserCalls(t, e.hub, http.MethodPut, "/api/v1/secrets/API_KEY")
+		assert.Contains(t, e.discord.allBodies(), "has been set")
+	})
+	t.Run("delete", func(t *testing.T) {
+		e := newLinkedUserEnv(t)
+		e.linkChannel(t)
+
+		e.commands.HandleSecretDelete(e.session, luSecretCommand("delete", luStringOpt("key", "API_KEY")))
+
+		assertLinkedUserCalls(t, e.hub, http.MethodDelete, "/api/v1/secrets/API_KEY")
+		assert.Contains(t, e.discord.allBodies(), "has been deleted")
+	})
 }
 
 func TestHandleAutocomplete_UnlinkedUserGetsNoChoices(t *testing.T) {
@@ -549,16 +629,36 @@ func TestHandleAutocomplete_UnlinkedUserGetsNoChoices(t *testing.T) {
 }
 
 func TestHandlers_LinkLookupFailureAsksToRetry(t *testing.T) {
+	for _, h := range linkCheckHandlers() {
+		t.Run(h.name, func(t *testing.T) {
+			e := newLinkedUserEnv(t)
+			e.linkChannel(t)
+			cs := e.useCountingStore(t)
+			cs.userMappingError = assert.AnError
+
+			h.run(t, e, luDiscordUser)
+
+			assert.Empty(t, e.hub.snapshot())
+			assert.Zero(t, cs.reads())
+			assert.Contains(t, e.discord.allBodies(), msgAccountLookupFailed)
+		})
+	}
+}
+
+func TestGetAgents_EmptyPrincipalReadsNothing(t *testing.T) {
 	e := newLinkedUserEnv(t)
-	e.linkChannel(t)
 	cs := e.useCountingStore(t)
-	cs.userMappingError = assert.AnError
 
-	e.commands.HandleAgents(e.session, luCommand("agents"))
+	agents, err := e.commands.getAgents(context.Background(), luProject, "")
 
-	assert.Empty(t, e.hub.snapshot())
-	assert.Zero(t, cs.reads())
-	assert.Contains(t, e.discord.allBodies(), "Something went wrong looking up your account. Please try again.")
+	require.ErrorIs(t, err, errNoLinkedUser)
+	assert.Nil(t, agents)
+	assert.Zero(t, cs.reads(), "no agent cache read without a principal")
+	assert.Empty(t, e.hub.snapshot(), "no hub call without a principal")
+
+	agents, err = e.commands.getAgents(context.Background(), luProject, luPrincipal)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"worker"}, agents)
 }
 
 func TestHandleSetup_NoProjectsTellsUserTheyAreNotAMember(t *testing.T) {
@@ -568,7 +668,6 @@ func TestHandleSetup_NoProjectsTellsUserTheyAreNotAMember(t *testing.T) {
 	e.commands.HandleSetup(e.session, luCommand("setup"))
 
 	assertLinkedUserCalls(t, e.hub, http.MethodGet, "/api/v1/projects")
-	assert.Empty(t, e.hub.callsTo(http.MethodGet, "/api/v1/broker/projects"))
 	bodies := e.discord.allBodies()
 	assert.Contains(t, bodies, "You are not a member of any project.")
 	assert.NotContains(t, bodies, "setup:proj:")
@@ -581,7 +680,6 @@ func TestHandleSetup_ProjectListErrorAsksToRetry(t *testing.T) {
 	e.commands.HandleSetup(e.session, luCommand("setup"))
 
 	assertLinkedUserCalls(t, e.hub, http.MethodGet, "/api/v1/projects")
-	assert.Empty(t, e.hub.callsTo(http.MethodGet, "/api/v1/broker/projects"))
 	bodies := e.discord.allBodies()
 	assert.Contains(t, bodies, "Failed to fetch your projects. Please try `/scion setup` again.")
 	assert.NotContains(t, bodies, "setup:proj:")
@@ -607,7 +705,6 @@ func TestHandleSetupProject_SlugFromUserProjects(t *testing.T) {
 			e.callback.Dispatch(e.session, i, "setup:proj:"+luProject, nil)
 
 			assertLinkedUserCalls(t, e.hub, http.MethodGet, "/api/v1/projects")
-			assert.Empty(t, e.hub.callsTo(http.MethodGet, "/api/v1/broker/projects"))
 			link, err := e.store.GetChannelLink(context.Background(), luChannel)
 			require.NoError(t, err)
 			require.NotNil(t, link)
@@ -661,9 +758,32 @@ func TestHandleIncomingMessage_RefreshesAgentsAsSender(t *testing.T) {
 	e.linkChannel(t)
 	b := newLinkedUserBroker(t, e, newLinkedUserHubServer(t, e))
 
+	cs := &countingStore{Store: e.store}
+	b.store = cs
+
 	b.handleIncomingMessage(e.session, luChannelMessage(luDiscordUser, "@worker hello"))
 
 	assertLinkedUserCalls(t, e.hub, http.MethodGet, "/api/v1/projects/"+luProject+"/agents")
+	assert.Equal(t, 1, cs.lookups(), "the sender's link is looked up once")
+}
+
+func TestHandleIncomingMessage_LinkWithoutEmailIsDelivered(t *testing.T) {
+	e := newLinkedUserEnv(t)
+	e.linkChannel(t)
+	require.NoError(t, e.store.CreateUserMapping(context.Background(), &DiscordUserMapping{
+		DiscordUserID: luOtherUser, DiscordUsername: "bob", ScionUserID: "scion-user-2", LinkedAt: time.Now(),
+	}))
+	require.NoError(t, e.store.SetProjectAgents(context.Background(), &ProjectAgents{
+		ProjectID: luProject, AgentSlugs: []string{"worker"}, RefreshedAt: time.Now(),
+	}))
+	b := newLinkedUserBroker(t, e, newLinkedUserHubServer(t, e))
+	cs := &countingStore{Store: e.store}
+	b.store = cs
+
+	b.handleIncomingMessage(e.session, luChannelMessage(luOtherUser, "@worker hello"))
+
+	assert.Equal(t, 1, cs.lookups(), "the sender's link is looked up once")
+	assert.NotContains(t, e.discord.allBodies(), "/scion register")
 }
 
 func TestHandleIncomingMessage_UnlinkedSenderUsesAgentCacheOnly(t *testing.T) {
@@ -696,17 +816,17 @@ func TestHandleIncomingMessage_UnlinkedSenderUsesAgentCacheOnly(t *testing.T) {
 	}
 }
 
-func TestLinkedPrincipal_LogsFailedLookup(t *testing.T) {
+func TestLookupUserMapping_LogsFailedLookup(t *testing.T) {
 	var buf strings.Builder
 	log := slog.New(slog.NewTextHandler(&buf, nil))
 
 	store := &countingStore{Store: newTestStore(t), userMappingError: assert.AnError}
-	assert.Empty(t, linkedPrincipal(context.Background(), store, log, "du-carol"))
+	assert.Nil(t, lookupUserMapping(context.Background(), store, log, "du-carol"))
 	assert.Contains(t, buf.String(), "level=WARN")
 	assert.Contains(t, buf.String(), "discord_user_id=du-carol")
 
 	buf.Reset()
 	store.userMappingError = nil
-	assert.Empty(t, linkedPrincipal(context.Background(), store, log, "du-carol"))
+	assert.Nil(t, lookupUserMapping(context.Background(), store, log, "du-carol"))
 	assert.Empty(t, buf.String(), "an unlinked user is not logged")
 }

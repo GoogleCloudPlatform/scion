@@ -103,11 +103,11 @@ func TestHTTPHubClient_IAPTransport_UsedOnAllPaths(t *testing.T) {
 	client := NewHTTPHubClient(hub.URL, "", "", httpClient)
 	ctx := context.Background()
 
-	// Test ListProjects (uses httpClient).
-	_, err := client.ListProjects(ctx)
+	// Test ListProjectsForUser (uses httpClient).
+	_, err := client.ListProjectsForUser(ctx, luPrincipal)
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), transport.calls.Load(),
-		"ListProjects should use the custom transport")
+		"ListProjectsForUser should use the custom transport")
 
 	// Test CreateAgent (uses longHTTPClient).
 	_, err = client.CreateAgent(ctx, "p1", CreateAgentRequest{
@@ -133,7 +133,7 @@ func TestHTTPHubClient_PlainClient_WhenNoIAP(t *testing.T) {
 	ctx := context.Background()
 
 	// Should work without IAP transport.
-	projects, err := client.ListProjects(ctx)
+	projects, err := client.ListProjectsForUser(ctx, luPrincipal)
 	require.NoError(t, err)
 	assert.Len(t, projects, 1)
 	assert.Equal(t, "test", projects[0].Slug)
