@@ -720,6 +720,96 @@ func TestCheckEffectiveMembership(t *testing.T) {
 			t.Fatal("non-member should not be a member")
 		}
 	})
+
+	// Helpers for the any-active-binding subtests below.
+	newUser := func(t *testing.T, name string) string {
+		t.Helper()
+		u := &store.User{ID: tid("msg-eff-" + name), Email: "eff-" + name + "@test.com",
+			Role: store.UserRoleMember, Status: "active", Created: time.Now()}
+		require_NoError(t, s.CreateUser(ctx, u))
+		return u.ID
+	}
+	newCustomRole := func(t *testing.T, name string) string {
+		t.Helper()
+		rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+			Name: "eff-custom-" + name, ScopeType: store.RoleScopeProject, Permissions: []string{"agent.read"},
+		})
+		require_NoError(t, err)
+		return rd.ID
+	}
+	newGroupWith := func(t *testing.T, name, userID string) string {
+		t.Helper()
+		grp := &store.Group{ID: tid("msg-eff-grp-" + name), Name: "eff " + name,
+			Slug: "msg-eff-grp-" + tid(name), GroupType: "explicit"}
+		require_NoError(t, s.CreateGroup(ctx, grp))
+		require_NoError(t, s.AddGroupMember(ctx, &store.GroupMember{GroupID: grp.ID,
+			MemberType: store.GroupMemberTypeUser, MemberID: userID, Role: store.GroupMemberRoleMember}))
+		return grp.ID
+	}
+	bind := func(t *testing.T, rdID, principalType, principalID string, notBefore, expiresAt *time.Time) {
+		t.Helper()
+		_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: rdID,
+			PrincipalType: principalType, PrincipalID: principalID,
+			ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: "test",
+			NotBefore: notBefore, ExpiresAt: expiresAt})
+		require_NoError(t, err)
+	}
+	expect := func(t *testing.T, userID string, wantMember bool, wantRole string) {
+		t.Helper()
+		result := srv.CheckEffectiveMembership(ctx, userID, projectID)
+		if result.Err != nil {
+			t.Fatalf("unexpected error: %v", result.Err)
+		}
+		if result.IsMember != wantMember || result.Role != wantRole {
+			t.Fatalf("got IsMember=%v Role=%q, want IsMember=%v Role=%q",
+				result.IsMember, result.Role, wantMember, wantRole)
+		}
+	}
+
+	t.Run("direct custom-only binding is a member with empty built-in role", func(t *testing.T) {
+		uid := newUser(t, "direct-custom")
+		bind(t, newCustomRole(t, "direct"), store.RoleBindingPrincipalUser, uid, nil, nil)
+		expect(t, uid, true, "")
+	})
+
+	t.Run("group-derived custom-only binding is a member", func(t *testing.T) {
+		uid := newUser(t, "group-custom")
+		gid := newGroupWith(t, "custom", uid)
+		bind(t, newCustomRole(t, "group"), store.RoleBindingPrincipalGroup, gid, nil, nil)
+		expect(t, uid, true, "")
+	})
+
+	t.Run("custom plus built-in reports the built-in tier", func(t *testing.T) {
+		uid := newUser(t, "custom-plus-admin")
+		bind(t, newCustomRole(t, "plus-admin"), store.RoleBindingPrincipalUser, uid, nil, nil)
+		adminRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
+		require_NoError(t, err)
+		bind(t, adminRD.ID, store.RoleBindingPrincipalUser, uid, nil, nil)
+		expect(t, uid, true, store.ProjectRoleAdmin)
+	})
+
+	t.Run("expired custom binding is not a member", func(t *testing.T) {
+		uid := newUser(t, "expired-custom")
+		past := time.Now().Add(-time.Hour)
+		bind(t, newCustomRole(t, "expired"), store.RoleBindingPrincipalUser, uid, nil, &past)
+		expect(t, uid, false, "")
+	})
+
+	t.Run("not-yet-active custom binding is not a member", func(t *testing.T) {
+		uid := newUser(t, "future-custom")
+		future := time.Now().Add(time.Hour)
+		bind(t, newCustomRole(t, "future"), store.RoleBindingPrincipalUser, uid, &future, nil)
+		expect(t, uid, false, "")
+	})
+
+	t.Run("group-bound owner still confers nothing", func(t *testing.T) {
+		uid := newUser(t, "group-owner")
+		gid := newGroupWith(t, "owner", uid)
+		ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
+		require_NoError(t, err)
+		bind(t, ownerRD.ID, store.RoleBindingPrincipalGroup, gid, nil, nil)
+		expect(t, uid, false, "")
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -1121,10 +1211,11 @@ func TestEvaluateAgentMessage_CrossProject_GroupRemoval(t *testing.T) {
 	}
 }
 
-// Test R-3/4: Custom-only role binding — user has only a custom/additive role
-// (NOT a built-in membership role), delivery denied with
-// cross_project_origin_not_member.
-func TestEvaluateAgentMessage_CrossProject_CustomRoleNotMember(t *testing.T) {
+// Test R-3/4: Custom-only role binding — user has only a custom role (not a
+// built-in membership role) in the destination project. Any active project
+// role binding counts as membership, so the "members" inbound policy admits
+// the sender.
+func TestEvaluateAgentMessage_CrossProject_CustomRoleIsMember(t *testing.T) {
 	f := crossProjectSetup(t)
 	ctx := context.Background()
 
@@ -1146,7 +1237,7 @@ func TestEvaluateAgentMessage_CrossProject_CustomRoleNotMember(t *testing.T) {
 	// Create a custom additive role.
 	customRD, err := f.store.CreateRoleDefinition(ctx, &store.RoleDefinition{
 		Name:        "custom-agent-viewer",
-		Description: "Custom additive role — NOT a membership role",
+		Description: "Custom project role",
 		ScopeType:   store.RoleScopeProject,
 		Permissions: []string{"agent.read"},
 		System:      false,
@@ -1164,16 +1255,20 @@ func TestEvaluateAgentMessage_CrossProject_CustomRoleNotMember(t *testing.T) {
 	})
 	require_NoError(t, err)
 
-	// CheckEffectiveMembership should NOT consider custom-only as member.
+	// CheckEffectiveMembership counts the custom-only binding as membership;
+	// Role reports only the built-in tier, so it stays empty.
 	memberResult := f.srv.CheckEffectiveMembership(ctx, customUser.ID, f.projectB)
 	if memberResult.Err != nil {
 		t.Fatalf("CheckEffectiveMembership error: %v", memberResult.Err)
 	}
-	if memberResult.IsMember {
-		t.Fatal("custom-only role binding should NOT count as membership")
+	if !memberResult.IsMember {
+		t.Fatal("custom-only role binding should count as membership")
+	}
+	if memberResult.Role != "" {
+		t.Fatalf("expected empty built-in Role for custom-only member, got %q", memberResult.Role)
 	}
 
-	// Verify cross-project messaging is denied.
+	// Verify cross-project messaging is allowed under the "members" policy.
 	sender := msgAuthzAgent(t, f.store, "cp-cust-sender", f.projectA, store.MessageModeHub,
 		[]string{customUser.ID})
 	target := msgAuthzAgent(t, f.store, "cp-cust-target", f.projectB, store.MessageModeProject,
@@ -1181,11 +1276,9 @@ func TestEvaluateAgentMessage_CrossProject_CustomRoleNotMember(t *testing.T) {
 
 	senderIdent := msgAuthzAgentIdentity(sender.ID, f.projectA, sender.Ancestry)
 	decision := f.srv.EvaluateAgentMessage(ctx, senderIdent, target)
-	if decision.Allowed {
-		t.Fatal("custom-only role should be denied cross-project messaging")
-	}
-	if decision.Code != MessageDenialCrossProjectNotMember {
-		t.Fatalf("expected code %s, got %s", MessageDenialCrossProjectNotMember, decision.Code)
+	if !decision.Allowed {
+		t.Fatalf("custom-only member should be allowed cross-project messaging, got code=%s reason=%s",
+			decision.Code, decision.Reason)
 	}
 }
 

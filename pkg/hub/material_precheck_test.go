@@ -420,17 +420,17 @@ func TestAgentSecretRead_ViewerCatalogGrantsDoNotAdmit(t *testing.T) {
 	}
 }
 
-// TestAgentSecretRead_UnrelatedScheduledEventGrantDoesNotAdmit covers check
-// 5: a project-scoped role binding that is not one of the built-in
-// membership roles (owner/admin/member) does not satisfy
-// CheckEffectiveMembership, no matter what permissions it carries, and does
-// not qualify as exact system authority for secret.use either (it is a
-// project-scoped, not a system-scoped, binding).
-func TestAgentSecretRead_UnrelatedScheduledEventGrantDoesNotAdmit(t *testing.T) {
-	f := newMaterialFixture(t, "unrelated-grant")
+// TestAgentSecretRead_CustomOnlyProjectBindingAdmits covers check 5: any
+// active project-scoped role binding, including a custom role that is not one
+// of the built-in membership roles (owner/admin/member), satisfies
+// CheckEffectiveMembership. Admission here does not grant reads: check 7
+// still requires project.secret_read (see
+// TestAgentSecretRead_CustomOnlyMemberWithoutSecretReadDeniedAtCheck7).
+func TestAgentSecretRead_CustomOnlyProjectBindingAdmits(t *testing.T) {
+	f := newMaterialFixture(t, "custom-only-binding")
 	ctx := context.Background()
 
-	// Remove the fixture's own owner membership so only the unrelated grant
+	// Remove the fixture's own owner membership so only the custom binding
 	// remains.
 	bindings, err := f.Store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, f.UserID)
 	require.NoError(t, err)
@@ -457,9 +457,9 @@ func TestAgentSecretRead_UnrelatedScheduledEventGrantDoesNotAdmit(t *testing.T) 
 	require.NoError(t, err)
 
 	ident := newFullAgentIdentity(f.AgentID, f.ProjectID, []string{f.UserID}, []AgentTokenScope{ScopeProjectSecretRead})
-	_, reason, status := f.Server.materialRuntimePrecheck(ctx, ident)
-	if status != http.StatusForbidden || reason != ReasonMembershipRequired {
-		t.Fatalf("expected 403/%s, got %d/%s", ReasonMembershipRequired, status, reason)
+	facts, reason, status := f.Server.materialRuntimePrecheck(ctx, ident)
+	if status != 0 || reason != ReasonAllowed || facts == nil {
+		t.Fatalf("expected check 5 to admit a custom-only project member, got %d/%s", status, reason)
 	}
 }
 

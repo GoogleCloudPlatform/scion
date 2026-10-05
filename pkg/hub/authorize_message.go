@@ -77,7 +77,7 @@ type MessageDecision struct {
 // error. Both refuse delivery, but infrastructure failure should be retryable.
 type EffectiveMembershipResult struct {
 	IsMember bool
-	Role     string // highest built-in role found: owner, admin, member, or ""
+	Role     string // highest built-in role found: owner, admin, member, or "" (custom-only or non-member)
 	Err      error  // non-nil only for infrastructure/store errors
 }
 
@@ -85,17 +85,22 @@ type EffectiveMembershipResult struct {
 // project by examining direct and effective-group role bindings with
 // active-time checks.
 //
-// Membership means holding a built-in member, admin, or owner binding
-// (including valid group-derived member/admin). An owner counts as a member;
-// ownership does not permit piercing a target's mode.
+// Membership means holding any active project-scoped role binding, built-in
+// (owner/admin/member) or custom, either directly or via an effective group.
+// This matches ProjectMembershipEvidence. A group-bound owner role is the one
+// exception: groups never confer owner, and such a binding is ignored. An
+// owner counts as a member; ownership does not permit piercing a target's
+// mode.
 //
-// Ignored: expired, not-yet-active, revoked, custom additive role bindings.
+// Ignored: expired, not-yet-active, or revoked bindings.
 // NOT membership: public project visibility, generic read grant, shared
 // conversation, or Hub-admin status.
 //
-// Returns EffectiveMembershipResult with IsMember=true and the highest role if the
-// user is a member, IsMember=false with Err=nil for a definite non-member,
-// or IsMember=false with Err!=nil for infrastructure errors.
+// Returns EffectiveMembershipResult with IsMember=true if the user is a
+// member, IsMember=false with Err=nil for a definite non-member, or
+// IsMember=false with Err!=nil for infrastructure errors. Role reports the
+// highest built-in tier held and is "" when membership comes only from
+// custom roles.
 func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID string) EffectiveMembershipResult {
 	now := time.Now()
 
@@ -121,6 +126,7 @@ func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID
 		return rd, nil
 	}
 
+	isMember := false
 	bestRole := ""
 	for _, rb := range directBindings {
 		if rb.ScopeType != store.RoleScopeProject || rb.ScopeID != projectID {
@@ -133,11 +139,12 @@ func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID
 		if rdErr != nil {
 			return EffectiveMembershipResult{Err: rdErr}
 		}
-		// Only built-in membership roles count.
-		if !store.IsBuiltInProjectMembershipRole(rd.Name) {
-			continue
+		// Any active project binding confers membership; Role tracks only
+		// the built-in tier.
+		isMember = true
+		if store.IsBuiltInProjectMembershipRole(rd.Name) {
+			bestRole = higherProjectRole(bestRole, rd.Name)
 		}
-		bestRole = higherProjectRole(bestRole, rd.Name)
 	}
 
 	// 2. Group-derived bindings.
@@ -169,14 +176,14 @@ func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID
 			if rd.Name == store.ProjectRoleOwner {
 				continue
 			}
-			if !store.IsBuiltInProjectMembershipRole(rd.Name) {
-				continue
+			isMember = true
+			if store.IsBuiltInProjectMembershipRole(rd.Name) {
+				bestRole = higherProjectRole(bestRole, rd.Name)
 			}
-			bestRole = higherProjectRole(bestRole, rd.Name)
 		}
 	}
 
-	if bestRole == "" {
+	if !isMember {
 		return EffectiveMembershipResult{IsMember: false}
 	}
 	return EffectiveMembershipResult{IsMember: true, Role: bestRole}

@@ -226,6 +226,91 @@ func TestAgentSecretRead_ProjectScopeRequiresDelegatorProjectSecretRead(t *testi
 	}
 }
 
+// customOnlyDelegateAgent creates a user whose only binding in the fixture
+// project is a custom project role with the given permissions, plus a
+// running agent rooted at that user with a recorded full-role delegation
+// edge. It returns the user ID, the agent ID, and a token carrying
+// ScopeProjectSecretRead.
+func customOnlyDelegateAgent(t *testing.T, f *materialFixture, name string, permissions []string) (string, string, string) {
+	t.Helper()
+	ctx := context.Background()
+
+	userID := tid("custom-only-" + name)
+	require.NoError(t, f.Store.CreateUser(ctx, &store.User{
+		ID: userID, Email: "custom-only-" + name + "@test.com", DisplayName: name, Role: "member", Status: store.UserStatusActive,
+	}))
+	rd, err := f.Store.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "custom-only-" + name,
+		ScopeType:   store.RoleScopeProject,
+		Permissions: permissions,
+	})
+	require.NoError(t, err)
+	_, err = f.Store.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          f.ProjectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+
+	m := f.Server.CheckEffectiveMembership(ctx, userID, f.ProjectID)
+	require.NoError(t, m.Err)
+	require.True(t, m.IsMember, "custom-only binding must count as project membership")
+	require.Empty(t, m.Role, "Role reports only the built-in tier")
+
+	agentID := tid("custom-only-agent-" + name)
+	require.NoError(t, f.Store.CreateAgent(ctx, &store.Agent{
+		ID: agentID, Slug: "custom-only-" + name, Name: name, ProjectID: f.ProjectID,
+		Phase: string(state.PhaseRunning), StateVersion: 1, Ancestry: []string{userID},
+		Created: time.Now(), Updated: time.Now(),
+	}))
+	seedRecordedDelegationEdge(t, f.Store, store.DelegationPrincipalUser, userID, store.DelegationPrincipalAgent, agentID,
+		store.RoleScopeProject, f.ProjectID, string(AgentRoleFull))
+	token, err := f.Server.agentTokenService.GenerateAgentToken(agentID, f.ProjectID, []AgentTokenScope{ScopeProjectSecretRead}, []string{userID})
+	require.NoError(t, err)
+	return userID, agentID, token
+}
+
+// TestAgentSecretRead_CustomOnlyMemberWithSecretReadAllowed pins that a root
+// user whose only project binding is a custom role carrying
+// project.secret_read passes check 5 (membership) and check 7, so the agent
+// reads the project secret.
+func TestAgentSecretRead_CustomOnlyMemberWithSecretReadAllowed(t *testing.T) {
+	f := newMaterialFixture(t, "custom-only-with-read")
+	setBackfillCompleted(t, f.Store)
+	seedSecret(t, f.Server.secretBackend, "CUSTOM_READ_KEY", "v", "", "", f.ProjectID)
+
+	_, agentID, token := customOnlyDelegateAgent(t, f, "with-read", []string{"project.read", "project.secret_read"})
+
+	rec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+agentID+"/secrets/CUSTOM_READ_KEY", nil, token)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for a custom-only member holding project.secret_read, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestAgentSecretRead_CustomOnlyMemberWithoutSecretReadDeniedAtCheck7 pins
+// that membership is admission only: a custom-only member whose role lacks
+// project.secret_read passes check 5 and is refused at check 7
+// (denied_by_policy per item), not with membership_required.
+func TestAgentSecretRead_CustomOnlyMemberWithoutSecretReadDeniedAtCheck7(t *testing.T) {
+	f := newMaterialFixture(t, "custom-only-no-read")
+	ctx := context.Background()
+	setBackfillCompleted(t, f.Store)
+	seedSecret(t, f.Server.secretBackend, "CUSTOM_NOREAD_KEY", "v", "", "", f.ProjectID)
+
+	userID, agentID, token := customOnlyDelegateAgent(t, f, "no-read", []string{"project.read", "agent.read"})
+
+	ident := newFullAgentIdentity(agentID, f.ProjectID, []string{userID}, []AgentTokenScope{ScopeProjectSecretRead})
+	facts, reason, status := f.Server.materialRuntimePrecheck(ctx, ident)
+	if status != 0 || reason != ReasonAllowed || facts == nil {
+		t.Fatalf("expected check 5 to admit the custom-only member, got %d/%s", status, reason)
+	}
+
+	assertProjectDenied(t, f, agentID, token, "CUSTOM_NOREAD_KEY")
+}
+
 // TestAgentSecretRead_ProjectScopeAgentDelegatorWithoutSecretReadDenies
 // pins that the parent agent's stored role must itself hold
 // project:secret:read.
