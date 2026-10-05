@@ -615,6 +615,9 @@ export interface Agent {
   image?: string;
   runtime?: string;
   createdBy?: string;
+  // The creator's display name. Set on compact list items, which carry no
+  // appliedConfig; full items carry it as appliedConfig.creatorName.
+  creatorName?: string;
   appliedConfig?: AgentAppliedConfig;
 
   // Ordered ancestor chain [root, ..., parent]; last entry is the direct
@@ -644,6 +647,10 @@ export interface Agent {
   // sends this key on REST agents and SSE status deltas; an explicit `null`
   // means no delete is active and must clear any earlier value.
   deletion?: DeletionInfo | null;
+
+  // Computed by the hub: provisioned but never asked to run
+  // (ptone/scion#2929). Absent means false.
+  provisionedOnly?: boolean;
 }
 
 /** `DeletionInfo.state` values the hub publishes (`finalizing` reads as `deleting`). */

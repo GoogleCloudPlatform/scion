@@ -353,9 +353,10 @@ func TestResolveHomeStorage_NonKubernetesIgnoresDamagedRecord(t *testing.T) {
 	assert.Error(t, err, "a Kubernetes start does read, and refuse, the damaged record")
 }
 
-// This version does not start agents with an NFS home.
-func TestHomeStorageNFSAvailable_OffInThisVersion(t *testing.T) {
-	assert.False(t, homeStorageNFSAvailable)
+// This version starts agents with an NFS home (behind the experiment and
+// the development gate).
+func TestHomeStorageNFSAvailable_On(t *testing.T) {
+	assert.True(t, homeStorageNFSAvailable)
 }
 
 // After the first start the record decides, whatever the settings say now.
