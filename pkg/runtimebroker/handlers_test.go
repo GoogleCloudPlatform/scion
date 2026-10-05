@@ -5891,6 +5891,7 @@ func TestHealthEndpointsConcurrentSwapRuntime(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(1)
+	defer wg.Wait()
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 200; i++ {
@@ -5922,6 +5923,11 @@ func TestHealthEndpointsConcurrentSwapRuntime(t *testing.T) {
 		if w.Code != http.StatusOK && w.Code != http.StatusServiceUnavailable {
 			t.Fatalf("readyz code = %d", w.Code)
 		}
+
+		w = httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/info", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("info code = %d", w.Code)
+		}
 	}
-	wg.Wait()
 }
