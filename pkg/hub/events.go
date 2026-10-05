@@ -168,6 +168,9 @@ type AgentStatusEvent struct {
 	// explicit null when no delete is active or failed, so the web's delta
 	// merge clears it.
 	Deletion *store.DeletionInfo `json:"deletion"`
+	// ProvisionedOnly is the computed provisionedOnly view (ptone/scion#2929).
+	// No omitempty: false must reach the web to clear a merged true.
+	ProvisionedOnly bool `json:"provisionedOnly"`
 }
 
 // AgentCreatedEvent is published when an agent is created.
@@ -193,6 +196,11 @@ type AgentCreatedEvent struct {
 	// no launch (e.g. a synchronous create, or before any dispatch path
 	// starts one).
 	Launch *store.AgentLaunch `json:"launch,omitempty"`
+	// ProvisionedOnly mirrors the agent's computed provisionedOnly view
+	// (ptone/scion#2929), so a browser shows a provision-only create as
+	// "provisioned, not started" without a refetch. No omitempty, as on
+	// the status event: a false must clear a value merged onto an existing row.
+	ProvisionedOnly bool `json:"provisionedOnly"`
 }
 
 // AgentDeletedEvent is published when an agent is deleted.
@@ -493,6 +501,7 @@ func (p *eventBuilder) PublishAgentStatus(_ context.Context, agent *store.Agent)
 		ContainerStatus: agent.ContainerStatus,
 		Launch:          store.ComputeAgentLaunch(agent, now),
 		Deletion:        store.ComputeAgentDeletion(agent, now),
+		ProvisionedOnly: store.ComputeAgentProvisionedOnly(agent),
 	}
 	if !agent.LastActivityEvent.IsZero() {
 		evt.LastActivityEvent = agent.LastActivityEvent.UTC().Format("2006-01-02T15:04:05Z07:00")
@@ -536,6 +545,7 @@ func (p *eventBuilder) PublishAgentCreated(_ context.Context, agent *store.Agent
 		TaskSummary:     agent.TaskSummary,
 		Ancestry:        agent.Ancestry,
 		Launch:          store.ComputeAgentLaunch(agent, time.Now()),
+		ProvisionedOnly: store.ComputeAgentProvisionedOnly(agent),
 	}
 	if !agent.Created.IsZero() {
 		evt.Created = agent.Created.UTC().Format("2006-01-02T15:04:05Z07:00")

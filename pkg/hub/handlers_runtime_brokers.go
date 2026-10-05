@@ -651,6 +651,16 @@ type brokerHeartbeatRequest struct {
 	// by an older broker, in which case the stored descriptor is left
 	// unchanged.
 	WorkspaceStorage *api.BrokerWorkspaceStorage `json:"workspaceStorage,omitempty"`
+	// StartsInFlight lists the agent starts still running on the broker
+	// (see hubclient.BrokerHeartbeat.StartsInFlight). Trusted to be complete
+	// only when Capabilities.StartsInFlight is set.
+	StartsInFlight []brokerStartInFlight `json:"startsInFlight,omitempty"`
+}
+
+// brokerStartInFlight mirrors hubclient.StartInFlight.
+type brokerStartInFlight struct {
+	ProjectID string `json:"projectId"`
+	Slug      string `json:"slug"`
 }
 
 // brokerProjectHeartbeat is per-project status in a heartbeat.
@@ -815,6 +825,7 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 				continue
 			}
 			report.present[agent.ID] = true
+			report.observed[agent.ID] = observedAgent{target: agentHB.RuntimeTarget, state: heartbeatObservedState(agentHB)}
 
 			// Build status update with agent status and container status.
 			// When the broker sends structured Phase/Activity fields, use
@@ -1214,6 +1225,10 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	// reports (their container is gone). Gated on a complete inventory and a
 	// fresh broker; see broker_heartbeat_reconcile.go.
 	s.reconcileMissingAgents(ctx, id, prevBroker, &heartbeat, report)
+
+	// Record runtime observations for start claims, once, outside the
+	// per-agent loop and in a single store transaction.
+	s.recordRecoveryObservations(ctx, id, prevBroker, &heartbeat, report)
 
 	w.WriteHeader(http.StatusOK)
 }
