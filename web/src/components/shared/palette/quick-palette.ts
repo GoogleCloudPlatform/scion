@@ -438,8 +438,11 @@ export class ScionQuickPalette extends LitElement {
    * changes (query edit or a group finishing/refreshing load).
    *
    * A query edit always resets to the new global best. A group refresh
-   * preserves a manual selection by stable ID when it is still present,
-   * otherwise falls back to the new global best.
+   * preserves a manual selection by stable ID when it is still present, so
+   * a row arriving above it never takes its place. Otherwise the highlight
+   * falls back to the new global best, which is not the user's pick: it
+   * keeps following the ranking, and Enter on an empty query does not
+   * commit it.
    */
   private reconcileActiveId(
     ranked: Array<RankedCandidate<PaletteCandidate>>,
@@ -463,6 +466,7 @@ export class ScionQuickPalette extends LitElement {
         return;
       }
     }
+    this.manualSelection = false;
     this.setActiveId(ranked[0]?.candidate.id ?? null);
   }
 

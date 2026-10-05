@@ -369,6 +369,77 @@ describe('scion-quick-palette: renders a grouped Agents list', () => {
     expect(active?.textContent).toContain('Coder One');
   });
 
+  it('a row arriving above a manually-selected candidate does not replace it', async () => {
+    const el = await mountPalette(
+      agentsGroup([
+        { peerId: 'a1', label: 'Coder One', activityMs: 100 },
+        { peerId: 'a2', label: 'Reviewer Bot', activityMs: 1 },
+      ])
+    );
+    const input = el.shadowRoot?.querySelector('#palette-query-input') as HTMLInputElement;
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    await el.updateComplete;
+    let committed: PaletteTarget | undefined;
+    el.addEventListener('palette-select', (e) => {
+      committed = (e as CustomEvent<{ target: PaletteTarget }>).detail.target;
+    });
+
+    // A group finishing its load adds a conversation with newer activity.
+    el.groups = agentsGroup([
+      { peerId: 'a1', label: 'Coder One', activityMs: 100 },
+      { peerId: 'a2', label: 'Reviewer Bot', activityMs: 1 },
+      { peerId: 'a3', label: 'Newest Agent', activityMs: 1000 },
+    ]);
+    await el.updateComplete;
+
+    expect(el.shadowRoot?.querySelector('.palette-option.active')?.textContent).toContain(
+      'Reviewer Bot'
+    );
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(committed).toEqual({
+      kind: 'dm',
+      peerKind: 'agent',
+      peerId: 'a2',
+      displayName: 'Reviewer Bot',
+    });
+  });
+
+  it('the fallback after a manually-selected candidate is removed is not a pick: it follows the ranking, and Enter on an empty query does not commit it', async () => {
+    const el = await mountPalette(
+      agentsGroup([
+        { peerId: 'a1', label: 'Coder One', activityMs: 100 },
+        { peerId: 'a2', label: 'Reviewer Bot', activityMs: 1 },
+      ])
+    );
+    const input = el.shadowRoot?.querySelector('#palette-query-input') as HTMLInputElement;
+    const activeText = (): string | null | undefined =>
+      el.shadowRoot?.querySelector('.palette-option.active')?.textContent;
+    let commits = 0;
+    el.addEventListener('palette-select', () => {
+      commits++;
+    });
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    await el.updateComplete;
+    expect(activeText()).toContain('Reviewer Bot');
+
+    // The picked row goes away; the highlight falls back to the top row.
+    el.groups = agentsGroup([{ peerId: 'a1', label: 'Coder One', activityMs: 100 }]);
+    await el.updateComplete;
+    expect(activeText()).toContain('Coder One');
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(commits).toBe(0);
+
+    // A newer row arriving now takes the highlight, as it does before any pick.
+    el.groups = agentsGroup([
+      { peerId: 'a1', label: 'Coder One', activityMs: 100 },
+      { peerId: 'a3', label: 'Newest Agent', activityMs: 1000 },
+    ]);
+    await el.updateComplete;
+    expect(activeText()).toContain('Newest Agent');
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    expect(commits).toBe(0);
+  });
+
   it('typing narrows the list and highlights the match', async () => {
     const el = await mountPalette(
       agentsGroup([
