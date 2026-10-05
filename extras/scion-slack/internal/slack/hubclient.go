@@ -42,8 +42,7 @@ type HubClient interface {
 	// sent with the request. Use this for every user-facing project picker.
 	ListUserProjects(ctx context.Context, linkedUser string) ([]ProjectOption, error)
 	// ListAgents lists the agents of a project. linkedUser ("user:<email>")
-	// is the Slack user's linked Scion account, sent with the request; the
-	// hub denies a project agent list without it.
+	// is the Slack user's linked Scion account, sent with the request.
 	ListAgents(ctx context.Context, projectID, linkedUser string) ([]AgentInfo, error)
 }
 
