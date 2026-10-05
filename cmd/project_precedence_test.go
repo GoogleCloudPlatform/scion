@@ -202,3 +202,121 @@ func TestRequireHubClient_ProjectFlagPrecedence(t *testing.T) {
 		})
 	}
 }
+
+// setupFlagPrecedenceHome writes ~/.scion/settings.yaml (with project_id
+// localID when set) pointing at endpoint, makes HOME the cwd, and sets an
+// agent container environment with SCION_PROJECT_ID envID.
+func setupFlagPrecedenceHome(t *testing.T, endpoint, localID, envID string) {
+	t.Helper()
+	tmpHome := t.TempDir()
+	globalDir := filepath.Join(tmpHome, ".scion")
+	require.NoError(t, os.MkdirAll(globalDir, 0755))
+	settings := fmt.Sprintf("hub:\n  enabled: true\n  endpoint: %s\n", endpoint)
+	if localID != "" {
+		settings = "project_id: " + localID + "\n" + settings
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(settings), 0644))
+
+	t.Setenv("HOME", tmpHome)
+	setOrUnsetTestEnv(t, "SCION_HUB_ENDPOINT", endpoint)
+	setOrUnsetTestEnv(t, "SCION_HUB_URL", "")
+	setOrUnsetTestEnv(t, "SCION_HUB_PROJECT_ID", "")
+	setOrUnsetTestEnv(t, "SCION_PROJECT_ID", envID)
+	setOrUnsetTestEnv(t, "SCION_PROJECT", "env-project")
+	setOrUnsetTestEnv(t, "SCION_DEV_TOKEN", "test-dev-token")
+	setOrUnsetTestEnv(t, "SCION_AUTH_TOKEN", "")
+	t.Chdir(tmpHome)
+}
+
+// TestCheckHubAvailability_ClearedPathKeepsEnvProject covers a
+// cross-project message send: --project names another project, but the
+// caller clears the path to resolve the sender's own project. An empty
+// path is not an explicit target, so SCION_PROJECT_ID wins and the hub
+// Global project is never looked up.
+func TestCheckHubAvailability_ClearedPathKeepsEnvProject(t *testing.T) {
+	const envProjectID = "env-project-id"
+	for _, hubHasGlobal := range []bool{true, false} {
+		t.Run(fmt.Sprintf("hub Global %v", hubHasGlobal), func(t *testing.T) {
+			globalLookups := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/healthz":
+					_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+				case "/api/v1/projects":
+					var projects []hubclient.Project
+					if r.URL.Query().Get("slug") == "global" {
+						globalLookups++
+						if hubHasGlobal {
+							projects = append(projects, hubclient.Project{ID: "hub-global", Name: "Global", Slug: "global"})
+						}
+					}
+					_ = json.NewEncoder(w).Encode(map[string]interface{}{"projects": projects, "totalCount": len(projects)})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			setupFlagPrecedenceHome(t, server.URL, "", envProjectID)
+			setProjectFlagForTest(t, "other-project")
+
+			hubCtx, err := CheckHubAvailabilityWithOptions("", true)
+			require.NoError(t, err)
+			require.NotNil(t, hubCtx)
+			assert.Equal(t, envProjectID, hubCtx.ProjectID)
+			assert.Zero(t, globalLookups, "no Global project lookup expected")
+		})
+	}
+}
+
+// TestSkillResolverHubOptions pins the create command's skill-resolver
+// hub context: only a flag-named, non-empty path is an explicit target.
+func TestSkillResolverHubOptions(t *testing.T) {
+	cases := []struct {
+		name, flag, path string
+		want             bool
+	}{
+		{name: "-g global", flag: "global", path: "global", want: true},
+		{name: "-g dir", flag: "/some/project", path: "/some/project", want: true},
+		{name: "no flag", flag: "", path: "", want: false},
+		{name: "flag, cleared path", flag: "other-project", path: "", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setProjectFlagForTest(t, tc.flag)
+			opts := skillResolverHubOptions(tc.path)
+			assert.Equal(t, tc.want, opts.ExplicitProject)
+			assert.True(t, opts.SkipSync)
+			assert.True(t, opts.AutoConfirm)
+		})
+	}
+}
+
+// TestTemplateSyncHubContext covers template sync after hub link: the
+// context targets the just-linked project, and with --global the settings
+// keep the global project's own ID over SCION_PROJECT_ID.
+func TestTemplateSyncHubContext(t *testing.T) {
+	const (
+		envProjectID  = "env-project-id"
+		globalLocalID = "global-local-id"
+		linkedID      = "linked-project-id"
+	)
+	setupFlagPrecedenceHome(t, "http://hub.invalid", globalLocalID, envProjectID)
+	setProjectFlagForTest(t, "global")
+
+	globalDir, err := config.GetResolvedProjectDir("global")
+	require.NoError(t, err)
+
+	hubCtx, err := templateSyncHubContext(globalDir, "http://hub.invalid", linkedID)
+	require.NoError(t, err)
+	require.NotNil(t, hubCtx.Client)
+	assert.Equal(t, linkedID, hubCtx.ProjectID)
+	assert.Equal(t, globalDir, hubCtx.ProjectPath)
+	require.NotNil(t, hubCtx.Settings)
+	assert.Equal(t, globalLocalID, hubCtx.Settings.ProjectID)
+
+	id, err := GetProjectID(hubCtx)
+	require.NoError(t, err)
+	assert.Equal(t, linkedID, id)
+}

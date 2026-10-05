@@ -253,6 +253,14 @@ func explicitProjectTarget() bool {
 	return projectPath != "" || globalMode
 }
 
+// explicitProjectTargetFor reports whether path is a project the user named
+// with a flag. An empty path is never explicit: a caller that clears the
+// path (a cross-project message send) resolves its own project from the
+// environment.
+func explicitProjectTargetFor(path string) bool {
+	return path != "" && explicitProjectTarget()
+}
+
 // loadSettingsForTarget loads settings for resolvedPath. When the user named
 // the project with a flag, SCION_PROJECT_ID in the environment does not
 // override that project's own ID (ptone/scion#3123).
@@ -306,7 +314,7 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 		SkipSync:         skipSync,
 		TargetAgent:      targetAgent,
 		ExcludedAgents:   excludedAgents,
-		ExplicitProject:  explicitProjectTarget(),
+		ExplicitProject:  explicitProjectTargetFor(projectPath),
 	}
 
 	hubCtx, err := hubsync.EnsureHubReady(projectPath, opts)

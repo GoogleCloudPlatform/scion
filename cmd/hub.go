@@ -2583,6 +2583,27 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// templateSyncHubContext builds the hub context that template sync uses
+// after hub link. It targets the just-linked projectID, whatever the
+// environment or flags say.
+func templateSyncHubContext(projectPath, endpoint, projectID string) (*HubContext, error) {
+	settings, err := loadSettingsForTarget(projectPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load settings for template sync: %w", err)
+	}
+	client, err := getHubClient(settings)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Hub client for template sync: %w", err)
+	}
+	return &HubContext{
+		Client:      client,
+		Endpoint:    endpoint,
+		ProjectPath: projectPath,
+		ProjectID:   projectID,
+		Settings:    settings,
+	}, nil
+}
+
 // offerTemplateSyncOnLink detects local project templates and prompts
 // the user to sync them to the Hub during project linking.
 func offerTemplateSyncOnLink(projectPath, endpoint, projectID string) {
@@ -2610,24 +2631,10 @@ func offerTemplateSyncOnLink(projectPath, endpoint, projectID string) {
 		return
 	}
 
-	// Create a HubContext for syncing
-	settings, err := loadSettingsForTarget(projectPath)
+	hubCtx, err := templateSyncHubContext(projectPath, endpoint, projectID)
 	if err != nil {
-		fmt.Printf("Warning: failed to load settings for template sync: %v\n", err)
+		fmt.Printf("Warning: %v\n", err)
 		return
-	}
-
-	client, err := getHubClient(settings)
-	if err != nil {
-		fmt.Printf("Warning: failed to create Hub client for template sync: %v\n", err)
-		return
-	}
-
-	hubCtx := &HubContext{
-		Client:      client,
-		Endpoint:    endpoint,
-		ProjectPath: projectPath,
-		Settings:    settings,
 	}
 
 	fmt.Println("\nSyncing project templates to Hub...")
