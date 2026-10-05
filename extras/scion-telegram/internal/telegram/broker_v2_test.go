@@ -1164,7 +1164,9 @@ func TestV2_Publish_DirectChatID(t *testing.T) {
 
 func TestV2_Publish_ConversationContextRouting(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
-	b := newTestBrokerV2(t, tgSrv)
+	hub := newFakeHubClient()
+	hub.projects = []ProjectOption{{ID: "proj-1", Slug: "alpha"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
 
 	ctx := context.Background()
 	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
@@ -1481,7 +1483,9 @@ func TestV2_HandleCallback_ExpiredRequest(t *testing.T) {
 
 func TestV2_Publish_StateChange_RoutedToDM(t *testing.T) {
 	tgSrv := newFakeTGServerV2(t)
-	b := newTestBrokerV2(t, tgSrv)
+	hub := newFakeHubClient()
+	hub.projects = []ProjectOption{{ID: "proj-1", Slug: "alpha"}}
+	b := newTestBrokerV2WithHub(t, tgSrv, hub)
 
 	ctx := context.Background()
 	require.NoError(t, b.store.SaveUserMapping(ctx, &TelegramUserMapping{
@@ -3339,9 +3343,12 @@ func TestResolveRecipientChats(t *testing.T) {
 		LastMessageAt:  time.Now(),
 	}))
 
+	hub := newFakeHubClient()
+	hub.projects = []ProjectOption{{ID: "proj-1", Slug: "alpha"}}
 	b := &TelegramBrokerV2{
-		log:   slog.New(slog.NewTextHandler(os.Stdout, nil)),
-		store: store,
+		log:       slog.New(slog.NewTextHandler(os.Stdout, nil)),
+		store:     store,
+		hubClient: hub,
 	}
 
 	t.Run("email lookup succeeds", func(t *testing.T) {

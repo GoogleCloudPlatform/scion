@@ -161,7 +161,7 @@ func TestCommandHandler_Notifications_StaleLinkShowsReregisterText(t *testing.T)
 	h, tgSrv, hub, store := newTestCommandHandler(t)
 	saveTestGroupLink(t, store, -100, "proj-1", "my-project", "")
 	linkTestUser(t, store, 42, "alice@example.com")
-	hub.listAgentsErr = staleLinkError("on-behalf-of principal not found")
+	hub.listUserProjectsErr = staleLinkError("on-behalf-of principal not found")
 
 	h.HandleCommand(&TGMessage{Text: "/notifications", Chat: TGChat{ID: 42, Type: "private"}, From: &TGUser{ID: 42}})
 
@@ -175,6 +175,7 @@ func TestCommandHandler_Notifications_DeniedProjectNotShownFromCache(t *testing.
 	saveTestGroupLink(t, store, -100, "proj-1", "my-project", "")
 	saveStaleAgentCache(t, store, "proj-1", "coder")
 	linkTestUser(t, store, 42, "alice@example.com")
+	hub.projects = []ProjectOption{{ID: "proj-1", Slug: "my-project"}}
 	hub.listAgentsErr = forbiddenListAgents()
 
 	h.HandleCommand(&TGMessage{Text: "/notifications", Chat: TGChat{ID: 42, Type: "private"}, From: &TGUser{ID: 42}})

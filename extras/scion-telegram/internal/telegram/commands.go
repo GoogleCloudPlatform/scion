@@ -616,11 +616,29 @@ func (h *CommandHandler) handleNotifications(msg *TGMessage) {
 		return
 	}
 
-	links, err := h.store.GetAllGroupLinks(ctx)
+	// Only projects the linked user can read are offered.
+	userProjects, err := h.hubClient.ListProjectsForUser(ctx, principal)
+	if err != nil {
+		h.log.Warn("Failed to list projects for linked user", "error", err)
+		h.reply(chatID, hubErrorText(err, mapping.ScionEmail, "", setupProjectsFailedText))
+		return
+	}
+	readable := make(map[string]bool, len(userProjects))
+	for _, p := range userProjects {
+		readable[p.ID] = true
+	}
+
+	allLinks, err := h.store.GetAllGroupLinks(ctx)
 	if err != nil {
 		h.log.Error("Failed to get group links", "error", err)
 		h.reply(chatID, "Something went wrong. Please try again.")
 		return
+	}
+	var links []*GroupLink
+	for _, link := range allLinks {
+		if readable[link.ProjectID] {
+			links = append(links, link)
+		}
 	}
 
 	if len(links) == 0 {
@@ -656,7 +674,7 @@ func (h *CommandHandler) handleNotifications(msg *TGMessage) {
 				h.reply(chatID, staleLinkText)
 				return
 			}
-			// Projects the user may not read are left out of the list.
+			// A project whose agents the user may not list is left out.
 			h.log.Warn("Failed to list agents for notification prefs", "project_id", link.ProjectID, "error", agentErr)
 			continue
 		}

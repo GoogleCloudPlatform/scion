@@ -582,6 +582,7 @@ func TestCommandHandler_GroupCommands_UnlinkedSenderGetsRegisterHint(t *testing.
 func TestCommandHandler_Notifications_SendsLinkedUser(t *testing.T) {
 	h, tgSrv, hub, store := newTestCommandHandler(t)
 	saveTestGroupLink(t, store, -100, "proj-1", "my-project", "")
+	hub.projects = []ProjectOption{{ID: "proj-1", Slug: "my-project"}}
 	hub.agents["proj-1"] = []AgentInfo{{Slug: "coder"}}
 	principal := linkTestUser(t, store, 42, "alice@example.com")
 
@@ -590,6 +591,7 @@ func TestCommandHandler_Notifications_SendsLinkedUser(t *testing.T) {
 	calls := hub.agentCalls()
 	require.Len(t, calls, 1)
 	assert.Equal(t, principal, calls[0].OnBehalfOf)
+	assert.Equal(t, []string{principal}, hub.listUserProjectsCalls)
 	sent := tgSrv.getSentMessages()
 	require.Len(t, sent, 1)
 	assert.Contains(t, sent[0].Text, "toggle notifications")

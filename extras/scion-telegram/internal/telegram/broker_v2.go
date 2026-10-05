@@ -104,7 +104,21 @@ type TelegramBrokerV2 struct {
 	errorCooldown           map[string]time.Time // key: "chatID:threadID:errorType" → last sent time
 	errorCooldownMu         sync.Mutex
 	errorCooldownCheckCount int
+
+	// userProjects caches, per linked-user principal, the project IDs that
+	// user can read. Used to scope notification DMs.
+	userProjects   map[string]userProjectsEntry
+	userProjectsMu sync.Mutex
 }
+
+type userProjectsEntry struct {
+	ids       map[string]bool
+	fetchedAt time.Time
+}
+
+// userProjectsCacheTTL bounds how long a user's readable-project set is
+// reused for notification DMs.
+const userProjectsCacheTTL = time.Minute
 
 // NewV2 creates a new TelegramBrokerV2 with the given logger.
 func NewV2(log *slog.Logger) *TelegramBrokerV2 {
@@ -988,6 +1002,11 @@ func (b *TelegramBrokerV2) resolveRecipientChats(ctx context.Context, recipient,
 		return nil
 	}
 
+	if !b.recipientCanReadProject(ctx, mapping, projectID) {
+		b.log.Debug("Recipient cannot read project, not routing to their chat", "project_id", projectID)
+		return nil
+	}
+
 	cc, err := b.store.GetConversationContext(ctx, mapping.TelegramUserID, projectID, agentSlug)
 	if err != nil || cc == nil {
 		return nil
@@ -1129,6 +1148,11 @@ func (b *TelegramBrokerV2) publishStateChangeDM(ctx context.Context, api *Telegr
 	}
 	if mapping == nil {
 		b.log.Debug("No user mapping for state-change recipient, dropping", "recipient", recipientVal)
+		return nil
+	}
+
+	if !b.recipientCanReadProject(ctx, mapping, projectID) {
+		b.log.Debug("State-change recipient cannot read project, dropping DM", "project_id", projectID)
 		return nil
 	}
 
@@ -2621,6 +2645,46 @@ func (b *TelegramBrokerV2) handleCallbackQuery(ctx context.Context, cb *Callback
 	}
 
 	b.deliverInbound(topic, msg)
+}
+
+// --- Recipient project access ---
+
+// recipientCanReadProject reports whether the linked user in mapping can
+// read projectID, listing that user's projects as that user. Results are
+// cached briefly per user. It returns false when the user cannot be acted
+// as or the list cannot be fetched, so notifications are not sent for
+// projects the user may not be able to read.
+func (b *TelegramBrokerV2) recipientCanReadProject(ctx context.Context, mapping *TelegramUserMapping, projectID string) bool {
+	principal := linkedUserPrincipal(mapping)
+	if principal == "" || projectID == "" || b.hubClient == nil {
+		return false
+	}
+
+	b.userProjectsMu.Lock()
+	entry, ok := b.userProjects[principal]
+	b.userProjectsMu.Unlock()
+	if ok && time.Since(entry.fetchedAt) < userProjectsCacheTTL {
+		return entry.ids[projectID]
+	}
+
+	projects, err := b.hubClient.ListProjectsForUser(ctx, principal)
+	if err != nil {
+		b.log.Warn("Failed to list projects for notification recipient", "error", err)
+		return false
+	}
+	ids := make(map[string]bool, len(projects))
+	for _, p := range projects {
+		ids[p.ID] = true
+	}
+
+	b.userProjectsMu.Lock()
+	if b.userProjects == nil {
+		b.userProjects = make(map[string]userProjectsEntry)
+	}
+	b.userProjects[principal] = userProjectsEntry{ids: ids, fetchedAt: time.Now()}
+	b.userProjectsMu.Unlock()
+
+	return ids[projectID]
 }
 
 // --- Agent cache ---
