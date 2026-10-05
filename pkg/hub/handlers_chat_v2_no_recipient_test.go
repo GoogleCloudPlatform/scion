@@ -390,3 +390,187 @@ func TestNoRecipient_ReplyLookupErrorKeepsPreviousState(t *testing.T) {
 	resp, m := replySend(t, srv, s, topicID, "re", api.NewUUID())
 	requireDispatchedNotNoRecipient(t, "reply lookup error", resp, m)
 }
+
+// errMembersStore fails project member listing, or GetUser for one user.
+type errMembersStore struct {
+	store.Store
+	failList     bool
+	failGetUser  string
+	notFoundUser string
+}
+
+func (e *errMembersStore) ListProjectMembers(ctx context.Context, projectID string) ([]*store.ProjectMembership, error) {
+	if e.failList {
+		return nil, errors.New("list members: connection reset by peer")
+	}
+	return e.Store.ListProjectMembers(ctx, projectID)
+}
+
+func (e *errMembersStore) GetUser(ctx context.Context, id string) (*store.User, error) {
+	if id == e.failGetUser {
+		return nil, errors.New("get user: connection reset by peer")
+	}
+	if id == e.notFoundUser {
+		return nil, store.ErrNotFound
+	}
+	return e.Store.GetUser(ctx, id)
+}
+
+// A failed member lookup means a mention of a real member cannot be ruled
+// out: keep dispatched rather than a terminal no_recipient.
+func TestNoRecipient_MemberLookupErrorKeepsDispatched(t *testing.T) {
+	for _, tc := range []string{"list members fails", "get user fails"} {
+		t.Run(tc, func(t *testing.T) {
+			srv, s, topicID, _, _, projectID := noRecipientSetupProject(t)
+			alice := addHumanMember(t, s, projectID, "alice@example.com", "Alice")
+			es := &errMembersStore{Store: s}
+			if tc == "list members fails" {
+				es.failList = true
+			} else {
+				es.failGetUser = alice.ID
+			}
+			srv.store = es
+
+			_, resp, m := unreachableSend(t, srv, s, topicID, "@alice can you look")
+			requireDispatchedNotNoRecipient(t, tc, resp, m)
+		})
+	}
+}
+
+// failNthGetTopicStore fails exactly the nth GetTopic call.
+type failNthGetTopicStore struct {
+	WebChatStore
+	n     int
+	calls int
+}
+
+func (f *failNthGetTopicStore) GetTopic(ctx context.Context, id string) (*WebChatTopic, error) {
+	f.calls++
+	if f.calls == f.n {
+		return nil, errors.New("get topic: connection reset by peer")
+	}
+	return f.WebChatStore.GetTopic(ctx, id)
+}
+
+// A failed topic lookup while resolving the default agent (the second
+// GetTopic of a send; the first authorizes it) keeps dispatched.
+func TestNoRecipient_TopicLookupErrorKeepsDispatched(t *testing.T) {
+	srv, s, topicID, _, _ := noRecipientSetup(t)
+	srv.mu.RLock()
+	wcs := srv.webChatStore
+	srv.mu.RUnlock()
+	srv.SetWebChatStore(&failNthGetTopicStore{WebChatStore: wcs, n: 2})
+
+	code, resp, m := unreachableSend(t, srv, s, topicID, "thanks")
+	if code != 201 {
+		t.Fatalf("expected 201, got %d (body=%v)", code, resp)
+	}
+	requireDispatchedNotNoRecipient(t, "topic lookup error", resp, m)
+}
+
+// seedRefMessage persists a message in threadID with the given sender
+// fields, as a quote-reply target.
+func seedRefMessage(t *testing.T, s store.Store, projectID, threadID, sender, senderID string) string {
+	t.Helper()
+	id := api.NewUUID()
+	if err := s.CreateMessage(t.Context(), &store.Message{
+		ID: id, ProjectID: projectID, Sender: sender, SenderID: senderID,
+		Recipient: "thread:" + threadID, Msg: "quoted", Type: "chat",
+		ThreadID: threadID, CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seedRefMessage: %v", err)
+	}
+	return id
+}
+
+// Only a quote-reply to the sender's own user message in this thread is
+// unaddressed. Any other in-thread reference keeps the previous state; a
+// reference to another thread is ignored and mentions decide.
+func TestNoRecipient_QuoteReplyRefKinds(t *testing.T) {
+	srv, s, wcs, proj, db := setupSendTest(t)
+	d := &brokerMockDispatcher{}
+	srv.SetDispatcher(d)
+	ctx := t.Context()
+	newTopic := func(name string) string {
+		id := tid("norcpt-ref-" + name)
+		if err := wcs.CreateTopic(ctx, WebChatTopic{ID: id, ProjectID: proj.ID, Name: name,
+			CreatedBy: "dev", CreatedAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+		setTopicConversationID(t, db, s, id, proj.ID)
+		return id
+	}
+	topicID := newTopic("main")
+	otherTopic := newTopic("other")
+	addHumanMember(t, s, proj.ID, "alice@example.com", "Alice")
+
+	// An agent from another project: the reply-to agent override does not
+	// apply, so the reply reaches this path.
+	other := &store.Project{ID: tid("norcpt-other-proj"), Name: "other", Slug: "norcpt-other",
+		Created: time.Now(), Updated: time.Now()}
+	if err := s.CreateProject(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	foreign := &store.Agent{ID: tid("norcpt-foreign"), ProjectID: other.ID, Name: "Foreign",
+		Slug: "norcpt-foreign", Phase: "running", OwnerID: DevUserID, CreatedBy: DevUserID}
+	if err := s.CreateAgent(ctx, foreign); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name    string
+		ref     string
+		content string
+		want    string
+	}{
+		{"agent ref", seedRefMessage(t, s, proj.ID, topicID, "agent:"+foreign.Slug, foreign.ID),
+			"ok", store.MessageDispatchDispatched},
+		{"user ref without user ID", seedRefMessage(t, s, proj.ID, topicID, "user:telegram-bob", ""),
+			"ok", store.MessageDispatchDispatched},
+		{"other sender kind", seedRefMessage(t, s, proj.ID, topicID, "channel:telegram", DevUserID),
+			"ok", store.MessageDispatchDispatched},
+		{"own user ref", seedRefMessage(t, s, proj.ID, topicID, "user:dev@localhost", DevUserID),
+			"ok", store.MessageDispatchNoRecipient},
+		{"another person in another thread", seedRefMessage(t, s, proj.ID, otherTopic, "user:x@example.com", api.NewUUID()),
+			"ok", store.MessageDispatchNoRecipient},
+		{"own ref in another thread", seedRefMessage(t, s, proj.ID, otherTopic, "user:dev@localhost", DevUserID),
+			"ok", store.MessageDispatchNoRecipient},
+		{"own ref in another thread, human mention", seedRefMessage(t, s, proj.ID, otherTopic, "user:dev@localhost", DevUserID),
+			"ok @alice", store.MessageDispatchDispatched},
+	}
+	for _, c := range cases {
+		resp, m := replySend(t, srv, s, topicID, c.content, c.ref)
+		if m == nil || m.DispatchState != c.want {
+			t.Errorf("%s: expected row %q, got %+v", c.name, c.want, m)
+			continue
+		}
+		if c.want == store.MessageDispatchNoRecipient && resp["dispatchState"] != c.want {
+			t.Errorf("%s: expected response %q, got %v", c.name, c.want, resp["dispatchState"])
+		}
+		if c.want == store.MessageDispatchDispatched {
+			if v, ok := resp["dispatchState"]; ok && v != c.want {
+				t.Errorf("%s: expected no no_recipient in response, got %v", c.name, v)
+			}
+		}
+	}
+	if n := len(d.getMessages()); n != 0 {
+		t.Fatalf("expected no agent dispatch, got %d", n)
+	}
+}
+
+// A member whose user record is gone cannot be addressed: it is skipped,
+// not treated as a lookup failure, so an unresolved mention stays
+// no_recipient.
+func TestNoRecipient_MissingMemberUserSkipped(t *testing.T) {
+	srv, s, topicID, _, _, projectID := noRecipientSetupProject(t)
+	gone := addHumanMember(t, s, projectID, "gone@example.com", "Gone")
+	srv.store = &errMembersStore{Store: s, notFoundUser: gone.ID}
+
+	_, resp, m := unreachableSend(t, srv, s, topicID, "@nobody hello")
+	if m == nil || m.DispatchState != store.MessageDispatchNoRecipient {
+		t.Fatalf("expected row no_recipient, got %+v", m)
+	}
+	if resp["dispatchState"] != store.MessageDispatchNoRecipient {
+		t.Fatalf("expected response no_recipient, got %v", resp["dispatchState"])
+	}
+}
