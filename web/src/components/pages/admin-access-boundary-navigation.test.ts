@@ -29,7 +29,12 @@ beforeAll(async () => {
   await import('./admin-access-boundary-detail.js');
 });
 
+// Listener removals registered by mount(); drained after every test so a
+// failed wait or assertion cannot leave a nav-click listener on document.
+const cleanups: Array<() => void> = [];
+
 afterEach(() => {
+  for (const cleanup of cleanups.splice(0)) cleanup();
   document.body.replaceChildren();
   window.history.replaceState({}, '', '/');
   list.mockReset();
@@ -52,17 +57,15 @@ async function mount(tag: string, ready: (el: Page) => boolean) {
     paths.push(event.detail.path);
   };
   document.addEventListener('nav-click', onNav);
+  const stop = () => document.removeEventListener('nav-click', onNav);
+  cleanups.push(stop);
   const el = document.createElement(tag) as Page;
   document.body.appendChild(el);
   await vi.waitFor(async () => {
     await el.updateComplete;
     expect(ready(el)).toBe(true);
   });
-  return {
-    el,
-    paths,
-    stop: () => document.removeEventListener('nav-click', onNav),
-  };
+  return { el, paths, stop };
 }
 
 function button(el: Page, label: string): HTMLElement {
