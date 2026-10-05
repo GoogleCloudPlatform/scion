@@ -23,11 +23,14 @@ vi.mock('../confirm-dialog.js', () => ({
 
 const {
   confirmWake,
+  WAKE_CONFIRM_MAX_MS,
   errorMessageFromBody,
+  isGatewayDrop,
   isSendInProgressBody,
   jsonResponse,
   saveDraftForConversation,
   wakeConfirmMessage,
+  wakeConfirmBudgetMs,
   wakeOfferFromErrorBody,
 } = await import('./chat-wake.js');
 
@@ -114,5 +117,37 @@ describe('jsonResponse', () => {
     expect(res.status).toBe(409);
     expect(res.ok).toBe(false);
     await expect(res.json()).resolves.toEqual({ error: { code: 'conflict' } });
+  });
+});
+
+describe('wakeConfirmBudgetMs', () => {
+  it("is the hub's budget for the recipients plus a margin", () => {
+    // hub: 90s + n * 30s + 30s; margin 30s
+    expect(wakeConfirmBudgetMs(1)).toBe(180_000);
+    expect(wakeConfirmBudgetMs(2)).toBe(210_000);
+    expect(wakeConfirmBudgetMs(0)).toBe(wakeConfirmBudgetMs(1));
+  });
+
+  it('stays below the 5 minute idempotency TTL', () => {
+    expect(WAKE_CONFIRM_MAX_MS).toBeLessThan(5 * 60_000);
+    expect(wakeConfirmBudgetMs(20)).toBe(WAKE_CONFIRM_MAX_MS);
+  });
+});
+
+describe('isGatewayDrop', () => {
+  it('treats a gateway status without a hub error as a drop', () => {
+    expect(isGatewayDrop(502, null)).toBe(true);
+    expect(isGatewayDrop(504, { message: 'gateway timeout' })).toBe(true);
+    expect(isGatewayDrop(503, { error: 'plain' })).toBe(true);
+  });
+
+  it("returns the hub's own structured answers", () => {
+    expect(isGatewayDrop(502, { error: { code: 'runtime_error', message: 'x' } })).toBe(false);
+    expect(isGatewayDrop(503, { error: { code: 'unavailable' } })).toBe(false);
+  });
+
+  it('ignores other statuses', () => {
+    expect(isGatewayDrop(500, null)).toBe(false);
+    expect(isGatewayDrop(409, null)).toBe(false);
   });
 });

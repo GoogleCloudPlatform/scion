@@ -52,13 +52,14 @@ import type { ChatAgentMember } from './chat-members.js';
 import {
   WAKING_DISPATCH_STATE,
   confirmWake,
-  WAKE_CONFIRM_BUDGET_MS,
   WAKE_OUTCOME_UNKNOWN_MESSAGE,
   WAKE_RETRY_DELAY_MS,
   errorMessageFromBody,
+  isGatewayDrop,
   isSendInProgressBody,
   jsonResponse,
   saveDraftForConversation,
+  wakeConfirmBudgetMs,
   wakeOfferFromErrorBody,
   type WakeOffer,
 } from './chat-wake.js';
@@ -519,8 +520,8 @@ export class ScionChatThread extends LitElement {
   private _sendingConversations = new Set<string>();
   /** Delay between wake-send confirmation retries; tests shorten it. */
   private wakeRetryDelayMs = WAKE_RETRY_DELAY_MS;
-  /** How long a wake send keeps confirming its outcome; tests shorten it. */
-  private wakeConfirmBudgetMs = WAKE_CONFIRM_BUDGET_MS;
+  /** Overrides wakeConfirmBudgetMs(recipients) when set; tests shorten it. */
+  private wakeConfirmBudgetOverrideMs: number | null = null;
   @state() private pinnedToBottom = true;
   /** Whether the user expanded a one-line send error to its full text. */
   @state() private sendErrorExpanded = false;
@@ -2465,9 +2466,9 @@ export class ScionChatThread extends LitElement {
     // minutes, for a wake). Its outcome must then neither touch the open
     // conversation's view nor land its draft in that conversation's composer.
     const switchedAway = (): boolean => sendConversationKey !== this.conversationKey;
-    const failSend = (message: string): void => {
+    const failSend = (message: string, outcomeUnknown = false): void => {
       if (switchedAway()) {
-        this.returnDraftElsewhere(sendConversationKey, text);
+        this.returnDraftElsewhere(sendConversationKey, text, outcomeUnknown);
         return;
       }
       this.sendError = message;
@@ -2524,7 +2525,8 @@ export class ScionChatThread extends LitElement {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
         },
-        wake
+        wake,
+        this.wakeConfirmBudgetOverrideMs ?? wakeConfirmBudgetMs(1 + new Set(mentions ?? []).size)
       );
 
       if (!res.ok) {
@@ -2672,13 +2674,11 @@ export class ScionChatThread extends LitElement {
       if (!switchedAway()) this.composerReplyTo = savedReplyTo;
       // For a wake send, postChatSend already retried with the same
       // idempotency key until the budget ran out: the outcome is unknown.
-      failSend(
-        wake
-          ? WAKE_OUTCOME_UNKNOWN_MESSAGE
-          : err instanceof Error
-            ? err.message
-            : 'Failed to send message'
-      );
+      if (wake) {
+        failSend(WAKE_OUTCOME_UNKNOWN_MESSAGE, true);
+      } else {
+        failSend(err instanceof Error ? err.message : 'Failed to send message');
+      }
     } finally {
       this._sendingConversations.delete(inFlightKey);
       if (wake && this.wakingConversationKey === inFlightKey) this.wakingConversationKey = '';
@@ -2695,21 +2695,39 @@ export class ScionChatThread extends LitElement {
    * the identical request (same idempotency key): the hub answers with the
    * original message once that send has finished (200), sends it now if it
    * never arrived (201), or 409 send_in_progress while it is still running,
-   * in which case this waits and asks again. A message is therefore
-   * delivered at most once. Throws when the outcome stays unknown for
-   * WAKE_CONFIRM_BUDGET_MS.
+   * in which case this waits and asks again. A gateway 502/503/504 without
+   * a structured hub error (the proxy lost the hub connection) is retried
+   * the same way; the hub's own 502/503 answers are returned.
+   *
+   * Limit: the hub's idempotency cache is per hub process with a 5 minute
+   * TTL, so this holds the message to at most once per hub process within
+   * the TTL. A retry reaching another hub replica, or arriving after a hub
+   * restart, is not recognised and sends again. budgetMs stays below the
+   * TTL (wakeConfirmBudgetMs). Throws when the outcome stays unknown for
+   * budgetMs.
    */
-  private async postChatSend(url: string, init: RequestInit, wake: boolean): Promise<Response> {
+  private async postChatSend(
+    url: string,
+    init: RequestInit,
+    wake: boolean,
+    budgetMs: number
+  ): Promise<Response> {
     if (!wake) return apiFetch(url, init);
-    const giveUpAt = Date.now() + this.wakeConfirmBudgetMs;
+    const giveUpAt = Date.now() + budgetMs;
     for (;;) {
       let lastError: unknown = null;
       try {
         const res = await apiFetch(url, init);
-        if (res.status !== 409) return res;
-        const data: unknown = await res.json().catch(() => null);
-        // Any other conflict is a real answer: hand it back intact.
-        if (!isSendInProgressBody(data)) return jsonResponse(data, 409);
+        if (res.status === 409) {
+          const data: unknown = await res.json().catch(() => null);
+          // Any other conflict is a real answer: hand it back intact.
+          if (!isSendInProgressBody(data)) return jsonResponse(data, 409);
+        } else if (res.status >= 502 && res.status <= 504) {
+          const data: unknown = await res.json().catch(() => null);
+          if (!isGatewayDrop(res.status, data)) return jsonResponse(data, res.status);
+        } else {
+          return res;
+        }
       } catch (err) {
         lastError = err;
       }
@@ -2755,8 +2773,23 @@ export class ScionChatThread extends LitElement {
    * The user switched conversations while a wake send was pending: keep the
    * draft with the conversation it was written in, not the open composer.
    */
-  private returnDraftElsewhere(conversationKey: string, text: string): void {
+  private returnDraftElsewhere(
+    conversationKey: string,
+    text: string,
+    outcomeUnknown = false
+  ): void {
     const saved = saveDraftForConversation(conversationKey, text);
+    if (outcomeUnknown) {
+      // Not "not sent": a wake send whose outcome could not be confirmed
+      // may well have been delivered.
+      showToast(
+        saved
+          ? 'Could not confirm whether the message was delivered. It was kept as a draft in its conversation; check there before sending it again.'
+          : WAKE_OUTCOME_UNKNOWN_MESSAGE,
+        'warning'
+      );
+      return;
+    }
     showToast(
       saved
         ? 'Message not sent: you switched conversations. It was kept as a draft there.'

@@ -33,12 +33,31 @@ import { chatDraftStorageKey } from '../../../client/chat-drafts.js';
 /** Client-only dispatch state shown on the optimistic bubble while waking. */
 export const WAKING_DISPATCH_STATE = 'waking';
 
+// The hub's wake budget (handlers_chat_v2.go chatWakeWriteBudget): a 90s
+// resume, then 30s per recipient (primary plus each @mention), plus 30s.
+const HUB_WAKE_RESUME_MS = 90_000;
+const HUB_DELIVERY_PER_RECIPIENT_MS = 30_000;
+const HUB_WAKE_SLACK_MS = 30_000;
+/** Extra time past the hub's budget before giving up on confirmation. */
+const WAKE_CONFIRM_MARGIN_MS = 30_000;
 /**
- * How long a wake send keeps confirming its outcome after a dropped
- * connection. Comfortably past the hub's own wake budget (90s resume plus
- * 30s per recipient plus slack), so the hub has answered by then.
+ * Upper bound for confirmation: the hub forgets idempotency keys after 5
+ * minutes, after which a retry would no longer be recognised and could send
+ * again, so confirmation must end safely before that.
  */
-export const WAKE_CONFIRM_BUDGET_MS = 240_000;
+export const WAKE_CONFIRM_MAX_MS = 5 * 60_000 - 30_000;
+
+/**
+ * How long a wake send to `recipients` agents (primary plus @mentions)
+ * keeps confirming its outcome after a dropped connection: the hub's wake
+ * budget for that many recipients plus a margin, capped below the hub's
+ * idempotency TTL.
+ */
+export function wakeConfirmBudgetMs(recipients: number): number {
+  const n = Math.max(1, Math.floor(recipients));
+  const hubBudget = HUB_WAKE_RESUME_MS + n * HUB_DELIVERY_PER_RECIPIENT_MS + HUB_WAKE_SLACK_MS;
+  return Math.min(hubBudget + WAKE_CONFIRM_MARGIN_MS, WAKE_CONFIRM_MAX_MS);
+}
 
 /** Delay between wake-send confirmation retries. */
 export const WAKE_RETRY_DELAY_MS = 3_000;
@@ -121,6 +140,23 @@ export function saveDraftForConversation(conversationKey: string, text: string):
     // localStorage may throw in private browsing mode.
     return false;
   }
+}
+
+/** Gateway statuses a proxy answers when the hub connection drops. */
+const GATEWAY_STATUSES = new Set([502, 503, 504]);
+
+/**
+ * Whether a response with this status and parsed body is a gateway drop
+ * (no structured hub error) rather than the hub's own answer. The hub also
+ * uses 502/503 for real failures (a wake that failed, dispatch not
+ * available), always with a JSON `error.code`; those are answers and must
+ * not be retried.
+ */
+export function isGatewayDrop(status: number, data: unknown): boolean {
+  if (!GATEWAY_STATUSES.has(status)) return false;
+  if (!data || typeof data !== 'object') return true;
+  const err = (data as { error?: unknown }).error;
+  return !(err && typeof err === 'object' && typeof (err as { code?: unknown }).code === 'string');
 }
 
 /** Whether a parsed 409 body says a send with the same key is still running. */

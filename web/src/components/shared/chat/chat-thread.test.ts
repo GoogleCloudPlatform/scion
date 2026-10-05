@@ -89,6 +89,7 @@ type Message = import('../../../shared/types.js').Message;
 type ChatAgentMember = import('./chat-members.js').ChatAgentMember;
 
 import { chatRecentFiles } from '../../../client/chat-recent-files.js';
+import { wakeConfirmBudgetMs } from './chat-wake.js';
 import { agentGraphHref, terminalHref } from '../../../client/open-terminal.js';
 import { setPreferredTimeZone } from '../../../utils/time.js';
 
@@ -660,7 +661,10 @@ describe('scion-chat-thread wake on send', () => {
     resolveWake({
       ok: false,
       status: 502,
-      json: () => Promise.resolve({ error: { message: 'Failed to wake agent: boom' } }),
+      json: () =>
+        Promise.resolve({
+          error: { code: 'runtime_error', message: 'Failed to wake agent: boom' },
+        }),
     } as unknown as Response);
     await done;
     await el.updateComplete;
@@ -673,9 +677,9 @@ describe('scion-chat-thread wake on send', () => {
   async function mountFastRetry(): Promise<ScionChatThread> {
     const el = await mount();
     el.currentUserId = 'user-me';
-    const t = el as unknown as { wakeRetryDelayMs: number; wakeConfirmBudgetMs: number };
+    const t = el as unknown as { wakeRetryDelayMs: number; wakeConfirmBudgetOverrideMs: number };
     t.wakeRetryDelayMs = 1;
-    t.wakeConfirmBudgetMs = 200;
+    t.wakeConfirmBudgetOverrideMs = 200;
     return el;
   }
 
@@ -780,6 +784,253 @@ describe('scion-chat-thread wake on send', () => {
     expect(localStorage.getItem(`scion-chat-draft-${CONVERSATION_KEY}`)).toBeNull();
     expect(showToastMock).not.toHaveBeenCalled();
     expect(internals.messageMap.has('landed-2')).toBe(false);
+  });
+
+  /** Lets a pending POST be answered later. */
+  function holdNextPost(): { answer: (r: Response) => void; drop: (e: Error) => void } {
+    const ctl = {} as { answer: (r: Response) => void; drop: (e: Error) => void };
+    apiFetch.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve, reject) => {
+          ctl.answer = resolve;
+          ctl.drop = reject;
+        })
+    );
+    return ctl;
+  }
+
+  async function switchConversation(el: ScionChatThread): Promise<void> {
+    el.conversationKey = 'topic-2';
+    await el.updateComplete;
+  }
+
+  it('retries a gateway 502 without a hub error and confirms the send', async () => {
+    const el = await mountFastRetry();
+    const internals = el as unknown as Internals;
+    showConfirmMock.mockResolvedValueOnce(true);
+    apiFetch.mockResolvedValueOnce(wakeOfferResponse());
+    apiFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 502,
+      json: () => Promise.reject(new SyntaxError('not json')),
+    } as unknown as Response);
+    apiFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 504,
+      json: () => Promise.resolve({ message: 'gateway timeout' }),
+    } as unknown as Response);
+    apiFetch.mockResolvedValueOnce(createdResponse({ id: 'gw-1', dispatchState: 'dispatched' }));
+
+    const onSuccess = vi.fn();
+    const onError = vi.fn();
+    await send(internals, { onSuccess, onError });
+
+    expect(sendBodies()).toHaveLength(4);
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it("does not retry the hub's own 502 answer", async () => {
+    const el = await mountFastRetry();
+    const internals = el as unknown as Internals;
+    showConfirmMock.mockResolvedValueOnce(true);
+    apiFetch.mockResolvedValueOnce(wakeOfferResponse());
+    apiFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 502,
+      json: () =>
+        Promise.resolve({ error: { code: 'runtime_error', message: 'Failed to wake agent: x' } }),
+    } as unknown as Response);
+
+    const onError = vi.fn();
+    await send(internals, { onSuccess: vi.fn(), onError });
+
+    expect(sendBodies()).toHaveLength(2);
+    expect(onError).toHaveBeenCalledTimes(1);
+  });
+
+  it('sizes the confirmation budget from the recipient count', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals & {
+      postChatSend(
+        url: string,
+        init: RequestInit,
+        wake: boolean,
+        budgetMs: number
+      ): Promise<Response>;
+    };
+    const spy = vi.spyOn(internals, 'postChatSend');
+    showConfirmMock.mockResolvedValueOnce(true);
+    apiFetch.mockResolvedValueOnce(wakeOfferResponse());
+    apiFetch.mockResolvedValueOnce(createdResponse({ id: 'b-1' }));
+    await internals.handleChatSendV2(
+      new CustomEvent<ChatSendDetail>('chat-send', {
+        detail: {
+          text: 'hi @a @b',
+          plain: false,
+          interrupt: false,
+          mentions: ['a', 'b', 'a'],
+          attachmentIds: [],
+          onSuccess: vi.fn(),
+          onError: vi.fn(),
+        },
+      })
+    );
+    const wakeCall = spy.mock.calls.find((c) => c[2] === true);
+    expect(wakeCall?.[3]).toBe(wakeConfirmBudgetMs(3));
+  });
+
+  it('keeps the could-not-confirm wording when the user switched away', async () => {
+    const el = await mountFastRetry();
+    const internals = el as unknown as Internals;
+    showToastMock.mockReset();
+    localStorage.removeItem(`scion-chat-draft-${CONVERSATION_KEY}`);
+    showConfirmMock.mockResolvedValueOnce(true);
+    apiFetch.mockResolvedValueOnce(wakeOfferResponse());
+    const wake = holdNextPost();
+    const onError = vi.fn();
+    const done = send(internals, { onSuccess: vi.fn(), onError });
+    await vi.waitFor(() => expect(sendBodies()).toHaveLength(2));
+    await switchConversation(el);
+    // Every retry fails on the network too: the outcome stays unknown.
+    apiFetch.mockImplementation((_url: string, init?: RequestInit) =>
+      init?.method === 'POST'
+        ? Promise.reject(new TypeError('Failed to fetch'))
+        : Promise.resolve(emptyHistory())
+    );
+    wake.drop(new TypeError('Failed to fetch'));
+    await done;
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(internals.sendError).toBeNull();
+    expect(localStorage.getItem(`scion-chat-draft-${CONVERSATION_KEY}`)).toBe(
+      'please pick this up'
+    );
+    expect(showToastMock).toHaveBeenCalledTimes(1);
+    const toast = String(showToastMock.mock.calls[0]![0]);
+    expect(toast).toContain('Could not confirm whether the message was delivered');
+    expect(toast).not.toContain('switched conversations');
+    localStorage.removeItem(`scion-chat-draft-${CONVERSATION_KEY}`);
+  });
+
+  it('returns a failed send to its own conversation after a switch', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    showToastMock.mockReset();
+    localStorage.removeItem(`scion-chat-draft-${CONVERSATION_KEY}`);
+    showConfirmMock.mockResolvedValueOnce(true);
+    apiFetch.mockResolvedValueOnce(wakeOfferResponse());
+    const wake = holdNextPost();
+    const onError = vi.fn();
+    const done = send(internals, { onSuccess: vi.fn(), onError });
+    await vi.waitFor(() => expect(sendBodies()).toHaveLength(2));
+    await switchConversation(el);
+    wake.answer({
+      ok: false,
+      status: 403,
+      json: () => Promise.resolve({ error: { code: 'forbidden', message: 'no' } }),
+    } as unknown as Response);
+    await done;
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(internals.sendError).toBeNull();
+    expect(localStorage.getItem(`scion-chat-draft-${CONVERSATION_KEY}`)).toBe(
+      'please pick this up'
+    );
+    expect(String(showToastMock.mock.calls[0]![0])).toContain('switched conversations');
+    localStorage.removeItem(`scion-chat-draft-${CONVERSATION_KEY}`);
+  });
+
+  it('shows no dialog when the wake offer arrives after a switch', async () => {
+    const el = await mount();
+    const internals = el as unknown as Internals;
+    showToastMock.mockReset();
+    localStorage.removeItem(`scion-chat-draft-${CONVERSATION_KEY}`);
+    const first = holdNextPost();
+    const onError = vi.fn();
+    const done = send(internals, { onSuccess: vi.fn(), onError });
+    await vi.waitFor(() => expect(sendBodies()).toHaveLength(1));
+    await switchConversation(el);
+    first.answer(wakeOfferResponse());
+    await done;
+
+    expect(showConfirmMock).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+    expect(sendBodies()).toHaveLength(1);
+    expect(localStorage.getItem(`scion-chat-draft-${CONVERSATION_KEY}`)).toBe(
+      'please pick this up'
+    );
+    expect(showToastMock).toHaveBeenCalledTimes(1);
+    localStorage.removeItem(`scion-chat-draft-${CONVERSATION_KEY}`);
+  });
+
+  describe('reply bar after a failed send', () => {
+    type ReplyInternals = Internals & {
+      composerReplyTo: { messageId: string; senderName: string; content: string } | null;
+    };
+    const reply = { messageId: 'm-9', senderName: 'Coder', content: 'earlier' };
+
+    function sendReply(internals: ReplyInternals, onError: () => void): Promise<void> {
+      internals.composerReplyTo = reply;
+      return internals.handleChatSendV2(
+        new CustomEvent<ChatSendDetail>('chat-send', {
+          detail: {
+            text: 'replying',
+            plain: false,
+            interrupt: false,
+            mentions: [],
+            attachmentIds: [],
+            replyToId: reply.messageId,
+            onSuccess: vi.fn(),
+            onError,
+          },
+        })
+      );
+    }
+
+    function failure(): Response {
+      return {
+        ok: false,
+        status: 500,
+        json: () => Promise.resolve({ error: { code: 'internal', message: 'boom' } }),
+      } as unknown as Response;
+    }
+
+    it('is restored when the send fails in the same conversation', async () => {
+      const el = await mount();
+      const internals = el as unknown as ReplyInternals;
+      apiFetch.mockResolvedValueOnce(failure());
+      await sendReply(internals, vi.fn());
+      expect(internals.composerReplyTo).toEqual(reply);
+    });
+
+    it('is not restored into a conversation the user switched to', async () => {
+      const el = await mount();
+      const internals = el as unknown as ReplyInternals;
+      showToastMock.mockReset();
+      const pending = holdNextPost();
+      const done = sendReply(internals, vi.fn());
+      await vi.waitFor(() => expect(sendBodies()).toHaveLength(1));
+      await switchConversation(el);
+      pending.answer(failure());
+      await done;
+      expect(internals.composerReplyTo).toBeNull();
+      localStorage.removeItem(`scion-chat-draft-${CONVERSATION_KEY}`);
+    });
+
+    it('is not restored after a network error once switched away', async () => {
+      const el = await mount();
+      const internals = el as unknown as ReplyInternals;
+      showToastMock.mockReset();
+      const pending = holdNextPost();
+      const done = sendReply(internals, vi.fn());
+      await vi.waitFor(() => expect(sendBodies()).toHaveLength(1));
+      await switchConversation(el);
+      pending.drop(new TypeError('Failed to fetch'));
+      await done;
+      expect(internals.composerReplyTo).toBeNull();
+      localStorage.removeItem(`scion-chat-draft-${CONVERSATION_KEY}`);
+    });
   });
 
   it('sends in another conversation while a wake is in flight', async () => {
