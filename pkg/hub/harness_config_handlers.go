@@ -21,6 +21,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"path"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -740,6 +743,12 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 		ValidationError(w, "manifest with files is required", nil)
 		return
 	}
+	for _, f := range req.Manifest.Files {
+		if !isCanonicalHarnessConfigFilePath(f.Path) {
+			ValidationError(w, "invalid manifest file path: "+strconv.Quote(f.Path), map[string]interface{}{"path": f.Path})
+			return
+		}
+	}
 
 	contentHash, err := verifyAndFinalizeFiles(ctx, stor, hc.StoragePath, req.Manifest.Files)
 	if err != nil {
@@ -789,19 +798,41 @@ func (s *Server) deleteRemovedHarnessConfigFiles(ctx context.Context, stor stora
 	for _, f := range hc.Files {
 		current[f.Path] = struct{}{}
 	}
-	var failed []string
+	var failed, skipped []string
 	for _, f := range previousFiles {
 		if _, ok := current[f.Path]; ok {
+			continue
+		}
+		// Records written before manifest paths were validated may hold
+		// paths that resolve outside this config or alias a kept file.
+		if !isCanonicalHarnessConfigFilePath(f.Path) {
+			skipped = append(skipped, f.Path)
 			continue
 		}
 		if err := stor.Delete(ctx, hc.StoragePath+"/"+f.Path); err != nil && !errors.Is(err, storage.ErrNotFound) {
 			failed = append(failed, f.Path)
 		}
 	}
+	if len(skipped) > 0 {
+		s.resourceLog.Warn("harness-config finalize: skipped deleting removed files with invalid paths",
+			"id", hc.ID, "name", hc.Name, "storagePath", hc.StoragePath, "paths", skipped)
+	}
 	if len(failed) > 0 {
 		s.resourceLog.Warn("harness-config finalize: failed to delete removed files from storage",
 			"id", hc.ID, "name", hc.Name, "storagePath", hc.StoragePath, "paths", failed)
 	}
+}
+
+// isCanonicalHarnessConfigFilePath reports whether p is a relative,
+// slash-separated, already-clean file path inside a harness-config: not empty
+// or ".", no "..", leading "/", "./", repeated or trailing slashes,
+// backslashes or NUL bytes. Only such paths map one-to-one onto a storage
+// object below the config's storage path.
+func isCanonicalHarnessConfigFilePath(p string) bool {
+	return p != "." &&
+		filepath.IsLocal(p) &&
+		path.Clean(p) == p &&
+		!strings.ContainsAny(p, "\\\x00")
 }
 
 // handleHarnessConfigCheckImage triggers an immediate image status re-check.

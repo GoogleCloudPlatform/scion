@@ -21,6 +21,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -431,6 +434,139 @@ func TestHandleHarnessConfigFinalize_KeepsObjectsNotInPreviousRecord(t *testing.
 	}
 	if _, ok := stor.objects[hc.StoragePath+"/config.yaml"]; !ok {
 		t.Error("expected config.yaml to be kept in storage after finalize")
+	}
+}
+
+// localStorageHarnessConfig sets up a server backed by real local storage
+// (rooted at a bucket directory below root) and a harness-config record whose
+// file list is recordPaths. Every path in storedPaths is written to storage
+// below the config's storage path. Local storage resolves object paths with
+// filepath.Join, so it shows what a path really points at on disk.
+func localStorageHarnessConfig(t *testing.T, recordPaths, storedPaths []string) (srv *Server, s store.Store, hc *store.HarnessConfig, root string) {
+	t.Helper()
+	srv, s, _ = testHarnessConfigFileServer(t)
+	root = t.TempDir()
+	stor, err := storage.NewLocal(storage.Config{Provider: storage.ProviderLocal, Bucket: "b", LocalPath: root})
+	if err != nil {
+		t.Fatalf("NewLocal: %v", err)
+	}
+	srv.SetStorage(stor)
+
+	hc = &store.HarnessConfig{
+		ID:            tid("hc-local-paths"),
+		Name:          "test-hc",
+		Slug:          "test-hc",
+		Harness:       "claude",
+		Scope:         store.HarnessConfigScopeGlobal,
+		Status:        store.HarnessConfigStatusActive,
+		StoragePath:   "harness-configs/global/test-hc",
+		StorageBucket: "b",
+	}
+	for _, p := range storedPaths {
+		if _, err := stor.Upload(context.Background(), hc.StoragePath+"/"+p, strings.NewReader("x\n"), storage.UploadOptions{}); err != nil {
+			t.Fatalf("upload %s: %v", p, err)
+		}
+	}
+	for _, p := range recordPaths {
+		hc.Files = append(hc.Files, store.TemplateFile{Path: p, Size: 2, Hash: "sha256:placeholder"})
+	}
+	hc.ContentHash = computeContentHash(hc.Files)
+	if err := s.CreateHarnessConfig(context.Background(), hc); err != nil {
+		t.Fatalf("CreateHarnessConfig: %v", err)
+	}
+	return srv, s, hc, root
+}
+
+func finalizeHarnessConfigRequest(t *testing.T, srv *Server, hcID string, paths ...string) int {
+	t.Helper()
+	files := make([]map[string]interface{}, 0, len(paths))
+	for _, p := range paths {
+		files = append(files, map[string]interface{}{"path": p, "size": 2, "hash": "sha256:placeholder"})
+	}
+	body := map[string]interface{}{"manifest": map[string]interface{}{"files": files}}
+	return doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+hcID+"/finalize", body).Code
+}
+
+// outsidePath is four levels up from harness-configs/global/test-hc in bucket
+// "b", i.e. the storage root's parent directory, outside the bucket.
+const outsidePath = "../../../../outside.txt"
+
+func writeOutsideFile(t *testing.T, root string) string {
+	t.Helper()
+	outside := filepath.Join(root, "outside.txt")
+	if err := os.WriteFile(outside, []byte("keep\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return outside
+}
+
+// TestHandleHarnessConfigFinalize_RejectsNonCanonicalPaths verifies that
+// finalize rejects manifest paths that do not name exactly one object below
+// the config's storage path: parent-directory references, aliases of a
+// canonical path, absolute paths and backslashes.
+func TestHandleHarnessConfigFinalize_RejectsNonCanonicalPaths(t *testing.T) {
+	for _, bad := range []string{
+		outsidePath,
+		"./config.yaml",
+		"scripts//provision.py",
+		"scripts/../config.yaml",
+		"scripts/",
+		"/config.yaml",
+		`scripts\provision.py`,
+		".",
+	} {
+		t.Run(bad, func(t *testing.T) {
+			srv, s, hc, root := localStorageHarnessConfig(t, []string{"config.yaml"},
+				[]string{"config.yaml", "scripts/provision.py", `scripts\provision.py`})
+			writeOutsideFile(t, root)
+
+			if code := finalizeHarnessConfigRequest(t, srv, hc.ID, "config.yaml", bad); code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for manifest path %q, got %d", bad, code)
+			}
+			got, err := s.GetHarnessConfig(context.Background(), hc.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got.Files) != 1 || got.Files[0].Path != "config.yaml" {
+				t.Errorf("record must be unchanged after a rejected finalize, got %+v", got.Files)
+			}
+		})
+	}
+}
+
+// TestHandleHarnessConfigFinalize_KeepsFilesOutsideStoragePath is the
+// end-to-end case: a manifest listing a parent-directory path, followed by
+// one that drops it, must not delete a file outside the storage root.
+func TestHandleHarnessConfigFinalize_KeepsFilesOutsideStoragePath(t *testing.T) {
+	srv, _, hc, root := localStorageHarnessConfig(t, []string{"config.yaml"}, []string{"config.yaml"})
+	outside := writeOutsideFile(t, root)
+
+	_ = finalizeHarnessConfigRequest(t, srv, hc.ID, "config.yaml", outsidePath)
+	if code := finalizeHarnessConfigRequest(t, srv, hc.ID, "config.yaml"); code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", code)
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Errorf("file outside storage must survive finalize: %v", err)
+	}
+}
+
+// TestHandleHarnessConfigFinalize_SkipsUnsafePathsInOldRecord covers records
+// written before manifest paths were validated: dropping a parent-directory
+// path or an alias of a kept file must not delete anything.
+func TestHandleHarnessConfigFinalize_SkipsUnsafePathsInOldRecord(t *testing.T) {
+	srv, _, hc, root := localStorageHarnessConfig(t,
+		[]string{"config.yaml", outsidePath, "./config.yaml"}, []string{"config.yaml"})
+	outside := writeOutsideFile(t, root)
+
+	if code := finalizeHarnessConfigRequest(t, srv, hc.ID, "config.yaml"); code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", code)
+	}
+	if _, err := os.Stat(outside); err != nil {
+		t.Errorf("file outside storage must survive finalize: %v", err)
+	}
+	kept := filepath.Join(root, "b", filepath.FromSlash(hc.StoragePath), "config.yaml")
+	if _, err := os.Stat(kept); err != nil {
+		t.Errorf("config.yaml is still listed and must survive dropping its alias ./config.yaml: %v", err)
 	}
 }
 
