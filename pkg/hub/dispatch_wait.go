@@ -99,12 +99,15 @@ var (
 //     is still pending or in_progress, wait up to lifecycleErrorPhaseGrace
 //     for it to fail, then return the generic error-phase error. For any
 //     other row state (done, or unreadable) return that error at once.
-//   - done event: read the row; return its failure if it is failed, else
-//     keep waiting (the executor's write may have lost its CAS). The rolling
-//     window is not reset.
+//   - done event: read the row; return its failure if it is failed. If an
+//     error phase is waiting out its grace and the row is now finished
+//     without failing, return the error-phase error. Otherwise keep waiting
+//     (the executor's write may have lost its CAS). The rolling window is
+//     not reset.
 //   - other status events reset the rolling window.
-//   - every lifecycleRowPollInterval, and when the rolling window expires,
-//     the row is read in case the done event was missed. Rolling window
+//   - every lifecycleRowPollInterval the row is read as on a done event, and
+//     when the rolling window expires it is read for its failure, in case
+//     the done event was missed. Rolling window
 //     expiry otherwise returns ErrDispatchFailed.
 //   - ctx cancellation returns ctx.Err().
 func waitForLifecycleOutcome(
@@ -149,6 +152,20 @@ func waitForLifecycleOutcome(
 			graceTimer.Stop()
 		}
 	}()
+	// rowOutcome re-reads the row on a done event or a poll: its failure if
+	// it is failed, the error-phase error if an error phase is waiting out
+	// its grace and the executor has since finished the row without failing
+	// it, else nil (keep waiting).
+	rowOutcome := func() error {
+		rowState, err := readRow()
+		if err != nil {
+			return err
+		}
+		if grace != nil && rowState != "" && rowState != store.DispatchStatePending && rowState != store.DispatchStateInProgress {
+			return errorPhaseErr
+		}
+		return nil
+	}
 
 	for {
 		select {
@@ -160,7 +177,7 @@ func waitForLifecycleOutcome(
 				return ErrDispatchFailed
 			}
 			if ev.Subject == doneSubject {
-				if err := rowFailure(); err != nil {
+				if err := rowOutcome(); err != nil {
 					return err
 				}
 				continue
@@ -204,7 +221,7 @@ func waitForLifecycleOutcome(
 			return errorPhaseErr
 
 		case <-poll.C:
-			if err := rowFailure(); err != nil {
+			if err := rowOutcome(); err != nil {
 				return err
 			}
 

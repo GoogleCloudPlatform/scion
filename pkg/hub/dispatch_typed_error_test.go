@@ -154,11 +154,12 @@ func newCrossNodeFixture(t *testing.T, ownerErr error, signalOwner bool) *crossN
 }
 
 // claimPending waits for the agent's single pending dispatch row and claims
-// it as an owner node would.
-func (f *crossNodeFixture) claimPending(t *testing.T) store.BrokerDispatch {
+// it as an owner node would. It runs on a helper goroutine, so it reports
+// failures with assert and returns ok=false instead of stopping the test.
+func (f *crossNodeFixture) claimPending(t *testing.T) (store.BrokerDispatch, bool) {
 	t.Helper()
 	var row store.BrokerDispatch
-	require.Eventually(t, func() bool {
+	ok := assert.Eventually(t, func() bool {
 		pending, err := f.store.ListPendingDispatch(context.Background(), f.agent.RuntimeBrokerID)
 		if err != nil || len(pending) == 0 {
 			return false
@@ -166,16 +167,18 @@ func (f *crossNodeFixture) claimPending(t *testing.T) store.BrokerDispatch {
 		row = pending[0]
 		return true
 	}, 5*time.Second, 5*time.Millisecond, "no dispatch row was written")
+	if !ok {
+		return row, false
+	}
 	claimed, err := f.store.ClaimBrokerDispatch(context.Background(), row.ID, "test-owner")
-	require.NoError(t, err)
-	require.True(t, claimed)
-	return row
+	return row, assert.NoError(t, err) && assert.True(t, claimed)
 }
 
 // failRow fails a claimed row with execErr exactly as reconcileBroker does.
-func (f *crossNodeFixture) failRow(t *testing.T, id string, execErr error) {
+// Like claimPending it runs on a helper goroutine and reports with assert.
+func (f *crossNodeFixture) failRow(t *testing.T, id string, execErr error) bool {
 	t.Helper()
-	require.NoError(t, f.store.FailBrokerDispatch(context.Background(), id, execErr.Error(), dispatchFailureResult(execErr)))
+	return assert.NoError(t, f.store.FailBrokerDispatch(context.Background(), id, execErr.Error(), dispatchFailureResult(execErr)))
 }
 
 // requireSkillRelay asserts err relays as the broker's typed skill error.
@@ -275,10 +278,15 @@ func TestCrossNodeStart_ErrorPhaseBeforeDone(t *testing.T) {
 func TestCrossNodeStart_DoneWithNonTerminalRowKeepsWaiting(t *testing.T) {
 	f := newCrossNodeFixture(t, nil, false)
 	go func() {
-		row := f.claimPending(t)
+		row, ok := f.claimPending(t)
+		if !ok {
+			return
+		}
 		f.events.PublishDispatchDone(context.Background(), row.ID) // row is in_progress
 		time.Sleep(100 * time.Millisecond)
-		f.failRow(t, row.ID, typedSkillError())
+		if !f.failRow(t, row.ID, typedSkillError()) {
+			return
+		}
 		f.events.PublishDispatchDone(context.Background(), row.ID)
 	}()
 	err := f.requester.DispatchAgentStart(crossNodeCtx(t), f.agent, "", false)
@@ -293,8 +301,10 @@ func TestCrossNodeStart_MissedDoneFoundByRowPoll(t *testing.T) {
 	stop := make(chan struct{})
 	defer close(stop)
 	go func() {
-		row := f.claimPending(t)
-		f.failRow(t, row.ID, typedSkillError()) // no done event
+		row, ok := f.claimPending(t)
+		if !ok || !f.failRow(t, row.ID, typedSkillError()) { // no done event
+			return
+		}
 		tick := time.NewTicker(20 * time.Millisecond)
 		defer tick.Stop()
 		for {
@@ -522,14 +532,16 @@ func TestAgentDeleteEngine_DeferredTypedFailureClassifies(t *testing.T) {
 func TestCrossNodeStart_ErrorPhaseOnDoneRowReturnsAtOnce(t *testing.T) {
 	f := newCrossNodeFixture(t, nil, true)
 	go func() {
-		require.Eventually(t, func() bool {
+		if !assert.Eventually(t, func() bool {
 			ds, _ := f.store.ListPendingDispatch(context.Background(), f.agent.RuntimeBrokerID)
 			if len(ds) != 0 {
 				return false
 			}
-			ds2, _ := f.store.HasCompletedBrokerDispatchSince(context.Background(), f.agent.ID, "start", time.Time{})
-			return ds2
-		}, 5*time.Second, 5*time.Millisecond, "the start row never completed")
+			done, _ := f.store.HasCompletedBrokerDispatchSince(context.Background(), f.agent.ID, "start", time.Time{})
+			return done
+		}, 5*time.Second, 5*time.Millisecond, "the start row never completed") {
+			return
+		}
 		errored := *f.agent
 		errored.Phase = string(state.PhaseError)
 		f.events.PublishAgentStatus(context.Background(), &errored)
@@ -541,26 +553,52 @@ func TestCrossNodeStart_ErrorPhaseOnDoneRowReturnsAtOnce(t *testing.T) {
 	assert.Less(t, time.Since(began), 2*time.Second, "an error phase on a done row waited for the grace")
 }
 
-// A cross-node finalize_env that still lacks required keys returns the same
-// *ErrEnvStillMissing a direct finalize returns, with its requirements.
-func TestCrossNodeFinalizeEnv_RelaysEnvStillMissing(t *testing.T) {
-	reqs := &RemoteEnvRequirementsResponse{AgentID: "a", Required: []string{"A", "B"}, Needs: []string{"B"}}
+// An error phase that arrives while the row is still pending starts the
+// grace, but the executor then completes the row (the broker accepted the
+// start): the done event ends the wait with the error-phase error at once.
+func TestCrossNodeStart_ErrorPhaseThenRowDoneReturnsAtOnce(t *testing.T) {
 	f := newCrossNodeFixture(t, nil, true)
-	f.ownerDisp.finalizeErr = &ErrEnvStillMissing{Requirements: reqs}
-
-	_, err := f.requester.deferredFinalizeEnv(crossNodeCtx(t), f.agent, map[string]string{"A": "v"})
+	f.ownerDisp.beforeStart = func() {
+		errored := *f.agent
+		errored.Phase = string(state.PhaseError)
+		f.events.PublishAgentStatus(context.Background(), &errored)
+		time.Sleep(100 * time.Millisecond)
+	}
+	began := time.Now()
+	err := f.requester.DispatchAgentStart(crossNodeCtx(t), f.agent, "", false)
 	require.Error(t, err)
-	var missing *ErrEnvStillMissing
-	require.ErrorAs(t, err, &missing)
-	assert.Equal(t, reqs, missing.Requirements)
+	assert.Contains(t, err.Error(), "agent entered error phase during start")
+	assert.Less(t, time.Since(began), 2*time.Second, "the grace outlived the row being done")
+}
 
-	// The handler's answer for it is the single-node 422.
-	rec := httptest.NewRecorder()
-	MissingEnvVars(rec, missing.Requirements.Needs, nil)
-	assert.Equal(t, http.StatusUnprocessableEntity, rec.Code)
+// A cross-node finalize_env that still lacks required keys is answered by
+// the env handler with the single-node 422 missing_env_vars, built from the
+// owner's requirements.
+func TestCrossNodeFinalizeEnvHandler_RelaysEnvStillMissing(t *testing.T) {
+	srv, agent, ownerDisp := crossNodeHandlerServerWithOwner(t, nil, state.PhaseProvisioning)
+	ownerDisp.finalizeErr = &ErrEnvStillMissing{Requirements: &RemoteEnvRequirementsResponse{
+		AgentID:      agent.ID,
+		Required:     []string{"A_KEY", "B_KEY", "C_KEY"},
+		HubHas:       []string{"A_KEY"},
+		BrokerHas:    []string{"C_KEY"},
+		Needs:        []string{"B_KEY"},
+		SecretInfo:   map[string]SecretKeyInfo{"B_KEY": {Description: "the B key", Source: "harness", Type: "environment"}},
+		Alternatives: map[string][]string{"B_KEY": {"B_KEY_ALT"}},
+	}}
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects/"+agent.ProjectID+"/agents/"+agent.Slug+"/env",
+		map[string]interface{}{"env": map[string]string{"A_KEY": "v"}})
+	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
 	code, details := errorBody(t, rec)
 	assert.Equal(t, ErrCodeMissingEnvVars, code)
-	assert.Equal(t, []interface{}{"B"}, details["missingKeys"])
+	assert.Equal(t, []interface{}{"B_KEY"}, details["missingKeys"])
+	gather, ok := details["envGather"].(map[string]interface{})
+	require.True(t, ok, "envGather missing: %s", rec.Body.String())
+	assert.Equal(t, []interface{}{"A_KEY", "B_KEY", "C_KEY"}, gather["required"])
+	assert.Equal(t, []interface{}{"B_KEY"}, gather["needs"])
+	assert.Equal(t, []interface{}{"C_KEY"}, gather["brokerHas"])
+	assert.Equal(t, map[string]interface{}{"B_KEY": map[string]interface{}{"description": "the B key", "source": "harness", "type": "environment"}}, gather["secretInfo"])
+	assert.Equal(t, map[string]string{"A_KEY": "v"}, ownerDisp.lastFinalizeEnv, "the submitted env reached the owner")
 }
 
 // A cross-node create whose as_needed second pass is still partial returns
@@ -597,6 +635,14 @@ func TestCrossNodeCreate_AsNeededPartialReturnsRemainingNeeds(t *testing.T) {
 // lifecycle op to an owner node running the real reconcileBroker.
 func crossNodeHandlerServer(t *testing.T, ownerErr error, phase state.Phase) (*Server, *store.Agent) {
 	t.Helper()
+	srv, agent, _ := crossNodeHandlerServerWithOwner(t, ownerErr, phase)
+	return srv, agent
+}
+
+// crossNodeHandlerServerWithOwner is crossNodeHandlerServer that also returns
+// the owner's dispatcher, so a test can set per-op answers.
+func crossNodeHandlerServerWithOwner(t *testing.T, ownerErr error, phase state.Phase) (*Server, *store.Agent, *ownerErrDispatcher) {
+	t.Helper()
 	srv, s := testServer(t)
 	bus := NewChannelEventPublisher()
 	t.Cleanup(bus.Close)
@@ -608,7 +654,8 @@ func crossNodeHandlerServer(t *testing.T, ownerErr error, phase state.Phase) (*S
 		agentLifecycleLog: slog.Default(),
 		events:            bus,
 	}
-	owner.SetDispatcher(&ownerErrDispatcher{err: ownerErr})
+	ownerDisp := &ownerErrDispatcher{err: ownerErr}
+	owner.SetDispatcher(ownerDisp)
 	owner.execDispatch = owner.executeDispatch
 	owner.deliverMsg = owner.deliverMessage
 
@@ -618,7 +665,7 @@ func crossNodeHandlerServer(t *testing.T, ownerErr error, phase state.Phase) (*S
 	srv.SetDispatcher(requester)
 
 	agent := setupBrokerAgentInPhase(t, s, "xnode-"+string(phase), phase)
-	return srv, agent
+	return srv, agent, ownerDisp
 }
 
 // The lifecycle handler answers a cross-node start the broker rejected with
