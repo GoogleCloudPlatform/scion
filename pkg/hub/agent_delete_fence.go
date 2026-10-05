@@ -33,7 +33,7 @@ import (
 // started the agent again, and run_id cannot tell a same-run start (one that
 // adopted the surviving run) from the run the delete was for. So the engine
 // sends a deadline, notAfter = min(its lease expiry, now + its dispatch
-// budget), and the broker refuses a delete that arrives after it with 409
+// budget) less deleteNotAfterMargin, and the broker refuses a delete that arrives after it with 409
 // stale_dispatch and no side effects. notAfter is a wire field only: nothing
 // stores it. A delete from any other caller carries none, and the broker
 // then does not check.
@@ -89,24 +89,27 @@ func deleteDispatchFenceFrom(ctx context.Context) (deleteDispatchFence, bool) {
 	return f, ok
 }
 
-// deleteNotAfterMargin is subtracted from the lease expiry when computing
-// notAfter. It equals the broker's skew allowance (deleteNotAfterSkew in
+// deleteNotAfterMargin is subtracted from every notAfter bound (the lease
+// expiry and the end of the dispatch budget). It equals the broker's skew allowance (deleteNotAfterSkew in
 // pkg/runtimebroker), so a broker with a synchronised clock stops accepting
 // the delete no later than the lease expiry.
 const deleteNotAfterMargin = 5 * time.Second
 
 // deleteNotAfter is the deadline for a delete sent at now under a lease
-// that expires at leaseUntil: the earlier of the lease expiry less
-// deleteNotAfterMargin and the end of the dispatch budget.
+// that expires at leaseUntil (zero: no lease bound): min(lease expiry, now
+// + dispatch budget) less deleteNotAfterMargin.
 func deleteNotAfter(now, leaseUntil time.Time) time.Time {
-	budgetEnd := now.Add(deleteDispatchBudget)
-	if leaseUntil.IsZero() {
-		return budgetEnd
+	end := now.Add(deleteDispatchBudget)
+	if !leaseUntil.IsZero() && leaseUntil.Before(end) {
+		end = leaseUntil
 	}
-	if bound := leaseUntil.Add(-deleteNotAfterMargin); bound.Before(budgetEnd) {
-		return bound
-	}
-	return budgetEnd
+	return notAfterFromEnd(end)
+}
+
+// notAfterFromEnd is the notAfter for a delete that must not act after end:
+// end less deleteNotAfterMargin, which offsets the broker's skew allowance.
+func notAfterFromEnd(end time.Time) time.Time {
+	return end.Add(-deleteNotAfterMargin)
 }
 
 // isStaleDeleteDispatch reports whether err is a delete that was refused as
@@ -138,7 +141,7 @@ func staleDeleteDispatchFromText(text string) bool {
 // notAfter to send it with. ok is false when the intent must be dropped.
 //
 //   - claim still live (same claim, deleting, lease not expired): notAfter =
-//     min(lease - margin, now + budget), as the engine computes it;
+//     min(lease, now + budget) less the margin, as the engine computes it;
 //   - claim failed in_doubt (the engine's wait ended with this intent still
 //     outstanding): the intent still runs, as design ptone/scion#2483
 //     §2.3.1 and its follow-up 3 expect ("teardown may still complete on
@@ -162,7 +165,7 @@ func deferredDeleteDeadline(ctx context.Context, row *store.Agent, claim int64, 
 		if dl, ok := ctx.Deadline(); ok && dl.Before(end) {
 			end = dl
 		}
-		return end.Add(-deleteNotAfterMargin), true
+		return notAfterFromEnd(end), true
 	}
 	return time.Time{}, false
 }

@@ -289,7 +289,7 @@ func TestDeleteFence_E2E_LateDeleteAfterAbandonment(t *testing.T) {
 				require.NotEqual(t, "run-a", wantRun)
 			}
 			out := f.wait(t, done)
-			assert.Contains(t, out.message, "after its deadline")
+			assert.Equal(t, staleDispatchMessage, out.message)
 			f.requireSurvived(t, out, wantRun)
 		})
 	}
@@ -324,7 +324,9 @@ func TestDeleteFence_E2E_MarginBoundary(t *testing.T) {
 		f.lapse(t, plan)
 		f.setBrokerNow(f.t0.Add(62 * time.Second))
 		close(f.client.release)
-		f.requireSurvived(t, f.wait(t, done), "run-a")
+		out := f.wait(t, done)
+		assert.Equal(t, staleDispatchMessage, out.message)
+		f.requireSurvived(t, out, "run-a")
 	})
 	t.Run("before the lease expiry", func(t *testing.T) {
 		f := newFenceE2E(t)

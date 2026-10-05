@@ -91,7 +91,7 @@ func TestDeleteFence_EngineSendsNotAfter(t *testing.T) {
 			assert.False(t, got.After(t0.Add(deleteDispatchBudget)), "notAfter %v past now+budget %v", got, t0.Add(deleteDispatchBudget))
 			want := t0.Add(55 * time.Second) // lease 60s - margin 5s
 			if tc.budget != 0 {
-				want = t0.Add(tc.budget)
+				want = t0.Add(tc.budget - deleteNotAfterMargin) // budget 30s - margin 5s
 			}
 			assert.True(t, got.Equal(want), "notAfter = %v, want %v", got, want)
 		})
@@ -100,11 +100,20 @@ func TestDeleteFence_EngineSendsNotAfter(t *testing.T) {
 
 func TestDeleteNotAfter_MinOfLeaseAndBudget(t *testing.T) {
 	t0 := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
-	// The lease bound subtracts the margin, toward refusal.
-	assert.Equal(t, t0.Add(35*time.Second), deleteNotAfter(t0, t0.Add(40*time.Second)))
-	assert.Equal(t, t0.Add(deleteDispatchBudget), deleteNotAfter(t0, t0.Add(deleteDispatchBudget+time.Minute)))
-	assert.Equal(t, t0.Add(deleteDispatchBudget), deleteNotAfter(t0, time.Time{}))
-	assert.Equal(t, 5*time.Second, deleteNotAfterMargin, "keep equal to the broker's deleteNotAfterSkew")
+	require.Equal(t, 5*time.Second, deleteNotAfterMargin, "keep equal to the broker's deleteNotAfterSkew")
+	require.Equal(t, 120*time.Second, deleteDispatchBudget)
+	// Every bound has the margin subtracted, toward refusal.
+	t.Run("lease bound wins", func(t *testing.T) {
+		assert.Equal(t, t0.Add(35*time.Second), deleteNotAfter(t0, t0.Add(40*time.Second)))
+	})
+	t.Run("budget bound wins", func(t *testing.T) {
+		// Lease longer than the budget: now + budget - 5s.
+		assert.Equal(t, t0.Add(115*time.Second), deleteNotAfter(t0, t0.Add(deleteDispatchBudget+time.Minute)))
+	})
+	t.Run("zero lease", func(t *testing.T) {
+		// No lease bound: the budget deadline - 5s.
+		assert.Equal(t, t0.Add(115*time.Second), deleteNotAfter(t0, time.Time{}))
+	})
 }
 
 // Both transports put notAfter on the delete query only when set.
