@@ -32,7 +32,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import test from 'node:test';
 
-import { createBridgeState, redactErrorMessage, route, sessionErrorText, toolExecuteBeforeData, toolExecuteAfterData } from './scion-bridge.js';
+import { createBridgeState, route, sessionErrorText, toolExecuteBeforeData, toolExecuteAfterData } from './scion-bridge.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // harnesses/opencode/home/.config/opencode/plugins -> repo root is 6 levels up.
@@ -216,14 +216,14 @@ test('run3: session.error emits nothing by itself, and the number of agent-ends 
   assert.equal(idleEmissions.length, 1, 'run3 is one real prompt cycle (a failed one), so exactly one agent-end is expected');
 });
 
-test('run3: the captured session.error is carried onto the one agent-end as a bounded error string', () => {
+test('run3: the captured session.error is carried onto the one agent-end as its name and status only', () => {
   const run3 = loadFixture().get('run3');
   const idleEmissions = emissionsFor(run3, 'session.idle');
   assert.equal(idleEmissions.length, 1);
-  // The capture's error is {name: "APIError", data: {message: "mock upstream
-  // failure", responseBody, responseHeaders, metadata.url, ...}}; only the
-  // name and message are carried.
-  assert.equal(idleEmissions[0].data.error, 'APIError: mock upstream failure');
+  // The capture's error is {name: "APIError", data: {statusCode: 500,
+  // message: "mock upstream failure", responseBody, responseHeaders,
+  // metadata.url, ...}}; only the name and status are carried.
+  assert.equal(idleEmissions[0].data.error, 'APIError (status 500)');
   assert.deepEqual(Object.keys(idleEmissions[0].data).sort(), ['error', 'session_id']);
 });
 
@@ -245,7 +245,7 @@ test('a pending error is attached once, then cleared, so the next turn ends clea
   route(state, { type: 'session.error', properties: { sessionID, error: { name: 'APIError', data: { message: 'boom' } } } });
   const first = route(state, { type: 'session.idle', properties: { sessionID } });
   assert.equal(first.length, 1);
-  assert.equal(first[0].data.error, 'APIError: boom');
+  assert.equal(first[0].data.error, 'APIError');
   // OpenCode's own duplicate idle after the error: dropped, as before.
   assert.deepEqual(route(state, { type: 'session.idle', properties: { sessionID } }), []);
   assert.equal(state.pendingErrors.has(sessionID), false);
@@ -292,68 +292,55 @@ test('a user abort (MessageAbortedError) is not reported as a failed turn', () =
   assert.equal(idle[0].data.error, undefined);
 });
 
-test('sessionErrorText reads only name and message, with fallbacks, bounded in length', () => {
-  assert.equal(sessionErrorText({ name: 'APIError', data: { message: 'boom', responseBody: 'secret' } }), 'APIError: boom');
-  assert.equal(sessionErrorText({ name: 'ProviderAuthError' }), 'ProviderAuthError');
-  assert.equal(sessionErrorText({ data: { message: 'only a message' } }), 'only a message');
-  assert.equal(sessionErrorText(undefined), 'session error');
-  assert.equal(sessionErrorText({ name: 42, data: { message: {} } }), 'session error');
-  // Spaces keep this from matching the long-token redaction rule.
-  const long = sessionErrorText({ name: 'APIError', data: { message: 'x '.repeat(500) } });
-  assert.equal(Array.from(long).length, 256);
-  assert.ok(long.startsWith('APIError: x x'));
-});
-
-test('sessionErrorText truncates on a code point boundary, never splitting a surrogate pair', () => {
-  // "APIError: " is 10 code points; 245 more ASCII puts an astral emoji
-  // (two UTF-16 code units) exactly across the 256 cut with slice().
-  const message = 'a '.repeat(122) + 'b' + '\u{1F600}' + ' tail';
-  const text = sessionErrorText({ name: 'APIError', data: { message } });
-  assert.equal(Array.from(text).length, 256);
-  assert.ok(text.endsWith('\u{1F600}'), 'the emoji is kept whole as the 256th code point');
-  const last = text.charCodeAt(text.length - 1);
-  assert.ok(!(last >= 0xd800 && last <= 0xdbff), 'no lone high surrogate at the end');
-  // One more code point of prefix pushes the emoji out entirely.
-  const text2 = sessionErrorText({ name: 'APIError', data: { message: 'c' + message } });
-  assert.equal(Array.from(text2).length, 256);
-  const last2 = text2.charCodeAt(text2.length - 1);
-  assert.ok(!(last2 >= 0xd800 && last2 <= 0xdbff), 'no lone high surrogate at the end');
-});
-
-test('sessionErrorText carries only the name for authentication errors', () => {
-  const masked = 'Incorrect API key provided: sk-proj-****abcd. Organization org-AbCdEfGh12345678.';
-  assert.equal(sessionErrorText({ name: 'ProviderAuthError', data: { message: masked } }), 'ProviderAuthError');
-  assert.equal(sessionErrorText({ name: 'APIError', data: { statusCode: 401, message: masked } }), 'APIError');
-  assert.equal(sessionErrorText({ name: 'APIError', data: { statusCode: 403, message: masked } }), 'APIError');
-  // Other status codes keep a (redacted) message.
-  assert.equal(sessionErrorText({ name: 'APIError', data: { statusCode: 500, message: 'mock upstream failure' } }), 'APIError: mock upstream failure');
-});
-
-test('sessionErrorText redacts credential-like tokens in non-auth error messages', () => {
-  const cases = [
-    ['quota exceeded for key sk-ant-api03-AbCdEf1234567890', 'quota exceeded for key [REDACTED]'],
-    ['key sk-proj-****abcd rate limited', 'key [REDACTED] rate limited'],
-    ['API key AIzaSyA1234567890abcdefghijklmnop invalid', 'API key [REDACTED] invalid'],
-    ['header Authorization: Bearer eyJhbGciOi.payload.sig was sent', 'header Authorization: Bearer [REDACTED] was sent'],
-    ['organization org-AbCdEfGh12345678 over limit', 'organization [REDACTED] over limit'],
-    ['project proj_AbCdEfGh12345678 over limit', 'project [REDACTED] over limit'],
-    ['request 0123456789abcdef0123456789abcdef failed', 'request [REDACTED] failed'],
-    ['token dGhpcyBpcyBhIHNlY3JldCB0b2tlbiB2YWx1ZQ== leaked', 'token [REDACTED] leaked'],
-    ['mock upstream failure', 'mock upstream failure'],
-  ];
-  for (const [input, want] of cases) {
-    assert.equal(redactErrorMessage(input), want, input);
+test('sessionErrorText carries only the error name and numeric status', () => {
+  assert.equal(sessionErrorText({ name: 'APIError', data: { statusCode: 429, message: 'rate limited' } }), 'APIError (status 429)');
+  assert.equal(sessionErrorText({ name: 'APIError', data: { statusCode: 500 } }), 'APIError (status 500)');
+  assert.equal(sessionErrorText({ name: 'ProviderAuthError', data: { message: 'bad key' } }), 'ProviderAuthError');
+  // A string status is compared numerically.
+  assert.equal(sessionErrorText({ name: 'APIError', data: { statusCode: '401', message: 'bad key' } }), 'APIError (status 401)');
+  // Non-numeric or out-of-range statuses are dropped.
+  for (const statusCode of ['abc', 42, 1000, 401.5, null, undefined, {}]) {
+    assert.equal(sessionErrorText({ name: 'APIError', data: { statusCode } }), 'APIError', String(statusCode));
   }
-  assert.equal(
-    sessionErrorText({ name: 'APIError', data: { statusCode: 429, message: 'rate limit for sk-live-AbCdEf123456' } }),
-    'APIError: rate limit for [REDACTED]',
-  );
-  // Redaction runs before truncation: a key straddling the cap is never
-  // left partially visible.
-  const nearCap = 'a '.repeat(118) + 'sk-' + 'Z'.repeat(40);
-  const text = sessionErrorText({ name: 'APIError', data: { message: nearCap } });
-  assert.ok(!text.includes('sk-'), text);
-  assert.ok(!text.includes('ZZZZ'), text);
+  // Missing or non-identifier names fall back to a fixed string.
+  assert.equal(sessionErrorText(undefined), 'session error');
+  assert.equal(sessionErrorText({ data: { message: 'only a message' } }), 'session error');
+  assert.equal(sessionErrorText({ name: 42 }), 'session error');
+  assert.equal(sessionErrorText({ name: 'Error: key sk-live-abc' }), 'session error');
+  assert.equal(sessionErrorText({ name: 'A'.repeat(65) }), 'session error');
+  assert.equal(sessionErrorText({ name: 'A'.repeat(64) }), 'A'.repeat(64));
+});
+
+test('sessionErrorText never carries provider message text, whatever it contains', () => {
+  const secretish = [
+    'Incorrect API key provided: sk-proj-****abcd',
+    'Authorization: "Bearer abc.def.ghi"',
+    'Basic dXNlcjpwYXNz',
+    'key sk_live_51Habcdef',
+    'key=abc123',
+    'token eyJ.eyJ.sig',
+    'contact someone@example.com',
+    'organization org-AbCdEfGh12345678',
+  ];
+  for (const message of secretish) {
+    for (const statusCode of [undefined, 400, 401, '403', 429, 500]) {
+      const text = sessionErrorText({
+        name: 'APIError',
+        data: { statusCode, message, responseBody: message, metadata: { url: 'https://x/?key=abc' } },
+      });
+      assert.match(text, /^APIError( \(status \d{3}\))?$/, `${message} / ${statusCode}: ${text}`);
+    }
+  }
+  // And end to end through route(): only the structured form reaches the
+  // agent-end emission.
+  const sessionID = 'ses_synthetic_secret';
+  const state = createBridgeState();
+  route(state, { type: 'session.created', properties: { info: { id: sessionID } } });
+  route(state, { type: 'session.status', properties: { sessionID, status: { type: 'busy' } } });
+  route(state, { type: 'session.error', properties: { sessionID, error: { name: 'APIError', data: { statusCode: 403, message: secretish[0] } } } });
+  const idle = route(state, { type: 'session.idle', properties: { sessionID } });
+  assert.equal(idle.length, 1);
+  assert.equal(idle[0].data.error, 'APIError (status 403)');
 });
 
 test('run4: permission.asked and permission.replied route through the event hook', () => {

@@ -472,10 +472,11 @@ func TestOpencodeDialectHasNoSessionErrorMapping(t *testing.T) {
 // opencodeRun3AgentEndPayload is the exact sciontool stdin scion-bridge.js
 // produces for bus-events-1.18.33.json's run3 (a prompt failing after
 // OpenCode's provider retries are exhausted): the captured session.error
-// ({name: "APIError", data: {message: "mock upstream failure", ...}}) is
-// remembered and attached to that turn's one gated session.idle. The bridge
+// ({name: "APIError", data: {statusCode: 500, message: ..., ...}}) is
+// remembered as its name and status only, and attached to that turn's one
+// gated session.idle. The bridge
 // test "run3: the captured session.error is carried onto the one agent-end
-// as a bounded error string" (scion-bridge.test.mjs) pins that the bridge
+// as its name and status only" (scion-bridge.test.mjs) pins that the bridge
 // emits exactly this, from the real capture; this replays it through the
 // real dialect.yaml and telemetry handler. Note this does not by itself
 // guard dialect.yaml's explicit `error: error` field on session.idle:
@@ -485,7 +486,7 @@ func TestOpencodeDialectHasNoSessionErrorMapping(t *testing.T) {
 var opencodeRun3AgentEndPayload = map[string]interface{}{
 	"hook_event_name": "session.idle",
 	"session_id":      "ses_f12e82b0fffeTWfXQtofqh9VxA",
-	"error":           "APIError: mock upstream failure",
+	"error":           "APIError (status 500)",
 }
 
 // TestOpencodeDialectCarriesSessionErrorOntoTurnEndSpan is ptone/scion#2244:
@@ -501,7 +502,7 @@ func TestOpencodeDialectCarriesSessionErrorOntoTurnEndSpan(t *testing.T) {
 	if event.Name != hooks.EventAgentEnd {
 		t.Fatalf("event.Name = %q, want %q", event.Name, hooks.EventAgentEnd)
 	}
-	if event.Data.Error != "APIError: mock upstream failure" {
+	if event.Data.Error != "APIError (status 500)" {
 		t.Errorf("event.Data.Error = %q, want the bridge's carried session.error text", event.Data.Error)
 	}
 
@@ -520,7 +521,7 @@ func TestOpencodeDialectCarriesSessionErrorOntoTurnEndSpan(t *testing.T) {
 	if spans[0].Name() != "agent.turn.end" {
 		t.Errorf("span name = %q, want agent.turn.end", spans[0].Name())
 	}
-	if got := spans[0].Status(); got.Code != codes.Error || got.Description != "APIError: mock upstream failure" {
+	if got := spans[0].Status(); got.Code != codes.Error || got.Description != "APIError (status 500)" {
 		t.Errorf("span status = %+v, want Error with the carried session.error text", got)
 	}
 

@@ -77,12 +77,6 @@ function numberOrZero(v) {
 // `task_id` much later in a very long-lived `opencode serve` process.
 const MAX_CACHE_ENTRIES = 4096;
 
-// MAX_ERROR_CHARS bounds, in code points, the error text the bridge carries
-// from a session.error onto that turn's agent-end (see routeSessionError).
-// The text becomes a span status and log attribute, so it is kept short;
-// the full error remains in opencode's own log.
-const MAX_ERROR_CHARS = 256;
-
 // evictOldest trims a Map or Set (both expose .size, .keys(), .delete()) down
 // to maxEntries by removing entries in insertion order, oldest first.
 function evictOldest(collection, maxEntries) {
@@ -264,54 +258,28 @@ function routeSessionError(state, event) {
   return [];
 }
 
+// ERROR_NAME_RE accepts an error class name (e.g. "APIError",
+// "ProviderAuthError"): an identifier, bounded in length. Anything else in
+// the `name` field is not carried.
+const ERROR_NAME_RE = /^[A-Za-z][A-Za-z0-9_.]{0,63}$/;
+
 // sessionErrorText renders an OpenCode session.error `error` object
-// ({name, data: {message, statusCode, ...}}) as "<name>: <message>",
-// falling back to whichever part is present. Only name and message are
-// read: response bodies, headers and URLs are never carried.
-//
-// The result becomes span status and log text, so it is limited further:
-// - an authentication error (ProviderAuthError, or an APIError with HTTP
-//   401/403) carries its name only, since provider auth messages can echo
-//   part of the credential or account identifiers;
-// - any other message has credential-like tokens redacted (see
-//   redactErrorMessage) before it is attached;
-// - the text is capped at MAX_ERROR_CHARS code points, cut on a code point
-//   boundary so a surrogate pair is never split.
+// ({name, data: {message, statusCode, ...}}) for turn-end telemetry (span
+// status and log). It carries only structured fields: the error class name
+// and, when present, the numeric HTTP status -- e.g. "APIError (status
+// 429)" or "ProviderAuthError". Free-text fields (data.message, response
+// body, headers, URL) are never carried: provider messages can echo
+// credentials or account details, and no pattern list can reliably scrub
+// them. The full error remains in opencode's own log. The result is bounded
+// by construction (a 64-character name plus a 3-digit status).
 export function sessionErrorText(err) {
-  const name = typeof err?.name === 'string' ? err.name.trim() : '';
-  const rawMessage = typeof err?.data?.message === 'string' ? err.data.message.trim() : '';
-  const statusCode = err?.data?.statusCode;
-  const isAuthError = name === 'ProviderAuthError' ||
-    (name === 'APIError' && (statusCode === 401 || statusCode === 403));
-  const message = isAuthError ? '' : redactErrorMessage(rawMessage);
-  let text = name && message ? `${name}: ${message}` : (name || message || 'session error');
-  const codePoints = Array.from(text);
-  if (codePoints.length > MAX_ERROR_CHARS) text = codePoints.slice(0, MAX_ERROR_CHARS).join('');
-  return text;
-}
-
-// ERROR_REDACTIONS replaces credential-like tokens in provider error text.
-// Order matters: the specific prefixed forms run before the generic long-run
-// rules, so a key is redacted whole rather than in pieces. Masked keys
-// (e.g. "sk-proj-****abcd") are caught by the prefixed rules too.
-const ERROR_REDACTIONS = [
-  [/\bbearer\s+[^\s"',;]+/gi, 'Bearer [REDACTED]'],
-  [/\bsk-[A-Za-z0-9_*.\-]{4,}/g, '[REDACTED]'],
-  [/\bAIza[A-Za-z0-9_*.\-]{10,}/g, '[REDACTED]'],
-  [/\b(?:org|proj)[-_][A-Za-z0-9_*\-]{8,}/g, '[REDACTED]'],
-  // Long hex or base64/base64url runs (keys, tokens, request signatures).
-  [/[A-Za-z0-9+\/_=\-]{32,}/g, '[REDACTED]'],
-];
-
-// redactErrorMessage applies ERROR_REDACTIONS to a provider error message.
-// It runs before truncation, so a token cut by the length cap can never
-// slip through partially unredacted.
-export function redactErrorMessage(message) {
-  let out = message;
-  for (const [pattern, replacement] of ERROR_REDACTIONS) {
-    out = out.replace(pattern, replacement);
+  const rawName = typeof err?.name === 'string' ? err.name.trim() : '';
+  const name = ERROR_NAME_RE.test(rawName) ? rawName : 'session error';
+  const status = Number(err?.data?.statusCode);
+  if (Number.isInteger(status) && status >= 100 && status <= 599) {
+    return `${name} (status ${status})`;
   }
-  return out;
+  return name;
 }
 
 // routeSessionStatus never emits a hook event by itself. It only remembers

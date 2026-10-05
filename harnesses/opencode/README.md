@@ -81,10 +81,9 @@ abort path (the one known path without an idle, context-overflow
 auto-compaction, continues the turn rather than ending it). That matters
 because every agent-end increments a turn counter (`max_turns`), so
 double-counting could shut a working agent down on a single recoverable error
-or user abort. Instead, the bridge remembers a short, limited error string
-(the error name, plus its message for non-authentication errors with
-credential-like tokens removed; never the response body, headers or URL; see
-`sessionErrorText`) for the armed session and attaches
+or user abort. Instead, the bridge remembers the error name and HTTP status
+only (for example `APIError (status 429)`; never the message, response body,
+headers or URL; see `sessionErrorText`) for the armed session and attaches
 it as `error` to that turn's one gated `session.idle` emission, then clears
 it, so the failed turn's `agent.turn.end` span and log carry error status.
 A user abort (`MessageAbortedError`) is not recorded, an error on a session

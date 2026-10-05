@@ -51,8 +51,9 @@
 # turn a second time (a real capture shows session.idle firing twice for one
 # failed prompt, so mapping session.error to anything -- even a non-terminal
 # event -- double-counts a turn against hooks/handlers/limits.go's
-# max_turns). Instead the bridge remembers a short, limited error string
-# (see scion-bridge.js's sessionErrorText) for the armed session and attaches it, as `error`, to that turn's
+# max_turns). Instead the bridge remembers the error's name and HTTP status
+# only (e.g. "APIError (status 429)"; see scion-bridge.js's
+# sessionErrorText) for the armed session and attaches it, as `error`, to that turn's
 # one gated session.idle emission, which the mapping below carries onto the
 # agent-end event (span status and log). A user abort (MessageAbortedError)
 # is not recorded, and a run that goes busy again after the error (e.g.
