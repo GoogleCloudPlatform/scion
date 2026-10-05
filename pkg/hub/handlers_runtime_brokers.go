@@ -517,25 +517,21 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// checkBrokerDispatchAccess verifies that the caller has dispatch permission on
-// the given broker. Returns true if access is granted. If denied, it writes a
-// 403 response and returns false. If the broker cannot be found, it writes an
-// error and returns false.
+// checkBrokerDispatchAccess verifies that the caller may have an agent in
+// project dispatched to the given broker. Returns true if access is granted.
+// If denied, it writes a 403 response and returns false. If the broker cannot
+// be found, it writes an error and returns false.
 //
-// The decision is canDispatchToBroker's, called rather than restated: the two
-// were "one decision written twice" and this is the copy that drifted. It opened
-// with `if userIdent == nil { return true }` — read as "broker-to-broker, allow",
-// but GetUserIdentityFromContext also returns nil for an agent caller and for no
-// caller at all, so it handed dispatch to every agent regardless of scope or
-// project, and to anything unauthenticated that reached it (ptone/scion#591).
-// Delegating leaves one place where the rule can change.
-func (s *Server) checkBrokerDispatchAccess(ctx context.Context, w http.ResponseWriter, brokerID string) bool {
+// The decision is canUseBrokerForProject's, called rather than restated: the
+// rule lives in one place (brokerDispatchAllowed), and this wrapper only adds
+// the response (ptone/scion#591).
+func (s *Server) checkBrokerDispatchAccess(ctx context.Context, w http.ResponseWriter, brokerID string, project *store.Project) bool {
 	broker, err := s.store.GetRuntimeBroker(ctx, brokerID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return false
 	}
-	if !s.canDispatchToBroker(ctx, broker) {
+	if !s.canUseBrokerForProject(ctx, broker, project) {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"You don't have permission to create agents on this broker", nil)
 		return false

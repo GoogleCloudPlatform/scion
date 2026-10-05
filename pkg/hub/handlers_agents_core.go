@@ -1325,9 +1325,11 @@ func (s *Server) createAgentInProject(
 		return
 	}
 
-	// Enforce broker-level dispatch authorization: only the broker owner can create agents on it
+	// Enforce broker-level dispatch authorization: an auto-provide broker, a
+	// broker associated with this project with its owner's consent, or
+	// broker.dispatch on the broker (canUseBrokerForProject).
 	if runtimeBrokerID != "" {
-		if !s.checkBrokerDispatchAccess(ctx, w, runtimeBrokerID) {
+		if !s.checkBrokerDispatchAccess(ctx, w, runtimeBrokerID, project) {
 			return
 		}
 	}

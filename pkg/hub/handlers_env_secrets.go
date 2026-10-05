@@ -2112,6 +2112,12 @@ func (s *Server) handleProjectSecretByKey(w http.ResponseWriter, r *http.Request
 	s.handleScopedSecretByKey(w, r, key, store.ScopeProject, projectID)
 }
 
+// autoProvideLinkedBy is the ProjectProvider.LinkedBy value recorded by
+// autoLinkProviders. brokerProviderHasOwnerConsent treats it as consent,
+// because only brokers whose auto-provide setting was authorized are linked
+// this way.
+const autoProvideLinkedBy = "auto-provide"
+
 // autoLinkProviders links brokers with auto_provide enabled as providers for a project.
 // If the project has no default runtime broker, the first auto-provided broker is set as default.
 func (s *Server) autoLinkProviders(ctx context.Context, project *store.Project) {
@@ -2130,7 +2136,7 @@ func (s *Server) autoLinkProviders(ctx context.Context, project *store.Project) 
 			BrokerID:   autoBroker.ID,
 			BrokerName: autoBroker.Name,
 			Status:     autoBroker.Status,
-			LinkedBy:   "auto-provide",
+			LinkedBy:   autoProvideLinkedBy,
 		}
 		if addErr := s.store.AddProjectProvider(ctx, provider); addErr != nil {
 			s.envSecretLog.Warn("Failed to auto-link broker to project",
