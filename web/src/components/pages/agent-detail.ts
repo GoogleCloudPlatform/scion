@@ -254,8 +254,9 @@ export class ScionPageAgentDetail extends LitElement {
       flex-shrink: 0;
       color: var(--scion-primary, #3b82f6);
       font-size: 1.5rem;
-      /* Centre the icon on the first line of the name. */
-      margin-top: 0.125rem;
+      /* Centre the icon on the first line of the name: (1.95rem h1 line box
+         - 1.5rem icon) / 2. */
+      margin-top: 0.225rem;
     }
     /* A long name wraps on its own line; the badges then follow on the next
        line instead of floating beside a multi-line name. */

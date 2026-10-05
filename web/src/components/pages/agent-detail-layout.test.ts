@@ -15,8 +15,6 @@
  */
 
 import { describe, it, expect, beforeAll, vi } from 'vitest';
-import { readFileSync } from 'fs';
-import { join } from 'path';
 import { render, type TemplateResult } from 'lit';
 
 import type { Agent } from '../../shared/types.js';
@@ -28,8 +26,6 @@ vi.mock('../../client/main.js', () => ({
   navigateTo: vi.fn(),
   stateManager: new EventTarget(),
 }));
-
-const pageSource = readFileSync(join(__dirname, 'agent-detail.ts'), 'utf-8');
 
 /** Leaf style rules from Lit cssText. */
 function styleRules(cssText: string): Map<string, string> {
@@ -70,27 +66,34 @@ describe('agent detail layout', () => {
     expect(text).toMatch(/flex-wrap:\s*wrap/);
     expect(text).toMatch(/min-width:\s*0/);
     expect(rules.get('.header h1') ?? '').toMatch(/overflow-wrap:\s*anywhere/);
-    expect(pageSource).toMatch(/<div class="header-title-text">\s*<h1>/);
   });
 
   it('keeps the message-mode select inside its column', () => {
     expect(rules.get('.messaging-grid') ?? '').toMatch(/flex-wrap:\s*wrap/);
     expect(rules.get('.messaging-grid .messaging-mode') ?? '').toMatch(/max-width:\s*360px/);
     expect(rules.get('.messaging-mode sl-select') ?? '').toMatch(/width:\s*100%/);
-    // The select used to force itself wider than its grid column.
-    expect(pageSource).not.toMatch(/min-width:\s*280px;\s*max-width:\s*360px/);
+    // The select used to force itself wider than its column with an inline
+    // min-width; it now takes its width from the stylesheet only.
+    const select = renderMessagingCard(
+      makeAgent({ _capabilities: { actions: ['read', 'set_message_mode'] } })
+    ).querySelector('sl-select');
+    expect(select).not.toBeNull();
+    expect(select!.hasAttribute('style')).toBe(false);
   });
 
-  /** Render the page header for `agent`. */
-  function renderHeader(agent: Agent): HTMLElement {
+  /** Render one of the page's template methods for `agent`. */
+  function renderPart(agent: Agent, method: 'renderHeader' | 'renderMessagingCard'): HTMLElement {
     const el = document.createElement('scion-page-agent-detail');
     (el as unknown as { agentId: string }).agentId = agent.id;
     (el as unknown as { agent: Agent }).agent = agent;
-    const tpl = (el as unknown as { renderHeader(): TemplateResult }).renderHeader();
+    const tpl = (el as unknown as Record<typeof method, () => TemplateResult>)[method]();
     const host = document.createElement('div');
     render(tpl, host);
     return host;
   }
+  const renderHeader = (agent: Agent): HTMLElement => renderPart(agent, 'renderHeader');
+  const renderMessagingCard = (agent: Agent): HTMLElement =>
+    renderPart(agent, 'renderMessagingCard');
 
   function makeAgent(overrides: Partial<Agent>): Agent {
     return {
