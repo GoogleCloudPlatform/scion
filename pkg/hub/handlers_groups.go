@@ -731,11 +731,15 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 		// Try as ID first, then as slug
 		memberGroup, err := s.store.GetGroup(ctx, req.MemberID)
 		if err != nil {
-			if err == store.ErrNotFound {
+			if errors.Is(err, store.ErrNotFound) {
 				var slugErr error
 				memberGroup, slugErr = s.store.GetGroupBySlug(ctx, req.MemberID)
 				if slugErr != nil {
-					ValidationError(w, "group not found: "+req.MemberID, nil)
+					if errors.Is(slugErr, store.ErrNotFound) {
+						ValidationError(w, "group not found: "+req.MemberID, nil)
+						return
+					}
+					writeErrorFromErr(w, slugErr, "")
 					return
 				}
 				resolvedID = memberGroup.ID
