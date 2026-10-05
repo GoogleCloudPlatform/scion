@@ -1104,10 +1104,12 @@ func TestPutServerConfig_FileMode_EveryMaskedField(t *testing.T) {
 	}
 }
 
-// DB mode, every masked field: sending the field's block back (unchanged or
-// with a changed sibling) never persists the placeholder. Layer-0 blocks
-// are rejected with 422 before any restore; github_app (Layer-1) restores
-// when unchanged and is rejected with 400 when a sibling changed.
+// DB mode (hosted), every masked field: sending the field's block back
+// (unchanged or with a changed sibling) never persists the placeholder.
+// Layer-0 blocks: an unchanged echo of the GET view is ignored (200, nothing
+// written), a changed sibling is rejected with 422 layer0_rejected before
+// any restore. github_app (Layer-1) restores when unchanged and is rejected
+// with 400 when a sibling changed.
 func TestPutServerConfigDB_EveryMaskedField(t *testing.T) {
 	settingsPath := setTempScionHome(t)
 	writeAllSecretsSettings(t, settingsPath)
@@ -1142,6 +1144,9 @@ func TestPutServerConfigDB_EveryMaskedField(t *testing.T) {
 				rr := httptest.NewRecorder()
 				srv.handlePutServerConfigDB(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", string(reqBody)), ops)
 				want := http.StatusUnprocessableEntity
+				if !layer1 && !edited {
+					want = http.StatusOK // Layer-0 echo: ignored
+				}
 				if layer1 {
 					want = http.StatusOK
 					if edited {
