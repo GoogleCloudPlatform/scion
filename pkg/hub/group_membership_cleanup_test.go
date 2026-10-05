@@ -18,7 +18,10 @@ package hub
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -121,6 +124,50 @@ func TestStartupSweep_RemovesOrphanedGroupMemberships(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, members, 1)
 	assert.Equal(t, keep, members[0].MemberID, "the real membership survives the sweep")
+}
+
+// sweepFailingStore fails DeleteOrphanedGroupMemberships and passes every
+// other call through.
+type sweepFailingStore struct {
+	store.Store
+	calls int
+}
+
+// DB forwards to the wrapped store's raw *sql.DB so New()'s D4
+// membership-index migration runs against the real store.
+func (s *sweepFailingStore) DB() *sql.DB {
+	if p, ok := s.Store.(interface{ DB() *sql.DB }); ok {
+		return p.DB()
+	}
+	return nil
+}
+
+func (s *sweepFailingStore) DeleteOrphanedGroupMemberships(context.Context) (int, error) {
+	s.calls++
+	return 0, errors.New("sweep failed")
+}
+
+// TestStartupSweep_ErrorIsNonFatal: a failing startup sweep is logged at Warn
+// and server construction still succeeds.
+func TestStartupSweep_ErrorIsNonFatal(t *testing.T) {
+	inner, err := newTestStore(":memory:")
+	require.NoError(t, err)
+	wrapped := &sweepFailingStore{Store: inner}
+	logs := captureSlog(t)
+
+	srv, _ := testServerWithStore(t, wrapped) // fails the test if New() errors
+	require.NotNil(t, srv)
+
+	assert.Equal(t, 1, wrapped.calls, "New() ran the startup sweep")
+	var warned bool
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if strings.Contains(line, "level=WARN") &&
+			strings.Contains(line, "failed to delete orphaned group memberships") &&
+			strings.Contains(line, "sweep failed") {
+			warned = true
+		}
+	}
+	assert.True(t, warned, "the sweep error is logged at Warn")
 }
 
 // TestSweepOrphanedGroupMemberships_Idempotent: a second run finds nothing.

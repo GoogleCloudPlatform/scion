@@ -1191,7 +1191,11 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, id string) {
 
 		// Remove the user's group memberships before the user row: the
 		// FK is ON DELETE SET NULL, so afterwards they would be orphans
-		// that still count toward group roles (ptone/scion#2769).
+		// that still count toward group roles (ptone/scion#2769). Residual
+		// race on PostgreSQL: a concurrent AddGroupMember for this user can
+		// insert a row this delete does not see, which the FK then nulls.
+		// It is harmless: orphaned rows are excluded from counts and
+		// listings, and the startup sweep removes them.
 		if _, err := tx.DeleteGroupMembershipsForUser(ctx, id); err != nil {
 			return fmt.Errorf("delete group memberships: %w", err)
 		}

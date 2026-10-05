@@ -149,6 +149,13 @@ test-fixture-coverage:
 # (TestProjectOwnerID_*, ptone/scion#2597): UpdateProject must not write
 # owner_id on either backend, so SetProjectOwnerID stays its only writer.
 #
+# It also includes the orphaned group-membership tests and the composite
+# purge tests (ptone/scion#2769): PurgeDeletedAgents re-reads its batch with
+# FOR UPDATE on Postgres only, and the restore-during-purge cases exercise
+# that path. A third run covers the storetest group/MembershipCleanup
+# conformance (pkg/store/storetest), selected by name so only that subtest
+# of the CRUD-parity suite runs here.
+#
 # Fail loudly, not green, if a Postgres-only case in this job's own suite
 # skips instead of running. SCION_TEST_POSTGRES_URL is checked explicitly
 # first; on -v test output, any "--- SKIP" line (including an indented
@@ -181,13 +188,27 @@ test-launch-store-postgres:
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
-		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUTCTimestampNormalizeJSON_|TestConduitRegistry_|TestRunIntent_|TestUpdateSecretValueIfVersion|TestProjectOwnerID_|TestStartClaim_|TestRecoveryObs_)' \
+		-run '^(TestLaunchStore_|TestReaper_|TestListSchedules_|TestListActiveZonePrefixedSchedules|TestReport_H1_|TestPutBrokerSettings|TestDeleteBrokerSettings|TestUsesRowLocks_ReflectsBackend|TestCountAgents_|TestListAgentMembers_|TestUTCTimestampNormalizeJSON_|TestConduitRegistry_|TestRunIntent_|TestUpdateSecretValueIfVersion|TestProjectOwnerID_|TestStartClaim_|TestRecoveryObs_|TestCountGroupMembersByRole_IgnoresDeletedOwner|TestGetGroupMembers_SkipsOrphanedRows|TestCompositeDeleteAgent_|TestCompositeDeleteProject_|TestFinalizeAgentDeletionHard_|TestPurgeDeletedAgents_|TestCompositeStore_PurgeDeletedAgents_)' \
 		./pkg/store/entadapter/... > /tmp/test-launch-store-postgres.log 2>&1; \
 	status=$$?; \
 	cat /tmp/test-launch-store-postgres.log; \
 	if [ $$status -ne 0 ]; then exit $$status; fi; \
 	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres.log; then \
 		echo "ERROR: one or more Postgres-only launch tests were skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi
+	@go test -tags integration -count=1 -timeout 10m -v \
+		-run '^TestCompositeStore_CRUDParity$$/^group$$/^MembershipCleanup$$' \
+		./pkg/store/storetest/... > /tmp/test-launch-store-postgres-storetest.log 2>&1; \
+	status=$$?; \
+	cat /tmp/test-launch-store-postgres-storetest.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if ! grep -qE '^[[:space:]]*--- PASS: TestCompositeStore_CRUDParity/group/MembershipCleanup' /tmp/test-launch-store-postgres-storetest.log; then \
+		echo "ERROR: the storetest group/MembershipCleanup conformance did not run." >&2; \
+		exit 1; \
+	fi; \
+	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-storetest.log; then \
+		echo "ERROR: one or more storetest group/MembershipCleanup cases were skipped -- see '--- SKIP' lines above." >&2; \
 		exit 1; \
 	fi
 

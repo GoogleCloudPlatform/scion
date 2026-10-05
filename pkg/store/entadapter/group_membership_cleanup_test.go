@@ -22,6 +22,8 @@ import (
 	"testing"
 	"time"
 
+	entgo "entgo.io/ent"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/groupmembership"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -234,4 +236,58 @@ func TestCompositeDeleteProject_RemovesGroupMemberships(t *testing.T) {
 
 	assert.Zero(t, orphanedMembershipCount(t, f.cs), "no NULL row left behind")
 	assert.Equal(t, 1, membershipRowCount(t, f.cs, f.group), "only the user owner remains")
+}
+
+// failAgentDeletes makes every agent delete on cs's client (and on any
+// transaction opened from it, which shares the client's hooks) fail with the
+// returned error.
+func failAgentDeletes(cs *CompositeStore) error {
+	boom := errors.New("agent delete failed")
+	cs.client.Agent.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if m.Op().Is(entgo.OpDeleteOne | entgo.OpDelete) {
+				return nil, boom
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+	return boom
+}
+
+// TestCompositeDeleteAgent_FailedDeleteKeepsGroupMemberships: DeleteAgent
+// runs in one transaction, so when the agent row delete fails the membership
+// delete that ran before it is rolled back too.
+func TestCompositeDeleteAgent_FailedDeleteKeepsGroupMemberships(t *testing.T) {
+	ctx := context.Background()
+	f := newAgentGroupFixture(t)
+	boom := failAgentDeletes(f.cs)
+
+	require.ErrorIs(t, f.cs.DeleteAgent(ctx, f.a.ID), boom)
+
+	_, err := f.cs.GetAgent(ctx, f.a.ID)
+	require.NoError(t, err, "agent survives the failed delete")
+	_, err = f.cs.GetGroupMembership(ctx, f.group, store.GroupMemberTypeAgent, f.a.ID)
+	assert.NoError(t, err, "the agent keeps its membership")
+	assert.Equal(t, 3, membershipRowCount(t, f.cs, f.group), "no membership was removed")
+}
+
+// TestCompositeDeleteProject_FailedDeleteKeepsGroupMemberships: DeleteProject
+// runs in one transaction, so when the bulk agent delete fails the project's
+// agents keep their memberships.
+func TestCompositeDeleteProject_FailedDeleteKeepsGroupMemberships(t *testing.T) {
+	ctx := context.Background()
+	f := newAgentGroupFixture(t)
+	boom := failAgentDeletes(f.cs)
+
+	require.ErrorIs(t, f.cs.DeleteProject(ctx, f.projectID), boom)
+
+	_, err := f.cs.GetProject(ctx, f.projectID)
+	require.NoError(t, err, "project survives the failed delete")
+	for _, a := range []*store.Agent{f.a, f.b} {
+		_, err = f.cs.GetAgent(ctx, a.ID)
+		require.NoError(t, err, "agent survives the failed delete")
+		_, err = f.cs.GetGroupMembership(ctx, f.group, store.GroupMemberTypeAgent, a.ID)
+		assert.NoError(t, err, "the agent keeps its membership")
+	}
+	assert.Equal(t, 3, membershipRowCount(t, f.cs, f.group), "no membership was removed")
 }

@@ -242,7 +242,14 @@ func NewCompositeStore(client *ent.Client) *CompositeStore {
 // is ON DELETE SET NULL, so once the agent row is gone its membership rows no
 // longer carry the agent ID and could only be found as orphans
 // (ptone/scion#2769).
+//
+// Everything runs in one transaction, so the membership delete and the agent
+// row delete commit or roll back together: a failed agent delete leaves the
+// agent with its memberships.
 func (c *CompositeStore) DeleteAgent(ctx context.Context, id string) error {
+	if !c.inTx {
+		return c.WithTx(ctx, func(tx store.Store) error { return tx.DeleteAgent(ctx, id) })
+	}
 	if _, err := c.DeleteGroupMembershipsForAgents(ctx, []string{id}); err != nil {
 		return err
 	}
@@ -293,7 +300,14 @@ func (c *CompositeStore) deleteAgentDependents(ctx context.Context, id string) e
 // project->agents edge has no DB-level cascade, so deleting a project while
 // agents still reference it would fail with a foreign-key violation. The bulk
 // agent delete is a hard delete, so it also removes soft-deleted agents.
+//
+// Everything runs in one transaction: the agent-ID query, the cascades
+// (including the group-membership delete) and the row deletes commit or roll
+// back together.
 func (c *CompositeStore) DeleteProject(ctx context.Context, id string) error {
+	if !c.inTx {
+		return c.WithTx(ctx, func(tx store.Store) error { return tx.DeleteProject(ctx, id) })
+	}
 	uid, err := parseUUID(id)
 	if err != nil {
 		return err
@@ -423,9 +437,11 @@ func (c *CompositeStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Tim
 		// before the delete (agent_id is ON DELETE SET NULL; see DeleteAgent).
 		// The set is re-read under the eligibility predicate, and locked where
 		// the database supports row locks, so a candidate restored in between
-		// keeps its memberships just as it keeps its row.
+		// keeps its memberships just as it keeps its row. Rows are locked in
+		// ID order so concurrent purges take overlapping locks in one order.
 		eligibleQuery := tx.Agent.Query().
-			Where(agent.IDIn(batch...), agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff))
+			Where(agent.IDIn(batch...), agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff)).
+			Order(ent.Asc(agent.FieldID))
 		if useLock {
 			eligibleQuery = eligibleQuery.ForUpdate()
 		}
