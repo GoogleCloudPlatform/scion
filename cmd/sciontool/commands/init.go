@@ -609,10 +609,11 @@ func RunInit(args []string, opts InitRunOptions) int {
 		lifecycleManager.RegisterHandler(eventName, loggingHandler.Handle)
 	}
 
-	// Create telemetry handler for hook-to-span conversion
-	// Note: The hook command is invoked separately by harnesses, so telemetry
-	// handler registration happens in hook.go. This handler is for lifecycle events.
-	var telemetryHandler *handlers.TelemetryHandler
+	// Create telemetry handler for lifecycle-event spans and metrics.
+	// Harness hook events are handled by separate `sciontool hook`
+	// processes (hook.go), which also report session metrics to the Hub.
+	// This handler sees only lifecycle events, which carry no session ID or
+	// counts, so it does not report session metrics.
 	var lifecycleProviders *telemetry.Providers
 	if telemetryPipeline != nil && telemetryPipeline.Config() != nil {
 		redactor := telemetry.NewRedactor(telemetryPipeline.Config().Redaction)
@@ -625,7 +626,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 			log.Error("Failed to create lifecycle telemetry providers: %v", provErr)
 		}
 
-		telemetryHandler = registerLifecycleTelemetryHandler(lifecycleManager, lifecycleProviders, redactor)
+		registerLifecycleTelemetryHandler(lifecycleManager, lifecycleProviders, redactor)
 		log.Info("Telemetry handler initialized for hook-to-span conversion")
 	}
 	if lifecycleProviders != nil {
@@ -869,22 +870,6 @@ func RunInit(args []string, opts InitRunOptions) int {
 	// Initialize hubClient early so the metadata server's fetch callbacks
 	// can use it without data races or startup race conditions.
 	hubClient := hub.NewClient()
-
-	// Wire the OnSessionEnd callback so the aggregator sends finalized
-	// session metrics to the Hub when a session completes. The closure
-	// captures hubClient, which is already initialized above.
-	if telemetryHandler != nil && hubClient != nil && hubClient.IsConfigured() {
-		telemetryHandler.OnSessionEnd = func(summary telemetry.SessionSummary) {
-			payload := hub.SummaryToMetricsPayload(summary)
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if err := hubClient.ReportMetrics(ctx, payload); err != nil {
-				log.Error("Failed to report session metrics to hub: %v", err)
-			} else {
-				log.Info("Session metrics reported to hub for session %s", summary.SessionID)
-			}
-		}
-	}
 
 	// Start GCP metadata server if configured
 	var metadataServer *metadata.Server

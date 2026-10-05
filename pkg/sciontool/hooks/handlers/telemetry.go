@@ -64,9 +64,14 @@ type TelemetryHandler struct {
 	aggregator *telemetry.Aggregator
 
 	// OnSessionEnd is called with the finalized session summary when a
-	// session-end event is processed. Set by the daemon to wire up Hub
-	// reporting without creating a circular dependency.
+	// session-end event is processed. Set by the hook command to wire up
+	// Hub reporting without creating a circular dependency.
 	OnSessionEnd func(summary telemetry.SessionSummary)
+
+	// SessionState, if set, persists the aggregator's state between hook
+	// invocations. Each `sciontool hook` run is a new process with a new
+	// handler, so without it a session's counts are lost between events.
+	SessionState SessionStateStore
 
 	// Metric instruments
 	usageTokens  metric.Int64Counter // scion.usage.tokens{token_type} (design §3.5; replaces scion.hook.tokens.*)
@@ -723,13 +728,52 @@ func (h *TelemetryHandler) Flush() {
 	})
 }
 
-// updateAggregator feeds event data into the in-memory aggregator that
-// accumulates session-level metrics for Hub reporting.
+// updateAggregator feeds event data into the aggregator that accumulates
+// session-level metrics for Hub reporting, and calls OnSessionEnd when a
+// session ends.
+//
+// With SessionState set, the aggregator's state is loaded before the event
+// is applied and saved after it, under the store's lock, so that the
+// per-invocation hook processes share one session's counts. OnSessionEnd is
+// called after the lock is released.
 func (h *TelemetryHandler) updateAggregator(event *hooks.Event) {
 	if h.aggregator == nil {
 		return
 	}
 
+	var summary telemetry.SessionSummary
+	var ended bool
+	apply := func() bool {
+		summary, ended = h.applyAggregatorEvent(event)
+		return ended
+	}
+	if h.SessionState != nil && isAggregatorEvent(event.Name) {
+		if err := h.SessionState.Update(h.aggregator, event, apply); err != nil {
+			log.Error("Session metrics state: %v", err)
+		}
+	} else {
+		apply()
+	}
+
+	if ended && h.OnSessionEnd != nil {
+		h.OnSessionEnd(summary)
+	}
+}
+
+// isAggregatorEvent reports whether applyAggregatorEvent changes the
+// aggregator for an event with this name.
+func isAggregatorEvent(name string) bool {
+	switch name {
+	case hooks.EventSessionStart, hooks.EventToolEnd, hooks.EventModelEnd, hooks.EventAgentEnd, hooks.EventSessionEnd:
+		return true
+	default:
+		return false
+	}
+}
+
+// applyAggregatorEvent applies one event to the aggregator. On session-end
+// it returns the finalized summary and true.
+func (h *TelemetryHandler) applyAggregatorEvent(event *hooks.Event) (telemetry.SessionSummary, bool) {
 	// Events that feed the summary also carry the session ID. Observing it
 	// means a missed session-start does not leave the summary without an
 	// ID or start time (the session-end event itself usually has the ID).
@@ -766,10 +810,9 @@ func (h *TelemetryHandler) updateAggregator(event *hooks.Event) {
 			event.Data.ReasoningTokens,
 			event.Data.Error,
 		)
-		if h.OnSessionEnd != nil {
-			h.OnSessionEnd(summary)
-		}
+		return summary, true
 	}
+	return telemetry.SessionSummary{}, false
 }
 
 func isMetricRelevantEvent(name string) bool {
