@@ -264,6 +264,41 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	groupID := api.NewUUID()
+
+	// A group created under a parent becomes a member of that parent and
+	// inherits the parent's role bindings, so the caller needs the same
+	// authority on the parent as adding a group member to it would require,
+	// and the new membership counts toward the parent's member limit. Both
+	// checks run before anything is created.
+	var parentEdge *store.GroupMember
+	var canDelegateResult, canDelegateReason string
+	if req.ParentID != "" {
+		parent, err := s.store.GetGroup(ctx, req.ParentID)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				ValidationError(w, "parent group not found: "+req.ParentID, nil)
+				return
+			}
+			writeErrorFromErr(w, err, "")
+			return
+		}
+		var ok bool
+		canDelegateResult, canDelegateReason, ok = s.authorizeGroupMemberGrant(w, r, parent, store.GroupMemberRoleMember)
+		if !ok {
+			return
+		}
+		parentEdge = &store.GroupMember{
+			GroupID:    parent.ID,
+			MemberType: store.GroupMemberTypeGroup,
+			MemberID:   groupID,
+			Role:       store.GroupMemberRoleMember,
+		}
+		if !s.reserveGroupMemberSlot(w, ctx, parentEdge) {
+			return
+		}
+	}
+
 	ownerID := req.OwnerID
 	createdBy := ""
 	if identity := GetIdentityFromContext(ctx); identity != nil {
@@ -274,7 +309,7 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	group := &store.Group{
-		ID:          api.NewUUID(),
+		ID:          groupID,
 		Name:        req.Name,
 		Slug:        slug,
 		Description: req.Description,
@@ -287,12 +322,19 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.store.CreateGroup(ctx, group); err != nil {
+		if parentEdge != nil {
+			s.releaseGroupMemberSlot(ctx, parentEdge.GroupID, parentEdge.MemberType, parentEdge.MemberID)
+		}
 		if err == store.ErrAlreadyExists {
 			Conflict(w, "Group with this slug already exists")
 			return
 		}
 		writeErrorFromErr(w, err, "")
 		return
+	}
+
+	if parentEdge != nil {
+		s.auditGroupMemberAdd(ctx, parentEdge, canDelegateResult, canDelegateReason)
 	}
 
 	s.groupsLogger().Info("group created",
@@ -618,11 +660,6 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 	ctx := r.Context()
 	groupID := group.ID
 
-	// Enforce authorization: only group owner or admins can add members
-	if !s.authorize(w, r, groupResource(group), ActionAddMember) {
-		return
-	}
-
 	var req AddGroupMemberRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -649,53 +686,11 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 		return
 	}
 
-	// Enforce role-hierarchy: only owners can add owners/admins; admins can only add members.
-	// Platform admins and group resource owners bypass the role-hierarchy check.
-	//
-	// The hierarchy is defined over user membership in the group, so it cannot be
-	// evaluated for an agent or broker caller — which is why the pre-#591 form of
-	// this guard let those callers grant any role at all. Such a caller reaches
-	// this point only through an explicit addMember policy, and is held to adding
-	// plain members: escalating someone to admin or owner requires a caller whose
-	// own standing in the group can be checked.
-	userIdent, isUserCaller := GetIdentityFromContext(ctx).(UserIdentity)
-	if !isUserCaller {
-		if req.Role != store.GroupMemberRoleMember {
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"Only group owners can add owners or admins", nil)
-			return
-		}
-	} else {
-		isResourceOwner := group.OwnerID != "" && group.OwnerID == userIdent.ID()
-		isPlatformAdmin := s.authzService.Decide(ctx, AuthzRequest{
-			Principal:  principalContextForIdentity(userIdent),
-			Credential: credentialContextForIdentity(userIdent),
-			Resource:   Resource{Type: "group", ID: "hub"},
-			Action:     Action("update"),
-			Permission: "group.update",
-		}).Allowed
-		if !isResourceOwner && !isPlatformAdmin {
-			callerMembership, err := s.store.GetGroupMembership(ctx, groupID, store.GroupMemberTypeUser, userIdent.ID())
-			switch req.Role {
-			case store.GroupMemberRoleOwner, store.GroupMemberRoleAdmin:
-				if err != nil || callerMembership.Role != store.GroupMemberRoleOwner {
-					writeError(w, http.StatusForbidden, ErrCodeForbidden,
-						"Only group owners can add owners or admins", nil)
-					return
-				}
-			case store.GroupMemberRoleMember:
-				if err != nil {
-					writeError(w, http.StatusForbidden, ErrCodeForbidden,
-						"Only group owners or admins can add members", nil)
-					return
-				}
-				if callerMembership.Role != store.GroupMemberRoleOwner && callerMembership.Role != store.GroupMemberRoleAdmin {
-					writeError(w, http.StatusForbidden, ErrCodeForbidden,
-						"Only group owners or admins can add members", nil)
-					return
-				}
-			}
-		}
+	// Authorization on the group: addMember, the role hierarchy, and the
+	// delegation check (see authorizeGroupMemberGrant).
+	canDelegateResult, canDelegateReason, ok := s.authorizeGroupMemberGrant(w, r, group, req.Role)
+	if !ok {
+		return
 	}
 
 	// Resolve the member ID from human-friendly identifiers.
@@ -779,35 +774,6 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 		}
 	}
 
-	// CanDelegate check: ensure the actor has sufficient authority to grant
-	// the membership. Because membership in a role-bearing group confers all
-	// of that group's role-binding authority, the actor must hold every
-	// permission that becomes newly reachable.
-	//
-	// This applies to ALL callers (user AND agent) and ALL member types
-	// (user, group, agent). An agent with group.addMember authority must
-	// pass the same delegation test as a user caller — group governance role
-	// does NOT substitute for resource authority.
-	var canDelegateResult, canDelegateReason string
-	if s.authzService != nil {
-		actorIdentity := GetIdentityFromContext(ctx)
-		if actorIdentity != nil {
-			grantDesc := GrantDescriptor{
-				Type:    GrantTypeGroupMembership,
-				GroupID: groupID,
-			}
-			delegateDecision := s.authzService.CanDelegate(ctx, actorIdentity, grantDesc)
-			canDelegateResult = "allow"
-			canDelegateReason = delegateDecision.Reason
-			if !delegateDecision.Allowed {
-				logAuthzDenial(r, actorIdentity, groupResource(group), ActionAddMember,
-					"CanDelegate denied: "+delegateDecision.Reason)
-				writeForbidden(w, "Cannot grant authority you do not hold: "+delegateDecision.Reason)
-				return
-			}
-		}
-	}
-
 	member := &store.GroupMember{
 		GroupID:    groupID,
 		MemberType: req.MemberType,
@@ -821,29 +787,12 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 	}
 
 	// Quota enforcement: check members-per-group limit before addition.
-	if s.quotaService != nil {
-		membershipID := fmt.Sprintf("%s:%s:%s", groupID, member.MemberType, member.MemberID)
-		if err := s.quotaService.CheckAndReserve(ctx, "max_members_per_group", groupID, "group", groupID, membershipID); err != nil {
-			if errors.Is(err, store.ErrQuotaExceeded) {
-				writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
-					"quota exceeded: max_members_per_group", nil)
-				return
-			}
-			if errors.Is(err, ErrQuotaLockContention) {
-				writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
-					"quota check temporarily unavailable, please retry", nil)
-				return
-			}
-			writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "quota check failed", nil)
-			return
-		}
+	if !s.reserveGroupMemberSlot(w, ctx, member) {
+		return
 	}
 
 	if err := s.store.AddGroupMember(ctx, member); err != nil {
-		if s.quotaService != nil {
-			membershipID := fmt.Sprintf("%s:%s:%s", groupID, member.MemberType, member.MemberID)
-			s.quotaService.Release(ctx, "max_members_per_group", membershipID)
-		}
+		s.releaseGroupMemberSlot(ctx, member.GroupID, member.MemberType, member.MemberID)
 		if err == store.ErrAlreadyExists {
 			Conflict(w, "Member already exists in this group")
 			return
@@ -852,15 +801,7 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 		return
 	}
 
-	auditRecord := &store.MutationAuditRecord{
-		MutationType:      "group_member_add",
-		TargetType:        "group_membership",
-		TargetID:          group.ID,
-		AfterSummary:      `{"groupId":"` + group.ID + `","memberType":"` + member.MemberType + `","memberId":"` + member.MemberID + `","role":"` + member.Role + `"}`,
-		CanDelegateResult: canDelegateResult,
-		CanDelegateReason: canDelegateReason,
-	}
-	s.emitMutationAudit(r.Context(), auditRecord)
+	s.auditGroupMemberAdd(ctx, member, canDelegateResult, canDelegateReason)
 
 	s.groupsLogger().Info("group member added",
 		"group_id", groupID,
@@ -874,6 +815,169 @@ func (s *Server) addGroupMember(w http.ResponseWriter, r *http.Request, group *s
 		DisplayName: s.resolveGroupMemberDisplayName(ctx, member.MemberType, member.MemberID),
 	}
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+// groupMembershipQuotaID is the max_members_per_group reservation resource ID
+// for one membership of a group.
+func groupMembershipQuotaID(groupID, memberType, memberID string) string {
+	return fmt.Sprintf("%s:%s:%s", groupID, memberType, memberID)
+}
+
+// reserveGroupMemberSlot reserves a max_members_per_group slot on
+// member.GroupID for member, writing the refusal response and returning false
+// when the group is at its limit or the check fails. Callers release the slot
+// with releaseGroupMemberSlot if the membership is then not created.
+func (s *Server) reserveGroupMemberSlot(w http.ResponseWriter, ctx context.Context, member *store.GroupMember) bool {
+	if s.quotaService == nil {
+		return true
+	}
+	membershipID := groupMembershipQuotaID(member.GroupID, member.MemberType, member.MemberID)
+	err := s.quotaService.CheckAndReserve(ctx, store.LimitMaxMembersPerGroup, member.GroupID, "group", member.GroupID, membershipID)
+	if err == nil {
+		return true
+	}
+	if errors.Is(err, store.ErrQuotaExceeded) {
+		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
+			"quota exceeded: max_members_per_group", nil)
+		return false
+	}
+	if errors.Is(err, ErrQuotaLockContention) {
+		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
+			"quota check temporarily unavailable, please retry", nil)
+		return false
+	}
+	writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, "quota check failed", nil)
+	return false
+}
+
+// releaseGroupMemberSlot releases the max_members_per_group reservation for
+// one membership of a group (best-effort).
+func (s *Server) releaseGroupMemberSlot(ctx context.Context, groupID, memberType, memberID string) {
+	if s.quotaService == nil {
+		return
+	}
+	s.quotaService.Release(ctx, store.LimitMaxMembersPerGroup, groupMembershipQuotaID(groupID, memberType, memberID))
+}
+
+// auditGroupMemberAdd writes the group_member_add mutation audit record for a
+// membership that was just created, with the CanDelegate result and reason
+// returned by authorizeGroupMemberGrant.
+func (s *Server) auditGroupMemberAdd(ctx context.Context, member *store.GroupMember, canDelegateResult, canDelegateReason string) {
+	s.emitMutationAudit(ctx, &store.MutationAuditRecord{
+		MutationType:      "group_member_add",
+		TargetType:        "group_membership",
+		TargetID:          member.GroupID,
+		AfterSummary:      `{"groupId":"` + member.GroupID + `","memberType":"` + member.MemberType + `","memberId":"` + member.MemberID + `","role":"` + member.Role + `"}`,
+		CanDelegateResult: canDelegateResult,
+		CanDelegateReason: canDelegateReason,
+	})
+}
+
+// authorizeGroupMemberGrant runs the authorization for adding a member with
+// the given role to group, writing the refusal response and returning ok=false
+// when the caller may not. It is shared by addGroupMember and by createGroup
+// when a new group is created under a parent group (the new group becomes a
+// member of the parent, so it needs the same authority on the parent):
+//
+//  1. group.addMember on the group;
+//  2. the role hierarchy within the group;
+//  3. CanDelegate for a membership of the group.
+//
+// On success it returns the CanDelegate result and reason for the audit
+// record.
+func (s *Server) authorizeGroupMemberGrant(w http.ResponseWriter, r *http.Request, group *store.Group, role string) (canDelegateResult, canDelegateReason string, ok bool) {
+	ctx := r.Context()
+
+	// Only group owners, group admins or callers granted group.addMember
+	// may add members.
+	if !s.authorize(w, r, groupResource(group), ActionAddMember) {
+		return "", "", false
+	}
+
+	// Enforce role-hierarchy: only owners can add owners/admins; admins can only add members.
+	// Platform admins and group resource owners are exempt from the role-hierarchy check.
+	//
+	// The hierarchy is defined over user membership in the group, so it cannot be
+	// evaluated for an agent or broker caller — which is why an earlier form of
+	// this guard let those callers grant any role at all. Such a caller reaches
+	// this point only through an explicit addMember policy, and is held to adding
+	// plain members: making someone an admin or owner requires a caller whose
+	// own standing in the group can be checked.
+	userIdent, isUserCaller := GetIdentityFromContext(ctx).(UserIdentity)
+	if !isUserCaller {
+		if role != store.GroupMemberRoleMember {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"Only group owners can add owners or admins", nil)
+			return "", "", false
+		}
+	} else {
+		isResourceOwner := group.OwnerID != "" && group.OwnerID == userIdent.ID()
+		isPlatformAdmin := s.authzService.Decide(ctx, AuthzRequest{
+			Principal:  principalContextForIdentity(userIdent),
+			Credential: credentialContextForIdentity(userIdent),
+			Resource:   Resource{Type: "group", ID: "hub"},
+			Action:     Action("update"),
+			Permission: "group.update",
+		}).Allowed
+		if !isResourceOwner && !isPlatformAdmin {
+			callerMembership, err := s.store.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, userIdent.ID())
+			// Not being a member is a refusal below; any other store error
+			// is reported as such rather than as a 403.
+			if err != nil && !errors.Is(err, store.ErrNotFound) {
+				writeErrorFromErr(w, err, "")
+				return "", "", false
+			}
+			switch role {
+			case store.GroupMemberRoleOwner, store.GroupMemberRoleAdmin:
+				if err != nil || callerMembership.Role != store.GroupMemberRoleOwner {
+					writeError(w, http.StatusForbidden, ErrCodeForbidden,
+						"Only group owners can add owners or admins", nil)
+					return "", "", false
+				}
+			case store.GroupMemberRoleMember:
+				if err != nil {
+					writeError(w, http.StatusForbidden, ErrCodeForbidden,
+						"Only group owners or admins can add members", nil)
+					return "", "", false
+				}
+				if callerMembership.Role != store.GroupMemberRoleOwner && callerMembership.Role != store.GroupMemberRoleAdmin {
+					writeError(w, http.StatusForbidden, ErrCodeForbidden,
+						"Only group owners or admins can add members", nil)
+					return "", "", false
+				}
+			}
+		}
+	}
+
+	// CanDelegate check: ensure the actor has sufficient authority to grant
+	// the membership. Because membership in a role-bearing group confers all
+	// of that group's role-binding authority, the actor must hold every
+	// permission that becomes newly reachable.
+	//
+	// This applies to ALL callers (user AND agent) and ALL member types
+	// (user, group, agent). An agent with group.addMember authority must
+	// pass the same delegation test as a user caller — group governance role
+	// does NOT substitute for resource authority.
+	if s.authzService != nil {
+		actorIdentity := GetIdentityFromContext(ctx)
+		if actorIdentity != nil {
+			grantDesc := GrantDescriptor{
+				Type:    GrantTypeGroupMembership,
+				GroupID: group.ID,
+			}
+			delegateDecision := s.authzService.CanDelegate(ctx, actorIdentity, grantDesc)
+			canDelegateResult = "allow"
+			canDelegateReason = delegateDecision.Reason
+			if !delegateDecision.Allowed {
+				logAuthzDenial(r, actorIdentity, groupResource(group), ActionAddMember,
+					"CanDelegate denied: "+delegateDecision.Reason)
+				writeForbidden(w, "Cannot grant authority you do not hold: "+delegateDecision.Reason)
+				return "", "", false
+			}
+		}
+	}
+
+	return canDelegateResult, canDelegateReason, true
 }
 
 // handleGroupMemberByID handles DELETE on /api/v1/groups/{groupId}/members/{type}/{id}
@@ -972,10 +1076,7 @@ func (s *Server) removeGroupMember(w http.ResponseWriter, r *http.Request, group
 	}
 
 	// Release quota reservation for the removed member (best-effort).
-	if s.quotaService != nil {
-		membershipID := fmt.Sprintf("%s:%s:%s", group.ID, memberType, memberID)
-		s.quotaService.Release(ctx, "max_members_per_group", membershipID)
-	}
+	s.releaseGroupMemberSlot(ctx, group.ID, memberType, memberID)
 
 	s.emitMutationAudit(r.Context(), &store.MutationAuditRecord{
 		MutationType:  "group_member_remove",
