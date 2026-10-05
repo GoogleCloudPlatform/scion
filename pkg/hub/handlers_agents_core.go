@@ -1042,6 +1042,10 @@ func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (co
 // compensation failed (correlationID != ""), it writes a 500 that carries the
 // correlation ID, because the create's records may be left behind;
 // otherwise it writes the failure's own response.
+//
+// The 500 takes precedence over every original response, including a 409
+// delete_in_progress: when the rollback is incomplete, the caller needs the
+// correlation ID to report the leftover records.
 func writeCreateFailure(w http.ResponseWriter, correlationID string, writeOriginal func()) {
 	if correlationID == "" {
 		writeOriginal()
