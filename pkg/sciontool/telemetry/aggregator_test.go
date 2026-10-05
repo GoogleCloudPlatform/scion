@@ -442,3 +442,44 @@ func TestAggregator_ObserveWithinStartedSession(t *testing.T) {
 		t.Errorf("APICallCount = %d, want 1", summary.APICallCount)
 	}
 }
+
+// Claude sends session-start again with the same ID on /compact and on
+// resume. That must keep the counts and the start time.
+func TestAggregator_RepeatedSessionStartSameIDKeepsCounts(t *testing.T) {
+	a := newTestAggregator()
+
+	a.StartSession("s1")
+	started := a.startedAt
+	a.RecordModelEnd(100, 10, 0, 0)
+	a.RecordToolEnd("Bash", "")
+	a.RecordTurn()
+	a.StartSession("s1")
+	a.RecordModelEnd(5, 1, 0, 0)
+	summary := a.Finalize(0, 0, 0, 0, "")
+
+	if summary.SessionID != "s1" || !summary.StartedAt.Equal(started) {
+		t.Errorf("got id=%q started=%v, want s1/%v", summary.SessionID, summary.StartedAt, started)
+	}
+	if summary.APICallCount != 2 || summary.TokensInput != 105 || summary.TurnCount != 1 {
+		t.Errorf("api=%d in=%d turns=%d, want 2/105/1", summary.APICallCount, summary.TokensInput, summary.TurnCount)
+	}
+	if summary.ToolCalls["Bash"].Calls != 1 {
+		t.Errorf("Bash calls = %d, want 1", summary.ToolCalls["Bash"].Calls)
+	}
+}
+
+// A start with the same ID after Finalize begins a fresh session.
+func TestAggregator_SessionStartSameIDAfterFinalizeResets(t *testing.T) {
+	a := newTestAggregator()
+
+	a.StartSession("s1")
+	a.RecordModelEnd(100, 10, 0, 0)
+	a.Finalize(0, 0, 0, 0, "")
+
+	a.StartSession("s1")
+	summary := a.Finalize(0, 0, 0, 0, "")
+
+	if summary.SessionID != "s1" || summary.APICallCount != 0 || summary.TokensInput != 0 {
+		t.Errorf("got id=%q api=%d in=%d, want s1/0/0", summary.SessionID, summary.APICallCount, summary.TokensInput)
+	}
+}
