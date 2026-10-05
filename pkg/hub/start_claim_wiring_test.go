@@ -435,11 +435,20 @@ func TestStartClaimWiring_FenceFailureRollsBackCapacity(t *testing.T) {
 	setBrokerAgentCeiling(t, f.s, 5)
 	def, err := f.s.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
 	require.NoError(t, err)
-	f.srv.startClaimTestHook = func(r *startClaimRun) { r.fenceAt = time.Now().Add(-time.Second) }
+	// The fence passes while the reservation is being made: the claim is
+	// lost (its run context cancelled) by the time the fence is checked.
+	f.srv.startClaimTestHook = func(r *startClaimRun) {
+		r.fenceAt = time.Now().Add(150 * time.Millisecond)
+		r.renewEvery = time.Hour
+	}
 	d.start = func(ctx context.Context, cur *store.Agent) error {
 		t.Fatal("dispatched past the fence")
 		return nil
 	}
+	// A database refuses work on a done context, so the release must run
+	// on a detached one.
+	f.srv.store = ctxHonouringReleaseStore{Store: f.s, reserveDelay: 400 * time.Millisecond}
+	f.srv.quotaService.store = f.srv.store
 	err = f.srv.startAgentCore(ctx, a, StartOpts{Kind: store.StartClaimUser})
 	require.ErrorIs(t, err, errStartClaimLost)
 	has, err := f.s.HasActiveReservation(ctx, def.ID, a.ID)
@@ -514,4 +523,32 @@ func TestStartClaimWiring_WakeRunningWrittenUnderClaim(t *testing.T) {
 	require.Nil(t, dmErr)
 	require.Equal(t, WakeResumed, res.Outcome)
 	assert.True(t, claimHeld, "running is written before the wake's claim is released")
+}
+
+// ctxHonouringReleaseStore refuses a reservation release on a done context,
+// as a real database does, and delays returning from a reservation.
+type ctxHonouringReleaseStore struct {
+	store.Store
+	reserveDelay time.Duration
+}
+
+func (s ctxHonouringReleaseStore) TryAdvisoryLock(ctx context.Context, key store.AdvisoryLockKey) (bool, func() error, error) {
+	return s.Store.(store.AdvisoryLocker).TryAdvisoryLock(ctx, key)
+}
+
+func (s ctxHonouringReleaseStore) TryAdvisoryLockObject(ctx context.Context, classID store.AdvisoryLockKey, objID int32) (bool, func() error, error) {
+	return s.Store.(store.AdvisoryLocker).TryAdvisoryLockObject(ctx, classID, objID)
+}
+
+func (s ctxHonouringReleaseStore) CreateUsageReservation(ctx context.Context, r *store.UsageReservation) (*store.UsageReservation, error) {
+	out, err := s.Store.CreateUsageReservation(ctx, r)
+	time.Sleep(s.reserveDelay)
+	return out, err
+}
+
+func (s ctxHonouringReleaseStore) ReleaseReservation(ctx context.Context, limitID, resourceID string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return s.Store.ReleaseReservation(ctx, limitID, resourceID)
 }
