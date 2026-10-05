@@ -1407,7 +1407,7 @@ describe('scion-quick-palette: keys typed before the query input has focus', () 
     expect(typeahead.pending).toBe('');
   });
 
-  it('the initial focus applies the keys when focusing fires no focus event, as in a window without focus', async () => {
+  it('the initial focus applies the keys when focusing fires no focus event', async () => {
     const el = await mountClosed();
     await show(el);
     typeOutside('a');
