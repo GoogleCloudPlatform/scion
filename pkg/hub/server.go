@@ -4826,7 +4826,13 @@ func (s *Server) registerSchedulerHandlers() {
 	s.scheduler.RegisterRecurringSingleton("broker-quota-reconcile", 60, store.LockBrokerQuotaReconcile, s.ReconcileStaleBrokerQuotaReservations)
 	s.scheduler.RegisterRecurringSingleton("reincarnation-sweep", 5, store.LockReincarnationSweep, s.reincarnationSweepHandler())
 	s.scheduler.RegisterRecurringSingleton("start-claim-reaper", 1, store.LockStartClaimReaper, s.startClaimReaperHandler())
-	go s.demoteOwnClaimsOnRestart(context.Background())
+	go func() {
+		// Bounded: a store that does not answer at startup must not leave
+		// this goroutine behind.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		s.demoteOwnClaimsOnRestart(ctx)
+	}()
 
 	// A2A bridge sweep — conditional on the bridge being registered as a standalone plugin.
 	if a2aExternalURL := s.getA2ABridgeExternalURL(); a2aExternalURL != "" {

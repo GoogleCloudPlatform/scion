@@ -394,7 +394,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 	// The already-pending/already-starting check itself now lives above,
 	// before the plan is computed, so it also gates --dry-run (design §3.4
 	// Amendment A11 item 3); a concurrent real request could still slip in
-	// between that check and this claim, but UpdateAgent's own state_version
+	// between that check and this claim, but ClaimAgentReincarnation's state_version
 	// CAS below catches that race exactly as it always has.
 	previousReincarnationState := agent.ReincarnationState
 	previousReincarnationUpdatedAt := agent.ReincarnationUpdatedAt

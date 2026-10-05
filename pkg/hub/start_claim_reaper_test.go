@@ -76,45 +76,55 @@ func TestStartClaimReaper_AbsentTooSoonAfterDemotionKeeps(t *testing.T) {
 }
 
 func TestStartClaimReaper_StartInFlight(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		capability bool
-		released   bool
-	}{
-		{"broker reports the start in flight", true, false},
-		{"broker without the capability: time rule only", false, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			f, _, a := newClaimFixture(t)
-			noObservationLag(t)
-			unconfirmedClaim(t, f, a, store.StartClaimUser, time.Hour)
-			hb := brokerHeartbeatRequest{
-				Status:         store.BrokerStatusOnline,
-				Inventory:      completeInventory(),
-				StartsInFlight: []brokerStartInFlight{{ProjectID: f.projectID, Slug: a.Slug}},
-				Projects:       []brokerProjectHeartbeat{{ProjectID: f.projectID}},
-			}
-			if tc.capability {
-				hb.Capabilities = &store.BrokerCapabilities{StartsInFlight: true}
-			}
-			f.send(hb)
-			f.srv.reapStartClaims(context.Background())
-			got := getAgent(t, f.s, a.ID)
-			if tc.released {
-				assert.Empty(t, got.StartClaimID)
-			} else {
-				assert.Equal(t, store.StartClaimUnconfirmed, got.StartClaimState)
-			}
+	t.Run("broker reports the start in flight", func(t *testing.T) {
+		f, _, a := newClaimFixture(t)
+		noObservationLag(t)
+		unconfirmedClaim(t, f, a, store.StartClaimUser, time.Hour)
+		f.send(brokerHeartbeatRequest{
+			Status:         store.BrokerStatusOnline,
+			Inventory:      completeInventory(),
+			Capabilities:   &store.BrokerCapabilities{StartsInFlight: true},
+			StartsInFlight: []brokerStartInFlight{{ProjectID: f.projectID, Slug: a.Slug}},
+			Projects:       []brokerProjectHeartbeat{{ProjectID: f.projectID}},
 		})
-	}
+		f.srv.reapStartClaims(context.Background())
+		assert.Equal(t, store.StartClaimUnconfirmed, getAgent(t, f.s, a.ID).StartClaimState)
+	})
+	t.Run("broker without the capability, start queued on the hub", func(t *testing.T) {
+		f, _, a := newClaimFixture(t)
+		noObservationLag(t)
+		unconfirmedClaim(t, f, a, store.StartClaimUser, time.Hour)
+		require.NoError(t, f.s.InsertBrokerDispatch(context.Background(), &store.BrokerDispatch{
+			ID: tid("queued-" + a.Slug), BrokerID: f.brokerID, AgentID: a.ID, AgentSlug: a.Slug, ProjectID: f.projectID, Op: "start",
+		}))
+		f.heartbeat(completeInventory())
+		f.srv.reapStartClaims(context.Background())
+		assert.Equal(t, store.StartClaimUnconfirmed, getAgent(t, f.s, a.ID).StartClaimState,
+			"the hub's own queued start is honoured whatever the broker's capabilities")
+	})
+	t.Run("broker without the capability, nothing queued: time rule only", func(t *testing.T) {
+		f, _, a := newClaimFixture(t)
+		noObservationLag(t)
+		unconfirmedClaim(t, f, a, store.StartClaimUser, time.Hour)
+		f.heartbeat(completeInventory())
+		f.srv.reapStartClaims(context.Background())
+		assert.Empty(t, getAgent(t, f.s, a.ID).StartClaimID)
+	})
 }
 
 func TestStartClaimReaper_ReleasedWhenAgentReportsRunning(t *testing.T) {
 	f, _, a := newClaimFixture(t)
+	noObservationLag(t)
 	unconfirmedClaim(t, f, a, store.StartClaimUser, time.Hour)
-	// The late container's agent reports running (its own status report).
-	require.NoError(t, f.s.UpdateAgentStatus(context.Background(), a.ID, store.AgentStatusUpdate{Phase: "running", Heartbeat: true}))
-	f.srv.reapStartClaims(context.Background())
+	ctx := context.Background()
+	// A status write alone (here the agent's own report) is not enough...
+	require.NoError(t, f.s.UpdateAgentStatus(ctx, a.ID, store.AgentStatusUpdate{Phase: "running", Heartbeat: true}))
+	f.srv.reapStartClaims(ctx)
+	assert.Equal(t, store.StartClaimUnconfirmed, getAgent(t, f.s, a.ID).StartClaimState, "no inventory lists the container yet")
+	// ...with a fresh inventory listing the late container running, the
+	// start succeeded.
+	f.heartbeat(completeInventory(), a.Slug)
+	f.srv.reapStartClaims(ctx)
 	assert.Empty(t, getAgent(t, f.s, a.ID).StartClaimID)
 }
 
@@ -133,7 +143,8 @@ func TestStartClaimReaper_HoldExpiryStopsPresentContainer(t *testing.T) {
 	f.send(present)
 	ctx := context.Background()
 	f.srv.reapStartClaims(ctx)
-	assert.Equal(t, int32(1), d.stops.Load(), "a container still present past the hold is stopped (normal grace)")
+	require.Eventually(t, func() bool { return d.stops.Load() == 1 }, 5*time.Second, 10*time.Millisecond,
+		"a container still present past the hold is stopped (normal grace)")
 	assert.Equal(t, store.StartClaimUnconfirmed, getAgent(t, f.s, a.ID).StartClaimState, "the claim is kept until it is gone")
 	f.srv.reapStartClaims(ctx)
 	assert.Equal(t, int32(1), d.stops.Load(), "the stop is rate-limited")
@@ -251,4 +262,61 @@ func TestStartClaimReaper_StaleRunningPhaseIsNotSuccess(t *testing.T) {
 	f.srv.reapStartClaims(context.Background())
 	assert.Equal(t, store.StartClaimUnconfirmed, getAgent(t, f.s, a.ID).StartClaimState,
 		"running without a report after the claim became unconfirmed does not release it")
+}
+
+// No stop is sent while the hold runs, even for a container that is present.
+func TestStartClaimReaper_NoStopBeforeHoldExpires(t *testing.T) {
+	f, d, a := newClaimFixture(t)
+	noObservationLag(t)
+	unconfirmedClaim(t, f, a, store.StartClaimUser, time.Hour)
+	f.send(brokerHeartbeatRequest{
+		Status:    store.BrokerStatusOnline,
+		Inventory: completeInventory(),
+		Projects: []brokerProjectHeartbeat{{ProjectID: f.projectID, Agents: []brokerAgentHeartbeat{
+			{Slug: a.Slug, Phase: "starting", ContainerStatus: "Pending", RuntimeTarget: "docker"},
+		}}},
+	})
+	f.srv.reapStartClaims(context.Background())
+	time.Sleep(100 * time.Millisecond)
+	assert.Equal(t, int32(0), d.stops.Load())
+	assert.Equal(t, store.StartClaimUnconfirmed, getAgent(t, f.s, a.ID).StartClaimState)
+}
+
+// swapClaimAfterListStore releases the listed claim and takes a new one
+// right after the reaper lists claims: the agent is now another start's.
+type swapClaimAfterListStore struct {
+	store.Store
+	t *testing.T
+}
+
+func (s swapClaimAfterListStore) ListAgentsWithStartClaim(ctx context.Context) ([]*store.Agent, error) {
+	list, err := s.Store.ListAgentsWithStartClaim(ctx)
+	for _, a := range list {
+		_, rerr := s.Store.ReleaseUnconfirmedStart(ctx, a.ID, a.StartClaimID)
+		require.NoError(s.t, rerr)
+		_, cerr := s.Store.ClaimAgentStart(ctx, a.ID, "newer-hub", store.StartClaimUser, "", time.Minute)
+		require.NoError(s.t, cerr)
+	}
+	return list, err
+}
+
+// The reaper's stop is tied to the claim it judged: if that claim was
+// released and a newer start claimed the agent since the tick listed it, no
+// stop is sent.
+func TestStartClaimReaper_StopSkippedWhenClaimChanged(t *testing.T) {
+	f, d, a := newClaimFixture(t)
+	noObservationLag(t)
+	unconfirmedClaim(t, f, a, store.StartClaimUser, time.Millisecond)
+	time.Sleep(5 * time.Millisecond)
+	f.send(brokerHeartbeatRequest{
+		Status:    store.BrokerStatusOnline,
+		Inventory: completeInventory(),
+		Projects: []brokerProjectHeartbeat{{ProjectID: f.projectID, Agents: []brokerAgentHeartbeat{
+			{Slug: a.Slug, Phase: "starting", ContainerStatus: "Pending", RuntimeTarget: "docker"},
+		}}},
+	})
+	f.srv.store = swapClaimAfterListStore{Store: f.s, t: t}
+	f.srv.reapStartClaims(context.Background())
+	time.Sleep(200 * time.Millisecond)
+	assert.Equal(t, int32(0), d.stops.Load(), "a newer start's container is never stopped")
 }

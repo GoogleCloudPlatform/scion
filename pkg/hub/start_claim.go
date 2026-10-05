@@ -125,19 +125,15 @@ type startClaimRun struct {
 
 // acquireStartClaim takes a claim of kind for agent and starts its lease
 // renewal. The returned run's Context carries the start deadline and is
-// cancelled when the claim is lost. A claim predicate mismatch is retried
-// once after re-reading the agent; a held stop-kind claim (a queued stop
+// cancelled when the claim is lost. A held stop-kind claim (a queued stop
 // being applied) is waited for, up to stopClaimWait. Errors: a
-// *store.ClaimHeldError, store.ErrClaimPredicate, or a store error.
+// *store.ClaimHeldError, store.ErrClaimPredicate (the agent is deleted or
+// mid-reincarnation), store.ErrDeleteInProgress, or a store error.
 func (s *Server) acquireStartClaim(ctx context.Context, agent *store.Agent, kind store.StartClaimKind) (*startClaimRun, error) {
 	cfg := s.startClaimSettings()
 	target := expectedClaimTarget(agent)
 	sent := time.Now()
 	claim, err := s.store.ClaimAgentStart(ctx, agent.ID, s.instanceID, kind, target, cfg.LeaseTTL)
-	if errors.Is(err, store.ErrClaimPredicate) {
-		sent = time.Now()
-		claim, err = s.store.ClaimAgentStart(ctx, agent.ID, s.instanceID, kind, target, cfg.LeaseTTL)
-	}
 	var held *store.ClaimHeldError
 	if errors.As(err, &held) && held.Kind == store.StartClaimStop {
 		deadline := time.Now().Add(stopClaimWait)
@@ -243,6 +239,14 @@ func (r *startClaimRun) renewLoop() {
 			r.markLost("lease not renewed before the fence deadline")
 			return
 		}
+		if r.ctx.Err() != nil {
+			// The start deadline passed (or the claim was cancelled): stop
+			// renewing. A dispatch that ignores its context keeps running,
+			// but the lease lapses and the reaper makes the claim
+			// unconfirmed.
+			r.markLost("start deadline passed")
+			return
+		}
 		sent := time.Now()
 		callCtx, cancel := context.WithDeadline(context.WithoutCancel(r.ctx), fence)
 		held, err := r.s.store.RenewAgentStart(callCtx, r.agent, r.claim.ID, r.owner, r.cfg.LeaseTTL)
@@ -323,13 +327,17 @@ func (s *Server) withStartClaim(ctx context.Context, agent *store.Agent, kind st
 	if handoff && err == nil {
 		outcome = startHandedOff
 	}
-	lost := run.isLost()
 	run.finish(outcome)
 	if err == nil {
 		s.compensatingStop(ctx, agent, run.claim)
 	}
-	if lost && err != nil {
-		return fmt.Errorf("%w: %v", errStartClaimLost, err)
+	if run.isLost() {
+		// The claim was lost while the start ran: whatever the dispatch
+		// returned, the start was abandoned (and may still be running).
+		if err != nil {
+			return fmt.Errorf("%w: %v", errStartClaimLost, err)
+		}
+		return errStartClaimLost
 	}
 	return err
 }
@@ -349,9 +357,13 @@ func (s *Server) startAgentCore(ctx context.Context, agent *store.Agent, kind st
 
 // compensatingStop stops an agent whose start succeeded after a stop was
 // accepted (run intent stopped, written after the claim was taken): the
-// start may have reached the broker after the stop did.
+// start may have reached the broker after the stop did. It runs after the
+// start's claim is settled, under a stop-kind claim pinned to the stop's
+// intent time: a start accepted meanwhile wrote a newer intent (or holds a
+// claim), so the stop claim is refused and nothing is stopped.
 func (s *Server) compensatingStop(ctx context.Context, agent *store.Agent, claim store.StartClaim) {
-	cur, err := s.store.GetAgent(context.WithoutCancel(ctx), agent.ID)
+	bg := context.WithoutCancel(ctx)
+	cur, err := s.store.GetAgent(bg, agent.ID)
 	if err != nil || cur.RunIntent != store.RunIntentStopped || cur.RunIntentAt == nil || !cur.RunIntentAt.After(claim.At) {
 		return
 	}
@@ -359,9 +371,18 @@ func (s *Server) compensatingStop(ctx context.Context, agent *store.Agent, claim
 	if dispatcher == nil {
 		return
 	}
-	slog.Info("Stopping an agent whose start completed after a stop was accepted", "agent_id", agent.ID)
-	stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+	stopCtx, cancel := context.WithTimeout(bg, 2*time.Minute)
 	defer cancel()
+	stop, err := s.store.ClaimAgentStop(stopCtx, agent.ID, s.instanceID, *cur.RunIntentAt, s.startClaimSettings().LeaseTTL)
+	if err != nil {
+		return // a newer start or stop since: nothing to compensate
+	}
+	defer func() {
+		if _, err := s.store.ReleaseAgentStart(bg, agent.ID, stop.ID, s.instanceID); err != nil {
+			slog.Warn("Compensating stop: releasing its claim failed; the reaper will settle it", "agent_id", agent.ID, "error", err)
+		}
+	}()
+	slog.Info("Stopping an agent whose start completed after a stop was accepted", "agent_id", agent.ID)
 	if err := dispatcher.DispatchAgentStop(stopCtx, cur); err != nil {
 		slog.Warn("Compensating stop failed", "agent_id", agent.ID, "error", err)
 	}

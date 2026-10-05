@@ -48,9 +48,8 @@ func (s *Server) startClaimReaperHandler() func(ctx context.Context) {
 
 // reaperBrokerView is what the reaper reads once per broker per tick.
 type reaperBrokerView struct {
-	broker   *store.RuntimeBroker
-	inv      map[string]time.Time
-	inFlight bool // the broker reports starts in flight
+	broker *store.RuntimeBroker
+	inv    map[string]time.Time
 }
 
 func (s *Server) reapStartClaims(ctx context.Context) {
@@ -101,9 +100,8 @@ func (s *Server) reaperBrokerView(ctx context.Context, brokerID string) *reaperB
 		return nil
 	}
 	return &reaperBrokerView{
-		broker:   b,
-		inv:      targetInventoryTimes(rows),
-		inFlight: b.Capabilities != nil && b.Capabilities.StartsInFlight,
+		broker: b,
+		inv:    targetInventoryTimes(rows),
 	}
 }
 
@@ -149,12 +147,9 @@ func (s *Server) reapUnconfirmedStartClaim(ctx context.Context, a *store.Agent, 
 		if ok, err := s.store.ReleaseUnconfirmedStart(ctx, a.ID, a.StartClaimID); err != nil {
 			slog.Warn("Start claim reaper: release failed", "agent_id", a.ID, "error", err)
 		} else if ok {
+			s.claimStops.Delete(a.ID)
 			slog.Info("Start claim reaper: released an unconfirmed start claim", "agent_id", a.ID, "kind", a.StartClaimKind, "reason", why)
 		}
-	}
-	if startReportedRunning(a) {
-		release("agent reported running")
-		return
 	}
 	if view == nil || a.StartClaimUnconfirmedAt == nil {
 		return
@@ -163,14 +158,27 @@ func (s *Server) reapUnconfirmedStartClaim(ctx context.Context, a *store.Agent, 
 		!observationFresh(obs, view.inv, now) {
 		return // no fresh inventory of the target: keep the claim
 	}
-	inFlight := view.inFlight && obs.InFlight
+	// The start succeeded after all: the agent reported running since the
+	// claim became unconfirmed, and a fresh inventory taken after that
+	// lists its container running.
+	if startReportedRunning(a) && obs.State == store.ObservedPresentRunning && !obs.InFlight &&
+		!obs.ObservedAt.Before(a.StartClaimUnconfirmedAt.Add(unconfirmedObservationLag)) {
+		release("agent reported running")
+		return
+	}
+	// In flight: the broker lists the start (trusted only from a broker
+	// that reports starts in flight; an older broker never sends the list)
+	// or the hub has a create, start or restart queued for it (always
+	// trusted). Both are recorded in observed_in_flight; a broker without
+	// the capability can only have set it through the hub's queue.
+	inFlight := obs.InFlight
 	gone := obs.State == store.ObservedAbsent || obs.State == store.ObservedPresentTerminal
 	if gone && !inFlight && !obs.ObservedAt.Before(a.StartClaimUnconfirmedAt.Add(unconfirmedObservationLag)) {
 		release("runtime shows nothing running")
 		return
 	}
 	if exp, ok := holds.HoldExpiry(a); ok && !now.Before(exp) && (obs.State == store.ObservedPresentRunning || inFlight) {
-		s.stopUnconfirmedStart(ctx, a)
+		s.stopUnconfirmedStart(ctx, a.ID, a.StartClaimID)
 	}
 }
 
@@ -189,22 +197,32 @@ func reaperTarget(a *store.Agent, view *reaperBrokerView) string {
 }
 
 // stopUnconfirmedStart stops, with normal grace, a container an unconfirmed
-// start left running past its hold. It does not change run intent.
-func (s *Server) stopUnconfirmedStart(ctx context.Context, a *store.Agent) {
-	if last, ok := s.claimStops.Load(a.ID); ok && time.Since(last.(time.Time)) < unconfirmedStopInterval {
+// start left running past its hold. It does not change run intent. The stop
+// is sent from its own goroutine, so one slow broker does not age the rest
+// of the tick, and only after re-reading the agent: the same unconfirmed
+// claim (claimID) must still be held, so a stop never reaches a newer
+// start's container once that claim was released.
+func (s *Server) stopUnconfirmedStart(ctx context.Context, agentID, claimID string) {
+	if last, ok := s.claimStops.Load(agentID); ok && time.Since(last.(time.Time)) < unconfirmedStopInterval {
 		return
 	}
 	dispatcher := s.GetDispatcher()
 	if dispatcher == nil {
 		return
 	}
-	s.claimStops.Store(a.ID, time.Now())
-	slog.Info("Start claim reaper: stopping a container an unconfirmed start left running past its hold", "agent_id", a.ID)
-	stopCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	defer cancel()
-	if err := dispatcher.DispatchAgentStop(stopCtx, a); err != nil {
-		slog.Warn("Start claim reaper: stop failed", "agent_id", a.ID, "error", err)
-	}
+	s.claimStops.Store(agentID, time.Now())
+	go func() {
+		stopCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		defer cancel()
+		cur, err := s.store.GetAgent(stopCtx, agentID)
+		if err != nil || cur.StartClaimID != claimID || cur.StartClaimState != store.StartClaimUnconfirmed {
+			return
+		}
+		slog.Info("Start claim reaper: stopping a container an unconfirmed start left running past its hold", "agent_id", agentID)
+		if err := dispatcher.DispatchAgentStop(stopCtx, cur); err != nil {
+			slog.Warn("Start claim reaper: stop failed", "agent_id", agentID, "error", err)
+		}
+	}()
 }
 
 // demoteOwnClaimsOnRestart runs once at startup: when this replica runs as

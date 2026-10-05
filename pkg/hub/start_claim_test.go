@@ -322,3 +322,53 @@ func TestStartClaim_ReincarnateRefusedWhileClaimHeld(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, list)
 }
+
+// startBeforeStopClaimStore takes a start claim (a newer start) just before
+// the compensating stop's claim.
+type startBeforeStopClaimStore struct {
+	store.Store
+}
+
+func (s startBeforeStopClaimStore) ClaimAgentStop(ctx context.Context, agentID, owner string, intentAt time.Time, ttl time.Duration) (store.StartClaim, error) {
+	if _, err := s.Store.ClaimAgentStart(ctx, agentID, "newer-hub", store.StartClaimUser, "", time.Minute); err != nil {
+		return store.StartClaim{}, err
+	}
+	return s.Store.ClaimAgentStop(ctx, agentID, owner, intentAt, ttl)
+}
+
+// The compensating stop is fenced: a start accepted after the stop's intent
+// was read is never stopped by it.
+func TestStartClaim_CompensatingStopSkipsNewerStart(t *testing.T) {
+	f, d, a := newClaimFixture(t)
+	d.start = func(ctx context.Context, cur *store.Agent) error {
+		_, err := f.s.SetRunIntent(context.Background(), a.ID, store.RunIntentStopped)
+		return err
+	}
+	f.srv.store = startBeforeStopClaimStore{Store: f.s}
+	require.NoError(t, f.srv.startAgentCore(context.Background(), a, store.StartClaimUser, nil, "", false))
+	assert.Equal(t, int32(0), d.stops.Load())
+}
+
+// A dispatch that ignores its context does not keep the claim renewed past
+// the start deadline: renewal stops, the start reports the claim lost, and
+// the lapsed lease is left to the reaper.
+func TestStartClaim_RenewalStopsAtStartDeadline(t *testing.T) {
+	f, d, a := newClaimFixture(t)
+	f.srv.startClaimTestHook = func(r *startClaimRun) {
+		r.cfg.LeaseTTL = 600 * time.Millisecond
+		r.fenceAt = time.Now().Add(400 * time.Millisecond)
+		r.renewEvery = 100 * time.Millisecond
+		r.retryEvery = 50 * time.Millisecond
+		r.cfg.MaxDuration = 150 * time.Millisecond
+	}
+	d.start = func(ctx context.Context, cur *store.Agent) error {
+		time.Sleep(1500 * time.Millisecond) // ignores ctx
+		return nil
+	}
+	err := f.srv.startAgentCore(context.Background(), a, store.StartClaimUser, nil, "", false)
+	require.ErrorIs(t, err, errStartClaimLost)
+	got := getAgent(t, f.s, a.ID)
+	require.NotNil(t, got.StartClaimLeaseUntil)
+	assert.True(t, got.StartClaimLeaseUntil.Before(time.Now()), "the lease was not renewed past the deadline")
+	assert.Equal(t, store.StartClaimLive, got.StartClaimState, "left for the reaper to demote")
+}
