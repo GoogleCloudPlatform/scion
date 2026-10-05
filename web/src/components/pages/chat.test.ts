@@ -1597,9 +1597,11 @@ describe('chat page — late DM peer lookups', () => {
   }
 
   /** A page whose user ID is unknown, so a peer-ID DM route is resolved over the API. */
+  /** A page without a cached user ID that reports itself mounted. */
   function createPageWithoutUserId(): any {
     const el = createPage();
     el.pageData = {};
+    Object.defineProperty(el, 'isConnected', { get: () => true, configurable: true });
     return el;
   }
 
@@ -1827,6 +1829,21 @@ describe('chat page — late DM peer lookups', () => {
       peerName: 'Coder One',
     });
     expect(el.mobilePanel).toBe('center');
+  });
+
+  it('a lookup on a page that is no longer mounted opens nothing', async () => {
+    const releases = holdDMLists();
+    const el = createPageWithoutUserId();
+    window.history.replaceState({}, '', '/chat/dm/agent-1');
+    el.parseV2Route();
+    await flush();
+    // The router replaced this page with a new one for the same URL.
+    Object.defineProperty(el, 'isConnected', { get: () => false });
+
+    releases[0]();
+    await flush();
+
+    expect(el.v2Conversation).toBeNull();
   });
 
   it('a lookup overtaken during the user refresh builds no key and logs no error', async () => {

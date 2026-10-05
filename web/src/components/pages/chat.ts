@@ -1727,10 +1727,10 @@ export class ScionPageChat extends LitElement {
     return this.isConnected && !!match && decodeURIComponent(match[1]) === slug;
   }
 
-  /** Does the current URL still name this peer-ID DM route? */
+  /** Does the current URL still name this peer-ID DM route, on a mounted page? */
   private routeNamesDMPeer(peerId: string): boolean {
     const match = window.location.pathname.match(/\/chat\/dm\/([^/]+)$/);
-    return !!match && decodeURIComponent(match[1]) === peerId;
+    return this.isConnected && !!match && decodeURIComponent(match[1]) === peerId;
   }
 
   private parseV2Route(): void {
