@@ -75,6 +75,11 @@ import {
   type PathLinkTarget,
 } from '../../../utils/chat-file-links.js';
 import { chatRecentFiles } from '../../../client/chat-recent-files.js';
+import {
+  findTopVisibleRow,
+  scrollTopForAnchor,
+  type ChatScrollAnchor,
+} from './chat-scroll-anchor.js';
 
 /** Result from server-side mention fan-out. */
 interface MentionResult {
@@ -423,6 +428,23 @@ export class ScionChatThread extends LitElement {
   private get isV2(): boolean {
     return this.conversationKey.length > 0;
   }
+
+  /**
+   * Scroll position to restore when this conversation first loads, carried
+   * over from a previous chat page instance (see chat-scroll-anchor.ts).
+   * Ignored unless it names this conversation, and used at most once.
+   */
+  @property({ attribute: false })
+  restoreScrollAnchor: ChatScrollAnchor | null = null;
+
+  /** The restore anchor already applied, so a re-load does not reuse it. */
+  private _usedRestoreAnchor: ChatScrollAnchor | null = null;
+
+  /** Latest scroll position, kept current from scroll events. */
+  private _scrollAnchor: ChatScrollAnchor | null = null;
+
+  /** Pending rAF that refreshes `_scrollAnchor` after a scroll. */
+  private _scrollAnchorRaf: number | null = null;
 
   @state() private messages: Message[] = [];
   @state() private messageMap = new Map<string, Message>();
@@ -1140,6 +1162,8 @@ export class ScionChatThread extends LitElement {
     // A thread switch is a fresh "open" — the old anchor (and its watchers)
     // belong to the conversation we just left.
     this.deactivateUnreadAnchor();
+    this.cancelScrollAnchorCapture();
+    this._scrollAnchor = null;
 
     // Stop any active SSE listener
     stateManager.removeEventListener('connected', this._sseReconnectHandler);
@@ -1200,6 +1224,8 @@ export class ScionChatThread extends LitElement {
     super.disconnectedCallback();
     this.stopStream();
     this.deactivateUnreadAnchor();
+    // Keep `_scrollAnchor` itself: the page reads it after we detach.
+    this.cancelScrollAnchorCapture();
     // Cancel any pending jump-to-message scrollend re-check and its listeners/timers.
     this.cancelJumpScrollWatch();
     // Clean up v2 SSE listeners
@@ -1502,10 +1528,14 @@ export class ScionChatThread extends LitElement {
       this.error = err instanceof Error ? err.message : 'Failed to load messages';
     } finally {
       this.loading = false;
-      // Determine scroll target: permalink hash > unread divider > bottom.
+      // Determine scroll target: permalink hash > restored position >
+      // unread divider > bottom.
       const hashMsgId = this.parseMessageHash();
+      const restore = this.takeRestoreScrollAnchor();
       if (hashMsgId) {
         void this.scrollToMessageById(hashMsgId, true);
+      } else if (restore) {
+        void this.restoreScrollPosition(restore);
       } else if (this.showUnreadDivider) {
         this.scrollToUnreadDivider();
       } else {
@@ -2715,6 +2745,7 @@ export class ScionChatThread extends LitElement {
 
     const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     this.pinnedToBottom = distFromBottom < SCROLL_BOTTOM_THRESHOLD;
+    this.scheduleScrollAnchorCapture();
 
     // A tap-opened (or right-clicked) context menu is positioned at a fixed
     // viewport point; once the thread scrolls it no longer points at the
@@ -2776,6 +2807,113 @@ export class ScionChatThread extends LitElement {
       const newScrollHeight = scrollEl.scrollHeight;
       scrollEl.scrollTop += newScrollHeight - prevScrollHeight;
     }
+  }
+
+  /**
+   * The current scroll position as an anchor, for a chat page that is about
+   * to be destroyed to hand on to its replacement. Null until the thread has
+   * been scrolled (programmatically or by the user) at least once.
+   */
+  get scrollAnchor(): ChatScrollAnchor | null {
+    const anchor = this._scrollAnchor;
+    return anchor && anchor.conversationKey === this.conversationKey ? { ...anchor } : null;
+  }
+
+  private scheduleScrollAnchorCapture(): void {
+    if (this._scrollAnchorRaf !== null) return;
+    this._scrollAnchorRaf = requestAnimationFrame(() => {
+      this._scrollAnchorRaf = null;
+      this.captureScrollAnchor();
+    });
+  }
+
+  private cancelScrollAnchorCapture(): void {
+    if (this._scrollAnchorRaf === null) return;
+    cancelAnimationFrame(this._scrollAnchorRaf);
+    this._scrollAnchorRaf = null;
+  }
+
+  /** Record the topmost visible message and its offset from the top edge. */
+  private captureScrollAnchor(): void {
+    if (!this.isV2) return;
+    const scrollEl = this.shadowRoot?.querySelector('.messages-scroll') as HTMLElement | null;
+    if (!scrollEl) return;
+    const containerRect = scrollEl.getBoundingClientRect();
+    // Hidden (e.g. the outlet is hidden behind the terminal view): layout
+    // reads are all zero and would overwrite a good anchor with nonsense.
+    if (containerRect.height === 0) return;
+    const rows = scrollEl.querySelectorAll<HTMLElement>('scion-chat-message[id^="msg-"]');
+    const row = findTopVisibleRow(
+      rows.length,
+      (i) => {
+        const el = rows[i];
+        const rect = el.getBoundingClientRect();
+        return { id: el.id.slice('msg-'.length), top: rect.top, bottom: rect.bottom };
+      },
+      containerRect.top
+    );
+    this._scrollAnchor = {
+      conversationKey: this.conversationKey,
+      pinnedToBottom: this.pinnedToBottom,
+      messageId: row?.id ?? '',
+      offset: row ? row.top - containerRect.top : 0,
+    };
+  }
+
+  /** The restore anchor for this conversation, once; null otherwise. */
+  private takeRestoreScrollAnchor(): ChatScrollAnchor | null {
+    const anchor = this.restoreScrollAnchor;
+    if (!anchor || anchor === this._usedRestoreAnchor) return null;
+    if (anchor.conversationKey !== this.conversationKey) return null;
+    this._usedRestoreAnchor = anchor;
+    return anchor;
+  }
+
+  /**
+   * Put the view back where a previous instance left it: at the bottom when
+   * it was following new messages, otherwise with the anchor message at the
+   * same offset — loading the history around it first if the latest page
+   * does not include it. Falls back to the bottom if the message is gone.
+   */
+  private async restoreScrollPosition(anchor: ChatScrollAnchor): Promise<void> {
+    if (anchor.pinnedToBottom || !anchor.messageId) {
+      this.pinnedToBottom = true;
+      this.scrollToBottomAfterRender();
+      return;
+    }
+    const fetchId = this.fetchId;
+    // Not following the bottom: keep late loads (inter-agent exchanges)
+    // from auto-scrolling down while the anchor is being located.
+    this.pinnedToBottom = false;
+    await this.updateComplete;
+    let msgEl = this.shadowRoot?.getElementById(`msg-${anchor.messageId}`) ?? null;
+    if (!msgEl) {
+      await this.fetchAroundMessage(anchor.messageId);
+      await this.updateComplete;
+      msgEl = this.shadowRoot?.getElementById(`msg-${anchor.messageId}`) ?? null;
+    }
+    if (fetchId !== this.fetchId) return;
+    if (!msgEl) {
+      this.pinnedToBottom = true;
+      this.scrollToBottomAfterRender();
+      return;
+    }
+    const target = msgEl;
+    const apply = (): void => {
+      const scrollEl = this.shadowRoot?.querySelector('.messages-scroll') as HTMLElement | null;
+      if (!scrollEl || !target.isConnected) return;
+      scrollEl.scrollTop = scrollTopForAnchor(
+        scrollEl.scrollTop,
+        target.getBoundingClientRect().top,
+        scrollEl.getBoundingClientRect().top,
+        anchor.offset
+      );
+    };
+    apply();
+    // Rows can still settle for a frame (markdown, fonts); pin once more.
+    requestAnimationFrame(() => {
+      if (fetchId === this.fetchId) apply();
+    });
   }
 
   private scrollToBottom(): void {

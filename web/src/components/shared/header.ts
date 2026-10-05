@@ -1489,7 +1489,9 @@ export class ScionHeader extends LitElement {
   private rememberModePath(): void {
     const path = this.currentPath || window.location.pathname;
     if (path.startsWith('/chat')) {
-      rememberedModePaths.chat = path;
+      // Drop a `#msg-…` jump target: coming back to chat should land where
+      // the user left off, not replay the jump that first opened the thread.
+      rememberedModePaths.chat = path.split('#')[0];
     } else if (path !== '/terminals' && !path.startsWith('/terminals/')) {
       rememberedModePaths.dashboard = path || '/';
     }

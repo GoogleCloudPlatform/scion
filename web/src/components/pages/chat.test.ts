@@ -32,7 +32,11 @@
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { render, type TemplateResult } from 'lit';
 import { apiFetch } from '../../client/api.js';
-import { navigateTo, replaceRoute } from '../../client/main.js';
+import { navigateTo, pushRoute, replaceRoute } from '../../client/main.js';
+import {
+  rememberChatScrollAnchor,
+  takeChatScrollAnchor,
+} from '../shared/chat/chat-scroll-anchor.js';
 import { PAGE_TITLE_EVENT } from '../../client/page-title.js';
 import { chatDMsLoad, chatSpacesLoad } from '../../client/chat-list-cache.js';
 import { FakeEventSource } from '../../client/__fixtures__/agent-store-harness.js';
@@ -41,6 +45,10 @@ import { FakeEventSource } from '../../client/__fixtures__/agent-store-harness.j
 
 vi.mock('../../client/main.js', () => ({
   navigateTo: vi.fn(),
+  pushRoute: vi.fn((path: string) => {
+    window.history.pushState({}, '', path);
+    return Promise.resolve();
+  }),
   replaceRoute: vi.fn((path: string) => {
     window.history.replaceState(
       window.history.state,
@@ -1743,5 +1751,98 @@ describe('chat page — late DM peer lookups', () => {
     expect(errorSpy).not.toHaveBeenCalled();
     expect(el.v2Conversation.conversationKey).toBe('topic-2');
     errorSpy.mockRestore();
+  });
+});
+
+describe('chat page — thread and scroll position across mode switches', () => {
+  const THREAD_ANCHOR = {
+    conversationKey: 'topic-1',
+    pinnedToBottom: false,
+    messageId: 'm4',
+    offset: -20,
+  };
+  const AGENT_ID = '11111111-1111-4111-8111-111111111111';
+  const USER_ID = '99999999-9999-4999-8999-999999999999';
+  const AGENT_DM_KEY = `dm:agent:${AGENT_ID}:user:${USER_ID}`;
+
+  afterEach(() => {
+    // Detaching a page hands its position over, so clear the memory after.
+    document.body.innerHTML = '';
+    takeChatScrollAnchor();
+    window.history.replaceState({}, '', '/');
+  });
+
+  it('a mounting page takes the handed-over position, once', () => {
+    rememberChatScrollAnchor(THREAD_ANCHOR);
+    const el = createPage();
+    window.history.replaceState({}, '', '/chat/alpha/topic-1');
+    document.body.appendChild(el);
+    expect(el._pendingScrollRestore).toEqual(THREAD_ANCHOR);
+    expect(takeChatScrollAnchor()).toBeNull();
+  });
+
+  it('offers the position to the thread only for the conversation it belongs to', () => {
+    const el = createPage();
+    el._pendingScrollRestore = THREAD_ANCHOR;
+    expect(el.scrollRestoreFor('topic-1')).toBe(THREAD_ANCHOR);
+    expect(el.scrollRestoreFor(AGENT_DM_KEY)).toBeNull();
+  });
+
+  it('drops the position when the route opens another conversation (terminal chat button)', () => {
+    const el = createPage();
+    el.pageData = { user: { id: USER_ID } };
+    el._pendingScrollRestore = THREAD_ANCHOR;
+    window.history.replaceState({}, '', `/chat/dm/${encodeURIComponent(AGENT_DM_KEY)}`);
+    el.parseV2Route();
+    expect(el.v2Conversation).toMatchObject({ conversationKey: AGENT_DM_KEY, isDM: true });
+    el.willUpdate(new Map([['v2Conversation', null]]));
+    expect(el._pendingScrollRestore).toBeNull();
+    expect(el.scrollRestoreFor('topic-1')).toBeNull();
+  });
+
+  it('keeps the position while the same conversation is shown', () => {
+    const el = createPage();
+    el._pendingScrollRestore = THREAD_ANCHOR;
+    el.v2Conversation = { conversationKey: 'topic-1', projectId: 'p1' };
+    el.willUpdate(new Map([['v2Conversation', null]]));
+    expect(el._pendingScrollRestore).toBe(THREAD_ANCHOR);
+  });
+
+  it("hands the open thread's live position to the next page", () => {
+    const el = createPage();
+    const live = { ...THREAD_ANCHOR, messageId: 'm7', offset: 3 };
+    Object.defineProperty(el, 'shadowRoot', {
+      value: { querySelector: () => ({ scrollAnchor: live }) },
+    });
+    el._pendingScrollRestore = THREAD_ANCHOR;
+    el.handOverScrollPosition();
+    expect(takeChatScrollAnchor()).toEqual(live);
+    expect(el._pendingScrollRestore).toBeNull();
+  });
+
+  it('passes on a handed-over position it never got to apply', () => {
+    const el = createPage();
+    el._pendingScrollRestore = THREAD_ANCHOR;
+    el.handOverScrollPosition();
+    expect(takeChatScrollAnchor()).toEqual(THREAD_ANCHOR);
+  });
+
+  it('records an in-place thread switch with the router, keeping the page title', async () => {
+    const el = createPage();
+    window.history.replaceState({}, '', '/chat');
+    document.body.appendChild(el);
+    const titles: string[][] = [];
+    el.addEventListener(PAGE_TITLE_EVENT, (e: Event) =>
+      titles.push((e as CustomEvent<{ segments: string[] }>).detail.segments)
+    );
+    el.navigateToThread({
+      conversationKey: 'topic-2',
+      projectId: 'p1',
+      projectSlug: 'alpha',
+      threadName: 'design',
+    });
+    expect(pushRoute).toHaveBeenLastCalledWith('/chat/alpha/topic-2');
+    await vi.waitFor(() => expect(titles.length).toBeGreaterThanOrEqual(2));
+    expect(titles[titles.length - 1]).toEqual(['#design', 'Chat']);
   });
 });

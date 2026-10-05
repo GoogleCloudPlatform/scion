@@ -6424,3 +6424,225 @@ describe('export timestamps in the display zone (tz-refactor task 21)', () => {
     expect(el.filenameDateStamp()).toBe('2026-09-23');
   });
 });
+
+/**
+ * Switching chat to the dashboard and back builds a fresh thread; the page
+ * hands it the previous instance's scroll anchor (`restoreScrollAnchor`) and
+ * reads the live one back (`scrollAnchor`) when it is torn down.
+ */
+describe('scion-chat-thread scroll position hand-over', () => {
+  const ROW_HEIGHT = 100;
+  const ROWS = 10;
+  const VIEWPORT = 300;
+  const history = Array.from({ length: ROWS }, (_, i) => ({
+    id: `m${i}`,
+    sender: 'them@example.com',
+    msg: `message ${i}`,
+    createdAt: `2026-01-01T00:0${i}:00Z`,
+  }));
+  const older = {
+    id: 'old-1',
+    sender: 'them@example.com',
+    msg: 'from an older page',
+    createdAt: '2025-12-31T00:00:00Z',
+  };
+
+  const originalGetBoundingClientRect = HTMLElement.prototype.getBoundingClientRect;
+  const originalScrollHeight = Object.getOwnPropertyDescriptor(
+    HTMLElement.prototype,
+    'scrollHeight'
+  );
+  const originalClientHeight = Object.getOwnPropertyDescriptor(
+    HTMLElement.prototype,
+    'clientHeight'
+  );
+  let hidden = false;
+
+  /** The thread's scroller, found from any element inside its shadow root. */
+  function scrollerOf(el: Element): HTMLElement | null {
+    const root = el.getRootNode() as ShadowRoot;
+    return root.querySelector?.('.messages-scroll') ?? null;
+  }
+
+  /** happy-dom has no layout: lay rows out at 100px each, list scrolled by scrollTop. */
+  function rect(top: number, height: number): DOMRect {
+    return {
+      top,
+      bottom: top + height,
+      height,
+      left: 0,
+      right: 0,
+      width: 0,
+      x: 0,
+      y: top,
+      toJSON: () => ({}),
+    } as DOMRect;
+  }
+
+  beforeEach(() => {
+    hidden = false;
+    apiFetch.mockReset();
+    apiFetch.mockImplementation((url: string) =>
+      Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () =>
+          Promise.resolve({
+            items: String(url).includes('around=old-1') ? [older, ...history] : history,
+          }),
+      } as unknown as Response)
+    );
+    Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', {
+      configurable: true,
+      value: function (this: HTMLElement) {
+        if (hidden) return rect(0, 0);
+        if (this.classList.contains('messages-scroll')) return rect(0, VIEWPORT);
+        const match = /^msg-(.+)$/.exec(this.id);
+        if (match) {
+          const scroller = scrollerOf(this);
+          const rows = Array.from(scroller?.querySelectorAll('[id^="msg-"]') ?? []);
+          const index = rows.indexOf(this);
+          return rect(index * ROW_HEIGHT - (scroller?.scrollTop ?? 0), ROW_HEIGHT);
+        }
+        return originalGetBoundingClientRect.call(this);
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return (this.querySelectorAll('[id^="msg-"]').length || ROWS) * ROW_HEIGHT;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      get: () => VIEWPORT,
+    });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(HTMLElement.prototype, 'getBoundingClientRect', {
+      configurable: true,
+      value: originalGetBoundingClientRect,
+    });
+    for (const [prop, descriptor] of [
+      ['scrollHeight', originalScrollHeight],
+      ['clientHeight', originalClientHeight],
+    ] as const) {
+      if (descriptor) {
+        Object.defineProperty(HTMLElement.prototype, prop, descriptor);
+      } else {
+        delete (HTMLElement.prototype as unknown as Record<string, unknown>)[prop];
+      }
+    }
+    document.body.innerHTML = '';
+  });
+
+  async function mountWith(
+    anchor: import('./chat-scroll-anchor.js').ChatScrollAnchor | null
+  ): Promise<{ el: ScionChatThread; scroller: () => HTMLElement }> {
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = CONVERSATION_KEY;
+    el.restoreScrollAnchor = anchor;
+    document.body.appendChild(el);
+    await vi.waitFor(() => expect(el.shadowRoot?.getElementById('msg-m9')).not.toBeNull());
+    const scroller = (): HTMLElement =>
+      el.shadowRoot!.querySelector('.messages-scroll') as HTMLElement;
+    return { el, scroller };
+  }
+
+  const nextFrame = (): Promise<void> =>
+    new Promise((resolve) => requestAnimationFrame(() => resolve()));
+
+  it('puts the anchor message back at its recorded offset', async () => {
+    const { scroller } = await mountWith({
+      conversationKey: CONVERSATION_KEY,
+      pinnedToBottom: false,
+      messageId: 'm4',
+      offset: -30,
+    });
+    // m4's top is 400 - scrollTop; -30 means scrollTop 430.
+    await vi.waitFor(() => expect(scroller().scrollTop).toBe(430));
+  });
+
+  it('loads the history around an anchor message the latest page lacks', async () => {
+    const { el, scroller } = await mountWith({
+      conversationKey: CONVERSATION_KEY,
+      pinnedToBottom: false,
+      messageId: 'old-1',
+      offset: 0,
+    });
+    await vi.waitFor(() => expect(el.shadowRoot?.getElementById('msg-old-1')).not.toBeNull());
+    expect(apiFetch.mock.calls.some((c) => String(c[0]).includes('around=old-1'))).toBe(true);
+    await vi.waitFor(() => expect(scroller().scrollTop).toBe(0));
+  });
+
+  it('follows the bottom when the previous view was following it', async () => {
+    const { scroller } = await mountWith({
+      conversationKey: CONVERSATION_KEY,
+      pinnedToBottom: true,
+      messageId: 'm7',
+      offset: 0,
+    });
+    await vi.waitFor(() => expect(scroller().scrollTop).toBe(ROWS * ROW_HEIGHT));
+  });
+
+  it("ignores another conversation's anchor (e.g. a jump to an agent DM)", async () => {
+    const { scroller } = await mountWith({
+      conversationKey: 'dm:agent:a:user:u',
+      pinnedToBottom: false,
+      messageId: 'm2',
+      offset: 0,
+    });
+    await vi.waitFor(() => expect(scroller().scrollTop).toBe(ROWS * ROW_HEIGHT));
+  });
+
+  it('applies an anchor once, not on a later return to the conversation', async () => {
+    const { el, scroller } = await mountWith({
+      conversationKey: CONVERSATION_KEY,
+      pinnedToBottom: false,
+      messageId: 'm4',
+      offset: 0,
+    });
+    await vi.waitFor(() => expect(scroller().scrollTop).toBe(400));
+    el.conversationKey = 'topic-2';
+    await el.updateComplete;
+    el.conversationKey = CONVERSATION_KEY;
+    await vi.waitFor(() => expect(el.shadowRoot?.getElementById('msg-m9')).not.toBeNull());
+    await vi.waitFor(() => expect(scroller().scrollTop).toBe(ROWS * ROW_HEIGHT));
+  });
+
+  it('reports the topmost visible message after a scroll', async () => {
+    const { el, scroller } = await mountWith(null);
+    scroller().scrollTop = 250;
+    scroller().dispatchEvent(new Event('scroll'));
+    await nextFrame();
+    expect(el.scrollAnchor).toEqual({
+      conversationKey: CONVERSATION_KEY,
+      pinnedToBottom: false,
+      messageId: 'm2',
+      offset: -50,
+    });
+  });
+
+  it('keeps the last good position while hidden, and after detaching', async () => {
+    const { el, scroller } = await mountWith(null);
+    scroller().scrollTop = 250;
+    scroller().dispatchEvent(new Event('scroll'));
+    await nextFrame();
+    hidden = true;
+    scroller().dispatchEvent(new Event('scroll'));
+    await nextFrame();
+    el.remove();
+    expect(el.scrollAnchor?.messageId).toBe('m2');
+  });
+
+  it('forgets the position when switching conversations', async () => {
+    const { el, scroller } = await mountWith(null);
+    scroller().scrollTop = 250;
+    scroller().dispatchEvent(new Event('scroll'));
+    await nextFrame();
+    el.conversationKey = 'topic-2';
+    await el.updateComplete;
+    expect(el.scrollAnchor).toBeNull();
+  });
+});
