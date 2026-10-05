@@ -741,8 +741,8 @@ func (b *TelegramBrokerV2) Publish(ctx context.Context, topic string, msg *messa
 		chatIDs, denied = b.resolveRecipientChats(ctx, msg.Recipient, msg.RecipientID, projectID, agentSlug)
 		if denied {
 			// The recipient is a linked user who cannot read the project
-			// (or the check failed): drop rather than broadcast.
-			b.log.Debug("Recipient cannot read project, dropping message", "topic", topic)
+			// (or the check failed): drop rather than broadcast. The reason
+			// was logged by resolveRecipientChats.
 			return nil
 		}
 	}
